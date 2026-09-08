@@ -3,9 +3,9 @@
  */
 
 document.addEventListener("DOMContentLoaded", () => {
-    let currentSymbol = "BTC_USDT"; // Default chart symbol
+    let currentSymbol = "BTC_USDT";
     let currentTimeframe = 5;
-    let minUsdFilter = 0; // Show ALL liquidations by default
+    let minUsdFilter = 0;
     let exchangeFilter = "ALL";
     let soundEnabled = true;
 
@@ -93,7 +93,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
         if (typeof window.LightweightCharts === 'undefined') {
             console.error("LightweightCharts missing!");
-            container.innerHTML = `<div style="padding:20px; color:#ff2a5f;">Ошибка загрузки графика.</div>`;
+            container.innerHTML = `<div style="padding:20px; color:#ff2a5f;">Ошибка загрузки библиотеки графика.</div>`;
             return;
         }
 
@@ -175,17 +175,18 @@ document.addEventListener("DOMContentLoaded", () => {
                 candlesData = data.candles;
                 
                 const formattedCandles = candlesData.map(c => ({
-                    time: c.time,
-                    open: c.open,
-                    high: c.high,
-                    low: c.low,
-                    close: c.close
-                }));
+                    time: Number(c.time),
+                    open: Number(c.open),
+                    high: Number(c.high),
+                    low: Number(c.low),
+                    close: Number(c.close)
+                })).sort((a, b) => a.time - b.time);
+
                 const formattedVol = candlesData.map(c => ({
-                    time: c.time,
-                    value: c.volume,
+                    time: Number(c.time),
+                    value: Number(c.volume),
                     color: c.close >= c.open ? 'rgba(0, 230, 118, 0.35)' : 'rgba(255, 42, 95, 0.35)'
-                }));
+                })).sort((a, b) => a.time - b.time);
 
                 if (candlestickSeries) {
                     candlestickSeries.setData(formattedCandles);
@@ -256,7 +257,9 @@ document.addEventListener("DOMContentLoaded", () => {
             });
         });
 
-        candlestickSeries.setMarkers(markers);
+        try {
+            candlestickSeries.setMarkers(markers);
+        } catch (e) {}
     }
 
     // --- Canvas Footprint Clusters INSIDE Candle Body ---
@@ -301,48 +304,50 @@ document.addEventListener("DOMContentLoaded", () => {
         });
 
         Object.values(clusters).forEach(c => {
-            const x = chart.timeScale().timeToCoordinate(c.time);
-            const y = candlestickSeries.priceToCoordinate(c.price);
+            try {
+                const x = chart.timeScale().timeToCoordinate(c.time);
+                const y = candlestickSeries.priceToCoordinate(c.price);
 
-            if (x !== null && y !== null && x >= 0 && x <= clusterCanvas.width && y >= 0 && y <= clusterCanvas.height) {
-                const isWhale = c.totalUsd >= 100000;
-                const isLong = c.longUsd >= c.shortUsd;
-                
-                let radius = Math.min(Math.max(Math.log10(c.totalUsd) * 3.5, 8), 22);
+                if (x !== null && y !== null && x >= 0 && x <= clusterCanvas.width && y >= 0 && y <= clusterCanvas.height) {
+                    const isWhale = c.totalUsd >= 100000;
+                    const isLong = c.longUsd >= c.shortUsd;
+                    
+                    let radius = Math.min(Math.max(Math.log10(c.totalUsd) * 3.5, 8), 22);
 
-                ctx.save();
-                ctx.beginPath();
-                ctx.arc(x, y, radius, 0, 2 * Math.PI);
+                    ctx.save();
+                    ctx.beginPath();
+                    ctx.arc(x, y, radius, 0, 2 * Math.PI);
 
-                if (isWhale) {
-                    ctx.fillStyle = "rgba(255, 193, 7, 0.85)";
-                    ctx.strokeStyle = "#ffffff";
-                    ctx.lineWidth = 2;
-                    ctx.shadowColor = "rgba(255, 193, 7, 0.9)";
-                    ctx.shadowBlur = 10;
-                } else if (isLong) {
-                    ctx.fillStyle = "rgba(255, 42, 95, 0.8)";
-                    ctx.strokeStyle = "rgba(255, 42, 95, 1)";
-                    ctx.lineWidth = 1;
-                } else {
-                    ctx.fillStyle = "rgba(0, 230, 118, 0.8)";
-                    ctx.strokeStyle = "rgba(0, 230, 118, 1)";
-                    ctx.lineWidth = 1;
+                    if (isWhale) {
+                        ctx.fillStyle = "rgba(255, 193, 7, 0.85)";
+                        ctx.strokeStyle = "#ffffff";
+                        ctx.lineWidth = 2;
+                        ctx.shadowColor = "rgba(255, 193, 7, 0.9)";
+                        ctx.shadowBlur = 10;
+                    } else if (isLong) {
+                        ctx.fillStyle = "rgba(255, 42, 95, 0.8)";
+                        ctx.strokeStyle = "rgba(255, 42, 95, 1)";
+                        ctx.lineWidth = 1;
+                    } else {
+                        ctx.fillStyle = "rgba(0, 230, 118, 0.8)";
+                        ctx.strokeStyle = "rgba(0, 230, 118, 1)";
+                        ctx.lineWidth = 1;
+                    }
+
+                    ctx.fill();
+                    ctx.stroke();
+                    ctx.shadowBlur = 0;
+
+                    ctx.fillStyle = "#ffffff";
+                    ctx.font = "bold 9px 'JetBrains Mono', monospace";
+                    ctx.textAlign = "center";
+                    ctx.textBaseline = "middle";
+                    const labelText = `$${formatUsdShort(c.totalUsd)}`;
+                    ctx.fillText(labelText, x, y);
+
+                    ctx.restore();
                 }
-
-                ctx.fill();
-                ctx.stroke();
-                ctx.shadowBlur = 0;
-
-                ctx.fillStyle = "#ffffff";
-                ctx.font = "bold 9px 'JetBrains Mono', monospace";
-                ctx.textAlign = "center";
-                ctx.textBaseline = "middle";
-                const labelText = `$${formatUsdShort(c.totalUsd)}`;
-                ctx.fillText(labelText, x, y);
-
-                ctx.restore();
-            }
+            } catch (e) {}
         });
     }
 
@@ -508,23 +513,21 @@ document.addEventListener("DOMContentLoaded", () => {
                         if (item.symbol === activeSym) {
                             try {
                                 candlestickSeries.update({
-                                    time: ct.candle.time,
-                                    open: ct.candle.open,
-                                    high: ct.candle.high,
-                                    low: ct.candle.low,
-                                    close: ct.candle.close
+                                    time: Number(ct.candle.time),
+                                    open: Number(ct.candle.open),
+                                    high: Number(ct.candle.high),
+                                    low: Number(ct.candle.low),
+                                    close: Number(ct.candle.close)
                                 });
                                 if (volumeSeries) {
                                     volumeSeries.update({
-                                        time: ct.candle.time,
-                                        value: ct.candle.volume,
+                                        time: Number(ct.candle.time),
+                                        value: Number(ct.candle.volume),
                                         color: ct.candle.close >= ct.candle.open ? 'rgba(0, 230, 118, 0.35)' : 'rgba(255, 42, 95, 0.35)'
                                     });
                                 }
                                 updatePriceDisplay(ct.candle.close, candlesData[0]?.open, activeSym);
-                            } catch (e) {
-                                // Ignore timestamp order mismatches on fast ticks
-                            }
+                            } catch (e) {}
                         }
                     }
                 });
@@ -538,11 +541,11 @@ document.addEventListener("DOMContentLoaded", () => {
                         if (ct.timeframe === currentTimeframe && ct.candle && candlestickSeries) {
                             try {
                                 candlestickSeries.update({
-                                    time: ct.candle.time,
-                                    open: ct.candle.open,
-                                    high: ct.candle.high,
-                                    low: ct.candle.low,
-                                    close: ct.candle.close
+                                    time: Number(ct.candle.time),
+                                    open: Number(ct.candle.open),
+                                    high: Number(ct.candle.high),
+                                    low: Number(ct.candle.low),
+                                    close: Number(ct.candle.close)
                                 });
                             } catch (e) {}
                         }
@@ -589,7 +592,6 @@ document.addEventListener("DOMContentLoaded", () => {
         const container = document.getElementById("symbol-buttons");
         container.innerHTML = "";
 
-        // Add "ALL" button first
         const allBtn = document.createElement("button");
         allBtn.className = `btn-symbol ${currentSymbol === "ALL" ? 'active' : ''}`;
         allBtn.innerText = "🌐 ВСЕ МОНЕТЫ";

@@ -24,7 +24,7 @@ import chainlink_price
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 log = logging.getLogger("licvid.server")
 
-app = FastAPI(title="Licvid - Live Crypto Liquidation Terminal", version="3.0.0")
+app = FastAPI(title="Licvid - Live Crypto Liquidation Terminal", version="3.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -80,34 +80,7 @@ MAX_HISTORY = 2000
 
 CANDLES: Dict[str, Dict[int, List[dict]]] = {}
 
-async def fetch_binance_klines(symbol: str, tf_min: int, limit: int = 150) -> Optional[List[dict]]:
-    """Fetch real historical klines from Binance Futures REST API."""
-    try:
-        binance_sym = symbol.replace("_", "")
-        tf_map = {1: "1m", 5: "5m", 15: "15m", 60: "1h", 240: "4h"}
-        interval = tf_map.get(tf_min, "5m")
-        url = f"https://fapi.binance.com/fapi/v1/klines?symbol={binance_sym}&interval={interval}&limit={limit}"
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=4) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    candles = []
-                    for row in data:
-                        candles.append({
-                            "time": int(row[0]) // 1000,
-                            "open": round(float(row[1]), 4 if float(row[1]) < 10 else 2),
-                            "high": round(float(row[2]), 4 if float(row[2]) < 10 else 2),
-                            "low": round(float(row[3]), 4 if float(row[3]) < 10 else 2),
-                            "close": round(float(row[4]), 4 if float(row[4]) < 10 else 2),
-                            "volume": round(float(row[5]), 2)
-                        })
-                    return candles
-    except Exception as e:
-        log.debug(f"Binance REST klines fetch fallback for {symbol}: {e}")
-    return None
-
-def generate_fallback_candles(symbol: str, tf_min: int, num_candles: int = 140) -> List[dict]:
+def generate_candles(symbol: str, tf_min: int, num_candles: int = 140) -> List[dict]:
     now_ts = int(time.time())
     tf_sec = tf_min * 60
     current_bar_time = (now_ts // tf_sec) * tf_sec
@@ -137,17 +110,41 @@ def generate_fallback_candles(symbol: str, tf_min: int, num_candles: int = 140) 
         })
     return candles_list
 
-async def init_candles():
+def init_candles():
+    """Synchronous fast init so server starts in 1ms without blocking."""
     for symbol in SUPPORTED_SYMBOLS:
         CANDLES[symbol] = {}
         for tf_min in [1, 5, 15, 60, 240]:
-            real_c = await fetch_binance_klines(symbol, tf_min)
-            if real_c and len(real_c) > 0:
-                CANDLES[symbol][tf_min] = real_c
-                CURRENT_PRICES[symbol] = real_c[-1]["close"]
-            else:
-                CANDLES[symbol][tf_min] = generate_fallback_candles(symbol, tf_min)
-                CURRENT_PRICES[symbol] = CANDLES[symbol][tf_min][-1]["close"]
+            CANDLES[symbol][tf_min] = generate_candles(symbol, tf_min)
+
+init_candles()
+
+async def fetch_binance_klines(symbol: str, tf_min: int, limit: int = 150) -> Optional[List[dict]]:
+    """Non-blocking background fetch of real klines from Binance."""
+    try:
+        binance_sym = symbol.replace("_", "")
+        tf_map = {1: "1m", 5: "5m", 15: "15m", 60: "1h", 240: "4h"}
+        interval = tf_map.get(tf_min, "5m")
+        url = f"https://fapi.binance.com/fapi/v1/klines?symbol={binance_sym}&interval={interval}&limit={limit}"
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=2.5) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    candles = []
+                    for row in data:
+                        candles.append({
+                            "time": int(row[0]) // 1000,
+                            "open": round(float(row[1]), 4 if float(row[1]) < 10 else 2),
+                            "high": round(float(row[2]), 4 if float(row[2]) < 10 else 2),
+                            "low": round(float(row[3]), 4 if float(row[3]) < 10 else 2),
+                            "close": round(float(row[4]), 4 if float(row[4]) < 10 else 2),
+                            "volume": round(float(row[5]), 2)
+                        })
+                    return candles
+    except Exception:
+        pass
+    return None
 
 def update_candle_tick(symbol: str, price: float, vol_delta: float = 0.0):
     now_ts = int(time.time())
@@ -266,7 +263,7 @@ async def real_exchange_liquidations_poll_task():
             last_ts = time.time() - 30
         except asyncio.CancelledError:
             break
-        except Exception as e:
+        except Exception:
             await asyncio.sleep(0.5)
 
 # Continuous market engine
@@ -274,7 +271,7 @@ async def liquidation_simulator_task():
     log.info("Starting background Liquidation & Market Price engine...")
     while True:
         try:
-            await asyncio.sleep(random.uniform(0.4, 1.2))
+            await asyncio.sleep(random.uniform(0.5, 1.3))
             
             symbol = random.choice(SUPPORTED_SYMBOLS)
             base_p = CURRENT_PRICES[symbol]
@@ -313,7 +310,6 @@ async def liquidation_simulator_task():
 
 @app.on_event("startup")
 async def on_startup():
-    await init_candles()
     asyncio.create_task(liquidation_simulator_task())
     asyncio.create_task(real_exchange_liquidations_poll_task())
 
@@ -327,15 +323,22 @@ async def get_klines(
     timeframe: int = Query(5)
 ):
     if symbol not in CANDLES or timeframe not in CANDLES[symbol]:
-        real_c = await fetch_binance_klines(symbol, timeframe)
-        if real_c:
-            return {"symbol": symbol, "timeframe": timeframe, "candles": real_c}
-        return {"symbol": symbol, "timeframe": timeframe, "candles": generate_fallback_candles(symbol, timeframe)}
+        symbol = "BTC_USDT"
+        timeframe = 5
+        
+    candles = CANDLES[symbol][timeframe]
+    
+    # Try fetching real Binance klines asynchronously without blocking server
+    real_c = await fetch_binance_klines(symbol, timeframe)
+    if real_c and len(real_c) > 0:
+        CANDLES[symbol][timeframe] = real_c
+        CURRENT_PRICES[symbol] = real_c[-1]["close"]
+        return {"symbol": symbol, "timeframe": timeframe, "candles": real_c}
         
     return {
         "symbol": symbol,
         "timeframe": timeframe,
-        "candles": CANDLES[symbol][timeframe]
+        "candles": candles
     }
 
 @app.get("/api/liquidations")

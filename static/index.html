@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Licvid Terminal - Live Liquidation Cluster Chart & Stream</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <!-- Local Lightweight Charts -->
+    <script src="/static/lightweight-charts.js"></script>
+</head>
+<body class="dark-theme">
+    <!-- Top Header -->
+    <header class="top-nav">
+        <div class="brand">
+            <span class="logo-icon">⚡</span>
+            <span class="brand-title">LICVID</span>
+            <span class="brand-badge">TERMINAL</span>
+            <span class="status-badge" id="conn-status"><span class="dot pulse green"></span> LIVE WS</span>
+        </div>
+
+        <div class="header-metrics">
+            <div class="metric-card">
+                <span class="metric-label">Ликвидации (24ч)</span>
+                <span class="metric-value text-gold" id="stat-24h-total">$0</span>
+            </div>
+            <div class="metric-card">
+                <span class="metric-label">Ликвидации (1ч)</span>
+                <span class="metric-value" id="stat-1h-total">$0</span>
+            </div>
+            <div class="metric-card ratio-metric">
+                <div class="metric-label flex-between">
+                    <span>Longs <strong id="long-pct" class="text-danger">50%</strong></span>
+                    <span>Shorts <strong id="short-pct" class="text-success">50%</strong></span>
+                </div>
+                <div class="ratio-bar-bg">
+                    <div class="ratio-bar-fill-long" id="long-ratio-bar" style="width: 50%;"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="header-controls">
+            <button class="btn btn-icon btn-outline" id="sound-toggle-btn" title="Звуковой сигнал">
+                <span id="sound-icon">🔊</span>
+            </button>
+            <button class="btn btn-outline" id="clear-clusters-btn" title="Очистить">
+                <span>🧹 Очистить</span>
+            </button>
+        </div>
+    </header>
+
+    <!-- Controls Bar -->
+    <section class="controls-bar">
+        <div class="control-group">
+            <label>Монета:</label>
+            <div class="symbol-selector" id="symbol-buttons">
+                <!-- Dynamically populated with ALL, BTC, ETH, SOL, XRP, DOGE, BNB -->
+            </div>
+        </div>
+
+        <div class="control-group">
+            <label>Таймфрейм:</label>
+            <div class="btn-group" id="tf-buttons">
+                <button class="btn btn-tf" data-tf="1">1м</button>
+                <button class="btn btn-tf active" data-tf="5">5м</button>
+                <button class="btn btn-tf" data-tf="15">15м</button>
+                <button class="btn btn-tf" data-tf="60">1ч</button>
+                <button class="btn btn-tf" data-tf="240">4ч</button>
+            </div>
+        </div>
+
+        <div class="control-group">
+            <label>Мин. объем:</label>
+            <select id="min-usd-filter" class="form-select">
+                <option value="0" selected>Все ($0+)</option>
+                <option value="5000">$5,000+</option>
+                <option value="25000">$25,000+</option>
+                <option value="100000">$100,000+ 🔥</option>
+                <option value="500000">$500,000+ 🐋</option>
+            </select>
+        </div>
+
+        <div class="control-group">
+            <label>Биржа:</label>
+            <select id="exchange-filter" class="form-select">
+                <option value="ALL">Все биржи</option>
+                <option value="binance">Binance</option>
+                <option value="bybit">Bybit</option>
+                <option value="gate">Gate.io</option>
+                <option value="okx">OKX</option>
+            </select>
+        </div>
+    </section>
+
+    <!-- Main Workspace -->
+    <main class="main-layout">
+        <!-- Cluster Candlestick Chart -->
+        <section class="chart-section">
+            <div class="chart-header flex-between">
+                <div class="symbol-price-display">
+                    <h2 id="current-symbol-title">BTC_USDT</h2>
+                    <span class="live-price" id="current-price">$78,450.00</span>
+                    <span class="price-change positive" id="price-change-pct">+0.00%</span>
+                </div>
+                <div class="chart-legend">
+                    <span class="legend-item"><span class="cluster-dot red"></span> Long Liq (Sell)</span>
+                    <span class="legend-item"><span class="cluster-dot green"></span> Short Liq (Buy)</span>
+                    <span class="legend-item"><span class="cluster-dot gold"></span> Whale ($100k+)</span>
+                </div>
+            </div>
+
+            <div class="chart-wrapper" id="chart-wrapper">
+                <!-- Lightweight Charts Container -->
+                <div id="tv-chart-container"></div>
+                <!-- Cluster Canvas Overlay -->
+                <canvas id="cluster-canvas"></canvas>
+
+                <!-- Profile Sidebar -->
+                <div class="profile-sidebar" id="profile-sidebar">
+                    <div class="profile-title">ПРОФИЛЬ ЛИКВИДАЦИЙ</div>
+                    <div id="profile-bars-container"></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Live Feed Section -->
+        <aside class="feed-section">
+            <div class="feed-header flex-between">
+                <span class="feed-title">⚡ ПРЯМОЙ ЭФИР ЛИКВИДАЦИЙ</span>
+                <span class="feed-count-badge" id="feed-count">0 событий</span>
+            </div>
+
+            <!-- Table Feed -->
+            <div class="feed-table-container">
+                <table class="feed-table">
+                    <thead>
+                        <tr>
+                            <th>Время</th>
+                            <th>Монета</th>
+                            <th>Биржа</th>
+                            <th>Тип</th>
+                            <th class="col-usd">СУММА ЛИКВИДАЦИИ ($)</th>
+                            <th>Цена ($)</th>
+                        </tr>
+                    </thead>
+                    <tbody id="feed-tbody"></tbody>
+                </table>
+            </div>
+
+            <!-- Top Coins Bar -->
+            <div class="top-coins-box">
+                <div class="box-title">🔥 Лидеры по ликвидациям (24ч)</div>
+                <div id="top-coins-list" class="top-coins-grid"></div>
+            </div>
+        </aside>
+    </main>
+
+    <!-- Modal -->
+    <div id="detail-modal" class="modal hidden">
+        <div class="modal-content">
+            <span class="close-modal" id="close-modal">&times;</span>
+            <h3 id="modal-title">Детали ликвидации</h3>
+            <div id="modal-body"></div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,11 +1,11 @@
 /**
- * Licvid Terminal - Cluster Footprint Chart & Stream App
+ * Licvid Terminal - Realtime Crypto Liquidation Stream & Cluster Footprint Chart
  */
 
 document.addEventListener("DOMContentLoaded", () => {
-    let currentSymbol = "BTC_USDT";
+    let currentSymbol = "BTC_USDT"; // Default chart symbol
     let currentTimeframe = 5;
-    let minUsdFilter = 5000;
+    let minUsdFilter = 0; // Show ALL liquidations by default
     let exchangeFilter = "ALL";
     let soundEnabled = true;
 
@@ -67,7 +67,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 osc.type = 'sine';
                 osc.frequency.setValueAtTime(150, audioCtx.currentTime);
                 osc.frequency.exponentialRampToValueAtTime(45, audioCtx.currentTime + 0.5);
-                gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+                gain.gain.setValueAtTime(0.25, audioCtx.currentTime);
                 gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.5);
                 osc.start();
                 osc.stop(audioCtx.currentTime + 0.5);
@@ -75,7 +75,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 const freq = side === 'BUY' ? 800 : 420;
                 osc.type = 'triangle';
                 osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
-                gain.gain.setValueAtTime(0.04, audioCtx.currentTime);
+                gain.gain.setValueAtTime(0.03, audioCtx.currentTime);
                 gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.12);
                 osc.start();
                 osc.stop(audioCtx.currentTime + 0.12);
@@ -92,8 +92,8 @@ document.addEventListener("DOMContentLoaded", () => {
         const height = container.clientHeight || chartWrapper.clientHeight || 500;
 
         if (typeof window.LightweightCharts === 'undefined') {
-            console.error("LightweightCharts library missing!");
-            container.innerHTML = `<div style="padding:20px; color:#ff2a5f;">Ошибка загрузки графика TradingView.</div>`;
+            console.error("LightweightCharts missing!");
+            container.innerHTML = `<div style="padding:20px; color:#ff2a5f;">Ошибка загрузки графика.</div>`;
             return;
         }
 
@@ -167,8 +167,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // --- Load Historical Candles ---
     async function loadCandles() {
+        const symbolToLoad = currentSymbol === "ALL" ? "BTC_USDT" : currentSymbol;
         try {
-            const resp = await fetch(`/api/klines?symbol=${currentSymbol}&timeframe=${currentTimeframe}`);
+            const resp = await fetch(`/api/klines?symbol=${symbolToLoad}&timeframe=${currentTimeframe}`);
             const data = await resp.json();
             if (data && data.candles) {
                 candlesData = data.candles;
@@ -193,7 +194,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
                 if (formattedCandles.length > 0) {
                     const last = formattedCandles[formattedCandles.length - 1];
-                    updatePriceDisplay(last.close, formattedCandles[0].open);
+                    updatePriceDisplay(last.close, formattedCandles[0].open, symbolToLoad);
                 }
                 
                 updateChartMarkers();
@@ -204,8 +205,8 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     }
 
-    function updatePriceDisplay(price, firstOpenPrice) {
-        livePriceEl.innerText = formatPrice(price, currentSymbol);
+    function updatePriceDisplay(price, firstOpenPrice, symbol) {
+        livePriceEl.innerText = formatPrice(price, symbol || currentSymbol);
         if (firstOpenPrice) {
             const diff = price - firstOpenPrice;
             const pct = (diff / firstOpenPrice) * 100;
@@ -215,12 +216,13 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     }
 
-    // --- TradingView Standard Markers Fallback ---
+    // --- TradingView Standard Markers ---
     function updateChartMarkers() {
         if (!candlestickSeries) return;
+        const activeSym = currentSymbol === "ALL" ? "BTC_USDT" : currentSymbol;
 
         const filtered = liquidationHistory.filter(item => {
-            if (item.symbol !== currentSymbol) return false;
+            if (item.symbol !== activeSym) return false;
             if (exchangeFilter !== "ALL" && item.exchange !== exchangeFilter) return false;
             if (item.usd < minUsdFilter) return false;
             return true;
@@ -263,10 +265,11 @@ document.addEventListener("DOMContentLoaded", () => {
         const ctx = clusterCanvas.getContext("2d");
         ctx.clearRect(0, 0, clusterCanvas.width, clusterCanvas.height);
 
+        const activeSym = currentSymbol === "ALL" ? "BTC_USDT" : currentSymbol;
         const tfSec = currentTimeframe * 60;
 
         const filtered = liquidationHistory.filter(item => {
-            if (item.symbol !== currentSymbol) return false;
+            if (item.symbol !== activeSym) return false;
             if (exchangeFilter !== "ALL" && item.exchange !== exchangeFilter) return false;
             if (item.usd < minUsdFilter) return false;
             return true;
@@ -276,7 +279,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
         filtered.forEach(item => {
             const candleTime = Math.floor(item.timestamp / tfSec) * tfSec;
-            const key = `${candleTime}_${item.price.toFixed(priceDecimals(currentSymbol))}`;
+            const key = `${candleTime}_${item.price.toFixed(priceDecimals(activeSym))}`;
             if (!clusters[key]) {
                 clusters[key] = {
                     time: candleTime,
@@ -345,7 +348,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // --- Profile Sidebar ---
     function updateProfileSidebar() {
-        const filtered = liquidationHistory.filter(x => x.symbol === currentSymbol);
+        const activeSym = currentSymbol === "ALL" ? "BTC_USDT" : currentSymbol;
+        const filtered = liquidationHistory.filter(x => x.symbol === activeSym);
         if (filtered.length === 0) {
             profileBarsContainer.innerHTML = `<div style="text-align:center; color:#8493a8; font-size:0.68rem; padding:8px;">Нет данных</div>`;
             return;
@@ -390,7 +394,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
             html += `
                 <div class="profile-row">
-                    <span class="profile-price">${formatPrice(midP, currentSymbol)}</span>
+                    <span class="profile-price">${formatPrice(midP, activeSym)}</span>
                     <div class="profile-bar-wrapper">
                         <div class="profile-bar-long" style="width: ${longPct}%"></div>
                         <div class="profile-bar-short" style="width: ${shortPct}%"></div>
@@ -439,7 +443,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
         feedTbody.insertBefore(tr, feedTbody.firstChild);
 
-        while (feedTbody.children.length > 100) {
+        while (feedTbody.children.length > 120) {
             feedTbody.removeChild(feedTbody.lastChild);
         }
 
@@ -486,7 +490,9 @@ document.addEventListener("DOMContentLoaded", () => {
             liquidationHistory.push(item);
             if (liquidationHistory.length > 2000) liquidationHistory.shift();
 
-            if (item.symbol === currentSymbol && item.usd >= minUsdFilter) {
+            const activeSym = currentSymbol === "ALL" ? "BTC_USDT" : currentSymbol;
+
+            if ((currentSymbol === "ALL" || item.symbol === currentSymbol) && item.usd >= minUsdFilter) {
                 playLiquidationSound(item.usd, item.side);
             }
 
@@ -499,37 +505,46 @@ document.addEventListener("DOMContentLoaded", () => {
             if (msg.candle_ticks && msg.candle_ticks.length > 0) {
                 msg.candle_ticks.forEach(ct => {
                     if (ct.timeframe === currentTimeframe && ct.candle && candlestickSeries) {
-                        candlestickSeries.update({
-                            time: ct.candle.time,
-                            open: ct.candle.open,
-                            high: ct.candle.high,
-                            low: ct.candle.low,
-                            close: ct.candle.close
-                        });
-                        if (volumeSeries) {
-                            volumeSeries.update({
-                                time: ct.candle.time,
-                                value: ct.candle.volume,
-                                color: ct.candle.close >= ct.candle.open ? 'rgba(0, 230, 118, 0.35)' : 'rgba(255, 42, 95, 0.35)'
-                            });
+                        if (item.symbol === activeSym) {
+                            try {
+                                candlestickSeries.update({
+                                    time: ct.candle.time,
+                                    open: ct.candle.open,
+                                    high: ct.candle.high,
+                                    low: ct.candle.low,
+                                    close: ct.candle.close
+                                });
+                                if (volumeSeries) {
+                                    volumeSeries.update({
+                                        time: ct.candle.time,
+                                        value: ct.candle.volume,
+                                        color: ct.candle.close >= ct.candle.open ? 'rgba(0, 230, 118, 0.35)' : 'rgba(255, 42, 95, 0.35)'
+                                    });
+                                }
+                                updatePriceDisplay(ct.candle.close, candlesData[0]?.open, activeSym);
+                            } catch (e) {
+                                // Ignore timestamp order mismatches on fast ticks
+                            }
                         }
-                        updatePriceDisplay(ct.candle.close, candlesData[0]?.open);
                     }
                 });
             }
         } else if (msg.type === "price_tick") {
-            if (msg.symbol === currentSymbol) {
-                updatePriceDisplay(msg.price, candlesData[0]?.open);
+            const activeSym = currentSymbol === "ALL" ? "BTC_USDT" : currentSymbol;
+            if (msg.symbol === activeSym) {
+                updatePriceDisplay(msg.price, candlesData[0]?.open, activeSym);
                 if (msg.candle_ticks) {
                     msg.candle_ticks.forEach(ct => {
                         if (ct.timeframe === currentTimeframe && ct.candle && candlestickSeries) {
-                            candlestickSeries.update({
-                                time: ct.candle.time,
-                                open: ct.candle.open,
-                                high: ct.candle.high,
-                                low: ct.candle.low,
-                                close: ct.candle.close
-                            });
+                            try {
+                                candlestickSeries.update({
+                                    time: ct.candle.time,
+                                    open: ct.candle.open,
+                                    high: ct.candle.high,
+                                    low: ct.candle.low,
+                                    close: ct.candle.close
+                                });
+                            } catch (e) {}
                         }
                     });
                 }
@@ -539,7 +554,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
     async function fetchStats() {
         try {
-            const resp = await fetch(`/api/stats?symbol=${currentSymbol}`);
+            const activeSym = currentSymbol === "ALL" ? "" : currentSymbol;
+            const resp = await fetch(`/api/stats?symbol=${activeSym}`);
             const data = await resp.json();
             if (data) {
                 stat24hTotalEl.innerText = `$${formatUsdShort(data.total_usd_24h)}`;
@@ -572,6 +588,20 @@ document.addEventListener("DOMContentLoaded", () => {
     function setupSymbolButtons(symbols) {
         const container = document.getElementById("symbol-buttons");
         container.innerHTML = "";
+
+        // Add "ALL" button first
+        const allBtn = document.createElement("button");
+        allBtn.className = `btn-symbol ${currentSymbol === "ALL" ? 'active' : ''}`;
+        allBtn.innerText = "🌐 ВСЕ МОНЕТЫ";
+        allBtn.addEventListener("click", () => {
+            document.querySelectorAll(".btn-symbol").forEach(b => b.classList.remove("active"));
+            allBtn.classList.add("active");
+            currentSymbol = "ALL";
+            symbolTitleEl.innerText = "BTC_USDT (ВСЕ МОНЕТЫ)";
+            refreshAllData();
+        });
+        container.appendChild(allBtn);
+
         symbols.forEach(s => {
             const btn = document.createElement("button");
             btn.className = `btn-symbol ${s === currentSymbol ? 'active' : ''}`;
@@ -663,7 +693,7 @@ document.addEventListener("DOMContentLoaded", () => {
             if (item.usd < minUsdFilter) return false;
             return true;
         });
-        filtered.slice(-100).reverse().forEach(item => addFeedRow(item, false));
+        filtered.slice(-120).reverse().forEach(item => addFeedRow(item, false));
     }
 
     function priceDecimals(symbol) {

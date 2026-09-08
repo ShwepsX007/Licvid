@@ -22,7 +22,7 @@ import chainlink_price
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 log = logging.getLogger("licvid.server")
 
-app = FastAPI(title="Licvid - Live Crypto Liquidation Terminal", version="2.0.0")
+app = FastAPI(title="Licvid - Live Crypto Liquidation Terminal", version="2.5.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -89,11 +89,13 @@ def init_candles():
             candles_list = []
             num_candles = 140
             
-            start_time = (now_ts // tf_sec - num_candles) * tf_sec
+            # Align exact start time to timeframe boundaries
+            current_bar_time = (now_ts // tf_sec) * tf_sec
+            start_time = current_bar_time - (num_candles * tf_sec)
             p = target_price
             
-            for i in range(num_candles):
-                c_time = start_time + i * tf_sec
+            for i in range(num_candles + 1):
+                c_time = start_time + (i * tf_sec)
                 vol = random.uniform(5, 150) * (target_price / 1000.0)
                 change_pct = random.gauss(0, 0.0008)
                 open_p = round(p, 4 if target_price < 10 else 2)
@@ -197,47 +199,37 @@ async def liquidation_simulator_task():
     log.info("Starting background Liquidation & Price engine...")
     while True:
         try:
-            await asyncio.sleep(random.uniform(0.6, 2.0))
+            # Emit events frequently (every 0.5 to 1.5 seconds)
+            await asyncio.sleep(random.uniform(0.4, 1.2))
             
             symbol = random.choice(SUPPORTED_SYMBOLS)
             base_p = CURRENT_PRICES[symbol]
             
-            if random.random() < 0.85:
-                is_long_liq = random.random() < 0.53
-                side = "SELL" if is_long_liq else "BUY"
-                exchange = random.choice(EXCHANGES)
-                
-                r = random.random()
-                if r < 0.60:
-                    usd = random.uniform(2500, 35000)
-                elif r < 0.88:
-                    usd = random.uniform(35000, 180000)
-                elif r < 0.97:
-                    usd = random.uniform(180000, 750000)
-                else:
-                    usd = random.uniform(750000, 4200000)
-                
-                p_offset = random.uniform(-0.0005, 0.0008)
-                liq_price = round(base_p * (1 + p_offset), 4 if base_p < 10 else 2)
-                
-                await process_liquidation_event({
-                    "symbol": symbol,
-                    "exchange": exchange,
-                    "side": side,
-                    "price": liq_price,
-                    "usd": usd,
-                    "timestamp": time.time()
-                })
+            is_long_liq = random.random() < 0.53
+            side = "SELL" if is_long_liq else "BUY"
+            exchange = random.choice(EXCHANGES)
+            
+            r = random.random()
+            if r < 0.55:
+                usd = random.uniform(1500, 25000)
+            elif r < 0.85:
+                usd = random.uniform(25000, 150000)
+            elif r < 0.96:
+                usd = random.uniform(150000, 600000)
             else:
-                p_offset = random.gauss(0, 0.00015)
-                new_price = round(base_p * (1 + p_offset), 4 if base_p < 10 else 2)
-                candle_ticks = update_candle_tick(symbol, new_price, random.uniform(0.1, 3.0))
-                await manager.broadcast({
-                    "type": "price_tick",
-                    "symbol": symbol,
-                    "price": new_price,
-                    "candle_ticks": candle_ticks
-                })
+                usd = random.uniform(600000, 3500000)
+            
+            p_offset = random.uniform(-0.0006, 0.0006)
+            liq_price = round(base_p * (1 + p_offset), 4 if base_p < 10 else 2)
+            
+            await process_liquidation_event({
+                "symbol": symbol,
+                "exchange": exchange,
+                "side": side,
+                "price": liq_price,
+                "usd": usd,
+                "timestamp": time.time()
+            })
                 
         except asyncio.CancelledError:
             break
@@ -333,7 +325,7 @@ async def websocket_endpoint(websocket: WebSocket):
             "type": "init",
             "symbols": SUPPORTED_SYMBOLS,
             "prices": CURRENT_PRICES,
-            "recent_liquidations": LIQUIDATION_HISTORY[-100:]
+            "recent_liquidations": LIQUIDATION_HISTORY[-150:]
         })
         while True:
             await websocket.receive_text()

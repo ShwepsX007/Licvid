@@ -7,7 +7,6 @@
     <link rel="stylesheet" href="/static/style.css">
     <!-- Local Lightweight Charts -->
     <script src="/static/lightweight-charts.js"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 </head>
 <body class="dark-theme">
     <!-- Top Header -->
@@ -53,7 +52,9 @@
     <section class="controls-bar">
         <div class="control-group">
             <label>Монета:</label>
-            <div class="symbol-selector" id="symbol-buttons"></div>
+            <div class="symbol-selector" id="symbol-buttons">
+                <!-- Dynamically populated with ALL, BTC, ETH, SOL, XRP, DOGE, BNB -->
+            </div>
         </div>
 
         <div class="control-group">
@@ -70,8 +71,8 @@
         <div class="control-group">
             <label>Мин. объем:</label>
             <select id="min-usd-filter" class="form-select">
-                <option value="0">Все ($0+)</option>
-                <option value="5000" selected>$5,000+</option>
+                <option value="0" selected>Все ($0+)</option>
+                <option value="5000">$5,000+</option>
                 <option value="25000">$25,000+</option>
                 <option value="100000">$100,000+ 🔥</option>
                 <option value="500000">$500,000+ 🐋</option>

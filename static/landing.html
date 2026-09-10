@@ -21,6 +21,8 @@
     --cyan: #00d6ff;
     --gold: #ffd54f;
     --magenta: #ff2d95;
+    --violet: #a78bfa;
+    --orange: #ff9100;
     --font: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
 }
@@ -151,6 +153,32 @@ a { color: inherit; text-decoration: none; }
     .live-table th:nth-child(4), .live-table td:nth-child(4) { display: none; }
 }
 
+/* ---------- CVD strip ---------- */
+.cvd-head {
+    display: flex; align-items: center; justify-content: center; gap: 10px;
+    margin-top: 44px; margin-bottom: 14px; flex-wrap: wrap;
+}
+.cvd-head h2 { font-size: 1.15rem; font-weight: 800; }
+.cvd-head .live-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--violet); animation: pulse 1.6s infinite;
+}
+.cvd-head .hint { color: var(--muted); font-size: 0.72rem; }
+.hero-stats.cvd-stats { grid-template-columns: repeat(3, 1fr); margin-top: 0; }
+.cvd-stats .stat-card { position: relative; overflow: hidden; }
+.cvd-stats .stat-card::before {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+    background: var(--border);
+}
+.cvd-stats .stat-card.is-pos::before { background: linear-gradient(180deg, #8b5cf6, #6d28d9); }
+.cvd-stats .stat-card.is-neg::before { background: linear-gradient(180deg, #ffb020, #ff7300); }
+.cvd-stats .stat-card .stat-value.cvd-pos {
+    color: var(--violet); text-shadow: 0 0 18px rgba(139,92,246,0.35);
+}
+.cvd-stats .stat-card .stat-value.cvd-neg {
+    color: var(--orange); text-shadow: 0 0 18px rgba(255,145,0,0.35);
+}
+
 /* ---------- Features ---------- */
 .features { max-width: 1080px; margin: 0 auto; padding: 70px 28px 20px; }
 .features h2, .how h2, .cta h2 { font-size: clamp(1.5rem, 3vw, 2rem); font-weight: 800; text-align: center; }
@@ -202,6 +230,8 @@ a { color: inherit; text-decoration: none; }
     .site-nav a:not(.btn) { display: none; }
     .hero { padding-top: 56px; }
     .hero-stats { grid-template-columns: repeat(2, 1fr); }
+    .hero-stats.cvd-stats { grid-template-columns: repeat(3, 1fr); }
+    .cvd-stats .stat-value { font-size: 1.05rem; }
     .stat-value { font-size: 1.2rem; }
     .live-section, .features, .how, .cta { padding-left: 16px; padding-right: 16px; }
     .site-footer { padding: 24px 16px 32px; }
@@ -249,6 +279,17 @@ a { color: inherit; text-decoration: none; }
         <div class="stat-card"><span class="stat-value" id="stat-1h">—</span><span class="stat-label" data-i18n="land.stat.1h">За последний час</span></div>
         <div class="stat-card"><span class="stat-value" id="stat-live">—</span><span class="stat-label" data-i18n="land.stat.exch">Бирж в эфире</span></div>
         <div class="stat-card"><span class="stat-value" id="stat-ratio">—</span><span class="stat-label" data-i18n="land.stat.ratio">Лонги × шорты (24ч)</span></div>
+    </div>
+
+    <div class="cvd-head">
+        <span class="live-dot"></span>
+        <h2 id="cvd-title">CVD BTC/USDT</h2>
+        <span class="hint" data-i18n="land.cvd.hint">тейкер-покупки минус продажи · обновляется каждые 4 секунды</span>
+    </div>
+    <div class="hero-stats cvd-stats">
+        <div class="stat-card" id="cvd-card-24h"><span class="stat-value" id="cvd-24h">—</span><span class="stat-label" data-i18n="land.stat.cvd24h">CVD за 24ч</span></div>
+        <div class="stat-card" id="cvd-card-1h"><span class="stat-value" id="cvd-1h">—</span><span class="stat-label" data-i18n="land.stat.cvd1h">CVD за 1ч</span></div>
+        <div class="stat-card" id="cvd-card-5m"><span class="stat-value" id="cvd-5m">—</span><span class="stat-label" data-i18n="land.stat.cvd5m">CVD за 5м</span></div>
     </div>
 </section>
 
@@ -343,7 +384,7 @@ a { color: inherit; text-decoration: none; }
     };
     I18n.init();
 
-    var last = { stats: null, health: null, rows: null };
+    var last = { stats: null, health: null, rows: null, cvd: null, cvdSym: "BTC_USDT", cvdAt: 0 };
 
     function fmtShort(v) {
         v = Number(v) || 0;
@@ -393,6 +434,73 @@ a { color: inherit; text-decoration: none; }
         }).join("");
     }
 
+    /* ---------- CVD лидера рынка (тейкер-покупки минус продажи) ---------- */
+    var CVD_REFETCH_MS = 25000;   // свечи 5м на сервере кэшируются — чаще нет смысла
+
+    function cvdSum(candles, since) {
+        var s = 0, ok = false;
+        for (var i = 0; i < candles.length; i++) {
+            var c = candles[i];
+            if ((Number(c.time) || 0) < since) continue;
+            var d = Number(c.cvd);
+            if (isFinite(d)) { s += d; ok = true; }
+        }
+        return ok ? s : NaN;
+    }
+
+    function paintCvd(id, cardId, v) {
+        var valEl = el(id), cardEl = el(cardId);
+        valEl.classList.remove("cvd-pos", "cvd-neg");
+        cardEl.classList.remove("is-pos", "is-neg");
+        if (!isFinite(v)) {
+            valEl.textContent = "—";
+            return;
+        }
+        var buy = v >= 0;
+        valEl.textContent = (buy ? "+$" : "−$") + fmtShort(Math.abs(v));
+        valEl.classList.add(buy ? "cvd-pos" : "cvd-neg");
+        cardEl.classList.add(buy ? "is-pos" : "is-neg");
+    }
+
+    function renderCvd() {
+        var sym = last.cvdSym || "BTC_USDT";
+        el("cvd-title").textContent = I18n.t("land.cvd.title", {
+            sym: String(sym).replace("_", "/"),
+        });
+        var c = last.cvd;
+        if (!c) {
+            paintCvd("cvd-24h", "cvd-card-24h", NaN);
+            paintCvd("cvd-1h", "cvd-card-1h", NaN);
+            paintCvd("cvd-5m", "cvd-card-5m", NaN);
+            return;
+        }
+        paintCvd("cvd-24h", "cvd-card-24h", c.d24);
+        paintCvd("cvd-1h", "cvd-card-1h", c.d1);
+        paintCvd("cvd-5m", "cvd-card-5m", c.d5);
+    }
+
+    async function updateCvd(st) {
+        // лидер — монета с максимальными ликвидациями за 24ч (как в терминале)
+        var sym = (st && st.top_coins && st.top_coins.length && st.top_coins[0].symbol) || "BTC_USDT";
+        var nowMs = Date.now();
+        if (sym !== last.cvdSym || nowMs - last.cvdAt > CVD_REFETCH_MS || !last.cvd) {
+            last.cvdSym = sym;
+            last.cvdAt = nowMs;
+            try {
+                var r = await fetch("/api/klines?symbol=" + encodeURIComponent(sym) + "&timeframe=5");
+                var data = await r.json();
+                var candles = (data && data.candles) || [];
+                var now = Date.now() / 1000;
+                last.cvd = {
+                    d24: cvdSum(candles, now - 86400),
+                    d1: cvdSum(candles, now - 3600),
+                    d5: cvdSum(candles, now - 300),
+                };
+            } catch (e) { /* сервер недоступен — оставляем «—» */ }
+        }
+        renderCvd();
+    }
+
     async function refresh() {
         try {
             var [st, liq, h] = await Promise.all([
@@ -404,6 +512,7 @@ a { color: inherit; text-decoration: none; }
             last.health = h;
             fillStats(st, h);
             renderRows(liq ? liq.liquidations : null);
+            updateCvd(st);
         } catch (e) { /* сервер недоступен — оставляем «—» */ }
     }
 
@@ -418,6 +527,7 @@ a { color: inherit; text-decoration: none; }
         if (langSelect) langSelect.value = I18n.lang();
         fillStats(last.stats, last.health);
         renderRows(last.rows);
+        renderCvd();
     });
 
     refresh();

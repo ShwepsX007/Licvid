@@ -117,6 +117,9 @@
     const stat24hEl = $("stat-24h-total");
     const stat1hEl = $("stat-1h-total");
     const stat5mEl = $("stat-5m-total");
+    const cvd24hEl = $("stat-cvd-24h");
+    const cvd1hEl = $("stat-cvd-1h");
+    const cvd5mEl = $("stat-cvd-5m");
     const longPctEl = $("long-pct");
     const shortPctEl = $("short-pct");
     const longRatioBar = $("long-ratio-bar");
@@ -747,11 +750,32 @@
         });
     }
 
-    // --- CVD-стрелки по свечам -------------------------------------------------
+    // --- CVD-бейджи в центре свечи -----------------------------------------------
     // delta = taker buy volume - taker sell volume (USDT) внутри одной свечи.
-    // ▲ зелёная над свечой — цену толкали покупатели; ▼ красная под — продавцы.
-    // Формирующаяся свеча обновляется на каждом тике, после закрытия стрелка
-    // остаётся с финальным значением.
+    // Бейдж стоит СТРОГО в центре тела свечи и подписан суммой — как шарики
+    // ликвидаций. Палитра специально НЕ повторяет ни свечи (зелёный/красный),
+    // ни ликвидации (маджента/циан/золото): покупки — фиолет, продажи — оранж.
+    const CVD_COLORS = {
+        buy:  { fill: "rgba(139,92,246,0.96)",  ring: "#e6d9ff", text: "#0d0618" },
+        sell: { fill: "rgba(255,145,0,0.96)",   ring: "#ffe3b8", text: "#1c0d00" },
+    };
+    const CVD_MAX_BADGES = 48;
+
+    function rrPath(ctx, x, y, w, h, r) {
+        r = Math.min(r, w / 2, h / 2);
+        ctx.beginPath();
+        if (typeof ctx.roundRect === "function") {
+            ctx.roundRect(x, y, w, h, r);
+        } else {
+            ctx.moveTo(x + r, y);
+            ctx.arcTo(x + w, y, x + w, y + h, r);
+            ctx.arcTo(x + w, y + h, x, y + h, r);
+            ctx.arcTo(x, y + h, x, y, r);
+            ctx.arcTo(x, y, x + w, y, r);
+            ctx.closePath();
+        }
+    }
+
     function drawCvdArrows(ctx) {
         const candles = state.candles;
         if (!candles.length || !chart || !candleSeries) return;
@@ -763,49 +787,92 @@
         state.cvdBars = 0;
         if (!(maxAbs > 0)) return;
         const minAbs = Math.max(1000, maxAbs * 0.04);   // микрошум не рисуем
+
+        // Кандидаты: только значимые свечи. Раскладываем от сильных к слабым,
+        // чтобы при тесноте выживали самые важные сигналы.
+        const lastIdx = candles.length - 1;
+        const cand = [];
+        for (let i = 0; i < candles.length; i++) {
+            const d = Number(candles[i].cvd);
+            if (isFinite(d) && Math.abs(d) >= minAbs) {
+                cand.push({ c: candles[i], d: d, live: i === lastIdx });
+            }
+        }
+        cand.sort((a, b) => Math.abs(b.d) - Math.abs(a.d));
+
         const ts = chart.timeScale();
         const W = clusterCanvas.width, H = clusterCanvas.height;
-        const lastIdx = candles.length - 1;
-        for (let i = 0; i < candles.length; i++) {
-            const c = candles[i];
-            const d = Number(c.cvd);
-            if (!isFinite(d) || Math.abs(d) < minAbs) continue;
+        const placed = [];   // занятые прямоугольники — защита от налезания
+        let drawn = 0;
+
+        ctx.save();
+        ctx.font = "bold 9px 'JetBrains Mono', monospace";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+
+        for (let k = 0; k < cand.length && drawn < CVD_MAX_BADGES; k++) {
+            const c = cand[k].c, d = cand[k].d;
             const buy = d > 0;
-            state.cvdBars += 1;
+            // центр ТЕЛА свечи — середина между open и close
+            const mid = (Number(c.open) + Number(c.close)) / 2;
             let x, y;
             try {
                 x = ts.timeToCoordinate(c.time);
-                y = candleSeries.priceToCoordinate(buy ? c.high : c.low);
+                y = candleSeries.priceToCoordinate(mid);
             } catch (e) { continue; }
             if (x === null || x === undefined || y === null || y === undefined) continue;
-            if (x < -30 || x > W + 30 || y < -40 || y > H + 40) continue;
-            const k = Math.sqrt(Math.abs(d) / maxAbs);
-            const size = 3.5 + 7.5 * k;
-            const gap = 4;
-            ctx.save();
-            ctx.globalAlpha = 0.45 + 0.55 * k;
-            ctx.fillStyle = buy ? "rgba(0,230,118,0.95)" : "rgba(255,42,95,0.95)";
-            if (i === lastIdx) {           // живая свеча — подсвечиваем сильнее
-                ctx.shadowColor = ctx.fillStyle;
-                ctx.shadowBlur = 10;
+            if (x < -40 || x > W + 40 || y < -30 || y > H + 30) continue;
+
+            const label = (buy ? "▲ +$" : "▼ −$") + fmtUsdShort(Math.abs(d));
+            const bw = Math.ceil(ctx.measureText(label).width) + 12;
+            const bh = 16;
+            const bx = Math.round(x - bw / 2), by = Math.round(y - bh / 2);
+
+            // налезает на уже нарисованный бейдж? пропускаем более слабый
+            let clash = false;
+            for (let j = 0; j < placed.length; j++) {
+                const p = placed[j];
+                if (bx < p.x + p.w + 2 && bx + bw + 2 > p.x &&
+                    by < p.y + p.h + 2 && by + bh + 2 > p.y) { clash = true; break; }
             }
-            ctx.beginPath();
-            if (buy) {                     // ▲ над максимумом
-                ctx.moveTo(x, y - gap - size);
-                ctx.lineTo(x - size * 0.62, y - gap);
-                ctx.lineTo(x + size * 0.62, y - gap);
-            } else {                       // ▼ под минимумом
-                ctx.moveTo(x, y + gap + size);
-                ctx.lineTo(x - size * 0.62, y + gap);
-                ctx.lineTo(x + size * 0.62, y + gap);
-            }
-            ctx.closePath();
+            if (clash) continue;
+            placed.push({ x: bx, y: by, w: bw, h: bh });
+
+            const theme = buy ? CVD_COLORS.buy : CVD_COLORS.sell;
+
+            // тёмная подложка — бейдж читается на свече любого цвета
+            rrPath(ctx, bx - 1.5, by - 1.5, bw + 3, bh + 3, 5);
+            ctx.fillStyle = "rgba(5,8,14,0.88)";
             ctx.fill();
-            ctx.restore();
+
+            ctx.shadowColor = theme.fill;
+            ctx.shadowBlur = cand[k].live ? 14 : 8;
+            rrPath(ctx, bx, by, bw, bh, 4);
+            ctx.fillStyle = theme.fill;
+            ctx.fill();
+            ctx.shadowBlur = 0;
+            ctx.lineWidth = 1.2;
+            ctx.strokeStyle = theme.ring;
+            ctx.stroke();
+
+            if (cand[k].live) {
+                // живая свеча — белое кольцо поверх
+                rrPath(ctx, bx - 3.5, by - 3.5, bw + 7, bh + 7, 7);
+                ctx.lineWidth = 1.6;
+                ctx.strokeStyle = "rgba(255,255,255,0.9)";
+                ctx.stroke();
+            }
+
+            ctx.fillStyle = theme.text;
+            ctx.fillText(label, x, y + 0.5);
+            drawn += 1;
         }
+        ctx.restore();
+        state.cvdBars = drawn;
     }
 
     function updateCvdStat() {
+        updateCvdCards();   // табло CVD 24ч/1ч/5м в шапке — из тех же свечей
         if (!cvdStatEl) return;
         if (!state.cvdEnabled) { cvdStatEl.textContent = ""; return; }
         const last = state.candles[state.candles.length - 1];
@@ -818,6 +885,53 @@
         const buy = d >= 0;
         cvdStatEl.textContent = (buy ? "▲ +$" : "▼ −$") + fmtUsdShort(Math.abs(d));
         cvdStatEl.className = "cvd-stat " + (buy ? "up" : "down");
+    }
+
+    // --- Табло CVD в шапке: перевес тейкеров по монете ГРАФИКА ---------------
+    // Суммируем поле cvd загруженных свечей за 24ч / 1ч / 5м. Свечи живые
+    // (текущая обновляется каждым тиком), поэтому табло всегда свежее.
+    function cvdSumSince(since) {
+        let s = 0, ok = false;
+        for (let i = 0; i < state.candles.length; i++) {
+            const c = state.candles[i];
+            if ((Number(c.time) || 0) < since) continue;
+            const d = Number(c.cvd);
+            if (isFinite(d)) { s += d; ok = true; }
+        }
+        return ok ? s : NaN;
+    }
+
+    function paintCvdCard(el, v) {
+        if (!el) return;
+        if (!isFinite(v)) {
+            el.textContent = "—";
+            el.className = "metric-value cvd-val";
+            el.removeAttribute("title");
+            return;
+        }
+        const buy = v >= 0;
+        el.textContent = (buy ? "+$" : "−$") + fmtUsdShort(Math.abs(v));
+        el.className = "metric-value cvd-val " + (buy ? "cvd-pos" : "cvd-neg");
+        el.title = I18n.t("stats.cvd_title") + ": " +
+            (buy ? "+" : "−") + "$" + fmtUsdFull(Math.abs(v));
+    }
+
+    function updateCvdCards() {
+        if (!cvd24hEl && !cvd1hEl && !cvd5mEl) return;
+        const now = Date.now() / 1000;
+        if (!state.cvdEnabled || !state.candles.length) {
+            paintCvdCard(cvd24hEl, NaN);
+            paintCvdCard(cvd1hEl, NaN);
+            paintCvdCard(cvd5mEl, NaN);
+            return;
+        }
+        paintCvdCard(cvd24hEl, cvdSumSince(now - 86400));
+        paintCvdCard(cvd1hEl, cvdSumSince(now - 3600));
+        paintCvdCard(cvd5mEl, cvdSumSince(now - 300));
+        // подпись монеты в карточках — CVD всегда по монете графика
+        const base = chartSymbol().split("_")[0];
+        const coins = document.querySelectorAll(".cvd-coin");
+        for (let i = 0; i < coins.length; i++) coins[i].textContent = base;
     }
 
     // --- Наведение/нажатие на шарик: подсветка связанных записей в ленте -----
@@ -884,18 +998,30 @@
 
     function initSplitters() {
         const root = document.documentElement;
-        const layout = { feedW: 430, coinsH: 170 };
+        const layout = { feedW: 430, coinsH: 170, mChartH: 0 };
         try {
             const raw = localStorage.getItem("licvid.layout");
             if (raw) {
                 const o = JSON.parse(raw) || {};
                 layout.feedW = clampPx(Number(o.feedW) || 430, 280, 720);
                 layout.coinsH = clampPx(Number(o.coinsH) || 170, 90, 460);
+                layout.mChartH = clampPx(Number(o.mChartH) || 0, 0, 90);   // 0 = авто
             }
         } catch (e) { /* ignore */ }
         const applyLayout = () => {
             root.style.setProperty("--feed-width", layout.feedW + "px");
             root.style.setProperty("--coins-height", layout.coinsH + "px");
+            if (layout.mChartH > 0) {
+                root.style.setProperty("--m-chart-h", layout.mChartH + "vh");
+            } else {
+                root.style.removeProperty("--m-chart-h");
+            }
+        };
+        // текущая высота графика в vh — стартовая точка мобильного перетаскивания
+        const currentChartVh = () => {
+            const vh = window.innerHeight > 0 ? window.innerHeight : 800;
+            const h = chartSection ? chartSection.clientHeight : vh * 0.55;
+            return clampPx((h / vh) * 100, 20, 88);
         };
         const saveLayout = () => {
             try { localStorage.setItem("licvid.layout", JSON.stringify(layout)); } catch (e) { /* ignore */ }
@@ -906,9 +1032,11 @@
                 e.preventDefault();
                 el.classList.add("active");
                 document.body.classList.add("split-dragging");
-                if (axis === "y") document.body.classList.add("split-dragging-y");
+                if (axis === "y" || axis === "mchart") document.body.classList.add("split-dragging-y");
                 const start = axis === "x" ? e.clientX : e.clientY;
-                const startVal = axis === "x" ? layout.feedW : layout.coinsH;
+                const startVal = axis === "x" ? layout.feedW
+                    : axis === "y" ? layout.coinsH
+                    : (layout.mChartH > 0 ? layout.mChartH : currentChartVh());
                 const move = (ev) => {
                     ev.preventDefault();
                     const delta = (axis === "x" ? ev.clientX : ev.clientY) - start;
@@ -916,6 +1044,10 @@
                         // лента прижата к правому краю: тянем разделитель вправо →
                         // её ширина УМЕНЬШАЕТСЯ (иначе блоки «уезжают» влево)
                         layout.feedW = clampPx(startVal - delta, 280, 720);
+                    } else if (axis === "mchart") {
+                        // телефон: тянем разделитель вниз → график становится ВЫШЕ
+                        const vh = window.innerHeight > 0 ? window.innerHeight : 800;
+                        layout.mChartH = clampPx(startVal + (delta / vh) * 100, 20, 88);
                     } else {
                         layout.coinsH = clampPx(startVal - delta, 90, 460);
                     }
@@ -936,6 +1068,7 @@
         };
         bind($("split-feed-x"), "x");
         bind($("split-coins-y"), "y");
+        bind($("split-chart-y"), "mchart");   // телефон: высота графика
         applyLayout();
     }
 
@@ -1843,6 +1976,7 @@
         updateSymbolTitle();
         rebuildFeed();
         renderTickIndicator();
+        updateCvdCards();
         if (state.modalItem && !detailModal.classList.contains("hidden")) {
             openModal(state.modalItem);
         }
@@ -1908,6 +2042,7 @@
         loadCandles();
         connectWs();
         setInterval(fetchStats, 15000);
+        setInterval(updateCvdCards, 15000);   // окна 24ч/1ч/5м медленно ползут
         setInterval(renderTickIndicator, 1000);
         setupLayerToggles();
         setupChartToggle();

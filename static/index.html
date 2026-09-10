@@ -38,6 +38,22 @@
                 <span class="metric-label" data-i18n="stats.5m">Ликвидации (5м)</span>
                 <span class="metric-value" id="stat-5m-total">$0</span>
             </div>
+            <div class="cvd-sep" aria-hidden="true"></div>
+            <div class="metric-card cvd-card" data-i18n-title="stats.cvd_title"
+                 title="CVD монеты на графике: тейкер-покупки минус продажи">
+                <span class="metric-label"><span class="cvd-tag">CVD</span> <b class="cvd-coin">BTC</b> · <span data-i18n="stats.cvd24h">24ч</span></span>
+                <span class="metric-value cvd-val" id="stat-cvd-24h">—</span>
+            </div>
+            <div class="metric-card cvd-card" data-i18n-title="stats.cvd_title"
+                 title="CVD монеты на графике: тейкер-покупки минус продажи">
+                <span class="metric-label"><span class="cvd-tag">CVD</span> <b class="cvd-coin">BTC</b> · <span data-i18n="stats.cvd1h">1ч</span></span>
+                <span class="metric-value cvd-val" id="stat-cvd-1h">—</span>
+            </div>
+            <div class="metric-card cvd-card" data-i18n-title="stats.cvd_title"
+                 title="CVD монеты на графике: тейкер-покупки минус продажи">
+                <span class="metric-label"><span class="cvd-tag">CVD</span> <b class="cvd-coin">BTC</b> · <span data-i18n="stats.cvd5m">5м</span></span>
+                <span class="metric-value cvd-val" id="stat-cvd-5m">—</span>
+            </div>
             <div class="metric-card ratio-metric">
                 <div class="metric-label flex-between">
                     <span><span data-i18n="stats.longs">Longs</span> <strong id="long-pct" class="text-danger">50%</strong></span>
@@ -161,6 +177,8 @@
                     <span class="legend-item"><span class="cluster-dot liq-long"></span> <span data-i18n="chart.long">Ликв. лонгов</span></span>
                     <span class="legend-item"><span class="cluster-dot liq-short"></span> <span data-i18n="chart.short">Ликв. шортов</span></span>
                     <span class="legend-item"><span class="cluster-dot liq-whale"></span> <span data-i18n="chart.whale">Кит ($100k+)</span></span>
+                    <span class="legend-item"><span class="cluster-dot cvd-buy"></span> <span data-i18n="chart.cvd_buy">CVD ▲</span></span>
+                    <span class="legend-item"><span class="cluster-dot cvd-sell"></span> <span data-i18n="chart.cvd_sell">CVD ▼</span></span>
                     <button class="profile-toggle liq-toggle" id="liq-toggle" type="button"
                             data-i18n-title="chart.liq_on" data-i18n="chart.liq"
                             title="Скрыть шарики ликвидаций">⚡ Ликвидации</button>
@@ -184,6 +202,12 @@
                 <canvas id="cluster-canvas"></canvas>
             </div>
         </section>
+
+        <!-- Мобильный разделитель: высота графика на телефоне -->
+        <div class="splitter splitter-chart" id="split-chart-y" role="separator"
+             aria-orientation="horizontal" tabindex="-1"
+             data-i18n-title="layout.chart_split"
+             title="Высота графика: потяните вверх или вниз"><span class="splitter-grip" aria-hidden="true"></span></div>
 
         <!-- Вертикальный разделитель: ширина ленты -->
         <div class="splitter splitter-x" id="split-feed-x" role="separator"

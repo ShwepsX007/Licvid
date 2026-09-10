@@ -194,6 +194,34 @@ body.dark-theme {
     text-shadow: 0 0 12px rgba(255,145,0,0.45);
 }
 
+/* Табло OI в шапке: текущий интерес + изменения 24ч/1ч/5м */
+.metric-card.oi-card .metric-label {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    white-space: nowrap;
+}
+.oi-tag {
+    color: #2dd4bf;
+    font-weight: 800;
+}
+.oi-coin {
+    color: var(--text-primary);
+    font-weight: 800;
+}
+.metric-value.oi-val.oi-pos {
+    color: #2dd4bf;
+    text-shadow: 0 0 12px rgba(45,212,191,0.45);
+}
+.metric-value.oi-val.oi-neg {
+    color: #fb7185;
+    text-shadow: 0 0 12px rgba(251,113,133,0.45);
+}
+.profile-toggle.oi-toggle.active {
+    border-color: #2dd4bf;
+    color: #2dd4bf;
+}
+
 .header-controls {
     display: flex;
     align-items: center;

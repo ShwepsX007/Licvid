@@ -41,6 +41,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from market_feed import MarketFeed, TF_MINUTES, base_of, canon
+from oi_feed import map_candles_to_oi
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -454,6 +455,20 @@ async def on_price(symbol: str, price: float, candle1m: Optional[dict]):
 # =============================================================================
 #  Свечи
 # =============================================================================
+def _attach_oi(candles: list, tf: int, levels: dict, chgs: dict) -> None:
+    if not levels:
+        return
+    mapping = map_candles_to_oi([c["time"] for c in candles], tf, levels, chgs)
+    for c in candles:
+        m = mapping.get(c["time"])
+        if not m:
+            continue
+        if m["oi"] is not None:
+            c["oi"] = m["oi"]
+        if m["oiChg"] is not None:
+            c["oiChg"] = m["oiChg"]
+
+
 async def get_candles(symbol: str, tf: int, force: bool = False) -> dict:
     symbol = canon(symbol)
     if tf not in TF_MINUTES:
@@ -482,6 +497,16 @@ async def get_candles(symbol: str, tf: int, force: bool = False) -> dict:
                         if d is not None:
                             c["cvd"] = d
     if real:
+        # подшиваем открытый интерес: oi — уровень на конец свечи,
+        # oiChg — изменение за свечу (для треугольников на графике)
+        tracker = getattr(feed, "oi", None)
+        if tracker is not None:
+            try:
+                await tracker.ensure_symbol(symbol)
+                _attach_oi(real, tf, tracker.series(symbol),
+                           tracker.bucket_chg(symbol))
+            except Exception as e:
+                log.debug("oi attach %s: %s", symbol, e)
         # сохраняем «живой» хвост, если биржа ещё не закрыла текущую свечу
         CANDLES[k] = {"candles": real, "ts": time.time(), "source": "exchange"}
         _cvd_seed_base(CANDLES[k], symbol, tf)
@@ -514,10 +539,22 @@ async def get_candles(symbol: str, tf: int, force: bool = False) -> dict:
     if DEMO_MODE:
         for c in series:
             c["cvd"] = round((c.get("volume") or 1e4) * random.uniform(-0.35, 0.35), 2)
+        _demo_oi(series)
     CANDLES[k] = {"candles": series, "ts": time.time(),
                   "source": "demo" if DEMO_MODE else "unavailable"}
     _cvd_seed_base(CANDLES[k], symbol, tf)
     return CANDLES[k]
+
+
+def _demo_oi(series: list) -> None:
+    """Синтетический OI для демо-режима: случайное блуждание уровня."""
+    oi = 5e8
+    for c in series:
+        oi = max(oi * (1 + random.gauss(0, 0.004)), 1e6)
+        c["oi"] = round(oi, 2)
+    for i, c in enumerate(series):
+        prev = series[i - 1]["oi"] if i else c["oi"]
+        c["oiChg"] = round(c["oi"] - prev, 2)
 
 
 def sync_hot_symbols():
@@ -578,8 +615,15 @@ def compute_stats(symbol: Optional[str] = None, exchange: Optional[str] = None) 
     l1, s1 = split(h1)
     l5, s5 = split(m5)
 
+    # Лидеры — всегда по ВСЕМ монетам (фильтр монеты их не схлопывает):
+    # иначе при выборе монеты в блоке оставалась бы только она одна.
+    # Фильтр биржи уважаем: лидеры внутри выбранной биржи осмысленны.
+    pool = list(LIQUIDATIONS)
+    if exchange and exchange != "ALL":
+        pool = [x for x in pool if x["exchange"] == exchange]
+    pool24 = [x for x in pool if now - x["timestamp"] <= 86400]
     coin_totals: Dict[str, dict] = {}
-    for x in d24:
+    for x in pool24:
         c = coin_totals.setdefault(x["symbol"], {"symbol": x["symbol"], "usd": 0.0,
                                                  "longs": 0.0, "shorts": 0.0, "count": 0})
         c["usd"] += x["usd"]
@@ -591,7 +635,7 @@ def compute_stats(symbol: Optional[str] = None, exchange: Optional[str] = None) 
     top_coins = sorted(coin_totals.values(), key=lambda c: c["usd"], reverse=True)
 
     exch_totals: Dict[str, float] = {}
-    for x in d24:
+    for x in pool24:
         exch_totals[x["exchange"]] = exch_totals.get(x["exchange"], 0.0) + x["usd"]
 
     biggest = max(d24, key=lambda x: x["usd"], default=None)
@@ -945,6 +989,46 @@ async def api_klines(symbol: str = Query("BTC_USDT"), timeframe: int = Query(5))
         "source": entry["source"],
         "candles": entry["candles"],
     }
+
+
+@app.get("/api/oi")
+async def api_oi(symbol: str = Query("BTC_USDT")):
+    """Открытый интерес: текущий тотал по живым ногам + изменения m5/h1/h24
+    по непрерывному ряду (биржи с историей)."""
+    symbol = canon(symbol)
+    tracker = getattr(feed, "oi", None)
+    if tracker is None:
+        return {"symbol": symbol, "total_usd": None, "per_exchange": {},
+                "live_exchanges": [], "hist_exchanges": [],
+                "changes": {"m5": None, "h1": None, "h24": None},
+                "partial": {"m5": True, "h1": True, "h24": True},
+                "ts": None, "stale_sec": None}
+    try:
+        await tracker.ensure_symbol(symbol)
+    except Exception as e:
+        log.debug("oi %s: %s", symbol, e)
+    out = tracker.payload(symbol)
+    if DEMO_MODE and out["total_usd"] is None:
+        out = _demo_oi_payload(symbol)
+    return out
+
+
+def _demo_oi_payload(symbol: str) -> dict:
+    total = 4e8 + random.uniform(-2e7, 2e7)
+    legs = ["binance", "bybit", "okx", "gate", "bitget", "htx", "bitmex"]
+    weights = [0.34, 0.21, 0.13, 0.12, 0.09, 0.06, 0.05]
+    per = {e: round(total * w, 2) for e, w in zip(legs, weights)}
+
+    def _chg(scale):
+        usd = random.gauss(0, total * scale)
+        return {"usd": round(usd, 2), "pct": round(usd / total * 100, 3)}
+
+    return {"symbol": symbol, "total_usd": round(total, 2),
+            "per_exchange": per, "live_exchanges": legs,
+            "hist_exchanges": ["binance", "bybit", "gate"],
+            "changes": {"m5": _chg(0.001), "h1": _chg(0.004), "h24": _chg(0.02)},
+            "partial": {"m5": False, "h1": False, "h24": False},
+            "ts": time.time(), "stale_sec": 0.0}
 
 
 @app.get("/api/liquidations")

@@ -54,6 +54,27 @@
                 <span class="metric-label"><span class="cvd-tag">CVD</span> <b class="cvd-coin">BTC</b> · <span data-i18n="stats.cvd5m">5м</span></span>
                 <span class="metric-value cvd-val" id="stat-cvd-5m">—</span>
             </div>
+            <div class="cvd-sep" aria-hidden="true"></div>
+            <div class="metric-card oi-card" data-i18n-title="stats.oi_title"
+                 title="Открытый интерес монеты на графике со всех бирж">
+                <span class="metric-label"><span class="oi-tag">OI</span> <b class="oi-coin">BTC</b></span>
+                <span class="metric-value oi-val" id="stat-oi-total">—</span>
+            </div>
+            <div class="metric-card oi-card" data-i18n-title="stats.oi_title"
+                 title="Открытый интерес монеты на графике со всех бирж">
+                <span class="metric-label"><span class="oi-tag">OI Δ</span> <b class="oi-coin">BTC</b> · <span data-i18n="stats.cvd24h">24ч</span></span>
+                <span class="metric-value oi-val" id="stat-oi-24h">—</span>
+            </div>
+            <div class="metric-card oi-card" data-i18n-title="stats.oi_title"
+                 title="Открытый интерес монеты на графике со всех бирж">
+                <span class="metric-label"><span class="oi-tag">OI Δ</span> <b class="oi-coin">BTC</b> · <span data-i18n="stats.cvd1h">1ч</span></span>
+                <span class="metric-value oi-val" id="stat-oi-1h">—</span>
+            </div>
+            <div class="metric-card oi-card" data-i18n-title="stats.oi_title"
+                 title="Открытый интерес монеты на графике со всех бирж">
+                <span class="metric-label"><span class="oi-tag">OI Δ</span> <b class="oi-coin">BTC</b> · <span data-i18n="stats.cvd5m">5м</span></span>
+                <span class="metric-value oi-val" id="stat-oi-5m">—</span>
+            </div>
             <div class="metric-card ratio-metric">
                 <div class="metric-label flex-between">
                     <span><span data-i18n="stats.longs">Longs</span> <strong id="long-pct" class="text-danger">50%</strong></span>
@@ -188,6 +209,9 @@
                     <button class="profile-toggle cvd-toggle" id="cvd-toggle" type="button"
                             data-i18n-title="chart.cvd_on" data-i18n="chart.cvd"
                             title="Скрыть CVD-шарики">🎯 CVD</button>
+                    <button class="profile-toggle oi-toggle" id="oi-toggle" type="button"
+                            data-i18n-title="chart.oi_on" data-i18n="chart.oi"
+                            title="Скрыть треугольники открытого интереса">▲ OI</button>
                     <span class="cvd-stat" id="cvd-stat" title="Кто двигает цену в текущей свече"></span>
                     <button class="chart-toggle" id="chart-toggle" type="button"
                             data-i18n-title="chart.toggle_title"

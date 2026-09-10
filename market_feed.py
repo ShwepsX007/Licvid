@@ -35,6 +35,7 @@ import time
 from typing import Awaitable, Callable, Dict, Iterable, List, Optional
 
 import aiohttp
+from oi_feed import OpenInterestTracker
 
 log = logging.getLogger("licvid.feed")
 
@@ -536,6 +537,10 @@ class MarketFeed:
             if name not in ("prices", "ticks"):
                 st.enabled = name in self.enabled_exchanges
 
+        self.oi = OpenInterestTracker(
+            price_fn=lambda sym: self.prices.get(sym),
+            bitmex_meta_fn=lambda: self.bitmex_instruments)
+
         self.started_at = time.time()
         self.symbols_source = "fallback"
         self._session: Optional[aiohttp.ClientSession] = None
@@ -563,7 +568,9 @@ class MarketFeed:
             if name in self.enabled_exchanges:
                 self._tasks.append(asyncio.create_task(self._supervise(name, coro), name=f"liq-{name}"))
 
+        self.oi.bind(self._session)
         self._tasks.append(asyncio.create_task(self._price_engine(), name="prices"))
+        self._tasks.append(asyncio.create_task(self._oi_engine(), name="oi"))
         if self.on_trade is not None:
             self._tasks.append(asyncio.create_task(self._trade_engine(), name="ticks"))
         self._tasks.append(asyncio.create_task(self._symbols_refresher(), name="symbols"))
@@ -1350,6 +1357,38 @@ class MarketFeed:
             self._hot_changed.set()
             log.info("[ticks] горячие монеты: %s",
                      ", ".join(sorted(new)) if new else "нет")
+
+
+    async def _oi_engine(self):
+        """Живой опрос OI всех 7 бирж по тёплым символам (график/статистика).
+
+        История подтягивается лениво (TTL 10 мин), опрос — раз в 30 c;
+        символы опрашиваем по очереди, биржи внутри символа — параллельно.
+        """
+        from oi_feed import SAMPLE_INTERVAL
+        await asyncio.sleep(5)   # дать ценам и инструментам подтянуться
+        while not self._stop.is_set():
+            try:
+                for sym in list(self.hot_symbols)[:6]:
+                    self.oi.watch(sym)
+                for sym in self.oi.watched_symbols():
+                    if self._stop.is_set():
+                        break
+                    try:
+                        await self.oi.backfill_symbol(sym)   # TTL-сторож внутри
+                        await self.oi.sample_symbol(sym)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        log.debug("oi engine %s: %s", sym, e)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                log.debug("oi engine: %s", e)
+            try:
+                await asyncio.sleep(SAMPLE_INTERVAL)
+            except asyncio.CancelledError:
+                break
 
     async def _trade_engine(self):
         """Каждая сделка по открытым графикам.

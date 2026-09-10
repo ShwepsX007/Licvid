@@ -34,6 +34,8 @@
         liqEnabled: true,       // шарики ликвидаций на графике
         cvdEnabled: true,       // CVD-стрелки: перевес тейкер-покупок/продаж в свече
         cvdBars: 0,
+        oiEnabled: true,        // OI-треугольники: рост/падение открытого интереса за свечу
+        oiBars: 0,
         symbols: [],
         details: {},
         prices: {},
@@ -120,6 +122,10 @@
     const cvd24hEl = $("stat-cvd-24h");
     const cvd1hEl = $("stat-cvd-1h");
     const cvd5mEl = $("stat-cvd-5m");
+    const oiTotalEl = $("stat-oi-total");
+    const oi24hEl = $("stat-oi-24h");
+    const oi1hEl = $("stat-oi-1h");
+    const oi5mEl = $("stat-oi-5m");
     const longPctEl = $("long-pct");
     const shortPctEl = $("short-pct");
     const longRatioBar = $("long-ratio-bar");
@@ -697,6 +703,7 @@
         clusterHits = [];              // актуальные геометрии — только если слой включён
         if (state.liqEnabled) drawLiqRects(ctx);
         if (state.cvdEnabled) drawCvdBalls(ctx);
+        if (state.oiEnabled) drawOiTriangles(ctx);
     }
 
     // --- Прямоугольники ликвидаций ---------------------------------------------
@@ -1052,6 +1059,172 @@
         for (let i = 0; i < coins.length; i++) coins[i].textContent = base;
     }
 
+    // --- Табло OI в шапке: текущий интерес + изменения 24ч/1ч/5м ------------
+    function paintOiCard(el, v, isTotal) {
+        if (!el) return;
+        if (!isFinite(v)) {
+            el.textContent = "—";
+            el.className = "metric-value oi-val";
+            el.removeAttribute("title");
+            return;
+        }
+        const up = v >= 0;
+        el.textContent = isTotal
+            ? "$" + fmtUsdShort(Math.abs(v))
+            : (up ? "+$" : "−$") + fmtUsdShort(Math.abs(v));
+        el.className = "metric-value oi-val " + (up ? "oi-pos" : "oi-neg");
+        el.title = I18n.t("stats.oi_title") + ": " +
+            (isTotal ? "" : (up ? "+" : "−")) + "$" + fmtUsdFull(Math.abs(v));
+    }
+
+    function paintOiCards(data) {
+        const ch = (data && data.changes) || {};
+        paintOiCard(oiTotalEl, data ? Number(data.total_usd) : NaN, true);
+        paintOiCard(oi24hEl, ch.h24 ? Number(ch.h24.usd) : NaN, false);
+        paintOiCard(oi1hEl, ch.h1 ? Number(ch.h1.usd) : NaN, false);
+        paintOiCard(oi5mEl, ch.m5 ? Number(ch.m5.usd) : NaN, false);
+        const base = chartSymbol().split("_")[0];
+        const coins = document.querySelectorAll(".oi-coin");
+        for (let i = 0; i < coins.length; i++) coins[i].textContent = base;
+    }
+
+    let oiRequestId = 0;
+    async function fetchOI() {
+        const my = ++oiRequestId;
+        try {
+            const r = await fetch("/api/oi?symbol=" + encodeURIComponent(chartSymbol()));
+            const data = await r.json();
+            if (my !== oiRequestId) return;   // пришёл новый запрос — этот стар
+            paintOiCards(data);
+        } catch (e) { /* ignore */ }
+    }
+
+    // --- OI-треугольники над/под свечой -----------------------------------------
+    // oiChg = изменение открытого интереса за свечу (USD, биржи с историей).
+    // Рост — треугольник над хаем, падение — под лоем; внутри — сумма.
+    // Палитра специально не пересекается ни со свечами, ни с шариками CVD,
+    // ни с тепловой шкалой ликвидаций: рост — teal, падение — rose.
+    const OI_COLORS = {
+        up:   { fill: "rgba(45,212,191,0.95)",  ring: "#d2fff8", text: "#062a26" },
+        down: { fill: "rgba(251,113,133,0.95)", ring: "#ffe0e6", text: "#2b060d" },
+    };
+    const OI_MAX_TRI = 60;
+
+    function triPath(ctx, x, apexY, halfW, h, up) {
+        ctx.beginPath();
+        if (up) {
+            ctx.moveTo(x, apexY);
+            ctx.lineTo(x + halfW, apexY + h);
+            ctx.lineTo(x - halfW, apexY + h);
+        } else {
+            ctx.moveTo(x, apexY);
+            ctx.lineTo(x + halfW, apexY - h);
+            ctx.lineTo(x - halfW, apexY - h);
+        }
+        ctx.closePath();
+    }
+
+    function drawOiTriangles(ctx) {
+        const candles = state.candles;
+        if (!candles.length || !chart || !candleSeries) return;
+        // Значимость — по p90, как у шариков: один выброс не должен
+        // гасить остальные треугольники.
+        const absVals = [];
+        for (let i = 0; i < candles.length; i++) {
+            const d = Math.abs(Number(candles[i].oiChg));
+            if (isFinite(d) && d > 0) absVals.push(d);
+        }
+        state.oiBars = 0;
+        if (!absVals.length) return;
+        absVals.sort((a, b) => a - b);
+        const p90 = absVals[Math.floor(0.9 * (absVals.length - 1))] || 0;
+        if (!(p90 > 0)) return;
+        const minAbs = Math.max(1000, p90 * 0.05);
+
+        const cand = [];
+        for (let i = 0; i < candles.length; i++) {
+            const d = Number(candles[i].oiChg);
+            if (isFinite(d) && Math.abs(d) >= minAbs) cand.push({ c: candles[i], d: d });
+        }
+        cand.sort((a, b) => Math.abs(b.d) - Math.abs(a.d));
+
+        const ts = chart.timeScale();
+        const W = clusterCanvas.width, H = clusterCanvas.height;
+        const placed = [];
+        let drawn = 0;
+        ctx.save();
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        for (let k = 0; k < cand.length && drawn < OI_MAX_TRI; k++) {
+            const c = cand[k].c, d = cand[k].d;
+            const up = d > 0;
+            const ref = up ? Number(c.high) : Number(c.low);
+            if (!isFinite(ref)) continue;
+            let x, yRef;
+            try {
+                x = ts.timeToCoordinate(c.time);
+                yRef = candleSeries.priceToCoordinate(ref);
+            } catch (e) { continue; }
+            if (x === null || x === undefined || yRef === null || yRef === undefined) continue;
+
+            // Размер — под подпись; шрифт подбираем, невместившееся крупное
+            // значение рисуем мини-значком без цифр.
+            const val = fmtCompact(Math.abs(d));
+            ctx.font = "bold 8px 'JetBrains Mono', monospace";
+            const tw8 = ctx.measureText(val).width;
+            let halfW, h, fs = 0;
+            if (tw8 <= 56) {
+                halfW = Math.min(26, Math.max(13, tw8 / 2 + 10));
+                h = halfW * 1.5;
+                const sizes = [8, 7, 6.5];
+                for (let f = 0; f < sizes.length; f++) {
+                    ctx.font = "bold " + sizes[f] + "px 'JetBrains Mono', monospace";
+                    if (ctx.measureText(val).width <= halfW * 1.3) { fs = sizes[f]; break; }
+                }
+            }
+            if (!fs) { halfW = 6; h = 10; }
+            const gap = 6;
+            const apexY = up ? yRef - gap - h : yRef + gap + h;
+            const cy = up ? apexY + h * 0.68 : apexY - h * 0.68;
+            if (x < -halfW || x > W + halfW || cy < -h || cy > H + h) continue;
+
+            // Налезает на уже нарисованный? пропускаем более слабый.
+            let clash = false;
+            for (let j = 0; j < placed.length; j++) {
+                const p = placed[j];
+                const dx = x - p.x, dy = cy - p.y;
+                const rr = Math.max(halfW, h / 2) + p.r + 2;
+                if (dx * dx + dy * dy <= rr * rr) { clash = true; break; }
+            }
+            if (clash) continue;
+            placed.push({ x: x, y: cy, r: Math.max(halfW, h / 2) });
+
+            const theme = up ? OI_COLORS.up : OI_COLORS.down;
+            // Тёмная подложка — читается на свече любого цвета
+            triPath(ctx, x, up ? apexY - 1.6 : apexY + 1.6, halfW + 1.6, h + 1.6, up);
+            ctx.fillStyle = "rgba(5,8,14,0.88)";
+            ctx.fill();
+
+            ctx.shadowColor = theme.fill;
+            ctx.shadowBlur = 8;
+            triPath(ctx, x, apexY, halfW, h, up);
+            ctx.fillStyle = theme.fill;
+            ctx.fill();
+            ctx.shadowBlur = 0;
+            ctx.lineWidth = 1.3;
+            ctx.strokeStyle = theme.ring;
+            ctx.stroke();
+
+            if (fs > 0) {
+                ctx.fillStyle = theme.text;
+                ctx.fillText(val, x, cy + 0.5);
+            }
+            drawn++;
+        }
+        ctx.restore();
+        state.oiBars = drawn;
+    }
+
     // --- Наведение/нажатие на прямоугольник: подсветка связанных записей в ленте --
     function hitAt(px, py) {
         for (let i = clusterHits.length - 1; i >= 0; i--) {
@@ -1397,6 +1570,8 @@
               on: "chart.liq_on", off: "chart.liq_off" },
             { el: $("cvd-toggle"), skey: "cvdEnabled", store: "licvid.cvdEnabled",
               on: "chart.cvd_on", off: "chart.cvd_off" },
+            { el: $("oi-toggle"), skey: "oiEnabled", store: "licvid.oiEnabled",
+              on: "chart.oi_on", off: "chart.oi_off" },
         ];
         defs.forEach((d) => {
             if (!d.el) return;
@@ -1425,6 +1600,7 @@
                 updateCvdStat();
                 queueRedraw();
             });
+            I18n.onChange(paint);
             paint();
         });
     }
@@ -1948,6 +2124,7 @@
 
     // --- Свечи ---------------------------------------------------------------
     async function loadCandles() {
+        fetchOI();   // табло OI — за монетой графика
         try {
             const r = await fetch("/api/klines?symbol=" + encodeURIComponent(chartSymbol()) +
                 "&timeframe=" + state.timeframe);
@@ -2169,6 +2346,8 @@
         loadCandles();
         connectWs();
         setInterval(fetchStats, 15000);
+        setInterval(fetchOI, 15000);
+        fetchOI();
         setInterval(updateCvdCards, 15000);   // окна 24ч/1ч/5м медленно ползут
         setInterval(renderTickIndicator, 1000);
         setupLayerToggles();

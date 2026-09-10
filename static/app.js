@@ -837,7 +837,7 @@
 
     // --- CVD-шарики в центре свечи ------------------------------------------------
     // delta = taker buy volume - taker sell volume (USDT) внутри одной свечи.
-    // Шарик стоит СТРОГО в центре тела свечи; крупные подписаны суммой.
+    // Шарик стоит СТРОГО в центре тела свечи и подписан суммой дельты.
     // Палитра специально НЕ повторяет ни свечи (зелёный/красный), ни тепловую
     // шкалу ликвидаций (жёлтый→красный): покупки — фиолет, продажи — оранж.
     const CVD_COLORS = {
@@ -871,7 +871,17 @@
         }
         state.cvdBars = 0;
         if (!(maxAbs > 0)) return;
-        const minAbs = Math.max(1000, maxAbs * 0.04);   // микрошум не рисуем
+        // Нормировка по 90-му перцентилю, а не по максимуму: один гигантский
+        // бар иначе сплющивает все остальные шарики до точек без подписей.
+        const absVals = [];
+        for (let i = 0; i < candles.length; i++) {
+            const d = Math.abs(Number(candles[i].cvd));
+            if (isFinite(d) && d > 0) absVals.push(d);
+        }
+        absVals.sort((a, b) => a - b);
+        let p90 = absVals.length ? absVals[Math.floor(0.9 * (absVals.length - 1))] : 0;
+        if (!(p90 > 0)) p90 = maxAbs;
+        const minAbs = Math.max(1000, p90 * 0.05);   // микрошум не рисуем
 
         // Кандидаты: только значимые свечи. Раскладываем от сильных к слабым,
         // чтобы при тесноте выживали самые важные сигналы.
@@ -905,8 +915,8 @@
                 y = candleSeries.priceToCoordinate(mid);
             } catch (e) { continue; }
             if (x === null || x === undefined || y === null || y === undefined) continue;
-            const kk = Math.sqrt(Math.abs(d) / maxAbs);
-            const r = 9 + 15 * kk;
+            const kk = Math.min(Math.sqrt(Math.abs(d) / p90), 1.2);
+            const r = 10 + 14 * kk;
             if (x < -r - 10 || x > W + r + 10 || y < -r - 10 || y > H + r + 10) continue;
 
             // налезает на уже нарисованный шарик? пропускаем более слабый
@@ -949,17 +959,24 @@
                 ctx.stroke();
             }
 
-            // Сумма — второй строкой, если помещается в круг
-            ctx.font = "bold 8px 'JetBrains Mono', monospace";
+            // Сумма — второй строкой. Шрифт подбираем под размер шарика,
+            // чтобы цифры были почти в каждом кружке.
             const val = fmtCompact(Math.abs(d));
-            const tw = ctx.measureText(val).width;
-            const hasValue = r >= 12.5 && tw <= 1.85 * r - 6;
+            let vFont = 0;
+            const vSizes = [8, 7, 6.5];
+            for (let f = 0; f < vSizes.length; f++) {
+                ctx.font = "bold " + vSizes[f] + "px 'JetBrains Mono', monospace";
+                if (r >= 10.5 && ctx.measureText(val).width <= 1.9 * r - 5) {
+                    vFont = vSizes[f];
+                    break;
+                }
+            }
             ctx.fillStyle = theme.text;
-            if (hasValue) {
+            if (vFont > 0) {
                 const gs = Math.max(8, Math.min(12, Math.round(r * 0.62)));
                 ctx.font = "bold " + gs + "px 'JetBrains Mono', monospace";
                 ctx.fillText(glyph, x, y - r * 0.26);
-                ctx.font = "bold 8px 'JetBrains Mono', monospace";
+                ctx.font = "bold " + vFont + "px 'JetBrains Mono', monospace";
                 ctx.fillText(val, x, y + r * 0.36);
             } else {
                 const gs = Math.max(8, Math.min(13, Math.round(r * 0.8)));
@@ -1098,149 +1115,58 @@
 
     function initSplitters() {
         const root = document.documentElement;
-        const layout = { feedW: 430, coinsH: 170, mChartH: 0 };
+        const layout = { feedW: 430, coinsH: 170 };
         try {
             const raw = localStorage.getItem("licvid.layout");
             if (raw) {
                 const o = JSON.parse(raw) || {};
                 layout.feedW = clampPx(Number(o.feedW) || 430, 280, 720);
                 layout.coinsH = clampPx(Number(o.coinsH) || 170, 90, 460);
-                layout.mChartH = clampPx(Number(o.mChartH) || 0, 0, 90);   // 0 = авто
             }
         } catch (e) { /* ignore */ }
         const applyLayout = () => {
             root.style.setProperty("--feed-width", layout.feedW + "px");
             root.style.setProperty("--coins-height", layout.coinsH + "px");
-            if (layout.mChartH > 0) {
-                root.style.setProperty("--m-chart-h", layout.mChartH + "vh");
-            } else {
-                root.style.removeProperty("--m-chart-h");
-            }
-        };
-        // текущая высота графика в vh — стартовая точка мобильного перетаскивания
-        const currentChartVh = () => {
-            const vh = window.innerHeight > 0 ? window.innerHeight : 800;
-            const h = chartSection ? chartSection.clientHeight : vh * 0.55;
-            return clampPx((h / vh) * 100, 20, 88);
         };
         const saveLayout = () => {
             try { localStorage.setItem("licvid.layout", JSON.stringify(layout)); } catch (e) { /* ignore */ }
         };
-        // Живой ресайз графика во время перетаскивания (мобильная высота):
-        // ResizeObserver и сам подхватит, но явный вызов надёжнее на телефонах.
-        let chartResizeQueued = false;
-        const requestChartResize = () => {
-            if (chartResizeQueued) return;
-            chartResizeQueued = true;
-            requestAnimationFrame(() => {
-                chartResizeQueued = false;
-                try { window.dispatchEvent(new Event("resize")); } catch (e) { /* ignore */ }
-                queueRedraw();
-            });
-        };
         const bind = (el, axis) => {
             if (!el) return;
-            const isX = axis === "x";
-            const startValue = () => isX ? layout.feedW
-                : axis === "y" ? layout.coinsH
-                : (layout.mChartH > 0 ? layout.mChartH : currentChartVh());
-            const applyAxis = (startVal, delta) => {
-                if (isX) {
-                    // лента прижата к правому краю: тянем разделитель вправо →
-                    // её ширина УМЕНЬШАЕТСЯ (иначе блоки «уезжают» влево)
-                    layout.feedW = clampPx(startVal - delta, 280, 720);
-                } else if (axis === "mchart") {
-                    // телефон: тянем разделитель вниз → график становится ВЫШЕ
-                    const vh = window.innerHeight > 0 ? window.innerHeight : 800;
-                    layout.mChartH = clampPx(startVal + (delta / vh) * 100, 20, 88);
-                } else {
-                    layout.coinsH = clampPx(startVal - delta, 90, 460);
-                }
-                applyLayout();
-                if (axis === "mchart") requestChartResize();
-            };
-            let session = null;   // {kind:"p"|"t", id, start, startVal}
-            const begin = (kind, id, clientX, clientY) => {
-                if (session) return false;
-                session = { kind: kind, id: id,
-                    start: isX ? clientX : clientY, startVal: startValue() };
+            el.addEventListener("pointerdown", (e) => {
+                e.preventDefault();
                 el.classList.add("active");
                 document.body.classList.add("split-dragging");
-                if (!isX) document.body.classList.add("split-dragging-y");
-                return true;
-            };
-            const end = () => {
-                if (!session) return;
-                session = null;
-                el.classList.remove("active");
-                document.body.classList.remove("split-dragging", "split-dragging-y");
-                saveLayout();
-            };
-            const moveTo = (clientX, clientY) => {
-                if (!session) return;
-                applyAxis(session.startVal, (isX ? clientX : clientY) - session.start);
-            };
-            // Pointer Events: мышь и современные тач-браузеры. Захватываем
-            // указатель, чтобы движение не терялось, даже если палец ушёл
-            // с ручки.
-            el.addEventListener("pointerdown", (e) => {
-                if (e.isPrimary === false) return;
-                e.preventDefault();
-                if (!begin("p", e.pointerId, e.clientX, e.clientY)) return;
-                try { if (el.setPointerCapture) el.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+                if (axis === "y") document.body.classList.add("split-dragging-y");
+                const start = axis === "x" ? e.clientX : e.clientY;
+                const startVal = axis === "x" ? layout.feedW : layout.coinsH;
                 const move = (ev) => {
-                    if (!session || session.kind !== "p" || ev.pointerId !== session.id) return;
                     ev.preventDefault();
-                    moveTo(ev.clientX, ev.clientY);
+                    const delta = (axis === "x" ? ev.clientX : ev.clientY) - start;
+                    if (axis === "x") {
+                        // лента прижата к правому краю: тянем разделитель вправо →
+                        // её ширина УМЕНЬШАЕТСЯ (иначе блоки «уезжают» влево)
+                        layout.feedW = clampPx(startVal - delta, 280, 720);
+                    } else {
+                        layout.coinsH = clampPx(startVal - delta, 90, 460);
+                    }
+                    applyLayout();
                 };
-                const up = (ev) => {
-                    if (!session || session.kind !== "p") return;
-                    if (ev && ev.pointerId !== undefined && ev.pointerId !== session.id) return;
+                const up = () => {
+                    el.classList.remove("active");
+                    document.body.classList.remove("split-dragging", "split-dragging-y");
                     window.removeEventListener("pointermove", move);
                     window.removeEventListener("pointerup", up);
                     window.removeEventListener("pointercancel", up);
-                    if (el.removeEventListener) el.removeEventListener("lostpointercapture", up);
-                    end();
+                    saveLayout();
                 };
                 window.addEventListener("pointermove", move);
                 window.addEventListener("pointerup", up);
                 window.addEventListener("pointercancel", up);
-                el.addEventListener("lostpointercapture", up);
             });
-            // Touch-фолбэк для браузеров без Pointer Events. pointerdown
-            // срабатывает раньше touchstart, поэтому при рабочем pointer-пути
-            // сессия уже занята и эти обработчики молча отступают.
-            el.addEventListener("touchstart", (e) => {
-                if (session) return;
-                if (!e.changedTouches || !e.changedTouches.length) return;
-                e.preventDefault();
-                const t = e.changedTouches[0];
-                begin("t", t.identifier, t.clientX, t.clientY);
-            }, { passive: false });
-            el.addEventListener("touchmove", (e) => {
-                if (!session || session.kind !== "t") return;
-                e.preventDefault();
-                const ts = e.changedTouches || [];
-                for (let i = 0; i < ts.length; i++) {
-                    if (ts[i].identifier === session.id) {
-                        moveTo(ts[i].clientX, ts[i].clientY);
-                        break;
-                    }
-                }
-            }, { passive: false });
-            const touchEnd = (e) => {
-                if (!session || session.kind !== "t") return;
-                const ts = (e && e.changedTouches) || [];
-                for (let i = 0; i < ts.length; i++) {
-                    if (ts[i].identifier === session.id) { end(); break; }
-                }
-            };
-            el.addEventListener("touchend", touchEnd);
-            el.addEventListener("touchcancel", touchEnd);
         };
         bind($("split-feed-x"), "x");
         bind($("split-coins-y"), "y");
-        bind($("split-chart-y"), "mchart");   // телефон: высота графика
         applyLayout();
     }
 
@@ -1525,6 +1451,35 @@
                 }, 60);
             }
         });
+    }
+
+    // --- Разворот графика на весь экран (как на биржах) -----------------------
+    function setupChartExpand() {
+        const btn = $("chart-expand");
+        if (!btn || !chartSection) return;
+        const paint = () => {
+            const fs = chartSection.classList.contains("fullscreen");
+            btn.classList.toggle("active", fs);
+            btn.title = I18n.t(fs ? "chart.collapse_title" : "chart.expand_title");
+        };
+        const setFs = (on) => {
+            chartSection.classList.toggle("fullscreen", on);
+            document.body.classList.toggle("chart-fullscreen", on);
+            paint();
+            // после смены геометрии — пересчитать размеры графика
+            setTimeout(() => {
+                window.dispatchEvent(new Event("resize"));
+                queueRedraw();
+            }, 60);
+        };
+        btn.addEventListener("click", () => {
+            setFs(!chartSection.classList.contains("fullscreen"));
+        });
+        document.addEventListener("keydown", (e) => {
+            if (e.key === "Escape" && chartSection.classList.contains("fullscreen")) setFs(false);
+        });
+        I18n.onChange(paint);
+        paint();
     }
 
     // --- Список монет: выпадающий список (как на биржах) ---------------------
@@ -2218,6 +2173,7 @@
         setInterval(renderTickIndicator, 1000);
         setupLayerToggles();
         setupChartToggle();
+        setupChartExpand();
         // страховка: если WS молчит дольше 30с — перезапрашиваем свечи
         setInterval(() => {
             if (!ws || ws.readyState !== WebSocket.OPEN) return;

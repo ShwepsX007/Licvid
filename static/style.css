@@ -445,7 +445,6 @@ body.dark-theme {
 .splitter:hover, .splitter.active { background: var(--color-blue); }
 .splitter-x { width: 8px; cursor: col-resize; }
 .splitter-y { height: 8px; cursor: row-resize; }
-.splitter-chart { display: none; }   /* виден только на телефоне */
 body.split-dragging { user-select: none; cursor: col-resize; }
 body.split-dragging.split-dragging-y { cursor: row-resize; }
 
@@ -1230,6 +1229,24 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
 .chart-section.collapsed .chart-wrapper { display: none; }
 .chart-section.collapsed .chart-toggle { transform: rotate(-90deg); }
 
+/* Разворот графика на весь экран (как на биржах): поверх всего, Esc — назад */
+.chart-section.fullscreen {
+    position: fixed;
+    inset: 0;
+    z-index: 90;
+    height: 100vh;
+    height: 100dvh;
+    min-height: 0;
+    background: var(--bg-dark);
+}
+body.chart-fullscreen { overflow: hidden; }
+.chart-section.fullscreen #chart-toggle { display: none; }
+.chart-expand.active {
+    border-color: var(--color-blue);
+    color: var(--color-blue);
+    box-shadow: 0 0 8px rgba(61,112,255,0.35);
+}
+
 /* ============================================================
    Планшеты и телефоны: одна колонка, график сверху и сворачивается
    ============================================================ */
@@ -1249,78 +1266,10 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
         height: auto;
         max-height: none;
     }
-    #split-feed-x { display: none; }   /* вертикальный на телефоне не нужен */
-    /* на телефоне блоки тоже двигаются: высота графика и «Лидеров» */
-    #split-chart-y {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        height: 28px;
-        cursor: row-resize;
-        background: #0c1119;
-        border-top: 1px solid var(--border-color);
-        border-bottom: 1px solid var(--border-color);
-        user-select: none;
-        -webkit-user-select: none;
-        -webkit-touch-callout: none;
-        -webkit-tap-highlight-color: transparent;
-    }
-    #split-chart-y:hover, #split-chart-y.active { background: #141c30; }
-    .splitter-grip {
-        min-width: 92px;
-        height: 16px;
-        padding: 0 12px;
-        border-radius: 9px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 10px;
-        line-height: 1;
-        color: #9dbcff;
-        background: rgba(61,112,255,0.16);
-        border: 1px solid rgba(61,112,255,0.55);
-        box-shadow: 0 0 10px rgba(61,112,255,0.25);
-    }
-    #split-chart-y:hover .splitter-grip, #split-chart-y.active .splitter-grip {
-        color: #fff;
-        background: rgba(61,112,255,0.35);
-        border-color: #3d70ff;
-    }
-    .chart-section.collapsed + #split-chart-y { display: none; }
-    #split-coins-y {
-        display: block;
-        height: 24px;
-        position: relative;
-        background: #0c1119;
-        user-select: none;
-        -webkit-user-select: none;
-        -webkit-touch-callout: none;
-        -webkit-tap-highlight-color: transparent;
-    }
-    #split-coins-y::after {
-        content: "⇕";
-        position: absolute;
-        left: 50%; top: 50%;
-        transform: translate(-50%, -50%);
-        min-width: 92px; height: 15px;
-        border-radius: 8px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 9px;
-        color: #9aa7bd;
-        background: rgba(132,147,168,0.12);
-        border: 1px solid rgba(132,147,168,0.45);
-    }
-    #split-coins-y:hover::after, #split-coins-y.active::after {
-        color: #fff;
-        border-color: #3d70ff;
-        background: rgba(61,112,255,0.25);
-    }
-
+    .splitter { display: none; }   /* на телефоне панели фиксированные */
     .chart-section {
-        height: var(--m-chart-h, 58vh);
-        min-height: 160px;
+        height: 58vh;
+        min-height: 300px;
     }
     .chart-section.collapsed { height: auto; min-height: 0; }
 
@@ -1342,11 +1291,7 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
         height: auto;
         max-height: none;
     }
-    .feed-table-container {
-        /* лента сжимается, когда график растёт, — блоки двигаются парой */
-        max-height: max(140px, calc((100vh - var(--m-chart-h, 58vh)) * 0.75));
-        max-height: max(140px, calc((100dvh - var(--m-chart-h, 58vh)) * 0.75));
-    }
+    .feed-table-container { max-height: 65vh; }
 
     .controls-bar,
     .control-group { flex-wrap: wrap; }
@@ -1370,11 +1315,7 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
 }
 
 @media (max-width: 560px) {
-    .chart-section { height: var(--m-chart-h, 52vh); }
-    .feed-table-container {
-        max-height: max(140px, calc((100vh - var(--m-chart-h, 52vh)) * 0.75));
-        max-height: max(140px, calc((100dvh - var(--m-chart-h, 52vh)) * 0.75));
-    }
+    .chart-section { height: 52vh; }
     .exch-health { display: none; }
     .lang-select { max-width: 92px; font-size: 0.62rem; }
     /* Колонка «Монета» (2-я) ОСТАЁТСЯ — по ней открывается график.

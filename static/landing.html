@@ -408,8 +408,23 @@ a { color: inherit; text-decoration: none; }
             var s = Number(data.shorts_usd_24h) || 0;
             el("stat-ratio").textContent = "$" + fmtShort(l) + " × $" + fmtShort(s);
         }
-        if (health && health.live_exchanges) {
-            el("stat-live").textContent = health.live_exchanges.length + " / 7";
+        if (health) {
+            var live = health.live_exchanges;
+            var total = health.exchanges_total;
+            if (!live && health.sources) {
+                // запасной путь: считаем подключённые биржи по источникам
+                live = [];
+                total = 0;
+                for (var name in health.sources) {
+                    if (!Object.prototype.hasOwnProperty.call(health.sources, name)) continue;
+                    if (name === "prices" || name === "ticks") continue;
+                    total += 1;
+                    if (health.sources[name] && health.sources[name].connected) live.push(name);
+                }
+            }
+            if (live) {
+                el("stat-live").textContent = live.length + " / " + (total || live.length || 7);
+            }
         }
     }
 

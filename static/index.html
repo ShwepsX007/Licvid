@@ -192,6 +192,9 @@
                     <button class="chart-toggle" id="chart-toggle" type="button"
                             data-i18n-title="chart.toggle_title"
                             title="Свернуть/развернуть график">▾</button>
+                    <button class="chart-toggle chart-expand" id="chart-expand" type="button"
+                            data-i18n-title="chart.expand_title"
+                            title="Развернуть график на весь экран">⛶</button>
                 </div>
             </div>
 
@@ -202,12 +205,6 @@
                 <canvas id="cluster-canvas"></canvas>
             </div>
         </section>
-
-        <!-- Мобильный разделитель: высота графика на телефоне -->
-        <div class="splitter splitter-chart" id="split-chart-y" role="separator"
-             aria-orientation="horizontal" tabindex="-1"
-             data-i18n-title="layout.chart_split"
-             title="Высота графика: потяните вверх или вниз"><span class="splitter-grip" aria-hidden="true">⇕</span></div>
 
         <!-- Вертикальный разделитель: ширина ленты -->
         <div class="splitter splitter-x" id="split-feed-x" role="separator"

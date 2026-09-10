@@ -986,6 +986,14 @@ async def api_health():
         },
     }
     data.update(feed.health() if feed else {"sources": {}})
+    _srcs = data.get("sources") or {}
+    data["live_exchanges"] = sorted(
+        name for name, s in _srcs.items()
+        if name not in ("prices", "ticks") and isinstance(s, dict) and s.get("connected")
+    )
+    data["exchanges_total"] = (
+        sum(1 for name in _srcs if name not in ("prices", "ticks")) or len(EXCHANGES)
+    )
     data["ticks_seen"] = TICKS_SEEN
     data["hot_symbols"] = sorted(feed.hot_symbols) if feed else []
     data["tick_subscriptions"] = sorted(feed.tick_subscriptions) if feed else []

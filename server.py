@@ -594,6 +594,12 @@ async def kline_refresher():
 # =============================================================================
 #  Статистика
 # =============================================================================
+# Окна статистики для боксов шапки (суффикс ключа -> секунд).
+# Старые ключи 24h/1h/5m сохранены как есть — их едят лендинг и клиенты.
+STAT_WINDOWS = (("1m", 60), ("5m", 300), ("15m", 900), ("30m", 1800),
+                ("1h", 3600), ("4h", 14400), ("24h", 86400))
+
+
 def compute_stats(symbol: Optional[str] = None, exchange: Optional[str] = None) -> dict:
     now = time.time()
     items = list(LIQUIDATIONS)
@@ -602,18 +608,19 @@ def compute_stats(symbol: Optional[str] = None, exchange: Optional[str] = None) 
     if exchange and exchange != "ALL":
         items = [x for x in items if x["exchange"] == exchange]
 
-    d24 = [x for x in items if now - x["timestamp"] <= 86400]
-    h1 = [x for x in items if now - x["timestamp"] <= 3600]
-    m5 = [x for x in items if now - x["timestamp"] <= 300]
-
     def split(rows):
         longs = sum(x["usd"] for x in rows if x["side"] == "SELL")
         shorts = sum(x["usd"] for x in rows if x["side"] == "BUY")
         return longs, shorts
 
-    l24, s24 = split(d24)
-    l1, s1 = split(h1)
-    l5, s5 = split(m5)
+    d24 = [x for x in items if now - x["timestamp"] <= 86400]
+    wins = {}
+    for suffix, sec in STAT_WINDOWS:
+        rows = d24 if sec == 86400 else [x for x in items if now - x["timestamp"] <= sec]
+        longs, shorts = split(rows)
+        wins[f"total_usd_{suffix}"] = longs + shorts
+        wins[f"longs_usd_{suffix}"] = longs
+        wins[f"shorts_usd_{suffix}"] = shorts
 
     # Лидеры — всегда по ВСЕМ монетам (фильтр монеты их не схлопывает):
     # иначе при выборе монеты в блоке оставалась бы только она одна.
@@ -640,22 +647,15 @@ def compute_stats(symbol: Optional[str] = None, exchange: Optional[str] = None) 
 
     biggest = max(d24, key=lambda x: x["usd"], default=None)
 
-    return {
-        "total_usd_24h": l24 + s24,
-        "longs_usd_24h": l24,
-        "shorts_usd_24h": s24,
-        "total_usd_1h": l1 + s1,
-        "longs_usd_1h": l1,
-        "shorts_usd_1h": s1,
-        "total_usd_5m": l5 + s5,
-        "longs_usd_5m": l5,
-        "shorts_usd_5m": s5,
+    out = dict(wins)
+    out.update({
         "top_coins": top_coins[:12],
         "exchanges": exch_totals,
         "total_count": len(items),
         "biggest_24h": biggest,
         "demo": DEMO_MODE,
-    }
+    })
+    return out
 
 
 # =============================================================================
@@ -998,10 +998,11 @@ async def api_oi(symbol: str = Query("BTC_USDT")):
     symbol = canon(symbol)
     tracker = getattr(feed, "oi", None)
     if tracker is None:
+        from oi_feed import OI_WINDOWS
         return {"symbol": symbol, "total_usd": None, "per_exchange": {},
                 "live_exchanges": [], "hist_exchanges": [],
-                "changes": {"m5": None, "h1": None, "h24": None},
-                "partial": {"m5": True, "h1": True, "h24": True},
+                "changes": {k: None for k, _ in OI_WINDOWS},
+                "partial": {k: True for k, _ in OI_WINDOWS},
                 "ts": None, "stale_sec": None}
     try:
         await tracker.ensure_symbol(symbol)
@@ -1023,11 +1024,14 @@ def _demo_oi_payload(symbol: str) -> dict:
         usd = random.gauss(0, total * scale)
         return {"usd": round(usd, 2), "pct": round(usd / total * 100, 3)}
 
+    from oi_feed import OI_WINDOWS
+    scales = {"m1": 0.0002, "m5": 0.001, "m15": 0.0016, "m30": 0.0022,
+              "h1": 0.004, "h4": 0.009, "h24": 0.02}
     return {"symbol": symbol, "total_usd": round(total, 2),
             "per_exchange": per, "live_exchanges": legs,
             "hist_exchanges": ["binance", "bybit", "gate"],
-            "changes": {"m5": _chg(0.001), "h1": _chg(0.004), "h24": _chg(0.02)},
-            "partial": {"m5": False, "h1": False, "h24": False},
+            "changes": {k: _chg(scales[k]) for k, _ in OI_WINDOWS},
+            "partial": {k: False for k, _ in OI_WINDOWS},
             "ts": time.time(), "stale_sec": 0.0}
 
 

@@ -51,6 +51,8 @@
         searchRequestId: 0,
         lastHealth: null,
         lastStats: null,
+        lastOI: null,
+        statWin: { liq: "24h", cvd: "24h", oi: "24h" },
         modalItem: null,
     };
 
@@ -116,16 +118,15 @@
     const symbolDropdown = $("symbol-dropdown");
     const symbolSearchEl = $("symbol-search");
 
-    const stat24hEl = $("stat-24h-total");
-    const stat1hEl = $("stat-1h-total");
-    const stat5mEl = $("stat-5m-total");
-    const cvd24hEl = $("stat-cvd-24h");
-    const cvd1hEl = $("stat-cvd-1h");
-    const cvd5mEl = $("stat-cvd-5m");
-    const oiTotalEl = $("stat-oi-total");
-    const oi24hEl = $("stat-oi-24h");
-    const oi1hEl = $("stat-oi-1h");
-    const oi5mEl = $("stat-oi-5m");
+    const statBoxLiq = $("stat-box-liq"), statLiqHead = $("stat-liq-head"),
+          statLiqWin = $("stat-liq-win"), statLiqValue = $("stat-liq-value"),
+          statLiqSub = $("stat-liq-sub"), statMenuLiq = $("stat-menu-liq");
+    const statBoxCvd = $("stat-box-cvd"), statCvdHead = $("stat-cvd-head"),
+          statCvdWin = $("stat-cvd-win"), statCvdValue = $("stat-cvd-value"),
+          statCvdSub = $("stat-cvd-sub"), statMenuCvd = $("stat-menu-cvd");
+    const statBoxOi = $("stat-box-oi"), statOiHead = $("stat-oi-head"),
+          statOiWin = $("stat-oi-win"), statOiValue = $("stat-oi-value"),
+          statOiSub = $("stat-oi-sub"), statMenuOi = $("stat-menu-oi");
     const longPctEl = $("long-pct");
     const shortPctEl = $("short-pct");
     const longRatioBar = $("long-ratio-bar");
@@ -997,7 +998,7 @@
     }
 
     function updateCvdStat() {
-        updateCvdCards();   // табло CVD 24ч/1ч/5м в шапке — из тех же свечей
+        paintCvdBox();   // бокс CVD в шапке — из тех же свечей
         if (!cvdStatEl) return;
         if (!state.cvdEnabled) { cvdStatEl.textContent = ""; return; }
         const last = state.candles[state.candles.length - 1];
@@ -1012,81 +1013,222 @@
         cvdStatEl.className = "cvd-stat " + (buy ? "up" : "down");
     }
 
-    // --- Табло CVD в шапке: перевес тейкеров по монете ГРАФИКА ---------------
-    // Суммируем поле cvd загруженных свечей за 24ч / 1ч / 5м. Свечи живые
-    // (текущая обновляется каждым тиком), поэтому табло всегда свежее.
-    function cvdSumSince(since) {
-        let s = 0, ok = false;
+    // --- Боксы статистики: ликвидации / CVD / OI --------------------------------
+    // Три окошка в шапке, у каждого — меню выбора периода. Окна выбираются
+    // из STAT_WIN_DEFS, выбор помнится в localStorage отдельно для бокса.
+    const STAT_WIN_DEFS = [
+        { key: "1m", sec: 60 }, { key: "5m", sec: 300 },
+        { key: "15m", sec: 900 }, { key: "30m", sec: 1800 },
+        { key: "1h", sec: 3600 }, { key: "4h", sec: 14400 },
+        { key: "24h", sec: 86400 },
+    ];
+    const OI_WIN_KEY = { "1m": "m1", "5m": "m5", "15m": "m15", "30m": "m30",
+                         "1h": "h1", "4h": "h4", "24h": "h24" };
+    function statWinSec(key) {
+        for (let i = 0; i < STAT_WIN_DEFS.length; i++)
+            if (STAT_WIN_DEFS[i].key === key) return STAT_WIN_DEFS[i].sec;
+        return 86400;
+    }
+    (function loadStatWin() {
+        const kinds = ["liq", "cvd", "oi"];
+        for (let i = 0; i < kinds.length; i++) {
+            try {
+                const v = localStorage.getItem("licvid.statwin." + kinds[i]);
+                if (v && OI_WIN_KEY[v]) state.statWin[kinds[i]] = v;
+            } catch (e) { /* ignore */ }
+        }
+    })();
+    function setStatWin(kind, key) {
+        if (!OI_WIN_KEY[key]) return;
+        state.statWin[kind] = key;
+        try { localStorage.setItem("licvid.statwin." + kind, key); } catch (e) {}
+        paintStatBox(kind);
+    }
+
+    // Значения боксов за окно key: ликвидации — из /api/stats,
+    // CVD — сумма поля cvd загруженных свечей, OI — из /api/oi.
+    function statLiqVal(key) {
+        const d = state.lastStats;
+        if (!d) return null;
+        const t = Number(d["total_usd_" + key]);
+        if (!isFinite(t)) return null;
+        return { total: t,
+                 longs: Number(d["longs_usd_" + key]) || 0,
+                 shorts: Number(d["shorts_usd_" + key]) || 0 };
+    }
+    function statCvdVal(key) {
+        if (!state.cvdEnabled || !state.candles.length) return null;
+        const since = Date.now() / 1000 - statWinSec(key);
+        let buy = 0, sell = 0, ok = false;
         for (let i = 0; i < state.candles.length; i++) {
             const c = state.candles[i];
             if ((Number(c.time) || 0) < since) continue;
             const d = Number(c.cvd);
-            if (isFinite(d)) { s += d; ok = true; }
+            if (!isFinite(d)) continue;
+            ok = true;
+            if (d >= 0) buy += d; else sell -= d;
         }
-        return ok ? s : NaN;
+        return ok ? { net: buy - sell, buy: buy, sell: sell } : null;
+    }
+    function statOiVal(key) {
+        const ch = (state.lastOI && state.lastOI.changes) || {};
+        const c = ch[OI_WIN_KEY[key]];
+        return c ? Number(c.usd) : NaN;
     }
 
-    function paintCvdCard(el, v) {
-        if (!el) return;
-        if (!isFinite(v)) {
-            el.textContent = "—";
-            el.className = "metric-value cvd-val";
-            el.removeAttribute("title");
-            return;
-        }
-        const buy = v >= 0;
-        el.textContent = (buy ? "+$" : "−$") + fmtUsdShort(Math.abs(v));
-        el.className = "metric-value cvd-val " + (buy ? "cvd-pos" : "cvd-neg");
-        el.title = I18n.t("stats.cvd_title") + ": " +
-            (buy ? "+" : "−") + "$" + fmtUsdFull(Math.abs(v));
+    function statHeadEls(kind) {
+        return kind === "liq"
+            ? { box: statBoxLiq, win: statLiqWin, value: statLiqValue, sub: statLiqSub, menu: statMenuLiq }
+            : kind === "cvd"
+            ? { box: statBoxCvd, win: statCvdWin, value: statCvdValue, sub: statCvdSub, menu: statMenuCvd }
+            : { box: statBoxOi, win: statOiWin, value: statOiValue, sub: statOiSub, menu: statMenuOi };
     }
 
-    function updateCvdCards() {
-        if (!cvd24hEl && !cvd1hEl && !cvd5mEl) return;
-        const now = Date.now() / 1000;
-        if (!state.cvdEnabled || !state.candles.length) {
-            paintCvdCard(cvd24hEl, NaN);
-            paintCvdCard(cvd1hEl, NaN);
-            paintCvdCard(cvd5mEl, NaN);
-            return;
+    // Текст строки меню/шапки: { txt, cls, title }
+    function statCell(kind, key) {
+        if (kind === "liq") {
+            const v = statLiqVal(key);
+            if (!v) return { txt: "—", cls: "", title: "" };
+            return { txt: "$" + fmtUsdShort(v.total), cls: "",
+                     title: "L $" + fmtUsdFull(v.longs) + " / S $" + fmtUsdFull(v.shorts) };
         }
-        paintCvdCard(cvd24hEl, cvdSumSince(now - 86400));
-        paintCvdCard(cvd1hEl, cvdSumSince(now - 3600));
-        paintCvdCard(cvd5mEl, cvdSumSince(now - 300));
-        // подпись монеты в карточках — CVD всегда по монете графика
-        const base = chartSymbol().split("_")[0];
-        const coins = document.querySelectorAll(".cvd-coin");
-        for (let i = 0; i < coins.length; i++) coins[i].textContent = base;
-    }
-
-    // --- Табло OI в шапке: текущий интерес + изменения 24ч/1ч/5м ------------
-    function paintOiCard(el, v, isTotal) {
-        if (!el) return;
-        if (!isFinite(v)) {
-            el.textContent = "—";
-            el.className = "metric-value oi-val";
-            el.removeAttribute("title");
-            return;
+        if (kind === "cvd") {
+            const v = statCvdVal(key);
+            if (!v) return { txt: "—", cls: "", title: "" };
+            const up = v.net >= 0;
+            return { txt: (up ? "+$" : "−$") + fmtUsdShort(Math.abs(v.net)),
+                     cls: up ? "cvd-pos" : "cvd-neg",
+                     title: I18n.t("stats.cvd_title") + ": " + (up ? "+" : "−") +
+                            "$" + fmtUsdFull(Math.abs(v.net)) };
         }
+        const v = statOiVal(key);
+        if (!isFinite(v)) return { txt: "—", cls: "", title: "" };
         const up = v >= 0;
-        el.textContent = isTotal
-            ? "$" + fmtUsdShort(Math.abs(v))
-            : (up ? "+$" : "−$") + fmtUsdShort(Math.abs(v));
-        el.className = "metric-value oi-val " + (up ? "oi-pos" : "oi-neg");
-        el.title = I18n.t("stats.oi_title") + ": " +
-            (isTotal ? "" : (up ? "+" : "−")) + "$" + fmtUsdFull(Math.abs(v));
+        return { txt: (up ? "+$" : "−$") + fmtUsdShort(Math.abs(v)),
+                 cls: up ? "oi-pos" : "oi-neg",
+                 title: I18n.t("stats.oi_title") + ": " + (up ? "+" : "−") +
+                        "$" + fmtUsdFull(Math.abs(v)) };
     }
 
-    function paintOiCards(data) {
-        const ch = (data && data.changes) || {};
-        paintOiCard(oiTotalEl, data ? Number(data.total_usd) : NaN, true);
-        paintOiCard(oi24hEl, ch.h24 ? Number(ch.h24.usd) : NaN, false);
-        paintOiCard(oi1hEl, ch.h1 ? Number(ch.h1.usd) : NaN, false);
-        paintOiCard(oi5mEl, ch.m5 ? Number(ch.m5.usd) : NaN, false);
-        const base = chartSymbol().split("_")[0];
-        const coins = document.querySelectorAll(".oi-coin");
-        for (let i = 0; i < coins.length; i++) coins[i].textContent = base;
+    function paintStatBox(kind) {
+        const E = statHeadEls(kind);
+        const key = state.statWin[kind];
+        if (E.win) E.win.textContent = I18n.t("stats.w" + key);
+        const cell = statCell(kind, key);
+        if (E.value) {
+            E.value.textContent = cell.txt;
+            E.value.className = "stat-box-value" +
+                (kind === "liq" ? " text-gold" : kind === "cvd" ? " cvd-val" : " oi-val") +
+                (cell.cls ? " " + cell.cls : "");
+            if (cell.title) E.value.title = cell.title;
+            else E.value.removeAttribute("title");
+        }
+        if (E.sub) {
+            if (kind === "liq") {
+                const v = statLiqVal(key);
+                E.sub.innerHTML = v
+                    ? '<span class="sub-long">L $' + fmtUsdShort(v.longs) + "</span> · " +
+                      '<span class="sub-short">S $' + fmtUsdShort(v.shorts) + "</span>"
+                    : "—";
+            } else if (kind === "cvd") {
+                const v = statCvdVal(key);
+                E.sub.textContent = v
+                    ? "+$" + fmtUsdShort(v.buy) + " / −$" + fmtUsdShort(v.sell)
+                    : "—";
+            } else {
+                const t = state.lastOI ? Number(state.lastOI.total_usd) : NaN;
+                E.sub.innerHTML = isFinite(t)
+                    ? 'Σ <span class="sub-total">$' + fmtUsdShort(t) + "</span>"
+                    : "—";
+            }
+        }
+        if (kind !== "liq") {
+            const base = chartSymbol().split("_")[0];
+            const coins = E.box ? E.box.querySelectorAll(kind === "cvd" ? ".cvd-coin" : ".oi-coin")
+                                : document.querySelectorAll(kind === "cvd" ? ".cvd-coin" : ".oi-coin");
+            for (let i = 0; i < coins.length; i++) coins[i].textContent = base;
+        }
+        if (openStatMenu === kind) renderStatMenu(kind);
     }
+
+    function renderStatMenu(kind) {
+        const E = statHeadEls(kind);
+        if (!E.menu) return;
+        const cur = state.statWin[kind];
+        let html = "";
+        for (let i = 0; i < STAT_WIN_DEFS.length; i++) {
+            const k = STAT_WIN_DEFS[i].key;
+            const cell = statCell(kind, k);
+            html += '<button type="button" role="option" class="stat-menu-row' +
+                (k === cur ? " sel" : "") + '" data-k="' + k + '"' +
+                (cell.title ? ' title="' + cell.title.replace(/"/g, "&quot;") + '"' : "") + ">" +
+                '<span class="w">' + I18n.t("stats.w" + k) + "</span>" +
+                '<span class="v' + (cell.cls ? " " + cell.cls : "") + '">' + cell.txt + "</span></button>";
+        }
+        E.menu.innerHTML = html;
+        Array.prototype.forEach.call(E.menu.children, (row) => {
+            row.addEventListener("click", (ev) => {
+                ev.stopPropagation();
+                setStatWin(kind, row.dataset.k);
+                closeStatMenus();
+            });
+        });
+    }
+
+    let openStatMenu = null;
+    function closeStatMenus() {
+        openStatMenu = null;
+        const pairs = [[statBoxLiq, statMenuLiq], [statBoxCvd, statMenuCvd], [statBoxOi, statMenuOi]];
+        for (let i = 0; i < pairs.length; i++) {
+            if (pairs[i][0]) pairs[i][0].classList.remove("open");
+            if (pairs[i][1]) pairs[i][1].classList.add("hidden");
+        }
+    }
+    function toggleStatMenu(kind) {
+        if (openStatMenu === kind) { closeStatMenus(); return; }
+        closeStatMenus();
+        const E = statHeadEls(kind);
+        const head = kind === "liq" ? statLiqHead : kind === "cvd" ? statCvdHead : statOiHead;
+        if (!E.menu || !head) return;
+        openStatMenu = kind;
+        renderStatMenu(kind);
+        E.menu.classList.remove("hidden");
+        // fixed-позиция под боксом: не обрезается скроллом шапки на мобильных
+        const r = head.getBoundingClientRect();
+        let left = r.left + (window.scrollX || 0);
+        left = Math.max(8, Math.min(left, (window.innerWidth || 1024) - E.menu.offsetWidth - 8));
+        let top = r.bottom + (window.scrollY || 0) + 6;
+        if (top + E.menu.offsetHeight > (window.scrollY || 0) + (window.innerHeight || 768) - 8)
+            top = Math.max(8, r.top + (window.scrollY || 0) - E.menu.offsetHeight - 6);
+        E.menu.style.left = left + "px";
+        E.menu.style.top = top + "px";
+        if (E.box) E.box.classList.add("open");
+    }
+    function setupStatBoxes() {
+        const pairs = [[statLiqHead, "liq"], [statCvdHead, "cvd"], [statOiHead, "oi"]];
+        for (let i = 0; i < pairs.length; i++) {
+            if (pairs[i][0]) pairs[i][0].addEventListener("click", (ev) => {
+                ev.stopPropagation();
+                toggleStatMenu(pairs[i][1]);
+            });
+        }
+        document.addEventListener("click", (ev) => {
+            if (!ev.target.closest || !ev.target.closest(".stat-box")) closeStatMenus();
+        });
+        document.addEventListener("keydown", (ev) => {
+            if (ev.key === "Escape") closeStatMenus();
+        });
+        document.addEventListener("scroll", () => closeStatMenus(), true);
+        window.addEventListener("resize", () => closeStatMenus());
+    }
+
+    // --- Табло CVD в шапке: перевес тейкеров по монете ГРАФИКА ---------------
+    // Суммируем поле cvd загруженных свечей за выбранное окно. Свечи живые
+    // (текущая обновляется каждым тиком), поэтому табло всегда свежее.
+    function paintCvdBox() { paintStatBox("cvd"); }
+
+    // --- Бокс OI в шапке: изменение за выбранное окно + суммарный интерес ----
+    function paintOiBox() { paintStatBox("oi"); }
 
     let oiRequestId = 0;
     async function fetchOI() {
@@ -1095,7 +1237,8 @@
             const r = await fetch("/api/oi?symbol=" + encodeURIComponent(chartSymbol()));
             const data = await r.json();
             if (my !== oiRequestId) return;   // пришёл новый запрос — этот стар
-            paintOiCards(data);
+            state.lastOI = data;
+            paintOiBox();
         } catch (e) { /* ignore */ }
     }
 
@@ -2086,9 +2229,7 @@
     function renderStats(data) {
         if (!data) return;
         state.lastStats = data;
-        stat24hEl.textContent = "$" + fmtUsdShort(data.total_usd_24h);
-        stat1hEl.textContent = "$" + fmtUsdShort(data.total_usd_1h);
-        stat5mEl.textContent = "$" + fmtUsdShort(data.total_usd_5m);
+        paintStatBox("liq");
 
         const total = data.total_usd_24h || 0;
         const longPct = total > 0 ? Math.round((data.longs_usd_24h / total) * 100) : 50;
@@ -2276,11 +2417,13 @@
         refreshFilterButtons();
         renderHealth(state.lastHealth);
         renderStats(state.lastStats);
+        paintStatBox("liq");   // renderStats(null) молчит — ярлык окна всё равно локализуем
+        paintCvdBox();
+        paintOiBox();
         renderSymbolButtons();
         updateSymbolTitle();
         rebuildFeed();
         renderTickIndicator();
-        updateCvdCards();
         if (state.modalItem && !detailModal.classList.contains("hidden")) {
             openModal(state.modalItem);
         }
@@ -2343,12 +2486,14 @@
         initSplitters();             // регулируемая ширина ленты и высота «Лидеров»
         setupTopCoinsToggle();       // выпадающий список топ-пар
         setupSymbolDropdown();       // выпадающий список монет
+        setupStatBoxes();            // боксы статистики: меню выбора периода
         loadCandles();
         connectWs();
         setInterval(fetchStats, 15000);
+        fetchStats();   // бокс ликвидаций — сразу, не ждём WS/первый тик
         setInterval(fetchOI, 15000);
         fetchOI();
-        setInterval(updateCvdCards, 15000);   // окна 24ч/1ч/5м медленно ползут
+        setInterval(paintCvdBox, 15000);   // окно CVD медленно ползёт
         setInterval(renderTickIndicator, 1000);
         setupLayerToggles();
         setupChartToggle();

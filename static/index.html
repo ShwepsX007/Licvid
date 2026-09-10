@@ -26,54 +26,37 @@
         </div>
 
         <div class="header-metrics">
-            <div class="metric-card">
-                <span class="metric-label" data-i18n="stats.24h">Ликвидации (24ч)</span>
-                <span class="metric-value text-gold" id="stat-24h-total">$0</span>
-            </div>
-            <div class="metric-card">
-                <span class="metric-label" data-i18n="stats.1h">Ликвидации (1ч)</span>
-                <span class="metric-value" id="stat-1h-total">$0</span>
-            </div>
-            <div class="metric-card">
-                <span class="metric-label" data-i18n="stats.5m">Ликвидации (5м)</span>
-                <span class="metric-value" id="stat-5m-total">$0</span>
+            <div class="stat-box" id="stat-box-liq">
+                <button class="stat-box-head" id="stat-liq-head" type="button"
+                        data-i18n-title="stats.liq_title"
+                        title="Ликвидации за выбранный период — нажмите, чтобы сменить">
+                    <span class="stat-box-label"><span class="metric-label" data-i18n="stats.box_liq">Ликвидации</span> <span class="stat-box-win" id="stat-liq-win">24ч</span> <span class="stat-box-caret">▾</span></span>
+                    <span class="stat-box-value text-gold" id="stat-liq-value">$0</span>
+                    <span class="stat-box-sub" id="stat-liq-sub">—</span>
+                </button>
+                <div class="stat-menu hidden" id="stat-menu-liq" role="listbox"></div>
             </div>
             <div class="cvd-sep" aria-hidden="true"></div>
-            <div class="metric-card cvd-card" data-i18n-title="stats.cvd_title"
-                 title="CVD монеты на графике: тейкер-покупки минус продажи">
-                <span class="metric-label"><span class="cvd-tag">CVD</span> <b class="cvd-coin">BTC</b> · <span data-i18n="stats.cvd24h">24ч</span></span>
-                <span class="metric-value cvd-val" id="stat-cvd-24h">—</span>
-            </div>
-            <div class="metric-card cvd-card" data-i18n-title="stats.cvd_title"
-                 title="CVD монеты на графике: тейкер-покупки минус продажи">
-                <span class="metric-label"><span class="cvd-tag">CVD</span> <b class="cvd-coin">BTC</b> · <span data-i18n="stats.cvd1h">1ч</span></span>
-                <span class="metric-value cvd-val" id="stat-cvd-1h">—</span>
-            </div>
-            <div class="metric-card cvd-card" data-i18n-title="stats.cvd_title"
-                 title="CVD монеты на графике: тейкер-покупки минус продажи">
-                <span class="metric-label"><span class="cvd-tag">CVD</span> <b class="cvd-coin">BTC</b> · <span data-i18n="stats.cvd5m">5м</span></span>
-                <span class="metric-value cvd-val" id="stat-cvd-5m">—</span>
+            <div class="stat-box" id="stat-box-cvd">
+                <button class="stat-box-head" id="stat-cvd-head" type="button"
+                        data-i18n-title="stats.cvd_title"
+                        title="CVD монеты на графике: тейкер-покупки минус продажи">
+                    <span class="stat-box-label"><span class="cvd-tag">CVD</span> <b class="cvd-coin">BTC</b> <span class="stat-box-win" id="stat-cvd-win">24ч</span> <span class="stat-box-caret">▾</span></span>
+                    <span class="stat-box-value cvd-val" id="stat-cvd-value">—</span>
+                    <span class="stat-box-sub" id="stat-cvd-sub">—</span>
+                </button>
+                <div class="stat-menu hidden" id="stat-menu-cvd" role="listbox"></div>
             </div>
             <div class="cvd-sep" aria-hidden="true"></div>
-            <div class="metric-card oi-card" data-i18n-title="stats.oi_title"
-                 title="Открытый интерес монеты на графике со всех бирж">
-                <span class="metric-label"><span class="oi-tag">OI</span> <b class="oi-coin">BTC</b></span>
-                <span class="metric-value oi-val" id="stat-oi-total">—</span>
-            </div>
-            <div class="metric-card oi-card" data-i18n-title="stats.oi_title"
-                 title="Открытый интерес монеты на графике со всех бирж">
-                <span class="metric-label"><span class="oi-tag">OI Δ</span> <b class="oi-coin">BTC</b> · <span data-i18n="stats.cvd24h">24ч</span></span>
-                <span class="metric-value oi-val" id="stat-oi-24h">—</span>
-            </div>
-            <div class="metric-card oi-card" data-i18n-title="stats.oi_title"
-                 title="Открытый интерес монеты на графике со всех бирж">
-                <span class="metric-label"><span class="oi-tag">OI Δ</span> <b class="oi-coin">BTC</b> · <span data-i18n="stats.cvd1h">1ч</span></span>
-                <span class="metric-value oi-val" id="stat-oi-1h">—</span>
-            </div>
-            <div class="metric-card oi-card" data-i18n-title="stats.oi_title"
-                 title="Открытый интерес монеты на графике со всех бирж">
-                <span class="metric-label"><span class="oi-tag">OI Δ</span> <b class="oi-coin">BTC</b> · <span data-i18n="stats.cvd5m">5м</span></span>
-                <span class="metric-value oi-val" id="stat-oi-5m">—</span>
+            <div class="stat-box" id="stat-box-oi">
+                <button class="stat-box-head" id="stat-oi-head" type="button"
+                        data-i18n-title="stats.oi_title"
+                        title="Изменение открытого интереса монеты на графике за период">
+                    <span class="stat-box-label"><span class="oi-tag">OI Δ</span> <b class="oi-coin">BTC</b> <span class="stat-box-win" id="stat-oi-win">24ч</span> <span class="stat-box-caret">▾</span></span>
+                    <span class="stat-box-value oi-val" id="stat-oi-value">—</span>
+                    <span class="stat-box-sub" id="stat-oi-sub">—</span>
+                </button>
+                <div class="stat-menu hidden" id="stat-menu-oi" role="listbox"></div>
             </div>
             <div class="metric-card ratio-metric">
                 <div class="metric-label flex-between">

@@ -20,11 +20,18 @@ import asyncio
 import bisect
 import logging
 import time
-from typing import Awaitable, Callable, Dict, List, Optional, Tuple
+from collections import deque
+from typing import Awaitable, Callable, Deque, Dict, List, Optional, Tuple
 
 import aiohttp
 
 log = logging.getLogger("licvid.oi")
+
+# Окна изменений для боксов шапки: ключ -> секунд. m1 считается по живым
+# опросам (кольцо _live_hist), остальные — по 5-минутным бакетам.
+OI_WINDOWS = (("m1", 60), ("m5", 300), ("m15", 900), ("m30", 1800),
+               ("h1", 3600), ("h4", 14400), ("h24", 86400))
+LIVE_HIST_KEEP_SEC = 900                # окно живых опросов для m1
 
 BUCKET_SEC = 300                    # 5 минут — гранулярность серии
 SERIES_KEEP_SEC = 30 * 3600         # окно серии: хватает на h24 + запас
@@ -307,6 +314,8 @@ class OpenInterestTracker:
         self._series: Dict[str, Dict[int, Dict[str, float]]] = {}
         # symbol -> {exchange: (ts, usd)} — последний живой опрос
         self._live: Dict[str, Dict[str, Tuple[float, float]]] = {}
+        # symbol -> [(ts, {exchange: usd}), ...] — кольцо опросов для m1
+        self._live_hist: Dict[str, Deque[Tuple[float, Dict[str, float]]]] = {}
         self._watched: Dict[str, float] = {}          # symbol -> last access
         self._backfilled_at: Dict[str, float] = {}
         self._bitmex_sym_cache: Dict[str, Optional[str]] = {}
@@ -523,6 +532,10 @@ class OpenInterestTracker:
                 live = self._live.setdefault(symbol, {})
                 for exch, usd in legs.items():
                     live[exch] = (now, usd)
+                hist = self._live_hist.setdefault(symbol, deque(maxlen=40))
+                hist.append((now, dict(legs)))
+                while hist and now - hist[0][0] > LIVE_HIST_KEEP_SEC:
+                    hist.popleft()
                 buckets = self._series.setdefault(symbol, {})
                 cell = buckets.setdefault(bucket_5m(now), {})
                 for exch, usd in legs.items():
@@ -591,23 +604,47 @@ class OpenInterestTracker:
                 "ts": newest or None,
                 "stale_sec": round(now - newest, 1) if newest else None}
 
-    def changes(self, symbol: str) -> dict:
-        """Изменения за 5м/1ч/24ч {usd, pct} + partial.
+    def _change_m1(self, symbol: str) -> Tuple[Optional[dict], bool]:
+        """Изменение за ~минуту по кольцу живых опросов (все ноги)."""
+        hist = list(self._live_hist.get(symbol) or [])
+        if len(hist) < 2:
+            return None, True
+        cur_ts, cur = hist[-1]
+        ref_ts, ref = min(hist[:-1], key=lambda p: abs(p[0] - (cur_ts - 60)))
+        legs = [e for e in cur if e in ref]
+        if not legs:
+            return None, True
+        base = sum(ref[e] for e in legs)
+        if base <= 0:
+            return None, True
+        delta = sum(cur[e] - ref[e] for e in legs)
+        dt = cur_ts - ref_ts
+        return ({"usd": round(delta, 2), "pct": round(delta / base * 100, 3)},
+                not (45 <= dt <= 150))
 
-        Считаем по ногам, присутствующим И в текущем, И в опорном бакете, —
-        иначе подключение новой биржи дало бы ложный скачок дельты.
+    def changes(self, symbol: str) -> dict:
+        """Изменения за окна OI_WINDOWS {usd, pct} + partial.
+
+        Бакетные окна считаем по ногам, присутствующим И в текущем, И в
+        опорном бакете, — иначе подключение новой биржи дало бы ложный
+        скачок дельты. m1 — по кольцу живых опросов.
         """
         cells = self._series.get(symbol) or {}
-        out = {"m5": None, "h1": None, "h24": None,
-               "partial": {"m5": True, "h1": True, "h24": True},
-               "hist_exchanges": [e for e in HIST_EXCHANGES
-                                  if any(e in cell for cell in cells.values())]}
+        out = {name: None for name, _ in OI_WINDOWS}
+        out["partial"] = {name: True for name, _ in OI_WINDOWS}
+        out["hist_exchanges"] = [e for e in HIST_EXCHANGES
+                                 if any(e in cell for cell in cells.values())]
+        m1, m1_partial = self._change_m1(symbol)
+        out["m1"] = m1
+        out["partial"]["m1"] = m1_partial
         if not cells:
             return out
         keys = sorted(cells)
         cur_cell = cells[keys[-1]]
         now = time.time()
-        for name, window in (("m5", 300), ("h1", 3600), ("h24", 86400)):
+        for name, window in OI_WINDOWS:
+            if name == "m1":
+                continue                       # уже посчитано по опросам
             ref_ts = now - window
             i = bisect.bisect_right(keys, ref_ts) - 1
             if i < 0:
@@ -637,7 +674,7 @@ class OpenInterestTracker:
                 "per_exchange": {e: v["usd"] for e, v in snap["per_exchange"].items()},
                 "live_exchanges": sorted(snap["per_exchange"]),
                 "hist_exchanges": ch["hist_exchanges"],
-                "changes": {k: ch[k] for k in ("m5", "h1", "h24")},
+                "changes": {k: ch[k] for k, _ in OI_WINDOWS},
                 "partial": ch["partial"],
                 "ts": snap["ts"],
                 "stale_sec": snap["stale_sec"]}

@@ -222,6 +222,141 @@ body.dark-theme {
     color: #2dd4bf;
 }
 
+/* Интерактивные боксы статистики: ликвидации / CVD / OI.
+   Клик по боксу открывает меню выбора периода. */
+.stat-box { position: relative; }
+.stat-box-head {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1px;
+    min-width: 112px;
+    padding: 4px 10px 5px;
+    background: rgba(255,255,255,0.03);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+}
+.stat-box-head:hover, .stat-box.open .stat-box-head {
+    border-color: rgba(61,112,255,0.55);
+    background: rgba(61,112,255,0.08);
+    box-shadow: 0 0 12px rgba(61,112,255,0.18);
+}
+.stat-box-head:active { transform: scale(0.98); }
+.stat-box-label {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+}
+.stat-box-win {
+    font-size: 0.64rem;
+    font-weight: 800;
+    color: #8fb4ff;
+    background: rgba(61,112,255,0.16);
+    border-radius: 8px;
+    padding: 0 6px;
+    line-height: 1.5;
+}
+.stat-box-caret {
+    display: inline-block;
+    color: var(--text-muted);
+    font-size: 0.6rem;
+    transition: transform 0.15s;
+}
+.stat-box.open .stat-box-caret { transform: rotate(180deg); }
+.stat-box-value {
+    font-family: var(--font-mono);
+    font-weight: 700;
+    font-size: 0.95rem;
+    white-space: nowrap;
+}
+.stat-box-value.text-gold { color: #f5c542; }
+.stat-box-value.cvd-pos {
+    color: #a78bfa;
+    text-shadow: 0 0 12px rgba(139,92,246,0.45);
+}
+.stat-box-value.cvd-neg {
+    color: #ff9100;
+    text-shadow: 0 0 12px rgba(255,145,0,0.45);
+}
+.stat-box-value.oi-pos {
+    color: #2dd4bf;
+    text-shadow: 0 0 12px rgba(45,212,191,0.45);
+}
+.stat-box-value.oi-neg {
+    color: #fb7185;
+    text-shadow: 0 0 12px rgba(251,113,133,0.45);
+}
+.stat-box-sub {
+    font-family: var(--font-mono);
+    font-size: 0.66rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+.stat-box-sub .sub-long { color: var(--color-red); }
+.stat-box-sub .sub-short { color: var(--color-green); }
+.stat-box-sub .sub-total { color: #2dd4bf; }
+/* Всплывающее меню периода: fixed — не обрезается скроллом шапки на мобильных */
+.stat-menu {
+    position: fixed;
+    z-index: 2000;
+    min-width: 196px;
+    padding: 4px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    box-shadow: 0 12px 32px rgba(0,0,0,0.55);
+}
+.stat-menu-head {
+    padding: 5px 9px 7px;
+    margin-bottom: 3px;
+    border-bottom: 1px solid var(--border-color);
+    font-size: 0.7rem;
+    color: var(--text-muted);
+}
+.stat-menu-head b {
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+}
+.stat-menu-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 14px;
+    width: 100%;
+    padding: 6px 9px;
+    background: none;
+    border: none;
+    border-radius: 6px;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+}
+.stat-menu-row:hover { background: rgba(61,112,255,0.14); }
+.stat-menu-row.sel { background: rgba(61,112,255,0.22); }
+.stat-menu-row .w {
+    font-size: 0.74rem;
+    color: var(--text-muted);
+}
+.stat-menu-row.sel .w {
+    color: var(--text-primary);
+    font-weight: 700;
+}
+.stat-menu-row .v {
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    font-weight: 700;
+}
+.stat-menu-row .v.cvd-pos { color: #a78bfa; }
+.stat-menu-row .v.cvd-neg { color: #ff9100; }
+.stat-menu-row .v.oi-pos { color: #2dd4bf; }
+.stat-menu-row .v.oi-neg { color: #fb7185; }
+
 .header-controls {
     display: flex;
     align-items: center;

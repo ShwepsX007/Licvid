@@ -4,8 +4,9 @@
 Запуск:  python3 tests/test_oi.py
 Проверяем: парсеры ответов 7 бирж, склейку 5-минутных бакетов без
 ложных дельт при смене покрытия, раскладку по свечам, изменения
-m5/h1/h24, снапшот/ответ API и фикс лидеров (top_coins глобальные
-при фильтре монеты).
+m5/h1/h24, снапшот/ответ API, фикс лидеров (top_coins глобальные
+при фильтре монеты) и окна стат-боксов (ликв. 1м/15м/30м/4ч,
+OI m1 по живым опросам + m15/m30/h4 по бакетам).
 """
 
 import asyncio
@@ -314,6 +315,96 @@ try:
     check("global leaders", len(glob["top_coins"]) == 2)
 finally:
     srv.LIQUIDATIONS.clear()
+
+print("statwin: liq windows")
+srv.LIQUIDATIONS.clear()
+_now = time.time()
+srv.LIQUIDATIONS.extend([
+    {"symbol": "BTC_USDT", "exchange": "binance", "side": "SELL",
+     "usd": 10.0, "timestamp": _now - 30},
+    {"symbol": "BTC_USDT", "exchange": "binance", "side": "BUY",
+     "usd": 20.0, "timestamp": _now - 200},
+    {"symbol": "BTC_USDT", "exchange": "binance", "side": "SELL",
+     "usd": 40.0, "timestamp": _now - 700},
+    {"symbol": "BTC_USDT", "exchange": "binance", "side": "BUY",
+     "usd": 80.0, "timestamp": _now - 1500},
+    {"symbol": "BTC_USDT", "exchange": "binance", "side": "SELL",
+     "usd": 160.0, "timestamp": _now - 3000},
+    {"symbol": "BTC_USDT", "exchange": "binance", "side": "BUY",
+     "usd": 320.0, "timestamp": _now - 10000},
+    {"symbol": "BTC_USDT", "exchange": "binance", "side": "SELL",
+     "usd": 640.0, "timestamp": _now - 40000},
+    {"symbol": "BTC_USDT", "exchange": "binance", "side": "BUY",
+     "usd": 1280.0, "timestamp": _now - 90000},
+])
+try:
+    w = srv.compute_stats()
+    check("win keys", all(k in w for k in
+          ("total_usd_1m", "total_usd_15m", "total_usd_30m", "total_usd_4h")))
+    check("win 1m", w["total_usd_1m"] == 10.0, w["total_usd_1m"])
+    check("win 5m", w["total_usd_5m"] == 30.0, w["total_usd_5m"])
+    check("win 15m", w["total_usd_15m"] == 70.0, w["total_usd_15m"])
+    check("win 30m", w["total_usd_30m"] == 150.0, w["total_usd_30m"])
+    check("win 1h", w["total_usd_1h"] == 310.0, w["total_usd_1h"])
+    check("win 4h", w["total_usd_4h"] == 630.0, w["total_usd_4h"])
+    check("win 24h", w["total_usd_24h"] == 1270.0, w["total_usd_24h"])
+    check("win longs 1h", w["longs_usd_1h"] == 210.0, w["longs_usd_1h"])
+    check("win shorts 4h", w["shorts_usd_4h"] == 420.0, w["shorts_usd_4h"])
+finally:
+    srv.LIQUIDATIONS.clear()
+
+print("statwin: oi m1 + windows")
+from collections import deque  # noqa: E402
+from oi_feed import OI_WINDOWS  # noqa: E402
+
+check("oi win keys", [k for k, _ in OI_WINDOWS] ==
+      ["m1", "m5", "m15", "m30", "h1", "h4", "h24"])
+trw = OpenInterestTracker()
+_nowf = time.time()
+trw._live_hist["BTC_USDT"] = deque([(_nowf - 60, {"binance": 1000.0}),
+                                    (_nowf, {"binance": 1100.0})])
+cw = trw.changes("BTC_USDT")
+check("oi m1 delta", cw["m1"] == {"usd": 100.0, "pct": 10.0}, cw["m1"])
+check("oi m1 full", cw["partial"]["m1"] is False, cw["partial"])
+check("oi m5 none w/o buckets", cw["m5"] is None)
+
+trw._live_hist["ONE"] = deque([(_nowf, {"binance": 5.0})])
+co = trw.changes("ONE")
+check("oi m1 single none", co["m1"] is None)
+check("oi m1 single partial", co["partial"]["m1"] is True)
+
+trw._live_hist["FAST"] = deque([(_nowf - 10, {"binance": 100.0}),
+                                (_nowf, {"binance": 110.0})])
+cf = trw.changes("FAST")
+check("oi m1 short dt delta", cf["m1"] and cf["m1"]["usd"] == 10.0, cf["m1"])
+check("oi m1 short dt partial", cf["partial"]["m1"] is True, cf["partial"])
+
+trw._live_hist["PICK"] = deque([(_nowf - 70, {"binance": 100.0}),
+                                (_nowf - 40, {"binance": 105.0}),
+                                (_nowf, {"binance": 110.0})])
+cp = trw.changes("PICK")
+check("oi m1 picks nearest 60s", cp["m1"] and cp["m1"]["usd"] == 10.0, cp["m1"])
+check("oi m1 nearest full", cp["partial"]["m1"] is False, cp["partial"])
+
+trb = OpenInterestTracker()
+_now_b = int(time.time() // 300) * 300
+trb._series["BTC_USDT"] = {
+    _now_b - 14400: {"binance": 100.0, "bybit": 100.0, "gate": 100.0},
+    _now_b - 1800: {"binance": 110.0, "bybit": 110.0, "gate": 110.0},
+    _now_b - 900: {"binance": 120.0, "bybit": 120.0, "gate": 120.0},
+    _now_b: {"binance": 130.0, "bybit": 130.0, "gate": 130.0},
+}
+cb = trb.changes("BTC_USDT")
+check("oi h4", cb["h4"] and cb["h4"]["usd"] == 90.0, cb["h4"])
+check("oi h4 full", cb["partial"]["h4"] is False, cb["partial"])
+check("oi m30", cb["m30"] and cb["m30"]["usd"] == 60.0, cb["m30"])
+check("oi m15", cb["m15"] and cb["m15"]["usd"] == 30.0, cb["m15"])
+check("oi payload win keys",
+      set(trb.payload("BTC_USDT")["changes"]) == {k for k, _ in OI_WINDOWS})
+_demo = srv._demo_oi_payload("BTC_USDT")
+check("oi demo win keys",
+      set(_demo["changes"]) == {k for k, _ in OI_WINDOWS} and
+      set(_demo["partial"]) == {k for k, _ in OI_WINDOWS})
 
 print()
 print(f"итог: {ok} ок, {fail} ошибок")

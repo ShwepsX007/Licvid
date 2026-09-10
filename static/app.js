@@ -1248,10 +1248,37 @@
     // Палитра специально не пересекается ни со свечами, ни с шариками CVD,
     // ни с тепловой шкалой ликвидаций: рост — teal, падение — rose.
     const OI_COLORS = {
-        up:   { fill: "rgba(45,212,191,0.95)",  ring: "#d2fff8", text: "#062a26" },
-        down: { fill: "rgba(251,113,133,0.95)", ring: "#ffe0e6", text: "#2b060d" },
+        up:   { rgb: [45, 212, 191],  ring: "#d2fff8", text: "#062a26" },
+        down: { rgb: [251, 113, 133], ring: "#ffe0e6", text: "#2b060d" },
     };
     const OI_MAX_TRI = 60;
+    // Тиры треугольников по |Δ OI|: мелочь (<$1M) — мини-значок без подписи,
+    // крупняк — больше, ярче (заливка осветляется к белому) и с сильным свечением.
+    const OI_TIER_MIN = 1000000;
+    const OI_TIER_STYLE = [
+        null,   // 0 — мини
+        { mult: 1.0,  font: 0, white: 0.0,  glow: 8  },   // $1M+
+        { mult: 1.22, font: 1, white: 0.22, glow: 12 },   // $5M+
+        { mult: 1.45, font: 2, white: 0.45, glow: 16 },   // $20M+
+    ];
+    function oiTier(abs) {
+        if (abs >= 20000000) return 3;
+        if (abs >= 5000000) return 2;
+        if (abs >= OI_TIER_MIN) return 1;
+        return 0;
+    }
+    function oiTheme(up, tier) {
+        const b = up ? OI_COLORS.up : OI_COLORS.down;
+        const st = OI_TIER_STYLE[tier] || OI_TIER_STYLE[1];
+        const c = [b.rgb[0] + (255 - b.rgb[0]) * st.white,
+                   b.rgb[1] + (255 - b.rgb[1]) * st.white,
+                   b.rgb[2] + (255 - b.rgb[2]) * st.white]
+            .map(Math.round);
+        return {
+            fill: "rgba(" + c[0] + "," + c[1] + "," + c[2] + ",0.95)",
+            ring: b.ring, text: b.text, glow: st.glow,
+        };
+    }
 
     function triPath(ctx, x, apexY, halfW, h, up) {
         ctx.beginPath();
@@ -1310,23 +1337,35 @@
             } catch (e) { continue; }
             if (x === null || x === undefined || yRef === null || yRef === undefined) continue;
 
-            // Размер — под подпись; шрифт подбираем, невместившееся крупное
-            // значение рисуем мини-значком без цифр.
-            const val = fmtCompact(Math.abs(d));
-            ctx.font = "bold 8px 'JetBrains Mono', monospace";
-            const tw8 = ctx.measureText(val).width;
+            // Размер — по тиру величины: мелочь (<$1M) всегда мини без подписи,
+            // подписанным подбираем шрифт, крупняку треугольник и кегль наращиваем.
+            const abs = Math.abs(d);
+            const tier = oiTier(abs);
+            const val = fmtCompact(abs);
             let halfW, h, fs = 0;
-            if (tw8 <= 56) {
-                halfW = Math.min(26, Math.max(13, tw8 / 2 + 10));
-                h = halfW * 1.5;
-                const sizes = [8, 7, 6.5];
-                for (let f = 0; f < sizes.length; f++) {
-                    ctx.font = "bold " + sizes[f] + "px 'JetBrains Mono', monospace";
-                    if (ctx.measureText(val).width <= halfW * 1.3) { fs = sizes[f]; break; }
+            if (tier > 0) {
+                ctx.font = "bold 8px 'JetBrains Mono', monospace";
+                const tw8 = ctx.measureText(val).width;
+                if (tw8 <= 56) {
+                    halfW = Math.min(26, Math.max(13, tw8 / 2 + 10));
+                    h = halfW * 1.5;
+                    const sizes = [8, 7, 6.5];
+                    for (let f = 0; f < sizes.length; f++) {
+                        ctx.font = "bold " + sizes[f] + "px 'JetBrains Mono', monospace";
+                        if (ctx.measureText(val).width <= halfW * 1.3) { fs = sizes[f]; break; }
+                    }
                 }
             }
             if (!fs) { halfW = 6; h = 10; }
-            const gap = 6;
+            else if (tier >= 2) {
+                const st = OI_TIER_STYLE[tier];
+                fs = Math.min(10, fs + st.font);
+                ctx.font = "bold " + fs + "px 'JetBrains Mono', monospace";
+                halfW = Math.min(34, Math.max(halfW * st.mult,
+                                              ctx.measureText(val).width / 2 + 10));
+                h = halfW * 1.5;
+            }
+            const gap = 10 + tier * 2;   // чем крупнее, тем дальше от свечи
             const apexY = up ? yRef - gap - h : yRef + gap + h;
             const cy = up ? apexY + h * 0.68 : apexY - h * 0.68;
             if (x < -halfW || x > W + halfW || cy < -h || cy > H + h) continue;
@@ -1342,14 +1381,14 @@
             if (clash) continue;
             placed.push({ x: x, y: cy, r: Math.max(halfW, h / 2) });
 
-            const theme = up ? OI_COLORS.up : OI_COLORS.down;
+            const theme = oiTheme(up, tier);
             // Тёмная подложка — читается на свече любого цвета
             triPath(ctx, x, up ? apexY - 1.6 : apexY + 1.6, halfW + 1.6, h + 1.6, up);
             ctx.fillStyle = "rgba(5,8,14,0.88)";
             ctx.fill();
 
             ctx.shadowColor = theme.fill;
-            ctx.shadowBlur = 8;
+            ctx.shadowBlur = theme.glow;
             triPath(ctx, x, apexY, halfW, h, up);
             ctx.fillStyle = theme.fill;
             ctx.fill();

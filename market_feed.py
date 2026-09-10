@@ -148,6 +148,51 @@ def _chunks(items: List, size: int) -> Iterable[List]:
         yield items[i:i + size]
 
 
+# ----------------------------------------------------------------------------
+# CVD (cumulative volume delta) — разница объёмов агрессивных покупок/продаж
+# ----------------------------------------------------------------------------
+# OKX rubik принимает только конкретные окна агрегации (секунды):
+OKX_CVD_SEC = {1: 60, 5: 300, 15: 900, 60: 3600, 240: 14400}
+
+
+def binance_kline_cvd(row) -> Optional[float]:
+    """Тейкер-дельта одной свечи Binance Futures в USDT.
+
+    В ответе /fapi/v1/klines поле [7] — объём в котировке (USDT),
+    поле [10] — taker buy quote volume (агрессивные покупки). Продажи —
+    остаток. delta = buy - sell = 2*tb - total.
+    """
+    try:
+        total = float(row[7])
+        tb = float(row[10])
+    except (TypeError, ValueError, IndexError):
+        return None
+    if total <= 0:
+        return None
+    return round(2.0 * tb - total, 2)
+
+
+def cvd_map_from_okx_taker(rows, price_map: Dict[int, float], tf_sec: int) -> Dict[int, float]:
+    """OKX /api/v5/rubik/stat/taker-volume-contract: строки [ts, sellVol, buyVol].
+
+    Объёмы в базовой монете — переводим в USDT по close соответствующей
+    свечи (price_map: время свечи -> цена). Возвращает {bucket: delta_usd}.
+    """
+    out: Dict[int, float] = {}
+    for r in rows or []:
+        try:
+            ts = int(r[0]) // 1000
+            sell = float(r[1])
+            buy = float(r[2])
+        except (TypeError, ValueError, IndexError):
+            continue
+        bucket = (ts // tf_sec) * tf_sec if tf_sec > 0 else ts
+        px = price_map.get(bucket)
+        if not px or px <= 0:
+            continue
+        out[bucket] = round(out.get(bucket, 0.0) + (buy - sell) * px, 2)
+    return out
+
 
 # ----------------------------------------------------------------------------
 # Чистые парсеры сообщений бирж (без сети — можно тестировать офлайн)
@@ -432,7 +477,9 @@ class SourceStatus:
 LiqCallback = Callable[[dict], Awaitable[None]]
 PriceCallback = Callable[[str, float, Optional[dict]], Awaitable[None]]
 # (symbol, price, qty, timestamp) — сделка, каждый тик
-TradeCallback = Callable[[str, float, float, float], Awaitable[None]]
+# on_trade(symbol, price, qty, ts, side) — side: сторона ТЕЙКЕРА ("BUY"/"SELL"),
+# для CVD; может быть "" если биржа её не сообщает.
+TradeCallback = Callable[..., Awaitable[None]]
 
 
 class MarketFeed:
@@ -476,6 +523,7 @@ class MarketFeed:
         # Биржа, с которой реально идут тики — с неё же берём и свечи,
         # чтобы цена на графике не расходилась с последним тиком.
         self.preferred_kline_source: Optional[str] = None
+        self.cvd_source: Optional[str] = None   # откуда берём историю CVD (binance-kline/okx-rubik)
         self._hot_version = 0
         self._hot_changed = asyncio.Event()
 
@@ -1361,7 +1409,13 @@ class MarketFeed:
     NO_DATA_TIMEOUT = 20.0
 
     def _handle_trade_payload(self, payload) -> List[tuple]:
-        """Достаёт сделки из сообщения Binance (raw и combined формат)."""
+        """Достаёт сделки из сообщения Binance (raw и combined формат).
+
+        Возвращает (symbol, price, qty, ts, side) — side это сторона
+        ТЕЙКЕРА: "BUY" = били по аску (агрессивная покупка), "SELL" = били
+        по биду. Поле m — «покупатель был мейкером»: если m=true, значит
+        агрессор — продавец. Нужна для CVD (разницы покупок и продаж).
+        """
         if not isinstance(payload, dict):
             return []
         data = payload.get("data") if "data" in payload else payload
@@ -1378,7 +1432,8 @@ class MarketFeed:
             return []
         if not sym or price <= 0:
             return []
-        return [(sym, price, qty, ts or time.time())]
+        side = "SELL" if data.get("m") else "BUY"
+        return [(sym, price, qty, ts or time.time(), side)]
 
     async def _binance_trade_combined(self) -> str:
         """aggTrade через combined-стрим; при смене монет — переподключение."""
@@ -1425,11 +1480,11 @@ class MarketFeed:
                 if not trades:
                     self._log_unexpected("binance-combined", payload)
                     continue
-                for sym, price, qty, ts in trades:
+                for sym, price, qty, ts, side in trades:
                     got += 1
                     st.hit()
                     self.prices[sym] = price
-                    await self.on_trade(sym, price, qty, ts)
+                    await self.on_trade(sym, price, qty, ts, side)
         return "closed" if got else "nodata"
 
     async def _binance_trade_raw(self) -> str:
@@ -1487,11 +1542,11 @@ class MarketFeed:
                     if not trades:
                         self._log_unexpected("binance-raw", payload)
                         continue
-                    for sym, price, qty, ts in trades:
+                    for sym, price, qty, ts, side in trades:
                         got += 1
                         st.hit()
                         self.prices[sym] = price
-                        await self.on_trade(sym, price, qty, ts)
+                        await self.on_trade(sym, price, qty, ts, side)
             finally:
                 syncer.cancel()
                 self.tick_subscriptions = set()
@@ -1568,10 +1623,12 @@ class MarketFeed:
                             continue
                         if price <= 0:
                             continue
+                        side = ("BUY" if str(it.get("S") or "").upper() == "BUY"
+                                else "SELL" if str(it.get("S") or "").upper() == "SELL" else "")
                         got += 1
                         st.hit()
                         self.prices[sym] = price
-                        await self.on_trade(sym, price, qty, ts)
+                        await self.on_trade(sym, price, qty, ts, side)
             finally:
                 syncer.cancel()
                 self.tick_subscriptions = set()
@@ -1600,17 +1657,70 @@ class MarketFeed:
                 log.debug("klines %s %s: %s", loader.__name__, symbol, e)
         return None
 
+    async def fetch_cvd(self, symbol: str, tf_min: int,
+                        candles: Optional[List[dict]] = None,
+                        limit: int = 300) -> Optional[Dict[int, float]]:
+        """История тейкер-дельты {время_свечи: delta_usd}, USDT.
+
+        Источники (по порядку доступности):
+          1. Binance — родные поля taker buy volume в ответе kline, любой ТФ;
+          2. OKX     — публичная статистика rubik/taker-volume-contract
+                       (объёмы в базовой монете → пересчёт по close свечей).
+        Bybit/Bitget/HTX/Gate публичной исторической CVD-статистики не дают —
+        по ним дельта текущей свечи накапливается из ленты сделок (on_trade).
+        """
+        # 1) Binance
+        try:
+            tf_map = {1: "1m", 5: "5m", 15: "15m", 60: "1h", 240: "4h"}
+            url = (f"{BINANCE_REST}/fapi/v1/klines?symbol={to_binance(symbol)}"
+                   f"&interval={tf_map.get(tf_min, '5m')}&limit={min(max(limit, 1), 1000)}")
+            rows = await _get_json(self._session, url, timeout=8)
+            if isinstance(rows, list) and rows:
+                out = {}
+                for r in rows:
+                    if not isinstance(r, (list, tuple)):
+                        continue
+                    d = binance_kline_cvd(r)
+                    if d is not None:
+                        out[int(r[0]) // 1000] = d
+                if out:
+                    self.cvd_source = "binance-kline"
+                    return out
+        except Exception as e:
+            log.debug("cvd binance %s: %s", symbol, e)
+        # 2) OKX
+        try:
+            sec = OKX_CVD_SEC.get(tf_min)
+            if sec:
+                url = (f"{OKX_REST}/api/v5/rubik/stat/taker-volume-contract"
+                       f"?instId={to_okx(symbol)}&sec={sec}")
+                data = await _get_json(self._session, url, timeout=8)
+                rows = (data or {}).get("data") or []
+                price_map = {int(c["time"]): float(c.get("close") or 0)
+                             for c in (candles or [])}
+                out = cvd_map_from_okx_taker(rows, price_map, sec)
+                if out:
+                    self.cvd_source = "okx-rubik"
+                    return out
+        except Exception as e:
+            log.debug("cvd okx %s: %s", symbol, e)
+        return None
+
     async def _klines_binance(self, symbol: str, tf_min: int, limit: int) -> Optional[List[dict]]:
         tf_map = {1: "1m", 5: "5m", 15: "15m", 60: "1h", 240: "4h"}
         url = (f"{BINANCE_REST}/fapi/v1/klines?symbol={to_binance(symbol)}"
                f"&interval={tf_map.get(tf_min, '5m')}&limit={min(limit, 1000)}")
         rows = await _get_json(self._session, url, timeout=8)
-        return [{
+        out = [{
             "time": int(r[0]) // 1000,
             "open": float(r[1]), "high": float(r[2]),
             "low": float(r[3]), "close": float(r[4]),
             "volume": float(r[7]),      # quote volume (USDT)
+            "cvd": binance_kline_cvd(r),   # тейкер-дельта в USDT (Buy-Sell)
         } for r in rows]
+        if any(c["cvd"] is not None for c in out):
+            self.cvd_source = "binance-kline"
+        return out
 
     async def _klines_bybit(self, symbol: str, tf_min: int, limit: int) -> Optional[List[dict]]:
         url = (f"{BYBIT_REST}/v5/market/kline?category=linear&symbol={to_bybit(symbol)}"
@@ -1650,5 +1760,6 @@ class MarketFeed:
             "custom_symbols": list(self.custom_symbols),
             "catalog_count": len(self.symbol_index),
             "catalog_source": self.symbol_index_source,
+            "cvd_source": self.cvd_source,
             "sources": {k: v.as_dict() for k, v in self.status.items()},
         }

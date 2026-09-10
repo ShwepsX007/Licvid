@@ -33,7 +33,7 @@ def check(name, cond, extra=""):
 def make_feed():
     feed = MarketFeed(on_liquidation=lambda e: asyncio.sleep(0),
                       on_price=lambda s, p, c: asyncio.sleep(0),
-                      on_trade=lambda s, p, q, t: asyncio.sleep(0),
+                      on_trade=lambda s, p, q, t, side="": asyncio.sleep(0),
                       symbols_limit=40)
 
     # топ с Binance (без GRAM) + полный каталог с GRAM на Gate/OKX

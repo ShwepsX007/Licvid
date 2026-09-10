@@ -1163,6 +1163,17 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
     line-height: 1;
 }
 .profile-toggle:hover { border-color: var(--color-blue); color: var(--text-primary); }
+
+/* Индикатор «кто в свече»: покупатели/продавцы (CVD) */
+.cvd-stat {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    font-weight: 800;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+.cvd-stat.up { color: var(--color-green); }
+.cvd-stat.down { color: var(--color-red); }
 .profile-toggle.active {
     border-color: rgba(0, 214, 255, 0.65);
     color: #00d6ff;

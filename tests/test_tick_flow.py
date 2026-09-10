@@ -153,7 +153,7 @@ async def fake_bybit(request):
     return ws
 
 
-async def on_trade(symbol, price, qty, ts):
+async def on_trade(symbol, price, qty, ts, side=""):
     received.append((symbol, price, qty, ts))
 
 

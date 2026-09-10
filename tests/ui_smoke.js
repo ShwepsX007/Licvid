@@ -224,6 +224,29 @@ async function main() {
   const profileToggleAfter = profileToggleBtn
     ? profileToggleBtn.classList.contains("active") : null;
 
+  // 5b) Слои «Ликвидации» и «CVD»: кнопки есть, по умолчанию включены,
+  //     клик выключает (класс + localStorage), индикатор перевеса показывает ▲/▼
+  const liqToggleBtn = q("liq-toggle");
+  const cvdToggleBtn = q("cvd-toggle");
+  const liqActiveBefore = liqToggleBtn ? liqToggleBtn.classList.contains("active") : null;
+  const cvdActiveBefore = cvdToggleBtn ? cvdToggleBtn.classList.contains("active") : null;
+  if (liqToggleBtn) liqToggleBtn.dispatchEvent(new win.MouseEvent("click", { bubbles: true }));
+  if (cvdToggleBtn) cvdToggleBtn.dispatchEvent(new win.MouseEvent("click", { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 100));
+  const liqActiveAfter = liqToggleBtn ? liqToggleBtn.classList.contains("active") : null;
+  const cvdActiveAfter = cvdToggleBtn ? cvdToggleBtn.classList.contains("active") : null;
+  let liqStore = null, cvdStore = null;
+  try {
+    liqStore = win.localStorage.getItem("licvid.liqEnabled");
+    cvdStore = win.localStorage.getItem("licvid.cvdEnabled");
+  } catch (e) { /* ignore */ }
+  const cvdStatOff = text("cvd-stat");     // при выключенном CVD индикатор пуст
+  // вернуть как было — другие проверки рисуют шарики
+  if (liqToggleBtn) liqToggleBtn.dispatchEvent(new win.MouseEvent("click", { bubbles: true }));
+  if (cvdToggleBtn) cvdToggleBtn.dispatchEvent(new win.MouseEvent("click", { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 200));
+  const cvdStat = text("cvd-stat");
+
   // 6) Лендинг: на / посадочная страница со ссылкой в терминал
   let landing = null;
   try {
@@ -311,6 +334,14 @@ async function main() {
     hasProfileToggle: !!profileToggleBtn,
     profileToggleActive,
     profileToggleAfter,
+    liqActiveBefore,
+    cvdActiveBefore,
+    liqActiveAfter,
+    cvdActiveAfter,
+    liqStore,
+    cvdStore,
+    cvdStatOff,
+    cvdStat,
     hasChartToggle: !!q("chart-toggle"),
     hasProfileSidebar: !!q("profile-sidebar"),
     chartCanvases: doc.querySelectorAll("#tv-chart-container canvas").length,
@@ -357,6 +388,11 @@ async function main() {
     out.hasProfileToggle &&
     out.profileToggleActive === true &&
     out.profileToggleAfter === false &&
+    out.liqActiveBefore === true && out.cvdActiveBefore === true &&   // слои по умолчанию вкл
+    out.liqActiveAfter === false && out.cvdActiveAfter === false &&   // клик выключает
+    out.liqStore === "0" && out.cvdStore === "0" &&                   // состояние сохраняется
+    out.cvdStatOff === "" &&                                          // выкл — индикатор пуст
+    /[▲▼]/.test(out.cvdStat) &&                                       // вкл — виден перевес
     !out.hasProfileSidebar &&
     out.hasChartToggle &&
     !!out.titleAfterCoin &&

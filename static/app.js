@@ -31,6 +31,9 @@
         customSymbols: [],
         soundEnabled: false,
         profileEnabled: true,   // профиль ликвидаций по ценам (полосы на графике)
+        liqEnabled: true,       // шарики ликвидаций на графике
+        cvdEnabled: true,       // CVD-стрелки: перевес тейкер-покупок/продаж в свече
+        cvdBars: 0,
         symbols: [],
         details: {},
         prices: {},
@@ -103,6 +106,7 @@
     const chartSection = document.querySelector(".chart-section");
     const chartToggle = $("chart-toggle");
     const profileToggle = $("profile-toggle");
+    const cvdStatEl = $("cvd-stat");
     const langSelect = $("lang-select");
     const symbolButtonsEl = $("symbol-buttons");   // старый контейнер (не используется)
     const symbolCurrentBtn = $("symbol-current");
@@ -487,6 +491,7 @@
         updatePriceDisplay(bars[bars.length - 1].close);
         renderTickIndicator();
         updateMarkers();
+        updateCvdStat();
         queueRedraw();
     }
 
@@ -515,6 +520,7 @@
             if (state.candles.length > 700) state.candles.shift();
         }
         updatePriceDisplay(bar.close);
+        updateCvdStat();
         queueRedraw();
     }
 
@@ -589,6 +595,7 @@
 
     function updateMarkers() {
         if (!candleSeries) return;
+        if (!state.liqEnabled) { applyMarkers([]); return; }
         const tfSec = state.timeframe * 60;
         const byTime = new Map();
 
@@ -634,6 +641,12 @@
 
         drawLiquidationProfile(ctx);   // индикатор: полосы по ценовым уровням
 
+        clusterBalls = [];             // актуальные геометрии шариков — только если слой включён
+        if (state.liqEnabled) drawLiqBalls(ctx);
+        if (state.cvdEnabled) drawCvdArrows(ctx);
+    }
+
+    function drawLiqBalls(ctx) {
         const tfSec = state.timeframe * 60;
         const items = visibleLiquidations();
         if (!items.length || !state.candles.length) return;
@@ -732,6 +745,79 @@
             }
             ctx.restore();
         });
+    }
+
+    // --- CVD-стрелки по свечам -------------------------------------------------
+    // delta = taker buy volume - taker sell volume (USDT) внутри одной свечи.
+    // ▲ зелёная над свечой — цену толкали покупатели; ▼ красная под — продавцы.
+    // Формирующаяся свеча обновляется на каждом тике, после закрытия стрелка
+    // остаётся с финальным значением.
+    function drawCvdArrows(ctx) {
+        const candles = state.candles;
+        if (!candles.length || !chart || !candleSeries) return;
+        let maxAbs = 0;
+        for (let i = 0; i < candles.length; i++) {
+            const d = Math.abs(Number(candles[i].cvd));
+            if (isFinite(d) && d > maxAbs) maxAbs = d;
+        }
+        state.cvdBars = 0;
+        if (!(maxAbs > 0)) return;
+        const minAbs = Math.max(1000, maxAbs * 0.04);   // микрошум не рисуем
+        const ts = chart.timeScale();
+        const W = clusterCanvas.width, H = clusterCanvas.height;
+        const lastIdx = candles.length - 1;
+        for (let i = 0; i < candles.length; i++) {
+            const c = candles[i];
+            const d = Number(c.cvd);
+            if (!isFinite(d) || Math.abs(d) < minAbs) continue;
+            const buy = d > 0;
+            state.cvdBars += 1;
+            let x, y;
+            try {
+                x = ts.timeToCoordinate(c.time);
+                y = candleSeries.priceToCoordinate(buy ? c.high : c.low);
+            } catch (e) { continue; }
+            if (x === null || x === undefined || y === null || y === undefined) continue;
+            if (x < -30 || x > W + 30 || y < -40 || y > H + 40) continue;
+            const k = Math.sqrt(Math.abs(d) / maxAbs);
+            const size = 3.5 + 7.5 * k;
+            const gap = 4;
+            ctx.save();
+            ctx.globalAlpha = 0.45 + 0.55 * k;
+            ctx.fillStyle = buy ? "rgba(0,230,118,0.95)" : "rgba(255,42,95,0.95)";
+            if (i === lastIdx) {           // живая свеча — подсвечиваем сильнее
+                ctx.shadowColor = ctx.fillStyle;
+                ctx.shadowBlur = 10;
+            }
+            ctx.beginPath();
+            if (buy) {                     // ▲ над максимумом
+                ctx.moveTo(x, y - gap - size);
+                ctx.lineTo(x - size * 0.62, y - gap);
+                ctx.lineTo(x + size * 0.62, y - gap);
+            } else {                       // ▼ под минимумом
+                ctx.moveTo(x, y + gap + size);
+                ctx.lineTo(x - size * 0.62, y + gap);
+                ctx.lineTo(x + size * 0.62, y + gap);
+            }
+            ctx.closePath();
+            ctx.fill();
+            ctx.restore();
+        }
+    }
+
+    function updateCvdStat() {
+        if (!cvdStatEl) return;
+        if (!state.cvdEnabled) { cvdStatEl.textContent = ""; return; }
+        const last = state.candles[state.candles.length - 1];
+        const d = last ? Number(last.cvd) : NaN;
+        if (!isFinite(d)) {
+            cvdStatEl.textContent = "CVD —";
+            cvdStatEl.className = "cvd-stat";
+            return;
+        }
+        const buy = d >= 0;
+        cvdStatEl.textContent = (buy ? "▲ +$" : "▼ −$") + fmtUsdShort(Math.abs(d));
+        cvdStatEl.className = "cvd-stat " + (buy ? "up" : "down");
     }
 
     // --- Наведение/нажатие на шарик: подсветка связанных записей в ленте -----
@@ -1071,28 +1157,44 @@
         detailModal.classList.remove("hidden");
     }
 
-    // --- Переключатель профиля ликвидаций на графике -------------------------
-    function setupProfileToggle() {
-        if (!profileToggle) return;
-        try {
-            if (localStorage.getItem("licvid.profileEnabled") === "0") {
-                state.profileEnabled = false;
-            }
-        } catch (e) { /* ignore */ }
-        profileToggle.classList.toggle("active", state.profileEnabled);
-        profileToggle.title = state.profileEnabled
-            ? I18n.t("chart.profile_on")
-            : I18n.t("chart.profile_off");
-        profileToggle.addEventListener("click", () => {
-            state.profileEnabled = !state.profileEnabled;
-            profileToggle.classList.toggle("active", state.profileEnabled);
-            profileToggle.title = state.profileEnabled
-                ? I18n.t("chart.profile_on")
-                : I18n.t("chart.profile_off");
+    // --- Слои графика: ликвидации / профиль / CVD ----------------------------
+    function setupLayerToggles() {
+        const defs = [
+            { el: profileToggle, skey: "profileEnabled", store: "licvid.profileEnabled",
+              on: "chart.profile_on", off: "chart.profile_off" },
+            { el: $("liq-toggle"), skey: "liqEnabled", store: "licvid.liqEnabled",
+              on: "chart.liq_on", off: "chart.liq_off" },
+            { el: $("cvd-toggle"), skey: "cvdEnabled", store: "licvid.cvdEnabled",
+              on: "chart.cvd_on", off: "chart.cvd_off" },
+        ];
+        defs.forEach((d) => {
+            if (!d.el) return;
             try {
-                localStorage.setItem("licvid.profileEnabled", state.profileEnabled ? "1" : "0");
+                const v = localStorage.getItem(d.store);
+                if (v === "0") state[d.skey] = false;
+                else if (v === "1") state[d.skey] = true;
             } catch (e) { /* ignore */ }
-            queueRedraw();
+            const paint = () => {
+                d.el.classList.toggle("active", state[d.skey]);
+                d.el.title = I18n.t(state[d.skey] ? d.on : d.off);
+            };
+            d.el.addEventListener("click", () => {
+                state[d.skey] = !state[d.skey];
+                try {
+                    localStorage.setItem(d.store, state[d.skey] ? "1" : "0");
+                } catch (e) { /* ignore */ }
+                if (d.skey === "liqEnabled" && !state.liqEnabled) {
+                    // с прячущихся шариков снимаем и подсветку ленты
+                    pinBallKey = null;
+                    hoverBallKey = null;
+                    applyFeedHighlight(null, true);
+                }
+                paint();
+                updateMarkers();
+                updateCvdStat();
+                queueRedraw();
+            });
+            paint();
         });
     }
 
@@ -1807,7 +1909,7 @@
         connectWs();
         setInterval(fetchStats, 15000);
         setInterval(renderTickIndicator, 1000);
-        setupProfileToggle();
+        setupLayerToggles();
         setupChartToggle();
         // страховка: если WS молчит дольше 30с — перезапрашиваем свечи
         setInterval(() => {

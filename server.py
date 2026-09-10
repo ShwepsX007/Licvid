@@ -86,6 +86,9 @@ STATS_INTERVAL = float(os.getenv("LICVID_STATS_INTERVAL_MS", "2000")) / 1000.0
 LIQUIDATIONS: Deque[dict] = deque(maxlen=HISTORY_MAX)
 CANDLES: Dict[str, dict] = {}            # "SYM|tf" -> {"candles": [...], "ts", "source"}
 MINUTE_VOL: Dict[str, Dict[int, float]] = {}   # symbol -> {minute_ts: volume}
+# Живая CVD: "SYM|tf" -> {время_начала_свечи: дельта USDT (покупки-продажи)}.
+# Считается из ленты сделок (тейкер-сторона) и дополняет исторические свечи.
+CVD_ACC: Dict[str, Dict[int, float]] = {}
 LAST_TICK_TS: Dict[str, float] = {}            # symbol -> время последней сделки
 LAST_TICK_PRICE: Dict[str, float] = {}         # symbol -> цена последней сделки
 _last_tick_sent: Dict[str, float] = {}         # symbol -> когда последний раз слали
@@ -289,12 +292,23 @@ def viewed_tfs(symbol: str) -> Set[int]:
     return {c.tf for c in hub.clients if c.chart_symbol == symbol}
 
 
-async def on_trade(symbol: str, price: float, qty: float, ts: float):
-    """Каждая сделка по открытому графику: сразу двигаем свечу и шлём тик."""
+async def on_trade(symbol: str, price: float, qty: float, ts: float,
+                   side: str = ""):
+    """Каждая сделка по открытому графику: сразу двигаем свечу и шлём тик.
+
+    side — сторона ТЕЙКЕРА ("BUY" бьёт по аску, "SELL" — по биду). По ней
+    копит живая CVD: сумма (покупки - продажи) в USDT внутри каждой свечи.
+    """
     global TICKS_SEEN
     TICKS_SEEN += 1
     LAST_TICK_TS[symbol] = time.time()
     LAST_TICK_PRICE[symbol] = price
+    try:
+        if side in ("BUY", "SELL") and price > 0 and qty > 0:
+            signed = float(price) * float(qty) * (1 if side == "BUY" else -1)
+            _cvd_add(symbol, float(ts) if ts else time.time(), signed)
+    except (TypeError, ValueError):
+        pass
 
     if TICK_MIN_GAP > 0:
         last = _last_tick_sent.get(symbol, 0.0)
@@ -317,6 +331,55 @@ async def on_trade(symbol: str, price: float, qty: float, ts: float):
         )
 
 
+def _cvd_add(symbol: str, ts: float, signed_usd: float) -> None:
+    """Копит тейкер-дельту по всем таймфреймам: bucket -> накопленная USDT."""
+    for tf in TF_MINUTES:
+        tf_sec = tf * 60
+        bucket = int(ts // tf_sec) * tf_sec
+        acc = CVD_ACC.setdefault(_key(symbol, tf), {})
+        acc[bucket] = round(acc.get(bucket, 0.0) + signed_usd, 2)
+        if len(acc) > 400:                      # чистим древние buckets
+            for old_b in sorted(acc)[:200]:
+                acc.pop(old_b, None)
+
+
+def _cvd_live_of(symbol: str, tf: int, bucket: int) -> Optional[float]:
+    acc = CVD_ACC.get(_key(symbol, tf))
+    if not acc:
+        return None
+    return acc.get(bucket)
+
+
+def _cvd_apply_live(entry: dict, symbol: str, tf: int, bucket: int,
+                    candle: dict) -> None:
+    """CVD текущей свечи = биржевая база (на момент загрузки kline) + новые тики.
+
+    База нужна, чтобы не считать одни и те же сделки дважды: REST-свеча
+    Binance уже включает тикеры с начала свечи, а сверху кладём только тики,
+    прилетевшие после загрузки (их база вычтена в _cvd_seed_base).
+    """
+    live = _cvd_live_of(symbol, tf, bucket)
+    if live is None:
+        return
+    candle["cvd"] = round((entry.get("cvd_base") or 0.0) + live, 2)
+
+
+def _cvd_seed_base(entry: dict, symbol: str, tf: int) -> None:
+    """После загрузки серии свечей фиксируем «базу» для текущей свечи."""
+    series = entry.get("candles") or []
+    if not series:
+        return
+    tf_sec = tf * 60
+    now_bucket = int(time.time() // tf_sec) * tf_sec
+    last = series[-1]
+    if last.get("time") != now_bucket:
+        return
+    rest = last.get("cvd")
+    acc = CVD_ACC.get(_key(symbol, tf), {})
+    entry["cvd_base"] = round(
+        (float(rest) if rest is not None else 0.0) - acc.get(now_bucket, 0.0), 2)
+
+
 def _apply_price_to_candles(symbol: str, price: float,
                             vol_delta: float = 0.0,
                             only_tfs: Optional[Set[int]] = None) -> List[tuple]:
@@ -337,6 +400,7 @@ def _apply_price_to_candles(symbol: str, price: float,
             last["close"] = price
             if vol_delta:
                 last["volume"] = round(last["volume"] + vol_delta, 2)
+            _cvd_apply_live(entry, symbol, tf, bucket, last)
         elif bucket > last["time"]:
             series.append({
                 "time": bucket,
@@ -345,10 +409,13 @@ def _apply_price_to_candles(symbol: str, price: float,
                 "low": min(last["close"], price),
                 "close": price,
                 "volume": round(vol_delta, 2),
+                "cvd": 0.0,
             })
             if len(series) > 600:
                 del series[:len(series) - 600]
             last = series[-1]
+            entry["cvd_base"] = 0.0      # новая свеча — считаем только с её начала
+            _cvd_apply_live(entry, symbol, tf, bucket, last)
         else:
             continue
         updated.append((tf, dict(last)))
@@ -400,9 +467,24 @@ async def get_candles(symbol: str, tf: int, force: bool = False) -> dict:
     real = None
     if feed:
         real = await feed.fetch_klines(symbol, tf, limit=300)
+        if real and any(c.get("cvd") is None for c in real[-30:]):
+            # источник свечей (Bybit/OKX) тейкер-полей не даёт —
+            # тянем историю CVD с Binance → OKX и подшиваем по времени свечи
+            try:
+                cvd_map = await feed.fetch_cvd(symbol, tf, candles=real,
+                                               limit=max(len(real), 300))
+            except Exception:
+                cvd_map = None
+            if cvd_map:
+                for c in real:
+                    if c.get("cvd") is None:
+                        d = cvd_map.get(c["time"])
+                        if d is not None:
+                            c["cvd"] = d
     if real:
         # сохраняем «живой» хвост, если биржа ещё не закрыла текущую свечу
         CANDLES[k] = {"candles": real, "ts": time.time(), "source": "exchange"}
+        _cvd_seed_base(CANDLES[k], symbol, tf)
         return CANDLES[k]
 
     if entry:
@@ -429,8 +511,12 @@ async def get_candles(symbol: str, tf: int, force: bool = False) -> dict:
         else:
             series.append({"time": now_bucket - (n * tf_sec), "open": price,
                            "high": price, "low": price, "close": price, "volume": 0.0})
+    if DEMO_MODE:
+        for c in series:
+            c["cvd"] = round((c.get("volume") or 1e4) * random.uniform(-0.35, 0.35), 2)
     CANDLES[k] = {"candles": series, "ts": time.time(),
                   "source": "demo" if DEMO_MODE else "unavailable"}
+    _cvd_seed_base(CANDLES[k], symbol, tf)
     return CANDLES[k]
 
 
@@ -652,7 +738,8 @@ async def demo_tick_walk():
                 p = feed.prices.get(symbol) or DEMO_SEED_PRICES.get(symbol) or 100.0
                 p = max(p * (1 + random.gauss(0, 0.00025)), 1e-12)
                 feed.prices[symbol] = p
-                await on_trade(symbol, p, random.uniform(0.01, 3.0), time.time())
+                await on_trade(symbol, p, random.uniform(0.01, 3.0), time.time(),
+                               random.choice(("BUY", "SELL")))
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -904,6 +991,7 @@ async def api_health():
     data["tick_subscriptions"] = sorted(feed.tick_subscriptions) if feed else []
     data["tick_source"] = feed.status["ticks"].name if feed else None
     data["kline_source_preferred"] = feed.preferred_kline_source if feed else None
+    data["cvd_source"] = getattr(feed, "cvd_source", None) if feed else None
     last_tick = max(LAST_TICK_TS.values(), default=None)
     data["seconds_since_last_tick"] = (round(time.time() - last_tick, 2)
                                        if last_tick else None)

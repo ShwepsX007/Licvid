@@ -65,10 +65,10 @@
     let audioCtx = null;
     let redrawQueued = false;
 
-    // Хит-тест шариков: координаты и ids событий из последнего drawClusters()
-    let clusterBalls = [];        // [{x, y, r, key, ids:[...]}]
-    let hoverBallKey = null;      // шарик под курсором (наведение)
-    let pinBallKey = null;        // шарик, закреплённый кликом/тапом
+    // Хит-тест прямоугольников: координаты и ids событий из последнего drawClusters()
+    let clusterHits = [];         // [{x, y, w, h, key, ids:[...]}]
+    let hoverHitKey = null;       // прямоугольник под курсором (наведение)
+    let pinHitKey = null;         // прямоугольник, закреплённый кликом/тапом
 
     // --- DOM ---------------------------------------------------------------
     const $ = (id) => document.getElementById(id);
@@ -587,14 +587,64 @@
             x.usd >= state.minUsd);
     }
 
-    // Палитра ликвидаций специально НЕ повторяет цвета свечей (зелёный/красный),
-    // иначе шарик внутри свечи сливается с её телом.
+    // Палитра ликвидаций: мелкие события кодируют СТОРОНУ (маджента — вынесли
+    // лонг, циан — вынесли шорт), а киты от $100K — ОБЪЁМ по тепловой шкале
+    // от жёлтого к ярко-красному (см. HEAT_STOPS ниже).
     const LIQ_COLORS = {
-        long:  { fill: "rgba(255,45,149,0.92)", ring: "#ffd7ec" },   // вынесли ЛОНГ — маджента
-        short: { fill: "rgba(0,214,255,0.92)",  ring: "#ccf6ff" },   // вынесли ШОРТ — циан
-        whale: { fill: "rgba(255,206,0,0.96)",  ring: "#fff6cc" },   // кит — золото
+        long:  { fill: "rgba(255,45,149,0.92)", ring: "#ffd7ec", text: "#04070d" },
+        short: { fill: "rgba(0,214,255,0.92)",  ring: "#ccf6ff", text: "#04070d" },
     };
     const WHALE_USD = 100000;
+    const LIQ_LABEL_MIN_USD = 2000;   // меньше — рисуем чип без подписи
+
+    // Тепловая шкала китов: [порог $, R, G, B]. Между соседними стопами цвет
+    // интерполируется, выше последнего — ярко-красный с растущим свечением.
+    const HEAT_STOPS = [
+        [100000, 255, 206, 0],    // $100K — жёлтый
+        [300000, 255, 168, 0],    // $300K — жёлто-оранжевый
+        [500000, 255, 128, 0],    // $500K — оранжевый
+        [1000000, 255, 72, 0],    // $1M — красно-оранжевый
+        [2000000, 255, 30, 8],    // $2M — красный
+        [5000000, 255, 16, 48],   // $5M+ — ярко-красный
+    ];
+
+    function heatRGB(usd) {
+        const first = HEAT_STOPS[0], last = HEAT_STOPS[HEAT_STOPS.length - 1];
+        if (usd <= first[0]) return [first[1], first[2], first[3]];
+        for (let i = 1; i < HEAT_STOPS.length; i++) {
+            if (usd <= HEAT_STOPS[i][0]) {
+                const a = HEAT_STOPS[i - 1], b = HEAT_STOPS[i];
+                const k = (usd - a[0]) / (b[0] - a[0]);
+                return [
+                    Math.round(a[1] + (b[1] - a[1]) * k),
+                    Math.round(a[2] + (b[2] - a[2]) * k),
+                    Math.round(a[3] + (b[3] - a[3]) * k),
+                ];
+            }
+        }
+        return [last[1], last[2], last[3]];
+    }
+
+    function heatTheme(usd) {
+        const c = heatRGB(usd);
+        const lum = (0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]) / 255;
+        const mx = (v) => Math.round(v + (255 - v) * 0.55);
+        return {
+            fill: "rgba(" + c[0] + "," + c[1] + "," + c[2] + ",0.95)",
+            ring: "rgb(" + mx(c[0]) + "," + mx(c[1]) + "," + mx(c[2]) + ")",
+            text: lum > 0.5 ? "#1a1200" : "#ffffff",
+        };
+    }
+
+    function heatCss(usd) {
+        const c = heatRGB(usd);
+        return "rgb(" + c[0] + "," + c[1] + "," + c[2] + ")";
+    }
+
+    // Компактная подпись: $150K вместо $150.0K, $2.5M вместо $2.50M.
+    function fmtCompact(v) {
+        return "$" + fmtUsdShort(v).replace(/(\.\d)0+([KM])/, "$1$2").replace(/\.0+([KM])/, "$1");
+    }
 
     function updateMarkers() {
         if (!candleSeries) return;
@@ -603,7 +653,7 @@
         const byTime = new Map();
 
         // Метками помечаем только крупные события — всё остальное рисуем
-        // шариками прямо на свече, чтобы не засорять поле графика.
+        // прямоугольниками прямо на свече, чтобы не засорять поле графика.
         visibleLiquidations().slice(-400).forEach((item) => {
             if (item.usd < WHALE_USD) return;
             const t = Math.floor(item.timestamp / tfSec) * tfSec;
@@ -619,9 +669,9 @@
             .map((m) => ({
                 time: m.time,
                 position: m.side === "SELL" ? "aboveBar" : "belowBar",
-                color: LIQ_COLORS.whale.fill,
+                color: heatCss(m.usd),
                 shape: "circle",
-                text: "🔥 $" + fmtUsdShort(m.usd),
+                text: "🔥 " + fmtCompact(m.usd),
             }))
             .sort((a, b) => a.time - b.time);
 
@@ -644,20 +694,25 @@
 
         drawLiquidationProfile(ctx);   // индикатор: полосы по ценовым уровням
 
-        clusterBalls = [];             // актуальные геометрии шариков — только если слой включён
-        if (state.liqEnabled) drawLiqBalls(ctx);
-        if (state.cvdEnabled) drawCvdArrows(ctx);
+        clusterHits = [];              // актуальные геометрии — только если слой включён
+        if (state.liqEnabled) drawLiqRects(ctx);
+        if (state.cvdEnabled) drawCvdBalls(ctx);
     }
 
-    function drawLiqBalls(ctx) {
+    // --- Прямоугольники ликвидаций ---------------------------------------------
+    // Каждый кластер — скруглённый прямоугольник с суммой. Мелкие (< $100K)
+    // красятся по стороне (маджента/циан), киты — по тепловой шкале объёма.
+    // Совсем мелкие (< $2K) рисуются чипом без текста; подписанные
+    // прямоугольники не налезают друг на друга (жадная раскладка).
+    function drawLiqRects(ctx) {
         const tfSec = state.timeframe * 60;
         const items = visibleLiquidations();
         if (!items.length || !state.candles.length) return;
 
-        // Свечи по времени: шарик рисуем только там, где свеча реально есть,
-        // и прижимаем цену к её диапазону low..high. Биржи отдают цену
+        // Свечи по времени: прямоугольник рисуем только там, где свеча реально
+        // есть, и прижимаем цену к её диапазону low..high. Биржи отдают цену
         // банкротства, она может уходить далеко от рынка — раньше из-за этого
-        // шарики улетали в пустоту.
+        // метки улетали в пустоту.
         const bars = new Map();
         state.candles.forEach((c) => bars.set(c.time, c));
 
@@ -672,7 +727,7 @@
             if (!isFinite(price)) price = bar.close;
             price = Math.min(Math.max(price, lo), hi);
             // Внутри свечи раскладываем по 6 уровням, чтобы близкие
-            // ликвидации слипались в один шарик, а не рисовались стопкой.
+            // ликвидации слипались в один прямоугольник.
             const span = hi - lo;
             const level = span > 0 ? Math.round(((price - lo) / span) * 5) : 0;
             const key = t + "_" + level;
@@ -690,9 +745,13 @@
 
         const ts = chart.timeScale();
         const list = Array.from(clusters.values()).sort((a, b) => a.total - b.total);
-        const activeKey = pinBallKey || hoverBallKey;   // закреплённый важнее
+        const activeKey = pinHitKey || hoverHitKey;   // закреплённый важнее
 
-        clusterBalls = [];
+        clusterHits = [];
+        const labeled = [];   // подписанные прямоугольники — защита от налезания
+        ctx.save();
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
         list.forEach((c) => {
             const price = c.hi > c.lo ? c.lo + ((c.hi - c.lo) * c.level) / 5 : c.lo;
             let x, y;
@@ -701,65 +760,91 @@
                 y = candleSeries.priceToCoordinate(price);
             } catch (e) { return; }
             if (x === null || y === null || x === undefined || y === undefined) return;
-            if (x < -30 || x > clusterCanvas.width + 30) return;
+            if (x < -40 || x > clusterCanvas.width + 40) return;
             if (y < -30 || y > clusterCanvas.height + 30) return;
 
             const whale = c.total >= WHALE_USD;
             const isLong = c.longUsd >= c.shortUsd;
-            const theme = whale ? LIQ_COLORS.whale : (isLong ? LIQ_COLORS.long : LIQ_COLORS.short);
-            const radius = Math.min(Math.max(Math.log10(Math.max(c.total, 10)) * 3.4, 5), 20);
+            const theme = whale ? heatTheme(c.total) : (isLong ? LIQ_COLORS.long : LIQ_COLORS.short);
+            const wantLabel = whale || c.total >= LIQ_LABEL_MIN_USD;
+
+            let bw, bh, label;
+            if (wantLabel) {
+                ctx.font = "bold 9px 'JetBrains Mono', monospace";
+                label = fmtCompact(c.total);
+                bw = Math.max(30, Math.ceil(ctx.measureText(label).width) + 12);
+                bh = whale ? 16 + Math.min(6, (Math.log10(c.total) - 5) * 2.5) : 15;
+            } else {
+                bw = 10; bh = 10; label = "";
+            }
+            const bx = Math.round(x - bw / 2), by = Math.round(y - bh / 2);
+
+            // Подписанный прямоугольник, налезающий на другой подписанный, —
+            // рисуем чипом без текста (кроме китов: киты всегда с текстом).
+            let showLabel = wantLabel;
+            if (wantLabel && !whale) {
+                for (let j = 0; j < labeled.length; j++) {
+                    const p = labeled[j];
+                    if (bx < p.x + p.w + 2 && bx + bw + 2 > p.x &&
+                        by < p.y + p.h + 2 && by + bh + 2 > p.y) {
+                        showLabel = false;
+                        bw = 10; bh = 10;
+                        break;
+                    }
+                }
+            }
+            const fx = showLabel ? bx : Math.round(x - bw / 2);
+            const fy = showLabel ? by : Math.round(y - bh / 2);
+            if (showLabel) labeled.push({ x: fx, y: fy, w: bw, h: bh });
+
             const isActive = activeKey === c.key;
+            clusterHits.push({ x: fx, y: fy, w: bw, h: bh, key: c.key, ids: c.ids });
 
-            clusterBalls.push({ x: x, y: y, r: radius, key: c.key, ids: c.ids });
+            const glow = 6 + Math.min(12, (Math.log10(Math.max(c.total, 10)) - 3) * 3);
+            const rad = showLabel ? 4 : 3;
 
-            ctx.save();
-            // Тёмная подложка отделяет шарик от тела свечи любого цвета
-            ctx.beginPath();
-            ctx.arc(x, y, radius + 1.6, 0, 2 * Math.PI);
+            // Тёмная подложка отделяет прямоугольник от тела свечи любого цвета
+            rrPath(ctx, fx - 1.5, fy - 1.5, bw + 3, bh + 3, rad + 1);
             ctx.fillStyle = "rgba(5,8,14,0.85)";
             ctx.fill();
 
-            ctx.beginPath();
-            ctx.arc(x, y, radius, 0, 2 * Math.PI);
-            ctx.fillStyle = theme.fill;
             ctx.shadowColor = theme.fill;
-            ctx.shadowBlur = whale ? 14 : 7;
+            ctx.shadowBlur = glow;
+            rrPath(ctx, fx, fy, bw, bh, rad);
+            ctx.fillStyle = theme.fill;
             ctx.fill();
             ctx.shadowBlur = 0;
-            ctx.lineWidth = whale ? 2 : 1.4;
+            ctx.lineWidth = whale ? 1.8 : 1.2;
             ctx.strokeStyle = theme.ring;
             ctx.stroke();
 
-            // Активный шарик (наведение/нажатие) — белое кольцо поверх
+            // Активный прямоугольник (наведение/нажатие) — белое кольцо поверх
             if (isActive) {
-                ctx.beginPath();
-                ctx.arc(x, y, radius + 4, 0, 2 * Math.PI);
-                ctx.lineWidth = 2;
+                rrPath(ctx, fx - 3.5, fy - 3.5, bw + 7, bh + 7, rad + 2);
+                ctx.lineWidth = 1.8;
                 ctx.strokeStyle = "rgba(255,255,255,0.95)";
                 ctx.stroke();
             }
 
-            if (radius >= 11) {
-                ctx.fillStyle = whale ? "#1a1200" : "#04070d";
+            if (showLabel) {
                 ctx.font = "bold 9px 'JetBrains Mono', monospace";
-                ctx.textAlign = "center";
-                ctx.textBaseline = "middle";
-                ctx.fillText("$" + fmtUsdShort(c.total), x, y);
+                ctx.fillStyle = theme.text;
+                ctx.fillText(label, x, y + 0.5);
             }
-            ctx.restore();
         });
+        ctx.restore();
     }
 
-    // --- CVD-бейджи в центре свечи -----------------------------------------------
+    // --- CVD-шарики в центре свечи ------------------------------------------------
     // delta = taker buy volume - taker sell volume (USDT) внутри одной свечи.
-    // Бейдж стоит СТРОГО в центре тела свечи и подписан суммой — как шарики
-    // ликвидаций. Палитра специально НЕ повторяет ни свечи (зелёный/красный),
-    // ни ликвидации (маджента/циан/золото): покупки — фиолет, продажи — оранж.
+    // Шарик стоит СТРОГО в центре тела свечи; крупные подписаны суммой.
+    // Палитра специально НЕ повторяет ни свечи (зелёный/красный), ни тепловую
+    // шкалу ликвидаций (жёлтый→красный): покупки — фиолет, продажи — оранж.
     const CVD_COLORS = {
         buy:  { fill: "rgba(139,92,246,0.96)",  ring: "#e6d9ff", text: "#0d0618" },
         sell: { fill: "rgba(255,145,0,0.96)",   ring: "#ffe3b8", text: "#1c0d00" },
     };
-    const CVD_MAX_BADGES = 48;
+    const CVD_MAX_BALLS = 40;
 
     function rrPath(ctx, x, y, w, h, r) {
         r = Math.min(r, w / 2, h / 2);
@@ -776,7 +861,7 @@
         }
     }
 
-    function drawCvdArrows(ctx) {
+    function drawCvdBalls(ctx) {
         const candles = state.candles;
         if (!candles.length || !chart || !candleSeries) return;
         let maxAbs = 0;
@@ -802,15 +887,14 @@
 
         const ts = chart.timeScale();
         const W = clusterCanvas.width, H = clusterCanvas.height;
-        const placed = [];   // занятые прямоугольники — защита от налезания
+        const placed = [];   // центры и радиусы — защита от налезания
         let drawn = 0;
 
         ctx.save();
-        ctx.font = "bold 9px 'JetBrains Mono', monospace";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
 
-        for (let k = 0; k < cand.length && drawn < CVD_MAX_BADGES; k++) {
+        for (let k = 0; k < cand.length && drawn < CVD_MAX_BALLS; k++) {
             const c = cand[k].c, d = cand[k].d;
             const buy = d > 0;
             // центр ТЕЛА свечи — середина между open и close
@@ -821,50 +905,67 @@
                 y = candleSeries.priceToCoordinate(mid);
             } catch (e) { continue; }
             if (x === null || x === undefined || y === null || y === undefined) continue;
-            if (x < -40 || x > W + 40 || y < -30 || y > H + 30) continue;
+            const kk = Math.sqrt(Math.abs(d) / maxAbs);
+            const r = 9 + 15 * kk;
+            if (x < -r - 10 || x > W + r + 10 || y < -r - 10 || y > H + r + 10) continue;
 
-            const label = (buy ? "▲ +$" : "▼ −$") + fmtUsdShort(Math.abs(d));
-            const bw = Math.ceil(ctx.measureText(label).width) + 12;
-            const bh = 16;
-            const bx = Math.round(x - bw / 2), by = Math.round(y - bh / 2);
-
-            // налезает на уже нарисованный бейдж? пропускаем более слабый
+            // налезает на уже нарисованный шарик? пропускаем более слабый
             let clash = false;
             for (let j = 0; j < placed.length; j++) {
                 const p = placed[j];
-                if (bx < p.x + p.w + 2 && bx + bw + 2 > p.x &&
-                    by < p.y + p.h + 2 && by + bh + 2 > p.y) { clash = true; break; }
+                const dx = x - p.x, dy = y - p.y;
+                const rr = r + p.r + 2;
+                if (dx * dx + dy * dy <= rr * rr) { clash = true; break; }
             }
             if (clash) continue;
-            placed.push({ x: bx, y: by, w: bw, h: bh });
+            placed.push({ x: x, y: y, r: r });
 
             const theme = buy ? CVD_COLORS.buy : CVD_COLORS.sell;
+            const glyph = buy ? "▲" : "▼";
 
-            // тёмная подложка — бейдж читается на свече любого цвета
-            rrPath(ctx, bx - 1.5, by - 1.5, bw + 3, bh + 3, 5);
+            // Тёмная подложка — шарик читается на свече любого цвета
+            ctx.beginPath();
+            ctx.arc(x, y, r + 1.6, 0, 2 * Math.PI);
             ctx.fillStyle = "rgba(5,8,14,0.88)";
             ctx.fill();
 
             ctx.shadowColor = theme.fill;
-            ctx.shadowBlur = cand[k].live ? 14 : 8;
-            rrPath(ctx, bx, by, bw, bh, 4);
+            ctx.shadowBlur = cand[k].live ? 16 : 9;
+            ctx.beginPath();
+            ctx.arc(x, y, r, 0, 2 * Math.PI);
             ctx.fillStyle = theme.fill;
             ctx.fill();
             ctx.shadowBlur = 0;
-            ctx.lineWidth = 1.2;
+            ctx.lineWidth = 1.4;
             ctx.strokeStyle = theme.ring;
             ctx.stroke();
 
             if (cand[k].live) {
                 // живая свеча — белое кольцо поверх
-                rrPath(ctx, bx - 3.5, by - 3.5, bw + 7, bh + 7, 7);
-                ctx.lineWidth = 1.6;
+                ctx.beginPath();
+                ctx.arc(x, y, r + 3.5, 0, 2 * Math.PI);
+                ctx.lineWidth = 1.8;
                 ctx.strokeStyle = "rgba(255,255,255,0.9)";
                 ctx.stroke();
             }
 
+            // Сумма — второй строкой, если помещается в круг
+            ctx.font = "bold 8px 'JetBrains Mono', monospace";
+            const val = fmtCompact(Math.abs(d));
+            const tw = ctx.measureText(val).width;
+            const hasValue = r >= 12.5 && tw <= 1.85 * r - 6;
             ctx.fillStyle = theme.text;
-            ctx.fillText(label, x, y + 0.5);
+            if (hasValue) {
+                const gs = Math.max(8, Math.min(12, Math.round(r * 0.62)));
+                ctx.font = "bold " + gs + "px 'JetBrains Mono', monospace";
+                ctx.fillText(glyph, x, y - r * 0.26);
+                ctx.font = "bold 8px 'JetBrains Mono', monospace";
+                ctx.fillText(val, x, y + r * 0.36);
+            } else {
+                const gs = Math.max(8, Math.min(13, Math.round(r * 0.8)));
+                ctx.font = "bold " + gs + "px 'JetBrains Mono', monospace";
+                ctx.fillText(glyph, x, y + 0.5);
+            }
             drawn += 1;
         }
         ctx.restore();
@@ -934,23 +1035,22 @@
         for (let i = 0; i < coins.length; i++) coins[i].textContent = base;
     }
 
-    // --- Наведение/нажатие на шарик: подсветка связанных записей в ленте -----
-    function ballAt(px, py) {
-        for (let i = clusterBalls.length - 1; i >= 0; i--) {
-            const b = clusterBalls[i];
-            const dx = px - b.x, dy = py - b.y;
-            const rr = b.r + 5;
-            if (dx * dx + dy * dy <= rr * rr) return b;
+    // --- Наведение/нажатие на прямоугольник: подсветка связанных записей в ленте --
+    function hitAt(px, py) {
+        for (let i = clusterHits.length - 1; i >= 0; i--) {
+            const b = clusterHits[i];
+            if (px >= b.x - 4 && px <= b.x + b.w + 4 &&
+                py >= b.y - 4 && py <= b.y + b.h + 4) return b;
         }
         return null;
     }
 
     function applyFeedHighlight(ball, pin) {
         if (pin) {
-            pinBallKey = ball ? ball.key : null;
-            if (!ball) hoverBallKey = null;
+            pinHitKey = ball ? ball.key : null;
+            if (!ball) hoverHitKey = null;
         } else {
-            hoverBallKey = ball ? ball.key : null;
+            hoverHitKey = ball ? ball.key : null;
         }
         const ids = ball ? new Set(ball.ids) : null;
         let firstRow = null;
@@ -974,17 +1074,17 @@
             // наведение (и палец на телефоне при движении по графику)
             chart.subscribeCrosshairMove((param) => {
                 if (!param || !param.point) {
-                    if (!pinBallKey) applyFeedHighlight(null, false);
+                    if (!pinHitKey) applyFeedHighlight(null, false);
                     return;
                 }
-                if (pinBallKey) return;   // закреплено кликом/тапом — не дёргаем
-                applyFeedHighlight(ballAt(param.point.x, param.point.y), false);
+                if (pinHitKey) return;   // закреплено кликом/тапом — не дёргаем
+                applyFeedHighlight(hitAt(param.point.x, param.point.y), false);
             });
-            // клик/тап: закрепить шарик; повторный клик по тому же — снять
+            // клик/тап: закрепить прямоугольник; повторный клик по нему — снять
             chart.subscribeClick((param) => {
                 const ball = (param && param.point)
-                    ? ballAt(param.point.x, param.point.y) : null;
-                if (ball && ball.key === pinBallKey) {
+                    ? hitAt(param.point.x, param.point.y) : null;
+                if (ball && ball.key === pinHitKey) {
                     applyFeedHighlight(null, true);
                 } else {
                     applyFeedHighlight(ball, true);
@@ -1026,45 +1126,117 @@
         const saveLayout = () => {
             try { localStorage.setItem("licvid.layout", JSON.stringify(layout)); } catch (e) { /* ignore */ }
         };
+        // Живой ресайз графика во время перетаскивания (мобильная высота):
+        // ResizeObserver и сам подхватит, но явный вызов надёжнее на телефонах.
+        let chartResizeQueued = false;
+        const requestChartResize = () => {
+            if (chartResizeQueued) return;
+            chartResizeQueued = true;
+            requestAnimationFrame(() => {
+                chartResizeQueued = false;
+                try { window.dispatchEvent(new Event("resize")); } catch (e) { /* ignore */ }
+                queueRedraw();
+            });
+        };
         const bind = (el, axis) => {
             if (!el) return;
-            el.addEventListener("pointerdown", (e) => {
-                e.preventDefault();
+            const isX = axis === "x";
+            const startValue = () => isX ? layout.feedW
+                : axis === "y" ? layout.coinsH
+                : (layout.mChartH > 0 ? layout.mChartH : currentChartVh());
+            const applyAxis = (startVal, delta) => {
+                if (isX) {
+                    // лента прижата к правому краю: тянем разделитель вправо →
+                    // её ширина УМЕНЬШАЕТСЯ (иначе блоки «уезжают» влево)
+                    layout.feedW = clampPx(startVal - delta, 280, 720);
+                } else if (axis === "mchart") {
+                    // телефон: тянем разделитель вниз → график становится ВЫШЕ
+                    const vh = window.innerHeight > 0 ? window.innerHeight : 800;
+                    layout.mChartH = clampPx(startVal + (delta / vh) * 100, 20, 88);
+                } else {
+                    layout.coinsH = clampPx(startVal - delta, 90, 460);
+                }
+                applyLayout();
+                if (axis === "mchart") requestChartResize();
+            };
+            let session = null;   // {kind:"p"|"t", id, start, startVal}
+            const begin = (kind, id, clientX, clientY) => {
+                if (session) return false;
+                session = { kind: kind, id: id,
+                    start: isX ? clientX : clientY, startVal: startValue() };
                 el.classList.add("active");
                 document.body.classList.add("split-dragging");
-                if (axis === "y" || axis === "mchart") document.body.classList.add("split-dragging-y");
-                const start = axis === "x" ? e.clientX : e.clientY;
-                const startVal = axis === "x" ? layout.feedW
-                    : axis === "y" ? layout.coinsH
-                    : (layout.mChartH > 0 ? layout.mChartH : currentChartVh());
+                if (!isX) document.body.classList.add("split-dragging-y");
+                return true;
+            };
+            const end = () => {
+                if (!session) return;
+                session = null;
+                el.classList.remove("active");
+                document.body.classList.remove("split-dragging", "split-dragging-y");
+                saveLayout();
+            };
+            const moveTo = (clientX, clientY) => {
+                if (!session) return;
+                applyAxis(session.startVal, (isX ? clientX : clientY) - session.start);
+            };
+            // Pointer Events: мышь и современные тач-браузеры. Захватываем
+            // указатель, чтобы движение не терялось, даже если палец ушёл
+            // с ручки.
+            el.addEventListener("pointerdown", (e) => {
+                if (e.isPrimary === false) return;
+                e.preventDefault();
+                if (!begin("p", e.pointerId, e.clientX, e.clientY)) return;
+                try { if (el.setPointerCapture) el.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
                 const move = (ev) => {
+                    if (!session || session.kind !== "p" || ev.pointerId !== session.id) return;
                     ev.preventDefault();
-                    const delta = (axis === "x" ? ev.clientX : ev.clientY) - start;
-                    if (axis === "x") {
-                        // лента прижата к правому краю: тянем разделитель вправо →
-                        // её ширина УМЕНЬШАЕТСЯ (иначе блоки «уезжают» влево)
-                        layout.feedW = clampPx(startVal - delta, 280, 720);
-                    } else if (axis === "mchart") {
-                        // телефон: тянем разделитель вниз → график становится ВЫШЕ
-                        const vh = window.innerHeight > 0 ? window.innerHeight : 800;
-                        layout.mChartH = clampPx(startVal + (delta / vh) * 100, 20, 88);
-                    } else {
-                        layout.coinsH = clampPx(startVal - delta, 90, 460);
-                    }
-                    applyLayout();
+                    moveTo(ev.clientX, ev.clientY);
                 };
-                const up = () => {
-                    el.classList.remove("active");
-                    document.body.classList.remove("split-dragging", "split-dragging-y");
+                const up = (ev) => {
+                    if (!session || session.kind !== "p") return;
+                    if (ev && ev.pointerId !== undefined && ev.pointerId !== session.id) return;
                     window.removeEventListener("pointermove", move);
                     window.removeEventListener("pointerup", up);
                     window.removeEventListener("pointercancel", up);
-                    saveLayout();
+                    if (el.removeEventListener) el.removeEventListener("lostpointercapture", up);
+                    end();
                 };
                 window.addEventListener("pointermove", move);
                 window.addEventListener("pointerup", up);
                 window.addEventListener("pointercancel", up);
+                el.addEventListener("lostpointercapture", up);
             });
+            // Touch-фолбэк для браузеров без Pointer Events. pointerdown
+            // срабатывает раньше touchstart, поэтому при рабочем pointer-пути
+            // сессия уже занята и эти обработчики молча отступают.
+            el.addEventListener("touchstart", (e) => {
+                if (session) return;
+                if (!e.changedTouches || !e.changedTouches.length) return;
+                e.preventDefault();
+                const t = e.changedTouches[0];
+                begin("t", t.identifier, t.clientX, t.clientY);
+            }, { passive: false });
+            el.addEventListener("touchmove", (e) => {
+                if (!session || session.kind !== "t") return;
+                e.preventDefault();
+                const ts = e.changedTouches || [];
+                for (let i = 0; i < ts.length; i++) {
+                    if (ts[i].identifier === session.id) {
+                        moveTo(ts[i].clientX, ts[i].clientY);
+                        break;
+                    }
+                }
+            }, { passive: false });
+            const touchEnd = (e) => {
+                if (!session || session.kind !== "t") return;
+                const ts = (e && e.changedTouches) || [];
+                for (let i = 0; i < ts.length; i++) {
+                    if (ts[i].identifier === session.id) { end(); break; }
+                }
+            };
+            el.addEventListener("touchend", touchEnd);
+            el.addEventListener("touchcancel", touchEnd);
         };
         bind($("split-feed-x"), "x");
         bind($("split-coins-y"), "y");
@@ -1193,7 +1365,7 @@
                 ctx.font = "8px 'JetBrains Mono', monospace";
                 ctx.textAlign = "left";
                 ctx.textBaseline = "middle";
-                ctx.fillText("$" + fmtUsdShort(b.total), x0 + rowW + 4, y);
+                ctx.fillText(fmtCompact(b.total), x0 + rowW + 4, y);
             }
         }
         ctx.restore();
@@ -1256,8 +1428,8 @@
 
     function rebuildFeed() {
         // строки пересоздаются — закреплённая подсветка шарика гаснет
-        pinBallKey = null;
-        hoverBallKey = null;
+        pinHitKey = null;
+        hoverHitKey = null;
         const rows = state.liquidations.filter(passesFeedFilter).slice(-150).reverse();
         feedTbody.innerHTML = "";
         const frag = document.createDocumentFragment();
@@ -1317,9 +1489,9 @@
                     localStorage.setItem(d.store, state[d.skey] ? "1" : "0");
                 } catch (e) { /* ignore */ }
                 if (d.skey === "liqEnabled" && !state.liqEnabled) {
-                    // с прячущихся шариков снимаем и подсветку ленты
-                    pinBallKey = null;
-                    hoverBallKey = null;
+                    // с прячущихся прямоугольников снимаем и подсветку ленты
+                    pinHitKey = null;
+                    hoverHitKey = null;
                     applyFeedHighlight(null, true);
                 }
                 paint();

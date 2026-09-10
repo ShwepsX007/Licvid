@@ -595,14 +595,36 @@
     }
 
     // Палитра ликвидаций: мелкие события кодируют СТОРОНУ (маджента — вынесли
-    // лонг, циан — вынесли шорт), а киты от $100K — ОБЪЁМ по тепловой шкале
-    // от жёлтого к ярко-красному (см. HEAT_STOPS ниже).
+    // лонг, циан — вынесли шорт), а киты — ОБЪЁМ по тепловой шкале
+    // от жёлтого к ярко-красному (см. HEAT_STOPS ниже). Порог кита
+    // масштабируется от оборота монеты (для BTC — $100K, см. volScale).
     const LIQ_COLORS = {
         long:  { fill: "rgba(255,45,149,0.92)", ring: "#ffd7ec", text: "#04070d" },
         short: { fill: "rgba(0,214,255,0.92)",  ring: "#ccf6ff", text: "#04070d" },
     };
     const WHALE_USD = 100000;
     const LIQ_LABEL_MIN_USD = 2000;   // меньше — рисуем чип без подписи
+
+    // --- Масштаб «крупности» от оборота монеты -------------------------------
+    // Пороги китов/подписей/тиров заданы для BTC; для остальных монет умножаем
+    // на отношение средненедельного оборота к BTC. Что для BTC пыль ($100K),
+    // для GRAM — кит. Нет данных об оборотах — масштаб 1, как раньше.
+    function volOf(d) {
+        return Number(d.volAvg7d) || Number(d.volume24h) || 0;
+    }
+    function volAnchor() {
+        const b = volOf(state.details["BTC_USDT"] || {});
+        if (b > 0) return b;
+        let mx = 0;
+        for (const k in state.details) mx = Math.max(mx, volOf(state.details[k] || {}));
+        return mx;
+    }
+    function volScale(symbol) {
+        const a = volAnchor(), v = volOf(state.details[symbol] || {});
+        if (!(v > 0) || !(a > 0)) return 1;
+        return Math.min(2, Math.max(0.001, v / a));
+    }
+    function chartVolScale() { return volScale(chartSymbol()); }
 
     // Тепловая шкала китов: [порог $, R, G, B]. Между соседними стопами цвет
     // интерполируется, выше последнего — ярко-красный с растущим свечением.
@@ -615,25 +637,26 @@
         [5000000, 255, 16, 48],   // $5M+ — ярко-красный
     ];
 
-    function heatRGB(usd) {
+    function heatRGB(usd, k) {
+        k = k || 1;
         const first = HEAT_STOPS[0], last = HEAT_STOPS[HEAT_STOPS.length - 1];
-        if (usd <= first[0]) return [first[1], first[2], first[3]];
+        if (usd <= first[0] * k) return [first[1], first[2], first[3]];
         for (let i = 1; i < HEAT_STOPS.length; i++) {
-            if (usd <= HEAT_STOPS[i][0]) {
+            if (usd <= HEAT_STOPS[i][0] * k) {
                 const a = HEAT_STOPS[i - 1], b = HEAT_STOPS[i];
-                const k = (usd - a[0]) / (b[0] - a[0]);
+                const t = (usd - a[0] * k) / ((b[0] - a[0]) * k);
                 return [
-                    Math.round(a[1] + (b[1] - a[1]) * k),
-                    Math.round(a[2] + (b[2] - a[2]) * k),
-                    Math.round(a[3] + (b[3] - a[3]) * k),
+                    Math.round(a[1] + (b[1] - a[1]) * t),
+                    Math.round(a[2] + (b[2] - a[2]) * t),
+                    Math.round(a[3] + (b[3] - a[3]) * t),
                 ];
             }
         }
         return [last[1], last[2], last[3]];
     }
 
-    function heatTheme(usd) {
-        const c = heatRGB(usd);
+    function heatTheme(usd, k) {
+        const c = heatRGB(usd, k);
         const lum = (0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]) / 255;
         const mx = (v) => Math.round(v + (255 - v) * 0.55);
         return {
@@ -643,8 +666,8 @@
         };
     }
 
-    function heatCss(usd) {
-        const c = heatRGB(usd);
+    function heatCss(usd, k) {
+        const c = heatRGB(usd, k);
         return "rgb(" + c[0] + "," + c[1] + "," + c[2] + ")";
     }
 
@@ -661,8 +684,9 @@
 
         // Метками помечаем только крупные события — всё остальное рисуем
         // прямоугольниками прямо на свече, чтобы не засорять поле графика.
+        const kvol = chartVolScale();
         visibleLiquidations().slice(-400).forEach((item) => {
-            if (item.usd < WHALE_USD) return;
+            if (item.usd < WHALE_USD * kvol) return;
             const t = Math.floor(item.timestamp / tfSec) * tfSec;
             const key = t + "_" + (item.side === "SELL" ? "L" : "S");
             const cur = byTime.get(key) || { time: t, side: item.side, usd: 0 };
@@ -676,7 +700,7 @@
             .map((m) => ({
                 time: m.time,
                 position: m.side === "SELL" ? "aboveBar" : "belowBar",
-                color: heatCss(m.usd),
+                color: heatCss(m.usd, kvol),
                 shape: "circle",
                 text: "🔥 " + fmtCompact(m.usd),
             }))
@@ -708,12 +732,14 @@
     }
 
     // --- Прямоугольники ликвидаций ---------------------------------------------
-    // Каждый кластер — скруглённый прямоугольник с суммой. Мелкие (< $100K)
+    // Каждый кластер — скруглённый прямоугольник с суммой. Мелкие (ниже кита)
     // красятся по стороне (маджента/циан), киты — по тепловой шкале объёма.
-    // Совсем мелкие (< $2K) рисуются чипом без текста; подписанные
+    // Пороги масштабируются от оборота монеты (для BTC кит — $100K).
+    // Совсем мелкие (ниже $2K × масштаб) рисуются чипом без текста; подписанные
     // прямоугольники не налезают друг на друга (жадная раскладка).
     function drawLiqRects(ctx) {
         const tfSec = state.timeframe * 60;
+        const kvol = chartVolScale();
         const items = visibleLiquidations();
         if (!items.length || !state.candles.length) return;
 
@@ -771,17 +797,17 @@
             if (x < -40 || x > clusterCanvas.width + 40) return;
             if (y < -30 || y > clusterCanvas.height + 30) return;
 
-            const whale = c.total >= WHALE_USD;
+            const whale = c.total >= WHALE_USD * kvol;
             const isLong = c.longUsd >= c.shortUsd;
-            const theme = whale ? heatTheme(c.total) : (isLong ? LIQ_COLORS.long : LIQ_COLORS.short);
-            const wantLabel = whale || c.total >= LIQ_LABEL_MIN_USD;
+            const theme = whale ? heatTheme(c.total, kvol) : (isLong ? LIQ_COLORS.long : LIQ_COLORS.short);
+            const wantLabel = whale || c.total >= LIQ_LABEL_MIN_USD * kvol;
 
             let bw, bh, label;
             if (wantLabel) {
                 ctx.font = "bold 9px 'JetBrains Mono', monospace";
                 label = fmtCompact(c.total);
                 bw = Math.max(30, Math.ceil(ctx.measureText(label).width) + 12);
-                bh = whale ? 16 + Math.min(6, (Math.log10(c.total) - 5) * 2.5) : 15;
+                bh = whale ? 16 + Math.min(6, Math.max(-3, (Math.log10(c.total) - 5) * 2.5)) : 15;
             } else {
                 bw = 10; bh = 10; label = "";
             }
@@ -889,7 +915,7 @@
         absVals.sort((a, b) => a - b);
         let p90 = absVals.length ? absVals[Math.floor(0.9 * (absVals.length - 1))] : 0;
         if (!(p90 > 0)) p90 = maxAbs;
-        const minAbs = Math.max(1000, p90 * 0.05);   // микрошум не рисуем
+        const minAbs = Math.max(1000 * chartVolScale(), p90 * 0.05);   // микрошум не рисуем
 
         // Кандидаты: только значимые свечи. Раскладываем от сильных к слабым,
         // чтобы при тесноте выживали самые важные сигналы.
@@ -1261,10 +1287,11 @@
         { mult: 1.22, font: 1, white: 0.22, glow: 12 },   // $5M+
         { mult: 1.45, font: 2, white: 0.45, glow: 16 },   // $20M+
     ];
-    function oiTier(abs) {
-        if (abs >= 20000000) return 3;
-        if (abs >= 5000000) return 2;
-        if (abs >= OI_TIER_MIN) return 1;
+    function oiTier(abs, k) {
+        k = k || 1;
+        if (abs >= 20000000 * k) return 3;
+        if (abs >= 5000000 * k) return 2;
+        if (abs >= OI_TIER_MIN * k) return 1;
         return 0;
     }
     function oiTheme(up, tier) {
@@ -1309,7 +1336,8 @@
         absVals.sort((a, b) => a - b);
         const p90 = absVals[Math.floor(0.9 * (absVals.length - 1))] || 0;
         if (!(p90 > 0)) return;
-        const minAbs = Math.max(1000, p90 * 0.05);
+        const kvol = chartVolScale();
+        const minAbs = Math.max(1000 * kvol, p90 * 0.05);
 
         const cand = [];
         for (let i = 0; i < candles.length; i++) {
@@ -1340,7 +1368,7 @@
             // Размер — по тиру величины: мелочь (<$1M) всегда мини без подписи,
             // подписанным подбираем шрифт, крупняку треугольник и кегль наращиваем.
             const abs = Math.abs(d);
-            const tier = oiTier(abs);
+            const tier = oiTier(abs, kvol);
             const val = fmtCompact(abs);
             let halfW, h, fs = 0;
             if (tier > 0) {
@@ -1661,7 +1689,7 @@
 
     function feedRow(item) {
         const isLong = item.side === "SELL";
-        const whale = item.usd >= 100000;
+        const whale = item.usd >= 100000 * volScale(item.symbol);
         const tr = document.createElement("tr");
         tr.className = whale ? "feed-row-whale" : "feed-row-new";
         if (item.id != null) tr.dataset.liqId = String(item.id);   // связь с шариком
@@ -1716,7 +1744,8 @@
         const frag = document.createDocumentFragment();
         rows.forEach((item) => {
             const tr = feedRow(item);
-            tr.className = "";
+            // гасим анимацию «новая строка», но подсветку кита оставляем
+            tr.className = tr.classList.contains("feed-row-whale") ? "feed-row-whale" : "";
             frag.appendChild(tr);
         });
         feedTbody.appendChild(frag);

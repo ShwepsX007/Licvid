@@ -30,6 +30,7 @@ import asyncio
 import gzip
 import json
 import logging
+import os
 import re
 import time
 from typing import Awaitable, Callable, Dict, Iterable, List, Optional
@@ -38,6 +39,18 @@ import aiohttp
 from oi_feed import OpenInterestTracker
 
 log = logging.getLogger("licvid.feed")
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+# Часовые срезы оборота монет — для среднего за неделю (volAvg7d).
+# От него клиент масштабирует пороги «крупности» ликвидаций/CVD/OI:
+# что для BTC пыль, для GRAM — кит.
+VOL_HIST_FILE = os.getenv("LICVID_VOL_HISTORY_FILE",
+                          os.path.join(HERE, "data", "vol_history.json")).strip()
+if VOL_HIST_FILE.lower() in ("0", "none", "off", "false"):
+    VOL_HIST_FILE = ""
+VOL_HIST_KEEP_SEC = 7 * 86400 + 3600   # ~7 суток + допуск
+VOL_HIST_KEEP_N = 200                  # не больше срезов на монету
+VOL_HIST_MIN_SAMPLES = 3               # меньше — шлём текущий volume24h
 
 # ----------------------------------------------------------------------------
 # Эндпоинты
@@ -502,6 +515,9 @@ class MarketFeed:
 
         self.symbols: List[str] = list(FALLBACK_SYMBOLS[:self.symbols_limit])
         self.symbol_meta: Dict[str, dict] = {}   # symbol -> {volume24h, price, change24h}
+        # symbol -> [[ts, volume24h], ...] — часовые срезы оборота (~неделя)
+        self.vol_hist: Dict[str, List[List[float]]] = {}
+        self._load_vol_hist()
         self.prices: Dict[str, float] = {}
         # Пользовательские монеты, добавленные через поиск: они не выпадают
         # из списка при периодическом обновлении топа по обороту.
@@ -554,6 +570,7 @@ class MarketFeed:
             timeout=aiohttp.ClientTimeout(total=20),
         )
         await self.refresh_symbols()
+        self._record_volumes()
 
         spawn = {
             "binance": self._binance_liquidations,
@@ -910,6 +927,72 @@ class MarketFeed:
             })
         return rows
 
+    def vol_avg7d(self, symbol: str) -> float:
+        """Среднесуточный оборот монеты за ~неделю (среднее часовых срезов).
+
+        Каждый срез — скользящий оборот за 24ч, их среднее за неделю и есть
+        типичный дневной оборот. Пока срезов мало — текущий volume24h,
+        чтобы масштаб графики не прыгал на свежем сервере.
+        """
+        samples = self.vol_hist.get(symbol) or []
+        if len(samples) >= VOL_HIST_MIN_SAMPLES:
+            return sum(v for _, v in samples) / len(samples)
+        try:
+            return float((self.symbol_meta.get(symbol) or {}).get("volume24h") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _record_volumes(self):
+        """Часовой срез оборотов топа и пользовательских монет."""
+        if not self.symbol_meta:
+            return
+        now = time.time()
+        cutoff = now - VOL_HIST_KEEP_SEC
+        for sym, m in self.symbol_meta.items():
+            try:
+                v = float(m.get("volume24h") or 0)
+            except (TypeError, ValueError):
+                continue
+            if v <= 0:
+                continue
+            lst = self.vol_hist.setdefault(sym, [])
+            lst.append([now, v])
+            lst[:] = [p for p in lst if p[0] >= cutoff][-VOL_HIST_KEEP_N:]
+        self._save_vol_hist()
+
+    def _save_vol_hist(self):
+        if not VOL_HIST_FILE:
+            return
+        try:
+            os.makedirs(os.path.dirname(VOL_HIST_FILE), exist_ok=True)
+            tmp = VOL_HIST_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self.vol_hist, f)
+            os.replace(tmp, VOL_HIST_FILE)
+        except Exception as e:
+            log.debug("vol history save: %s", e)
+
+    def _load_vol_hist(self):
+        if not VOL_HIST_FILE:
+            return
+        try:
+            with open(VOL_HIST_FILE, encoding="utf-8") as f:
+                raw = json.load(f)
+        except FileNotFoundError:
+            return
+        except Exception as e:
+            log.debug("vol history load: %s", e)
+            return
+        now = time.time()
+        for sym, samples in (raw or {}).items():
+            try:
+                keep = [[float(ts), float(v)] for ts, v in samples
+                        if float(v) > 0 and now - float(ts) <= VOL_HIST_KEEP_SEC]
+            except (TypeError, ValueError):
+                continue
+            if keep:
+                self.vol_hist[str(sym)] = keep[-VOL_HIST_KEEP_N:]
+
     async def _symbols_refresher(self):
         while not self._stop.is_set():
             await asyncio.sleep(3600)
@@ -917,6 +1000,7 @@ class MarketFeed:
                 # сначала обновляем полный каталог, затем — дефолтный топ
                 await self._load_symbol_index()
                 await self.refresh_symbols()
+                self._record_volumes()
             except Exception as e:
                 log.debug("symbols refresh: %s", e)
 

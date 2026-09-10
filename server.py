@@ -919,6 +919,7 @@ async def api_symbols():
             "price": prices.get(s) or m.get("price") or 0.0,
             "change24h": m.get("change24h", 0.0),
             "volume24h": m.get("volume24h", 0.0),
+            "volAvg7d": round(feed.vol_avg7d(s), 2) if feed else 0.0,
             "liq24h": round(liq24.get(s, 0.0), 2),
             "custom": s in custom,
             "exchanges": m.get("exchanges", []),

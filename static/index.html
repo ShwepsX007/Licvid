@@ -3,34 +3,45 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Licvid Terminal - Live Liquidation Cluster Chart & Stream</title>
+    <meta name="description" data-i18n-meta="terminal.meta"
+          content="Licvidation Terminal — live-лента ликвидаций крипто-фьючерсов с 7 бирж, свечной график, кластеры и профиль объёмов.">
+    <title data-i18n="terminal.title">Licvidation Terminal — Live Liquidation Stream & Cluster Chart</title>
     <link rel="stylesheet" href="/static/style.css">
-    <!-- Local Lightweight Charts -->
+    <!-- Local Lightweight Charts v5 -->
     <script src="/static/lightweight-charts.js"></script>
+    <script src="/static/i18n.js"></script>
 </head>
 <body class="dark-theme">
     <!-- Top Header -->
     <header class="top-nav">
         <div class="brand">
-            <span class="logo-icon">⚡</span>
-            <span class="brand-title">LICVID</span>
-            <span class="brand-badge">TERMINAL</span>
-            <span class="status-badge" id="conn-status"><span class="dot pulse green"></span> LIVE WS</span>
+            <a class="brand-link" href="/" data-i18n-title="brand.home_title"
+               title="На главную — Licvidation Terminal">
+                <span class="logo-icon">⚡</span>
+                <span class="brand-title">LICVIDATION</span>
+                <span class="brand-badge" data-i18n="brand.badge">TERMINAL</span>
+            </a>
+            <span class="status-badge" id="conn-status"><span class="dot pulse yellow"></span> ПОДКЛЮЧЕНИЕ…</span>
+            <span class="demo-badge hidden" id="demo-badge">DEMO</span>
         </div>
 
         <div class="header-metrics">
             <div class="metric-card">
-                <span class="metric-label">Ликвидации (24ч)</span>
+                <span class="metric-label" data-i18n="stats.24h">Ликвидации (24ч)</span>
                 <span class="metric-value text-gold" id="stat-24h-total">$0</span>
             </div>
             <div class="metric-card">
-                <span class="metric-label">Ликвидации (1ч)</span>
+                <span class="metric-label" data-i18n="stats.1h">Ликвидации (1ч)</span>
                 <span class="metric-value" id="stat-1h-total">$0</span>
+            </div>
+            <div class="metric-card">
+                <span class="metric-label" data-i18n="stats.5m">Ликвидации (5м)</span>
+                <span class="metric-value" id="stat-5m-total">$0</span>
             </div>
             <div class="metric-card ratio-metric">
                 <div class="metric-label flex-between">
-                    <span>Longs <strong id="long-pct" class="text-danger">50%</strong></span>
-                    <span>Shorts <strong id="short-pct" class="text-success">50%</strong></span>
+                    <span><span data-i18n="stats.longs">Longs</span> <strong id="long-pct" class="text-danger">50%</strong></span>
+                    <span><span data-i18n="stats.shorts">Shorts</span> <strong id="short-pct" class="text-success">50%</strong></span>
                 </div>
                 <div class="ratio-bar-bg">
                     <div class="ratio-bar-fill-long" id="long-ratio-bar" style="width: 50%;"></div>
@@ -39,26 +50,49 @@
         </div>
 
         <div class="header-controls">
-            <button class="btn btn-icon btn-outline" id="sound-toggle-btn" title="Звуковой сигнал">
-                <span id="sound-icon">🔊</span>
+            <select id="lang-select" class="lang-select" aria-label="Language / Язык" title="Language / Язык">
+                <option value="ru">🇷🇺 Русский</option>
+                <option value="en">🇬🇧 English</option>
+                <option value="zh">🇨🇳 中文</option>
+                <option value="hi">🇮🇳 हिन्दी</option>
+                <option value="es">🇪🇸 Español</option>
+            </select>
+            <div class="exch-health" id="exch-health" title="Состояние подключения к биржам"></div>
+            <button class="btn btn-icon btn-outline" id="sound-toggle-btn" data-i18n-title="sound.title" title="Звуковой сигнал">
+                <span id="sound-icon">🔇</span>
             </button>
-            <button class="btn btn-outline" id="clear-clusters-btn" title="Очистить">
-                <span>🧹 Очистить</span>
+            <button class="btn btn-outline" id="clear-clusters-btn" data-i18n-title="clear.title" title="Очистить">
+                <span data-i18n="clear.btn">🧹 Очистить</span>
             </button>
         </div>
     </header>
 
     <!-- Controls Bar -->
     <section class="controls-bar">
-        <div class="control-group">
-            <label>Монета:</label>
-            <div class="symbol-selector" id="symbol-buttons">
-                <!-- Dynamically populated with ALL, BTC, ETH, SOL, XRP, DOGE, BNB -->
+        <div class="control-group symbol-group">
+            <label data-i18n="ctrl.moneta">Монета:</label>
+            <div class="symbol-search-box">
+                <input type="text" id="symbol-search" class="form-input symbol-search-input"
+                       data-i18n-placeholder="search.placeholder"
+                       placeholder="Поиск пары: BTC, SOL, GRAM…" autocomplete="off">
+                <div class="symbol-search-results hidden" id="symbol-search-results"></div>
+            </div>
+            <div class="symbol-hint" id="symbol-hint" data-i18n="search.hint">
+                Топ по обороту 24ч + добавленные вручную пары. Пишите код монеты — найдём на биржах.
+            </div>
+            <div class="symbol-dropdown-wrap" id="symbol-dropdown-wrap">
+                <button class="symbol-current" id="symbol-current" type="button"
+                        aria-haspopup="listbox" aria-expanded="false"
+                        data-i18n-title="sym.choose" title="Выбрать монету">
+                    <span class="symbol-current-label" id="symbol-current-label">ВСЕ</span>
+                    <span class="box-caret" aria-hidden="true">▾</span>
+                </button>
+                <div class="symbol-dropdown hidden" id="symbol-dropdown" role="listbox"></div>
             </div>
         </div>
 
         <div class="control-group">
-            <label>Таймфрейм:</label>
+            <label data-i18n="ctrl.tf">Таймфрейм:</label>
             <div class="btn-group" id="tf-buttons">
                 <button class="btn btn-tf" data-tf="1">1м</button>
                 <button class="btn btn-tf active" data-tf="5">5м</button>
@@ -69,25 +103,46 @@
         </div>
 
         <div class="control-group">
-            <label>Мин. объем:</label>
-            <select id="min-usd-filter" class="form-select">
-                <option value="0" selected>Все ($0+)</option>
-                <option value="5000">$5,000+</option>
-                <option value="25000">$25,000+</option>
-                <option value="100000">$100,000+ 🔥</option>
-                <option value="500000">$500,000+ 🐋</option>
-            </select>
+            <label data-i18n="ctrl.minvol">Мин. объем:</label>
+            <div class="filter-dropdown" id="min-usd-dd">
+                <button class="form-select filter-btn" id="min-usd-btn" type="button"
+                        title="Порог суммы ликвидации">Все ($0+) ▾</button>
+                <div class="filter-panel hidden" id="min-usd-panel">
+                    <div class="filter-row">
+                        <input type="number" id="min-usd-input" class="form-input filter-number"
+                               min="0" step="100" data-i18n-placeholder="filter.usd_placeholder"
+                               placeholder="Например 10000">
+                        <button class="btn btn-sm" data-i18n="filter.ok" id="min-usd-apply" type="button">OK</button>
+                    </div>
+                    <div class="preset-chips" id="min-usd-presets">
+                        <button data-v="0" type="button" data-i18n="filter.preset_all">Все</button>
+                        <button data-v="1000" type="button">$1K</button>
+                        <button data-v="5000" type="button">$5K</button>
+                        <button data-v="25000" type="button">$25K</button>
+                        <button data-v="100000" type="button">$100K 🔥</button>
+                        <button data-v="500000" type="button">$500K 🐋</button>
+                    </div>
+                    <div class="filter-note" data-i18n="filter.usd_note">Показываются только ликвидации ≥ порога.</div>
+                </div>
+            </div>
         </div>
 
         <div class="control-group">
-            <label>Биржа:</label>
-            <select id="exchange-filter" class="form-select">
-                <option value="ALL">Все биржи</option>
-                <option value="binance">Binance</option>
-                <option value="bybit">Bybit</option>
-                <option value="gate">Gate.io</option>
-                <option value="okx">OKX</option>
-            </select>
+            <label data-i18n="ctrl.exchange">Биржа:</label>
+            <div class="filter-dropdown" id="exchange-dd">
+                <button class="form-select filter-btn" id="exchange-btn" type="button"
+                        title="Фильтр по биржам">Все биржи ▾</button>
+                <div class="filter-panel hidden exchange-panel" id="exchange-panel">
+                    <div class="filter-row filter-row-between">
+                        <span class="filter-note" data-i18n="filter.exch_header">Включённые биржи</span>
+                        <span>
+                            <button class="link-btn" data-i18n="filter.all" id="exch-all-check" type="button">Все</button>
+                            <button class="link-btn" data-i18n="filter.none" id="exch-none-check" type="button">Ничего</button>
+                        </span>
+                    </div>
+                    <div id="exch-list"></div>
+                </div>
+            </div>
         </div>
     </section>
 
@@ -97,35 +152,42 @@
         <section class="chart-section">
             <div class="chart-header flex-between">
                 <div class="symbol-price-display">
-                    <h2 id="current-symbol-title">BTC_USDT</h2>
-                    <span class="live-price" id="current-price">$78,450.00</span>
+                    <h2 id="current-symbol-title">BTC/USDT</h2>
+                    <span class="live-price" id="current-price">—</span>
                     <span class="price-change positive" id="price-change-pct">+0.00%</span>
+                    <span class="data-source" id="data-source"></span>
                 </div>
                 <div class="chart-legend">
-                    <span class="legend-item"><span class="cluster-dot red"></span> Long Liq (Sell)</span>
-                    <span class="legend-item"><span class="cluster-dot green"></span> Short Liq (Buy)</span>
-                    <span class="legend-item"><span class="cluster-dot gold"></span> Whale ($100k+)</span>
+                    <span class="legend-item"><span class="cluster-dot liq-long"></span> <span data-i18n="chart.long">Ликв. лонгов</span></span>
+                    <span class="legend-item"><span class="cluster-dot liq-short"></span> <span data-i18n="chart.short">Ликв. шортов</span></span>
+                    <span class="legend-item"><span class="cluster-dot liq-whale"></span> <span data-i18n="chart.whale">Кит ($100k+)</span></span>
+                    <button class="profile-toggle" id="profile-toggle" type="button"
+                            data-i18n-title="chart.profile_on" data-i18n="chart.profile"
+                            title="Показать/скрыть профиль объёмов ликвидаций по ценам">📊 Профиль</button>
+                    <button class="chart-toggle" id="chart-toggle" type="button"
+                            data-i18n-title="chart.toggle_title"
+                            title="Свернуть/развернуть график">▾</button>
                 </div>
             </div>
 
             <div class="chart-wrapper" id="chart-wrapper">
                 <!-- Lightweight Charts Container -->
                 <div id="tv-chart-container"></div>
-                <!-- Cluster Canvas Overlay -->
+                <!-- Cluster Canvas Overlay: ликвидации + профиль по ценам -->
                 <canvas id="cluster-canvas"></canvas>
-
-                <!-- Profile Sidebar -->
-                <div class="profile-sidebar" id="profile-sidebar">
-                    <div class="profile-title">ПРОФИЛЬ ЛИКВИДАЦИЙ</div>
-                    <div id="profile-bars-container"></div>
-                </div>
             </div>
         </section>
+
+        <!-- Вертикальный разделитель: ширина ленты -->
+        <div class="splitter splitter-x" id="split-feed-x" role="separator"
+             aria-orientation="vertical" tabindex="-1"
+             data-i18n-title="layout.feed_split"
+             title="Ширина ленты: потяните за разделитель"></div>
 
         <!-- Live Feed Section -->
         <aside class="feed-section">
             <div class="feed-header flex-between">
-                <span class="feed-title">⚡ ПРЯМОЙ ЭФИР ЛИКВИДАЦИЙ</span>
+                <span class="feed-title" data-i18n="feed.title">⚡ ПРЯМОЙ ЭФИР ЛИКВИДАЦИЙ</span>
                 <span class="feed-count-badge" id="feed-count">0 событий</span>
             </div>
 
@@ -134,22 +196,34 @@
                 <table class="feed-table">
                     <thead>
                         <tr>
-                            <th>Время</th>
-                            <th>Монета</th>
-                            <th>Биржа</th>
-                            <th>Тип</th>
-                            <th class="col-usd">СУММА ЛИКВИДАЦИИ ($)</th>
-                            <th>Цена ($)</th>
+                            <th data-i18n="feed.col_time">Время</th>
+                            <th data-i18n="feed.col_coin">Монета</th>
+                            <th data-i18n="feed.col_exch">Биржа</th>
+                            <th data-i18n="feed.col_type">Тип</th>
+                            <th class="col-usd" data-i18n="feed.col_usd">СУММА ЛИКВИДАЦИИ ($)</th>
+                            <th data-i18n="feed.col_price">Цена ($)</th>
                         </tr>
                     </thead>
                     <tbody id="feed-tbody"></tbody>
                 </table>
+                <div class="feed-empty" id="feed-empty" data-i18n="feed.empty">Ожидание событий с бирж…</div>
             </div>
 
-            <!-- Top Coins Bar -->
-            <div class="top-coins-box">
-                <div class="box-title">🔥 Лидеры по ликвидациям (24ч)</div>
-                <div id="top-coins-list" class="top-coins-grid"></div>
+            <!-- Горизонтальный разделитель: высота блока «Лидеры» -->
+            <div class="splitter splitter-y" id="split-coins-y" role="separator"
+                 aria-orientation="horizontal" tabindex="-1"
+                 data-i18n-title="layout.coins_split"
+                 title="Высота блока «Лидеры»: потяните за разделитель"></div>
+
+            <!-- Top Coins Bar: выпадающий вертикальный список -->
+            <div class="top-coins-box" id="top-coins-box">
+                <button class="box-title" id="top-coins-toggle" type="button"
+                        data-i18n-title="top.title"
+                        title="Свернуть/развернуть список" aria-expanded="true">
+                    <span data-i18n="top.title">🔥 Лидеры по ликвидациям (24ч)</span>
+                    <span class="box-caret" aria-hidden="true">▾</span>
+                </button>
+                <div id="top-coins-list" class="top-coins-list"></div>
             </div>
         </aside>
     </main>
@@ -158,7 +232,7 @@
     <div id="detail-modal" class="modal hidden">
         <div class="modal-content">
             <span class="close-modal" id="close-modal">&times;</span>
-            <h3 id="modal-title">Детали ликвидации</h3>
+            <h3 data-i18n="modal.title" id="modal-title">Детали ликвидации</h3>
             <div id="modal-body"></div>
         </div>
     </div>

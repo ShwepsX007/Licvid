@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title data-i18n="land.title">Licvidation — терминал ликвидаций крипто-фьючерсов в реальном времени</title>
+<meta name="description" data-i18n-meta="land.meta"
+      content="Licvidation — бесплатный live-терминал ликвидаций: Binance, Bybit, OKX, Gate.io, Bitget, HTX, BitMEX. Свечной график с кластерами, поиск любой пары, фильтры по объёму и биржам.">
+<script src="/static/i18n.js"></script>
+<style>
+:root {
+    --bg: #070a10;
+    --bg-card: #0d1220;
+    --bg-dark: #0a0e18;
+    --border: #1b2434;
+    --text: #e8edf6;
+    --muted: #8493a8;
+    --blue: #3d70ff;
+    --green: #00e676;
+    --red: #ff2a5f;
+    --cyan: #00d6ff;
+    --gold: #ffd54f;
+    --magenta: #ff2d95;
+    --font: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+    font-family: var(--font);
+    background:
+        radial-gradient(900px 500px at 15% -5%, rgba(61, 112, 255, 0.16), transparent 60%),
+        radial-gradient(800px 500px at 95% 10%, rgba(0, 214, 255, 0.10), transparent 55%),
+        radial-gradient(700px 600px at 50% 110%, rgba(255, 45, 149, 0.08), transparent 60%),
+        var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    overflow-x: hidden;
+}
+a { color: inherit; text-decoration: none; }
+.mono { font-family: var(--mono); }
+
+/* ---------- Header ---------- */
+.site-header {
+    position: sticky; top: 0; z-index: 50;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 28px;
+    background: rgba(7, 10, 16, 0.82);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid rgba(27, 36, 52, 0.7);
+}
+.brand { display: flex; align-items: baseline; gap: 8px; font-weight: 800; letter-spacing: 1px; }
+.brand .logo { font-size: 1.25rem; }
+.brand .name { font-size: 1.15rem; }
+.brand .tag { font-size: 0.62rem; color: var(--muted); letter-spacing: 2.5px; border: 1px solid var(--border); padding: 2px 6px; border-radius: 3px; }
+.site-nav { display: flex; gap: 22px; align-items: center; font-size: 0.85rem; color: var(--muted); }
+.site-nav a:hover { color: var(--text); }
+.lang-select {
+    background: rgba(13, 18, 32, 0.7);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 0.8rem;
+    cursor: pointer;
+    outline: none;
+}
+.lang-select:hover { border-color: var(--blue); }
+.lang-select option { background: #0d1220; color: var(--text); }
+
+.btn {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 10px 20px; border-radius: 8px; font-weight: 700; font-size: 0.9rem;
+    cursor: pointer; transition: transform .15s, box-shadow .15s, background .15s;
+    border: 1px solid transparent;
+}
+.btn-primary {
+    background: linear-gradient(135deg, #3d70ff, #00d6ff);
+    color: #060a12;
+    box-shadow: 0 6px 22px rgba(61, 112, 255, 0.35);
+}
+.btn-primary:hover { transform: translateY(-2px); box-shadow: 0 10px 28px rgba(61, 112, 255, 0.5); }
+.btn-ghost { border-color: var(--border); color: var(--text); background: rgba(13, 18, 32, 0.6); }
+.btn-ghost:hover { border-color: var(--blue); }
+.btn-big { padding: 14px 30px; font-size: 1.05rem; }
+
+/* ---------- Hero ---------- */
+.hero { max-width: 1080px; margin: 0 auto; padding: 84px 28px 40px; text-align: center; }
+.hero-badge {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 0.72rem; color: var(--cyan); letter-spacing: 0.4px;
+    border: 1px solid rgba(0, 214, 255, 0.35); background: rgba(0, 214, 255, 0.07);
+    padding: 6px 14px; border-radius: 100px; margin-bottom: 22px;
+}
+.hero-badge .pulse {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--green);
+    box-shadow: 0 0 0 0 rgba(0, 230, 118, 0.7); animation: pulse 1.6s infinite;
+}
+@keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(0,230,118,.6); } 70% { box-shadow: 0 0 0 9px rgba(0,230,118,0); } 100% { box-shadow: 0 0 0 0 rgba(0,230,118,0); } }
+.hero h1 { font-size: clamp(2rem, 5.2vw, 3.4rem); line-height: 1.12; font-weight: 800; letter-spacing: -0.5px; }
+.hero h1 .grad {
+    background: linear-gradient(90deg, #ffd54f, #ff2d95 45%, #00d6ff);
+    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+}
+.hero p.sub { max-width: 660px; margin: 18px auto 0; color: var(--muted); font-size: 1.05rem; line-height: 1.6; }
+.hero-actions { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; margin-top: 30px; }
+
+.hero-stats {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;
+    margin-top: 46px;
+}
+.stat-card {
+    background: linear-gradient(180deg, rgba(13, 18, 32, 0.9), rgba(10, 14, 24, 0.75));
+    border: 1px solid var(--border); border-radius: 12px; padding: 18px 12px;
+}
+.stat-value { font-family: var(--mono); font-size: 1.5rem; font-weight: 800; display: block; }
+.stat-card:nth-child(1) .stat-value { color: var(--gold); }
+.stat-card:nth-child(2) .stat-value { color: var(--cyan); }
+.stat-card:nth-child(3) .stat-value { color: var(--green); }
+.stat-card:nth-child(4) .stat-value { color: var(--magenta); }
+.stat-label { font-size: 0.72rem; color: var(--muted); display: block; margin-top: 6px; }
+
+/* ---------- Live preview ---------- */
+.live-section { max-width: 1080px; margin: 30px auto 0; padding: 0 28px; }
+.section-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+.section-head h2 { font-size: 1.15rem; font-weight: 800; }
+.section-head .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); animation: pulse 1.6s infinite; }
+.section-head .hint { color: var(--muted); font-size: 0.72rem; }
+
+.live-preview {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px;
+    overflow: hidden; box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+}
+.live-table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 0.8rem; }
+.live-table th {
+    text-align: left; padding: 10px 14px; font-size: 0.62rem; color: var(--muted);
+    letter-spacing: 1px; text-transform: uppercase; border-bottom: 1px solid var(--border);
+    background: rgba(10, 14, 24, 0.8);
+}
+.live-table td { padding: 9px 14px; border-bottom: 1px solid rgba(27, 36, 52, 0.55); white-space: nowrap; }
+.live-table tr:last-child td { border-bottom: none; }
+.live-table .sym { font-weight: 700; }
+.live-table .exch { color: var(--muted); text-transform: uppercase; font-size: 0.7rem; }
+.live-table .side-long { color: var(--magenta); font-weight: 700; }
+.live-table .side-short { color: var(--cyan); font-weight: 700; }
+.live-table .usd { color: var(--gold); font-weight: 800; text-align: right; }
+.live-table .usd-col { text-align: right; }
+.live-empty { padding: 26px; text-align: center; color: var(--muted); font-size: 0.85rem; }
+@media (max-width: 640px) {
+    .live-table th:nth-child(3), .live-table td:nth-child(3),
+    .live-table th:nth-child(4), .live-table td:nth-child(4) { display: none; }
+}
+
+/* ---------- Features ---------- */
+.features { max-width: 1080px; margin: 0 auto; padding: 70px 28px 20px; }
+.features h2, .how h2, .cta h2 { font-size: clamp(1.5rem, 3vw, 2rem); font-weight: 800; text-align: center; }
+.features .lead { text-align: center; color: var(--muted); margin-top: 10px; font-size: 0.95rem; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 14px; margin-top: 34px; }
+.card {
+    background: linear-gradient(180deg, rgba(13, 18, 32, 0.92), rgba(10, 14, 24, 0.7));
+    border: 1px solid var(--border); border-radius: 14px; padding: 22px;
+    transition: transform .18s, border-color .18s, box-shadow .18s;
+}
+.card:hover { transform: translateY(-3px); border-color: rgba(61, 112, 255, 0.6); box-shadow: 0 14px 34px rgba(0, 0, 0, 0.4); }
+.card .icon { font-size: 1.6rem; }
+.card h3 { margin-top: 12px; font-size: 1rem; font-weight: 800; }
+.card p { margin-top: 8px; color: var(--muted); font-size: 0.85rem; line-height: 1.55; }
+.card .mini { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 5px; }
+.chip { font-size: 0.64rem; border: 1px solid var(--border); border-radius: 100px; padding: 3px 9px; color: var(--cyan); background: rgba(0, 214, 255, 0.05); }
+
+/* ---------- How ---------- */
+.how { max-width: 1080px; margin: 0 auto; padding: 70px 28px 10px; }
+.steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin-top: 34px; }
+.step { border: 1px solid var(--border); border-radius: 12px; padding: 18px; background: rgba(10, 14, 24, 0.6); }
+.step .num { font-family: var(--mono); color: var(--blue); font-weight: 800; font-size: 0.8rem; }
+.step h3 { margin-top: 8px; font-size: 0.95rem; }
+.step p { margin-top: 6px; color: var(--muted); font-size: 0.82rem; line-height: 1.5; }
+
+/* ---------- CTA ---------- */
+.cta {
+    max-width: 1080px; margin: 70px auto 0; padding: 60px 28px;
+    text-align: center; position: relative;
+    border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+    background:
+        radial-gradient(600px 240px at 50% 0%, rgba(61, 112, 255, 0.12), transparent 70%),
+        rgba(10, 14, 24, 0.5);
+}
+.cta .btn { margin-top: 26px; }
+.cta-note { margin-top: 14px; color: var(--muted); font-size: 0.8rem; }
+
+.site-footer {
+    max-width: 1080px; margin: 0 auto; padding: 26px 28px 40px;
+    display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;
+    color: var(--muted); font-size: 0.74rem;
+}
+.site-footer a { color: var(--cyan); }
+.site-footer a:hover { text-decoration: underline; }
+
+/* ---------- Mobile ---------- */
+@media (max-width: 760px) {
+    .site-header { padding: 12px 16px; }
+    .site-nav a:not(.btn) { display: none; }
+    .hero { padding-top: 56px; }
+    .hero-stats { grid-template-columns: repeat(2, 1fr); }
+    .stat-value { font-size: 1.2rem; }
+    .live-section, .features, .how, .cta { padding-left: 16px; padding-right: 16px; }
+    .site-footer { padding: 24px 16px 32px; }
+}
+</style>
+</head>
+<body>
+
+<header class="site-header">
+    <a class="brand" href="/" data-i18n-title="brand.home_title" title="Licvidation — главная">
+        <span class="logo">⚡</span>
+        <span class="name">LICVIDATION</span>
+        <span class="tag" data-i18n="brand.badge">TERMINAL</span>
+    </a>
+    <nav class="site-nav">
+        <select id="lang-select" class="lang-select" aria-label="Language / Язык" title="Language / Язык">
+            <option value="ru">🇷🇺 Русский</option>
+            <option value="en">🇬🇧 English</option>
+            <option value="zh">🇨🇳 中文</option>
+            <option value="hi">🇮🇳 हिन्दी</option>
+            <option value="es">🇪🇸 Español</option>
+        </select>
+        <a href="#live" data-i18n="land.nav.live">Живой эфир</a>
+        <a href="#features" data-i18n="land.nav.features">Возможности</a>
+        <a href="#how" data-i18n="land.nav.how">Как работает</a>
+        <a class="btn btn-primary" href="/terminal" data-i18n="land.cta.open">⚡ Открыть терминал</a>
+    </nav>
+</header>
+
+<section class="hero">
+    <div class="hero-badge"><span class="pulse"></span> <span data-i18n="land.badge">7 бирж · публичные WebSocket · без API-ключей</span></div>
+    <h1><span data-i18n="land.h1.1">Ликвидации крипто-фьючерсов</span><br><span class="grad" data-i18n="land.h1.2">в реальном времени</span></h1>
+    <p class="sub" data-i18n="land.sub">
+        Licvidation ловит принудительные закрытия позиций на Binance, Bybit, OKX, Gate.io, Bitget,
+        HTX и BitMEX и рисует их на живом свечном графике — с кластерами, профилем объёмов
+        и поиском любой торгуемой пары.
+    </p>
+    <div class="hero-actions">
+        <a class="btn btn-primary btn-big" href="/terminal" data-i18n="land.cta.open">⚡ Открыть терминал</a>
+        <a class="btn btn-ghost btn-big" href="#features" data-i18n="land.hero.more">Что умеет</a>
+    </div>
+
+    <div class="hero-stats">
+        <div class="stat-card"><span class="stat-value" id="stat-24h">—</span><span class="stat-label" data-i18n="land.stat.24h">Ликвидаций за 24ч</span></div>
+        <div class="stat-card"><span class="stat-value" id="stat-1h">—</span><span class="stat-label" data-i18n="land.stat.1h">За последний час</span></div>
+        <div class="stat-card"><span class="stat-value" id="stat-live">—</span><span class="stat-label" data-i18n="land.stat.exch">Бирж в эфире</span></div>
+        <div class="stat-card"><span class="stat-value" id="stat-ratio">—</span><span class="stat-label" data-i18n="land.stat.ratio">Лонги × шорты (24ч)</span></div>
+    </div>
+</section>
+
+<section class="live-section" id="live">
+    <div class="section-head">
+        <span class="live-dot"></span>
+        <h2 data-i18n="land.live.title">Живой эфир прямо с сервера</h2>
+        <span class="hint" data-i18n="land.live.hint">обновляется каждые 4 секунды · полная версия в терминале</span>
+    </div>
+    <div class="live-preview">
+        <table class="live-table">
+            <thead>
+                <tr>
+                    <th data-i18n="feed.col_time">Время</th><th data-i18n="feed.col_coin">Монета</th><th data-i18n="feed.col_exch">Биржа</th><th data-i18n="feed.col_type">Тип</th>
+                    <th class="usd-col" data-i18n="feed.col_usd">Сумма ($)</th>
+                </tr>
+            </thead>
+            <tbody id="live-rows"><tr><td colspan="5" class="live-empty" data-i18n="land.live.connect">Подключение к серверу…</td></tr></tbody>
+        </table>
+    </div>
+</section>
+
+<section class="features" id="features">
+    <h2 data-i18n="land.feat.title">Что умеет терминал</h2>
+    <p class="lead" data-i18n="land.feat.lead">Никаких ключей и регистрации — только публичные данные бирж.</p>
+    <div class="cards">
+        <div class="card">
+            <div class="icon">🌐</div><h3 data-i18n="land.card1.title">7 бирж в одном эфире</h3>
+            <p data-i18n="land.card1.desc">Ликвидации с Binance, Bybit, OKX, Gate.io, Bitget, HTX и BitMEX сливаются в одну живую ленту без дублей и с нормализованными парами.</p>
+            <div class="mini"><span class="chip">Binance</span><span class="chip">Bybit</span><span class="chip">OKX</span><span class="chip">Gate</span><span class="chip">Bitget</span><span class="chip">HTX</span><span class="chip">BitMEX</span></div>
+        </div>
+        <div class="card">
+            <div class="icon">🕯️</div><h3 data-i18n="land.card2.title">Свечной график с кластерами</h3>
+            <p data-i18n="land.card2.desc">Живые свечи 1м–4ч, а каждая ликвидация рисуется шариком точно в своей цене: маджента — лонги, циан — шорты, золото — киты от $100K.</p>
+        </div>
+        <div class="card">
+            <div class="icon">📊</div><h3 data-i18n="land.card3.title">Профиль ликвидаций по ценам</h3>
+            <p data-i18n="land.card3.desc">Индикатор на графике показывает, на каких ценовых уровнях сосредоточен объём ликвидаций за видимый период. Включается и выключается одной кнопкой.</p>
+        </div>
+        <div class="card">
+            <div class="icon">🔎</div><h3 data-i18n="land.card4.title">Поиск любой пары</h3>
+            <p data-i18n="land.card4.desc">Нужной монеты нет в топе? Введите код — терминал найдёт её по полному каталогу бирж и добавит на график. GRAM, новинки, редкие перпетуалы.</p>
+        </div>
+        <div class="card">
+            <div class="icon">🎛️</div><h3 data-i18n="land.card5.title">Гибкие фильтры</h3>
+            <p data-i18n="land.card5.desc">Минимальный объём ликвидации задаётся вручную, биржи включаются и отключаются галочками. Настройки сохраняются в браузере.</p>
+        </div>
+        <div class="card">
+            <div class="icon">📱</div><h3 data-i18n="land.card6.title">Работает с телефона</h3>
+            <p data-i18n="land.card6.desc">Одноколоночная мобильная раскладка: график, лента с кликабельной монетой и фильтры всегда под рукой.</p>
+        </div>
+        <div class="card">
+            <div class="icon">⚡</div><h3 data-i18n="land.card7.title">Тики без задержки</h3>
+            <p data-i18n="land.card7.desc">Каждая сделка по открытой монете сразу двигает свечу. Задержка в миллисекундах видна прямо над графиком.</p>
+        </div>
+        <div class="card">
+            <div class="icon">🩺</div><h3 data-i18n="land.card8.title">Диагностика в реальном времени</h3>
+            <p data-i18n="land.card8.desc">Индикаторы в шапке показывают, какая биржа подключена, сколько событий пришло и откуда идут цены. Источники автоматически переключаются при сбое.</p>
+        </div>
+    </div>
+</section>
+
+<section class="how" id="how">
+    <h2 data-i18n="land.how.title">Как это работает</h2>
+    <div class="steps">
+        <div class="step"><div class="num">01</div><h3 data-i18n="land.step1.title">Слушаем биржи</h3><p data-i18n="land.step1.desc">Публичные WebSocket-каналы ликвидаций и сделок — напрямую, без посредников.</p></div>
+        <div class="step"><div class="num">02</div><h3 data-i18n="land.step2.title">Нормализуем данные</h3><p data-i18n="land.step2.desc">Пары, объёмы и стороны приводятся к единому виду, дубли отсекаются.</p></div>
+        <div class="step"><div class="num">03</div><h3 data-i18n="land.step3.title">Рисуем на графике</h3><p data-i18n="land.step3.desc">Ликвидации ложатся на свечи в свою цену, профиль показывает их объёмы по уровням.</p></div>
+        <div class="step"><div class="num">04</div><h3 data-i18n="land.step4.title">Вы смотрите</h3><p data-i18n="land.step4.desc">Лента, статистика 5м/1ч/24ч, топ монет — всё обновляется в реальном времени.</p></div>
+    </div>
+</section>
+
+<section class="cta">
+    <h2 data-i18n="land.cta.title">Готовы увидеть рынок изнутри?</h2>
+    <a class="btn btn-primary btn-big" href="/terminal" data-i18n="land.cta.open">⚡ Открыть терминал</a>
+    <p class="cta-note" data-i18n="land.cta.note">Бесплатно · без регистрации · без API-ключей · данные с публичных потоков бирж</p>
+</section>
+
+<footer class="site-footer">
+    <span data-i18n="land.footer.copy">© 2026 Licvidation Terminal · данные с публичных WebSocket бирж</span>
+    <span><span data-i18n="land.footer.race">Не является инвестиционной рекомендацией</span> · <a href="/terminal" data-i18n="land.footer.open">Открыть терминал →</a></span>
+</footer>
+
+<script>
+(function () {
+    "use strict";
+
+    var I18n = window.LicvidationI18n || {
+        t: function (k) { return k; }, lang: function () { return "ru"; },
+        set: function () {}, number: function (n) { return String(Number(n) || 0); },
+        init: function () {}, onChange: function () {},
+    };
+    I18n.init();
+
+    var last = { stats: null, health: null, rows: null };
+
+    function fmtShort(v) {
+        v = Number(v) || 0;
+        if (v >= 1e9) return (v / 1e9).toFixed(2) + " B";
+        if (v >= 1e6) return (v / 1e6).toFixed(2) + " M";
+        if (v >= 1e3) return (v / 1e3).toFixed(1) + " K";
+        return Math.round(v).toString();
+    }
+
+    function fmtUsd(v) {
+        return I18n.number(v);
+    }
+
+    var el = function (id) { return document.getElementById(id); };
+
+    function fillStats(data, health) {
+        if (data) {
+            el("stat-24h").textContent = "$" + fmtShort(data.total_usd_24h);
+            el("stat-1h").textContent = "$" + fmtShort(data.total_usd_1h);
+            var l = Number(data.longs_usd_24h) || 0;
+            var s = Number(data.shorts_usd_24h) || 0;
+            el("stat-ratio").textContent = "$" + fmtShort(l) + " × $" + fmtShort(s);
+        }
+        if (health && health.live_exchanges) {
+            el("stat-live").textContent = health.live_exchanges.length + " / 7";
+        }
+    }
+
+    var sideClass = function (side) { return side === "SELL" ? "side-long" : "side-short"; };
+    var sideLabel = function (side) { return side === "SELL" ? "LONG LIQ" : "SHORT LIQ"; };
+
+    function renderRows(rows) {
+        var tb = el("live-rows");
+        last.rows = rows;
+        if (!rows || !rows.length) {
+            tb.innerHTML = '<tr><td colspan="5" class="live-empty">' +
+                I18n.t("feed.empty") + "</td></tr>";
+            return;
+        }
+        tb.innerHTML = rows.slice(-12).reverse().map(function (x) {
+            var t = I18n.time(x.timestamp);
+            return "<tr><td class='mono'>" + t + "</td>" +
+                "<td class='sym'>" + String(x.symbol).replace("_", "/") + "</td>" +
+                "<td class='exch'>" + x.exchange + "</td>" +
+                "<td class='" + sideClass(x.side) + "'>" + sideLabel(x.side) + "</td>" +
+                "<td class='usd usd-col'>$" + fmtUsd(x.usd) + "</td></tr>";
+        }).join("");
+    }
+
+    async function refresh() {
+        try {
+            var [st, liq, h] = await Promise.all([
+                fetch("/api/stats").then(function (r) { return r.json(); }).catch(function () { return null; }),
+                fetch("/api/liquidations?limit=12").then(function (r) { return r.json(); }).catch(function () { return null; }),
+                fetch("/api/health").then(function (r) { return r.json(); }).catch(function () { return null; })
+            ]);
+            last.stats = st;
+            last.health = h;
+            fillStats(st, h);
+            renderRows(liq ? liq.liquidations : null);
+        } catch (e) { /* сервер недоступен — оставляем «—» */ }
+    }
+
+    // Переключатель языка
+    var langSelect = document.getElementById("lang-select");
+    if (langSelect) {
+        langSelect.value = I18n.lang();
+        langSelect.addEventListener("change", function (e) { I18n.set(e.target.value); });
+    }
+    I18n.onChange(function () {
+        document.title = I18n.t("land.title");
+        if (langSelect) langSelect.value = I18n.lang();
+        fillStats(last.stats, last.health);
+        renderRows(last.rows);
+    });
+
+    refresh();
+    setInterval(refresh, 4000);
+})();
+</script>
+</body>
+</html>

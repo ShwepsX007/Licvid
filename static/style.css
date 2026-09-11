@@ -1410,7 +1410,6 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
 /* Индикатор «кто в свече»: покупатели/продавцы (CVD) */
 .cvd-stat {
     display: inline-block;
-    min-width: 10ch;
     font-family: var(--font-mono);
     font-size: 0.68rem;
     font-weight: 800;
@@ -1422,9 +1421,10 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
 .cvd-stat.down { color: #ff9100; text-shadow: 0 0 10px rgba(255,145,0,0.4); }
 
 /* Живые цифры у кнопок слоёв: ликвидации текущей свечи, объём профиля,
-   изменение OI текущей свечи. Пусто — приглушённое тире. Фиксированная
-   минимальная ширина в ch (шрифт моноширинный) — скачущие цифры не толкают
-   кнопки и соседей. */
+   изменение OI текущей свечи. Пусто — приглушённое тире. Ширина — строго
+   по содержимому (никаких зарезервированных min-width — без пустот),
+   а стабильность даёт моноширинный шрифт + tabular-nums: все цифры равной
+   ширины, смена значений не дёргает кнопки и соседей. */
 .live-stat {
     display: inline-block;
     font-family: var(--font-mono);
@@ -1434,9 +1434,6 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
     color: var(--text-muted);
     white-space: nowrap;
 }
-#liq-stat { min-width: 11ch; }   /* "$125.0K·12" + запас */
-#profile-stat { min-width: 9ch; }
-#oi-stat { min-width: 10ch; }
 .live-stat.on-liq { color: #ffd166; text-shadow: 0 0 10px rgba(255,209,102,0.4); }
 .live-stat.on-profile { color: #67e8f9; text-shadow: 0 0 10px rgba(103,232,249,0.35); }
 .live-stat.up { color: #4ade80; text-shadow: 0 0 10px rgba(74,222,128,0.4); }
@@ -1547,7 +1544,7 @@ body.chart-fullscreen { overflow: hidden; }
     }
     /* Ячейки слоёв — сеткой 2 в ряд. Цифра вплотную к своей кнопке
        (без space-between — иначе она уезжает к краю половинки).
-       Фиксированная доля + min-width у цифр = кнопки не скачут. */
+       Цифры шириной по содержимому + tabular-nums — плотно и не скачут. */
     .layer-cell {
         flex: 1 1 42%;
         justify-content: flex-start;

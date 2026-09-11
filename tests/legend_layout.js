@@ -3,9 +3,10 @@
  *  Структура: каждая кнопка слоя и её живая цифра лежат в .layer-cell,
  *  цифра — сразу за кнопкой. Кнопки: nowrap, inline-flex, line-height 1.3
  *  (текст не вылезает), активный слой подсвечен цветом своих фигур.
- *  Цифры: inline-block + min-width в ch (моноширинный шрифт — ширина
- *  стабильна, кнопки не скачут). Мобильное правило 2-в-ряд проверяем
- *  по тексту CSS (jsdom не применяет media-запросы).
+ *  Цифры: inline-block, ширина строго по содержимому (без min-width —
+ *  никаких пустот), стабильность даёт моноширинный шрифт + tabular-nums
+ *  (все цифры равной ширины — кнопки не скачут). Мобильное правило
+ *  2-в-ряд проверяем по тексту CSS (jsdom не применяет media-запросы).
  *
  *  Запуск (сервер уже на 127.0.0.1:8000):
  *      npm install --no-save jsdom ws
@@ -121,13 +122,12 @@ async function main() {
     new win.MouseEvent("click", { bubbles: true, cancelable: true, view: win }));
   check("liq off loses gold", color("liq-toggle") !== "rgb(255, 209, 102)", color("liq-toggle"));
 
-  // --- цифры с фиксированной шириной ---
-  // jsdom резолвит ch в px (0.68rem → 5.44px/ch): 11/9/10ch
+  // --- цифры компактные: без зарезервированной ширины ---
   const mw = (id) => cs(doc.getElementById(id)).minWidth;
-  check("liq min-width", mw("liq-stat") === "59.84px", mw("liq-stat"));
-  check("profile min-width", mw("profile-stat") === "48.96px", mw("profile-stat"));
-  check("cvd min-width", mw("cvd-stat") === "54.4px", mw("cvd-stat"));
-  check("oi min-width", mw("oi-stat") === "54.4px", mw("oi-stat"));
+  ["liq-stat", "profile-stat", "cvd-stat", "oi-stat"].forEach((id) => {
+    check(id + " no reserved width",
+      mw(id) === "" || mw(id) === "0px" || mw(id) === "auto", JSON.stringify(mw(id)));
+  });
   check("stat inline-block", cs(doc.getElementById("liq-stat")).display === "inline-block");
 
   // --- мобильное правило 2-в-ряд — по тексту CSS ---
@@ -139,6 +139,18 @@ async function main() {
     cellBlock.indexOf("flex: 1 1 42%") !== -1);
   check("mobile stat hugs button", cellBlock.indexOf("space-between") === -1 &&
     cellBlock.indexOf("flex-start") !== -1, cellBlock.slice(0, 80));
+
+  // --- стабильность цифр — табличными цифрами, а не запасом ширины ---
+  const cssBlock = (sel) => {
+    const i = css.indexOf(sel + " {");
+    return i === -1 ? "" : css.slice(i, i + 400);
+  };
+  ["live-stat", "cvd-stat"].forEach((cls) => {
+    const b = cssBlock("." + cls);
+    check(cls + " tabular-nums, no min-width",
+      b.indexOf("tabular-nums") !== -1 && b.indexOf("min-width") === -1,
+      b.slice(0, 60));
+  });
 
   check("no js errors", errors.length === 0, errors.slice(0, 3).join(" // "));
 

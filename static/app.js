@@ -70,9 +70,14 @@
     let redrawQueued = false;
 
     // Хит-тест прямоугольников: координаты и ids событий из последнего drawClusters()
-    let clusterHits = [];         // [{x, y, w, h, key, ids:[...]}]
+    let clusterHits = [];         // [{kind:"liq", x, y, w, h, key, ids:[...]}]
     let hoverHitKey = null;       // прямоугольник под курсором (наведение)
     let pinHitKey = null;         // прямоугольник, закреплённый кликом/тапом
+    // Хит-тест фигур CVD/OI: круги из последнего drawClusters()
+    let cvdHits = [];             // [{kind:"cvd", key, x, y, r, time, d, buy, live, p90, c}]
+    let oiHits = [];              // [{kind:"oi", key, x, y, r, time, d, up, tier, live, c}]
+    let shapeHover = null;        // {kind, key} — фигура под курсором
+    let shapePin = null;          // {kind, key} — фигура, закреплённая кликом/тапом
 
     // --- DOM ---------------------------------------------------------------
     const $ = (id) => document.getElementById(id);
@@ -726,6 +731,8 @@
         drawLiquidationProfile(ctx);   // индикатор: полосы по ценовым уровням
 
         clusterHits = [];              // актуальные геометрии — только если слой включён
+        cvdHits = [];
+        oiHits = [];
         if (state.liqEnabled) drawLiqRects(ctx);
         if (state.cvdEnabled) drawCvdTriangles(ctx);
         if (state.oiEnabled) drawOiBalls(ctx);
@@ -832,7 +839,7 @@
             if (showLabel) labeled.push({ x: fx, y: fy, w: bw, h: bh });
 
             const isActive = activeKey === c.key;
-            clusterHits.push({ x: fx, y: fy, w: bw, h: bh, key: c.key, ids: c.ids });
+            clusterHits.push({ kind: "liq", x: fx, y: fy, w: bw, h: bh, key: c.key, ids: c.ids });
 
             const glow = 6 + Math.min(12, (Math.log10(Math.max(c.total, 10)) - 3) * 3);
             const rad = showLabel ? 4 : 3;
@@ -968,6 +975,9 @@
             }
             if (clash) continue;
             placed.push({ x: x, y: y, r: rr });
+            const triKey = "cvd_" + c.time;
+            cvdHits.push({ kind: "cvd", key: triKey, x: x, y: y, r: rr,
+                           time: c.time, d: d, buy: buy, live: cand[k].live, p90: p90, c: c });
 
             // Треугольник центрируем по y: вершина выше/ниже центра на h/2.
             const apexY = buy ? y - h / 2 : y + h / 2;
@@ -988,6 +998,14 @@
             ctx.lineWidth = 1.4;
             ctx.strokeStyle = theme.ring;
             ctx.stroke();
+
+            // Активный треугольник (наведение/закреп) — белая обводка поверх
+            if (shapeIsActive("cvd", triKey)) {
+                triPath(ctx, x, apexY, halfW, h, buy);
+                ctx.lineWidth = 1.8;
+                ctx.strokeStyle = "rgba(255,255,255,0.9)";
+                ctx.stroke();
+            }
 
             // Сумма — если влезает; шрифт подбираем под размер треугольника.
             const val = fmtCompact(Math.abs(d));
@@ -1326,7 +1344,9 @@
         const cand = [];
         for (let i = 0; i < candles.length; i++) {
             const d = Number(candles[i].oiChg);
-            if (isFinite(d) && Math.abs(d) >= minAbs) cand.push({ c: candles[i], d: d });
+            if (isFinite(d) && Math.abs(d) >= minAbs) {
+                cand.push({ c: candles[i], d: d, live: i === candles.length - 1 });
+            }
         }
         cand.sort((a, b) => Math.abs(b.d) - Math.abs(a.d));
 
@@ -1388,6 +1408,9 @@
             }
             if (clash) continue;
             placed.push({ x: x, y: cy, r: r });
+            const ballKey = "oi_" + c.time;
+            oiHits.push({ kind: "oi", key: ballKey, x: x, y: cy, r: r,
+                          time: c.time, d: d, up: up, tier: tier, live: cand[k].live, c: c });
 
             const theme = oiTheme(up, tier);
             // Тёмная подложка — читается на свече любого цвета
@@ -1407,6 +1430,15 @@
             ctx.strokeStyle = theme.ring;
             ctx.stroke();
 
+            // Активный шарик (наведение/закреп) — белое кольцо поверх
+            if (shapeIsActive("oi", ballKey)) {
+                ctx.beginPath();
+                ctx.arc(x, cy, r + 3.5, 0, 2 * Math.PI);
+                ctx.lineWidth = 1.8;
+                ctx.strokeStyle = "rgba(255,255,255,0.9)";
+                ctx.stroke();
+            }
+
             if (fs > 0) {
                 ctx.fillStyle = theme.text;
                 ctx.fillText(val, x, cy + 0.5);
@@ -1417,14 +1449,31 @@
         state.oiBars = drawn;
     }
 
-    // --- Наведение/нажатие на прямоугольник: подсветка связанных записей в ленте --
+    // --- Наведение/нажатие на фигуры: прямоугольники, CVD, OI -------------------
+    // Порядок проверки — обратный отрисовке: шарики поверх треугольников
+    // поверх прямоугольников. У фигур хит-тест кругом с допуском 4px.
     function hitAt(px, py) {
+        for (let i = oiHits.length - 1; i >= 0; i--) {
+            const b = oiHits[i];
+            const dx = px - b.x, dy = py - b.y, rr = b.r + 4;
+            if (dx * dx + dy * dy <= rr * rr) return b;
+        }
+        for (let i = cvdHits.length - 1; i >= 0; i--) {
+            const b = cvdHits[i];
+            const dx = px - b.x, dy = py - b.y, rr = b.r + 4;
+            if (dx * dx + dy * dy <= rr * rr) return b;
+        }
         for (let i = clusterHits.length - 1; i >= 0; i--) {
             const b = clusterHits[i];
             if (px >= b.x - 4 && px <= b.x + b.w + 4 &&
                 py >= b.y - 4 && py <= b.y + b.h + 4) return b;
         }
         return null;
+    }
+
+    function shapeIsActive(kind, key) {
+        if (shapePin) return shapePin.kind === kind && shapePin.key === key;
+        return !!shapeHover && shapeHover.kind === kind && shapeHover.key === key;
     }
 
     function applyFeedHighlight(ball, pin) {
@@ -1450,26 +1499,82 @@
         queueRedraw();
     }
 
+    // Окно фигуры: наведение показывает, уход курсора прячет (если не закреплено
+    // кликом). Закрепы прямоугольника и фигуры взаимоисключающие.
+    function hoverShape(hit) {
+        const key = hit ? hit.kind + ":" + hit.key : null;
+        const cur = shapeHover ? shapeHover.kind + ":" + shapeHover.key : null;
+        if (key === cur) return;
+        shapeHover = hit ? { kind: hit.kind, key: hit.key } : null;
+        if (hit) openShapeModal(hit.kind, hit);
+        else hideShapeModal();
+        queueRedraw();
+    }
+
+    function pinShape(hit) {
+        shapePin = { kind: hit.kind, key: hit.key };
+        shapeHover = null;
+        queueRedraw();
+    }
+
+    function unpinShape() {
+        if (!shapePin && !shapeHover) return;
+        shapePin = null;
+        shapeHover = null;
+        queueRedraw();
+    }
+
+    function hideShapeModal() {
+        if (shapePin) return;   // закреплено кликом — не пропадает
+        if (!state.modalItem) {
+            detailModal.classList.add("hidden");
+            detailModal.classList.remove("peek", "peek-pinned");
+        }
+    }
+
     function setupClusterInteraction() {
         if (!chart || !chart.subscribeCrosshairMove || !chart.subscribeClick) return;
         try {
             // наведение (и палец на телефоне при движении по графику)
             chart.subscribeCrosshairMove((param) => {
                 if (!param || !param.point) {
-                    if (!pinHitKey) applyFeedHighlight(null, false);
+                    if (!pinHitKey && !shapePin) {
+                        applyFeedHighlight(null, false);
+                        hoverShape(null);
+                    }
                     return;
                 }
-                if (pinHitKey) return;   // закреплено кликом/тапом — не дёргаем
-                applyFeedHighlight(hitAt(param.point.x, param.point.y), false);
-            });
-            // клик/тап: закрепить прямоугольник; повторный клик по нему — снять
-            chart.subscribeClick((param) => {
-                const ball = (param && param.point)
-                    ? hitAt(param.point.x, param.point.y) : null;
-                if (ball && ball.key === pinHitKey) {
-                    applyFeedHighlight(null, true);
+                if (pinHitKey || shapePin) return;   // закреплено — не дёргаем
+                const hit = hitAt(param.point.x, param.point.y);
+                if (!hit || hit.kind === "liq") {
+                    hoverShape(null);
+                    applyFeedHighlight(hit || null, false);
                 } else {
-                    applyFeedHighlight(ball, true);
+                    applyFeedHighlight(null, false);
+                    hoverShape(hit);
+                }
+            });
+            // клик/тап: закрепить фигуру; повторный клик по ней или клик
+            // мимо — снять закреп
+            chart.subscribeClick((param) => {
+                const hit = (param && param.point)
+                    ? hitAt(param.point.x, param.point.y) : null;
+                if (!hit) {
+                    applyFeedHighlight(null, true);
+                    unpinShape();
+                    hideShapeModal();
+                } else if (hit.kind === "liq") {
+                    unpinShape();
+                    hideShapeModal();
+                    if (hit.key === pinHitKey) applyFeedHighlight(null, true);
+                    else applyFeedHighlight(hit, true);
+                } else if (shapePin && hit.key === shapePin.key) {
+                    unpinShape();
+                    hideShapeModal();
+                } else {
+                    applyFeedHighlight(null, true);
+                    pinShape(hit);
+                    openShapeModal(hit.kind, hit);
                 }
             });
         } catch (e) { /* старая библиотека без подписок — просто без подсветки */ }
@@ -1751,7 +1856,78 @@
             "<p><strong>" + I18n.t("modal.qty") + "</strong> " +
             Number(item.qty).toLocaleString("en-US", { maximumFractionDigits: 6 }) + "</p>" +
             "<p><strong>" + I18n.t("modal.time") + "</strong> " + I18n.dateTime(item.timestamp) + "</p>";
+        unpinShape();
         detailModal.classList.remove("hidden");
+        detailModal.classList.remove("peek", "peek-pinned");
+    }
+
+    // --- Окно фигуры CVD/OI ----------------------------------------------------
+    // Тот же попап, что у ликвидаций, но фон некликабельный и прозрачный:
+    // наведение не должно перекрывать график, иначе фигуру не «отпустить».
+    // Закреплённое кликом окно затемняется, но клики всё равно проходят
+    // сквозь фон — снять закреп можно кликом мимо фигуры или по крестику.
+    function openShapeModal(kind, hit) {
+        state.modalItem = null;
+        const sym = pretty(chartSymbol());
+        const tfSec = state.timeframe * 60;
+        const range = I18n.time(hit.time) + "–" + I18n.time(Number(hit.time) + tfSec);
+        const abs = Math.abs(hit.d);
+        const sign = hit.d > 0 ? "+" : hit.d < 0 ? "−" : "";
+        const c = hit.c || {};
+        const open = Number(c.open), close = Number(c.close);
+        let moveHtml = "—";
+        if (isFinite(open) && isFinite(close) && open > 0) {
+            const pct = ((close - open) / open) * 100;
+            const cls = pct > 0 ? "text-success" : pct < 0 ? "text-danger" : "";
+            moveHtml = fmtPrice(open) + " → " + fmtPrice(close) +
+                ' <span class="' + cls + '">(' + (pct > 0 ? "+" : "") +
+                pct.toFixed(2) + "%)</span>";
+        }
+        const liveHtml = hit.live ? " · <em>" + I18n.t("modal.live") + "</em>" : "";
+        let dirHtml, valColor, extraRows, about;
+        if (kind === "cvd") {
+            modalTitle.textContent = I18n.t("modal.cvd_of", { sym: sym });
+            dirHtml = hit.buy
+                ? '<span class="badge-cvd-buy">' + I18n.t("modal.cvd_buy") + "</span>"
+                : '<span class="badge-cvd-sell">' + I18n.t("modal.cvd_sell") + "</span>";
+            valColor = hit.buy ? "#a78bfa" : "#ffab4a";
+            // Сила относительно p90 видимых свечей: ≥1 — топ-10% по величине.
+            let strengthHtml = "—";
+            if (hit.p90 > 0) {
+                const r = abs / hit.p90;
+                strengthHtml = I18n.t("modal.p90mult", { r: r.toFixed(1) }) +
+                    (r >= 1 ? " · " + I18n.t("modal.top10") : "");
+            }
+            extraRows = "<p><strong>" + I18n.t("modal.strength") + "</strong> " +
+                strengthHtml + "</p>";
+            about = I18n.t("modal.cvd_about");
+        } else {
+            modalTitle.textContent = I18n.t("modal.oi_of", { sym: sym });
+            dirHtml = hit.up
+                ? '<span class="badge-oi-up">' + I18n.t("modal.oi_up") + "</span>"
+                : '<span class="badge-oi-down">' + I18n.t("modal.oi_down") + "</span>";
+            valColor = hit.up ? "#4ade80" : "#fb7185";
+            // Тир с порогом в масштабе оборота монеты (для GRAM тиры в 1000 раз ниже).
+            const k = chartVolScale();
+            const tierHtml = hit.tier > 0
+                ? "T" + hit.tier + " · ≥ " + fmtCompact([0, 1000000, 5000000, 20000000][hit.tier] * k)
+                : I18n.t("modal.tier_mini") + " · < " + fmtCompact(1000000 * k);
+            extraRows = "<p><strong>" + I18n.t("modal.tier") + "</strong> " +
+                tierHtml + "</p>";
+            about = I18n.t("modal.oi_about");
+        }
+        modalBody.innerHTML =
+            "<p><strong>" + I18n.t("modal.candle") + "</strong> " + range + liveHtml + "</p>" +
+            "<p><strong>" + I18n.t("modal.direction") + "</strong> " + dirHtml + "</p>" +
+            '<p><strong>' + I18n.t("modal.usd") + '</strong> <span style="font-size:1.1rem;font-weight:800;color:' +
+            valColor + '">' + sign + "$" + fmtUsdFull(abs) + "</span></p>" +
+            extraRows +
+            "<p><strong>" + I18n.t("modal.price_move") + "</strong> " + moveHtml + "</p>" +
+            '<p class="modal-about">' + about + "</p>";
+        detailModal.classList.remove("hidden");
+        const pinned = !!shapePin;
+        detailModal.classList.toggle("peek", !pinned);
+        detailModal.classList.toggle("peek-pinned", pinned);
     }
 
     // --- Слои графика: ликвидации / профиль / CVD ----------------------------
@@ -1787,6 +1963,13 @@
                     pinHitKey = null;
                     hoverHitKey = null;
                     applyFeedHighlight(null, true);
+                }
+                // слой фигуры погас — её окно тоже прячем
+                if (shapePin && ((shapePin.kind === "cvd" && d.skey === "cvdEnabled") ||
+                                 (shapePin.kind === "oi" && d.skey === "oiEnabled")) &&
+                        !state[d.skey]) {
+                    unpinShape();
+                    closeModal();
                 }
                 paint();
                 updateMarkers();
@@ -1982,6 +2165,8 @@
             state.tickCount = 0;
             state.lastTickAt = 0;
             state.lagMs = null;
+            unpinShape();
+            closeModal();
         }
         updateSymbolTitle();
         renderSymbolButtons();
@@ -1994,6 +2179,8 @@
 
     function selectChartSymbol(s) {
         if (!s || s === chartSymbol()) return;
+        unpinShape();
+        closeModal();
         state.chartSymbol = s;
         try { localStorage.setItem("licvid.chartSymbol", s); } catch (e) { /* ignore */ }
         state.tickCount = 0;
@@ -2522,7 +2709,9 @@
 
     function closeModal() {
         state.modalItem = null;
+        unpinShape();
         detailModal.classList.add("hidden");
+        detailModal.classList.remove("peek", "peek-pinned");
     }
     closeModalBtn.addEventListener("click", closeModal);
     detailModal.addEventListener("click", (e) => {

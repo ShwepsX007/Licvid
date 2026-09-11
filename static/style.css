@@ -982,6 +982,37 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
     font-size: 1.4rem; cursor: pointer; color: var(--text-muted);
 }
 
+/* Окно фигуры CVD/OI: фон прозрачный и некликабельный — наведение не должно
+   перекрывать график, иначе фигуру не «отпустить». Закреплённое окно
+   затемняется, но клики всё равно проходят сквозь фон. */
+.modal.peek { background: transparent; pointer-events: none; }
+.modal.peek-pinned { background: rgba(0,0,0,0.45); pointer-events: none; }
+.modal.peek .modal-content,
+.modal.peek-pinned .modal-content {
+    pointer-events: auto;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+}
+.modal-about {
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border-color);
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    line-height: 1.4;
+}
+.badge-cvd-buy, .badge-cvd-sell, .badge-oi-up, .badge-oi-down {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 4px;
+    font-weight: 700;
+    font-size: 0.82rem;
+    white-space: nowrap;
+}
+.badge-cvd-buy { background: rgba(139,92,246,0.22); color: #c4b0ff; }
+.badge-cvd-sell { background: rgba(255,145,0,0.20); color: #ffc578; }
+.badge-oi-up { background: rgba(34,197,94,0.20); color: #6ee7a8; }
+.badge-oi-down { background: rgba(239,68,68,0.22); color: #fda4a4; }
+
 /* ============================================================
    Licvidation v4 — новые элементы: поиск монет, здоровье бирж, DEMO
    ============================================================ */

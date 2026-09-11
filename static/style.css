@@ -982,12 +982,15 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
     font-size: 1.4rem; cursor: pointer; color: var(--text-muted);
 }
 
-/* Окно фигуры CVD/OI: фон прозрачный и некликабельный — наведение не должно
-   перекрывать график, иначе фигуру не «отпустить». Закреплённое окно
-   затемняется, но клики всё равно проходят сквозь фон. */
+/* Окно фигуры CVD/OI: ховер-версия полностью прозрачна для мыши (и фон,
+   и контент) — иначе окно, открывшись под курсором, уводит мышь с графика,
+   LWC шлёт mouseleave и окно тут же гаснет (мерцание вместо окна).
+   Закреплённое кликом окно затемняется, контент интерактивный (крестик,
+   выделение текста), а клики мимо контента проходят сквозь фон на график —
+   снять закреп можно кликом мимо фигуры. */
 .modal.peek { background: transparent; pointer-events: none; }
+.modal.peek .modal-content { pointer-events: none; }
 .modal.peek-pinned { background: rgba(0,0,0,0.45); pointer-events: none; }
-.modal.peek .modal-content,
 .modal.peek-pinned .modal-content {
     pointer-events: auto;
     box-shadow: 0 8px 32px rgba(0,0,0,0.6);

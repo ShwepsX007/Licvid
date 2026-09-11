@@ -213,6 +213,8 @@ async function main() {
   check("cvd hover shows modal", shown());
   check("cvd hover peek (not pinned)",
     modal.classList.contains("peek") && !modal.classList.contains("peek-pinned"));
+  const contentPE = () => win.getComputedStyle(body.parentElement).pointerEvents;
+  check("hover modal click-through", contentPE() === "none", contentPE());
   check("cvd title", title.textContent === "CVD BTC/USDT", title.textContent);
   check("cvd direction", txt().indexOf("Покупатели перевесили") !== -1 ||
     txt().indexOf("Продавцы перевесили") !== -1, txt().slice(0, 100));
@@ -250,6 +252,7 @@ async function main() {
   check("click pins modal",
     shown() && modal.classList.contains("peek-pinned") &&
     !modal.classList.contains("peek"), modal.className);
+  check("pinned modal interactive", contentPE() === "auto", contentPE());
   move(empty[0], empty[1]);
   check("pinned survives leave", shown() && modal.classList.contains("peek-pinned"));
 

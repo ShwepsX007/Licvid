@@ -34,7 +34,7 @@
         liqEnabled: true,       // шарики ликвидаций на графике
         cvdEnabled: true,       // CVD-стрелки: перевес тейкер-покупок/продаж в свече
         cvdBars: 0,
-        oiEnabled: true,        // OI-треугольники: рост/падение открытого интереса за свечу
+        oiEnabled: true,        // OI-шарики: рост/падение открытого интереса за свечу
         oiBars: 0,
         symbols: [],
         details: {},
@@ -727,8 +727,8 @@
 
         clusterHits = [];              // актуальные геометрии — только если слой включён
         if (state.liqEnabled) drawLiqRects(ctx);
-        if (state.cvdEnabled) drawCvdBalls(ctx);
-        if (state.oiEnabled) drawOiTriangles(ctx);
+        if (state.cvdEnabled) drawCvdTriangles(ctx);
+        if (state.oiEnabled) drawOiBalls(ctx);
     }
 
     // --- Прямоугольники ликвидаций ---------------------------------------------
@@ -869,16 +869,19 @@
         ctx.restore();
     }
 
-    // --- CVD-шарики в центре свечи ------------------------------------------------
+    // --- CVD-треугольники в центре свечи -------------------------------------------
     // delta = taker buy volume - taker sell volume (USDT) внутри одной свечи.
-    // Шарик стоит СТРОГО в центре тела свечи и подписан суммой дельты.
-    // Палитра специально НЕ повторяет ни свечи (зелёный/красный), ни тепловую
-    // шкалу ликвидаций (жёлтый→красный): покупки — фиолет, продажи — оранж.
+    // Треугольник стоит СТРОГО в центре тела свечи: фиолетовый ▲ —
+    // преобладали покупатели, оранжевый ▼ — продавцы; размер — величина
+    // перевеса относительно p90 видимых свечей, внутри — сумма, когда влезает.
+    // Направление читается самой формой, отдельный глиф не нужен.
+    // Палитра специально НЕ повторяет свечи (зелёный/красный): треугольник
+    // лежит прямо на теле и должен отличаться от него при любом цвете.
     const CVD_COLORS = {
         buy:  { fill: "rgba(139,92,246,0.96)",  ring: "#e6d9ff", text: "#0d0618" },
         sell: { fill: "rgba(255,145,0,0.96)",   ring: "#ffe3b8", text: "#1c0d00" },
     };
-    const CVD_MAX_BALLS = 40;
+    const CVD_MAX_TRI = 40;
 
     function rrPath(ctx, x, y, w, h, r) {
         r = Math.min(r, w / 2, h / 2);
@@ -895,7 +898,7 @@
         }
     }
 
-    function drawCvdBalls(ctx) {
+    function drawCvdTriangles(ctx) {
         const candles = state.candles;
         if (!candles.length || !chart || !candleSeries) return;
         let maxAbs = 0;
@@ -906,7 +909,7 @@
         state.cvdBars = 0;
         if (!(maxAbs > 0)) return;
         // Нормировка по 90-му перцентилю, а не по максимуму: один гигантский
-        // бар иначе сплющивает все остальные шарики до точек без подписей.
+        // бар иначе сплющивает все остальные треугольники до точек без подписей.
         const absVals = [];
         for (let i = 0; i < candles.length; i++) {
             const d = Math.abs(Number(candles[i].cvd));
@@ -938,7 +941,7 @@
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
 
-        for (let k = 0; k < cand.length && drawn < CVD_MAX_BALLS; k++) {
+        for (let k = 0; k < cand.length && drawn < CVD_MAX_TRI; k++) {
             const c = cand[k].c, d = cand[k].d;
             const buy = d > 0;
             // центр ТЕЛА свечи — середина между open и close
@@ -950,33 +953,35 @@
             } catch (e) { continue; }
             if (x === null || x === undefined || y === null || y === undefined) continue;
             const kk = Math.min(Math.sqrt(Math.abs(d) / p90), 1.2);
-            const r = 10 + 14 * kk;
-            if (x < -r - 10 || x > W + r + 10 || y < -r - 10 || y > H + r + 10) continue;
+            const halfW = 9 + 12 * kk;
+            const h = halfW * 1.5;
+            const rr = Math.max(halfW, h / 2);
+            if (x < -rr - 10 || x > W + rr + 10 || y < -rr - 10 || y > H + rr + 10) continue;
 
-            // налезает на уже нарисованный шарик? пропускаем более слабый
+            // налезает на уже нарисованный треугольник? пропускаем более слабый
             let clash = false;
             for (let j = 0; j < placed.length; j++) {
-                const p = placed[j];
-                const dx = x - p.x, dy = y - p.y;
-                const rr = r + p.r + 2;
-                if (dx * dx + dy * dy <= rr * rr) { clash = true; break; }
+                const q = placed[j];
+                const dx = x - q.x, dy = y - q.y;
+                const rad = rr + q.r + 2;
+                if (dx * dx + dy * dy <= rad * rad) { clash = true; break; }
             }
             if (clash) continue;
-            placed.push({ x: x, y: y, r: r });
+            placed.push({ x: x, y: y, r: rr });
 
+            // Треугольник центрируем по y: вершина выше/ниже центра на h/2.
+            const apexY = buy ? y - h / 2 : y + h / 2;
+            const cy = buy ? apexY + h * 0.68 : apexY - h * 0.68;
             const theme = buy ? CVD_COLORS.buy : CVD_COLORS.sell;
-            const glyph = buy ? "▲" : "▼";
 
-            // Тёмная подложка — шарик читается на свече любого цвета
-            ctx.beginPath();
-            ctx.arc(x, y, r + 1.6, 0, 2 * Math.PI);
+            // Тёмная подложка — треугольник читается на свече любого цвета
+            triPath(ctx, x, buy ? apexY - 1.6 : apexY + 1.6, halfW + 1.6, h + 1.6, buy);
             ctx.fillStyle = "rgba(5,8,14,0.88)";
             ctx.fill();
 
             ctx.shadowColor = theme.fill;
             ctx.shadowBlur = cand[k].live ? 16 : 9;
-            ctx.beginPath();
-            ctx.arc(x, y, r, 0, 2 * Math.PI);
+            triPath(ctx, x, apexY, halfW, h, buy);
             ctx.fillStyle = theme.fill;
             ctx.fill();
             ctx.shadowBlur = 0;
@@ -984,38 +989,17 @@
             ctx.strokeStyle = theme.ring;
             ctx.stroke();
 
-            if (cand[k].live) {
-                // живая свеча — белое кольцо поверх
-                ctx.beginPath();
-                ctx.arc(x, y, r + 3.5, 0, 2 * Math.PI);
-                ctx.lineWidth = 1.8;
-                ctx.strokeStyle = "rgba(255,255,255,0.9)";
-                ctx.stroke();
-            }
-
-            // Сумма — второй строкой. Шрифт подбираем под размер шарика,
-            // чтобы цифры были почти в каждом кружке.
+            // Сумма — если влезает; шрифт подбираем под размер треугольника.
             const val = fmtCompact(Math.abs(d));
             let vFont = 0;
             const vSizes = [8, 7, 6.5];
             for (let f = 0; f < vSizes.length; f++) {
                 ctx.font = "bold " + vSizes[f] + "px 'JetBrains Mono', monospace";
-                if (r >= 10.5 && ctx.measureText(val).width <= 1.9 * r - 5) {
-                    vFont = vSizes[f];
-                    break;
-                }
+                if (ctx.measureText(val).width <= halfW * 1.3) { vFont = vSizes[f]; break; }
             }
-            ctx.fillStyle = theme.text;
             if (vFont > 0) {
-                const gs = Math.max(8, Math.min(12, Math.round(r * 0.62)));
-                ctx.font = "bold " + gs + "px 'JetBrains Mono', monospace";
-                ctx.fillText(glyph, x, y - r * 0.26);
-                ctx.font = "bold " + vFont + "px 'JetBrains Mono', monospace";
-                ctx.fillText(val, x, y + r * 0.36);
-            } else {
-                const gs = Math.max(8, Math.min(13, Math.round(r * 0.8)));
-                ctx.font = "bold " + gs + "px 'JetBrains Mono', monospace";
-                ctx.fillText(glyph, x, y + 0.5);
+                ctx.fillStyle = theme.text;
+                ctx.fillText(val, x, cy + 0.5);
             }
             drawn += 1;
         }
@@ -1268,24 +1252,27 @@
         } catch (e) { /* ignore */ }
     }
 
-    // --- OI-треугольники над/под свечой -----------------------------------------
+    // --- OI-шарики над/под свечой ------------------------------------------------
     // oiChg = изменение открытого интереса за свечу (USD, биржи с историей).
-    // Рост — треугольник над хаем, падение — под лоем; внутри — сумма.
-    // Палитра специально не пересекается ни со свечами, ни с шариками CVD,
-    // ни с тепловой шкалой ликвидаций: рост — teal, падение — rose.
-    const OI_COLORS = {
-        up:   { rgb: [45, 212, 191],  ring: "#d2fff8", text: "#062a26" },
-        down: { rgb: [251, 113, 133], ring: "#ffe0e6", text: "#2b060d" },
+    // Рост — шарик над хаем, падение — под лоем; внутри — сумма.
+    // Цвет — интуитивный светофор по направлению и величине: рост зеленеет
+    // от бледного к едкому с тиром, падение краснеет от бледного к ядрёному.
+    // Шарики висят ВНЕ тела свечи, поэтому со свечами не сливаются.
+    const OI_BALL = {
+        up:   { shades: [[190, 242, 200], [134, 239, 172], [34, 197, 94], [0, 230, 118]],
+                ring: "#d8ffe6", text: "#04160b" },
+        down: { shades: [[252, 200, 200], [248, 113, 113], [239, 68, 68], [255, 42, 95]],
+                ring: "#ffe3e6", text: "#1c060d" },
     };
-    const OI_MAX_TRI = 60;
-    // Тиры треугольников по |Δ OI|: мелочь (<$1M) — мини-значок без подписи,
-    // крупняк — больше, ярче (заливка осветляется к белому) и с сильным свечением.
+    const OI_MAX_BALLS = 60;
+    // Тиры OI по |Δ|: мелочь (<$1M × масштаб) — мини-значок без подписи,
+    // крупняк — больше, ярче и с сильным свечением.
     const OI_TIER_MIN = 1000000;
     const OI_TIER_STYLE = [
         null,   // 0 — мини
-        { mult: 1.0,  font: 0, white: 0.0,  glow: 8  },   // $1M+
-        { mult: 1.22, font: 1, white: 0.22, glow: 12 },   // $5M+
-        { mult: 1.45, font: 2, white: 0.45, glow: 16 },   // $20M+
+        { mult: 1.0,  font: 0, glow: 8  },   // $1M+
+        { mult: 1.22, font: 1, glow: 12 },   // $5M+
+        { mult: 1.45, font: 2, glow: 16 },   // $20M+
     ];
     function oiTier(abs, k) {
         k = k || 1;
@@ -1295,12 +1282,9 @@
         return 0;
     }
     function oiTheme(up, tier) {
-        const b = up ? OI_COLORS.up : OI_COLORS.down;
+        const b = up ? OI_BALL.up : OI_BALL.down;
+        const c = b.shades[Math.min(3, Math.max(0, tier))];
         const st = OI_TIER_STYLE[tier] || OI_TIER_STYLE[1];
-        const c = [b.rgb[0] + (255 - b.rgb[0]) * st.white,
-                   b.rgb[1] + (255 - b.rgb[1]) * st.white,
-                   b.rgb[2] + (255 - b.rgb[2]) * st.white]
-            .map(Math.round);
         return {
             fill: "rgba(" + c[0] + "," + c[1] + "," + c[2] + ",0.95)",
             ring: b.ring, text: b.text, glow: st.glow,
@@ -1321,11 +1305,11 @@
         ctx.closePath();
     }
 
-    function drawOiTriangles(ctx) {
+    function drawOiBalls(ctx) {
         const candles = state.candles;
         if (!candles.length || !chart || !candleSeries) return;
-        // Значимость — по p90, как у шариков: один выброс не должен
-        // гасить остальные треугольники.
+        // Значимость — по p90, как у треугольников CVD: один выброс не должен
+        // гасить остальные шарики.
         const absVals = [];
         for (let i = 0; i < candles.length; i++) {
             const d = Math.abs(Number(candles[i].oiChg));
@@ -1353,7 +1337,7 @@
         ctx.save();
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
-        for (let k = 0; k < cand.length && drawn < OI_MAX_TRI; k++) {
+        for (let k = 0; k < cand.length && drawn < OI_MAX_BALLS; k++) {
             const c = cand[k].c, d = cand[k].d;
             const up = d > 0;
             const ref = up ? Number(c.high) : Number(c.low);
@@ -1365,59 +1349,57 @@
             } catch (e) { continue; }
             if (x === null || x === undefined || yRef === null || yRef === undefined) continue;
 
-            // Размер — по тиру величины: мелочь (<$1M) всегда мини без подписи,
-            // подписанным подбираем шрифт, крупняку треугольник и кегль наращиваем.
+            // Размер — по тиру величины: мелочь (<$1M × масштаб) всегда мини
+            // без подписи, крупняку радиус и кегль наращиваем.
             const abs = Math.abs(d);
             const tier = oiTier(abs, kvol);
             const val = fmtCompact(abs);
-            let halfW, h, fs = 0;
+            let r, fs = 0;
             if (tier > 0) {
                 ctx.font = "bold 8px 'JetBrains Mono', monospace";
                 const tw8 = ctx.measureText(val).width;
-                if (tw8 <= 56) {
-                    halfW = Math.min(26, Math.max(13, tw8 / 2 + 10));
-                    h = halfW * 1.5;
+                if (tw8 <= 1.9 * 26 - 5) {
+                    r = Math.max(11, (tw8 + 5) / 1.9);
                     const sizes = [8, 7, 6.5];
                     for (let f = 0; f < sizes.length; f++) {
                         ctx.font = "bold " + sizes[f] + "px 'JetBrains Mono', monospace";
-                        if (ctx.measureText(val).width <= halfW * 1.3) { fs = sizes[f]; break; }
+                        if (ctx.measureText(val).width <= 1.9 * r - 5) { fs = sizes[f]; break; }
                     }
                 }
             }
-            if (!fs) { halfW = 6; h = 10; }
+            if (!fs) { r = 6; }
             else if (tier >= 2) {
                 const st = OI_TIER_STYLE[tier];
                 fs = Math.min(10, fs + st.font);
                 ctx.font = "bold " + fs + "px 'JetBrains Mono', monospace";
-                halfW = Math.min(34, Math.max(halfW * st.mult,
-                                              ctx.measureText(val).width / 2 + 10));
-                h = halfW * 1.5;
+                r = Math.min(30, Math.max(r * st.mult, (ctx.measureText(val).width + 5) / 1.9));
             }
             const gap = 10 + tier * 2;   // чем крупнее, тем дальше от свечи
-            const apexY = up ? yRef - gap - h : yRef + gap + h;
-            const cy = up ? apexY + h * 0.68 : apexY - h * 0.68;
-            if (x < -halfW || x > W + halfW || cy < -h || cy > H + h) continue;
+            const cy = up ? yRef - gap - r : yRef + gap + r;
+            if (x < -r || x > W + r || cy < -r || cy > H + r) continue;
 
             // Налезает на уже нарисованный? пропускаем более слабый.
             let clash = false;
             for (let j = 0; j < placed.length; j++) {
-                const p = placed[j];
-                const dx = x - p.x, dy = cy - p.y;
-                const rr = Math.max(halfW, h / 2) + p.r + 2;
-                if (dx * dx + dy * dy <= rr * rr) { clash = true; break; }
+                const q = placed[j];
+                const dx = x - q.x, dy = cy - q.y;
+                const rad = r + q.r + 2;
+                if (dx * dx + dy * dy <= rad * rad) { clash = true; break; }
             }
             if (clash) continue;
-            placed.push({ x: x, y: cy, r: Math.max(halfW, h / 2) });
+            placed.push({ x: x, y: cy, r: r });
 
             const theme = oiTheme(up, tier);
             // Тёмная подложка — читается на свече любого цвета
-            triPath(ctx, x, up ? apexY - 1.6 : apexY + 1.6, halfW + 1.6, h + 1.6, up);
+            ctx.beginPath();
+            ctx.arc(x, cy, r + 1.6, 0, 2 * Math.PI);
             ctx.fillStyle = "rgba(5,8,14,0.88)";
             ctx.fill();
 
             ctx.shadowColor = theme.fill;
             ctx.shadowBlur = theme.glow;
-            triPath(ctx, x, apexY, halfW, h, up);
+            ctx.beginPath();
+            ctx.arc(x, cy, r, 0, 2 * Math.PI);
             ctx.fillStyle = theme.fill;
             ctx.fill();
             ctx.shadowBlur = 0;

@@ -663,7 +663,8 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
 }
 
 /* Ячейка слоя: кнопка + её живая цифра. Не сжимается — текст кнопок
-   не вылезает и не переносится; на телефоне ячейки встают 2 в ряд. */
+   не вылезает и не переносится; текут в строку как в браузере
+   (на узких экранах переносятся сами, без жёсткой сетки). */
 .layer-cell {
     display: inline-flex;
     align-items: center;
@@ -1464,7 +1465,9 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
     box-shadow: 0 0 8px rgba(74, 222, 128, 0.2);
 }
 
-/* Кнопка сворачивания графика (видна на узких экранах) */
+/* Кнопки сворачивания/разворота графика: прибиты к правому краю легенды
+   (margin-left: auto у первой) — стоят в углу, не тянутся за кнопками слоёв. */
+#chart-toggle { margin-left: auto; }
 .chart-toggle {
     display: inline-flex;
     align-items: center;
@@ -1542,13 +1545,9 @@ body.chart-fullscreen { overflow: hidden; }
         gap: 8px;
         font-size: 0.62rem;
     }
-    /* Ячейки слоёв — сеткой 2 в ряд. Цифра вплотную к своей кнопке
-       (без space-between — иначе она уезжает к краю половинки).
+    /* Ячейки слоёв текут в строку как в браузере (лишнее переносится) —
+       без жёсткой сетки 2-в-ряд: на широких экранах нет пустот.
        Цифры шириной по содержимому + tabular-nums — плотно и не скачут. */
-    .layer-cell {
-        flex: 1 1 42%;
-        justify-content: flex-start;
-    }
 
     .feed-section {
         height: auto;

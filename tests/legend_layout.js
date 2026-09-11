@@ -5,8 +5,10 @@
  *  (текст не вылезает), активный слой подсвечен цветом своих фигур.
  *  Цифры: inline-block, ширина строго по содержимому (без min-width —
  *  никаких пустот), стабильность даёт моноширинный шрифт + tabular-nums
- *  (все цифры равной ширины — кнопки не скачут). Мобильное правило
- *  2-в-ряд проверяем по тексту CSS (jsdom не применяет media-запросы).
+ *  (все цифры равной ширины — кнопки не скачут). На телефоне ячейки
+ *  текут в строку как в браузере (без жёсткой сетки — проверяем по тексту
+ *  CSS, jsdom не применяет media-запросы). Кнопки свернуть/развернуть
+ *  прибиты к правому краю легенды.
  *
  *  Запуск (сервер уже на 127.0.0.1:8000):
  *      npm install --no-save jsdom ws
@@ -130,21 +132,30 @@ async function main() {
   });
   check("stat inline-block", cs(doc.getElementById("liq-stat")).display === "inline-block");
 
-  // --- мобильное правило 2-в-ряд — по тексту CSS ---
+  // --- мобильное: без жёсткой сетки, ячейки текут в строку — по тексту CSS ---
   const css = await httpGet(URL_BASE + "/static/style.css");
-  const m900 = css.indexOf("@media (max-width: 900px)");
-  const cellRule = css.indexOf(".layer-cell", m900);
-  const cellBlock = cellRule !== -1 ? css.slice(cellRule, cellRule + 200) : "";
-  check("mobile layer-cell rule", m900 !== -1 && cellRule !== -1 &&
-    cellBlock.indexOf("flex: 1 1 42%") !== -1);
-  check("mobile stat hugs button", cellBlock.indexOf("space-between") === -1 &&
-    cellBlock.indexOf("flex-start") !== -1, cellBlock.slice(0, 80));
-
-  // --- стабильность цифр — табличными цифрами, а не запасом ширины ---
   const cssBlock = (sel) => {
     const i = css.indexOf(sel + " {");
     return i === -1 ? "" : css.slice(i, i + 400);
   };
+  const m900 = css.indexOf("@media (max-width: 900px)");
+  const m560 = css.indexOf("@media (max-width: 560px)");
+  const mob900 = m900 !== -1 ? css.slice(m900, m560 !== -1 ? m560 : m900 + 3000) : "";
+  check("mobile cells flow free", m900 !== -1 &&
+    mob900.indexOf(".layer-cell {") === -1 && mob900.indexOf("42%") === -1,
+    "grid-rule:" + (mob900.indexOf(".layer-cell {") !== -1));
+  check("stat hugs button", cssBlock(".layer-cell").indexOf("space-between") === -1);
+
+  // --- кнопки свернуть/развернуть прибиты к правому краю ---
+  check("toggles pinned right",
+    cssBlock("#chart-toggle").indexOf("margin-left: auto") !== -1);
+  const legendKids = Array.from(doc.querySelector(".chart-legend").children);
+  check("toggles last in legend",
+    legendKids.length >= 2 &&
+    legendKids[legendKids.length - 2].id === "chart-toggle" &&
+    legendKids[legendKids.length - 1].id === "chart-expand");
+
+  // --- стабильность цифр — табличными цифрами, а не запасом ширины ---
   ["live-stat", "cvd-stat"].forEach((cls) => {
     const b = cssBlock("." + cls);
     check(cls + " tabular-nums, no min-width",

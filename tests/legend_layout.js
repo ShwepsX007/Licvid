@@ -134,8 +134,11 @@ async function main() {
   const css = await httpGet(URL_BASE + "/static/style.css");
   const m900 = css.indexOf("@media (max-width: 900px)");
   const cellRule = css.indexOf(".layer-cell", m900);
+  const cellBlock = cellRule !== -1 ? css.slice(cellRule, cellRule + 200) : "";
   check("mobile layer-cell rule", m900 !== -1 && cellRule !== -1 &&
-    css.slice(cellRule, cellRule + 200).indexOf("flex: 1 1 42%") !== -1);
+    cellBlock.indexOf("flex: 1 1 42%") !== -1);
+  check("mobile stat hugs button", cellBlock.indexOf("space-between") === -1 &&
+    cellBlock.indexOf("flex-start") !== -1, cellBlock.slice(0, 80));
 
   check("no js errors", errors.length === 0, errors.slice(0, 3).join(" // "));
 

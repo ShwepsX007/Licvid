@@ -1545,11 +1545,12 @@ body.chart-fullscreen { overflow: hidden; }
         gap: 8px;
         font-size: 0.62rem;
     }
-    /* Ячейки слоёв — сеткой 2 в ряд: кнопка слева, её цифра справа.
+    /* Ячейки слоёв — сеткой 2 в ряд. Цифра вплотную к своей кнопке
+       (без space-between — иначе она уезжает к краю половинки).
        Фиксированная доля + min-width у цифр = кнопки не скачут. */
     .layer-cell {
         flex: 1 1 42%;
-        justify-content: space-between;
+        justify-content: flex-start;
     }
 
     .feed-section {

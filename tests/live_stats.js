@@ -131,15 +131,13 @@ async function main() {
   check("profile live", val("profile-stat") === "$125.0K", val("profile-stat"));
   check("header cvd box", val("stat-cvd-value") === "+$5.0K", val("stat-cvd-value"));
 
-  // --- строгое соседство: Профиль — цифра за кнопкой, остальные — за подписью ---
-  const nextTo = (btn, stat) =>
-    doc.getElementById(btn).nextElementSibling === doc.getElementById(stat);
+  // --- строгое соседство: все цифры — сразу за своими подписями ---
   const afterLabel = (stat) => {
     const prev = doc.getElementById(stat).previousElementSibling;
     return !!prev && prev.classList.contains("layer-label");
   };
   check("liq after label", afterLabel("liq-stat"));
-  check("profile next to btn", nextTo("profile-toggle", "profile-stat"));
+  check("profile after label", afterLabel("profile-stat"));
   check("cvd after label", afterLabel("cvd-stat"));
   check("oi after label", afterLabel("oi-stat"));
   check("liq title i18n", doc.getElementById("liq-stat").title === "Ликвидации текущей свечи",

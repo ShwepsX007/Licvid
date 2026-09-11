@@ -1,8 +1,8 @@
 /** Раскладка легенды: ячейки кнопка/подпись+цифра, попап кнопок слоёв.
  *
- *  Структура: Профиль — кнопка+цифра в .layer-cell; у остальных слоёв
- *  в плашке подпись+цифра, а их кнопки выезжают сверху горизонтальной
- *  панелью по кнопке «☰ Слои» (закрытие: повторный клик, клик мимо, Esc).
+ *  Структура: в плашке у всех слоёв подпись+цифра в .layer-cell,
+ *  а все 4 кнопки выезжают сверху горизонтальной панелью по кнопке
+ *  «☰ Слои» (закрытие: повторный клик, клик мимо, Esc).
  *  Кнопки: nowrap, inline-flex, line-height 1.3
  *  (текст не вылезает), активный слой подсвечен цветом своих фигур.
  *  Цифры: inline-block, ширина строго по содержимому (без min-width —
@@ -97,14 +97,9 @@ async function main() {
   const pairs = [["liq-toggle", "liq-stat"], ["profile-toggle", "profile-stat"],
                  ["cvd-toggle", "cvd-stat"], ["oi-toggle", "oi-stat"]];
 
-  // --- структура ячеек: Профиль — кнопка+цифра, остальные — подпись+цифра ---
+  // --- структура ячеек: у всех подпись+цифра, кнопки — в попапе ---
   check("4 layer cells", doc.querySelectorAll(".chart-legend .layer-cell").length === 4);
-  const pBtn = doc.getElementById("profile-toggle"), pStat = doc.getElementById("profile-stat");
-  check("profile wrapped with stat",
-    pBtn.parentElement.classList.contains("layer-cell") &&
-    pBtn.parentElement === pStat.parentElement &&
-    pBtn.nextElementSibling === pStat);
-  ["liq-stat", "cvd-stat", "oi-stat"].forEach((s) => {
+  ["liq-stat", "profile-stat", "cvd-stat", "oi-stat"].forEach((s) => {
     const stat = doc.getElementById(s);
     const prev = stat.previousElementSibling;
     check(s + " label before stat",
@@ -150,8 +145,9 @@ async function main() {
   check("call label", win.LiqScopeI18n.t("chart.layers") === "☰ Слои",
     win.LiqScopeI18n.t("chart.layers"));
   check("pop hidden initially", !!layerPop && layerPop.classList.contains("hidden"));
-  check("3 buttons in pop", ["liq-toggle", "cvd-toggle", "oi-toggle"].every((id) =>
-    doc.getElementById(id).parentElement === layerPop));
+  check("4 buttons in pop",
+    ["liq-toggle", "profile-toggle", "cvd-toggle", "oi-toggle"].every((id) =>
+      doc.getElementById(id).parentElement === layerPop));
   check("layers api", !!win.LiqScopeLayers && typeof win.LiqScopeLayers.isOpen === "function");
   click(layerCall);
   check("pop opens", win.LiqScopeLayers.isOpen() && !layerPop.classList.contains("hidden"));

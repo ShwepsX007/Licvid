@@ -1,7 +1,9 @@
-/** Раскладка легенды: ячейки кнопка+цифра, кнопки не рвутся, цифры не толкают.
+/** Раскладка легенды: ячейки кнопка/подпись+цифра, попап кнопок слоёв.
  *
- *  Структура: каждая кнопка слоя и её живая цифра лежат в .layer-cell,
- *  цифра — сразу за кнопкой. Кнопки: nowrap, inline-flex, line-height 1.3
+ *  Структура: Профиль — кнопка+цифра в .layer-cell; у остальных слоёв
+ *  в плашке подпись+цифра, а их кнопки выезжают сверху горизонтальной
+ *  панелью по кнопке «☰ Слои» (закрытие: повторный клик, клик мимо, Esc).
+ *  Кнопки: nowrap, inline-flex, line-height 1.3
  *  (текст не вылезает), активный слой подсвечен цветом своих фигур.
  *  Цифры: inline-block, ширина строго по содержимому (без min-width —
  *  никаких пустот), стабильность даёт моноширинный шрифт + tabular-nums
@@ -95,14 +97,19 @@ async function main() {
   const pairs = [["liq-toggle", "liq-stat"], ["profile-toggle", "profile-stat"],
                  ["cvd-toggle", "cvd-stat"], ["oi-toggle", "oi-stat"]];
 
-  // --- структура ячеек ---
+  // --- структура ячеек: Профиль — кнопка+цифра, остальные — подпись+цифра ---
   check("4 layer cells", doc.querySelectorAll(".chart-legend .layer-cell").length === 4);
-  pairs.forEach(([b, s]) => {
-    const btn = doc.getElementById(b), stat = doc.getElementById(s);
-    check(b + " wrapped with stat",
-      btn.parentElement.classList.contains("layer-cell") &&
-      btn.parentElement === stat.parentElement &&
-      btn.nextElementSibling === stat);
+  const pBtn = doc.getElementById("profile-toggle"), pStat = doc.getElementById("profile-stat");
+  check("profile wrapped with stat",
+    pBtn.parentElement.classList.contains("layer-cell") &&
+    pBtn.parentElement === pStat.parentElement &&
+    pBtn.nextElementSibling === pStat);
+  ["liq-stat", "cvd-stat", "oi-stat"].forEach((s) => {
+    const stat = doc.getElementById(s);
+    const prev = stat.previousElementSibling;
+    check(s + " label before stat",
+      stat.parentElement.classList.contains("layer-cell") &&
+      !!prev && prev.classList.contains("layer-label"));
   });
 
   // --- кнопки не рвут текст ---
@@ -131,6 +138,34 @@ async function main() {
       mw(id) === "" || mw(id) === "0px" || mw(id) === "auto", JSON.stringify(mw(id)));
   });
   check("stat inline-block", cs(doc.getElementById("liq-stat")).display === "inline-block");
+
+  // --- попап кнопок слоёв ---
+  const layerCall = doc.getElementById("layer-call");
+  const layerPop = doc.getElementById("layer-pop");
+  const click = (el) => el.dispatchEvent(
+    new win.MouseEvent("click", { bubbles: true, cancelable: true, view: win }));
+  check("call btn profile-sized",
+    !!layerCall && layerCall.classList.contains("profile-toggle") &&
+    layerCall.classList.contains("layer-call"));
+  check("call label", win.LiqScopeI18n.t("chart.layers") === "☰ Слои",
+    win.LiqScopeI18n.t("chart.layers"));
+  check("pop hidden initially", !!layerPop && layerPop.classList.contains("hidden"));
+  check("3 buttons in pop", ["liq-toggle", "cvd-toggle", "oi-toggle"].every((id) =>
+    doc.getElementById(id).parentElement === layerPop));
+  check("layers api", !!win.LiqScopeLayers && typeof win.LiqScopeLayers.isOpen === "function");
+  click(layerCall);
+  check("pop opens", win.LiqScopeLayers.isOpen() && !layerPop.classList.contains("hidden"));
+  check("pop flex row", cs(layerPop).display === "flex" && cs(layerPop).position === "absolute",
+    cs(layerPop).display + "/" + cs(layerPop).position);
+  check("pop below header", cs(layerPop).top.indexOf("100%") !== -1, cs(layerPop).top);
+  click(layerCall);
+  check("pop closes on reclick", !win.LiqScopeLayers.isOpen());
+  click(layerCall);
+  doc.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  check("pop closes on esc", !win.LiqScopeLayers.isOpen());
+  click(layerCall);
+  doc.body.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, view: win }));
+  check("pop closes outside", !win.LiqScopeLayers.isOpen());
 
   // --- мобильное: без жёсткой сетки, ячейки текут в строку — по тексту CSS ---
   const css = await httpGet(URL_BASE + "/static/style.css");

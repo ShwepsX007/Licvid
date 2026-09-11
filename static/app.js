@@ -2433,6 +2433,32 @@
         detailModal.classList.toggle("peek-pinned", pinned);
     }
 
+    // --- Панель кнопок слоёв: выезжает сверху по кнопке «☰ Слои» -------------
+    // Кнопки Ликвидации/CVD/OI живут в попапе, а их цифры — в верхней плашке
+    // с текстовыми подписями. Закрытие: повторный клик, клик мимо, Esc.
+    function setupLayerPop() {
+        const callBtn = $("layer-call"), pop = $("layer-pop");
+        if (!callBtn || !pop) return;
+        const setOpen = (open) => {
+            pop.classList.toggle("hidden", !open);
+            callBtn.classList.toggle("active", open);
+        };
+        callBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            setOpen(pop.classList.contains("hidden"));
+        });
+        // клики по кнопкам слоёв попап не закрывают — можно щёлкать несколько
+        pop.addEventListener("click", (e) => e.stopPropagation());
+        document.addEventListener("click", () => setOpen(false));
+        document.addEventListener("keydown", (e) => {
+            if (e.key === "Escape") setOpen(false);
+        });
+        window.LiqScopeLayers = {  // тестовый API для tests/legend_layout.js
+            isOpen: () => !pop.classList.contains("hidden"),
+            setOpen,
+        };
+    }
+
     // --- Слои графика: ликвидации / профиль / CVD ----------------------------
     function setupLayerToggles() {
         const defs = [
@@ -3253,6 +3279,7 @@
         setInterval(paintCvdBox, 15000);   // окно CVD медленно ползёт
         setInterval(renderTickIndicator, 1000);
         setupLayerToggles();
+        setupLayerPop();   // попап кнопок слоёв по «☰ Слои»
         setupChartToggle();
         setupChartExpand();
         setupDrawToolbar();   // панель рисования + тестовый API

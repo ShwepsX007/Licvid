@@ -623,6 +623,7 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
 }
 
 .chart-header {
+    position: relative;
     padding: 8px 16px;
     background: var(--bg-card);
     border-bottom: 1px solid var(--border-color);
@@ -673,6 +674,53 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
     align-items: center;
     gap: 7px;
     flex-shrink: 0;
+}
+
+/* Текстовая подпись слоя в плашке (кнопка переехала в попап) */
+.layer-label {
+    font-size: 0.66rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+/* Кнопка вызова панели слоёв — того же размера, что Профиль,
+   но заметная: циановая рамка и свечение */
+.profile-toggle.layer-call {
+    border-color: rgba(0, 214, 255, 0.55);
+    color: #67e8f9;
+    background: rgba(0, 214, 255, 0.1);
+    box-shadow: 0 0 10px rgba(0, 214, 255, 0.25);
+}
+.profile-toggle.layer-call:hover {
+    border-color: rgba(0, 214, 255, 0.9);
+    color: #a5f3fc;
+    background: rgba(0, 214, 255, 0.16);
+}
+.profile-toggle.layer-call.active {
+    background: rgba(0, 214, 255, 0.22);
+    color: #cffafe;
+    box-shadow: 0 0 14px rgba(0, 214, 255, 0.45);
+}
+
+/* Панель кнопок слоёв: выезжает сверху, кнопки — горизонтально */
+.layer-pop {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 12px;
+    z-index: 30;
+    display: flex;
+    gap: 8px;
+    padding: 8px 10px;
+    background: rgba(10, 14, 24, 0.96);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+    animation: layerPopDown 0.18s ease;
+}
+@keyframes layerPopDown {
+    from { opacity: 0; transform: translateY(-8px); }
+    to { opacity: 1; transform: translateY(0); }
 }
 
 .legend-item {
@@ -1683,6 +1731,7 @@ body.chart-fullscreen { overflow: hidden; }
     .coin-link { font-size: 0.72rem; }
     .coin-link-icon { opacity: 0.85; }
     .profile-toggle { padding: 2px 6px; font-size: 0.6rem; }
+    .layer-pop { left: 8px; right: 8px; justify-content: center; }
 
     .symbol-search-box { max-width: 100%; }
     .filter-btn { min-width: 104px; font-size: 0.7rem; }

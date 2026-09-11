@@ -76,7 +76,7 @@
     // Хит-тест фигур CVD/OI: круги из последнего drawClusters()
     let cvdHits = [];             // [{kind:"cvd", key, x, y, r, time, d, buy, live, p90, c}]
     let oiHits = [];              // [{kind:"oi", key, x, y, r, time, d, up, tier, live, c}]
-    let shapeHover = null;        // {kind, key} — фигура под курсором
+    let shapeHover = null;        // {kind, key} — фигура под курсором (liq/cvd/oi)
     let shapePin = null;          // {kind, key} — фигура, закреплённая кликом/тапом
 
     // --- DOM ---------------------------------------------------------------
@@ -774,9 +774,10 @@
             const key = t + "_" + level;
             const c = clusters.get(key) || {
                 key: key, time: t, lo: lo, hi: hi, level: level,
-                longUsd: 0, shortUsd: 0, total: 0, count: 0, ids: [],
+                longUsd: 0, shortUsd: 0, total: 0, count: 0, longN: 0, shortN: 0, ids: [],
             };
-            if (item.side === "SELL") c.longUsd += item.usd; else c.shortUsd += item.usd;
+            if (item.side === "SELL") { c.longUsd += item.usd; c.longN += 1; }
+            else { c.shortUsd += item.usd; c.shortN += 1; }
             c.total += item.usd;
             c.count += 1;
             if (item.id != null) c.ids.push(item.id);
@@ -839,7 +840,10 @@
             if (showLabel) labeled.push({ x: fx, y: fy, w: bw, h: bh });
 
             const isActive = activeKey === c.key;
-            clusterHits.push({ kind: "liq", x: fx, y: fy, w: bw, h: bh, key: c.key, ids: c.ids });
+            clusterHits.push({ kind: "liq", x: fx, y: fy, w: bw, h: bh, key: c.key, ids: c.ids,
+                time: c.time, price: price, total: c.total, count: c.count,
+                longUsd: c.longUsd, shortUsd: c.shortUsd,
+                longN: c.longN, shortN: c.shortN, whale: whale });
 
             const glow = 6 + Math.min(12, (Math.log10(Math.max(c.total, 10)) - 3) * 3);
             const rad = showLabel ? 4 : 3;
@@ -1500,7 +1504,7 @@
     }
 
     // Окно фигуры: наведение показывает, уход курсора прячет (если не закреплено
-    // кликом). Закрепы прямоугольника и фигуры взаимоисключающие.
+    // кликом). Закреп одновременно один: прямоугольник или фигура CVD/OI.
     function hoverShape(hit) {
         const key = hit ? hit.kind + ":" + hit.key : null;
         const cur = shapeHover ? shapeHover.kind + ":" + shapeHover.key : null;
@@ -1546,9 +1550,13 @@
                 }
                 if (pinHitKey || shapePin) return;   // закреплено — не дёргаем
                 const hit = hitAt(param.point.x, param.point.y);
-                if (!hit || hit.kind === "liq") {
+                if (!hit) {
                     hoverShape(null);
-                    applyFeedHighlight(hit || null, false);
+                    applyFeedHighlight(null, false);
+                } else if (hit.kind === "liq") {
+                    // прямоугольник: окно кластера ПЛЮС подсветка строк в ленте
+                    hoverShape(hit);
+                    applyFeedHighlight(hit, false);
                 } else {
                     applyFeedHighlight(null, false);
                     hoverShape(hit);
@@ -1564,10 +1572,15 @@
                     unpinShape();
                     hideShapeModal();
                 } else if (hit.kind === "liq") {
-                    unpinShape();
-                    hideShapeModal();
-                    if (hit.key === pinHitKey) applyFeedHighlight(null, true);
-                    else applyFeedHighlight(hit, true);
+                    if (hit.key === pinHitKey) {
+                        applyFeedHighlight(null, true);
+                        unpinShape();
+                        hideShapeModal();
+                    } else {
+                        applyFeedHighlight(hit, true);
+                        pinShape(hit);
+                        openShapeModal(hit.kind, hit);
+                    }
                 } else if (shapePin && hit.key === shapePin.key) {
                     unpinShape();
                     hideShapeModal();
@@ -1823,9 +1836,14 @@
     }
 
     function rebuildFeed() {
-        // строки пересоздаются — закреплённая подсветка шарика гаснет
+        // строки пересоздаются — закреплённая подсветка шарика гаснет,
+        // окно кластера (ссылалось на старые строки) — тоже
         pinHitKey = null;
         hoverHitKey = null;
+        if (shapePin && shapePin.kind === "liq") {
+            unpinShape();
+            hideShapeModal();
+        }
         const rows = state.liquidations.filter(passesFeedFilter).slice(-150).reverse();
         feedTbody.innerHTML = "";
         const frag = document.createDocumentFragment();
@@ -1861,8 +1879,8 @@
         detailModal.classList.remove("peek", "peek-pinned");
     }
 
-    // --- Окно фигуры CVD/OI ----------------------------------------------------
-    // Тот же попап, что у ликвидаций, но фон некликабельный и прозрачный:
+    // --- Окно фигуры: кластер ликвидаций, CVD, OI ---------------------------------
+    // Тот же попап, что у строк ленты, но фон некликабельный и прозрачный:
     // наведение не должно перекрывать график, иначе фигуру не «отпустить».
     // Закреплённое кликом окно затемняется, но клики всё равно проходят
     // сквозь фон — снять закреп можно кликом мимо фигуры или по крестику.
@@ -1871,10 +1889,23 @@
         const sym = pretty(chartSymbol());
         const tfSec = state.timeframe * 60;
         const range = I18n.time(hit.time) + "–" + I18n.time(Number(hit.time) + tfSec);
-        const abs = Math.abs(hit.d);
-        const sign = hit.d > 0 ? "+" : hit.d < 0 ? "−" : "";
-        const c = hit.c || {};
-        const open = Number(c.open), close = Number(c.close);
+        // Свеча фигуры — для движения цены и бейджа «формируется».
+        // У кластера свечи в хите нет — ищем по времени.
+        let bar = hit.c || null, live = !!hit.live;
+        if (!bar && state.candles.length) {
+            for (let i = 0; i < state.candles.length; i++) {
+                if (Number(state.candles[i].time) === Number(hit.time)) {
+                    bar = state.candles[i];
+                    break;
+                }
+            }
+            if (bar) {
+                live = Number(hit.time) ===
+                    Number(state.candles[state.candles.length - 1].time);
+            }
+        }
+        const open = bar ? Number(bar.open) : NaN;
+        const close = bar ? Number(bar.close) : NaN;
         let moveHtml = "—";
         if (isFinite(open) && isFinite(close) && open > 0) {
             const pct = ((close - open) / open) * 100;
@@ -1883,14 +1914,38 @@
                 ' <span class="' + cls + '">(' + (pct > 0 ? "+" : "") +
                 pct.toFixed(2) + "%)</span>";
         }
-        const liveHtml = hit.live ? " · <em>" + I18n.t("modal.live") + "</em>" : "";
-        let dirHtml, valColor, extraRows, about;
-        if (kind === "cvd") {
+        const liveHtml = live ? " · <em>" + I18n.t("modal.live") + "</em>" : "";
+        const usdRow = (inner) => "<p><strong>" + I18n.t("modal.usd") + "</strong> " +
+            '<span style="font-size:1.1rem;font-weight:800;color:var(--color-gold)">' +
+            inner + "</span></p>";
+        let dirHtml, valRowHtml, extraRows, about;
+        if (kind === "liq") {
+            modalTitle.textContent = I18n.t("modal.clust_of", { sym: sym });
+            const isLong = hit.longUsd >= hit.shortUsd;
+            dirHtml = isLong
+                ? '<span class="badge-side long">' + I18n.t("modal.long_desc") + "</span>"
+                : '<span class="badge-side short">' + I18n.t("modal.short_desc") + "</span>";
+            valRowHtml = usdRow("$" + fmtUsdFull(hit.total) +
+                (hit.whale ? " · 🐋 " + I18n.t("modal.whale") : ""));
+            extraRows =
+                "<p><strong>" + I18n.t("modal.level") + "</strong> ≈ " +
+                fmtPrice(hit.price) + "</p>" +
+                "<p><strong>" + I18n.t("modal.events") + "</strong> " + hit.count +
+                " · " + hit.longN + " LONG / " + hit.shortN + " SHORT</p>" +
+                "<p><strong>" + I18n.t("modal.split") + "</strong> " +
+                '<span class="badge-side long">L $' + fmtUsdShort(hit.longUsd) + "</span> " +
+                '<span class="badge-side short">S $' + fmtUsdShort(hit.shortUsd) + "</span></p>";
+            about = I18n.t("modal.clust_about");
+        } else if (kind === "cvd") {
+            const abs = Math.abs(hit.d);
+            const sign = hit.d > 0 ? "+" : hit.d < 0 ? "−" : "";
+            const valColor = hit.buy ? "#a78bfa" : "#ffab4a";
             modalTitle.textContent = I18n.t("modal.cvd_of", { sym: sym });
             dirHtml = hit.buy
                 ? '<span class="badge-cvd-buy">' + I18n.t("modal.cvd_buy") + "</span>"
                 : '<span class="badge-cvd-sell">' + I18n.t("modal.cvd_sell") + "</span>";
-            valColor = hit.buy ? "#a78bfa" : "#ffab4a";
+            valRowHtml = "<p><strong>" + I18n.t("modal.usd") + '</strong> <span style="font-size:1.1rem;font-weight:800;color:' +
+                valColor + '">' + sign + "$" + fmtUsdFull(abs) + "</span></p>";
             // Сила относительно p90 видимых свечей: ≥1 — топ-10% по величине.
             let strengthHtml = "—";
             if (hit.p90 > 0) {
@@ -1906,7 +1961,10 @@
             dirHtml = hit.up
                 ? '<span class="badge-oi-up">' + I18n.t("modal.oi_up") + "</span>"
                 : '<span class="badge-oi-down">' + I18n.t("modal.oi_down") + "</span>";
-            valColor = hit.up ? "#4ade80" : "#fb7185";
+            valRowHtml = "<p><strong>" + I18n.t("modal.usd") + '</strong> <span style="font-size:1.1rem;font-weight:800;color:' +
+                (hit.up ? "#4ade80" : "#fb7185") + '">' +
+                (hit.d > 0 ? "+" : hit.d < 0 ? "−" : "") +
+                "$" + fmtUsdFull(Math.abs(hit.d)) + "</span></p>";
             // Тир с порогом в масштабе оборота монеты (для GRAM тиры в 1000 раз ниже).
             const k = chartVolScale();
             const tierHtml = hit.tier > 0
@@ -1919,8 +1977,7 @@
         modalBody.innerHTML =
             "<p><strong>" + I18n.t("modal.candle") + "</strong> " + range + liveHtml + "</p>" +
             "<p><strong>" + I18n.t("modal.direction") + "</strong> " + dirHtml + "</p>" +
-            '<p><strong>' + I18n.t("modal.usd") + '</strong> <span style="font-size:1.1rem;font-weight:800;color:' +
-            valColor + '">' + sign + "$" + fmtUsdFull(abs) + "</span></p>" +
+            valRowHtml +
             extraRows +
             "<p><strong>" + I18n.t("modal.price_move") + "</strong> " + moveHtml + "</p>" +
             '<p class="modal-about">' + about + "</p>";
@@ -1959,17 +2016,20 @@
                     localStorage.setItem(d.store, state[d.skey] ? "1" : "0");
                 } catch (e) { /* ignore */ }
                 if (d.skey === "liqEnabled" && !state.liqEnabled) {
-                    // с прячущихся прямоугольников снимаем и подсветку ленты
+                    // с прячущихся прямоугольников снимаем подсветку ленты и окно
                     pinHitKey = null;
                     hoverHitKey = null;
                     applyFeedHighlight(null, true);
+                    unpinShape();
+                    hideShapeModal();
                 }
-                // слой фигуры погас — её окно тоже прячем
+                // слой фигуры погас — её окно тоже прячем (окно строки
+                // ленты не трогаем — у него свой крестик)
                 if (shapePin && ((shapePin.kind === "cvd" && d.skey === "cvdEnabled") ||
                                  (shapePin.kind === "oi" && d.skey === "oiEnabled")) &&
                         !state[d.skey]) {
                     unpinShape();
-                    closeModal();
+                    hideShapeModal();
                 }
                 paint();
                 updateMarkers();
@@ -2708,8 +2768,17 @@
     });
 
     function closeModal() {
+        // закрываем окно закреплённого кластера — снимаем и подсветку ленты
+        // (у кластера пин живёт в двух местах); окно строки ленты чужой
+        // закреп прямоугольника не трогает
+        const clusterPinned = !state.modalItem && shapePin && shapePin.kind === "liq";
         state.modalItem = null;
         unpinShape();
+        if (clusterPinned) {
+            pinHitKey = null;
+            hoverHitKey = null;
+            applyFeedHighlight(null, true);
+        }
         detailModal.classList.add("hidden");
         detailModal.classList.remove("peek", "peek-pinned");
     }

@@ -1,4 +1,4 @@
-# Licvidation Terminal — живой поток ликвидаций
+# LiqScope Terminal — живой поток ликвидаций
 
 Веб-терминал, который в реальном времени показывает ликвидации фьючерсов
 с **Binance, Bybit, OKX, Gate.io, Bitget, HTX и BitMEX**, свечной график монеты и кластеры
@@ -18,8 +18,8 @@ http://<сервер>:8000/terminal  — сам терминал
 | Проблема | Причина | Решение |
 |---|---|---|
 | Не видно графика, нет выбора монет, пустая лента | `static/app.js` вызывал `chart.addCandlestickSeries()` и `series.setMarkers()` — это API **Lightweight Charts v4**, а в `static/lightweight-charts.js` лежит **v5.2.1**, где этих методов нет. Исключение падало в самом начале скрипта и убивало весь фронтенд целиком (поэтому не работало вообще ничего) | Фронтенд переписан на v5 (`chart.addSeries(LightweightCharts.CandlestickSeries, …)`, `LightweightCharts.createSeriesMarkers(...)`) с автоматическим откатом на v4 |
-| «Данные не идут» | Сервер большую часть событий **выдумывал** (`liquidation_simulator_task`), а реальные ликвидации читал через опрос буферов бота с постоянно сбрасываемым курсором `last_ts`; цены были захардкожены (BTC = 78 450) | Симулятор выключен (только `LICVID_DEMO=1`). Ликвидации идут напрямую из публичных WS бирж, цены и свечи — настоящие |
-| Всего 6 монет | Список был захардкожен в `server.py` | Список монет подтягивается с биржи автоматически (топ-N USDT-перпетуалов по обороту за 24 ч), по умолчанию 40, настраивается `LICVID_SYMBOLS_LIMIT`. В интерфейсе — поиск по монете |
+| «Данные не идут» | Сервер большую часть событий **выдумывал** (`liquidation_simulator_task`), а реальные ликвидации читал через опрос буферов бота с постоянно сбрасываемым курсором `last_ts`; цены были захардкожены (BTC = 78 450) | Симулятор выключен (только `LIQSCOPE_DEMO=1`). Ликвидации идут напрямую из публичных WS бирж, цены и свечи — настоящие |
+| Всего 6 монет | Список был захардкожен в `server.py` | Список монет подтягивается с биржи автоматически (топ-N USDT-перпетуалов по обороту за 24 ч), по умолчанию 40, настраивается `LIQSCOPE_SYMBOLS_LIMIT`. В интерфейсе — поиск по монете |
 | Непонятно, почему нет данных | Нет диагностики | Появился `GET /api/health` и индикаторы бирж в шапке: видно, кто подключён, сколько событий пришло и с какой ошибкой отвалился источник |
 
 ---
@@ -27,11 +27,11 @@ http://<сервер>:8000/terminal  — сам терминал
 ## Быстрый деплой на сервер
 
 ```bash
-cd /root/Licvid
+cd /root/LiqScope
 git pull                                  # забрать обновление
 pip install -r requirements.txt           # fastapi, uvicorn, aiohttp
-sudo systemctl restart licvid
-sudo journalctl -u licvid -f              # смотреть логи
+sudo systemctl restart liqscope
+sudo journalctl -u liqscope -f              # смотреть логи
 ```
 
 Проверка, что данные реально идут:
@@ -46,17 +46,17 @@ curl -s "localhost:8000/api/liquidations?limit=5" | python3 -m json.tool
 
 ### systemd-юнит (пример)
 
-Готовый файл: [`deploy/licvid.service`](deploy/licvid.service)
+Готовый файл: [`deploy/liqscope.service`](deploy/liqscope.service)
 
 ```ini
 [Unit]
-Description=Licvidation Liquidation Terminal
+Description=LiqScope Liquidation Terminal
 After=network-online.target
 
 [Service]
-WorkingDirectory=/root/Licvid
-Environment=LICVID_SYMBOLS_LIMIT=40
-Environment=LICVID_EXCHANGES=binance,bybit,okx,gate,bitget,htx,bitmex
+WorkingDirectory=/root/LiqScope
+Environment=LIQSCOPE_SYMBOLS_LIMIT=40
+Environment=LIQSCOPE_EXCHANGES=binance,bybit,okx,gate,bitget,htx,bitmex
 ExecStart=/usr/bin/python3 -m uvicorn server:app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=5
@@ -68,9 +68,9 @@ WantedBy=multi-user.target
 Установка:
 
 ```bash
-sudo cp deploy/licvid.service /etc/systemd/system/licvid.service
+sudo cp deploy/liqscope.service /etc/systemd/system/liqscope.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now licvid
+sudo systemctl enable --now liqscope
 ```
 
 ---
@@ -97,8 +97,8 @@ sudo systemctl enable --now licvid
 с той же биржи, что и тики (`kline_source_preferred`), чтобы цена на
 графике не расходилась с последней сделкой.
 
-Порядок источников фиксируется через `LICVID_TICK_SOURCE` — например,
-`LICVID_TICK_SOURCE=bybit`, если на вашем сервере Binance принимает
+Порядок источников фиксируется через `LIQSCOPE_TICK_SOURCE` — например,
+`LIQSCOPE_TICK_SOURCE=bybit`, если на вашем сервере Binance принимает
 подписку, но рыночные данные не присылает (встречается на части хостингов).
 
 Тики идут только по монетам, чьи графики сейчас открыты («горячие» монеты):
@@ -112,18 +112,18 @@ sudo systemctl enable --now licvid
 
 | Переменная | По умолчанию | Назначение |
 |---|---|---|
-| `LICVID_SYMBOLS_LIMIT` | `40` | сколько монет держать в списке (топ по обороту) |
-| `LICVID_EXCHANGES` | `binance,bybit,okx,gate,bitget,htx,bitmex` | какие биржи слушать |
-| `LICVID_DEMO` | `0` | `1` — синтетический поток для проверки интерфейса без бирж (в шапке загорится бейдж `DEMO`) |
-| `LICVID_HISTORY_MAX` | `60000` | сколько событий держать в памяти |
-| `LICVID_HISTORY_FILE` | `data/liq_history.jsonl` | файл истории ликвидаций (JSONL, append). Пустая строка / `0` / `off` — не писать на диск |
-| `LICVID_HISTORY_TTL_HOURS` | `24` | сколько часов истории держать при загрузке с диска и урезании файла |
+| `LIQSCOPE_SYMBOLS_LIMIT` | `40` | сколько монет держать в списке (топ по обороту) |
+| `LIQSCOPE_EXCHANGES` | `binance,bybit,okx,gate,bitget,htx,bitmex` | какие биржи слушать |
+| `LIQSCOPE_DEMO` | `0` | `1` — синтетический поток для проверки интерфейса без бирж (в шапке загорится бейдж `DEMO`) |
+| `LIQSCOPE_HISTORY_MAX` | `60000` | сколько событий держать в памяти |
+| `LIQSCOPE_HISTORY_FILE` | `data/liq_history.jsonl` | файл истории ликвидаций (JSONL, append). Пустая строка / `0` / `off` — не писать на диск |
+| `LIQSCOPE_HISTORY_TTL_HOURS` | `24` | сколько часов истории держать при загрузке с диска и урезании файла |
 | `PORT` | `8000` | порт при запуске `python3 server.py` |
-| `LICVID_TICK_SOURCE` | `binance,binance-raw,bybit` | порядок источников тиков. Если известно, что Binance на этом сервере не отдаёт сделки — поставьте `bybit`, чтобы не терять 40 с на его переопрос после рестарта |
-| `LICVID_TICK_MIN_GAP_MS` | `0` | минимальный зазор между тиками графика по монете (`0` = слать каждый тик; поставьте, например, `40`, если хочется беречь трафик) |
-| `LICVID_LIQ_FLUSH_MS` | `0` | `0` = каждая ликвидация уходит немедленно; `>0` — склеивать в пачки |
-| `LICVID_PRICE_INTERVAL_MS` | `1000` | как часто обновлять таблицу цен |
-| `LICVID_STATS_INTERVAL_MS` | `2000` | как часто пересчитывать статистику |
+| `LIQSCOPE_TICK_SOURCE` | `binance,binance-raw,bybit` | порядок источников тиков. Если известно, что Binance на этом сервере не отдаёт сделки — поставьте `bybit`, чтобы не терять 40 с на его переопрос после рестарта |
+| `LIQSCOPE_TICK_MIN_GAP_MS` | `0` | минимальный зазор между тиками графика по монете (`0` = слать каждый тик; поставьте, например, `40`, если хочется беречь трафик) |
+| `LIQSCOPE_LIQ_FLUSH_MS` | `0` | `0` = каждая ликвидация уходит немедленно; `>0` — склеивать в пачки |
+| `LIQSCOPE_PRICE_INTERVAL_MS` | `1000` | как часто обновлять таблицу цен |
+| `LIQSCOPE_STATS_INTERVAL_MS` | `2000` | как часто пересчитывать статистику |
 
 ---
 
@@ -162,7 +162,7 @@ sudo systemctl enable --now licvid
 | HTX (Huobi) USDT-M | `public.*.liquidation_orders` (gzip) | `direction=sell` → **LONG**, `trade_turnover` в USDT |
 | BitMEX | таблица `liquidation` | `side=Sell` → **LONG**; учитываем только `action=insert`, размер переводим из контрактов через `underlyingToPositionMultiplier` (инверсные `XBTUSD`: 1 контракт = 1 USD) |
 
-Отключить лишние: `LICVID_EXCHANGES=binance,bybit,bitget`.
+Отключить лишние: `LIQSCOPE_EXCHANGES=binance,bybit,bitget`.
 
 ### Почему нет Coinbase, Hyperliquid, KuCoin и BingX
 
@@ -188,7 +188,7 @@ sudo systemctl enable --now licvid
 - **Выбор монеты — выпадающий список, как на биржах.** Сервер раз в час
   собирает ПОЛНЫЙ каталог USDT-перпетуалов с Binance, Bybit, OKX, Gate и
   Bitget (несколько тысяч пар) и сортирует его по обороту за 24 часа. В
-  селекторе показывается только верх (`LICVID_SYMBOLS_LIMIT`, по умолчанию
+  селекторе показывается только верх (`LIQSCOPE_SYMBOLS_LIMIT`, по умолчанию
   40) — поэтому, например, свежей пары `GRAM/USDT` могло не быть в списке,
   хотя она есть на Binance. Кнопка «Монета» показывает только выбранную
   пару (или **🌐 ВСЕ**); клик открывает вертикальный список: «ВСЕ» +
@@ -245,7 +245,7 @@ sudo systemctl enable --now licvid
 - **Регулируемые панели, как на биржах.** Между графиком и лентой есть
   вертикальный разделитель (тянется мышью/пальцем — меняется ширина ленты),
   внутри ленты — горизонтальный (высота блока «Лидеры по ликвидациям»).
-  Размеры сохраняются в браузере (`licvid.layout`) и восстанавливаются после
+  Размеры сохраняются в браузере (`liqscope.layout`) и восстанавливаются после
   F5; на телефоне раскладка фиксированная, разделители скрыты.
 - **Разворот графика на весь экран** — кнопка ⛶ в шапке графика (и на телефоне,
   и на компьютере): график раскрывается поверх всего, Esc или повторный клик —
@@ -292,7 +292,7 @@ sudo systemctl enable --now licvid
   в каждой строке меню сразу видно значение за этот период. Под значением —
   детали: у ликвидаций сплит лонги/шорты, у CVD — встречные потоки,
   у OI — суммарный интерес. Выбор периода у каждого бокса свой
-  и запоминается в браузере (`licvid.statwin.liq/cvd/oi`).
+  и запоминается в браузере (`liqscope.statwin.liq/cvd/oi`).
 - **«Крупность» масштабируется от оборота монеты.** Что для BTC пыль,
   для GRAM — кит: поэтому пороги кита ($100K), подписей ($2K), тиров OI
   ($1M/$5M/$20M) и пола шума CVD/OI ($1K) умножаются на отношение
@@ -313,8 +313,8 @@ sudo systemctl enable --now licvid
   прямоугольники ликвидаций (и маркеры китов), «📊 Профиль» — профиль
   объёмов по ценам, «🎯 CVD» — треугольники, «● OI» — шарики открытого
   интереса. Состояние каждой кнопки сохраняется в браузере
-  (`licvid.liqEnabled`, `licvid.profileEnabled`, `licvid.cvdEnabled`,
-  `licvid.oiEnabled`). Кнопка прячет только фигуры на графике — цифры
+  (`liqscope.liqEnabled`, `liqscope.profileEnabled`, `liqscope.cvdEnabled`,
+  `liqscope.oiEnabled`). Кнопка прячет только фигуры на графике — цифры
   у кнопок и боксы в шапке продолжают жить своей жизнью.
 - **Живые цифры строго у своих кнопок.** Справа от каждого тумблера слоя —
   текущий поток: у «⚡ Ликвидации» — сумма и число событий текущей свечи,
@@ -330,8 +330,8 @@ sudo systemctl enable --now licvid
   Теперь `top_coins` в `/api/stats` всегда глобальные — список лидеров
   виден целиком при любом фильтре (фильтр биржи уважаем).
 - **История пузырьков переживает F5 и рестарт сервера.** Сервер пишет каждое
-  событие в `data/liq_history.jsonl` (JSONL, до `LICVID_HISTORY_MAX` событий,
-  TTL `LICVID_HISTORY_TTL_HOURS` ч) и восстанавливает её при старте. Клиент при
+  событие в `data/liq_history.jsonl` (JSONL, до `LIQSCOPE_HISTORY_MAX` событий,
+  TTL `LIQSCOPE_HISTORY_TTL_HOURS` ч) и восстанавливает её при старте. Клиент при
   загрузке догружает до 2000 событий выбранной пары через
   `GET /api/liquidations?symbol=…` (дедупликация по `id`, без дублей после
   переподключения) и дополнительно кэширует их в IndexedDB на этом устройстве —
@@ -341,8 +341,8 @@ sudo systemctl enable --now licvid
 - **Языки (i18n)**: выпадающий переключатель языка в шапке терминала и на
   лендинге — русский, английский, китайский, хинди, испанский. Переводы лежат
   в `static/i18n.js` (словари RU/EN/ZH/HI/ES), статический текст помечен
-  атрибутами `data-i18n*`, динамический идёт через `LicvidationI18n.t()`.
-  Выбор хранится в localStorage (`licvidation.lang`), по умолчанию — язык
+  атрибутами `data-i18n*`, динамический идёт через `LiqScopeI18n.t()`.
+  Выбор хранится в localStorage (`liqscope.lang`), по умолчанию — язык
   браузера или русский. Форматы чисел/времени/дат тоже локализованы
   (`Intl` с локалью выбранного языка).
 
@@ -397,7 +397,7 @@ static/index.html    интерфейс терминала
 static/app.js        график (Lightweight Charts v5), лента, кластеры, профиль
 static/style.css     тёмная тема
 tests/test_parsers.py офлайн-тесты парсеров
-deploy/licvid.service пример systemd-юнита
+deploy/liqscope.service пример systemd-юнита
 ```
 
 Файлы `liq_api.py`, `orderflow.py`, `chainlink_price.py`, `main.py`
@@ -414,14 +414,14 @@ deploy/licvid.service пример systemd-юнита
    curl -s -o /dev/null -w '%{http_code}\n' https://fapi.binance.com/fapi/v1/ping
    curl -s -o /dev/null -w '%{http_code}\n' https://api.bybit.com/v5/market/time
    ```
-   Лишние биржи можно отключить: `LICVID_EXCHANGES=bybit,okx`.
+   Лишние биржи можно отключить: `LIQSCOPE_EXCHANGES=bybit,okx`.
 3. Нет тиков (`ticks_seen: 0`): смотрите `tick_source`, `hot_symbols` и
-   `tick_subscriptions` в `/api/health`, плюс `journalctl -u licvid | grep ticks`.
+   `tick_subscriptions` в `/api/health`, плюс `journalctl -u liqscope | grep ticks`.
    Если источник «молчит», через 20 с движок сам уйдёт на следующий
    (combined → raw → Bybit) и напишет об этом в лог.
 4. Binance принимает подписку (`{"result":null,"id":1}`), но сделок не шлёт —
    такое бывает на отдельных серверах. Терминал сам уйдёт на Bybit; чтобы не
-   ждать 40 с после каждого рестарта, поставьте `LICVID_TICK_SOURCE=bybit`.
+   ждать 40 с после каждого рестарта, поставьте `LIQSCOPE_TICK_SOURCE=bybit`.
    Подтвердить руками: `python3 tools/check_exchanges.py`.
 5. `connected: true`, но `events: 0` — рынок спокойный: ликвидации по
    топ-монетам идут каждые несколько секунд, но в штиль могут быть паузы.

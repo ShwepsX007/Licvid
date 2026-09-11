@@ -1,5 +1,5 @@
 """
-market_feed.py — реальные рыночные данные для Licvidation Terminal.
+market_feed.py — реальные рыночные данные для LiqScope Terminal.
 
 Модуль полностью самодостаточный (нужен только aiohttp) и НЕ зависит от
 телеграм-бота. Он даёт три вещи:
@@ -38,13 +38,13 @@ from typing import Awaitable, Callable, Dict, Iterable, List, Optional
 import aiohttp
 from oi_feed import OpenInterestTracker
 
-log = logging.getLogger("licvid.feed")
+log = logging.getLogger("liqscope.feed")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # Часовые срезы оборота монет — для среднего за неделю (volAvg7d).
 # От него клиент масштабирует пороги «крупности» ликвидаций/CVD/OI:
 # что для BTC пыль, для GRAM — кит.
-VOL_HIST_FILE = os.getenv("LICVID_VOL_HISTORY_FILE",
+VOL_HIST_FILE = os.getenv("LIQSCOPE_VOL_HISTORY_FILE",
                           os.path.join(HERE, "data", "vol_history.json")).strip()
 if VOL_HIST_FILE.lower() in ("0", "none", "off", "false"):
     VOL_HIST_FILE = ""
@@ -533,7 +533,7 @@ class MarketFeed:
         # По ним идёт потиковый поток сделок (aggTrade / publicTrade).
         self.hot_symbols: set = set()
         self.tick_subscriptions: set = set()
-        # Порядок источников тиков; можно задать через LICVID_TICK_SOURCE,
+        # Порядок источников тиков; можно задать через LIQSCOPE_TICK_SOURCE,
         # если известно, что какая-то биржа на этом сервере молчит.
         self.tick_sources = [x.strip().lower() for x in
                              (tick_sources or ["binance", "binance-raw", "bybit"]) if x]
@@ -566,7 +566,7 @@ class MarketFeed:
     # -- жизненный цикл ------------------------------------------------------
     async def start(self):
         self._session = aiohttp.ClientSession(
-            headers={"User-Agent": "Licvidation-Terminal/4.1"},
+            headers={"User-Agent": "LiqScope-Terminal/4.1"},
             timeout=aiohttp.ClientTimeout(total=20),
         )
         await self.refresh_symbols()
@@ -1343,7 +1343,7 @@ class MarketFeed:
         """public.*.liquidation_orders; кадры приходят в gzip."""
         st = self.status["htx"]
         async with self._session.ws_connect(HTX_WS, heartbeat=None, timeout=25) as ws:
-            await ws.send_json({"op": "sub", "cid": "licvid",
+            await ws.send_json({"op": "sub", "cid": "liqscope",
                                 "topic": "public.*.liquidation_orders"})
             st.up()
             log.info("[htx] подписка на public.*.liquidation_orders")

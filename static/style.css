@@ -1,4 +1,4 @@
-/* Licvidation Terminal Clean Dark Theme */
+/* LiqScope Terminal Clean Dark Theme */
 :root {
     --bg-dark: #090c10;
     --bg-card: #121721;
@@ -71,7 +71,10 @@ body.dark-theme {
 .brand-link:active { transform: scale(0.98); }
 
 .logo-icon {
-    font-size: 1.2rem;
+    width: 26px;
+    height: 26px;
+    border-radius: 7px;
+    flex-shrink: 0;
 }
 
 .brand-title {
@@ -1024,7 +1027,7 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
 .badge-oi-down { background: rgba(239,68,68,0.22); color: #fda4a4; }
 
 /* ============================================================
-   Licvidation v4 — новые элементы: поиск монет, здоровье бирж, DEMO
+   LiqScope v4 — новые элементы: поиск монет, здоровье бирж, DEMO
    ============================================================ */
 
 .hidden { display: none !important; }
@@ -1167,7 +1170,7 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
 .data-source.live { color: var(--color-green); }
 
 /* ============================================================
-   Поиск пар, фильтры объёма/бирж, кликабельная монета — Licvidation v5
+   Поиск пар, фильтры объёма/бирж, кликабельная монета — LiqScope v5
    ============================================================ */
 
 /* --- Поиск пары --- */

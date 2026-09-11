@@ -123,7 +123,7 @@ async function main() {
         Object.defineProperty(win.navigator, "language", { value: "ru-RU", configurable: true });
       } catch (e) { /* ignore */ }
       try {
-        win.localStorage.setItem("licvid.chartSymbol", "BTC_USDT");
+        win.localStorage.setItem("liqscope.chartSymbol", "BTC_USDT");
       } catch (e) { /* ignore */ }
       win.matchMedia = () => ({ matches: false, media: "", onchange: null,
         addListener() {}, removeListener() {}, addEventListener() {},

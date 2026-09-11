@@ -1,5 +1,5 @@
 /**
- * Licvidation Terminal — реальный поток ликвидаций + кластерный график.
+ * LiqScope Terminal — реальный поток ликвидаций + кластерный график.
  *
  * Важное отличие от прошлой версии: библиотека Lightweight Charts v5
  * больше не имеет методов addCandlestickSeries()/setMarkers() — вызов
@@ -12,7 +12,7 @@
     "use strict";
 
     // Мультиязычность (i18n.js): ru / en / zh / hi / es
-    var I18n = window.LicvidationI18n || {
+    var I18n = window.LiqScopeI18n || {
         t: function (k) { return k; }, lang: function () { return "ru"; },
         set: function () {}, plural: function (n, f) { return f[0]; },
         apply: function () {}, onChange: function () {}, init: function () {},
@@ -192,11 +192,11 @@
 
     function loadSavedFilters() {
         try {
-            const v = localStorage.getItem("licvid.minUsd");
+            const v = localStorage.getItem("liqscope.minUsd");
             if (v !== null) state.minUsd = Math.max(0, parseFloat(v) || 0);
         } catch (e) { /* ignore */ }
         try {
-            const raw = localStorage.getItem("licvid.exchanges");
+            const raw = localStorage.getItem("liqscope.exchanges");
             if (raw !== null) {
                 if (raw === "*") {
                     state.exchanges = null;               // все биржи включены
@@ -209,12 +209,12 @@
     }
 
     function saveMinUsd() {
-        try { localStorage.setItem("licvid.minUsd", String(state.minUsd || 0)); } catch (e) { /* ignore */ }
+        try { localStorage.setItem("liqscope.minUsd", String(state.minUsd || 0)); } catch (e) { /* ignore */ }
     }
 
     function saveExchanges() {
         try {
-            localStorage.setItem("licvid.exchanges",
+            localStorage.setItem("liqscope.exchanges",
                 state.exchanges ? JSON.stringify(Array.from(state.exchanges).sort()) : "*");
         } catch (e) { /* ignore */ }
     }
@@ -242,7 +242,7 @@
         if (!window.indexedDB) return Promise.resolve(null);   // старый браузер
         return new Promise((resolve) => {
             try {
-                const req = window.indexedDB.open("licvid-history", 1);
+                const req = window.indexedDB.open("liqscope-history", 1);
                 req.onupgradeneeded = () => {
                     const db = req.result;
                     if (!db.objectStoreNames.contains("liqs")) {
@@ -1143,7 +1143,7 @@
         const kinds = ["liq", "cvd", "oi"];
         for (let i = 0; i < kinds.length; i++) {
             try {
-                const v = localStorage.getItem("licvid.statwin." + kinds[i]);
+                const v = localStorage.getItem("liqscope.statwin." + kinds[i]);
                 if (v && OI_WIN_KEY[v]) state.statWin[kinds[i]] = v;
             } catch (e) { /* ignore */ }
         }
@@ -1151,7 +1151,7 @@
     function setStatWin(kind, key) {
         if (!OI_WIN_KEY[key]) return;
         state.statWin[kind] = key;
-        try { localStorage.setItem("licvid.statwin." + kind, key); } catch (e) {}
+        try { localStorage.setItem("liqscope.statwin." + kind, key); } catch (e) {}
         paintStatBox(kind);
     }
 
@@ -1678,7 +1678,7 @@
         const root = document.documentElement;
         const layout = { feedW: 430, coinsH: 170 };
         try {
-            const raw = localStorage.getItem("licvid.layout");
+            const raw = localStorage.getItem("liqscope.layout");
             if (raw) {
                 const o = JSON.parse(raw) || {};
                 layout.feedW = clampPx(Number(o.feedW) || 430, 280, 720);
@@ -1690,7 +1690,7 @@
             root.style.setProperty("--coins-height", layout.coinsH + "px");
         };
         const saveLayout = () => {
-            try { localStorage.setItem("licvid.layout", JSON.stringify(layout)); } catch (e) { /* ignore */ }
+            try { localStorage.setItem("liqscope.layout", JSON.stringify(layout)); } catch (e) { /* ignore */ }
         };
         const bind = (el, axis) => {
             if (!el) return;
@@ -1737,14 +1737,14 @@
         const tgl = $("top-coins-toggle");
         if (!box || !tgl) return;
         let open = true;
-        try { open = localStorage.getItem("licvid.coinsOpen") !== "0"; } catch (e) { /* ignore */ }
+        try { open = localStorage.getItem("liqscope.coinsOpen") !== "0"; } catch (e) { /* ignore */ }
         const render = () => {
             box.classList.toggle("closed", !open);
             tgl.setAttribute("aria-expanded", open ? "true" : "false");
         };
         tgl.addEventListener("click", () => {
             open = !open;
-            try { localStorage.setItem("licvid.coinsOpen", open ? "1" : "0"); } catch (e) { /* ignore */ }
+            try { localStorage.setItem("liqscope.coinsOpen", open ? "1" : "0"); } catch (e) { /* ignore */ }
             render();
         });
         render();
@@ -2068,13 +2068,13 @@
     // --- Слои графика: ликвидации / профиль / CVD ----------------------------
     function setupLayerToggles() {
         const defs = [
-            { el: profileToggle, skey: "profileEnabled", store: "licvid.profileEnabled",
+            { el: profileToggle, skey: "profileEnabled", store: "liqscope.profileEnabled",
               on: "chart.profile_on", off: "chart.profile_off" },
-            { el: $("liq-toggle"), skey: "liqEnabled", store: "licvid.liqEnabled",
+            { el: $("liq-toggle"), skey: "liqEnabled", store: "liqscope.liqEnabled",
               on: "chart.liq_on", off: "chart.liq_off" },
-            { el: $("cvd-toggle"), skey: "cvdEnabled", store: "licvid.cvdEnabled",
+            { el: $("cvd-toggle"), skey: "cvdEnabled", store: "liqscope.cvdEnabled",
               on: "chart.cvd_on", off: "chart.cvd_off" },
-            { el: $("oi-toggle"), skey: "oiEnabled", store: "licvid.oiEnabled",
+            { el: $("oi-toggle"), skey: "oiEnabled", store: "liqscope.oiEnabled",
               on: "chart.oi_on", off: "chart.oi_off" },
         ];
         defs.forEach((d) => {
@@ -2123,7 +2123,7 @@
     function setupChartToggle() {
         if (!chartToggle || !chartSection) return;
         try {
-            if (localStorage.getItem("licvid.chartCollapsed") === "1") {
+            if (localStorage.getItem("liqscope.chartCollapsed") === "1") {
                 chartSection.classList.add("collapsed");
             }
         } catch (e) { /* ignore */ }
@@ -2131,7 +2131,7 @@
         chartToggle.addEventListener("click", () => {
             const collapsed = chartSection.classList.toggle("collapsed");
             try {
-                localStorage.setItem("licvid.chartCollapsed", collapsed ? "1" : "0");
+                localStorage.setItem("liqscope.chartCollapsed", collapsed ? "1" : "0");
             } catch (e) { /* ignore */ }
             if (!collapsed) {
                 // после разворачивания пересчитываем размеры графика
@@ -2296,7 +2296,7 @@
         state.symbol = s;
         if (s !== "ALL") {
             state.chartSymbol = s;              // «ВСЕ» график не переключает
-            try { localStorage.setItem("licvid.chartSymbol", s); } catch (e) { /* ignore */ }
+            try { localStorage.setItem("liqscope.chartSymbol", s); } catch (e) { /* ignore */ }
         }
         const chartChanged = chartSymbol() !== prevChart;
         if (chartChanged) {
@@ -2320,7 +2320,7 @@
         unpinShape();
         closeModal();
         state.chartSymbol = s;
-        try { localStorage.setItem("licvid.chartSymbol", s); } catch (e) { /* ignore */ }
+        try { localStorage.setItem("liqscope.chartSymbol", s); } catch (e) { /* ignore */ }
         state.tickCount = 0;
         state.lastTickAt = 0;
         state.lagMs = null;
@@ -2717,7 +2717,7 @@
                 }
                 if (!state.chartSymbol) {
                     let saved = "";
-                    try { saved = localStorage.getItem("licvid.chartSymbol") || ""; } catch (e) { /* ignore */ }
+                    try { saved = localStorage.getItem("liqscope.chartSymbol") || ""; } catch (e) { /* ignore */ }
                     // сохранённая пара может быть пользовательской — держим её,
                     // даже если она не попала в текущий топ (сервер найдёт свечи)
                     state.chartSymbol = (saved && /^[A-Z0-9]{2,20}_[A-Z0-9]{2,6}$/.test(saved))

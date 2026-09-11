@@ -25,7 +25,7 @@ from typing import Awaitable, Callable, Deque, Dict, List, Optional, Tuple
 
 import aiohttp
 
-log = logging.getLogger("licvid.oi")
+log = logging.getLogger("liqscope.oi")
 
 # Окна изменений для боксов шапки: ключ -> секунд. m1 считается по живым
 # опросам (кольцо _live_hist), остальные — по 5-минутным бакетам.

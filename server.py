@@ -1,5 +1,5 @@
 """
-Licvid Web Server — терминал ликвидаций в реальном времени.
+LiqScope Web Server — терминал ликвидаций в реальном времени.
 
 Что отдаёт наружу:
     GET  /                  — лендинг (посадочная страница)
@@ -13,14 +13,14 @@ Licvid Web Server — терминал ликвидаций в реальном 
 
 Все данные — настоящие, с публичных WS бирж (ключи не нужны).
 Демо-режим (синтетические события) включается только явно:
-    LICVID_DEMO=1  — и тогда фронтенд честно рисует бейдж «DEMO».
+    LIQSCOPE_DEMO=1  — и тогда фронтенд честно рисует бейдж «DEMO».
 
 Переменные окружения:
-    LICVID_SYMBOLS_LIMIT  сколько монет держать в списке (по умолчанию 40)
-    LICVID_EXCHANGES      binance,bybit,okx,gate,bitget,htx,bitmex (по умолчанию все)
-    LICVID_TICK_SOURCE    порядок источников тиков: binance,binance-raw,bybit
-    LICVID_DEMO           1 — генерировать тестовый поток вместо биржевого
-    LICVID_HISTORY_MAX    сколько событий держать в памяти (по умолчанию 60000)
+    LIQSCOPE_SYMBOLS_LIMIT  сколько монет держать в списке (по умолчанию 40)
+    LIQSCOPE_EXCHANGES      binance,bybit,okx,gate,bitget,htx,bitmex (по умолчанию все)
+    LIQSCOPE_TICK_SOURCE    порядок источников тиков: binance,binance-raw,bybit
+    LIQSCOPE_DEMO           1 — генерировать тестовый поток вместо биржевого
+    LIQSCOPE_HISTORY_MAX    сколько событий держать в памяти (по умолчанию 60000)
 """
 
 from __future__ import annotations
@@ -45,40 +45,40 @@ from oi_feed import map_candles_to_oi
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-log = logging.getLogger("licvid.server")
+log = logging.getLogger("liqscope.server")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(HERE, "static")
 
-SYMBOLS_LIMIT = int(os.getenv("LICVID_SYMBOLS_LIMIT", "40"))
+SYMBOLS_LIMIT = int(os.getenv("LIQSCOPE_SYMBOLS_LIMIT", "40"))
 EXCHANGES = [e.strip().lower() for e in
-             os.getenv("LICVID_EXCHANGES",
+             os.getenv("LIQSCOPE_EXCHANGES",
                        "binance,bybit,okx,gate,bitget,htx,bitmex").split(",")
              if e.strip()]
 # Порядок источников потиковых данных для графика (первый рабочий побеждает)
 TICK_SOURCES = [x.strip().lower() for x in
-                os.getenv("LICVID_TICK_SOURCE", "binance,binance-raw,bybit").split(",")
+                os.getenv("LIQSCOPE_TICK_SOURCE", "binance,binance-raw,bybit").split(",")
                 if x.strip()]
-DEMO_MODE = os.getenv("LICVID_DEMO", "0").strip() in ("1", "true", "yes", "on")
-HISTORY_MAX = int(os.getenv("LICVID_HISTORY_MAX", "60000"))
+DEMO_MODE = os.getenv("LIQSCOPE_DEMO", "0").strip() in ("1", "true", "yes", "on")
+HISTORY_MAX = int(os.getenv("LIQSCOPE_HISTORY_MAX", "60000"))
 # Дисковое сохранение истории ликвидаций (переживает рестарт сервера).
-# Путь: LICVID_HISTORY_FILE ("" / "0" / "off" — отключить), TTL — сколько часов
+# Путь: LIQSCOPE_HISTORY_FILE ("" / "0" / "off" — отключить), TTL — сколько часов
 # держать при загрузке/урезании файла.
-HISTORY_FILE = os.getenv("LICVID_HISTORY_FILE",
+HISTORY_FILE = os.getenv("LIQSCOPE_HISTORY_FILE",
                          os.path.join(HERE, "data", "liq_history.jsonl")).strip()
 if HISTORY_FILE.lower() in ("0", "none", "off", "false"):
     HISTORY_FILE = ""
-HISTORY_TTL_HOURS = float(os.getenv("LICVID_HISTORY_TTL_HOURS", "24"))
+HISTORY_TTL_HOURS = float(os.getenv("LIQSCOPE_HISTORY_TTL_HOURS", "24"))
 HISTORY_FILE_MAX_BYTES = 64 * 1024 * 1024   # страховка: урезаем файл при разрастании
 
 KLINE_TTL = 20.0            # сек: как часто перезапрашивать историю с биржи
 # Ликвидации уходят клиенту сразу; интервал — только предохранитель от флуда
 # при лавине событий (0 = слать каждое событие немедленно).
-BROADCAST_INTERVAL = float(os.getenv("LICVID_LIQ_FLUSH_MS", "0")) / 1000.0
+BROADCAST_INTERVAL = float(os.getenv("LIQSCOPE_LIQ_FLUSH_MS", "0")) / 1000.0
 # Минимальный зазор между тиками графика по одной монете (0 = каждый тик).
-TICK_MIN_GAP = float(os.getenv("LICVID_TICK_MIN_GAP_MS", "0")) / 1000.0
-PRICE_INTERVAL = float(os.getenv("LICVID_PRICE_INTERVAL_MS", "1000")) / 1000.0
-STATS_INTERVAL = float(os.getenv("LICVID_STATS_INTERVAL_MS", "2000")) / 1000.0
+TICK_MIN_GAP = float(os.getenv("LIQSCOPE_TICK_MIN_GAP_MS", "0")) / 1000.0
+PRICE_INTERVAL = float(os.getenv("LIQSCOPE_PRICE_INTERVAL_MS", "1000")) / 1000.0
+STATS_INTERVAL = float(os.getenv("LIQSCOPE_STATS_INTERVAL_MS", "2000")) / 1000.0
 
 
 # =============================================================================
@@ -662,7 +662,7 @@ def compute_stats(symbol: Optional[str] = None, exchange: Optional[str] = None) 
 #  Фоновые рассылки
 # =============================================================================
 async def liquidation_broadcaster():
-    """Работает только если включена буферизация (LICVID_LIQ_FLUSH_MS > 0)."""
+    """Работает только если включена буферизация (LIQSCOPE_LIQ_FLUSH_MS > 0)."""
     if BROADCAST_INTERVAL <= 0:
         return
     while True:
@@ -718,10 +718,10 @@ async def stats_broadcaster():
 
 
 # =============================================================================
-#  Демо-генератор (только при LICVID_DEMO=1)
+#  Демо-генератор (только при LIQSCOPE_DEMO=1)
 # =============================================================================
 async def demo_generator():
-    log.warning("ВКЛЮЧЁН ДЕМО-РЕЖИМ: поток ликвидаций синтетический (LICVID_DEMO=1)")
+    log.warning("ВКЛЮЧЁН ДЕМО-РЕЖИМ: поток ликвидаций синтетический (LIQSCOPE_DEMO=1)")
     exchanges = ["binance", "bybit", "okx", "gate", "bitget", "htx", "bitmex"]
     while True:
         try:
@@ -885,7 +885,7 @@ async def lifespan(app: FastAPI):
         await feed.stop()
 
 
-app = FastAPI(title="Licvidation — Live Crypto Liquidation Terminal",
+app = FastAPI(title="LiqScope — Live Crypto Liquidation Terminal",
               version="4.1.0", lifespan=lifespan)
 
 app.add_middleware(

@@ -189,8 +189,8 @@ async def main():
   «НЕТ» у ликвидаций может означать просто затишье на рынке — повторите
   с большим ожиданием: python3 tools/check_exchanges.py BTCUSDT 60
   «НЕТ» у aggTrade/kline при живом connect — биржа не отдаёт этому серверу
-  рыночные данные. Тогда закрепите рабочий источник в /etc/systemd/system/licvid.service:
-      Environment=LICVID_TICK_SOURCE=bybit
+  рыночные данные. Тогда закрепите рабочий источник в /etc/systemd/system/liqscope.service:
+      Environment=LIQSCOPE_TICK_SOURCE=bybit
 """)
 
 

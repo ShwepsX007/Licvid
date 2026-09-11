@@ -3,9 +3,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title data-i18n="land.title">Licvidation — терминал ликвидаций крипто-фьючерсов в реальном времени</title>
+<title data-i18n="land.title">LiqScope — терминал ликвидаций крипто-фьючерсов в реальном времени</title>
 <meta name="description" data-i18n-meta="land.meta"
-      content="Licvidation — бесплатный live-терминал ликвидаций: Binance, Bybit, OKX, Gate.io, Bitget, HTX, BitMEX. Свечной график с кластерами, поиск любой пары, фильтры по объёму и биржам.">
+      content="LiqScope — бесплатный live-терминал ликвидаций: Binance, Bybit, OKX, Gate.io, Bitget, HTX, BitMEX. Свечной график с кластерами, поиск любой пары, фильтры по объёму и биржам.">
+<link rel="icon" type="image/png" href="/static/logo.png">
 <script src="/static/i18n.js"></script>
 <style>
 :root {
@@ -51,8 +52,8 @@ a { color: inherit; text-decoration: none; }
     backdrop-filter: blur(10px);
     border-bottom: 1px solid rgba(27, 36, 52, 0.7);
 }
-.brand { display: flex; align-items: baseline; gap: 8px; font-weight: 800; letter-spacing: 1px; }
-.brand .logo { font-size: 1.25rem; }
+.brand { display: flex; align-items: center; gap: 8px; font-weight: 800; letter-spacing: 1px; }
+.brand .logo { width: 26px; height: 26px; border-radius: 7px; }
 .brand .name { font-size: 1.15rem; }
 .brand .tag { font-size: 0.62rem; color: var(--muted); letter-spacing: 2.5px; border: 1px solid var(--border); padding: 2px 6px; border-radius: 3px; }
 .site-nav { display: flex; gap: 22px; align-items: center; font-size: 0.85rem; color: var(--muted); }
@@ -255,9 +256,9 @@ a { color: inherit; text-decoration: none; }
 <body>
 
 <header class="site-header">
-    <a class="brand" href="/" data-i18n-title="brand.home_title" title="Licvidation — главная">
-        <span class="logo">⚡</span>
-        <span class="name">LICVIDATION</span>
+    <a class="brand" href="/" data-i18n-title="brand.home_title" title="LiqScope — главная">
+        <img class="logo" src="/static/logo.png" alt="LiqScope">
+        <span class="name">LIQSCOPE</span>
         <span class="tag" data-i18n="brand.badge">TERMINAL</span>
     </a>
     <nav class="site-nav">
@@ -279,7 +280,7 @@ a { color: inherit; text-decoration: none; }
     <div class="hero-badge"><span class="pulse"></span> <span data-i18n="land.badge">7 бирж · публичные WebSocket · без API-ключей</span></div>
     <h1><span data-i18n="land.h1.1">Ликвидации крипто-фьючерсов</span><br><span class="grad" data-i18n="land.h1.2">в реальном времени</span></h1>
     <p class="sub" data-i18n="land.sub">
-        Licvidation ловит принудительные закрытия позиций на Binance, Bybit, OKX, Gate.io, Bitget,
+        LiqScope ловит принудительные закрытия позиций на Binance, Bybit, OKX, Gate.io, Bitget,
         HTX и BitMEX и рисует их на живом свечном графике — с кластерами, профилем объёмов
         и поиском любой торгуемой пары.
     </p>
@@ -395,7 +396,7 @@ a { color: inherit; text-decoration: none; }
 </section>
 
 <footer class="site-footer">
-    <span data-i18n="land.footer.copy">© 2026 Licvidation Terminal · данные с публичных WebSocket бирж</span>
+    <span data-i18n="land.footer.copy">© 2026 LiqScope Terminal · данные с публичных WebSocket бирж</span>
     <span><span data-i18n="land.footer.race">Не является инвестиционной рекомендацией</span> · <a href="/terminal" data-i18n="land.footer.open">Открыть терминал →</a></span>
 </footer>
 
@@ -403,7 +404,7 @@ a { color: inherit; text-decoration: none; }
 (function () {
     "use strict";
 
-    var I18n = window.LicvidationI18n || {
+    var I18n = window.LiqScopeI18n || {
         t: function (k) { return k; }, lang: function () { return "ru"; },
         set: function () {}, number: function (n) { return String(Number(n) || 0); },
         init: function () {}, onChange: function () {},

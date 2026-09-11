@@ -1,5 +1,5 @@
 {
-  "name": "licvid",
+  "name": "liqscope",
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
@@ -8,15 +8,15 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ShwepsX007/Licvid.git"
+    "url": "git+https://github.com/ShwepsX007/LiqScope.git"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "bugs": {
-    "url": "https://github.com/ShwepsX007/Licvid/issues"
+    "url": "https://github.com/ShwepsX007/LiqScope/issues"
   },
-  "homepage": "https://github.com/ShwepsX007/Licvid#readme",
+  "homepage": "https://github.com/ShwepsX007/LiqScope#readme",
   "dependencies": {
     "lightweight-charts": "^5.2.1"
   }

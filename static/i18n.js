@@ -1,5 +1,5 @@
 /**
- * Licvidation Terminal — мультиязычность.
+ * LiqScope Terminal — мультиязычность.
  *
  * Поддерживаются: русский (по умолчанию), английский, китайский (мандарин),
  * хинди, испанский. Язык определяется по браузеру, переключается в шапке и
@@ -7,10 +7,10 @@
  *
  * Использование:
  *   <script src="/static/i18n.js"></script>
- *   LicvidationI18n.init();                    // применить сохранённый/броузерный язык
- *   LicvidationI18n.t("feed.title");           // перевод строки
- *   LicvidationI18n.plural(n, [one, few, many]);
- *   LicvidationI18n.onChange(fn);              // перерисовка динамики при смене языка
+ *   LiqScopeI18n.init();                    // применить сохранённый/броузерный язык
+ *   LiqScopeI18n.t("feed.title");           // перевод строки
+ *   LiqScopeI18n.plural(n, [one, few, many]);
+ *   LiqScopeI18n.onChange(fn);              // перерисовка динамики при смене языка
  *
  * Статичный текст размечается атрибутами:
  *   data-i18n="key"               — textContent
@@ -34,10 +34,10 @@
      * СЛОВАРИ
      * ===================================================================== */
     var RU = {
-        "terminal.title": "Licvidation Terminal — Live Liquidation Stream & Cluster Chart",
-        "terminal.meta": "Licvidation Terminal — live-лента ликвидаций крипто-фьючерсов с 7 бирж, свечной график, кластеры и профиль объёмов.",
+        "terminal.title": "LiqScope Terminal — Live Liquidation Stream & Cluster Chart",
+        "terminal.meta": "LiqScope Terminal — live-лента ликвидаций крипто-фьючерсов с 7 бирж, свечной график, кластеры и профиль объёмов.",
         "brand.badge": "TERMINAL",
-        "brand.home_title": "На главную — Licvidation Terminal",
+        "brand.home_title": "На главную — LiqScope Terminal",
         "layout.feed_split": "Ширина ленты: потяните за разделитель",
         "layout.coins_split": "Высота блока «Лидеры»: потяните за разделитель",
         "layout.chart_split": "Высота графика: потяните вверх или вниз",
@@ -178,12 +178,12 @@
         "health.ticks": "тики",
         "health.connected": "подключено, событий: {n}",
         "health.noconn": "нет связи: {err}",
-        "land.title": "Licvidation — терминал ликвидаций крипто-фьючерсов в реальном времени",
-        "land.meta": "Licvidation — бесплатный live-терминал ликвидаций: Binance, Bybit, OKX, Gate.io, Bitget, HTX, BitMEX. Свечной график с кластерами, поиск любой пары, фильтры по объёму и биржам.",
+        "land.title": "LiqScope — терминал ликвидаций крипто-фьючерсов в реальном времени",
+        "land.meta": "LiqScope — бесплатный live-терминал ликвидаций: Binance, Bybit, OKX, Gate.io, Bitget, HTX, BitMEX. Свечной график с кластерами, поиск любой пары, фильтры по объёму и биржам.",
         "land.badge": "7 бирж · публичные WebSocket · без API-ключей",
         "land.h1.1": "Ликвидации крипто-фьючерсов",
         "land.h1.2": "в реальном времени",
-        "land.sub": "Licvidation ловит принудительные закрытия позиций на Binance, Bybit, OKX, Gate.io, Bitget, HTX и BitMEX и рисует их на живом свечном графике — с кластерами, профилем объёмов и поиском любой торгуемой пары.",
+        "land.sub": "LiqScope ловит принудительные закрытия позиций на Binance, Bybit, OKX, Gate.io, Bitget, HTX и BitMEX и рисует их на живом свечном графике — с кластерами, профилем объёмов и поиском любой торгуемой пары.",
         "land.hero.more": "Что умеет",
         "land.nav.live": "Живой эфир",
         "land.nav.features": "Возможности",
@@ -236,16 +236,16 @@
         "land.step4.desc": "Лента, статистика 5м/1ч/24ч, топ монет — всё обновляется в реальном времени.",
         "land.cta.title": "Готовы увидеть рынок изнутри?",
         "land.cta.note": "Бесплатно · без регистрации · без API-ключей · данные с публичных потоков бирж",
-        "land.footer.copy": "© 2026 Licvidation Terminal · данные с публичных WebSocket бирж",
+        "land.footer.copy": "© 2026 LiqScope Terminal · данные с публичных WebSocket бирж",
         "land.footer.race": "Не является инвестиционной рекомендацией",
         "land.footer.open": "Открыть терминал →",
     };
 
     var EN = {
-        "terminal.title": "Licvidation Terminal — Live Liquidation Stream & Cluster Chart",
-        "terminal.meta": "Licvidation Terminal — live crypto futures liquidation feed from 7 exchanges, candlestick chart, clusters and volume profile.",
+        "terminal.title": "LiqScope Terminal — Live Liquidation Stream & Cluster Chart",
+        "terminal.meta": "LiqScope Terminal — live crypto futures liquidation feed from 7 exchanges, candlestick chart, clusters and volume profile.",
         "brand.badge": "TERMINAL",
-        "brand.home_title": "Back to home — Licvidation Terminal",
+        "brand.home_title": "Back to home — LiqScope Terminal",
         "layout.feed_split": "Feed width — drag the divider",
         "layout.coins_split": "Top coins block height — drag the divider",
         "layout.chart_split": "Chart height — drag up or down",
@@ -386,12 +386,12 @@
         "health.ticks": "ticks",
         "health.connected": "connected, events: {n}",
         "health.noconn": "no connection: {err}",
-        "land.title": "Licvidation — real-time crypto futures liquidation terminal",
-        "land.meta": "Licvidation — free live liquidation terminal: Binance, Bybit, OKX, Gate.io, Bitget, HTX, BitMEX. Candlestick chart with clusters, pair search, size and exchange filters.",
+        "land.title": "LiqScope — real-time crypto futures liquidation terminal",
+        "land.meta": "LiqScope — free live liquidation terminal: Binance, Bybit, OKX, Gate.io, Bitget, HTX, BitMEX. Candlestick chart with clusters, pair search, size and exchange filters.",
         "land.badge": "7 exchanges · public WebSocket · no API keys",
         "land.h1.1": "Crypto futures liquidations",
         "land.h1.2": "in real time",
-        "land.sub": "Licvidation captures forced position closures on Binance, Bybit, OKX, Gate.io, Bitget, HTX and BitMEX and draws them on a live candlestick chart — with clusters, a volume profile and search for any tradable pair.",
+        "land.sub": "LiqScope captures forced position closures on Binance, Bybit, OKX, Gate.io, Bitget, HTX and BitMEX and draws them on a live candlestick chart — with clusters, a volume profile and search for any tradable pair.",
         "land.hero.more": "What it does",
         "land.nav.live": "Live feed",
         "land.nav.features": "Features",
@@ -444,16 +444,16 @@
         "land.step4.desc": "Feed, 5m/1h/24h stats, top coins — everything updates in real time.",
         "land.cta.title": "Ready to see the market from the inside?",
         "land.cta.note": "Free · no signup · no API keys · data from public exchange streams",
-        "land.footer.copy": "© 2026 Licvidation Terminal · data from public exchange WebSockets",
+        "land.footer.copy": "© 2026 LiqScope Terminal · data from public exchange WebSockets",
         "land.footer.race": "Not investment advice",
         "land.footer.open": "Open terminal →",
     };
 
     var ZH = {
-        "terminal.title": "Licvidation 终端 — 实时爆仓流与K线图",
-        "terminal.meta": "Licvidation 终端 — 来自7家交易所的实时加密货币期货爆仓流、K线图、爆仓聚类和成交量分布。",
+        "terminal.title": "LiqScope 终端 — 实时爆仓流与K线图",
+        "terminal.meta": "LiqScope 终端 — 来自7家交易所的实时加密货币期货爆仓流、K线图、爆仓聚类和成交量分布。",
         "brand.badge": "终端",
-        "brand.home_title": "返回首页 — Licvidation 终端",
+        "brand.home_title": "返回首页 — LiqScope 终端",
         "layout.feed_split": "列表宽度 — 拖动分隔条调整",
         "layout.coins_split": "币种榜高度 — 拖动分隔条调整",
         "layout.chart_split": "图表高度 — 上下拖动",
@@ -594,12 +594,12 @@
         "health.ticks": "tick",
         "health.connected": "已连接，事件: {n}",
         "health.noconn": "无连接: {err}",
-        "land.title": "Licvidation — 实时加密货币期货爆仓终端",
-        "land.meta": "Licvidation — 免费实时爆仓终端: Binance、Bybit、OKX、Gate.io、Bitget、HTX、BitMEX。带聚类K线图、交易对搜索、金额和交易所筛选。",
+        "land.title": "LiqScope — 实时加密货币期货爆仓终端",
+        "land.meta": "LiqScope — 免费实时爆仓终端: Binance、Bybit、OKX、Gate.io、Bitget、HTX、BitMEX。带聚类K线图、交易对搜索、金额和交易所筛选。",
         "land.badge": "7 家交易所 · 公开 WebSocket · 无需 API 密钥",
         "land.h1.1": "加密货币期货爆仓",
         "land.h1.2": "实时",
-        "land.sub": "Licvidation 抓取 Binance、Bybit、OKX、Gate.io、Bitget、HTX 和 BitMEX 上的强制平仓，并绘制在实时K线图上——带聚类、成交量分布以及对任意交易对的搜索。",
+        "land.sub": "LiqScope 抓取 Binance、Bybit、OKX、Gate.io、Bitget、HTX 和 BitMEX 上的强制平仓，并绘制在实时K线图上——带聚类、成交量分布以及对任意交易对的搜索。",
         "land.hero.more": "功能一览",
         "land.nav.live": "实时行情",
         "land.nav.features": "功能",
@@ -652,16 +652,16 @@
         "land.step4.desc": "信息流、5分/1时/24时统计、币种排行——全部实时更新。",
         "land.cta.title": "准备好从内部看市场了吗？",
         "land.cta.note": "免费 · 无需注册 · 无需 API 密钥 · 数据来自交易所公开流",
-        "land.footer.copy": "© 2026 Licvidation 终端 · 数据来自交易所公开 WebSocket",
+        "land.footer.copy": "© 2026 LiqScope 终端 · 数据来自交易所公开 WebSocket",
         "land.footer.race": "不构成投资建议",
         "land.footer.open": "打开终端 →",
     };
 
     var HI = {
-        "terminal.title": "Licvidation टर्मिनल — लाइव लिक्विडेशन स्ट्रीम और चार्ट",
-        "terminal.meta": "Licvidation टर्मिनल — 7 एक्सचेंजों से क्रिप्टो फ्यूचर्स लिक्विडेशन की लाइव फ़ीड, कैंडल चार्ट, क्लस्टर और वॉल्यूम प्रोफ़ाइल।",
+        "terminal.title": "LiqScope टर्मिनल — लाइव लिक्विडेशन स्ट्रीम और चार्ट",
+        "terminal.meta": "LiqScope टर्मिनल — 7 एक्सचेंजों से क्रिप्टो फ्यूचर्स लिक्विडेशन की लाइव फ़ीड, कैंडल चार्ट, क्लस्टर और वॉल्यूम प्रोफ़ाइल।",
         "brand.badge": "टर्मिनल",
-        "brand.home_title": "होम पर वापस — Licvidation टर्मिनल",
+        "brand.home_title": "होम पर वापस — LiqScope टर्मिनल",
         "layout.feed_split": "फ़ीड की चौड़ाई — डिवाइडर खींचें",
         "layout.coins_split": "टॉप कॉइन ब्लॉक की ऊँचाई — डिवाइडर खींचें",
         "layout.chart_split": "चार्ट की ऊँचाई — ऊपर/नीचे खींचें",
@@ -802,12 +802,12 @@
         "health.ticks": "टिक्स",
         "health.connected": "जुड़ा, घटनाएँ: {n}",
         "health.noconn": "संपर्क नहीं: {err}",
-        "land.title": "Licvidation — रीयल-टाइम क्रिप्टो फ्यूचर्स लिक्विडेशन टर्मिनल",
-        "land.meta": "Licvidation — मुफ़्त लाइव लिक्विडेशन टर्मिनल: Binance, Bybit, OKX, Gate.io, Bitget, HTX, BitMEX। क्लस्टर के साथ कैंडल चार्ट, पेयर खोज, राशि और एक्सचेंज फ़िल्टर।",
+        "land.title": "LiqScope — रीयल-टाइम क्रिप्टो फ्यूचर्स लिक्विडेशन टर्मिनल",
+        "land.meta": "LiqScope — मुफ़्त लाइव लिक्विडेशन टर्मिनल: Binance, Bybit, OKX, Gate.io, Bitget, HTX, BitMEX। क्लस्टर के साथ कैंडल चार्ट, पेयर खोज, राशि और एक्सचेंज फ़िल्टर।",
         "land.badge": "7 एक्सचेंज · पब्लिक WebSocket · कोई API कुंजी नहीं",
         "land.h1.1": "क्रिप्टो फ्यूचर्स लिक्विडेशन",
         "land.h1.2": "रीयल-टाइम में",
-        "land.sub": "Licvidation Binance, Bybit, OKX, Gate.io, Bitget, HTX और BitMEX पर जबरन पोज़िशन बंद होने को पकड़ता है और उन्हें लाइव कैंडल चार्ट पर दिखाता है — क्लस्टर, वॉल्यूम प्रोफ़ाइल और किसी भी पेयर की खोज के साथ।",
+        "land.sub": "LiqScope Binance, Bybit, OKX, Gate.io, Bitget, HTX और BitMEX पर जबरन पोज़िशन बंद होने को पकड़ता है और उन्हें लाइव कैंडल चार्ट पर दिखाता है — क्लस्टर, वॉल्यूम प्रोफ़ाइल और किसी भी पेयर की खोज के साथ।",
         "land.hero.more": "क्या करता है",
         "land.nav.live": "लाइव फ़ीड",
         "land.nav.features": "विशेषताएँ",
@@ -860,16 +860,16 @@
         "land.step4.desc": "फ़ीड, 5मि/1घं/24घं आँकड़े, टॉप सिक्के — सब कुछ रीयल-टाइम में।",
         "land.cta.title": "बाज़ार को अंदर से देखने के लिए तैयार?",
         "land.cta.note": "मुफ़्त · कोई पंजीकरण नहीं · कोई API कुंजी नहीं · सार्वजनिक स्ट्रीम से डेटा",
-        "land.footer.copy": "© 2026 Licvidation टर्मिनल · सार्वजनिक एक्सचेंज WebSocket से डेटा",
+        "land.footer.copy": "© 2026 LiqScope टर्मिनल · सार्वजनिक एक्सचेंज WebSocket से डेटा",
         "land.footer.race": "यह निवेश सलाह नहीं है",
         "land.footer.open": "टर्मिनल खोलें →",
     };
 
     var ES = {
-        "terminal.title": "Licvidation Terminal — stream de liquidaciones en vivo y gráficos",
-        "terminal.meta": "Licvidation Terminal — stream en vivo de liquidaciones de futuros cripto de 7 exchanges, gráfico de velas, clústeres y perfil de volúmenes.",
+        "terminal.title": "LiqScope Terminal — stream de liquidaciones en vivo y gráficos",
+        "terminal.meta": "LiqScope Terminal — stream en vivo de liquidaciones de futuros cripto de 7 exchanges, gráfico de velas, clústeres y perfil de volúmenes.",
         "brand.badge": "TERMINAL",
-        "brand.home_title": "Volver al inicio — Licvidation Terminal",
+        "brand.home_title": "Volver al inicio — LiqScope Terminal",
         "layout.feed_split": "Ancho de la lista — arrastra el divisor",
         "layout.coins_split": "Altura del bloque de monedas — arrastra el divisor",
         "layout.chart_split": "Altura del gráfico — arrastra arriba o abajo",
@@ -1010,12 +1010,12 @@
         "health.ticks": "ticks",
         "health.connected": "conectado, eventos: {n}",
         "health.noconn": "sin conexión: {err}",
-        "land.title": "Licvidation — terminal de liquidaciones de futuros cripto en tiempo real",
-        "land.meta": "Licvidation — terminal gratuito de liquidaciones en vivo: Binance, Bybit, OKX, Gate.io, Bitget, HTX, BitMEX. Gráfico de velas con clústeres, búsqueda de pares, filtros por importe y exchange.",
+        "land.title": "LiqScope — terminal de liquidaciones de futuros cripto en tiempo real",
+        "land.meta": "LiqScope — terminal gratuito de liquidaciones en vivo: Binance, Bybit, OKX, Gate.io, Bitget, HTX, BitMEX. Gráfico de velas con clústeres, búsqueda de pares, filtros por importe y exchange.",
         "land.badge": "7 exchanges · WebSocket público · sin claves API",
         "land.h1.1": "Liquidaciones de futuros cripto",
         "land.h1.2": "en tiempo real",
-        "land.sub": "Licvidation captura los cierres forzados de posiciones en Binance, Bybit, OKX, Gate.io, Bitget, HTX y BitMEX y los dibuja en un gráfico de velas en vivo — con clústeres, perfil de volúmenes y búsqueda de cualquier par negociable.",
+        "land.sub": "LiqScope captura los cierres forzados de posiciones en Binance, Bybit, OKX, Gate.io, Bitget, HTX y BitMEX y los dibuja en un gráfico de velas en vivo — con clústeres, perfil de volúmenes y búsqueda de cualquier par negociable.",
         "land.hero.more": "Qué ofrece",
         "land.nav.live": "Feed en vivo",
         "land.nav.features": "Funciones",
@@ -1068,7 +1068,7 @@
         "land.step4.desc": "Feed, estadísticas 5m/1h/24h, top de monedas — todo se actualiza en tiempo real.",
         "land.cta.title": "¿Listo para ver el mercado desde dentro?",
         "land.cta.note": "Gratis · sin registro · sin claves API · datos de flujos públicos de los exchanges",
-        "land.footer.copy": "© 2026 Licvidation Terminal · datos de WebSocket públicos de los exchanges",
+        "land.footer.copy": "© 2026 LiqScope Terminal · datos de WebSocket públicos de los exchanges",
         "land.footer.race": "No es una recomendación de inversión",
         "land.footer.open": "Abrir terminal →",
     };
@@ -1082,7 +1082,7 @@
      * ===================================================================== */
     function detect() {
         try {
-            var saved = localStorage.getItem("licvidation.lang");
+            var saved = localStorage.getItem("liqscope.lang");
             if (saved && MESSAGES[saved]) return saved;
         } catch (e) { /* ignore */ }
         var nav = String((typeof navigator !== "undefined" && navigator.language) || "").toLowerCase();
@@ -1163,7 +1163,7 @@
     function set(code) {
         if (!MESSAGES[code] || code === current) return;
         current = code;
-        try { localStorage.setItem("licvidation.lang", code); } catch (e) { /* ignore */ }
+        try { localStorage.setItem("liqscope.lang", code); } catch (e) { /* ignore */ }
         apply(document);
         emit();
     }
@@ -1183,7 +1183,7 @@
         catch (e) { return ""; }
     }
 
-    global.LicvidationI18n = {
+    global.LiqScopeI18n = {
         LANGS: LANGS,
         init: init, lang: lang, set: set, t: t, plural: plural,
         apply: apply, onChange: onChange,

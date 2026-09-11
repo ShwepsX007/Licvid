@@ -116,6 +116,9 @@
     const chartToggle = $("chart-toggle");
     const profileToggle = $("profile-toggle");
     const cvdStatEl = $("cvd-stat");
+    const liqStatEl = $("liq-stat");
+    const profileStatEl = $("profile-stat");
+    const oiStatEl = $("oi-stat");
     const langSelect = $("lang-select");
     const symbolButtonsEl = $("symbol-buttons");   // старый контейнер (не используется)
     const symbolCurrentBtn = $("symbol-current");
@@ -219,6 +222,7 @@
     function applyFiltersFull() {
         rebuildFeed();
         updateMarkers();
+        updateLiveStats();
         queueRedraw();
     }
 
@@ -327,6 +331,7 @@
             if (rest.length) cacheLiquidations(rest);
             rebuildFeed();
             updateMarkers();
+            updateLiveStats();
             queueRedraw();
         } catch (e) { /* сеть недоступна — живём на том, что уже пришло */ }
     }
@@ -506,7 +511,7 @@
         updatePriceDisplay(bars[bars.length - 1].close);
         renderTickIndicator();
         updateMarkers();
-        updateCvdStat();
+        updateLiveStats();
         queueRedraw();
     }
 
@@ -535,7 +540,7 @@
             if (state.candles.length > 700) state.candles.shift();
         }
         updatePriceDisplay(bar.close);
-        updateCvdStat();
+        updateLiveStats();
         queueRedraw();
     }
 
@@ -1032,7 +1037,8 @@
     function updateCvdStat() {
         paintCvdBox();   // бокс CVD в шапке — из тех же свечей
         if (!cvdStatEl) return;
-        if (!state.cvdEnabled) { cvdStatEl.textContent = ""; return; }
+        // слой на графике и цифры живут отдельно: выключенные треугольники
+        // не должны гасить ни бокс в шапке, ни живой индикатор у кнопки
         const last = state.candles[state.candles.length - 1];
         const d = last ? Number(last.cvd) : NaN;
         if (!isFinite(d)) {
@@ -1043,6 +1049,78 @@
         const buy = d >= 0;
         cvdStatEl.textContent = (buy ? "▲ +$" : "▼ −$") + fmtUsdShort(Math.abs(d));
         cvdStatEl.className = "cvd-stat " + (buy ? "up" : "down");
+    }
+
+    // Ликвидации текущей свечи: сумма и число событий. Те же фильтры,
+    // что у прямоугольников на графике (монета, биржи, мин. сумма).
+    function updateLiqStat() {
+        if (!liqStatEl) return;
+        const tfSec = state.timeframe * 60;
+        const bucket = Math.floor(Date.now() / 1000 / tfSec) * tfSec;
+        let sum = 0, n = 0;
+        const items = visibleLiquidations();
+        for (let i = 0; i < items.length; i++) {
+            const t = Math.floor((Number(items[i].timestamp) || 0) / tfSec) * tfSec;
+            if (t !== bucket) continue;
+            sum += Number(items[i].usd) || 0;
+            n += 1;
+        }
+        if (!n) {
+            liqStatEl.textContent = "—";
+            liqStatEl.className = "live-stat";
+            return;
+        }
+        liqStatEl.textContent = "$" + fmtUsdShort(sum) + "·" + n;
+        liqStatEl.className = "live-stat on-liq";
+    }
+
+    // Объём профиля: сумма ликвидаций видимого диапазона — то, что
+    // раскладывают полосы индикатора.
+    function updateProfileStat() {
+        if (!profileStatEl) return;
+        const range = profilePriceRange();
+        let sum = 0;
+        if (range) {
+            const pad = state.timeframe * 60;
+            const items = visibleLiquidations();
+            for (let i = 0; i < items.length; i++) {
+                const ts = Number(items[i].timestamp) || 0;
+                if (ts < range.from - pad || ts > range.to + pad) continue;
+                sum += Number(items[i].usd) || 0;
+            }
+        }
+        if (!(sum > 0)) {
+            profileStatEl.textContent = "—";
+            profileStatEl.className = "live-stat";
+            return;
+        }
+        profileStatEl.textContent = "$" + fmtUsdShort(sum);
+        profileStatEl.className = "live-stat on-profile";
+    }
+
+    // Изменение OI текущей свечи — пара к CVD-индикатору.
+    function updateOiStat() {
+        if (!oiStatEl) return;
+        const last = state.candles[state.candles.length - 1];
+        const d = last ? Number(last.oiChg) : NaN;
+        if (!isFinite(d)) {
+            oiStatEl.textContent = "OI —";
+            oiStatEl.className = "live-stat";
+            return;
+        }
+        const up = d >= 0;
+        oiStatEl.textContent = (up ? "● +$" : "● −$") + fmtUsdShort(Math.abs(d));
+        oiStatEl.className = "live-stat " + (up ? "up" : "down");
+    }
+
+    // Живые цифры у кнопок слоёв (+ бокс CVD в шапке внутри updateCvdStat).
+    // Слои на графике и цифры живут отдельно: выключенный слой прячет
+    // только фигуры, цифры продолжают обновляться.
+    function updateLiveStats() {
+        updateCvdStat();
+        updateLiqStat();
+        updateProfileStat();
+        updateOiStat();
     }
 
     // --- Боксы статистики: ликвидации / CVD / OI --------------------------------
@@ -1089,7 +1167,7 @@
                  shorts: Number(d["shorts_usd_" + key]) || 0 };
     }
     function statCvdVal(key) {
-        if (!state.cvdEnabled || !state.candles.length) return null;
+        if (!state.candles.length) return null;
         const since = Date.now() / 1000 - statWinSec(key);
         let buy = 0, sell = 0, ok = false;
         for (let i = 0; i < state.candles.length; i++) {
@@ -2033,7 +2111,7 @@
                 }
                 paint();
                 updateMarkers();
-                updateCvdStat();
+                updateLiveStats();
                 queueRedraw();
             });
             I18n.onChange(paint);
@@ -2672,6 +2750,7 @@
                 }
                 cacheLiquidations(rows);   // копия на этом устройстве (IndexedDB)
                 updateMarkers();
+                updateLiveStats();
                 queueRedraw();
                 break;
             }

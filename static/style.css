@@ -1403,6 +1403,20 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
 }
 .cvd-stat.up { color: #a78bfa; text-shadow: 0 0 10px rgba(139,92,246,0.4); }
 .cvd-stat.down { color: #ff9100; text-shadow: 0 0 10px rgba(255,145,0,0.4); }
+
+/* Живые цифры у кнопок слоёв: ликвидации текущей свечи, объём профиля,
+   изменение OI текущей свечи. Пусто — приглушённое тире. */
+.live-stat {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    font-weight: 800;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+.live-stat.on-liq { color: #ffd166; text-shadow: 0 0 10px rgba(255,209,102,0.4); }
+.live-stat.on-profile { color: #67e8f9; text-shadow: 0 0 10px rgba(103,232,249,0.35); }
+.live-stat.up { color: #4ade80; text-shadow: 0 0 10px rgba(74,222,128,0.4); }
+.live-stat.down { color: #fb7185; text-shadow: 0 0 10px rgba(251,113,133,0.4); }
 .profile-toggle.active {
     border-color: rgba(0, 214, 255, 0.65);
     color: #00d6ff;

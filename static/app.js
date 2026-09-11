@@ -112,6 +112,9 @@
     const topCoinsContainer = $("top-coins-list");
     const chartWrapper = $("chart-wrapper");
     const clusterCanvas = $("cluster-canvas");
+    const drawCanvas = $("draw-canvas");
+    const drawToggle = $("draw-toggle");
+    const drawToolbar = $("draw-toolbar");
     const chartSection = document.querySelector(".chart-section");
     const chartToggle = $("chart-toggle");
     const profileToggle = $("profile-toggle");
@@ -457,6 +460,10 @@
                 clusterCanvas.width = w;
                 clusterCanvas.height = h;
             }
+            if (drawCanvas) {
+                drawCanvas.width = w;
+                drawCanvas.height = h;
+            }
             queueRedraw();
         };
 
@@ -741,6 +748,7 @@
         if (state.liqEnabled) drawLiqRects(ctx);
         if (state.cvdEnabled) drawCvdTriangles(ctx);
         if (state.oiEnabled) drawOiBalls(ctx);
+        drawFigures();   // фигуры теханализа — свой canvas поверх
     }
 
     // --- Прямоугольники ликвидаций ---------------------------------------------
@@ -1614,11 +1622,370 @@
         }
     }
 
+    // --- Фигуры теханализа: рисование поверх графика ---------------------------
+    // Линия, луч, горизонталь, прямоугольник, Фибоначчи + ластик. Фигуры
+    // хранятся во времени/цене (не в пикселях) — переживают зум, скролл
+    // и смену таймфрейма. Хранение — localStorage отдельно по каждой монете.
+    const FIB_RATIOS = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1];
+    const DRAW_HIT_PX = 8;
+    let drawTool = null;          // null | line | ray | horiz | rect | fib | eraser
+    let drawColor = "#ffd166";
+    let drawDraft = null;         // первая точка двухточечной фигуры {time, price}
+    let drawHover = null;         // {x, y} в пикселях для предпросмотра
+    let drawFiguresList = [];     // [{t, c, p1:{time,price}, p2?}]
+
+    function drawKey() { return "liqscope.drawings." + chartSymbol(); }
+
+    function loadDrawings() {
+        drawFiguresList = [];
+        drawDraft = null;
+        drawHover = null;
+        try {
+            const raw = localStorage.getItem(drawKey());
+            if (!raw) return;
+            const arr = JSON.parse(raw);
+            if (!Array.isArray(arr)) return;
+            arr.forEach((f) => {
+                if (!f || typeof f !== "object") return;
+                if (["line", "ray", "horiz", "rect", "fib"].indexOf(f.t) === -1) return;
+                if (!f.p1 || !isFinite(Number(f.p1.time)) || !isFinite(Number(f.p1.price))) return;
+                if (f.t !== "horiz" &&
+                        (!f.p2 || !isFinite(Number(f.p2.time)) || !isFinite(Number(f.p2.price)))) return;
+                drawFiguresList.push({
+                    t: f.t,
+                    c: typeof f.c === "string" ? f.c : drawColor,
+                    p1: { time: Number(f.p1.time), price: Number(f.p1.price) },
+                    p2: f.p2 ? { time: Number(f.p2.time), price: Number(f.p2.price) } : null,
+                });
+            });
+        } catch (e) { /* ignore */ }
+    }
+
+    function saveDrawings() {
+        try { localStorage.setItem(drawKey(), JSON.stringify(drawFiguresList)); } catch (e) { /* ignore */ }
+    }
+
+    function drawAddFigure(fig) {
+        drawFiguresList.push(fig);
+        saveDrawings();
+        queueRedraw();
+    }
+
+    function drawClearAll() {
+        drawFiguresList = [];
+        drawDraft = null;
+        saveDrawings();
+        queueRedraw();
+    }
+
+    // время+цена → пиксели (null, если точка вне видимости)
+    function drawToXY(tp) {
+        if (!chart || !candleSeries || !tp) return null;
+        try {
+            const x = chart.timeScale().timeToCoordinate(Number(tp.time));
+            const y = candleSeries.priceToCoordinate(Number(tp.price));
+            if (!isFinite(x) || !isFinite(y)) return null;
+            return { x, y };
+        } catch (e) { return null; }
+    }
+
+    function drawPixelToTP(x, y) {
+        if (!chart || !candleSeries) return null;
+        try {
+            if (!chart.timeScale().coordinateToTime || !candleSeries.coordinateToPrice) return null;
+            const t = chart.timeScale().coordinateToTime(x);
+            const p = candleSeries.coordinateToPrice(y);
+            const time = (t !== null && t !== undefined) ? Number(t) : NaN;
+            const price = (p !== null && p !== undefined) ? Number(p) : NaN;
+            if (!isFinite(time) || !isFinite(price)) return null;
+            return { time, price };
+        } catch (e) { return null; }
+    }
+
+    // клик библиотеки → время+цена (null, если мимо шкал)
+    function drawClickToTP(param) {
+        if (!param || !param.point || !chart || !candleSeries) return null;
+        try {
+            let time = (param.time !== undefined && param.time !== null) ? Number(param.time) : NaN;
+            if (!isFinite(time)) {
+                const tp = drawPixelToTP(param.point.x, param.point.y);
+                return tp;
+            }
+            const price = candleSeries.coordinateToPrice
+                ? Number(candleSeries.coordinateToPrice(param.point.y)) : NaN;
+            if (!isFinite(price)) return null;
+            return { time, price };
+        } catch (e) { return null; }
+    }
+
+    // расстояние от точки до отрезка (чистая функция — покрыта тестами)
+    function distToSegment(px, py, ax, ay, bx, by) {
+        const dx = bx - ax, dy = by - ay;
+        const len2 = dx * dx + dy * dy;
+        let t = len2 ? ((px - ax) * dx + (py - ay) * dy) / len2 : 0;
+        t = Math.max(0, Math.min(1, t));
+        const cx = ax + t * dx, cy = ay + t * dy;
+        return Math.sqrt((px - cx) * (px - cx) + (py - cy) * (py - cy));
+    }
+
+    // цена уровня фибо (чистая функция — покрыта тестами)
+    function fibPrice(p1, p2, ratio) {
+        return Number(p1.price) + (Number(p2.price) - Number(p1.price)) * ratio;
+    }
+
+    // дальний конец луча: от a через b до края canvas (чистая — в тестах)
+    function rayFar(a, b, W, H) {
+        const dx = b.x - a.x, dy = b.y - a.y;
+        if (!dx && !dy) return { x: b.x, y: b.y };
+        let t = Infinity;
+        if (dx > 0) t = Math.min(t, (W - a.x) / dx);
+        else if (dx < 0) t = Math.min(t, (0 - a.x) / dx);
+        if (dy > 0) t = Math.min(t, (H - a.y) / dy);
+        else if (dy < 0) t = Math.min(t, (0 - a.y) / dy);
+        if (!isFinite(t) || t < 0) t = 0;
+        return { x: a.x + dx * t, y: a.y + dy * t };
+    }
+
+    // попадание клика (x, y — пиксели) в фигуру; toXY — преобразователь
+    function drawFigureHit(fig, x, y, toXY, W, H) {
+        const cvt = toXY || drawToXY;
+        if (fig.t === "horiz") {
+            const a = cvt(fig.p1);
+            return !!a && Math.abs(y - a.y) <= DRAW_HIT_PX;
+        }
+        if (fig.t === "rect") {
+            const a = cvt(fig.p1), b = cvt(fig.p2);
+            if (!a || !b) return false;
+            const x0 = Math.min(a.x, b.x), x1 = Math.max(a.x, b.x);
+            const y0 = Math.min(a.y, b.y), y1 = Math.max(a.y, b.y);
+            return distToSegment(x, y, x0, y0, x1, y0) <= DRAW_HIT_PX ||
+                   distToSegment(x, y, x1, y0, x1, y1) <= DRAW_HIT_PX ||
+                   distToSegment(x, y, x1, y1, x0, y1) <= DRAW_HIT_PX ||
+                   distToSegment(x, y, x0, y1, x0, y0) <= DRAW_HIT_PX;
+        }
+        if (fig.t === "fib") {
+            const a = cvt(fig.p1);
+            if (!a || x < a.x - DRAW_HIT_PX) return false;
+            for (let i = 0; i < FIB_RATIOS.length; i++) {
+                const pt = cvt({ time: fig.p1.time, price: fibPrice(fig.p1, fig.p2, FIB_RATIOS[i]) });
+                if (pt && Math.abs(y - pt.y) <= DRAW_HIT_PX) return true;
+            }
+            return false;
+        }
+        // line / ray
+        const a = cvt(fig.p1), b = cvt(fig.p2);
+        if (!a || !b) return false;
+        if (fig.t === "ray") {
+            const f = rayFar(a, b, W || 0, H || 0);
+            return distToSegment(x, y, a.x, a.y, f.x, f.y) <= DRAW_HIT_PX;
+        }
+        return distToSegment(x, y, a.x, a.y, b.x, b.y) <= DRAW_HIT_PX;
+    }
+
+    function drawLineSeg(ctx, x1, y1, x2, y2) {
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+    }
+
+    function drawFigureShape(ctx, fig, W, H, preview) {
+        ctx.strokeStyle = fig.c;
+        ctx.fillStyle = fig.c;
+        ctx.setLineDash(preview ? [5, 4] : []);
+        if (fig.t === "horiz") {
+            const a = drawToXY(fig.p1);
+            if (a) drawLineSeg(ctx, 0, a.y, W, a.y);
+        } else if (fig.t === "line") {
+            const a = drawToXY(fig.p1), b = drawToXY(fig.p2);
+            if (a && b) drawLineSeg(ctx, a.x, a.y, b.x, b.y);
+        } else if (fig.t === "ray") {
+            const a = drawToXY(fig.p1), b = drawToXY(fig.p2);
+            if (a && b) {
+                const f = rayFar(a, b, W, H);
+                drawLineSeg(ctx, a.x, a.y, f.x, f.y);
+            }
+        } else if (fig.t === "rect") {
+            const a = drawToXY(fig.p1), b = drawToXY(fig.p2);
+            if (a && b) {
+                const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y);
+                const w = Math.abs(b.x - a.x), h = Math.abs(b.y - a.y);
+                ctx.globalAlpha = 0.12;
+                ctx.fillRect(x, y, w, h);
+                ctx.globalAlpha = 1;
+                ctx.strokeRect(x + 0.5, y + 0.5, w, h);
+            }
+        } else if (fig.t === "fib") {
+            const a = drawToXY(fig.p1);
+            if (a) {
+                ctx.lineWidth = 1;
+                ctx.font = "11px Inter, system-ui, sans-serif";
+                ctx.textBaseline = "bottom";
+                FIB_RATIOS.forEach((r) => {
+                    const lvl = fibPrice(fig.p1, fig.p2, r);
+                    const pt = drawToXY({ time: fig.p1.time, price: lvl });
+                    if (!pt) return;
+                    drawLineSeg(ctx, a.x, pt.y, W, pt.y);
+                    const label = (r * 100).toFixed(1) + "%  " + lvl.toFixed(priceDigits(lvl));
+                    const tw = ctx.measureText ? ctx.measureText(label).width : 60;
+                    ctx.fillText(label, Math.max(2, W - tw - 6), pt.y - 2);
+                });
+                ctx.lineWidth = 2;
+            }
+        }
+        ctx.setLineDash([]);
+    }
+
+    function drawFigures() {
+        if (!drawCanvas || !chart || !candleSeries) return;
+        const ctx = drawCanvas.getContext("2d");
+        const W = drawCanvas.width, H = drawCanvas.height;
+        ctx.clearRect(0, 0, W, H);
+        ctx.lineWidth = 2;
+        drawFiguresList.forEach((fig) => drawFigureShape(ctx, fig, W, H, false));
+        drawPreview(ctx, W, H);
+    }
+
+    function drawPreview(ctx, W, H) {
+        if (!drawTool || drawTool === "eraser") return;
+        if (drawTool === "horiz") {
+            if (!drawHover) return;
+            ctx.strokeStyle = drawColor;
+            ctx.setLineDash([5, 4]);
+            drawLineSeg(ctx, 0, drawHover.y, W, drawHover.y);
+            ctx.setLineDash([]);
+            return;
+        }
+        if (!drawDraft) return;
+        const a = drawToXY(drawDraft);
+        if (a) {
+            ctx.fillStyle = drawColor;
+            ctx.beginPath();
+            ctx.arc(a.x, a.y, 4, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        if (!drawHover || !a) return;
+        const tp = drawPixelToTP(drawHover.x, drawHover.y);
+        if (!tp) return;
+        drawFigureShape(ctx, { t: drawTool, c: drawColor, p1: drawDraft, p2: tp }, W, H, true);
+    }
+
+    function setDrawTool(tool) {
+        drawTool = tool;
+        drawDraft = null;
+        drawHover = null;
+        if (drawToolbar) {
+            drawToolbar.querySelectorAll("[data-draw-tool]").forEach((b) =>
+                b.classList.toggle("active", b.getAttribute("data-draw-tool") === tool));
+        }
+        if (drawToggle) drawToggle.classList.toggle("active", !!tool);
+        if (drawToolbar) drawToolbar.classList.toggle("hidden", !tool);
+        if (tool) {
+            // вход в рисование снимает закреп фигур слоёв и их окна
+            pinHitKey = null;
+            hoverHitKey = null;
+            applyFeedHighlight(null, true);
+            unpinShape();
+            hideShapeModal();
+            if (chartWrapper) chartWrapper.style.cursor = tool === "eraser" ? "not-allowed" : "crosshair";
+        } else if (chartWrapper) {
+            chartWrapper.style.cursor = "";
+        }
+        queueRedraw();
+    }
+
+    function drawClick(param) {
+        if (!param || !param.point) return;
+        if (drawTool === "eraser") {
+            const W = drawCanvas ? drawCanvas.width : 0;
+            const H = drawCanvas ? drawCanvas.height : 0;
+            for (let i = drawFiguresList.length - 1; i >= 0; i--) {
+                if (drawFigureHit(drawFiguresList[i], param.point.x, param.point.y, drawToXY, W, H)) {
+                    drawFiguresList.splice(i, 1);
+                    saveDrawings();
+                    queueRedraw();
+                    return;
+                }
+            }
+            return;
+        }
+        const tp = drawClickToTP(param);
+        if (!tp) return;
+        if (drawTool === "horiz") {
+            drawAddFigure({ t: "horiz", c: drawColor, p1: tp, p2: null });
+            return;
+        }
+        if (!drawDraft) {
+            drawDraft = tp;
+            queueRedraw();
+            return;
+        }
+        drawAddFigure({ t: drawTool, c: drawColor, p1: drawDraft, p2: tp });
+        drawDraft = null;
+    }
+
+    function setupDrawToolbar() {
+        if (drawToggle) {
+            drawToggle.addEventListener("click", () => {
+                setDrawTool(drawTool ? null : "line");
+            });
+        }
+        if (drawToolbar) {
+            drawToolbar.querySelectorAll("[data-draw-tool]").forEach((b) => {
+                b.addEventListener("click", () => setDrawTool(b.getAttribute("data-draw-tool")));
+            });
+            drawToolbar.querySelectorAll("[data-draw-color]").forEach((b) => {
+                b.addEventListener("click", () => {
+                    drawColor = b.getAttribute("data-draw-color") || drawColor;
+                    drawToolbar.querySelectorAll("[data-draw-color]").forEach((o) =>
+                        o.classList.toggle("active", o === b));
+                });
+            });
+            const clearBtn = $("draw-clear");
+            if (clearBtn) clearBtn.addEventListener("click", drawClearAll);
+            const closeBtn = $("draw-close");
+            if (closeBtn) closeBtn.addEventListener("click", () => setDrawTool(null));
+        }
+        document.addEventListener("keydown", (e) => {
+            if (!drawTool) return;
+            if (e.key === "Escape") {
+                if (drawDraft) { drawDraft = null; queueRedraw(); }
+                else setDrawTool(null);
+            }
+        });
+        if (chartWrapper) {
+            chartWrapper.addEventListener("contextmenu", (e) => {
+                if (!drawTool) return;
+                e.preventDefault();
+                if (drawDraft) { drawDraft = null; queueRedraw(); }
+                else setDrawTool(null);
+            });
+        }
+        // тестовый API для jsdom-гарнесса tests/drawings.js
+        window.LiqScopeDraw = {
+            fibPrice, distToSegment, rayFar,
+            figureHit: (fig, x, y, toXY, W, H) => drawFigureHit(fig, x, y, toXY, W, H),
+            add: drawAddFigure,
+            clear: drawClearAll,
+            setTool: setDrawTool,
+            save: saveDrawings,
+            load: loadDrawings,
+            getFigures: () => drawFiguresList.slice(),
+            getTool: () => drawTool,
+            getColor: () => drawColor,
+        };
+    }
+
     function setupClusterInteraction() {
         if (!chart || !chart.subscribeCrosshairMove || !chart.subscribeClick) return;
         try {
             // наведение (и палец на телефоне при движении по графику)
             chart.subscribeCrosshairMove((param) => {
+                if (drawTool) {   // рисование: только предпросмотр, окна фигур молчат
+                    drawHover = (param && param.point) ? { x: param.point.x, y: param.point.y } : null;
+                    queueRedraw();
+                    return;
+                }
                 if (!param || !param.point) {
                     if (!pinHitKey && !shapePin) {
                         applyFeedHighlight(null, false);
@@ -1643,6 +2010,7 @@
             // клик/тап: закрепить фигуру; повторный клик по ней или клик
             // мимо — снять закреп
             chart.subscribeClick((param) => {
+                if (drawTool) { drawClick(param); return; }   // точки фигур вместо окон
                 const hit = (param && param.point)
                     ? hitAt(param.point.x, param.point.y) : null;
                 if (!hit) {
@@ -2305,6 +2673,7 @@
             state.lagMs = null;
             unpinShape();
             closeModal();
+            loadDrawings();   // фигуры — свои у каждой монеты
         }
         updateSymbolTitle();
         renderSymbolButtons();
@@ -2321,6 +2690,7 @@
         closeModal();
         state.chartSymbol = s;
         try { localStorage.setItem("liqscope.chartSymbol", s); } catch (e) { /* ignore */ }
+        loadDrawings();   // фигуры — свои у каждой монеты
         state.tickCount = 0;
         state.lastTickAt = 0;
         state.lagMs = null;
@@ -2885,6 +3255,8 @@
         setupLayerToggles();
         setupChartToggle();
         setupChartExpand();
+        setupDrawToolbar();   // панель рисования + тестовый API
+        loadDrawings();       // фигуры текущей монеты
         // страховка: если WS молчит дольше 30с — перезапрашиваем свечи
         setInterval(() => {
             if (!ws || ws.readyState !== WebSocket.OPEN) return;

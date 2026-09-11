@@ -203,6 +203,9 @@
                             title="Скрыть шарики открытого интереса">● OI</button>
                     <span class="live-stat" id="oi-stat" data-i18n-title="chart.live_oi"
                             title="Изменение OI текущей свечи"></span></span>
+                    <button class="tool-toggle" id="draw-toggle" type="button"
+                            data-i18n-title="chart.draw_title"
+                            title="Рисовать фигуры теханализа">✎</button>
                     <button class="chart-toggle" id="chart-toggle" type="button"
                             data-i18n-title="chart.toggle_title"
                             title="Свернуть/развернуть график">▾</button>
@@ -217,6 +220,36 @@
                 <div id="tv-chart-container"></div>
                 <!-- Cluster Canvas Overlay: ликвидации + профиль по ценам -->
                 <canvas id="cluster-canvas"></canvas>
+                <!-- Draw Canvas Overlay: фигуры теханализа пользователя -->
+                <canvas id="draw-canvas"></canvas>
+                <div class="draw-toolbar hidden" id="draw-toolbar" role="toolbar">
+                    <button type="button" data-draw-tool="line" data-i18n-title="draw.line"
+                            title="Трендовая линия">╲</button>
+                    <button type="button" data-draw-tool="ray" data-i18n-title="draw.ray"
+                            title="Луч">→</button>
+                    <button type="button" data-draw-tool="horiz" data-i18n-title="draw.horiz"
+                            title="Горизонтальная линия">─</button>
+                    <button type="button" data-draw-tool="rect" data-i18n-title="draw.rect"
+                            title="Прямоугольник">▭</button>
+                    <button type="button" data-draw-tool="fib" data-i18n-title="draw.fib"
+                            title="Уровни Фибоначчи">F</button>
+                    <button type="button" data-draw-tool="eraser" data-i18n-title="draw.eraser"
+                            title="Ластик: клик по фигуре удаляет её">⌫</button>
+                    <span class="draw-colors">
+                        <button type="button" data-draw-color="#ffd166" class="active"
+                                style="background:#ffd166" aria-label="gold"></button>
+                        <button type="button" data-draw-color="#22d3ee"
+                                style="background:#22d3ee" aria-label="cyan"></button>
+                        <button type="button" data-draw-color="#a78bfa"
+                                style="background:#a78bfa" aria-label="violet"></button>
+                        <button type="button" data-draw-color="#fb7185"
+                                style="background:#fb7185" aria-label="rose"></button>
+                    </span>
+                    <button type="button" id="draw-clear" data-i18n-title="draw.clear"
+                            title="Убрать все фигуры">🗑</button>
+                    <button type="button" id="draw-close" data-i18n-title="draw.close"
+                            title="Закрыть рисование">✕</button>
+                </div>
             </div>
         </section>
 

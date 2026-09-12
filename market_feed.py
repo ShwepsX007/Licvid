@@ -1616,8 +1616,15 @@ class MarketFeed:
                 await session.close()
 
     async def _run_hl_listener(self, st, session, bare: bool):
-        universe = await self._hyperliquid_load_universe(
-            session=session if bare else None)
+        if bare:
+            # точная копия выживавшего зонда: universe — через отдельную
+            # одноразовую сессию, чтобы REST не оставлял в WS-сессии
+            # TLS-тикетов/пула (проверено diag_hl: так соединение живёт)
+            async with aiohttp.ClientSession() as u_sess:
+                universe = await self._hyperliquid_load_universe(
+                    session=u_sess)
+        else:
+            universe = await self._hyperliquid_load_universe()
         if universe:
             log.info("[hyperliquid] universe перпетуумов: %d", len(universe))
 
@@ -1787,7 +1794,12 @@ class MarketFeed:
                     except asyncio.TimeoutError:
                         loops += 1
                         if loops % 120 == 1:   # ~раз в час: новые HIP-3 маркеты
-                            universe = await self._hyperliquid_load_universe() or universe
+                            if bare:
+                                async with aiohttp.ClientSession() as u_sess:
+                                    universe = (await self._hyperliquid_load_universe(
+                                        session=u_sess)) or universe
+                            else:
+                                universe = (await self._hyperliquid_load_universe()) or universe
                         rebuild_map()
                         try:
                             await sync_subs()

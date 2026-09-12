@@ -502,6 +502,12 @@ def parse_hyperliquid_msg(payload: dict,
     return out
 
 
+def hl_close_reason(msg_type, close_code, exc, data) -> str:
+    """Текст причины закрытия HL-сокета: код + исключение + данные кадра."""
+    return (f"hyperliquid ws {msg_type}: close_code={close_code} "
+            f"exc={exc!r} data={str(data)[:150]}")
+
+
 class SourceStatus:
     """Диагностика одного WS-источника (видна в /api/health)."""
 
@@ -1535,6 +1541,9 @@ class MarketFeed:
                     await ws.send_json({"method": "subscribe",
                                         "subscription": {"type": "trades", "coin": coin}})
                     subscribed.add(coin)
+                    # отдаём цикл — ответы subscriptionResponse обрабатываются
+                    # чтением, а не копятся; заодно не долбим биржу пачкой
+                    await asyncio.sleep(0)
                 for coin in sorted(subscribed - want):
                     try:
                         await ws.send_json({"method": "unsubscribe",
@@ -1563,12 +1572,22 @@ class MarketFeed:
                     continue
                 if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING,
                                 aiohttp.WSMsgType.ERROR):
-                    break
+                    # Громкий разрыв вместо тихого: код закрытия попадёт в лог
+                    # и в подсказку плашки, а backoff супервайзера начнёт расти
+                    # и перестанет долбить биржу реконнектом каждые 2 секунды.
+                    err_data = msg.data if msg.type == aiohttp.WSMsgType.ERROR else ""
+                    raise ConnectionError(hl_close_reason(
+                        msg.type, ws.close_code, ws.exception(), err_data))
                 if msg.type != aiohttp.WSMsgType.TEXT:
                     continue
                 try:
                     payload = json.loads(msg.data)
                 except Exception:
+                    continue
+                if payload.get("channel") == "subscriptionResponse":
+                    blob = json.dumps(payload, ensure_ascii=False)[:300]
+                    if "error" in blob.lower() or "fail" in blob.lower():
+                        log.warning("[hyperliquid] ошибка подписки: %s", blob)
                     continue
                 for ev in parse_hyperliquid_msg(payload, self.hl_coin_map):
                     await self._emit("hyperliquid", ev["symbol"], ev["side"],

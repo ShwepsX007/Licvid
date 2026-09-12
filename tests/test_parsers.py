@@ -10,7 +10,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from market_feed import (canon, canon_bitmex, hl_coin_map,
+from market_feed import (canon, canon_bitmex, hl_close_reason, hl_coin_map,
                          parse_binance_msg, parse_bitget_msg, parse_bitmex_msg,
                          parse_bybit_msg, parse_gate_msg, parse_htx_msg,
                          parse_hyperliquid_msg, parse_okx_msg,
@@ -242,6 +242,9 @@ check("нулевой объём пропускаем",
           {"channel": "trades",
            "data": [{"coin": "BTC", "side": "A", "px": "5", "sz": "0",
                      "time": 1, "liquidation": {}}]}, hl_map) == [])
+reason = hl_close_reason("CLOSED", 1006, None, "")
+check("close reason: код", "close_code=1006" in reason, reason)
+check("close reason: префикс", reason.startswith("hyperliquid ws"), reason)
 
 print()
 print(f"итог: {ok} ок, {fail} ошибок")

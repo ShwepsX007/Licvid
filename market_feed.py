@@ -1541,9 +1541,9 @@ class MarketFeed:
                     await ws.send_json({"method": "subscribe",
                                         "subscription": {"type": "trades", "coin": coin}})
                     subscribed.add(coin)
-                    # отдаём цикл — ответы subscriptionResponse обрабатываются
-                    # чтением, а не копятся; заодно не долбим биржу пачкой
-                    await asyncio.sleep(0)
+                    # подписки врассыпную, а не пачкой: некоторые WAF/лимитеры
+                    # режут резкие всплески сообщений сразу после handshake
+                    await asyncio.sleep(0.05)
                 for coin in sorted(subscribed - want):
                     try:
                         await ws.send_json({"method": "unsubscribe",
@@ -1556,6 +1556,7 @@ class MarketFeed:
             st.up()
             log.info("[hyperliquid] подписка trades на %d монет", len(subscribed))
             loops = 0
+            seen_msgs = 0
             while not self._stop.is_set():
                 try:
                     msg = await ws.receive(timeout=30.0)
@@ -1584,6 +1585,13 @@ class MarketFeed:
                     payload = json.loads(msg.data)
                 except Exception:
                     continue
+                if seen_msgs < 3:
+                    # диагностика первых секунд соединения: видно, долетает
+                    # ли вообще что-то до разрыва (канал + размер + голова)
+                    seen_msgs += 1
+                    log.info("[hyperliquid] msg#%d: channel=%s size=%d %.150s",
+                             seen_msgs, payload.get("channel", "?"),
+                             len(msg.data), msg.data)
                 if payload.get("channel") == "subscriptionResponse":
                     blob = json.dumps(payload, ensure_ascii=False)[:300]
                     if "error" in blob.lower() or "fail" in blob.lower():

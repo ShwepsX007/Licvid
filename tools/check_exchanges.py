@@ -200,6 +200,12 @@ async def main():
                        and bool(p.get("result")),
                        wait=max(WAIT, 20))
         hl_coin = SYMBOL[:-4] if SYMBOL.endswith("USDT") else SYMBOL
+        await check_ws(s, f"Hyperliquid trades {hl_coin} (любые сделки)",
+                       "wss://api.hyperliquid.xyz/ws",
+                       subscribe={"method": "subscribe",
+                                  "subscription": {"type": "trades", "coin": hl_coin}},
+                       match=lambda p: p.get("channel") == "trades"
+                       and bool(p.get("data")))
         await check_ws(s, f"Hyperliquid trades {hl_coin} (ликвидации)",
                        "wss://api.hyperliquid.xyz/ws",
                        subscribe={"method": "subscribe",

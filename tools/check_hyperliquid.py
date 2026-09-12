@@ -8,6 +8,13 @@
    показывает, на какой по счёту/какой именно подписке умирает соединение):
      venv/bin/python3 tools/check_hyperliquid.py --bisect
      venv/bin/python3 tools/check_hyperliquid.py --bisect http://127.0.0.1:8000
+
+3) диагностика убийцы соединения (два прогона, ~35 секунд, рестарт не нужен):
+     venv/bin/python3 tools/check_hyperliquid.py BTC 20 --ua "LiqScope-Terminal/4.1"
+     venv/bin/python3 tools/check_hyperliquid.py --burst
+   Первый — одна монета, но с User-Agent боевого кода; второй — все 23
+   подписки мгновенной пачкой, но со стандартным UA. Какой умрёт — тот
+   фактор и убивает (кастомный UA режет WAF / всплеск режет лимитер).
 """
 
 import asyncio
@@ -29,15 +36,18 @@ SUB_GAP = 0.4       # пауза между подписками в bisect
 RESP_WAIT = 2.5     # сколько ждать subscriptionResponse на каждую монету
 
 
-async def watch(coin: str, dur: float) -> None:
+async def watch(coin: str, dur: float, ua: str = "") -> None:
     t0 = time.time()
 
     def log(*a):
         print(f"[{time.time() - t0:6.2f}с]", *a, flush=True)
 
+    headers = {"User-Agent": ua} if ua else None
+    if ua:
+        log(f"User-Agent: {ua}")
     log("connect", HL_WS, "...")
     try:
-        async with aiohttp.ClientSession() as s:
+        async with aiohttp.ClientSession(headers=headers) as s:
             async with s.ws_connect(HL_WS, timeout=15) as ws:
                 log("handshake OK, шлю subscribe trades", coin)
                 await ws.send_json({"method": "subscribe",
@@ -198,11 +208,84 @@ async def bisect(server: str) -> None:
         log(f"ИСКЛЮЧЕНИЕ: {type(e).__name__}: {e}")
 
 
+async def burst(server: str, dur: float = 15.0) -> None:
+    """Вся батарея продакшена одной мгновенной пачкой (стандартный UA).
+
+    Если выживет — всплеск подписок невиновен и дело в чём-то ещё
+    (главный подозреваемый — кастомный User-Agent боевого кода).
+    """
+    coin_map = await fetch_production_map(server)
+    coins = sorted(coin_map)
+    print(f"батарея подписок ({len(coins)}): {', '.join(coins)}")
+    if not coins:
+        print("подписываться не на что — выхожу")
+        return
+    t0 = time.time()
+
+    def log(*a):
+        print(f"[{time.time() - t0:6.2f}с]", *a, flush=True)
+
+    log("connect", HL_WS, "(стандартный User-Agent) ...")
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.ws_connect(HL_WS, timeout=15) as ws:
+                log("handshake OK, шлю все подписки пачкой без пауз...")
+                for coin in coins:
+                    await ws.send_json({"method": "subscribe",
+                                        "subscription": {"type": "trades",
+                                                         "coin": coin}})
+                log(f"пачка из {len(coins)} ушла за "
+                    f"{time.time() - t0:.2f}с, слушаю...")
+                n = 0
+                next_stat = t0 + 5.0
+                while time.time() - t0 < dur:
+                    try:
+                        msg = await ws.receive(timeout=max(
+                            0.1, min(dur - (time.time() - t0),
+                                     next_stat - time.time())))
+                    except asyncio.TimeoutError:
+                        if time.time() >= next_stat:
+                            log(f"... живо, сообщений: {n}")
+                            next_stat = time.time() + 5.0
+                            continue
+                        break
+                    if msg.type is aiohttp.WSMsgType.TEXT:
+                        n += 1
+                        if n <= 5:
+                            try:
+                                p = json.loads(msg.data)
+                                ch = p.get("channel", "?")
+                            except Exception:
+                                ch = "НЕ-JSON"
+                            log(f"msg#{n} channel={ch} ({len(msg.data)} байт)")
+                    elif msg.type in (aiohttp.WSMsgType.CLOSED,
+                                      aiohttp.WSMsgType.CLOSING,
+                                      aiohttp.WSMsgType.ERROR):
+                        log(f"ВХОДЯЩИЙ {msg.type}: "
+                            f"close_code={ws.close_code} "
+                            f"exc={ws.exception()!r} "
+                            f"data={str(msg.data)[:120]}")
+                        break
+                log(f"ИТОГ BURST: сообщений={n} "
+                    f"соединение={'живо' if not ws.closed else 'закрыто'}")
+    except Exception as e:
+        log(f"ИСКЛЮЧЕНИЕ: {type(e).__name__}: {e}")
+
+
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--bisect":
-        asyncio.run(bisect(sys.argv[2] if len(sys.argv) > 2
+    args = list(sys.argv[1:])
+    ua = ""
+    if "--ua" in args:
+        i = args.index("--ua")
+        ua = args[i + 1] if i + 1 < len(args) else ""
+        del args[i:i + 2]
+    if args and args[0] == "--bisect":
+        asyncio.run(bisect(args[1] if len(args) > 1
                             else "http://127.0.0.1:8000"))
+    elif args and args[0] == "--burst":
+        asyncio.run(burst(args[1] if len(args) > 1
+                           else "http://127.0.0.1:8000"))
     else:
-        coin = sys.argv[1] if len(sys.argv) > 1 else "BTC"
-        secs = float(sys.argv[2]) if len(sys.argv) > 2 else 15.0
-        asyncio.run(watch(coin, secs))
+        coin = args[0] if args else "BTC"
+        secs = float(args[1]) if len(args) > 1 else 15.0
+        asyncio.run(watch(coin, secs, ua))

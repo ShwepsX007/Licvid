@@ -89,6 +89,14 @@ a { color: inherit; text-decoration: none; }
 
 /* ---------- Hero ---------- */
 .hero { max-width: 1080px; margin: 0 auto; padding: 84px 28px 40px; text-align: center; }
+.hero-logo {
+    width: 120px;
+    height: 120px;
+    border-radius: 28px;
+    border: 1px solid var(--border);
+    box-shadow: 0 0 44px rgba(59, 130, 246, 0.35);
+    margin-bottom: 20px;
+}
 .hero-badge {
     display: inline-flex; align-items: center; gap: 8px;
     font-size: 0.72rem; color: var(--cyan); letter-spacing: 0.4px;
@@ -277,6 +285,7 @@ a { color: inherit; text-decoration: none; }
 </header>
 
 <section class="hero">
+    <img class="hero-logo" src="/static/logo.png" alt="LiqScope">
     <div class="hero-badge"><span class="pulse"></span> <span data-i18n="land.badge">7 бирж · публичные WebSocket · без API-ключей</span></div>
     <h1><span data-i18n="land.h1.1">Ликвидации крипто-фьючерсов</span><br><span class="grad" data-i18n="land.h1.2">в реальном времени</span></h1>
     <p class="sub" data-i18n="land.sub">

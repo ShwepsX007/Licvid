@@ -1,5 +1,5 @@
 """
-market_feed.py — реальные рыночные данные для Licvidation Terminal.
+market_feed.py — реальные рыночные данные для LiqScope Terminal.
 
 Модуль полностью самодостаточный (нужен только aiohttp) и НЕ зависит от
 телеграм-бота. Он даёт три вещи:
@@ -30,13 +30,27 @@ import asyncio
 import gzip
 import json
 import logging
+import os
 import re
 import time
 from typing import Awaitable, Callable, Dict, Iterable, List, Optional
 
 import aiohttp
+from oi_feed import OpenInterestTracker
 
-log = logging.getLogger("licvid.feed")
+log = logging.getLogger("liqscope.feed")
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+# Часовые срезы оборота монет — для среднего за неделю (volAvg7d).
+# От него клиент масштабирует пороги «крупности» ликвидаций/CVD/OI:
+# что для BTC пыль, для GRAM — кит.
+VOL_HIST_FILE = os.getenv("LIQSCOPE_VOL_HISTORY_FILE",
+                          os.path.join(HERE, "data", "vol_history.json")).strip()
+if VOL_HIST_FILE.lower() in ("0", "none", "off", "false"):
+    VOL_HIST_FILE = ""
+VOL_HIST_KEEP_SEC = 7 * 86400 + 3600   # ~7 суток + допуск
+VOL_HIST_KEEP_N = 200                  # не больше срезов на монету
+VOL_HIST_MIN_SAMPLES = 3               # меньше — шлём текущий volume24h
 
 # ----------------------------------------------------------------------------
 # Эндпоинты
@@ -58,6 +72,8 @@ HTX_WS = "wss://api.hbdm.com/linear-swap-notification"
 # BitMEX: таблица liquidation
 BITMEX_WS = "wss://ws.bitmex.com/realtime?subscribe=liquidation"
 BITMEX_REST = "https://www.bitmex.com/api/v1"
+HL_REST = "https://api.hyperliquid.xyz"
+HL_WS = "wss://api.hyperliquid.xyz/ws"
 
 # Запасной список монет, если ни одна биржа не ответила на REST
 FALLBACK_SYMBOLS = [
@@ -117,6 +133,28 @@ def to_gate(symbol: str) -> str:
 
 def to_okx(symbol: str) -> str:
     return canon(symbol).replace("_", "-") + "-SWAP"
+
+
+def hl_coin_map(symbols: Iterable[str], universe: Iterable[str]) -> Dict[str, str]:
+    """Монета Hyperliquid -> канонический символ.
+
+    Дешёвые токены у HL торгуются с префиксом k (kPEPE, kSHIB): сначала ищем
+    точное совпадение базы, потом k+база. Вслепую префикс не срезаем —
+    есть монеты, реально начинающиеся на K (KAS).
+    """
+    # Ключи — в оригинальном регистре universe (kPEPE с маленькой k):
+    # именно так монета приходит в подписках и сделках.
+    by_upper: Dict[str, str] = {}
+    for c in universe:
+        by_upper.setdefault(str(c or "").upper(), str(c or ""))
+    out = {}
+    for sym in symbols:
+        base = base_of(sym)
+        if base in by_upper:
+            out[by_upper[base]] = canon(sym)
+        elif "K" + base in by_upper:
+            out[by_upper["K" + base]] = canon(sym)
+    return out
 
 
 def base_of(symbol: str) -> str:
@@ -426,6 +464,50 @@ def parse_bitmex_msg(payload: dict,
     return out
 
 
+def parse_hyperliquid_msg(payload: dict,
+                          coin_map: Optional[Dict[str, str]] = None) -> List[dict]:
+    """Hyperliquid: channel=trades, data — список сделок.
+
+    Ликвидации — это те же сделки, но с объектом 'liquidation'
+    (liquidatedUser/markPx/method); остальные игнорируем.
+    side — сторона тейкера: 'A' (ask/продажа) → вынесли LONG.
+    coin_map: 'BTC' -> 'BTC_USDT' (строится из universe, см. hl_coin_map).
+    """
+    if not isinstance(payload, dict):
+        return []
+    if payload.get("channel") != "trades":
+        return []
+    coin_map = coin_map or {}
+    out = []
+    for t in payload.get("data") or []:
+        if not isinstance(t, dict):
+            continue
+        if "liquidation" not in t:
+            continue
+        raw_coin = str(t.get("coin") or "")
+        try:
+            price = float(t.get("px") or 0)
+            qty = float(t.get("sz") or 0)
+            ts = float(t.get("time") or 0) / 1000.0
+        except (TypeError, ValueError):
+            continue
+        if price <= 0 or qty <= 0:
+            continue
+        out.append({
+            "symbol": (coin_map.get(raw_coin) or coin_map.get(raw_coin.upper()) or
+                       canon(raw_coin.upper() + "_USDT")),
+            "side": "LONG" if str(t.get("side") or "").upper() == "A" else "SHORT",
+            "price": price, "qty": qty, "ts": ts or time.time(),
+        })
+    return out
+
+
+def hl_close_reason(msg_type, close_code, exc, data) -> str:
+    """Текст причины закрытия HL-сокета: код + исключение + данные кадра."""
+    return (f"hyperliquid ws {msg_type}: close_code={close_code} "
+            f"exc={exc!r} data={str(data)[:150]}")
+
+
 class SourceStatus:
     """Диагностика одного WS-источника (видна в /api/health)."""
 
@@ -501,6 +583,9 @@ class MarketFeed:
 
         self.symbols: List[str] = list(FALLBACK_SYMBOLS[:self.symbols_limit])
         self.symbol_meta: Dict[str, dict] = {}   # symbol -> {volume24h, price, change24h}
+        # symbol -> [[ts, volume24h], ...] — часовые срезы оборота (~неделя)
+        self.vol_hist: Dict[str, List[List[float]]] = {}
+        self._load_vol_hist()
         self.prices: Dict[str, float] = {}
         # Пользовательские монеты, добавленные через поиск: они не выпадают
         # из списка при периодическом обновлении топа по обороту.
@@ -516,7 +601,7 @@ class MarketFeed:
         # По ним идёт потиковый поток сделок (aggTrade / publicTrade).
         self.hot_symbols: set = set()
         self.tick_subscriptions: set = set()
-        # Порядок источников тиков; можно задать через LICVID_TICK_SOURCE,
+        # Порядок источников тиков; можно задать через LIQSCOPE_TICK_SOURCE,
         # если известно, что какая-то биржа на этом сервере молчит.
         self.tick_sources = [x.strip().lower() for x in
                              (tick_sources or ["binance", "binance-raw", "bybit"]) if x]
@@ -530,12 +615,17 @@ class MarketFeed:
         self.status: Dict[str, SourceStatus] = {
             name: SourceStatus(name)
             for name in ("binance", "bybit", "okx", "gate", "bitget", "htx",
-                         "bitmex", "prices", "ticks")
+                         "bitmex", "hyperliquid", "prices", "ticks")
         }
         for name, st in self.status.items():
             if name not in ("prices", "ticks"):
                 st.enabled = name in self.enabled_exchanges
 
+        self.oi = OpenInterestTracker(
+            price_fn=lambda sym: self.prices.get(sym),
+            bitmex_meta_fn=lambda: self.bitmex_instruments)
+
+        self.hl_coin_map: Dict[str, str] = {}   # монета HL -> канон (из universe)
         self.started_at = time.time()
         self.symbols_source = "fallback"
         self._session: Optional[aiohttp.ClientSession] = None
@@ -545,10 +635,11 @@ class MarketFeed:
     # -- жизненный цикл ------------------------------------------------------
     async def start(self):
         self._session = aiohttp.ClientSession(
-            headers={"User-Agent": "Licvidation-Terminal/4.1"},
+            headers={"User-Agent": "LiqScope-Terminal/4.1"},
             timeout=aiohttp.ClientTimeout(total=20),
         )
         await self.refresh_symbols()
+        self._record_volumes()
 
         spawn = {
             "binance": self._binance_liquidations,
@@ -558,12 +649,19 @@ class MarketFeed:
             "bitget": self._bitget_liquidations,
             "htx": self._htx_liquidations,
             "bitmex": self._bitmex_liquidations,
+            "hyperliquid": self._hyperliquid_liquidations,
         }
         for name, coro in spawn.items():
             if name in self.enabled_exchanges:
-                self._tasks.append(asyncio.create_task(self._supervise(name, coro), name=f"liq-{name}"))
+                # hyperliquid жёстко режет частые переподключения (RST), поэтому
+                # стартуем с длинной паузы, чтобы не продлевать лимит долбёжкой
+                base = 15.0 if name == "hyperliquid" else 2.0
+                self._tasks.append(asyncio.create_task(
+                    self._supervise(name, coro, base_delay=base), name=f"liq-{name}"))
 
+        self.oi.bind(self._session)
         self._tasks.append(asyncio.create_task(self._price_engine(), name="prices"))
+        self._tasks.append(asyncio.create_task(self._oi_engine(), name="oi"))
         if self.on_trade is not None:
             self._tasks.append(asyncio.create_task(self._trade_engine(), name="ticks"))
         self._tasks.append(asyncio.create_task(self._symbols_refresher(), name="symbols"))
@@ -610,13 +708,13 @@ class MarketFeed:
                     await asyncio.sleep(interval)
         return asyncio.create_task(runner())
 
-    async def _supervise(self, name: str, factory):
+    async def _supervise(self, name: str, factory, base_delay: float = 2.0):
         """Перезапускает слушателя при любой ошибке с нарастающей паузой."""
-        delay = 2.0
+        delay = base_delay
         while not self._stop.is_set():
             try:
                 await factory()
-                delay = 2.0
+                delay = base_delay
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -903,6 +1001,72 @@ class MarketFeed:
             })
         return rows
 
+    def vol_avg7d(self, symbol: str) -> float:
+        """Среднесуточный оборот монеты за ~неделю (среднее часовых срезов).
+
+        Каждый срез — скользящий оборот за 24ч, их среднее за неделю и есть
+        типичный дневной оборот. Пока срезов мало — текущий volume24h,
+        чтобы масштаб графики не прыгал на свежем сервере.
+        """
+        samples = self.vol_hist.get(symbol) or []
+        if len(samples) >= VOL_HIST_MIN_SAMPLES:
+            return sum(v for _, v in samples) / len(samples)
+        try:
+            return float((self.symbol_meta.get(symbol) or {}).get("volume24h") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _record_volumes(self):
+        """Часовой срез оборотов топа и пользовательских монет."""
+        if not self.symbol_meta:
+            return
+        now = time.time()
+        cutoff = now - VOL_HIST_KEEP_SEC
+        for sym, m in self.symbol_meta.items():
+            try:
+                v = float(m.get("volume24h") or 0)
+            except (TypeError, ValueError):
+                continue
+            if v <= 0:
+                continue
+            lst = self.vol_hist.setdefault(sym, [])
+            lst.append([now, v])
+            lst[:] = [p for p in lst if p[0] >= cutoff][-VOL_HIST_KEEP_N:]
+        self._save_vol_hist()
+
+    def _save_vol_hist(self):
+        if not VOL_HIST_FILE:
+            return
+        try:
+            os.makedirs(os.path.dirname(VOL_HIST_FILE), exist_ok=True)
+            tmp = VOL_HIST_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self.vol_hist, f)
+            os.replace(tmp, VOL_HIST_FILE)
+        except Exception as e:
+            log.debug("vol history save: %s", e)
+
+    def _load_vol_hist(self):
+        if not VOL_HIST_FILE:
+            return
+        try:
+            with open(VOL_HIST_FILE, encoding="utf-8") as f:
+                raw = json.load(f)
+        except FileNotFoundError:
+            return
+        except Exception as e:
+            log.debug("vol history load: %s", e)
+            return
+        now = time.time()
+        for sym, samples in (raw or {}).items():
+            try:
+                keep = [[float(ts), float(v)] for ts, v in samples
+                        if float(v) > 0 and now - float(ts) <= VOL_HIST_KEEP_SEC]
+            except (TypeError, ValueError):
+                continue
+            if keep:
+                self.vol_hist[str(sym)] = keep[-VOL_HIST_KEEP_N:]
+
     async def _symbols_refresher(self):
         while not self._stop.is_set():
             await asyncio.sleep(3600)
@@ -910,6 +1074,7 @@ class MarketFeed:
                 # сначала обновляем полный каталог, затем — дефолтный топ
                 await self._load_symbol_index()
                 await self.refresh_symbols()
+                self._record_volumes()
             except Exception as e:
                 log.debug("symbols refresh: %s", e)
 
@@ -1252,7 +1417,7 @@ class MarketFeed:
         """public.*.liquidation_orders; кадры приходят в gzip."""
         st = self.status["htx"]
         async with self._session.ws_connect(HTX_WS, heartbeat=None, timeout=25) as ws:
-            await ws.send_json({"op": "sub", "cid": "licvid",
+            await ws.send_json({"op": "sub", "cid": "liqscope",
                                 "topic": "public.*.liquidation_orders"})
             st.up()
             log.info("[htx] подписка на public.*.liquidation_orders")
@@ -1340,6 +1505,141 @@ class MarketFeed:
                     await self._emit("bitmex", ev["symbol"], ev["side"],
                                      ev["price"], ev["qty"], ev["ts"], usd=ev.get("usd"))
 
+    # -- Hyperliquid ---------------------------------------------------------
+    async def _hyperliquid_load_universe(self) -> set:
+        """Имена перпетуумов HL (universe из POST /info {"type": "meta"})."""
+        try:
+            async with self._session.post(f"{HL_REST}/info", json={"type": "meta"},
+                                          timeout=12) as resp:
+                data = await resp.json()
+        except Exception as e:
+            log.warning("[hyperliquid] не удалось загрузить universe: %s", e)
+            return set()
+        names = set()
+        for row in (data or {}).get("universe") or []:
+            name = str((row or {}).get("name") or "").upper()
+            if name:
+                names.add(name)
+        return names
+
+    async def _hyperliquid_liquidations(self):
+        """trades-подписка на каждую монету; ликвидации помечены объектом."""
+        st = self.status["hyperliquid"]
+        universe = await self._hyperliquid_load_universe()
+        if universe:
+            log.info("[hyperliquid] universe перпетуумов: %d", len(universe))
+
+        def rebuild_map():
+            if universe:
+                self.hl_coin_map = hl_coin_map(self.symbols, universe)
+            else:   # universe недоступен — подписываемся на базы как есть
+                self.hl_coin_map = {base_of(s): canon(s) for s in self.symbols}
+
+        rebuild_map()
+        async with self._session.ws_connect(HL_WS, heartbeat=None, timeout=25) as ws:
+            subscribed: set = set()
+            acked: set = set()
+            seen_msgs = 0
+
+            async def handle_text(raw: str):
+                """Разобрать одно текстовое сообщение; вернуть монету, если это
+                subscriptionResponse на subscribe (иначе None)."""
+                nonlocal seen_msgs
+                try:
+                    payload = json.loads(raw)
+                except Exception:
+                    return None
+                if seen_msgs < 3:
+                    # диагностика первых секунд соединения: видно, долетает
+                    # ли вообще что-то до разрыва (канал + размер + голова)
+                    seen_msgs += 1
+                    log.info("[hyperliquid] msg#%d: channel=%s size=%d %.150s",
+                             seen_msgs, payload.get("channel", "?"),
+                             len(raw), raw)
+                if payload.get("channel") == "subscriptionResponse":
+                    data = payload.get("data") or {}
+                    blob = json.dumps(payload, ensure_ascii=False)[:300]
+                    if "error" in blob.lower() or "fail" in blob.lower():
+                        log.warning("[hyperliquid] ошибка подписки: %s", blob)
+                    sub = data.get("subscription") or {}
+                    coin = sub.get("coin")
+                    if data.get("method") == "subscribe" and coin:
+                        acked.add(coin)
+                    return coin
+                for ev in parse_hyperliquid_msg(payload, self.hl_coin_map):
+                    await self._emit("hyperliquid", ev["symbol"], ev["side"],
+                                     ev["price"], ev["qty"], ev["ts"])
+                return None
+
+            def raise_on_close(msg):
+                # Громкий разрыв вместо тихого: код закрытия попадёт в лог
+                # и в подсказку плашки, а backoff супервайзера начнёт расти
+                # и перестанет долбить биржу частыми реконнектами.
+                err_data = msg.data if msg.type == aiohttp.WSMsgType.ERROR else ""
+                raise ConnectionError(hl_close_reason(
+                    msg.type, ws.close_code, ws.exception(), err_data))
+
+            async def sync_subs():
+                want = set(self.hl_coin_map)
+                for coin in sorted(want - subscribed):
+                    await ws.send_json({"method": "subscribe",
+                                        "subscription": {"type": "trades", "coin": coin}})
+                    subscribed.add(coin)
+                    # Каждую подписку подтверждаем ответом биржи (темп ~1.5/с,
+                    # сокет постоянно читается — как в зонде tools/check_hyperliquid.py
+                    # --bisect, который выживает 23/23, в отличие от всплеска
+                    # подписок вслепую: его гейтвей HL рвёт примерно через секунду).
+                    # Всё приходящее мимоходом обрабатывается штатно.
+                    t_end = time.monotonic() + 2.5
+                    while coin not in acked:
+                        try:
+                            msg = await ws.receive(
+                                timeout=max(0.1, t_end - time.monotonic()))
+                        except asyncio.TimeoutError:
+                            break
+                        if msg.type in (aiohttp.WSMsgType.CLOSED,
+                                        aiohttp.WSMsgType.CLOSING,
+                                        aiohttp.WSMsgType.ERROR):
+                            raise_on_close(msg)
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            await handle_text(msg.data)
+                    if coin not in acked:
+                        log.debug("[hyperliquid] %s: нет subscriptionResponse "
+                                  "за 2.5с — иду дальше", coin)
+                for coin in sorted(subscribed - want):
+                    try:
+                        await ws.send_json({"method": "unsubscribe",
+                                            "subscription": {"type": "trades", "coin": coin}})
+                    except Exception:
+                        pass
+                    subscribed.discard(coin)
+                    acked.discard(coin)
+
+            await sync_subs()
+            st.up()
+            log.info("[hyperliquid] подписка trades на %d монет", len(subscribed))
+            loops = 0
+            while not self._stop.is_set():
+                try:
+                    msg = await ws.receive(timeout=30.0)
+                except asyncio.TimeoutError:
+                    loops += 1
+                    if loops % 120 == 1:   # ~раз в час: новые HIP-3 маркеты
+                        universe = await self._hyperliquid_load_universe() or universe
+                    rebuild_map()
+                    try:
+                        await sync_subs()
+                        await ws.send_json({"method": "ping"})
+                    except Exception:
+                        pass
+                    continue
+                if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING,
+                                aiohttp.WSMsgType.ERROR):
+                    raise_on_close(msg)
+                if msg.type != aiohttp.WSMsgType.TEXT:
+                    continue
+                await handle_text(msg.data)
+
     # -- Потиковый поток сделок (для графика) --------------------------------
     def set_hot_symbols(self, symbols: Iterable[str]):
         """Монеты, чьи графики открыты у клиентов — по ним нужен каждый тик."""
@@ -1350,6 +1650,38 @@ class MarketFeed:
             self._hot_changed.set()
             log.info("[ticks] горячие монеты: %s",
                      ", ".join(sorted(new)) if new else "нет")
+
+
+    async def _oi_engine(self):
+        """Живой опрос OI всех 7 бирж по тёплым символам (график/статистика).
+
+        История подтягивается лениво (TTL 10 мин), опрос — раз в 30 c;
+        символы опрашиваем по очереди, биржи внутри символа — параллельно.
+        """
+        from oi_feed import SAMPLE_INTERVAL
+        await asyncio.sleep(5)   # дать ценам и инструментам подтянуться
+        while not self._stop.is_set():
+            try:
+                for sym in list(self.hot_symbols)[:6]:
+                    self.oi.watch(sym)
+                for sym in self.oi.watched_symbols():
+                    if self._stop.is_set():
+                        break
+                    try:
+                        await self.oi.backfill_symbol(sym)   # TTL-сторож внутри
+                        await self.oi.sample_symbol(sym)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        log.debug("oi engine %s: %s", sym, e)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                log.debug("oi engine: %s", e)
+            try:
+                await asyncio.sleep(SAMPLE_INTERVAL)
+            except asyncio.CancelledError:
+                break
 
     async def _trade_engine(self):
         """Каждая сделка по открытым графикам.

@@ -1,5 +1,5 @@
 /**
- * Licvidation Terminal — реальный поток ликвидаций + кластерный график.
+ * LiqScope Terminal — реальный поток ликвидаций + кластерный график.
  *
  * Важное отличие от прошлой версии: библиотека Lightweight Charts v5
  * больше не имеет методов addCandlestickSeries()/setMarkers() — вызов
@@ -12,7 +12,7 @@
     "use strict";
 
     // Мультиязычность (i18n.js): ru / en / zh / hi / es
-    var I18n = window.LicvidationI18n || {
+    var I18n = window.LiqScopeI18n || {
         t: function (k) { return k; }, lang: function () { return "ru"; },
         set: function () {}, plural: function (n, f) { return f[0]; },
         apply: function () {}, onChange: function () {}, init: function () {},
@@ -34,6 +34,8 @@
         liqEnabled: true,       // шарики ликвидаций на графике
         cvdEnabled: true,       // CVD-стрелки: перевес тейкер-покупок/продаж в свече
         cvdBars: 0,
+        oiEnabled: true,        // OI-шарики: рост/падение открытого интереса за свечу
+        oiBars: 0,
         symbols: [],
         details: {},
         prices: {},
@@ -49,6 +51,8 @@
         searchRequestId: 0,
         lastHealth: null,
         lastStats: null,
+        lastOI: null,
+        statWin: { liq: "24h", cvd: "24h", oi: "24h" },
         modalItem: null,
     };
 
@@ -65,10 +69,15 @@
     let audioCtx = null;
     let redrawQueued = false;
 
-    // Хит-тест шариков: координаты и ids событий из последнего drawClusters()
-    let clusterBalls = [];        // [{x, y, r, key, ids:[...]}]
-    let hoverBallKey = null;      // шарик под курсором (наведение)
-    let pinBallKey = null;        // шарик, закреплённый кликом/тапом
+    // Хит-тест прямоугольников: координаты и ids событий из последнего drawClusters()
+    let clusterHits = [];         // [{kind:"liq", x, y, w, h, key, ids:[...]}]
+    let hoverHitKey = null;       // прямоугольник под курсором (наведение)
+    let pinHitKey = null;         // прямоугольник, закреплённый кликом/тапом
+    // Хит-тест фигур CVD/OI: круги из последнего drawClusters()
+    let cvdHits = [];             // [{kind:"cvd", key, x, y, r, time, d, buy, live, p90, c}]
+    let oiHits = [];              // [{kind:"oi", key, x, y, r, time, d, up, tier, live, c}]
+    let shapeHover = null;        // {kind, key} — фигура под курсором (liq/cvd/oi)
+    let shapePin = null;          // {kind, key} — фигура, закреплённая кликом/тапом
 
     // --- DOM ---------------------------------------------------------------
     const $ = (id) => document.getElementById(id);
@@ -103,10 +112,16 @@
     const topCoinsContainer = $("top-coins-list");
     const chartWrapper = $("chart-wrapper");
     const clusterCanvas = $("cluster-canvas");
+    const drawCanvas = $("draw-canvas");
+    const drawToggle = $("draw-toggle");
+    const drawToolbar = $("draw-toolbar");
     const chartSection = document.querySelector(".chart-section");
     const chartToggle = $("chart-toggle");
     const profileToggle = $("profile-toggle");
     const cvdStatEl = $("cvd-stat");
+    const liqStatEl = $("liq-stat");
+    const profileStatEl = $("profile-stat");
+    const oiStatEl = $("oi-stat");
     const langSelect = $("lang-select");
     const symbolButtonsEl = $("symbol-buttons");   // старый контейнер (не используется)
     const symbolCurrentBtn = $("symbol-current");
@@ -114,9 +129,15 @@
     const symbolDropdown = $("symbol-dropdown");
     const symbolSearchEl = $("symbol-search");
 
-    const stat24hEl = $("stat-24h-total");
-    const stat1hEl = $("stat-1h-total");
-    const stat5mEl = $("stat-5m-total");
+    const statBoxLiq = $("stat-box-liq"), statLiqHead = $("stat-liq-head"),
+          statLiqWin = $("stat-liq-win"), statLiqValue = $("stat-liq-value"),
+          statLiqSub = $("stat-liq-sub"), statMenuLiq = $("stat-menu-liq");
+    const statBoxCvd = $("stat-box-cvd"), statCvdHead = $("stat-cvd-head"),
+          statCvdWin = $("stat-cvd-win"), statCvdValue = $("stat-cvd-value"),
+          statCvdSub = $("stat-cvd-sub"), statMenuCvd = $("stat-menu-cvd");
+    const statBoxOi = $("stat-box-oi"), statOiHead = $("stat-oi-head"),
+          statOiWin = $("stat-oi-win"), statOiValue = $("stat-oi-value"),
+          statOiSub = $("stat-oi-sub"), statMenuOi = $("stat-menu-oi");
     const longPctEl = $("long-pct");
     const shortPctEl = $("short-pct");
     const longRatioBar = $("long-ratio-bar");
@@ -174,11 +195,11 @@
 
     function loadSavedFilters() {
         try {
-            const v = localStorage.getItem("licvid.minUsd");
+            const v = localStorage.getItem("liqscope.minUsd");
             if (v !== null) state.minUsd = Math.max(0, parseFloat(v) || 0);
         } catch (e) { /* ignore */ }
         try {
-            const raw = localStorage.getItem("licvid.exchanges");
+            const raw = localStorage.getItem("liqscope.exchanges");
             if (raw !== null) {
                 if (raw === "*") {
                     state.exchanges = null;               // все биржи включены
@@ -191,12 +212,12 @@
     }
 
     function saveMinUsd() {
-        try { localStorage.setItem("licvid.minUsd", String(state.minUsd || 0)); } catch (e) { /* ignore */ }
+        try { localStorage.setItem("liqscope.minUsd", String(state.minUsd || 0)); } catch (e) { /* ignore */ }
     }
 
     function saveExchanges() {
         try {
-            localStorage.setItem("licvid.exchanges",
+            localStorage.setItem("liqscope.exchanges",
                 state.exchanges ? JSON.stringify(Array.from(state.exchanges).sort()) : "*");
         } catch (e) { /* ignore */ }
     }
@@ -204,6 +225,7 @@
     function applyFiltersFull() {
         rebuildFeed();
         updateMarkers();
+        updateLiveStats();
         queueRedraw();
     }
 
@@ -223,7 +245,7 @@
         if (!window.indexedDB) return Promise.resolve(null);   // старый браузер
         return new Promise((resolve) => {
             try {
-                const req = window.indexedDB.open("licvid-history", 1);
+                const req = window.indexedDB.open("liqscope-history", 1);
                 req.onupgradeneeded = () => {
                     const db = req.result;
                     if (!db.objectStoreNames.contains("liqs")) {
@@ -312,6 +334,7 @@
             if (rest.length) cacheLiquidations(rest);
             rebuildFeed();
             updateMarkers();
+            updateLiveStats();
             queueRedraw();
         } catch (e) { /* сеть недоступна — живём на том, что уже пришло */ }
     }
@@ -437,6 +460,10 @@
                 clusterCanvas.width = w;
                 clusterCanvas.height = h;
             }
+            if (drawCanvas) {
+                drawCanvas.width = w;
+                drawCanvas.height = h;
+            }
             queueRedraw();
         };
 
@@ -491,7 +518,7 @@
         updatePriceDisplay(bars[bars.length - 1].close);
         renderTickIndicator();
         updateMarkers();
-        updateCvdStat();
+        updateLiveStats();
         queueRedraw();
     }
 
@@ -520,7 +547,7 @@
             if (state.candles.length > 700) state.candles.shift();
         }
         updatePriceDisplay(bar.close);
-        updateCvdStat();
+        updateLiveStats();
         queueRedraw();
     }
 
@@ -584,14 +611,87 @@
             x.usd >= state.minUsd);
     }
 
-    // Палитра ликвидаций специально НЕ повторяет цвета свечей (зелёный/красный),
-    // иначе шарик внутри свечи сливается с её телом.
+    // Палитра ликвидаций: мелкие события кодируют СТОРОНУ (маджента — вынесли
+    // лонг, циан — вынесли шорт), а киты — ОБЪЁМ по тепловой шкале
+    // от жёлтого к ярко-красному (см. HEAT_STOPS ниже). Порог кита
+    // масштабируется от оборота монеты (для BTC — $100K, см. volScale).
     const LIQ_COLORS = {
-        long:  { fill: "rgba(255,45,149,0.92)", ring: "#ffd7ec" },   // вынесли ЛОНГ — маджента
-        short: { fill: "rgba(0,214,255,0.92)",  ring: "#ccf6ff" },   // вынесли ШОРТ — циан
-        whale: { fill: "rgba(255,206,0,0.96)",  ring: "#fff6cc" },   // кит — золото
+        long:  { fill: "rgba(255,45,149,0.92)", ring: "#ffd7ec", text: "#04070d" },
+        short: { fill: "rgba(0,214,255,0.92)",  ring: "#ccf6ff", text: "#04070d" },
     };
     const WHALE_USD = 100000;
+    const LIQ_LABEL_MIN_USD = 2000;   // меньше — рисуем чип без подписи
+
+    // --- Масштаб «крупности» от оборота монеты -------------------------------
+    // Пороги китов/подписей/тиров заданы для BTC; для остальных монет умножаем
+    // на отношение средненедельного оборота к BTC. Что для BTC пыль ($100K),
+    // для GRAM — кит. Нет данных об оборотах — масштаб 1, как раньше.
+    function volOf(d) {
+        return Number(d.volAvg7d) || Number(d.volume24h) || 0;
+    }
+    function volAnchor() {
+        const b = volOf(state.details["BTC_USDT"] || {});
+        if (b > 0) return b;
+        let mx = 0;
+        for (const k in state.details) mx = Math.max(mx, volOf(state.details[k] || {}));
+        return mx;
+    }
+    function volScale(symbol) {
+        const a = volAnchor(), v = volOf(state.details[symbol] || {});
+        if (!(v > 0) || !(a > 0)) return 1;
+        return Math.min(2, Math.max(0.001, v / a));
+    }
+    function chartVolScale() { return volScale(chartSymbol()); }
+
+    // Тепловая шкала китов: [порог $, R, G, B]. Между соседними стопами цвет
+    // интерполируется, выше последнего — ярко-красный с растущим свечением.
+    const HEAT_STOPS = [
+        [100000, 255, 206, 0],    // $100K — жёлтый
+        [300000, 255, 168, 0],    // $300K — жёлто-оранжевый
+        [500000, 255, 128, 0],    // $500K — оранжевый
+        [1000000, 255, 72, 0],    // $1M — красно-оранжевый
+        [2000000, 255, 30, 8],    // $2M — красный
+        [5000000, 255, 16, 48],   // $5M+ — ярко-красный
+    ];
+
+    function heatRGB(usd, k) {
+        k = k || 1;
+        const first = HEAT_STOPS[0], last = HEAT_STOPS[HEAT_STOPS.length - 1];
+        if (usd <= first[0] * k) return [first[1], first[2], first[3]];
+        for (let i = 1; i < HEAT_STOPS.length; i++) {
+            if (usd <= HEAT_STOPS[i][0] * k) {
+                const a = HEAT_STOPS[i - 1], b = HEAT_STOPS[i];
+                const t = (usd - a[0] * k) / ((b[0] - a[0]) * k);
+                return [
+                    Math.round(a[1] + (b[1] - a[1]) * t),
+                    Math.round(a[2] + (b[2] - a[2]) * t),
+                    Math.round(a[3] + (b[3] - a[3]) * t),
+                ];
+            }
+        }
+        return [last[1], last[2], last[3]];
+    }
+
+    function heatTheme(usd, k) {
+        const c = heatRGB(usd, k);
+        const lum = (0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]) / 255;
+        const mx = (v) => Math.round(v + (255 - v) * 0.55);
+        return {
+            fill: "rgba(" + c[0] + "," + c[1] + "," + c[2] + ",0.95)",
+            ring: "rgb(" + mx(c[0]) + "," + mx(c[1]) + "," + mx(c[2]) + ")",
+            text: lum > 0.5 ? "#1a1200" : "#ffffff",
+        };
+    }
+
+    function heatCss(usd, k) {
+        const c = heatRGB(usd, k);
+        return "rgb(" + c[0] + "," + c[1] + "," + c[2] + ")";
+    }
+
+    // Компактная подпись: $150K вместо $150.0K, $2.5M вместо $2.50M.
+    function fmtCompact(v) {
+        return "$" + fmtUsdShort(v).replace(/(\.\d)0+([KM])/, "$1$2").replace(/\.0+([KM])/, "$1");
+    }
 
     function updateMarkers() {
         if (!candleSeries) return;
@@ -600,9 +700,10 @@
         const byTime = new Map();
 
         // Метками помечаем только крупные события — всё остальное рисуем
-        // шариками прямо на свече, чтобы не засорять поле графика.
+        // прямоугольниками прямо на свече, чтобы не засорять поле графика.
+        const kvol = chartVolScale();
         visibleLiquidations().slice(-400).forEach((item) => {
-            if (item.usd < WHALE_USD) return;
+            if (item.usd < WHALE_USD * kvol) return;
             const t = Math.floor(item.timestamp / tfSec) * tfSec;
             const key = t + "_" + (item.side === "SELL" ? "L" : "S");
             const cur = byTime.get(key) || { time: t, side: item.side, usd: 0 };
@@ -616,9 +717,9 @@
             .map((m) => ({
                 time: m.time,
                 position: m.side === "SELL" ? "aboveBar" : "belowBar",
-                color: LIQ_COLORS.whale.fill,
+                color: heatCss(m.usd, kvol),
                 shape: "circle",
-                text: "🔥 $" + fmtUsdShort(m.usd),
+                text: "🔥 " + fmtCompact(m.usd),
             }))
             .sort((a, b) => a.time - b.time);
 
@@ -641,20 +742,31 @@
 
         drawLiquidationProfile(ctx);   // индикатор: полосы по ценовым уровням
 
-        clusterBalls = [];             // актуальные геометрии шариков — только если слой включён
-        if (state.liqEnabled) drawLiqBalls(ctx);
-        if (state.cvdEnabled) drawCvdArrows(ctx);
+        clusterHits = [];              // актуальные геометрии — только если слой включён
+        cvdHits = [];
+        oiHits = [];
+        if (state.liqEnabled) drawLiqRects(ctx);
+        if (state.cvdEnabled) drawCvdTriangles(ctx);
+        if (state.oiEnabled) drawOiBalls(ctx);
+        drawFigures();   // фигуры теханализа — свой canvas поверх
     }
 
-    function drawLiqBalls(ctx) {
+    // --- Прямоугольники ликвидаций ---------------------------------------------
+    // Каждый кластер — скруглённый прямоугольник с суммой. Мелкие (ниже кита)
+    // красятся по стороне (маджента/циан), киты — по тепловой шкале объёма.
+    // Пороги масштабируются от оборота монеты (для BTC кит — $100K).
+    // Совсем мелкие (ниже $2K × масштаб) рисуются чипом без текста; подписанные
+    // прямоугольники не налезают друг на друга (жадная раскладка).
+    function drawLiqRects(ctx) {
         const tfSec = state.timeframe * 60;
+        const kvol = chartVolScale();
         const items = visibleLiquidations();
         if (!items.length || !state.candles.length) return;
 
-        // Свечи по времени: шарик рисуем только там, где свеча реально есть,
-        // и прижимаем цену к её диапазону low..high. Биржи отдают цену
+        // Свечи по времени: прямоугольник рисуем только там, где свеча реально
+        // есть, и прижимаем цену к её диапазону low..high. Биржи отдают цену
         // банкротства, она может уходить далеко от рынка — раньше из-за этого
-        // шарики улетали в пустоту.
+        // метки улетали в пустоту.
         const bars = new Map();
         state.candles.forEach((c) => bars.set(c.time, c));
 
@@ -669,17 +781,24 @@
             if (!isFinite(price)) price = bar.close;
             price = Math.min(Math.max(price, lo), hi);
             // Внутри свечи раскладываем по 6 уровням, чтобы близкие
-            // ликвидации слипались в один шарик, а не рисовались стопкой.
+            // ликвидации слипались в один прямоугольник.
             const span = hi - lo;
             const level = span > 0 ? Math.round(((price - lo) / span) * 5) : 0;
             const key = t + "_" + level;
             const c = clusters.get(key) || {
                 key: key, time: t, lo: lo, hi: hi, level: level,
-                longUsd: 0, shortUsd: 0, total: 0, count: 0, ids: [],
+                longUsd: 0, shortUsd: 0, total: 0, count: 0, longN: 0, shortN: 0, ids: [],
+                exchs: {},
             };
-            if (item.side === "SELL") c.longUsd += item.usd; else c.shortUsd += item.usd;
+            if (item.side === "SELL") { c.longUsd += item.usd; c.longN += 1; }
+            else { c.shortUsd += item.usd; c.shortN += 1; }
             c.total += item.usd;
             c.count += 1;
+            const exKey = String(item.exchange || "?").toUpperCase();
+            const slot = c.exchs[exKey] || { n: 0, usd: 0 };
+            slot.n += 1;
+            slot.usd += item.usd;
+            c.exchs[exKey] = slot;
             if (item.id != null) c.ids.push(item.id);
             clusters.set(key, c);
         });
@@ -687,9 +806,13 @@
 
         const ts = chart.timeScale();
         const list = Array.from(clusters.values()).sort((a, b) => a.total - b.total);
-        const activeKey = pinBallKey || hoverBallKey;   // закреплённый важнее
+        const activeKey = pinHitKey || hoverHitKey;   // закреплённый важнее
 
-        clusterBalls = [];
+        clusterHits = [];
+        const labeled = [];   // подписанные прямоугольники — защита от налезания
+        ctx.save();
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
         list.forEach((c) => {
             const price = c.hi > c.lo ? c.lo + ((c.hi - c.lo) * c.level) / 5 : c.lo;
             let x, y;
@@ -698,61 +821,114 @@
                 y = candleSeries.priceToCoordinate(price);
             } catch (e) { return; }
             if (x === null || y === null || x === undefined || y === undefined) return;
-            if (x < -30 || x > clusterCanvas.width + 30) return;
+            if (x < -40 || x > clusterCanvas.width + 40) return;
             if (y < -30 || y > clusterCanvas.height + 30) return;
 
-            const whale = c.total >= WHALE_USD;
+            const whale = c.total >= WHALE_USD * kvol;
             const isLong = c.longUsd >= c.shortUsd;
-            const theme = whale ? LIQ_COLORS.whale : (isLong ? LIQ_COLORS.long : LIQ_COLORS.short);
-            const radius = Math.min(Math.max(Math.log10(Math.max(c.total, 10)) * 3.4, 5), 20);
+            const theme = whale ? heatTheme(c.total, kvol) : (isLong ? LIQ_COLORS.long : LIQ_COLORS.short);
+            const wantLabel = whale || c.total >= LIQ_LABEL_MIN_USD * kvol;
+
+            let bw, bh, label;
+            if (wantLabel) {
+                ctx.font = "bold 9px 'JetBrains Mono', monospace";
+                label = fmtCompact(c.total);
+                bw = Math.max(30, Math.ceil(ctx.measureText(label).width) + 12);
+                bh = whale ? 16 + Math.min(6, Math.max(-3, (Math.log10(c.total) - 5) * 2.5)) : 15;
+            } else {
+                bw = 10; bh = 10; label = "";
+            }
+            const bx = Math.round(x - bw / 2), by = Math.round(y - bh / 2);
+
+            // Подписанный прямоугольник, налезающий на другой подписанный, —
+            // рисуем чипом без текста (кроме китов: киты всегда с текстом).
+            let showLabel = wantLabel;
+            if (wantLabel && !whale) {
+                for (let j = 0; j < labeled.length; j++) {
+                    const p = labeled[j];
+                    if (bx < p.x + p.w + 2 && bx + bw + 2 > p.x &&
+                        by < p.y + p.h + 2 && by + bh + 2 > p.y) {
+                        showLabel = false;
+                        bw = 10; bh = 10;
+                        break;
+                    }
+                }
+            }
+            const fx = showLabel ? bx : Math.round(x - bw / 2);
+            const fy = showLabel ? by : Math.round(y - bh / 2);
+            if (showLabel) labeled.push({ x: fx, y: fy, w: bw, h: bh });
+
             const isActive = activeKey === c.key;
+            clusterHits.push({ kind: "liq", x: fx, y: fy, w: bw, h: bh, key: c.key, ids: c.ids,
+                time: c.time, price: price, total: c.total, count: c.count,
+                longUsd: c.longUsd, shortUsd: c.shortUsd,
+                longN: c.longN, shortN: c.shortN, whale: whale, exchs: c.exchs });
 
-            clusterBalls.push({ x: x, y: y, r: radius, key: c.key, ids: c.ids });
+            const glow = 6 + Math.min(12, (Math.log10(Math.max(c.total, 10)) - 3) * 3);
+            const rad = showLabel ? 4 : 3;
 
-            ctx.save();
-            // Тёмная подложка отделяет шарик от тела свечи любого цвета
-            ctx.beginPath();
-            ctx.arc(x, y, radius + 1.6, 0, 2 * Math.PI);
+            // Тёмная подложка отделяет прямоугольник от тела свечи любого цвета
+            rrPath(ctx, fx - 1.5, fy - 1.5, bw + 3, bh + 3, rad + 1);
             ctx.fillStyle = "rgba(5,8,14,0.85)";
             ctx.fill();
 
-            ctx.beginPath();
-            ctx.arc(x, y, radius, 0, 2 * Math.PI);
-            ctx.fillStyle = theme.fill;
             ctx.shadowColor = theme.fill;
-            ctx.shadowBlur = whale ? 14 : 7;
+            ctx.shadowBlur = glow;
+            rrPath(ctx, fx, fy, bw, bh, rad);
+            ctx.fillStyle = theme.fill;
             ctx.fill();
             ctx.shadowBlur = 0;
-            ctx.lineWidth = whale ? 2 : 1.4;
+            ctx.lineWidth = whale ? 1.8 : 1.2;
             ctx.strokeStyle = theme.ring;
             ctx.stroke();
 
-            // Активный шарик (наведение/нажатие) — белое кольцо поверх
+            // Активный прямоугольник (наведение/нажатие) — белое кольцо поверх
             if (isActive) {
-                ctx.beginPath();
-                ctx.arc(x, y, radius + 4, 0, 2 * Math.PI);
-                ctx.lineWidth = 2;
+                rrPath(ctx, fx - 3.5, fy - 3.5, bw + 7, bh + 7, rad + 2);
+                ctx.lineWidth = 1.8;
                 ctx.strokeStyle = "rgba(255,255,255,0.95)";
                 ctx.stroke();
             }
 
-            if (radius >= 11) {
-                ctx.fillStyle = whale ? "#1a1200" : "#04070d";
+            if (showLabel) {
                 ctx.font = "bold 9px 'JetBrains Mono', monospace";
-                ctx.textAlign = "center";
-                ctx.textBaseline = "middle";
-                ctx.fillText("$" + fmtUsdShort(c.total), x, y);
+                ctx.fillStyle = theme.text;
+                ctx.fillText(label, x, y + 0.5);
             }
-            ctx.restore();
         });
+        ctx.restore();
     }
 
-    // --- CVD-стрелки по свечам -------------------------------------------------
+    // --- CVD-треугольники в центре свечи -------------------------------------------
     // delta = taker buy volume - taker sell volume (USDT) внутри одной свечи.
-    // ▲ зелёная над свечой — цену толкали покупатели; ▼ красная под — продавцы.
-    // Формирующаяся свеча обновляется на каждом тике, после закрытия стрелка
-    // остаётся с финальным значением.
-    function drawCvdArrows(ctx) {
+    // Треугольник стоит СТРОГО в центре тела свечи: фиолетовый ▲ —
+    // преобладали покупатели, оранжевый ▼ — продавцы; размер — величина
+    // перевеса относительно p90 видимых свечей, внутри — сумма, когда влезает.
+    // Направление читается самой формой, отдельный глиф не нужен.
+    // Палитра специально НЕ повторяет свечи (зелёный/красный): треугольник
+    // лежит прямо на теле и должен отличаться от него при любом цвете.
+    const CVD_COLORS = {
+        buy:  { fill: "rgba(139,92,246,0.96)",  ring: "#e6d9ff", text: "#0d0618" },
+        sell: { fill: "rgba(255,145,0,0.96)",   ring: "#ffe3b8", text: "#1c0d00" },
+    };
+    const CVD_MAX_TRI = 40;
+
+    function rrPath(ctx, x, y, w, h, r) {
+        r = Math.min(r, w / 2, h / 2);
+        ctx.beginPath();
+        if (typeof ctx.roundRect === "function") {
+            ctx.roundRect(x, y, w, h, r);
+        } else {
+            ctx.moveTo(x + r, y);
+            ctx.arcTo(x + w, y, x + w, y + h, r);
+            ctx.arcTo(x + w, y + h, x, y + h, r);
+            ctx.arcTo(x, y + h, x, y, r);
+            ctx.arcTo(x, y, x + w, y, r);
+            ctx.closePath();
+        }
+    }
+
+    function drawCvdTriangles(ctx) {
         const candles = state.candles;
         if (!candles.length || !chart || !candleSeries) return;
         let maxAbs = 0;
@@ -762,52 +938,121 @@
         }
         state.cvdBars = 0;
         if (!(maxAbs > 0)) return;
-        const minAbs = Math.max(1000, maxAbs * 0.04);   // микрошум не рисуем
+        // Нормировка по 90-му перцентилю, а не по максимуму: один гигантский
+        // бар иначе сплющивает все остальные треугольники до точек без подписей.
+        const absVals = [];
+        for (let i = 0; i < candles.length; i++) {
+            const d = Math.abs(Number(candles[i].cvd));
+            if (isFinite(d) && d > 0) absVals.push(d);
+        }
+        absVals.sort((a, b) => a - b);
+        let p90 = absVals.length ? absVals[Math.floor(0.9 * (absVals.length - 1))] : 0;
+        if (!(p90 > 0)) p90 = maxAbs;
+        const minAbs = Math.max(1000 * chartVolScale(), p90 * 0.05);   // микрошум не рисуем
+
+        // Кандидаты: только значимые свечи. Раскладываем от сильных к слабым,
+        // чтобы при тесноте выживали самые важные сигналы.
+        const lastIdx = candles.length - 1;
+        const cand = [];
+        for (let i = 0; i < candles.length; i++) {
+            const d = Number(candles[i].cvd);
+            if (isFinite(d) && Math.abs(d) >= minAbs) {
+                cand.push({ c: candles[i], d: d, live: i === lastIdx });
+            }
+        }
+        cand.sort((a, b) => Math.abs(b.d) - Math.abs(a.d));
+
         const ts = chart.timeScale();
         const W = clusterCanvas.width, H = clusterCanvas.height;
-        const lastIdx = candles.length - 1;
-        for (let i = 0; i < candles.length; i++) {
-            const c = candles[i];
-            const d = Number(c.cvd);
-            if (!isFinite(d) || Math.abs(d) < minAbs) continue;
+        const placed = [];   // центры и радиусы — защита от налезания
+        let drawn = 0;
+
+        ctx.save();
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+
+        for (let k = 0; k < cand.length && drawn < CVD_MAX_TRI; k++) {
+            const c = cand[k].c, d = cand[k].d;
             const buy = d > 0;
-            state.cvdBars += 1;
+            // центр ТЕЛА свечи — середина между open и close
+            const mid = (Number(c.open) + Number(c.close)) / 2;
             let x, y;
             try {
                 x = ts.timeToCoordinate(c.time);
-                y = candleSeries.priceToCoordinate(buy ? c.high : c.low);
+                y = candleSeries.priceToCoordinate(mid);
             } catch (e) { continue; }
             if (x === null || x === undefined || y === null || y === undefined) continue;
-            if (x < -30 || x > W + 30 || y < -40 || y > H + 40) continue;
-            const k = Math.sqrt(Math.abs(d) / maxAbs);
-            const size = 3.5 + 7.5 * k;
-            const gap = 4;
-            ctx.save();
-            ctx.globalAlpha = 0.45 + 0.55 * k;
-            ctx.fillStyle = buy ? "rgba(0,230,118,0.95)" : "rgba(255,42,95,0.95)";
-            if (i === lastIdx) {           // живая свеча — подсвечиваем сильнее
-                ctx.shadowColor = ctx.fillStyle;
-                ctx.shadowBlur = 10;
+            const kk = Math.min(Math.sqrt(Math.abs(d) / p90), 1.2);
+            const halfW = 9 + 12 * kk;
+            const h = halfW * 1.5;
+            const rr = Math.max(halfW, h / 2);
+            if (x < -rr - 10 || x > W + rr + 10 || y < -rr - 10 || y > H + rr + 10) continue;
+
+            // налезает на уже нарисованный треугольник? пропускаем более слабый
+            let clash = false;
+            for (let j = 0; j < placed.length; j++) {
+                const q = placed[j];
+                const dx = x - q.x, dy = y - q.y;
+                const rad = rr + q.r + 2;
+                if (dx * dx + dy * dy <= rad * rad) { clash = true; break; }
             }
-            ctx.beginPath();
-            if (buy) {                     // ▲ над максимумом
-                ctx.moveTo(x, y - gap - size);
-                ctx.lineTo(x - size * 0.62, y - gap);
-                ctx.lineTo(x + size * 0.62, y - gap);
-            } else {                       // ▼ под минимумом
-                ctx.moveTo(x, y + gap + size);
-                ctx.lineTo(x - size * 0.62, y + gap);
-                ctx.lineTo(x + size * 0.62, y + gap);
-            }
-            ctx.closePath();
+            if (clash) continue;
+            placed.push({ x: x, y: y, r: rr });
+            const triKey = "cvd_" + c.time;
+            cvdHits.push({ kind: "cvd", key: triKey, x: x, y: y, r: rr,
+                           time: c.time, d: d, buy: buy, live: cand[k].live, p90: p90, c: c });
+
+            // Треугольник центрируем по y: вершина выше/ниже центра на h/2.
+            const apexY = buy ? y - h / 2 : y + h / 2;
+            const cy = buy ? apexY + h * 0.68 : apexY - h * 0.68;
+            const theme = buy ? CVD_COLORS.buy : CVD_COLORS.sell;
+
+            // Тёмная подложка — треугольник читается на свече любого цвета
+            triPath(ctx, x, buy ? apexY - 1.6 : apexY + 1.6, halfW + 1.6, h + 1.6, buy);
+            ctx.fillStyle = "rgba(5,8,14,0.88)";
             ctx.fill();
-            ctx.restore();
+
+            ctx.shadowColor = theme.fill;
+            ctx.shadowBlur = cand[k].live ? 16 : 9;
+            triPath(ctx, x, apexY, halfW, h, buy);
+            ctx.fillStyle = theme.fill;
+            ctx.fill();
+            ctx.shadowBlur = 0;
+            ctx.lineWidth = 1.4;
+            ctx.strokeStyle = theme.ring;
+            ctx.stroke();
+
+            // Активный треугольник (наведение/закреп) — белая обводка поверх
+            if (shapeIsActive("cvd", triKey)) {
+                triPath(ctx, x, apexY, halfW, h, buy);
+                ctx.lineWidth = 1.8;
+                ctx.strokeStyle = "rgba(255,255,255,0.9)";
+                ctx.stroke();
+            }
+
+            // Сумма — если влезает; шрифт подбираем под размер треугольника.
+            const val = fmtCompact(Math.abs(d));
+            let vFont = 0;
+            const vSizes = [8, 7, 6.5];
+            for (let f = 0; f < vSizes.length; f++) {
+                ctx.font = "bold " + vSizes[f] + "px 'JetBrains Mono', monospace";
+                if (ctx.measureText(val).width <= halfW * 1.3) { vFont = vSizes[f]; break; }
+            }
+            if (vFont > 0) {
+                ctx.fillStyle = theme.text;
+                ctx.fillText(val, x, cy + 0.5);
+            }
+            drawn += 1;
         }
+        ctx.restore();
+        state.cvdBars = drawn;
     }
 
     function updateCvdStat() {
+        paintCvdBox();   // бокс CVD в шапке — из тех же свечей
         if (!cvdStatEl) return;
-        if (!state.cvdEnabled) { cvdStatEl.textContent = ""; return; }
+        // слой на графике и цифры живут отдельно: выключенные треугольники
+        // не должны гасить ни бокс в шапке, ни живой индикатор у кнопки
         const last = state.candles[state.candles.length - 1];
         const d = last ? Number(last.cvd) : NaN;
         if (!isFinite(d)) {
@@ -820,23 +1065,519 @@
         cvdStatEl.className = "cvd-stat " + (buy ? "up" : "down");
     }
 
-    // --- Наведение/нажатие на шарик: подсветка связанных записей в ленте -----
-    function ballAt(px, py) {
-        for (let i = clusterBalls.length - 1; i >= 0; i--) {
-            const b = clusterBalls[i];
-            const dx = px - b.x, dy = py - b.y;
-            const rr = b.r + 5;
+    // Ликвидации текущей свечи: сумма и число событий. Те же фильтры,
+    // что у прямоугольников на графике (монета, биржи, мин. сумма).
+    function updateLiqStat() {
+        if (!liqStatEl) return;
+        const tfSec = state.timeframe * 60;
+        const bucket = Math.floor(Date.now() / 1000 / tfSec) * tfSec;
+        let sum = 0, n = 0;
+        const items = visibleLiquidations();
+        for (let i = 0; i < items.length; i++) {
+            const t = Math.floor((Number(items[i].timestamp) || 0) / tfSec) * tfSec;
+            if (t !== bucket) continue;
+            sum += Number(items[i].usd) || 0;
+            n += 1;
+        }
+        if (!n) {
+            liqStatEl.textContent = "—";
+            liqStatEl.className = "live-stat";
+            return;
+        }
+        liqStatEl.textContent = "$" + fmtUsdShort(sum) + "·" + n;
+        liqStatEl.className = "live-stat on-liq";
+    }
+
+    // Объём профиля: сумма ликвидаций видимого диапазона — то, что
+    // раскладывают полосы индикатора.
+    function updateProfileStat() {
+        if (!profileStatEl) return;
+        const range = profilePriceRange();
+        let sum = 0;
+        if (range) {
+            const pad = state.timeframe * 60;
+            const items = visibleLiquidations();
+            for (let i = 0; i < items.length; i++) {
+                const ts = Number(items[i].timestamp) || 0;
+                if (ts < range.from - pad || ts > range.to + pad) continue;
+                sum += Number(items[i].usd) || 0;
+            }
+        }
+        if (!(sum > 0)) {
+            profileStatEl.textContent = "—";
+            profileStatEl.className = "live-stat";
+            return;
+        }
+        profileStatEl.textContent = "$" + fmtUsdShort(sum);
+        profileStatEl.className = "live-stat on-profile";
+    }
+
+    // Изменение OI текущей свечи — пара к CVD-индикатору.
+    function updateOiStat() {
+        if (!oiStatEl) return;
+        const last = state.candles[state.candles.length - 1];
+        const d = last ? Number(last.oiChg) : NaN;
+        if (!isFinite(d)) {
+            oiStatEl.textContent = "OI —";
+            oiStatEl.className = "live-stat";
+            return;
+        }
+        const up = d >= 0;
+        oiStatEl.textContent = (up ? "● +$" : "● −$") + fmtUsdShort(Math.abs(d));
+        oiStatEl.className = "live-stat " + (up ? "up" : "down");
+    }
+
+    // Живые цифры у кнопок слоёв (+ бокс CVD в шапке внутри updateCvdStat).
+    // Слои на графике и цифры живут отдельно: выключенный слой прячет
+    // только фигуры, цифры продолжают обновляться.
+    function updateLiveStats() {
+        updateCvdStat();
+        updateLiqStat();
+        updateProfileStat();
+        updateOiStat();
+    }
+
+    // --- Боксы статистики: ликвидации / CVD / OI --------------------------------
+    // Три окошка в шапке, у каждого — меню выбора периода. Окна выбираются
+    // из STAT_WIN_DEFS, выбор помнится в localStorage отдельно для бокса.
+    const STAT_WIN_DEFS = [
+        { key: "1m", sec: 60 }, { key: "5m", sec: 300 },
+        { key: "15m", sec: 900 }, { key: "30m", sec: 1800 },
+        { key: "1h", sec: 3600 }, { key: "4h", sec: 14400 },
+        { key: "24h", sec: 86400 },
+    ];
+    const OI_WIN_KEY = { "1m": "m1", "5m": "m5", "15m": "m15", "30m": "m30",
+                         "1h": "h1", "4h": "h4", "24h": "h24" };
+    function statWinSec(key) {
+        for (let i = 0; i < STAT_WIN_DEFS.length; i++)
+            if (STAT_WIN_DEFS[i].key === key) return STAT_WIN_DEFS[i].sec;
+        return 86400;
+    }
+    (function loadStatWin() {
+        const kinds = ["liq", "cvd", "oi"];
+        for (let i = 0; i < kinds.length; i++) {
+            try {
+                const v = localStorage.getItem("liqscope.statwin." + kinds[i]);
+                if (v && OI_WIN_KEY[v]) state.statWin[kinds[i]] = v;
+            } catch (e) { /* ignore */ }
+        }
+    })();
+    function setStatWin(kind, key) {
+        if (!OI_WIN_KEY[key]) return;
+        state.statWin[kind] = key;
+        try { localStorage.setItem("liqscope.statwin." + kind, key); } catch (e) {}
+        paintStatBox(kind);
+    }
+
+    // Значения боксов за окно key: ликвидации — из /api/stats,
+    // CVD — сумма поля cvd загруженных свечей, OI — из /api/oi.
+    function statLiqVal(key) {
+        const d = state.lastStats;
+        if (!d) return null;
+        const t = Number(d["total_usd_" + key]);
+        if (!isFinite(t)) return null;
+        return { total: t,
+                 longs: Number(d["longs_usd_" + key]) || 0,
+                 shorts: Number(d["shorts_usd_" + key]) || 0 };
+    }
+    function statCvdVal(key) {
+        if (!state.candles.length) return null;
+        const since = Date.now() / 1000 - statWinSec(key);
+        let buy = 0, sell = 0, ok = false;
+        for (let i = 0; i < state.candles.length; i++) {
+            const c = state.candles[i];
+            if ((Number(c.time) || 0) < since) continue;
+            const d = Number(c.cvd);
+            if (!isFinite(d)) continue;
+            ok = true;
+            if (d >= 0) buy += d; else sell -= d;
+        }
+        return ok ? { net: buy - sell, buy: buy, sell: sell } : null;
+    }
+    function statOiVal(key) {
+        const ch = (state.lastOI && state.lastOI.changes) || {};
+        const c = ch[OI_WIN_KEY[key]];
+        return c ? Number(c.usd) : NaN;
+    }
+
+    function statHeadEls(kind) {
+        return kind === "liq"
+            ? { box: statBoxLiq, win: statLiqWin, value: statLiqValue, sub: statLiqSub, menu: statMenuLiq }
+            : kind === "cvd"
+            ? { box: statBoxCvd, win: statCvdWin, value: statCvdValue, sub: statCvdSub, menu: statMenuCvd }
+            : { box: statBoxOi, win: statOiWin, value: statOiValue, sub: statOiSub, menu: statMenuOi };
+    }
+
+    // Текст строки меню/шапки: { txt, cls, title }
+    function statCell(kind, key) {
+        if (kind === "liq") {
+            const v = statLiqVal(key);
+            if (!v) return { txt: "—", cls: "", title: "" };
+            return { txt: "$" + fmtUsdShort(v.total), cls: "",
+                     title: "L $" + fmtUsdFull(v.longs) + " / S $" + fmtUsdFull(v.shorts) };
+        }
+        if (kind === "cvd") {
+            const v = statCvdVal(key);
+            if (!v) return { txt: "—", cls: "", title: "" };
+            const up = v.net >= 0;
+            return { txt: (up ? "+$" : "−$") + fmtUsdShort(Math.abs(v.net)),
+                     cls: up ? "cvd-pos" : "cvd-neg",
+                     title: I18n.t("stats.cvd_title") + ": " + (up ? "+" : "−") +
+                            "$" + fmtUsdFull(Math.abs(v.net)) };
+        }
+        const v = statOiVal(key);
+        if (!isFinite(v)) return { txt: "—", cls: "", title: "" };
+        const up = v >= 0;
+        return { txt: (up ? "+$" : "−$") + fmtUsdShort(Math.abs(v)),
+                 cls: up ? "oi-pos" : "oi-neg",
+                 title: I18n.t("stats.oi_title") + ": " + (up ? "+" : "−") +
+                        "$" + fmtUsdFull(Math.abs(v)) };
+    }
+
+    function paintStatBox(kind) {
+        const E = statHeadEls(kind);
+        const key = state.statWin[kind];
+        if (E.win) E.win.textContent = I18n.t("stats.w" + key);
+        const cell = statCell(kind, key);
+        if (E.value) {
+            E.value.textContent = cell.txt;
+            E.value.className = "stat-box-value" +
+                (kind === "liq" ? " text-gold" : kind === "cvd" ? " cvd-val" : " oi-val") +
+                (cell.cls ? " " + cell.cls : "");
+            if (cell.title) E.value.title = cell.title;
+            else E.value.removeAttribute("title");
+        }
+        if (E.sub) {
+            if (kind === "liq") {
+                const v = statLiqVal(key);
+                E.sub.innerHTML = v
+                    ? '<span class="sub-long">L $' + fmtUsdShort(v.longs) + "</span> · " +
+                      '<span class="sub-short">S $' + fmtUsdShort(v.shorts) + "</span>"
+                    : "—";
+            } else if (kind === "cvd") {
+                const v = statCvdVal(key);
+                E.sub.textContent = v
+                    ? "+$" + fmtUsdShort(v.buy) + " / −$" + fmtUsdShort(v.sell)
+                    : "—";
+            } else {
+                const t = state.lastOI ? Number(state.lastOI.total_usd) : NaN;
+                E.sub.innerHTML = isFinite(t)
+                    ? 'Σ <span class="sub-total">$' + fmtUsdShort(t) + "</span>"
+                    : "—";
+            }
+        }
+        if (kind !== "liq") {
+            const base = chartSymbol().split("_")[0];
+            const coins = E.box ? E.box.querySelectorAll(kind === "cvd" ? ".cvd-coin" : ".oi-coin")
+                                : document.querySelectorAll(kind === "cvd" ? ".cvd-coin" : ".oi-coin");
+            for (let i = 0; i < coins.length; i++) coins[i].textContent = base;
+        }
+        if (openStatMenu === kind) renderStatMenu(kind);
+    }
+
+    function renderStatMenu(kind) {
+        const E = statHeadEls(kind);
+        if (!E.menu) return;
+        const cur = state.statWin[kind];
+        let html = "";
+        for (let i = 0; i < STAT_WIN_DEFS.length; i++) {
+            const k = STAT_WIN_DEFS[i].key;
+            const cell = statCell(kind, k);
+            html += '<button type="button" role="option" class="stat-menu-row' +
+                (k === cur ? " sel" : "") + '" data-k="' + k + '"' +
+                (cell.title ? ' title="' + cell.title.replace(/"/g, "&quot;") + '"' : "") + ">" +
+                '<span class="w">' + I18n.t("stats.w" + k) + "</span>" +
+                '<span class="v' + (cell.cls ? " " + cell.cls : "") + '">' + cell.txt + "</span></button>";
+        }
+        E.menu.innerHTML = html;
+        Array.prototype.forEach.call(E.menu.children, (row) => {
+            row.addEventListener("click", (ev) => {
+                ev.stopPropagation();
+                setStatWin(kind, row.dataset.k);
+                closeStatMenus();
+            });
+        });
+    }
+
+    let openStatMenu = null;
+    function closeStatMenus() {
+        openStatMenu = null;
+        const pairs = [[statBoxLiq, statMenuLiq], [statBoxCvd, statMenuCvd], [statBoxOi, statMenuOi]];
+        for (let i = 0; i < pairs.length; i++) {
+            if (pairs[i][0]) pairs[i][0].classList.remove("open");
+            if (pairs[i][1]) pairs[i][1].classList.add("hidden");
+        }
+    }
+    function toggleStatMenu(kind) {
+        if (openStatMenu === kind) { closeStatMenus(); return; }
+        closeStatMenus();
+        const E = statHeadEls(kind);
+        const head = kind === "liq" ? statLiqHead : kind === "cvd" ? statCvdHead : statOiHead;
+        if (!E.menu || !head) return;
+        openStatMenu = kind;
+        renderStatMenu(kind);
+        E.menu.classList.remove("hidden");
+        // fixed-позиция под боксом: не обрезается скроллом шапки на мобильных
+        const r = head.getBoundingClientRect();
+        let left = r.left + (window.scrollX || 0);
+        left = Math.max(8, Math.min(left, (window.innerWidth || 1024) - E.menu.offsetWidth - 8));
+        let top = r.bottom + (window.scrollY || 0) + 6;
+        if (top + E.menu.offsetHeight > (window.scrollY || 0) + (window.innerHeight || 768) - 8)
+            top = Math.max(8, r.top + (window.scrollY || 0) - E.menu.offsetHeight - 6);
+        E.menu.style.left = left + "px";
+        E.menu.style.top = top + "px";
+        if (E.box) E.box.classList.add("open");
+    }
+    function setupStatBoxes() {
+        const pairs = [[statLiqHead, "liq"], [statCvdHead, "cvd"], [statOiHead, "oi"]];
+        for (let i = 0; i < pairs.length; i++) {
+            if (pairs[i][0]) pairs[i][0].addEventListener("click", (ev) => {
+                ev.stopPropagation();
+                toggleStatMenu(pairs[i][1]);
+            });
+        }
+        document.addEventListener("click", (ev) => {
+            if (!ev.target.closest || !ev.target.closest(".stat-box")) closeStatMenus();
+        });
+        document.addEventListener("keydown", (ev) => {
+            if (ev.key === "Escape") closeStatMenus();
+        });
+        document.addEventListener("scroll", () => closeStatMenus(), true);
+        window.addEventListener("resize", () => closeStatMenus());
+    }
+
+    // --- Табло CVD в шапке: перевес тейкеров по монете ГРАФИКА ---------------
+    // Суммируем поле cvd загруженных свечей за выбранное окно. Свечи живые
+    // (текущая обновляется каждым тиком), поэтому табло всегда свежее.
+    function paintCvdBox() { paintStatBox("cvd"); }
+
+    // --- Бокс OI в шапке: изменение за выбранное окно + суммарный интерес ----
+    function paintOiBox() { paintStatBox("oi"); }
+
+    let oiRequestId = 0;
+    async function fetchOI() {
+        const my = ++oiRequestId;
+        try {
+            const r = await fetch("/api/oi?symbol=" + encodeURIComponent(chartSymbol()));
+            const data = await r.json();
+            if (my !== oiRequestId) return;   // пришёл новый запрос — этот стар
+            state.lastOI = data;
+            paintOiBox();
+        } catch (e) { /* ignore */ }
+    }
+
+    // --- OI-шарики над/под свечой ------------------------------------------------
+    // oiChg = изменение открытого интереса за свечу (USD, биржи с историей).
+    // Рост — шарик над хаем, падение — под лоем; внутри — сумма.
+    // Цвет — интуитивный светофор по направлению и величине: рост зеленеет
+    // от бледного к едкому с тиром, падение краснеет от бледного к ядрёному.
+    // Шарики висят ВНЕ тела свечи, поэтому со свечами не сливаются.
+    const OI_BALL = {
+        up:   { shades: [[190, 242, 200], [134, 239, 172], [34, 197, 94], [0, 230, 118]],
+                ring: "#d8ffe6", text: "#04160b" },
+        down: { shades: [[252, 200, 200], [248, 113, 113], [239, 68, 68], [255, 42, 95]],
+                ring: "#ffe3e6", text: "#1c060d" },
+    };
+    const OI_MAX_BALLS = 60;
+    // Тиры OI по |Δ|: мелочь (<$1M × масштаб) — мини-значок без подписи,
+    // крупняк — больше, ярче и с сильным свечением.
+    const OI_TIER_MIN = 1000000;
+    const OI_TIER_STYLE = [
+        null,   // 0 — мини
+        { mult: 1.0,  font: 0, glow: 8  },   // $1M+
+        { mult: 1.22, font: 1, glow: 12 },   // $5M+
+        { mult: 1.45, font: 2, glow: 16 },   // $20M+
+    ];
+    function oiTier(abs, k) {
+        k = k || 1;
+        if (abs >= 20000000 * k) return 3;
+        if (abs >= 5000000 * k) return 2;
+        if (abs >= OI_TIER_MIN * k) return 1;
+        return 0;
+    }
+    function oiTheme(up, tier) {
+        const b = up ? OI_BALL.up : OI_BALL.down;
+        const c = b.shades[Math.min(3, Math.max(0, tier))];
+        const st = OI_TIER_STYLE[tier] || OI_TIER_STYLE[1];
+        return {
+            fill: "rgba(" + c[0] + "," + c[1] + "," + c[2] + ",0.95)",
+            ring: b.ring, text: b.text, glow: st.glow,
+        };
+    }
+
+    function triPath(ctx, x, apexY, halfW, h, up) {
+        ctx.beginPath();
+        if (up) {
+            ctx.moveTo(x, apexY);
+            ctx.lineTo(x + halfW, apexY + h);
+            ctx.lineTo(x - halfW, apexY + h);
+        } else {
+            ctx.moveTo(x, apexY);
+            ctx.lineTo(x + halfW, apexY - h);
+            ctx.lineTo(x - halfW, apexY - h);
+        }
+        ctx.closePath();
+    }
+
+    function drawOiBalls(ctx) {
+        const candles = state.candles;
+        if (!candles.length || !chart || !candleSeries) return;
+        // Значимость — по p90, как у треугольников CVD: один выброс не должен
+        // гасить остальные шарики.
+        const absVals = [];
+        for (let i = 0; i < candles.length; i++) {
+            const d = Math.abs(Number(candles[i].oiChg));
+            if (isFinite(d) && d > 0) absVals.push(d);
+        }
+        state.oiBars = 0;
+        if (!absVals.length) return;
+        absVals.sort((a, b) => a - b);
+        const p90 = absVals[Math.floor(0.9 * (absVals.length - 1))] || 0;
+        if (!(p90 > 0)) return;
+        const kvol = chartVolScale();
+        const minAbs = Math.max(1000 * kvol, p90 * 0.05);
+
+        const cand = [];
+        for (let i = 0; i < candles.length; i++) {
+            const d = Number(candles[i].oiChg);
+            if (isFinite(d) && Math.abs(d) >= minAbs) {
+                cand.push({ c: candles[i], d: d, live: i === candles.length - 1 });
+            }
+        }
+        cand.sort((a, b) => Math.abs(b.d) - Math.abs(a.d));
+
+        const ts = chart.timeScale();
+        const W = clusterCanvas.width, H = clusterCanvas.height;
+        const placed = [];
+        let drawn = 0;
+        ctx.save();
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        for (let k = 0; k < cand.length && drawn < OI_MAX_BALLS; k++) {
+            const c = cand[k].c, d = cand[k].d;
+            const up = d > 0;
+            const ref = up ? Number(c.high) : Number(c.low);
+            if (!isFinite(ref)) continue;
+            let x, yRef;
+            try {
+                x = ts.timeToCoordinate(c.time);
+                yRef = candleSeries.priceToCoordinate(ref);
+            } catch (e) { continue; }
+            if (x === null || x === undefined || yRef === null || yRef === undefined) continue;
+
+            // Размер — по тиру величины: мелочь (<$1M × масштаб) всегда мини
+            // без подписи, крупняку радиус и кегль наращиваем.
+            const abs = Math.abs(d);
+            const tier = oiTier(abs, kvol);
+            const val = fmtCompact(abs);
+            let r, fs = 0;
+            if (tier > 0) {
+                ctx.font = "bold 8px 'JetBrains Mono', monospace";
+                const tw8 = ctx.measureText(val).width;
+                if (tw8 <= 1.9 * 26 - 5) {
+                    r = Math.max(11, (tw8 + 5) / 1.9);
+                    const sizes = [8, 7, 6.5];
+                    for (let f = 0; f < sizes.length; f++) {
+                        ctx.font = "bold " + sizes[f] + "px 'JetBrains Mono', monospace";
+                        if (ctx.measureText(val).width <= 1.9 * r - 5) { fs = sizes[f]; break; }
+                    }
+                }
+            }
+            if (!fs) { r = 6; }
+            else if (tier >= 2) {
+                const st = OI_TIER_STYLE[tier];
+                fs = Math.min(10, fs + st.font);
+                ctx.font = "bold " + fs + "px 'JetBrains Mono', monospace";
+                r = Math.min(30, Math.max(r * st.mult, (ctx.measureText(val).width + 5) / 1.9));
+            }
+            const gap = 10 + tier * 2;   // чем крупнее, тем дальше от свечи
+            const cy = up ? yRef - gap - r : yRef + gap + r;
+            if (x < -r || x > W + r || cy < -r || cy > H + r) continue;
+
+            // Налезает на уже нарисованный? пропускаем более слабый.
+            let clash = false;
+            for (let j = 0; j < placed.length; j++) {
+                const q = placed[j];
+                const dx = x - q.x, dy = cy - q.y;
+                const rad = r + q.r + 2;
+                if (dx * dx + dy * dy <= rad * rad) { clash = true; break; }
+            }
+            if (clash) continue;
+            placed.push({ x: x, y: cy, r: r });
+            const ballKey = "oi_" + c.time;
+            oiHits.push({ kind: "oi", key: ballKey, x: x, y: cy, r: r,
+                          time: c.time, d: d, up: up, tier: tier, live: cand[k].live, c: c });
+
+            const theme = oiTheme(up, tier);
+            // Тёмная подложка — читается на свече любого цвета
+            ctx.beginPath();
+            ctx.arc(x, cy, r + 1.6, 0, 2 * Math.PI);
+            ctx.fillStyle = "rgba(5,8,14,0.88)";
+            ctx.fill();
+
+            ctx.shadowColor = theme.fill;
+            ctx.shadowBlur = theme.glow;
+            ctx.beginPath();
+            ctx.arc(x, cy, r, 0, 2 * Math.PI);
+            ctx.fillStyle = theme.fill;
+            ctx.fill();
+            ctx.shadowBlur = 0;
+            ctx.lineWidth = 1.3;
+            ctx.strokeStyle = theme.ring;
+            ctx.stroke();
+
+            // Активный шарик (наведение/закреп) — белое кольцо поверх
+            if (shapeIsActive("oi", ballKey)) {
+                ctx.beginPath();
+                ctx.arc(x, cy, r + 3.5, 0, 2 * Math.PI);
+                ctx.lineWidth = 1.8;
+                ctx.strokeStyle = "rgba(255,255,255,0.9)";
+                ctx.stroke();
+            }
+
+            if (fs > 0) {
+                ctx.fillStyle = theme.text;
+                ctx.fillText(val, x, cy + 0.5);
+            }
+            drawn++;
+        }
+        ctx.restore();
+        state.oiBars = drawn;
+    }
+
+    // --- Наведение/нажатие на фигуры: прямоугольники, CVD, OI -------------------
+    // Порядок проверки — обратный отрисовке: шарики поверх треугольников
+    // поверх прямоугольников. У фигур хит-тест кругом с допуском 4px.
+    function hitAt(px, py) {
+        for (let i = oiHits.length - 1; i >= 0; i--) {
+            const b = oiHits[i];
+            const dx = px - b.x, dy = py - b.y, rr = b.r + 4;
             if (dx * dx + dy * dy <= rr * rr) return b;
+        }
+        for (let i = cvdHits.length - 1; i >= 0; i--) {
+            const b = cvdHits[i];
+            const dx = px - b.x, dy = py - b.y, rr = b.r + 4;
+            if (dx * dx + dy * dy <= rr * rr) return b;
+        }
+        for (let i = clusterHits.length - 1; i >= 0; i--) {
+            const b = clusterHits[i];
+            if (px >= b.x - 4 && px <= b.x + b.w + 4 &&
+                py >= b.y - 4 && py <= b.y + b.h + 4) return b;
         }
         return null;
     }
 
+    function shapeIsActive(kind, key) {
+        if (shapePin) return shapePin.kind === kind && shapePin.key === key;
+        return !!shapeHover && shapeHover.kind === kind && shapeHover.key === key;
+    }
+
     function applyFeedHighlight(ball, pin) {
         if (pin) {
-            pinBallKey = ball ? ball.key : null;
-            if (!ball) hoverBallKey = null;
+            pinHitKey = ball ? ball.key : null;
+            if (!ball) hoverHitKey = null;
         } else {
-            hoverBallKey = ball ? ball.key : null;
+            hoverHitKey = ball ? ball.key : null;
         }
         const ids = ball ? new Set(ball.ids) : null;
         let firstRow = null;
@@ -854,26 +1595,451 @@
         queueRedraw();
     }
 
+    // Окно фигуры: наведение показывает, уход курсора прячет (если не закреплено
+    // кликом). Закреп одновременно один: прямоугольник или фигура CVD/OI.
+    function hoverShape(hit) {
+        const key = hit ? hit.kind + ":" + hit.key : null;
+        const cur = shapeHover ? shapeHover.kind + ":" + shapeHover.key : null;
+        if (key === cur) return;
+        shapeHover = hit ? { kind: hit.kind, key: hit.key } : null;
+        if (hit) openShapeModal(hit.kind, hit);
+        else hideShapeModal();
+        queueRedraw();
+    }
+
+    function pinShape(hit) {
+        shapePin = { kind: hit.kind, key: hit.key };
+        shapeHover = null;
+        queueRedraw();
+    }
+
+    function unpinShape() {
+        if (!shapePin && !shapeHover) return;
+        shapePin = null;
+        shapeHover = null;
+        queueRedraw();
+    }
+
+    function hideShapeModal() {
+        if (shapePin) return;   // закреплено кликом — не пропадает
+        if (!state.modalItem) {
+            detailModal.classList.add("hidden");
+            detailModal.classList.remove("peek", "peek-pinned");
+        }
+    }
+
+    // --- Фигуры теханализа: рисование поверх графика ---------------------------
+    // Линия, луч, горизонталь, прямоугольник, Фибоначчи + ластик. Фигуры
+    // хранятся во времени/цене (не в пикселях) — переживают зум, скролл
+    // и смену таймфрейма. Хранение — localStorage отдельно по каждой монете.
+    const FIB_RATIOS = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1];
+    const DRAW_HIT_PX = 8;
+    let drawTool = null;          // null | line | ray | horiz | rect | fib | eraser
+    let drawColor = "#ffd166";
+    let drawDraft = null;         // первая точка двухточечной фигуры {time, price}
+    let drawHover = null;         // {x, y} в пикселях для предпросмотра
+    let drawFiguresList = [];     // [{t, c, p1:{time,price}, p2?}]
+
+    function drawKey() { return "liqscope.drawings." + chartSymbol(); }
+
+    function loadDrawings() {
+        drawFiguresList = [];
+        drawDraft = null;
+        drawHover = null;
+        try {
+            const raw = localStorage.getItem(drawKey());
+            if (!raw) return;
+            const arr = JSON.parse(raw);
+            if (!Array.isArray(arr)) return;
+            arr.forEach((f) => {
+                if (!f || typeof f !== "object") return;
+                if (["line", "ray", "horiz", "rect", "fib"].indexOf(f.t) === -1) return;
+                if (!f.p1 || !isFinite(Number(f.p1.time)) || !isFinite(Number(f.p1.price))) return;
+                if (f.t !== "horiz" &&
+                        (!f.p2 || !isFinite(Number(f.p2.time)) || !isFinite(Number(f.p2.price)))) return;
+                drawFiguresList.push({
+                    t: f.t,
+                    c: typeof f.c === "string" ? f.c : drawColor,
+                    p1: { time: Number(f.p1.time), price: Number(f.p1.price) },
+                    p2: f.p2 ? { time: Number(f.p2.time), price: Number(f.p2.price) } : null,
+                });
+            });
+        } catch (e) { /* ignore */ }
+    }
+
+    function saveDrawings() {
+        try { localStorage.setItem(drawKey(), JSON.stringify(drawFiguresList)); } catch (e) { /* ignore */ }
+    }
+
+    function drawAddFigure(fig) {
+        drawFiguresList.push(fig);
+        saveDrawings();
+        queueRedraw();
+    }
+
+    function drawClearAll() {
+        drawFiguresList = [];
+        drawDraft = null;
+        saveDrawings();
+        queueRedraw();
+    }
+
+    // время+цена → пиксели (null, если точка вне видимости)
+    function drawToXY(tp) {
+        if (!chart || !candleSeries || !tp) return null;
+        try {
+            const x = chart.timeScale().timeToCoordinate(Number(tp.time));
+            const y = candleSeries.priceToCoordinate(Number(tp.price));
+            if (!isFinite(x) || !isFinite(y)) return null;
+            return { x, y };
+        } catch (e) { return null; }
+    }
+
+    function drawPixelToTP(x, y) {
+        if (!chart || !candleSeries) return null;
+        try {
+            if (!chart.timeScale().coordinateToTime || !candleSeries.coordinateToPrice) return null;
+            const t = chart.timeScale().coordinateToTime(x);
+            const p = candleSeries.coordinateToPrice(y);
+            const time = (t !== null && t !== undefined) ? Number(t) : NaN;
+            const price = (p !== null && p !== undefined) ? Number(p) : NaN;
+            if (!isFinite(time) || !isFinite(price)) return null;
+            return { time, price };
+        } catch (e) { return null; }
+    }
+
+    // клик библиотеки → время+цена (null, если мимо шкал)
+    function drawClickToTP(param) {
+        if (!param || !param.point || !chart || !candleSeries) return null;
+        try {
+            let time = (param.time !== undefined && param.time !== null) ? Number(param.time) : NaN;
+            if (!isFinite(time)) {
+                const tp = drawPixelToTP(param.point.x, param.point.y);
+                return tp;
+            }
+            const price = candleSeries.coordinateToPrice
+                ? Number(candleSeries.coordinateToPrice(param.point.y)) : NaN;
+            if (!isFinite(price)) return null;
+            return { time, price };
+        } catch (e) { return null; }
+    }
+
+    // расстояние от точки до отрезка (чистая функция — покрыта тестами)
+    function distToSegment(px, py, ax, ay, bx, by) {
+        const dx = bx - ax, dy = by - ay;
+        const len2 = dx * dx + dy * dy;
+        let t = len2 ? ((px - ax) * dx + (py - ay) * dy) / len2 : 0;
+        t = Math.max(0, Math.min(1, t));
+        const cx = ax + t * dx, cy = ay + t * dy;
+        return Math.sqrt((px - cx) * (px - cx) + (py - cy) * (py - cy));
+    }
+
+    // цена уровня фибо (чистая функция — покрыта тестами)
+    function fibPrice(p1, p2, ratio) {
+        return Number(p1.price) + (Number(p2.price) - Number(p1.price)) * ratio;
+    }
+
+    // дальний конец луча: от a через b до края canvas (чистая — в тестах)
+    function rayFar(a, b, W, H) {
+        const dx = b.x - a.x, dy = b.y - a.y;
+        if (!dx && !dy) return { x: b.x, y: b.y };
+        let t = Infinity;
+        if (dx > 0) t = Math.min(t, (W - a.x) / dx);
+        else if (dx < 0) t = Math.min(t, (0 - a.x) / dx);
+        if (dy > 0) t = Math.min(t, (H - a.y) / dy);
+        else if (dy < 0) t = Math.min(t, (0 - a.y) / dy);
+        if (!isFinite(t) || t < 0) t = 0;
+        return { x: a.x + dx * t, y: a.y + dy * t };
+    }
+
+    // попадание клика (x, y — пиксели) в фигуру; toXY — преобразователь
+    function drawFigureHit(fig, x, y, toXY, W, H) {
+        const cvt = toXY || drawToXY;
+        if (fig.t === "horiz") {
+            const a = cvt(fig.p1);
+            return !!a && Math.abs(y - a.y) <= DRAW_HIT_PX;
+        }
+        if (fig.t === "rect") {
+            const a = cvt(fig.p1), b = cvt(fig.p2);
+            if (!a || !b) return false;
+            const x0 = Math.min(a.x, b.x), x1 = Math.max(a.x, b.x);
+            const y0 = Math.min(a.y, b.y), y1 = Math.max(a.y, b.y);
+            return distToSegment(x, y, x0, y0, x1, y0) <= DRAW_HIT_PX ||
+                   distToSegment(x, y, x1, y0, x1, y1) <= DRAW_HIT_PX ||
+                   distToSegment(x, y, x1, y1, x0, y1) <= DRAW_HIT_PX ||
+                   distToSegment(x, y, x0, y1, x0, y0) <= DRAW_HIT_PX;
+        }
+        if (fig.t === "fib") {
+            const a = cvt(fig.p1);
+            if (!a || x < a.x - DRAW_HIT_PX) return false;
+            for (let i = 0; i < FIB_RATIOS.length; i++) {
+                const pt = cvt({ time: fig.p1.time, price: fibPrice(fig.p1, fig.p2, FIB_RATIOS[i]) });
+                if (pt && Math.abs(y - pt.y) <= DRAW_HIT_PX) return true;
+            }
+            return false;
+        }
+        // line / ray
+        const a = cvt(fig.p1), b = cvt(fig.p2);
+        if (!a || !b) return false;
+        if (fig.t === "ray") {
+            const f = rayFar(a, b, W || 0, H || 0);
+            return distToSegment(x, y, a.x, a.y, f.x, f.y) <= DRAW_HIT_PX;
+        }
+        return distToSegment(x, y, a.x, a.y, b.x, b.y) <= DRAW_HIT_PX;
+    }
+
+    function drawLineSeg(ctx, x1, y1, x2, y2) {
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+    }
+
+    function drawFigureShape(ctx, fig, W, H, preview) {
+        ctx.strokeStyle = fig.c;
+        ctx.fillStyle = fig.c;
+        ctx.setLineDash(preview ? [5, 4] : []);
+        if (fig.t === "horiz") {
+            const a = drawToXY(fig.p1);
+            if (a) drawLineSeg(ctx, 0, a.y, W, a.y);
+        } else if (fig.t === "line") {
+            const a = drawToXY(fig.p1), b = drawToXY(fig.p2);
+            if (a && b) drawLineSeg(ctx, a.x, a.y, b.x, b.y);
+        } else if (fig.t === "ray") {
+            const a = drawToXY(fig.p1), b = drawToXY(fig.p2);
+            if (a && b) {
+                const f = rayFar(a, b, W, H);
+                drawLineSeg(ctx, a.x, a.y, f.x, f.y);
+            }
+        } else if (fig.t === "rect") {
+            const a = drawToXY(fig.p1), b = drawToXY(fig.p2);
+            if (a && b) {
+                const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y);
+                const w = Math.abs(b.x - a.x), h = Math.abs(b.y - a.y);
+                ctx.globalAlpha = 0.12;
+                ctx.fillRect(x, y, w, h);
+                ctx.globalAlpha = 1;
+                ctx.strokeRect(x + 0.5, y + 0.5, w, h);
+            }
+        } else if (fig.t === "fib") {
+            const a = drawToXY(fig.p1);
+            if (a) {
+                ctx.lineWidth = 1;
+                ctx.font = "11px Inter, system-ui, sans-serif";
+                ctx.textBaseline = "bottom";
+                FIB_RATIOS.forEach((r) => {
+                    const lvl = fibPrice(fig.p1, fig.p2, r);
+                    const pt = drawToXY({ time: fig.p1.time, price: lvl });
+                    if (!pt) return;
+                    drawLineSeg(ctx, a.x, pt.y, W, pt.y);
+                    const label = (r * 100).toFixed(1) + "%  " + lvl.toFixed(priceDigits(lvl));
+                    const tw = ctx.measureText ? ctx.measureText(label).width : 60;
+                    ctx.fillText(label, Math.max(2, W - tw - 6), pt.y - 2);
+                });
+                ctx.lineWidth = 2;
+            }
+        }
+        ctx.setLineDash([]);
+    }
+
+    function drawFigures() {
+        if (!drawCanvas || !chart || !candleSeries) return;
+        const ctx = drawCanvas.getContext("2d");
+        const W = drawCanvas.width, H = drawCanvas.height;
+        ctx.clearRect(0, 0, W, H);
+        ctx.lineWidth = 2;
+        drawFiguresList.forEach((fig) => drawFigureShape(ctx, fig, W, H, false));
+        drawPreview(ctx, W, H);
+    }
+
+    function drawPreview(ctx, W, H) {
+        if (!drawTool || drawTool === "eraser") return;
+        if (drawTool === "horiz") {
+            if (!drawHover) return;
+            ctx.strokeStyle = drawColor;
+            ctx.setLineDash([5, 4]);
+            drawLineSeg(ctx, 0, drawHover.y, W, drawHover.y);
+            ctx.setLineDash([]);
+            return;
+        }
+        if (!drawDraft) return;
+        const a = drawToXY(drawDraft);
+        if (a) {
+            ctx.fillStyle = drawColor;
+            ctx.beginPath();
+            ctx.arc(a.x, a.y, 4, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        if (!drawHover || !a) return;
+        const tp = drawPixelToTP(drawHover.x, drawHover.y);
+        if (!tp) return;
+        drawFigureShape(ctx, { t: drawTool, c: drawColor, p1: drawDraft, p2: tp }, W, H, true);
+    }
+
+    function setDrawTool(tool) {
+        drawTool = tool;
+        drawDraft = null;
+        drawHover = null;
+        if (drawToolbar) {
+            drawToolbar.querySelectorAll("[data-draw-tool]").forEach((b) =>
+                b.classList.toggle("active", b.getAttribute("data-draw-tool") === tool));
+        }
+        if (drawToggle) drawToggle.classList.toggle("active", !!tool);
+        if (drawToolbar) drawToolbar.classList.toggle("hidden", !tool);
+        if (tool) {
+            // вход в рисование снимает закреп фигур слоёв и их окна
+            pinHitKey = null;
+            hoverHitKey = null;
+            applyFeedHighlight(null, true);
+            unpinShape();
+            hideShapeModal();
+            if (chartWrapper) chartWrapper.style.cursor = tool === "eraser" ? "not-allowed" : "crosshair";
+        } else if (chartWrapper) {
+            chartWrapper.style.cursor = "";
+        }
+        queueRedraw();
+    }
+
+    function drawClick(param) {
+        if (!param || !param.point) return;
+        if (drawTool === "eraser") {
+            const W = drawCanvas ? drawCanvas.width : 0;
+            const H = drawCanvas ? drawCanvas.height : 0;
+            for (let i = drawFiguresList.length - 1; i >= 0; i--) {
+                if (drawFigureHit(drawFiguresList[i], param.point.x, param.point.y, drawToXY, W, H)) {
+                    drawFiguresList.splice(i, 1);
+                    saveDrawings();
+                    queueRedraw();
+                    return;
+                }
+            }
+            return;
+        }
+        const tp = drawClickToTP(param);
+        if (!tp) return;
+        if (drawTool === "horiz") {
+            drawAddFigure({ t: "horiz", c: drawColor, p1: tp, p2: null });
+            return;
+        }
+        if (!drawDraft) {
+            drawDraft = tp;
+            queueRedraw();
+            return;
+        }
+        drawAddFigure({ t: drawTool, c: drawColor, p1: drawDraft, p2: tp });
+        drawDraft = null;
+    }
+
+    function setupDrawToolbar() {
+        if (drawToggle) {
+            drawToggle.addEventListener("click", () => {
+                setDrawTool(drawTool ? null : "line");
+            });
+        }
+        if (drawToolbar) {
+            drawToolbar.querySelectorAll("[data-draw-tool]").forEach((b) => {
+                b.addEventListener("click", () => setDrawTool(b.getAttribute("data-draw-tool")));
+            });
+            drawToolbar.querySelectorAll("[data-draw-color]").forEach((b) => {
+                b.addEventListener("click", () => {
+                    drawColor = b.getAttribute("data-draw-color") || drawColor;
+                    drawToolbar.querySelectorAll("[data-draw-color]").forEach((o) =>
+                        o.classList.toggle("active", o === b));
+                });
+            });
+            const clearBtn = $("draw-clear");
+            if (clearBtn) clearBtn.addEventListener("click", drawClearAll);
+            const closeBtn = $("draw-close");
+            if (closeBtn) closeBtn.addEventListener("click", () => setDrawTool(null));
+        }
+        document.addEventListener("keydown", (e) => {
+            if (!drawTool) return;
+            if (e.key === "Escape") {
+                if (drawDraft) { drawDraft = null; queueRedraw(); }
+                else setDrawTool(null);
+            }
+        });
+        if (chartWrapper) {
+            chartWrapper.addEventListener("contextmenu", (e) => {
+                if (!drawTool) return;
+                e.preventDefault();
+                if (drawDraft) { drawDraft = null; queueRedraw(); }
+                else setDrawTool(null);
+            });
+        }
+        // тестовый API для jsdom-гарнесса tests/drawings.js
+        window.LiqScopeDraw = {
+            fibPrice, distToSegment, rayFar,
+            figureHit: (fig, x, y, toXY, W, H) => drawFigureHit(fig, x, y, toXY, W, H),
+            add: drawAddFigure,
+            clear: drawClearAll,
+            setTool: setDrawTool,
+            save: saveDrawings,
+            load: loadDrawings,
+            getFigures: () => drawFiguresList.slice(),
+            getTool: () => drawTool,
+            getColor: () => drawColor,
+        };
+    }
+
     function setupClusterInteraction() {
         if (!chart || !chart.subscribeCrosshairMove || !chart.subscribeClick) return;
         try {
             // наведение (и палец на телефоне при движении по графику)
             chart.subscribeCrosshairMove((param) => {
-                if (!param || !param.point) {
-                    if (!pinBallKey) applyFeedHighlight(null, false);
+                if (drawTool) {   // рисование: только предпросмотр, окна фигур молчат
+                    drawHover = (param && param.point) ? { x: param.point.x, y: param.point.y } : null;
+                    queueRedraw();
                     return;
                 }
-                if (pinBallKey) return;   // закреплено кликом/тапом — не дёргаем
-                applyFeedHighlight(ballAt(param.point.x, param.point.y), false);
-            });
-            // клик/тап: закрепить шарик; повторный клик по тому же — снять
-            chart.subscribeClick((param) => {
-                const ball = (param && param.point)
-                    ? ballAt(param.point.x, param.point.y) : null;
-                if (ball && ball.key === pinBallKey) {
-                    applyFeedHighlight(null, true);
+                if (!param || !param.point) {
+                    if (!pinHitKey && !shapePin) {
+                        applyFeedHighlight(null, false);
+                        hoverShape(null);
+                    }
+                    return;
+                }
+                if (pinHitKey || shapePin) return;   // закреплено — не дёргаем
+                const hit = hitAt(param.point.x, param.point.y);
+                if (!hit) {
+                    hoverShape(null);
+                    applyFeedHighlight(null, false);
+                } else if (hit.kind === "liq") {
+                    // прямоугольник: окно кластера ПЛЮС подсветка строк в ленте
+                    hoverShape(hit);
+                    applyFeedHighlight(hit, false);
                 } else {
-                    applyFeedHighlight(ball, true);
+                    applyFeedHighlight(null, false);
+                    hoverShape(hit);
+                }
+            });
+            // клик/тап: закрепить фигуру; повторный клик по ней или клик
+            // мимо — снять закреп
+            chart.subscribeClick((param) => {
+                if (drawTool) { drawClick(param); return; }   // точки фигур вместо окон
+                const hit = (param && param.point)
+                    ? hitAt(param.point.x, param.point.y) : null;
+                if (!hit) {
+                    applyFeedHighlight(null, true);
+                    unpinShape();
+                    hideShapeModal();
+                } else if (hit.kind === "liq") {
+                    if (hit.key === pinHitKey) {
+                        applyFeedHighlight(null, true);
+                        unpinShape();
+                        hideShapeModal();
+                    } else {
+                        applyFeedHighlight(hit, true);
+                        pinShape(hit);
+                        openShapeModal(hit.kind, hit);
+                    }
+                } else if (shapePin && hit.key === shapePin.key) {
+                    unpinShape();
+                    hideShapeModal();
+                } else {
+                    applyFeedHighlight(null, true);
+                    pinShape(hit);
+                    openShapeModal(hit.kind, hit);
                 }
             });
         } catch (e) { /* старая библиотека без подписок — просто без подсветки */ }
@@ -886,7 +2052,7 @@
         const root = document.documentElement;
         const layout = { feedW: 430, coinsH: 170 };
         try {
-            const raw = localStorage.getItem("licvid.layout");
+            const raw = localStorage.getItem("liqscope.layout");
             if (raw) {
                 const o = JSON.parse(raw) || {};
                 layout.feedW = clampPx(Number(o.feedW) || 430, 280, 720);
@@ -898,7 +2064,7 @@
             root.style.setProperty("--coins-height", layout.coinsH + "px");
         };
         const saveLayout = () => {
-            try { localStorage.setItem("licvid.layout", JSON.stringify(layout)); } catch (e) { /* ignore */ }
+            try { localStorage.setItem("liqscope.layout", JSON.stringify(layout)); } catch (e) { /* ignore */ }
         };
         const bind = (el, axis) => {
             if (!el) return;
@@ -945,14 +2111,14 @@
         const tgl = $("top-coins-toggle");
         if (!box || !tgl) return;
         let open = true;
-        try { open = localStorage.getItem("licvid.coinsOpen") !== "0"; } catch (e) { /* ignore */ }
+        try { open = localStorage.getItem("liqscope.coinsOpen") !== "0"; } catch (e) { /* ignore */ }
         const render = () => {
             box.classList.toggle("closed", !open);
             tgl.setAttribute("aria-expanded", open ? "true" : "false");
         };
         tgl.addEventListener("click", () => {
             open = !open;
-            try { localStorage.setItem("licvid.coinsOpen", open ? "1" : "0"); } catch (e) { /* ignore */ }
+            try { localStorage.setItem("liqscope.coinsOpen", open ? "1" : "0"); } catch (e) { /* ignore */ }
             render();
         });
         render();
@@ -1060,7 +2226,7 @@
                 ctx.font = "8px 'JetBrains Mono', monospace";
                 ctx.textAlign = "left";
                 ctx.textBaseline = "middle";
-                ctx.fillText("$" + fmtUsdShort(b.total), x0 + rowW + 4, y);
+                ctx.fillText(fmtCompact(b.total), x0 + rowW + 4, y);
             }
         }
         ctx.restore();
@@ -1075,7 +2241,7 @@
 
     function feedRow(item) {
         const isLong = item.side === "SELL";
-        const whale = item.usd >= 100000;
+        const whale = item.usd >= 100000 * volScale(item.symbol);
         const tr = document.createElement("tr");
         tr.className = whale ? "feed-row-whale" : "feed-row-new";
         if (item.id != null) tr.dataset.liqId = String(item.id);   // связь с шариком
@@ -1122,15 +2288,21 @@
     }
 
     function rebuildFeed() {
-        // строки пересоздаются — закреплённая подсветка шарика гаснет
-        pinBallKey = null;
-        hoverBallKey = null;
+        // строки пересоздаются — закреплённая подсветка шарика гаснет,
+        // окно кластера (ссылалось на старые строки) — тоже
+        pinHitKey = null;
+        hoverHitKey = null;
+        if (shapePin && shapePin.kind === "liq") {
+            unpinShape();
+            hideShapeModal();
+        }
         const rows = state.liquidations.filter(passesFeedFilter).slice(-150).reverse();
         feedTbody.innerHTML = "";
         const frag = document.createDocumentFragment();
         rows.forEach((item) => {
             const tr = feedRow(item);
-            tr.className = "";
+            // гасим анимацию «новая строка», но подсветку кита оставляем
+            tr.className = tr.classList.contains("feed-row-whale") ? "feed-row-whale" : "";
             frag.appendChild(tr);
         });
         feedTbody.appendChild(frag);
@@ -1154,18 +2326,171 @@
             "<p><strong>" + I18n.t("modal.qty") + "</strong> " +
             Number(item.qty).toLocaleString("en-US", { maximumFractionDigits: 6 }) + "</p>" +
             "<p><strong>" + I18n.t("modal.time") + "</strong> " + I18n.dateTime(item.timestamp) + "</p>";
+        unpinShape();
         detailModal.classList.remove("hidden");
+        detailModal.classList.remove("peek", "peek-pinned");
+    }
+
+    // --- Окно фигуры: кластер ликвидаций, CVD, OI ---------------------------------
+    // Тот же попап, что у строк ленты, но фон некликабельный и прозрачный:
+    // наведение не должно перекрывать график, иначе фигуру не «отпустить».
+    // Закреплённое кликом окно затемняется, но клики всё равно проходят
+    // сквозь фон — снять закреп можно кликом мимо фигуры или по крестику.
+    function openShapeModal(kind, hit) {
+        state.modalItem = null;
+        const sym = pretty(chartSymbol());
+        const tfSec = state.timeframe * 60;
+        const range = I18n.time(hit.time) + "–" + I18n.time(Number(hit.time) + tfSec);
+        // Свеча фигуры — для движения цены и бейджа «формируется».
+        // У кластера свечи в хите нет — ищем по времени.
+        let bar = hit.c || null, live = !!hit.live;
+        if (!bar && state.candles.length) {
+            for (let i = 0; i < state.candles.length; i++) {
+                if (Number(state.candles[i].time) === Number(hit.time)) {
+                    bar = state.candles[i];
+                    break;
+                }
+            }
+            if (bar) {
+                live = Number(hit.time) ===
+                    Number(state.candles[state.candles.length - 1].time);
+            }
+        }
+        const open = bar ? Number(bar.open) : NaN;
+        const close = bar ? Number(bar.close) : NaN;
+        let moveHtml = "—";
+        if (isFinite(open) && isFinite(close) && open > 0) {
+            const pct = ((close - open) / open) * 100;
+            const cls = pct > 0 ? "text-success" : pct < 0 ? "text-danger" : "";
+            moveHtml = fmtPrice(open) + " → " + fmtPrice(close) +
+                ' <span class="' + cls + '">(' + (pct > 0 ? "+" : "") +
+                pct.toFixed(2) + "%)</span>";
+        }
+        const liveHtml = live ? " · <em>" + I18n.t("modal.live") + "</em>" : "";
+        const usdRow = (inner) => "<p><strong>" + I18n.t("modal.usd") + "</strong> " +
+            '<span style="font-size:1.1rem;font-weight:800;color:var(--color-gold)">' +
+            inner + "</span></p>";
+        let dirHtml, valRowHtml, extraRows, about;
+        if (kind === "liq") {
+            modalTitle.textContent = I18n.t("modal.clust_of", { sym: sym });
+            const isLong = hit.longUsd >= hit.shortUsd;
+            dirHtml = isLong
+                ? '<span class="badge-side long">' + I18n.t("modal.long_desc") + "</span>"
+                : '<span class="badge-side short">' + I18n.t("modal.short_desc") + "</span>";
+            valRowHtml = usdRow("$" + fmtUsdFull(hit.total) +
+                (hit.whale ? " · 🐋 " + I18n.t("modal.whale") : ""));
+            // Биржи кластера: бейдж + число событий + сумма, по убыванию суммы.
+            let exchRow = "";
+            if (hit.exchs) {
+                const parts = Object.keys(hit.exchs)
+                    .map((e) => ({ e: e, n: hit.exchs[e].n, usd: hit.exchs[e].usd }))
+                    .sort((a, b) => b.usd - a.usd)
+                    .map((o) => '<span class="exch-badge ' + o.e.toLowerCase() + '">' +
+                        o.e.charAt(0) + o.e.slice(1).toLowerCase() + "</span> ×" + o.n +
+                        " $" + fmtUsdShort(o.usd));
+                if (parts.length) {
+                    exchRow = "<p><strong>" + I18n.t("modal.exchs") + "</strong> " +
+                        parts.join(" · ") + "</p>";
+                }
+            }
+            extraRows =
+                "<p><strong>" + I18n.t("modal.level") + "</strong> ≈ " +
+                fmtPrice(hit.price) + "</p>" +
+                "<p><strong>" + I18n.t("modal.events") + "</strong> " + hit.count +
+                " · " + hit.longN + " LONG / " + hit.shortN + " SHORT</p>" +
+                "<p><strong>" + I18n.t("modal.split") + "</strong> " +
+                '<span class="badge-side long">L $' + fmtUsdShort(hit.longUsd) + "</span> " +
+                '<span class="badge-side short">S $' + fmtUsdShort(hit.shortUsd) + "</span></p>" +
+                exchRow;
+            about = I18n.t("modal.clust_about");
+        } else if (kind === "cvd") {
+            const abs = Math.abs(hit.d);
+            const sign = hit.d > 0 ? "+" : hit.d < 0 ? "−" : "";
+            const valColor = hit.buy ? "#a78bfa" : "#ffab4a";
+            modalTitle.textContent = I18n.t("modal.cvd_of", { sym: sym });
+            dirHtml = hit.buy
+                ? '<span class="badge-cvd-buy">' + I18n.t("modal.cvd_buy") + "</span>"
+                : '<span class="badge-cvd-sell">' + I18n.t("modal.cvd_sell") + "</span>";
+            valRowHtml = "<p><strong>" + I18n.t("modal.usd") + '</strong> <span style="font-size:1.1rem;font-weight:800;color:' +
+                valColor + '">' + sign + "$" + fmtUsdFull(abs) + "</span></p>";
+            // Сила относительно p90 видимых свечей: ≥1 — топ-10% по величине.
+            let strengthHtml = "—";
+            if (hit.p90 > 0) {
+                const r = abs / hit.p90;
+                strengthHtml = I18n.t("modal.p90mult", { r: r.toFixed(1) }) +
+                    (r >= 1 ? " · " + I18n.t("modal.top10") : "");
+            }
+            extraRows = "<p><strong>" + I18n.t("modal.strength") + "</strong> " +
+                strengthHtml + "</p>";
+            about = I18n.t("modal.cvd_about");
+        } else {
+            modalTitle.textContent = I18n.t("modal.oi_of", { sym: sym });
+            dirHtml = hit.up
+                ? '<span class="badge-oi-up">' + I18n.t("modal.oi_up") + "</span>"
+                : '<span class="badge-oi-down">' + I18n.t("modal.oi_down") + "</span>";
+            valRowHtml = "<p><strong>" + I18n.t("modal.usd") + '</strong> <span style="font-size:1.1rem;font-weight:800;color:' +
+                (hit.up ? "#4ade80" : "#fb7185") + '">' +
+                (hit.d > 0 ? "+" : hit.d < 0 ? "−" : "") +
+                "$" + fmtUsdFull(Math.abs(hit.d)) + "</span></p>";
+            // Тир с порогом в масштабе оборота монеты (для GRAM тиры в 1000 раз ниже).
+            const k = chartVolScale();
+            const tierHtml = hit.tier > 0
+                ? "T" + hit.tier + " · ≥ " + fmtCompact([0, 1000000, 5000000, 20000000][hit.tier] * k)
+                : I18n.t("modal.tier_mini") + " · < " + fmtCompact(1000000 * k);
+            extraRows = "<p><strong>" + I18n.t("modal.tier") + "</strong> " +
+                tierHtml + "</p>";
+            about = I18n.t("modal.oi_about");
+        }
+        modalBody.innerHTML =
+            "<p><strong>" + I18n.t("modal.candle") + "</strong> " + range + liveHtml + "</p>" +
+            "<p><strong>" + I18n.t("modal.direction") + "</strong> " + dirHtml + "</p>" +
+            valRowHtml +
+            extraRows +
+            "<p><strong>" + I18n.t("modal.price_move") + "</strong> " + moveHtml + "</p>" +
+            '<p class="modal-about">' + about + "</p>";
+        detailModal.classList.remove("hidden");
+        const pinned = !!shapePin;
+        detailModal.classList.toggle("peek", !pinned);
+        detailModal.classList.toggle("peek-pinned", pinned);
+    }
+
+    // --- Панель кнопок слоёв: выезжает сверху по кнопке «☰ Слои» -------------
+    // Кнопки Ликвидации/CVD/OI живут в попапе, а их цифры — в верхней плашке
+    // с текстовыми подписями. Закрытие: повторный клик, клик мимо, Esc.
+    function setupLayerPop() {
+        const callBtn = $("layer-call"), pop = $("layer-pop");
+        if (!callBtn || !pop) return;
+        const setOpen = (open) => {
+            pop.classList.toggle("hidden", !open);
+            callBtn.classList.toggle("active", open);
+        };
+        callBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            setOpen(pop.classList.contains("hidden"));
+        });
+        // клики по кнопкам слоёв попап не закрывают — можно щёлкать несколько
+        pop.addEventListener("click", (e) => e.stopPropagation());
+        document.addEventListener("click", () => setOpen(false));
+        document.addEventListener("keydown", (e) => {
+            if (e.key === "Escape") setOpen(false);
+        });
+        window.LiqScopeLayers = {  // тестовый API для tests/legend_layout.js
+            isOpen: () => !pop.classList.contains("hidden"),
+            setOpen,
+        };
     }
 
     // --- Слои графика: ликвидации / профиль / CVD ----------------------------
     function setupLayerToggles() {
         const defs = [
-            { el: profileToggle, skey: "profileEnabled", store: "licvid.profileEnabled",
+            { el: profileToggle, skey: "profileEnabled", store: "liqscope.profileEnabled",
               on: "chart.profile_on", off: "chart.profile_off" },
-            { el: $("liq-toggle"), skey: "liqEnabled", store: "licvid.liqEnabled",
+            { el: $("liq-toggle"), skey: "liqEnabled", store: "liqscope.liqEnabled",
               on: "chart.liq_on", off: "chart.liq_off" },
-            { el: $("cvd-toggle"), skey: "cvdEnabled", store: "licvid.cvdEnabled",
+            { el: $("cvd-toggle"), skey: "cvdEnabled", store: "liqscope.cvdEnabled",
               on: "chart.cvd_on", off: "chart.cvd_off" },
+            { el: $("oi-toggle"), skey: "oiEnabled", store: "liqscope.oiEnabled",
+              on: "chart.oi_on", off: "chart.oi_off" },
         ];
         defs.forEach((d) => {
             if (!d.el) return;
@@ -1184,16 +2509,27 @@
                     localStorage.setItem(d.store, state[d.skey] ? "1" : "0");
                 } catch (e) { /* ignore */ }
                 if (d.skey === "liqEnabled" && !state.liqEnabled) {
-                    // с прячущихся шариков снимаем и подсветку ленты
-                    pinBallKey = null;
-                    hoverBallKey = null;
+                    // с прячущихся прямоугольников снимаем подсветку ленты и окно
+                    pinHitKey = null;
+                    hoverHitKey = null;
                     applyFeedHighlight(null, true);
+                    unpinShape();
+                    hideShapeModal();
+                }
+                // слой фигуры погас — её окно тоже прячем (окно строки
+                // ленты не трогаем — у него свой крестик)
+                if (shapePin && ((shapePin.kind === "cvd" && d.skey === "cvdEnabled") ||
+                                 (shapePin.kind === "oi" && d.skey === "oiEnabled")) &&
+                        !state[d.skey]) {
+                    unpinShape();
+                    hideShapeModal();
                 }
                 paint();
                 updateMarkers();
-                updateCvdStat();
+                updateLiveStats();
                 queueRedraw();
             });
+            I18n.onChange(paint);
             paint();
         });
     }
@@ -1202,7 +2538,7 @@
     function setupChartToggle() {
         if (!chartToggle || !chartSection) return;
         try {
-            if (localStorage.getItem("licvid.chartCollapsed") === "1") {
+            if (localStorage.getItem("liqscope.chartCollapsed") === "1") {
                 chartSection.classList.add("collapsed");
             }
         } catch (e) { /* ignore */ }
@@ -1210,7 +2546,7 @@
         chartToggle.addEventListener("click", () => {
             const collapsed = chartSection.classList.toggle("collapsed");
             try {
-                localStorage.setItem("licvid.chartCollapsed", collapsed ? "1" : "0");
+                localStorage.setItem("liqscope.chartCollapsed", collapsed ? "1" : "0");
             } catch (e) { /* ignore */ }
             if (!collapsed) {
                 // после разворачивания пересчитываем размеры графика
@@ -1220,6 +2556,35 @@
                 }, 60);
             }
         });
+    }
+
+    // --- Разворот графика на весь экран (как на биржах) -----------------------
+    function setupChartExpand() {
+        const btn = $("chart-expand");
+        if (!btn || !chartSection) return;
+        const paint = () => {
+            const fs = chartSection.classList.contains("fullscreen");
+            btn.classList.toggle("active", fs);
+            btn.title = I18n.t(fs ? "chart.collapse_title" : "chart.expand_title");
+        };
+        const setFs = (on) => {
+            chartSection.classList.toggle("fullscreen", on);
+            document.body.classList.toggle("chart-fullscreen", on);
+            paint();
+            // после смены геометрии — пересчитать размеры графика
+            setTimeout(() => {
+                window.dispatchEvent(new Event("resize"));
+                queueRedraw();
+            }, 60);
+        };
+        btn.addEventListener("click", () => {
+            setFs(!chartSection.classList.contains("fullscreen"));
+        });
+        document.addEventListener("keydown", (e) => {
+            if (e.key === "Escape" && chartSection.classList.contains("fullscreen")) setFs(false);
+        });
+        I18n.onChange(paint);
+        paint();
     }
 
     // --- Список монет: выпадающий список (как на биржах) ---------------------
@@ -1346,13 +2711,16 @@
         state.symbol = s;
         if (s !== "ALL") {
             state.chartSymbol = s;              // «ВСЕ» график не переключает
-            try { localStorage.setItem("licvid.chartSymbol", s); } catch (e) { /* ignore */ }
+            try { localStorage.setItem("liqscope.chartSymbol", s); } catch (e) { /* ignore */ }
         }
         const chartChanged = chartSymbol() !== prevChart;
         if (chartChanged) {
             state.tickCount = 0;
             state.lastTickAt = 0;
             state.lagMs = null;
+            unpinShape();
+            closeModal();
+            loadDrawings();   // фигуры — свои у каждой монеты
         }
         updateSymbolTitle();
         renderSymbolButtons();
@@ -1365,8 +2733,11 @@
 
     function selectChartSymbol(s) {
         if (!s || s === chartSymbol()) return;
+        unpinShape();
+        closeModal();
         state.chartSymbol = s;
-        try { localStorage.setItem("licvid.chartSymbol", s); } catch (e) { /* ignore */ }
+        try { localStorage.setItem("liqscope.chartSymbol", s); } catch (e) { /* ignore */ }
+        loadDrawings();   // фигуры — свои у каждой монеты
         state.tickCount = 0;
         state.lastTickAt = 0;
         state.lagMs = null;
@@ -1650,9 +3021,7 @@
     function renderStats(data) {
         if (!data) return;
         state.lastStats = data;
-        stat24hEl.textContent = "$" + fmtUsdShort(data.total_usd_24h);
-        stat1hEl.textContent = "$" + fmtUsdShort(data.total_usd_1h);
-        stat5mEl.textContent = "$" + fmtUsdShort(data.total_usd_5m);
+        paintStatBox("liq");
 
         const total = data.total_usd_24h || 0;
         const longPct = total > 0 ? Math.round((data.longs_usd_24h / total) * 100) : 50;
@@ -1688,6 +3057,7 @@
 
     // --- Свечи ---------------------------------------------------------------
     async function loadCandles() {
+        fetchOI();   // табло OI — за монетой графика
         try {
             const r = await fetch("/api/klines?symbol=" + encodeURIComponent(chartSymbol()) +
                 "&timeframe=" + state.timeframe);
@@ -1764,7 +3134,7 @@
                 }
                 if (!state.chartSymbol) {
                     let saved = "";
-                    try { saved = localStorage.getItem("licvid.chartSymbol") || ""; } catch (e) { /* ignore */ }
+                    try { saved = localStorage.getItem("liqscope.chartSymbol") || ""; } catch (e) { /* ignore */ }
                     // сохранённая пара может быть пользовательской — держим её,
                     // даже если она не попала в текущий топ (сервер найдёт свечи)
                     state.chartSymbol = (saved && /^[A-Z0-9]{2,20}_[A-Z0-9]{2,6}$/.test(saved))
@@ -1797,6 +3167,7 @@
                 }
                 cacheLiquidations(rows);   // копия на этом устройстве (IndexedDB)
                 updateMarkers();
+                updateLiveStats();
                 queueRedraw();
                 break;
             }
@@ -1839,6 +3210,9 @@
         refreshFilterButtons();
         renderHealth(state.lastHealth);
         renderStats(state.lastStats);
+        paintStatBox("liq");   // renderStats(null) молчит — ярлык окна всё равно локализуем
+        paintCvdBox();
+        paintOiBox();
         renderSymbolButtons();
         updateSymbolTitle();
         rebuildFeed();
@@ -1890,8 +3264,19 @@
     });
 
     function closeModal() {
+        // закрываем окно закреплённого кластера — снимаем и подсветку ленты
+        // (у кластера пин живёт в двух местах); окно строки ленты чужой
+        // закреп прямоугольника не трогает
+        const clusterPinned = !state.modalItem && shapePin && shapePin.kind === "liq";
         state.modalItem = null;
+        unpinShape();
+        if (clusterPinned) {
+            pinHitKey = null;
+            hoverHitKey = null;
+            applyFeedHighlight(null, true);
+        }
         detailModal.classList.add("hidden");
+        detailModal.classList.remove("peek", "peek-pinned");
     }
     closeModalBtn.addEventListener("click", closeModal);
     detailModal.addEventListener("click", (e) => {
@@ -1905,12 +3290,21 @@
         initSplitters();             // регулируемая ширина ленты и высота «Лидеров»
         setupTopCoinsToggle();       // выпадающий список топ-пар
         setupSymbolDropdown();       // выпадающий список монет
+        setupStatBoxes();            // боксы статистики: меню выбора периода
         loadCandles();
         connectWs();
         setInterval(fetchStats, 15000);
+        fetchStats();   // бокс ликвидаций — сразу, не ждём WS/первый тик
+        setInterval(fetchOI, 15000);
+        fetchOI();
+        setInterval(paintCvdBox, 15000);   // окно CVD медленно ползёт
         setInterval(renderTickIndicator, 1000);
         setupLayerToggles();
+        setupLayerPop();   // попап кнопок слоёв по «☰ Слои»
         setupChartToggle();
+        setupChartExpand();
+        setupDrawToolbar();   // панель рисования + тестовый API
+        loadDrawings();       // фигуры текущей монеты
         // страховка: если WS молчит дольше 30с — перезапрашиваем свечи
         setInterval(() => {
             if (!ws || ws.readyState !== WebSocket.OPEN) return;

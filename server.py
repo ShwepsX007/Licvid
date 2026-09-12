@@ -1,5 +1,5 @@
 """
-Licvid Web Server — терминал ликвидаций в реальном времени.
+LiqScope Web Server — терминал ликвидаций в реальном времени.
 
 Что отдаёт наружу:
     GET  /                  — лендинг (посадочная страница)
@@ -13,14 +13,14 @@ Licvid Web Server — терминал ликвидаций в реальном 
 
 Все данные — настоящие, с публичных WS бирж (ключи не нужны).
 Демо-режим (синтетические события) включается только явно:
-    LICVID_DEMO=1  — и тогда фронтенд честно рисует бейдж «DEMO».
+    LIQSCOPE_DEMO=1  — и тогда фронтенд честно рисует бейдж «DEMO».
 
 Переменные окружения:
-    LICVID_SYMBOLS_LIMIT  сколько монет держать в списке (по умолчанию 40)
-    LICVID_EXCHANGES      binance,bybit,okx,gate,bitget,htx,bitmex (по умолчанию все)
-    LICVID_TICK_SOURCE    порядок источников тиков: binance,binance-raw,bybit
-    LICVID_DEMO           1 — генерировать тестовый поток вместо биржевого
-    LICVID_HISTORY_MAX    сколько событий держать в памяти (по умолчанию 60000)
+    LIQSCOPE_SYMBOLS_LIMIT  сколько монет держать в списке (по умолчанию 40)
+    LIQSCOPE_EXCHANGES      binance,bybit,okx,gate,bitget,htx,bitmex,hyperliquid (по умолчанию все)
+    LIQSCOPE_TICK_SOURCE    порядок источников тиков: binance,binance-raw,bybit
+    LIQSCOPE_DEMO           1 — генерировать тестовый поток вместо биржевого
+    LIQSCOPE_HISTORY_MAX    сколько событий держать в памяти (по умолчанию 60000)
 """
 
 from __future__ import annotations
@@ -41,43 +41,44 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from market_feed import MarketFeed, TF_MINUTES, base_of, canon
+from oi_feed import map_candles_to_oi
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-log = logging.getLogger("licvid.server")
+log = logging.getLogger("liqscope.server")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(HERE, "static")
 
-SYMBOLS_LIMIT = int(os.getenv("LICVID_SYMBOLS_LIMIT", "40"))
+SYMBOLS_LIMIT = int(os.getenv("LIQSCOPE_SYMBOLS_LIMIT", "40"))
 EXCHANGES = [e.strip().lower() for e in
-             os.getenv("LICVID_EXCHANGES",
-                       "binance,bybit,okx,gate,bitget,htx,bitmex").split(",")
+             os.getenv("LIQSCOPE_EXCHANGES",
+                       "binance,bybit,okx,gate,bitget,htx,bitmex,hyperliquid").split(",")
              if e.strip()]
 # Порядок источников потиковых данных для графика (первый рабочий побеждает)
 TICK_SOURCES = [x.strip().lower() for x in
-                os.getenv("LICVID_TICK_SOURCE", "binance,binance-raw,bybit").split(",")
+                os.getenv("LIQSCOPE_TICK_SOURCE", "binance,binance-raw,bybit").split(",")
                 if x.strip()]
-DEMO_MODE = os.getenv("LICVID_DEMO", "0").strip() in ("1", "true", "yes", "on")
-HISTORY_MAX = int(os.getenv("LICVID_HISTORY_MAX", "60000"))
+DEMO_MODE = os.getenv("LIQSCOPE_DEMO", "0").strip() in ("1", "true", "yes", "on")
+HISTORY_MAX = int(os.getenv("LIQSCOPE_HISTORY_MAX", "60000"))
 # Дисковое сохранение истории ликвидаций (переживает рестарт сервера).
-# Путь: LICVID_HISTORY_FILE ("" / "0" / "off" — отключить), TTL — сколько часов
+# Путь: LIQSCOPE_HISTORY_FILE ("" / "0" / "off" — отключить), TTL — сколько часов
 # держать при загрузке/урезании файла.
-HISTORY_FILE = os.getenv("LICVID_HISTORY_FILE",
+HISTORY_FILE = os.getenv("LIQSCOPE_HISTORY_FILE",
                          os.path.join(HERE, "data", "liq_history.jsonl")).strip()
 if HISTORY_FILE.lower() in ("0", "none", "off", "false"):
     HISTORY_FILE = ""
-HISTORY_TTL_HOURS = float(os.getenv("LICVID_HISTORY_TTL_HOURS", "24"))
+HISTORY_TTL_HOURS = float(os.getenv("LIQSCOPE_HISTORY_TTL_HOURS", "24"))
 HISTORY_FILE_MAX_BYTES = 64 * 1024 * 1024   # страховка: урезаем файл при разрастании
 
 KLINE_TTL = 20.0            # сек: как часто перезапрашивать историю с биржи
 # Ликвидации уходят клиенту сразу; интервал — только предохранитель от флуда
 # при лавине событий (0 = слать каждое событие немедленно).
-BROADCAST_INTERVAL = float(os.getenv("LICVID_LIQ_FLUSH_MS", "0")) / 1000.0
+BROADCAST_INTERVAL = float(os.getenv("LIQSCOPE_LIQ_FLUSH_MS", "0")) / 1000.0
 # Минимальный зазор между тиками графика по одной монете (0 = каждый тик).
-TICK_MIN_GAP = float(os.getenv("LICVID_TICK_MIN_GAP_MS", "0")) / 1000.0
-PRICE_INTERVAL = float(os.getenv("LICVID_PRICE_INTERVAL_MS", "1000")) / 1000.0
-STATS_INTERVAL = float(os.getenv("LICVID_STATS_INTERVAL_MS", "2000")) / 1000.0
+TICK_MIN_GAP = float(os.getenv("LIQSCOPE_TICK_MIN_GAP_MS", "0")) / 1000.0
+PRICE_INTERVAL = float(os.getenv("LIQSCOPE_PRICE_INTERVAL_MS", "1000")) / 1000.0
+STATS_INTERVAL = float(os.getenv("LIQSCOPE_STATS_INTERVAL_MS", "2000")) / 1000.0
 
 
 # =============================================================================
@@ -454,6 +455,20 @@ async def on_price(symbol: str, price: float, candle1m: Optional[dict]):
 # =============================================================================
 #  Свечи
 # =============================================================================
+def _attach_oi(candles: list, tf: int, levels: dict, chgs: dict) -> None:
+    if not levels:
+        return
+    mapping = map_candles_to_oi([c["time"] for c in candles], tf, levels, chgs)
+    for c in candles:
+        m = mapping.get(c["time"])
+        if not m:
+            continue
+        if m["oi"] is not None:
+            c["oi"] = m["oi"]
+        if m["oiChg"] is not None:
+            c["oiChg"] = m["oiChg"]
+
+
 async def get_candles(symbol: str, tf: int, force: bool = False) -> dict:
     symbol = canon(symbol)
     if tf not in TF_MINUTES:
@@ -482,6 +497,16 @@ async def get_candles(symbol: str, tf: int, force: bool = False) -> dict:
                         if d is not None:
                             c["cvd"] = d
     if real:
+        # подшиваем открытый интерес: oi — уровень на конец свечи,
+        # oiChg — изменение за свечу (для треугольников на графике)
+        tracker = getattr(feed, "oi", None)
+        if tracker is not None:
+            try:
+                await tracker.ensure_symbol(symbol)
+                _attach_oi(real, tf, tracker.series(symbol),
+                           tracker.bucket_chg(symbol))
+            except Exception as e:
+                log.debug("oi attach %s: %s", symbol, e)
         # сохраняем «живой» хвост, если биржа ещё не закрыла текущую свечу
         CANDLES[k] = {"candles": real, "ts": time.time(), "source": "exchange"}
         _cvd_seed_base(CANDLES[k], symbol, tf)
@@ -514,10 +539,22 @@ async def get_candles(symbol: str, tf: int, force: bool = False) -> dict:
     if DEMO_MODE:
         for c in series:
             c["cvd"] = round((c.get("volume") or 1e4) * random.uniform(-0.35, 0.35), 2)
+        _demo_oi(series)
     CANDLES[k] = {"candles": series, "ts": time.time(),
                   "source": "demo" if DEMO_MODE else "unavailable"}
     _cvd_seed_base(CANDLES[k], symbol, tf)
     return CANDLES[k]
+
+
+def _demo_oi(series: list) -> None:
+    """Синтетический OI для демо-режима: случайное блуждание уровня."""
+    oi = 5e8
+    for c in series:
+        oi = max(oi * (1 + random.gauss(0, 0.004)), 1e6)
+        c["oi"] = round(oi, 2)
+    for i, c in enumerate(series):
+        prev = series[i - 1]["oi"] if i else c["oi"]
+        c["oiChg"] = round(c["oi"] - prev, 2)
 
 
 def sync_hot_symbols():
@@ -557,6 +594,12 @@ async def kline_refresher():
 # =============================================================================
 #  Статистика
 # =============================================================================
+# Окна статистики для боксов шапки (суффикс ключа -> секунд).
+# Старые ключи 24h/1h/5m сохранены как есть — их едят лендинг и клиенты.
+STAT_WINDOWS = (("1m", 60), ("5m", 300), ("15m", 900), ("30m", 1800),
+                ("1h", 3600), ("4h", 14400), ("24h", 86400))
+
+
 def compute_stats(symbol: Optional[str] = None, exchange: Optional[str] = None) -> dict:
     now = time.time()
     items = list(LIQUIDATIONS)
@@ -565,21 +608,29 @@ def compute_stats(symbol: Optional[str] = None, exchange: Optional[str] = None) 
     if exchange and exchange != "ALL":
         items = [x for x in items if x["exchange"] == exchange]
 
-    d24 = [x for x in items if now - x["timestamp"] <= 86400]
-    h1 = [x for x in items if now - x["timestamp"] <= 3600]
-    m5 = [x for x in items if now - x["timestamp"] <= 300]
-
     def split(rows):
         longs = sum(x["usd"] for x in rows if x["side"] == "SELL")
         shorts = sum(x["usd"] for x in rows if x["side"] == "BUY")
         return longs, shorts
 
-    l24, s24 = split(d24)
-    l1, s1 = split(h1)
-    l5, s5 = split(m5)
+    d24 = [x for x in items if now - x["timestamp"] <= 86400]
+    wins = {}
+    for suffix, sec in STAT_WINDOWS:
+        rows = d24 if sec == 86400 else [x for x in items if now - x["timestamp"] <= sec]
+        longs, shorts = split(rows)
+        wins[f"total_usd_{suffix}"] = longs + shorts
+        wins[f"longs_usd_{suffix}"] = longs
+        wins[f"shorts_usd_{suffix}"] = shorts
 
+    # Лидеры — всегда по ВСЕМ монетам (фильтр монеты их не схлопывает):
+    # иначе при выборе монеты в блоке оставалась бы только она одна.
+    # Фильтр биржи уважаем: лидеры внутри выбранной биржи осмысленны.
+    pool = list(LIQUIDATIONS)
+    if exchange and exchange != "ALL":
+        pool = [x for x in pool if x["exchange"] == exchange]
+    pool24 = [x for x in pool if now - x["timestamp"] <= 86400]
     coin_totals: Dict[str, dict] = {}
-    for x in d24:
+    for x in pool24:
         c = coin_totals.setdefault(x["symbol"], {"symbol": x["symbol"], "usd": 0.0,
                                                  "longs": 0.0, "shorts": 0.0, "count": 0})
         c["usd"] += x["usd"]
@@ -591,34 +642,27 @@ def compute_stats(symbol: Optional[str] = None, exchange: Optional[str] = None) 
     top_coins = sorted(coin_totals.values(), key=lambda c: c["usd"], reverse=True)
 
     exch_totals: Dict[str, float] = {}
-    for x in d24:
+    for x in pool24:
         exch_totals[x["exchange"]] = exch_totals.get(x["exchange"], 0.0) + x["usd"]
 
     biggest = max(d24, key=lambda x: x["usd"], default=None)
 
-    return {
-        "total_usd_24h": l24 + s24,
-        "longs_usd_24h": l24,
-        "shorts_usd_24h": s24,
-        "total_usd_1h": l1 + s1,
-        "longs_usd_1h": l1,
-        "shorts_usd_1h": s1,
-        "total_usd_5m": l5 + s5,
-        "longs_usd_5m": l5,
-        "shorts_usd_5m": s5,
+    out = dict(wins)
+    out.update({
         "top_coins": top_coins[:12],
         "exchanges": exch_totals,
         "total_count": len(items),
         "biggest_24h": biggest,
         "demo": DEMO_MODE,
-    }
+    })
+    return out
 
 
 # =============================================================================
 #  Фоновые рассылки
 # =============================================================================
 async def liquidation_broadcaster():
-    """Работает только если включена буферизация (LICVID_LIQ_FLUSH_MS > 0)."""
+    """Работает только если включена буферизация (LIQSCOPE_LIQ_FLUSH_MS > 0)."""
     if BROADCAST_INTERVAL <= 0:
         return
     while True:
@@ -674,11 +718,12 @@ async def stats_broadcaster():
 
 
 # =============================================================================
-#  Демо-генератор (только при LICVID_DEMO=1)
+#  Демо-генератор (только при LIQSCOPE_DEMO=1)
 # =============================================================================
 async def demo_generator():
-    log.warning("ВКЛЮЧЁН ДЕМО-РЕЖИМ: поток ликвидаций синтетический (LICVID_DEMO=1)")
-    exchanges = ["binance", "bybit", "okx", "gate", "bitget", "htx", "bitmex"]
+    log.warning("ВКЛЮЧЁН ДЕМО-РЕЖИМ: поток ликвидаций синтетический (LIQSCOPE_DEMO=1)")
+    exchanges = ["binance", "bybit", "okx", "gate", "bitget", "htx", "bitmex",
+                   "hyperliquid"]
     while True:
         try:
             await asyncio.sleep(random.uniform(0.15, 0.9))
@@ -841,7 +886,7 @@ async def lifespan(app: FastAPI):
         await feed.stop()
 
 
-app = FastAPI(title="Licvidation — Live Crypto Liquidation Terminal",
+app = FastAPI(title="LiqScope — Live Crypto Liquidation Terminal",
               version="4.1.0", lifespan=lifespan)
 
 app.add_middleware(
@@ -875,6 +920,7 @@ async def api_symbols():
             "price": prices.get(s) or m.get("price") or 0.0,
             "change24h": m.get("change24h", 0.0),
             "volume24h": m.get("volume24h", 0.0),
+            "volAvg7d": round(feed.vol_avg7d(s), 2) if feed else 0.0,
             "liq24h": round(liq24.get(s, 0.0), 2),
             "custom": s in custom,
             "exchanges": m.get("exchanges", []),
@@ -947,6 +993,50 @@ async def api_klines(symbol: str = Query("BTC_USDT"), timeframe: int = Query(5))
     }
 
 
+@app.get("/api/oi")
+async def api_oi(symbol: str = Query("BTC_USDT")):
+    """Открытый интерес: текущий тотал по живым ногам + изменения m5/h1/h24
+    по непрерывному ряду (биржи с историей)."""
+    symbol = canon(symbol)
+    tracker = getattr(feed, "oi", None)
+    if tracker is None:
+        from oi_feed import OI_WINDOWS
+        return {"symbol": symbol, "total_usd": None, "per_exchange": {},
+                "live_exchanges": [], "hist_exchanges": [],
+                "changes": {k: None for k, _ in OI_WINDOWS},
+                "partial": {k: True for k, _ in OI_WINDOWS},
+                "ts": None, "stale_sec": None}
+    try:
+        await tracker.ensure_symbol(symbol)
+    except Exception as e:
+        log.debug("oi %s: %s", symbol, e)
+    out = tracker.payload(symbol)
+    if DEMO_MODE and out["total_usd"] is None:
+        out = _demo_oi_payload(symbol)
+    return out
+
+
+def _demo_oi_payload(symbol: str) -> dict:
+    total = 4e8 + random.uniform(-2e7, 2e7)
+    legs = ["binance", "bybit", "okx", "gate", "bitget", "htx", "bitmex"]
+    weights = [0.34, 0.21, 0.13, 0.12, 0.09, 0.06, 0.05]
+    per = {e: round(total * w, 2) for e, w in zip(legs, weights)}
+
+    def _chg(scale):
+        usd = random.gauss(0, total * scale)
+        return {"usd": round(usd, 2), "pct": round(usd / total * 100, 3)}
+
+    from oi_feed import OI_WINDOWS
+    scales = {"m1": 0.0002, "m5": 0.001, "m15": 0.0016, "m30": 0.0022,
+              "h1": 0.004, "h4": 0.009, "h24": 0.02}
+    return {"symbol": symbol, "total_usd": round(total, 2),
+            "per_exchange": per, "live_exchanges": legs,
+            "hist_exchanges": ["binance", "bybit", "gate"],
+            "changes": {k: _chg(scales[k]) for k, _ in OI_WINDOWS},
+            "partial": {k: False for k, _ in OI_WINDOWS},
+            "ts": time.time(), "stale_sec": 0.0}
+
+
 @app.get("/api/liquidations")
 async def api_liquidations(symbol: Optional[str] = None,
                            exchange: Optional[str] = None,
@@ -986,6 +1076,14 @@ async def api_health():
         },
     }
     data.update(feed.health() if feed else {"sources": {}})
+    _srcs = data.get("sources") or {}
+    data["live_exchanges"] = sorted(
+        name for name, s in _srcs.items()
+        if name not in ("prices", "ticks") and isinstance(s, dict) and s.get("connected")
+    )
+    data["exchanges_total"] = (
+        sum(1 for name in _srcs if name not in ("prices", "ticks")) or len(EXCHANGES)
+    )
     data["ticks_seen"] = TICKS_SEEN
     data["hot_symbols"] = sorted(feed.hot_symbols) if feed else []
     data["tick_subscriptions"] = sorted(feed.tick_subscriptions) if feed else []

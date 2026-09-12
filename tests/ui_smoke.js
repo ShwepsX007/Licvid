@@ -79,7 +79,7 @@ async function main() {
       }
       // проверка регулируемых панелей: задаём сохранённую раскладку заранее
       try {
-        win.localStorage.setItem("licvid.layout", JSON.stringify({ feedW: 520, coinsH: 220 }));
+        win.localStorage.setItem("liqscope.layout", JSON.stringify({ feedW: 520, coinsH: 220 }));
       } catch (e) { /* ignore */ }
       win.WebSocket = require("ws");
       win.fetchCalls = [];
@@ -237,8 +237,8 @@ async function main() {
   const cvdActiveAfter = cvdToggleBtn ? cvdToggleBtn.classList.contains("active") : null;
   let liqStore = null, cvdStore = null;
   try {
-    liqStore = win.localStorage.getItem("licvid.liqEnabled");
-    cvdStore = win.localStorage.getItem("licvid.cvdEnabled");
+    liqStore = win.localStorage.getItem("liqscope.liqEnabled");
+    cvdStore = win.localStorage.getItem("liqscope.cvdEnabled");
   } catch (e) { /* ignore */ }
   const cvdStatOff = text("cvd-stat");     // при выключенном CVD индикатор пуст
   // вернуть как было — другие проверки рисуют шарики
@@ -255,12 +255,15 @@ async function main() {
   const landingOk = !!landing && landing.status === 200 &&
     landing.body.indexOf("Открыть терминал") !== -1 &&
     landing.body.indexOf("/terminal") !== -1;
-  const landingBrandOk = !!landing && landing.body.indexOf("LICVIDATION") !== -1;
+  const landingBrandOk = !!landing && landing.body.indexOf("LIQSCOPE") !== -1;
   const landingLangOk = !!landing && landing.body.indexOf('id="lang-select"') !== -1;
   // Название в шапке терминала — ссылка на главную
   const brandLink = doc.querySelector(".brand-link");
   const brandLinkOk = !!brandLink && brandLink.getAttribute("href") === "/" &&
-    brandLink.textContent.indexOf("LICVIDATION") !== -1;
+    brandLink.textContent.indexOf("LIQSCOPE") !== -1;
+  const logoImg = doc.querySelector(".brand-link img.logo-icon");
+  const logoOk = !!logoImg && logoImg.getAttribute("src") === "/static/logo.png" &&
+    !!landing && landing.body.indexOf("/static/logo.png") !== -1;
 
   // 8) Регулируемые панели + привязка строк ленты к шарикам
   const splitX = q("split-feed-x");
@@ -280,7 +283,7 @@ async function main() {
     win.dispatchEvent(new win.MouseEvent("pointerup", { bubbles: true, clientX: 620 }));
     layoutFeedAfterDrag = win.document.documentElement.style.getPropertyValue("--feed-width").trim();
     try {
-      const raw = win.localStorage.getItem("licvid.layout");
+      const raw = win.localStorage.getItem("liqscope.layout");
       if (raw) layoutSaved = JSON.parse(raw).feedW;
     } catch (e) { /* ignore */ }
   }
@@ -360,6 +363,7 @@ async function main() {
     landingOk,
     terminalOk: landingBrandOk,
     brandLinkOk,
+    logoOk,
     langDefault,
     langEn,
     liqHistoryFetches: win.fetchCalls.filter((u) => u.indexOf("/api/liquidations") === 0).length,
@@ -414,13 +418,14 @@ async function main() {
     out.landingOk &&
     out.terminalOk &&
     out.brandLinkOk &&
+    out.logoOk &&
     out.langDefault === "ru" &&
     out.langEn &&
     out.langEn.select === "en" &&
     out.langEn.htmlLang === "en-US" &&
     out.langEn.feedTitle.indexOf("LIVE LIQUIDATION FEED") !== -1 &&
     out.langEn.metricLabel.indexOf("Liquidations") !== -1 &&
-    out.langEn.title.indexOf("Licvidation Terminal") !== -1 &&
+    out.langEn.title.indexOf("LiqScope Terminal") !== -1 &&
     out.liqHistoryFetches > 0 &&   // после F5 клиент догружает историю пузырьков
     out.hasSplitX &&
     out.hasSplitY &&

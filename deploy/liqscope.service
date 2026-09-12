@@ -1,0 +1,24 @@
+[Unit]
+Description=LiqScope Liquidation Terminal
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/LiqScope
+Environment=PYTHONUNBUFFERED=1
+Environment=LIQSCOPE_SYMBOLS_LIMIT=40
+Environment=LIQSCOPE_EXCHANGES=binance,bybit,okx,gate,bitget,htx,bitmex,hyperliquid
+# Источник потиковых данных для графика. По умолчанию пробуется Binance,
+# затем Bybit. Если Binance на этом сервере не отдаёт сделки — раскомментируйте:
+# Environment=LIQSCOPE_TICK_SOURCE=bybit
+# Демо-поток (синтетика) — только для проверки интерфейса:
+# Environment=LIQSCOPE_DEMO=1
+ExecStart=/usr/bin/python3 -m uvicorn server:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

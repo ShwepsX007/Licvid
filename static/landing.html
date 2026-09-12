@@ -3,9 +3,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title data-i18n="land.title">Licvidation — терминал ликвидаций крипто-фьючерсов в реальном времени</title>
+<title data-i18n="land.title">LiqScope — терминал ликвидаций крипто-фьючерсов в реальном времени</title>
 <meta name="description" data-i18n-meta="land.meta"
-      content="Licvidation — бесплатный live-терминал ликвидаций: Binance, Bybit, OKX, Gate.io, Bitget, HTX, BitMEX. Свечной график с кластерами, поиск любой пары, фильтры по объёму и биржам.">
+      content="LiqScope — бесплатный live-терминал ликвидаций: Binance, Bybit, OKX, Gate.io, Bitget, HTX, BitMEX. Свечной график с кластерами, поиск любой пары, фильтры по объёму и биржам.">
+<link rel="icon" type="image/png" href="/static/logo.png">
 <script src="/static/i18n.js"></script>
 <style>
 :root {
@@ -21,6 +22,8 @@
     --cyan: #00d6ff;
     --gold: #ffd54f;
     --magenta: #ff2d95;
+    --violet: #a78bfa;
+    --orange: #ff9100;
     --font: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
 }
@@ -49,8 +52,8 @@ a { color: inherit; text-decoration: none; }
     backdrop-filter: blur(10px);
     border-bottom: 1px solid rgba(27, 36, 52, 0.7);
 }
-.brand { display: flex; align-items: baseline; gap: 8px; font-weight: 800; letter-spacing: 1px; }
-.brand .logo { font-size: 1.25rem; }
+.brand { display: flex; align-items: center; gap: 8px; font-weight: 800; letter-spacing: 1px; }
+.brand .logo { width: 26px; height: 26px; border-radius: 7px; }
 .brand .name { font-size: 1.15rem; }
 .brand .tag { font-size: 0.62rem; color: var(--muted); letter-spacing: 2.5px; border: 1px solid var(--border); padding: 2px 6px; border-radius: 3px; }
 .site-nav { display: flex; gap: 22px; align-items: center; font-size: 0.85rem; color: var(--muted); }
@@ -86,6 +89,14 @@ a { color: inherit; text-decoration: none; }
 
 /* ---------- Hero ---------- */
 .hero { max-width: 1080px; margin: 0 auto; padding: 84px 28px 40px; text-align: center; }
+.hero-top {
+    display: flex; align-items: center; justify-content: center; gap: 20px;
+    margin-bottom: 22px;
+}
+.hero-logo {
+    width: 120px;
+    height: 120px;
+}
 .hero-badge {
     display: inline-flex; align-items: center; gap: 8px;
     font-size: 0.72rem; color: var(--cyan); letter-spacing: 0.4px;
@@ -151,6 +162,46 @@ a { color: inherit; text-decoration: none; }
     .live-table th:nth-child(4), .live-table td:nth-child(4) { display: none; }
 }
 
+/* ---------- CVD strip ---------- */
+.cvd-head {
+    display: flex; align-items: center; justify-content: center; gap: 10px;
+    margin-top: 44px; margin-bottom: 14px; flex-wrap: wrap;
+}
+.cvd-head h2 { font-size: 1.15rem; font-weight: 800; }
+.cvd-head .live-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--violet); animation: pulse 1.6s infinite;
+}
+.cvd-head .hint { color: var(--muted); font-size: 0.72rem; }
+.hero-stats.cvd-stats { grid-template-columns: repeat(3, 1fr); margin-top: 0; }
+.cvd-stats .stat-card { position: relative; overflow: hidden; }
+.cvd-stats .stat-card::before {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+    background: var(--border);
+}
+.cvd-stats .stat-card.is-pos::before { background: linear-gradient(180deg, #8b5cf6, #6d28d9); }
+.cvd-stats .stat-card.is-neg::before { background: linear-gradient(180deg, #ffb020, #ff7300); }
+.cvd-stats .stat-card .stat-value.cvd-pos {
+    color: var(--violet); text-shadow: 0 0 18px rgba(139,92,246,0.35);
+}
+.cvd-stats .stat-card .stat-value.cvd-neg {
+    color: var(--orange); text-shadow: 0 0 18px rgba(255,145,0,0.35);
+}
+.hero-stats.oi-stats { grid-template-columns: repeat(4, 1fr); margin-top: 0; }
+.oi-stats .stat-card { position: relative; overflow: hidden; }
+.oi-stats .stat-card::before {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+    background: var(--border);
+}
+.oi-stats .stat-card.is-pos::before { background: linear-gradient(180deg, #2dd4bf, #0d9488); }
+.oi-stats .stat-card.is-neg::before { background: linear-gradient(180deg, #fb7185, #e11d48); }
+.oi-stats .stat-card .stat-value.oi-pos {
+    color: #2dd4bf; text-shadow: 0 0 18px rgba(45,212,191,0.35);
+}
+.oi-stats .stat-card .stat-value.oi-neg {
+    color: #fb7185; text-shadow: 0 0 18px rgba(251,113,133,0.35);
+}
+
 /* ---------- Features ---------- */
 .features { max-width: 1080px; margin: 0 auto; padding: 70px 28px 20px; }
 .features h2, .how h2, .cta h2 { font-size: clamp(1.5rem, 3vw, 2rem); font-weight: 800; text-align: center; }
@@ -201,7 +252,10 @@ a { color: inherit; text-decoration: none; }
     .site-header { padding: 12px 16px; }
     .site-nav a:not(.btn) { display: none; }
     .hero { padding-top: 56px; }
+    .hero-top { flex-direction: column; gap: 14px; }
     .hero-stats { grid-template-columns: repeat(2, 1fr); }
+    .hero-stats.cvd-stats { grid-template-columns: repeat(3, 1fr); }
+    .cvd-stats .stat-value { font-size: 1.05rem; }
     .stat-value { font-size: 1.2rem; }
     .live-section, .features, .how, .cta { padding-left: 16px; padding-right: 16px; }
     .site-footer { padding: 24px 16px 32px; }
@@ -211,9 +265,9 @@ a { color: inherit; text-decoration: none; }
 <body>
 
 <header class="site-header">
-    <a class="brand" href="/" data-i18n-title="brand.home_title" title="Licvidation — главная">
-        <span class="logo">⚡</span>
-        <span class="name">LICVIDATION</span>
+    <a class="brand" href="/" data-i18n-title="brand.home_title" title="LiqScope — главная">
+        <img class="logo" src="/static/logo.png" alt="LiqScope">
+        <span class="name">LIQSCOPE</span>
         <span class="tag" data-i18n="brand.badge">TERMINAL</span>
     </a>
     <nav class="site-nav">
@@ -232,10 +286,13 @@ a { color: inherit; text-decoration: none; }
 </header>
 
 <section class="hero">
-    <div class="hero-badge"><span class="pulse"></span> <span data-i18n="land.badge">7 бирж · публичные WebSocket · без API-ключей</span></div>
+    <div class="hero-top">
+        <img class="hero-logo" src="/static/logo.png" alt="LiqScope">
+        <div class="hero-badge"><span class="pulse"></span> <span data-i18n="land.badge">8 бирж · публичные WebSocket · без API-ключей</span></div>
+    </div>
     <h1><span data-i18n="land.h1.1">Ликвидации крипто-фьючерсов</span><br><span class="grad" data-i18n="land.h1.2">в реальном времени</span></h1>
     <p class="sub" data-i18n="land.sub">
-        Licvidation ловит принудительные закрытия позиций на Binance, Bybit, OKX, Gate.io, Bitget,
+        LiqScope ловит принудительные закрытия позиций на Binance, Bybit, OKX, Gate.io, Bitget,
         HTX и BitMEX и рисует их на живом свечном графике — с кластерами, профилем объёмов
         и поиском любой торгуемой пары.
     </p>
@@ -249,6 +306,29 @@ a { color: inherit; text-decoration: none; }
         <div class="stat-card"><span class="stat-value" id="stat-1h">—</span><span class="stat-label" data-i18n="land.stat.1h">За последний час</span></div>
         <div class="stat-card"><span class="stat-value" id="stat-live">—</span><span class="stat-label" data-i18n="land.stat.exch">Бирж в эфире</span></div>
         <div class="stat-card"><span class="stat-value" id="stat-ratio">—</span><span class="stat-label" data-i18n="land.stat.ratio">Лонги × шорты (24ч)</span></div>
+    </div>
+
+    <div class="cvd-head">
+        <span class="live-dot"></span>
+        <h2 id="cvd-title">CVD BTC/USDT</h2>
+        <span class="hint" data-i18n="land.cvd.hint">тейкер-покупки минус продажи · обновляется каждые 4 секунды</span>
+    </div>
+    <div class="hero-stats cvd-stats">
+        <div class="stat-card" id="cvd-card-24h"><span class="stat-value" id="cvd-24h">—</span><span class="stat-label" data-i18n="land.stat.cvd24h">CVD за 24ч</span></div>
+        <div class="stat-card" id="cvd-card-1h"><span class="stat-value" id="cvd-1h">—</span><span class="stat-label" data-i18n="land.stat.cvd1h">CVD за 1ч</span></div>
+        <div class="stat-card" id="cvd-card-5m"><span class="stat-value" id="cvd-5m">—</span><span class="stat-label" data-i18n="land.stat.cvd5m">CVD за 5м</span></div>
+    </div>
+
+    <div class="cvd-head">
+        <span class="live-dot"></span>
+        <h2 id="oi-title">OI BTC/USDT</h2>
+        <span class="hint" data-i18n="land.oi.hint">открытый интерес со всех бирж · обновляется каждые 4 секунды</span>
+    </div>
+    <div class="hero-stats oi-stats">
+        <div class="stat-card" id="oi-card-total"><span class="stat-value" id="oi-total">—</span><span class="stat-label" data-i18n="land.stat.oiTotal">Открытый интерес</span></div>
+        <div class="stat-card" id="oi-card-24h"><span class="stat-value" id="oi-24h">—</span><span class="stat-label" data-i18n="land.stat.oi24h">OI Δ за 24ч</span></div>
+        <div class="stat-card" id="oi-card-1h"><span class="stat-value" id="oi-1h">—</span><span class="stat-label" data-i18n="land.stat.oi1h">OI Δ за 1ч</span></div>
+        <div class="stat-card" id="oi-card-5m"><span class="stat-value" id="oi-5m">—</span><span class="stat-label" data-i18n="land.stat.oi5m">OI Δ за 5м</span></div>
     </div>
 </section>
 
@@ -276,7 +356,7 @@ a { color: inherit; text-decoration: none; }
     <p class="lead" data-i18n="land.feat.lead">Никаких ключей и регистрации — только публичные данные бирж.</p>
     <div class="cards">
         <div class="card">
-            <div class="icon">🌐</div><h3 data-i18n="land.card1.title">7 бирж в одном эфире</h3>
+            <div class="icon">🌐</div><h3 data-i18n="land.card1.title">8 бирж в одном эфире</h3>
             <p data-i18n="land.card1.desc">Ликвидации с Binance, Bybit, OKX, Gate.io, Bitget, HTX и BitMEX сливаются в одну живую ленту без дублей и с нормализованными парами.</p>
             <div class="mini"><span class="chip">Binance</span><span class="chip">Bybit</span><span class="chip">OKX</span><span class="chip">Gate</span><span class="chip">Bitget</span><span class="chip">HTX</span><span class="chip">BitMEX</span></div>
         </div>
@@ -328,7 +408,7 @@ a { color: inherit; text-decoration: none; }
 </section>
 
 <footer class="site-footer">
-    <span data-i18n="land.footer.copy">© 2026 Licvidation Terminal · данные с публичных WebSocket бирж</span>
+    <span data-i18n="land.footer.copy">© 2026 LiqScope Terminal · данные с публичных WebSocket бирж</span>
     <span><span data-i18n="land.footer.race">Не является инвестиционной рекомендацией</span> · <a href="/terminal" data-i18n="land.footer.open">Открыть терминал →</a></span>
 </footer>
 
@@ -336,14 +416,15 @@ a { color: inherit; text-decoration: none; }
 (function () {
     "use strict";
 
-    var I18n = window.LicvidationI18n || {
+    var I18n = window.LiqScopeI18n || {
         t: function (k) { return k; }, lang: function () { return "ru"; },
         set: function () {}, number: function (n) { return String(Number(n) || 0); },
         init: function () {}, onChange: function () {},
     };
     I18n.init();
 
-    var last = { stats: null, health: null, rows: null };
+    var last = { stats: null, health: null, rows: null, cvd: null, cvdSym: "BTC_USDT", cvdAt: 0,
+                 oi: null, oiSym: "BTC_USDT" };
 
     function fmtShort(v) {
         v = Number(v) || 0;
@@ -367,8 +448,23 @@ a { color: inherit; text-decoration: none; }
             var s = Number(data.shorts_usd_24h) || 0;
             el("stat-ratio").textContent = "$" + fmtShort(l) + " × $" + fmtShort(s);
         }
-        if (health && health.live_exchanges) {
-            el("stat-live").textContent = health.live_exchanges.length + " / 7";
+        if (health) {
+            var live = health.live_exchanges;
+            var total = health.exchanges_total;
+            if (!live && health.sources) {
+                // запасной путь: считаем подключённые биржи по источникам
+                live = [];
+                total = 0;
+                for (var name in health.sources) {
+                    if (!Object.prototype.hasOwnProperty.call(health.sources, name)) continue;
+                    if (name === "prices" || name === "ticks") continue;
+                    total += 1;
+                    if (health.sources[name] && health.sources[name].connected) live.push(name);
+                }
+            }
+            if (live) {
+                el("stat-live").textContent = live.length + " / " + (total || live.length || 7);
+            }
         }
     }
 
@@ -393,6 +489,120 @@ a { color: inherit; text-decoration: none; }
         }).join("");
     }
 
+    /* ---------- CVD лидера рынка (тейкер-покупки минус продажи) ---------- */
+    var CVD_REFETCH_MS = 25000;   // свечи 5м на сервере кэшируются — чаще нет смысла
+
+    function cvdSum(candles, since) {
+        var s = 0, ok = false;
+        for (var i = 0; i < candles.length; i++) {
+            var c = candles[i];
+            if ((Number(c.time) || 0) < since) continue;
+            var d = Number(c.cvd);
+            if (isFinite(d)) { s += d; ok = true; }
+        }
+        return ok ? s : NaN;
+    }
+
+    function paintCvd(id, cardId, v) {
+        var valEl = el(id), cardEl = el(cardId);
+        valEl.classList.remove("cvd-pos", "cvd-neg");
+        cardEl.classList.remove("is-pos", "is-neg");
+        if (!isFinite(v)) {
+            valEl.textContent = "—";
+            return;
+        }
+        var buy = v >= 0;
+        valEl.textContent = (buy ? "+$" : "−$") + fmtShort(Math.abs(v));
+        valEl.classList.add(buy ? "cvd-pos" : "cvd-neg");
+        cardEl.classList.add(buy ? "is-pos" : "is-neg");
+    }
+
+    function renderCvd() {
+        var sym = last.cvdSym || "BTC_USDT";
+        el("cvd-title").textContent = I18n.t("land.cvd.title", {
+            sym: String(sym).replace("_", "/"),
+        });
+        var c = last.cvd;
+        if (!c) {
+            paintCvd("cvd-24h", "cvd-card-24h", NaN);
+            paintCvd("cvd-1h", "cvd-card-1h", NaN);
+            paintCvd("cvd-5m", "cvd-card-5m", NaN);
+            return;
+        }
+        paintCvd("cvd-24h", "cvd-card-24h", c.d24);
+        paintCvd("cvd-1h", "cvd-card-1h", c.d1);
+        paintCvd("cvd-5m", "cvd-card-5m", c.d5);
+    }
+
+    function paintOi(id, cardId, v, isTotal) {
+        var valEl = el(id), cardEl = el(cardId);
+        valEl.classList.remove("oi-pos", "oi-neg");
+        cardEl.classList.remove("is-pos", "is-neg");
+        if (!isFinite(v)) {
+            valEl.textContent = "—";
+            return;
+        }
+        var up = v >= 0;
+        valEl.textContent = isTotal
+            ? "$" + fmtShort(Math.abs(v))
+            : (up ? "+$" : "−$") + fmtShort(Math.abs(v));
+        valEl.classList.add(up ? "oi-pos" : "oi-neg");
+        cardEl.classList.add(up ? "is-pos" : "is-neg");
+    }
+
+    function renderOi() {
+        var sym = last.oiSym || "BTC_USDT";
+        el("oi-title").textContent = I18n.t("land.oi.title", {
+            sym: String(sym).replace("_", "/"),
+        });
+        var o = last.oi;
+        if (!o) {
+            paintOi("oi-total", "oi-card-total", NaN, true);
+            paintOi("oi-24h", "oi-card-24h", NaN, false);
+            paintOi("oi-1h", "oi-card-1h", NaN, false);
+            paintOi("oi-5m", "oi-card-5m", NaN, false);
+            return;
+        }
+        var ch = o.changes || {};
+        paintOi("oi-total", "oi-card-total", Number(o.total_usd), true);
+        paintOi("oi-24h", "oi-card-24h", ch.h24 ? Number(ch.h24.usd) : NaN, false);
+        paintOi("oi-1h", "oi-card-1h", ch.h1 ? Number(ch.h1.usd) : NaN, false);
+        paintOi("oi-5m", "oi-card-5m", ch.m5 ? Number(ch.m5.usd) : NaN, false);
+    }
+
+    async function updateOi(st) {
+        // тот же лидер, что и у CVD — монета с максимальными ликвидациями
+        var sym = (st && st.top_coins && st.top_coins.length && st.top_coins[0].symbol) || "BTC_USDT";
+        last.oiSym = sym;
+        try {
+            var r = await fetch("/api/oi?symbol=" + encodeURIComponent(sym));
+            last.oi = await r.json();
+        } catch (e) { /* сервер недоступен — оставляем «—» */ }
+        renderOi();
+    }
+
+    async function updateCvd(st) {
+        // лидер — монета с максимальными ликвидациями за 24ч (как в терминале)
+        var sym = (st && st.top_coins && st.top_coins.length && st.top_coins[0].symbol) || "BTC_USDT";
+        var nowMs = Date.now();
+        if (sym !== last.cvdSym || nowMs - last.cvdAt > CVD_REFETCH_MS || !last.cvd) {
+            last.cvdSym = sym;
+            last.cvdAt = nowMs;
+            try {
+                var r = await fetch("/api/klines?symbol=" + encodeURIComponent(sym) + "&timeframe=5");
+                var data = await r.json();
+                var candles = (data && data.candles) || [];
+                var now = Date.now() / 1000;
+                last.cvd = {
+                    d24: cvdSum(candles, now - 86400),
+                    d1: cvdSum(candles, now - 3600),
+                    d5: cvdSum(candles, now - 300),
+                };
+            } catch (e) { /* сервер недоступен — оставляем «—» */ }
+        }
+        renderCvd();
+    }
+
     async function refresh() {
         try {
             var [st, liq, h] = await Promise.all([
@@ -404,6 +614,8 @@ a { color: inherit; text-decoration: none; }
             last.health = h;
             fillStats(st, h);
             renderRows(liq ? liq.liquidations : null);
+            updateCvd(st);
+            updateOi(st);
         } catch (e) { /* сервер недоступен — оставляем «—» */ }
     }
 
@@ -418,6 +630,8 @@ a { color: inherit; text-decoration: none; }
         if (langSelect) langSelect.value = I18n.lang();
         fillStats(last.stats, last.health);
         renderRows(last.rows);
+        renderCvd();
+        renderOi();
     });
 
     refresh();

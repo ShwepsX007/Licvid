@@ -4,8 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="description" data-i18n-meta="terminal.meta"
-          content="Licvidation Terminal — live-лента ликвидаций крипто-фьючерсов с 7 бирж, свечной график, кластеры и профиль объёмов.">
-    <title data-i18n="terminal.title">Licvidation Terminal — Live Liquidation Stream & Cluster Chart</title>
+          content="LiqScope Terminal — live-лента ликвидаций крипто-фьючерсов с 8 бирж, свечной график, кластеры и профиль объёмов.">
+    <title data-i18n="terminal.title">LiqScope Terminal — Live Liquidation Stream & Cluster Chart</title>
+    <link rel="icon" type="image/png" href="/static/logo.png">
     <link rel="stylesheet" href="/static/style.css">
     <!-- Local Lightweight Charts v5 -->
     <script src="/static/lightweight-charts.js"></script>
@@ -16,9 +17,9 @@
     <header class="top-nav">
         <div class="brand">
             <a class="brand-link" href="/" data-i18n-title="brand.home_title"
-               title="На главную — Licvidation Terminal">
-                <span class="logo-icon">⚡</span>
-                <span class="brand-title">LICVIDATION</span>
+               title="На главную — LiqScope Terminal">
+                <img class="logo-icon" src="/static/logo.png" alt="LiqScope">
+                <span class="brand-title">LIQSCOPE</span>
                 <span class="brand-badge" data-i18n="brand.badge">TERMINAL</span>
             </a>
             <span class="status-badge" id="conn-status"><span class="dot pulse yellow"></span> ПОДКЛЮЧЕНИЕ…</span>
@@ -26,17 +27,37 @@
         </div>
 
         <div class="header-metrics">
-            <div class="metric-card">
-                <span class="metric-label" data-i18n="stats.24h">Ликвидации (24ч)</span>
-                <span class="metric-value text-gold" id="stat-24h-total">$0</span>
+            <div class="stat-box" id="stat-box-liq">
+                <button class="stat-box-head" id="stat-liq-head" type="button"
+                        data-i18n-title="stats.liq_title"
+                        title="Ликвидации за выбранный период — нажмите, чтобы сменить">
+                    <span class="stat-box-label"><span class="metric-label" data-i18n="stats.box_liq">Ликвидации</span> <span class="stat-box-win" id="stat-liq-win">24ч</span> <span class="stat-box-caret">▾</span></span>
+                    <span class="stat-box-value text-gold" id="stat-liq-value">$0</span>
+                    <span class="stat-box-sub" id="stat-liq-sub">—</span>
+                </button>
+                <div class="stat-menu hidden" id="stat-menu-liq" role="listbox"></div>
             </div>
-            <div class="metric-card">
-                <span class="metric-label" data-i18n="stats.1h">Ликвидации (1ч)</span>
-                <span class="metric-value" id="stat-1h-total">$0</span>
+            <div class="cvd-sep" aria-hidden="true"></div>
+            <div class="stat-box" id="stat-box-cvd">
+                <button class="stat-box-head" id="stat-cvd-head" type="button"
+                        data-i18n-title="stats.cvd_title"
+                        title="CVD монеты на графике: тейкер-покупки минус продажи">
+                    <span class="stat-box-label"><span class="cvd-tag">CVD</span> <b class="cvd-coin">BTC</b> <span class="stat-box-win" id="stat-cvd-win">24ч</span> <span class="stat-box-caret">▾</span></span>
+                    <span class="stat-box-value cvd-val" id="stat-cvd-value">—</span>
+                    <span class="stat-box-sub" id="stat-cvd-sub">—</span>
+                </button>
+                <div class="stat-menu hidden" id="stat-menu-cvd" role="listbox"></div>
             </div>
-            <div class="metric-card">
-                <span class="metric-label" data-i18n="stats.5m">Ликвидации (5м)</span>
-                <span class="metric-value" id="stat-5m-total">$0</span>
+            <div class="cvd-sep" aria-hidden="true"></div>
+            <div class="stat-box" id="stat-box-oi">
+                <button class="stat-box-head" id="stat-oi-head" type="button"
+                        data-i18n-title="stats.oi_title"
+                        title="Изменение открытого интереса монеты на графике за период">
+                    <span class="stat-box-label"><span class="oi-tag">OI Δ</span> <b class="oi-coin">BTC</b> <span class="stat-box-win" id="stat-oi-win">24ч</span> <span class="stat-box-caret">▾</span></span>
+                    <span class="stat-box-value oi-val" id="stat-oi-value">—</span>
+                    <span class="stat-box-sub" id="stat-oi-sub">—</span>
+                </button>
+                <div class="stat-menu hidden" id="stat-menu-oi" role="listbox"></div>
             </div>
             <div class="metric-card ratio-metric">
                 <div class="metric-label flex-between">
@@ -160,20 +181,46 @@
                 <div class="chart-legend">
                     <span class="legend-item"><span class="cluster-dot liq-long"></span> <span data-i18n="chart.long">Ликв. лонгов</span></span>
                     <span class="legend-item"><span class="cluster-dot liq-short"></span> <span data-i18n="chart.short">Ликв. шортов</span></span>
-                    <span class="legend-item"><span class="cluster-dot liq-whale"></span> <span data-i18n="chart.whale">Кит ($100k+)</span></span>
+                    <span class="legend-item" data-i18n-title="chart.whale_title" title="Шкала китов: $100K — жёлтый … $1M+ — ярко-красный"><span class="cluster-dot liq-whale"></span> <span data-i18n="chart.whale">Кит ($100k+)</span></span>
+                    <span class="legend-item"><span class="cluster-dot cvd-buy"></span> <span data-i18n="chart.cvd_buy">CVD ▲</span></span>
+                    <span class="legend-item"><span class="cluster-dot cvd-sell"></span> <span data-i18n="chart.cvd_sell">CVD ▼</span></span>
+                    <span class="layer-cell"><span class="layer-label" data-i18n="chart.liq_label">Ликвидации</span>
+                    <span class="live-stat" id="liq-stat" data-i18n-title="chart.live_liq"
+                            title="Ликвидации текущей свечи"></span></span>
+                    <span class="layer-cell"><span class="layer-label" data-i18n="chart.profile_label">Профиль</span>
+                    <span class="live-stat" id="profile-stat" data-i18n-title="chart.live_profile"
+                            title="Ликвидации видимого диапазона"></span></span>
+                    <span class="layer-cell"><span class="layer-label" data-i18n="chart.cvd_label">CVD</span>
+                    <span class="cvd-stat" id="cvd-stat" title="Кто двигает цену в текущей свече"></span></span>
+                    <span class="layer-cell"><span class="layer-label" data-i18n="chart.oi_label">OI</span>
+                    <span class="live-stat" id="oi-stat" data-i18n-title="chart.live_oi"
+                            title="Изменение OI текущей свечи"></span></span>
+                    <button class="profile-toggle layer-call" id="layer-call" type="button"
+                            data-i18n-title="chart.layers_title" data-i18n="chart.layers"
+                            title="Показать/скрыть кнопки слоёв">☰ Слои</button>
+                    <button class="tool-toggle" id="draw-toggle" type="button"
+                            data-i18n-title="chart.draw_title"
+                            title="Рисовать фигуры теханализа">✎</button>
+                    <button class="chart-toggle" id="chart-toggle" type="button"
+                            data-i18n-title="chart.toggle_title"
+                            title="Свернуть/развернуть график">▾</button>
+                    <button class="chart-toggle chart-expand" id="chart-expand" type="button"
+                            data-i18n-title="chart.expand_title"
+                            title="Развернуть график на весь экран">⛶</button>
+                </div>
+                <div class="layer-pop hidden" id="layer-pop">
                     <button class="profile-toggle liq-toggle" id="liq-toggle" type="button"
                             data-i18n-title="chart.liq_on" data-i18n="chart.liq"
-                            title="Скрыть шарики ликвидаций">⚡ Ликвидации</button>
+                            title="Скрыть прямоугольники ликвидаций">⚡ Ликвидации</button>
                     <button class="profile-toggle" id="profile-toggle" type="button"
                             data-i18n-title="chart.profile_on" data-i18n="chart.profile"
                             title="Показать/скрыть профиль объёмов ликвидаций по ценам">📊 Профиль</button>
                     <button class="profile-toggle cvd-toggle" id="cvd-toggle" type="button"
                             data-i18n-title="chart.cvd_on" data-i18n="chart.cvd"
-                            title="Скрыть CVD-стрелки">🎯 CVD</button>
-                    <span class="cvd-stat" id="cvd-stat" title="Кто двигает цену в текущей свече"></span>
-                    <button class="chart-toggle" id="chart-toggle" type="button"
-                            data-i18n-title="chart.toggle_title"
-                            title="Свернуть/развернуть график">▾</button>
+                            title="Скрыть CVD-треугольники">🎯 CVD</button>
+                    <button class="profile-toggle oi-toggle" id="oi-toggle" type="button"
+                            data-i18n-title="chart.oi_on" data-i18n="chart.oi"
+                            title="Скрыть шарики открытого интереса">● OI</button>
                 </div>
             </div>
 
@@ -182,6 +229,36 @@
                 <div id="tv-chart-container"></div>
                 <!-- Cluster Canvas Overlay: ликвидации + профиль по ценам -->
                 <canvas id="cluster-canvas"></canvas>
+                <!-- Draw Canvas Overlay: фигуры теханализа пользователя -->
+                <canvas id="draw-canvas"></canvas>
+                <div class="draw-toolbar hidden" id="draw-toolbar" role="toolbar">
+                    <button type="button" data-draw-tool="line" data-i18n-title="draw.line"
+                            title="Трендовая линия">╲</button>
+                    <button type="button" data-draw-tool="ray" data-i18n-title="draw.ray"
+                            title="Луч">→</button>
+                    <button type="button" data-draw-tool="horiz" data-i18n-title="draw.horiz"
+                            title="Горизонтальная линия">─</button>
+                    <button type="button" data-draw-tool="rect" data-i18n-title="draw.rect"
+                            title="Прямоугольник">▭</button>
+                    <button type="button" data-draw-tool="fib" data-i18n-title="draw.fib"
+                            title="Уровни Фибоначчи">F</button>
+                    <button type="button" data-draw-tool="eraser" data-i18n-title="draw.eraser"
+                            title="Ластик: клик по фигуре удаляет её">⌫</button>
+                    <span class="draw-colors">
+                        <button type="button" data-draw-color="#ffd166" class="active"
+                                style="background:#ffd166" aria-label="gold"></button>
+                        <button type="button" data-draw-color="#22d3ee"
+                                style="background:#22d3ee" aria-label="cyan"></button>
+                        <button type="button" data-draw-color="#a78bfa"
+                                style="background:#a78bfa" aria-label="violet"></button>
+                        <button type="button" data-draw-color="#fb7185"
+                                style="background:#fb7185" aria-label="rose"></button>
+                    </span>
+                    <button type="button" id="draw-clear" data-i18n-title="draw.clear"
+                            title="Убрать все фигуры">🗑</button>
+                    <button type="button" id="draw-close" data-i18n-title="draw.close"
+                            title="Закрыть рисование">✕</button>
+                </div>
             </div>
         </section>
 

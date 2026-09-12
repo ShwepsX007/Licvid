@@ -47,6 +47,20 @@ async def check_rest(session, name, url):
         return False
 
 
+async def check_rest_post(session, name, url, payload):
+    t0 = time.time()
+    try:
+        async with session.post(url, json=payload,
+                                timeout=aiohttp.ClientTimeout(total=10)) as r:
+            body = await r.text()
+            ms = int((time.time() - t0) * 1000)
+            line(name, r.status == 200, f"HTTP {r.status}, {ms} мс, {len(body)} байт")
+            return r.status == 200
+    except Exception as e:
+        line(name, False, str(e)[:90])
+        return False
+
+
 async def check_ws(session, name, url, subscribe=None, match=None, wait=WAIT,
                    gzipped=False, on_message=None):
     """Подключается, шлёт подписку и ждёт ПЕРВОЕ подходящее сообщение."""
@@ -118,6 +132,8 @@ async def main():
                          "https://api.hbdm.com/linear-swap-api/v1/swap_contract_info?contract_code=BTC-USDT")
         await check_rest(s, "BitMEX instruments",
                          "https://www.bitmex.com/api/v1/instrument/active")
+        await check_rest_post(s, "Hyperliquid meta universe",
+                              "https://api.hyperliquid.xyz/info", {"type": "meta"})
 
         print("\nWebSocket (главное — приходят ли ДАННЫЕ, а не просто connect):")
         await check_ws(s, "Binance combined aggTrade",
@@ -183,14 +199,29 @@ async def main():
                        match=lambda p: p.get("channel") == "futures.public_liquidates"
                        and bool(p.get("result")),
                        wait=max(WAIT, 20))
+        hl_coin = SYMBOL[:-4] if SYMBOL.endswith("USDT") else SYMBOL
+        await check_ws(s, f"Hyperliquid trades {hl_coin} (любые сделки)",
+                       "wss://api.hyperliquid.xyz/ws",
+                       subscribe={"method": "subscribe",
+                                  "subscription": {"type": "trades", "coin": hl_coin}},
+                       match=lambda p: p.get("channel") == "trades"
+                       and bool(p.get("data")))
+        await check_ws(s, f"Hyperliquid trades {hl_coin} (ликвидации)",
+                       "wss://api.hyperliquid.xyz/ws",
+                       subscribe={"method": "subscribe",
+                                  "subscription": {"type": "trades", "coin": hl_coin}},
+                       match=lambda p: p.get("channel") == "trades" and any(
+                           isinstance(t, dict) and "liquidation" in t
+                           for t in (p.get("data") or [])),
+                       wait=max(WAIT, 20))
 
     print("""
 Как читать:
   «НЕТ» у ликвидаций может означать просто затишье на рынке — повторите
   с большим ожиданием: python3 tools/check_exchanges.py BTCUSDT 60
   «НЕТ» у aggTrade/kline при живом connect — биржа не отдаёт этому серверу
-  рыночные данные. Тогда закрепите рабочий источник в /etc/systemd/system/licvid.service:
-      Environment=LICVID_TICK_SOURCE=bybit
+  рыночные данные. Тогда закрепите рабочий источник в /etc/systemd/system/liqscope.service:
+      Environment=LIQSCOPE_TICK_SOURCE=bybit
 """)
 
 

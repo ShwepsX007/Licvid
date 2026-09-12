@@ -123,7 +123,7 @@ async def fetch_production_map(server: str):
         universe = [u.get("name") for u in (meta.get("universe") or [])
                     if u.get("name")]
         print(f"universe перпетуумов: {len(universe)}")
-        return hl_coin_map(universe, symbols)
+        return hl_coin_map(symbols, universe)
 
 
 async def bisect(server: str) -> None:

@@ -387,9 +387,12 @@ python3 tools/check_exchanges.py ETHUSDT 60 # дольше ждать ликви
 ```bash
 python3 tools/check_hyperliquid.py BTC 15            # лента сделок одной монеты
 python3 tools/check_hyperliquid.py --bisect          # пошаговые подписки как в бою
-python3 tools/check_hyperliquid.py --soak            # долгая проверка канала (10 мин)
-python3 tools/check_hyperliquid.py --soak http://127.0.0.1:8000 3600  # час
+python3 tools/check_hyperliquid.py --soak 3600       # долгая проверка канала, 1 час
+python3 tools/check_hyperliquid.py --soak 1800 http://127.0.0.1:8000  # порядок любой
 ```
+
+Число в аргументах `--soak` — длительность в секундах, адрес сервера можно
+указать до или после числа (по умолчанию `http://127.0.0.1:8000`).
 
 `--bisect` проходит соединение за ~16 с и проверяет только темп подписок.
 `--soak` держит соединение минуты/часы с теми же подписками и тем же пингом,

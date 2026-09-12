@@ -11,14 +11,17 @@
 
 3) soak (те же подписки + держим соединение минуты/часы как боевой слушатель:
    пинг раз в HL_PING_INTERVAL, контроль pong, возраста входящих; при обрыве —
-   код закрытия и время жизни). Код выхода: 0 — пережил весь срок, 4 — умер:
-     venv/bin/python3 tools/check_hyperliquid.py --soak
+   код закрытия и время жизни). Код выхода: 0 — пережил весь срок, 4 — умер.
+   Аргументы в любом порядке: число — длительность в секундах, остальное —
+   адрес сервера (по умолчанию http://127.0.0.1:8000):
+     venv/bin/python3 tools/check_hyperliquid.py --soak 3600
      venv/bin/python3 tools/check_hyperliquid.py --soak http://127.0.0.1:8000 1800
 """
 
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 
@@ -327,13 +330,25 @@ async def soak(server: str, dur: float) -> int:
     return 4
 
 
+def parse_soak_args(args):
+    """Аргументы --soak в любом порядке: число — секунды, остальное — сервер."""
+    server = "http://127.0.0.1:8000"
+    dur = 600.0
+    for a in args:
+        # только положительное число (не URL, не хост:порт)
+        if isinstance(a, str) and re.fullmatch(r"\d+(\.\d+)?", a):
+            dur = float(a)
+        elif a:
+            server = a
+    return server, dur
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--bisect":
         asyncio.run(bisect(sys.argv[2] if len(sys.argv) > 2
                            else "http://127.0.0.1:8000"))
     elif len(sys.argv) > 1 and sys.argv[1] == "--soak":
-        server = sys.argv[2] if len(sys.argv) > 2 else "http://127.0.0.1:8000"
-        dur = float(sys.argv[3]) if len(sys.argv) > 3 else 600.0
+        server, dur = parse_soak_args(sys.argv[2:])
         sys.exit(asyncio.run(soak(server, dur)))
     else:
         coin = sys.argv[1] if len(sys.argv) > 1 else "BTC"

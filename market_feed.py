@@ -519,7 +519,9 @@ def parse_hyperliquid_msg(payload: dict,
 
 def hl_close_reason(msg_type, close_code, exc, data) -> str:
     """Текст причины закрытия HL-сокета: код + исключение + данные кадра."""
-    return (f"hyperliquid ws {msg_type}: close_code={close_code} "
+    # Имя вместо числа: на Python 3.11+ str(IntEnum) печатает «257», а не «CLOSED»
+    kind = getattr(msg_type, "name", None) or str(msg_type)
+    return (f"hyperliquid ws {kind}: close_code={close_code} "
             f"exc={exc!r} data={str(data)[:150]}")
 
 

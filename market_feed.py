@@ -653,7 +653,11 @@ class MarketFeed:
         }
         for name, coro in spawn.items():
             if name in self.enabled_exchanges:
-                self._tasks.append(asyncio.create_task(self._supervise(name, coro), name=f"liq-{name}"))
+                # hyperliquid жёстко режет частые переподключения (RST), поэтому
+                # стартуем с длинной паузы, чтобы не продлевать лимит долбёжкой
+                base = 15.0 if name == "hyperliquid" else 2.0
+                self._tasks.append(asyncio.create_task(
+                    self._supervise(name, coro, base_delay=base), name=f"liq-{name}"))
 
         self.oi.bind(self._session)
         self._tasks.append(asyncio.create_task(self._price_engine(), name="prices"))
@@ -704,13 +708,13 @@ class MarketFeed:
                     await asyncio.sleep(interval)
         return asyncio.create_task(runner())
 
-    async def _supervise(self, name: str, factory):
+    async def _supervise(self, name: str, factory, base_delay: float = 2.0):
         """Перезапускает слушателя при любой ошибке с нарастающей паузой."""
-        delay = 2.0
+        delay = base_delay
         while not self._stop.is_set():
             try:
                 await factory()
-                delay = 2.0
+                delay = base_delay
             except asyncio.CancelledError:
                 raise
             except Exception as e:

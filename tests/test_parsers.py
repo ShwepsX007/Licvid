@@ -10,9 +10,10 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from market_feed import (canon, canon_bitmex, parse_binance_msg,
-                         parse_bitget_msg, parse_bitmex_msg, parse_bybit_msg,
-                         parse_gate_msg, parse_htx_msg, parse_okx_msg,
+from market_feed import (canon, canon_bitmex, hl_coin_map,
+                         parse_binance_msg, parse_bitget_msg, parse_bitmex_msg,
+                         parse_bybit_msg, parse_gate_msg, parse_htx_msg,
+                         parse_hyperliquid_msg, parse_okx_msg,
                          to_binance, to_bybit, to_gate, to_okx)
 
 ok = 0
@@ -194,6 +195,53 @@ check("update не учитываем (задвоение объёма)",
                        instr) == [])
 check("без метаданных линейный пропускаем",
       parse_bitmex_msg(linear, {}) == [])
+
+print("hyperliquid trades")
+hl_universe = ["BTC", "ETH", "kPEPE", "KAS", "HYPE"]
+hl_map = hl_coin_map(["BTC_USDT", "PEPE_USDT", "KAS_USDT", "DOGE_USDT"], hl_universe)
+check("точное совпадение", hl_map.get("BTC") == "BTC_USDT", hl_map)
+check("k-префикс", hl_map.get("kPEPE") == "PEPE_USDT", hl_map)
+check("KAS не трогаем", hl_map.get("KAS") == "KAS_USDT", hl_map)
+check("нет в universe — нет в карте", "DOGE" not in hl_map and "kDOGE" not in hl_map)
+hl_msg = {
+    "channel": "trades",
+    "data": [
+        {"coin": "BTC", "side": "A", "px": "50000.5", "sz": "1.2",
+         "time": 1700000000123, "hash": "0xaaa",
+         "liquidation": {"liquidatedUser": "0x111", "markPx": "50001.0",
+                         "method": "market"}},
+        {"coin": "kPEPE", "side": "B", "px": "0.00001234", "sz": "5000000",
+         "time": 1700000000456, "hash": "0xbbb",
+         "liquidation": {"liquidatedUser": "0x222", "markPx": "0.000012",
+                         "method": "market"}},
+        # обычная сделка без liquidation — не ликвидация
+        {"coin": "ETH", "side": "A", "px": "3000", "sz": "0.5",
+         "time": 1700000000789, "hash": "0xccc"},
+    ],
+}
+res = parse_hyperliquid_msg(hl_msg, hl_map)
+check("2 ликвидации из 3 сделок", len(res) == 2, res)
+check("A → LONG", res[0]["side"] == "LONG")
+check("B → SHORT", res[1]["side"] == "SHORT")
+check("символ BTC", res[0]["symbol"] == "BTC_USDT")
+check("kPEPE → PEPE_USDT", res[1]["symbol"] == "PEPE_USDT")
+check("цена", res[0]["price"] == 50000.5)
+check("время мс → с", abs(res[0]["ts"] - 1700000000.123) < 0.01)
+check("без карты — наивный маппинг",
+      parse_hyperliquid_msg(hl_msg)[0]["symbol"] == "BTC_USDT")
+check("чужой канал игнор",
+      parse_hyperliquid_msg({"channel": "l2Book", "data": []}, hl_map) == [])
+check("не словарь игнор", parse_hyperliquid_msg([1, 2, 3]) == [])
+check("битые числа пропускаем",
+      parse_hyperliquid_msg(
+          {"channel": "trades",
+           "data": [{"coin": "BTC", "side": "A", "px": "zzz", "sz": "1",
+                     "time": 1, "liquidation": {}}]}, hl_map) == [])
+check("нулевой объём пропускаем",
+      parse_hyperliquid_msg(
+          {"channel": "trades",
+           "data": [{"coin": "BTC", "side": "A", "px": "5", "sz": "0",
+                     "time": 1, "liquidation": {}}]}, hl_map) == [])
 
 print()
 print(f"итог: {ok} ок, {fail} ошибок")

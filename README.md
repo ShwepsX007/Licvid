@@ -56,7 +56,7 @@ After=network-online.target
 [Service]
 WorkingDirectory=/root/LiqScope
 Environment=LIQSCOPE_SYMBOLS_LIMIT=40
-Environment=LIQSCOPE_EXCHANGES=binance,bybit,okx,gate,bitget,htx,bitmex
+Environment=LIQSCOPE_EXCHANGES=binance,bybit,okx,gate,bitget,htx,bitmex,hyperliquid
 ExecStart=/usr/bin/python3 -m uvicorn server:app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=5
@@ -84,7 +84,7 @@ sudo systemctl enable --now liqscope
 | Поток | Источник | Как часто | Что обновляет |
 |---|---|---|---|
 | **Тики** | Binance combined `?streams=<sym>@aggTrade` → Binance raw + SUBSCRIBE → Bybit `publicTrade` | **каждая сделка**, без буферизации | цену и свечу открытого графика — сразу, тем же тиком |
-| Ликвидации | 7 бирж, WS | **каждое событие**, сразу | лента, маркеры, кластеры |
+| Ликвидации | 8 бирж, WS | **каждое событие**, сразу | лента, маркеры, кластеры |
 | Свеча/объём | Binance `kline_1m` | ~250 мс | авторитетный объём свечи; цену не трогает, если тик свежее |
 | Цены всех монет | из тиков и `kline_1m` | 1 с | подписи цен у монет |
 | Статистика | агрегаты в памяти | 2 с | шапка, топ монет |
@@ -113,7 +113,7 @@ sudo systemctl enable --now liqscope
 | Переменная | По умолчанию | Назначение |
 |---|---|---|
 | `LIQSCOPE_SYMBOLS_LIMIT` | `40` | сколько монет держать в списке (топ по обороту) |
-| `LIQSCOPE_EXCHANGES` | `binance,bybit,okx,gate,bitget,htx,bitmex` | какие биржи слушать |
+| `LIQSCOPE_EXCHANGES` | `binance,bybit,okx,gate,bitget,htx,bitmex,hyperliquid` | какие биржи слушать |
 | `LIQSCOPE_DEMO` | `0` | `1` — синтетический поток для проверки интерфейса без бирж (в шапке загорится бейдж `DEMO`) |
 | `LIQSCOPE_HISTORY_MAX` | `60000` | сколько событий держать в памяти |
 | `LIQSCOPE_HISTORY_FILE` | `data/liq_history.jsonl` | файл истории ликвидаций (JSONL, append). Пустая строка / `0` / `off` — не писать на диск |
@@ -161,21 +161,23 @@ sudo systemctl enable --now liqscope
 | Bitget UTA | `liquidation` (instType=usdt-futures) | `side=buy` → **LONG**, `amount` уже в USDT |
 | HTX (Huobi) USDT-M | `public.*.liquidation_orders` (gzip) | `direction=sell` → **LONG**, `trade_turnover` в USDT |
 | BitMEX | таблица `liquidation` | `side=Sell` → **LONG**; учитываем только `action=insert`, размер переводим из контрактов через `underlyingToPositionMultiplier` (инверсные `XBTUSD`: 1 контракт = 1 USD) |
+| Hyperliquid | `trades` на каждую монету | только сделки с объектом `liquidation`; тейкер `A` (продажа) → **LONG**. Маппинг монет — из `universe` (`POST /info {"type": "meta"}`), дешёвые токены с префиксом `k` (`kPEPE`) |
 
 Отключить лишние: `LIQSCOPE_EXCHANGES=binance,bybit,bitget`.
 
-### Почему нет Coinbase, Hyperliquid, KuCoin и BingX
+### Почему нет Coinbase, KuCoin и BingX
 
 | Биржа | Почему |
 |---|---|
-| **Hyperliquid** | В публичном WS (`wss://api.hyperliquid.xyz/ws`) нет глобального канала ликвидаций: `trades` не содержит признака ликвидации, а `userFills`/`userEvents` требуют конкретный адрес кошелька. Ликвидации HL отдают только платные агрегаторы (Bitquery, PurrData) — можно подключить, если нужен именно HL |
 | **Coinbase** | На спотовой бирже ликвидаций не бывает; у Coinbase International (деривативы) в публичном WS каналов `liquidation` нет |
 | **KuCoin Futures** | Публичные топики — стакан, сделки, тикер, funding. Ликвидации есть только в приватном канале своих ордеров (`tradeType=liquid`) |
 | **BingX** | В публичном WS перпетуалов каналов ликвидаций нет (только стакан/сделки/свечи/тикер) |
 
-Если очень нужны Hyperliquid или KuCoin — их можно добавить через платный агрегатор
+Если очень нужен KuCoin — его можно добавить через платный агрегатор
 или через приватные ключи (только свои позиции), но «как у всех остальных»,
-из публичного потока — нельзя.
+из публичного потока — нельзя. (Hyperliquid так когда-то и считался
+закрытым, но оказалось, что его `trades` помечают ликвидации объектом
+`liquidation` — поэтому он теперь восьмой в списке.)
 
 Цены и свечи: WS `kline_1m` Binance, история — REST Binance → Bybit → OKX
 (что первым ответит). Если Binance недоступен из вашей страны, терминал

@@ -8,7 +8,7 @@ Type=simple
 WorkingDirectory=/root/LiqScope
 Environment=PYTHONUNBUFFERED=1
 Environment=LIQSCOPE_SYMBOLS_LIMIT=40
-Environment=LIQSCOPE_EXCHANGES=binance,bybit,okx,gate,bitget,htx,bitmex
+Environment=LIQSCOPE_EXCHANGES=binance,bybit,okx,gate,bitget,htx,bitmex,hyperliquid
 # Источник потиковых данных для графика. По умолчанию пробуется Binance,
 # затем Bybit. Если Binance на этом сервере не отдаёт сделки — раскомментируйте:
 # Environment=LIQSCOPE_TICK_SOURCE=bybit

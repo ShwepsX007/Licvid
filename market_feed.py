@@ -72,6 +72,8 @@ HTX_WS = "wss://api.hbdm.com/linear-swap-notification"
 # BitMEX: таблица liquidation
 BITMEX_WS = "wss://ws.bitmex.com/realtime?subscribe=liquidation"
 BITMEX_REST = "https://www.bitmex.com/api/v1"
+HL_REST = "https://api.hyperliquid.xyz"
+HL_WS = "wss://api.hyperliquid.xyz/ws"
 
 # Запасной список монет, если ни одна биржа не ответила на REST
 FALLBACK_SYMBOLS = [
@@ -131,6 +133,28 @@ def to_gate(symbol: str) -> str:
 
 def to_okx(symbol: str) -> str:
     return canon(symbol).replace("_", "-") + "-SWAP"
+
+
+def hl_coin_map(symbols: Iterable[str], universe: Iterable[str]) -> Dict[str, str]:
+    """Монета Hyperliquid -> канонический символ.
+
+    Дешёвые токены у HL торгуются с префиксом k (kPEPE, kSHIB): сначала ищем
+    точное совпадение базы, потом k+база. Вслепую префикс не срезаем —
+    есть монеты, реально начинающиеся на K (KAS).
+    """
+    # Ключи — в оригинальном регистре universe (kPEPE с маленькой k):
+    # именно так монета приходит в подписках и сделках.
+    by_upper: Dict[str, str] = {}
+    for c in universe:
+        by_upper.setdefault(str(c or "").upper(), str(c or ""))
+    out = {}
+    for sym in symbols:
+        base = base_of(sym)
+        if base in by_upper:
+            out[by_upper[base]] = canon(sym)
+        elif "K" + base in by_upper:
+            out[by_upper["K" + base]] = canon(sym)
+    return out
 
 
 def base_of(symbol: str) -> str:
@@ -440,6 +464,44 @@ def parse_bitmex_msg(payload: dict,
     return out
 
 
+def parse_hyperliquid_msg(payload: dict,
+                          coin_map: Optional[Dict[str, str]] = None) -> List[dict]:
+    """Hyperliquid: channel=trades, data — список сделок.
+
+    Ликвидации — это те же сделки, но с объектом 'liquidation'
+    (liquidatedUser/markPx/method); остальные игнорируем.
+    side — сторона тейкера: 'A' (ask/продажа) → вынесли LONG.
+    coin_map: 'BTC' -> 'BTC_USDT' (строится из universe, см. hl_coin_map).
+    """
+    if not isinstance(payload, dict):
+        return []
+    if payload.get("channel") != "trades":
+        return []
+    coin_map = coin_map or {}
+    out = []
+    for t in payload.get("data") or []:
+        if not isinstance(t, dict):
+            continue
+        if "liquidation" not in t:
+            continue
+        raw_coin = str(t.get("coin") or "")
+        try:
+            price = float(t.get("px") or 0)
+            qty = float(t.get("sz") or 0)
+            ts = float(t.get("time") or 0) / 1000.0
+        except (TypeError, ValueError):
+            continue
+        if price <= 0 or qty <= 0:
+            continue
+        out.append({
+            "symbol": (coin_map.get(raw_coin) or coin_map.get(raw_coin.upper()) or
+                       canon(raw_coin.upper() + "_USDT")),
+            "side": "LONG" if str(t.get("side") or "").upper() == "A" else "SHORT",
+            "price": price, "qty": qty, "ts": ts or time.time(),
+        })
+    return out
+
+
 class SourceStatus:
     """Диагностика одного WS-источника (видна в /api/health)."""
 
@@ -547,7 +609,7 @@ class MarketFeed:
         self.status: Dict[str, SourceStatus] = {
             name: SourceStatus(name)
             for name in ("binance", "bybit", "okx", "gate", "bitget", "htx",
-                         "bitmex", "prices", "ticks")
+                         "bitmex", "hyperliquid", "prices", "ticks")
         }
         for name, st in self.status.items():
             if name not in ("prices", "ticks"):
@@ -557,6 +619,7 @@ class MarketFeed:
             price_fn=lambda sym: self.prices.get(sym),
             bitmex_meta_fn=lambda: self.bitmex_instruments)
 
+        self.hl_coin_map: Dict[str, str] = {}   # монета HL -> канон (из universe)
         self.started_at = time.time()
         self.symbols_source = "fallback"
         self._session: Optional[aiohttp.ClientSession] = None
@@ -580,6 +643,7 @@ class MarketFeed:
             "bitget": self._bitget_liquidations,
             "htx": self._htx_liquidations,
             "bitmex": self._bitmex_liquidations,
+            "hyperliquid": self._hyperliquid_liquidations,
         }
         for name, coro in spawn.items():
             if name in self.enabled_exchanges:
@@ -1430,6 +1494,85 @@ class MarketFeed:
                 for ev in parse_bitmex_msg(payload, self.bitmex_instruments):
                     await self._emit("bitmex", ev["symbol"], ev["side"],
                                      ev["price"], ev["qty"], ev["ts"], usd=ev.get("usd"))
+
+    # -- Hyperliquid ---------------------------------------------------------
+    async def _hyperliquid_load_universe(self) -> set:
+        """Имена перпетуумов HL (universe из POST /info {"type": "meta"})."""
+        try:
+            async with self._session.post(f"{HL_REST}/info", json={"type": "meta"},
+                                          timeout=12) as resp:
+                data = await resp.json()
+        except Exception as e:
+            log.warning("[hyperliquid] не удалось загрузить universe: %s", e)
+            return set()
+        names = set()
+        for row in (data or {}).get("universe") or []:
+            name = str((row or {}).get("name") or "").upper()
+            if name:
+                names.add(name)
+        return names
+
+    async def _hyperliquid_liquidations(self):
+        """trades-подписка на каждую монету; ликвидации помечены объектом."""
+        st = self.status["hyperliquid"]
+        universe = await self._hyperliquid_load_universe()
+        if universe:
+            log.info("[hyperliquid] universe перпетуумов: %d", len(universe))
+
+        def rebuild_map():
+            if universe:
+                self.hl_coin_map = hl_coin_map(self.symbols, universe)
+            else:   # universe недоступен — подписываемся на базы как есть
+                self.hl_coin_map = {base_of(s): canon(s) for s in self.symbols}
+
+        rebuild_map()
+        async with self._session.ws_connect(HL_WS, heartbeat=None, timeout=25) as ws:
+            subscribed: set = set()
+
+            async def sync_subs():
+                want = set(self.hl_coin_map)
+                for coin in sorted(want - subscribed):
+                    await ws.send_json({"method": "subscribe",
+                                        "subscription": {"type": "trades", "coin": coin}})
+                    subscribed.add(coin)
+                for coin in sorted(subscribed - want):
+                    try:
+                        await ws.send_json({"method": "unsubscribe",
+                                            "subscription": {"type": "trades", "coin": coin}})
+                    except Exception:
+                        pass
+                    subscribed.discard(coin)
+
+            await sync_subs()
+            st.up()
+            log.info("[hyperliquid] подписка trades на %d монет", len(subscribed))
+            loops = 0
+            while not self._stop.is_set():
+                try:
+                    msg = await ws.receive(timeout=30.0)
+                except asyncio.TimeoutError:
+                    loops += 1
+                    if loops % 120 == 1:   # ~раз в час: новые HIP-3 маркеты
+                        universe = await self._hyperliquid_load_universe() or universe
+                    rebuild_map()
+                    try:
+                        await sync_subs()
+                        await ws.send_json({"method": "ping"})
+                    except Exception:
+                        pass
+                    continue
+                if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING,
+                                aiohttp.WSMsgType.ERROR):
+                    break
+                if msg.type != aiohttp.WSMsgType.TEXT:
+                    continue
+                try:
+                    payload = json.loads(msg.data)
+                except Exception:
+                    continue
+                for ev in parse_hyperliquid_msg(payload, self.hl_coin_map):
+                    await self._emit("hyperliquid", ev["symbol"], ev["side"],
+                                     ev["price"], ev["qty"], ev["ts"])
 
     # -- Потиковый поток сделок (для графика) --------------------------------
     def set_hot_symbols(self, symbols: Iterable[str]):

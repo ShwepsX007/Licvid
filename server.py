@@ -17,7 +17,7 @@ LiqScope Web Server — терминал ликвидаций в реально�
 
 Переменные окружения:
     LIQSCOPE_SYMBOLS_LIMIT  сколько монет держать в списке (по умолчанию 40)
-    LIQSCOPE_EXCHANGES      binance,bybit,okx,gate,bitget,htx,bitmex (по умолчанию все)
+    LIQSCOPE_EXCHANGES      binance,bybit,okx,gate,bitget,htx,bitmex,hyperliquid (по умолчанию все)
     LIQSCOPE_TICK_SOURCE    порядок источников тиков: binance,binance-raw,bybit
     LIQSCOPE_DEMO           1 — генерировать тестовый поток вместо биржевого
     LIQSCOPE_HISTORY_MAX    сколько событий держать в памяти (по умолчанию 60000)
@@ -53,7 +53,7 @@ STATIC_DIR = os.path.join(HERE, "static")
 SYMBOLS_LIMIT = int(os.getenv("LIQSCOPE_SYMBOLS_LIMIT", "40"))
 EXCHANGES = [e.strip().lower() for e in
              os.getenv("LIQSCOPE_EXCHANGES",
-                       "binance,bybit,okx,gate,bitget,htx,bitmex").split(",")
+                       "binance,bybit,okx,gate,bitget,htx,bitmex,hyperliquid").split(",")
              if e.strip()]
 # Порядок источников потиковых данных для графика (первый рабочий побеждает)
 TICK_SOURCES = [x.strip().lower() for x in
@@ -722,7 +722,8 @@ async def stats_broadcaster():
 # =============================================================================
 async def demo_generator():
     log.warning("ВКЛЮЧЁН ДЕМО-РЕЖИМ: поток ликвидаций синтетический (LIQSCOPE_DEMO=1)")
-    exchanges = ["binance", "bybit", "okx", "gate", "bitget", "htx", "bitmex"]
+    exchanges = ["binance", "bybit", "okx", "gate", "bitget", "htx", "bitmex",
+                   "hyperliquid"]
     while True:
         try:
             await asyncio.sleep(random.uniform(0.15, 0.9))

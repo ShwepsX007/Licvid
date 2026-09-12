@@ -1538,6 +1538,46 @@ class MarketFeed:
         rebuild_map()
         async with self._session.ws_connect(HL_WS, heartbeat=None, timeout=25) as ws:
             subscribed: set = set()
+            acked: set = set()
+            seen_msgs = 0
+
+            async def handle_text(raw: str):
+                """Разобрать одно текстовое сообщение; вернуть монету, если это
+                subscriptionResponse на subscribe (иначе None)."""
+                nonlocal seen_msgs
+                try:
+                    payload = json.loads(raw)
+                except Exception:
+                    return None
+                if seen_msgs < 3:
+                    # диагностика первых секунд соединения: видно, долетает
+                    # ли вообще что-то до разрыва (канал + размер + голова)
+                    seen_msgs += 1
+                    log.info("[hyperliquid] msg#%d: channel=%s size=%d %.150s",
+                             seen_msgs, payload.get("channel", "?"),
+                             len(raw), raw)
+                if payload.get("channel") == "subscriptionResponse":
+                    data = payload.get("data") or {}
+                    blob = json.dumps(payload, ensure_ascii=False)[:300]
+                    if "error" in blob.lower() or "fail" in blob.lower():
+                        log.warning("[hyperliquid] ошибка подписки: %s", blob)
+                    sub = data.get("subscription") or {}
+                    coin = sub.get("coin")
+                    if data.get("method") == "subscribe" and coin:
+                        acked.add(coin)
+                    return coin
+                for ev in parse_hyperliquid_msg(payload, self.hl_coin_map):
+                    await self._emit("hyperliquid", ev["symbol"], ev["side"],
+                                     ev["price"], ev["qty"], ev["ts"])
+                return None
+
+            def raise_on_close(msg):
+                # Громкий разрыв вместо тихого: код закрытия попадёт в лог
+                # и в подсказку плашки, а backoff супервайзера начнёт расти
+                # и перестанет долбить биржу частыми реконнектами.
+                err_data = msg.data if msg.type == aiohttp.WSMsgType.ERROR else ""
+                raise ConnectionError(hl_close_reason(
+                    msg.type, ws.close_code, ws.exception(), err_data))
 
             async def sync_subs():
                 want = set(self.hl_coin_map)
@@ -1545,9 +1585,27 @@ class MarketFeed:
                     await ws.send_json({"method": "subscribe",
                                         "subscription": {"type": "trades", "coin": coin}})
                     subscribed.add(coin)
-                    # подписки врассыпную, а не пачкой: некоторые WAF/лимитеры
-                    # режут резкие всплески сообщений сразу после handshake
-                    await asyncio.sleep(0.05)
+                    # Каждую подписку подтверждаем ответом биржи (темп ~1.5/с,
+                    # сокет постоянно читается — как в зонде tools/check_hyperliquid.py
+                    # --bisect, который выживает 23/23, в отличие от всплеска
+                    # подписок вслепую: его гейтвей HL рвёт примерно через секунду).
+                    # Всё приходящее мимоходом обрабатывается штатно.
+                    t_end = time.monotonic() + 2.5
+                    while coin not in acked:
+                        try:
+                            msg = await ws.receive(
+                                timeout=max(0.1, t_end - time.monotonic()))
+                        except asyncio.TimeoutError:
+                            break
+                        if msg.type in (aiohttp.WSMsgType.CLOSED,
+                                        aiohttp.WSMsgType.CLOSING,
+                                        aiohttp.WSMsgType.ERROR):
+                            raise_on_close(msg)
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            await handle_text(msg.data)
+                    if coin not in acked:
+                        log.debug("[hyperliquid] %s: нет subscriptionResponse "
+                                  "за 2.5с — иду дальше", coin)
                 for coin in sorted(subscribed - want):
                     try:
                         await ws.send_json({"method": "unsubscribe",
@@ -1555,12 +1613,12 @@ class MarketFeed:
                     except Exception:
                         pass
                     subscribed.discard(coin)
+                    acked.discard(coin)
 
             await sync_subs()
             st.up()
             log.info("[hyperliquid] подписка trades на %d монет", len(subscribed))
             loops = 0
-            seen_msgs = 0
             while not self._stop.is_set():
                 try:
                     msg = await ws.receive(timeout=30.0)
@@ -1577,33 +1635,10 @@ class MarketFeed:
                     continue
                 if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING,
                                 aiohttp.WSMsgType.ERROR):
-                    # Громкий разрыв вместо тихого: код закрытия попадёт в лог
-                    # и в подсказку плашки, а backoff супервайзера начнёт расти
-                    # и перестанет долбить биржу реконнектом каждые 2 секунды.
-                    err_data = msg.data if msg.type == aiohttp.WSMsgType.ERROR else ""
-                    raise ConnectionError(hl_close_reason(
-                        msg.type, ws.close_code, ws.exception(), err_data))
+                    raise_on_close(msg)
                 if msg.type != aiohttp.WSMsgType.TEXT:
                     continue
-                try:
-                    payload = json.loads(msg.data)
-                except Exception:
-                    continue
-                if seen_msgs < 3:
-                    # диагностика первых секунд соединения: видно, долетает
-                    # ли вообще что-то до разрыва (канал + размер + голова)
-                    seen_msgs += 1
-                    log.info("[hyperliquid] msg#%d: channel=%s size=%d %.150s",
-                             seen_msgs, payload.get("channel", "?"),
-                             len(msg.data), msg.data)
-                if payload.get("channel") == "subscriptionResponse":
-                    blob = json.dumps(payload, ensure_ascii=False)[:300]
-                    if "error" in blob.lower() or "fail" in blob.lower():
-                        log.warning("[hyperliquid] ошибка подписки: %s", blob)
-                    continue
-                for ev in parse_hyperliquid_msg(payload, self.hl_coin_map):
-                    await self._emit("hyperliquid", ev["symbol"], ev["side"],
-                                     ev["price"], ev["qty"], ev["ts"])
+                await handle_text(msg.data)
 
     # -- Потиковый поток сделок (для графика) --------------------------------
     def set_hot_symbols(self, symbols: Iterable[str]):

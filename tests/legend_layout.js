@@ -177,10 +177,14 @@ async function main() {
     "grid-rule:" + (mob900.indexOf(".layer-cell {") !== -1));
   check("stat hugs button", cssBlock(".layer-cell").indexOf("space-between") === -1);
 
-  // --- кнопки свернуть/развернуть прибиты к правому краю ---
-  check("toggles pinned right",
-    cssBlock("#chart-toggle").indexOf("margin-left: auto") !== -1);
+  // --- правый угол: Слои + рисование + свернуть/развернуть, прибиты и не бегают ---
+  check("right cluster pinned",
+    cssBlock("#layer-call").indexOf("margin-left: auto") !== -1);
   const legendKids = Array.from(doc.querySelector(".chart-legend").children);
+  const kidIds = legendKids.map((k) => k.id || k.className);
+  check("right cluster order",
+    kidIds.slice(-4).join(",") === "layer-call,draw-toggle,chart-toggle,chart-expand",
+    kidIds.slice(-4).join(","));
   check("toggles last in legend",
     legendKids.length >= 2 &&
     legendKids[legendKids.length - 2].id === "chart-toggle" &&

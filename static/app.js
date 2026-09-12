@@ -788,11 +788,17 @@
             const c = clusters.get(key) || {
                 key: key, time: t, lo: lo, hi: hi, level: level,
                 longUsd: 0, shortUsd: 0, total: 0, count: 0, longN: 0, shortN: 0, ids: [],
+                exchs: {},
             };
             if (item.side === "SELL") { c.longUsd += item.usd; c.longN += 1; }
             else { c.shortUsd += item.usd; c.shortN += 1; }
             c.total += item.usd;
             c.count += 1;
+            const exKey = String(item.exchange || "?").toUpperCase();
+            const slot = c.exchs[exKey] || { n: 0, usd: 0 };
+            slot.n += 1;
+            slot.usd += item.usd;
+            c.exchs[exKey] = slot;
             if (item.id != null) c.ids.push(item.id);
             clusters.set(key, c);
         });
@@ -856,7 +862,7 @@
             clusterHits.push({ kind: "liq", x: fx, y: fy, w: bw, h: bh, key: c.key, ids: c.ids,
                 time: c.time, price: price, total: c.total, count: c.count,
                 longUsd: c.longUsd, shortUsd: c.shortUsd,
-                longN: c.longN, shortN: c.shortN, whale: whale });
+                longN: c.longN, shortN: c.shortN, whale: whale, exchs: c.exchs });
 
             const glow = 6 + Math.min(12, (Math.log10(Math.max(c.total, 10)) - 3) * 3);
             const rad = showLabel ? 4 : 3;
@@ -2373,6 +2379,20 @@
                 : '<span class="badge-side short">' + I18n.t("modal.short_desc") + "</span>";
             valRowHtml = usdRow("$" + fmtUsdFull(hit.total) +
                 (hit.whale ? " · 🐋 " + I18n.t("modal.whale") : ""));
+            // Биржи кластера: бейдж + число событий + сумма, по убыванию суммы.
+            let exchRow = "";
+            if (hit.exchs) {
+                const parts = Object.keys(hit.exchs)
+                    .map((e) => ({ e: e, n: hit.exchs[e].n, usd: hit.exchs[e].usd }))
+                    .sort((a, b) => b.usd - a.usd)
+                    .map((o) => '<span class="exch-badge ' + o.e.toLowerCase() + '">' +
+                        o.e.charAt(0) + o.e.slice(1).toLowerCase() + "</span> ×" + o.n +
+                        " $" + fmtUsdShort(o.usd));
+                if (parts.length) {
+                    exchRow = "<p><strong>" + I18n.t("modal.exchs") + "</strong> " +
+                        parts.join(" · ") + "</p>";
+                }
+            }
             extraRows =
                 "<p><strong>" + I18n.t("modal.level") + "</strong> ≈ " +
                 fmtPrice(hit.price) + "</p>" +
@@ -2380,7 +2400,8 @@
                 " · " + hit.longN + " LONG / " + hit.shortN + " SHORT</p>" +
                 "<p><strong>" + I18n.t("modal.split") + "</strong> " +
                 '<span class="badge-side long">L $' + fmtUsdShort(hit.longUsd) + "</span> " +
-                '<span class="badge-side short">S $' + fmtUsdShort(hit.shortUsd) + "</span></p>";
+                '<span class="badge-side short">S $' + fmtUsdShort(hit.shortUsd) + "</span></p>" +
+                exchRow;
             about = I18n.t("modal.clust_about");
         } else if (kind === "cvd") {
             const abs = Math.abs(hit.d);

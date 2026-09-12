@@ -1605,9 +1605,9 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
     box-shadow: 0 0 8px rgba(74, 222, 128, 0.2);
 }
 
-/* Кнопки сворачивания/разворота графика: прибиты к правому краю легенды
-   (margin-left: auto у первой) — стоят в углу, не тянутся за кнопками слоёв. */
-#chart-toggle { margin-left: auto; }
+/* Правый угол легенды: «☰ Слои», рисование, свернуть/развернуть —
+   прибиты к краю (margin-left: auto у первой) и не бегают за цифрами слоёв. */
+#layer-call { margin-left: auto; }
 .chart-toggle {
     display: inline-flex;
     align-items: center;

@@ -243,6 +243,8 @@ async function main() {
   check("events", t.indexOf("2 · 2 LONG / 0 SHORT") !== -1, t.slice(0, 200));
   check("split", t.indexOf("L $120.0K") !== -1 && t.indexOf("S $0") !== -1,
     t.slice(0, 220));
+  check("exchanges", t.indexOf("Биржи:") !== -1 && t.indexOf("Binance") !== -1 &&
+    t.indexOf("×2") !== -1, t.slice(0, 300));
   check("about", t.indexOf("слипшиеся") !== -1);
   check("feed highlight 2+1", hits() === 2 && dims() === 1,
     "hit=" + hits() + " dim=" + dims());

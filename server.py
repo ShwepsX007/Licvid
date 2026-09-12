@@ -203,11 +203,20 @@ class Client:
 
     async def send(self, msg: dict) -> bool:
         try:
-            await self.ws.send_json(msg)
+            # Медленный/зависший клиент не должен подвешивать читателей
+            # биржевых сокетов: send_json внутри ждёт drain() без лимита, а
+            # TCP-буфер забитого клиента может не освобождаться минутами.
+            # Всё, что ушло в транспорт до таймаута, остаётся валидным кадром,
+            # так что отмена безопасна. Застряли — клиент мёртв, выкидываем.
+            await asyncio.wait_for(self.ws.send_json(msg),
+                                   timeout=self.SEND_TIMEOUT)
             return True
         except Exception:
             self.alive = False
             return False
+
+    # см. send(): заведомо больше любого нормального сетевого хода
+    SEND_TIMEOUT = 5.0
 
 
 class Hub:

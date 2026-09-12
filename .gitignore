@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Рантайм-данные (срезы оборота для volAvg7d)
+data/
+*.tmp

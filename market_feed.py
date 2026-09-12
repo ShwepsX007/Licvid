@@ -74,6 +74,11 @@ BITMEX_WS = "wss://ws.bitmex.com/realtime?subscribe=liquidation"
 BITMEX_REST = "https://www.bitmex.com/api/v1"
 HL_REST = "https://api.hyperliquid.xyz"
 HL_WS = "wss://api.hyperliquid.xyz/ws"
+# Hyperliquid закрывает соединение, если в течение ~60 секунд не было обмена
+# сообщениями. Пинг шлём раз в 50 секунд (как официальный python-sdk) ОТДЕЛЬНОЙ
+# задачей, а не «по простою»: на топ-40 монет поток trades почти не замолкает,
+# receive-таймаут не срабатывает, и пинг, завязанный на него, не уходит вовсе.
+HL_PING_INTERVAL = 50.0
 
 # Запасной список монет, если ни одна биржа не ответила на REST
 FALLBACK_SYMBOLS = [
@@ -1523,7 +1528,13 @@ class MarketFeed:
         return names
 
     async def _hyperliquid_liquidations(self):
-        """trades-подписка на каждую монету; ликвидации помечены объектом."""
+        """trades-подписка на каждую монету; ликвидации помечены объектом.
+
+        Heartbeat: Hyperliquid рвёт «тихие» соединения через ~60 секунд.
+        Пинг шлётся отдельной задачей строго по таймеру (HL_PING_INTERVAL),
+        независимо от входящего потока, — иначе на активной ленте trades
+        receive-таймаут не срабатывает и пинг не отправляется вообще.
+        """
         st = self.status["hyperliquid"]
         universe = await self._hyperliquid_load_universe()
         if universe:
@@ -1540,6 +1551,13 @@ class MarketFeed:
             subscribed: set = set()
             acked: set = set()
             seen_msgs = 0
+            # Подписки (sync_subs) и heartbeat-пинги шлём через общий замок:
+            # aiohttp не гарантирует безопасность параллельных send_json.
+            send_lock = asyncio.Lock()
+
+            async def send(payload: dict):
+                async with send_lock:
+                    await ws.send_json(payload)
 
             async def handle_text(raw: str):
                 """Разобрать одно текстовое сообщение; вернуть монету, если это
@@ -1582,8 +1600,8 @@ class MarketFeed:
             async def sync_subs():
                 want = set(self.hl_coin_map)
                 for coin in sorted(want - subscribed):
-                    await ws.send_json({"method": "subscribe",
-                                        "subscription": {"type": "trades", "coin": coin}})
+                    await send({"method": "subscribe",
+                                "subscription": {"type": "trades", "coin": coin}})
                     subscribed.add(coin)
                     # Каждую подписку подтверждаем ответом биржи (темп ~1.5/с,
                     # сокет постоянно читается — как в зонде tools/check_hyperliquid.py
@@ -1608,37 +1626,62 @@ class MarketFeed:
                                   "за 2.5с — иду дальше", coin)
                 for coin in sorted(subscribed - want):
                     try:
-                        await ws.send_json({"method": "unsubscribe",
-                                            "subscription": {"type": "trades", "coin": coin}})
+                        await send({"method": "unsubscribe",
+                                    "subscription": {"type": "trades", "coin": coin}})
                     except Exception:
                         pass
                     subscribed.discard(coin)
                     acked.discard(coin)
 
-            await sync_subs()
-            st.up()
-            log.info("[hyperliquid] подписка trades на %d монет", len(subscribed))
-            loops = 0
-            while not self._stop.is_set():
-                try:
-                    msg = await ws.receive(timeout=30.0)
-                except asyncio.TimeoutError:
-                    loops += 1
-                    if loops % 120 == 1:   # ~раз в час: новые HIP-3 маркеты
-                        universe = await self._hyperliquid_load_universe() or universe
-                    rebuild_map()
+            async def heartbeat():
+                """Пинг раз в HL_PING_INTERVAL секунд, независимо от потока."""
+                while not ws.closed and not self._stop.is_set():
                     try:
-                        await sync_subs()
-                        await ws.send_json({"method": "ping"})
-                    except Exception:
-                        pass
-                    continue
-                if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING,
-                                aiohttp.WSMsgType.ERROR):
-                    raise_on_close(msg)
-                if msg.type != aiohttp.WSMsgType.TEXT:
-                    continue
-                await handle_text(msg.data)
+                        await asyncio.sleep(HL_PING_INTERVAL)
+                    except asyncio.CancelledError:
+                        raise
+                    if ws.closed or self._stop.is_set():
+                        return
+                    try:
+                        await send({"method": "ping"})
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        # сокет умер — цикл чтения сам поднимет громкую ошибку
+                        log.debug("[hyperliquid] heartbeat ping не ушёл: %s", e)
+                        return
+
+            hb = asyncio.create_task(heartbeat(), name="hl-heartbeat")
+            try:
+                await sync_subs()
+                st.up()
+                log.info("[hyperliquid] подписка trades на %d монет", len(subscribed))
+                loops = 0
+                while not self._stop.is_set():
+                    try:
+                        msg = await ws.receive(timeout=30.0)
+                    except asyncio.TimeoutError:
+                        loops += 1
+                        if loops % 120 == 1:   # ~раз в час: новые HIP-3 маркеты
+                            universe = await self._hyperliquid_load_universe() or universe
+                        rebuild_map()
+                        try:
+                            await sync_subs()
+                        except Exception:
+                            pass
+                        continue
+                    if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING,
+                                    aiohttp.WSMsgType.ERROR):
+                        raise_on_close(msg)
+                    if msg.type != aiohttp.WSMsgType.TEXT:
+                        continue
+                    await handle_text(msg.data)
+            finally:
+                hb.cancel()
+                try:
+                    await hb
+                except (asyncio.CancelledError, Exception):
+                    pass
 
     # -- Потиковый поток сделок (для графика) --------------------------------
     def set_hot_symbols(self, symbols: Iterable[str]):

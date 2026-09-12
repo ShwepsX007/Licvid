@@ -685,8 +685,11 @@ class MarketFeed:
         for name, coro in spawn.items():
             if name in self.enabled_exchanges:
                 # hyperliquid жёстко режет частые переподключения (RST), поэтому
-                # стартуем с длинной паузы, чтобы не продлевать лимит долбёжкой
-                base = 15.0 if name == "hyperliquid" else 2.0
+                # стартуем с длинной паузы (LIQSCOPE_HL_BASE_DELAY), чтобы не
+                # продлевать лимит долбёжкой — пауза пригодится и для
+                # «остывания», если бокс попал под временный сетевой фильтр
+                base = (float(os.getenv("LIQSCOPE_HL_BASE_DELAY", "15"))
+                        if name == "hyperliquid" else 2.0)
                 kw = {"base_delay": base}
                 if name == "hyperliquid":
                     # «стабильным» считаем только соединение, прожившее больше
@@ -1568,11 +1571,12 @@ class MarketFeed:
                                      ev["price"], ev["qty"], ev["ts"], usd=ev.get("usd"))
 
     # -- Hyperliquid ---------------------------------------------------------
-    async def _hyperliquid_load_universe(self) -> set:
+    async def _hyperliquid_load_universe(self, session=None) -> set:
         """Имена перпетуумов HL (universe из POST /info {"type": "meta"})."""
+        sess = session or self._session
         try:
-            async with self._session.post(f"{HL_REST}/info", json={"type": "meta"},
-                                          timeout=12) as resp:
+            async with sess.post(f"{HL_REST}/info", json={"type": "meta"},
+                                 timeout=12) as resp:
                 data = await resp.json()
         except Exception as e:
             log.warning("[hyperliquid] не удалось загрузить universe: %s", e)
@@ -1593,7 +1597,27 @@ class MarketFeed:
         receive-таймаут не срабатывает и пинг не отправляется вообще.
         """
         st = self.status["hyperliquid"]
-        universe = await self._hyperliquid_load_universe()
+        # LIQSCOPE_HL_SOLO=1: HL ходит через ОТДЕЛЬНУЮ «голую» сессию — точная
+        # копия окружения зонда tools/check_hyperliquid.py (без User-Agent и
+        # без общего ClientTimeout(total=20)). Гвоздь для обхода: если общий
+        # боевой процесс рвёт HL-соединения (заголовок/таймаут сессии/шеринг
+        # пула с REST-движками), а «голый» клиент с той же машины живёт —
+        # этот переключатель воспроизводит выжившую конфигурацию в бою.
+        solo = os.getenv("LIQSCOPE_HL_SOLO", "").strip() in ("1", "true",
+                                                             "yes", "on")
+        session = self._session
+        if solo:
+            session = aiohttp.ClientSession()
+        try:
+            await self._run_hl_listener(st, session,
+                                        solo or session is not self._session)
+        finally:
+            if session is not self._session:
+                await session.close()
+
+    async def _run_hl_listener(self, st, session, bare: bool):
+        universe = await self._hyperliquid_load_universe(
+            session=session if bare else None)
         if universe:
             log.info("[hyperliquid] universe перпетуумов: %d", len(universe))
 
@@ -1606,11 +1630,12 @@ class MarketFeed:
         rebuild_map()
         # Некоторые бот-фильтры перед Hyperliquid (Cloudflare) режут WS с
         # нестандартным User-Agent: если LIQSCOPE_HL_UA задан — этот участок
-        # ходит под ним (заголовок перекрывает сессионный только здесь).
+        # ходит под ним. В «голом» (bare) режиме заголовок не подменяем —
+        # там важно точное равенство с зондом.
         hl_headers = ({"User-Agent": os.environ["LIQSCOPE_HL_UA"]}
-                      if os.getenv("LIQSCOPE_HL_UA") else None)
-        async with self._session.ws_connect(HL_WS, heartbeat=None, timeout=25,
-                                            headers=hl_headers) as ws:
+                      if os.getenv("LIQSCOPE_HL_UA") and not bare else None)
+        async with session.ws_connect(HL_WS, heartbeat=None, timeout=25,
+                                      headers=hl_headers) as ws:
             subscribed: set = set()
             acked: set = set()
             seen_msgs = 0

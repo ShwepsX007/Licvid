@@ -66,7 +66,7 @@ async def noop_price(*a):
     pass
 
 
-async def fake_universe():
+async def fake_universe(session=None):
     return ["BTC", "ETH"]
 
 

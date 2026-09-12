@@ -676,8 +676,10 @@ class MarketFeed:
                 kw = {"base_delay": base}
                 if name == "hyperliquid":
                     # «стабильным» считаем только соединение, прожившее больше
-                    # трёх «тихих» окон HL (3 × 60с)
+                    # трёх «тихих» окон HL (3 × 60с); коннект — не в момент
+                    # бута, а через 10с, когда остальные слушатели уже встали
                     kw["stable_uptime"] = 180.0
+                    kw["initial_delay"] = 10.0
                 self._tasks.append(asyncio.create_task(
                     self._supervise(name, coro, **kw), name=f"liq-{name}"))
 
@@ -731,7 +733,7 @@ class MarketFeed:
         return asyncio.create_task(runner())
 
     async def _supervise(self, name: str, factory, base_delay: float = 2.0,
-                         stable_uptime: float = 90.0):
+                         stable_uptime: float = 90.0, initial_delay: float = 0.0):
         """Перезапускает слушателя при любой ошибке с нарастающей паузой.
 
         Пауза растёт до 60с, но сбрасывается к base_delay ТОЛЬКО если
@@ -740,8 +742,17 @@ class MarketFeed:
         которая рвёт соединения пачкой (Hyperliquid за частые переподключения
         отвечает RST), попадала в цикл «подключились → оборвалось → через
         base_delay снова» и не поднималась, пока долбёжка не прекращался.
+
+        initial_delay: пауза перед ПЕРВОЙ попыткой (не влияет на ретраи) —
+        чтобы слушатель коннектился не в момент бута, когда event loop
+        занят рестом остальных бирж и загрузкой истории, а после него:
+        наблюдаемое на старте 1006-обрывы первого коннекта HL.
         """
         delay = base_delay
+        if initial_delay > 0:
+            await asyncio.sleep(initial_delay)
+            if self._stop.is_set():
+                return
         while not self._stop.is_set():
             run_start = time.monotonic()
             try:

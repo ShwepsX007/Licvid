@@ -243,6 +243,27 @@ async def scenario_supervise_backoff():
     check("после сброса рост начинается заново",
           len(sleeps) >= 5 and sleeps[4] > sleeps[3], sleeps[:5])
 
+    # initial_delay: пауза перед первой попыткой, в ретраи не подмешивается
+    feed._stop.clear()
+    sleeps.clear()
+    calls["n"] = 0
+
+    async def factory_once():
+        feed._stop.set()
+        raise RuntimeError("once")
+
+    market_feed.asyncio = Shim()
+    try:
+        await asyncio.wait_for(
+            feed._supervise("hyperliquid", factory_once,
+                            base_delay=0.1, initial_delay=0.5), 10)
+    finally:
+        market_feed.asyncio = orig
+    check("initial_delay ждёт до первой попытки (0.5, потом 0.1)",
+          len(sleeps) >= 2 and abs(sleeps[0] - 0.5) < 1e-9
+          and abs(sleeps[1] - 0.1) < 1e-9, sleeps[:2])
+    feed._stop.clear()
+
 
 # --- 4) таймаут отправки зависшему клиенту -----------------------------------
 

@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import re
+import socket
 import time
 from typing import Awaitable, Callable, Dict, Iterable, List, Optional
 
@@ -653,9 +654,20 @@ class MarketFeed:
 
     # -- жизненный цикл ------------------------------------------------------
     async def start(self):
+        connector = None
+        fam = os.getenv("LIQSCOPE_FAMILY", "").strip()
+        if fam in ("4", "6"):
+            # Гвоздь для диагностики: бывает, хостер/промежуточная сеть режет
+            # одно из семейств адресов (чаще IPv6 до Cloudflare, за которой
+            # сидит Hyperliquid) — тогда каждый WS умирает 1006-сбросом, а
+            # curl (happy eyeballs) при этом работает. Ограничиваем семейство
+            # для всей сессии: LIQSCOPE_FAMILY=4 или LIQSCOPE_FAMILY=6.
+            connector = aiohttp.TCPConnector(
+                family=socket.AF_INET if fam == "4" else socket.AF_INET6)
         self._session = aiohttp.ClientSession(
             headers={"User-Agent": "LiqScope-Terminal/4.1"},
             timeout=aiohttp.ClientTimeout(total=20),
+            connector=connector,
         )
         await self.refresh_symbols()
         self._record_volumes()
@@ -1592,7 +1604,13 @@ class MarketFeed:
                 self.hl_coin_map = {base_of(s): canon(s) for s in self.symbols}
 
         rebuild_map()
-        async with self._session.ws_connect(HL_WS, heartbeat=None, timeout=25) as ws:
+        # Некоторые бот-фильтры перед Hyperliquid (Cloudflare) режут WS с
+        # нестандартным User-Agent: если LIQSCOPE_HL_UA задан — этот участок
+        # ходит под ним (заголовок перекрывает сессионный только здесь).
+        hl_headers = ({"User-Agent": os.environ["LIQSCOPE_HL_UA"]}
+                      if os.getenv("LIQSCOPE_HL_UA") else None)
+        async with self._session.ws_connect(HL_WS, heartbeat=None, timeout=25,
+                                            headers=hl_headers) as ws:
             subscribed: set = set()
             acked: set = set()
             seen_msgs = 0

@@ -537,6 +537,7 @@ class SourceStatus:
         self.last_error = ""
         self.connected_since = 0.0
         self.reconnects = 0
+        self.attempts = 0   # попыток коннекта (в т.ч. неудачных до первого up)
 
     def up(self):
         self.connected = True
@@ -566,6 +567,7 @@ class SourceStatus:
             "uptime_sec": (round(time.time() - self.connected_since, 1)
                            if self.connected else 0),
             "reconnects": self.reconnects,
+            "attempts": self.attempts,
             "last_error": self.last_error,
         }
 
@@ -754,6 +756,7 @@ class MarketFeed:
             if self._stop.is_set():
                 return
         while not self._stop.is_set():
+            self.status[name].attempts += 1   # попытки видно и до первого up
             run_start = time.monotonic()
             try:
                 await factory()

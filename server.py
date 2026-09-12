@@ -203,11 +203,20 @@ class Client:
 
     async def send(self, msg: dict) -> bool:
         try:
-            await self.ws.send_json(msg)
+            # Медленный/зависший клиент не должен подвешивать читателей
+            # биржевых сокетов: send_json внутри ждёт drain() без лимита, а
+            # TCP-буфер забитого клиента может не освобождаться минутами.
+            # Всё, что ушло в транспорт до таймаута, остаётся валидным кадром,
+            # так что отмена безопасна. Застряли — клиент мёртв, выкидываем.
+            await asyncio.wait_for(self.ws.send_json(msg),
+                                   timeout=self.SEND_TIMEOUT)
             return True
         except Exception:
             self.alive = False
             return False
+
+    # см. send(): заведомо больше любого нормального сетевого хода
+    SEND_TIMEOUT = 5.0
 
 
 class Hub:
@@ -247,13 +256,27 @@ hub = Hub()
 feed: Optional[MarketFeed] = None
 _pending: List[dict] = []
 _pending_lock = asyncio.Lock()
+# Очередь «тяжёлой» обработки ликвидаций (диск + рассылка клиентам).
+# Задачи-читатели бирж только кладут событие в очередь и мгновенно идут
+# дальше читать свой сокет: всплеск событий (например, кадр trades HL на
+# 8 КБ) больше не подвешивает чтение сокета — раньше burst обрабатывался
+# прямо в читателе, тот переставал читать (задержка ack видна в журнале
+# инцидента: 2.3с вместо 0.3с), и соединение с биржей умирало 1006-сбросом.
+_liq_queue: asyncio.Queue = asyncio.Queue(maxsize=20000)
+_liq_dropped = 0
+_liq_drop_warn_at = 0.0
 
 
 # =============================================================================
 #  Обработка событий от бирж
 # =============================================================================
 async def on_liquidation(ev: dict):
-    """Пришла ликвидация с биржи → в историю и в очередь на рассылку."""
+    """Пришла ликвидация с биржи → в историю памяти и в очередь воркера.
+
+    ДЕШЁВАЯ функция по контракту: её await'ит читатель биржевого сокета,
+    поэтому здесь только словарь, append в память и put_nowait. Запись на
+    диск и рассылку клиентам делает liq_event_worker (см. ниже).
+    """
     event = {
         "id": _fmt_id(),
         "symbol": ev["symbol"],
@@ -267,15 +290,40 @@ async def on_liquidation(ev: dict):
         "timestamp": float(ev["timestamp"]),
     }
     LIQUIDATIONS.append(event)
-    append_history_event(event, HISTORY_FILE)
-    if len(LIQUIDATIONS) % 1000 == 0:
-        trim_history_file(HISTORY_FILE, HISTORY_MAX, HISTORY_TTL_HOURS)
-    if BROADCAST_INTERVAL <= 0:
-        # без буферизации: событие уходит в сокеты в тот же момент
-        await send_liquidations([event])
-    else:
-        async with _pending_lock:
-            _pending.append(event)
+    try:
+        _liq_queue.put_nowait(event)
+    except asyncio.QueueFull:
+        global _liq_dropped, _liq_drop_warn_at
+        _liq_dropped += 1
+        now = time.time()
+        if now - _liq_drop_warn_at > 10:
+            _liq_drop_warn_at = now
+            log.warning("очередь ликвидаций переполнена: пропущено %d событий",
+                        _liq_dropped)
+
+
+async def liq_event_worker():
+    """Один обработчик очереди ликвидаций: диск + рассылка.
+
+    Живёт отдельной задачей (запуск в lifespan), поэтому никакие задержки
+    диска или медленного клиента не блокируют читателей биржевых сокетов.
+    """
+    while True:
+        event = await _liq_queue.get()
+        try:
+            append_history_event(event, HISTORY_FILE)
+            if len(LIQUIDATIONS) % 1000 == 0:
+                trim_history_file(HISTORY_FILE, HISTORY_MAX, HISTORY_TTL_HOURS)
+            if BROADCAST_INTERVAL <= 0:
+                # без буферизации: событие уходит в сокеты в тот же момент
+                await send_liquidations([event])
+            else:
+                async with _pending_lock:
+                    _pending.append(event)
+        except Exception as e:  # noqa: BLE001 — ошибка одного события не убивает воркер
+            log.warning("обработка ликвидации упала: %s", e)
+        finally:
+            _liq_queue.task_done()
 
 
 async def send_liquidations(batch: List[dict]):
@@ -858,6 +906,7 @@ async def lifespan(app: FastAPI):
     sync_hot_symbols()      # чтобы тики пошли сразу, не дожидаясь клиента
 
     tasks = [
+        asyncio.create_task(liq_event_worker(), name="liq-worker"),
         asyncio.create_task(liquidation_broadcaster(), name="liq-broadcast"),
         asyncio.create_task(price_broadcaster(), name="price-broadcast"),
         asyncio.create_task(stats_broadcaster(), name="stats-broadcast"),

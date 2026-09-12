@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import re
+import socket
 import time
 from typing import Awaitable, Callable, Dict, Iterable, List, Optional
 
@@ -78,7 +79,17 @@ HL_WS = "wss://api.hyperliquid.xyz/ws"
 # сообщениями. Пинг шлём раз в 50 секунд (как официальный python-sdk) ОТДЕЛЬНОЙ
 # задачей, а не «по простою»: на топ-40 монет поток trades почти не замолкает,
 # receive-таймаут не срабатывает, и пинг, завязанный на него, не уходит вовсе.
-HL_PING_INTERVAL = 50.0
+HL_PING_INTERVAL = float(os.getenv("LIQSCOPE_HL_PING_SEC", "50"))
+# Сторож зомби-сокетов: если от биржи нет НИЧЕГО (ни ленты, ни subscriptionResponse,
+# ни pong на наши пинги) дольше HL_STALE_AFTER секунд — TCP почти наверняка тихо
+# потерян (обрыв на CF-эдже/NAT, смена маршрута). aiohttp такой сокет от «тихой
+# ленты» не отличает: receive() просто таймаутит, а send() пишет в буфер без
+# ошибок, и слушатель висит на мёртвом соединении вечно. Поэтому при превышении
+# порога соединение закрываем принудительно — супервайзер переподключится.
+# Pong на наш пинг — входящее сообщение, так что живое соединение порога не
+# достигнет (молчание максимум HL_PING_INTERVAL секунд).
+HL_STALE_AFTER = float(os.getenv("LIQSCOPE_HL_STALE_SEC",
+                                 str(HL_PING_INTERVAL * 3)))
 
 # Запасной список монет, если ни одна биржа не ответила на REST
 FALLBACK_SYMBOLS = [
@@ -509,7 +520,9 @@ def parse_hyperliquid_msg(payload: dict,
 
 def hl_close_reason(msg_type, close_code, exc, data) -> str:
     """Текст причины закрытия HL-сокета: код + исключение + данные кадра."""
-    return (f"hyperliquid ws {msg_type}: close_code={close_code} "
+    # Имя вместо числа: на Python 3.11+ str(IntEnum) печатает «257», а не «CLOSED»
+    kind = getattr(msg_type, "name", None) or str(msg_type)
+    return (f"hyperliquid ws {kind}: close_code={close_code} "
             f"exc={exc!r} data={str(data)[:150]}")
 
 
@@ -525,6 +538,7 @@ class SourceStatus:
         self.last_error = ""
         self.connected_since = 0.0
         self.reconnects = 0
+        self.attempts = 0   # попыток коннекта (в т.ч. неудачных до первого up)
 
     def up(self):
         self.connected = True
@@ -554,6 +568,7 @@ class SourceStatus:
             "uptime_sec": (round(time.time() - self.connected_since, 1)
                            if self.connected else 0),
             "reconnects": self.reconnects,
+            "attempts": self.attempts,
             "last_error": self.last_error,
         }
 
@@ -639,9 +654,20 @@ class MarketFeed:
 
     # -- жизненный цикл ------------------------------------------------------
     async def start(self):
+        connector = None
+        fam = os.getenv("LIQSCOPE_FAMILY", "").strip()
+        if fam in ("4", "6"):
+            # Гвоздь для диагностики: бывает, хостер/промежуточная сеть режет
+            # одно из семейств адресов (чаще IPv6 до Cloudflare, за которой
+            # сидит Hyperliquid) — тогда каждый WS умирает 1006-сбросом, а
+            # curl (happy eyeballs) при этом работает. Ограничиваем семейство
+            # для всей сессии: LIQSCOPE_FAMILY=4 или LIQSCOPE_FAMILY=6.
+            connector = aiohttp.TCPConnector(
+                family=socket.AF_INET if fam == "4" else socket.AF_INET6)
         self._session = aiohttp.ClientSession(
             headers={"User-Agent": "LiqScope-Terminal/4.1"},
             timeout=aiohttp.ClientTimeout(total=20),
+            connector=connector,
         )
         await self.refresh_symbols()
         self._record_volumes()
@@ -659,10 +685,20 @@ class MarketFeed:
         for name, coro in spawn.items():
             if name in self.enabled_exchanges:
                 # hyperliquid жёстко режет частые переподключения (RST), поэтому
-                # стартуем с длинной паузы, чтобы не продлевать лимит долбёжкой
-                base = 15.0 if name == "hyperliquid" else 2.0
+                # стартуем с длинной паузы (LIQSCOPE_HL_BASE_DELAY), чтобы не
+                # продлевать лимит долбёжкой — пауза пригодится и для
+                # «остывания», если бокс попал под временный сетевой фильтр
+                base = (float(os.getenv("LIQSCOPE_HL_BASE_DELAY", "15"))
+                        if name == "hyperliquid" else 2.0)
+                kw = {"base_delay": base}
+                if name == "hyperliquid":
+                    # «стабильным» считаем только соединение, прожившее больше
+                    # трёх «тихих» окон HL (3 × 60с); коннект — не в момент
+                    # бута, а через 10с, когда остальные слушатели уже встали
+                    kw["stable_uptime"] = 180.0
+                    kw["initial_delay"] = 10.0
                 self._tasks.append(asyncio.create_task(
-                    self._supervise(name, coro, base_delay=base), name=f"liq-{name}"))
+                    self._supervise(name, coro, **kw), name=f"liq-{name}"))
 
         self.oi.bind(self._session)
         self._tasks.append(asyncio.create_task(self._price_engine(), name="prices"))
@@ -713,20 +749,44 @@ class MarketFeed:
                     await asyncio.sleep(interval)
         return asyncio.create_task(runner())
 
-    async def _supervise(self, name: str, factory, base_delay: float = 2.0):
-        """Перезапускает слушателя при любой ошибке с нарастающей паузой."""
+    async def _supervise(self, name: str, factory, base_delay: float = 2.0,
+                         stable_uptime: float = 90.0, initial_delay: float = 0.0):
+        """Перезапускает слушателя при любой ошибке с нарастающей паузой.
+
+        Пауза растёт до 60с, но сбрасывается к base_delay ТОЛЬКО если
+        соединение прожило >= stable_uptime секунд. Раньше любой «успешный»
+        коннект (даже на 2 секунды) сбрасывал паузу на минимум: биржа,
+        которая рвёт соединения пачкой (Hyperliquid за частые переподключения
+        отвечает RST), попадала в цикл «подключились → оборвалось → через
+        base_delay снова» и не поднималась, пока долбёжка не прекращался.
+
+        initial_delay: пауза перед ПЕРВОЙ попыткой (не влияет на ретраи) —
+        чтобы слушатель коннектился не в момент бута, когда event loop
+        занят рестом остальных бирж и загрузкой истории, а после него:
+        наблюдаемое на старте 1006-обрывы первого коннекта HL.
+        """
         delay = base_delay
+        if initial_delay > 0:
+            await asyncio.sleep(initial_delay)
+            if self._stop.is_set():
+                return
         while not self._stop.is_set():
+            self.status[name].attempts += 1   # попытки видно и до первого up
+            run_start = time.monotonic()
             try:
                 await factory()
-                delay = base_delay
+                uptime = time.monotonic() - run_start
+                self.status[name].down("stream closed")
+                if uptime >= stable_uptime:
+                    delay = base_delay
+                log.info("[%s] поток закрыт (проработал %.0fс)", name, uptime)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
+                uptime = time.monotonic() - run_start
                 self.status[name].down(f"{type(e).__name__}: {e}")
-                log.warning("[%s] обрыв: %s — переподключение через %.0fс", name, e, delay)
-            else:
-                self.status[name].down("stream closed")
+                log.warning("[%s] обрыв после %.0fс работы: %s — "
+                            "переподключение через %.0fс", name, uptime, e, delay)
             await asyncio.sleep(delay)
             delay = min(delay * 1.6, 60.0)
 
@@ -1511,11 +1571,12 @@ class MarketFeed:
                                      ev["price"], ev["qty"], ev["ts"], usd=ev.get("usd"))
 
     # -- Hyperliquid ---------------------------------------------------------
-    async def _hyperliquid_load_universe(self) -> set:
+    async def _hyperliquid_load_universe(self, session=None) -> set:
         """Имена перпетуумов HL (universe из POST /info {"type": "meta"})."""
+        sess = session or self._session
         try:
-            async with self._session.post(f"{HL_REST}/info", json={"type": "meta"},
-                                          timeout=12) as resp:
+            async with sess.post(f"{HL_REST}/info", json={"type": "meta"},
+                                 timeout=12) as resp:
                 data = await resp.json()
         except Exception as e:
             log.warning("[hyperliquid] не удалось загрузить universe: %s", e)
@@ -1536,7 +1597,34 @@ class MarketFeed:
         receive-таймаут не срабатывает и пинг не отправляется вообще.
         """
         st = self.status["hyperliquid"]
-        universe = await self._hyperliquid_load_universe()
+        # LIQSCOPE_HL_SOLO=1: HL ходит через ОТДЕЛЬНУЮ «голую» сессию — точная
+        # копия окружения зонда tools/check_hyperliquid.py (без User-Agent и
+        # без общего ClientTimeout(total=20)). Гвоздь для обхода: если общий
+        # боевой процесс рвёт HL-соединения (заголовок/таймаут сессии/шеринг
+        # пула с REST-движками), а «голый» клиент с той же машины живёт —
+        # этот переключатель воспроизводит выжившую конфигурацию в бою.
+        solo = os.getenv("LIQSCOPE_HL_SOLO", "").strip() in ("1", "true",
+                                                             "yes", "on")
+        session = self._session
+        if solo:
+            session = aiohttp.ClientSession()
+        try:
+            await self._run_hl_listener(st, session,
+                                        solo or session is not self._session)
+        finally:
+            if session is not self._session:
+                await session.close()
+
+    async def _run_hl_listener(self, st, session, bare: bool):
+        if bare:
+            # точная копия выживавшего зонда: universe — через отдельную
+            # одноразовую сессию, чтобы REST не оставлял в WS-сессии
+            # TLS-тикетов/пула (проверено diag_hl: так соединение живёт)
+            async with aiohttp.ClientSession() as u_sess:
+                universe = await self._hyperliquid_load_universe(
+                    session=u_sess)
+        else:
+            universe = await self._hyperliquid_load_universe()
         if universe:
             log.info("[hyperliquid] universe перпетуумов: %d", len(universe))
 
@@ -1547,10 +1635,24 @@ class MarketFeed:
                 self.hl_coin_map = {base_of(s): canon(s) for s in self.symbols}
 
         rebuild_map()
-        async with self._session.ws_connect(HL_WS, heartbeat=None, timeout=25) as ws:
+        # Некоторые бот-фильтры перед Hyperliquid (Cloudflare) режут WS с
+        # нестандартным User-Agent: если LIQSCOPE_HL_UA задан — этот участок
+        # ходит под ним. В «голом» (bare) режиме заголовок не подменяем —
+        # там важно точное равенство с зондом.
+        hl_headers = ({"User-Agent": os.environ["LIQSCOPE_HL_UA"]}
+                      if os.getenv("LIQSCOPE_HL_UA") and not bare else None)
+        async with session.ws_connect(HL_WS, heartbeat=None, timeout=25,
+                                      headers=hl_headers) as ws:
             subscribed: set = set()
             acked: set = set()
             seen_msgs = 0
+            # Возраст входящего трафика: обновляется любым сообщением от биржи
+            # (лента, subscriptionResponse, pong, кадры ping). Сторож в heartbeat
+            # сравнивает метку с HL_STALE_AFTER — см. heartbeat().
+            last_inbound = time.monotonic()
+            # Причина принудительного закрытия (заполняет сторож) — попадает в
+            # текст ConnectionError, чтобы в логе было видно, ПОЧЕМУ рвём.
+            dead_reason = ""
             # Подписки (sync_subs) и heartbeat-пинги шлём через общий замок:
             # aiohttp не гарантирует безопасность параллельных send_json.
             send_lock = asyncio.Lock()
@@ -1594,10 +1696,14 @@ class MarketFeed:
                 # и в подсказку плашки, а backoff супервайзера начнёт расти
                 # и перестанет долбить биржу частыми реконнектами.
                 err_data = msg.data if msg.type == aiohttp.WSMsgType.ERROR else ""
-                raise ConnectionError(hl_close_reason(
-                    msg.type, ws.close_code, ws.exception(), err_data))
+                text = hl_close_reason(
+                    msg.type, ws.close_code, ws.exception(), err_data)
+                if dead_reason:
+                    text = f"{text} — {dead_reason}"
+                raise ConnectionError(text)
 
             async def sync_subs():
+                nonlocal last_inbound
                 want = set(self.hl_coin_map)
                 for coin in sorted(want - subscribed):
                     await send({"method": "subscribe",
@@ -1615,6 +1721,7 @@ class MarketFeed:
                                 timeout=max(0.1, t_end - time.monotonic()))
                         except asyncio.TimeoutError:
                             break
+                        last_inbound = time.monotonic()
                         if msg.type in (aiohttp.WSMsgType.CLOSED,
                                         aiohttp.WSMsgType.CLOSING,
                                         aiohttp.WSMsgType.ERROR):
@@ -1634,13 +1741,37 @@ class MarketFeed:
                     acked.discard(coin)
 
             async def heartbeat():
-                """Пинг раз в HL_PING_INTERVAL секунд, независимо от потока."""
+                """Пинг раз в HL_PING_INTERVAL секунд, независимо от потока.
+
+                Заодно сторож зомби-сокетов: если входящих нет уже
+                HL_STALE_AFTER секунд (pong не приходит, лента молчит), TCP,
+                скорее всего, тихо потерян — aiohttp не отличит такой сокет
+                от «тихой ленты», поэтому закрываем принудительно: главная
+                петля получит CLOSED/CLOSING, поднимет громкий ConnectionError
+                (с причиной от сторожа), и супервайзер переподключится.
+                """
+                nonlocal last_inbound, dead_reason
                 while not ws.closed and not self._stop.is_set():
                     try:
                         await asyncio.sleep(HL_PING_INTERVAL)
                     except asyncio.CancelledError:
                         raise
                     if ws.closed or self._stop.is_set():
+                        return
+                    age = time.monotonic() - last_inbound
+                    if age > HL_STALE_AFTER:
+                        dead_reason = (f"входящих нет {age:.0f}с — ни pong на "
+                                       f"пинги, ни ленты; сокет мёртв")
+                        log.warning("[hyperliquid] %s — принудительно закрываю",
+                                    dead_reason)
+                        try:
+                            # close() из сторонней задачи безопасен: aiohttp
+                            # сам разбудит висящий receive() (см. client_ws)
+                            await ws.close()
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:
+                            pass
                         return
                     try:
                         await send({"method": "ping"})
@@ -1663,7 +1794,12 @@ class MarketFeed:
                     except asyncio.TimeoutError:
                         loops += 1
                         if loops % 120 == 1:   # ~раз в час: новые HIP-3 маркеты
-                            universe = await self._hyperliquid_load_universe() or universe
+                            if bare:
+                                async with aiohttp.ClientSession() as u_sess:
+                                    universe = (await self._hyperliquid_load_universe(
+                                        session=u_sess)) or universe
+                            else:
+                                universe = (await self._hyperliquid_load_universe()) or universe
                         rebuild_map()
                         try:
                             await sync_subs()
@@ -1673,6 +1809,9 @@ class MarketFeed:
                     if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING,
                                     aiohttp.WSMsgType.ERROR):
                         raise_on_close(msg)
+                    # любой входящий кадр — признак живой трубы (включая
+                    # протокольные ping/pong, не только TEXT)
+                    last_inbound = time.monotonic()
                     if msg.type != aiohttp.WSMsgType.TEXT:
                         continue
                     await handle_text(msg.data)

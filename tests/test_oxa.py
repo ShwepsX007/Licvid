@@ -209,6 +209,7 @@ def test_parser():
 async def test_stream(fake, keys):
     print("3) два ключа — два соединения, монеты пополам")
     market_feed.OXA_WS = f"http://127.0.0.1:{PORT}/ws"
+    market_feed.OXA_MODE = "ws"   # файл проверяет WS-ветку
     market_feed.OXA_PING_SEC = 0.3
     os.environ["LIQSCOPE_OXA_KEYS"] = ",".join(keys)
     liqs = []
@@ -269,6 +270,7 @@ async def test_junk_frames():
     await r.setup()
     await web.TCPSite(r, "127.0.0.1", PORT + 1).start()
     market_feed.OXA_WS = f"http://127.0.0.1:{PORT + 1}/ws"
+    market_feed.OXA_MODE = "ws"   # файл проверяет WS-ветку
     os.environ["LIQSCOPE_OXA_KEYS"] = "0xa_j1"
     try:
         liqs = []
@@ -333,6 +335,7 @@ async def test_bad_key():
     await r.setup()
     await web.TCPSite(r, "127.0.0.1", PORT + 2).start()
     market_feed.OXA_WS = f"http://127.0.0.1:{PORT + 2}/ws"
+    market_feed.OXA_MODE = "ws"   # файл проверяет WS-ветку
     os.environ["LIQSCOPE_OXA_KEYS"] = "0xa_bad"
     try:
         feed = make_feed(liqs := [])
@@ -366,6 +369,7 @@ async def test_server(fake, keys):
     # адрес читаётся в константу при импорте market_feed, поэтому меняем её
     # здесь, а не только в окружении
     market_feed.OXA_WS = f"http://127.0.0.1:{PORT}/ws"
+    market_feed.OXA_MODE = "ws"   # файл проверяет WS-ветку
     market_feed.OXA_PING_SEC = 0.3
 
     async def _fake_universe(self, session=None):
@@ -446,6 +450,7 @@ async def test_spawn_decision():
 
     os.environ["LIQSCOPE_OXA_KEYS"] = "0xa_spawn_test"
     market_feed.OXA_WS = f"http://127.0.0.1:{PORT + 9}/ws"   # никого там нет
+    market_feed.OXA_MODE = "ws"   # файл проверяет WS-ветку
     feed2 = MarketFeed(on_liquidation=lambda ev: None,
                        on_price=lambda *a: None, exchanges=[])
     await feed2.start()

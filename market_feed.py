@@ -35,7 +35,9 @@ import re
 import socket
 import time
 from datetime import datetime
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
+from collections import deque
+from typing import (Any, Awaitable, Callable, Deque, Dict, Iterable, List,
+                    Optional)
 
 import aiohttp
 from aiohttp import ClientWSTimeout
@@ -109,6 +111,20 @@ OXA_WS = os.getenv("LIQSCOPE_OXA_WS", "wss://api.0xarchive.io/ws")
 OXA_SUBS_PER_KEY = int(os.getenv("LIQSCOPE_OXA_SUBS_PER_KEY", "10"))
 OXA_PING_SEC = float(os.getenv("LIQSCOPE_OXA_PING_SEC", "25"))
 OXA_LIQ_FRESH_SEC = float(os.getenv("LIQSCOPE_OXA_FRESH_SEC", "300"))
+OXA_REST = os.getenv("LIQSCOPE_OXA_REST",
+                     "https://api.0xarchive.io/v1/hyperliquid")
+# Замер на боевом сервере 14.09.2026: живой WS-канал liquidations за 1800 с
+# не прислал ни одного кадра данных (3 subscribed + 72 pong), тогда как REST
+# отдал 1118 ликвидаций за сутки с самой свежей «0 с назад». Поэтому рабочий
+# путь — опрос REST. Режимы: rest (по умолчанию), ws, both.
+OXA_MODE = os.getenv("LIQSCOPE_OXA_MODE", "rest").strip().lower()
+OXA_POLL_SEC = float(os.getenv("LIQSCOPE_OXA_POLL_SEC", "60"))
+# Запрос стоит минимум 1 кредит, Free — 50 000 кредитов/мес на ключ
+# (~69 запросов в час). Сколько монет опрашивать одним ключом:
+OXA_COINS_PER_KEY = int(os.getenv("LIQSCOPE_OXA_COINS_PER_KEY", "5"))
+OXA_FREE_CREDITS = int(os.getenv("LIQSCOPE_OXA_CREDITS", "50000"))
+OXA_OVERLAP_SEC = float(os.getenv("LIQSCOPE_OXA_OVERLAP_SEC", "30"))
+OXA_FIRST_WINDOW_SEC = float(os.getenv("LIQSCOPE_OXA_FIRST_WINDOW_SEC", "120"))
 # Период keepalive: Kraken просит пинг хотя бы раз в 60 с, Bitfinex — раз в 30 с.
 KRAKEN_PING_SEC = float(os.getenv("LIQSCOPE_KRAKEN_PING_SEC", "25"))
 BITFINEX_PING_SEC = float(os.getenv("LIQSCOPE_BITFINEX_PING_SEC", "20"))
@@ -650,15 +666,43 @@ def oxa_keys() -> List[str]:
     return keys
 
 
+def oxa_is_liquidation(row: dict, all_rows: bool = False) -> bool:
+    """Ликвидация ли строка 0xArchive.
+
+    all_rows=True — строки пришли из REST /liquidations/{coin}, где других
+    строк не бывает; тогда признаком служит само наличие полей ликвидации.
+    """
+    if row.get("is_liquidation"):
+        return True
+    if all_rows:
+        return bool(row.get("liquidated_user") or row.get("direction")
+                    or row.get("liquidator_user"))
+    return False
+
+
 def parse_oxa_liquidations(payload, coin_map: Optional[Dict[str, str]] = None,
                            now: Optional[float] = None,
                            max_age: Optional[float] = None,
-                           stats: Optional[dict] = None) -> List[dict]:
+                           stats: Optional[dict] = None,
+                           all_rows: bool = False) -> List[dict]:
     """Кадр 0xArchive -> наши события ликвидаций.
 
     coin_map: имя монеты Hyperliquid (BTC, kPEPE) -> канонический символ.
-    Отбираются только строки с is_liquidation: true — в канал могут приходить
-    и обычные заполнения. Старые события отсеиваются как у прочих источников.
+
+    Признак ликвидации зависит от того, откуда строка (проверено на боевом
+    REST-ответе 14.09.2026, поля: closed_pnl, coin, direction,
+    liquidated_user, liquidator_user, mark_price, price, side, size, symbol,
+    timestamp, trade_id, tx_hash):
+      * WS-канал trades — строки заполнения смешаны с обычными, у ликвидации
+        стоит is_liquidation: true;
+      * REST /liquidations/{coin} — поля is_liquidation НЕТ вовсе, там каждая
+        строка и есть ликвидация, а признак — liquidated_user/direction.
+    Поэтому при all_rows=True (чтение из REST-эндпоинта ликвидаций) строки не
+    фильтруются по признаку.
+
+    Сторону берём из direction ("Long"/"Short") — это прямое указание, какую
+    позицию вынесли; на side ("A"/"B", сторона тейкера) только резерв.
+    Старые события отсеиваются как у прочих источников.
     """
     if not isinstance(payload, dict):
         return []
@@ -672,7 +716,7 @@ def parse_oxa_liquidations(payload, coin_map: Optional[Dict[str, str]] = None,
     now = now or time.time()
     out: List[dict] = []
     for r in rows:
-        if not isinstance(r, dict) or not r.get("is_liquidation"):
+        if not isinstance(r, dict) or not oxa_is_liquidation(r, all_rows):
             continue
         if stats is not None:
             stats["liq_rows"] = stats.get("liq_rows", 0) + 1
@@ -692,13 +736,24 @@ def parse_oxa_liquidations(payload, coin_map: Optional[Dict[str, str]] = None,
             ts /= 1000.0
         if price <= 0 or qty <= 0 or not _fresh(ts, now, max_age, stats):
             continue
-        side = str(r.get("side") or "").upper()
-        out.append({
-            "symbol": symbol,
-            "side": "LONG" if side.startswith(("A", "S")) else "SHORT",
+        direction = str(r.get("direction") or "").strip().lower()
+        if direction.startswith("l"):
+            position = "LONG"
+        elif direction.startswith("s"):
+            position = "SHORT"
+        else:
+            # резерв: сторона тейкера (A — продал, значит вынесли лонг)
+            side = str(r.get("side") or "").upper()
+            position = "LONG" if side.startswith(("A", "S")) else "SHORT"
+        ev = {
+            "symbol": symbol, "side": position,
             "price": price, "qty": qty, "usd": price * qty, "ts": ts or now,
             "coin": coin,
-        })
+        }
+        tid = r.get("trade_id") or r.get("tid") or r.get("tx_hash")
+        if tid:
+            ev["id"] = str(tid)          # для дедупликации при опросе REST
+        out.append(ev)
     return out
 
 
@@ -2458,7 +2513,84 @@ class MarketFeed:
             finally:
                 pinger.cancel()
 
-    # -- 0xArchive: ликвидации Hyperliquid по API-ключу ----------------------
+    async def _oxa_rest_poll(self, key_no: int, key: str, coins: List[str],
+                             coin_map: Dict[str, str], stats: dict,
+                             publish, report) -> None:
+        """Опрос REST /liquidations/{coin} — рабочий путь вместо живого WS.
+
+        Замер 14.09.2026 на боевом сервере: WS-канал liquidations за 1800 с не
+        прислал ни кадра данных, а REST отдал 1118 ликвидаций за сутки с самой
+        свежей «0 с назад». Поэтому ликвидации Hyperliquid берутся опросом.
+
+        Каждый запрос стоит минимум 1 кредит (Free — 50 000/мес на ключ),
+        поэтому монет на ключ ограничено OXA_COINS_PER_KEY, а интервал —
+        OXA_POLL_SEC. Окна опроса перекрываются на OXA_OVERLAP_SEC, чтобы не
+        потерять событие на границе; повторы отсеиваются по trade_id.
+        """
+        seen: set = set()
+        seen_order: Deque[str] = deque(maxlen=4000)
+        headers = {"X-API-Key": key}
+        # стартуем с короткого окна: историю за сутки вываливать в ленту нельзя
+        cursor = time.time() - OXA_FIRST_WINDOW_SEC
+
+        while not self._stop.is_set():
+            for coin in coins:
+                if self._stop.is_set():
+                    return
+                end = time.time()
+                url = f"{OXA_REST}/liquidations/{coin}"
+                params = {"start": int(cursor * 1000) - int(OXA_OVERLAP_SEC * 1000),
+                          "end": int(end * 1000), "limit": 1000}
+                try:
+                    async with self._session.get(
+                            url, params=params, headers=headers,
+                            timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                        stats["requests"] += 1
+                        if resp.status != 200:
+                            stats["errors"] += 1
+                            body = (await resp.text())[:200]
+                            st = self.status["oxa"]
+                            st.last_error = f"HTTP {resp.status}: {body}"
+                            log.warning("[oxa] ключ #%d %s: %s", key_no + 1,
+                                        coin, st.last_error)
+                            publish()
+                            continue
+                        payload = await resp.json(content_type=None)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    stats["errors"] += 1
+                    self.status["oxa"].last_error = f"{type(e).__name__}: {e}"
+                    log.warning("[oxa] ключ #%d %s: %s", key_no + 1, coin,
+                                self.status["oxa"].last_error)
+                    publish()
+                    continue
+
+                for ev in parse_oxa_liquidations(payload, coin_map,
+                                                 now=time.time(),
+                                                 max_age=OXA_LIQ_FRESH_SEC,
+                                                 stats=stats, all_rows=True):
+                    eid = ev.get("id")
+                    if eid:
+                        if eid in seen:
+                            stats["dupes"] += 1
+                            continue
+                        seen.add(eid)
+                        seen_order.append(eid)
+                        while len(seen) > 4000:
+                            seen.discard(seen_order.popleft())
+                    stats["liq"] += 1
+                    # ликвидация произошла на Hyperliquid — её и показываем
+                    await self._emit("hyperliquid", ev["symbol"], ev["side"],
+                                     ev["price"], ev["qty"], ev["ts"],
+                                     usd=ev.get("usd"))
+                cursor = end
+                publish()
+                report()
+                # растаскиваем запросы, чтобы не упираться в 15 RPS
+                await asyncio.sleep(OXA_POLL_SEC / max(1, len(coins)))
+
+        # -- 0xArchive: ликвидации Hyperliquid по API-ключу ----------------------
     async def _oxa_liquidations(self):
         """Ликвидации Hyperliquid через индексатор 0xArchive.
 
@@ -2482,21 +2614,43 @@ class MarketFeed:
         if not coins:
             raise ConnectionError("нет монет Hyperliquid для подписки")
 
-        # по одному соединению на ключ, монеты режем поровну
+        # по одному соединению (или опросу) на ключ, монеты режем поровну.
+        # Лимит на ключ разный: у WS это подписки, у REST — бюджет кредитов.
+        per_key = (OXA_COINS_PER_KEY if OXA_MODE in ("rest", "both")
+                   else OXA_SUBS_PER_KEY)
         shards = [coins[i::len(keys)] for i in range(len(keys))]
-        shards = [sh[:OXA_SUBS_PER_KEY] for sh in shards]
+        shards = [sh[:per_key] for sh in shards]
         dropped = len(coins) - sum(len(sh) for sh in shards)
 
         st = self.status["oxa"]
         stats = {"frames": 0, "liq_rows": 0, "stale": 0, "skipped_other": 0,
                  "liq": 0, "errors": 0, "acked": 0, "subs": sum(len(sh) for sh in shards),
-                 "keys": len(keys), "kinds": {}}
+                 "keys": len(keys), "kinds": {}, "requests": 0, "dupes": 0,
+                 "mode": OXA_MODE}
         last_log = 0.0
+        started = time.monotonic()      # отсюда считаем прогноз расхода кредитов
 
         def publish():
             kinds = dict(sorted(stats["kinds"].items(),
                                 key=lambda kv: -kv[1])[:6])
-            st.extra = {"oxa_url": OXA_WS, "oxa_keys": stats["keys"],
+            req = stats["requests"]
+            # Прогноз месячного расхода (запрос стоит минимум 1 кредит).
+            # Считать его можно только набрав хотя бы полный цикл опроса:
+            # экстраполяция двух запросов за полсекунды даёт миллиарды и
+            # врёт про «не влезает в бюджет» на первых минутах работы.
+            elapsed = time.monotonic() - started
+            ready = elapsed >= max(OXA_POLL_SEC * 2, 60.0)
+            per_month = int(req * 86400 * 30 / elapsed) if (req and ready) else 0
+            st.extra = {"oxa_mode": OXA_MODE,
+                        "oxa_url": OXA_REST if OXA_MODE != "ws" else OXA_WS,
+                        "oxa_keys": stats["keys"],
+                        "oxa_requests": req,
+                        "oxa_dupes": stats["dupes"],
+                        "oxa_credits_month_eta": per_month or None,
+                        "oxa_credits_budget": OXA_FREE_CREDITS * stats["keys"],
+                        # None — ещё рано судить, бюджет не исчерпан
+                        "oxa_fits_budget": (None if not ready else
+                                            per_month <= OXA_FREE_CREDITS * stats["keys"]),
                         "oxa_subs_total": stats["subs"],
                         "oxa_subs_acked": stats["acked"],
                         "oxa_frames": stats["frames"],
@@ -2514,14 +2668,24 @@ class MarketFeed:
             if not force and now - last_log < NEW_SOURCE_LOG_SEC:
                 return
             last_log = now
-            log.info("[oxa] ключей %d, подписок %d/%d, кадров %d, "
-                     "ликвидаций %d (строк %d), старых %d, чужих монет %d",
-                     stats["keys"], stats["acked"], stats["subs"],
-                     stats["frames"], stats["liq"], stats["liq_rows"],
-                     stats["stale"], stats["skipped_other"])
-            if stats["frames"] and not stats["liq_rows"]:
-                log.warning("[oxa] кадры идут, а строк ликвидаций нет; "
-                            "типы кадров: %s", stats["kinds"])
+            if OXA_MODE == "ws":
+                log.info("[oxa] ключей %d, подписок %d/%d, кадров %d, "
+                         "ликвидаций %d (строк %d), старых %d, чужих монет %d",
+                         stats["keys"], stats["acked"], stats["subs"],
+                         stats["frames"], stats["liq"], stats["liq_rows"],
+                         stats["stale"], stats["skipped_other"])
+                if stats["frames"] and not stats["liq_rows"]:
+                    log.warning("[oxa] кадры идут, а строк ликвидаций нет; "
+                                "типы кадров: %s", stats["kinds"])
+            else:
+                log.info("[oxa/%s] ключей %d, монет %d, запросов %d, "
+                         "ликвидаций %d (повторов %d), ошибок %d, "
+                         "кредитов/мес ~%d из %d",
+                         OXA_MODE, stats["keys"], stats["subs"],
+                         stats["requests"], stats["liq"], stats["dupes"],
+                         stats["errors"],
+                         st.extra.get("oxa_credits_month_eta", 0),
+                         st.extra.get("oxa_credits_budget", 0))
         publish()
 
         async def stream(key_no: int, key: str, shard: List[str]):
@@ -2599,10 +2763,19 @@ class MarketFeed:
                     publish()
                     report()
 
+        if OXA_MODE in ("rest", "both"):
+            st.up()
+            st.name = "oxa-rest"
+            log.info("[oxa] режим %s: опрос REST раз в %.0f с, монет на ключ %d",
+                     OXA_MODE, OXA_POLL_SEC, per_key)
+        jobs = []
+        if OXA_MODE in ("ws", "both"):
+            jobs += [stream(i, k, sh) for i, (k, sh) in enumerate(zip(keys, shards))]
+        if OXA_MODE in ("rest", "both"):
+            jobs += [self._oxa_rest_poll(i, k, sh, coin_map, stats, publish, report)
+                     for i, (k, sh) in enumerate(zip(keys, shards))]
         try:
-            await asyncio.gather(
-                *[stream(i, k, sh) for i, (k, sh) in enumerate(zip(keys, shards))],
-                return_exceptions=False)
+            await asyncio.gather(*jobs, return_exceptions=False)
         finally:
             report(force=True)
             publish()

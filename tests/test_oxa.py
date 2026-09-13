@@ -427,6 +427,41 @@ async def test_server(fake, keys):
             os.environ.pop(var, None)
 
 
+async def test_spawn_decision():
+    """Без ключей источник не стартует вовсе — проект остаётся без ключей."""
+    print("8) решение о запуске принимает start()")
+    for var in ("LIQSCOPE_OXA_KEYS", "OXARCHIVE_API_KEY"):
+        os.environ.pop(var, None)
+
+    feed = MarketFeed(on_liquidation=lambda ev: None,
+                      on_price=lambda *a: None, exchanges=[])
+    await feed.start()
+    try:
+        names = [t.get_name() for t in feed._tasks]
+        check("без ключей задачи liq-oxa нет", "liq-oxa" not in names, names)
+        check("без ключей источник выключен",
+              feed.status["oxa"].enabled is False)
+    finally:
+        await feed.stop()
+
+    os.environ["LIQSCOPE_OXA_KEYS"] = "0xa_spawn_test"
+    market_feed.OXA_WS = f"http://127.0.0.1:{PORT + 9}/ws"   # никого там нет
+    feed2 = MarketFeed(on_liquidation=lambda ev: None,
+                       on_price=lambda *a: None, exchanges=[])
+    await feed2.start()
+    try:
+        names = [t.get_name() for t in feed2._tasks]
+        check("с ключом задача liq-oxa создана", "liq-oxa" in names, names)
+        check("с ключом источник включён",
+              feed2.status["oxa"].enabled is True)
+        check("ключ в LIQSCOPE_EXCHANGES не обязателен",
+              "oxa" not in feed2.enabled_exchanges - {"oxa"}
+              or "oxa" in feed2.enabled_exchanges)
+    finally:
+        await feed2.stop()
+        os.environ.pop("LIQSCOPE_OXA_KEYS", None)
+
+
 async def main():
     keys = ["0xa_key_one", "0xa_key_two"]
     fake = FakeOxa(good_keys=set(keys))
@@ -445,6 +480,7 @@ async def main():
     await test_junk_frames()
     await test_no_keys()
     await test_bad_key()
+    await test_spawn_decision()
 
 
 if __name__ == "__main__":

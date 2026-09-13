@@ -24,10 +24,18 @@ Hyperliquid БЕЗ денег (в отличие от GoldRush, где ключ 
 Ключ берётся из переменной OXARCHIVE_API_KEY (или --key). Ключ нигде не
 печатается.
 
-Запуск:
-    OXARCHIVE_API_KEY=ox_... python3 tools/oxa_probe.py --rest BTC ETH
-    OXARCHIVE_API_KEY=ox_... python3 tools/oxa_probe.py BTC ETH SOL 300
+Запуск (сначала REST — он отвечает на главный вопрос):
+    OXARCHIVE_API_KEY=ox_... python3 tools/oxa_probe.py --rest BTC ETH --hours 24
+    OXARCHIVE_API_KEY=ox_... python3 tools/oxa_probe.py BTC ETH SOL 1800
     python3 tools/oxa_probe.py --selftest      # офлайн, ключ не нужен
+
+Как читать результат:
+  * в REST события ЕСТЬ, а в WS тишина  -> спокойный рынок или проблема
+    канала; слушайте дольше (1800 с) и смотрите oxa_frame_kinds;
+  * в REST событий НЕТ                 -> ключу недоступны сами данные,
+    WS тут ни при чём;
+  * в WS кадры идут, но типов данных нет -> формат отличается от
+    документированного, зонд напечатает незнакомые кадры.
 """
 
 import asyncio
@@ -122,6 +130,12 @@ def credit_forecast(msgs, seconds):
 
 # ---------------------------------------------------------------------------
 async def probe_rest(coins, hours, key, verbose=True):
+    """Сколько ликвидаций УЖЕ лежит в архиве за последние часы.
+
+    Это решающая проверка: если события есть, значит данные ключу доступны и
+    тишина в WS — это либо спокойный рынок, либо проблема канала. Если их нет
+    и здесь — дело в доступе к данным, а не в нашем клиенте.
+    """
     import aiohttp
     end = int(time.time() * 1000)
     start = end - int(hours * 3600 * 1000)
@@ -355,6 +369,8 @@ async def main():
     for a in args:
         if a.isdigit():
             seconds = int(a)
+        elif a.startswith("--"):
+            continue                     # флаги с аргументом обработаны выше
         else:
             coins.append(a)
     coins = coins or ["BTC", "ETH"]
@@ -368,8 +384,14 @@ async def main():
     print(f"           WS   {WS_URL}")
     print(f"           монет {len(coins)}: {', '.join(coins)}")
     if mode_rest:
-        print("\n[1] REST: сколько ликвидаций уже есть в архиве")
-        await probe_rest(coins, max(1, seconds / 3600.0 * 24) or 24, key)
+        hours = 24
+        if "--hours" in args:
+            i = args.index("--hours")
+            hours = float(args[i + 1])
+            del args[i:i + 2]
+        print(f"\n[1] REST: сколько ликвидаций уже есть в архиве "
+              f"за {hours:g} ч")
+        await probe_rest(coins, hours, key)
         return
     print(f"\n[1] WS: слушаю {seconds} с, считаю сообщения и кредиты")
     await probe_ws(coins, seconds, key)

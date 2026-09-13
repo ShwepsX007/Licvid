@@ -10,11 +10,14 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from market_feed import (canon, canon_bitmex, hl_close_reason, hl_coin_map,
-                         parse_binance_msg, parse_bitget_msg, parse_bitmex_msg,
-                         parse_bybit_msg, parse_gate_msg, parse_htx_msg,
-                         parse_hyperliquid_msg, parse_okx_msg,
-                         to_binance, to_bybit, to_gate, to_okx)
+from market_feed import (bitfinex_symbol_map, canon, canon_bitmex,
+                         dydx_symbol_map, hl_close_reason, hl_coin_map,
+                         kraken_symbol_map, parse_binance_msg,
+                         parse_bitfinex_liquidations, parse_bitget_msg,
+                         parse_bitmex_msg, parse_bybit_msg, parse_dydx_msg,
+                         parse_gate_msg, parse_htx_msg,
+                         parse_hyperliquid_msg, parse_kraken_msg,
+                         parse_okx_msg, to_binance, to_bybit, to_gate, to_okx)
 
 ok = 0
 fail = 0
@@ -245,6 +248,109 @@ check("нулевой объём пропускаем",
 reason = hl_close_reason("CLOSED", 1006, None, "")
 check("close reason: код", "close_code=1006" in reason, reason)
 check("close reason: префикс", reason.startswith("hyperliquid ws"), reason)
+
+NOW = 1789300000.0
+
+
+def _iso(sec_ago):
+    from datetime import datetime, timezone
+    return (datetime.fromtimestamp(NOW - sec_ago, tz=timezone.utc)
+            .strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z")
+
+
+print("dYdX v4 (v4_trades, type=Liquidated)")
+dmap = dydx_symbol_map(["BTC_USDT", "PEPE_USDT", "BAD"])
+check("карта тикеров dYdX", dmap == {"BTC-USD": "BTC_USDT",
+                                     "PEPE-USD": "PEPE_USDT"}, dmap)
+dmsg = {"type": "data", "channel": "v4_trades", "id": "BTC-USD",
+        "contents": {"trades": [
+            {"id": "1", "createdAt": _iso(1), "side": "BUY", "price": "60000",
+             "size": "0.1", "type": "LIMIT"},
+            {"id": "2", "createdAt": _iso(1), "side": "SELL", "price": "59900",
+             "size": "2.5", "type": "LIQUIDATED"},
+            {"id": "3", "createdAt": _iso(1), "side": "BUY", "price": "59800",
+             "size": "1", "type": "DELEVERAGED"},
+        ]}}
+dstats = {}
+res = parse_dydx_msg(dmsg, dmap, now=NOW, max_age=120, stats=dstats)
+check("2 ликвидации из 3 сделок", len(res) == 2, res)
+check("SELL тейкера -> LONG", res[0]["side"] == "LONG")
+check("BUY тейкера -> SHORT", res[1]["side"] == "SHORT")
+check("символ из карты", res[0]["symbol"] == "BTC_USDT")
+check("ISO-время в epoch", abs(res[0]["ts"] - (NOW - 1)) < 0.01)
+check("все сделки посчитаны", dstats.get("trades") == 3, dstats)
+check("срез истории отсеян",
+      parse_dydx_msg({"channel": "v4_trades", "id": "BTC-USD",
+                      "contents": {"trades": [
+                          {"createdAt": _iso(5000), "side": "SELL",
+                           "price": "1", "size": "1", "type": "LIQUIDATED"}]}},
+                     dmap, now=NOW, max_age=120) == [])
+check("чужой канал игнор", parse_dydx_msg({"channel": "v4_orderbook"}, dmap) == [])
+check("битые числа пропускаем",
+      parse_dydx_msg({"channel": "v4_trades", "id": "BTC-USD",
+                      "contents": {"trades": [
+                          {"createdAt": _iso(1), "side": "SELL", "price": "zzz",
+                           "size": "1", "type": "LIQUIDATED"}]}}, dmap) == [])
+
+print("Kraken Futures (trade, type=liquidation)")
+kmap = kraken_symbol_map(["BTC_USDT", "ETH_USDT"])
+check("карта продуктов Kraken", kmap == {"PF_XBTUSD": "BTC_USDT",
+                                         "PF_ETHUSD": "ETH_USDT"}, kmap)
+ksnap = {"feed": "trade_snapshot", "product_id": "PF_XBTUSD", "trades": [
+    {"uid": "a", "side": "sell", "type": "fill", "seq": 1, "time": 1789299999000,
+     "qty": 440, "price": 34893},
+    {"uid": "b", "side": "sell", "type": "liquidation", "seq": 2,
+     "time": 1789299999000, "qty": 100, "price": 34800}]}
+kstats = {}
+res = parse_kraken_msg(ksnap, kmap, now=NOW, max_age=120, stats=kstats)
+check("снапшот: 1 ликвидация из 2 сделок", len(res) == 1, res)
+check("sell тейкера -> LONG", res[0]["side"] == "LONG")
+check("мс -> с", abs(res[0]["ts"] - 1789299999.0) < 0.01)
+check("сделки посчитаны", kstats.get("trades") == 2, kstats)
+one = {"feed": "trade", "product_id": "PF_ETHUSD", "uid": "c", "side": "buy",
+       "type": "termination", "seq": 3, "time": 1789299999000, "qty": 10,
+       "price": 3000}
+res = parse_kraken_msg(one, kmap, now=NOW, max_age=120)
+check("termination тоже ликвидация",
+      len(res) == 1 and res[0]["kind"] == "termination")
+check("buy тейкера -> SHORT", res[0]["side"] == "SHORT")
+check("тип block не считаем",
+      parse_kraken_msg({"feed": "trade", "product_id": "PF_XBTUSD",
+                        "side": "sell", "type": "block", "time": 1789299999000,
+                        "qty": 1, "price": 1}, kmap, now=NOW, max_age=120) == [])
+check("чужой фид игнор",
+      parse_kraken_msg({"feed": "ticker", "product_id": "PF_XBTUSD"}, kmap) == [])
+
+print("Bitfinex (status / liq:global)")
+bmap = bitfinex_symbol_map(["BTC_USDT", "ETH_USDT"])
+check("карта символов Bitfinex", bmap == {"tBTCF0:USTF0": "BTC_USDT",
+                                          "tETHF0:USTF0": "ETH_USDT"}, bmap)
+bstats = {}
+frame = [91684, [["pos", 1, 1789299999000, None, "tBTCF0:USTF0", 2.5, 59000.0,
+                  None, 1, 1, None, 60000.0],
+                 ["pos", 2, 1789299999000, None, "tETHF0:USTF0", -1.0, 2900.0,
+                  None, 1, 0, None, 3000.0],
+                 ["pos", 3, 1789299999000, None, "tBSVUSD", -2.6, 90.0,
+                  None, 1, 1, None, 112.27]]]
+res = parse_bitfinex_liquidations(frame, 91684, bmap, now=NOW, max_age=120,
+                                  stats=bstats)
+check("наши перпы прошли, спот отсеян", len(res) == 2, res)
+check("цена ликвидации из индекса 11", res[0]["price"] == 60000.0)
+check("объём — модуль размера", res[1]["qty"] == 1.0)
+check("плюс -> LONG, минус -> SHORT",
+      res[0]["side"] == "LONG" and res[1]["side"] == "SHORT")
+check("чужой символ посчитан", bstats.get("skipped_other") == 1, bstats)
+check("стороны в статистике", bstats.get("liq_long") == 1
+      and bstats.get("liq_short") == 1, bstats)
+check("чужой chanId игнор",
+      parse_bitfinex_liquidations(frame, 11111, bmap) == [])
+check("hb игнор", parse_bitfinex_liquidations([91684, "hb"], 91684, bmap) == [])
+check("снапшот отсеян по возрасту",
+      parse_bitfinex_liquidations(
+          [91684, [["pos", 1, 1789200000000, None, "tBTCF0:USTF0", 1.0, 1.0,
+                    None, 1, 1, None, 1.0]]], 91684, bmap,
+          now=NOW, max_age=120) == [])
+
 
 print()
 print(f"итог: {ok} ок, {fail} ошибок")

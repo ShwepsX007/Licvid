@@ -16,11 +16,12 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from oi_feed import (OpenInterestTracker, bucket_5m, bucket_changes,  # noqa: E402
-                     map_candles_to_oi, parse_binance_hist, parse_binance_spot,
-                     parse_bitget_oi, parse_bitmex_oi, parse_bybit_hist,
-                     parse_bybit_oi, parse_gate_stats, parse_htx_oi,
-                     parse_okx_oi)
+from oi_feed import (EXCHANGES, OpenInterestTracker, bucket_5m,  # noqa: E402
+                     bucket_changes, map_candles_to_oi, parse_binance_hist,
+                     parse_binance_spot, parse_bitfinex_oi, parse_bitget_oi,
+                     parse_bitmex_oi, parse_bybit_hist, parse_bybit_oi,
+                     parse_dydx_oi, parse_gate_stats, parse_hl_oi,
+                     parse_htx_oi, parse_kraken_oi, parse_okx_oi)
 
 ok = 0
 fail = 0
@@ -405,6 +406,55 @@ _demo = srv._demo_oi_payload("BTC_USDT")
 check("oi demo win keys",
       set(_demo["changes"]) == {k for k, _ in OI_WINDOWS} and
       set(_demo["partial"]) == {k for k, _ in OI_WINDOWS})
+
+print("OI: dYdX / Kraken Futures / Bitfinex / Hyperliquid")
+check("в опросе 11 бирж", len(EXCHANGES) == 11, EXCHANGES)
+for name in ("dydx", "kraken", "bitfinex", "hyperliquid"):
+    check(f"  {name} в списке опроса", name in EXCHANGES, EXCHANGES)
+check("dYdX: openInterest в базовой монете * цена",
+      abs(parse_dydx_oi({"markets": {"BTC-USD": {"openInterest": "2.5",
+          "oraclePrice": "60000"}}}, "BTC-USD", None) - 150000) < 1e-6)
+check("dYdX: своя цена важнее оракула",
+      abs(parse_dydx_oi({"markets": {"BTC-USD": {"openInterest": "2.5",
+          "oraclePrice": "60000"}}}, "BTC-USD", 40000) - 100000) < 1e-6)
+check("dYdX: нет рынка -> None",
+      parse_dydx_oi({"markets": {}}, "BTC-USD", 1) is None)
+check("dYdX: нет ни одной цены -> None",
+      parse_dydx_oi({"markets": {"BTC-USD": {"openInterest": "2.5"}}},
+                    "BTC-USD", None) is None)
+inv = {"contractSize": 1, "type": "futures_inverse"}
+lin = {"contractSize": 0.1, "type": "futures_linear"}
+check("Kraken inverse: контракты уже в USD",
+      parse_kraken_oi({"tickers": {"PF_XBTUSD": {"openInterest": 12345}}},
+                      "PF_XBTUSD", inv, 60000) == 12345)
+check("Kraken linear: size * OI * цена",
+      abs(parse_kraken_oi({"tickers": {"PF_ETHUSD": {"openInterest": 100}}},
+          "PF_ETHUSD", lin, 3000) - 30000) < 1e-6)
+check("Kraken: нет продукта -> None",
+      parse_kraken_oi({"tickers": {}}, "PF_XBTUSD", inv, 1) is None)
+check("Kraken linear без цены -> None",
+      parse_kraken_oi({"tickers": {"PF_ETHUSD": {"openInterest": 100}}},
+                      "PF_ETHUSD", lin, None) is None)
+brow = ["tBTCF0:USTF0", 60000.0, 60010.0] + [None] * 14 + [12.5]
+check("Bitfinex: OI на индексе 17 * цена",
+      abs(parse_bitfinex_oi([brow], None) - 750000) < 1e-6)
+check("Bitfinex: пустой ответ -> None", parse_bitfinex_oi([], 1) is None)
+check("Bitfinex: короткая строка -> None",
+      parse_bitfinex_oi([["tBTCF0:USTF0"]], 1) is None)
+hlp = [{"universe": [{"name": "BTC"}, {"name": "ETH"}]},
+       [{"openInterest": "100.5", "markPx": "60000"},
+        {"openInterest": "5", "markPx": "3000"}]]
+check("Hyperliquid: OI * markPx",
+      abs(parse_hl_oi(hlp, "btc", None) - 6030000) < 1e-6)
+check("Hyperliquid: вторая монета из списка",
+      abs(parse_hl_oi(hlp, "ETH", None) - 15000) < 1e-6)
+check("Hyperliquid: нет такой монеты -> None",
+      parse_hl_oi(hlp, "SOL", 1) is None)
+check("Hyperliquid: кривой ответ -> None", parse_hl_oi([1], "BTC", 1) is None)
+check("Hyperliquid: нет марк.цены -> None",
+      parse_hl_oi([{"universe": [{"name": "BTC"}]},
+                   [{"openInterest": "1"}]], "BTC", None) is None)
+
 
 print()
 print(f"итог: {ok} ок, {fail} ошибок")

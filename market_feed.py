@@ -92,6 +92,18 @@ DYDX_MAX_SUBS = int(os.getenv("LIQSCOPE_DYDX_MAX_SUBS", "40"))
 # Как часто новые источники отчитываются в лог: по одному подключению и по
 # числу ликвидаций видно, жив канал или молчит.
 NEW_SOURCE_LOG_SEC = float(os.getenv("LIQSCOPE_NEW_SOURCE_LOG_SEC", "60"))
+
+# 0xArchive (https://0xarchive.io) — индексатор Hyperliquid. Единственный
+# известный способ получить глобальные ликвидации HL без платной подписки:
+# канал `liquidations` подписывается ПО МОНЕТЕ, поэтому бесплатные 10 подписок
+# дают 10 монет. Лимит расширяется несколькими ключами: каждый ключ — своё
+# соединение и своя квота подписок. Ключи перечисляются через запятую в
+# LIQSCOPE_OXA_KEYS (или один в OXARCHIVE_API_KEY). Без ключей источник
+# просто не запускается — по умолчанию проект остаётся без ключей вообще.
+OXA_WS = os.getenv("LIQSCOPE_OXA_WS", "wss://api.0xarchive.io/ws")
+OXA_SUBS_PER_KEY = int(os.getenv("LIQSCOPE_OXA_SUBS_PER_KEY", "10"))
+OXA_PING_SEC = float(os.getenv("LIQSCOPE_OXA_PING_SEC", "25"))
+OXA_LIQ_FRESH_SEC = float(os.getenv("LIQSCOPE_OXA_FRESH_SEC", "300"))
 # Период keepalive: Kraken просит пинг хотя бы раз в 60 с, Bitfinex — раз в 30 с.
 KRAKEN_PING_SEC = float(os.getenv("LIQSCOPE_KRAKEN_PING_SEC", "25"))
 BITFINEX_PING_SEC = float(os.getenv("LIQSCOPE_BITFINEX_PING_SEC", "20"))
@@ -610,6 +622,82 @@ def hl_close_reason(msg_type, close_code, exc, data) -> str:
 #  работает фильтр свежести (LIQ_FRESH_SEC).
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
+# 0xArchive — индексатор Hyperliquid (ликвидации по API-ключу)
+#
+# Канал `liquidations` отдаёт строки заполнений (fill) с признаком
+# is_liquidation: true, по форме совпадающие со сделкой: coin/px/sz/side/time.
+# Тейкер A (продал) — значит вынесли LONG, как во всех наших источниках.
+# Подписка построчная по монете, поэтому список монет делится между ключами.
+# ---------------------------------------------------------------------------
+def oxa_keys() -> List[str]:
+    """Ключи 0xArchive из окружения.
+
+    LIQSCOPE_OXA_KEYS=key1,key2,... — несколько аккаунтов, чтобы сложить их
+    квоты подписок; OXARCHIVE_API_KEY — один ключ. Пустые значения и дубликаты
+    отбрасываются, порядок сохраняется.
+    """
+    raw = os.getenv("LIQSCOPE_OXA_KEYS") or os.getenv("OXARCHIVE_API_KEY") or ""
+    keys: List[str] = []
+    for part in raw.replace(";", ",").split(","):
+        k = part.strip()
+        if k and k not in keys:
+            keys.append(k)
+    return keys
+
+
+def parse_oxa_liquidations(payload, coin_map: Optional[Dict[str, str]] = None,
+                           now: Optional[float] = None,
+                           max_age: Optional[float] = None,
+                           stats: Optional[dict] = None) -> List[dict]:
+    """Кадр 0xArchive -> наши события ликвидаций.
+
+    coin_map: имя монеты Hyperliquid (BTC, kPEPE) -> канонический символ.
+    Отбираются только строки с is_liquidation: true — в канал могут приходить
+    и обычные заполнения. Старые события отсеиваются как у прочих источников.
+    """
+    if not isinstance(payload, dict):
+        return []
+    rows = payload.get("data")
+    if isinstance(rows, dict):
+        rows = [rows]
+    if not isinstance(rows, list):
+        return []
+    coin_map = coin_map or {}
+    frame_coin = str(payload.get("symbol") or payload.get("coin") or "")
+    now = now or time.time()
+    out: List[dict] = []
+    for r in rows:
+        if not isinstance(r, dict) or not r.get("is_liquidation"):
+            continue
+        if stats is not None:
+            stats["liq_rows"] = stats.get("liq_rows", 0) + 1
+        coin = str(r.get("coin") or frame_coin or "")
+        symbol = coin_map.get(coin) or coin_map.get(coin.upper())
+        if not symbol:
+            if stats is not None:
+                stats["skipped_other"] = stats.get("skipped_other", 0) + 1
+            continue
+        try:
+            price = float(r.get("px") or r.get("price") or 0)
+            qty = float(r.get("sz") or r.get("size") or 0)
+            ts = float(r.get("time") or r.get("timestamp") or 0)
+        except (TypeError, ValueError):
+            continue
+        if ts > 1e12:                              # миллисекунды
+            ts /= 1000.0
+        if price <= 0 or qty <= 0 or not _fresh(ts, now, max_age, stats):
+            continue
+        side = str(r.get("side") or "").upper()
+        out.append({
+            "symbol": symbol,
+            "side": "LONG" if side.startswith(("A", "S")) else "SHORT",
+            "price": price, "qty": qty, "usd": price * qty, "ts": ts or now,
+            "coin": coin,
+        })
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Сделки с dYdX / Kraken Futures / Bitfinex — источник тиков для CVD.
 # Все три публикуют публичную ленту сделок со стороной тейкера, то есть
 # годятся наравне с Binance/Bybit. Возвращают (symbol, price, qty, ts, side),
@@ -1051,7 +1139,7 @@ class MarketFeed:
             name: SourceStatus(name)
             for name in ("binance", "bybit", "okx", "gate", "bitget", "htx",
                          "bitmex", "hyperliquid", "dydx", "kraken", "bitfinex",
-                         "prices", "ticks")
+                         "oxa", "prices", "ticks")
         }
         for name, st in self.status.items():
             if name not in ("prices", "ticks"):
@@ -1104,7 +1192,14 @@ class MarketFeed:
             "dydx": self._dydx_liquidations,
             "kraken": self._kraken_liquidations,
             "bitfinex": self._bitfinex_liquidations,
+            # 0xArchive не входит в LIQSCOPE_EXCHANGES по умолчанию: источник
+            # включается сам, только если заданы ключи (см. ниже)
+            "oxa": self._oxa_liquidations,
         }
+        if oxa_keys():
+            # ключи есть — включаем, даже если в списке бирж его не назвали
+            self.enabled_exchanges.add("oxa")
+            self.status["oxa"].enabled = True
         for name, coro in spawn.items():
             if name in self.enabled_exchanges:
                 # hyperliquid жёстко режет частые переподключения (RST), поэтому
@@ -2262,6 +2357,155 @@ class MarketFeed:
                     report()
             finally:
                 pinger.cancel()
+
+    # -- 0xArchive: ликвидации Hyperliquid по API-ключу ----------------------
+    async def _oxa_liquidations(self):
+        """Ликвидации Hyperliquid через индексатор 0xArchive.
+
+        У самого HL публичного канала ликвидаций нет (замер 13.09.2026:
+        18144 сделки, ни одной с объектом liquidation), а 0xArchive их
+        публикует. Подписка построчная по монете, поэтому на бесплатном
+        тарифе один ключ даёт OXA_SUBS_PER_KEY монет; чтобы покрыть больше,
+        ключей задают несколько — каждый получает своё соединение и свой
+        срез списка монет.
+
+        Источник работает только если ключи заданы в окружении: без них
+        проект остаётся полностью «без ключей», как и был.
+        """
+        keys = oxa_keys()
+        if not keys:
+            self.status["oxa"].down("не задан LIQSCOPE_OXA_KEYS")
+            return
+        universe = await self._hyperliquid_load_universe()
+        coin_map = hl_coin_map(self.symbols, universe)
+        coins = list(coin_map)
+        if not coins:
+            raise ConnectionError("нет монет Hyperliquid для подписки")
+
+        # по одному соединению на ключ, монеты режем поровну
+        shards = [coins[i::len(keys)] for i in range(len(keys))]
+        shards = [sh[:OXA_SUBS_PER_KEY] for sh in shards]
+        dropped = len(coins) - sum(len(sh) for sh in shards)
+
+        st = self.status["oxa"]
+        stats = {"frames": 0, "liq_rows": 0, "stale": 0, "skipped_other": 0,
+                 "liq": 0, "errors": 0, "acked": 0, "subs": sum(len(sh) for sh in shards),
+                 "keys": len(keys), "kinds": {}}
+        last_log = 0.0
+
+        def publish():
+            kinds = dict(sorted(stats["kinds"].items(),
+                                key=lambda kv: -kv[1])[:6])
+            st.extra = {"oxa_url": OXA_WS, "oxa_keys": stats["keys"],
+                        "oxa_subs_total": stats["subs"],
+                        "oxa_subs_acked": stats["acked"],
+                        "oxa_frames": stats["frames"],
+                        "oxa_liquidations": stats["liq"],
+                        "oxa_liq_rows": stats["liq_rows"],
+                        "oxa_skipped_stale": stats["stale"],
+                        "oxa_skipped_other": stats["skipped_other"],
+                        "oxa_errors": stats["errors"],
+                        "oxa_coins_uncovered": dropped,
+                        "oxa_frame_kinds": kinds}
+
+        def report(force=False):
+            nonlocal last_log
+            now = time.monotonic()
+            if not force and now - last_log < NEW_SOURCE_LOG_SEC:
+                return
+            last_log = now
+            log.info("[oxa] ключей %d, подписок %d/%d, кадров %d, "
+                     "ликвидаций %d (строк %d), старых %d, чужих монет %d",
+                     stats["keys"], stats["acked"], stats["subs"],
+                     stats["frames"], stats["liq"], stats["liq_rows"],
+                     stats["stale"], stats["skipped_other"])
+            if stats["frames"] and not stats["liq_rows"]:
+                log.warning("[oxa] кадры идут, а строк ликвидаций нет; "
+                            "типы кадров: %s", stats["kinds"])
+        publish()
+
+        async def stream(key_no: int, key: str, shard: List[str]):
+            """Одно соединение на один ключ со своим срезом монет."""
+            nonlocal last_log
+            headers = {"Authorization": f"Bearer {key}"}
+            async with self._session.ws_connect(
+                    OXA_WS, headers=headers, heartbeat=None,
+                    max_msg_size=0) as ws:
+                st.up()
+                for coin in shard:
+                    await ws.send_json({"op": "subscribe",
+                                        "channel": "liquidations",
+                                        "symbol": coin})
+                log.info("[oxa] ключ #%d: подписываю %d монет (%s)",
+                         key_no + 1, len(shard), ", ".join(shard[:8])
+                         + ("..." if len(shard) > 8 else ""))
+                last_ping = time.monotonic()
+                while not self._stop.is_set():
+                    if time.monotonic() - last_ping >= OXA_PING_SEC:
+                        await ws.send_json({"op": "ping"})
+                        last_ping = time.monotonic()
+                    try:
+                        msg = await ws.receive(timeout=5.0)
+                    except asyncio.TimeoutError:
+                        continue
+                    if msg.type in (aiohttp.WSMsgType.CLOSED,
+                                    aiohttp.WSMsgType.CLOSING,
+                                    aiohttp.WSMsgType.ERROR):
+                        break
+                    if msg.type != aiohttp.WSMsgType.TEXT:
+                        continue
+                    # считаем каждый кадр: «ноль ликвидаций» должно означать
+                    # тишину, а не незнакомую форму кадра
+                    stats["frames"] += 1
+                    try:
+                        payload = json.loads(msg.data)
+                    except Exception:
+                        stats["kinds"]["<не-json>"] = \
+                            stats["kinds"].get("<не-json>", 0) + 1
+                        continue
+                    if not isinstance(payload, dict):
+                        # строка/число/список вместо объекта: не данные, но
+                        # молча терять нельзя — иначе «ноль ликвидаций»
+                        # неотличим от незнакомого формата
+                        stats["kinds"]["<не-объект>"] = \
+                            stats["kinds"].get("<не-объект>", 0) + 1
+                        publish()
+                        continue
+                    kind = str(payload.get("type") or "<без type>")
+                    stats["kinds"][kind] = stats["kinds"].get(kind, 0) + 1
+                    if kind == "subscribed":
+                        stats["acked"] += 1
+                        publish()
+                        continue
+                    if kind == "error":
+                        stats["errors"] += 1
+                        st.last_error = str(payload.get("message"))[:200]
+                        log.warning("[oxa] ключ #%d: отказ %s", key_no + 1,
+                                    st.last_error)
+                        publish()
+                        continue
+                    if kind != "data":
+                        publish()
+                        continue
+                    for ev in parse_oxa_liquidations(
+                            payload, coin_map, now=time.time(),
+                            max_age=OXA_LIQ_FRESH_SEC, stats=stats):
+                        stats["liq"] += 1
+                        # ликвидация произошла на Hyperliquid — её и показываем,
+                        # 0xArchive здесь только транспорт
+                        await self._emit("hyperliquid", ev["symbol"], ev["side"],
+                                         ev["price"], ev["qty"], ev["ts"],
+                                         usd=ev.get("usd"))
+                    publish()
+                    report()
+
+        try:
+            await asyncio.gather(
+                *[stream(i, k, sh) for i, (k, sh) in enumerate(zip(keys, shards))],
+                return_exceptions=False)
+        finally:
+            report(force=True)
+            publish()
 
     # -- Hyperliquid ---------------------------------------------------------
     def _hl_session(self):

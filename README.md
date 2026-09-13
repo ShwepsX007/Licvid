@@ -125,6 +125,7 @@ sudo systemctl enable --now liqscope
 | `LIQSCOPE_BITFINEX_WS` | `wss://api-pub.bitfinex.com/ws/2` | адрес Bitfinex |
 | `LIQSCOPE_BITFINEX_PING_SEC` | `20` | интервал пинга Bitfinex |
 | `LIQSCOPE_LIQ_FRESH_SEC` | `120` | насколько свежие события из подписочного среза новых бирж пускать в ленту |
+| `LIQSCOPE_NEW_SOURCE_LOG_SEC` | `60` | как часто dYdX/Kraken/Bitfinex/0xArchive отчитываются в лог о подписках и ликвидациях |
 | `LIQSCOPE_DEMO` | `0` | `1` — синтетический поток для проверки интерфейса без бирж (в шапке загорится бейдж `DEMO`) |
 | `LIQSCOPE_HISTORY_MAX` | `60000` | сколько событий держать в памяти |
 | `LIQSCOPE_HISTORY_FILE` | `data/liq_history.jsonl` | файл истории ликвидаций (JSONL, append). Пустая строка / `0` / `off` — не писать на диск |
@@ -190,6 +191,44 @@ sudo systemctl enable --now liqscope
 | Hyperliquid | `trades` на каждую монету | только сделки с объектом `liquidation`; тейкер `A` (продажа) → **LONG**. Маппинг монет — из `universe` (`POST /info {"type": "meta"}`), дешёвые токены с префиксом `k` (`kPEPE`). Срез истории, который биржа отдаёт на подписку, в ленту не идёт (`LIQSCOPE_HL_FRESH_SEC`) — иначе каждое переподключение показывало бы вчерашние ликвидации как новые |
 
 Отключить лишние: `LIQSCOPE_EXCHANGES=binance,bybit,bitget`.
+
+#### Hyperliquid через 0xArchive (по API-ключу, необязательно)
+
+Сам HL ликвидаций не публикует, но их публикует индексатор
+[0xArchive](https://0xarchive.io/hyperliquid): канал `liquidations` на
+`wss://api.0xarchive.io/ws`, событие — строка заполнения с
+`is_liquidation: true` (`coin/px/sz/side/time`), тейкер `A` → **LONG**.
+
+Подписка **построчная по монете**, поэтому бесплатный тариф (10 подписок,
+2 соединения, 50 000 кредитов в месяц, **каждое WS-сообщение = 1 кредит**)
+покрывает только 10 монет. Лимит складывается ключами — источник поднимает
+**по одному соединению на ключ** и делит список монет между ними:
+
+```ini
+# /etc/systemd/system/licvid.service — несколько аккаунтов через запятую
+Environment=LIQSCOPE_OXA_KEYS=0xa_ключ1,0xa_ключ2,0xa_ключ3
+```
+
+Без ключей источник не стартует вовсе и пишет причину в `/api/health` — по
+умолчанию проект остаётся полностью «без ключей». В ленте событие помечено
+биржей **hyperliquid**: ликвидация произошла там, 0xArchive только транспорт.
+
+| Переменная | По умолчанию | Что делает |
+|---|---|---|
+| `LIQSCOPE_OXA_KEYS` | — | ключи через запятую (или `;`); один ключ можно задать в `OXARCHIVE_API_KEY` |
+| `LIQSCOPE_OXA_SUBS_PER_KEY` | `10` | сколько монет на один ключ (лимит бесплатного тарифа) |
+| `LIQSCOPE_OXA_FRESH_SEC` | `300` | окно свежести событий |
+| `LIQSCOPE_OXA_PING_SEC` | `25` | интервал пинга |
+| `LIQSCOPE_OXA_WS` | `wss://api.0xarchive.io/ws` | адрес |
+
+В `/api/health` для `oxa` видно `oxa_keys`, `oxa_subs_acked/total`,
+`oxa_frames`, `oxa_liquidations`, `oxa_skipped_stale/other` и
+`oxa_coins_uncovered` — сколько монет не влезло в квоту ключей. Отдельно
+считается `oxa_frame_kinds` (типы принятых кадров): если кадры идут, а строк
+ликвидаций нет, в лог уходит предупреждение с этими типами — «ноль
+ликвидаций» тогда отличим от незнакомого формата кадра.
+
+Проверить ключ до включения: `tools/oxa_probe.py` (см. ниже).
 
 Внутренности каждого нового канала видны в `/api/health`: `dydx_trades_seen` /
 `dydx_subs_acked`, `kraken_trades_seen` / `kraken_subs_acked`, у Bitfinex —

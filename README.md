@@ -60,7 +60,7 @@ After=network-online.target
 [Service]
 WorkingDirectory=/root/LiqScope
 Environment=LIQSCOPE_SYMBOLS_LIMIT=40
-Environment=LIQSCOPE_EXCHANGES=binance,bybit,okx,gate,bitget,htx,bitmex,hyperliquid
+Environment=LIQSCOPE_EXCHANGES=binance,bybit,okx,gate,bitget,htx,bitmex,hyperliquid,dydx,kraken,bitfinex
 ExecStart=/usr/bin/python3 -m uvicorn server:app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=5
@@ -117,7 +117,14 @@ sudo systemctl enable --now liqscope
 | Переменная | По умолчанию | Назначение |
 |---|---|---|
 | `LIQSCOPE_SYMBOLS_LIMIT` | `40` | сколько монет держать в списке (топ по обороту) |
-| `LIQSCOPE_EXCHANGES` | `binance,bybit,okx,gate,bitget,htx,bitmex,hyperliquid` | какие биржи слушать |
+| `LIQSCOPE_EXCHANGES` | `binance,bybit,okx,gate,bitget,htx,bitmex,hyperliquid,dydx,kraken,bitfinex` | какие биржи слушать |
+| `LIQSCOPE_DYDX_WS` | `wss://indexer.dydx.trade/v4/ws` | адрес индексера dYdX v4 |
+| `LIQSCOPE_DYDX_SUB_GAP_MS` | `550` | пауза между подписками dYdX (индексер разрешает 2/с на пару канал+id) |
+| `LIQSCOPE_KRAKEN_WS` | `wss://futures.kraken.com/ws/v1` | адрес Kraken Futures |
+| `LIQSCOPE_KRAKEN_PING_SEC` | `25` | интервал пинга Kraken Futures (обрывает сокет после 60 с молчания) |
+| `LIQSCOPE_BITFINEX_WS` | `wss://api-pub.bitfinex.com/ws/2` | адрес Bitfinex |
+| `LIQSCOPE_BITFINEX_PING_SEC` | `20` | интервал пинга Bitfinex |
+| `LIQSCOPE_LIQ_FRESH_SEC` | `120` | насколько свежие события из подписочного среза новых бирж пускать в ленту |
 | `LIQSCOPE_DEMO` | `0` | `1` — синтетический поток для проверки интерфейса без бирж (в шапке загорится бейдж `DEMO`) |
 | `LIQSCOPE_HISTORY_MAX` | `60000` | сколько событий держать в памяти |
 | `LIQSCOPE_HISTORY_FILE` | `data/liq_history.jsonl` | файл истории ликвидаций (JSONL, append). Пустая строка / `0` / `off` — не писать на диск |
@@ -177,9 +184,39 @@ sudo systemctl enable --now liqscope
 | Bitget UTA | `liquidation` (instType=usdt-futures) | `side=buy` → **LONG**, `amount` уже в USDT |
 | HTX (Huobi) USDT-M | `public.*.liquidation_orders` (gzip) | `direction=sell` → **LONG**, `trade_turnover` в USDT |
 | BitMEX | таблица `liquidation` | `side=Sell` → **LONG**; учитываем только `action=insert`, размер переводим из контрактов через `underlyingToPositionMultiplier` (инверсные `XBTUSD`: 1 контракт = 1 USD) |
+| dYdX v4 | `v4_trades` на каждый тикер | сделки с `type=Liquidated` и `Deleveraged` (принудительное закрытие страховым фондом); тейкер `SELL` → **LONG**. Подписка по тикеру вида `BTC-USD`, карта строится из нашего списка монет. Индексер разрешает 2 подписки в секунду на пару «соединение+канал+id», поэтому темп подписок ограничен `LIQSCOPE_DYDX_SUB_GAP_MS` (по умолчанию 550 мс), а на подписку биржа отдаёт срез последних сделок — он отсеивается по возрасту |
+| Kraken Futures | `trade` (публичный) | у сделки поле `type`: `liquidation` (движок) и `termination` (принудительное закрытие — считаем ликвидацией, `kind=termination`); `fill`/`block` не считаем. Тейкер `sell` → **LONG**. Продукты вида `PF_XBTUSD`; подписка шлётся **по одному продукту за раз**, потому что на `Invalid product id` Kraken закрывает всё соединение. Пинг раз в `LIQSCOPE_KRAKEN_PING_SEC` (25 с) — биржа рвёт сокет после 60 с молчания |
+| Bitfinex | `status` c ключом `liq:global` | **одна подписка на всю биржу**: в ленте позиции, закрытые по ликвидации. `chanId` берётся из подтверждения подписки, кадры чужих каналов и `"hb"` игнорируются. Сторона — из знака `AMOUNT` (`+` → **LONG**), цена — `LIQUIDATION_PRICE` (индекс 11), объём — `|AMOUNT|`. Спот-символы отсеиваются и это видно в `/api/health` → `bitfinex_skipped_other`. Пинг раз в `LIQSCOPE_BITFINEX_PING_SEC` (20 с) |
 | Hyperliquid | `trades` на каждую монету | только сделки с объектом `liquidation`; тейкер `A` (продажа) → **LONG**. Маппинг монет — из `universe` (`POST /info {"type": "meta"}`), дешёвые токены с префиксом `k` (`kPEPE`). Срез истории, который биржа отдаёт на подписку, в ленту не идёт (`LIQSCOPE_HL_FRESH_SEC`) — иначе каждое переподключение показывало бы вчерашние ликвидации как новые |
 
 Отключить лишние: `LIQSCOPE_EXCHANGES=binance,bybit,bitget`.
+
+Внутренности каждого нового канала видны в `/api/health`: `dydx_trades_seen` /
+`dydx_subs_acked`, `kraken_trades_seen` / `kraken_subs_acked`, у Bitfinex —
+`bitfinex_rows_seen`, `bitfinex_liq_long` / `bitfinex_liq_short` и
+`bitfinex_skipped_other`. По ним сразу видно разницу между «подключён, но
+ликвидаций на этой бирже не было» и «канал сломался».
+
+#### Hyperliquid: ликвидаций в публичном API нет, OI — есть
+
+Замер на боевом сервере (13.09.2026, 8403 кадра, 18144 сделки): **ноль** сделок
+с объектом `liquidation`, набор полей всегда `coin, hash, px, side, sz, tid,
+time, users`. Публичный API HL публикует ликвидации только внутри **личной**
+ленты кошелька (`userFills`), глобального канала нет. Поэтому HL остаётся в
+проекте как источник **открытого интереса** (`POST /info {"type":
+"metaAndAssetCtx"}` → `openInterest` рядом с `markPx`) и не даёт ликвидаций.
+
+Единственный известный способ получить глобальные ликвидации HL — индексатор
+[GoldRush (Covalent)](https://goldrush.dev/docs/goldrush-hyperliquid/overview):
+`wss://hypercore.goldrushdata.com/ws?key=<GOLDRUSH_API_KEY>` с подпиской
+`{"method":"subscribe","subscription":{"type":"liquidationFills"}}` — один
+канал на всю биржу, в каждом кадре `fills` и непустой `liquidation`
+(`liquidatedUser`, `markPx`, `method`). Но это **платный API-ключ** (1 кредит в
+минуту), что ломает принцип «публичные потоки без ключей», поэтому в проект он
+не встроен. Если ключ появится — интеграция сводится к одному слушателю:
+адрес вместо `LIQSCOPE_HL_WS`, ключ в query-строке, разбор `fills`
+(`coin/px/sz/side/time` + `liquidation`) — парсер уже есть
+(`parse_hyperliquid_msg` принимает и такой набор полей).
 
 ### Почему нет Coinbase, KuCoin и BingX
 
@@ -296,7 +333,7 @@ sudo systemctl enable --now liqscope
   оборотом тиры ниже (см. ниже). В шапке —
   бокс OI
   по монете графика:
-  изменение за выбранный период + суммарный интерес со всех 7 бирж. Источники:
+  изменение за выбранный период + суммарный интерес со всех 11 бирж. Источники:
   мгновенный OI опрашивается со всех бирж раз в 30 с, история 5-минуток —
   **Binance** (`openInterestHist`), **Bybit** (`open-interest` 5min),
   **Gate** (`contract_stats`); изменения и шарики считаются только

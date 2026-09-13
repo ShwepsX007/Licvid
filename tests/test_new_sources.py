@@ -92,9 +92,10 @@ def ms(sec_ago: float) -> int:
 # Псевдо-dYdX v4
 # ---------------------------------------------------------------------------
 class FakeDydx:
-    def __init__(self, liq_every=0.3, snapshot=True):
+    def __init__(self, liq_every=0.3, snapshot=True, reject=None):
         self.liq_every = liq_every
         self.snapshot = snapshot
+        self.reject = reject            # тикер, на который отвечаем ошибкой
         self.subs = []
         self.sockets = set()
 
@@ -115,6 +116,11 @@ class FakeDydx:
                     continue
                 if p.get("type") == "subscribe" and p.get("channel") == "v4_trades":
                     self.subs.append(p.get("id"))
+                    if p.get("id") == self.reject:
+                        await ws.send_json({"type": "error",
+                                            "message": "Unknown ticker",
+                                            "id": p.get("id")})
+                        continue
                     await ws.send_json({"type": "subscribed",
                                         "channel": "v4_trades",
                                         "id": p.get("id"), "contents": {}})
@@ -150,9 +156,10 @@ class FakeDydx:
 # Псевдо-Kraken Futures
 # ---------------------------------------------------------------------------
 class FakeKraken:
-    def __init__(self, liq_every=0.3, snapshot=True):
+    def __init__(self, liq_every=0.3, snapshot=True, reject=None):
         self.liq_every = liq_every
         self.snapshot = snapshot
+        self.reject = reject            # продукт, на который отвечаем ошибкой
         self.subs = []
         self.pings = 0
         self.seq = 100
@@ -175,6 +182,11 @@ class FakeKraken:
                 if p.get("event") == "subscribe" and p.get("feed") == "trade":
                     for pid in p.get("product_ids") or []:
                         self.subs.append(pid)
+                        if pid == self.reject:
+                            await ws.send_json({"event": "error",
+                                                "error": "Invalid product id",
+                                                "product_ids": [pid]})
+                            continue
                         await ws.send_json({"event": "subscribed", "feed": "trade",
                                             "product_ids": [pid]})
         finally:
@@ -393,8 +405,76 @@ async def scenario_bitfinex(fake):
                 pass
 
 
+async def scenario_rejections():
+    """Отказ биржи должен быть виден: иначе «нет ликвидаций» неотличимо от
+    «подписка не прошла»."""
+    print("5) отказы подписки видны в health")
+    market_feed.DYDX_WS = f"http://127.0.0.1:{DYDX_PORT}/ws"
+    market_feed.DYDX_SUB_GAP = 0.01
+    market_feed.KRAKEN_WS = f"http://127.0.0.1:{KRAKEN_PORT}/ws"
+    market_feed.KRAKEN_PING_SEC = 5
+
+    fd = FakeDydx(reject="BTC-USD")
+    fk = FakeKraken(reject="PF_XBTUSD")
+    runners = []
+    for fake, port in ((fd, DYDX_PORT + 10), (fk, KRAKEN_PORT + 10)):
+        app = web.Application()
+        app.router.add_get("/ws", fake.handle)
+        r = web.AppRunner(app)
+        await r.setup()
+        await web.TCPSite(r, "127.0.0.1", port).start()
+        runners.append(r)
+    prev_dydx, prev_kraken = market_feed.DYDX_WS, market_feed.KRAKEN_WS
+    market_feed.DYDX_WS = f"http://127.0.0.1:{DYDX_PORT + 10}/ws"
+    market_feed.KRAKEN_WS = f"http://127.0.0.1:{KRAKEN_PORT + 10}/ws"
+    try:
+        liqs = []
+        feed = make_feed(liqs)
+        async with aiohttp.ClientSession() as session:
+            feed._session = session
+            td = asyncio.create_task(feed._dydx_liquidations())
+            tk = asyncio.create_task(feed._kraken_liquidations())
+            try:
+                check("dYdX: отказ посчитан",
+                      await wait_until(lambda: feed.status["dydx"].extra.get(
+                          "dydx_errors", 0) >= 1), feed.status["dydx"].extra)
+                check("dYdX: причина в last_error",
+                      "Unknown ticker" in (feed.status["dydx"].last_error or ""),
+                      feed.status["dydx"].last_error)
+                check("dYdX: отказ не попал в подтверждённые",
+                      "BTC-USD" not in [feed.status["dydx"].extra.get(
+                          "dydx_subs_acked")], feed.status["dydx"].extra)
+                check("kraken: отказ посчитан",
+                      await wait_until(lambda: feed.status["kraken"].extra.get(
+                          "kraken_errors", 0) >= 1), feed.status["kraken"].extra)
+                check("kraken: причина в last_error",
+                      "Invalid product id" in (feed.status["kraken"].last_error
+                                               or ""),
+                      feed.status["kraken"].last_error)
+                check("dYdX: типы кадров видны",
+                      "error" in feed.status["dydx"].extra.get(
+                          "dydx_frame_kinds", {}),
+                      feed.status["dydx"].extra.get("dydx_frame_kinds"))
+                check("kraken: типы кадров видны",
+                      "error" in feed.status["kraken"].extra.get(
+                          "kraken_frame_kinds", {}),
+                      feed.status["kraken"].extra.get("kraken_frame_kinds"))
+            finally:
+                for t in (td, tk):
+                    t.cancel()
+                    try:
+                        await t
+                    except (asyncio.CancelledError, Exception):   # noqa: B014
+                        pass
+    finally:
+        # возвращаем адреса основным псевдо-биржам: дальше сквозной прогон
+        market_feed.DYDX_WS, market_feed.KRAKEN_WS = prev_dydx, prev_kraken
+        for r in runners:
+            await r.cleanup()
+
+
 async def scenario_server(fake_d, fake_k, fake_b):
-    print("4) сквозной прогон через server.py")
+    print("6) сквозной прогон через server.py")
     os.environ["LIQSCOPE_DEMO"] = "0"
     os.environ["PORT"] = str(SERVER_PORT)
     os.environ["LIQSCOPE_DYDX_WS"] = f"http://127.0.0.1:{DYDX_PORT}/ws"
@@ -481,6 +561,7 @@ async def main():
         await scenario_dydx(fake_d)
         await scenario_kraken(fake_k)
         await scenario_bitfinex(fake_b)
+        await scenario_rejections()
         await scenario_server(fake_d, fake_k, fake_b)
     finally:
         await r1.cleanup()

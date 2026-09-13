@@ -2109,7 +2109,11 @@ class MarketFeed:
                         "dydx_subs_acked": len(acked),
                         "dydx_trades_seen": stats["trades"],
                         "dydx_liquidations": stats["liq"],
-                        "dydx_skipped_stale": stats["stale"]}
+                        "dydx_skipped_stale": stats["stale"],
+                        "dydx_errors": stats.get("errors", 0),
+                        "dydx_frame_kinds": dict(sorted(
+                            stats.get("kinds", {}).items(),
+                            key=lambda kv: -kv[1])[:6])}
 
         def report(force=False):
             nonlocal last_log
@@ -2118,8 +2122,12 @@ class MarketFeed:
                 return
             last_log = now
             log.info("[dydx] подписок %d/%d, сделок %d, ликвидаций %d, "
-                     "старых отсеяно %d", len(acked), len(tickers),
-                     stats["trades"], stats["liq"], stats["stale"])
+                     "старых отсеяно %d, отказов %d", len(acked), len(tickers),
+                     stats["trades"], stats["liq"], stats["stale"],
+                     stats.get("errors", 0))
+            if not stats["trades"] and stats.get("kinds"):
+                log.warning("[dydx] сделок нет; типы кадров: %s",
+                            stats["kinds"])
 
         async with self._session.ws_connect(DYDX_WS, heartbeat=None,
                                             max_msg_size=0) as ws:
@@ -2152,10 +2160,23 @@ class MarketFeed:
                         payload = json.loads(msg.data)
                     except Exception:
                         continue
-                    if isinstance(payload, dict) and payload.get("type") == "subscribed":
-                        acked.add(str(payload.get("id") or ""))
-                        publish()
-                        continue
+                    if isinstance(payload, dict):
+                        kind = str(payload.get("type") or "<без type>")
+                        stats["kinds"] = stats.get("kinds", {})
+                        stats["kinds"][kind] = stats["kinds"].get(kind, 0) + 1
+                        if kind == "subscribed":
+                            acked.add(str(payload.get("id") or ""))
+                            publish()
+                            continue
+                        if kind == "error":
+                            # без этого отказ биржи неотличим от тишины:
+                            # сокет жив, а ликвидаций нет и причины не видно
+                            stats["errors"] = stats.get("errors", 0) + 1
+                            st.last_error = str(payload.get("message")
+                                                or payload)[:200]
+                            log.warning("[dydx] отказ: %s", st.last_error)
+                            publish()
+                            continue
                     for ev in parse_dydx_msg(payload, sym_map, now=time.time(),
                                              max_age=LIQ_FRESH_SEC, stats=stats):
                         stats["liq"] += 1
@@ -2188,7 +2209,11 @@ class MarketFeed:
                         "kraken_subs_acked": len(acked),
                         "kraken_trades_seen": stats["trades"],
                         "kraken_liquidations": stats["liq"],
-                        "kraken_skipped_stale": stats["stale"]}
+                        "kraken_skipped_stale": stats["stale"],
+                        "kraken_errors": stats.get("errors", 0),
+                        "kraken_frame_kinds": dict(sorted(
+                            stats.get("kinds", {}).items(),
+                            key=lambda kv: -kv[1])[:6])}
 
         def report():
             nonlocal last_log
@@ -2197,8 +2222,9 @@ class MarketFeed:
                 return
             last_log = now
             log.info("[kraken] подписок %d/%d, сделок %d, ликвидаций %d, "
-                     "старых отсеяно %d", len(acked), len(products),
-                     stats["trades"], stats["liq"], stats["stale"])
+                     "старых отсеяно %d, отказов %d", len(acked), len(products),
+                     stats["trades"], stats["liq"], stats["stale"],
+                     stats.get("errors", 0))
 
         async with self._session.ws_connect(KRAKEN_WS, heartbeat=None,
                                             max_msg_size=0) as ws:
@@ -2243,11 +2269,25 @@ class MarketFeed:
                         payload = json.loads(msg.data)
                     except Exception:
                         continue
-                    if isinstance(payload, dict) and payload.get("event") == "subscribed":
-                        for pid in payload.get("product_ids") or []:
-                            acked.add(str(pid))
-                        publish()
-                        continue
+                    if isinstance(payload, dict):
+                        kind = str(payload.get("event") or payload.get("feed")
+                                   or "<без event>")
+                        stats["kinds"] = stats.get("kinds", {})
+                        stats["kinds"][kind] = stats["kinds"].get(kind, 0) + 1
+                        if kind == "subscribed":
+                            for pid in payload.get("product_ids") or []:
+                                acked.add(str(pid))
+                            publish()
+                            continue
+                        if kind == "error":
+                            # Kraken отвечает ошибкой на незнакомый продукт и
+                            # при этом рвёт сокет — причину нужно видеть
+                            stats["errors"] = stats.get("errors", 0) + 1
+                            st.last_error = str(payload.get("error")
+                                                or payload)[:200]
+                            log.warning("[kraken] отказ: %s", st.last_error)
+                            publish()
+                            continue
                     for ev in parse_kraken_msg(payload, sym_map, now=time.time(),
                                                max_age=LIQ_FRESH_SEC, stats=stats):
                         stats["liq"] += 1

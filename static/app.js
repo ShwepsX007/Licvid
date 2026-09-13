@@ -3009,11 +3009,14 @@
         Object.keys(health.sources).forEach((name) => {
             const s = health.sources[name];
             if (!s.enabled) return;
+            // oxa — это транспорт для ликвидаций Hyperliquid, а не отдельная
+            // площадка: её события приходят с биржей hyperliquid, и чип
+            // Hyperliquid уже есть. Вторая плашка дублировала бы его.
+            if (name === "oxa") return;
             const cls = s.connected ? "ok" : "bad";
             let label = name;
             if (name.indexOf("prices") === 0) label = I18n.t("health.prices");
             else if (name.indexOf("ticks") === 0) label = I18n.t("health.ticks");
-            else if (name === "oxa") label = "Hyperliquid via 0xArchive";
             const title = s.connected
                 ? I18n.t("health.connected", { n: s.events })
                 : I18n.t("health.noconn", { err: s.last_error || "—" });

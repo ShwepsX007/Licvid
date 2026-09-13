@@ -351,6 +351,82 @@ async def test_bad_key():
         os.environ.pop("LIQSCOPE_OXA_KEYS", None)
 
 
+SERVER_PORT = 8845
+
+
+async def test_server(fake, keys):
+    """Сквозной прогон: oxa не считается биржей, а события видны в ленте."""
+    print("7) сквозной прогон через server.py")
+    os.environ["LIQSCOPE_DEMO"] = "0"
+    os.environ["PORT"] = str(SERVER_PORT)
+    os.environ["LIQSCOPE_OXA_KEYS"] = ",".join(keys)
+    os.environ["LIQSCOPE_EXCHANGES"] = "hyperliquid"
+    # историю с диска не грузим: иначе в ленте окажутся события прошлых прогонов
+    os.environ["LIQSCOPE_HISTORY_FILE"] = "off"
+    # адрес читаётся в константу при импорте market_feed, поэтому меняем её
+    # здесь, а не только в окружении
+    market_feed.OXA_WS = f"http://127.0.0.1:{PORT}/ws"
+    market_feed.OXA_PING_SEC = 0.3
+
+    async def _fake_universe(self, session=None):
+        return {"BTC", "ETH", "SOL", "kPEPE"}
+    MarketFeed._hyperliquid_load_universe = _fake_universe
+
+    import importlib
+    import server as srv
+    importlib.reload(srv)
+
+    import uvicorn
+    config = uvicorn.Config(srv.app, host="127.0.0.1", port=SERVER_PORT,
+                            log_level="warning")
+    httpd = uvicorn.Server(config)
+    task = asyncio.create_task(httpd.serve())
+    try:
+        await wait_until(lambda: httpd.started, 15)
+        base = f"http://127.0.0.1:{SERVER_PORT}"
+        async with aiohttp.ClientSession() as s:
+            async with s.get(base + "/api/health") as r:
+                health = await r.json()
+            src = health.get("sources", {})
+            check("health: oxa присутствует и подключён",
+                  src.get("oxa", {}).get("connected") is True, src.get("oxa"))
+            check("health: oxa НЕ в списке живых бирж",
+                  "oxa" not in (health.get("live_exchanges") or []),
+                  health.get("live_exchanges"))
+            total = health.get("exchanges_total")
+            venues = [k for k in src if k not in ("prices", "ticks", "oxa")]
+            check("health: oxa не inflate число бирж",
+                  total == len(venues), (total, venues))
+            check("health: видно число ключей",
+                  src.get("oxa", {}).get("oxa_keys") == 2, src.get("oxa"))
+            await asyncio.sleep(2.0)
+            async with s.get(base + "/api/liquidations?limit=300") as r:
+                data = await r.json()
+            evs = data.get("liquidations", [])
+            hl = [e for e in evs if e["exchange"] == "hyperliquid"]
+            check("в ленте есть ликвидации Hyperliquid", len(hl) > 0,
+                  {e["exchange"] for e in evs})
+            check("подпись источника — hyperliquid, не oxa",
+                  all(e["exchange"] != "oxa" for e in evs),
+                  {e["exchange"] for e in evs})
+            # в API side — сторона тейкера, position — какую позицию вынесло
+            check("событие полное",
+                  bool(hl) and hl[0].get("usd", 0) > 0
+                  and hl[0].get("position") in ("LONG", "SHORT")
+                  and hl[0].get("side") in ("BUY", "SELL"), hl[:1])
+    finally:
+        httpd.should_exit = True
+        await asyncio.sleep(0.2)
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):      # noqa: B014
+            pass
+        for var in ("LIQSCOPE_OXA_KEYS", "LIQSCOPE_EXCHANGES",
+                    "LIQSCOPE_HISTORY_FILE"):
+            os.environ.pop(var, None)
+
+
 async def main():
     keys = ["0xa_key_one", "0xa_key_two"]
     fake = FakeOxa(good_keys=set(keys))
@@ -363,6 +439,7 @@ async def main():
         test_keys()
         test_parser()
         await test_stream(fake, keys)
+        await test_server(fake, keys)
     finally:
         await r.cleanup()
     await test_junk_frames()

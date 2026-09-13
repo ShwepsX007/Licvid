@@ -1130,12 +1130,16 @@ async def api_health():
     }
     data.update(feed.health() if feed else {"sources": {}})
     _srcs = data.get("sources") or {}
+    # oxa — это транспорт для ликвидаций Hyperliquid, а не отдельная биржа:
+    # её события приходят с биржей hyperliquid, поэтому в счётчик бирж она не
+    # идёт (иначе на лендинге было бы «11 бирж» при десяти площадках)
+    _not_venue = ("prices", "ticks", "oxa")
     data["live_exchanges"] = sorted(
         name for name, s in _srcs.items()
-        if name not in ("prices", "ticks") and isinstance(s, dict) and s.get("connected")
+        if name not in _not_venue and isinstance(s, dict) and s.get("connected")
     )
     data["exchanges_total"] = (
-        sum(1 for name in _srcs if name not in ("prices", "ticks")) or len(EXCHANGES)
+        sum(1 for name in _srcs if name not in _not_venue) or len(EXCHANGES)
     )
     data["ticks_seen"] = TICKS_SEEN
     data["hot_symbols"] = sorted(feed.hot_symbols) if feed else []

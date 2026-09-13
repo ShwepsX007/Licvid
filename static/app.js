@@ -3013,6 +3013,7 @@
             let label = name;
             if (name.indexOf("prices") === 0) label = I18n.t("health.prices");
             else if (name.indexOf("ticks") === 0) label = I18n.t("health.ticks");
+            else if (name === "oxa") label = "Hyperliquid via 0xArchive";
             const title = s.connected
                 ? I18n.t("health.connected", { n: s.events })
                 : I18n.t("health.noconn", { err: s.last_error || "—" });

@@ -457,7 +457,8 @@ a { color: inherit; text-decoration: none; }
                 total = 0;
                 for (var name in health.sources) {
                     if (!Object.prototype.hasOwnProperty.call(health.sources, name)) continue;
-                    if (name === "prices" || name === "ticks") continue;
+                    // oxa — транспорт для Hyperliquid, не отдельная биржа
+                    if (name === "prices" || name === "ticks" || name === "oxa") continue;
                     total += 1;
                     if (health.sources[name] && health.sources[name].connected) live.push(name);
                 }

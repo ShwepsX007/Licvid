@@ -120,6 +120,8 @@ sudo systemctl enable --now liqscope
 | `LIQSCOPE_EXCHANGES` | `binance,bybit,okx,gate,bitget,htx,bitmex,hyperliquid,dydx,kraken,bitfinex` | какие биржи слушать |
 | `LIQSCOPE_DYDX_WS` | `wss://indexer.dydx.trade/v4/ws` | адрес индексера dYdX v4 |
 | `LIQSCOPE_DYDX_SUB_GAP_MS` | `550` | пауза между подписками dYdX (индексер разрешает 2/с на пару канал+id) |
+| `LIQSCOPE_DYDX_REST` | `https://indexer.dydx.trade` | откуда брать список рынков dYdX: подписываемся только на существующие тикеры |
+| `LIQSCOPE_KRAKEN_REST` | `https://futures.kraken.com/derivatives/api/v3` | то же для продуктов Kraken Futures |
 | `LIQSCOPE_KRAKEN_WS` | `wss://futures.kraken.com/ws/v1` | адрес Kraken Futures |
 | `LIQSCOPE_KRAKEN_PING_SEC` | `25` | интервал пинга Kraken Futures (обрывает сокет после 60 с молчания) |
 | `LIQSCOPE_BITFINEX_WS` | `wss://api-pub.bitfinex.com/ws/2` | адрес Bitfinex |

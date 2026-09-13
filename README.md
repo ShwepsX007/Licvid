@@ -422,6 +422,8 @@ python3 tools/check_hyperliquid.py --bisect          # пошаговые под
 python3 tools/check_hyperliquid.py --soak 3600       # долгая проверка канала, 1 час
 python3 tools/check_hyperliquid.py --soak 1800 http://127.0.0.1:8000  # порядок любой
 python3 tools/hl_find_killer.py                    # какая монета рвёт соединение
+python3 tools/hl_liq_probe.py 600                   # есть ли в trades метка liquidation
+python3 tools/fake_hl_server.py                     # псевдо-HL: посмотреть терминал без сети
 python3 tools/hl_standalone_test.py                  # A/B: боевой корутиин в пустом процессе
 bash tools/diag_hl.sh                                # сводка: REST, WS-матрица, health
 ```
@@ -449,6 +451,23 @@ bash tools/diag_hl.sh                                # сводка: REST, WS-м
     [  0.3с] УМЕР: CLOSED close_code=1000; последняя монета=kPEPE
   >> виновник прохода 1: kPEPE
 --- проход 2 (исключено: ['kPEPE']): ЖИВ
+```
+
+`tools/hl_liq_probe.py` отвечает на вопрос «а отдаёт ли HL ликвидации вообще».
+Соединение может быть идеально живым при `events: 0`, и причины две: ликвидаций
+просто не было, либо биржа не помечает их в публичном канале `trades`
+(в документации HL тип `WsTrade` — это `coin/side/px/sz/hash/time/tid/users`,
+без поля `liquidation`; оно описано только для `WsFill` из приватного
+`userFills`). Зонд считает сделки и сделки с объектом `liquidation`, печатает
+фактические наборы полей и пример — по ним видно, какой это случай.
+
+`tools/fake_hl_server.py` поднимает локальную псевдо-биржу (universe + trades
+с ликвидациями + pong), чтобы смотреть терминал без доступа к биржам:
+
+```bash
+python3 tools/fake_hl_server.py 8899 2.0 &
+LIQSCOPE_HL_WS=http://127.0.0.1:8899/ws LIQSCOPE_HL_REST=http://127.0.0.1:8899 \
+LIQSCOPE_DEMO=1 python3 -m uvicorn server:app --host 0.0.0.0 --port 8000
 ```
 
 `tools/hl_standalone_test.py` запускает **боевой корутиин** в пустом процессе

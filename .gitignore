@@ -8,3 +8,6 @@ env/
 # Рантайм-данные (срезы оборота для volAvg7d)
 data/
 *.tmp
+
+# Node (фронтовые тесты тянут jsdom/lightweight-charts)
+node_modules/

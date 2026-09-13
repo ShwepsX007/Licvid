@@ -1,19 +1,28 @@
 """
-Изоляционный тест боевого HL-слушателя БЕЗ боевого сервера.
+Изоляционный A/B-прогон боевого HL-слушателя БЕЗ боевого сервера.
 
-Матрица diag_hl v2 показала: голые клиенты (любой UA, любой таймаут) живут,
-а боевой процесс умирает на ~4-й секунде. Этот скрипт запускает ТОТ ЖЕ
-боевой корутиин (MarketFeed._hyperliquid_liquidations) в отдельном пустом
-процессе, с той же сессией (UA + ClientTimeout(total=20)) и с тем же
-порядком «REST universe → WS на той же сессии». Плюс контрольный голый
-клиент. Сеть-расписание: результат скажет, где сидит убийца —
+Зачем: боевой слушатель живёт внутри процесса с восемью биржами, REST-движками
+и клиентами, и «на глаз» не отличить, кто именно рвёт Hyperliquid-соединение.
+Этот скрипт запускает ТОТ ЖЕ боевой корутиин
+(MarketFeed._hyperliquid_liquidations) в пустом процессе и прогоняет его в
+двух конфигурациях сессии + голым клиентом-контролем:
 
-  ВАРИАНТ 1 умер  → воспроизводится вне сервера: баг в market_feed/сессии
-                    (тогда чиню быстро, уже знаю где искать)
-  ВАРИАНТ 1 жив   → убийца — взаимодействие внутри полного сервера
-                    (обвязка/нагрузка); лечим разделением сессии/циркулем
+  ВАРИАНТ 1  solo   — отдельная сессия только для HL, без общего
+                      ClientTimeout(total=...) (текущий боевой дефолт)
+  ВАРИАНТ 2  shared — боевая сессия (общий пул с REST/OI/свечами,
+                      User-Agent + ClientTimeout(total=20)); старый профиль,
+                      включается LIQSCOPE_HL_SHARED=1
+  ВАРИАНТ 3  bare   — голый aiohttp-клиент: контроль сети/биржи
 
-Запуск (прод трогать не нужно, тест живёт рядом ~2.5 мин):
+Расписание результатов:
+  1 жив, 2 умер   → дело в общей сессии: держим solo (дефолт) и не трогаем
+  1 умер, 3 жив   → баг в market_feed/обвязке: смотрите строку
+                    «[ВАРИАНТ 1] УМЕР ...» целиком (в ней код закрытия и
+                    причина от сторожа)
+  3 умер          → биржа/сеть сейчас режет всех с этого IP: подождать
+                    20-30 минут и повторить
+
+Запуск (прод трогать не нужно, тест живёт рядом ~3 мин):
   /root/Licvid/venv/bin/python3 /root/Licvid/tools/hl_standalone_test.py
 """
 
@@ -29,8 +38,8 @@ from aiohttp import ClientWSTimeout
 
 from market_feed import MarketFeed, hl_coin_map
 
-HL_WS = "wss://api.hyperliquid.xyz/ws"
-HL_REST = "https://api.hyperliquid.xyz"
+HL_WS = os.getenv("LIQSCOPE_HL_WS", "wss://api.hyperliquid.xyz/ws")
+HL_REST = os.getenv("LIQSCOPE_HL_REST", "https://api.hyperliquid.xyz")
 HOLD = 45.0          # сколько держим боевой корутиин
 CONTROL_HOLD = 20.0  # контрольный голый клиент
 
@@ -53,10 +62,15 @@ async def battle_bases():
     return bases
 
 
-async def variant1_battle_code(bases):
-    """Точный боевой корутиин в пустом процессе, HOLD секунд."""
-    print(f"\n=== ВАРИАНТ 1: боевой код (_hyperliquid_liquidations), "
+async def run_battle(label: str, bases, shared: bool):
+    """Точный боевой корутиин в пустом процессе, HOLD секунд.
+
+    shared=True воспроизводит прежний боевой профиль: HL ходит через общую
+    сессию с User-Agent и ClientTimeout(total=20).
+    """
+    print(f"\n=== {label}: боевой код (_hyperliquid_liquidations), "
           f"держу {HOLD:.0f}с")
+    os.environ["LIQSCOPE_HL_SHARED"] = "1" if shared else "0"
     liq_count = {"n": 0}
 
     async def on_liq(ev):
@@ -83,42 +97,44 @@ async def variant1_battle_code(bases):
             if task.done():
                 death = "завершился раньше срока"
                 break
+        diag = feed.status["hyperliquid"].as_dict()
     except asyncio.CancelledError:
         raise
     finally:
         life = time.monotonic() - t0
         if death is None:
-            print(f"  [ВАРИАНТ 1] ЖИВО весь срок {life:.0f}с; "
-                  f"событий ликвидаций: {liq_count['n']}; "
-                  f"status={feed.status['hyperliquid'].as_dict()}")
+            print(f"  [{label}] ЖИВО весь срок {life:.0f}с; "
+                  f"ликвидаций: {liq_count['n']}")
         else:
             exc = task.exception() if task.done() else None
-            print(f"  [ВАРИАНТ 1] УМЕР через {life:.1f}с: {death}; "
+            print(f"  [{label}] УМЕР через {life:.1f}с: {death}; "
                   f"исключение: {exc!r}; "
-                  f"last_error={feed.status['hyperliquid'].last_error[:160]}")
+                  f"last_error={feed.status['hyperliquid'].last_error[:200]}")
         task.cancel()
         try:
             await task
         except (asyncio.CancelledError, Exception):
             pass
         await feed._session.close()
+        keys = ("connected", "events", "uptime_sec", "reconnects", "attempts",
+                "hl_subs_total", "hl_subs_sent", "hl_subs_acked", "hl_pings",
+                "hl_pongs", "hl_last_inbound_sec", "hl_skipped_stale")
+        print("      диагностика: " +
+              ", ".join(f"{k}={diag.get(k)}" for k in keys))
     return death is None
 
 
-async def variant2_bare_control(bases):
-    """Голый клиент (копия выживавшей матрицы A) — контроль сети."""
-    print(f"\n=== ВАРИАНТ 2: голый клиент (контроль), держу "
-          f"{CONTROL_HOLD:.0f}с")
+async def variant_bare_control(bases):
+    """Голый клиент — контроль сети/биржи."""
+    print(f"\n=== ВАРИАНТ 3 (bare): голый клиент, держу {CONTROL_HOLD:.0f}с")
     async with aiohttp.ClientSession() as s:
         t0 = time.monotonic()
         try:
             ws = await s.ws_connect(HL_WS, heartbeat=None,
                                     timeout=ClientWSTimeout(ws_close=25))
         except Exception as e:
-            print(f"  [ВАРИАНТ 2] рукопожатие FAIL: {type(e).__name__}: {e}")
+            print(f"  [ВАРИАНТ 3] рукопожатие FAIL: {type(e).__name__}: {e}")
             return False
-        # universe отдельно (как в матрице — через эту же сессию, но REST
-        # делаем ДО ws и на той же сессии для единообразия проверки)
         death = None
         msgs = 0
         try:
@@ -144,11 +160,10 @@ async def variant2_bare_control(bases):
         finally:
             life = time.monotonic() - t0
             if death:
-                print(f"  [ВАРИАНТ 2] УМЕР через {life:.1f}с: {death}; "
+                print(f"  [ВАРИАНТ 3] УМЕР через {life:.1f}с: {death}; "
                       f"кадров {msgs}")
             else:
-                print(f"  [ВАРИАНТ 2] ЖИВО весь срок {life:.0f}с; "
-                      f"кадров {msgs}")
+                print(f"  [ВАРИАНТ 3] ЖИВО весь срок {life:.0f}с; кадров {msgs}")
             try:
                 await ws.close()
             except Exception:
@@ -156,19 +171,39 @@ async def variant2_bare_control(bases):
     return death is None
 
 
+async def universe_size():
+    """Размер universe — заодно проверка, что REST до биржи вообще ходит."""
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.post(f"{HL_REST}/info", json={"type": "meta"},
+                              timeout=aiohttp.ClientTimeout(total=12)) as r:
+                data = await r.json(content_type=None)
+        return len((data or {}).get("universe") or [])
+    except Exception as e:
+        print(f"  REST {HL_REST}/info недоступен: {type(e).__name__}: {e}")
+        return 0
+
+
 async def main():
+    n = await universe_size()
+    print(f"universe перпетуумов по REST: {n}")
     bases = await battle_bases()
     print(f"базы монет ({len(bases)}): {', '.join(bases[:24])}...")
-    ok1 = await variant1_battle_code(bases)
-    ok2 = await variant2_bare_control(bases)
+    ok1 = await run_battle("ВАРИАНТ 1 (solo)", bases, shared=False)
+    ok2 = await run_battle("ВАРИАНТ 2 (shared)", bases, shared=True)
+    ok3 = await variant_bare_control(bases)
     print("\n=== ВЕРДИКТ:")
-    if not ok1 and ok2:
+    if ok1 and not ok2:
+        print("  общая сессия рвёт соединение, отдельная — нет: оставляем "
+              "дефолт (solo), LIQSCOPE_HL_SHARED не включать")
+    elif not ok1 and ok3:
         print("  боевой КОД умирает даже в изоляции → чиню market_feed "
               "(пришлите строку «[ВАРИАНТ 1] УМЕР...» целиком)")
     elif ok1 and ok2:
-        print("  боевой код в изоляции ЖИВЕТ → убийца сидит в обвязке "
-              "полного сервера (нужен следующий шаг: SOLO/разнос сессий)")
-    elif not ok2:
+        print("  обе конфигурации живы → убийца сидит в обвязке полного "
+              "сервера (нагрузка/клиенты); следующий шаг — смотреть "
+              "journalctl в момент обрыва")
+    elif not ok3:
         print("  даже голый клиент умер → сеть/HL сейчас сбрасывает всех "
               "с этого IP — подождать 30 мин и повторить")
 

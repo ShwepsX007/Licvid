@@ -132,8 +132,6 @@ async def main():
                          "https://api.hbdm.com/linear-swap-api/v1/swap_contract_info?contract_code=BTC-USDT")
         await check_rest(s, "BitMEX instruments",
                          "https://www.bitmex.com/api/v1/instrument/active")
-        await check_rest_post(s, "Hyperliquid meta universe",
-                              "https://api.hyperliquid.xyz/info", {"type": "meta"})
 
         print("\nWebSocket (главное — приходят ли ДАННЫЕ, а не просто connect):")
         await check_ws(s, "Binance combined aggTrade",
@@ -198,21 +196,6 @@ async def main():
                                   "event": "subscribe", "payload": ["BTC_USDT"]},
                        match=lambda p: p.get("channel") == "futures.public_liquidates"
                        and bool(p.get("result")),
-                       wait=max(WAIT, 20))
-        hl_coin = SYMBOL[:-4] if SYMBOL.endswith("USDT") else SYMBOL
-        await check_ws(s, f"Hyperliquid trades {hl_coin} (любые сделки)",
-                       "wss://api.hyperliquid.xyz/ws",
-                       subscribe={"method": "subscribe",
-                                  "subscription": {"type": "trades", "coin": hl_coin}},
-                       match=lambda p: p.get("channel") == "trades"
-                       and bool(p.get("data")))
-        await check_ws(s, f"Hyperliquid trades {hl_coin} (ликвидации)",
-                       "wss://api.hyperliquid.xyz/ws",
-                       subscribe={"method": "subscribe",
-                                  "subscription": {"type": "trades", "coin": hl_coin}},
-                       match=lambda p: p.get("channel") == "trades" and any(
-                           isinstance(t, dict) and "liquidation" in t
-                           for t in (p.get("data") or [])),
                        wait=max(WAIT, 20))
 
     print("""

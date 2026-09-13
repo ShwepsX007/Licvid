@@ -42,7 +42,7 @@ def check(name, cond, detail=""):
 
 
 def make_event(i):
-    return {"symbol": "BTC_USDT", "exchange": "bitmex",
+    return {"symbol": "BTC_USDT", "exchange": "hyperliquid",
             "side": "LONG", "price": 50000 + i, "qty": 0.1, "usd": 5000 + i,
             "timestamp": 1789250000.0 + i}
 

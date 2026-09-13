@@ -74,6 +74,56 @@ HTX_WS = "wss://api.hbdm.com/linear-swap-notification"
 # BitMEX: таблица liquidation
 BITMEX_WS = "wss://ws.bitmex.com/realtime?subscribe=liquidation"
 BITMEX_REST = "https://www.bitmex.com/api/v1"
+# Адреса HL переопределяются из окружения: тестнет
+# (wss://api.hyperliquid-testnet.xyz/ws), свой узел или локальная псевдо-биржа
+# для сквозных тестов (см. tests/test_hl_stream.py).
+HL_REST = os.getenv("LIQSCOPE_HL_REST", "https://api.hyperliquid.xyz")
+HL_WS = os.getenv("LIQSCOPE_HL_WS", "wss://api.hyperliquid.xyz/ws")
+# Hyperliquid (docs → «Timeouts and heartbeats») закрывает соединение, если
+# 60 секунд не слал в него сообщений; keepalive — {"method":"ping"}, биржа
+# отвечает {"channel":"pong"}. Интервал документация не задаёт, поэтому берём
+# 20 с — трёхкратный запас до порога. Пинг шлём ОТДЕЛЬНОЙ задачей по таймеру,
+# а не «по простою»: на топ-40 монет поток trades почти не замолкает,
+# receive-таймаут не срабатывает, и пинг, завязанный на него, не уходит вовсе.
+HL_PING_INTERVAL = float(os.getenv("LIQSCOPE_HL_PING_SEC", "20"))
+# Первый пинг не ждём полного интервала: пока встают подписки, лента молчит,
+# и держать сокет без keepalive лишние десятки секунд смысла нет.
+HL_FIRST_PING = float(os.getenv("LIQSCOPE_HL_FIRST_PING_SEC", "10"))
+# Сторож зомби-сокетов: если от биржи нет НИЧЕГО (ни ленты, ни subscriptionResponse,
+# ни pong на наши пинги) дольше HL_STALE_AFTER секунд — TCP почти наверняка тихо
+# потерян (обрыв на CF-эдже/NAT, смена маршрута). aiohttp такой сокет от «тихой
+# ленты» не отличает: receive() просто таймаутит, а send() пишет в буфер без
+# ошибок, и слушатель висит на мёртвом соединении вечно. Поэтому при превышении
+# порога соединение закрываем принудительно — супервайзер переподключится.
+# Pong на наш пинг — входящее сообщение, так что живое соединение порога не
+# достигнет (молчание максимум HL_PING_INTERVAL секунд).
+HL_STALE_AFTER = float(os.getenv("LIQSCOPE_HL_STALE_SEC",
+                                 str(HL_PING_INTERVAL * 4)))
+# Подписки: HL ограничивает 1000 подписок на IP и 2000 исходящих сообщений
+# в минуту. Пауза между subscribe — темп ~12/с: топ-40 встаёт за ~3 с, при
+# этом всплеска, на который гейтвей отвечает разрывом, не получается.
+HL_SUB_GAP = float(os.getenv("LIQSCOPE_HL_SUB_GAP_MS", "80")) / 1000.0
+# Сколько ждать subscriptionResponse перед повтором и сколько повторов делать.
+HL_SUB_ACK_WAIT = float(os.getenv("LIQSCOPE_HL_ACK_SEC", "4"))
+HL_SUB_TRIES = int(os.getenv("LIQSCOPE_HL_SUB_TRIES", "3"))
+HL_SUB_TICK = float(os.getenv("LIQSCOPE_HL_SUB_TICK_SEC", "1"))
+# Подписка на несуществующую монету обходится дорого: HL отвечает ошибкой и
+# закрывает ВСЁ соединение, то есть из-за одного битого имени молчит весь
+# поток. Поэтому монету, на которую биржа не подписала, запоминаем между
+# попытками: сразу — если биржа прямо ответила ошибкой, и после
+# HL_COIN_STRIKES срывов — если соединение стабильно умирает вскоре после
+# отправки её подписки.
+HL_COIN_STRIKES = int(os.getenv("LIQSCOPE_HL_COIN_STRIKES", "2"))
+HL_DEATH_WINDOW = float(os.getenv("LIQSCOPE_HL_DEATH_WINDOW_SEC", "3"))
+HL_RECV_TICK = float(os.getenv("LIQSCOPE_HL_RECV_TICK_SEC", "5"))
+# Срез «свежести». При подписке на trades HL отдаёт срез последних сделок по
+# монете, поэтому каждое переподключение заново притащило бы в ленту вчерашние
+# ликвидации (они встали бы в историю как новые). Сделки старше порога считаем
+# срезом, а не живым потоком. Порог нарочно большой — он должен гасить
+# срез, но не живой поток при небольшом рассинхроне часов сервера.
+HL_FRESH_SEC = float(os.getenv("LIQSCOPE_HL_FRESH_SEC", "120"))
+# User-Agent HL-сокета (LIQSCOPE_HL_UA подменяет его целиком).
+HL_UA = os.getenv("LIQSCOPE_HL_UA", "LiqScope-Terminal/4.1")
 
 # Запасной список монет, если ни одна биржа не ответила на REST
 FALLBACK_SYMBOLS = [
@@ -133,6 +183,28 @@ def to_gate(symbol: str) -> str:
 
 def to_okx(symbol: str) -> str:
     return canon(symbol).replace("_", "-") + "-SWAP"
+
+
+def hl_coin_map(symbols: Iterable[str], universe: Iterable[str]) -> Dict[str, str]:
+    """Монета Hyperliquid -> канонический символ.
+
+    Дешёвые токены у HL торгуются с префиксом k (kPEPE, kSHIB): сначала ищем
+    точное совпадение базы, потом k+база. Вслепую префикс не срезаем —
+    есть монеты, реально начинающиеся на K (KAS).
+    """
+    # Ключи — в оригинальном регистре universe (kPEPE с маленькой k):
+    # именно так монета приходит в подписках и сделках.
+    by_upper: Dict[str, str] = {}
+    for c in universe:
+        by_upper.setdefault(str(c or "").upper(), str(c or ""))
+    out = {}
+    for sym in symbols:
+        base = base_of(sym)
+        if base in by_upper:
+            out[by_upper[base]] = canon(sym)
+        elif "K" + base in by_upper:
+            out[by_upper["K" + base]] = canon(sym)
+    return out
 
 
 def base_of(symbol: str) -> str:
@@ -442,6 +514,69 @@ def parse_bitmex_msg(payload: dict,
     return out
 
 
+def parse_hyperliquid_msg(payload: dict,
+                          coin_map: Optional[Dict[str, str]] = None,
+                          now: Optional[float] = None,
+                          max_age: Optional[float] = None,
+                          stats: Optional[dict] = None) -> List[dict]:
+    """Hyperliquid: channel=trades, data — список сделок.
+
+    Ликвидации — это те же сделки, но с объектом 'liquidation'
+    (liquidatedUser/markPx/method); остальные игнорируем.
+    side — сторона тейкера: 'A' (ask/продажа) → вынесли LONG.
+    coin_map: 'BTC' -> 'BTC_USDT' (строится из universe, см. hl_coin_map).
+
+    now/max_age — фильтр среза истории: на подписку HL присылает последние
+    сделки по монете, и без фильтра каждое переподключение заново отдавало бы
+    в ленту старые ликвидации. Сделки старше max_age секунд отбрасываются
+    (счётчик — в stats["stale"], если он передан).
+    """
+    if not isinstance(payload, dict):
+        return []
+    if payload.get("channel") != "trades":
+        return []
+    if payload.get("isSnapshot"):
+        # явная метка среза — это не живой поток
+        if stats is not None and isinstance(payload.get("data"), list):
+            stats["stale"] = stats.get("stale", 0) + len(payload["data"])
+        return []
+    coin_map = coin_map or {}
+    out = []
+    for t in payload.get("data") or []:
+        if not isinstance(t, dict):
+            continue
+        if "liquidation" not in t:
+            continue
+        raw_coin = str(t.get("coin") or "")
+        try:
+            price = float(t.get("px") or 0)
+            qty = float(t.get("sz") or 0)
+            ts = float(t.get("time") or 0) / 1000.0
+        except (TypeError, ValueError):
+            continue
+        if price <= 0 or qty <= 0:
+            continue
+        if max_age and now and ts and (now - ts) > max_age:
+            if stats is not None:
+                stats["stale"] = stats.get("stale", 0) + 1
+            continue
+        out.append({
+            "symbol": (coin_map.get(raw_coin) or coin_map.get(raw_coin.upper()) or
+                       canon(raw_coin.upper() + "_USDT")),
+            "side": "LONG" if str(t.get("side") or "").upper() == "A" else "SHORT",
+            "price": price, "qty": qty, "ts": ts or time.time(),
+        })
+    return out
+
+
+def hl_close_reason(msg_type, close_code, exc, data) -> str:
+    """Текст причины закрытия HL-сокета: код + исключение + данные кадра."""
+    # Имя вместо числа: на Python 3.11+ str(IntEnum) печатает «257», а не «CLOSED»
+    kind = getattr(msg_type, "name", None) or str(msg_type)
+    return (f"hyperliquid ws {kind}: close_code={close_code} "
+            f"exc={exc!r} data={str(data)[:150]}")
+
+
 class SourceStatus:
     """Диагностика одного WS-источника (видна в /api/health)."""
 
@@ -455,8 +590,8 @@ class SourceStatus:
         self.connected_since = 0.0
         self.reconnects = 0
         self.attempts = 0   # попыток коннекта (в т.ч. неудачных до первого up)
-        # Доп. диагностика источника; подмешивается в as_dict()
-        # и видна в /api/health.
+        # Доп. диагностика источника (у Hyperliquid — подписки/пинги/входящие);
+        # подмешивается в as_dict() и видна в /api/health.
         self.extra: Dict[str, Any] = {}
 
     def up(self):
@@ -556,7 +691,7 @@ class MarketFeed:
         self.status: Dict[str, SourceStatus] = {
             name: SourceStatus(name)
             for name in ("binance", "bybit", "okx", "gate", "bitget", "htx",
-                         "bitmex", "prices", "ticks")
+                         "bitmex", "hyperliquid", "prices", "ticks")
         }
         for name, st in self.status.items():
             if name not in ("prices", "ticks"):
@@ -566,6 +701,11 @@ class MarketFeed:
             price_fn=lambda sym: self.prices.get(sym),
             bitmex_meta_fn=lambda: self.bitmex_instruments)
 
+        self.hl_coin_map: Dict[str, str] = {}   # монета HL -> канон (из universe)
+        # Монеты, которые HL не принял: счётчик срывов и постоянный бан.
+        # Живут на экземпляре — переживают переподключения.
+        self.hl_coin_strikes: Dict[str, int] = {}
+        self.hl_banned_coins: set = set()
         self.started_at = time.time()
         self.symbols_source = "fallback"
         self._session: Optional[aiohttp.ClientSession] = None
@@ -579,7 +719,7 @@ class MarketFeed:
         if fam in ("4", "6"):
             # Гвоздь для диагностики: бывает, хостер/промежуточная сеть режет
             # одно из семейств адресов (чаще IPv6 до Cloudflare, за которой
-            # сидит часть бирж) — тогда каждый WS умирает 1006-сбросом, а
+            # сидит Hyperliquid) — тогда каждый WS умирает 1006-сбросом, а
             # curl (happy eyeballs) при этом работает. Ограничиваем семейство
             # для всей сессии: LIQSCOPE_FAMILY=4 или LIQSCOPE_FAMILY=6.
             connector = aiohttp.TCPConnector(
@@ -600,11 +740,25 @@ class MarketFeed:
             "bitget": self._bitget_liquidations,
             "htx": self._htx_liquidations,
             "bitmex": self._bitmex_liquidations,
+            "hyperliquid": self._hyperliquid_liquidations,
         }
         for name, coro in spawn.items():
             if name in self.enabled_exchanges:
+                # hyperliquid жёстко режет частые переподключения (RST), поэтому
+                # стартуем с длинной паузы (LIQSCOPE_HL_BASE_DELAY), чтобы не
+                # продлевать лимит долбёжкой — пауза пригодится и для
+                # «остывания», если бокс попал под временный сетевой фильтр
+                base = (float(os.getenv("LIQSCOPE_HL_BASE_DELAY", "15"))
+                        if name == "hyperliquid" else 2.0)
+                kw = {"base_delay": base}
+                if name == "hyperliquid":
+                    # «стабильным» считаем только соединение, прожившее больше
+                    # трёх «тихих» окон HL (3 × 60с); коннект — не в момент
+                    # бута, а через 10с, когда остальные слушатели уже встали
+                    kw["stable_uptime"] = 180.0
+                    kw["initial_delay"] = 10.0
                 self._tasks.append(asyncio.create_task(
-                    self._supervise(name, coro), name=f"liq-{name}"))
+                    self._supervise(name, coro, **kw), name=f"liq-{name}"))
 
         self.oi.bind(self._session)
         self._tasks.append(asyncio.create_task(self._price_engine(), name="prices"))
@@ -662,13 +816,14 @@ class MarketFeed:
         Пауза растёт до 60с, но сбрасывается к base_delay ТОЛЬКО если
         соединение прожило >= stable_uptime секунд. Раньше любой «успешный»
         коннект (даже на 2 секунды) сбрасывал паузу на минимум: биржа,
-        которая рвёт соединения пачкой (за частые переподключения часть бирж
+        которая рвёт соединения пачкой (Hyperliquid за частые переподключения
         отвечает RST), попадала в цикл «подключились → оборвалось → через
-        base_delay снова» и не поднималась, пока долбёжка не прекращалась.
+        base_delay снова» и не поднималась, пока долбёжка не прекращался.
 
         initial_delay: пауза перед ПЕРВОЙ попыткой (не влияет на ретраи) —
         чтобы слушатель коннектился не в момент бута, когда event loop
-        занят рестом остальных бирж и загрузкой истории, а после него.
+        занят рестом остальных бирж и загрузкой истории, а после него:
+        наблюдаемое на старте 1006-обрывы первого коннекта HL.
         """
         delay = base_delay
         if initial_delay > 0:
@@ -1475,7 +1630,371 @@ class MarketFeed:
                     await self._emit("bitmex", ev["symbol"], ev["side"],
                                      ev["price"], ev["qty"], ev["ts"], usd=ev.get("usd"))
 
-    # -- горячие монеты ------------------------------------------------------
+    # -- Hyperliquid ---------------------------------------------------------
+    def _hl_session(self):
+        """Сессия для HL. Возвращает (сессия, «мы её создали» — нам и закрывать).
+
+        По умолчанию HL ходит через ОТДЕЛЬНУЮ сессию со своим коннектором,
+        а не через боевую: боевая создана с общим ClientTimeout(total=20) и
+        через неё же идут REST-движки (каталог монет, свечи, OI восьми бирж).
+        Зонды tools/check_hyperliquid.py, которые жили стабильно, — это как
+        раз «голая» отдельная сессия без общего таймаута. LIQSCOPE_HL_SHARED=1
+        возвращает прежнее поведение (общая сессия) для сравнения на бою.
+        """
+        solo = os.getenv("LIQSCOPE_HL_SOLO", "").strip().lower()
+        shared = os.getenv("LIQSCOPE_HL_SHARED", "").strip().lower()
+        if (shared in ("1", "true", "yes", "on")
+                and solo not in ("1", "true", "yes", "on")
+                and self._session is not None):
+            return self._session, False
+        connector = None
+        fam = os.getenv("LIQSCOPE_FAMILY", "").strip()
+        if fam in ("4", "6"):
+            # см. start(): бывает, хостер режет одно из семейств адресов
+            connector = aiohttp.TCPConnector(
+                family=socket.AF_INET if fam == "4" else socket.AF_INET6)
+        return aiohttp.ClientSession(
+            headers={"User-Agent": HL_UA},
+            # total=None важно: боевой total=20 к WS применять нельзя
+            timeout=aiohttp.ClientTimeout(total=None, sock_connect=20,
+                                          sock_read=None),
+            connector=connector,
+        ), True
+
+    def _hl_ban(self, coin: str, reason: str, immediate: bool = False) -> None:
+        """Запомнить монету, из-за которой HL рвёт соединение.
+
+        Подписка на имя, которого у биржи нет, — это не «нет данных по монете»,
+        а обрыв всего сокета: без такой памяти слушатель вечно спотыкался бы
+        об одну и ту же монету и не поднимался вовсе.
+        """
+        if not coin or coin in self.hl_banned_coins:
+            return
+        n = self.hl_coin_strikes.get(coin, 0) + 1
+        self.hl_coin_strikes[coin] = n
+        if immediate or n >= HL_COIN_STRIKES:
+            self.hl_banned_coins.add(coin)
+            log.warning("[hyperliquid] монета %s отключена (%s); всего "
+                        "отключено: %d", coin, reason, len(self.hl_banned_coins))
+        else:
+            log.warning("[hyperliquid] %s: срыв %d/%d (%s)", coin, n,
+                        HL_COIN_STRIKES, reason)
+
+    async def _hyperliquid_load_universe(self, session=None) -> set:
+        """Имена перпетуумов HL (universe из POST /info {"type": "meta"})."""
+        sess = session
+        own = sess is None
+        if own:
+            # одноразовая сессия: REST не должен оставлять в WS-сессии
+            # keep-alive соединений и TLS-тиккетов к тому же хосту:порт
+            sess = aiohttp.ClientSession(headers={"User-Agent": HL_UA})
+        try:
+            async with sess.post(f"{HL_REST}/info", json={"type": "meta"},
+                                 timeout=12) as resp:
+                data = await resp.json(content_type=None)
+        except Exception as e:
+            log.warning("[hyperliquid] не удалось загрузить universe: %s", e)
+            return set()
+        finally:
+            if own:
+                await sess.close()
+        names = set()
+        for row in (data or {}).get("universe") or []:
+            # РЕГИСТР НЕ ТРОГАЕМ: дешёвые токены HL называются kPEPE, kSHIB,
+            # kBONK — с маленькой «k», и подписываться надо ровно этим именем.
+            # Приведение к верхнему регистру здесь превращало их в KPEPE/KSHIB,
+            # то есть в несуществующие монеты: HL на такую подписку отвечал
+            # ошибкой и закрывал соединение (см. hl_coin_map — он сам строит
+            # регистронезависимый индекс, сохраняя оригинальное имя).
+            name = str((row or {}).get("name") or "").strip()
+            if name:
+                names.add(name)
+        return names
+
+    async def _hyperliquid_liquidations(self):
+        """trades-подписка на каждую монету; ликвидации помечены объектом.
+
+        Три задачи на одно соединение:
+          * чтение сокета (главный цикл) — единственный, кто делает receive();
+          * sub_worker — подписки/отписки отдельной задачей, поэтому фаза
+            подписок не держит сокет «заложником» и не блокирует чтение;
+          * heartbeat — пинг строго по таймеру (HL рвёт тихое соединение
+            через ~60 с) плюс сторож зомби-сокета.
+        """
+        st = self.status["hyperliquid"]
+        session, own = self._hl_session()
+        try:
+            await self._run_hl_listener(st, session)
+        finally:
+            if own and not session.closed:
+                await session.close()
+
+    async def _run_hl_listener(self, st, session):
+        universe = await self._hyperliquid_load_universe()
+        if universe:
+            log.info("[hyperliquid] universe перпетуумов: %d", len(universe))
+
+        def rebuild_map():
+            if universe:
+                mapped = hl_coin_map(self.symbols, universe)
+            else:   # universe недоступен — подписываемся на базы как есть
+                mapped = {base_of(s): canon(s) for s in self.symbols}
+            # Ручное исключение (LIQSCOPE_HL_SKIP_COINS=kPEPE,SHIB): если
+            # tools/hl_find_killer.py назвал монету, на которой биржа рвёт
+            # соединение, поток можно поднять без неё, не дожидаясь правки.
+            skip = {c.strip().upper() for c in
+                    os.getenv("LIQSCOPE_HL_SKIP_COINS", "").split(",") if c.strip()}
+            if skip:
+                mapped = {c: s for c, s in mapped.items() if c.upper() not in skip}
+            self.hl_coin_map = mapped
+
+        rebuild_map()
+
+        async with session.ws_connect(
+                HL_WS, heartbeat=None,
+                timeout=ClientWSTimeout(ws_close=25)) as ws:
+            sent: Dict[str, float] = {}   # монета -> когда послали subscribe
+            tries: Dict[str, int] = {}
+            acked: set = set()
+            # Возраст входящего трафика: обновляется любым сообщением от биржи
+            # (лента, subscriptionResponse, pong, кадры ping). Сторож в
+            # heartbeat сравнивает метку с HL_STALE_AFTER.
+            last_inbound = time.monotonic()
+            dead_reason = ""      # причина принудительного закрытия (сторож)
+            seen_msgs = 0         # первые кадры печатаем подробно
+            stats = {"stale": 0}  # сколько сделок отсеяно как срез истории
+            keepalive = {"ping": 0, "pong": 0}
+            flags = {"announced": False, "stale_warn": 0.0}
+            send_lock = asyncio.Lock()
+
+            async def send(payload: dict):
+                async with send_lock:
+                    await ws.send_json(payload)
+
+            def publish():
+                """Диагностика в /api/health: видно, где именно затык."""
+                st.extra = {
+                    "hl_url": HL_WS,
+                    "hl_subs_total": len(self.hl_coin_map),
+                    "hl_subs_sent": len(sent),
+                    "hl_subs_acked": len(acked),
+                    "hl_pings": keepalive["ping"],
+                    "hl_pongs": keepalive["pong"],
+                    "hl_last_inbound_sec": round(time.monotonic() - last_inbound, 1),
+                    "hl_skipped_stale": stats["stale"],
+                    "hl_coins_banned": sorted(self.hl_banned_coins),
+                }
+
+            async def handle_text(raw: str):
+                nonlocal seen_msgs
+                try:
+                    payload = json.loads(raw)
+                except Exception:
+                    return
+                if seen_msgs < 3:
+                    # диагностика первых секунд соединения: видно, долетает
+                    # ли вообще что-то до разрыва (канал + размер + голова)
+                    seen_msgs += 1
+                    log.info("[hyperliquid] msg#%d: channel=%s size=%d %.150s",
+                             seen_msgs, payload.get("channel", "?"),
+                             len(raw), raw)
+                channel = payload.get("channel")
+                if channel == "pong":
+                    keepalive["pong"] += 1
+                    return
+                if channel == "subscriptionResponse":
+                    data = payload.get("data") or {}
+                    blob = json.dumps(payload, ensure_ascii=False)[:300]
+                    sub = data.get("subscription") or {}
+                    coin = sub.get("coin")
+                    if "error" in blob.lower() or "fail" in blob.lower():
+                        log.warning("[hyperliquid] ошибка подписки: %s", blob)
+                        # Биржа прямо сказала, что не знает монету: повторять
+                        # бессмысленно, а цена повтора — обрыв всего сокета.
+                        if coin:
+                            self._hl_ban(coin, "биржа ответила ошибкой",
+                                         immediate=True)
+                            sent.pop(coin, None)
+                            acked.add(coin)   # больше не трогаем эту монету
+                    elif data.get("method") == "subscribe" and coin:
+                        acked.add(coin)
+                    return
+                evs = parse_hyperliquid_msg(payload, self.hl_coin_map,
+                                            now=time.time(),
+                                            max_age=HL_FRESH_SEC, stats=stats)
+                for ev in evs:
+                    await self._emit("hyperliquid", ev["symbol"], ev["side"],
+                                     ev["price"], ev["qty"], ev["ts"])
+                # рассинхрон часов съел бы весь поток молча — говорим вслух,
+                # но только если живых ликвидаций нет вовсе (иначе это штатный
+                # срез истории на подписку, а не поломка)
+                if (stats["stale"] >= 20 and st.events == 0
+                        and time.monotonic() - flags["stale_warn"] > 300):
+                    flags["stale_warn"] = time.monotonic()
+                    log.warning("[hyperliquid] отброшено %d сделок как устаревших "
+                                "(> %.0fс) — проверьте часы сервера, если живых "
+                                "ликвидаций нет", stats["stale"], HL_FRESH_SEC)
+
+            def raise_on_close(msg):
+                # Громкий разрыв вместо тихого: код закрытия попадёт в лог
+                # и в подсказку плашки, а backoff супервайзера начнёт расти
+                # и перестанет долбить биржу частыми реконнектами.
+                err_data = msg.data if msg.type == aiohttp.WSMsgType.ERROR else ""
+                text = hl_close_reason(
+                    msg.type, ws.close_code, ws.exception(), err_data)
+                if dead_reason:
+                    text = f"{text} — {dead_reason}"
+                raise ConnectionError(text)
+
+            async def sub_worker():
+                """Подписки отдельной задачей: главный цикл чтения начинает
+                читать сокет сразу, а неподтверждённые подписки повторяются
+                сами (и это видно в /api/health)."""
+                nonlocal universe
+                next_universe = time.monotonic() + 3600   # новые HIP-3 маркеты
+                unacked_logged: set = set()
+                while not ws.closed and not self._stop.is_set():
+                    want = set(self.hl_coin_map) - self.hl_banned_coins
+                    # 1) новые монеты — с темпом HL_SUB_GAP, без ожидания ack
+                    for coin in sorted(want - set(sent)):
+                        await send({"method": "subscribe",
+                                    "subscription": {"type": "trades",
+                                                     "coin": coin}})
+                        sent[coin] = time.monotonic()
+                        tries[coin] = tries.get(coin, 0) + 1
+                        await asyncio.sleep(HL_SUB_GAP)
+                    # 2) повтор неподтверждённых
+                    now = time.monotonic()
+                    for coin in sorted(set(sent) - acked):
+                        if now - sent[coin] < HL_SUB_ACK_WAIT:
+                            continue
+                        if tries.get(coin, 0) > HL_SUB_TRIES:
+                            if coin not in unacked_logged:
+                                unacked_logged.add(coin)
+                                log.warning(
+                                    "[hyperliquid] %s: биржа не подтвердила "
+                                    "подписку за %d попыток — ликвидаций по "
+                                    "монете не будет", coin, HL_SUB_TRIES)
+                            continue
+                        await send({"method": "subscribe",
+                                    "subscription": {"type": "trades",
+                                                     "coin": coin}})
+                        sent[coin] = now
+                        tries[coin] = tries.get(coin, 0) + 1
+                        await asyncio.sleep(HL_SUB_GAP)
+                    # 3) лишние монеты — отписываемся
+                    for coin in sorted(set(sent) - want):
+                        try:
+                            await send({"method": "unsubscribe",
+                                        "subscription": {"type": "trades",
+                                                         "coin": coin}})
+                        except Exception:
+                            pass
+                        sent.pop(coin, None)
+                        acked.discard(coin)
+                        tries.pop(coin, None)
+                    # 4) раз в час — освежить universe
+                    if time.monotonic() >= next_universe:
+                        universe = (await self._hyperliquid_load_universe()) or universe
+                        rebuild_map()
+                        next_universe = time.monotonic() + 3600
+                    if not flags["announced"] and sent and len(acked) >= len(sent):
+                        flags["announced"] = True
+                        log.info("[hyperliquid] подписка trades подтверждена "
+                                 "на %d монет", len(acked))
+                    publish()
+                    await asyncio.sleep(HL_SUB_TICK)
+
+            async def heartbeat():
+                """Пинг раз в HL_PING_INTERVAL секунд, независимо от потока.
+
+                Заодно сторож зомби-сокетов: если входящих нет уже
+                HL_STALE_AFTER секунд (pong не приходит, лента молчит), TCP,
+                скорее всего, тихо потерян — aiohttp не отличит такой сокет
+                от «тихой ленты», поэтому закрываем принудительно: главная
+                петля получит CLOSED/CLOSING, поднимет громкий ConnectionError
+                (с причиной от сторожа), и супервайзер переподключится.
+                """
+                nonlocal dead_reason
+                try:
+                    await asyncio.sleep(min(HL_PING_INTERVAL, HL_FIRST_PING))
+                except asyncio.CancelledError:
+                    raise
+                while not ws.closed and not self._stop.is_set():
+                    age = time.monotonic() - last_inbound
+                    if age > HL_STALE_AFTER:
+                        dead_reason = (f"входящих нет {age:.0f}с — ни pong на "
+                                       f"пинги, ни ленты; сокет мёртв")
+                        log.warning("[hyperliquid] %s — принудительно закрываю",
+                                    dead_reason)
+                        try:
+                            # close() из сторонней задачи безопасен: aiohttp
+                            # сам разбудит висящий receive() (см. client_ws)
+                            await ws.close()
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:
+                            pass
+                        return
+                    try:
+                        await send({"method": "ping"})
+                        keepalive["ping"] += 1
+                        publish()   # health свежий и между тиками sub_worker
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        # сокет умер — цикл чтения сам поднимет громкую ошибку
+                        log.debug("[hyperliquid] heartbeat ping не ушёл: %s", e)
+                        return
+                    await asyncio.sleep(HL_PING_INTERVAL)
+
+            hb = asyncio.create_task(heartbeat(), name="hl-heartbeat")
+            sw = asyncio.create_task(sub_worker(), name="hl-subs")
+            try:
+                # up() сразу после рукопожатия: лента пойдёт с первой
+                # подтверждённой монеты, а не после всех 40 подписок
+                st.up()
+                publish()
+                want = sorted(set(self.hl_coin_map) - self.hl_banned_coins)
+                log.info("[hyperliquid] сокет открыт (%s), подписываюсь на %d "
+                         "монет: %s", HL_WS, len(want), ", ".join(want))
+                while not self._stop.is_set():
+                    try:
+                        msg = await ws.receive(timeout=HL_RECV_TICK)
+                    except asyncio.TimeoutError:
+                        continue
+                    if msg.type in (aiohttp.WSMsgType.CLOSED,
+                                    aiohttp.WSMsgType.CLOSING,
+                                    aiohttp.WSMsgType.ERROR):
+                        raise_on_close(msg)
+                    # любой входящий кадр — признак живой трубы (включая
+                    # протокольные ping/pong, не только TEXT)
+                    last_inbound = time.monotonic()
+                    if msg.type != aiohttp.WSMsgType.TEXT:
+                        continue
+                    await handle_text(msg.data)
+            finally:
+                for t in (hb, sw):
+                    t.cancel()
+                for t in (hb, sw):
+                    try:
+                        await t
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                # Соединение умерло. Если это случилось сразу после отправки
+                # подписки и биржа её не подтвердила — очень похоже, что
+                # именно это имя HL и не принял. Один срыв не приговор
+                # (могла порваться сеть), но после HL_COIN_STRIKES монету
+                # отключаем: иначе слушатель вечно спотыкается об неё.
+                now = time.monotonic()
+                for coin, sent_at in list(sent.items()):
+                    if coin in acked or now - sent_at > HL_DEATH_WINDOW:
+                        continue
+                    self._hl_ban(coin, f"сокет умер через "
+                                       f"{now - sent_at:.1f}с после подписки")
+                publish()
+
+    # -- Потиковый поток сделок (для графика) --------------------------------
     def set_hot_symbols(self, symbols: Iterable[str]):
         """Монеты, чьи графики открыты у клиентов — по ним нужен каждый тик."""
         new = {canon(s) for s in (symbols or []) if s}

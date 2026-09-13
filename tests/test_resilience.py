@@ -1,36 +1,48 @@
 """
-Живучесть обвязки потоков: супервайзер и рассылка клиентам.
+Живучесть Hyperliquid-потока и смежной обвязки.
 
-Два механизма, от которых зависит «не висит ли терминал мёртвым»:
+Закрывает три дыры, из-за которых боевой слушатель «отваливался», хотя зонд
+tools/check_hyperliquid.py --bisect проходил 23/23:
 
-  1. Backoff супервайзера: короткоживущий «успешный» коннект больше не
+  1. Зомби-сокет: TCP тихо потерян (CF-эдж/NAT/маршрут) — receive() вечно
+     таймаутит, send(ping) пишет в буфер без ошибок, слушатель висит на
+     мёртвом соединении вечно. Теперь сторож в heartbeat закрывает соединение,
+     если входящих нет дольше HL_STALE_AFTER, и ConnectionError содержит
+     причину. Проверяем и обратное: тихое, но ЖИВОЕ соединение (pong ходит,
+     ленты нет) сторож не убивает.
+
+  2. Backoff супервайзера: короткоживущий «успешный» коннект больше не
      сбрасывает паузу к минимуму (иначе биржа, рвущая соединения пачкой,
      попадает в цикл долбёжки и не поднимается); честный сброс — только
-     после соединения, прожившего >= stable_uptime. initial_delay отодвигает
-     ПЕРВУЮ попытку, не подмешиваясь в ретраи.
+     после соединения, прожившего >= stable_uptime.
 
-  2. Зависший WS-клиент терминала: Client.send ограничен по времени и
+  3. Зависший WS-клиент терминала: Client.send ограничен по времени и
      помечает клиента мёртвым вместо бесконечного drain(), подвешивавшего
      читателей бирж.
 
-(Раньше здесь были ещё сценарии сторожа зомби-сокета и зонда --soak — они
-проверяли слушатель Hyperliquid, удалённый из проекта: публичный канал
-ликвидаций у этой биржи не отдаёт метку liquidation, замер 13.09.2026 —
-18 144 сделки и 0 меток. История — в git.)
+  4. Сквозной прогон зонда в режиме --soak (нормальная биржа → код 0,
+     замолчавшая биржа → код 4).
 
 Сеть наружу не нужна.  Запуск:  python3 tests/test_resilience.py
 """
 
 import asyncio
+import json
 import os
 import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import aiohttp
+from aiohttp import web
+
 import market_feed
 import server as srv
-from market_feed import MarketFeed, SourceStatus
+from market_feed import MarketFeed
+
+PORT = 8805
+BASE = f"http://127.0.0.1:{PORT}"
 
 ok = 0
 fail = 0
@@ -54,14 +66,135 @@ async def noop_price(*a):
     pass
 
 
-# --- 1) backoff супервайзера -------------------------------------------------
+async def fake_universe(session=None):
+    return ["BTC", "ETH"]
+
+
+# --- псевдо-биржа -----------------------------------------------------------
+
+class FakeHL:
+    """Аккумулирует счётчики pings/pongs/subs для проверок."""
+
+    def __init__(self, answer_pongs: int):
+        self.answer_pongs = answer_pongs   # сколько первых ping ответить pong
+        self.pings = 0
+        self.pongs = 0
+        self.subs = 0
+
+    async def handle(self, request):
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+        answered = 0
+        async for msg in ws:
+            if msg.type != aiohttp.WSMsgType.TEXT:
+                continue
+            try:
+                p = json.loads(msg.data)
+            except Exception:
+                continue
+            if p.get("method") == "ping":
+                self.pings += 1
+                if answered < self.answer_pongs:
+                    answered += 1
+                    self.pongs += 1
+                    await ws.send_json({"channel": "pong"})
+                continue
+            if p.get("method") == "subscribe":
+                self.subs += 1
+                await ws.send_json({
+                    "channel": "subscriptionResponse",
+                    "data": {"method": "subscribe",
+                             "subscription": p.get("subscription") or {}}})
+        return ws
+
+
+def make_feed(session) -> MarketFeed:
+    feed = MarketFeed(on_liquidation=on_liq, on_price=noop_price, exchanges=[])
+    feed._session = session
+    feed.symbols = ["BTC_USDT", "ETH_USDT"]
+    feed._hyperliquid_load_universe = fake_universe
+    return feed
+
+
+# Разные маршруты-псевдобиржи: у каждого сценария свой характер «биржи».
+scenario1_zombie = FakeHL(answer_pongs=1)   # pong на первый ping, дальше молчит
+scenario2_alive = FakeHL(answer_pongs=10**9)  # тихая, но живая: pong всегда
+soak_alive = FakeHL(answer_pongs=10**9)
+soak_zombie = FakeHL(answer_pongs=1)
+
+
+async def run_listener(feed, timeout_s):
+    """Запустить слушатель, вернуть (исключение, секунды до исхода)."""
+    task = asyncio.create_task(feed._hyperliquid_liquidations())
+    t0 = time.monotonic()
+    err = None
+    try:
+        await asyncio.wait_for(task, timeout_s)
+    except asyncio.TimeoutError:
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):  # noqa: B014
+            pass
+    except Exception as e:  # noqa: BLE001
+        err = e
+    return err, time.monotonic() - t0
+
+
+# --- 1) сторож убивает зомби-сокет ------------------------------------------
+
+async def scenario_watchdog_kills_zombie():
+    print("1) зомби-сокет (pong перестал приходить) — сторож рвёт соединение")
+    market_feed.HL_WS = f"{BASE}/zombie"
+    market_feed.HL_PING_INTERVAL = 0.3
+    market_feed.HL_STALE_AFTER = 1.0
+    fake = scenario1_zombie            # маршрут /zombie ведёт на этот инстанс
+    async with aiohttp.ClientSession() as session:
+        feed = make_feed(session)
+        err, elapsed = await run_listener(feed, 10)
+    check("слушатель завершился с громкой ошибкой",
+          isinstance(err, ConnectionError), repr(err))
+    check("в тексте причины — «входящих нет»",
+          err is not None and "входящих нет" in str(err), str(err)[:160])
+    check("пришлось отправить несколько пингов (≥3)",
+          fake.pings >= 3, fake.pings)
+    check("первый pong всё же был (убийство — из-за молчания ПОСЛЕ него)",
+          fake.pongs == 1, fake.pongs)
+    check("сработал быстро (быстрее таймаута ожидания)",
+          elapsed < 9.5, f"{elapsed:.1f}с")
+
+
+# --- 2) тихое, но живое соединение сторож НЕ убивает ------------------------
+
+async def scenario_watchdog_keeps_quiet_alive():
+    print("2) тихое соединение с рабочим pong — сторож не срабатывает")
+    market_feed.HL_WS = f"{BASE}/alive"
+    market_feed.HL_PING_INTERVAL = 0.3
+    market_feed.HL_STALE_AFTER = 1.0
+    fake = scenario2_alive             # маршрут /alive ведёт на этот инстанс
+    async with aiohttp.ClientSession() as session:
+        feed = make_feed(session)
+        task = asyncio.create_task(feed._hyperliquid_liquidations())
+        try:
+            await asyncio.sleep(1.5)   # > HL_STALE_AFTER, несколько пингов
+            alive = not task.done() and feed.status["hyperliquid"].connected
+            check("соединение живо после окна молчания ленты", alive)
+            check("пинги реально ходили", fake.pings >= 3, fake.pings)
+            check("pong приходил на каждый пинг",
+                  fake.pongs == fake.pings, f"{fake.pongs}/{fake.pings}")
+        finally:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: B014
+                pass
+
+
+# --- 3) backoff супервайзера -------------------------------------------------
 
 async def scenario_supervise_backoff():
-    print("1) backoff: короткие «успехи» не сбрасывают паузу, долгий — сбрасывает")
+    print("3) backoff: короткие «успехи» не сбрасывают паузу, долгий — сбрасывает")
     feed = MarketFeed(on_liquidation=on_liq, on_price=noop_price, exchanges=[])
-    # «fakesrc» в списке боевых источников не значится — регистрируем статус
-    # сами: _supervise с источником работает по имени, не по списку бирж.
-    feed.status["fakesrc"] = SourceStatus("fakesrc")
     plan = [
         ("ok", 0.05),    # короткоживущий успех — раньше сбрасывал паузу
         ("ok", 0.05),
@@ -97,7 +230,7 @@ async def scenario_supervise_backoff():
     market_feed.asyncio = Shim()
     try:
         await asyncio.wait_for(
-            feed._supervise("fakesrc", factory,
+            feed._supervise("hyperliquid", factory,
                             base_delay=0.1, stable_uptime=0.3), 10)
     finally:
         market_feed.asyncio = orig
@@ -109,11 +242,6 @@ async def scenario_supervise_backoff():
           len(sleeps) >= 4 and abs(sleeps[3] - 0.1) < 1e-9, sleeps[:4])
     check("после сброса рост начинается заново",
           len(sleeps) >= 5 and sleeps[4] > sleeps[3], sleeps[:5])
-    check("попытка учтена в статусе источника",
-          feed.status["fakesrc"].attempts == len(plan), feed.status["fakesrc"].attempts)
-    check("последний обрыв записан в last_error",
-          "boom#" in feed.status["fakesrc"].last_error,
-          feed.status["fakesrc"].last_error)
 
     # initial_delay: пауза перед первой попыткой, в ретраи не подмешивается
     feed._stop.clear()
@@ -127,7 +255,7 @@ async def scenario_supervise_backoff():
     market_feed.asyncio = Shim()
     try:
         await asyncio.wait_for(
-            feed._supervise("fakesrc", factory_once,
+            feed._supervise("hyperliquid", factory_once,
                             base_delay=0.1, initial_delay=0.5), 10)
     finally:
         market_feed.asyncio = orig
@@ -137,7 +265,7 @@ async def scenario_supervise_backoff():
     feed._stop.clear()
 
 
-# --- 2) таймаут отправки зависшему клиенту -----------------------------------
+# --- 4) таймаут отправки зависшему клиенту -----------------------------------
 
 class SlowWS:
     def __init__(self, lag: float):
@@ -148,7 +276,7 @@ class SlowWS:
 
 
 async def scenario_client_send_timeout():
-    print("2) зависший WS-клиент: send ограничен по времени, клиент мёртв")
+    print("4) зависший WS-клиент: send ограничен по времени, клиент мёртв")
     old = srv.Client.SEND_TIMEOUT
     srv.Client.SEND_TIMEOUT = 0.15
     try:
@@ -168,13 +296,61 @@ async def scenario_client_send_timeout():
         srv.Client.SEND_TIMEOUT = old
 
 
+# --- 5) сквозной прогон зонда --soak -----------------------------------------
+
+async def scenario_soak_probe():
+    print("5) зонд --soak: живая биржа → 0, замолчавшая → 4")
+    import tools.check_hyperliquid as probe
+    probe.HL_REST = BASE
+    probe.HL_WS = f"{BASE}/hl"
+    probe.SOAK_PING = 0.3
+    probe.SOAK_STALE = 0.9
+
+    rc = await probe.soak(BASE, 1.6)
+    check("живая биржа: soak пережил весь срок (код 0)", rc == 0, rc)
+    check("живая биржа: пинги/понги сходятся",
+          soak_alive.pings >= 2 and soak_alive.pongs == soak_alive.pings,
+          f"{soak_alive.pongs}/{soak_alive.pings}")
+
+    probe.HL_WS = f"{BASE}/hl-dead"
+    rc = await probe.soak(BASE, 30)
+    check("замолчавшая биржа: soak завершился с кодом 4", rc == 4, rc)
+    check("замолчавшая биржа: замечены пинги без ответа",
+          soak_zombie.pings >= 3 and soak_zombie.pongs == 1,
+          f"pings={soak_zombie.pings} pongs={soak_zombie.pongs}")
+
+
 async def main():
-    await scenario_supervise_backoff()
-    await scenario_client_send_timeout()
+    app = web.Application()
+
+    async def api_symbols(request):
+        return web.json_response({"symbols": ["BTC_USDT", "ETH_USDT"]})
+
+    async def info_meta(request):
+        return web.json_response({"universe": [{"name": "BTC"},
+                                               {"name": "ETH"}]})
+
+    app.router.add_get("/api/symbols", api_symbols)
+    app.router.add_post("/info", info_meta)
+    app.router.add_get("/zombie", scenario1_zombie.handle)
+    app.router.add_get("/alive", scenario2_alive.handle)
+    app.router.add_get("/hl", soak_alive.handle)
+    app.router.add_get("/hl-dead", soak_zombie.handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "127.0.0.1", PORT).start()
+    try:
+        await scenario_watchdog_kills_zombie()
+        await scenario_watchdog_keeps_quiet_alive()
+        await scenario_supervise_backoff()
+        await scenario_client_send_timeout()
+        await scenario_soak_probe()
+    finally:
+        await runner.cleanup()
 
 
 if __name__ == "__main__":
-    print("живучесть обвязки: супервайзер и рассылка клиентам")
+    print("живучесть hyperliquid и обвязки (локальная псевдо-биржа)")
     asyncio.run(main())
     print()
     print(f"итог: {ok} ок, {fail} ошибок")

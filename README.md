@@ -227,6 +227,16 @@ sudo systemctl enable --now liqscope
 и [`deploy/liqscope.service`](deploy/liqscope.service) она уже есть,
 закомментированная.
 
+В репозитории два юнита с разными именами и рабочими каталогами
+(`licvid` → `/root/Licvid`, `liqscope` → `/root/LiqScope`), поэтому сначала
+узнайте, какой реально стоит на сервере:
+
+```bash
+systemctl list-units --type=service | grep -iE "licvid|liqscope"
+```
+
+Дальше подставьте своё имя — ниже для примера `licvid`:
+
 ```bash
 sudo systemctl edit --full licvid      # или: sudo nano /etc/systemd/system/licvid.service
 ```
@@ -268,6 +278,10 @@ curl -s localhost:8000/api/health | python3 -c \
    print('ключей:', o.get('oxa_keys'), '| подключён:', o.get('connected'), \
          '| ликвидаций:', o.get('oxa_liquidations'), '| ошибка:', o.get('last_error'))"
 ```
+
+Если `ключей: 0` — юнит не перезапущен или строка попала не в тот файл
+(`sudo systemctl show licvid -p Environment` покажет, что systemd видит
+на самом деле).
 
 | Переменная | По умолчанию | Что делает |
 |---|---|---|

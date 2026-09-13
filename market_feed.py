@@ -79,6 +79,11 @@ BITMEX_REST = "https://www.bitmex.com/api/v1"
 DYDX_WS = os.getenv("LIQSCOPE_DYDX_WS", "wss://indexer.dydx.trade/v4/ws")
 # Kraken Futures: публичный фид trade, ликвидация — поле type
 KRAKEN_WS = os.getenv("LIQSCOPE_KRAKEN_WS", "wss://futures.kraken.com/ws/v1")
+# REST-адреса для списков рынков: подписываться на несуществующий тикер —
+# это отказ биржи в логах и впустую потраченная квота подписок.
+DYDX_REST = os.getenv("LIQSCOPE_DYDX_REST", "https://indexer.dydx.trade")
+KRAKEN_FUT_REST = os.getenv("LIQSCOPE_KRAKEN_REST",
+                            "https://futures.kraken.com/derivatives/api/v3")
 # Bitfinex: канал status с ключом liq:global — поток ликвидаций по всей бирже
 BITFINEX_WS = os.getenv("LIQSCOPE_BITFINEX_WS", "wss://api-pub.bitfinex.com/ws/2")
 # Срез «свежести» для подписочных снапшотов (dYdX/Kraken/Bitfinex отдают
@@ -1118,6 +1123,8 @@ class MarketFeed:
         self.symbol_index: Dict[str, dict] = {}
         self.symbol_index_source = "none"
         self._index_ready = asyncio.Event()
+        self._dydx_market_set: Optional[set] = None
+        self._kraken_product_set: Optional[set] = None
         self.gate_multipliers: Dict[str, float] = {}
         self.bitmex_instruments: Dict[str, dict] = {}
         # «Горячие» монеты — те, чей график сейчас открыт у клиентов.
@@ -2088,6 +2095,43 @@ class MarketFeed:
                     await self._emit("bitmex", ev["symbol"], ev["side"],
                                      ev["price"], ev["qty"], ev["ts"], usd=ev.get("usd"))
 
+    # -- Списки рынков: не подписываемся на то, чего у биржи нет -------------
+    async def _dydx_markets(self) -> set:
+        """Тикеры, которые реально есть на dYdX v4 (кэш на время работы)."""
+        if self._dydx_market_set is None:
+            try:
+                data = await _get_json(self._session,
+                                       f"{DYDX_REST}/v4/perpetualMarkets",
+                                       timeout=6.0)
+                markets = (data or {}).get("markets") or {}
+                self._dydx_market_set = {str(k) for k in markets}
+                log.info("[dydx] рынков на бирже: %d", len(self._dydx_market_set))
+            except Exception as e:
+                # список не получен — не повод оставаться без подписок вовсе:
+                # подпишемся на всё, лишнее биржа просто отвергнет
+                log.warning("[dydx] список рынков недоступен (%s) — "
+                            "подписываюсь без фильтра", e)
+                self._dydx_market_set = set()
+        return self._dydx_market_set
+
+    async def _kraken_products(self) -> set:
+        """Продукты, которые реально есть на Kraken Futures (кэш)."""
+        if self._kraken_product_set is None:
+            try:
+                data = await _get_json(self._session,
+                                       f"{KRAKEN_FUT_REST}/instruments",
+                                       timeout=6.0)
+                rows = (data or {}).get("instruments") or []
+                self._kraken_product_set = {str(r.get("symbol")) for r in rows
+                                         if isinstance(r, dict)}
+                log.info("[kraken] продуктов на бирже: %d",
+                         len(self._kraken_product_set))
+            except Exception as e:
+                log.warning("[kraken] список продуктов недоступен (%s) — "
+                            "подписываюсь без фильтра", e)
+                self._kraken_product_set = set()
+        return self._kraken_product_set
+
     # -- dYdX v4 -------------------------------------------------------------
     async def _dydx_liquidations(self):
         """dYdX v4: публичный индексатор, канал v4_trades на каждый тикер.
@@ -2097,6 +2141,14 @@ class MarketFeed:
         """
         st = self.status["dydx"]
         sym_map = dydx_symbol_map(self.symbols)
+        known = await self._dydx_markets()
+        if known:
+            # подписка на несуществующий тикер — отказ биржи и мусор в логах
+            missing = sorted(set(sym_map) - known)
+            if missing:
+                log.info("[dydx] нет на бирже, пропускаю %d: %s", len(missing),
+                         ", ".join(missing[:10]) + ("..." if len(missing) > 10 else ""))
+            sym_map = {t: s_ for t, s_ in sym_map.items() if t in known}
         tickers = list(sym_map)[:DYDX_MAX_SUBS]
         if not tickers:
             raise ConnectionError("нет тикеров dYdX для подписки")
@@ -2196,6 +2248,14 @@ class MarketFeed:
         """
         st = self.status["kraken"]
         sym_map = kraken_symbol_map(self.symbols)
+        known = await self._kraken_products()
+        if known:
+            missing = sorted(set(sym_map) - known)
+            if missing:
+                log.info("[kraken] нет на бирже, пропускаю %d: %s",
+                         len(missing), ", ".join(missing[:10])
+                         + ("..." if len(missing) > 10 else ""))
+            sym_map = {p_: s_ for p_, s_ in sym_map.items() if p_ in known}
         products = list(sym_map)
         if not products:
             raise ConnectionError("нет продуктов Kraken для подписки")

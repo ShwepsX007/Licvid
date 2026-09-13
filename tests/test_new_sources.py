@@ -276,18 +276,102 @@ class FakeBitfinex:
 # ---------------------------------------------------------------------------
 # Сценарии
 # ---------------------------------------------------------------------------
-def make_feed(liqs):
+def make_feed(liqs, symbols=("BTC_USDT", "ETH_USDT", "PEPE_USDT")):
     async def on_liq(ev):
         liqs.append(ev)
 
     feed = MarketFeed(on_liquidation=on_liq, on_price=noop_price, exchanges=[])
-    feed.symbols = ["BTC_USDT", "ETH_USDT", "PEPE_USDT"]
+    feed.symbols = list(symbols)
     return feed
+
+
+# BTC/ETH/PEPE у биржи есть, LSK и ZEC — нет: на них сценарий 0 и проверяет
+# фильтр подписок
+DYDX_MARKETS = {"markets": {"BTC-USD": {}, "ETH-USD": {}, "PEPE-USD": {}}}
+KRAKEN_INSTRUMENTS = {"instruments": [{"symbol": "PF_XBTUSD"},
+                                       {"symbol": "PF_ETHUSD"},
+                                       {"symbol": "PF_PEPEUSD"}]}
+
+
+def add_rest(app, port):
+    """REST-заглушки со списками рынков на том же порту, что и WS."""
+    async def dydx_markets(request):
+        return web.json_response(DYDX_MARKETS)
+
+    async def kraken_instruments(request):
+        return web.json_response(KRAKEN_INSTRUMENTS)
+
+    app.router.add_get("/v4/perpetualMarkets", dydx_markets)
+    app.router.add_get("/instruments", kraken_instruments)
+
+
+async def scenario_markets():
+    """Подписка только на рынки, которые у биржи реально есть."""
+    print("0) фильтр подписок по списку рынков биржи")
+    # свои порты: основные псевдо-биржи уже подняты в main()
+    dport, kport = DYDX_PORT + 20, KRAKEN_PORT + 20
+    market_feed.DYDX_WS = f"http://127.0.0.1:{dport}/ws"
+    market_feed.DYDX_REST = f"http://127.0.0.1:{dport}"
+    market_feed.DYDX_SUB_GAP = 0.01
+    market_feed.KRAKEN_WS = f"http://127.0.0.1:{kport}/ws"
+    market_feed.KRAKEN_FUT_REST = f"http://127.0.0.1:{kport}"
+    market_feed.KRAKEN_PING_SEC = 5
+
+    fd, fk = FakeDydx(), FakeKraken()
+    runners = []
+    for fake, port in ((fd, dport), (fk, kport)):
+        app = web.Application()
+        app.router.add_get("/ws", fake.handle)
+        add_rest(app, port)
+        r = web.AppRunner(app)
+        await r.setup()
+        await web.TCPSite(r, "127.0.0.1", port).start()
+        runners.append(r)
+    try:
+        liqs = []
+        feed = make_feed(liqs, ("BTC_USDT", "ETH_USDT", "LSK_USDT", "ZEC_USDT"))
+        async with aiohttp.ClientSession() as session:
+            feed._session = session
+            td = asyncio.create_task(feed._dydx_liquidations())
+            tk = asyncio.create_task(feed._kraken_liquidations())
+            try:
+                check("dYdX: подписаны только существующие",
+                      await wait_until(lambda: sorted(fd.subs)
+                                       == ["BTC-USD", "ETH-USD"]), fd.subs)
+                check("kraken: подписаны только существующие",
+                      await wait_until(lambda: sorted(fk.subs)
+                                       == ["PF_ETHUSD", "PF_XBTUSD"]), fk.subs)
+                check("dYdX: всего подписок = числу существующих",
+                      await wait_until(
+                          lambda: feed.status["dydx"].extra.get(
+                              "dydx_subs_total") == 2),
+                      feed.status["dydx"].extra)
+                check("dYdX: подтверждены все",
+                      await wait_until(
+                          lambda: feed.status["dydx"].extra.get(
+                              "dydx_subs_acked") == 2),
+                      feed.status["dydx"].extra)
+            finally:
+                for t in (td, tk):
+                    t.cancel()
+                    try:
+                        await t
+                    except (asyncio.CancelledError, Exception):   # noqa: B014
+                        pass
+    finally:
+        for r in runners:
+            await r.cleanup()
+        # дальше сценарии идут на основных псевдо-биржах (там тоже есть REST)
+        market_feed.DYDX_WS = f"http://127.0.0.1:{DYDX_PORT}/ws"
+        market_feed.DYDX_REST = f"http://127.0.0.1:{DYDX_PORT}"
+        market_feed.KRAKEN_WS = f"http://127.0.0.1:{KRAKEN_PORT}/ws"
+        market_feed.KRAKEN_FUT_REST = f"http://127.0.0.1:{KRAKEN_PORT}"
 
 
 async def scenario_dydx(fake):
     print("1) dYdX v4 — v4_trades с типом Liquidated")
     market_feed.DYDX_WS = f"http://127.0.0.1:{DYDX_PORT}/ws"
+    market_feed.DYDX_REST = f"http://127.0.0.1:{DYDX_PORT}"
     market_feed.DYDX_SUB_GAP = 0.01
     liqs = []
     feed = make_feed(liqs)
@@ -326,6 +410,7 @@ async def scenario_dydx(fake):
 async def scenario_kraken(fake):
     print("2) Kraken Futures — фид trade с типом liquidation/termination")
     market_feed.KRAKEN_WS = f"http://127.0.0.1:{KRAKEN_PORT}/ws"
+    market_feed.KRAKEN_FUT_REST = f"http://127.0.0.1:{KRAKEN_PORT}"
     market_feed.KRAKEN_PING_SEC = 0.3
     liqs = []
     feed = make_feed(liqs)
@@ -541,12 +626,14 @@ async def main():
 
     app = web.Application()
     app.router.add_get("/ws", fake_d.handle)
+    add_rest(app, DYDX_PORT)
     r1 = web.AppRunner(app)
     await r1.setup()
     await web.TCPSite(r1, "127.0.0.1", DYDX_PORT).start()
 
     app2 = web.Application()
     app2.router.add_get("/ws", fake_k.handle)
+    add_rest(app2, KRAKEN_PORT)
     r2 = web.AppRunner(app2)
     await r2.setup()
     await web.TCPSite(r2, "127.0.0.1", KRAKEN_PORT).start()
@@ -558,6 +645,7 @@ async def main():
     await web.TCPSite(r3, "127.0.0.1", BITFINEX_PORT).start()
 
     try:
+        await scenario_markets()
         await scenario_dydx(fake_d)
         await scenario_kraken(fake_k)
         await scenario_bitfinex(fake_b)

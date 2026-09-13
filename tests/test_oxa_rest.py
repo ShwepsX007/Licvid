@@ -164,7 +164,10 @@ async def test_poll(fake, keys):
     # при опросе раз в 0,4 с реальный бюджет дал бы 0 монет и кламп урезал бы
     # per_key до 1 — здесь проверяем сам опрос, поэтому бюджет поднимаем
     market_feed.OXA_FREE_CREDITS = 10 ** 9
-    market_feed.OXA_OVERLAP_SEC = 1
+    # Перекрытие ОБЯЗАНО быть меньше шага между монетами (0,4/2 = 0,2 с),
+    # иначе дыры от общего курсора не видно: в бою шаг 60 с при перекрытии
+    # 30 с, то есть перекрытие вдвое меньше шага.
+    market_feed.OXA_OVERLAP_SEC = 0.05
     market_feed.OXA_FIRST_WINDOW_SEC = 60
     os.environ["LIQSCOPE_OXA_KEYS"] = ",".join(keys)
 
@@ -210,6 +213,18 @@ async def test_poll(fake, keys):
         check("окно опроса передаётся в миллисекундах",
               all(str(w[1]).isdigit() and len(str(w[1])) >= 12
                   for w in fake.windows[:3]), fake.windows[:3])
+        # У каждой монеты окна обязаны идти встык с перекрытием. Общий курсор
+        # на весь ключ давал дыры: монеты опрашиваются вразнобой, поэтому
+        # после опроса второй монеты курсор уезжал вперёд и следующая монета
+        # начинала запрос уже оттуда — терялись целые интервалы.
+        gaps = []
+        for coin in {w[0] for w in fake.windows}:
+            ws = sorted((int(a), int(b)) for c, a, b in fake.windows
+                        if c == coin and a and b)
+            for (a1, b1), (a2, b2) in zip(ws, ws[1:]):
+                if a2 > b1:
+                    gaps.append((coin, b1, a2, a2 - b1))
+        check("в окнах опроса нет дыр ни у одной монеты", gaps == [], gaps)
     finally:
         await feed.stop()
         os.environ.pop("LIQSCOPE_OXA_KEYS", None)

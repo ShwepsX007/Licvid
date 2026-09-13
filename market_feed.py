@@ -2573,8 +2573,14 @@ class MarketFeed:
         seen: set = set()
         seen_order: Deque[str] = deque(maxlen=4000)
         headers = {"X-API-Key": key}
-        # стартуем с короткого окна: историю за сутки вываливать в ленту нельзя
-        cursor = time.time() - OXA_FIRST_WINDOW_SEC
+        # Курсор — СВОЙ у каждой монеты. Общий курсор на весь ключ давал дыры:
+        # монеты опрашиваются вразнобой (сон OXA_POLL_SEC/len(coins) между
+        # ними), поэтому после опроса SOL курсор уезжал вперёд, и следующий
+        # запрос BTC начинался уже оттуда — на 2 монетах каждая теряла по
+        # 30 с на каждом цикле.
+        # Стартуем с короткого окна: историю за сутки вываливать в ленту нельзя.
+        cursors: Dict[str, float] = {
+            c: time.time() - OXA_FIRST_WINDOW_SEC for c in coins}
 
         while not self._stop.is_set():
             for coin in coins:
@@ -2582,7 +2588,8 @@ class MarketFeed:
                     return
                 end = time.time()
                 url = f"{OXA_REST}/liquidations/{coin}"
-                params = {"start": int(cursor * 1000) - int(OXA_OVERLAP_SEC * 1000),
+                params = {"start": int(cursors[coin] * 1000)
+                          - int(OXA_OVERLAP_SEC * 1000),
                           "end": int(end * 1000), "limit": 1000}
                 try:
                     async with self._session.get(
@@ -2627,7 +2634,7 @@ class MarketFeed:
                     await self._emit("hyperliquid", ev["symbol"], ev["side"],
                                      ev["price"], ev["qty"], ev["ts"],
                                      usd=ev.get("usd"))
-                cursor = end
+                cursors[coin] = end
                 publish()
                 report()
                 # растаскиваем запросы, чтобы не упираться в 15 RPS

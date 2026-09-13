@@ -164,7 +164,8 @@ async def probe_ws(coins, seconds, key):
         print(f"  внимание: монет {len(coins)}, а бесплатных подписок "
               f"{FREE_SUBS} — часть будет отклонена")
     stats = {"messages": 0, "fills": 0, "errors": 0, "gaps": 0,
-             "per_coin": {}, "first_at": None, "latency": []}
+             "per_coin": {}, "first_at": None, "latency": [],
+             "frames": 0, "kinds": {}, "unknown": []}
     subs_acked = 0
 
     async with aiohttp.ClientSession() as s:
@@ -198,11 +199,24 @@ async def probe_ws(coins, seconds, key):
                                 print(f"  соединение закрыто: {msg.type}")
                                 break
                             continue
+                        # СЧИТАЕМ КАЖДЫЙ кадр: «0 сообщений» должно означать
+                        # именно тишину в сокете, а не незнакомую форму кадра.
+                        stats["frames"] += 1
                         try:
                             data = json.loads(msg.data)
                         except Exception:
+                            kind = "<не-json>"
+                            stats["kinds"][kind] = stats["kinds"].get(kind, 0) + 1
+                            if len(stats["unknown"]) < 5:
+                                stats["unknown"].append(str(msg.data)[:200])
                             continue
-                        kind = data.get("type")
+                        kind = data.get("type") or ("<без type: " +
+                                                    ",".join(list(data)[:4]) + ">")
+                        stats["kinds"][kind] = stats["kinds"].get(kind, 0) + 1
+                        if kind not in ("subscribed", "error", "gap_detected",
+                                        "data", "pong", "open"):
+                            if len(stats["unknown"]) < 5:
+                                stats["unknown"].append(str(data)[:300])
                         if kind == "subscribed":
                             subs_acked += 1
                         elif kind == "error":
@@ -235,7 +249,12 @@ async def probe_ws(coins, seconds, key):
             return stats
 
     print(f"  подтверждено подписок: {subs_acked}/{len(coins)}")
-    print(f"  сообщений WS: {stats['messages']}  (столько же кредитов)")
+    print(f"  кадров в сокете всего: {stats['frames']}")
+    print(f"  типы кадров: {stats['kinds'] or '— пусто, биржа молчала —'}")
+    for u in stats["unknown"]:
+        print(f"    незнакомый кадр: {u}")
+    print(f"  кадров с данными (type=data): {stats['messages']}  "
+          f"(столько же кредитов)")
     print(f"  строк ликвидаций: {stats['fills']}   ошибок: {stats['errors']}"
           f"   gap_detected: {stats['gaps']}")
     if stats["latency"]:

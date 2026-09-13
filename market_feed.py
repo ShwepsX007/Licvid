@@ -89,6 +89,9 @@ LIQ_FRESH_SEC = float(os.getenv("LIQSCOPE_LIQ_FRESH_SEC", "120"))
 DYDX_SUB_GAP = float(os.getenv("LIQSCOPE_DYDX_SUB_GAP_MS", "550")) / 1000.0
 # Сколько тикеров dYdX подписываем (топ по нашему списку монет).
 DYDX_MAX_SUBS = int(os.getenv("LIQSCOPE_DYDX_MAX_SUBS", "40"))
+# Как часто новые источники отчитываются в лог: по одному подключению и по
+# числу ликвидаций видно, жив канал или молчит.
+NEW_SOURCE_LOG_SEC = float(os.getenv("LIQSCOPE_NEW_SOURCE_LOG_SEC", "60"))
 # Период keepalive: Kraken просит пинг хотя бы раз в 60 с, Bitfinex — раз в 30 с.
 KRAKEN_PING_SEC = float(os.getenv("LIQSCOPE_KRAKEN_PING_SEC", "25"))
 BITFINEX_PING_SEC = float(os.getenv("LIQSCOPE_BITFINEX_PING_SEC", "20"))
@@ -2002,14 +2005,26 @@ class MarketFeed:
         tickers = list(sym_map)[:DYDX_MAX_SUBS]
         if not tickers:
             raise ConnectionError("нет тикеров dYdX для подписки")
-        stats = {"trades": 0, "stale": 0}
+        stats = {"trades": 0, "stale": 0, "liq": 0}
         acked: set = set()
+        last_log = 0.0
 
         def publish():
             st.extra = {"dydx_url": DYDX_WS, "dydx_subs_total": len(tickers),
                         "dydx_subs_acked": len(acked),
                         "dydx_trades_seen": stats["trades"],
+                        "dydx_liquidations": stats["liq"],
                         "dydx_skipped_stale": stats["stale"]}
+
+        def report(force=False):
+            nonlocal last_log
+            now = time.monotonic()
+            if not force and now - last_log < NEW_SOURCE_LOG_SEC:
+                return
+            last_log = now
+            log.info("[dydx] подписок %d/%d, сделок %d, ликвидаций %d, "
+                     "старых отсеяно %d", len(acked), len(tickers),
+                     stats["trades"], stats["liq"], stats["stale"])
 
         async with self._session.ws_connect(DYDX_WS, heartbeat=None,
                                             max_msg_size=0) as ws:
@@ -2048,9 +2063,11 @@ class MarketFeed:
                         continue
                     for ev in parse_dydx_msg(payload, sym_map, now=time.time(),
                                              max_age=LIQ_FRESH_SEC, stats=stats):
+                        stats["liq"] += 1
                         await self._emit("dydx", ev["symbol"], ev["side"],
                                          ev["price"], ev["qty"], ev["ts"])
                     publish()
+                    report()
             finally:
                 sub.cancel()
 
@@ -2066,15 +2083,27 @@ class MarketFeed:
         products = list(sym_map)
         if not products:
             raise ConnectionError("нет продуктов Kraken для подписки")
-        stats = {"trades": 0, "stale": 0}
+        stats = {"trades": 0, "stale": 0, "liq": 0}
         acked: set = set()
+        last_log = 0.0
 
         def publish():
             st.extra = {"kraken_url": KRAKEN_WS,
                         "kraken_subs_total": len(products),
                         "kraken_subs_acked": len(acked),
                         "kraken_trades_seen": stats["trades"],
+                        "kraken_liquidations": stats["liq"],
                         "kraken_skipped_stale": stats["stale"]}
+
+        def report():
+            nonlocal last_log
+            now = time.monotonic()
+            if now - last_log < NEW_SOURCE_LOG_SEC:
+                return
+            last_log = now
+            log.info("[kraken] подписок %d/%d, сделок %d, ликвидаций %d, "
+                     "старых отсеяно %d", len(acked), len(products),
+                     stats["trades"], stats["liq"], stats["stale"])
 
         async with self._session.ws_connect(KRAKEN_WS, heartbeat=None,
                                             max_msg_size=0) as ws:
@@ -2126,9 +2155,11 @@ class MarketFeed:
                         continue
                     for ev in parse_kraken_msg(payload, sym_map, now=time.time(),
                                                max_age=LIQ_FRESH_SEC, stats=stats):
+                        stats["liq"] += 1
                         await self._emit("kraken", ev["symbol"], ev["side"],
                                          ev["price"], ev["qty"], ev["ts"])
                     publish()
+                    report()
             finally:
                 sub.cancel()
                 pinger.cancel()
@@ -2144,7 +2175,7 @@ class MarketFeed:
         sym_map = bitfinex_symbol_map(self.symbols)
         stats = {"trades": 0, "stale": 0, "liq_long": 0, "liq_short": 0,
                  "skipped_other": 0}
-        state = {"chan": None, "ping": 0, "pong": 0}
+        state = {"chan": None, "ping": 0, "pong": 0, "last_log": 0.0}
 
         def publish():
             st.extra = {"bitfinex_url": BITFINEX_WS,
@@ -2155,8 +2186,22 @@ class MarketFeed:
                         "bitfinex_liq_long": stats["liq_long"],
                         "bitfinex_liq_short": stats["liq_short"],
                         "bitfinex_skipped_other": stats["skipped_other"],
+                        "bitfinex_liquidations":
+                            stats["liq_long"] + stats["liq_short"],
                         "bitfinex_pings": state["ping"],
                         "bitfinex_pongs": state["pong"]}
+
+        def report():
+            now = time.monotonic()
+            if now - state["last_log"] < NEW_SOURCE_LOG_SEC:
+                return
+            state["last_log"] = now
+            log.info("[bitfinex] chanId=%s, строк %d, ликвидаций %d "
+                     "(LONG %d / SHORT %d), чужих рынков %d, старых %d",
+                     state["chan"], stats["trades"],
+                     stats["liq_long"] + stats["liq_short"],
+                     stats["liq_long"], stats["liq_short"],
+                     stats["skipped_other"], stats["stale"])
 
         async with self._session.ws_connect(BITFINEX_WS, heartbeat=None,
                                             max_msg_size=0) as ws:
@@ -2214,6 +2259,7 @@ class MarketFeed:
                         await self._emit("bitfinex", ev["symbol"], ev["side"],
                                          ev["price"], ev["qty"], ev["ts"])
                     publish()
+                    report()
             finally:
                 pinger.cancel()
 

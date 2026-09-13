@@ -82,7 +82,7 @@ def make_feed():
     feed._session = aiohttp.ClientSession()
     feed.symbols = ["BTC_USDT", "ETH_USDT"]
     feed._hyperliquid_load_universe = (
-        lambda: asyncio.sleep(0, result=["BTC", "ETH"]))
+        lambda session=None: asyncio.sleep(0, result=["BTC", "ETH"]))
     return feed
 
 

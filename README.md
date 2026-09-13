@@ -330,13 +330,42 @@ curl -s localhost:8000/api/health | python3 -c \
 экстраполяция первых секунд врёт на порядки.
 
 В `/api/health` для `oxa` видно `oxa_keys`, `oxa_mode`, `oxa_requests`,
-`oxa_dupes`, `oxa_credits_planned/month_eta/budget`,
-`oxa_coins_clamped_from`, `oxa_subs_acked/total`,
-`oxa_frames`, `oxa_liquidations`, `oxa_skipped_stale/other` и
-`oxa_coins_uncovered` — сколько монет не влезло в квоту ключей. Отдельно
-считается `oxa_frame_kinds` (типы принятых кадров): если кадры идут, а строк
-ликвидаций нет, в лог уходит предупреждение с этими типами — «ноль
-ликвидаций» тогда отличим от незнакомого формата кадра.
+`oxa_raw_rows`, `oxa_liq_rows`, `oxa_dupes`,
+`oxa_credits_planned/month_eta/budget`, `oxa_coins_clamped_from`,
+`oxa_subs_acked/total`, `oxa_frames`, `oxa_liquidations`,
+`oxa_skipped_stale/other` и `oxa_coins_uncovered` — сколько монет не влезло в
+квоту ключей. Отдельно считается `oxa_frame_kinds` (типы принятых кадров):
+если кадры идут, а строк ликвидаций нет, в лог уходит предупреждение с этими
+типами — «ноль ликвидаций» тогда отличим от незнакомого формата кадра.
+
+**Если ликвидаций нет**, смотреть надо не на `oxa_liquidations`, а на цепочку
+счётчиков — она показывает, где именно обрывается:
+
+```bash
+curl -s localhost:8000/api/health | python3 -c "
+import json,sys
+o = json.load(sys.stdin)['sources']['oxa']
+print('режим      :', o.get('oxa_mode'), '| ключей:', o.get('oxa_keys'))
+print('запросов   :', o.get('oxa_requests'), '| ошибок:', o.get('oxa_errors'))
+print('строк API  :', o.get('oxa_raw_rows'), '| распознано:', o.get('oxa_liq_rows'))
+print('в ленте    :', o.get('oxa_liquidations'),
+      '| дублей:', o.get('oxa_dupes'), '| старых:', o.get('oxa_skipped_stale'))
+print('кредитов   :', o.get('oxa_credits_planned'), 'из', o.get('oxa_credits_budget'))
+print('урезано с  :', o.get('oxa_coins_clamped_from'), '| ошибка:', o.get('last_error') or '—')
+"
+```
+
+| Что видно | Что это значит |
+|---|---|
+| `запросов` не растёт | опрос не стартовал — смотрите `ошибка` |
+| `ошибок` > 0 | ключ или сеть; причина в `ошибка` |
+| `строк API` = 0 при растущих `запросов` | провайдер вернул пусто: в окне просто нет ликвидаций, либо монеты непопулярные |
+| `строк API` > 0, `распознано` = 0 | строки приходят, но не распознаются как ликвидации — присылайте вывод, это баг парсера |
+| `распознано` > 0, `в ленте` = 0 | отброшено как старое (`старых`) или как дубли (`дублей`) |
+
+Помните про арифметику: при дефолтном окне в 120 с по BTC+ETH ожидается
+порядка 1,5 события, то есть **ноль сразу после рестарта — норма примерно в
+одном случае из пяти**. Судить можно только по счётчикам через 5–10 минут.
 
 Проверить доступ своими глазами: `python3 tools/oxa_probe.py --selftest`,
 затем `--rest BTC ETH --hours 24` (сколько событий вернёт REST) и

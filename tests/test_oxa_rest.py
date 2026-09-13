@@ -246,6 +246,24 @@ def test_budget():
           int(round(month * 5 / market_feed.OXA_FREE_CREDITS)) == 259,
           int(round(month * 5 / market_feed.OXA_FREE_CREDITS)))
 
+    # Окно свежести обязано быть не короче шага опроса: иначе при опросе
+    # раз в 300 с и реже отбрасывается ВСЁ, в том числе интервалы, которые
+    # советует кламп по бюджету (518 с на 10 монет).
+    check("при редком опросе окно шире шага",
+          all(market_feed.oxa_rest_max_age(p, 30) >= p
+              for p in (60, 300, 518, 600, 900)),
+          [(p, market_feed.oxa_rest_max_age(p, 30)) for p in (300, 518, 900)])
+    check("при частом опросе окно остаётся 300 с",
+          market_feed.oxa_rest_max_age(60, 30) == market_feed.OXA_LIQ_FRESH_SEC,
+          market_feed.oxa_rest_max_age(60, 30))
+    for poll in (300, 518, 600):
+        # событие пришло между двумя опросами: возраст = шаг опроса
+        row = liq_row("BTC", 100, 1, "Long", f"old{poll}", sec_ago=poll)
+        got = parse_oxa_liquidations(
+            {"data": [row]}, {"BTC": "BTC_USDT"}, now=time.time(),
+            max_age=market_feed.oxa_rest_max_age(poll, 30), all_rows=True)
+        check(f"при опросе раз в {poll} с событие не теряется", bool(got), got)
+
 
 async def test_clamp(fake, keys):
     """Настройка сверх бюджета урезается, и это видно в health."""

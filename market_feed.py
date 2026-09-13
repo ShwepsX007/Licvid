@@ -684,6 +684,22 @@ def oxa_month_credits(coins_per_key: int, poll_sec: float) -> float:
     return coins_per_key * OXA_MONTH_SEC / poll_sec
 
 
+def oxa_rest_max_age(poll_sec: Optional[float] = None,
+                     overlap_sec: Optional[float] = None) -> float:
+    """Окно свежести для опроса REST — не короче шага опроса.
+
+    LIQ_FRESH_SEC задумано как защита от подписочных снапшотов WS: там поток
+    непрерывный и событие старше 5 минут действительно подозрительно. У опроса
+    REST события легально приходят пачкой раз в poll_sec, поэтому при опросе
+    раз в 300 с и реже фиксированное окно в 300 с отбрасывало бы ВСЁ —
+    в том числе интервалы, которые советует кламп по бюджету (518 с на 10
+    монет). Берём шаг опроса с запасом на перекрытие окон и время ответа.
+    """
+    poll = OXA_POLL_SEC if poll_sec is None else poll_sec
+    overlap = OXA_OVERLAP_SEC if overlap_sec is None else overlap_sec
+    return max(OXA_LIQ_FRESH_SEC, poll + overlap + 60.0)
+
+
 def oxa_coins_for_budget(poll_sec: float,
                          credits: Optional[int] = None) -> int:
     """Сколько монет влезает в месячный бюджет на ключ при данном опросе."""
@@ -2595,7 +2611,7 @@ class MarketFeed:
 
                 for ev in parse_oxa_liquidations(payload, coin_map,
                                                  now=time.time(),
-                                                 max_age=OXA_LIQ_FRESH_SEC,
+                                                 max_age=oxa_rest_max_age(),
                                                  stats=stats, all_rows=True):
                     eid = ev.get("id")
                     if eid:

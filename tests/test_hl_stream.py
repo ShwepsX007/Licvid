@@ -67,12 +67,17 @@ class FakeHL:
     COINS = ("BTC", "ETH")
 
     def __init__(self, idle_kill=None, close_after=None, ignore_subs=None,
-                 snapshot=True, liq_every=0.4):
+                 snapshot=True, liq_every=0.4, coins=None, reject_coins=(),
+                 strict_unknown=False):
         self.idle_kill = idle_kill      # рвём сокет после N с тишины клиента
         self.close_after = close_after  # рвём сокет через N с жизни
         self.ignore_subs = dict(ignore_subs or {})   # монета -> сколько раз промолчать
         self.snapshot = snapshot        # отдавать срез истории на подписку
         self.liq_every = liq_every      # период живых ликвидаций
+        self.COINS = tuple(coins) if coins else self.COINS
+        self.reject_coins = set(reject_coins)   # ответ ошибкой + разрыв
+        self.strict_unknown = strict_unknown    # как HL: неизвестная монета = обрыв
+        self.errors = 0
         self.connections = 0
         self.pings = 0
         self.subs = {}                  # монета -> сколько раз просили подписку
@@ -146,6 +151,17 @@ class FakeHL:
                 sub = p.get("subscription") or {}
                 coin = sub.get("coin")
                 self.subs[coin] = self.subs.get(coin, 0) + 1
+                bad = coin in self.reject_coins or (
+                    self.strict_unknown and coin not in self.COINS)
+                if bad:
+                    # так делает HL: ошибка в ответе и закрытие соединения
+                    self.errors += 1
+                    await ws.send_json({
+                        "channel": "subscriptionResponse",
+                        "data": {"method": "subscribe", "subscription": sub,
+                                 "error": f"no such coin: {coin}"}})
+                    await ws.close(code=1000)
+                    return ws
                 if self.ignore_subs.get(coin, 0) > 0:
                     self.ignore_subs[coin] -= 1     # биржа «потеряла» подписку
                     continue
@@ -439,11 +455,86 @@ async def scenario_server_e2e():
         await runner.cleanup()
 
 
+# ---------------------------------------------------------------------------
+# 6) регистр имени монеты: kPEPE, а не KPEPE
+# ---------------------------------------------------------------------------
+async def scenario_coin_case():
+    print("6) дешёвые токены: подписка на kPEPE (как у биржи), а не KPEPE")
+    market_feed.HL_SUB_GAP = 0.02
+    fake = FakeHL(coins=("BTC", "kPEPE"), strict_unknown=True)
+    runner = await start_fake(fake)
+    liqs = []
+    feed = make_feed(liqs)
+    feed.symbols = ["BTC_USDT", "PEPE_USDT"]
+    point_at_fake()
+    task = asyncio.create_task(feed._hyperliquid_liquidations())
+    try:
+        ready = await wait_until(
+            lambda: feed.status["hyperliquid"].extra.get("hl_subs_acked") == 2, 8)
+        check("обе монеты подтверждены (kPEPE принят биржей)", ready,
+              feed.status["hyperliquid"].extra)
+        check("подписка ушла ровно на kPEPE (регистр биржи)",
+              "kPEPE" in fake.subs, list(fake.subs))
+        check("KPEPE в подписках нет — биржа не рвала сокет",
+              "KPEPE" not in fake.subs and fake.errors == 0,
+              {"subs": list(fake.subs), "errors": fake.errors})
+        check("соединение живо", not task.done(), fake.connections)
+    finally:
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+        await runner.cleanup()
+        market_feed.HL_SUB_GAP = 0.08
+
+
+# ---------------------------------------------------------------------------
+# 7) битая монета отключается, поток поднимается без неё
+# ---------------------------------------------------------------------------
+async def scenario_bad_coin_banned():
+    print("7) биржа не знает монету: отключаем её и поднимаем остальной поток")
+    market_feed.HL_SUB_GAP = 0.02
+    fake = FakeHL(reject_coins={"ETH"})
+    runner = await start_fake(fake)
+    liqs = []
+    feed = make_feed(liqs)
+    point_at_fake()
+    sup = asyncio.create_task(
+        feed._supervise("hyperliquid", feed._hyperliquid_liquidations,
+                        base_delay=0.2, stable_uptime=999.0))
+    try:
+        ok = await wait_until(
+            lambda: "ETH" in feed.hl_banned_coins
+            and feed.status["hyperliquid"].extra.get("hl_subs_acked") == 1
+            and feed.status["hyperliquid"].connected, 12)
+        extra = feed.status["hyperliquid"].extra
+        check("битая монета отключена и видна в health", ok,
+              {"banned": sorted(feed.hl_banned_coins), **extra})
+        check("в health список отключённых монет",
+              extra.get("hl_coins_banned") == ["ETH"], extra.get("hl_coins_banned"))
+        alive = await asyncio.sleep(2.0) or not sup.done()
+        check("после отключения битой монеты соединение живёт", alive)
+        flowing = await wait_until(lambda: len(liqs) >= 1, 8)
+        check("ликвидации по остальным монетам идут", flowing, len(liqs))
+    finally:
+        feed._stop.set()
+        sup.cancel()
+        try:
+            await sup
+        except (asyncio.CancelledError, Exception):
+            pass
+        await runner.cleanup()
+        market_feed.HL_SUB_GAP = 0.08
+
+
 async def main():
     await scenario_fast_start()
     await scenario_ping_keeps_alive()
     await scenario_sub_retry()
     await scenario_reconnect()
+    await scenario_coin_case()
+    await scenario_bad_coin_banned()
     await scenario_server_e2e()
 
 

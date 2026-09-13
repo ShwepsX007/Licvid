@@ -107,6 +107,14 @@ HL_SUB_GAP = float(os.getenv("LIQSCOPE_HL_SUB_GAP_MS", "80")) / 1000.0
 HL_SUB_ACK_WAIT = float(os.getenv("LIQSCOPE_HL_ACK_SEC", "4"))
 HL_SUB_TRIES = int(os.getenv("LIQSCOPE_HL_SUB_TRIES", "3"))
 HL_SUB_TICK = float(os.getenv("LIQSCOPE_HL_SUB_TICK_SEC", "1"))
+# Подписка на несуществующую монету обходится дорого: HL отвечает ошибкой и
+# закрывает ВСЁ соединение, то есть из-за одного битого имени молчит весь
+# поток. Поэтому монету, на которую биржа не подписала, запоминаем между
+# попытками: сразу — если биржа прямо ответила ошибкой, и после
+# HL_COIN_STRIKES срывов — если соединение стабильно умирает вскоре после
+# отправки её подписки.
+HL_COIN_STRIKES = int(os.getenv("LIQSCOPE_HL_COIN_STRIKES", "2"))
+HL_DEATH_WINDOW = float(os.getenv("LIQSCOPE_HL_DEATH_WINDOW_SEC", "3"))
 HL_RECV_TICK = float(os.getenv("LIQSCOPE_HL_RECV_TICK_SEC", "5"))
 # Срез «свежести». При подписке на trades HL отдаёт срез последних сделок по
 # монете, поэтому каждое переподключение заново притащило бы в ленту вчерашние
@@ -694,6 +702,10 @@ class MarketFeed:
             bitmex_meta_fn=lambda: self.bitmex_instruments)
 
         self.hl_coin_map: Dict[str, str] = {}   # монета HL -> канон (из universe)
+        # Монеты, которые HL не принял: счётчик срывов и постоянный бан.
+        # Живут на экземпляре — переживают переподключения.
+        self.hl_coin_strikes: Dict[str, int] = {}
+        self.hl_banned_coins: set = set()
         self.started_at = time.time()
         self.symbols_source = "fallback"
         self._session: Optional[aiohttp.ClientSession] = None
@@ -1649,6 +1661,25 @@ class MarketFeed:
             connector=connector,
         ), True
 
+    def _hl_ban(self, coin: str, reason: str, immediate: bool = False) -> None:
+        """Запомнить монету, из-за которой HL рвёт соединение.
+
+        Подписка на имя, которого у биржи нет, — это не «нет данных по монете»,
+        а обрыв всего сокета: без такой памяти слушатель вечно спотыкался бы
+        об одну и ту же монету и не поднимался вовсе.
+        """
+        if not coin or coin in self.hl_banned_coins:
+            return
+        n = self.hl_coin_strikes.get(coin, 0) + 1
+        self.hl_coin_strikes[coin] = n
+        if immediate or n >= HL_COIN_STRIKES:
+            self.hl_banned_coins.add(coin)
+            log.warning("[hyperliquid] монета %s отключена (%s); всего "
+                        "отключено: %d", coin, reason, len(self.hl_banned_coins))
+        else:
+            log.warning("[hyperliquid] %s: срыв %d/%d (%s)", coin, n,
+                        HL_COIN_STRIKES, reason)
+
     async def _hyperliquid_load_universe(self, session=None) -> set:
         """Имена перпетуумов HL (universe из POST /info {"type": "meta"})."""
         sess = session
@@ -1669,7 +1700,13 @@ class MarketFeed:
                 await sess.close()
         names = set()
         for row in (data or {}).get("universe") or []:
-            name = str((row or {}).get("name") or "").upper()
+            # РЕГИСТР НЕ ТРОГАЕМ: дешёвые токены HL называются kPEPE, kSHIB,
+            # kBONK — с маленькой «k», и подписываться надо ровно этим именем.
+            # Приведение к верхнему регистру здесь превращало их в KPEPE/KSHIB,
+            # то есть в несуществующие монеты: HL на такую подписку отвечал
+            # ошибкой и закрывал соединение (см. hl_coin_map — он сам строит
+            # регистронезависимый индекс, сохраняя оригинальное имя).
+            name = str((row or {}).get("name") or "").strip()
             if name:
                 names.add(name)
         return names
@@ -1699,9 +1736,17 @@ class MarketFeed:
 
         def rebuild_map():
             if universe:
-                self.hl_coin_map = hl_coin_map(self.symbols, universe)
+                mapped = hl_coin_map(self.symbols, universe)
             else:   # universe недоступен — подписываемся на базы как есть
-                self.hl_coin_map = {base_of(s): canon(s) for s in self.symbols}
+                mapped = {base_of(s): canon(s) for s in self.symbols}
+            # Ручное исключение (LIQSCOPE_HL_SKIP_COINS=kPEPE,SHIB): если
+            # tools/hl_find_killer.py назвал монету, на которой биржа рвёт
+            # соединение, поток можно поднять без неё, не дожидаясь правки.
+            skip = {c.strip().upper() for c in
+                    os.getenv("LIQSCOPE_HL_SKIP_COINS", "").split(",") if c.strip()}
+            if skip:
+                mapped = {c: s for c, s in mapped.items() if c.upper() not in skip}
+            self.hl_coin_map = mapped
 
         rebuild_map()
 
@@ -1737,6 +1782,7 @@ class MarketFeed:
                     "hl_pongs": keepalive["pong"],
                     "hl_last_inbound_sec": round(time.monotonic() - last_inbound, 1),
                     "hl_skipped_stale": stats["stale"],
+                    "hl_coins_banned": sorted(self.hl_banned_coins),
                 }
 
             async def handle_text(raw: str):
@@ -1759,11 +1805,18 @@ class MarketFeed:
                 if channel == "subscriptionResponse":
                     data = payload.get("data") or {}
                     blob = json.dumps(payload, ensure_ascii=False)[:300]
-                    if "error" in blob.lower() or "fail" in blob.lower():
-                        log.warning("[hyperliquid] ошибка подписки: %s", blob)
                     sub = data.get("subscription") or {}
                     coin = sub.get("coin")
-                    if data.get("method") == "subscribe" and coin:
+                    if "error" in blob.lower() or "fail" in blob.lower():
+                        log.warning("[hyperliquid] ошибка подписки: %s", blob)
+                        # Биржа прямо сказала, что не знает монету: повторять
+                        # бессмысленно, а цена повтора — обрыв всего сокета.
+                        if coin:
+                            self._hl_ban(coin, "биржа ответила ошибкой",
+                                         immediate=True)
+                            sent.pop(coin, None)
+                            acked.add(coin)   # больше не трогаем эту монету
+                    elif data.get("method") == "subscribe" and coin:
                         acked.add(coin)
                     return
                 evs = parse_hyperliquid_msg(payload, self.hl_coin_map,
@@ -1801,7 +1854,7 @@ class MarketFeed:
                 next_universe = time.monotonic() + 3600   # новые HIP-3 маркеты
                 unacked_logged: set = set()
                 while not ws.closed and not self._stop.is_set():
-                    want = set(self.hl_coin_map)
+                    want = set(self.hl_coin_map) - self.hl_banned_coins
                     # 1) новые монеты — с темпом HL_SUB_GAP, без ожидания ack
                     for coin in sorted(want - set(sent)):
                         await send({"method": "subscribe",
@@ -1902,8 +1955,9 @@ class MarketFeed:
                 # подтверждённой монеты, а не после всех 40 подписок
                 st.up()
                 publish()
-                log.info("[hyperliquid] сокет открыт (%s), монет к подписке: %d",
-                         HL_WS, len(self.hl_coin_map))
+                want = sorted(set(self.hl_coin_map) - self.hl_banned_coins)
+                log.info("[hyperliquid] сокет открыт (%s), подписываюсь на %d "
+                         "монет: %s", HL_WS, len(want), ", ".join(want))
                 while not self._stop.is_set():
                     try:
                         msg = await ws.receive(timeout=HL_RECV_TICK)
@@ -1927,6 +1981,17 @@ class MarketFeed:
                         await t
                     except (asyncio.CancelledError, Exception):
                         pass
+                # Соединение умерло. Если это случилось сразу после отправки
+                # подписки и биржа её не подтвердила — очень похоже, что
+                # именно это имя HL и не принял. Один срыв не приговор
+                # (могла порваться сеть), но после HL_COIN_STRIKES монету
+                # отключаем: иначе слушатель вечно спотыкается об неё.
+                now = time.monotonic()
+                for coin, sent_at in list(sent.items()):
+                    if coin in acked or now - sent_at > HL_DEATH_WINDOW:
+                        continue
+                    self._hl_ban(coin, f"сокет умер через "
+                                       f"{now - sent_at:.1f}с после подписки")
                 publish()
 
     # -- Потиковый поток сделок (для графика) --------------------------------

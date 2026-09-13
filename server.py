@@ -19,7 +19,9 @@ LiqScope Web Server — терминал ликвидаций в реально�
     LIQSCOPE_SYMBOLS_LIMIT  сколько монет держать в списке (по умолчанию 40)
     LIQSCOPE_EXCHANGES      binance,bybit,okx,gate,bitget,htx,bitmex,hyperliquid,
                             dydx,kraken,bitfinex (по умолчанию все)
-    LIQSCOPE_TICK_SOURCE    порядок источников тиков: binance,binance-raw,bybit
+    LIQSCOPE_TICK_SOURCE    порядок источников тиков (CVD):
+                            binance,binance-raw,bybit,dydx,kraken,
+                            bitfinex,hyperliquid
     LIQSCOPE_DEMO           1 — генерировать тестовый поток вместо биржевого
     LIQSCOPE_HISTORY_MAX    сколько событий держать в памяти (по умолчанию 60000)
 """

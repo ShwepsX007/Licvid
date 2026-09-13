@@ -130,7 +130,7 @@ sudo systemctl enable --now liqscope
 | `LIQSCOPE_HISTORY_FILE` | `data/liq_history.jsonl` | файл истории ликвидаций (JSONL, append). Пустая строка / `0` / `off` — не писать на диск |
 | `LIQSCOPE_HISTORY_TTL_HOURS` | `24` | сколько часов истории держать при загрузке с диска и урезании файла |
 | `PORT` | `8000` | порт при запуске `python3 server.py` |
-| `LIQSCOPE_TICK_SOURCE` | `binance,binance-raw,bybit` | порядок источников тиков. Если известно, что Binance на этом сервере не отдаёт сделки — поставьте `bybit`, чтобы не терять 40 с на его переопрос после рестарта |
+| `LIQSCOPE_TICK_SOURCE` | `binance,binance-raw,bybit` | порядок источников тиков (по ним считается **CVD**). Доступны также `dydx`, `kraken`, `bitfinex`, `hyperliquid` — например `binance,bybit,dydx,kraken,bitfinex,hyperliquid`. Если известно, что Binance на этом сервере не отдаёт сделки — поставьте `bybit`, чтобы не терять 40 с на его переопрос после рестарта |
 | `LIQSCOPE_TICK_MIN_GAP_MS` | `0` | минимальный зазор между тиками графика по монете (`0` = слать каждый тик; поставьте, например, `40`, если хочется беречь трафик) |
 | `LIQSCOPE_HL_PING_SEC` | `20` | интервал heartbeat-пинга Hyperliquid. Биржа закрывает соединение, если 60 с ничего в него не послала (docs → «Timeouts and heartbeats»); 20 с — трёхкратный запас до порога |
 | `LIQSCOPE_HL_FIRST_PING_SEC` | `10` | когда слать первый пинг после подключения (не ждём полного интервала — пока встают подписки, лента молчит) |

@@ -606,6 +606,123 @@ def hl_close_reason(msg_type, close_code, exc, data) -> str:
 #  При подписке каждый из них отдаёт снапшот последних событий, поэтому везде
 #  работает фильтр свежести (LIQ_FRESH_SEC).
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Сделки с dYdX / Kraken Futures / Bitfinex — источник тиков для CVD.
+# Все три публикуют публичную ленту сделок со стороной тейкера, то есть
+# годятся наравне с Binance/Bybit. Возвращают (symbol, price, qty, ts, side),
+# где side — "BUY"/"SELL" (сторона агрессора).
+# ---------------------------------------------------------------------------
+def parse_dydx_trades(payload, ticker_map: dict, now: Optional[float] = None) -> List[tuple]:
+    """dYdX v4 `v4_trades`: contents.trades[{id,createdAt,side,price,size,type}].
+
+    Для CVD годятся все типы сделок (LIMIT/LIQUIDATED/DELEVERAGED) — объём
+    проторгован в любом случае. Срез истории при подключении тоже
+    возвращается: для накопительного CVD это плюс, а не минус.
+    """
+    if not isinstance(payload, dict) or payload.get("channel") != "v4_trades":
+        return []
+    symbol = ticker_map.get(str(payload.get("id") or ""))
+    if not symbol:
+        return []
+    contents = payload.get("contents")
+    if not isinstance(contents, dict):
+        return []
+    trades = contents.get("trades")
+    if not isinstance(trades, list):
+        return []
+    now = now or time.time()
+    out: List[tuple] = []
+    for t in trades:
+        if not isinstance(t, dict):
+            continue
+        try:
+            price = float(t.get("price") or 0)
+            qty = float(t.get("size") or 0)
+        except (TypeError, ValueError):
+            continue
+        if price <= 0 or qty <= 0:
+            continue
+        ts = _iso_to_epoch(t.get("createdAt")) or now
+        side = str(t.get("side") or "").upper()
+        out.append((symbol, price, qty, ts,
+                    side if side in ("BUY", "SELL") else ""))
+    return out
+
+
+def parse_kraken_trades(payload, product_map: dict) -> List[tuple]:
+    """Kraken Futures `trade`: одиночные кадры и trade_snapshot.
+
+    Берутся все сделки, включая ликвидации и terminations.
+    """
+    if not isinstance(payload, dict):
+        return []
+    if payload.get("feed") not in ("trade", "trade_snapshot"):
+        return []
+    rows = payload.get("trades") if isinstance(payload.get("trades"), list) \
+        else [payload]
+    product = str(payload.get("product_id") or "")
+    symbol = product_map.get(product)
+    out: List[tuple] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        sym = symbol or product_map.get(str(row.get("product_id") or ""))
+        if not sym:
+            continue
+        try:
+            price = float(row.get("price") or 0)
+            qty = float(row.get("qty") or 0)
+        except (TypeError, ValueError):
+            continue
+        if price <= 0 or qty <= 0:
+            continue
+        ts = float(row.get("time") or 0) / 1000.0 or time.time()
+        side = str(row.get("side") or "").upper()
+        out.append((sym, price, qty, ts,
+                    side if side in ("BUY", "SELL") else ""))
+    return out
+
+
+def parse_bitfinex_trades(payload, chan_map: dict, now: Optional[float] = None) -> List[tuple]:
+    """Bitfinex `trades` (chanId) — кадр [chanId, [seq, ms, amount, price]].
+
+    Положительный amount — агрессор покупал, отрицательный — продавал.
+    Разбираются и одиночная сделка, и кадр-снапшот (список списков).
+    """
+    if not isinstance(payload, list) or len(payload) != 2:
+        return []
+    symbol = chan_map.get(payload[0])
+    if not symbol:
+        return []
+    rows = payload[1]
+    if not isinstance(rows, list) or not rows:
+        return []
+    if not isinstance(rows[0], list):
+        if isinstance(rows[0], (int, float)):
+            rows = [rows]                 # одиночная сделка
+        else:
+            return []                     # "hb" и прочие служебные кадры
+    now = now or time.time()
+    out: List[tuple] = []
+    for r in rows:
+        if not isinstance(r, list) or len(r) < 4:
+            continue
+        try:
+            amount = float(r[2] or 0)
+            price = float(r[3] or 0)
+        except (TypeError, ValueError):
+            continue
+        if price <= 0 or amount == 0:
+            continue
+        try:
+            ts = float(r[1] or 0) / 1000.0 or now
+        except (TypeError, ValueError):
+            ts = now
+        out.append((symbol, price, abs(amount), ts,
+                    "BUY" if amount > 0 else "SELL"))
+    return out
+
+
 def _iso_to_epoch(text) -> float:
     """ISO-8601 ('2026-09-13T10:00:00.123Z') в epoch-секунды."""
     try:
@@ -2524,6 +2641,11 @@ class MarketFeed:
             "binance": ("binance-combined", self._binance_trade_combined, "binance"),
             "binance-raw": ("binance-raw", self._binance_trade_raw, "binance"),
             "bybit": ("bybit-publicTrade", self._bybit_trade_stream, "bybit"),
+            "dydx": ("dydx-v4_trades", self._dydx_trade_stream, "dydx"),
+            "kraken": ("kraken-trade", self._kraken_trade_stream, "kraken"),
+            "bitfinex": ("bitfinex-trades", self._bitfinex_trade_stream, "bitfinex"),
+            "hyperliquid": ("hyperliquid-trades",
+                            self._hyperliquid_trade_stream, "hyperliquid"),
         }
         sources = [available[x] for x in self.tick_sources if x in available]
         if not sources:
@@ -2785,6 +2907,278 @@ class MarketFeed:
                         st.hit()
                         self.prices[sym] = price
                         await self.on_trade(sym, price, qty, ts, side)
+            finally:
+                syncer.cancel()
+                self.tick_subscriptions = set()
+        return "closed" if got else "nodata"
+
+    # -- Тики с dYdX / Kraken / Bitfinex / Hyperliquid (источники CVD) --------
+    async def _dydx_trade_stream(self) -> str:
+        """dYdX v4: v4_trades по открытым графикам. Подписки с паузой —
+        индексер разрешает 2 подписки в секунду на пару канал+id."""
+        st = self.status["ticks"]
+        ticker_map = dydx_symbol_map(self.hot_symbols)
+        subscribed: set = set()
+        got = 0
+        gap = DYDX_SUB_GAP / 1000.0
+        async with self._session.ws_connect(DYDX_WS, heartbeat=30,
+                                            timeout=25) as ws:
+            st.up()
+            st.name = "ticks:dydx-v4_trades"
+            connected_at = time.time()
+
+            async def sync():
+                want = set(dydx_symbol_map(self.hot_symbols))
+                ticker_map.update(dydx_symbol_map(self.hot_symbols))
+                for ticker in sorted(want - subscribed):
+                    await ws.send_json({"type": "subscribe",
+                                        "channel": "v4_trades", "id": ticker})
+                    subscribed.add(ticker)
+                    self.tick_subscriptions = set(subscribed)
+                    await asyncio.sleep(gap)
+                for ticker in sorted(subscribed - want):
+                    await ws.send_json({"type": "unsubscribe",
+                                        "channel": "v4_trades", "id": ticker})
+                    subscribed.discard(ticker)
+                self.tick_subscriptions = set(subscribed)
+
+            syncer = self._start_syncer(ws, sync, 1.0, wake=self._hot_changed)
+            try:
+                while not self._stop.is_set():
+                    try:
+                        msg = await ws.receive(timeout=1.0)
+                    except asyncio.TimeoutError:
+                        if (not got and subscribed
+                                and time.time() - connected_at > self.NO_DATA_TIMEOUT):
+                            return "nodata"
+                        continue
+                    if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING,
+                                    aiohttp.WSMsgType.ERROR):
+                        break
+                    if msg.type != aiohttp.WSMsgType.TEXT:
+                        continue
+                    try:
+                        payload = json.loads(msg.data)
+                    except Exception:
+                        continue
+                    for sym, price, qty, ts, side in parse_dydx_trades(payload, ticker_map):
+                        got += 1
+                        st.hit()
+                        self.prices[sym] = price
+                        await self.on_trade(sym, price, qty, ts, side)
+            finally:
+                syncer.cancel()
+                self.tick_subscriptions = set()
+        return "closed" if got else "nodata"
+
+    async def _kraken_trade_stream(self) -> str:
+        """Kraken Futures: публичный фид trade. Пинг по таймеру — биржа рвёт
+        сокет после 60 с молчания."""
+        st = self.status["ticks"]
+        product_map = kraken_symbol_map(self.hot_symbols)
+        subscribed: set = set()
+        got = 0
+        last_ping = time.monotonic()
+        async with self._session.ws_connect(KRAKEN_WS, timeout=25) as ws:
+            st.up()
+            st.name = "ticks:kraken-trade"
+            connected_at = time.time()
+
+            async def sync():
+                product_map.update(kraken_symbol_map(self.hot_symbols))
+                for pid in sorted(set(kraken_symbol_map(self.hot_symbols)) - subscribed):
+                    await ws.send_json({"event": "subscribe", "feed": "trade",
+                                        "product_ids": [pid]})
+                    subscribed.add(pid)
+                    self.tick_subscriptions = set(subscribed)
+                for pid in sorted(subscribed - set(kraken_symbol_map(self.hot_symbols))):
+                    await ws.send_json({"event": "unsubscribe", "feed": "trade",
+                                        "product_ids": [pid]})
+                    subscribed.discard(pid)
+                self.tick_subscriptions = set(subscribed)
+
+            syncer = self._start_syncer(ws, sync, 1.0, wake=self._hot_changed)
+            try:
+                while not self._stop.is_set():
+                    if time.monotonic() - last_ping >= KRAKEN_PING_SEC:
+                        await ws.send_json({"event": "ping"})
+                        last_ping = time.monotonic()
+                    try:
+                        msg = await ws.receive(timeout=1.0)
+                    except asyncio.TimeoutError:
+                        if (not got and subscribed
+                                and time.time() - connected_at > self.NO_DATA_TIMEOUT):
+                            return "nodata"
+                        continue
+                    if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING,
+                                    aiohttp.WSMsgType.ERROR):
+                        break
+                    if msg.type != aiohttp.WSMsgType.TEXT:
+                        continue
+                    try:
+                        payload = json.loads(msg.data)
+                    except Exception:
+                        continue
+                    for sym, price, qty, ts, side in parse_kraken_trades(payload, product_map):
+                        got += 1
+                        st.hit()
+                        self.prices[sym] = price
+                        await self.on_trade(sym, price, qty, ts, side)
+            finally:
+                syncer.cancel()
+                self.tick_subscriptions = set()
+        return "closed" if got else "nodata"
+
+    async def _bitfinex_trade_stream(self) -> str:
+        """Bitfinex: публичный канал trades на каждый символ."""
+        st = self.status["ticks"]
+        symbol_map = bitfinex_symbol_map(self.hot_symbols)
+        chan_map: dict = {}
+        subscribed: set = set()
+        got = 0
+        last_ping = time.monotonic()
+        async with self._session.ws_connect(BITFINEX_WS, timeout=25) as ws:
+            st.up()
+            st.name = "ticks:bitfinex-trades"
+            connected_at = time.time()
+
+            async def sync():
+                symbol_map.update(bitfinex_symbol_map(self.hot_symbols))
+                for pair in sorted(set(symbol_map) - subscribed):
+                    await ws.send_json({"event": "subscribe", "channel": "trades",
+                                        "key": pair})
+                    subscribed.add(pair)
+                for pair in sorted(subscribed - set(symbol_map)):
+                    await ws.send_json({"event": "unsubscribe", "channel": "trades",
+                                        "key": pair})
+                    subscribed.discard(pair)
+                self.tick_subscriptions = set(subscribed)
+
+            syncer = self._start_syncer(ws, sync, 1.0, wake=self._hot_changed)
+            try:
+                while not self._stop.is_set():
+                    if time.monotonic() - last_ping >= BITFINEX_PING_SEC:
+                        await ws.send_json({"event": "ping",
+                                            "cid": int(time.time() * 1000)})
+                        last_ping = time.monotonic()
+                    try:
+                        msg = await ws.receive(timeout=1.0)
+                    except asyncio.TimeoutError:
+                        if (not got and subscribed
+                                and time.time() - connected_at > self.NO_DATA_TIMEOUT):
+                            return "nodata"
+                        continue
+                    if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING,
+                                    aiohttp.WSMsgType.ERROR):
+                        break
+                    if msg.type != aiohttp.WSMsgType.TEXT:
+                        continue
+                    try:
+                        payload = json.loads(msg.data)
+                    except Exception:
+                        continue
+                    if isinstance(payload, dict):
+                        if payload.get("event") == "subscribed" \
+                                and payload.get("channel") == "trades":
+                            pair = str(payload.get("pair") or payload.get("key") or "")
+                            sym = symbol_map.get(pair)
+                            if sym and payload.get("chanId") is not None:
+                                chan_map[payload["chanId"]] = sym
+                        continue
+                    for sym, price, qty, ts, side in parse_bitfinex_trades(payload, chan_map):
+                        got += 1
+                        st.hit()
+                        self.prices[sym] = price
+                        await self.on_trade(sym, price, qty, ts, side)
+            finally:
+                syncer.cancel()
+                self.tick_subscriptions = set()
+        return "closed" if got else "nodata"
+
+    async def _hyperliquid_trade_stream(self) -> str:
+        """Hyperliquid: публичная лента trades. Ликвидаций в ней нет (замер
+        13.09.2026: 18144 сделки, ни одной с объектом liquidation), но
+        сторона тейкера есть — для CVD биржа годится.
+
+        Соединение живёт в своей сессии: биржа обрывает его по 60-секундному
+        молчанию, поэтому пинг уходит по таймеру независимо от потока.
+        """
+        st = self.status["ticks"]
+        universe = await self._hyperliquid_load_universe()
+        coin_map = hl_coin_map(self.hot_symbols, universe)
+        subscribed: set = set()
+        got = 0
+        last_ping = time.monotonic()
+        session, _own = self._hl_session()
+        async with session.ws_connect(HL_WS, timeout=25) as ws:
+            st.up()
+            st.name = "ticks:hyperliquid-trades"
+            connected_at = time.time()
+
+            async def sync():
+                want = set(hl_coin_map(self.hot_symbols, universe))
+                coin_map.update(hl_coin_map(self.hot_symbols, universe))
+                for coin in sorted(want - subscribed):
+                    await ws.send_json({"method": "subscribe",
+                                        "subscription": {"type": "trades",
+                                                         "coin": coin}})
+                    subscribed.add(coin)
+                    self.tick_subscriptions = set(subscribed)
+                    await asyncio.sleep(0.08)
+                for coin in sorted(subscribed - want):
+                    await ws.send_json({"method": "unsubscribe",
+                                        "subscription": {"type": "trades",
+                                                         "coin": coin}})
+                    subscribed.discard(coin)
+                self.tick_subscriptions = set(subscribed)
+
+            syncer = self._start_syncer(ws, sync, 1.0, wake=self._hot_changed)
+            try:
+                while not self._stop.is_set():
+                    if time.monotonic() - last_ping >= HL_PING_INTERVAL:
+                        await ws.send_json({"method": "ping"})
+                        last_ping = time.monotonic()
+                    try:
+                        msg = await ws.receive(timeout=1.0)
+                    except asyncio.TimeoutError:
+                        if (not got and subscribed
+                                and time.time() - connected_at > self.NO_DATA_TIMEOUT):
+                            return "nodata"
+                        continue
+                    if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING,
+                                    aiohttp.WSMsgType.ERROR):
+                        break
+                    if msg.type != aiohttp.WSMsgType.TEXT:
+                        continue
+                    try:
+                        payload = json.loads(msg.data)
+                    except Exception:
+                        continue
+                    if not isinstance(payload, dict) \
+                            or payload.get("channel") != "trades":
+                        continue
+                    data = payload.get("data") or {}
+                    coin = str((data.get("coin") or "")).upper()
+                    symbol = next((s for c, s in coin_map.items()
+                                   if str(c).upper() == coin), None)
+                    if not symbol:
+                        continue
+                    for row in data.get("trades") or []:
+                        if not isinstance(row, dict):
+                            continue
+                        try:
+                            price = float(row.get("px") or 0)
+                            qty = float(row.get("sz") or 0)
+                        except (TypeError, ValueError):
+                            continue
+                        if price <= 0 or qty <= 0:
+                            continue
+                        ts = float(row.get("time") or 0) / 1000.0 or time.time()
+                        got += 1
+                        st.hit()
+                        self.prices[symbol] = price
+                        await self.on_trade(symbol, price, qty, ts,
+                                            "SELL" if row.get("side") == "A" else "BUY")
             finally:
                 syncer.cancel()
                 self.tick_subscriptions = set()

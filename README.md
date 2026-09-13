@@ -221,14 +221,53 @@ sudo systemctl enable --now liqscope
 источник держит **по одному потоку на ключ** и делит список монет между
 ними:
 
+**Куда вписывать ключи.** Ключи берутся только из переменных окружения —
+файла с секретами в проекте нет. В systemd это строка `Environment=` в секции
+`[Service]` юнита; в готовых [`deploy/licvid.service`](deploy/licvid.service)
+и [`deploy/liqscope.service`](deploy/liqscope.service) она уже есть,
+закомментированная.
+
+```bash
+sudo systemctl edit --full licvid      # или: sudo nano /etc/systemd/system/licvid.service
+```
+
 ```ini
-# /etc/systemd/system/licvid.service — несколько аккаунтов через запятую
+[Service]
+# ...прочие Environment=...
+# несколько аккаунтов через запятую — их бюджеты сложатся
 Environment=LIQSCOPE_OXA_KEYS=0xa_ключ1,0xa_ключ2,0xa_ключ3
 ```
+
+```bash
+sudo systemctl daemon-reload && sudo systemctl restart licvid
+```
+
+Разделитель — запятая или `;`, пробелы вокруг ключей не мешают, дубликаты и
+пустые значения отбрасываются. Один ключ можно задать и переменной
+`OXARCHIVE_API_KEY`, но `LIQSCOPE_OXA_KEYS` важнее.
+
+Без запуска systemd, для проверки вручную:
+
+```bash
+LIQSCOPE_OXA_KEYS=0xa_ключ1,0xa_ключ2 python3 -m uvicorn server:app --host 0.0.0.0 --port 8000
+```
+
+Ключи не должны попадать в git: в юните они лежат в
+`/etc/systemd/system/`, вне репозитория, а в `deploy/` строка закомментирована
+и с плейсхолдерами.
 
 Без ключей источник не стартует вовсе и пишет причину в `/api/health` — по
 умолчанию проект остаётся полностью «без ключей». В ленте событие помечено
 биржей **hyperliquid**: ликвидация произошла там, 0xArchive только транспорт.
+
+Проверить, что ключи подхватились:
+
+```bash
+curl -s localhost:8000/api/health | python3 -c \
+  "import json,sys; o=json.load(sys.stdin)['sources']['oxa']; \
+   print('ключей:', o.get('oxa_keys'), '| подключён:', o.get('connected'), \
+         '| ликвидаций:', o.get('oxa_liquidations'), '| ошибка:', o.get('last_error'))"
+```
 
 | Переменная | По умолчанию | Что делает |
 |---|---|---|

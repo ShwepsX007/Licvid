@@ -156,7 +156,7 @@ def test_parser_on_real_shape():
 
 
 async def test_poll(fake, keys):
-    print("3) опрос REST двумя ключами")
+    print("4) опрос REST двумя ключами")
     market_feed.OXA_REST = f"http://127.0.0.1:{PORT}/v1/hyperliquid"
     market_feed.OXA_MODE = "rest"
     market_feed.OXA_POLL_SEC = 0.4
@@ -230,9 +230,49 @@ async def test_poll(fake, keys):
         os.environ.pop("LIQSCOPE_OXA_KEYS", None)
 
 
+def test_envelope_variants():
+    """Обёртка ответа: строки могут лежать не только в "data".
+
+    Зонд tools/oxa_probe.py перебирает data/rows/liquidations/result, а
+    парсер читал один лишь "data" и молча возвращал пусто на любом другом
+    ключе. В бою это выглядит как «запросы идут, ошибок нет, строк нет».
+    """
+    print("2) обёртка ответа и счётчик сырых строк")
+    cmap = {"BTC": "BTC_USDT"}
+    row = liq_row("BTC", 100, 1, "Long", "e1")
+    for key in ("data", "rows", "liquidations", "result"):
+        stats = {}
+        got = parse_oxa_liquidations({key: [row]}, cmap, now=time.time(),
+                                     max_age=300, stats=stats, all_rows=True)
+        check(f"обёртка {key} разбирается", len(got) == 1, got)
+        check(f"обёртка {key}: сырые строки посчитаны",
+              stats.get("raw_rows") == 1, stats)
+
+    stats = {}
+    got = parse_oxa_liquidations({"data": row}, cmap, now=time.time(),
+                                 max_age=300, stats=stats, all_rows=True)
+    check("data одним объектом (не списком) разбирается", len(got) == 1, got)
+
+    stats = {}
+    got = parse_oxa_liquidations({"data": []}, cmap, now=time.time(),
+                                 max_age=300, stats=stats, all_rows=True)
+    check("пустой ответ: событий 0 и raw_rows 0",
+          got == [] and stats.get("raw_rows") == 0, stats)
+
+    # строка есть, но не ликвидация — raw_rows растёт, liq_rows нет:
+    # именно так «провайдер отдал мусор» отличим от «провайдер отдал пусто»
+    stats = {}
+    got = parse_oxa_liquidations(
+        {"data": [{"coin": "BTC", "price": 100, "size": 1}]}, cmap,
+        now=time.time(), max_age=300, stats=stats, all_rows=True)
+    check("нераспознанная строка: raw_rows=1, событий 0",
+          got == [] and stats.get("raw_rows") == 1
+          and stats.get("liq_rows", 0) == 0, stats)
+
+
 def test_budget():
     """Бюджет кредитов: сколько монет влезает и урезается ли настройка."""
-    print("2) бюджет кредитов и кламп")
+    print("3) бюджет кредитов и кламп")
     month = market_feed.OXA_MONTH_SEC
     check("месяц — 30 суток", month == 30 * 24 * 3600, month)
     # Free: 50 000 кредитов/мес на ключ, 1 запрос = минимум 1 кредит
@@ -283,7 +323,7 @@ def test_budget():
 
 async def test_clamp(fake, keys):
     """Настройка сверх бюджета урезается, и это видно в health."""
-    print("4) настройка сверх бюджета урезается")
+    print("5) настройка сверх бюджета урезается")
     market_feed.OXA_REST = f"http://127.0.0.1:{PORT}/v1/hyperliquid"
     market_feed.OXA_MODE = "rest"
     market_feed.OXA_POLL_SEC = 60.0        # реальный интервал
@@ -343,7 +383,7 @@ class FormatHandler(logging.Handler):
 
 async def test_log_formats(fake, keys):
     """Минутная строка лога обязана форматироваться при любом состоянии."""
-    print("6) лог форматируется без ошибок")
+    print("7) лог форматируется без ошибок")
     market_feed.OXA_REST = f"http://127.0.0.1:{PORT}/v1/hyperliquid"
     market_feed.OXA_MODE = "rest"
     market_feed.OXA_POLL_SEC = 0.4
@@ -388,7 +428,7 @@ async def test_log_formats(fake, keys):
 
 
 async def test_http_error(fake_bad):
-    print("5) HTTP-ошибка видна, поток не падает")
+    print("8) HTTP-ошибка видна, поток не падает")
     market_feed.OXA_REST = f"http://127.0.0.1:{PORT + 1}/v1/hyperliquid"
     market_feed.OXA_POLL_SEC = 0.3
     market_feed.OXA_COINS_PER_KEY = 4
@@ -436,6 +476,7 @@ async def main():
 
     try:
         test_parser_on_real_shape()
+        test_envelope_variants()
         test_budget()
         await test_poll(fake, keys)
         await test_clamp(fake, keys)

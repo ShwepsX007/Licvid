@@ -749,11 +749,23 @@ def parse_oxa_liquidations(payload, coin_map: Optional[Dict[str, str]] = None,
     """
     if not isinstance(payload, dict):
         return []
-    rows = payload.get("data")
-    if isinstance(rows, dict):
-        rows = [rows]
+    # Обёртку перебираем как зонд tools/oxa_probe.py: боевой ответ может
+    # лежать не только в "data". Чтение одного лишь "data" молча давало
+    # пустой список при любом другом ключе — в логе это выглядело как
+    # «запросы идут, ошибок нет, строк нет».
+    rows = None
+    for key in ("data", "rows", "liquidations", "result"):
+        if isinstance(payload.get(key), list):
+            rows = payload[key]
+            break
+    if rows is None and isinstance(payload.get("data"), dict):
+        rows = [payload["data"]]
     if not isinstance(rows, list):
         return []
+    if stats is not None:
+        # сколько строк реально вернул API — до всех наших фильтров.
+        # Без этого «строк: 0» не отличить от «API вернул пусто».
+        stats["raw_rows"] = stats.get("raw_rows", 0) + len(rows)
     coin_map = coin_map or {}
     frame_coin = str(payload.get("symbol") or payload.get("coin") or "")
     now = now or time.time()
@@ -2697,6 +2709,7 @@ class MarketFeed:
         stats = {"frames": 0, "liq_rows": 0, "stale": 0, "skipped_other": 0,
                  "liq": 0, "errors": 0, "acked": 0, "subs": sum(len(sh) for sh in shards),
                  "keys": len(keys), "kinds": {}, "requests": 0, "dupes": 0,
+                 "raw_rows": 0,
                  "mode": OXA_MODE, "clamped_from": clamped_from,
                  "per_key": per_key}
         last_log = 0.0
@@ -2733,6 +2746,10 @@ class MarketFeed:
                         "oxa_subs_acked": stats["acked"],
                         "oxa_frames": stats["frames"],
                         "oxa_liquidations": stats["liq"],
+                        # сколько строк вернул API до наших фильтров:
+                        # raw_rows=0 при растущих requests — пусто у провайдера,
+                        # raw_rows>0 при liq_rows=0 — строки не распознаются
+                        "oxa_raw_rows": stats["raw_rows"],
                         "oxa_liq_rows": stats["liq_rows"],
                         "oxa_skipped_stale": stats["stale"],
                         "oxa_skipped_other": stats["skipped_other"],

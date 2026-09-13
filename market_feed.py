@@ -118,11 +118,16 @@ OXA_REST = os.getenv("LIQSCOPE_OXA_REST",
 # отдал 1118 ликвидаций за сутки с самой свежей «0 с назад». Поэтому рабочий
 # путь — опрос REST. Режимы: rest (по умолчанию), ws, both.
 OXA_MODE = os.getenv("LIQSCOPE_OXA_MODE", "rest").strip().lower()
-OXA_POLL_SEC = float(os.getenv("LIQSCOPE_OXA_POLL_SEC", "60"))
-# Запрос стоит минимум 1 кредит, Free — 50 000 кредитов/мес на ключ
-# (~69 запросов в час). Сколько монет опрашивать одним ключом:
-OXA_COINS_PER_KEY = int(os.getenv("LIQSCOPE_OXA_COINS_PER_KEY", "5"))
+# Запрос стоит минимум 1 кредит, Free — 50 000 кредитов/мес на ключ, то есть
+# ~69 запросов в час на ключ. Это и есть настоящее ограничение: при опросе
+# раз в 60 с один ключ вытягивает только 1,2 монеты, а не 10.
+# Дефолт подобран так, чтобы укладываться в бюджет ОДНИМ ключом:
+# 2 монеты × 30 запросов/ч × 720 ч = 43 200 кредитов (< 50 000).
+OXA_POLL_SEC = float(os.getenv("LIQSCOPE_OXA_POLL_SEC", "120"))
+OXA_COINS_PER_KEY = int(os.getenv("LIQSCOPE_OXA_COINS_PER_KEY", "2"))
 OXA_FREE_CREDITS = int(os.getenv("LIQSCOPE_OXA_CREDITS", "50000"))
+# Секунд в месяце — для расчёта бюджета
+OXA_MONTH_SEC = 30 * 24 * 3600.0
 OXA_OVERLAP_SEC = float(os.getenv("LIQSCOPE_OXA_OVERLAP_SEC", "30"))
 OXA_FIRST_WINDOW_SEC = float(os.getenv("LIQSCOPE_OXA_FIRST_WINDOW_SEC", "120"))
 # Период keepalive: Kraken просит пинг хотя бы раз в 60 с, Bitfinex — раз в 30 с.
@@ -664,6 +669,28 @@ def oxa_keys() -> List[str]:
         if k and k not in keys:
             keys.append(k)
     return keys
+
+
+def oxa_month_credits(coins_per_key: int, poll_sec: float) -> float:
+    """Сколько кредитов в месяц сожжёт опрос одного ключа.
+
+    Один запрос стоит минимум 1 кредит (Free — 50 000 кредитов/мес на ключ),
+    поэтому расход считается по числу запросов: coins_per_key запросов раз в
+    poll_sec. Это и есть настоящее ограничение бесплатного тарифа — при опросе
+    раз в 60 с ключ вытягивает 1,16 монеты, а не 10.
+    """
+    if coins_per_key <= 0 or poll_sec <= 0:
+        return 0.0
+    return coins_per_key * OXA_MONTH_SEC / poll_sec
+
+
+def oxa_coins_for_budget(poll_sec: float,
+                         credits: Optional[int] = None) -> int:
+    """Сколько монет влезает в месячный бюджет на ключ при данном опросе."""
+    credits = OXA_FREE_CREDITS if credits is None else credits
+    if poll_sec <= 0 or credits <= 0:
+        return 0
+    return int(credits * poll_sec / OXA_MONTH_SEC)
 
 
 def oxa_is_liquidation(row: dict, all_rows: bool = False) -> bool:
@@ -2618,6 +2645,27 @@ class MarketFeed:
         # Лимит на ключ разный: у WS это подписки, у REST — бюджет кредитов.
         per_key = (OXA_COINS_PER_KEY if OXA_MODE in ("rest", "both")
                    else OXA_SUBS_PER_KEY)
+        # Защита от выжигания ключа: опрос стоит кредитов, и настройка вида
+        # «5 монет раз в 60 с» — это 216 000 запросов в месяц при бюджете
+        # 50 000, то есть ключ умирает на 7-й день. Молча так делать нельзя,
+        # поэтому урезаем до того, что влезает в бюджет, и кричим в лог.
+        budget_coins = (oxa_coins_for_budget(OXA_POLL_SEC)
+                        if OXA_MODE in ("rest", "both") else None)
+        clamped_from = 0
+        if budget_coins is not None and per_key > budget_coins:
+            clamped_from = per_key
+            per_key = max(1, budget_coins)
+            # при каком интервале желаемое число монет влезло бы в бюджет
+            poll_for_all = int(round(OXA_MONTH_SEC * OXA_COINS_PER_KEY
+                                     / OXA_FREE_CREDITS))
+            log.warning(
+                "[oxa] %d монет на ключ при опросе раз в %.0f с — это "
+                "%.0f кредитов/мес при бюджете %d на ключ; урезано до %d "
+                "монет. Хочется все %d — поставьте LIQSCOPE_OXA_POLL_SEC=%d "
+                "или добавьте ключей",
+                clamped_from, OXA_POLL_SEC,
+                oxa_month_credits(clamped_from, OXA_POLL_SEC),
+                OXA_FREE_CREDITS, per_key, clamped_from, poll_for_all)
         shards = [coins[i::len(keys)] for i in range(len(keys))]
         shards = [sh[:per_key] for sh in shards]
         dropped = len(coins) - sum(len(sh) for sh in shards)
@@ -2626,7 +2674,8 @@ class MarketFeed:
         stats = {"frames": 0, "liq_rows": 0, "stale": 0, "skipped_other": 0,
                  "liq": 0, "errors": 0, "acked": 0, "subs": sum(len(sh) for sh in shards),
                  "keys": len(keys), "kinds": {}, "requests": 0, "dupes": 0,
-                 "mode": OXA_MODE}
+                 "mode": OXA_MODE, "clamped_from": clamped_from,
+                 "per_key": per_key}
         last_log = 0.0
         started = time.monotonic()      # отсюда считаем прогноз расхода кредитов
 
@@ -2648,6 +2697,12 @@ class MarketFeed:
                         "oxa_dupes": stats["dupes"],
                         "oxa_credits_month_eta": per_month or None,
                         "oxa_credits_budget": OXA_FREE_CREDITS * stats["keys"],
+                        # плановый расход по настройкам — виден сразу, не
+                        # дожидаясь, пока наберётся статистика запросов
+                        "oxa_credits_planned": int(oxa_month_credits(
+                            stats["per_key"], OXA_POLL_SEC) * stats["keys"]),
+                        # >0 — настройку урезали, иначе она выжгла бы ключ
+                        "oxa_coins_clamped_from": stats["clamped_from"],
                         # None — ещё рано судить, бюджет не исчерпан
                         "oxa_fits_budget": (None if not ready else
                                             per_month <= OXA_FREE_CREDITS * stats["keys"]),

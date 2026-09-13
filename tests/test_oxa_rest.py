@@ -155,11 +155,14 @@ def test_parser_on_real_shape():
 
 
 async def test_poll(fake, keys):
-    print("2) опрос REST двумя ключами")
+    print("3) опрос REST двумя ключами")
     market_feed.OXA_REST = f"http://127.0.0.1:{PORT}/v1/hyperliquid"
     market_feed.OXA_MODE = "rest"
     market_feed.OXA_POLL_SEC = 0.4
     market_feed.OXA_COINS_PER_KEY = 2
+    # при опросе раз в 0,4 с реальный бюджет дал бы 0 монет и кламп урезал бы
+    # per_key до 1 — здесь проверяем сам опрос, поэтому бюджет поднимаем
+    market_feed.OXA_FREE_CREDITS = 10 ** 9
     market_feed.OXA_OVERLAP_SEC = 1
     market_feed.OXA_FIRST_WINDOW_SEC = 60
     os.environ["LIQSCOPE_OXA_KEYS"] = ",".join(keys)
@@ -181,8 +184,9 @@ async def test_poll(fake, keys):
               extra.get("oxa_requests", 0) >= 2, extra)
         check("health: ликвидации считаются",
               extra.get("oxa_liquidations", 0) >= 2, extra)
-        check("health: прогноз кредитов есть",
-              extra.get("oxa_credits_budget") == 100000, extra)
+        check("health: бюджет кредитов показан на все ключи",
+              extra.get("oxa_credits_budget")
+              == market_feed.OXA_FREE_CREDITS * 2, extra)
         # прогноз считается только набрав полный цикл опроса — на первых
         # секундах его ещё нет, и это честно
         check("health: прогноз на старте ещё не выдаётся",
@@ -210,8 +214,78 @@ async def test_poll(fake, keys):
         os.environ.pop("LIQSCOPE_OXA_KEYS", None)
 
 
+def test_budget():
+    """Бюджет кредитов: сколько монет влезает и урезается ли настройка."""
+    print("2) бюджет кредитов и кламп")
+    month = market_feed.OXA_MONTH_SEC
+    check("месяц — 30 суток", month == 30 * 24 * 3600, month)
+    # Free: 50 000 кредитов/мес на ключ, 1 запрос = минимум 1 кредит
+    check("5 монет раз в 60 с — это 216 000 кредитов",
+          market_feed.oxa_month_credits(5, 60) == 216000,
+          market_feed.oxa_month_credits(5, 60))
+    check("дефолт (2 монеты, 120 с) влезает в 50 000",
+          market_feed.oxa_month_credits(
+              market_feed.OXA_COINS_PER_KEY, market_feed.OXA_POLL_SEC)
+          <= market_feed.OXA_FREE_CREDITS,
+          market_feed.oxa_month_credits(market_feed.OXA_COINS_PER_KEY,
+                                        market_feed.OXA_POLL_SEC))
+    check("раз в 60 с — влезает 1 монета",
+          market_feed.oxa_coins_for_budget(60) == 1,
+          market_feed.oxa_coins_for_budget(60))
+    check("раз в 300 с — влезает 5 монет",
+          market_feed.oxa_coins_for_budget(300) == 5,
+          market_feed.oxa_coins_for_budget(300))
+    check("раз в 30 с — не влезает ничего",
+          market_feed.oxa_coins_for_budget(30) == 0,
+          market_feed.oxa_coins_for_budget(30))
+    check("нулевой опрос не роняет расчёт",
+          market_feed.oxa_coins_for_budget(0) == 0
+          and market_feed.oxa_month_credits(3, 0) == 0.0)
+    # при каком интервале желаемое число монет влезло бы в бюджет
+    check("5 монет влезут при опросе раз в 259 с",
+          int(round(month * 5 / market_feed.OXA_FREE_CREDITS)) == 259,
+          int(round(month * 5 / market_feed.OXA_FREE_CREDITS)))
+
+
+async def test_clamp(fake, keys):
+    """Настройка сверх бюджета урезается, и это видно в health."""
+    print("4) настройка сверх бюджета урезается")
+    market_feed.OXA_REST = f"http://127.0.0.1:{PORT}/v1/hyperliquid"
+    market_feed.OXA_MODE = "rest"
+    market_feed.OXA_POLL_SEC = 60.0        # реальный интервал
+    market_feed.OXA_FREE_CREDITS = 50000   # реальный бюджет Free
+    market_feed.OXA_COINS_PER_KEY = 5      # просим 5 -> влезает 1
+    market_feed.OXA_OVERLAP_SEC = 1
+    market_feed.OXA_FIRST_WINDOW_SEC = 60
+    os.environ["LIQSCOPE_OXA_KEYS"] = keys[0]
+    fake.hits.clear()
+
+    liqs = []
+    feed = make_feed(liqs)
+    await feed.start()
+    try:
+        check("источник поднялся",
+              await wait_until(lambda: feed.status["oxa"].connected),
+              feed.status["oxa"].last_error)
+        extra = feed.status["oxa"].extra
+        check("health: настройку урезали с 5",
+              extra.get("oxa_coins_clamped_from") == 5, extra)
+        check("health: плановый расход влезает в бюджет",
+              extra.get("oxa_credits_planned", 10 ** 9)
+              <= market_feed.OXA_FREE_CREDITS, extra)
+        check("health: плановый расход посчитан",
+              extra.get("oxa_credits_planned") == 43200, extra)
+        check("опрашивается ровно одна монета",
+              await wait_until(lambda: len({c for _, c in fake.hits}) >= 1)
+              and len({c for _, c in fake.hits}) == 1,
+              {c for _, c in fake.hits})
+    finally:
+        await feed.stop()
+        os.environ.pop("LIQSCOPE_OXA_KEYS", None)
+
+
 async def test_http_error(fake_bad):
-    print("3) HTTP-ошибка видна, поток не падает")
+    print("5) HTTP-ошибка видна, поток не падает")
     market_feed.OXA_REST = f"http://127.0.0.1:{PORT + 1}/v1/hyperliquid"
     market_feed.OXA_POLL_SEC = 0.3
     market_feed.OXA_COINS_PER_KEY = 4
@@ -259,7 +333,9 @@ async def main():
 
     try:
         test_parser_on_real_shape()
+        test_budget()
         await test_poll(fake, keys)
+        await test_clamp(fake, keys)
         await test_http_error(fake_bad)
     finally:
         await r.cleanup()

@@ -541,6 +541,8 @@ def parse_hyperliquid_msg(payload: dict,
             stats["stale"] = stats.get("stale", 0) + len(payload["data"])
         return []
     coin_map = coin_map or {}
+    if stats is not None:
+        stats["trades"] = stats.get("trades", 0) + len(payload.get("data") or [])
     out = []
     for t in payload.get("data") or []:
         if not isinstance(t, dict):
@@ -1762,9 +1764,19 @@ class MarketFeed:
             last_inbound = time.monotonic()
             dead_reason = ""      # причина принудительного закрытия (сторож)
             seen_msgs = 0         # первые кадры печатаем подробно
-            stats = {"stale": 0}  # сколько сделок отсеяно как срез истории
+            # stale — отсеяно как срез истории, trades — сколько всего пришло
+            stats = {"stale": 0, "trades": 0}
             keepalive = {"ping": 0, "pong": 0}
-            flags = {"announced": False, "stale_warn": 0.0}
+            # None — «ещё не предупреждали». Нулём здесь не обойтись:
+            # time.monotonic() отсчитывается от загрузки машины, и на свежем
+            # хосте условие «прошло больше N секунд» не сработает вовсе.
+            flags = {"announced": False, "stale_warn": None, "marker_warn": None}
+            # Публичный канал trades у HL сегодня приходит БЕЗ поля liquidation
+            # (проверено на бою: 18144 сделки, у всех один набор полей —
+            # coin/hash/px/side/sz/tid/time/users). Соединение при этом живое,
+            # поэтому молчание ленты надо объяснять вслух, а не оставлять
+            # «connected: true, events: 0».
+            note = {"text": ""}
             send_lock = asyncio.Lock()
 
             async def send(payload: dict):
@@ -1782,8 +1794,11 @@ class MarketFeed:
                     "hl_pongs": keepalive["pong"],
                     "hl_last_inbound_sec": round(time.monotonic() - last_inbound, 1),
                     "hl_skipped_stale": stats["stale"],
+                    "hl_trades_seen": stats["trades"],
                     "hl_coins_banned": sorted(self.hl_banned_coins),
                 }
+                if note["text"]:
+                    st.extra["hl_note"] = note["text"]
 
             async def handle_text(raw: str):
                 nonlocal seen_msgs
@@ -1822,6 +1837,15 @@ class MarketFeed:
                 evs = parse_hyperliquid_msg(payload, self.hl_coin_map,
                                             now=time.time(),
                                             max_age=HL_FRESH_SEC, stats=stats)
+                if (stats["trades"] >= 500 and st.events == 0
+                        and (flags["marker_warn"] is None
+                             or time.monotonic() - flags["marker_warn"] > 900)):
+                    flags["marker_warn"] = time.monotonic()
+                    note["text"] = ("биржа прислала %d сделок и ни одной с "
+                                    "объектом liquidation — публичный канал "
+                                    "trades ликвидаций не отдаёт"
+                                    % stats["trades"])
+                    log.warning("[hyperliquid] %s", note["text"])
                 for ev in evs:
                     await self._emit("hyperliquid", ev["symbol"], ev["side"],
                                      ev["price"], ev["qty"], ev["ts"])
@@ -1829,7 +1853,8 @@ class MarketFeed:
                 # но только если живых ликвидаций нет вовсе (иначе это штатный
                 # срез истории на подписку, а не поломка)
                 if (stats["stale"] >= 20 and st.events == 0
-                        and time.monotonic() - flags["stale_warn"] > 300):
+                        and (flags["stale_warn"] is None
+                             or time.monotonic() - flags["stale_warn"] > 300)):
                     flags["stale_warn"] = time.monotonic()
                     log.warning("[hyperliquid] отброшено %d сделок как устаревших "
                                 "(> %.0fс) — проверьте часы сервера, если живых "

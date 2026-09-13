@@ -79,6 +79,7 @@ class FakeHL:
         self.strict_unknown = strict_unknown    # как HL: неизвестная монета = обрыв
         self.errors = 0
         self.connections = 0
+        self._sockets = set()
         self.pings = 0
         self.subs = {}                  # монета -> сколько раз просили подписку
         self.acks = 0
@@ -93,6 +94,7 @@ class FakeHL:
         ws = web.WebSocketResponse()
         await ws.prepare(request)
         self.connections += 1
+        self._sockets.add(ws)
         self.last_client_msg = time.monotonic()
         opened = time.monotonic()
         coins = set()
@@ -190,6 +192,7 @@ class FakeHL:
         finally:
             k.cancel()
             t.cancel()
+            self._sockets.discard(ws)
         return ws
 
 
@@ -528,6 +531,59 @@ async def scenario_bad_coin_banned():
         market_feed.HL_SUB_GAP = 0.08
 
 
+# ---------------------------------------------------------------------------
+# 8) биржа шлёт сделки без метки liquidation — это видно, а не «events: 0»
+# ---------------------------------------------------------------------------
+async def scenario_no_liquidation_marker():
+    print("8) публичный trades без поля liquidation — состояние это объясняет")
+    market_feed.HL_SUB_GAP = 0.02
+    fake = FakeHL(liq_every=10**6)   # ликвидаций нет вообще
+    runner = await start_fake(fake)
+
+    # докидываем пачку ordinary-сделок, как это делает настоящая биржа
+    async def spam():
+        await asyncio.sleep(1.0)
+        rows = [{"coin": "BTC", "side": "B", "px": "68000", "sz": "0.01",
+                 "time": int(time.time() * 1000), "hash": f"h{i}",
+                 "tid": i, "users": ["0xa", "0xb"]} for i in range(600)]
+        for chunk in (rows[i:i + 100] for i in range(0, len(rows), 100)):
+            for c in list(fake._sockets):
+                try:
+                    await c.send_json({"channel": "trades", "data": chunk})
+                except Exception:
+                    pass
+            await asyncio.sleep(0.05)
+
+    liqs = []
+    feed = make_feed(liqs)
+    point_at_fake()
+    task = asyncio.create_task(feed._hyperliquid_liquidations())
+    sp = asyncio.create_task(spam())
+    try:
+        ok = await wait_until(
+            lambda: feed.status["hyperliquid"].extra.get("hl_trades_seen", 0) >= 500,
+            10)
+        extra = feed.status["hyperliquid"].extra
+        check("сделки считаются (hl_trades_seen >= 500)", ok, extra)
+        check("ликвидаций при этом ноль", feed.status["hyperliquid"].events == 0,
+              feed.status["hyperliquid"].events)
+        note = await wait_until(
+            lambda: "liquidation" in feed.status["hyperliquid"].extra.get("hl_note", ""),
+            5)
+        check("в health объяснено, почему events=0", note,
+              feed.status["hyperliquid"].extra.get("hl_note"))
+    finally:
+        sp.cancel()
+        task.cancel()
+        for t in (sp, task):
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
+        await runner.cleanup()
+        market_feed.HL_SUB_GAP = 0.08
+
+
 async def main():
     await scenario_fast_start()
     await scenario_ping_keeps_alive()
@@ -535,6 +591,7 @@ async def main():
     await scenario_reconnect()
     await scenario_coin_case()
     await scenario_bad_coin_banned()
+    await scenario_no_liquidation_marker()
     await scenario_server_e2e()
 
 

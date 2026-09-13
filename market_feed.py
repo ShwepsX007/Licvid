@@ -2749,14 +2749,19 @@ class MarketFeed:
                     log.warning("[oxa] кадры идут, а строк ликвидаций нет; "
                                 "типы кадров: %s", stats["kinds"])
             else:
+                # oxa_credits_month_eta равно None, пока не набран полный
+                # цикл опроса, — .get(..., 0) его НЕ подменяет (ключ-то
+                # присутствует), а %d на None падает с TypeError прямо
+                # в логгер. Поэтому через %s и читабельное «ещё неясно».
+                eta = st.extra.get("oxa_credits_month_eta")
                 log.info("[oxa/%s] ключей %d, монет %d, запросов %d, "
                          "ликвидаций %d (повторов %d), ошибок %d, "
-                         "кредитов/мес ~%d из %d",
+                         "кредитов/мес ~%s из %d",
                          OXA_MODE, stats["keys"], stats["subs"],
                          stats["requests"], stats["liq"], stats["dupes"],
                          stats["errors"],
-                         st.extra.get("oxa_credits_month_eta", 0),
-                         st.extra.get("oxa_credits_budget", 0))
+                         "ещё неясно" if eta is None else eta,
+                         st.extra.get("oxa_credits_budget") or 0)
         publish()
 
         async def stream(key_no: int, key: str, shard: List[str]):

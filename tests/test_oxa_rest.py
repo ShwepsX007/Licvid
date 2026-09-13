@@ -25,6 +25,7 @@ HTTP-ошибке.
 
 import asyncio
 import json
+import logging
 import os
 import sys
 import time
@@ -302,6 +303,75 @@ async def test_clamp(fake, keys):
         os.environ.pop("LIQSCOPE_OXA_KEYS", None)
 
 
+class FormatHandler(logging.Handler):
+    """Обработчик, который именно ФОРМАТИРУЕТ запись, как в бою.
+
+    В server.py стоит logging.basicConfig(level=INFO), поэтому каждая запись
+    проходит через Formatter -> record.getMessage() -> "msg % args". В тестах
+    обработчиков нет, а lastResort срабатывает только от WARNING, поэтому
+    log.info не форматируется вовсе и битый %d молча проходит. Боевой лог при
+    этом падает с TypeError: %d format: a real number is required, not NoneType.
+    """
+
+    def __init__(self):
+        super().__init__(logging.INFO)
+        self.setFormatter(logging.Formatter("%(message)s"))
+        self.lines = []
+        self.errors = []
+
+    def emit(self, record):
+        try:
+            self.lines.append(self.format(record))
+        except Exception as e:                      # noqa: BLE001
+            self.errors.append(f"{type(record.msg).__name__}: {type(e).__name__}: {e}")
+
+
+async def test_log_formats(fake, keys):
+    """Минутная строка лога обязана форматироваться при любом состоянии."""
+    print("6) лог форматируется без ошибок")
+    market_feed.OXA_REST = f"http://127.0.0.1:{PORT}/v1/hyperliquid"
+    market_feed.OXA_MODE = "rest"
+    market_feed.OXA_POLL_SEC = 0.4
+    market_feed.OXA_COINS_PER_KEY = 2
+    market_feed.OXA_FREE_CREDITS = 10 ** 9
+    market_feed.OXA_OVERLAP_SEC = 1
+    market_feed.OXA_FIRST_WINDOW_SEC = 60
+    market_feed.NEW_SOURCE_LOG_SEC = 0.0     # чтобы report() писал каждый раз
+    os.environ["LIQSCOPE_OXA_KEYS"] = ",".join(keys)
+    fake.hits.clear()
+
+    handler = FormatHandler()
+    feed_log = logging.getLogger("liqscope.feed")
+    feed_log.addHandler(handler)
+    old_level = feed_log.level
+    feed_log.setLevel(logging.INFO)
+
+    liqs = []
+    async def on_liq(ev): liqs.append(ev)
+    async def on_price(*a): pass
+    feed = MarketFeed(on_liquidation=on_liq, on_price=on_price, exchanges=[])
+    feed.symbols = ["BTC_USDT", "ETH_USDT"]
+    async def _uni(session=None): return {"BTC", "ETH"}
+    feed._hyperliquid_load_universe = _uni
+    await feed.start()
+    try:
+        await wait_until(lambda: feed.status["oxa"].extra.get("oxa_requests", 0) >= 2)
+        await asyncio.sleep(0.2)
+    finally:
+        await feed.stop()
+        feed_log.removeHandler(handler)
+        feed_log.setLevel(old_level)
+        os.environ.pop("LIQSCOPE_OXA_KEYS", None)
+
+    check("лог не падал при форматировании", handler.errors == [], handler.errors)
+    check("минутная строка oxa/rest действительно писалась",
+          any("[oxa/rest]" in ln for ln in handler.lines), handler.lines[-3:])
+    # прогноз кредитов на старте ещё None — строка обязана это пережить
+    check("в строке нет None вместо числа",
+          all("None" not in ln for ln in handler.lines if "[oxa" in ln),
+          [ln for ln in handler.lines if "[oxa" in ln][-2:])
+
+
 async def test_http_error(fake_bad):
     print("5) HTTP-ошибка видна, поток не падает")
     market_feed.OXA_REST = f"http://127.0.0.1:{PORT + 1}/v1/hyperliquid"
@@ -354,6 +424,7 @@ async def main():
         test_budget()
         await test_poll(fake, keys)
         await test_clamp(fake, keys)
+        await test_log_formats(fake, keys)
         await test_http_error(fake_bad)
     finally:
         await r.cleanup()

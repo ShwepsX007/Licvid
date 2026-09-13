@@ -34,6 +34,7 @@ import os
 import re
 import socket
 import time
+from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
 
 import aiohttp
@@ -74,6 +75,23 @@ HTX_WS = "wss://api.hbdm.com/linear-swap-notification"
 # BitMEX: таблица liquidation
 BITMEX_WS = "wss://ws.bitmex.com/realtime?subscribe=liquidation"
 BITMEX_REST = "https://www.bitmex.com/api/v1"
+# dYdX v4: публичный индексатор, канал v4_trades, ликвидация — тип сделки
+DYDX_WS = os.getenv("LIQSCOPE_DYDX_WS", "wss://indexer.dydx.trade/v4/ws")
+# Kraken Futures: публичный фид trade, ликвидация — поле type
+KRAKEN_WS = os.getenv("LIQSCOPE_KRAKEN_WS", "wss://futures.kraken.com/ws/v1")
+# Bitfinex: канал status с ключом liq:global — поток ликвидаций по всей бирже
+BITFINEX_WS = os.getenv("LIQSCOPE_BITFINEX_WS", "wss://api-pub.bitfinex.com/ws/2")
+# Срез «свежести» для подписочных снапшотов (dYdX/Kraken/Bitfinex отдают
+# последние события при подписке — без фильтра они встали бы в ленту как новые).
+LIQ_FRESH_SEC = float(os.getenv("LIQSCOPE_LIQ_FRESH_SEC", "120"))
+# Пауза между подписками dYdX: лимит индексатора — 2 подписки в секунду
+# на (соединение + канал + id), держимся с запасом.
+DYDX_SUB_GAP = float(os.getenv("LIQSCOPE_DYDX_SUB_GAP_MS", "550")) / 1000.0
+# Сколько тикеров dYdX подписываем (топ по нашему списку монет).
+DYDX_MAX_SUBS = int(os.getenv("LIQSCOPE_DYDX_MAX_SUBS", "40"))
+# Период keepalive: Kraken просит пинг хотя бы раз в 60 с, Bitfinex — раз в 30 с.
+KRAKEN_PING_SEC = float(os.getenv("LIQSCOPE_KRAKEN_PING_SEC", "25"))
+BITFINEX_PING_SEC = float(os.getenv("LIQSCOPE_BITFINEX_PING_SEC", "20"))
 # Адреса HL переопределяются из окружения: тестнет
 # (wss://api.hyperliquid-testnet.xyz/ws), свой узел или локальная псевдо-биржа
 # для сквозных тестов (см. tests/test_hl_stream.py).
@@ -577,6 +595,227 @@ def hl_close_reason(msg_type, close_code, exc, data) -> str:
             f"exc={exc!r} data={str(data)[:150]}")
 
 
+# ---------------------------------------------------------------------------
+#  dYdX v4 / Kraken Futures / Bitfinex
+#
+#  Все три отдают ликвидацию меткой внутри общего потока, а не отдельным
+#  каналом (проверено по официальной документации 13.09.2026):
+#    dYdX     — канал v4_trades, у сделки type: Limit|Liquidated|Deleveraged
+#    Kraken   — фид trade, у сделки type: fill|liquidation|termination|block
+#    Bitfinex — канал status с ключом liq:global, кадр [chanId, [["pos", ...]]]
+#  При подписке каждый из них отдаёт снапшот последних событий, поэтому везде
+#  работает фильтр свежести (LIQ_FRESH_SEC).
+# ---------------------------------------------------------------------------
+def _iso_to_epoch(text) -> float:
+    """ISO-8601 ('2026-09-13T10:00:00.123Z') в epoch-секунды."""
+    try:
+        return datetime.fromisoformat(str(text).replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
+
+
+def _fresh(ts: float, now, max_age, stats) -> bool:
+    """Свежее ли событие; устаревшие считаем подписочным снапшотом."""
+    if not (max_age and now and ts):
+        return True
+    if (now - ts) > max_age:
+        if stats is not None:
+            stats["stale"] = stats.get("stale", 0) + 1
+        return False
+    return True
+
+
+def dydx_symbol_map(symbols: Iterable[str]) -> Dict[str, str]:
+    """Карта тикер dYdX -> канон: 'BTC-USD' -> 'BTC_USDT'."""
+    out: Dict[str, str] = {}
+    for sym in symbols or []:
+        c = canon(sym)
+        if not c or "_" not in c:
+            continue
+        out[c.split("_")[0] + "-USD"] = c
+    return out
+
+
+def kraken_symbol_map(symbols: Iterable[str]) -> Dict[str, str]:
+    """Карта продукт Kraken -> канон: 'PF_XBTUSD' -> 'BTC_USDT'.
+
+    Берём бессрочные мультиколлатеральные контракты (префикс PF_, котируются
+    в USD); BTC у Kraken называется XBT.
+    """
+    out: Dict[str, str] = {}
+    for sym in symbols or []:
+        c = canon(sym)
+        if not c or "_" not in c:
+            continue
+        base = c.split("_")[0]
+        out["PF_" + ("XBT" if base == "BTC" else base) + "USD"] = c
+    return out
+
+
+def bitfinex_symbol_map(symbols: Iterable[str]) -> Dict[str, str]:
+    """Карта символ Bitfinex -> канон: 'tBTCF0:USTF0' -> 'BTC_USDT'.
+
+    Берём USDT-маржинальные перпы (F0 — бессрочный контракт).
+    """
+    out: Dict[str, str] = {}
+    for sym in symbols or []:
+        c = canon(sym)
+        if not c or "_" not in c:
+            continue
+        out["t" + c.split("_")[0] + "F0:USTF0"] = c
+    return out
+
+
+def parse_dydx_msg(payload, sym_map: Optional[Dict[str, str]] = None,
+                   now: Optional[float] = None,
+                   max_age: Optional[float] = None,
+                   stats: Optional[dict] = None) -> List[dict]:
+    """dYdX v4: v4_trades. Ликвидация — type Liquidated/Deleveraged.
+
+    side у сделки — сторона ТЕЙКЕРА, поэтому SELL означает принудительную
+    продажу, то есть вынесли LONG.
+    """
+    if not isinstance(payload, dict) or payload.get("channel") != "v4_trades":
+        return []
+    contents = payload.get("contents")
+    if not isinstance(contents, dict):
+        return []
+    trades = contents.get("trades")
+    if not isinstance(trades, list):
+        return []
+    if stats is not None:
+        stats["trades"] = stats.get("trades", 0) + len(trades)
+    sym_map = sym_map or {}
+    ticker = str(payload.get("id") or "")
+    out: List[dict] = []
+    for t in trades:
+        if not isinstance(t, dict):
+            continue
+        ttype = str(t.get("type") or "").lower()
+        if ttype not in ("liquidated", "deleveraged"):
+            continue
+        try:
+            price = float(t.get("price") or 0)
+            qty = float(t.get("size") or 0)
+        except (TypeError, ValueError):
+            continue
+        ts = _iso_to_epoch(t.get("createdAt"))
+        if price <= 0 or qty <= 0 or not _fresh(ts, now, max_age, stats):
+            continue
+        out.append({
+            "symbol": sym_map.get(ticker) or canon(ticker),
+            "side": "LONG" if str(t.get("side") or "").upper() == "SELL" else "SHORT",
+            "price": price, "qty": qty, "ts": ts or time.time(),
+            "kind": ttype,
+        })
+    return out
+
+
+def parse_kraken_msg(payload, sym_map: Optional[Dict[str, str]] = None,
+                     now: Optional[float] = None,
+                     max_age: Optional[float] = None,
+                     stats: Optional[dict] = None) -> List[dict]:
+    """Kraken Futures: фид trade. Ликвидация — type liquidation/termination.
+
+    side — сторона тейкера в ликвидационной сделке: sell = принудительная
+    продажа = вынесли LONG. `termination` — закрытие через страховый фонд
+    (аналог ADL), считаем его ликвидацией, но помечаем в kind.
+    """
+    if not isinstance(payload, dict):
+        return []
+    feed = str(payload.get("feed") or "")
+    if feed == "trade_snapshot":
+        rows = payload.get("trades") or []
+    elif feed == "trade":
+        rows = [payload]
+    else:
+        return []
+    if not isinstance(rows, list):
+        return []
+    if stats is not None:
+        stats["trades"] = stats.get("trades", 0) + len(rows)
+    sym_map = sym_map or {}
+    product = str(payload.get("product_id") or "")
+    out: List[dict] = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        rtype = str(r.get("type") or "").lower()
+        if rtype not in ("liquidation", "termination"):
+            continue
+        try:
+            price = float(r.get("price") or 0)
+            qty = float(r.get("qty") or 0)
+            ts = float(r.get("time") or 0) / 1000.0
+        except (TypeError, ValueError):
+            continue
+        if price <= 0 or qty <= 0 or not _fresh(ts, now, max_age, stats):
+            continue
+        pid = str(r.get("product_id") or product)
+        out.append({
+            "symbol": sym_map.get(pid) or canon_bitmex(pid.replace("PF_", "")),
+            "side": "LONG" if str(r.get("side") or "").lower() == "sell" else "SHORT",
+            "price": price, "qty": qty, "ts": ts or time.time(),
+            "kind": rtype,
+        })
+    return out
+
+
+def parse_bitfinex_liquidations(payload, chan_id=None,
+                                sym_map: Optional[Dict[str, str]] = None,
+                                now: Optional[float] = None,
+                                max_age: Optional[float] = None,
+                                stats: Optional[dict] = None) -> List[dict]:
+    """Bitfinex: канал status, ключ liq:global.
+
+    Кадр: [chanId, [["pos", posId, timeMs, null, symbol, amount, basePrice,
+                     null, isMatch, isMarketSold, null, liqPrice], ...]]
+    Сторону берём из знака AMOUNT: положительный — вынесли лонг. Знак
+    подтверждён документацией только косвенно, поэтому значение дублируется
+    в health-статистике (bitfinex_liq_long/short) — по живым данным его видно.
+    """
+    if not isinstance(payload, list) or len(payload) < 2:
+        return []
+    if chan_id is not None and payload[0] != chan_id:
+        return []
+    body = payload[1]
+    if not isinstance(body, list):
+        return []                              # "hb" и прочие служебные кадры
+    rows = body if body and isinstance(body[0], list) else [body]
+    sym_map = sym_map or {}
+    out: List[dict] = []
+    for r in rows:
+        if not isinstance(r, list) or not r or r[0] != "pos" or len(r) < 12:
+            continue
+        if stats is not None:
+            stats["trades"] = stats.get("trades", 0) + 1
+        raw_sym = str(r[4] or "")
+        sym = sym_map.get(raw_sym)
+        if not sym:
+            # в поток попадают и спот-маржинальные ликвидации — не наши рынки
+            if stats is not None:
+                stats["skipped_other"] = stats.get("skipped_other", 0) + 1
+            continue
+        try:
+            amount = float(r[5] or 0)
+            ts = float(r[2] or 0) / 1000.0
+            price = float(r[11] or r[6] or 0)   # цена ликвидации, резерв — базовая
+        except (TypeError, ValueError):
+            continue
+        qty = abs(amount)
+        if qty <= 0 or price <= 0 or not _fresh(ts, now, max_age, stats):
+            continue
+        side = "LONG" if amount >= 0 else "SHORT"
+        if stats is not None:
+            key = "liq_long" if side == "LONG" else "liq_short"
+            stats[key] = stats.get(key, 0) + 1
+        out.append({
+            "symbol": sym, "side": side, "price": price, "qty": qty,
+            "ts": ts or time.time(), "kind": "pos",
+        })
+    return out
+
+
 class SourceStatus:
     """Диагностика одного WS-источника (видна в /api/health)."""
 
@@ -691,7 +930,8 @@ class MarketFeed:
         self.status: Dict[str, SourceStatus] = {
             name: SourceStatus(name)
             for name in ("binance", "bybit", "okx", "gate", "bitget", "htx",
-                         "bitmex", "hyperliquid", "prices", "ticks")
+                         "bitmex", "hyperliquid", "dydx", "kraken", "bitfinex",
+                         "prices", "ticks")
         }
         for name, st in self.status.items():
             if name not in ("prices", "ticks"):
@@ -741,6 +981,9 @@ class MarketFeed:
             "htx": self._htx_liquidations,
             "bitmex": self._bitmex_liquidations,
             "hyperliquid": self._hyperliquid_liquidations,
+            "dydx": self._dydx_liquidations,
+            "kraken": self._kraken_liquidations,
+            "bitfinex": self._bitfinex_liquidations,
         }
         for name, coro in spawn.items():
             if name in self.enabled_exchanges:
@@ -1629,6 +1872,233 @@ class MarketFeed:
                 for ev in parse_bitmex_msg(payload, self.bitmex_instruments):
                     await self._emit("bitmex", ev["symbol"], ev["side"],
                                      ev["price"], ev["qty"], ev["ts"], usd=ev.get("usd"))
+
+    # -- dYdX v4 -------------------------------------------------------------
+    async def _dydx_liquidations(self):
+        """dYdX v4: публичный индексатор, канал v4_trades на каждый тикер.
+
+        Ликвидация помечена типом сделки (type: Liquidated/Deleveraged),
+        отдельного канала нет. Подписка по тикеру, ключ не нужен.
+        """
+        st = self.status["dydx"]
+        sym_map = dydx_symbol_map(self.symbols)
+        tickers = list(sym_map)[:DYDX_MAX_SUBS]
+        if not tickers:
+            raise ConnectionError("нет тикеров dYdX для подписки")
+        stats = {"trades": 0, "stale": 0}
+        acked: set = set()
+
+        def publish():
+            st.extra = {"dydx_url": DYDX_WS, "dydx_subs_total": len(tickers),
+                        "dydx_subs_acked": len(acked),
+                        "dydx_trades_seen": stats["trades"],
+                        "dydx_skipped_stale": stats["stale"]}
+
+        async with self._session.ws_connect(DYDX_WS, heartbeat=None,
+                                            max_msg_size=0) as ws:
+            st.up()
+            publish()
+            log.info("[dydx] подключён, подписываю %d тикеров", len(tickers))
+
+            async def sub_worker():
+                for tk in tickers:
+                    if self._stop.is_set() or ws.closed:
+                        return
+                    await ws.send_json({"type": "subscribe",
+                                        "channel": "v4_trades", "id": tk})
+                    await asyncio.sleep(DYDX_SUB_GAP)
+
+            sub = asyncio.create_task(sub_worker())
+            try:
+                while not self._stop.is_set():
+                    try:
+                        msg = await ws.receive(timeout=5.0)
+                    except asyncio.TimeoutError:
+                        continue
+                    if msg.type in (aiohttp.WSMsgType.CLOSED,
+                                    aiohttp.WSMsgType.CLOSING,
+                                    aiohttp.WSMsgType.ERROR):
+                        break
+                    if msg.type != aiohttp.WSMsgType.TEXT:
+                        continue
+                    try:
+                        payload = json.loads(msg.data)
+                    except Exception:
+                        continue
+                    if isinstance(payload, dict) and payload.get("type") == "subscribed":
+                        acked.add(str(payload.get("id") or ""))
+                        publish()
+                        continue
+                    for ev in parse_dydx_msg(payload, sym_map, now=time.time(),
+                                             max_age=LIQ_FRESH_SEC, stats=stats):
+                        await self._emit("dydx", ev["symbol"], ev["side"],
+                                         ev["price"], ev["qty"], ev["ts"])
+                    publish()
+            finally:
+                sub.cancel()
+
+    # -- Kraken Futures ------------------------------------------------------
+    async def _kraken_liquidations(self):
+        """Kraken Futures: публичный фид trade, ликвидация — поле type.
+
+        По документации у сделки type: fill | liquidation | termination |
+        block; termination — закрытие через страховой фонд (аналог ADL).
+        """
+        st = self.status["kraken"]
+        sym_map = kraken_symbol_map(self.symbols)
+        products = list(sym_map)
+        if not products:
+            raise ConnectionError("нет продуктов Kraken для подписки")
+        stats = {"trades": 0, "stale": 0}
+        acked: set = set()
+
+        def publish():
+            st.extra = {"kraken_url": KRAKEN_WS,
+                        "kraken_subs_total": len(products),
+                        "kraken_subs_acked": len(acked),
+                        "kraken_trades_seen": stats["trades"],
+                        "kraken_skipped_stale": stats["stale"]}
+
+        async with self._session.ws_connect(KRAKEN_WS, heartbeat=None,
+                                            max_msg_size=0) as ws:
+            st.up()
+            publish()
+            log.info("[kraken] подключён, подписываю %d контрактов", len(products))
+
+            async def sub_worker():
+                # по одному контракту: на незнакомый id Kraken отвечает ошибкой
+                # на весь запрос, а потерять из-за одного весь поток жалко
+                for pid in products:
+                    if self._stop.is_set() or ws.closed:
+                        return
+                    await ws.send_json({"event": "subscribe", "feed": "trade",
+                                        "product_ids": [pid]})
+                    await asyncio.sleep(0.1)
+
+            async def ping_worker():
+                # Kraken просит пинг хотя бы раз в 60 с
+                while not self._stop.is_set() and not ws.closed:
+                    await asyncio.sleep(KRAKEN_PING_SEC)
+                    try:
+                        await ws.send_json({"event": "ping"})
+                    except Exception:
+                        return
+
+            sub = asyncio.create_task(sub_worker())
+            pinger = asyncio.create_task(ping_worker())
+            try:
+                while not self._stop.is_set():
+                    try:
+                        msg = await ws.receive(timeout=5.0)
+                    except asyncio.TimeoutError:
+                        continue
+                    if msg.type in (aiohttp.WSMsgType.CLOSED,
+                                    aiohttp.WSMsgType.CLOSING,
+                                    aiohttp.WSMsgType.ERROR):
+                        break
+                    if msg.type != aiohttp.WSMsgType.TEXT:
+                        continue
+                    try:
+                        payload = json.loads(msg.data)
+                    except Exception:
+                        continue
+                    if isinstance(payload, dict) and payload.get("event") == "subscribed":
+                        for pid in payload.get("product_ids") or []:
+                            acked.add(str(pid))
+                        publish()
+                        continue
+                    for ev in parse_kraken_msg(payload, sym_map, now=time.time(),
+                                               max_age=LIQ_FRESH_SEC, stats=stats):
+                        await self._emit("kraken", ev["symbol"], ev["side"],
+                                         ev["price"], ev["qty"], ev["ts"])
+                    publish()
+            finally:
+                sub.cancel()
+                pinger.cancel()
+
+    # -- Bitfinex ------------------------------------------------------------
+    async def _bitfinex_liquidations(self):
+        """Bitfinex: канал status с ключом liq:global — поток по всей бирже.
+
+        Одна подписка на все рынки сразу (в отличие от остальных источников).
+        chanId приходит в ответе subscribed, дальше кадры идут массивами.
+        """
+        st = self.status["bitfinex"]
+        sym_map = bitfinex_symbol_map(self.symbols)
+        stats = {"trades": 0, "stale": 0, "liq_long": 0, "liq_short": 0,
+                 "skipped_other": 0}
+        state = {"chan": None, "ping": 0, "pong": 0}
+
+        def publish():
+            st.extra = {"bitfinex_url": BITFINEX_WS,
+                        "bitfinex_key": "liq:global",
+                        "bitfinex_chan_id": state["chan"],
+                        "bitfinex_rows_seen": stats["trades"],
+                        "bitfinex_skipped_stale": stats["stale"],
+                        "bitfinex_liq_long": stats["liq_long"],
+                        "bitfinex_liq_short": stats["liq_short"],
+                        "bitfinex_skipped_other": stats["skipped_other"],
+                        "bitfinex_pings": state["ping"],
+                        "bitfinex_pongs": state["pong"]}
+
+        async with self._session.ws_connect(BITFINEX_WS, heartbeat=None,
+                                            max_msg_size=0) as ws:
+            st.up()
+            publish()
+            log.info("[bitfinex] подключён, подписка на status/liq:global")
+
+            async def ping_worker():
+                while not self._stop.is_set() and not ws.closed:
+                    await asyncio.sleep(BITFINEX_PING_SEC)
+                    state["ping"] += 1
+                    try:
+                        await ws.send_json({"event": "ping",
+                                            "cid": int(time.time() * 1000)})
+                    except Exception:
+                        return
+
+            pinger = asyncio.create_task(ping_worker())
+            try:
+                await ws.send_json({"event": "subscribe", "channel": "status",
+                                    "key": "liq:global"})
+                while not self._stop.is_set():
+                    try:
+                        msg = await ws.receive(timeout=5.0)
+                    except asyncio.TimeoutError:
+                        continue
+                    if msg.type in (aiohttp.WSMsgType.CLOSED,
+                                    aiohttp.WSMsgType.CLOSING,
+                                    aiohttp.WSMsgType.ERROR):
+                        break
+                    if msg.type != aiohttp.WSMsgType.TEXT:
+                        continue
+                    try:
+                        payload = json.loads(msg.data)
+                    except Exception:
+                        continue
+                    if isinstance(payload, dict):
+                        ev = payload.get("event")
+                        if ev == "subscribed" and payload.get("key") == "liq:global":
+                            state["chan"] = payload.get("chanId")
+                            log.info("[bitfinex] подписка подтверждена, chanId=%s",
+                                     state["chan"])
+                        elif ev == "pong":
+                            state["pong"] += 1
+                        elif ev == "error":
+                            st.last_error = str(payload.get("msg"))[:200]
+                            log.warning("[bitfinex] ошибка: %s", st.last_error)
+                        publish()
+                        continue
+                    if state["chan"] is None:
+                        continue
+                    for ev in parse_bitfinex_liquidations(
+                            payload, state["chan"], sym_map, now=time.time(),
+                            max_age=LIQ_FRESH_SEC, stats=stats):
+                        await self._emit("bitfinex", ev["symbol"], ev["side"],
+                                         ev["price"], ev["qty"], ev["ts"])
+                    publish()
+            finally:
+                pinger.cancel()
 
     # -- Hyperliquid ---------------------------------------------------------
     def _hl_session(self):

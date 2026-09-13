@@ -184,8 +184,13 @@
     const pretty = (s) => String(s || "").replace("_", "/");
 
     // --- Фильтры (мин. объём + биржи) ----------------------------------------
+    // Как биржа подписывается в интерфейсе (код биржи -> читаемое имя)
+    const EXCH_NAMES = {
+        dydx: "dYdX", okx: "OKX", htx: "HTX", bitmex: "BitMEX",
+    };
     function exchangeName(e) {
-        return String(e || "").charAt(0).toUpperCase() + String(e || "").slice(1);
+        const k = String(e || "").toLowerCase();
+        return EXCH_NAMES[k] || (k.charAt(0).toUpperCase() + k.slice(1));
     }
 
     function isExchangeOn(name) {

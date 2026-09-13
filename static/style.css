@@ -1507,6 +1507,9 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
 .exch-badge.htx    { background: rgba(255, 122, 0, 0.14);  color: #ff9d3d; }
 .exch-badge.bitmex { background: rgba(255, 61, 113, 0.14); color: #ff6b8a; }
 .exch-badge.hyperliquid { background: rgba(151, 252, 228, 0.12); color: #97fce4; }
+.exch-badge.dydx        { background: rgba(112, 191, 255, 0.12); color: #70bfff; }
+.exch-badge.kraken      { background: rgba(147, 112, 219, 0.14); color: #b39ddb; }
+.exch-badge.bitfinex    { background: rgba(155, 221, 120, 0.12); color: #9bdd78; }
 .exch-badge.dydx   { background: rgba(140, 120, 255, 0.14); color: #a794ff; }
 
 /* ============================================================

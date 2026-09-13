@@ -214,7 +214,12 @@ Hyperliquid был подключён как восьмой источник —
 | Crypto.com Derivatives | ❌ | `LIQUIDATION` встречается лишь в `exec_inst` приватного `user.order`; публичного канала в найденной доке нет | частично |
 | KuCoin Futures | ❌ | см. таблицу выше | да |
 | BingX | ❌ | см. таблицу выше | да |
-| BTSE, Kraken Futures, Bitfinex, Delta, BloFin, WooX | ? | не проверял — если какая-то из них нужна, скажите, посмотрю прицельно | нет |
+| **Kraken Futures** | ✅ **да** | `wss://futures.kraken.com/ws/v1`, публичный фид `trade` (`{"event":"subscribe","feed":"trade","product_ids":["PF_XBTUSD"]}`); у каждой сделки поле `type`: `fill` \| **`liquidation`** \| **`termination`** \| `block`. Поля: `uid`, `side` (тейкер), `seq`, `time` (мс), `qty`, `price`. Ключ не нужен | да |
+| **Bitfinex** | ✅ **да** | `wss://api-pub.bitfinex.com/ws/2`, публичный канал `status` с ключом **`liq:global`** — общий поток ликвидаций. Кадр: `[chanId, [["pos", posId, timeMs, null, symbol, amount, basePrice, null, isMatch, isMarketSold, null, liqPrice]]]`. Ключ не нужен | да |
+| BTSE | ❌ | публичные топики — `tradeHistoryApi:{symbol}`, `tradeHistoryApiV2:{symbol}`, L1-стакан; ликвидация видна только в приватных статусах ордера/счёта (`STATUS_LIQUIDATION`, `ORDER_LIQUIDATION`) | да |
+| Delta Exchange | ❌ | публичные каналы — `ticker`, `ob_l1`, `ob_l2`, `ob_updates`, `trades`, `mark_price`, `candlesticks`, `spot_price`, `funding_rate`; ликвидация — только приватный `v2/user_trades` с `reason: "liquidation"` (добавлен 01.06.25) | да |
+| BloFin | ❌ | публичные — `books`/`books5`, `trades`, `candlesticks`, `tickers`, `mark-price-candle`; ликвидация встречается лишь как `orderCategory`/`closeType` в приватных каналах | да |
+| WooX | ❌ | публичные — стакан, сделки, kline, тикеры, `indexprice`, `markprice`, `openinterest`, `estfundingrate`; ликвидации уходят в приватный `marginassignment` (ордер типа `LIQUIDATE_BLP`) | да |
 
 **DEX**
 
@@ -227,25 +232,29 @@ Hyperliquid был подключён как восьмой источник —
 | GMX, Jupiter Perps, Synthetix Perps | ❌ | ликвидации — он-чейн-события/сабграф, стриминга нет | нет (по общим сведениям) |
 | EdgeX | ? | сторонняя библиотека заявляет «real-time trade streams with liquidation tracking», по официальной доке не проверял | нет |
 
-**Итог:** единственный найденный источник с явной публичной меткой ликвидации
-и без ключа — **dYdX v4**. По устройству он почти повторяет то, что мы ждали от
-Hyperliquid: общий канал сделок, где ликвидация помечена полем (`type:
-"Liquidated"`), подписка на тикер, ключ не нужен. Логичный кандидат на место
-удалённого Hyperliquid.
+**Итог:** найдено три публичных источника с явной меткой ликвидации и без
+ключа — **Kraken Futures**, **Bitfinex** и **dYdX v4**. Все три устроены по
+одной схеме, которую мы ждали от Hyperliquid: общий поток, где ликвидация
+помечена полем (`type: "liquidation"`, кадр `"pos"`, `type: "Liquidated"`).
+Из них Kraken и Bitfinex удобнее всего: одна подписка на весь рынок (у Kraken —
+по контрактам, но без перечисления тикеров у Bitfinex), а dYdX требует
+подписки на каждый тикер отдельно.
 
 Но урок Hyperliquid в том, что документация — не факт: прежде чем писать
-слушатель, канал надо померить живьём. Для этого есть
-`tools/dydx_liq_probe.py` (запускать на сервере, не из песочницы):
+слушатель, канал надо померить живьём. Для трёх найденных источников есть
+`tools/liq_probe.py` (запускать на сервере, не из песочницы):
 
 ```bash
-python3 tools/dydx_liq_probe.py 600              # 10 минут, топ-10 тикеров
-python3 tools/dydx_liq_probe.py 1800 BTC-USD ETH-USD SOL-USD
-python3 tools/dydx_liq_probe.py --selftest       # разбор кадра, сеть не нужна
+python3 tools/liq_probe.py kraken 600                # 10 минут, топ-10 контрактов
+python3 tools/liq_probe.py kraken 1800 PF_XBTUSD PF_ETHUSD
+python3 tools/liq_probe.py bitfinex 1800             # поток liq:global
+python3 tools/liq_probe.py dydx 600 BTC-USD ETH-USD SOL-USD
+python3 tools/liq_probe.py --selftest                # разбор кадров всех трёх, без сети
 ```
 
-Он печатает число сделок, распределение значений поля `type` и образцы
-ликвидаций; код выхода 0 — метки есть (можно подключать), 3 — сделок много, а
-меток нет (как было с Hyperliquid), 4 — не удалось подключиться.
+Он печатает число сделок, распределение значений типа и образцы ликвидаций;
+код выхода 0 — метки есть (можно подключать), 3 — сделок много, а меток нет
+(как было с Hyperliquid), 4 — не удалось подключиться.
 
 Цены и свечи: WS `kline_1m` Binance, история — REST Binance → Bybit → OKX
 (что первым ответит). Если Binance недоступен из вашей страны, терминал
@@ -439,8 +448,8 @@ node tests/ui_smoke.js
 ```bash
 python3 tools/check_exchanges.py            # BTCUSDT, ожидание 10 с
 python3 tools/check_exchanges.py ETHUSDT 60 # дольше ждать ликвидации
-python3 tools/dydx_liq_probe.py 600        # dYdX v4: есть ли метка ликвидации в v4_trades
-python3 tools/dydx_liq_probe.py --selftest # разбор кадра v4_trades без сети
+python3 tools/liq_probe.py kraken 600      # Kraken/Bitfinex/dYdX: есть ли ликвидации
+python3 tools/liq_probe.py --selftest      # разбор кадров всех трёх, без сети
 ```
 
 Скрипт проверяет не «открылся ли сокет», а **приходят ли данные** в каждый

@@ -654,10 +654,10 @@ class Store:
         data = data or b""
         if len(data) < 24:
             return {"ok": False, "error": "empty"}
-        if len(data) > 4_000_000:
+        if len(data) > 12_000_000:
             return {"ok": False, "error": "too_big"}
         ext = ""
-        if data[:3] == b"\xff\xd8\xff":
+        if data[:2] == b"\xff\xd8":
             ext = ".jpg"
         elif data[:8] == b"\x89PNG\r\n\x1a\n":
             ext = ".png"

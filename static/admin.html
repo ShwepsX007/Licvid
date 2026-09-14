@@ -92,10 +92,13 @@
                 <ul class="tpl-list" id="tpl-heads"></ul>
             </div>
             <div>
-                <label>Новое фото (jpg / png / webp, до 4 МБ)</label>
-                <input id="tpl-photo-in" type="file" accept="image/jpeg,image/png,image/webp">
+                <label>Новое фото (jpg / png / webp)</label>
                 <div class="row-actions">
-                    <span class="meta" id="tpl-photo-status"></span>
+                    <label class="btn btn-primary file-btn">
+                        Выбрать файл
+                        <input id="tpl-photo-in" type="file" accept="image/jpeg,image/jpg,image/png,image/webp,image/*">
+                    </label>
+                    <span class="meta" id="tpl-photo-status">jpg, png, webp — до 12 МБ</span>
                 </div>
                 <div class="tpl-photos" id="tpl-photos"></div>
             </div>

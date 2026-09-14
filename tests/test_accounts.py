@@ -128,6 +128,20 @@ class AccountsTest(unittest.TestCase):
         self.assertTrue(self.store.delete_digest_photo(bundled["id"]))
         self.assertTrue(os.path.isfile(bundled["path"]))
 
+    def test_digest_photo_accepts_phone_size_jpeg(self):
+        # раньше лимит был 4 МБ — телефонные jpg часто больше
+        blob = b"\xff\xd8\xff\xe0" + b"\x00" * (5 * 1000 * 1000) + b"\xff\xd9"
+        r = self.store.add_digest_photo(blob, filename="phone.jpg")
+        self.assertTrue(r["ok"], r)
+        self.assertTrue(os.path.isfile(r["path"]))
+        self.store.delete_digest_photo(r["id"])
+
+    def test_digest_photo_rejects_too_big_and_non_image(self):
+        huge = b"\xff\xd8" + b"\x00" * 12_000_001
+        self.assertEqual(self.store.add_digest_photo(huge).get("error"), "too_big")
+        self.assertEqual(self.store.add_digest_photo(b"not-an-image-file-at-all!!").get("error"), "not_image")
+        self.assertEqual(self.store.add_digest_photo(b"").get("error"), "empty")
+
     def test_ip_hash_stable(self):
         a = hash_ip("s", "1.2.3.4")
         b = hash_ip("s", "1.2.3.4")

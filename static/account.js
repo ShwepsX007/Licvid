@@ -454,23 +454,37 @@
             var f = inp.files && inp.files[0];
             var st = $("tpl-photo-status");
             if (!f) return;
-            if (f.size > 4 * 1024 * 1024) {
-                if (st) st.textContent = "файл больше 4 МБ";
+            if (f.size > 12 * 1000 * 1000) {
+                if (st) st.textContent = "файл больше 12 МБ";
                 inp.value = "";
                 return;
             }
-            var r = new FileReader();
-            r.onload = function () {
-                api("/api/admin/digest/photos", {
-                    method: "POST",
-                    body: JSON.stringify({ filename: f.name, data: String(r.result || "") }),
-                }).then(function (d) {
-                    if (st) st.textContent = d.ok ? t("saved") : (d.error || "error");
-                    inp.value = "";
-                    loadDigestTpl();
-                });
-            };
-            r.readAsDataURL(f);
+            if (st) st.textContent = "загрузка…";
+            uploadDigestPhoto(f).then(function (d) {
+                if (st) st.textContent = d.ok ? t("saved") : (d.hint || d.error || "ошибка загрузки");
+                inp.value = "";
+                loadDigestTpl();
+            }).catch(function () {
+                if (st) st.textContent = "ошибка сети";
+                inp.value = "";
+            });
+        });
+    }
+
+    function uploadDigestPhoto(file) {
+        var fd = new FormData();
+        fd.append("file", file, file.name || "photo.jpg");
+        return fetch("/api/admin/digest/photos", {
+            method: "POST",
+            body: fd,
+            credentials: "same-origin",
+        }).then(function (r) {
+            return r.json().catch(function () { return {}; }).then(function (d) {
+                d = d || {};
+                d._status = r.status;
+                if (d.ok === undefined && !r.ok) d.error = "http_" + r.status;
+                return d;
+            });
         });
     }
 

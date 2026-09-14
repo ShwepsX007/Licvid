@@ -180,6 +180,10 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
 }
 .tpl-photo img { width: 100%; height: 88px; object-fit: cover; display: block; }
 .tpl-photo .btn { position: absolute; top: 6px; right: 6px; padding: 3px 7px; }
+.file-btn { position: relative; overflow: hidden; cursor: pointer; margin: 0; }
+.file-btn input[type=file] {
+    position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
+}
 
 .hidden { display: none !important; }
 .err-box { color: var(--red); margin-top: 12px; font-size: 0.85rem; }

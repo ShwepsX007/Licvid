@@ -4,13 +4,14 @@ from __future__ import annotations
 import logging
 import os
 import secrets
-from typing import Optional
+from typing import Optional, Tuple
 from urllib.parse import quote
 
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 
 from accounts import COOKIE_SID, COOKIE_VID, hash_ip, verify_telegram_widget
+from web_upload import PHOTO_ERR, decode_json_photo, parse_multipart_file
 
 log = logging.getLogger("liqscope.account")
 
@@ -98,6 +99,22 @@ def _public_url(request: Request) -> str:
     if ctx.public_url:
         return ctx.public_url.rstrip("/")
     return str(request.base_url).rstrip("/")
+
+
+async def read_uploaded_photo(request: Request) -> Tuple[bytes, str]:
+    ctype = (request.headers.get("content-type") or "").lower()
+    if "multipart/form-data" in ctype:
+        raw = await request.body()
+        return parse_multipart_file(raw, request.headers.get("content-type") or "")
+    if "application/json" in ctype:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        return decode_json_photo(body)
+    if ctype.startswith("image/"):
+        return await request.body(), ""
+    return b"", ""
 
 
 def register_account_routes(app) -> None:
@@ -417,20 +434,16 @@ def register_account_routes(app) -> None:
         actor, err = _admin(request)
         if err:
             return err
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
-        raw = str(body.get("data") or "")
-        if "," in raw and raw.strip().startswith("data:"):
-            raw = raw.split(",", 1)[1]
-        try:
-            blob = base64.b64decode(raw, validate=False)
-        except Exception:
-            return JSONResponse({"ok": False, "error": "bad_data"}, status_code=400)
-        r = ctx.store.add_digest_photo(
-            blob, filename=str(body.get("filename") or ""), actor_id=actor["id"])
+        blob, filename = await read_uploaded_photo(request)
+        if not blob:
+            return JSONResponse(
+                {"ok": False, "error": "bad_data", "hint": PHOTO_ERR["bad_data"]},
+                status_code=400)
+        r = ctx.store.add_digest_photo(blob, filename=filename, actor_id=actor["id"])
         if not r.get("ok"):
+            code = str(r.get("error") or "error")
+            r = dict(r)
+            r["hint"] = PHOTO_ERR.get(code, code)
             return JSONResponse(r, status_code=400)
         return {"ok": True, "id": r["id"], "name": r.get("name")}
 

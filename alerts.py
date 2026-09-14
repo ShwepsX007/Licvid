@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import html
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional
 
 METRICS = ("liq", "cvd", "oi")
 METRIC_TITLE = {

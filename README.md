@@ -9,6 +9,9 @@
 ```
 http://<сервер>:8000/          — лендинг (посадочная страница)
 http://<сервер>:8000/terminal  — сам терминал
+http://<сервер>:8000/login     — вход через Telegram
+http://<сервер>:8000/cabinet   — кабинет пользователя
+http://<сервер>:8000/admin     — панель администратора
 ```
 
 ---
@@ -134,6 +137,13 @@ sudo systemctl enable --now liqscope
 | `LIQSCOPE_HISTORY_FILE` | `data/liq_history.jsonl` | файл истории ликвидаций (JSONL, append). Пустая строка / `0` / `off` — не писать на диск |
 | `LIQSCOPE_HISTORY_TTL_HOURS` | `24` | сколько часов истории держать при загрузке с диска и урезании файла |
 | `PORT` | `8000` | порт при запуске `python3 server.py` |
+| `LIQSCOPE_BOT_TOKEN` | — | токен Telegram-бота (BotFather). Без него кабинет не логинит, терминал работает как раньше |
+| `LIQSCOPE_ADMIN_IDS` | — | telegram id админов через запятую — кабинет `/admin` и команды `/admin` в боте |
+| `LIQSCOPE_PUBLIC_URL` | — | публичный URL сайта (`https://example.com`) — ссылки в боте |
+| `LIQSCOPE_SECRET` | `liqscope-change-me` | секрет сессий и хеша IP. Задайте свой в проде |
+| `LIQSCOPE_COOKIE_SECURE` | `0` | `1` — cookie только по HTTPS |
+| `LIQSCOPE_DEV_LOGIN` | `0` | `1` — `POST /api/auth/dev` без Telegram (только разработка) |
+| `LIQSCOPE_ACCOUNTS_DB` | `data/accounts.db` | SQLite пользователей, сессий, визитов |
 | `LIQSCOPE_TICK_SOURCE` | `binance,binance-raw,bybit` | порядок источников тиков (по ним считается **CVD**). Доступны также `dydx`, `kraken`, `bitfinex`, `hyperliquid` — например `binance,bybit,dydx,kraken,bitfinex,hyperliquid`. Если известно, что Binance на этом сервере не отдаёт сделки — поставьте `bybit`, чтобы не терять 40 с на его переопрос после рестарта |
 | `LIQSCOPE_TICK_MIN_GAP_MS` | `0` | минимальный зазор между тиками графика по монете (`0` = слать каждый тик; поставьте, например, `40`, если хочется беречь трафик) |
 | `LIQSCOPE_BINANCE_WS` | `wss://fstream.binance.com/stream?streams=` | базовый адрес combined-потока Binance (свечи, `!forceOrder@arr`, aggTrade). Терминал всегда пробует первым **тот же адрес с `/market`** — это новые ворота WS после реформы 2026-04-23, — а указанный здесь оставляет запасным. Менять нужно только для тестнета или своего зеркала |
@@ -169,6 +179,12 @@ sudo systemctl enable --now liqscope
 |---|---|
 | `GET /` | лендинг с живой статистикой и ссылкой в терминал |
 | `GET /terminal` | сам терминал |
+| `GET /login` | вход через Telegram (deep-link бота + Login Widget) |
+| `GET /cabinet` | кабинет: профиль и сервисы (алерты, корреляции — каркас) |
+| `GET /admin` | админка: пользователи, визиты, рассылка, настройки |
+| `GET /api/auth/me` | текущий пользователь или `null` |
+| `POST /api/auth/telegram/start` | создать код входа, ссылка `t.me/bot?start=login_…` |
+| `GET /api/auth/telegram/wait` | поллинг: бот подтвердил → cookie-сессия |
 | `GET /api/symbols` | дефолтный топ монет (по обороту 24ч) + добавленные вручную; цены, обороты, `volAvg7d` (средний оборот за неделю), ликвидации за 24 ч |
 | `GET /api/symbols/search?q=GRAM` | поиск пары по ПОЛНОМУ каталогу бирж (не только по топу): можно найти `GRAM`, `GRAM_USDT`, `gram/usdt` |
 | `POST /api/symbols/add?symbol=GRAM` | добавить пару из каталога в список и на график (404, если пары нет ни на одной бирже; `force=true` — добавить вслепую) |
@@ -834,6 +850,7 @@ LIQSCOPE_DEMO=1 python3 -m uvicorn server:app --host 0.0.0.0 --port 8000
 Разбор сообщений бирж покрыт офлайн-тестами (сеть не нужна):
 
 ```bash
+python3 tests/test_accounts.py    # кабинет: пользователи, сессии, подпись Telegram
 python3 tests/test_parsers.py     # разбор сообщений бирж
 python3 tests/test_tick_flow.py   # потиковый поток на локальном псевдо-Binance
 python3 tests/test_search.py      # поиск/добавление монет (например, GRAM)
@@ -862,13 +879,20 @@ node tests/drawings.js            # рисование: панель, инстр
 ## Структура
 
 ```
-server.py            FastAPI: REST + WebSocket-хаб, свечи, статистика
+server.py            FastAPI: REST + WebSocket-хаб, свечи, статистика, кабинет
+accounts.py          SQLite: пользователи, сессии, визиты, сервисы
+tg_bot.py            Telegram-бот (регистрация, кабинет, админка)
+web_account.py       HTTP /login /cabinet /admin и /api/auth|/api/admin
 market_feed.py       подключение к биржам, парсеры, список монет, klines
 static/landing.html  лендинг (посадочная страница)
 static/index.html    интерфейс терминала
+static/login.html    вход через Telegram
+static/cabinet.html  кабинет пользователя
+static/admin.html    панель администратора
 static/app.js        график (Lightweight Charts v5), лента, кластеры, профиль
 static/style.css     тёмная тема
 tests/test_parsers.py офлайн-тесты парсеров
+tests/test_accounts.py пользователи, сессии, подпись Telegram
 deploy/liqscope.service пример systemd-юнита
 ```
 
@@ -906,3 +930,50 @@ deploy/liqscope.service пример systemd-юнита
 5. `connected: true`, но `events: 0` — рынок спокойный: ликвидации по
    топ-монетам идут каждые несколько секунд, но в штиль могут быть паузы.
    Проверить можно, выставив «Мин. объём = Все» и монету «🌐 ВСЕ».
+
+---
+
+## Кабинет пользователя и Telegram-бот
+
+Терминал по-прежнему открыт без регистрации. Кабинет — для сервисов
+(алерты по объёму и времени, корреляции, сторож монет, дайджест): они
+появятся и на сайте, и в боте с одним аккаунтом.
+
+### Как включить
+
+1. Создайте бота у [@BotFather](https://t.me/BotFather), получите токен.
+2. Узнайте свой telegram id (например, у `@userinfobot`).
+3. В systemd:
+
+```ini
+Environment=LIQSCOPE_BOT_TOKEN=123456:AAH...
+Environment=LIQSCOPE_ADMIN_IDS=123456789
+Environment=LIQSCOPE_PUBLIC_URL=https://your.domain
+Environment=LIQSCOPE_SECRET=длинная-случайная-строка
+```
+
+4. `systemctl restart liqscope`. В логе: `Telegram-бот @name запущен`.
+5. На сайте: **Войти** → открывается бот → `/start` → кабинет.
+   Опционально в BotFather: `/setdomain` на ваш домен — тогда работает
+   и кнопка Login Widget.
+
+Пользователи с id из `LIQSCOPE_ADMIN_IDS` видят `/admin` на сайте и
+команды `/admin` `/users` `/visits` `/broadcast` в боте.
+
+### Что умеет бот
+
+| Команда | Кто | Что |
+|---|---|---|
+| `/start` | все | регистрация; ` /start login_<код>` подтверждает вход на сайт |
+| `/cabinet` | все | профиль |
+| `/terminal` `/stats` `/status` `/liq` | все | ссылка, рынок 24ч, биржи, лента |
+| `/services` | все | те же сервисы, что в кабинете (лист ожидания) |
+| `/admin` `/users` `/visits` `/broadcast` | админ | панель, пользователи, визиты, рассылка |
+
+Каркас сервисов уже в SQLite (`alerts`, `correlations`, `watchlist`, `digest`):
+в кабинете и боте они видны как «скоро». Когда сервис будет готов,
+админ снимает флаг «скоро» — и он открывается и на сайте, и в боте.
+
+```bash
+python3 tests/test_accounts.py
+```

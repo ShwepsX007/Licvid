@@ -23,6 +23,11 @@ Environment=LIQSCOPE_EXCHANGES=binance,bybit,okx,gate,bitget,htx,bitmex,hyperliq
 # Environment=LIQSCOPE_OXA_KEYS=0xa_ключ1,0xa_ключ2
 # Environment=LIQSCOPE_OXA_COINS_PER_KEY=2
 # Environment=LIQSCOPE_OXA_POLL_SEC=120
+# Кабинет и Telegram-бот (регистрация только через Telegram):
+# Environment=LIQSCOPE_BOT_TOKEN=123456:ABC...
+# Environment=LIQSCOPE_ADMIN_IDS=123456789
+# Environment=LIQSCOPE_PUBLIC_URL=https://your.domain
+# Environment=LIQSCOPE_SECRET=смените-на-случайную-строку
 ExecStart=/usr/bin/python3 -m uvicorn server:app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=5

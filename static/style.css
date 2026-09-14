@@ -377,6 +377,26 @@ body.dark-theme {
 .lang-select:focus { border-color: var(--color-blue); }
 .lang-select option { background: var(--bg-card); color: var(--text-primary); }
 
+.acc-nav, #nav-account {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+}
+.acc-nav a:not(.btn),
+#nav-account a:not(.btn) {
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+    font-weight: 700;
+    white-space: nowrap;
+}
+.acc-nav a:not(.btn):hover,
+#nav-account a:not(.btn):hover { color: var(--text-primary); }
+.acc-nav .btn, #nav-account .btn {
+    padding: 6px 12px;
+    font-size: 0.75rem;
+}
+
 /* Controls Bar */
 .controls-bar {
     display: flex;

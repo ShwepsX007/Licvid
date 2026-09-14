@@ -4,6 +4,7 @@ LiqScope Web Server — терминал ликвидаций в реально�
 Что отдаёт наружу:
     GET  /                  — лендинг (посадочная страница)
     GET  /terminal          — сам терминал
+    GET  /login /cabinet /admin — вход через Telegram, кабинет, админка
     GET  /api/symbols       — список монет (авто-подбор по обороту) + цены
     GET  /api/klines        — реальные свечи (Binance → Bybit → OKX)
     GET  /api/liquidations  — история ликвидаций из памяти
@@ -45,6 +46,9 @@ from fastapi.staticfiles import StaticFiles
 
 from market_feed import MarketFeed, TF_MINUTES, base_of, canon
 from oi_feed import map_candles_to_oi
+from accounts import Store
+from tg_bot import TelegramBot
+from web_account import ctx as account_ctx, register_account_routes
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -74,6 +78,19 @@ if HISTORY_FILE.lower() in ("0", "none", "off", "false"):
     HISTORY_FILE = ""
 HISTORY_TTL_HOURS = float(os.getenv("LIQSCOPE_HISTORY_TTL_HOURS", "24"))
 HISTORY_FILE_MAX_BYTES = 64 * 1024 * 1024   # страховка: урезаем файл при разрастании
+
+BOT_TOKEN = os.getenv("LIQSCOPE_BOT_TOKEN", "").strip()
+PUBLIC_URL = os.getenv("LIQSCOPE_PUBLIC_URL", "").strip()
+SECRET = os.getenv("LIQSCOPE_SECRET", "").strip() or "liqscope-change-me"
+ADMIN_IDS = []
+for _x in os.getenv("LIQSCOPE_ADMIN_IDS", "").replace(";", ",").split(","):
+    _x = _x.strip()
+    if _x.isdigit():
+        ADMIN_IDS.append(int(_x))
+ACCOUNTS_DB = os.getenv("LIQSCOPE_ACCOUNTS_DB",
+                        os.path.join(HERE, "data", "accounts.db"))
+account_store = Store(ACCOUNTS_DB, SECRET, ADMIN_IDS)
+tg_bot = TelegramBot(BOT_TOKEN, account_store, PUBLIC_URL)
 
 KLINE_TTL = 20.0            # сек: как часто перезапрашивать историю с биржи
 # Ликвидации уходят клиенту сразу; интервал — только предохранитель от флуда
@@ -939,11 +956,19 @@ async def lifespan(app: FastAPI):
                 pass
     tasks.append(asyncio.create_task(warmup(), name="warmup"))
 
+    tg_bot.health_fn = health_summary
+    tg_bot.stats_fn = compute_stats
+    tg_bot.liqs_fn = lambda: list(LIQUIDATIONS)[-8:]
+    tg_bot.ws_clients_fn = lambda: len(hub.clients)
+    tg_bot.public_url = PUBLIC_URL
+    await tg_bot.start()
+
     try:
         yield
     finally:
         for t in tasks:
             t.cancel()
+        await tg_bot.stop()
         await feed.stop()
 
 
@@ -957,6 +982,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+account_ctx.store = account_store
+account_ctx.bot = tg_bot
+account_ctx.public_url = PUBLIC_URL
+account_ctx.secret = SECRET
+account_ctx.cookie_secure = os.getenv("LIQSCOPE_COOKIE_SECURE", "").strip() in ("1", "true", "yes")
+account_ctx.dev_login = os.getenv("LIQSCOPE_DEV_LOGIN", "").strip() in ("1", "true", "yes")
+account_ctx.health_fn = health_summary
+account_ctx.stats_fn = compute_stats
+account_ctx.liqs_fn = lambda: list(LIQUIDATIONS)[-8:]
+account_ctx.ws_clients_fn = lambda: len(hub.clients)
+register_account_routes(app)
 
 
 @app.get("/api/symbols")

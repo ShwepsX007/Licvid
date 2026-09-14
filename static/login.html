@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LiqScope — вход через Telegram</title>
+<link rel="icon" type="image/png" href="/static/logo.png">
+<link rel="stylesheet" href="/static/account.css">
+</head>
+<body data-page="login">
+<header class="site-header">
+    <a class="brand" href="/">
+        <img class="logo" src="/static/logo.png" alt="LiqScope">
+        <span class="name">LIQSCOPE</span>
+        <span class="tag">ACCOUNT</span>
+    </a>
+    <nav class="site-nav">
+        <a href="/terminal">⚡ Терминал</a>
+        <span id="nav-account"></span>
+    </nav>
+</header>
+<main class="wrap login-box">
+    <div class="card">
+        <img src="/static/logo.png" alt="" style="width:72px;height:72px;margin-bottom:12px">
+        <h1 class="page-title">Вход через Telegram</h1>
+        <p class="lead">Кабинет на сайте и бот — один аккаунт. Без паролей: подтверждаете вход в Telegram.</p>
+        <div style="margin-top:22px">
+            <button type="button" class="btn btn-tg" id="login-btn">✈ Открыть бота Telegram</button>
+        </div>
+        <div id="tg-widget" style="margin-top:16px"></div>
+        <p class="login-status" id="login-status"></p>
+        <p class="lead" style="margin-top:18px;font-size:0.78rem">
+            Терминал ликвидаций по-прежнему открыт без регистрации.
+            Кабинет нужен для алертов, корреляций и других сервисов.
+        </p>
+    </div>
+</main>
+<script src="/static/account.js"></script>
+</body>
+</html>

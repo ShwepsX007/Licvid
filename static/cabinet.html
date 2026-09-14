@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LiqScope — кабинет</title>
+<link rel="icon" type="image/png" href="/static/logo.png">
+<link rel="stylesheet" href="/static/account.css">
+</head>
+<body data-page="cabinet">
+<header class="site-header">
+    <a class="brand" href="/">
+        <img class="logo" src="/static/logo.png" alt="LiqScope">
+        <span class="name">LIQSCOPE</span>
+        <span class="tag">ACCOUNT</span>
+    </a>
+    <nav class="site-nav">
+        <a href="/terminal">⚡ Терминал</a>
+        <a href="/cabinet" class="active">Кабинет</a>
+        <span id="nav-account"></span>
+    </nav>
+</header>
+<main class="wrap">
+    <div class="notice hidden" id="site-notice"></div>
+    <div class="card" style="margin-top:18px">
+        <div class="profile">
+            <div class="avatar" id="cab-avatar">?</div>
+            <div>
+                <h1 class="page-title" id="cab-name">…</h1>
+                <span class="badge" id="cab-role">пользователь</span>
+                <div class="meta" id="cab-meta"></div>
+            </div>
+        </div>
+        <div class="row-actions">
+            <a class="btn btn-primary" href="/terminal">⚡ Открыть терминал</a>
+            <a class="btn btn-ghost" href="/login" id="cab-bot-link">Бот в Telegram</a>
+        </div>
+    </div>
+
+    <h2 style="margin-top:34px;font-size:1.2rem">Сервисы</h2>
+    <p class="lead">Один аккаунт — сайт и бот. Алерты, корреляции и сторож подключатся сюда и в Telegram.</p>
+    <div class="grid grid-2" id="svc-grid"></div>
+</main>
+<script src="/static/account.js"></script>
+</body>
+</html>

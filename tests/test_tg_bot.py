@@ -143,6 +143,27 @@ class BotMenuTest(unittest.TestCase):
         self.assertIn("cabinet", _datas(edit.get("reply_markup")))
         self.assertNotIn("← Назад", _btns(edit.get("reply_markup")))
 
+    def test_not_modified_is_success_and_retries(self):
+        calls = []
+
+        async def fake(method, payload=None):
+            calls.append((method, payload or {}))
+            if method == "editMessageText":
+                t = str((payload or {}).get("text") or "")
+                if t.endswith("\u200b"):
+                    return {"ok": True}
+                return {"ok": False, "description":
+                        "Bad Request: message is not modified: specified new "
+                        "message content and reply markup are exactly the same"}
+            return {"ok": True}
+
+        self.bot._call = fake  # type: ignore
+        ok = asyncio.run(self.bot.edit(2002, 1, "привет", self.bot._menu(self.user)))
+        self.assertTrue(ok)
+        edits = [p for m, p in calls if m == "editMessageText"]
+        self.assertEqual(len(edits), 2)
+        self.assertTrue(str(edits[1]["text"]).endswith("\u200b"))
+
 
 if __name__ == "__main__":
     unittest.main()

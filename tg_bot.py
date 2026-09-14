@@ -93,7 +93,11 @@ class TelegramBot:
             async with self._session.post(url, json=payload or {}) as r:
                 data = await r.json(content_type=None)
             if method != "getUpdates" and data and not data.get("ok"):
-                log.warning("tg %s: %s", method, data.get("description"))
+                desc = str(data.get("description") or "")
+                # «message is not modified» — повторный клик по той же кнопке,
+                # для Telegram это не ошибка.
+                if "not modified" not in desc.lower():
+                    log.warning("tg %s: %s", method, desc)
             return data
         except Exception as e:
             log.debug("tg %s: %s", method, e)
@@ -128,9 +132,13 @@ class TelegramBot:
         if res and res.get("ok"):
             return True
         desc = str((res or {}).get("description") or "").lower()
-        # тот же текст+клавиатура — для Telegram это не ошибка
+        # тот же текст+клавиатура: клиент иногда не перерисовывает кнопки.
+        # Невидимый символ заставляет Telegram принять правку и обновить UI.
         if "not modified" in desc:
-            return True
+            t = body.get("text") or ""
+            body["text"] = t[:-1] if t.endswith("\u200b") else (t + "\u200b")
+            res2 = await self._call("editMessageText", body)
+            return bool(res2 and res2.get("ok")) or True
         if "parse entit" in desc or "can't find end of the entity" in desc:
             body.pop("parse_mode", None)
             res = await self._call("editMessageText", body)

@@ -517,6 +517,14 @@
             .sort((a, b) => a.time - b.time);
 
         applyPricePrecision(bars[bars.length - 1].close);
+        try {
+            if (chart && chart.timeScale) {
+                chart.timeScale().applyOptions({
+                    timeVisible: Number(state.timeframe) < 1440,
+                    secondsVisible: false,
+                });
+            }
+        } catch (e) { /* ignore */ }
         candleSeries.setData(bars);
         if (volumeSeries) volumeSeries.setData(vols);
 
@@ -3416,15 +3424,116 @@
     }
 
     // --- Свечи ---------------------------------------------------------------
+    const TF_EXCHANGE = {
+        1: { binance: "1m", bybit: "1" },
+        5: { binance: "5m", bybit: "5" },
+        15: { binance: "15m", bybit: "15" },
+        60: { binance: "1h", bybit: "60" },
+        240: { binance: "4h", bybit: "240" },
+        1440: { binance: "1d", bybit: "D" },
+    };
+
+    function sameTf(a, b) {
+        return Number(a) === Number(b);
+    }
+
+    function medianStep(candles) {
+        if (!candles || candles.length < 4) return 0;
+        const steps = [];
+        for (let i = 1; i < candles.length; i++) {
+            const dt = Number(candles[i].time) - Number(candles[i - 1].time);
+            if (dt > 0) steps.push(dt);
+        }
+        if (!steps.length) return 0;
+        steps.sort((a, b) => a - b);
+        return steps[Math.floor(steps.length / 2)];
+    }
+
+    function candlesMatchTf(candles, tfMin) {
+        const step = medianStep(candles);
+        if (!step) return true;   // мало баров — шаг не на чем мерить
+        const want = Number(tfMin) * 60;
+        return step >= want * 0.45 && step <= want * 2.5;
+    }
+
+    async function fetchPublicKlines(symbol, tfMin) {
+        const spec = TF_EXCHANGE[tfMin];
+        if (!spec) return null;
+        const pair = String(symbol || "").replace("_", "");
+        if (!pair) return null;
+        try {
+            const url = "https://fapi.binance.com/fapi/v1/klines?symbol=" +
+                encodeURIComponent(pair) + "&interval=" + spec.binance + "&limit=300";
+            const r = await fetch(url);
+            const rows = await r.json();
+            if (Array.isArray(rows) && rows.length) {
+                return rows.map((row) => ({
+                    time: Math.floor(Number(row[0]) / 1000),
+                    open: Number(row[1]), high: Number(row[2]),
+                    low: Number(row[3]), close: Number(row[4]),
+                    volume: Number(row[7]),
+                    cvd: (row[10] != null && Number(row[7]) > 0)
+                        ? (2 * Number(row[10]) - Number(row[7])) : null,
+                }));
+            }
+        } catch (e) { /* CORS / сеть — пробуем Bybit */ }
+        try {
+            const url = "https://api.bybit.com/v5/market/kline?category=linear&symbol=" +
+                encodeURIComponent(pair) + "&interval=" + spec.bybit + "&limit=300";
+            const r = await fetch(url);
+            const data = await r.json();
+            const rows = (data && data.result && data.result.list) || [];
+            if (!rows.length) return null;
+            const out = rows.map((row) => ({
+                time: Math.floor(Number(row[0]) / 1000),
+                open: Number(row[1]), high: Number(row[2]),
+                low: Number(row[3]), close: Number(row[4]),
+                volume: Number(row[6]),
+            }));
+            out.sort((a, b) => a.time - b.time);
+            return out;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    let candlesReqId = 0;
     async function loadCandles() {
         fetchOI();   // табло OI — за монетой графика
+        const req = ++candlesReqId;
+        const want = Number(state.timeframe);
+        let applied = false;
+        let gotWrong = false;
         try {
             const r = await fetch("/api/klines?symbol=" + encodeURIComponent(chartSymbol()) +
-                "&timeframe=" + state.timeframe);
+                "&timeframe=" + want);
             const data = await r.json();
-            if (data && data.candles) setCandles(data.candles, data.source);
+            if (req !== candlesReqId) return;
+            if (data && data.candles && data.candles.length) {
+                const gotTf = data.timeframe != null ? Number(data.timeframe) : NaN;
+                const tfOk = !Number.isFinite(gotTf) || gotTf === want;
+                if (tfOk && candlesMatchTf(data.candles, want)) {
+                    setCandles(data.candles, data.source);
+                    applied = true;
+                } else {
+                    gotWrong = true;
+                }
+            }
         } catch (e) {
             console.error("klines:", e);
+        }
+        if (!applied && gotWrong) {
+            try {
+                const ext = await fetchPublicKlines(chartSymbol(), want);
+                if (req !== candlesReqId) return;
+                if (ext && ext.length && candlesMatchTf(ext, want)) {
+                    setCandles(ext, "exchange");
+                    applied = true;
+                }
+            } catch (e) { /* ignore */ }
+        }
+        if (!applied && gotWrong) {
+            console.warn("klines: сервер отдал другой ТФ, дневные свечи не подставились");
         }
     }
 
@@ -3539,14 +3648,15 @@
             }
             case "tick":
             case "candle": {
-                if (msg.symbol === chartSymbol() && msg.tf === state.timeframe) {
+                if (msg.symbol === chartSymbol() && sameTf(msg.tf, state.timeframe)) {
                     updateCandle(msg.candle);
                     if (msg.type === "tick") noteTick(msg.ts);
                 }
                 break;
             }
             case "candles": {
-                if (msg.symbol === chartSymbol() && msg.tf === state.timeframe) {
+                if (msg.symbol === chartSymbol() && sameTf(msg.tf, state.timeframe)
+                    && candlesMatchTf(msg.candles, state.timeframe)) {
                     setCandles(msg.candles, msg.source);
                 }
                 break;

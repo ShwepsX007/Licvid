@@ -45,6 +45,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from market_feed import MarketFeed, TF_MINUTES, base_of, canon
+from timeframes import parse_tf
 from oi_feed import map_candles_to_oi
 from accounts import Store
 from tg_bot import TelegramBot
@@ -548,8 +549,8 @@ def _attach_oi(candles: list, tf: int, levels: dict, chgs: dict) -> None:
 
 async def get_candles(symbol: str, tf: int, force: bool = False) -> dict:
     symbol = canon(symbol)
-    if tf not in TF_MINUTES:
-        tf = 5
+    parsed = parse_tf(tf)
+    tf = parsed if parsed is not None else 5
     k = _key(symbol, tf)
     entry = CANDLES.get(k)
     fresh = entry and (time.time() - entry["ts"] < KLINE_TTL) and not force
@@ -1082,10 +1083,11 @@ async def api_klines(symbol: str = Query("BTC_USDT"), timeframe: int = Query(5))
     symbol = canon(symbol)
     # Любую монету можно открыть на графике, даже если её нет в дефолтном
     # топ-списке: свечи берутся напрямую с бирж, а не из локального списка.
-    entry = await get_candles(symbol, timeframe)
+    tf = parse_tf(timeframe) or 5
+    entry = await get_candles(symbol, tf)
     return {
         "symbol": symbol,
-        "timeframe": timeframe if timeframe in TF_MINUTES else 5,
+        "timeframe": tf,
         "source": entry["source"],
         "candles": entry["candles"],
     }
@@ -1232,8 +1234,9 @@ async def ws_endpoint(websocket: WebSocket):
                 chart = raw.get("chart") or raw.get("chart_symbol")
                 if chart:
                     client.chart = canon(chart)
-                if raw.get("tf") in TF_MINUTES:
-                    client.tf = int(raw["tf"])
+                parsed_tf = parse_tf(raw.get("tf"))
+                if parsed_tf is not None:
+                    client.tf = parsed_tf
                 if raw.get("min_usd") is not None:
                     try:
                         client.min_usd = float(raw["min_usd"])

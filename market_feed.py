@@ -41,6 +41,8 @@ from typing import (Any, Awaitable, Callable, Deque, Dict, Iterable, List,
                     Optional)
 
 from hl_infer import HL_INFER_ENABLED, HlLiquidationInferer
+from timeframes import (OKX_CVD_SEC, TF_BINANCE, TF_BYBIT, TF_MINUTES, TF_OKX,
+                        kline_interval, parse_tf)
 
 import aiohttp
 from aiohttp import ClientWSTimeout
@@ -209,11 +211,7 @@ FALLBACK_SYMBOLS = [
     "CRV_USDT", "LDO_USDT", "STX_USDT", "ENA_USDT",
 ]
 
-TF_MINUTES = [1, 5, 15, 60, 240, 1440]
-# Интервалы REST-свечей. У Bybit дневной — «D», не 1440.
-TF_BINANCE = {1: "1m", 5: "5m", 15: "15m", 60: "1h", 240: "4h", 1440: "1d"}
-TF_BYBIT = {1: "1", 5: "5", 15: "15", 60: "60", 240: "240", 1440: "D"}
-TF_OKX = {1: "1m", 5: "5m", 15: "15m", 60: "1H", 240: "4H", 1440: "1D"}
+# TF_MINUTES / TF_* — в timeframes.py (дневной = 1440; Bybit «D»).
 
 
 # ----------------------------------------------------------------------------
@@ -336,8 +334,7 @@ def _chunks(items: List, size: int) -> Iterable[List]:
 # ----------------------------------------------------------------------------
 # CVD (cumulative volume delta) — разница объёмов агрессивных покупок/продаж
 # ----------------------------------------------------------------------------
-# OKX rubik принимает только конкретные окна агрегации (секунды):
-OKX_CVD_SEC = {1: 60, 5: 300, 15: 900, 60: 3600, 240: 14400, 1440: 86400}
+# OKX_CVD_SEC — в timeframes.py (дневное окно 86400 с).
 
 
 def binance_kline_cvd(row) -> Optional[float]:
@@ -4083,6 +4080,10 @@ class MarketFeed:
         Если тики идут с конкретной биржи, её же ставим первой — иначе
         свечи одной биржи и тики другой дают небольшое расхождение цены.
         """
+        parsed = parse_tf(tf_min)
+        if parsed is None:
+            return None
+        tf_min = parsed
         loaders = {"binance": self._klines_binance,
                    "bybit": self._klines_bybit,
                    "okx": self._klines_okx}
@@ -4113,8 +4114,11 @@ class MarketFeed:
         """
         # 1) Binance
         try:
+            interval = kline_interval(TF_BINANCE, tf_min)
+            if not interval:
+                raise ValueError(f"no binance interval for tf={tf_min!r}")
             url = (f"{BINANCE_REST}/fapi/v1/klines?symbol={to_binance(symbol)}"
-                   f"&interval={TF_BINANCE.get(tf_min, '5m')}&limit={min(max(limit, 1), 1000)}")
+                   f"&interval={interval}&limit={min(max(limit, 1), 1000)}")
             rows = await _get_json(self._session, url, timeout=8)
             if isinstance(rows, list) and rows:
                 out = {}
@@ -4131,7 +4135,8 @@ class MarketFeed:
             log.debug("cvd binance %s: %s", symbol, e)
         # 2) OKX
         try:
-            sec = OKX_CVD_SEC.get(tf_min)
+            parsed = parse_tf(tf_min)
+            sec = OKX_CVD_SEC.get(parsed) if parsed is not None else None
             if sec:
                 url = (f"{OKX_REST}/api/v5/rubik/stat/taker-volume-contract"
                        f"?instId={to_okx(symbol)}&sec={sec}")
@@ -4148,8 +4153,11 @@ class MarketFeed:
         return None
 
     async def _klines_binance(self, symbol: str, tf_min: int, limit: int) -> Optional[List[dict]]:
+        interval = kline_interval(TF_BINANCE, tf_min)
+        if not interval:
+            return None
         url = (f"{BINANCE_REST}/fapi/v1/klines?symbol={to_binance(symbol)}"
-               f"&interval={TF_BINANCE.get(tf_min, '5m')}&limit={min(limit, 1000)}")
+               f"&interval={interval}&limit={min(limit, 1000)}")
         rows = await _get_json(self._session, url, timeout=8)
         out = [{
             "time": int(r[0]) // 1000,
@@ -4163,8 +4171,11 @@ class MarketFeed:
         return out
 
     async def _klines_bybit(self, symbol: str, tf_min: int, limit: int) -> Optional[List[dict]]:
+        interval = kline_interval(TF_BYBIT, tf_min)
+        if not interval:
+            return None
         url = (f"{BYBIT_REST}/v5/market/kline?category=linear&symbol={to_bybit(symbol)}"
-               f"&interval={TF_BYBIT.get(tf_min, str(tf_min))}&limit={min(limit, 1000)}")
+               f"&interval={interval}&limit={min(limit, 1000)}")
         data = await _get_json(self._session, url, timeout=8)
         rows = (data.get("result") or {}).get("list") or []
         out = [{
@@ -4177,8 +4188,11 @@ class MarketFeed:
         return out
 
     async def _klines_okx(self, symbol: str, tf_min: int, limit: int) -> Optional[List[dict]]:
+        interval = kline_interval(TF_OKX, tf_min)
+        if not interval:
+            return None
         url = (f"{OKX_REST}/api/v5/market/candles?instId={to_okx(symbol)}"
-               f"&bar={TF_OKX.get(tf_min, '5m')}&limit={min(limit, 300)}")
+               f"&bar={interval}&limit={min(limit, 300)}")
         data = await _get_json(self._session, url, timeout=8)
         rows = data.get("data") or []
         out = [{

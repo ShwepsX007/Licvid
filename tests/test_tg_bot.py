@@ -116,8 +116,10 @@ class BotMenuTest(unittest.TestCase):
         self.assertIn("answerCallbackQuery", methods)
         self.assertIn("editMessageText", methods)
         self.assertNotIn("sendMessage", methods)
-        self.assertLess(methods.index("editMessageText"),
-                        methods.index("answerCallbackQuery"))
+        self.assertLess(methods.index("answerCallbackQuery"),
+                        methods.index("editMessageText"))
+        ans = [p for m, p in calls if m == "answerCallbackQuery"][0]
+        self.assertNotIn("text", ans)
         edit = [p for m, p in calls if m == "editMessageText"][0]
         self.assertEqual(edit["message_id"], 77)
         self.assertEqual(edit["chat_id"], 2002)

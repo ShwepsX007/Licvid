@@ -61,7 +61,13 @@ class TelegramBot:
         if not self.token:
             log.warning("LIQSCOPE_BOT_TOKEN не задан — Telegram-бот выключен")
             return
-        self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=80))
+        # getUpdates живёт до 50 с, остальные методы — короткие.
+        # total на сессии не ставим: иначе длинный long-poll съедает лимит
+        # и следующий edit/answer может оборваться.
+        self._session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=70),
+            connector=aiohttp.TCPConnector(limit=8),
+        )
         me = await self._call("getMe")
         if not me or not me.get("ok"):
             log.error("Не удалось получить бота getMe: %s", me)
@@ -89,8 +95,10 @@ class TelegramBot:
         if not self._session:
             return None
         url = API.format(token=self.token, method=method)
+        timeout = aiohttp.ClientTimeout(total=70, sock_read=70) if method == "getUpdates" \
+            else aiohttp.ClientTimeout(total=15)
         try:
-            async with self._session.post(url, json=payload or {}) as r:
+            async with self._session.post(url, json=payload or {}, timeout=timeout) as r:
                 data = await r.json(content_type=None)
             if method != "getUpdates" and data and not data.get("ok"):
                 desc = str(data.get("description") or "")
@@ -100,7 +108,7 @@ class TelegramBot:
                     log.warning("tg %s: %s", method, desc)
             return data
         except Exception as e:
-            log.debug("tg %s: %s", method, e)
+            log.warning("tg %s: %s", method, e)
             return None
 
     async def send(self, chat_id: int, text: str, markup: Optional[dict] = None,
@@ -154,7 +162,12 @@ class TelegramBot:
         return await self.send(chat_id, text, markup)
 
     async def answer_cb(self, cb_id: str, text: str = "") -> None:
-        await self._call("answerCallbackQuery", {"callback_query_id": cb_id, "text": text[:180]})
+        # Пустой text Telegram иногда отвергает — тогда клиент «залипает»
+        # и больше не шлёт нажатия.
+        body: Dict[str, Any] = {"callback_query_id": cb_id}
+        if text:
+            body["text"] = text[:180]
+        await self._call("answerCallbackQuery", body)
 
     async def broadcast(self, text: str, actor_id: Optional[int] = None) -> Dict[str, int]:
         ids = self.store.tg_ids_for_broadcast()
@@ -177,6 +190,8 @@ class TelegramBot:
                     "allowed_updates": ["message", "callback_query"],
                 })
                 if not res or not res.get("ok"):
+                    if res and res.get("description"):
+                        log.warning("getUpdates: %s", res.get("description"))
                     await asyncio.sleep(2)
                     continue
                 for upd in res.get("result") or []:
@@ -188,7 +203,7 @@ class TelegramBot:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                log.debug("poll: %s", e)
+                log.warning("poll: %s", e)
                 await asyncio.sleep(3)
 
     async def _on_update(self, upd: dict) -> None:
@@ -258,19 +273,17 @@ class TelegramBot:
         tg_id = int(from_u.get("id") or 0)
         if data in ("menu", "back", "nav:home", "home"):
             self._wait_broadcast.pop(tg_id, None)
-        # Сначала правим сообщение, потом отвечаем на колбэк: иначе Telegram Web
-        # гасит часики и оставляет старые кнопки — «Назад» выглядит мёртвым.
-        ok = False
+        # Сначала снимаем «часики»: если answer уйдёт после edit или с
+        # пустым text, клиент залипает и следующие кнопки не нажимаются.
+        await self.answer_cb(cb["id"])
         try:
             text, markup = self._screen(user, data)
             ok = await self.reply(chat_id, text, markup, message_id=message_id)
+            if not ok:
+                log.warning("меню не обновилось data=%s chat=%s msg=%s",
+                            data, chat_id, message_id)
         except Exception as e:
             log.warning("cb %s: %s", data, e)
-        finally:
-            await self.answer_cb(cb["id"])
-        if not ok:
-            log.warning("меню не обновилось data=%s chat=%s msg=%s",
-                        data, chat_id, message_id)
 
     def _screen(self, user: dict, data: str) -> tuple:
         """Текст и клавиатура экрана. Кнопки меняются на месте, не новым сообщением."""
@@ -375,7 +388,10 @@ class TelegramBot:
         st = await self.broadcast(body, actor_id=user["id"])
         await self.send(chat_id, f"Готово: {st['ok']}/{st['total']}.", self._admin_kb())
 
-    def _kb_back(self, to: str = "menu") -> dict:
+    def _kb_back(self, to: str = "nav:home") -> dict:
+        aliases = {"menu": "nav:home", "home": "nav:home", "back": "nav:home",
+                   "admin": "nav:admin"}
+        to = aliases.get(to, to)
         return {"inline_keyboard": [[{"text": "← Назад", "callback_data": to}]]}
 
     def _menu(self, user: dict) -> dict:

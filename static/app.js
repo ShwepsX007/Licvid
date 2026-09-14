@@ -54,6 +54,7 @@
         lastOI: null,
         statWin: { liq: "24h", cvd: "24h", oi: "24h" },
         modalItem: null,
+        feedTab: "liq",         // лента: liq | cvd | oi
     };
 
     let connState = { status: "pulse yellow", key: "conn.connecting" };
@@ -525,6 +526,7 @@
         updateMarkers();
         updateLiveStats();
         queueRedraw();
+        queueShapeFeed();
     }
 
     function updateCandle(c) {
@@ -554,6 +556,7 @@
         updatePriceDisplay(bar.close);
         updateLiveStats();
         queueRedraw();
+        queueShapeFeed();
     }
 
     // --- Индикатор «живости» тиков ------------------------------------------
@@ -750,9 +753,11 @@
         clusterHits = [];              // актуальные геометрии — только если слой включён
         cvdHits = [];
         oiHits = [];
-        if (state.liqEnabled) drawLiqRects(ctx);
-        if (state.cvdEnabled) drawCvdTriangles(ctx);
+        // Порядок снизу вверх: шары OI → треугольники CVD → кластеры ликвидаций.
+        // Крупные OI-шары больше не перекрывают прямоугольники и треугольники.
         if (state.oiEnabled) drawOiBalls(ctx);
+        if (state.cvdEnabled) drawCvdTriangles(ctx);
+        if (state.liqEnabled) drawLiqRects(ctx);
         drawFigures();   // фигуры теханализа — свой canvas поверх
     }
 
@@ -1551,23 +1556,23 @@
     }
 
     // --- Наведение/нажатие на фигуры: прямоугольники, CVD, OI -------------------
-    // Порядок проверки — обратный отрисовке: шарики поверх треугольников
-    // поверх прямоугольников. У фигур хит-тест кругом с допуском 4px.
+    // Порядок проверки — обратный отрисовке: кластеры поверх треугольников
+    // поверх шаров OI. У фигур хит-тест кругом с допуском 4px.
     function hitAt(px, py) {
-        for (let i = oiHits.length - 1; i >= 0; i--) {
-            const b = oiHits[i];
-            const dx = px - b.x, dy = py - b.y, rr = b.r + 4;
-            if (dx * dx + dy * dy <= rr * rr) return b;
+        for (let i = clusterHits.length - 1; i >= 0; i--) {
+            const b = clusterHits[i];
+            if (px >= b.x - 4 && px <= b.x + b.w + 4 &&
+                py >= b.y - 4 && py <= b.y + b.h + 4) return b;
         }
         for (let i = cvdHits.length - 1; i >= 0; i--) {
             const b = cvdHits[i];
             const dx = px - b.x, dy = py - b.y, rr = b.r + 4;
             if (dx * dx + dy * dy <= rr * rr) return b;
         }
-        for (let i = clusterHits.length - 1; i >= 0; i--) {
-            const b = clusterHits[i];
-            if (px >= b.x - 4 && px <= b.x + b.w + 4 &&
-                py >= b.y - 4 && py <= b.y + b.h + 4) return b;
+        for (let i = oiHits.length - 1; i >= 0; i--) {
+            const b = oiHits[i];
+            const dx = px - b.x, dy = py - b.y, rr = b.r + 4;
+            if (dx * dx + dy * dy <= rr * rr) return b;
         }
         return null;
     }
@@ -1579,17 +1584,26 @@
 
     function applyFeedHighlight(ball, pin) {
         if (pin) {
-            pinHitKey = ball ? ball.key : null;
+            pinHitKey = (ball && ball.kind === "liq") ? ball.key : null;
             if (!ball) hoverHitKey = null;
         } else {
-            hoverHitKey = ball ? ball.key : null;
+            hoverHitKey = (ball && ball.kind === "liq") ? ball.key : null;
         }
-        const ids = ball ? new Set(ball.ids) : null;
+        const kind = ball && ball.kind;
+        const matchTab = (kind === "liq" && state.feedTab === "liq")
+            || (kind === "cvd" && state.feedTab === "cvd")
+            || (kind === "oi" && state.feedTab === "oi");
+        const ids = (kind === "liq" && ball.ids) ? new Set(ball.ids.map(String)) : null;
+        const feedKey = (kind === "cvd" || kind === "oi") ? (kind + "_" + ball.time) : null;
         let firstRow = null;
         feedTbody.querySelectorAll("tr").forEach((tr) => {
-            const hit = ids && ids.has(tr.dataset.liqId);
+            let hit = false;
+            if (ball && matchTab) {
+                if (ids) hit = ids.has(String(tr.dataset.liqId));
+                else if (feedKey) hit = tr.dataset.feedKey === feedKey;
+            }
             tr.classList.toggle("feed-hit", !!hit);
-            tr.classList.toggle("feed-dim", !!ids && !hit);
+            tr.classList.toggle("feed-dim", !!(ball && matchTab) && !hit);
             if (hit && !firstRow) firstRow = tr;
         });
         if (firstRow) {
@@ -1598,6 +1612,84 @@
             } catch (e) { /* ignore */ }
         }
         queueRedraw();
+    }
+
+    // Лента → график: наведение/клик по строке подсвечивает кластер/треугольник/шар.
+    function hitFromFeedItem(item) {
+        if (!item) return null;
+        if (item._kind === "cvd") {
+            for (let i = 0; i < cvdHits.length; i++) {
+                if (Number(cvdHits[i].time) === Number(item.time)) return cvdHits[i];
+            }
+            return {
+                kind: "cvd", key: "cvd_" + item.time, x: 0, y: 0, r: 0,
+                time: item.time, d: item.delta, buy: item.delta > 0,
+                live: !!item.live, p90: 0, c: item.c,
+            };
+        }
+        if (item._kind === "oi") {
+            for (let i = 0; i < oiHits.length; i++) {
+                if (Number(oiHits[i].time) === Number(item.time)) return oiHits[i];
+            }
+            return {
+                kind: "oi", key: "oi_" + item.time, x: 0, y: 0, r: 0,
+                time: item.time, d: item.delta, up: item.delta > 0,
+                tier: 0, live: !!item.live, c: item.c,
+            };
+        }
+        if (item.id != null) {
+            const sid = String(item.id);
+            for (let i = 0; i < clusterHits.length; i++) {
+                const ids = clusterHits[i].ids || [];
+                for (let j = 0; j < ids.length; j++) {
+                    if (String(ids[j]) === sid) return clusterHits[i];
+                }
+            }
+        }
+        return null;
+    }
+
+    function highlightFromFeed(item, pin) {
+        if (pinHitKey || shapePin) {
+            if (!pin) return;   // закреп остаётся, пока не кликнут иначе
+        }
+        const hit = item ? hitFromFeedItem(item) : null;
+        if (!item) {
+            applyFeedHighlight(null, false);
+            if (!shapePin) { shapeHover = null; queueRedraw(); }
+            return;
+        }
+        if (hit && hit.kind === "liq") {
+            applyFeedHighlight(hit, pin);
+            if (pin) pinShape(hit);
+            else if (!shapePin) {
+                shapeHover = { kind: "liq", key: hit.key };
+                queueRedraw();
+            }
+            return;
+        }
+        if (hit && (hit.kind === "cvd" || hit.kind === "oi")) {
+            if (pin) {
+                pinShape(hit);
+                applyFeedHighlight(hit, true);
+            } else if (!shapePin) {
+                shapeHover = { kind: hit.kind, key: hit.key };
+                applyFeedHighlight(hit, false);
+            }
+            return;
+        }
+        // события нет на текущем графике (другая монета) — подсветим только строку
+        feedTbody.querySelectorAll("tr").forEach((tr) => {
+            const self = (item.id != null && String(tr.dataset.liqId) === String(item.id))
+                || (item._kind && tr.dataset.feedKey === item._kind + "_" + item.time);
+            tr.classList.toggle("feed-hit", !!self);
+            tr.classList.toggle("feed-dim", !self);
+        });
+    }
+
+    function bindFeedHover(tr, item) {
+        tr.addEventListener("mouseenter", () => highlightFromFeed(item, false));
+        tr.addEventListener("mouseleave", () => highlightFromFeed(null, false));
     }
 
     // Окно фигуры: наведение показывает, уход курсора прячет (если не закреплено
@@ -2270,7 +2362,12 @@
             (isLong ? "LONG LIQ" : "SHORT LIQ") + "</span></td>" +
             '<td class="td-usd-amount ' + valClass + '">$' + fmtUsdFull(item.usd) + "</td>" +
             '<td class="td-price">' + fmtPrice(item.price) + "</td>";
-        tr.addEventListener("click", () => openModal(item));
+        tr.addEventListener("click", () => {
+            const hit = hitFromFeedItem(item);
+            if (hit && hit.kind === "liq") applyFeedHighlight(hit, true);
+            openModal(item);
+        });
+        bindFeedHover(tr, item);
         const coinBtn = tr.querySelector(".coin-link");
         if (coinBtn) {
             coinBtn.addEventListener("click", (e) => {
@@ -2290,6 +2387,7 @@
     }
 
     function addFeedRow(item) {
+        if (state.feedTab !== "liq") return;
         if (!passesFeedFilter(item)) return;
         feedEmptyEl.classList.add("hidden");
         feedTbody.insertBefore(feedRow(item), feedTbody.firstChild);
@@ -2297,27 +2395,169 @@
         feedCountEl.textContent = feedCountLabel(feedTbody.children.length);
     }
 
+    function paintFeedHeaders() {
+        const table = $("feed-table");
+        if (table) table.className = "feed-table feed-kind-" + state.feedTab;
+        const usd = $("feed-th-usd");
+        if (usd) {
+            usd.textContent = state.feedTab === "cvd" ? I18n.t("feed.col_cvd")
+                            : state.feedTab === "oi" ? I18n.t("feed.col_oi")
+                            : I18n.t("feed.col_usd");
+        }
+        document.querySelectorAll(".feed-tab").forEach((btn) => {
+            const on = btn.getAttribute("data-feed") === state.feedTab;
+            btn.classList.toggle("active", on);
+            btn.setAttribute("aria-selected", on ? "true" : "false");
+        });
+    }
+
+    function shapeFeedItems(field) {
+        const candles = state.candles;
+        const items = [];
+        if (!candles.length) return items;
+        const lastIdx = candles.length - 1;
+        const absVals = [];
+        for (let i = 0; i < candles.length; i++) {
+            const d = Math.abs(Number(candles[i][field]));
+            if (isFinite(d) && d > 0) absVals.push(d);
+        }
+        absVals.sort((a, b) => a - b);
+        const p90 = absVals.length ? (absVals[Math.floor(0.9 * (absVals.length - 1))] || 0) : 0;
+        const minAbs = Math.max(1000 * chartVolScale(), p90 * 0.05);
+        for (let i = candles.length - 1; i >= 0 && items.length < 150; i--) {
+            const d = Number(candles[i][field]);
+            if (!isFinite(d) || Math.abs(d) < minAbs) continue;
+            if (state.minUsd > 0 && Math.abs(d) < state.minUsd) continue;
+            items.push({
+                _kind: field === "cvd" ? "cvd" : "oi",
+                time: candles[i].time,
+                timestamp: candles[i].time,
+                symbol: chartSymbol(),
+                usd: Math.abs(d),
+                delta: d,
+                price: candles[i].close,
+                live: i === lastIdx,
+                c: candles[i],
+            });
+        }
+        return items;
+    }
+
+    function shapeFeedRow(item) {
+        const isCvd = item._kind === "cvd";
+        const up = item.delta >= 0;
+        const tr = document.createElement("tr");
+        tr.dataset.feedKey = item._kind + "_" + item.time;
+        if (item.live) tr.classList.add("feed-row-live");
+        const typeClass = isCvd ? (up ? "badge-cvd-buy" : "badge-cvd-sell")
+                                : (up ? "badge-oi-up" : "badge-oi-down");
+        const typeLabel = isCvd
+            ? I18n.t(up ? "feed.cvd_buy" : "feed.cvd_sell")
+            : I18n.t(up ? "feed.oi_up" : "feed.oi_down");
+        const valClass = isCvd ? (up ? "cvd-buy-val" : "cvd-sell-val")
+                               : (up ? "oi-up-val" : "oi-down-val");
+        const sign = up ? "+" : "−";
+        const openTitle = I18n.t("feed.open_chart", { sym: pretty(item.symbol) });
+        const openTitleHtml = openTitle.replace(/"/g, "&quot;");
+        tr.innerHTML =
+            '<td class="td-time">' + I18n.time(item.timestamp) + "</td>" +
+            '<td class="td-coin"><button class="coin-link" type="button" data-symbol="' +
+            encodeURIComponent(item.symbol) + '" title="' + openTitleHtml +
+            '" aria-label="' + openTitleHtml + '">' +
+            "<strong>" + pretty(item.symbol) + "</strong><span class=\"coin-link-icon\">📈</span></button></td>" +
+            "<td></td>" +
+            '<td><span class="' + typeClass + '">' + typeLabel + "</span></td>" +
+            '<td class="td-usd-amount ' + valClass + '">' + sign + "$" + fmtUsdFull(item.usd) + "</td>" +
+            '<td class="td-price">' + fmtPrice(item.price) + "</td>";
+        tr.addEventListener("click", () => {
+            const hit = hitFromFeedItem(item);
+            if (hit) {
+                applyFeedHighlight(hit, true);
+                pinShape(hit);
+                openShapeModal(hit.kind, hit);
+            }
+        });
+        bindFeedHover(tr, item);
+        const coinBtn = tr.querySelector(".coin-link");
+        if (coinBtn) {
+            coinBtn.addEventListener("click", (e) => {
+                e.stopPropagation();
+                selectChartSymbol(decodeURIComponent(coinBtn.dataset.symbol));
+            });
+        }
+        return tr;
+    }
+
+    function rebuildShapeFeed(field) {
+        const rows = shapeFeedItems(field);
+        feedTbody.innerHTML = "";
+        const frag = document.createDocumentFragment();
+        rows.forEach((item) => frag.appendChild(shapeFeedRow(item)));
+        feedTbody.appendChild(frag);
+        feedCountEl.textContent = feedCountLabel(rows.length);
+        if (feedEmptyEl) {
+            feedEmptyEl.textContent = I18n.t(field === "cvd" ? "feed.empty_cvd" : "feed.empty_oi");
+            feedEmptyEl.classList.toggle("hidden", rows.length > 0);
+        }
+    }
+
     function rebuildFeed() {
-        // строки пересоздаются — закреплённая подсветка шарика гаснет,
-        // окно кластера (ссылалось на старые строки) — тоже
         pinHitKey = null;
         hoverHitKey = null;
-        if (shapePin && shapePin.kind === "liq") {
-            unpinShape();
-            hideShapeModal();
+        if (shapePin && (shapePin.kind === "liq" || shapePin.kind === "cvd" || shapePin.kind === "oi")) {
+            if (!state.modalItem) {
+                unpinShape();
+                hideShapeModal();
+            }
         }
+        paintFeedHeaders();
+        if (state.feedTab === "cvd") { rebuildShapeFeed("cvd"); return; }
+        if (state.feedTab === "oi") { rebuildShapeFeed("oi"); return; }
+        if (feedEmptyEl) feedEmptyEl.textContent = I18n.t("feed.empty");
         const rows = state.liquidations.filter(passesFeedFilter).slice(-150).reverse();
         feedTbody.innerHTML = "";
         const frag = document.createDocumentFragment();
         rows.forEach((item) => {
             const tr = feedRow(item);
-            // гасим анимацию «новая строка», но подсветку кита оставляем
-            tr.className = tr.classList.contains("feed-row-whale") ? "feed-row-whale" : "";
+            tr.classList.remove("feed-row-new");
             frag.appendChild(tr);
         });
         feedTbody.appendChild(frag);
         feedCountEl.textContent = feedCountLabel(rows.length);
         feedEmptyEl.classList.toggle("hidden", rows.length > 0);
+    }
+
+    function setFeedTab(tab) {
+        if (tab !== "liq" && tab !== "cvd" && tab !== "oi") return;
+        if (state.feedTab === tab) return;
+        state.feedTab = tab;
+        try { localStorage.setItem("liqscope.feedTab", tab); } catch (e) { /* ignore */ }
+        rebuildFeed();
+    }
+
+    function setupFeedTabs() {
+        try {
+            const v = localStorage.getItem("liqscope.feedTab");
+            if (v === "liq" || v === "cvd" || v === "oi") state.feedTab = v;
+        } catch (e) { /* ignore */ }
+        const tabs = $("feed-tabs");
+        if (!tabs) return;
+        tabs.addEventListener("click", (e) => {
+            const btn = e.target.closest ? e.target.closest(".feed-tab") : null;
+            if (!btn) return;
+            setFeedTab(btn.getAttribute("data-feed"));
+        });
+        paintFeedHeaders();
+    }
+
+    let shapeFeedTimer = null;
+    function queueShapeFeed() {
+        if (state.feedTab === "liq") return;
+        if (shapeFeedTimer) return;
+        shapeFeedTimer = setTimeout(() => {
+            shapeFeedTimer = null;
+            if (state.feedTab !== "liq") rebuildFeed();
+        }, 400);
     }
 
     function openModal(item) {
@@ -3028,6 +3268,7 @@
         state.demo = !!health.demo;
         demoBadge.classList.toggle("hidden", !state.demo);
         const parts = [];
+        let okN = 0, total = 0;
         Object.keys(health.sources).forEach((name) => {
             const s = health.sources[name];
             if (!s.enabled) return;
@@ -3036,6 +3277,8 @@
             // Hyperliquid уже есть. Вторая плашка дублировала бы его.
             if (name === "oxa") return;
             const cls = s.connected ? "ok" : "bad";
+            if (s.connected) okN += 1;
+            total += 1;
             let label = name;
             if (name.indexOf("prices") === 0) label = I18n.t("health.prices");
             else if (name.indexOf("ticks") === 0) label = I18n.t("health.ticks");
@@ -3043,9 +3286,34 @@
                 ? I18n.t("health.connected", { n: s.events })
                 : I18n.t("health.noconn", { err: s.last_error || "—" });
             parts.push('<span class="exch-chip ' + cls + '" title="' +
-                title.replace(/"/g, "&quot;") + '">' + label + "</span>");
+                title.replace(/"/g, "&quot;") + '"><span>' + label + "</span>" +
+                (s.connected ? "" : '<span>✕</span>') + "</span>");
         });
-        exchHealthEl.innerHTML = parts.join("");
+        const dot = (okN === total && total) ? "ok" : (okN ? "mixed" : "bad");
+        const wasOpen = exchHealthEl.classList.contains("open");
+        exchHealthEl.innerHTML =
+            '<button type="button" class="exch-health-btn" id="exch-health-btn">' +
+                '<span class="exch-health-dot ' + dot + '"></span>' +
+                '<span class="exch-health-sum">' +
+                    I18n.t("health.summary", { ok: okN, n: total }) + "</span>" +
+                '<span class="exch-health-caret">▾</span>' +
+            "</button>" +
+            '<div class="exch-health-pop" id="exch-health-pop">' + parts.join("") + "</div>";
+        if (wasOpen) exchHealthEl.classList.add("open");
+    }
+
+    function setupExchHealth() {
+        if (!exchHealthEl) return;
+        exchHealthEl.addEventListener("click", (e) => {
+            const btn = e.target.closest ? e.target.closest(".exch-health-btn") : null;
+            if (!btn) return;
+            e.stopPropagation();
+            exchHealthEl.classList.toggle("open");
+        });
+        document.addEventListener("click", (e) => {
+            if (exchHealthEl.contains(e.target)) return;
+            exchHealthEl.classList.remove("open");
+        });
     }
 
     // --- Статистика ----------------------------------------------------------
@@ -3332,6 +3600,8 @@
         setInterval(renderTickIndicator, 1000);
         setupLayerToggles();
         setupLayerPop();   // попап кнопок слоёв по «☰ Слои»
+        setupFeedTabs();   // эфир: ликвидации / CVD / OI
+        setupExchHealth(); // выпадающий список бирж в шапке
         setupChartToggle();
         setupChartExpand();
         setupDrawToolbar();   // панель рисования + тестовый API
@@ -3349,3 +3619,4 @@
         boot();
     }
 })();
+

@@ -12,7 +12,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 IMAGES_DIR = os.path.join(HERE, "static", "channel")
 
 WINDOW_SEC = 4 * 3600
-VARIANT_COUNT = 12
+VARIANT_COUNT = 24
 CAPTION_LIMIT = 1024
 
 EXCH_NAMES = {
@@ -268,16 +268,47 @@ def _facts(snap: dict) -> dict:
     }
 
 
+def _headlines(h: int) -> tuple:
+    """Шапка как у живого человека, не как у дашборда. {h} — окно в часах."""
+    return (
+        f"🌙 <b>Ночная смена на ленте. {h} часа — и рынок снова кого-то съел.</b>",
+        f"🔥 <b>Разбор полётов за {h}ч. Без розовых очков, как есть.</b>",
+        f"👁 <b>Кто кормил ленту последние {h} часа. Спойлер: не джедаи.</b>",
+        f"💥 <b>{h} часа огня. Коротко, по фактам, с характером.</b>",
+        f"📓 <b>Дневник терминала. Окно {h}ч, настроение рабочее.</b>",
+        f"🪖 <b>Сводка с передовой. Ликвидации за {h} часа — ниже.</b>",
+        f"☕ <b>Пока вы пили кофе, лента уже намолотила кассу.</b>",
+        f"🛠 <b>Зашёл проверить одну свечу. Ушёл со сводкой за {h}ч.</b>",
+        f"😬 <b>Опять кто-то забыл, что такое стоп. Разбор за {h} часа.</b>",
+        f"🧪 <b>Это не сигнал. Это рентген рынка за {h}ч.</b>",
+        f"🗣 <b>Пишу как есть: {h} часа, и плечи снова короче, чем казались.</b>",
+        f"🩸 <b>Касса боли за {h} часа. Кто виноват — тоже написал.</b>",
+        f"🎬 <b>Живой эфир с ленты. Без монтажа и без жалости.</b>",
+        f"🧊 <b>Тихий час? Нет. Просто резали не тех.</b>",
+        f"📌 <b>Вечерняя планёрка с лентой: кто кого вынес за {h}ч.</b>",
+        f"⚠️ <b>Если плечо было «чуть-чуть» — вот счёт за {h} часа.</b>",
+        f"🧠 <b>Рынок не обязан быть вежливым. За {h}ч это видно сразу.</b>",
+        f"📉 <b>Не паника. Просто цифры, которые не умеют врать.</b>",
+        f"🃏 <b>Короткий разбор. Длинные плечи сегодня плохо жили.</b>",
+        f"📡 <b>Лента не молчала. Я тоже не буду.</b>",
+        f"🧹 <b>Это не «коррекция». Это кто-то кормил стакан {h} часа.</b>",
+        f"📸 <b>Снял слепок рынка. Держитесь за стул.</b>",
+        f"🕐 <b>Утро начинается не с кофе. С трупов на графике.</b>",
+        f"💬 <b>Смотрел ленту {h} часа. Кому досталось — в цифрах ниже.</b>",
+    )
+
+
 def render_post(snap: dict, variant: int = 0) -> str:
-    """Сводка. variant крутится, макеты разные, цифры всегда в <code>."""
-    v = int(variant) % VARIANT_COUNT
+    """Сводка: живая шапка + читаемые цифры. variant крутит и то и другое."""
     f = _facts(snap)
     h, n = f["h"], f["n"]
     tail = "— <i>LiqScope</i>"
+    heads = _headlines(h)
+    v = int(variant) % max(1, len(heads))
+    head = heads[v]
 
-    layouts = (
+    bodies = (
         [  # 0 — KPI-карточка
-            f"⚡ <b>LiqScope · {h}ч</b>",
             f"💥  {f['total']}\n"
             f"🔴  {f['longs']}  лонги\n"
             f"🟢  {f['shorts']}  шорты\n"
@@ -287,7 +318,6 @@ def render_post(snap: dict, variant: int = 0) -> str:
             f['big'], f['oi'], f['cvd'],
         ],
         [  # 1 — рейтинг монет
-            f"🔥 <b>Кто кормил ленту · {h}ч</b>",
             f['leaders'],
             f"итого  {f['total']}  из  {n}\n"
             f"🔴 лонги  {f['longs']}\n"
@@ -297,7 +327,6 @@ def render_post(snap: dict, variant: int = 0) -> str:
             f['big'], f['oi'], f['cvd'],
         ],
         [  # 2 — терминальный лог
-            f"<b>LIQ // {h}H WINDOW</b>",
             f"TOTAL  {f['total']}    N={n}\n"
             f"LONG   {f['longs']}\n"
             f"SHORT  {f['shorts']}\n"
@@ -307,7 +336,6 @@ def render_post(snap: dict, variant: int = 0) -> str:
             f['big'], f['oi'], f['cvd'],
         ],
         [  # 3 — кит первым
-            f"🐋 <b>Главный удар · {h}ч</b>",
             f['big'] or f"{f['bias_e']} {f['bias']}",
             f"касса  {f['total']}  ·  {n} ликв.\n"
             f"🔴 {f['longs']}    🟢 {f['shorts']}",
@@ -316,7 +344,6 @@ def render_post(snap: dict, variant: int = 0) -> str:
             f['oi'], f['cvd'],
         ],
         [  # 4 — биржи первыми
-            f"🏛 <b>Где резали · {h}ч</b>",
             f['ex'],
             f"💥 {f['total']}  ·  {n} шт.\n"
             f"🔴 лонги  {f['longs']}\n"
@@ -324,17 +351,16 @@ def render_post(snap: dict, variant: int = 0) -> str:
             f"<b>Монеты</b>\n{f['leaders']}",
             f['big'], f['oi'], f['cvd'],
         ],
-        [  # 5 — перекос в заголовке
-            f"{f['bias_e']} <b>{f['bias'].capitalize()} · {h}ч</b>",
+        [  # 5 — касса
             f"касса  {f['total']}\n"
             f"ударов  <code>{n}</code>\n"
-            f"🔴 {f['longs']}   🟢 {f['shorts']}",
+            f"🔴 {f['longs']}   🟢 {f['shorts']}\n"
+            f"{f['bias_e']} {f['bias']}",
             f['leaders'],
             f"🏛 {f['ex_in']}",
             f['big'], f['oi'], f['cvd'],
         ],
         [  # 6 — табло
-            f"🏆 <b>Счёт за {h}ч</b>",
             f"💥 {f['total']}\n"
             f"🔴 лонги   {f['longs']}\n"
             f"🟢 шорты   {f['shorts']}\n"
@@ -343,17 +369,16 @@ def render_post(snap: dict, variant: int = 0) -> str:
             f['ex'],
             f['big'], f['oi'], f['cvd'],
         ],
-        [  # 7 — ночная смена
-            f"🌙 <b>Ночная смена</b>\nокно {h}ч · {f['bias']}",
+        [  # 7 — вынесло
             f"вынесло  {f['total']}\n"
             f"🔴 {f['longs']}  лонги\n"
-            f"🟢 {f['shorts']}  шорты",
+            f"🟢 {f['shorts']}  шорты\n"
+            f"{f['bias_e']} {f['bias']}",
             f"<b>Лидеры</b>\n{f['leaders']}",
             f"🏛 {f['ex_in']}",
             f['big'], f['oi'], f['cvd'],
         ],
         [  # 8 — температура
-            f"🌡 <b>Температура рынка · {h}ч</b>",
             f"{f['bias_e']} {f['bias']}\n"
             f"жар  {f['total']}  /  {n} ликв.",
             f"🔴 лонги  {f['longs']}\n🟢 шорты  {f['shorts']}",
@@ -361,25 +386,23 @@ def render_post(snap: dict, variant: int = 0) -> str:
             f"🏛 {f['ex_in']}",
             f['big'], f['oi'], f['cvd'],
         ],
-        [  # 9 — одна плитка
-            f"⏱ <b>{h}ч</b>   💥 {f['total']}",
+        [  # 9 — плитка
+            f"💥 {f['total']}\n"
             f"🔴 {f['longs']}   🟢 {f['shorts']}   ·  {n} шт.\n"
             f"{f['bias_e']} {f['bias']}",
             f['leaders'],
             f['ex'],
             f['big'], f['oi'], f['cvd'],
         ],
-        [  # 10 — вопрос
-            f"❓ <b>Кого вынесло за {h}ч?</b>",
+        [  # 10 — сначала лидеры
             f['leaders'],
-            f"ответ:  {f['total']}  в  {n} ликвидациях\n"
+            f"итого  {f['total']}  в  {n} ликвидациях\n"
             f"🔴 лонги  {f['longs']}\n"
             f"🟢 шорты  {f['shorts']}",
             f"🏛 {f['ex_in']}",
             f['big'], f['oi'], f['cvd'],
         ],
         [  # 11 — брифинг
-            f"📋 <b>Брифинг · {h} часа</b>",
             f"{f['bias_e']} {f['bias'].capitalize()}. "
             f"Касса {f['total']}, {n} ударов.",
             f"🔴 лонги  {f['longs']}\n🟢 шорты  {f['shorts']}",
@@ -388,7 +411,8 @@ def render_post(snap: dict, variant: int = 0) -> str:
             f['big'], f['oi'], f['cvd'],
         ],
     )
-    return _pack(layouts[v], tail)
+    parts = [head] + list(bodies[v % len(bodies)])
+    return _pack(parts, tail)
 
 
 def list_images() -> List[str]:

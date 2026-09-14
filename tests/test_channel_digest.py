@@ -9,8 +9,8 @@ HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
 
 from channel_digest import (  # noqa: E402
-    CAPTION_LIMIT, VARIANT_COUNT, collect_digest, list_images, money,
-    pick_image, render_post,
+    CAPTION_LIMIT, VARIANT_COUNT, _headlines, collect_digest, list_images,
+    money, pick_image, render_post,
 )
 
 
@@ -51,7 +51,8 @@ class DigestTest(unittest.TestCase):
     def test_variants_differ_and_contain_facts(self):
         snap = collect_digest(self.events, now=self.now, oi=self.oi, cvd=self.cvd)
         texts = [render_post(snap, i) for i in range(VARIANT_COUNT)]
-        self.assertGreaterEqual(VARIANT_COUNT, 10)
+        self.assertEqual(len(_headlines(4)), VARIANT_COUNT)
+        self.assertGreaterEqual(VARIANT_COUNT, 20)
         self.assertEqual(len(set(texts)), VARIANT_COUNT)
         for t in texts:
             self.assertIn("BTC", t)
@@ -62,6 +63,18 @@ class DigestTest(unittest.TestCase):
             self.assertIn("OI", t)
             self.assertIn("<code>", t)
             self.assertTrue(any(ch in t for ch in "💥🔴🟢🐋📊🌊🏛🔥⚡🏆🌙🌡⏱❓📋📉📈"))
+
+    def test_blogger_heads_are_alive(self):
+        snap = collect_digest(self.events, now=self.now, oi=self.oi, cvd=self.cvd)
+        heads = []
+        for i in range(VARIANT_COUNT):
+            line = render_post(snap, i).split("\n", 1)[0]
+            heads.append(line)
+            self.assertNotIn("LiqScope ·", line)
+            self.assertNotIn("LIQ //", line)
+            self.assertTrue(any(ch in line for ch in ".?—!"), line)
+            self.assertIn("<b>", line)
+        self.assertEqual(len(set(heads)), VARIANT_COUNT)
 
     def test_caption_fits_with_many_coins(self):
         extra = [

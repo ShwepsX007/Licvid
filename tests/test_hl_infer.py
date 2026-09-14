@@ -217,13 +217,61 @@ async def unit_checks():
     check("чистые филы без метки — None",
           find_liquidation({"fills": [{"coin": "BTC", "tid": 1}]}) is None)
 
+    # --- регрессия боевого падения 14.09.2026: sweep() оставлял под ключом
+    # пустой список, и следующая сделка того же тейкера читала rows[-1] →
+    # IndexError «list index out of range» улетал в читателя сокета, и HL
+    # переподключался каждые несколько секунд.
     inf = HlLiquidationInferer({"BTC": "BTC_USDT"}, None, None,
+                               hl_rest="http://x", window=0.05,
+                               max_confirm_per_min=2)
+    t0 = time.time()
+    burst = [{"coin": "BTC", "side": "A", "px": 99_850.0, "sz": 4.885,
+              "ts": t0 + i * 0.01, "seen": t0 + i * 0.01, "position": "LONG",
+              "tid": 4000 + i} for i in range(3)]
+    inf.bursts[("BTC", "0xv")] = burst
+    for r in burst:
+        r["seen"] -= 10                    # «замолчал» — так это видит sweep
+    inf.sweep()
+    check("sweep закрывает всплеск и НЕ оставляет пустой список под ключом",
+          ("BTC", "0xv") not in inf.bursts, inf.bursts)
+    check("sweep поставил кандидата в очередь", inf.queue.qsize() == 1,
+          inf.queue.qsize())
+    try:
+        inf._fold("BTC", "0xv", {"coin": "BTC", "side": "A", "px": 99_850.0,
+                                "sz": 4.885, "ts": time.time(),
+                                "seen": time.time(), "position": "LONG",
+                                "tid": 4100})
+        folded = True
+    except IndexError as e:
+        folded = False
+        detail = e
+    check("сделка того же тейкера после sweep не роняет вывод", folded,
+          locals().get("detail", ""))
+    check("и собирается в новый всплеск",
+          len(inf.bursts.get(("BTC", "0xv"), [])) == 1)
+
+    # --- горячий путь не имеет права бросать наружу в принципе
+    def boom(_payload):
+        raise RuntimeError("внутренняя поломка разбора")
+    inf._observe = boom
+    try:
+        inf.observe({"channel": "trades", "data": []})
+        survived = True
+    except Exception:
+        survived = False
+    check("любая внутренняя ошибка разбора гасится в observe", survived)
+    check("и попадает в счётчик (это видно в health)",
+          inf.stats["errors"] == 1 and inf.describe()["hl_infer_errors"] == 1,
+          inf.describe())
+
+    inf2 = HlLiquidationInferer({"BTC": "BTC_USDT"}, None, None,
                                hl_rest="http://x", max_confirm_per_min=2)
     check("бюджет подтверждений считается по минуте",
-          all([inf._budget_ok(), inf._budget_ok()]) and not inf._budget_ok(),
-          inf.stats)
-    check("имя монеты берётся из карты", inf.coin_name("BTC") == "BTC_USDT")
-    check("неизвестная монета не ломает имя", inf.coin_name("NEW") == "NEW_USDT")
+          all([inf2._budget_ok(), inf2._budget_ok()]) and not inf2._budget_ok(),
+          inf2.stats)
+    check("имя монеты берётся из карты", inf2.coin_name("BTC") == "BTC_USDT")
+    check("неизвестная монета не ломает имя", inf2.coin_name("NEW") == "NEW_USDT")
+    check("в покое ошибок разбора нет", inf2.describe()["hl_infer_errors"] == 0)
 
 
 async def integration_checks():

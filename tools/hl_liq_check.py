@@ -124,7 +124,11 @@ async def check_health(server: str) -> dict:
              f"{hl.get('hl_infer_budget_per_min')}/мин), /info: "
              f"{hl.get('hl_infer_info_calls')} вызовов, "
              f"{hl.get('hl_infer_info_errors')} ошибок, латентность "
-             f"{hl.get('hl_infer_latency_ms')} мс")
+             f"{hl.get('hl_infer_latency_ms')} мс, сбои разбора: "
+             f"{hl.get('hl_infer_errors')}")
+        if hl.get("hl_infer_errors"):
+            warn("внутри вывода ликвидаций были сбои разбора — см. строки "
+                 "[hyperliquid/infer] в логе (сокет они ронять не должны)")
         if hl.get("hl_infer_info_errors"):
             warn("/info отвечает ошибкой: с этого сервера подтверждения не "
                  "доходят (429 = лимит веса на IP)")

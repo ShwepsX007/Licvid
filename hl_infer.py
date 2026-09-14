@@ -199,15 +199,34 @@ class HlLiquidationInferer:
         self.stats = {"trades": 0, "candidates": 0, "confirmed": 0,
                       "rejected": 0, "budget_skipped": 0, "queue_skipped": 0,
                       "info_calls": 0, "info_errors": 0, "usd": 0.0,
-                      "latency_ms": 0.0, "latency_n": 0}
+                      "latency_ms": 0.0, "latency_n": 0, "errors": 0}
         self._spent_at = 0.0
         self._spent = 0
+        self._err_log_at = 0.0
         self._log_at = 0.0
         self._stop = asyncio.Event()
 
     # -- горячий путь: вызывается из цикла чтения сокета ---------------------
     def observe(self, payload: dict) -> None:
-        """Кадры `trades` → всплески. Ничего не ждём и не кидаем наружу."""
+        """Кадры `trades` → всплески. Ничего не ждём и не кидаем наружу.
+
+        Метод живёт внутри читателя сокета, поэтому любое исключение отсюда
+        стоило бы разрыва с биржей (в бою на этом и поймали: IndexError из
+        `_fold` ронял слушателя каждые несколько секунд). Разбор целиком под
+        try: ошибочный кадр — минус к `hl_infer_errors`, а лента идёт дальше.
+        """
+        try:
+            self._observe(payload)
+        except Exception as e:
+            self.stats["errors"] += 1
+            now = time.monotonic()
+            if now - self._err_log_at > 60:
+                self._err_log_at = now
+                log.warning("[hyperliquid/infer] разбор кадра пропущен: %s: %s "
+                            "(ошибок всего: %d) — сокет не роняем",
+                            type(e).__name__, e, self.stats["errors"])
+
+    def _observe(self, payload: dict) -> None:
         if not isinstance(payload, dict) or payload.get("channel") != "trades":
             return
         data = payload.get("data")
@@ -247,7 +266,9 @@ class HlLiquidationInferer:
     def _fold(self, coin: str, taker: str, row: dict) -> None:
         key = (coin, taker)
         rows = self.bursts.get(key)
-        if rows is None:
+        if not rows:
+            # сюда попадаем и когда ключа нет, и когда его оставил пустым
+            # sweep(): это просто начало нового всплеска
             self.bursts[key] = [row]
             return
         # длинный разрыв = новый всплеск: старый закрываем и оцениваем
@@ -306,11 +327,24 @@ class HlLiquidationInferer:
         return cmap.get(coin) or cmap.get(str(coin).upper()) or f"{str(coin).upper()}_USDT"
 
     def sweep(self) -> None:
-        """Досмотреть всплески, которые замолчали (иначе хвост окна потерян)."""
+        """Досмотреть всплески, которые замолчали (иначе хвост окна потерян).
+
+        Закрытый ключ удаляется, а не оставляется пустым списком: на длинном
+        соединении это ещё и единственный способ не хранить пару (монета,
+        адрес) навсегда — на 234 монетах таких пар десятки тысяч.
+        """
+        try:
+            self._sweep()
+        except Exception as e:            # та же защита, что у observe()
+            self.stats["errors"] += 1
+            log.warning("[hyperliquid/infer] sweep пропущен: %s: %s",
+                        type(e).__name__, e)
+
+    def _sweep(self) -> None:
         now = time.time()
         for key, rows in list(self.bursts.items()):
             if rows and now - rows[-1]["seen"] > self.window + 1.0:
-                self.bursts[key] = []
+                del self.bursts[key]
                 self._propose(key[0], key[1], rows)
 
     # -- холодный путь: подтверждения ---------------------------------------
@@ -400,10 +434,11 @@ class HlLiquidationInferer:
         s = self.stats
         log.info("[hyperliquid/infer] сделок %d, кандидатов %d, подтверждено %d "
                  "(%.1f$), отклонено %d, вне бюджета %d, /info: %d вызовов, "
-                 "%d ошибок, латентность %.0f мс",
+                 "%d ошибок, латентность %.0f мс%s",
                  s["trades"], s["candidates"], s["confirmed"], s["usd"],
                  s["rejected"], s["budget_skipped"], s["info_calls"],
-                 s["info_errors"], s["latency_ms"])
+                 s["info_errors"], s["latency_ms"],
+                 "" if not s["errors"] else f", СБОИ РАЗБОРА: {s['errors']}")
 
     async def aclose(self) -> None:
         self._stop.set()
@@ -425,6 +460,7 @@ class HlLiquidationInferer:
             "hl_infer_budget_skipped": s["budget_skipped"],
             "hl_infer_queue_skipped": s["queue_skipped"],
             "hl_infer_latency_ms": round(s["latency_ms"]),
+            "hl_infer_errors": s["errors"],
             "hl_infer_budget_per_min": self.max_confirm_per_min,
         }
 

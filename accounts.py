@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import logging
 import os
 import secrets
@@ -27,10 +28,10 @@ DEFAULT_SERVICES = (
         "slug": "alerts",
         "title": "Алерты по объёму",
         "title_en": "Volume alerts",
-        "description": "Порог объёма ликвидации и окно времени — сообщение в кабинет и в Telegram.",
+        "description": "Ликвидации, CVD и OI: порог, окно, монета — сигнал в кабинет и в Telegram.",
         "icon": "🔔",
         "enabled": 1,
-        "coming_soon": 1,
+        "coming_soon": 0,
         "sort": 10,
     },
     {
@@ -236,6 +237,19 @@ class Store:
                     name TEXT,
                     created_at REAL NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS alert_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts REAL NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    metric TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    value REAL NOT NULL,
+                    threshold REAL NOT NULL,
+                    window_min INTEGER NOT NULL,
+                    detail TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_alert_user_ts ON alert_events(user_id, ts);
+                CREATE INDEX IF NOT EXISTS idx_alert_cool ON alert_events(user_id, metric, symbol, ts);
                 """
             )
             self._db.commit()
@@ -248,6 +262,13 @@ class Store:
                         (s["slug"], s["title"], s["title_en"], s["description"],
                          s["icon"], s["enabled"], s["coming_soon"], s["sort"]),
                     )
+            # первый живой сервис — снимаем «скоро» даже на старых базах
+            alerts = next((s for s in DEFAULT_SERVICES if s["slug"] == "alerts"), None)
+            if alerts:
+                self._db.execute(
+                    "UPDATE services SET coming_soon=0, description=?, title=? WHERE slug='alerts'",
+                    (alerts["description"], alerts["title"]),
+                )
             self._db.commit()
         self._seed_digest()
 
@@ -719,3 +740,110 @@ class Store:
                 "SELECT tg_id FROM users WHERE is_banned=0"
             ).fetchall()
         return [int(r["tg_id"]) for r in rows]
+
+    def _parse_svc_config(self, raw: str) -> Dict[str, Any]:
+        try:
+            data = json.loads(raw or "{}")
+        except (TypeError, ValueError):
+            data = {}
+        return data if isinstance(data, dict) else {}
+
+    def get_user_service(self, user_id: int, slug: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM user_services WHERE user_id=? AND slug=?",
+                (int(user_id), slug),
+            ).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["config"] = self._parse_svc_config(d.get("config") or "")
+        d["enabled"] = bool(d.get("enabled"))
+        return d
+
+    def set_user_service_config(self, user_id: int, slug: str, config: Dict[str, Any],
+                                enabled: Optional[bool] = None) -> Dict[str, Any]:
+        from alerts import normalize_config
+        cfg = normalize_config(config or {})
+        blob = json.dumps(cfg, ensure_ascii=False, separators=(",", ":"))
+        now = _now()
+        with self._lock:
+            svc = self._db.execute("SELECT * FROM services WHERE slug=?", (slug,)).fetchone()
+            if not svc:
+                return {"ok": False, "error": "unknown_service"}
+            row = self._db.execute(
+                "SELECT * FROM user_services WHERE user_id=? AND slug=?",
+                (int(user_id), slug),
+            ).fetchone()
+            if enabled is None:
+                on = int(row["enabled"]) if row else 1
+            else:
+                on = 1 if enabled else 0
+            if row:
+                self._db.execute(
+                    "UPDATE user_services SET config=?, enabled=? WHERE user_id=? AND slug=?",
+                    (blob, on, int(user_id), slug),
+                )
+            else:
+                self._db.execute(
+                    "INSERT INTO user_services(user_id,slug,enabled,config,created_at)"
+                    " VALUES(?,?,?,?,?)",
+                    (int(user_id), slug, on, blob, now),
+                )
+            self._db.commit()
+        return {"ok": True, "slug": slug, "enabled": bool(on), "config": cfg}
+
+    def list_alert_subscribers(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT u.id AS user_id, u.tg_id, us.config, us.enabled "
+                "FROM user_services us JOIN users u ON u.id=us.user_id "
+                "WHERE us.slug='alerts' AND us.enabled=1 AND u.is_banned=0"
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["config"] = self._parse_svc_config(d.get("config") or "")
+            d["enabled"] = bool(d.get("enabled"))
+            out.append(d)
+        return out
+
+    def add_alert_event(self, user_id: int, hit: Dict[str, Any]) -> int:
+        now = _now()
+        with self._lock:
+            cur = self._db.execute(
+                "INSERT INTO alert_events(ts,user_id,metric,symbol,value,threshold,"
+                "window_min,detail) VALUES(?,?,?,?,?,?,?,?)",
+                (now, int(user_id),
+                 str(hit.get("metric") or "liq")[:12],
+                 str(hit.get("symbol") or "ALL")[:32],
+                 float(hit.get("value") or 0),
+                 float(hit.get("threshold") or 0),
+                 int(hit.get("window_min") or 5),
+                 json.dumps({k: hit.get(k) for k in
+                             ("count", "longs", "shorts", "pct") if k in hit},
+                            ensure_ascii=False)[:400]),
+            )
+            if secrets.randbelow(40) == 0:
+                self._db.execute(
+                    "DELETE FROM alert_events WHERE ts<?", (now - 14 * 86400,))
+            self._db.commit()
+            return int(cur.lastrowid)
+
+    def list_alert_events(self, user_id: int, limit: int = 30) -> List[Dict[str, Any]]:
+        limit = max(1, min(int(limit), 80))
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM alert_events WHERE user_id=? ORDER BY id DESC LIMIT ?",
+                (int(user_id), limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def last_alert_ts(self, user_id: int, metric: str, symbol: str) -> Optional[float]:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT ts FROM alert_events WHERE user_id=? AND metric=? AND symbol=?"
+                " ORDER BY ts DESC LIMIT 1",
+                (int(user_id), str(metric)[:12], str(symbol)[:32]),
+            ).fetchone()
+        return float(row["ts"]) if row else None

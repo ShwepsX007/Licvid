@@ -30,6 +30,8 @@ class Ctx:
     stats_fn = staticmethod(lambda: {})
     liqs_fn = staticmethod(lambda: [])
     ws_clients_fn = staticmethod(lambda: 0)
+    alerts_market_fn = staticmethod(lambda: {})
+    symbols_fn = staticmethod(lambda: [])
 
 
 ctx = Ctx()
@@ -258,6 +260,56 @@ def register_account_routes(app) -> None:
             body = {}
         enabled = bool(body.get("enabled", True))
         return ctx.store.toggle_user_service(user["id"], slug, enabled)
+
+    @router.get("/api/account/alerts")
+    async def api_alerts_get(request: Request):
+        from alerts import live_snapshot, normalize_config, presets
+        user = current_user(request)
+        if not user:
+            return _need_auth()
+        row = ctx.store.get_user_service(user["id"], "alerts")
+        cfg = normalize_config((row or {}).get("config") or {})
+        market = {}
+        try:
+            market = ctx.alerts_market_fn() or {}
+        except Exception as e:
+            log.debug("alerts market: %s", e)
+        return {
+            "ok": True,
+            "config": cfg,
+            "subscribed": bool(row and row.get("enabled")),
+            "presets": presets(),
+            "live": live_snapshot(cfg, market),
+            "history": ctx.store.list_alert_events(user["id"], 24),
+            "symbols": list(ctx.symbols_fn() or [])[:60],
+        }
+
+    @router.post("/api/account/alerts")
+    async def api_alerts_save(request: Request):
+        from alerts import live_snapshot, normalize_config
+        user = current_user(request)
+        if not user:
+            return _need_auth()
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        r = ctx.store.set_user_service_config(
+            user["id"], "alerts", body or {}, enabled=True)
+        if not r.get("ok"):
+            return JSONResponse(r, status_code=400)
+        market = {}
+        try:
+            market = ctx.alerts_market_fn() or {}
+        except Exception:
+            market = {}
+        cfg = r.get("config") or normalize_config(body)
+        return {
+            "ok": True,
+            "config": cfg,
+            "subscribed": True,
+            "live": live_snapshot(cfg, market),
+        }
 
     # ----- admin ----------------------------------------------------------
     def _admin(request: Request):

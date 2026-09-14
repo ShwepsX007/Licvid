@@ -142,6 +142,30 @@ class AccountsTest(unittest.TestCase):
         self.assertEqual(self.store.add_digest_photo(b"not-an-image-file-at-all!!").get("error"), "not_image")
         self.assertEqual(self.store.add_digest_photo(b"").get("error"), "empty")
 
+    def test_alerts_service_is_live_and_stores_config(self):
+        slugs = {s["slug"]: s for s in self.store.list_services()}
+        self.assertFalse(slugs["alerts"]["coming_soon"])
+        u = self.store.upsert_telegram_user({"id": 77, "first_name": "A"})
+        r = self.store.set_user_service_config(u["id"], "alerts", {
+            "watch": ["liq", "io"], "symbol": "ethusdt", "window_min": 15,
+            "threshold": {"liq": 100000}, "enabled": True,
+        }, enabled=True)
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["config"]["symbol"], "ETH_USDT")
+        self.assertIn("oi", r["config"]["watch"])
+        got = self.store.get_user_service(u["id"], "alerts")
+        self.assertTrue(got["enabled"])
+        self.assertEqual(got["config"]["window_min"], 15)
+        subs = self.store.list_alert_subscribers()
+        self.assertEqual(len(subs), 1)
+        hit = {"metric": "liq", "symbol": "ETH_USDT", "value": 150000,
+               "threshold": 100000, "window_min": 15, "count": 3}
+        pid = self.store.add_alert_event(u["id"], hit)
+        self.assertGreater(pid, 0)
+        self.assertTrue(self.store.last_alert_ts(u["id"], "liq", "ETH_USDT"))
+        hist = self.store.list_alert_events(u["id"])
+        self.assertEqual(hist[0]["metric"], "liq")
+
     def test_ip_hash_stable(self):
         a = hash_ip("s", "1.2.3.4")
         b = hash_ip("s", "1.2.3.4")

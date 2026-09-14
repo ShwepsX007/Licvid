@@ -641,14 +641,119 @@ def _demo_oi(series: list) -> None:
         c["oiChg"] = round(c["oi"] - prev, 2)
 
 
+def alert_watch_symbols() -> Set[str]:
+    """Монеты, которые смотрят алерты — их нужно держать в тиках/OI."""
+    from alerts import normalize_config
+    out: Set[str] = set()
+    need_all = False
+    try:
+        subs = account_store.list_alert_subscribers()
+    except Exception:
+        return out
+    for s in subs:
+        cfg = normalize_config(s.get("config"))
+        if not cfg.get("enabled"):
+            continue
+        if cfg["symbol"] == "ALL":
+            if "cvd" in cfg["watch"] or "oi" in cfg["watch"]:
+                need_all = True
+        else:
+            out.add(cfg["symbol"])
+    if need_all:
+        now = time.time()
+        totals: Dict[str, float] = {}
+        for x in LIQUIDATIONS:
+            if now - float(x.get("timestamp") or 0) <= 3600:
+                totals[x["symbol"]] = totals.get(x["symbol"], 0.0) + float(x.get("usd") or 0)
+        out.update(sorted(totals, key=totals.get, reverse=True)[:8])
+        if feed and feed.symbols:
+            out.add(feed.symbols[0])
+    return out
+
+
 def sync_hot_symbols():
     """Сообщаем фиду, чьи графики сейчас открыты — по ним нужен каждый тик."""
     if not feed:
         return
     hot = {c.chart_symbol for c in hub.clients}
+    hot |= alert_watch_symbols()
     if not hot and feed.symbols:
         hot = {feed.symbols[0]}          # держим BTC тёплым для быстрого старта
     feed.set_hot_symbols(hot)
+
+
+def alerts_market_snapshot() -> dict:
+    """Снимок для движка алертов и кабинета."""
+    now = time.time()
+    events = [x for x in LIQUIDATIONS
+              if now - float(x.get("timestamp") or 0) <= 4 * 3600]
+    cvd = {k: dict(v) for k, v in CVD_ACC.items()}
+    oi: Dict[str, dict] = {}
+    tracker = getattr(feed, "oi", None) if feed else None
+    if tracker is not None:
+        for sym in list(alert_watch_symbols())[:16]:
+            try:
+                oi[sym] = tracker.payload(sym)
+            except Exception:
+                pass
+        if not oi:
+            for sym in list(getattr(tracker, "_watched", {}) or {})[:8]:
+                try:
+                    oi[sym] = tracker.payload(sym)
+                except Exception:
+                    pass
+    return {"now": now, "events": events, "cvd": cvd, "oi": oi}
+
+
+async def alerts_oi_warmup():
+    tracker = getattr(feed, "oi", None) if feed else None
+    if tracker is None:
+        return
+    for sym in list(alert_watch_symbols())[:12]:
+        try:
+            await tracker.ensure_symbol(sym)
+        except Exception as e:
+            log.debug("alerts oi %s: %s", sym, e)
+
+
+async def alert_loop():
+    """Раз в несколько секунд проверяет пороги и шлёт в Telegram."""
+    from alerts import evaluate, format_alert_html, normalize_config, should_fire
+    try:
+        await asyncio.sleep(20)
+    except asyncio.CancelledError:
+        return
+    while True:
+        try:
+            await alerts_oi_warmup()
+            market = alerts_market_snapshot()
+            now = market["now"]
+            for sub in account_store.list_alert_subscribers():
+                cfg = normalize_config(sub.get("config"))
+                if not cfg.get("enabled"):
+                    continue
+                hits = evaluate(cfg, market)
+                sent = 0
+                for hit in hits:
+                    last = account_store.last_alert_ts(
+                        sub["user_id"], hit["metric"], hit["symbol"])
+                    if not should_fire(last, now, hit["window_min"]):
+                        continue
+                    account_store.add_alert_event(sub["user_id"], hit)
+                    tg_id = int(sub.get("tg_id") or 0)
+                    if tg_id and tg_bot.running:
+                        await tg_bot.send(tg_id, format_alert_html(hit))
+                    sent += 1
+                    if sent >= 3:
+                        break
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            log.warning("alerts: %s", e)
+        try:
+            await asyncio.sleep(8)
+        except asyncio.CancelledError:
+            break
 
 
 async def hot_symbols_watcher():
@@ -999,6 +1104,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(stats_broadcaster(), name="stats-broadcast"),
         asyncio.create_task(kline_refresher(), name="kline-refresh"),
         asyncio.create_task(hot_symbols_watcher(), name="hot-symbols"),
+        asyncio.create_task(alert_loop(), name="alerts"),
     ]
     if DEMO_MODE:
         tasks.append(asyncio.create_task(demo_generator(), name="demo"))
@@ -1019,6 +1125,7 @@ async def lifespan(app: FastAPI):
     tg_bot.liqs_fn = lambda: list(LIQUIDATIONS)[-8:]
     tg_bot.ws_clients_fn = lambda: len(hub.clients)
     tg_bot.digest_fn = build_channel_digest
+    tg_bot.alerts_market_fn = alerts_market_snapshot
     tg_bot.public_url = PUBLIC_URL
     await tg_bot.start()
 
@@ -1052,6 +1159,8 @@ account_ctx.health_fn = health_summary
 account_ctx.stats_fn = compute_stats
 account_ctx.liqs_fn = lambda: list(LIQUIDATIONS)[-8:]
 account_ctx.ws_clients_fn = lambda: len(hub.clients)
+account_ctx.alerts_market_fn = alerts_market_snapshot
+account_ctx.symbols_fn = lambda: list((feed.symbols if feed else [])[:40])
 register_account_routes(app)
 
 
@@ -1340,3 +1449,4 @@ async def terminal():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("server:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
+run("server:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")))

@@ -62,7 +62,9 @@ class TelegramBot:
         self._offset = 0
         self._wait_broadcast: Dict[int, bool] = {}  # tg_id -> waiting for text
         self._wait_tpl: Dict[int, str] = {}         # tg_id -> "head"|"photo"
+        self._wait_alert: Dict[int, str] = {}       # tg_id -> "coin"|"win"|"thr:liq"|...
         self._menu_msg: Dict[int, int] = {}         # chat_id -> последнее меню
+        self.alerts_market_fn: Optional[Callable[[], Any]] = None
 
     @property
     def enabled(self) -> bool:
@@ -528,6 +530,19 @@ class TelegramBot:
             await self.send(chat_id, "Доступ закрыт.")
             return
         tg_id = int(from_u.get("id") or 0)
+        wait_al = self._wait_alert.get(tg_id)
+        if wait_al:
+            if text.startswith("/"):
+                self._wait_alert.pop(tg_id, None)
+                if text.startswith("/cancel"):
+                    await self.show_menu(chat_id, "Отмена.", self._alert_kb(user))
+                    return
+            else:
+                msg_ok = self._alert_apply_text(user, wait_al, text or msg)
+                self._wait_alert.pop(tg_id, None)
+                await self.show_menu(chat_id, msg_ok + "\n\n" + self._alert_text(user),
+                                     self._alert_kb(user))
+                return
         wait = self._wait_tpl.get(tg_id)
         if wait and user.get("is_admin"):
             if text.startswith("/"):
@@ -593,6 +608,8 @@ class TelegramBot:
             await self.show_menu(chat_id, self._liq_text(), self._kb_back("nav:home"))
         elif text.startswith("/services"):
             await self.show_menu(chat_id, self._services_text(user), self._services_kb(user))
+        elif text.startswith("/alerts"):
+            await self.show_menu(chat_id, self._alert_text(user), self._alert_kb(user))
         elif text.startswith("/terminal"):
             await self.show_menu(chat_id, self._terminal_text(), self._kb_back("nav:home"))
         elif text.startswith("/admin"):
@@ -617,9 +634,10 @@ class TelegramBot:
             await self.answer_cb(cb["id"], "Доступ закрыт")
             return
         tg_id = int(from_u.get("id") or 0)
-        if data in ("menu", "back", "nav:home", "home", "nav:admin", "a:tpl"):
+        if data in ("menu", "back", "nav:home", "home", "nav:admin", "a:tpl", "al", "services"):
             self._wait_broadcast.pop(tg_id, None)
             self._wait_tpl.pop(tg_id, None)
+            self._wait_alert.pop(tg_id, None)
         # Сначала снимаем «часики»: если answer уйдёт после edit или с
         # пустым text, клиент залипает и следующие кнопки не нажимаются.
         await self.answer_cb(cb["id"])
@@ -645,6 +663,9 @@ class TelegramBot:
             if user.get("is_admin") and (
                     data == "a:tpl" or data.startswith("a:th") or data.startswith("a:tp")):
                 await self._on_tpl_cb(chat_id, user, data, message_id)
+                return
+            if data == "al" or data.startswith("al:"):
+                await self._on_alert_cb(chat_id, user, data, message_id)
                 return
             if data != "ch:check" and not await self._ensure_channel(
                     chat_id, user, message_id=message_id):
@@ -678,6 +699,11 @@ class TelegramBot:
             return self._services_text(user), self._services_kb(user)
         if data.startswith("svc:"):
             slug = data.split(":", 1)[1]
+            if slug == "alerts":
+                row = next((s for s in self.store.list_services(False)
+                            if s["slug"] == "alerts"), None)
+                if row and not row.get("coming_soon"):
+                    return self._alert_text(user), self._alert_kb(user)
             have = set(self.store.user_service_slugs(user["id"]))
             on = slug not in have
             self.store.toggle_user_service(user["id"], slug, on)
@@ -961,6 +987,7 @@ class TelegramBot:
             "/status — какие биржи в эфире",
             "/liq — последние события",
             "/services — сервисы кабинета",
+            "/alerts — алерты по объёму",
         ]
         if user.get("is_admin"):
             lines += [
@@ -1064,16 +1091,19 @@ class TelegramBot:
         have = set(self.store.user_service_slugs(user["id"]))
         lines = [
             "<b>Сервисы кабинета</b>",
-            "Те же, что на сайте. Сейчас закладываем каркас — алерты, корреляции и сторож появятся в кабинете и здесь.",
+            "Те же, что на сайте. Алерты по объёму уже работают — откройте 🔔.",
             "",
         ]
         for s in self.store.list_services(include_disabled=False):
             mark = "✓" if s["slug"] in have else "○"
-            lock = " · скоро" if s["coming_soon"] else ""
-            lines.append(f"{mark} {s['icon']} <b>{_esc(s['title'])}</b>{lock}")
+            if s["slug"] == "alerts" and not s.get("coming_soon"):
+                extra = " · настроить"
+            else:
+                extra = " · скоро" if s["coming_soon"] else ""
+            lines.append(f"{mark} {s['icon']} <b>{_esc(s['title'])}</b>{extra}")
             if s.get("description"):
                 lines.append(f"    {_esc(s['description'])}")
-        lines.append("\nНажмите сервис, чтобы подписаться (лист ожидания, пока он «скоро»).")
+        lines.append("\nАлерты открывают настройки. Остальное — лист ожидания, пока «скоро».")
         return "\n".join(lines)
 
     def _users_text(self) -> str:
@@ -1113,3 +1143,219 @@ class TelegramBot:
             f"Биржи в эфире: {len(live)}"
             f"{link}"
         )
+
+    def _alert_cfg(self, user: dict) -> dict:
+        from alerts import normalize_config
+        row = self.store.get_user_service(user["id"], "alerts") if self.store else None
+        return normalize_config((row or {}).get("config") or {})
+
+    def _alert_save(self, user: dict, cfg: dict) -> dict:
+        return self.store.set_user_service_config(
+            user["id"], "alerts", cfg, enabled=True)
+
+    def _alert_text(self, user: dict) -> str:
+        from alerts import format_config_text, live_snapshot, money, window_label
+        cfg = self._alert_cfg(user)
+        lines = ["<b>🔔 Алерты по объёму</b>", format_config_text(cfg)]
+        fn = self.alerts_market_fn
+        if fn:
+            try:
+                market = fn() or {}
+                live = live_snapshot(cfg, market)
+                bits = []
+                for m, title in (("liq", "LIQ"), ("cvd", "CVD"), ("oi", "OI")):
+                    row = live.get(m) or {}
+                    bits.append(f"{title} {money(row.get('value'))}")
+                lines.append("сейчас: " + " · ".join(bits))
+                lines.append(f"окно {window_label(cfg['window_min'])}")
+            except Exception:
+                pass
+        lines.append("\nКнопки ниже — метрика, монета, окно, порог. Сигнал приходит отдельным сообщением.")
+        return "\n".join(lines)
+
+    def _alert_kb(self, user: dict) -> dict:
+        cfg = self._alert_cfg(user)
+        on = "🔔 Сигнал ВКЛ" if cfg.get("enabled") else "🔕 Сигнал выкл"
+        return {"inline_keyboard": [
+            [{"text": "💥 LIQ", "callback_data": "al:m:liq"},
+             {"text": "🌊 CVD", "callback_data": "al:m:cvd"},
+             {"text": "📊 OI", "callback_data": "al:m:oi"}],
+            [{"text": "Монета", "callback_data": "al:c"},
+             {"text": "Окно", "callback_data": "al:w"}],
+            [{"text": "Порог", "callback_data": "al:t"},
+             {"text": "Мин. удар", "callback_data": "al:n"}],
+            [{"text": on, "callback_data": "al:on"}],
+            [{"text": "← Назад", "callback_data": "services"}],
+        ]}
+
+    def _alert_coins_kb(self) -> dict:
+        from alerts import COIN_PRESETS, coin_name
+        rows = [[{"text": coin_name(c), "callback_data": f"al:c:{c}"}] for c in COIN_PRESETS]
+        rows.append([{"text": "своя монета", "callback_data": "al:c:?"}])
+        rows.append([{"text": "← К алертам", "callback_data": "al"}])
+        return {"inline_keyboard": rows}
+
+    def _alert_win_kb(self) -> dict:
+        from alerts import WINDOW_PRESETS, window_label
+        row = [{"text": window_label(w), "callback_data": f"al:w:{w}"} for w in WINDOW_PRESETS]
+        return {"inline_keyboard": [
+            row[:3], row[3:],
+            [{"text": "свои минуты", "callback_data": "al:w:?"}],
+            [{"text": "← К алертам", "callback_data": "al"}],
+        ]}
+
+    def _alert_thr_kb(self, metric: str, field: str) -> dict:
+        from alerts import MIN_PRESETS, THRESHOLD_PRESETS, money
+        presets = THRESHOLD_PRESETS if field == "thr" else MIN_PRESETS
+        rows: List[list] = []
+        row: list = []
+        prefix = f"al:{'t' if field == 'thr' else 'n'}:{metric}:"
+        for v in presets:
+            row.append({"text": money(v) if v else "0", "callback_data": prefix + str(int(v))})
+            if len(row) == 3:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+        rows.append([{"text": "своё число", "callback_data": prefix + "?"}])
+        rows.append([{"text": "← К алертам", "callback_data": "al"}])
+        return {"inline_keyboard": rows}
+
+    def _alert_metric_pick_kb(self, field: str) -> dict:
+        letter = "t" if field == "thr" else "n"
+        return {"inline_keyboard": [
+            [{"text": "LIQ", "callback_data": f"al:{letter}:liq"},
+             {"text": "CVD", "callback_data": f"al:{letter}:cvd"},
+             {"text": "OI", "callback_data": f"al:{letter}:oi"}],
+            [{"text": "← К алертам", "callback_data": "al"}],
+        ]}
+
+    def _alert_apply_text(self, user: dict, wait: str, raw) -> str:
+        from alerts import canon_symbol, money, window_label
+        cfg = self._alert_cfg(user)
+        text = raw if isinstance(raw, str) else ""
+        if wait == "coin":
+            cfg["symbol"] = canon_symbol(text)
+            self._alert_save(user, cfg)
+            return f"Монета: {cfg['symbol']}"
+        if wait == "win":
+            try:
+                n = int(float(text.replace(",", ".")))
+            except (TypeError, ValueError):
+                return "Нужно число минут, например 5."
+            cfg["window_min"] = max(1, min(n, 1440))
+            self._alert_save(user, cfg)
+            return f"Окно: {window_label(cfg['window_min'])}"
+        if wait.startswith("thr:") or wait.startswith("min:"):
+            kind, metric = wait.split(":", 1)
+            try:
+                n = float(text.replace(" ", "").replace(",", ".").replace("$", "")
+                          .replace("k", "000").replace("K", "000")
+                          .replace("m", "000000").replace("M", "000000"))
+            except (TypeError, ValueError):
+                return "Нужна сумма в долларах, например 250000 или 250k."
+            key = "threshold" if kind == "thr" else "min_event"
+            cfg[key][metric] = max(0.0, n)
+            self._alert_save(user, cfg)
+            return f"{'Порог' if kind == 'thr' else 'Мин. удар'} {metric}: {money(n)}"
+        return "Не понял."
+
+    async def _on_alert_cb(self, chat_id, user: dict, data: str, message_id) -> None:
+        tg_id = int(user.get("tg_id") or 0)
+        cfg = self._alert_cfg(user)
+        if data == "al":
+            await self.reply(chat_id, self._alert_text(user), self._alert_kb(user),
+                             message_id=message_id)
+            return
+        if data == "al:on":
+            cfg["enabled"] = not cfg.get("enabled")
+            self._alert_save(user, cfg)
+            await self.reply(chat_id, self._alert_text(user), self._alert_kb(user),
+                             message_id=message_id)
+            return
+        if data.startswith("al:m:"):
+            m = data.split(":")[2]
+            w = list(cfg.get("watch") or [])
+            if m in w:
+                if len(w) > 1:
+                    w.remove(m)
+            else:
+                w.append(m)
+            cfg["watch"] = w
+            self._alert_save(user, cfg)
+            await self.reply(chat_id, self._alert_text(user), self._alert_kb(user),
+                             message_id=message_id)
+            return
+        if data == "al:c":
+            await self.reply(chat_id, "Какую монету смотреть?", self._alert_coins_kb(),
+                             message_id=message_id)
+            return
+        if data == "al:c:?":
+            self._wait_alert[tg_id] = "coin"
+            await self.reply(chat_id, "Пришлите тикер, например BTC или ETHUSDT.\n/cancel — отмена.",
+                             self._kb_back("al"), message_id=message_id)
+            return
+        if data.startswith("al:c:"):
+            from alerts import canon_symbol
+            cfg["symbol"] = canon_symbol(data.split(":", 2)[2])
+            self._alert_save(user, cfg)
+            await self.reply(chat_id, self._alert_text(user), self._alert_kb(user),
+                             message_id=message_id)
+            return
+        if data == "al:w":
+            await self.reply(chat_id, "Окно агрегации:", self._alert_win_kb(),
+                             message_id=message_id)
+            return
+        if data == "al:w:?":
+            self._wait_alert[tg_id] = "win"
+            await self.reply(chat_id, "Сколько минут в окне? Число, например 7.\n/cancel — отмена.",
+                             self._kb_back("al"), message_id=message_id)
+            return
+        if data.startswith("al:w:"):
+            try:
+                n = int(data.split(":")[2])
+            except (IndexError, ValueError):
+                n = 5
+            cfg["window_min"] = max(1, min(n, 1440))
+            self._alert_save(user, cfg)
+            await self.reply(chat_id, self._alert_text(user), self._alert_kb(user),
+                             message_id=message_id)
+            return
+        if data in ("al:t", "al:n"):
+            field = "thr" if data == "al:t" else "min"
+            title = "Порог какой метрики?" if field == "thr" else "Мин. удар какой метрики?"
+            await self.reply(chat_id, title, self._alert_metric_pick_kb(field),
+                             message_id=message_id)
+            return
+        # al:t:liq / al:t:liq:500000 / al:t:liq:?
+        parts = data.split(":")
+        if len(parts) >= 3 and parts[1] in ("t", "n"):
+            field = "thr" if parts[1] == "t" else "min"
+            metric = parts[2]
+            if len(parts) == 3:
+                title = "Порог" if field == "thr" else "Мин. удар"
+                await self.reply(chat_id, f"{title} {metric.upper()}:",
+                                 self._alert_thr_kb(metric, field),
+                                 message_id=message_id)
+                return
+            val = parts[3]
+            if val == "?":
+                self._wait_alert[tg_id] = f"{field}:{metric}"
+                await self.reply(
+                    chat_id,
+                    "Пришлите сумму в $ — 250000 или 250k.\n/cancel — отмена.",
+                    self._kb_back("al"), message_id=message_id)
+                return
+            try:
+                n = float(val)
+            except ValueError:
+                n = 0.0
+            key = "threshold" if field == "thr" else "min_event"
+            cfg[key][metric] = max(0.0, n)
+            self._alert_save(user, cfg)
+            await self.reply(chat_id, self._alert_text(user), self._alert_kb(user),
+                             message_id=message_id)
+            return
+        await self.reply(chat_id, self._alert_text(user), self._alert_kb(user),
+                         message_id=message_id)
+

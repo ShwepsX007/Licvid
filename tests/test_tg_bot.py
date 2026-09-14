@@ -77,6 +77,20 @@ class BotMenuTest(unittest.TestCase):
             self.assertEqual(_btns(kb), ["← Назад"], data)
             self.assertEqual(_datas(kb), ["nav:home"], data)
 
+    def test_alerts_screen_from_services(self):
+        text, kb = self.bot._screen(self.user, "svc:alerts")
+        self.assertIn("Алерты", text)
+        self.assertIn("al:on", _datas(kb))
+        self.assertIn("al:m:liq", _datas(kb))
+        self.assertIn("services", _datas(kb))
+        cfg = self.bot._alert_cfg(self.user)
+        cfg["enabled"] = True
+        cfg["watch"] = ["liq"]
+        cfg["window_min"] = 15
+        self.bot._alert_save(self.user, cfg)
+        text2, _kb2 = self.bot._screen(self.user, "svc:alerts")
+        self.assertIn("включён", text2)
+
     def test_services_and_admin_have_back(self):
         _t, skb = self.bot._screen(self.user, "services")
         self.assertIn("← Назад", _btns(skb))

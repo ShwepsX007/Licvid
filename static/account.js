@@ -219,7 +219,8 @@
         }
         var box = $("svc-grid");
         if (!box) return;
-        box.innerHTML = (services || []).map(function (s) {
+        var rest = (services || []).filter(function (s) { return s.slug !== "alerts"; });
+        box.innerHTML = rest.map(function (s) {
             var soon = s.coming_soon ? '<div class="soon">⏳ ' + t("soon") + "</div>" : "";
             var label = s.coming_soon
                 ? (s.subscribed ? t("waitlistOn") : t("waitlistOff"))
@@ -232,7 +233,7 @@
                 '<div class="row-actions"><button class="btn btn-ghost btn-small" data-slug="' +
                 s.slug + '" data-on="' + (s.subscribed ? "0" : "1") + '">' + label +
                 "</button></div></div>";
-        }).join("") || "<p class='lead'>—</p>";
+        }).join("") || "";
         box.querySelectorAll("button[data-slug]").forEach(function (btn) {
             btn.addEventListener("click", function () {
                 api("/api/account/services/" + btn.getAttribute("data-slug"), {
@@ -241,6 +242,7 @@
                 }).then(function () { bootCabinet(); });
             });
         });
+        bootAlerts();
     }
 
     function bootCabinet() {
@@ -257,6 +259,308 @@
                 api("/api/auth/logout", { method: "POST" }).then(function () {
                     location.href = "/";
                 });
+            });
+        });
+    }
+
+    /* ---------- volume alerts ---------- */
+    var alCfg = null;
+    var alPresets = null;
+    var alTimer = null;
+    var alSaveT = null;
+    var alBusy = false;
+
+    function alMoney(v) {
+        v = Number(v) || 0;
+        var sign = v < 0 ? "−" : "";
+        v = Math.abs(v);
+        if (v >= 1e9) return sign + "$" + (v / 1e9).toFixed(2) + "B";
+        if (v >= 1e6) return sign + "$" + (v / 1e6).toFixed(2) + "M";
+        if (v >= 1e3) return sign + "$" + (v / 1e3).toFixed(1) + "K";
+        return sign + "$" + Math.round(v);
+    }
+    function alWin(m) {
+        m = Number(m) || 0;
+        if (m >= 60 && m % 60 === 0) return (m / 60) + "ч";
+        return m + "м";
+    }
+    function alHas(m) {
+        return alCfg && (alCfg.watch || []).indexOf(m) >= 0;
+    }
+    function alChip(on, attrs, label) {
+        return '<button type="button" class="al-chip' + (on ? " on" : "") + '" ' + attrs + ">" +
+            label + "</button>";
+    }
+
+    function bootAlerts() {
+        if (!$("alerts-board")) return;
+        loadAlerts(true);
+        if (alTimer) clearInterval(alTimer);
+        alTimer = setInterval(function () { loadAlerts(false); }, 4000);
+    }
+
+    function loadAlerts(full) {
+        if (alBusy && !full) return;
+        api("/api/account/alerts").then(function (d) {
+            if (!d.ok) return;
+            alPresets = d.presets || alPresets;
+            if (full || !alCfg) {
+                alCfg = d.config || alCfg;
+                paintAlerts(d, true);
+            } else {
+                paintAlertsLive(d);
+            }
+        });
+    }
+
+    function saveAlerts() {
+        if (!alCfg) return;
+        alBusy = true;
+        var st = $("al-status");
+        if (st) { st.className = "al-status"; st.textContent = "сохраняю…"; }
+        api("/api/account/alerts", {
+            method: "POST",
+            body: JSON.stringify(alCfg),
+        }).then(function (d) {
+            alBusy = false;
+            if (d.config) alCfg = d.config;
+            if (st) {
+                st.className = "al-status " + (d.ok ? "ok" : "");
+                st.textContent = d.ok ? "сохранено · то же в боте" : (d.error || "ошибка");
+            }
+            if (d.live) paintAlertsLive({ live: d.live, history: null, config: alCfg });
+        }).catch(function () { alBusy = false; });
+    }
+
+    function alDebounce() {
+        if (alSaveT) clearTimeout(alSaveT);
+        alSaveT = setTimeout(saveAlerts, 280);
+    }
+
+    function paintAlerts(d, bind) {
+        var board = $("alerts-board");
+        if (!board || !alCfg) return;
+        var live = d.live || {};
+        var hist = d.history || [];
+        var symbols = d.symbols || [];
+        var p = alPresets || { windows: [1, 5, 15, 30, 60, 240],
+            thresholds: [50000, 100000, 250000, 500000, 1000000, 5000000],
+            min_event: [0, 10000, 25000, 50000, 100000],
+            coins: ["ALL", "BTC_USDT", "ETH_USDT", "SOL_USDT"] };
+        function meter(key, title) {
+            var row = live[key] || {};
+            var on = alHas(key);
+            var val = row.value || 0;
+            var thr = (alCfg.threshold || {})[key] || 1;
+            var pct = Math.max(4, Math.min(100, Math.round(100 * Math.abs(val) / thr)));
+            var hot = on && Math.abs(val) >= thr;
+            var cls = "gold";
+            if (key !== "liq") cls = val >= 0 ? "pos" : "neg";
+            var extra = "";
+            if (key === "liq" && row.market) extra = "рынок " + alMoney(row.market.usd);
+            else extra = (row.symbol && row.symbol !== "ALL" ? String(row.symbol).split("_")[0] : "") +
+                (row.count ? " · " + row.count + " шт." : "");
+            return '<div class="al-meter' + (on ? " on" : "") + (hot ? " hot" : "") +
+                '" data-metric="' + key + '"><div class="k">' + title +
+                (on ? " · ON" : "") + "</div><div class=\"v " + cls + "\">" +
+                alMoney(val) + "</div><div class=\"s\">" + extra +
+                " / порог " + alMoney(thr) + "</div><div class=\"al-bar\"><i style=\"width:" +
+                pct + '%"></i></div></div>';
+        }
+        function chips(list, cur, attr, fmt) {
+            return list.map(function (v) {
+                return alChip(String(v) === String(cur), attr + '="' + v + '"', fmt ? fmt(v) : String(v));
+            }).join("");
+        }
+        var coin = alCfg.symbol || "ALL";
+        var coinLabel = coin === "ALL" ? "все" : String(coin).split("_")[0];
+        board.innerHTML =
+            '<div class="al-head"><div><h3>🔔 Алерты по объёму</h3>' +
+            '<div class="al-sub">Смотрю ликвидации, CVD и OI в выбранном окне. Пересёк порог — сообщение сюда и в Telegram.</div></div>' +
+            '<label class="al-switch' + (alCfg.enabled ? " on" : "") + '" id="al-sw">' +
+            "<i></i><span>" + (alCfg.enabled ? "СИГНАЛ ВКЛ" : "СИГНАЛ ВЫКЛ") + "</span></label></div>" +
+            '<div class="al-meters">' +
+            meter("liq", "LIQ") + meter("cvd", "CVD") + meter("oi", "OI") +
+            "</div>" +
+            '<div class="al-grid"><div>' +
+            '<div class="al-label">Монета</div><div class="al-chips" id="al-coins">' +
+            chips(p.coins || [], coin, "data-coin", function (v) {
+                return v === "ALL" ? "все" : String(v).split("_")[0];
+            }) + "</div>" +
+            '<div class="al-row" style="margin-top:8px"><input id="al-coin-in" type="text" list="al-sym-list" placeholder="BTC_USDT или тикер" value="' +
+            (coin === "ALL" ? "" : coin) + '"><datalist id="al-sym-list">' +
+            (symbols || []).map(function (s) { return "<option value=\"" + s + "\">"; }).join("") +
+            "</datalist></div>" +
+            '<div class="al-label">Окно агрегации</div><div class="al-chips" id="al-wins">' +
+            chips(p.windows || [], alCfg.window_min, "data-win", alWin) +
+            '</div><div class="al-row" style="margin-top:8px"><input id="al-win-in" type="number" min="1" max="1440" placeholder="минуты" value="' +
+            alCfg.window_min + '"></div>' +
+            '<div class="al-label">Порог срабатывания</div>' +
+            ["liq", "cvd", "oi"].map(function (m) {
+                var cur = (alCfg.threshold || {})[m];
+                return '<div class="al-label" style="margin-top:8px">' + m.toUpperCase() + "</div>" +
+                    '<div class="al-chips" data-thr="' + m + '">' +
+                    chips(p.thresholds || [], cur, "data-thrval", alMoney) +
+                    '</div><div class="al-row" style="margin-top:6px"><input data-thrin="' + m +
+                    '" type="number" min="0" step="1000" value="' + Math.round(cur || 0) + '"></div>';
+            }).join("") +
+            "</div><div>" +
+            '<div class="al-label">Мин. удар в окне (мелочь не считается)</div>' +
+            ["liq", "cvd", "oi"].map(function (m) {
+                var cur = (alCfg.min_event || {})[m];
+                return '<div class="al-label" style="margin-top:8px">' + m.toUpperCase() + "</div>" +
+                    '<div class="al-chips" data-min="' + m + '">' +
+                    chips(p.min_event || [], cur, "data-minval", alMoney) +
+                    '</div><div class="al-row" style="margin-top:6px"><input data-minin="' + m +
+                    '" type="number" min="0" step="1000" value="' + Math.round(cur || 0) + '"></div>';
+            }).join("") +
+            '<div class="al-label">Лента сигналов</div>' +
+            '<div class="al-tape" id="al-tape">' + alTape(hist) + "</div>" +
+            '<div class="al-status" id="al-status">монета: ' + coinLabel +
+            " · окно " + alWin(alCfg.window_min) + "</div>" +
+            "</div></div>";
+        if (bind) bindAlerts();
+    }
+
+    function alTape(hist) {
+        if (!hist || !hist.length) return '<div class="s">пока тихо — порог не пересекали</div>';
+        return hist.map(function (h) {
+            var ts = h.ts ? new Date(Number(h.ts) * 1000) : null;
+            var t = ts ? ts.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—";
+            var sym = String(h.symbol || "").split("_")[0];
+            return '<div class="row"><span class="t">' + t + '</span><span class="m">' +
+                String(h.metric || "").toUpperCase() + "</span><span>" +
+                sym + "  " + alMoney(h.value) + " / " + alMoney(h.threshold) +
+                " · " + alWin(h.window_min) + "</span></div>";
+        }).join("");
+    }
+
+    function paintAlertsLive(d) {
+        var live = d.live || {};
+        ["liq", "cvd", "oi"].forEach(function (key) {
+            var el = document.querySelector('.al-meter[data-metric="' + key + '"]');
+            if (!el) return;
+            var row = live[key] || {};
+            var val = row.value || 0;
+            var thr = (alCfg && alCfg.threshold && alCfg.threshold[key]) || 1;
+            var pct = Math.max(4, Math.min(100, Math.round(100 * Math.abs(val) / thr)));
+            var hot = alHas(key) && Math.abs(val) >= thr;
+            el.classList.toggle("on", alHas(key));
+            el.classList.toggle("hot", hot);
+            var v = el.querySelector(".v");
+            if (v) {
+                v.textContent = alMoney(val);
+                v.className = "v " + (key === "liq" ? "gold" : (val >= 0 ? "pos" : "neg"));
+            }
+            var bar = el.querySelector(".al-bar i");
+            if (bar) bar.style.width = pct + "%";
+        });
+        if (d.history) {
+            var tape = $("al-tape");
+            if (tape) tape.innerHTML = alTape(d.history);
+        }
+    }
+
+    function bindAlerts() {
+        var sw = $("al-sw");
+        if (sw) sw.addEventListener("click", function () {
+            alCfg.enabled = !alCfg.enabled;
+            sw.classList.toggle("on", alCfg.enabled);
+            sw.querySelector("span").textContent = alCfg.enabled ? "СИГНАЛ ВКЛ" : "СИГНАЛ ВЫКЛ";
+            alDebounce();
+        });
+        document.querySelectorAll(".al-meter[data-metric]").forEach(function (el) {
+            el.addEventListener("click", function () {
+                var m = el.getAttribute("data-metric");
+                var w = alCfg.watch ? alCfg.watch.slice() : [];
+                var i = w.indexOf(m);
+                if (i >= 0) {
+                    if (w.length === 1) return;
+                    w.splice(i, 1);
+                } else w.push(m);
+                alCfg.watch = w;
+                el.classList.toggle("on", alHas(m));
+                alDebounce();
+            });
+        });
+        document.querySelectorAll("[data-coin]").forEach(function (btn) {
+            btn.addEventListener("click", function () {
+                alCfg.symbol = btn.getAttribute("data-coin");
+                document.querySelectorAll("[data-coin]").forEach(function (b) {
+                    b.classList.toggle("on", b === btn);
+                });
+                var inp = $("al-coin-in");
+                if (inp) inp.value = alCfg.symbol === "ALL" ? "" : alCfg.symbol;
+                alDebounce();
+            });
+        });
+        var cin = $("al-coin-in");
+        if (cin) cin.addEventListener("change", function () {
+            var v = (cin.value || "").trim().toUpperCase().replace("-", "_");
+            alCfg.symbol = v || "ALL";
+            alDebounce();
+        });
+        document.querySelectorAll("[data-win]").forEach(function (btn) {
+            btn.addEventListener("click", function () {
+                alCfg.window_min = Number(btn.getAttribute("data-win")) || 5;
+                document.querySelectorAll("[data-win]").forEach(function (b) {
+                    b.classList.toggle("on", b === btn);
+                });
+                var inp = $("al-win-in");
+                if (inp) inp.value = alCfg.window_min;
+                alDebounce();
+            });
+        });
+        var win = $("al-win-in");
+        if (win) win.addEventListener("change", function () {
+            var n = Math.max(1, Math.min(1440, Number(win.value) || 5));
+            alCfg.window_min = n;
+            alDebounce();
+        });
+        document.querySelectorAll("[data-thrval]").forEach(function (btn) {
+            btn.addEventListener("click", function () {
+                var box = btn.parentNode;
+                var m = box && box.getAttribute("data-thr");
+                if (!m) return;
+                alCfg.threshold = alCfg.threshold || {};
+                alCfg.threshold[m] = Number(btn.getAttribute("data-thrval")) || 0;
+                box.querySelectorAll("[data-thrval]").forEach(function (b) {
+                    b.classList.toggle("on", b === btn);
+                });
+                var inp = document.querySelector('[data-thrin="' + m + '"]');
+                if (inp) inp.value = alCfg.threshold[m];
+                alDebounce();
+            });
+        });
+        document.querySelectorAll("[data-thrin]").forEach(function (inp) {
+            inp.addEventListener("change", function () {
+                var m = inp.getAttribute("data-thrin");
+                alCfg.threshold = alCfg.threshold || {};
+                alCfg.threshold[m] = Math.max(0, Number(inp.value) || 0);
+                alDebounce();
+            });
+        });
+        document.querySelectorAll("[data-minval]").forEach(function (btn) {
+            btn.addEventListener("click", function () {
+                var box = btn.parentNode;
+                var m = box && box.getAttribute("data-min");
+                if (!m) return;
+                alCfg.min_event = alCfg.min_event || {};
+                alCfg.min_event[m] = Number(btn.getAttribute("data-minval")) || 0;
+                box.querySelectorAll("[data-minval]").forEach(function (b) {
+                    b.classList.toggle("on", b === btn);
+                });
+                var inp = document.querySelector('[data-minin="' + m + '"]');
+                if (inp) inp.value = alCfg.min_event[m];
+                alDebounce();
+            });
+        });
+        document.querySelectorAll("[data-minin]").forEach(function (inp) {
+            inp.addEventListener("change", function () {
+                var m = inp.getAttribute("data-minin");
+                alCfg.min_event = alCfg.min_event || {};
+                alCfg.min_event[m] = Math.max(0, Number(inp.value) || 0);
+                alDebounce();
             });
         });
     }

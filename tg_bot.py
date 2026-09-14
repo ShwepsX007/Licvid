@@ -52,6 +52,8 @@ class TelegramBot:
         self.digest_fn = digest_fn or (lambda: {})
         self._digest_task: Optional[asyncio.Task] = None
         self._ch_ok: Dict[int, float] = {}   # tg_id -> cache until
+        self._digest_err = ""
+        self._last_tg_err = ""
         self.username = ""
         self.bot_id = 0
         self.running = False
@@ -141,6 +143,17 @@ class TelegramBot:
             body["reply_markup"] = markup
         res = await self._call("sendMessage", body)
         if not res or not res.get("ok"):
+            desc = str((res or {}).get("description") or "нет ответа")
+            self._last_tg_err = desc
+            if parse and ("parse entit" in desc.lower() or "can't find end of the entity" in desc.lower()):
+                body.pop("parse_mode", None)
+                res = await self._call("sendMessage", body)
+                if res and res.get("ok"):
+                    mid = (res.get("result") or {}).get("message_id")
+                    try:
+                        return int(mid) if mid is not None else None
+                    except (TypeError, ValueError):
+                        return None
             return None
         mid = (res.get("result") or {}).get("message_id")
         try:
@@ -264,16 +277,66 @@ class TelegramBot:
                              old_id=message_id)
         return False
 
+    def _digest_result_text(self, ok: bool) -> str:
+        if ok:
+            cid = self.channel_chat_id() or "—"
+            return f"Сводка ушла в канал.\n<code>{_esc(cid)}</code>"
+        err = _esc(self._digest_err or "неизвестная ошибка")
+        return (
+            "<b>Не удалось отправить сводку</b>\n"
+            f"{err}\n\n"
+            "Если бот уже админ — перешлите сюда любой пост из канала, "
+            "затем снова /digest."
+        )
+
+    async def _bind_channel_from_message(self, msg: dict, chat_id: int) -> bool:
+        """Админ переслал пост из канала → запоминаем id."""
+        chat = self._extract_forward_chat(msg)
+        if not chat:
+            return False
+        cid = self.remember_channel(chat.get("id"), chat.get("title") or "")
+        title = _esc(chat.get("title") or cid)
+        await self.show_menu(
+            chat_id,
+            f"Канал привязан: <b>{title}</b>\n<code>{_esc(cid)}</code>\n\n"
+            "Теперь /digest отправит сводку туда. "
+            "У бота должно быть право «Публикация сообщений».",
+            self._admin_kb(),
+        )
+        return True
+
+    def remember_channel(self, chat_id, title: str = "") -> str:
+        cid = str(chat_id).strip()
+        if not cid:
+            return ""
+        self.store.set_setting("channel_id", cid)
+        if title:
+            self.store.set_setting("channel_title", str(title)[:80])
+        log.info("канал привязан chat_id=%s title=%s", cid, title)
+        return cid
+
+    def _extract_forward_chat(self, msg: dict) -> Optional[dict]:
+        origin = msg.get("forward_origin") if isinstance(msg.get("forward_origin"), dict) else {}
+        chat = origin.get("chat") if origin.get("type") in ("channel", "chat") else None
+        if not isinstance(chat, dict):
+            chat = msg.get("forward_from_chat")
+        if not isinstance(chat, dict):
+            return None
+        if chat.get("type") not in ("channel", "supergroup"):
+            return None
+        if chat.get("id") in (None, "", 0):
+            return None
+        return chat
+
     async def _on_my_chat_member(self, ev: dict) -> None:
         chat = ev.get("chat") or {}
-        if chat.get("type") != "channel":
+        if chat.get("type") not in ("channel", "supergroup"):
             return
         new = ev.get("new_chat_member") or {}
         st = str(new.get("status") or "")
         cid = chat.get("id")
         if cid and st in ("administrator", "creator"):
-            self.store.set_setting("channel_id", str(cid))
-            log.info("канал подключён chat_id=%s title=%s", cid, chat.get("title"))
+            self.remember_channel(cid, chat.get("title") or "")
         elif cid and st in ("left", "kicked"):
             log.warning("бота убрали из канала chat_id=%s", cid)
 
@@ -305,7 +368,11 @@ class TelegramBot:
             log.warning("tg sendPhoto: %s", e)
             return None
         if not res or not res.get("ok"):
-            log.warning("tg sendPhoto: %s", (res or {}).get("description"))
+            desc = str((res or {}).get("description") or "нет ответа")
+            self._last_tg_err = desc
+            log.warning("tg sendPhoto: %s", desc)
+            if caption and ("parse entit" in desc.lower() or "can't find end of the entity" in desc.lower()):
+                return await self.send_photo(chat_id, path, caption="", markup=markup)
             return None
         mid = (res.get("result") or {}).get("message_id")
         try:
@@ -340,13 +407,21 @@ class TelegramBot:
             except asyncio.CancelledError:
                 break
 
+    def _digest_fail(self, reason: str) -> bool:
+        self._digest_err = reason
+        log.warning("сводка: %s", reason)
+        return False
+
     async def post_channel_digest(self, force: bool = False) -> bool:
         from channel_digest import pick_image, render_post
+        self._digest_err = ""
+        self._last_tg_err = ""
         cid = self.channel_chat_id()
         if not cid:
-            log.warning("сводка: нет channel_id — добавьте бота админом канала "
-                        "или задайте LIQSCOPE_CHANNEL_ID")
-            return False
+            return self._digest_fail(
+                "Бот ещё не знает id канала (инвайт-ссылки недостаточно). "
+                "Перешлите сюда любой пост из канала — так он запомнит адрес. "
+                "В правах админа включите «Публикация сообщений».")
         raw = self.digest_fn() if self.digest_fn else {}
         if asyncio.iscoroutine(raw):
             raw = await raw
@@ -376,8 +451,17 @@ class TelegramBot:
         if ok:
             self.store.set_setting("channel_digest_n", str(n + 1))
             self.store.set_setting("channel_digest_ts", str(int(time.time())))
-            log.info("сводка в канал n=%s", n)
-        return ok
+            log.info("сводка в канал n=%s chat=%s", n, cid)
+            return True
+        err = getattr(self, "_last_tg_err", "") or "Telegram отклонил пост"
+        low = err.lower()
+        extra = ""
+        if "chat not found" in low:
+            extra = " Перешлите боту любой пост из канала, чтобы привязать id."
+        elif "not enough right" in low or "need administrator" in low or "have no rights" in low:
+            extra = (" В канале у бота должно быть право «Публикация сообщений» "
+                     "(и «Прикрепление файлов», если шлём картинку).")
+        return self._digest_fail(err + extra)
 
     async def answer_cb(self, cb_id: str, text: str = "") -> None:
         # Пустой text Telegram иногда отвергает — тогда клиент «залипает»
@@ -443,6 +527,8 @@ class TelegramBot:
         if user["is_banned"]:
             await self.send(chat_id, "Доступ закрыт.")
             return
+        if user.get("is_admin") and await self._bind_channel_from_message(msg, chat_id):
+            return
         if self._wait_broadcast.get(int(from_u["id"])) and user["is_admin"]:
             if text.startswith("/"):
                 self._wait_broadcast.pop(int(from_u["id"]), None)
@@ -461,9 +547,8 @@ class TelegramBot:
             return
         if text.startswith("/digest") and user.get("is_admin"):
             ok = await self.post_channel_digest(force=True)
-            await self.show_menu(chat_id,
-                                 "Сводка ушла в канал." if ok else "Не удалось отправить сводку. Бот должен быть админом канала.",
-                                 self._admin_kb() if user.get("is_admin") else self._menu(user))
+            await self.show_menu(chat_id, self._digest_result_text(ok),
+                                 self._admin_kb())
         elif text.startswith("/help"):
             await self.show_menu(chat_id, self._help(user), self._menu(user))
         elif text.startswith("/cabinet"):
@@ -521,9 +606,8 @@ class TelegramBot:
                 return
             if data == "a:digest" and user.get("is_admin"):
                 posted = await self.post_channel_digest(force=True)
-                msg = ("Сводка ушла в канал." if posted
-                       else "Не удалось отправить. Бот должен быть админом канала.")
-                await self.reply(chat_id, msg, self._admin_kb(), message_id=message_id)
+                await self.reply(chat_id, self._digest_result_text(posted),
+                                 self._admin_kb(), message_id=message_id)
                 return
             if data != "ch:check" and not await self._ensure_channel(
                     chat_id, user, message_id=message_id):

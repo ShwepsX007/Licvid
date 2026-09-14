@@ -227,6 +227,8 @@ class BotMenuTest(unittest.TestCase):
         self.bot._channel_id_cfg = ""
         ok = asyncio.run(self.bot.post_channel_digest())
         self.assertFalse(ok)
+        self.assertIn("Перешлите", self.bot._digest_err)
+        self.assertIn("Перешлите", self.bot._digest_result_text(False))
 
     def test_my_chat_member_stores_channel_id(self):
         asyncio.run(self.bot._on_my_chat_member({
@@ -235,6 +237,54 @@ class BotMenuTest(unittest.TestCase):
                                 "user": {"id": 1, "is_bot": True}},
         }))
         self.assertEqual(self.store.get_setting("channel_id"), "-100555")
+
+    def test_my_chat_member_accepts_supergroup(self):
+        asyncio.run(self.bot._on_my_chat_member({
+            "chat": {"id": -100777, "type": "supergroup", "title": "Grp"},
+            "new_chat_member": {"status": "administrator",
+                                "user": {"id": 1, "is_bot": True}},
+        }))
+        self.assertEqual(self.store.get_setting("channel_id"), "-100777")
+
+    def test_digest_shows_telegram_error(self):
+        self.bot._channel_id_cfg = "-100111"
+
+        async def fake(method, payload=None):
+            return {"ok": False, "description": "Forbidden: bot is not a member of the channel chat"}
+
+        self.bot._call = fake  # type: ignore
+        ok = asyncio.run(self.bot.post_channel_digest())
+        self.assertFalse(ok)
+        self.assertIn("not a member", self.bot._digest_err)
+        self.assertIn("not a member", self.bot._digest_result_text(False))
+        self.assertNotIn("должен быть админом", self.bot._digest_result_text(False))
+
+    def test_admin_forward_binds_channel(self):
+        calls = []
+
+        async def fake(method, payload=None):
+            calls.append((method, payload or {}))
+            if method == "sendMessage":
+                return {"ok": True, "result": {"message_id": 44}}
+            return {"ok": True}
+
+        self.bot._call = fake  # type: ignore
+        upd = {
+            "update_id": 1,
+            "message": {
+                "message_id": 9,
+                "chat": {"id": 1001},
+                "from": {"id": 1001, "username": "boss", "first_name": "Ada"},
+                "text": "ликвидации",
+                "forward_from_chat": {
+                    "id": -100888, "type": "channel", "title": "LiqScope",
+                },
+            },
+        }
+        asyncio.run(self.bot._on_update(upd))
+        self.assertEqual(self.store.get_setting("channel_id"), "-100888")
+        sent = [p for m, p in calls if m == "sendMessage"][0]
+        self.assertIn("привязан", sent["text"].lower())
 
     def test_not_modified_is_success_and_retries(self):
         calls = []

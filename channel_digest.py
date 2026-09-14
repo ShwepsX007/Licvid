@@ -12,8 +12,37 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 IMAGES_DIR = os.path.join(HERE, "static", "channel")
 
 WINDOW_SEC = 4 * 3600
-VARIANT_COUNT = 24
 CAPTION_LIMIT = 1024
+
+# Шаблоны шапок. {h} — окно в часах. Админ может удалить/добавить свои в БД.
+DEFAULT_HEAD_TEMPLATES = (
+    "🌙 Ночная смена на ленте. {h} часа — и рынок снова кого-то съел.",
+    "🔥 Разбор полётов за {h}ч. Без розовых очков, как есть.",
+    "👁 Кто кормил ленту последние {h} часа. Спойлер: не джедаи.",
+    "💥 {h} часа огня. Коротко, по фактам, с характером.",
+    "📓 Дневник терминала. Окно {h}ч, настроение рабочее.",
+    "🪖 Сводка с передовой. Ликвидации за {h} часа — ниже.",
+    "☕ Пока вы пили кофе, лента уже намолотила кассу.",
+    "🛠 Зашёл проверить одну свечу. Ушёл со сводкой за {h}ч.",
+    "😬 Опять кто-то забыл, что такое стоп. Разбор за {h} часа.",
+    "🧪 Это не сигнал. Это рентген рынка за {h}ч.",
+    "🗣 Пишу как есть: {h} часа, и плечи снова короче, чем казались.",
+    "🩸 Касса боли за {h} часа. Кто виноват — тоже написал.",
+    "🎬 Живой эфир с ленты. Без монтажа и без жалости.",
+    "🧊 Тихий час? Нет. Просто резали не тех.",
+    "📌 Вечерняя планёрка с лентой: кто кого вынес за {h}ч.",
+    "⚠️ Если плечо было «чуть-чуть» — вот счёт за {h} часа.",
+    "🧠 Рынок не обязан быть вежливым. За {h}ч это видно сразу.",
+    "📉 Не паника. Просто цифры, которые не умеют врать.",
+    "🃏 Короткий разбор. Длинные плечи сегодня плохо жили.",
+    "📡 Лента не молчала. Я тоже не буду.",
+    "🧹 Это не «коррекция». Это кто-то кормил стакан {h} часа.",
+    "📸 Снял слепок рынка. Держитесь за стул.",
+    "🕐 Утро начинается не с кофе. С трупов на графике.",
+    "💬 Смотрел ленту {h} часа. Кому досталось — в цифрах ниже.",
+)
+VARIANT_COUNT = len(DEFAULT_HEAD_TEMPLATES)
+HEAD_MAX_LEN = 240
 
 EXCH_NAMES = {
     "binance": "Binance",
@@ -268,42 +297,59 @@ def _facts(snap: dict) -> dict:
     }
 
 
+def format_headline(tpl: str, h: int = 4) -> str:
+    """Подставляет {h} и оборачивает в <b>, если админ прислал голый текст."""
+    import html as _html
+    s = (tpl or "").strip()
+    if not s:
+        return ""
+    s = s.replace("{h}", str(int(h))).replace("{H}", str(int(h)))
+    s = s[:HEAD_MAX_LEN + 32]
+    if "<" in s:
+        return s
+    return f"<b>{_html.escape(s, quote=False)}</b>"
+
+
 def _headlines(h: int) -> tuple:
-    """Шапка как у живого человека, не как у дашборда. {h} — окно в часах."""
-    return (
-        f"🌙 <b>Ночная смена на ленте. {h} часа — и рынок снова кого-то съел.</b>",
-        f"🔥 <b>Разбор полётов за {h}ч. Без розовых очков, как есть.</b>",
-        f"👁 <b>Кто кормил ленту последние {h} часа. Спойлер: не джедаи.</b>",
-        f"💥 <b>{h} часа огня. Коротко, по фактам, с характером.</b>",
-        f"📓 <b>Дневник терминала. Окно {h}ч, настроение рабочее.</b>",
-        f"🪖 <b>Сводка с передовой. Ликвидации за {h} часа — ниже.</b>",
-        f"☕ <b>Пока вы пили кофе, лента уже намолотила кассу.</b>",
-        f"🛠 <b>Зашёл проверить одну свечу. Ушёл со сводкой за {h}ч.</b>",
-        f"😬 <b>Опять кто-то забыл, что такое стоп. Разбор за {h} часа.</b>",
-        f"🧪 <b>Это не сигнал. Это рентген рынка за {h}ч.</b>",
-        f"🗣 <b>Пишу как есть: {h} часа, и плечи снова короче, чем казались.</b>",
-        f"🩸 <b>Касса боли за {h} часа. Кто виноват — тоже написал.</b>",
-        f"🎬 <b>Живой эфир с ленты. Без монтажа и без жалости.</b>",
-        f"🧊 <b>Тихий час? Нет. Просто резали не тех.</b>",
-        f"📌 <b>Вечерняя планёрка с лентой: кто кого вынес за {h}ч.</b>",
-        f"⚠️ <b>Если плечо было «чуть-чуть» — вот счёт за {h} часа.</b>",
-        f"🧠 <b>Рынок не обязан быть вежливым. За {h}ч это видно сразу.</b>",
-        f"📉 <b>Не паника. Просто цифры, которые не умеют врать.</b>",
-        f"🃏 <b>Короткий разбор. Длинные плечи сегодня плохо жили.</b>",
-        f"📡 <b>Лента не молчала. Я тоже не буду.</b>",
-        f"🧹 <b>Это не «коррекция». Это кто-то кормил стакан {h} часа.</b>",
-        f"📸 <b>Снял слепок рынка. Держитесь за стул.</b>",
-        f"🕐 <b>Утро начинается не с кофе. С трупов на графике.</b>",
-        f"💬 <b>Смотрел ленту {h} часа. Кому досталось — в цифрах ниже.</b>",
-    )
+    """Встроенные шапки (пока в БД нет своих)."""
+    return tuple(format_headline(t, h) for t in DEFAULT_HEAD_TEMPLATES)
 
 
-def render_post(snap: dict, variant: int = 0) -> str:
+def active_headlines(store=None, h: int = 4) -> List[str]:
+    """Шапки из админки; если таблица пустая — дефолт из кода."""
+    rows = []
+    if store is not None:
+        try:
+            rows = store.list_digest_heads()
+        except Exception:
+            rows = []
+    out = [format_headline(r.get("text") or "", h) for r in (rows or [])]
+    out = [x for x in out if x]
+    return out or list(_headlines(h))
+
+
+def active_images(store=None) -> List[str]:
+    """Фото из админки; если пусто — bundled static/channel."""
+    rows = []
+    if store is not None:
+        try:
+            rows = store.list_digest_photos()
+        except Exception:
+            rows = []
+    out = []
+    for r in rows or []:
+        p = r.get("path") or ""
+        if p and os.path.isfile(p):
+            out.append(p)
+    return out or list_images()
+
+
+def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = None) -> str:
     """Сводка: живая шапка + читаемые цифры. variant крутит и то и другое."""
     f = _facts(snap)
     h, n = f["h"], f["n"]
     tail = "— <i>LiqScope</i>"
-    heads = _headlines(h)
+    heads = [x for x in (headlines or []) if x] or list(_headlines(h))
     v = int(variant) % max(1, len(heads))
     head = heads[v]
 
@@ -425,8 +471,11 @@ def list_images() -> List[str]:
     return out
 
 
-def pick_image(variant: int = 0) -> Optional[str]:
-    imgs = list_images()
+def pick_image(variant: int = 0, images: Optional[List[str]] = None) -> Optional[str]:
+    imgs = [p for p in (images if images is not None else list_images())
+            if p and os.path.isfile(p)]
+    if not imgs:
+        imgs = list_images()
     if not imgs:
         return None
     return imgs[int(variant) % len(imgs)]

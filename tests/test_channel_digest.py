@@ -9,8 +9,8 @@ HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
 
 from channel_digest import (  # noqa: E402
-    CAPTION_LIMIT, VARIANT_COUNT, _headlines, collect_digest, list_images,
-    money, pick_image, render_post,
+    CAPTION_LIMIT, VARIANT_COUNT, _headlines, collect_digest,
+    format_headline, list_images, money, pick_image, render_post,
 )
 
 
@@ -96,6 +96,15 @@ class DigestTest(unittest.TestCase):
         t = render_post(snap, 0)
         self.assertIn("лидеров нет", t)
         self.assertLessEqual(len(t), CAPTION_LIMIT)
+
+    def test_custom_headlines_used(self):
+        snap = collect_digest(self.events, now=self.now, oi=self.oi, cvd=self.cvd)
+        custom = [format_headline("☕ Моя шапка за {h}ч. Цифры ниже.", 4)]
+        t = render_post(snap, 0, headlines=custom)
+        self.assertIn("Моя шапка", t)
+        self.assertIn("BTC", t)
+        self.assertLessEqual(len(t), CAPTION_LIMIT)
+        self.assertIn("4ч", t)
 
     def test_images_exist(self):
         imgs = list_images()

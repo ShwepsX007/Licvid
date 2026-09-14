@@ -77,6 +77,30 @@
             <div id="admin-svc"></div>
         </div>
     </div>
+
+    <div class="card" style="margin-top:14px">
+        <h3>Сводка в канал — шапки и фото</h3>
+        <p class="lead">Каждый пост берёт следующую шапку и картинку по кругу. Можно писать как блогер; <code>{h}</code> подставится как «4» (окно в часах). То же самое есть в боте: Админка → Шаблоны канала.</p>
+        <div class="grid grid-2" style="margin-top:12px">
+            <div>
+                <label>Новая шапка</label>
+                <textarea id="tpl-head-in" placeholder="☕ Пока вы пили кофе, лента уже намолотила кассу за {h}ч."></textarea>
+                <div class="row-actions">
+                    <button class="btn btn-primary" id="tpl-head-add" type="button">Добавить шапку</button>
+                    <span class="meta" id="tpl-head-status"></span>
+                </div>
+                <ul class="tpl-list" id="tpl-heads"></ul>
+            </div>
+            <div>
+                <label>Новое фото (jpg / png / webp, до 4 МБ)</label>
+                <input id="tpl-photo-in" type="file" accept="image/jpeg,image/png,image/webp">
+                <div class="row-actions">
+                    <span class="meta" id="tpl-photo-status"></span>
+                </div>
+                <div class="tpl-photos" id="tpl-photos"></div>
+            </div>
+        </div>
+    </div>
 </main>
 <script src="/static/account.js"></script>
 </body>

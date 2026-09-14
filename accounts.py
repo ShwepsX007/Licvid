@@ -225,6 +225,17 @@ class Store:
                     action TEXT NOT NULL,
                     detail TEXT
                 );
+                CREATE TABLE IF NOT EXISTS digest_heads (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    text TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS digest_photos (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    path TEXT NOT NULL,
+                    name TEXT,
+                    created_at REAL NOT NULL
+                );
                 """
             )
             self._db.commit()
@@ -238,6 +249,7 @@ class Store:
                          s["icon"], s["enabled"], s["coming_soon"], s["sort"]),
                     )
             self._db.commit()
+        self._seed_digest()
 
     # ----- users ----------------------------------------------------------
     def upsert_telegram_user(self, tg: Dict[str, Any]) -> Dict[str, Any]:
@@ -564,6 +576,142 @@ class Store:
                 "SELECT * FROM audit ORDER BY id DESC LIMIT ?", (int(limit),)
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def digest_photo_dir(self) -> str:
+        d = os.path.join(os.path.dirname(os.path.abspath(self.path)) or ".", "channel")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def _seed_digest(self) -> None:
+        from channel_digest import DEFAULT_HEAD_TEMPLATES, list_images
+        with self._lock:
+            n = self._db.execute("SELECT COUNT(*) FROM digest_heads").fetchone()[0]
+            if n == 0:
+                now = _now()
+                self._db.executemany(
+                    "INSERT INTO digest_heads(text, created_at) VALUES(?,?)",
+                    [(t, now) for t in DEFAULT_HEAD_TEMPLATES],
+                )
+            n = self._db.execute("SELECT COUNT(*) FROM digest_photos").fetchone()[0]
+            if n == 0:
+                now = _now()
+                for path in list_images():
+                    self._db.execute(
+                        "INSERT INTO digest_photos(path, name, created_at) VALUES(?,?,?)",
+                        (path, os.path.basename(path), now),
+                    )
+            self._db.commit()
+
+    def list_digest_heads(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT id, text, created_at FROM digest_heads ORDER BY id"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def add_digest_head(self, text: str, actor_id: Optional[int] = None) -> Dict[str, Any]:
+        text = (text or "").strip()
+        if not text:
+            return {"ok": False, "error": "empty"}
+        if len(text) > 240:
+            text = text[:240]
+        with self._lock:
+            n = self._db.execute("SELECT COUNT(*) FROM digest_heads").fetchone()[0]
+            if n >= 80:
+                return {"ok": False, "error": "limit"}
+            cur = self._db.execute(
+                "INSERT INTO digest_heads(text, created_at) VALUES(?,?)",
+                (text, _now()),
+            )
+            self._db.commit()
+            pid = int(cur.lastrowid)
+        self.audit(actor_id, "digest_head_add", text[:80])
+        return {"ok": True, "id": pid, "text": text}
+
+    def delete_digest_head(self, head_id: int, actor_id: Optional[int] = None) -> bool:
+        with self._lock:
+            cur = self._db.execute("DELETE FROM digest_heads WHERE id=?", (int(head_id),))
+            self._db.commit()
+            ok = cur.rowcount > 0
+        if ok:
+            self.audit(actor_id, "digest_head_del", str(head_id))
+        return ok
+
+    def list_digest_photos(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT id, path, name, created_at FROM digest_photos ORDER BY id"
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["exists"] = bool(d.get("path") and os.path.isfile(d["path"]))
+            out.append(d)
+        return out
+
+    def add_digest_photo(self, data: bytes, filename: str = "",
+                         actor_id: Optional[int] = None) -> Dict[str, Any]:
+        data = data or b""
+        if len(data) < 24:
+            return {"ok": False, "error": "empty"}
+        if len(data) > 4_000_000:
+            return {"ok": False, "error": "too_big"}
+        ext = ""
+        if data[:3] == b"\xff\xd8\xff":
+            ext = ".jpg"
+        elif data[:8] == b"\x89PNG\r\n\x1a\n":
+            ext = ".png"
+        elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            ext = ".webp"
+        if not ext:
+            return {"ok": False, "error": "not_image"}
+        with self._lock:
+            n = self._db.execute("SELECT COUNT(*) FROM digest_photos").fetchone()[0]
+            if n >= 40:
+                return {"ok": False, "error": "limit"}
+        folder = self.digest_photo_dir()
+        name = f"{int(_now() * 1000)}_{secrets.token_hex(3)}{ext}"
+        path = os.path.join(folder, name)
+        try:
+            with open(path, "wb") as f:
+                f.write(data)
+        except OSError as e:
+            return {"ok": False, "error": str(e)[:80]}
+        orig = os.path.basename(filename or name)[:80]
+        with self._lock:
+            cur = self._db.execute(
+                "INSERT INTO digest_photos(path, name, created_at) VALUES(?,?,?)",
+                (path, orig, _now()),
+            )
+            self._db.commit()
+            pid = int(cur.lastrowid)
+        self.audit(actor_id, "digest_photo_add", orig)
+        return {"ok": True, "id": pid, "path": path, "name": orig}
+
+    def get_digest_photo(self, photo_id: int) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT id, path, name, created_at FROM digest_photos WHERE id=?",
+                (int(photo_id),),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def delete_digest_photo(self, photo_id: int, actor_id: Optional[int] = None) -> bool:
+        row = self.get_digest_photo(photo_id)
+        if not row:
+            return False
+        with self._lock:
+            self._db.execute("DELETE FROM digest_photos WHERE id=?", (int(photo_id),))
+            self._db.commit()
+        path = os.path.abspath(row.get("path") or "")
+        root = os.path.abspath(self.digest_photo_dir())
+        if path.startswith(root + os.sep):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        self.audit(actor_id, "digest_photo_del", str(photo_id))
+        return True
 
     def tg_ids_for_broadcast(self) -> List[int]:
         with self._lock:

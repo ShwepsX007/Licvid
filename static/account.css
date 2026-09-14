@@ -163,6 +163,24 @@ textarea, input[type=text] {
 textarea { min-height: 90px; resize: vertical; }
 label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 6px; }
 
+.tpl-list { list-style: none; margin-top: 12px; max-height: 360px; overflow: auto; }
+.tpl-list li {
+    display: flex; gap: 8px; align-items: flex-start; justify-content: space-between;
+    padding: 8px 0; border-bottom: 1px solid rgba(27,36,52,.55);
+    font-size: 0.82rem; line-height: 1.4;
+}
+.tpl-list li span { flex: 1; min-width: 0; }
+.tpl-photos {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+    gap: 10px; margin-top: 14px;
+}
+.tpl-photo {
+    position: relative; border: 1px solid var(--border); border-radius: 10px;
+    overflow: hidden; background: var(--bg-dark);
+}
+.tpl-photo img { width: 100%; height: 88px; object-fit: cover; display: block; }
+.tpl-photo .btn { position: absolute; top: 6px; right: 6px; padding: 3px 7px; }
+
 .hidden { display: none !important; }
 .err-box { color: var(--red); margin-top: 12px; font-size: 0.85rem; }
 

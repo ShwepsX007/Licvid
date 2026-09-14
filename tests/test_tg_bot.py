@@ -328,6 +328,58 @@ class BotMenuTest(unittest.TestCase):
         sent = [p for m, p in calls if m == "sendMessage"][0]
         self.assertIn("привязан", sent["text"].lower())
 
+    def test_admin_kb_has_templates(self):
+        self.assertIn("a:tpl", _datas(self.bot._admin_kb()))
+
+    def test_admin_adds_head_via_bot(self):
+        calls = []
+
+        async def fake(method, payload=None):
+            calls.append((method, payload or {}))
+            if method == "sendMessage":
+                return {"ok": True, "result": {"message_id": 55}}
+            return {"ok": True}
+
+        self.bot._call = fake  # type: ignore
+        n0 = len(self.store.list_digest_heads())
+        self.bot._wait_tpl[1001] = "head"
+        asyncio.run(self.bot._on_update({
+            "update_id": 2,
+            "message": {
+                "message_id": 10,
+                "chat": {"id": 1001},
+                "from": {"id": 1001, "username": "boss", "first_name": "Ada"},
+                "text": "☕ Новый заход за {h}ч. Цифры ниже.",
+            },
+        }))
+        texts = [h["text"] for h in self.store.list_digest_heads()]
+        self.assertEqual(len(texts), n0 + 1)
+        self.assertTrue(any("Новый заход" in t for t in texts))
+        self.assertNotIn(1001, self.bot._wait_tpl)
+        sent = [p for m, p in calls if m == "sendMessage"][0]
+        self.assertIn("добавлена", sent["text"].lower())
+
+    def test_tpl_delete_head_callback(self):
+        hid = self.store.add_digest_head("удали меня")["id"]
+        calls = []
+
+        async def fake(method, payload=None):
+            calls.append((method, payload or {}))
+            if method == "sendMessage":
+                return {"ok": True, "result": {"message_id": 70}}
+            return {"ok": True}
+
+        self.bot._call = fake  # type: ignore
+        cb = {
+            "id": "cbt",
+            "from": {"id": 1001, "username": "boss", "first_name": "Ada"},
+            "data": f"a:th:{hid}",
+            "message": {"message_id": 4, "chat": {"id": 1001}},
+        }
+        asyncio.run(self.bot._on_callback(cb))
+        texts = [h["text"] for h in self.store.list_digest_heads()]
+        self.assertNotIn("удали меня", texts)
+
     def test_not_modified_is_success_and_retries(self):
         calls = []
 

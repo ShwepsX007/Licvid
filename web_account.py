@@ -367,6 +367,93 @@ def register_account_routes(app) -> None:
             return err
         return {"ok": True, "stats": ctx.stats_fn(), "health": ctx.health_fn()}
 
+    @router.get("/api/admin/digest")
+    async def admin_digest_list(request: Request):
+        actor, err = _admin(request)
+        if err:
+            return err
+        heads = ctx.store.list_digest_heads()
+        photos = []
+        for p in ctx.store.list_digest_photos():
+            photos.append({
+                "id": p["id"],
+                "name": p.get("name") or "",
+                "exists": bool(p.get("exists")),
+                "url": f"/api/admin/digest/photos/{p['id']}/file",
+            })
+        return {
+            "ok": True,
+            "heads": heads,
+            "photos": photos,
+            "using_default_heads": not bool(heads),
+            "using_default_photos": not bool(photos),
+        }
+
+    @router.post("/api/admin/digest/heads")
+    async def admin_digest_add_head(request: Request):
+        actor, err = _admin(request)
+        if err:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        r = ctx.store.add_digest_head(str(body.get("text") or ""), actor_id=actor["id"])
+        if not r.get("ok"):
+            return JSONResponse(r, status_code=400)
+        return r
+
+    @router.post("/api/admin/digest/heads/{head_id}/delete")
+    async def admin_digest_del_head(request: Request, head_id: int):
+        actor, err = _admin(request)
+        if err:
+            return err
+        if not ctx.store.delete_digest_head(head_id, actor_id=actor["id"]):
+            return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
+        return {"ok": True}
+
+    @router.post("/api/admin/digest/photos")
+    async def admin_digest_add_photo(request: Request):
+        actor, err = _admin(request)
+        if err:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        raw = str(body.get("data") or "")
+        if "," in raw and raw.strip().startswith("data:"):
+            raw = raw.split(",", 1)[1]
+        try:
+            blob = base64.b64decode(raw, validate=False)
+        except Exception:
+            return JSONResponse({"ok": False, "error": "bad_data"}, status_code=400)
+        r = ctx.store.add_digest_photo(
+            blob, filename=str(body.get("filename") or ""), actor_id=actor["id"])
+        if not r.get("ok"):
+            return JSONResponse(r, status_code=400)
+        return {"ok": True, "id": r["id"], "name": r.get("name")}
+
+    @router.get("/api/admin/digest/photos/{photo_id}/file")
+    async def admin_digest_photo_file(request: Request, photo_id: int):
+        actor, err = _admin(request)
+        if err:
+            return err
+        row = ctx.store.get_digest_photo(photo_id)
+        path = (row or {}).get("path") or ""
+        if not row or not os.path.isfile(path):
+            return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
+        return FileResponse(path)
+
+    @router.post("/api/admin/digest/photos/{photo_id}/delete")
+    async def admin_digest_del_photo(request: Request, photo_id: int):
+        actor, err = _admin(request)
+        if err:
+            return err
+        if not ctx.store.delete_digest_photo(photo_id, actor_id=actor["id"]):
+            return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
+        return {"ok": True}
+
     app.include_router(router)
 
     @app.middleware("http")

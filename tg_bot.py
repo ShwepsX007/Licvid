@@ -61,6 +61,7 @@ class TelegramBot:
         self._session: Optional[aiohttp.ClientSession] = None
         self._offset = 0
         self._wait_broadcast: Dict[int, bool] = {}  # tg_id -> waiting for text
+        self._wait_tpl: Dict[int, str] = {}         # tg_id -> "head"|"photo"
         self._menu_msg: Dict[int, int] = {}         # chat_id -> последнее меню
 
     @property
@@ -371,8 +372,6 @@ class TelegramBot:
             desc = str((res or {}).get("description") or "нет ответа")
             self._last_tg_err = desc
             log.warning("tg sendPhoto: %s", desc)
-            if caption and ("parse entit" in desc.lower() or "can't find end of the entity" in desc.lower()):
-                return await self.send_photo(chat_id, path, caption="", markup=markup)
             return None
         mid = (res.get("result") or {}).get("message_id")
         try:
@@ -413,7 +412,9 @@ class TelegramBot:
         return False
 
     async def post_channel_digest(self, force: bool = False) -> bool:
-        from channel_digest import pick_image, render_post
+        from channel_digest import (
+            active_headlines, active_images, pick_image, render_post,
+        )
         self._digest_err = ""
         self._last_tg_err = ""
         cid = self.channel_chat_id()
@@ -430,8 +431,12 @@ class TelegramBot:
             n = int(self.store.get_setting("channel_digest_n") or 0)
         except (TypeError, ValueError):
             n = 0
-        caption = render_post(snap, n)
-        img = pick_image(n)
+        try:
+            hours = int(snap.get("window_h") or 4)
+        except (TypeError, ValueError):
+            hours = 4
+        caption = render_post(snap, n, headlines=active_headlines(self.store, hours))
+        img = pick_image(n, images=active_images(self.store))
         markup = None
         if self.public_url:
             markup = {"inline_keyboard": [[
@@ -522,7 +527,39 @@ class TelegramBot:
         if user["is_banned"]:
             await self.send(chat_id, "Доступ закрыт.")
             return
-        if user.get("is_admin") and await self._bind_channel_from_message(msg, chat_id):
+        tg_id = int(from_u.get("id") or 0)
+        wait = self._wait_tpl.get(tg_id)
+        if wait and user.get("is_admin"):
+            if text.startswith("/"):
+                self._wait_tpl.pop(tg_id, None)
+                if text.startswith("/cancel"):
+                    await self.show_menu(chat_id, "Отмена.", self._tpl_kb())
+                    return
+            elif wait == "head":
+                if not text:
+                    await self.show_menu(
+                        chat_id, "Нужен текст шапки. /cancel — отмена.", self._tpl_kb())
+                    return
+                self._wait_tpl.pop(tg_id, None)
+                r = self.store.add_digest_head(text, actor_id=user["id"])
+                msg_ok = "Шапка добавлена." if r.get("ok") else f"Не вышло: {r.get('error')}"
+                await self.show_menu(chat_id, msg_ok + "\n\n" + self._tpl_home_text(),
+                                     self._tpl_kb())
+                return
+            elif wait == "photo":
+                self._wait_tpl.pop(tg_id, None)
+                r = await self._ingest_tpl_photo(msg, user)
+                if not r.get("ok"):
+                    self._wait_tpl[tg_id] = "photo"
+                    await self.show_menu(
+                        chat_id,
+                        "Пришлите картинку jpg/png (как фото или файл). /cancel — отмена.",
+                        self._tpl_kb())
+                    return
+                await self.show_menu(
+                    chat_id, "Фото добавлено.\n\n" + self._tpl_home_text(), self._tpl_kb())
+                return
+        if user.get("is_admin") and not wait and await self._bind_channel_from_message(msg, chat_id):
             return
         if self._wait_broadcast.get(int(from_u["id"])) and user["is_admin"]:
             if text.startswith("/"):
@@ -580,8 +617,9 @@ class TelegramBot:
             await self.answer_cb(cb["id"], "Доступ закрыт")
             return
         tg_id = int(from_u.get("id") or 0)
-        if data in ("menu", "back", "nav:home", "home"):
+        if data in ("menu", "back", "nav:home", "home", "nav:admin", "a:tpl"):
             self._wait_broadcast.pop(tg_id, None)
+            self._wait_tpl.pop(tg_id, None)
         # Сначала снимаем «часики»: если answer уйдёт после edit или с
         # пустым text, клиент залипает и следующие кнопки не нажимаются.
         await self.answer_cb(cb["id"])
@@ -603,6 +641,10 @@ class TelegramBot:
                 posted = await self.post_channel_digest(force=True)
                 await self.reply(chat_id, self._digest_result_text(posted),
                                  self._admin_kb(), message_id=message_id)
+                return
+            if user.get("is_admin") and (
+                    data == "a:tpl" or data.startswith("a:th") or data.startswith("a:tp")):
+                await self._on_tpl_cb(chat_id, user, data, message_id)
                 return
             if data != "ch:check" and not await self._ensure_channel(
                     chat_id, user, message_id=message_id):
@@ -642,6 +684,7 @@ class TelegramBot:
             return self._services_text(user), self._services_kb(user)
         if data in ("admin", "nav:admin") and user.get("is_admin"):
             self._wait_broadcast.pop(int(user.get("tg_id") or 0), None)
+            self._wait_tpl.pop(int(user.get("tg_id") or 0), None)
             return self._admin_text(), self._admin_kb()
         if data == "users" and user.get("is_admin"):
             return self._users_text(), self._kb_back("nav:admin")
@@ -727,6 +770,137 @@ class TelegramBot:
         st = await self.broadcast(body, actor_id=user["id"])
         await self.show_menu(chat_id, f"Готово: {st['ok']}/{st['total']}.", self._admin_kb())
 
+    def _tpl_home_text(self) -> str:
+        heads = self.store.list_digest_heads() if self.store else []
+        photos = self.store.list_digest_photos() if self.store else []
+        lines = [
+            "<b>Шаблоны сводки</b>",
+            f"Шапки: {len(heads)} · фото: {len(photos)}",
+            "Посты крутят их по очереди. В шапке можно {h} — это часы окна.",
+            "",
+        ]
+        for i, h in enumerate(heads[:15], 1):
+            t = str(h.get("text") or "")
+            if len(t) > 70:
+                t = t[:67] + "…"
+            lines.append(f"{i}. {_esc(t)}")
+        if len(heads) > 15:
+            lines.append(f"… и ещё {len(heads) - 15}")
+        if not heads:
+            lines.append("Шапки пусты — в постах дефолтные из кода.")
+        return "\n".join(lines)
+
+    def _tpl_kb(self) -> dict:
+        return {"inline_keyboard": [
+            [{"text": "➕ Шапка", "callback_data": "a:th+"},
+             {"text": "➕ Фото", "callback_data": "a:tp+"}],
+            [{"text": "🗑 Удалить шапку", "callback_data": "a:th-"},
+             {"text": "🗑 Удалить фото", "callback_data": "a:tp-"}],
+            [{"text": "← Назад", "callback_data": "nav:admin"}],
+        ]}
+
+    def _tpl_del_heads_kb(self) -> dict:
+        rows: List[list] = []
+        row: list = []
+        for i, h in enumerate(self.store.list_digest_heads(), 1):
+            row.append({"text": f"✗{i}", "callback_data": f"a:th:{h['id']}"})
+            if len(row) == 5:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+        if not rows:
+            rows.append([{"text": "список пуст", "callback_data": "a:tpl"}])
+        rows.append([{"text": "← К шаблонам", "callback_data": "a:tpl"}])
+        return {"inline_keyboard": rows}
+
+    def _tpl_del_photos_kb(self) -> dict:
+        rows: List[list] = []
+        row: list = []
+        for i, p in enumerate(self.store.list_digest_photos(), 1):
+            row.append({"text": f"✗{i}", "callback_data": f"a:tp:{p['id']}"})
+            if len(row) == 5:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+        if not rows:
+            rows.append([{"text": "список пуст", "callback_data": "a:tpl"}])
+        rows.append([{"text": "← К шаблонам", "callback_data": "a:tpl"}])
+        return {"inline_keyboard": rows}
+
+    async def _on_tpl_cb(self, chat_id, user: dict, data: str, message_id) -> None:
+        tg_id = int(user.get("tg_id") or 0)
+        if data == "a:tpl":
+            await self.reply(chat_id, self._tpl_home_text(), self._tpl_kb(),
+                             message_id=message_id)
+            return
+        if data == "a:th+":
+            self._wait_tpl[tg_id] = "head"
+            await self.reply(
+                chat_id,
+                "Пришлите текст шапки следующим сообщением.\n"
+                "Можно {h} — подставится число часов.\n/cancel — отмена.",
+                self._kb_back("a:tpl"), message_id=message_id)
+            return
+        if data == "a:tp+":
+            self._wait_tpl[tg_id] = "photo"
+            await self.reply(
+                chat_id,
+                "Пришлите картинку jpg/png (как фото или файл).\n/cancel — отмена.",
+                self._kb_back("a:tpl"), message_id=message_id)
+            return
+        if data == "a:th-":
+            await self.reply(chat_id, "Какую шапку убрать?",
+                             self._tpl_del_heads_kb(), message_id=message_id)
+            return
+        if data == "a:tp-":
+            await self.reply(chat_id, "Какое фото убрать?",
+                             self._tpl_del_photos_kb(), message_id=message_id)
+            return
+        if data.startswith("a:th:"):
+            try:
+                hid = int(data.split(":")[2])
+            except (IndexError, ValueError):
+                hid = 0
+            self.store.delete_digest_head(hid, actor_id=user["id"])
+            await self.reply(chat_id, self._tpl_home_text(), self._tpl_kb(),
+                             message_id=message_id)
+            return
+        if data.startswith("a:tp:"):
+            try:
+                pid = int(data.split(":")[2])
+            except (IndexError, ValueError):
+                pid = 0
+            self.store.delete_digest_photo(pid, actor_id=user["id"])
+            await self.reply(chat_id, self._tpl_home_text(), self._tpl_kb(),
+                             message_id=message_id)
+
+    async def _ingest_tpl_photo(self, msg: dict, user: dict) -> dict:
+        file_id = None
+        photos = msg.get("photo") or []
+        if photos:
+            file_id = (photos[-1] or {}).get("file_id")
+        doc = msg.get("document") or {}
+        mime = str(doc.get("mime_type") or "")
+        name = str(doc.get("file_name") or "photo.jpg")
+        if not file_id and mime.startswith("image/"):
+            file_id = doc.get("file_id")
+        if not file_id:
+            return {"ok": False, "error": "no_photo"}
+        res = await self._call("getFile", {"file_id": file_id})
+        fpath = ((res or {}).get("result") or {}).get("file_path") or ""
+        if not fpath or not self._session:
+            return {"ok": False, "error": "no_file"}
+        url = f"https://api.telegram.org/file/bot{self.token}/{fpath}"
+        try:
+            async with self._session.get(
+                    url, timeout=aiohttp.ClientTimeout(total=30)) as r:
+                blob = await r.read()
+        except Exception as e:
+            return {"ok": False, "error": str(e)[:80]}
+        return self.store.add_digest_photo(blob, filename=name, actor_id=user["id"])
+
     def _kb_back(self, to: str = "nav:home") -> dict:
         aliases = {"menu": "nav:home", "home": "nav:home", "back": "nav:home",
                    "admin": "nav:admin"}
@@ -755,6 +929,7 @@ class TelegramBot:
             [{"text": "📣 Рассылка", "callback_data": "broadcast"},
              {"text": "🩺 Здоровье", "callback_data": "a:health"}],
             [{"text": "📰 Сводка в канал", "callback_data": "a:digest"}],
+            [{"text": "🎨 Шаблоны канала", "callback_data": "a:tpl"}],
             [{"text": "← Назад", "callback_data": "nav:home"}],
         ]}
 

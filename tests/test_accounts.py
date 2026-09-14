@@ -99,6 +99,35 @@ class AccountsTest(unittest.TestCase):
         data["hash"] = "00" * 32
         self.assertFalse(verify_telegram_widget(data, token))
 
+    def test_digest_heads_and_photos(self):
+        heads = self.store.list_digest_heads()
+        self.assertGreaterEqual(len(heads), 20)
+        r = self.store.add_digest_head("☕ Мой заход за {h}ч")
+        self.assertTrue(r["ok"])
+        texts = [h["text"] for h in self.store.list_digest_heads()]
+        self.assertIn("☕ Мой заход за {h}ч", texts)
+        self.assertTrue(self.store.delete_digest_head(r["id"]))
+        texts2 = [h["text"] for h in self.store.list_digest_heads()]
+        self.assertNotIn("☕ Мой заход за {h}ч", texts2)
+        photos = self.store.list_digest_photos()
+        self.assertGreaterEqual(len(photos), 1)
+        src = photos[0]["path"]
+        self.assertTrue(os.path.isfile(src))
+        with open(src, "rb") as f:
+            blob = f.read()
+        add = self.store.add_digest_photo(blob, filename="copy.jpg")
+        self.assertTrue(add["ok"], add)
+        self.assertTrue(os.path.isfile(add["path"]))
+        pid = add["id"]
+        n_before = len(self.store.list_digest_photos())
+        self.assertTrue(self.store.delete_digest_photo(pid))
+        self.assertEqual(len(self.store.list_digest_photos()), n_before - 1)
+        self.assertFalse(os.path.isfile(add["path"]))
+        # bundled file stays on disk after row delete
+        bundled = photos[0]
+        self.assertTrue(self.store.delete_digest_photo(bundled["id"]))
+        self.assertTrue(os.path.isfile(bundled["path"]))
+
     def test_ip_hash_stable(self):
         a = hash_ip("s", "1.2.3.4")
         b = hash_ip("s", "1.2.3.4")

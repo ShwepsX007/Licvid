@@ -384,6 +384,94 @@
                 if (st) st.textContent = d.ok ? t("saved") : (d.error || "error");
             });
         });
+        bootDigestTpl();
+    }
+
+    function esc(s) {
+        return String(s || "").replace(/[&<>"]/g, function (c) {
+            return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c];
+        });
+    }
+
+    function loadDigestTpl() {
+        api("/api/admin/digest").then(function (d) {
+            if (!d.ok) return;
+            var ul = $("tpl-heads");
+            if (ul) {
+                var note = d.using_default_heads
+                    ? "<li class='meta'>В постах пока дефолтные шапки. Добавьте свои — дефолт отключится.</li>"
+                    : "";
+                ul.innerHTML = note + (d.heads || []).map(function (h) {
+                    return "<li><span>" + esc(h.text) + "</span>" +
+                        '<button class="btn btn-danger btn-small" data-hid="' + h.id + '">удалить</button></li>';
+                }).join("");
+                ul.querySelectorAll("button[data-hid]").forEach(function (btn) {
+                    btn.addEventListener("click", function () {
+                        api("/api/admin/digest/heads/" + btn.getAttribute("data-hid") + "/delete", {
+                            method: "POST", body: "{}",
+                        }).then(loadDigestTpl);
+                    });
+                });
+            }
+            var box = $("tpl-photos");
+            if (box) {
+                box.innerHTML = (d.photos || []).map(function (p) {
+                    return '<div class="tpl-photo"><img alt="" src="' + p.url + '">' +
+                        '<button type="button" class="btn btn-danger btn-small" data-pid="' + p.id +
+                        '">×</button></div>';
+                }).join("") || (d.using_default_photos
+                    ? "<p class='lead'>В постах дефолтные картинки. Загрузите свои.</p>"
+                    : "");
+                box.querySelectorAll("button[data-pid]").forEach(function (btn) {
+                    btn.addEventListener("click", function () {
+                        api("/api/admin/digest/photos/" + btn.getAttribute("data-pid") + "/delete", {
+                            method: "POST", body: "{}",
+                        }).then(loadDigestTpl);
+                    });
+                });
+            }
+        });
+    }
+
+    function bootDigestTpl() {
+        if (!$("tpl-heads") && !$("tpl-photos")) return;
+        loadDigestTpl();
+        var add = $("tpl-head-add");
+        if (add) add.addEventListener("click", function () {
+            var ta = $("tpl-head-in");
+            var st = $("tpl-head-status");
+            api("/api/admin/digest/heads", {
+                method: "POST",
+                body: JSON.stringify({ text: (ta && ta.value) || "" }),
+            }).then(function (d) {
+                if (st) st.textContent = d.ok ? t("saved") : (d.error || "error");
+                if (d.ok && ta) ta.value = "";
+                loadDigestTpl();
+            });
+        });
+        var inp = $("tpl-photo-in");
+        if (inp) inp.addEventListener("change", function () {
+            var f = inp.files && inp.files[0];
+            var st = $("tpl-photo-status");
+            if (!f) return;
+            if (f.size > 4 * 1024 * 1024) {
+                if (st) st.textContent = "файл больше 4 МБ";
+                inp.value = "";
+                return;
+            }
+            var r = new FileReader();
+            r.onload = function () {
+                api("/api/admin/digest/photos", {
+                    method: "POST",
+                    body: JSON.stringify({ filename: f.name, data: String(r.result || "") }),
+                }).then(function (d) {
+                    if (st) st.textContent = d.ok ? t("saved") : (d.error || "error");
+                    inp.value = "";
+                    loadDigestTpl();
+                });
+            };
+            r.readAsDataURL(f);
+        });
     }
 
     function bootLogin() {

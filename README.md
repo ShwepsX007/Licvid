@@ -188,7 +188,7 @@ sudo systemctl enable --now liqscope
 | `GET /api/symbols` | дефолтный топ монет (по обороту 24ч) + добавленные вручную; цены, обороты, `volAvg7d` (средний оборот за неделю), ликвидации за 24 ч |
 | `GET /api/symbols/search?q=GRAM` | поиск пары по ПОЛНОМУ каталогу бирж (не только по топу): можно найти `GRAM`, `GRAM_USDT`, `gram/usdt` |
 | `POST /api/symbols/add?symbol=GRAM` | добавить пару из каталога в список и на график (404, если пары нет ни на одной бирже; `force=true` — добавить вслепую) |
-| `GET /api/klines?symbol=BTC_USDT&timeframe=5` | свечи (1/5/15/60/240 мин), в т.ч. для пар не из топа |
+| `GET /api/klines?symbol=BTC_USDT&timeframe=5` | свечи (1/5/15/60/240/1440 мин), в т.ч. для пар не из топа |
 | `GET /api/liquidations?symbol=&exchange=&min_usd=&limit=` | история ликвидаций |
 | `GET /api/stats?symbol=` | агрегаты: лонги/шорты за 1м/5м/15м/30м/1ч/4ч/24ч, топ монет, разрез по биржам |
 | `GET /api/oi?symbol=BTC_USDT` | открытый интерес: текущий тотал по живым ногам + изменения m1/m5/m15/m30/h1/h4/h24 (m1 — по живым опросам) |

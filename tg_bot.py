@@ -47,6 +47,7 @@ class TelegramBot:
         self._session: Optional[aiohttp.ClientSession] = None
         self._offset = 0
         self._wait_broadcast: Dict[int, bool] = {}  # tg_id -> waiting for text
+        self._menu_msg: Dict[int, int] = {}         # chat_id -> последнее меню
 
     @property
     def enabled(self) -> bool:
@@ -112,7 +113,7 @@ class TelegramBot:
             return None
 
     async def send(self, chat_id: int, text: str, markup: Optional[dict] = None,
-                   parse: str = "HTML") -> bool:
+                   parse: str = "HTML") -> Optional[int]:
         body: Dict[str, Any] = {
             "chat_id": chat_id,
             "text": text[:3900],
@@ -122,7 +123,13 @@ class TelegramBot:
         if markup:
             body["reply_markup"] = markup
         res = await self._call("sendMessage", body)
-        return bool(res and res.get("ok"))
+        if not res or not res.get("ok"):
+            return None
+        mid = (res.get("result") or {}).get("message_id")
+        try:
+            return int(mid) if mid is not None else None
+        except (TypeError, ValueError):
+            return None
 
     async def edit(self, chat_id: int, message_id: int, text: str,
                    markup: Optional[dict] = None, parse: str = "HTML") -> bool:
@@ -154,12 +161,41 @@ class TelegramBot:
                 return True
         return False
 
+    async def drop_menu(self, chat_id: int, message_id: Optional[int]) -> None:
+        if not chat_id or not message_id:
+            return
+        await self._call("deleteMessage", {
+            "chat_id": chat_id, "message_id": int(message_id),
+        })
+
+    async def show_menu(self, chat_id: int, text: str, markup: Optional[dict] = None,
+                        old_id: Optional[int] = None) -> bool:
+        """Новое меню + удаление старого.
+
+        Telegram Web после editMessageText рисует кнопки, но клики по ним
+        не отправляет — они копятся и срабатывают пачкой после /start.
+        Свежее sendMessage кнопки всегда живые; старое сообщение убираем,
+        чтобы чат не засорялся.
+        """
+        new_id = await self.send(chat_id, text, markup)
+        if not new_id:
+            return False
+        prev = self._menu_msg.get(int(chat_id))
+        self._menu_msg[int(chat_id)] = int(new_id)
+        seen = set()
+        for mid in (old_id, prev):
+            if not mid:
+                continue
+            mid = int(mid)
+            if mid == int(new_id) or mid in seen:
+                continue
+            seen.add(mid)
+            await self.drop_menu(chat_id, mid)
+        return True
+
     async def reply(self, chat_id: int, text: str, markup: Optional[dict] = None,
                     message_id: Optional[int] = None) -> bool:
-        if message_id:
-            if await self.edit(chat_id, message_id, text, markup):
-                return True
-        return await self.send(chat_id, text, markup)
+        return await self.show_menu(chat_id, text, markup, old_id=message_id)
 
     async def answer_cb(self, cb_id: str, text: str = "") -> None:
         # Пустой text Telegram иногда отвергает — тогда клиент «залипает»
@@ -236,19 +272,19 @@ class TelegramBot:
         if text.startswith("/start"):
             await self._cmd_start(chat_id, user, text)
         elif text.startswith("/help"):
-            await self.send(chat_id, self._help(user), self._menu(user))
+            await self.show_menu(chat_id, self._help(user), self._menu(user))
         elif text.startswith("/cabinet"):
-            await self.send(chat_id, self._cabinet_text(user), self._kb_back("nav:home"))
+            await self.show_menu(chat_id, self._cabinet_text(user), self._kb_back("nav:home"))
         elif text.startswith("/stats"):
-            await self.send(chat_id, self._stats_text(), self._kb_back("nav:home"))
+            await self.show_menu(chat_id, self._stats_text(), self._kb_back("nav:home"))
         elif text.startswith("/status") or text.startswith("/health"):
-            await self.send(chat_id, self._health_text(), self._kb_back("nav:home"))
+            await self.show_menu(chat_id, self._health_text(), self._kb_back("nav:home"))
         elif text.startswith("/liq"):
-            await self.send(chat_id, self._liq_text(), self._kb_back("nav:home"))
+            await self.show_menu(chat_id, self._liq_text(), self._kb_back("nav:home"))
         elif text.startswith("/services"):
-            await self.send(chat_id, self._services_text(user), self._services_kb(user))
+            await self.show_menu(chat_id, self._services_text(user), self._services_kb(user))
         elif text.startswith("/terminal"):
-            await self.send(chat_id, self._terminal_text(), self._kb_back("nav:home"))
+            await self.show_menu(chat_id, self._terminal_text(), self._kb_back("nav:home"))
         elif text.startswith("/admin"):
             await self._cmd_admin(chat_id, user)
         elif text.startswith("/users"):
@@ -258,7 +294,7 @@ class TelegramBot:
         elif text.startswith("/broadcast"):
             await self._cmd_broadcast(chat_id, user, text)
         else:
-            await self.send(chat_id, "Не понял. Нажмите кнопку или /help.", self._menu(user))
+            await self.show_menu(chat_id, "Не понял. Нажмите кнопку или /help.", self._menu(user))
 
     async def _on_callback(self, cb: dict) -> None:
         from_u = cb.get("from") or {}
@@ -286,7 +322,7 @@ class TelegramBot:
             log.warning("cb %s: %s", data, e)
 
     def _screen(self, user: dict, data: str) -> tuple:
-        """Текст и клавиатура экрана. Кнопки меняются на месте, не новым сообщением."""
+        """Текст и клавиатура экрана."""
         if data in ("menu", "back", "nav:home", "home", "help", ""):
             return (self._home_text(user) if data != "help" else self._help(user),
                     self._menu(user))
@@ -330,7 +366,7 @@ class TelegramBot:
             nonce = payload[6:]
             if self.store.confirm_nonce(nonce, user["id"]):
                 site = self.public_url or "сайт"
-                await self.send(
+                await self.show_menu(
                     chat_id,
                     f"Вход подтверждён, {_esc(user['display_name'])}.\n"
                     f"Вернитесь во вкладку браузера — кабинет откроется сам.\n\n"
@@ -338,8 +374,11 @@ class TelegramBot:
                     self._menu(user),
                 )
                 return
-            await self.send(chat_id, "Код входа недействителен или устарел. Нажмите «Войти» на сайте ещё раз.",
-                            self._menu(user))
+            await self.show_menu(
+                chat_id,
+                "Код входа недействителен или устарел. Нажмите «Войти» на сайте ещё раз.",
+                self._menu(user),
+            )
             return
         welcome = self.store.get_setting(
             "bot_welcome",
@@ -348,45 +387,47 @@ class TelegramBot:
         )
         site = self.public_url
         extra = f"\nКабинет: {site}/cabinet\nТерминал: {site}/terminal" if site else ""
-        await self.send(
+        await self.show_menu(
             chat_id,
-            f"Привет, {_esc(user['display_name'])}!\n\n{welcome}{extra}",
+            f"Привет, {_esc(user.get('display_name') or 'друг')}!\n\n{welcome}{extra}",
             self._menu(user),
         )
 
     async def _cmd_admin(self, chat_id: int, user: dict) -> None:
         if not user["is_admin"]:
-            await self.send(chat_id, "Недостаточно прав.", self._menu(user))
+            await self.show_menu(chat_id, "Недостаточно прав.", self._menu(user))
             return
-        await self.send(chat_id, self._admin_text(), self._admin_kb())
+        await self.show_menu(chat_id, self._admin_text(), self._admin_kb())
 
     async def _cmd_users(self, chat_id: int, user: dict) -> None:
         if not user["is_admin"]:
-            await self.send(chat_id, "Недостаточно прав.", self._menu(user))
+            await self.show_menu(chat_id, "Недостаточно прав.", self._menu(user))
             return
-        await self.send(chat_id, self._users_text(), self._kb_back("nav:admin"))
+        await self.show_menu(chat_id, self._users_text(), self._kb_back("nav:admin"))
 
     async def _cmd_visits(self, chat_id: int, user: dict) -> None:
         if not user["is_admin"]:
-            await self.send(chat_id, "Недостаточно прав.", self._menu(user))
+            await self.show_menu(chat_id, "Недостаточно прав.", self._menu(user))
             return
-        await self.send(chat_id, self._visits_text(), self._kb_back("nav:admin"))
+        await self.show_menu(chat_id, self._visits_text(), self._kb_back("nav:admin"))
 
     async def _cmd_broadcast(self, chat_id: int, user: dict, text: str) -> None:
         if not user["is_admin"]:
-            await self.send(chat_id, "Недостаточно прав.", self._menu(user))
+            await self.show_menu(chat_id, "Недостаточно прав.", self._menu(user))
             return
         rest = text.split(maxsplit=1)
         body = rest[1].strip() if len(rest) > 1 else ""
         if not body:
             self._wait_broadcast[int(user["tg_id"])] = True
-            await self.send(chat_id,
-                            "Пришлите текст рассылки следующим сообщением.\n/cancel — отмена.",
-                            self._kb_back("nav:admin"))
+            await self.show_menu(
+                chat_id,
+                "Пришлите текст рассылки следующим сообщением.\n/cancel — отмена.",
+                self._kb_back("nav:admin"),
+            )
             return
         await self.send(chat_id, "Рассылаю…")
         st = await self.broadcast(body, actor_id=user["id"])
-        await self.send(chat_id, f"Готово: {st['ok']}/{st['total']}.", self._admin_kb())
+        await self.show_menu(chat_id, f"Готово: {st['ok']}/{st['total']}.", self._admin_kb())
 
     def _kb_back(self, to: str = "nav:home") -> dict:
         aliases = {"menu": "nav:home", "home": "nav:home", "back": "nav:home",

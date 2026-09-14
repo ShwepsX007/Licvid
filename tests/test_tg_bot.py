@@ -1,4 +1,4 @@
-"""Меню бота: кнопки меняются на месте, везде «Назад»."""
+"""Меню бота: новое сообщение + удаление старого, везде «Назад»."""
 from __future__ import annotations
 
 import asyncio
@@ -97,11 +97,13 @@ class BotMenuTest(unittest.TestCase):
             self.assertIn("cabinet", _datas(kb), data)
             self.assertNotIn("← Назад", _btns(kb), data)
 
-    def test_callback_edits_same_message(self):
+    def test_callback_replaces_message(self):
         calls = []
 
         async def fake(method, payload=None):
             calls.append((method, payload or {}))
+            if method == "sendMessage":
+                return {"ok": True, "result": {"message_id": 101}}
             return {"ok": True}
 
         self.bot._call = fake  # type: ignore
@@ -114,22 +116,26 @@ class BotMenuTest(unittest.TestCase):
         asyncio.run(self.bot._on_callback(cb))
         methods = [m for m, _ in calls]
         self.assertIn("answerCallbackQuery", methods)
-        self.assertIn("editMessageText", methods)
-        self.assertNotIn("sendMessage", methods)
+        self.assertIn("sendMessage", methods)
+        self.assertIn("deleteMessage", methods)
+        self.assertNotIn("editMessageText", methods)
         self.assertLess(methods.index("answerCallbackQuery"),
-                        methods.index("editMessageText"))
+                        methods.index("sendMessage"))
         ans = [p for m, p in calls if m == "answerCallbackQuery"][0]
         self.assertNotIn("text", ans)
-        edit = [p for m, p in calls if m == "editMessageText"][0]
-        self.assertEqual(edit["message_id"], 77)
-        self.assertEqual(edit["chat_id"], 2002)
-        self.assertIn("← Назад", _btns(edit.get("reply_markup")))
+        sent = [p for m, p in calls if m == "sendMessage"][0]
+        self.assertEqual(sent["chat_id"], 2002)
+        self.assertIn("← Назад", _btns(sent.get("reply_markup")))
+        deleted = [p for m, p in calls if m == "deleteMessage"][0]
+        self.assertEqual(deleted["message_id"], 77)
 
-    def test_back_callback_edits_to_main(self):
+    def test_back_callback_sends_main_and_drops_old(self):
         calls = []
 
         async def fake(method, payload=None):
             calls.append((method, payload or {}))
+            if method == "sendMessage":
+                return {"ok": True, "result": {"message_id": 202}}
             return {"ok": True}
 
         self.bot._call = fake  # type: ignore
@@ -140,10 +146,32 @@ class BotMenuTest(unittest.TestCase):
             "message": {"message_id": 88, "chat": {"id": 2002}},
         }
         asyncio.run(self.bot._on_callback(cb))
-        edit = [p for m, p in calls if m == "editMessageText"][0]
-        self.assertEqual(edit["message_id"], 88)
-        self.assertIn("cabinet", _datas(edit.get("reply_markup")))
-        self.assertNotIn("← Назад", _btns(edit.get("reply_markup")))
+        sent = [p for m, p in calls if m == "sendMessage"][0]
+        self.assertIn("cabinet", _datas(sent.get("reply_markup")))
+        self.assertNotIn("← Назад", _btns(sent.get("reply_markup")))
+        deleted = [p for m, p in calls if m == "deleteMessage"][0]
+        self.assertEqual(deleted["message_id"], 88)
+
+    def test_start_drops_previous_menu(self):
+        calls = []
+        n = {"id": 10}
+
+        async def fake(method, payload=None):
+            calls.append((method, payload or {}))
+            if method == "sendMessage":
+                n["id"] += 1
+                return {"ok": True, "result": {"message_id": n["id"]}}
+            return {"ok": True}
+
+        self.bot._call = fake  # type: ignore
+        user = self.user
+        asyncio.run(self.bot._cmd_start(2002, user, "/start"))
+        self.assertEqual(self.bot._menu_msg[2002], 11)
+        asyncio.run(self.bot._cmd_start(2002, user, "/start"))
+        self.assertEqual(self.bot._menu_msg[2002], 12)
+        deleted = [p["message_id"] for m, p in calls if m == "deleteMessage"]
+        self.assertEqual(deleted, [11])
+        self.assertNotIn("editMessageText", [m for m, _ in calls])
 
     def test_not_modified_is_success_and_retries(self):
         calls = []

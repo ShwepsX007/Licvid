@@ -63,9 +63,20 @@ VOL_HIST_MIN_SAMPLES = 3               # меньше — шлём текущи�
 # ----------------------------------------------------------------------------
 # Эндпоинты
 # ----------------------------------------------------------------------------
-BINANCE_REST = "https://fapi.binance.com"
-BINANCE_WS = "wss://fstream.binance.com/stream?streams="
-BINANCE_WS_RAW = "wss://fstream.binance.com/ws"   # для SUBSCRIBE/UNSUBSCRIBE на лету
+BINANCE_REST = os.getenv("LIQSCOPE_BINANCE_REST", "https://fapi.binance.com")
+# 2026-04-23 Binance отключил legacy-пути WS: wss://fstream.binance.com/ws и
+# /stream. Худшее в этой реформе то, что старое соединение НЕ отказывается —
+# рукопожатие проходит, подписка принимается, и только данных нет. Для
+# слушателя это выглядит как «биржа молчит 30 с», а не как ошибка конфигурации.
+# Рабочие пути теперь под /market (обычные рыночные стримы: kline, aggTrade,
+# markPrice, forceOrder) и /public (высокочастотный стакан).
+BINANCE_WS = os.getenv("LIQSCOPE_BINANCE_WS",
+                       "wss://fstream.binance.com/stream?streams=")
+BINANCE_WS_RAW = os.getenv("LIQSCOPE_BINANCE_WS_RAW",
+                           "wss://fstream.binance.com/ws")   # SUBSCRIBE на лету
+# Сколько секунд молчит поток свечей, прежде чем слушатель решит, что путь
+# мёртвый. У 1m-свечей пауз не бывает, поэтому 30 с — с запасом.
+BINANCE_SILENT_SEC = float(os.getenv("LIQSCOPE_BINANCE_SILENT_SEC", "30"))
 BYBIT_REST = "https://api.bybit.com"
 BYBIT_WS = "wss://stream.bybit.com/v5/public/linear"
 OKX_REST = "https://www.okx.com"
@@ -229,6 +240,26 @@ def canon_bitmex(symbol: str) -> str:
         if s.endswith(quote) and len(s) > len(quote):
             return f"{s[:-len(quote)]}_USDT"
     return canon(s)
+
+
+def binance_market_url(url: str) -> str:
+    """Тот же адрес Binance, но под /market — новым корнем WS."""
+    if "/market" in url or "/public" in url or "/private" in url:
+        return url
+    i = url.find("/", url.find("//") + 2)          # конец host-а
+    return url[:i] + "/market" + url[i:] if i > 0 else url
+
+
+def binance_ws_urls(kind: str = "combined") -> tuple:
+    """Кандидаты WS-префикса Binance в порядке предпочтения.
+
+    Первым всегда идёт /market, вторым — то, что стоит в BINANCE_WS. Список
+    строится от переменной, а не захардкожен, чтобы тесты, тестнет и
+    внутренние зеркала могли переопределить адрес одним движением.
+    """
+    base = BINANCE_WS if kind == "combined" else BINANCE_WS_RAW
+    alt = binance_market_url(base)
+    return (alt, base) if alt != base else (base,)
 
 
 def to_binance(symbol: str) -> str:
@@ -1228,6 +1259,10 @@ class MarketFeed:
         self.vol_hist: Dict[str, List[List[float]]] = {}
         self._load_vol_hist()
         self.prices: Dict[str, float] = {}
+        # путь WS Binance, который в прошлый раз реально отдавал
+        # данные ('' = ещё не проверяли); нужен, чтобы не скакать
+        # между /market и legacy при каждой переподписке
+        self._binance_ws_pref = ''
         # Пользовательские монеты, добавленные через поиск: они не выпадают
         # из списка при периодическом обновлении топа по обороту.
         self.custom_symbols: List[str] = []
@@ -1817,12 +1852,46 @@ class MarketFeed:
         return set(self.symbols)
 
     # -- Binance -------------------------------------------------------------
+    async def _binance_ws_open(self, kind: str = "combined", suffix: str = "",
+                               prefer: str = ""):
+        """Открыть WS Binance, перебирая пути: /market, затем legacy.
+
+        Пути перебираются только пока сокет НЕ открылся: мёртвый legacy-путь
+        открывается охотно и молчит, так что «открылся и молчит» решается на
+        уровне слушателя (у свечей есть сторож молчания, у ликвидаций тишина —
+        норма). `prefer` — путь, который в прошлый раз реально давал данные:
+        без него сломанный источник скакал бы между двумя адресами при каждой
+        переподписке.
+        """
+        urls = list(binance_ws_urls(kind))
+        if prefer and prefer in urls:
+            urls.remove(prefer)
+            urls.insert(0, prefer)
+        err: Exception = RuntimeError("нет путей WS Binance")
+        for i, prefix in enumerate(urls):
+            url = prefix + suffix
+            try:
+                ws = await self._session.ws_connect(url, heartbeat=20, timeout=25)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                err = e
+                if i + 1 < len(urls):
+                    log.warning("[binance] %s не открылся (%s: %s) — пробую "
+                                "другой путь WS", url, type(e).__name__, e)
+                continue
+            return ws, prefix
+        raise err
+
     async def _binance_liquidations(self):
-        url = BINANCE_WS + "!forceOrder@arr"
         st = self.status["binance"]
-        async with self._session.ws_connect(url, heartbeat=20, timeout=25) as ws:
+        ws, prefix = await self._binance_ws_open(
+            "combined", "!forceOrder@arr", prefer=self._binance_ws_pref)
+        url = prefix + "!forceOrder@arr"
+        st.extra = {"binance_ws": url}
+        async with ws:
             st.up()
-            log.info("[binance] подключён к !forceOrder@arr")
+            log.info("[binance] подключён к !forceOrder@arr (%s)", url)
             async for msg in ws:
                 if msg.type != aiohttp.WSMsgType.TEXT:
                     if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
@@ -1833,6 +1902,9 @@ class MarketFeed:
                 except Exception:
                     continue
                 for ev in parse_binance_msg(payload):
+                    # раз биржа отдала событие — путь живой, запоминаем его
+                    # (префиксом: именно его сравниваем при переподключении)
+                    self._binance_ws_pref = prefix
                     await self._emit("binance", ev["symbol"], ev["side"],
                                      ev["price"], ev["qty"], ev["ts"])
 
@@ -2007,13 +2079,51 @@ class MarketFeed:
             raise RuntimeError("нет символов")
         streams = "/".join(f"{s}@kline_1m" for s in syms)
         st = self.status["prices"]
-        async with self._session.ws_connect(BINANCE_WS + streams, heartbeat=20, timeout=25) as ws:
+        urls = binance_ws_urls("combined")
+        if self._binance_ws_pref in urls:
+            urls = (self._binance_ws_pref,) + tuple(u for u in urls
+                                                     if u != self._binance_ws_pref)
+        for i, prefix in enumerate(urls):
+            url = prefix + streams
+            try:
+                ws = await self._session.ws_connect(url, heartbeat=20, timeout=25)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                if i + 1 == len(urls):
+                    raise
+                log.warning("[prices] %s не открылся (%s: %s) — пробую другой "
+                            "путь WS", url, type(e).__name__, e)
+                continue
+            res = await self._binance_kline_run(ws, url, st, len(syms), prefix)
+            if res is True:
+                return True                     # список монет изменился
+            if res is None and i + 1 < len(urls):
+                # сокет есть, свечей нет. До реформы WS это читалось как «биржа
+                # молчит»; теперь чаще «мы на отключённом пути», поэтому
+                # сначала пробуем другой путь и только потом уходим на REST
+                log.warning("[prices] %s открыт, но свечей не прислал — пробую "
+                            "другой путь WS", url)
+                continue
+            return False
+        return False
+
+    async def _binance_kline_run(self, ws, url: str, st, n_syms: int,
+                                 prefix: str = ""):
+        """Одно подключение к потоку свечей. True — сменился список монет,
+        None — соединение живое, но данных нет, False — всё обычно."""
+        async with ws:
             st.up()
             st.name = "prices:binance-ws"
-            log.info("[prices] Binance kline_1m: %d символов", len(syms))
+            st.extra = {"binance_ws": url, "binance_symbols": n_syms,
+                        "binance_frames": 0, "binance_klines": 0,
+                        "binance_silent_sec": 0.0}
+            log.info("[prices] Binance kline_1m: %d символов (%s)", n_syms, url)
             symbols_snapshot = list(self.symbols)
             connected_at = time.time()
+            last_frame_at = time.time()
             got = 0
+            frames = 0
             while not self._stop.is_set():
                 # список монет обновился — пересоздаём подписку
                 if symbols_snapshot != self.symbols:
@@ -2023,15 +2133,25 @@ class MarketFeed:
                     msg = await ws.receive(timeout=1.0)
                 except asyncio.TimeoutError:
                     # сокет открыт, но биржа молчит — уходим на REST
-                    if not got and time.time() - connected_at > 30:
-                        log.warning("[prices] Binance kline молчит 30с — перехожу на REST")
-                        return False
+                    st.extra["binance_silent_sec"] = round(
+                        time.time() - last_frame_at, 1)
+                    if not got and time.time() - connected_at > BINANCE_SILENT_SEC:
+                        log.warning("[prices] Binance kline молчит %.0fс: кадров "
+                                    "%d, свечей 0 (URL %s) — %s",
+                                    BINANCE_SILENT_SEC, frames, url,
+                                    "пробую другой путь WS" if not frames
+                                    else "перехожу на REST")
+                        return None if not frames else False
                     continue
                 if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING,
                                 aiohttp.WSMsgType.ERROR):
                     break
                 if msg.type != aiohttp.WSMsgType.TEXT:
                     continue
+                frames += 1
+                st.extra["binance_frames"] = frames
+                last_frame_at = time.time()
+                st.extra["binance_silent_sec"] = 0.0
                 try:
                     payload = json.loads(msg.data)
                 except Exception:
@@ -2039,6 +2159,12 @@ class MarketFeed:
                 data = payload.get("data", payload)
                 k = data.get("k") or {}
                 if not k:
+                    # не свеча: ack подписки или ошибка биржи. Именно здесь
+                    # было слепо: Binance отвечает {"e":"error",...} текстом, а
+                    # слушатель молчал 30 с и уходил на REST
+                    if frames <= 3 or "error" in str(payload)[:200].lower():
+                        log.info("[prices] Binance не kline: %s",
+                                 str(msg.data)[:200])
                     continue
                 try:
                     sym = canon(data.get("s") or k.get("s") or "")
@@ -2054,9 +2180,14 @@ class MarketFeed:
                     continue
                 st.hit()
                 got += 1
+                st.extra["binance_klines"] = got
                 self.prices[sym] = candle["close"]
                 await self.on_price(sym, candle["close"], candle)
-        return False
+            # хоть один кадр-свеча — путь рабочий, запоминаем его для
+            # последующих переподключений (и ликвидаций, и тиков)
+            if got:
+                self._binance_ws_pref = prefix
+            return False
 
     async def _rest_price_poll(self, duration: float = 60):
         """Пока WS недоступен — берём цены пачкой через REST (Bybit → Binance → OKX)."""
@@ -3436,10 +3567,14 @@ class MarketFeed:
                 pass
             return "restart"
 
-        url = BINANCE_WS + "/".join(f"{x}@aggTrade" for x in syms)
         version = self._hot_version
         got = 0
-        async with self._session.ws_connect(url, heartbeat=20, timeout=25) as ws:
+        ws, tick_prefix = await self._binance_ws_open(
+            "combined", "/".join(f"{x}@aggTrade" for x in syms),
+            prefer=self._binance_ws_pref)
+        url = tick_prefix + "/".join(f"{x}@aggTrade" for x in syms)
+        st.extra = {"ticks_ws": url}
+        async with ws:
             st.up()
             st.name = "ticks:binance-combined"
             self.tick_subscriptions = set(syms)
@@ -3482,10 +3617,13 @@ class MarketFeed:
         subscribed: set = set()
         got = 0
 
-        async with self._session.ws_connect(BINANCE_WS_RAW, heartbeat=20, timeout=25) as ws:
+        ws, raw_prefix = await self._binance_ws_open("raw")
+        raw_url = raw_prefix
+        st.extra = {"ticks_ws": raw_url}
+        async with ws:
             st.up()
             st.name = "ticks:binance-raw"
-            log.info("[ticks] Binance raw aggTrade подключён")
+            log.info("[ticks] Binance raw aggTrade подключён (%s)", raw_url)
             connected_at = time.time()
 
             async def sync():

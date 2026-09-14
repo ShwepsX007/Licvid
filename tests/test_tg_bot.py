@@ -75,26 +75,27 @@ class BotMenuTest(unittest.TestCase):
         for data in ("cabinet", "stats", "health", "liq", "terminal"):
             _text, kb = self.bot._screen(self.user, data)
             self.assertEqual(_btns(kb), ["← Назад"], data)
-            self.assertEqual(_datas(kb), ["menu"], data)
+            self.assertEqual(_datas(kb), ["nav:home"], data)
 
     def test_services_and_admin_have_back(self):
         _t, skb = self.bot._screen(self.user, "services")
         self.assertIn("← Назад", _btns(skb))
-        self.assertIn("menu", _datas(skb))
+        self.assertIn("nav:home", _datas(skb))
         _t, akb = self.bot._screen(self.admin, "admin")
         self.assertIn("← Назад", _btns(akb))
-        self.assertIn("menu", _datas(akb))
+        self.assertIn("nav:home", _datas(akb))
         self.assertIn("a:health", _datas(akb))
 
     def test_admin_leaves_back_to_admin(self):
         for data in ("users", "visits", "broadcast", "a:health"):
             _t, kb = self.bot._screen(self.admin, data)
-            self.assertEqual(_datas(kb), ["admin"], data)
+            self.assertEqual(_datas(kb), ["nav:admin"], data)
 
     def test_back_returns_main_keyboard(self):
-        _t, kb = self.bot._screen(self.user, "menu")
-        self.assertIn("cabinet", _datas(kb))
-        self.assertNotIn("← Назад", _btns(kb))
+        for data in ("nav:home", "menu", "back"):
+            _t, kb = self.bot._screen(self.user, data)
+            self.assertIn("cabinet", _datas(kb), data)
+            self.assertNotIn("← Назад", _btns(kb), data)
 
     def test_callback_edits_same_message(self):
         calls = []
@@ -115,10 +116,32 @@ class BotMenuTest(unittest.TestCase):
         self.assertIn("answerCallbackQuery", methods)
         self.assertIn("editMessageText", methods)
         self.assertNotIn("sendMessage", methods)
+        self.assertLess(methods.index("editMessageText"),
+                        methods.index("answerCallbackQuery"))
         edit = [p for m, p in calls if m == "editMessageText"][0]
         self.assertEqual(edit["message_id"], 77)
         self.assertEqual(edit["chat_id"], 2002)
         self.assertIn("← Назад", _btns(edit.get("reply_markup")))
+
+    def test_back_callback_edits_to_main(self):
+        calls = []
+
+        async def fake(method, payload=None):
+            calls.append((method, payload or {}))
+            return {"ok": True}
+
+        self.bot._call = fake  # type: ignore
+        cb = {
+            "id": "cb2",
+            "from": {"id": 2002, "username": "bob", "first_name": "Bob"},
+            "data": "nav:home",
+            "message": {"message_id": 88, "chat": {"id": 2002}},
+        }
+        asyncio.run(self.bot._on_callback(cb))
+        edit = [p for m, p in calls if m == "editMessageText"][0]
+        self.assertEqual(edit["message_id"], 88)
+        self.assertIn("cabinet", _datas(edit.get("reply_markup")))
+        self.assertNotIn("← Назад", _btns(edit.get("reply_markup")))
 
 
 if __name__ == "__main__":

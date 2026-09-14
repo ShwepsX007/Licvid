@@ -2350,10 +2350,6 @@
             '" aria-label="' + openTitleHtml + '">' +
             "<strong>" + pretty(item.symbol) + "</strong><span class=\"coin-link-icon\">📈</span></button></td>" +
             '<td><span class="exch-badge ' + item.exchange + '">' + item.exchange +
-            (item.kind === "tape"
-                ? '<span class="tape-tag" title="' + I18n.t("feed.tape_tip").replace(/"/g, "&quot;") +
-                  '">∿</span>'
-                : "") +
             "</span></td>" +
             '<td><span class="badge-side ' + (isLong ? "long" : "short") + '">' +
             (isLong ? "LONG LIQ" : "SHORT LIQ") + "</span></td>" +

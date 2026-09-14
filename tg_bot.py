@@ -91,7 +91,10 @@ class TelegramBot:
         url = API.format(token=self.token, method=method)
         try:
             async with self._session.post(url, json=payload or {}) as r:
-                return await r.json(content_type=None)
+                data = await r.json(content_type=None)
+            if method != "getUpdates" and data and not data.get("ok"):
+                log.warning("tg %s: %s", method, data.get("description"))
+            return data
         except Exception as e:
             log.debug("tg %s: %s", method, e)
             return None
@@ -128,6 +131,11 @@ class TelegramBot:
         # тот же текст+клавиатура — для Telegram это не ошибка
         if "not modified" in desc:
             return True
+        if "parse entit" in desc or "can't find end of the entity" in desc:
+            body.pop("parse_mode", None)
+            res = await self._call("editMessageText", body)
+            if res and res.get("ok"):
+                return True
         return False
 
     async def reply(self, chat_id: int, text: str, markup: Optional[dict] = None,
@@ -207,17 +215,17 @@ class TelegramBot:
         elif text.startswith("/help"):
             await self.send(chat_id, self._help(user), self._menu(user))
         elif text.startswith("/cabinet"):
-            await self.send(chat_id, self._cabinet_text(user), self._kb_back("menu"))
+            await self.send(chat_id, self._cabinet_text(user), self._kb_back("nav:home"))
         elif text.startswith("/stats"):
-            await self.send(chat_id, self._stats_text(), self._kb_back("menu"))
+            await self.send(chat_id, self._stats_text(), self._kb_back("nav:home"))
         elif text.startswith("/status") or text.startswith("/health"):
-            await self.send(chat_id, self._health_text(), self._kb_back("menu"))
+            await self.send(chat_id, self._health_text(), self._kb_back("nav:home"))
         elif text.startswith("/liq"):
-            await self.send(chat_id, self._liq_text(), self._kb_back("menu"))
+            await self.send(chat_id, self._liq_text(), self._kb_back("nav:home"))
         elif text.startswith("/services"):
             await self.send(chat_id, self._services_text(user), self._services_kb(user))
         elif text.startswith("/terminal"):
-            await self.send(chat_id, self._terminal_text(), self._kb_back("menu"))
+            await self.send(chat_id, self._terminal_text(), self._kb_back("nav:home"))
         elif text.startswith("/admin"):
             await self._cmd_admin(chat_id, user)
         elif text.startswith("/users"):
@@ -239,30 +247,40 @@ class TelegramBot:
         if user["is_banned"]:
             await self.answer_cb(cb["id"], "Доступ закрыт")
             return
-        await self.answer_cb(cb["id"])
         tg_id = int(from_u.get("id") or 0)
-        if data in ("menu", "back"):
+        if data in ("menu", "back", "nav:home", "home"):
             self._wait_broadcast.pop(tg_id, None)
-        text, markup = self._screen(user, data)
-        await self.reply(chat_id, text, markup, message_id=message_id)
+        # Сначала правим сообщение, потом отвечаем на колбэк: иначе Telegram Web
+        # гасит часики и оставляет старые кнопки — «Назад» выглядит мёртвым.
+        ok = False
+        try:
+            text, markup = self._screen(user, data)
+            ok = await self.reply(chat_id, text, markup, message_id=message_id)
+        except Exception as e:
+            log.warning("cb %s: %s", data, e)
+        finally:
+            await self.answer_cb(cb["id"])
+        if not ok:
+            log.warning("меню не обновилось data=%s chat=%s msg=%s",
+                        data, chat_id, message_id)
 
     def _screen(self, user: dict, data: str) -> tuple:
         """Текст и клавиатура экрана. Кнопки меняются на месте, не новым сообщением."""
-        if data in ("menu", "back", "help", ""):
+        if data in ("menu", "back", "nav:home", "home", "help", ""):
             return (self._home_text(user) if data != "help" else self._help(user),
                     self._menu(user))
         if data == "cabinet":
-            return self._cabinet_text(user), self._kb_back("menu")
+            return self._cabinet_text(user), self._kb_back("nav:home")
         if data == "stats":
-            return self._stats_text(), self._kb_back("menu")
+            return self._stats_text(), self._kb_back("nav:home")
         if data == "health":
-            return self._health_text(), self._kb_back("menu")
+            return self._health_text(), self._kb_back("nav:home")
         if data == "a:health" and user.get("is_admin"):
-            return self._health_text(), self._kb_back("admin")
+            return self._health_text(), self._kb_back("nav:admin")
         if data == "liq":
-            return self._liq_text(), self._kb_back("menu")
+            return self._liq_text(), self._kb_back("nav:home")
         if data == "terminal":
-            return self._terminal_text(), self._kb_back("menu")
+            return self._terminal_text(), self._kb_back("nav:home")
         if data == "services":
             return self._services_text(user), self._services_kb(user)
         if data.startswith("svc:"):
@@ -271,17 +289,17 @@ class TelegramBot:
             on = slug not in have
             self.store.toggle_user_service(user["id"], slug, on)
             return self._services_text(user), self._services_kb(user)
-        if data == "admin" and user.get("is_admin"):
+        if data in ("admin", "nav:admin") and user.get("is_admin"):
             self._wait_broadcast.pop(int(user.get("tg_id") or 0), None)
             return self._admin_text(), self._admin_kb()
         if data == "users" and user.get("is_admin"):
-            return self._users_text(), self._kb_back("admin")
+            return self._users_text(), self._kb_back("nav:admin")
         if data == "visits" and user.get("is_admin"):
-            return self._visits_text(), self._kb_back("admin")
+            return self._visits_text(), self._kb_back("nav:admin")
         if data == "broadcast" and user.get("is_admin"):
             self._wait_broadcast[int(user.get("tg_id") or 0)] = True
             return ("Пришлите текст рассылки следующим сообщением.\n"
-                    "/cancel — отмена.", self._kb_back("admin"))
+                    "/cancel — отмена.", self._kb_back("nav:admin"))
         return self._home_text(user), self._menu(user)
 
     async def _cmd_start(self, chat_id: int, user: dict, text: str) -> None:
@@ -325,13 +343,13 @@ class TelegramBot:
         if not user["is_admin"]:
             await self.send(chat_id, "Недостаточно прав.", self._menu(user))
             return
-        await self.send(chat_id, self._users_text(), self._kb_back("admin"))
+        await self.send(chat_id, self._users_text(), self._kb_back("nav:admin"))
 
     async def _cmd_visits(self, chat_id: int, user: dict) -> None:
         if not user["is_admin"]:
             await self.send(chat_id, "Недостаточно прав.", self._menu(user))
             return
-        await self.send(chat_id, self._visits_text(), self._kb_back("admin"))
+        await self.send(chat_id, self._visits_text(), self._kb_back("nav:admin"))
 
     async def _cmd_broadcast(self, chat_id: int, user: dict, text: str) -> None:
         if not user["is_admin"]:
@@ -343,7 +361,7 @@ class TelegramBot:
             self._wait_broadcast[int(user["tg_id"])] = True
             await self.send(chat_id,
                             "Пришлите текст рассылки следующим сообщением.\n/cancel — отмена.",
-                            self._kb_back("admin"))
+                            self._kb_back("nav:admin"))
             return
         await self.send(chat_id, "Рассылаю…")
         st = await self.broadcast(body, actor_id=user["id"])
@@ -371,7 +389,7 @@ class TelegramBot:
              {"text": "📈 Визиты", "callback_data": "visits"}],
             [{"text": "📣 Рассылка", "callback_data": "broadcast"},
              {"text": "🩺 Здоровье", "callback_data": "a:health"}],
-            [{"text": "← Назад", "callback_data": "menu"}],
+            [{"text": "← Назад", "callback_data": "nav:home"}],
         ]}
 
     def _services_kb(self, user: dict) -> dict:
@@ -382,7 +400,7 @@ class TelegramBot:
             lock = " (скоро)" if s["coming_soon"] else ""
             rows.append([{"text": f"{mark}{s['icon']} {s['title']}{lock}",
                           "callback_data": "svc:" + s["slug"]}])
-        rows.append([{"text": "← Назад", "callback_data": "menu"}])
+        rows.append([{"text": "← Назад", "callback_data": "nav:home"}])
         return {"inline_keyboard": rows}
 
     def _home_text(self, user: dict) -> str:

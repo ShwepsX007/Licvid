@@ -437,15 +437,10 @@ class TelegramBot:
             markup = {"inline_keyboard": [[
                 {"text": "⚡ Терминал", "url": self.public_url.rstrip("/") + "/terminal"}
             ]]}
+        # одно сообщение: фото с подписью, иначе только текст. Никогда фото+текст.
         ok = False
-        if img:
-            # подпись к фото — 1024; если длиннее, фото без текста + сообщение
-            if len(caption) <= 1024:
-                ok = bool(await self.send_photo(cid, img, caption, markup))
-            else:
-                pic = await self.send_photo(cid, img)
-                msg = await self.send(cid, caption, markup)
-                ok = bool(pic or msg)
+        if img and len(caption) <= 1024:
+            ok = bool(await self.send_photo(cid, img, caption, markup))
         if not ok:
             ok = bool(await self.send(cid, caption, markup))
         if ok:

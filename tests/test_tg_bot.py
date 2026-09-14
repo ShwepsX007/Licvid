@@ -246,6 +246,48 @@ class BotMenuTest(unittest.TestCase):
         }))
         self.assertEqual(self.store.get_setting("channel_id"), "-100777")
 
+    def test_digest_sends_one_message(self):
+        self.bot._channel_id_cfg = "-100111"
+        calls = []
+
+        async def fake_photo(*_a, **_k):
+            calls.append("photo")
+            return 11
+
+        async def fake_send(*_a, **_k):
+            calls.append("text")
+            return 22
+
+        self.bot.send_photo = fake_photo  # type: ignore
+        self.bot.send = fake_send  # type: ignore
+        ok = asyncio.run(self.bot.post_channel_digest())
+        self.assertTrue(ok)
+        self.assertEqual(calls, ["photo"])
+
+    def test_digest_long_caption_still_one_message(self):
+        self.bot._channel_id_cfg = "-100111"
+        import channel_digest
+        orig = channel_digest.render_post
+        channel_digest.render_post = lambda *_a, **_k: "x" * 2000
+        calls = []
+
+        async def fake_photo(*_a, **_k):
+            calls.append("photo")
+            return 11
+
+        async def fake_send(*_a, **_k):
+            calls.append("text")
+            return 22
+
+        self.bot.send_photo = fake_photo  # type: ignore
+        self.bot.send = fake_send  # type: ignore
+        try:
+            ok = asyncio.run(self.bot.post_channel_digest())
+        finally:
+            channel_digest.render_post = orig
+        self.assertTrue(ok)
+        self.assertEqual(calls, ["text"])
+
     def test_digest_shows_telegram_error(self):
         self.bot._channel_id_cfg = "-100111"
 

@@ -9,7 +9,8 @@ HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
 
 from channel_digest import (  # noqa: E402
-    VARIANT_COUNT, collect_digest, list_images, money, pick_image, render_post,
+    CAPTION_LIMIT, VARIANT_COUNT, collect_digest, list_images, money,
+    pick_image, render_post,
 )
 
 
@@ -50,14 +51,30 @@ class DigestTest(unittest.TestCase):
     def test_variants_differ_and_contain_facts(self):
         snap = collect_digest(self.events, now=self.now, oi=self.oi, cvd=self.cvd)
         texts = [render_post(snap, i) for i in range(VARIANT_COUNT)]
+        self.assertGreaterEqual(VARIANT_COUNT, 10)
         self.assertEqual(len(set(texts)), VARIANT_COUNT)
         for t in texts:
             self.assertIn("BTC", t)
             self.assertIn("Binance", t)
             self.assertIn("LiqScope", t)
-            self.assertLessEqual(len(t), 3900)
+            self.assertLessEqual(len(t), CAPTION_LIMIT)
             self.assertIn("CVD", t)
             self.assertIn("OI", t)
+            self.assertIn("<code>", t)
+            self.assertTrue(any(ch in t for ch in "💥🔴🟢🐋📊🌊🏛🔥⚡🏆🌙🌡⏱❓📋📉📈"))
+
+    def test_caption_fits_with_many_coins(self):
+        extra = [
+            _ev(f"C{i}_USDT", 80_000 + i * 1000, "SELL" if i % 2 == 0 else "BUY",
+                "binance", self.now - 10, 10 + i)
+            for i in range(16)
+        ]
+        snap = collect_digest(self.events + extra, now=self.now,
+                              oi=self.oi, cvd=self.cvd)
+        for i in range(VARIANT_COUNT):
+            t = render_post(snap, i)
+            self.assertLessEqual(len(t), CAPTION_LIMIT, f"v{i} len={len(t)}")
+            self.assertIn("LiqScope", t)
 
     def test_money_and_empty(self):
         self.assertEqual(money(1_250_000), "$1.25M")
@@ -65,6 +82,7 @@ class DigestTest(unittest.TestCase):
         snap = collect_digest([], now=self.now)
         t = render_post(snap, 0)
         self.assertIn("лидеров нет", t)
+        self.assertLessEqual(len(t), CAPTION_LIMIT)
 
     def test_images_exist(self):
         imgs = list_images()

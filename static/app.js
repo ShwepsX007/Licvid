@@ -2101,13 +2101,11 @@
                 if (!hit) {
                     hoverShape(null);
                     applyFeedHighlight(null, false);
-                } else if (hit.kind === "liq") {
-                    // прямоугольник: окно кластера ПЛЮС подсветка строк в ленте
+                } else {
+                    // кластер / треугольник / шар: окно фигуры + строка в
+                    // открытой ленте того же типа (liq / cvd / oi)
                     hoverShape(hit);
                     applyFeedHighlight(hit, false);
-                } else {
-                    applyFeedHighlight(null, false);
-                    hoverShape(hit);
                 }
             });
             // клик/тап: закрепить фигуру; повторный клик по ней или клик
@@ -2116,25 +2114,16 @@
                 if (drawTool) { drawClick(param); return; }   // точки фигур вместо окон
                 const hit = (param && param.point)
                     ? hitAt(param.point.x, param.point.y) : null;
-                if (!hit) {
+                const pinned = hit && (
+                    (hit.kind === "liq" && hit.key === pinHitKey) ||
+                    (shapePin && shapePin.kind === hit.kind && shapePin.key === hit.key)
+                );
+                if (!hit || pinned) {
                     applyFeedHighlight(null, true);
-                    unpinShape();
-                    hideShapeModal();
-                } else if (hit.kind === "liq") {
-                    if (hit.key === pinHitKey) {
-                        applyFeedHighlight(null, true);
-                        unpinShape();
-                        hideShapeModal();
-                    } else {
-                        applyFeedHighlight(hit, true);
-                        pinShape(hit);
-                        openShapeModal(hit.kind, hit);
-                    }
-                } else if (shapePin && hit.key === shapePin.key) {
                     unpinShape();
                     hideShapeModal();
                 } else {
-                    applyFeedHighlight(null, true);
+                    applyFeedHighlight(hit, true);
                     pinShape(hit);
                     openShapeModal(hit.kind, hit);
                 }

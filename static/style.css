@@ -706,14 +706,14 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
     white-space: nowrap;
 }
 
-/* Кнопка «Слои» — шире и крупнее соседних, чтобы её было видно сразу */
+/* Кнопка «Слои» — ширина как была, высота ближе к соседним */
 .profile-toggle.layer-call {
     border-color: rgba(0, 214, 255, 0.65);
     color: #67e8f9;
     background: rgba(0, 214, 255, 0.14);
     box-shadow: 0 0 14px rgba(0, 214, 255, 0.32);
-    padding: 8px 18px;
-    min-height: 36px;
+    padding: 3px 18px;
+    min-height: 26px;
     min-width: 108px;
     font-size: 0.84rem;
     font-weight: 800;

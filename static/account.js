@@ -191,8 +191,9 @@
     };
 
     /* ---------- cabinet ---------- */
-    function renderCabinet(me, services, notice) {
-        var u = me;
+    function renderCabinet(payload, services) {
+        var u = (payload && payload.user) || payload || {};
+        var notice = (payload && payload.site_notice) || "";
         $("cab-name") && ($("cab-name").textContent = u.display_name);
         $("cab-role") && ($("cab-role").textContent = u.is_admin ? t("roleAdmin") : t("roleUser"));
         $("cab-role") && $("cab-role").classList.toggle("badge-admin", !!u.is_admin);
@@ -200,6 +201,17 @@
             (u.username ? "@" + u.username + " · " : "") +
             "id " + u.tg_id + " · " + t("member") + " " + fmtDate(u.created_at));
         fillAvatar($("cab-avatar"), u);
+        var botLink = $("cab-bot-link");
+        if (botLink) {
+            var href = (payload && payload.bot_link) || "";
+            if (!href) {
+                var un = String((payload && payload.bot_username) || "LiqScopeBot").replace(/^@/, "");
+                href = "https://t.me/" + un;
+            }
+            botLink.href = href;
+            botLink.setAttribute("target", "_blank");
+            botLink.setAttribute("rel", "noopener");
+        }
         var n = $("site-notice");
         if (n) {
             if (notice) { n.textContent = notice; n.classList.remove("hidden"); }
@@ -239,7 +251,7 @@
             var me = arr[0];
             if (!me.user) { location.href = "/login?next=/cabinet"; return; }
             paintNav(me.user);
-            renderCabinet(me.user, (arr[1] && arr[1].services) || [], me.site_notice || "");
+            renderCabinet(me, (arr[1] && arr[1].services) || []);
             var cabLo = $("cab-logout");
             if (cabLo) cabLo.addEventListener("click", function () {
                 api("/api/auth/logout", { method: "POST" }).then(function () {

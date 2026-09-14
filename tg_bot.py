@@ -109,6 +109,34 @@ class TelegramBot:
         res = await self._call("sendMessage", body)
         return bool(res and res.get("ok"))
 
+    async def edit(self, chat_id: int, message_id: int, text: str,
+                   markup: Optional[dict] = None, parse: str = "HTML") -> bool:
+        """Меняет то же сообщение (текст + кнопки), не плодит новые."""
+        body: Dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text[:3900],
+            "parse_mode": parse,
+            "disable_web_page_preview": True,
+        }
+        if markup is not None:
+            body["reply_markup"] = markup
+        res = await self._call("editMessageText", body)
+        if res and res.get("ok"):
+            return True
+        desc = str((res or {}).get("description") or "").lower()
+        # тот же текст+клавиатура — для Telegram это не ошибка
+        if "not modified" in desc:
+            return True
+        return False
+
+    async def reply(self, chat_id: int, text: str, markup: Optional[dict] = None,
+                    message_id: Optional[int] = None) -> bool:
+        if message_id:
+            if await self.edit(chat_id, message_id, text, markup):
+                return True
+        return await self.send(chat_id, text, markup)
+
     async def answer_cb(self, cb_id: str, text: str = "") -> None:
         await self._call("answerCallbackQuery", {"callback_query_id": cb_id, "text": text[:180]})
 
@@ -179,17 +207,17 @@ class TelegramBot:
         elif text.startswith("/help"):
             await self.send(chat_id, self._help(user), self._menu(user))
         elif text.startswith("/cabinet"):
-            await self.send(chat_id, self._cabinet_text(user), self._menu(user))
+            await self.send(chat_id, self._cabinet_text(user), self._kb_back("menu"))
         elif text.startswith("/stats"):
-            await self.send(chat_id, self._stats_text(), self._menu(user))
+            await self.send(chat_id, self._stats_text(), self._kb_back("menu"))
         elif text.startswith("/status") or text.startswith("/health"):
-            await self.send(chat_id, self._health_text(), self._menu(user))
+            await self.send(chat_id, self._health_text(), self._kb_back("menu"))
         elif text.startswith("/liq"):
-            await self.send(chat_id, self._liq_text(), self._menu(user))
+            await self.send(chat_id, self._liq_text(), self._kb_back("menu"))
         elif text.startswith("/services"):
             await self.send(chat_id, self._services_text(user), self._services_kb(user))
         elif text.startswith("/terminal"):
-            await self.send(chat_id, self._terminal_text(), self._menu(user))
+            await self.send(chat_id, self._terminal_text(), self._kb_back("menu"))
         elif text.startswith("/admin"):
             await self._cmd_admin(chat_id, user)
         elif text.startswith("/users"):
@@ -203,47 +231,58 @@ class TelegramBot:
 
     async def _on_callback(self, cb: dict) -> None:
         from_u = cb.get("from") or {}
-        data = cb.get("data") or ""
-        chat_id = ((cb.get("message") or {}).get("chat") or {}).get("id") or from_u.get("id")
+        data = (cb.get("data") or "").strip()
+        msg = cb.get("message") or {}
+        chat_id = (msg.get("chat") or {}).get("id") or from_u.get("id")
+        message_id = msg.get("message_id")
         user = self.store.upsert_telegram_user(from_u)
         if user["is_banned"]:
             await self.answer_cb(cb["id"], "Доступ закрыт")
             return
         await self.answer_cb(cb["id"])
+        tg_id = int(from_u.get("id") or 0)
+        if data in ("menu", "back"):
+            self._wait_broadcast.pop(tg_id, None)
+        text, markup = self._screen(user, data)
+        await self.reply(chat_id, text, markup, message_id=message_id)
+
+    def _screen(self, user: dict, data: str) -> tuple:
+        """Текст и клавиатура экрана. Кнопки меняются на месте, не новым сообщением."""
+        if data in ("menu", "back", "help", ""):
+            return (self._home_text(user) if data != "help" else self._help(user),
+                    self._menu(user))
         if data == "cabinet":
-            await self.send(chat_id, self._cabinet_text(user), self._menu(user))
-        elif data == "stats":
-            await self.send(chat_id, self._stats_text(), self._menu(user))
-        elif data == "health":
-            await self.send(chat_id, self._health_text(), self._menu(user))
-        elif data == "liq":
-            await self.send(chat_id, self._liq_text(), self._menu(user))
-        elif data == "services":
-            await self.send(chat_id, self._services_text(user), self._services_kb(user))
-        elif data == "terminal":
-            await self.send(chat_id, self._terminal_text(), self._menu(user))
-        elif data == "help":
-            await self.send(chat_id, self._help(user), self._menu(user))
-        elif data == "admin" and user["is_admin"]:
-            await self.send(chat_id, self._admin_text(), self._admin_kb())
-        elif data == "users" and user["is_admin"]:
-            await self._cmd_users(chat_id, user)
-        elif data == "visits" and user["is_admin"]:
-            await self._cmd_visits(chat_id, user)
-        elif data == "broadcast" and user["is_admin"]:
-            await self._cmd_broadcast(chat_id, user, "")
-        elif data.startswith("svc:"):
+            return self._cabinet_text(user), self._kb_back("menu")
+        if data == "stats":
+            return self._stats_text(), self._kb_back("menu")
+        if data == "health":
+            return self._health_text(), self._kb_back("menu")
+        if data == "a:health" and user.get("is_admin"):
+            return self._health_text(), self._kb_back("admin")
+        if data == "liq":
+            return self._liq_text(), self._kb_back("menu")
+        if data == "terminal":
+            return self._terminal_text(), self._kb_back("menu")
+        if data == "services":
+            return self._services_text(user), self._services_kb(user)
+        if data.startswith("svc:"):
             slug = data.split(":", 1)[1]
             have = set(self.store.user_service_slugs(user["id"]))
             on = slug not in have
-            res = self.store.toggle_user_service(user["id"], slug, on)
-            if res.get("ok"):
-                note = " в списке ожидания" if res.get("coming_soon") and on else ""
-                await self.send(chat_id,
-                                ("Подключено" if on else "Отключено") + f" <b>{_esc(slug)}</b>{note}.",
-                                self._services_kb(user))
-        else:
-            await self.send(chat_id, self._help(user), self._menu(user))
+            self.store.toggle_user_service(user["id"], slug, on)
+            return self._services_text(user), self._services_kb(user)
+        if data == "admin" and user.get("is_admin"):
+            self._wait_broadcast.pop(int(user.get("tg_id") or 0), None)
+            return self._admin_text(), self._admin_kb()
+        if data == "users" and user.get("is_admin"):
+            return self._users_text(), self._kb_back("admin")
+        if data == "visits" and user.get("is_admin"):
+            return self._visits_text(), self._kb_back("admin")
+        if data == "broadcast" and user.get("is_admin"):
+            self._wait_broadcast[int(user.get("tg_id") or 0)] = True
+            return ("Пришлите текст рассылки следующим сообщением.\n"
+                    "/cancel — отмена.", self._kb_back("admin"))
+        return self._home_text(user), self._menu(user)
 
     async def _cmd_start(self, chat_id: int, user: dict, text: str) -> None:
         parts = text.split(maxsplit=1)
@@ -286,29 +325,13 @@ class TelegramBot:
         if not user["is_admin"]:
             await self.send(chat_id, "Недостаточно прав.", self._menu(user))
             return
-        data = self.store.list_users(limit=10)
-        c = self.store.user_counts()
-        lines = [f"<b>Пользователи</b> · всего {c['total']} · за 24ч {c['active_24h']} · новых {c['new_24h']}"]
-        for u in data["users"]:
-            flag = " ★" if u["is_admin"] else ""
-            ban = " ⛔" if u["is_banned"] else ""
-            un = f" @{_esc(u['username'])}" if u["username"] else ""
-            lines.append(f"· {_esc(u['display_name'])}{un} <code>{u['tg_id']}</code>{flag}{ban}")
-        await self.send(chat_id, "\n".join(lines), self._admin_kb())
+        await self.send(chat_id, self._users_text(), self._kb_back("admin"))
 
     async def _cmd_visits(self, chat_id: int, user: dict) -> None:
         if not user["is_admin"]:
             await self.send(chat_id, "Недостаточно прав.", self._menu(user))
             return
-        v = self.store.visit_stats(7)
-        lines = [
-            f"<b>Визиты</b>",
-            f"Сегодня: {v['today_views']} просмотров, {v['today_uniques']} уникальных",
-            f"Онлайн WS: {self.ws_clients_fn()}",
-        ]
-        for d in v["days"][-7:]:
-            lines.append(f"· {d['day']}: {d['views']} / {d['uniques']} уник.")
-        await self.send(chat_id, "\n".join(lines), self._admin_kb())
+        await self.send(chat_id, self._visits_text(), self._kb_back("admin"))
 
     async def _cmd_broadcast(self, chat_id: int, user: dict, text: str) -> None:
         if not user["is_admin"]:
@@ -318,11 +341,16 @@ class TelegramBot:
         body = rest[1].strip() if len(rest) > 1 else ""
         if not body:
             self._wait_broadcast[int(user["tg_id"])] = True
-            await self.send(chat_id, "Пришлите текст рассылки следующим сообщением. /cancel — отмена.")
+            await self.send(chat_id,
+                            "Пришлите текст рассылки следующим сообщением.\n/cancel — отмена.",
+                            self._kb_back("admin"))
             return
         await self.send(chat_id, "Рассылаю…")
         st = await self.broadcast(body, actor_id=user["id"])
         await self.send(chat_id, f"Готово: {st['ok']}/{st['total']}.", self._admin_kb())
+
+    def _kb_back(self, to: str = "menu") -> dict:
+        return {"inline_keyboard": [[{"text": "← Назад", "callback_data": to}]]}
 
     def _menu(self, user: dict) -> dict:
         rows = [
@@ -342,8 +370,8 @@ class TelegramBot:
             [{"text": "👥 Пользователи", "callback_data": "users"},
              {"text": "📈 Визиты", "callback_data": "visits"}],
             [{"text": "📣 Рассылка", "callback_data": "broadcast"},
-             {"text": "🩺 Здоровье", "callback_data": "health"}],
-            [{"text": "← Меню", "callback_data": "cabinet"}],
+             {"text": "🩺 Здоровье", "callback_data": "a:health"}],
+            [{"text": "← Назад", "callback_data": "menu"}],
         ]}
 
     def _services_kb(self, user: dict) -> dict:
@@ -354,8 +382,15 @@ class TelegramBot:
             lock = " (скоро)" if s["coming_soon"] else ""
             rows.append([{"text": f"{mark}{s['icon']} {s['title']}{lock}",
                           "callback_data": "svc:" + s["slug"]}])
-        rows.append([{"text": "← Меню", "callback_data": "cabinet"}])
+        rows.append([{"text": "← Назад", "callback_data": "menu"}])
         return {"inline_keyboard": rows}
+
+    def _home_text(self, user: dict) -> str:
+        return (
+            f"<b>LiqScope</b>\n"
+            f"Привет, {_esc(user['display_name'])}!\n"
+            f"Выберите раздел — кнопки ниже."
+        )
 
     def _help(self, user: dict) -> str:
         lines = [
@@ -479,6 +514,28 @@ class TelegramBot:
             if s.get("description"):
                 lines.append(f"    {_esc(s['description'])}")
         lines.append("\nНажмите сервис, чтобы подписаться (лист ожидания, пока он «скоро»).")
+        return "\n".join(lines)
+
+    def _users_text(self) -> str:
+        data = self.store.list_users(limit=10)
+        c = self.store.user_counts()
+        lines = [f"<b>Пользователи</b> · всего {c['total']} · за 24ч {c['active_24h']} · новых {c['new_24h']}"]
+        for u in data["users"]:
+            flag = " ★" if u["is_admin"] else ""
+            ban = " ⛔" if u["is_banned"] else ""
+            un = f" @{_esc(u['username'])}" if u["username"] else ""
+            lines.append(f"· {_esc(u['display_name'])}{un} <code>{u['tg_id']}</code>{flag}{ban}")
+        return "\n".join(lines)
+
+    def _visits_text(self) -> str:
+        v = self.store.visit_stats(7)
+        lines = [
+            "<b>Визиты</b>",
+            f"Сегодня: {v['today_views']} просмотров, {v['today_uniques']} уникальных",
+            f"Онлайн WS: {self.ws_clients_fn()}",
+        ]
+        for d in v["days"][-7:]:
+            lines.append(f"· {d['day']}: {d['views']} / {d['uniques']} уник.")
         return "\n".join(lines)
 
     def _admin_text(self) -> str:

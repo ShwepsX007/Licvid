@@ -77,9 +77,21 @@ def _need_admin() -> JSONResponse:
     return JSONResponse({"ok": False, "error": "admin"}, status_code=403)
 
 
+# Публичное имя бота, если getMe ещё не ответил или токен не подхватился.
+DEFAULT_BOT_USERNAME = (os.getenv("LIQSCOPE_BOT_USERNAME") or "LiqScopeBot").lstrip("@")
+
+
 def _bot_username() -> str:
     bot = ctx.bot
-    return (bot.username if bot else "") or ""
+    name = ((bot.username if bot else "") or "").lstrip("@")
+    return name or DEFAULT_BOT_USERNAME
+
+
+def _bot_link(start: str = "") -> str:
+    user = _bot_username()
+    if start:
+        return f"https://t.me/{user}?start={quote(start)}"
+    return f"https://t.me/{user}"
 
 
 def _public_url(request: Request) -> str:
@@ -129,7 +141,7 @@ def register_account_routes(app) -> None:
         if not ctx.store:
             return JSONResponse({"ok": False, "error": "no_store"}, status_code=503)
         bot_user = _bot_username()
-        if not bot_user:
+        if not ctx.bot or not getattr(ctx.bot, "token", ""):
             return JSONResponse({
                 "ok": False,
                 "error": "no_bot",
@@ -137,12 +149,11 @@ def register_account_routes(app) -> None:
             }, status_code=503)
         nonce = ctx.store.new_nonce()
         payload = "login_" + nonce
-        link = f"https://t.me/{bot_user}?start={quote(payload)}"
         return {
             "ok": True,
             "nonce": nonce,
             "bot_username": bot_user,
-            "bot_link": link,
+            "bot_link": _bot_link(payload),
             "expires_in": 300,
         }
 

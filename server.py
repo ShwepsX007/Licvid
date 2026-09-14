@@ -293,6 +293,14 @@ async def on_liquidation(ev: dict):
         "usd": round(float(ev["usd"]), 2),
         "timestamp": float(ev["timestamp"]),
     }
+    # kind="tape" — событие выведено из ленты сделок (Hyperliquid не помечает
+    # ликвидации публично, см. hl_infer.py). Едем с событием дальше: в ленте и
+    # в окне деталей его надо видеть, иначе вывод выдаётся за факт биржи.
+    if ev.get("kind"):
+        event["kind"] = ev["kind"]
+        if ev.get("liquidation"):
+            event["liq"] = {k: v for k, v in ev["liquidation"].items()
+                            if k in ("liquidatedUser", "markPx", "method")}
     LIQUIDATIONS.append(event)
     try:
         _liq_queue.put_nowait(event)

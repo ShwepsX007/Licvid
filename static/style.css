@@ -1290,6 +1290,19 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
 .exch-badge.okx     { color: #cfd6e4; border-color: rgba(207,214,228,0.3); }
 .exch-badge.gate    { color: #4ba7ff; border-color: rgba(75,167,255,0.35); }
 
+/* «выведено из ленты»: событие посчитал терминал, а не прислала биржа.
+   Знак стоит внутри бейджа биржи, чтобы не ломать ширину колонки. */
+.tape-tag {
+    margin-left: 4px;
+    color: var(--color-gold);
+    font-weight: 700;
+    font-size: 0.72rem;
+    cursor: help;
+}
+
+/* строка «источник» в модалке и пояснение к ней */
+.liq-src { color: var(--text-muted); font-family: var(--font-mono); font-size: 0.86rem; }
+
 .top-coin-card { cursor: pointer; transition: border-color .15s, transform .15s; }
 .top-coin-card:hover { border-color: var(--color-blue); transform: translateY(-1px); }
 

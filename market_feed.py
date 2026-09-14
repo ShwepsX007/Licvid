@@ -1,7 +1,8 @@
 """
 market_feed.py — реальные рыночные данные для LiqScope Terminal.
 
-Модуль полностью самодостаточный (нужен только aiohttp) и НЕ зависит от
+Модуль самодостаточен (из внешних нужны только aiohttp и соседний
+`hl_infer.py` — вывод ликвидаций Hyperliquid из ленты) и НЕ зависит от
 телеграм-бота. Он даёт три вещи:
 
   1. Список торгуемых монет (USDT-перпетуалы), автоматически подтянутый
@@ -38,6 +39,8 @@ from datetime import datetime
 from collections import deque
 from typing import (Any, Awaitable, Callable, Deque, Dict, Iterable, List,
                     Optional)
+
+from hl_infer import HL_INFER_ENABLED, HlLiquidationInferer
 
 import aiohttp
 from aiohttp import ClientWSTimeout
@@ -1780,7 +1783,8 @@ class MarketFeed:
 
     # -- нормализация и выдача события --------------------------------------
     async def _emit(self, source: str, symbol: str, side: str,
-                    price: float, qty: float, ts: float, usd: Optional[float] = None):
+                    price: float, qty: float, ts: float, usd: Optional[float] = None,
+                    kind: Optional[str] = None, details: Optional[dict] = None):
         sym = canon(symbol)
         if sym not in self.symbol_set:
             return
@@ -1799,6 +1803,13 @@ class MarketFeed:
             "usd": usd_value,
             "timestamp": ts or time.time(),
         }
+        if kind:
+            # "tape" — событие не прислано биржей, а выведено из ленты сделок
+            # и подтверждено /info (см. hl_infer.py); фронт помечает его значком
+            event["kind"] = kind
+        if details:
+            # что именно подтвердило вывод: адрес жертвы, markPx, method
+            event.update(details)
         await self.on_liquidation(event)
 
     @property
@@ -3021,9 +3032,30 @@ class MarketFeed:
                 async with send_lock:
                     await ws.send_json(payload)
 
+            # Вывод ликвидаций из ленты: у HL публичной метки нет, и без этого
+            # источник в ленте пустой (см. hl_infer.py). Кандидаты копятся в
+            # горячей памяти, подтверждаются редким /info в СВОЕЙ задаче —
+            # читатель сокета не ждёт сеть.
+            inferer = None
+            infer_task = None
+            if HL_INFER_ENABLED:
+                async def _infer_event(ev: dict):
+                    await self._emit("hyperliquid", ev["symbol"], ev["side"],
+                                     ev["price"], ev["qty"], ev["ts"],
+                                     usd=ev.get("usd"), kind=ev.get("kind"),
+                                     details={"liquidation": ev.get("liquidation")})
+
+                inferer = HlLiquidationInferer(lambda: self.hl_coin_map, session,
+                                               _infer_event, hl_rest=HL_REST,
+                                               max_age=HL_FRESH_SEC)
+                infer_task = asyncio.create_task(inferer.worker(), name="hl-infer")
+                log.info("[hyperliquid/infer] вывод ликвидаций из ленты: кандидат "
+                         "от %.0f$, подтверждение /info userFillsByTime до %d/мин",
+                         inferer.min_usd, inferer.max_confirm_per_min)
+
             def publish():
                 """Диагностика в /api/health: видно, где именно затык."""
-                st.extra = {
+                extra = {
                     "hl_url": HL_WS,
                     "hl_subs_total": len(self.hl_coin_map),
                     "hl_subs_sent": len(sent),
@@ -3034,6 +3066,9 @@ class MarketFeed:
                     "hl_skipped_stale": stats["stale"],
                     "hl_coins_banned": sorted(self.hl_banned_coins),
                 }
+                if inferer is not None:
+                    extra.update(inferer.describe())
+                st.extra = extra
 
             async def handle_text(raw: str):
                 nonlocal seen_msgs
@@ -3075,6 +3110,10 @@ class MarketFeed:
                 for ev in evs:
                     await self._emit("hyperliquid", ev["symbol"], ev["side"],
                                      ev["price"], ev["qty"], ev["ts"])
+                if inferer is not None:
+                    # кадры с меткой биржа помечает сама — inferer видит tid и
+                    # такие всплески не подтверждает (двойных событий не будет)
+                    inferer.observe(payload)
                 # рассинхрон часов съел бы весь поток молча — говорим вслух,
                 # но только если живых ликвидаций нет вовсе (иначе это штатный
                 # срез истории на подписку, а не поломка)
@@ -3152,6 +3191,11 @@ class MarketFeed:
                         flags["announced"] = True
                         log.info("[hyperliquid] подписка trades подтверждена "
                                  "на %d монет", len(acked))
+                    if inferer is not None:
+                        # тик раз в HL_SUB_TICK — именно здесь «досматриваются»
+                        # всплески, после которых тейкер замолчал
+                        inferer.sweep()
+                        inferer.maybe_log()
                     publish()
                     await asyncio.sleep(HL_SUB_TICK)
 
@@ -3224,9 +3268,12 @@ class MarketFeed:
                         continue
                     await handle_text(msg.data)
             finally:
-                for t in (hb, sw):
+                if inferer is not None:
+                    # воркер подтверждений закрываем вместе с соединением:
+                    # висящий /info не должен переживать реконнект
+                    await inferer.aclose()
+                for t in tuple(x for x in (hb, sw, infer_task) if x):
                     t.cancel()
-                for t in (hb, sw):
                     try:
                         await t
                     except (asyncio.CancelledError, Exception):

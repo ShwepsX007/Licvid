@@ -2260,7 +2260,12 @@
             encodeURIComponent(item.symbol) + '" title="' + openTitleHtml +
             '" aria-label="' + openTitleHtml + '">' +
             "<strong>" + pretty(item.symbol) + "</strong><span class=\"coin-link-icon\">📈</span></button></td>" +
-            '<td><span class="exch-badge ' + item.exchange + '">' + item.exchange + "</span></td>" +
+            '<td><span class="exch-badge ' + item.exchange + '">' + item.exchange +
+            (item.kind === "tape"
+                ? '<span class="tape-tag" title="' + I18n.t("feed.tape_tip").replace(/"/g, "&quot;") +
+                  '">∿</span>'
+                : "") +
+            "</span></td>" +
             '<td><span class="badge-side ' + (isLong ? "long" : "short") + '">' +
             (isLong ? "LONG LIQ" : "SHORT LIQ") + "</span></td>" +
             '<td class="td-usd-amount ' + valClass + '">$' + fmtUsdFull(item.usd) + "</td>" +
@@ -2330,7 +2335,24 @@
             fmtUsdFull(item.usd) + "</span></p>" +
             "<p><strong>" + I18n.t("modal.qty") + "</strong> " +
             Number(item.qty).toLocaleString("en-US", { maximumFractionDigits: 6 }) + "</p>" +
-            "<p><strong>" + I18n.t("modal.time") + "</strong> " + I18n.dateTime(item.timestamp) + "</p>";
+            "<p><strong>" + I18n.t("modal.time") + "</strong> " + I18n.dateTime(item.timestamp) + "</p>" +
+            // источник события: «выведено из ленты» надо показывать честно —
+            // биржа такие ликвидации не публикует, их считает терминал
+            (item.kind === "tape"
+                ? '<p><strong>' + I18n.t("modal.src") + "</strong> " +
+                  I18n.t("modal.src_tape") +
+                  (item.liq ? '<span class="liq-src"> · markPx ' +
+                             fmtPrice(item.liq.markPx) +
+                             (item.liq.method ? " · " + String(item.liq.method) : "") +
+                             (item.liq.liquidatedUser
+                                 ? ' · <span class="wallet">' +
+                                   String(item.liq.liquidatedUser).slice(0, 10) + "…" +
+                                   "</span>"
+                                 : "") + "</span>"
+                             : "") +
+                  "</p>"
+                : '<p><strong>' + I18n.t("modal.src") + "</strong> " +
+                  I18n.t("modal.src_feed") + "</p>");
         unpinShape();
         detailModal.classList.remove("hidden");
         detailModal.classList.remove("peek", "peek-pinned");

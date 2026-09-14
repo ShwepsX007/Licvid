@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import logging
+import os
 import time
 from typing import Any, Callable, Dict, List, Optional
 
@@ -32,6 +34,9 @@ class TelegramBot:
         stats_fn: Optional[Callable[[], dict]] = None,
         liqs_fn: Optional[Callable[[], list]] = None,
         ws_clients_fn: Optional[Callable[[], int]] = None,
+        channel_url: str = "",
+        channel_id: str = "",
+        digest_fn: Optional[Callable[[], Any]] = None,
     ):
         self.token = (token or "").strip()
         self.store = store
@@ -40,6 +45,13 @@ class TelegramBot:
         self.stats_fn = stats_fn or (lambda: {})
         self.liqs_fn = liqs_fn or (lambda: [])
         self.ws_clients_fn = ws_clients_fn or (lambda: 0)
+        self.channel_url = (channel_url or os.getenv("LIQSCOPE_CHANNEL_URL")
+                            or "https://t.me/+4S1LsZtH1Pc5YWZi").strip()
+        self._channel_id_cfg = (channel_id or os.getenv("LIQSCOPE_CHANNEL_ID")
+                                or "").strip()
+        self.digest_fn = digest_fn or (lambda: {})
+        self._digest_task: Optional[asyncio.Task] = None
+        self._ch_ok: Dict[int, float] = {}   # tg_id -> cache until
         self.username = ""
         self.bot_id = 0
         self.running = False
@@ -78,16 +90,21 @@ class TelegramBot:
         await self._call("deleteWebhook", {"drop_pending_updates": False})
         self.running = True
         self._task = asyncio.create_task(self._poll(), name="tg-bot")
+        self._digest_task = asyncio.create_task(self._channel_loop(), name="tg-channel")
         log.info("Telegram-бот @%s запущен", self.username)
 
     async def stop(self) -> None:
         self.running = False
-        if self._task:
-            self._task.cancel()
+        for t in (self._task, self._digest_task):
+            if not t:
+                continue
+            t.cancel()
             try:
-                await self._task
+                await t
             except (asyncio.CancelledError, Exception):
                 pass
+        self._task = None
+        self._digest_task = None
         if self._session:
             await self._session.close()
             self._session = None
@@ -197,6 +214,171 @@ class TelegramBot:
                     message_id: Optional[int] = None) -> bool:
         return await self.show_menu(chat_id, text, markup, old_id=message_id)
 
+    def channel_chat_id(self) -> str:
+        return (self._channel_id_cfg
+                or (self.store.get_setting("channel_id", "") if self.store else "")
+                or "").strip()
+
+    def _join_text(self, extra: str = "") -> str:
+        url = _esc(self.channel_url)
+        more = f"\n\n{extra}" if extra else ""
+        return (
+            "<b>Сначала канал</b>\n"
+            "Чтобы пользоваться ботом LiqScope, подпишитесь на канал со сводками "
+            "ликвидаций, OI и CVD.\n\n"
+            "Раз в 4 часа туда уходит разбор рынка: кто кого вынес и на каких биржах.\n"
+            f"Канал: {url}{more}"
+        )
+
+    def _kb_join(self) -> dict:
+        return {"inline_keyboard": [
+            [{"text": "📣 Подписаться", "url": self.channel_url}],
+            [{"text": "✅ Я подписался", "callback_data": "ch:check"}],
+        ]}
+
+    async def _is_member(self, tg_id: int) -> bool:
+        cid = self.channel_chat_id()
+        if not cid or not tg_id:
+            return False
+        until = self._ch_ok.get(int(tg_id), 0)
+        if until > time.time():
+            return True
+        res = await self._call("getChatMember", {"chat_id": cid, "user_id": int(tg_id)})
+        status = str(((res or {}).get("result") or {}).get("status") or "").lower()
+        ok = status in ("creator", "administrator", "member", "restricted")
+        if ok:
+            self._ch_ok[int(tg_id)] = time.time() + 180
+        else:
+            self._ch_ok.pop(int(tg_id), None)
+        return ok
+
+    async def _ensure_channel(self, chat_id: int, user: dict,
+                              message_id: Optional[int] = None,
+                              extra: str = "") -> bool:
+        """True — можно показывать меню. Без id канала не блокируем (нечего проверить)."""
+        if not self.channel_chat_id():
+            return True
+        if await self._is_member(int(user.get("tg_id") or 0)):
+            return True
+        await self.show_menu(chat_id, self._join_text(extra), self._kb_join(),
+                             old_id=message_id)
+        return False
+
+    async def _on_my_chat_member(self, ev: dict) -> None:
+        chat = ev.get("chat") or {}
+        if chat.get("type") != "channel":
+            return
+        new = ev.get("new_chat_member") or {}
+        st = str(new.get("status") or "")
+        cid = chat.get("id")
+        if cid and st in ("administrator", "creator"):
+            self.store.set_setting("channel_id", str(cid))
+            log.info("канал подключён chat_id=%s title=%s", cid, chat.get("title"))
+        elif cid and st in ("left", "kicked"):
+            log.warning("бота убрали из канала chat_id=%s", cid)
+
+    async def send_photo(self, chat_id, path: str, caption: str = "",
+                         markup: Optional[dict] = None) -> Optional[int]:
+        if not self._session or not path or not os.path.isfile(path):
+            return None
+        url = API.format(token=self.token, method="sendPhoto")
+        form = aiohttp.FormData()
+        form.add_field("chat_id", str(chat_id))
+        if caption:
+            form.add_field("caption", caption[:1024])
+            form.add_field("parse_mode", "HTML")
+        if markup:
+            form.add_field("reply_markup", json.dumps(markup, ensure_ascii=False))
+        try:
+            data = open(path, "rb").read()
+        except OSError as e:
+            log.warning("photo read %s: %s", path, e)
+            return None
+        name = os.path.basename(path)
+        ctype = "image/png" if name.lower().endswith(".png") else "image/jpeg"
+        form.add_field("photo", data, filename=name, content_type=ctype)
+        try:
+            async with self._session.post(
+                    url, data=form, timeout=aiohttp.ClientTimeout(total=30)) as r:
+                res = await r.json(content_type=None)
+        except Exception as e:
+            log.warning("tg sendPhoto: %s", e)
+            return None
+        if not res or not res.get("ok"):
+            log.warning("tg sendPhoto: %s", (res or {}).get("description"))
+            return None
+        mid = (res.get("result") or {}).get("message_id")
+        try:
+            return int(mid) if mid is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    async def _channel_loop(self) -> None:
+        from channel_digest import WINDOW_SEC
+        # первый пост не сразу: пусть фиды прогреются; дальше — каждые 4 часа
+        first = 90.0
+        last = 0.0
+        try:
+            last = float(self.store.get_setting("channel_digest_ts") or 0)
+        except (TypeError, ValueError):
+            last = 0.0
+        if last > 0:
+            first = max(30.0, WINDOW_SEC - (time.time() - last))
+        try:
+            await asyncio.sleep(first)
+        except asyncio.CancelledError:
+            return
+        while self.running:
+            try:
+                await self.post_channel_digest()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                log.warning("channel digest: %s", e)
+            try:
+                await asyncio.sleep(WINDOW_SEC)
+            except asyncio.CancelledError:
+                break
+
+    async def post_channel_digest(self, force: bool = False) -> bool:
+        from channel_digest import pick_image, render_post
+        cid = self.channel_chat_id()
+        if not cid:
+            log.warning("сводка: нет channel_id — добавьте бота админом канала "
+                        "или задайте LIQSCOPE_CHANNEL_ID")
+            return False
+        raw = self.digest_fn() if self.digest_fn else {}
+        if asyncio.iscoroutine(raw):
+            raw = await raw
+        snap = raw if isinstance(raw, dict) else {}
+        try:
+            n = int(self.store.get_setting("channel_digest_n") or 0)
+        except (TypeError, ValueError):
+            n = 0
+        caption = render_post(snap, n)
+        img = pick_image(n)
+        markup = None
+        if self.public_url:
+            markup = {"inline_keyboard": [[
+                {"text": "⚡ Терминал", "url": self.public_url.rstrip("/") + "/terminal"}
+            ]]}
+        ok = False
+        if img:
+            # подпись к фото — 1024; если длиннее, фото без текста + сообщение
+            if len(caption) <= 1024:
+                ok = bool(await self.send_photo(cid, img, caption, markup))
+            else:
+                pic = await self.send_photo(cid, img)
+                msg = await self.send(cid, caption, markup)
+                ok = bool(pic or msg)
+        if not ok:
+            ok = bool(await self.send(cid, caption, markup))
+        if ok:
+            self.store.set_setting("channel_digest_n", str(n + 1))
+            self.store.set_setting("channel_digest_ts", str(int(time.time())))
+            log.info("сводка в канал n=%s", n)
+        return ok
+
     async def answer_cb(self, cb_id: str, text: str = "") -> None:
         # Пустой text Telegram иногда отвергает — тогда клиент «залипает»
         # и больше не шлёт нажатия.
@@ -223,7 +405,7 @@ class TelegramBot:
                 res = await self._call("getUpdates", {
                     "offset": self._offset,
                     "timeout": 50,
-                    "allowed_updates": ["message", "callback_query"],
+                    "allowed_updates": ["message", "callback_query", "my_chat_member"],
                 })
                 if not res or not res.get("ok"):
                     if res and res.get("description"):
@@ -243,6 +425,9 @@ class TelegramBot:
                 await asyncio.sleep(3)
 
     async def _on_update(self, upd: dict) -> None:
+        if "my_chat_member" in upd:
+            await self._on_my_chat_member(upd["my_chat_member"])
+            return
         if "callback_query" in upd:
             await self._on_callback(upd["callback_query"])
             return
@@ -271,6 +456,14 @@ class TelegramBot:
                 return
         if text.startswith("/start"):
             await self._cmd_start(chat_id, user, text)
+            return
+        if not await self._ensure_channel(chat_id, user):
+            return
+        if text.startswith("/digest") and user.get("is_admin"):
+            ok = await self.post_channel_digest(force=True)
+            await self.show_menu(chat_id,
+                                 "Сводка ушла в канал." if ok else "Не удалось отправить сводку. Бот должен быть админом канала.",
+                                 self._admin_kb() if user.get("is_admin") else self._menu(user))
         elif text.startswith("/help"):
             await self.show_menu(chat_id, self._help(user), self._menu(user))
         elif text.startswith("/cabinet"):
@@ -313,6 +506,28 @@ class TelegramBot:
         # пустым text, клиент залипает и следующие кнопки не нажимаются.
         await self.answer_cb(cb["id"])
         try:
+            if data == "ch:check":
+                if await self._is_member(tg_id):
+                    text, markup = self._home_text(user), self._menu(user)
+                    ok = await self.reply(chat_id, text, markup, message_id=message_id)
+                else:
+                    extra = ("Telegram ещё не видит подписку. Откройте канал, "
+                             "затем нажмите «Я подписался» ещё раз.")
+                    ok = await self.show_menu(chat_id, self._join_text(extra),
+                                              self._kb_join(), old_id=message_id)
+                if not ok:
+                    log.warning("меню не обновилось data=%s chat=%s msg=%s",
+                                data, chat_id, message_id)
+                return
+            if data == "a:digest" and user.get("is_admin"):
+                posted = await self.post_channel_digest(force=True)
+                msg = ("Сводка ушла в канал." if posted
+                       else "Не удалось отправить. Бот должен быть админом канала.")
+                await self.reply(chat_id, msg, self._admin_kb(), message_id=message_id)
+                return
+            if data != "ch:check" and not await self._ensure_channel(
+                    chat_id, user, message_id=message_id):
+                return
             text, markup = self._screen(user, data)
             ok = await self.reply(chat_id, text, markup, message_id=message_id)
             if not ok:
@@ -366,6 +581,8 @@ class TelegramBot:
             nonce = payload[6:]
             if self.store.confirm_nonce(nonce, user["id"]):
                 site = self.public_url or "сайт"
+                if not await self._ensure_channel(chat_id, user):
+                    return
                 await self.show_menu(
                     chat_id,
                     f"Вход подтверждён, {_esc(user['display_name'])}.\n"
@@ -379,6 +596,8 @@ class TelegramBot:
                 "Код входа недействителен или устарел. Нажмите «Войти» на сайте ещё раз.",
                 self._menu(user),
             )
+            return
+        if not await self._ensure_channel(chat_id, user):
             return
         welcome = self.store.get_setting(
             "bot_welcome",
@@ -446,6 +665,8 @@ class TelegramBot:
         ]
         if user.get("is_admin"):
             rows.append([{"text": "★ Админка", "callback_data": "admin"}])
+        if self.channel_url:
+            rows.append([{"text": "📣 Канал", "url": self.channel_url}])
         return {"inline_keyboard": rows}
 
     def _admin_kb(self) -> dict:
@@ -454,6 +675,7 @@ class TelegramBot:
              {"text": "📈 Визиты", "callback_data": "visits"}],
             [{"text": "📣 Рассылка", "callback_data": "broadcast"},
              {"text": "🩺 Здоровье", "callback_data": "a:health"}],
+            [{"text": "📰 Сводка в канал", "callback_data": "a:digest"}],
             [{"text": "← Назад", "callback_data": "nav:home"}],
         ]}
 
@@ -492,6 +714,7 @@ class TelegramBot:
                 "<b>Админ</b>",
                 "/admin /users /visits",
                 "/broadcast текст — рассылка всем",
+                "/digest — сводка ликвидаций в канал",
             ]
         return "\n".join(lines)
 

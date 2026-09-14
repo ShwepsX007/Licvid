@@ -173,6 +173,69 @@ class BotMenuTest(unittest.TestCase):
         self.assertEqual(deleted, [11])
         self.assertNotIn("editMessageText", [m for m, _ in calls])
 
+    def test_menu_has_channel_url(self):
+        kb = self.bot._menu(self.user)
+        urls = []
+        for row in kb["inline_keyboard"]:
+            for b in row:
+                if b.get("url"):
+                    urls.append(b["url"])
+        self.assertTrue(any("t.me/" in u for u in urls))
+
+    def test_start_requires_channel_when_id_set(self):
+        self.bot._channel_id_cfg = "-100111"
+        calls = []
+
+        async def fake(method, payload=None):
+            calls.append((method, payload or {}))
+            if method == "getChatMember":
+                return {"ok": True, "result": {"status": "left"}}
+            if method == "sendMessage":
+                return {"ok": True, "result": {"message_id": 5}}
+            return {"ok": True}
+
+        self.bot._call = fake  # type: ignore
+        asyncio.run(self.bot._cmd_start(2002, self.user, "/start"))
+        sent = [p for m, p in calls if m == "sendMessage"][0]
+        self.assertIn("Подписаться", str(sent.get("reply_markup")))
+        self.assertNotIn("cabinet", _datas(sent.get("reply_markup")))
+
+    def test_check_callback_opens_menu_when_member(self):
+        self.bot._channel_id_cfg = "-100111"
+        calls = []
+
+        async def fake(method, payload=None):
+            calls.append((method, payload or {}))
+            if method == "getChatMember":
+                return {"ok": True, "result": {"status": "member"}}
+            if method == "sendMessage":
+                return {"ok": True, "result": {"message_id": 9}}
+            return {"ok": True}
+
+        self.bot._call = fake  # type: ignore
+        cb = {
+            "id": "cbx",
+            "from": {"id": 2002, "username": "bob", "first_name": "Bob"},
+            "data": "ch:check",
+            "message": {"message_id": 3, "chat": {"id": 2002}},
+        }
+        asyncio.run(self.bot._on_callback(cb))
+        sent = [p for m, p in calls if m == "sendMessage"][0]
+        self.assertIn("cabinet", _datas(sent.get("reply_markup")))
+
+    def test_digest_without_channel_id_is_false(self):
+        self.bot._channel_id_cfg = ""
+        ok = asyncio.run(self.bot.post_channel_digest())
+        self.assertFalse(ok)
+
+    def test_my_chat_member_stores_channel_id(self):
+        asyncio.run(self.bot._on_my_chat_member({
+            "chat": {"id": -100555, "type": "channel", "title": "Liq"},
+            "new_chat_member": {"status": "administrator",
+                                "user": {"id": 1, "is_bot": True}},
+        }))
+        self.assertEqual(self.store.get_setting("channel_id"), "-100555")
+
     def test_not_modified_is_success_and_retries(self):
         calls = []
 

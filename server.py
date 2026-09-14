@@ -25,6 +25,9 @@ LiqScope Web Server — терминал ликвидаций в реально�
                             bitfinex,hyperliquid
     LIQSCOPE_DEMO           1 — генерировать тестовый поток вместо биржевого
     LIQSCOPE_HISTORY_MAX    сколько событий держать в памяти (по умолчанию 60000)
+    LIQSCOPE_CHANNEL_URL    инвайт канала (по умолчанию https://t.me/+4S1LsZtH1Pc5YWZi)
+    LIQSCOPE_CHANNEL_ID     numeric id канала (-100…) — чтобы проверять подписку и постить;
+                            если пусто, бот запомнит id, когда его добавят админом канала
 """
 
 from __future__ import annotations
@@ -82,6 +85,8 @@ HISTORY_FILE_MAX_BYTES = 64 * 1024 * 1024   # страховка: урезаем
 
 BOT_TOKEN = os.getenv("LIQSCOPE_BOT_TOKEN", "").strip()
 PUBLIC_URL = os.getenv("LIQSCOPE_PUBLIC_URL", "").strip()
+CHANNEL_URL = os.getenv("LIQSCOPE_CHANNEL_URL", "https://t.me/+4S1LsZtH1Pc5YWZi").strip()
+CHANNEL_ID = os.getenv("LIQSCOPE_CHANNEL_ID", "").strip()
 SECRET = os.getenv("LIQSCOPE_SECRET", "").strip() or "liqscope-change-me"
 ADMIN_IDS = []
 for _x in os.getenv("LIQSCOPE_ADMIN_IDS", "").replace(";", ",").split(","):
@@ -91,7 +96,8 @@ for _x in os.getenv("LIQSCOPE_ADMIN_IDS", "").replace(";", ",").split(","):
 ACCOUNTS_DB = os.getenv("LIQSCOPE_ACCOUNTS_DB",
                         os.path.join(HERE, "data", "accounts.db"))
 account_store = Store(ACCOUNTS_DB, SECRET, ADMIN_IDS)
-tg_bot = TelegramBot(BOT_TOKEN, account_store, PUBLIC_URL)
+tg_bot = TelegramBot(BOT_TOKEN, account_store, PUBLIC_URL,
+                     channel_url=CHANNEL_URL, channel_id=CHANNEL_ID)
 
 KLINE_TTL = 20.0            # сек: как часто перезапрашивать историю с биржи
 # Ликвидации уходят клиенту сразу; интервал — только предохранитель от флуда
@@ -736,6 +742,57 @@ def compute_stats(symbol: Optional[str] = None, exchange: Optional[str] = None) 
     return out
 
 
+def _cvd_window(symbol: str, sec: float = 14400.0) -> Optional[float]:
+    """Сумма тейкер-дельты по монете за окно. None — нет тиков."""
+    now = time.time()
+    for tf in (5, 15, 60, 240):
+        acc = CVD_ACC.get(f"{symbol}|{tf}") or {}
+        if not acc:
+            continue
+        try:
+            return round(sum(float(v) for b, v in acc.items()
+                             if now - float(b) <= sec), 2)
+        except (TypeError, ValueError):
+            continue
+    entry = CANDLES.get(f"{symbol}|240") or {}
+    series = entry.get("candles") or []
+    if not series:
+        return None
+    last = series[-1] or {}
+    try:
+        if now - float(last.get("time") or 0) <= sec and last.get("cvd") is not None:
+            return float(last["cvd"])
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+async def build_channel_digest() -> dict:
+    """Снимок рынка за 4ч для поста в канал: лидеры, биржи, OI, CVD."""
+    from channel_digest import collect_digest
+    now = time.time()
+    events = list(LIQUIDATIONS)
+    preview = collect_digest(events, now=now)
+    oi: Dict[str, dict] = {}
+    cvd: Dict[str, float] = {}
+    tracker = getattr(feed, "oi", None) if feed else None
+    for c in (preview.get("top_coins") or [])[:4]:
+        sym = c.get("symbol")
+        if not sym:
+            continue
+        v = _cvd_window(sym)
+        if v is not None:
+            cvd[sym] = v
+        if tracker is None:
+            continue
+        try:
+            await tracker.ensure_symbol(sym)
+            oi[sym] = tracker.payload(sym)
+        except Exception as e:
+            log.debug("digest oi %s: %s", sym, e)
+    return collect_digest(events, now=now, oi=oi, cvd=cvd)
+
+
 # =============================================================================
 #  Фоновые рассылки
 # =============================================================================
@@ -961,6 +1018,7 @@ async def lifespan(app: FastAPI):
     tg_bot.stats_fn = compute_stats
     tg_bot.liqs_fn = lambda: list(LIQUIDATIONS)[-8:]
     tg_bot.ws_clients_fn = lambda: len(hub.clients)
+    tg_bot.digest_fn = build_channel_digest
     tg_bot.public_url = PUBLIC_URL
     await tg_bot.start()
 

@@ -137,6 +137,8 @@ sudo systemctl enable --now liqscope
 | `LIQSCOPE_HISTORY_FILE` | `data/liq_history.jsonl` | файл истории ликвидаций (JSONL, append). Пустая строка / `0` / `off` — не писать на диск |
 | `LIQSCOPE_HISTORY_TTL_HOURS` | `24` | сколько часов истории держать при загрузке с диска и урезании файла |
 | `PORT` | `8000` | порт при запуске `python3 server.py` |
+| `LIQSCOPE_CHANNEL_URL` | `https://t.me/+4S1LsZtH1Pc5YWZi` | инвайт канала: бот просит всех пользователей подписаться |
+| `LIQSCOPE_CHANNEL_ID` | — | numeric id канала (`-100…`). Нужен, чтобы проверять подписку и постить сводки. Если пусто — бот запомнит id сам, когда его добавят **админом** канала |
 | `LIQSCOPE_BOT_TOKEN` | — | токен Telegram-бота (BotFather). Без него кабинет не логинит, терминал работает как раньше |
 | `LIQSCOPE_ADMIN_IDS` | — | telegram id админов через запятую — кабинет `/admin` и команды `/admin` в боте |
 | `LIQSCOPE_PUBLIC_URL` | — | публичный URL сайта (`https://example.com`) — ссылки в боте |
@@ -881,7 +883,8 @@ node tests/drawings.js            # рисование: панель, инстр
 ```
 server.py            FastAPI: REST + WebSocket-хаб, свечи, статистика, кабинет
 accounts.py          SQLite: пользователи, сессии, визиты, сервисы
-tg_bot.py            Telegram-бот (регистрация, кабинет, админка)
+tg_bot.py            Telegram-бот (регистрация, кабинет, админка, канал)
+channel_digest.py    текст 4-часовой сводки в канал (лидеры, OI, CVD)
 web_account.py       HTTP /login /cabinet /admin и /api/auth|/api/admin
 market_feed.py       подключение к биржам, парсеры, список монет, klines
 static/landing.html  лендинг (посадочная страница)
@@ -953,7 +956,11 @@ Environment=LIQSCOPE_SECRET=длинная-случайная-строка
 ```
 
 4. `systemctl restart liqscope`. В логе: `Telegram-бот @name запущен`.
-5. На сайте: **Войти** → открывается бот → `/start` → кабинет.
+5. Добавьте бота **админом** канала (право писать сообщения). Без этого
+   не проверить подписку и не уйдут сводки раз в 4 часа. Инвайт по
+   умолчанию — `https://t.me/+4S1LsZtH1Pc5YWZi`. Id канала бот запоминает
+   сам; можно задать `LIQSCOPE_CHANNEL_ID=-100…`.
+6. На сайте: **Войти** → открывается бот → `/start` → подписка на канал → кабинет.
    Опционально в BotFather: `/setdomain` на ваш домен — тогда работает
    и кнопка Login Widget.
 
@@ -969,6 +976,7 @@ Environment=LIQSCOPE_SECRET=длинная-случайная-строка
 | `/terminal` `/stats` `/status` `/liq` | все | ссылка, рынок 24ч, биржи, лента |
 | `/services` | все | те же сервисы, что в кабинете (лист ожидания) |
 | `/admin` `/users` `/visits` `/broadcast` | админ | панель, пользователи, визиты, рассылка |
+| `/digest` | админ | сразу отправить 4-часовую сводку (лидеры, биржи, OI, CVD) в канал |
 
 Каркас сервисов уже в SQLite (`alerts`, `correlations`, `watchlist`, `digest`):
 в кабинете и боте они видны как «скоро». Когда сервис будет готов,

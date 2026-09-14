@@ -392,9 +392,11 @@ body.dark-theme {
 }
 .acc-nav a:not(.btn):hover,
 #nav-account a:not(.btn):hover { color: var(--text-primary); }
-.acc-nav .btn, #nav-account .btn {
+.acc-nav .btn, #nav-account .btn,
+.acc-nav button, #nav-account button {
     padding: 6px 12px;
     font-size: 0.75rem;
+    white-space: nowrap;
 }
 
 /* Controls Bar */

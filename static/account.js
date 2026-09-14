@@ -101,17 +101,21 @@
     function paintNav(user) {
         var box = $("nav-account");
         if (!box) return;
+        var path = location.pathname || "";
         if (!user) {
-            box.innerHTML = '<a class="btn btn-primary" href="/login">' + t("login") + "</a>";
+            if (path === "/login") { box.innerHTML = ""; return; }
+            box.innerHTML = '<a class="btn btn-primary btn-compact" href="/login">' + t("login") + "</a>";
             return;
         }
-        var admin = user.is_admin
-            ? '<a href="/admin"' + (location.pathname === "/admin" ? ' class="active"' : "") + ">" + t("admin") + "</a>"
-            : "";
-        box.innerHTML =
-            '<a href="/cabinet"' + (location.pathname === "/cabinet" ? ' class="active"' : "") + ">" +
-            t("cabinet") + "</a>" + admin +
-            '<a href="#" id="acc-logout">' + t("logout") + "</a>";
+        var html = "";
+        if (path !== "/cabinet") {
+            html += '<a class="btn btn-ghost btn-compact" href="/cabinet">' + t("cabinet") + "</a>";
+        }
+        if (user.is_admin && path !== "/admin") {
+            html += '<a class="btn btn-ghost btn-compact" href="/admin">' + t("admin") + "</a>";
+        }
+        html += '<button type="button" class="btn btn-ghost btn-compact" id="acc-logout">' + t("logout") + "</button>";
+        box.innerHTML = html;
         var lo = $("acc-logout");
         if (lo) lo.addEventListener("click", function (e) {
             e.preventDefault();
@@ -236,6 +240,12 @@
             if (!me.user) { location.href = "/login?next=/cabinet"; return; }
             paintNav(me.user);
             renderCabinet(me.user, (arr[1] && arr[1].services) || [], me.site_notice || "");
+            var cabLo = $("cab-logout");
+            if (cabLo) cabLo.addEventListener("click", function () {
+                api("/api/auth/logout", { method: "POST" }).then(function () {
+                    location.href = "/";
+                });
+            });
         });
     }
 

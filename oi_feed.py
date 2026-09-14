@@ -19,6 +19,7 @@ OI — это запас (stock), а не поток: значение свеч�
 import asyncio
 import bisect
 import logging
+import os
 import time
 from collections import deque
 from typing import Awaitable, Callable, Deque, Dict, List, Optional, Tuple
@@ -40,7 +41,8 @@ BACKFILL_TTL = 600.0                # историю обновляем раз �
 STALE_LEG_SEC = 300.0               # нога старше — не входит в текущий тотал
 MAX_WATCHED = 12                    # столько символов держим тёплыми
 
-EXCHANGES = ("binance", "bybit", "okx", "gate", "bitget", "htx", "bitmex")
+EXCHANGES = ("binance", "bybit", "okx", "gate", "bitget", "htx", "bitmex",
+             "dydx", "kraken", "bitfinex", "hyperliquid")
 HIST_EXCHANGES = ("binance", "bybit", "gate")   # у кого есть 5m-история
 
 BINANCE_REST = "https://fapi.binance.com"
@@ -50,6 +52,11 @@ GATE_REST = "https://api.gateio.ws/api/v4/futures/usdt"
 BITGET_REST = "https://api.bitget.com"
 HTX_REST = "https://api.hbdm.com"
 BITMEX_REST = "https://www.bitmex.com/api/v1"
+DYDX_REST = os.getenv("DYDX_REST", "https://indexer.dydx.trade")
+KRAKEN_FUT_REST = os.getenv("KRAKEN_FUT_REST",
+                            "https://futures.kraken.com/derivatives/api/v3")
+BITFINEX_REST = os.getenv("BITFINEX_REST", "https://api-pub.bitfinex.com")
+HL_REST = os.getenv("HL_REST", "https://api.hyperliquid.xyz")
 
 
 def _num(v) -> Optional[float]:
@@ -303,6 +310,103 @@ async def _get_json(session: aiohttp.ClientSession, url: str,
         return await resp.json(content_type=None)
 
 
+async def _post_json(session: aiohttp.ClientSession, url: str, body: dict,
+                     timeout: float = 8.0):
+    async with session.post(url, json=body,
+                            timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+        if resp.status != 200:
+            raise RuntimeError(f"HTTP {resp.status} for {url}")
+        return await resp.json(content_type=None)
+
+
+# -- dYdX / Kraken Futures / Bitfinex / Hyperliquid -------------------------
+def parse_dydx_oi(payload, ticker: str, price: Optional[float]) -> Optional[float]:
+    """dYdX: /v4/perpetualMarkets -> markets[TICKER].openInterest в БАЗОВОЙ
+    монете (BTC), поэтому USD = openInterest * цена."""
+    if not isinstance(payload, dict):
+        return None
+    mk = (payload.get("markets") or {}).get(ticker)
+    if not isinstance(mk, dict):
+        return None
+    qty = _num(mk.get("openInterest"))
+    if qty is None or qty <= 0:
+        return None
+    px = price if (price and price > 0) else _num(mk.get("oraclePrice")) \
+        or _num(mk.get("indexPrice"))
+    if not px:
+        return None
+    return qty * px
+
+
+def parse_kraken_oi(payload, product: str, meta: Optional[dict],
+                    price: Optional[float]) -> Optional[float]:
+    """Kraken Futures: /derivatives/api/v3/tickers -> tickers[PRODUCT]
+    .openInterest в КОНТРАКТАХ. Стоимость контракта берём из метаданных
+    /instruments: у inverse-контрактов contractSize уже в USD, у linear —
+    в базовой монете, её домножаем на цену."""
+    if not isinstance(payload, dict):
+        return None
+    tk = (payload.get("tickers") or {}).get(product)
+    if not isinstance(tk, dict):
+        return None
+    qty = _num(tk.get("openInterest"))
+    if qty is None or qty <= 0:
+        return None
+    meta = meta or {}
+    size = _num(meta.get("contractSize")) or 1.0
+    if str(meta.get("type") or "").startswith("futures_linear"):
+        px = price if (price and price > 0) else _num(tk.get("markPrice"))
+        if not px:
+            return None
+        return qty * size * px
+    return qty * size
+
+
+def parse_bitfinex_oi(payload, price: Optional[float]) -> Optional[float]:
+    """Bitfinex: /v2/status/deriv -> [[SYMBOL, PRICE, SPOT_PRICE, ...]]
+    OPEN_INTEREST лежит на индексе 17 и выражен в базовой монете."""
+    if not isinstance(payload, list) or not payload:
+        return None
+    row = payload[0]
+    if not isinstance(row, list) or len(row) < 18:
+        return None
+    qty = _num(row[17])
+    if qty is None or qty <= 0:
+        return None
+    px = price if (price and price > 0) else _num(row[1])
+    if not px:
+        return None
+    return qty * px
+
+
+def parse_hl_oi(payload, coin: str, price: Optional[float]) -> Optional[float]:
+    """Hyperliquid: POST /info {"type":"metaAndAssetCtx"} ->
+    [[{universes:[{name:...}]}, [{openInterest, markPx, ...}, ...]]]
+    openInterest в базовой монете, markPx рядом с ним."""
+    if not isinstance(payload, list) or len(payload) != 2:
+        return None
+    universes = (payload[0] or {}).get("universe") if isinstance(payload[0], dict) \
+        else None
+    ctxs = payload[1] if isinstance(payload[1], list) else None
+    if not universes or not ctxs:
+        return None
+    coin = coin.upper()
+    for i, u in enumerate(universes):
+        if not isinstance(u, dict) or str(u.get("name") or "").upper() != coin:
+            continue
+        ctx = ctxs[i] if i < len(ctxs) else None
+        if not isinstance(ctx, dict):
+            return None
+        qty = _num(ctx.get("openInterest"))
+        if qty is None or qty <= 0:
+            return None
+        px = price if (price and price > 0) else _num(ctx.get("markPx"))
+        if not px:
+            return None
+        return qty * px
+    return None
+
+
 class OpenInterestTracker:
     def __init__(self,
                  price_fn: Optional[Callable[[str], Optional[float]]] = None,
@@ -319,6 +423,9 @@ class OpenInterestTracker:
         self._watched: Dict[str, float] = {}          # symbol -> last access
         self._backfilled_at: Dict[str, float] = {}
         self._bitmex_sym_cache: Dict[str, Optional[str]] = {}
+        self._dydx_markets_cache: dict = {}
+        self._kraken_meta: Optional[dict] = None
+        self._kraken_meta_cache: dict = {}
         self._lock = asyncio.Lock()
         self.last_errors: Dict[str, str] = {}         # exchange -> ошибка
 
@@ -447,6 +554,55 @@ class OpenInterestTracker:
         meta = (self._bitmex_meta() or {}).get(bsym) or {}
         return parse_bitmex_oi(data, meta, self._price(symbol))
 
+    async def _fetch_dydx(self, symbol: str) -> Optional[float]:
+        base = base_of(symbol)
+        ticker = f"{base}-USD"
+        if not self._dydx_markets_cache:
+            self._dydx_markets_cache = await _get_json(
+                self._session, f"{DYDX_REST}/v4/perpetualMarkets") or {}
+        payload = self._dydx_markets_cache
+        usd = parse_dydx_oi(payload, ticker, self._price(symbol))
+        if usd is None and payload:
+            # кэш протух или монета появилась позже — обновляем один раз
+            self._dydx_markets_cache = await _get_json(
+                self._session, f"{DYDX_REST}/v4/perpetualMarkets") or {}
+            usd = parse_dydx_oi(self._dydx_markets_cache, ticker,
+                                self._price(symbol))
+        return usd
+
+    async def _kraken_product(self, symbol: str) -> Optional[str]:
+        base = base_of(symbol).upper()
+        product = "PF_XBTUSD" if base == "BTC" else f"PF_{base}USD"
+        if self._kraken_meta is None:
+            self._kraken_meta = await _get_json(
+                self._session, f"{KRAKEN_FUT_REST}/instruments") or {}
+        instr = (self._kraken_meta.get("instruments") or {})
+        if product not in instr:
+            return None
+        self._kraken_meta_cache = instr
+        return product
+
+    async def _fetch_kraken(self, symbol: str) -> Optional[float]:
+        product = await self._kraken_product(symbol)
+        if not product:
+            return None
+        data = await _get_json(self._session, f"{KRAKEN_FUT_REST}/tickers")
+        meta = (self._kraken_meta_cache or {}).get(product)
+        return parse_kraken_oi(data, product, meta, self._price(symbol))
+
+    async def _fetch_bitfinex(self, symbol: str) -> Optional[float]:
+        base = base_of(symbol).upper()
+        pair = "tBTCF0:USTF0" if base == "BTC" else f"t{base}F0:USTF0"
+        data = await _post_json(
+            self._session, f"{BITFINEX_REST}/v2/status/deriv", {"keys": [pair]})
+        return parse_bitfinex_oi(data, self._price(symbol))
+
+    async def _fetch_hyperliquid(self, symbol: str) -> Optional[float]:
+        coin = base_of(symbol).upper()
+        payload = await _post_json(self._session, f"{HL_REST}/info",
+                                   {"type": "metaAndAssetCtx"})
+        return parse_hl_oi(payload, coin, self._price(symbol))
+
     # -- история 5m -------------------------------------------------------
     async def _hist_binance(self, symbol: str) -> Dict[int, float]:
         rows = await _get_json(
@@ -506,7 +662,7 @@ class OpenInterestTracker:
         return counts
 
     async def sample_symbol(self, symbol: str) -> Dict[str, float]:
-        """Живой опрос всех 7 бирж → текущий бакет. Возвращает ноги в USD."""
+        """Живой опрос всех бирж → текущий бакет. Возвращает ноги в USD."""
         if self._session is None:
             return {}
         self.watch(symbol)
@@ -516,7 +672,11 @@ class OpenInterestTracker:
                 "gate": self._fetch_gate(symbol),
                 "bitget": self._fetch_bitget(symbol),
                 "htx": self._fetch_htx(symbol),
-                "bitmex": self._fetch_bitmex(symbol)}
+                "bitmex": self._fetch_bitmex(symbol),
+                "dydx": self._fetch_dydx(symbol),
+                "kraken": self._fetch_kraken(symbol),
+                "bitfinex": self._fetch_bitfinex(symbol),
+                "hyperliquid": self._fetch_hyperliquid(symbol)}
         results = await asyncio.gather(*jobs.values(), return_exceptions=True)
         legs: Dict[str, float] = {}
         now = time.time()

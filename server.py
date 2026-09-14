@@ -17,8 +17,11 @@ LiqScope Web Server — терминал ликвидаций в реально�
 
 Переменные окружения:
     LIQSCOPE_SYMBOLS_LIMIT  сколько монет держать в списке (по умолчанию 40)
-    LIQSCOPE_EXCHANGES      binance,bybit,okx,gate,bitget,htx,bitmex,hyperliquid (по умолчанию все)
-    LIQSCOPE_TICK_SOURCE    порядок источников тиков: binance,binance-raw,bybit
+    LIQSCOPE_EXCHANGES      binance,bybit,okx,gate,bitget,htx,bitmex,hyperliquid,
+                            dydx,kraken,bitfinex (по умолчанию все)
+    LIQSCOPE_TICK_SOURCE    порядок источников тиков (CVD):
+                            binance,binance-raw,bybit,dydx,kraken,
+                            bitfinex,hyperliquid
     LIQSCOPE_DEMO           1 — генерировать тестовый поток вместо биржевого
     LIQSCOPE_HISTORY_MAX    сколько событий держать в памяти (по умолчанию 60000)
 """
@@ -53,7 +56,8 @@ STATIC_DIR = os.path.join(HERE, "static")
 SYMBOLS_LIMIT = int(os.getenv("LIQSCOPE_SYMBOLS_LIMIT", "40"))
 EXCHANGES = [e.strip().lower() for e in
              os.getenv("LIQSCOPE_EXCHANGES",
-                       "binance,bybit,okx,gate,bitget,htx,bitmex,hyperliquid").split(",")
+                       "binance,bybit,okx,gate,bitget,htx,bitmex,hyperliquid,"
+                       "dydx,kraken,bitfinex").split(",")
              if e.strip()]
 # Порядок источников потиковых данных для графика (первый рабочий побеждает)
 TICK_SOURCES = [x.strip().lower() for x in
@@ -771,7 +775,7 @@ async def stats_broadcaster():
 async def demo_generator():
     log.warning("ВКЛЮЧЁН ДЕМО-РЕЖИМ: поток ликвидаций синтетический (LIQSCOPE_DEMO=1)")
     exchanges = ["binance", "bybit", "okx", "gate", "bitget", "htx", "bitmex",
-                   "hyperliquid"]
+                   "hyperliquid", "dydx", "kraken", "bitfinex"]
     while True:
         try:
             await asyncio.sleep(random.uniform(0.15, 0.9))
@@ -1126,12 +1130,16 @@ async def api_health():
     }
     data.update(feed.health() if feed else {"sources": {}})
     _srcs = data.get("sources") or {}
+    # oxa — это транспорт для ликвидаций Hyperliquid, а не отдельная биржа:
+    # её события приходят с биржей hyperliquid, поэтому в счётчик бирж она не
+    # идёт (иначе на лендинге было бы «11 бирж» при десяти площадках)
+    _not_venue = ("prices", "ticks", "oxa")
     data["live_exchanges"] = sorted(
         name for name, s in _srcs.items()
-        if name not in ("prices", "ticks") and isinstance(s, dict) and s.get("connected")
+        if name not in _not_venue and isinstance(s, dict) and s.get("connected")
     )
     data["exchanges_total"] = (
-        sum(1 for name in _srcs if name not in ("prices", "ticks")) or len(EXCHANGES)
+        sum(1 for name in _srcs if name not in _not_venue) or len(EXCHANGES)
     )
     data["ticks_seen"] = TICKS_SEEN
     data["hot_symbols"] = sorted(feed.hot_symbols) if feed else []

@@ -184,8 +184,13 @@
     const pretty = (s) => String(s || "").replace("_", "/");
 
     // --- Фильтры (мин. объём + биржи) ----------------------------------------
+    // Как биржа подписывается в интерфейсе (код биржи -> читаемое имя)
+    const EXCH_NAMES = {
+        dydx: "dYdX", okx: "OKX", htx: "HTX", bitmex: "BitMEX",
+    };
     function exchangeName(e) {
-        return String(e || "").charAt(0).toUpperCase() + String(e || "").slice(1);
+        const k = String(e || "").toLowerCase();
+        return EXCH_NAMES[k] || (k.charAt(0).toUpperCase() + k.slice(1));
     }
 
     function isExchangeOn(name) {
@@ -3004,6 +3009,10 @@
         Object.keys(health.sources).forEach((name) => {
             const s = health.sources[name];
             if (!s.enabled) return;
+            // oxa — это транспорт для ликвидаций Hyperliquid, а не отдельная
+            // площадка: её события приходят с биржей hyperliquid, и чип
+            // Hyperliquid уже есть. Вторая плашка дублировала бы его.
+            if (name === "oxa") return;
             const cls = s.connected ? "ok" : "bad";
             let label = name;
             if (name.indexOf("prices") === 0) label = I18n.t("health.prices");

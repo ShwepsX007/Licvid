@@ -7,13 +7,22 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/root/Licvid
 Environment=PYTHONUNBUFFERED=1
-Environment=LICVID_SYMBOLS_LIMIT=40
-Environment=LICVID_EXCHANGES=binance,bybit,okx,gate,bitget,htx,bitmex
+Environment=LIQSCOPE_SYMBOLS_LIMIT=40
+Environment=LIQSCOPE_EXCHANGES=binance,bybit,okx,gate,bitget,htx,bitmex,hyperliquid
 # Источник потиковых данных для графика. По умолчанию пробуется Binance,
 # затем Bybit. Если Binance на этом сервере не отдаёт сделки — раскомментируйте:
-# Environment=LICVID_TICK_SOURCE=bybit
+# Environment=LIQSCOPE_TICK_SOURCE=bybit
 # Демо-поток (синтетика) — только для проверки интерфейса:
-# Environment=LICVID_DEMO=1
+# Environment=LIQSCOPE_DEMO=1
+# Ликвидации Hyperliquid через индексатор 0xArchive (необязательно).
+# Ключи берём на https://0xarchive.io — бесплатный тариф даёт 50 000 кредитов
+# в месяц на аккаунт, поэтому ключей можно вписать несколько через запятую:
+# бюджет сложится. Без ключей источник просто не стартует, остальное работает.
+# Режим по умолчанию rest — живой WS-канал ликвидаций у 0xArchive пуст
+# (замер 14.09.2026), поэтому берём их опросом раз в 120 с.
+# Environment=LIQSCOPE_OXA_KEYS=0xa_ключ1,0xa_ключ2
+# Environment=LIQSCOPE_OXA_COINS_PER_KEY=2
+# Environment=LIQSCOPE_OXA_POLL_SEC=120
 ExecStart=/usr/bin/python3 -m uvicorn server:app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=5

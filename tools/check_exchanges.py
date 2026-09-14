@@ -112,6 +112,66 @@ async def check_ws(session, name, url, subscribe=None, match=None, wait=WAIT,
         return False
 
 
+# ---------------------------------------------------------------------------
+# Матчеры кадров. Вынесены из лямбд, чтобы их можно было проверить офлайн:
+# логика «есть ли в кадре ликвидация» у новых бирж нетривиальная — у всех
+# трёх ликвидация это метка внутри общего потока сделок.
+# ---------------------------------------------------------------------------
+def dydx_has_trades(p) -> bool:
+    """dYdX v4: кадр v4_trades со сделками."""
+    return (isinstance(p, dict) and p.get("channel") == "v4_trades"
+            and bool((p.get("contents") or {}).get("trades")))
+
+
+def dydx_has_liquidation(p) -> bool:
+    """dYdX v4: среди сделок есть Liquidated/Deleveraged."""
+    if not dydx_has_trades(p):
+        return False
+    trades = (p.get("contents") or {}).get("trades") or []
+    return any(isinstance(t, dict)
+               and str(t.get("type") or "").upper() in ("LIQUIDATED", "DELEVERAGED")
+               for t in trades)
+
+
+def _kraken_rows(p):
+    """Сделки кадра Kraken: одиночный trade или список в trade_snapshot.
+
+    Важно не принять за сделку служебный кадр: у подтверждения подписки тоже
+    есть feed == "trade" ({"event":"subscribed","feed":"trade"}), и без этой
+    проверки диагностика рапортовала бы «данные идут» на одном лишь connect.
+    """
+    if not isinstance(p, dict) or p.get("feed") not in ("trade", "trade_snapshot"):
+        return []
+    if p.get("event"):                      # subscribed / info / error / pong
+        return []
+    if p.get("feed") == "trade":
+        # у настоящей сделки есть и цена, и объём
+        return [p] if p.get("price") is not None and p.get("qty") is not None else []
+    rows = p.get("trades")
+    return rows if isinstance(rows, list) else []
+
+
+def kraken_has_trades(p) -> bool:
+    return bool(_kraken_rows(p))
+
+
+def kraken_has_liquidation(p) -> bool:
+    """Kraken Futures: type == liquidation (движок) или termination (страховой фонд)."""
+    return any(str(r.get("type") or "") in ("liquidation", "termination")
+               for r in _kraken_rows(p) if isinstance(r, dict))
+
+
+def bitfinex_has_liq_row(p) -> bool:
+    """Bitfinex status/liq:global: кадр [chanId, [["pos", ...], ...]].
+
+    chanId приходит в подтверждении подписки, поэтому проверяем форму кадра,
+    а не конкретный идентификатор канала.
+    """
+    if not isinstance(p, list) or len(p) != 2 or not isinstance(p[1], list):
+        return False
+    return any(isinstance(r, list) and r and r[0] == "pos" for r in p[1])
+
+
 async def main():
     low = SYMBOL.lower()
     print(f"\nПроверка бирж с этого сервера (монета {SYMBOL}, ожидание {WAIT:.0f} с)\n")
@@ -134,6 +194,10 @@ async def main():
                          "https://www.bitmex.com/api/v1/instrument/active")
         await check_rest_post(s, "Hyperliquid meta universe",
                               "https://api.hyperliquid.xyz/info", {"type": "meta"})
+        await check_rest(s, "dYdX v4 perpetualMarkets",
+                         "https://indexer.dydx.trade/v4/perpetualMarkets")
+        await check_rest(s, "Kraken Futures instruments",
+                         "https://futures.kraken.com/derivatives/api/v3/instruments")
 
         print("\nWebSocket (главное — приходят ли ДАННЫЕ, а не просто connect):")
         await check_ws(s, "Binance combined aggTrade",
@@ -215,6 +279,40 @@ async def main():
                            for t in (p.get("data") or [])),
                        wait=max(WAIT, 20))
 
+        dydx_ticker = SYMBOL[:-4] + "-USD" if SYMBOL.endswith("USDT") else SYMBOL
+        await check_ws(s, f"dYdX v4_trades {dydx_ticker} (любые сделки)",
+                       "wss://indexer.dydx.trade/v4/ws",
+                       subscribe={"type": "subscribe", "channel": "v4_trades",
+                                  "id": dydx_ticker},
+                       match=dydx_has_trades)
+        await check_ws(s, f"dYdX v4_trades {dydx_ticker} (ликвидации)",
+                       "wss://indexer.dydx.trade/v4/ws",
+                       subscribe={"type": "subscribe", "channel": "v4_trades",
+                                  "id": dydx_ticker},
+                       match=dydx_has_liquidation,
+                       wait=max(WAIT, 60))
+        kraken_product = "PF_XBTUSD" if SYMBOL.startswith("BTC") else \
+            "PF_" + (SYMBOL[:-4] if SYMBOL.endswith("USDT") else SYMBOL) + "USD"
+        await check_ws(s, f"Kraken trade {kraken_product} (любые сделки)",
+                       "wss://futures.kraken.com/ws/v1",
+                       subscribe={"event": "subscribe", "feed": "trade",
+                                  "product_ids": [kraken_product]},
+                       match=kraken_has_trades)
+        await check_ws(s, f"Kraken trade {kraken_product} (ликвидации)",
+                       "wss://futures.kraken.com/ws/v1",
+                       subscribe={"event": "subscribe", "feed": "trade",
+                                  "product_ids": [kraken_product]},
+                       match=kraken_has_liquidation,
+                       wait=max(WAIT, 60))
+        await check_ws(s, "Bitfinex status liq:global (ликвидации всей биржи)",
+                       "wss://api-pub.bitfinex.com/ws/2",
+                       subscribe={"event": "subscribe", "channel": "status",
+                                  "key": "liq:global"},
+                       # кадр приходит по chanId из подтверждения подписки,
+                       # поэтому смотрим любой массив со строкой "pos"
+                       match=bitfinex_has_liq_row,
+                       wait=max(WAIT, 60))
+
     print("""
 Как читать:
   «НЕТ» у ликвидаций может означать просто затишье на рынке — повторите
@@ -222,6 +320,13 @@ async def main():
   «НЕТ» у aggTrade/kline при живом connect — биржа не отдаёт этому серверу
   рыночные данные. Тогда закрепите рабочий источник в /etc/systemd/system/liqscope.service:
       Environment=LIQSCOPE_TICK_SOURCE=bybit
+  У dYdX, Kraken и Bitfinex ликвидация — это МЕТКА внутри общего потока
+  сделок, а не отдельный канал. Поэтому «ОК» у строк «любые сделки» при
+  «НЕТ» у строк «ликвидации» — это норма: канал работает, ликвидаций на этой
+  бирже за время ожидания просто не случилось. Тревожиться нужно, если
+  «НЕТ» именно у «любые сделки».
+  Ликвидации Hyperliquid отдельно проверяются зондом 0xArchive (нужен ключ):
+      OXARCHIVE_API_KEY=... python3 tools/oxa_probe.py --rest BTC --hours 24
 """)
 
 

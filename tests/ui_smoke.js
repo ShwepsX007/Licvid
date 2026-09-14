@@ -438,7 +438,11 @@ async function main() {
     out.topCoinsToggleExists &&
     out.topCoinsIsList &&
     out.topCoinsCardsCount > 0 &&
-    out.topCoinsClosed;                   // клик по заголовку сворачивает список
+    out.topCoinsClosed &&                 // клик по заголовку сворачивает список
+    // oxa — транспорт для ликвидаций Hyperliquid, а не отдельная площадка:
+    // чип Hyperliquid уже есть, вторая плашка его дублировала
+    /hyperliquid/i.test(out.health) &&
+    !/0xArchive/i.test(out.health);
 
   console.log(JSON.stringify(out, null, 2));
   console.log(ok ? "\nИТОГ: ок" : "\nИТОГ: ЕСТЬ ПРОБЛЕМЫ");

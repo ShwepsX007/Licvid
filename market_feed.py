@@ -34,9 +34,13 @@ import os
 import re
 import socket
 import time
-from typing import Awaitable, Callable, Dict, Iterable, List, Optional
+from datetime import datetime
+from collections import deque
+from typing import (Any, Awaitable, Callable, Deque, Dict, Iterable, List,
+                    Optional)
 
 import aiohttp
+from aiohttp import ClientWSTimeout
 from oi_feed import OpenInterestTracker
 
 log = logging.getLogger("liqscope.feed")
@@ -73,13 +77,77 @@ HTX_WS = "wss://api.hbdm.com/linear-swap-notification"
 # BitMEX: таблица liquidation
 BITMEX_WS = "wss://ws.bitmex.com/realtime?subscribe=liquidation"
 BITMEX_REST = "https://www.bitmex.com/api/v1"
-HL_REST = "https://api.hyperliquid.xyz"
-HL_WS = "wss://api.hyperliquid.xyz/ws"
-# Hyperliquid закрывает соединение, если в течение ~60 секунд не было обмена
-# сообщениями. Пинг шлём раз в 50 секунд (как официальный python-sdk) ОТДЕЛЬНОЙ
-# задачей, а не «по простою»: на топ-40 монет поток trades почти не замолкает,
+# dYdX v4: публичный индексатор, канал v4_trades, ликвидация — тип сделки
+DYDX_WS = os.getenv("LIQSCOPE_DYDX_WS", "wss://indexer.dydx.trade/v4/ws")
+# Kraken Futures: публичный фид trade, ликвидация — поле type
+KRAKEN_WS = os.getenv("LIQSCOPE_KRAKEN_WS", "wss://futures.kraken.com/ws/v1")
+# REST-адреса для списков рынков: подписываться на несуществующий тикер —
+# это отказ биржи в логах и впустую потраченная квота подписок.
+DYDX_REST = os.getenv("LIQSCOPE_DYDX_REST", "https://indexer.dydx.trade")
+KRAKEN_FUT_REST = os.getenv("LIQSCOPE_KRAKEN_REST",
+                            "https://futures.kraken.com/derivatives/api/v3")
+# Bitfinex: канал status с ключом liq:global — поток ликвидаций по всей бирже
+BITFINEX_WS = os.getenv("LIQSCOPE_BITFINEX_WS", "wss://api-pub.bitfinex.com/ws/2")
+# Срез «свежести» для подписочных снапшотов (dYdX/Kraken/Bitfinex отдают
+# последние события при подписке — без фильтра они встали бы в ленту как новые).
+LIQ_FRESH_SEC = float(os.getenv("LIQSCOPE_LIQ_FRESH_SEC", "120"))
+# Пауза между подписками dYdX: лимит индексатора — 2 подписки в секунду
+# на (соединение + канал + id), держимся с запасом.
+DYDX_SUB_GAP = float(os.getenv("LIQSCOPE_DYDX_SUB_GAP_MS", "550")) / 1000.0
+# Сколько тикеров dYdX подписываем (топ по нашему списку монет).
+DYDX_MAX_SUBS = int(os.getenv("LIQSCOPE_DYDX_MAX_SUBS", "40"))
+# Как часто новые источники отчитываются в лог: по одному подключению и по
+# числу ликвидаций видно, жив канал или молчит.
+NEW_SOURCE_LOG_SEC = float(os.getenv("LIQSCOPE_NEW_SOURCE_LOG_SEC", "60"))
+
+# 0xArchive (https://0xarchive.io) — индексатор Hyperliquid. Единственный
+# известный способ получить глобальные ликвидации HL без платной подписки:
+# канал `liquidations` подписывается ПО МОНЕТЕ, поэтому бесплатные 10 подписок
+# дают 10 монет. Лимит расширяется несколькими ключами: каждый ключ — своё
+# соединение и своя квота подписок. Ключи перечисляются через запятую в
+# LIQSCOPE_OXA_KEYS (или один в OXARCHIVE_API_KEY). Без ключей источник
+# просто не запускается — по умолчанию проект остаётся без ключей вообще.
+OXA_WS = os.getenv("LIQSCOPE_OXA_WS", "wss://api.0xarchive.io/ws")
+OXA_SUBS_PER_KEY = int(os.getenv("LIQSCOPE_OXA_SUBS_PER_KEY", "10"))
+OXA_PING_SEC = float(os.getenv("LIQSCOPE_OXA_PING_SEC", "25"))
+OXA_LIQ_FRESH_SEC = float(os.getenv("LIQSCOPE_OXA_FRESH_SEC", "300"))
+OXA_REST = os.getenv("LIQSCOPE_OXA_REST",
+                     "https://api.0xarchive.io/v1/hyperliquid")
+# Замер на боевом сервере 14.09.2026: живой WS-канал liquidations за 1800 с
+# не прислал ни одного кадра данных (3 subscribed + 72 pong), тогда как REST
+# отдал 1118 ликвидаций за сутки с самой свежей «0 с назад». Поэтому рабочий
+# путь — опрос REST. Режимы: rest (по умолчанию), ws, both.
+OXA_MODE = os.getenv("LIQSCOPE_OXA_MODE", "rest").strip().lower()
+# Запрос стоит минимум 1 кредит, Free — 50 000 кредитов/мес на ключ, то есть
+# ~69 запросов в час на ключ. Это и есть настоящее ограничение: при опросе
+# раз в 60 с один ключ вытягивает только 1,2 монеты, а не 10.
+# Дефолт подобран так, чтобы укладываться в бюджет ОДНИМ ключом:
+# 2 монеты × 30 запросов/ч × 720 ч = 43 200 кредитов (< 50 000).
+OXA_POLL_SEC = float(os.getenv("LIQSCOPE_OXA_POLL_SEC", "120"))
+OXA_COINS_PER_KEY = int(os.getenv("LIQSCOPE_OXA_COINS_PER_KEY", "2"))
+OXA_FREE_CREDITS = int(os.getenv("LIQSCOPE_OXA_CREDITS", "50000"))
+# Секунд в месяце — для расчёта бюджета
+OXA_MONTH_SEC = 30 * 24 * 3600.0
+OXA_OVERLAP_SEC = float(os.getenv("LIQSCOPE_OXA_OVERLAP_SEC", "30"))
+OXA_FIRST_WINDOW_SEC = float(os.getenv("LIQSCOPE_OXA_FIRST_WINDOW_SEC", "120"))
+# Период keepalive: Kraken просит пинг хотя бы раз в 60 с, Bitfinex — раз в 30 с.
+KRAKEN_PING_SEC = float(os.getenv("LIQSCOPE_KRAKEN_PING_SEC", "25"))
+BITFINEX_PING_SEC = float(os.getenv("LIQSCOPE_BITFINEX_PING_SEC", "20"))
+# Адреса HL переопределяются из окружения: тестнет
+# (wss://api.hyperliquid-testnet.xyz/ws), свой узел или локальная псевдо-биржа
+# для сквозных тестов (см. tests/test_hl_stream.py).
+HL_REST = os.getenv("LIQSCOPE_HL_REST", "https://api.hyperliquid.xyz")
+HL_WS = os.getenv("LIQSCOPE_HL_WS", "wss://api.hyperliquid.xyz/ws")
+# Hyperliquid (docs → «Timeouts and heartbeats») закрывает соединение, если
+# 60 секунд не слал в него сообщений; keepalive — {"method":"ping"}, биржа
+# отвечает {"channel":"pong"}. Интервал документация не задаёт, поэтому берём
+# 20 с — трёхкратный запас до порога. Пинг шлём ОТДЕЛЬНОЙ задачей по таймеру,
+# а не «по простою»: на топ-40 монет поток trades почти не замолкает,
 # receive-таймаут не срабатывает, и пинг, завязанный на него, не уходит вовсе.
-HL_PING_INTERVAL = float(os.getenv("LIQSCOPE_HL_PING_SEC", "50"))
+HL_PING_INTERVAL = float(os.getenv("LIQSCOPE_HL_PING_SEC", "20"))
+# Первый пинг не ждём полного интервала: пока встают подписки, лента молчит,
+# и держать сокет без keepalive лишние десятки секунд смысла нет.
+HL_FIRST_PING = float(os.getenv("LIQSCOPE_HL_FIRST_PING_SEC", "10"))
 # Сторож зомби-сокетов: если от биржи нет НИЧЕГО (ни ленты, ни subscriptionResponse,
 # ни pong на наши пинги) дольше HL_STALE_AFTER секунд — TCP почти наверняка тихо
 # потерян (обрыв на CF-эдже/NAT, смена маршрута). aiohttp такой сокет от «тихой
@@ -89,7 +157,32 @@ HL_PING_INTERVAL = float(os.getenv("LIQSCOPE_HL_PING_SEC", "50"))
 # Pong на наш пинг — входящее сообщение, так что живое соединение порога не
 # достигнет (молчание максимум HL_PING_INTERVAL секунд).
 HL_STALE_AFTER = float(os.getenv("LIQSCOPE_HL_STALE_SEC",
-                                 str(HL_PING_INTERVAL * 3)))
+                                 str(HL_PING_INTERVAL * 4)))
+# Подписки: HL ограничивает 1000 подписок на IP и 2000 исходящих сообщений
+# в минуту. Пауза между subscribe — темп ~12/с: топ-40 встаёт за ~3 с, при
+# этом всплеска, на который гейтвей отвечает разрывом, не получается.
+HL_SUB_GAP = float(os.getenv("LIQSCOPE_HL_SUB_GAP_MS", "80")) / 1000.0
+# Сколько ждать subscriptionResponse перед повтором и сколько повторов делать.
+HL_SUB_ACK_WAIT = float(os.getenv("LIQSCOPE_HL_ACK_SEC", "4"))
+HL_SUB_TRIES = int(os.getenv("LIQSCOPE_HL_SUB_TRIES", "3"))
+HL_SUB_TICK = float(os.getenv("LIQSCOPE_HL_SUB_TICK_SEC", "1"))
+# Подписка на несуществующую монету обходится дорого: HL отвечает ошибкой и
+# закрывает ВСЁ соединение, то есть из-за одного битого имени молчит весь
+# поток. Поэтому монету, на которую биржа не подписала, запоминаем между
+# попытками: сразу — если биржа прямо ответила ошибкой, и после
+# HL_COIN_STRIKES срывов — если соединение стабильно умирает вскоре после
+# отправки её подписки.
+HL_COIN_STRIKES = int(os.getenv("LIQSCOPE_HL_COIN_STRIKES", "2"))
+HL_DEATH_WINDOW = float(os.getenv("LIQSCOPE_HL_DEATH_WINDOW_SEC", "3"))
+HL_RECV_TICK = float(os.getenv("LIQSCOPE_HL_RECV_TICK_SEC", "5"))
+# Срез «свежести». При подписке на trades HL отдаёт срез последних сделок по
+# монете, поэтому каждое переподключение заново притащило бы в ленту вчерашние
+# ликвидации (они встали бы в историю как новые). Сделки старше порога считаем
+# срезом, а не живым потоком. Порог нарочно большой — он должен гасить
+# срез, но не живой поток при небольшом рассинхроне часов сервера.
+HL_FRESH_SEC = float(os.getenv("LIQSCOPE_HL_FRESH_SEC", "120"))
+# User-Agent HL-сокета (LIQSCOPE_HL_UA подменяет его целиком).
+HL_UA = os.getenv("LIQSCOPE_HL_UA", "LiqScope-Terminal/4.1")
 
 # Запасной список монет, если ни одна биржа не ответила на REST
 FALLBACK_SYMBOLS = [
@@ -481,17 +574,30 @@ def parse_bitmex_msg(payload: dict,
 
 
 def parse_hyperliquid_msg(payload: dict,
-                          coin_map: Optional[Dict[str, str]] = None) -> List[dict]:
+                          coin_map: Optional[Dict[str, str]] = None,
+                          now: Optional[float] = None,
+                          max_age: Optional[float] = None,
+                          stats: Optional[dict] = None) -> List[dict]:
     """Hyperliquid: channel=trades, data — список сделок.
 
     Ликвидации — это те же сделки, но с объектом 'liquidation'
     (liquidatedUser/markPx/method); остальные игнорируем.
     side — сторона тейкера: 'A' (ask/продажа) → вынесли LONG.
     coin_map: 'BTC' -> 'BTC_USDT' (строится из universe, см. hl_coin_map).
+
+    now/max_age — фильтр среза истории: на подписку HL присылает последние
+    сделки по монете, и без фильтра каждое переподключение заново отдавало бы
+    в ленту старые ликвидации. Сделки старше max_age секунд отбрасываются
+    (счётчик — в stats["stale"], если он передан).
     """
     if not isinstance(payload, dict):
         return []
     if payload.get("channel") != "trades":
+        return []
+    if payload.get("isSnapshot"):
+        # явная метка среза — это не живой поток
+        if stats is not None and isinstance(payload.get("data"), list):
+            stats["stale"] = stats.get("stale", 0) + len(payload["data"])
         return []
     coin_map = coin_map or {}
     out = []
@@ -508,6 +614,10 @@ def parse_hyperliquid_msg(payload: dict,
         except (TypeError, ValueError):
             continue
         if price <= 0 or qty <= 0:
+            continue
+        if max_age and now and ts and (now - ts) > max_age:
+            if stats is not None:
+                stats["stale"] = stats.get("stale", 0) + 1
             continue
         out.append({
             "symbol": (coin_map.get(raw_coin) or coin_map.get(raw_coin.upper()) or
@@ -526,6 +636,509 @@ def hl_close_reason(msg_type, close_code, exc, data) -> str:
             f"exc={exc!r} data={str(data)[:150]}")
 
 
+# ---------------------------------------------------------------------------
+#  dYdX v4 / Kraken Futures / Bitfinex
+#
+#  Все три отдают ликвидацию меткой внутри общего потока, а не отдельным
+#  каналом (проверено по официальной документации 13.09.2026):
+#    dYdX     — канал v4_trades, у сделки type: Limit|Liquidated|Deleveraged
+#    Kraken   — фид trade, у сделки type: fill|liquidation|termination|block
+#    Bitfinex — канал status с ключом liq:global, кадр [chanId, [["pos", ...]]]
+#  При подписке каждый из них отдаёт снапшот последних событий, поэтому везде
+#  работает фильтр свежести (LIQ_FRESH_SEC).
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 0xArchive — индексатор Hyperliquid (ликвидации по API-ключу)
+#
+# Канал `liquidations` отдаёт строки заполнений (fill) с признаком
+# is_liquidation: true, по форме совпадающие со сделкой: coin/px/sz/side/time.
+# Тейкер A (продал) — значит вынесли LONG, как во всех наших источниках.
+# Подписка построчная по монете, поэтому список монет делится между ключами.
+# ---------------------------------------------------------------------------
+def oxa_keys() -> List[str]:
+    """Ключи 0xArchive из окружения.
+
+    LIQSCOPE_OXA_KEYS=key1,key2,... — несколько аккаунтов, чтобы сложить их
+    квоты подписок; OXARCHIVE_API_KEY — один ключ. Пустые значения и дубликаты
+    отбрасываются, порядок сохраняется.
+    """
+    raw = os.getenv("LIQSCOPE_OXA_KEYS") or os.getenv("OXARCHIVE_API_KEY") or ""
+    keys: List[str] = []
+    for part in raw.replace(";", ",").split(","):
+        k = part.strip()
+        if k and k not in keys:
+            keys.append(k)
+    return keys
+
+
+def oxa_month_credits(coins_per_key: int, poll_sec: float) -> float:
+    """Сколько кредитов в месяц сожжёт опрос одного ключа.
+
+    Один запрос стоит минимум 1 кредит (Free — 50 000 кредитов/мес на ключ),
+    поэтому расход считается по числу запросов: coins_per_key запросов раз в
+    poll_sec. Это и есть настоящее ограничение бесплатного тарифа — при опросе
+    раз в 60 с ключ вытягивает 1,16 монеты, а не 10.
+    """
+    if coins_per_key <= 0 or poll_sec <= 0:
+        return 0.0
+    return coins_per_key * OXA_MONTH_SEC / poll_sec
+
+
+def oxa_rest_max_age(poll_sec: Optional[float] = None,
+                     overlap_sec: Optional[float] = None) -> float:
+    """Окно свежести для опроса REST — не короче шага опроса.
+
+    LIQ_FRESH_SEC задумано как защита от подписочных снапшотов WS: там поток
+    непрерывный и событие старше 5 минут действительно подозрительно. У опроса
+    REST события легально приходят пачкой раз в poll_sec, поэтому при опросе
+    раз в 300 с и реже фиксированное окно в 300 с отбрасывало бы ВСЁ —
+    в том числе интервалы, которые советует кламп по бюджету (518 с на 10
+    монет). Берём шаг опроса с запасом на перекрытие окон и время ответа.
+    """
+    poll = OXA_POLL_SEC if poll_sec is None else poll_sec
+    overlap = OXA_OVERLAP_SEC if overlap_sec is None else overlap_sec
+    return max(OXA_LIQ_FRESH_SEC, poll + overlap + 60.0)
+
+
+def oxa_coins_for_budget(poll_sec: float,
+                         credits: Optional[int] = None) -> int:
+    """Сколько монет влезает в месячный бюджет на ключ при данном опросе."""
+    credits = OXA_FREE_CREDITS if credits is None else credits
+    if poll_sec <= 0 or credits <= 0:
+        return 0
+    return int(credits * poll_sec / OXA_MONTH_SEC)
+
+
+def oxa_is_liquidation(row: dict, all_rows: bool = False) -> bool:
+    """Ликвидация ли строка 0xArchive.
+
+    all_rows=True — строки пришли из REST /liquidations/{coin}, где других
+    строк не бывает; тогда признаком служит само наличие полей ликвидации.
+    """
+    if row.get("is_liquidation"):
+        return True
+    if all_rows:
+        return bool(row.get("liquidated_user") or row.get("direction")
+                    or row.get("liquidator_user"))
+    return False
+
+
+def parse_oxa_liquidations(payload, coin_map: Optional[Dict[str, str]] = None,
+                           now: Optional[float] = None,
+                           max_age: Optional[float] = None,
+                           stats: Optional[dict] = None,
+                           all_rows: bool = False) -> List[dict]:
+    """Кадр 0xArchive -> наши события ликвидаций.
+
+    coin_map: имя монеты Hyperliquid (BTC, kPEPE) -> канонический символ.
+
+    Признак ликвидации зависит от того, откуда строка (проверено на боевом
+    REST-ответе 14.09.2026, поля: closed_pnl, coin, direction,
+    liquidated_user, liquidator_user, mark_price, price, side, size, symbol,
+    timestamp, trade_id, tx_hash):
+      * WS-канал trades — строки заполнения смешаны с обычными, у ликвидации
+        стоит is_liquidation: true;
+      * REST /liquidations/{coin} — поля is_liquidation НЕТ вовсе, там каждая
+        строка и есть ликвидация, а признак — liquidated_user/direction.
+    Поэтому при all_rows=True (чтение из REST-эндпоинта ликвидаций) строки не
+    фильтруются по признаку.
+
+    Сторону берём из direction ("Long"/"Short") — это прямое указание, какую
+    позицию вынесли; на side ("A"/"B", сторона тейкера) только резерв.
+    Старые события отсеиваются как у прочих источников.
+    """
+    if not isinstance(payload, dict):
+        return []
+    # Обёртку перебираем как зонд tools/oxa_probe.py: боевой ответ может
+    # лежать не только в "data". Чтение одного лишь "data" молча давало
+    # пустой список при любом другом ключе — в логе это выглядело как
+    # «запросы идут, ошибок нет, строк нет».
+    rows = None
+    for key in ("data", "rows", "liquidations", "result"):
+        if isinstance(payload.get(key), list):
+            rows = payload[key]
+            break
+    if rows is None and isinstance(payload.get("data"), dict):
+        rows = [payload["data"]]
+    if not isinstance(rows, list):
+        return []
+    if stats is not None:
+        # сколько строк реально вернул API — до всех наших фильтров.
+        # Без этого «строк: 0» не отличить от «API вернул пусто».
+        stats["raw_rows"] = stats.get("raw_rows", 0) + len(rows)
+    coin_map = coin_map or {}
+    frame_coin = str(payload.get("symbol") or payload.get("coin") or "")
+    now = now or time.time()
+    out: List[dict] = []
+    for r in rows:
+        if not isinstance(r, dict) or not oxa_is_liquidation(r, all_rows):
+            continue
+        if stats is not None:
+            stats["liq_rows"] = stats.get("liq_rows", 0) + 1
+        coin = str(r.get("coin") or frame_coin or "")
+        symbol = coin_map.get(coin) or coin_map.get(coin.upper())
+        if not symbol:
+            if stats is not None:
+                stats["skipped_other"] = stats.get("skipped_other", 0) + 1
+            continue
+        try:
+            price = float(r.get("px") or r.get("price") or 0)
+            qty = float(r.get("sz") or r.get("size") or 0)
+            ts = float(r.get("time") or r.get("timestamp") or 0)
+        except (TypeError, ValueError):
+            continue
+        if ts > 1e12:                              # миллисекунды
+            ts /= 1000.0
+        if price <= 0 or qty <= 0 or not _fresh(ts, now, max_age, stats):
+            continue
+        direction = str(r.get("direction") or "").strip().lower()
+        if direction.startswith("l"):
+            position = "LONG"
+        elif direction.startswith("s"):
+            position = "SHORT"
+        else:
+            # резерв: сторона тейкера (A — продал, значит вынесли лонг)
+            side = str(r.get("side") or "").upper()
+            position = "LONG" if side.startswith(("A", "S")) else "SHORT"
+        ev = {
+            "symbol": symbol, "side": position,
+            "price": price, "qty": qty, "usd": price * qty, "ts": ts or now,
+            "coin": coin,
+        }
+        tid = r.get("trade_id") or r.get("tid") or r.get("tx_hash")
+        if tid:
+            ev["id"] = str(tid)          # для дедупликации при опросе REST
+        out.append(ev)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Сделки с dYdX / Kraken Futures / Bitfinex — источник тиков для CVD.
+# Все три публикуют публичную ленту сделок со стороной тейкера, то есть
+# годятся наравне с Binance/Bybit. Возвращают (symbol, price, qty, ts, side),
+# где side — "BUY"/"SELL" (сторона агрессора).
+# ---------------------------------------------------------------------------
+def parse_dydx_trades(payload, ticker_map: dict, now: Optional[float] = None) -> List[tuple]:
+    """dYdX v4 `v4_trades`: contents.trades[{id,createdAt,side,price,size,type}].
+
+    Для CVD годятся все типы сделок (LIMIT/LIQUIDATED/DELEVERAGED) — объём
+    проторгован в любом случае. Срез истории при подключении тоже
+    возвращается: для накопительного CVD это плюс, а не минус.
+    """
+    if not isinstance(payload, dict) or payload.get("channel") != "v4_trades":
+        return []
+    symbol = ticker_map.get(str(payload.get("id") or ""))
+    if not symbol:
+        return []
+    contents = payload.get("contents")
+    if not isinstance(contents, dict):
+        return []
+    trades = contents.get("trades")
+    if not isinstance(trades, list):
+        return []
+    now = now or time.time()
+    out: List[tuple] = []
+    for t in trades:
+        if not isinstance(t, dict):
+            continue
+        try:
+            price = float(t.get("price") or 0)
+            qty = float(t.get("size") or 0)
+        except (TypeError, ValueError):
+            continue
+        if price <= 0 or qty <= 0:
+            continue
+        ts = _iso_to_epoch(t.get("createdAt")) or now
+        side = str(t.get("side") or "").upper()
+        out.append((symbol, price, qty, ts,
+                    side if side in ("BUY", "SELL") else ""))
+    return out
+
+
+def parse_kraken_trades(payload, product_map: dict) -> List[tuple]:
+    """Kraken Futures `trade`: одиночные кадры и trade_snapshot.
+
+    Берутся все сделки, включая ликвидации и terminations.
+    """
+    if not isinstance(payload, dict):
+        return []
+    if payload.get("feed") not in ("trade", "trade_snapshot"):
+        return []
+    rows = payload.get("trades") if isinstance(payload.get("trades"), list) \
+        else [payload]
+    product = str(payload.get("product_id") or "")
+    symbol = product_map.get(product)
+    out: List[tuple] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        sym = symbol or product_map.get(str(row.get("product_id") or ""))
+        if not sym:
+            continue
+        try:
+            price = float(row.get("price") or 0)
+            qty = float(row.get("qty") or 0)
+        except (TypeError, ValueError):
+            continue
+        if price <= 0 or qty <= 0:
+            continue
+        ts = float(row.get("time") or 0) / 1000.0 or time.time()
+        side = str(row.get("side") or "").upper()
+        out.append((sym, price, qty, ts,
+                    side if side in ("BUY", "SELL") else ""))
+    return out
+
+
+def parse_bitfinex_trades(payload, chan_map: dict, now: Optional[float] = None) -> List[tuple]:
+    """Bitfinex `trades` (chanId) — кадр [chanId, [seq, ms, amount, price]].
+
+    Положительный amount — агрессор покупал, отрицательный — продавал.
+    Разбираются и одиночная сделка, и кадр-снапшот (список списков).
+    """
+    if not isinstance(payload, list) or len(payload) != 2:
+        return []
+    symbol = chan_map.get(payload[0])
+    if not symbol:
+        return []
+    rows = payload[1]
+    if not isinstance(rows, list) or not rows:
+        return []
+    if not isinstance(rows[0], list):
+        if isinstance(rows[0], (int, float)):
+            rows = [rows]                 # одиночная сделка
+        else:
+            return []                     # "hb" и прочие служебные кадры
+    now = now or time.time()
+    out: List[tuple] = []
+    for r in rows:
+        if not isinstance(r, list) or len(r) < 4:
+            continue
+        try:
+            amount = float(r[2] or 0)
+            price = float(r[3] or 0)
+        except (TypeError, ValueError):
+            continue
+        if price <= 0 or amount == 0:
+            continue
+        try:
+            ts = float(r[1] or 0) / 1000.0 or now
+        except (TypeError, ValueError):
+            ts = now
+        out.append((symbol, price, abs(amount), ts,
+                    "BUY" if amount > 0 else "SELL"))
+    return out
+
+
+def _iso_to_epoch(text) -> float:
+    """ISO-8601 ('2026-09-13T10:00:00.123Z') в epoch-секунды."""
+    try:
+        return datetime.fromisoformat(str(text).replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
+
+
+def _fresh(ts: float, now, max_age, stats) -> bool:
+    """Свежее ли событие; устаревшие считаем подписочным снапшотом."""
+    if not (max_age and now and ts):
+        return True
+    if (now - ts) > max_age:
+        if stats is not None:
+            stats["stale"] = stats.get("stale", 0) + 1
+        return False
+    return True
+
+
+def dydx_symbol_map(symbols: Iterable[str]) -> Dict[str, str]:
+    """Карта тикер dYdX -> канон: 'BTC-USD' -> 'BTC_USDT'."""
+    out: Dict[str, str] = {}
+    for sym in symbols or []:
+        c = canon(sym)
+        if not c or "_" not in c:
+            continue
+        out[c.split("_")[0] + "-USD"] = c
+    return out
+
+
+def kraken_symbol_map(symbols: Iterable[str]) -> Dict[str, str]:
+    """Карта продукт Kraken -> канон: 'PF_XBTUSD' -> 'BTC_USDT'.
+
+    Берём бессрочные мультиколлатеральные контракты (префикс PF_, котируются
+    в USD); BTC у Kraken называется XBT.
+    """
+    out: Dict[str, str] = {}
+    for sym in symbols or []:
+        c = canon(sym)
+        if not c or "_" not in c:
+            continue
+        base = c.split("_")[0]
+        out["PF_" + ("XBT" if base == "BTC" else base) + "USD"] = c
+    return out
+
+
+def bitfinex_symbol_map(symbols: Iterable[str]) -> Dict[str, str]:
+    """Карта символ Bitfinex -> канон: 'tBTCF0:USTF0' -> 'BTC_USDT'.
+
+    Берём USDT-маржинальные перпы (F0 — бессрочный контракт).
+    """
+    out: Dict[str, str] = {}
+    for sym in symbols or []:
+        c = canon(sym)
+        if not c or "_" not in c:
+            continue
+        out["t" + c.split("_")[0] + "F0:USTF0"] = c
+    return out
+
+
+def parse_dydx_msg(payload, sym_map: Optional[Dict[str, str]] = None,
+                   now: Optional[float] = None,
+                   max_age: Optional[float] = None,
+                   stats: Optional[dict] = None) -> List[dict]:
+    """dYdX v4: v4_trades. Ликвидация — type Liquidated/Deleveraged.
+
+    side у сделки — сторона ТЕЙКЕРА, поэтому SELL означает принудительную
+    продажу, то есть вынесли LONG.
+    """
+    if not isinstance(payload, dict) or payload.get("channel") != "v4_trades":
+        return []
+    contents = payload.get("contents")
+    if not isinstance(contents, dict):
+        return []
+    trades = contents.get("trades")
+    if not isinstance(trades, list):
+        return []
+    if stats is not None:
+        stats["trades"] = stats.get("trades", 0) + len(trades)
+    sym_map = sym_map or {}
+    ticker = str(payload.get("id") or "")
+    out: List[dict] = []
+    for t in trades:
+        if not isinstance(t, dict):
+            continue
+        ttype = str(t.get("type") or "").lower()
+        if ttype not in ("liquidated", "deleveraged"):
+            continue
+        try:
+            price = float(t.get("price") or 0)
+            qty = float(t.get("size") or 0)
+        except (TypeError, ValueError):
+            continue
+        ts = _iso_to_epoch(t.get("createdAt"))
+        if price <= 0 or qty <= 0 or not _fresh(ts, now, max_age, stats):
+            continue
+        out.append({
+            "symbol": sym_map.get(ticker) or canon(ticker),
+            "side": "LONG" if str(t.get("side") or "").upper() == "SELL" else "SHORT",
+            "price": price, "qty": qty, "ts": ts or time.time(),
+            "kind": ttype,
+        })
+    return out
+
+
+def parse_kraken_msg(payload, sym_map: Optional[Dict[str, str]] = None,
+                     now: Optional[float] = None,
+                     max_age: Optional[float] = None,
+                     stats: Optional[dict] = None) -> List[dict]:
+    """Kraken Futures: фид trade. Ликвидация — type liquidation/termination.
+
+    side — сторона тейкера в ликвидационной сделке: sell = принудительная
+    продажа = вынесли LONG. `termination` — закрытие через страховый фонд
+    (аналог ADL), считаем его ликвидацией, но помечаем в kind.
+    """
+    if not isinstance(payload, dict):
+        return []
+    feed = str(payload.get("feed") or "")
+    if feed == "trade_snapshot":
+        rows = payload.get("trades") or []
+    elif feed == "trade":
+        rows = [payload]
+    else:
+        return []
+    if not isinstance(rows, list):
+        return []
+    if stats is not None:
+        stats["trades"] = stats.get("trades", 0) + len(rows)
+    sym_map = sym_map or {}
+    product = str(payload.get("product_id") or "")
+    out: List[dict] = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        rtype = str(r.get("type") or "").lower()
+        if rtype not in ("liquidation", "termination"):
+            continue
+        try:
+            price = float(r.get("price") or 0)
+            qty = float(r.get("qty") or 0)
+            ts = float(r.get("time") or 0) / 1000.0
+        except (TypeError, ValueError):
+            continue
+        if price <= 0 or qty <= 0 or not _fresh(ts, now, max_age, stats):
+            continue
+        pid = str(r.get("product_id") or product)
+        out.append({
+            "symbol": sym_map.get(pid) or canon_bitmex(pid.replace("PF_", "")),
+            "side": "LONG" if str(r.get("side") or "").lower() == "sell" else "SHORT",
+            "price": price, "qty": qty, "ts": ts or time.time(),
+            "kind": rtype,
+        })
+    return out
+
+
+def parse_bitfinex_liquidations(payload, chan_id=None,
+                                sym_map: Optional[Dict[str, str]] = None,
+                                now: Optional[float] = None,
+                                max_age: Optional[float] = None,
+                                stats: Optional[dict] = None) -> List[dict]:
+    """Bitfinex: канал status, ключ liq:global.
+
+    Кадр: [chanId, [["pos", posId, timeMs, null, symbol, amount, basePrice,
+                     null, isMatch, isMarketSold, null, liqPrice], ...]]
+    Сторону берём из знака AMOUNT: положительный — вынесли лонг. Знак
+    подтверждён документацией только косвенно, поэтому значение дублируется
+    в health-статистике (bitfinex_liq_long/short) — по живым данным его видно.
+    """
+    if not isinstance(payload, list) or len(payload) < 2:
+        return []
+    if chan_id is not None and payload[0] != chan_id:
+        return []
+    body = payload[1]
+    if not isinstance(body, list):
+        return []                              # "hb" и прочие служебные кадры
+    rows = body if body and isinstance(body[0], list) else [body]
+    sym_map = sym_map or {}
+    out: List[dict] = []
+    for r in rows:
+        if not isinstance(r, list) or not r or r[0] != "pos" or len(r) < 12:
+            continue
+        if stats is not None:
+            stats["trades"] = stats.get("trades", 0) + 1
+        raw_sym = str(r[4] or "")
+        sym = sym_map.get(raw_sym)
+        if not sym:
+            # в поток попадают и спот-маржинальные ликвидации — не наши рынки
+            if stats is not None:
+                stats["skipped_other"] = stats.get("skipped_other", 0) + 1
+            continue
+        try:
+            amount = float(r[5] or 0)
+            ts = float(r[2] or 0) / 1000.0
+            price = float(r[11] or r[6] or 0)   # цена ликвидации, резерв — базовая
+        except (TypeError, ValueError):
+            continue
+        qty = abs(amount)
+        if qty <= 0 or price <= 0 or not _fresh(ts, now, max_age, stats):
+            continue
+        side = "LONG" if amount >= 0 else "SHORT"
+        if stats is not None:
+            key = "liq_long" if side == "LONG" else "liq_short"
+            stats[key] = stats.get(key, 0) + 1
+        out.append({
+            "symbol": sym, "side": side, "price": price, "qty": qty,
+            "ts": ts or time.time(), "kind": "pos",
+        })
+    return out
+
+
 class SourceStatus:
     """Диагностика одного WS-источника (видна в /api/health)."""
 
@@ -539,6 +1152,9 @@ class SourceStatus:
         self.connected_since = 0.0
         self.reconnects = 0
         self.attempts = 0   # попыток коннекта (в т.ч. неудачных до первого up)
+        # Доп. диагностика источника (у Hyperliquid — подписки/пинги/входящие);
+        # подмешивается в as_dict() и видна в /api/health.
+        self.extra: Dict[str, Any] = {}
 
     def up(self):
         self.connected = True
@@ -557,7 +1173,7 @@ class SourceStatus:
         self.last_event_ts = time.time()
 
     def as_dict(self) -> dict:
-        return {
+        d = {
             "name": self.name,
             "enabled": self.enabled,
             "connected": self.connected,
@@ -571,6 +1187,8 @@ class SourceStatus:
             "attempts": self.attempts,
             "last_error": self.last_error,
         }
+        d.update(self.extra)
+        return d
 
 
 # ----------------------------------------------------------------------------
@@ -615,6 +1233,8 @@ class MarketFeed:
         self.symbol_index: Dict[str, dict] = {}
         self.symbol_index_source = "none"
         self._index_ready = asyncio.Event()
+        self._dydx_market_set: Optional[set] = None
+        self._kraken_product_set: Optional[set] = None
         self.gate_multipliers: Dict[str, float] = {}
         self.bitmex_instruments: Dict[str, dict] = {}
         # «Горячие» монеты — те, чей график сейчас открыт у клиентов.
@@ -635,7 +1255,8 @@ class MarketFeed:
         self.status: Dict[str, SourceStatus] = {
             name: SourceStatus(name)
             for name in ("binance", "bybit", "okx", "gate", "bitget", "htx",
-                         "bitmex", "hyperliquid", "prices", "ticks")
+                         "bitmex", "hyperliquid", "dydx", "kraken", "bitfinex",
+                         "oxa", "prices", "ticks")
         }
         for name, st in self.status.items():
             if name not in ("prices", "ticks"):
@@ -646,6 +1267,10 @@ class MarketFeed:
             bitmex_meta_fn=lambda: self.bitmex_instruments)
 
         self.hl_coin_map: Dict[str, str] = {}   # монета HL -> канон (из universe)
+        # Монеты, которые HL не принял: счётчик срывов и постоянный бан.
+        # Живут на экземпляре — переживают переподключения.
+        self.hl_coin_strikes: Dict[str, int] = {}
+        self.hl_banned_coins: set = set()
         self.started_at = time.time()
         self.symbols_source = "fallback"
         self._session: Optional[aiohttp.ClientSession] = None
@@ -681,7 +1306,17 @@ class MarketFeed:
             "htx": self._htx_liquidations,
             "bitmex": self._bitmex_liquidations,
             "hyperliquid": self._hyperliquid_liquidations,
+            "dydx": self._dydx_liquidations,
+            "kraken": self._kraken_liquidations,
+            "bitfinex": self._bitfinex_liquidations,
+            # 0xArchive не входит в LIQSCOPE_EXCHANGES по умолчанию: источник
+            # включается сам, только если заданы ключи (см. ниже)
+            "oxa": self._oxa_liquidations,
         }
+        if oxa_keys():
+            # ключи есть — включаем, даже если в списке бирж его не назвали
+            self.enabled_exchanges.add("oxa")
+            self.status["oxa"].enabled = True
         for name, coro in spawn.items():
             if name in self.enabled_exchanges:
                 # hyperliquid жёстко режет частые переподключения (RST), поэтому
@@ -1570,20 +2205,758 @@ class MarketFeed:
                     await self._emit("bitmex", ev["symbol"], ev["side"],
                                      ev["price"], ev["qty"], ev["ts"], usd=ev.get("usd"))
 
+    # -- Списки рынков: не подписываемся на то, чего у биржи нет -------------
+    async def _dydx_markets(self) -> set:
+        """Тикеры, которые реально есть на dYdX v4 (кэш на время работы)."""
+        if self._dydx_market_set is None:
+            try:
+                data = await _get_json(self._session,
+                                       f"{DYDX_REST}/v4/perpetualMarkets",
+                                       timeout=6.0)
+                markets = (data or {}).get("markets") or {}
+                self._dydx_market_set = {str(k) for k in markets}
+                log.info("[dydx] рынков на бирже: %d", len(self._dydx_market_set))
+            except Exception as e:
+                # список не получен — не повод оставаться без подписок вовсе:
+                # подпишемся на всё, лишнее биржа просто отвергнет
+                log.warning("[dydx] список рынков недоступен (%s) — "
+                            "подписываюсь без фильтра", e)
+                self._dydx_market_set = set()
+        return self._dydx_market_set
+
+    async def _kraken_products(self) -> set:
+        """Продукты, которые реально есть на Kraken Futures (кэш)."""
+        if self._kraken_product_set is None:
+            try:
+                data = await _get_json(self._session,
+                                       f"{KRAKEN_FUT_REST}/instruments",
+                                       timeout=6.0)
+                rows = (data or {}).get("instruments") or []
+                self._kraken_product_set = {str(r.get("symbol")) for r in rows
+                                         if isinstance(r, dict)}
+                log.info("[kraken] продуктов на бирже: %d",
+                         len(self._kraken_product_set))
+            except Exception as e:
+                log.warning("[kraken] список продуктов недоступен (%s) — "
+                            "подписываюсь без фильтра", e)
+                self._kraken_product_set = set()
+        return self._kraken_product_set
+
+    # -- dYdX v4 -------------------------------------------------------------
+    async def _dydx_liquidations(self):
+        """dYdX v4: публичный индексатор, канал v4_trades на каждый тикер.
+
+        Ликвидация помечена типом сделки (type: Liquidated/Deleveraged),
+        отдельного канала нет. Подписка по тикеру, ключ не нужен.
+        """
+        st = self.status["dydx"]
+        sym_map = dydx_symbol_map(self.symbols)
+        known = await self._dydx_markets()
+        if known:
+            # подписка на несуществующий тикер — отказ биржи и мусор в логах
+            missing = sorted(set(sym_map) - known)
+            if missing:
+                log.info("[dydx] нет на бирже, пропускаю %d: %s", len(missing),
+                         ", ".join(missing[:10]) + ("..." if len(missing) > 10 else ""))
+            sym_map = {t: s_ for t, s_ in sym_map.items() if t in known}
+        tickers = list(sym_map)[:DYDX_MAX_SUBS]
+        if not tickers:
+            raise ConnectionError("нет тикеров dYdX для подписки")
+        stats = {"trades": 0, "stale": 0, "liq": 0}
+        acked: set = set()
+        last_log = 0.0
+
+        def publish():
+            st.extra = {"dydx_url": DYDX_WS, "dydx_subs_total": len(tickers),
+                        "dydx_subs_acked": len(acked),
+                        "dydx_trades_seen": stats["trades"],
+                        "dydx_liquidations": stats["liq"],
+                        "dydx_skipped_stale": stats["stale"],
+                        "dydx_errors": stats.get("errors", 0),
+                        "dydx_frame_kinds": dict(sorted(
+                            stats.get("kinds", {}).items(),
+                            key=lambda kv: -kv[1])[:6])}
+
+        def report(force=False):
+            nonlocal last_log
+            now = time.monotonic()
+            if not force and now - last_log < NEW_SOURCE_LOG_SEC:
+                return
+            last_log = now
+            log.info("[dydx] подписок %d/%d, сделок %d, ликвидаций %d, "
+                     "старых отсеяно %d, отказов %d", len(acked), len(tickers),
+                     stats["trades"], stats["liq"], stats["stale"],
+                     stats.get("errors", 0))
+            if not stats["trades"] and stats.get("kinds"):
+                log.warning("[dydx] сделок нет; типы кадров: %s",
+                            stats["kinds"])
+
+        async with self._session.ws_connect(DYDX_WS, heartbeat=None,
+                                            max_msg_size=0) as ws:
+            st.up()
+            publish()
+            log.info("[dydx] подключён, подписываю %d тикеров", len(tickers))
+
+            async def sub_worker():
+                for tk in tickers:
+                    if self._stop.is_set() or ws.closed:
+                        return
+                    await ws.send_json({"type": "subscribe",
+                                        "channel": "v4_trades", "id": tk})
+                    await asyncio.sleep(DYDX_SUB_GAP)
+
+            sub = asyncio.create_task(sub_worker())
+            try:
+                while not self._stop.is_set():
+                    try:
+                        msg = await ws.receive(timeout=5.0)
+                    except asyncio.TimeoutError:
+                        continue
+                    if msg.type in (aiohttp.WSMsgType.CLOSED,
+                                    aiohttp.WSMsgType.CLOSING,
+                                    aiohttp.WSMsgType.ERROR):
+                        break
+                    if msg.type != aiohttp.WSMsgType.TEXT:
+                        continue
+                    try:
+                        payload = json.loads(msg.data)
+                    except Exception:
+                        continue
+                    if isinstance(payload, dict):
+                        kind = str(payload.get("type") or "<без type>")
+                        stats["kinds"] = stats.get("kinds", {})
+                        stats["kinds"][kind] = stats["kinds"].get(kind, 0) + 1
+                        if kind == "subscribed":
+                            acked.add(str(payload.get("id") or ""))
+                            publish()
+                            continue
+                        if kind == "error":
+                            # без этого отказ биржи неотличим от тишины:
+                            # сокет жив, а ликвидаций нет и причины не видно
+                            stats["errors"] = stats.get("errors", 0) + 1
+                            st.last_error = str(payload.get("message")
+                                                or payload)[:200]
+                            log.warning("[dydx] отказ: %s", st.last_error)
+                            publish()
+                            continue
+                    for ev in parse_dydx_msg(payload, sym_map, now=time.time(),
+                                             max_age=LIQ_FRESH_SEC, stats=stats):
+                        stats["liq"] += 1
+                        await self._emit("dydx", ev["symbol"], ev["side"],
+                                         ev["price"], ev["qty"], ev["ts"])
+                    publish()
+                    report()
+            finally:
+                sub.cancel()
+
+    # -- Kraken Futures ------------------------------------------------------
+    async def _kraken_liquidations(self):
+        """Kraken Futures: публичный фид trade, ликвидация — поле type.
+
+        По документации у сделки type: fill | liquidation | termination |
+        block; termination — закрытие через страховой фонд (аналог ADL).
+        """
+        st = self.status["kraken"]
+        sym_map = kraken_symbol_map(self.symbols)
+        known = await self._kraken_products()
+        if known:
+            missing = sorted(set(sym_map) - known)
+            if missing:
+                log.info("[kraken] нет на бирже, пропускаю %d: %s",
+                         len(missing), ", ".join(missing[:10])
+                         + ("..." if len(missing) > 10 else ""))
+            sym_map = {p_: s_ for p_, s_ in sym_map.items() if p_ in known}
+        products = list(sym_map)
+        if not products:
+            raise ConnectionError("нет продуктов Kraken для подписки")
+        stats = {"trades": 0, "stale": 0, "liq": 0}
+        acked: set = set()
+        last_log = 0.0
+
+        def publish():
+            st.extra = {"kraken_url": KRAKEN_WS,
+                        "kraken_subs_total": len(products),
+                        "kraken_subs_acked": len(acked),
+                        "kraken_trades_seen": stats["trades"],
+                        "kraken_liquidations": stats["liq"],
+                        "kraken_skipped_stale": stats["stale"],
+                        "kraken_errors": stats.get("errors", 0),
+                        "kraken_frame_kinds": dict(sorted(
+                            stats.get("kinds", {}).items(),
+                            key=lambda kv: -kv[1])[:6])}
+
+        def report():
+            nonlocal last_log
+            now = time.monotonic()
+            if now - last_log < NEW_SOURCE_LOG_SEC:
+                return
+            last_log = now
+            log.info("[kraken] подписок %d/%d, сделок %d, ликвидаций %d, "
+                     "старых отсеяно %d, отказов %d", len(acked), len(products),
+                     stats["trades"], stats["liq"], stats["stale"],
+                     stats.get("errors", 0))
+
+        async with self._session.ws_connect(KRAKEN_WS, heartbeat=None,
+                                            max_msg_size=0) as ws:
+            st.up()
+            publish()
+            log.info("[kraken] подключён, подписываю %d контрактов", len(products))
+
+            async def sub_worker():
+                # по одному контракту: на незнакомый id Kraken отвечает ошибкой
+                # на весь запрос, а потерять из-за одного весь поток жалко
+                for pid in products:
+                    if self._stop.is_set() or ws.closed:
+                        return
+                    await ws.send_json({"event": "subscribe", "feed": "trade",
+                                        "product_ids": [pid]})
+                    await asyncio.sleep(0.1)
+
+            async def ping_worker():
+                # Kraken просит пинг хотя бы раз в 60 с
+                while not self._stop.is_set() and not ws.closed:
+                    await asyncio.sleep(KRAKEN_PING_SEC)
+                    try:
+                        await ws.send_json({"event": "ping"})
+                    except Exception:
+                        return
+
+            sub = asyncio.create_task(sub_worker())
+            pinger = asyncio.create_task(ping_worker())
+            try:
+                while not self._stop.is_set():
+                    try:
+                        msg = await ws.receive(timeout=5.0)
+                    except asyncio.TimeoutError:
+                        continue
+                    if msg.type in (aiohttp.WSMsgType.CLOSED,
+                                    aiohttp.WSMsgType.CLOSING,
+                                    aiohttp.WSMsgType.ERROR):
+                        break
+                    if msg.type != aiohttp.WSMsgType.TEXT:
+                        continue
+                    try:
+                        payload = json.loads(msg.data)
+                    except Exception:
+                        continue
+                    if isinstance(payload, dict):
+                        kind = str(payload.get("event") or payload.get("feed")
+                                   or "<без event>")
+                        stats["kinds"] = stats.get("kinds", {})
+                        stats["kinds"][kind] = stats["kinds"].get(kind, 0) + 1
+                        if kind == "subscribed":
+                            for pid in payload.get("product_ids") or []:
+                                acked.add(str(pid))
+                            publish()
+                            continue
+                        if kind == "error":
+                            # Kraken отвечает ошибкой на незнакомый продукт и
+                            # при этом рвёт сокет — причину нужно видеть
+                            stats["errors"] = stats.get("errors", 0) + 1
+                            st.last_error = str(payload.get("error")
+                                                or payload)[:200]
+                            log.warning("[kraken] отказ: %s", st.last_error)
+                            publish()
+                            continue
+                    for ev in parse_kraken_msg(payload, sym_map, now=time.time(),
+                                               max_age=LIQ_FRESH_SEC, stats=stats):
+                        stats["liq"] += 1
+                        await self._emit("kraken", ev["symbol"], ev["side"],
+                                         ev["price"], ev["qty"], ev["ts"])
+                    publish()
+                    report()
+            finally:
+                sub.cancel()
+                pinger.cancel()
+
+    # -- Bitfinex ------------------------------------------------------------
+    async def _bitfinex_liquidations(self):
+        """Bitfinex: канал status с ключом liq:global — поток по всей бирже.
+
+        Одна подписка на все рынки сразу (в отличие от остальных источников).
+        chanId приходит в ответе subscribed, дальше кадры идут массивами.
+        """
+        st = self.status["bitfinex"]
+        sym_map = bitfinex_symbol_map(self.symbols)
+        stats = {"trades": 0, "stale": 0, "liq_long": 0, "liq_short": 0,
+                 "skipped_other": 0}
+        state = {"chan": None, "ping": 0, "pong": 0, "last_log": 0.0}
+
+        def publish():
+            st.extra = {"bitfinex_url": BITFINEX_WS,
+                        "bitfinex_key": "liq:global",
+                        "bitfinex_chan_id": state["chan"],
+                        "bitfinex_rows_seen": stats["trades"],
+                        "bitfinex_skipped_stale": stats["stale"],
+                        "bitfinex_liq_long": stats["liq_long"],
+                        "bitfinex_liq_short": stats["liq_short"],
+                        "bitfinex_skipped_other": stats["skipped_other"],
+                        "bitfinex_liquidations":
+                            stats["liq_long"] + stats["liq_short"],
+                        "bitfinex_pings": state["ping"],
+                        "bitfinex_pongs": state["pong"]}
+
+        def report():
+            now = time.monotonic()
+            if now - state["last_log"] < NEW_SOURCE_LOG_SEC:
+                return
+            state["last_log"] = now
+            log.info("[bitfinex] chanId=%s, строк %d, ликвидаций %d "
+                     "(LONG %d / SHORT %d), чужих рынков %d, старых %d",
+                     state["chan"], stats["trades"],
+                     stats["liq_long"] + stats["liq_short"],
+                     stats["liq_long"], stats["liq_short"],
+                     stats["skipped_other"], stats["stale"])
+
+        async with self._session.ws_connect(BITFINEX_WS, heartbeat=None,
+                                            max_msg_size=0) as ws:
+            st.up()
+            publish()
+            log.info("[bitfinex] подключён, подписка на status/liq:global")
+
+            async def ping_worker():
+                while not self._stop.is_set() and not ws.closed:
+                    await asyncio.sleep(BITFINEX_PING_SEC)
+                    state["ping"] += 1
+                    try:
+                        await ws.send_json({"event": "ping",
+                                            "cid": int(time.time() * 1000)})
+                    except Exception:
+                        return
+
+            pinger = asyncio.create_task(ping_worker())
+            try:
+                await ws.send_json({"event": "subscribe", "channel": "status",
+                                    "key": "liq:global"})
+                while not self._stop.is_set():
+                    try:
+                        msg = await ws.receive(timeout=5.0)
+                    except asyncio.TimeoutError:
+                        continue
+                    if msg.type in (aiohttp.WSMsgType.CLOSED,
+                                    aiohttp.WSMsgType.CLOSING,
+                                    aiohttp.WSMsgType.ERROR):
+                        break
+                    if msg.type != aiohttp.WSMsgType.TEXT:
+                        continue
+                    try:
+                        payload = json.loads(msg.data)
+                    except Exception:
+                        continue
+                    if isinstance(payload, dict):
+                        ev = payload.get("event")
+                        if ev == "subscribed" and payload.get("key") == "liq:global":
+                            state["chan"] = payload.get("chanId")
+                            log.info("[bitfinex] подписка подтверждена, chanId=%s",
+                                     state["chan"])
+                        elif ev == "pong":
+                            state["pong"] += 1
+                        elif ev == "error":
+                            st.last_error = str(payload.get("msg"))[:200]
+                            log.warning("[bitfinex] ошибка: %s", st.last_error)
+                        publish()
+                        continue
+                    if state["chan"] is None:
+                        continue
+                    for ev in parse_bitfinex_liquidations(
+                            payload, state["chan"], sym_map, now=time.time(),
+                            max_age=LIQ_FRESH_SEC, stats=stats):
+                        await self._emit("bitfinex", ev["symbol"], ev["side"],
+                                         ev["price"], ev["qty"], ev["ts"])
+                    publish()
+                    report()
+            finally:
+                pinger.cancel()
+
+    async def _oxa_rest_poll(self, key_no: int, key: str, coins: List[str],
+                             coin_map: Dict[str, str], stats: dict,
+                             publish, report) -> None:
+        """Опрос REST /liquidations/{coin} — рабочий путь вместо живого WS.
+
+        Замер 14.09.2026 на боевом сервере: WS-канал liquidations за 1800 с не
+        прислал ни кадра данных, а REST отдал 1118 ликвидаций за сутки с самой
+        свежей «0 с назад». Поэтому ликвидации Hyperliquid берутся опросом.
+
+        Каждый запрос стоит минимум 1 кредит (Free — 50 000/мес на ключ),
+        поэтому монет на ключ ограничено OXA_COINS_PER_KEY, а интервал —
+        OXA_POLL_SEC. Окна опроса перекрываются на OXA_OVERLAP_SEC, чтобы не
+        потерять событие на границе; повторы отсеиваются по trade_id.
+        """
+        seen: set = set()
+        seen_order: Deque[str] = deque(maxlen=4000)
+        headers = {"X-API-Key": key}
+        # Курсор — СВОЙ у каждой монеты. Общий курсор на весь ключ давал дыры:
+        # монеты опрашиваются вразнобой (сон OXA_POLL_SEC/len(coins) между
+        # ними), поэтому после опроса SOL курсор уезжал вперёд, и следующий
+        # запрос BTC начинался уже оттуда — на 2 монетах каждая теряла по
+        # 30 с на каждом цикле.
+        # Стартуем с короткого окна: историю за сутки вываливать в ленту нельзя.
+        cursors: Dict[str, float] = {
+            c: time.time() - OXA_FIRST_WINDOW_SEC for c in coins}
+
+        while not self._stop.is_set():
+            for coin in coins:
+                if self._stop.is_set():
+                    return
+                end = time.time()
+                url = f"{OXA_REST}/liquidations/{coin}"
+                params = {"start": int(cursors[coin] * 1000)
+                          - int(OXA_OVERLAP_SEC * 1000),
+                          "end": int(end * 1000), "limit": 1000}
+                try:
+                    async with self._session.get(
+                            url, params=params, headers=headers,
+                            timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                        stats["requests"] += 1
+                        if resp.status != 200:
+                            stats["errors"] += 1
+                            body = (await resp.text())[:200]
+                            st = self.status["oxa"]
+                            st.last_error = f"HTTP {resp.status}: {body}"
+                            log.warning("[oxa] ключ #%d %s: %s", key_no + 1,
+                                        coin, st.last_error)
+                            publish()
+                            continue
+                        payload = await resp.json(content_type=None)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    stats["errors"] += 1
+                    self.status["oxa"].last_error = f"{type(e).__name__}: {e}"
+                    log.warning("[oxa] ключ #%d %s: %s", key_no + 1, coin,
+                                self.status["oxa"].last_error)
+                    publish()
+                    continue
+
+                for ev in parse_oxa_liquidations(payload, coin_map,
+                                                 now=time.time(),
+                                                 max_age=oxa_rest_max_age(),
+                                                 stats=stats, all_rows=True):
+                    eid = ev.get("id")
+                    if eid:
+                        if eid in seen:
+                            stats["dupes"] += 1
+                            continue
+                        seen.add(eid)
+                        seen_order.append(eid)
+                        while len(seen) > 4000:
+                            seen.discard(seen_order.popleft())
+                    stats["liq"] += 1
+                    # ликвидация произошла на Hyperliquid — её и показываем
+                    await self._emit("hyperliquid", ev["symbol"], ev["side"],
+                                     ev["price"], ev["qty"], ev["ts"],
+                                     usd=ev.get("usd"))
+                cursors[coin] = end
+                publish()
+                report()
+                # растаскиваем запросы, чтобы не упираться в 15 RPS
+                await asyncio.sleep(OXA_POLL_SEC / max(1, len(coins)))
+
+        # -- 0xArchive: ликвидации Hyperliquid по API-ключу ----------------------
+    async def _oxa_liquidations(self):
+        """Ликвидации Hyperliquid через индексатор 0xArchive.
+
+        У самого HL публичного канала ликвидаций нет (замер 13.09.2026:
+        18144 сделки, ни одной с объектом liquidation), а 0xArchive их
+        публикует. Подписка построчная по монете, поэтому на бесплатном
+        тарифе один ключ даёт OXA_SUBS_PER_KEY монет; чтобы покрыть больше,
+        ключей задают несколько — каждый получает своё соединение и свой
+        срез списка монет.
+
+        Источник работает только если ключи заданы в окружении: без них
+        проект остаётся полностью «без ключей», как и был.
+        """
+        keys = oxa_keys()
+        if not keys:
+            self.status["oxa"].down("не задан LIQSCOPE_OXA_KEYS")
+            return
+        universe = await self._hyperliquid_load_universe()
+        coin_map = hl_coin_map(self.symbols, universe)
+        coins = list(coin_map)
+        if not coins:
+            raise ConnectionError("нет монет Hyperliquid для подписки")
+
+        # по одному соединению (или опросу) на ключ, монеты режем поровну.
+        # Лимит на ключ разный: у WS это подписки, у REST — бюджет кредитов.
+        per_key = (OXA_COINS_PER_KEY if OXA_MODE in ("rest", "both")
+                   else OXA_SUBS_PER_KEY)
+        # Защита от выжигания ключа: опрос стоит кредитов, и настройка вида
+        # «5 монет раз в 60 с» — это 216 000 запросов в месяц при бюджете
+        # 50 000, то есть ключ умирает на 7-й день. Молча так делать нельзя,
+        # поэтому урезаем до того, что влезает в бюджет, и кричим в лог.
+        budget_coins = (oxa_coins_for_budget(OXA_POLL_SEC)
+                        if OXA_MODE in ("rest", "both") else None)
+        clamped_from = 0
+        if budget_coins is not None and per_key > budget_coins:
+            clamped_from = per_key
+            per_key = max(1, budget_coins)
+            # при каком интервале желаемое число монет влезло бы в бюджет
+            poll_for_all = int(round(OXA_MONTH_SEC * OXA_COINS_PER_KEY
+                                     / OXA_FREE_CREDITS))
+            log.warning(
+                "[oxa] %d монет на ключ при опросе раз в %.0f с — это "
+                "%.0f кредитов/мес при бюджете %d на ключ; урезано до %d "
+                "монет. Хочется все %d — поставьте LIQSCOPE_OXA_POLL_SEC=%d "
+                "или добавьте ключей",
+                clamped_from, OXA_POLL_SEC,
+                oxa_month_credits(clamped_from, OXA_POLL_SEC),
+                OXA_FREE_CREDITS, per_key, clamped_from, poll_for_all)
+        shards = [coins[i::len(keys)] for i in range(len(keys))]
+        shards = [sh[:per_key] for sh in shards]
+        dropped = len(coins) - sum(len(sh) for sh in shards)
+
+        st = self.status["oxa"]
+        stats = {"frames": 0, "liq_rows": 0, "stale": 0, "skipped_other": 0,
+                 "liq": 0, "errors": 0, "acked": 0, "subs": sum(len(sh) for sh in shards),
+                 "keys": len(keys), "kinds": {}, "requests": 0, "dupes": 0,
+                 "raw_rows": 0,
+                 "mode": OXA_MODE, "clamped_from": clamped_from,
+                 "per_key": per_key}
+        last_log = 0.0
+        started = time.monotonic()      # отсюда считаем прогноз расхода кредитов
+
+        def publish():
+            kinds = dict(sorted(stats["kinds"].items(),
+                                key=lambda kv: -kv[1])[:6])
+            req = stats["requests"]
+            # Прогноз месячного расхода (запрос стоит минимум 1 кредит).
+            # Считать его можно только набрав хотя бы полный цикл опроса:
+            # экстраполяция двух запросов за полсекунды даёт миллиарды и
+            # врёт про «не влезает в бюджет» на первых минутах работы.
+            elapsed = time.monotonic() - started
+            ready = elapsed >= max(OXA_POLL_SEC * 2, 60.0)
+            per_month = int(req * 86400 * 30 / elapsed) if (req and ready) else 0
+            st.extra = {"oxa_mode": OXA_MODE,
+                        "oxa_url": OXA_REST if OXA_MODE != "ws" else OXA_WS,
+                        "oxa_keys": stats["keys"],
+                        "oxa_requests": req,
+                        "oxa_dupes": stats["dupes"],
+                        "oxa_credits_month_eta": per_month or None,
+                        "oxa_credits_budget": OXA_FREE_CREDITS * stats["keys"],
+                        # плановый расход по настройкам — виден сразу, не
+                        # дожидаясь, пока наберётся статистика запросов
+                        "oxa_credits_planned": int(oxa_month_credits(
+                            stats["per_key"], OXA_POLL_SEC) * stats["keys"]),
+                        # >0 — настройку урезали, иначе она выжгла бы ключ
+                        "oxa_coins_clamped_from": stats["clamped_from"],
+                        # None — ещё рано судить, бюджет не исчерпан
+                        "oxa_fits_budget": (None if not ready else
+                                            per_month <= OXA_FREE_CREDITS * stats["keys"]),
+                        "oxa_subs_total": stats["subs"],
+                        "oxa_subs_acked": stats["acked"],
+                        "oxa_frames": stats["frames"],
+                        "oxa_liquidations": stats["liq"],
+                        # сколько строк вернул API до наших фильтров:
+                        # raw_rows=0 при растущих requests — пусто у провайдера,
+                        # raw_rows>0 при liq_rows=0 — строки не распознаются
+                        "oxa_raw_rows": stats["raw_rows"],
+                        "oxa_liq_rows": stats["liq_rows"],
+                        "oxa_skipped_stale": stats["stale"],
+                        "oxa_skipped_other": stats["skipped_other"],
+                        "oxa_errors": stats["errors"],
+                        "oxa_coins_uncovered": dropped,
+                        "oxa_frame_kinds": kinds}
+
+        def report(force=False):
+            nonlocal last_log
+            now = time.monotonic()
+            if not force and now - last_log < NEW_SOURCE_LOG_SEC:
+                return
+            last_log = now
+            if OXA_MODE == "ws":
+                log.info("[oxa] ключей %d, подписок %d/%d, кадров %d, "
+                         "ликвидаций %d (строк %d), старых %d, чужих монет %d",
+                         stats["keys"], stats["acked"], stats["subs"],
+                         stats["frames"], stats["liq"], stats["liq_rows"],
+                         stats["stale"], stats["skipped_other"])
+                if stats["frames"] and not stats["liq_rows"]:
+                    log.warning("[oxa] кадры идут, а строк ликвидаций нет; "
+                                "типы кадров: %s", stats["kinds"])
+            else:
+                # oxa_credits_month_eta равно None, пока не набран полный
+                # цикл опроса, — .get(..., 0) его НЕ подменяет (ключ-то
+                # присутствует), а %d на None падает с TypeError прямо
+                # в логгер. Поэтому через %s и читабельное «ещё неясно».
+                eta = st.extra.get("oxa_credits_month_eta")
+                log.info("[oxa/%s] ключей %d, монет %d, запросов %d, "
+                         "ликвидаций %d (повторов %d), ошибок %d, "
+                         "кредитов/мес ~%s из %d",
+                         OXA_MODE, stats["keys"], stats["subs"],
+                         stats["requests"], stats["liq"], stats["dupes"],
+                         stats["errors"],
+                         "ещё неясно" if eta is None else eta,
+                         st.extra.get("oxa_credits_budget") or 0)
+        publish()
+
+        async def stream(key_no: int, key: str, shard: List[str]):
+            """Одно соединение на один ключ со своим срезом монет."""
+            nonlocal last_log
+            headers = {"Authorization": f"Bearer {key}"}
+            async with self._session.ws_connect(
+                    OXA_WS, headers=headers, heartbeat=None,
+                    max_msg_size=0) as ws:
+                st.up()
+                for coin in shard:
+                    await ws.send_json({"op": "subscribe",
+                                        "channel": "liquidations",
+                                        "symbol": coin})
+                log.info("[oxa] ключ #%d: подписываю %d монет (%s)",
+                         key_no + 1, len(shard), ", ".join(shard[:8])
+                         + ("..." if len(shard) > 8 else ""))
+                last_ping = time.monotonic()
+                while not self._stop.is_set():
+                    if time.monotonic() - last_ping >= OXA_PING_SEC:
+                        await ws.send_json({"op": "ping"})
+                        last_ping = time.monotonic()
+                    try:
+                        msg = await ws.receive(timeout=5.0)
+                    except asyncio.TimeoutError:
+                        continue
+                    if msg.type in (aiohttp.WSMsgType.CLOSED,
+                                    aiohttp.WSMsgType.CLOSING,
+                                    aiohttp.WSMsgType.ERROR):
+                        break
+                    if msg.type != aiohttp.WSMsgType.TEXT:
+                        continue
+                    # считаем каждый кадр: «ноль ликвидаций» должно означать
+                    # тишину, а не незнакомую форму кадра
+                    stats["frames"] += 1
+                    try:
+                        payload = json.loads(msg.data)
+                    except Exception:
+                        stats["kinds"]["<не-json>"] = \
+                            stats["kinds"].get("<не-json>", 0) + 1
+                        continue
+                    if not isinstance(payload, dict):
+                        # строка/число/список вместо объекта: не данные, но
+                        # молча терять нельзя — иначе «ноль ликвидаций»
+                        # неотличим от незнакомого формата
+                        stats["kinds"]["<не-объект>"] = \
+                            stats["kinds"].get("<не-объект>", 0) + 1
+                        publish()
+                        continue
+                    kind = str(payload.get("type") or "<без type>")
+                    stats["kinds"][kind] = stats["kinds"].get(kind, 0) + 1
+                    if kind == "subscribed":
+                        stats["acked"] += 1
+                        publish()
+                        continue
+                    if kind == "error":
+                        stats["errors"] += 1
+                        st.last_error = str(payload.get("message"))[:200]
+                        log.warning("[oxa] ключ #%d: отказ %s", key_no + 1,
+                                    st.last_error)
+                        publish()
+                        continue
+                    if kind != "data":
+                        publish()
+                        continue
+                    for ev in parse_oxa_liquidations(
+                            payload, coin_map, now=time.time(),
+                            max_age=OXA_LIQ_FRESH_SEC, stats=stats):
+                        stats["liq"] += 1
+                        # ликвидация произошла на Hyperliquid — её и показываем,
+                        # 0xArchive здесь только транспорт
+                        await self._emit("hyperliquid", ev["symbol"], ev["side"],
+                                         ev["price"], ev["qty"], ev["ts"],
+                                         usd=ev.get("usd"))
+                    publish()
+                    report()
+
+        if OXA_MODE in ("rest", "both"):
+            st.up()
+            st.name = "oxa-rest"
+            log.info("[oxa] режим %s: опрос REST раз в %.0f с, монет на ключ %d",
+                     OXA_MODE, OXA_POLL_SEC, per_key)
+        jobs = []
+        if OXA_MODE in ("ws", "both"):
+            jobs += [stream(i, k, sh) for i, (k, sh) in enumerate(zip(keys, shards))]
+        if OXA_MODE in ("rest", "both"):
+            jobs += [self._oxa_rest_poll(i, k, sh, coin_map, stats, publish, report)
+                     for i, (k, sh) in enumerate(zip(keys, shards))]
+        try:
+            await asyncio.gather(*jobs, return_exceptions=False)
+        finally:
+            report(force=True)
+            publish()
+
     # -- Hyperliquid ---------------------------------------------------------
+    def _hl_session(self):
+        """Сессия для HL. Возвращает (сессия, «мы её создали» — нам и закрывать).
+
+        По умолчанию HL ходит через ОТДЕЛЬНУЮ сессию со своим коннектором,
+        а не через боевую: боевая создана с общим ClientTimeout(total=20) и
+        через неё же идут REST-движки (каталог монет, свечи, OI восьми бирж).
+        Зонды tools/check_hyperliquid.py, которые жили стабильно, — это как
+        раз «голая» отдельная сессия без общего таймаута. LIQSCOPE_HL_SHARED=1
+        возвращает прежнее поведение (общая сессия) для сравнения на бою.
+        """
+        solo = os.getenv("LIQSCOPE_HL_SOLO", "").strip().lower()
+        shared = os.getenv("LIQSCOPE_HL_SHARED", "").strip().lower()
+        if (shared in ("1", "true", "yes", "on")
+                and solo not in ("1", "true", "yes", "on")
+                and self._session is not None):
+            return self._session, False
+        connector = None
+        fam = os.getenv("LIQSCOPE_FAMILY", "").strip()
+        if fam in ("4", "6"):
+            # см. start(): бывает, хостер режет одно из семейств адресов
+            connector = aiohttp.TCPConnector(
+                family=socket.AF_INET if fam == "4" else socket.AF_INET6)
+        return aiohttp.ClientSession(
+            headers={"User-Agent": HL_UA},
+            # total=None важно: боевой total=20 к WS применять нельзя
+            timeout=aiohttp.ClientTimeout(total=None, sock_connect=20,
+                                          sock_read=None),
+            connector=connector,
+        ), True
+
+    def _hl_ban(self, coin: str, reason: str, immediate: bool = False) -> None:
+        """Запомнить монету, из-за которой HL рвёт соединение.
+
+        Подписка на имя, которого у биржи нет, — это не «нет данных по монете»,
+        а обрыв всего сокета: без такой памяти слушатель вечно спотыкался бы
+        об одну и ту же монету и не поднимался вовсе.
+        """
+        if not coin or coin in self.hl_banned_coins:
+            return
+        n = self.hl_coin_strikes.get(coin, 0) + 1
+        self.hl_coin_strikes[coin] = n
+        if immediate or n >= HL_COIN_STRIKES:
+            self.hl_banned_coins.add(coin)
+            log.warning("[hyperliquid] монета %s отключена (%s); всего "
+                        "отключено: %d", coin, reason, len(self.hl_banned_coins))
+        else:
+            log.warning("[hyperliquid] %s: срыв %d/%d (%s)", coin, n,
+                        HL_COIN_STRIKES, reason)
+
     async def _hyperliquid_load_universe(self, session=None) -> set:
         """Имена перпетуумов HL (universe из POST /info {"type": "meta"})."""
-        sess = session or self._session
+        sess = session
+        own = sess is None
+        if own:
+            # одноразовая сессия: REST не должен оставлять в WS-сессии
+            # keep-alive соединений и TLS-тиккетов к тому же хосту:порт
+            sess = aiohttp.ClientSession(headers={"User-Agent": HL_UA})
         try:
             async with sess.post(f"{HL_REST}/info", json={"type": "meta"},
                                  timeout=12) as resp:
-                data = await resp.json()
+                data = await resp.json(content_type=None)
         except Exception as e:
             log.warning("[hyperliquid] не удалось загрузить universe: %s", e)
             return set()
+        finally:
+            if own:
+                await sess.close()
         names = set()
         for row in (data or {}).get("universe") or []:
-            name = str((row or {}).get("name") or "").upper()
+            # РЕГИСТР НЕ ТРОГАЕМ: дешёвые токены HL называются kPEPE, kSHIB,
+            # kBONK — с маленькой «k», и подписываться надо ровно этим именем.
+            # Приведение к верхнему регистру здесь превращало их в KPEPE/KSHIB,
+            # то есть в несуществующие монеты: HL на такую подписку отвечал
+            # ошибкой и закрывал соединение (см. hl_coin_map — он сам строит
+            # регистронезависимый индекс, сохраняя оригинальное имя).
+            name = str((row or {}).get("name") or "").strip()
             if name:
                 names.add(name)
         return names
@@ -1591,84 +2964,83 @@ class MarketFeed:
     async def _hyperliquid_liquidations(self):
         """trades-подписка на каждую монету; ликвидации помечены объектом.
 
-        Heartbeat: Hyperliquid рвёт «тихие» соединения через ~60 секунд.
-        Пинг шлётся отдельной задачей строго по таймеру (HL_PING_INTERVAL),
-        независимо от входящего потока, — иначе на активной ленте trades
-        receive-таймаут не срабатывает и пинг не отправляется вообще.
+        Три задачи на одно соединение:
+          * чтение сокета (главный цикл) — единственный, кто делает receive();
+          * sub_worker — подписки/отписки отдельной задачей, поэтому фаза
+            подписок не держит сокет «заложником» и не блокирует чтение;
+          * heartbeat — пинг строго по таймеру (HL рвёт тихое соединение
+            через ~60 с) плюс сторож зомби-сокета.
         """
         st = self.status["hyperliquid"]
-        # LIQSCOPE_HL_SOLO=1: HL ходит через ОТДЕЛЬНУЮ «голую» сессию — точная
-        # копия окружения зонда tools/check_hyperliquid.py (без User-Agent и
-        # без общего ClientTimeout(total=20)). Гвоздь для обхода: если общий
-        # боевой процесс рвёт HL-соединения (заголовок/таймаут сессии/шеринг
-        # пула с REST-движками), а «голый» клиент с той же машины живёт —
-        # этот переключатель воспроизводит выжившую конфигурацию в бою.
-        solo = os.getenv("LIQSCOPE_HL_SOLO", "").strip() in ("1", "true",
-                                                             "yes", "on")
-        session = self._session
-        if solo:
-            session = aiohttp.ClientSession()
+        session, own = self._hl_session()
         try:
-            await self._run_hl_listener(st, session,
-                                        solo or session is not self._session)
+            await self._run_hl_listener(st, session)
         finally:
-            if session is not self._session:
+            if own and not session.closed:
                 await session.close()
 
-    async def _run_hl_listener(self, st, session, bare: bool):
-        if bare:
-            # точная копия выживавшего зонда: universe — через отдельную
-            # одноразовую сессию, чтобы REST не оставлял в WS-сессии
-            # TLS-тикетов/пула (проверено diag_hl: так соединение живёт)
-            async with aiohttp.ClientSession() as u_sess:
-                universe = await self._hyperliquid_load_universe(
-                    session=u_sess)
-        else:
-            universe = await self._hyperliquid_load_universe()
+    async def _run_hl_listener(self, st, session):
+        universe = await self._hyperliquid_load_universe()
         if universe:
             log.info("[hyperliquid] universe перпетуумов: %d", len(universe))
 
         def rebuild_map():
             if universe:
-                self.hl_coin_map = hl_coin_map(self.symbols, universe)
+                mapped = hl_coin_map(self.symbols, universe)
             else:   # universe недоступен — подписываемся на базы как есть
-                self.hl_coin_map = {base_of(s): canon(s) for s in self.symbols}
+                mapped = {base_of(s): canon(s) for s in self.symbols}
+            # Ручное исключение (LIQSCOPE_HL_SKIP_COINS=kPEPE,SHIB): если
+            # tools/hl_find_killer.py назвал монету, на которой биржа рвёт
+            # соединение, поток можно поднять без неё, не дожидаясь правки.
+            skip = {c.strip().upper() for c in
+                    os.getenv("LIQSCOPE_HL_SKIP_COINS", "").split(",") if c.strip()}
+            if skip:
+                mapped = {c: s for c, s in mapped.items() if c.upper() not in skip}
+            self.hl_coin_map = mapped
 
         rebuild_map()
-        # Некоторые бот-фильтры перед Hyperliquid (Cloudflare) режут WS с
-        # нестандартным User-Agent: если LIQSCOPE_HL_UA задан — этот участок
-        # ходит под ним. В «голом» (bare) режиме заголовок не подменяем —
-        # там важно точное равенство с зондом.
-        hl_headers = ({"User-Agent": os.environ["LIQSCOPE_HL_UA"]}
-                      if os.getenv("LIQSCOPE_HL_UA") and not bare else None)
-        async with session.ws_connect(HL_WS, heartbeat=None, timeout=25,
-                                      headers=hl_headers) as ws:
-            subscribed: set = set()
+
+        async with session.ws_connect(
+                HL_WS, heartbeat=None,
+                timeout=ClientWSTimeout(ws_close=25)) as ws:
+            sent: Dict[str, float] = {}   # монета -> когда послали subscribe
+            tries: Dict[str, int] = {}
             acked: set = set()
-            seen_msgs = 0
             # Возраст входящего трафика: обновляется любым сообщением от биржи
-            # (лента, subscriptionResponse, pong, кадры ping). Сторож в heartbeat
-            # сравнивает метку с HL_STALE_AFTER — см. heartbeat().
+            # (лента, subscriptionResponse, pong, кадры ping). Сторож в
+            # heartbeat сравнивает метку с HL_STALE_AFTER.
             last_inbound = time.monotonic()
-            # Причина принудительного закрытия (заполняет сторож) — попадает в
-            # текст ConnectionError, чтобы в логе было видно, ПОЧЕМУ рвём.
-            dead_reason = ""
-            # Подписки (sync_subs) и heartbeat-пинги шлём через общий замок:
-            # aiohttp не гарантирует безопасность параллельных send_json.
+            dead_reason = ""      # причина принудительного закрытия (сторож)
+            seen_msgs = 0         # первые кадры печатаем подробно
+            stats = {"stale": 0}  # сколько сделок отсеяно как срез истории
+            keepalive = {"ping": 0, "pong": 0}
+            flags = {"announced": False, "stale_warn": 0.0}
             send_lock = asyncio.Lock()
 
             async def send(payload: dict):
                 async with send_lock:
                     await ws.send_json(payload)
 
+            def publish():
+                """Диагностика в /api/health: видно, где именно затык."""
+                st.extra = {
+                    "hl_url": HL_WS,
+                    "hl_subs_total": len(self.hl_coin_map),
+                    "hl_subs_sent": len(sent),
+                    "hl_subs_acked": len(acked),
+                    "hl_pings": keepalive["ping"],
+                    "hl_pongs": keepalive["pong"],
+                    "hl_last_inbound_sec": round(time.monotonic() - last_inbound, 1),
+                    "hl_skipped_stale": stats["stale"],
+                    "hl_coins_banned": sorted(self.hl_banned_coins),
+                }
+
             async def handle_text(raw: str):
-                """Разобрать одно текстовое сообщение; вернуть монету, если это
-                subscriptionResponse на subscribe (иначе None)."""
                 nonlocal seen_msgs
                 try:
                     payload = json.loads(raw)
                 except Exception:
-                    return None
+                    return
                 if seen_msgs < 3:
                     # диагностика первых секунд соединения: видно, долетает
                     # ли вообще что-то до разрыва (канал + размер + голова)
@@ -1676,20 +3048,42 @@ class MarketFeed:
                     log.info("[hyperliquid] msg#%d: channel=%s size=%d %.150s",
                              seen_msgs, payload.get("channel", "?"),
                              len(raw), raw)
-                if payload.get("channel") == "subscriptionResponse":
+                channel = payload.get("channel")
+                if channel == "pong":
+                    keepalive["pong"] += 1
+                    return
+                if channel == "subscriptionResponse":
                     data = payload.get("data") or {}
                     blob = json.dumps(payload, ensure_ascii=False)[:300]
-                    if "error" in blob.lower() or "fail" in blob.lower():
-                        log.warning("[hyperliquid] ошибка подписки: %s", blob)
                     sub = data.get("subscription") or {}
                     coin = sub.get("coin")
-                    if data.get("method") == "subscribe" and coin:
+                    if "error" in blob.lower() or "fail" in blob.lower():
+                        log.warning("[hyperliquid] ошибка подписки: %s", blob)
+                        # Биржа прямо сказала, что не знает монету: повторять
+                        # бессмысленно, а цена повтора — обрыв всего сокета.
+                        if coin:
+                            self._hl_ban(coin, "биржа ответила ошибкой",
+                                         immediate=True)
+                            sent.pop(coin, None)
+                            acked.add(coin)   # больше не трогаем эту монету
+                    elif data.get("method") == "subscribe" and coin:
                         acked.add(coin)
-                    return coin
-                for ev in parse_hyperliquid_msg(payload, self.hl_coin_map):
+                    return
+                evs = parse_hyperliquid_msg(payload, self.hl_coin_map,
+                                            now=time.time(),
+                                            max_age=HL_FRESH_SEC, stats=stats)
+                for ev in evs:
                     await self._emit("hyperliquid", ev["symbol"], ev["side"],
                                      ev["price"], ev["qty"], ev["ts"])
-                return None
+                # рассинхрон часов съел бы весь поток молча — говорим вслух,
+                # но только если живых ликвидаций нет вовсе (иначе это штатный
+                # срез истории на подписку, а не поломка)
+                if (stats["stale"] >= 20 and st.events == 0
+                        and time.monotonic() - flags["stale_warn"] > 300):
+                    flags["stale_warn"] = time.monotonic()
+                    log.warning("[hyperliquid] отброшено %d сделок как устаревших "
+                                "(> %.0fс) — проверьте часы сервера, если живых "
+                                "ликвидаций нет", stats["stale"], HL_FRESH_SEC)
 
             def raise_on_close(msg):
                 # Громкий разрыв вместо тихого: код закрытия попадёт в лог
@@ -1702,43 +3096,64 @@ class MarketFeed:
                     text = f"{text} — {dead_reason}"
                 raise ConnectionError(text)
 
-            async def sync_subs():
-                nonlocal last_inbound
-                want = set(self.hl_coin_map)
-                for coin in sorted(want - subscribed):
-                    await send({"method": "subscribe",
-                                "subscription": {"type": "trades", "coin": coin}})
-                    subscribed.add(coin)
-                    # Каждую подписку подтверждаем ответом биржи (темп ~1.5/с,
-                    # сокет постоянно читается — как в зонде tools/check_hyperliquid.py
-                    # --bisect, который выживает 23/23, в отличие от всплеска
-                    # подписок вслепую: его гейтвей HL рвёт примерно через секунду).
-                    # Всё приходящее мимоходом обрабатывается штатно.
-                    t_end = time.monotonic() + 2.5
-                    while coin not in acked:
+            async def sub_worker():
+                """Подписки отдельной задачей: главный цикл чтения начинает
+                читать сокет сразу, а неподтверждённые подписки повторяются
+                сами (и это видно в /api/health)."""
+                nonlocal universe
+                next_universe = time.monotonic() + 3600   # новые HIP-3 маркеты
+                unacked_logged: set = set()
+                while not ws.closed and not self._stop.is_set():
+                    want = set(self.hl_coin_map) - self.hl_banned_coins
+                    # 1) новые монеты — с темпом HL_SUB_GAP, без ожидания ack
+                    for coin in sorted(want - set(sent)):
+                        await send({"method": "subscribe",
+                                    "subscription": {"type": "trades",
+                                                     "coin": coin}})
+                        sent[coin] = time.monotonic()
+                        tries[coin] = tries.get(coin, 0) + 1
+                        await asyncio.sleep(HL_SUB_GAP)
+                    # 2) повтор неподтверждённых
+                    now = time.monotonic()
+                    for coin in sorted(set(sent) - acked):
+                        if now - sent[coin] < HL_SUB_ACK_WAIT:
+                            continue
+                        if tries.get(coin, 0) > HL_SUB_TRIES:
+                            if coin not in unacked_logged:
+                                unacked_logged.add(coin)
+                                log.warning(
+                                    "[hyperliquid] %s: биржа не подтвердила "
+                                    "подписку за %d попыток — ликвидаций по "
+                                    "монете не будет", coin, HL_SUB_TRIES)
+                            continue
+                        await send({"method": "subscribe",
+                                    "subscription": {"type": "trades",
+                                                     "coin": coin}})
+                        sent[coin] = now
+                        tries[coin] = tries.get(coin, 0) + 1
+                        await asyncio.sleep(HL_SUB_GAP)
+                    # 3) лишние монеты — отписываемся
+                    for coin in sorted(set(sent) - want):
                         try:
-                            msg = await ws.receive(
-                                timeout=max(0.1, t_end - time.monotonic()))
-                        except asyncio.TimeoutError:
-                            break
-                        last_inbound = time.monotonic()
-                        if msg.type in (aiohttp.WSMsgType.CLOSED,
-                                        aiohttp.WSMsgType.CLOSING,
-                                        aiohttp.WSMsgType.ERROR):
-                            raise_on_close(msg)
-                        if msg.type == aiohttp.WSMsgType.TEXT:
-                            await handle_text(msg.data)
-                    if coin not in acked:
-                        log.debug("[hyperliquid] %s: нет subscriptionResponse "
-                                  "за 2.5с — иду дальше", coin)
-                for coin in sorted(subscribed - want):
-                    try:
-                        await send({"method": "unsubscribe",
-                                    "subscription": {"type": "trades", "coin": coin}})
-                    except Exception:
-                        pass
-                    subscribed.discard(coin)
-                    acked.discard(coin)
+                            await send({"method": "unsubscribe",
+                                        "subscription": {"type": "trades",
+                                                         "coin": coin}})
+                        except Exception:
+                            pass
+                        sent.pop(coin, None)
+                        acked.discard(coin)
+                        tries.pop(coin, None)
+                    # 4) раз в час — освежить universe
+                    if time.monotonic() >= next_universe:
+                        universe = (await self._hyperliquid_load_universe()) or universe
+                        rebuild_map()
+                        next_universe = time.monotonic() + 3600
+                    if not flags["announced"] and sent and len(acked) >= len(sent):
+                        flags["announced"] = True
+                        log.info("[hyperliquid] подписка trades подтверждена "
+                                 "на %d монет", len(acked))
+                    publish()
+                    await asyncio.sleep(HL_SUB_TICK)
 
             async def heartbeat():
                 """Пинг раз в HL_PING_INTERVAL секунд, независимо от потока.
@@ -1750,14 +3165,12 @@ class MarketFeed:
                 петля получит CLOSED/CLOSING, поднимет громкий ConnectionError
                 (с причиной от сторожа), и супервайзер переподключится.
                 """
-                nonlocal last_inbound, dead_reason
+                nonlocal dead_reason
+                try:
+                    await asyncio.sleep(min(HL_PING_INTERVAL, HL_FIRST_PING))
+                except asyncio.CancelledError:
+                    raise
                 while not ws.closed and not self._stop.is_set():
-                    try:
-                        await asyncio.sleep(HL_PING_INTERVAL)
-                    except asyncio.CancelledError:
-                        raise
-                    if ws.closed or self._stop.is_set():
-                        return
                     age = time.monotonic() - last_inbound
                     if age > HL_STALE_AFTER:
                         dead_reason = (f"входящих нет {age:.0f}с — ни pong на "
@@ -1775,38 +3188,33 @@ class MarketFeed:
                         return
                     try:
                         await send({"method": "ping"})
+                        keepalive["ping"] += 1
+                        publish()   # health свежий и между тиками sub_worker
                     except asyncio.CancelledError:
                         raise
                     except Exception as e:
                         # сокет умер — цикл чтения сам поднимет громкую ошибку
                         log.debug("[hyperliquid] heartbeat ping не ушёл: %s", e)
                         return
+                    await asyncio.sleep(HL_PING_INTERVAL)
 
             hb = asyncio.create_task(heartbeat(), name="hl-heartbeat")
+            sw = asyncio.create_task(sub_worker(), name="hl-subs")
             try:
-                await sync_subs()
+                # up() сразу после рукопожатия: лента пойдёт с первой
+                # подтверждённой монеты, а не после всех 40 подписок
                 st.up()
-                log.info("[hyperliquid] подписка trades на %d монет", len(subscribed))
-                loops = 0
+                publish()
+                want = sorted(set(self.hl_coin_map) - self.hl_banned_coins)
+                log.info("[hyperliquid] сокет открыт (%s), подписываюсь на %d "
+                         "монет: %s", HL_WS, len(want), ", ".join(want))
                 while not self._stop.is_set():
                     try:
-                        msg = await ws.receive(timeout=30.0)
+                        msg = await ws.receive(timeout=HL_RECV_TICK)
                     except asyncio.TimeoutError:
-                        loops += 1
-                        if loops % 120 == 1:   # ~раз в час: новые HIP-3 маркеты
-                            if bare:
-                                async with aiohttp.ClientSession() as u_sess:
-                                    universe = (await self._hyperliquid_load_universe(
-                                        session=u_sess)) or universe
-                            else:
-                                universe = (await self._hyperliquid_load_universe()) or universe
-                        rebuild_map()
-                        try:
-                            await sync_subs()
-                        except Exception:
-                            pass
                         continue
-                    if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING,
+                    if msg.type in (aiohttp.WSMsgType.CLOSED,
+                                    aiohttp.WSMsgType.CLOSING,
                                     aiohttp.WSMsgType.ERROR):
                         raise_on_close(msg)
                     # любой входящий кадр — признак живой трубы (включая
@@ -1816,11 +3224,25 @@ class MarketFeed:
                         continue
                     await handle_text(msg.data)
             finally:
-                hb.cancel()
-                try:
-                    await hb
-                except (asyncio.CancelledError, Exception):
-                    pass
+                for t in (hb, sw):
+                    t.cancel()
+                for t in (hb, sw):
+                    try:
+                        await t
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                # Соединение умерло. Если это случилось сразу после отправки
+                # подписки и биржа её не подтвердила — очень похоже, что
+                # именно это имя HL и не принял. Один срыв не приговор
+                # (могла порваться сеть), но после HL_COIN_STRIKES монету
+                # отключаем: иначе слушатель вечно спотыкается об неё.
+                now = time.monotonic()
+                for coin, sent_at in list(sent.items()):
+                    if coin in acked or now - sent_at > HL_DEATH_WINDOW:
+                        continue
+                    self._hl_ban(coin, f"сокет умер через "
+                                       f"{now - sent_at:.1f}с после подписки")
+                publish()
 
     # -- Потиковый поток сделок (для графика) --------------------------------
     def set_hot_symbols(self, symbols: Iterable[str]):
@@ -1882,6 +3304,11 @@ class MarketFeed:
             "binance": ("binance-combined", self._binance_trade_combined, "binance"),
             "binance-raw": ("binance-raw", self._binance_trade_raw, "binance"),
             "bybit": ("bybit-publicTrade", self._bybit_trade_stream, "bybit"),
+            "dydx": ("dydx-v4_trades", self._dydx_trade_stream, "dydx"),
+            "kraken": ("kraken-trade", self._kraken_trade_stream, "kraken"),
+            "bitfinex": ("bitfinex-trades", self._bitfinex_trade_stream, "bitfinex"),
+            "hyperliquid": ("hyperliquid-trades",
+                            self._hyperliquid_trade_stream, "hyperliquid"),
         }
         sources = [available[x] for x in self.tick_sources if x in available]
         if not sources:
@@ -2143,6 +3570,278 @@ class MarketFeed:
                         st.hit()
                         self.prices[sym] = price
                         await self.on_trade(sym, price, qty, ts, side)
+            finally:
+                syncer.cancel()
+                self.tick_subscriptions = set()
+        return "closed" if got else "nodata"
+
+    # -- Тики с dYdX / Kraken / Bitfinex / Hyperliquid (источники CVD) --------
+    async def _dydx_trade_stream(self) -> str:
+        """dYdX v4: v4_trades по открытым графикам. Подписки с паузой —
+        индексер разрешает 2 подписки в секунду на пару канал+id."""
+        st = self.status["ticks"]
+        ticker_map = dydx_symbol_map(self.hot_symbols)
+        subscribed: set = set()
+        got = 0
+        gap = DYDX_SUB_GAP / 1000.0
+        async with self._session.ws_connect(DYDX_WS, heartbeat=30,
+                                            timeout=25) as ws:
+            st.up()
+            st.name = "ticks:dydx-v4_trades"
+            connected_at = time.time()
+
+            async def sync():
+                want = set(dydx_symbol_map(self.hot_symbols))
+                ticker_map.update(dydx_symbol_map(self.hot_symbols))
+                for ticker in sorted(want - subscribed):
+                    await ws.send_json({"type": "subscribe",
+                                        "channel": "v4_trades", "id": ticker})
+                    subscribed.add(ticker)
+                    self.tick_subscriptions = set(subscribed)
+                    await asyncio.sleep(gap)
+                for ticker in sorted(subscribed - want):
+                    await ws.send_json({"type": "unsubscribe",
+                                        "channel": "v4_trades", "id": ticker})
+                    subscribed.discard(ticker)
+                self.tick_subscriptions = set(subscribed)
+
+            syncer = self._start_syncer(ws, sync, 1.0, wake=self._hot_changed)
+            try:
+                while not self._stop.is_set():
+                    try:
+                        msg = await ws.receive(timeout=1.0)
+                    except asyncio.TimeoutError:
+                        if (not got and subscribed
+                                and time.time() - connected_at > self.NO_DATA_TIMEOUT):
+                            return "nodata"
+                        continue
+                    if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING,
+                                    aiohttp.WSMsgType.ERROR):
+                        break
+                    if msg.type != aiohttp.WSMsgType.TEXT:
+                        continue
+                    try:
+                        payload = json.loads(msg.data)
+                    except Exception:
+                        continue
+                    for sym, price, qty, ts, side in parse_dydx_trades(payload, ticker_map):
+                        got += 1
+                        st.hit()
+                        self.prices[sym] = price
+                        await self.on_trade(sym, price, qty, ts, side)
+            finally:
+                syncer.cancel()
+                self.tick_subscriptions = set()
+        return "closed" if got else "nodata"
+
+    async def _kraken_trade_stream(self) -> str:
+        """Kraken Futures: публичный фид trade. Пинг по таймеру — биржа рвёт
+        сокет после 60 с молчания."""
+        st = self.status["ticks"]
+        product_map = kraken_symbol_map(self.hot_symbols)
+        subscribed: set = set()
+        got = 0
+        last_ping = time.monotonic()
+        async with self._session.ws_connect(KRAKEN_WS, timeout=25) as ws:
+            st.up()
+            st.name = "ticks:kraken-trade"
+            connected_at = time.time()
+
+            async def sync():
+                product_map.update(kraken_symbol_map(self.hot_symbols))
+                for pid in sorted(set(kraken_symbol_map(self.hot_symbols)) - subscribed):
+                    await ws.send_json({"event": "subscribe", "feed": "trade",
+                                        "product_ids": [pid]})
+                    subscribed.add(pid)
+                    self.tick_subscriptions = set(subscribed)
+                for pid in sorted(subscribed - set(kraken_symbol_map(self.hot_symbols))):
+                    await ws.send_json({"event": "unsubscribe", "feed": "trade",
+                                        "product_ids": [pid]})
+                    subscribed.discard(pid)
+                self.tick_subscriptions = set(subscribed)
+
+            syncer = self._start_syncer(ws, sync, 1.0, wake=self._hot_changed)
+            try:
+                while not self._stop.is_set():
+                    if time.monotonic() - last_ping >= KRAKEN_PING_SEC:
+                        await ws.send_json({"event": "ping"})
+                        last_ping = time.monotonic()
+                    try:
+                        msg = await ws.receive(timeout=1.0)
+                    except asyncio.TimeoutError:
+                        if (not got and subscribed
+                                and time.time() - connected_at > self.NO_DATA_TIMEOUT):
+                            return "nodata"
+                        continue
+                    if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING,
+                                    aiohttp.WSMsgType.ERROR):
+                        break
+                    if msg.type != aiohttp.WSMsgType.TEXT:
+                        continue
+                    try:
+                        payload = json.loads(msg.data)
+                    except Exception:
+                        continue
+                    for sym, price, qty, ts, side in parse_kraken_trades(payload, product_map):
+                        got += 1
+                        st.hit()
+                        self.prices[sym] = price
+                        await self.on_trade(sym, price, qty, ts, side)
+            finally:
+                syncer.cancel()
+                self.tick_subscriptions = set()
+        return "closed" if got else "nodata"
+
+    async def _bitfinex_trade_stream(self) -> str:
+        """Bitfinex: публичный канал trades на каждый символ."""
+        st = self.status["ticks"]
+        symbol_map = bitfinex_symbol_map(self.hot_symbols)
+        chan_map: dict = {}
+        subscribed: set = set()
+        got = 0
+        last_ping = time.monotonic()
+        async with self._session.ws_connect(BITFINEX_WS, timeout=25) as ws:
+            st.up()
+            st.name = "ticks:bitfinex-trades"
+            connected_at = time.time()
+
+            async def sync():
+                symbol_map.update(bitfinex_symbol_map(self.hot_symbols))
+                for pair in sorted(set(symbol_map) - subscribed):
+                    await ws.send_json({"event": "subscribe", "channel": "trades",
+                                        "key": pair})
+                    subscribed.add(pair)
+                for pair in sorted(subscribed - set(symbol_map)):
+                    await ws.send_json({"event": "unsubscribe", "channel": "trades",
+                                        "key": pair})
+                    subscribed.discard(pair)
+                self.tick_subscriptions = set(subscribed)
+
+            syncer = self._start_syncer(ws, sync, 1.0, wake=self._hot_changed)
+            try:
+                while not self._stop.is_set():
+                    if time.monotonic() - last_ping >= BITFINEX_PING_SEC:
+                        await ws.send_json({"event": "ping",
+                                            "cid": int(time.time() * 1000)})
+                        last_ping = time.monotonic()
+                    try:
+                        msg = await ws.receive(timeout=1.0)
+                    except asyncio.TimeoutError:
+                        if (not got and subscribed
+                                and time.time() - connected_at > self.NO_DATA_TIMEOUT):
+                            return "nodata"
+                        continue
+                    if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING,
+                                    aiohttp.WSMsgType.ERROR):
+                        break
+                    if msg.type != aiohttp.WSMsgType.TEXT:
+                        continue
+                    try:
+                        payload = json.loads(msg.data)
+                    except Exception:
+                        continue
+                    if isinstance(payload, dict):
+                        if payload.get("event") == "subscribed" \
+                                and payload.get("channel") == "trades":
+                            pair = str(payload.get("pair") or payload.get("key") or "")
+                            sym = symbol_map.get(pair)
+                            if sym and payload.get("chanId") is not None:
+                                chan_map[payload["chanId"]] = sym
+                        continue
+                    for sym, price, qty, ts, side in parse_bitfinex_trades(payload, chan_map):
+                        got += 1
+                        st.hit()
+                        self.prices[sym] = price
+                        await self.on_trade(sym, price, qty, ts, side)
+            finally:
+                syncer.cancel()
+                self.tick_subscriptions = set()
+        return "closed" if got else "nodata"
+
+    async def _hyperliquid_trade_stream(self) -> str:
+        """Hyperliquid: публичная лента trades. Ликвидаций в ней нет (замер
+        13.09.2026: 18144 сделки, ни одной с объектом liquidation), но
+        сторона тейкера есть — для CVD биржа годится.
+
+        Соединение живёт в своей сессии: биржа обрывает его по 60-секундному
+        молчанию, поэтому пинг уходит по таймеру независимо от потока.
+        """
+        st = self.status["ticks"]
+        universe = await self._hyperliquid_load_universe()
+        coin_map = hl_coin_map(self.hot_symbols, universe)
+        subscribed: set = set()
+        got = 0
+        last_ping = time.monotonic()
+        session, _own = self._hl_session()
+        async with session.ws_connect(HL_WS, timeout=25) as ws:
+            st.up()
+            st.name = "ticks:hyperliquid-trades"
+            connected_at = time.time()
+
+            async def sync():
+                want = set(hl_coin_map(self.hot_symbols, universe))
+                coin_map.update(hl_coin_map(self.hot_symbols, universe))
+                for coin in sorted(want - subscribed):
+                    await ws.send_json({"method": "subscribe",
+                                        "subscription": {"type": "trades",
+                                                         "coin": coin}})
+                    subscribed.add(coin)
+                    self.tick_subscriptions = set(subscribed)
+                    await asyncio.sleep(0.08)
+                for coin in sorted(subscribed - want):
+                    await ws.send_json({"method": "unsubscribe",
+                                        "subscription": {"type": "trades",
+                                                         "coin": coin}})
+                    subscribed.discard(coin)
+                self.tick_subscriptions = set(subscribed)
+
+            syncer = self._start_syncer(ws, sync, 1.0, wake=self._hot_changed)
+            try:
+                while not self._stop.is_set():
+                    if time.monotonic() - last_ping >= HL_PING_INTERVAL:
+                        await ws.send_json({"method": "ping"})
+                        last_ping = time.monotonic()
+                    try:
+                        msg = await ws.receive(timeout=1.0)
+                    except asyncio.TimeoutError:
+                        if (not got and subscribed
+                                and time.time() - connected_at > self.NO_DATA_TIMEOUT):
+                            return "nodata"
+                        continue
+                    if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING,
+                                    aiohttp.WSMsgType.ERROR):
+                        break
+                    if msg.type != aiohttp.WSMsgType.TEXT:
+                        continue
+                    try:
+                        payload = json.loads(msg.data)
+                    except Exception:
+                        continue
+                    if not isinstance(payload, dict) \
+                            or payload.get("channel") != "trades":
+                        continue
+                    data = payload.get("data") or {}
+                    coin = str((data.get("coin") or "")).upper()
+                    symbol = next((s for c, s in coin_map.items()
+                                   if str(c).upper() == coin), None)
+                    if not symbol:
+                        continue
+                    for row in data.get("trades") or []:
+                        if not isinstance(row, dict):
+                            continue
+                        try:
+                            price = float(row.get("px") or 0)
+                            qty = float(row.get("sz") or 0)
+                        except (TypeError, ValueError):
+                            continue
+                        if price <= 0 or qty <= 0:
+                            continue
+                        ts = float(row.get("time") or 0) / 1000.0 or time.time()
+                        got += 1
+                        st.hit()
+                        self.prices[symbol] = price
+                        await self.on_trade(symbol, price, qty, ts,
+                                            "SELL" if row.get("side") == "A" else "BUY")
             finally:
                 syncer.cancel()
                 self.tick_subscriptions = set()

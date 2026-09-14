@@ -16,6 +16,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -75,7 +76,9 @@ async def fake_hl(request):
             sub_log.append(coin)
             await ws.send_json({"channel": "trades", "data": [
                 {"coin": coin, "side": "A", "px": "50000", "sz": "0.1",
-                 "time": 1, "hash": "x",
+                 # время — как у живой биржи (мс от эпохи): старые сделки
+                 # слушатель считает срезом истории и в ленту не отдаёт
+                 "time": int(time.time() * 1000), "hash": "x",
                  "liquidation": {"liquidatedUser": "u"}}]})
             await ws.send_json({"channel": "subscriptionResponse",
                                 "data": {"method": "subscribe",

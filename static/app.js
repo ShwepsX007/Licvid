@@ -2432,41 +2432,73 @@
         return items;
     }
 
-    function shapeFeedRow(item) {
+    function shapeFeedKey(item) {
+        return item._kind + "_" + item.time;
+    }
+
+    function shapeFeedType(item) {
         const isCvd = item._kind === "cvd";
         const up = item.delta >= 0;
+        return {
+            isCvd: isCvd,
+            up: up,
+            typeClass: isCvd ? (up ? "badge-cvd-buy" : "badge-cvd-sell")
+                             : (up ? "badge-oi-up" : "badge-oi-down"),
+            typeLabel: isCvd
+                ? I18n.t(up ? "feed.cvd_buy" : "feed.cvd_sell")
+                : I18n.t(up ? "feed.oi_up" : "feed.oi_down"),
+            valClass: isCvd ? (up ? "cvd-buy-val" : "cvd-sell-val")
+                            : (up ? "oi-up-val" : "oi-down-val"),
+            sign: up ? "+" : "−",
+        };
+    }
+
+    function paintShapeFeedCells(tr, item) {
+        tr._feedItem = item;
+        tr.dataset.feedKey = shapeFeedKey(item);
+        tr.classList.toggle("feed-row-live", !!item.live);
+        const t = shapeFeedType(item);
+        let usdTd = tr.querySelector(".td-usd-amount");
+        if (!usdTd) {
+            const openTitle = I18n.t("feed.open_chart", { sym: pretty(item.symbol) });
+            const openTitleHtml = openTitle.replace(/"/g, "&quot;");
+            tr.innerHTML =
+                '<td class="td-time">' + I18n.time(item.timestamp) + "</td>" +
+                '<td class="td-coin"><button class="coin-link" type="button" data-symbol="' +
+                encodeURIComponent(item.symbol) + '" title="' + openTitleHtml +
+                '" aria-label="' + openTitleHtml + '">' +
+                "<strong>" + pretty(item.symbol) + "</strong><span class=\"coin-link-icon\">📈</span></button></td>" +
+                "<td></td>" +
+                '<td><span class="' + t.typeClass + '">' + t.typeLabel + "</span></td>" +
+                '<td class="td-usd-amount ' + t.valClass + '">' + t.sign + "$" + fmtUsdFull(item.usd) + "</td>" +
+                '<td class="td-price">' + fmtPrice(item.price) + "</td>";
+            return;
+        }
+        usdTd.className = "td-usd-amount " + t.valClass;
+        usdTd.textContent = t.sign + "$" + fmtUsdFull(item.usd);
+        const priceTd = tr.querySelector(".td-price");
+        if (priceTd) priceTd.textContent = fmtPrice(item.price);
+        const badge = tr.cells[3] ? tr.cells[3].querySelector("span") : null;
+        if (badge) {
+            badge.className = t.typeClass;
+            badge.textContent = t.typeLabel;
+        }
+    }
+
+    function shapeFeedRow(item) {
         const tr = document.createElement("tr");
-        tr.dataset.feedKey = item._kind + "_" + item.time;
-        if (item.live) tr.classList.add("feed-row-live");
-        const typeClass = isCvd ? (up ? "badge-cvd-buy" : "badge-cvd-sell")
-                                : (up ? "badge-oi-up" : "badge-oi-down");
-        const typeLabel = isCvd
-            ? I18n.t(up ? "feed.cvd_buy" : "feed.cvd_sell")
-            : I18n.t(up ? "feed.oi_up" : "feed.oi_down");
-        const valClass = isCvd ? (up ? "cvd-buy-val" : "cvd-sell-val")
-                               : (up ? "oi-up-val" : "oi-down-val");
-        const sign = up ? "+" : "−";
-        const openTitle = I18n.t("feed.open_chart", { sym: pretty(item.symbol) });
-        const openTitleHtml = openTitle.replace(/"/g, "&quot;");
-        tr.innerHTML =
-            '<td class="td-time">' + I18n.time(item.timestamp) + "</td>" +
-            '<td class="td-coin"><button class="coin-link" type="button" data-symbol="' +
-            encodeURIComponent(item.symbol) + '" title="' + openTitleHtml +
-            '" aria-label="' + openTitleHtml + '">' +
-            "<strong>" + pretty(item.symbol) + "</strong><span class=\"coin-link-icon\">📈</span></button></td>" +
-            "<td></td>" +
-            '<td><span class="' + typeClass + '">' + typeLabel + "</span></td>" +
-            '<td class="td-usd-amount ' + valClass + '">' + sign + "$" + fmtUsdFull(item.usd) + "</td>" +
-            '<td class="td-price">' + fmtPrice(item.price) + "</td>";
+        paintShapeFeedCells(tr, item);
         tr.addEventListener("click", () => {
-            const hit = hitFromFeedItem(item);
+            const it = tr._feedItem || item;
+            const hit = hitFromFeedItem(it);
             if (hit) {
                 applyFeedHighlight(hit, true);
                 pinShape(hit);
                 openShapeModal(hit.kind, hit);
             }
         });
-        bindFeedHover(tr, item);
+        tr.addEventListener("mouseenter", () => highlightFromFeed(tr._feedItem || item, false));
+        tr.addEventListener("mouseleave", () => highlightFromFeed(null, false));
         const coinBtn = tr.querySelector(".coin-link");
         if (coinBtn) {
             coinBtn.addEventListener("click", (e) => {
@@ -2477,17 +2509,56 @@
         return tr;
     }
 
+    function finishShapeFeed(field, n) {
+        feedCountEl.textContent = feedCountLabel(n);
+        if (feedEmptyEl) {
+            feedEmptyEl.textContent = I18n.t(field === "cvd" ? "feed.empty_cvd" : "feed.empty_oi");
+            feedEmptyEl.classList.toggle("hidden", n > 0);
+        }
+    }
+
     function rebuildShapeFeed(field) {
         const rows = shapeFeedItems(field);
         feedTbody.innerHTML = "";
         const frag = document.createDocumentFragment();
         rows.forEach((item) => frag.appendChild(shapeFeedRow(item)));
         feedTbody.appendChild(frag);
-        feedCountEl.textContent = feedCountLabel(rows.length);
-        if (feedEmptyEl) {
-            feedEmptyEl.textContent = I18n.t(field === "cvd" ? "feed.empty_cvd" : "feed.empty_oi");
-            feedEmptyEl.classList.toggle("hidden", rows.length > 0);
+        finishShapeFeed(field, rows.length);
+    }
+
+    // Тик не должен сносить DOM: иначе ховер срывается (mouseleave),
+    // подсветка мигает, закреп фигуры сбрасывается. Обновляем ячейки на месте.
+    function syncShapeFeed(field) {
+        if (!feedTbody) return;
+        const items = shapeFeedItems(field);
+        if (!feedTbody.children.length) {
+            rebuildShapeFeed(field);
+            return;
         }
+        const have = new Map();
+        Array.from(feedTbody.children).forEach((tr) => {
+            if (tr.dataset.feedKey) have.set(tr.dataset.feedKey, tr);
+        });
+        const keep = new Set();
+        const ordered = [];
+        for (let i = 0; i < items.length; i++) {
+            const item = items[i];
+            const key = shapeFeedKey(item);
+            keep.add(key);
+            let tr = have.get(key);
+            if (!tr) tr = shapeFeedRow(item);
+            else paintShapeFeedCells(tr, item);
+            ordered.push(tr);
+        }
+        Array.from(feedTbody.children).forEach((tr) => {
+            if (!keep.has(tr.dataset.feedKey)) feedTbody.removeChild(tr);
+        });
+        for (let i = 0; i < ordered.length; i++) {
+            if (feedTbody.children[i] !== ordered[i]) {
+                feedTbody.insertBefore(ordered[i], feedTbody.children[i] || null);
+            }
+        }
+        finishShapeFeed(field, items.length);
     }
 
     function rebuildFeed() {
@@ -2541,11 +2612,12 @@
 
     let shapeFeedTimer = null;
     function queueShapeFeed() {
-        if (state.feedTab === "liq") return;
+        if (state.feedTab !== "cvd" && state.feedTab !== "oi") return;
         if (shapeFeedTimer) return;
         shapeFeedTimer = setTimeout(() => {
             shapeFeedTimer = null;
-            if (state.feedTab !== "liq") rebuildFeed();
+            if (state.feedTab === "cvd") syncShapeFeed("cvd");
+            else if (state.feedTab === "oi") syncShapeFeed("oi");
         }, 400);
     }
 

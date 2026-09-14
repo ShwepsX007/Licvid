@@ -1913,19 +1913,31 @@ class MarketFeed:
         st = self.status["bybit"]
         async with self._session.ws_connect(BYBIT_WS, heartbeat=20, timeout=25) as ws:
             st.up()
-            subscribed = set()
+            subscribed: set = set()
+            # Bybit v5 отклоняет ВСЮ пачку, если хоть один символ невалиден.
+            # Ответ приходит асинхронно, поэтому отправляем подписки по одной и
+            # обновляем `subscribed` только в обработчике ответа. Невалидные
+            # символы (напр. кривые мемкоины) заносим в rejected, чтобы не
+            # бесконечно их переотправлять — их видно в /api/health.
+            rejected: set = set()
+            pending: dict = {}  # req_id → symbol
+            req_id = 0
 
             async def sync_subs():
+                nonlocal req_id
                 want = {to_bybit(s) for s in self.symbols}
-                new = sorted(want - subscribed)
-                for chunk in _chunks(new, 10):
+                for sym in sorted(want - subscribed - rejected - set(pending.values())):
+                    req_id += 1
+                    pending[req_id] = sym
                     await ws.send_json({"op": "subscribe",
-                                        "args": [f"allLiquidation.{s}" for s in chunk]})
-                    subscribed.update(chunk)
+                                        "args": [f"allLiquidation.{sym}"],
+                                        "req_id": req_id})
                     await asyncio.sleep(0.2)
 
             await sync_subs()
-            log.info("[bybit] подписка allLiquidation на %d символов", len(subscribed))
+            log.info("[bybit] подписка allLiquidation на %d символов "
+                     "(%d валидных, %d отклонено биржей)",
+                     len(self.symbols), len(subscribed), len(rejected))
             syncer = self._start_syncer(ws, sync_subs, 30.0)
             try:
                 async for msg in ws:
@@ -1937,9 +1949,19 @@ class MarketFeed:
                         payload = json.loads(msg.data)
                     except Exception:
                         continue
-                    if payload.get("op") == "subscribe" and not payload.get("success", True):
+                    if payload.get("op") == "subscribe":
+                        rid = payload.get("req_id")
+                        sym = pending.pop(rid, None) if rid else None
+                        if payload.get("success", True):
+                            if sym:
+                                subscribed.add(sym)
+                            continue
+                        # подписка отклонена
+                        if sym:
+                            rejected.add(sym)
                         st.last_error = str(payload.get("ret_msg"))[:200]
-                        log.warning("[bybit] отказ подписки: %s", st.last_error)
+                        log.warning("[bybit] отказ подписки на %s: %s",
+                                    sym or "?", st.last_error)
                         continue
                     for ev in parse_bybit_msg(payload):
                         await self._emit("bybit", ev["symbol"], ev["side"],
@@ -3695,6 +3717,9 @@ class MarketFeed:
         """Резерв: publicTrade.<SYMBOL> на Bybit."""
         st = self.status["ticks"]
         subscribed: set = set()
+        rejected: set = set()
+        pending: dict = {}
+        req_id = 0
         got = 0
         async with self._session.ws_connect(BYBIT_WS, heartbeat=20, timeout=25) as ws:
             st.up()
@@ -3703,12 +3728,18 @@ class MarketFeed:
             connected_at = time.time()
 
             async def sync():
+                nonlocal req_id
                 want = {to_bybit(x) for x in self.hot_symbols}
-                add, drop = want - subscribed, subscribed - want
-                for chunk in _chunks(sorted(add), 10):
+                # подписка: по одной, чтобы невалидный символ не убил пачку
+                for sym in sorted(want - subscribed - rejected - set(pending.values())):
+                    req_id += 1
+                    pending[req_id] = sym
                     await ws.send_json({"op": "subscribe",
-                                        "args": [f"publicTrade.{x}" for x in chunk]})
-                    subscribed.update(chunk)
+                                        "args": [f"publicTrade.{sym}"],
+                                        "req_id": req_id})
+                    await asyncio.sleep(0.1)
+                # отписка пачками — Bybit не отклоняет отписку
+                drop = subscribed - want
                 for chunk in _chunks(sorted(drop), 10):
                     await ws.send_json({"op": "unsubscribe",
                                         "args": [f"publicTrade.{x}" for x in chunk]})
@@ -3735,8 +3766,17 @@ class MarketFeed:
                     except Exception:
                         continue
                     if not str(payload.get("topic") or "").startswith("publicTrade"):
-                        if payload.get("success") is False:
-                            log.warning("[ticks] Bybit отказ: %s", payload.get("ret_msg"))
+                        if payload.get("op") == "subscribe":
+                            rid = payload.get("req_id")
+                            sym = pending.pop(rid, None) if rid else None
+                            if payload.get("success", True):
+                                if sym:
+                                    subscribed.add(sym)
+                            else:
+                                if sym:
+                                    rejected.add(sym)
+                                log.warning("[ticks] Bybit отказ подписки на %s: %s",
+                                            sym or "?", payload.get("ret_msg"))
                         continue
                     now = time.time()
                     for it in payload.get("data") or []:

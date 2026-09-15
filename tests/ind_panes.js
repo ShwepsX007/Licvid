@@ -135,8 +135,8 @@ function part2() {
     },
   };
   const names = ["IND_PANES", "indMoney", "indBarSpacing", "indGrid", "indVerticals",
-    "indPrepareCanvas", "indNoData", "indSetVal", "drawPaneLiq", "drawPaneCvd",
-    "drawPaneOi", "drawIndicatorPanes", "syncPaneVisibility"];
+    "indPrepareCanvas", "indCurve", "indNoData", "indSetVal", "drawPaneLiq",
+    "drawPaneCvd", "drawPaneOi", "drawIndicatorPanes", "syncPaneVisibility"];
   const code = names.map((n) =>
     grab(src, n === "IND_PANES" ? "const" : "function", n)).join("\n") +
     "\nreturn { IND_PANES, indMoney, drawPaneLiq, drawPaneCvd, drawPaneOi," +
@@ -170,6 +170,17 @@ function part2() {
   check("CVD: нулевая линия", rc.lines.length > 0);
   const cvdVal = $("ind-cvd-val").textContent;
   check("CVD: значение со знаком в шапке", /^[+−]\$/.test(cvdVal), cvdVal);
+
+  // --- полупрозрачные кривые «в моменте» (как линия OI) ---------------------
+  check("LIQ: кривая накопленного перевеса поверх столбиков",
+        rq.strokes.indexOf("rgba(255,209,102,0.85)") >= 0, JSON.stringify(rq.strokes));
+  check("LIQ: заливка под кривой", rq.fills.indexOf("rgba(255,209,102,0.08)") >= 0,
+        JSON.stringify(rq.fills));
+  check("CVD: кривая накопления поверх столбиков",
+        rc.strokes.indexOf("rgba(167,139,250,0.9)") >= 0, JSON.stringify(rc.strokes));
+  check("CVD: заливка под кривой", rc.fills.indexOf("rgba(167,139,250,0.10)") >= 0,
+        JSON.stringify(rc.fills));
+  check("CVD: заливка кривой отрисована", rc.fills.length > 0);
 
   // --- OI: линия -----------------------------------------------------------
   api.drawPaneOi();
@@ -283,6 +294,18 @@ async function part1() {
     check("кнопка «Слои» " + id, !!$$("#" + id));
   });
   check("крестики закрытия", !!$$("#ind-close-liq") && !!$$("#ind-close-cvd") && !!$$("#ind-close-oi"));
+  // Раскладка — в столбик (как в мобильной версии): в ряд окна ужимались
+  // и обрезали цифры шкалы.
+  const cssTxt = await new Promise((res, rej) => {
+    require("http").get(URL_BASE + "/static/style.css", (r) => {
+      let b = ""; r.on("data", (c) => (b += c)); r.on("end", () => res(b));
+    }).on("error", rej);
+  });
+  const cssRule = (cssTxt.match(/\.indicator-panes\s*\{[^}]*\}/) || [""])[0];
+  check("CSS: окна индикаторов в одну колонку", /grid-template-columns:\s*1fr/.test(cssRule),
+        cssRule.replace(/\s+/g, " ").slice(0, 120));
+  check("CSS: окна не растягиваются в ряд", !/repeat\(auto-fit/.test(cssRule),
+        cssRule.replace(/\s+/g, " ").slice(0, 120));
   check("заголовки локализованы (LIQ)", ($$("#ind-pane-liq .ind-title") || {}).textContent === "💥 LIQ");
 
   // клик по кнопке слоя прячет окно и гасит кнопку

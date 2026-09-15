@@ -5,7 +5,8 @@
  *   - прямоугольник: $100 — кит (тепловая заливка + подпись $100 цветом
  *     #1a1200), $50 — подписанный по стороне (циан), $1 — чип без подписи;
  *   - CVD: треугольники рисуются от $50/$200 (без масштаба минимум $1000);
- *   - OI: $2K — тир1 (r=9, подпись $2K), $600 — мини (r=6, без подписи);
+ *   - OI: $2K — тир1 (r=13.5, подпись $2K), $600 — мини (r=9, без подписи);
+ *     (геометрия шариков умножена на OI_BALL_SCALE=1.5)
  *   - лента: $100 — whale-строка, остальные — обычные.
  *  Плюс проверяем новые цвета swapped-фигур: рост — зелёный, падение — красный.
  *
@@ -225,13 +226,13 @@ async function main() {
   check("cvd sell labeled $200", hasText("$200", CVD_SELL_TEXT));
 
   // OI: тир1 от $1K вместо $1M
-  check("oi tier1 r=9", hasR(9), JSON.stringify(radii));
-  check("oi $2K green-dark 8px",
-    hasText("$2K", OI_UP_TEXT) && ofont("$2K", OI_UP_TEXT) === "8px",
+  check("oi tier1 r=13.5", hasR(13.5), JSON.stringify(radii));
+  check("oi $2K green-dark 12px",
+    hasText("$2K", OI_UP_TEXT) && ofont("$2K", OI_UP_TEXT) === "12px",
     ofont("$2K", OI_UP_TEXT));
   check("oi tier1 pale-green fill", balls.some((t) => t.fill === OI_UP_T1),
     JSON.stringify(balls.map((t) => t.fill)));
-  check("oi mini r=6", hasR(6));
+  check("oi mini r=9", hasR(9));
   check("oi mini unlabeled", !anyText("$600"));
   check("oi mini pale-red fill", balls.some((t) => t.fill === OI_DOWN_MINI));
 

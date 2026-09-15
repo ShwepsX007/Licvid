@@ -77,19 +77,6 @@ def money(v: Any) -> str:
     return f"{sign}${n:.0f}"
 
 
-def _num(v: Any) -> str:
-    """Цифра в моноширинном <code>, чтобы сумма читалась из абзаца."""
-    return f"<code>{money(v)}</code>"
-
-
-def _anum(v: Any) -> str:
-    try:
-        n = abs(float(v or 0))
-    except (TypeError, ValueError):
-        n = 0.0
-    return _num(n)
-
-
 def coin(sym: Any) -> str:
     s = str(sym or "").replace("-", "_")
     return (s.split("_")[0] or s).upper() or "—"
@@ -184,81 +171,138 @@ def _side_dot(longs: float, shorts: float) -> str:
     return "🔴" if longs >= shorts else "🟢"
 
 
-def _leaders(snap: dict, n: int = 5) -> str:
+def _mono(rows: List[List[tuple]], gap: str = "  ") -> str:
+    """Моноширинный блок «в два столбика»: ячейка — (текст, "l"|"r").
+
+    Telegram выравнивает столбики только в <pre>/<code>, поэтому таблицы
+    (биржи, монеты) уходят именно так: слева имя, справа цифры. Пустые
+    строки и пустые ячейки не печатаем — подпись к фото ограничена 1024.
+    """
+    rows = [r for r in rows if r and any((c[0] or "").strip() for c in r)]
+    if not rows:
+        return ""
+    ncol = max(len(r) for r in rows)
+    width = [0] * ncol
+    for r in rows:
+        for i, (txt, _a) in enumerate(r):
+            width[i] = max(width[i], len(txt))
+    lines = []
+    for r in rows:
+        cells = []
+        for i, (txt, align) in enumerate(r):
+            pad = " " * max(0, width[i] - len(txt))
+            cells.append((pad + txt) if align == "r" else (txt + pad))
+        lines.append(gap.join(cells).rstrip())
+    body = "\n".join(lines)
+    body = body.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return f"<pre><code>{body}</code></pre>"
+
+
+def _kpi_cells(snap: dict) -> List[str]:
+    """Правая колонка таблицы бирж: касса, лонги, шорты, кит.
+
+    Строк ровно четыре — по числу бирж в компактной таблице: каждая
+    цифра окна стоит напротив своей биржи, а не висит отдельным абзацем.
+    """
+    b = snap.get("biggest") or {}
+    cells = [
+        f"💥 {money(snap.get('total_usd'))} · {int(snap.get('count') or 0)} шт.",
+        f"🔴 лонги {money(snap.get('longs_usd'))}",
+        f"🟢 шорты {money(snap.get('shorts_usd'))}",
+    ]
+    if b:
+        mark = "🔴" if b.get("side") == "SELL" else "🟢"
+        cells.append(f"🐋 {coin(b.get('symbol'))} {money(b.get('usd'))}"
+                     f" · {exch(b.get('exchange'))} {mark}")
+    return cells
+
+
+def _kpi_line(snap: dict) -> str:
+    """Одна строка вместо таблицы — для вариантов, где биржи не первыми."""
+    return (f"💥 {money(snap.get('total_usd'))} · {int(snap.get('count') or 0)} шт."
+            f"   🔴 {money(snap.get('longs_usd'))}"
+            f"   🟢 {money(snap.get('shorts_usd'))}")
+
+
+def _ex_block(snap: dict, n: int = 4) -> str:
+    """Биржи слева, цифры окна справа — два столбика, как в терминале."""
+    items = list((snap.get("exchanges") or {}).items())[:n]
+    if not items:
+        return ""
+    right = _kpi_cells(snap)
+    rows = []
+    for i, (k, v) in enumerate(items):
+        rows.append([
+            (f"• {exch(k)}", "l"),
+            (money(v), "r"),
+            (right[i] if i < len(right) else "", "l"),
+        ])
+    return _mono(rows)
+
+
+def _metric_cell(snap: dict, sym: Any) -> str:
+    """Правая колонка монеты — одной короткой строкой: OI или CVD.
+
+    Показываем тот индикатор, который в этой монете сильнее по деньгам:
+    движение открытого интереса или перевес тейкер-дельты. Так строка
+    остаётся компактной (в терминале они живут в разных окнах).
+    """
+    payload = (snap.get("oi") or {}).get(sym) or {}
+    ch = (payload.get("changes") or {}).get("h4") or {}
+    oi_txt, oi_abs = "", None
+    if ch.get("usd") is not None:
+        try:
+            n = float(ch.get("usd"))
+        except (TypeError, ValueError):
+            n = None
+        if n is not None:
+            pct = ch.get("pct")
+            extra = f" ({pct:+.2f}%)" if isinstance(pct, (int, float)) else ""
+            oi_txt = f"📊 OI {'↑' if n >= 0 else '↓'}{money(abs(n))}{extra}"
+            oi_abs = abs(n)
+    cvd_txt, cvd_abs = "", None
+    cvd = (snap.get("cvd") or {}).get(sym)
+    if cvd is not None:
+        try:
+            v = float(cvd)
+        except (TypeError, ValueError):
+            v = None
+        if v is not None:
+            cvd_txt = (f"🌊 CVD {'🟢' if v >= 0 else '🔴'} "
+                       f"{'покупки' if v >= 0 else 'продажи'} {money(abs(v))}")
+            cvd_abs = abs(v)
+    if oi_txt and cvd_txt:
+        return oi_txt if oi_abs >= cvd_abs else cvd_txt
+    if oi_txt:
+        return oi_txt
+    if cvd_txt:
+        return cvd_txt
+    tot = payload.get("total_usd")
+    if tot:
+        return f"📊 OI {money(tot)}"
+    return ""
+
+
+def _coins_block(snap: dict, n: int = 5, header: str = "Монеты") -> str:
+    """Монеты-лидеры: слева ранг/монета/сумма, справа метрика (OI или CVD)."""
     coins = list(snap.get("top_coins") or [])[:n]
     if not coins:
         return "лидеров нет"
-    rows = []
+    rows: List[List[tuple]] = [[(header, "l")]]
     for i, c in enumerate(coins):
         mark = _MEDALS[i] if i < len(_MEDALS) else f"{i + 1}."
-        rows.append(
-            f"{mark} <b>{coin(c['symbol'])}</b>  {_num(c['usd'])}  "
-            f"{_side_dot(c['longs'], c['shorts'])}"
-        )
-    return "\n".join(rows)
-
-
-def _ex_lines(snap: dict, n: int = 4) -> str:
-    items = list((snap.get("exchanges") or {}).items())[:n]
-    if not items:
-        return "биржи молчали"
-    return "\n".join(f"• {exch(k)}  {_num(v)}" for k, v in items)
-
-
-def _ex_inline(snap: dict, n: int = 4) -> str:
-    items = list((snap.get("exchanges") or {}).items())[:n]
-    if not items:
-        return "биржи молчали"
-    return " · ".join(f"{exch(k)} {_num(v)}" for k, v in items)
-
-
-def _biggest(snap: dict) -> str:
-    b = snap.get("biggest") or {}
-    if not b:
-        return ""
-    side = "🔴 лонг" if b.get("side") == "SELL" else "🟢 шорт"
-    return (f"🐋 <b>{coin(b.get('symbol'))}</b>  {_num(b.get('usd'))}"
-            f"  ·  {exch(b.get('exchange'))}  ·  {side}")
-
-
-def _oi_line(snap: dict) -> str:
-    parts = []
-    for c in (snap.get("top_coins") or [])[:3]:
-        sym = c.get("symbol")
-        payload = (snap.get("oi") or {}).get(sym) or {}
-        ch = (payload.get("changes") or {}).get("h4") or {}
-        usd = ch.get("usd")
-        pct = ch.get("pct")
-        if usd is None:
-            tot = payload.get("total_usd")
-            if tot:
-                parts.append(f"{coin(sym)} {_num(tot)}")
-            continue
         try:
-            n = float(usd)
+            longs = float(c.get("longs") or 0)
+            shorts = float(c.get("shorts") or 0)
         except (TypeError, ValueError):
-            continue
-        arrow = "↑" if n >= 0 else "↓"
-        extra = f" ({pct:+.2f}%)" if isinstance(pct, (int, float)) else ""
-        parts.append(f"{coin(sym)} {arrow}{_anum(n)}{extra}")
-    return " · ".join(parts)
-
-
-def _cvd_line(snap: dict) -> str:
-    parts = []
-    for c in (snap.get("top_coins") or [])[:3]:
-        sym = c.get("symbol")
-        v = (snap.get("cvd") or {}).get(sym)
-        if v is None:
-            continue
-        try:
-            n = float(v)
-        except (TypeError, ValueError):
-            continue
-        side = "покупки" if n >= 0 else "продажи"
-        mark = "🟢" if n >= 0 else "🔴"
-        parts.append(f"{coin(sym)} {mark} {side} {_anum(n)}")
-    return " · ".join(parts)
+            longs = shorts = 0.0
+        rows.append([
+            (f"{mark} {coin(c.get('symbol'))}", "l"),
+            (money(c.get("usd")), "r"),
+            (_side_dot(longs, shorts), "l"),
+            (_metric_cell(snap, c.get("symbol")), "l"),
+        ])
+    return _mono(rows)
 
 
 def _pack(parts: List[str], tail: str, limit: int = CAPTION_LIMIT) -> str:
@@ -278,22 +322,20 @@ def _facts(snap: dict) -> dict:
     longs = float(snap.get("longs_usd") or 0)
     shorts = float(snap.get("shorts_usd") or 0)
     bemoji, btxt = _bias(longs, shorts)
-    oi = _oi_line(snap)
-    cvd = _cvd_line(snap)
     return {
         "h": h,
         "n": int(snap.get("count") or 0),
-        "total": _num(snap.get("total_usd")),
-        "longs": _num(longs),
-        "shorts": _num(shorts),
+        "total": money(snap.get("total_usd")),
+        "longs": money(longs),
+        "shorts": money(shorts),
         "bias_e": bemoji,
         "bias": btxt,
-        "leaders": _leaders(snap),
-        "ex": _ex_lines(snap),
-        "ex_in": _ex_inline(snap),
-        "big": _biggest(snap),
-        "oi": f"📊 OI  {oi}" if oi else "",
-        "cvd": f"🌊 CVD  {cvd}" if cvd else "",
+        "bias_line": f"{bemoji} {btxt} · окно {h}ч",
+        "kpi": _kpi_line(snap),
+        "ex": _ex_block(snap, 4),
+        "ex6": _ex_block(snap, 6),
+        "coins": _coins_block(snap, 5),
+        "coins8": _coins_block(snap, 8),
     }
 
 
@@ -347,10 +389,14 @@ def active_images(store=None) -> List[str]:
 def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = None,
                 site_url: str = "https://liqscope.online",
                 bot_url: str = "https://t.me/LiqScopeBot") -> str:
-    """Сводка: живая шапка + читаемые цифры. variant крутит и то и другое."""
+    """Сводка: живая шапка + компактные блоки в два столбика.
+
+    Компоновка — как в терминале: слева биржа/монета, справа цифры.
+    variant крутит и шапку, и порядок блоков (тексты не повторяются).
+    """
     import html as _html
     f = _facts(snap)
-    h, n = f["h"], f["n"]
+    h = f["h"]
     site = (site_url or "https://liqscope.online").rstrip("/")
     bot = (bot_url or "https://t.me/LiqScopeBot").rstrip("/")
     # ссылки прячем в слова: кликабельные, без голого URL в посте
@@ -358,112 +404,28 @@ def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = N
             f'🌐 <a href="{_html.escape(site, quote=True)}">liqscope.online</a> · '
             f'🤖 <a href="{_html.escape(bot, quote=True)}">бот</a>')
     heads = [x for x in (headlines or []) if x] or list(_headlines(h))
-    v = int(variant) % max(1, len(heads))
-    head = heads[v]
+    # шапку и компоновку крутим независимо: своя единственная шапка из админки
+    # не должна «замораживать» раскладку — блоки продолжают чередоваться
+    v = int(variant)
+    head = heads[v % max(1, len(heads))]
+
+    ex, ex6 = f["ex"], f["ex6"]
+    coins, coins8 = f["coins"], f["coins8"]
+    kpi, bias = f["kpi"], f["bias_line"]
 
     bodies = (
-        [  # 0 — KPI-карточка
-            f"💥  {f['total']}\n"
-            f"🔴  {f['longs']}  лонги\n"
-            f"🟢  {f['shorts']}  шорты\n"
-            f"{f['bias_e']}  {n} ликв. · {f['bias']}",
-            f"<b>Лидеры</b>\n{f['leaders']}",
-            f"🏛 {f['ex_in']}",
-            f['big'], f['oi'], f['cvd'],
-        ],
-        [  # 1 — рейтинг монет
-            f['leaders'],
-            f"итого  {f['total']}  из  {n}\n"
-            f"🔴 лонги  {f['longs']}\n"
-            f"🟢 шорты  {f['shorts']}\n"
-            f"{f['bias_e']} {f['bias']}",
-            f"🏛 {f['ex_in']}",
-            f['big'], f['oi'], f['cvd'],
-        ],
-        [  # 2 — терминальный лог
-            f"TOTAL  {f['total']}    N={n}\n"
-            f"LONG   {f['longs']}\n"
-            f"SHORT  {f['shorts']}\n"
-            f"{f['bias_e']} {f['bias']}",
-            f['leaders'],
-            f['ex'],
-            f['big'], f['oi'], f['cvd'],
-        ],
-        [  # 3 — кит первым
-            f['big'] or f"{f['bias_e']} {f['bias']}",
-            f"касса  {f['total']}  ·  {n} ликв.\n"
-            f"🔴 {f['longs']}    🟢 {f['shorts']}",
-            f"<b>Дальше по ленте</b>\n{f['leaders']}",
-            f"🏛 {f['ex_in']}",
-            f['oi'], f['cvd'],
-        ],
-        [  # 4 — биржи первыми
-            f['ex'],
-            f"💥 {f['total']}  ·  {n} шт.\n"
-            f"🔴 лонги  {f['longs']}\n"
-            f"🟢 шорты  {f['shorts']}",
-            f"<b>Монеты</b>\n{f['leaders']}",
-            f['big'], f['oi'], f['cvd'],
-        ],
-        [  # 5 — касса
-            f"касса  {f['total']}\n"
-            f"ударов  <code>{n}</code>\n"
-            f"🔴 {f['longs']}   🟢 {f['shorts']}\n"
-            f"{f['bias_e']} {f['bias']}",
-            f['leaders'],
-            f"🏛 {f['ex_in']}",
-            f['big'], f['oi'], f['cvd'],
-        ],
-        [  # 6 — табло
-            f"💥 {f['total']}\n"
-            f"🔴 лонги   {f['longs']}\n"
-            f"🟢 шорты   {f['shorts']}\n"
-            f"матчей     <code>{n}</code>",
-            f['leaders'],
-            f['ex'],
-            f['big'], f['oi'], f['cvd'],
-        ],
-        [  # 7 — вынесло
-            f"вынесло  {f['total']}\n"
-            f"🔴 {f['longs']}  лонги\n"
-            f"🟢 {f['shorts']}  шорты\n"
-            f"{f['bias_e']} {f['bias']}",
-            f"<b>Лидеры</b>\n{f['leaders']}",
-            f"🏛 {f['ex_in']}",
-            f['big'], f['oi'], f['cvd'],
-        ],
-        [  # 8 — температура
-            f"{f['bias_e']} {f['bias']}\n"
-            f"жар  {f['total']}  /  {n} ликв.",
-            f"🔴 лонги  {f['longs']}\n🟢 шорты  {f['shorts']}",
-            f['leaders'],
-            f"🏛 {f['ex_in']}",
-            f['big'], f['oi'], f['cvd'],
-        ],
-        [  # 9 — плитка
-            f"💥 {f['total']}\n"
-            f"🔴 {f['longs']}   🟢 {f['shorts']}   ·  {n} шт.\n"
-            f"{f['bias_e']} {f['bias']}",
-            f['leaders'],
-            f['ex'],
-            f['big'], f['oi'], f['cvd'],
-        ],
-        [  # 10 — сначала лидеры
-            f['leaders'],
-            f"итого  {f['total']}  в  {n} ликвидациях\n"
-            f"🔴 лонги  {f['longs']}\n"
-            f"🟢 шорты  {f['shorts']}",
-            f"🏛 {f['ex_in']}",
-            f['big'], f['oi'], f['cvd'],
-        ],
-        [  # 11 — брифинг
-            f"{f['bias_e']} {f['bias'].capitalize()}. "
-            f"Касса {f['total']}, {n} ударов.",
-            f"🔴 лонги  {f['longs']}\n🟢 шорты  {f['shorts']}",
-            f"<b>Лидеры</b>\n{f['leaders']}",
-            f"<b>Биржи</b>\n{f['ex']}",
-            f['big'], f['oi'], f['cvd'],
-        ],
+        [ex, kpi, coins],                 # 0 — биржи, цифры окна, монеты
+        [kpi, ex, coins, bias],           # 1 — цифры, таблицы, оценка
+        [ex6, coins],                     # 2 — шесть бирж
+        [ex, coins, bias],                # 3 — с оценкой рынка внизу
+        [coins, ex],                      # 4 — монеты первыми
+        [ex, coins, kpi],                 # 5 — касса строкой внизу
+        [kpi, coins, ex],                 # 6 — касса, монеты, биржи
+        [coins8, ex],                     # 7 — топ-8 монет
+        [ex, bias, coins],                # 8 — оценка между таблицами
+        [coins, ex, kpi],                 # 9 — монеты, биржи, касса
+        [kpi, bias, ex, coins],           # 10 — цифры и оценка сверху
+        [bias, ex, coins],                # 11 — с оценки рынка
     )
     parts = [head] + list(bodies[v % len(bodies)])
     return _pack(parts, tail)

@@ -885,7 +885,9 @@ async def build_channel_digest() -> dict:
     oi: Dict[str, dict] = {}
     cvd: Dict[str, float] = {}
     tracker = getattr(feed, "oi", None) if feed else None
-    for c in (preview.get("top_coins") or [])[:4]:
+    # шесть монет: в компактной сводке таблица «Монеты» — пять строк,
+    # и каждая должна получить свою метрику (OI или CVD)
+    for c in (preview.get("top_coins") or [])[:6]:
         sym = c.get("symbol")
         if not sym:
             continue

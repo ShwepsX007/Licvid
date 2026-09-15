@@ -1835,7 +1835,9 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
 
 /* --- Индикаторные окна (LIQ/CVD/OI) под графиком -------------------------
    Те же живые данные, что в кабинете «Алерты по объёму»: короткие окна
-   с сеткой и цифрами, выровнены по свечам основного графика. */
+   с сеткой и цифрами, выровнены по свечам основного графика.
+   Раскладка — в столбик, как в мобильной версии: в ряд на широком экране
+   окна получались узкими и обрезали цифры шкалы. */
 .layer-pop-sep {
     width: 1px;
     align-self: stretch;
@@ -1845,10 +1847,17 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
 .indicator-panes {
     flex-shrink: 0;
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    grid-template-columns: 1fr;
     gap: 6px;
     padding: 6px 10px 8px;
     background: var(--bg-dark);
+    /* Три окна в столбик выше, чем одна строка: если экран низкий,
+       область окон ужимается и скроллится, а не обрезается вместе
+       с графиком (у .chart-section overflow: hidden). */
+    min-height: 0;
+    max-height: 50%;
+    overflow-y: auto;
+    overscroll-behavior: contain;
 }
 .indicator-panes.all-hidden { display: none; }
 .ind-pane {
@@ -1890,6 +1899,12 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
 }
 .ind-close:hover { color: var(--text-primary); background: rgba(255, 255, 255, 0.06); }
 .ind-canvas-wrap { position: relative; height: 64px; }
+/* Низкое и широкое окно: три окна в столбик + график должны делиться
+   высотой, а не упираться в min-height графика. */
+@media (max-height: 780px) and (min-width: 901px) {
+    .chart-wrapper { min-height: 200px; }
+    .ind-canvas-wrap { height: 54px; }
+}
 .ind-canvas-wrap canvas {
     position: absolute;
     inset: 0;

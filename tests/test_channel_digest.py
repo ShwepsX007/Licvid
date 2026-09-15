@@ -37,7 +37,10 @@ class DigestTest(unittest.TestCase):
             "ETH_USDT": {"total_usd": 4e9,
                          "changes": {"h4": {"usd": 40_000_000, "pct": 1.02}}},
         }
-        self.cvd = {"BTC_USDT": -12_500_000, "ETH_USDT": 3_200_000}
+        # CVD и OI в жизни есть не по каждой монете: в правой колонке
+        # показывается тот индикатор, который по деньгам сильнее
+        self.cvd = {"BTC_USDT": -12_500_000, "ETH_USDT": 3_200_000,
+                    "SOL_USDT": -5_000_000}
 
     def test_collect_window_and_leaders(self):
         snap = collect_digest(self.events, now=self.now, oi=self.oi, cvd=self.cvd)
@@ -65,6 +68,36 @@ class DigestTest(unittest.TestCase):
             self.assertIn("OI", t)
             self.assertIn("<code>", t)
             self.assertTrue(any(ch in t for ch in "💥🔴🟢🐋📊🌊🏛🔥⚡🏆🌙🌡⏱❓📋📉📈"))
+
+    def test_compact_two_column_layout(self):
+        """Компактный пост: таблица бирж и монет — двумя столбиками в <pre>."""
+        snap = collect_digest(self.events, now=self.now, oi=self.oi, cvd=self.cvd)
+        t = render_post(snap, 0)
+        # выравнивать столбики Telegram умеет только в <pre><code>
+        self.assertIn("<pre><code>", t)
+        self.assertIn("</code></pre>", t)
+        self.assertIn("• Binance", t)
+        self.assertIn("шт.", t)             # касса и число ликвидаций в правой колонке
+        self.assertIn("🔴 лонги", t)
+        self.assertIn("🟢 шорты", t)
+        self.assertIn("🐋", t)              # кит строкой ниже таблицы
+        self.assertIn("Монеты", t)
+        self.assertIn("1️⃣", t)              # ранги монет
+        self.assertIn("📊 OI", t)
+        self.assertIn("🌊 CVD", t)          # CVD показываем там, где он сильнее OI
+        # голого URL вне <a> в посте нет (ссылки спрятаны в слова)
+        import re
+        stripped = re.sub(r"<a\s+href=\"[^\"]*\">.*?</a>", "", t, flags=re.S)
+        self.assertNotIn("http", stripped)
+        for i in range(VARIANT_COUNT):
+            self.assertIn("<pre><code>", render_post(snap, i))
+
+    def test_metric_picks_stronger_signal(self):
+        """Одна строка на монету: OI, если движение больше, иначе CVD."""
+        snap = collect_digest(self.events, now=self.now, oi=self.oi, cvd=self.cvd)
+        t = render_post(snap, 4)             # вариант, где монеты идут первыми
+        self.assertIn("📊 OI ↓$180.00M (-1.45%)", t)   # BTC: OI −180M > CVD −12.5M
+        self.assertIn("🌊 CVD 🔴 продажи $5.00M", t)   # SOL: CVD есть, OI нет
 
     def test_blogger_heads_are_alive(self):
         snap = collect_digest(self.events, now=self.now, oi=self.oi, cvd=self.cvd)

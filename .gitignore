@@ -8,3 +8,6 @@ env/
 # Рантайм-данные (срезы оборота для volAvg7d)
 data/
 *.tmp
+
+# Node: jsdom/ws для тестов интерфейса (npm install --no-save jsdom ws)
+node_modules/

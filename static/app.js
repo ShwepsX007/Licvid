@@ -1408,6 +1408,10 @@
     // крупняк — чуть больше и с более сильным свечением. Размер нарочно
     // сдержанный (потолок вдвое ниже прежнего): главную работу делает цвет.
     const OI_TIER_MIN = 1000000;
+    // Масштаб шариков: на прежних размерах цифры внутри не читались
+    // (мини r≈6, подписи 8px). Всё, что рисуем, умножаем на этот множитель —
+    // пропорции и формула вписывания текста остаются прежними.
+    const OI_BALL_SCALE = 1.5;
     const OI_TIER_STYLE = [
         null,   // 0 — мини
         { mult: 1.0,  font: 0, glow: 6  },   // $1M+
@@ -1427,7 +1431,8 @@
         const st = OI_TIER_STYLE[tier] || OI_TIER_STYLE[1];
         return {
             fill: "rgba(" + c[0] + "," + c[1] + "," + c[2] + ",0.95)",
-            ring: b.ring, text: b.text, glow: st.glow,
+            ring: b.ring, text: b.text,
+            glow: Math.round(st.glow * OI_BALL_SCALE),
         };
     }
 
@@ -1496,27 +1501,39 @@
             const abs = Math.abs(d);
             const tier = oiTier(abs, kvol);
             const val = fmtCompact(abs);
-            let r, fs = 0;
+            // Подбор размера считаем в «базовых» единицах (как раньше),
+            // а в конце умножаем геометрию на OI_BALL_SCALE — иначе подпись
+            // внутри шарика уходила в 6.5-8px и не читалась.
+            const s = OI_BALL_SCALE;
+            let rB = 0, fsB = 0;
             if (tier > 0) {
                 ctx.font = "bold 8px 'JetBrains Mono', monospace";
                 const tw8 = ctx.measureText(val).width;
                 if (tw8 <= 1.9 * 18 - 5) {
-                    r = Math.min(15, Math.max(9, (tw8 + 5) / 1.9));
+                    rB = Math.min(15, Math.max(9, (tw8 + 5) / 1.9));
                     const sizes = [8, 7, 6.5];
                     for (let f = 0; f < sizes.length; f++) {
                         ctx.font = "bold " + sizes[f] + "px 'JetBrains Mono', monospace";
-                        if (ctx.measureText(val).width <= 1.9 * r - 5) { fs = sizes[f]; break; }
+                        if (ctx.measureText(val).width <= 1.9 * rB - 5) { fsB = sizes[f]; break; }
                     }
                 }
             }
-            if (!fs) { r = 6; }
-            else if (tier >= 2) {
-                const st = OI_TIER_STYLE[tier];
-                fs = Math.min(10, fs + st.font);
+            let r, fs = 0;
+            if (!fsB) {
+                r = 6 * s;   // мелочь без подписи
+            } else {
+                if (tier >= 2) {
+                    const st = OI_TIER_STYLE[tier];
+                    fsB = Math.min(10, fsB + st.font);
+                    ctx.font = "bold " + fsB + "px 'JetBrains Mono', monospace";
+                    rB = Math.min(15, Math.max(rB * st.mult,
+                                               (ctx.measureText(val).width + 5) / 1.9));
+                }
+                fs = Math.round(fsB * s * 10) / 10;
+                r = rB * s;
                 ctx.font = "bold " + fs + "px 'JetBrains Mono', monospace";
-                r = Math.min(15, Math.max(r * st.mult, (ctx.measureText(val).width + 5) / 1.9));
             }
-            const gap = 10 + tier * 2;   // чем крупнее, тем дальше от свечи
+            const gap = (10 + tier * 2) * s;   // чем крупнее, тем дальше от свечи
             const cy = up ? yRef - gap - r : yRef + gap + r;
             if (x < -r || x > W + r || cy < -r || cy > H + r) continue;
 
@@ -3037,6 +3054,43 @@
         return { P: P, canvas: canvas, ctx: ctx, w: w, h: h };
     }
 
+    // Полупрозрачная кривая «в моменте» — как линия OI: точки по свечам,
+    // мягкая заливка под ней и точка последнего значения. Своя шкала
+    // (lo…hi считается по переданным точкам), поэтому кривая накопления
+    // спокойно живёт рядом со столбиками, у которых шкала своя.
+    function indCurve(ctx, w, h, pts, color, fill, symmetric) {
+        if (!pts || pts.length < 2) return false;
+        let lo = Infinity, hi = -Infinity;
+        pts.forEach((p) => { lo = Math.min(lo, p.v); hi = Math.max(hi, p.v); });
+        if (!isFinite(lo) || !isFinite(hi)) return false;
+        if (symmetric) {
+            const m = Math.max(Math.abs(lo), Math.abs(hi));
+            lo = -m; hi = m;
+        }
+        if (hi - lo < 1e-9) { hi = lo + 1; }
+        const pad = 8;
+        const yOf = (v) => h - pad - (h - 2 * pad) * (v - lo) / (hi - lo);
+        ctx.save();
+        ctx.beginPath();
+        pts.forEach((p, i) => {
+            if (!i) ctx.moveTo(p.x, yOf(p.v)); else ctx.lineTo(p.x, yOf(p.v));
+        });
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.4;
+        ctx.stroke();
+        // заливка под линией — «полупрозрачная», как на OI
+        const first = pts[0], last = pts[pts.length - 1];
+        ctx.lineTo(last.x, h); ctx.lineTo(first.x, h); ctx.closePath();
+        ctx.fillStyle = fill;
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(last.x, yOf(last.v), 2.4, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.restore();
+        return true;
+    }
+
     function indNoData(p, text) {
         p.ctx.save();
         p.ctx.fillStyle = "rgba(132,147,168,0.55)";
@@ -3109,6 +3163,11 @@
                 ctx.fillRect(pt.x - bw / 2, mid, bw, hh);
             }
         });
+        // Накопленный перевес за видимый диапазон: шорты (+), лонги (−).
+        // Полупрозрачная кривая «в моменте» — как линия OI.
+        let acc = 0;
+        const cum = pts.map((pt) => { acc += pt.S - pt.L; return { x: pt.x, v: acc }; });
+        indCurve(ctx, w, h, cum, "rgba(255,209,102,0.85)", "rgba(255,209,102,0.08)", true);
         // подписи краёв шкалы
         ctx.font = "9px 'JetBrains Mono', monospace";
         ctx.textAlign = "right";
@@ -3117,7 +3176,8 @@
         ctx.fillStyle = "rgba(255,42,95,0.8)";
         ctx.fillText("▼ " + indMoney(maxSide), w - 3, h - 8);
         indSetVal("liq", "Σ " + indMoney(totL + totS), "",
-                   "Лонги " + indMoney(totL) + " / шорты " + indMoney(totS));
+                   "Столбики: лонги " + indMoney(totL) + " / шорты " + indMoney(totS)
+                   + " · кривая: накопленный перевес " + indMoney(acc, true));
     }
 
     // CVD: гистограмма тейкер-дельты по свечам (зелёный — покупки, красный — продажи)
@@ -3157,8 +3217,14 @@
             const top = Math.min(y, y0), hh = Math.max(1, Math.abs(y - y0));
             ctx.fillRect(pt.x - bw / 2, top, bw, hh);
         });
+        // Накопленная дельта по видимым свечам — полупрозрачная кривая
+        // «в моменте», как линия OI: видно, куда рынок перевесил.
+        let acc = 0;
+        const cum = pts.map((pt) => { acc += pt.d; return { x: pt.x, v: acc }; });
+        indCurve(ctx, w, h, cum, "rgba(167,139,250,0.9)", "rgba(167,139,250,0.10)", true);
         indSetVal("cvd", indMoney(net, true), net >= 0 ? "pos" : "neg",
-                  "Сумма тейкер-дельты по видимым свечам");
+                  "Сумма тейкер-дельты по видимым свечам: " + indMoney(net, true)
+                  + " · кривая — накопление по свечам");
     }
 
     // OI: линия открытого интереса по свечам (золото) + дельта в шапке
@@ -3190,26 +3256,8 @@
         }
         indGrid(ctx, w, h, lo, hi);
         indVerticals(ctx, w, h, spacing);
-        const span = Math.max(1e-9, hi - lo);
-        const pad = 8;
-        const yOf = (v) => h - pad - (h - 2 * pad) * (v - lo) / span;
-        ctx.beginPath();
-        pts.forEach((pt, i) => {
-            if (!i) ctx.moveTo(pt.x, yOf(pt.v)); else ctx.lineTo(pt.x, yOf(pt.v));
-        });
-        ctx.strokeStyle = "#ffd54f";
-        ctx.lineWidth = 1;
-        ctx.stroke();
-        // мягкая подсветка под линией
-        const lastPt = pts[pts.length - 1];
-        ctx.lineTo(lastPt.x, h); ctx.lineTo(pts[0].x, h); ctx.closePath();
-        ctx.fillStyle = "rgba(255,213,79,0.07)";
-        ctx.fill();
-        // точка последнего значения
-        ctx.beginPath();
-        ctx.arc(lastPt.x, yOf(lastPt.v), 2, 0, Math.PI * 2);
-        ctx.fillStyle = "#ffd54f";
-        ctx.fill();
+        // линия OI + мягкая подсветка под ней (та же геометрия, что у CVD/LIQ)
+        indCurve(ctx, w, h, pts, "#ffd54f", "rgba(255,213,79,0.07)", false);
         const chg = last - first;
         indSetVal("oi", indMoney(chg, true), chg >= 0 ? "pos" : "neg",
                   "Изменение OI за видимый диапазон · сейчас " + indMoney(last));

@@ -48,6 +48,12 @@ def _datas(markup: dict) -> list:
     return [b.get("callback_data") for row in rows for b in row]
 
 
+def _strip_anchors(text: str) -> str:
+    """Убирает <a href="...">…</a> целиком — остаётся только видимый текст."""
+    import re
+    return re.sub(r"<a\s+href=\"[^\"]*\">.*?</a>", "", text, flags=re.S)
+
+
 @unittest.skipIf(not HAVE, "aiohttp/accounts")
 class BotMenuTest(unittest.TestCase):
     def setUp(self):
@@ -75,7 +81,7 @@ class BotMenuTest(unittest.TestCase):
         self.assertNotIn("cabinet", _datas(kb))
 
     def test_leaf_screens_use_reply_panel(self):
-        for data in ("cabinet", "stats", "health", "liq", "terminal"):
+        for data in ("cabinet", "stats", "health", "liq"):
             text, kb = self.bot._screen(self.user, data)
             rows = kb.get("keyboard") or []
             texts = [b.get("text") for row in rows for b in row]
@@ -83,8 +89,31 @@ class BotMenuTest(unittest.TestCase):
             self.assertTrue(any("Кабинет" in t for t in texts), data)
             self.assertNotIn("← Назад", texts)
             self.assertFalse(kb.get("inline_keyboard"), data)
-        text, _kb = self.bot._screen(self.user, "terminal")
-        self.assertIn("https://liqscope.online/terminal", text)
+
+    def test_terminal_screen_opens_site_directly(self):
+        """⚡ Терминал — сразу на /terminal: URL-кнопка, без лишнего звука."""
+        text, kb = self.bot._screen(self.user, "terminal")
+        rows = kb.get("inline_keyboard") or []
+        urls = [b.get("url") for row in rows for b in row if b.get("url")]
+        self.assertIn("https://liqscope.online/terminal", urls)
+        # текст прячет ссылку в слово, голого URL вне <a> нет
+        self.assertIn('<a href="https://liqscope.online/terminal"', text)
+        self.assertNotIn("https://", _strip_anchors(text))
+
+    def test_screens_hide_urls_in_clickable_words(self):
+        """Все ссылки в экранных уведомлениях спрятаны в кликабельные слова;
+        в конце каждого — красиво оформленная ссылка на сайт."""
+        screens = ("cabinet", "stats", "health", "liq", "terminal",
+                   "services", "nav:home", "help")
+        for data in screens:
+            text, _kb = self.bot._screen(self.user, data)
+            self.assertNotIn("https://", _strip_anchors(text), data)
+            self.assertIn('<a href="https://liqscope.online"', text, data)
+        # админские экраны тоже с футером
+        for data in ("admin", "users", "visits"):
+            text, _kb = self.bot._screen(self.admin, data)
+            self.assertNotIn("https://", _strip_anchors(text), data)
+            self.assertIn('<a href="https://liqscope.online"', text, data)
 
     def test_alerts_screen_from_services(self):
         text, kb = self.bot._screen(self.user, "svc:alerts")
@@ -235,6 +264,27 @@ class BotMenuTest(unittest.TestCase):
         sent = [p for m, p in calls if m == "sendMessage"][0]
         self.assertIn("Подписаться", str(sent.get("reply_markup")))
         self.assertNotIn("cabinet", _datas(sent.get("reply_markup")))
+
+    def test_channel_check_unavailable_does_not_lock_users(self):
+        """getChatMember падает (бот не админ канала) — меню не запирается."""
+        self.bot._channel_id_cfg = "-100111"
+        calls = []
+
+        async def fake(method, payload=None):
+            calls.append((method, payload or {}))
+            if method == "getChatMember":
+                return {"ok": False,
+                        "description": "Bad Request: chat not found"}
+            if method == "sendMessage":
+                return {"ok": True, "result": {"message_id": 6}}
+            return {"ok": True}
+
+        self.bot._call = fake  # type: ignore
+        asyncio.run(self.bot._cmd_start(2002, self.user, "/start"))
+        sent = [p for m, p in calls if m == "sendMessage"][0]
+        # вместо экрана «Сначала канал» — обычное приветствие с меню
+        self.assertNotIn("Подписаться", str(sent.get("reply_markup")))
+        self.assertIn("Привет", str(sent.get("text")))
 
     def test_check_callback_opens_menu_when_member(self):
         self.bot._channel_id_cfg = "-100111"
@@ -452,6 +502,121 @@ class BotMenuTest(unittest.TestCase):
         edits = [p for m, p in calls if m == "editMessageText"]
         self.assertEqual(len(edits), 2)
         self.assertTrue(str(edits[1]["text"]).endswith("\u200b"))
+
+    def test_liq_tape_is_big_rich_and_fits(self):
+        """Лента: максимум событий, время, биржи, суммы; влезает в лимит."""
+        import time as _time
+        now = _time.time()
+        events = []
+        for i in range(300):
+            events.append({
+                "symbol": ("BTC_USDT" if i % 3 == 0 else
+                           "ETH_USDT" if i % 3 == 1 else "SOL_USDT"),
+                "exchange": ("binance" if i % 2 == 0 else "bybit"),
+                "side": "SELL" if i % 4 else "BUY",
+                "usd": 1000 + i * 137.5,
+                "timestamp": now - i * 7,
+            })
+        self.bot.liqs_fn = lambda: list(events)
+        text = self.bot._liq_text()
+        self.assertIn("Лента ликвидаций", text)
+        self.assertIn("Binance", text)
+        self.assertIn("Bybit", text)
+        self.assertIn("BTC/USDT", text)
+        # времени и событий много: больше 40 строк ленты, а не 8
+        self.assertGreater(text.count("BTC/USDT") + text.count("ETH/USDT")
+                           + text.count("SOL/USDT"), 40)
+        self.assertRegex(text, r"\d{2}:\d{2}:\d{2}")
+        # всё сообщение вместе с HTML укладывается в лимит отправки
+        self.assertLessEqual(len(text), 3900)
+        # ссылка в конце спрятана в слово
+        self.assertIn('<a href="https://liqscope.online"', text)
+        self.assertNotIn("https://", _strip_anchors(text))
+
+    def test_liq_tape_empty(self):
+        self.bot.liqs_fn = lambda: []
+        text = self.bot._liq_text()
+        self.assertIn("Лента", text)
+        self.assertIn('<a href="https://liqscope.online"', text)
+
+    def test_poll_conflict_notifies_admins(self):
+        """409 Conflict: уведомление админам сразу, затем не чаще раза в ~30 мин."""
+        sent = []
+
+        async def fake_send(chat_id, text, markup=None, parse="HTML", silent=False):
+            sent.append((chat_id, text))
+            return len(sent)
+
+        self.bot.send = fake_send  # type: ignore
+        self.bot.running = True
+        res409 = {"ok": False, "error_code": 409,
+                  "description": "Conflict: terminated by other getUpdates request"}
+        sleep1 = asyncio.run(self.bot._poll_fail_step(res409))
+        self.assertEqual(sleep1, 0.5)          # конфликт: быстрые повторы
+        self.assertEqual([c for c, _t in sent], [1001])  # только админ
+        self.assertIn("Конфликт", sent[0][1])
+        self.assertIn("призрачного", sent[0][1])  # диагноз про старую копию
+        self.assertTrue(self.bot._conflict_mode)
+        # сразу повторно не спамим
+        asyncio.run(self.bot._poll_fail_step(res409))
+        self.assertEqual(len(sent), 1)
+        self.assertTrue(self.bot.running)
+        # через 30 минут напоминание приходит снова
+        self.bot._conflict_warned_at -= 2000
+        asyncio.run(self.bot._poll_fail_step(res409))
+        self.assertEqual(len(sent), 2)
+
+    def test_private_command_echo_deleted(self):
+        """Эхо команды/кнопки из лички вычищается — в чате живёт только меню."""
+        calls = []
+
+        async def noop_route(upd):
+            pass
+
+        async def fake_call(method, payload=None):
+            calls.append((method, payload or {}))
+            return {"ok": True}
+
+        self.bot._route_message = noop_route  # type: ignore
+        self.bot._call = fake_call  # type: ignore
+        asyncio.run(self.bot._on_update({
+            "message": {"message_id": 77,
+                        "chat": {"id": 1001, "type": "private"},
+                        "from": {"id": 1001},
+                        "text": "Плиты"},
+        }))
+        self.assertEqual(calls, [("deleteMessage",
+                                  {"chat_id": 1001, "message_id": 77})])
+
+    def test_poll_conflict_webhook_reason(self):
+        async def fake_send(chat_id, text, markup=None, parse="HTML", silent=False):
+            fake_send.text = text
+            return 1
+
+        self.bot.send = fake_send  # type: ignore
+        res = {"ok": False, "error_code": 409,
+               "description": "Conflict: can't use getUpdates while webhook is active"}
+        asyncio.run(self.bot._poll_fail_step(res))
+        self.assertIn("вебхук", getattr(fake_send, "text", ""))
+
+    def test_poll_unauthorized_stops_bot(self):
+        self.bot.running = True
+        res = {"ok": False, "error_code": 401, "description": "Unauthorized"}
+        sleep_s = asyncio.run(self.bot._poll_fail_step(res))
+        self.assertEqual(sleep_s, 0.0)
+        self.assertFalse(self.bot.running)
+
+    def test_poll_ordinary_error_keeps_polling(self):
+        self.bot.running = True
+        sleep_s = asyncio.run(self.bot._poll_fail_step(None))
+        self.assertEqual(sleep_s, 2.0)
+        self.assertTrue(self.bot.running)
+        self.assertEqual(self.bot._poll_fails, 1)
+
+    def test_admin_tg_ids(self):
+        self.assertEqual(self.store.admin_tg_ids(), [1001])
+        self.store.set_banned(self.admin["id"], True)
+        self.assertEqual(self.store.admin_tg_ids(), [])
 
 
 if __name__ == "__main__":

@@ -383,6 +383,14 @@ class Store:
         return {"total": total, "admins": admins, "banned": banned,
                 "active_24h": today, "new_24h": new_today}
 
+    def admin_tg_ids(self) -> List[int]:
+        """Telegram-id админов (не в бане) — для служебных уведомлений бота."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT tg_id FROM users WHERE is_admin=1 AND is_banned=0"
+            ).fetchall()
+        return [int(r["tg_id"]) for r in rows]
+
     # ----- sessions / nonces ----------------------------------------------
     def create_session(self, user_id: int, ip_hash: str = "", ua: str = "") -> str:
         token = secrets.token_urlsafe(32)

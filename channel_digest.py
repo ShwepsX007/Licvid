@@ -348,11 +348,15 @@ def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = N
                 site_url: str = "https://liqscope.online",
                 bot_url: str = "https://t.me/LiqScopeBot") -> str:
     """Сводка: живая шапка + читаемые цифры. variant крутит и то и другое."""
+    import html as _html
     f = _facts(snap)
     h, n = f["h"], f["n"]
     site = (site_url or "https://liqscope.online").rstrip("/")
     bot = (bot_url or "https://t.me/LiqScopeBot").rstrip("/")
-    tail = f"— <i>LiqScope</i>\n{site}\n{bot}"
+    # ссылки прячем в слова: кликабельные, без голого URL в посте
+    tail = (f"— <i>LiqScope</i>\n"
+            f'🌐 <a href="{_html.escape(site, quote=True)}">liqscope.online</a> · '
+            f'🤖 <a href="{_html.escape(bot, quote=True)}">бот</a>')
     heads = [x for x in (headlines or []) if x] or list(_headlines(h))
     v = int(variant) % max(1, len(heads))
     head = heads[v]

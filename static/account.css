@@ -66,6 +66,8 @@ a { color: inherit; text-decoration: none; }
 .btn-compact { padding: 7px 12px; font-size: 0.78rem; white-space: nowrap; }
 
 .wrap { max-width: 1080px; margin: 0 auto; padding: 36px 28px 60px; }
+/* кабинет тянется по ширине экрана — сервисам нужно место */
+body[data-page="cabinet"] .wrap { max-width: min(1600px, 96vw); }
 .page-title { font-size: clamp(1.6rem, 3vw, 2.2rem); font-weight: 800; letter-spacing: -0.3px; }
 .lead { color: var(--muted); margin-top: 8px; font-size: 0.95rem; line-height: 1.55; }
 
@@ -277,6 +279,31 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
 .al-bar { height: 3px; background: #1b2434; border-radius: 2px; margin-top: 10px; overflow: hidden; }
 .al-bar > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, #3d70ff, #00d6ff); }
 .al-meter.hot .al-bar > i { background: linear-gradient(90deg, #ff2a5f, #ffd54f); }
+/* бегущая кривая метрики: низкое окно, тонкая линия, сетка и цифры как на графике */
+.al-feeds {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 12px; margin-top: 6px;
+}
+.al-feed {
+    border: 1px solid var(--border); border-radius: 12px;
+    padding: 12px; background: rgba(10, 14, 24, 0.5);
+}
+.al-feed.on { border-color: rgba(0, 214, 255, 0.35); }
+.al-feed.hot { border-color: rgba(255, 42, 95, 0.55); box-shadow: 0 0 22px rgba(255, 42, 95, 0.15); }
+.al-spark-wrap {
+    position: relative; height: 44px; margin: 10px 0 4px;
+    border: 1px solid rgba(27, 36, 52, 0.7); border-radius: 8px;
+    background: linear-gradient(180deg, rgba(13, 18, 32, 0.35), rgba(7, 10, 16, 0.55));
+    overflow: hidden;
+}
+.al-spark { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.al-spark-max, .al-spark-min {
+    position: absolute; right: 6px;
+    font-family: var(--mono); font-size: 0.58rem; line-height: 1;
+    color: rgba(132, 147, 168, 0.9); pointer-events: none;
+}
+.al-spark-max { top: 4px; }
+.al-spark-min { bottom: 4px; }
 .al-grid {
     display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 16px; margin-top: 16px;
 }
@@ -298,13 +325,37 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
 }
 .al-tape {
     margin-top: 8px; font-family: var(--mono); font-size: 0.72rem;
-    max-height: 220px; overflow: auto; line-height: 1.55;
-    border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px;
+    max-height: 240px; overflow: auto; line-height: 1.5;
+    border: 1px solid var(--border); border-radius: 10px; padding: 6px 8px;
     background: rgba(7, 10, 16, 0.7);
 }
-.al-tape .row { display: flex; gap: 10px; border-bottom: 1px solid rgba(27,36,52,.4); padding: 4px 0; }
-.al-tape .t { color: var(--muted); min-width: 54px; }
-.al-tape .m { color: var(--cyan); min-width: 36px; }
+/* лента как в терминале: время · иконка · монета · сумма · порог/окно */
+.al-tape .row {
+    position: relative;
+    display: grid;
+    grid-template-columns: 56px 18px minmax(44px, auto) auto 1fr;
+    gap: 7px; align-items: center;
+    padding: 4px 6px 5px; border-bottom: 1px solid rgba(27,36,52,.35);
+    border-radius: 6px; overflow: hidden;
+}
+.al-tape .row:last-child { border-bottom: none; }
+.al-tape .row.hot { background: rgba(255, 42, 95, 0.08); }
+.al-tape .t { color: var(--muted); }
+.al-tape .m { text-align: center; }
+.al-tape .sym { font-weight: 800; letter-spacing: 0.3px; }
+.al-tape .val { font-weight: 800; white-space: nowrap; }
+.al-tape .val.gold { color: var(--gold); text-shadow: 0 0 12px rgba(255, 213, 79, 0.35); }
+.al-tape .val.pos { color: var(--green); text-shadow: 0 0 12px rgba(0, 230, 118, 0.3); }
+.al-tape .val.neg { color: var(--red); text-shadow: 0 0 12px rgba(255, 42, 95, 0.3); }
+.al-tape .thr { color: var(--muted); font-size: 0.92em; white-space: nowrap; }
+/* полоса накачки: насколько значение близко к порогу */
+.al-tape .tape-bar {
+    position: absolute; left: 0; bottom: 0; height: 2px;
+    width: var(--p, 0%);
+    background: linear-gradient(90deg, rgba(61,112,255,.75), rgba(0,214,255,.9));
+    border-radius: 2px;
+}
+.al-tape .row.hot .tape-bar { background: linear-gradient(90deg, #ff2a5f, #ffd54f); }
 .al-status { font-size: 0.75rem; color: var(--muted); min-height: 1.2em; }
 .al-status.ok { color: var(--green); }
 @media (max-width: 760px) {

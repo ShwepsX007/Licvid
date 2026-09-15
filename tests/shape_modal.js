@@ -123,6 +123,11 @@ async function main() {
       try {
         Object.defineProperty(win.navigator, "language", { value: "ru-RU", configurable: true });
       } catch (e) { /* ignore */ }
+      try {
+        win.localStorage.setItem("liqscope.devLayers", "1");
+        ["liqscope.liqEnabled", "liqscope.cvdEnabled", "liqscope.oiEnabled",
+         "liqscope.profileEnabled"].forEach((k) => win.localStorage.setItem(k, "1"));
+      } catch (e) { /* ignore */ }
       win.matchMedia = () => ({ matches: false, media: "", onchange: null,
         addListener() {}, removeListener() {}, addEventListener() {},
         removeEventListener() {}, dispatchEvent() { return false; } });

@@ -213,7 +213,8 @@ async function main() {
     titleAfterCoinClick = text("current-symbol-title");
   }
 
-  // 5) Переключатель профиля: есть кнопка, по клику меняет активное состояние
+  // 5) Переключатель профиля: есть кнопка, по умолчанию выключен,
+  //    по клику включается (и выключается обратно)
   const profileToggleBtn = q("profile-toggle");
   let profileToggleActive = null;
   if (profileToggleBtn) {
@@ -223,16 +224,19 @@ async function main() {
   }
   const profileToggleAfter = profileToggleBtn
     ? profileToggleBtn.classList.contains("active") : null;
+  // вернуть как было: профиль выключен
+  if (profileToggleBtn) profileToggleBtn.dispatchEvent(new win.MouseEvent("click", { bubbles: true }));
 
-  // 5b) Слои «Ликвидации» и «CVD»: кнопки есть, по умолчанию включены,
-  //     клик выключает (класс + localStorage), индикатор перевеса показывает ▲/▼
+  // 5b) Слои «Ликвидации» и «CVD»: кнопки есть, по умолчанию ВЫКЛЮЧЕНЫ,
+  //     клик включает (класс + localStorage), индикатор перевеса показывает ▲/▼
   const liqToggleBtn = q("liq-toggle");
   const cvdToggleBtn = q("cvd-toggle");
   const liqActiveBefore = liqToggleBtn ? liqToggleBtn.classList.contains("active") : null;
   const cvdActiveBefore = cvdToggleBtn ? cvdToggleBtn.classList.contains("active") : null;
+  const cvdStatOff = text("cvd-stat");     // при выключенном CVD индикатор пуст
   if (liqToggleBtn) liqToggleBtn.dispatchEvent(new win.MouseEvent("click", { bubbles: true }));
   if (cvdToggleBtn) cvdToggleBtn.dispatchEvent(new win.MouseEvent("click", { bubbles: true }));
-  await new Promise((r) => setTimeout(r, 100));
+  await new Promise((r) => setTimeout(r, 200));
   const liqActiveAfter = liqToggleBtn ? liqToggleBtn.classList.contains("active") : null;
   const cvdActiveAfter = cvdToggleBtn ? cvdToggleBtn.classList.contains("active") : null;
   let liqStore = null, cvdStore = null;
@@ -240,11 +244,7 @@ async function main() {
     liqStore = win.localStorage.getItem("liqscope.liqEnabled");
     cvdStore = win.localStorage.getItem("liqscope.cvdEnabled");
   } catch (e) { /* ignore */ }
-  const cvdStatOff = text("cvd-stat");     // при выключенном CVD индикатор пуст
-  // вернуть как было — другие проверки рисуют шарики
-  if (liqToggleBtn) liqToggleBtn.dispatchEvent(new win.MouseEvent("click", { bubbles: true }));
-  if (cvdToggleBtn) cvdToggleBtn.dispatchEvent(new win.MouseEvent("click", { bubbles: true }));
-  await new Promise((r) => setTimeout(r, 200));
+  // слои остаются включёнными — другие проверки рисуют шарики
   const cvdStat = text("cvd-stat");
 
   // 6) Лендинг: на / посадочная страница со ссылкой в терминал
@@ -390,12 +390,12 @@ async function main() {
     out.symCurrentLabelAfterCoin.indexOf(out.pickedCoin) !== -1 && // видна выбранная монета
     out.symDropdownClosedAfterPick &&       // после выбора список закрывается
     out.hasProfileToggle &&
-    out.profileToggleActive === true &&
-    out.profileToggleAfter === false &&
-    out.liqActiveBefore === true && out.cvdActiveBefore === true &&   // слои по умолчанию вкл
-    out.liqActiveAfter === false && out.cvdActiveAfter === false &&   // клик выключает
-    out.liqStore === "0" && out.cvdStore === "0" &&                   // состояние сохраняется
-    out.cvdStatOff === "" &&                                          // выкл — индикатор пуст
+    out.profileToggleActive === false &&                              // слои по умолчанию выкл
+    out.profileToggleAfter === true &&                                // клик включает
+    out.liqActiveBefore === false && out.cvdActiveBefore === false && // по умолчанию выкл
+    out.liqActiveAfter === true && out.cvdActiveAfter === true &&     // клик включает
+    out.liqStore === "1" && out.cvdStore === "1" &&                   // состояние сохраняется
+    /[▲▼]|CVD —/.test(String(out.cvdStatOff || "")) &&               // цифры живут отдельно от слоя
     /[▲▼]/.test(out.cvdStat) &&                                       // вкл — виден перевес
     !out.hasProfileSidebar &&
     out.hasChartToggle &&

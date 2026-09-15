@@ -30,12 +30,18 @@
         availableExchanges: [],
         customSymbols: [],
         soundEnabled: false,
-        profileEnabled: true,   // профиль ликвидаций по ценам (полосы на графике)
-        liqEnabled: true,       // шарики ликвидаций на графике
-        cvdEnabled: true,       // CVD-стрелки: перевес тейкер-покупок/продаж в свече
+        profileEnabled: false,  // профиль ликвидаций по ценам (полосы на графике)
+        liqEnabled: false,      // шарики ликвидаций на графике
+        cvdEnabled: false,      // CVD-стрелки: перевес тейкер-покупок/продаж в свече
         cvdBars: 0,
-        oiEnabled: true,        // OI-шарики: рост/падение открытого интереса за свечу
+        oiEnabled: false,       // OI-шарики: рост/падение открытого интереса за свечу
         oiBars: 0,
+        // индикаторные окна под графиком (те же данные, что в кабинете)
+        paneLiq: false,
+        paneCvd: false,
+        paneOi: false,
+        userLoggedIn: false,    // слои и окна доступны только зарегистрированным
+        layersAllowed: false,   // userLoggedIn || dev-обход для тестов
         symbols: [],
         details: {},
         prices: {},
@@ -767,6 +773,7 @@
         if (state.cvdEnabled) drawCvdTriangles(ctx);
         if (state.liqEnabled) drawLiqRects(ctx);
         drawFigures();   // фигуры теханализа — свой canvas поверх
+        drawIndicatorPanes();   // окна LIQ/CVD/OI под графиком
     }
 
     // --- Прямоугольники ликвидаций ---------------------------------------------
@@ -1398,13 +1405,14 @@
     };
     const OI_MAX_BALLS = 60;
     // Тиры OI по |Δ|: мелочь (<$1M × масштаб) — мини-значок без подписи,
-    // крупняк — больше, ярче и с сильным свечением.
+    // крупняк — чуть больше и с более сильным свечением. Размер нарочно
+    // сдержанный (потолок вдвое ниже прежнего): главную работу делает цвет.
     const OI_TIER_MIN = 1000000;
     const OI_TIER_STYLE = [
         null,   // 0 — мини
-        { mult: 1.0,  font: 0, glow: 8  },   // $1M+
-        { mult: 1.22, font: 1, glow: 12 },   // $5M+
-        { mult: 1.45, font: 2, glow: 16 },   // $20M+
+        { mult: 1.0,  font: 0, glow: 6  },   // $1M+
+        { mult: 1.10, font: 1, glow: 9 },    // $5M+
+        { mult: 1.20, font: 2, glow: 12 },   // $20M+
     ];
     function oiTier(abs, k) {
         k = k || 1;
@@ -1492,8 +1500,8 @@
             if (tier > 0) {
                 ctx.font = "bold 8px 'JetBrains Mono', monospace";
                 const tw8 = ctx.measureText(val).width;
-                if (tw8 <= 1.9 * 26 - 5) {
-                    r = Math.max(11, (tw8 + 5) / 1.9);
+                if (tw8 <= 1.9 * 18 - 5) {
+                    r = Math.min(15, Math.max(9, (tw8 + 5) / 1.9));
                     const sizes = [8, 7, 6.5];
                     for (let f = 0; f < sizes.length; f++) {
                         ctx.font = "bold " + sizes[f] + "px 'JetBrains Mono', monospace";
@@ -1506,7 +1514,7 @@
                 const st = OI_TIER_STYLE[tier];
                 fs = Math.min(10, fs + st.font);
                 ctx.font = "bold " + fs + "px 'JetBrains Mono', monospace";
-                r = Math.min(30, Math.max(r * st.mult, (ctx.measureText(val).width + 5) / 1.9));
+                r = Math.min(15, Math.max(r * st.mult, (ctx.measureText(val).width + 5) / 1.9));
             }
             const gap = 10 + tier * 2;   // чем крупнее, тем дальше от свечи
             const cy = up ? yRef - gap - r : yRef + gap + r;
@@ -2813,7 +2821,32 @@
     }
 
     // --- Слои графика: ликвидации / профиль / CVD ----------------------------
-    function setupLayerToggles() {
+    // По умолчанию при входе на график все слои выключены, а сами переключатели
+    // видны только зарегистрированным пользователям (авторизация сайта).
+    const LAYER_KEYS = ["profileEnabled", "liqEnabled", "cvdEnabled", "oiEnabled",
+                        "paneLiq", "paneCvd", "paneOi"];
+
+    async function applyAuthGate() {
+        let user = null;
+        try {
+            const r = await fetch("/api/auth/me", { credentials: "same-origin" });
+            const d = await r.json();
+            user = (d && d.user) || null;
+        } catch (e) { user = null; }
+        state.userLoggedIn = !!user;
+        // dev-обход для автотестов без Telegram-авторизации
+        let dev = false;
+        try { dev = localStorage.getItem("liqscope.devLayers") === "1"; } catch (e) { /* ignore */ }
+        state.layersAllowed = state.userLoggedIn || dev;
+        if (!state.layersAllowed) {
+            LAYER_KEYS.forEach((k) => { state[k] = false; });
+            const call = $("layer-call");
+            if (call) call.classList.add("hidden");
+        }
+        return state.layersAllowed;
+    }
+
+    function setupLayerToggles(allowed) {
         const defs = [
             { el: profileToggle, skey: "profileEnabled", store: "liqscope.profileEnabled",
               on: "chart.profile_on", off: "chart.profile_off" },
@@ -2823,23 +2856,36 @@
               on: "chart.cvd_on", off: "chart.cvd_off" },
             { el: $("oi-toggle"), skey: "oiEnabled", store: "liqscope.oiEnabled",
               on: "chart.oi_on", off: "chart.oi_off" },
+            // индикаторные окна под графиком — те же данные, что в кабинете
+            { el: $("pane-liq-toggle"), skey: "paneLiq", store: "liqscope.paneLiq",
+              on: "chart.pane_liq_on", off: "chart.pane_liq_off", pane: "liq" },
+            { el: $("pane-cvd-toggle"), skey: "paneCvd", store: "liqscope.paneCvd",
+              on: "chart.pane_cvd_on", off: "chart.pane_cvd_off", pane: "cvd" },
+            { el: $("pane-oi-toggle"), skey: "paneOi", store: "liqscope.paneOi",
+              on: "chart.pane_oi_on", off: "chart.pane_oi_off", pane: "oi" },
         ];
         defs.forEach((d) => {
             if (!d.el) return;
-            try {
-                const v = localStorage.getItem(d.store);
-                if (v === "0") state[d.skey] = false;
-                else if (v === "1") state[d.skey] = true;
-            } catch (e) { /* ignore */ }
+            if (allowed) {
+                try {
+                    const v = localStorage.getItem(d.store);
+                    if (v === "0") state[d.skey] = false;
+                    else if (v === "1") state[d.skey] = true;
+                } catch (e) { /* ignore */ }
+            } else {
+                state[d.skey] = false;
+            }
             const paint = () => {
                 d.el.classList.toggle("active", state[d.skey]);
                 d.el.title = I18n.t(state[d.skey] ? d.on : d.off);
+                if (d.pane) syncPaneVisibility(d.pane);
             };
             d.el.addEventListener("click", () => {
                 state[d.skey] = !state[d.skey];
                 try {
                     localStorage.setItem(d.store, state[d.skey] ? "1" : "0");
                 } catch (e) { /* ignore */ }
+                if (d.pane) syncPaneVisibility(d.pane);
                 if (d.skey === "liqEnabled" && !state.liqEnabled) {
                     // с прячущихся прямоугольников снимаем подсветку ленты и окно
                     pinHitKey = null;
@@ -2864,6 +2910,318 @@
             I18n.onChange(paint);
             paint();
         });
+    }
+
+    // --- Индикаторные окна под графиком (LIQ / CVD / OI) --------------------
+    // Те же живые данные, что в кабинете «Алерты по объёму»: короткие окна
+    // с прозрачной сеткой и цифрами. Выровнены по свечам основного графика
+    // (общий timeScale), листаются/зумятся вместе с ним.
+    const IND_PANES = {
+        liq: { canvas: "ind-canvas-liq", val: "ind-liq-val", pane: "ind-pane-liq",
+               skey: "paneLiq", toggle: "pane-liq-toggle", off: "chart.pane_liq_off" },
+        cvd: { canvas: "ind-canvas-cvd", val: "ind-cvd-val", pane: "ind-pane-cvd",
+               skey: "paneCvd", toggle: "pane-cvd-toggle", off: "chart.pane_cvd_off" },
+        oi:  { canvas: "ind-canvas-oi",  val: "ind-oi-val",  pane: "ind-pane-oi",
+               skey: "paneOi", toggle: "pane-oi-toggle", off: "chart.pane_oi_off" },
+    };
+
+    function syncPaneVisibility(kind) {
+        const P = IND_PANES[kind];
+        if (!P) return;
+        const el = $(P.pane);
+        if (el) el.classList.toggle("hidden", !state[P.skey]);
+        const box = $("indicator-panes");
+        if (box) {
+            const any = Object.keys(IND_PANES).some((k) => state[IND_PANES[k].skey]);
+            box.classList.toggle("all-hidden", !any);
+        }
+    }
+
+    function setupIndicatorPanes() {
+        // незарегистрированным окна не положены вовсе
+        if (!state.layersAllowed) {
+            const box = $("indicator-panes");
+            if (box) box.classList.add("all-hidden");
+            return;
+        }
+        Object.keys(IND_PANES).forEach((kind) => {
+            const P = IND_PANES[kind];
+            // крестик на окне = выключить соответствующую кнопку в «Слоях»
+            const btn = $("ind-close-" + kind);
+            if (btn) {
+                btn.addEventListener("click", () => {
+                    const tog = $(P.toggle);
+                    if (tog) tog.click();
+                });
+            }
+            syncPaneVisibility(kind);
+        });
+    }
+
+    // Подписи чисел в окнах: $1.2K / $3.4M… с плюсом, если надо
+    function indMoney(v, signed) {
+        const n = Number(v) || 0;
+        const s = signed ? (n >= 0 ? "+" : "−") : (n < 0 ? "−" : "");
+        return s + "$" + fmtUsdShort(Math.abs(n));
+    }
+
+    function indBarSpacing() {
+        // расстояние между свечами в px — из двух соседних видимых точек
+        const ts = chart.timeScale();
+        const cs = state.candles;
+        for (let i = 1; i < cs.length; i++) {
+            let x0 = null, x1 = null;
+            try {
+                x0 = ts.timeToCoordinate(cs[i - 1].time);
+                x1 = ts.timeToCoordinate(cs[i].time);
+            } catch (e) { return 6; }
+            if (x0 != null && x1 != null && x1 !== x0) {
+                return Math.max(3, Math.abs(x1 - x0));
+            }
+        }
+        return 6;
+    }
+
+    // Сетка и подписи шкалы, как на биржевом графике
+    function indGrid(ctx, w, h, lo, hi) {
+        ctx.save();
+        ctx.font = "9px 'JetBrains Mono', monospace";
+        ctx.textBaseline = "middle";
+        for (let i = 1; i <= 3; i++) {
+            const y = Math.round(h * i / 4) + 0.5;
+            ctx.strokeStyle = "rgba(132,147,168,0.13)";
+            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+            if (isFinite(lo) && isFinite(hi)) {
+                const val = hi - (hi - lo) * i / 4;
+                ctx.fillStyle = "rgba(132,147,168,0.75)";
+                ctx.textAlign = "right";
+                ctx.fillText(indMoney(val), w - 3, y - 5);
+            }
+        }
+        ctx.restore();
+    }
+
+    function indVerticals(ctx, w, h, spacing) {
+        const step = Math.max(1, Math.round(120 / spacing));
+        const ts = chart.timeScale();
+        const cs = state.candles;
+        ctx.save();
+        ctx.strokeStyle = "rgba(132,147,168,0.07)";
+        for (let i = 0; i < cs.length; i += step) {
+            let x = null;
+            try { x = ts.timeToCoordinate(cs[i].time); } catch (e) { break; }
+            if (x == null || x < 0 || x > w) continue;
+            ctx.beginPath();
+            ctx.moveTo(Math.round(x) + 0.5, 0);
+            ctx.lineTo(Math.round(x) + 0.5, h);
+            ctx.stroke();
+        }
+        ctx.restore();
+    }
+
+    function indPrepareCanvas(kind) {
+        const P = IND_PANES[kind];
+        const canvas = $(P.canvas);
+        if (!canvas || !state[P.skey]) return null;
+        const dpr = window.devicePixelRatio || 1;
+        const w = canvas.clientWidth || (canvas.parentElement || {}).clientWidth || 0;
+        const h = canvas.clientHeight || 64;
+        if (w < 10) return null;
+        const W = Math.round(w * dpr), H = Math.round(h * dpr);
+        if (canvas.width !== W || canvas.height !== H) {
+            canvas.width = W; canvas.height = H;
+        }
+        const ctx = canvas.getContext("2d");
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, w, h);
+        return { P: P, canvas: canvas, ctx: ctx, w: w, h: h };
+    }
+
+    function indNoData(p, text) {
+        p.ctx.save();
+        p.ctx.fillStyle = "rgba(132,147,168,0.55)";
+        p.ctx.font = "10px Inter, sans-serif";
+        p.ctx.textAlign = "center";
+        p.ctx.textBaseline = "middle";
+        p.ctx.fillText(text || "нет данных", p.w / 2, p.h / 2);
+        p.ctx.restore();
+    }
+
+    function indSetVal(kind, txt, cls, title) {
+        const el = $(IND_PANES[kind].val);
+        if (!el) return;
+        el.textContent = txt;
+        el.className = "ind-val" + (cls ? " " + cls : "");
+        if (title !== undefined) el.title = title;
+    }
+
+    // ЛИКВИДАЦИИ: столбики от середины — 🔴 вниз вынесли лонг, 🟢 вверх шорт
+    function drawPaneLiq() {
+        const p = indPrepareCanvas("liq");
+        if (!p) return;
+        const { ctx, w, h } = p;
+        const tfSec = state.timeframe * 60;
+        const bars = new Map();
+        visibleLiquidations().forEach((x) => {
+            const t = Math.floor(x.timestamp / tfSec) * tfSec;
+            const b = bars.get(t) || { long: 0, short: 0 };
+            if (x.side === "SELL") b.long += x.usd; else b.short += x.usd;
+            bars.set(t, b);
+        });
+        const ts = chart.timeScale();
+        const cs = state.candles;
+        const spacing = indBarSpacing();
+        indGrid(ctx, w, h, null, null);
+        indVerticals(ctx, w, h, spacing);
+        const bw = Math.max(1.5, Math.min(28, spacing - 1.5));
+        let maxSide = 0, totL = 0, totS = 0, seen = 0;
+        const pts = [];
+        cs.forEach((c) => {
+            const b = bars.get(Number(c.time));
+            let x = null;
+            try { x = ts.timeToCoordinate(c.time); } catch (e) { return; }
+            if (x == null || x < -40 || x > w + 40) return;
+            const L = b ? b.long : 0, S = b ? b.short : 0;
+            pts.push({ x: x, L: L, S: S });
+            maxSide = Math.max(maxSide, L, S);
+            totL += L; totS += S; seen++;
+        });
+        // нулевая линия посередине
+        const mid = Math.round(h / 2) + 0.5;
+        ctx.strokeStyle = "rgba(132,147,168,0.35)";
+        ctx.beginPath(); ctx.moveTo(0, mid); ctx.lineTo(w, mid); ctx.stroke();
+        if (!maxSide) {
+            indNoData(p);
+            indSetVal("liq", "Σ $0", "");
+            return;
+        }
+        const kTop = (h / 2 - 6) / maxSide;   // вверх — шорты
+        const kBot = (h / 2 - 6) / maxSide;   // вниз — лонги
+        pts.forEach((pt) => {
+            if (pt.S > 0) {
+                const hh = Math.max(1, pt.S * kTop);
+                ctx.fillStyle = "rgba(0,214,255,0.85)";
+                ctx.fillRect(pt.x - bw / 2, mid - hh, bw, hh);
+            }
+            if (pt.L > 0) {
+                const hh = Math.max(1, pt.L * kBot);
+                ctx.fillStyle = "rgba(255,42,95,0.85)";
+                ctx.fillRect(pt.x - bw / 2, mid, bw, hh);
+            }
+        });
+        // подписи краёв шкалы
+        ctx.font = "9px 'JetBrains Mono', monospace";
+        ctx.textAlign = "right";
+        ctx.fillStyle = "rgba(0,214,255,0.8)";
+        ctx.fillText("▲ " + indMoney(maxSide), w - 3, 8);
+        ctx.fillStyle = "rgba(255,42,95,0.8)";
+        ctx.fillText("▼ " + indMoney(maxSide), w - 3, h - 8);
+        indSetVal("liq", "Σ " + indMoney(totL + totS), "",
+                   "Лонги " + indMoney(totL) + " / шорты " + indMoney(totS));
+    }
+
+    // CVD: гистограмма тейкер-дельты по свечам (зелёный — покупки, красный — продажи)
+    function drawPaneCvd() {
+        const p = indPrepareCanvas("cvd");
+        if (!p) return;
+        const { ctx, w, h } = p;
+        const ts = chart.timeScale();
+        const cs = state.candles;
+        const spacing = indBarSpacing();
+        const bw = Math.max(1.5, Math.min(28, spacing - 1.5));
+        const pts = [];
+        let lo = 0, hi = 0, net = 0, has = false;
+        cs.forEach((c) => {
+            const d = Number(c.cvd);
+            let x = null;
+            try { x = ts.timeToCoordinate(c.time); } catch (e) { return; }
+            if (x == null || x < -40 || x > w + 40) return;
+            if (isFinite(d)) {
+                pts.push({ x: x, d: d });
+                lo = Math.min(lo, d); hi = Math.max(hi, d);
+                net += d; has = true;
+            }
+        });
+        indGrid(ctx, w, h, lo, hi);
+        indVerticals(ctx, w, h, spacing);
+        if (!has) { indNoData(p); indSetVal("cvd", "—", ""); return; }
+        const span = Math.max(1e-9, hi - lo);
+        const pad = 6;
+        const yOf = (v) => h - pad - (h - 2 * pad) * (v - lo) / span;
+        const y0 = Math.round(yOf(0)) + 0.5;
+        ctx.strokeStyle = "rgba(132,147,168,0.35)";
+        ctx.beginPath(); ctx.moveTo(0, y0); ctx.lineTo(w, y0); ctx.stroke();
+        pts.forEach((pt) => {
+            const y = yOf(pt.d);
+            ctx.fillStyle = pt.d >= 0 ? "rgba(0,230,118,0.8)" : "rgba(255,42,95,0.8)";
+            const top = Math.min(y, y0), hh = Math.max(1, Math.abs(y - y0));
+            ctx.fillRect(pt.x - bw / 2, top, bw, hh);
+        });
+        indSetVal("cvd", indMoney(net, true), net >= 0 ? "pos" : "neg",
+                  "Сумма тейкер-дельты по видимым свечам");
+    }
+
+    // OI: линия открытого интереса по свечам (золото) + дельта в шапке
+    function drawPaneOi() {
+        const p = indPrepareCanvas("oi");
+        if (!p) return;
+        const { ctx, w, h } = p;
+        const ts = chart.timeScale();
+        const cs = state.candles;
+        const spacing = indBarSpacing();
+        const pts = [];
+        let lo = Infinity, hi = -Infinity, first = NaN, last = NaN;
+        cs.forEach((c) => {
+            const v = Number(c.oi);
+            let x = null;
+            try { x = ts.timeToCoordinate(c.time); } catch (e) { return; }
+            if (x == null || x < -40 || x > w + 40) return;
+            if (!isFinite(v)) return;
+            pts.push({ x: x, v: v });
+            lo = Math.min(lo, v); hi = Math.max(hi, v);
+            if (!isFinite(first)) first = v;
+            last = v;
+        });
+        if (!pts.length) {
+            indGrid(ctx, w, h, null, null);
+            indNoData(p, "OI: нет данных по бирже");
+            indSetVal("oi", "—", "");
+            return;
+        }
+        indGrid(ctx, w, h, lo, hi);
+        indVerticals(ctx, w, h, spacing);
+        const span = Math.max(1e-9, hi - lo);
+        const pad = 8;
+        const yOf = (v) => h - pad - (h - 2 * pad) * (v - lo) / span;
+        ctx.beginPath();
+        pts.forEach((pt, i) => {
+            if (!i) ctx.moveTo(pt.x, yOf(pt.v)); else ctx.lineTo(pt.x, yOf(pt.v));
+        });
+        ctx.strokeStyle = "#ffd54f";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        // мягкая подсветка под линией
+        const lastPt = pts[pts.length - 1];
+        ctx.lineTo(lastPt.x, h); ctx.lineTo(pts[0].x, h); ctx.closePath();
+        ctx.fillStyle = "rgba(255,213,79,0.07)";
+        ctx.fill();
+        // точка последнего значения
+        ctx.beginPath();
+        ctx.arc(lastPt.x, yOf(lastPt.v), 2, 0, Math.PI * 2);
+        ctx.fillStyle = "#ffd54f";
+        ctx.fill();
+        const chg = last - first;
+        indSetVal("oi", indMoney(chg, true), chg >= 0 ? "pos" : "neg",
+                  "Изменение OI за видимый диапазон · сейчас " + indMoney(last));
+    }
+
+    function drawIndicatorPanes() {
+        if (!chart || !state.candles.length) return;
+        try {
+            if (state.paneLiq) drawPaneLiq();
+            if (state.paneCvd) drawPaneCvd();
+            if (state.paneOi) drawPaneOi();
+        } catch (e) { /* индикаторные окна не должны ломать график */ }
     }
 
     // --- Сворачивание графика (нужно на телефоне) ----------------------------
@@ -3765,8 +4123,15 @@
         fetchOI();
         setInterval(paintCvdBox, 15000);   // окно CVD медленно ползёт
         setInterval(renderTickIndicator, 1000);
-        setupLayerToggles();
-        setupLayerPop();   // попап кнопок слоёв по «☰ Слои»
+        // Слои по умолчанию выключены и доступны только зарегистрированным:
+        // сначала узнаём, кто смотрит график, потом вешаем переключатели.
+        applyAuthGate().then((allowed) => {
+            setupLayerToggles(allowed);
+            setupLayerPop();   // попап кнопок слоёв по «☰ Слои»
+            setupIndicatorPanes();   // окна LIQ/CVD/OI под графиком + крестики
+            updateMarkers();
+            queueRedraw();
+        });
         setupFeedTabs();   // эфир: ликвидации / CVD / OI
         setupExchHealth(); // выпадающий список бирж в шапке
         setupChartToggle();

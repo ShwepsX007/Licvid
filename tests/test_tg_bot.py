@@ -20,8 +20,11 @@ if "aiohttp" not in sys.modules:
         fake = types.ModuleType("aiohttp")
 
         class _TO:
-            def __init__(self, total=None):
+            # tg_bot задаёт и sock_connect/sock_read — заглушка обязана их принимать
+            def __init__(self, total=None, **kw):
                 self.total = total
+                for k, v in kw.items():
+                    setattr(self, k, v)
 
         class _CS:
             def __init__(self, *a, **k):
@@ -30,8 +33,13 @@ if "aiohttp" not in sys.modules:
             async def close(self):
                 return None
 
+        class _TCP:
+            def __init__(self, *a, **k):
+                pass
+
         fake.ClientTimeout = _TO
         fake.ClientSession = _CS
+        fake.TCPConnector = _TCP
         sys.modules["aiohttp"] = fake
 
 from accounts import Store  # noqa: E402

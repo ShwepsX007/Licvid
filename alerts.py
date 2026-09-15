@@ -444,6 +444,9 @@ def format_alert_html(hit: dict, site_url: str = "https://liqscope.online") -> s
     site = (site_url or "https://liqscope.online").rstrip("/")
     href = html.escape(f"{site}/terminal", quote=True)
     lines.append(f'<a href="{href}">посмотреть в терминале</a>')
+    lines.append("──────────────")
+    lines.append(f'🌐 <a href="{html.escape(site, quote=True)}">LiqScope</a>'
+                 " — живой поток ликвидаций")
     return "\n".join(lines)
 
 

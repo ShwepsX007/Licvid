@@ -277,6 +277,31 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
 .al-bar { height: 3px; background: #1b2434; border-radius: 2px; margin-top: 10px; overflow: hidden; }
 .al-bar > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, #3d70ff, #00d6ff); }
 .al-meter.hot .al-bar > i { background: linear-gradient(90deg, #ff2a5f, #ffd54f); }
+/* бегущая кривая метрики: низкое окно, тонкая линия, сетка и цифры как на графике */
+.al-feeds {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 12px; margin-top: 6px;
+}
+.al-feed {
+    border: 1px solid var(--border); border-radius: 12px;
+    padding: 12px; background: rgba(10, 14, 24, 0.5);
+}
+.al-feed.on { border-color: rgba(0, 214, 255, 0.35); }
+.al-feed.hot { border-color: rgba(255, 42, 95, 0.55); box-shadow: 0 0 22px rgba(255, 42, 95, 0.15); }
+.al-spark-wrap {
+    position: relative; height: 44px; margin: 10px 0 4px;
+    border: 1px solid rgba(27, 36, 52, 0.7); border-radius: 8px;
+    background: linear-gradient(180deg, rgba(13, 18, 32, 0.35), rgba(7, 10, 16, 0.55));
+    overflow: hidden;
+}
+.al-spark { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.al-spark-max, .al-spark-min {
+    position: absolute; right: 6px;
+    font-family: var(--mono); font-size: 0.58rem; line-height: 1;
+    color: rgba(132, 147, 168, 0.9); pointer-events: none;
+}
+.al-spark-max { top: 4px; }
+.al-spark-min { bottom: 4px; }
 .al-grid {
     display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 16px; margin-top: 16px;
 }

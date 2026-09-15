@@ -65,6 +65,7 @@ class TelegramBot:
         self.digest_fn = digest_fn or (lambda: {})
         self._digest_task: Optional[asyncio.Task] = None
         self._ch_ok: Dict[int, float] = {}   # tg_id -> cache until
+        self._ch_warn_at = 0.0               # троттлинг варнинга про канал
         self._digest_err = ""
         self._last_tg_err = ""
         self.username = ""
@@ -78,6 +79,8 @@ class TelegramBot:
         self._wait_alert: Dict[int, str] = {}       # tg_id -> "coin"|"win"|"thr:liq"|...
         self._menu_msg: Dict[int, int] = {}         # chat_id -> последнее меню
         self.alerts_market_fn: Optional[Callable[[], Any]] = None
+        self._poll_fails = 0          # подряд неудачных getUpdates
+        self._conflict_warned = False # уже сообщили админам про 409
 
     @property
     def enabled(self) -> bool:
@@ -119,6 +122,66 @@ class TelegramBot:
             {"text": "liqscope", "url": self.site_url()},
             {"text": "бот", "url": self.bot_url()},
         ]]}
+
+    # ----- красивые ссылки ------------------------------------------------
+    def site_a(self, label: str, path: str = "") -> str:
+        """Ссылка, спрятанная в слово: <a href="...">label</a>."""
+        return f'<a href="{_esc(self.site_url(path))}">{_esc(label)}</a>'
+
+    def site_footer(self) -> str:
+        """Единый хвост уведомлений: сайт кликабельным словом."""
+        return (
+            "\n──────────────────────\n"
+            f"🌐 {self.site_a('LiqScope')} — живой поток ликвидаций"
+        )
+
+    EXCHANGE_NAMES = {
+        "binance": "Binance", "bybit": "Bybit", "okx": "OKX",
+        "gate": "Gate.io", "bitget": "Bitget", "htx": "HTX",
+        "bitmex": "BitMEX", "hyperliquid": "Hyperliquid", "dydx": "dYdX",
+        "kraken": "Kraken", "bitfinex": "Bitfinex", "oxa": "0xArchive",
+    }
+
+    @classmethod
+    def ex_name(cls, key: Any) -> str:
+        k = str(key or "").lower()
+        return cls.EXCHANGE_NAMES.get(k) or (str(key or "?").capitalize())
+
+    @staticmethod
+    def fmt_int(n: Any) -> str:
+        try:
+            return f"{int(round(float(n))):,}".replace(",", " ")
+        except (TypeError, ValueError):
+            return "0"
+
+    @staticmethod
+    def fmt_usd(n: Any) -> str:
+        try:
+            v = float(n)
+        except (TypeError, ValueError):
+            return "$0"
+        sign = "−" if v < 0 else ""
+        return f"{sign}${abs(v):,.0f}".replace(",", " ")
+
+    @staticmethod
+    def ago_label(sec: Any) -> str:
+        try:
+            s = max(0, int(float(sec)))
+        except (TypeError, ValueError):
+            return "—"
+        if s < 60:
+            return f"{s}с назад"
+        if s < 3600:
+            return f"{s // 60}м назад"
+        return f"{s // 3600}ч назад"
+
+    def _admin_tg_ids(self) -> List[int]:
+        try:
+            if self.store and hasattr(self.store, "admin_tg_ids"):
+                return [int(x) for x in self.store.admin_tg_ids()]
+        except Exception:
+            pass
+        return []
 
     def _reply_kb(self, user: Optional[dict] = None) -> dict:
         rows = [
@@ -172,7 +235,10 @@ class TelegramBot:
             return
         self.username = me["result"]["username"]
         self.bot_id = int(me["result"]["id"])
-        await self._call("deleteWebhook", {"drop_pending_updates": False})
+        dw = await self._call("deleteWebhook", {"drop_pending_updates": False})
+        if dw and not dw.get("ok"):
+            log.error("Не удалось снять вебхук: %s — getUpdates может конфликтовать",
+                      dw.get("description"))
         self.running = True
         self._task = asyncio.create_task(self._poll(), name="tg-bot")
         self._digest_task = asyncio.create_task(self._channel_loop(), name="tg-channel")
@@ -320,14 +386,14 @@ class TelegramBot:
                 or "").strip()
 
     def _join_text(self, extra: str = "") -> str:
-        url = _esc(self.channel_url)
+        link = f'<a href="{_esc(self.channel_url)}">📣 открыть канал</a>'
         more = f"\n\n{extra}" if extra else ""
         return (
             "<b>Сначала канал</b>\n"
             "Чтобы пользоваться ботом LiqScope, подпишитесь на канал со сводками "
             "ликвидаций, OI и CVD.\n\n"
             "Раз в 4 часа туда уходит разбор рынка: кто кого вынес и на каких биржах.\n"
-            f"Канал: {url}{more}"
+            f"Канал: {link}{more}"
         )
 
     def _kb_join(self) -> dict:
@@ -344,6 +410,15 @@ class TelegramBot:
         if until > time.time():
             return True
         res = await self._call("getChatMember", {"chat_id": cid, "user_id": int(tg_id)})
+        if not res or not res.get("ok"):
+            # Проверка недоступна (бот не админ канала, неверный id, отвал сети).
+            # Не запирать же всех в меню подписки: пропускаем, но громко.
+            if time.time() - self._ch_warn_at > 600:
+                self._ch_warn_at = time.time()
+                log.warning("getChatMember %s: %s — проверка канала отключена, "
+                            "пользователи пропускаются без неё",
+                            cid, (res or {}).get("description") or "нет ответа")
+            return True
         status = str(((res or {}).get("result") or {}).get("status") or "").lower()
         ok = status in ("creator", "administrator", "member", "restricted")
         if ok:
@@ -571,6 +646,7 @@ class TelegramBot:
         return {"ok": ok, "fail": fail, "total": len(ids)}
 
     async def _poll(self) -> None:
+        fails = 0
         while self.running:
             try:
                 res = await self._call("getUpdates", {
@@ -579,10 +655,17 @@ class TelegramBot:
                     "allowed_updates": ["message", "callback_query", "my_chat_member"],
                 })
                 if not res or not res.get("ok"):
-                    if res and res.get("description"):
-                        log.warning("getUpdates: %s", res.get("description"))
-                    await asyncio.sleep(2)
+                    sleep_s = await self._poll_fail_step(res)
+                    if not self.running:
+                        break
+                    fails += 1
+                    await asyncio.sleep(sleep_s)
                     continue
+                if fails:
+                    log.info("getUpdates снова в строю после %d сбоев — "
+                             "кнопки и команды опять отвечают", fails)
+                    fails = 0
+                    self._poll_fails = 0
                 for upd in res.get("result") or []:
                     self._offset = int(upd["update_id"]) + 1
                     try:
@@ -594,6 +677,63 @@ class TelegramBot:
             except Exception as e:
                 log.warning("poll: %s", e)
                 await asyncio.sleep(3)
+
+    async def _poll_fail_step(self, res: Optional[dict]) -> float:
+        """Классифицирует ошибку getUpdates, возвращает секунды до повтора.
+
+        Главное — 409 Conflict: этот же токен опрашивает другой процесс
+        (старый бот, вторая копия сервиса) либо у бота включён вебхук.
+        Уведомления при этом отправляются свободно, а кнопки и команды
+        бот не видит. Один раз сообщаем админам, чтобы причину было видно.
+        """
+        desc = str((res or {}).get("description") or "")
+        low = desc.lower()
+        try:
+            code = int((res or {}).get("error_code") or 0)
+        except (TypeError, ValueError):
+            code = 0
+        self._poll_fails += 1
+        if code == 401 or "unauthorized" in low:
+            log.error("Telegram отверг токен бота (401): %s — "
+                      "бот выключен, проверьте LIQSCOPE_BOT_TOKEN", desc or "нет описания")
+            self.running = False
+            return 0.0
+        if code == 409 or "conflict" in low:
+            if "webhook" in low:
+                reason = "у бота включён вебхук"
+            else:
+                reason = ("этот токен параллельно опрашивает другой процесс — "
+                          "старый бот или вторая копия сервиса")
+            if not self._conflict_warned:
+                self._conflict_warned = True
+                log.error("getUpdates 409: %s. Бот отправляет уведомления, но НЕ видит "
+                          "кнопки и команды. Уберите конфликтующий процесс (один токен — "
+                          "ровно один опрашиватель) и перезапустите сервис.", reason)
+                await self._notify_conflict(reason)
+            elif self._poll_fails % 30 == 0:
+                log.warning("конфликт getUpdates продолжается (%d сбоев): %s",
+                            self._poll_fails, desc)
+            return 1.0
+        if self._poll_fails % 10 == 1:
+            log.warning("getUpdates недоступен (%d сбоев подряд): %s",
+                        self._poll_fails, desc or "нет ответа")
+        return 2.0
+
+    async def _notify_conflict(self, reason: str) -> None:
+        """Одноразово предупреждаем админов: почему бот не отвечает на команды."""
+        text = (
+            "🚨 <b>Конфликт бота</b>\n"
+            "Я отправляю сигналы, но не вижу кнопки и команды: "
+            f"{reason}.\n\n"
+            "Один токен может опрашивать только один процесс. "
+            "Остановите старый бот (вторую копию) и перезапустите сервис — "
+            "меню снова заработает."
+        )
+        for tg_id in self._admin_tg_ids():
+            try:
+                await self.send(tg_id, text, parse="HTML")
+            except Exception as e:
+                log.warning("conflict notify %s: %s", tg_id, e)
 
     async def _on_update(self, upd: dict) -> None:
         if "my_chat_member" in upd:
@@ -683,8 +823,14 @@ class TelegramBot:
                 await self._cmd_admin(chat_id, user)
                 return
             if nav == "channel":
+                link = f'<a href="{_esc(self.channel_url)}">📣 канал LiqScope</a>'
                 await self.show_menu(
-                    chat_id, f"Канал:\n{self.channel_url}", self._reply_kb(user))
+                    chat_id,
+                    "<b>📣 Канал</b>\n"
+                    "Сводки ликвидаций, OI и CVD раз в 4 часа.\n"
+                    f"{link} — подписывайтесь, чтобы не пропустить."
+                    + self.site_footer(),
+                    self._reply_kb(user))
                 return
             if nav == "al":
                 await self.show_menu(chat_id, self._alert_text(user), self._alert_kb(user))
@@ -711,7 +857,7 @@ class TelegramBot:
         elif text.startswith("/alerts"):
             await self.show_menu(chat_id, self._alert_text(user), self._alert_kb(user))
         elif text.startswith("/terminal"):
-            await self.show_menu(chat_id, self._terminal_text(), self._reply_kb(user))
+            await self.show_menu(chat_id, self._terminal_text(), self._terminal_kb())
         elif text.startswith("/admin"):
             await self._cmd_admin(chat_id, user)
         elif text.startswith("/users"):
@@ -795,7 +941,8 @@ class TelegramBot:
         if data == "liq":
             return self._liq_text(), self._reply_kb(user)
         if data == "terminal":
-            return self._terminal_text(), self._reply_kb(user)
+            # сразу на сайт: большая URL-кнопка, сообщение уходит без звука
+            return self._terminal_text(), self._terminal_kb()
         if data == "services":
             return self._services_text(user), self._services_kb(user)
         if data.startswith("svc:"):
@@ -834,8 +981,8 @@ class TelegramBot:
                 await self.show_menu(
                     chat_id,
                     f"Вход подтверждён, {_esc(user['display_name'])}.\n"
-                    f"Вернитесь во вкладку браузера — кабинет откроется сам.\n\n"
-                    f"Сайт: {self.cabinet_url()}",
+                    "Вернитесь во вкладку браузера — кабинет откроется сам.\n"
+                    f"🌍 {self.site_a('открыть кабинет на сайте', '/cabinet')}",
                     self._reply_kb(user),
                 )
                 return
@@ -852,7 +999,8 @@ class TelegramBot:
             "Это бот <b>LiqScope</b> — живой терминал ликвидаций крипто-фьючерсов.\n"
             "Здесь тот же кабинет, что и на сайте: статистика рынка, биржи, сервисы.",
         )
-        extra = f"\nКабинет: {self.cabinet_url()}\nТерминал: {self.terminal_url()}"
+        extra = (f"\n🌍 {self.site_a('кабинет на сайте', '/cabinet')} · "
+                 f"{self.site_a('терминал', '/terminal')}")
         await self.show_menu(
             chat_id,
             f"Привет, {_esc(user.get('display_name') or 'друг')}!\n\n{welcome}{extra}",
@@ -1061,7 +1209,8 @@ class TelegramBot:
         return (
             f"<b>LiqScope</b>\n"
             f"Привет, {_esc(user['display_name'])}!\n"
-            f"Выберите раздел — кнопки внизу экрана."
+            "Выберите раздел — кнопки внизу экрана."
+            + self.site_footer()
         )
 
     def _help(self, user: dict) -> str:
@@ -1084,30 +1233,36 @@ class TelegramBot:
                 "/broadcast текст — рассылка всем",
                 "/digest — сводка ликвидаций в канал",
             ]
-        return "\n".join(lines)
+        return "\n".join(lines) + self.site_footer()
 
     def _cabinet_text(self, user: dict) -> str:
         un = f"@{_esc(user['username'])}" if user["username"] else "—"
-        link = f"\nСайт: {self.cabinet_url()}"
         have = self.store.user_service_slugs(user["id"])
         svc = ", ".join(have) if have else "пока не выбраны"
-        role = "администратор" if user["is_admin"] else "пользователь"
+        role = "👑 администратор" if user["is_admin"] else "👤 пользователь"
         return (
-            f"<b>Кабинет</b>\n"
+            f"<b>👤 Кабинет</b>\n"
             f"{_esc(user['display_name'])} · {un}\n"
             f"Telegram ID: <code>{user['tg_id']}</code>\n"
             f"Роль: {role}\n"
-            f"Сервисы: { _esc(svc) }"
-            f"{link}"
+            f"Сервисы: {_esc(svc)}\n"
+            f"🌍 {self.site_a('кабинет на сайте', '/cabinet')}"
+            + self.site_footer()
         )
 
     def _terminal_text(self) -> str:
-        return f"Терминал ликвидаций:\n{self.terminal_url()}"
+        return (
+            "<b>⚡ Терминал</b>\n"
+            "Живой поток ликвидаций с бирж: лента, свечи, кластеры.\n"
+            f"{self.site_a('liqscope.online/terminal', '/terminal')}\n\n"
+            "Кнопка ниже откроет его сразу, без звука."
+            + self.site_footer()
+        )
 
     def _terminal_kb(self) -> dict:
+        # URL-кнопка ведёт на терминал напрямую; сообщение шлётся без звука
         return {"inline_keyboard": [
-            [{"text": "⚡ Открыть", "url": self.terminal_url()}],
-            [{"text": "← Назад", "callback_data": "nav:home"}],
+            [{"text": "⚡ Открыть терминал", "url": self.terminal_url()}],
         ]}
 
     def _stats_text(self) -> str:
@@ -1130,51 +1285,111 @@ class TelegramBot:
             for c in top[:5]
         ) or "—"
         return (
-            f"<b>Рынок · 24ч</b>\n"
-            f"Ликвидации: {usd(st.get('total_usd_24h'))}\n"
-            f"Лонги {usd(st.get('longs_usd_24h'))} × шорты {usd(st.get('shorts_usd_24h'))}\n"
-            f"За час: {usd(st.get('total_usd_1h'))}\n"
-            f"Лидеры: { _esc(top_s) }"
+            f"<b>📊 Рынок · 24ч</b>\n"
+            f"💥 Ликвидации: <code>{usd(st.get('total_usd_24h'))}</code>\n"
+            f"🔴 Лонги <code>{usd(st.get('longs_usd_24h'))}</code> · "
+            f"🟢 шорты <code>{usd(st.get('shorts_usd_24h'))}</code>\n"
+            f"⏱ За час: <code>{usd(st.get('total_usd_1h'))}</code>\n"
+            f"🏆 Лидеры: {_esc(top_s)}"
+            + self.site_footer()
         )
 
     def _health_text(self) -> str:
         h = self.health_fn() or {}
         srcs = h.get("sources") or {}
         skip = {"prices", "ticks", "oxa"}
-        lines = ["<b>Биржи</b>"]
+        rows: List[str] = []
         live = 0
         total = 0
+        events_total = 0
         for name, s in sorted(srcs.items()):
             if name in skip or not isinstance(s, dict):
                 continue
             total += 1
-            ok = bool(s.get("connected"))
-            if ok:
+            ev = int(s.get("events") or 0)
+            events_total += ev
+            if s.get("connected"):
                 live += 1
-            mark = "●" if ok else "✕"
-            err = "" if ok else f" · {_esc((s.get('last_error') or 'нет связи')[:40])}"
-            lines.append(f"{mark} {_esc(name)}{err}")
-        if not total:
-            lines.append("сервер ещё собирает источники")
-        lines.append(f"\nВ эфире {live}/{total or '—'} · WS-клиентов {self.ws_clients_fn()}")
-        return "\n".join(lines)
+                fresh = ""
+                sec = s.get("seconds_since_event")
+                if isinstance(sec, (int, float)):
+                    fresh = f" · {self.ago_label(sec)}"
+                rows.append(
+                    f"🟢 <b>{_esc(self.ex_name(name))}</b> · "
+                    f"{self.fmt_int(ev)} событий{fresh}")
+            else:
+                err = _esc(str(s.get("last_error") or "нет связи")[:42])
+                rows.append(f"🔴 <b>{_esc(self.ex_name(name))}</b> · {err}")
+        lines = ["<b>🩺 Биржи · эфир</b>", ""]
+        lines.extend(rows or ["сервер ещё собирает источники"])
+        lines.append("")
+        lines.append(
+            f"📡 В эфире <b>{live}/{total or '—'}</b> · "
+            f"событий в памяти: {self.fmt_int(events_total)} · "
+            f"зрителей WS: {self.ws_clients_fn()}")
+        return "\n".join(lines) + self.site_footer()
 
-    def _liq_text(self) -> str:
-        rows = list(self.liqs_fn() or [])[-8:]
-        rows = list(reversed(rows))
+    def _liq_line(self, x: dict) -> str:
+        """Одна строка ленты: время, монета, биржа, сумма, сторона."""
+        try:
+            tm = time.strftime("%H:%M:%S",
+                               time.localtime(float(x.get("timestamp") or 0)))
+        except (TypeError, ValueError, OSError):
+            tm = "--:--:--"
+        sym = str(x.get("symbol") or "?").replace("_", "/")
+        mark = "🔴" if x.get("side") == "SELL" else "🟢"
+        return (f"{tm} {mark} {_esc(sym)}  "
+                f"{self.fmt_usd(x.get('usd'))}  {_esc(self.ex_name(x.get('exchange')))}")
+
+    def _liq_text(self, limit: int = 3600) -> str:
+        """Лента: максимум событий, которые влезают в сообщение Telegram."""
+        rows = list(self.liqs_fn() or [])
         if not rows:
-            return "Пока нет событий в памяти."
-        lines = ["<b>Последние ликвидации</b>"]
+            return ("<b>📰 Лента</b>\n"
+                    "Пока нет событий в памяти — биржевые потоки прогреваются."
+                    + self.site_footer())
+        rows.reverse()                                   # новые сверху
+        total = longs = shorts = 0.0
+        by_ex: Dict[str, int] = {}
         for x in rows:
-            side = "L" if x.get("side") == "SELL" else "S"
-            sym = str(x.get("symbol") or "").replace("_", "/")
             try:
                 usd = float(x.get("usd") or 0)
-                usd_s = f"${usd:,.0f}"
             except (TypeError, ValueError):
-                usd_s = "$?"
-            lines.append(f"{side} {_esc(sym)} {_esc(x.get('exchange'))} {usd_s}")
-        return "\n".join(lines)
+                usd = 0.0
+            total += usd
+            if x.get("side") == "SELL":
+                longs += usd
+            else:
+                shorts += usd
+            ex = str(x.get("exchange") or "?")
+            by_ex[ex] = by_ex.get(ex, 0) + 1
+        ex_bits = " · ".join(
+            f"{self.ex_name(k)} {v}"
+            for k, v in sorted(by_ex.items(), key=lambda kv: -kv[1])[:6])
+        head = (
+            "<b>📰 Лента ликвидаций</b>\n"
+            f"💥 <code>{self.fmt_int(len(rows))}</code> событий в памяти · "
+            f"касса {self.fmt_usd(total)}\n"
+            f"🔴 лонги {self.fmt_usd(longs)} · 🟢 шорты {self.fmt_usd(shorts)}\n"
+            f"🏛 {ex_bits}\n"
+            "⏱ время UTC · новые сверху\n"
+        )
+        body: List[str] = []
+        used = len(head)
+        shown = 0
+        for x in rows:
+            line = self._liq_line(x)
+            if used + len(line) + 1 > limit:
+                break
+            body.append(line)
+            used += len(line) + 1
+            shown += 1
+        rest = len(rows) - shown
+        tail = ""
+        if rest > 0:
+            tail = (f"\n… и ещё {self.fmt_int(rest)} — "
+                    f"{self.site_a('смотреть в терминале', '/terminal')}")
+        return head + "\n".join(body) + tail + self.site_footer()
 
     def _services_text(self, user: dict) -> str:
         have = set(self.store.user_service_slugs(user["id"]))
@@ -1193,7 +1408,7 @@ class TelegramBot:
             if s.get("description"):
                 lines.append(f"    {_esc(s['description'])}")
         lines.append("\nАлерты открывают настройки. Остальное — лист ожидания, пока «скоро».")
-        return "\n".join(lines)
+        return "\n".join(lines) + self.site_footer()
 
     def _users_text(self) -> str:
         data = self.store.list_users(limit=10)
@@ -1204,7 +1419,7 @@ class TelegramBot:
             ban = " ⛔" if u["is_banned"] else ""
             un = f" @{_esc(u['username'])}" if u["username"] else ""
             lines.append(f"· {_esc(u['display_name'])}{un} <code>{u['tg_id']}</code>{flag}{ban}")
-        return "\n".join(lines)
+        return "\n".join(lines) + self.site_footer()
 
     def _visits_text(self) -> str:
         v = self.store.visit_stats(7)
@@ -1215,21 +1430,21 @@ class TelegramBot:
         ]
         for d in v["days"][-7:]:
             lines.append(f"· {d['day']}: {d['views']} / {d['uniques']} уник.")
-        return "\n".join(lines)
+        return "\n".join(lines) + self.site_footer()
 
     def _admin_text(self) -> str:
         c = self.store.user_counts()
         v = self.store.visit_stats(1)
         h = self.health_fn() or {}
         live = h.get("live_exchanges") or []
-        link = f"\nПанель: {self.admin_url()}"
         return (
-            f"<b>Админка LiqScope</b>\n"
-            f"Пользователи: {c['total']} (за сутки {c['active_24h']}, новых {c['new_24h']})\n"
-            f"Визиты сегодня: {v['today_views']} / {v['today_uniques']} уник.\n"
-            f"Онлайн WS: {self.ws_clients_fn()}\n"
-            f"Биржи в эфире: {len(live)}"
-            f"{link}"
+            f"<b>★ Админка LiqScope</b>\n"
+            f"👥 Пользователи: {c['total']} (за сутки {c['active_24h']}, новых {c['new_24h']})\n"
+            f"👁 Визиты сегодня: {v['today_views']} / {v['today_uniques']} уник.\n"
+            f"📡 Онлайн WS: {self.ws_clients_fn()}\n"
+            f"🩺 Биржи в эфире: {len(live)}\n"
+            f"🛠 {self.site_a('панель на сайте', '/admin')}"
+            + self.site_footer()
         )
 
     def _alert_cfg(self, user: dict) -> dict:
@@ -1259,7 +1474,7 @@ class TelegramBot:
             except Exception:
                 pass
         lines.append("\nКнопки ниже — метрика, монета, окно, порог. Сигнал приходит отдельным сообщением.")
-        return "\n".join(lines)
+        return "\n".join(lines) + self.site_footer()
 
     def _alert_kb(self, user: dict) -> dict:
         cfg = self._alert_cfg(user)

@@ -1126,7 +1126,8 @@ async def lifespan(app: FastAPI):
 
     tg_bot.health_fn = health_summary
     tg_bot.stats_fn = compute_stats
-    tg_bot.liqs_fn = lambda: list(LIQUIDATIONS)[-8:]
+    # Лента бота: как можно больше событий — текст сам упрётся в лимит Telegram
+    tg_bot.liqs_fn = lambda: list(LIQUIDATIONS)[-400:]
     tg_bot.ws_clients_fn = lambda: len(hub.clients)
     tg_bot.digest_fn = build_channel_digest
     tg_bot.alerts_market_fn = alerts_market_snapshot

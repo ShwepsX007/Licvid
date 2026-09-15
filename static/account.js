@@ -373,14 +373,31 @@
         if (a.length > 36) a = a.slice(-36);
         alSparkBuf[key] = a;
     }
+    function alSparkGrid(w, h) {
+        // прозрачная сетка, как на биржевом графике
+        var g = "";
+        for (var gy = 1; gy <= 3; gy++) {
+            var y = (h * gy / 4).toFixed(1);
+            g += '<line x1="0" y1="' + y + '" x2="' + w + '" y2="' + y +
+                '" stroke="rgba(132,147,168,0.16)" stroke-width="1" vector-effect="non-scaling-stroke"/>';
+        }
+        for (var gx = 1; gx <= 4; gx++) {
+            var x = (w * gx / 5).toFixed(1);
+            g += '<line x1="' + x + '" y1="0" x2="' + x + '" y2="' + h +
+                '" stroke="rgba(132,147,168,0.09)" stroke-width="1" vector-effect="non-scaling-stroke"/>';
+        }
+        return g;
+    }
     function alSparkSvg(vals) {
         vals = (vals || []).map(Number).filter(function (x) { return isFinite(x); });
+        var w = 120, h = 30, p = 2;
+        var open = '<div class="al-spark-wrap">' +
+            '<svg class="al-spark" viewBox="0 0 ' + w + " " + h + '" preserveAspectRatio="none">';
         if (vals.length < 2) {
-            return '<svg class="al-spark" viewBox="0 0 120 28"></svg>';
+            return open + alSparkGrid(w, h) + "</svg></div>";
         }
         var min = Math.min.apply(null, vals), max = Math.max.apply(null, vals);
         if (max === min) max = min + 1;
-        var w = 120, h = 28, p = 2;
         var pts = vals.map(function (v, i) {
             var x = p + (w - 2 * p) * i / (vals.length - 1);
             var y = h - p - (h - 2 * p) * (v - min) / (max - min);
@@ -388,8 +405,14 @@
         }).join(" ");
         var up = vals[vals.length - 1] >= vals[0];
         var color = up ? "#00e676" : "#ff2a5f";
-        return '<svg class="al-spark" viewBox="0 0 120 28" preserveAspectRatio="none">' +
-            '<polyline fill="none" stroke="' + color + '" stroke-width="1.6" points="' + pts + '"/></svg>';
+        // тонкая линия (1px, не масштабируется растяжением) + шкала цифрами
+        return open + alSparkGrid(w, h) +
+            '<polyline fill="none" stroke="' + color +
+            '" stroke-width="1" vector-effect="non-scaling-stroke" points="' + pts + '"/>' +
+            "</svg>" +
+            '<span class="al-spark-max">' + alMoney(max) + "</span>" +
+            '<span class="al-spark-min">' + alMoney(min) + "</span>" +
+            "</div>";
     }
 
     function paintAlerts(d, bind) {
@@ -501,7 +524,7 @@
             if (feed) {
                 feed.classList.toggle("on", alHas(key));
                 feed.classList.toggle("hot", hot);
-                var spark = feed.querySelector(".al-spark");
+                var spark = feed.querySelector(".al-spark-wrap") || feed.querySelector(".al-spark");
                 if (spark) {
                     var wrap = document.createElement("div");
                     wrap.innerHTML = alSparkSvg(alSparkBuf[key]);

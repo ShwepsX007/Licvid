@@ -661,6 +661,23 @@ class BotMenuTest(unittest.TestCase):
         self.assertEqual(TelegramBot._flood_wait(
             {"ok": False, "error_code": 429, "parameters": {"retry_after": 600}}), 20.0)
 
+    def test_send_retry_on_bad_entities_strips_tags(self):
+        """Telegram не принял разметку — повтор уходит без тегов, а не с ними."""
+        bot = self.bot
+        bot._session = _Session([
+            {"ok": False, "error_code": 400,
+             "description": "Bad Request: can't parse entities: Unexpected end tag"},
+            {"ok": True, "result": {"message_id": 9}},
+        ])
+        res = asyncio.run(bot.send(2002, "<pre><code>• Binance  $78.46M</code></pre>"))
+        self.assertEqual(res, 9)
+        self.assertEqual(bot._session.posts, 2)
+
+    def test_strip_html_helper(self):
+        from tg_bot import _strip_html
+        self.assertEqual(_strip_html("<b>BTC</b> &amp; ETH"), "BTC & ETH")
+        self.assertEqual(_strip_html(""), "")
+
     def test_call_waits_and_retries_on_429(self):
         """429 больше не теряет нажатие: ждём retry_after и повторяем."""
         bot = self.bot

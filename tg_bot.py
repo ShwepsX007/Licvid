@@ -38,6 +38,13 @@ def normalize_public_url(url: str = "") -> str:
     return s
 
 
+def _strip_html(s: str) -> str:
+    """Текст без разметки — для повтора, когда Telegram отверг parse_mode."""
+    import html as _html
+    import re
+    return _html.unescape(re.sub(r"<[^>]+>", "", s or ""))
+
+
 def _esc(s: Any) -> str:
     return html.escape(str(s or ""), quote=False)
 
@@ -400,7 +407,10 @@ class TelegramBot:
             desc = str((res or {}).get("description") or "нет ответа")
             self._last_tg_err = desc
             if parse and ("parse entit" in desc.lower() or "can't find end of the entity" in desc.lower()):
+                # Разметку Telegram не принял: шлём тот же текст без тегов —
+                # иначе в чате окажутся голые <pre>/<code>/<b>.
                 body.pop("parse_mode", None)
+                body["text"] = _strip_html(body.get("text") or "")
                 res = await self._call("sendMessage", body)
                 if res and res.get("ok"):
                     mid = (res.get("result") or {}).get("message_id")

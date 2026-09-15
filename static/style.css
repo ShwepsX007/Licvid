@@ -2017,8 +2017,17 @@ body.chart-fullscreen { overflow: hidden; }
 
     .chart-wrapper { min-height: 240px; }
 
-    /* разделители блоков на телефоне скрыты — окна разводим отступом */
-    .indicator-panes { gap: 6px; }
+    /* Разделителей блоков на телефоне нет (пальцем высоты не потаскаешь):
+       главный график держит свои 240px, окна — фиксированные и скроллятся. */
+    .chart-stack.sized > .chart-wrapper { min-height: 240px; }
+    #ind-pane-liq, #ind-pane-cvd, #ind-pane-oi { --ind-h: 54px; }
+    .indicator-panes {
+        gap: 6px;
+        padding: 6px 10px 8px;
+        max-height: 50%;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+    }
 
 
     .chart-header {

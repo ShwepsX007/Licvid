@@ -160,7 +160,7 @@ function part2() {
     "indPrepareCanvas", "indCurve", "indNoData", "indSetVal", "drawPaneLiq",
     "drawPaneCvd", "drawPaneOi", "drawIndicatorPanes", "syncPaneVisibility",
     // регулировка высот блоков графика
-    "indKey", "paneVisible", "visiblePaneKinds", "visibleSplitCount", "stackHeight",
+    "indKey", "mobileLayout", "paneVisible", "visiblePaneKinds", "visibleSplitCount", "stackHeight",
     "chartMinHeight", "panesBudget", "maxCanvasFor", "normalizeHeights"];
   const scalars = ["IND_KINDS", "IND_DEFAULT_CANVAS_H", "IND_MIN_CANVAS_H",
     "IND_HEAD_H", "SPLIT_H", "STACK_SLACK_H"].map((n) =>
@@ -475,6 +475,13 @@ async function part1() {
   const canvasWrapRule = (cssTxt.match(/\.ind-canvas-wrap\s*\{[^}]*\}/) || [""])[0];
   check("CSS: полотно окна тянется по переменной", /height:\s*var\(--ind-h/.test(canvasWrapRule),
         canvasWrapRule);
+  // телефон: разделителей нет, окна вернулись к фиксированной высоте со скроллом
+  const mobileCss = cssTxt.slice(cssTxt.indexOf("@media (max-width: 900px)"));
+  check("CSS: на телефоне окна фиксированные и скроллятся",
+        /#ind-pane-liq,\s*#ind-pane-cvd,\s*#ind-pane-oi\s*\{\s*--ind-h:\s*54px/.test(mobileCss) &&
+        /\.indicator-panes\s*\{[^}]*overflow-y:\s*auto/.test(mobileCss));
+  check("CSS: на телефоне главный график держит свои 240px",
+        /\.chart-stack\.sized\s*>\s*\.chart-wrapper\s*\{\s*min-height:\s*240px/.test(mobileCss));
   check("заголовки локализованы (LIQ)", ($$("#ind-pane-liq .ind-title") || {}).textContent === "💥 LIQ");
 
   // клик по кнопке слоя прячет окно и гасит кнопку

@@ -2265,6 +2265,12 @@
     // напрямую, у главного графика — просто из остатка стека. Сузить можно
     // до нуля, включая главный график; двойной клик возвращает исходное.
 
+    // Телефон/планшет: разделители скрыты, окна держат фиксированную высоту
+    // и скроллятся внутри своей области — высоты там не считаем.
+    function mobileLayout() {
+        return !!(window.matchMedia && window.matchMedia("(max-width: 900px)").matches);
+    }
+
     function paneVisible(kind) {
         const P = IND_PANES[kind];
         return !!(P && state[P.skey]);
@@ -2307,7 +2313,7 @@
     // Сколько максимум может занять полотно окна, чтобы блоки не вылезли
     // за стек: главный график при этом считается сжимаемым до нуля.
     function maxCanvasFor(kind) {
-        if (!stackHeight()) return 900;    // раскладки нет (jsdom, скрытый блок)
+        if (!stackHeight() || mobileLayout()) return 900;   // раскладки нет (телефон, jsdom)
         let others = 0;
         visiblePaneKinds().forEach((k) => { if (k !== kind) others += LAYOUT[indKey(k)]; });
         return Math.max(IND_MIN_CANVAS_H, panesBudget() - others);
@@ -2317,7 +2323,7 @@
     // ещё одно) — ужимаем их пропорционально, сохраняя соотношение высот.
     function normalizeHeights() {
         if (!layoutReady) return;
-        if (!stackHeight()) return;
+        if (!stackHeight() || mobileLayout()) return;
         const kinds = visiblePaneKinds();
         if (!kinds.length) return;
         const avail = panesBudget();

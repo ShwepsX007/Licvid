@@ -214,14 +214,22 @@ class TelegramBot:
             log.warning("tg %s: %s", method, e)
             return None
 
+    @staticmethod
+    def _inline_markup(markup: Optional[dict]) -> dict:
+        """editMessageText принимает только inline. Пустой список снимает кнопки под текстом."""
+        rows = (markup or {}).get("inline_keyboard")
+        return {"inline_keyboard": rows if rows else []}
+
     async def send(self, chat_id: int, text: str, markup: Optional[dict] = None,
-                   parse: str = "HTML") -> Optional[int]:
+                   parse: str = "HTML", silent: bool = False) -> Optional[int]:
         body: Dict[str, Any] = {
             "chat_id": chat_id,
             "text": text[:3900],
             "parse_mode": parse,
             "disable_web_page_preview": True,
         }
+        if silent:
+            body["disable_notification"] = True
         if markup:
             body["reply_markup"] = markup
         res = await self._call("sendMessage", body)
@@ -283,27 +291,23 @@ class TelegramBot:
 
     async def show_menu(self, chat_id: int, text: str, markup: Optional[dict] = None,
                         old_id: Optional[int] = None) -> bool:
-        """Новое меню + удаление старого.
+        """Тот же экран: правим сообщение на месте, без пуша и удаления.
 
-        Telegram Web после editMessageText рисует кнопки, но клики по ним
-        не отправляет — они копятся и срабатывают пачкой после /start.
-        Свежее sendMessage кнопки всегда живые; старое сообщение убираем,
-        чтобы чат не засорялся.
+        ReplyKeyboard живёт у чата и не требует нового send. Инлайн под текстом
+        обновляется через editMessageText. Новое сообщение — только если править
+        нечего (первый /start или бот перезапустился); тогда без звука.
         """
-        new_id = await self.send(chat_id, text, markup)
+        chat_id = int(chat_id)
+        inline = self._inline_markup(markup)
+        mid = old_id or self._menu_msg.get(chat_id)
+        if mid:
+            if await self.edit(chat_id, int(mid), text, inline):
+                self._menu_msg[chat_id] = int(mid)
+                return True
+        new_id = await self.send(chat_id, text, markup, silent=True)
         if not new_id:
             return False
-        prev = self._menu_msg.get(int(chat_id))
-        self._menu_msg[int(chat_id)] = int(new_id)
-        seen = set()
-        for mid in (old_id, prev):
-            if not mid:
-                continue
-            mid = int(mid)
-            if mid == int(new_id) or mid in seen:
-                continue
-            seen.add(mid)
-            await self.drop_menu(chat_id, mid)
+        self._menu_msg[chat_id] = int(new_id)
         return True
 
     async def reply(self, chat_id: int, text: str, markup: Optional[dict] = None,

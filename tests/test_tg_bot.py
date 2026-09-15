@@ -1,4 +1,4 @@
-"""Меню бота: новое сообщение + удаление старого, везде «Назад»."""
+"""Меню бота: правка того же сообщения, панель внизу."""
 from __future__ import annotations
 
 import asyncio
@@ -121,7 +121,7 @@ class BotMenuTest(unittest.TestCase):
             self.assertTrue(any("Кабинет" in t for t in texts), data)
             self.assertTrue(kb.get("is_persistent"), data)
 
-    def test_callback_replaces_message(self):
+    def test_callback_edits_same_message(self):
         calls = []
 
         async def fake(method, payload=None):
@@ -140,29 +140,24 @@ class BotMenuTest(unittest.TestCase):
         asyncio.run(self.bot._on_callback(cb))
         methods = [m for m, _ in calls]
         self.assertIn("answerCallbackQuery", methods)
-        self.assertIn("sendMessage", methods)
-        self.assertIn("deleteMessage", methods)
-        self.assertNotIn("editMessageText", methods)
+        self.assertIn("editMessageText", methods)
+        self.assertNotIn("sendMessage", methods)
+        self.assertNotIn("deleteMessage", methods)
         self.assertLess(methods.index("answerCallbackQuery"),
-                        methods.index("sendMessage"))
+                        methods.index("editMessageText"))
         ans = [p for m, p in calls if m == "answerCallbackQuery"][0]
         self.assertNotIn("text", ans)
-        sent = [p for m, p in calls if m == "sendMessage"][0]
-        self.assertEqual(sent["chat_id"], 2002)
-        kb = sent.get("reply_markup") or {}
-        texts = [b.get("text") for row in (kb.get("keyboard") or []) for b in row]
-        self.assertTrue(any("Кабинет" in t for t in texts))
-        self.assertTrue(kb.get("is_persistent"))
-        deleted = [p for m, p in calls if m == "deleteMessage"][0]
-        self.assertEqual(deleted["message_id"], 77)
+        edited = [p for m, p in calls if m == "editMessageText"][0]
+        self.assertEqual(edited["chat_id"], 2002)
+        self.assertEqual(edited["message_id"], 77)
+        self.assertIn("Рынок", edited["text"])
+        self.assertEqual(self.bot._menu_msg[2002], 77)
 
-    def test_back_callback_sends_main_and_drops_old(self):
+    def test_back_callback_edits_home(self):
         calls = []
 
         async def fake(method, payload=None):
             calls.append((method, payload or {}))
-            if method == "sendMessage":
-                return {"ok": True, "result": {"message_id": 202}}
             return {"ok": True}
 
         self.bot._call = fake  # type: ignore
@@ -173,15 +168,14 @@ class BotMenuTest(unittest.TestCase):
             "message": {"message_id": 88, "chat": {"id": 2002}},
         }
         asyncio.run(self.bot._on_callback(cb))
-        sent = [p for m, p in calls if m == "sendMessage"][0]
-        kb = sent.get("reply_markup") or {}
-        texts = [b.get("text") for row in (kb.get("keyboard") or []) for b in row]
-        self.assertTrue(any("Кабинет" in t for t in texts))
-        self.assertTrue(kb.get("is_persistent"))
-        deleted = [p for m, p in calls if m == "deleteMessage"][0]
-        self.assertEqual(deleted["message_id"], 88)
+        self.assertNotIn("sendMessage", [m for m, _ in calls])
+        self.assertNotIn("deleteMessage", [m for m, _ in calls])
+        edited = [p for m, p in calls if m == "editMessageText"][0]
+        self.assertEqual(edited["message_id"], 88)
+        self.assertIn("кнопки внизу", edited["text"])
+        self.assertEqual((edited.get("reply_markup") or {}).get("inline_keyboard"), [])
 
-    def test_start_drops_previous_menu(self):
+    def test_start_edits_second_time(self):
         calls = []
         n = {"id": 10}
 
@@ -197,10 +191,12 @@ class BotMenuTest(unittest.TestCase):
         asyncio.run(self.bot._cmd_start(2002, user, "/start"))
         self.assertEqual(self.bot._menu_msg[2002], 11)
         asyncio.run(self.bot._cmd_start(2002, user, "/start"))
-        self.assertEqual(self.bot._menu_msg[2002], 12)
-        deleted = [p["message_id"] for m, p in calls if m == "deleteMessage"]
-        self.assertEqual(deleted, [11])
-        self.assertNotIn("editMessageText", [m for m, _ in calls])
+        self.assertEqual(self.bot._menu_msg[2002], 11)
+        self.assertEqual([m for m, _ in calls if m == "sendMessage"], ["sendMessage"])
+        self.assertIn("editMessageText", [m for m, _ in calls])
+        self.assertNotIn("deleteMessage", [m for m, _ in calls])
+        sent = [p for m, p in calls if m == "sendMessage"][0]
+        self.assertTrue(sent.get("disable_notification"))
 
     def test_menu_has_channel_url(self):
         kb = self.bot._reply_kb(self.user)
@@ -260,10 +256,10 @@ class BotMenuTest(unittest.TestCase):
             "message": {"message_id": 3, "chat": {"id": 2002}},
         }
         asyncio.run(self.bot._on_callback(cb))
-        sent = [p for m, p in calls if m == "sendMessage"][0]
-        kb = sent.get("reply_markup") or {}
-        texts = [b.get("text") for row in (kb.get("keyboard") or []) for b in row]
-        self.assertTrue(any("Кабинет" in t for t in texts))
+        self.assertNotIn("sendMessage", [m for m, _ in calls])
+        edited = [p for m, p in calls if m == "editMessageText"][0]
+        self.assertEqual(edited["message_id"], 3)
+        self.assertIn("LiqScope", edited["text"])
 
     def test_digest_without_channel_id_is_false(self):
         self.bot._channel_id_cfg = ""

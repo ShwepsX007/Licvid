@@ -357,6 +357,31 @@ class MailerTest(unittest.TestCase):
         finally:
             os.environ.pop("LIQSCOPE_MAIL_DIR", None)
 
+    def test_smtp_sender_defaults_to_login(self):
+        """Яндекс/Gmail требуют, чтобы отправитель совпадал с логином."""
+        keys = ("LIQSCOPE_SMTP_HOST", "LIQSCOPE_SMTP_USER", "LIQSCOPE_SMTP_FROM",
+                "LIQSCOPE_SMTP_PORT", "LIQSCOPE_SMTP_TLS", "LIQSCOPE_MAIL_DIR")
+        keep = {k: os.environ.get(k) for k in keys}
+        try:
+            for k in keys:
+                os.environ.pop(k, None)
+            os.environ["LIQSCOPE_SMTP_HOST"] = "smtp.yandex.ru"
+            os.environ["LIQSCOPE_SMTP_USER"] = "terarasa@yandex.ru"
+            m = build_mailer("https://liqscope.online")
+            self.assertTrue(m.enabled)
+            self.assertEqual(m.transport.sender, "LiqScope <terarasa@yandex.ru>")
+            self.assertEqual(m.transport._sender_parts(),
+                             ("LiqScope", "terarasa@yandex.ru"))
+            # явный отправитель важнее логина
+            os.environ["LIQSCOPE_SMTP_FROM"] = "LiqScope <no-reply@liqscope.online>"
+            m2 = build_mailer("https://liqscope.online")
+            self.assertEqual(m2.transport._sender_parts()[1], "no-reply@liqscope.online")
+        finally:
+            for k in keys:
+                os.environ.pop(k, None)
+                if keep[k] is not None:
+                    os.environ[k] = keep[k]
+
     def test_smtp_sender_parts(self):
         t = SmtpTransport("smtp.example.com", 465, "user", "pass",
                           "LiqScope <no-reply@liqscope.online>", tls="ssl")

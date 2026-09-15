@@ -272,10 +272,16 @@ def build_mailer(public_url: str = "") -> Mailer:
                       public_url=public_url, enabled=False)
     port = int(_env("LIQSCOPE_SMTP_PORT", "465" if _flag("LIQSCOPE_SMTP_SSL") else "587") or 587)
     tls = _env("LIQSCOPE_SMTP_TLS", "ssl" if _flag("LIQSCOPE_SMTP_SSL") else "starttls")
+    user = _env("LIQSCOPE_SMTP_USER")
+    # Яндекс, Mail.ru и Gmail отклоняют письмо, если отправитель не совпадает
+    # с логином («Sender address not allowed»). Поэтому без LIQSCOPE_SMTP_FROM
+    # шлём с того же адреса, под которым авторизуемся.
+    sender = _env("LIQSCOPE_SMTP_FROM") or (f"{BRAND} <{user}>" if user
+                                            else f"{BRAND} <no-reply@{host}>")
     transport = SmtpTransport(
-        host=host, port=port, user=_env("LIQSCOPE_SMTP_USER"),
+        host=host, port=port, user=user,
         password=os.getenv("LIQSCOPE_SMTP_PASSWORD") or "",
-        sender=_env("LIQSCOPE_SMTP_FROM", f"{BRAND} <no-reply@{host}>"),
+        sender=sender,
         tls=tls, timeout=float(_env("LIQSCOPE_SMTP_TIMEOUT", "15") or 15),
     )
     return Mailer(transport, sender=transport.sender, public_url=public_url, enabled=True)

@@ -18,6 +18,19 @@ import aiohttp
 log = logging.getLogger("liqscope.bot")
 
 API = "https://api.telegram.org/bot{token}/{method}"
+DEFAULT_PUBLIC_URL = "https://liqscope.online"
+
+
+def normalize_public_url(url: str = "") -> str:
+    """Канонический сайт. Пустое значение, IP и :8000 → https://liqscope.online."""
+    s = (url or "").strip().rstrip("/")
+    if not s:
+        return DEFAULT_PUBLIC_URL
+    rest = s.split("://", 1)[-1].lower()
+    host = rest.split("/")[0].split(":")[0]
+    if host in ("liqscope.online", "www.liqscope.online", "78.17.66.215"):
+        return DEFAULT_PUBLIC_URL
+    return s
 
 
 def _esc(s: Any) -> str:
@@ -40,7 +53,7 @@ class TelegramBot:
     ):
         self.token = (token or "").strip()
         self.store = store
-        self.public_url = (public_url or "").rstrip("/")
+        self.public_url = normalize_public_url(public_url)
         self.health_fn = health_fn or (lambda: {})
         self.stats_fn = stats_fn or (lambda: {})
         self.liqs_fn = liqs_fn or (lambda: [])
@@ -74,6 +87,27 @@ class TelegramBot:
         if not self.username:
             return ""
         return f"https://t.me/{self.username}?start={payload}"
+
+    def site_url(self, path: str = "") -> str:
+        base = normalize_public_url(self.public_url)
+        path = (path or "").strip()
+        if not path:
+            return base
+        if not path.startswith("/"):
+            path = "/" + path
+        return base + path
+
+    def terminal_url(self) -> str:
+        return self.site_url("/terminal")
+
+    def cabinet_url(self) -> str:
+        return self.site_url("/cabinet")
+
+    def admin_url(self) -> str:
+        return self.site_url("/admin")
+
+    def site_link_kb(self, label: str = "⚡ Терминал", path: str = "/terminal") -> dict:
+        return {"inline_keyboard": [[{"text": label, "url": self.site_url(path)}]]}
 
     async def start(self) -> None:
         if not self.token:
@@ -437,13 +471,13 @@ class TelegramBot:
             hours = int(snap.get("window_h") or 4)
         except (TypeError, ValueError):
             hours = 4
-        caption = render_post(snap, n, headlines=active_headlines(self.store, hours))
+        caption = render_post(
+            snap, n,
+            headlines=active_headlines(self.store, hours),
+            site_url=self.site_url(),
+        )
         img = pick_image(n, images=active_images(self.store))
-        markup = None
-        if self.public_url:
-            markup = {"inline_keyboard": [[
-                {"text": "⚡ Терминал", "url": self.public_url.rstrip("/") + "/terminal"}
-            ]]}
+        markup = self.site_link_kb("⚡ Терминал", "/terminal")
         # одно сообщение: фото с подписью, иначе только текст. Никогда фото+текст.
         ok = False
         if img and len(caption) <= 1024:
@@ -611,7 +645,7 @@ class TelegramBot:
         elif text.startswith("/alerts"):
             await self.show_menu(chat_id, self._alert_text(user), self._alert_kb(user))
         elif text.startswith("/terminal"):
-            await self.show_menu(chat_id, self._terminal_text(), self._kb_back("nav:home"))
+            await self.show_menu(chat_id, self._terminal_text(), self._terminal_kb())
         elif text.startswith("/admin"):
             await self._cmd_admin(chat_id, user)
         elif text.startswith("/users"):
@@ -694,7 +728,7 @@ class TelegramBot:
         if data == "liq":
             return self._liq_text(), self._kb_back("nav:home")
         if data == "terminal":
-            return self._terminal_text(), self._kb_back("nav:home")
+            return self._terminal_text(), self._terminal_kb()
         if data == "services":
             return self._services_text(user), self._services_kb(user)
         if data.startswith("svc:"):
@@ -728,14 +762,13 @@ class TelegramBot:
         if payload.startswith("login_"):
             nonce = payload[6:]
             if self.store.confirm_nonce(nonce, user["id"]):
-                site = self.public_url or "сайт"
                 if not await self._ensure_channel(chat_id, user):
                     return
                 await self.show_menu(
                     chat_id,
                     f"Вход подтверждён, {_esc(user['display_name'])}.\n"
                     f"Вернитесь во вкладку браузера — кабинет откроется сам.\n\n"
-                    f"Сайт: {site}/cabinet",
+                    f"Сайт: {self.cabinet_url()}",
                     self._menu(user),
                 )
                 return
@@ -752,8 +785,7 @@ class TelegramBot:
             "Это бот <b>LiqScope</b> — живой терминал ликвидаций крипто-фьючерсов.\n"
             "Здесь тот же кабинет, что и на сайте: статистика рынка, биржи, сервисы.",
         )
-        site = self.public_url
-        extra = f"\nКабинет: {site}/cabinet\nТерминал: {site}/terminal" if site else ""
+        extra = f"\nКабинет: {self.cabinet_url()}\nТерминал: {self.terminal_url()}"
         await self.show_menu(
             chat_id,
             f"Привет, {_esc(user.get('display_name') or 'друг')}!\n\n{welcome}{extra}",
@@ -936,7 +968,7 @@ class TelegramBot:
     def _menu(self, user: dict) -> dict:
         rows = [
             [{"text": "👤 Кабинет", "callback_data": "cabinet"},
-             {"text": "⚡ Терминал", "callback_data": "terminal"}],
+             {"text": "⚡ Терминал", "url": self.terminal_url()}],
             [{"text": "📊 Статистика", "callback_data": "stats"},
              {"text": "🩺 Биржи", "callback_data": "health"}],
             [{"text": "🛠 Сервисы", "callback_data": "services"},
@@ -1001,8 +1033,7 @@ class TelegramBot:
 
     def _cabinet_text(self, user: dict) -> str:
         un = f"@{_esc(user['username'])}" if user["username"] else "—"
-        site = self.public_url
-        link = f"\nСайт: {site}/cabinet" if site else ""
+        link = f"\nСайт: {self.cabinet_url()}"
         have = self.store.user_service_slugs(user["id"])
         svc = ", ".join(have) if have else "пока не выбраны"
         role = "администратор" if user["is_admin"] else "пользователь"
@@ -1016,10 +1047,13 @@ class TelegramBot:
         )
 
     def _terminal_text(self) -> str:
-        site = self.public_url or ""
-        if site:
-            return f"Терминал ликвидаций:\n{site}/terminal"
-        return "Терминал на сайте LiqScope (задайте LIQSCOPE_PUBLIC_URL, чтобы бот давал прямую ссылку)."
+        return f"Терминал ликвидаций:\n{self.terminal_url()}"
+
+    def _terminal_kb(self) -> dict:
+        return {"inline_keyboard": [
+            [{"text": "⚡ Открыть", "url": self.terminal_url()}],
+            [{"text": "← Назад", "callback_data": "nav:home"}],
+        ]}
 
     def _stats_text(self) -> str:
         st = self.stats_fn() or {}
@@ -1358,4 +1392,3 @@ class TelegramBot:
             return
         await self.reply(chat_id, self._alert_text(user), self._alert_kb(user),
                          message_id=message_id)
-

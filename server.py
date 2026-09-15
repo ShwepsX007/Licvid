@@ -51,7 +51,7 @@ from market_feed import MarketFeed, TF_MINUTES, base_of, canon
 from timeframes import parse_tf
 from oi_feed import map_candles_to_oi
 from accounts import Store
-from tg_bot import TelegramBot
+from tg_bot import TelegramBot, normalize_public_url
 from web_account import ctx as account_ctx, register_account_routes
 
 logging.basicConfig(level=logging.INFO,
@@ -84,7 +84,7 @@ HISTORY_TTL_HOURS = float(os.getenv("LIQSCOPE_HISTORY_TTL_HOURS", "24"))
 HISTORY_FILE_MAX_BYTES = 64 * 1024 * 1024   # страховка: урезаем файл при разрастании
 
 BOT_TOKEN = os.getenv("LIQSCOPE_BOT_TOKEN", "").strip()
-PUBLIC_URL = os.getenv("LIQSCOPE_PUBLIC_URL", "").strip()
+PUBLIC_URL = normalize_public_url(os.getenv("LIQSCOPE_PUBLIC_URL", ""))
 CHANNEL_URL = os.getenv("LIQSCOPE_CHANNEL_URL", "https://t.me/+4S1LsZtH1Pc5YWZi").strip()
 CHANNEL_ID = os.getenv("LIQSCOPE_CHANNEL_ID", "").strip()
 SECRET = os.getenv("LIQSCOPE_SECRET", "").strip() or "liqscope-change-me"
@@ -742,7 +742,11 @@ async def alert_loop():
                     account_store.add_alert_event(sub["user_id"], hit)
                     tg_id = int(sub.get("tg_id") or 0)
                     if tg_id and tg_bot.running:
-                        await tg_bot.send(tg_id, format_alert_html(hit))
+                        await tg_bot.send(
+                            tg_id,
+                            format_alert_html(hit, tg_bot.site_url()),
+                            markup=tg_bot.site_link_kb(),
+                        )
                     sent += 1
                     if sent >= 3:
                         break

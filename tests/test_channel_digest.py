@@ -58,6 +58,7 @@ class DigestTest(unittest.TestCase):
             self.assertIn("BTC", t)
             self.assertIn("Binance", t)
             self.assertIn("LiqScope", t)
+            self.assertIn("https://liqscope.online", t)
             self.assertLessEqual(len(t), CAPTION_LIMIT)
             self.assertIn("CVD", t)
             self.assertIn("OI", t)

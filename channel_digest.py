@@ -344,11 +344,13 @@ def active_images(store=None) -> List[str]:
     return out or list_images()
 
 
-def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = None) -> str:
+def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = None,
+                site_url: str = "https://liqscope.online") -> str:
     """Сводка: живая шапка + читаемые цифры. variant крутит и то и другое."""
     f = _facts(snap)
     h, n = f["h"], f["n"]
-    tail = "— <i>LiqScope</i>"
+    site = (site_url or "https://liqscope.online").rstrip("/")
+    tail = f"— <i>LiqScope</i>\n{site}"
     heads = [x for x in (headlines or []) if x] or list(_headlines(h))
     v = int(variant) % max(1, len(heads))
     head = heads[v]

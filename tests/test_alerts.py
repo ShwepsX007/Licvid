@@ -108,6 +108,7 @@ class AlertsTest(unittest.TestCase):
         text = format_alert_html(liq_hit)
         self.assertIn("Алерт", text)
         self.assertIn("BTC", text)
+        self.assertIn("https://liqscope.online/terminal", text)
 
     def test_below_threshold_no_hit(self):
         now = 100.0

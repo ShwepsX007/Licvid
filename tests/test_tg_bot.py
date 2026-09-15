@@ -72,10 +72,16 @@ class BotMenuTest(unittest.TestCase):
         self.assertIn("cabinet", _datas(kb))
 
     def test_leaf_screens_have_back_to_menu(self):
-        for data in ("cabinet", "stats", "health", "liq", "terminal"):
+        for data in ("cabinet", "stats", "health", "liq"):
             _text, kb = self.bot._screen(self.user, data)
             self.assertEqual(_btns(kb), ["← Назад"], data)
             self.assertEqual(_datas(kb), ["nav:home"], data)
+        text, kb = self.bot._screen(self.user, "terminal")
+        self.assertIn("https://liqscope.online/terminal", text)
+        self.assertIn("← Назад", _btns(kb))
+        self.assertIn("nav:home", _datas(kb))
+        urls = [b.get("url") for row in kb["inline_keyboard"] for b in row]
+        self.assertIn("https://liqscope.online/terminal", urls)
 
     def test_alerts_screen_from_services(self):
         text, kb = self.bot._screen(self.user, "svc:alerts")
@@ -195,6 +201,19 @@ class BotMenuTest(unittest.TestCase):
                 if b.get("url"):
                     urls.append(b["url"])
         self.assertTrue(any("t.me/" in u for u in urls))
+        self.assertIn("https://liqscope.online/terminal", urls)
+
+    def test_public_url_defaults_to_domain(self):
+        from tg_bot import normalize_public_url
+        self.assertEqual(normalize_public_url(""), "https://liqscope.online")
+        self.assertEqual(normalize_public_url("http://liqscope.online:8000"),
+                         "https://liqscope.online")
+        self.assertEqual(normalize_public_url("http://78.17.66.215:8000/"),
+                         "https://liqscope.online")
+        self.assertEqual(self.bot.site_url("/cabinet"),
+                         "https://liqscope.online/cabinet")
+        self.assertEqual(self.bot.terminal_url(),
+                         "https://liqscope.online/terminal")
 
     def test_start_requires_channel_when_id_set(self):
         self.bot._channel_id_cfg = "-100111"
@@ -263,9 +282,13 @@ class BotMenuTest(unittest.TestCase):
     def test_digest_sends_one_message(self):
         self.bot._channel_id_cfg = "-100111"
         calls = []
+        captured = {}
 
         async def fake_photo(*_a, **_k):
             calls.append("photo")
+            captured["caption"] = _k.get("caption") or (_a[2] if len(_a) > 2 else "")
+            captured["markup"] = _k.get("markup") if "markup" in _k else (
+                _a[3] if len(_a) > 3 else None)
             return 11
 
         async def fake_send(*_a, **_k):
@@ -277,6 +300,10 @@ class BotMenuTest(unittest.TestCase):
         ok = asyncio.run(self.bot.post_channel_digest())
         self.assertTrue(ok)
         self.assertEqual(calls, ["photo"])
+        self.assertIn("https://liqscope.online", captured.get("caption") or "")
+        markup = captured.get("markup") or {}
+        urls = [b.get("url") for row in (markup.get("inline_keyboard") or []) for b in row]
+        self.assertIn("https://liqscope.online/terminal", urls)
 
     def test_digest_long_caption_still_one_message(self):
         self.bot._channel_id_cfg = "-100111"

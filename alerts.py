@@ -349,7 +349,7 @@ def evaluate(cfg: Dict[str, Any], market: Dict[str, Any],
     return hits
 
 
-def format_alert_html(hit: dict) -> str:
+def format_alert_html(hit: dict, site_url: str = "https://liqscope.online") -> str:
     metric = str(hit.get("metric") or "liq")
     icon = METRIC_ICON.get(metric, "🔔")
     title = METRIC_TITLE.get(metric, metric)
@@ -376,6 +376,8 @@ def format_alert_html(hit: dict) -> str:
         extra = f" ({pct:+.2f}%)" if isinstance(pct, (int, float)) and pct else ""
         arrow = "↑" if _num(hit.get("value")) >= 0 else "↓"
         lines.append(f"изменение OI {arrow}{extra}")
+    site = (site_url or "https://liqscope.online").rstrip("/")
+    lines.append(f"{site}/terminal")
     return "\n".join(lines)
 
 

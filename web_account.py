@@ -158,10 +158,24 @@ def _email_enabled() -> bool:
     return bool(ctx.mailer and getattr(ctx.mailer, "enabled", False))
 
 
+def _mail_path(kind: str, token: str) -> str:
+    if kind == "verify":
+        return f"/verify?token={token}"
+    if kind == "login":
+        return f"/email-login?token={token}"
+    if kind == "reset":
+        return f"/reset?token={token}"
+    return ""
+
+
 def _send_mail_blocking(kind: str, to: str, token: str, name: str = "") -> bool:
     m = _mailer()
-    if not m:
-        log.warning("Почта не настроена: письмо «%s» для %s не отправлено", kind, to)
+    if not m or not getattr(m, "enabled", False):
+        # Пока SMTP не настроен, регистрация не должна упираться в стену:
+        # ссылку пишем в журнал сервиса, админ отдаст её человеку руками.
+        log.warning("SMTP не настроен — письмо «%s» для %s не отправлено. "
+                    "Ссылка для ручной выдачи: %s",
+                    kind, to, (m.link(_mail_path(kind, token)) if m else _mail_path(kind, token)))
         return False
     if kind == "verify":
         return m.send_verify(to, token, name=name)

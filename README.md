@@ -1019,7 +1019,9 @@ Environment=LIQSCOPE_SMTP_FROM=LiqScope <no-reply@your.domain>
    Стенд без реального ящика: `LIQSCOPE_MAIL_DIR=/tmp/mail` — письма
    складываются в файлы, ничего наружу не уходит.
    Если SMTP не настроен, регистрация всё равно работает (`sent: false`),
-   а ссылку админ видит в `/api/admin/overview` → `mail.last`.
+   а ссылку для ручной выдачи админ видит прямо в журнале сервиса:
+   `journalctl -u licvid | grep "Ссылка для ручной выдачи"` (плюс состояние
+   отправки — в `/api/admin/overview` → `mail`).
 
 2. Когда писем много, домен отправителя должен иметь **SPF и DKIM** записи
    (у Яндекса/Google/Unisender — в панели домена), иначе часть писем уйдёт

@@ -8,3 +8,6 @@ env/
 # Рантайм-данные (срезы оборота для volAvg7d)
 data/
 *.tmp
+
+# Тестовые зависимости (ставятся через `npm install --no-save jsdom ws`)
+node_modules/

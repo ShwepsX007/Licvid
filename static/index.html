@@ -226,6 +226,16 @@
                     <button class="profile-toggle oi-toggle" id="oi-toggle" type="button"
                             data-i18n-title="chart.oi_on" data-i18n="chart.oi"
                             title="Скрыть шарики открытого интереса">● OI</button>
+                    <span class="layer-pop-sep" aria-hidden="true"></span>
+                    <button class="profile-toggle pane-toggle" id="pane-liq-toggle" type="button"
+                            data-i18n-title="chart.pane_liq_on" data-i18n="chart.pane_liq"
+                            title="Окно ликвидаций под графиком">💥 Окно LIQ</button>
+                    <button class="profile-toggle pane-toggle" id="pane-cvd-toggle" type="button"
+                            data-i18n-title="chart.pane_cvd_on" data-i18n="chart.pane_cvd"
+                            title="Окно CVD под графиком">🌊 Окно CVD</button>
+                    <button class="profile-toggle pane-toggle" id="pane-oi-toggle" type="button"
+                            data-i18n-title="chart.pane_oi_on" data-i18n="chart.pane_oi"
+                            title="Окно OI под графиком">📈 Окно OI</button>
                 </div>
             </div>
 
@@ -263,6 +273,38 @@
                             title="Убрать все фигуры">🗑</button>
                     <button type="button" id="draw-close" data-i18n-title="draw.close"
                             title="Закрыть рисование">✕</button>
+                </div>
+            </div>
+
+            <!-- Индикаторные окна: те же данные, что в кабинете «Алерты по объёму».
+                 Включаются в «☰ Слои», крестик на окне прячет его обратно. -->
+            <div class="indicator-panes" id="indicator-panes">
+                <div class="ind-pane" id="ind-pane-liq">
+                    <div class="ind-pane-head">
+                        <span class="ind-title liq" data-i18n="chart.pane_liq_head">💥 LIQ</span>
+                        <span class="ind-val" id="ind-liq-val">—</span>
+                        <button class="ind-close" id="ind-close-liq" type="button"
+                                data-i18n-title="chart.pane_close" title="Скрыть окно">✕</button>
+                    </div>
+                    <div class="ind-canvas-wrap"><canvas id="ind-canvas-liq"></canvas></div>
+                </div>
+                <div class="ind-pane" id="ind-pane-cvd">
+                    <div class="ind-pane-head">
+                        <span class="ind-title cvd" data-i18n="chart.pane_cvd_head">🌊 CVD</span>
+                        <span class="ind-val" id="ind-cvd-val">—</span>
+                        <button class="ind-close" id="ind-close-cvd" type="button"
+                                data-i18n-title="chart.pane_close" title="Скрыть окно">✕</button>
+                    </div>
+                    <div class="ind-canvas-wrap"><canvas id="ind-canvas-cvd"></canvas></div>
+                </div>
+                <div class="ind-pane" id="ind-pane-oi">
+                    <div class="ind-pane-head">
+                        <span class="ind-title oi" data-i18n="chart.pane_oi_head">📈 OI</span>
+                        <span class="ind-val" id="ind-oi-val">—</span>
+                        <button class="ind-close" id="ind-close-oi" type="button"
+                                data-i18n-title="chart.pane_close" title="Скрыть окно">✕</button>
+                    </div>
+                    <div class="ind-canvas-wrap"><canvas id="ind-canvas-oi"></canvas></div>
                 </div>
             </div>
         </section>
@@ -336,6 +378,6 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=notape"></script>
+    <script src="/static/app.js?v=indpanes"></script>
 </body>
 </html>

@@ -500,13 +500,28 @@
             return !metric || String(h.metric || "") === metric;
         });
         if (!rows.length) return '<div class="s">пока тихо</div>';
+        // ярко, как лента терминала: время · монета · сумма · порог/окно,
+        // цвет по метрике/знаку, полоса накачки |значения| к порогу
         return rows.map(function (h) {
             var ts = h.ts ? new Date(Number(h.ts) * 1000) : null;
-            var tm = ts ? ts.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—";
+            var tm = ts ? ts.toLocaleTimeString([], {
+                hour: "2-digit", minute: "2-digit", second: "2-digit",
+            }) : "—";
             var sym = String(h.symbol || "").split("_")[0];
-            return '<div class="row"><span class="t">' + tm + "</span><span>" +
-                sym + "  " + alMoney(h.value) + " / " + alMoney(h.threshold) +
-                " · " + alWin(h.window_min) + "</span></div>";
+            var val = Number(h.value) || 0;
+            var thr = Number(h.threshold) || 0;
+            var pct = thr > 0 ? Math.min(100, Math.round(100 * Math.abs(val) / thr)) : 100;
+            var hot = thr > 0 && Math.abs(val) >= thr;
+            var m = String(h.metric || "liq");
+            var cls = m === "liq" ? "gold" : (val >= 0 ? "pos" : "neg");
+            var icon = m === "cvd" ? "🌊" : m === "oi" ? "📊" : "💥";
+            return '<div class="row' + (hot ? " hot" : "") + '" style="--p:' + pct + '%">' +
+                '<span class="t">' + tm + "</span>" +
+                '<span class="m">' + icon + "</span>" +
+                '<span class="sym">' + (sym === "ALL" ? "все" : sym) + "</span>" +
+                '<span class="val ' + cls + '">' + alMoney(val) + "</span>" +
+                '<span class="thr">/ ' + alMoney(thr) + " · " + alWin(h.window_min) + "</span>" +
+                '<i class="tape-bar"></i></div>';
         }).join("");
     }
 

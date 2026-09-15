@@ -21,6 +21,7 @@ import shlex
 import socket
 import subprocess
 import sys
+import urllib.parse
 from typing import Dict, Tuple
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -30,7 +31,8 @@ if HERE not in sys.path:
 KEYS = ("LIQSCOPE_SMTP_HOST", "LIQSCOPE_SMTP_PORT", "LIQSCOPE_SMTP_USER",
         "LIQSCOPE_SMTP_PASSWORD", "LIQSCOPE_SMTP_FROM", "LIQSCOPE_SMTP_TLS",
         "LIQSCOPE_SMTP_TIMEOUT", "LIQSCOPE_SMTP_IPV4", "LIQSCOPE_MAIL_DIR",
-        "LIQSCOPE_PUBLIC_URL")
+        "LIQSCOPE_MAIL_API", "LIQSCOPE_MAIL_API_KEY", "LIQSCOPE_MAIL_API_SECRET",
+        "LIQSCOPE_MAIL_API_URL", "LIQSCOPE_MAIL_API_FROM", "LIQSCOPE_PUBLIC_URL")
 PORTS = (465, 587, 25, 2525)
 CONTROL = ("ya.ru", 443)          # обычный HTTPS: проверка, что интернет вообще есть
 
@@ -52,10 +54,25 @@ def systemd_env(unit: str) -> Dict[str, str]:
     return env
 
 
+def api_lines(env: Dict[str, str]) -> str:
+    """Строки про режим HTTPS-API (когда SMTP-порты у хостинга закрыты)."""
+    kind = (env.get("LIQSCOPE_MAIL_API") or "").strip().lower()
+    if not kind:
+        return ""
+    key = env.get("LIQSCOPE_MAIL_API_KEY") or ""
+    secret = env.get("LIQSCOPE_MAIL_API_SECRET") or ""
+    return ("\n".join([
+        f"  отправка: HTTPS-API «{kind}» (порт 443, SMTP не нужен)",
+        f"  ключ:    {len(key)} символов" if key else "  ключ:    НЕ ЗАДАН",
+        f"  секрет:  {len(secret)} символов" if secret else "  секрет:  —",
+        f"  адрес API: {env.get('LIQSCOPE_MAIL_API_URL') or '(по умолчанию сервиса)'}",
+    ]))
+
+
 def masked(env: Dict[str, str]) -> str:
     password = env.get("LIQSCOPE_SMTP_PASSWORD") or ""
     hint = f"{len(password)} символов" if password else "НЕ ЗАДАН"
-    return "\n".join([
+    return "\n".join([*[
         f"  хост:    {env.get('LIQSCOPE_SMTP_HOST') or '—'}",
         f"  порт:    {env.get('LIQSCOPE_SMTP_PORT') or '—'}",
         f"  шифрование: {env.get('LIQSCOPE_SMTP_TLS') or '(по умолчанию starttls)'}",
@@ -64,7 +81,7 @@ def masked(env: Dict[str, str]) -> str:
         f"  отправитель: {env.get('LIQSCOPE_SMTP_FROM') or '(не задан — берём логин)'}",
         f"  только IPv4: {env.get('LIQSCOPE_SMTP_IPV4') or 'нет (авто: при сбое повторим по IPv4)'}",
         f"  LIQSCOPE_MAIL_DIR: {env.get('LIQSCOPE_MAIL_DIR') or '—'}",
-    ])
+    ], api_lines(env)])
 
 
 def tcp_test(host: str, port: int, family: int = 0, timeout: float = 5) -> Tuple[bool, str]:
@@ -202,6 +219,39 @@ def check_login(env: Dict[str, str]) -> bool:
     return False
 
 
+def api_mode(env: Dict[str, str], to: str = "") -> int:
+    """Режим HTTPS-API: проверяем 443 и, если попросили, шлём тестовое письмо."""
+    from mailer import API_URLS, build_mailer
+
+    kind = (env.get("LIQSCOPE_MAIL_API") or "").strip().lower()
+    url = env.get("LIQSCOPE_MAIL_API_URL") or API_URLS.get(kind) or API_URLS["resend"]
+    host = urllib.parse.urlparse(url).hostname or ""
+    if not (env.get("LIQSCOPE_MAIL_API_KEY") or "").strip():
+        print("  ✗ LIQSCOPE_MAIL_API_KEY не задан — письма не уйдут")
+        return 1
+    print(f"  адрес:   {url}")
+    ok, why = tcp_test(host, 443, socket.AF_INET)
+    print(f"  порт 443 у {host}: " + ("открыт" if ok else f"НЕДОСТУПЕН — {why}"))
+    if not ok:
+        print("  → Серверу нужен обычный HTTPS на 443: если и он закрыт, "
+              "вопрос к хостингу")
+        return 1
+    if not to:
+        print("  (добавьте адрес аргументом, чтобы получить тестовое письмо)")
+        return 0
+    for k, v in env.items():
+        os.environ[k] = v
+    mailer = build_mailer(env.get("LIQSCOPE_PUBLIC_URL") or "https://liqscope.online")
+    sent = mailer.send(to, "LiqScope: проверка почты",
+                       "<p>Это тестовое письмо от LiqScope. Если вы его видите — "
+                       "отправка через API настроена и работает.</p>")
+    print("  тестовое письмо:", "отправлено" if sent else "НЕ отправлено")
+    if sent:
+        return 0
+    print("  причина:", (mailer.status().get("last") or {}).get("reason") or "—")
+    return 1
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Проверка SMTP для LiqScope")
     ap.add_argument("to", nargs="?", help="кому отправить тестовое письмо")
@@ -221,6 +271,8 @@ def main() -> int:
     print(f"настройки: {source}")
     print(masked(env))
     host = env.get("LIQSCOPE_SMTP_HOST") or "smtp.yandex.ru"
+    if (env.get("LIQSCOPE_MAIL_API") or "").strip() and not args.ports:
+        return api_mode(env, args.to or "")
     if args.ports:
         net_report(host)
         return 0

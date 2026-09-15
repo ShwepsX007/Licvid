@@ -44,6 +44,10 @@ Environment=LIQSCOPE_COOKIE_SECURE=1
 # Environment=LIQSCOPE_SMTP_FROM=LiqScope <no-reply@liqscope.online>
 # Проверка настроек и сети: python3 tools/smtp_check.py --ports
 # Environment=LIQSCOPE_SMTP_IPV4=1
+# Если хостинг закрыл SMTP-порты — шлём через HTTPS-API (443) сервиса рассылок:
+# Environment=LIQSCOPE_MAIL_API=resend
+# Environment=LIQSCOPE_MAIL_API_KEY=re_…
+# Environment=LIQSCOPE_MAIL_API_SECRET=            # только для SendPulse
 # Стенд без реального ящика: письма складываются в папку
 # Environment=LIQSCOPE_MAIL_DIR=/tmp/liqscope-mail
 #

@@ -435,5 +435,112 @@ class MailerTest(unittest.TestCase):
         self.assertEqual(t2._sender_parts()[0], "LiqScope")
 
 
+class ApiMailTest(unittest.TestCase):
+    """Отправка через HTTPS-API (443) — когда хостинг закрыл SMTP-порты."""
+
+    KEYS = ("LIQSCOPE_MAIL_API", "LIQSCOPE_MAIL_API_KEY", "LIQSCOPE_MAIL_API_SECRET",
+            "LIQSCOPE_MAIL_API_URL", "LIQSCOPE_MAIL_API_FROM", "LIQSCOPE_SMTP_FROM",
+            "LIQSCOPE_SMTP_HOST", "LIQSCOPE_MAIL_DIR")
+
+    def setUp(self):
+        self.keep = {k: os.environ.get(k) for k in self.KEYS}
+        for k in self.KEYS:
+            os.environ.pop(k, None)
+
+    def tearDown(self):
+        for k in self.KEYS:
+            os.environ.pop(k, None)
+            if self.keep[k] is not None:
+                os.environ[k] = self.keep[k]
+
+    def test_resend_sends_json_with_bearer_key(self):
+        os.environ["LIQSCOPE_MAIL_API"] = "resend"
+        os.environ["LIQSCOPE_MAIL_API_KEY"] = "re_test123"
+        os.environ["LIQSCOPE_SMTP_HOST"] = "smtp.yandex.ru"   # API важнее SMTP
+        os.environ["LIQSCOPE_SMTP_FROM"] = "LiqScope <no-reply@liqscope.online>"
+        m = build_mailer("https://liqscope.online")
+        self.assertTrue(m.enabled)
+        self.assertIsInstance(m.transport, mailer_module.ApiTransport)
+        calls = []
+
+        def fake_post(url, payload, headers, timeout=15.0):
+            calls.append((url, payload, headers))
+            return {"id": "abc"}
+
+        with mock.patch.object(mailer_module, "http_post_json", fake_post):
+            self.assertTrue(m.send_verify("bob@mail.ru", "TOK", name="Боб"))
+        url, payload, headers = calls[0]
+        self.assertEqual(url, "https://api.resend.com/emails")
+        self.assertEqual(headers["Authorization"], "Bearer re_test123")
+        self.assertEqual(payload["from"], "LiqScope <no-reply@liqscope.online>")
+        self.assertEqual(payload["to"], ["bob@mail.ru"])
+        self.assertIn("/verify?token=TOK", payload["html"])
+        self.assertIn("Подтвердить почту", payload["text"])
+        self.assertEqual(m.status()["last"]["ok"], True)
+
+    def test_sendpulse_gets_token_once_and_sends_email(self):
+        os.environ["LIQSCOPE_MAIL_API"] = "sendpulse"
+        os.environ["LIQSCOPE_MAIL_API_KEY"] = "ID123"
+        os.environ["LIQSCOPE_MAIL_API_SECRET"] = "SECRET"
+        os.environ["LIQSCOPE_SMTP_FROM"] = "LiqScope <no-reply@liqscope.online>"
+        m = build_mailer("https://liqscope.online")
+        tokens, mails = [], []
+
+        def fake_form(url, fields, timeout=15.0):
+            tokens.append((url, fields))
+            return {"access_token": "T-1", "expires_in": 3600}
+
+        def fake_json(url, payload, headers, timeout=15.0):
+            mails.append((url, payload, headers))
+            return {}
+
+        with mock.patch.object(mailer_module, "http_post_form", fake_form), \
+                mock.patch.object(mailer_module, "http_post_json", fake_json):
+            self.assertTrue(m.send_reset("bob@mail.ru", "R1"))
+            self.assertTrue(m.send_login_link("bob@mail.ru", "L1"))
+        self.assertEqual(len(tokens), 1)          # токен переиспользуется
+        self.assertEqual(tokens[0][0], "https://api.sendpulse.com/oauth/access_token")
+        self.assertEqual(tokens[0][1]["grant_type"], "client_credentials")
+        self.assertEqual(tokens[0][1]["client_id"], "ID123")
+        self.assertEqual(tokens[0][1]["client_secret"], "SECRET")
+        self.assertEqual(mails[0][2]["Authorization"], "Bearer T-1")
+        email = mails[0][1]["email"]
+        self.assertEqual(email["from"]["email"], "no-reply@liqscope.online")
+        self.assertEqual(email["to"], [{"email": "bob@mail.ru"}])
+        self.assertIn("/reset?token=R1", email["html"])
+
+    def test_api_error_is_reported_not_raised(self):
+        transport = mailer_module.ApiTransport("resend", "re_x",
+                                               "LiqScope <no-reply@liqscope.online>")
+
+        def boom(*a, **kw):
+            raise RuntimeError("HTTP 401: ключ неверный")
+
+        with mock.patch.object(mailer_module, "http_post_json", boom):
+            ok, err = transport.send("bob@mail.ru", "Тема", "<p>привет</p>")
+        self.assertFalse(ok)
+        self.assertIn("401", err)
+
+    def test_api_without_key_is_disabled_and_says_so(self):
+        os.environ["LIQSCOPE_MAIL_API"] = "resend"
+        m = build_mailer("https://liqscope.online")
+        self.assertFalse(m.enabled)
+        self.assertFalse(m.send_verify("bob@mail.ru", "T"))
+        self.assertFalse(m.status()["last"]["ok"])
+
+    def test_generic_api_uses_own_url(self):
+        os.environ["LIQSCOPE_MAIL_API"] = "generic"
+        os.environ["LIQSCOPE_MAIL_API_KEY"] = "key-1"
+        os.environ["LIQSCOPE_MAIL_API_URL"] = "https://mail.example.com/api/send"
+        os.environ["LIQSCOPE_MAIL_API_FROM"] = "LiqScope <post@example.com>"
+        m = build_mailer("https://liqscope.online")
+        calls = []
+        with mock.patch.object(mailer_module, "http_post_json",
+                               lambda url, *a, **kw: calls.append(url) or {}):
+            self.assertTrue(m.send_reset("bob@mail.ru", "R2"))
+        self.assertEqual(calls[0], "https://mail.example.com/api/send")
+        self.assertEqual(m.transport._sender_parts(), ("LiqScope", "post@example.com"))
+
+
 if __name__ == "__main__":
     unittest.main()

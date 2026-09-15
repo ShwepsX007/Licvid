@@ -152,6 +152,10 @@ sudo systemctl enable --now liqscope
 | `LIQSCOPE_SMTP_TIMEOUT` | `15` | таймаут подключения к SMTP, сек (отправка идёт в отдельном потоке и не морозит сервер) |
 | `LIQSCOPE_SMTP_IPV4` | — | `1` — слать только по IPv4. По умолчанию сначала обычная попытка, при сетевой ошибке — автоматический повтор по IPv4 (лечит «Network is unreachable» на хостингах со сломанным IPv6) |
 | `LIQSCOPE_MAIL_DIR` | — | если задан — письма не отправляются, а складываются в папку (стенд, автотесты) |
+| `LIQSCOPE_MAIL_API` | — | `resend` / `sendpulse` / `generic` — слать через HTTPS-API сервиса рассылок (порт 443) там, где хостинг закрыл SMTP-порты. Приоритет выше `LIQSCOPE_SMTP_*` |
+| `LIQSCOPE_MAIL_API_KEY` | — | ключ сервиса (у SendPulse — ID из «Настройки → API») |
+| `LIQSCOPE_MAIL_API_SECRET` | — | секрет сервиса (нужен SendPulse, у Resend не используется) |
+| `LIQSCOPE_MAIL_API_URL` | адрес сервиса | свой адрес для `generic` (по умолчанию — Resend) |
 | `LIQSCOPE_REQUIRE_EMAIL_VERIFICATION` | `1` | `1` — жёсткий режим: без подтверждения почты кабинет и сервисы закрыты. `0` — мягкий: пускаем сразу, в кабинете только напоминание |
 | `LIQSCOPE_PUBLIC_URL` | — | публичный URL сайта (`https://example.com`) — ссылки в боте |
 | `LIQSCOPE_SECRET` | `liqscope-change-me` | секрет сессий и хеша IP. Задайте свой в проде |
@@ -1040,8 +1044,30 @@ python3 tools/smtp_check.py --ports              # какие SMTP-порты в
    * `Network is unreachable` / `reset by peer` — у сервера не работает IPv6
      (лечится автоматическим повтором по IPv4) либо **хостинг блокирует
      исходящие SMTP-порты**. Проверяется `--ports`: если 25/465/587/2525
-     закрыты, а 443 открыт, остаётся заявка в поддержку хостинга или отправка
-     через HTTP-API сервиса рассылок (порт 443).
+     закрыты (таймаут), а 443 открыт — это как раз блокировка.
+
+   **Когда хостинг закрыл SMTP-порты** (частое дело на VPS), шлём письма через
+   HTTPS-API сервиса рассылок — порт 443, обычный интернет:
+
+```ini
+Environment=LIQSCOPE_MAIL_API=resend          # или sendpulse, или generic
+Environment=LIQSCOPE_MAIL_API_KEY=re_…        # у SendPulse — ID
+Environment=LIQSCOPE_MAIL_API_SECRET=         # только SendPulse
+Environment=LIQSCOPE_SMTP_FROM=LiqScope <no-reply@liqscope.online>
+```
+
+   * **Resend** (resend.com): регистрация → *Domains* → добавить свой домен и
+     прописать выданные DNS-записи (SPF/DKIM) → *API Keys* → создать ключ.
+     Бесплатный тариф — несколько тысяч писем в месяц, карта не нужна.
+   * **SendPulse**: регистрация → *Настройки → API* → скопировать **ID** и
+     **Secret** (это `KEY` и `SECRET`), отправителя подтвердить в разделе
+     отправки. Интерфейс на русском, есть бесплатный тариф.
+   * Любой другой сервис с JSON-API и Bearer-ключом: `LIQSCOPE_MAIL_API=generic`
+     и `LIQSCOPE_MAIL_API_URL=https://…` (тело запроса — `from`/`to`/`subject`/
+     `html`/`text`).
+
+   Проверка: `python3 tools/smtp_check.py you@example.com` — он покажет режим
+   API, доступность 443 и отправит тестовое письмо.
 
 2. Когда писем много, домен отправителя должен иметь **SPF и DKIM** записи
    (у Яндекса/Google/Unisender — в панели домена), иначе часть писем уйдёт

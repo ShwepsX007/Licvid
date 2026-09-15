@@ -25,10 +25,20 @@
 Если у сервера сломан IPv6 (или хостинг его не даёт), первая попытка
 отправки пройдёт по обычному пути, а при сетевой ошибке транспорт один раз
 повторит её, используя только IPv4, и запомнит это для следующих писем.
+
+Когда хостинг закрывает исходящие SMTP-порты (25/465/587) — обычная история
+для VPS — остаётся отправка через HTTPS-API сервиса рассылок:
+
+    LIQSCOPE_MAIL_API        resend | sendpulse | generic
+    LIQSCOPE_MAIL_API_KEY    ключ сервиса (у SendPulse — ID)
+    LIQSCOPE_MAIL_API_SECRET секрет (у SendPulse — Secret)
+    LIQSCOPE_MAIL_API_URL    свой адрес для generic (по умолчанию — Resend)
+    LIQSCOPE_SMTP_FROM       адрес отправителя, подтверждённый в сервисе
 """
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
 import re
@@ -37,6 +47,9 @@ import socket
 import ssl
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from email.header import Header
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -232,6 +245,138 @@ class FileTransport:
         return True, ""
 
 
+def http_post_json(url: str, payload: Dict[str, Any],
+                   headers: Dict[str, str], timeout: float = 15.0) -> Dict[str, Any]:
+    """POST с JSON-телом; ошибку сервиса возвращаем словами, а не стеком."""
+    req = urllib.request.Request(
+        url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        method="POST", headers={"Content-Type": "application/json", **headers})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")[:300]
+        raise RuntimeError(f"HTTP {e.code}: {detail}") from None
+    except Exception as e:                       # сеть, DNS, TLS
+        raise RuntimeError(f"{type(e).__name__}: {e}") from None
+    try:
+        return json.loads(body) if body.strip() else {}
+    except ValueError:
+        return {"raw": body[:300]}
+
+
+def http_post_form(url: str, fields: Dict[str, str],
+                   timeout: float = 15.0) -> Dict[str, Any]:
+    """POST формой (так SendPulse выдаёт OAuth-токен)."""
+    req = urllib.request.Request(
+        url, data=urllib.parse.urlencode(fields).encode("utf-8"), method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded",
+                 "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")[:300]
+        raise RuntimeError(f"HTTP {e.code}: {detail}") from None
+    except Exception as e:
+        raise RuntimeError(f"{type(e).__name__}: {e}") from None
+    try:
+        return json.loads(body) if body.strip() else {}
+    except ValueError:
+        return {"raw": body[:300]}
+
+
+API_URLS = {
+    "resend": "https://api.resend.com/emails",
+    "sendpulse": "https://api.sendpulse.com/smtp/emails",
+}
+
+
+class ApiTransport:
+    """Отправка письма HTTP-API сервиса рассылок (порт 443, без SMTP).
+
+    Нужна там, где хостинг блокирует исходящие SMTP-порты: HTTPS обычно открыт.
+    Поддерживаются Resend и SendPulse (у обоих есть бесплатный тариф), а также
+    «generic» — любой сервис, принимающий JSON с Bearer-ключом.
+    """
+
+    label = "API"
+
+    def __init__(self, kind: str, key: str, sender: str, secret: str = "",
+                 url: str = "", timeout: float = 15.0, site: str = ""):
+        self.kind = (kind or "generic").strip().lower()
+        self.key = key
+        self.secret = secret
+        self.sender = sender
+        self.timeout = float(timeout or 15)
+        self.site = site or "https://liqscope.online"
+        if self.kind == "send_pulse":
+            self.kind = "sendpulse"
+        self.url = url or API_URLS.get(self.kind, API_URLS["resend"])
+        self._token = ""
+        self._token_until = 0.0
+
+    def send(self, to: str, subject: str, html: str, text: str = "") -> Tuple[bool, str]:
+        try:
+            if self.kind == "sendpulse":
+                self._send_sendpulse(to, subject, html, text)
+            else:
+                self._send_json_api(to, subject, html, text)
+            return True, ""
+        except Exception as e:
+            log.warning("%s (%s): письмо для %s не ушло: %s",
+                        self.label, self.kind, to, e)
+            return False, str(e)[:200]
+
+    def _sender_parts(self) -> Tuple[str, str]:
+        return split_sender(self.sender)
+
+    def _send_json_api(self, to: str, subject: str, html: str, text: str) -> None:
+        """Resend и «generic»: JSON с Bearer-ключом."""
+        name, addr = self._sender_parts()
+        payload = {
+            "from": f"{name} <{addr}>" if name else addr,
+            "to": [to],
+            "subject": subject,
+            "html": html,
+            "text": text or html_to_text(html),
+        }
+        headers = {"Authorization": f"Bearer {self.key}", "Accept": "application/json"}
+        if self.kind == "resend":
+            headers["User-Agent"] = f"LiqScope ({self.site})"
+        http_post_json(self.url, payload, headers, self.timeout)
+
+    def _sendpulse_token(self) -> str:
+        """SendPulse: OAuth-токен на час, держим в памяти."""
+        if self._token and time.time() < self._token_until - 60:
+            return self._token
+        base = self.url.rsplit("/smtp/", 1)[0]
+        data = http_post_form(f"{base}/oauth/access_token", {
+            "grant_type": "client_credentials",
+            "client_id": self.key,
+            "client_secret": self.secret,
+        }, self.timeout)
+        token = str(data.get("access_token") or "")
+        if not token:
+            raise RuntimeError(f"SendPulse не выдал токен: {str(data)[:200]}")
+        self._token = token
+        self._token_until = time.time() + float(data.get("expires_in") or 3600)
+        return token
+
+    def _send_sendpulse(self, to: str, subject: str, html: str, text: str) -> None:
+        name, addr = self._sender_parts()
+        payload = {"email": {
+            "subject": subject,
+            "html": html,
+            "text": text or html_to_text(html),
+            "from": {"name": name, "email": addr},
+            "to": [{"email": to}],
+        }}
+        http_post_json(self.url, payload,
+                       {"Authorization": f"Bearer {self._sendpulse_token()}"},
+                       self.timeout)
+
+
 class Mailer:
     """Общая точка отправки: шаблоны, журнал отправок, сторож на ошибки."""
 
@@ -353,6 +498,24 @@ def build_mailer(public_url: str = "") -> Mailer:
     if folder:
         sender = _env("LIQSCOPE_SMTP_FROM", f"{BRAND} <no-reply@liqscope.online>")
         return Mailer(FileTransport(folder), sender=sender, public_url=public_url)
+    api_kind = _env("LIQSCOPE_MAIL_API")
+    if api_kind:
+        key = (os.getenv("LIQSCOPE_MAIL_API_KEY") or "").strip()
+        default_from = f"{BRAND} <no-reply@liqscope.online>"
+        sender = (_env("LIQSCOPE_SMTP_FROM") or _env("LIQSCOPE_MAIL_API_FROM")
+                  or default_from)
+        if not key:
+            log.warning("LIQSCOPE_MAIL_API=%s задан, а LIQSCOPE_MAIL_API_KEY пуст — "
+                        "письма не уходят", api_kind)
+            return Mailer(None, sender=sender, public_url=public_url, enabled=False)
+        transport = ApiTransport(
+            kind=api_kind, key=key,
+            secret=os.getenv("LIQSCOPE_MAIL_API_SECRET") or "",
+            sender=sender, url=_env("LIQSCOPE_MAIL_API_URL"),
+            timeout=float(_env("LIQSCOPE_SMTP_TIMEOUT", "15") or 15),
+            site=public_url,
+        )
+        return Mailer(transport, sender=sender, public_url=public_url, enabled=True)
     host = _env("LIQSCOPE_SMTP_HOST")
     if not host:
         return Mailer(None, sender=_env("LIQSCOPE_SMTP_FROM",

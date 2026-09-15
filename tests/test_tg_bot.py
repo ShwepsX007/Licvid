@@ -5,6 +5,7 @@ import asyncio
 import os
 import sys
 import tempfile
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -52,6 +53,36 @@ def _strip_anchors(text: str) -> str:
     """Убирает <a href="...">…</a> целиком — остаётся только видимый текст."""
     import re
     return re.sub(r"<a\s+href=\"[^\"]*\">.*?</a>", "", text, flags=re.S)
+
+
+class _Resp:
+    def __init__(self, payload):
+        self._p = payload
+
+    async def json(self, content_type=None):
+        return self._p
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+
+class _Session:
+    """Заглушка aiohttp-сессии: отдаёт заранее заданные ответы по порядку."""
+
+    def __init__(self, seq):
+        self.seq = list(seq)
+        self.posts = 0
+
+    def post(self, url, json=None, timeout=None):
+        self.posts += 1
+        return _Resp(self.seq.pop(0))
+
+
+async def _always_true(*a, **k):
+    return True
 
 
 @unittest.skipIf(not HAVE, "aiohttp/accounts")
@@ -617,6 +648,219 @@ class BotMenuTest(unittest.TestCase):
         self.assertEqual(self.store.admin_tg_ids(), [1001])
         self.store.set_banned(self.admin["id"], True)
         self.assertEqual(self.store.admin_tg_ids(), [])
+
+    def test_flood_wait_detects_429(self):
+        self.assertEqual(TelegramBot._flood_wait({"ok": True}), 0.0)
+        self.assertEqual(TelegramBot._flood_wait(
+            {"ok": False, "error_code": 400, "description": "Bad Request"}), 0.0)
+        self.assertEqual(TelegramBot._flood_wait(
+            {"ok": False, "error_code": 429,
+             "description": "Too Many Requests: retry after 7",
+             "parameters": {"retry_after": 7}}), 7.0)
+        # слишком длинный бан не ждём — иначе встанет опрос
+        self.assertEqual(TelegramBot._flood_wait(
+            {"ok": False, "error_code": 429, "parameters": {"retry_after": 600}}), 20.0)
+
+    def test_call_waits_and_retries_on_429(self):
+        """429 больше не теряет нажатие: ждём retry_after и повторяем."""
+        bot = self.bot
+        bot._session = _Session([
+            {"ok": False, "error_code": 429,
+             "description": "Too Many Requests: retry after 1"},
+            {"ok": True, "result": {"message_id": 5}},
+        ])
+        slept = []
+        orig = asyncio.sleep
+
+        async def fake_sleep(sec):
+            slept.append(sec)
+
+        asyncio.sleep = fake_sleep  # type: ignore
+        try:
+            res = asyncio.run(bot._call("sendMessage", {"chat_id": 1, "text": "x"}))
+        finally:
+            asyncio.sleep = orig  # type: ignore
+        self.assertTrue(res and res.get("ok"))
+        self.assertEqual(bot._session.posts, 2)
+        self.assertEqual(slept, [1.0])
+
+    def test_edit_retry_failure_is_not_reported_as_success(self):
+        """Правка, которую Telegram отверг, не должна считаться успешной."""
+        bot = self.bot
+        bot._session = _Session([
+            {"ok": False, "error_code": 400,
+             "description": "Bad Request: message is not modified"},
+            {"ok": False, "error_code": 400,
+             "description": "Bad Request: message to edit not found"},
+        ])
+        ok = asyncio.run(bot.edit(2002, 77, "текст", bot._menu(self.user)))
+        self.assertFalse(ok)
+        self.assertEqual(bot._session.posts, 2)  # была попытка повтора
+
+    def test_broken_screen_tells_user_instead_of_silence(self):
+        """Раньше исключение экрана глоталось: кнопка «просто не работала»."""
+        sent = []
+
+        async def fake_send(chat_id, text, markup=None, parse="HTML", silent=False):
+            sent.append(text)
+            return 1
+
+        self.bot.send = fake_send  # type: ignore
+        self.bot._ensure_channel = _always_true  # type: ignore
+        self.bot._screen = lambda user, data: (_ for _ in ()).throw(  # type: ignore
+            RuntimeError("boom"))
+        asyncio.run(self.bot._route_message({
+            "message": {"message_id": 5, "chat": {"id": 2002, "type": "private"},
+                        "from": {"id": 2002}, "text": "📊 Статистика"}}))
+        self.assertTrue(sent and "не открылся" in sent[0])
+
+    def test_callback_error_tells_user(self):
+        sent = []
+
+        async def fake_send(chat_id, text, markup=None, parse="HTML", silent=False):
+            sent.append(text)
+            return 1
+
+        async def fake_answer(cb_id, text=""):
+            return None
+
+        self.bot.send = fake_send  # type: ignore
+        self.bot.answer_cb = fake_answer  # type: ignore
+        self.bot._ensure_channel = _always_true  # type: ignore
+        self.bot._screen = lambda user, data: (_ for _ in ()).throw(  # type: ignore
+            RuntimeError("boom"))
+        asyncio.run(self.bot._on_callback({
+            "id": "cb1", "data": "stats", "from": {"id": 2002},
+            "message": {"message_id": 77, "chat": {"id": 2002, "type": "private"}}}))
+        self.assertTrue(sent and "не открылся" in sent[0])
+
+    def test_liq_button_survives_dead_store_reads(self):
+        """Лента — единственный экран без обращений к Store: он живёт всегда."""
+        text, _kb = self.bot._screen(self.user, "liq")
+        self.assertIn("Лента", text)
+
+    def test_watchdog_sees_dead_and_stalled_poll(self):
+        """Сторож ловит и мёртвую задачу, и зависший опрос."""
+        self.bot._last_ok_at = time.time()
+        self.assertTrue(self.bot._watchdog_problem())  # задачи опроса нет
+        self.bot._task = object()  # type: ignore  # «живая» заглушка
+
+        class _T:  # задача, которая уже завершилась
+            def done(self):
+                return True
+
+            def exception(self):
+                return RuntimeError("boom")
+
+        self.bot._task = _T()  # type: ignore
+        self.assertIn("остановилась", self.bot._watchdog_problem())
+
+        class _Alive:
+            def done(self):
+                return False
+
+        self.bot._task = _Alive()  # type: ignore
+        self.bot._last_ok_at = time.time()
+        self.assertEqual(self.bot._watchdog_problem(), "")
+
+        import tg_bot as tg
+        self.bot._last_ok_at = time.time() - (tg.POLL_STALE_SEC + 60)
+        self.assertIn("getUpdates", self.bot._watchdog_problem())
+
+    def test_watchdog_restart_notifies_and_recreates_task(self):
+        sent = []
+
+        async def fake_send(chat_id, text, markup=None, parse="HTML", silent=False):
+            sent.append((chat_id, text))
+            return 1
+
+        async def fake_poll():
+            await asyncio.sleep(3600)
+
+        async def scenario():
+            self.bot._poll = fake_poll  # type: ignore
+            self.bot.send = fake_send  # type: ignore
+            self.bot.running = True
+            self.bot._conflict_mode = True
+            self.bot._last_ok_at = time.time() - 10_000
+            self.bot._task = None
+            problem = self.bot._watchdog_problem()
+            await self.bot._watchdog_restart(problem)
+            task = self.bot._task
+            self.assertTrue(task is not None and not task.done())
+            self.assertFalse(self.bot._conflict_mode)
+            self.assertEqual(self.bot._watchdog_restarts, 1)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        asyncio.run(scenario())
+        self.assertEqual([c for c, _t in sent], [1001])
+        self.assertIn("перезапущен", sent[0][1])
+        self.assertIn("journalctl", sent[0][1])
+
+    def test_poll_status_exposes_liveness(self):
+        """running — флаг; по нему нельзя понять, живой ли опрос."""
+        st = self.bot.poll_status()
+        self.assertFalse(st["task_alive"])
+        self.assertIsNone(st["poll_ok_sec"])
+        self.assertEqual(st["send_fails"], 0)
+        self.bot._last_ok_at = time.time() - 5
+        self.bot._last_update_at = time.time() - 7
+        st = self.bot.poll_status()
+        self.assertGreaterEqual(st["poll_ok_sec"], 4)
+        self.assertGreaterEqual(st["last_update_sec"], 6)
+
+    def test_health_and_poll_line_show_stalled_poll(self):
+        import tg_bot as tg
+        self.bot.health_fn = lambda: {"sources": {}}
+        self.bot.ws_clients_fn = lambda: 0
+
+        class _Alive:
+            def done(self):
+                return False
+
+        self.bot.running = True
+        self.bot._task = _Alive()  # type: ignore
+        self.bot._last_ok_at = time.time() - (tg.POLL_STALE_SEC + 120)
+        self.assertIn("завис", self.bot.poll_line())
+        self.assertIn("завис", self.bot.poll_text())
+        text = self.bot._health_text()
+        self.assertIn("Бот:", text)
+
+    def test_call_429_sets_retry_pause(self):
+        """429: Telegram сам говорит, сколько ждать — иначе бот продлевает бан."""
+        self.assertEqual(TelegramBot._retry_after(
+            {"parameters": {"retry_after": 17}}), 17.0)
+        self.assertEqual(TelegramBot._retry_after(
+            {"description": "Too Many Requests: retry after 9"}), 9.0)
+        self.assertGreaterEqual(TelegramBot._retry_after({}), 1.0)
+
+    def test_start_restores_saved_offset(self):
+        async def fake_call(method, payload=None):
+            if method == "getMe":
+                return {"ok": True, "result": {"id": 42, "username": "liq_bot"}}
+            if method == "getUpdates":
+                await asyncio.sleep(3600)
+                return {"ok": True, "result": []}
+            return {"ok": True}
+
+        async def scenario():
+            self.bot._call = fake_call  # type: ignore
+            self.bot._channel_loop = lambda: asyncio.sleep(3600)  # type: ignore
+            self.store.set_setting("bot_offset:42", "555")
+            await self.bot.start()
+            self.assertTrue(self.bot.running)
+            self.assertEqual(self.bot._offset, 555)
+            st = self.bot.poll_status()
+            self.assertTrue(st["task_alive"])
+            self.assertIsNotNone(st["poll_ok_sec"])
+            await self.bot.stop()
+
+        asyncio.run(scenario())
+        self.assertFalse(self.bot.running)
 
 
 if __name__ == "__main__":

@@ -19,6 +19,11 @@ log = logging.getLogger("liqscope.bot")
 
 API = "https://api.telegram.org/bot{token}/{method}"
 DEFAULT_PUBLIC_URL = "https://liqscope.online"
+# Сторож опроса. Если успешного getUpdates не было дольше этого времени,
+# задача опроса считается зависшей и пересоздаётся: иначе «бот пишет уведомления,
+# но не видит кнопки» лечится только ручным перезапуском сервиса, а
+# /api/health при этом показывает running: true и fails: 0.
+POLL_STALE_SEC = float(os.getenv("LIQSCOPE_BOT_POLL_STALE_SEC", "180"))
 
 
 def normalize_public_url(url: str = "") -> str:
@@ -83,6 +88,18 @@ class TelegramBot:
         self._conflict_warned_at = 0.0  # когда последний раз слали 409-предупреждение
         self._conflict_mode = False     # конфликт: короткий опрос, быстрые повторы
         self._conflict_ok_streak = 0    # подряд успешных getUpdates в конфликт-режиме
+        # Диагностика и сторож. Без этих полей «бот молчит, а health зелёный»
+        # неотличим от «бот работает»: running — это флаг, выставленный один раз
+        # при старте, он не говорит, жива ли задача опроса и доходят ли ответы.
+        self._watchdog_task: Optional[asyncio.Task] = None
+        self._last_ok_at = 0.0        # последний успешный getUpdates
+        self._last_update_at = 0.0    # последний полученный апдейт
+        self._updates_seen = 0
+        self._send_fails = 0          # Telegram отказался принять сообщение (429/403/parse)
+        self._retry_after_until = 0.0  # пауза после 429 (flood control)
+        self._flood_warned_at = 0.0
+        self._watchdog_restarts = 0
+        self._saved_offset = 0
 
     @property
     def enabled(self) -> bool:
@@ -224,6 +241,8 @@ class TelegramBot:
         if not self.token:
             log.warning("LIQSCOPE_BOT_TOKEN не задан — Telegram-бот выключен")
             return
+        if self.running:
+            return
         # getUpdates живёт до 50 с, остальные методы — короткие.
         # total на сессии не ставим: иначе длинный long-poll съедает лимит
         # и следующий edit/answer может оборваться.
@@ -231,9 +250,19 @@ class TelegramBot:
             timeout=aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=70),
             connector=aiohttp.TCPConnector(limit=8),
         )
-        me = await self._call("getMe")
+        # getMe на старте может отвалиться (сеть, 5xx у Telegram). Раньше в этом
+        # случае бот молча оставался без опроса — кнопки не работали до
+        # перезапуска сервиса. Повторяем несколько раз.
+        me = None
+        for attempt in range(5):
+            me = await self._call("getMe")
+            if me and me.get("ok"):
+                break
+            log.warning("getMe не удался (%d/5): %s", attempt + 1,
+                        (me or {}).get("description") or "нет ответа")
+            await asyncio.sleep(min(15.0, 3.0 * (attempt + 1)))
         if not me or not me.get("ok"):
-            log.error("Не удалось получить бота getMe: %s", me)
+            log.error("Не удалось получить бота getMe: %s — опрос не запущен", me)
             return
         self.username = me["result"]["username"]
         self.bot_id = int(me["result"]["id"])
@@ -241,14 +270,28 @@ class TelegramBot:
         if dw and not dw.get("ok"):
             log.error("Не удалось снять вебхук: %s — getUpdates может конфликтовать",
                       dw.get("description"))
+        # offset переживает рестарт: иначе Telegram отдаёт старую очередь
+        # апдейтов, и первые минуты после перезапуска бот отвечает «прошлым»
+        # нажатиям, а свежие кнопки ждут своей очереди.
+        try:
+            # Ключ привязан к id бота: у разных ботов update_id нумеруются
+            # независимо, и чужой offset заставил бы нового бота пропускать
+            # апдейты (выглядит как «кнопки не работают после смены токена»).
+            self._offset = int(
+                self.store.get_setting(f"bot_offset:{self.bot_id}", "0") or 0)
+        except (TypeError, ValueError, AttributeError):
+            self._offset = 0
+        self._saved_offset = self._offset
         self.running = True
+        self._last_ok_at = time.time()
         self._task = asyncio.create_task(self._poll(), name="tg-bot")
         self._digest_task = asyncio.create_task(self._channel_loop(), name="tg-channel")
-        log.info("Telegram-бот @%s запущен", self.username)
+        self._watchdog_task = asyncio.create_task(self._watchdog(), name="tg-watchdog")
+        log.info("Telegram-бот @%s запущен (offset=%s)", self.username, self._offset)
 
     async def stop(self) -> None:
         self.running = False
-        for t in (self._task, self._digest_task):
+        for t in (self._task, self._digest_task, self._watchdog_task):
             if not t:
                 continue
             t.cancel()
@@ -258,6 +301,7 @@ class TelegramBot:
                 pass
         self._task = None
         self._digest_task = None
+        self._watchdog_task = None
         if self._session:
             await self._session.close()
             self._session = None
@@ -269,18 +313,69 @@ class TelegramBot:
         timeout = aiohttp.ClientTimeout(total=70, sock_read=70) if method == "getUpdates" \
             else aiohttp.ClientTimeout(total=15)
         try:
-            async with self._session.post(url, json=payload or {}, timeout=timeout) as r:
-                data = await r.json(content_type=None)
+            for attempt in (0, 1):
+                async with self._session.post(url, json=payload or {},
+                                              timeout=timeout) as r:
+                    data = await r.json(content_type=None)
+                # 429 (flood control) от Telegram: ждём столько, сколько сказано,
+                # и пробуем ещё раз — иначе нажатие кнопки молча теряется,
+                # а бот выглядит «сломанным», пока лимит не остынет.
+                wait = self._flood_wait(data) if attempt == 0 else 0.0
+                if method == "getUpdates" or not wait:
+                    break
+                log.warning("tg %s: флуд-лимит, ждём %.0f с и повторяем",
+                            method, wait)
+                await asyncio.sleep(wait)
             if method != "getUpdates" and data and not data.get("ok"):
                 desc = str(data.get("description") or "")
                 # «message is not modified» — повторный клик по той же кнопке,
                 # для Telegram это не ошибка.
                 if "not modified" not in desc.lower():
-                    log.warning("tg %s: %s", method, desc)
+                    self._last_tg_err = desc
+                    self._send_fails += 1
+                    # chat_id в логе обязателен: иначе непонятно, кого именно
+                    # Telegram не пускает (флуд-лимит 429, бот заблокирован 403,
+                    # битый HTML) — а без этого «кнопки не работают» не отладить.
+                    who = (payload or {}).get("chat_id")
+                    log.warning("tg %s chat=%s: %s", method, who, desc)
+                    if "retry after" in desc.lower() or data.get("error_code") == 429:
+                        self._retry_after_until = time.time() + self._retry_after(data)
             return data
         except Exception as e:
+            if method != "getUpdates":
+                self._send_fails += 1
+                self._last_tg_err = f"{method}: {e}"
             log.warning("tg %s: %s", method, e)
             return None
+
+    @staticmethod
+    def _flood_wait(res: Optional[dict]) -> float:
+        """Сколько ждать перед повтором при 429. 0 — это не флуд-лимит."""
+        if not res or res.get("ok"):
+            return 0.0
+        desc = str(res.get("description") or "").lower()
+        code = res.get("error_code")
+        if code != 429 and "retry after" not in desc and "too many requests" not in desc:
+            return 0.0
+        sec = TelegramBot._retry_after(res)
+        # Дольше 20 с ждать смысла нет: пользователь всё равно уже не ждёт,
+        # а опрос и очередь обновлений встанут.
+        return min(sec, 20.0)
+
+    @staticmethod
+    def _retry_after(res: Optional[dict]) -> float:
+        """Сколько секунд ждать после 429 (Telegram кладёт retry_after)."""
+        try:
+            params = (res or {}).get("parameters") or {}
+            sec = float(params.get("retry_after") or 0)
+            if sec > 0:
+                return sec
+        except (TypeError, ValueError, AttributeError):
+            pass
+        desc = str((res or {}).get("description") or "")
+        tail = desc.split("retry after", 1)[-1]
+        digits = "".join(ch for ch in tail if ch.isdigit())
+        return max(1.0, float(digits)) if digits else 5.0
 
     @staticmethod
     def _inline_markup(markup: Optional[dict]) -> dict:
@@ -342,7 +437,10 @@ class TelegramBot:
             t = body.get("text") or ""
             body["text"] = t[:-1] if t.endswith("\u200b") else (t + "\u200b")
             res2 = await self._call("editMessageText", body)
-            return bool(res2 and res2.get("ok")) or True
+            # Раньше здесь стояло `or True`: правка, которую Telegram не принял
+            # (флуд-лимит, сообщение удалено, битый HTML), считалась успешной —
+            # и меню молча не перерисовывалось, а show_menu не слал новое.
+            return bool(res2 and res2.get("ok"))
         if "parse entit" in desc or "can't find end of the entity" in desc:
             body.pop("parse_mode", None)
             res = await self._call("editMessageText", body)
@@ -374,6 +472,10 @@ class TelegramBot:
                 return True
         new_id = await self.send(chat_id, text, markup, silent=True)
         if not new_id:
+            # Ни правка, ни новое сообщение не прошли: без этой строки в логе
+            # вообще ничего не видно, хотя для пользователя бот «просто молчит».
+            log.error("меню не доставлено chat=%s: %s", chat_id,
+                      self._last_tg_err or "Telegram не ответил")
             return False
         self._menu_msg[chat_id] = int(new_id)
         return True
@@ -651,6 +753,11 @@ class TelegramBot:
         fails = 0
         while self.running:
             try:
+                # 429 (flood control): молотить дальше нельзя — Telegram продлевает
+                # запрет, и бот не видит кнопки. Ждём столько, сколько сказано.
+                pause = self._retry_after_until - time.time()
+                if pause > 0:
+                    await asyncio.sleep(min(60.0, pause))
                 res = await self._call("getUpdates", {
                     "offset": self._offset,
                     # в конфликт-режиме короткие опросы: быстрее перехватываем
@@ -665,6 +772,7 @@ class TelegramBot:
                     fails += 1
                     await asyncio.sleep(sleep_s)
                     continue
+                self._last_ok_at = time.time()
                 if fails:
                     log.info("getUpdates снова в строю после %d сбоев — "
                              "кнопки и команды опять отвечают", fails)
@@ -679,10 +787,24 @@ class TelegramBot:
                                  "возвращаем обычный опрос")
                 for upd in res.get("result") or []:
                     self._offset = int(upd["update_id"]) + 1
+                    self._last_update_at = time.time()
+                    self._updates_seen += 1
                     try:
                         await self._on_update(upd)
                     except Exception as e:
-                        log.warning("update %s: %s", upd.get("update_id"), e)
+                        # С трейсбеком: без него в журнале видно только текст
+                        # ошибки, и «кнопка молчит» неоткуда отладить.
+                        log.exception("update %s: %s", upd.get("update_id"), e)
+                # offset на диск: чтобы после перезапуска не разбирать заново
+                # старую очередь апдейтов (иначе первые минуты бот отвечает
+                # вчерашним нажатиям, а свежие кнопки ждут очереди).
+                if self._offset and self._offset != self._saved_offset:
+                    try:
+                        self.store.set_setting(f"bot_offset:{self.bot_id}",
+                                               str(self._offset))
+                        self._saved_offset = self._offset
+                    except Exception as e:
+                        log.debug("offset не сохранён: %s", e)
                 if self._conflict_mode:
                     await asyncio.sleep(0.5)
             except asyncio.CancelledError:
@@ -691,19 +813,147 @@ class TelegramBot:
                 log.warning("poll: %s", e)
                 await asyncio.sleep(3)
 
+    def _watchdog_problem(self) -> str:
+        """Пустая строка — опрос жив; иначе причина, по которой его надо пересоздать."""
+        task = self._task
+        if task is None or task.done():
+            exc = None
+            if task is not None:
+                try:
+                    exc = task.exception()
+                except (asyncio.CancelledError, Exception):
+                    exc = None
+            return f"задача опроса остановилась ({exc!r})"
+        if self._last_ok_at and (time.time() - self._last_ok_at) > POLL_STALE_SEC:
+            return ("от Telegram не было успешных getUpdates "
+                    f"{time.time() - self._last_ok_at:.0f} с")
+        return ""
+
+    async def _watchdog_restart(self, reason: str) -> None:
+        """Пересоздаёт задачу опроса и говорит об этом админам.
+
+        Без этого «running: true, fails: 0, а кнопки не отвечают» лечится
+        только ручным `systemctl restart`.
+        """
+        log.error("сторож бота: %s — пересоздаю опрос", reason)
+        self._watchdog_restarts += 1
+        self._poll_fails = 0
+        self._conflict_mode = False
+        self._conflict_ok_streak = 0
+        self._retry_after_until = 0.0
+        self._last_ok_at = time.time()
+        old = self._task
+        if old is not None and not old.done():
+            old.cancel()
+        self._task = asyncio.create_task(self._poll(), name="tg-bot")
+        text = ("♻️ <b>Опрос Telegram перезапущен</b>\n"
+                f"{_esc(reason)}. "
+                f"Перезапусков сторожем: {self._watchdog_restarts}.\n"
+                "Кнопки и команды снова должны отвечать. Если это повторяется, "
+                "смотрите журнал: <code>journalctl -u licvid -n 200</code>")
+        for tg_id in self._admin_tg_ids():
+            try:
+                await self.send(tg_id, text, parse="HTML")
+            except Exception as e:
+                log.warning("сторож: не смог предупредить %s: %s", tg_id, e)
+
+    async def _watchdog(self) -> None:
+        """Сторож опроса: зависшую или упавшую задачу getUpdates пересоздаём.
+
+        «Бот отвечает какое-то время после перезапуска, потом молчит, а
+        /api/health показывает running: true и fails: 0» — ровно этот случай:
+        флаг жив, а опрос стоит.
+        """
+        while self.running:
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                break
+            if not self.running:
+                break
+            problem = self._watchdog_problem()
+            if problem:
+                await self._watchdog_restart(problem)
+
     def poll_status(self) -> Dict[str, Any]:
         """Срез состояния опроса getUpdates для /api/health.
 
         conflict=true — токен параллельно дёргает чужой процесс: команды
         и кнопки могут приходить ему, а не нам.
+        task_alive/poll_ok_sec/last_update_sec отвечают на вопрос «бот правда
+        живой?»: running — это флаг, выставленный при старте, он ничего не
+        говорит ни о задаче опроса, ни о том, доходят ли ответы до Telegram.
         """
+        now = time.time()
         return {
             "enabled": bool(self.token),
             "running": bool(self.running),
             "fails": self._poll_fails,
             "conflict": bool(self._conflict_mode),
             "offset": int(self._offset),
+            "task_alive": bool(self._task and not self._task.done()),
+            "poll_ok_sec": (round(now - self._last_ok_at, 1)
+                            if self._last_ok_at else None),
+            "last_update_sec": (round(now - self._last_update_at, 1)
+                                if self._last_update_at else None),
+            "updates_seen": int(self._updates_seen),
+            "send_fails": int(self._send_fails),
+            "last_err": (self._last_tg_err or "")[:160],
+            "watchdog_restarts": int(self._watchdog_restarts),
+            "waits": (len(self._wait_alert) + len(self._wait_tpl)
+                      + len(self._wait_broadcast)),
         }
+
+    def poll_line(self) -> str:
+        """Одна строка о самом боте — видно прямо в чате, без curl."""
+        st = self.poll_status()
+        if not st["enabled"]:
+            return "🤖 Бот: токен не задан"
+        if not st["running"] or not st["task_alive"]:
+            return ("🤖 Бот: ⚠️ опрос не идёт "
+                    f"(running={st['running']}, задача={st['task_alive']}) — "
+                    "кнопки не отвечают, нужен перезапуск сервиса")
+        ok = st["poll_ok_sec"]
+        bits = []
+        if ok is not None and ok > POLL_STALE_SEC:
+            bits.append(f"⚠️ опрос завис {ok:.0f} с")
+        else:
+            bits.append(f"опрос ок ({'—' if ok is None else f'{ok:.0f} с'})")
+        fresh = st["last_update_sec"]
+        bits.append("апдейт " + ("—" if fresh is None else f"{fresh:.0f} с назад"))
+        if st["send_fails"]:
+            bits.append(f"отказов Telegram {st['send_fails']}: "
+                        f"{_esc(st['last_err'][:60])}")
+        if st["conflict"]:
+            bits.append("409: токен тянет кто-то ещё")
+        if st["watchdog_restarts"]:
+            bits.append(f"перезапусков сторожем {st['watchdog_restarts']}")
+        return "🤖 Бот: " + " · ".join(bits)
+
+    def poll_text(self) -> str:
+        """Подробный разбор состояния бота (команда /bot)."""
+        st = self.poll_status()
+        def ago(v):
+            return "—" if v is None else f"{v:.0f} с назад"
+        lines = [
+            "<b>🤖 Состояние бота</b>",
+            f"опрос: {'идёт' if st['running'] and st['task_alive'] else 'НЕ идёт'}"
+            f" · задача опроса {'жива' if st['task_alive'] else 'мертва'}"
+            + (f" · завис {st['poll_ok_sec']:.0f} с" if st['poll_ok_sec'] and
+               st['poll_ok_sec'] > POLL_STALE_SEC else ""),
+            f"успешный getUpdates: {ago(st['poll_ok_sec'])}",
+            f"последний апдейт: {ago(st['last_update_sec'])}"
+            f" · обработано апдейтов: {st['updates_seen']}",
+            f"сбоев getUpdates подряд: {st['fails']}"
+            f" · 409-конфликт: {'да' if st['conflict'] else 'нет'}",
+            f"отказов Telegram (отправка/правка): {st['send_fails']}"
+            + (f"\nпоследняя: <code>{_esc(st['last_err'])}</code>"
+               if st["last_err"] else ""),
+            f"перезапусков сторожем: {st['watchdog_restarts']}"
+            f" · чатов с меню: {len(self._menu_msg)}"
+            f" · ожиданий ввода: {st['waits']}",
+        ]
+        return "\n".join(lines) + self.site_footer()
 
     async def _poll_fail_step(self, res: Optional[dict]) -> float:
         """Классифицирует ошибку getUpdates, возвращает секунды до повтора.
@@ -763,11 +1013,11 @@ class TelegramBot:
             "которая всё ещё висит на сервере.\n"
             "Один токен может опрашивать только один процесс.\n"
             "На сервере:\n"
-            "• <code>ps aux | grep -i tg_bot</code> — ищем дубли (особенно "
-            "запущенные давно);\n"
+            "• <code>ps aux | grep -E \"main\\.py|tg_bot|uvicorn|server:app\"</code> — "
+            "ищем дубли (особенно запущенные давно);\n"
             "• <code>systemctl list-units | grep -i liq</code> — нет ли второго "
-            "сервиса;\n"
-            "• убили лишнее — <code>systemctl restart liqscope</code>, меню "
+            "сервиса (старый liqscope из /root/LiqScope занимает тот же порт 8000);\n"
+            "• убили лишнее — <code>systemctl restart licvid</code>, меню "
             "оживёт.\n"
             "Напоминаю каждые ~30 минут, пока конфликт не исчезнет."
         )
@@ -892,7 +1142,18 @@ class TelegramBot:
             if nav == "al":
                 await self.show_menu(chat_id, self._alert_text(user), self._alert_kb(user))
                 return
-            body, kb = self._screen(user, nav)
+            try:
+                body, kb = self._screen(user, nav)
+            except Exception as e:
+                # «Кнопка молчит» не должна быть немой: если экран упал,
+                # пользователь видит причину, а не тишину.
+                log.exception("экран %s: %s", nav, e)
+                await self.show_menu(
+                    chat_id,
+                    "⚠️ Экран не открылся: <code>" + _esc(str(e)[:120])
+                    + "</code>\nОшибка записана в журнал сервиса.",
+                    self._reply_kb(user))
+                return
             await self.show_menu(chat_id, body, kb)
             return
         if text.startswith("/digest") and user.get("is_admin"):
@@ -907,6 +1168,8 @@ class TelegramBot:
             await self.show_menu(chat_id, self._stats_text(), self._reply_kb(user))
         elif text.startswith("/status") or text.startswith("/health"):
             await self.show_menu(chat_id, self._health_text(), self._reply_kb(user))
+        elif text.startswith("/bot"):
+            await self.show_menu(chat_id, self.poll_text(), self._reply_kb(user))
         elif text.startswith("/liq"):
             await self.show_menu(chat_id, self._liq_text(), self._reply_kb(user))
         elif text.startswith("/services"):
@@ -979,7 +1242,17 @@ class TelegramBot:
                 log.warning("меню не обновилось data=%s chat=%s msg=%s",
                             data, chat_id, message_id)
         except Exception as e:
-            log.warning("cb %s: %s", data, e)
+            log.exception("cb %s: %s", data, e)
+            # Раньше ошибка экрана оставалась только в журнале, а для
+            # пользователя кнопка просто «ничего не делала».
+            try:
+                await self.send(
+                    chat_id,
+                    "⚠️ Экран не открылся: <code>" + _esc(str(e)[:120])
+                    + "</code>\nОшибка записана в журнал сервиса.",
+                    parse="HTML")
+            except Exception:
+                pass
 
     def _screen(self, user: dict, data: str) -> tuple:
         """Текст и клавиатура экрана."""
@@ -1281,6 +1554,7 @@ class TelegramBot:
             "/liq — последние события",
             "/services — сервисы кабинета",
             "/alerts — алерты по объёму",
+            "/bot — состояние опроса бота",
         ]
         if user.get("is_admin"):
             lines += [
@@ -1384,6 +1658,10 @@ class TelegramBot:
             f"📡 В эфире <b>{live}/{total or '—'}</b> · "
             f"событий в памяти: {self.fmt_int(events_total)} · "
             f"зрителей WS: {self.ws_clients_fn()}")
+        # Строка о самом боте: по ней видно «молчит, потому что не опрашивает»
+        # прямо из чата, без curl к /api/health.
+        lines.append("")
+        lines.append(self.poll_line())
         return "\n".join(lines) + self.site_footer()
 
     def _liq_line(self, x: dict) -> str:

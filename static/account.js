@@ -8,6 +8,53 @@
             loginTitle: "Вход через Telegram",
             loginLead: "Кабинет и бот — один аккаунт. Нажмите кнопку, подтвердите /start в Telegram — и вернитесь сюда.",
             openBot: "Открыть бота Telegram",
+            /* почта — основной вход */
+            authTitleLogin: "Вход в кабинет",
+            authTitleRegister: "Регистрация по почте",
+            authTitleLink: "Вход по ссылке из письма",
+            authLeadLogin: "Почта и пароль. Telegram можно привязать позже — для сигналов.",
+            authLeadRegister: "Почта, пароль — и письмо со ссылкой для подтверждения. Без подтверждения вход закрыт.",
+            authLeadLink: "Пришлём ссылку для входа — пароль помнить не нужно.",
+            tabLogin: "Вход", tabRegister: "Регистрация", tabLink: "Ссылка на почту",
+            labelName: "Имя (необязательно)", labelEmail: "Почта", labelPass: "Пароль",
+            submitLogin: "Войти", submitRegister: "Создать аккаунт", submitLink: "Прислать ссылку",
+            forgot: "Забыли пароль?", resendVerify: "Отправить письмо ещё раз",
+            tgAlt: "Вход через Telegram", tgAltBadge: "запасной способ",
+            tgAltLead: "Если почта недоступна — войдите тем же аккаунтом через Telegram.",
+            registerSent: "Письмо отправлено на {email}. Откройте его и нажмите «Подтвердить почту».",
+            linkSent: "Если адрес зарегистрирован, письмо со ссылкой уже в пути. Ссылка живёт 30 минут.",
+            verifySent: "Отправили письмо ещё раз — проверьте почту и папку «Спам».",
+            needEmail: "Введите почту.",
+            needPass: "Введите пароль.",
+            weakShort: "Пароль короче 8 символов.",
+            weakSimple: "Такой пароль слишком простой — придумайте посложнее.",
+            verifyBad: "Ссылка подтверждения не подошла — запросите новую.",
+            verifyUsed: "Ссылка уже использована. Запросите новую.",
+            verifyExpired: "Ссылка устарела — запросите новую.",
+            verifyFirst: "Сначала подтвердите почту по ссылке из письма.",
+            linkBad: "Ссылка для входа не подошла — запросите новую.",
+            mailOff: "Отправка писем пока не настроена на сервере — напишите администратору.",
+            emailUnverified: "подтвердите почту",
+            emailVerified: "почта подтверждена",
+            tgLinked: "Telegram привязан",
+            tgNotLinked: "Telegram не привязан",
+            tgWhy: "сигналы алертов приходят в бота, привяжите — и они не потеряются",
+            tgLink: "Привязать Telegram",
+            tgUnlink: "Отвязать",
+            tgLinkOpened: "Откройте бота и нажмите Start — привязка подтвердится здесь сама.",
+            tgLinkOk: "Telegram привязан — сигналы придут в бота.",
+            tgLinkTaken: "Этот Telegram уже привязан к другому аккаунту с почтой.",
+            tgUnlinkOk: "Telegram отвязан. Вход по почте и письма работают по-прежнему.",
+            tgUnlinkSure: "Отвязать Telegram? Сигналы в бота перестанут приходить.",
+            resetTitle: "Новый пароль",
+            resetLead: "Придумайте пароль для входа в кабинет по почте.",
+            resetPass2: "Пароль ещё раз",
+            resetSave: "Сохранить пароль",
+            resetMismatch: "Пароли не совпадают.",
+            resetOk: "Пароль сохранён — открываем кабинет…",
+            resetBad: "Ссылка сброса не подошла — запросите новую на странице входа.",
+            emailCol: "Почта",
+            svcLocked: "Сервисы включатся после подтверждения почты. Письмо со ссылкой уже отправлено — проверьте адрес и папку «Спам» (кнопка «Отправить письмо ещё раз» выше).",
             waiting: "Ждём подтверждение в боте…",
             ok: "Готово, открываем кабинет",
             noBot: "Бот ещё не настроен. Администратор задаёт LIQSCOPE_BOT_TOKEN.",
@@ -41,6 +88,52 @@
             loginTitle: "Sign in with Telegram",
             loginLead: "Cabinet and bot share one account. Open Telegram, press Start, then come back.",
             openBot: "Open Telegram bot",
+            authTitleLogin: "Sign in",
+            authTitleRegister: "Sign up with email",
+            authTitleLink: "Sign in by email link",
+            authLeadLogin: "Email and password. Link Telegram later to get signal alerts.",
+            authLeadRegister: "Email, password, and a confirmation letter. Without it sign-in stays closed.",
+            authLeadLink: "We will email you a one-time sign-in link — no password needed.",
+            tabLogin: "Sign in", tabRegister: "Sign up", tabLink: "Email link",
+            labelName: "Name (optional)", labelEmail: "Email", labelPass: "Password",
+            submitLogin: "Sign in", submitRegister: "Create account", submitLink: "Send the link",
+            forgot: "Forgot password?", resendVerify: "Resend the letter",
+            tgAlt: "Sign in with Telegram", tgAltBadge: "backup way",
+            tgAltLead: "If email is unavailable, use Telegram for the same account.",
+            registerSent: "Letter sent to {email}. Open it and press “Confirm email”.",
+            linkSent: "If the address is registered, the link is on its way. It lives 30 minutes.",
+            verifySent: "Letter sent again — check your inbox and the spam folder.",
+            needEmail: "Enter your email.",
+            needPass: "Enter your password.",
+            weakShort: "Password is shorter than 8 characters.",
+            weakSimple: "That password is too simple — pick a stronger one.",
+            verifyBad: "This confirmation link did not work — request a new one.",
+            verifyUsed: "The link was already used. Request a new one.",
+            verifyExpired: "The link expired — request a new one.",
+            verifyFirst: "Confirm your email using the letter first.",
+            linkBad: "This sign-in link did not work — request a new one.",
+            mailOff: "Email sending is not configured on the server yet — ping the admin.",
+            emailUnverified: "confirm your email",
+            emailVerified: "email confirmed",
+            tgLinked: "Telegram linked",
+            tgNotLinked: "Telegram not linked",
+            tgWhy: "alert signals arrive in the bot — link it so they are not lost",
+            tgLink: "Link Telegram",
+            tgUnlink: "Unlink",
+            tgLinkOpened: "Open the bot and press Start — the link will confirm here.",
+            tgLinkOk: "Telegram linked — alerts will arrive in the bot.",
+            tgLinkTaken: "This Telegram is already linked to another email account.",
+            tgUnlinkOk: "Telegram unlinked. Email sign-in keeps working.",
+            tgUnlinkSure: "Unlink Telegram? Bot alerts will stop.",
+            resetTitle: "New password",
+            resetLead: "Pick a password for signing in with your email.",
+            resetPass2: "Password again",
+            resetSave: "Save password",
+            resetMismatch: "Passwords do not match.",
+            resetOk: "Password saved — opening the cabinet…",
+            resetBad: "This reset link did not work — request a new one on the sign-in page.",
+            emailCol: "Email",
+            svcLocked: "Services unlock once your email is confirmed. The letter with the link is on its way — check the inbox and spam folder (use “Resend the letter” above).",
             waiting: "Waiting for confirmation in the bot…",
             ok: "Done — opening the cabinet",
             noBot: "Bot is not configured. Set LIQSCOPE_BOT_TOKEN.",
@@ -71,7 +164,15 @@
             return T[c] ? c : "ru";
         } catch (e) { return "ru"; }
     }
-    function t(k) { return (T[lang()] || T.ru)[k] || (T.en[k] || k); }
+    function t(k, vars) {
+        var s = (T[lang()] || T.ru)[k] || (T.en[k] || k);
+        if (vars) {
+            Object.keys(vars).forEach(function (name) {
+                s = s.replace(new RegExp("\\{" + name + "\\}", "g"), vars[name]);
+            });
+        }
+        return s;
+    }
 
     async function api(path, opts) {
         var r = await fetch(path, Object.assign({
@@ -191,16 +292,54 @@
     };
 
     /* ---------- cabinet ---------- */
-    function renderCabinet(payload, services) {
+    function renderCabinet(payload, services, locked) {
         var u = (payload && payload.user) || payload || {};
         var notice = (payload && payload.site_notice) || "";
         $("cab-name") && ($("cab-name").textContent = u.display_name);
         $("cab-role") && ($("cab-role").textContent = u.is_admin ? t("roleAdmin") : t("roleUser"));
         $("cab-role") && $("cab-role").classList.toggle("badge-admin", !!u.is_admin);
+        var metaParts = [];
+        if (u.email) metaParts.push(u.email);
         $("cab-meta") && ($("cab-meta").textContent =
-            (u.username ? "@" + u.username + " · " : "") +
-            "id " + u.tg_id + " · " + t("member") + " " + fmtDate(u.created_at));
+            metaParts.concat([
+                u.tg_linked ? ("@" + (u.username || "telegram")) : t("tgNotLinked"),
+                t("member") + " " + fmtDate(u.created_at),
+            ]).join(" · "));
         fillAvatar($("cab-avatar"), u);
+        var roleBadge = $("cab-role");
+        if (roleBadge) roleBadge.textContent = u.is_admin ? t("roleAdmin") : t("roleUser");
+        // метка подтверждения почты рядом с ролью
+        var verBadge = $("cab-verified");
+        if (verBadge) {
+            if (!u.email) verBadge.classList.add("hidden");
+            else {
+                verBadge.classList.remove("hidden");
+                verBadge.textContent = u.email_verified ? t("emailVerified") : t("emailUnverified");
+                verBadge.className = "badge" + (u.email_verified ? "" : " badge-warn");
+            }
+        }
+        // баннер «подтвердите почту» с повторной отправкой письма
+        var vbar = $("verify-bar");
+        if (vbar) {
+            if (u.email && !u.email_verified) {
+                vbar.classList.remove("hidden");
+                var hint = $("verify-bar-hint");
+                if (hint) hint.textContent = t("verifyFirst");
+            } else {
+                vbar.classList.add("hidden");
+            }
+        }
+        var vresend = $("verify-resend");
+        if (vresend) {
+            vresend.onclick = function () {
+                api("/api/auth/email/resend", {
+                    method: "POST", body: JSON.stringify({ email: u.email, language: lang() }),
+                }).then(function (d) {
+                    if (vresend) vresend.textContent = d.ok ? t("verifySent") : (d.error || "error");
+                });
+            };
+        }
+        paintTgCard(u, payload);
         var botLink = $("cab-bot-link");
         if (botLink) {
             var href = (payload && payload.bot_link) || "";
@@ -219,6 +358,11 @@
         }
         var box = $("svc-acc");
         if (!box) return;
+        if (locked) {
+            // жёсткий режим: сервисы недоступны, пока почта не подтверждена
+            box.innerHTML = '<div class="notice">' + t("svcLocked") + "</div>";
+            return;
+        }
         var open = "";
         try { open = localStorage.getItem("liqscope.svc.open") || ""; } catch (e) { open = ""; }
         var list = services || [];
@@ -267,7 +411,80 @@
         bootAlerts();
     }
 
+    var tgLinkTimer = null;
+
+    /* ---------- Telegram в кабинете: привязка и отвязка ---------- */
+    function paintTgCard(u, payload) {
+        var box = $("tg-card");
+        if (!box) return;
+        var state = $("tg-state");
+        var btn = $("tg-link");
+        var off = $("tg-unlink");
+        if (state) {
+            state.textContent = u.tg_linked
+                ? (t("tgLinked") + (u.username ? " @" + u.username : ""))
+                : t("tgNotLinked") + " — " + t("tgWhy");
+        }
+        if (btn) {
+            btn.classList.toggle("hidden", !!u.tg_linked);
+            btn.disabled = !(payload && payload.bot_ready);
+            btn.title = (payload && payload.bot_ready) ? "" : t("noBot");
+        }
+        if (off) off.classList.toggle("hidden", !u.tg_linked);
+    }
+
+    function linkTelegram() {
+        var st = $("tg-state");
+        api("/api/auth/telegram/link", { method: "POST" }).then(function (d) {
+            if (!d.ok) {
+                if (st) st.textContent = d.error === "no_bot" ? t("noBot") : (d.hint || d.error || "error");
+                return;
+            }
+            if (st) st.textContent = t("tgLinkOpened");
+            window.open(d.bot_link, "_blank", "noopener");
+            var left = d.expires_in || 900;
+            tgLinkTimer && clearInterval(tgLinkTimer);
+            tgLinkTimer = setInterval(function () {
+                left -= 3;
+                api("/api/auth/telegram/link/status?nonce=" + encodeURIComponent(d.nonce))
+                    .then(function (w) {
+                        if (w.ok) {
+                            clearInterval(tgLinkTimer);
+                            if (st) st.textContent = t("tgLinkOk");
+                            bootCabinet();
+                            return;
+                        }
+                        if (w.error === "taken") {
+                            clearInterval(tgLinkTimer);
+                            if (st) st.textContent = t("tgLinkTaken");
+                            return;
+                        }
+                        if (w.error === "expired" || w.error === "unknown" || left <= 0) {
+                            clearInterval(tgLinkTimer);
+                        }
+                    });
+            }, 3000);
+        });
+    }
+
+    function unlinkTelegram() {
+        if (!window.confirm(t("tgUnlinkSure"))) return;
+        api("/api/auth/telegram/unlink", { method: "POST" }).then(function (d) {
+            var st = $("tg-state");
+            if (d.ok) {
+                if (st) st.textContent = t("tgUnlinkOk");
+                bootCabinet();
+            } else if (st) {
+                st.textContent = d.error || "error";
+            }
+        });
+    }
+
     function bootCabinet() {
+        var tgBtn = $("tg-link");
+        if (tgBtn && !tgBtn._bound) { tgBtn._bound = true; tgBtn.addEventListener("click", linkTelegram); }
+        var tgOff = $("tg-unlink");
+        if (tgOff && !tgOff._bound) { tgOff._bound = true; tgOff.addEventListener("click", unlinkTelegram); }
         Promise.all([
             api("/api/auth/me"),
             api("/api/account/services"),
@@ -275,7 +492,10 @@
             var me = arr[0];
             if (!me.user) { location.href = "/login?next=/cabinet"; return; }
             paintNav(me.user);
-            renderCabinet(me, (arr[1] && arr[1].services) || []);
+            var locked = !!(me.user.email && !me.user.email_verified);
+            var services = (arr[1] && arr[1].services) || [];
+            if (arr[1] && arr[1].error) services = [];   // почта не подтверждена
+            renderCabinet(me, services, locked);
             var cabLo = $("cab-logout");
             if (cabLo) cabLo.addEventListener("click", function () {
                 api("/api/auth/logout", { method: "POST" }).then(function () {
@@ -701,15 +921,20 @@
         var tb = $("users-body");
         if (!tb) return;
         tb.innerHTML = (list || []).map(function (u) {
-            var un = u.username ? "@" + u.username : "—";
             var role = u.is_admin ? "★" : "";
+            var email = u.email
+                ? (esc(u.email) + (u.email_verified ? "" : " <span class='badge badge-warn'>не подтв.</span>"))
+                : "<span class='meta'>—</span>";
+            var tg = u.tg_linked
+                ? (u.username ? "@" + esc(u.username) : "") + " <span class='meta mono'>" + u.tg_id + "</span>"
+                : "<span class='meta'>не привязан</span>";
             var banBtn = u.is_banned
                 ? '<button class="btn btn-ghost btn-small" data-ban="0" data-id="' + u.id + '">' + t("unban") + "</button>"
                 : '<button class="btn btn-danger btn-small" data-ban="1" data-id="' + u.id + '">' + t("ban") + "</button>";
             return "<tr class='" + (u.is_banned ? "banned" : "") + "'>" +
-                "<td>" + (u.display_name || "") + " " + role + "</td>" +
-                "<td class='mono'>" + un + "</td>" +
-                "<td class='mono'>" + u.tg_id + "</td>" +
+                "<td>" + esc(u.display_name || "") + " " + role + "</td>" +
+                "<td class='mono'>" + email + "</td>" +
+                "<td class='mono'>" + tg + "</td>" +
                 "<td>" + fmtDate(u.last_seen) + "</td>" +
                 "<td>" + banBtn + "</td></tr>";
         }).join("") || "<tr><td colspan='5'>—</td></tr>";
@@ -902,30 +1127,196 @@
         });
     }
 
+    /* ---------- login: почта как основной вход ---------- */
+    var authTab = "login";
+
+    function setStatus(el, text, kind) {
+        if (!el) return;
+        el.className = "login-status" + (kind ? " " + kind : "");
+        el.textContent = text || "";
+    }
+
+    function paintAuthTab(tab) {
+        authTab = tab || "login";
+        var isLogin = authTab === "login";
+        var isReg = authTab === "register";
+        var isLink = authTab === "link";
+        document.querySelectorAll(".auth-tab").forEach(function (b) {
+            b.classList.toggle("active", b.getAttribute("data-tab") === authTab);
+        });
+        var title = $("auth-title"), lead = $("auth-lead");
+        if (title) title.textContent = t(isReg ? "authTitleRegister" : (isLink ? "authTitleLink" : "authTitleLogin"));
+        if (lead) lead.textContent = t(isReg ? "authLeadRegister" : (isLink ? "authLeadLink" : "authLeadLogin"));
+        var fName = $("field-name"), fPass = $("field-pass"), sub = $("email-submit");
+        if (fName) fName.classList.toggle("hidden", !isReg);
+        if (fPass) fPass.classList.toggle("hidden", isLink);
+        var pass = $("in-password");
+        if (pass) pass.setAttribute("autocomplete", isReg ? "new-password" : "current-password");
+        if (sub) sub.textContent = t(isReg ? "submitRegister" : (isLink ? "submitLink" : "submitLogin"));
+        try { localStorage.setItem("liqscope.auth.tab", authTab); } catch (e) {}
+        setStatus($("login-status"), "");
+    }
+
+    function authError(d) {
+        var code = d && d.error;
+        if (d && d.hint) return d.hint;
+        if (code === "email_unverified") return t("verifyFirst");
+        if (code === "short") return t("weakShort");
+        if (code === "weak") return t("weakSimple");
+        if (code === "bad_email") return t("needEmail");
+        if (code === "mail_failed") return t("mailOff");
+        if (code === "rate") return t("verifySent");
+        return code || "error";
+    }
+
+    function submitEmailForm() {
+        var email = (($("in-email") || {}).value || "").trim();
+        var pass = ($("in-password") || {}).value || "";
+        var name = (($("in-name") || {}).value || "").trim();
+        var status = $("login-status");
+        var next = new URLSearchParams(location.search).get("next") || "/cabinet";
+        if (!email || email.indexOf("@") < 0) { setStatus(status, t("needEmail"), "err"); return; }
+        if (authTab !== "link" && !pass) { setStatus(status, t("needPass"), "err"); return; }
+        if (authTab === "register" && pass.length < 8) { setStatus(status, t("weakShort"), "err"); return; }
+        var body = { email: email, password: pass, name: name, language: lang() };
+        var path = authTab === "register" ? "/api/auth/email/register"
+            : (authTab === "link" ? "/api/auth/email/link" : "/api/auth/email/login");
+        setStatus(status, "…");
+        api(path, { method: "POST", body: JSON.stringify(body) }).then(function (d) {
+            if (d.ok && d.user) { location.href = next; return; }
+            if (d.ok && d.exists) {
+                // адрес уже подтверждён: отправляем на вход/восстановление
+                setStatus(status, d.hint || t("verifyUsed"), "err");
+                return;
+            }
+            if (d.ok && (authTab === "register" || authTab === "link")) {
+                if (d.sent === false) {
+                    setStatus(status, t("mailOff"), "err");
+                    return;
+                }
+                setStatus(status, t(authTab === "register" ? "registerSent" : "linkSent",
+                    { email: email }), "ok");
+                return;
+            }
+            setStatus(status, authError(d), d.error === "email_unverified" ? "err" : "err");
+        }).catch(function () { setStatus(status, "network", "err"); });
+    }
+
+    function resendVerify() {
+        var email = (($("in-email") || {}).value || "").trim();
+        var status = $("login-status");
+        if (!email || email.indexOf("@") < 0) { setStatus(status, t("needEmail"), "err"); return; }
+        api("/api/auth/email/resend", {
+            method: "POST", body: JSON.stringify({ email: email, language: lang() }),
+        }).then(function (d) {
+            setStatus(status, d.ok ? t("verifySent") : authError(d), d.ok ? "ok" : "err");
+        });
+    }
+
+    function statusFromQuery(me) {
+        var q = new URLSearchParams(location.search);
+        var status = $("login-status");
+        var verify = q.get("verify");
+        if (verify) {
+            var map = { used: "verifyUsed", expired: "verifyExpired",
+                        bad: "verifyBad", unknown: "verifyBad" };
+            setStatus(status, t(map[verify] || "verifyBad"), "err");
+            return;
+        }
+        if (q.get("link")) { setStatus(status, t("linkBad"), "err"); return; }
+        if (q.get("banned")) { setStatus(status, t("banned"), "err"); return; }
+        if (me && !me.mail_enabled) setStatus(status, t("mailOff"), "err");
+    }
+
     function bootLogin() {
+        paintAuthTab("login");
+        // если пришли по «Забыли пароль?» или по письму — открываем нужную вкладку
+        var q = new URLSearchParams(location.search);
+        var saved = "";
+        try { saved = localStorage.getItem("liqscope.auth.tab") || ""; } catch (e) { saved = ""; }
+        if (q.get("mode") === "register" || q.get("mode") === "link") paintAuthTab(q.get("mode"));
+        else if (saved === "register" || saved === "link") paintAuthTab(saved);
+
+        document.querySelectorAll(".auth-tab").forEach(function (b) {
+            b.addEventListener("click", function () { paintAuthTab(b.getAttribute("data-tab")); });
+        });
+        var form = $("email-form");
+        if (form) form.addEventListener("submit", function (e) { e.preventDefault(); submitEmailForm(); });
+        var resend = $("resend-verify");
+        if (resend) resend.addEventListener("click", resendVerify);
+        var forgot = $("to-reset");
+        if (forgot) forgot.addEventListener("click", function () {
+            var email = (($("in-email") || {}).value || "").trim();
+            var status = $("login-status");
+            if (!email || email.indexOf("@") < 0) { setStatus(status, t("needEmail"), "err"); return; }
+            api("/api/auth/email/reset", {
+                method: "POST", body: JSON.stringify({ email: email, language: lang() }),
+            }).then(function (d) {
+                setStatus(status, d.ok ? t("linkSent") : authError(d), d.ok ? "ok" : "err");
+            });
+        });
+
         api("/api/auth/me").then(function (me) {
             paintNav(me.user);
             if (me.user) { location.href = "/cabinet"; return; }
+            statusFromQuery(me);
+            // Telegram остаётся запасным входом: ссылка на бота или виджет
+            var alt = $("tg-alt");
+            if (alt && !me.bot_ready) alt.classList.add("hidden");
             var widget = $("tg-widget");
             if (widget && me.bot_username) {
-                var s = document.createElement("script");
-                s.async = true;
-                s.src = "https://telegram.org/js/telegram-widget.js?22";
-                s.setAttribute("data-telegram-login", me.bot_username);
-                s.setAttribute("data-size", "large");
-                s.setAttribute("data-radius", "8");
-                s.setAttribute("data-request-access", "write");
-                s.setAttribute("data-onauth", "onTelegramAuth(user)");
-                widget.appendChild(s);
+                var sc = document.createElement("script");
+                sc.async = true;
+                sc.src = "https://telegram.org/js/telegram-widget.js?22";
+                sc.setAttribute("data-telegram-login", me.bot_username);
+                sc.setAttribute("data-size", "large");
+                sc.setAttribute("data-radius", "8");
+                sc.setAttribute("data-request-access", "write");
+                sc.setAttribute("data-onauth", "onTelegramAuth(user)");
+                widget.appendChild(sc);
             }
         });
         var btn = $("login-btn");
         if (btn) btn.addEventListener("click", startLogin);
     }
 
+    /* ---------- reset: новый пароль по ссылке из письма ---------- */
+    function bootReset() {
+        var token = new URLSearchParams(location.search).get("token") || "";
+        var status = $("reset-status");
+        var form = $("reset-form");
+        api("/api/auth/me").then(function (me) { paintNav(me.user); });
+        api("/api/auth/email/token?token=" + encodeURIComponent(token)).then(function (d) {
+            if (!d.ok) {
+                setStatus(status, t("resetBad"), "err");
+                if (form) form.classList.add("hidden");
+                return;
+            }
+            if ($("reset-email")) $("reset-email").value = d.email || "";
+        });
+        if (form) form.addEventListener("submit", function (e) {
+            e.preventDefault();
+            var p1 = ($("reset-pass") || {}).value || "";
+            var p2 = ($("reset-pass2") || {}).value || "";
+            if (p1.length < 8) { setStatus(status, t("weakShort"), "err"); return; }
+            if (p1 !== p2) { setStatus(status, t("resetMismatch"), "err"); return; }
+            setStatus(status, "…");
+            api("/api/auth/email/set-password", {
+                method: "POST",
+                body: JSON.stringify({ token: token, password: p1,
+                                       email: ($("reset-email") || {}).value || "",
+                                       language: lang() }),
+            }).then(function (d) {
+                if (d.ok) { setStatus(status, t("resetOk"), "ok"); location.href = "/cabinet"; return; }
+                setStatus(status, authError(d), "err");
+            }).catch(function () { setStatus(status, "network", "err"); });
+        });
+    }
+
     function boot() {
         var page = (document.body && document.body.getAttribute("data-page")) || "";
         if (page === "login") bootLogin();
+        else if (page === "reset") bootReset();
         else if (page === "cabinet") bootCabinet();
         else if (page === "admin") bootAdmin();
         else {

@@ -51,6 +51,7 @@ from market_feed import MarketFeed, TF_MINUTES, base_of, canon
 from timeframes import parse_tf
 from oi_feed import map_candles_to_oi
 from accounts import Store
+from mailer import build_mailer
 from tg_bot import TelegramBot, normalize_public_url
 from web_account import ctx as account_ctx, register_account_routes
 
@@ -93,9 +94,18 @@ for _x in os.getenv("LIQSCOPE_ADMIN_IDS", "").replace(";", ",").split(","):
     _x = _x.strip()
     if _x.isdigit():
         ADMIN_IDS.append(int(_x))
+# Админы, которые регистрируются по почте (через запятую или точку с запятой)
+ADMIN_EMAILS = [x.strip().lower() for x in
+                os.getenv("LIQSCOPE_ADMIN_EMAILS", "").replace(";", ",").split(",")
+                if x.strip()]
+# Жёсткий режим: без подтверждения почты кабинет закрыт (по умолчанию так)
+REQUIRE_EMAIL_VERIFICATION = os.getenv(
+    "LIQSCOPE_REQUIRE_EMAIL_VERIFICATION", "1").strip().lower() not in ("0", "false", "no")
 ACCOUNTS_DB = os.getenv("LIQSCOPE_ACCOUNTS_DB",
                         os.path.join(HERE, "data", "accounts.db"))
-account_store = Store(ACCOUNTS_DB, SECRET, ADMIN_IDS)
+account_store = Store(ACCOUNTS_DB, SECRET, ADMIN_IDS, ADMIN_EMAILS)
+# Письма: SMTP из окружения; без настроек сервер работает, письма не уходят
+mailer = build_mailer(PUBLIC_URL)
 tg_bot = TelegramBot(BOT_TOKEN, account_store, PUBLIC_URL,
                      channel_url=CHANNEL_URL, channel_id=CHANNEL_ID)
 
@@ -1162,6 +1172,8 @@ account_ctx.public_url = PUBLIC_URL
 account_ctx.secret = SECRET
 account_ctx.cookie_secure = os.getenv("LIQSCOPE_COOKIE_SECURE", "").strip() in ("1", "true", "yes")
 account_ctx.dev_login = os.getenv("LIQSCOPE_DEV_LOGIN", "").strip() in ("1", "true", "yes")
+account_ctx.mailer = mailer
+account_ctx.require_email_verification = REQUIRE_EMAIL_VERIFICATION
 account_ctx.health_fn = health_summary
 account_ctx.stats_fn = compute_stats
 account_ctx.liqs_fn = lambda: list(LIQUIDATIONS)[-8:]

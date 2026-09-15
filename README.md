@@ -9,7 +9,7 @@
 ```
 http://<сервер>:8000/          — лендинг (посадочная страница)
 http://<сервер>:8000/terminal  — сам терминал
-http://<сервер>:8000/login     — вход через Telegram
+http://<сервер>:8000/login     — регистрация и вход (почта; Telegram — запасной)
 http://<сервер>:8000/cabinet   — кабинет пользователя
 http://<сервер>:8000/admin     — панель администратора
 ```
@@ -143,6 +143,15 @@ sudo systemctl enable --now liqscope
 | `LIQSCOPE_CHANNEL_ID` | — | numeric id канала (`-100…`). Нужен, чтобы проверять подписку и постить сводки. Если пусто — бот запомнит id сам, когда его добавят **админом** канала |
 | `LIQSCOPE_BOT_TOKEN` | — | токен Telegram-бота (BotFather). Без него кабинет не логинит, терминал работает как раньше |
 | `LIQSCOPE_ADMIN_IDS` | — | telegram id админов через запятую — кабинет `/admin` и команды `/admin` в боте |
+| `LIQSCOPE_ADMIN_EMAILS` | — | почты админов через запятую — то же самое для аккаунтов, зарегистрированных по почте |
+| `LIQSCOPE_SMTP_HOST` | — | SMTP-сервер для писем (подтверждение почты, вход по ссылке, сброс пароля). Пусто — регистрация работает, но письма не уходят, а в лог идёт предупреждение |
+| `LIQSCOPE_SMTP_PORT` | `587` (или `465` при `LIQSCOPE_SMTP_SSL=1`) | порт SMTP |
+| `LIQSCOPE_SMTP_USER` / `LIQSCOPE_SMTP_PASSWORD` | — | логин и пароль (для Gmail/Яндекс/Mail.ru — пароль приложения) |
+| `LIQSCOPE_SMTP_FROM` | `LiqScope <no-reply@…>` | адрес отправителя; домен должен совпадать с SPF/DKIM, иначе письма улетают в спам |
+| `LIQSCOPE_SMTP_TLS` | `starttls` | `starttls` / `ssl` / `none` |
+| `LIQSCOPE_SMTP_TIMEOUT` | `15` | таймаут подключения к SMTP, сек (отправка идёт в отдельном потоке и не морозит сервер) |
+| `LIQSCOPE_MAIL_DIR` | — | если задан — письма не отправляются, а складываются в папку (стенд, автотесты) |
+| `LIQSCOPE_REQUIRE_EMAIL_VERIFICATION` | `1` | `1` — жёсткий режим: без подтверждения почты кабинет и сервисы закрыты. `0` — мягкий: пускаем сразу, в кабинете только напоминание |
 | `LIQSCOPE_PUBLIC_URL` | — | публичный URL сайта (`https://example.com`) — ссылки в боте |
 | `LIQSCOPE_SECRET` | `liqscope-change-me` | секрет сессий и хеша IP. Задайте свой в проде |
 | `LIQSCOPE_COOKIE_SECURE` | `0` | `1` — cookie только по HTTPS |
@@ -183,10 +192,21 @@ sudo systemctl enable --now liqscope
 |---|---|
 | `GET /` | лендинг с живой статистикой и ссылкой в терминал |
 | `GET /terminal` | сам терминал |
-| `GET /login` | вход через Telegram (deep-link бота + Login Widget) |
+| `GET /login` | вход и регистрация: почта + пароль, ссылка из письма; Telegram — запасной вход |
+| `GET /verify` / `GET /email-login` / `GET /reset` | переходы по ссылкам из писем: подтверждение почты, вход без пароля, новый пароль |
 | `GET /cabinet` | кабинет: профиль и сервисы (алерты, корреляции — каркас) |
 | `GET /admin` | админка: пользователи, визиты, рассылка, настройки |
-| `GET /api/auth/me` | текущий пользователь или `null` |
+| `POST /api/auth/email/register` | регистрация по почте: почта + пароль → письмо со ссылкой-подтверждением |
+| `POST /api/auth/email/resend` | отправить письмо-подтверждение повторно (ответ одинаков для любого адреса) |
+| `POST /api/auth/email/login` | вход по почте и паролю (до подтверждения адреса — 403 `email_unverified` + письмо) |
+| `POST /api/auth/email/link` | прислать ссылку для входа без пароля |
+| `POST /api/auth/email/reset` | прислать ссылку на смену пароля |
+| `GET /api/auth/email/token?token=` | годится ли ссылка из письма (страница сброса) |
+| `POST /api/auth/email/set-password` | новый пароль по ссылке из письма (старые сессии сбрасываются) |
+| `POST /api/auth/telegram/link` | ссылка на бота для привязки Telegram к аккаунту (`t.me/bot?start=link_…`) |
+| `GET /api/auth/telegram/link/status?nonce=` | бот подтвердил привязку? (кабинет опрашивает) |
+| `POST /api/auth/telegram/unlink` | отвязать Telegram; вход по почте остаётся |
+| `GET /api/auth/me` | текущий пользователь или `null` (есть `email`, `email_verified`, `tg_linked`, `mail_enabled`) |
 | `POST /api/auth/telegram/start` | создать код входа, ссылка `t.me/bot?start=login_…` |
 | `GET /api/auth/telegram/wait` | поллинг: бот подтвердил → cookie-сессия |
 | `GET /api/symbols` | дефолтный топ монет (по обороту 24ч) + добавленные вручную; цены, обороты, `volAvg7d` (средний оборот за неделю), ликвидации за 24 ч |
@@ -872,6 +892,10 @@ LIQSCOPE_DEMO=1 python3 -m uvicorn server:app --host 0.0.0.0 --port 8000
 
 ```bash
 python3 tests/test_accounts.py    # кабинет: пользователи, сессии, подпись Telegram
+python3 tests/test_email_auth.py  # почта: адреса, пароли (scrypt), токены, привязка Telegram,
+                                  #   слияние аккаунтов, миграция старой базы с tg_id NOT NULL
+python3 tests/test_email_flow.py  # сквозной сценарий по HTTP: регистрация → письмо →
+                                  #   подтверждение → вход/ссылка/сброс, жёсткий шлюз, лимиты
 python3 tests/test_parsers.py     # разбор сообщений бирж
 python3 tests/test_tick_flow.py   # потиковый поток на локальном псевдо-Binance
 python3 tests/test_search.py      # поиск/добавление монет (например, GRAM)
@@ -904,11 +928,13 @@ server.py            FastAPI: REST + WebSocket-хаб, свечи, статис�
 accounts.py          SQLite: пользователи, сессии, визиты, сервисы
 tg_bot.py            Telegram-бот (регистрация, кабинет, админка, канал)
 channel_digest.py    текст 4-часовой сводки в канал (лидеры, OI, CVD)
-web_account.py       HTTP /login /cabinet /admin и /api/auth|/api/admin
+web_account.py       HTTP /login /cabinet /admin и /api/auth|/api/admin (почта и Telegram)
+mailer.py            письма: SMTP (smtplib, scrypt-ссылки), файловый транспорт для тестов
 market_feed.py       подключение к биржам, парсеры, список монет, klines
 static/landing.html  лендинг (посадочная страница)
 static/index.html    интерфейс терминала
-static/login.html    вход через Telegram
+static/login.html    вход и регистрация по почте (Telegram — запасной способ)
+static/reset.html    новый пароль по ссылке из письма
 static/cabinet.html  кабинет пользователя
 static/admin.html    панель администратора
 static/app.js        график (Lightweight Charts v5), лента, кластеры, профиль
@@ -955,33 +981,76 @@ deploy/liqscope.service пример systemd-юнита
 
 ---
 
-## Кабинет пользователя и Telegram-бот
+## Кабинет пользователя: вход по почте, Telegram как дополнение
 
 Терминал по-прежнему открыт без регистрации. Кабинет — для сервисов
 (алерты по объёму и времени, корреляции, сторож монет, дайджест): они
 появятся и на сайте, и в боте с одним аккаунтом.
 
+**Основной вход — почта.** Регистрация: почта + пароль (от 8 символов,
+scrypt-хеш), на адрес уходит письмо со ссылкой-подтверждением. Пока адрес не
+подтверждён, вход закрыт — пароль не пустит, пока не кликнули ссылку из письма
+(жёсткий режим; мягкий включается `LIQSCOPE_REQUIRE_EMAIL_VERIFICATION=0`).
+Кроме пароля есть вход **по ссылке из письма** (пароль вообще не нужен) и
+**сброс пароля** — оба тоже письмом.
+
+**Telegram — запасной вход и канал сигналов.** Отдельная регистрация через
+бота не нужна: Telegram привязывается к тому же аккаунту в кабинете
+(«Привязать Telegram» → `/start link_<метка>`). Если человек уже писал боту до
+привязки, его профиль (подписки, история алертов) переезжает в аккаунт с
+почтой — «двух половин» одного человека не появляется. Отвязать можно там же;
+вход по почте при этом остаётся.
+
 ### Как включить
 
-1. Создайте бота у [@BotFather](https://t.me/BotFather), получите токен.
-2. Узнайте свой telegram id (например, у `@userinfobot`).
-3. В systemd:
+1. Почта — SMTP-доступ к ящику, с которого шлём письма:
+
+```ini
+Environment=LIQSCOPE_SMTP_HOST=smtp.yandex.ru
+Environment=LIQSCOPE_SMTP_PORT=465
+Environment=LIQSCOPE_SMTP_TLS=ssl
+Environment=LIQSCOPE_SMTP_USER=no-reply@your.domain
+Environment=LIQSCOPE_SMTP_PASSWORD=пароль-приложения
+Environment=LIQSCOPE_SMTP_FROM=LiqScope <no-reply@your.domain>
+```
+
+   Проверка: `curl -X POST -H 'Content-Type: application/json'    -d '{"email":"you@example.com","password":"Good-Pass-2026"}'    https://your.domain/api/auth/email/register` — в ответе `sent: true`,
+   письмо приходит, ссылка ведёт на `/verify?token=…`.
+   Стенд без реального ящика: `LIQSCOPE_MAIL_DIR=/tmp/mail` — письма
+   складываются в файлы, ничего наружу не уходит.
+   Если SMTP не настроен, регистрация всё равно работает (`sent: false`),
+   а ссылку админ видит в `/api/admin/overview` → `mail.last`.
+
+2. Когда писем много, домен отправителя должен иметь **SPF и DKIM** записи
+   (у Яндекса/Google/Unisender — в панели домена), иначе часть писем уйдёт
+   в спам. Адрес отправителя лучше сделать на своём домене, а не gmail.com.
+
+3. Бот (для сигналов и запасного входа) — как раньше:
+   создайте бота у [@BotFather](https://t.me/BotFather), получите токен и
+   добавьте в systemd:
 
 ```ini
 Environment=LIQSCOPE_BOT_TOKEN=123456:AAH...
 Environment=LIQSCOPE_ADMIN_IDS=123456789
+Environment=LIQSCOPE_ADMIN_EMAILS=you@your.domain
 Environment=LIQSCOPE_PUBLIC_URL=https://your.domain
 Environment=LIQSCOPE_SECRET=длинная-случайная-строка
 ```
 
-4. `systemctl restart liqscope`. В логе: `Telegram-бот @name запущен`.
+4. `systemctl restart liqscope`. В логе: `Telegram-бот @name запущен`;
+   при настроенном SMTP ошибок отправки не будет, при пустом — разовое
+   предупреждение `SMTP не настроен`.
+
 5. Добавьте бота **админом** канала (право писать сообщения). Без этого
    не проверить подписку и не уйдут сводки раз в 4 часа. Инвайт по
    умолчанию — `https://t.me/+4S1LsZtH1Pc5YWZi`. Id канала бот запоминает
    сам; можно задать `LIQSCOPE_CHANNEL_ID=-100…`.
-6. На сайте: **Войти** → открывается бот → `/start` → подписка на канал → кабинет.
-   Опционально в BotFather: `/setdomain` на ваш домен — тогда работает
-   и кнопка Login Widget.
+6. На сайте: **Войти** → почта и пароль (или ссылка из письма) → кабинет.
+   Telegram привязывается уже в кабинете. Опционально в BotFather:
+   `/setdomain` на ваш домен — тогда дополнительно работает Login Widget.
+
+Старая схема «вход через бота» (`/start login_<код>`) сохранена и работает
+как запасная: кнопка «Открыть бота Telegram» на странице входа.
 
 Пользователи с id из `LIQSCOPE_ADMIN_IDS` видят `/admin` на сайте и
 команды `/admin` `/users` `/visits` `/broadcast` в боте.
@@ -990,7 +1059,7 @@ Environment=LIQSCOPE_SECRET=длинная-случайная-строка
 
 | Команда | Кто | Что |
 |---|---|---|
-| `/start` | все | регистрация; ` /start login_<код>` подтверждает вход на сайт |
+| `/start` | все | приветствие и меню; `/start login_<код>` подтверждает вход через бота, `/start link_<метка>` привязывает Telegram к аккаунту с почтой |
 | `/cabinet` | все | профиль |
 | `/terminal` `/stats` `/status` `/liq` | все | ссылка, рынок 24ч, биржи, лента |
 | `/services` | все | те же сервисы, что в кабинете (лист ожидания) |

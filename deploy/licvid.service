@@ -26,11 +26,23 @@ Environment=LIQSCOPE_EXCHANGES=binance,bybit,okx,gate,bitget,htx,bitmex,hyperliq
 # Кабинет / бот / HTTPS (см. deploy/HTTPS.md):
 Environment=LIQSCOPE_PUBLIC_URL=https://liqscope.online
 Environment=LIQSCOPE_COOKIE_SECURE=1
-# Токен бота, админы и секрет — только в /etc/systemd/system/licvid.service
+# Токен бота, админы, почта и секрет — только в /etc/systemd/system/licvid.service
 # (или drop-in), не в git:
 # Environment=LIQSCOPE_BOT_TOKEN=
-# Environment=LIQSCOPE_ADMIN_IDS=
+# Environment=LIQSCOPE_ADMIN_IDS=          # telegram id админов
+# Environment=LIQSCOPE_ADMIN_EMAILS=       # админы, зарегистрированные по почте
 # Environment=LIQSCOPE_SECRET=
+# Почта — основной вход (подтверждение адреса, вход по ссылке, сброс пароля).
+# Без SMTP регистрация работает, но письма не уходят: в логе будет
+# «SMTP не настроен», а ссылку видно в /api/admin/overview → mail.last.
+# Environment=LIQSCOPE_SMTP_HOST=smtp.yandex.ru
+# Environment=LIQSCOPE_SMTP_PORT=465
+# Environment=LIQSCOPE_SMTP_TLS=ssl
+# Environment=LIQSCOPE_SMTP_USER=no-reply@liqscope.online
+# Environment=LIQSCOPE_SMTP_PASSWORD=пароль-приложения
+# Environment=LIQSCOPE_SMTP_FROM=LiqScope <no-reply@liqscope.online>
+# Стенд без реального ящика: письма складываются в папку
+# Environment=LIQSCOPE_MAIL_DIR=/tmp/liqscope-mail
 #
 # В Type=simple разрешена РОВНО одна строка ExecStart.
 # Две сразу (например, venv и /usr/bin) →

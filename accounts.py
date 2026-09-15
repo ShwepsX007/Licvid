@@ -1,7 +1,11 @@
-"""Пользователи LiqScope: Telegram-вход, сессии, визиты, сервисы, админка.
+"""Пользователи LiqScope: вход по почте и Telegram, сессии, визиты, сервисы.
 
 SQLite в data/accounts.db (путь задаётся LIQSCOPE_ACCOUNTS_DB).
-Регистрация — только через Telegram (виджет или deep-link бота).
+
+Основной вход — почта: регистрация с паролем и подтверждением письмом
+(пока адрес не подтверждён, входа нет), плюс вход по ссылке из письма и
+сброс пароля. Telegram — запасной вход и канал сигналов: привязать его к
+аккаунту можно в кабинете, отдельная регистрация через бота не нужна.
 """
 from __future__ import annotations
 
@@ -10,11 +14,12 @@ import hmac
 import json
 import logging
 import os
+import re
 import secrets
 import sqlite3
 import threading
 import time
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 log = logging.getLogger("liqscope.accounts")
 
@@ -22,6 +27,71 @@ COOKIE_SID = "liqscope_sid"
 COOKIE_VID = "liqscope_vid"
 SESSION_DAYS = 30
 NONCE_TTL = 300  # 5 минут на подтверждение входа в боте
+
+# Почта и пароли
+EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9.\-]{1,190}\.[A-Za-z]{2,24}$")
+PASSWORD_MIN = 8
+PASSWORD_MAX = 200
+BAD_PASSWORDS = {"password", "passw0rd", "12345678", "123456789", "1234567890",
+                 "qwertyui", "qwerty123", "11111111", "пароль123", "пароль1234"}
+SCRYPT_N, SCRYPT_R, SCRYPT_P = 2 ** 14, 8, 1
+
+# Сколько живут ссылки в письмах
+EMAIL_TOKEN_TTL = {
+    "verify": 24 * 3600,   # подтверждение почты — сутки
+    "login": 30 * 60,      # вход по ссылке — полчаса
+    "reset": 3600,         # сброс пароля — час
+}
+LINK_NONCE_TTL = 15 * 60   # привязка Telegram из кабинета
+
+
+def normalize_email(raw: Any) -> str:
+    """Адреса сравниваем без регистра и пробелов: Foo@Mail.ru == foo@mail.ru."""
+    return str(raw or "").strip().lower()
+
+
+def valid_email(raw: Any) -> bool:
+    email = normalize_email(raw)
+    if not email or len(email) > 254 or ".." in email:
+        return False
+    return bool(EMAIL_RE.match(email))
+
+
+def password_problem(password: Any, email: str = "") -> str:
+    """Пустая строка — пароль годный, иначе код ошибки для фронтенда."""
+    p = str(password or "")
+    if len(p) < PASSWORD_MIN:
+        return "short"
+    if len(p) > PASSWORD_MAX:
+        return "long"
+    if p.lower() in BAD_PASSWORDS:
+        return "weak"
+    if email and p.lower() == normalize_email(email):
+        return "weak"
+    return ""
+
+
+def hash_password(password: str) -> str:
+    """scrypt из стандартной библиотеки — внешних зависимостей не нужно."""
+    salt = secrets.token_bytes(16)
+    dk = hashlib.scrypt(str(password).encode("utf-8"), salt=salt,
+                        n=SCRYPT_N, r=SCRYPT_R, p=SCRYPT_P, dklen=32)
+    return f"scrypt${SCRYPT_N}${SCRYPT_R}${SCRYPT_P}${salt.hex()}${dk.hex()}"
+
+
+def verify_password(password: str, stored: str) -> bool:
+    """Проверка пароля по сохранённому хешу (не падает на битом значении)."""
+    if not password or not stored:
+        return False
+    try:
+        kind, n, r, p, salt_hex, hash_hex = str(stored).split("$")
+        if kind != "scrypt":
+            return False
+        dk = hashlib.scrypt(str(password).encode("utf-8"), salt=bytes.fromhex(salt_hex),
+                            n=int(n), r=int(r), p=int(p), dklen=len(hash_hex) // 2)
+        return hmac.compare_digest(dk.hex(), hash_hex)
+    except (ValueError, TypeError, MemoryError):
+        return False
 
 DEFAULT_SERVICES = (
     {
@@ -85,14 +155,27 @@ def display_name(user: Dict[str, Any]) -> str:
         return first
     if user.get("username"):
         return "@" + str(user["username"])
+    email = str(user.get("email") or "")
+    if email:
+        return email.split("@")[0]
     return "id" + str(user.get("tg_id") or user.get("id") or "")
 
 
 def public_user(row: sqlite3.Row | Dict[str, Any]) -> Dict[str, Any]:
+    """Публичный профиль: без хеша пароля, с признаками входа.
+
+    tg_id у аккаунта по почте пустой — Telegram может быть не привязан вовсе,
+    поэтому отдаём None, а не 0 (иначе фронтенд рисует «id 0»).
+    """
     d = dict(row)
+    tg_id = d.get("tg_id")
     return {
         "id": int(d["id"]),
-        "tg_id": int(d["tg_id"]),
+        "tg_id": int(tg_id) if tg_id else None,
+        "tg_linked": bool(tg_id),
+        "email": d.get("email") or "",
+        "email_verified": bool(d.get("email_verified")),
+        "has_password": bool(d.get("password_hash")),
         "username": d.get("username") or "",
         "first_name": d.get("first_name") or "",
         "last_name": d.get("last_name") or "",
@@ -138,10 +221,13 @@ def verify_telegram_widget(data: Dict[str, Any], bot_token: str, max_age: int = 
 
 
 class Store:
-    def __init__(self, path: str, secret: str, admin_ids: Iterable[int] = ()):
+    def __init__(self, path: str, secret: str, admin_ids: Iterable[int] = (),
+                 admin_emails: Iterable[str] = ()):
         self.path = path
         self.secret = secret or secrets.token_hex(16)
         self.admin_ids = {int(x) for x in admin_ids if int(x)}
+        # админы, зарегистрированные по почте (LIQSCOPE_ADMIN_EMAILS)
+        self.admin_emails = {normalize_email(x) for x in admin_emails if normalize_email(x)}
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         self._lock = threading.Lock()
         self._db = sqlite3.connect(path, check_same_thread=False)
@@ -160,7 +246,13 @@ class Store:
                 """
                 CREATE TABLE IF NOT EXISTS users (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    tg_id INTEGER UNIQUE NOT NULL,
+                    -- NULL = регистрация по почте, Telegram ещё не привязан
+                    tg_id INTEGER UNIQUE,
+                    email TEXT,
+                    password_hash TEXT,
+                    email_verified INTEGER NOT NULL DEFAULT 0,
+                    email_verified_at REAL,
+                    tg_linked_at REAL,
                     username TEXT,
                     first_name TEXT,
                     last_name TEXT,
@@ -171,6 +263,24 @@ class Store:
                     created_at REAL NOT NULL,
                     last_seen REAL NOT NULL,
                     login_count INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS email_tokens (
+                    token TEXT PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    email TEXT,
+                    kind TEXT NOT NULL,              -- verify | login | reset
+                    created_at REAL NOT NULL,
+                    expires_at REAL NOT NULL,
+                    consumed INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_email_tokens_user
+                    ON email_tokens(user_id, kind);
+                CREATE TABLE IF NOT EXISTS tg_link_nonces (
+                    nonce TEXT PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    created_at REAL NOT NULL,
+                    expires_at REAL NOT NULL,
+                    consumed INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS sessions (
                     token TEXT PRIMARY KEY,
@@ -270,9 +380,358 @@ class Store:
                     (alerts["description"], alerts["title"]),
                 )
             self._db.commit()
+        self._migrate_users()
         self._seed_digest()
 
-    # ----- users ----------------------------------------------------------
+    def _migrate_users(self) -> None:
+        """Догоняем старые базы: почта/пароль и tg_id без NOT NULL.
+
+        Базы прежних версий знали только Telegram (tg_id INTEGER NOT NULL),
+        поэтому аккаунт по почте туда просто не влезал — колонки добавляем
+        ALTER-ом, а при NOT NULL таблицу пересобираем с сохранением строк.
+        """
+        with self._lock:
+            cols = {r["name"]: r for r in self._db.execute("PRAGMA table_info(users)")}
+            for name, ddl in (
+                ("email", "TEXT"),
+                ("password_hash", "TEXT"),
+                ("email_verified", "INTEGER NOT NULL DEFAULT 0"),
+                ("email_verified_at", "REAL"),
+                ("tg_linked_at", "REAL"),
+            ):
+                if name not in cols:
+                    self._db.execute(f"ALTER TABLE users ADD COLUMN {name} {ddl}")
+            self._db.commit()
+            cols = {r["name"]: r for r in self._db.execute("PRAGMA table_info(users)")}
+            if cols.get("tg_id") and int(cols["tg_id"]["notnull"]):
+                self._db.executescript(
+                    """
+                    ALTER TABLE users RENAME TO users_legacy;
+                    CREATE TABLE users (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        tg_id INTEGER UNIQUE,
+                        email TEXT,
+                        password_hash TEXT,
+                        email_verified INTEGER NOT NULL DEFAULT 0,
+                        email_verified_at REAL,
+                        tg_linked_at REAL,
+                        username TEXT,
+                        first_name TEXT,
+                        last_name TEXT,
+                        photo_url TEXT,
+                        language TEXT DEFAULT 'ru',
+                        is_admin INTEGER NOT NULL DEFAULT 0,
+                        is_banned INTEGER NOT NULL DEFAULT 0,
+                        created_at REAL NOT NULL,
+                        last_seen REAL NOT NULL,
+                        login_count INTEGER NOT NULL DEFAULT 0
+                    );
+                    INSERT INTO users(id, tg_id, email, password_hash, email_verified,
+                        email_verified_at, tg_linked_at, username, first_name, last_name,
+                        photo_url, language, is_admin, is_banned, created_at, last_seen,
+                        login_count)
+                    SELECT id, tg_id, NULL, NULL, 0, NULL, NULL, username, first_name,
+                        last_name, photo_url, language, is_admin, is_banned, created_at,
+                        last_seen, login_count FROM users_legacy;
+                    DROP TABLE users_legacy;
+                    """
+                )
+                self._db.commit()
+                log.info("Схема users обновлена: Telegram-аккаунты сохранены, "
+                         "регистрация по почте включена")
+            self._db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email"
+                " ON users(email) WHERE email IS NOT NULL AND email != ''"
+            )
+            self._db.commit()
+
+    # ----- users (почта) --------------------------------------------------
+    def _admin_flag(self, tg_id: Optional[int] = None, email: str = "") -> int:
+        if tg_id and int(tg_id) in self.admin_ids:
+            return 1
+        if email and normalize_email(email) in self.admin_emails:
+            return 1
+        return 0
+
+    def create_email_user(self, email: str, password_hash: str = "",
+                          first_name: str = "", language: str = "ru") -> Dict[str, Any]:
+        """Регистрация по почте. Адрес занят → {"ok": False, "error": "taken"}."""
+        email = normalize_email(email)
+        if not valid_email(email):
+            return {"ok": False, "error": "bad_email"}
+        now = _now()
+        with self._lock:
+            row = self._db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+            if row and row["email_verified"]:
+                return {"ok": False, "error": "taken"}
+            resumed = bool(row)
+            is_admin = self._admin_flag(email=email)
+            if row:
+                # регистрация оборвалась на подтверждении — даём начать заново
+                self._db.execute(
+                    "UPDATE users SET password_hash=?, first_name=?, language=?,"
+                    " is_admin=?, last_seen=? WHERE id=?",
+                    (password_hash or row["password_hash"], (first_name or "")[:64],
+                     (language or "ru")[:8], is_admin or int(row["is_admin"]), now,
+                     int(row["id"])),
+                )
+            else:
+                self._db.execute(
+                    "INSERT INTO users(tg_id,email,password_hash,email_verified,"
+                    "first_name,language,is_admin,is_banned,created_at,last_seen,login_count)"
+                    " VALUES(NULL,?,?,0,?,?,?,0,?,?,0)",
+                    (email, password_hash, (first_name or "")[:64],
+                     (language or "ru")[:8], is_admin, now, now),
+                )
+            self._db.commit()
+            row = self._db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+        return {"ok": True, "user": public_user(row), "resumed": resumed}
+
+    def get_user_by_email(self, email: str) -> Optional[Dict[str, Any]]:
+        email = normalize_email(email)
+        if not email:
+            return None
+        with self._lock:
+            row = self._db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+        return public_user(row) if row else None
+
+    def set_user_password(self, user_id: int, password_hash: str) -> bool:
+        with self._lock:
+            cur = self._db.execute(
+                "UPDATE users SET password_hash=? WHERE id=?",
+                (password_hash, int(user_id)),
+            )
+            self._db.commit()
+        return cur.rowcount > 0
+
+    def set_user_name(self, user_id: int, first_name: str) -> None:
+        with self._lock:
+            self._db.execute("UPDATE users SET first_name=? WHERE id=?",
+                             ((first_name or "")[:64], int(user_id)))
+            self._db.commit()
+
+    def mark_email_verified(self, user_id: int, promote_admin: bool = True) -> Optional[Dict[str, Any]]:
+        """Почта подтверждена (клик по ссылке из письма) — вход открывается."""
+        now = _now()
+        with self._lock:
+            row = self._db.execute("SELECT * FROM users WHERE id=?", (int(user_id),)).fetchone()
+            if not row:
+                return None
+            email = row["email"] or ""
+            is_admin = int(row["is_admin"]) or (self._admin_flag(email=email) if promote_admin else 0)
+            self._db.execute(
+                "UPDATE users SET email_verified=1, email_verified_at=?, is_admin=?,"
+                " last_seen=? WHERE id=?",
+                (now, is_admin, now, int(user_id)),
+            )
+            self._db.commit()
+            row = self._db.execute("SELECT * FROM users WHERE id=?", (int(user_id),)).fetchone()
+        return public_user(row)
+
+    # ----- письма: одноразовые токены --------------------------------------
+    def new_email_token(self, user_id: int, kind: str, email: str = "") -> str:
+        ttl = EMAIL_TOKEN_TTL.get(kind, 3600)
+        now = _now()
+        token = secrets.token_urlsafe(32)
+        with self._lock:
+            # старые ссылки того же назначения больше не нужны
+            self._db.execute(
+                "UPDATE email_tokens SET consumed=1 WHERE user_id=? AND kind=? AND consumed=0",
+                (int(user_id), kind),
+            )
+            self._db.execute("DELETE FROM email_tokens WHERE expires_at<?", (now - 7 * 86400,))
+            self._db.execute(
+                "INSERT INTO email_tokens(token,user_id,email,kind,created_at,expires_at,consumed)"
+                " VALUES(?,?,?,?,?,?,0)",
+                (token, int(user_id), normalize_email(email), kind, now, now + ttl),
+            )
+            self._db.commit()
+        return token
+
+    def email_token_user(self, token: str, kind: str = "") -> Tuple[Optional[Dict[str, Any]], str]:
+        """Кто владелец токена. Второе значение — "" или код ошибки."""
+        token = str(token or "").strip()
+        if not token:
+            return None, "unknown"
+        with self._lock:
+            row = self._db.execute("SELECT * FROM email_tokens WHERE token=?", (token,)).fetchone()
+            if not row or (kind and row["kind"] != kind):
+                return None, "unknown"
+            if row["consumed"]:
+                return None, "used"
+            if row["expires_at"] < _now():
+                return None, "expired"
+            user = self._db.execute("SELECT * FROM users WHERE id=?", (int(row["user_id"]),)).fetchone()
+        if not user:
+            return None, "unknown"
+        return public_user(user), ""
+
+    def consume_email_token(self, token: str, kind: str = "") -> Tuple[Optional[Dict[str, Any]], str]:
+        user, err = self.email_token_user(token, kind)
+        if err:
+            return None, err
+        with self._lock:
+            self._db.execute("UPDATE email_tokens SET consumed=1 WHERE token=?", (str(token),))
+            self._db.commit()
+        return user, ""
+
+    def email_tokens_recent(self, user_id: Optional[int] = None, email: str = "",
+                            kind: str = "", since: float = 0) -> int:
+        """Сколько писем уже ушло — для ограничения частоты отправки."""
+        where, args = ["created_at>=?"], [float(since or 0)]
+        if user_id:
+            where.append("user_id=?")
+            args.append(int(user_id))
+        if email:
+            where.append("email=?")
+            args.append(normalize_email(email))
+        if kind:
+            where.append("kind=?")
+            args.append(kind)
+        with self._lock:
+            n = self._db.execute(
+                "SELECT COUNT(*) FROM email_tokens WHERE " + " AND ".join(where), args
+            ).fetchone()[0]
+        return int(n)
+
+    # ----- привязка Telegram к аккаунту ------------------------------------
+    def new_link_nonce(self, user_id: int) -> str:
+        """Одноразовая метка для deep-link бота: t.me/<bot>?start=link_<nonce>."""
+        now = _now()
+        nonce = secrets.token_urlsafe(16)
+        with self._lock:
+            self._db.execute(
+                "UPDATE tg_link_nonces SET consumed=1 WHERE user_id=? AND consumed=0",
+                (int(user_id),),
+            )
+            self._db.execute(
+                "INSERT INTO tg_link_nonces(nonce,user_id,created_at,expires_at,consumed)"
+                " VALUES(?,?,?,?,0)",
+                (nonce, int(user_id), now, now + LINK_NONCE_TTL),
+            )
+            self._db.commit()
+        return nonce
+
+    def link_nonce_status(self, nonce: str) -> Dict[str, Any]:
+        """Состояние привязки — кабинет опрашивает его после открытия бота."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM tg_link_nonces WHERE nonce=?", (str(nonce or ""),)
+            ).fetchone()
+            if not row:
+                return {"ok": False, "error": "unknown"}
+            user_id = int(row["user_id"])
+            if not row["consumed"]:
+                if row["expires_at"] < _now():
+                    return {"ok": False, "error": "expired"}
+                return {"ok": False, "pending": True}
+            user = self._db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+        return {"ok": True, "user": public_user(user) if user else None}
+
+    def confirm_tg_link(self, nonce: str, tg: Dict[str, Any]) -> Dict[str, Any]:
+        """Бот получил /start link_<nonce>: привязываем Telegram к аккаунту.
+
+        Если у этого Telegram уже есть отдельный «телеграмный» аккаунт (человек
+        писал боту до привязки) — переносим его данные в аккаунт с почтой,
+        чтобы не было двух половин одного человека. Аккаунт с почтой у другого
+        человека не трогаем: такая привязка запрещена.
+        """
+        # Внимание: бот зовёт нас с публичным профилем, где "id" — это id записи
+        # в базе, а Telegram-id лежит в "tg_id". У сырого апдейта Telegram —
+        # наоборот. Поэтому сначала tg_id, и только потом id.
+        tg_id = int(tg.get("tg_id") or tg.get("id") or 0)
+        if not tg_id:
+            return {"ok": False, "error": "no_tg"}
+        nonce = str(nonce or "").strip()
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM tg_link_nonces WHERE nonce=?", (nonce,)
+            ).fetchone()
+            if not row:
+                return {"ok": False, "error": "unknown"}
+            if row["consumed"]:
+                return {"ok": False, "error": "used"}
+            if row["expires_at"] < _now():
+                return {"ok": False, "error": "expired"}
+            target_id = int(row["user_id"])
+            other = self._db.execute("SELECT * FROM users WHERE tg_id=?", (tg_id,)).fetchone()
+            merged = False
+            if other and int(other["id"]) != target_id:
+                if (other["email"] or "").strip():
+                    return {"ok": False, "error": "taken"}
+                self._merge_users_locked(int(other["id"]), target_id)
+                merged = True
+            self._db.execute(
+                "UPDATE tg_link_nonces SET consumed=1 WHERE nonce=?", (nonce,)
+            )
+            self._db.execute(
+                "UPDATE users SET tg_id=?, tg_linked_at=?, username=?, first_name=?,"
+                " last_name=?, photo_url=?, language=?, is_admin=?, last_seen=?"
+                " WHERE id=?",
+                (tg_id, _now(),
+                 (tg.get("username") or "")[:64], (tg.get("first_name") or "")[:64],
+                 (tg.get("last_name") or "")[:64], (tg.get("photo_url") or "")[:500],
+                 (tg.get("language_code") or tg.get("language") or "ru")[:8],
+                 self._admin_flag(tg_id=tg_id), _now(), target_id),
+            )
+            self._db.commit()
+            user = self._db.execute("SELECT * FROM users WHERE id=?", (target_id,)).fetchone()
+        self.audit(target_id, "tg_link", f"tg_id={tg_id} merged={int(merged)}")
+        return {"ok": True, "user": public_user(user) if user else None, "merged": merged}
+
+    def _merge_users_locked(self, src_id: int, dst_id: int) -> None:
+        """Слияние «телеграмного» аккаунта в аккаунт с почтой (под замком)."""
+        src_id, dst_id = int(src_id), int(dst_id)
+        for r in self._db.execute(
+                "SELECT slug, enabled, config, created_at FROM user_services WHERE user_id=?",
+                (src_id,)).fetchall():
+            self._db.execute(
+                "INSERT INTO user_services(user_id,slug,enabled,config,created_at)"
+                " VALUES(?,?,?,?,?) ON CONFLICT(user_id,slug) DO NOTHING",
+                (dst_id, r["slug"], r["enabled"], r["config"], r["created_at"]),
+            )
+        self._db.execute("DELETE FROM user_services WHERE user_id=?", (src_id,))
+        for table in ("alert_events", "visits", "sessions"):
+            self._db.execute(f"UPDATE {table} SET user_id=? WHERE user_id=?", (dst_id, src_id))
+        src = self._db.execute("SELECT * FROM users WHERE id=?", (src_id,)).fetchone()
+        if src and int(src["is_admin"]):
+            self._db.execute("UPDATE users SET is_admin=1 WHERE id=?", (dst_id,))
+        if not src:
+            return
+        # «телеграмный» аккаунт был первой записью человека: имя/фото не теряем
+        self._db.execute(
+            "UPDATE users SET first_name=CASE WHEN first_name IS NULL OR first_name=''"
+            " THEN ? ELSE first_name END,"
+            " last_name=CASE WHEN last_name IS NULL OR last_name='' THEN ? ELSE last_name END,"
+            " photo_url=CASE WHEN photo_url IS NULL OR photo_url='' THEN ? ELSE photo_url END,"
+            " created_at=MIN(created_at, ?) WHERE id=?",
+            (src["first_name"] or "", src["last_name"] or "", src["photo_url"] or "",
+             float(src["created_at"] or _now()), dst_id),
+        )
+        self._db.execute("DELETE FROM users WHERE id=?", (src_id,))
+        log.info("Telegram-аккаунт %s слит в аккаунт %s", src_id, dst_id)
+
+    def unlink_telegram(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """Отвязать Telegram: аккаунт остаётся, письма и вход по почте работают."""
+        user_id = int(user_id)
+        with self._lock:
+            row = self._db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+            if not row:
+                return None
+            if not row["tg_id"]:
+                return public_user(row)
+            tg_id = int(row["tg_id"])
+            self._db.execute(
+                "UPDATE users SET tg_id=NULL, tg_linked_at=NULL, is_admin=? WHERE id=?",
+                (self._admin_flag(email=row["email"] or ""), user_id),
+            )
+            # отвязываем только «свой» канал: сессии бота не нужны, он их не держит
+            self._db.commit()
+            row = self._db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+        self.audit(user_id, "tg_unlink", f"tg_id={tg_id}")
+        return public_user(row)
+
+    # ----- users (Telegram) -----------------------------------------------
     def upsert_telegram_user(self, tg: Dict[str, Any]) -> Dict[str, Any]:
         tg_id = int(tg["id"] if "id" in tg else tg["tg_id"])
         username = (tg.get("username") or "")[:64]
@@ -283,7 +742,7 @@ class Store:
         now = _now()
         with self._lock:
             row = self._db.execute("SELECT * FROM users WHERE tg_id=?", (tg_id,)).fetchone()
-            is_admin = 1 if tg_id in self.admin_ids else (int(row["is_admin"]) if row else 0)
+            is_admin = 1 if (tg_id in self.admin_ids or (row and int(row["is_admin"]))) else 0
             if row:
                 self._db.execute(
                     "UPDATE users SET username=?, first_name=?, last_name=?, photo_url=?,"
@@ -349,16 +808,15 @@ class Store:
             total = self._db.execute("SELECT COUNT(*) FROM users").fetchone()[0]
             if q:
                 like = f"%{q}%"
+                where = ("username LIKE ? OR first_name LIKE ? OR last_name LIKE ?"
+                         " OR email LIKE ? OR CAST(tg_id AS TEXT) LIKE ?")
+                args = (like, like, like, like, like)
                 rows = self._db.execute(
-                    "SELECT * FROM users WHERE username LIKE ? OR first_name LIKE ?"
-                    " OR last_name LIKE ? OR CAST(tg_id AS TEXT) LIKE ?"
-                    " ORDER BY last_seen DESC LIMIT ? OFFSET ?",
-                    (like, like, like, like, limit, offset),
+                    f"SELECT * FROM users WHERE {where} ORDER BY last_seen DESC LIMIT ? OFFSET ?",
+                    args + (limit, offset),
                 ).fetchall()
                 matched = self._db.execute(
-                    "SELECT COUNT(*) FROM users WHERE username LIKE ? OR first_name LIKE ?"
-                    " OR last_name LIKE ? OR CAST(tg_id AS TEXT) LIKE ?",
-                    (like, like, like, like),
+                    f"SELECT COUNT(*) FROM users WHERE {where}", args
                 ).fetchone()[0]
             else:
                 rows = self._db.execute(
@@ -388,6 +846,7 @@ class Store:
         with self._lock:
             rows = self._db.execute(
                 "SELECT tg_id FROM users WHERE is_admin=1 AND is_banned=0"
+                " AND tg_id IS NOT NULL"
             ).fetchall()
         return [int(r["tg_id"]) for r in rows]
 
@@ -745,7 +1204,7 @@ class Store:
     def tg_ids_for_broadcast(self) -> List[int]:
         with self._lock:
             rows = self._db.execute(
-                "SELECT tg_id FROM users WHERE is_banned=0"
+                "SELECT tg_id FROM users WHERE is_banned=0 AND tg_id IS NOT NULL"
             ).fetchall()
         return [int(r["tg_id"]) for r in rows]
 

@@ -1313,6 +1313,40 @@ class TelegramBot:
     async def _cmd_start(self, chat_id: int, user: dict, text: str) -> None:
         parts = text.split(maxsplit=1)
         payload = parts[1].strip() if len(parts) > 1 else ""
+        if payload.startswith("link_"):
+            # Кабинет попросил привязать Telegram к аккаунту с почтой:
+            # отдельная регистрация не нужна, аккаунт тот же.
+            nonce = payload[5:]
+            r = self.store.confirm_tg_link(nonce, user)
+            if r.get("ok"):
+                linked = r.get("user") or {}
+                extra = ""
+                if linked.get("email"):
+                    extra = f"\nПочта аккаунта: <code>{_esc(linked['email'])}</code>"
+                if r.get("merged"):
+                    extra += ("\nВесь профиль из Telegram перенесён в этот аккаунт"
+                              " — история алертов и подписки на месте.")
+                await self.show_menu(
+                    chat_id,
+                    f"✅ Telegram привязан к аккаунту LiqScope, {_esc(user['display_name'])}."
+                    f"{extra}\n"
+                    "Теперь сигналы алертов придут сюда, а вход в кабинет — "
+                    "по почте или этим же Telegram.\n"
+                    f"🌍 {self.site_a('открыть кабинет на сайте', '/cabinet')}",
+                    self._reply_kb(user),
+                )
+                return
+            err = r.get("error")
+            if err == "taken":
+                msg = ("Этот Telegram уже привязан к аккаунту с почтой — "
+                       "сначала отвяжите его в кабинете того аккаунта.")
+            elif err in ("expired", "used", "unknown"):
+                msg = ("Ссылка привязки устарела. Нажмите «Привязать Telegram» "
+                       "в кабинете ещё раз.")
+            else:
+                msg = "Не получилось привязать Telegram. Попробуйте ещё раз из кабинета."
+            await self.show_menu(chat_id, msg, self._reply_kb(user))
+            return
         if payload.startswith("login_"):
             nonce = payload[6:]
             if self.store.confirm_nonce(nonce, user["id"]):
@@ -1581,15 +1615,23 @@ class TelegramBot:
         have = self.store.user_service_slugs(user["id"])
         svc = ", ".join(have) if have else "пока не выбраны"
         role = "👑 администратор" if user["is_admin"] else "👤 пользователь"
-        return (
-            f"<b>👤 Кабинет</b>\n"
-            f"{_esc(user['display_name'])} · {un}\n"
-            f"Telegram ID: <code>{user['tg_id']}</code>\n"
-            f"Роль: {role}\n"
-            f"Сервисы: {_esc(svc)}\n"
-            f"🌍 {self.site_a('кабинет на сайте', '/cabinet')}"
-            + self.site_footer()
-        )
+        lines = [
+            "<b>👤 Кабинет</b>",
+            f"{_esc(user['display_name'])} · {un}",
+        ]
+        # Основной вход — почта, Telegram может быть и не привязан
+        email = (user.get("email") or "").strip()
+        if email:
+            mark = " ✅" if user.get("email_verified") else " (не подтверждена)"
+            lines.append(f"Почта: <code>{_esc(email)}</code>{mark}")
+        if user.get("tg_id"):
+            lines.append(f"Telegram ID: <code>{user['tg_id']}</code>")
+        lines += [
+            f"Роль: {role}",
+            f"Сервисы: {_esc(svc)}",
+            f"🌍 {self.site_a('кабинет на сайте', '/cabinet')}",
+        ]
+        return "\n".join(lines) + self.site_footer()
 
     def _terminal_text(self) -> str:
         return (

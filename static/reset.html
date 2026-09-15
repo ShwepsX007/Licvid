@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LiqScope — новый пароль</title>
+<link rel="icon" type="image/png" href="/static/logo.png">
+<link rel="stylesheet" href="/static/account.css?v=email1">
+</head>
+<body data-page="reset">
+<header class="site-header">
+    <a class="brand" href="/">
+        <img class="logo" src="/static/logo.png" alt="LiqScope">
+        <span class="name">LIQSCOPE</span>
+        <span class="tag">ACCOUNT</span>
+    </a>
+    <nav class="site-nav">
+        <a class="btn btn-ghost btn-compact" href="/terminal">⚡ Терминал</a>
+        <span id="nav-account"></span>
+    </nav>
+</header>
+<main class="wrap login-box">
+    <div class="card">
+        <img src="/static/logo.png" alt="" style="width:72px;height:72px;margin-bottom:12px">
+        <h1 class="page-title" id="reset-title">Новый пароль</h1>
+        <p class="lead" id="reset-lead">Придумайте пароль для входа в кабинет по почте.</p>
+
+        <form id="reset-form" style="margin-top:16px">
+            <label class="field">
+                <span>Почта</span>
+                <input type="email" id="reset-email" readonly tabindex="-1">
+            </label>
+            <label class="field">
+                <span>Пароль</span>
+                <input type="password" id="reset-pass" autocomplete="new-password"
+                       minlength="8" placeholder="не короче 8 символов">
+            </label>
+            <label class="field">
+                <span>Пароль ещё раз</span>
+                <input type="password" id="reset-pass2" autocomplete="new-password"
+                       minlength="8" placeholder="повторите">
+            </label>
+            <button type="submit" class="btn btn-primary" id="reset-submit">Сохранить пароль</button>
+        </form>
+        <p class="login-status" id="reset-status"></p>
+        <p class="lead" style="margin-top:18px;font-size:0.78rem">
+            Пароль хранится только в виде хеша: после сохранения сменённый пароль
+            знаете лишь вы. Забыли — снова «Забыли пароль?» на странице входа.
+        </p>
+    </div>
+</main>
+<script src="/static/account.js?v=email1"></script>
+</body>
+</html>

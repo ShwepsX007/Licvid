@@ -1,16 +1,27 @@
-"""HTTP: вход через Telegram, кабинет, админка, учёт визитов."""
+"""HTTP: вход по почте и Telegram, кабинет, админка, учёт визитов.
+
+Основной путь — почта: регистрация с паролем, письмо со ссылкой-подтверждением
+(без подтверждения входа нет), вход по паролю или по ссылке из письма, сброс
+пароля. Telegram — запасной вход и канал сигналов: привязывается к аккаунту
+из кабинета, отдельная регистрация через бота не нужна.
+"""
 from __future__ import annotations
 
 import logging
 import os
 import secrets
-from typing import Optional, Tuple
+import threading
+import time
+from typing import Dict, Optional, Tuple
 from urllib.parse import quote
 
 from fastapi import APIRouter, Request, Response
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from starlette.concurrency import run_in_threadpool
 
-from accounts import COOKIE_SID, COOKIE_VID, hash_ip, verify_telegram_widget
+from accounts import (COOKIE_SID, COOKIE_VID, hash_ip, hash_password,
+                      normalize_email, password_problem, valid_email,
+                      verify_password, verify_telegram_widget)
 from web_upload import PHOTO_ERR, decode_json_photo, parse_multipart_file
 
 log = logging.getLogger("liqscope.account")
@@ -22,10 +33,12 @@ class Ctx:
     """Связка сервера и аккаунтов — заполняется в server.py."""
     store = None
     bot = None
+    mailer = None
     public_url = ""
     secret = ""
     cookie_secure = False
     dev_login = False
+    require_email_verification = True
     health_fn = staticmethod(lambda: {})
     stats_fn = staticmethod(lambda: {})
     liqs_fn = staticmethod(lambda: [])
@@ -78,6 +91,161 @@ def _need_auth() -> JSONResponse:
 
 def _need_admin() -> JSONResponse:
     return JSONResponse({"ok": False, "error": "admin"}, status_code=403)
+
+
+def _need_verified() -> JSONResponse:
+    return JSONResponse({"ok": False, "error": "email_unverified"}, status_code=403)
+
+
+class RateLimiter:
+    """Простое окно для писем и входов: не больше N попыток за период.
+
+    Считаем по ключу (IP + действие), в памяти процесса: этого хватает,
+    чтобы почта не превратилась в спам-рассылку при переборе.
+    """
+
+    def __init__(self, limit: int, window: float):
+        self.limit = int(limit)
+        self.window = float(window)
+        self._hits: Dict[str, list] = {}
+
+    def allow(self, key: str) -> bool:
+        now = time.time()
+        with _RATE_LOCK:
+            hits = [t for t in self._hits.get(key, []) if now - t < self.window]
+            if len(hits) >= self.limit:
+                self._hits[key] = hits
+                return False
+            hits.append(now)
+            self._hits[key] = hits
+            if len(self._hits) > 5000:   # редкая чистка, чтобы словарь не рос
+                for k in list(self._hits):
+                    if not [t for t in self._hits[k] if now - t < self.window]:
+                        self._hits.pop(k, None)
+        return True
+
+    def reset(self, key: str) -> None:
+        with _RATE_LOCK:
+            self._hits.pop(key, None)
+
+
+_RATE_LOCK = threading.Lock()
+_MAIL_RATE = RateLimiter(3, 15 * 60)     # 3 письма на IP за 15 минут
+_MAIL_RATE_EMAIL = RateLimiter(5, 3600)  # 5 писем на адрес за час
+_LOGIN_RATE = RateLimiter(10, 15 * 60)   # 10 попыток входа на IP за 15 минут
+
+
+def _rate_key(request: Request, action: str, extra: str = "") -> str:
+    return f"{action}:{_client_ip(request)}:{extra}"
+
+
+def _lang_code(request: Request, body: Optional[dict] = None) -> str:
+    if body:
+        lang = str((body or {}).get("language") or "").strip().lower()
+        if lang:
+            return lang[:5]
+    head = (request.headers.get("accept-language") or "").lower()
+    if head.startswith("en"):
+        return "en"
+    return "ru"
+
+
+def _mailer():
+    return ctx.mailer
+
+
+def _email_enabled() -> bool:
+    return bool(ctx.mailer and getattr(ctx.mailer, "enabled", False))
+
+
+def _send_mail_blocking(kind: str, to: str, token: str, name: str = "") -> bool:
+    m = _mailer()
+    if not m:
+        log.warning("Почта не настроена: письмо «%s» для %s не отправлено", kind, to)
+        return False
+    if kind == "verify":
+        return m.send_verify(to, token, name=name)
+    if kind == "login":
+        return m.send_login_link(to, token)
+    if kind == "reset":
+        return m.send_reset(to, token)
+    return False
+
+
+async def _send_mail(kind: str, to: str, token: str, name: str = "") -> bool:
+    """SMTP — блокирующий вызов: уводим его в поток, не морозя event loop."""
+    return await run_in_threadpool(_send_mail_blocking, kind, to, token, name)
+
+
+async def _json_body(request: Request) -> dict:
+    try:
+        data = await request.json()
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _email_error(lang: str, code: str) -> str:
+    ru = {
+        "bad_email": "Похоже, в адресе опечатка.",
+        "email_unverified": "Сначала подтвердите почту — ссылка есть в письме от LiqScope.",
+        "no_user": "Аккаунта с такой почтой нет.",
+        "no_password": "У этого аккаунта нет пароля — войдите по ссылке из письма или через Telegram.",
+        "short": "Пароль короче 8 символов.",
+        "long": "Пароль слишком длинный.",
+        "weak": "Такой пароль слишком простой.",
+        "rate": "Слишком часто. Попробуйте через пару минут.",
+        "expired": "Ссылка устарела — запросите новую.",
+        "used": "Ссылка уже использована. Запросите новую.",
+        "unknown": "Ссылка не найдена — запросите новую.",
+        "taken": "Эта почта уже зарегистрирована — войдите или восстановите пароль.",
+        "mail_failed": "Письмо не ушло. Проверьте адрес или попробуйте позже.",
+    }
+    en = {
+        "bad_email": "That address does not look right.",
+        "email_unverified": "Confirm your email first — the link is in our letter.",
+        "no_user": "No account with this email.",
+        "no_password": "This account has no password — use the email link or Telegram.",
+        "short": "Password is shorter than 8 characters.",
+        "long": "Password is too long.",
+        "weak": "That password is too simple.",
+        "rate": "Too many attempts. Try again in a few minutes.",
+        "expired": "The link expired — request a new one.",
+        "used": "That link was already used. Request a new one.",
+        "unknown": "Link not found — request a new one.",
+        "taken": "This email is already registered — sign in or reset the password.",
+        "mail_failed": "The letter did not go out. Check the address or try later.",
+    }
+    table = en if str(lang).startswith("en") else ru
+    return table.get(code, code)
+
+
+def _user_session(request: Request, response: Response, user: dict) -> str:
+    iph = hash_ip(ctx.secret, _client_ip(request))
+    token = ctx.store.create_session(user["id"], iph, request.headers.get("user-agent") or "")
+    _set_sid(response, token)
+    return token
+
+
+def _verify_allowed(user: dict) -> bool:
+    """Пускать ли в кабинет: подтверждение почты обязательно (жёсткий режим)."""
+    if not ctx.require_email_verification:
+        return True
+    if not user.get("email"):
+        return True          # Telegram-аккаунт без почты — отдельный случай
+    return bool(user.get("email_verified"))
+
+
+def _next_after_verify() -> str:
+    return "/cabinet"
+
+
+def _safe_next(value: str) -> str:
+    """Только свой путь: «//evil.com» и «https://…» не принимаем."""
+    value = (value or "").strip()
+    if not value.startswith("/") or value.startswith("//"):
+        return ""
+    return value
 
 
 # Публичное имя бота, если getMe ещё не ответил или токен не подхватился.
@@ -143,9 +311,254 @@ def register_account_routes(app) -> None:
             "user": user,
             "bot_username": bot_user,
             "bot_ready": bool(bot_user),
+            "bot_link": _bot_link(),
             "public_url": _public_url(request),
             "site_notice": notice,
+            # кабинет спрашивает это, чтобы показать «подтвердите почту»
+            "verified": bool(user) and _verify_allowed(user),
+            "email_required": bool(ctx.require_email_verification),
+            "mail_enabled": _email_enabled(),
         }
+
+    # ----- почта: регистрация и вход ---------------------------------------
+    @router.post("/api/auth/email/register")
+    async def api_email_register(request: Request, response: Response):
+        """Регистрация по почте. Возвращает только «письмо отправлено»."""
+        if not ctx.store:
+            return JSONResponse({"ok": False, "error": "no_store"}, status_code=503)
+        body = await _json_body(request)
+        email = normalize_email(body.get("email"))
+        lang = _lang_code(request, body)
+        if not valid_email(email):
+            return JSONResponse({"ok": False, "error": "bad_email",
+                                 "hint": _email_error(lang, "bad_email")}, status_code=400)
+        problem = password_problem(body.get("password"), email)
+        if problem:
+            return JSONResponse({"ok": False, "error": problem,
+                                 "hint": _email_error(lang, problem)}, status_code=400)
+        if not _MAIL_RATE.allow(_rate_key(request, "mail")):
+            return JSONResponse({"ok": False, "error": "rate",
+                                 "hint": _email_error(lang, "rate")}, status_code=429)
+        r = ctx.store.create_email_user(
+            email, password_hash=hash_password(str(body.get("password"))),
+            first_name=str(body.get("name") or "")[:64], language=lang)
+        if not r.get("ok"):
+            # адрес уже подтверждён: честно говорим, что аккаунт есть, и
+            # отправляем на вход — письмо чужому человеку не уходит
+            return JSONResponse({
+                "ok": True, "sent": False, "exists": True, "email": email,
+                "verify_required": True,
+                "hint": _email_error(lang, "taken"),
+            }, status_code=200)
+        user = r["user"]
+        token = ctx.store.new_email_token(user["id"], "verify", email=email)
+        sent = await _send_mail("verify", email, token, name=user.get("first_name") or "")
+        if not sent and _email_enabled():
+            return JSONResponse({"ok": False, "error": "mail_failed",
+                                 "hint": _email_error(lang, "mail_failed")}, status_code=502)
+        log.info("Регистрация по почте: %s (письмо %s)", email, "ушло" if sent else "не ушло")
+        return {"ok": True, "sent": bool(sent), "email": email,
+                "verify_required": True, "mail_enabled": _email_enabled()}
+
+    @router.post("/api/auth/email/resend")
+    async def api_email_resend(request: Request):
+        body = await _json_body(request)
+        email = normalize_email(body.get("email"))
+        lang = _lang_code(request, body)
+        if not valid_email(email):
+            return JSONResponse({"ok": False, "error": "bad_email",
+                                 "hint": _email_error(lang, "bad_email")}, status_code=400)
+        if not _MAIL_RATE.allow(_rate_key(request, "mail")) or \
+                not _MAIL_RATE_EMAIL.allow(_rate_key(request, "mail-addr", email)):
+            return JSONResponse({"ok": False, "error": "rate",
+                                 "hint": _email_error(lang, "rate")}, status_code=429)
+        user = ctx.store.get_user_by_email(email) if ctx.store else None
+        # ответ всегда одинаковый: не выдаём, зарегистрирован адрес или нет
+        if user and not user.get("email_verified"):
+            token = ctx.store.new_email_token(user["id"], "verify", email=email)
+            sent = await _send_mail("verify", email, token, name=user.get("first_name") or "")
+            return {"ok": True, "sent": bool(sent), "email": email}
+        return {"ok": True, "sent": True, "email": email}
+
+    @router.get("/verify")
+    async def page_verify(request: Request, token: str = ""):
+        """Ссылка из письма: подтверждаем почту и сразу открываем кабинет."""
+        if not ctx.store or not token:
+            return RedirectResponse("/login?verify=bad", status_code=303)
+        user, err = ctx.store.consume_email_token(token, "verify")
+        if err:
+            return RedirectResponse("/login?verify=" + err, status_code=303)
+        user = ctx.store.mark_email_verified(user["id"]) or user
+        if user["is_banned"]:
+            return RedirectResponse("/login?banned=1", status_code=303)
+        ctx.store.audit(user["id"], "email_verified", user.get("email") or "")
+        resp = RedirectResponse(_next_after_verify(), status_code=303)
+        _set_sid(resp, ctx.store.create_session(
+            user["id"], hash_ip(ctx.secret, _client_ip(request)),
+            request.headers.get("user-agent") or ""))
+        return resp
+
+    @router.post("/api/auth/email/login")
+    async def api_email_login(request: Request, response: Response):
+        body = await _json_body(request)
+        email = normalize_email(body.get("email"))
+        lang = _lang_code(request, body)
+        if not _LOGIN_RATE.allow(_rate_key(request, "login")):
+            return JSONResponse({"ok": False, "error": "rate",
+                                 "hint": _email_error(lang, "rate")}, status_code=429)
+        user = ctx.store.get_user_by_email(email) if ctx.store else None
+        row = None
+        if ctx.store and user:
+            row = ctx.store._db.execute(   # пароль наружу не отдаём публичным профилем
+                "SELECT password_hash FROM users WHERE id=?", (int(user["id"]),)
+            ).fetchone()
+        stored = (row["password_hash"] if row else "") or ""
+        password = str(body.get("password") or "")
+        if not user or not stored or not verify_password(password, stored):
+            return JSONResponse({"ok": False, "error": "bad_credentials",
+                                 "hint": _email_error(lang, "no_user")}, status_code=401)
+        if user["is_banned"]:
+            return JSONResponse({"ok": False, "error": "banned",
+                                 "hint": _email_error(lang, "banned")}, status_code=403)
+        if not _verify_allowed(user):
+            # жёсткий режим: без клика по ссылке из письма входа нет
+            token = ctx.store.new_email_token(user["id"], "verify", email=email)
+            sent = await _send_mail("verify", email, token, name=user.get("first_name") or "")
+            return JSONResponse({"ok": False, "error": "email_unverified",
+                                 "hint": _email_error(lang, "email_unverified"),
+                                 "sent": bool(sent)}, status_code=403)
+        _LOGIN_RATE.reset(_rate_key(request, "login"))
+        _user_session(request, response, user)
+        return {"ok": True, "user": user}
+
+    @router.post("/api/auth/email/link")
+    async def api_email_link(request: Request):
+        """Вход по ссылке: присылаем ссылку на почту, пароль не нужен."""
+        body = await _json_body(request)
+        email = normalize_email(body.get("email"))
+        lang = _lang_code(request, body)
+        if not valid_email(email):
+            return JSONResponse({"ok": False, "error": "bad_email",
+                                 "hint": _email_error(lang, "bad_email")}, status_code=400)
+        if not _MAIL_RATE.allow(_rate_key(request, "mail")) or \
+                not _MAIL_RATE_EMAIL.allow(_rate_key(request, "mail-addr", email)):
+            return JSONResponse({"ok": False, "error": "rate",
+                                 "hint": _email_error(lang, "rate")}, status_code=429)
+        user = ctx.store.get_user_by_email(email) if ctx.store else None
+        if user and not user["is_banned"]:
+            token = ctx.store.new_email_token(user["id"], "login", email=email)
+            await _send_mail("login", email, token)
+        return {"ok": True, "sent": True, "email": email}
+
+    @router.get("/email-login")
+    async def page_email_login(request: Request, token: str = ""):
+        if not ctx.store or not token:
+            return RedirectResponse("/login?link=bad", status_code=303)
+        user, err = ctx.store.consume_email_token(token, "login")
+        if err:
+            return RedirectResponse("/login?link=" + err, status_code=303)
+        if user["is_banned"]:
+            return RedirectResponse("/login?banned=1", status_code=303)
+        if not _verify_allowed(user):
+            return RedirectResponse("/login?verify=first", status_code=303)
+        resp = RedirectResponse("/cabinet", status_code=303)
+        _set_sid(resp, ctx.store.create_session(
+            user["id"], hash_ip(ctx.secret, _client_ip(request)),
+            request.headers.get("user-agent") or ""))
+        return resp
+
+    @router.post("/api/auth/email/reset")
+    async def api_email_reset(request: Request):
+        """Забыли пароль: письмо со ссылкой на смену."""
+        body = await _json_body(request)
+        email = normalize_email(body.get("email"))
+        lang = _lang_code(request, body)
+        if not valid_email(email):
+            return JSONResponse({"ok": False, "error": "bad_email",
+                                 "hint": _email_error(lang, "bad_email")}, status_code=400)
+        if not _MAIL_RATE.allow(_rate_key(request, "mail")) or \
+                not _MAIL_RATE_EMAIL.allow(_rate_key(request, "mail-addr", email)):
+            return JSONResponse({"ok": False, "error": "rate",
+                                 "hint": _email_error(lang, "rate")}, status_code=429)
+        user = ctx.store.get_user_by_email(email) if ctx.store else None
+        if user and not user["is_banned"]:
+            token = ctx.store.new_email_token(user["id"], "reset", email=email)
+            await _send_mail("reset", email, token)
+        return {"ok": True, "sent": True, "email": email}
+
+    @router.get("/reset")
+    async def page_reset(request: Request, token: str = ""):
+        return FileResponse(os.path.join(STATIC_DIR, "reset.html"))
+
+    @router.get("/api/auth/email/token")
+    async def api_email_token_info(request: Request, token: str = ""):
+        """Годится ли ссылка из письма (страница сброса спрашивает это)."""
+        if not ctx.store:
+            return {"ok": False, "error": "no_store"}
+        user, err = ctx.store.email_token_user(token, "")
+        if err:
+            return {"ok": False, "error": err}
+        return {"ok": True, "email": user.get("email") or ""}
+
+    @router.post("/api/auth/email/set-password")
+    async def api_email_set_password(request: Request, response: Response):
+        body = await _json_body(request)
+        lang = _lang_code(request, body)
+        problem = password_problem(body.get("password"), body.get("email") or "")
+        if problem:
+            return JSONResponse({"ok": False, "error": problem,
+                                 "hint": _email_error(lang, problem)}, status_code=400)
+        token = str(body.get("token") or "")
+        user, err = ctx.store.consume_email_token(token, "reset") if ctx.store else (None, "unknown")
+        if err:
+            return JSONResponse({"ok": False, "error": err,
+                                 "hint": _email_error(lang, err)}, status_code=400)
+        ctx.store.set_user_password(user["id"], hash_password(str(body.get("password"))))
+        # пароль сменили — старые сессии уходят
+        ctx.store.drop_user_sessions(user["id"])
+        refreshed = ctx.store.get_user(user["id"]) or user
+        if refreshed.get("email") and not refreshed.get("email_verified"):
+            refreshed = ctx.store.mark_email_verified(refreshed["id"]) or refreshed
+        _user_session(request, response, refreshed)
+        ctx.store.audit(user["id"], "password_reset", user.get("email") or "")
+        return {"ok": True, "user": refreshed}
+
+    # ----- Telegram: привязка к аккаунту (не регистрация) -------------------
+    @router.post("/api/auth/telegram/link")
+    async def api_tg_link(request: Request):
+        """Кабинет просит ссылку на бота: привяжем Telegram к этому аккаунту."""
+        user = current_user(request)
+        if not user:
+            return _need_auth()
+        if not ctx.bot or not getattr(ctx.bot, "token", ""):
+            return JSONResponse({"ok": False, "error": "no_bot",
+                                 "hint": "Задайте LIQSCOPE_BOT_TOKEN и перезапустите сервер."},
+                                status_code=503)
+        nonce = ctx.store.new_link_nonce(user["id"])
+        return {"ok": True, "nonce": nonce, "bot_username": _bot_username(),
+                "bot_link": _bot_link("link_" + nonce),
+                "expires_in": 900}
+
+    @router.get("/api/auth/telegram/link/status")
+    async def api_tg_link_status(request: Request, nonce: str = ""):
+        user = current_user(request)
+        if not user:
+            return _need_auth()
+        st = ctx.store.link_nonce_status(nonce)
+        if st.get("ok"):
+            # сессия браузера остаётся, но данные в ней обновляем
+            st["user"] = ctx.store.get_user(user["id"]) or user
+        return st
+
+    @router.post("/api/auth/telegram/unlink")
+    async def api_tg_unlink(request: Request):
+        user = current_user(request)
+        if not user:
+            return _need_auth()
+        updated = ctx.store.unlink_telegram(user["id"])
+        if not updated:
+            return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
+        return {"ok": True, "user": updated}
 
     @router.post("/api/auth/logout")
     async def api_logout(request: Request, response: Response):
@@ -241,6 +654,8 @@ def register_account_routes(app) -> None:
         user = current_user(request)
         if not user:
             return _need_auth()
+        if not _verify_allowed(user):
+            return _need_verified()
         have = set(ctx.store.user_service_slugs(user["id"]))
         out = []
         for s in ctx.store.list_services(include_disabled=False):
@@ -254,6 +669,8 @@ def register_account_routes(app) -> None:
         user = current_user(request)
         if not user:
             return _need_auth()
+        if not _verify_allowed(user):
+            return _need_verified()
         try:
             body = await request.json()
         except Exception:
@@ -267,6 +684,8 @@ def register_account_routes(app) -> None:
         user = current_user(request)
         if not user:
             return _need_auth()
+        if not _verify_allowed(user):
+            return _need_verified()
         row = ctx.store.get_user_service(user["id"], "alerts")
         cfg = normalize_config((row or {}).get("config") or {})
         market = {}
@@ -290,6 +709,8 @@ def register_account_routes(app) -> None:
         user = current_user(request)
         if not user:
             return _need_auth()
+        if not _verify_allowed(user):
+            return _need_verified()
         try:
             body = await request.json()
         except Exception:
@@ -351,6 +772,7 @@ def register_account_routes(app) -> None:
             },
             "services": ctx.store.list_services(True),
             "audit": ctx.store.recent_audit(20),
+            "mail": (ctx.mailer.status() if ctx.mailer else {"enabled": False}),
         }
 
     @router.get("/api/admin/users")

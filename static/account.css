@@ -101,6 +101,7 @@ body[data-page="cabinet"] .wrap { max-width: min(1600px, 96vw); }
     border: 1px solid var(--border); border-radius: 100px; padding: 2px 8px; margin-left: 6px;
 }
 .badge-admin { color: var(--gold); border-color: rgba(255,213,79,.4); }
+.badge-warn { color: var(--gold); border-color: rgba(255,213,79,.45); background: rgba(255,213,79,.08); }
 
 .svc {
     display: flex; flex-direction: column; min-height: 160px;
@@ -119,6 +120,58 @@ body[data-page="cabinet"] .wrap { max-width: min(1600px, 96vw); }
     color: var(--cyan);
     border-radius: 10px; padding: 12px 16px; margin-top: 18px; font-size: 0.85rem;
 }
+
+/* Почта — основной вход: формы, вкладки, ссылки-помощники */
+.field {
+    display: block; text-align: left; margin-bottom: 12px;
+}
+.field > span {
+    display: block; font-size: 0.72rem; letter-spacing: 0.6px; text-transform: uppercase;
+    color: var(--muted); margin-bottom: 6px;
+}
+.field input {
+    width: 100%; box-sizing: border-box;
+    background: rgba(9, 13, 22, 0.75); color: var(--text);
+    border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px 14px; font-size: 0.95rem; font-family: inherit;
+}
+.field input:focus { outline: none; border-color: var(--blue); }
+.field input:read-only { color: var(--muted); }
+.auth-tabs {
+    display: flex; gap: 6px; justify-content: center; flex-wrap: wrap; margin-top: 18px;
+}
+.auth-tab {
+    background: none; border: 1px solid var(--border); color: var(--muted);
+    border-radius: 999px; padding: 7px 14px; cursor: pointer;
+    font-size: 0.82rem; font-family: inherit;
+}
+.auth-tab:hover { color: var(--text); }
+.auth-tab.active { border-color: var(--blue); color: var(--text); background: rgba(61,112,255,.12); }
+.auth-help {
+    margin-top: 14px; font-size: 0.8rem; color: var(--muted);
+    display: flex; gap: 8px; justify-content: center; align-items: center; flex-wrap: wrap;
+}
+.auth-help .dot { opacity: 0.5; }
+.link-btn {
+    background: none; border: none; color: var(--blue); cursor: pointer;
+    font-size: 0.8rem; font-family: inherit; padding: 2px 0; text-decoration: underline dotted;
+}
+.link-btn:hover { color: var(--text); }
+.tg-alt {
+    margin-top: 22px; text-align: left; border-top: 1px solid var(--border); padding-top: 14px;
+}
+.tg-alt summary { cursor: pointer; font-size: 0.85rem; color: var(--muted); }
+.tg-alt summary .badge { margin-left: 6px; }
+.tg-alt[open] summary { color: var(--text); margin-bottom: 6px; }
+.verify-bar {
+    display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 14px;
+    border: 1px solid rgba(255, 213, 79, 0.35); background: rgba(255, 213, 79, 0.07);
+    border-radius: 10px; padding: 10px 14px; font-size: 0.82rem; color: var(--gold);
+}
+.verify-bar .btn { padding: 6px 12px; font-size: 0.8rem; }
+.tg-card { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+.tg-card .meta { margin-bottom: 8px; }
+.badge-tg { color: var(--tg); border-color: rgba(41, 171, 226, 0.45); }
 
 .login-box { max-width: 460px; margin: 60px auto; text-align: center; }
 .login-box .card { padding: 36px 28px; }

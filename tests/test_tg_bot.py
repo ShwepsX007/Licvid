@@ -235,6 +235,124 @@ class BotMenuTest(unittest.TestCase):
         self.assertIn("кнопки внизу", edited["text"])
         self.assertEqual((edited.get("reply_markup") or {}).get("inline_keyboard"), [])
 
+    def test_start_links_telegram_to_email_account(self):
+        """/start link_<nonce> привязывает Telegram к аккаунту с почтой."""
+        from accounts import hash_password
+        acc = self.store.create_email_user("bob@mail.ru", hash_password("Good-Pass-2026"),
+                                           first_name="Боб")["user"]
+        self.store.mark_email_verified(acc["id"])
+        nonce = self.store.new_link_nonce(acc["id"])
+        calls = []
+        n = {"id": 30}
+
+        async def fake(method, payload=None):
+            calls.append((method, payload or {}))
+            if method == "sendMessage":
+                n["id"] += 1
+                return {"ok": True, "result": {"message_id": n["id"]}}
+            return {"ok": True}
+
+        self.bot._call = fake  # type: ignore
+        asyncio.run(self.bot._cmd_start(2002, self.user, "/start link_" + nonce))
+        sent = [p for m, p in calls if m == "sendMessage"][0]
+        self.assertIn("привязан", sent["text"])
+        self.assertIn("bob@mail.ru", sent["text"])
+        linked = self.store.get_user(acc["id"])
+        self.assertEqual(linked["tg_id"], 2002)
+        self.assertTrue(linked["email_verified"])
+        self.assertTrue(self.store.link_nonce_status(nonce)["ok"])
+
+    def test_start_link_merges_telegram_account(self):
+        """Человек писал боту до привязки — профиль переезжает в аккаунт с почтой."""
+        from accounts import hash_password
+        acc = self.store.create_email_user("bob@mail.ru", hash_password("Good-Pass-2026"))["user"]
+        self.store.mark_email_verified(acc["id"])
+        self.store.toggle_user_service(self.user["id"], "alerts", True)
+        nonce = self.store.new_link_nonce(acc["id"])
+        calls = []
+        n = {"id": 40}
+
+        async def fake(method, payload=None):
+            calls.append((method, payload or {}))
+            if method == "sendMessage":
+                n["id"] += 1
+                return {"ok": True, "result": {"message_id": n["id"]}}
+            return {"ok": True}
+
+        self.bot._call = fake  # type: ignore
+        asyncio.run(self.bot._cmd_start(2002, self.user, "/start link_" + nonce))
+        sent = [p for m, p in calls if m == "sendMessage"][0]
+        self.assertIn("перенесён", sent["text"])
+        merged = self.store.get_user(acc["id"])
+        self.assertEqual(merged["tg_id"], 2002)
+        self.assertIn("alerts", self.store.user_service_slugs(acc["id"]))
+        self.assertIsNone(self.store.get_user(self.user["id"]))
+
+    def test_start_link_expired_tells_user(self):
+        from accounts import hash_password
+        acc = self.store.create_email_user("bob@mail.ru", hash_password("Good-Pass-2026"))["user"]
+        nonce = self.store.new_link_nonce(acc["id"])
+        self.store._db.execute("UPDATE tg_link_nonces SET expires_at=0 WHERE nonce=?", (nonce,))
+        self.store._db.commit()
+        calls = []
+        n = {"id": 50}
+
+        async def fake(method, payload=None):
+            calls.append((method, payload or {}))
+            if method == "sendMessage":
+                n["id"] += 1
+                return {"ok": True, "result": {"message_id": n["id"]}}
+            return {"ok": True}
+
+        self.bot._call = fake  # type: ignore
+        asyncio.run(self.bot._cmd_start(2002, self.user, "/start link_" + nonce))
+        sent = [p for m, p in calls if m == "sendMessage"][0]
+        self.assertIn("устарела", sent["text"])
+        self.assertIsNone(self.store.get_user(acc["id"])["tg_id"])
+
+    def test_start_link_rejected_when_tg_taken(self):
+        from accounts import hash_password
+        first = self.store.create_email_user("f@mail.ru", hash_password("First-Pass-2026"))["user"]
+        self.store.mark_email_verified(first["id"])
+        second = self.store.create_email_user("s@mail.ru", hash_password("Second-Pass-2026"))["user"]
+        self.store.mark_email_verified(second["id"])
+        self.store.confirm_tg_link(self.store.new_link_nonce(first["id"]), {"id": 2002})
+        nonce = self.store.new_link_nonce(second["id"])
+        calls = []
+        n = {"id": 60}
+
+        async def fake(method, payload=None):
+            calls.append((method, payload or {}))
+            if method == "sendMessage":
+                n["id"] += 1
+                return {"ok": True, "result": {"message_id": n["id"]}}
+            return {"ok": True}
+
+        self.bot._call = fake  # type: ignore
+        asyncio.run(self.bot._cmd_start(2002, self.user, "/start link_" + nonce))
+        sent = [p for m, p in calls if m == "sendMessage"][0]
+        self.assertIn("уже привязан", sent["text"])
+        self.assertIsNone(self.store.get_user(second["id"])["tg_id"])
+
+    def test_login_nonce_still_works(self):
+        """Старый вход через бота (login_<nonce>) не сломан."""
+        nonce = self.store.new_nonce()
+        calls = []
+        n = {"id": 70}
+
+        async def fake(method, payload=None):
+            calls.append((method, payload or {}))
+            if method == "sendMessage":
+                n["id"] += 1
+                return {"ok": True, "result": {"message_id": n["id"]}}
+            return {"ok": True}
+
+        self.bot._call = fake  # type: ignore
+        asyncio.run(self.bot._cmd_start(2002, self.user, "/start login_" + nonce))
+        sent = [p for m, p in calls if m == "sendMessage"][0]
+        self.assertIn("Вход подтверждён", sent["text"])
+        self.assertTrue(self.store.nonce_status(nonce)["ok"])
+
     def test_start_edits_second_time(self):
         calls = []
         n = {"id": 10}

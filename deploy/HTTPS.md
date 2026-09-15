@@ -64,6 +64,19 @@ sudo systemctl daemon-reload
 sudo systemctl restart licvid nginx
 ```
 
+Если `restart` отвечает `Unit licvid.service has a bad unit file setting` —
+в юните две строки `ExecStart` (для `Type=simple` systemd это запрещает).
+Проверка и правка:
+
+```bash
+systemctl cat licvid.service | grep ExecStart
+# оставьте одну, например:
+# ExecStart=/root/Licvid/venv/bin/python3 -m uvicorn server:app --host 127.0.0.1 --port 8000
+sudo systemctl edit --full licvid
+sudo systemctl daemon-reload
+sudo systemctl restart licvid
+```
+
 ## 5. Telegram
 
 В BotFather: `/setdomain` → `liqscope.online` (без https, без порта).

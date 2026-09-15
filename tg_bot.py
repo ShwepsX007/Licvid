@@ -680,8 +680,7 @@ class TelegramBot:
                 return
             if nav == "channel":
                 await self.show_menu(
-                    chat_id, f"Канал:\n{self.channel_url}",
-                    {"inline_keyboard": [[{"text": "📣 Открыть", "url": self.channel_url}]]})
+                    chat_id, f"Канал:\n{self.channel_url}", self._reply_kb(user))
                 return
             if nav == "al":
                 await self.show_menu(chat_id, self._alert_text(user), self._alert_kb(user))
@@ -696,19 +695,19 @@ class TelegramBot:
         elif text.startswith("/help"):
             await self.show_menu(chat_id, self._help(user), self._reply_kb(user))
         elif text.startswith("/cabinet"):
-            await self.show_menu(chat_id, self._cabinet_text(user), self._kb_back("nav:home"))
+            await self.show_menu(chat_id, self._cabinet_text(user), self._reply_kb(user))
         elif text.startswith("/stats"):
-            await self.show_menu(chat_id, self._stats_text(), self._kb_back("nav:home"))
+            await self.show_menu(chat_id, self._stats_text(), self._reply_kb(user))
         elif text.startswith("/status") or text.startswith("/health"):
-            await self.show_menu(chat_id, self._health_text(), self._kb_back("nav:home"))
+            await self.show_menu(chat_id, self._health_text(), self._reply_kb(user))
         elif text.startswith("/liq"):
-            await self.show_menu(chat_id, self._liq_text(), self._kb_back("nav:home"))
+            await self.show_menu(chat_id, self._liq_text(), self._reply_kb(user))
         elif text.startswith("/services"):
             await self.show_menu(chat_id, self._services_text(user), self._services_kb(user))
         elif text.startswith("/alerts"):
             await self.show_menu(chat_id, self._alert_text(user), self._alert_kb(user))
         elif text.startswith("/terminal"):
-            await self.show_menu(chat_id, self._terminal_text(), self._terminal_kb())
+            await self.show_menu(chat_id, self._terminal_text(), self._reply_kb(user))
         elif text.startswith("/admin"):
             await self._cmd_admin(chat_id, user)
         elif text.startswith("/users"):
@@ -782,17 +781,17 @@ class TelegramBot:
                 return self._help(user), self._reply_kb(user)
             return self._home_text(user), self._reply_kb(user)
         if data == "cabinet":
-            return self._cabinet_text(user), self._kb_back("nav:home")
+            return self._cabinet_text(user), self._reply_kb(user)
         if data == "stats":
-            return self._stats_text(), self._kb_back("nav:home")
+            return self._stats_text(), self._reply_kb(user)
         if data == "health":
-            return self._health_text(), self._kb_back("nav:home")
+            return self._health_text(), self._reply_kb(user)
         if data == "a:health" and user.get("is_admin"):
             return self._health_text(), self._kb_back("nav:admin")
         if data == "liq":
-            return self._liq_text(), self._kb_back("nav:home")
+            return self._liq_text(), self._reply_kb(user)
         if data == "terminal":
-            return self._terminal_text(), self._terminal_kb()
+            return self._terminal_text(), self._reply_kb(user)
         if data == "services":
             return self._services_text(user), self._services_kb(user)
         if data.startswith("svc:"):

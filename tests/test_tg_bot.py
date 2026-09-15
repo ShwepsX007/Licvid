@@ -74,17 +74,17 @@ class BotMenuTest(unittest.TestCase):
         self.assertTrue(kb.get("is_persistent"))
         self.assertNotIn("cabinet", _datas(kb))
 
-    def test_leaf_screens_have_back_to_menu(self):
-        for data in ("cabinet", "stats", "health", "liq"):
-            _text, kb = self.bot._screen(self.user, data)
-            self.assertEqual(_btns(kb), ["← Назад"], data)
-            self.assertEqual(_datas(kb), ["nav:home"], data)
-        text, kb = self.bot._screen(self.user, "terminal")
+    def test_leaf_screens_use_reply_panel(self):
+        for data in ("cabinet", "stats", "health", "liq", "terminal"):
+            text, kb = self.bot._screen(self.user, data)
+            rows = kb.get("keyboard") or []
+            texts = [b.get("text") for row in rows for b in row]
+            self.assertTrue(kb.get("is_persistent"), data)
+            self.assertTrue(any("Кабинет" in t for t in texts), data)
+            self.assertNotIn("← Назад", texts)
+            self.assertFalse(kb.get("inline_keyboard"), data)
+        text, _kb = self.bot._screen(self.user, "terminal")
         self.assertIn("https://liqscope.online/terminal", text)
-        self.assertIn("← Назад", _btns(kb))
-        self.assertIn("nav:home", _datas(kb))
-        urls = [b.get("url") for row in kb["inline_keyboard"] for b in row]
-        self.assertIn("https://liqscope.online/terminal", urls)
 
     def test_alerts_screen_from_services(self):
         text, kb = self.bot._screen(self.user, "svc:alerts")
@@ -149,7 +149,10 @@ class BotMenuTest(unittest.TestCase):
         self.assertNotIn("text", ans)
         sent = [p for m, p in calls if m == "sendMessage"][0]
         self.assertEqual(sent["chat_id"], 2002)
-        self.assertIn("← Назад", _btns(sent.get("reply_markup")))
+        kb = sent.get("reply_markup") or {}
+        texts = [b.get("text") for row in (kb.get("keyboard") or []) for b in row]
+        self.assertTrue(any("Кабинет" in t for t in texts))
+        self.assertTrue(kb.get("is_persistent"))
         deleted = [p for m, p in calls if m == "deleteMessage"][0]
         self.assertEqual(deleted["message_id"], 77)
 

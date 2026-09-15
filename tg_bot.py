@@ -106,8 +106,54 @@ class TelegramBot:
     def admin_url(self) -> str:
         return self.site_url("/admin")
 
-    def site_link_kb(self, label: str = "⚡ Терминал", path: str = "/terminal") -> dict:
+    def site_link_kb(self, label: str = "посмотреть в терминале",
+                     path: str = "/terminal") -> dict:
         return {"inline_keyboard": [[{"text": label, "url": self.site_url(path)}]]}
+
+    def bot_url(self) -> str:
+        name = (self.username or os.getenv("LIQSCOPE_BOT_USERNAME") or "LiqScopeBot")
+        return f"https://t.me/{str(name).lstrip('@')}"
+
+    def channel_link_kb(self) -> dict:
+        return {"inline_keyboard": [[
+            {"text": "liqscope", "url": self.site_url()},
+            {"text": "бот", "url": self.bot_url()},
+        ]]}
+
+    def _reply_kb(self, user: Optional[dict] = None) -> dict:
+        rows = [
+            [{"text": "👤 Кабинет"}, {"text": "⚡ Терминал"}],
+            [{"text": "📊 Статистика"}, {"text": "🩺 Биржи"}],
+            [{"text": "🛠 Сервисы"}, {"text": "📰 Лента"}],
+            [{"text": "🔔 Алерты"}, {"text": "📣 Канал"}],
+        ]
+        if user and user.get("is_admin"):
+            rows.append([{"text": "★ Админка"}])
+        return {
+            "keyboard": rows,
+            "resize_keyboard": True,
+            "is_persistent": True,
+            "input_field_placeholder": "меню внизу экрана",
+        }
+
+    def _reply_cmd(self, text: str) -> str:
+        key = " ".join((text or "").strip().lower().split())
+        key = key.replace("★ ", "").replace("👤 ", "").replace("⚡ ", "")
+        key = key.replace("📊 ", "").replace("🩺 ", "").replace("🛠 ", "")
+        key = key.replace("📰 ", "").replace("🔔 ", "").replace("📣 ", "")
+        return {
+            "кабинет": "cabinet",
+            "терминал": "terminal",
+            "статистика": "stats",
+            "биржи": "health",
+            "сервисы": "services",
+            "лента": "liq",
+            "лента liq": "liq",
+            "алерты": "al",
+            "алерты по объёму": "al",
+            "канал": "channel",
+            "админка": "admin",
+        }.get(key, "")
 
     async def start(self) -> None:
         if not self.token:
@@ -475,9 +521,10 @@ class TelegramBot:
             snap, n,
             headlines=active_headlines(self.store, hours),
             site_url=self.site_url(),
+            bot_url=self.bot_url(),
         )
         img = pick_image(n, images=active_images(self.store))
-        markup = self.site_link_kb("⚡ Терминал", "/terminal")
+        markup = self.channel_link_kb()
         # одно сообщение: фото с подписью, иначе только текст. Никогда фото+текст.
         ok = False
         if img and len(caption) <= 1024:
@@ -626,12 +673,28 @@ class TelegramBot:
             return
         if not await self._ensure_channel(chat_id, user):
             return
+        nav = self._reply_cmd(text)
+        if nav:
+            if nav == "admin":
+                await self._cmd_admin(chat_id, user)
+                return
+            if nav == "channel":
+                await self.show_menu(
+                    chat_id, f"Канал:\n{self.channel_url}",
+                    {"inline_keyboard": [[{"text": "📣 Открыть", "url": self.channel_url}]]})
+                return
+            if nav == "al":
+                await self.show_menu(chat_id, self._alert_text(user), self._alert_kb(user))
+                return
+            body, kb = self._screen(user, nav)
+            await self.show_menu(chat_id, body, kb)
+            return
         if text.startswith("/digest") and user.get("is_admin"):
             ok = await self.post_channel_digest(force=True)
             await self.show_menu(chat_id, self._digest_result_text(ok),
                                  self._admin_kb())
         elif text.startswith("/help"):
-            await self.show_menu(chat_id, self._help(user), self._menu(user))
+            await self.show_menu(chat_id, self._help(user), self._reply_kb(user))
         elif text.startswith("/cabinet"):
             await self.show_menu(chat_id, self._cabinet_text(user), self._kb_back("nav:home"))
         elif text.startswith("/stats"):
@@ -655,7 +718,7 @@ class TelegramBot:
         elif text.startswith("/broadcast"):
             await self._cmd_broadcast(chat_id, user, text)
         else:
-            await self.show_menu(chat_id, "Не понял. Нажмите кнопку или /help.", self._menu(user))
+            await self.show_menu(chat_id, "Не понял. Нажмите кнопку или /help.", self._reply_kb(user))
 
     async def _on_callback(self, cb: dict) -> None:
         from_u = cb.get("from") or {}
@@ -678,7 +741,7 @@ class TelegramBot:
         try:
             if data == "ch:check":
                 if await self._is_member(tg_id):
-                    text, markup = self._home_text(user), self._menu(user)
+                    text, markup = self._home_text(user), self._reply_kb(user)
                     ok = await self.reply(chat_id, text, markup, message_id=message_id)
                 else:
                     extra = ("Telegram ещё не видит подписку. Откройте канал, "
@@ -715,8 +778,9 @@ class TelegramBot:
     def _screen(self, user: dict, data: str) -> tuple:
         """Текст и клавиатура экрана."""
         if data in ("menu", "back", "nav:home", "home", "help", ""):
-            return (self._home_text(user) if data != "help" else self._help(user),
-                    self._menu(user))
+            if data == "help":
+                return self._help(user), self._reply_kb(user)
+            return self._home_text(user), self._reply_kb(user)
         if data == "cabinet":
             return self._cabinet_text(user), self._kb_back("nav:home")
         if data == "stats":
@@ -754,7 +818,7 @@ class TelegramBot:
             self._wait_broadcast[int(user.get("tg_id") or 0)] = True
             return ("Пришлите текст рассылки следующим сообщением.\n"
                     "/cancel — отмена.", self._kb_back("nav:admin"))
-        return self._home_text(user), self._menu(user)
+        return self._home_text(user), self._reply_kb(user)
 
     async def _cmd_start(self, chat_id: int, user: dict, text: str) -> None:
         parts = text.split(maxsplit=1)
@@ -769,13 +833,13 @@ class TelegramBot:
                     f"Вход подтверждён, {_esc(user['display_name'])}.\n"
                     f"Вернитесь во вкладку браузера — кабинет откроется сам.\n\n"
                     f"Сайт: {self.cabinet_url()}",
-                    self._menu(user),
+                    self._reply_kb(user),
                 )
                 return
             await self.show_menu(
                 chat_id,
                 "Код входа недействителен или устарел. Нажмите «Войти» на сайте ещё раз.",
-                self._menu(user),
+                self._reply_kb(user),
             )
             return
         if not await self._ensure_channel(chat_id, user):
@@ -789,30 +853,30 @@ class TelegramBot:
         await self.show_menu(
             chat_id,
             f"Привет, {_esc(user.get('display_name') or 'друг')}!\n\n{welcome}{extra}",
-            self._menu(user),
+            self._reply_kb(user),
         )
 
     async def _cmd_admin(self, chat_id: int, user: dict) -> None:
         if not user["is_admin"]:
-            await self.show_menu(chat_id, "Недостаточно прав.", self._menu(user))
+            await self.show_menu(chat_id, "Недостаточно прав.", self._reply_kb(user))
             return
         await self.show_menu(chat_id, self._admin_text(), self._admin_kb())
 
     async def _cmd_users(self, chat_id: int, user: dict) -> None:
         if not user["is_admin"]:
-            await self.show_menu(chat_id, "Недостаточно прав.", self._menu(user))
+            await self.show_menu(chat_id, "Недостаточно прав.", self._reply_kb(user))
             return
         await self.show_menu(chat_id, self._users_text(), self._kb_back("nav:admin"))
 
     async def _cmd_visits(self, chat_id: int, user: dict) -> None:
         if not user["is_admin"]:
-            await self.show_menu(chat_id, "Недостаточно прав.", self._menu(user))
+            await self.show_menu(chat_id, "Недостаточно прав.", self._reply_kb(user))
             return
         await self.show_menu(chat_id, self._visits_text(), self._kb_back("nav:admin"))
 
     async def _cmd_broadcast(self, chat_id: int, user: dict, text: str) -> None:
         if not user["is_admin"]:
-            await self.show_menu(chat_id, "Недостаточно прав.", self._menu(user))
+            await self.show_menu(chat_id, "Недостаточно прав.", self._reply_kb(user))
             return
         rest = text.split(maxsplit=1)
         body = rest[1].strip() if len(rest) > 1 else ""
@@ -966,19 +1030,7 @@ class TelegramBot:
         return {"inline_keyboard": [[{"text": "← Назад", "callback_data": to}]]}
 
     def _menu(self, user: dict) -> dict:
-        rows = [
-            [{"text": "👤 Кабинет", "callback_data": "cabinet"},
-             {"text": "⚡ Терминал", "url": self.terminal_url()}],
-            [{"text": "📊 Статистика", "callback_data": "stats"},
-             {"text": "🩺 Биржи", "callback_data": "health"}],
-            [{"text": "🛠 Сервисы", "callback_data": "services"},
-             {"text": "📰 Лента liq", "callback_data": "liq"}],
-        ]
-        if user.get("is_admin"):
-            rows.append([{"text": "★ Админка", "callback_data": "admin"}])
-        if self.channel_url:
-            rows.append([{"text": "📣 Канал", "url": self.channel_url}])
-        return {"inline_keyboard": rows}
+        return self._reply_kb(user)
 
     def _admin_kb(self) -> dict:
         return {"inline_keyboard": [
@@ -1006,7 +1058,7 @@ class TelegramBot:
         return (
             f"<b>LiqScope</b>\n"
             f"Привет, {_esc(user['display_name'])}!\n"
-            f"Выберите раздел — кнопки ниже."
+            f"Выберите раздел — кнопки внизу экрана."
         )
 
     def _help(self, user: dict) -> str:
@@ -1167,8 +1219,7 @@ class TelegramBot:
         v = self.store.visit_stats(1)
         h = self.health_fn() or {}
         live = h.get("live_exchanges") or []
-        site = self.public_url
-        link = f"\nПанель: {site}/admin" if site else ""
+        link = f"\nПанель: {self.admin_url()}"
         return (
             f"<b>Админка LiqScope</b>\n"
             f"Пользователи: {c['total']} (за сутки {c['active_24h']}, новых {c['new_24h']})\n"
@@ -1209,11 +1260,14 @@ class TelegramBot:
 
     def _alert_kb(self, user: dict) -> dict:
         cfg = self._alert_cfg(user)
+        w = cfg.get("watch") or []
+        def mark(m, label):
+            return ("✓ " if m in w else "") + label
         on = "🔔 Сигнал ВКЛ" if cfg.get("enabled") else "🔕 Сигнал выкл"
         return {"inline_keyboard": [
-            [{"text": "💥 LIQ", "callback_data": "al:m:liq"},
-             {"text": "🌊 CVD", "callback_data": "al:m:cvd"},
-             {"text": "📊 OI", "callback_data": "al:m:oi"}],
+            [{"text": mark("liq", "💥 LIQ"), "callback_data": "al:m:liq"},
+             {"text": mark("cvd", "🌊 CVD"), "callback_data": "al:m:cvd"},
+             {"text": mark("oi", "📊 OI"), "callback_data": "al:m:oi"}],
             [{"text": "Монета", "callback_data": "al:c"},
              {"text": "Окно", "callback_data": "al:w"}],
             [{"text": "Порог", "callback_data": "al:t"},
@@ -1239,8 +1293,8 @@ class TelegramBot:
         ]}
 
     def _alert_thr_kb(self, metric: str, field: str) -> dict:
-        from alerts import MIN_PRESETS, THRESHOLD_PRESETS, money
-        presets = THRESHOLD_PRESETS if field == "thr" else MIN_PRESETS
+        from alerts import MIN_PRESETS, money, threshold_presets
+        presets = threshold_presets(metric) if field == "thr" else MIN_PRESETS
         rows: List[list] = []
         row: list = []
         prefix = f"al:{'t' if field == 'thr' else 'n'}:{metric}:"
@@ -1311,8 +1365,7 @@ class TelegramBot:
             m = data.split(":")[2]
             w = list(cfg.get("watch") or [])
             if m in w:
-                if len(w) > 1:
-                    w.remove(m)
+                w.remove(m)
             else:
                 w.append(m)
             cfg["watch"] = w

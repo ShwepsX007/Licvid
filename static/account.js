@@ -217,25 +217,47 @@
             if (notice) { n.textContent = notice; n.classList.remove("hidden"); }
             else n.classList.add("hidden");
         }
-        var box = $("svc-grid");
+        var box = $("svc-acc");
         if (!box) return;
-        var rest = (services || []).filter(function (s) { return s.slug !== "alerts"; });
-        box.innerHTML = rest.map(function (s) {
+        var open = "";
+        try { open = localStorage.getItem("liqscope.svc.open") || ""; } catch (e) { open = ""; }
+        var list = services || [];
+        if (!list.some(function (s) { return s.slug === "alerts"; })) {
+            list = [{ slug: "alerts", title: "Алерты по объёму", icon: "🔔",
+                description: "Ликвидации, CVD и OI", coming_soon: false, subscribed: true }].concat(list);
+        }
+        box.innerHTML = list.map(function (s) {
+            var isOpen = open === s.slug;
             var soon = s.coming_soon ? '<div class="soon">⏳ ' + t("soon") + "</div>" : "";
             var label = s.coming_soon
                 ? (s.subscribed ? t("waitlistOn") : t("waitlistOff"))
                 : (s.subscribed ? t("subscribed") : t("subscribe"));
-            return '<div class="card svc' + (s.coming_soon ? " locked" : "") + '">' +
-                '<div class="icon">' + (s.icon || "•") + "</div>" +
-                "<h3>" + (s.title || s.slug) + "</h3>" +
-                "<p>" + (s.description || "") + "</p>" +
-                soon +
-                '<div class="row-actions"><button class="btn btn-ghost btn-small" data-slug="' +
-                s.slug + '" data-on="' + (s.subscribed ? "0" : "1") + '">' + label +
-                "</button></div></div>";
-        }).join("") || "";
-        box.querySelectorAll("button[data-slug]").forEach(function (btn) {
+            var body = s.slug === "alerts"
+                ? '<div class="alerts-board" id="alerts-board"></div>'
+                : "<p>" + (s.description || "") + "</p>" + soon +
+                    '<div class="row-actions"><button class="btn btn-ghost btn-small" data-slug="' +
+                    s.slug + '" data-on="' + (s.subscribed ? "0" : "1") + '">' + label +
+                    "</button></div>";
+            return '<div class="svc-fold' + (isOpen ? " open" : "") + '" data-fold="' + s.slug + '">' +
+                '<button type="button" class="svc-fold-h" data-toggle="' + s.slug + '">' +
+                '<span class="ic">' + (s.icon || "•") + "</span><span><div>" +
+                (s.title || s.slug) + '</div><div class="svc-fold-sub">' +
+                (s.description || "") + "</div></span><span class=\"chev\">▼</span></button>" +
+                '<div class="svc-fold-b">' + body + "</div></div>";
+        }).join("");
+        box.querySelectorAll("[data-toggle]").forEach(function (btn) {
             btn.addEventListener("click", function () {
+                var slug = btn.getAttribute("data-toggle");
+                var fold = box.querySelector('[data-fold="' + slug + '"]');
+                var was = fold && fold.classList.contains("open");
+                box.querySelectorAll(".svc-fold").forEach(function (f) { f.classList.remove("open"); });
+                if (!was && fold) fold.classList.add("open");
+                try { localStorage.setItem("liqscope.svc.open", was ? "" : slug); } catch (e) {}
+            });
+        });
+        box.querySelectorAll("button[data-slug]").forEach(function (btn) {
+            btn.addEventListener("click", function (e) {
+                e.stopPropagation();
                 api("/api/account/services/" + btn.getAttribute("data-slug"), {
                     method: "POST",
                     body: JSON.stringify({ enabled: btn.getAttribute("data-on") === "1" }),
@@ -269,6 +291,7 @@
     var alTimer = null;
     var alSaveT = null;
     var alBusy = false;
+    var alSparkBuf = { liq: [], cvd: [], oi: [] };
 
     function alMoney(v) {
         v = Number(v) || 0;
@@ -337,6 +360,38 @@
         alSaveT = setTimeout(saveAlerts, 280);
     }
 
+    function alThrList(m) {
+        var p = alPresets || {};
+        if (m === "cvd" || m === "oi") return p.thresholds_flow || [10000, 100000, 1e6, 1e7, 1e8];
+        return p.thresholds_liq || p.thresholds || [50000, 100000, 250000, 500000, 1e6, 5e6];
+    }
+    function alPushSpark(key, row) {
+        var src = (row && row.spark && row.spark.length) ? row.spark : null;
+        if (src) { alSparkBuf[key] = src.slice(); return; }
+        var a = alSparkBuf[key] || [];
+        a.push(Number(row && row.value) || 0);
+        if (a.length > 36) a = a.slice(-36);
+        alSparkBuf[key] = a;
+    }
+    function alSparkSvg(vals) {
+        vals = (vals || []).map(Number).filter(function (x) { return isFinite(x); });
+        if (vals.length < 2) {
+            return '<svg class="al-spark" viewBox="0 0 120 28"></svg>';
+        }
+        var min = Math.min.apply(null, vals), max = Math.max.apply(null, vals);
+        if (max === min) max = min + 1;
+        var w = 120, h = 28, p = 2;
+        var pts = vals.map(function (v, i) {
+            var x = p + (w - 2 * p) * i / (vals.length - 1);
+            var y = h - p - (h - 2 * p) * (v - min) / (max - min);
+            return x.toFixed(1) + "," + y.toFixed(1);
+        }).join(" ");
+        var up = vals[vals.length - 1] >= vals[0];
+        var color = up ? "#00e676" : "#ff2a5f";
+        return '<svg class="al-spark" viewBox="0 0 120 28" preserveAspectRatio="none">' +
+            '<polyline fill="none" stroke="' + color + '" stroke-width="1.6" points="' + pts + '"/></svg>';
+    }
+
     function paintAlerts(d, bind) {
         var board = $("alerts-board");
         if (!board || !alCfg) return;
@@ -347,42 +402,47 @@
             thresholds: [50000, 100000, 250000, 500000, 1000000, 5000000],
             min_event: [0, 10000, 25000, 50000, 100000],
             coins: ["ALL", "BTC_USDT", "ETH_USDT", "SOL_USDT"] };
-        function meter(key, title) {
-            var row = live[key] || {};
-            var on = alHas(key);
-            var val = row.value || 0;
-            var thr = (alCfg.threshold || {})[key] || 1;
-            var pct = Math.max(4, Math.min(100, Math.round(100 * Math.abs(val) / thr)));
-            var hot = on && Math.abs(val) >= thr;
-            var cls = "gold";
-            if (key !== "liq") cls = val >= 0 ? "pos" : "neg";
-            var extra = "";
-            if (key === "liq" && row.market) extra = "рынок " + alMoney(row.market.usd);
-            else extra = (row.symbol && row.symbol !== "ALL" ? String(row.symbol).split("_")[0] : "") +
-                (row.count ? " · " + row.count + " шт." : "");
-            return '<div class="al-meter' + (on ? " on" : "") + (hot ? " hot" : "") +
-                '" data-metric="' + key + '"><div class="k">' + title +
-                (on ? " · ON" : "") + "</div><div class=\"v " + cls + "\">" +
-                alMoney(val) + "</div><div class=\"s\">" + extra +
-                " / порог " + alMoney(thr) + "</div><div class=\"al-bar\"><i style=\"width:" +
-                pct + '%"></i></div></div>';
-        }
         function chips(list, cur, attr, fmt) {
             return list.map(function (v) {
                 return alChip(String(v) === String(cur), attr + '="' + v + '"', fmt ? fmt(v) : String(v));
             }).join("");
         }
+        function feed(key, title) {
+            var row = live[key] || {};
+            alPushSpark(key, row);
+            var on = alHas(key);
+            var val = row.value || 0;
+            var thr = (alCfg.threshold || {})[key] || 1;
+            var pct = Math.max(4, Math.min(100, Math.round(100 * Math.abs(val) / thr)));
+            var hot = on && Math.abs(val) >= thr;
+            var cls = key === "liq" ? "gold" : (val >= 0 ? "pos" : "neg");
+            var extra = "";
+            if (key === "liq" && row.market) extra = "рынок " + alMoney(row.market.usd);
+            else extra = (row.symbol && row.symbol !== "ALL" ? String(row.symbol).split("_")[0] : "") +
+                (row.count ? " · " + row.count + " шт." : "");
+            return '<div class="al-feed' + (on ? " on" : "") + (hot ? " hot" : "") +
+                '" data-feed="' + key + '"><div class="al-feed-h">' +
+                '<label class="al-switch' + (on ? " on" : "") + '" data-metric="' + key + '">' +
+                "<i></i><span>" + title + (on ? " · ON" : " · выкл") + "</span></label></div>" +
+                '<div class="al-meter" data-metric="' + key + '"><div class="v ' + cls + '">' +
+                alMoney(val) + '</div><div class="s">' + extra + " / порог " + alMoney(thr) +
+                '</div><div class="al-bar"><i style="width:' + pct + '%"></i></div></div>' +
+                alSparkSvg(alSparkBuf[key]) +
+                '<div class="al-label">Порог ' + title + "</div>" +
+                '<div class="al-chips" data-thr="' + key + '">' +
+                chips(alThrList(key), thr, "data-thrval", alMoney) + "</div>" +
+                '<div class="al-row" style="margin-top:6px"><input data-thrin="' + key +
+                '" type="number" min="0" step="1000" value="' + Math.round(thr || 0) + '"></div>' +
+                '<div class="al-label">Лента ' + title + "</div>" +
+                '<div class="al-tape" id="al-tape-' + key + '">' + alTape(hist, key) + "</div></div>";
+        }
         var coin = alCfg.symbol || "ALL";
         var coinLabel = coin === "ALL" ? "все" : String(coin).split("_")[0];
         board.innerHTML =
-            '<div class="al-head"><div><h3>🔔 Алерты по объёму</h3>' +
-            '<div class="al-sub">Смотрю ликвидации, CVD и OI в выбранном окне. Пересёк порог — сообщение сюда и в Telegram.</div></div>' +
+            '<div class="al-head"><div><h3>Алерты по объёму</h3>' +
+            '<div class="al-sub">Включайте ликвидации, CVD и OI по отдельности — можно слушать один источник или два. Порог CVD/OI крупнее, чем у ликвидаций.</div></div>' +
             '<label class="al-switch' + (alCfg.enabled ? " on" : "") + '" id="al-sw">' +
             "<i></i><span>" + (alCfg.enabled ? "СИГНАЛ ВКЛ" : "СИГНАЛ ВЫКЛ") + "</span></label></div>" +
-            '<div class="al-meters">' +
-            meter("liq", "LIQ") + meter("cvd", "CVD") + meter("oi", "OI") +
-            "</div>" +
-            '<div class="al-grid"><div>' +
             '<div class="al-label">Монета</div><div class="al-chips" id="al-coins">' +
             chips(p.coins || [], coin, "data-coin", function (v) {
                 return v === "ALL" ? "все" : String(v).split("_")[0];
@@ -395,17 +455,10 @@
             chips(p.windows || [], alCfg.window_min, "data-win", alWin) +
             '</div><div class="al-row" style="margin-top:8px"><input id="al-win-in" type="number" min="1" max="1440" placeholder="минуты" value="' +
             alCfg.window_min + '"></div>' +
-            '<div class="al-label">Порог срабатывания</div>' +
-            ["liq", "cvd", "oi"].map(function (m) {
-                var cur = (alCfg.threshold || {})[m];
-                return '<div class="al-label" style="margin-top:8px">' + m.toUpperCase() + "</div>" +
-                    '<div class="al-chips" data-thr="' + m + '">' +
-                    chips(p.thresholds || [], cur, "data-thrval", alMoney) +
-                    '</div><div class="al-row" style="margin-top:6px"><input data-thrin="' + m +
-                    '" type="number" min="0" step="1000" value="' + Math.round(cur || 0) + '"></div>';
-            }).join("") +
-            "</div><div>" +
-            '<div class="al-label">Мин. удар в окне (мелочь не считается)</div>' +
+            '<div class="al-feeds">' +
+            feed("liq", "LIQ") + feed("cvd", "CVD") + feed("oi", "OI") +
+            "</div>" +
+            '<div class="al-label">Мин. удар в окне</div>' +
             ["liq", "cvd", "oi"].map(function (m) {
                 var cur = (alCfg.min_event || {})[m];
                 return '<div class="al-label" style="margin-top:8px">' + m.toUpperCase() + "</div>" +
@@ -414,22 +467,21 @@
                     '</div><div class="al-row" style="margin-top:6px"><input data-minin="' + m +
                     '" type="number" min="0" step="1000" value="' + Math.round(cur || 0) + '"></div>';
             }).join("") +
-            '<div class="al-label">Лента сигналов</div>' +
-            '<div class="al-tape" id="al-tape">' + alTape(hist) + "</div>" +
             '<div class="al-status" id="al-status">монета: ' + coinLabel +
-            " · окно " + alWin(alCfg.window_min) + "</div>" +
-            "</div></div>";
+            " · окно " + alWin(alCfg.window_min) + "</div>";
         if (bind) bindAlerts();
     }
 
-    function alTape(hist) {
-        if (!hist || !hist.length) return '<div class="s">пока тихо — порог не пересекали</div>';
-        return hist.map(function (h) {
+    function alTape(hist, metric) {
+        var rows = (hist || []).filter(function (h) {
+            return !metric || String(h.metric || "") === metric;
+        });
+        if (!rows.length) return '<div class="s">пока тихо</div>';
+        return rows.map(function (h) {
             var ts = h.ts ? new Date(Number(h.ts) * 1000) : null;
-            var t = ts ? ts.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—";
+            var tm = ts ? ts.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—";
             var sym = String(h.symbol || "").split("_")[0];
-            return '<div class="row"><span class="t">' + t + '</span><span class="m">' +
-                String(h.metric || "").toUpperCase() + "</span><span>" +
+            return '<div class="row"><span class="t">' + tm + "</span><span>" +
                 sym + "  " + alMoney(h.value) + " / " + alMoney(h.threshold) +
                 " · " + alWin(h.window_min) + "</span></div>";
         }).join("");
@@ -438,13 +490,25 @@
     function paintAlertsLive(d) {
         var live = d.live || {};
         ["liq", "cvd", "oi"].forEach(function (key) {
+            var feed = document.querySelector('.al-feed[data-feed="' + key + '"]');
             var el = document.querySelector('.al-meter[data-metric="' + key + '"]');
-            if (!el) return;
             var row = live[key] || {};
+            alPushSpark(key, row);
             var val = row.value || 0;
             var thr = (alCfg && alCfg.threshold && alCfg.threshold[key]) || 1;
             var pct = Math.max(4, Math.min(100, Math.round(100 * Math.abs(val) / thr)));
             var hot = alHas(key) && Math.abs(val) >= thr;
+            if (feed) {
+                feed.classList.toggle("on", alHas(key));
+                feed.classList.toggle("hot", hot);
+                var spark = feed.querySelector(".al-spark");
+                if (spark) {
+                    var wrap = document.createElement("div");
+                    wrap.innerHTML = alSparkSvg(alSparkBuf[key]);
+                    spark.replaceWith(wrap.firstChild);
+                }
+            }
+            if (!el) return;
             el.classList.toggle("on", alHas(key));
             el.classList.toggle("hot", hot);
             var v = el.querySelector(".v");
@@ -456,8 +520,10 @@
             if (bar) bar.style.width = pct + "%";
         });
         if (d.history) {
-            var tape = $("al-tape");
-            if (tape) tape.innerHTML = alTape(d.history);
+            ["liq", "cvd", "oi"].forEach(function (key) {
+                var tape = $("al-tape-" + key);
+                if (tape) tape.innerHTML = alTape(d.history, key);
+            });
         }
     }
 
@@ -469,17 +535,23 @@
             sw.querySelector("span").textContent = alCfg.enabled ? "СИГНАЛ ВКЛ" : "СИГНАЛ ВЫКЛ";
             alDebounce();
         });
-        document.querySelectorAll(".al-meter[data-metric]").forEach(function (el) {
-            el.addEventListener("click", function () {
+        document.querySelectorAll(".al-switch[data-metric]").forEach(function (el) {
+            el.addEventListener("click", function (e) {
+                e.preventDefault();
                 var m = el.getAttribute("data-metric");
                 var w = alCfg.watch ? alCfg.watch.slice() : [];
                 var i = w.indexOf(m);
-                if (i >= 0) {
-                    if (w.length === 1) return;
-                    w.splice(i, 1);
-                } else w.push(m);
+                if (i >= 0) w.splice(i, 1);
+                else w.push(m);
                 alCfg.watch = w;
                 el.classList.toggle("on", alHas(m));
+                var sp = el.querySelector("span");
+                if (sp) {
+                    var title = m === "liq" ? "LIQ" : m.toUpperCase();
+                    sp.textContent = title + (alHas(m) ? " · ON" : " · выкл");
+                }
+                var feed = document.querySelector('.al-feed[data-feed="' + m + '"]');
+                if (feed) feed.classList.toggle("on", alHas(m));
                 alDebounce();
             });
         });

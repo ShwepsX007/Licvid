@@ -9,9 +9,10 @@ HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
 
 from alerts import (  # noqa: E402
-    canon_symbol, cooldown_sec, cvd_by_symbol, evaluate, format_alert_html,
-    liq_by_symbol, money, normalize_config, oi_by_symbol, oi_window_key,
-    should_fire, window_label,
+    THRESHOLD_PRESETS_FLOW, canon_symbol, cooldown_sec, cvd_by_symbol, evaluate,
+    format_alert_html, liq_by_symbol, money, normalize_config, oi_by_symbol,
+    oi_window_key, presets, should_fire, sparkline, threshold_presets,
+    window_label,
 )
 
 
@@ -108,6 +109,7 @@ class AlertsTest(unittest.TestCase):
         text = format_alert_html(liq_hit)
         self.assertIn("Алерт", text)
         self.assertIn("BTC", text)
+        self.assertIn("посмотреть в терминале", text)
         self.assertIn("https://liqscope.online/terminal", text)
 
     def test_below_threshold_no_hit(self):
@@ -132,6 +134,39 @@ class AlertsTest(unittest.TestCase):
         rows = oi_by_symbol(oi, 60, min_usd=100_000, symbol="ALL")
         self.assertEqual(set(rows), {"ETH_USDT"})
         self.assertLess(rows["ETH_USDT"]["usd"], 0)
+
+    def test_watch_can_be_one_or_empty(self):
+        c = normalize_config({"watch": ["cvd"], "enabled": True})
+        self.assertEqual(c["watch"], ["cvd"])
+        empty = normalize_config({"watch": [], "enabled": True})
+        self.assertEqual(empty["watch"], [])
+        missing = normalize_config({"enabled": True})
+        self.assertEqual(missing["watch"], ["liq"])
+
+    def test_flow_thresholds_are_larger(self):
+        self.assertEqual(threshold_presets("cvd"), list(THRESHOLD_PRESETS_FLOW))
+        self.assertEqual(threshold_presets("oi"), list(THRESHOLD_PRESETS_FLOW))
+        self.assertIn(100_000_000, presets()["thresholds_flow"])
+        self.assertNotIn(100_000_000, threshold_presets("liq"))
+
+    def test_sparkline_bins_window(self):
+        now = 1000.0
+        pts = {910: 10, 950: 20, 990: 40}
+        s = sparkline(pts, now, 120, n=4)
+        self.assertEqual(len(s), 4)
+        self.assertGreater(sum(s), 0)
+
+    def test_live_snapshot_has_sparks(self):
+        from alerts import live_snapshot
+        now = 1_000_000.0
+        snap = live_snapshot(
+            {"watch": ["liq"], "window_min": 5, "min_event": 0},
+            {"now": now, "events": [_liq("BTC_USDT", 80_000, now - 10)],
+             "cvd": {}, "oi": {}},
+        )
+        self.assertEqual(len(snap["liq"]["spark"]), 24)
+        self.assertGreater(sum(snap["liq"]["spark"]), 0)
+        self.assertEqual(len(snap["cvd"]["spark"]), 24)
 
 
 if __name__ == "__main__":

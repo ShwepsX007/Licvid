@@ -18,6 +18,8 @@ METRIC_ICON = {"liq": "💥", "cvd": "🌊", "oi": "📊"}
 
 WINDOW_PRESETS = (1, 5, 15, 30, 60, 240)
 THRESHOLD_PRESETS = (50_000, 100_000, 250_000, 500_000, 1_000_000, 5_000_000)
+THRESHOLD_PRESETS_LIQ = THRESHOLD_PRESETS
+THRESHOLD_PRESETS_FLOW = (10_000, 100_000, 1_000_000, 10_000_000, 100_000_000)
 MIN_PRESETS = (0, 10_000, 25_000, 50_000, 100_000, 250_000)
 COIN_PRESETS = ("ALL", "BTC_USDT", "ETH_USDT", "SOL_USDT")
 
@@ -32,7 +34,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "watch": ["liq"],
     "symbol": "ALL",
     "window_min": 5,
-    "threshold": {"liq": 500_000, "cvd": 500_000, "oi": 1_000_000},
+    "threshold": {"liq": 500_000, "cvd": 1_000_000, "oi": 1_000_000},
     "min_event": {"liq": 0, "cvd": 0, "oi": 0},
 }
 
@@ -123,7 +125,7 @@ def normalize_config(raw: Any) -> Dict[str, Any]:
             m = "liq"
         if m in METRICS and m not in watch:
             watch.append(m)
-    if not watch:
+    if "watch" not in src and "metrics" not in src:
         watch = ["liq"]
     window = int(_num(src.get("window_min") or src.get("window"), 5))
     window = max(1, min(window, 1440))
@@ -142,11 +144,39 @@ def normalize_config(raw: Any) -> Dict[str, Any]:
     }
 
 
+def threshold_presets(metric: str) -> List[int]:
+    if str(metric or "").lower() in ("cvd", "oi"):
+        return list(THRESHOLD_PRESETS_FLOW)
+    return list(THRESHOLD_PRESETS_LIQ)
+
+
+def sparkline(points: Dict[Any, float], now: float, window_sec: float,
+              n: int = 24) -> List[float]:
+    n = max(2, int(n or 24))
+    win = max(1.0, float(window_sec or 1))
+    step = win / n
+    bins = [0.0] * n
+    for ts, val in (points or {}).items():
+        try:
+            t = float(ts)
+            v = float(val)
+        except (TypeError, ValueError):
+            continue
+        age = now - t
+        if age < 0 or age > win:
+            continue
+        idx = min(n - 1, max(0, int((win - age) / step)))
+        bins[idx] += v
+    return bins
+
+
 def presets() -> Dict[str, Any]:
     return {
         "metrics": list(METRICS),
         "windows": list(WINDOW_PRESETS),
         "thresholds": list(THRESHOLD_PRESETS),
+        "thresholds_liq": list(THRESHOLD_PRESETS_LIQ),
+        "thresholds_flow": list(THRESHOLD_PRESETS_FLOW),
         "min_event": list(MIN_PRESETS),
         "coins": list(COIN_PRESETS),
     }
@@ -298,6 +328,41 @@ def live_snapshot(cfg: Dict[str, Any], market: Dict[str, Any]) -> Dict[str, Any]
         out["liq"]["market"] = {"usd": tot, "longs": lng, "shorts": sht, "count": n}
     out["cvd"] = pack(cvd, signed=True)
     out["oi"] = pack(oi, signed=True)
+
+    liq_pts: Dict[Any, float] = {}
+    want = canon_symbol(sym)
+    for x in (market.get("events") or []):
+        try:
+            ts = float(x.get("timestamp") or 0)
+            usd = float(x.get("usd") or 0)
+        except (TypeError, ValueError):
+            continue
+        if usd < cfg["min_event"]["liq"] or now - ts > window_sec or now - ts < 0:
+            continue
+        ev_sym = canon_symbol(str(x.get("symbol") or ""))
+        if want != "ALL" and ev_sym != want:
+            continue
+        liq_pts[int(ts)] = liq_pts.get(int(ts), 0.0) + usd
+    cvd_pts: Dict[Any, float] = {}
+    for key, acc in (market.get("cvd") or {}).items():
+        if "|" not in str(key):
+            continue
+        csym, _tf = str(key).rsplit("|", 1)
+        csym = canon_symbol(csym)
+        if want != "ALL" and csym != want:
+            continue
+        for b, v in (acc or {}).items():
+            try:
+                ts = float(b)
+                val = float(v)
+            except (TypeError, ValueError):
+                continue
+            if now - ts > window_sec or now - ts < -60:
+                continue
+            cvd_pts[int(ts)] = cvd_pts.get(int(ts), 0.0) + val
+    out["liq"]["spark"] = sparkline(liq_pts, now, window_sec)
+    out["cvd"]["spark"] = sparkline(cvd_pts, now, window_sec)
+    out["oi"]["spark"] = []
     out["window_min"] = cfg["window_min"]
     out["symbol"] = cfg["symbol"]
     return out
@@ -377,14 +442,15 @@ def format_alert_html(hit: dict, site_url: str = "https://liqscope.online") -> s
         arrow = "↑" if _num(hit.get("value")) >= 0 else "↓"
         lines.append(f"изменение OI {arrow}{extra}")
     site = (site_url or "https://liqscope.online").rstrip("/")
-    lines.append(f"{site}/terminal")
+    href = html.escape(f"{site}/terminal", quote=True)
+    lines.append(f'<a href="{href}">посмотреть в терминале</a>')
     return "\n".join(lines)
 
 
 def format_config_text(cfg: Dict[str, Any]) -> str:
     cfg = normalize_config(cfg)
     on = "включён" if cfg["enabled"] else "выключен"
-    watch = ", ".join(METRIC_TITLE[m] for m in cfg["watch"]) or "—"
+    watch = ", ".join(METRIC_TITLE[m] for m in cfg["watch"]) or "ничего"
     lines = [
         f"сигнал: <b>{on}</b>",
         f"смотрю: {html.escape(watch)}",

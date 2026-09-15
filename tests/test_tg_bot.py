@@ -67,9 +67,12 @@ class BotMenuTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_main_menu_has_no_back(self):
-        kb = self.bot._menu(self.user)
-        self.assertNotIn("← Назад", _btns(kb))
-        self.assertIn("cabinet", _datas(kb))
+        kb = self.bot._reply_kb(self.user)
+        texts = [b.get("text") for row in kb["keyboard"] for b in row]
+        self.assertNotIn("← Назад", texts)
+        self.assertTrue(any("Кабинет" in t for t in texts))
+        self.assertTrue(kb.get("is_persistent"))
+        self.assertNotIn("cabinet", _datas(kb))
 
     def test_leaf_screens_have_back_to_menu(self):
         for data in ("cabinet", "stats", "health", "liq"):
@@ -114,8 +117,9 @@ class BotMenuTest(unittest.TestCase):
     def test_back_returns_main_keyboard(self):
         for data in ("nav:home", "menu", "back"):
             _t, kb = self.bot._screen(self.user, data)
-            self.assertIn("cabinet", _datas(kb), data)
-            self.assertNotIn("← Назад", _btns(kb), data)
+            texts = [b.get("text") for row in (kb.get("keyboard") or []) for b in row]
+            self.assertTrue(any("Кабинет" in t for t in texts), data)
+            self.assertTrue(kb.get("is_persistent"), data)
 
     def test_callback_replaces_message(self):
         calls = []
@@ -167,8 +171,10 @@ class BotMenuTest(unittest.TestCase):
         }
         asyncio.run(self.bot._on_callback(cb))
         sent = [p for m, p in calls if m == "sendMessage"][0]
-        self.assertIn("cabinet", _datas(sent.get("reply_markup")))
-        self.assertNotIn("← Назад", _btns(sent.get("reply_markup")))
+        kb = sent.get("reply_markup") or {}
+        texts = [b.get("text") for row in (kb.get("keyboard") or []) for b in row]
+        self.assertTrue(any("Кабинет" in t for t in texts))
+        self.assertTrue(kb.get("is_persistent"))
         deleted = [p for m, p in calls if m == "deleteMessage"][0]
         self.assertEqual(deleted["message_id"], 88)
 
@@ -194,14 +200,12 @@ class BotMenuTest(unittest.TestCase):
         self.assertNotIn("editMessageText", [m for m, _ in calls])
 
     def test_menu_has_channel_url(self):
-        kb = self.bot._menu(self.user)
-        urls = []
-        for row in kb["inline_keyboard"]:
-            for b in row:
-                if b.get("url"):
-                    urls.append(b["url"])
-        self.assertTrue(any("t.me/" in u for u in urls))
-        self.assertIn("https://liqscope.online/terminal", urls)
+        kb = self.bot._reply_kb(self.user)
+        texts = [b.get("text") for row in kb["keyboard"] for b in row]
+        self.assertTrue(any("Канал" in t for t in texts))
+        self.assertEqual(self.bot._reply_cmd("👤 Кабинет"), "cabinet")
+        self.assertEqual(self.bot._reply_cmd("🔔 Алерты"), "al")
+        self.assertEqual(self.bot.bot_url(), "https://t.me/LiqScopeBot")
 
     def test_public_url_defaults_to_domain(self):
         from tg_bot import normalize_public_url
@@ -254,7 +258,9 @@ class BotMenuTest(unittest.TestCase):
         }
         asyncio.run(self.bot._on_callback(cb))
         sent = [p for m, p in calls if m == "sendMessage"][0]
-        self.assertIn("cabinet", _datas(sent.get("reply_markup")))
+        kb = sent.get("reply_markup") or {}
+        texts = [b.get("text") for row in (kb.get("keyboard") or []) for b in row]
+        self.assertTrue(any("Кабинет" in t for t in texts))
 
     def test_digest_without_channel_id_is_false(self):
         self.bot._channel_id_cfg = ""
@@ -300,10 +306,16 @@ class BotMenuTest(unittest.TestCase):
         ok = asyncio.run(self.bot.post_channel_digest())
         self.assertTrue(ok)
         self.assertEqual(calls, ["photo"])
-        self.assertIn("https://liqscope.online", captured.get("caption") or "")
+        cap = captured.get("caption") or ""
+        self.assertIn("https://liqscope.online", cap)
+        self.assertIn("t.me/LiqScopeBot", cap)
         markup = captured.get("markup") or {}
-        urls = [b.get("url") for row in (markup.get("inline_keyboard") or []) for b in row]
-        self.assertIn("https://liqscope.online/terminal", urls)
+        btns = [b for row in (markup.get("inline_keyboard") or []) for b in row]
+        texts = [b.get("text") for b in btns]
+        urls = [b.get("url") for b in btns]
+        self.assertIn("liqscope", texts)
+        self.assertIn("https://liqscope.online", urls)
+        self.assertTrue(any("t.me/" in (u or "") for u in urls))
 
     def test_digest_long_caption_still_one_message(self):
         self.bot._channel_id_cfg = "-100111"

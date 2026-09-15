@@ -745,7 +745,7 @@ async def alert_loop():
                         await tg_bot.send(
                             tg_id,
                             format_alert_html(hit, tg_bot.site_url()),
-                            markup=tg_bot.site_link_kb(),
+                            markup=tg_bot.site_link_kb("посмотреть в терминале"),
                         )
                     sent += 1
                     if sent >= 3:

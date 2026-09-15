@@ -345,12 +345,14 @@ def active_images(store=None) -> List[str]:
 
 
 def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = None,
-                site_url: str = "https://liqscope.online") -> str:
+                site_url: str = "https://liqscope.online",
+                bot_url: str = "https://t.me/LiqScopeBot") -> str:
     """Сводка: живая шапка + читаемые цифры. variant крутит и то и другое."""
     f = _facts(snap)
     h, n = f["h"], f["n"]
     site = (site_url or "https://liqscope.online").rstrip("/")
-    tail = f"— <i>LiqScope</i>\n{site}"
+    bot = (bot_url or "https://t.me/LiqScopeBot").rstrip("/")
+    tail = f"— <i>LiqScope</i>\n{site}\n{bot}"
     heads = [x for x in (headlines or []) if x] or list(_headlines(h))
     v = int(variant) % max(1, len(heads))
     head = heads[v]

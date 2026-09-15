@@ -280,7 +280,7 @@ def register_account_routes(app) -> None:
             "subscribed": bool(row and row.get("enabled")),
             "presets": presets(),
             "live": live_snapshot(cfg, market),
-            "history": ctx.store.list_alert_events(user["id"], 24),
+            "history": ctx.store.list_alert_events(user["id"], 48),
             "symbols": list(ctx.symbols_fn() or [])[:60],
         }
 

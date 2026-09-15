@@ -18,8 +18,8 @@ sys.path.insert(0, HERE)
 from accounts import (Store, hash_password, normalize_email, password_problem,  # noqa: E402
                       public_user, valid_email, verify_password)
 import mailer as mailer_module  # noqa: E402
-from mailer import (Mailer, SmtpTransport, build_mailer, html_to_text,  # noqa: E402
-                    ipv4_address, sender_hint, split_sender)
+from mailer import (Mailer, SmtpTransport, api_error_hint, build_mailer,  # noqa: E402
+                    html_to_text, ipv4_address, sender_hint, split_sender)
 
 
 class EmailAccountTest(unittest.TestCase):
@@ -546,6 +546,12 @@ class ApiMailTest(unittest.TestCase):
         self.assertEqual(email["from"]["email"], "no-reply@liqscope.online")
         self.assertEqual(email["to"], [{"email": "bob@mail.ru"}])
         self.assertIn("/reset?token=R1", email["html"])
+
+    def test_api_error_hint_explains_resend_test_mode(self):
+        hint = api_error_hint('HTTP 403: {"message":"You can only send testing '
+                              'emails to your own email address (a@b.com)"}')
+        self.assertIn("resend.com/domains", hint)
+        self.assertEqual(api_error_hint("HTTP 500: что-то сломалось"), "")
 
     def test_api_error_is_reported_not_raised(self):
         transport = mailer_module.ApiTransport("resend", "re_x",

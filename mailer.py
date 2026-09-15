@@ -313,6 +313,24 @@ API_URLS = {
 }
 
 
+def api_error_hint(err: str) -> str:
+    """Человеческая расшифровка типовых ответов сервисов рассылок."""
+    low = (err or "").lower()
+    if "can only send testing emails" in low or "verify a domain" in low:
+        return ("пока домен не подтверждён в Resend, письма уходят только на адрес "
+                "владельца аккаунта. Для остальных адресов: resend.com/domains → "
+                "Add Domain → прописать выданные DNS-записи → дождаться Verified, "
+                "затем слать с адреса своего домена")
+    if "401" in low or "invalid api key" in low or "unauthorized" in low:
+        return "ключ не подошёл — проверьте LIQSCOPE_MAIL_API_KEY (ключ re_…) "
+    if "422" in low and "from" in low:
+        return ("сервис не понял адрес отправителя — в systemd значение с пробелом "
+                "обязательно в кавычках")
+    if "domain is not verified" in low:
+        return "домен отправителя ещё не подтверждён в сервисе рассылок"
+    return ""
+
+
 class ApiTransport:
     """Отправка письма HTTP-API сервиса рассылок (порт 443, без SMTP).
 
@@ -348,9 +366,12 @@ class ApiTransport:
                 self._send_json_api(to, subject, html, text)
             return True, ""
         except Exception as e:
-            log.warning("%s (%s): письмо для %s не ушло: %s",
-                        self.label, self.kind, to, e)
-            return False, str(e)[:200]
+            message = str(e)[:200]
+            hint = api_error_hint(message)
+            log.warning("%s (%s): письмо для %s не ушло: %s%s",
+                        self.label, self.kind, to, message,
+                        f" — {hint}" if hint else "")
+            return False, (f"{message} — {hint}" if hint else message)[:300]
 
     def _sender_parts(self) -> Tuple[str, str]:
         return split_sender(self.sender)

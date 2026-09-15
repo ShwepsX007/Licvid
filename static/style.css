@@ -657,6 +657,20 @@ body.dark-theme {
 body.split-dragging { user-select: none; cursor: col-resize; }
 body.split-dragging.split-dragging-y { cursor: row-resize; }
 
+/* Стек графика: главный график и окна индикаторов — блоки одной колонки.
+   Главный забирает остаток, окна — свои px (переменные --ind-h-*), поэтому
+   разделители тянут высоту «относительно друг друга», вплоть до нуля. */
+.chart-stack {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+.chart-stack > .chart-wrapper { height: auto; }
+/* Как только пользователь сам двигал высоты — главный график можно сузить
+   до нуля (по умолчанию держим привычные 300px, чтобы окна его не съели). */
+.chart-stack.sized > .chart-wrapper { min-height: 0; }
+
 /* Chart Section */
 .chart-section {
     background: var(--bg-dark);
@@ -1845,20 +1859,40 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
     margin: 0 2px;
 }
 .indicator-panes {
-    flex-shrink: 0;
-    display: grid;
-    grid-template-columns: 1fr;
-    gap: 6px;
-    padding: 6px 10px 8px;
-    background: var(--bg-dark);
-    /* Три окна в столбик выше, чем одна строка: если экран низкий,
-       область окон ужимается и скроллится, а не обрезается вместе
-       с графиком (у .chart-section overflow: hidden). */
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
     min-height: 0;
-    max-height: 50%;
-    overflow-y: auto;
-    overscroll-behavior: contain;
+    padding: 0 10px 6px;
+    background: var(--bg-dark);
 }
+/* Высота полотна окна — своя переменная: её двигает разделитель над окном
+   (двойной клик по разделителю возвращает исходные 64px). */
+#ind-pane-liq { --ind-h: var(--ind-h-liq, 64px); }
+#ind-pane-cvd { --ind-h: var(--ind-h-cvd, 64px); }
+#ind-pane-oi  { --ind-h: var(--ind-h-oi, 64px); }
+.ind-pane { flex: 0 0 auto; }
+.stack-splitter { position: relative; }
+.stack-splitter::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 44px;
+    height: 3px;
+    margin: -1.5px 0 0 -22px;
+    border-radius: 2px;
+    background: rgba(132, 147, 168, 0.55);
+    opacity: 0;
+    transition: opacity 0.15s ease, background 0.15s ease;
+    pointer-events: none;
+}
+.stack-splitter:hover::after,
+.stack-splitter.active::after {
+    opacity: 1;
+    background: #fff;
+}
+.chart-section.collapsed .stack-splitter { display: none; }
 .indicator-panes.all-hidden { display: none; }
 .ind-pane {
     border: 1px solid var(--border-color);
@@ -1898,12 +1932,12 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
     border-radius: 5px;
 }
 .ind-close:hover { color: var(--text-primary); background: rgba(255, 255, 255, 0.06); }
-.ind-canvas-wrap { position: relative; height: 64px; }
-/* Низкое и широкое окно: три окна в столбик + график должны делиться
-   высотой, а не упираться в min-height графика. */
+.ind-canvas-wrap { position: relative; height: var(--ind-h, 64px); }
+
+/* Низкое и широкое окно: главному графику хватит 200px вместо 300,
+   окна ниже — их высоты двигает разделитель (.chart-stack.sized). */
 @media (max-height: 780px) and (min-width: 901px) {
     .chart-wrapper { min-height: 200px; }
-    .ind-canvas-wrap { height: 54px; }
 }
 .ind-canvas-wrap canvas {
     position: absolute;
@@ -1982,6 +2016,9 @@ body.chart-fullscreen { overflow: hidden; }
     .chart-section.collapsed { height: auto; min-height: 0; }
 
     .chart-wrapper { min-height: 240px; }
+
+    /* разделители блоков на телефоне скрыты — окна разводим отступом */
+    .indicator-panes { gap: 6px; }
 
 
     .chart-header {

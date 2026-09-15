@@ -2167,24 +2167,57 @@
     // --- Регулируемые панели: размеры сохраняются в браузере -----------------
     function clampPx(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
-    function initSplitters() {
-        const root = document.documentElement;
-        const layout = { feedW: 430, coinsH: 170 };
+    // Высоты блоков графика: главный тянется сам (занимает остаток стека),
+    // окна LIQ/CVD/OI — своим полотном в px. Складываем всё в тот же
+    // liqscope.layout, что и лента с «Лидерами».
+    const IND_KINDS = ["liq", "cvd", "oi"];
+    const IND_DEFAULT_CANVAS_H = 64;   // высота полотна окна по умолчанию
+    const IND_MIN_CANVAS_H = 0;        // полное сужение разрешено
+    const IND_HEAD_H = 26;             // шапка окна (в переменную высоты не входит)
+    const SPLIT_H = 8;                 // высота разделителя
+    const STACK_SLACK_H = 12;          // отступы контейнера окон + запас на округления
+    const LAYOUT = {
+        feedW: 430, coinsH: 170,
+        indLiq: IND_DEFAULT_CANVAS_H, indCvd: IND_DEFAULT_CANVAS_H,
+        indOi: IND_DEFAULT_CANVAS_H,
+        sized: false,      // пользователь сам двигал высоты блоков графика
+    };
+    let layoutReady = false;
+
+    function indKey(kind) {
+        return "ind" + kind.charAt(0).toUpperCase() + kind.slice(1);
+    }
+
+    function loadLayout() {
         try {
             const raw = localStorage.getItem("liqscope.layout");
-            if (raw) {
-                const o = JSON.parse(raw) || {};
-                layout.feedW = clampPx(Number(o.feedW) || 430, 280, 720);
-                layout.coinsH = clampPx(Number(o.coinsH) || 170, 90, 460);
-            }
+            if (!raw) return;
+            const o = JSON.parse(raw) || {};
+            LAYOUT.feedW = clampPx(Number(o.feedW) || 430, 280, 720);
+            LAYOUT.coinsH = clampPx(Number(o.coinsH) || 170, 90, 460);
+            IND_KINDS.forEach((k) => {
+                const v = Number(o[indKey(k)]);
+                LAYOUT[indKey(k)] = clampPx(isFinite(v) ? v : IND_DEFAULT_CANVAS_H, 0, 900);
+            });
+            LAYOUT.sized = !!o.sized;
         } catch (e) { /* ignore */ }
-        const applyLayout = () => {
-            root.style.setProperty("--feed-width", layout.feedW + "px");
-            root.style.setProperty("--coins-height", layout.coinsH + "px");
-        };
-        const saveLayout = () => {
-            try { localStorage.setItem("liqscope.layout", JSON.stringify(layout)); } catch (e) { /* ignore */ }
-        };
+    }
+
+    function saveLayout() {
+        try { localStorage.setItem("liqscope.layout", JSON.stringify(LAYOUT)); } catch (e) { /* ignore */ }
+    }
+
+    function applyLayoutValues() {
+        const root = document.documentElement;
+        root.style.setProperty("--feed-width", LAYOUT.feedW + "px");
+        root.style.setProperty("--coins-height", LAYOUT.coinsH + "px");
+        IND_KINDS.forEach((k) => root.style.setProperty("--ind-h-" + k, LAYOUT[indKey(k)] + "px"));
+        const stack = $("chart-stack");
+        if (stack) stack.classList.toggle("sized", !!LAYOUT.sized);
+    }
+
+    function initSplitters() {
+        loadLayout();
         const bind = (el, axis) => {
             if (!el) return;
             el.addEventListener("pointerdown", (e) => {
@@ -2193,18 +2226,18 @@
                 document.body.classList.add("split-dragging");
                 if (axis === "y") document.body.classList.add("split-dragging-y");
                 const start = axis === "x" ? e.clientX : e.clientY;
-                const startVal = axis === "x" ? layout.feedW : layout.coinsH;
+                const startVal = axis === "x" ? LAYOUT.feedW : LAYOUT.coinsH;
                 const move = (ev) => {
                     ev.preventDefault();
                     const delta = (axis === "x" ? ev.clientX : ev.clientY) - start;
                     if (axis === "x") {
                         // лента прижата к правому краю: тянем разделитель вправо →
                         // её ширина УМЕНЬШАЕТСЯ (иначе блоки «уезжают» влево)
-                        layout.feedW = clampPx(startVal - delta, 280, 720);
+                        LAYOUT.feedW = clampPx(startVal - delta, 280, 720);
                     } else {
-                        layout.coinsH = clampPx(startVal - delta, 90, 460);
+                        LAYOUT.coinsH = clampPx(startVal - delta, 90, 460);
                     }
-                    applyLayout();
+                    applyLayoutValues();
                 };
                 const up = () => {
                     el.classList.remove("active");
@@ -2221,7 +2254,151 @@
         };
         bind($("split-feed-x"), "x");
         bind($("split-coins-y"), "y");
-        applyLayout();
+        bindStackSplitters();
+        layoutReady = true;
+        normalizeHeights();
+        applyLayoutValues();
+    }
+
+    // --- Блоки графика: главный график и окна LIQ/CVD/OI тянутся по высоте ---
+    // Разделитель над окном забирает высоту у блока выше: у соседнего окна —
+    // напрямую, у главного графика — просто из остатка стека. Сузить можно
+    // до нуля, включая главный график; двойной клик возвращает исходное.
+
+    function paneVisible(kind) {
+        const P = IND_PANES[kind];
+        return !!(P && state[P.skey]);
+    }
+
+    function visiblePaneKinds() { return IND_KINDS.filter(paneVisible); }
+
+    function visibleSplitCount() {
+        return document.querySelectorAll("#chart-stack .splitter:not(.hidden)").length;
+    }
+
+    // Ниже 120px стек считается «нераскладочным» (свёрнутый график, крошечное
+    // окно, jsdom): тогда высоты не пересчитываем и не ужимаем окна в ноль.
+    function stackHeight() {
+        const stack = $("chart-stack");
+        const h = (stack && stack.clientHeight) || 0;
+        return h >= 120 ? h : 0;
+    }
+
+    // min-height главного графика: пока пользователь не двигал высоты, окна не
+    // имеют права съесть график целиком (в «сжатом» режиме он тоже в ноль).
+    function chartMinHeight() {
+        if (LAYOUT.sized) return 0;
+        const wrap = document.querySelector("#chart-stack > .chart-wrapper");
+        if (!wrap || !window.getComputedStyle) return 0;
+        let mh = NaN;
+        try { mh = parseFloat(window.getComputedStyle(wrap).minHeight); } catch (e) { /* ignore */ }
+        return isFinite(mh) && mh > 0 ? mh : 0;
+    }
+
+    // Сколько всего пикселей полотен есть у видимых окон: высота стека минус
+    // шапки окон, разделители и то, что оставлено главному графику.
+    function panesBudget() {
+        const total = stackHeight();
+        if (!total) return 0;
+        return Math.max(0, total - chartMinHeight() - STACK_SLACK_H
+            - visiblePaneKinds().length * IND_HEAD_H - visibleSplitCount() * SPLIT_H);
+    }
+
+    // Сколько максимум может занять полотно окна, чтобы блоки не вылезли
+    // за стек: главный график при этом считается сжимаемым до нуля.
+    function maxCanvasFor(kind) {
+        if (!stackHeight()) return 900;    // раскладки нет (jsdom, скрытый блок)
+        let others = 0;
+        visiblePaneKinds().forEach((k) => { if (k !== kind) others += LAYOUT[indKey(k)]; });
+        return Math.max(IND_MIN_CANVAS_H, panesBudget() - others);
+    }
+
+    // Если окна в сумме больше стека (например, окно уменьшили или включили
+    // ещё одно) — ужимаем их пропорционально, сохраняя соотношение высот.
+    function normalizeHeights() {
+        if (!layoutReady) return;
+        if (!stackHeight()) return;
+        const kinds = visiblePaneKinds();
+        if (!kinds.length) return;
+        const avail = panesBudget();
+        const sum = kinds.reduce((s, k) => s + LAYOUT[indKey(k)], 0);
+        if (sum <= avail || sum <= 0) return;
+        const k = avail / sum;
+        kinds.forEach((kind) => {
+            LAYOUT[indKey(kind)] = Math.round(LAYOUT[indKey(kind)] * k);
+        });
+    }
+
+    let layoutRaf = 0;
+    function redrawAfterLayout() {
+        if (typeof queueRedraw === "function") queueRedraw();
+        if (layoutRaf) return;
+        const raf = window.requestAnimationFrame || ((f) => setTimeout(f, 16));
+        layoutRaf = raf(() => {
+            layoutRaf = 0;
+            // главный график пересчитывает размер по своему контейнеру
+            window.dispatchEvent(new Event("resize"));
+        });
+    }
+
+    function resetStackHeights() {
+        IND_KINDS.forEach((k) => { LAYOUT[indKey(k)] = IND_DEFAULT_CANVAS_H; });
+        LAYOUT.sized = false;
+        applyLayoutValues();
+        redrawAfterLayout();
+        saveLayout();
+    }
+
+    function bindStackSplitters() {
+        const list = document.querySelectorAll("#chart-stack .stack-splitter");
+        Array.prototype.forEach.call(list, (el) => {
+            const kind = el.getAttribute("data-pane");
+            if (!kind) return;
+            el.addEventListener("pointerdown", (e) => {
+                e.preventDefault();
+                const kinds = visiblePaneKinds();
+                const i = kinds.indexOf(kind);
+                if (i < 0) return;                    // окно выключено — тянуть нечего
+                const prevKind = i > 0 ? kinds[i - 1] : "";   // "" — выше главный график
+                const startY = e.clientY;
+                const startH = LAYOUT[indKey(kind)];
+                const startPrev = prevKind ? LAYOUT[indKey(prevKind)] : 0;
+                el.classList.add("active");
+                document.body.classList.add("split-dragging", "split-dragging-y");
+                const move = (ev) => {
+                    ev.preventDefault();
+                    const grow = startY - ev.clientY;   // тянем вверх — окно растёт
+                    let want = startH + grow;
+                    if (prevKind) {
+                        // высоту отдаёт соседнее окно и только до своего нуля
+                        const take = clampPx(want - startH, -startH, startPrev);
+                        want = startH + take;
+                        LAYOUT[indKey(prevKind)] = Math.round(startPrev - take);
+                    }
+                    want = clampPx(want, IND_MIN_CANVAS_H, maxCanvasFor(kind));
+                    LAYOUT[indKey(kind)] = Math.round(want);
+                    LAYOUT.sized = true;
+                    applyLayoutValues();
+                    redrawAfterLayout();
+                };
+                const up = () => {
+                    el.classList.remove("active");
+                    document.body.classList.remove("split-dragging", "split-dragging-y");
+                    window.removeEventListener("pointermove", move);
+                    window.removeEventListener("pointerup", up);
+                    window.removeEventListener("pointercancel", up);
+                    saveLayout();
+                };
+                window.addEventListener("pointermove", move);
+                window.addEventListener("pointerup", up);
+                window.addEventListener("pointercancel", up);
+            });
+            el.addEventListener("dblclick", resetStackHeights);
+        });
+        window.addEventListener("resize", () => {
+            normalizeHeights();
+            applyLayoutValues();
+        });
     }
 
     // --- Топ пар: выпадающий вертикальный список -----------------------------
@@ -2947,11 +3124,17 @@
         if (!P) return;
         const el = $(P.pane);
         if (el) el.classList.toggle("hidden", !state[P.skey]);
+        // разделитель показываем только у включённого окна: у выключенного
+        // он висел бы пустой полосой
+        const sp = $("split-" + kind + "-y");
+        if (sp) sp.classList.toggle("hidden", !state[P.skey]);
         const box = $("indicator-panes");
         if (box) {
             const any = Object.keys(IND_PANES).some((k) => state[IND_PANES[k].skey]);
             box.classList.toggle("all-hidden", !any);
         }
+        // высоты блоков пересчитываем: включение/выключение окна меняет остаток
+        normalizeHeights();
     }
 
     function setupIndicatorPanes() {
@@ -2959,6 +3142,10 @@
         if (!state.layersAllowed) {
             const box = $("indicator-panes");
             if (box) box.classList.add("all-hidden");
+            // окон нет вовсе — разделители блоков тоже прячем, иначе под
+            // графиком осталась бы пустая полоса из трёх полосок
+            const splits = document.querySelectorAll("#chart-stack .stack-splitter");
+            Array.prototype.forEach.call(splits, (el) => el.classList.add("hidden"));
             return;
         }
         Object.keys(IND_PANES).forEach((kind) => {
@@ -2973,6 +3160,8 @@
             }
             syncPaneVisibility(kind);
         });
+        // после синхронизации раскладываем сохранённые высоты блоков
+        applyLayoutValues();
     }
 
     // Подписи чисел в окнах: $1.2K / $3.4M… с плюсом, если надо
@@ -3042,8 +3231,8 @@
         if (!canvas || !state[P.skey]) return null;
         const dpr = window.devicePixelRatio || 1;
         const w = canvas.clientWidth || (canvas.parentElement || {}).clientWidth || 0;
-        const h = canvas.clientHeight || 64;
-        if (w < 10) return null;
+        const h = canvas.clientHeight || 0;
+        if (w < 10 || h < 8) return null;   // окно сужено в ноль — рисовать нечего
         const W = Math.round(w * dpr), H = Math.round(h * dpr);
         if (canvas.width !== W || canvas.height !== H) {
             canvas.width = W; canvas.height = H;

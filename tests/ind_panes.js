@@ -37,6 +37,12 @@ function grab(src, kind, name) {
   return src.slice(i, j);
 }
 
+function grabLine(src, marker) {
+  const i = src.indexOf(marker);
+  if (i < 0) throw new Error("не нашёл " + marker);
+  return src.slice(i, src.indexOf("\n", i));
+}
+
 function recordedCtx() {
   const rec = { rects: [], texts: [], lines: [], strokes: [], fills: [], arcs: [] };
   const ctx = {
@@ -109,16 +115,31 @@ function part2() {
     });
   }
 
+  // Высоты блоков проверяем на «стеке» известной высоты: в jsdom раскладки
+  // нет, поэтому clientHeight задаём вручную.
+  const STACK_H = 700;
+  const stackEl = { clientHeight: STACK_H, classList: { toggle() {}, contains() { return false; } } };
+
   const canvases = {
     "ind-canvas-liq": fakeCanvas(360, 64),
     "ind-canvas-cvd": fakeCanvas(360, 64),
     "ind-canvas-oi": fakeCanvas(360, 64),
   };
   const $stub = (id) => (canvases[id] ? canvases[id] : $(id));
+  const $stack = (id) => (id === "chart-stack" ? stackEl : $stub(id));
+
+  // главный график «живёт» с min-height 220px, пока пользователь не тянул
+  // разделители (.chart-stack.sized)
+  const wrapEl = { _mh: "220px" };
+  const fakeDoc = {
+    querySelector: (sel) => (sel.indexOf(".chart-wrapper") >= 0 ? wrapEl : null),
+    querySelectorAll: () => ({ length: 3 }),   // три разделителя блоков видны
+  };
 
   const sandbox = {
-    $: $stub,
-    window: { devicePixelRatio: 1 },
+    $: $stack,
+    document: fakeDoc,
+    window: { devicePixelRatio: 1, getComputedStyle: (el) => ({ minHeight: (el && el._mh) || "" }) },
     localStorage: { getItem: () => null, setItem: () => {} },
     I18n: { t: (k) => k, onChange: () => {} },
     state: {
@@ -134,17 +155,27 @@ function part2() {
       return String(Math.round(v));
     },
   };
-  const names = ["IND_PANES", "indMoney", "indBarSpacing", "indGrid", "indVerticals",
+  const constNames = ["IND_PANES", "LAYOUT"];
+  const names = ["indMoney", "indBarSpacing", "indGrid", "indVerticals",
     "indPrepareCanvas", "indCurve", "indNoData", "indSetVal", "drawPaneLiq",
-    "drawPaneCvd", "drawPaneOi", "drawIndicatorPanes", "syncPaneVisibility"];
-  const code = names.map((n) =>
-    grab(src, n === "IND_PANES" ? "const" : "function", n)).join("\n") +
-    "\nreturn { IND_PANES, indMoney, drawPaneLiq, drawPaneCvd, drawPaneOi," +
-    " drawIndicatorPanes, syncPaneVisibility };";
-  const api = new Function("$", "window", "localStorage", "I18n", "state",
+    "drawPaneCvd", "drawPaneOi", "drawIndicatorPanes", "syncPaneVisibility",
+    // регулировка высот блоков графика
+    "indKey", "paneVisible", "visiblePaneKinds", "visibleSplitCount", "stackHeight",
+    "chartMinHeight", "panesBudget", "maxCanvasFor", "normalizeHeights"];
+  const scalars = ["IND_KINDS", "IND_DEFAULT_CANVAS_H", "IND_MIN_CANVAS_H",
+    "IND_HEAD_H", "SPLIT_H", "STACK_SLACK_H"].map((n) =>
+    grabLine(src, "const " + n + " = ")).join("\n");
+  const code = scalars + "\n" + grabLine(src, "let layoutReady =") +
+    "\nlayoutReady = true;\n" +
+    constNames.map((n) => grab(src, "const", n)).join("\n") + "\n" +
+    names.map((n) => grab(src, "function", n)).join("\n") + "\n" +
+    "\nreturn { IND_PANES, LAYOUT, IND_KINDS, indMoney, drawPaneLiq, drawPaneCvd," +
+    " drawPaneOi, drawIndicatorPanes, syncPaneVisibility, indKey, visiblePaneKinds," +
+    " stackHeight, panesBudget, maxCanvasFor, normalizeHeights };";
+  const api = new Function("$", "window", "document", "localStorage", "I18n", "state",
     "chart", "visibleLiquidations", "fmtUsdShort", code)(
-    sandbox.$, sandbox.window, sandbox.localStorage, sandbox.I18n, sandbox.state,
-    sandbox.chart, sandbox.visibleLiquidations, sandbox.fmtUsdShort);
+    sandbox.$, sandbox.window, sandbox.document, sandbox.localStorage, sandbox.I18n,
+    sandbox.state, sandbox.chart, sandbox.visibleLiquidations, sandbox.fmtUsdShort);
 
   // --- LIQ: двусторонние столбики -----------------------------------------
   api.drawPaneLiq();
@@ -212,6 +243,54 @@ function part2() {
   sandbox.state.paneCvd = true;
   api.syncPaneVisibility("cvd");
   check("включённое окно без hidden", !$("ind-pane-cvd").classList.contains("hidden"));
+
+  // --- высоты блоков: бюджет стека и клампы (раскладка 700px) ---------------
+  console.log("\nчасть 2b: бюджет высот блоков графика");
+  const L = api.LAYOUT;
+  const stackH = api.stackHeight();
+  check("высота стека прочитана", stackH === STACK_H, stackH);
+  // пока пользователь не тянул разделители, главному графику оставлен его
+  // min-height 220px: 700 - 220 - 3 шапки(26) - 3 разделителя(8) - 12 = 366
+  const budgetDefault = api.panesBudget();
+  check("бюджет окон с запасом под график", budgetDefault === 366, budgetDefault);
+  api.normalizeHeights();
+  check("окна по 64px не ужимаются зря", L.indLiq === 64 && L.indCvd === 64 && L.indOi === 64,
+        JSON.stringify([L.indLiq, L.indCvd, L.indOi]));
+  // окно не может занять больше, чем осталось от соседей: 366 - 128 = 238
+  check("потолок роста окна LIQ", api.maxCanvasFor("liq") === 238, api.maxCanvasFor("liq"));
+  // потянули — главный график становится сжимаемым в ноль: 700 - 78 - 24 - 4 = 594
+  L.sized = true;
+  check("после растяжки график отдаёт свою высоту", api.panesBudget() === 586, api.panesBudget());
+  check("потолок роста окна без запаса под график", api.maxCanvasFor("liq") === 458,
+        api.maxCanvasFor("liq"));
+  // окна в сумме больше стека — ужимаются пропорционально, соотношение цело
+  L.indLiq = 500; L.indCvd = 500; L.indOi = 500;
+  api.normalizeHeights();
+  check("переполнение стека ужимает окна",
+        Math.abs(L.indLiq + L.indCvd + L.indOi - 586) <= 2,
+        L.indLiq + L.indCvd + L.indOi);
+  check("соотношение высот сохранилось", L.indLiq === L.indCvd && L.indCvd === L.indOi &&
+        L.indLiq >= 194 && L.indLiq <= 196, JSON.stringify([L.indLiq, L.indCvd, L.indOi]));
+  // выключенное окно выпадает из бюджета — соседям больше места
+  sandbox.state.paneOi = false;
+  L.indLiq = 64; L.indCvd = 64;
+  // окно выключено — его шапка (26px) больше не занимает стек
+  check("выключенное окно не занимает бюджет", api.panesBudget() === 612,
+        api.panesBudget());
+  sandbox.state.paneOi = true;
+  // окно можно сузить в ноль — это разрешённая высота, а не ошибка
+  L.indLiq = 0; L.indCvd = 0; L.indOi = 0;
+  api.normalizeHeights();
+  check("нулевые высоты сохраняются (полное сужение разрешено)",
+        L.indLiq === 0 && L.indCvd === 0 && L.indOi === 0);
+  check("потолок при нулевых окнах — весь бюджет", api.maxCanvasFor("oi") === 586,
+        api.maxCanvasFor("oi"));
+  // на низком экране окна ужимаются, а не вылезают под график
+  L.indLiq = 600; L.indCvd = 600; L.indOi = 600;
+  api.normalizeHeights();
+  check("переполнение на любом экране гасится до бюджета",
+        Math.abs(L.indLiq + L.indCvd + L.indOi - 586) <= 2,
+        L.indLiq + L.indCvd + L.indOi);
 }
 
 /* ================= часть 1: jsdom-структура и переключатели ================= */
@@ -302,10 +381,100 @@ async function part1() {
     }).on("error", rej);
   });
   const cssRule = (cssTxt.match(/\.indicator-panes\s*\{[^}]*\}/) || [""])[0];
-  check("CSS: окна индикаторов в одну колонку", /grid-template-columns:\s*1fr/.test(cssRule),
+  check("CSS: окна индикаторов в одну колонку",
+        /display:\s*flex/.test(cssRule) && /flex-direction:\s*column/.test(cssRule),
         cssRule.replace(/\s+/g, " ").slice(0, 120));
   check("CSS: окна не растягиваются в ряд", !/repeat\(auto-fit/.test(cssRule),
         cssRule.replace(/\s+/g, " ").slice(0, 120));
+
+  // --- Блоки графика регулируются по высоте, как лента с «Лидерами» --------
+  const cssVar = (n) => win.document.documentElement.style.getPropertyValue(n).trim();
+  const savedLayout = () => {
+    try { return JSON.parse(win.localStorage.getItem("liqscope.layout")) || {}; }
+    catch (e) { return {}; }
+  };
+  const dragSplit = (id, fromY, toY) => {
+    const el = $$("#" + id);
+    el.dispatchEvent(new win.MouseEvent("pointerdown", { bubbles: true, clientY: fromY }));
+    win.dispatchEvent(new win.MouseEvent("pointermove", { bubbles: true, clientY: toY }));
+    win.dispatchEvent(new win.MouseEvent("pointerup", { bubbles: true, clientY: toY }));
+  };
+  const stack = $$("#chart-stack");
+  check("главный график и окна — в одном стеке",
+        !!stack && !!stack.querySelector("#chart-wrapper") && !!stack.querySelector("#indicator-panes"));
+  ["liq", "cvd", "oi"].forEach((k) => {
+    const sp = $$("#split-" + k + "-y");
+    check("разделитель split-" + k + "-y есть и виден", !!sp && !sp.classList.contains("hidden"));
+  });
+  check("высота окна LIQ по умолчанию", cssVar("--ind-h-liq") === "64px", cssVar("--ind-h-liq"));
+  check("высота окна CVD по умолчанию", cssVar("--ind-h-cvd") === "64px", cssVar("--ind-h-cvd"));
+  // тянем разделитель над окном LIQ вверх на 40px — окно растёт, график отдаёт
+  dragSplit("split-liq-y", 300, 260);
+  check("перетаскивание вверх растянуло окно LIQ", cssVar("--ind-h-liq") === "104px",
+        cssVar("--ind-h-liq"));
+  check("растяжка включила режим «график можно сузить в ноль»",
+        !!stack && stack.classList.contains("sized"));
+  check("новая высота сохранена", savedLayout().indLiq === 104, JSON.stringify(savedLayout().indLiq));
+  check("ширина ленты не поехала от вертикального драга", savedLayout().feedW === undefined ||
+        savedLayout().feedW === 430, savedLayout().feedW);
+  // разделитель над CVD забирает высоту у соседа сверху (LIQ), а не у графика
+  dragSplit("split-cvd-y", 400, 340);
+  check("окно CVD выросло", cssVar("--ind-h-cvd") === "124px", cssVar("--ind-h-cvd"));
+  check("высоту отдало соседнее окно LIQ", cssVar("--ind-h-liq") === "44px", cssVar("--ind-h-liq"));
+  // рывок вверх «до упора»: сосед сужается в ноль, окно забирает всё
+  dragSplit("split-cvd-y", 400, -5000);
+  check("соседнее окно сузилось до нуля", cssVar("--ind-h-liq") === "0px", cssVar("--ind-h-liq"));
+  check("окно CVD забрало освободившуюся высоту", cssVar("--ind-h-cvd") === "168px",
+        cssVar("--ind-h-cvd"));
+  // и наоборот: рывок вниз сужает само окно до нуля (полное сужение разрешено)
+  dragSplit("split-oi-y", 400, 5000);
+  check("окно можно сузить полностью", cssVar("--ind-h-oi") === "0px", cssVar("--ind-h-oi"));
+  check("нулевая высота сохранена", savedLayout().indOi === 0, JSON.stringify(savedLayout().indOi));
+  // выключенное окно: разделитель прячется и ничего не двигает
+  $$("#pane-liq-toggle").click();
+  check("выключенное окно прячет свой разделитель",
+        $$("#split-liq-y").classList.contains("hidden"));
+  const beforeDisabled = ["liq", "cvd", "oi"].map((k) => cssVar("--ind-h-" + k)).join(" / ");
+  dragSplit("split-liq-y", 200, 120);
+  check("по выключенному окну разделитель не тянется",
+        ["liq", "cvd", "oi"].map((k) => cssVar("--ind-h-" + k)).join(" / ") === beforeDisabled,
+        ["liq", "cvd", "oi"].map((k) => cssVar("--ind-h-" + k)).join(" / "));
+  $$("#pane-liq-toggle").click();
+  check("включённое окно возвращает разделитель",
+        !$$("#split-liq-y").classList.contains("hidden"));
+  // верхний разделитель тянет высоту у главного графика, а не у соседних окон:
+  // рывок вверх растит LIQ «до потолка стека», CVD и OI не меняются
+  const cvdBeforeChartDrag = cssVar("--ind-h-cvd");
+  const oiBeforeChartDrag = cssVar("--ind-h-oi");
+  dragSplit("split-liq-y", 300, -5000);
+  // в jsdom раскладки нет, поэтому потолок = 900px; в браузере его считает
+  // maxCanvasFor по реальной высоте стека (там график сужается в ноль)
+  check("окно LIQ растянулось за счёт главного графика", cssVar("--ind-h-liq") === "900px",
+        cssVar("--ind-h-liq"));
+  check("соседние окна при этом не тронуты",
+        cssVar("--ind-h-cvd") === cvdBeforeChartDrag && cssVar("--ind-h-oi") === oiBeforeChartDrag,
+        cssVar("--ind-h-cvd") + " / " + cssVar("--ind-h-oi"));
+  // двойной клик по разделителю — исходные высоты
+  $$("#split-cvd-y").dispatchEvent(new win.MouseEvent("dblclick", { bubbles: true }));
+  const allDefault = ["liq", "cvd", "oi"].every((k) => cssVar("--ind-h-" + k) === "64px");
+  check("двойной клик вернул исходные высоты", allDefault,
+        ["liq", "cvd", "oi"].map((k) => cssVar("--ind-h-" + k)).join(" / "));
+  check("сброс снял режим растяжки", !stack.classList.contains("sized"));
+  check("сброс сохранён", savedLayout().indCvd === 64 && !savedLayout().sized,
+        JSON.stringify(savedLayout()));
+  // CSS: главный график — «остаток» стека и сжимается в ноль после растяжки
+  const stackRule = (cssTxt.match(/\.chart-stack\s*\{[^}]*\}/) || [""])[0];
+  check("CSS: стек графика — колонка",
+        /display:\s*flex/.test(stackRule) && /flex-direction:\s*column/.test(stackRule),
+        stackRule.replace(/\s+/g, " ").slice(0, 140));
+  check("CSS: главный график занимает остаток", /flex:\s*1/.test(stackRule),
+        stackRule.replace(/\s+/g, " ").slice(0, 140));
+  const sizedRule = (cssTxt.match(/\.chart-stack\.sized\s*>\s*\.chart-wrapper\s*\{[^}]*\}/) || [""])[0];
+  check("CSS: после растяжки график сужается в ноль", /min-height:\s*0/.test(sizedRule),
+        sizedRule);
+  const canvasWrapRule = (cssTxt.match(/\.ind-canvas-wrap\s*\{[^}]*\}/) || [""])[0];
+  check("CSS: полотно окна тянется по переменной", /height:\s*var\(--ind-h/.test(canvasWrapRule),
+        canvasWrapRule);
   check("заголовки локализованы (LIQ)", ($$("#ind-pane-liq .ind-title") || {}).textContent === "💥 LIQ");
 
   // клик по кнопке слоя прячет окно и гасит кнопку
@@ -359,6 +528,11 @@ async function part1() {
   const panesAnon = docAnon.getElementById("indicator-panes");
   check("шлюз: индикаторных окон у анонима нет",
     !!panesAnon && panesAnon.classList.contains("all-hidden"));
+  const splitsAnon = docAnon.querySelectorAll("#chart-stack .stack-splitter");
+  const splitsHidden = Array.prototype.every.call(splitsAnon,
+    (el) => el.classList.contains("hidden"));
+  check("шлюз: разделители блоков у анонима спрятаны",
+    splitsAnon.length === 3 && splitsHidden, splitsAnon.length + " / " + splitsHidden);
   domAnon.window.close();
 }
 

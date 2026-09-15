@@ -10,13 +10,16 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
 
 from accounts import (Store, hash_password, normalize_email, password_problem,  # noqa: E402
                       public_user, valid_email, verify_password)
-from mailer import Mailer, SmtpTransport, build_mailer, html_to_text  # noqa: E402
+import mailer as mailer_module  # noqa: E402
+from mailer import (Mailer, SmtpTransport, build_mailer, html_to_text,  # noqa: E402
+                    ipv4_address, split_sender)
 
 
 class EmailAccountTest(unittest.TestCase):
@@ -381,6 +384,47 @@ class MailerTest(unittest.TestCase):
                 os.environ.pop(k, None)
                 if keep[k] is not None:
                     os.environ[k] = keep[k]
+
+    def test_sender_split_and_ipv4_lookup(self):
+        self.assertEqual(split_sender("LiqScope <no-reply@liqscope.online>"),
+                         ("LiqScope", "no-reply@liqscope.online"))
+        self.assertEqual(split_sender("plain@liqscope.online"),
+                         ("LiqScope", "plain@liqscope.online"))
+        self.assertEqual(split_sender(""), ("LiqScope", "no-reply@liqscope.online"))
+        self.assertEqual(ipv4_address("localhost"), "127.0.0.1")
+        self.assertEqual(ipv4_address("такого-хоста-нет.лиqscope"),
+                         "")   # мусорный домен — пусто, без исключения
+
+    def test_smtp_retries_over_ipv4_after_network_error(self):
+        """«Network is unreachable» из-за IPv6 → одна повторная попытка по IPv4."""
+        calls = []
+
+        def fake_deliver(host, port, user, password, tls, timeout, msg, to,
+                         from_addr, ipv4_only=False):
+            calls.append(ipv4_only)
+            if not ipv4_only:
+                raise OSError(101, "Network is unreachable")
+
+        transport = SmtpTransport("smtp.yandex.ru", 465, "u@yandex.ru", "p",
+                                  "LiqScope <u@yandex.ru>", tls="ssl")
+        with mock.patch.object(mailer_module, "smtp_deliver", fake_deliver), \
+                mock.patch.object(mailer_module, "ipv4_address", lambda h: "77.88.21.158"):
+            ok, err = transport.send("bob@mail.ru", "Тема", "<p>привет</p>")
+        self.assertTrue(ok, err)
+        self.assertEqual(calls, [False, True])
+        self.assertTrue(transport.ipv4)          # дальше сразу по IPv4
+
+    def test_smtp_error_is_reported_when_ipv4_does_not_help(self):
+        def fake_deliver(*a, **kw):
+            raise OSError(101, "Network is unreachable")
+
+        transport = SmtpTransport("smtp.yandex.ru", 465, "", "",
+                                  "LiqScope <no-reply@liqscope.online>", tls="ssl")
+        with mock.patch.object(mailer_module, "smtp_deliver", fake_deliver), \
+                mock.patch.object(mailer_module, "ipv4_address", lambda h: "77.88.21.158"):
+            ok, err = transport.send("bob@mail.ru", "Тема", "<p>привет</p>")
+        self.assertFalse(ok)
+        self.assertIn("Network is unreachable", err)
 
     def test_smtp_sender_parts(self):
         t = SmtpTransport("smtp.example.com", 465, "user", "pass",

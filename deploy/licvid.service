@@ -34,13 +34,16 @@ Environment=LIQSCOPE_COOKIE_SECURE=1
 # Environment=LIQSCOPE_SECRET=
 # Почта — основной вход (подтверждение адреса, вход по ссылке, сброс пароля).
 # Без SMTP регистрация работает, но письма не уходят: в логе будет
-# «SMTP не настроен», а ссылку видно в /api/admin/overview → mail.last.
+# «SMTP не настроен», а ссылка для ручной выдачи пишется в журнал:
+# journalctl -u licvid | grep "Ссылка для ручной выдачи"
 # Environment=LIQSCOPE_SMTP_HOST=smtp.yandex.ru
 # Environment=LIQSCOPE_SMTP_PORT=465
 # Environment=LIQSCOPE_SMTP_TLS=ssl
 # Environment=LIQSCOPE_SMTP_USER=no-reply@liqscope.online
 # Environment=LIQSCOPE_SMTP_PASSWORD=пароль-приложения
 # Environment=LIQSCOPE_SMTP_FROM=LiqScope <no-reply@liqscope.online>
+# Проверка настроек и сети: python3 tools/smtp_check.py --ports
+# Environment=LIQSCOPE_SMTP_IPV4=1
 # Стенд без реального ящика: письма складываются в папку
 # Environment=LIQSCOPE_MAIL_DIR=/tmp/liqscope-mail
 #

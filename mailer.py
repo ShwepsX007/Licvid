@@ -12,20 +12,28 @@
     LIQSCOPE_SMTP_FROM      адрес отправителя ("LiqScope <no-reply@…>")
     LIQSCOPE_SMTP_TLS       starttls (по умолчанию) | ssl | none
     LIQSCOPE_SMTP_TIMEOUT   таймаут подключения, сек (по умолчанию 15)
+    LIQSCOPE_SMTP_IPV4=1    слать только по IPv4 (по умолчанию — обычная
+                            попытка, при сетевой ошибке повтор по IPv4)
     LIQSCOPE_MAIL_DIR       если задан — письма не уходят, а складываются
                             в папку (стенд/тесты)
 
 Без LIQSCOPE_SMTP_HOST сервер всё равно работает: регистрация и вход
-по почте живут, письмо просто не уходит — ссылку администратор может
-отдать вручную из журнала (`/api/admin/overview` → mail.last), в консоль
-пишется предупреждение.
+по почте живут, письмо просто не уходит. Ссылку администратор берёт из
+журнала сервиса (строка «Ссылка для ручной выдачи»), а состояние отправок
+видно в /api/admin/overview → mail.
+
+Если у сервера сломан IPv6 (или хостинг его не даёт), первая попытка
+отправки пройдёт по обычному пути, а при сетевой ошибке транспорт один раз
+повторит её, используя только IPv4, и запомнит это для следующих писем.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import re
 import smtplib
+import socket
 import ssl
 import threading
 import time
@@ -67,11 +75,104 @@ def html_to_text(html: str) -> str:
     return text.strip()
 
 
+def split_sender(raw: str) -> Tuple[str, str]:
+    """«LiqScope <no-reply@liqscope.online>» → (имя, адрес)."""
+    raw = (raw or "").strip() or "no-reply@liqscope.online"
+    m = re.match(r"^\s*(.*?)\s*<\s*([^>]+)\s*>\s*$", raw)
+    if m:
+        return (m.group(1) or BRAND), m.group(2).strip()
+    return BRAND, raw.strip()
+
+
+def build_message(sender: str, to: str, subject: str, html: str,
+                  text: str = "") -> MIMEMultipart:
+    """Письмо text+HTML с правильными заголовками."""
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = Header(subject, "utf-8")
+    name, addr = split_sender(sender)
+    msg["From"] = formataddr((str(Header(name, "utf-8")), addr))
+    msg["To"] = to
+    msg["Date"] = formatdate(localtime=True)
+    msg["Message-ID"] = make_msgid(domain=addr.split("@")[-1] or "liqscope.online")
+    msg.attach(MIMEText(text or html_to_text(html), "plain", "utf-8"))
+    msg.attach(MIMEText(html, "html", "utf-8"))
+    return msg
+
+
+def ipv4_address(host: str) -> str:
+    """Первый IPv4-адрес хоста ("" — если A-записи нет)."""
+    try:
+        infos = socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM)
+    except OSError:
+        return ""
+    for info in infos:
+        return info[4][0]
+    return ""
+
+
+class _IPv4SMTP(smtplib.SMTP):
+    """Как smtplib.SMTP, но подключается только по IPv4."""
+
+    def _get_socket(self, host, port, timeout):
+        return super()._get_socket(ipv4_address(host) or host, port, timeout)
+
+
+class _IPv4SMTPSSL(smtplib.SMTP_SSL):
+    """То же для SSL-порта: сертификат всё равно проверяется по имени хоста."""
+
+    def _get_socket(self, host, port, timeout):
+        return super()._get_socket(ipv4_address(host) or host, port, timeout)
+
+
+@contextlib.contextmanager
+def smtp_session(host: str, port: int, user: str, password: str, tls: str,
+                 timeout: float, ipv4_only: bool = False):
+    """Соединение с SMTP: TLS при необходимости и вход, если задан логин."""
+    secure = (tls or "").lower() == "ssl"
+    if secure:
+        cls = _IPv4SMTPSSL if ipv4_only else smtplib.SMTP_SSL
+        srv = cls(host, port, timeout=timeout,
+                  context=ssl.create_default_context())
+    else:
+        cls = _IPv4SMTP if ipv4_only else smtplib.SMTP
+        srv = cls(host, port, timeout=timeout)
+    with srv:
+        if not secure:
+            srv.ehlo()
+            if (tls or "").lower() not in ("none", "off", "plain"):
+                try:
+                    srv.starttls(context=ssl.create_default_context())
+                    srv.ehlo()
+                except smtplib.SMTPException as e:
+                    log.warning("SMTP starttls не поднялся: %s", e)
+        if user:
+            srv.login(user, password)
+        yield srv
+
+
+def smtp_login(host: str, port: int, user: str, password: str, tls: str,
+               timeout: float, ipv4_only: bool = False) -> None:
+    """Только вход в SMTP, без письма (диагностика: tools/smtp_check.py)."""
+    with smtp_session(host, port, user, password, tls, timeout, ipv4_only):
+        pass
+
+
+def smtp_deliver(host: str, port: int, user: str, password: str, tls: str,
+                 timeout: float, msg, to: str, from_addr: str,
+                 ipv4_only: bool = False) -> None:
+    """Отправляет готовое письмо. Ошибки — исключениями."""
+    with smtp_session(host, port, user, password, tls, timeout, ipv4_only) as srv:
+        srv.sendmail(from_addr, [to], msg.as_string())
+
+
 class SmtpTransport:
     """Реальная отправка по SMTP."""
 
+    label = "SMTP"
+
     def __init__(self, host: str, port: int, user: str, password: str,
-                 sender: str, tls: str = "starttls", timeout: float = 15.0):
+                 sender: str, tls: str = "starttls", timeout: float = 15.0,
+                 ipv4: bool = False):
         self.host = host
         self.port = int(port or 25)
         self.user = user
@@ -79,49 +180,36 @@ class SmtpTransport:
         self.sender = sender
         self.tls = (tls or "starttls").lower()
         self.timeout = float(timeout or 15)
+        self.ipv4 = bool(ipv4)   # True — сразу шлём только по IPv4
 
     def send(self, to: str, subject: str, html: str, text: str = "") -> Tuple[bool, str]:
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = Header(subject, "utf-8")
-        name, addr = self._sender_parts()
-        msg["From"] = formataddr((str(Header(name, "utf-8")), addr))
-        msg["To"] = to
-        msg["Date"] = formatdate(localtime=True)
-        msg["Message-ID"] = make_msgid(domain=addr.split("@")[-1] or "liqscope.online")
-        msg.attach(MIMEText(text or html_to_text(html), "plain", "utf-8"))
-        msg.attach(MIMEText(html, "html", "utf-8"))
-        try:
-            if self.tls == "ssl":
-                ctx = ssl.create_default_context()
-                with smtplib.SMTP_SSL(self.host, self.port, timeout=self.timeout,
-                                      context=ctx) as srv:
-                    self._auth_send(srv, msg, to)
-            else:
-                with smtplib.SMTP(self.host, self.port, timeout=self.timeout) as srv:
-                    srv.ehlo()
-                    if self.tls not in ("none", "off", "plain"):
-                        try:
-                            srv.starttls(context=ssl.create_default_context())
-                            srv.ehlo()
-                        except smtplib.SMTPException as e:
-                            log.warning("SMTP starttls не поднялся: %s", e)
-                    self._auth_send(srv, msg, to)
-            return True, ""
-        except Exception as e:  # сеть, авторизация, отказ сервера
-            log.warning("SMTP: письмо для %s не ушло: %s", to, e)
-            return False, str(e)[:200]
+        msg = build_message(self.sender, to, subject, html, text)
+        ok, err = self._attempt(msg, to, self.ipv4)
+        if not ok and not self.ipv4 and ipv4_address(self.host):
+            # Частая беда дешёвых/российских хостингов: IPv6-адрес есть, а IPv6
+            # не ходит, и попытка заканчивается «Network is unreachable».
+            log.info("%s: повторяю отправку для %s только по IPv4", self.label, to)
+            ok, err2 = self._attempt(msg, to, True)
+            if ok:
+                self.ipv4 = True    # дальше сразу по IPv4, без лишней попытки
+                return True, ""
+            err = err2 or err
+        if not ok:
+            log.warning("%s: письмо для %s не ушло: %s", self.label, to, err)
+            return False, str(err)[:200]
+        return True, ""
 
-    def _auth_send(self, srv, msg, to: str) -> None:
-        if self.user:
-            srv.login(self.user, self.password)
-        srv.sendmail(self._sender_parts()[1], [to], msg.as_string())
+    def _attempt(self, msg, to: str, ipv4: bool) -> Tuple[bool, Optional[Exception]]:
+        try:
+            smtp_deliver(self.host, self.port, self.user, self.password, self.tls,
+                         self.timeout, msg, to, self._sender_parts()[1],
+                         ipv4_only=ipv4)
+            return True, None
+        except Exception as e:   # сеть, авторизация, отказ сервера
+            return False, e
 
     def _sender_parts(self) -> Tuple[str, str]:
-        raw = self.sender or self.user or "no-reply@liqscope.online"
-        m = re.match(r"^\s*(.*?)\s*<\s*([^>]+)\s*>\s*$", raw)
-        if m:
-            return (m.group(1) or BRAND), m.group(2).strip()
-        return BRAND, raw.strip()
+        return split_sender(self.sender or self.user or "no-reply@liqscope.online")
 
 
 class FileTransport:
@@ -283,5 +371,6 @@ def build_mailer(public_url: str = "") -> Mailer:
         password=os.getenv("LIQSCOPE_SMTP_PASSWORD") or "",
         sender=sender,
         tls=tls, timeout=float(_env("LIQSCOPE_SMTP_TIMEOUT", "15") or 15),
+        ipv4=_flag("LIQSCOPE_SMTP_IPV4"),
     )
     return Mailer(transport, sender=transport.sender, public_url=public_url, enabled=True)

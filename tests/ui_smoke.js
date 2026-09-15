@@ -423,7 +423,7 @@ async function main() {
     out.langEn &&
     out.langEn.select === "en" &&
     out.langEn.htmlLang === "en-US" &&
-    out.langEn.feedTitle.indexOf("LIVE LIQUIDATION FEED") !== -1 &&
+    out.langEn.feedTitle.indexOf("Liquidations") !== -1 &&
     out.langEn.metricLabel.indexOf("Liquidations") !== -1 &&
     out.langEn.title.indexOf("LiqScope Terminal") !== -1 &&
     out.liqHistoryFetches > 0 &&   // после F5 клиент догружает историю пузырьков

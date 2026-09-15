@@ -54,6 +54,7 @@
         lastOI: null,
         statWin: { liq: "24h", cvd: "24h", oi: "24h" },
         modalItem: null,
+        feedTab: "liq",         // лента: liq | cvd | oi
     };
 
     let connState = { status: "pulse yellow", key: "conn.connecting" };
@@ -516,6 +517,14 @@
             .sort((a, b) => a.time - b.time);
 
         applyPricePrecision(bars[bars.length - 1].close);
+        try {
+            if (chart && chart.timeScale) {
+                chart.timeScale().applyOptions({
+                    timeVisible: Number(state.timeframe) < 1440,
+                    secondsVisible: false,
+                });
+            }
+        } catch (e) { /* ignore */ }
         candleSeries.setData(bars);
         if (volumeSeries) volumeSeries.setData(vols);
 
@@ -525,6 +534,7 @@
         updateMarkers();
         updateLiveStats();
         queueRedraw();
+        queueShapeFeed();
     }
 
     function updateCandle(c) {
@@ -554,6 +564,7 @@
         updatePriceDisplay(bar.close);
         updateLiveStats();
         queueRedraw();
+        queueShapeFeed();
     }
 
     // --- Индикатор «живости» тиков ------------------------------------------
@@ -750,9 +761,11 @@
         clusterHits = [];              // актуальные геометрии — только если слой включён
         cvdHits = [];
         oiHits = [];
-        if (state.liqEnabled) drawLiqRects(ctx);
-        if (state.cvdEnabled) drawCvdTriangles(ctx);
+        // Порядок снизу вверх: шары OI → треугольники CVD → кластеры ликвидаций.
+        // Крупные OI-шары больше не перекрывают прямоугольники и треугольники.
         if (state.oiEnabled) drawOiBalls(ctx);
+        if (state.cvdEnabled) drawCvdTriangles(ctx);
+        if (state.liqEnabled) drawLiqRects(ctx);
         drawFigures();   // фигуры теханализа — свой canvas поверх
     }
 
@@ -1551,23 +1564,23 @@
     }
 
     // --- Наведение/нажатие на фигуры: прямоугольники, CVD, OI -------------------
-    // Порядок проверки — обратный отрисовке: шарики поверх треугольников
-    // поверх прямоугольников. У фигур хит-тест кругом с допуском 4px.
+    // Порядок проверки — обратный отрисовке: кластеры поверх треугольников
+    // поверх шаров OI. У фигур хит-тест кругом с допуском 4px.
     function hitAt(px, py) {
-        for (let i = oiHits.length - 1; i >= 0; i--) {
-            const b = oiHits[i];
-            const dx = px - b.x, dy = py - b.y, rr = b.r + 4;
-            if (dx * dx + dy * dy <= rr * rr) return b;
+        for (let i = clusterHits.length - 1; i >= 0; i--) {
+            const b = clusterHits[i];
+            if (px >= b.x - 4 && px <= b.x + b.w + 4 &&
+                py >= b.y - 4 && py <= b.y + b.h + 4) return b;
         }
         for (let i = cvdHits.length - 1; i >= 0; i--) {
             const b = cvdHits[i];
             const dx = px - b.x, dy = py - b.y, rr = b.r + 4;
             if (dx * dx + dy * dy <= rr * rr) return b;
         }
-        for (let i = clusterHits.length - 1; i >= 0; i--) {
-            const b = clusterHits[i];
-            if (px >= b.x - 4 && px <= b.x + b.w + 4 &&
-                py >= b.y - 4 && py <= b.y + b.h + 4) return b;
+        for (let i = oiHits.length - 1; i >= 0; i--) {
+            const b = oiHits[i];
+            const dx = px - b.x, dy = py - b.y, rr = b.r + 4;
+            if (dx * dx + dy * dy <= rr * rr) return b;
         }
         return null;
     }
@@ -1579,17 +1592,26 @@
 
     function applyFeedHighlight(ball, pin) {
         if (pin) {
-            pinHitKey = ball ? ball.key : null;
+            pinHitKey = (ball && ball.kind === "liq") ? ball.key : null;
             if (!ball) hoverHitKey = null;
         } else {
-            hoverHitKey = ball ? ball.key : null;
+            hoverHitKey = (ball && ball.kind === "liq") ? ball.key : null;
         }
-        const ids = ball ? new Set(ball.ids) : null;
+        const kind = ball && ball.kind;
+        const matchTab = (kind === "liq" && state.feedTab === "liq")
+            || (kind === "cvd" && state.feedTab === "cvd")
+            || (kind === "oi" && state.feedTab === "oi");
+        const ids = (kind === "liq" && ball.ids) ? new Set(ball.ids.map(String)) : null;
+        const feedKey = (kind === "cvd" || kind === "oi") ? (kind + "_" + ball.time) : null;
         let firstRow = null;
         feedTbody.querySelectorAll("tr").forEach((tr) => {
-            const hit = ids && ids.has(tr.dataset.liqId);
+            let hit = false;
+            if (ball && matchTab) {
+                if (ids) hit = ids.has(String(tr.dataset.liqId));
+                else if (feedKey) hit = tr.dataset.feedKey === feedKey;
+            }
             tr.classList.toggle("feed-hit", !!hit);
-            tr.classList.toggle("feed-dim", !!ids && !hit);
+            tr.classList.toggle("feed-dim", !!(ball && matchTab) && !hit);
             if (hit && !firstRow) firstRow = tr;
         });
         if (firstRow) {
@@ -1598,6 +1620,84 @@
             } catch (e) { /* ignore */ }
         }
         queueRedraw();
+    }
+
+    // Лента → график: наведение/клик по строке подсвечивает кластер/треугольник/шар.
+    function hitFromFeedItem(item) {
+        if (!item) return null;
+        if (item._kind === "cvd") {
+            for (let i = 0; i < cvdHits.length; i++) {
+                if (Number(cvdHits[i].time) === Number(item.time)) return cvdHits[i];
+            }
+            return {
+                kind: "cvd", key: "cvd_" + item.time, x: 0, y: 0, r: 0,
+                time: item.time, d: item.delta, buy: item.delta > 0,
+                live: !!item.live, p90: 0, c: item.c,
+            };
+        }
+        if (item._kind === "oi") {
+            for (let i = 0; i < oiHits.length; i++) {
+                if (Number(oiHits[i].time) === Number(item.time)) return oiHits[i];
+            }
+            return {
+                kind: "oi", key: "oi_" + item.time, x: 0, y: 0, r: 0,
+                time: item.time, d: item.delta, up: item.delta > 0,
+                tier: 0, live: !!item.live, c: item.c,
+            };
+        }
+        if (item.id != null) {
+            const sid = String(item.id);
+            for (let i = 0; i < clusterHits.length; i++) {
+                const ids = clusterHits[i].ids || [];
+                for (let j = 0; j < ids.length; j++) {
+                    if (String(ids[j]) === sid) return clusterHits[i];
+                }
+            }
+        }
+        return null;
+    }
+
+    function highlightFromFeed(item, pin) {
+        if (pinHitKey || shapePin) {
+            if (!pin) return;   // закреп остаётся, пока не кликнут иначе
+        }
+        const hit = item ? hitFromFeedItem(item) : null;
+        if (!item) {
+            applyFeedHighlight(null, false);
+            if (!shapePin) { shapeHover = null; queueRedraw(); }
+            return;
+        }
+        if (hit && hit.kind === "liq") {
+            applyFeedHighlight(hit, pin);
+            if (pin) pinShape(hit);
+            else if (!shapePin) {
+                shapeHover = { kind: "liq", key: hit.key };
+                queueRedraw();
+            }
+            return;
+        }
+        if (hit && (hit.kind === "cvd" || hit.kind === "oi")) {
+            if (pin) {
+                pinShape(hit);
+                applyFeedHighlight(hit, true);
+            } else if (!shapePin) {
+                shapeHover = { kind: hit.kind, key: hit.key };
+                applyFeedHighlight(hit, false);
+            }
+            return;
+        }
+        // события нет на текущем графике (другая монета) — подсветим только строку
+        feedTbody.querySelectorAll("tr").forEach((tr) => {
+            const self = (item.id != null && String(tr.dataset.liqId) === String(item.id))
+                || (item._kind && tr.dataset.feedKey === item._kind + "_" + item.time);
+            tr.classList.toggle("feed-hit", !!self);
+            tr.classList.toggle("feed-dim", !self);
+        });
+    }
+
+    function bindFeedHover(tr, item) {
+        tr.addEventListener("mouseenter", () => highlightFromFeed(item, false));
+        tr.addEventListener("mouseleave", () => highlightFromFeed(null, false));
     }
 
     // Окно фигуры: наведение показывает, уход курсора прячет (если не закреплено
@@ -2009,13 +2109,11 @@
                 if (!hit) {
                     hoverShape(null);
                     applyFeedHighlight(null, false);
-                } else if (hit.kind === "liq") {
-                    // прямоугольник: окно кластера ПЛЮС подсветка строк в ленте
+                } else {
+                    // кластер / треугольник / шар: окно фигуры + строка в
+                    // открытой ленте того же типа (liq / cvd / oi)
                     hoverShape(hit);
                     applyFeedHighlight(hit, false);
-                } else {
-                    applyFeedHighlight(null, false);
-                    hoverShape(hit);
                 }
             });
             // клик/тап: закрепить фигуру; повторный клик по ней или клик
@@ -2024,25 +2122,16 @@
                 if (drawTool) { drawClick(param); return; }   // точки фигур вместо окон
                 const hit = (param && param.point)
                     ? hitAt(param.point.x, param.point.y) : null;
-                if (!hit) {
+                const pinned = hit && (
+                    (hit.kind === "liq" && hit.key === pinHitKey) ||
+                    (shapePin && shapePin.kind === hit.kind && shapePin.key === hit.key)
+                );
+                if (!hit || pinned) {
                     applyFeedHighlight(null, true);
-                    unpinShape();
-                    hideShapeModal();
-                } else if (hit.kind === "liq") {
-                    if (hit.key === pinHitKey) {
-                        applyFeedHighlight(null, true);
-                        unpinShape();
-                        hideShapeModal();
-                    } else {
-                        applyFeedHighlight(hit, true);
-                        pinShape(hit);
-                        openShapeModal(hit.kind, hit);
-                    }
-                } else if (shapePin && hit.key === shapePin.key) {
                     unpinShape();
                     hideShapeModal();
                 } else {
-                    applyFeedHighlight(null, true);
+                    applyFeedHighlight(hit, true);
                     pinShape(hit);
                     openShapeModal(hit.kind, hit);
                 }
@@ -2260,12 +2349,18 @@
             encodeURIComponent(item.symbol) + '" title="' + openTitleHtml +
             '" aria-label="' + openTitleHtml + '">' +
             "<strong>" + pretty(item.symbol) + "</strong><span class=\"coin-link-icon\">📈</span></button></td>" +
-            '<td><span class="exch-badge ' + item.exchange + '">' + item.exchange + "</span></td>" +
+            '<td><span class="exch-badge ' + item.exchange + '">' + item.exchange +
+            "</span></td>" +
             '<td><span class="badge-side ' + (isLong ? "long" : "short") + '">' +
             (isLong ? "LONG LIQ" : "SHORT LIQ") + "</span></td>" +
             '<td class="td-usd-amount ' + valClass + '">$' + fmtUsdFull(item.usd) + "</td>" +
             '<td class="td-price">' + fmtPrice(item.price) + "</td>";
-        tr.addEventListener("click", () => openModal(item));
+        tr.addEventListener("click", () => {
+            const hit = hitFromFeedItem(item);
+            if (hit && hit.kind === "liq") applyFeedHighlight(hit, true);
+            openModal(item);
+        });
+        bindFeedHover(tr, item);
         const coinBtn = tr.querySelector(".coin-link");
         if (coinBtn) {
             coinBtn.addEventListener("click", (e) => {
@@ -2285,6 +2380,7 @@
     }
 
     function addFeedRow(item) {
+        if (state.feedTab !== "liq") return;
         if (!passesFeedFilter(item)) return;
         feedEmptyEl.classList.add("hidden");
         feedTbody.insertBefore(feedRow(item), feedTbody.firstChild);
@@ -2292,27 +2388,241 @@
         feedCountEl.textContent = feedCountLabel(feedTbody.children.length);
     }
 
+    function paintFeedHeaders() {
+        const table = $("feed-table");
+        if (table) table.className = "feed-table feed-kind-" + state.feedTab;
+        const usd = $("feed-th-usd");
+        if (usd) {
+            usd.textContent = state.feedTab === "cvd" ? I18n.t("feed.col_cvd")
+                            : state.feedTab === "oi" ? I18n.t("feed.col_oi")
+                            : I18n.t("feed.col_usd");
+        }
+        document.querySelectorAll(".feed-tab").forEach((btn) => {
+            const on = btn.getAttribute("data-feed") === state.feedTab;
+            btn.classList.toggle("active", on);
+            btn.setAttribute("aria-selected", on ? "true" : "false");
+        });
+    }
+
+    function shapeFeedItems(field) {
+        const candles = state.candles;
+        const items = [];
+        if (!candles.length) return items;
+        const lastIdx = candles.length - 1;
+        const absVals = [];
+        for (let i = 0; i < candles.length; i++) {
+            const d = Math.abs(Number(candles[i][field]));
+            if (isFinite(d) && d > 0) absVals.push(d);
+        }
+        absVals.sort((a, b) => a - b);
+        const p90 = absVals.length ? (absVals[Math.floor(0.9 * (absVals.length - 1))] || 0) : 0;
+        const minAbs = Math.max(1000 * chartVolScale(), p90 * 0.05);
+        for (let i = candles.length - 1; i >= 0 && items.length < 150; i--) {
+            const d = Number(candles[i][field]);
+            if (!isFinite(d) || Math.abs(d) < minAbs) continue;
+            if (state.minUsd > 0 && Math.abs(d) < state.minUsd) continue;
+            items.push({
+                _kind: field === "cvd" ? "cvd" : "oi",
+                time: candles[i].time,
+                timestamp: candles[i].time,
+                symbol: chartSymbol(),
+                usd: Math.abs(d),
+                delta: d,
+                price: candles[i].close,
+                live: i === lastIdx,
+                c: candles[i],
+            });
+        }
+        return items;
+    }
+
+    function shapeFeedKey(item) {
+        return item._kind + "_" + item.time;
+    }
+
+    function shapeFeedType(item) {
+        const isCvd = item._kind === "cvd";
+        const up = item.delta >= 0;
+        return {
+            isCvd: isCvd,
+            up: up,
+            typeClass: isCvd ? (up ? "badge-cvd-buy" : "badge-cvd-sell")
+                             : (up ? "badge-oi-up" : "badge-oi-down"),
+            typeLabel: isCvd
+                ? I18n.t(up ? "feed.cvd_buy" : "feed.cvd_sell")
+                : I18n.t(up ? "feed.oi_up" : "feed.oi_down"),
+            valClass: isCvd ? (up ? "cvd-buy-val" : "cvd-sell-val")
+                            : (up ? "oi-up-val" : "oi-down-val"),
+            sign: up ? "+" : "−",
+        };
+    }
+
+    function paintShapeFeedCells(tr, item) {
+        tr._feedItem = item;
+        tr.dataset.feedKey = shapeFeedKey(item);
+        tr.classList.toggle("feed-row-live", !!item.live);
+        const t = shapeFeedType(item);
+        let usdTd = tr.querySelector(".td-usd-amount");
+        if (!usdTd) {
+            const openTitle = I18n.t("feed.open_chart", { sym: pretty(item.symbol) });
+            const openTitleHtml = openTitle.replace(/"/g, "&quot;");
+            tr.innerHTML =
+                '<td class="td-time">' + I18n.time(item.timestamp) + "</td>" +
+                '<td class="td-coin"><button class="coin-link" type="button" data-symbol="' +
+                encodeURIComponent(item.symbol) + '" title="' + openTitleHtml +
+                '" aria-label="' + openTitleHtml + '">' +
+                "<strong>" + pretty(item.symbol) + "</strong><span class=\"coin-link-icon\">📈</span></button></td>" +
+                "<td></td>" +
+                '<td><span class="' + t.typeClass + '">' + t.typeLabel + "</span></td>" +
+                '<td class="td-usd-amount ' + t.valClass + '">' + t.sign + "$" + fmtUsdFull(item.usd) + "</td>" +
+                '<td class="td-price">' + fmtPrice(item.price) + "</td>";
+            return;
+        }
+        usdTd.className = "td-usd-amount " + t.valClass;
+        usdTd.textContent = t.sign + "$" + fmtUsdFull(item.usd);
+        const priceTd = tr.querySelector(".td-price");
+        if (priceTd) priceTd.textContent = fmtPrice(item.price);
+        const badge = tr.cells[3] ? tr.cells[3].querySelector("span") : null;
+        if (badge) {
+            badge.className = t.typeClass;
+            badge.textContent = t.typeLabel;
+        }
+    }
+
+    function shapeFeedRow(item) {
+        const tr = document.createElement("tr");
+        paintShapeFeedCells(tr, item);
+        tr.addEventListener("click", () => {
+            const it = tr._feedItem || item;
+            const hit = hitFromFeedItem(it);
+            if (hit) {
+                applyFeedHighlight(hit, true);
+                pinShape(hit);
+                openShapeModal(hit.kind, hit);
+            }
+        });
+        tr.addEventListener("mouseenter", () => highlightFromFeed(tr._feedItem || item, false));
+        tr.addEventListener("mouseleave", () => highlightFromFeed(null, false));
+        const coinBtn = tr.querySelector(".coin-link");
+        if (coinBtn) {
+            coinBtn.addEventListener("click", (e) => {
+                e.stopPropagation();
+                selectChartSymbol(decodeURIComponent(coinBtn.dataset.symbol));
+            });
+        }
+        return tr;
+    }
+
+    function finishShapeFeed(field, n) {
+        feedCountEl.textContent = feedCountLabel(n);
+        if (feedEmptyEl) {
+            feedEmptyEl.textContent = I18n.t(field === "cvd" ? "feed.empty_cvd" : "feed.empty_oi");
+            feedEmptyEl.classList.toggle("hidden", n > 0);
+        }
+    }
+
+    function rebuildShapeFeed(field) {
+        const rows = shapeFeedItems(field);
+        feedTbody.innerHTML = "";
+        const frag = document.createDocumentFragment();
+        rows.forEach((item) => frag.appendChild(shapeFeedRow(item)));
+        feedTbody.appendChild(frag);
+        finishShapeFeed(field, rows.length);
+    }
+
+    // Тик не должен сносить DOM: иначе ховер срывается (mouseleave),
+    // подсветка мигает, закреп фигуры сбрасывается. Обновляем ячейки на месте.
+    function syncShapeFeed(field) {
+        if (!feedTbody) return;
+        const items = shapeFeedItems(field);
+        if (!feedTbody.children.length) {
+            rebuildShapeFeed(field);
+            return;
+        }
+        const have = new Map();
+        Array.from(feedTbody.children).forEach((tr) => {
+            if (tr.dataset.feedKey) have.set(tr.dataset.feedKey, tr);
+        });
+        const keep = new Set();
+        const ordered = [];
+        for (let i = 0; i < items.length; i++) {
+            const item = items[i];
+            const key = shapeFeedKey(item);
+            keep.add(key);
+            let tr = have.get(key);
+            if (!tr) tr = shapeFeedRow(item);
+            else paintShapeFeedCells(tr, item);
+            ordered.push(tr);
+        }
+        Array.from(feedTbody.children).forEach((tr) => {
+            if (!keep.has(tr.dataset.feedKey)) feedTbody.removeChild(tr);
+        });
+        for (let i = 0; i < ordered.length; i++) {
+            if (feedTbody.children[i] !== ordered[i]) {
+                feedTbody.insertBefore(ordered[i], feedTbody.children[i] || null);
+            }
+        }
+        finishShapeFeed(field, items.length);
+    }
+
     function rebuildFeed() {
-        // строки пересоздаются — закреплённая подсветка шарика гаснет,
-        // окно кластера (ссылалось на старые строки) — тоже
         pinHitKey = null;
         hoverHitKey = null;
-        if (shapePin && shapePin.kind === "liq") {
-            unpinShape();
-            hideShapeModal();
+        if (shapePin && (shapePin.kind === "liq" || shapePin.kind === "cvd" || shapePin.kind === "oi")) {
+            if (!state.modalItem) {
+                unpinShape();
+                hideShapeModal();
+            }
         }
+        paintFeedHeaders();
+        if (state.feedTab === "cvd") { rebuildShapeFeed("cvd"); return; }
+        if (state.feedTab === "oi") { rebuildShapeFeed("oi"); return; }
+        if (feedEmptyEl) feedEmptyEl.textContent = I18n.t("feed.empty");
         const rows = state.liquidations.filter(passesFeedFilter).slice(-150).reverse();
         feedTbody.innerHTML = "";
         const frag = document.createDocumentFragment();
         rows.forEach((item) => {
             const tr = feedRow(item);
-            // гасим анимацию «новая строка», но подсветку кита оставляем
-            tr.className = tr.classList.contains("feed-row-whale") ? "feed-row-whale" : "";
+            tr.classList.remove("feed-row-new");
             frag.appendChild(tr);
         });
         feedTbody.appendChild(frag);
         feedCountEl.textContent = feedCountLabel(rows.length);
         feedEmptyEl.classList.toggle("hidden", rows.length > 0);
+    }
+
+    function setFeedTab(tab) {
+        if (tab !== "liq" && tab !== "cvd" && tab !== "oi") return;
+        if (state.feedTab === tab) return;
+        state.feedTab = tab;
+        try { localStorage.setItem("liqscope.feedTab", tab); } catch (e) { /* ignore */ }
+        rebuildFeed();
+    }
+
+    function setupFeedTabs() {
+        try {
+            const v = localStorage.getItem("liqscope.feedTab");
+            if (v === "liq" || v === "cvd" || v === "oi") state.feedTab = v;
+        } catch (e) { /* ignore */ }
+        const tabs = $("feed-tabs");
+        if (!tabs) return;
+        tabs.addEventListener("click", (e) => {
+            const btn = e.target.closest ? e.target.closest(".feed-tab") : null;
+            if (!btn) return;
+            setFeedTab(btn.getAttribute("data-feed"));
+        });
+        paintFeedHeaders();
+    }
+
+    let shapeFeedTimer = null;
+    function queueShapeFeed() {
+        if (state.feedTab !== "cvd" && state.feedTab !== "oi") return;
+        if (shapeFeedTimer) return;
+        shapeFeedTimer = setTimeout(() => {
+            shapeFeedTimer = null;
+            if (state.feedTab === "cvd") syncShapeFeed("cvd");
+            else if (state.feedTab === "oi") syncShapeFeed("oi");
+        }, 400);
     }
 
     function openModal(item) {
@@ -2330,7 +2640,24 @@
             fmtUsdFull(item.usd) + "</span></p>" +
             "<p><strong>" + I18n.t("modal.qty") + "</strong> " +
             Number(item.qty).toLocaleString("en-US", { maximumFractionDigits: 6 }) + "</p>" +
-            "<p><strong>" + I18n.t("modal.time") + "</strong> " + I18n.dateTime(item.timestamp) + "</p>";
+            "<p><strong>" + I18n.t("modal.time") + "</strong> " + I18n.dateTime(item.timestamp) + "</p>" +
+            // источник события: «выведено из ленты» надо показывать честно —
+            // биржа такие ликвидации не публикует, их считает терминал
+            (item.kind === "tape"
+                ? '<p><strong>' + I18n.t("modal.src") + "</strong> " +
+                  I18n.t("modal.src_tape") +
+                  (item.liq ? '<span class="liq-src"> · markPx ' +
+                             fmtPrice(item.liq.markPx) +
+                             (item.liq.method ? " · " + String(item.liq.method) : "") +
+                             (item.liq.liquidatedUser
+                                 ? ' · <span class="wallet">' +
+                                   String(item.liq.liquidatedUser).slice(0, 10) + "…" +
+                                   "</span>"
+                                 : "") + "</span>"
+                             : "") +
+                  "</p>"
+                : '<p><strong>' + I18n.t("modal.src") + "</strong> " +
+                  I18n.t("modal.src_feed") + "</p>");
         unpinShape();
         detailModal.classList.remove("hidden");
         detailModal.classList.remove("peek", "peek-pinned");
@@ -3006,6 +3333,7 @@
         state.demo = !!health.demo;
         demoBadge.classList.toggle("hidden", !state.demo);
         const parts = [];
+        let okN = 0, total = 0;
         Object.keys(health.sources).forEach((name) => {
             const s = health.sources[name];
             if (!s.enabled) return;
@@ -3014,6 +3342,8 @@
             // Hyperliquid уже есть. Вторая плашка дублировала бы его.
             if (name === "oxa") return;
             const cls = s.connected ? "ok" : "bad";
+            if (s.connected) okN += 1;
+            total += 1;
             let label = name;
             if (name.indexOf("prices") === 0) label = I18n.t("health.prices");
             else if (name.indexOf("ticks") === 0) label = I18n.t("health.ticks");
@@ -3021,9 +3351,34 @@
                 ? I18n.t("health.connected", { n: s.events })
                 : I18n.t("health.noconn", { err: s.last_error || "—" });
             parts.push('<span class="exch-chip ' + cls + '" title="' +
-                title.replace(/"/g, "&quot;") + '">' + label + "</span>");
+                title.replace(/"/g, "&quot;") + '"><span>' + label + "</span>" +
+                (s.connected ? "" : '<span>✕</span>') + "</span>");
         });
-        exchHealthEl.innerHTML = parts.join("");
+        const dot = (okN === total && total) ? "ok" : (okN ? "mixed" : "bad");
+        const wasOpen = exchHealthEl.classList.contains("open");
+        exchHealthEl.innerHTML =
+            '<button type="button" class="exch-health-btn" id="exch-health-btn">' +
+                '<span class="exch-health-dot ' + dot + '"></span>' +
+                '<span class="exch-health-sum">' +
+                    I18n.t("health.summary", { ok: okN, n: total }) + "</span>" +
+                '<span class="exch-health-caret">▾</span>' +
+            "</button>" +
+            '<div class="exch-health-pop" id="exch-health-pop">' + parts.join("") + "</div>";
+        if (wasOpen) exchHealthEl.classList.add("open");
+    }
+
+    function setupExchHealth() {
+        if (!exchHealthEl) return;
+        exchHealthEl.addEventListener("click", (e) => {
+            const btn = e.target.closest ? e.target.closest(".exch-health-btn") : null;
+            if (!btn) return;
+            e.stopPropagation();
+            exchHealthEl.classList.toggle("open");
+        });
+        document.addEventListener("click", (e) => {
+            if (exchHealthEl.contains(e.target)) return;
+            exchHealthEl.classList.remove("open");
+        });
     }
 
     // --- Статистика ----------------------------------------------------------
@@ -3065,15 +3420,116 @@
     }
 
     // --- Свечи ---------------------------------------------------------------
+    const TF_EXCHANGE = {
+        1: { binance: "1m", bybit: "1" },
+        5: { binance: "5m", bybit: "5" },
+        15: { binance: "15m", bybit: "15" },
+        60: { binance: "1h", bybit: "60" },
+        240: { binance: "4h", bybit: "240" },
+        1440: { binance: "1d", bybit: "D" },
+    };
+
+    function sameTf(a, b) {
+        return Number(a) === Number(b);
+    }
+
+    function medianStep(candles) {
+        if (!candles || candles.length < 4) return 0;
+        const steps = [];
+        for (let i = 1; i < candles.length; i++) {
+            const dt = Number(candles[i].time) - Number(candles[i - 1].time);
+            if (dt > 0) steps.push(dt);
+        }
+        if (!steps.length) return 0;
+        steps.sort((a, b) => a - b);
+        return steps[Math.floor(steps.length / 2)];
+    }
+
+    function candlesMatchTf(candles, tfMin) {
+        const step = medianStep(candles);
+        if (!step) return true;   // мало баров — шаг не на чем мерить
+        const want = Number(tfMin) * 60;
+        return step >= want * 0.45 && step <= want * 2.5;
+    }
+
+    async function fetchPublicKlines(symbol, tfMin) {
+        const spec = TF_EXCHANGE[tfMin];
+        if (!spec) return null;
+        const pair = String(symbol || "").replace("_", "");
+        if (!pair) return null;
+        try {
+            const url = "https://fapi.binance.com/fapi/v1/klines?symbol=" +
+                encodeURIComponent(pair) + "&interval=" + spec.binance + "&limit=300";
+            const r = await fetch(url);
+            const rows = await r.json();
+            if (Array.isArray(rows) && rows.length) {
+                return rows.map((row) => ({
+                    time: Math.floor(Number(row[0]) / 1000),
+                    open: Number(row[1]), high: Number(row[2]),
+                    low: Number(row[3]), close: Number(row[4]),
+                    volume: Number(row[7]),
+                    cvd: (row[10] != null && Number(row[7]) > 0)
+                        ? (2 * Number(row[10]) - Number(row[7])) : null,
+                }));
+            }
+        } catch (e) { /* CORS / сеть — пробуем Bybit */ }
+        try {
+            const url = "https://api.bybit.com/v5/market/kline?category=linear&symbol=" +
+                encodeURIComponent(pair) + "&interval=" + spec.bybit + "&limit=300";
+            const r = await fetch(url);
+            const data = await r.json();
+            const rows = (data && data.result && data.result.list) || [];
+            if (!rows.length) return null;
+            const out = rows.map((row) => ({
+                time: Math.floor(Number(row[0]) / 1000),
+                open: Number(row[1]), high: Number(row[2]),
+                low: Number(row[3]), close: Number(row[4]),
+                volume: Number(row[6]),
+            }));
+            out.sort((a, b) => a.time - b.time);
+            return out;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    let candlesReqId = 0;
     async function loadCandles() {
         fetchOI();   // табло OI — за монетой графика
+        const req = ++candlesReqId;
+        const want = Number(state.timeframe);
+        let applied = false;
+        let gotWrong = false;
         try {
             const r = await fetch("/api/klines?symbol=" + encodeURIComponent(chartSymbol()) +
-                "&timeframe=" + state.timeframe);
+                "&timeframe=" + want);
             const data = await r.json();
-            if (data && data.candles) setCandles(data.candles, data.source);
+            if (req !== candlesReqId) return;
+            if (data && data.candles && data.candles.length) {
+                const gotTf = data.timeframe != null ? Number(data.timeframe) : NaN;
+                const tfOk = !Number.isFinite(gotTf) || gotTf === want;
+                if (tfOk && candlesMatchTf(data.candles, want)) {
+                    setCandles(data.candles, data.source);
+                    applied = true;
+                } else {
+                    gotWrong = true;
+                }
+            }
         } catch (e) {
             console.error("klines:", e);
+        }
+        if (!applied && gotWrong) {
+            try {
+                const ext = await fetchPublicKlines(chartSymbol(), want);
+                if (req !== candlesReqId) return;
+                if (ext && ext.length && candlesMatchTf(ext, want)) {
+                    setCandles(ext, "exchange");
+                    applied = true;
+                }
+            } catch (e) { /* ignore */ }
+        }
+        if (!applied && gotWrong) {
+            console.warn("klines: сервер отдал другой ТФ, дневные свечи не подставились");
         }
     }
 
@@ -3188,14 +3644,15 @@
             }
             case "tick":
             case "candle": {
-                if (msg.symbol === chartSymbol() && msg.tf === state.timeframe) {
+                if (msg.symbol === chartSymbol() && sameTf(msg.tf, state.timeframe)) {
                     updateCandle(msg.candle);
                     if (msg.type === "tick") noteTick(msg.ts);
                 }
                 break;
             }
             case "candles": {
-                if (msg.symbol === chartSymbol() && msg.tf === state.timeframe) {
+                if (msg.symbol === chartSymbol() && sameTf(msg.tf, state.timeframe)
+                    && candlesMatchTf(msg.candles, state.timeframe)) {
                     setCandles(msg.candles, msg.source);
                 }
                 break;
@@ -3310,6 +3767,8 @@
         setInterval(renderTickIndicator, 1000);
         setupLayerToggles();
         setupLayerPop();   // попап кнопок слоёв по «☰ Слои»
+        setupFeedTabs();   // эфир: ликвидации / CVD / OI
+        setupExchHealth(); // выпадающий список бирж в шапке
         setupChartToggle();
         setupChartExpand();
         setupDrawToolbar();   // панель рисования + тестовый API
@@ -3327,3 +3786,4 @@
         boot();
     }
 })();
+

@@ -21,8 +21,10 @@ Hyperliquid БЕЗ денег (в отличие от GoldRush, где ключ 
              сколько сообщений и заполнений пришло, задержка до события,
              расход кредитов в час/сутки и хватит ли месячного лимита.
 
-Ключ берётся из переменной OXARCHIVE_API_KEY (или --key). Ключ нигде не
-печатается.
+Ключ берётся из OXARCHIVE_API_KEY, из LIQSCOPE_OXA_KEYS (первый из списка —
+так же, как его читает боевой источник) или из --key. Ключ нигде не печатается.
+Сам ключ выдаётся на 0xarchive.io и выглядит как ox_...: плейсхолдеры вида
+0xa_ключ1 из README биржа, естественно, не примет.
 
 Запуск (сначала REST — он отвечает на главный вопрос):
     OXARCHIVE_API_KEY=ox_... python3 tools/oxa_probe.py --rest BTC ETH --hours 24
@@ -356,7 +358,12 @@ async def main():
     if "--selftest" in args:
         sys.exit(1 if selftest() else 0)
 
+    # Ключ ищем в том же порядке, что и боевой источник (market_feed.oxa_keys):
+    # LIQSCOPE_OXA_KEYS — список через запятую, OXARCHIVE_API_KEY — один ключ.
     key = os.getenv("OXARCHIVE_API_KEY", "")
+    if not key:
+        multi = (os.getenv("LIQSCOPE_OXA_KEYS") or "").replace(";", ",")
+        key = next((k.strip() for k in multi.split(",") if k.strip()), "")
     if "--key" in args:
         i = args.index("--key")
         key = args[i + 1]
@@ -376,9 +383,16 @@ async def main():
     coins = coins or ["BTC", "ETH"]
 
     if not key:
-        print("нужен ключ: OXARCHIVE_API_KEY=ox_... python3 tools/oxa_probe.py "
-              "BTC ETH 180   (или --selftest без ключа)")
+        print("нужен ключ 0xArchive (выдаётся на https://0xarchive.io, вид ox_...):\n"
+              "  OXARCHIVE_API_KEY=ox_... python3 tools/oxa_probe.py --rest BTC ETH --hours 24\n"
+              "  LIQSCOPE_OXA_KEYS=ox_...  — переменная боевого источника, зонд её тоже видит\n"
+              "  --key ox_... — передать прямо в команде\n"
+              "Ключи не печатаются. Без ключа можно посмотреть разбор формата: --selftest")
         sys.exit(2)
+    if not key.startswith("ox_"):
+        print(f"ВНИМАНИЕ: ключ длиной {len(key)} символов и не начинается с 'ox_' — "
+              f"похоже на плейсхолдер из README, а не на ключ из личного кабинета "
+              f"0xArchive. Ответ биржи, скорее всего, будет 401.")
 
     print(f"0xArchive: REST {BASE}")
     print(f"           WS   {WS_URL}")

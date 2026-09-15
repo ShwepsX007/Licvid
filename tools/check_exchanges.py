@@ -200,21 +200,35 @@ async def main():
                          "https://futures.kraken.com/derivatives/api/v3/instruments")
 
         print("\nWebSocket (главное — приходят ли ДАННЫЕ, а не просто connect):")
-        await check_ws(s, "Binance combined aggTrade",
-                       f"wss://fstream.binance.com/stream?streams={low}@aggTrade",
-                       match=lambda p: (p.get("data") or p).get("e") in ("aggTrade", "trade"))
-        await check_ws(s, "Binance raw + SUBSCRIBE aggTrade",
-                       "wss://fstream.binance.com/ws",
-                       subscribe={"method": "SUBSCRIBE",
-                                  "params": [f"{low}@aggTrade"], "id": 1},
-                       match=lambda p: (p.get("data") or p).get("e") in ("aggTrade", "trade"))
-        await check_ws(s, "Binance combined kline_1m",
-                       f"wss://fstream.binance.com/stream?streams={low}@kline_1m",
-                       match=lambda p: (p.get("data") or p).get("e") == "kline")
-        await check_ws(s, "Binance !forceOrder@arr (ликвидации)",
-                       "wss://fstream.binance.com/stream?streams=!forceOrder@arr",
-                       match=lambda p: (p.get("data") or p).get("e") == "forceOrder",
-                       wait=max(WAIT, 20))
+        # 2026-04-23 Binance отключил legacy-пути WS: …/stream и …/ws теперь
+        # открываются и молчат. Поэтому каждый стрим проверяем по обоим путям
+        # — по ответу сразу видно: источник жив или мы просто не туда смотрим.
+        for suffix, sub, matcher, nm, wt in (
+            (f"stream?streams={low}@aggTrade", None,
+             lambda p: (p.get("data") or p).get("e") in ("aggTrade", "trade"),
+             "Binance combined aggTrade", WAIT),
+            ("ws", {"method": "SUBSCRIBE", "params": [f"{low}@aggTrade"], "id": 1},
+             lambda p: (p.get("data") or p).get("e") in ("aggTrade", "trade"),
+             "Binance raw + SUBSCRIBE aggTrade", WAIT),
+            (f"stream?streams={low}@kline_1m", None,
+             lambda p: (p.get("data") or p).get("e") == "kline",
+             "Binance combined kline_1m", WAIT),
+            ("stream?streams=!forceOrder@arr", None,
+             lambda p: (p.get("data") or p).get("e") == "forceOrder",
+             "Binance !forceOrder@arr (ликвидации)", max(WAIT, 20)),
+        ):
+            hits = []
+            for root, tag in (("wss://fstream.binance.com/market", "/market"),
+                              ("wss://fstream.binance.com", "legacy")):
+                if await check_ws(s, f"{nm} [{tag}]", f"{root}/{suffix}",
+                                  subscribe=sub, match=matcher, wait=wt):
+                    hits.append(tag)
+            if hits == ["legacy"]:
+                line(f"{nm}: итог", False,
+                     "данные только по legacy-пути — терминал должен ходить на "
+                     "/market (LIQSCOPE_BINANCE_WS)")
+            elif not hits:
+                line(f"{nm}: итог", False, "ни один путь Binance не отдал данные")
         await check_ws(s, "Bybit publicTrade",
                        "wss://stream.bybit.com/v5/public/linear",
                        subscribe={"op": "subscribe", "args": [f"publicTrade.{SYMBOL}"]},

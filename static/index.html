@@ -11,6 +11,7 @@
     <!-- Local Lightweight Charts v5 -->
     <script src="/static/lightweight-charts.js"></script>
     <script src="/static/i18n.js"></script>
+    <script src="/static/account.js"></script>
 </head>
 <body class="dark-theme">
     <!-- Top Header -->
@@ -71,6 +72,7 @@
         </div>
 
         <div class="header-controls">
+            <span id="nav-account" class="acc-nav"></span>
             <select id="lang-select" class="lang-select" aria-label="Language / Язык" title="Language / Язык">
                 <option value="ru">🇷🇺 Русский</option>
                 <option value="en">🇬🇧 English</option>
@@ -78,7 +80,9 @@
                 <option value="hi">🇮🇳 हिन्दी</option>
                 <option value="es">🇪🇸 Español</option>
             </select>
-            <div class="exch-health" id="exch-health" title="Состояние подключения к биржам"></div>
+            <div class="exch-health" id="exch-health"
+                 data-i18n-title="health.open"
+                 title="Состояние бирж — наведите или нажмите"></div>
             <button class="btn btn-icon btn-outline" id="sound-toggle-btn" data-i18n-title="sound.title" title="Звуковой сигнал">
                 <span id="sound-icon">🔇</span>
             </button>
@@ -120,6 +124,7 @@
                 <button class="btn btn-tf" data-tf="15">15м</button>
                 <button class="btn btn-tf" data-tf="60">1ч</button>
                 <button class="btn btn-tf" data-tf="240">4ч</button>
+                <button class="btn btn-tf" data-tf="1440">1д</button>
             </div>
         </div>
 
@@ -271,20 +276,30 @@
         <!-- Live Feed Section -->
         <aside class="feed-section">
             <div class="feed-header flex-between">
-                <span class="feed-title" data-i18n="feed.title">⚡ ПРЯМОЙ ЭФИР ЛИКВИДАЦИЙ</span>
+                <div class="feed-tabs" id="feed-tabs" role="tablist">
+                    <button type="button" class="feed-tab feed-title active" role="tab"
+                            data-feed="liq" id="feed-tab-liq" aria-selected="true"
+                            data-i18n="feed.tab_liq">⚡ Ликвидации</button>
+                    <button type="button" class="feed-tab" role="tab"
+                            data-feed="cvd" id="feed-tab-cvd" aria-selected="false"
+                            data-i18n="feed.tab_cvd">🎯 CVD</button>
+                    <button type="button" class="feed-tab" role="tab"
+                            data-feed="oi" id="feed-tab-oi" aria-selected="false"
+                            data-i18n="feed.tab_oi">● OI</button>
+                </div>
                 <span class="feed-count-badge" id="feed-count">0 событий</span>
             </div>
 
             <!-- Table Feed -->
             <div class="feed-table-container">
-                <table class="feed-table">
+                <table class="feed-table feed-kind-liq" id="feed-table">
                     <thead>
                         <tr>
                             <th data-i18n="feed.col_time">Время</th>
                             <th data-i18n="feed.col_coin">Монета</th>
-                            <th data-i18n="feed.col_exch">Биржа</th>
+                            <th id="feed-th-exch" data-i18n="feed.col_exch">Биржа</th>
                             <th data-i18n="feed.col_type">Тип</th>
-                            <th class="col-usd" data-i18n="feed.col_usd">СУММА ЛИКВИДАЦИИ ($)</th>
+                            <th class="col-usd" id="feed-th-usd">СУММА ЛИКВИДАЦИИ ($)</th>
                             <th data-i18n="feed.col_price">Цена ($)</th>
                         </tr>
                     </thead>
@@ -321,6 +336,6 @@
         </div>
     </div>
 
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=notape"></script>
 </body>
 </html>

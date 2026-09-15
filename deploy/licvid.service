@@ -23,7 +23,20 @@ Environment=LIQSCOPE_EXCHANGES=binance,bybit,okx,gate,bitget,htx,bitmex,hyperliq
 # Environment=LIQSCOPE_OXA_KEYS=0xa_ключ1,0xa_ключ2
 # Environment=LIQSCOPE_OXA_COINS_PER_KEY=2
 # Environment=LIQSCOPE_OXA_POLL_SEC=120
-ExecStart=/usr/bin/python3 -m uvicorn server:app --host 0.0.0.0 --port 8000
+# Кабинет / бот / HTTPS (см. deploy/HTTPS.md):
+Environment=LIQSCOPE_PUBLIC_URL=https://liqscope.online
+Environment=LIQSCOPE_COOKIE_SECURE=1
+# Токен бота, админы и секрет — только в /etc/systemd/system/licvid.service
+# (или drop-in), не в git:
+# Environment=LIQSCOPE_BOT_TOKEN=
+# Environment=LIQSCOPE_ADMIN_IDS=
+# Environment=LIQSCOPE_SECRET=
+#
+# В Type=simple разрешена РОВНО одна строка ExecStart.
+# Две сразу (например, venv и /usr/bin) →
+# «Failed to restart: Unit licvid.service has a bad unit file setting».
+# nginx слушает 80/443 и проксирует сюда — снаружи 8000 не открываем.
+ExecStart=/root/Licvid/venv/bin/python3 -m uvicorn server:app --host 127.0.0.1 --port 8000
 Restart=always
 RestartSec=5
 KillSignal=SIGINT

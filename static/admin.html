@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LiqScope — админка</title>
+<link rel="icon" type="image/png" href="/static/logo.png">
+<link rel="stylesheet" href="/static/account.css">
+</head>
+<body data-page="admin">
+<header class="site-header">
+    <a class="brand" href="/">
+        <img class="logo" src="/static/logo.png" alt="LiqScope">
+        <span class="name">LIQSCOPE</span>
+        <span class="tag">ADMIN</span>
+    </a>
+    <nav class="site-nav">
+        <a class="btn btn-ghost btn-compact" href="/terminal">⚡ Терминал</a>
+        <span id="nav-account"></span>
+    </nav>
+</header>
+<main class="wrap">
+    <h1 class="page-title">Панель управления</h1>
+    <p class="lead">Сайт, бот и пользователи. Те же цифры доступны командами /admin в Telegram.</p>
+
+    <div class="grid grid-4" style="margin-top:22px">
+        <div class="card"><span class="stat-value" id="st-users">—</span><span class="stat-label">Пользователей</span></div>
+        <div class="card"><span class="stat-value" id="st-new">—</span><span class="stat-label">Новых за 24ч</span></div>
+        <div class="card"><span class="stat-value" id="st-views">—</span><span class="stat-label">Просмотров сегодня</span></div>
+        <div class="card"><span class="stat-value" id="st-uniq">—</span><span class="stat-label">Уникальных сегодня</span></div>
+        <div class="card"><span class="stat-value" id="st-ws">—</span><span class="stat-label">Онлайн WS</span></div>
+        <div class="card"><span class="stat-value" id="st-exch">—</span><span class="stat-label">Бирж в эфире</span></div>
+        <div class="card"><span class="stat-value" id="st-bot" style="font-size:1.05rem">—</span><span class="stat-label">Telegram-бот</span></div>
+        <div class="card"><span class="stat-value" id="m-24h">—</span><span class="stat-label">Ликвидации 24ч</span></div>
+    </div>
+
+    <div class="grid grid-2">
+        <div class="card">
+            <h3>Визиты за 2 недели</h3>
+            <div class="bars" id="visit-bars"></div>
+        </div>
+        <div class="card">
+            <h3>Рассылка в Telegram</h3>
+            <p class="lead">Уйдёт всем, кто запускал бота и не в бане.</p>
+            <textarea id="broadcast-text" placeholder="Текст сообщения…"></textarea>
+            <div class="row-actions">
+                <button class="btn btn-primary" id="broadcast-send" type="button">Отправить</button>
+                <span class="meta" id="broadcast-status"></span>
+            </div>
+        </div>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+        <h3>Пользователи</h3>
+        <input class="search" id="user-q" placeholder="поиск: имя, @username, id">
+        <table class="data">
+            <thead><tr><th>Имя</th><th>Username</th><th>Telegram ID</th><th>Был</th><th></th></tr></thead>
+            <tbody id="users-body"></tbody>
+        </table>
+    </div>
+
+    <div class="grid grid-2">
+        <div class="card">
+            <h3>Настройки</h3>
+            <label>Приветствие бота (/start)</label>
+            <textarea id="bot-welcome"></textarea>
+            <label>Объявление в кабинете</label>
+            <textarea id="site-notice-in"></textarea>
+            <div class="row-actions">
+                <button class="btn btn-primary" id="settings-save" type="button">Сохранить</button>
+                <span class="meta" id="settings-status"></span>
+            </div>
+        </div>
+        <div class="card">
+            <h3>Сервисы</h3>
+            <p class="lead">Снимите галочку «скоро», когда сервис готов для пользователей (сайт + бот).</p>
+            <div id="admin-svc"></div>
+        </div>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+        <h3>Сводка в канал — шапки и фото</h3>
+        <p class="lead">Каждый пост берёт следующую шапку и картинку по кругу. Можно писать как блогер; <code>{h}</code> подставится как «4» (окно в часах). То же самое есть в боте: Админка → Шаблоны канала.</p>
+        <div class="grid grid-2" style="margin-top:12px">
+            <div>
+                <label>Новая шапка</label>
+                <textarea id="tpl-head-in" placeholder="☕ Пока вы пили кофе, лента уже намолотила кассу за {h}ч."></textarea>
+                <div class="row-actions">
+                    <button class="btn btn-primary" id="tpl-head-add" type="button">Добавить шапку</button>
+                    <span class="meta" id="tpl-head-status"></span>
+                </div>
+                <ul class="tpl-list" id="tpl-heads"></ul>
+            </div>
+            <div>
+                <label>Новое фото (jpg / png / webp)</label>
+                <div class="row-actions">
+                    <label class="btn btn-primary file-btn">
+                        Выбрать файл
+                        <input id="tpl-photo-in" type="file" accept="image/jpeg,image/jpg,image/png,image/webp,image/*">
+                    </label>
+                    <span class="meta" id="tpl-photo-status">jpg, png, webp — до 12 МБ</span>
+                </div>
+                <div class="tpl-photos" id="tpl-photos"></div>
+            </div>
+        </div>
+    </div>
+</main>
+<script src="/static/account.js"></script>
+</body>
+</html>

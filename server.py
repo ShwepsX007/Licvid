@@ -4,6 +4,7 @@ LiqScope Web Server — терминал ликвидаций в реально�
 Что отдаёт наружу:
     GET  /                  — лендинг (посадочная страница)
     GET  /terminal          — сам терминал
+    GET  /login /cabinet /admin — вход через Telegram, кабинет, админка
     GET  /api/symbols       — список монет (авто-подбор по обороту) + цены
     GET  /api/klines        — реальные свечи (Binance → Bybit → OKX)
     GET  /api/liquidations  — история ликвидаций из памяти
@@ -24,6 +25,9 @@ LiqScope Web Server — терминал ликвидаций в реально�
                             bitfinex,hyperliquid
     LIQSCOPE_DEMO           1 — генерировать тестовый поток вместо биржевого
     LIQSCOPE_HISTORY_MAX    сколько событий держать в памяти (по умолчанию 60000)
+    LIQSCOPE_CHANNEL_URL    инвайт канала (по умолчанию https://t.me/+4S1LsZtH1Pc5YWZi)
+    LIQSCOPE_CHANNEL_ID     numeric id канала (-100…) — чтобы проверять подписку и постить;
+                            если пусто, бот запомнит id, когда его добавят админом канала
 """
 
 from __future__ import annotations
@@ -44,7 +48,11 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from market_feed import MarketFeed, TF_MINUTES, base_of, canon
+from timeframes import parse_tf
 from oi_feed import map_candles_to_oi
+from accounts import Store
+from tg_bot import TelegramBot, normalize_public_url
+from web_account import ctx as account_ctx, register_account_routes
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -74,6 +82,22 @@ if HISTORY_FILE.lower() in ("0", "none", "off", "false"):
     HISTORY_FILE = ""
 HISTORY_TTL_HOURS = float(os.getenv("LIQSCOPE_HISTORY_TTL_HOURS", "24"))
 HISTORY_FILE_MAX_BYTES = 64 * 1024 * 1024   # страховка: урезаем файл при разрастании
+
+BOT_TOKEN = os.getenv("LIQSCOPE_BOT_TOKEN", "").strip()
+PUBLIC_URL = normalize_public_url(os.getenv("LIQSCOPE_PUBLIC_URL", ""))
+CHANNEL_URL = os.getenv("LIQSCOPE_CHANNEL_URL", "https://t.me/+4S1LsZtH1Pc5YWZi").strip()
+CHANNEL_ID = os.getenv("LIQSCOPE_CHANNEL_ID", "").strip()
+SECRET = os.getenv("LIQSCOPE_SECRET", "").strip() or "liqscope-change-me"
+ADMIN_IDS = []
+for _x in os.getenv("LIQSCOPE_ADMIN_IDS", "").replace(";", ",").split(","):
+    _x = _x.strip()
+    if _x.isdigit():
+        ADMIN_IDS.append(int(_x))
+ACCOUNTS_DB = os.getenv("LIQSCOPE_ACCOUNTS_DB",
+                        os.path.join(HERE, "data", "accounts.db"))
+account_store = Store(ACCOUNTS_DB, SECRET, ADMIN_IDS)
+tg_bot = TelegramBot(BOT_TOKEN, account_store, PUBLIC_URL,
+                     channel_url=CHANNEL_URL, channel_id=CHANNEL_ID)
 
 KLINE_TTL = 20.0            # сек: как часто перезапрашивать историю с биржи
 # Ликвидации уходят клиенту сразу; интервал — только предохранитель от флуда
@@ -293,6 +317,14 @@ async def on_liquidation(ev: dict):
         "usd": round(float(ev["usd"]), 2),
         "timestamp": float(ev["timestamp"]),
     }
+    # kind="tape" — событие выведено из ленты сделок (Hyperliquid не помечает
+    # ликвидации публично, см. hl_infer.py). Едем с событием дальше: в ленте и
+    # в окне деталей его надо видеть, иначе вывод выдаётся за факт биржи.
+    if ev.get("kind"):
+        event["kind"] = ev["kind"]
+        if ev.get("liquidation"):
+            event["liq"] = {k: v for k, v in ev["liquidation"].items()
+                            if k in ("liquidatedUser", "markPx", "method")}
     LIQUIDATIONS.append(event)
     try:
         _liq_queue.put_nowait(event)
@@ -523,8 +555,8 @@ def _attach_oi(candles: list, tf: int, levels: dict, chgs: dict) -> None:
 
 async def get_candles(symbol: str, tf: int, force: bool = False) -> dict:
     symbol = canon(symbol)
-    if tf not in TF_MINUTES:
-        tf = 5
+    parsed = parse_tf(tf)
+    tf = parsed if parsed is not None else 5
     k = _key(symbol, tf)
     entry = CANDLES.get(k)
     fresh = entry and (time.time() - entry["ts"] < KLINE_TTL) and not force
@@ -609,14 +641,123 @@ def _demo_oi(series: list) -> None:
         c["oiChg"] = round(c["oi"] - prev, 2)
 
 
+def alert_watch_symbols() -> Set[str]:
+    """Монеты, которые смотрят алерты — их нужно держать в тиках/OI."""
+    from alerts import normalize_config
+    out: Set[str] = set()
+    need_all = False
+    try:
+        subs = account_store.list_alert_subscribers()
+    except Exception:
+        return out
+    for s in subs:
+        cfg = normalize_config(s.get("config"))
+        if not cfg.get("enabled"):
+            continue
+        if cfg["symbol"] == "ALL":
+            if "cvd" in cfg["watch"] or "oi" in cfg["watch"]:
+                need_all = True
+        else:
+            out.add(cfg["symbol"])
+    if need_all:
+        now = time.time()
+        totals: Dict[str, float] = {}
+        for x in LIQUIDATIONS:
+            if now - float(x.get("timestamp") or 0) <= 3600:
+                totals[x["symbol"]] = totals.get(x["symbol"], 0.0) + float(x.get("usd") or 0)
+        out.update(sorted(totals, key=totals.get, reverse=True)[:8])
+        if feed and feed.symbols:
+            out.add(feed.symbols[0])
+    return out
+
+
 def sync_hot_symbols():
     """Сообщаем фиду, чьи графики сейчас открыты — по ним нужен каждый тик."""
     if not feed:
         return
     hot = {c.chart_symbol for c in hub.clients}
+    hot |= alert_watch_symbols()
     if not hot and feed.symbols:
         hot = {feed.symbols[0]}          # держим BTC тёплым для быстрого старта
     feed.set_hot_symbols(hot)
+
+
+def alerts_market_snapshot() -> dict:
+    """Снимок для движка алертов и кабинета."""
+    now = time.time()
+    events = [x for x in LIQUIDATIONS
+              if now - float(x.get("timestamp") or 0) <= 4 * 3600]
+    cvd = {k: dict(v) for k, v in CVD_ACC.items()}
+    oi: Dict[str, dict] = {}
+    tracker = getattr(feed, "oi", None) if feed else None
+    if tracker is not None:
+        for sym in list(alert_watch_symbols())[:16]:
+            try:
+                oi[sym] = tracker.payload(sym)
+            except Exception:
+                pass
+        if not oi:
+            for sym in list(getattr(tracker, "_watched", {}) or {})[:8]:
+                try:
+                    oi[sym] = tracker.payload(sym)
+                except Exception:
+                    pass
+    return {"now": now, "events": events, "cvd": cvd, "oi": oi}
+
+
+async def alerts_oi_warmup():
+    tracker = getattr(feed, "oi", None) if feed else None
+    if tracker is None:
+        return
+    for sym in list(alert_watch_symbols())[:12]:
+        try:
+            await tracker.ensure_symbol(sym)
+        except Exception as e:
+            log.debug("alerts oi %s: %s", sym, e)
+
+
+async def alert_loop():
+    """Раз в несколько секунд проверяет пороги и шлёт в Telegram."""
+    from alerts import evaluate, format_alert_html, normalize_config, should_fire
+    try:
+        await asyncio.sleep(20)
+    except asyncio.CancelledError:
+        return
+    while True:
+        try:
+            await alerts_oi_warmup()
+            market = alerts_market_snapshot()
+            now = market["now"]
+            for sub in account_store.list_alert_subscribers():
+                cfg = normalize_config(sub.get("config"))
+                if not cfg.get("enabled"):
+                    continue
+                hits = evaluate(cfg, market)
+                sent = 0
+                for hit in hits:
+                    last = account_store.last_alert_ts(
+                        sub["user_id"], hit["metric"], hit["symbol"])
+                    if not should_fire(last, now, hit["window_min"]):
+                        continue
+                    account_store.add_alert_event(sub["user_id"], hit)
+                    tg_id = int(sub.get("tg_id") or 0)
+                    if tg_id and tg_bot.running:
+                        await tg_bot.send(
+                            tg_id,
+                            format_alert_html(hit, tg_bot.site_url()),
+                            markup=tg_bot.site_link_kb("посмотреть в терминале"),
+                        )
+                    sent += 1
+                    if sent >= 3:
+                        break
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            log.warning("alerts: %s", e)
+        try:
+            await asyncio.sleep(8)
+        except asyncio.CancelledError:
+            break
 
 
 async def hot_symbols_watcher():
@@ -708,6 +849,57 @@ def compute_stats(symbol: Optional[str] = None, exchange: Optional[str] = None) 
         "demo": DEMO_MODE,
     })
     return out
+
+
+def _cvd_window(symbol: str, sec: float = 14400.0) -> Optional[float]:
+    """Сумма тейкер-дельты по монете за окно. None — нет тиков."""
+    now = time.time()
+    for tf in (5, 15, 60, 240):
+        acc = CVD_ACC.get(f"{symbol}|{tf}") or {}
+        if not acc:
+            continue
+        try:
+            return round(sum(float(v) for b, v in acc.items()
+                             if now - float(b) <= sec), 2)
+        except (TypeError, ValueError):
+            continue
+    entry = CANDLES.get(f"{symbol}|240") or {}
+    series = entry.get("candles") or []
+    if not series:
+        return None
+    last = series[-1] or {}
+    try:
+        if now - float(last.get("time") or 0) <= sec and last.get("cvd") is not None:
+            return float(last["cvd"])
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+async def build_channel_digest() -> dict:
+    """Снимок рынка за 4ч для поста в канал: лидеры, биржи, OI, CVD."""
+    from channel_digest import collect_digest
+    now = time.time()
+    events = list(LIQUIDATIONS)
+    preview = collect_digest(events, now=now)
+    oi: Dict[str, dict] = {}
+    cvd: Dict[str, float] = {}
+    tracker = getattr(feed, "oi", None) if feed else None
+    for c in (preview.get("top_coins") or [])[:4]:
+        sym = c.get("symbol")
+        if not sym:
+            continue
+        v = _cvd_window(sym)
+        if v is not None:
+            cvd[sym] = v
+        if tracker is None:
+            continue
+        try:
+            await tracker.ensure_symbol(sym)
+            oi[sym] = tracker.payload(sym)
+        except Exception as e:
+            log.debug("digest oi %s: %s", sym, e)
+    return collect_digest(events, now=now, oi=oi, cvd=cvd)
 
 
 # =============================================================================
@@ -916,6 +1108,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(stats_broadcaster(), name="stats-broadcast"),
         asyncio.create_task(kline_refresher(), name="kline-refresh"),
         asyncio.create_task(hot_symbols_watcher(), name="hot-symbols"),
+        asyncio.create_task(alert_loop(), name="alerts"),
     ]
     if DEMO_MODE:
         tasks.append(asyncio.create_task(demo_generator(), name="demo"))
@@ -931,11 +1124,21 @@ async def lifespan(app: FastAPI):
                 pass
     tasks.append(asyncio.create_task(warmup(), name="warmup"))
 
+    tg_bot.health_fn = health_summary
+    tg_bot.stats_fn = compute_stats
+    tg_bot.liqs_fn = lambda: list(LIQUIDATIONS)[-8:]
+    tg_bot.ws_clients_fn = lambda: len(hub.clients)
+    tg_bot.digest_fn = build_channel_digest
+    tg_bot.alerts_market_fn = alerts_market_snapshot
+    tg_bot.public_url = PUBLIC_URL
+    await tg_bot.start()
+
     try:
         yield
     finally:
         for t in tasks:
             t.cancel()
+        await tg_bot.stop()
         await feed.stop()
 
 
@@ -949,6 +1152,20 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+account_ctx.store = account_store
+account_ctx.bot = tg_bot
+account_ctx.public_url = PUBLIC_URL
+account_ctx.secret = SECRET
+account_ctx.cookie_secure = os.getenv("LIQSCOPE_COOKIE_SECURE", "").strip() in ("1", "true", "yes")
+account_ctx.dev_login = os.getenv("LIQSCOPE_DEV_LOGIN", "").strip() in ("1", "true", "yes")
+account_ctx.health_fn = health_summary
+account_ctx.stats_fn = compute_stats
+account_ctx.liqs_fn = lambda: list(LIQUIDATIONS)[-8:]
+account_ctx.ws_clients_fn = lambda: len(hub.clients)
+account_ctx.alerts_market_fn = alerts_market_snapshot
+account_ctx.symbols_fn = lambda: list((feed.symbols if feed else [])[:40])
+register_account_routes(app)
 
 
 @app.get("/api/symbols")
@@ -1037,10 +1254,11 @@ async def api_klines(symbol: str = Query("BTC_USDT"), timeframe: int = Query(5))
     symbol = canon(symbol)
     # Любую монету можно открыть на графике, даже если её нет в дефолтном
     # топ-списке: свечи берутся напрямую с бирж, а не из локального списка.
-    entry = await get_candles(symbol, timeframe)
+    tf = parse_tf(timeframe) or 5
+    entry = await get_candles(symbol, tf)
     return {
         "symbol": symbol,
-        "timeframe": timeframe if timeframe in TF_MINUTES else 5,
+        "timeframe": tf,
         "source": entry["source"],
         "candles": entry["candles"],
     }
@@ -1187,8 +1405,9 @@ async def ws_endpoint(websocket: WebSocket):
                 chart = raw.get("chart") or raw.get("chart_symbol")
                 if chart:
                     client.chart = canon(chart)
-                if raw.get("tf") in TF_MINUTES:
-                    client.tf = int(raw["tf"])
+                parsed_tf = parse_tf(raw.get("tf"))
+                if parsed_tf is not None:
+                    client.tf = parsed_tf
                 if raw.get("min_usd") is not None:
                     try:
                         client.min_usd = float(raw["min_usd"])

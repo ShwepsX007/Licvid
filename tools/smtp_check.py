@@ -159,6 +159,13 @@ def sender_address(env: Dict[str, str]) -> str:
 
 def check_sender(env: Dict[str, str]) -> bool:
     """Яндекс (и Gmail) отклоняют письмо, если From не совпадает с логином."""
+    from mailer import sender_hint
+
+    raw = env.get("LIQSCOPE_SMTP_FROM") or env.get("LIQSCOPE_MAIL_API_FROM") or ""
+    hint = sender_hint(raw)
+    if hint:
+        print(f"  ! {hint}")
+        return False
     user = (env.get("LIQSCOPE_SMTP_USER") or "").strip().lower()
     sender = sender_address(env).lower()
     if user and sender and sender != user:
@@ -229,6 +236,11 @@ def api_mode(env: Dict[str, str], to: str = "") -> int:
     if not (env.get("LIQSCOPE_MAIL_API_KEY") or "").strip():
         print("  ✗ LIQSCOPE_MAIL_API_KEY не задан — письма не уйдут")
         return 1
+    from mailer import sender_hint
+    hint = sender_hint(env.get("LIQSCOPE_SMTP_FROM")
+                       or env.get("LIQSCOPE_MAIL_API_FROM") or "")
+    if hint:
+        print(f"  ! {hint}")
     print(f"  адрес:   {url}")
     ok, why = tcp_test(host, 443, socket.AF_INET)
     print(f"  порт 443 у {host}: " + ("открыт" if ok else f"НЕДОСТУПЕН — {why}"))

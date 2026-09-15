@@ -97,6 +97,21 @@ def split_sender(raw: str) -> Tuple[str, str]:
     return BRAND, raw.strip()
 
 
+def sender_hint(raw: str) -> str:
+    """Пусто, если отправитель — нормальный адрес. Иначе объясняем, что не так.
+
+    Самая частая беда: значение записано в systemd без кавычек, и всё, что после
+    пробела, отбрасывается — «LiqScope <box@site.ru>» превращается в «LiqScope».
+    """
+    _, addr = split_sender(raw)
+    if "@" in addr:
+        return ""
+    return (f"отправитель «{raw}» — это имя без адреса: в systemd значение "
+            "обрезалось по пробелу. Нужны кавычки: "
+            'Environment="LIQSCOPE_SMTP_FROM=LiqScope <box@site.ru>", '
+            "либо просто адрес без имени: LIQSCOPE_SMTP_FROM=box@site.ru")
+
+
 def build_message(sender: str, to: str, subject: str, html: str,
                   text: str = "") -> MIMEMultipart:
     """Письмо text+HTML с правильными заголовками."""
@@ -196,13 +211,19 @@ class SmtpTransport:
         self.ipv4 = bool(ipv4)   # True — сразу шлём только по IPv4
 
     def send(self, to: str, subject: str, html: str, text: str = "") -> Tuple[bool, str]:
-        msg = build_message(self.sender, to, subject, html, text)
-        ok, err = self._attempt(msg, to, self.ipv4)
+        sender = self.sender
+        problem = sender_hint(sender)
+        if problem and "@" in (self.user or ""):
+            log.warning("SMTP: %s — письмо пойдёт с логина %s", problem, self.user)
+            sender = self.user
+        msg = build_message(sender, to, subject, html, text)
+        from_addr = split_sender(sender)[1]
+        ok, err = self._attempt(msg, to, self.ipv4, from_addr)
         if not ok and not self.ipv4 and ipv4_address(self.host):
             # Частая беда дешёвых/российских хостингов: IPv6-адрес есть, а IPv6
             # не ходит, и попытка заканчивается «Network is unreachable».
             log.info("%s: повторяю отправку для %s только по IPv4", self.label, to)
-            ok, err2 = self._attempt(msg, to, True)
+            ok, err2 = self._attempt(msg, to, True, from_addr)
             if ok:
                 self.ipv4 = True    # дальше сразу по IPv4, без лишней попытки
                 return True, ""
@@ -212,11 +233,11 @@ class SmtpTransport:
             return False, str(err)[:200]
         return True, ""
 
-    def _attempt(self, msg, to: str, ipv4: bool) -> Tuple[bool, Optional[Exception]]:
+    def _attempt(self, msg, to: str, ipv4: bool,
+                 from_addr: str) -> Tuple[bool, Optional[Exception]]:
         try:
             smtp_deliver(self.host, self.port, self.user, self.password, self.tls,
-                         self.timeout, msg, to, self._sender_parts()[1],
-                         ipv4_only=ipv4)
+                         self.timeout, msg, to, from_addr, ipv4_only=ipv4)
             return True, None
         except Exception as e:   # сеть, авторизация, отказ сервера
             return False, e
@@ -318,6 +339,9 @@ class ApiTransport:
 
     def send(self, to: str, subject: str, html: str, text: str = "") -> Tuple[bool, str]:
         try:
+            problem = sender_hint(self.sender)
+            if problem:
+                raise RuntimeError(problem)
             if self.kind == "sendpulse":
                 self._send_sendpulse(to, subject, html, text)
             else:
@@ -498,6 +522,9 @@ def build_mailer(public_url: str = "") -> Mailer:
     if folder:
         sender = _env("LIQSCOPE_SMTP_FROM", f"{BRAND} <no-reply@liqscope.online>")
         return Mailer(FileTransport(folder), sender=sender, public_url=public_url)
+    hint = sender_hint(_env("LIQSCOPE_SMTP_FROM") or _env("LIQSCOPE_MAIL_API_FROM"))
+    if hint:
+        log.warning("%s", hint)
     api_kind = _env("LIQSCOPE_MAIL_API")
     if api_kind:
         key = (os.getenv("LIQSCOPE_MAIL_API_KEY") or "").strip()

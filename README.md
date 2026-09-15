@@ -1039,8 +1039,11 @@ python3 tools/smtp_check.py --ports              # какие SMTP-порты в
    Частые причины:
    * `535 authentication failed` — вместо пароля приложения указан пароль от
      почты (у Яндекса пароль приложения — 16 символов);
-   * `553 Sender address not allowed` — `LIQSCOPE_SMTP_FROM` не совпадает с
-     логином (или строка без кавычек развалилась на пробеле);
+   * `553 Sender address not allowed` у SMTP или `Invalid from field` у API —
+     в `LIQSCOPE_SMTP_FROM` нет адреса: в systemd значение **обязательно** в
+     кавычках, иначе systemd отбрасывает всё после пробела и остаётся только
+     имя (`Environment="LIQSCOPE_SMTP_FROM=LiqScope <box@site.ru>"`). Проверить:
+     `systemctl show licvid -p Environment | tr ' ' '\n' | grep FROM`;
    * `Network is unreachable` / `reset by peer` — у сервера не работает IPv6
      (лечится автоматическим повтором по IPv4) либо **хостинг блокирует
      исходящие SMTP-порты**. Проверяется `--ports`: если 25/465/587/2525

@@ -19,7 +19,7 @@ from accounts import (Store, hash_password, normalize_email, password_problem,  
                       public_user, valid_email, verify_password)
 import mailer as mailer_module  # noqa: E402
 from mailer import (Mailer, SmtpTransport, build_mailer, html_to_text,  # noqa: E402
-                    ipv4_address, split_sender)
+                    ipv4_address, sender_hint, split_sender)
 
 
 class EmailAccountTest(unittest.TestCase):
@@ -433,6 +433,44 @@ class MailerTest(unittest.TestCase):
         t2 = SmtpTransport("h", 25, "", "", "plain@liqscope.online")
         self.assertEqual(t2._sender_parts()[1], "plain@liqscope.online")
         self.assertEqual(t2._sender_parts()[0], "LiqScope")
+
+
+class SenderConfigTest(unittest.TestCase):
+    """Значение From, обрезанное systemd по пробелу, должно объясняться словами."""
+
+    def test_sender_hint_accepts_normal_values(self):
+        self.assertEqual(sender_hint("LiqScope <no-reply@liqscope.online>"), "")
+        self.assertEqual(sender_hint("no-reply@liqscope.online"), "")
+        self.assertEqual(sender_hint(""), "")          # пусто — берём логин/дефолт
+
+    def test_sender_hint_explains_broken_value(self):
+        hint = sender_hint("LiqScope")                 # как в systemd без кавычек
+        self.assertIn("кавычки", hint)
+        self.assertIn("LIQSCOPE_SMTP_FROM", hint)
+
+    def test_api_refuses_broken_sender_before_request(self):
+        transport = mailer_module.ApiTransport("resend", "re_x", "LiqScope")
+        called = []
+        with mock.patch.object(mailer_module, "http_post_json",
+                               lambda *a, **kw: called.append(a) or {}):
+            ok, err = transport.send("bob@mail.ru", "Тема", "<p>привет</p>")
+        self.assertFalse(ok)
+        self.assertIn("кавычки", err)
+        self.assertEqual(called, [])                   # запрос даже не делали
+
+    def test_smtp_uses_login_when_sender_has_no_address(self):
+        from_addr = []
+
+        def fake_deliver(host, port, user, password, tls, timeout, msg, to,
+                         from_addr_arg, ipv4_only=False):
+            from_addr.append(from_addr_arg)
+
+        transport = SmtpTransport("smtp.yandex.ru", 465, "me@yandex.ru", "p",
+                                  "LiqScope", tls="ssl")   # значение без адреса
+        with mock.patch.object(mailer_module, "smtp_deliver", fake_deliver):
+            ok, err = transport.send("bob@mail.ru", "Тема", "<p>привет</p>")
+        self.assertTrue(ok, err)
+        self.assertEqual(from_addr, ["me@yandex.ru"])    # шлём с логина
 
 
 class ApiMailTest(unittest.TestCase):

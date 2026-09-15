@@ -392,11 +392,37 @@ body.dark-theme {
 }
 .acc-nav a:not(.btn):hover,
 #nav-account a:not(.btn):hover { color: var(--text-primary); }
+/* Кнопки кабинета/админки/выхода — округлые, как на главной */
 .acc-nav .btn, #nav-account .btn,
 .acc-nav button, #nav-account button {
-    padding: 6px 12px;
-    font-size: 0.75rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 14px;
+    font-size: 0.76rem;
+    font-weight: 700;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+    background: rgba(13, 18, 32, 0.6);
+    color: var(--text-primary);
     white-space: nowrap;
+    transition: transform 0.15s, box-shadow 0.15s, background 0.15s, border-color 0.15s;
+}
+.acc-nav .btn:hover, #nav-account .btn:hover,
+.acc-nav button:hover, #nav-account button:hover {
+    border-color: var(--color-blue);
+    background: var(--bg-hover);
+    transform: translateY(-1px);
+}
+.acc-nav .btn-primary, #nav-account .btn-primary {
+    background: linear-gradient(135deg, #3d70ff, #00d6ff);
+    border-color: transparent;
+    color: #060a12;
+    box-shadow: 0 4px 16px rgba(61, 112, 255, 0.35);
+}
+.acc-nav .btn-primary:hover, #nav-account .btn-primary:hover {
+    background: linear-gradient(135deg, #3d70ff, #00d6ff);
+    box-shadow: 0 8px 22px rgba(61, 112, 255, 0.5);
 }
 
 /* Controls Bar */

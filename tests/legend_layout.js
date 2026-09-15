@@ -87,6 +87,14 @@ async function main() {
         else if (u.indexOf("/api/liquidations") === 0) body = { liquidations: [], total: 0 };
         return { ok: true, status: 200, json: async () => body };
       };
+      // слои теперь выключены по умолчанию и доступны только авторизованным:
+      // в тесте включаем dev-обход и «прошлые» выборы пользователя
+      try {
+        win.localStorage.setItem("liqscope.devLayers", "1");
+        ["liqscope.liqEnabled", "liqscope.profileEnabled",
+         "liqscope.cvdEnabled", "liqscope.oiEnabled"].forEach((k) =>
+          win.localStorage.setItem(k, "1"));
+      } catch (e) { /* ignore */ }
     },
   });
 
@@ -117,7 +125,7 @@ async function main() {
     cs(doc.getElementById("liq-toggle")).lineHeight);
   check("cell no shrink", cs(doc.querySelector(".layer-cell")).flexShrink === "0");
 
-  // --- активные цвета слоёв (всё включено по умолчанию) ---
+  // --- активные цвета слоёв (восстановлено из «прошлой сессии») ---
   const color = (id) => cs(doc.getElementById(id)).color;
   check("liq active gold", color("liq-toggle") === "rgb(255, 209, 102)", color("liq-toggle"));
   check("cvd active violet", color("cvd-toggle") === "rgb(167, 139, 250)", color("cvd-toggle"));

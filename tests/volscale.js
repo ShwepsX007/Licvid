@@ -5,7 +5,7 @@
  *   - прямоугольник: $100 — кит (тепловая заливка + подпись $100 цветом
  *     #1a1200), $50 — подписанный по стороне (циан), $1 — чип без подписи;
  *   - CVD: треугольники рисуются от $50/$200 (без масштаба минимум $1000);
- *   - OI: $2K — тир1 (r=11, подпись $2K), $600 — мини (r=6, без подписи);
+ *   - OI: $2K — тир1 (r=9, подпись $2K), $600 — мини (r=6, без подписи);
  *   - лента: $100 — whale-строка, остальные — обычные.
  *  Плюс проверяем новые цвета swapped-фигур: рост — зелёный, падение — красный.
  *
@@ -131,6 +131,9 @@ async function main() {
       } catch (e) { /* ignore */ }
       try {
         win.localStorage.setItem("liqscope.chartSymbol", "GRAM_USDT");
+        win.localStorage.setItem("liqscope.devLayers", "1");
+        ["liqscope.liqEnabled", "liqscope.cvdEnabled", "liqscope.oiEnabled",
+         "liqscope.profileEnabled"].forEach((k) => win.localStorage.setItem(k, "1"));
       } catch (e) { /* ignore */ }
       win.matchMedia = () => ({ matches: false, media: "", onchange: null,
         addListener() {}, removeListener() {}, addEventListener() {},
@@ -222,7 +225,7 @@ async function main() {
   check("cvd sell labeled $200", hasText("$200", CVD_SELL_TEXT));
 
   // OI: тир1 от $1K вместо $1M
-  check("oi tier1 r=11", hasR(11), JSON.stringify(radii));
+  check("oi tier1 r=9", hasR(9), JSON.stringify(radii));
   check("oi $2K green-dark 8px",
     hasText("$2K", OI_UP_TEXT) && ofont("$2K", OI_UP_TEXT) === "8px",
     ofont("$2K", OI_UP_TEXT));

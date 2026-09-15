@@ -236,25 +236,36 @@ async function part1() {
     });
     win.HTMLCanvasElement.prototype.getContext = () => ctx;
   }
+  const mkBeforeParse = (devBypass) => (win) => {
+    stubCanvas(win);
+    win.matchMedia = () => ({ matches: false, media: "", onchange: null,
+      addListener() {}, removeListener() {},
+      addEventListener() {}, removeEventListener() {}, dispatchEvent() { return false; } });
+    if (!win.ResizeObserver) {
+      win.ResizeObserver = function () {
+        return { observe() {}, unobserve() {}, disconnect() {} };
+      };
+    }
+    win.WebSocket = require("ws");
+    // в jsdom нет fetch — пустая заглушка, чтобы скрипты не падали
+    win.fetch = async () => ({ ok: true, status: 200, json: async () => ({}) });
+    // dev-обход шлюза авторизации: в jsdom нет сессии пользователя,
+    // а тест проверяет сами окна/переключатели
+    if (devBypass) {
+      try {
+        win.localStorage.setItem("liqscope.devLayers", "1");
+        // по умолчанию окна выключены — восстанавливаем «прошлые» выборы
+        ["liqscope.paneLiq", "liqscope.paneCvd", "liqscope.paneOi"].forEach((k) =>
+          win.localStorage.setItem(k, "1"));
+      } catch (e) { /* ignore */ }
+    }
+  };
   const dom = await JSDOM.fromURL(URL_BASE + "/terminal", {
     runScripts: "dangerously",
     resources: "usable",
     pretendToBeVisual: true,
     virtualConsole: vc,
-    beforeParse(win) {
-      stubCanvas(win);
-      win.matchMedia = () => ({ matches: false, media: "", onchange: null,
-        addListener() {}, removeListener() {},
-        addEventListener() {}, removeEventListener() {}, dispatchEvent() { return false; } });
-      if (!win.ResizeObserver) {
-        win.ResizeObserver = function () {
-          return { observe() {}, unobserve() {}, disconnect() {} };
-        };
-      }
-      win.WebSocket = require("ws");
-      // в jsdom нет fetch — пустая заглушка, чтобы скрипты не падали
-      win.fetch = async () => ({ ok: true, status: 200, json: async () => ({}) });
-    },
+    beforeParse: mkBeforeParse(true),
   });
   const win = dom.window;
   const doc = win.document;
@@ -306,7 +317,26 @@ async function part1() {
   check("повторный клик вернул окно", !$$("#ind-pane-cvd").classList.contains("hidden"));
 
   check("ошибок страницы нет", errors.length === 0, errors.join(" | "));
-  dom.window.close();
+  // первое окно не закрываем раньше времени: его WS продолжит сыпать
+  // сообщения в мёртвый document и уронит процесс
+
+  // --- шлюз: анониму слои недоступны вообще ---
+  const vcAnon = new VirtualConsole();
+  const domAnon = await JSDOM.fromURL(URL_BASE + "/terminal", {
+    runScripts: "dangerously",
+    resources: "usable",
+    pretendToBeVisual: true,
+    virtualConsole: vcAnon,
+    beforeParse: mkBeforeParse(false),
+  });
+  await new Promise((r) => setTimeout(r, 4000));
+  const docAnon = domAnon.window.document;
+  const callAnon = docAnon.getElementById("layer-call");
+  check("шлюз: «Слои» скрыты у анонима", !!callAnon && callAnon.classList.contains("hidden"));
+  const panesAnon = docAnon.getElementById("indicator-panes");
+  check("шлюз: индикаторных окон у анонима нет",
+    !!panesAnon && panesAnon.classList.contains("all-hidden"));
+  domAnon.window.close();
 }
 
 (async () => {

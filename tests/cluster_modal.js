@@ -124,6 +124,9 @@ async function main() {
       } catch (e) { /* ignore */ }
       try {
         win.localStorage.setItem("liqscope.chartSymbol", "BTC_USDT");
+        win.localStorage.setItem("liqscope.devLayers", "1");
+        ["liqscope.liqEnabled", "liqscope.cvdEnabled", "liqscope.oiEnabled",
+         "liqscope.profileEnabled"].forEach((k) => win.localStorage.setItem(k, "1"));
       } catch (e) { /* ignore */ }
       win.matchMedia = () => ({ matches: false, media: "", onchange: null,
         addListener() {}, removeListener() {}, addEventListener() {},

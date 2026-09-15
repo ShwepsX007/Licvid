@@ -1338,6 +1338,7 @@ async def api_health():
         "clients": len(hub.clients),
         "liquidations_in_memory": len(LIQUIDATIONS),
         "demo": DEMO_MODE,
+        "tg": tg_bot.poll_status(),
         "config": {
             "symbols_limit": SYMBOLS_LIMIT,
             "exchanges": EXCHANGES,

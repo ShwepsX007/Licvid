@@ -80,7 +80,9 @@ class TelegramBot:
         self._menu_msg: Dict[int, int] = {}         # chat_id -> последнее меню
         self.alerts_market_fn: Optional[Callable[[], Any]] = None
         self._poll_fails = 0          # подряд неудачных getUpdates
-        self._conflict_warned = False # уже сообщили админам про 409
+        self._conflict_warned_at = 0.0  # когда последний раз слали 409-предупреждение
+        self._conflict_mode = False     # конфликт: короткий опрос, быстрые повторы
+        self._conflict_ok_streak = 0    # подряд успешных getUpdates в конфликт-режиме
 
     @property
     def enabled(self) -> bool:
@@ -651,7 +653,9 @@ class TelegramBot:
             try:
                 res = await self._call("getUpdates", {
                     "offset": self._offset,
-                    "timeout": 50,
+                    # в конфликт-режиме короткие опросы: быстрее перехватываем
+                    # апдейты в окне, пока «чужой» процесс их не забрал
+                    "timeout": 5 if self._conflict_mode else 50,
                     "allowed_updates": ["message", "callback_query", "my_chat_member"],
                 })
                 if not res or not res.get("ok"):
@@ -666,17 +670,40 @@ class TelegramBot:
                              "кнопки и команды опять отвечают", fails)
                     fails = 0
                     self._poll_fails = 0
+                if self._conflict_mode:
+                    self._conflict_ok_streak += 1
+                    if self._conflict_ok_streak >= 3:
+                        self._conflict_mode = False
+                        self._conflict_ok_streak = 0
+                        log.info("конфликт-режим снят: getUpdates стабилен, "
+                                 "возвращаем обычный опрос")
                 for upd in res.get("result") or []:
                     self._offset = int(upd["update_id"]) + 1
                     try:
                         await self._on_update(upd)
                     except Exception as e:
                         log.warning("update %s: %s", upd.get("update_id"), e)
+                if self._conflict_mode:
+                    await asyncio.sleep(0.5)
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 log.warning("poll: %s", e)
                 await asyncio.sleep(3)
+
+    def poll_status(self) -> Dict[str, Any]:
+        """Срез состояния опроса getUpdates для /api/health.
+
+        conflict=true — токен параллельно дёргает чужой процесс: команды
+        и кнопки могут приходить ему, а не нам.
+        """
+        return {
+            "enabled": bool(self.token),
+            "running": bool(self.running),
+            "fails": self._poll_fails,
+            "conflict": bool(self._conflict_mode),
+            "offset": int(self._offset),
+        }
 
     async def _poll_fail_step(self, res: Optional[dict]) -> float:
         """Классифицирует ошибку getUpdates, возвращает секунды до повтора.
@@ -704,8 +731,10 @@ class TelegramBot:
             else:
                 reason = ("этот токен параллельно опрашивает другой процесс — "
                           "старый бот или вторая копия сервиса")
-            if not self._conflict_warned:
-                self._conflict_warned = True
+            self._conflict_mode = True
+            self._conflict_ok_streak = 0
+            if time.time() - self._conflict_warned_at >= 1800:
+                self._conflict_warned_at = time.time()
                 log.error("getUpdates 409: %s. Бот отправляет уведомления, но НЕ видит "
                           "кнопки и команды. Уберите конфликтующий процесс (один токен — "
                           "ровно один опрашиватель) и перезапустите сервис.", reason)
@@ -713,21 +742,34 @@ class TelegramBot:
             elif self._poll_fails % 30 == 0:
                 log.warning("конфликт getUpdates продолжается (%d сбоев): %s",
                             self._poll_fails, desc)
-            return 1.0
+            return 0.5
         if self._poll_fails % 10 == 1:
             log.warning("getUpdates недоступен (%d сбоев подряд): %s",
                         self._poll_fails, desc or "нет ответа")
         return 2.0
 
     async def _notify_conflict(self, reason: str) -> None:
-        """Одноразово предупреждаем админов: почему бот не отвечает на команды."""
+        """Предупреждаем админов: почему бот не отвечает на команды.
+
+        Повторяем каждые ~30 минут, пока конфликт жив, — одна разовая
+        нотификация теряется, а проблема чинится только на сервере.
+        """
         text = (
             "🚨 <b>Конфликт бота</b>\n"
             "Я отправляю сигналы, но не вижу кнопки и команды: "
             f"{reason}.\n\n"
-            "Один токен может опрашивать только один процесс. "
-            "Остановите старый бот (вторую копию) и перезапустите сервис — "
-            "меню снова заработает."
+            "Признак призрачного процесса: сигналы приходят даже после того, "
+            "как на сайте выключены ВСЕ уведомления — шлёт их старая копия бота, "
+            "которая всё ещё висит на сервере.\n"
+            "Один токен может опрашивать только один процесс.\n"
+            "На сервере:\n"
+            "• <code>ps aux | grep -i tg_bot</code> — ищем дубли (особенно "
+            "запущенные давно);\n"
+            "• <code>systemctl list-units | grep -i liq</code> — нет ли второго "
+            "сервиса;\n"
+            "• убили лишнее — <code>systemctl restart liqscope</code>, меню "
+            "оживёт.\n"
+            "Напоминаю каждые ~30 минут, пока конфликт не исчезнет."
         )
         for tg_id in self._admin_tg_ids():
             try:
@@ -736,6 +778,21 @@ class TelegramBot:
                 log.warning("conflict notify %s: %s", tg_id, e)
 
     async def _on_update(self, upd: dict) -> None:
+        await self._route_message(upd)
+        # «Плашка» от кнопки или команды: удаляем эхо пользователя, чтобы в
+        # чате не копился мусор — живым остаётся только сообщение-меню.
+        msg = upd.get("message") or {}
+        text = (msg.get("text") or "").strip()
+        chat = msg.get("chat") or {}
+        chat_id = chat.get("id")
+        message_id = msg.get("message_id")
+        if (text and message_id and chat_id
+                and str(chat.get("type") or "private") == "private"
+                and not (msg.get("from") or {}).get("is_bot")):
+            await self._call("deleteMessage",
+                             {"chat_id": chat_id, "message_id": int(message_id)})
+
+    async def _route_message(self, upd: dict) -> None:
         if "my_chat_member" in upd:
             await self._on_my_chat_member(upd["my_chat_member"])
             return

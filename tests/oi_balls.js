@@ -1,7 +1,7 @@
 /** OI-шарики и CVD-треугольники: формы, тиры, цвета.
  *
- *  OI-шарики: мини (<$1M, r=6, без подписи), тиры 1/2/3 (r=11/13.42/15.95,
- *  кегль 8/9/10, свечение 8/12/16), цвет — зелёная/красная шкала по тиру.
+ *  OI-шарики: мини (<$1M, r=6, без подписи), тиры 1/2/3 (r=9/9.9/10.8,
+ *  кегль 8/9/10, свечение 6/9/12), цвет — зелёная/красная шкала по тиру.
  *  CVD-треугольники: фиолет/оранж, размер от p90, подпись когда влезает.
  *  Рекордер пишет вызовы cluster-canvas: шарики опознаём по дугам arc()
  *  с OI-заливками, треугольники — по путям из 3 точек с CVD-заливками,
@@ -151,6 +151,13 @@ async function runCase(candles) {
         else if (u.indexOf("/api/liquidations") === 0) body = { liquidations: [], total: 0 };
         return { ok: true, status: 200, json: async () => body };
       };
+      // слои по умолчанию выключены и нужны только авторизованным —
+      // в тесте включаем dev-обход и «прошлые» выборы, чтобы шарики рисовались
+      try {
+        win.localStorage.setItem("liqscope.devLayers", "1");
+        win.localStorage.setItem("liqscope.oiEnabled", "1");
+        win.localStorage.setItem("liqscope.cvdEnabled", "1");
+      } catch (e) { /* ignore */ }
     },
   });
 
@@ -187,10 +194,11 @@ async function main() {
 
   check("all 4 balls drawn", balls.length >= 4, balls.length);
   check("mini r=6", hasR(6), JSON.stringify(radii));
-  check("tier1 r=11", hasR(11));
-  check("tier2 r=13.42", hasR(13.42));
-  check("tier3 r=15.95", hasR(15.95));
-  check("growth: max>14", Math.max.apply(null, radii.concat([0])) > 14);
+  check("tier1 r=9", hasR(9));
+  check("tier2 r=9.9", hasR(9.9));
+  check("tier3 r=10.8", hasR(10.8));
+  check("growth: 10<max<=15", Math.max.apply(null, radii.concat([0])) > 10 &&
+        Math.max.apply(null, radii.concat([0])) <= 15);
   check("mini unlabeled", ovals.indexOf("$500K") === -1, JSON.stringify(ovals));
   check("tier1 labeled $2M", ovals.indexOf("$2M") !== -1);
   check("tier2 labeled $10M", ovals.indexOf("$10M") !== -1);
@@ -200,9 +208,9 @@ async function main() {
   check("tier3 font 10px", ofont("$50M") === "10px", ofont("$50M"));
   check("down text red-dark", ocolor("$2M") === "#1c060d" && ocolor("$50M") === "#1c060d");
   check("up text green-dark", ocolor("$10M") === "#04160b");
-  check("glow 8 present", oglows.indexOf(8) !== -1, JSON.stringify(oglows));
+  check("glow 6 present", oglows.indexOf(6) !== -1, JSON.stringify(oglows));
+  check("glow 9 present", oglows.indexOf(9) !== -1);
   check("glow 12 present", oglows.indexOf(12) !== -1);
-  check("glow 16 present", oglows.indexOf(16) !== -1);
   check("tier2 green", balls.some((t) => t.fill === oiFill(UP_SHADES[2])),
     JSON.stringify(balls.map((t) => t.fill)));
   check("tier3 red-hot", balls.some((t) => t.fill === oiFill(DOWN_SHADES[3])));

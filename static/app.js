@@ -30,16 +30,18 @@
         availableExchanges: [],
         customSymbols: [],
         soundEnabled: false,
-        profileEnabled: true,   // профиль ликвидаций по ценам (полосы на графике)
-        liqEnabled: true,       // шарики ликвидаций на графике
-        cvdEnabled: true,       // CVD-стрелки: перевес тейкер-покупок/продаж в свече
+        profileEnabled: false,  // профиль ликвидаций по ценам (полосы на графике)
+        liqEnabled: false,      // шарики ликвидаций на графике
+        cvdEnabled: false,      // CVD-стрелки: перевес тейкер-покупок/продаж в свече
         cvdBars: 0,
-        oiEnabled: true,        // OI-шарики: рост/падение открытого интереса за свечу
+        oiEnabled: false,       // OI-шарики: рост/падение открытого интереса за свечу
         oiBars: 0,
         // индикаторные окна под графиком (те же данные, что в кабинете)
-        paneLiq: true,
-        paneCvd: true,
-        paneOi: true,
+        paneLiq: false,
+        paneCvd: false,
+        paneOi: false,
+        userLoggedIn: false,    // слои и окна доступны только зарегистрированным
+        layersAllowed: false,   // userLoggedIn || dev-обход для тестов
         symbols: [],
         details: {},
         prices: {},
@@ -1403,13 +1405,14 @@
     };
     const OI_MAX_BALLS = 60;
     // Тиры OI по |Δ|: мелочь (<$1M × масштаб) — мини-значок без подписи,
-    // крупняк — больше, ярче и с сильным свечением.
+    // крупняк — чуть больше и с более сильным свечением. Размер нарочно
+    // сдержанный (потолок вдвое ниже прежнего): главную работу делает цвет.
     const OI_TIER_MIN = 1000000;
     const OI_TIER_STYLE = [
         null,   // 0 — мини
-        { mult: 1.0,  font: 0, glow: 8  },   // $1M+
-        { mult: 1.22, font: 1, glow: 12 },   // $5M+
-        { mult: 1.45, font: 2, glow: 16 },   // $20M+
+        { mult: 1.0,  font: 0, glow: 6  },   // $1M+
+        { mult: 1.10, font: 1, glow: 9 },    // $5M+
+        { mult: 1.20, font: 2, glow: 12 },   // $20M+
     ];
     function oiTier(abs, k) {
         k = k || 1;
@@ -1497,8 +1500,8 @@
             if (tier > 0) {
                 ctx.font = "bold 8px 'JetBrains Mono', monospace";
                 const tw8 = ctx.measureText(val).width;
-                if (tw8 <= 1.9 * 26 - 5) {
-                    r = Math.max(11, (tw8 + 5) / 1.9);
+                if (tw8 <= 1.9 * 18 - 5) {
+                    r = Math.min(15, Math.max(9, (tw8 + 5) / 1.9));
                     const sizes = [8, 7, 6.5];
                     for (let f = 0; f < sizes.length; f++) {
                         ctx.font = "bold " + sizes[f] + "px 'JetBrains Mono', monospace";
@@ -1511,7 +1514,7 @@
                 const st = OI_TIER_STYLE[tier];
                 fs = Math.min(10, fs + st.font);
                 ctx.font = "bold " + fs + "px 'JetBrains Mono', monospace";
-                r = Math.min(30, Math.max(r * st.mult, (ctx.measureText(val).width + 5) / 1.9));
+                r = Math.min(15, Math.max(r * st.mult, (ctx.measureText(val).width + 5) / 1.9));
             }
             const gap = 10 + tier * 2;   // чем крупнее, тем дальше от свечи
             const cy = up ? yRef - gap - r : yRef + gap + r;
@@ -2818,7 +2821,32 @@
     }
 
     // --- Слои графика: ликвидации / профиль / CVD ----------------------------
-    function setupLayerToggles() {
+    // По умолчанию при входе на график все слои выключены, а сами переключатели
+    // видны только зарегистрированным пользователям (авторизация сайта).
+    const LAYER_KEYS = ["profileEnabled", "liqEnabled", "cvdEnabled", "oiEnabled",
+                        "paneLiq", "paneCvd", "paneOi"];
+
+    async function applyAuthGate() {
+        let user = null;
+        try {
+            const r = await fetch("/api/auth/me", { credentials: "same-origin" });
+            const d = await r.json();
+            user = (d && d.user) || null;
+        } catch (e) { user = null; }
+        state.userLoggedIn = !!user;
+        // dev-обход для автотестов без Telegram-авторизации
+        let dev = false;
+        try { dev = localStorage.getItem("liqscope.devLayers") === "1"; } catch (e) { /* ignore */ }
+        state.layersAllowed = state.userLoggedIn || dev;
+        if (!state.layersAllowed) {
+            LAYER_KEYS.forEach((k) => { state[k] = false; });
+            const call = $("layer-call");
+            if (call) call.classList.add("hidden");
+        }
+        return state.layersAllowed;
+    }
+
+    function setupLayerToggles(allowed) {
         const defs = [
             { el: profileToggle, skey: "profileEnabled", store: "liqscope.profileEnabled",
               on: "chart.profile_on", off: "chart.profile_off" },
@@ -2838,11 +2866,15 @@
         ];
         defs.forEach((d) => {
             if (!d.el) return;
-            try {
-                const v = localStorage.getItem(d.store);
-                if (v === "0") state[d.skey] = false;
-                else if (v === "1") state[d.skey] = true;
-            } catch (e) { /* ignore */ }
+            if (allowed) {
+                try {
+                    const v = localStorage.getItem(d.store);
+                    if (v === "0") state[d.skey] = false;
+                    else if (v === "1") state[d.skey] = true;
+                } catch (e) { /* ignore */ }
+            } else {
+                state[d.skey] = false;
+            }
             const paint = () => {
                 d.el.classList.toggle("active", state[d.skey]);
                 d.el.title = I18n.t(state[d.skey] ? d.on : d.off);
@@ -2906,6 +2938,12 @@
     }
 
     function setupIndicatorPanes() {
+        // незарегистрированным окна не положены вовсе
+        if (!state.layersAllowed) {
+            const box = $("indicator-panes");
+            if (box) box.classList.add("all-hidden");
+            return;
+        }
         Object.keys(IND_PANES).forEach((kind) => {
             const P = IND_PANES[kind];
             // крестик на окне = выключить соответствующую кнопку в «Слоях»
@@ -4085,9 +4123,15 @@
         fetchOI();
         setInterval(paintCvdBox, 15000);   // окно CVD медленно ползёт
         setInterval(renderTickIndicator, 1000);
-        setupLayerToggles();
-        setupLayerPop();   // попап кнопок слоёв по «☰ Слои»
-        setupIndicatorPanes();   // окна LIQ/CVD/OI под графиком + крестики
+        // Слои по умолчанию выключены и доступны только зарегистрированным:
+        // сначала узнаём, кто смотрит график, потом вешаем переключатели.
+        applyAuthGate().then((allowed) => {
+            setupLayerToggles(allowed);
+            setupLayerPop();   // попап кнопок слоёв по «☰ Слои»
+            setupIndicatorPanes();   // окна LIQ/CVD/OI под графиком + крестики
+            updateMarkers();
+            queueRedraw();
+        });
         setupFeedTabs();   // эфир: ликвидации / CVD / OI
         setupExchHealth(); // выпадающий список бирж в шапке
         setupChartToggle();

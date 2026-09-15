@@ -539,8 +539,8 @@ class BotMenuTest(unittest.TestCase):
         self.assertIn("Лента", text)
         self.assertIn('<a href="https://liqscope.online"', text)
 
-    def test_poll_conflict_notifies_admins_once(self):
-        """409 Conflict: шлём уведомление админам один раз и быстро повторяем."""
+    def test_poll_conflict_notifies_admins(self):
+        """409 Conflict: уведомление админам сразу, затем не чаще раза в ~30 мин."""
         sent = []
 
         async def fake_send(chat_id, text, markup=None, parse="HTML", silent=False):
@@ -552,13 +552,41 @@ class BotMenuTest(unittest.TestCase):
         res409 = {"ok": False, "error_code": 409,
                   "description": "Conflict: terminated by other getUpdates request"}
         sleep1 = asyncio.run(self.bot._poll_fail_step(res409))
-        self.assertEqual(sleep1, 1.0)
+        self.assertEqual(sleep1, 0.5)          # конфликт: быстрые повторы
         self.assertEqual([c for c, _t in sent], [1001])  # только админ
         self.assertIn("Конфликт", sent[0][1])
-        # повторно не спамим
+        self.assertIn("призрачного", sent[0][1])  # диагноз про старую копию
+        self.assertTrue(self.bot._conflict_mode)
+        # сразу повторно не спамим
         asyncio.run(self.bot._poll_fail_step(res409))
         self.assertEqual(len(sent), 1)
         self.assertTrue(self.bot.running)
+        # через 30 минут напоминание приходит снова
+        self.bot._conflict_warned_at -= 2000
+        asyncio.run(self.bot._poll_fail_step(res409))
+        self.assertEqual(len(sent), 2)
+
+    def test_private_command_echo_deleted(self):
+        """Эхо команды/кнопки из лички вычищается — в чате живёт только меню."""
+        calls = []
+
+        async def noop_route(upd):
+            pass
+
+        async def fake_call(method, payload=None):
+            calls.append((method, payload or {}))
+            return {"ok": True}
+
+        self.bot._route_message = noop_route  # type: ignore
+        self.bot._call = fake_call  # type: ignore
+        asyncio.run(self.bot._on_update({
+            "message": {"message_id": 77,
+                        "chat": {"id": 1001, "type": "private"},
+                        "from": {"id": 1001},
+                        "text": "Плиты"},
+        }))
+        self.assertEqual(calls, [("deleteMessage",
+                                  {"chat_id": 1001, "message_id": 77})])
 
     def test_poll_conflict_webhook_reason(self):
         async def fake_send(chat_id, text, markup=None, parse="HTML", silent=False):

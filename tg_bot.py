@@ -1996,6 +1996,9 @@ class TelegramBot:
             rows.append([{"text": "✉️ Подтвердить почту", "callback_data": "a:vmail"}])
         if admin:
             rows.append([{"text": "★ Админка", "callback_data": "nav:admin"}])
+        # Партнёрская ссылка кнопкой: url-кнопку Telegram подсвечивает как ссылку
+        rows.append([{"text": "💠 Торговать на Gate — скидка на комиссию",
+                      "url": gate_url()}])
         return {"inline_keyboard": rows}
 
     def _commands_text(self, user: dict) -> str:
@@ -2329,8 +2332,12 @@ class TelegramBot:
             tm = "--:--:--"
         sym = str(x.get("symbol") or "?").replace("_", "/")
         mark = "🔴" if x.get("side") == "SELL" else "🟢"
+        # строка ленты — обычный текст (не <pre>), значит биржу можно сделать
+        # ссылкой: Gate ведёт на партнёрскую, остальные — просто название
+        ex_key = x.get("exchange")
         return (f"{tm} {mark} {_esc(sym)}  "
-                f"{self.fmt_usd(x.get('usd'))}  {_esc(self.ex_name(x.get('exchange')))}")
+                f"{self.fmt_usd(x.get('usd'))}  "
+                f"{ex_link(ex_key, fallback=self.ex_name(ex_key))}")
 
     def _liq_text(self, limit: int = 3600) -> str:
         """Лента: максимум событий, которые влезают в сообщение Telegram."""

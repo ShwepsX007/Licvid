@@ -674,7 +674,11 @@ class BotMenuTest(unittest.TestCase):
         """Кнопка «☰ Меню» открывает экран с кнопками вместо ручного /start."""
         text, kb = self.bot._screen(self.user, "help")
         self.assertIn("Меню", text)
-        print(text)
+        # партнёрская ссылка Gate — отдельной url-кнопкой прямо в меню
+        gate = [b for row in kb["inline_keyboard"] for b in row
+                if str(b.get("url") or "").startswith("https://www.gate.com/")]
+        self.assertTrue(gate, kb)
+        self.assertIn("VLFCAVWMBW", gate[0]["url"])
         datas = _datas(kb)
         self.assertIn("nav:home", datas)                 # это и есть /start
         self.assertIn("cabinet", datas)

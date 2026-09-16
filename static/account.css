@@ -178,6 +178,9 @@ body[data-page="cabinet"] .wrap { max-width: min(1600px, 96vw); }
     border-radius: 10px; padding: 10px 14px; font-size: 0.82rem; color: var(--gold);
 }
 .verify-bar .btn { padding: 6px 12px; font-size: 0.8rem; }
+.partner-line { margin-top: 22px; font-size: 0.82rem; }
+.partner-line a { color: #7fe3c0; font-weight: 700; text-decoration: none; }
+.partner-line a:hover { text-decoration: underline; }
 .tg-card { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
 .tg-card .meta { margin-bottom: 8px; }
 .badge-tg { color: var(--tg); border-color: rgba(41, 171, 226, 0.45); }

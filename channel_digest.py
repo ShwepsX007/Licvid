@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any, Dict, List, Optional
 
 from hour_board import hour_hhmm, tz_offset
@@ -599,6 +600,28 @@ def build_board(board: Optional[dict], lang: str = "ru") -> str:
         return ""
 
 
+_TAG_RE = re.compile(r"</?(pre|code|b|i|a|u|s)(?:\s[^>]*)?>", re.I)
+
+
+def _close_tags(text: str) -> str:
+    """Закрывает теги, оставшиеся открытыми после обрезки по лимиту.
+
+    Telegram отвергает сообщение с незакрытым <pre>/<a> («can't parse
+    entities»), а обрезка длинного поста — обычное дело на горячем рынке.
+    """
+    stack: List[str] = []
+    for m in _TAG_RE.finditer(text or ""):
+        tag = m.group(1).lower()
+        if m.group(0).startswith("</"):
+            if tag in stack:
+                stack.reverse()
+                stack.remove(tag)
+                stack.reverse()
+        else:
+            stack.append(tag)
+    return text + "".join(f"</{t}>" for t in reversed(stack))
+
+
 def _pack(parts: List[str], tail: str, limit: int = CAPTION_LIMIT) -> str:
     chunks = [p for p in parts if p]
     def join(cs: List[str]) -> str:
@@ -610,7 +633,14 @@ def _pack(parts: List[str], tail: str, limit: int = CAPTION_LIMIT) -> str:
     while len(text) > limit and len(chunks) > 1:
         chunks.pop()
         text = join(chunks)
-    return text[:limit]
+    if len(text) > limit:
+        cut = text[:limit]
+        # режем по целой строке: половина строки таблицы читается как сбой
+        nl = cut.rfind("\n")
+        if nl > limit // 2:
+            cut = cut[:nl]
+        text = _close_tags(cut)
+    return text
 
 
 def _facts(snap: dict, lang: str = "ru") -> dict:

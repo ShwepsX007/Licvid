@@ -937,6 +937,66 @@ def _cvd_window(symbol: str, sec: float = 14400.0) -> Optional[float]:
     return None
 
 
+async def hour_flows(need: int = 5) -> Dict[str, dict]:
+    """Часовые потоки по монетам: {монета: {начало часа: {cvd, vol, has_cvd}}}.
+
+    Объём часа в USDT и тейкер-дельта — из часовых свечей (Binance/Bybit/OKX,
+    что отдаст feed). Это база для строки «CVD за 4ч» и для доли CVD в объёме
+    рынка по каждому часу: без свечей доля не считается, и пост остаётся с
+    ликвидациями.
+    """
+    try:
+        cells = BOARD.hours(need)
+    except Exception as e:
+        log.debug("потоки: часы не собрались: %s", e)
+        cells = []
+    volume: Dict[str, float] = {}
+    for hr in cells:
+        for sym, usd in (hr.get("coins") or {}).items():
+            volume[sym] = volume.get(sym, 0.0) + float(usd)
+    coins = [s for s, _v in sorted(volume.items(), key=lambda kv: kv[1],
+                                   reverse=True)[:16]]
+    if not coins:
+        return {}
+    sem = asyncio.Semaphore(5)
+
+    async def one(sym: str):
+        async with sem:
+            try:
+                entry = await asyncio.wait_for(get_candles(sym, 60), timeout=20)
+            except Exception as e:
+                log.debug("потоки %s: %s", sym, e)
+                return sym, None
+            return sym, entry
+
+    out: Dict[str, dict] = {}
+    for sym, entry in await asyncio.gather(*(one(s) for s in coins)):
+        rows = (entry or {}).get("candles") or []
+        by_hour: Dict[int, dict] = {}
+        for c in rows[-8:]:
+            try:
+                h = int(float(c.get("time") or 0))
+            except (TypeError, ValueError):
+                continue
+            if not h:
+                continue
+            cell = by_hour.setdefault(h, {"cvd": 0.0, "vol": 0.0,
+                                          "has_cvd": False})
+            try:
+                cell["vol"] += float(c.get("volume") or 0)
+            except (TypeError, ValueError):
+                pass
+            if c.get("cvd") is not None:
+                try:
+                    cell["cvd"] += float(c["cvd"])
+                except (TypeError, ValueError):
+                    continue
+                cell["has_cvd"] = True
+        if by_hour:
+            out[sym] = by_hour
+    return out
+
+
 async def build_channel_digest() -> dict:
     """Снимок рынка за 4ч для поста в канал: лидеры, биржи, OI, CVD."""
     from channel_digest import collect_digest
@@ -966,7 +1026,8 @@ async def build_channel_digest() -> dict:
     # Часовой стенд (ликвы по календарным часам, перекос CVD, OI за каждый час)
     # считается по накопленной истории: в посте он идёт сразу после шапки.
     try:
-        snap["board"] = build_snapshot(BOARD, OI, now=now)
+        flows = await hour_flows()
+        snap["board"] = build_snapshot(BOARD, OI, now=now, flows=flows)
     except Exception as e:
         log.warning("стенд для поста не собрался: %s", e)
     return snap

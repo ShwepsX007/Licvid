@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import unittest
 
@@ -10,7 +11,8 @@ sys.path.insert(0, HERE)
 
 from channel_digest import (  # noqa: E402
     CAPTION_LIMIT, VARIANT_COUNT, _dwidth, _headlines, _mono, collect_digest,
-    format_headline, list_images, money, pick_image, render_post, short_money,
+    format_headline, list_images, money, pick_image, post_has_hours,
+    render_post, short_money,
 )
 
 
@@ -20,12 +22,17 @@ def _ev(sym, usd, side, exch, ts, n=1):
 
 
 def _board(total=4_640_000, count=5):
-    """Часовой стенд: ровно те данные, из которых собирается пост."""
-    base = 1_000_000 - 1_000_000 % 3600      # начало часа в секундах
-    hours = [(base - i * 3600, pct) for i, pct in
-             enumerate((-0.42, 0.31, -0.18, 0.05))]
+    """Часовой стенд: ровно те данные, из которых собирается пост.
+
+    Часы идут от старого к новому — как их отдаёт build_snapshot; сам пост
+    разворачивает ряд и показывает свежий час первым.
+    """
+    base = 986_400                            # 13:00 МСК (10:00 UTC)
+    pcts = (-4.2, 3.1, -1.8, 0.5)              # ход OI по часам, %
+    shares = (4.2, 2.7, -3.1, -0.3)            # CVD как доля объёма рынка, %
+    hours = [(base - (3 - i) * 3600, pcts[i], shares[i]) for i in range(4)]
     top = []
-    for i, (h, pct) in enumerate(hours):
+    for i, (h, _pct, _share) in enumerate(hours):
         top.append({
             "h": h, "tz": 3 * 3600, "total": 1_200_000 - i * 100_000, "count": 2,
             "items": [
@@ -39,14 +46,30 @@ def _board(total=4_640_000, count=5):
                  "exchange": "gate"},
             ],
         })
+    out_hours = []
+    for i, (h, pct, share) in enumerate(hours):
+        out_hours.append({
+            "h": h, "tz": 3 * 3600, "total": 1_200_000 - i * 100_000, "count": 2,
+            "longs": 700_000.0, "shorts": 500_000.0, "bias": "long",
+            "coins": [{"symbol": "BTC_USDT", "usd": 2_400_000 - i * 100_000,
+                       "flow": None, "pct": 31.0 - i * 4.0},
+                      {"symbol": "ETH_USDT", "usd": 1_100_000 - i * 50_000,
+                       "flow": None, "pct": -12.0 + i},
+                      {"symbol": "SOL_USDT", "usd": 250_000, "flow": None,
+                       "pct": 6.0 + i}],
+            "cvd": {}, "cvd_sum": 0.0,
+            "oi": {"value": 1.2e9, "pct": pct},
+            "liq_pct": None if i == 0 else 8.0 - i,
+            "count_pct": None, "vol_usd": 20_000_000.0,
+            "cvd_net": 900_000.0 - i * 300_000, "cvd_share": share,
+        })
     return {
         "tz": 3, "span_hours": 4, "total_usd": total, "count": count,
         "prev_total": 4_000_000, "diff_pct": 16.0,
-        "hours": [{"h": h, "total": 1_200_000, "count": 2, "coins": [],
-                   "bias": "long", "oi": {"value": 1.2e9, "pct": pct}}
-                  for h, pct in hours],
-        "top_hours": top,
-        "oi_hours": [{"h": h, "pct": pct, "value": 1.2e9} for h, pct in hours],
+        "cvd_4h": 2_400_000.0, "cvd_4h_share": 3.6, "vol_4h": 66_000_000.0,
+        "hours": out_hours, "top_hours": top,
+        "oi_hours": [{"h": h, "pct": pct, "value": 1.2e9}
+                     for h, pct, _sh in hours],
         "oi_now_usd": 1_200_000_000, "oi_4h_pct": -1.2,
     }
 
@@ -92,33 +115,63 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(len(set(texts)), VARIANT_COUNT)
         for t in texts:
             self.assertIn("BTC", t)
-            self.assertIn("Binance", t)
             self.assertIn("LiqScope", t)
             self.assertIn("https://liqscope.online", t)
             self.assertIn("t.me/LiqScopeBot", t)
             self.assertLessEqual(len(t), CAPTION_LIMIT)
             self.assertIn("OI", t)
-            self.assertIn("<code>", t)
-            self.assertTrue(any(ch in t for ch in "💥🔴🟢🐋📊🌊🏛🔥⚡🏆🌙🌡⏱❓📋📉📈"))
+            self.assertIn("🕘", t)                 # часы в подписи
+            self.assertNotIn("<pre>", t)           # рамки с цифрами больше нет
+            self.assertTrue(any(ch in t for ch in "💥🔴🟢🐋📊🌊🏛🔥⚡🕘🌙🌡⏱❓📋📉📈"))
 
-    def test_one_post_carries_top7_hours(self):
-        """Один пост: цифры не дублируются, топ-7 живёт в той же подписи."""
+    def test_one_post_carries_hours(self):
+        """Один пост: все четыре часа внутри подписи, рамочного окна нет."""
         snap = collect_digest(self.events, now=self.now, oi=self.oi, cvd=self.cvd)
         snap["board"] = _board()
         t = render_post(snap, 0)
         self.assertEqual(t.count("💥 <b>$4.64M</b>"), 1)   # касса ровно раз
-        self.assertIn("🏆", t)
-        # все часы представлены: сколько влезло полными таблицами, остальные —
-        # сжатой строкой (три удара часа), чтобы час не пропал из поста
-        self.assertEqual(t.count("<b>🏆"), 4)
-        self.assertGreaterEqual(t.count("</code></pre>"), 2)
-        self.assertIn(" · ", t.split("<b>🏆")[-1])      # последний час — сжатый
-        self.assertIn("крупнейшие за час", t)
-        # часов влезает столько, сколько помещается в подпись (но не меньше трёх)
-        self.assertGreaterEqual(t.count("крупнейшие за час"), 3)
+        self.assertNotIn("<pre>", t)
+        self.assertNotIn("</code>", t)
+        self.assertEqual(t.count("🕘 <b>"), 4)             # все четыре часа
+        self.assertLess(t.index("13:00"), t.index("10:00"))  # свежий первым
         self.assertNotIn("00:00", t)         # часы в МСК, а не в эпохе
         self.assertIn("к прошлым 4ч", t)
-        self.assertIn("📊 OI за 4ч", t)
+        self.assertIn("📊 OI", t)
+        self.assertTrue(post_has_hours(t))   # второй пост с топом не нужен
+
+    def test_hours_have_liqs_oi_and_cvd(self):
+        """По каждому часу: ликвы, OI и CVD долей объёма — простыми строками."""
+        snap = collect_digest(self.events, now=self.now, oi=self.oi, cvd=self.cvd)
+        snap["board"] = _board()
+        t = render_post(snap, 0)
+        # четыре часа: касса с эмодзи направления, OI, CVD от объёма
+        # процент к предыдущему часу — у каждого часа, кроме самого первого
+        with_pct = re.findall(
+            r"🕘 <b>\d{2}:00</b>(?: \(идёт\))? · 💥 <b>\$[\d.]+[KMB]</b> [📈📉]", t)
+        self.assertEqual(len(with_pct), 3, t)
+        self.assertEqual(t.count("📊 OI "), 4)
+        self.assertEqual(t.count("% объёма"), 5)   # четыре часа + строка окна
+        self.assertEqual(t.count("🌊 CVD"), 5)     # четыре часа + строка окна
+        self.assertIn("🌊 CVD за 4ч", t)
+        self.assertGreaterEqual(t.count("📈"), 3)
+        self.assertGreaterEqual(t.count("📉"), 2)
+        # монеты часа — с изменением объёма к предыдущему часу
+        self.assertIn("🔝 BTC", t)
+        self.assertIn(" ▲31%", t)
+        self.assertIn(" ▼12%", t)
+
+    def test_long_headline_keeps_all_hours(self):
+        """Полные сроки часов не влезли — часы уходят короткими строками."""
+        snap = collect_digest(self.events, now=self.now, oi=self.oi, cvd=self.cvd)
+        snap["board"] = _board()
+        head = "Смешанный рынок: лонги подчистили, шорты добрали. " * 7
+        t = render_post(snap, 0, head_override=head)
+        self.assertLessEqual(len(t), CAPTION_LIMIT)
+        self.assertEqual(t.count("🕘 <b>"), 4)     # ни один час не потерялся
+        self.assertIn("% объёма", t)
+        self.assertNotIn("<pre>", t)
+        self.assertNotIn("🔝", t)                  # короткий вид — без монет
+        self.assertTrue(post_has_hours(t))
 
     def test_no_heavy_tables_in_post(self):
         """В посте нет таблиц с колонками цифр — они спорили друг с другом."""
@@ -200,7 +253,7 @@ class DigestTest(unittest.TestCase):
             t = render_post(snap, i, head_override=long_head)
             self.assertLessEqual(len(t), CAPTION_LIMIT, f"v{i} len={len(t)}")
             self.assertIn("LiqScope", t)
-            self.assertIn("🏆", t)
+            self.assertIn("🕘", t)
             self.assertTrue(t.rstrip().endswith("</a>"), t[-90:])
 
     def test_money_and_empty(self):

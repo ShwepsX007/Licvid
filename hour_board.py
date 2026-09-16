@@ -323,16 +323,47 @@ def _bias_word(longs: float, shorts: float) -> str:
     return ""
 
 
+def pct_change(cur: float, base: float) -> Optional[float]:
+    """Изменение в процентах: None, если базы нет или она нулевая."""
+    try:
+        cur, base = float(cur or 0), float(base or 0)
+    except (TypeError, ValueError):
+        return None
+    if base <= 0:
+        return None
+    return (cur - base) / base * 100.0
+
+
 def build_snapshot(board: "HourBoard", oi: "OiHistory", now: Optional[float] = None,
-                   span: int = 4) -> dict:
+                   span: int = 4, flows: Optional[dict] = None) -> dict:
     """Стенд для поста: часы, топ-7 ударов часа, перекос CVD и ряды OI.
 
     Считаем на стороне сервера и один раз: пост рендерится и для русского
     канала, и для английского — данные у них общие, отличаются подписи.
+
+    ``flows`` — {монета: {час: {"cvd": Δ, "vol": объём, "has_cvd": bool}}}
+    из часовых свечей: по ним считается CVD часа и его доля в объёме рынка.
+    Часы берутся на один больше окна: первому часу поста нужен предыдущий,
+    чтобы показать процент изменения.
     """
     now = float(now if now is not None else time.time())
-    hours = board.hours(span, now)
+    tail = board.hours(span + 1, now)          # +1 час — база для первого часа
+    hours = tail[-span:] if len(tail) > span else tail
     prev = board.hours(span * 2, now)[:span]
+
+    # объём и CVD рынка по часам: складываем только те монеты, где CVD есть
+    market: Dict[float, dict] = {}
+    for _sym, by_hour in (flows or {}).items():
+        for h, cell in (by_hour or {}).items():
+            try:
+                vol = float((cell or {}).get("vol") or 0)
+            except (TypeError, ValueError):
+                continue
+            if vol <= 0 or not (cell or {}).get("has_cvd"):
+                continue
+            acc = market.setdefault(float(h), {"cvd": 0.0, "vol": 0.0})
+            acc["vol"] += vol
+            acc["cvd"] += float((cell or {}).get("cvd") or 0)
 
     # монеты, по которым показываем OI: самые крупные за окно
     volume: Dict[str, float] = {}
@@ -362,25 +393,44 @@ def build_snapshot(board: "HourBoard", oi: "OiHistory", now: Optional[float] = N
 
     out_hours = []
     oi_hours = []
+    # Предыдущий час для каждого показанного: соседний в хвосте. Порядок
+    # важен — иначе час сравнивался бы сам с собой и процент был бы нулевым.
+    prev_map = {tail[i].get("h"): tail[i - 1] for i in range(1, len(tail))}
+    live_h = hour_start(now, board.tz)
     for i, hr in enumerate(hours):
         cvd = hr.get("cvd") or {}
+        was = prev_map.get(hr.get("h")) or {}
+        was_coins = was.get("coins") or {}
         coins = []
         for sym, usd in sorted((hr.get("coins") or {}).items(),
                               key=lambda kv: kv[1], reverse=True)[:3]:
             flow = cvd.get(sym)
             coins.append({"symbol": sym, "usd": float(usd),
-                          "flow": float(flow) if flow is not None else None})
+                          "flow": float(flow) if flow is not None else None,
+                          "pct": pct_change(usd, was_coins.get(sym))})
         longs, shorts = float(hr.get("longs") or 0), float(hr.get("shorts") or 0)
         bias = _bias_word(longs, shorts)
         pct = None
         if have_value[i] and have_from[i] and oi_from[i] > 0:
             pct = (oi_value[i] - oi_from[i]) / oi_from[i] * 100.0
+        mk = market.get(float(hr.get("h") or 0)) or {}
+        m_vol = float(mk.get("vol") or 0)
+        m_cvd = float(mk.get("cvd") or 0)
         out_hours.append({
             "h": hr.get("h"), "total": hr.get("total"), "count": hr.get("count"),
             "longs": longs, "shorts": shorts,
             "side_sum": max(longs, shorts) if bias else 0.0,
             "bias": bias, "coins": coins, "cvd": dict(cvd),
             "cvd_sum": sum(float(v) for v in cvd.values()),
+            # сравнение с предыдущим часом: видно, больше или меньше стало
+            "liq_pct": pct_change(hr.get("total"), was.get("total")),
+            # текущий час идёт прямо сейчас: сумма ещё не финальная
+            "live": bool(hr.get("h") == live_h),
+            "count_pct": pct_change(hr.get("count"), was.get("count")),
+            # CVD рынка за час и его доля в объёме торгов (в процентах)
+            "cvd_net": m_cvd if m_vol > 0 else None,
+            "cvd_share": (m_cvd / m_vol * 100.0) if m_vol > 0 else None,
+            "vol_usd": m_vol if m_vol > 0 else None,
             "oi": {"value": oi_value[i] if have_value[i] else None, "pct": pct},
         })
         oi_hours.append({"h": hr.get("h"), "value": oi_value[i] if have_value[i] else None,
@@ -402,8 +452,15 @@ def build_snapshot(board: "HourBoard", oi: "OiHistory", now: Optional[float] = N
         if base:
             oi_4h_pct = (oi_value[last_ok] - base) / base * 100.0
 
+    win_vol = sum(float((market.get(float(hr.get("h") or 0)) or {}).get("vol") or 0)
+                  for hr in hours)
+    win_cvd = sum(float((market.get(float(hr.get("h") or 0)) or {}).get("cvd") or 0)
+                  for hr in hours)
     return {
         "span_hours": span,
+        "cvd_4h": win_cvd if win_vol > 0 else None,
+        "cvd_4h_share": (win_cvd / win_vol * 100.0) if win_vol > 0 else None,
+        "vol_4h": win_vol if win_vol > 0 else None,
         "hours": out_hours,
         "top_hours": top_hours,
         "total_usd": total,

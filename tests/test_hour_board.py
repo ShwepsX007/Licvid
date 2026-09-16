@@ -15,7 +15,7 @@ from hour_board import (  # noqa: E402
     OI, HourBoard, OiHistory, build_snapshot, hour_hhmm, hour_start, tz_offset,
 )
 from channel_digest import (  # noqa: E402
-    CAPTION_LIMIT, render_post, render_top7,
+    CAPTION_LIMIT, post_has_hours, render_post, render_top7,
 )
 
 MSK = 3 * 3600
@@ -132,18 +132,36 @@ class HourBoardTest(unittest.TestCase):
         self.assertEqual(again.latest("BTC_USDT")[1], 2_000_000)
 
     # ----- стенд в посте -----
-    def _full(self):
-        for h in range(8):
+    def _flows(self):
+        """Часовые потоки по монетам: {монета: {час: {cvd, vol, has_cvd}}}."""
+        out = {}
+        last = int(self.now // 3600 * 3600)
+        for j, sym in enumerate(("BTC_USDT", "ETH_USDT")):
+            out[sym] = {last - h * 3600: {"cvd": 1_000_000.0 - h * 100_000,
+                                          "vol": 50_000_000.0 + j * 1_000_000,
+                                          "has_cvd": True}
+                        for h in range(5)}
+        return out
+
+    def _full(self, flows=None):
+        # История OI пишется только хронологически: срезы каждого часа идут
+        # от старого к новому, по два на час (начало и конец) — так у часа
+        # есть и уровень, и процент к его началу.
+        series = [1.00, 1.02, 1.01, 1.03, 1.01, 1.04, 1.02, 1.05]   # млн $
+        hours = list(range(7, -1, -1))
+        for idx, h in enumerate(hours):
             for i in range(12):
                 self.liq(h + 0.2 + i * 0.05, 50_000 * (i + 1),
                          sym="BTC_USDT" if i % 2 else "ETH_USDT",
                          ex="gate" if i % 3 == 0 else "binance")
                 self.board.add_cvd("BTC_USDT" if i % 2 else "ETH_USDT",
                                    self.now - h * 3600 - i * 60, -30_000)
-            for sym in ("BTC_USDT", "ETH_USDT"):
-                self.oi.add(sym, 1_000_000 * (1 + 0.01 * (8 - h)),
-                            self.now - h * 3600)
-        return build_snapshot(self.board, self.oi, now=self.now)
+            hs = int(self.now // 3600 * 3600) - h * 3600
+            nxt = series[min(idx + 1, len(series) - 1)]
+            for sym, k in (("BTC_USDT", 1.0), ("ETH_USDT", 0.92)):
+                self.oi.add(sym, series[idx] * 1_000_000 * k, hs + 60)
+                self.oi.add(sym, nxt * 1_000_000 * k, min(hs + 3500, self.now))
+        return build_snapshot(self.board, self.oi, now=self.now, flows=flows)
 
     def test_snapshot_has_everything_the_stand_promises(self):
         snap = self._full()
@@ -162,22 +180,26 @@ class HourBoardTest(unittest.TestCase):
         self.assertEqual([c["pct"] for c in snap["oi_hours"]],
                          [c["pct"] for c in snap["oi_hours"]])
 
-    def test_post_shows_stand_and_top7(self):
-        board = self._full()
+    def test_post_shows_hours_without_frame(self):
+        """Пост: четыре часа, у каждого OI и CVD — простым текстом, без <pre>."""
+        board = self._full(flows=self._flows())
         snap = {"window_h": 4, "count": 30, "total_usd": board["total_usd"],
                 "longs_usd": 6_000_000, "shorts_usd": 5_700_000,
                 "top_coins": [], "exchanges": {"gate": 3_000_000}, "board": board}
         ru = render_post(snap, 0)
-        self.assertIn("OI за 4ч", ru)
         self.assertIn("к прошлым 4ч", ru)              # сравнение окон
-        self.assertIn("крупнейшие за час", ru)         # топ-7 внутри подписи
-        self.assertIn("🏆", ru)
-        self.assertIn("<pre><code>", ru)
-        self.assertIn("Gate", ru)
+        self.assertEqual(ru.count("🕘 <b>"), 4)        # все четыре часа
+        self.assertEqual(ru.count("📊 OI"), 4)         # OI по каждому часу
+        self.assertIn("% объёма", ru)                  # CVD — доля объёма рынка
+        self.assertIn("🌊 CVD за 4ч", ru)
+        self.assertNotIn("<pre>", ru)                  # рамочного окна нет
+        self.assertNotIn("</code>", ru)
+        self.assertIn("Gate", ru)                      # партнёрская строка жива
         self.assertLessEqual(len(ru), CAPTION_LIMIT)   # один пост, не два
+        self.assertTrue(post_has_hours(ru))
         en = render_post(snap, 0, lang="en")
-        self.assertIn("OI over 4h", en)
-        self.assertIn("biggest of the hour", en)
+        self.assertIn("of volume", en)
+        self.assertEqual(en.count("🕘 <b>"), 4)
         self.assertLessEqual(len(en), CAPTION_LIMIT)
 
     def test_top7_reserve_matches_post_format(self):
@@ -213,22 +235,23 @@ class HourBoardTest(unittest.TestCase):
         self.assertEqual(liqs_word(40, "en"), "fills")
 
     def test_oi_line_has_no_dashes_without_history(self):
-        """Пока OI-история не набралась, в посте нет строки из прочерков."""
+        """Пока OI-история не набралась, часы идут без OI и без прочерков."""
         board = {"span_hours": 4, "total_usd": 1e6, "count": 5, "prev_total": 0,
                  "diff_pct": None, "oi_hours": [], "hours": [
                      {"h": 1789578000, "total": 1e6, "count": 5, "longs": 9e5,
                       "shorts": 1e5, "side_sum": 9e5, "bias": "long",
                       "coins": [{"symbol": "BTC_USDT", "usd": 1e6, "flow": 1.0}],
-                      "cvd_sum": 1.0, "oi": {"value": None, "pct": None}}]}
+                      "cvd_sum": 1.0, "liq_pct": None,
+                      "oi": {"value": None, "pct": None}}]}
         text = render_post({"window_h": 4, "board": board, "total_usd": 1e6})
-        self.assertNotIn("OI за 4ч", text)
-        self.assertIsNone(re.search(r"\d{2}:00 —", text))   # нет часов-прочерков
-        self.assertIn("резали лонги", text)
-        # часы с прочерком вместо процента в строку не попадают
-        board["oi_hours"] = [{"h": 1789578000, "value": 1.2e9, "pct": None}]
-        board["oi_now_usd"] = 1.2e9
+        self.assertNotIn("📊 OI", text)          # OI нет — строки нет вовсе
+        self.assertIsNone(re.search(r"\d{2}:00 —", text))   # часов-прочерков нет
+        self.assertIn("🕘", text)                # час всё равно показан
+        self.assertIn("$1.00M", text)
+        # появился уровень — появилась строка, процент без истории не выдуман
+        board["hours"][0]["oi"] = {"value": 1.2e9, "pct": None}
         text2 = render_post({"window_h": 4, "board": board, "total_usd": 1e6})
-        self.assertIn("OI за 4ч: $1.20B", text2)
+        self.assertIn("📊 OI $1.20B", text2)
         self.assertIsNone(re.search(r"\d{2}:00 —", text2))
 
     def test_post_is_not_empty_even_without_data(self):

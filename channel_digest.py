@@ -111,6 +111,9 @@ LABELS = {
         "top_title": "крупнейшие за час",
         "top_hours": "Топ-7 по часам",
         "empty_hour": "тихо",
+        "of_volume": "объёма",
+        "cvd_4h": "CVD за 4ч",
+        "going": "идёт",
     },
     "en": {
         "exchanges": "Exchanges",
@@ -145,6 +148,9 @@ LABELS = {
         "top_title": "biggest of the hour",
         "top_hours": "Top 7 by hour",
         "empty_hour": "quiet",
+        "of_volume": "of volume",
+        "cvd_4h": "CVD over 4h",
+        "going": "in progress",
     },
 }
 
@@ -498,6 +504,142 @@ def _arrow(pct, lang: str = "ru") -> str:
     return "→ 0.0%"
 
 
+def _updown(pct, lang: str = "ru") -> str:
+    """Эмодзи направления и процент к предыдущему часу.
+
+    «Больше или меньше стало» — главный вопрос к почасовому ряду, поэтому
+    рядом с каждой цифрой стоит стрелка (📈 ▲18% / 📉 ▼6%) или знак покоя.
+    """
+    try:
+        v = float(pct)
+    except (TypeError, ValueError):
+        return ""
+    if v > 0.5:
+        return f" 📈 ▲{abs(v):.0f}%"
+    if v < -0.5:
+        return f" 📉 ▼{abs(v):.0f}%"
+    return " ⚖️ →0%"
+
+
+def _pct_txt(v: float) -> str:
+    """Доля в процентах: у мелких значений держим десятую, иначе округляем."""
+    v = abs(float(v))
+    return f"{v:.1f}%" if v < 10 else f"{v:.0f}%"
+
+
+def _cvd_bit(hour: dict, lang: str = "ru") -> str:
+    """CVD как доля объёма рынка: сколько процентов оборота дал перевес.
+
+    Доля считается по часовым свечам (тейкер-дельта к объёму часа). Если
+    свечей с дельтой ещё нет, показываем накопленную лентой сумму — она
+    считается по тем же сделкам, просто в деньгах.
+    """
+    share = hour.get("cvd_share")
+    if share is not None:
+        try:
+            v = float(share)
+        except (TypeError, ValueError):
+            v = 0.0
+        emo = "🟢" if v > 0.5 else ("🔴" if v < -0.5 else "⚖️")
+        return f"🌊 CVD {emo} {_pct_txt(v)} {lbl(lang, 'of_volume')}"
+    net = hour.get("cvd_net")
+    if net is None:
+        net = hour.get("cvd_sum")
+    if not net:
+        return ""
+    try:
+        n = float(net)
+    except (TypeError, ValueError):
+        return ""
+    emo = "🟢" if n > 0 else "🔴"
+    return f"🌊 CVD {emo} {money(abs(n))}"
+
+
+def _coins_bit(hour: dict, lang: str = "ru") -> str:
+    """Монеты часа строкой: сумма и её изменение к предыдущему часу.
+
+    Монеты берутся из часового стенда (три сильнее всех); если стенд отдал
+    только топ ударов часа — считаем по ним, без процентов.
+    """
+    coins = hour.get("coins") or []
+    if not coins:
+        coins = [{"symbol": it.get("symbol"), "usd": it.get("usd"), "pct": None}
+                 for it in (hour.get("items") or [])[:3]]
+    bits: List[str] = []
+    for c in coins[:3]:
+        if not c.get("symbol"):
+            continue
+        piece = f"{coin(c['symbol'])} {short_money(c.get('usd'))}"
+        pct = c.get("pct")
+        if pct is not None:
+            try:
+                v = float(pct)
+            except (TypeError, ValueError):
+                v = None
+            if v is not None:
+                piece += (" ▲" if v > 0 else " ▼") + f"{abs(v):.0f}%"
+        bits.append(piece)
+    return " · ".join(bits)
+
+
+def hour_block(hour: dict, lang: str = "ru") -> str:
+    """Один час поста: ликвидации, OI и CVD — своими строками, без рамки.
+
+    Раньше час был таблицей в <pre>: моноширинное окно выравнивало столбики,
+    но читалось как вставка из терминала, а цифры «наезжали» друг на друга.
+    Теперь час — обычные строки:
+
+        🕘 21:00 · 💥 $12.40M 📈 ▲18%
+        📊 OI $18.20B 📉 ▼2%
+        🌊 CVD 🟢 3.4% объёма
+        🔝 BTC ▲31% · ETH ▲12% · SOL ▼8%
+    """
+    hh = hour_hhmm(hour.get("h") or 0, hour.get("tz") or tz_offset())
+    total = float(hour.get("total") or 0)
+    head = f"🕘 <b>{hh}</b>"
+    if hour.get("live"):
+        # час ещё идёт: суммы не финальные, читателю это важно знать
+        head += f" ({lbl(lang, 'going')})"
+    if total > 0:
+        head += (f" · 💥 <b>{money(total)}</b>"
+                 + _updown(hour.get("liq_pct"), lang))
+    else:
+        head += f" · {lbl(lang, 'empty_hour')}"
+    lines = [head]
+
+    oi = hour.get("oi") or {}
+    if oi.get("value"):
+        lines.append(f"📊 {lbl(lang, 'oi')} {money(oi['value'])}"
+                     + _updown(oi.get("pct"), lang))
+    cvd = _cvd_bit(hour, lang)
+    if cvd:
+        lines.append(cvd)
+    coins = _coins_bit(hour, lang)
+    if coins:
+        lines.append("🔝 " + coins)
+    return "\n".join(lines)
+
+
+def short_hour_block(hour: dict, lang: str = "ru") -> str:
+    """Час одной строкой — когда четыре полных блока в подпись не влезают."""
+    hh = hour_hhmm(hour.get("h") or 0, hour.get("tz") or tz_offset())
+    total = float(hour.get("total") or 0)
+    mark = f" ({lbl(lang, 'going')})" if hour.get("live") else ""
+    if total > 0:
+        bits = [f"🕘 <b>{hh}</b>{mark} 💥 {short_money(total)}"
+                + _updown(hour.get("liq_pct"), lang)]
+    else:
+        bits = [f"🕘 <b>{hh}</b>{mark} {lbl(lang, 'empty_hour')}"]
+    oi = hour.get("oi") or {}
+    if oi.get("value"):
+        bits.append(f"{lbl(lang, 'oi')} {short_money(oi['value'])}"
+                    + _updown(oi.get("pct"), lang))
+    cvd = _cvd_bit(hour, lang)
+    if cvd:
+        bits.append(cvd)
+    return " · ".join(bits)
+
+
 def _coin_cell(c: dict, lang: str = "ru") -> str:
     """Монета за час: сумма ликвидаций и перекос CVD по этой же монете."""
     if not c.get("symbol"):
@@ -646,12 +788,9 @@ def top_hour_block(hour: dict, lang: str = "ru", compact: int = 0) -> str:
     rows = []
     for i, it in enumerate(items):
         side = "🔴" if it.get("side") == "SELL" else "🟢"
-        rows.append([
-            (f"{i + 1}. {coin(it.get('symbol'))} {side}", "l"),
-            (short_money(it.get("usd")), "r"),
-            (exch(it.get("exchange")), "l"),
-        ])
-    return title + "\n" + _mono(rows)
+        rows.append(f"{i + 1}. {coin(it.get('symbol'))} {side} "
+                    f"{short_money(it.get('usd'))} · {exch(it.get('exchange'))}")
+    return title + "\n" + "\n".join(rows)
 
 
 def render_top7(board: Optional[dict], lang: str = "ru") -> str:
@@ -834,18 +973,31 @@ def active_images(store=None) -> List[str]:
     return out or list_images()
 
 
+HOUR_MARK = r"🕘[^\n]{0,12}\d{2}:\d{2}"
+
+
+def post_has_hours(text: str) -> bool:
+    """Есть ли в подписи почасовой ряд (🕘 HH:MM).
+
+    Нужен вызывающему коду: если часы уже в посте, второй сообщение с топом
+    не отправляем — пост остаётся одним.
+    """
+    return bool(re.search(HOUR_MARK, text or ""))
+
+
 def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = None,
                 site_url: str = "https://liqscope.online",
                 bot_url: str = "https://t.me/LiqScopeBot",
                 head_override: Optional[str] = None,
                 lang: str = "ru") -> str:
-    """Сводка одним сообщением: шапка, стенд и топ-7 ударов по часам.
+    """Сводка одним сообщением: шапка, строка окна и часы по порядку.
 
-    Блоков ровно столько, сколько нужно: дублирующие таблицы (биржи, монеты,
-    KPI) убраны — их цифры спорили друг с другом и наезжали на соседние
-    столбцы. Раскладка собирается по лимиту подписи (1024): часы идут от
-    свежего к старому, блок добавляется, только если целиком влезает. Если
-    не влезает ни один — берётся сжатый вид (три удара часа строкой).
+    Каждый час — обычными строками, без <pre>-рамки: касса часа с изменением
+    к предыдущему часу, OI с тем же процентом, CVD как доля объёма рынка и
+    три монеты, которые горели сильнее всех (тоже с изменением). Часы идут от
+    свежего к старому и добавляются, пока влезают в подпись (1024); если
+    четыре полных блока не помещаются — весь ряд уходит короткими строками,
+    чтобы часы не выглядели разнобоем.
     head_override — шапка от ИИ: та же раскладка, меняется только текст.
     """
     import html as _html
@@ -868,53 +1020,75 @@ def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = N
     head = (format_ai_head(head_override, h) if head_override
             else heads[v % max(1, len(heads))])
 
-    # Компоновка поста: шапка → строка итога → топ-7 по часам (свежие часы
-    # первыми, сколько влезет) → хвост. Таблицы в два столбика убраны: в
-    # Telegram колонки разъезжались на эмодзи и цифрах, и пост читался плохо.
+    # Компоновка поста: шапка → строка итога → CVD окна → часы по порядку
+    # (свежий первым) → хвост. Рамочной таблицы <pre> больше нет: цифры идут
+    # обычными строками и больше не «наезжают» друг на друга.
     board = snap.get("board") or {}
-    hours = [dict(x) for x in (board.get("top_hours") or [])]
     tz = board.get("tz") or tz_offset()
+    hours = [dict(x) for x in (board.get("hours") or [])]
     for x in hours:
         x.setdefault("tz", tz)
+    hours = list(reversed(hours))[:int(board.get("span_hours") or 4)]
+    # Монеты часа лежат и в часовом стенде, и в топах ударов; если стенд дал
+    # пустую тройку, подставляем удары часа — строка «🔝» не должна пропадать.
+    tops = {x.get("h"): (x.get("items") or [])
+            for x in (board.get("top_hours") or [])}
+    for x in hours:
+        if not x.get("coins"):
+            x["coins"] = [{"symbol": it.get("symbol"), "usd": it.get("usd"),
+                           "pct": None} for it in tops.get(x.get("h"), [])[:3]]
+    if not hours:
+        # запасной вид стенда (только топы часов) — монеты берём из items
+        hours = [dict(x) for x in (board.get("top_hours") or [])]
+        for x in hours:
+            x.setdefault("tz", tz)
 
     def fits(parts_: List[str]) -> bool:
         text = "\n\n".join([p for p in parts_ if p] + [tail])
         return len(text) <= CAPTION_LIMIT
 
     parts: List[str] = [head, _total_line(snap, lang)]
-    # OI — короткая строка, ставим её до часов: иначе топы съедают подпись
-    # целиком, и открытый интерес до поста не доезжает
-    oi_line = oi_line_of(board, lang)
-    if oi_line and fits(parts + [oi_line]):
-        parts.append(oi_line)
-    full: List[int] = []
-    for i, x in enumerate(hours):          # свежие часы первыми
-        block = top_hour_block(x, lang)
+    flow = _flow_line(board, lang)
+    if flow and fits(parts + [flow]):
+        parts.append(flow)
+    # Сначала полный вид часа (ликвы, OI и CVD своими строками). Если четыре
+    # часа так не влезают — весь ряд сжимается в строку, но часы остаются все.
+    blocks = [hour_block(x, lang) for x in hours]
+    if blocks and not fits(parts + blocks):
+        blocks = [short_hour_block(x, lang) for x in hours]
+    added = 0
+    for block in blocks:
         if block and fits(parts + [block]):
             parts.append(block)
-            full.append(i)
-    # остатки часов — сжатыми строками: семь ударов в подпись не влезают,
-    # а три самых крупных дают картину часа, если место ещё осталось
-    if full:
-        for i, x in enumerate(hours):
-            if i in full:
-                continue
-            block = top_hour_block(x, lang, compact=3)
-            if block and fits(parts + [block]):
-                parts.append(block)
-    if len(parts) == 2:
-        # ни один час с семёркой не влез (очень длинная шапка) — сжатый вид:
-        # три крупнейших удара часа одной строкой
-        for x in hours:
-            block = top_hour_block(x, lang, compact=3)
-            if block and fits(parts + [block]):
-                parts.append(block)
-                break
-    if len(parts) == 2 and not hours:
-        # часовой стенд ещё не собрался (первый запуск): показываем хотя бы
-        # настроение ленты, чтобы пост не состоял из одной суммы
+            added += 1
+    if not added:
+        # часов ещё нет (первый запуск): показываем хотя бы настроение ленты,
+        # чтобы пост не состоял из одной суммы
         parts.append(_board_bias_line(board, lang) or f["bias_line"])
     return _pack(parts, tail)
+
+
+def _flow_line(board: Optional[dict], lang: str = "ru") -> str:
+    """Строка окна: CVD за 4 часа и его доля в объёме рынка.
+
+    «CVD от общего объёма» — сколько процентов оборота рынка составил
+    перевес агрессивных покупок над продажами: знак показывает сторону,
+    число — силу перекоса.
+    """
+    share = (board or {}).get("cvd_4h_share")
+    if share is None:
+        return ""
+    try:
+        v = float(share)
+    except (TypeError, ValueError):
+        return ""
+    emo = "🟢" if v > 0.5 else ("🔴" if v < -0.5 else "⚖️")
+    line = (f"🌊 {lbl(lang, 'cvd_4h')}: {emo} {_pct_txt(v)} "
+            f"{lbl(lang, 'of_volume')}")
+    net = (board or {}).get("cvd_4h")
+    if net and abs(float(net)) >= 1000:
+        line += f" ({money(abs(float(net)))})"
+    return line
 
 
 def _board_bias_line(board: Optional[dict], lang: str = "ru") -> str:
@@ -940,8 +1114,7 @@ def _total_line(snap: dict, lang: str = "ru") -> str:
     line = f"💥 <b>{money(total)}</b> · {int(count or 0)} {liqs_word(count or 0, lang)}"
     diff = board.get("diff_pct")
     if diff is not None and board.get("prev_total"):
-        mark = "⚖️" if abs(float(diff)) <= 0.5 else ("📈" if float(diff) > 0 else "📉")
-        line += f"   {mark} {_arrow(diff, lang)} ({lbl(lang, 'vs_prev')})"
+        line += _updown(diff, lang) + f" ({lbl(lang, 'vs_prev')})"
     return line
 
 

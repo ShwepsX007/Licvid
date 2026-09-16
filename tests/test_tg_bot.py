@@ -628,9 +628,10 @@ class BotMenuTest(unittest.TestCase):
         self.assertEqual(len(posts), 1, posts)            # одно сообщение, не два
         self.assertEqual(posts[0]["kind"], "photo")
         caption = posts[0]["text"]
-        self.assertIn("крупнейшие за час", caption)       # топ-7 внутри подписи
-        self.assertIn("<pre><code>", caption)
-        self.assertIn("📊 OI за 4ч", caption)
+        self.assertEqual(caption.count("🕘 <b>"), 4)      # все четыре часа
+        self.assertEqual(caption.count("📊 OI"), 4)       # OI по каждому часу
+        self.assertIn("CVD", caption)                     # и CVD часа
+        self.assertNotIn("<pre>", caption)                # рамки с цифрами нет
         self.assertIn("к прошлым 4ч", caption)
         self.assertIn("Gate", caption)
         self.assertLessEqual(len(caption), 1024, len(caption))
@@ -695,16 +696,67 @@ class BotMenuTest(unittest.TestCase):
         self.bot._channel2_id_cfg = ""
         self.bot.store.set_setting("channel_id", "")
         self.bot.store.set_setting("channel_id_en", "")
+        self.bot._save_channel_bindings({"ru": "", "en": "", "titles": {}})
         code, cid = self.bot.remember_channel_auto("-100999", "LiqScopeEng")
         self.assertEqual((code, cid), ("en", "-100999"))
-        self.bot.store.set_setting("channel_id_en", "")
+        self.bot._save_channel_bindings({"ru": "", "en": "", "titles": {}})
         code2, cid2 = self.bot.remember_channel_auto("-100888", "LiqScopeRUS")
         self.assertEqual((code2, cid2), ("ru", "-100888"))
         # без названия работает порядок: первый — русский, второй — английский
-        self.bot.store.set_setting("channel_id", "")
-        self.bot.store.set_setting("channel_id_en", "")
+        self.bot._save_channel_bindings({"ru": "", "en": "", "titles": {}})
         self.assertEqual(self.bot.remember_channel_auto("-100777", "")[0], "ru")
         self.assertEqual(self.bot.remember_channel_auto("-100666", "")[0], "en")
+
+    def test_swapped_channels_are_repaired_by_titles(self):
+        """Перепутанные роли каналов бот видит по названию и меняет местами."""
+        self.bot._channel_id_cfg = ""
+        self.bot._channel2_id_cfg = ""
+        # так каналы записались раньше: русская роль — на английском канале
+        self.bot._save_channel_bindings({
+            "ru": "-3931620564", "en": "-4481747490",
+            "titles": {"ru": "LiqScopeEng", "en": "LiqScopeRUS"}})
+        titles = {"-3931620564": "LiqScope ENG", "-4481747490": "LiqScope RUS"}
+
+        async def fake_call(method, payload=None):
+            if method == "getChat":
+                cid = str((payload or {}).get("chat_id"))
+                if cid in titles:
+                    return {"ok": True, "result": {"id": cid, "title": titles[cid]}}
+            return {"ok": False, "description": "Bad Request"}
+
+        self.bot._call = fake_call  # type: ignore
+        note = asyncio.run(self.bot.verify_channel_roles(force=True))
+        self.assertIn("поменяли местами", note)
+        self.assertEqual(self.bot.channel_chat_id(), "-4481747490")      # русский
+        self.assertEqual(self.bot.channel_chat_id_en(), "-3931620564")   # английский
+        # повторная проверка уже ничего не меняет
+        self.assertEqual(asyncio.run(self.bot.verify_channel_roles(force=True)), "")
+        self.assertEqual(self.bot.channel_chat_id(), "-4481747490")
+        # в отчёте о сводке видно, куда что ушло
+        routes = self.bot.channel_route_text()
+        self.assertIn("-4481747490", routes)
+        self.assertIn("-3931620564", routes)
+
+    def test_swapped_env_channels_are_repaired_by_titles(self):
+        """Перепутанные id из env тоже лечатся: проверка названий правит роли."""
+        self.bot._save_channel_bindings({"ru": "", "en": "", "titles": {}})
+        # так каналы заданы переменными окружения: ru — английский канал
+        self.bot._channel_id_cfg = "-3931620564"
+        self.bot._channel2_id_cfg = "-4481747490"
+        titles = {"-3931620564": "LiqScope ENG", "-4481747490": "LiqScope RUS"}
+
+        async def fake_call(method, payload=None):
+            if method == "getChat":
+                cid = str((payload or {}).get("chat_id"))
+                if cid in titles:
+                    return {"ok": True, "result": {"id": cid, "title": titles[cid]}}
+            return {"ok": False, "description": "Bad Request"}
+
+        self.bot._call = fake_call  # type: ignore
+        note = asyncio.run(self.bot.verify_channel_roles(force=True))
+        self.assertIn("поменяли местами", note)
+        self.assertEqual(self.bot.channel_chat_id(), "-4481747490")
+        self.assertEqual(self.bot.channel_chat_id_en(), "-3931620564")
 
     def test_menu_opens_without_channel_when_ai_missing(self):
         """Без ключей ИИ бот работает как раньше — шапка из шаблонов."""

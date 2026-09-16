@@ -1038,6 +1038,45 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
     font-weight: 600;
 }
 
+.exch-health-pop .exch-ref {
+    display: block;
+    margin-top: 6px;
+    padding: 6px 8px;
+    border-radius: 8px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: #7fe3c0;
+    background: rgba(0, 230, 118, 0.10);
+    border: 1px solid rgba(0, 230, 118, 0.35);
+    text-align: center;
+}
+
+.exch-health-pop .exch-ref:hover {
+    background: rgba(0, 230, 118, 0.20);
+}
+
+.feed-filter-chip {
+    background: rgba(56, 189, 248, 0.14);
+    border: 1px solid rgba(56, 189, 248, 0.45);
+    color: var(--accent, #38bdf8);
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 0.68rem;
+    font-weight: 700;
+    cursor: pointer;
+    margin-right: 6px;
+    white-space: nowrap;
+    line-height: 1.5;
+}
+
+.feed-filter-chip:hover {
+    background: rgba(56, 189, 248, 0.24);
+}
+
+.feed-filter-chip.hidden {
+    display: none;
+}
+
 .feed-table-container {
     flex: 1;
     overflow-y: auto;

@@ -102,6 +102,8 @@ LABELS = {
         "msk": "МСК",
         "total": "Всего",
         "liqs": "ликвидаций",
+        "liq1": "ликвидация",
+        "liq2": "ликвидации",
         "oi_4h": "OI за 4ч",
         "vs_prev": "к прошлым 4ч",
         "no_data": "—",
@@ -134,6 +136,8 @@ LABELS = {
         "msk": "UTC+3",
         "total": "Total",
         "liqs": "liquidations",
+        "liq1": "fill",
+        "liq2": "fills",
         "oi_4h": "OI over 4h",
         "vs_prev": "vs previous 4h",
         "no_data": "—",
@@ -142,6 +146,18 @@ LABELS = {
         "empty_hour": "quiet",
     },
 }
+
+
+def liqs_word(n: int, lang: str = "ru") -> str:
+    """«1 ликвидация», «2 ликвидации», «5 ликвидаций» — без «40 ликвидаций»."""
+    n = abs(int(n or 0))
+    if str(lang).startswith("en"):
+        return lbl(lang, "liq1") if n == 1 else lbl(lang, "liq2")
+    if n % 10 == 1 and n % 100 != 11:
+        return lbl(lang, "liq1")
+    if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+        return lbl(lang, "liq2")
+    return lbl(lang, "liqs")
 
 
 def lbl(lang: str, key: str, **kw) -> str:
@@ -446,16 +462,22 @@ def _coin_cell(c: dict, lang: str = "ru") -> str:
     return text
 
 
-def hour_rows(hours: list, lang: str = "ru") -> List[List[tuple]]:
-    """Строки стенда: час, ликвидации, топ монет часа, перекос CVD и OI."""
+def hour_rows(hours: list, lang: str = "ru", with_oi: bool = True) -> List[List[tuple]]:
+    """Строки стенда: час, ликвидации, топ монет часа, перекос CVD и OI.
+
+    ``with_oi=False`` — история открытого интереса ещё не набралась: колонку
+    не рисуем вовсе, чтобы в посте не было столбца из одних прочерков.
+    """
     rows: List[List[tuple]] = []
     for hr in hours or []:
         hh = hour_hhmm(hr.get("h") or 0, tz_offset())
         total = float(hr.get("total") or 0)
         cnt = int(hr.get("count") or 0)
         if not total and not cnt:
-            rows.append([(hh, "l"), (lbl(lang, "empty_hour"), "l"),
-                         ("", "l"), ("", "l"), ("", "l")])
+            row = [(hh, "l"), (lbl(lang, "empty_hour"), "l"), ("", "l"), ("", "l")]
+            if with_oi:
+                row.append(("", "l"))
+            rows.append(row)
             continue
         left = f"{money(total)} · {cnt} {lbl(lang, 'pieces')}"
         coins = (hr.get("coins") or [])
@@ -475,8 +497,10 @@ def hour_rows(hours: list, lang: str = "ru") -> List[List[tuple]]:
             oi_txt = f"{money(oi['value'])}"
             if oi.get("pct") is not None:
                 oi_txt = f"{oi_txt} {_arrow(oi['pct'], lang)}"
-        rows.append([(hh, "l"), (left, "l"), (top_coins, "l"),
-                     (bias_txt, "l"), (oi_txt, "l")])
+        row = [(hh, "l"), (left, "l"), (top_coins, "l"), (bias_txt, "l")]
+        if with_oi:
+            row.append((oi_txt, "l"))
+        rows.append(row)
     return rows
 
 
@@ -500,19 +524,26 @@ def board_block(board: Optional[dict], lang: str = "ru") -> str:
     head = (f"<b>📊 {lbl(lang, 'stand')} · {lbl(lang, 'stand_hours', h=span)}"
             f" ({lbl(lang, 'msk')})</b>")
     total_line = (f"💥 {lbl(lang, 'total')}: <b>{money(board.get('total_usd'))}</b>"
-                  f" · {int(board.get('count') or 0)} {lbl(lang, 'liqs')}")
+                  f" · {int(board.get('count') or 0)}"
+                  f" {liqs_word(board.get('count') or 0, lang)}")
     prev = board.get("prev_total")
     if prev:
         total_line += (f"   {mark} {_arrow(board.get('diff_pct'), lang)}"
                        f" ({lbl(lang, 'vs_prev')})")
-    body = _mono([[(lbl(lang, "col_hour"), "l"), (lbl(lang, "col_liqs"), "l"),
-                    (lbl(lang, "col_coins"), "l"), (lbl(lang, "col_bias"), "l"),
-                    (lbl(lang, "oi"), "l")]] + hour_rows(hours, lang))
+    oi_rows = board.get("oi_hours") or []
+    # OI показываем только если хоть что-то набралось: пустая колонка
+    # прочерков в посте выглядит как поломка, а не как «данных ещё нет»
+    with_oi = bool(board.get("oi_now_usd")) or any(
+        cell.get("pct") is not None or cell.get("value") for cell in oi_rows)
+    header = [(lbl(lang, "col_hour"), "l"), (lbl(lang, "col_liqs"), "l"),
+              (lbl(lang, "col_coins"), "l"), (lbl(lang, "col_bias"), "l")]
+    if with_oi:
+        header.append((lbl(lang, "oi"), "l"))
+    body = _mono([header] + hour_rows(hours, lang, with_oi))
     parts.append(head + "\n" + total_line + "\n" + body)
 
     oi_line = ""
-    oi_rows = board.get("oi_hours") or []
-    if oi_rows:
+    if oi_rows and with_oi:
         cells = []
         for cell in oi_rows:
             hh = hour_hhmm(cell.get("h") or 0, tz)

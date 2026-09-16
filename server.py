@@ -50,7 +50,7 @@ from fastapi.staticfiles import StaticFiles
 from market_feed import MarketFeed, TF_MINUTES, base_of, canon
 from timeframes import parse_tf
 from oi_feed import map_candles_to_oi
-from hour_board import BOARD, OI
+from hour_board import BOARD, OI, build_snapshot
 from accounts import Store
 from mailer import build_mailer
 from ai_text import build_ai
@@ -962,7 +962,14 @@ async def build_channel_digest() -> dict:
             oi[sym] = tracker.payload(sym)
         except Exception as e:
             log.debug("digest oi %s: %s", sym, e)
-    return collect_digest(events, now=now, oi=oi, cvd=cvd)
+    snap = collect_digest(events, now=now, oi=oi, cvd=cvd)
+    # Часовой стенд (ликвы по календарным часам, перекос CVD, OI за каждый час)
+    # считается по накопленной истории: в посте он идёт сразу после шапки.
+    try:
+        snap["board"] = build_snapshot(BOARD, OI, now=now)
+    except Exception as e:
+        log.warning("стенд для поста не собрался: %s", e)
+    return snap
 
 
 # =============================================================================

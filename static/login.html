@@ -65,17 +65,20 @@
             <button type="button" class="link-btn" id="resend-verify">Отправить письмо ещё раз</button>
         </div>
 
-        <details class="tg-alt" id="tg-alt">
-            <summary>Вход через Telegram <span class="badge">запасной способ</span></summary>
-            <p class="lead" style="font-size:0.8rem;margin:12px 0 10px">
-                Если почта недоступна — войдите тем же аккаунтом через Telegram:
-                кабинет и бот делят один профиль.
+        <div class="tg-alt" id="tg-alt">
+            <div class="or-sep"><span>или</span></div>
+            <button type="button" class="btn btn-tg btn-tg-wide" id="login-btn">
+                ✈ Зарегистрироваться через Telegram
+            </button>
+            <p class="lead tg-note">
+                Тот же аккаунт, что и в боте: подтверждать нечего, пароль не нужен.
+                Запасной способ — если почта недоступна. Почту можно привязать позже.
             </p>
-            <button type="button" class="btn btn-tg" id="login-btn">✈ Открыть бота Telegram</button>
-            <div id="tg-widget" style="margin-top:16px"></div>
-        </details>
+            <div id="tg-widget" style="margin-top:12px"></div>
+        </div>
 
         <p class="lead" style="margin-top:18px;font-size:0.78rem">
+            Основной способ — почта: она же восстанавливает пароль и присылает письма.
             Терминал ликвидаций по-прежнему открыт без регистрации.
             Кабинет нужен для алертов, корреляций и других сервисов.
         </p>

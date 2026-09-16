@@ -99,14 +99,37 @@ async function main() {
   check("кнопка «Другой пример» на месте",
     !!doc.querySelector("#captcha-refresh") &&
     doc.querySelector("#captcha-refresh").textContent.length > 0);
-  check("Telegram — в свёрнутом блоке «запасной способ»",
-    !!doc.querySelector("#tg-alt") && doc.querySelector("#tg-alt").tagName === "DETAILS" &&
-    !doc.querySelector("#tg-alt").hasAttribute("open"));
-  check("кнопка Telegram-бота внутри блока", !!doc.querySelector("#login-btn"));
+  // Telegram — отдельный блок рядом с формой почты с разделителем «или»,
+  // а не спрятанный в свёрнутый блок: его раньше просто не замечали
+  const alt = doc.querySelector("#tg-alt");
+  check("Telegram — отдельный блок рядом с формой почты (не свёрнутый)",
+    !!alt && alt.tagName === "DIV" && !!doc.querySelector("#tg-alt .or-sep"),
+    alt && alt.tagName);
+  check("без токена бота блок Telegram не показываем",
+    !!alt && alt.classList.contains("hidden"), alt && alt.className);
+  check("кнопка Telegram-бота внутри блока",
+    !!doc.querySelector("#login-btn") &&
+    /Telegram/.test(doc.querySelector("#login-btn").textContent));
+  check("почта названа основным способом",
+    /Основной способ — почта/.test(doc.body.textContent),
+    (doc.body.textContent.match(/Основной способ[^.]*/) || [""])[0]);
   check("ссылки-помощники: сброс пароля и повтор письма",
     !!doc.querySelector("#to-reset") && !!doc.querySelector("#resend-verify"));
   check("виджет Telegram не подгружается без токена бота",
     !doc.querySelector("#tg-widget script"));
+
+  // с настроенным ботом блок Telegram виден сразу — не надо «раскрывать»
+  // без bot_username: виджет Telegram тянет скрипт из интернета, а в тесте
+  // сети нет — нам важен сам блок и кнопка
+  const withBot = await openPage("/login", { me: { bot_ready: true } });
+  const altBot = withBot.doc.querySelector("#tg-alt");
+  check("с ботом блок Telegram виден",
+    !!altBot && !altBot.classList.contains("hidden"), altBot && altBot.className);
+  check("кнопка Telegram ведёт в бота",
+    !!withBot.doc.querySelector("#login-btn"));
+  check("пояснение про привязку почты позже",
+    /привязать позже/.test(withBot.doc.body.textContent));
+  await withBot.win.close();
 
   // переключение на регистрацию: появляется имя, меняется заголовок
   doc.querySelector('.auth-tab[data-tab="register"]').dispatchEvent(

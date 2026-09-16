@@ -182,6 +182,40 @@ class HourBoardTest(unittest.TestCase):
         self.assertIn("Top 7", top_en)
         self.assertIn("gate.com/signup/VLFCAVWMBW", top_en)
 
+    def test_digest_from_server_carries_the_stand(self):
+        """Сервер обязан положить стенд в снимок поста.
+
+        Стенд умеет рендериться и сам по себе, но в посты он попадает только
+        через snap["board"] — однажды это звено уже было забыто, и посты
+        уходили без таблицы часов.
+        """
+        src = open(os.path.join(HERE, "server.py"), encoding="utf-8").read()
+        body = src[src.index("async def build_channel_digest"):]
+        body = body[:body.index("\n\nasync def ", 1)]
+        self.assertIn("build_snapshot(BOARD, OI", body)
+        self.assertIn('snap["board"]', body)
+
+    def test_liqs_word_declines(self):
+        from channel_digest import liqs_word
+        self.assertEqual(liqs_word(1), "ликвидация")
+        self.assertEqual(liqs_word(3), "ликвидации")
+        self.assertEqual(liqs_word(40), "ликвидаций")
+        self.assertEqual(liqs_word(1, "en"), "fill")
+        self.assertEqual(liqs_word(40, "en"), "fills")
+
+    def test_stand_hides_oi_column_without_history(self):
+        """Пока OI-история не набралась, столбца прочерков в посте нет."""
+        board = {"span_hours": 4, "total_usd": 1e6, "count": 5, "prev_total": 0,
+                 "diff_pct": None, "oi_hours": [], "hours": [
+                     {"h": 1789578000, "total": 1e6, "count": 5, "longs": 9e5,
+                      "shorts": 1e5, "side_sum": 9e5, "bias": "long",
+                      "coins": [{"symbol": "BTC_USDT", "usd": 1e6, "flow": 1.0}],
+                      "cvd_sum": 1.0, "oi": {"value": None, "pct": None}}]}
+        text = render_post({"window_h": 4, "board": board, "total_usd": 1e6})
+        self.assertIn("СТЕНД", text)
+        self.assertNotIn("OI за 4ч", text)
+        self.assertIn("BTC $1.00M", text)
+
     def test_post_is_not_empty_even_without_data(self):
         """Пустой снимок не должен превращаться в пост из одной ссылки."""
         text = render_post({"window_h": 4})

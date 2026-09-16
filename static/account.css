@@ -60,6 +60,7 @@ a { color: inherit; text-decoration: none; }
 .btn-ghost { border-color: var(--border); background: rgba(13, 18, 32, 0.6); }
 .btn-ghost:hover { border-color: var(--blue); }
 .btn-tg { background: var(--tg); color: #fff; font-size: 1rem; padding: 12px 22px; }
+.btn-tg-wide { width: 100%; justify-content: center; }
 .btn-tg:hover { filter: brightness(1.08); }
 .btn-danger { border-color: rgba(255,42,95,.45); color: #ff6b8a; }
 .btn-small { padding: 5px 10px; font-size: 0.75rem; }
@@ -160,9 +161,17 @@ body[data-page="cabinet"] .wrap { max-width: min(1600px, 96vw); }
 .tg-alt {
     margin-top: 22px; text-align: left; border-top: 1px solid var(--border); padding-top: 14px;
 }
-.tg-alt summary { cursor: pointer; font-size: 0.85rem; color: var(--muted); }
-.tg-alt summary .badge { margin-left: 6px; }
-.tg-alt[open] summary { color: var(--text); margin-bottom: 6px; }
+.tg-alt .or-sep {
+    display: flex; align-items: center; gap: 10px;
+    color: var(--muted); font-size: 0.72rem; letter-spacing: 2px; text-transform: uppercase;
+    margin-bottom: 12px;
+}
+.tg-alt .or-sep::before, .tg-alt .or-sep::after {
+    content: ""; flex: 1; height: 1px; background: var(--border);
+}
+.tg-note {
+    font-size: 0.78rem; margin: 10px 0 0;
+}
 .verify-bar {
     display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 14px;
     border: 1px solid rgba(255, 213, 79, 0.35); background: rgba(255, 213, 79, 0.07);

@@ -1463,12 +1463,18 @@ class TelegramBot:
                 await self._cmd_admin(chat_id, user)
                 return
             if nav == "channel":
-                link = f'<a href="{_esc(self.channel_url)}">📣 канал LiqScope</a>'
+                links = "\n".join(
+                    f'• <a href="{_esc(url)}">{_esc(name)}</a>'
+                    + (" 🇷🇺" if code == "ru" else " 🇬🇧")
+                    for code, name, url, _cid in self.channel_pair())
                 await self.show_menu(
                     chat_id,
-                    "<b>📣 Канал</b>\n"
-                    "Сводки ликвидаций, OI и CVD раз в 4 часа.\n"
-                    f"{link} — подписывайтесь, чтобы не пропустить."
+                    "<b>📣 Каналы LiqScope</b>\n"
+                    "Сводки ликвидаций, OI и CVD раз в 4 часа — тот же разбор,"
+                    " что в боте.\n"
+                    "Содержание одинаковое, отличается язык: русский и английский.\n"
+                    f"{links}\n\n"
+                    "Подписки на любой из них достаточно."
                     + self.site_footer(),
                     self._reply_kb(user))
                 return
@@ -1984,8 +1990,10 @@ class TelegramBot:
              {"text": "📰 Лента", "callback_data": "liq"}],
             [{"text": "🔔 Алерты", "callback_data": "al"},
              {"text": "📣 Канал", "callback_data": "channel"}],
-            [{"text": "✉️ Подтвердить почту", "callback_data": "a:vmail"}],
         ]
+        email = (user.get("email") or "").strip()
+        if not email or not user.get("email_verified"):
+            rows.append([{"text": "✉️ Подтвердить почту", "callback_data": "a:vmail"}])
         if admin:
             rows.append([{"text": "★ Админка", "callback_data": "nav:admin"}])
         return {"inline_keyboard": rows}
@@ -2175,6 +2183,7 @@ class TelegramBot:
         lines = [
             "<b>Команды LiqScope</b>",
             "/start — регистрация / вход на сайт",
+            "☰ Меню — кнопки разделов вместо ручного ввода",
             "/cabinet — профиль",
             "/terminal — ссылка на терминал",
             "/stats — ликвидации 24ч",

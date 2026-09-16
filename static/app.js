@@ -98,6 +98,7 @@
     const feedTbody = $("feed-tbody");
     const feedEmptyEl = $("feed-empty");
     const feedCountEl = $("feed-count");
+    const feedFilterEl = $("feed-filter");          // плашка «фильтр: монета»
     const minUsdBtn = $("min-usd-btn");
     const minUsdInput = $("min-usd-input");
     const minUsdApply = $("min-usd-apply");
@@ -2572,11 +2573,22 @@
         const coinBtn = tr.querySelector(".coin-link");
         if (coinBtn) {
             coinBtn.addEventListener("click", (e) => {
-                e.stopPropagation();          // не открываем модалку — открываем график
-                selectChartSymbol(decodeURIComponent(coinBtn.dataset.symbol));
+                e.stopPropagation();      // не открываем модалку — фильтруем ленту
+                selectSymbol(decodeURIComponent(coinBtn.dataset.symbol));
             });
         }
         return tr;
+    }
+
+    /** Плашка активного фильтра ленты: клик по ней возвращает все монеты. */
+    function updateFeedFilter() {
+        if (!feedFilterEl) return;
+        const on = state.symbol !== "ALL";
+        feedFilterEl.classList.toggle("hidden", !on);
+        if (!on) return;
+        feedFilterEl.textContent = pretty(state.symbol) + " ✕";
+        feedFilterEl.title = I18n.t("feed.chip_title");
+        feedFilterEl.setAttribute("aria-label", I18n.t("feed.chip_title"));
     }
 
     function feedCountLabel(n) {
@@ -2612,6 +2624,13 @@
         });
     }
 
+    // Значение ленты CVD/OI за свечу. У OI в свече лежит уровень открытого
+    // интереса (миллиарды), а изменение за свечу — в oiChg: лента показывает
+    // именно дельту, как и шары на графике (столбец так и называется «OI Δ»).
+    function shapeFeedValue(c, field) {
+        return field === "oi" ? Number(c.oiChg) : Number(c[field]);
+    }
+
     function shapeFeedItems(field) {
         const candles = state.candles;
         const items = [];
@@ -2619,14 +2638,14 @@
         const lastIdx = candles.length - 1;
         const absVals = [];
         for (let i = 0; i < candles.length; i++) {
-            const d = Math.abs(Number(candles[i][field]));
+            const d = Math.abs(shapeFeedValue(candles[i], field));
             if (isFinite(d) && d > 0) absVals.push(d);
         }
         absVals.sort((a, b) => a - b);
         const p90 = absVals.length ? (absVals[Math.floor(0.9 * (absVals.length - 1))] || 0) : 0;
         const minAbs = Math.max(1000 * chartVolScale(), p90 * 0.05);
         for (let i = candles.length - 1; i >= 0 && items.length < 150; i--) {
-            const d = Number(candles[i][field]);
+            const d = shapeFeedValue(candles[i], field);
             if (!isFinite(d) || Math.abs(d) < minAbs) continue;
             if (state.minUsd > 0 && Math.abs(d) < state.minUsd) continue;
             items.push({
@@ -2714,8 +2733,8 @@
         const coinBtn = tr.querySelector(".coin-link");
         if (coinBtn) {
             coinBtn.addEventListener("click", (e) => {
-                e.stopPropagation();
-                selectChartSymbol(decodeURIComponent(coinBtn.dataset.symbol));
+                e.stopPropagation();      // фильтр ленты + выбор монеты на графике
+                selectSymbol(decodeURIComponent(coinBtn.dataset.symbol));
             });
         }
         return tr;
@@ -3656,6 +3675,7 @@
             loadDrawings();   // фигуры — свои у каждой монеты
         }
         updateSymbolTitle();
+        updateFeedFilter();
         renderSymbolButtons();
         sendConfig();
         if (chartChanged) loadCandles();        // иначе график не трогаем вовсе
@@ -3675,10 +3695,21 @@
         state.lastTickAt = 0;
         state.lagMs = null;
         updateSymbolTitle();
+        updateFeedFilter();
         renderSymbolButtons();
         sendConfig();
         loadCandles();
         loadHistoryFor(s);   // пузырьки новой пары сразу с полной историей
+    }
+
+    if (feedFilterEl) {
+        feedFilterEl.addEventListener("click", () => selectSymbol("ALL"));
+        feedFilterEl.addEventListener("keydown", (e) => {
+            if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                selectSymbol("ALL");
+            }
+        });
     }
 
     function renderExchangeOptions(exchanges) {
@@ -3928,6 +3959,13 @@
         }[c]));
     }
 
+    // Партнёрская ссылка Gate (ru — русская страница, остальным — английская)
+    const GATE_REFS = {
+        ru: "https://www.gate.com/ru/signup/VLFCAVWMBW?ref_type=103",
+        en: "https://www.gate.com/signup/VLFCAVWMBW?ref_type=103",
+    };
+    function gateRefUrl() { return GATE_REFS[I18n.lang()] || GATE_REFS.en; }
+
     function renderHealth(health) {
         if (!health || !health.sources) return;
         state.lastHealth = health;
@@ -3955,6 +3993,10 @@
                 title.replace(/"/g, "&quot;") + '"><span>' + label + "</span>" +
                 (s.connected ? "" : '<span>✕</span>') + "</span>");
         });
+        // Партнёрская строка — в том же списке, что и биржи
+        parts.push('<a class="exch-ref" href="' + gateRefUrl() +
+            '" target="_blank" rel="noopener sponsored">' +
+            I18n.t("health.gate_ref") + "</a>");
         const dot = (okN === total && total) ? "ok" : (okN ? "mixed" : "bad");
         const wasOpen = exchHealthEl.classList.contains("open");
         exchHealthEl.innerHTML =
@@ -4195,7 +4237,10 @@
                 renderExchangeOptions(msg.exchanges);
                 renderHealth(msg.health);
                 renderSymbolButtons();
-                if (state.symbol !== "ALL" && state.symbols.indexOf(state.symbol) === -1) {
+                if (state.symbol !== "ALL" && state.symbols.indexOf(state.symbol) === -1 &&
+                        !(state.liquidations || []).some((x) => x.symbol === state.symbol)) {
+                    // монеты нет в списке сервера и событий по ней тоже нет —
+                    // только тогда возвращаем ленту ко всем монетам
                     state.symbol = "ALL";
                 }
                 if (!state.chartSymbol) {

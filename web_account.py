@@ -787,6 +787,9 @@ def register_account_routes(app) -> None:
             "services": ctx.store.list_services(True),
             "audit": ctx.store.recent_audit(20),
             "mail": (ctx.mailer.status() if ctx.mailer else {"enabled": False}),
+            "ai": (ctx.bot.ai_status()
+                   if ctx.bot is not None and hasattr(ctx.bot, "ai_status")
+                   else {"enabled": False}),
         }
 
     @router.get("/api/admin/users")

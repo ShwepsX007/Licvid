@@ -28,6 +28,13 @@ Environment=LIQSCOPE_PUBLIC_URL=https://liqscope.online
 Environment=LIQSCOPE_COOKIE_SECURE=1
 # Токен бота, админы, почта и секрет — только в /etc/systemd/system/licvid.service
 # (или drop-in), не в git:
+# ИИ-шапка постов в канал: Gemini → Groq → OpenRouter (все с бесплатными
+# тарифами). Без ключей сводка уходит с шаблонными шапками, как раньше.
+# Проверка: python3 tools/ai_check.py
+# Environment=LIQSCOPE_AI_GEMINI_KEY=
+# Environment=LIQSCOPE_AI_GROQ_KEY=
+# Environment=LIQSCOPE_AI_OPENROUTER_KEY=
+# Environment=LIQSCOPE_AI_ORDER=gemini,groq,openrouter
 # Environment=LIQSCOPE_BOT_TOKEN=
 # Environment=LIQSCOPE_ADMIN_IDS=          # telegram id админов
 # Environment=LIQSCOPE_ADMIN_EMAILS=       # админы, зарегистрированные по почте

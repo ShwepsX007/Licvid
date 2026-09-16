@@ -75,6 +75,10 @@ class TelegramBot:
         self._channel_id_cfg = (channel_id or os.getenv("LIQSCOPE_CHANNEL_ID")
                                 or "").strip()
         self.digest_fn = digest_fn or (lambda: {})
+        self.ai = None                      # ai_text.AiWriter из server.py (может не быть)
+        self._ai_recent: List[str] = []      # последние ИИ-шапки — чтобы не повторяться
+        self._ai_state: Dict[str, Any] = {}  # что ответил ИИ (для админки)
+        self._draft: Optional[Dict[str, Any]] = None   # непринятый пост (контроль)
         self._digest_task: Optional[asyncio.Task] = None
         self._ch_ok: Dict[int, float] = {}   # tg_id -> cache until
         self._ch_warn_at = 0.0               # троттлинг варнинга про канал
@@ -681,6 +685,51 @@ class TelegramBot:
             except asyncio.CancelledError:
                 break
 
+    # --- ИИ-шапка и контроль публикации -----------------------------------
+    def ai_status(self) -> Dict[str, Any]:
+        """Состояние ИИ для админки и /api/admin/overview."""
+        ai = getattr(self, "ai", None)
+        out: Dict[str, Any] = dict(ai.status()) if ai is not None else {"enabled": False}
+        try:
+            out["review"] = self._review_on()
+        except Exception:
+            out["review"] = False
+        out["last_post"] = dict(self._ai_state or {})
+        return out
+
+    def _review_on(self) -> bool:
+        """Контроль публикации: черновик у админа вместо поста в канал."""
+        try:
+            v = (self.store.get_setting("channel_digest_review") or "").strip().lower()
+        except Exception:
+            return False
+        return v in ("1", "on", "true", "yes")
+
+    def _set_review(self, on: bool, actor_id: Optional[int] = None) -> None:
+        self.store.set_setting("channel_digest_review", "1" if on else "0",
+                               actor_id=actor_id)
+
+    async def _ai_headline(self, snap: dict) -> tuple:
+        """(шапка или None, короткая пометка для админа)."""
+        ai = getattr(self, "ai", None)
+        if ai is None or not getattr(ai, "enabled", False):
+            self._ai_state = {"provider": "", "ok": False, "reason": "ИИ не настроен"}
+            return None, "ИИ не настроен — шапка из шаблонов"
+        try:
+            head = await ai.headline(snap, recent=list(self._ai_recent))
+        except Exception as e:                      # сеть, лимиты, что угодно
+            log.warning("ИИ-шапка: %s", e)
+            head = None
+        st = dict(ai.status().get("last") or {})
+        self._ai_state = st
+        if head:
+            self._ai_recent = (self._ai_recent + [head])[-8:]
+            note = f"ИИ: {st.get('provider') or '?'} · {st.get('ms') or 0} мс"
+        else:
+            note = (f"ИИ не ответил ({st.get('reason') or 'все сервисы'}) —"
+                    " шапка из шаблонов")
+        return head, note
+
     def _digest_fail(self, reason: str) -> bool:
         self._digest_err = reason
         log.warning("сводка: %s", reason)
@@ -710,13 +759,21 @@ class TelegramBot:
             hours = int(snap.get("window_h") or 4)
         except (TypeError, ValueError):
             hours = 4
+        ai_head, ai_note = await self._ai_headline(snap)
         caption = render_post(
             snap, n,
             headlines=active_headlines(self.store, hours),
+            head_override=ai_head,
             site_url=self.site_url(),
             bot_url=self.bot_url(),
         )
         img = pick_image(n, images=active_images(self.store))
+        if self._review_on():
+            return await self._send_draft(caption, img, n, ai_note)
+        return await self._publish_digest(cid, caption, img, n)
+
+    async def _publish_digest(self, cid, caption: str, img, n: int) -> bool:
+        """Отправка готового поста в канал + счётчики (общее для обоих режимов)."""
         markup = self.channel_link_kb()
         # одно сообщение: фото с подписью, иначе только текст. Никогда фото+текст.
         ok = False
@@ -738,6 +795,58 @@ class TelegramBot:
             extra = (" В канале у бота должно быть право «Публикация сообщений» "
                      "(и «Прикрепление файлов», если шлём картинку).")
         return self._digest_fail(err + extra)
+
+    async def _send_draft(self, caption: str, img, n: int, note: str) -> bool:
+        """Контроль публикации: показываем пост админу, в канал не отправляем."""
+        admin = 0
+        try:
+            admins = self.store.admin_tg_ids() if self.store else []
+            admin = int(admins[0]) if admins else 0
+        except Exception:
+            admin = 0
+        if not admin:
+            return self._digest_fail(
+                "Контроль публикации включён, но у бота нет админа с Telegram. "
+                "Выключите контроль в «Шаблоны канала» или привяжите Telegram админу")
+        self._draft = {"caption": caption, "img": img, "n": int(n), "note": note}
+        kb = {"inline_keyboard": [[
+            {"text": "✅ Опубликовать", "callback_data": "d:pub"},
+            {"text": "🔄 Перегенерировать", "callback_data": "d:regen"},
+            {"text": "✖️ Отмена", "callback_data": "d:no"}]]}
+        text = (f"<b>Черновик сводки</b>\n<i>{_esc(note)}</i>\n"
+                "В канал уйдёт только после «Опубликовать».\n\n" + caption)
+        await self.send(admin, text, kb)
+        log.info("сводка: черновик отправлен админу %s (n=%s)", admin, n)
+        return True
+
+    async def _on_draft_cb(self, chat_id, user: dict, data: str, message_id) -> None:
+        """Кнопки под черновиком: опубликовать / перегенерировать / отменить."""
+        d = dict(self._draft or {})
+        if data == "d:regen":
+            self._draft = None
+            await self.reply(chat_id, "Готовлю новый вариант…", None,
+                             message_id=message_id)
+            await self.post_channel_digest(force=True)
+            return
+        if data == "d:no":
+            self._draft = None
+            await self.reply(chat_id, "Черновик отменён, в канал ничего не ушло.",
+                             self._admin_kb(), message_id=message_id)
+            return
+        if data == "d:pub":
+            if not d:
+                await self.reply(chat_id, "Черновик уже неактуален — нажмите "
+                                 "«Сводка в канал» ещё раз.",
+                                 self._admin_kb(), message_id=message_id)
+                return
+            cid = self.channel_chat_id()
+            ok = False
+            if cid:
+                ok = await self._publish_digest(cid, d.get("caption") or "",
+                                                d.get("img"), int(d.get("n") or 0))
+            self._draft = None
+            await self.reply(chat_id, self._digest_result_text(ok), self._admin_kb(),
+                             message_id=message_id)
 
     async def answer_cb(self, cb_id: str, text: str = "") -> None:
         # Пустой text Telegram иногда отвергает — тогда клиент «залипает»
@@ -1236,8 +1345,12 @@ class TelegramBot:
                 await self.reply(chat_id, self._digest_result_text(posted),
                                  self._admin_kb(), message_id=message_id)
                 return
+            if user.get("is_admin") and data.startswith("d:"):
+                await self._on_draft_cb(chat_id, user, data, message_id)
+                return
             if user.get("is_admin") and (
-                    data == "a:tpl" or data.startswith("a:th") or data.startswith("a:tp")):
+                    data == "a:tpl" or data.startswith("a:th") or data.startswith("a:tp")
+                    or data in ("a:rv", "a:ai")):
                 await self._on_tpl_cb(chat_id, user, data, message_id)
                 return
             if data == "al" or data.startswith("al:"):
@@ -1435,6 +1548,21 @@ class TelegramBot:
             lines.append(f"… и ещё {len(heads) - 15}")
         if not heads:
             lines.append("Шапки пусты — в постах дефолтные из кода.")
+        lines.append("")
+        ai = getattr(self, "ai", None)
+        st = ai.status() if ai is not None else {"enabled": False}
+        if st.get("enabled"):
+            chain = " → ".join(str(x.get("name")) for x in (st.get("providers") or []))
+            last = st.get("last") or {}
+            tail = (f"последняя: {last.get('provider')} · {last.get('ms')} мс"
+                    if last.get("ok") else f"последняя: ошибка — {last.get('reason') or '—'}")
+            lines.append(f"🤖 ИИ-шапка: включена · {_esc(chain)}")
+            lines.append(f"   {_esc(tail)}")
+        else:
+            lines.append("🤖 ИИ-шапка: выключена (нет ключей) — шапки из шаблонов")
+        lines.append("🧪 Контроль постов: " +
+                     ("включён — черновик приходит сюда" if self._review_on()
+                      else "выключен — пост уходит сразу в канал"))
         return "\n".join(lines)
 
     def _tpl_kb(self) -> dict:
@@ -1443,6 +1571,9 @@ class TelegramBot:
              {"text": "➕ Фото", "callback_data": "a:tp+"}],
             [{"text": "🗑 Удалить шапку", "callback_data": "a:th-"},
              {"text": "🗑 Удалить фото", "callback_data": "a:tp-"}],
+            [{"text": f"🧪 Контроль: {'вкл' if self._review_on() else 'выкл'}",
+              "callback_data": "a:rv"},
+             {"text": "🤖 Проверить ИИ", "callback_data": "a:ai"}],
             [{"text": "← Назад", "callback_data": "nav:admin"}],
         ]}
 
@@ -1481,6 +1612,27 @@ class TelegramBot:
         if data == "a:tpl":
             await self.reply(chat_id, self._tpl_home_text(), self._tpl_kb(),
                              message_id=message_id)
+            return
+        if data == "a:rv":
+            on = not self._review_on()
+            self._set_review(on, actor_id=user.get("id"))
+            await self.reply(chat_id, self._tpl_home_text(), self._tpl_kb(),
+                             message_id=message_id)
+            return
+        if data == "a:ai":
+            snap: dict = {}
+            try:
+                raw = self.digest_fn() if self.digest_fn else {}
+                if asyncio.iscoroutine(raw):
+                    raw = await raw
+                snap = raw if isinstance(raw, dict) else {}
+            except Exception as e:
+                log.warning("проверка ИИ: снимок не собрался: %s", e)
+            head, note = await self._ai_headline(snap)
+            body = (f"🤖 <b>Проверка ИИ</b>\n<i>{_esc(note)}</i>\n\n"
+                    + (f"<b>{_esc(head)}</b>" if head
+                       else "Шапка: <i>не получилось, будет из шаблонов</i>"))
+            await self.reply(chat_id, body, self._tpl_kb(), message_id=message_id)
             return
         if data == "a:th+":
             self._wait_tpl[tg_id] = "head"

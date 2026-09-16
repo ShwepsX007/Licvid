@@ -52,6 +52,7 @@ from timeframes import parse_tf
 from oi_feed import map_candles_to_oi
 from accounts import Store
 from mailer import build_mailer
+from ai_text import build_ai
 from tg_bot import TelegramBot, normalize_public_url
 from web_account import ctx as account_ctx, register_account_routes
 
@@ -108,6 +109,9 @@ account_store = Store(ACCOUNTS_DB, SECRET, ADMIN_IDS, ADMIN_EMAILS)
 mailer = build_mailer(PUBLIC_URL)
 tg_bot = TelegramBot(BOT_TOKEN, account_store, PUBLIC_URL,
                      channel_url=CHANNEL_URL, channel_id=CHANNEL_ID)
+# ИИ-шапки для постов в канал: Gemini → Groq → OpenRouter (ключи из окружения).
+# Без ключей None — сводка уходит с шаблонными шапками, как раньше.
+tg_bot.ai = build_ai()
 
 KLINE_TTL = 20.0            # сек: как часто перезапрашивать историю с биржи
 # Ликвидации уходят клиенту сразу; интервал — только предохранитель от флуда

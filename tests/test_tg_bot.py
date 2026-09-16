@@ -491,6 +491,151 @@ class BotMenuTest(unittest.TestCase):
         }))
         self.assertEqual(self.store.get_setting("channel_id"), "-100777")
 
+    # --- ИИ-шапка и контроль публикации ------------------------------------
+    class _FakeAI:
+        """Заглушка ai_text.AiWriter: без сети, отвечает заранее заданной шапкой."""
+
+        enabled = True
+
+        def __init__(self, head="Рынок снова показал, кто здесь главный"):
+            self.head = head
+            self.seen = []
+
+        async def headline(self, snap, recent=None):
+            self.seen.append((snap, list(recent or [])))
+            return self.head
+
+        def status(self):
+            return {"enabled": True, "calls": 1, "fails": 0,
+                    "providers": [{"name": "gemini", "model": "gemini-2.5-flash-lite",
+                                   "ok": True, "reason": "", "dead": False, "ms": 800}],
+                    "last": {"provider": "gemini", "ok": True, "reason": "",
+                             "ms": 800, "ts": 0.0}}
+
+    def _capture_caption(self):
+        captured = {}
+
+        async def fake_photo(cid, path, caption="", markup=None, **_kw):
+            captured["cid"] = cid
+            captured["caption"] = caption
+            captured["markup"] = markup
+            return 11
+
+        async def fake_send(chat_id, text, kb=None, **_kw):
+            captured["cid"] = chat_id
+            captured["caption"] = text
+            captured["markup"] = kb
+            return 22
+
+        self.bot.send_photo = fake_photo  # type: ignore
+        self.bot.send = fake_send  # type: ignore
+        return captured
+
+    def test_ai_head_goes_into_post(self):
+        self.bot._channel_id_cfg = "-100111"
+        self.bot.ai = self._FakeAI()
+        cap = self._capture_caption()
+        self.assertTrue(asyncio.run(self.bot.post_channel_digest()))
+        self.assertIn("Рынок снова показал, кто здесь главный", cap["caption"])
+        self.assertTrue(self.bot.ai.seen)                 # модель реально звали
+        self.assertIn("$", cap["caption"])                # «сухие» цифры на месте
+
+    def test_menu_opens_without_channel_when_ai_missing(self):
+        """Без ключей ИИ бот работает как раньше — шапка из шаблонов."""
+        self.bot._channel_id_cfg = "-100111"
+        cap = self._capture_caption()
+        self.assertTrue(asyncio.run(self.bot.post_channel_digest()))
+        self.assertIn("liqscope.online", cap["caption"])
+        self.assertEqual(self.bot._ai_state.get("ok"), False)
+
+    def test_review_toggle_in_templates_menu(self):
+        calls = []
+
+        async def fake(method, payload=None):
+            calls.append((method, payload or {}))
+            return {"ok": True, "result": {"message_id": 77}}
+
+        self.bot._call = fake  # type: ignore
+        self.assertFalse(self.bot._review_on())
+        cb = {"id": "cb1", "from": {"id": 1001, "username": "boss", "first_name": "Ada"},
+              "data": "a:rv", "message": {"message_id": 5, "chat": {"id": 1001}}}
+        asyncio.run(self.bot._on_callback(cb))
+        self.assertTrue(self.bot._review_on())
+        self.assertEqual(self.store.get_setting("channel_digest_review"), "1")
+        text = [pl for m, pl in calls if m in ("editMessageText", "sendMessage")][0]["text"]
+        self.assertIn("Контроль постов: включён", text)
+        labels = [b["text"] for row in self.bot._tpl_kb()["inline_keyboard"] for b in row]
+        self.assertIn("🧪 Контроль: вкл", labels)
+
+    def test_review_mode_drafts_then_publishes(self):
+        self.bot._channel_id_cfg = "-100111"
+        self.bot.ai = self._FakeAI()
+        self.bot._set_review(True)
+        sent, photo = [], []
+
+        async def fake_send(chat_id, text, kb=None, **_kw):
+            sent.append((str(chat_id), text, kb))
+            return 1
+
+        async def fake_photo(cid, path, caption="", markup=None, **_kw):
+            photo.append((str(cid), caption))
+            return 11
+
+        self.bot.send = fake_send          # черновик админу
+        self.bot.send_photo = fake_photo   # публикация в канал
+        self.assertTrue(asyncio.run(self.bot.post_channel_digest()))
+        # в канал ничего не ушло, черновик — админу (tg_id 1001)
+        self.assertEqual(photo, [])
+        self.assertEqual([x[0] for x in sent], ["1001"])
+        self.assertIn("Черновик сводки", sent[0][1])
+        datas = [b["callback_data"] for row in sent[0][2]["inline_keyboard"] for b in row]
+        self.assertEqual(datas, ["d:pub", "d:regen", "d:no"])
+        self.assertEqual(self.store.get_setting("channel_digest_n", "0"), "0")
+
+        calls = []
+
+        async def fake_call(method, payload=None):
+            calls.append((method, payload or {}))
+            return {"ok": True, "result": {"message_id": 78}}
+
+        self.bot._call = fake_call  # type: ignore
+        cb = {"id": "cb2", "from": {"id": 1001, "username": "boss", "first_name": "Ada"},
+              "data": "d:pub", "message": {"message_id": 6, "chat": {"id": 1001}}}
+        asyncio.run(self.bot._on_callback(cb))
+        to_channel = [x for x in photo if x[0] == "-100111"] or \
+                     [x for x in sent if x[0] == "-100111"]
+        self.assertTrue(to_channel, "пост должен уйти в канал после нажатия")
+        self.assertIn("Рынок снова показал, кто здесь главный", to_channel[0][1])
+        self.assertEqual(self.store.get_setting("channel_digest_n", "0"), "1")
+
+    def test_review_cancel_keeps_channel_clean(self):
+        self.bot._channel_id_cfg = "-100111"
+        self.bot._set_review(True)
+        sent, photo = [], []
+
+        async def fake_send(chat_id, text, kb=None, **_kw):
+            sent.append((str(chat_id), text, kb))
+            return 1
+
+        async def fake_photo(cid, path, caption="", markup=None, **_kw):
+            photo.append(str(cid))
+            return 11
+
+        self.bot.send = fake_send  # type: ignore
+        self.bot.send_photo = fake_photo  # type: ignore
+        asyncio.run(self.bot.post_channel_digest())
+
+        async def fake_call(method, payload=None):
+            return {"ok": True, "result": {"message_id": 79}}
+
+        self.bot._call = fake_call  # type: ignore
+        cb = {"id": "cb3", "from": {"id": 1001, "username": "boss", "first_name": "Ada"},
+              "data": "d:no", "message": {"message_id": 7, "chat": {"id": 1001}}}
+        asyncio.run(self.bot._on_callback(cb))
+        self.assertEqual(photo, [])
+        self.assertIsNone(self.bot._draft)
+        self.assertEqual(self.store.get_setting("channel_digest_n", "0"), "0")
+
     def test_digest_sends_one_message(self):
         self.bot._channel_id_cfg = "-100111"
         calls = []

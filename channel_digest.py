@@ -352,6 +352,18 @@ def format_headline(tpl: str, h: int = 4) -> str:
     return f"<b>{_html.escape(s, quote=False)}</b>"
 
 
+def format_ai_head(text: str, h: int = 4) -> str:
+    """Шапка от ИИ: всегда экранируем и оборачиваем в <b>.
+
+    В отличие от шаблонов из админки (там можно прислать готовый HTML),
+    текст модели — это только текст: случайный «<» сломает разметку Telegram.
+    """
+    import html as _html
+    s = (text or "").strip().replace("{h}", str(int(h)))
+    s = s[:HEAD_MAX_LEN]
+    return f"<b>{_html.escape(s, quote=False)}</b>" if s else ""
+
+
 def _headlines(h: int) -> tuple:
     """Встроенные шапки (пока в БД нет своих)."""
     return tuple(format_headline(t, h) for t in DEFAULT_HEAD_TEMPLATES)
@@ -388,11 +400,14 @@ def active_images(store=None) -> List[str]:
 
 def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = None,
                 site_url: str = "https://liqscope.online",
-                bot_url: str = "https://t.me/LiqScopeBot") -> str:
+                bot_url: str = "https://t.me/LiqScopeBot",
+                head_override: Optional[str] = None) -> str:
     """Сводка: живая шапка + компактные блоки в два столбика.
 
     Компоновка — как в терминале: слева биржа/монета, справа цифры.
     variant крутит и шапку, и порядок блоков (тексты не повторяются).
+    head_override — шапка, написанная ИИ: если она прошла проверку, берём её
+    вместо шаблона, а раскладка продолжает чередоваться по variant.
     """
     import html as _html
     f = _facts(snap)
@@ -407,7 +422,8 @@ def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = N
     # шапку и компоновку крутим независимо: своя единственная шапка из админки
     # не должна «замораживать» раскладку — блоки продолжают чередоваться
     v = int(variant)
-    head = heads[v % max(1, len(heads))]
+    head = (format_ai_head(head_override, h) if head_override
+            else heads[v % max(1, len(heads))])
 
     ex, ex6 = f["ex"], f["ex6"]
     coins, coins8 = f["coins"], f["coins8"]

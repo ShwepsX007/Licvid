@@ -111,6 +111,10 @@ class TelegramBot:
         self._mail_at: Dict[str, float] = {}        # "tg:адрес" -> когда слали письмо
         self.mailer = None                          # mailer.Mailer из server.py
         self._menu_msg: Dict[int, int] = {}         # chat_id -> последнее меню
+        # chat_id -> id последнего отправленного сообщения. Нужен, чтобы не
+        # править меню, которое уже уехало вверх: id сообщений в чате растут,
+        # и по этой паре видно, ушло ли после меню что-то ещё (алерты, отчёты).
+        self._last_msg: Dict[int, int] = {}
         self.alerts_market_fn: Optional[Callable[[], Any]] = None
         self._poll_fails = 0          # подряд неудачных getUpdates
         self._conflict_warned_at = 0.0  # когда последний раз слали 409-предупреждение
@@ -454,16 +458,38 @@ class TelegramBot:
                 res = await self._call("sendMessage", body)
                 if res and res.get("ok"):
                     mid = (res.get("result") or {}).get("message_id")
-                    try:
-                        return int(mid) if mid is not None else None
-                    except (TypeError, ValueError):
-                        return None
+                    return self._note_sent(chat_id, mid)
             return None
         mid = (res.get("result") or {}).get("message_id")
+        return self._note_sent(chat_id, mid)
+
+    def _note_sent(self, chat_id, message_id) -> Optional[int]:
+        """Запомнить последнее сообщение чата: id растут по времени.
+
+        Нужно для меню: пока id меню-сообщения не меньше последнего
+        отправленного, оно лежит внизу и правка не сдвинет ленту.
+        """
         try:
-            return int(mid) if mid is not None else None
+            cid, mid = int(chat_id), int(message_id)
         except (TypeError, ValueError):
             return None
+        self._last_msg[cid] = max(mid, self._last_msg.get(cid, 0))
+        return mid
+
+    def _menu_is_last(self, chat_id: int, mid: Optional[int]) -> bool:
+        """Меню — последнее сообщение чата? Тогда правим на месте.
+
+        Если после меню бот прислал что-то ещё (сигналы алертов, отчёт о
+        сводке, черновик), старое сообщение уже выше по ленте: правка
+        показывает именно его, и пользователю приходится мотать чат вверх.
+        """
+        if not mid:
+            return False
+        try:
+            last = int(self._last_msg.get(int(chat_id)) or 0)
+            return not last or int(mid) >= last
+        except (TypeError, ValueError):
+            return False
 
     async def edit(self, chat_id: int, message_id: int, text: str,
                    markup: Optional[dict] = None, parse: str = "HTML") -> bool:
@@ -505,20 +531,33 @@ class TelegramBot:
             "chat_id": chat_id, "message_id": int(message_id),
         })
 
+    def _stale_menus(self) -> int:
+        """Сколько чатов живут с меню, уехавшим вверх по ленте (диагностика)."""
+        return sum(1 for cid, mid in self._menu_msg.items()
+                   if not self._menu_is_last(cid, mid))
+
     async def show_menu(self, chat_id: int, text: str, markup: Optional[dict] = None,
                         old_id: Optional[int] = None) -> bool:
-        """Тот же экран: правим сообщение на месте, без пуша и удаления.
+        """Экран меню — всегда внизу чата, под сигналами и отчётами.
 
-        ReplyKeyboard живёт у чата и не требует нового send. Инлайн под текстом
-        обновляется через editMessageText. Новое сообщение — только если править
-        нечего (первый /start или бот перезапустился); тогда без звука.
+        Пока меню — последнее сообщение, правим его на месте: без новых
+        сообщений, пуша и мусора. Но если после меню бот прислал что-то ещё
+        (сигналы алертов, отчёт, черновик), править старое нельзя: Telegram
+        показывает именно его, и лента уезжает наверх — приходилось мотать
+        чат. Тогда шлём свежий экран вниз, а старое меню убираем, чтобы в
+        чате оставался один актуальный экран.
+
+        ReplyKeyboard живёт у чата и приезжает вместе с новым send. Инлайн
+        под текстом обновляется через editMessageText.
         """
         chat_id = int(chat_id)
         inline = self._inline_markup(markup)
         mid = old_id or self._menu_msg.get(chat_id)
-        if mid:
+        stale = bool(mid) and not self._menu_is_last(chat_id, mid)
+        if mid and not stale:
             if await self.edit(chat_id, int(mid), text, inline):
                 self._menu_msg[chat_id] = int(mid)
+                self._note_sent(chat_id, mid)
                 return True
         new_id = await self.send(chat_id, text, markup, silent=True)
         if not new_id:
@@ -527,7 +566,14 @@ class TelegramBot:
             log.error("меню не доставлено chat=%s: %s", chat_id,
                       self._last_tg_err or "Telegram не ответил")
             return False
-        self._menu_msg[chat_id] = int(new_id)
+        new_id = int(new_id)
+        self._menu_msg[chat_id] = new_id
+        if stale:
+            # Старые экраны больше не нужны: пользователь просил меню
+            # последним сообщением, а не стопку меню между алертами.
+            for old in {int(mid or 0), int(old_id or 0)}:
+                if old and old != new_id:
+                    await self.drop_menu(chat_id, old)
         return True
 
     async def reply(self, chat_id: int, text: str, markup: Optional[dict] = None,
@@ -1038,10 +1084,7 @@ class TelegramBot:
             log.warning("tg sendPhoto: %s", desc)
             return None
         mid = (res.get("result") or {}).get("message_id")
-        try:
-            return int(mid) if mid is not None else None
-        except (TypeError, ValueError):
-            return None
+        return self._note_sent(chat_id, mid)
 
     async def _channel_loop(self) -> None:
         from channel_digest import WINDOW_SEC
@@ -1538,6 +1581,7 @@ class TelegramBot:
                if st["last_err"] else ""),
             f"перезапусков сторожем: {st['watchdog_restarts']}"
             f" · чатов с меню: {len(self._menu_msg)}"
+            f" · меню не внизу: {self._stale_menus()}"
             f" · ожиданий ввода: {st['waits']}",
         ]
         return "\n".join(lines) + self.site_footer()

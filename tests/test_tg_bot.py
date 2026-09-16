@@ -226,6 +226,81 @@ class BotMenuTest(unittest.TestCase):
         self.assertIn("Рынок", edited["text"])
         self.assertEqual(self.bot._menu_msg[2002], 77)
 
+    def test_menu_after_alerts_moves_to_bottom(self):
+        """После алертов меню открывается внизу, старое сообщение убирается."""
+        calls = []
+        n = {"id": 100}
+
+        async def fake(method, payload=None):
+            calls.append((method, payload or {}))
+            if method == "sendMessage":
+                n["id"] += 1
+                return {"ok": True, "result": {"message_id": n["id"]}}
+            return {"ok": True}
+
+        self.bot._call = fake  # type: ignore
+        self.bot._menu_msg.clear()
+        self.bot._last_msg.clear()
+        kb = self.bot._reply_kb(self.user)
+        # первое меню — сообщение 101, оно же последнее
+        asyncio.run(self.bot.show_menu(2002, "меню", kb))
+        self.assertEqual(self.bot._menu_msg[2002], 101)
+        calls.clear()
+        asyncio.run(self.bot.show_menu(2002, "кабинет", kb))
+        self.assertEqual([m for m, _ in calls], ["editMessageText"])
+        # прилетели сигналы алертов: сообщения 102 и 103
+        asyncio.run(self.bot.send(2002, "алерт 1", markup=self.bot.site_link_kb()))
+        asyncio.run(self.bot.send(2002, "алерт 2", markup=self.bot.site_link_kb()))
+        calls.clear()
+        asyncio.run(self.bot.show_menu(2002, "меню снова", kb))
+        methods = [m for m, _ in calls]
+        self.assertIn("sendMessage", methods)        # свежий экран внизу
+        self.assertNotIn("editMessageText", methods)  # уехавшее вверх не трогаем
+        self.assertTrue([p for m, p in calls
+                         if m == "deleteMessage" and p.get("message_id") == 101], calls)
+        sent = [p for m, p in calls if m == "sendMessage"][0]
+        self.assertTrue(sent.get("disable_notification"))   # без пуша
+        # 101 — меню, 102–103 — алерты, 104 — свежее меню внизу
+        self.assertEqual(self.bot._menu_msg[2002], 104)
+        # меню снова последнее: следующее нажатие правит его на месте
+        calls.clear()
+        asyncio.run(self.bot.show_menu(2002, "и снова меню", kb))
+        self.assertEqual([m for m, _ in calls], ["editMessageText"])
+
+    def test_menu_button_after_alerts_lands_below(self):
+        """Кнопка «☰ Меню» после алертов: новый экран внизу, старый удалён."""
+        calls = []
+        n = {"id": 200}
+
+        async def fake(method, payload=None):
+            calls.append((method, payload or {}))
+            if method == "sendMessage":
+                n["id"] += 1
+                return {"ok": True, "result": {"message_id": n["id"]}}
+            return {"ok": True}
+
+        self.bot._call = fake  # type: ignore
+        self.bot._menu_msg.clear()
+        self.bot._last_msg.clear()
+        kb = self.bot._reply_kb(self.user)
+        asyncio.run(self.bot.show_menu(2002, "меню", kb))
+        old = self.bot._menu_msg[2002]
+        # алерт пришёл уже после меню — иначе меню осталось бы внизу
+        asyncio.run(self.bot.send(2002, "алерт", markup=self.bot.site_link_kb()))
+        calls.clear()
+        upd = {"update_id": 1, "message": {
+            "message_id": 900, "text": "☰ Меню", "from": {"id": 2002,
+                                                          "first_name": "Bob"},
+            "chat": {"id": 2002, "type": "private"}}}
+        asyncio.run(self.bot._on_update(upd))
+        methods = [m for m, _ in calls]
+        self.assertIn("sendMessage", methods)
+        self.assertNotIn("editMessageText", methods)
+        self.assertTrue([p for m, p in calls
+                         if m == "deleteMessage" and p.get("message_id") == old], calls)
+        self.assertGreater(self.bot._menu_msg[2002], old)
+        self.assertFalse(self.bot._stale_menus())     # меню снова внизу
+
     def test_back_callback_edits_home(self):
         calls = []
 

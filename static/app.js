@@ -814,9 +814,16 @@
         // Кегль хотим как можно крупнее — растёт вместе с телом свечи вширь
         // и вверх, — но подпись обязана влезть в плашку.
         let font = Math.min(w * LIQ_PLATE_FONT_W, h * LIQ_PLATE_FONT_H,
-                            LIQ_PLATE_FONT_MAX);
-        font = Math.min(font, room / per);
+                            LIQ_PLATE_FONT_MAX, room / per);
+        // Ширина текста в канвасе растёт от кегля почти линейно, но не строго:
+        // подгоняем по реальной мере, чтобы подпись гарантированно влезла.
+        for (let i = 0; i < 3; i++) {
+            const wide = measure(text, font);
+            if (!(wide > room)) break;
+            font = font * (room / wide) * 0.97;
+        }
         if (font < LIQ_PLATE_FONT_MIN) return out;   // узко/мелко — цифры убираем
+        if (measure(text, font) > room) return out;  // не влезла даже сжатой
         out.font = font;
         out.showLabel = true;
         out.text = text;

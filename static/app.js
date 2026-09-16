@@ -778,15 +778,20 @@
     }
 
     // --- Плашки ликвидаций ------------------------------------------------------
-    // Плашка живёт на теле свечи. Все ликвидации одного бара собираются в одну
-    // плашку (раньше их было до шести на свечу — они и «налеплялись» кластером
-    // поверх графика). Габариты привязаны к свече:
-    //   • высота — почти тело: зазор 3% сверху и снизу, тело остаётся видно;
-    //   • ширина — слот свечи: тянете график вширь — плашки и тела растут
+    // Плашка — компактная метка кластера ликвидаций: она стоит **там, где были
+    // ликвидации** (по цене, внутри свечи), а не растянута по её телу.
+    // Габариты:
+    //   • высота — как была: 15px у обычной плашки, 16–22px у кита (от суммы),
+    //     10px у чипа без цифр. Сверху ограничена телом свечи с зазором 3%
+    //     с каждой стороны — тело никогда не закрывается целиком;
+    //   • ширина — слот свечи: тянете график вширь — свечи и плашки растут
     //     вместе, сужаете — сжимаются вместе с ними.
     // Цифры внутри показываем, только если помещаются: кегль растёт вместе с
     // шириной, при сужении подпись убирается совсем (остаётся цвет стороны).
     const LIQ_PLATE_GAP = 0.03;      // зазор до тела свечи с каждой стороны
+    const LIQ_PLATE_H = 15;          // высота обычной плашки (как было)
+    const LIQ_PLATE_CHIP_H = 10;     // чип без цифр
+    const LIQ_PLATE_WHALE_H = 16;    // базовая высота плашки кита (+ до 6px)
     const LIQ_PLATE_W_FRAC = 0.86;   // доля слота свечи по ширине
     const LIQ_PLATE_MIN_W = 3;       // совсем узкий слот: плашка-штрих
     const LIQ_PLATE_MIN_H = 2;
@@ -796,23 +801,36 @@
     const LIQ_PLATE_FONT_W = 0.9;    // кегль как доля ширины плашки
     const LIQ_PLATE_FONT_H = 0.74;   // кегль как доля высоты плашки
 
+    // Высота плашки: как была, с поправкой на сумму для китов.
+    function liqPlateBaseH(wantLabel, whale, total) {
+        if (!wantLabel) return LIQ_PLATE_CHIP_H;
+        if (!whale) return LIQ_PLATE_H;
+        const extra = Math.min(6, Math.max(-3,
+            (Math.log10(Math.max(Number(total) || 10, 10)) - 5) * 2.5));
+        return LIQ_PLATE_WHALE_H + extra;
+    }
+
     // Габариты плашки по телу свечи и слоту; подпись — если помещается.
     // Чистая функция (проверяется в tests/liq_plates.js): measure(text, font)
     // возвращает ширину текста в пикселях на заданном кегле.
-    function liqPlateGeom(bodyPx, slotPx, label, measure) {
+    function liqPlateGeom(bodyPx, slotPx, label, measure, baseH) {
         const slot = Math.max(1, Number(slotPx) || 1);
         const body = Math.max(0, Number(bodyPx) || 0);
+        const base = Math.max(LIQ_PLATE_MIN_H, Number(baseH) || LIQ_PLATE_H);
         const w = Math.max(LIQ_PLATE_MIN_W, Math.round(slot * LIQ_PLATE_W_FRAC));
-        const h = Math.max(LIQ_PLATE_MIN_H,
-                           Math.round(body * (1 - 2 * LIQ_PLATE_GAP)));
+        // Потолок по телу: 3% зазора с каждой стороны (floor — чтобы округление
+        // не съедало зазор). На тонкой свече плашка становится тоньше её тела.
+        const cap = Math.floor(body * (1 - 2 * LIQ_PLATE_GAP));
+        const h = Math.max(LIQ_PLATE_MIN_H, cap > 0 ? Math.min(base, cap)
+                                                   : LIQ_PLATE_MIN_H);
         const out = { w: w, h: h, font: 0, showLabel: false, text: "" };
         const text = String(label || "");
         if (!text || typeof measure !== "function") return out;
         const room = w - LIQ_PLATE_TEXT_PAD;
         const per = measure(text, 1);      // ширина подписи на кегле 1
         if (!(per > 0) || !(room > 0)) return out;
-        // Кегль хотим как можно крупнее — растёт вместе с телом свечи вширь
-        // и вверх, — но подпись обязана влезть в плашку.
+        // Кегль хотим как можно крупнее — растёт вместе с шириной плашки,
+        // но подпись обязана в неё влезть.
         let font = Math.min(w * LIQ_PLATE_FONT_W, h * LIQ_PLATE_FONT_H,
                             LIQ_PLATE_FONT_MAX, room / per);
         // Ширина текста в канвасе растёт от кегля почти линейно, но не строго:
@@ -885,15 +903,19 @@
             let price = Number(item.price);
             if (!isFinite(price)) price = bar.close;
             price = Math.min(Math.max(price, lo), hi);
-            // Ключ — сам бар: одна плашка на свечу вместо шести уровней внутри
-            let c = clusters.get(t);
+            // Внутри свечи — шесть уровней (как и было): кластер стоит там,
+            // где были ликвидации, а не растянут по всему телу свечи.
+            const span = hi - lo;
+            const level = span > 0 ? Math.round(((price - lo) / span) * 5) : 0;
+            const key = "b" + t + "_" + level;
+            let c = clusters.get(key);
             if (!c) {
                 c = {
-                    key: "b" + t, time: t, bar: bar, lo: lo, hi: hi,
+                    key: key, time: t, bar: bar, lo: lo, hi: hi, level: level,
                     longUsd: 0, shortUsd: 0, total: 0, count: 0, longN: 0,
                     shortN: 0, ids: [], exchs: {}, pxSum: 0,
                 };
-                clusters.set(t, c);
+                clusters.set(key, c);
             }
             if (item.side === "SELL") { c.longUsd += item.usd; c.longN += 1; }
             else { c.shortUsd += item.usd; c.shortN += 1; }
@@ -909,6 +931,8 @@
         });
         if (!clusters.size) return;
 
+        const priceOf = (c) => (c.total > 0 ? c.pxSum / c.total
+                                            : Number(c.bar.close));
         const ts = chart.timeScale();
         const slotPx = plateSlotPx();
         const measure = (text, font) => {
@@ -920,24 +944,23 @@
         const activeKey = pinHitKey || hoverHitKey;   // закреплённый важнее
 
         clusterHits = [];
-        const drawn = [];    // страховка от наложения (одна плашка на свечу)
+        const drawn = [];    // наложение: сначала чип без цифр, потом пропуск
         ctx.save();
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
         list.forEach((c) => {
             const bar = c.bar;
-            const price = c.total > 0 ? c.pxSum / c.total : Number(bar.close);
             let x, yO, yC, y;
             try {
                 x = ts.timeToCoordinate(c.time);
                 yO = candleSeries.priceToCoordinate(Number(bar.open));
                 yC = candleSeries.priceToCoordinate(Number(bar.close));
-                y = candleSeries.priceToCoordinate(price);
+                y = candleSeries.priceToCoordinate(priceOf(c));
             } catch (e) { return; }
             if (x === null || x === undefined || !isFinite(x)) return;
             if (!isFinite(yO) || !isFinite(yC)) return;
             if (x < -40 || x > clusterCanvas.width + 40) return;
-            const bodyTop = Math.min(yO, yC), bodyBot = Math.max(yO, yC);
+            const bodyPx = Math.abs(yC - yO);
 
             const whale = c.total >= WHALE_USD * kvol;
             const isLong = c.longUsd >= c.shortUsd;
@@ -945,40 +968,44 @@
                                 : (isLong ? LIQ_COLORS.long : LIQ_COLORS.short);
             const wantLabel = whale || c.total >= LIQ_LABEL_MIN_USD * kvol;
             const full = fmtCompact(c.total);
-            let geom = liqPlateGeom(bodyBot - bodyTop, slotPx,
-                                    wantLabel ? full : "", measure);
+            const baseH = liqPlateBaseH(wantLabel, whale, c.total);
+            let geom = liqPlateGeom(bodyPx, slotPx, wantLabel ? full : "",
+                                    measure, baseH);
             if (wantLabel && !geom.showLabel && full.charAt(0) === "$") {
                 // Не влезла подпись со знаком валюты — пробуем без него:
                 // в узком слоте выигранный символ и есть шанс показать цифры.
-                const alt = liqPlateGeom(bodyBot - bodyTop, slotPx,
-                                         full.slice(1), measure);
+                const alt = liqPlateGeom(bodyPx, slotPx, full.slice(1),
+                                         measure, baseH);
                 if (alt.showLabel) geom = alt;
             }
-            const bw = geom.w, bh = geom.h, half = bh / 2;
-            // Центр плашки — по цене ликвидаций, но внутри тела: иначе она
-            // вылезла бы за свечу и закрыла её целиком.
-            let cy = isFinite(y) ? y : (bodyTop + bodyBot) / 2;
-            if (bodyBot - bodyTop >= bh) {
-                cy = Math.min(Math.max(cy, bodyTop + half), bodyBot - half);
-            } else {
-                cy = (bodyTop + bodyBot) / 2;
-            }
-            const fx = Math.round(x - bw / 2), fy = Math.round(cy - half);
-            let clash = false;
-            for (let j = 0; j < drawn.length; j++) {
-                const d = drawn[j];
-                if (fx < d.x + d.w && fx + bw > d.x &&
-                        fy < d.y + d.h && fy + bh > d.y) {
-                    clash = true;
-                    break;
+            // Центр плашки — ровно на цене ликвидаций (в моменте), а не в
+            // середине тела: по положению видно уровень, где снесло позиции.
+            const cy = isFinite(y) ? y : (yO + yC) / 2;
+            const place = (g) => {
+                const bx = Math.round(x - g.w / 2), by = Math.round(cy - g.h / 2);
+                for (let j = 0; j < drawn.length; j++) {
+                    const d = drawn[j];
+                    if (bx < d.x + d.w && bx + g.w > d.x &&
+                            by < d.y + d.h && by + g.h > d.y) return null;
                 }
+                return { fx: bx, fy: by, bw: g.w, bh: g.h };
+            };
+            let box = place(geom);
+            if (!box && geom.showLabel) {
+                // Налезает на соседнюю плашку — как и раньше, показываем чипом
+                // без цифр: уровень виден, цифры не наслаиваются.
+                const chip = liqPlateGeom(bodyPx, slotPx, "", measure,
+                                          LIQ_PLATE_CHIP_H);
+                box = place(chip);
+                if (box) geom = chip;
             }
-            if (clash) return;
+            if (!box) return;
+            const fx = box.fx, fy = box.fy, bw = box.bw, bh = box.bh;
             drawn.push({ x: fx, y: fy, w: bw, h: bh });
 
             const isActive = activeKey === c.key;
             clusterHits.push({ kind: "liq", x: fx, y: fy, w: bw, h: bh, key: c.key,
-                ids: c.ids, time: c.time, price: price, total: c.total,
+                ids: c.ids, time: c.time, price: priceOf(c), total: c.total,
                 count: c.count, longUsd: c.longUsd, shortUsd: c.shortUsd,
                 longN: c.longN, shortN: c.shortN, whale: whale, exchs: c.exchs });
 
@@ -2481,11 +2508,14 @@
             plateGeom: liqPlateGeom,
             slotPx: plateSlotPx,
             plateGap: LIQ_PLATE_GAP,
+            plateBaseH: liqPlateBaseH,
             fontMin: LIQ_PLATE_FONT_MIN,
             // для tests/liq_plates.js: что реально нарисовано и как свеча
             // отображается в пиксели при текущем масштабе
-            hits: () => clusterHits.map((h) => ({ x: h.x, y: h.y,
-                                                  w: h.w, h: h.h, key: h.key })),
+            hits: () => clusterHits.map((h) => ({ x: h.x, y: h.y, w: h.w,
+                                                  h: h.h, key: h.key,
+                                                  price: h.price, total: h.total,
+                                                  count: h.count })),
             priceToY: (v) => candleSeries.priceToCoordinate(Number(v)),
             timeToX: (t) => chart.timeScale().timeToCoordinate(Number(t)),
             // Растягивание графика: в jsdom библиотека не пересчитывает

@@ -93,6 +93,9 @@ class TelegramBot:
         self._wait_broadcast: Dict[int, bool] = {}  # tg_id -> waiting for text
         self._wait_tpl: Dict[int, str] = {}         # tg_id -> "head"|"photo"
         self._wait_alert: Dict[int, str] = {}       # tg_id -> "coin"|"win"|"thr:liq"|...
+        self._wait_email: Dict[int, float] = {}     # tg_id -> ждём адрес почты до
+        self._mail_at: Dict[str, float] = {}        # "tg:адрес" -> когда слали письмо
+        self.mailer = None                          # mailer.Mailer из server.py
         self._menu_msg: Dict[int, int] = {}         # chat_id -> последнее меню
         self.alerts_market_fn: Optional[Callable[[], Any]] = None
         self._poll_fails = 0          # подряд неудачных getUpdates
@@ -222,6 +225,11 @@ class TelegramBot:
         ]
         if user and user.get("is_admin"):
             rows.append([{"text": "★ Админка"}])
+        if user is not None:
+            email = (user.get("email") or "").strip()
+            if not email or not user.get("email_verified"):
+                # Основной вход — почта: напоминаем, пока адрес не подтверждён
+                rows.append([{"text": "✉️ Подтвердить почту"}])
         return {
             "keyboard": rows,
             "resize_keyboard": True,
@@ -234,6 +242,7 @@ class TelegramBot:
         key = key.replace("★ ", "").replace("👤 ", "").replace("⚡ ", "")
         key = key.replace("📊 ", "").replace("🩺 ", "").replace("🛠 ", "")
         key = key.replace("📰 ", "").replace("🔔 ", "").replace("📣 ", "")
+        key = key.replace("✉️ ", "").replace("📧 ", "")
         return {
             "кабинет": "cabinet",
             "терминал": "terminal",
@@ -242,6 +251,9 @@ class TelegramBot:
             "сервисы": "services",
             "лента": "liq",
             "лента liq": "liq",
+            "подтвердить почту": "mail",
+            "почта": "mail",
+            "email": "mail",
             "алерты": "al",
             "алерты по объёму": "al",
             "канал": "channel",
@@ -1199,6 +1211,19 @@ class TelegramBot:
                 await self.show_menu(chat_id, msg_ok + "\n\n" + self._alert_text(user),
                                      self._alert_kb(user))
                 return
+        until = float(self._wait_email.get(tg_id) or 0)
+        if until and until < time.time():
+            self._wait_email.pop(tg_id, None)
+            until = 0
+        if until:
+            if text.startswith("/"):
+                self._wait_email.pop(tg_id, None)
+                if text.startswith("/cancel"):
+                    await self.show_menu(chat_id, "Отмена.", self._cabinet_kb(user))
+                    return
+            else:
+                await self._handle_email_input(chat_id, user, text)
+                return
         wait = self._wait_tpl.get(tg_id)
         if wait and user.get("is_admin"):
             if text.startswith("/"):
@@ -1288,6 +1313,9 @@ class TelegramBot:
             await self.show_menu(chat_id, self._help(user), self._reply_kb(user))
         elif text.startswith("/cabinet"):
             await self.show_menu(chat_id, self._cabinet_text(user), self._reply_kb(user))
+        elif text.startswith("/mail"):
+            body, kb = self._screen(user, "mail")
+            await self.show_menu(chat_id, body, kb)
         elif text.startswith("/stats"):
             await self.show_menu(chat_id, self._stats_text(), self._reply_kb(user))
         elif text.startswith("/status") or text.startswith("/health"):
@@ -1328,6 +1356,7 @@ class TelegramBot:
             self._wait_broadcast.pop(tg_id, None)
             self._wait_tpl.pop(tg_id, None)
             self._wait_alert.pop(tg_id, None)
+            self._wait_email.pop(tg_id, None)
         # Сначала снимаем «часики»: если answer уйдёт после edit или с
         # пустым text, клиент залипает и следующие кнопки не нажимаются.
         await self.answer_cb(cb["id"])
@@ -1344,6 +1373,36 @@ class TelegramBot:
                 if not ok:
                     log.warning("меню не обновилось data=%s chat=%s msg=%s",
                                 data, chat_id, message_id)
+                return
+            if data == "a:vmail":
+                self._wait_email[int(tg_id or 0)] = time.time() + 900
+                await self.show_menu(
+                    chat_id,
+                    "Пришлите адрес почты следующим сообщением.\n"
+                    "На него уйдёт письмо со ссылкой — по ней почта привяжется"
+                    " к этому аккаунту, и вы сможете входить на сайт.\n\n"
+                    "/cancel — отмена.",
+                    self._cabinet_kb(user))
+                return
+            if data == "a:vchk":
+                fresh = self.store.get_user(int(user["id"])) or user
+                email = (fresh.get("email") or "").strip()
+                if email and fresh.get("email_verified"):
+                    await self.show_menu(
+                        chat_id,
+                        f"Готово: <code>{_esc(email)}</code> подтверждена ✅\n"
+                        "Теперь можно входить на сайт и этим адресом, и Telegram.",
+                        self._cabinet_kb(fresh))
+                elif email:
+                    await self.show_menu(
+                        chat_id,
+                        f"Почта <code>{_esc(email)}</code> пока не подтверждена.\n"
+                        "Откройте письмо от LiqScope и нажмите в нём кнопку —"
+                        " ссылка живёт 24 часа.",
+                        self._cabinet_kb(fresh))
+                else:
+                    await self.show_menu(chat_id, "Почта ещё не привязана.",
+                                         self._cabinet_kb(fresh))
                 return
             if data == "a:digest" and user.get("is_admin"):
                 posted = await self.post_channel_digest(force=True)
@@ -1390,6 +1449,10 @@ class TelegramBot:
             return self._home_text(user), self._reply_kb(user)
         if data == "cabinet":
             return self._cabinet_text(user), self._reply_kb(user)
+        if data == "mail":
+            # Напоминание из кабинета: ждём адрес почты следующим сообщением
+            self._wait_email[int(user.get("tg_id") or 0)] = time.time() + 900
+            return self._mail_screen(user), self._cabinet_kb(user)
         if data == "stats":
             return self._stats_text(), self._reply_kb(user)
         if data == "health":
@@ -1710,6 +1773,150 @@ class TelegramBot:
             return {"ok": False, "error": str(e)[:80]}
         return self.store.add_digest_photo(blob, filename=name, actor_id=user["id"])
 
+    def _cabinet_kb(self, user: dict) -> dict:
+        """Кнопки кабинета: напоминание про почту и возврат в меню."""
+        rows = []
+        email = (user.get("email") or "").strip()
+        if not email or not user.get("email_verified"):
+            rows.append([{"text": "✉️ Подтвердить почту",
+                          "callback_data": "a:vmail"}])
+        if email and not user.get("email_verified"):
+            rows.append([{"text": "✅ Я подтвердил почту",
+                          "callback_data": "a:vchk"}])
+        rows.append([{"text": "← В меню", "callback_data": "nav:home"}])
+        return {"inline_keyboard": rows}
+
+    def _mail_screen(self, user: dict) -> str:
+        email = (user.get("email") or "").strip()
+        head = "<b>✉️ Подтверждение почты</b>\n"
+        if email and user.get("email_verified"):
+            return (head + f"Почта <code>{_esc(email)}</code> уже подтверждена ✅\n"
+                    "Она работает и на сайте, и здесь." + self.site_footer())
+        lines = [
+            head.rstrip(),
+            "Почта — основной вход на сайт: по ней приходит ссылка для входа"
+            " и сброс пароля.",
+        ]
+        if email:
+            lines += [
+                f"Сейчас привязана <code>{_esc(email)}</code>, но она"
+                " <b>не подтверждена</b> — вход на сайт закрыт.",
+                "Пришлите адрес ещё раз, если нужно письмо с новой ссылкой.",
+            ]
+        else:
+            lines.append("Сейчас почта к аккаунту не привязана.")
+        lines.append("Пришлите адрес следующим сообщением — отправлю письмо"
+                     " со ссылкой. /cancel — отмена.")
+        return "\n".join(lines) + self.site_footer()
+
+    def _mail_left(self, tg_id: int, email: str, wait: float = 90.0) -> int:
+        """Сколько секунд ждать до следующего письма (0 — можно слать)."""
+        key = f"{int(tg_id)}:{email}"
+        last = float(self._mail_at.get(key) or 0)
+        left = int(wait - (time.time() - last)) if last else 0
+        if left > 0:
+            return left
+        self._mail_at[key] = time.time()
+        return 0
+
+    def _mail_send(self, kind: str, to: str, token: str, name: str = "") -> bool:
+        """Письмо из бота: mailer тот же, что у сайта (server.py подкладывает)."""
+        m = self.mailer
+        if not m or not getattr(m, "enabled", False):
+            log.warning("Бот: почта не настроена — письмо «%s» для %s не отправлено",
+                        kind, to)
+            return False
+        try:
+            if kind == "verify":
+                return bool(m.send_verify(to, token, name=name))
+            if kind == "attach":
+                return bool(m.send_tg_attach(to, token, tg_name=name))
+        except Exception as e:
+            log.warning("Бот: письмо «%s» для %s не ушло: %s", kind, to, e)
+        return False
+
+    async def _handle_email_input(self, chat_id: int, user: dict, text: str) -> None:
+        """Человек прислал адрес почты из кабинета бота."""
+        from accounts import normalize_email, valid_email
+
+        self._wait_email.pop(int(user.get("tg_id") or 0), None)
+        email = normalize_email(text)
+        if not valid_email(email):
+            self._wait_email[int(user.get("tg_id") or 0)] = time.time() + 900
+            await self.show_menu(
+                chat_id,
+                "Это не похоже на адрес. Пришлите почту ещё раз,"
+                " например <code>name@mail.ru</code>.\n/cancel — отмена.",
+                self._cabinet_kb(user))
+            return
+        tg_id = int(user.get("tg_id") or 0)
+        left = self._mail_left(tg_id, email)
+        if left:
+            await self.show_menu(
+                chat_id,
+                f"Письмо уже отправил — подождите {left} с и проверьте ящик"
+                f" (и папку «Спам»).",
+                self._cabinet_kb(user))
+            return
+        me = self.store.get_user(int(user["id"])) or user
+        if (me.get("email") or "") == email and me.get("email_verified"):
+            await self.show_menu(chat_id, f"Почта <code>{_esc(email)}</code>"
+                                          " уже подтверждена ✅",
+                                 self._cabinet_kb(me))
+            return
+        att = self.store.attach_email(int(me["id"]), email)
+        if att.get("ok"):
+            # адрес свободен или остался от незавершённой регистрации —
+            # это тот же человек, просто просим подтвердить почту
+            token = self.store.new_email_token(int(att["user"]["id"]), "verify", email=email)
+            sent = self._mail_send("verify", email, token,
+                                   name=att["user"].get("first_name") or "")
+            if not sent:
+                await self.show_menu(
+                    chat_id,
+                    "Почта не ушла: отправка писем на сервере не настроена."
+                    " Адрес сохранил, но подтвердить его пока нельзя.",
+                    self._cabinet_kb(att["user"]))
+                return
+            fresh = self.store.get_user(int(att["user"]["id"])) or att["user"]
+            await self.show_menu(
+                chat_id,
+                f"Письмо ушло на <code>{_esc(email)}</code>.\n"
+                "Откройте ссылку из письма — и почта станет входом на сайт.\n"
+                "Пока адрес не подтверждён, вход на сайте закрыт.",
+                self._cabinet_kb(fresh))
+            return
+        if att.get("error") != "taken":
+            await self.show_menu(chat_id, "Не получилось привязать адрес — попробуйте позже.",
+                                 self._cabinet_kb(me))
+            return
+        # Адрес уже подтверждён в кабинете на сайте. Чтобы чужой человек не забрал
+        # его себе, привязку подтверждает владелец почты — письмом.
+        other = self.store.get_user_by_email(email)
+        if not other:
+            await self.show_menu(chat_id, "Не получилось привязать адрес — попробуйте позже.",
+                                 self._cabinet_kb(me))
+            return
+        token = self.store.new_tg_attach(int(other["id"]), {"tg_id": tg_id,
+                                                           "username": me.get("username") or "",
+                                                           "first_name": me.get("first_name") or "",
+                                                           "last_name": me.get("last_name") or ""})
+        sent = self._mail_send("attach", email, token,
+                               name=me.get("username") or me.get("first_name") or "Telegram")
+        if not sent:
+            await self.show_menu(
+                chat_id,
+                "Почта не ушла: отправка писем на сервере не настроена.",
+                self._cabinet_kb(me))
+            return
+        await self.show_menu(
+            chat_id,
+            f"На <code>{_esc(email)}</code> отправлено письмо с подтверждением.\n"
+            "Нажмите в нём «Привязать Telegram» — и этот Telegram станет вашим"
+            " входом в кабинет на сайте.\n"
+            "Ссылка живёт 2 часа.",
+            self._cabinet_kb(me))
+
     def _kb_back(self, to: str = "nav:home") -> dict:
         aliases = {"menu": "nav:home", "home": "nav:home", "back": "nav:home",
                    "admin": "nav:admin"}
@@ -1762,6 +1969,10 @@ class TelegramBot:
             "/alerts — алерты по объёму",
             "/bot — состояние опроса бота",
         ]
+        email = (user.get("email") or "").strip()
+        if not email or not user.get("email_verified"):
+            lines.append("/mail — привязать и подтвердить почту"
+                         " (основной вход на сайт)")
         if user.get("is_admin"):
             lines += [
                 "",
@@ -1786,6 +1997,12 @@ class TelegramBot:
         if email:
             mark = " ✅" if user.get("email_verified") else " (не подтверждена)"
             lines.append(f"Почта: <code>{_esc(email)}</code>{mark}")
+        if not email:
+            lines.append("Почта: <b>не привязана</b> — входить на сайт нечем,"
+                         " кроме Telegram")
+        elif not user.get("email_verified"):
+            lines.append("⚠️ Почта не подтверждена — вход на сайт закрыт,"
+                         " пока не перейдёте по ссылке из письма")
         if user.get("tg_id"):
             lines.append(f"Telegram ID: <code>{user['tg_id']}</code>")
         lines += [

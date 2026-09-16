@@ -47,6 +47,13 @@
                 <input type="password" id="in-password" autocomplete="current-password"
                        minlength="8" placeholder="не короче 8 символов">
             </label>
+            <label class="field hidden" id="field-captcha">
+                <span><span id="captcha-label">Проверка</span>
+                      <b id="captcha-question">…</b></span>
+                <input type="text" id="in-captcha" inputmode="numeric" autocomplete="off"
+                       placeholder="ответ цифрой">
+                <button type="button" class="link-btn" id="captcha-refresh">Другой пример</button>
+            </label>
             <button type="submit" class="btn btn-primary" id="email-submit">Войти</button>
         </form>
 

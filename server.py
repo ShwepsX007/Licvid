@@ -1177,6 +1177,8 @@ account_ctx.secret = SECRET
 account_ctx.cookie_secure = os.getenv("LIQSCOPE_COOKIE_SECURE", "").strip() in ("1", "true", "yes")
 account_ctx.dev_login = os.getenv("LIQSCOPE_DEV_LOGIN", "").strip() in ("1", "true", "yes")
 account_ctx.mailer = mailer
+# Бот подтверждает почту теми же письмами, что и сайт
+tg_bot.mailer = mailer
 account_ctx.require_email_verification = REQUIRE_EMAIL_VERIFICATION
 account_ctx.health_fn = health_summary
 account_ctx.stats_fn = compute_stats

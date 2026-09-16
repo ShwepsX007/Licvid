@@ -1151,5 +1151,144 @@ class BotMenuTest(unittest.TestCase):
         self.assertFalse(self.bot.running)
 
 
+class _FakeMailer:
+    """Письма из бота: пишем вызовы, наружу ничего не уходит."""
+
+    enabled = True
+
+    def __init__(self):
+        self.sent = []
+
+    def send_verify(self, to, token, name=""):
+        self.sent.append(("verify", to, token, name))
+        return True
+
+    def send_tg_attach(self, to, token, tg_name="", name=""):
+        self.sent.append(("attach", to, token, tg_name))
+        return True
+
+
+@unittest.skipIf(not HAVE, "aiohttp/accounts")
+class BotMailTest(unittest.TestCase):
+    """Напоминание про почту в кабинете и привязка почты из бота."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Store(os.path.join(self.tmp.name, "a.db"), secret="s", admin_ids=[1001])
+        self.bot = TelegramBot("0:x", self.store)
+        self.mailer = _FakeMailer()
+        self.bot.mailer = self.mailer
+        self.user = self.store.upsert_telegram_user({
+            "id": 2002, "username": "bob", "first_name": "Bob"})
+        self.sent = []
+
+        async def fake_send(chat_id, text, markup=None, parse="HTML", silent=False):
+            self.sent.append(text)
+            return 1
+
+        self.bot.send = fake_send  # type: ignore
+        self.bot._ensure_channel = _always_true  # type: ignore
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def _type(self, text, tg_id=2002):
+        self.bot._wait_email[tg_id] = time.time() + 900
+        asyncio.run(self.bot._route_message({
+            "message": {"message_id": 5, "chat": {"id": tg_id, "type": "private"},
+                        "from": {"id": tg_id, "username": "bob", "first_name": "Bob"},
+                        "text": text}}))
+
+    def test_cabinet_asks_to_confirm_email(self):
+        kb = self.bot._reply_kb(self.user)
+        texts = [b.get("text") for row in kb["keyboard"] for b in row]
+        self.assertIn("✉️ Подтвердить почту", texts)
+        self.assertIn("не привязана", self.bot._cabinet_text(self.user))
+        self.assertEqual(self.bot._reply_cmd("✉️ Подтвердить почту"), "mail")
+
+    def test_button_hides_when_email_confirmed(self):
+        r = self.store.attach_email(self.user["id"], "bob@mail.ru")
+        self.assertTrue(r["ok"])
+        unverified = r["user"]
+        self.assertIn("не подтверждена", self.bot._cabinet_text(unverified))
+        texts = [b.get("text") for row in self.bot._reply_kb(unverified)["keyboard"] for b in row]
+        self.assertIn("✉️ Подтвердить почту", texts)
+        ok_user = self.store.mark_email_verified(self.user["id"])
+        texts = [b.get("text") for row in self.bot._reply_kb(ok_user)["keyboard"] for b in row]
+        self.assertNotIn("✉️ Подтвердить почту", texts)
+        self.assertIn("уже подтверждена", self.bot._mail_screen(ok_user))
+
+    def test_mail_screen_waits_for_address(self):
+        text, _kb = self.bot._screen(self.user, "mail")
+        self.assertIn("Пришлите адрес", text)
+        self.assertGreater(self.bot._wait_email.get(2002, 0), time.time())
+
+    def test_mail_command_and_help_mention_it(self):
+        self.assertEqual(self.bot._reply_cmd("/mail"), "")
+        help_text = self.bot._help(self.user)
+        self.assertIn("/mail", help_text)
+        body, kb = self.bot._screen(self.user, "mail")
+        self.assertIn("Пришлите адрес", body)
+        self.assertTrue([b for row in kb["inline_keyboard"] for b in row])
+
+    def test_email_input_sends_verify_letter(self):
+        self._type("  bob@MAIL.ru ")
+        self.assertEqual(len(self.mailer.sent), 1)
+        kind, to, token, _name = self.mailer.sent[0]
+        self.assertEqual((kind, to), ("verify", "bob@mail.ru"))
+        self.assertTrue(token)
+        me = self.store.get_user(self.user["id"])
+        self.assertEqual(me["email"], "bob@mail.ru")
+        self.assertFalse(me["email_verified"])          # ждём клик по ссылке
+        self.assertTrue(any("Письмо ушло" in t for t in self.sent), self.sent)
+        # повторный ввод сразу — письма нет, просим подождать
+        self._type("bob@mail.ru")
+        self.assertEqual(len(self.mailer.sent), 1)
+        self.assertTrue(any("уже отправил" in t for t in self.sent), self.sent)
+
+    def test_bad_address_asks_again(self):
+        self._type("не-адрес")
+        self.assertEqual(self.mailer.sent, [])
+        self.assertTrue(any("не похоже на адрес" in t for t in self.sent), self.sent)
+        self.assertGreater(self.bot._wait_email.get(2002, 0), time.time())
+
+    def test_confirmed_email_gets_attach_letter_and_merges(self):
+        # человек зарегистрировался на сайте по почте и подтвердил её
+        made = self.store.create_email_user("bob@mail.ru", password_hash="x")
+        other_id = made["user"]["id"]
+        self.store.mark_email_verified(other_id)
+        self._type("bob@mail.ru")
+        kind, to, token, _tg = self.mailer.sent[0]
+        self.assertEqual(kind, "attach")               # без письма не связываем
+        self.assertEqual(to, "bob@mail.ru")
+        self.assertIsNotNone(self.store.get_user(self.user["id"]))  # пока два аккаунта
+        # владелец почты нажал ссылку в письме
+        r = self.store.confirm_tg_attach(token)
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["user"]["id"], other_id)
+        self.assertEqual(r["user"]["tg_id"], 2002)
+        self.assertEqual(r["user"]["email_verified"], True)
+        self.assertIsNone(self.store.get_user(self.user["id"]))     # дубль исчез
+        self.assertTrue(any("подтверждением" in t for t in self.sent), self.sent)
+
+    def test_email_input_needs_mail_enabled(self):
+        self.bot.mailer = None
+        self._type("bob@mail.ru")
+        self.assertTrue(any("не настроена" in t for t in self.sent), self.sent)
+        self.assertEqual(self.store.get_user(self.user["id"])["email"], "bob@mail.ru")
+
+    def test_vcheck_reports_state(self):
+        self.store.attach_email(self.user["id"], "bob@mail.ru")
+        cb = {"id": "c1", "data": "a:vchk",
+              "from": {"id": 2002, "username": "bob", "first_name": "Bob"},
+              "message": {"message_id": 9, "chat": {"id": 2002}}}
+        asyncio.run(self.bot._on_callback(cb))
+        self.assertTrue(any("пока не подтверждена" in t for t in self.sent), self.sent)
+        self.store.mark_email_verified(self.user["id"])
+        asyncio.run(self.bot._on_callback(cb))
+        self.assertTrue(any("Готово" in t for t in self.sent), self.sent)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -41,8 +41,10 @@ EMAIL_TOKEN_TTL = {
     "verify": 24 * 3600,   # подтверждение почты — сутки
     "login": 30 * 60,      # вход по ссылке — полчаса
     "reset": 3600,         # сброс пароля — час
+    "link": 2 * 3600,      # привязка почты к аккаунту из бота — два часа
 }
 LINK_NONCE_TTL = 15 * 60   # привязка Telegram из кабинета
+CAPTCHA_TTL = 10 * 60      # арифметическая капча на регистрацию
 
 
 def normalize_email(raw: Any) -> str:
@@ -275,6 +277,23 @@ class Store:
                 );
                 CREATE INDEX IF NOT EXISTS idx_email_tokens_user
                     ON email_tokens(user_id, kind);
+                CREATE TABLE IF NOT EXISTS captchas (
+                    token TEXT PRIMARY KEY,
+                    answer INTEGER NOT NULL,
+                    created_at REAL NOT NULL,
+                    expires_at REAL NOT NULL,
+                    used INTEGER NOT NULL DEFAULT 0,
+                    attempts INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS tg_attaches (
+                    token TEXT PRIMARY KEY,
+                    user_id INTEGER NOT NULL,     -- аккаунт с подтверждённой почтой
+                    tg_id INTEGER NOT NULL,
+                    profile TEXT,                 -- JSON профиля Telegram
+                    created_at REAL NOT NULL,
+                    expires_at REAL NOT NULL,
+                    consumed INTEGER NOT NULL DEFAULT 0
+                );
                 CREATE TABLE IF NOT EXISTS tg_link_nonces (
                     nonce TEXT PRIMARY KEY,
                     user_id INTEGER NOT NULL,
@@ -487,6 +506,103 @@ class Store:
             row = self._db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
         return {"ok": True, "user": public_user(row), "resumed": resumed}
 
+    def attach_email(self, user_id: int, email: str, password_hash: str = "") -> Dict[str, Any]:
+        """Привязать почту к уже существующему аккаунту.
+
+        Так закрывается дубль: человек пришёл из Telegram (аккаунт уже есть),
+        а потом указал почту — это тот же аккаунт, а не второй. Если у адреса
+        осталась незавершённая регистрация (почта введена, но не подтверждена),
+        переносим её сюда же.
+
+        Возвращает {"ok": True, "user": …} либо {"ok": False, "error": "taken"}.
+        """
+        email = normalize_email(email)
+        if not valid_email(email):
+            return {"ok": False, "error": "bad_email"}
+        user_id = int(user_id)
+        merged = False
+        with self._lock:
+            me = self._db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+            if not me:
+                return {"ok": False, "error": "unknown"}
+            other = self._db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+            if other and int(other["id"]) != user_id:
+                if other["email_verified"]:
+                    # адрес подтверждён у другого аккаунта: это чужой кабинет
+                    return {"ok": False, "error": "taken"}
+                self._merge_users_locked(int(other["id"]), user_id)
+                merged = True
+            keep_ok = bool(me["email_verified"]) and (me["email"] or "") == email
+            self._db.execute(
+                "UPDATE users SET email=?,"
+                " password_hash=COALESCE(NULLIF(?, ''), password_hash),"
+                " email_verified=?, email_verified_at=?, last_seen=? WHERE id=?",
+                (email, password_hash or "", 1 if keep_ok else 0,
+                 me["email_verified_at"] if keep_ok else None, _now(), user_id),
+            )
+            self._db.commit()
+            row = self._db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+        self.audit(user_id, "email_attach", f"{email} merged={int(merged)}")
+        return {"ok": True, "user": public_user(row), "merged": merged}
+
+    # ----- капча (арифметика на регистрацию) --------------------------------
+    def new_captcha(self, answer: int, ttl: float = CAPTCHA_TTL) -> str:
+        """Задача-капча: храним только ответ, наружу отдаём случайный токен."""
+        token = secrets.token_urlsafe(18)
+        now = _now()
+        with self._lock:
+            # на забытых базах колонки может не быть — добавляем молча
+            try:
+                self._db.execute("ALTER TABLE captchas ADD COLUMN attempts"
+                                 " INTEGER NOT NULL DEFAULT 0")
+            except Exception:
+                pass
+            self._db.execute("DELETE FROM captchas WHERE expires_at<?", (now - 3600,))
+            self._db.execute(
+                "INSERT INTO captchas(token,answer,created_at,expires_at,used)"
+                " VALUES(?,?,?,?,0)",
+                (token, int(answer), now, now + float(ttl)),
+            )
+            self._db.commit()
+        return token
+
+    def check_captcha(self, token: str, answer: Any, attempts: int = 3) -> Tuple[bool, str]:
+        """Проверка ответа: 3 попытки на задачу, потом токен сгорает."""
+        token = str(token or "").strip()
+        if not token:
+            return False, "unknown"
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM captchas WHERE token=?", (token,)
+            ).fetchone()
+            if not row:
+                return False, "unknown"
+            if row["used"]:
+                return False, "used"
+            if row["expires_at"] < _now():
+                return False, "expired"
+            try:
+                expect = int(row["answer"])
+            except (TypeError, ValueError):
+                return False, "unknown"
+            try:
+                got = int(str(answer).strip())
+            except (TypeError, ValueError):
+                got = None
+            if got == expect:
+                self._db.execute("UPDATE captchas SET used=1 WHERE token=?", (token,))
+                self._db.commit()
+                return True, ""
+            try:
+                seen = int(row["attempts"] or 0) + 1
+            except (IndexError, TypeError, ValueError):
+                seen = 1
+            burn = 1 if seen >= max(1, int(attempts)) else 0
+            self._db.execute(
+                "UPDATE captchas SET attempts=?, used=? WHERE token=?", (seen, burn, token))
+            self._db.commit()
+            return False, ("used" if burn else "wrong")
+
     def get_user_by_email(self, email: str) -> Optional[Dict[str, Any]]:
         email = normalize_email(email)
         if not email:
@@ -628,6 +744,58 @@ class Store:
             user = self._db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
         return {"ok": True, "user": public_user(user) if user else None}
 
+    def _link_tg_locked(self, user_id: int, tg: Dict[str, Any]) -> Dict[str, Any]:
+        """Привязать Telegram к аккаунту (замок уже держим).
+
+        Если у этого Telegram уже есть отдельный «телеграмный» аккаунт (человек
+        писал боту раньше) — переносим его данные сюда, чтобы не появилось двух
+        половин одного человека. Аккаунт с почтой у другого человека не трогаем.
+        """
+        # Внимание: бот зовёт нас с публичным профилем, где "id" — это id записи
+        # в базе, а Telegram-id лежит в "tg_id". У сырого апдейта Telegram —
+        # наоборот. Поэтому сначала tg_id, и только потом id.
+        tg_id = int(tg.get("tg_id") or tg.get("id") or 0)
+        if not tg_id:
+            return {"ok": False, "error": "no_tg"}
+        user_id = int(user_id)
+        other = self._db.execute("SELECT * FROM users WHERE tg_id=?", (tg_id,)).fetchone()
+        merged = False
+        if other and int(other["id"]) != user_id:
+            if (other["email"] or "").strip():
+                return {"ok": False, "error": "taken"}
+            self._merge_users_locked(int(other["id"]), user_id)
+            merged = True
+        self._db.execute(
+            "UPDATE users SET tg_id=?, tg_linked_at=?, username=?, first_name=?,"
+            " last_name=?, photo_url=?, language=?, is_admin=?, last_seen=?"
+            " WHERE id=?",
+            (tg_id, _now(),
+             (tg.get("username") or "")[:64], (tg.get("first_name") or "")[:64],
+             (tg.get("last_name") or "")[:64], (tg.get("photo_url") or "")[:500],
+             (tg.get("language_code") or tg.get("language") or "ru")[:8],
+             self._admin_flag(tg_id=tg_id), _now(), user_id),
+        )
+        self._db.commit()
+        row = self._db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+        return {"ok": True, "user": public_user(row), "merged": merged}
+
+    def link_tg_to_user(self, user_id: int, tg: Dict[str, Any]) -> Dict[str, Any]:
+        """Привязать Telegram к конкретному аккаунту (вход виджетом, вход ботом)."""
+        want = self._admin_flag(tg_id=int(tg.get("tg_id") or tg.get("id") or 0))
+        with self._lock:
+            r = self._link_tg_locked(int(user_id), tg)
+            uid = (r.get("user") or {}).get("id")
+            if r.get("ok") and want and uid:
+                self._db.execute("UPDATE users SET is_admin=1 WHERE id=?", (int(uid),))
+                self._db.commit()
+                r["user"] = public_user(
+                    self._db.execute("SELECT * FROM users WHERE id=?", (int(uid),)).fetchone())
+        if r.get("ok"):
+            tg_id = int(tg.get("tg_id") or tg.get("id") or 0)
+            self.audit((r.get("user") or {}).get("id"), "tg_link",
+                       f"tg_id={tg_id} via=api merged={int(bool(r.get('merged')))}")
+        return r
+
     def confirm_tg_link(self, nonce: str, tg: Dict[str, Any]) -> Dict[str, Any]:
         """Бот получил /start link_<nonce>: привязываем Telegram к аккаунту.
 
@@ -636,12 +804,6 @@ class Store:
         чтобы не было двух половин одного человека. Аккаунт с почтой у другого
         человека не трогаем: такая привязка запрещена.
         """
-        # Внимание: бот зовёт нас с публичным профилем, где "id" — это id записи
-        # в базе, а Telegram-id лежит в "tg_id". У сырого апдейта Telegram —
-        # наоборот. Поэтому сначала tg_id, и только потом id.
-        tg_id = int(tg.get("tg_id") or tg.get("id") or 0)
-        if not tg_id:
-            return {"ok": False, "error": "no_tg"}
         nonce = str(nonce or "").strip()
         with self._lock:
             row = self._db.execute(
@@ -654,30 +816,17 @@ class Store:
             if row["expires_at"] < _now():
                 return {"ok": False, "error": "expired"}
             target_id = int(row["user_id"])
-            other = self._db.execute("SELECT * FROM users WHERE tg_id=?", (tg_id,)).fetchone()
-            merged = False
-            if other and int(other["id"]) != target_id:
-                if (other["email"] or "").strip():
-                    return {"ok": False, "error": "taken"}
-                self._merge_users_locked(int(other["id"]), target_id)
-                merged = True
-            self._db.execute(
-                "UPDATE tg_link_nonces SET consumed=1 WHERE nonce=?", (nonce,)
-            )
-            self._db.execute(
-                "UPDATE users SET tg_id=?, tg_linked_at=?, username=?, first_name=?,"
-                " last_name=?, photo_url=?, language=?, is_admin=?, last_seen=?"
-                " WHERE id=?",
-                (tg_id, _now(),
-                 (tg.get("username") or "")[:64], (tg.get("first_name") or "")[:64],
-                 (tg.get("last_name") or "")[:64], (tg.get("photo_url") or "")[:500],
-                 (tg.get("language_code") or tg.get("language") or "ru")[:8],
-                 self._admin_flag(tg_id=tg_id), _now(), target_id),
-            )
-            self._db.commit()
-            user = self._db.execute("SELECT * FROM users WHERE id=?", (target_id,)).fetchone()
-        self.audit(target_id, "tg_link", f"tg_id={tg_id} merged={int(merged)}")
-        return {"ok": True, "user": public_user(user) if user else None, "merged": merged}
+            r = self._link_tg_locked(target_id, tg)
+            if r.get("ok"):
+                self._db.execute(
+                    "UPDATE tg_link_nonces SET consumed=1 WHERE nonce=?", (nonce,)
+                )
+                self._db.commit()
+        if r.get("ok"):
+            tg_id = int(tg.get("tg_id") or tg.get("id") or 0)
+            self.audit(target_id, "tg_link", f"tg_id={tg_id} via=nonce"
+                                            f" merged={int(bool(r.get('merged')))}")
+        return r
 
     def _merge_users_locked(self, src_id: int, dst_id: int) -> None:
         """Слияние «телеграмного» аккаунта в аккаунт с почтой (под замком)."""
@@ -691,7 +840,7 @@ class Store:
                 (dst_id, r["slug"], r["enabled"], r["config"], r["created_at"]),
             )
         self._db.execute("DELETE FROM user_services WHERE user_id=?", (src_id,))
-        for table in ("alert_events", "visits", "sessions"):
+        for table in ("alert_events", "visits", "sessions", "email_tokens"):
             self._db.execute(f"UPDATE {table} SET user_id=? WHERE user_id=?", (dst_id, src_id))
         src = self._db.execute("SELECT * FROM users WHERE id=?", (src_id,)).fetchone()
         if src and int(src["is_admin"]):
@@ -762,6 +911,73 @@ class Store:
             self._db.commit()
             row = self._db.execute("SELECT * FROM users WHERE tg_id=?", (tg_id,)).fetchone()
         return public_user(row)
+
+    # ----- привязка Telegram по ссылке из письма ----------------------------
+    def new_tg_attach(self, user_id: int, tg: Dict[str, Any], ttl: float = 2 * 3600) -> str:
+        """Письмо-подтверждение: «этот Telegram принадлежит владельцу почты»."""
+        token = secrets.token_urlsafe(32)
+        now = _now()
+        tg_id = int(tg.get("tg_id") or tg.get("id") or 0)
+        profile = {k: tg.get(k) for k in
+                   ("username", "first_name", "last_name", "photo_url",
+                    "language_code", "language")}
+        with self._lock:
+            self._db.execute(
+                "UPDATE tg_attaches SET consumed=1 WHERE user_id=? AND consumed=0",
+                (int(user_id),),
+            )
+            self._db.execute("DELETE FROM tg_attaches WHERE expires_at<?", (now - 7 * 86400,))
+            self._db.execute(
+                "INSERT INTO tg_attaches(token,user_id,tg_id,profile,created_at,expires_at,"
+                "consumed) VALUES(?,?,?,?,?,?,0)",
+                (token, int(user_id), tg_id, json.dumps(profile, ensure_ascii=False),
+                 now, now + float(ttl)),
+            )
+            self._db.commit()
+        return token
+
+    def tg_attach_info(self, token: str) -> Tuple[Optional[Dict[str, Any]], str]:
+        token = str(token or "").strip()
+        if not token:
+            return None, "unknown"
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM tg_attaches WHERE token=?", (token,)).fetchone()
+            if not row:
+                return None, "unknown"
+            if row["consumed"]:
+                return None, "used"
+            if row["expires_at"] < _now():
+                return None, "expired"
+            user = self._db.execute(
+                "SELECT * FROM users WHERE id=?", (int(row["user_id"]),)).fetchone()
+            if not user:
+                return None, "unknown"
+        return {"user": public_user(user), "tg_id": int(row["tg_id"]),
+                "profile": row["profile"] or "{}"}, ""
+
+    def confirm_tg_attach(self, token: str) -> Dict[str, Any]:
+        """Ссылка из письма: привязываем Telegram к аккаунту с этой почтой."""
+        info, err = self.tg_attach_info(token)
+        if err:
+            return {"ok": False, "error": err}
+        profile = {}
+        try:
+            profile = json.loads(info.get("profile") or "{}")
+        except Exception:
+            profile = {}
+        tg = dict(profile or {})
+        tg["tg_id"] = int(info["tg_id"])
+        with self._lock:
+            r = self._link_tg_locked(int(info["user"]["id"]), tg)
+            if r.get("ok"):
+                self._db.execute(
+                    "UPDATE tg_attaches SET consumed=1 WHERE token=?", (str(token),))
+                self._db.commit()
+        if r.get("ok"):
+            self.audit((r.get("user") or {}).get("id"), "tg_link",
+                       f"tg_id={tg['tg_id']} via=mail merged={int(bool(r.get('merged')))}")
+        return r
 
     def get_user(self, user_id: int) -> Optional[Dict[str, Any]]:
         with self._lock:

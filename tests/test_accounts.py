@@ -166,6 +166,129 @@ class AccountsTest(unittest.TestCase):
         hist = self.store.list_alert_events(u["id"])
         self.assertEqual(hist[0]["metric"], "liq")
 
+    # ----- капча ----------------------------------------------------------
+    def test_captcha_solves_once_and_expires(self):
+        tok = self.store.new_captcha(12)
+        ok, err = self.store.check_captcha(tok, "12")
+        self.assertTrue(ok, err)
+        # решённая задача одноразовая
+        again, err2 = self.store.check_captcha(tok, "12")
+        self.assertFalse(again)
+        self.assertEqual(err2, "used")
+        # чужая задача не подходит
+        self.assertEqual(self.store.check_captcha("nope", 1), (False, "unknown"))
+        self.assertEqual(self.store.check_captcha("", 1), (False, "unknown"))
+        # просроченная
+        old = self.store.new_captcha(3, ttl=-1)
+        self.assertEqual(self.store.check_captcha(old, 3), (False, "expired"))
+
+    def test_captcha_three_tries(self):
+        tok = self.store.new_captcha(5)
+        self.assertEqual(self.store.check_captcha(tok, "4"), (False, "wrong"))
+        self.assertEqual(self.store.check_captcha(tok, " шесть "), (False, "wrong"))
+        self.assertEqual(self.store.check_captcha(tok, "6"), (False, "used"))
+        # после «сожжённой» задачи правильный ответ уже не помогает
+        self.assertEqual(self.store.check_captcha(tok, "5"), (False, "used"))
+
+    def test_captcha_tokens_are_unique(self):
+        """Задачи не повторяются, и ответ по токену не угадывается."""
+        first = self.store.new_captcha(4)
+        second = self.store.new_captcha(4)
+        self.assertNotEqual(first, second)
+        self.assertGreaterEqual(len(first), 16)
+        row = self.store._db.execute("SELECT answer FROM captchas WHERE token=?",
+                                     (first,)).fetchone()
+        self.assertEqual(int(row["answer"]), 4)      # ответ знает только сервер
+
+    # ----- дубли аккаунтов ------------------------------------------------
+    def test_attach_email_merges_unverified_registration(self):
+        made = self.store.create_email_user("bob@mail.ru", password_hash="h")
+        old_id = made["user"]["id"]
+        tg = self.store.upsert_telegram_user({"id": 555, "username": "bob"})
+        r = self.store.attach_email(tg["id"], "BOB@mail.ru")
+        self.assertTrue(r["ok"], r)
+        self.assertTrue(r["merged"])
+        self.assertEqual(r["user"]["id"], tg["id"])
+        self.assertFalse(r["user"]["email_verified"])
+        self.assertIsNone(self.store.get_user(old_id))       # незавершённая запись ушла
+        self.assertEqual(self.store.get_user_by_email("bob@mail.ru")["id"], tg["id"])
+
+    def test_attach_email_refuses_someone_elses_verified_address(self):
+        made = self.store.create_email_user("bob@mail.ru", password_hash="h")
+        self.store.mark_email_verified(made["user"]["id"])
+        tg = self.store.upsert_telegram_user({"id": 556, "username": "not_bob"})
+        r = self.store.attach_email(tg["id"], "bob@mail.ru")
+        self.assertEqual(r["error"], "taken")
+        self.assertEqual(self.store.get_user(tg["id"])["email"], "")
+        self.assertIsNotNone(self.store.get_user(made["user"]["id"]))
+
+    def test_attach_email_keeps_verified_flag_on_repeat(self):
+        u = self.store.create_email_user("bob@mail.ru", password_hash="h")["user"]
+        self.store.mark_email_verified(u["id"])
+        r = self.store.attach_email(u["id"], "bob@mail.ru")
+        self.assertTrue(r["ok"])
+        self.assertTrue(r["user"]["email_verified"])         # подтверждение не сбрасываем
+
+    def test_link_tg_to_user_merges_telegram_half(self):
+        made = self.store.create_email_user("bob@mail.ru", password_hash="h")
+        uid = made["user"]["id"]
+        self.store.mark_email_verified(uid)
+        old = self.store.upsert_telegram_user({"id": 777, "username": "bob_tg",
+                                               "first_name": "Боб"})
+        r = self.store.link_tg_to_user(uid, {"tg_id": 777, "username": "bob_tg",
+                                             "first_name": "Боб"})
+        self.assertTrue(r["ok"], r)
+        self.assertTrue(r["merged"])
+        self.assertEqual(r["user"]["id"], uid)
+        self.assertEqual(r["user"]["tg_id"], 777)
+        self.assertEqual(r["user"]["email"], "bob@mail.ru")
+        self.assertIsNone(self.store.get_user(old["id"]))
+        # повторная привязка ничего не ломает
+        self.assertTrue(self.store.link_tg_to_user(uid, {"tg_id": 777})["ok"])
+
+    def test_link_tg_to_user_keeps_email_account_of_other_person(self):
+        made = self.store.create_email_user("bob@mail.ru", password_hash="h")
+        self.store.mark_email_verified(made["user"]["id"])
+        other = self.store.create_email_user("kate@mail.ru", password_hash="h")["user"]
+        self.store.mark_email_verified(other["id"])
+        r = self.store.link_tg_to_user(other["id"], {"tg_id": 777})   # tg_id занят? нет
+        self.assertTrue(r["ok"])
+        tg = self.store.upsert_telegram_user({"id": 888, "username": "tg_only"})
+        r2 = self.store.link_tg_to_user(made["user"]["id"], {"tg_id": 888})
+        self.assertTrue(r2["ok"])
+        self.assertIsNone(self.store.get_user(tg["id"]))       # «телеграмную» половину слили
+        # чужой аккаунт с подтверждённой почтой не отдаём: 888 занят аккаунтом
+        # с подтверждённой почтой, поэтому привязка отклоняется
+        with self.store._lock:
+            clash = self.store._link_tg_locked(other["id"], {"tg_id": 888})
+        self.assertEqual(clash["error"], "taken")
+        self.assertEqual(self.store.get_user(other["id"])["tg_id"], 777)
+
+    def test_confirm_tg_attach_binds_and_consumes(self):
+        made = self.store.create_email_user("bob@mail.ru", password_hash="h")
+        uid = made["user"]["id"]
+        self.store.mark_email_verified(uid)
+        self.store.upsert_telegram_user({"id": 909, "username": "bob_tg"})
+        tok = self.store.new_tg_attach(uid, {"tg_id": 909, "username": "bob_tg"})
+        info, err = self.store.tg_attach_info(tok)
+        self.assertEqual(err, "")
+        self.assertEqual(info["tg_id"], 909)
+        r = self.store.confirm_tg_attach(tok)
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["user"]["id"], uid)
+        self.assertEqual(r["user"]["tg_id"], 909)
+        self.assertEqual(self.store.confirm_tg_attach(tok)["error"], "used")
+        self.assertEqual(self.store.tg_attach_info("nope")[1], "unknown")
+        self.assertEqual(self.store.confirm_tg_attach("")["error"], "unknown")
+
+    def test_public_user_marks_email_state(self):
+        u = self.store.create_email_user("bob@mail.ru", password_hash="h")["user"]
+        pub = public_user(self.store.get_user(u["id"]))
+        self.assertTrue(pub["email"])
+        self.assertFalse(pub["email_verified"])
+        self.store.mark_email_verified(u["id"])
+        self.assertTrue(self.store.get_user(u["id"])["email_verified"])
+
     def test_ip_hash_stable(self):
         a = hash_ip("s", "1.2.3.4")
         b = hash_ip("s", "1.2.3.4")

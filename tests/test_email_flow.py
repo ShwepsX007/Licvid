@@ -15,6 +15,10 @@ import unittest
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
 
+import hashlib  # noqa: E402
+import hmac  # noqa: E402
+import time as _time  # noqa: E402
+
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -41,7 +45,7 @@ class EmailFlowTest(unittest.TestCase):
             FileTransport(self.mail_dir), sender="LiqScope <no-reply@liqscope.online>",
             public_url="https://liqscope.online", enabled=True)
         for lim in (web_account._MAIL_RATE, web_account._MAIL_RATE_EMAIL,
-                    web_account._LOGIN_RATE):
+                    web_account._LOGIN_RATE, web_account._CAPTCHA_RATE):
             lim._hits.clear()
         app = FastAPI()
         web_account.register_account_routes(app)
@@ -68,9 +72,29 @@ class EmailFlowTest(unittest.TestCase):
         self.assertTrue(links, "в письме нет ссылки " + path_prefix)
         return links[0]
 
-    def register(self, email="bob@mail.ru", password="Good-Pass-2026", name="Боб"):
-        return self.client.post("/api/auth/email/register", json={
-            "email": email, "password": password, "name": name, "language": "ru"})
+    def captcha(self, answer=None) -> dict:
+        """Свежая задача-капча: считаем пример как живой человек."""
+        data = self.client.get("/api/auth/captcha").json()
+        self.assertTrue(data["ok"], data)
+        a, b = [int(x) for x in str(data["question"]).split("+")]
+        return {"captcha": data["token"],
+                "answer": (a + b) if answer is None else answer}
+
+    def register(self, email="bob@mail.ru", password="Good-Pass-2026", name="Боб",
+                 answer=None, **extra):
+        body = {"email": email, "password": password, "name": name, "language": "ru"}
+        body.update(self.captcha(answer=answer))
+        body.update(extra)
+        return self.client.post("/api/auth/email/register", json=body)
+
+    def widget_sign(self, data: dict, token="0:x") -> dict:
+        """Подпись Telegram Login Widget, как её считает Telegram."""
+        parts = [f"{k}={data[k]}" for k in sorted(data) if data[k] is not None]
+        secret = hashlib.sha256(token.encode()).digest()
+        digest = hmac.new(secret, "\n".join(parts).encode(), hashlib.sha256).hexdigest()
+        out = dict(data)
+        out["hash"] = digest
+        return out
 
     def me(self):
         return self.client.get("/api/auth/me").json()
@@ -320,6 +344,131 @@ class EmailFlowTest(unittest.TestCase):
         self.assertTrue(off["ok"])
         self.assertFalse(self.me()["user"]["tg_linked"])
         self.assertEqual(self.me()["user"]["email"], "bob@mail.ru")
+
+    # ----- капча на регистрацию -------------------------------------------
+    def test_captcha_required_to_register(self):
+        r = self.client.post("/api/auth/email/register",
+                             json={"email": "bob@mail.ru", "password": "Good-Pass-2026"})
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.json()["error"], "captcha_missing")
+        cap = self.client.get("/api/auth/captcha").json()
+        self.assertNotIn("answer", cap)          # ответ считает только сервер
+        self.assertTrue(cap["question"])
+        self.assertEqual(self.letters(), [])
+        self.assertIsNone(self.store.get_user_by_email("bob@mail.ru"))
+
+    def test_captcha_wrong_answer_then_three_tries(self):
+        cap = self.captcha()
+        for _ in range(2):
+            r = self.register(answer=cap["answer"] + 1, captcha=cap["captcha"])
+            self.assertEqual(r.status_code, 400)
+            self.assertEqual(r.json()["error"], "captcha_wrong")
+            self.assertTrue(r.json()["captcha"]["token"])      # дали новый пример
+        # третья ошибка сжигает задачу
+        r3 = self.register(answer=cap["answer"] + 1, captcha=cap["captcha"])
+        self.assertEqual(r3.json()["error"], "captcha_used")
+        # решённая задача больше не работает (одноразовая)
+        solved = self.captcha()
+        self.assertEqual(self.register(captcha=solved["captcha"],
+                                       answer=solved["answer"]).status_code, 200)
+        again = self.register(email="kate@mail.ru", captcha=solved["captcha"],
+                              answer=solved["answer"])
+        self.assertEqual(again.json()["error"], "captcha_used")
+        self.assertEqual(len(self.letters()), 1)
+
+    # ----- один человек — один аккаунт ------------------------------------
+    def test_register_from_telegram_session_attaches_email(self):
+        tg = self.store.upsert_telegram_user({"id": 777, "username": "bob_tg",
+                                              "first_name": "Боб"})
+        sid = self.store.create_session(tg["id"], "", "")
+        self.client.cookies.set("liqscope_sid", sid)
+        r = self.register()
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json().get("attached"))
+        me = self.me()
+        self.assertEqual(me["user"]["id"], tg["id"])        # тот же аккаунт
+        self.assertEqual(me["user"]["email"], "bob@mail.ru")
+        self.assertEqual(me["user"]["tg_id"], 777)
+        self.assertFalse(me["user"]["email_verified"])
+        # дубля нет: тот же адрес указывает на тот же аккаунт
+        self.assertEqual(self.store.get_user_by_email("bob@mail.ru")["id"], tg["id"])
+        email = self.store.get_user_by_email("bob@mail.ru")
+        self.assertEqual(self.store.get_user_by_tg(777)["id"], email["id"])
+
+    def test_second_address_while_signed_in_is_refused(self):
+        """Вошедшему со своим адресом не подсовываем второй аккаунт."""
+        self.register()
+        self.client.get(self.last_link("/verify"))
+        r = self.register(email="kate@mail.ru", password="Kate-Pass-2026")
+        self.assertEqual(r.status_code, 409)
+        self.assertEqual(r.json()["error"], "signed_in")
+        self.assertIsNone(self.store.get_user_by_email("kate@mail.ru"))
+        # а повторная регистрация своего же адреса — это просто «уже есть»
+        same = self.register()
+        self.assertEqual(same.status_code, 200)
+        self.assertTrue(same.json().get("exists"))
+        self.assertFalse(same.json().get("sent"))
+        self.assertEqual(len(self.letters()), 1)
+
+    def test_widget_login_keeps_session_account(self):
+        class FakeBot:
+            token = "0:x"
+            username = "LiqScopeBot"
+
+        web_account.ctx.bot = FakeBot()
+        self.register()
+        self.client.get(self.last_link("/verify"))
+        me = self.me()
+        uid = me["user"]["id"]
+        data = self.widget_sign({"id": 8888, "first_name": "Боб", "username": "bob",
+                                 "auth_date": int(_time.time())})
+        r = self.client.post("/api/auth/telegram/widget", json=data)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["user"]["id"], uid)        # сессия и аккаунт те же
+        self.assertEqual(r.json()["user"]["tg_id"], 8888)
+        self.assertEqual(r.json()["user"]["email"], "bob@mail.ru")
+        self.assertEqual(self.me()["user"]["tg_id"], 8888)
+
+    def test_widget_merges_telegram_only_account(self):
+        class FakeBot:
+            token = "0:x"
+            username = "LiqScopeBot"
+
+        web_account.ctx.bot = FakeBot()
+        self.register()
+        self.client.get(self.last_link("/verify"))
+        uid = self.me()["user"]["id"]
+        # человек писал боту раньше — есть «телеграмный» аккаунт без почты
+        old = self.store.upsert_telegram_user({"id": 5150, "username": "old",
+                                               "first_name": "Старый"})
+        data = self.widget_sign({"id": 5150, "first_name": "Старый", "username": "old",
+                                 "auth_date": int(_time.time())})
+        r = self.client.post("/api/auth/telegram/widget", json=data)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["user"]["id"], uid)        # остались на своём
+        self.assertEqual(r.json()["user"]["email"], "bob@mail.ru")
+        # вторая половина человека исчезла
+        self.assertIsNone(self.store.get_user(old["id"]))
+        self.assertEqual(self.store.get_user_by_tg(5150)["id"], uid)
+
+    def test_attach_letter_links_telegram_to_email_account(self):
+        self.register()
+        self.client.get(self.last_link("/verify"))
+        uid = self.me()["user"]["id"]
+        self.client.post("/api/auth/logout")
+        self.store.upsert_telegram_user({"id": 6060, "username": "bot_bob"})
+        token = self.store.new_tg_attach(uid, {"tg_id": 6060, "username": "bot_bob",
+                                               "first_name": "Боб"})
+        r = self.client.get("/attach?token=" + token, follow_redirects=False)
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(r.headers["location"], "/cabinet?tg=attached")
+        me = self.me()
+        self.assertEqual(me["user"]["id"], uid)
+        self.assertEqual(me["user"]["tg_id"], 6060)
+        self.assertEqual(me["user"]["email"], "bob@mail.ru")
+        # ссылка одноразовая
+        again = self.client.get("/attach?token=" + token, follow_redirects=False)
+        self.assertIn("mail=used", again.headers["location"])
 
     def test_me_reports_mail_disabled(self):
         web_account.ctx.mailer = Mailer(None, enabled=False)

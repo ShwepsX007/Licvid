@@ -165,6 +165,8 @@ def _mail_path(kind: str, token: str) -> str:
         return f"/email-login?token={token}"
     if kind == "reset":
         return f"/reset?token={token}"
+    if kind == "attach":
+        return f"/attach?token={token}"
     return ""
 
 
@@ -183,6 +185,8 @@ def _send_mail_blocking(kind: str, to: str, token: str, name: str = "") -> bool:
         return m.send_login_link(to, token)
     if kind == "reset":
         return m.send_reset(to, token)
+    if kind == "attach":
+        return m.send_tg_attach(to, token, tg_name=name)
     return False
 
 
@@ -214,6 +218,12 @@ def _email_error(lang: str, code: str) -> str:
         "unknown": "Ссылка не найдена — запросите новую.",
         "taken": "Эта почта уже зарегистрирована — войдите или восстановите пароль.",
         "mail_failed": "Письмо не ушло. Проверьте адрес или попробуйте позже.",
+        "captcha_wrong": "Неверный ответ на пример. Попробуйте ещё раз.",
+        "captcha_expired": "Пример устарел — обновите его и решите заново.",
+        "captcha_missing": "Решите пример ниже — так мы отсекаем роботов.",
+        "captcha_used": "Эту задачу уже решили — обновите пример.",
+        "signed_in": "Вы уже вошли в кабинет. Чтобы завести другой адрес, "
+                     "сначала выйдите из своего.",
     }
     en = {
         "bad_email": "That address does not look right.",
@@ -229,6 +239,12 @@ def _email_error(lang: str, code: str) -> str:
         "unknown": "Link not found — request a new one.",
         "taken": "This email is already registered — sign in or reset the password.",
         "mail_failed": "The letter did not go out. Check the address or try later.",
+        "captcha_wrong": "Wrong answer. Try the new example.",
+        "captcha_expired": "The example expired — refresh it and solve a new one.",
+        "captcha_missing": "Solve the example below — that keeps robots out.",
+        "captcha_used": "That example was already solved — refresh it.",
+        "signed_in": "You are already signed in. Sign out first to register "
+                     "another address.",
     }
     table = en if str(lang).startswith("en") else ru
     return table.get(code, code)
@@ -263,6 +279,26 @@ def _safe_next(value: str) -> str:
 
 
 # Публичное имя бота, если getMe ещё не ответил или токен не подхватился.
+# Капча на регистрацию: простой пример на сложение, ответ считает сервер.
+CAPTCHA_MAX = 20          # слагаемые не больше 20 — считается в уме
+_CAPTCHA_RATE = RateLimiter(30, 5 * 60)   # выдача задач на IP
+
+
+def _captcha_problem(lang: str, code: str) -> str:
+    return _email_error(lang, code)
+
+
+async def _captcha_new(request: Request) -> dict:
+    """Новая задача: наружу уходит только текст примера и токен."""
+    if not ctx.store:
+        return {"ok": False, "error": "no_store"}
+    a = secrets.randbelow(CAPTCHA_MAX - 1) + 1
+    b = secrets.randbelow(CAPTCHA_MAX - 1) + 1
+    token = ctx.store.new_captcha(a + b)
+    return {"ok": True, "token": token, "question": f"{a} + {b}",
+            "hint": "Сколько получится?"}
+
+
 DEFAULT_BOT_USERNAME = (os.getenv("LIQSCOPE_BOT_USERNAME") or "LiqScopeBot").lstrip("@")
 
 
@@ -334,6 +370,22 @@ def register_account_routes(app) -> None:
             "mail_enabled": _email_enabled(),
         }
 
+    # ----- капча -----------------------------------------------------------
+    @router.get("/api/auth/captcha")
+    async def api_captcha(request: Request):
+        """Пример на сложение для формы регистрации."""
+        if not ctx.store:
+            return JSONResponse({"ok": False, "error": "no_store"}, status_code=503)
+        if not _CAPTCHA_RATE.allow(_rate_key(request, "captcha")):
+            return JSONResponse({"ok": False, "error": "rate",
+                                 "hint": _email_error(_lang_code(request), "rate")},
+                                status_code=429)
+        return await _captcha_new(request)
+
+    @router.post("/api/auth/captcha")
+    async def api_captcha_new(request: Request):
+        return await api_captcha(request)
+
     # ----- почта: регистрация и вход ---------------------------------------
     @router.post("/api/auth/email/register")
     async def api_email_register(request: Request, response: Response):
@@ -350,9 +402,56 @@ def register_account_routes(app) -> None:
         if problem:
             return JSONResponse({"ok": False, "error": problem,
                                  "hint": _email_error(lang, problem)}, status_code=400)
+        # Капча: без неё боты заваливают регистрацию письмами
+        cap_token = body.get("captcha") or body.get("captcha_token") or ""
+        cap_answer = body.get("answer", body.get("captcha_answer"))
+        if not str(cap_token).strip():
+            return JSONResponse({"ok": False, "error": "captcha_missing",
+                                 "hint": _email_error(lang, "captcha_missing")},
+                                status_code=400)
+        cap_ok, cap_err = ctx.store.check_captcha(cap_token, cap_answer)
+        if not cap_ok:
+            return JSONResponse({"ok": False, "error": "captcha_" + (cap_err or "wrong"),
+                                 "hint": _email_error(lang, "captcha_" + (cap_err or "wrong")),
+                                 "captcha": await _captcha_new(request)}, status_code=400)
         if not _MAIL_RATE.allow(_rate_key(request, "mail")):
             return JSONResponse({"ok": False, "error": "rate",
                                  "hint": _email_error(lang, "rate")}, status_code=429)
+        # Человек уже вошёл (например, через Telegram) — почту привязываем к
+        # его аккаунту. Иначе на каждого такого входа появлялся бы дубль.
+        here = current_user(request)
+        here_email = (here.get("email") or "").strip() if here else ""
+        if here and here_email and here_email != email:
+            # Человек уже вошёл с другим адресом: второй аккаунт здесь не нужен
+            return JSONResponse({"ok": False, "error": "signed_in",
+                                 "hint": _email_error(lang, "signed_in")},
+                                status_code=409)
+        if here and (not here_email or here_email == email):
+            if here_email == email and here.get("email_verified"):
+                # это тот же подтверждённый аккаунт — просто входим
+                return {"ok": True, "sent": False, "exists": True, "email": email,
+                        "verify_required": True,
+                        "hint": _email_error(lang, "taken")}
+            att = ctx.store.attach_email(
+                here["id"], email, hash_password(str(body.get("password"))))
+            if att.get("ok"):
+                user = att["user"]
+                token = ctx.store.new_email_token(user["id"], "verify", email=email)
+                sent = await _send_mail("verify", email, token,
+                                        name=user.get("first_name") or "")
+                if not sent and _email_enabled():
+                    return JSONResponse({"ok": False, "error": "mail_failed",
+                                         "hint": _email_error(lang, "mail_failed")},
+                                        status_code=502)
+                log.info("Почта %s привязана к аккаунту %s (письмо %s)",
+                         email, user["id"], "ушло" if sent else "не ушло")
+                return {"ok": True, "sent": bool(sent), "email": email, "attached": True,
+                        "verify_required": True, "mail_enabled": _email_enabled()}
+            if att.get("error") == "taken":
+                return JSONResponse({
+                    "ok": True, "sent": False, "exists": True, "email": email,
+                    "verify_required": True, "hint": _email_error(lang, "taken"),
+                }, status_code=200)
         r = ctx.store.create_email_user(
             email, password_hash=hash_password(str(body.get("password"))),
             first_name=str(body.get("name") or "")[:64], language=lang)
@@ -463,6 +562,24 @@ def register_account_routes(app) -> None:
             token = ctx.store.new_email_token(user["id"], "login", email=email)
             await _send_mail("login", email, token)
         return {"ok": True, "sent": True, "email": email}
+
+    @router.get("/attach")
+    async def page_attach(request: Request, token: str = ""):
+        """Ссылка из письма: владелец почты подтверждает привязку Telegram."""
+        if not ctx.store or not token:
+            return RedirectResponse("/login?mail=unknown", status_code=303)
+        r = ctx.store.confirm_tg_attach(token)
+        if not r.get("ok"):
+            code = {"used": "used", "expired": "expired"}.get(str(r.get("error")), "unknown")
+            return RedirectResponse(f"/login?mail={code}", status_code=303)
+        user = r["user"]
+        if user.get("is_banned"):
+            return RedirectResponse("/login?mail=blocked", status_code=303)
+        iph = hash_ip(ctx.secret, _client_ip(request))
+        sid = ctx.store.create_session(user["id"], iph, request.headers.get("user-agent") or "")
+        resp = RedirectResponse("/cabinet?tg=attached", status_code=303)
+        _set_sid(resp, sid)
+        return resp
 
     @router.get("/email-login")
     async def page_email_login(request: Request, token: str = ""):
@@ -630,7 +747,17 @@ def register_account_routes(app) -> None:
             data = {}
         if not verify_telegram_widget(data, ctx.bot.token):
             return JSONResponse({"ok": False, "error": "bad_hash"}, status_code=401)
-        user = ctx.store.upsert_telegram_user(data)
+        # Если человек уже вошёл на сайте (например, по почте) — Telegram
+        # привязываем к этому же аккаунту: один человек — один кабинет.
+        here = current_user(request)
+        if here:
+            r = ctx.store.link_tg_to_user(here["id"], data)
+            if r.get("ok"):
+                user = r["user"]
+            else:
+                user = ctx.store.upsert_telegram_user(data)
+        else:
+            user = ctx.store.upsert_telegram_user(data)
         if user["is_banned"]:
             return JSONResponse({"ok": False, "error": "banned"}, status_code=403)
         iph = hash_ip(ctx.secret, _client_ip(request))

@@ -94,6 +94,11 @@ async function main() {
     !doc.querySelector("#field-pass").classList.contains("hidden"));
   check("поле имени скрыто до регистрации",
     doc.querySelector("#field-name").classList.contains("hidden"));
+  check("поле с примером скрыто на входе",
+    doc.querySelector("#field-captcha").classList.contains("hidden"));
+  check("кнопка «Другой пример» на месте",
+    !!doc.querySelector("#captcha-refresh") &&
+    doc.querySelector("#captcha-refresh").textContent.length > 0);
   check("Telegram — в свёрнутом блоке «запасной способ»",
     !!doc.querySelector("#tg-alt") && doc.querySelector("#tg-alt").tagName === "DETAILS" &&
     !doc.querySelector("#tg-alt").hasAttribute("open"));
@@ -109,6 +114,8 @@ async function main() {
   await new Promise((r) => setTimeout(r, 60));
   check("на регистрации появилось поле имени",
     !doc.querySelector("#field-name").classList.contains("hidden"));
+  check("на регистрации появилось поле с примером",
+    !doc.querySelector("#field-captcha").classList.contains("hidden"));
   check("заголовок сменился на регистрацию",
     doc.querySelector("#auth-title").textContent.indexOf("Регистрация") === 0,
     doc.querySelector("#auth-title").textContent);
@@ -128,10 +135,13 @@ async function main() {
   // --- 2. отправка формы регистрации --------------------------------------
   const sent = [];
   const reg = await openPage("/login", {
-    handler(u) {
+    handler(u, opts) {
       if (u.indexOf("/api/auth/me") === 0) return { ok: true, user: null, mail_enabled: true };
+      if (u.indexOf("/api/auth/captcha") === 0) {
+        return { ok: true, token: "cap-1", question: "3 + 4", hint: "Сколько получится?" };
+      }
       if (u.indexOf("/api/auth/email/register") === 0) {
-        sent.push(u);
+        sent.push({ url: u, body: (opts && opts.body) || "" });
         return { ok: true, sent: true, email: "bob@mail.ru", verify_required: true };
       }
       return { ok: true };
@@ -140,18 +150,71 @@ async function main() {
   const rdoc = reg.doc;
   rdoc.querySelector('.auth-tab[data-tab="register"]').dispatchEvent(
     new reg.win.MouseEvent("click", { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 250));   // пример приходит запросом
+  check("на регистрации видно поле с примером",
+    !rdoc.querySelector("#field-captcha").classList.contains("hidden"));
+  check("пример загрузился с сервера",
+    rdoc.querySelector("#captcha-question").textContent === "3 + 4",
+    rdoc.querySelector("#captcha-question").textContent);
   rdoc.querySelector("#in-email").value = "bob@mail.ru";
   rdoc.querySelector("#in-password").value = "Good-Pass-2026";
   rdoc.querySelector("#in-name").value = "Боб";
+  // без ответа на пример форма не уходит
+  rdoc.querySelector("#email-form").dispatchEvent(
+    new reg.win.Event("submit", { bubbles: true, cancelable: true }));
+  await new Promise((r) => setTimeout(r, 60));
+  check("без ответа на пример запроса нет", sent.length === 0, JSON.stringify(sent));
+  check("и подсказка просит решить пример",
+    rdoc.querySelector("#login-status").textContent.indexOf("Решите пример") !== -1,
+    rdoc.querySelector("#login-status").textContent);
+  rdoc.querySelector("#in-captcha").value = "7";
   rdoc.querySelector("#email-form").dispatchEvent(
     new reg.win.Event("submit", { bubbles: true, cancelable: true }));
   await new Promise((r) => setTimeout(r, 120));
   check("регистрация ушла на сервер", sent.length === 1, JSON.stringify(sent));
+  const regBody = JSON.parse(sent[0].body);
+  check("в запросе токен и ответ капчи",
+    regBody.captcha === "cap-1" && String(regBody.answer) === "7",
+    sent[0].body);
   check("просьба открыть письмо показана",
     reg.doc.querySelector("#login-status").textContent.indexOf("Письмо отправлено") === 0,
     reg.doc.querySelector("#login-status").textContent);
   check("статус зелёный",
     reg.doc.querySelector("#login-status").classList.contains("ok"));
+
+  // --- 2б. неверный ответ на пример ---------------------------------------
+  const capWrong = await openPage("/login", {
+    handler(u) {
+      if (u.indexOf("/api/auth/me") === 0) return { ok: true, user: null, mail_enabled: true };
+      if (u.indexOf("/api/auth/captcha") === 0) {
+        return { ok: true, token: "cap-a", question: "2 + 2", hint: "" };
+      }
+      if (u.indexOf("/api/auth/email/register") === 0) {
+        return { ok: false, error: "captcha_wrong", status: 400,
+                 hint: "Неверный ответ на пример. Попробуйте ещё раз.",
+                 captcha: { ok: true, token: "cap-b", question: "9 + 1" } };
+      }
+      return { ok: true };
+    },
+  });
+  capWrong.doc.querySelector('.auth-tab[data-tab="register"]').dispatchEvent(
+    new capWrong.win.MouseEvent("click", { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 60));
+  capWrong.doc.querySelector("#in-email").value = "bob@mail.ru";
+  capWrong.doc.querySelector("#in-password").value = "Good-Pass-2026";
+  capWrong.doc.querySelector("#in-captcha").value = "5";
+  capWrong.doc.querySelector("#email-form").dispatchEvent(
+    new capWrong.win.Event("submit", { bubbles: true, cancelable: true }));
+  await new Promise((r) => setTimeout(r, 120));
+  check("ошибка капчи показана",
+    capWrong.doc.querySelector("#login-status").textContent.indexOf("Неверный ответ") !== -1,
+    capWrong.doc.querySelector("#login-status").textContent);
+  check("сервер прислал новый пример — он на экране",
+    capWrong.doc.querySelector("#captcha-question").textContent === "9 + 1",
+    capWrong.doc.querySelector("#captcha-question").textContent);
+  check("поле ответа очищено под новый пример",
+    capWrong.doc.querySelector("#in-captcha").value === "",
+    capWrong.doc.querySelector("#in-captcha").value);
 
   // --- 3. вход по паролю: ошибка «подтвердите почту» ----------------------
   const verifyNeeded = await openPage("/login", {
@@ -284,6 +347,32 @@ async function main() {
   check("вместо сервисов — объяснение",
     cab.doc.querySelector("#svc-acc").textContent.indexOf("после подтверждения почты") !== -1,
     cab.doc.querySelector("#svc-acc").textContent.slice(0, 90));
+
+  // --- 7. кабинет того, кто вошёл только через Telegram/бота --------------
+  const tgOnly = await openPage("/cabinet", {
+    handler(u) {
+      if (u.indexOf("/api/auth/me") === 0) {
+        return { ok: true, mail_enabled: true, verified: true, bot_ready: true,
+                 bot_username: "LiqScopeBot",
+                 user: { id: 2, email: "", email_verified: false, tg_linked: true,
+                         tg_id: 777, display_name: "Боб", is_admin: false,
+                         created_at: 1700000000, username: "bob_tg" } };
+      }
+      if (u.indexOf("/api/account/services") === 0) return { ok: true, services: [] };
+      return { ok: true };
+    },
+  });
+  await new Promise((r) => setTimeout(r, 250));
+  check("без почты баннер напоминает привязать её",
+    !tgOnly.doc.querySelector("#verify-bar").classList.contains("hidden"));
+  check("и объясняет, зачем почта",
+    tgOnly.doc.querySelector("#verify-bar-hint").textContent.indexOf("Почта не привязана") === 0,
+    tgOnly.doc.querySelector("#verify-bar-hint").textContent);
+  check("кнопка ведёт подтверждать почту в боте",
+    tgOnly.doc.querySelector("#verify-resend").textContent === "Подтвердить почту в боте",
+    tgOnly.doc.querySelector("#verify-resend").textContent);
+  check("метка подтверждения скрыта, когда почты нет",
+    tgOnly.doc.querySelector("#cab-verified").classList.contains("hidden"));
 
   check("ошибок страниц нет", errors.length === 0, errors.join(" | "));
 }

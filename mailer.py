@@ -502,6 +502,22 @@ class Mailer:
             " вашего клика нельзя.")
         return self.send(to, subject, html, kind="login")
 
+    def send_tg_attach(self, to: str, token: str, tg_name: str = "",
+                       name: str = "") -> bool:
+        """Подтверждение привязки Telegram к кабинету с этой почтой."""
+        url = self.link(f"/attach?token={token}")
+        subject = f"{BRAND}: подтвердите привязку Telegram"
+        who = tg_name or "ваш Telegram"
+        hello = f"Привет, {name}!" if name else "Привет!"
+        html = self._wrap(subject, hello, [
+            f"Аккаунт {who} просит привязать Telegram к кабинету LiqScope с этой почтой.",
+            "Если это вы — жмите кнопку, и Telegram станет вашим входом в кабинет:",
+            "Ссылка живёт 2 часа и одноразовая.",
+        ], url, "Привязать Telegram",
+            "Если это не вы — просто удалите письмо: без вашего клика Telegram "
+            "к кабинету не привяжется.")
+        return self.send(to, subject, html, kind="attach")
+
     def send_reset(self, to: str, token: str) -> bool:
         url = self.link(f"/reset?token={token}")
         subject = f"{BRAND}: новый пароль"

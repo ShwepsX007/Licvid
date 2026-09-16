@@ -26,6 +26,11 @@
             verifySent: "Отправили письмо ещё раз — проверьте почту и папку «Спам».",
             needEmail: "Введите почту.",
             needPass: "Введите пароль.",
+            captchaLead: "Проверка",
+            captchaLoading: "Проверка — загружаю пример…",
+            captchaNeed: "Решите пример — так мы отсекаем роботов.",
+            captchaWrong: "Неверный ответ. Пример обновили — решите новый.",
+            captchaRefresh: "Другой пример",
             weakShort: "Пароль короче 8 символов.",
             weakSimple: "Такой пароль слишком простой — придумайте посложнее.",
             verifyBad: "Ссылка подтверждения не подошла — запросите новую.",
@@ -33,6 +38,14 @@
             verifyExpired: "Ссылка устарела — запросите новую.",
             verifyFirst: "Сначала подтвердите почту по ссылке из письма.",
             linkBad: "Ссылка для входа не подошла — запросите новую.",
+            attachUsed: "Ссылка привязки уже использована — запросите новую в боте.",
+            attachExpired: "Ссылка привязки устарела — запросите новую в боте.",
+            attachBad: "Ссылка привязки не подошла — запросите новую в боте.",
+            attachBlocked: "Аккаунт заблокирован — привязка не сработала.",
+            tgAttached: "Telegram привязан к кабинету — сигналы алертов придут в бота.",
+            verifyNoMail: "Почта не привязана. Подтвердите её в боте — она нужна для "
+                + "входа и восстановления пароля.",
+            openBot: "Подтвердить почту в боте",
             mailOff: "Отправка писем пока не настроена на сервере — напишите администратору.",
             emailUnverified: "подтвердите почту",
             emailVerified: "почта подтверждена",
@@ -105,6 +118,11 @@
             verifySent: "Letter sent again — check your inbox and the spam folder.",
             needEmail: "Enter your email.",
             needPass: "Enter your password.",
+            captchaLead: "Check",
+            captchaLoading: "Check — loading the example…",
+            captchaNeed: "Solve the example — that keeps robots out.",
+            captchaWrong: "Wrong answer. We refreshed the example — try the new one.",
+            captchaRefresh: "Another example",
             weakShort: "Password is shorter than 8 characters.",
             weakSimple: "That password is too simple — pick a stronger one.",
             verifyBad: "This confirmation link did not work — request a new one.",
@@ -112,6 +130,14 @@
             verifyExpired: "The link expired — request a new one.",
             verifyFirst: "Confirm your email using the letter first.",
             linkBad: "This sign-in link did not work — request a new one.",
+            attachUsed: "This attach link was already used — request a new one in the bot.",
+            attachExpired: "The attach link expired — request a new one in the bot.",
+            attachBad: "The attach link did not work — request a new one in the bot.",
+            attachBlocked: "The account is blocked — the link did not attach anything.",
+            tgAttached: "Telegram is linked to this cabinet — alert signals go to the bot.",
+            verifyNoMail: "No email attached. Confirm it in the bot — it is needed for "
+                + "sign-in and password recovery.",
+            openBot: "Confirm email in the bot",
             mailOff: "Email sending is not configured on the server yet — ping the admin.",
             emailUnverified: "confirm your email",
             emailVerified: "email confirmed",
@@ -318,26 +344,44 @@
                 verBadge.className = "badge" + (u.email_verified ? "" : " badge-warn");
             }
         }
-        // баннер «подтвердите почту» с повторной отправкой письма
+        // баннер «подтвердите почту»: письмо или бот — зависит от того,
+        // привязан ли адрес вообще
         var vbar = $("verify-bar");
+        var vhint = $("verify-bar-hint");
+        var vresend = $("verify-resend");
+        var botHref = (payload && payload.bot_link) || "";
+        if (!botHref) {
+            var bun = String((payload && payload.bot_username) || "LiqScopeBot").replace(/^@/, "");
+            botHref = "https://t.me/" + bun;
+        }
         if (vbar) {
             if (u.email && !u.email_verified) {
                 vbar.classList.remove("hidden");
-                var hint = $("verify-bar-hint");
-                if (hint) hint.textContent = t("verifyFirst");
+                if (vhint) vhint.textContent = t("verifyFirst");
+                if (vresend) {
+                    vresend.textContent = t("resendVerify");
+                    vresend.onclick = function () {
+                        api("/api/auth/email/resend", {
+                            method: "POST",
+                            body: JSON.stringify({ email: u.email, language: lang() }),
+                        }).then(function (d) {
+                            if (vresend) {
+                                vresend.textContent = d.ok ? t("verifySent") : (d.error || "error");
+                            }
+                        });
+                    };
+                }
+            } else if (!u.email) {
+                // вошли через Telegram/бота: почты нет — напоминаем привязать её
+                vbar.classList.remove("hidden");
+                if (vhint) vhint.textContent = t("verifyNoMail");
+                if (vresend) {
+                    vresend.textContent = t("openBot");
+                    vresend.onclick = function () { location.href = botHref; };
+                }
             } else {
                 vbar.classList.add("hidden");
             }
-        }
-        var vresend = $("verify-resend");
-        if (vresend) {
-            vresend.onclick = function () {
-                api("/api/auth/email/resend", {
-                    method: "POST", body: JSON.stringify({ email: u.email, language: lang() }),
-                }).then(function (d) {
-                    if (vresend) vresend.textContent = d.ok ? t("verifySent") : (d.error || "error");
-                });
-            };
         }
         paintTgCard(u, payload);
         var botLink = $("cab-bot-link");
@@ -496,6 +540,15 @@
             var services = (arr[1] && arr[1].services) || [];
             if (arr[1] && arr[1].error) services = [];   // почта не подтверждена
             renderCabinet(me, services, locked);
+            // пришли по ссылке из письма о привязке Telegram
+            var tgQ = new URLSearchParams(location.search).get("tg");
+            if (tgQ === "attached") {
+                var note = $("site-notice");
+                if (note) {
+                    note.textContent = t("tgAttached");
+                    note.classList.remove("hidden");
+                }
+            }
             var cabLo = $("cab-logout");
             if (cabLo) cabLo.addEventListener("click", function () {
                 api("/api/auth/logout", { method: "POST" }).then(function () {
@@ -1136,6 +1189,33 @@
         el.textContent = text || "";
     }
 
+    var captchaToken = "";
+
+    function showCaptcha(data) {
+        // Подпись и сам пример — отдельные узлы: «Другой пример» просто
+        // заменяет числа, не пересобирая поле.
+        var q = $("captcha-question"), label = $("captcha-label"), inp = $("in-captcha");
+        if (data && data.token && data.question) {
+            captchaToken = data.token;
+            if (q) q.textContent = data.question;
+            if (label) label.textContent = t("captchaLead");
+            if (inp) inp.value = "";
+            return true;
+        }
+        captchaToken = "";
+        if (q) q.textContent = "…";
+        if (label) label.textContent = t("captchaLoading");
+        return false;
+    }
+
+    function loadCaptcha() {
+        showCaptcha(null);
+        return api("/api/auth/captcha").then(function (d) {
+            showCaptcha(d && d.ok !== false ? d : null);
+            return captchaToken;
+        }).catch(function () { showCaptcha(null); return ""; });
+    }
+
     function paintAuthTab(tab) {
         authTab = tab || "login";
         var isLogin = authTab === "login";
@@ -1148,8 +1228,12 @@
         if (title) title.textContent = t(isReg ? "authTitleRegister" : (isLink ? "authTitleLink" : "authTitleLogin"));
         if (lead) lead.textContent = t(isReg ? "authLeadRegister" : (isLink ? "authLeadLink" : "authLeadLogin"));
         var fName = $("field-name"), fPass = $("field-pass"), sub = $("email-submit");
+        var fCap = $("field-captcha");
         if (fName) fName.classList.toggle("hidden", !isReg);
         if (fPass) fPass.classList.toggle("hidden", isLink);
+        if (fCap) fCap.classList.toggle("hidden", !isReg);
+        if (isReg) loadCaptcha();
+        else if ($("in-captcha")) $("in-captcha").value = "";
         var pass = $("in-password");
         if (pass) pass.setAttribute("autocomplete", isReg ? "new-password" : "current-password");
         if (sub) sub.textContent = t(isReg ? "submitRegister" : (isLink ? "submitLink" : "submitLogin"));
@@ -1175,10 +1259,21 @@
         var name = (($("in-name") || {}).value || "").trim();
         var status = $("login-status");
         var next = new URLSearchParams(location.search).get("next") || "/cabinet";
+        var answer = (($("in-captcha") || {}).value || "").trim();
         if (!email || email.indexOf("@") < 0) { setStatus(status, t("needEmail"), "err"); return; }
         if (authTab !== "link" && !pass) { setStatus(status, t("needPass"), "err"); return; }
         if (authTab === "register" && pass.length < 8) { setStatus(status, t("weakShort"), "err"); return; }
+        if (authTab === "register") {
+            if (!captchaToken) {
+                // пример ещё не приехал — просим подождать и тянем заново
+                loadCaptcha();
+                setStatus(status, t("captchaNeed"), "err");
+                return;
+            }
+            if (!answer) { setStatus(status, t("captchaNeed"), "err"); return; }
+        }
         var body = { email: email, password: pass, name: name, language: lang() };
+        if (authTab === "register") { body.captcha = captchaToken; body.answer = answer; }
         var path = authTab === "register" ? "/api/auth/email/register"
             : (authTab === "link" ? "/api/auth/email/link" : "/api/auth/email/login");
         setStatus(status, "…");
@@ -1198,7 +1293,16 @@
                     { email: email }), "ok");
                 return;
             }
-            setStatus(status, authError(d), d.error === "email_unverified" ? "err" : "err");
+            if (String(d.error || "").indexOf("captcha") === 0) {
+                // Сервер уже прислал новый пример — подставляем его
+                if (d.captcha && d.captcha.token) showCaptcha(d.captcha);
+                else loadCaptcha();
+                var capErr = d.hint || (d.error === "captcha_missing"
+                    ? t("captchaNeed") : t("captchaWrong"));
+                setStatus(status, capErr, "err");
+                return;
+            }
+            setStatus(status, authError(d), "err");
         }).catch(function () { setStatus(status, "network", "err"); });
     }
 
@@ -1224,6 +1328,13 @@
             return;
         }
         if (q.get("link")) { setStatus(status, t("linkBad"), "err"); return; }
+        var mail = q.get("mail");
+        if (mail) {
+            var mmap = { used: "attachUsed", expired: "attachExpired",
+                         unknown: "attachBad", blocked: "attachBlocked" };
+            setStatus(status, t(mmap[mail] || "attachBad"), "err");
+            return;
+        }
         if (q.get("banned")) { setStatus(status, t("banned"), "err"); return; }
         if (me && !me.mail_enabled) setStatus(status, t("mailOff"), "err");
     }
@@ -1244,6 +1355,11 @@
         if (form) form.addEventListener("submit", function (e) { e.preventDefault(); submitEmailForm(); });
         var resend = $("resend-verify");
         if (resend) resend.addEventListener("click", resendVerify);
+        var capBtn = $("captcha-refresh");
+        if (capBtn) {
+            capBtn.textContent = t("captchaRefresh");
+            capBtn.addEventListener("click", function () { loadCaptcha(); });
+        }
         var forgot = $("to-reset");
         if (forgot) forgot.addEventListener("click", function () {
             var email = (($("in-email") || {}).value || "").trim();

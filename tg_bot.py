@@ -711,6 +711,13 @@ class TelegramBot:
             return ("en", en)
         if self._channel_id_cfg and cid == self._channel_id_cfg:
             return ("ru", self.remember_channel(cid, title))
+        # Название надёжнее порядка: «LiqScopeEng» — английский, «LiqScopeRUS» —
+        # русский, даже если админ переслал их в обратном порядке.
+        low = (title or "").lower()
+        if not en and ("eng" in low or low.endswith("_en") or low.endswith(" en")):
+            return ("en", self.remember_channel_en(cid, title))
+        if not ru and ("rus" in low or low.endswith("_ru") or low.endswith(" ru")):
+            return ("ru", self.remember_channel(cid, title))
         if not ru:
             return ("ru", self.remember_channel(cid, title))
         return ("en", self.remember_channel_en(cid, title))

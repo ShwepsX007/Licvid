@@ -688,6 +688,23 @@ class BotMenuTest(unittest.TestCase):
                  for b in row]
         self.assertTrue(any("Меню" in t for t in texts), texts)
 
+    def test_channel_binding_by_title(self):
+        """Канал понятен по названию, даже если переслали в обратном порядке."""
+        self.bot._channel_id_cfg = ""
+        self.bot._channel2_id_cfg = ""
+        self.bot.store.set_setting("channel_id", "")
+        self.bot.store.set_setting("channel_id_en", "")
+        code, cid = self.bot.remember_channel_auto("-100999", "LiqScopeEng")
+        self.assertEqual((code, cid), ("en", "-100999"))
+        self.bot.store.set_setting("channel_id_en", "")
+        code2, cid2 = self.bot.remember_channel_auto("-100888", "LiqScopeRUS")
+        self.assertEqual((code2, cid2), ("ru", "-100888"))
+        # без названия работает порядок: первый — русский, второй — английский
+        self.bot.store.set_setting("channel_id", "")
+        self.bot.store.set_setting("channel_id_en", "")
+        self.assertEqual(self.bot.remember_channel_auto("-100777", "")[0], "ru")
+        self.assertEqual(self.bot.remember_channel_auto("-100666", "")[0], "en")
+
     def test_menu_opens_without_channel_when_ai_missing(self):
         """Без ключей ИИ бот работает как раньше — шапка из шаблонов."""
         self.bot._channel_id_cfg = "-100111"

@@ -16,7 +16,9 @@ OI/CVD), она уходит модели, а ответ проверяется:
                                  свой OpenAI-совместимый сервис (или локальный)
     LIQSCOPE_AI_ORDER            порядок сервисов, по умолчанию
                                  gemini,groq,openrouter,deepseek,custom
-    LIQSCOPE_AI_<СЕРВИС>_MODEL   своя модель у сервиса
+    LIQSCOPE_AI_<СЕРВИС>_MODEL   своя модель у сервиса (по умолчанию берём
+                                 актуальную: если заданная устарела, сервис
+                                 ответит 404 — тогда модель подбирается сама)
     LIQSCOPE_AI_TIMEOUT          таймаут запроса, сек (12)
     LIQSCOPE_AI_MAX_TOKENS       предел ответа модели (120)
     LIQSCOPE_AI_DISABLED=1       выключить генерацию совсем
@@ -39,6 +41,16 @@ from typing import Any, Dict, List, Optional, Tuple
 from channel_digest import HEAD_MAX_LEN, money
 
 log = logging.getLogger("liqscope.ai")
+
+# Cloudflare (edge Groq, OpenRouter) отвечает 403 «error code: 1010» на
+# стандартный User-Agent python-urllib ещё до проверки ключа — поэтому
+# представляемся своим именем и просим JSON.
+USER_AGENT = "LiqScope/1.0 (+https://liqscope.online)"
+BASE_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "ru,en;q=0.9",
+}
 
 MIN_LEN = 18
 LONG = "слишком длинный"
@@ -144,6 +156,8 @@ class Provider:
     url: str
     model: str = ""
     headers: Dict[str, str] = field(default_factory=dict)
+    models_url: str = ""                 # где спросить список моделей
+    explicit_model: bool = False         # модель задана админом вручную
 
     def public(self) -> Dict[str, str]:
         return {"name": self.name, "model": self.model}
@@ -158,11 +172,13 @@ def _provider(name: str, default_model: str, key_env: str,
     key = _env(key_env)
     if not key:
         return None
+    explicit = bool(_env(model_env) or _env("LIQSCOPE_AI_MODEL"))
     model = _env(model_env) or _env("LIQSCOPE_AI_MODEL") or default_model
     if name == "gemini":
         url = _env("LIQSCOPE_AI_GEMINI_URL",
                    "https://generativelanguage.googleapis.com/v1beta/models")
-        return Provider(name=name, kind="gemini", key=key, url=url, model=model)
+        return Provider(name=name, kind="gemini", key=key, url=url, model=model,
+                        models_url=url, explicit_model=explicit)
     urls = {
         "groq": "https://api.groq.com/openai/v1/chat/completions",
         "openrouter": "https://openrouter.ai/api/v1/chat/completions",
@@ -171,9 +187,10 @@ def _provider(name: str, default_model: str, key_env: str,
     headers = {}
     if name == "openrouter":
         headers = {"HTTP-Referer": "https://liqscope.online", "X-Title": "LiqScope"}
-    return Provider(name=name, kind="openai", key=key,
-                    url=_env(f"LIQSCOPE_AI_{name.upper()}_URL", urls.get(name, "")),
-                    model=model, headers=headers)
+    url = _env(f"LIQSCOPE_AI_{name.upper()}_URL", urls.get(name, ""))
+    return Provider(name=name, kind="openai", key=key, url=url, model=model,
+                    models_url=url.rsplit("/chat/completions", 1)[0] + "/models",
+                    headers=headers, explicit_model=explicit)
 
 
 def custom_provider() -> Optional[Provider]:
@@ -182,7 +199,8 @@ def custom_provider() -> Optional[Provider]:
     if not (url and key):
         return None
     return Provider(name="custom", kind="openai", key=key, url=url,
-                    model=_env("LIQSCOPE_AI_MODEL") or "gpt-4o-mini")
+                    model=_env("LIQSCOPE_AI_MODEL") or "gpt-4o-mini",
+                    explicit_model=bool(_env("LIQSCOPE_AI_MODEL")))
 
 
 def build_providers() -> List[Provider]:
@@ -190,7 +208,7 @@ def build_providers() -> List[Provider]:
     if _env("LIQSCOPE_AI_DISABLED") in ("1", "true", "on", "yes"):
         return []
     found: Dict[str, Provider] = {}
-    for name, default_model in (("gemini", "gemini-2.5-flash-lite"),
+    for name, default_model in (("gemini", "gemini-3.5-flash-lite"),
                                 ("groq", "llama-3.3-70b-versatile"),
                                 ("openrouter", "openrouter/free"),
                                 ("deepseek", "deepseek-chat")):
@@ -216,7 +234,8 @@ def post_json(url: str, payload: dict, headers: Dict[str, str],
     """POST с JSON-телом. Ошибки сервиса — исключением с понятным текстом."""
     req = urllib.request.Request(
         url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        method="POST", headers={"Content-Type": "application/json", **headers})
+        method="POST", headers={**BASE_HEADERS, "Content-Type": "application/json",
+                                **headers})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read().decode("utf-8", "replace")
@@ -229,6 +248,121 @@ def post_json(url: str, payload: dict, headers: Dict[str, str],
         return json.loads(body) if body.strip() else {}
     except ValueError:
         raise RuntimeError(f"не JSON в ответе: {body[:120]!r}") from None
+
+
+def get_json(url: str, headers: Dict[str, str], timeout: float = 12.0) -> dict:
+    """GET JSON (список моделей у сервиса)."""
+    req = urllib.request.Request(url, headers={**BASE_HEADERS, **headers})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")[:200]
+        raise RuntimeError(f"HTTP {e.code}: {detail}") from None
+    except Exception as e:
+        raise RuntimeError(f"{type(e).__name__}: {e}") from None
+    try:
+        return json.loads(body) if body.strip() else {}
+    except ValueError:
+        raise RuntimeError(f"не JSON в ответе: {body[:120]!r}") from None
+
+
+MODEL_WORDS_BAD = ("embedding", "embed", "image", "tts", "audio", "live",
+                   "transcribe", "translate", "veo", "imagen", "whisper",
+                   "guard", "moderation", "rerank", "speech")
+
+
+def pick_model(kind: str, ids: List[str]) -> str:
+    """Самая подходящая модель для короткого текста из списка сервиса."""
+    good = [i for i in ids if i and not any(w in i.lower() for w in MODEL_WORDS_BAD)]
+    if not good:
+        return ""
+    if kind == "gemini":
+        lite = [i for i in good if "flash-lite" in i]
+        flash = [i for i in good if "flash" in i]
+        pool = lite or flash or good
+
+        def ver(x: str) -> float:
+            m = re.search(r"gemini-(\d+)(?:\.(\d+))?", x)
+            return float(f"{m.group(1)}.{m.group(2) or 0}") if m else 0.0
+
+        return sorted(pool, key=ver, reverse=True)[0]
+    if kind == "openrouter":
+        free = [i for i in good if i.endswith(":free")]
+        return sorted(free, key=len, reverse=True)[0] if free else ""
+    if kind == "groq":
+        for want in ("70b", "120b", "llama-3.3", "gpt-oss"):
+            hit = [i for i in good if want in i.lower()]
+            if hit:
+                return sorted(hit, key=len)[0]
+        return sorted(good, key=len)[0]
+    return sorted(good, key=len)[0]
+
+
+def list_models(provider: Provider, timeout: float = 12.0) -> List[str]:
+    """Спрашиваем у сервиса список моделей (для авто-подбора)."""
+    if not provider.models_url:
+        return []
+    try:
+        if provider.kind == "gemini":
+            data = get_json(f"{provider.models_url}?key={provider.key}",
+                            provider.headers, timeout)
+            out = []
+            for m in data.get("models") or []:
+                name = str(m.get("name") or "").split("/")[-1]
+                methods = m.get("supportedGenerationMethods") or []
+                if name and (not methods or "generateContent" in methods):
+                    out.append(name)
+            return out
+        data = get_json(provider.models_url,
+                        {"Authorization": f"Bearer {provider.key}", **provider.headers},
+                        timeout)
+        return [str(m.get("id") or "") for m in (data.get("data") or [])]
+    except Exception as e:
+        log.info("ИИ (%s): список моделей не получен: %s", provider.name, e)
+        return []
+
+
+def suggested_model(err: str, current: str = "") -> str:
+    """Google в 404 сам пишет замену: «use models/gemini-3.5-flash-lite».
+
+    В тексте ошибки сначала идёт *старое* имя («…models/gemini-2.5-flash-lite
+    is no longer available… use models/gemini-3.5-flash-lite»), поэтому берём
+    имя после слов use/update/replace, а не первое совпадение.
+    """
+    text = err or ""
+    m = re.search(r"(?:use|update to|replace with|switch to|move to)\s+"
+                  r"(?:the\s+)?model[s]?/([a-z0-9.\-]+)", text, re.I)
+    if m and m.group(1) != current:
+        return m.group(1)
+    for name in re.findall(r"models/([a-z0-9.\-]+)", text, re.I):
+        if name != current:
+            return name
+    return ""
+
+
+def model_error(err: str) -> bool:
+    """Похоже, что модель устарела/переименована (а не сеть и не ключ)."""
+    low = (err or "").lower()
+    return ("model" in low and any(x in low for x in (
+        "no longer available", "not found", "decommissioned", "does not exist",
+        "unknown model", "unsupported model", "invalid model")))
+
+
+def ai_error_hint(err: str) -> str:
+    """Человеческая расшифровка ответа сервиса."""
+    low = (err or "").lower()
+    if "1010" in low:
+        return ("Cloudflare сервиса не пускает запрос (error code: 1010) — "
+                "обычно из-за User-Agent; обновите код до версии с "
+                "LiqScope/1.0 в заголовках")
+    if "429" in low or "rate limit" in low or "quota" in low:
+        return "лимит бесплатного тарифа — подождите или проверьте консоль сервиса"
+    if "401" in low or "403" in low or "invalid api key" in low:
+        return "ключ не подошёл или у него нет доступа к этой модели"
+    if model_error(err):
+        return "сервис переименовал модель — обновите LIQSCOPE_AI_<СЕРВИС>_MODEL"
+    return ""
 
 
 def parse_reply(provider: Provider, data: dict) -> str:
@@ -338,6 +472,7 @@ class AiWriter:
                                      "ms": 0, "ts": 0.0}
         self.calls = 0
         self.fails = 0
+        self.resolved: Dict[str, str] = {}    # сервис -> модель, которую подобрали
 
     # --- состояние для админки ---
     @property
@@ -354,6 +489,27 @@ class AiWriter:
         }
 
     # --- сама генерация ---
+    def _repair_model(self, p: Provider) -> bool:
+        """Модель устарела — спрашиваем у сервиса актуальную и пробуем снова."""
+        # выбор модели зависит от сервиса (groq/openrouter/gemini), а kind у
+        # OpenAI-совместимых один — поэтому смотрим на имя сервиса
+        fresh = pick_model(p.name, list_models(p, self.timeout))
+        if not fresh or fresh == p.model:
+            return False
+        log.warning("ИИ (%s): модель %s недоступна — перехожу на %s",
+                    p.name, p.model, fresh)
+        p.model = fresh
+        self.state[p.name]["model"] = fresh
+        self.resolved[p.name] = fresh
+        return True
+
+    def _attempt(self, p: Provider, prompt: str) -> Optional[str]:
+        """Один запрос к сервису с самолечением модели. None — не вышло."""
+        url, body, headers = request_for(p, prompt, SYSTEM_PROMPT,
+                                         self.temperature, self.max_tokens)
+        data = post_json(url, body, headers, self.timeout)
+        return parse_reply(p, data)
+
     def headline_sync(self, snap: dict, recent: Optional[List[str]] = None) -> Optional[str]:
         """Первый удачный ответ или None (тогда шапка будет из шаблонов)."""
         if not self.providers:
@@ -365,10 +521,25 @@ class AiWriter:
                 continue
             started = time.time()
             try:
-                url, body, headers = request_for(p, prompt, SYSTEM_PROMPT,
-                                                 self.temperature, self.max_tokens)
-                data = post_json(url, body, headers, self.timeout)
-                raw = parse_reply(p, data)
+                try:
+                    raw = self._attempt(p, prompt)
+                except Exception as e:
+                    # Google шлёт в 404 готовую замену — пробуем её, а если её
+                    # нет, спрашиваем список моделей у сервиса.
+                    if not model_error(str(e)):
+                        raise
+                    hint = suggested_model(str(e), p.model)
+                    if hint:
+                        log.warning("ИИ (%s): модель %s устарела — беру %s из ответа",
+                                    p.name, p.model, hint)
+                        p.model = hint
+                        st["model"] = hint
+                        self.resolved[p.name] = hint
+                        raw = self._attempt(p, prompt)
+                    elif self._repair_model(p):
+                        raw = self._attempt(p, prompt)
+                    else:
+                        raise
                 head = clean_head(raw)
                 problem = head_problem(head)
                 if problem and problem != LONG:
@@ -383,17 +554,19 @@ class AiWriter:
                 log.info("ИИ-шапка: %s (%s) за %s мс", p.name, p.model, st["ms"])
                 return head
             except Exception as e:
-                st.update({"ok": False, "reason": str(e)[:160],
+                hint = ai_error_hint(str(e))
+                reason = str(e)[:160] + (f" — {hint}" if hint else "")
+                st.update({"ok": False, "reason": reason[:220],
                            "ms": int((time.time() - started) * 1000)})
-                # мёртвый ключ/модель больше не дёргаем; лимиты и сеть — повторяем
-                if re.search(r"HTTP (401|403|404)|invalid api key|not found",
-                             str(e), re.I):
+                # ключ и модель (после подбора) больше не дёргаем; лимиты и сеть — повторяем
+                if re.search(r"HTTP (401|403)|invalid api key", str(e), re.I) \
+                        and not model_error(str(e)):
                     st["dead"] = True
                 self.fails += 1
-                self.last = {"provider": p.name, "ok": False,
-                             "reason": str(e)[:160], "ms": st["ms"],
-                             "ts": time.time()}
-                log.warning("ИИ-шапка: %s не ответил: %s", p.name, e)
+                self.last = {"provider": p.name, "ok": False, "reason": reason[:220],
+                             "ms": st["ms"], "ts": time.time()}
+                log.warning("ИИ-шапка: %s не ответил: %s%s", p.name, e,
+                            f" ({hint})" if hint else "")
         return None
 
     async def headline(self, snap: dict,

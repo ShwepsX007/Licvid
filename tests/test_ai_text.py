@@ -17,7 +17,7 @@ sys.path.insert(0, HERE)
 
 import ai_text  # noqa: E402
 from ai_text import (AiWriter, build_providers, clean_head, fit_head,  # noqa: E402
-                     head_problem, parse_reply, summarize)
+                     head_problem, parse_reply, pick_model, summarize)
 
 SNAP = {
     "window_h": 4,
@@ -234,6 +234,111 @@ class WriterTest(EnvMixin):
                                    {"message": {"content": "Спокойный вечер на ленте"}}]}):
             head = asyncio.run(w.headline(SNAP))
         self.assertEqual(head, "Спокойный вечер на ленте")
+
+
+class ModelRepairTest(EnvMixin):
+    """Сервисы переименовывают модели — код должен это переживать сам."""
+
+    def test_user_agent_is_not_python_urllib(self):
+        """Cloudflare у Groq отвечает 403/1010 на Python-urllib — шлём свой UA."""
+        import urllib.request
+        captured = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_a):
+                return False
+
+            def read(self):
+                return b'{"ok": true}'
+
+        def fake_urlopen(req, timeout=None):
+            captured["headers"] = {k.lower(): v for k, v in req.header_items()}
+            return FakeResponse()
+
+        real = urllib.request.urlopen
+        urllib.request.urlopen = fake_urlopen
+        try:
+            ai_text.post_json("https://api.example.com/x", {"a": 1}, {})
+        finally:
+            urllib.request.urlopen = real
+        ua = captured["headers"].get("user-agent", "")
+        self.assertTrue(ua.startswith("LiqScope/"), ua)
+        self.assertNotIn("urllib", ua.lower())
+        self.assertIn("application/json", captured["headers"].get("accept", ""))
+
+    def test_hint_for_cloudflare_1010_and_rate_limits(self):
+        self.assertIn("1010", ai_text.ai_error_hint("HTTP 403: error code: 1010"))
+        self.assertIn("лимит", ai_text.ai_error_hint("HTTP 429: rate limit reached"))
+        self.assertIn("ключ", ai_text.ai_error_hint("HTTP 401: invalid api key"))
+
+    def test_google_404_replacement_is_used(self):
+        """Google пишет замену прямо в ошибке — берём её и повторяем запрос."""
+        os.environ["LIQSCOPE_AI_GEMINI_KEY"] = "g-key"
+        # админ прописал устаревшую модель — сервис ответит 404 с заменой
+        os.environ["LIQSCOPE_AI_GEMINI_MODEL"] = "gemini-2.5-flash-lite"
+        w = AiWriter(build_providers())
+        self.assertEqual(w.providers[0].model, "gemini-2.5-flash-lite")
+        urls = []
+
+        def fake_post(url, payload, headers, timeout=12.0):
+            urls.append(url)
+            if "gemini-2.5-flash-lite" in url:      # старый дефолт: 404 + подсказка
+                raise RuntimeError(
+                    'HTTP 404: {"message": "This model models/gemini-2.5-flash-lite is '
+                    'no longer available to new users. Please update your code to use '
+                    'models/gemini-3.5-flash-lite for the latest"}')
+            return {"candidates": [{"content": {"parts": [
+                {"text": "Рынок переваривает снятые лонги без паники"}]}}]}
+
+        with mock.patch.object(ai_text, "post_json", fake_post):
+            head = w.headline_sync(SNAP)
+        self.assertEqual(head, "Рынок переваривает снятые лонги без паники")
+        self.assertEqual(len(urls), 2)
+        self.assertIn("gemini-3.5-flash-lite", urls[1])
+        self.assertEqual(w.status()["providers"][0]["model"], "gemini-3.5-flash-lite")
+
+    def test_model_is_discovered_when_hint_is_missing(self):
+        """Нет подсказки в ошибке — спрашиваем список моделей у сервиса."""
+        os.environ["LIQSCOPE_AI_GROQ_KEY"] = "q-key"
+        w = AiWriter(build_providers())
+        asked = []
+
+        def fake_post(url, payload, headers, timeout=12.0):
+            if payload.get("model") == "llama-3.3-70b-versatile":
+                raise RuntimeError('HTTP 404: model "llama-3.3-70b-versatile" not found')
+            return {"choices": [{"message": {"content": "Лента отработала окно спокойно"}}]}
+
+        def fake_get(url, headers, timeout=12.0):
+            asked.append(url)
+            return {"data": [{"id": "whisper-large-v3"}, {"id": "llama-4-scout-17b"},
+                             {"id": "openai/gpt-oss-120b"}]}
+
+        with mock.patch.object(ai_text, "post_json", fake_post), \
+                mock.patch.object(ai_text, "get_json", fake_get):
+            head = w.headline_sync(SNAP)
+        self.assertEqual(head, "Лента отработала окно спокойно")
+        self.assertTrue(asked and asked[0].endswith("/models"))
+        self.assertEqual(w.status()["providers"][0]["model"], "openai/gpt-oss-120b")
+
+    def test_suggested_model_takes_replacement_not_old_name(self):
+        err = ('HTTP 404: {"message": "This model models/gemini-2.5-flash-lite is no '
+               'longer available to new users. Please update your code to use '
+               'models/gemini-3.5-flash-lite for the latest"}')
+        self.assertEqual(ai_text.suggested_model(err, "gemini-2.5-flash-lite"),
+                         "gemini-3.5-flash-lite")
+        self.assertEqual(ai_text.suggested_model("HTTP 500: поломка"), "")
+
+    def test_pick_model_prefers_lite_and_free(self):
+        gem = ["gemini-2.5-flash", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite",
+               "gemini-3.5-flash", "text-embedding-004", "gemini-2.5-flash-image"]
+        self.assertEqual(pick_model("gemini", gem), "gemini-3.5-flash-lite")
+        self.assertEqual(pick_model("openrouter", ["a/paid", "b/c:free"]), "b/c:free")
+        self.assertEqual(pick_model("openrouter", ["a/paid"]), "")   # бесплатной нет
+        self.assertEqual(pick_model("groq", ["whisper-large-v3", "llama-3.3-70b-versatile"]),
+                         "llama-3.3-70b-versatile")
 
 
 class RenderTest(unittest.TestCase):

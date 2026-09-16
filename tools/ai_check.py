@@ -90,6 +90,8 @@ def main() -> int:
     ap.add_argument("--no-systemd", action="store_true", help="не читать окружение юнита")
     ap.add_argument("--dry", action="store_true",
                     help="только показать настройки и промпт, без запросов")
+    ap.add_argument("--models", action="store_true",
+                    help="спросить у сервисов список моделей и показать, какая подойдёт")
     args = ap.parse_args()
 
     env = {k: os.environ[k] for k in KEYS if os.environ.get(k)}
@@ -118,6 +120,19 @@ def main() -> int:
         print("\nпромпт целиком:\n")
         print(ai_text.build_prompt(SAMPLE))
         return 0
+    if args.models:
+        print("\nдоступные модели (и та, которую выберет код):")
+        timeout = float(env.get("LIQSCOPE_AI_TIMEOUT", "15") or 15)
+        for p_ in providers:
+            ids = ai_text.list_models(p_, timeout)
+            if not ids:
+                print(f"  {p_.name}: список не получен (сеть или ключ) — "
+                      f"остаётся {p_.model}")
+                continue
+            best = ai_text.pick_model(p_.name, ids) or "—"
+            print(f"  {p_.name}: {len(ids)} шт., код выберет {best}")
+            print(f"     первые: {', '.join(ids[:6])}")
+        return 0
 
     ok_any = False
     print("\nпроверяю сервисы по очереди:")
@@ -129,7 +144,10 @@ def main() -> int:
             ok_any = True
             print(f"  ✓ {p.name} ({p.model}) · {st['ms']} мс\n     «{head}»")
         else:
+            hint = ai_text.ai_error_hint(st.get("reason") or "")
             print(f"  ✗ {p.name} ({p.model}): {st['reason']}")
+            if hint:
+                print(f"     → {hint}")
     print()
     if ok_any:
         print("Итог: есть рабочие сервисы — сводку подпишет ИИ. Остальные "

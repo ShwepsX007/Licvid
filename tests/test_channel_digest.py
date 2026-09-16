@@ -9,14 +9,46 @@ HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
 
 from channel_digest import (  # noqa: E402
-    CAPTION_LIMIT, VARIANT_COUNT, _headlines, collect_digest,
-    format_headline, list_images, money, pick_image, render_post,
+    CAPTION_LIMIT, VARIANT_COUNT, _dwidth, _headlines, _mono, collect_digest,
+    format_headline, list_images, money, pick_image, render_post, short_money,
 )
 
 
 def _ev(sym, usd, side, exch, ts, n=1):
     return {"symbol": sym, "usd": usd, "side": side,
             "exchange": exch, "timestamp": ts, "id": f"{sym}-{n}"}
+
+
+def _board(total=4_640_000, count=5):
+    """Часовой стенд: ровно те данные, из которых собирается пост."""
+    base = 1_000_000 - 1_000_000 % 3600      # начало часа в секундах
+    hours = [(base - i * 3600, pct) for i, pct in
+             enumerate((-0.42, 0.31, -0.18, 0.05))]
+    top = []
+    for i, (h, pct) in enumerate(hours):
+        top.append({
+            "h": h, "tz": 3 * 3600, "total": 1_200_000 - i * 100_000, "count": 2,
+            "items": [
+                {"symbol": "BTC_USDT", "usd": 2_400_000 - i * 100_000,
+                 "side": "SELL", "exchange": "binance"},
+                {"symbol": "ETH_USDT", "usd": 1_100_000 - i * 50_000,
+                 "side": "BUY", "exchange": "okx"},
+                {"symbol": "SOL_USDT", "usd": 250_000, "side": "BUY",
+                 "exchange": "bybit"},
+                {"symbol": "DOGE_USDT", "usd": 90_000, "side": "SELL",
+                 "exchange": "gate"},
+            ],
+        })
+    return {
+        "tz": 3, "span_hours": 4, "total_usd": total, "count": count,
+        "prev_total": 4_000_000, "diff_pct": 16.0,
+        "hours": [{"h": h, "total": 1_200_000, "count": 2, "coins": [],
+                   "bias": "long", "oi": {"value": 1.2e9, "pct": pct}}
+                  for h, pct in hours],
+        "top_hours": top,
+        "oi_hours": [{"h": h, "pct": pct, "value": 1.2e9} for h, pct in hours],
+        "oi_now_usd": 1_200_000_000, "oi_4h_pct": -1.2,
+    }
 
 
 class DigestTest(unittest.TestCase):
@@ -53,6 +85,7 @@ class DigestTest(unittest.TestCase):
 
     def test_variants_differ_and_contain_facts(self):
         snap = collect_digest(self.events, now=self.now, oi=self.oi, cvd=self.cvd)
+        snap["board"] = _board()
         texts = [render_post(snap, i) for i in range(VARIANT_COUNT)]
         self.assertEqual(len(_headlines(4)), VARIANT_COUNT)
         self.assertGreaterEqual(VARIANT_COUNT, 20)
@@ -64,40 +97,83 @@ class DigestTest(unittest.TestCase):
             self.assertIn("https://liqscope.online", t)
             self.assertIn("t.me/LiqScopeBot", t)
             self.assertLessEqual(len(t), CAPTION_LIMIT)
-            self.assertIn("CVD", t)
             self.assertIn("OI", t)
             self.assertIn("<code>", t)
             self.assertTrue(any(ch in t for ch in "💥🔴🟢🐋📊🌊🏛🔥⚡🏆🌙🌡⏱❓📋📉📈"))
 
-    def test_compact_two_column_layout(self):
-        """Компактный пост: таблица бирж и монет — двумя столбиками в <pre>."""
+    def test_one_post_carries_top7_hours(self):
+        """Один пост: цифры не дублируются, топ-7 живёт в той же подписи."""
+        snap = collect_digest(self.events, now=self.now, oi=self.oi, cvd=self.cvd)
+        snap["board"] = _board()
+        t = render_post(snap, 0)
+        self.assertEqual(t.count("💥 <b>$4.64M</b>"), 1)   # касса ровно раз
+        self.assertIn("🏆", t)
+        # все часы представлены: сколько влезло полными таблицами, остальные —
+        # сжатой строкой (три удара часа), чтобы час не пропал из поста
+        self.assertEqual(t.count("<b>🏆"), 4)
+        self.assertGreaterEqual(t.count("</code></pre>"), 2)
+        self.assertIn(" · ", t.split("<b>🏆")[-1])      # последний час — сжатый
+        self.assertIn("крупнейшие за час", t)
+        # часов влезает столько, сколько помещается в подпись (но не меньше трёх)
+        self.assertGreaterEqual(t.count("крупнейшие за час"), 3)
+        self.assertNotIn("00:00", t)         # часы в МСК, а не в эпохе
+        self.assertIn("к прошлым 4ч", t)
+        self.assertIn("📊 OI за 4ч", t)
+
+    def test_no_heavy_tables_in_post(self):
+        """В посте нет таблиц с колонками цифр — они спорили друг с другом."""
+        snap = collect_digest(self.events, now=self.now, oi=self.oi, cvd=self.cvd)
+        snap["board"] = _board()
+        t = render_post(snap, 0)
+        self.assertNotIn("Биржи", t)
+        self.assertNotIn("шт.", t)
+        for i in range(VARIANT_COUNT):
+            self.assertNotIn("Кит", render_post(snap, i))
+
+    def test_post_without_board_still_readable(self):
         snap = collect_digest(self.events, now=self.now, oi=self.oi, cvd=self.cvd)
         t = render_post(snap, 0)
-        # выравнивать столбики Telegram умеет только в <pre><code>
-        self.assertIn("<pre><code>", t)
-        self.assertIn("</code></pre>", t)
-        self.assertIn("• Binance", t)
-        self.assertIn("шт.", t)             # касса и число ликвидаций в правой колонке
-        self.assertIn("🔴 лонги", t)
-        self.assertIn("🟢 шорты", t)
-        self.assertIn("🐋", t)              # кит строкой ниже таблицы
-        self.assertIn("Монеты", t)
-        self.assertIn("1️⃣", t)              # ранги монет
-        self.assertIn("📊 OI", t)
-        self.assertIn("🌊 CVD", t)          # CVD показываем там, где он сильнее OI
-        # голого URL вне <a> в посте нет (ссылки спрятаны в слова)
-        import re
-        stripped = re.sub(r"<a\s+href=\"[^\"]*\">.*?</a>", "", t, flags=re.S)
-        self.assertNotIn("http", stripped)
-        for i in range(VARIANT_COUNT):
-            self.assertIn("<pre><code>", render_post(snap, i))
+        self.assertIn("$4.64M", t)
+        self.assertIn("резали лонги", t)
+        self.assertLessEqual(len(t), CAPTION_LIMIT)
 
-    def test_metric_picks_stronger_signal(self):
-        """Одна строка на монету: OI, если движение больше, иначе CVD."""
+    def test_legacy_views_still_render(self):
+        """Запасные виды: табличный стенд и старые таблицы — живы, но в пост не идут."""
+        from channel_digest import build_board, _facts
         snap = collect_digest(self.events, now=self.now, oi=self.oi, cvd=self.cvd)
-        t = render_post(snap, 4)             # вариант, где монеты идут первыми
-        self.assertIn("📊 OI ↓$180.00M (-1.45%)", t)   # BTC: OI −180M > CVD −12.5M
-        self.assertIn("🌊 CVD 🔴 продажи $5.00M", t)   # SOL: CVD есть, OI нет
+        snap["board"] = _board()
+        stand = build_board(snap["board"])
+        self.assertIn("СТЕНД", stand)
+        self.assertIn("Всего", stand)
+        self.assertIn("<pre><code>", stand)
+        self.assertIn("OI за 4ч", stand)
+        self.assertNotIn("СТЕНД", render_post(snap, 0))     # в пост таблица не идёт
+        facts = _facts(snap, tables=True)
+        for key in ("ex", "ex6", "coins", "coins8", "kpi"):
+            self.assertIn(key, facts)
+        self.assertNotIn("ex", _facts(snap))                # по умолчанию не считаем
+
+    def test_money_shorter_in_top7(self):
+        """В топ-7 суммы короче: знак в строке стоит строки."""
+        self.assertEqual(short_money(2_400_000), "$2.4M")
+        self.assertEqual(short_money(899_400), "$899K")
+        self.assertEqual(short_money(1_260_000_000), "$1.3B")
+        self.assertEqual(short_money(0), "$0")
+
+    def test_emoji_do_not_break_columns(self):
+        """Столбики не разъезжаются: эмодзи считается за две знакоместа."""
+        rows = [
+            [("1. BTC 🔴", "l"), ("$2.4M", "r"), ("Binance", "l")],
+            [("2. ETH 🟢", "l"), ("$1.1M", "r"), ("OKX", "l")],
+            [("3. LONG_NAME", "l"), ("$900K", "r"), ("Gate", "l")],
+        ]
+        block = _mono(rows)
+        body = block.split("<code>")[1].split("</code>")[0]
+        lines = body.splitlines()
+        self.assertEqual(len(lines), 3)
+        widths = {_dwidth(line.split("$")[0]) for line in
+                  (l for l in lines if "$" in l)}
+        self.assertEqual(len(widths), 1, lines)
 
     def test_blogger_heads_are_alive(self):
         snap = collect_digest(self.events, now=self.now, oi=self.oi, cvd=self.cvd)
@@ -111,18 +187,21 @@ class DigestTest(unittest.TestCase):
             self.assertIn("<b>", line)
         self.assertEqual(len(set(heads)), VARIANT_COUNT)
 
-    def test_caption_fits_with_many_coins(self):
-        extra = [
-            _ev(f"C{i}_USDT", 80_000 + i * 1000, "SELL" if i % 2 == 0 else "BUY",
-                "binance", self.now - 10, 10 + i)
-            for i in range(16)
-        ]
-        snap = collect_digest(self.events + extra, now=self.now,
-                              oi=self.oi, cvd=self.cvd)
+    def test_caption_fits_with_long_headline(self):
+        """Даже с длинной шапкой ИИ пост остаётся одним сообщением."""
+        snap = collect_digest(self.events, now=self.now, oi=self.oi, cvd=self.cvd)
+        snap["board"] = _board()
+        long_head = ("Смешанная картина: лонги BTC и ETH вынесли на $2.4M,"
+                     " шорты SOL и DOGE получили своё, открытый интерес по"
+                     " рынку просел на 1.2% за четыре часа, а суммарно лента"
+                     " отдала больше четырёх с половиной миллионов долларов."
+                     " Подробности по часам — ниже, в блоке с топом.")
         for i in range(VARIANT_COUNT):
-            t = render_post(snap, i)
+            t = render_post(snap, i, head_override=long_head)
             self.assertLessEqual(len(t), CAPTION_LIMIT, f"v{i} len={len(t)}")
             self.assertIn("LiqScope", t)
+            self.assertIn("🏆", t)
+            self.assertTrue(t.rstrip().endswith("</a>"), t[-90:])
 
     def test_money_and_empty(self):
         self.assertEqual(money(1_250_000), "$1.25M")
@@ -134,7 +213,8 @@ class DigestTest(unittest.TestCase):
 
     def test_custom_headlines_used(self):
         snap = collect_digest(self.events, now=self.now, oi=self.oi, cvd=self.cvd)
-        custom = [format_headline("☕ Моя шапка за {h}ч. Цифры ниже.", 4)]
+        snap["board"] = _board()
+        custom = [format_headline("☕ Моя шапка за {h}ч. Топы ниже.", 4)]
         t = render_post(snap, 0, headlines=custom)
         self.assertIn("Моя шапка", t)
         self.assertIn("BTC", t)

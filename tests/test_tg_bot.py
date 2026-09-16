@@ -590,19 +590,17 @@ class BotMenuTest(unittest.TestCase):
         self.assertIn("Рынок снова показал, кто здесь главный", ru)
         self.assertIn("Futures opened the week", en)
         self.assertNotIn("Рынок снова", en)
-        # подписи блоков тоже переведены
-        self.assertIn("Coins", en)
+        # цифры и подписи блоков тоже переведены
         self.assertIn("fills", en)
         self.assertIn("longs", en)
-        self.assertIn("Монеты", ru)
-        self.assertIn("шт.", ru)
+        self.assertIn("ликвидаций", ru)
         self.assertIn("лонги", ru)
         # реф-ссылка Gate есть в обоих каналах
         self.assertIn("gate.com/ru/signup/VLFCAVWMBW", ru)
         self.assertIn("gate.com/signup/VLFCAVWMBW", en)
 
-    def test_top7_goes_as_second_message(self):
-        """Топ-7 по часам не влезает в подпись — уходит отдельным сообщением."""
+    def test_one_post_carries_top7_inside_caption(self):
+        """Один пост: топ-7 по часам живёт в той же подписи, второго нет."""
         self.bot._channel_id_cfg = "-100111"
         board = {
             "span_hours": 4, "tz": 3 * 3600, "total_usd": 12e6, "count": 40,
@@ -627,12 +625,15 @@ class BotMenuTest(unittest.TestCase):
         self.bot.digest_fn = digest          # type: ignore
         posts = self._capture_posts()
         self.assertTrue(asyncio.run(self.bot.post_channel_digest()))
-        self.assertEqual(len(posts), 2, posts)
+        self.assertEqual(len(posts), 1, posts)            # одно сообщение, не два
         self.assertEqual(posts[0]["kind"], "photo")
-        self.assertEqual(posts[1]["kind"], "text")
-        self.assertIn("СТЕНД", posts[0]["text"])          # таблица часов в подписи
-        self.assertIn("Топ-7", posts[1]["text"])          # второй сообщение
-        self.assertIn("Gate", posts[1]["text"])
+        caption = posts[0]["text"]
+        self.assertIn("крупнейшие за час", caption)       # топ-7 внутри подписи
+        self.assertIn("<pre><code>", caption)
+        self.assertIn("📊 OI за 4ч", caption)
+        self.assertIn("к прошлым 4ч", caption)
+        self.assertIn("Gate", caption)
+        self.assertLessEqual(len(caption), 1024, len(caption))
 
     def test_subscription_accepts_either_channel(self):
         """Подписки на любой канал достаточно — русский или английский."""
@@ -894,9 +895,40 @@ class BotMenuTest(unittest.TestCase):
             },
         }
         asyncio.run(self.bot._on_update(upd))
-        self.assertEqual(self.store.get_setting("channel_id"), "-100888")
         sent = [p for m, p in calls if m == "sendMessage"][0]
-        self.assertIn("привязан", sent["text"].lower())
+        # бот не угадывает язык: он спрашивает, какой канал перед ним
+        self.assertIn("на русском или на английском", sent["text"])
+        cbs = str(sent.get("reply_markup"))
+        self.assertIn("ch:role:ru", cbs)
+        self.assertIn("ch:role:en", cbs)
+        # до ответа админа привязки нет — канал не встанет не на свою роль
+        self.assertEqual(self.store.get_setting("channel_id") or "", "")
+
+        # админ выбрал «русский»
+        self.store.upsert_telegram_user({"id": 1001, "username": "boss",
+                                         "first_name": "Ada"})
+        self.bot._pending_channel = {"id": "-100888", "title": "LiqScopeRUS"}
+        asyncio.run(self.bot._on_callback({
+            "id": "cb1", "from": {"id": 1001, "username": "boss", "first_name": "Ada"},
+            "data": "ch:role:ru",
+            "message": {"message_id": 44, "chat": {"id": 1001}},
+        }))
+        self.assertEqual(self.bot.channel_chat_id(), "-100888")
+        self.assertEqual(self.store.get_setting("channel_id"), "-100888")
+
+        # и английский канал встаёт на свою роль, не сбивая русский
+        self.bot._pending_channel = {"id": "-100777", "title": "LiqScopeEng"}
+        asyncio.run(self.bot._on_callback({
+            "id": "cb2", "from": {"id": 1001, "username": "boss", "first_name": "Ada"},
+            "data": "ch:role:en",
+            "message": {"message_id": 45, "chat": {"id": 1001}},
+        }))
+        self.assertEqual(self.bot.channel_chat_id_en(), "-100777")
+        self.assertEqual(self.bot.channel_chat_id(), "-100888")
+        # один и тот же канал не может занимать обе роли
+        self.bot._pending_channel = {"id": "-100777", "title": "LiqScopeEng"}
+        self.bot.remember_channel_role("ru", "-100777", "LiqScopeEng")
+        self.assertEqual(self.bot.channel_chat_id_en(), "")
 
     def test_admin_kb_has_templates(self):
         self.assertIn("a:tpl", _datas(self.bot._admin_kb()))

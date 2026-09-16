@@ -1314,6 +1314,11 @@ class MarketFeed:
         self.symbols_source = "fallback"
         self._session: Optional[aiohttp.ClientSession] = None
         self._tasks: List[asyncio.Task] = []
+        # Сторож подключений: задача-супервизор по имени источника и метка
+        # «перезапусти принудительно». Нужны, чтобы источник, у которого
+        # сокет открыт, а данные не идут, можно было перезапустить извне.
+        self._supervisors: Dict[str, asyncio.Task] = {}
+        self._kick: Dict[str, bool] = {}
         self._stop = asyncio.Event()
 
     # -- жизненный цикл ------------------------------------------------------
@@ -1375,6 +1380,7 @@ class MarketFeed:
                     self._supervise(name, coro, **kw), name=f"liq-{name}"))
 
         self.oi.bind(self._session)
+        self._tasks.append(asyncio.create_task(self._silence_watchdog(), name="watchdog"))
         self._tasks.append(asyncio.create_task(self._price_engine(), name="prices"))
         self._tasks.append(asyncio.create_task(self._oi_engine(), name="oi"))
         if self.on_trade is not None:
@@ -1445,6 +1451,9 @@ class MarketFeed:
             if self._stop.is_set():
                 return
         while not self._stop.is_set():
+            cur = asyncio.current_task()
+            if cur is not None:
+                self._supervisors[name] = cur
             self.status[name].attempts += 1   # попытки видно и до первого up
             run_start = time.monotonic()
             try:
@@ -1455,6 +1464,17 @@ class MarketFeed:
                     delay = base_delay
                 log.info("[%s] поток закрыт (проработал %.0fс)", name, uptime)
             except asyncio.CancelledError:
+                # Отмена бывает двух видов: остановка сервиса и «пинок» сторожа.
+                # Во втором случае слушателя надо поднять заново — иначе биржа,
+                # у которой сокет открыт, а данные не идут, так и осталась бы
+                # висеть «подключённой» без единого события.
+                if self._kick.pop(name, False) and not self._stop.is_set():
+                    uptime = time.monotonic() - run_start
+                    self.status[name].down("watchdog restart")
+                    log.warning("[%s] сторож: молчит %.0fс — переподключаюсь", name, uptime)
+                    delay = base_delay
+                    await asyncio.sleep(delay)
+                    continue
                 raise
             except Exception as e:
                 uptime = time.monotonic() - run_start
@@ -1463,6 +1483,57 @@ class MarketFeed:
                             "переподключение через %.0fс", name, uptime, e, delay)
             await asyncio.sleep(delay)
             delay = min(delay * 1.6, 60.0)
+
+    # -- сторож молчащих источников ------------------------------------------
+    def silence_limit(self) -> float:
+        """Сколько секунд тишины при живом сокете считаем поломкой."""
+        try:
+            return max(120.0, float(os.getenv("LIQSCOPE_SILENCE_SEC", "1800")))
+        except ValueError:
+            return 1800.0
+
+    def silent_sources(self) -> List[str]:
+        """Подключённые источники, от которых давно нет событий."""
+        limit = self.silence_limit()
+        now = time.time()
+        out = []
+        for name, st in self.status.items():
+            if name in ("prices", "ticks") or not st.enabled or not st.connected:
+                continue
+            since = (now - st.last_event_ts) if st.last_event_ts else (now - st.connected_since)
+            if since >= limit:
+                out.append(name)
+        return out
+
+    async def restart_source(self, name: str) -> bool:
+        """Принудительно перезапускает слушателя биржи (то же, что сторож)."""
+        task = self._supervisors.get(name)
+        if task is None or task.done():
+            return False
+        self._kick[name] = True
+        task.cancel()
+        return True
+
+    async def _silence_watchdog(self, interval: float = 60.0) -> None:
+        """Раз в минуту проверяет: сокет открыт, а события не идут?
+
+        Так выглядит поломка, которую не видно ни по ошибкам, ни по
+        переподключениям: подписка не встала, спецификации контрактов не
+        загрузились, биржа молча режет поток. Раньше источник в таком
+        состоянии висел до ручного рестарта сервиса.
+        """
+        while not self._stop.is_set():
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=interval)
+                return                      # сервис останавливается
+            except asyncio.TimeoutError:
+                pass
+            for name in self.silent_sources():
+                if self._stop.is_set():
+                    return
+                if await self.restart_source(name):
+                    log.warning("[%s] тишина дольше %.0fс — сторож переподключает",
+                                name, self.silence_limit())
 
     # -- монеты --------------------------------------------------------------
     async def refresh_symbols(self):
@@ -2016,8 +2087,20 @@ class MarketFeed:
     # -- Gate.io -------------------------------------------------------------
     async def _gate_liquidations(self):
         st = self.status["gate"]
-        if not self.gate_multipliers:
+        for attempt in range(3):
+            if self.gate_multipliers:
+                break
             await self._gate_load_specs()
+            if self.gate_multipliers:
+                break
+            # Пустая карта — не «тихая биржа», а поломка: подписка уходит на
+            # ноль контрактов, сокет живёт, событий нет. Раньше слушатель
+            # оставался в этом состоянии навсегда — Gate «подключён», данных нет.
+            log.warning("[gate] нет спецификаций контрактов (попытка %d/3)",
+                        attempt + 1)
+            await asyncio.sleep(2.0 * (attempt + 1))
+        if not self.gate_multipliers:
+            raise RuntimeError("не загрузились спецификации контрактов Gate")
         async with self._session.ws_connect(GATE_WS, heartbeat=20, timeout=25) as ws:
             st.up()
             subscribed = set()
@@ -2036,7 +2119,12 @@ class MarketFeed:
                     await asyncio.sleep(0.2)
 
             await sync_subs()
+            st.extra["subs"] = len(subscribed)
             log.info("[gate] подписка public_liquidates на %d контрактов", len(subscribed))
+            if not subscribed:
+                # подписка на ноль контрактов = тишина навсегда: пусть
+                # супервизор поднимет поток заново (и перечитает спецификации)
+                raise RuntimeError("подписка public_liquidates пустая")
             syncer = self._start_syncer(ws, sync_subs, 30.0)
             try:
                 async for msg in ws:
@@ -4206,13 +4294,23 @@ class MarketFeed:
 
     # -- Диагностика ---------------------------------------------------------
     def health(self) -> dict:
+        silent = set(self.silent_sources())
+        sources = {}
+        for k, v in self.status.items():
+            d = v.as_dict()
+            since = d.get("seconds_since_event")
+            d["silent_sec"] = since
+            d["stale"] = k in silent
+            sources[k] = d
         return {
             "uptime_sec": round(time.time() - self.started_at, 1),
+            "silent_exchanges": sorted(silent),
+            "silence_limit_sec": self.silence_limit(),
             "symbols_count": len(self.symbols),
             "symbols_source": self.symbols_source,
             "custom_symbols": list(self.custom_symbols),
             "catalog_count": len(self.symbol_index),
             "catalog_source": self.symbol_index_source,
             "cvd_source": self.cvd_source,
-            "sources": {k: v.as_dict() for k, v in self.status.items()},
+            "sources": sources,
         }

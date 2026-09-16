@@ -265,6 +265,99 @@ async def scenario_supervise_backoff():
     feed._stop.clear()
 
 
+# --- 3б) сторож молчащих источников ------------------------------------------
+
+async def scenario_silence_watchdog():
+    print("3б) сторож: сокет открыт, событий нет — источник переподключается")
+    feed = MarketFeed(on_liquidation=on_liq, on_price=noop_price, exchanges=[])
+    feed.status["gate"].enabled = True
+
+    starts = []
+
+    async def factory():
+        starts.append(time.time())
+        feed.status["gate"].up()
+        try:
+            await asyncio.sleep(30)
+        finally:
+            pass
+
+    task = asyncio.create_task(feed._supervise("gate", factory, base_delay=0.05))
+    await asyncio.sleep(0.2)
+    check("слушатель запустился и отмечен подключённым",
+          len(starts) == 1 and feed.status["gate"].connected)
+
+    # тишина при открытом сокете: подкручиваем время «последнего события» назад
+    feed.status["gate"].events = 1
+    feed.status["gate"].last_event_ts = time.time() - 10_000
+    check("тишина видна как stale", feed.silent_sources() == ["gate"],
+          feed.silent_sources())
+    check("health отдаёт признак и лимит тишины",
+          feed.health()["silent_exchanges"] == ["gate"]
+          and feed.health()["silence_limit_sec"] >= 120)
+    check("активный источник в stale не попадает",
+          all(feed.status[n].connected_since == 0 for n in ("bybit", "okx")),
+          "ok")
+
+    kicked = await feed.restart_source("gate")
+    check("сторож пнул слушателя", kicked)
+    for _ in range(60):
+        if len(starts) >= 2:
+            break
+        await asyncio.sleep(0.05)
+    check("слушатель поднялся заново сам (без рестарта сервиса)",
+          len(starts) >= 2, f"запусков: {len(starts)}")
+    check("статус после перезапуска снова подключён",
+          feed.status["gate"].connected)
+
+    feed._stop.set()
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+async def scenario_gate_needs_contract_specs():
+    print("3в) gate: без спецификаций контрактов слушатель не «висит тихо»")
+    import inspect
+    src = inspect.getsource(MarketFeed._gate_liquidations)
+    check("спецификации контрактов грузятся с повторами",
+          "for attempt in range(3)" in src and "_gate_load_specs()" in src)
+    check("пустая карта спецификаций — ошибка, а не тихая тишина",
+          "не загрузились спецификации контрактов Gate" in src)
+    check("подписка на ноль контрактов не оставляем",
+          "подписка public_liquidates пустая" in src)
+    check("число подписок видно в health",
+          'st.extra["subs"] = len(subscribed)' in src)
+
+    # гоняем настоящий сторож против пустой карты подписок
+    feed = MarketFeed(on_liquidation=on_liq, on_price=noop_price, exchanges=["gate"])
+    feed.status["gate"].enabled = True
+    feed.silence_limit = lambda: 0.0        # любая тишина = поломка
+    long_ago = time.time() - 5
+    feed.status["gate"].up()
+    feed.status["gate"].connected_since = long_ago
+    feed.status["gate"].last_event_ts = long_ago
+
+    started = asyncio.Event()
+
+    async def factory():
+        started.set()
+        await asyncio.sleep(30)
+
+    task = asyncio.create_task(feed._supervise("gate", factory, base_delay=0.05))
+    await asyncio.wait_for(started.wait(), 5)
+    check("супервизор зарегистрировал себя для сторожа",
+          feed._supervisors.get("gate") is not None)
+    feed._stop.set()
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
 # --- 4) таймаут отправки зависшему клиенту -----------------------------------
 
 class SlowWS:
@@ -343,6 +436,8 @@ async def main():
         await scenario_watchdog_kills_zombie()
         await scenario_watchdog_keeps_quiet_alive()
         await scenario_supervise_backoff()
+        await scenario_silence_watchdog()
+        await scenario_gate_needs_contract_specs()
         await scenario_client_send_timeout()
         await scenario_soak_probe()
     finally:

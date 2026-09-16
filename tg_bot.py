@@ -531,14 +531,27 @@ class TelegramBot:
         return await self.show_menu(chat_id, text, markup, old_id=message_id)
 
     def channel_chat_id(self) -> str:
-        return (self._channel_id_cfg
-                or (self.store.get_setting("channel_id", "") if self.store else "")
-                or "").strip()
+        """id русского канала: выбор админа в боте важнее env.
+
+        Переменные LIQSCOPE_CHANNEL_ID/CHANNEL2_ID — это стартовое значение
+        для первого запуска; если админ потом перепривязал канал кнопками,
+        главным становится его выбор (иначе пост уходит не туда, и по логам
+        это не видно).
+        """
+        saved = (self.store.get_setting("channel_id", "") if self.store else "") or ""
+        return (saved or self._channel_id_cfg or "").strip() or self._channel_id_cfg.strip()
 
     def channel_chat_id_en(self) -> str:
-        return (self._channel2_id_cfg
-                or (self.store.get_setting("channel_id_en", "") if self.store else "")
-                or "").strip()
+        saved = (self.store.get_setting("channel_id_en", "") if self.store else "") or ""
+        return (saved or self._channel2_id_cfg or "").strip() or self._channel2_id_cfg.strip()
+
+    def channel_source(self, code: str = "ru") -> str:
+        """Откуда взялся id: «кнопки» (админ) или env (переменная окружения)."""
+        if code == "en":
+            saved = (self.store.get_setting("channel_id_en", "") if self.store else "") or ""
+            return "bot" if saved else ("env" if self._channel2_id_cfg else "")
+        saved = (self.store.get_setting("channel_id", "") if self.store else "") or ""
+        return "bot" if saved else ("env" if self._channel_id_cfg else "")
 
     def channel_url_en(self) -> str:
         return self.channel2_url
@@ -552,6 +565,76 @@ class TelegramBot:
             self.store.set_setting("channel_title_en", str(title)[:80])
         log.info("английский канал привязан chat_id=%s title=%s", cid, title)
         return cid
+
+    def channel_role(self, code: str) -> dict:
+        """Что сейчас привязано к роли: {id, title, url}."""
+        if code == "en":
+            cid = self.channel_chat_id_en()
+            title = (self.store.get_setting("channel_title_en", "") if self.store else "") or ""
+            return {"code": "en", "id": cid, "title": title or self.channel2_name(),
+                    "url": self.channel_url_en()}
+        cid = self.channel_chat_id()
+        # id из env имеет приоритет — показываем именно его
+        if self._channel_id_cfg and cid == self._channel_id_cfg:
+            title = (self.store.get_setting("channel_title", "") if self.store else "") or ""
+        else:
+            title = (self.store.get_setting("channel_title", "") if self.store else "") or ""
+        return {"code": "ru", "id": cid, "title": title or "LiqScopeRUS",
+                "url": self.channel_url}
+
+    def channel2_name(self) -> str:
+        return os.getenv("LIQSCOPE_CHANNEL_EN_NAME") or "LiqScopeEng"
+
+    def remember_channel_role(self, code: str, chat_id, title: str = "") -> str:
+        """Жёстко закрепляет канал за языком.
+
+        Заодно снимает ту же роль с другого канала: один канал не может быть
+        и русским, и английским, иначе посты уходят не туда.
+        """
+        cid = str(chat_id).strip()
+        if not cid or code not in ("ru", "en"):
+            return ""
+        d = self._channel_bindings()
+        d[code] = cid
+        if title:
+            d.setdefault("titles", {})[code] = str(title)[:80]
+        # если этот же id стоял на другой роли — убираем оттуда
+        for other in ("ru", "en"):
+            if other != code and d.get(other) == cid:
+                d[other] = ""
+        self._save_channel_bindings(d)
+        log.info("канал %s привязан: %s (%s)", code, cid, title)
+        return cid
+
+    def _channel_bindings(self) -> dict:
+        if self.store:
+            try:
+                raw = self.store.get_setting("channel_bindings", "")
+                if raw:
+                    d = json.loads(raw)
+                    if isinstance(d, dict):
+                        return {"ru": str(d.get("ru") or ""), "en": str(d.get("en") or ""),
+                                "titles": d.get("titles") or {}}
+            except Exception as e:
+                log.debug("channel_bindings: %s", e)
+        return {"ru": self.store.get_setting("channel_id", "") if self.store else "",
+                "en": self.store.get_setting("channel_id_en", "") if self.store else "",
+                "titles": {}}
+
+    def _save_channel_bindings(self, d: dict) -> None:
+        if not self.store:
+            return
+        d = {"ru": str(d.get("ru") or ""), "en": str(d.get("en") or ""),
+             "titles": d.get("titles") or {}}
+        self.store.set_setting("channel_bindings", json.dumps(d, ensure_ascii=False))
+        # держим и старые ключи: их читают channel_chat_id() и проверка подписки
+        self.store.set_setting("channel_id", d["ru"])
+        self.store.set_setting("channel_id_en", d["en"])
+        t = d.get("titles") or {}
+        if t.get("ru"):
+            self.store.set_setting("channel_title", str(t["ru"])[:80])
+        if t.get("en"):
+            self.store.set_setting("channel_title_en", str(t["en"])[:80])
 
     def channel_pair(self) -> list:
         """Каналы для подписки: (код, название, url, id)."""
@@ -678,22 +761,75 @@ class TelegramBot:
         )
 
     async def _bind_channel_from_message(self, msg: dict, chat_id: int) -> bool:
-        """Админ переслал пост из канала → запоминаем id."""
+        """Админ переслал пост из канала → спрашиваем, какой это язык.
+
+        Раньше язык угадывался (по названию и порядку пересылки) — и канал
+        легко вставал не на ту роль: русский пост уходил в английский канал.
+        Теперь решает админ: две кнопки, без догадок.
+        """
         chat = self._extract_forward_chat(msg)
         if not chat:
             return False
-        code, cid = self.remember_channel_auto(chat.get("id"), chat.get("title") or "")
-        title = _esc(chat.get("title") or cid)
-        where = ("🇷🇺 русский" if code == "ru" else "🇬🇧 английский")
+        cid = str(chat.get("id") or "").strip()
+        if not cid:
+            return False
+        title = chat.get("title") or cid
+        self._pending_channel = {"id": cid, "title": str(title)}
+        rows = [[{"text": "🇷🇺 Русский", "callback_data": "ch:role:ru"},
+                 {"text": "🇬🇧 English", "callback_data": "ch:role:en"}]]
         await self.show_menu(
             chat_id,
-            f"Канал привязан ({where}): <b>{title}</b>\n<code>{_esc(cid)}</code>\n\n"
-            "Сводки уходят в оба канала сразу: русский текст — в русский,"
-            " английский — в английский.\n"
+            f"Канал <b>{_esc(str(title))}</b>\n<code>{_esc(cid)}</code>\n\n"
+            "Куда слать сводки — на русском или на английском?\n"
+            "Посты пойдут в оба канала: русский в русский, английский"
+            " в английский.\n"
             "У бота должно быть право «Публикация сообщений».",
-            self._admin_kb(),
+            {"inline_keyboard": rows},
         )
         return True
+
+    async def _set_channel_role(self, code: str, chat_id: int) -> None:
+        pend = getattr(self, "_pending_channel", None) or {}
+        cid = str(pend.get("id") or "")
+        if not cid:
+            await self.show_menu(chat_id, "Не помню, из какого канала был пост."
+                                            " Перешлите его ещё раз.",
+                                 self._admin_kb())
+            return
+        self.remember_channel_role(code, cid, pend.get("title") or "")
+        self._pending_channel = None
+        await self.show_menu(chat_id, self._channels_text(), self._channels_kb())
+
+    def _channels_text(self) -> str:
+        ru, en = self.channel_role("ru"), self.channel_role("en")
+        def line(role: dict, flag: str) -> str:
+            cid = role.get("id") or "—"
+            src = self.channel_source(str(role.get("code") or "ru"))
+            note = {"bot": " · выбрано в боте", "env": " · из переменной окружения"}.get(src, "")
+            return (f"{flag} <b>{_esc(role.get('title') or '—')}</b>{note}"
+                    f"\n   <code>{_esc(cid)}</code>")
+        warn = ""
+        if not ru.get("id") or not en.get("id"):
+            warn = ("\n\n⚠️ Пока привязан один канал — сводка уходит только в него.\n"
+                    "Добавьте бота админом во второй канал и перешлите сюда его пост.")
+        elif ru.get("id") == en.get("id"):
+            warn = "\n\n⚠️ Оба языка указывают на один канал — перешлите пост из второго."
+        return ("<b>📣 Каналы бота</b>\n"
+                "Русская сводка — в русский канал, английская — в английский.\n\n"
+                f"{line(ru, '🇷🇺')}\n\n{line(en, '🇬🇧')}{warn}\n\n"
+                "Чтобы сменить канал: перешлите боту любой пост из него и выберите язык."
+                + self.site_footer())
+
+    def _channels_kb(self) -> dict:
+        ru, en = self.channel_role("ru"), self.channel_role("en")
+        rows = []
+        if ru.get("url"):
+            rows.append([{"text": f"🇷🇺 {ru.get('title') or 'русский'}", "url": ru["url"]}])
+        if en.get("url"):
+            rows.append([{"text": f"🇬🇧 {en.get('title') or 'английский'}", "url": en["url"]}])
+        rows.append([{"text": "🔄 Поменять местами", "callback_data": "ch:swap"}])
+        rows.append([{"text": "← Назад", "callback_data": "nav:home"}])
+        return {"inline_keyboard": rows}
 
     def remember_channel_auto(self, chat_id, title: str = "") -> tuple:
         """Какой это канал: русский или английский.
@@ -930,8 +1066,11 @@ class TelegramBot:
             bot_url=self.bot_url(),
             lang="en",
         )
-        top = render_top7(snap.get("board"))
-        top_en = render_top7(snap.get("board"), "en")
+        # Один пост вместо двух: топ-7 уже внутри подписи (render_post сам
+        # решает, сколько часов влезет). Второе сообщение оставляем только как
+        # аварийный путь — если в подпись не поместился ни один час.
+        top = "" if "🏆" in caption else render_top7(snap.get("board"))
+        top_en = "" if "🏆" in caption_en else render_top7(snap.get("board"), "en")
         posts = [
             {"lang": "ru", "cid": cid, "caption": caption, "top": top},
         ]
@@ -947,10 +1086,11 @@ class TelegramBot:
 
     async def _publish_one(self, cid, caption: str, img, top: str = "",
                            lang: str = "ru") -> bool:
-        """Пост в один канал: фото+подпись (или текст) и отдельно топ-7.
+        """Пост в один канал: одно сообщение — фото и подпись под ним.
 
-        Топ-7 по часам в подпись к фото не влезает (лимит 1024), поэтому он
-        уходит следом отдельным сообщением — так весь стенд читается целиком.
+        В подписи уже есть и шапка, и топ-7 по часам. ``top`` непустой только
+        в аварийном случае (подпись исчерпана до первого часа) — тогда текст
+        уходит вторым сообщением, чтобы данные не потерялись.
         """
         markup = self.channel_link_kb(lang)
         ok = False
@@ -1558,6 +1698,31 @@ class TelegramBot:
         # пустым text, клиент залипает и следующие кнопки не нажимаются.
         await self.answer_cb(cb["id"])
         try:
+            if data.startswith("ch:role:"):
+                if not user.get("is_admin"):
+                    await self.show_menu(chat_id, "Привязывать каналы может только"
+                                                    " администратор.",
+                                         self._reply_kb(user))
+                    return
+                await self._set_channel_role(data.split(":")[-1], chat_id)
+                return
+            if data == "ch:swap":
+                if not user.get("is_admin"):
+                    return
+                ru = self.channel_chat_id()
+                en = self.channel_chat_id_en()
+                if ru and en:
+                    d = self._channel_bindings()
+                    d["ru"], d["en"] = en, ru
+                    t = d.get("titles") or {}
+                    t["ru"], t["en"] = t.get("en", ""), t.get("ru", "")
+                    d["titles"] = t
+                    self._save_channel_bindings(d)
+                await self.show_menu(chat_id, self._channels_text(), self._channels_kb())
+                return
+            if data == "a:channels":
+                await self.show_menu(chat_id, self._channels_text(), self._channels_kb())
+                return
             if data == "ch:check":
                 if await self._is_member_any(tg_id):
                     text, markup = self._home_text(user), self._reply_kb(user)
@@ -2165,7 +2330,8 @@ class TelegramBot:
             [{"text": "📣 Рассылка", "callback_data": "broadcast"},
              {"text": "🩺 Здоровье", "callback_data": "a:health"}],
             [{"text": "📰 Сводка в канал", "callback_data": "a:digest"}],
-            [{"text": "🎨 Шаблоны канала", "callback_data": "a:tpl"}],
+            [{"text": "📣 Каналы", "callback_data": "a:channels"},
+             {"text": "🎨 Шаблоны", "callback_data": "a:tpl"}],
             [{"text": "← Назад", "callback_data": "nav:home"}],
         ]}
 
@@ -2442,12 +2608,17 @@ class TelegramBot:
         v = self.store.visit_stats(1)
         h = self.health_fn() or {}
         live = h.get("live_exchanges") or []
+        ru, en = self.channel_role("ru"), self.channel_role("en")
+        def ch(role: dict) -> str:
+            return f"{_esc(role.get('title') or '—')} <code>{_esc(role.get('id') or '—')}</code>"
         return (
             f"<b>★ Админка LiqScope</b>\n"
             f"👥 Пользователи: {c['total']} (за сутки {c['active_24h']}, новых {c['new_24h']})\n"
             f"👁 Визиты сегодня: {v['today_views']} / {v['today_uniques']} уник.\n"
             f"📡 Онлайн WS: {self.ws_clients_fn()}\n"
             f"🩺 Биржи в эфире: {len(live)}\n"
+            f"🇷🇺 Канал: {ch(ru)}\n"
+            f"🇬🇧 Канал: {ch(en)}\n"
             f"🛠 {self.site_a('панель на сайте', '/admin')}"
             + self.site_footer()
         )

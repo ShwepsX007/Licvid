@@ -109,7 +109,7 @@ LABELS = {
         "vs_prev": "к прошлым 4ч",
         "no_data": "—",
         "top_title": "крупнейшие за час",
-        "top_hours": "Топ-7 ликвидаций по часам",
+        "top_hours": "Топ-7 по часам",
         "empty_hour": "тихо",
     },
     "en": {
@@ -143,7 +143,7 @@ LABELS = {
         "vs_prev": "vs previous 4h",
         "no_data": "—",
         "top_title": "biggest of the hour",
-        "top_hours": "Top 7 liquidations by hour",
+        "top_hours": "Top 7 by hour",
         "empty_hour": "quiet",
     },
 }
@@ -303,6 +303,50 @@ def _side_dot(longs: float, shorts: float) -> str:
     return "🔴" if longs >= shorts else "🟢"
 
 
+def short_money(v: Any) -> str:
+    """Сумма покороче: $899.4K -> $899K, $1.25M -> $1.3M.
+
+    В подписи к фото всего 1024 символа, а топ-7 по четырём часам — это
+    28 строк: лишний знак в каждой строке съедает строку целиком.
+    """
+    try:
+        x = abs(float(v or 0))
+    except (TypeError, ValueError):
+        return money(v)
+    sgn = "-" if float(v or 0) < 0 else ""
+    if x >= 1e9:
+        return f"{sgn}${x / 1e9:.1f}B".replace(".0B", "B")
+    if x >= 1e6:
+        return f"{sgn}${x / 1e6:.1f}M".replace(".0M", "M")
+    if x >= 1e3:
+        return f"{sgn}${x / 1e3:.0f}K"
+    return f"{sgn}${x:.0f}"
+
+
+def _dwidth(text: str) -> int:
+    """Ширина строки в знакоместах: эмодзи и иероглифы занимают два.
+
+    Столбики в <pre> выравниваются по знакоместам, а len() считает эмодзи
+    за один символ — из-за этого правые числа «съезжали» на строку и цифры
+    визуально наезжали друг на друга. Считаем как считает шрифт.
+    """
+    import unicodedata
+    w = 0
+    for ch in text or "":
+        if ch in ("\ufe0f", "\u200d", "\u20e3"):
+            continue
+        o = ord(ch)
+        if o >= 0x1F000 or 0x2600 <= o <= 0x27BF or 0x2B00 <= o <= 0x2BFF:
+            w += 2
+            continue
+        w += 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    return w
+
+
+def _pad(text: str, width: int) -> str:
+    return text + " " * max(0, width - _dwidth(text))
+
+
 def _mono(rows: List[List[tuple]], gap: str = "  ") -> str:
     """Моноширинный блок «в два столбика»: ячейка — (текст, "l"|"r").
 
@@ -317,13 +361,15 @@ def _mono(rows: List[List[tuple]], gap: str = "  ") -> str:
     width = [0] * ncol
     for r in rows:
         for i, (txt, _a) in enumerate(r):
-            width[i] = max(width[i], len(txt))
+            width[i] = max(width[i], _dwidth(txt))
     lines = []
     for r in rows:
         cells = []
         for i, (txt, align) in enumerate(r):
-            pad = " " * max(0, width[i] - len(txt))
-            cells.append((pad + txt) if align == "r" else (txt + pad))
+            if align == "r":
+                cells.append(" " * max(0, width[i] - _dwidth(txt)) + txt)
+            else:
+                cells.append(_pad(txt, width[i]))
         lines.append(gap.join(cells).rstrip())
     body = "\n".join(lines)
     body = body.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -506,7 +552,10 @@ def hour_rows(hours: list, lang: str = "ru", with_oi: bool = True) -> List[List[
 
 
 def board_block(board: Optional[dict], lang: str = "ru") -> str:
-    """«Информационный стенд»: часы, тотал, топ-7 ударов, CVD и OI.
+    """«Информационный стенд» таблицей: часы, тотал, CVD и OI.
+
+    Запасной вид (в пост идёт компактная раскладка с топ-7): таблицу удобно
+    показать целиком, когда места хватает — например, в отдельном сообщении.
 
     Порядок важен: сначала общая касса за окно, потом по часам — что и на
     чём горело, затем крупнейшие удары часа и, наконец, открытый интерес
@@ -517,7 +566,6 @@ def board_block(board: Optional[dict], lang: str = "ru") -> str:
     hours = board.get("hours") or []
     if not hours:
         return ""
-    tz = tz_offset()
     span = board.get("span_hours") or len(hours)
     mark = "⚖️" if abs(float(board.get("diff_pct") or 0)) <= 0.5 else (
         "📈" if float(board.get("diff_pct") or 0) > 0 else "📉")
@@ -543,29 +591,75 @@ def board_block(board: Optional[dict], lang: str = "ru") -> str:
     body = _mono([header] + hour_rows(hours, lang, with_oi))
     parts.append(head + "\n" + total_line + "\n" + body)
 
-    oi_line = ""
-    if oi_rows and with_oi:
-        cells = []
-        for cell in oi_rows:
-            hh = hour_hhmm(cell.get("h") or 0, tz)
-            pct = cell.get("pct")
-            cells.append(f"{hh} {_arrow(pct, lang) if pct is not None else lbl(lang, 'no_data')}")
-        head4 = ""
-        if board.get("oi_now_usd"):
-            head4 = money(board.get("oi_now_usd"))
-            if board.get("oi_4h_pct") is not None:
-                head4 += f" {_arrow(board['oi_4h_pct'], lang)}"
-        oi_line = f"📊 {lbl(lang, 'oi_4h')}: {head4}".rstrip() + "  ·  " + "  ".join(cells)
+    oi_line = oi_line_of(board, lang) if (oi_rows and with_oi) else ""
     if oi_line:
         parts.append(oi_line)
     return "\n".join(p for p in parts if p)
 
 
-def render_top7(board: Optional[dict], lang: str = "ru") -> str:
-    """Второе сообщение поста: топ-7 крупных ликвидаций по каждому часу.
+def oi_line_of(board: Optional[dict], lang: str = "ru") -> str:
+    """Строка OI: открытый интерес сейчас и ход по часам.
 
-    В подпись к фото это не влезает (лимит 1024), а в обычное сообщение —
-    с запасом. Формат: час, затем строки «монета — сумма — биржа».
+    Одна строка вместо столбца в таблице — значения по часам видно, а
+    столбцы с эмодзи-стрелками больше не разъезжаются.
+    """
+    board = board or {}
+    cells = []
+    tz = board.get("tz") or tz_offset()
+    for cell in board.get("oi_hours") or []:
+        pct = cell.get("pct")
+        if pct is None:
+            # уровень без изменения ничего не говорит о часе — прочерк не пишем
+            continue
+        hh = hour_hhmm(cell.get("h") or 0, tz)
+        cells.append(f"{hh} {_arrow(pct, lang)}")
+    head4 = money(board.get("oi_now_usd")) if board.get("oi_now_usd") else ""
+    if head4 and board.get("oi_4h_pct") is not None:
+        head4 += f" {_arrow(board['oi_4h_pct'], lang)}"
+    if not head4 and not cells:
+        return ""
+    line = f"📊 {lbl(lang, 'oi_4h')}: {head4}".rstrip()
+    if cells:
+        line += (" · " if head4 else "") + " · ".join(cells)
+    return line
+
+
+def top_hour_block(hour: dict, lang: str = "ru", compact: int = 0) -> str:
+    """Один час в подписи поста: заголовок и крупнейшие ликвидации часа.
+
+    ``compact`` > 0 — сжатый вид для случая, когда обычный блок уже не влезает
+    в подпись: несколько позиций в одну строку, без нумерации.
+    """
+    items = hour.get("items") or []
+    if not items:
+        return ""
+    hh = hour_hhmm(hour.get("h") or 0, hour.get("tz") or tz_offset())
+    title = f"<b>🏆 {hh} · {lbl(lang, 'top_title')}</b>"
+    if compact:
+        bits = []
+        for it in items[:int(compact)]:
+            side = "🔴" if it.get("side") == "SELL" else "🟢"
+            bits.append(f"{coin(it.get('symbol'))} {side}"
+                        f" {short_money(it.get('usd'))}"
+                        f" {exch(it.get('exchange'))}")
+        return title + "\n" + " · ".join(bits)
+    rows = []
+    for i, it in enumerate(items):
+        side = "🔴" if it.get("side") == "SELL" else "🟢"
+        rows.append([
+            (f"{i + 1}. {coin(it.get('symbol'))} {side}", "l"),
+            (short_money(it.get("usd")), "r"),
+            (exch(it.get("exchange")), "l"),
+        ])
+    return title + "\n" + _mono(rows)
+
+
+def render_top7(board: Optional[dict], lang: str = "ru") -> str:
+    """Резерв: топ-7 крупных ликвидаций по часам отдельным сообщением.
+
+    Обычный пост укладывается в одну подпись (render_post), а это — запасной
+    путь, если подпись исчерпана до последней строки: текст уходит обычным
+    сообщением следом за фото.
     """
     if not board:
         return ""
@@ -643,12 +737,17 @@ def _pack(parts: List[str], tail: str, limit: int = CAPTION_LIMIT) -> str:
     return text
 
 
-def _facts(snap: dict, lang: str = "ru") -> dict:
+def _facts(snap: dict, lang: str = "ru", tables: bool = False) -> dict:
+    """Цифры окна. ``tables=True`` добавляет старые табличные блоки.
+
+    В посте они больше не участвуют (их заменил топ-7 по часам), но
+    оставлены как запасной вид: собрать их можно одним флагом.
+    """
     h = int(snap.get("window_h") or 4)
     longs = float(snap.get("longs_usd") or 0)
     shorts = float(snap.get("shorts_usd") or 0)
     bemoji, btxt = _bias(longs, shorts, lang)
-    return {
+    out = {
         "h": h,
         "n": int(snap.get("count") or 0),
         "total": money(snap.get("total_usd")),
@@ -657,12 +756,16 @@ def _facts(snap: dict, lang: str = "ru") -> dict:
         "bias_e": bemoji,
         "bias": btxt,
         "bias_line": f"{bemoji} {btxt} · {lbl(lang, 'window', h=h)}",
-        "kpi": _kpi_line(snap, lang),
-        "ex": _ex_block(snap, 4, lang),
-        "ex6": _ex_block(snap, 6, lang),
-        "coins": _coins_block(snap, 5, lang=lang),
-        "coins8": _coins_block(snap, 8, lang=lang),
     }
+    if tables:
+        out.update({
+            "kpi": _kpi_line(snap, lang),
+            "ex": _ex_block(snap, 4, lang),
+            "ex6": _ex_block(snap, 6, lang),
+            "coins": _coins_block(snap, 5, lang=lang),
+            "coins8": _coins_block(snap, 8, lang=lang),
+        })
+    return out
 
 
 def format_headline(tpl: str, h: int = 4) -> str:
@@ -736,12 +839,14 @@ def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = N
                 bot_url: str = "https://t.me/LiqScopeBot",
                 head_override: Optional[str] = None,
                 lang: str = "ru") -> str:
-    """Сводка: живая шапка + компактные блоки в два столбика.
+    """Сводка одним сообщением: шапка, стенд и топ-7 ударов по часам.
 
-    Компоновка — как в терминале: слева биржа/монета, справа цифры.
-    variant крутит и шапку, и порядок блоков (тексты не повторяются).
-    head_override — шапка, написанная ИИ: если она прошла проверку, берём её
-    вместо шаблона, а раскладка продолжает чередоваться по variant.
+    Блоков ровно столько, сколько нужно: дублирующие таблицы (биржи, монеты,
+    KPI) убраны — их цифры спорили друг с другом и наезжали на соседние
+    столбцы. Раскладка собирается по лимиту подписи (1024): часы идут от
+    свежего к старому, блок добавляется, только если целиком влезает. Если
+    не влезает ни один — берётся сжатый вид (три удара часа строкой).
+    head_override — шапка от ИИ: та же раскладка, меняется только текст.
     """
     import html as _html
     f = _facts(snap, lang)
@@ -763,29 +868,81 @@ def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = N
     head = (format_ai_head(head_override, h) if head_override
             else heads[v % max(1, len(heads))])
 
-    ex, ex6 = f["ex"], f["ex6"]
-    coins, coins8 = f["coins"], f["coins8"]
-    kpi, bias = f["kpi"], f["bias_line"]
-    # стенд идёт сразу после шапки: это главный блок поста
-    stand = build_board(snap.get("board"), lang)
-    stand = ("\n\n" + stand) if stand else ""
+    # Компоновка поста: шапка → строка итога → топ-7 по часам (свежие часы
+    # первыми, сколько влезет) → хвост. Таблицы в два столбика убраны: в
+    # Telegram колонки разъезжались на эмодзи и цифрах, и пост читался плохо.
+    board = snap.get("board") or {}
+    hours = [dict(x) for x in (board.get("top_hours") or [])]
+    tz = board.get("tz") or tz_offset()
+    for x in hours:
+        x.setdefault("tz", tz)
 
-    bodies = (
-        [ex, kpi, coins],                 # 0 — биржи, цифры окна, монеты
-        [kpi, ex, coins, bias],           # 1 — цифры, таблицы, оценка
-        [ex6, coins],                     # 2 — шесть бирж
-        [ex, coins, bias],                # 3 — с оценкой рынка внизу
-        [coins, ex],                      # 4 — монеты первыми
-        [ex, coins, kpi],                 # 5 — касса строкой внизу
-        [kpi, coins, ex],                 # 6 — касса, монеты, биржи
-        [coins8, ex],                     # 7 — топ-8 монет
-        [ex, bias, coins],                # 8 — оценка между таблицами
-        [coins, ex, kpi],                 # 9 — монеты, биржи, касса
-        [kpi, bias, ex, coins],           # 10 — цифры и оценка сверху
-        [bias, ex, coins],                # 11 — с оценки рынка
-    )
-    parts = [head + stand] + list(bodies[v % len(bodies)])
+    def fits(parts_: List[str]) -> bool:
+        text = "\n\n".join([p for p in parts_ if p] + [tail])
+        return len(text) <= CAPTION_LIMIT
+
+    parts: List[str] = [head, _total_line(snap, lang)]
+    # OI — короткая строка, ставим её до часов: иначе топы съедают подпись
+    # целиком, и открытый интерес до поста не доезжает
+    oi_line = oi_line_of(board, lang)
+    if oi_line and fits(parts + [oi_line]):
+        parts.append(oi_line)
+    full: List[int] = []
+    for i, x in enumerate(hours):          # свежие часы первыми
+        block = top_hour_block(x, lang)
+        if block and fits(parts + [block]):
+            parts.append(block)
+            full.append(i)
+    # остатки часов — сжатыми строками: семь ударов в подпись не влезают,
+    # а три самых крупных дают картину часа, если место ещё осталось
+    if full:
+        for i, x in enumerate(hours):
+            if i in full:
+                continue
+            block = top_hour_block(x, lang, compact=3)
+            if block and fits(parts + [block]):
+                parts.append(block)
+    if len(parts) == 2:
+        # ни один час с семёркой не влез (очень длинная шапка) — сжатый вид:
+        # три крупнейших удара часа одной строкой
+        for x in hours:
+            block = top_hour_block(x, lang, compact=3)
+            if block and fits(parts + [block]):
+                parts.append(block)
+                break
+    if len(parts) == 2 and not hours:
+        # часовой стенд ещё не собрался (первый запуск): показываем хотя бы
+        # настроение ленты, чтобы пост не состоял из одной суммы
+        parts.append(_board_bias_line(board, lang) or f["bias_line"])
     return _pack(parts, tail)
+
+
+def _board_bias_line(board: Optional[dict], lang: str = "ru") -> str:
+    """Перекос окна одной строкой — по суммам часов стенда."""
+    hours = (board or {}).get("hours") or []
+    longs = sum(float(h.get("longs") or 0) for h in hours)
+    shorts = sum(float(h.get("shorts") or 0) for h in hours)
+    if longs + shorts <= 0:
+        return ""
+    bemoji, btxt = _bias(longs, shorts, lang)
+    span = (board or {}).get("span_hours") or len(hours)
+    return f"{bemoji} {btxt} · {lbl(lang, 'window', h=span)}"
+
+
+def _total_line(snap: dict, lang: str = "ru") -> str:
+    """Итог окна одной строкой: касса, число ликвидаций и сравнение с прошлым."""
+    board = snap.get("board") or {}
+    total = board.get("total_usd")
+    count = board.get("count")
+    if not total:
+        total = snap.get("total_usd")
+        count = count or snap.get("count")
+    line = f"💥 <b>{money(total)}</b> · {int(count or 0)} {liqs_word(count or 0, lang)}"
+    diff = board.get("diff_pct")
+    if diff is not None and board.get("prev_total"):
+        mark = "⚖️" if abs(float(diff)) <= 0.5 else ("📈" if float(diff) > 0 else "📉")
+        line += f"   {mark} {_arrow(diff, lang)} ({lbl(lang, 'vs_prev')})"
+    return line
 
 
 def list_images() -> List[str]:

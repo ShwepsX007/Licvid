@@ -162,6 +162,33 @@ async function main() {
   check("pop flex row", cs(layerPop).display === "flex" && cs(layerPop).position === "absolute",
     cs(layerPop).display + "/" + cs(layerPop).position);
   check("pop below header", cs(layerPop).top.indexOf("100%") !== -1, cs(layerPop).top);
+
+  // окно кнопок слоёв: ширина по содержимому, но на узком экране тянется
+  // почти до правого края графика (раньше жалась в узкий столбик)
+  const css = await httpGet(URL_BASE + "/static/style.css");
+  const cssBlock = (sel) => {
+    const i = css.indexOf(sel + " {");
+    return i === -1 ? "" : css.slice(i, i + 400);
+  };
+  const popCss = cssBlock(".layer-pop");
+  check("pop width is content-based", popCss.indexOf("width: max-content") !== -1,
+    popCss.slice(0, 80));
+  check("pop stretches to the right edge of the chart",
+    /max-width:\s*calc\(100% - 24px\)/.test(popCss), popCss.slice(0, 200));
+  // правило узкого экрана ищем как «.layer-pop {», перед которым стоит @media
+  let narrowPop = "";
+  for (let i = css.indexOf(".layer-pop {"); i !== -1; i = css.indexOf(".layer-pop {", i + 1)) {
+    const before = css.slice(Math.max(0, i - 4000), i);
+    const lastMedia = before.lastIndexOf("@media");
+    // правило считается «узким», если оно внутри последнего @media-блока:
+    // иначе его закрывающая скобка в колонке 0 стоит раньше медиа-запроса
+    if (lastMedia === -1 || lastMedia < before.lastIndexOf("\n}")) continue;
+    narrowPop = css.slice(i, i + 200);
+    break;
+  }
+  check("narrow screen: full-width pop",
+    narrowPop.indexOf("right: 8px") !== -1 && narrowPop.indexOf("width: auto") !== -1
+    && narrowPop.indexOf("max-width: none") !== -1, narrowPop.slice(0, 140));
   click(layerCall);
   check("pop closes on reclick", !win.LiqScopeLayers.isOpen());
   click(layerCall);
@@ -172,11 +199,6 @@ async function main() {
   check("pop closes outside", !win.LiqScopeLayers.isOpen());
 
   // --- мобильное: без жёсткой сетки, ячейки текут в строку — по тексту CSS ---
-  const css = await httpGet(URL_BASE + "/static/style.css");
-  const cssBlock = (sel) => {
-    const i = css.indexOf(sel + " {");
-    return i === -1 ? "" : css.slice(i, i + 400);
-  };
   const m900 = css.indexOf("@media (max-width: 900px)");
   const m560 = css.indexOf("@media (max-width: 560px)");
   const mob900 = m900 !== -1 ? css.slice(m900, m560 !== -1 ? m560 : m900 + 3000) : "";

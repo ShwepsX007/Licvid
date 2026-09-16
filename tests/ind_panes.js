@@ -53,6 +53,7 @@ function recordedCtx() {
     set strokeStyle(v) { this._stroke = v; },
     get strokeStyle() { return this._stroke; },
     clearRect() {},
+    setLineDash() {},
     save() {}, restore() {},
     beginPath() {}, closePath() {},
     setTransform() {},
@@ -124,6 +125,10 @@ function part2() {
     "ind-canvas-liq": fakeCanvas(360, 64),
     "ind-canvas-cvd": fakeCanvas(360, 64),
     "ind-canvas-oi": fakeCanvas(360, 64),
+    // слои фигур теханализа поверх окон
+    "ind-draw-liq": fakeCanvas(360, 64),
+    "ind-draw-cvd": fakeCanvas(360, 64),
+    "ind-draw-oi": fakeCanvas(360, 64),
   };
   const $stub = (id) => (canvases[id] ? canvases[id] : $(id));
   const $stack = (id) => (id === "chart-stack" ? stackEl : $stub(id));
@@ -138,6 +143,9 @@ function part2() {
 
   const sandbox = {
     $: $stack,
+    // главный график: цена → пиксели, а сам канвас нужен для проекции
+    candleSeries: { priceToCoordinate: (p) => 200 - Number(p) / 100 },
+    drawCanvas: { width: 360, height: 200, clientWidth: 360, clientHeight: 200 },
     document: fakeDoc,
     window: { devicePixelRatio: 1, getComputedStyle: (el) => ({ minHeight: (el && el._mh) || "" }) },
     localStorage: { getItem: () => null, setItem: () => {} },
@@ -159,23 +167,37 @@ function part2() {
   const names = ["indMoney", "indBarSpacing", "indGrid", "indVerticals",
     "indPrepareCanvas", "indCurve", "indNoData", "indSetVal", "drawPaneLiq",
     "drawPaneCvd", "drawPaneOi", "drawIndicatorPanes", "syncPaneVisibility",
+    // фигуры теханализа в окнах: шкала окна, проекция с главного графика
+    "paneHeight", "paneYOf", "paneValueAt", "paneOf", "paneOverlayCtx",
+    "paneToXY", "projectToXY", "drawToXY", "drawLineSeg", "drawFigureShape",
+    "drawPreview", "panePixelToTP", "paneTimeAt", "drawPaneFigures",
+    "drawPanePreview", "drawPaneDrawings", "drawPixelToTP",
     // регулировка высот блоков графика
     "indKey", "mobileLayout", "paneVisible", "visiblePaneKinds", "visibleSplitCount", "stackHeight",
     "chartMinHeight", "panesBudget", "maxCanvasFor", "normalizeHeights"];
   const scalars = ["IND_KINDS", "IND_DEFAULT_CANVAS_H", "IND_MIN_CANVAS_H",
     "IND_HEAD_H", "SPLIT_H", "STACK_SLACK_H"].map((n) =>
-    grabLine(src, "const " + n + " = ")).join("\n");
+    grabLine(src, "const " + n + " = ")).join("\n") +
+    "\n" + grabLine(src, "const paneScales =") +
+    "\n" + grabLine(src, "const PANE_PAD =") +
+    "\n" + grabLine(src, "const DRAW_PANES =") +
+    ["let drawFiguresList =", "let drawDraftPane =", "let drawHoverPane =",
+     "let drawTool =", "let drawColor =", "let drawDraft =", "let drawHover ="]
+      .map((m) => grabLine(src, m)).join("\n");
   const code = scalars + "\n" + grabLine(src, "let layoutReady =") +
     "\nlayoutReady = true;\n" +
     constNames.map((n) => grab(src, "const", n)).join("\n") + "\n" +
     names.map((n) => grab(src, "function", n)).join("\n") + "\n" +
     "\nreturn { IND_PANES, LAYOUT, IND_KINDS, indMoney, drawPaneLiq, drawPaneCvd," +
     " drawPaneOi, drawIndicatorPanes, syncPaneVisibility, indKey, visiblePaneKinds," +
-    " stackHeight, panesBudget, maxCanvasFor, normalizeHeights };";
+    " stackHeight, panesBudget, maxCanvasFor, normalizeHeights," +
+    " paneYOf, paneValueAt, paneToXY, projectToXY, drawPaneFigures, drawPaneDrawings," +
+    " drawFiguresList, paneScales };";
   const api = new Function("$", "window", "document", "localStorage", "I18n", "state",
-    "chart", "visibleLiquidations", "fmtUsdShort", code)(
+    "chart", "visibleLiquidations", "fmtUsdShort", "candleSeries", "drawCanvas", code)(
     sandbox.$, sandbox.window, sandbox.document, sandbox.localStorage, sandbox.I18n,
-    sandbox.state, sandbox.chart, sandbox.visibleLiquidations, sandbox.fmtUsdShort);
+    sandbox.state, sandbox.chart, sandbox.visibleLiquidations, sandbox.fmtUsdShort,
+    sandbox.candleSeries, sandbox.drawCanvas);
 
   // --- LIQ: двусторонние столбики -----------------------------------------
   api.drawPaneLiq();
@@ -226,6 +248,48 @@ function part2() {
   api.drawPaneCvd();
   const rc2 = canvases["ind-canvas-cvd"]._rec;
   check("сетка: цифры шкалы у горизонталей", rc2.texts.length >= 3);
+
+  // --- фигуры теханализа в окнах -------------------------------------------
+  console.log("\nчасть 2в: фигуры теханализа в нижних окнах");
+  const hPane = 64, pad = 6;
+  api.paneScales.liq = { lo: -1000, hi: 1000 };      // шкала как её ставит окно
+  check("шкала окна: центр диапазона — середина высоты",
+        Math.abs(api.paneYOf("liq", 0, hPane) - (hPane / 2)) < 0.01,
+        api.paneYOf("liq", 0, hPane));
+  check("шкала окна: значение читается обратно",
+        Math.abs(api.paneValueAt("liq", api.paneYOf("liq", 640, hPane), hPane) - 640) < 1,
+        api.paneValueAt("liq", api.paneYOf("liq", 640, hPane), hPane));
+  check("шкала окна: край диапазона — с отступом",
+        Math.abs(api.paneYOf("liq", 1000, hPane) - (hPane - pad - (hPane - 2 * pad))) < 0.01,
+        api.paneYOf("liq", 1000, hPane));
+
+  // своя фигура окна рисуется в слое окна, а не в основном графике
+  api.drawFiguresList.length = 0;
+  api.drawFiguresList.push({ t: "line", c: "#22d3ee", pane: "cvd",
+    p1: { time: candles[0].time, price: -20000 },
+    p2: { time: candles[10].time, price: 30000 } });
+  Object.keys(canvases).forEach((k) => { canvases[k]._rec.lines.length = 0; });
+  api.drawPaneFigures("cvd");
+  const rd = canvases["ind-draw-cvd"]._rec;
+  check("фигура окна рисуется в слое этого окна", rd.lines.length >= 2, rd.lines.length);
+  check("фигура окна не попадает в слой ликвидаций",
+        canvases["ind-draw-liq"]._rec.lines.length === 0);
+
+  // проекция фигуры главного графика: пунктир в окне
+  api.drawFiguresList.length = 0;
+  api.drawFiguresList.push({ t: "line", c: "#ffd166",
+    p1: { time: candles[0].time, price: 10000 },
+    p2: { time: candles[20].time, price: 30000 } });
+  const rx = api.paneToXY("liq", { pane: "main" });
+  const proj = rx({ time: candles[0].time, price: 10000 });
+  check("проекция с графика даёт координаты в окне",
+        proj && isFinite(proj.y) && proj.y > 0 && proj.y < hPane, proj ? proj.y : null);
+  Object.keys(canvases).forEach((k) => { canvases[k]._rec.lines.length = 0; });
+  api.drawPaneFigures("liq");
+  check("фигура главного графика видна в окне проекцией",
+        canvases["ind-draw-liq"]._rec.lines.length >= 2,
+        canvases["ind-draw-liq"]._rec.lines.length);
+  api.drawFiguresList.length = 0;
 
   // --- пустые данные --------------------------------------------------------
   sandbox.state.candles = candles.map((c) => ({ time: c.time, close: c.close }));

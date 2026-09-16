@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import tempfile
 import time
@@ -13,7 +14,9 @@ sys.path.insert(0, HERE)
 from hour_board import (  # noqa: E402
     OI, HourBoard, OiHistory, build_snapshot, hour_hhmm, hour_start, tz_offset,
 )
-from channel_digest import render_post, render_top7  # noqa: E402
+from channel_digest import (  # noqa: E402
+    CAPTION_LIMIT, render_post, render_top7,
+)
 
 MSK = 3 * 3600
 
@@ -165,20 +168,26 @@ class HourBoardTest(unittest.TestCase):
                 "longs_usd": 6_000_000, "shorts_usd": 5_700_000,
                 "top_coins": [], "exchanges": {"gate": 3_000_000}, "board": board}
         ru = render_post(snap, 0)
-        self.assertIn("СТЕНД", ru)
-        self.assertIn("Всего", ru)
         self.assertIn("OI за 4ч", ru)
         self.assertIn("к прошлым 4ч", ru)              # сравнение окон
+        self.assertIn("крупнейшие за час", ru)         # топ-7 внутри подписи
+        self.assertIn("🏆", ru)
+        self.assertIn("<pre><code>", ru)
         self.assertIn("Gate", ru)
+        self.assertLessEqual(len(ru), CAPTION_LIMIT)   # один пост, не два
         en = render_post(snap, 0, lang="en")
-        self.assertIn("BOARD", en)
-        self.assertIn("Total", en)
         self.assertIn("OI over 4h", en)
-        top = render_top7(snap["board"])
+        self.assertIn("biggest of the hour", en)
+        self.assertLessEqual(len(en), CAPTION_LIMIT)
+
+    def test_top7_reserve_matches_post_format(self):
+        """Запасное сообщение с топ-7 остаётся на случай тесной подписи."""
+        board = self._full()
+        top = render_top7(board)
         self.assertIn("Топ-7", top)
         self.assertIn("крупнейшие за час", top)
         self.assertIn("gate.com/ru/signup/VLFCAVWMBW", top)
-        top_en = render_top7(snap["board"], "en")
+        top_en = render_top7(board, "en")
         self.assertIn("Top 7", top_en)
         self.assertIn("gate.com/signup/VLFCAVWMBW", top_en)
 
@@ -203,8 +212,8 @@ class HourBoardTest(unittest.TestCase):
         self.assertEqual(liqs_word(1, "en"), "fill")
         self.assertEqual(liqs_word(40, "en"), "fills")
 
-    def test_stand_hides_oi_column_without_history(self):
-        """Пока OI-история не набралась, столбца прочерков в посте нет."""
+    def test_oi_line_has_no_dashes_without_history(self):
+        """Пока OI-история не набралась, в посте нет строки из прочерков."""
         board = {"span_hours": 4, "total_usd": 1e6, "count": 5, "prev_total": 0,
                  "diff_pct": None, "oi_hours": [], "hours": [
                      {"h": 1789578000, "total": 1e6, "count": 5, "longs": 9e5,
@@ -212,9 +221,15 @@ class HourBoardTest(unittest.TestCase):
                       "coins": [{"symbol": "BTC_USDT", "usd": 1e6, "flow": 1.0}],
                       "cvd_sum": 1.0, "oi": {"value": None, "pct": None}}]}
         text = render_post({"window_h": 4, "board": board, "total_usd": 1e6})
-        self.assertIn("СТЕНД", text)
         self.assertNotIn("OI за 4ч", text)
-        self.assertIn("BTC $1.00M", text)
+        self.assertIsNone(re.search(r"\d{2}:00 —", text))   # нет часов-прочерков
+        self.assertIn("резали лонги", text)
+        # часы с прочерком вместо процента в строку не попадают
+        board["oi_hours"] = [{"h": 1789578000, "value": 1.2e9, "pct": None}]
+        board["oi_now_usd"] = 1.2e9
+        text2 = render_post({"window_h": 4, "board": board, "total_usd": 1e6})
+        self.assertIn("OI за 4ч: $1.20B", text2)
+        self.assertIsNone(re.search(r"\d{2}:00 —", text2))
 
     def test_post_is_not_empty_even_without_data(self):
         """Пустой снимок не должен превращаться в пост из одной ссылки."""

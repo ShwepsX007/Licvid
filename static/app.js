@@ -1769,7 +1769,13 @@
     let drawColor = "#ffd166";
     let drawDraft = null;         // первая точка двухточечной фигуры {time, price}
     let drawHover = null;         // {x, y} в пикселях для предпросмотра
-    let drawFiguresList = [];     // [{t, c, p1:{time,price}, p2?}]
+    let drawFiguresList = [];     // [{t, c, pane, p1:{time,price}, p2?}]
+    let drawDraftPane = null;     // в каком окне начата фигура
+    let drawHoverPane = null;     // {x, y} чьего окна сейчас под курсором
+    // Шкалы нижних окон (lo…hi по значениям) — заполняются, когда окно рисуется
+    const paneScales = {};
+    // Отступы шкалы внутри окна: те же, что в рисовании самих окон
+    const PANE_PAD = { liq: 6, cvd: 6, oi: 8 };
 
     function drawKey() { return "liqscope.drawings." + chartSymbol(); }
 
@@ -1788,9 +1794,11 @@
                 if (!f.p1 || !isFinite(Number(f.p1.time)) || !isFinite(Number(f.p1.price))) return;
                 if (f.t !== "horiz" &&
                         (!f.p2 || !isFinite(Number(f.p2.time)) || !isFinite(Number(f.p2.price)))) return;
+                const pane = DRAW_PANES.indexOf(f.pane) === -1 ? "main" : f.pane;
                 drawFiguresList.push({
                     t: f.t,
                     c: typeof f.c === "string" ? f.c : drawColor,
+                    pane: pane,
                     p1: { time: Number(f.p1.time), price: Number(f.p1.price) },
                     p2: f.p2 ? { time: Number(f.p2.time), price: Number(f.p2.price) } : null,
                 });
@@ -1803,6 +1811,7 @@
     }
 
     function drawAddFigure(fig) {
+        if (fig && !fig.pane) fig.pane = "main";
         drawFiguresList.push(fig);
         saveDrawings();
         queueRedraw();
@@ -1815,7 +1824,70 @@
         queueRedraw();
     }
 
-    // время+цена → пиксели (null, если точка вне видимости)
+    // Время+цена → пиксели (null, если точка вне видимости).
+    // Окна нижних графиков: x берём из общей шкалы времени, y — из шкалы окна.
+    const DRAW_PANES = ["main", "liq", "cvd", "oi"];
+
+    function paneHeight(kind) {
+        const P = IND_PANES[kind];
+        if (!P) return 0;
+        const cv = $(P.canvas) || $(P.draw);
+        if (!cv) return 0;
+        return cv.clientHeight || cv.height || 0;
+    }
+
+    function paneYOf(kind, value, h) {
+        const sc = paneScales[kind];
+        let lo = sc ? Number(sc.lo) : 0, hi = sc ? Number(sc.hi) : 1;
+        if (!isFinite(lo) || !isFinite(hi) || hi - lo < 1e-9) { lo = 0; hi = 1; }
+        const pad = PANE_PAD[kind] === undefined ? 8 : PANE_PAD[kind];
+        const H = h || paneHeight(kind) || 1;
+        return H - pad - (H - 2 * pad) * (Number(value) - lo) / (hi - lo);
+    }
+
+    function paneValueAt(kind, y, h) {
+        const sc = paneScales[kind];
+        let lo = sc ? Number(sc.lo) : 0, hi = sc ? Number(sc.hi) : 1;
+        if (!isFinite(lo) || !isFinite(hi) || hi - lo < 1e-9) { lo = 0; hi = 1; }
+        const pad = PANE_PAD[kind] === undefined ? 8 : PANE_PAD[kind];
+        const H = h || paneHeight(kind) || 1;
+        const frac = (H - pad - Number(y)) / (H - 2 * pad);
+        return lo + (hi - lo) * frac;
+    }
+
+    // точка фигуры главного окна → пиксели нижнего: x по времени, y по доле
+    // видимого диапазона цен (чтобы уровень читался в масштабе окна)
+    function projectToXY(kind, tp) {
+        if (!chart || !candleSeries || !tp) return null;
+        const H = paneHeight(kind);
+        if (!H) return null;
+        try {
+            const x = chart.timeScale().timeToCoordinate(Number(tp.time));
+            const ym = candleSeries.priceToCoordinate(Number(tp.price));
+            const Hm = (drawCanvas && (drawCanvas.clientHeight || drawCanvas.height)) || 0;
+            if (!isFinite(x) || !isFinite(ym) || !Hm) return null;
+            const frac = Math.min(1, Math.max(0, 1 - ym / Hm));
+            const pad = PANE_PAD[kind] === undefined ? 8 : PANE_PAD[kind];
+            return { x: x, y: H - pad - (H - 2 * pad) * frac };
+        } catch (e) { return null; }
+    }
+
+    // конвертер для конкретного окна: своя фигура — по своим значениям,
+    // фигура с главного графика — проекцией
+    function paneToXY(kind, fig) {
+        return function (tp) {
+            if (!tp) return null;
+            if (fig && fig.pane && fig.pane !== "main") {
+                try {
+                    const x = chart.timeScale().timeToCoordinate(Number(tp.time));
+                    if (!isFinite(x)) return null;
+                    return { x: x, y: paneYOf(kind, Number(tp.price), paneHeight(kind)) };
+                } catch (e) { return null; }
+            }
+            return projectToXY(kind, tp);
+        };
+    }
+
     function drawToXY(tp) {
         if (!chart || !candleSeries || !tp) return null;
         try {
@@ -1926,24 +1998,25 @@
         ctx.stroke();
     }
 
-    function drawFigureShape(ctx, fig, W, H, preview) {
+    function drawFigureShape(ctx, fig, W, H, preview, toXY) {
+        const cvt = toXY || drawToXY;
         ctx.strokeStyle = fig.c;
         ctx.fillStyle = fig.c;
         ctx.setLineDash(preview ? [5, 4] : []);
         if (fig.t === "horiz") {
-            const a = drawToXY(fig.p1);
+            const a = cvt(fig.p1);
             if (a) drawLineSeg(ctx, 0, a.y, W, a.y);
         } else if (fig.t === "line") {
-            const a = drawToXY(fig.p1), b = drawToXY(fig.p2);
+            const a = cvt(fig.p1), b = cvt(fig.p2);
             if (a && b) drawLineSeg(ctx, a.x, a.y, b.x, b.y);
         } else if (fig.t === "ray") {
-            const a = drawToXY(fig.p1), b = drawToXY(fig.p2);
+            const a = cvt(fig.p1), b = cvt(fig.p2);
             if (a && b) {
                 const f = rayFar(a, b, W, H);
                 drawLineSeg(ctx, a.x, a.y, f.x, f.y);
             }
         } else if (fig.t === "rect") {
-            const a = drawToXY(fig.p1), b = drawToXY(fig.p2);
+            const a = cvt(fig.p1), b = cvt(fig.p2);
             if (a && b) {
                 const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y);
                 const w = Math.abs(b.x - a.x), h = Math.abs(b.y - a.y);
@@ -1953,14 +2026,14 @@
                 ctx.strokeRect(x + 0.5, y + 0.5, w, h);
             }
         } else if (fig.t === "fib") {
-            const a = drawToXY(fig.p1);
+            const a = cvt(fig.p1);
             if (a) {
                 ctx.lineWidth = 1;
                 ctx.font = "11px Inter, system-ui, sans-serif";
                 ctx.textBaseline = "bottom";
                 FIB_RATIOS.forEach((r) => {
                     const lvl = fibPrice(fig.p1, fig.p2, r);
-                    const pt = drawToXY({ time: fig.p1.time, price: lvl });
+                    const pt = cvt({ time: fig.p1.time, price: lvl });
                     if (!pt) return;
                     drawLineSeg(ctx, a.x, pt.y, W, pt.y);
                     const label = (r * 100).toFixed(1) + "%  " + lvl.toFixed(priceDigits(lvl));
@@ -1973,18 +2046,201 @@
         ctx.setLineDash([]);
     }
 
+    function paneOf(fig) {
+        return fig && DRAW_PANES.indexOf(fig.pane) !== -1 ? fig.pane : "main";
+    }
+
     function drawFigures() {
         if (!drawCanvas || !chart || !candleSeries) return;
         const ctx = drawCanvas.getContext("2d");
         const W = drawCanvas.width, H = drawCanvas.height;
         ctx.clearRect(0, 0, W, H);
         ctx.lineWidth = 2;
-        drawFiguresList.forEach((fig) => drawFigureShape(ctx, fig, W, H, false));
+        drawFiguresList.forEach((fig) => {
+            if (paneOf(fig) === "main") drawFigureShape(ctx, fig, W, H, false);
+        });
         drawPreview(ctx, W, H);
+    }
+
+    // --- фигуры в нижних окнах (LIQ/CVD/OI) --------------------------------
+    // В окне видны: свои фигуры (по его шкале значений) и проекции фигур
+    // основного графика — приглушённо, чтобы уровни читались по всей стопке.
+    function paneOverlayCtx(kind) {
+        const P = IND_PANES[kind];
+        if (!P) return null;
+        const canvas = $(P.draw);
+        if (!canvas || !state[P.skey]) return null;
+        const parent = canvas.parentElement || {};
+        const w = canvas.clientWidth || parent.clientWidth || 0;
+        const h = canvas.clientHeight || parent.clientHeight || 0;
+        if (w < 10 || h < 8) return { canvas: canvas, ctx: canvas.getContext("2d"), w: 0, h: 0 };
+        const dpr = window.devicePixelRatio || 1;
+        const W = Math.round(w * dpr), H = Math.round(h * dpr);
+        if (canvas.width !== W || canvas.height !== H) {
+            canvas.width = W; canvas.height = H;
+        }
+        const ctx = canvas.getContext("2d");
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, w, h);
+        return { canvas: canvas, ctx: ctx, w: w, h: h };
+    }
+
+    function drawPaneFigures(kind) {
+        const p = paneOverlayCtx(kind);
+        if (!p || !p.w) return;
+        const { ctx, w, h } = p;
+        ctx.lineWidth = 2;
+        drawFiguresList.forEach((fig) => {
+            const cvt = paneToXY(kind, fig);
+            if (paneOf(fig) === kind) {
+                drawFigureShape(ctx, fig, w, h, false, cvt);
+                return;
+            }
+            if (paneOf(fig) !== "main") return;
+            ctx.save();
+            ctx.globalAlpha = 0.5;
+            drawFigureShape(ctx, fig, w, h, true, cvt);
+            ctx.restore();
+        });
+        drawPanePreview(kind, ctx, w, h);
+    }
+
+    function drawPanePreview(kind, ctx, w, h) {
+        if (!drawTool || drawTool === "eraser") return;
+        const cvt = paneToXY(kind, drawDraftPane === kind ? null : { pane: "main" });
+        if (drawTool === "horiz") {
+            if (!drawHover || drawHoverPane !== kind) return;
+            ctx.strokeStyle = drawColor;
+            ctx.setLineDash([5, 4]);
+            drawLineSeg(ctx, 0, drawHover.y, w, drawHover.y);
+            ctx.setLineDash([]);
+            return;
+        }
+        if (drawDraft && drawDraftPane === kind) {
+            const a = cvt(drawDraft);
+            if (a) {
+                ctx.fillStyle = drawColor;
+                ctx.beginPath();
+                ctx.arc(a.x, a.y, 4, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+        if (!drawHover || drawHoverPane !== kind || !drawDraft || drawDraftPane !== kind) return;
+        const a = cvt(drawDraft);
+        if (!a) return;
+        const tp = panePixelToTP(kind, drawHover.x, drawHover.y);
+        if (!tp) return;
+        drawFigureShape(ctx, { t: drawTool, c: drawColor, pane: kind,
+                               p1: drawDraft, p2: tp }, w, h, true, cvt);
+    }
+
+    // время по пикселю в окне: шкала времени общая с графиком, но если
+    // coordinateToTime молчит — берём ближайшую свечу (точка «липнет»
+    // к свече, как и положено при рисовании по свечам)
+    function paneTimeAt(x) {
+        if (!chart) return null;
+        try {
+            const t = chart.timeScale().coordinateToTime(x);
+            if (t !== null && t !== undefined && isFinite(Number(t))) return Number(t);
+        } catch (e) { /* ниже — обходной путь */ }
+        let best = null, bestD = Infinity;
+        (state.candles || []).forEach((c) => {
+            let cx = null;
+            try { cx = chart.timeScale().timeToCoordinate(c.time); } catch (e) { return; }
+            if (cx === null || cx === undefined || !isFinite(cx)) return;
+            const d = Math.abs(cx - x);
+            if (d < bestD) { bestD = d; best = Number(c.time); }
+        });
+        return best;
+    }
+
+    // пиксель в окне → время (общая шкала) и значение шкалы окна
+    function panePixelToTP(kind, x, y) {
+        const time = paneTimeAt(x);
+        if (time === null || !isFinite(time)) return null;
+        return { time: time, price: paneValueAt(kind, y, paneHeight(kind)) };
+    }
+
+    function drawPaneDrawings() {
+        Object.keys(IND_PANES).forEach((kind) => {
+            try { drawPaneFigures(kind); } catch (e) { /* окно не должно ломать график */ }
+        });
+    }
+
+    // клик по окну: та же логика, что на основном графике
+    function drawPointAt(tp, pane) {
+        const p = pane || "main";
+        if (drawTool === "horiz") {
+            drawAddFigure({ t: "horiz", c: drawColor, pane: p, p1: tp, p2: null });
+            return;
+        }
+        if (!drawDraft || drawDraftPane !== p) {
+            drawDraft = tp;
+            drawDraftPane = p;
+            queueRedraw();
+            return;
+        }
+        drawAddFigure({ t: drawTool, c: drawColor, pane: p, p1: drawDraft, p2: tp });
+        drawDraft = null;
+        drawDraftPane = null;
+    }
+
+    function paneErase(kind, x, y) {
+        const h = paneHeight(kind);
+        const w = (paneOverlayCtx(kind) || {}).w || 0;
+        for (let i = drawFiguresList.length - 1; i >= 0; i--) {
+            const fig = drawFiguresList[i];
+            const own = paneOf(fig) === kind;
+            if (!own && paneOf(fig) !== "main") continue;
+            const cvt = paneToXY(kind, fig);
+            if (drawFigureHit(fig, x, y, cvt, w, h)) {
+                drawFiguresList.splice(i, 1);
+                saveDrawings();
+                queueRedraw();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function setupPaneDrawings() {
+        Object.keys(IND_PANES).forEach((kind) => {
+            const P = IND_PANES[kind];
+            const canvas = $(P.draw);
+            if (!canvas) return;
+            canvas.addEventListener("click", (e) => {
+                if (!drawTool) return;
+                const x = e.offsetX, y = e.offsetY;
+                if (drawTool === "eraser") { paneErase(kind, x, y); return; }
+                const tp = panePixelToTP(kind, x, y);
+                if (!tp) return;
+                drawPointAt(tp, kind);
+            });
+            canvas.addEventListener("mousemove", (e) => {
+                if (!drawTool) return;
+                drawHover = { x: e.offsetX, y: e.offsetY };
+                drawHoverPane = kind;
+                queueRedraw();
+            });
+            canvas.addEventListener("mouseleave", () => {
+                if (drawHoverPane !== kind) return;
+                drawHover = null;
+                drawHoverPane = null;
+                queueRedraw();
+            });
+            canvas.addEventListener("contextmenu", (e) => {
+                if (!drawTool) return;
+                e.preventDefault();
+                if (drawDraft) { drawDraft = null; drawDraftPane = null; queueRedraw(); }
+                else setDrawTool(null);
+            });
+        });
     }
 
     function drawPreview(ctx, W, H) {
         if (!drawTool || drawTool === "eraser") return;
+        if (drawHoverPane && drawHoverPane !== "main") return;
+        if (drawDraft && drawDraftPane && drawDraftPane !== "main") return;
         if (drawTool === "horiz") {
             if (!drawHover) return;
             ctx.strokeStyle = drawColor;
@@ -2010,7 +2266,15 @@
     function setDrawTool(tool) {
         drawTool = tool;
         drawDraft = null;
+        drawDraftPane = null;
         drawHover = null;
+        drawHoverPane = null;
+        Object.keys(IND_PANES).forEach((kind) => {
+            const cv = $(IND_PANES[kind].draw);
+            if (!cv) return;
+            cv.classList.toggle("armed", !!tool);
+            cv.classList.toggle("erase", tool === "eraser");
+        });
         if (drawToolbar) {
             drawToolbar.querySelectorAll("[data-draw-tool]").forEach((b) =>
                 b.classList.toggle("active", b.getAttribute("data-draw-tool") === tool));
@@ -2048,17 +2312,7 @@
         }
         const tp = drawClickToTP(param);
         if (!tp) return;
-        if (drawTool === "horiz") {
-            drawAddFigure({ t: "horiz", c: drawColor, p1: tp, p2: null });
-            return;
-        }
-        if (!drawDraft) {
-            drawDraft = tp;
-            queueRedraw();
-            return;
-        }
-        drawAddFigure({ t: drawTool, c: drawColor, p1: drawDraft, p2: tp });
-        drawDraft = null;
+        drawPointAt(tp, "main");
     }
 
     function setupDrawToolbar() {
@@ -2099,8 +2353,21 @@
             });
         }
         // тестовый API для jsdom-гарнесса tests/drawings.js
+        setupPaneDrawings();
         window.LiqScopeDraw = {
             fibPrice, distToSegment, rayFar,
+            paneCanvas: (kind) => {
+                const P = IND_PANES[kind];
+                return P ? $(P.draw) : null;
+            },
+            paneToXY: (kind, tp) => paneToXY(kind, { pane: kind })(tp),
+            projectToXY: projectToXY,
+            setPaneScale: (kind, lo, hi) => { paneScales[kind] = { lo: lo, hi: hi }; },
+            paneValueAt: paneValueAt,
+            panePixelToTP: panePixelToTP,
+            paneTimeAt: paneTimeAt,
+            clickPoint: (tp, pane) => drawPointAt(tp, pane),
+            drawAt: drawPaneDrawings,
             figureHit: (fig, x, y, toXY, W, H) => drawFigureHit(fig, x, y, toXY, W, H),
             add: drawAddFigure,
             clear: drawClearAll,
@@ -3137,10 +3404,13 @@
     // (общий timeScale), листаются/зумятся вместе с ним.
     const IND_PANES = {
         liq: { canvas: "ind-canvas-liq", val: "ind-liq-val", pane: "ind-pane-liq",
+               draw: "ind-draw-liq",
                skey: "paneLiq", toggle: "pane-liq-toggle", off: "chart.pane_liq_off" },
         cvd: { canvas: "ind-canvas-cvd", val: "ind-cvd-val", pane: "ind-pane-cvd",
+               draw: "ind-draw-cvd",
                skey: "paneCvd", toggle: "pane-cvd-toggle", off: "chart.pane_cvd_off" },
         oi:  { canvas: "ind-canvas-oi",  val: "ind-oi-val",  pane: "ind-pane-oi",
+               draw: "ind-draw-oi",
                skey: "paneOi", toggle: "pane-oi-toggle", off: "chart.pane_oi_off" },
     };
 
@@ -3363,6 +3633,8 @@
             indSetVal("liq", "Σ $0", "");
             return;
         }
+        // шкала окна — для фигур теханализа, которые тут рисуют
+        paneScales.liq = { lo: -maxSide, hi: maxSide };
         const kTop = (h / 2 - 6) / maxSide;   // вверх — шорты
         const kBot = (h / 2 - 6) / maxSide;   // вниз — лонги
         pts.forEach((pt) => {
@@ -3416,6 +3688,7 @@
                 net += d; has = true;
             }
         });
+        paneScales.cvd = { lo: lo, hi: hi };
         indGrid(ctx, w, h, lo, hi);
         indVerticals(ctx, w, h, spacing);
         if (!has) { indNoData(p); indSetVal("cvd", "—", ""); return; }
@@ -3468,6 +3741,7 @@
             indSetVal("oi", "—", "");
             return;
         }
+        paneScales.oi = { lo: lo, hi: hi };
         indGrid(ctx, w, h, lo, hi);
         indVerticals(ctx, w, h, spacing);
         // линия OI + мягкая подсветка под ней (та же геометрия, что у CVD/LIQ)
@@ -3483,6 +3757,7 @@
             if (state.paneLiq) drawPaneLiq();
             if (state.paneCvd) drawPaneCvd();
             if (state.paneOi) drawPaneOi();
+            drawPaneDrawings();   // фигуры теханализа поверх окон
         } catch (e) { /* индикаторные окна не должны ломать график */ }
     }
 

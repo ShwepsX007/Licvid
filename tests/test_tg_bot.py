@@ -118,6 +118,11 @@ class BotMenuTest(unittest.TestCase):
         self.assertTrue(any("Кабинет" in t for t in texts))
         self.assertTrue(kb.get("is_persistent"))
         self.assertNotIn("cabinet", _datas(kb))
+        # «☰ Меню» — постоянная кнопка: если панель пропала, она её вернёт
+        self.assertIn("☰ Меню", texts)
+        self.assertEqual(self.bot._reply_cmd("☰ Меню"), "help")
+        self.assertEqual(self.bot._reply_cmd("меню"), "help")
+        self.assertEqual(self.bot._reply_cmd("/menu"), "help")
 
     def test_leaf_screens_use_reply_panel(self):
         for data in ("cabinet", "stats", "health", "liq"):
@@ -419,7 +424,8 @@ class BotMenuTest(unittest.TestCase):
         self.bot._call = fake  # type: ignore
         asyncio.run(self.bot._cmd_start(2002, self.user, "/start"))
         sent = [p for m, p in calls if m == "sendMessage"][0]
-        self.assertIn("Подписаться", str(sent.get("reply_markup")))
+        self.assertIn("LiqScopeRUS", str(sent.get("reply_markup")))
+        self.assertIn("LiqScopeEng", str(sent.get("reply_markup")))
         self.assertNotIn("cabinet", _datas(sent.get("reply_markup")))
 
     def test_channel_check_unavailable_does_not_lock_users(self):
@@ -497,13 +503,15 @@ class BotMenuTest(unittest.TestCase):
 
         enabled = True
 
-        def __init__(self, head="Рынок снова показал, кто здесь главный"):
+        def __init__(self, head="Рынок снова показал, кто здесь главный",
+                     head_en="Futures opened the week with a $2.1B flush"):
             self.head = head
+            self.head_en = head_en
             self.seen = []
 
-        async def headline(self, snap, recent=None, variant=0):
-            self.seen.append((snap, list(recent or []), variant))
-            return self.head
+        async def headline(self, snap, recent=None, variant=0, lang="ru"):
+            self.seen.append((snap, list(recent or []), variant, lang))
+            return self.head_en if str(lang).startswith("en") else self.head
 
         def status(self):
             return {"enabled": True, "calls": 1, "fails": 0,
@@ -539,6 +547,142 @@ class BotMenuTest(unittest.TestCase):
         self.assertIn("Рынок снова показал, кто здесь главный", cap["caption"])
         self.assertTrue(self.bot.ai.seen)                 # модель реально звали
         self.assertIn("$", cap["caption"])                # «сухие» цифры на месте
+
+    def _capture_posts(self):
+        """Все отправки в каналы: фото, текст и второе сообщение с топ-7."""
+        posts = []
+
+        async def fake_photo(cid, path, caption="", markup=None, **_kw):
+            posts.append({"cid": cid, "kind": "photo", "text": caption,
+                          "markup": markup})
+            return 11
+
+        async def fake_send(chat_id, text, kb=None, **_kw):
+            posts.append({"cid": chat_id, "kind": "text", "text": text, "markup": kb})
+            return 22
+
+        self.bot.send_photo = fake_photo  # type: ignore
+        self.bot.send = fake_send  # type: ignore
+        return posts
+
+    def test_two_channels_get_same_post_in_two_languages(self):
+        """Один бот — два канала: русский текст в русский, английский в английский."""
+        self.bot._channel_id_cfg = "-100111"
+        self.bot._channel2_id_cfg = "-100222"
+        self.bot.ai = self._FakeAI()
+        self.bot.digest_fn = lambda: {          # type: ignore
+            "window_h": 4, "total_usd": 12e6, "longs_usd": 7e6, "shorts_usd": 5e6,
+            "count": 40, "exchanges": {"gate": 3e6, "binance": 2e6},
+            "top_coins": [{"symbol": "BTC_USDT", "usd": 5e6, "longs": 4e6,
+                           "shorts": 1e6, "count": 12}],
+            "biggest": {"symbol": "BTC_USDT", "usd": 1e6, "exchange": "gate",
+                        "side": "SELL"},
+        }
+        posts = self._capture_posts()
+        self.assertTrue(asyncio.run(self.bot.post_channel_digest()))
+        by_chat = {}
+        for p in posts:
+            by_chat.setdefault(p["cid"], []).append(p)
+        self.assertIn("-100111", by_chat)
+        self.assertIn("-100222", by_chat)
+        ru = by_chat["-100111"][0]["text"]
+        en = by_chat["-100222"][0]["text"]
+        self.assertIn("Рынок снова показал, кто здесь главный", ru)
+        self.assertIn("Futures opened the week", en)
+        self.assertNotIn("Рынок снова", en)
+        # подписи блоков тоже переведены
+        self.assertIn("Coins", en)
+        self.assertIn("fills", en)
+        self.assertIn("longs", en)
+        self.assertIn("Монеты", ru)
+        self.assertIn("шт.", ru)
+        self.assertIn("лонги", ru)
+        # реф-ссылка Gate есть в обоих каналах
+        self.assertIn("gate.com/ru/signup/VLFCAVWMBW", ru)
+        self.assertIn("gate.com/signup/VLFCAVWMBW", en)
+
+    def test_top7_goes_as_second_message(self):
+        """Топ-7 по часам не влезает в подпись — уходит отдельным сообщением."""
+        self.bot._channel_id_cfg = "-100111"
+        board = {
+            "span_hours": 4, "tz": 3 * 3600, "total_usd": 12e6, "count": 40,
+            "prev_total": 10e6, "diff_pct": 20.0, "oi_now_usd": 2e9, "oi_4h_pct": 3.0,
+            "hours": [{"h": 1789578000 + i * 3600, "total": 3e6, "count": 10,
+                       "longs": 2e6, "shorts": 1e6, "side_sum": 2e6, "bias": "long",
+                       "coins": [{"symbol": "BTC_USDT", "usd": 2e6, "flow": -1e5}],
+                       "cvd_sum": -1e5,
+                       "oi": {"value": 2e9, "pct": 1.0}} for i in range(4)],
+            "top_hours": [{"h": 1789578000 + i * 3600, "items": [
+                {"symbol": "BTC_USDT", "exchange": "gate", "usd": 1e6, "side": "SELL"},
+                {"symbol": "ETH_USDT", "exchange": "bybit", "usd": 5e5, "side": "BUY"},
+            ]} for i in range(4)],
+            "oi_hours": [{"h": 1789578000 + i * 3600, "value": 2e9, "pct": 1.0}
+                         for i in range(4)],
+        }
+
+        async def digest():
+            return {"window_h": 4, "total_usd": 12e6, "count": 40, "board": board,
+                    "top_coins": [], "exchanges": {"gate": 3e6}}
+
+        self.bot.digest_fn = digest          # type: ignore
+        posts = self._capture_posts()
+        self.assertTrue(asyncio.run(self.bot.post_channel_digest()))
+        self.assertEqual(len(posts), 2, posts)
+        self.assertEqual(posts[0]["kind"], "photo")
+        self.assertEqual(posts[1]["kind"], "text")
+        self.assertIn("СТЕНД", posts[0]["text"])          # таблица часов в подписи
+        self.assertIn("Топ-7", posts[1]["text"])          # второй сообщение
+        self.assertIn("Gate", posts[1]["text"])
+
+    def test_subscription_accepts_either_channel(self):
+        """Подписки на любой канал достаточно — русский или английский."""
+        self.bot._channel_id_cfg = "-100111"
+        self.bot._channel2_id_cfg = "-100222"
+        asked = []
+
+        async def fake_call(method, payload=None):
+            if method == "getChatMember":
+                asked.append(payload.get("chat_id"))
+                ok = payload.get("chat_id") == "-100222"     # подписан только на Eng
+                if ok:
+                    return {"ok": True, "result": {"status": "member"}}
+                return {"ok": False, "description": "Bad Request: user not found"}
+            return {"ok": True}
+
+        self.bot._call = fake_call  # type: ignore
+        self.assertTrue(asyncio.run(self.bot._is_member_any(2002)))
+        self.assertIn("-100222", asked)
+        # кэш: второй раз не спрашиваем Telegram
+        asked.clear()
+        self.assertTrue(asyncio.run(self.bot._is_member_any(2002)))
+        self.assertEqual(asked, [])
+
+    def test_join_text_offers_both_channels(self):
+        self.bot._channel_id_cfg = "-100111"
+        self.bot._channel2_id_cfg = "-100222"
+        text = self.bot._join_text()
+        self.assertIn("LiqScopeRUS", text)
+        self.assertIn("LiqScopeEng", text)
+        self.assertIn("любой из двух каналов", text)
+        kb = self.bot._kb_join()
+        texts = [b.get("text") for row in kb["inline_keyboard"] for b in row]
+        self.assertTrue(any("LiqScopeRUS" in t for t in texts))
+        self.assertTrue(any("LiqScopeEng" in t for t in texts))
+        self.assertTrue(any("Я подписался" in t for t in texts))
+
+    def test_menu_button_opens_keyboard_screen(self):
+        """Кнопка «☰ Меню» открывает экран с кнопками вместо ручного /start."""
+        text, kb = self.bot._screen(self.user, "help")
+        self.assertIn("Меню", text)
+        print(text)
+        datas = _datas(kb)
+        self.assertIn("nav:home", datas)                 # это и есть /start
+        self.assertIn("cabinet", datas)
+        self.assertIn("terminal", datas)
+        self.assertIn("a:vmail", datas)
+        texts = [b.get("text") for row in self.bot._reply_kb(self.user)["keyboard"]
+                 for b in row]
+        self.assertTrue(any("Меню" in t for t in texts), texts)
 
     def test_menu_opens_without_channel_when_ai_missing(self):
         """Без ключей ИИ бот работает как раньше — шапка из шаблонов."""
@@ -664,7 +808,8 @@ class BotMenuTest(unittest.TestCase):
         btns = [b for row in (markup.get("inline_keyboard") or []) for b in row]
         texts = [b.get("text") for b in btns]
         urls = [b.get("url") for b in btns]
-        self.assertIn("liqscope", texts)
+        self.assertTrue(any("liqscope" in t for t in texts), texts)
+        self.assertTrue(any("Gate" in t for t in texts), texts)      # реф-ссылка
         self.assertIn("https://liqscope.online", urls)
         self.assertTrue(any("t.me/" in (u or "") for u in urls))
 

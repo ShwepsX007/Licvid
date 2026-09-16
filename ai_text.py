@@ -73,6 +73,65 @@ SYSTEM_PROMPT = (
 
 # Направления (акценты) — чередуются от поста к посту, чтобы формулировки
 # не повторялись: цифры одни и те же, а угол зрения каждый раз новый.
+SYSTEM_PROMPT_EN = (
+    "You are the editor of a crypto-futures Telegram channel. You write the "
+    "headline for a liquidation recap: calm business English, lively but "
+    "without slang, hype or addressing the reader. Write in English, 2-3 "
+    "sentences (up to 200 characters).\n"
+    "Always lean on the data: name at least one concrete coin and quote 1-2 "
+    "exact numbers from it (total, side skew or percentage). Do not list every "
+    "figure — pick what matters.\n"
+    "Do not invent facts or coins that are not in the data, give no advice or "
+    "forecasts, no hashtags, markdown, quotes, emojis or signatures. Do not "
+    "start with the same words as previous headlines. Return only the headline."
+)
+
+ANGLES_EN = (
+    "Start with the big picture of the window and the headline number.",
+    "Focus on the skew: which side got wiped and by how much (numbers required).",
+    "Focus on the leading coin: name it and its total.",
+    "Focus on exchanges: where it hit hardest — with numbers.",
+    "Focus on the single largest liquidation.",
+    "Focus on open interest and volume delta (CVD) if the data has them.",
+    "One dense sentence with the two most telling numbers — keep it short.",
+    "Focus on scale: is this big for the window or did the market get off lightly.",
+    "Start with the leading coin, then the window total.",
+    "Focus on the long/short ratio in per cent.",
+)
+
+# Подписи фактов для промпта: русский — основной канал, английский — второй.
+FACT_LABELS = {
+    "ru": {"window": "Окно сводки: последние {h} часа", "total": "Всего ликвидаций",
+           "longs": "лонги", "shorts": "шорты", "events": "событий",
+           "mood": "Характер окна", "leaders": "Лидеры", "exchanges": "Биржи",
+           "biggest": "Крупнейшее событие", "oi": "Открытый интерес",
+           "cvd": "Дельта объёма (CVD)", "hour": "за час", "on": "на"},
+    "en": {"window": "Recap window: last {h} hours", "total": "Total liquidations",
+           "longs": "longs", "shorts": "shorts", "events": "events",
+           "mood": "Tone of the window", "leaders": "Leaders", "exchanges": "Exchanges",
+           "biggest": "Largest event", "oi": "Open interest",
+           "cvd": "Volume delta (CVD)", "hour": "over the hour", "on": "on"},
+}
+
+
+def _flabel(lang: str, key: str, **kw) -> str:
+    table = FACT_LABELS.get("en" if str(lang).startswith("en") else "ru") or {}
+    text = table.get(key) or FACT_LABELS["ru"].get(key) or key
+    return text.format(**kw) if kw else text
+
+
+def _mood_word(longs: float, shorts: float, lang: str = "ru") -> str:
+    if str(lang).startswith("en"):
+        if longs + shorts <= 0:
+            return "almost silent"
+        if longs > shorts * 1.25:
+            return "longs were cut"
+        if shorts > longs * 1.25:
+            return "shorts were wrecked"
+        return "both sides got hit"
+    return _side_word(longs, shorts)
+
+
 ANGLES = (
     "Начни с общей картины окна и главной суммы.",
     "Акцент на перекосе: кого снимали и с каким отрывом (числа обязательны).",
@@ -105,9 +164,10 @@ def _side_word(longs: float, shorts: float) -> str:
     return "били с обеих сторон"
 
 
-def summarize(snap: dict) -> List[str]:
+def summarize(snap: dict, lang: str = "ru") -> List[str]:
     """Строки-факты для промпта (без HTML и цифр-обманок)."""
     s = snap or {}
+    L = (lambda key, **kw: _flabel(lang, key, **kw))
     try:
         h = int(s.get("window_h") or 4)
     except (TypeError, ValueError):
@@ -115,56 +175,66 @@ def summarize(snap: dict) -> List[str]:
     longs = float(s.get("longs_usd") or 0)
     shorts = float(s.get("shorts_usd") or 0)
     out = [
-        f"Окно сводки: последние {h} часа",
-        f"Всего ликвидаций: {money(s.get('total_usd'))} "
-        f"(лонги {money(longs)}, шорты {money(shorts)}), "
-        f"событий: {int(s.get('count') or 0)}",
-        f"Характер окна: {_side_word(longs, shorts)}",
+        L("window", h=h),
+        f"{L('total')}: {money(s.get('total_usd'))} "
+        f"({L('longs')} {money(longs)}, {L('shorts')} {money(shorts)}), "
+        f"{L('events')}: {int(s.get('count') or 0)}",
+        f"{L('mood')}: {_mood_word(longs, shorts, lang)}",
     ]
     coins = (s.get("top_coins") or [])[:3]
     if coins:
         parts = []
         for c in coins:
             parts.append(f"{c.get('symbol') or '?'} {money(c.get('usd'))} "
-                         f"(лонги {money(c.get('longs'))}, шорты {money(c.get('shorts'))})")
-        out.append("Лидеры: " + "; ".join(parts))
+                         f"({L('longs')} {money(c.get('longs'))}, "
+                         f"{L('shorts')} {money(c.get('shorts'))})")
+        out.append(L("leaders") + ": " + "; ".join(parts))
     ex = list((s.get("exchanges") or {}).items())[:3]
     if ex:
-        out.append("Биржи: " + ", ".join(f"{k} {money(v)}" for k, v in ex))
+        out.append(L("exchanges") + ": " + ", ".join(f"{k} {money(v)}" for k, v in ex))
     b = s.get("biggest") or {}
     if b:
-        out.append(f"Крупнейшее событие: {b.get('symbol') or '?'} "
-                   f"{money(b.get('usd'))} на {b.get('exchange') or '?'}")
+        out.append(f"{L('biggest')}: {b.get('symbol') or '?'} "
+                   f"{money(b.get('usd'))} {L('on')} {b.get('exchange') or '?'}")
     oi = s.get("oi") or {}
     oi_bits = []
     for sym, p in list(oi.items())[:3]:
         ch = (p or {}).get("changes") or {}
         pct = _pct((ch.get("h1") or {}).get("pct")) if isinstance(ch.get("h1"), dict) else ""
         if pct:
-            oi_bits.append(f"{sym} {pct} за час")
+            oi_bits.append(f"{sym} {pct} {L('hour')}")
     if oi_bits:
-        out.append("Открытый интерес: " + ", ".join(oi_bits))
+        out.append(L("oi") + ": " + ", ".join(oi_bits))
     cvd = s.get("cvd") or {}
     cvd_bits = [f"{sym} {money(v)}" for sym, v in list(cvd.items())[:3]]
     if cvd_bits:
-        out.append("Дельта объёма (CVD): " + ", ".join(cvd_bits))
+        out.append(L("cvd") + ": " + ", ".join(cvd_bits))
     return out
 
 
 def build_prompt(snap: dict, recent: Optional[List[str]] = None,
-                 variant: int = 0) -> str:
+                 variant: int = 0, lang: str = "ru") -> str:
+    en = str(lang).startswith("en")
+    angles = ANGLES_EN if en else ANGLES
     lines = [
-        "Данные сводки — используй их в тексте (числа и монеты брать отсюда):",
-        *[f"— {x}" for x in summarize(snap)],
+        ("Recap data - use it in the text (take numbers and coins from here):"
+         if en else
+         "Данные сводки — используй их в тексте (числа и монеты брать отсюда):"),
+        *[f"— {x}" for x in summarize(snap, lang)],
     ]
     keep = [r for r in (recent or []) if r][-4:]
     if keep:
         lines.append("")
-        lines.append("Прошлые шапки — не повторяй их формулировки и не начинай так же:")
+        lines.append("Previous headlines - do not repeat their wording or openings:"
+                     if en else
+                     "Прошлые шапки — не повторяй их формулировки и не начинай так же:")
         lines += [f"— {r}" for r in keep]
     lines.append("")
-    lines.append(f"Акцент этого поста: {ANGLES[int(variant) % len(ANGLES)]}")
-    lines.append("Напиши шапку: 2–3 предложения, с конкретной монетой и 1–2 числами.")
+    lines.append(("Angle for this post: " if en else "Акцент этого поста: ")
+                 + str(angles[int(variant) % len(angles)]))
+    lines.append("Write the headline: 2-3 sentences, one concrete coin and 1-2 numbers."
+                 if en else
+                 "Напиши шапку: 2–3 предложения, с конкретной монетой и 1–2 числами.")
     return "\n".join(lines)
 
 
@@ -641,16 +711,17 @@ class AiWriter:
         """Модель устарела — спрашиваем у сервиса актуальную и пробуем снова."""
         return self._switch_model(p, set()) is not None
 
-    def _attempt(self, p: Provider, prompt: str) -> Optional[str]:
+    def _attempt(self, p: Provider, prompt: str, lang: str = "ru") -> Optional[str]:
         """Один запрос к сервису (с учётом добавки к лимиту ответа)."""
         tokens = self.max_tokens + self._extra.get(p.name, 0)
-        url, body, headers = request_for(p, prompt, SYSTEM_PROMPT,
+        system = SYSTEM_PROMPT_EN if str(lang).startswith("en") else SYSTEM_PROMPT
+        url, body, headers = request_for(p, prompt, system,
                                          self.temperature, tokens)
         data = post_json(url, body, headers, self.timeout)
         return parse_reply(p, data)
 
     def headline_sync(self, snap: dict, recent: Optional[List[str]] = None,
-                      variant: int = 0) -> Optional[str]:
+                      variant: int = 0, lang: str = "ru") -> Optional[str]:
         """Первый удачный ответ или None (тогда шапка будет из шаблонов)."""
         if not self.providers:
             return None
@@ -665,8 +736,8 @@ class AiWriter:
             try:
                 while True:
                     try:
-                        prompt = build_prompt(snap, recent, angle)
-                        raw = self._attempt(p, prompt)
+                        prompt = build_prompt(snap, recent, angle, lang)
+                        raw = self._attempt(p, prompt, lang)
                         head = clean_head(raw)
                         problem = head_problem(head)
                         if problem and problem != LONG:
@@ -741,9 +812,9 @@ class AiWriter:
         return None
 
     async def headline(self, snap: dict, recent: Optional[List[str]] = None,
-                       variant: int = 0) -> Optional[str]:
+                       variant: int = 0, lang: str = "ru") -> Optional[str]:
         """То же, но без блокировки event loop бота."""
-        return await asyncio.to_thread(self.headline_sync, snap, recent, variant)
+        return await asyncio.to_thread(self.headline_sync, snap, recent, variant, lang)
 
 
 def build_ai() -> Optional[AiWriter]:

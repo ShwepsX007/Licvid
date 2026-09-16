@@ -50,6 +50,7 @@ from fastapi.staticfiles import StaticFiles
 from market_feed import MarketFeed, TF_MINUTES, base_of, canon
 from timeframes import parse_tf
 from oi_feed import map_candles_to_oi
+from hour_board import BOARD, OI
 from accounts import Store
 from mailer import build_mailer
 from ai_text import build_ai
@@ -127,6 +128,12 @@ STATS_INTERVAL = float(os.getenv("LIQSCOPE_STATS_INTERVAL_MS", "2000")) / 1000.0
 #  Состояние
 # =============================================================================
 LIQUIDATIONS: Deque[dict] = deque(maxlen=HISTORY_MAX)
+# История открытого интереса: уровень пишется каждые OI_SNAP_SEC секунд,
+# лежит на диске — после рестарта стенд в канале не пустует первые часы.
+OI_HISTORY_FILE = os.getenv("LIQSCOPE_OI_HISTORY",
+                            os.path.join(HERE, "data", "oi_history.json"))
+OI_SNAP_SEC = max(60.0, float(os.getenv("LIQSCOPE_OI_SNAP_SEC", "300")))
+OI_KEEP_MIN = int(os.getenv("LIQSCOPE_OI_KEEP_MIN", "360"))
 CANDLES: Dict[str, dict] = {}            # "SYM|tf" -> {"candles": [...], "ts", "source"}
 MINUTE_VOL: Dict[str, Dict[int, float]] = {}   # symbol -> {minute_ts: volume}
 # Живая CVD: "SYM|tf" -> {время_начала_свечи: дельта USDT (покупки-продажи)}.
@@ -340,6 +347,7 @@ async def on_liquidation(ev: dict):
             event["liq"] = {k: v for k, v in ev["liquidation"].items()
                             if k in ("liquidatedUser", "markPx", "method")}
     LIQUIDATIONS.append(event)
+    BOARD.add_liq(event)          # часовой стенд для постов в канал
     try:
         _liq_queue.put_nowait(event)
     except asyncio.QueueFull:
@@ -350,6 +358,43 @@ async def on_liquidation(ev: dict):
             _liq_drop_warn_at = now
             log.warning("очередь ликвидаций переполнена: пропущено %d событий",
                         _liq_dropped)
+
+
+async def oi_history_task() -> None:
+    """Каждые OI_SNAP_SEC кладём уровни OI по монетам в историю.
+
+    Источник — трекер бирж (``feed.oi``), тот же, что питает индикатор OI в
+    терминале. Монеты, которых нет в трекере, в срез не попадают: лучше
+    прочерк в стенде, чем выдуманный уровень.
+    """
+    loaded = 0
+    if OI_HISTORY_FILE:
+        try:
+            loaded = await asyncio.to_thread(OI.load, OI_HISTORY_FILE)
+        except Exception as e:  # noqa: BLE001
+            log.debug("история OI не загрузилась: %s", e)
+    if loaded:
+        log.info("История OI восстановлена: монет %d", loaded)
+    while True:
+        try:
+            tracker = getattr(feed, "oi", None) if feed else None
+            if tracker is not None:
+                symbols = set()
+                try:
+                    symbols.update(getattr(tracker, "_series", {}).keys() or [])
+                except Exception:  # noqa: BLE001
+                    pass
+                for sym in list(symbols)[:80]:
+                    try:
+                        payload = tracker.payload(sym)
+                        OI.add(sym, payload.get("total_usd"), payload.get("ts"))
+                    except Exception as e:  # noqa: BLE001
+                        log.debug("OI-срез %s: %s", sym, e)
+            if OI_HISTORY_FILE:
+                await asyncio.to_thread(OI.save, OI_HISTORY_FILE)
+        except Exception as e:  # noqa: BLE001
+            log.warning("история OI: %s", e)
+        await asyncio.sleep(OI_SNAP_SEC)
 
 
 async def liq_event_worker():
@@ -405,7 +450,9 @@ async def on_trade(symbol: str, price: float, qty: float, ts: float,
     try:
         if side in ("BUY", "SELL") and price > 0 and qty > 0:
             signed = float(price) * float(qty) * (1 if side == "BUY" else -1)
-            _cvd_add(symbol, float(ts) if ts else time.time(), signed)
+            tick_ts = float(ts) if ts else time.time()
+            _cvd_add(symbol, tick_ts, signed)
+            BOARD.add_cvd(symbol, tick_ts, signed)
     except (TypeError, ValueError):
         pass
 
@@ -1102,6 +1149,7 @@ async def lifespan(app: FastAPI):
                 load_history_file, HISTORY_FILE, HISTORY_MAX, HISTORY_TTL_HOURS)
             for ev in loaded:
                 LIQUIDATIONS.append(ev)
+                BOARD.add_liq(ev)
             if loaded:
                 log.info("История ликвидаций восстановлена с диска: %d событий", len(loaded))
         except Exception as e:
@@ -1119,6 +1167,7 @@ async def lifespan(app: FastAPI):
 
     tasks = [
         asyncio.create_task(liq_event_worker(), name="liq-worker"),
+        asyncio.create_task(oi_history_task(), name="oi-history"),
         asyncio.create_task(liquidation_broadcaster(), name="liq-broadcast"),
         asyncio.create_task(price_broadcaster(), name="price-broadcast"),
         asyncio.create_task(stats_broadcaster(), name="stats-broadcast"),

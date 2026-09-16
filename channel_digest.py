@@ -8,6 +8,9 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional
 
+from hour_board import hour_hhmm, tz_offset
+from refs import ex_link, gate_line
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 IMAGES_DIR = os.path.join(HERE, "static", "channel")
 
@@ -43,6 +46,109 @@ DEFAULT_HEAD_TEMPLATES = (
 )
 VARIANT_COUNT = len(DEFAULT_HEAD_TEMPLATES)
 HEAD_MAX_LEN = 240
+
+# Английские шапки: тот же состав данных, другой язык (для второго канала).
+DEFAULT_HEAD_TEMPLATES_EN = (
+    "🌙 Night shift on the tape. {h} hours — the market ate someone again.",
+    "🔥 {h}-hour post-mortem. No sugar-coating, just the numbers.",
+    "👁 Who fed the tape for the last {h} hours. Spoiler: not the jedi.",
+    "💥 {h} hours of fire. Short, factual, with character.",
+    "📓 Terminal diary. Window: {h}h. Mood: working.",
+    "🪖 Field report from the front line. Liquidations for {h}h below.",
+    "☕ While you were having coffee, the tape was printing money.",
+    "🛠 Came to check one candle. Left with a {h}h recap.",
+    "😬 Someone forgot what a stop is. The {h}-hour breakdown.",
+    "🧪 Not a signal. An X-ray of the market for {h}h.",
+    "🗣 Straight talk: {h} hours, and leverage got shorter than it looked.",
+    "🩸 The pain bill for {h} hours. With the names attached.",
+    "🎬 Live from the tape. No editing, no mercy.",
+    "🧊 Quiet hour? No. They just cut the wrong people.",
+    "📌 Evening stand-up with the tape: who got wrecked in {h}h.",
+    "⚠️ If your leverage was 'just a bit' — here is the {h}-hour invoice.",
+    "🧠 The market owes you nothing. {h}h make that obvious.",
+    "📉 Not panic. Just numbers that cannot lie.",
+    "🃏 Short recap. Long leverage did not live long today.",
+    "📡 The tape never went quiet. Neither will I.",
+    "🧹 This is not a 'correction'. Someone fed the book for {h} hours.",
+    "📸 Took a snapshot of the market. Hold on to your chair.",
+    "🕐 Morning does not start with coffee. It starts with wreckage.",
+    "💬 Watched the tape for {h} hours. Who paid — in numbers below.",
+)
+
+# Подписи блоков и стенда: ru — основной канал, en — второй.
+LABELS = {
+    "ru": {
+        "exchanges": "Биржи",
+        "coins": "Монеты",
+        "no_leaders": "лидеров нет",
+        "longs": "лонги",
+        "shorts": "шорты",
+        "pieces": "шт.",
+        "whale": "кит",
+        "oi": "OI",
+        "cvd_buy": "покупки",
+        "cvd_sell": "продажи",
+        "window": "окно {h}ч",
+        "bias_flat": "лента почти молчала",
+        "bias_long": "резали лонги",
+        "bias_short": "выносили шорты",
+        "bias_both": "били с обеих сторон",
+        "stand": "СТЕНД",
+        "col_hour": "час",
+        "col_liqs": "ликв.",
+        "col_coins": "монеты",
+        "col_bias": "перекос",
+        "stand_hours": "{h} часа",
+        "msk": "МСК",
+        "total": "Всего",
+        "liqs": "ликвидаций",
+        "oi_4h": "OI за 4ч",
+        "vs_prev": "к прошлым 4ч",
+        "no_data": "—",
+        "top_title": "крупнейшие за час",
+        "top_hours": "Топ-7 ликвидаций по часам",
+        "empty_hour": "тихо",
+    },
+    "en": {
+        "exchanges": "Exchanges",
+        "coins": "Coins",
+        "no_leaders": "no leaders",
+        "longs": "longs",
+        "shorts": "shorts",
+        "pieces": "fills",
+        "whale": "whale",
+        "oi": "OI",
+        "cvd_buy": "buying",
+        "cvd_sell": "selling",
+        "window": "{h}h window",
+        "bias_flat": "the tape was almost silent",
+        "bias_long": "longs were cut",
+        "bias_short": "shorts were wrecked",
+        "bias_both": "both sides got hit",
+        "stand": "BOARD",
+        "col_hour": "hour",
+        "col_liqs": "liqs",
+        "col_coins": "coins",
+        "col_bias": "bias",
+        "stand_hours": "last {h} hours",
+        "msk": "UTC+3",
+        "total": "Total",
+        "liqs": "liquidations",
+        "oi_4h": "OI over 4h",
+        "vs_prev": "vs previous 4h",
+        "no_data": "—",
+        "top_title": "biggest of the hour",
+        "top_hours": "Top 7 liquidations by hour",
+        "empty_hour": "quiet",
+    },
+}
+
+
+def lbl(lang: str, key: str, **kw) -> str:
+    """Подпись на нужном языке; неизвестный язык — русский."""
+    table = LABELS.get("en" if str(lang).startswith("en") else "ru") or {}
+    text = table.get(key) or LABELS["ru"].get(key) or key
+    return text.format(**kw) if kw else text
 
 EXCH_NAMES = {
     "binance": "Binance",
@@ -80,6 +186,15 @@ def money(v: Any) -> str:
 def coin(sym: Any) -> str:
     s = str(sym or "").replace("-", "_")
     return (s.split("_")[0] or s).upper() or "—"
+
+
+def exch_ref(name: Any, lang: str = "ru") -> str:
+    """Имя биржи в обычном тексте: с партнёрской ссылкой, если она есть.
+
+    Внутри <pre>/<code> ссылок не бывает, поэтому таблицы остаются текстом,
+    а строки вне таблиц ведут на биржу.
+    """
+    return ex_link(str(name or ""), fallback=exch(name), lang=lang)
 
 
 def exch(name: Any) -> str:
@@ -156,15 +271,15 @@ def collect_digest(
     }
 
 
-def _bias(longs: float, shorts: float) -> tuple:
+def _bias(longs: float, shorts: float, lang: str = "ru") -> tuple:
     tot = longs + shorts
     if tot <= 0:
-        return "😴", "лента почти молчала"
+        return "😴", lbl(lang, "bias_flat")
     if longs > shorts * 1.25:
-        return "📉", "резали лонги"
+        return "📉", lbl(lang, "bias_long")
     if shorts > longs * 1.25:
-        return "📈", "выносили шорты"
-    return "⚖️", "били с обеих сторон"
+        return "📈", lbl(lang, "col_bias")
+    return "⚖️", lbl(lang, "bias_both")
 
 
 def _side_dot(longs: float, shorts: float) -> str:
@@ -198,7 +313,7 @@ def _mono(rows: List[List[tuple]], gap: str = "  ") -> str:
     return f"<pre><code>{body}</code></pre>"
 
 
-def _kpi_cells(snap: dict) -> List[str]:
+def _kpi_cells(snap: dict, lang: str = "ru") -> List[str]:
     """Правая колонка таблицы бирж: касса, лонги, шорты, кит.
 
     Строк ровно четыре — по числу бирж в компактной таблице: каждая
@@ -206,30 +321,30 @@ def _kpi_cells(snap: dict) -> List[str]:
     """
     b = snap.get("biggest") or {}
     cells = [
-        f"💥 {money(snap.get('total_usd'))} · {int(snap.get('count') or 0)} шт.",
-        f"🔴 лонги {money(snap.get('longs_usd'))}",
-        f"🟢 шорты {money(snap.get('shorts_usd'))}",
+        f"💥 {money(snap.get('total_usd'))} · {int(snap.get('count') or 0)} {lbl(lang, 'pieces')}",
+        f"🔴 {lbl(lang, 'longs')} {money(snap.get('longs_usd'))}",
+        f"🟢 {lbl(lang, 'shorts')} {money(snap.get('shorts_usd'))}",
     ]
     if b:
         mark = "🔴" if b.get("side") == "SELL" else "🟢"
         cells.append(f"🐋 {coin(b.get('symbol'))} {money(b.get('usd'))}"
-                     f" · {exch(b.get('exchange'))} {mark}")
+                     f" · {exch_ref(b.get('exchange'), lang)} {mark}")
     return cells
 
 
-def _kpi_line(snap: dict) -> str:
+def _kpi_line(snap: dict, lang: str = "ru") -> str:
     """Одна строка вместо таблицы — для вариантов, где биржи не первыми."""
-    return (f"💥 {money(snap.get('total_usd'))} · {int(snap.get('count') or 0)} шт."
+    return (f"💥 {money(snap.get('total_usd'))} · {int(snap.get('count') or 0)} {lbl(lang, 'pieces')}"
             f"   🔴 {money(snap.get('longs_usd'))}"
             f"   🟢 {money(snap.get('shorts_usd'))}")
 
 
-def _ex_block(snap: dict, n: int = 4) -> str:
+def _ex_block(snap: dict, n: int = 4, lang: str = "ru") -> str:
     """Биржи слева, цифры окна справа — два столбика, как в терминале."""
     items = list((snap.get("exchanges") or {}).items())[:n]
     if not items:
         return ""
-    right = _kpi_cells(snap)
+    right = _kpi_cells(snap, lang)
     rows = []
     for i, (k, v) in enumerate(items):
         rows.append([
@@ -240,7 +355,7 @@ def _ex_block(snap: dict, n: int = 4) -> str:
     return _mono(rows)
 
 
-def _metric_cell(snap: dict, sym: Any) -> str:
+def _metric_cell(snap: dict, sym: Any, lang: str = "ru") -> str:
     """Правая колонка монеты — одной короткой строкой: OI или CVD.
 
     Показываем тот индикатор, который в этой монете сильнее по деньгам:
@@ -258,7 +373,7 @@ def _metric_cell(snap: dict, sym: Any) -> str:
         if n is not None:
             pct = ch.get("pct")
             extra = f" ({pct:+.2f}%)" if isinstance(pct, (int, float)) else ""
-            oi_txt = f"📊 OI {'↑' if n >= 0 else '↓'}{money(abs(n))}{extra}"
+            oi_txt = f"📊 {lbl(lang, 'oi')} {'↑' if n >= 0 else '↓'}{money(abs(n))}{extra}"
             oi_abs = abs(n)
     cvd_txt, cvd_abs = "", None
     cvd = (snap.get("cvd") or {}).get(sym)
@@ -268,8 +383,9 @@ def _metric_cell(snap: dict, sym: Any) -> str:
         except (TypeError, ValueError):
             v = None
         if v is not None:
+            side_txt = lbl(lang, "cvd_buy" if v >= 0 else "cvd_sell")
             cvd_txt = (f"🌊 CVD {'🟢' if v >= 0 else '🔴'} "
-                       f"{'покупки' if v >= 0 else 'продажи'} {money(abs(v))}")
+                       f"{side_txt} {money(abs(v))}")
             cvd_abs = abs(v)
     if oi_txt and cvd_txt:
         return oi_txt if oi_abs >= cvd_abs else cvd_txt
@@ -279,16 +395,17 @@ def _metric_cell(snap: dict, sym: Any) -> str:
         return cvd_txt
     tot = payload.get("total_usd")
     if tot:
-        return f"📊 OI {money(tot)}"
+        return f"📊 {lbl(lang, 'oi')} {money(tot)}"
     return ""
 
 
-def _coins_block(snap: dict, n: int = 5, header: str = "Монеты") -> str:
+def _coins_block(snap: dict, n: int = 5, header: str = "", lang: str = "ru") -> str:
     """Монеты-лидеры: слева ранг/монета/сумма, справа метрика (OI или CVD)."""
     coins = list(snap.get("top_coins") or [])[:n]
     if not coins:
-        return "лидеров нет"
-    rows: List[List[tuple]] = [[(header, "l")]]
+        # монет нет — блок просто не печатаем: стенд выше уже всё сказал
+        return ""
+    rows: List[List[tuple]] = [[(header or lbl(lang, "coins"), "l")]]
     for i, c in enumerate(coins):
         mark = _MEDALS[i] if i < len(_MEDALS) else f"{i + 1}."
         try:
@@ -300,9 +417,155 @@ def _coins_block(snap: dict, n: int = 5, header: str = "Монеты") -> str:
             (f"{mark} {coin(c.get('symbol'))}", "l"),
             (money(c.get("usd")), "r"),
             (_side_dot(longs, shorts), "l"),
-            (_metric_cell(snap, c.get("symbol")), "l"),
+            (_metric_cell(snap, c.get("symbol"), lang), "l"),
         ])
     return _mono(rows)
+
+
+def _arrow(pct, lang: str = "ru") -> str:
+    """Стрелка и процент: рост — ▲, падение — ▼, ровно — без шума."""
+    try:
+        v = float(pct)
+    except (TypeError, ValueError):
+        return ""
+    if v > 0.05:
+        return f"▲ {abs(v):.1f}%"
+    if v < -0.05:
+        return f"▼ {abs(v):.1f}%"
+    return "→ 0.0%"
+
+
+def _coin_cell(c: dict, lang: str = "ru") -> str:
+    """Монета за час: сумма ликвидаций и перекос CVD по этой же монете."""
+    if not c.get("symbol"):
+        return ""
+    text = f"{coin(c['symbol'])} {money(c.get('usd'))}"
+    flow = c.get("flow")
+    if flow is not None:
+        text += " 🟢" if float(flow) >= 0 else " 🔴"
+    return text
+
+
+def hour_rows(hours: list, lang: str = "ru") -> List[List[tuple]]:
+    """Строки стенда: час, ликвидации, топ монет часа, перекос CVD и OI."""
+    rows: List[List[tuple]] = []
+    for hr in hours or []:
+        hh = hour_hhmm(hr.get("h") or 0, tz_offset())
+        total = float(hr.get("total") or 0)
+        cnt = int(hr.get("count") or 0)
+        if not total and not cnt:
+            rows.append([(hh, "l"), (lbl(lang, "empty_hour"), "l"),
+                         ("", "l"), ("", "l"), ("", "l")])
+            continue
+        left = f"{money(total)} · {cnt} {lbl(lang, 'pieces')}"
+        coins = (hr.get("coins") or [])
+        top_coins = " ".join((_coin_cell(c, lang) for c in coins[:3] if c.get("symbol")))
+        bias = hr.get("bias")
+        bias_txt = ""
+        if bias in ("long", "short"):
+            side = lbl(lang, "longs" if bias == "long" else "shorts")
+            bias_txt = f"{'🔴' if bias == 'long' else '🟢'} {side} {money(hr.get('side_sum'))}"
+        cvd_sum = hr.get("cvd_sum")
+        if cvd_sum is not None:
+            flow = "🟢" if float(cvd_sum) >= 0 else "🔴"
+            bias_txt = (bias_txt + " · " if bias_txt else "") + f"{flow} CVD {money(abs(float(cvd_sum)))}"
+        oi_txt = ""
+        oi = hr.get("oi") or {}
+        if oi.get("value"):
+            oi_txt = f"{money(oi['value'])}"
+            if oi.get("pct") is not None:
+                oi_txt = f"{oi_txt} {_arrow(oi['pct'], lang)}"
+        rows.append([(hh, "l"), (left, "l"), (top_coins, "l"),
+                     (bias_txt, "l"), (oi_txt, "l")])
+    return rows
+
+
+def board_block(board: Optional[dict], lang: str = "ru") -> str:
+    """«Информационный стенд»: часы, тотал, топ-7 ударов, CVD и OI.
+
+    Порядок важен: сначала общая касса за окно, потом по часам — что и на
+    чём горело, затем крупнейшие удары часа и, наконец, открытый интерес
+    за каждый час и за все четыре.
+    """
+    if not board:
+        return ""
+    hours = board.get("hours") or []
+    if not hours:
+        return ""
+    tz = tz_offset()
+    span = board.get("span_hours") or len(hours)
+    mark = "⚖️" if abs(float(board.get("diff_pct") or 0)) <= 0.5 else (
+        "📈" if float(board.get("diff_pct") or 0) > 0 else "📉")
+    parts: List[str] = []
+    head = (f"<b>📊 {lbl(lang, 'stand')} · {lbl(lang, 'stand_hours', h=span)}"
+            f" ({lbl(lang, 'msk')})</b>")
+    total_line = (f"💥 {lbl(lang, 'total')}: <b>{money(board.get('total_usd'))}</b>"
+                  f" · {int(board.get('count') or 0)} {lbl(lang, 'liqs')}")
+    prev = board.get("prev_total")
+    if prev:
+        total_line += (f"   {mark} {_arrow(board.get('diff_pct'), lang)}"
+                       f" ({lbl(lang, 'vs_prev')})")
+    body = _mono([[(lbl(lang, "col_hour"), "l"), (lbl(lang, "col_liqs"), "l"),
+                    (lbl(lang, "col_coins"), "l"), (lbl(lang, "col_bias"), "l"),
+                    (lbl(lang, "oi"), "l")]] + hour_rows(hours, lang))
+    parts.append(head + "\n" + total_line + "\n" + body)
+
+    oi_line = ""
+    oi_rows = board.get("oi_hours") or []
+    if oi_rows:
+        cells = []
+        for cell in oi_rows:
+            hh = hour_hhmm(cell.get("h") or 0, tz)
+            pct = cell.get("pct")
+            cells.append(f"{hh} {_arrow(pct, lang) if pct is not None else lbl(lang, 'no_data')}")
+        head4 = ""
+        if board.get("oi_now_usd"):
+            head4 = money(board.get("oi_now_usd"))
+            if board.get("oi_4h_pct") is not None:
+                head4 += f" {_arrow(board['oi_4h_pct'], lang)}"
+        oi_line = f"📊 {lbl(lang, 'oi_4h')}: {head4}".rstrip() + "  ·  " + "  ".join(cells)
+    if oi_line:
+        parts.append(oi_line)
+    return "\n".join(p for p in parts if p)
+
+
+def render_top7(board: Optional[dict], lang: str = "ru") -> str:
+    """Второе сообщение поста: топ-7 крупных ликвидаций по каждому часу.
+
+    В подпись к фото это не влезает (лимит 1024), а в обычное сообщение —
+    с запасом. Формат: час, затем строки «монета — сумма — биржа».
+    """
+    if not board:
+        return ""
+    tz = board.get("tz") or tz_offset()
+    blocks: List[str] = []
+    for hr in board.get("top_hours") or []:
+        items = hr.get("items") or []
+        if not items:
+            continue
+        hh = hour_hhmm(hr.get("h") or 0, tz)
+        rows = []
+        for i, it in enumerate(items):
+            side = "🔴" if it.get("side") == "SELL" else "🟢"
+            rows.append([
+                (f"{i + 1}. {coin(it.get('symbol'))} {side}", "l"),
+                (money(it.get("usd")), "r"),
+                (exch(it.get("exchange")), "l"),
+            ])
+        title = f"<b>— {hh} · {lbl(lang, 'top_title')}</b>"
+        blocks.append(title + "\n" + _mono(rows))
+    if not blocks:
+        return ""
+    head = f"<b>🏆 {lbl(lang, 'top_hours')}</b>"
+    return head + "\n\n" + "\n\n".join(blocks) + "\n" + gate_line(lang)
+
+
+def build_board(board: Optional[dict], lang: str = "ru") -> str:
+    """Публичная обёртка: стенд или пустая строка, если данных ещё нет."""
+    try:
+        return board_block(board, lang)
+    except Exception:      # noqa: BLE001 — пост важнее стенда
+        return ""
 
 
 def _pack(parts: List[str], tail: str, limit: int = CAPTION_LIMIT) -> str:
@@ -311,17 +574,19 @@ def _pack(parts: List[str], tail: str, limit: int = CAPTION_LIMIT) -> str:
         body = "\n\n".join(cs)
         return f"{body}\n\n{tail}" if tail else body
     text = join(chunks)
-    while len(text) > limit and chunks:
+    # Режем хвост, но первый блок (шапка + стенд) не выбрасываем: пустой пост
+    # хуже длинного. Если и он не влезает — обрежется по лимиту строкой ниже.
+    while len(text) > limit and len(chunks) > 1:
         chunks.pop()
         text = join(chunks)
     return text[:limit]
 
 
-def _facts(snap: dict) -> dict:
+def _facts(snap: dict, lang: str = "ru") -> dict:
     h = int(snap.get("window_h") or 4)
     longs = float(snap.get("longs_usd") or 0)
     shorts = float(snap.get("shorts_usd") or 0)
-    bemoji, btxt = _bias(longs, shorts)
+    bemoji, btxt = _bias(longs, shorts, lang)
     return {
         "h": h,
         "n": int(snap.get("count") or 0),
@@ -330,12 +595,12 @@ def _facts(snap: dict) -> dict:
         "shorts": money(shorts),
         "bias_e": bemoji,
         "bias": btxt,
-        "bias_line": f"{bemoji} {btxt} · окно {h}ч",
-        "kpi": _kpi_line(snap),
-        "ex": _ex_block(snap, 4),
-        "ex6": _ex_block(snap, 6),
-        "coins": _coins_block(snap, 5),
-        "coins8": _coins_block(snap, 8),
+        "bias_line": f"{bemoji} {btxt} · {lbl(lang, 'window', h=h)}",
+        "kpi": _kpi_line(snap, lang),
+        "ex": _ex_block(snap, 4, lang),
+        "ex6": _ex_block(snap, 6, lang),
+        "coins": _coins_block(snap, 5, lang=lang),
+        "coins8": _coins_block(snap, 8, lang=lang),
     }
 
 
@@ -364,13 +629,20 @@ def format_ai_head(text: str, h: int = 4) -> str:
     return f"<b>{_html.escape(s, quote=False)}</b>" if s else ""
 
 
-def _headlines(h: int) -> tuple:
+def _headlines(h: int, lang: str = "ru") -> tuple:
     """Встроенные шапки (пока в БД нет своих)."""
-    return tuple(format_headline(t, h) for t in DEFAULT_HEAD_TEMPLATES)
+    table = DEFAULT_HEAD_TEMPLATES_EN if str(lang).startswith("en") else DEFAULT_HEAD_TEMPLATES
+    return tuple(format_headline(t, h) for t in table)
 
 
-def active_headlines(store=None, h: int = 4) -> List[str]:
-    """Шапки из админки; если таблица пустая — дефолт из кода."""
+def active_headlines(store=None, h: int = 4, lang: str = "ru") -> List[str]:
+    """Шапки из админки; если таблица пустая — дефолт из кода.
+
+    Шапки из админки написаны по-русски, поэтому для английского канала они
+    не подходят: там либо шаблоны из кода, либо ИИ-шапка на английском.
+    """
+    if str(lang).startswith("en"):
+        return list(_headlines(h, lang))
     rows = []
     if store is not None:
         try:
@@ -379,7 +651,7 @@ def active_headlines(store=None, h: int = 4) -> List[str]:
             rows = []
     out = [format_headline(r.get("text") or "", h) for r in (rows or [])]
     out = [x for x in out if x]
-    return out or list(_headlines(h))
+    return out or list(_headlines(h, lang))
 
 
 def active_images(store=None) -> List[str]:
@@ -401,7 +673,8 @@ def active_images(store=None) -> List[str]:
 def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = None,
                 site_url: str = "https://liqscope.online",
                 bot_url: str = "https://t.me/LiqScopeBot",
-                head_override: Optional[str] = None) -> str:
+                head_override: Optional[str] = None,
+                lang: str = "ru") -> str:
     """Сводка: живая шапка + компактные блоки в два столбика.
 
     Компоновка — как в терминале: слева биржа/монета, справа цифры.
@@ -410,15 +683,19 @@ def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = N
     вместо шаблона, а раскладка продолжает чередоваться по variant.
     """
     import html as _html
-    f = _facts(snap)
+    f = _facts(snap, lang)
     h = f["h"]
     site = (site_url or "https://liqscope.online").rstrip("/")
     bot = (bot_url or "https://t.me/LiqScopeBot").rstrip("/")
     # ссылки прячем в слова: кликабельные, без голого URL в посте
+    bot_word = "bot" if str(lang).startswith("en") else "бот"
     tail = (f"— <i>LiqScope</i>\n"
             f'🌐 <a href="{_html.escape(site, quote=True)}">liqscope.online</a> · '
-            f'🤖 <a href="{_html.escape(bot, quote=True)}">бот</a>')
-    heads = [x for x in (headlines or []) if x] or list(_headlines(h))
+            f'🤖 <a href="{_html.escape(bot, quote=True)}">{bot_word}</a>')
+    # Реферальная ссылка Gate: строкой внизу и кликабельным словом в таблицах,
+    # которые уходят обычным текстом (внутри <pre> ссылок не бывает).
+    tail += "\n" + gate_line(lang)
+    heads = [x for x in (headlines or []) if x] or list(_headlines(h, lang))
     # шапку и компоновку крутим независимо: своя единственная шапка из админки
     # не должна «замораживать» раскладку — блоки продолжают чередоваться
     v = int(variant)
@@ -428,6 +705,9 @@ def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = N
     ex, ex6 = f["ex"], f["ex6"]
     coins, coins8 = f["coins"], f["coins8"]
     kpi, bias = f["kpi"], f["bias_line"]
+    # стенд идёт сразу после шапки: это главный блок поста
+    stand = build_board(snap.get("board"), lang)
+    stand = ("\n\n" + stand) if stand else ""
 
     bodies = (
         [ex, kpi, coins],                 # 0 — биржи, цифры окна, монеты
@@ -443,7 +723,7 @@ def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = N
         [kpi, bias, ex, coins],           # 10 — цифры и оценка сверху
         [bias, ex, coins],                # 11 — с оценки рынка
     )
-    parts = [head] + list(bodies[v % len(bodies)])
+    parts = [head + stand] + list(bodies[v % len(bodies)])
     return _pack(parts, tail)
 
 

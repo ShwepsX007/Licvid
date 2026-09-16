@@ -1359,6 +1359,205 @@ class TelegramBot:
             await self.reply(chat_id, self._digest_result_text(ok), self._admin_kb(),
                              message_id=message_id)
 
+    # --- дневной дайджест (вечерний выпуск за сутки) ----------------------
+    def daily_status(self) -> Dict[str, Any]:
+        """Что известно про дневной дайджест — для админки и логов."""
+        out: Dict[str, Any] = dict(getattr(self, "_daily_state", None) or {})
+        out["review"] = self._review_on()
+        out["wired"] = bool(getattr(self, "daily_run_fn", None))
+        return out
+
+    async def publish_daily_digest(self, rec: dict, langs=("ru", "en"),
+                                   force: bool = False) -> Dict[str, Any]:
+        """Разложить готовый дайджест по каналам: {язык: [ок, ошибка]}.
+
+        Запись собирает сервер (api_digest): здесь только отправка и контроль
+        публикации — если он включён, посты уходят админу черновиком.
+        """
+        from channel_digest import active_images, pick_image
+        from daily_digest import render_post
+
+        self._digest_err = ""
+        self._last_tg_err = ""
+        try:
+            await self.verify_channel_roles()
+        except Exception as e:
+            log.debug("проверка каналов: %s", e)
+        day = str((rec or {}).get("day") or "")
+        posts: List[dict] = []
+        result: Dict[str, Any] = {}
+        seen: set = set()
+        for lang in langs or ("ru", "en"):
+            lang = "en" if str(lang).startswith("en") else "ru"
+            if lang in seen:
+                continue
+            seen.add(lang)
+            cid = self.channel_chat_id_en() if lang == "en" else self.channel_chat_id()
+            if not cid:
+                result[lang] = [False, ("английский канал не привязан"
+                                        if lang == "en" else
+                                        "канал не привязан — перешлите боту пост из канала")]
+                continue
+            caption = render_post(rec, lang, self.site_url())
+            posts.append({"lang": lang, "cid": cid, "caption": caption, "top": ""})
+        if not posts:
+            err = next((v[1] for v in result.values()), "каналы не привязаны")
+            self._digest_err = err
+            self._daily_state = {"ok": False, "day": day, "error": err,
+                                 "at": time.time()}
+            return result
+        images = active_images(self.store)
+        try:
+            variant = int(day.replace("-", "")[-2:] or 0)
+        except (TypeError, ValueError):
+            variant = 0
+        img = pick_image(variant, images=images)
+        if self._review_on():
+            ok = await self._send_daily_draft(posts, img, day)
+            for post in posts:
+                result[post["lang"]] = [False, "" if ok else
+                                        (self._digest_err or "черновик не ушёл")]
+            self._daily_state = {"ok": False, "day": day, "draft": bool(ok),
+                                 "at": time.time()}
+            return result
+        sent = await self._publish_daily_posts(posts, img)
+        result.update(sent)
+        return result
+
+    async def _publish_daily_posts(self, posts, img) -> Dict[str, Any]:
+        """Отправка постов дайджеста по каналам (один пост = одно сообщение)."""
+        out: Dict[str, Any] = {}
+        for post in posts or []:
+            lang = post.get("lang") or "ru"
+            cid = post.get("cid")
+            if not cid:
+                out[lang] = [False, "канал не привязан"]
+                continue
+            ok = await self._publish_one(cid, post.get("caption") or "", img,
+                                         post.get("top") or "", lang)
+            err = "" if ok else (getattr(self, "_last_tg_err", "")
+                                 or "Telegram отклонил пост")
+            if not ok:
+                low = err.lower()
+                if "chat not found" in low:
+                    err += " Перешлите боту любой пост из канала, чтобы привязать id."
+                elif ("not enough right" in low or "need administrator" in low
+                      or "have no rights" in low):
+                    err += (" В канале у бота должно быть право «Публикация "
+                            "сообщений» (и «Прикрепление файлов», если шлём картинку).")
+            out[lang] = [bool(ok), err]
+        delivered = [l for l, v in out.items() if v[0]]
+        if delivered:
+            self._digest_routes = self.channel_route_text()
+            try:
+                self.store.set_setting("daily_digest_ts", str(int(time.time())))
+            except Exception as e:
+                log.debug("дайджест: метка времени не сохранилась: %s", e)
+            log.info("дневной дайджест ушёл в каналы: %s", ", ".join(delivered))
+            self._daily_state = {"ok": True, "langs": delivered, "at": time.time()}
+        else:
+            self._daily_state = {"ok": False,
+                                 "error": next((v[1] for v in out.values()), ""),
+                                 "at": time.time()}
+        return out
+
+    async def _send_daily_draft(self, posts, img, day: str) -> bool:
+        """Контроль публикации: дневной дайджест показываем админу, не в канал."""
+        admin = 0
+        try:
+            admins = self.store.admin_tg_ids() if self.store else []
+            admin = int(admins[0]) if admins else 0
+        except Exception:
+            admin = 0
+        if not admin:
+            return self._digest_fail(
+                "Контроль публикации включён, но у бота нет админа с Telegram. "
+                "Выключите контроль в «Шаблоны канала» или привяжите Telegram админу")
+        self._daily_draft = {"posts": posts, "img": img, "day": day}
+        kb = {"inline_keyboard": [[
+            {"text": "✅ Опубликовать", "callback_data": "dd:pub"},
+            {"text": "🔄 Перегенерировать", "callback_data": "dd:regen"},
+            {"text": "✖️ Отмена", "callback_data": "dd:no"}]]}
+        text = (f"<b>Черновик дневного дайджеста</b> · {_esc(day)}\n"
+                "Это суточный выпуск (не сводка за 4 часа). В каналы он уйдёт "
+                "только после «Опубликовать».")
+        await self.send(admin, text, kb)
+        for post in posts or []:
+            mark = "🇬🇧" if post.get("lang") == "en" else "🇷🇺"
+            await self.send(admin, f"{mark} {post.get('caption') or ''}")
+        log.info("дневной дайджест: черновик отправлен админу %s (%s)", admin, day)
+        return True
+
+    async def _on_daily_cb(self, chat_id, user: dict, data: str, message_id) -> None:
+        """Кнопки под черновиком дайджеста: выложить / перегенерировать / отмена."""
+        d = dict(getattr(self, "_daily_draft", None) or {})
+        if data == "dd:regen":
+            self._daily_draft = None
+            await self.reply(chat_id, "Собираю новый дайджест за сутки…", None,
+                             message_id=message_id)
+            await self.post_daily_digest(force=True)
+            return
+        if data == "dd:no":
+            self._daily_draft = None
+            await self.reply(chat_id, "Черновик отменён, в каналы ничего не ушло.",
+                             self._admin_kb(), message_id=message_id)
+            return
+        if data == "dd:pub":
+            if not d:
+                await self.reply(chat_id, "Черновик уже неактуален — нажмите "
+                                 "«🗞 Дайджест за сутки» ещё раз.",
+                                 self._admin_kb(), message_id=message_id)
+                return
+            res = await self._publish_daily_posts(d.get("posts") or [],
+                                                  d.get("img"))
+            self._daily_draft = None
+            ok = any(v[0] for v in res.values())
+            await self.reply(chat_id, self._daily_result_text(ok, res),
+                             self._admin_kb(), message_id=message_id)
+
+    async def post_daily_digest(self, force: bool = True, langs=("ru", "en"),
+                                reason: str = "bot") -> bool:
+        """Кнопка «выложить в любое время»: собрать суточный дайджест и отправить."""
+        fn = getattr(self, "daily_run_fn", None)
+        if fn is None:
+            return self._digest_fail("дневной дайджест не подключён на сервере")
+        try:
+            rec = fn(force=bool(force), langs=list(langs), reason=reason)
+            if asyncio.iscoroutine(rec):
+                rec = await rec
+        except Exception as e:
+            return self._digest_fail(f"дайджест не собрался: {e}")
+        if not isinstance(rec, dict):
+            return self._digest_fail("дайджест не собрался: пустой ответ")
+        pub = rec.get("published") or {}
+        ok = any(bool((v or {}).get("ok")) for v in pub.values())
+        if not ok and self._review_on():
+            # черновик уже у админа — это не ошибка, а режим контроля
+            return bool(getattr(self, "_daily_state", {}).get("draft"))
+        self._daily_state = {"ok": ok, "day": rec.get("day"), "at": time.time(),
+                             "published": pub}
+        return ok
+
+    def _daily_result_text(self, ok: bool, result=None) -> str:
+        if ok:
+            routes = getattr(self, "_digest_routes", "") or self.channel_route_text()
+            return ("Дневной дайджест ушёл в каналы.\n" + routes
+                    + "\n\nПрошлые выпуски — на сайте в разделе «Дайджест».")
+        if self._review_on():
+            return ("Черновик дневного дайджеста — выше в чате. Проверьте текст "
+                    "и нажмите «✅ Опубликовать».")
+        err = _esc(self._digest_err or "неизвестная ошибка")
+        detail = ""
+        if isinstance(result, dict):
+            for lang, val in result.items():
+                if isinstance(val, (list, tuple)) and val and not val[0]:
+                    mark = "🇬🇧" if lang == "en" else "🇷🇺"
+                    detail += f"\n{mark} {_esc(val[1] if len(val) > 1 else '')}"
+        return ("<b>Не удалось отправить дневной дайджест</b>\n"
+                f"{err}{detail}\n\n"
+                "Если бот уже админ — перешлите сюда любой пост из канала "
+                "и попробуйте снова.")
+
     async def answer_cb(self, cb_id: str, text: str = "") -> None:
         # Пустой text Telegram иногда отвергает — тогда клиент «залипает»
         # и больше не шлёт нажатия.
@@ -1947,6 +2146,14 @@ class TelegramBot:
                 await self.reply(chat_id, self._digest_result_text(posted),
                                  self._admin_kb(), message_id=message_id)
                 return
+            if data == "a:ddigest" and user.get("is_admin"):
+                posted = await self.post_daily_digest(force=True)
+                await self.reply(chat_id, self._daily_result_text(posted),
+                                 self._admin_kb(), message_id=message_id)
+                return
+            if user.get("is_admin") and data.startswith("dd:"):
+                await self._on_daily_cb(chat_id, user, data, message_id)
+                return
             if user.get("is_admin") and data.startswith("d:"):
                 await self._on_draft_cb(chat_id, user, data, message_id)
                 return
@@ -2505,6 +2712,7 @@ class TelegramBot:
             [{"text": "📣 Рассылка", "callback_data": "broadcast"},
              {"text": "🩺 Здоровье", "callback_data": "a:health"}],
             [{"text": "📰 Сводка в канал", "callback_data": "a:digest"}],
+            [{"text": "🗞 Дайджест за сутки", "callback_data": "a:ddigest"}],
             [{"text": "📣 Каналы", "callback_data": "a:channels"},
              {"text": "🎨 Шаблоны", "callback_data": "a:tpl"}],
             [{"text": "← Назад", "callback_data": "nav:home"}],

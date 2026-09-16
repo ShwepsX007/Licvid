@@ -54,6 +54,9 @@ from hour_board import BOARD, OI, build_snapshot
 from accounts import Store
 from mailer import build_mailer
 from ai_text import build_ai
+import api_digest
+from api_digest import DigestScheduler, ctx as digest_ctx, register_digest_routes
+from daily_digest import DigestStore
 from tg_bot import TelegramBot, normalize_public_url
 from web_account import ctx as account_ctx, register_account_routes
 
@@ -105,6 +108,17 @@ REQUIRE_EMAIL_VERIFICATION = os.getenv(
     "LIQSCOPE_REQUIRE_EMAIL_VERIFICATION", "1").strip().lower() not in ("0", "false", "no")
 ACCOUNTS_DB = os.getenv("LIQSCOPE_ACCOUNTS_DB",
                         os.path.join(HERE, "data", "accounts.db"))
+# Дневной дайджест: архив выпусков и время вечерней публикации (МСК).
+# LIQSCOPE_DIGEST_FILE="" — не хранить историю (страница будет пустой).
+DIGEST_FILE = os.getenv("LIQSCOPE_DIGEST_FILE",
+                        os.path.join(HERE, "data", "digests.json")).strip()
+if DIGEST_FILE.lower() in ("0", "none", "off", "false"):
+    DIGEST_FILE = ""
+DIGEST_HOUR = int(os.getenv("LIQSCOPE_DIGEST_HOUR", "22") or 22)
+DIGEST_MINUTE = int(os.getenv("LIQSCOPE_DIGEST_MIN", "0") or 0)
+DIGEST_JITTER_MIN = int(os.getenv("LIQSCOPE_DIGEST_JITTER_MIN", "10") or 10)
+DIGEST_SCHED = os.getenv("LIQSCOPE_DIGEST_SCHED", "1").strip().lower() \
+    not in ("0", "false", "no", "off")
 account_store = Store(ACCOUNTS_DB, SECRET, ADMIN_IDS, ADMIN_EMAILS)
 # Письма: SMTP из окружения; без настроек сервер работает, письма не уходят
 mailer = build_mailer(PUBLIC_URL)
@@ -1033,6 +1047,35 @@ async def build_channel_digest() -> dict:
     return snap
 
 
+async def oi_payload(symbol: str) -> Optional[dict]:
+    """Снимок открытого интереса по монете (для дайджеста и кабинета)."""
+    tracker = getattr(feed, "oi", None) if feed else None
+    if tracker is None:
+        return None
+    try:
+        await tracker.ensure_symbol(symbol)
+    except Exception as e:
+        log.debug("oi %s: %s", symbol, e)
+        return None
+    try:
+        return tracker.payload(symbol)
+    except Exception as e:
+        log.debug("oi payload %s: %s", symbol, e)
+        return None
+
+
+async def digest_ai(facts: dict, lang: str = "ru") -> Optional[str]:
+    """Рассказ для дневного дайджеста: ИИ, если ключи есть."""
+    ai = getattr(tg_bot, "ai", None)
+    if ai is None or not getattr(ai, "enabled", False):
+        return None
+    try:
+        return await ai.narrative(facts, lang)
+    except Exception as e:
+        log.warning("ИИ-дайджест (%s): %s", lang, e)
+        return None
+
+
 # =============================================================================
 #  Фоновые рассылки
 # =============================================================================
@@ -1243,6 +1286,13 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(hot_symbols_watcher(), name="hot-symbols"),
         asyncio.create_task(alert_loop(), name="alerts"),
     ]
+    # Дневной дайджест: вечерний выпуск в оба канала и в архив на сайте
+    digest_sched = DigestScheduler(hour=DIGEST_HOUR, minute=DIGEST_MINUTE,
+                                   jitter_min=DIGEST_JITTER_MIN,
+                                   enabled=DIGEST_SCHED)
+    app.state.digest_scheduler = digest_sched
+    tasks.append(asyncio.create_task(api_digest.scheduler_loop(digest_sched),
+                                     name="digest"))
     if DEMO_MODE:
         tasks.append(asyncio.create_task(demo_generator(), name="demo"))
         tasks.append(asyncio.create_task(demo_price_walk(), name="demo-prices"))
@@ -1304,6 +1354,19 @@ account_ctx.ws_clients_fn = lambda: len(hub.clients)
 account_ctx.alerts_market_fn = alerts_market_snapshot
 account_ctx.symbols_fn = lambda: list((feed.symbols if feed else [])[:40])
 register_account_routes(app)
+
+# Дневной дайджест: архив выпусков, данные с сервера и публикация через бота
+digest_ctx.store = DigestStore(DIGEST_FILE)
+digest_ctx.liqs_fn = lambda: list(LIQUIDATIONS)
+digest_ctx.symbols_fn = lambda: list(feed.symbols if feed else [])
+digest_ctx.candles_fn = get_candles
+digest_ctx.oi_fn = oi_payload
+digest_ctx.ai_fn = digest_ai
+digest_ctx.publish_fn = tg_bot.publish_daily_digest
+digest_ctx.public_url = PUBLIC_URL
+register_digest_routes(app)
+# Кнопка «🗞 Дайджест за сутки» в админке бота собирает выпуск прямо сейчас
+tg_bot.daily_run_fn = api_digest.publish_digest
 
 
 @app.get("/api/symbols")

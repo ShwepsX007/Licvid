@@ -133,7 +133,7 @@ DEFAULT_SERVICES = (
         "description": "Сводка рынка за сутки в кабинет и в Telegram.",
         "icon": "📰",
         "enabled": 1,
-        "coming_soon": 1,
+        "coming_soon": 0,
         "sort": 40,
     },
 )
@@ -401,6 +401,32 @@ class Store:
             self._db.commit()
         self._migrate_users()
         self._seed_digest()
+        self._digest_service_live()
+
+    def _digest_service_live(self) -> None:
+        """Дневной дайджест вышел из «скоро»: один раз снимаем флаг.
+
+        Раньше сервис стоял заглушкой (coming_soon=1). Теперь он работает,
+        но не всем приятно, чтобы их настройку меняли при обновлении, поэтому
+        флаг снимаем ровно один раз — дальше в кабинете и в админке решает админ.
+        """
+        try:
+            if (self.get_setting("digest_service_live", "") or "") == "1":
+                return
+        except Exception:
+            pass
+        try:
+            with self._lock:
+                self._db.execute(
+                    "UPDATE services SET coming_soon=0 WHERE slug='digest' AND coming_soon=1")
+                self._db.commit()
+        except Exception as e:
+            log.debug("дайджест: сервис не переключился: %s", e)
+            return
+        try:
+            self.set_setting("digest_service_live", "1")
+        except Exception:
+            pass
 
     def _migrate_users(self) -> None:
         """Догоняем старые базы: почта/пароль и tg_id без NOT NULL.

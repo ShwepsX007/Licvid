@@ -1027,12 +1027,26 @@
             ctx.strokeStyle = theme.ring;
             ctx.stroke();
 
-            // Активная плашка (наведение/нажатие) — белое кольцо поверх
+            // Активная плашка (наведение в ленте или нажатие на графике) —
+            // ярко-белая подсветка: мягкий ореол, резкий контур и светлая
+            // вуаль поверх цвета, чтобы нужный кластер было видно сразу.
             if (isActive) {
-                rrPath(ctx, fx - 2.5, fy - 2.5, bw + 5, bh + 5, rad + 1.5);
-                ctx.lineWidth = 1.6;
-                ctx.strokeStyle = "rgba(255,255,255,0.95)";
+                ctx.save();
+                rrPath(ctx, fx - 3, fy - 3, bw + 6, bh + 6, rad + 2);
+                ctx.lineWidth = 3;
+                ctx.strokeStyle = "rgba(255,255,255,0.6)";
+                ctx.shadowColor = "#ffffff";
+                ctx.shadowBlur = 16;
                 ctx.stroke();
+                ctx.shadowBlur = 0;
+                rrPath(ctx, fx - 2.2, fy - 2.2, bw + 4.4, bh + 4.4, rad + 1.6);
+                ctx.lineWidth = 2.2;
+                ctx.strokeStyle = "#ffffff";
+                ctx.stroke();
+                rrPath(ctx, fx, fy, bw, bh, rad);
+                ctx.fillStyle = "rgba(255,255,255,0.24)";
+                ctx.fill();
+                ctx.restore();
             }
 
             if (geom.showLabel) {
@@ -2518,6 +2532,9 @@
                                                   count: h.count })),
             priceToY: (v) => candleSeries.priceToCoordinate(Number(v)),
             timeToX: (t) => chart.timeScale().timeToCoordinate(Number(t)),
+            // для tests/liq_hover.js: подсветка кластера, как при наведении
+            // строки ленты (в jsdom мышью не походишь)
+            setHover: (key) => { hoverHitKey = key || null; queueRedraw(); },
             // Растягивание графика: в jsdom библиотека не пересчитывает
             // ширину слота, поэтому tests/liq_plates.js подменяет у шкалы
             // времени timeToCoordinate — свечи и плашки растут вместе,

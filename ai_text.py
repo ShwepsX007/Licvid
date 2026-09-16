@@ -86,6 +86,90 @@ SYSTEM_PROMPT_EN = (
     "start with the same words as previous headlines. Return only the headline."
 )
 
+BODY_MIN_LEN = 320
+BODY_MAX_LEN = 2600
+
+# Рассказ для дневного дайджеста: живой язык, но без выдумок и воды.
+BODY_SYSTEM_PROMPT = (
+    "Ты — аналитик криптофьючерсного терминала LiqScope. Пишешь вечерний "
+    "дайджест за сутки живым человеческим языком: так, будто весь день "
+    "смотрел ленту ликвидаций и теперь рассказываешь, что произошло.\n"
+    "Спокойный деловой тон, можно лёгкую иронию, но без сленга, кликбейта, "
+    "восклицаний и обращения к читателю. Опирайся ТОЛЬКО на факты из запроса, "
+    "ничего не выдумывай, не давай советов и прогнозов.\n"
+    "Три–пять абзацев, каждый абзац 2–4 предложения, между абзацами пустая "
+    "строка. Начни с самого крупного события дня, дальше биржи, монеты с "
+    "самым тяжёлым открытым интересом относительно оборота, изменение цен и "
+    "общее настроение рынка. Не пересказывай цифры списком — связывай их в "
+    "живые фразы, объясняй, что за ними стоит.\n"
+    "Верни только текст дайджеста: без заголовков, markdown, списков, "
+    "хештегов, ссылок и подписи."
+)
+BODY_SYSTEM_PROMPT_EN = (
+    "You are an analyst at the LiqScope crypto futures terminal, writing the "
+    "evening daily digest in a live human voice: as if you watched the "
+    "liquidation tape all day and now tell the story.\n"
+    "Calm business English, mild irony is fine, but no slang, clickbait, "
+    "exclamation marks or addressing the reader. Use ONLY the facts from the "
+    "request, invent nothing, give no advice or forecasts.\n"
+    "Three to five paragraphs, each 2-4 sentences, blank line between "
+    "paragraphs. Start with the biggest event of the day, then exchanges, then "
+    "the coins with the heaviest open interest relative to turnover, then "
+    "price changes and the overall mood. Do not list numbers mechanically — "
+    "weave them into live sentences and explain what they mean.\n"
+    "Return only the digest text: no headings, markdown, lists, hashtags, "
+    "links or signatures."
+)
+
+
+def clean_body(raw: str) -> str:
+    """Чистим рассказ: без markdown, ссылок и лишних пустых строк."""
+    t = (raw or "").strip()
+    t = re.sub(r"```.*?```", " ", t, flags=re.S)
+    t = re.sub(r"<[^>]+>", " ", t)
+    t = re.sub(r"https?://\S+", "", t)
+    t = re.sub(r"[*_`#~\[\]{}|]+", "", t)
+    t = re.sub(r"[ \t]+", " ", t)
+    t = "\n".join(line.strip() for line in t.split("\n"))
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    return t.strip().strip('"‘’“”')
+
+
+def fit_body(text: str, limit: int = BODY_MAX_LEN) -> str:
+    """Обрезаем рассказ по границе предложения — длинные ответы моделей режем."""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    for sep in (". ", "! ", "? "):
+        i = cut.rfind(sep)
+        if i > limit * 0.6:
+            return cut[:i + 1].strip()
+    i = cut.rfind(" ")
+    return (cut[:i] if i > 0 else cut).strip()
+
+
+def body_problem(text: str, lang: str = "ru") -> str:
+    """Почему рассказ брать нельзя ("" — можно)."""
+    if not text:
+        return "пусто"
+    if len(text) < BODY_MIN_LEN:
+        return "слишком коротко"
+    low = text.lower()
+    for bad in ("не могу", "извин", "как ии", "языковая модель", "нейросет",
+                "не является инвестиционн", "as an ai", "i cannot", "i'm sorry",
+                "language model"):
+        if bad in low:
+            return f"отказ ({bad})"
+    cyr = sum(1 for ch in text if "\u0400" <= ch <= "\u04ff")
+    share = cyr / max(1, len(text))
+    if str(lang).startswith("en"):
+        if share > 0.05:
+            return "ответ не на английском"
+    elif share < 0.30:
+        return "ответ не на русском"
+    return ""
+
+
 ANGLES_EN = (
     "Start with the big picture of the window and the headline number.",
     "Focus on the skew: which side got wiped and by how much (numbers required).",
@@ -711,9 +795,11 @@ class AiWriter:
         """Модель устарела — спрашиваем у сервиса актуальную и пробуем снова."""
         return self._switch_model(p, set()) is not None
 
-    def _attempt(self, p: Provider, prompt: str, lang: str = "ru") -> Optional[str]:
+    def _attempt(self, p: Provider, prompt: str, lang: str = "ru",
+                 tokens: Optional[int] = None) -> Optional[str]:
         """Один запрос к сервису (с учётом добавки к лимиту ответа)."""
-        tokens = self.max_tokens + self._extra.get(p.name, 0)
+        if tokens is None:
+            tokens = self.max_tokens + self._extra.get(p.name, 0)
         system = SYSTEM_PROMPT_EN if str(lang).startswith("en") else SYSTEM_PROMPT
         url, body, headers = request_for(p, prompt, system,
                                          self.temperature, tokens)
@@ -815,6 +901,81 @@ class AiWriter:
                        variant: int = 0, lang: str = "ru") -> Optional[str]:
         """То же, но без блокировки event loop бота."""
         return await asyncio.to_thread(self.headline_sync, snap, recent, variant, lang)
+
+
+    # --- рассказ для дневного дайджеста ---------------------------------
+    def narrative_sync(self, facts: dict, lang: str = "ru",
+                       variant: int = 0) -> Optional[str]:
+        """Подробный текст дайджеста (RU/EN) или None — тогда будет шаблон."""
+        if not self.providers:
+            return None
+        from daily_digest import day_prompt
+        prompt = day_prompt(facts, lang, variant)
+        for p in self.providers:
+            st = self.state[p.name]
+            if st.get("dead"):
+                continue
+            started = time.time()
+            tried: set = set()
+            tokens = max(700, self.max_tokens * 3)
+            try:
+                while True:
+                    try:
+                        raw = self._attempt(p, prompt, lang, tokens=tokens)
+                        text = clean_body(raw)
+                        problem = body_problem(text, lang)
+                        if problem:
+                            raise RuntimeError(f"ответ не годится: {problem}")
+                        text = fit_body(text)
+                        break
+                    except Exception as e:
+                        if model_error(str(e)):
+                            hint = suggested_model(str(e), p.model)
+                            if hint and hint not in tried:
+                                tried.add(p.model)
+                                p.model = hint
+                                st["model"] = hint
+                                self.resolved[p.name] = hint
+                                continue
+                            nxt = self._switch_model(p, tried)
+                            if nxt:
+                                tried.add(nxt)
+                                continue
+                            st["dead"] = True
+                            raise
+                        if "пустой текст" in str(e) and tokens < 3200:
+                            tokens = min(3200, tokens * 2)
+                            log.info("ИИ (%s): пустой рассказ — повтор с лимитом %s",
+                                     p.name, tokens)
+                            continue
+                        raise
+                st.update({"ok": True, "reason": "",
+                           "ms": int((time.time() - started) * 1000)})
+                self.calls += 1
+                self.last = {"provider": p.name, "ok": True, "reason": "",
+                             "ms": st["ms"], "ts": time.time()}
+                log.info("ИИ-дайджест (%s): %s (%s), %d знаков за %s мс",
+                         lang, p.name, p.model, len(text), st["ms"])
+                return text
+            except Exception as e:
+                hint = ai_error_hint(str(e))
+                reason = str(e)[:160] + (f" — {hint}" if hint else "")
+                st.update({"ok": False, "reason": reason[:220],
+                           "ms": int((time.time() - started) * 1000)})
+                if re.search(r"HTTP 401|invalid api key|unauthorized", str(e), re.I) \
+                        and not model_error(str(e)):
+                    st["dead"] = True
+                self.fails += 1
+                self.last = {"provider": p.name, "ok": False, "reason": reason[:220],
+                             "ms": st["ms"], "ts": time.time()}
+                log.warning("ИИ-дайджест (%s): %s не ответил: %s%s", lang, p.name, e,
+                            f" ({hint})" if hint else "")
+        return None
+
+    async def narrative(self, facts: dict, lang: str = "ru",
+                        variant: int = 0) -> Optional[str]:
+        """То же, но без блокировки event loop."""
+        return await asyncio.to_thread(self.narrative_sync, facts, lang, variant)
 
 
 def build_ai() -> Optional[AiWriter]:

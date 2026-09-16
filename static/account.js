@@ -78,6 +78,7 @@
             services: "Сервисы",
             servicesLead: "Подписка сохранится: когда сервис заработает, он появится и в кабинете, и в боте.",
             soon: "скоро",
+            digestOpen: "Открыть дайджест",
             waitlistOn: "В листе ожидания",
             waitlistOff: "В лист ожидания",
             subscribed: "Подключено",
@@ -170,6 +171,7 @@
             services: "Services",
             servicesLead: "Your subscription is kept: when a service ships, it appears in the cabinet and the bot.",
             soon: "soon",
+            digestOpen: "Open digest",
             waitlistOn: "On the waitlist",
             waitlistOff: "Join waitlist",
             subscribed: "On",
@@ -423,7 +425,13 @@
             var body = s.slug === "alerts"
                 ? '<div class="alerts-board" id="alerts-board"></div>'
                 : "<p>" + (s.description || "") + "</p>" + soon +
-                    '<div class="row-actions"><button class="btn btn-ghost btn-small" data-slug="' +
+                    '<div class="row-actions">' +
+                    // у дайджеста есть своя страница: сразу ведём читать выпуски
+                    (s.slug === "digest"
+                        ? '<a class="btn btn-primary btn-small" href="/digest">📰 ' +
+                          t("digestOpen") + "</a>"
+                        : "") +
+                    '<button class="btn btn-ghost btn-small" data-slug="' +
                     s.slug + '" data-on="' + (s.subscribed ? "0" : "1") + '">' + label +
                     "</button></div>";
             return '<div class="svc-fold' + (isOpen ? " open" : "") + '" data-fold="' + s.slug + '">' +

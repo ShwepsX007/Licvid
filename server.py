@@ -59,6 +59,8 @@ from api_digest import DigestScheduler, ctx as digest_ctx, register_digest_route
 from daily_digest import DigestStore
 from tg_bot import TelegramBot, normalize_public_url
 from web_account import ctx as account_ctx, register_account_routes
+import web_bot_admin
+from web_bot_admin import register_bot_admin_routes
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -1355,6 +1357,44 @@ account_ctx.alerts_market_fn = alerts_market_snapshot
 account_ctx.symbols_fn = lambda: list((feed.symbols if feed else [])[:40])
 register_account_routes(app)
 
+# Настройки вечернего выпуска: значения из окружения замораживаем, остальные
+# (час, минуты, разброс, авто-публикация) админ сайта может менять на лету.
+DIGEST_ENV = {
+    "hour": ("LIQSCOPE_DIGEST_HOUR", DIGEST_HOUR),
+    "minute": ("LIQSCOPE_DIGEST_MIN", DIGEST_MINUTE),
+    "jitter_min": ("LIQSCOPE_DIGEST_JITTER_MIN", DIGEST_JITTER_MIN),
+}
+digest_ctx.env_locked = {k: name for k, (name, _v) in DIGEST_ENV.items()
+                         if os.getenv(name) not in (None, "")}
+if os.getenv("LIQSCOPE_DIGEST_SCHED") not in (None, ""):
+    digest_ctx.env_locked["enabled"] = "LIQSCOPE_DIGEST_SCHED"
+
+
+def digest_settings() -> dict:
+    """Настройки планировщика: где молчит окружение — берём из базы (сайт)."""
+    out: dict = {}
+    for key, (_env_name, default) in DIGEST_ENV.items():
+        if key in digest_ctx.env_locked:
+            out[key] = default
+            continue
+        raw = account_store.get_setting(f"digest_{key}", "")
+        try:
+            out[key] = int(float(raw)) if str(raw).strip() != "" else default
+        except (TypeError, ValueError):
+            out[key] = default
+    if "enabled" in digest_ctx.env_locked:
+        out["enabled"] = DIGEST_SCHED
+    else:
+        raw = str(account_store.get_setting("digest_enabled", "") or "").strip().lower()
+        out["enabled"] = DIGEST_SCHED if not raw else raw not in ("0", "false", "no", "off")
+    return out
+
+
+digest_ctx.settings_fn = digest_settings
+digest_ctx.set_setting_fn = (
+    lambda key, val, actor=None:
+    account_store.set_setting(str(key), str(val), actor_id=actor))
+
 # Дневной дайджест: архив выпусков, данные с сервера и публикация через бота
 digest_ctx.store = DigestStore(DIGEST_FILE)
 digest_ctx.liqs_fn = lambda: list(LIQUIDATIONS)
@@ -1367,6 +1407,14 @@ digest_ctx.public_url = PUBLIC_URL
 register_digest_routes(app)
 # Кнопка «🗞 Дайджест за сутки» в админке бота собирает выпуск прямо сейчас
 tg_bot.daily_run_fn = api_digest.publish_digest
+
+# Админка бота на сайте: каналы, публикация постов, контроль, здоровье бирж
+web_bot_admin.ctx.bot = tg_bot
+web_bot_admin.ctx.store = account_store
+web_bot_admin.ctx.health_fn = health_summary
+web_bot_admin.ctx.ws_clients_fn = lambda: len(hub.clients)
+web_bot_admin.ctx.public_url = PUBLIC_URL
+register_bot_admin_routes(app)
 
 
 @app.get("/api/symbols")

@@ -104,6 +104,74 @@
             </div>
         </div>
     </div>
+
+    <div class="card" id="bot-admin" style="margin-top:14px">
+        <h3>🤖 Бот и каналы — то же, что в админке бота</h3>
+        <p class="lead">Каналы, публикация сводки и дневного дайджеста, контроль постов, время вечернего выпуска, здоровье бирж и проверка ИИ. Действия применяются сразу — открывать Telegram не нужно.</p>
+        <p class="meta" id="bot-line">состояние бота…</p>
+
+        <div class="grid grid-2" style="margin-top:14px">
+            <div>
+                <h4>📣 Каналы</h4>
+                <label>🇷🇺 Русский канал (id)</label>
+                <input class="search" id="bot-ru" placeholder="-1001234567890" autocomplete="off">
+                <label>🇬🇧 Английский канал (id)</label>
+                <input class="search" id="bot-en" placeholder="-1001234567890" autocomplete="off">
+                <div class="row-actions">
+                    <button class="btn btn-primary" id="bot-ch-save" type="button">Сохранить</button>
+                    <button class="btn" id="bot-ch-swap" type="button">🔄 Поменять местами</button>
+                    <button class="btn" id="bot-ch-verify" type="button">✅ Сверить роли</button>
+                </div>
+                <p class="meta" id="bot-ch-status"></p>
+                <ul class="tpl-list" id="bot-ch-probe"></ul>
+                <p class="meta">id — это число вида <code>-1001234567890</code>. Бот должен быть админом канала (права на публикацию). Сменить канал можно и пересылкой поста боту — как раньше.</p>
+            </div>
+            <div>
+                <h4>🧪 Публикация</h4>
+                <label class="bot-check"><input type="checkbox" id="bot-review"> Контроль постов: черновик приходит в Telegram</label>
+                <p class="meta">Включён — пост ждёт вашего «✅ Опубликовать» в боте. Выключен — уходит в канал сразу.</p>
+                <div class="row-actions">
+                    <button class="btn btn-primary" id="bot-post" type="button">📰 Сводка в канал</button>
+                    <button class="btn btn-primary" id="bot-daily" type="button">🗞 Дайджест за сутки</button>
+                </div>
+                <p class="meta" id="bot-post-status"></p>
+                <h4 style="margin-top:16px">🕗 Вечерний дайджест</h4>
+                <div class="row-actions">
+                    <label class="bot-num">Часы <input id="dig-hour" type="number" min="0" max="23" step="1"></label>
+                    <label class="bot-num">Минуты <input id="dig-min" type="number" min="0" max="59" step="1"></label>
+                    <label class="bot-num">Разброс, мин <input id="dig-jitter" type="number" min="0" max="120" step="1"></label>
+                </div>
+                <label class="bot-check"><input type="checkbox" id="dig-enabled"> Публиковать автоматически</label>
+                <div class="row-actions">
+                    <button class="btn btn-primary" id="dig-save" type="button">Сохранить время</button>
+                    <span class="meta" id="dig-status"></span>
+                </div>
+                <p class="meta" id="dig-note"></p>
+            </div>
+        </div>
+
+        <div class="grid grid-2" style="margin-top:16px">
+            <div>
+                <h4>🩺 Биржи в эфире</h4>
+                <p class="meta" id="bot-health-line">—</p>
+                <table class="data">
+                    <thead><tr><th>Источник</th><th>Статус</th><th>События</th><th>Заметка</th></tr></thead>
+                    <tbody id="bot-health"></tbody>
+                </table>
+            </div>
+            <div>
+                <h4>🤖 ИИ-шапка постов</h4>
+                <p class="meta" id="bot-ai-line">—</p>
+                <div class="row-actions">
+                    <button class="btn" id="bot-ai-check" type="button">🤖 Проверить ИИ</button>
+                    <button class="btn" id="bot-refresh" type="button">↻ Обновить</button>
+                </div>
+                <p class="meta" id="bot-ai-head"></p>
+                <h4 style="margin-top:16px">📚 Последний дайджест</h4>
+                <p class="meta" id="bot-daily-line">—</p>
+            </div>
+        </div>
+    </div>
 </main>
 <script src="/static/account.js"></script>
 </body>

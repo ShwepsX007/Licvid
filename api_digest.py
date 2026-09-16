@@ -55,6 +55,12 @@ class Ctx:
         self.hours_pull = 25         # часовых свечей на монету (24ч + запас)
         self.last: Dict[str, Any] = {}
         self.busy = False
+        # Настройки вечернего выпуска: их читает сервер (store + env),
+        # планировщик только получает готовый словарь — модуль без базы.
+        self.settings_fn = None
+        self.env_locked: Dict[str, str] = {}   # ключи, замороженные окружением
+        # set_setting_fn — запись настроек в базу (её даёт server.py)
+        self.set_setting_fn = None
 
 
 ctx = Ctx()
@@ -318,6 +324,52 @@ class DigestScheduler:
     def _tz(self) -> int:
         return tz_offset() if self.tz is None else int(self.tz)
 
+    def apply(self, settings: Optional[dict]) -> None:
+        """Применить настройки выпуска (их может менять админка сайта).
+
+        Если время сдвинули, сбрасываем запомненную цель — иначе новая
+        настройка заработала бы только со следующих суток.
+        """
+        s = settings or {}
+        changed = False
+        for key in ("hour", "minute", "jitter_min"):
+            if key not in s or s[key] is None:
+                continue
+            try:
+                val = int(s[key])
+            except (TypeError, ValueError):
+                continue
+            if key == "hour":
+                val = val % 24
+            elif key == "minute":
+                val = val % 60
+            else:
+                val = max(0, val)
+            if val != getattr(self, key):
+                setattr(self, key, val)
+                changed = True
+        if "enabled" in s and s["enabled"] is not None:
+            val = bool(s["enabled"])
+            if val != self.enabled:
+                self.enabled = val
+                changed = True
+        if changed:
+            self._target_day = ""
+            self.target_ts = 0.0
+            log.info("Дайджест: настройки обновлены — %02d:%02d, ±%d мин, %s",
+                     self.hour, self.minute, self.jitter_min,
+                     "включён" if self.enabled else "выключен")
+
+    def _sync(self) -> None:
+        """Раз в проверку подтягиваем значения из store (их меняет сайт)."""
+        fn = ctx.settings_fn
+        if fn is None:
+            return
+        try:
+            self.apply(fn() or {})
+        except Exception as e:                      # настройки не должны ломать цикл
+            log.debug("Дайджест: настройки не прочитались: %s", e)
+
     def target_for(self, day: str, rnd: float = 0.0) -> float:
         """Момент публикации (epoch) для даты day в её часовом поясе."""
         import calendar
@@ -331,6 +383,7 @@ class DigestScheduler:
 
     def due(self, now: Optional[float] = None) -> Optional[str]:
         """Дата, которую пора выпускать (или None)."""
+        self._sync()
         if not self.enabled:
             return None
         now = float(now if now is not None else time.time())
@@ -372,6 +425,7 @@ class DigestScheduler:
             "next_target": self.target_ts,
             "last": ctx.last,
             "error": self.last_error,
+            "env_locked": dict(ctx.env_locked or {}),
             "archive": len(ctx.store.list()) if isinstance(ctx.store, DigestStore) else 0,
         }
 
@@ -467,6 +521,56 @@ def register_digest_routes(app) -> None:
         if rec is None:
             return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
         return {"ok": True, "item": public_record(rec, lang, with_article=True)}
+
+    @router.post("/api/digest/settings")
+    async def api_settings(request: Request,
+                           body: Optional[dict] = Body(default=None)):
+        """Время вечернего выпуска и авто-публикация — правки из админки сайта.
+
+        Значения из окружения имеют приоритет: если сервер задал час явно,
+        поменять его с сайта нельзя, и об этом честно сообщаем.
+        """
+        user, err = _admin(request)
+        if err:
+            return err
+        body = body or {}
+        locked = dict(ctx.env_locked or {})
+        sched = getattr(app.state, "digest_scheduler", None)
+        new_values: dict = {}
+        for key, lo, hi in (("hour", 0, 23), ("minute", 0, 59),
+                            ("jitter_min", 0, 120)):
+            if key in locked or key not in body or body.get(key) in (None, ""):
+                continue
+            try:
+                val = int(body[key])
+            except (TypeError, ValueError):
+                return JSONResponse({"ok": False, "error": "bad_value", "key": key},
+                                    status_code=400)
+            new_values[key] = max(lo, min(hi, val))
+        if "enabled" in body and "enabled" not in locked:
+            new_values["enabled"] = bool(body["enabled"])
+        if new_values and ctx.set_setting_fn is None:
+            return JSONResponse({"ok": False, "error": "no_store"}, status_code=503)
+        for key, val in new_values.items():
+            name = f"digest_{key}"
+            try:
+                ctx.set_setting_fn(name,
+                                   "1" if val is True else ("0" if val is False else val),
+                                   user.get("id"))
+            except TypeError:                       # store без actor_id
+                ctx.set_setting_fn(name, "1" if val is True else
+                                   ("0" if val is False else val))
+        if sched is not None and new_values:
+            sched.apply(new_values)
+        if locked:
+            names = ", ".join(sorted(set(locked.values())))
+            note = ("Сохранено. С сайта не меняется: " + names +
+                    " — это значение задано на сервере переменной окружения.")
+        else:
+            note = "Время выпуска сохранено."
+        return {"ok": True, "saved": new_values, "note": note,
+                "locked": locked,
+                "schedule": sched.status() if sched is not None else None}
 
     def _admin(request: Request):
         from web_account import current_user

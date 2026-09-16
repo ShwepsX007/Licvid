@@ -17,7 +17,7 @@ sys.path.insert(0, HERE)
 
 from ai_text import body_problem, clean_body, fit_body  # noqa: E402
 from daily_digest import (  # noqa: E402
-    DAY_SEC, DigestStore, brief, collect_day, day_key, day_label, day_prompt,
+    DigestStore, brief, collect_day, day_key, day_label, day_prompt,
     fallback_narrative, headline_block, mood_of, oi_block, price_txt,
     prices_block, render_article, render_post, weekday_label,
 )
@@ -393,6 +393,33 @@ class SchedulerTest(unittest.TestCase):
         self.assertEqual(st["tz_hours"], 3.0)
         self.assertIn("enabled", st)
 
+    def test_apply_moves_release_time_and_resets_target(self):
+        """Время поменяли с сайта — выпуск должен уйти уже по новому часу."""
+        s = self.cls(hour=22, minute=0, jitter_min=0, tz=3 * 3600)
+        day = "2026-09-17"
+        self.assertIsNone(s.due(s.target_for(day, 0.5) - 3600))
+        old_target = s.target_ts
+        s.apply({"hour": 20, "minute": 30, "jitter_min": 0})
+        self.assertEqual((s.hour, s.minute, s.jitter_min), (20, 30, 0))
+        self.assertEqual(s.target_ts, 0.0, "цель пересчитается по новому времени")
+        new_target = s.target_for(day, 0.5)
+        self.assertLess(new_target, old_target)
+        self.assertEqual(s.due(new_target + 60), day)
+
+    def test_apply_can_turn_scheduler_off(self):
+        s = self.cls(hour=22, minute=0, jitter_min=0, tz=3 * 3600)
+        s.apply({"enabled": False})
+        self.assertFalse(s.enabled)
+        self.assertIsNone(s.due(time.time() + 10 ** 6))
+        s.apply({"enabled": True, "hour": 25, "minute": 99})
+        self.assertTrue(s.enabled)
+        self.assertEqual((s.hour, s.minute), (1, 39))
+
+    def test_apply_ignores_garbage(self):
+        s = self.cls(hour=22, minute=0, jitter_min=10, tz=3 * 3600)
+        s.apply({"hour": "вечер", "minute": None, "jitter_min": "x", "enabled": None})
+        self.assertEqual((s.hour, s.minute, s.jitter_min), (22, 0, 10))
+
 
 class BotPublishTest(unittest.TestCase):
     """Публикация дневного дайджеста ботом: каналы, черновик, языки."""
@@ -540,6 +567,106 @@ class BodyLimitTest(unittest.TestCase):
         self.assertIn("нейтральный", line)
         self.assertNotIn("\n", line)
         self.assertIn("neutral", brief(rec, "en"))
+
+
+class SettingsApiTest(unittest.TestCase):
+    """Правки расписания с сайта: /api/digest/settings и приоритет окружения."""
+
+    def setUp(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        import api_digest
+        import web_account
+        from accounts import COOKIE_SID, Store
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Store(os.path.join(self.tmp.name, "a.db"), secret="s",
+                           admin_emails=["boss@liqscope.online"])
+        admin = self.store.create_email_user("boss@liqscope.online",
+                                             password_hash="x")["user"]
+        self.admin_id = int(admin["id"])
+        token = self.store.create_session(self.admin_id)
+        plain = self.store.create_email_user("vasya@example.com",
+                                             password_hash="x")["user"]
+        plain_token = self.store.create_session(int(plain["id"]))
+
+        web_account.ctx.store = self.store
+        api_digest.ctx.store = DigestStore(os.path.join(self.tmp.name, "dig.json"))
+        api_digest.ctx.public_url = ""
+        api_digest.ctx.env_locked = {}
+        api_digest.ctx.set_setting_fn = (
+            lambda key, val, actor=None:
+            self.store.set_setting(str(key), str(val), actor_id=actor))
+        api_digest.ctx.settings_fn = lambda: {"hour": 22, "minute": 0,
+                                              "jitter_min": 10, "enabled": True}
+
+        app = FastAPI()
+        self.sched = api_digest.DigestScheduler(hour=22, minute=0, jitter_min=10,
+                                                tz=3 * 3600)
+        app.state.digest_scheduler = self.sched
+        api_digest.register_digest_routes(app)
+        self.admin = TestClient(app)
+        self.admin.cookies.set(COOKIE_SID, token)
+        self.plain = TestClient(app)
+        self.plain.cookies.set(COOKIE_SID, plain_token)
+
+    def tearDown(self):
+        import api_digest
+        import web_account
+        web_account.ctx.store = None
+        api_digest.ctx.env_locked = {}
+        api_digest.ctx.settings_fn = None
+        api_digest.ctx.set_setting_fn = None
+        api_digest.ctx.store = DigestStore("")
+        self.tmp.cleanup()
+
+    def test_saves_time_and_turns_auto_off(self):
+        d = self.admin.post("/api/digest/settings",
+                            json={"hour": 21, "minute": 45, "jitter_min": 5,
+                                  "enabled": False}).json()
+        self.assertTrue(d["ok"])
+        self.assertEqual(self.store.get_setting("digest_hour"), "21")
+        self.assertEqual(self.store.get_setting("digest_minute"), "45")
+        self.assertEqual(self.store.get_setting("digest_jitter_min"), "5")
+        self.assertEqual(self.store.get_setting("digest_enabled"), "0")
+        # планировщик применил новое время сразу, без перезапуска
+        self.assertEqual((self.sched.hour, self.sched.minute, self.sched.jitter_min),
+                         (21, 45, 5))
+        self.assertFalse(self.sched.enabled)
+        self.assertEqual(d["schedule"]["hour"], 21)
+
+    def test_clamps_and_rejects_garbage(self):
+        d = self.admin.post("/api/digest/settings",
+                            json={"hour": 99, "minute": -5, "jitter_min": 999}).json()
+        self.assertTrue(d["ok"])
+        self.assertEqual((self.sched.hour, self.sched.minute, self.sched.jitter_min),
+                         (23, 0, 120))
+        bad = self.admin.post("/api/digest/settings", json={"hour": "вечер"})
+        self.assertEqual(bad.status_code, 400)
+        self.assertEqual(bad.json()["error"], "bad_value")
+
+    def test_env_locked_keys_win(self):
+        import api_digest
+        api_digest.ctx.env_locked = {"hour": "LIQSCOPE_DIGEST_HOUR"}
+        d = self.admin.post("/api/digest/settings",
+                            json={"hour": 3, "minute": 15}).json()
+        self.assertTrue(d["ok"])
+        self.assertNotIn("hour", d["saved"])
+        self.assertEqual(d["saved"]["minute"], 15)
+        self.assertEqual(self.sched.hour, 22, "замороженный час не меняется")
+        self.assertIn("LIQSCOPE_DIGEST_HOUR", d["note"])
+        self.assertEqual(self.store.get_setting("digest_hour"), "")
+
+    def test_only_admin_may_change(self):
+        self.assertEqual(self.plain.post("/api/digest/settings",
+                                         json={"hour": 5}).status_code, 403)
+
+    def test_status_shows_locked_keys(self):
+        import api_digest
+        api_digest.ctx.env_locked = {"enabled": "LIQSCOPE_DIGEST_SCHED"}
+        st = self.admin.get("/api/digest/status").json()
+        self.assertEqual(st["schedule"]["env_locked"]["enabled"],
+                         "LIQSCOPE_DIGEST_SCHED")
 
 
 if __name__ == "__main__":

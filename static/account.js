@@ -1022,15 +1022,17 @@
             paintNav(me.user);
             api("/api/admin/overview").then(function (d) {
                 if (!d.ok) return;
-                $("st-users") && ($("st-users").textContent = d.users.total);
-                $("st-new") && ($("st-new").textContent = d.users.new_24h);
-                $("st-views") && ($("st-views").textContent = d.visits.today_views);
-                $("st-uniq") && ($("st-uniq").textContent = d.visits.today_uniques);
+                var du = d.users || {};
+                var dv = d.visits || {};
+                $("st-users") && ($("st-users").textContent = du.total);
+                $("st-new") && ($("st-new").textContent = du.new_24h);
+                $("st-views") && ($("st-views").textContent = dv.today_views);
+                $("st-uniq") && ($("st-uniq").textContent = dv.today_uniques);
                 $("st-ws") && ($("st-ws").textContent = d.ws_clients);
                 $("st-bot") && ($("st-bot").textContent = d.bot.ready ? ("@" + d.bot.username) : "—");
                 var live = (d.health.live_exchanges || []).length;
                 $("st-exch") && ($("st-exch").textContent = live);
-                renderBars(d.visits.days);
+                renderBars(dv.days || []);
                 if ($("bot-welcome")) $("bot-welcome").value = (d.settings && d.settings.bot_welcome) || "";
                 if ($("site-notice-in")) $("site-notice-in").value = (d.settings && d.settings.site_notice) || "";
                 var svc = $("admin-svc");
@@ -1085,6 +1087,222 @@
             });
         });
         bootDigestTpl();
+        bootBotAdmin();
+    }
+
+    /* ---------------- админка бота на сайте ---------------- */
+
+    function botSet(id, text) {
+        var el = $(id);
+        if (el) el.textContent = text || "";
+    }
+
+    function botAgo(sec) {
+        if (sec === null || sec === undefined || sec === "") return "—";
+        var s = Number(sec);
+        if (!isFinite(s)) return "—";
+        if (s < 90) return Math.round(s) + " с назад";
+        if (s < 5400) return Math.round(s / 60) + " мин назад";
+        return Math.round(s / 3600) + " ч назад";
+    }
+
+    function botHealthState(state) {
+        if (state === "ok") return "🟢";
+        if (state === "dead") return "🟠";
+        return "🔴";
+    }
+
+    function botChannelLine(code, probe, ch) {
+        var mark = code === "en" ? "🇬🇧" : "🇷🇺";
+        var id = (ch && ch.id) || (probe && probe.id) || "";
+        var title = (ch && ch.title) || (probe && probe.title) || "—";
+        var rights = "";
+        if (probe && probe.can_post === true) rights = " · публикация разрешена";
+        else if (probe && probe.can_post === false) rights = " · публикация запрещена";
+        var src = ch && ch.source_label ? " · " + ch.source_label : "";
+        var note = probe && probe.note ? " · " + probe.note : "";
+        return mark + " <b>" + esc(title) + "</b> <code>" + esc(id || "—") + "</code>"
+            + src + rights + note;
+    }
+
+    var BOT_SNAP = null;
+
+    function renderBotAdmin(d) {
+        BOT_SNAP = d;
+        var b = d.bot || {};
+        botSet("bot-line", b.line || "Бот не подключён");
+        var ch = d.channels || {};
+        if ($("bot-ru") && document.activeElement !== $("bot-ru")) {
+            $("bot-ru").value = (ch.ru || {}).id || "";
+        }
+        if ($("bot-en") && document.activeElement !== $("bot-en")) {
+            $("bot-en").value = (ch.en || {}).id || "";
+        }
+        var probeBox = $("bot-ch-probe");
+        if (probeBox) {
+            probeBox.innerHTML = d.probes
+                ? "<li>" + botChannelLine("ru", d.probes.ru, ch.ru) + "</li>" +
+                  "<li>" + botChannelLine("en", d.probes.en, ch.en) + "</li>"
+                : "<li>🇷🇺 <b>" + esc((ch.ru || {}).title || "—") + "</b> <code>" +
+                  esc((ch.ru || {}).id || "—") + "</code>" + ((ch.ru || {}).source_label ? " · " + (ch.ru || {}).source_label : "") + "</li>" +
+                  "<li>🇬🇧 <b>" + esc((ch.en || {}).title || "—") + "</b> <code>" +
+                  esc((ch.en || {}).id || "—") + "</code>" + ((ch.en || {}).source_label ? " · " + (ch.en || {}).source_label : "") + "</li>";
+            if (ch.warn) probeBox.innerHTML += "<li class='meta'>⚠️ " + esc(ch.warn) + "</li>";
+        }
+        if ($("bot-review")) $("bot-review").checked = !!d.review;
+        var h = d.health || {};
+        botSet("bot-health-line", "В эфире " + (h.live === undefined ? "—" : h.live) +
+            "/" + (h.total || "—") + " · событий в памяти " + (h.events_total || 0) +
+            " · зрителей WS " + (h.ws_clients || 0));
+        var rows = $("bot-health");
+        if (rows) {
+            rows.innerHTML = (h.rows || []).map(function (r) {
+                var note = r.error || (r.since === null || r.since === undefined
+                    ? "" : ("последнее событие " + botAgo(r.since)));
+                if (r.respawns) note += " (подъёмов сторожа: " + r.respawns + ")";
+                return "<tr><td>" + botHealthState(r.state) + " " + esc(r.name) + "</td>" +
+                    "<td>" + (r.state === "ok" ? "в эфире" : r.state === "dead"
+                        ? "слушатель не запущен" : "нет связи") + "</td>" +
+                    "<td>" + (r.events || 0) + "</td><td class='meta'>" + esc(note) + "</td></tr>";
+            }).join("") || "<tr><td colspan='4' class='meta'>сервер ещё собирает источники</td></tr>";
+        }
+        var ai = d.ai || {};
+        botSet("bot-ai-line", ai.enabled
+            ? ("Шапка постов: включена · " + ((ai.providers || []).map(function (p) {
+                return p.name;
+            }).join(" → ") || "цепочка не готова") +
+               (ai.last && ai.last.provider ? " · последняя: " + ai.last.provider +
+                   (ai.last.ms ? " · " + ai.last.ms + " мс" : "") : ""))
+            : "Шапка постов: выключена (нет ключей) — шапки из шаблонов");
+        var dl = d.daily || {};
+        var sch = dl.schedule || {};
+        if ($("dig-hour")) $("dig-hour").value = sch.hour === undefined ? "" : sch.hour;
+        if ($("dig-min")) $("dig-min").value = sch.minute === undefined ? "" : sch.minute;
+        if ($("dig-jitter")) $("dig-jitter").value = sch.jitter_min === undefined ? "" : sch.jitter_min;
+        if ($("dig-enabled")) $("dig-enabled").checked = !!sch.enabled;
+        var locks = Object.keys(sch.env_locked || {});
+        botSet("dig-note", locks.length
+            ? "Часть настроек задана на сервере переменными окружения (" +
+              locks.map(function (k) { return (sch.env_locked || {})[k]; }).join(", ") +
+              ") — с сайта они не меняются."
+            : "Время — по Москве. Разброс: выпуск уходит в пределах ±N минут.");
+        var last = dl.last || {};
+        var facts = last.facts || {};
+        var sent = Object.keys(last.published || {}).map(function (k) {
+            return (k === "en" ? "🇬🇧 EN" : "🇷🇺 RU");
+        }).join(", ");
+        botSet("bot-daily-line", last.day
+            ? (last.day + " · $" + usd(facts.liq_total_usd) + " · " +
+               (facts.liq_count || 0) + " ликвидаций" +
+               (sent ? " · отправлен: " + sent : " · ещё не отправлялся"))
+            : "Выпусков пока нет — появится после первого вечернего запуска.");
+    }
+
+    function renderBotProbes(probes) {
+        var box = $("bot-ch-probe");
+        if (!box || !probes) return;
+        var ch = (BOT_SNAP || {}).channels || {};
+        box.innerHTML = "<li>" + botChannelLine("ru", probes.ru, ch.ru) + "</li>" +
+            "<li>" + botChannelLine("en", probes.en, ch.en) + "</li>";
+    }
+
+    function loadBotAdmin() {
+        return api("/api/admin/bot").then(function (d) {
+            if (!d.ok) {
+                botSet("bot-line", d.error === "no_bot" ? "Бот не подключён" : (d.error || "ошибка"));
+                return d;
+            }
+            renderBotAdmin(d);
+            return d;
+        });
+    }
+
+    function bootBotAdmin() {
+        if (!$("bot-admin")) return;
+        loadBotAdmin();
+        var refresh = $("bot-refresh");
+        if (refresh) refresh.addEventListener("click", loadBotAdmin);
+        var rev = $("bot-review");
+        if (rev) rev.addEventListener("change", function () {
+            botSet("bot-post-status", "Сохраняю…");
+            api("/api/admin/bot/review", {
+                method: "POST", body: JSON.stringify({ on: rev.checked }),
+            }).then(function (d) {
+                botSet("bot-post-status", d.ok ? (d.message || "готово") : (d.message || d.error || "ошибка"));
+            });
+        });
+        var save = $("bot-ch-save");
+        if (save) save.addEventListener("click", function () {
+            botSet("bot-ch-status", "Проверяю каналы в Telegram…");
+            api("/api/admin/bot/channels", {
+                method: "POST",
+                body: JSON.stringify({
+                    ru: ($("bot-ru") || {}).value || "",
+                    en: ($("bot-en") || {}).value || "",
+                }),
+            }).then(function (d) {
+                botSet("bot-ch-status", d.ok ? "Каналы сохранены." : (d.message || d.error || "ошибка"));
+                if (d.ok) loadBotAdmin().then(function () { renderBotProbes(d.probes); });
+            });
+        });
+        var swap = $("bot-ch-swap");
+        if (swap) swap.addEventListener("click", function () {
+            api("/api/admin/bot/channels/swap", { method: "POST", body: "{}" }).then(function (d) {
+                botSet("bot-ch-status", d.ok ? "Каналы поменялись местами." : (d.message || d.error || "ошибка"));
+                if (d.ok) loadBotAdmin();
+            });
+        });
+        var verify = $("bot-ch-verify");
+        if (verify) verify.addEventListener("click", function () {
+            botSet("bot-ch-status", "Сверяю с Telegram…");
+            api("/api/admin/bot/channels/verify", { method: "POST", body: "{}" }).then(function (d) {
+                botSet("bot-ch-status", d.ok ? (d.message || "Роли сверены.") : (d.message || d.error || "ошибка"));
+                if (d.ok) loadBotAdmin().then(function () { renderBotProbes(d.probes); });
+            });
+        });
+        function publish(kind, langs) {
+            botSet("bot-post-status", kind === "daily" ? "Собираю дайджест за сутки…" : "Готовлю сводку…");
+            api("/api/admin/bot/publish", {
+                method: "POST", body: JSON.stringify({ kind: kind, langs: langs }),
+            }).then(function (d) {
+                botSet("bot-post-status", d.message || d.error || "ошибка");
+            });
+        }
+        var post = $("bot-post");
+        if (post) post.addEventListener("click", function () { publish("channel"); });
+        var daily = $("bot-daily");
+        if (daily) daily.addEventListener("click", function () {
+            if (confirm("Собрать дневной дайджест за сутки и отправить в каналы?")) publish("daily");
+        });
+        var dsave = $("dig-save");
+        if (dsave) dsave.addEventListener("click", function () {
+            api("/api/digest/settings", {
+                method: "POST",
+                body: JSON.stringify({
+                    hour: ($("dig-hour") || {}).value,
+                    minute: ($("dig-min") || {}).value,
+                    jitter_min: ($("dig-jitter") || {}).value,
+                    enabled: !!($("dig-enabled") || {}).checked,
+                }),
+            }).then(function (d) {
+                botSet("dig-status", d.ok
+                    ? ("Сохранено: " + (d.schedule ? d.schedule.hour + ":" +
+                        String(d.schedule.minute).padStart(2, "0") : "") +
+                       (d.schedule && !d.schedule.enabled ? " (авто выключено)" : ""))
+                    : (d.message || d.error || "ошибка"));
+                if (d.ok) loadBotAdmin();
+            });
+        });
+        var aiBtn = $("bot-ai-check");
+        if (aiBtn) aiBtn.addEventListener("click", function () {
+            botSet("bot-ai-head", "Прошу ИИ написать шапку…");
+            api("/api/admin/bot/ai-check", { method: "POST", body: JSON.stringify({ lang: "ru" }) })
+                .then(function (d) {
+                    if (!d.ok) { botSet("bot-ai-head", d.message || d.error || "ошибка"); return; }
+                    botSet("bot-ai-head", (d.note ? d.note + " — " : "") +
+                        (d.head || "ИИ не ответил, шапка будет из шаблонов"));
+                });
+        });
     }
 
     function esc(s) {

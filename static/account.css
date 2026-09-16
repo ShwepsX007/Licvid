@@ -247,6 +247,24 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
 }
 .tpl-photo img { width: 100%; height: 88px; object-fit: cover; display: block; }
 .tpl-photo .btn { position: absolute; top: 6px; right: 6px; padding: 3px 7px; }
+/* Админка бота на сайте: переключатели и маленькие числовые поля */
+.bot-check {
+    display: flex; align-items: center; gap: 8px;
+    margin: 10px 0 2px; font-size: 0.9rem; cursor: pointer;
+}
+.bot-check input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--accent, #4da3ff); }
+.bot-num {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 0.82rem; color: var(--muted);
+}
+.bot-num input {
+    width: 68px; padding: 7px 8px; border-radius: 8px;
+    border: 1px solid var(--line, #2a3444); background: var(--bg-soft, #131a24);
+    color: var(--text, #e8eef7); font-size: 0.86rem;
+}
+#bot-admin h4 { margin: 0 0 6px; font-size: 0.98rem; }
+#bot-admin .tpl-list { max-height: 220px; }
+#bot-health td { font-size: 0.84rem; }
 .file-btn { position: relative; overflow: hidden; cursor: pointer; margin: 0; }
 .file-btn input[type=file] {
     position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;

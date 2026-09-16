@@ -378,8 +378,9 @@ class DigestScheduler:
 
 async def scheduler_loop(sched: DigestScheduler, check_sec: float = 60.0) -> None:
     """Фоновый цикл: раз в минуту смотрим, не пора ли выпускать дайджест."""
-    log.info("Дайджест: планировщик запущен (%.2f:%.2d МСК, ±%d мин)",
-             sched.hour, sched.minute, sched.jitter_min)
+    log.info("Дайджест: планировщик запущен (%02d:%02d МСК, ±%d мин, %s)",
+             sched.hour, sched.minute, sched.jitter_min,
+             "включён" if sched.enabled else "выключен")
     while True:
         try:
             now = time.time()

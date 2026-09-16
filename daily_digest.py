@@ -812,6 +812,7 @@ class DigestStore:
             if isinstance(data, dict):
                 data = data.get("items") or []
             self.items = [x for x in data if isinstance(x, dict)]
+            self._sort()
         except Exception as e:                      # битый файл не должен мешать
             self.error = f"{type(e).__name__}: {e}"
             self.items = []
@@ -839,9 +840,15 @@ class DigestStore:
         rec["id"] = rid
         self.items = [x for x in self.items if str(x.get("id")) != rid]
         self.items.insert(0, rec)
+        self._sort()
         self.items = self.items[:self.keep]
         self._flush()
         return rec
+
+    def _sort(self) -> None:
+        """Свежие выпуски первыми — даже если файл писали в другом порядке."""
+        self.items.sort(key=lambda x: str(x.get("day") or x.get("id") or ""),
+                        reverse=True)
 
     def get(self, rid: str) -> Optional[dict]:
         for x in self.items:

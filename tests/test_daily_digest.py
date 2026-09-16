@@ -290,6 +290,16 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(len(st2.list()), 2)
         self.assertEqual(st2.get("2026-09-14")["id"], "2026-09-14")
 
+    def test_newest_first_even_if_file_written_out_of_order(self):
+        st = DigestStore(self.path)
+        for day in ("2026-09-15", "2026-09-17", "2026-09-16"):
+            st.save({"id": day, "day": day, "facts": {}})
+        self.assertEqual([r["id"] for r in st.list()],
+                         ["2026-09-17", "2026-09-16", "2026-09-15"])
+        # и после перезапуска порядок не поедет
+        st2 = DigestStore(self.path)
+        self.assertEqual(st2.list()[0]["id"], "2026-09-17")
+
     def test_keep_limit_and_broken_file(self):
         st = DigestStore(self.path, keep=2)
         for d in ("01", "02", "03"):

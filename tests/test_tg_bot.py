@@ -501,8 +501,8 @@ class BotMenuTest(unittest.TestCase):
             self.head = head
             self.seen = []
 
-        async def headline(self, snap, recent=None):
-            self.seen.append((snap, list(recent or [])))
+        async def headline(self, snap, recent=None, variant=0):
+            self.seen.append((snap, list(recent or []), variant))
             return self.head
 
         def status(self):

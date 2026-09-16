@@ -38,7 +38,10 @@ Environment=LIQSCOPE_COOKIE_SECURE=1
 # Своя модель у сервиса (по умолчанию — актуальная Flash-Lite у Gemini;
 # если модель устарела, код подберёт замену сам):
 # Environment=LIQSCOPE_AI_GEMINI_MODEL=gemini-3.5-flash-lite
-# Environment=LIQSCOPE_AI_GROQ_MODEL=llama-3.3-70b-versatile
+# Environment=LIQSCOPE_AI_GROQ_MODEL=qwen/qwen3.8-27b
+#   (в Groq модель надо включить в Settings → Project → Models; из доступного
+#    набора для текста годятся qwen/qwen3.8-27b, openai/gpt-oss-20b,
+#    openai/gpt-oss-120b, groq/compound-mini)
 # Модель может быть выключена в настройках проекта сервиса — тогда код
 # переберёт доступные сам; список смотрите: python3 tools/ai_check.py --models
 # Environment=LIQSCOPE_BOT_TOKEN=

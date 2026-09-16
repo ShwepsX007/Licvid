@@ -16,8 +16,9 @@ HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
 
 import ai_text  # noqa: E402
-from ai_text import (AiWriter, build_providers, clean_head, fit_head,  # noqa: E402
-                     head_problem, parse_reply, pick_model, summarize)
+from ai_text import (ANGLES, AiWriter, build_providers, clean_head,  # noqa: E402
+                     fit_head, head_problem, missing_specifics, parse_reply,
+                     pick_model, summarize, too_similar)
 
 SNAP = {
     "window_h": 4,
@@ -89,10 +90,17 @@ class PromptTest(unittest.TestCase):
         self.assertIn("Открытый интерес", text)  # OI
         self.assertIn("CVD", text)
 
-    def test_prompt_asks_for_head_without_figures(self):
-        prompt = ai_text.build_prompt(SNAP, recent=["Прошлая шапка"])
-        self.assertIn("без цифр", prompt.lower())
-        self.assertIn("Прошлая шапка", prompt)      # просим не повторяться
+    def test_prompt_asks_for_figures_and_angle(self):
+        prompt = ai_text.build_prompt(SNAP, recent=["Прошлая шапка"], variant=2)
+        self.assertIn("Прошлая шапка", prompt)           # просим не повторяться
+        self.assertIn("монет", prompt.lower())
+        self.assertIn("числ", prompt.lower())
+        self.assertIn(ANGLES[2 % len(ANGLES)], prompt)    # акцент чередуется
+        self.assertNotIn("без цифр", prompt.lower())
+
+    def test_angles_rotate_between_posts(self):
+        self.assertNotEqual(ai_text.build_prompt(SNAP, variant=0),
+                            ai_text.build_prompt(SNAP, variant=1))
 
 
 class ReplyTest(unittest.TestCase):
@@ -118,13 +126,32 @@ class ReplyTest(unittest.TestCase):
 
 class CleanTest(unittest.TestCase):
     def test_markdown_and_quotes_are_stripped(self):
-        self.assertEqual(clean_head('**«Рынок снова показал характер»**'),
-                         "Рынок снова показал характер")
+        self.assertEqual(clean_head('**«Лонги BTC на $9.00M»**'),
+                         "Лонги BTC на $9.00M")
         self.assertEqual(clean_head("> - Текст   с   пробелами"), "Текст с пробелами")
 
-    def test_figures_are_rejected(self):
-        self.assertIn("цифры", head_problem("Ликвидации за 4 часа выросли"))
-        self.assertEqual(head_problem("Рынок снова показал, кто здесь главный"), "")
+    def test_figures_are_allowed(self):
+        """Цифры в шапке разрешены: раньше запрещались, теперь нужны."""
+        self.assertEqual(head_problem("Лонги BTC на $9.00M против $3.40M шортов"), "")
+        self.assertEqual(head_problem("Перевес лонгов 2.6 к 1 за окно"), "")
+
+    def test_hashtag_and_refusal_are_rejected(self):
+        self.assertIn("хештег", head_problem("Лонги BTC $9.00M #крипта"))
+        self.assertIn("отказ", head_problem("Извините, я не могу помочь"))
+
+    def test_specifics_are_required(self):
+        """Шапка без монеты и без числа — «вода», её не берём."""
+        self.assertIn("ни монеты, ни числа", missing_specifics(
+            "Рынок снова показал, кто здесь главный", SNAP))
+        self.assertIn("нет ни одного числа", missing_specifics(
+            "Лонги биткоина снова пострадали сильнее шортов", SNAP))
+        self.assertEqual(missing_specifics("Лонги BTC на $9.00M", SNAP), "")
+        self.assertEqual(missing_specifics("Лонги биткоина выросли к $9.00M", SNAP), "")
+
+    def test_similar_head_is_detected(self):
+        recent = ["За окно лонги BTC сняли на девять миллионов долларов"]
+        self.assertTrue(too_similar("За окно сняли лонги BTC на девять миллионов", recent))
+        self.assertFalse(too_similar("Шорты ETH сняли на $500.0K", recent))
 
     def test_refusal_is_rejected(self):
         self.assertIn("отказ", head_problem("Извините, я не могу помочь с этим запросом"))
@@ -149,19 +176,19 @@ class WriterTest(EnvMixin):
             calls.append(url)
             if "generativelanguage" in url:
                 raise RuntimeError("HTTP 429: rate limit")
-            return {"choices": [{"message": {"content": "Рынок снова показал характер"}}]}
+            return {"choices": [{"message": {"content": "Лонги BTC на $9.00M против $3.40M шортов"}}]}
 
         with mock.patch.object(ai_text, "post_json", fake_post):
             head = w.headline_sync(SNAP)
-        self.assertEqual(head, "Рынок снова показал характер")
+        self.assertEqual(head, "Лонги BTC на $9.00M против $3.40M шортов")
         self.assertEqual(len(calls), 2)                      # gemini → groq
         self.assertEqual(w.status()["last"]["provider"], "groq")
         self.assertTrue(w.status()["last"]["ok"])
 
     def test_bad_answer_falls_through_to_next_service(self):
         w = self.writer()
-        answers = ["Ликвидации за 4 часа — минус 12 миллионов",   # цифры → отказ
-                   "Рынок снова показал, кто здесь главный"]
+        answers = ["Извините, я не могу помочь с этим запросом",   # отказ модели
+                   "Лонги BTC на $9.00M против $3.40M шортов"]
 
         def fake_post(url, payload, headers, timeout=12.0):
             if "generativelanguage" in url:
@@ -171,7 +198,7 @@ class WriterTest(EnvMixin):
         with mock.patch.object(ai_text, "post_json", fake_post):
             head = w.headline_sync(SNAP)
         self.assertEqual(head, answers[1])
-        self.assertIn("цифры", w.status()["providers"][0]["reason"])
+        self.assertIn("отказ", w.status()["providers"][0]["reason"])
 
     def test_all_services_down_gives_none(self):
         w = self.writer()
@@ -195,17 +222,17 @@ class WriterTest(EnvMixin):
             calls.append("gemini" if "generativelanguage" in url else "groq")
             if "generativelanguage" in url:
                 raise RuntimeError("HTTP 401: invalid api key")
-            return {"choices": [{"message": {"content": "Рынок успокоился к вечеру"}}]}
+            return {"choices": [{"message": {"content": "ETH потерял $3.10M на ликвидациях, перевес у лонгов"}}]}
 
         with mock.patch.object(ai_text, "post_json", fake_post):
-            self.assertEqual(w.headline_sync(SNAP), "Рынок успокоился к вечеру")
+            self.assertEqual(w.headline_sync(SNAP), "ETH потерял $3.10M на ликвидациях, перевес у лонгов")
         self.assertEqual(calls, ["gemini", "groq"])
         self.assertTrue(w.status()["providers"][0]["dead"])
         calls.clear()
         with mock.patch.object(ai_text, "post_json", fake_post):
             head = w.headline_sync(SNAP)
         self.assertEqual(calls, ["groq"])          # gemini больше не дёргаем
-        self.assertEqual(head, "Рынок успокоился к вечеру")
+        self.assertEqual(head, "ETH потерял $3.10M на ликвидациях, перевес у лонгов")
 
     def test_requests_have_right_shape(self):
         w = self.writer()
@@ -223,7 +250,7 @@ class WriterTest(EnvMixin):
         self.assertIn("contents", g_body)
         q_url, q_body, q_head = seen[1]
         self.assertEqual(q_head["Authorization"], "Bearer q-key")
-        self.assertEqual(q_body["model"], "llama-3.3-70b-versatile")
+        self.assertEqual(q_body["model"], "qwen/qwen3.8-27b")
         self.assertEqual(q_body["messages"][0]["role"], "system")
 
     def test_async_wrapper_returns_head(self):
@@ -231,9 +258,9 @@ class WriterTest(EnvMixin):
         w = self.writer()
         with mock.patch.object(ai_text, "post_json",
                                lambda *a, **kw: {"choices": [
-                                   {"message": {"content": "Спокойный вечер на ленте"}}]}):
+                                   {"message": {"content": "Лонги SOL на $900.0K — крупнейшая ликвидация окна"}}]}):
             head = asyncio.run(w.headline(SNAP))
-        self.assertEqual(head, "Спокойный вечер на ленте")
+        self.assertEqual(head, "Лонги SOL на $900.0K — крупнейшая ликвидация окна")
 
 
 class ModelRepairTest(EnvMixin):
@@ -291,11 +318,11 @@ class ModelRepairTest(EnvMixin):
                     'no longer available to new users. Please update your code to use '
                     'models/gemini-3.5-flash-lite for the latest"}')
             return {"candidates": [{"content": {"parts": [
-                {"text": "Рынок переваривает снятые лонги без паники"}]}}]}
+                {"text": "Лонги BTC на $9.00M против $3.40M шортов — без паники"}]}}]}
 
         with mock.patch.object(ai_text, "post_json", fake_post):
             head = w.headline_sync(SNAP)
-        self.assertEqual(head, "Рынок переваривает снятые лонги без паники")
+        self.assertEqual(head, "Лонги BTC на $9.00M против $3.40M шортов — без паники")
         self.assertEqual(len(urls), 2)
         self.assertIn("gemini-3.5-flash-lite", urls[1])
         self.assertEqual(w.status()["providers"][0]["model"], "gemini-3.5-flash-lite")
@@ -303,13 +330,16 @@ class ModelRepairTest(EnvMixin):
     def test_model_is_discovered_when_hint_is_missing(self):
         """Нет подсказки в ошибке — спрашиваем список моделей у сервиса."""
         os.environ["LIQSCOPE_AI_GROQ_KEY"] = "q-key"
+        # админ прописал модель, которой у проекта нет
+        os.environ["LIQSCOPE_AI_GROQ_MODEL"] = "llama-3.3-70b-versatile"
         w = AiWriter(build_providers())
+        self.assertEqual(w.providers[0].model, "llama-3.3-70b-versatile")
         asked = []
 
         def fake_post(url, payload, headers, timeout=12.0):
             if payload.get("model") == "llama-3.3-70b-versatile":
                 raise RuntimeError('HTTP 404: model "llama-3.3-70b-versatile" not found')
-            return {"choices": [{"message": {"content": "Лента отработала окно спокойно"}}]}
+            return {"choices": [{"message": {"content": "Шорты ETH сняли на $500.0K при окне в $12.40M"}}]}
 
         def fake_get(url, headers, timeout=12.0):
             asked.append(url)
@@ -319,7 +349,7 @@ class ModelRepairTest(EnvMixin):
         with mock.patch.object(ai_text, "post_json", fake_post), \
                 mock.patch.object(ai_text, "get_json", fake_get):
             head = w.headline_sync(SNAP)
-        self.assertEqual(head, "Лента отработала окно спокойно")
+        self.assertEqual(head, "Шорты ETH сняли на $500.0K при окне в $12.40M")
         self.assertTrue(asked and asked[0].endswith("/models"))
         self.assertEqual(w.status()["providers"][0]["model"], "openai/gpt-oss-120b")
 
@@ -344,13 +374,20 @@ class ModelRepairTest(EnvMixin):
 class GroqProjectTest(EnvMixin):
     """Groq: модели можно выключать в настройках проекта — код должен подбирать."""
 
-    def test_rank_puts_useful_models_first(self):
-        ids = ["allam-2-7b", "whisper-large-v3", "llama-3.3-70b-versatile",
-               "openai/gpt-oss-120b"]
+    def test_rank_prefers_qwen_and_drops_non_text_models(self):
+        """Набор моделей проекта: берём те, что пишут текст по-русски."""
+        ids = ["allam-2-7b", "whisper-large-v3-turbo", "canopylabs/orpheus-v1-russian",
+               "meta-llama/llama-prompt-guard-2-22m", "openai/gpt-oss-safeguard-20b",
+               "openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b",
+               "groq/compound-mini"]
         ranked = ai_text.rank_models("groq", ids)
-        self.assertEqual(ranked[0], "llama-3.3-70b-versatile")
-        self.assertNotIn("whisper-large-v3", ranked)
-        self.assertLess(ranked.index("openai/gpt-oss-120b"), ranked.index("allam-2-7b"))
+        self.assertEqual(ranked[0], "qwen/qwen3.8-27b")
+        for bad in ("whisper-large-v3-turbo", "canopylabs/orpheus-v1-russian",
+                    "meta-llama/llama-prompt-guard-2-22m",
+                    "openai/gpt-oss-safeguard-20b"):
+            self.assertNotIn(bad, ranked)
+        self.assertIn("openai/gpt-oss-120b", ranked)
+        self.assertIn("groq/compound-mini", ranked)
 
     def test_hint_explains_project_block(self):
         hint = ai_text.ai_error_hint('HTTP 403: {"error":{"message":"The model `openai/gpt-oss-120b` '
@@ -370,7 +407,7 @@ class GroqProjectTest(EnvMixin):
             if model != "allam-2-7b":
                 raise RuntimeError(f'HTTP 403: The model `{model}` is blocked at the '
                                    'project level. Please have a project admin enable it')
-            return {"choices": [{"message": {"content": "Лента переваривает окно спокойно"}}]}
+            return {"choices": [{"message": {"content": "Лонги BTC на $9.00M — втрое больше шортов за окно"}}]}
 
         def fake_get(url, headers, timeout=12.0):
             return {"data": [{"id": "allam-2-7b"}, {"id": "llama-3.3-70b-versatile"},
@@ -380,7 +417,7 @@ class GroqProjectTest(EnvMixin):
         with mock.patch.object(ai_text, "post_json", fake_post), \
                 mock.patch.object(ai_text, "get_json", fake_get):
             head = w.headline_sync(SNAP)
-        self.assertEqual(head, "Лента переваривает окно спокойно")
+        self.assertEqual(head, "Лонги BTC на $9.00M — втрое больше шортов за окно")
         self.assertEqual(asked[-1], "allam-2-7b")          # дошли до рабочей модели
         self.assertGreaterEqual(len(asked), 3)
         self.assertEqual(w.status()["providers"][0]["model"], "allam-2-7b")
@@ -404,6 +441,27 @@ class GroqProjectTest(EnvMixin):
         self.assertTrue(st["dead"])
         self.assertIn("проект", st["reason"].lower())
 
+    def test_repeated_head_triggers_new_angle(self):
+        """Похожая на прошлую шапка не уходит в канал — меняем акцент."""
+        os.environ["LIQSCOPE_AI_GEMINI_KEY"] = "g-key"
+        w = AiWriter(build_providers())
+        prompts, answers = [], [
+            "Лонги BTC сняли на $9.00M против $3.40M шортов",
+            "Лонги BTC сняли на $9.00M против $3.40M шортов",
+            "Шорты ETH забрали $3.10M, перевес на стороне лонгов"]
+
+        def fake_post(url, payload, headers, timeout=12.0):
+            prompts.append(payload["contents"][0]["parts"][0]["text"])
+            return {"candidates": [{"content": {"parts": [{"text": answers.pop(0)}]}}]}
+
+        with mock.patch.object(ai_text, "post_json", fake_post):
+            head = w.headline_sync(
+                SNAP, recent=["Лонги BTC сняли на $9.00M против $3.40M шортов"])
+        self.assertEqual(head, "Шорты ETH забрали $3.10M, перевес на стороне лонгов")
+        # трижды пришла одна и та же формулировка — код переспрашивал с новым акцентом
+        self.assertEqual(len(prompts), 3)
+        self.assertEqual(len(set(prompts)), 3)           # акцент каждый раз другой
+
     def test_empty_reply_retries_with_bigger_limit(self):
         """gpt-oss и подобные сперва отдают пустой текст — повторяем с запасом."""
         os.environ["LIQSCOPE_AI_GROQ_KEY"] = "q-key"
@@ -415,11 +473,11 @@ class GroqProjectTest(EnvMixin):
             if len(limits) == 1:
                 return {"choices": [{"message": {"content": ""},
                                      "finish_reason": "length"}]}
-            return {"choices": [{"message": {"content": "Рынок спокоен, лента пустая"}}]}
+            return {"choices": [{"message": {"content": "Окно на $12.40M: лонги BTC $9.00M перевесили шорты"}}]}
 
         with mock.patch.object(ai_text, "post_json", fake_post):
             head = w.headline_sync(SNAP)
-        self.assertEqual(head, "Рынок спокоен, лента пустая")
+        self.assertEqual(head, "Окно на $12.40M: лонги BTC $9.00M перевесили шорты")
         self.assertEqual(limits[0], 120)
         self.assertGreaterEqual(limits[1], 400)
 
@@ -428,8 +486,8 @@ class RenderTest(unittest.TestCase):
     def test_ai_head_replaces_template_and_keeps_blocks(self):
         from channel_digest import render_post
         plain = render_post(SNAP, variant=0)
-        with_ai = render_post(SNAP, variant=0, head_override="Рынок снова показал характер")
-        self.assertIn("Рынок снова показал характер", with_ai)
+        with_ai = render_post(SNAP, variant=0, head_override="Лонги BTC на $9.00M против $3.40M шортов")
+        self.assertIn("Лонги BTC на $9.00M против $3.40M шортов", with_ai)
         self.assertIn("liqscope.online", with_ai)          # хвост на месте
         self.assertNotEqual(plain.splitlines()[0], with_ai.splitlines()[0])
         # «сухие» цифры никуда не делись

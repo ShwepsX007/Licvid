@@ -709,14 +709,19 @@ class TelegramBot:
         self.store.set_setting("channel_digest_review", "1" if on else "0",
                                actor_id=actor_id)
 
-    async def _ai_headline(self, snap: dict) -> tuple:
-        """(шапка или None, короткая пометка для админа)."""
+    async def _ai_headline(self, snap: dict, variant: int = 0) -> tuple:
+        """(шапка или None, короткая пометка для админа).
+
+        variant — номер поста: по нему ИИ выбирает новый акцент, чтобы
+        подряд идущие сводки не начинались одинаково.
+        """
         ai = getattr(self, "ai", None)
         if ai is None or not getattr(ai, "enabled", False):
             self._ai_state = {"provider": "", "ok": False, "reason": "ИИ не настроен"}
             return None, "ИИ не настроен — шапка из шаблонов"
         try:
-            head = await ai.headline(snap, recent=list(self._ai_recent))
+            head = await ai.headline(snap, recent=list(self._ai_recent),
+                                     variant=int(variant or 0))
         except Exception as e:                      # сеть, лимиты, что угодно
             log.warning("ИИ-шапка: %s", e)
             head = None
@@ -759,7 +764,7 @@ class TelegramBot:
             hours = int(snap.get("window_h") or 4)
         except (TypeError, ValueError):
             hours = 4
-        ai_head, ai_note = await self._ai_headline(snap)
+        ai_head, ai_note = await self._ai_headline(snap, variant=n)
         caption = render_post(
             snap, n,
             headlines=active_headlines(self.store, hours),
@@ -1628,7 +1633,12 @@ class TelegramBot:
                 snap = raw if isinstance(raw, dict) else {}
             except Exception as e:
                 log.warning("проверка ИИ: снимок не собрался: %s", e)
-            head, note = await self._ai_headline(snap)
+            n = 0
+            try:
+                n = int(self.store.get_setting("channel_digest_n") or 0)
+            except (TypeError, ValueError):
+                n = 0
+            head, note = await self._ai_headline(snap, variant=n)
             body = (f"🤖 <b>Проверка ИИ</b>\n<i>{_esc(note)}</i>\n\n"
                     + (f"<b>{_esc(head)}</b>" if head
                        else "Шапка: <i>не получилось, будет из шаблонов</i>"))

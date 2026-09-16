@@ -20,7 +20,9 @@ OI/CVD), она уходит модели, а ответ проверяется:
                                  актуальную: если заданная устарела, сервис
                                  ответит 404 — тогда модель подбирается сама)
     LIQSCOPE_AI_TIMEOUT          таймаут запроса, сек (12)
-    LIQSCOPE_AI_MAX_TOKENS       предел ответа модели (120)
+    LIQSCOPE_AI_MAX_TOKENS       предел ответа модели (220 — шапка с цифрами
+                                 длиннее, а reasoning-модели тратят часть
+                                 лимита на размышления)
     LIQSCOPE_AI_DISABLED=1       выключить генерацию совсем
 
 Без ключей модуль выключен: посты уходят с шапками из шаблонов, как раньше.
@@ -58,11 +60,30 @@ DEFAULT_ORDER = ("gemini", "groq", "openrouter", "deepseek", "custom")
 
 SYSTEM_PROMPT = (
     "Ты — редактор Telegram-канала о криптофьючерсах. Пишешь шапку к сводке "
-    "ликвидаций спокойным деловым языком: живым, но без сленга, жаргона, "
-    "восклицаний и обращения к читателю. Одно-два коротких предложения. "
-    "Не используй цифры и проценты — они идут в таблице ниже поста. "
-    "Не выдумывай факты, не давай советов, прогнозов и обещаний, не пиши "
-    "хештеги, markdown, кавычки и подписи. Верни только текст шапки."
+    "ликвидаций: спокойный деловой язык, живо, но без сленга, жаргона, "
+    "восклицаний и обращения к читателю. Пиши по-русски, 2–3 предложения "
+    "(до 200 знаков).\n"
+    "Обязательно опирайся на данные сводки: назови хотя бы одну конкретную "
+    "монету и приведи 1–2 точных числа из них (сумму, перевес сторон или "
+    "процент). Не пересказывай все цифры подряд — выбери самое важное.\n"
+    "Не выдумывай факты и монеты, которых нет в данных, не давай советов и "
+    "прогнозов, не пиши хештеги, markdown, кавычки, эмодзи и подписи. "
+    "Не начинай с тех же слов, что прошлые шапки. Верни только текст шапки."
+)
+
+# Направления (акценты) — чередуются от поста к посту, чтобы формулировки
+# не повторялись: цифры одни и те же, а угол зрения каждый раз новый.
+ANGLES = (
+    "Начни с общей картины окна и главной суммы.",
+    "Акцент на перекосе: кого снимали и с каким отрывом (числа обязательны).",
+    "Акцент на монете-лидере: назови её и её сумму.",
+    "Акцент на биржах: где сработало сильнее всего — с числами.",
+    "Акцент на самой крупной единичной ликвидации.",
+    "Акцент на открытом интересе и дельте объёма (CVD), если данные есть.",
+    "Одна плотная фраза с двумя самыми говорящими числами — кратко.",
+    "Акцент на масштабе: крупно это для окна или рынок отделался лёгким.",
+    "Начни с монеты-лидера, затем общая сумма окна.",
+    "Акцент на соотношении лонгов и шортов в процентах.",
 )
 
 
@@ -130,18 +151,20 @@ def summarize(snap: dict) -> List[str]:
     return out
 
 
-def build_prompt(snap: dict, recent: Optional[List[str]] = None) -> str:
+def build_prompt(snap: dict, recent: Optional[List[str]] = None,
+                 variant: int = 0) -> str:
     lines = [
-        "Данные сводки (для смысла, не пересказывай их по пунктам):",
+        "Данные сводки — используй их в тексте (числа и монеты брать отсюда):",
         *[f"— {x}" for x in summarize(snap)],
     ]
     keep = [r for r in (recent or []) if r][-4:]
     if keep:
         lines.append("")
-        lines.append("Прошлые шапки — не повторяй их формулировки:")
+        lines.append("Прошлые шапки — не повторяй их формулировки и не начинай так же:")
         lines += [f"— {r}" for r in keep]
     lines.append("")
-    lines.append("Напиши шапку (одна-две фразы, без цифр и процентов).")
+    lines.append(f"Акцент этого поста: {ANGLES[int(variant) % len(ANGLES)]}")
+    lines.append("Напиши шапку: 2–3 предложения, с конкретной монетой и 1–2 числами.")
     return "\n".join(lines)
 
 
@@ -209,7 +232,7 @@ def build_providers() -> List[Provider]:
         return []
     found: Dict[str, Provider] = {}
     for name, default_model in (("gemini", "gemini-3.5-flash-lite"),
-                                ("groq", "llama-3.3-70b-versatile"),
+                                ("groq", "qwen/qwen3.8-27b"),
                                 ("openrouter", "openrouter/free"),
                                 ("deepseek", "deepseek-chat")):
         p = _provider(name, default_model, f"LIQSCOPE_AI_{name.upper()}_KEY",
@@ -267,13 +290,21 @@ def get_json(url: str, headers: Dict[str, str], timeout: float = 12.0) -> dict:
         raise RuntimeError(f"не JSON в ответе: {body[:120]!r}") from None
 
 
+# Модели не для генерации текста: распознавание речи, синтез, классификаторы
+# («prompt-guard», «safeguard»), картинки. Их в перебор не берём.
 MODEL_WORDS_BAD = ("embedding", "embed", "image", "tts", "audio", "live",
                    "transcribe", "translate", "veo", "imagen", "whisper",
-                   "guard", "moderation", "rerank", "speech")
+                   "guard", "moderation", "rerank", "speech", "orpheus",
+                   "parakeet", "playai")
 
 
-GROQ_PREFER = ("llama-3.3-70b", "llama-3.1-8b", "gpt-oss-20b", "gpt-oss-120b",
-               "llama-4", "qwen", "mistral", "gemma")
+# У Groq модели включаются в настройках проекта, поэтому порядок предпочтения
+# задан под тот набор, что там обычно доступен: сначала многоязычные модели,
+# которые хорошо пишут по-русски, в конце — маленькие и специализированные.
+GROQ_PREFER = ("qwen3.8-27b", "qwen3.8", "qwen3", "qwen",
+               "gpt-oss-120b", "gpt-oss-20b",
+               "llama-3.3-70b", "llama-3.1-8b", "llama-4",
+               "compound-mini", "compound", "mistral", "gemma", "allam")
 
 
 def rank_models(kind: str, ids: List[str]) -> List[str]:
@@ -438,6 +469,73 @@ def request_for(provider: Provider, prompt: str, system: str,
 # ---------------------------------------------------------------------------
 #  Проверка и чистка ответа
 # ---------------------------------------------------------------------------
+COMMON_NAMES = {
+    "BTC": ("биткоин", "bitcoin", "btc"),
+    "ETH": ("эфириум", "эфир", "ethereum", "ether", "eth"),
+    "SOL": ("солана", "solana", "sol"),
+    "XRP": ("xrp", "рипл"),
+    "BNB": ("bnb", "бинанс коин"),
+    "DOGE": ("догикоин", "dogecoin", "doge"),
+    "TON": ("toncoin", "тон", "ton"),
+    "ADA": ("cardano", "кардано", "ada"),
+    "AVAX": ("avalanche", "avax"),
+    "LINK": ("chainlink", "link"),
+    "LTC": ("litecoin", "лайткоин", "ltc"),
+    "SUI": ("sui", "суи"),
+}
+
+
+def coin_words(snap: dict) -> set:
+    """Как могут называться монеты из сводки (тикер или слово)."""
+    syms = set()
+    for row in (snap.get("top_coins") or []):
+        if row.get("symbol"):
+            syms.add(str(row["symbol"]).upper())
+    big = (snap.get("biggest") or {}).get("symbol")
+    if big:
+        syms.add(str(big).upper())
+    for src in (snap.get("oi") or {}, snap.get("cvd") or {}):
+        syms.update(str(k).upper() for k in src)
+    out = set()
+    for sym in syms:
+        base = sym.split("_")[0].split("/")[0]
+        out.add(base.lower())
+        out.update(COMMON_NAMES.get(base, ()))
+    return out
+
+
+def missing_specifics(head: str, snap: dict) -> str:
+    """Требуем конкретику: монету или число — иначе шапка «водяная»."""
+    low = (head or "").lower()
+    has_coin = any(w and w in low for w in coin_words(snap))
+    has_fig = bool(re.search(r"\d", head or ""))
+    if has_fig:
+        return ""
+    if has_coin:
+        return "нет ни одного числа — добавьте 1–2 цифры из данных"
+    return "нет ни монеты, ни числа — шапка без конкретики"
+
+
+def _words(text: str) -> set:
+    return set(re.findall(r"[а-яёa-z]{5,}", (text or "").lower()))
+
+
+def too_similar(head: str, recent: Optional[List[str]], limit: float = 0.5) -> bool:
+    """Похоже на прошлые шапки? (доля общих значимых слов)"""
+    w = _words(head)
+    if not w:
+        return False
+    for old in (recent or [])[-4:]:
+        ow = _words(old)
+        if not ow:
+            continue
+        common = w & ow
+        # одного общего слова мало («сняли», «лонги») — нужны два и высокая доля
+        if len(common) >= 2 and len(common) / max(1, min(len(w), len(ow))) >= limit:
+            return True
+    return False
+
+
 def clean_head(raw: str) -> str:
     """Убираем markdown, кавычки и лишние пробелы."""
     t = (raw or "").strip()
@@ -452,8 +550,6 @@ def head_problem(text: str) -> str:
     """Почему шапку брать нельзя ("" — можно)."""
     if not text:
         return "пусто"
-    if any(ch.isdigit() for ch in text):
-        return "есть цифры — они идут в таблице ниже"
     if len(text) < MIN_LEN:
         return "слишком коротко"
     low = text.lower()
@@ -463,6 +559,8 @@ def head_problem(text: str) -> str:
             return f"не шапка, а отказ ({bad})"
     if "http" in low or "t.me" in low:
         return "ссылка в шапке"
+    if "#" in text:
+        return "хештег в шапке"
     if len(text) > HEAD_MAX_LEN * 2:
         return LONG                                   # длинно: режем через fit_head
     return ""
@@ -483,7 +581,7 @@ class AiWriter:
     """Пишет шапку поста, перебирая сервисы по порядку."""
 
     def __init__(self, providers: List[Provider], timeout: float = 12.0,
-                 max_tokens: int = 120, temperature: float = 0.85):
+                 max_tokens: int = 220, temperature: float = 0.9):
         self.providers = list(providers)
         self.timeout = float(timeout or 12)
         self.max_tokens = int(max_tokens or 120)
@@ -551,25 +649,39 @@ class AiWriter:
         data = post_json(url, body, headers, self.timeout)
         return parse_reply(p, data)
 
-    def headline_sync(self, snap: dict, recent: Optional[List[str]] = None) -> Optional[str]:
+    def headline_sync(self, snap: dict, recent: Optional[List[str]] = None,
+                      variant: int = 0) -> Optional[str]:
         """Первый удачный ответ или None (тогда шапка будет из шаблонов)."""
         if not self.providers:
             return None
-        prompt = build_prompt(snap, recent)
+        angle = int(variant)
         for p in self.providers:
             st = self.state[p.name]
             if st.get("dead"):
                 continue
             started = time.time()
             tried: set = set()
+            repeats = 0        # сколько раз переспрашивали из-за повтора
             try:
                 while True:
                     try:
+                        prompt = build_prompt(snap, recent, angle)
                         raw = self._attempt(p, prompt)
                         head = clean_head(raw)
                         problem = head_problem(head)
                         if problem and problem != LONG:
                             raise RuntimeError(f"ответ не годится: {problem}")
+                        generic = missing_specifics(head, snap)
+                        if generic:
+                            raise RuntimeError(f"ответ не годится: {generic}")
+                        if too_similar(head, recent) and repeats < 3:
+                            # тот же смысл, но другой заход: меняем акцент,
+                            # а не сервис — цифры те же, подача новая
+                            repeats += 1
+                            angle += 1
+                            log.info("ИИ (%s): шапка похожа на прошлую — меняю акцент",
+                                     p.name)
+                            continue
                         head = fit_head(head)
                         if not head:
                             raise RuntimeError("ответ не годится: пусто после чистки")
@@ -628,10 +740,10 @@ class AiWriter:
                             f" ({hint})" if hint else "")
         return None
 
-    async def headline(self, snap: dict,
-                       recent: Optional[List[str]] = None) -> Optional[str]:
+    async def headline(self, snap: dict, recent: Optional[List[str]] = None,
+                       variant: int = 0) -> Optional[str]:
         """То же, но без блокировки event loop бота."""
-        return await asyncio.to_thread(self.headline_sync, snap, recent)
+        return await asyncio.to_thread(self.headline_sync, snap, recent, variant)
 
 
 def build_ai() -> Optional[AiWriter]:
@@ -643,8 +755,8 @@ def build_ai() -> Optional[AiWriter]:
     writer = AiWriter(
         providers,
         timeout=float(_env("LIQSCOPE_AI_TIMEOUT", "12") or 12),
-        max_tokens=int(_env("LIQSCOPE_AI_MAX_TOKENS", "120") or 120),
-        temperature=float(_env("LIQSCOPE_AI_TEMPERATURE", "0.85") or 0.85),
+        max_tokens=int(_env("LIQSCOPE_AI_MAX_TOKENS", "220") or 220),
+        temperature=float(_env("LIQSCOPE_AI_TEMPERATURE", "0.9") or 0.9),
     )
     log.info("ИИ-шапка: %s", " → ".join(f"{p.name} ({p.model})" for p in providers))
     return writer

@@ -272,31 +272,43 @@ MODEL_WORDS_BAD = ("embedding", "embed", "image", "tts", "audio", "live",
                    "guard", "moderation", "rerank", "speech")
 
 
-def pick_model(kind: str, ids: List[str]) -> str:
-    """Самая подходящая модель для короткого текста из списка сервиса."""
+GROQ_PREFER = ("llama-3.3-70b", "llama-3.1-8b", "gpt-oss-20b", "gpt-oss-120b",
+               "llama-4", "qwen", "mistral", "gemma")
+
+
+def rank_models(kind: str, ids: List[str]) -> List[str]:
+    """Модели по убыванию предпочтения: для короткого русского текста.
+
+    Возвращаем список, а не одну: у Groq модели бывают «заблокированы в
+    проекте», поэтому код пробует следующую, а не сдаётся.
+    """
     good = [i for i in ids if i and not any(w in i.lower() for w in MODEL_WORDS_BAD)]
     if not good:
-        return ""
+        return []
     if kind == "gemini":
-        lite = [i for i in good if "flash-lite" in i]
-        flash = [i for i in good if "flash" in i]
-        pool = lite or flash or good
-
         def ver(x: str) -> float:
             m = re.search(r"gemini-(\d+)(?:\.(\d+))?", x)
             return float(f"{m.group(1)}.{m.group(2) or 0}") if m else 0.0
 
-        return sorted(pool, key=ver, reverse=True)[0]
+        return sorted(good, key=lambda x: (0 if "flash-lite" in x else 1, -ver(x)))
     if kind == "openrouter":
-        free = [i for i in good if i.endswith(":free")]
-        return sorted(free, key=len, reverse=True)[0] if free else ""
+        # только бесплатные: цепочка собрана из сервисов с бесплатным тарифом,
+        # платные модели у OpenRouter упрутся в отсутствие баланса
+        return sorted([i for i in good if i.endswith(":free")], key=len, reverse=True)
     if kind == "groq":
-        for want in ("70b", "120b", "llama-3.3", "gpt-oss"):
-            hit = [i for i in good if want in i.lower()]
-            if hit:
-                return sorted(hit, key=len)[0]
-        return sorted(good, key=len)[0]
-    return sorted(good, key=len)[0]
+        out: List[str] = []
+        for want in GROQ_PREFER:
+            for i in sorted(good):
+                if want in i.lower() and i not in out:
+                    out.append(i)
+        return out + [i for i in sorted(good) if i not in out]
+    return sorted(good)
+
+
+def pick_model(kind: str, ids: List[str]) -> str:
+    """Самая подходящая модель (первая из ранжированного списка)."""
+    ranked = rank_models(kind, ids)
+    return ranked[0] if ranked else ""
 
 
 def list_models(provider: Provider, timeout: float = 12.0) -> List[str]:
@@ -342,8 +354,14 @@ def suggested_model(err: str, current: str = "") -> str:
 
 
 def model_error(err: str) -> bool:
-    """Похоже, что модель устарела/переименована (а не сеть и не ключ)."""
+    """Модель недоступна: устарела, переименована или выключена в проекте.
+
+    Это не про ключ: у Groq модель можно отключить в настройках проекта
+    («blocked at the project level»), и тогда её надо просто заменить.
+    """
     low = (err or "").lower()
+    if "blocked at the project" in low or "is blocked" in low:
+        return True
     return ("model" in low and any(x in low for x in (
         "no longer available", "not found", "decommissioned", "does not exist",
         "unknown model", "unsupported model", "invalid model")))
@@ -358,8 +376,14 @@ def ai_error_hint(err: str) -> str:
                 "LiqScope/1.0 в заголовках")
     if "429" in low or "rate limit" in low or "quota" in low:
         return "лимит бесплатного тарифа — подождите или проверьте консоль сервиса"
-    if "401" in low or "403" in low or "invalid api key" in low:
-        return "ключ не подошёл или у него нет доступа к этой модели"
+    if "blocked at the project" in low or "is blocked" in low:
+        return ("модель выключена в настройках проекта сервиса — включите её "
+                "(у Groq: console.groq.com/settings/project) или задайте другую "
+                "через LIQSCOPE_AI_<СЕРВИС>_MODEL")
+    if "401" in low or "invalid api key" in low:
+        return "ключ не подошёл — проверьте LIQSCOPE_AI_<СЕРВИС>_KEY"
+    if "403" in low:
+        return "сервис не пускает запрос (ключ или регион)"
     if model_error(err):
         return "сервис переименовал модель — обновите LIQSCOPE_AI_<СЕРВИС>_MODEL"
     return ""
@@ -473,6 +497,9 @@ class AiWriter:
         self.calls = 0
         self.fails = 0
         self.resolved: Dict[str, str] = {}    # сервис -> модель, которую подобрали
+        self._models: Dict[str, List[str]] = {}     # кэш списка моделей сервиса
+        self._rejected: Dict[str, set] = {}         # модели, которые не подошли
+        self._extra: Dict[str, int] = {}            # добавка к лимиту ответа
 
     # --- состояние для админки ---
     @property
@@ -489,24 +516,38 @@ class AiWriter:
         }
 
     # --- сама генерация ---
+    def _model_list(self, p: Provider) -> List[str]:
+        """Список моделей сервиса (кэшируем: спрашиваем один раз за запуск)."""
+        if p.name not in self._models:
+            ids = list_models(p, self.timeout) if p.models_url else []
+            # выбор модели зависит от сервиса, а kind у OpenAI-совместимых один,
+            # поэтому ранжируем по имени сервиса
+            self._models[p.name] = rank_models(p.name, ids)
+        return self._models[p.name]
+
+    def _switch_model(self, p: Provider, tried: set) -> Optional[str]:
+        """Следующая модель сервиса. None — больше нечего пробовать."""
+        bad = self._rejected.setdefault(p.name, set())
+        for mid in self._model_list(p):
+            if mid and mid not in bad and mid not in tried and mid != p.model:
+                bad.add(p.model) if p.model else None
+                log.warning("ИИ (%s): модель %s не подошла — пробую %s",
+                            p.name, p.model, mid)
+                p.model = mid
+                self.state[p.name]["model"] = mid
+                self.resolved[p.name] = mid
+                return mid
+        return None
+
     def _repair_model(self, p: Provider) -> bool:
         """Модель устарела — спрашиваем у сервиса актуальную и пробуем снова."""
-        # выбор модели зависит от сервиса (groq/openrouter/gemini), а kind у
-        # OpenAI-совместимых один — поэтому смотрим на имя сервиса
-        fresh = pick_model(p.name, list_models(p, self.timeout))
-        if not fresh or fresh == p.model:
-            return False
-        log.warning("ИИ (%s): модель %s недоступна — перехожу на %s",
-                    p.name, p.model, fresh)
-        p.model = fresh
-        self.state[p.name]["model"] = fresh
-        self.resolved[p.name] = fresh
-        return True
+        return self._switch_model(p, set()) is not None
 
     def _attempt(self, p: Provider, prompt: str) -> Optional[str]:
-        """Один запрос к сервису с самолечением модели. None — не вышло."""
+        """Один запрос к сервису (с учётом добавки к лимиту ответа)."""
+        tokens = self.max_tokens + self._extra.get(p.name, 0)
         url, body, headers = request_for(p, prompt, SYSTEM_PROMPT,
-                                         self.temperature, self.max_tokens)
+                                         self.temperature, tokens)
         data = post_json(url, body, headers, self.timeout)
         return parse_reply(p, data)
 
@@ -520,34 +561,51 @@ class AiWriter:
             if st.get("dead"):
                 continue
             started = time.time()
+            tried: set = set()
             try:
-                try:
-                    raw = self._attempt(p, prompt)
-                except Exception as e:
-                    # Google шлёт в 404 готовую замену — пробуем её, а если её
-                    # нет, спрашиваем список моделей у сервиса.
-                    if not model_error(str(e)):
-                        raise
-                    hint = suggested_model(str(e), p.model)
-                    if hint:
-                        log.warning("ИИ (%s): модель %s устарела — беру %s из ответа",
-                                    p.name, p.model, hint)
-                        p.model = hint
-                        st["model"] = hint
-                        self.resolved[p.name] = hint
+                while True:
+                    try:
                         raw = self._attempt(p, prompt)
-                    elif self._repair_model(p):
-                        raw = self._attempt(p, prompt)
-                    else:
+                        head = clean_head(raw)
+                        problem = head_problem(head)
+                        if problem and problem != LONG:
+                            raise RuntimeError(f"ответ не годится: {problem}")
+                        head = fit_head(head)
+                        if not head:
+                            raise RuntimeError("ответ не годится: пусто после чистки")
+                        break
+                    except Exception as e:
+                        # Google шлёт в 404 готовую замену — пробуем её, а если её
+                        # нет, спрашиваем список моделей у сервиса и берём другую:
+                        # у Groq модель может быть выключена в настройках проекта.
+                        if model_error(str(e)):
+                            hint = suggested_model(str(e), p.model)
+                            if hint and hint not in tried:
+                                log.warning("ИИ (%s): модель %s недоступна — беру %s "
+                                            "из ответа", p.name, p.model, hint)
+                                tried.add(p.model)
+                                p.model = hint
+                                st["model"] = hint
+                                self.resolved[p.name] = hint
+                                continue
+                            nxt = self._switch_model(p, tried)
+                            if nxt:
+                                tried.add(nxt)
+                                continue
+                            st["dead"] = True    # ни одной рабочей модели у сервиса
+                            raise
+                        if "пустой текст" in str(e):
+                            # reasoning-модели тратят лимит на размышления: повторяем
+                            # тот же запрос с запасом по длине ответа
+                            base = self.max_tokens + self._extra.get(p.name, 0)
+                            if base < 400:
+                                self._extra[p.name] = max(base * 4, 400) - self.max_tokens
+                                log.info("ИИ (%s): пустой ответ — повтор с лимитом %s",
+                                         p.name, self.max_tokens + self._extra[p.name])
+                                continue
                         raise
-                head = clean_head(raw)
-                problem = head_problem(head)
-                if problem and problem != LONG:
-                    raise RuntimeError(f"ответ не годится: {problem}")
-                head = fit_head(head)
-                if not head:
-                    raise RuntimeError("ответ не годится: пусто после чистки")
-                st.update({"ok": True, "reason": "", "ms": int((time.time() - started) * 1000)})
+                st.update({"ok": True, "reason": "",
+                           "ms": int((time.time() - started) * 1000)})
                 self.calls += 1
                 self.last = {"provider": p.name, "ok": True, "reason": "",
                              "ms": st["ms"], "ts": time.time()}
@@ -558,8 +616,9 @@ class AiWriter:
                 reason = str(e)[:160] + (f" — {hint}" if hint else "")
                 st.update({"ok": False, "reason": reason[:220],
                            "ms": int((time.time() - started) * 1000)})
-                # ключ и модель (после подбора) больше не дёргаем; лимиты и сеть — повторяем
-                if re.search(r"HTTP (401|403)|invalid api key", str(e), re.I) \
+                # мёртвым сервис считаем только при неверном ключе: модели
+                # (404/403 в проекте) уже перебраны выше, лимиты и сеть — временное
+                if re.search(r"HTTP 401|invalid api key|unauthorized", str(e), re.I) \
                         and not model_error(str(e)):
                     st["dead"] = True
                 self.fails += 1

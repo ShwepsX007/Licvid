@@ -38,6 +38,9 @@ Environment=LIQSCOPE_COOKIE_SECURE=1
 # Своя модель у сервиса (по умолчанию — актуальная Flash-Lite у Gemini;
 # если модель устарела, код подберёт замену сам):
 # Environment=LIQSCOPE_AI_GEMINI_MODEL=gemini-3.5-flash-lite
+# Environment=LIQSCOPE_AI_GROQ_MODEL=llama-3.3-70b-versatile
+# Модель может быть выключена в настройках проекта сервиса — тогда код
+# переберёт доступные сам; список смотрите: python3 tools/ai_check.py --models
 # Environment=LIQSCOPE_BOT_TOKEN=
 # Environment=LIQSCOPE_ADMIN_IDS=          # telegram id админов
 # Environment=LIQSCOPE_ADMIN_EMAILS=       # админы, зарегистрированные по почте

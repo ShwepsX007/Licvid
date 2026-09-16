@@ -341,6 +341,89 @@ class ModelRepairTest(EnvMixin):
                          "llama-3.3-70b-versatile")
 
 
+class GroqProjectTest(EnvMixin):
+    """Groq: модели можно выключать в настройках проекта — код должен подбирать."""
+
+    def test_rank_puts_useful_models_first(self):
+        ids = ["allam-2-7b", "whisper-large-v3", "llama-3.3-70b-versatile",
+               "openai/gpt-oss-120b"]
+        ranked = ai_text.rank_models("groq", ids)
+        self.assertEqual(ranked[0], "llama-3.3-70b-versatile")
+        self.assertNotIn("whisper-large-v3", ranked)
+        self.assertLess(ranked.index("openai/gpt-oss-120b"), ranked.index("allam-2-7b"))
+
+    def test_hint_explains_project_block(self):
+        hint = ai_text.ai_error_hint('HTTP 403: {"error":{"message":"The model `openai/gpt-oss-120b` '
+                             'is blocked at the project level. Please have a project admin '
+                             'enable this model in the project settings"}}')
+        self.assertIn("проект", hint.lower())
+        self.assertIn("MODEL", hint)
+
+    def test_writer_skips_blocked_models_until_one_works(self):
+        os.environ["LIQSCOPE_AI_GROQ_KEY"] = "q-key"
+        w = AiWriter(build_providers())
+        asked = []
+
+        def fake_post(url, payload, headers, timeout=12.0):
+            model = payload.get("model")
+            asked.append(model)
+            if model != "allam-2-7b":
+                raise RuntimeError(f'HTTP 403: The model `{model}` is blocked at the '
+                                   'project level. Please have a project admin enable it')
+            return {"choices": [{"message": {"content": "Лента переваривает окно спокойно"}}]}
+
+        def fake_get(url, headers, timeout=12.0):
+            return {"data": [{"id": "allam-2-7b"}, {"id": "llama-3.3-70b-versatile"},
+                             {"id": "openai/gpt-oss-120b"},
+                             {"id": "whisper-large-v3"}]}
+
+        with mock.patch.object(ai_text, "post_json", fake_post), \
+                mock.patch.object(ai_text, "get_json", fake_get):
+            head = w.headline_sync(SNAP)
+        self.assertEqual(head, "Лента переваривает окно спокойно")
+        self.assertEqual(asked[-1], "allam-2-7b")          # дошли до рабочей модели
+        self.assertGreaterEqual(len(asked), 3)
+        self.assertEqual(w.status()["providers"][0]["model"], "allam-2-7b")
+        self.assertFalse(w.status()["providers"][0]["dead"])
+
+    def test_writer_gives_up_when_all_models_blocked(self):
+        os.environ["LIQSCOPE_AI_GROQ_KEY"] = "q-key"
+        w = AiWriter(build_providers())
+
+        def fake_post(url, payload, headers, timeout=12.0):
+            raise RuntimeError('HTTP 403: The model `%s` is blocked at the project level'
+                               % payload.get("model"))
+
+        def fake_get(url, headers, timeout=12.0):
+            return {"data": [{"id": "allam-2-7b"}, {"id": "llama-3.3-70b-versatile"}]}
+
+        with mock.patch.object(ai_text, "post_json", fake_post), \
+                mock.patch.object(ai_text, "get_json", fake_get):
+            self.assertIsNone(w.headline_sync(SNAP))
+        st = w.status()["providers"][0]
+        self.assertTrue(st["dead"])
+        self.assertIn("проект", st["reason"].lower())
+
+    def test_empty_reply_retries_with_bigger_limit(self):
+        """gpt-oss и подобные сперва отдают пустой текст — повторяем с запасом."""
+        os.environ["LIQSCOPE_AI_GROQ_KEY"] = "q-key"
+        w = AiWriter(build_providers(), max_tokens=120)
+        limits = []
+
+        def fake_post(url, payload, headers, timeout=12.0):
+            limits.append(payload.get("max_tokens"))
+            if len(limits) == 1:
+                return {"choices": [{"message": {"content": ""},
+                                     "finish_reason": "length"}]}
+            return {"choices": [{"message": {"content": "Рынок спокоен, лента пустая"}}]}
+
+        with mock.patch.object(ai_text, "post_json", fake_post):
+            head = w.headline_sync(SNAP)
+        self.assertEqual(head, "Рынок спокоен, лента пустая")
+        self.assertEqual(limits[0], 120)
+        self.assertGreaterEqual(limits[1], 400)
+
+
 class RenderTest(unittest.TestCase):
     def test_ai_head_replaces_template_and_keeps_blocks(self):
         from channel_digest import render_post

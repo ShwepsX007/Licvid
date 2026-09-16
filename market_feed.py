@@ -1318,6 +1318,15 @@ class MarketFeed:
         # «перезапусти принудительно». Нужны, чтобы источник, у которого
         # сокет открыт, а данные не идут, можно было перезапустить извне.
         self._supervisors: Dict[str, asyncio.Task] = {}
+        # Фабрики слушателей: нужны, чтобы поднять источник заново, если его
+        # задача супервизора умерла (раньше такой источник молчал до рестарта).
+        self._factories: Dict[str, Any] = {}
+        self.respawns: Dict[str, int] = {}
+        # Движки цен и сделок живут вне супервизоров (у них свой вечный цикл
+        # с внутренними try). Если такой поток всё-таки умрёт, цены в
+        # терминале молча замерзают — поэтому их тоже страхует сторож.
+        self._engines: Dict[str, Any] = {}
+        self._engine_tasks: Dict[str, asyncio.Task] = {}
         self._kick: Dict[str, bool] = {}
         self._stop = asyncio.Event()
 
@@ -1362,29 +1371,17 @@ class MarketFeed:
             self.enabled_exchanges.add("oxa")
             self.status["oxa"].enabled = True
         for name, coro in spawn.items():
+            self._factories[name] = coro
             if name in self.enabled_exchanges:
-                # hyperliquid жёстко режет частые переподключения (RST), поэтому
-                # стартуем с длинной паузы (LIQSCOPE_HL_BASE_DELAY), чтобы не
-                # продлевать лимит долбёжкой — пауза пригодится и для
-                # «остывания», если бокс попал под временный сетевой фильтр
-                base = (float(os.getenv("LIQSCOPE_HL_BASE_DELAY", "15"))
-                        if name == "hyperliquid" else 2.0)
-                kw = {"base_delay": base}
-                if name == "hyperliquid":
-                    # «стабильным» считаем только соединение, прожившее больше
-                    # трёх «тихих» окон HL (3 × 60с); коннект — не в момент
-                    # бута, а через 10с, когда остальные слушатели уже встали
-                    kw["stable_uptime"] = 180.0
-                    kw["initial_delay"] = 10.0
-                self._tasks.append(asyncio.create_task(
-                    self._supervise(name, coro, **kw), name=f"liq-{name}"))
+                self._spawn_source(name)
 
         self.oi.bind(self._session)
         self._tasks.append(asyncio.create_task(self._silence_watchdog(), name="watchdog"))
-        self._tasks.append(asyncio.create_task(self._price_engine(), name="prices"))
-        self._tasks.append(asyncio.create_task(self._oi_engine(), name="oi"))
+        self._engines["prices"] = self._price_engine
         if self.on_trade is not None:
-            self._tasks.append(asyncio.create_task(self._trade_engine(), name="ticks"))
+            self._engines["ticks"] = self._trade_engine
+        self._start_engines()
+        self._tasks.append(asyncio.create_task(self._oi_engine(), name="oi"))
         self._tasks.append(asyncio.create_task(self._symbols_refresher(), name="symbols"))
         log.info("MarketFeed запущен: биржи=%s, монет=%d",
                  ",".join(sorted(self.enabled_exchanges)), len(self.symbols))
@@ -1505,11 +1502,76 @@ class MarketFeed:
                 out.append(name)
         return out
 
+    def _spawn_source(self, name: str) -> bool:
+        """Поднять супервизор источника, если он не живёт.
+
+        Обычный путь — сторож «пинает» молчащий сокет (restart_source). Но
+        если задача супервизора умерла (отмена, исключение вне его цикла),
+        перезапускать было нечего: источник оставался выключенным до рестарта
+        сервиса, а в health это выглядело как «не подключён» без попыток.
+        """
+        factory = self._factories.get(name)
+        if factory is None or self._stop.is_set():
+            return False
+        task = self._supervisors.get(name)
+        if task is not None and not task.done():
+            return False
+        # hyperliquid жёстко режет частые переподключения (RST), поэтому
+        # стартуем с длинной паузы (LIQSCOPE_HL_BASE_DELAY), чтобы не
+        # продлевать лимит долбёжкой — пауза пригодится и для «остывания»,
+        # если бокс попал под временный сетевой фильтр
+        base = (float(os.getenv("LIQSCOPE_HL_BASE_DELAY", "15"))
+                if name == "hyperliquid" else 2.0)
+        kw: Dict[str, Any] = {"base_delay": base}
+        if name == "hyperliquid":
+            # «стабильным» считаем только соединение, прожившее больше
+            # трёх «тихих» окон HL (3 × 60с); коннект — не в момент
+            # бута, а через 10с, когда остальные слушатели уже встали
+            kw["stable_uptime"] = 180.0
+            kw["initial_delay"] = 10.0
+        was = self._supervisors.get(name)
+        task = asyncio.create_task(self._supervise(name, factory, **kw),
+                                   name=f"liq-{name}")
+        self._supervisors[name] = task
+        self._tasks.append(task)
+        if was is not None or name in self.respawns:
+            # подъём после смерти слушателя — считаем отдельно от бутового
+            # первого запуска, чтобы в health было видно именно оживления
+            self.respawns[name] = self.respawns.get(name, 0) + 1
+        return True
+
+    def _start_engines(self) -> List[str]:
+        """Запустить движки, которых нет или чья задача уже умерла."""
+        started = []
+        for name, fn in self._engines.items():
+            task = self._engine_tasks.get(name)
+            if task is not None and not task.done():
+                continue
+            task = asyncio.create_task(fn(), name=name)
+            self._engine_tasks[name] = task
+            self._tasks.append(task)
+            started.append(name)
+        return started
+
+    def ensure_sources(self) -> List[str]:
+        """Поднять источники, чьи супервизоры не живут: список поднятых.
+
+        Раз в минуту это делает сторож: биржа, которая «отвалилась и больше
+        не пытается», должна возвращаться сама, без рестарта сервиса.
+        """
+        raised = []
+        for name in sorted(self.enabled_exchanges):
+            if self._spawn_source(name):
+                raised.append(name)
+        raised.extend(self._start_engines())
+        return raised
+
     async def restart_source(self, name: str) -> bool:
         """Принудительно перезапускает слушателя биржи (то же, что сторож)."""
         task = self._supervisors.get(name)
         if task is None or task.done():
-            return False
+            # слушателя нет вовсе — поднимаем заново, а не оставляем как есть
+            return self._spawn_source(name)
         self._kick[name] = True
         task.cancel()
         return True
@@ -1534,6 +1596,12 @@ class MarketFeed:
                 if await self.restart_source(name):
                     log.warning("[%s] тишина дольше %.0fс — сторож переподключает",
                                 name, self.silence_limit())
+            # Источники, чей супервизор умер (или никогда не поднялся), —
+            # самая незаметная поломка: попытки не растут, статус «не
+            # подключён», и без ручного рестарта биржа не вернётся.
+            raised = self.ensure_sources()
+            if raised:
+                log.warning("сторож поднял слушателей заново: %s", ", ".join(raised))
 
     # -- монеты --------------------------------------------------------------
     async def refresh_symbols(self):
@@ -4301,6 +4369,16 @@ class MarketFeed:
             since = d.get("seconds_since_event")
             d["silent_sec"] = since
             d["stale"] = k in silent
+            if k in self._engines:
+                task = self._engine_tasks.get(k)
+                d["supervisor_alive"] = bool(task is not None and not task.done())
+            elif k in self._factories and v.enabled:
+                task = self._supervisors.get(k)
+                d["supervisor_alive"] = bool(task is not None and not task.done())
+            else:
+                # источник не включён или работает без своего потока
+                d["supervisor_alive"] = None
+            d["respawns"] = self.respawns.get(k, 0)
             sources[k] = d
         return {
             "uptime_sec": round(time.time() - self.started_at, 1),

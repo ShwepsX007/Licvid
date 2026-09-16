@@ -1443,6 +1443,27 @@ class BotMenuTest(unittest.TestCase):
         text = self.bot._health_text()
         self.assertIn("Бот:", text)
 
+    def test_health_shows_dead_listener_and_attempts(self):
+        """Биржа «отвалилась и больше не пытается» должна быть видна в чате."""
+        self.bot.health_fn = lambda: {"sources": {
+            "gate": {"connected": False, "events": 12, "attempts": 7,
+                     "last_error": "нет спецификаций", "supervisor_alive": False,
+                     "respawns": 2},
+            "bybit": {"connected": True, "events": 900, "attempts": 3,
+                      "seconds_since_event": 5, "supervisor_alive": True,
+                      "respawns": 0},
+            "okx": {"connected": False, "events": 0, "attempts": 4,
+                    "last_error": "timeout", "supervisor_alive": True,
+                    "respawns": 1},
+        }}
+        self.bot.ws_clients_fn = lambda: 3
+        text = self.bot._health_text()
+        self.assertIn("слушатель не запущен", text)
+        self.assertIn("подъёмов: 2", text)
+        self.assertIn("попыток: 7", text)      # красная строка тоже со счётчиком
+        self.assertIn("попыток: 3", text)      # зелёная строка — сколько раз поднимался
+        self.assertIn("В эфире <b>1/3</b>", text)
+
     def test_call_429_sets_retry_pause(self):
         """429: Telegram сам говорит, сколько ждать — иначе бот продлевает бан."""
         self.assertEqual(TelegramBot._retry_after(

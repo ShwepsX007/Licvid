@@ -318,6 +318,88 @@ async def scenario_silence_watchdog():
         pass
 
 
+async def scenario_dead_supervisor_respawns():
+    print("3г) биржа: умер супервизор — сторож поднимает источник заново")
+    feed = MarketFeed(on_liquidation=on_liq, on_price=noop_price,
+                      exchanges=["gate", "okx"])
+    feed.status["gate"].enabled = True
+    feed.status["okx"].enabled = True
+
+    starts = {"gate": 0, "okx": 0}
+
+    def make_factory(name):
+        async def factory():
+            starts[name] += 1
+            feed.status[name].up()
+            await asyncio.sleep(30)
+        return factory
+
+    feed._factories["gate"] = make_factory("gate")
+    feed._factories["okx"] = make_factory("okx")
+
+    # gate: задача супервизора умерла (отмена/исключение вне его цикла)
+    async def dead():
+        return None
+    task = asyncio.create_task(dead())
+    await task
+    feed._supervisors["gate"] = task
+
+    # okx: живой супервизор — его поднимать не надо
+    live = asyncio.create_task(asyncio.sleep(30))
+    feed._supervisors["okx"] = live
+
+    check("мёртвый супервизор виден в health",
+          feed.health()["sources"]["gate"]["supervisor_alive"] is False)
+
+    raised = feed.ensure_sources()
+    check("умерший источник поднят заново", raised == ["gate"], raised)
+    for _ in range(40):
+        if starts["gate"]:
+            break
+        await asyncio.sleep(0.05)
+    check("слушатель умершего источника запустился", starts["gate"] == 1, starts)
+    check("живой источник не поднимался повторно", raised.count("okx") == 0, raised)
+    check("живой супервизор не поднимается повторно",
+          feed.ensure_sources() == [], starts)
+    check("подъём виден в health",
+          feed.health()["sources"]["gate"]["supervisor_alive"] is True
+          and feed.health()["sources"]["gate"]["respawns"] >= 1)
+
+    # движок цен: его задача тоже поднимается сторожем (иначе цены замерзают)
+    feed._engines["prices"] = lambda: asyncio.sleep(30)
+    dead2 = asyncio.create_task(asyncio.sleep(0))
+    await dead2
+    feed._engine_tasks["prices"] = dead2
+    check("мёртвый движок цен виден в health",
+          feed.health()["sources"]["prices"]["supervisor_alive"] is False)
+    raised2 = feed.ensure_sources()
+    check("сторож поднял движок цен", "prices" in raised2, raised2)
+    check("живой движок цен больше не поднимается",
+          "prices" not in feed.ensure_sources())
+
+    # restart_source тоже не молчит, если супервизора нет вовсе
+    feed._supervisors["okx"] = None
+    check("restart_source поднимает отсутствующий слушатель",
+          await feed.restart_source("okx"))
+    live.cancel()
+    try:
+        await live
+    except asyncio.CancelledError:
+        pass
+    engine = feed._engine_tasks.get("prices")
+    if engine is not None:
+        engine.cancel()
+    feed._stop.set()
+    for name in ("gate", "okx"):
+        t = feed._supervisors.get(name)
+        if t is not None:
+            t.cancel()
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
+
+
 async def scenario_gate_needs_contract_specs():
     print("3в) gate: без спецификаций контрактов слушатель не «висит тихо»")
     import inspect
@@ -438,6 +520,7 @@ async def main():
         await scenario_supervise_backoff()
         await scenario_silence_watchdog()
         await scenario_gate_needs_contract_specs()
+        await scenario_dead_supervisor_respawns()
         await scenario_client_send_timeout()
         await scenario_soak_probe()
     finally:

@@ -777,22 +777,94 @@
         drawIndicatorPanes();   // окна LIQ/CVD/OI под графиком
     }
 
-    // --- Прямоугольники ликвидаций ---------------------------------------------
-    // Каждый кластер — скруглённый прямоугольник с суммой. Мелкие (ниже кита)
-    // красятся по стороне (маджента/циан), киты — по тепловой шкале объёма.
-    // Пороги масштабируются от оборота монеты (для BTC кит — $100K).
-    // Совсем мелкие (ниже $2K × масштаб) рисуются чипом без текста; подписанные
-    // прямоугольники не налезают друг на друга (жадная раскладка).
+    // --- Плашки ликвидаций ------------------------------------------------------
+    // Плашка живёт на теле свечи. Все ликвидации одного бара собираются в одну
+    // плашку (раньше их было до шести на свечу — они и «налеплялись» кластером
+    // поверх графика). Габариты привязаны к свече:
+    //   • высота — почти тело: зазор 3% сверху и снизу, тело остаётся видно;
+    //   • ширина — слот свечи: тянете график вширь — плашки и тела растут
+    //     вместе, сужаете — сжимаются вместе с ними.
+    // Цифры внутри показываем, только если помещаются: кегль растёт вместе с
+    // шириной, при сужении подпись убирается совсем (остаётся цвет стороны).
+    const LIQ_PLATE_GAP = 0.03;      // зазор до тела свечи с каждой стороны
+    const LIQ_PLATE_W_FRAC = 0.86;   // доля слота свечи по ширине
+    const LIQ_PLATE_MIN_W = 3;       // совсем узкий слот: плашка-штрих
+    const LIQ_PLATE_MIN_H = 2;
+    const LIQ_PLATE_FONT_MIN = 7.5;  // ниже этого цифры не читаются — убираем
+    const LIQ_PLATE_FONT_MAX = 14;   // крупнее подпись не становится
+    const LIQ_PLATE_TEXT_PAD = 4;    // рамка плашки по бокам подписи
+    const LIQ_PLATE_FONT_W = 0.9;    // кегль как доля ширины плашки
+    const LIQ_PLATE_FONT_H = 0.74;   // кегль как доля высоты плашки
+
+    // Габариты плашки по телу свечи и слоту; подпись — если помещается.
+    // Чистая функция (проверяется в tests/liq_plates.js): measure(text, font)
+    // возвращает ширину текста в пикселях на заданном кегле.
+    function liqPlateGeom(bodyPx, slotPx, label, measure) {
+        const slot = Math.max(1, Number(slotPx) || 1);
+        const body = Math.max(0, Number(bodyPx) || 0);
+        const w = Math.max(LIQ_PLATE_MIN_W, Math.round(slot * LIQ_PLATE_W_FRAC));
+        const h = Math.max(LIQ_PLATE_MIN_H,
+                           Math.round(body * (1 - 2 * LIQ_PLATE_GAP)));
+        const out = { w: w, h: h, font: 0, showLabel: false, text: "" };
+        const text = String(label || "");
+        if (!text || typeof measure !== "function") return out;
+        const room = w - LIQ_PLATE_TEXT_PAD;
+        const per = measure(text, 1);      // ширина подписи на кегле 1
+        if (!(per > 0) || !(room > 0)) return out;
+        // Кегль хотим как можно крупнее — растёт вместе с телом свечи вширь
+        // и вверх, — но подпись обязана влезть в плашку.
+        let font = Math.min(w * LIQ_PLATE_FONT_W, h * LIQ_PLATE_FONT_H,
+                            LIQ_PLATE_FONT_MAX);
+        font = Math.min(font, room / per);
+        if (font < LIQ_PLATE_FONT_MIN) return out;   // узко/мелко — цифры убираем
+        out.font = font;
+        out.showLabel = true;
+        out.text = text;
+        return out;
+    }
+
+    // Пикселей на свечу: ширина слота (barSpacing), медиана по свечам или
+    // ширина канваса, делённая на число видимых свечей.
+    function plateSlotPx() {
+        try {
+            const opt = chart && chart.timeScale && chart.timeScale().options
+                ? chart.timeScale().options() : null;
+            const bs = opt ? Number(opt.barSpacing) : NaN;
+            if (isFinite(bs) && bs > 0) return bs;
+        } catch (e) { /* ниже — считаем сами */ }
+        const gaps = [];
+        const cds = state.candles || [];
+        for (let i = 1; i < cds.length && gaps.length < 40; i++) {
+            try {
+                const a = chart.timeScale().timeToCoordinate(cds[i - 1].time);
+                const b = chart.timeScale().timeToCoordinate(cds[i].time);
+                if (isFinite(a) && isFinite(b) && b > a) gaps.push(b - a);
+            } catch (e) { /* пропускаем */ }
+        }
+        if (gaps.length) {
+            gaps.sort((x, y) => x - y);
+            return gaps[Math.floor(gaps.length / 2)];
+        }
+        const W = clusterCanvas ? Number(clusterCanvas.width) || 0 : 0;
+        let visible = 0;
+        try {
+            const r = chart.timeScale().getVisibleLogicalRange();
+            if (r && isFinite(r.to - r.from) && r.to > r.from) {
+                visible = Math.ceil(r.to - r.from);
+            }
+        } catch (e) { /* нет шкалы — считаем по свечам */ }
+        if (!visible) visible = Math.min(cds.length, 80);
+        if (W > 0 && visible > 0) return W / visible;
+        return 8;
+    }
+
     function drawLiqRects(ctx) {
         const tfSec = state.timeframe * 60;
         const kvol = chartVolScale();
         const items = visibleLiquidations();
         if (!items.length || !state.candles.length) return;
 
-        // Свечи по времени: прямоугольник рисуем только там, где свеча реально
-        // есть, и прижимаем цену к её диапазону low..high. Биржи отдают цену
-        // банкротства, она может уходить далеко от рынка — раньше из-за этого
-        // метки улетали в пустоту.
+        // Свечи по времени: плашка рисуется только там, где свеча реально есть.
         const bars = new Map();
         state.candles.forEach((c) => bars.set(c.time, c));
 
@@ -806,95 +878,108 @@
             let price = Number(item.price);
             if (!isFinite(price)) price = bar.close;
             price = Math.min(Math.max(price, lo), hi);
-            // Внутри свечи раскладываем по 6 уровням, чтобы близкие
-            // ликвидации слипались в один прямоугольник.
-            const span = hi - lo;
-            const level = span > 0 ? Math.round(((price - lo) / span) * 5) : 0;
-            const key = t + "_" + level;
-            const c = clusters.get(key) || {
-                key: key, time: t, lo: lo, hi: hi, level: level,
-                longUsd: 0, shortUsd: 0, total: 0, count: 0, longN: 0, shortN: 0, ids: [],
-                exchs: {},
-            };
+            // Ключ — сам бар: одна плашка на свечу вместо шести уровней внутри
+            let c = clusters.get(t);
+            if (!c) {
+                c = {
+                    key: "b" + t, time: t, bar: bar, lo: lo, hi: hi,
+                    longUsd: 0, shortUsd: 0, total: 0, count: 0, longN: 0,
+                    shortN: 0, ids: [], exchs: {}, pxSum: 0,
+                };
+                clusters.set(t, c);
+            }
             if (item.side === "SELL") { c.longUsd += item.usd; c.longN += 1; }
             else { c.shortUsd += item.usd; c.shortN += 1; }
             c.total += item.usd;
             c.count += 1;
+            c.pxSum += price * item.usd;
             const exKey = String(item.exchange || "?").toUpperCase();
             const slot = c.exchs[exKey] || { n: 0, usd: 0 };
             slot.n += 1;
             slot.usd += item.usd;
             c.exchs[exKey] = slot;
             if (item.id != null) c.ids.push(item.id);
-            clusters.set(key, c);
         });
         if (!clusters.size) return;
 
         const ts = chart.timeScale();
+        const slotPx = plateSlotPx();
+        const measure = (text, font) => {
+            ctx.font = "bold " + font.toFixed(1) + "px 'JetBrains Mono', monospace";
+            return ctx.measureText ? ctx.measureText(text).width : 0;
+        };
+        // От слабых к сильным: крупные плашки рисуются последними, поверх
         const list = Array.from(clusters.values()).sort((a, b) => a.total - b.total);
         const activeKey = pinHitKey || hoverHitKey;   // закреплённый важнее
 
         clusterHits = [];
-        const labeled = [];   // подписанные прямоугольники — защита от налезания
+        const drawn = [];    // страховка от наложения (одна плашка на свечу)
         ctx.save();
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
         list.forEach((c) => {
-            const price = c.hi > c.lo ? c.lo + ((c.hi - c.lo) * c.level) / 5 : c.lo;
-            let x, y;
+            const bar = c.bar;
+            const price = c.total > 0 ? c.pxSum / c.total : Number(bar.close);
+            let x, yO, yC, y;
             try {
                 x = ts.timeToCoordinate(c.time);
+                yO = candleSeries.priceToCoordinate(Number(bar.open));
+                yC = candleSeries.priceToCoordinate(Number(bar.close));
                 y = candleSeries.priceToCoordinate(price);
             } catch (e) { return; }
-            if (x === null || y === null || x === undefined || y === undefined) return;
+            if (x === null || x === undefined || !isFinite(x)) return;
+            if (!isFinite(yO) || !isFinite(yC)) return;
             if (x < -40 || x > clusterCanvas.width + 40) return;
-            if (y < -30 || y > clusterCanvas.height + 30) return;
+            const bodyTop = Math.min(yO, yC), bodyBot = Math.max(yO, yC);
 
             const whale = c.total >= WHALE_USD * kvol;
             const isLong = c.longUsd >= c.shortUsd;
-            const theme = whale ? heatTheme(c.total, kvol) : (isLong ? LIQ_COLORS.long : LIQ_COLORS.short);
+            const theme = whale ? heatTheme(c.total, kvol)
+                                : (isLong ? LIQ_COLORS.long : LIQ_COLORS.short);
             const wantLabel = whale || c.total >= LIQ_LABEL_MIN_USD * kvol;
-
-            let bw, bh, label;
-            if (wantLabel) {
-                ctx.font = "bold 9px 'JetBrains Mono', monospace";
-                label = fmtCompact(c.total);
-                bw = Math.max(30, Math.ceil(ctx.measureText(label).width) + 12);
-                bh = whale ? 16 + Math.min(6, Math.max(-3, (Math.log10(c.total) - 5) * 2.5)) : 15;
-            } else {
-                bw = 10; bh = 10; label = "";
+            const full = fmtCompact(c.total);
+            let geom = liqPlateGeom(bodyBot - bodyTop, slotPx,
+                                    wantLabel ? full : "", measure);
+            if (wantLabel && !geom.showLabel && full.charAt(0) === "$") {
+                // Не влезла подпись со знаком валюты — пробуем без него:
+                // в узком слоте выигранный символ и есть шанс показать цифры.
+                const alt = liqPlateGeom(bodyBot - bodyTop, slotPx,
+                                         full.slice(1), measure);
+                if (alt.showLabel) geom = alt;
             }
-            const bx = Math.round(x - bw / 2), by = Math.round(y - bh / 2);
-
-            // Подписанный прямоугольник, налезающий на другой подписанный, —
-            // рисуем чипом без текста (кроме китов: киты всегда с текстом).
-            let showLabel = wantLabel;
-            if (wantLabel && !whale) {
-                for (let j = 0; j < labeled.length; j++) {
-                    const p = labeled[j];
-                    if (bx < p.x + p.w + 2 && bx + bw + 2 > p.x &&
-                        by < p.y + p.h + 2 && by + bh + 2 > p.y) {
-                        showLabel = false;
-                        bw = 10; bh = 10;
-                        break;
-                    }
+            const bw = geom.w, bh = geom.h, half = bh / 2;
+            // Центр плашки — по цене ликвидаций, но внутри тела: иначе она
+            // вылезла бы за свечу и закрыла её целиком.
+            let cy = isFinite(y) ? y : (bodyTop + bodyBot) / 2;
+            if (bodyBot - bodyTop >= bh) {
+                cy = Math.min(Math.max(cy, bodyTop + half), bodyBot - half);
+            } else {
+                cy = (bodyTop + bodyBot) / 2;
+            }
+            const fx = Math.round(x - bw / 2), fy = Math.round(cy - half);
+            let clash = false;
+            for (let j = 0; j < drawn.length; j++) {
+                const d = drawn[j];
+                if (fx < d.x + d.w && fx + bw > d.x &&
+                        fy < d.y + d.h && fy + bh > d.y) {
+                    clash = true;
+                    break;
                 }
             }
-            const fx = showLabel ? bx : Math.round(x - bw / 2);
-            const fy = showLabel ? by : Math.round(y - bh / 2);
-            if (showLabel) labeled.push({ x: fx, y: fy, w: bw, h: bh });
+            if (clash) return;
+            drawn.push({ x: fx, y: fy, w: bw, h: bh });
 
             const isActive = activeKey === c.key;
-            clusterHits.push({ kind: "liq", x: fx, y: fy, w: bw, h: bh, key: c.key, ids: c.ids,
-                time: c.time, price: price, total: c.total, count: c.count,
-                longUsd: c.longUsd, shortUsd: c.shortUsd,
+            clusterHits.push({ kind: "liq", x: fx, y: fy, w: bw, h: bh, key: c.key,
+                ids: c.ids, time: c.time, price: price, total: c.total,
+                count: c.count, longUsd: c.longUsd, shortUsd: c.shortUsd,
                 longN: c.longN, shortN: c.shortN, whale: whale, exchs: c.exchs });
 
             const glow = 6 + Math.min(12, (Math.log10(Math.max(c.total, 10)) - 3) * 3);
-            const rad = showLabel ? 4 : 3;
+            const rad = Math.max(1, Math.min(3, bh / 2));
 
-            // Тёмная подложка отделяет прямоугольник от тела свечи любого цвета
-            rrPath(ctx, fx - 1.5, fy - 1.5, bw + 3, bh + 3, rad + 1);
+            // Тёмная подложка отделяет плашку от тела свечи любого цвета
+            rrPath(ctx, fx - 1, fy - 1, bw + 2, bh + 2, rad + 0.5);
             ctx.fillStyle = "rgba(5,8,14,0.85)";
             ctx.fill();
 
@@ -904,22 +989,23 @@
             ctx.fillStyle = theme.fill;
             ctx.fill();
             ctx.shadowBlur = 0;
-            ctx.lineWidth = whale ? 1.8 : 1.2;
+            ctx.lineWidth = whale ? 1.6 : 1.1;
             ctx.strokeStyle = theme.ring;
             ctx.stroke();
 
-            // Активный прямоугольник (наведение/нажатие) — белое кольцо поверх
+            // Активная плашка (наведение/нажатие) — белое кольцо поверх
             if (isActive) {
-                rrPath(ctx, fx - 3.5, fy - 3.5, bw + 7, bh + 7, rad + 2);
-                ctx.lineWidth = 1.8;
+                rrPath(ctx, fx - 2.5, fy - 2.5, bw + 5, bh + 5, rad + 1.5);
+                ctx.lineWidth = 1.6;
                 ctx.strokeStyle = "rgba(255,255,255,0.95)";
                 ctx.stroke();
             }
 
-            if (showLabel) {
-                ctx.font = "bold 9px 'JetBrains Mono', monospace";
+            if (geom.showLabel) {
+                ctx.font = "bold " + geom.font.toFixed(1) +
+                    "px 'JetBrains Mono', monospace";
                 ctx.fillStyle = theme.text;
-                ctx.fillText(label, x, y + 0.5);
+                ctx.fillText(geom.text || full, x, cy + 0.5);
             }
         });
         ctx.restore();
@@ -2105,9 +2191,23 @@
         drawPanePreview(kind, ctx, w, h);
     }
 
+    // tests/ind_panes.js: состояние рисования — без мыши в jsdom его не
+    // выставить, а проверить предпросмотр фигуры в окне нужно.
+    function drawTestState(patch) {
+        if (patch) {
+            if ("tool" in patch) drawTool = patch.tool;
+            if ("draft" in patch) drawDraft = patch.draft;
+            if ("draftPane" in patch) drawDraftPane = patch.draftPane;
+            if ("hover" in patch) drawHover = patch.hover;
+            if ("hoverPane" in patch) drawHoverPane = patch.hoverPane;
+        }
+        return { tool: drawTool, draft: drawDraft, draftPane: drawDraftPane,
+                 hover: drawHover, hoverPane: drawHoverPane };
+    }
+
     function drawPanePreview(kind, ctx, w, h) {
         if (!drawTool || drawTool === "eraser") return;
-        const cvt = paneToXY(kind, drawDraftPane === kind ? null : { pane: "main" });
+        const ownDraft = drawDraftPane === kind;      // фигура начата в этом окне
         if (drawTool === "horiz") {
             if (!drawHover || drawHoverPane !== kind) return;
             ctx.strokeStyle = drawColor;
@@ -2116,7 +2216,23 @@
             ctx.setLineDash([]);
             return;
         }
-        if (drawDraft && drawDraftPane === kind) {
+        if (!ownDraft) {
+            // Фигура начата в другом окне: показываем только её проекцию —
+            // тянуть «резинку» в чужой шкале нельзя (значения окон разные).
+            if (!drawDraft || drawDraftPane === "main") return;
+            const a = paneToXY(kind, { pane: "main" })(drawDraft);
+            if (!a) return;
+            ctx.fillStyle = drawColor;
+            ctx.beginPath();
+            ctx.arc(a.x, a.y, 4, 0, Math.PI * 2);
+            ctx.fill();
+            return;
+        }
+        // Своя фигура окна рисуется ПО ШКАЛЕ ЭТОГО ОКНА: раньше предпросмотр
+        // уходил в проекцию главного графика (значение окна как цена), из-за
+        // чего линия при перетаскивании прилипала к верхней кромке окна.
+        const cvt = paneToXY(kind, { pane: kind });
+        if (drawDraft) {
             const a = cvt(drawDraft);
             if (a) {
                 ctx.fillStyle = drawColor;
@@ -2125,7 +2241,7 @@
                 ctx.fill();
             }
         }
-        if (!drawHover || drawHoverPane !== kind || !drawDraft || drawDraftPane !== kind) return;
+        if (!drawHover || drawHoverPane !== kind || !drawDraft) return;
         const a = cvt(drawDraft);
         if (!a) return;
         const tp = panePixelToTP(kind, drawHover.x, drawHover.y);
@@ -2354,6 +2470,28 @@
         }
         // тестовый API для jsdom-гарнесса tests/drawings.js
         setupPaneDrawings();
+        window.LiqScopeLiq = {
+            plateGeom: liqPlateGeom,
+            slotPx: plateSlotPx,
+            plateGap: LIQ_PLATE_GAP,
+            fontMin: LIQ_PLATE_FONT_MIN,
+            // для tests/liq_plates.js: что реально нарисовано и как свеча
+            // отображается в пиксели при текущем масштабе
+            hits: () => clusterHits.map((h) => ({ x: h.x, y: h.y,
+                                                  w: h.w, h: h.h, key: h.key })),
+            priceToY: (v) => candleSeries.priceToCoordinate(Number(v)),
+            timeToX: (t) => chart.timeScale().timeToCoordinate(Number(t)),
+            // Растягивание графика: в jsdom библиотека не пересчитывает
+            // ширину слота, поэтому tests/liq_plates.js подменяет у шкалы
+            // времени timeToCoordinate — свечи и плашки растут вместе,
+            // ровно как при живом зуме.
+            timeScale: () => chart.timeScale(),
+            candles: () => (state.candles || []).map((c) => ({
+                time: c.time, open: c.open, close: c.close,
+                high: c.high, low: c.low,
+            })),
+            redraw: () => drawClusters(),
+        };
         window.LiqScopeDraw = {
             fibPrice, distToSegment, rayFar,
             paneCanvas: (kind) => {
@@ -2361,6 +2499,7 @@
                 return P ? $(P.draw) : null;
             },
             paneToXY: (kind, tp) => paneToXY(kind, { pane: kind })(tp),
+            testState: drawTestState,
             projectToXY: projectToXY,
             setPaneScale: (kind, lo, hi) => { paneScales[kind] = { lo: lo, hi: hi }; },
             paneValueAt: paneValueAt,

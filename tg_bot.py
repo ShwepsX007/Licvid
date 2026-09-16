@@ -2645,19 +2645,36 @@ class TelegramBot:
             total += 1
             ev = int(s.get("events") or 0)
             events_total += ev
-            if s.get("connected"):
+            dead = s.get("supervisor_alive") is False
+            if dead:
+                # Слушателя нет вовсе: попыток больше не будет, пока сторож
+                # не поднимет поток заново. Раньше это выглядело как «нет
+                # связи» без единой попытки — источник молчал до рестарта.
+                respawns = int(s.get("respawns") or 0)
+                tries = int(s.get("attempts") or 0)
+                rows.append(
+                    f"🟠 <b>{ex_link(name, fallback=self.ex_name(name))}</b> · "
+                    f"слушатель не запущен — поднимает сторож"
+                    + (f" · попыток: {self.fmt_int(tries)}" if tries else "")
+                    + (f" (подъёмов: {respawns})" if respawns else ""))
+            elif s.get("connected"):
                 live += 1
                 fresh = ""
                 sec = s.get("seconds_since_event")
                 if isinstance(sec, (int, float)):
                     fresh = f" · {self.ago_label(sec)}"
+                again = int(s.get("attempts") or 0)
+                if again > 1:
+                    fresh += f" · попыток: {self.fmt_int(again)}"
                 rows.append(
                     f"🟢 <b>{ex_link(name, fallback=self.ex_name(name))}</b> · "
                     f"{self.fmt_int(ev)} событий{fresh}")
             else:
                 err = _esc(str(s.get("last_error") or "нет связи")[:42])
+                attempts = int(s.get("attempts") or 0)
+                tail = f" · попыток: {attempts}" if attempts else ""
                 rows.append(f"🔴 <b>{ex_link(name, fallback=self.ex_name(name))}</b>"
-                            f" · {err}")
+                            f" · {err}{tail}")
         lines = ["<b>🩺 Биржи · эфир</b>", ""]
         lines.extend(rows or ["сервер ещё собирает источники"])
         lines.append("")

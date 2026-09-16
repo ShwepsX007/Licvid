@@ -2,8 +2,8 @@
  *
  *  GRAM с оборотом 1/1000 от BTC: k=0.001. Проверяем, что пороги кита,
  *  подписей, тиров OI и минимума CVD ужаты в 1000 раз:
- *   - прямоугольник: $100 — кит (тепловая заливка + подпись $100 цветом
- *     #1a1200), $50 — подписанный по стороне (циан), $1 — чип без подписи;
+ *   - плашка: $100 — кит (тепловая заливка), $50 — по стороне (циан),
+ *     $1 — ниже порога ленты и в плашку не попадает;
  *   - CVD: треугольники рисуются от $50/$200 (без масштаба минимум $1000);
  *   - OI: $2K — тир1 (r=13.5, подпись $2K), $600 — мини (r=9, без подписи);
  *     (геометрия шариков умножена на OI_BALL_SCALE=1.5)
@@ -212,11 +212,15 @@ async function main() {
   // прямоугольники: пороги ужаты в 1000 раз
   check("whale heat fill", fills.indexOf(HEAT_FILL) !== -1,
     JSON.stringify(fills.filter((f, i) => fills.indexOf(f) === i).slice(0, 12)));
-  check("whale labeled $100 heat-text", hasText("$100", HEAT_TEXT));
-  check("side rect labeled $50", hasText("$50", SIDE_TEXT),
-    JSON.stringify(texts.filter((e) => e.txt === "$50").map((e) => e.style)));
+  // Плашки ликвидаций теперь живут по телу свечи и подписываются только там,
+  // где цифры помещаются: в этом харнессе слот свечи ~6px, поэтому подписей
+  // плашек нет (пороги подписи проверяет tests/liq_plates.js на широком слоте).
+  check("узкий слот: цифры плашек убраны",
+    !hasText("$100", HEAT_TEXT) && !hasText("$101", HEAT_TEXT) &&
+    !hasText("$50", SIDE_TEXT),
+    JSON.stringify(texts.map((e) => e.txt + "|" + e.style)));
   check("side cyan fill", fills.indexOf(CYAN_FILL) !== -1);
-  check("dust $1 unlabeled", !anyText("$1"),
+  check("dust $1 unlabeled", !anyText("$1"),   // вошла в плашку $101
     JSON.stringify(texts.map((e) => e.txt).filter((v, i, a) => a.indexOf(v) === i)));
 
   // CVD: без масштаба минимум был бы $1000 — ничего бы не нарисовалось

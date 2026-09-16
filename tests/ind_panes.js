@@ -171,7 +171,7 @@ function part2() {
     "paneHeight", "paneYOf", "paneValueAt", "paneOf", "paneOverlayCtx",
     "paneToXY", "projectToXY", "drawToXY", "drawLineSeg", "drawFigureShape",
     "drawPreview", "panePixelToTP", "paneTimeAt", "drawPaneFigures",
-    "drawPanePreview", "drawPaneDrawings", "drawPixelToTP",
+    "drawPanePreview", "drawPaneDrawings", "drawPixelToTP", "drawTestState",
     // регулировка высот блоков графика
     "indKey", "mobileLayout", "paneVisible", "visiblePaneKinds", "visibleSplitCount", "stackHeight",
     "chartMinHeight", "panesBudget", "maxCanvasFor", "normalizeHeights"];
@@ -192,7 +192,7 @@ function part2() {
     " drawPaneOi, drawIndicatorPanes, syncPaneVisibility, indKey, visiblePaneKinds," +
     " stackHeight, panesBudget, maxCanvasFor, normalizeHeights," +
     " paneYOf, paneValueAt, paneToXY, projectToXY, drawPaneFigures, drawPaneDrawings," +
-    " drawFiguresList, paneScales };";
+    " drawFiguresList, paneScales, drawPanePreview, drawTestState };";
   const api = new Function("$", "window", "document", "localStorage", "I18n", "state",
     "chart", "visibleLiquidations", "fmtUsdShort", "candleSeries", "drawCanvas", code)(
     sandbox.$, sandbox.window, sandbox.document, sandbox.localStorage, sandbox.I18n,
@@ -290,6 +290,55 @@ function part2() {
         canvases["ind-draw-liq"]._rec.lines.length >= 2,
         canvases["ind-draw-liq"]._rec.lines.length);
   api.drawFiguresList.length = 0;
+
+  // --- предпросмотр фигуры, начатой В ЭТОМ окне ----------------------------
+  // Раньше «резинка» шла через проекцию главного графика: значение окна
+  // трактовалось как цена, и линия при перетаскивании прилипала к верхней
+  // кромке окна. Теперь драфт переводится по шкале самого окна.
+  console.log("\nчасть 2г: перетаскивание фигуры внутри нижнего окна");
+  const ctxLiq = canvases["ind-draw-liq"].getContext();
+  api.drawTestState({ tool: "line", draftPane: "liq",
+    draft: { time: candles[0].time, price: 0 },      // центр шкалы окна
+    hover: { x: 120, y: 8 }, hoverPane: "liq" });
+  const clearPanes = () => Object.keys(canvases).forEach(
+    (k) => { canvases[k]._rec.lines.length = 0; canvases[k]._rec.arcs.length = 0; });
+  clearPanes();
+  api.drawPanePreview("liq", ctxLiq, 360, hPane);
+  const rl = canvases["ind-draw-liq"]._rec;
+  check("предпросмотр в окне нарисован", rl.lines.length >= 2, rl.lines.length);
+  const ys = rl.lines.filter((l) => l[0] === "M" || l[0] === "L").map((l) => l[2]);
+  const yDraft = api.paneYOf("liq", 0, hPane);
+  check("линия идёт от точки драфта по шкале окна",
+        ys.some((y) => Math.abs(y - yDraft) < 0.01), ys.join(",") + " vs " + yDraft);
+  check("линия идёт за курсором, а не по верхней кромке",
+        ys.some((y) => Math.abs(y - 8) < 0.01) &&
+        ys.some((y) => Math.abs(y - yDraft) < 0.01) && Math.abs(yDraft - 8) > 5,
+        ys.join(","));
+  check("предпросмотр внутри окна (не вылезает за края)",
+        ys.every((y) => y >= 0 && y <= hPane), ys.join(","));
+  check("драфт своего окна не проецируется в другие окна",
+        canvases["ind-draw-cvd"]._rec.lines.length === 0 &&
+        canvases["ind-draw-oi"]._rec.lines.length === 0);
+
+  // фигура начата в ДРУГОМ окне — здесь только точка, «резинки» нет
+  api.drawTestState({ draftPane: "cvd", draft: { time: candles[2].time, price: -500 },
+                      hover: { x: 120, y: 18 }, hoverPane: "cvd" });
+  clearPanes();
+  api.drawPanePreview("liq", ctxLiq, 360, hPane);
+  check("чужой драфт из другого окна — только точка проекции",
+        rl.lines.length === 0 && rl.arcs.length === 1, rl.arcs.length);
+  check("точка проекции внутри окна",
+        rl.arcs[0] && rl.arcs[0].y > 0 && rl.arcs[0].y < hPane, JSON.stringify(rl.arcs[0]));
+
+  // фигура начата на главном графике — окно её не дублирует (рисует график)
+  api.drawTestState({ draftPane: "main", draft: { time: candles[2].time, price: 51000 },
+                      hover: { x: 120, y: 18 }, hoverPane: "main" });
+  clearPanes();
+  api.drawPanePreview("liq", ctxLiq, 360, hPane);
+  check("драфт главного графика в окне не дублируется",
+        rl.lines.length === 0 && rl.arcs.length === 0);
+  api.drawTestState({ tool: null, draft: null, draftPane: null, hover: null,
+                      hoverPane: null });
 
   // --- пустые данные --------------------------------------------------------
   sandbox.state.candles = candles.map((c) => ({ time: c.time, close: c.close }));

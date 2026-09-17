@@ -216,6 +216,73 @@ class BotMenuTest(unittest.TestCase):
                             for row in kb["inline_keyboard"] for b in row))
         self.assertEqual(calls[-1], ("24h", "liq"))
 
+    def test_pump_screen_shows_movers_and_settings(self):
+        """Сторож монет: экран показывает настройки, движения и кнопки."""
+        pic = {
+            "config": {"enabled": True, "mode": "both", "period": "5m",
+                       "candles": 3, "threshold": 30.0, "min_vol": 0.0,
+                       "cooldown_min": 10},
+            "status": {"coins": 418, "updated": 1789669572.0, "age_sec": 12.0,
+                       "poll_sec": 25.0, "signals_total": 2},
+            "movers": [
+                {"symbol": "SOL_USDT", "change_pct": 31.4, "price": 152.4,
+                 "volume24h": 12_500_000.0, "span_min": 15, "period": "5m",
+                 "candles": 3},
+                {"symbol": "DOGE_USDT", "change_pct": -18.2, "price": 0.31,
+                 "volume24h": 4_000_000.0, "span_min": 15, "period": "5m",
+                 "candles": 3},
+            ],
+            "hits": [{"symbol": "SOL_USDT", "kind": "pump", "change_pct": 31.4,
+                      "span_min": 15}],
+            "signals": [],
+        }
+        self.bot.pump_snapshot_fn = lambda cfg=None: pic
+        self.bot._pump_save(self.user, dict(pic["config"]))
+        text, kb = self.bot._screen(self.user, "svc:watchlist")
+        self.assertIn("Сторож монет", text)
+        self.assertIn("30%", text)
+        self.assertIn("3 × 5m", text)
+        self.assertIn("418", text)
+        self.assertIn("SOL", text)
+        self.assertIn("🚀", text)
+        self.assertIn("🩸", text)
+        datas = _datas(kb)
+        self.assertIn("pw:mode:both", datas)
+        self.assertIn("pw:thr:30", datas)
+        self.assertIn("pw:per:5m", datas)
+        self.assertIn("pw:cn:3", datas)
+        self.assertIn("pw:on", datas)
+        self.assertTrue(any(b.get("url", "").startswith("https://www.gate.com")
+                            for row in kb["inline_keyboard"] for b in row),
+                        "нужна ссылка на Gate")
+
+    def test_pump_screen_without_gate(self):
+        self.bot.pump_snapshot_fn = lambda cfg=None: {"status": {"coins": 0}}
+        text, _kb = self.bot._screen(self.user, "svc:watchlist")
+        self.assertIn("Цены Gate ещё не подтянулись", text)
+
+    def test_pump_settings_are_saved(self):
+        import asyncio
+        sent = []
+
+        async def fake_reply(chat_id, text, markup=None, message_id=None, **kw):
+            sent.append(text)
+            return True
+
+        self.bot.reply = fake_reply
+        self.bot.pump_snapshot_fn = lambda cfg=None: {"status": {"coins": 5}}
+        loop = asyncio.get_event_loop_policy().new_event_loop()
+        loop.run_until_complete(self.bot._on_pump_cb(1, self.user, "pw:thr:50", None))
+        loop.run_until_complete(self.bot._on_pump_cb(1, self.user, "pw:per:15m", None))
+        loop.run_until_complete(self.bot._on_pump_cb(1, self.user, "pw:cn:5", None))
+        cfg = self.bot._pump_cfg(self.user)
+        self.assertEqual(cfg["threshold"], 50.0)
+        self.assertEqual(cfg["period"], "15m")
+        self.assertEqual(cfg["candles"], 5)
+        row = self.store.get_user_service(self.user["id"], "watchlist")
+        self.assertTrue(row["enabled"])
+        self.assertEqual(row["config"]["period"], "15m")
+
     def test_correlations_screen_without_history(self):
         self.bot.correlations_fn = lambda window="24h", metric="liq": {}
         text, _kb = self.bot._screen(self.user, "svc:correlations")

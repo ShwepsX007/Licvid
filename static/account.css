@@ -469,3 +469,67 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
     .wrap { padding: 24px 16px 40px; }
     .profile { flex-direction: column; align-items: flex-start; }
 }
+
+
+/* ---------- доски сервисов в кабинете: корреляции и сторож монет -------- */
+.svc-board { display: block; }
+.svc-board .al-head { display: flex; gap: 12px; align-items: flex-start;
+    justify-content: space-between; }
+.cor-flows { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 10px; margin: 8px 0 4px; }
+.cor-flow { background: rgba(20, 26, 38, 0.55); border: 1px solid rgba(120, 140, 175, 0.18);
+    border-radius: 10px; padding: 8px 10px; }
+.cor-flow-h { font-size: 0.78rem; font-weight: 800; letter-spacing: 0.3px;
+    text-transform: uppercase; color: #9fb0c8; margin-bottom: 6px; }
+.cor-flow-row { display: flex; align-items: baseline; gap: 8px; padding: 3px 0;
+    border-bottom: 1px dashed rgba(120, 140, 175, 0.12); }
+.cor-flow-row:last-child { border-bottom: 0; }
+.cor-flow-sym { font-weight: 800; min-width: 62px; }
+.cor-flow-val { font-variant-numeric: tabular-nums; font-weight: 700; }
+.cor-flow-val.pos, .cor-pair-r.pos, .pump-val.pos { color: #00e676; }
+.cor-flow-val.neg, .cor-pair-r.neg, .pump-val.neg { color: #ff2a5f; }
+.cor-flow-val.gold { color: #ffc107; }
+.cor-flow-x { margin-left: auto; font-size: 0.74rem; color: #8d9cb4; text-align: right; }
+.cor-flow-empty { font-size: 0.8rem; color: #8d9cb4; padding: 4px 0; }
+.cor-heat-wrap { overflow-x: auto; margin: 4px 0 10px; }
+.cor-heat { border-collapse: separate; border-spacing: 2px; font-size: 0.7rem;
+    font-variant-numeric: tabular-nums; }
+.cor-heat th { font-weight: 700; color: #9fb0c8; padding: 2px 4px; text-align: center;
+    white-space: nowrap; }
+.cor-heat tbody th { text-align: right; }
+.cor-heat-cell { padding: 6px 4px; border-radius: 6px; text-align: center; color: #eaf0f8;
+    min-width: 40px; }
+.cor-heat-cell.diag, .cor-heat-empty { background: rgba(120, 140, 175, 0.10); color: #6c7a90; }
+.cor-pairs { display: grid; gap: 4px; }
+.cor-pair { display: grid; grid-template-columns: minmax(120px, 1.2fr) 2fr 48px;
+    align-items: center; gap: 8px; cursor: pointer; padding: 3px 0; }
+.cor-pair:hover { background: rgba(120, 140, 175, 0.08); }
+.cor-pair-names { font-weight: 700; font-size: 0.8rem; }
+.cor-pair-bar { height: 6px; border-radius: 4px; background: rgba(120, 140, 175, 0.18);
+    overflow: hidden; }
+.cor-pair-bar i { display: block; height: 100%; }
+.cor-pair-bar.pos i { background: linear-gradient(90deg, #0b6b3a, #00e676); }
+.cor-pair-bar.neg i { background: linear-gradient(90deg, #7a1030, #ff2a5f); }
+.cor-pair-r { text-align: right; font-weight: 800; font-variant-numeric: tabular-nums; }
+
+.pump-bars { display: grid; gap: 4px; margin: 6px 0 10px; }
+.pump-row { display: grid; grid-template-columns: 62px 1fr 78px minmax(120px, 150px);
+    align-items: center; gap: 8px; padding: 2px 0; }
+.pump-row.hot { background: rgba(255, 42, 95, 0.08); border-radius: 6px; }
+.pump-sym { font-weight: 800; font-size: 0.82rem; }
+.pump-track { position: relative; height: 14px; background: rgba(120, 140, 175, 0.12);
+    border-radius: 4px; overflow: hidden; }
+.pump-track i { position: absolute; top: 0; height: 100%; border-radius: 3px; }
+.pump-track i.up { background: linear-gradient(90deg, #0b6b3a, #00e676); }
+.pump-track i.down { background: linear-gradient(270deg, #7a1030, #ff2a5f); }
+.pump-track b.pump-mid { position: absolute; left: 50%; top: 0; bottom: 0; width: 1px;
+    background: rgba(220, 232, 248, 0.35); }
+.pump-val { font-weight: 800; font-variant-numeric: tabular-nums; }
+.pump-x { font-size: 0.74rem; color: #8d9cb4; text-align: right; }
+.pump-hint { font-size: 0.74rem; color: #8d9cb4; align-self: center; }
+.pump-window { font-size: 0.78rem; color: #9fb0c8; margin: 6px 0 2px; }
+.pump-hits { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 8px; }
+.pump-hit { padding: 4px 8px; border-radius: 999px; font-size: 0.78rem; font-weight: 700;
+    border: 1px solid currentColor; }
+.pump-hit.pos { color: #00e676; }
+.pump-hit.neg { color: #ff2a5f; }

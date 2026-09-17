@@ -47,13 +47,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from market_feed import MarketFeed, TF_MINUTES, base_of, canon
+from market_feed import GATE_REST, MarketFeed, TF_MINUTES, base_of, canon, _get_json
 from timeframes import parse_tf
 from oi_feed import map_candles_to_oi
 from hour_board import BOARD, OI, build_snapshot
 from accounts import Store
 from flow_feed import FlowFeed
 from history import HistoryStore, MONTH_HOURS
+from pump_scan import PumpScanner, filter_new as pump_filter_new
+from pump_scan import format_signal_html as pump_signal_html
+from refs import gate_url
 from mailer import build_mailer
 from ai_text import build_ai
 import api_digest
@@ -82,6 +85,7 @@ TICK_SOURCES = [x.strip().lower() for x in
                 os.getenv("LIQSCOPE_TICK_SOURCE", "binance,binance-raw,bybit").split(",")
                 if x.strip()]
 DEMO_MODE = os.getenv("LIQSCOPE_DEMO", "0").strip() in ("1", "true", "yes", "on")
+DEMO_PUMP_VOL: Dict[str, float] = {}   # демо-оборот 24ч по монетам для сторожа
 HISTORY_MAX = int(os.getenv("LIQSCOPE_HISTORY_MAX", "60000"))
 # Дисковое сохранение истории ликвидаций (переживает рестарт сервера).
 # Путь — каталог дневных файлов ("" / "0" / "off" — не хранить вовсе),
@@ -156,6 +160,17 @@ LIQUIDATIONS: Deque[dict] = deque(maxlen=HISTORY_MAX)
 # CVD, объём). В памяти — только свежий хвост, всё остальное на диске.
 HIST = HistoryStore(HISTORY_FILE, ttl_hours=HISTORY_TTL_HOURS,
                     shard_max_mb=HISTORY_SHARD_MAX_MB)
+# Сторож пампов и дампов: минутные цены всех монет Gate + сигналы.
+PUMPS = PumpScanner(keep_min=int(os.getenv("LIQSCOPE_PUMP_KEEP_MIN",
+                                         str(3 * 24 * 60)) or 3 * 24 * 60))
+PUMP_SIGNALS: Deque[dict] = deque(maxlen=300)      # последние сработавшие сигналы
+PUMP_LAST_FIRED: Dict[str, float] = {}             # "символ|режим" -> когда сообщили
+PUMP_POLL_SEC = max(10.0, float(os.getenv("LIQSCOPE_PUMP_POLL_SEC", "25") or 25))
+PUMP_OFF = os.getenv("LIQSCOPE_PUMP_OFF", "").strip() in ("1", "true", "yes", "on")
+# Заполняются из pump_scan при старте (так их видит и кабинет, и бот).
+PUMP_PERIODS: list = []
+PUMP_THRESHOLDS: list = []
+PUMP_CANDLES: list = []
 # История открытого интереса: уровень пишется каждые OI_SNAP_SEC секунд,
 # лежит на диске — после рестарта стенд в канале не пустует первые часы.
 OI_HISTORY_FILE = os.getenv("LIQSCOPE_OI_HISTORY",
@@ -868,6 +883,162 @@ def alerts_market_snapshot() -> dict:
     return {"now": now, "events": events, "cvd": cvd, "oi": oi}
 
 
+def pump_watchers() -> List[dict]:
+    """Кто следит за пампами: подписчики сервиса «Сторож монет»."""
+    out = []
+    for sub in account_store.list_service_subscribers("watchlist"):
+        cfg = pump_normalize(sub.get("config") or {})
+        if cfg.get("enabled"):
+            row = dict(sub)
+            row["pump"] = cfg
+            row["lang"] = ("en" if str(sub.get("language") or "").startswith("en")
+                           else "ru")
+            out.append(row)
+    return out
+
+
+def pump_normalize(config: Optional[dict]) -> dict:
+    from pump_scan import normalize
+    return normalize(config)
+
+
+def pump_snapshot(config: Optional[dict] = None, lang: str = "ru") -> dict:
+    """Картина для кабинета и бота: настройки, резкие движения, сигналы."""
+    from pump_scan import CANDLE_PRESETS as _CANDS, PERIODS as _PERIODS
+    from pump_scan import THRESHOLDS as _THR
+    cfg = pump_normalize(config or {})
+    now = time.time()
+    return {
+        "now": now,
+        "config": cfg,
+        "settings_text": pump_settings_text(cfg),
+        "status": {
+            "coins": PUMPS.known(),
+            "updated": PUMPS.last_update(),
+            "age_sec": (now - PUMPS.last_update()) if PUMPS.last_update() else None,
+            "poll_sec": PUMP_POLL_SEC,
+            "signals_total": len(PUMP_SIGNALS),
+            "lang": lang,
+        },
+        "movers": PUMPS.movers(cfg, limit=12),
+        "hits": PUMPS.scan(cfg)[:12],
+        "signals": list(PUMP_SIGNALS)[-30:][::-1],
+        "periods": [{"key": k, "minutes": m} for k, m in (PUMP_PERIODS or _PERIODS)],
+        "thresholds": list(PUMP_THRESHOLDS or _THR),
+        "candles": list(PUMP_CANDLES or _CANDS),
+    }
+
+
+def pump_settings_text(cfg: dict) -> str:
+    from pump_scan import format_settings_text
+    return format_settings_text(cfg)
+
+
+async def gate_ticker_snapshot() -> dict:
+    """Один запрос Gate за всеми USDT-контрактами: цены, оборот, изменение."""
+    session = getattr(feed, "_session", None) if feed else None
+    if session is None:
+        return {}
+    data = await _get_json(session, f"{GATE_REST}/tickers", timeout=15)
+    out = {"prices": {}, "volume": {}, "change24": {}}
+    for t in data or []:
+        contract = str(t.get("contract") or "")
+        if not contract.endswith("_USDT"):
+            continue
+        sym = canon(contract)
+        out["prices"][sym] = float(t.get("last") or 0)
+        out["volume"][sym] = float(t.get("volume_24h_quote")
+                                   or t.get("volume_24h_usd")
+                                   or t.get("volume_24h") or 0)
+        out["change24"][sym] = float(t.get("change_percentage") or 0)
+    return out
+
+
+async def pump_loop():
+    """Сторож монет: минутные цены всех монет Gate и сигналы в Telegram.
+
+    Один REST-запрос отдаёт все USDT-контракты сразу, поэтому следить за всем
+    рынком дешевле, чем за подписками по каждой паре. Сигнал уходит тем, кто
+    включил сервис «Сторож монет», и предлагает посмотреть монету на Gate.
+    """
+    from pump_scan import CANDLE_PRESETS as _CANDS, THRESHOLDS as _THR
+    global PUMP_CANDLES, PUMP_PERIODS, PUMP_THRESHOLDS
+    PUMP_CANDLES, PUMP_THRESHOLDS = _CANDS, _THR
+    if PUMP_OFF:
+        log.info("Сторож монет выключен (LIQSCOPE_PUMP_OFF=1)")
+        return
+    from pump_scan import PERIODS
+    PUMP_PERIODS = PERIODS
+    await asyncio.sleep(10)
+    fails = 0
+    while True:
+        try:
+            snap = await gate_ticker_snapshot()
+            if snap.get("prices"):
+                added = PUMPS.add_prices(snap["prices"], volume=snap["volume"],
+                                         change24=snap["change24"])
+                fails = 0
+                if added:
+                    log.debug("Сторож монет: %d монет, новых минуток %d",
+                              PUMPS.known(), added)
+                await pump_notify()
+            else:
+                fails += 1
+                if fails in (1, 5, 30):
+                    log.info("Сторож монет: Gate не отдал тикеры (попытка %d) — "
+                             "в демо-режиме это нормально", fails)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:  # noqa: BLE001
+            fails += 1
+            if fails in (1, 10):
+                log.warning("Сторож монет: %s", e)
+        try:
+            await asyncio.sleep(PUMP_POLL_SEC)
+        except asyncio.CancelledError:
+            break
+
+
+async def pump_notify():
+    """Разослать сигналы подписчикам: один сигнал — одна монета и режим."""
+    watchers = pump_watchers()
+    if not watchers:
+        return
+    now = time.time()
+    by_user: Dict[int, list] = {}
+    for w in watchers:
+        hits = PUMPS.scan(w["pump"])
+        if not hits:
+            continue
+        fresh = pump_filter_new(hits, PUMP_LAST_FIRED, now,
+                                w["pump"].get("cooldown_min", 10))
+        if fresh:
+            by_user[int(w["user_id"])] = fresh
+    for user_id, fresh in by_user.items():
+        for hit in fresh:
+            event = dict(hit)
+            event["ts"] = now
+            event["user_id"] = user_id
+            PUMP_SIGNALS.append(event)
+    if not by_user:
+        return
+    for w in watchers:
+        fresh = by_user.get(int(w["user_id"]))
+        if not fresh:
+            continue
+        tg_id = int(w.get("tg_id") or 0)
+        if not tg_id or not tg_bot.running:
+            continue
+        for hit in fresh[:3]:
+            lang = w.get("lang") or "ru"
+            await tg_bot.send(
+                tg_id, pump_signal_html(hit, lang),
+                markup={"inline_keyboard": [[
+                    {"text": "💠 Открыть на Gate", "url": gate_url(lang)},
+                    {"text": "🌐 Терминал", "url": PUBLIC_URL + "/terminal"},
+                ]]})
+
+
 async def alerts_oi_warmup():
     tracker = getattr(feed, "oi", None) if feed else None
     if tracker is None:
@@ -1298,6 +1469,72 @@ async def demo_generator():
 
 
 # Ориентировочные цены только для демо-режима (когда биржи недоступны)
+def demo_pump_seed(minutes: int = 20) -> None:
+    """Демо-история сторожа: минутки по всем монетам, чтобы панель была живой.
+
+    Без сети Gate тикеры не приходят, и «Сторож монет» показывал бы пустую
+    панель. Наполняем минутную историю случайным ходом, а паре монет даём
+    заметный памп и дамп — как это выглядит на живом рынке.
+    """
+    syms = list((feed.symbols if feed else []) or list(DEMO_SEED_PRICES))[:120]
+    if not syms:
+        syms = list(DEMO_SEED_PRICES)
+    now = time.time()
+    minute = int(now // 60) * 60
+    up_sym = random.choice(syms)
+    others = [x for x in syms if x != up_sym] or syms
+    down_sym = random.choice(others)
+    for sym in syms:
+        base = feed.prices.get(sym) if feed else None
+        base = base or DEMO_SEED_PRICES.get(sym) or random.uniform(1, 100)
+        DEMO_PUMP_VOL[sym] = random.uniform(4e5, 6e7)
+        price = base
+        series = []
+        for i in range(minutes - 1, -1, -1):
+            price = max(price * (1 + random.gauss(0.0, 0.004)), 1e-12)
+            series.append((minute - 60 * i, price))
+        kind = 0.32 if sym == up_sym else (-0.28 if sym == down_sym else 0.0)
+        if kind:
+            tail = 6
+            for j in range(tail):
+                idx = len(series) - tail + j
+                ts, p = series[idx]
+                series[idx] = (ts, max(p * (1 + kind * (j + 1) / tail), 1e-12))
+        for ts, p in series:
+            PUMPS.add_prices({sym: p}, ts=ts)
+        last = series[-1][1]
+        PUMPS.add_prices({sym: last}, ts=now, volume={sym: DEMO_PUMP_VOL[sym]},
+                         change24={sym: round((last / series[0][1] - 1) * 100, 2)})
+
+
+async def demo_pump_walk():
+    """Демо-цены сторожа: живые минутки всех монет и редкие всплески."""
+    await asyncio.sleep(2.0)
+    while True:
+        try:
+            await asyncio.sleep(5.0)
+            now = time.time()
+            syms = list((feed.symbols if feed else []) or list(DEMO_SEED_PRICES))[:120]
+            prices = {}
+            for sym in syms:
+                p = (PUMPS.price_now(sym) or DEMO_SEED_PRICES.get(sym)
+                     or random.uniform(1, 100))
+                if random.random() < 0.01:
+                    p *= random.choice((1.10, 1.22, 0.90, 0.78))
+                else:
+                    p *= 1 + random.gauss(0, 0.0025)
+                prices[sym] = max(p, 1e-12)
+                if feed and sym in feed.prices:
+                    feed.prices[sym] = prices[sym]
+            PUMPS.add_prices(prices, ts=now, volume=DEMO_PUMP_VOL)
+            if PUMPS.known():
+                await pump_notify()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:  # noqa: BLE001
+            log.debug("demo pumps: %s", e)
+
+
 DEMO_SEED_PRICES = {
     "BTC_USDT": 96000.0, "ETH_USDT": 3300.0, "SOL_USDT": 190.0, "XRP_USDT": 2.3,
     "DOGE_USDT": 0.32, "BNB_USDT": 690.0, "ADA_USDT": 0.95, "AVAX_USDT": 38.0,
@@ -1462,6 +1699,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(flow_broadcaster(), name="flow-broadcast"),
         asyncio.create_task(flow_oi_task(), name="flow-oi"),
         asyncio.create_task(history_task(), name="history"),
+        asyncio.create_task(pump_loop(), name="pumps"),
         asyncio.create_task(price_broadcaster(), name="price-broadcast"),
         asyncio.create_task(stats_broadcaster(), name="stats-broadcast"),
         asyncio.create_task(kline_refresher(), name="kline-refresh"),
@@ -1480,6 +1718,9 @@ async def lifespan(app: FastAPI):
         tasks.append(asyncio.create_task(demo_price_walk(), name="demo-prices"))
         tasks.append(asyncio.create_task(demo_tick_walk(), name="demo-ticks"))
         tasks.append(asyncio.create_task(demo_flow_walk(), name="demo-flow"))
+        # сторож монет в демо: минутная история всех монет и редкие всплески
+        demo_pump_seed()
+        tasks.append(asyncio.create_task(demo_pump_walk(), name="demo-pumps"))
 
     # прогреваем свечи популярных монет, чтобы первый клиент увидел график сразу
     async def warmup():
@@ -1498,6 +1739,7 @@ async def lifespan(app: FastAPI):
     tg_bot.digest_fn = build_channel_digest
     tg_bot.alerts_market_fn = alerts_market_snapshot
     tg_bot.correlations_fn = correlations_snapshot
+    tg_bot.pump_snapshot_fn = pump_snapshot
     tg_bot.public_url = PUBLIC_URL
     await tg_bot.start()
 
@@ -1541,6 +1783,7 @@ account_ctx.liqs_fn = lambda: list(LIQUIDATIONS)[-8:]
 account_ctx.ws_clients_fn = lambda: len(hub.clients)
 account_ctx.alerts_market_fn = alerts_market_snapshot
 account_ctx.correlations_fn = correlations_snapshot
+account_ctx.pump_snapshot_fn = pump_snapshot
 account_ctx.symbols_fn = lambda: list((feed.symbols if feed else [])[:40])
 register_account_routes(app)
 
@@ -1954,6 +2197,16 @@ async def ws_endpoint(websocket: WebSocket):
                     "source": entry["source"],
                     "candles": entry["candles"],
                 })
+            elif action == "feed":
+                # переключение ленты в терминале: «ВСЕ» + CVD/OI → клиент ждёт
+                # поток по всем монетам, поэтому сразу отдаём срез, не дожидаясь
+                # следующего тика рассылки
+                feed_tab = str(raw.get("feed") or "").strip().lower()
+                if feed_tab in ("liq", "cvd", "oi"):
+                    client.feed = feed_tab
+                sync_hot_symbols()
+                if client.wants_flow:
+                    await client.send(flow_snapshot())
             elif action == "ping":
                 await client.send({"type": "pong", "t": time.time()})
     except WebSocketDisconnect:

@@ -424,7 +424,11 @@
                 : (s.subscribed ? t("subscribed") : t("subscribe"));
             var body = s.slug === "alerts"
                 ? '<div class="alerts-board" id="alerts-board"></div>'
-                : "<p>" + (s.description || "") + "</p>" + soon +
+                : s.slug === "correlations"
+                    ? '<div class="svc-board" id="corr-board"></div>'
+                    : s.slug === "watchlist"
+                        ? '<div class="svc-board" id="pump-board"></div>'
+                        : "<p>" + (s.description || "") + "</p>" + soon +
                     '<div class="row-actions">' +
                     // у дайджеста есть своя страница: сразу ведём читать выпуски
                     (s.slug === "digest"
@@ -449,6 +453,8 @@
                 box.querySelectorAll(".svc-fold").forEach(function (f) { f.classList.remove("open"); });
                 if (!was && fold) fold.classList.add("open");
                 try { localStorage.setItem("liqscope.svc.open", was ? "" : slug); } catch (e) {}
+                if (!was && slug === "correlations") bootCorrelations();
+                if (!was && slug === "watchlist") bootPumps();
             });
         });
         box.querySelectorAll("button[data-slug]").forEach(function (btn) {
@@ -461,6 +467,10 @@
             });
         });
         bootAlerts();
+        // доски сервисов поднимаем только для раскрытой гармошки: не дёргаем
+        // сервер зря, а данные обновляются, пока сервис на экране
+        if (open === "correlations") bootCorrelations();
+        if (open === "watchlist") bootPumps();
     }
 
     var tgLinkTimer = null;
@@ -952,6 +962,396 @@
                 alCfg.min_event = alCfg.min_event || {};
                 alCfg.min_event[m] = Math.max(0, Number(inp.value) || 0);
                 alDebounce();
+            });
+        });
+    }
+
+        /* ---------- сервис «Корреляции валют»: тепловая карта ---------- */
+    var corData = null, corTimer = null, corCfg = { window: "24h", metric: "liq" };
+    var corPairs = null;
+
+    function bootCorrelations() {
+        if (!$("corr-board")) return;
+        loadCorrelations(true);
+        if (corTimer) clearInterval(corTimer);
+        corTimer = setInterval(function () {
+            if (!document.hidden && $("corr-board") &&
+                $("corr-board").offsetParent !== null) loadCorrelations(false);
+        }, 30000);
+    }
+
+    function loadCorrelations(full) {
+        api("/api/account/correlations?window=" + corCfg.window + "&metric=" + corCfg.metric)
+            .then(function (d) {
+                if (!d || !d.ok) return;
+                if (full || !corData) { corData = d; paintCorrelations(d, true); }
+                else { corData = d; paintCorrelations(d, false); }
+            });
+    }
+
+    function corHeatColor(r) {
+        var a = Math.max(0, Math.min(1, Math.abs(Number(r) || 0)));
+        var alpha = (0.06 + 0.7 * a).toFixed(2);
+        return Number(r) >= 0
+            ? "background:rgba(0,230,118," + alpha + ")"
+            : "background:rgba(255,42,95," + alpha + ")";
+    }
+
+    function corTile(sym) {
+        var short = String(sym || "").replace("_USDT", "");
+        return '<span class="cor-sym">' + esc(short) + "</span>";
+    }
+
+    function corFlow(title, cls, items, unit) {
+        var rows = (items || []).map(function (sym) {
+            var c = (corData && corData.coins && corData.coins[sym]) || {};
+            var val = unit === "liq" ? c.liq_usd : unit === "cvd" ? Math.abs(c.cvd || 0)
+                : unit === "oi" ? Math.abs(c.oi_delta || 0) : c.liq_usd;
+            var extra = "";
+            if (unit === "liq") {
+                var long = Number(c.liq_long || 0), short = Number(c.liq_short || 0);
+                if (long >= short) extra = Math.round(100 * long / (long + short || 1)) + "% лонги";
+                else extra = Math.round(100 * short / (long + short || 1)) + "% шорты";
+            } else if (unit === "cvd") {
+                extra = (c.cvd_share >= 0 ? "покупатели " : "продавцы ") +
+                    Math.abs(Number(c.cvd_share || 0)).toFixed(1) + "% объёма";
+            } else if (unit === "oi") {
+                extra = (c.oi_pct >= 0 ? "+" : "") + Number(c.oi_pct || 0).toFixed(2) + "% OI";
+            }
+            return '<div class="cor-flow-row"><span class="cor-flow-sym">' +
+                esc(String(sym).replace("_USDT", "")) + "</span>" +
+                '<span class="cor-flow-val ' + cls + '">' + alMoney(val) + "</span>" +
+                '<span class="cor-flow-x">' + esc(extra) + "</span></div>";
+        });
+        if (!rows.length) rows = ['<div class="cor-flow-empty">пока пусто</div>'];
+        return '<div class="cor-flow"><div class="cor-flow-h">' + title + "</div>" +
+            rows.join("") + "</div>";
+    }
+
+    function corPairsList(d) {
+        var pairs = (d.pairs || {})[d.metric] || [];
+        if (!pairs.length) return '<div class="cor-flow-empty">связей пока нет — мало истории</div>';
+        return pairs.map(function (p, i) {
+            var r = Number(p.r) || 0;
+            var w = Math.max(6, Math.min(100, Math.round(Math.abs(r) * 100)));
+            var cls = r >= 0 ? "pos" : "neg";
+            return '<div class="cor-pair" data-i="' + i + '">' +
+                '<span class="cor-pair-names">' + esc(String(p.a).replace("_USDT", "")) +
+                " ↔ " + esc(String(p.b).replace("_USDT", "")) + "</span>" +
+                '<span class="cor-pair-bar ' + cls + '"><i style="width:' + w + '%"></i></span>' +
+                '<span class="cor-pair-r ' + cls + '">' + r.toFixed(2) + "</span></div>";
+        }).join("");
+    }
+
+    function corHeat(d) {
+        var syms = (d.symbols || []).slice(0, 10);
+        var m = (d.matrices || {})[d.metric] || {};
+        if (syms.length < 2) {
+            return '<div class="cor-flow-empty">мало монет с историей за это окно</div>';
+        }
+        var html = '<div class="cor-heat-wrap"><table class="cor-heat"><thead><tr><th></th>' +
+            syms.map(function (s) { return "<th>" + esc(String(s).replace("_USDT", "")) + "</th>"; })
+                .join("") + "</tr></thead><tbody>";
+        syms.forEach(function (a) {
+            html += "<tr><th>" + esc(String(a).replace("_USDT", "")) + "</th>";
+            syms.forEach(function (b) {
+                var v = (m[a] || {})[b];
+                var same = a === b;
+                if (v === undefined || v === null) {
+                    html += '<td class="cor-heat-empty">·</td>';
+                    return;
+                }
+                var r = Number(v);
+                html += '<td class="cor-heat-cell' + (same ? " diag" : "") + '" style="' +
+                    (same ? "" : corHeatColor(r)) + '">' +
+                    (same ? "1" : r.toFixed(2)) + "</td>";
+            });
+            html += "</tr>";
+        });
+        return html + "</tbody></table></div>";
+    }
+
+    function paintCorrelations(d, bind) {
+        var board = $("corr-board");
+        if (!board) return;
+        var wins = d.windows || [];
+        var mets = d.metrics || [];
+        var labels = { liq: "LIQ", vol: "📦 Объём", cvd: "🌊 CVD", oi: "📊 OI" };
+        var winLabel = (d.window_label || d.window || "");
+        function chips(list, cur, attr, fmt) {
+            return list.map(function (v) {
+                var key = typeof v === "object" ? (v.key || v.window || v.metric) : v;
+                var on = String(key) === String(cur);
+                return '<button type="button" class="al-chip' + (on ? " on" : "") +
+                    '" ' + attr + '="' + key + '">' + esc(fmt ? fmt(v, key) : key) + "</button>";
+            }).join("");
+        }
+        var flows = d.flows || {};
+        var head = "<div class=\"al-head\"><div><h3>🔗 Корреляции валют</h3>" +
+            '<div class="al-sub">Кто ходит вместе за ' + esc(winLabel) +
+            ", а кто в противофазе: ликвидации и объём, CVD и OI. Видно, где выносило шорты, " +
+            "а где лонги, куда перекошен CVD и где растёт открытый интерес.</div></div></div>";
+        board.innerHTML = head +
+            '<div class="al-label">Окно</div><div class="al-chips" id="cor-wins">' +
+            chips(wins, d.window, "data-corwin", function (v, key) {
+                return (typeof v === "object" && (v.label || v.title)) || key;
+            }) + "</div>" +
+            '<div class="al-label">Метрика</div><div class="al-chips" id="cor-mets">' +
+            chips(mets, d.metric, "data-cormet", function (v, key) {
+                return labels[key] || key;
+            }) + "</div>" +
+            '<div class="cor-flows">' +
+            corFlow("🩸 Где выносило шорты", "neg", flows.liquidated_short, "liq") +
+            corFlow("💥 Где выносило лонги", "gold", flows.liquidated_long, "liq") +
+            corFlow("🌊 CVD на сторону продавцов", "neg", flows.cvd_sellers, "cvd") +
+            corFlow("🌊 CVD на сторону покупателей", "pos", flows.cvd_buyers, "cvd") +
+            corFlow("📈 OI растёт", "pos", flows.oi_up, "oi") +
+            corFlow("📉 OI падает", "neg", flows.oi_down, "oi") +
+            "</div>" +
+            '<div class="al-label">Тепловая карта · ' + esc(labels[d.metric] || d.metric) +
+            " · " + esc(winLabel) + "</div>" + corHeat(d) +
+            '<div class="al-label">Самые сильные связи</div>' +
+            '<div class="cor-pairs" id="cor-pairs">' + corPairsList(d) + "</div>" +
+            '<div class="al-status" id="cor-status">монет: ' + (d.symbols || []).length +
+            " · точек в окне: " + (d.hours || 0) + "</div>";
+        if (bind) bindCorrelations();
+    }
+
+    function bindCorrelations() {
+        document.querySelectorAll("#cor-wins .al-chip").forEach(function (b) {
+            b.addEventListener("click", function () {
+                corCfg.window = b.getAttribute("data-corwin");
+                loadCorrelations(true);
+            });
+        });
+        document.querySelectorAll("#cor-mets .al-chip").forEach(function (b) {
+            b.addEventListener("click", function () {
+                corCfg.metric = b.getAttribute("data-cormet");
+                loadCorrelations(true);
+            });
+        });
+        document.querySelectorAll("#cor-pairs .cor-pair").forEach(function (row) {
+            row.addEventListener("click", function () {
+                if (!corData) return;
+                var p = ((corData.pairs || {})[corData.metric] || [])[Number(row.getAttribute("data-i"))];
+                if (!p) return;
+                var st = $("cor-status");
+                var a = String(p.a).replace("_USDT", ""), b = String(p.b).replace("_USDT", "");
+                if (!st) return;
+                st.textContent = a + " и " + b + ": r = " + Number(p.r).toFixed(2) +
+                    (Number(p.r) >= 0 ? " — движутся вместе" : " — в противофазе") +
+                    " · " + (labelsForMetric(corData.metric));
+            });
+        });
+    }
+
+    function labelsForMetric(m) {
+        if (m === "cvd") return "по потоку CVD";
+        if (m === "oi") return "по открытому интересу";
+        if (m === "vol") return "по объёму";
+        return "по ликвидациям";
+    }
+
+    /* ---------- сервис «Сторож монет»: гистограмма пампов/дампов ---------- */
+    var pumpData = null, pumpTimer = null, pumpCfg = null, pumpSaveT = null;
+
+    function bootPumps() {
+        if (!$("pump-board")) return;
+        loadPumps(true);
+        if (pumpTimer) clearInterval(pumpTimer);
+        pumpTimer = setInterval(function () {
+            if (!document.hidden && $("pump-board") &&
+                $("pump-board").offsetParent !== null) loadPumps(false);
+        }, 12000);
+    }
+
+    function loadPumps(full) {
+        api("/api/account/watchlist").then(function (d) {
+            if (!d || !d.ok) return;
+            pumpData = d;
+            if (full || !pumpCfg) { pumpCfg = d.config || pumpCfg; paintPumps(d, true); }
+            else paintPumps(d, false);
+        });
+    }
+
+    function savePumps() {
+        if (!pumpCfg) return;
+        api("/api/account/watchlist", {
+            method: "POST",
+            body: JSON.stringify(pumpCfg),
+        }).then(function (d) {
+            var st = $("pump-status");
+            if (d && d.config) pumpCfg = d.config;
+            if (st) {
+                st.className = "al-status " + (d && d.ok ? "ok" : "");
+                st.textContent = d && d.ok ? "сохранено · сигналы придут в Telegram"
+                    : ((d && d.error) || "ошибка");
+            }
+        });
+    }
+
+    function pumpDebounce() {
+        if (pumpSaveT) clearTimeout(pumpSaveT);
+        pumpSaveT = setTimeout(savePumps, 300);
+    }
+
+    function pumpSpan(d) {
+        // окно сигнала: период свечи × число свечей (текущая свеча считается)
+        var per = (d.periods || []).filter(function (x) { return x.key === pumpCfg.period; })[0];
+        var mins = (per && per.minutes) || 5;
+        return mins * (Number(pumpCfg.candles) || 1);
+    }
+
+    function pumpBars(d) {
+        var movers = (d.movers || []).slice(0, 12);
+        if (!movers.length) {
+            return '<div class="cor-flow-empty">данных ещё нет — сторож собирает минутную историю Gate</div>';
+        }
+        var max = movers.reduce(function (m, x) {
+            return Math.max(m, Math.abs(Number(x.change_pct) || 0));
+        }, 1);
+        return '<div class="pump-bars">' + movers.map(function (m) {
+            var pct = Number(m.change_pct) || 0;
+            var w = Math.max(2, Math.round(50 * Math.abs(pct) / max));
+            var up = pct >= 0;
+            var thr = Math.abs(pct) >= Number((pumpCfg && pumpCfg.threshold) || 0);
+            return '<div class="pump-row' + (thr ? " hot" : "") + '">' +
+                '<span class="pump-sym">' + esc(String(m.symbol).replace("_USDT", "")) +
+                "</span>" +
+                '<span class="pump-track"><i class="' + (up ? "up" : "down") +
+                '" style="' + (up ? "left:50%;" : "right:50%;") + "width:" + w + '%"></i>' +
+                '<b class="pump-mid"></b></span>' +
+                '<span class="pump-val ' + (up ? "pos" : "neg") + '">' +
+                (pct >= 0 ? "+" : "−") + Math.abs(pct).toFixed(2) + "%</span>" +
+                '<span class="pump-x">' + esc(alPrice(m.price)) + " · " +
+                esc(alMoney(m.volume24h)) + "</span></div>";
+        }).join("") + "</div>";
+    }
+
+    function alPrice(v) {
+        v = Number(v) || 0;
+        if (v >= 1000) return "$" + v.toFixed(0);
+        if (v >= 1) return "$" + v.toFixed(2);
+        if (v >= 0.01) return "$" + v.toFixed(4);
+        return "$" + v.toPrecision(3);
+    }
+
+    function pumpTape(d) {
+        var rows = (d.signals || []).slice(0, 12);
+        if (!rows.length) return '<div class="s">сигналов пока не было</div>';
+        return rows.map(function (s) {
+            var ts = s.ts ? new Date(Number(s.ts) * 1000) : null;
+            var tm = ts ? ts.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—";
+            var up = String(s.kind || "pump") === "pump";
+            return '<div class="row"><span class="t">' + tm + "</span>" +
+                '<span class="m">' + (up ? "🚀" : "🩸") + "</span>" +
+                '<span class="sym">' + esc(String(s.symbol).replace("_USDT", "")) + "</span>" +
+                '<span class="val ' + (up ? "pos" : "neg") + '">' +
+                (up ? "+" : "−") + Math.abs(Number(s.change_pct) || 0).toFixed(2) + "%</span>" +
+                '<span class="thr">за ' + esc(alWin(s.span_min || 0)) + "</span></div>";
+        }).join("");
+    }
+
+    function paintPumps(d, bind) {
+        var board = $("pump-board");
+        if (!board || !pumpCfg) return;
+        var st = d.status || {};
+        function chips(list, cur, attr, fmt) {
+            return (list || []).map(function (v) {
+                var key = typeof v === "object" ? (v.key || v) : v;
+                var on = String(key) === String(cur);
+                return '<button type="button" class="al-chip' + (on ? " on" : "") + '" ' +
+                    attr + '="' + key + '">' + esc(fmt ? fmt(v, key) : key) + "</button>";
+            }).join("");
+        }
+        var thr = Number(pumpCfg.threshold || 10);
+        var hot = (d.hits || []);
+        board.innerHTML =
+            '<div class="al-head"><div><h3>👁 Сторож монет</h3>' +
+            '<div class="al-sub">Пампы и дампы всех монет Gate. Порог — изменение цены в % ' +
+            'за выбранный период свечей; текущая, ещё формирующаяся свеча считается. ' +
+            'Сигнал уходит в Telegram и предлагает посмотреть монету на Gate.</div></div>' +
+            '<label class="al-switch' + (pumpCfg.enabled ? " on" : "") + '" id="pump-sw">' +
+            "<i></i><span>" + (pumpCfg.enabled ? "СИГНАЛ ВКЛ" : "СИГНАЛ ВЫКЛ") +
+            "</span></label></div>" +
+            '<div class="al-label">Что ловим</div><div class="al-chips" id="pump-mode">' +
+            chips([{ key: "pump", label: "🚀 Пампы" }, { key: "dump", label: "🩸 Дампы" },
+                { key: "both", label: "⚖️ Сразу оба" }], pumpCfg.mode, "data-pumpmode",
+                function (v) { return v.label; }) + "</div>" +
+            '<div class="al-label">Порог изменения цены</div><div class="al-chips" id="pump-thr">' +
+            chips(d.thresholds || [3, 5, 10, 20, 30, 50], thr, "data-pumpthr",
+                function (v) { return v + "%"; }) + "</div>" +
+            '<div class="al-row" style="margin-top:8px"><input id="pump-thr-in" type="number" ' +
+            'min="0.5" max="500" step="0.5" value="' + thr + '">' +
+            '<span class="pump-hint">свой порог, %</span></div>' +
+            '<div class="al-label">Период свечей</div><div class="al-chips" id="pump-per">' +
+            chips(d.periods || [{ key: "1m" }, { key: "5m" }], pumpCfg.period, "data-pumpper",
+                function (v) { return v.key || v; }) + "</div>" +
+            '<div class="al-label">Сколько свечей</div><div class="al-chips" id="pump-cnd">' +
+            chips(d.candles || [1, 2, 3, 5, 10], pumpCfg.candles, "data-pumpcn",
+                function (v) { return v + " свеч."; }) + "</div>" +
+            '<div class="pump-window" id="pump-window">окно сигнала: ' +
+            esc(alWin(pumpSpan(d))) + " (период × свечи, текущая свеча считается)</div>" +
+            '<div class="al-label">Пампы и дампы сейчас</div>' + pumpBars(d) +
+            '<div class="al-label">Уже за порогом ' + thr + "%</div>" +
+            (hot.length
+                ? '<div class="pump-hits">' + hot.slice(0, 8).map(function (h) {
+                    var up = String(h.kind) === "pump";
+                    return '<div class="pump-hit ' + (up ? "pos" : "neg") + '">' +
+                        (up ? "🚀" : "🩸") + " " +
+                        esc(String(h.symbol).replace("_USDT", "")) + " " +
+                        (up ? "+" : "−") + Math.abs(Number(h.change_pct) || 0).toFixed(2) +
+                        "% за " + esc(alWin(h.span_min || 0)) + "</div>";
+                }).join("") + "</div>"
+                : '<div class="cor-flow-empty">тихо: ни одна монета не прошла порог</div>') +
+            '<div class="al-label">Последние сигналы</div><div class="al-tape">' +
+            pumpTape(d) + "</div>" +
+            '<div class="al-status" id="pump-status">под наблюдением монет: ' +
+            (st.coins || 0) + (st.age_sec != null ? " · данные " + Math.round(st.age_sec) + " с назад" : "") +
+            " · сигналов за сессию: " + (st.signals_total || 0) + "</div>";
+        if (bind) bindPumps();
+    }
+
+    function bindPumps() {
+        var sw = $("pump-sw");
+        if (sw) sw.addEventListener("click", function () {
+            pumpCfg.enabled = !pumpCfg.enabled;
+            sw.classList.toggle("on", pumpCfg.enabled);
+            sw.querySelector("span").textContent = pumpCfg.enabled ? "СИГНАЛ ВКЛ" : "СИГНАЛ ВЫКЛ";
+            pumpDebounce();
+        });
+        document.querySelectorAll("#pump-mode .al-chip").forEach(function (b) {
+            b.addEventListener("click", function () {
+                pumpCfg.mode = b.getAttribute("data-pumpmode");
+                pumpCfg.enabled = true;
+                loadPumps(true);
+                pumpDebounce();
+            });
+        });
+        document.querySelectorAll("#pump-thr .al-chip").forEach(function (b) {
+            b.addEventListener("click", function () {
+                pumpCfg.threshold = Number(b.getAttribute("data-pumpthr"));
+                paintPumps(pumpData || {}, false);
+                pumpDebounce();
+            });
+        });
+        var tIn = $("pump-thr-in");
+        if (tIn) tIn.addEventListener("change", function () {
+            pumpCfg.threshold = Number(tIn.value) || pumpCfg.threshold;
+            pumpDebounce();
+        });
+        document.querySelectorAll("#pump-per .al-chip").forEach(function (b) {
+            b.addEventListener("click", function () {
+                pumpCfg.period = b.getAttribute("data-pumpper");
+                loadPumps(true);
+                pumpDebounce();
+            });
+        });
+        document.querySelectorAll("#pump-cnd .al-chip").forEach(function (b) {
+            b.addEventListener("click", function () {
+                pumpCfg.candles = Number(b.getAttribute("data-pumpcn"));
+                loadPumps(true);
+                pumpDebounce();
             });
         });
     }

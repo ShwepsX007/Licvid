@@ -120,11 +120,12 @@ DEFAULT_SERVICES = (
     {
         "slug": "watchlist",
         "title": "Сторож монет",
-        "title_en": "Watchlist",
-        "description": "Личный список пар: всплески ликвидаций, смена CVD и OI.",
+        "title_en": "Coin watcher",
+        "description": ("Пампы и дампы всех монет Gate: порог в %, период свечей "
+                        "и их число. Сигнал в Telegram со ссылкой на Gate."),
         "icon": "👁",
         "enabled": 1,
-        "coming_soon": 1,
+        "coming_soon": 0,
         "sort": 30,
     },
     {
@@ -428,7 +429,7 @@ class Store:
                          s["icon"], s["enabled"], s["coming_soon"], s["sort"]),
                     )
             # работающие сервисы — снимаем «скоро» даже на старых базах
-            for slug in ("alerts", "correlations"):
+            for slug in ("alerts", "correlations", "watchlist"):
                 live = next((s for s in DEFAULT_SERVICES if s["slug"] == slug), None)
                 if live:
                     self._db.execute(
@@ -1543,6 +1544,24 @@ class Store:
                 )
             self._db.commit()
         return {"ok": True, "slug": slug, "enabled": bool(on), "config": cfg}
+
+    def list_service_subscribers(self, slug: str) -> List[Dict[str, Any]]:
+        """Кто включил сервис: для рассылки сигналов (алерты, сторож монет)."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT u.id AS user_id, u.tg_id, u.email, u.language, "
+                "us.config, us.enabled "
+                "FROM user_services us JOIN users u ON u.id=us.user_id "
+                "WHERE us.slug=? AND us.enabled=1 AND u.is_banned=0",
+                (str(slug),),
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["config"] = self._parse_svc_config(d.get("config") or "")
+            d["enabled"] = bool(d.get("enabled"))
+            out.append(d)
+        return out
 
     def list_alert_subscribers(self) -> List[Dict[str, Any]]:
         with self._lock:

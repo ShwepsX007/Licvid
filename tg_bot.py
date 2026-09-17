@@ -118,6 +118,8 @@ class TelegramBot:
         self.alerts_market_fn: Optional[Callable[[], Any]] = None
         # Корреляции валют: (окно, метрика) → готовая картина по истории
         self.correlations_fn: Optional[Callable[[str, str], Any]] = None
+        # Сторож монет: (настройки) → пампы, дампы и последние сигналы
+        self.pump_snapshot_fn: Optional[Callable[[dict], Any]] = None
         self._poll_fails = 0          # подряд неудачных getUpdates
         self._conflict_warned_at = 0.0  # когда последний раз слали 409-предупреждение
         self._conflict_mode = False     # конфликт: короткий опрос, быстрые повторы
@@ -2032,6 +2034,8 @@ class TelegramBot:
             await self.show_menu(chat_id, self._liq_text(), self._reply_kb(user))
         elif text.startswith("/services"):
             await self.show_menu(chat_id, self._services_text(user), self._services_kb(user))
+        elif text.startswith("/pumps") or text.startswith("/watch"):
+            await self.show_menu(chat_id, self._pump_text(user), self._pump_kb(user))
         elif text.startswith("/correlations") or text.startswith("/corr"):
             await self.show_menu(chat_id, self._corr_text(user), self._corr_kb(user))
         elif text.startswith("/alerts"):
@@ -2172,6 +2176,9 @@ class TelegramBot:
             if data == "cor" or data.startswith("cor:"):
                 await self._on_corr_cb(chat_id, user, data, message_id)
                 return
+            if data == "pw" or data.startswith("pw:"):
+                await self._on_pump_cb(chat_id, user, data, message_id)
+                return
             if data != "ch:check" and not await self._ensure_channel(
                     chat_id, user, message_id=message_id):
                 return
@@ -2230,6 +2237,11 @@ class TelegramBot:
                             if s["slug"] == "correlations"), None)
                 if row and not row.get("coming_soon"):
                     return self._corr_text(user), self._corr_kb(user)
+            if slug == "watchlist":
+                row = next((s for s in self.store.list_services(False)
+                            if s["slug"] == "watchlist"), None)
+                if row and not row.get("coming_soon"):
+                    return self._pump_text(user), self._pump_kb(user)
             have = set(self.store.user_service_slugs(user["id"]))
             on = slug not in have
             self.store.toggle_user_service(user["id"], slug, on)
@@ -2763,6 +2775,7 @@ class TelegramBot:
             "/services — сервисы кабинета",
             "/alerts — алерты по объёму",
             "/correlations — корреляции валют",
+            "/pumps — сторож монет: пампы и дампы",
             "/bot — состояние опроса бота",
         ]
         email = (user.get("email") or "").strip()
@@ -2979,7 +2992,8 @@ class TelegramBot:
         have = set(self.store.user_service_slugs(user["id"]))
         lines = [
             "<b>Сервисы кабинета</b>",
-            "Те же, что на сайте: 🔔 алерты и 🔗 корреляции валют уже работают.",
+            "Те же, что на сайте: 🔔 алерты, 🔗 корреляции валют и 👁 сторож "
+            "монет уже работают.",
             "",
         ]
         for s in self.store.list_services(include_disabled=False):
@@ -3155,6 +3169,142 @@ class TelegramBot:
             self._alert_save(user, cfg)
             return f"{'Порог' if kind == 'thr' else 'Мин. удар'} {metric}: {money(n)}"
         return "Не понял."
+
+    # ----- сервис «Сторож монет»: пампы и дампы ---------------------------
+    @staticmethod
+    def _user_lang(user: dict) -> str:
+        """Язык пользователя для ссылок и текстов сигналов."""
+        lang = (user or {}).get("language_code") or (user or {}).get("language") or ""
+        return "en" if str(lang).startswith("en") else "ru"
+
+    def _pump_cfg(self, user: dict) -> dict:
+        from pump_scan import normalize
+        row = self.store.get_user_service(user["id"], "watchlist") if self.store else None
+        cfg = normalize((row or {}).get("config") or {})
+        if row is None:
+            cfg["enabled"] = True
+        return cfg
+
+    def _pump_save(self, user: dict, cfg: dict) -> None:
+        self.store.set_user_service_config(
+            user["id"], "watchlist", cfg, enabled=bool(cfg.get("enabled")))
+
+    def _pump_data(self, cfg: dict) -> dict:
+        fn = self.pump_snapshot_fn
+        if not fn:
+            return {}
+        try:
+            return fn(cfg) or {}
+        except Exception as e:  # noqa: BLE001
+            log.debug("сторож монет: %s", e)
+            return {}
+
+    def _pump_text(self, user: dict) -> str:
+        from pump_scan import format_settings_text, money, price_str
+        cfg = self._pump_cfg(user)
+        data = self._pump_data(cfg)
+        status = data.get("status") or {}
+        lines = ["<b>👁 Сторож монет: пампы и дампы</b>",
+                 format_settings_text(cfg)]
+        if not status.get("coins"):
+            lines.append("")
+            lines.append("Цены Gate ещё не подтянулись — сторож начнёт считать "
+                         "минутную историю с первого удачного опроса.")
+        else:
+            lines.append(f"под наблюдением монет: <b>{status['coins']}</b>"
+                         + (f" · данные {int(status['age_sec'])} с назад"
+                            if status.get("age_sec") is not None else ""))
+        movers = data.get("movers") or []
+        if movers:
+            lines.append("")
+            lines.append("<b>Самые резкие движения сейчас</b>")
+            for m in movers[:5]:
+                arrow = "🚀" if m["change_pct"] > 0 else "🩸"
+                lines.append(f"{arrow} {m['symbol'].replace('_USDT', '')} "
+                             f"{m['change_pct']:+.2f}% · {price_str(m.get('price'))}"
+                             f" · оборот {money(m.get('volume24h'))}")
+        hits = data.get("hits") or []
+        if hits:
+            lines.append("")
+            lines.append("<b>Уже за порогом</b>")
+            for h in hits[:3]:
+                kind = "памп" if h["kind"] == "pump" else "дамп"
+                lines.append(f"· {h['symbol'].replace('_USDT', '')} — {kind} "
+                             f"{h['change_pct']:+.2f}% за {int(h['span_min'])} мин")
+        lines.append("")
+        lines.append("Кнопки ниже — режим, порог, период и число свечей. "
+                     "Сигналы приходят отдельными сообщениями со ссылкой на Gate.")
+        return "\n".join(lines) + self.site_footer()
+
+    def _pump_kb(self, user: dict) -> dict:
+        from pump_scan import CANDLE_PRESETS, THRESHOLDS, period_label
+        cfg = self._pump_cfg(user)
+
+        def mark(on: bool, label: str) -> str:
+            return ("✓ " if on else "") + label
+
+        on = "🔔 Следить ВКЛ" if cfg.get("enabled") else "🔕 Следить выкл"
+        kb = [
+            [{"text": mark(cfg["mode"] in ("pump", "both"), "🚀 Пампы"),
+              "callback_data": "pw:mode:pump"},
+             {"text": mark(cfg["mode"] in ("dump", "both"), "🩸 Дампы"),
+              "callback_data": "pw:mode:dump"},
+             {"text": mark(cfg["mode"] == "both", "⚖️ Оба"),
+              "callback_data": "pw:mode:both"}],
+        ]
+        thr = [{"text": mark(abs(cfg["threshold"] - t) < 1e-9, f"{t:g}%"),
+                "callback_data": f"pw:thr:{t:g}"} for t in THRESHOLDS[:4]]
+        kb.append(thr)
+        kb.append([{"text": mark(abs(cfg["threshold"] - t) < 1e-9, f"{t:g}%"),
+                    "callback_data": f"pw:thr:{t:g}"} for t in THRESHOLDS[4:]])
+        kb.append([{"text": mark(cfg["period"] == k, k),
+                    "callback_data": f"pw:per:{period_label(k)}"}
+                   for k in ("1m", "5m", "15m")])
+        kb.append([{"text": mark(cfg["period"] == k, k),
+                    "callback_data": f"pw:per:{period_label(k)}"}
+                   for k in ("30m", "1h", "4h")])
+        kb.append([{"text": mark(cfg["candles"] == n, f"{n} свеч."),
+                    "callback_data": f"pw:cn:{n}"} for n in CANDLE_PRESETS[:5]])
+        kb.append([{"text": on, "callback_data": "pw:on"},
+                   {"text": "🔄 Проверить", "callback_data": "pw:now"}])
+        kb.append([{"text": "💠 Gate", "url": gate_url(self._user_lang(user))},
+                   {"text": "← Назад", "callback_data": "services"}])
+        return {"inline_keyboard": kb}
+
+    async def _on_pump_cb(self, chat_id, user: dict, data: str, message_id) -> None:
+        from pump_scan import normalize
+        cfg = self._pump_cfg(user)
+        parts = data.split(":")
+        changed = True
+        if data in ("pw", "pw:now"):
+            changed = False
+        elif data == "pw:on":
+            cfg["enabled"] = not cfg.get("enabled")
+        elif len(parts) >= 3 and parts[1] == "mode":
+            mode = parts[2]
+            if mode not in ("pump", "dump", "both"):
+                mode = "both"
+            cfg["mode"] = mode
+            cfg["enabled"] = True
+        elif len(parts) >= 3 and parts[1] == "thr":
+            try:
+                cfg["threshold"] = float(parts[2])
+            except ValueError:
+                pass
+        elif len(parts) >= 3 and parts[1] == "per":
+            cfg["period"] = parts[2]
+        elif len(parts) >= 3 and parts[1] == "cn":
+            try:
+                cfg["candles"] = int(parts[2])
+            except ValueError:
+                pass
+        else:
+            changed = False
+        if changed:
+            cfg = normalize(cfg)
+            self._pump_save(user, cfg)
+        await self.reply(chat_id, self._pump_text(user), self._pump_kb(user),
+                         message_id=message_id)
 
     # ----- сервис «Корреляции валют» --------------------------------------
     def _corr_cfg(self, user: dict) -> dict:

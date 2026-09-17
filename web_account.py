@@ -47,6 +47,8 @@ class Ctx:
     symbols_fn = staticmethod(lambda: [])
     # Корреляции валют: (окно, метрика) → готовая картина по истории
     correlations_fn = staticmethod(lambda window="24h", metric="liq": {})
+    # Сторож монет: (настройки) → пампы, дампы и последние сигналы
+    pump_snapshot_fn = staticmethod(lambda config=None: {})
 
 
 ctx = Ctx()
@@ -925,6 +927,60 @@ def register_account_routes(app) -> None:
         if not r.get("ok"):
             return JSONResponse(r, status_code=400)
         return {"ok": True, "config": cfg, "subscribed": True}
+
+    @router.get("/api/account/watchlist")
+    async def api_watchlist(request: Request):
+        "Сторож монет: настройки пампов/дампов, резкие движения, сигналы."
+        from pump_scan import MODES, CANDLE_PRESETS, THRESHOLDS, PERIODS, normalize
+        user = current_user(request)
+        if not user:
+            return _need_auth()
+        if not _verify_allowed(user):
+            return _need_verified()
+        row = ctx.store.get_user_service(user["id"], "watchlist")
+        cfg = normalize((row or {}).get("config") or {})
+        data = {}
+        try:
+            data = ctx.pump_snapshot_fn(cfg) or {}
+        except Exception as e:
+            log.warning("сторож монет: %s", e)
+        if not data:
+            data = {"config": cfg, "movers": [], "hits": [], "signals": [],
+                    "status": {}}
+        data = dict(data)
+        data["subscribed"] = bool(row and row.get("enabled"))
+        data["config"] = cfg
+        data["modes"] = [{"key": k, "title": t, "icon": i} for k, t, i in MODES]
+        data["periods"] = data.get("periods") or [
+            {"key": k, "minutes": m} for k, m in PERIODS]
+        data["thresholds"] = data.get("thresholds") or list(THRESHOLDS)
+        data["candles"] = data.get("candles") or list(CANDLE_PRESETS)
+        return {"ok": True, **data}
+
+    @router.post("/api/account/watchlist")
+    async def api_watchlist_save(request: Request):
+        from pump_scan import normalize
+        user = current_user(request)
+        if not user:
+            return _need_auth()
+        if not _verify_allowed(user):
+            return _need_verified()
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        cfg = normalize(body or {})
+        r = ctx.store.set_user_service_config(
+            user["id"], "watchlist", cfg, enabled=bool(cfg.get("enabled")))
+        if not r.get("ok"):
+            return JSONResponse(r, status_code=400)
+        data = {}
+        try:
+            data = ctx.pump_snapshot_fn(cfg) or {}
+        except Exception as e:
+            log.warning("сторож монет: %s", e)
+        return {"ok": True, "config": cfg, "subscribed": True,
+                "movers": data.get("movers") or [], "hits": data.get("hits") or []}
 
     # ----- admin ----------------------------------------------------------
     def _admin(request: Request):

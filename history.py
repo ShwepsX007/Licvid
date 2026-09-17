@@ -137,16 +137,30 @@ class HistoryStore:
             return True
         return _num(event.get("usd"), 0.0) >= 50_000.0
 
+    def _day_cells(self, day: str) -> Dict[int, dict]:
+        """Ячейки дня: если дня нет в памяти — сначала читаем диск.
+
+        Так час продолжается с того, что уже записано. Иначе после перезапуска
+        первое же сохранение затирало бы свёртки дня, собранные до него
+        (сырые события при этом целы, а часовые итоги терялись бы).
+        """
+        cells = self._mem.get(day)
+        if cells is None:
+            cells = self._load_day_hours(day)
+            self._mem[day] = cells
+        return cells
+
     def _roll(self, event: dict, ts: float) -> None:
         h = hour_start(ts)
         day = day_key(ts)
-        cell = self._mem.setdefault(day, {}).get(h)
+        cells = self._day_cells(day)
+        cell = cells.get(h)
         if cell is None:
             cell = {"liq_usd": 0.0, "liq_count": 0, "liq_long": 0.0,
                     "liq_short": 0.0, "max_usd": 0.0, "max_symbol": "",
                     "cvd": 0.0, "vol": 0.0, "has_cvd": False,
                     "sym": {}, "exch": {}}
-            self._mem.setdefault(day, {})[h] = cell
+            cells[h] = cell
         usd = _num(event.get("usd"), 0.0)
         sym = str(event.get("symbol") or "?")
         exch = str(event.get("exchange") or "?")
@@ -181,13 +195,14 @@ class HistoryStore:
             return
         day = day_key(ts)
         h = hour_start(ts)
-        cell = self._mem.setdefault(day, {}).get(h)
+        cells = self._day_cells(day)
+        cell = cells.get(h)
         if cell is None:
             cell = {"liq_usd": 0.0, "liq_count": 0, "liq_long": 0.0,
                     "liq_short": 0.0, "max_usd": 0.0, "max_symbol": "",
                     "cvd": 0.0, "vol": 0.0, "has_cvd": False,
                     "sym": {}, "exch": {}}
-            self._mem.setdefault(day, {})[h] = cell
+            cells[h] = cell
         if cvd:
             cell["cvd"] += cvd
             cell["has_cvd"] = True

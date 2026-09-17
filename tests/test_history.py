@@ -13,7 +13,7 @@ import os
 import shutil
 import sys
 import tempfile
-import time
+
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -154,6 +154,29 @@ class TestPersistence(StoreCase):
         self.assertEqual(len(cells), 1)
         self.assertEqual(int(cells[0][1]["liq_count"]), 1)
         self.assertAlmostEqual(cells[0][1]["vol"], 2000.0, places=2)
+
+    def test_hour_continues_after_restart(self):
+        """После перезапуска час и день продолжаются с диска, а не с нуля.
+
+        Иначе первое же сохранение после рестарта затирало бы часовые свёртки
+        дня, собранные до него, и месячная история теряла бы начало дня.
+        """
+        self.store.add(ev(usd=1000, ts=NOW, n=1))
+        self.store.add_flow("BTC_USDT", NOW, cvd=100, vol=500)
+        self.store.flush()
+        again = HistoryStore(self.path, ttl_hours=24 * 31)      # «перезапуск»
+        again.add(ev(symbol="ETH_USDT", usd=2000, ts=NOW + 120, n=2))
+        again.add_flow("ETH_USDT", NOW + 120, cvd=50, vol=300)
+        again.flush()
+        cells = HistoryStore(self.path, ttl_hours=24 * 31).hours_range(NOW - 60, NOW + 60)
+        self.assertEqual(len(cells), 1)
+        cell = cells[0][1]
+        self.assertEqual(int(cell["liq_count"]), 2)             # 1 до + 1 после
+        self.assertAlmostEqual(cell["liq_usd"], 3000.0, places=2)
+        self.assertAlmostEqual(cell["vol"], 800.0, places=2)    # 500 + 300
+        self.assertAlmostEqual(cell["cvd"], 150.0, places=2)
+        self.assertEqual(cell["sym"]["BTC_USDT"]["n"], 1)
+        self.assertEqual(cell["sym"]["ETH_USDT"]["n"], 1)
 
     def test_cleanup_removes_old_days(self):
         old_ts = NOW - 40 * 24 * HOUR

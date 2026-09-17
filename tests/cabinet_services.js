@@ -150,8 +150,14 @@ async function main() {
   check("есть окна и метрики для выбора",
         qa("#cor-wins .al-chip").length >= 4 && qa("#cor-mets .al-chip").length >= 4,
         qa("#cor-wins .al-chip").length + "/" + qa("#cor-mets .al-chip").length);
-  check("есть список сильных связей", qa("#cor-pairs .cor-pair").length >= 1,
-        qa("#cor-pairs .cor-pair").length + " пар");
+  // связей может не быть, если в окне мало часов с историей — тогда доска
+  // честно говорит об этом; иначе показываем пары и клик по паре
+  const pairRows = qa("#cor-pairs .cor-pair");
+  const pairHint = /мало истории|связей пока нет/.test(
+    ($("cor-pairs") ? $("cor-pairs").textContent : ""));
+  check("есть список связей или честная подсказка про мало истории",
+        pairRows.length >= 1 || pairHint,
+        pairRows.length + " пар | " + (pairHint ? "подсказка есть" : "нет"));
 
   // переключение метрики на CVD идёт на сервер
   const cvdChip = qa("#cor-mets .al-chip").filter((b) => /CVD/.test(b.textContent))[0];
@@ -168,7 +174,6 @@ async function main() {
 
   // клик по паре объясняет связь словами
   const pair = q("#cor-pairs .cor-pair");
-  check("есть пара для клика", !!pair);
   if (pair) {
     pair.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, view: win }));
     await sleep(200);

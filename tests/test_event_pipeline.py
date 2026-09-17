@@ -90,12 +90,12 @@ async def scenario_fast_producer_slow_disk():
 
     disk_calls = []
 
-    def slow_append(event, path):            # «медленный диск», блокирует
+    def slow_append(event):                  # «медленный диск», блокирует
         time.sleep(0.03)
         disk_calls.append(event["id"])
 
-    real_append = srv.append_history_event
-    srv.append_history_event = slow_append
+    real_append = srv.HIST.add
+    srv.HIST.add = slow_append
     worker = asyncio.create_task(srv.liq_event_worker())
     try:
         await asyncio.sleep(0)               # дать воркеру встать в get()
@@ -128,13 +128,13 @@ async def scenario_fast_producer_slow_disk():
             await worker
         except asyncio.CancelledError:
             pass
-        srv.append_history_event = real_append
+        srv.HIST.add = real_append
 
 
 async def scenario_queue_overflow_drops():
     print("2) переполнение очереди: события отбрасываются, не блокируют")
-    real_append = srv.append_history_event
-    srv.append_history_event = lambda e, p: None
+    real_append = srv.HIST.add
+    srv.HIST.add = lambda e: None
     old_q = srv._liq_queue
     old_worker_alive = True
     # воркер НЕ запущен: очередь только копится
@@ -149,7 +149,7 @@ async def scenario_queue_overflow_drops():
         # производитель не заблокировался — цикл выше завершился быстро
     finally:
         srv._liq_queue = old_q
-        srv.append_history_event = real_append
+        srv.HIST.add = real_append
         del old_worker_alive
 
 
@@ -157,8 +157,8 @@ async def scenario_buffered_mode():
     print("3) buffered-режим: события ждут liquidation_broadcaster")
     old_bi = srv.BROADCAST_INTERVAL
     srv.BROADCAST_INTERVAL = 5.0             # «буфер включён»
-    real_append = srv.append_history_event
-    srv.append_history_event = lambda e, p: None
+    real_append = srv.HIST.add
+    srv.HIST.add = lambda e: None
     worker = asyncio.create_task(srv.liq_event_worker())
     try:
         srv._pending.clear()
@@ -178,7 +178,7 @@ async def scenario_buffered_mode():
             pass
         srv._pending.clear()
         srv.BROADCAST_INTERVAL = old_bi
-        srv.append_history_event = real_append
+        srv.HIST.add = real_append
 
 
 async def main():

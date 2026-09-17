@@ -53,6 +53,7 @@ from oi_feed import map_candles_to_oi
 from hour_board import BOARD, OI, build_snapshot
 from accounts import Store
 from flow_feed import FlowFeed
+from history import HistoryStore, MONTH_HOURS
 from mailer import build_mailer
 from ai_text import build_ai
 import api_digest
@@ -83,14 +84,20 @@ TICK_SOURCES = [x.strip().lower() for x in
 DEMO_MODE = os.getenv("LIQSCOPE_DEMO", "0").strip() in ("1", "true", "yes", "on")
 HISTORY_MAX = int(os.getenv("LIQSCOPE_HISTORY_MAX", "60000"))
 # Дисковое сохранение истории ликвидаций (переживает рестарт сервера).
-# Путь: LIQSCOPE_HISTORY_FILE ("" / "0" / "off" — отключить), TTL — сколько часов
-# держать при загрузке/урезании файла.
+# Путь — каталог дневных файлов ("" / "0" / "off" — не хранить вовсе),
+# TTL — сколько часов держать историю.
 HISTORY_FILE = os.getenv("LIQSCOPE_HISTORY_FILE",
                          os.path.join(HERE, "data", "liq_history.jsonl")).strip()
 if HISTORY_FILE.lower() in ("0", "none", "off", "false"):
     HISTORY_FILE = ""
-HISTORY_TTL_HOURS = float(os.getenv("LIQSCOPE_HISTORY_TTL_HOURS", "24"))
-HISTORY_FILE_MAX_BYTES = 64 * 1024 * 1024   # страховка: урезаем файл при разрастании
+# Сколько истории держать на диске. По умолчанию — 31 сутки: ликвидации,
+# CVD, объём и OI должны быть доступны за месяц, а не за сутки.
+HISTORY_TTL_HOURS = float(os.getenv("LIQSCOPE_HISTORY_TTL_HOURS", str(MONTH_HOURS)))
+# Лимит одного дневного файла сырых ликвидаций: мельче $50k в переполненный
+# день не пишем (часовые свёртки при этом остаются полными)
+HISTORY_SHARD_MAX_MB = float(os.getenv("LIQSCOPE_HISTORY_SHARD_MB", "48"))
+# Как часто свёртки дня и уборка старых дней уходят на диск
+HISTORY_FLUSH_SEC = max(30.0, float(os.getenv("LIQSCOPE_HISTORY_FLUSH_SEC", "180")))
 
 BOT_TOKEN = os.getenv("LIQSCOPE_BOT_TOKEN", "").strip()
 PUBLIC_URL = normalize_public_url(os.getenv("LIQSCOPE_PUBLIC_URL", ""))
@@ -145,16 +152,21 @@ STATS_INTERVAL = float(os.getenv("LIQSCOPE_STATS_INTERVAL_MS", "2000")) / 1000.0
 #  Состояние
 # =============================================================================
 LIQUIDATIONS: Deque[dict] = deque(maxlen=HISTORY_MAX)
+# Месячная история: сырые события по дням + часовые свёртки (ликвидации,
+# CVD, объём). В памяти — только свежий хвост, всё остальное на диске.
+HIST = HistoryStore(HISTORY_FILE, ttl_hours=HISTORY_TTL_HOURS,
+                    shard_max_mb=HISTORY_SHARD_MAX_MB)
 # История открытого интереса: уровень пишется каждые OI_SNAP_SEC секунд,
 # лежит на диске — после рестарта стенд в канале не пустует первые часы.
 OI_HISTORY_FILE = os.getenv("LIQSCOPE_OI_HISTORY",
                             os.path.join(HERE, "data", "oi_history.json"))
 OI_SNAP_SEC = max(60.0, float(os.getenv("LIQSCOPE_OI_SNAP_SEC", "300")))
-OI_KEEP_MIN = int(os.getenv("LIQSCOPE_OI_KEEP_MIN", "360"))
+# OI: история снимков тоже за месяц (снимок раз в OI_SNAP_SEC ≈ 5 минут)
+OI_KEEP_MIN = int(os.getenv("LIQSCOPE_OI_KEEP_MIN", str(MONTH_HOURS * 60)))
 CANDLES: Dict[str, dict] = {}            # "SYM|tf" -> {"candles": [...], "ts", "source"}
 MINUTE_VOL: Dict[str, Dict[int, float]] = {}   # symbol -> {minute_ts: volume}
 # Минутные потоки по всем монетам: лента «ВСЕ» (CVD/OI), сводки и сервисы.
-FLOWS = FlowFeed(keep_min=int(os.getenv("LIQSCOPE_FLOW_KEEP_MIN", "180") or 180))
+FLOWS = FlowFeed(keep_min=int(os.getenv("LIQSCOPE_FLOW_KEEP_MIN", "720") or 720))
 # Сколько монет потока держать в тиках, когда кто-то смотрит ленту «ВСЕ»
 FLOW_SYMBOLS_MAX = int(os.getenv("LIQSCOPE_FLOW_SYMBOLS_MAX", "12") or 0)
 # Окно ленты «ВСЕ» (минуты) и частота рассылки строк по WS
@@ -179,9 +191,6 @@ def _key(symbol: str, tf: int) -> str:
 # =============================================================================
 #  Дисковая история ликвидаций (JSONL): переживает рестарт сервера
 # =============================================================================
-_hist_warned = False
-
-
 def load_history_file(path: str, maxlen: int, ttl_hours: float) -> List[dict]:
     """Вернуть события из JSONL-файла (не старше TTL) в хронологическом порядке."""
     if not path or not os.path.exists(path):
@@ -208,42 +217,6 @@ def load_history_file(path: str, maxlen: int, ttl_hours: float) -> List[dict]:
     except OSError:
         return []
     return rows
-
-
-def append_history_event(event: dict, path: str) -> None:
-    """Дописать одно событие в JSONL (append). Ошибки не роняют поток данных."""
-    global _hist_warned
-    if not path:
-        return
-    try:
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")))
-            f.write("\n")
-        _hist_warned = False
-    except OSError:
-        if not _hist_warned:
-            _hist_warned = True
-            log.warning("Не удаётся писать историю ликвидаций в %s — продолжаем без диска",
-                        path)
-
-
-def trim_history_file(path: str, maxlen: int, ttl_hours: float) -> None:
-    """Если файл разросся — переписать его свежим хвостом (последние maxlen)."""
-    if not path or not os.path.exists(path):
-        return
-    try:
-        if os.path.getsize(path) <= HISTORY_FILE_MAX_BYTES:
-            return
-        keep = load_history_file(path, maxlen, ttl_hours)
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            for ev in keep:
-                f.write(json.dumps(ev, ensure_ascii=False, separators=(",", ":")))
-                f.write("\n")
-        os.replace(tmp, path)
-    except OSError:
-        pass
 
 
 def _fmt_id() -> str:
@@ -398,6 +371,28 @@ async def on_liquidation(ev: dict):
                         _liq_dropped)
 
 
+async def history_task() -> None:
+    """Раз в несколько минут: свёртки дня на диск и уборка старых дней.
+
+    Свёртки держат ликвидации, CVD и объём по часам, поэтому их потеря при
+    рестарте означала бы дырку в месячной истории — пишем часто.
+    """
+    while True:
+        try:
+            saved = await asyncio.to_thread(HIST.flush)
+            removed = await asyncio.to_thread(HIST.cleanup)
+            if removed:
+                log.info("История: удалено старых файлов — %d (TTL %.0f ч)",
+                         removed, HISTORY_TTL_HOURS)
+            if saved:
+                log.debug("История: свёртки дней сохранены (%d)", saved)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            log.debug("история: %s", e)
+        await asyncio.sleep(HISTORY_FLUSH_SEC)
+
+
 async def flow_oi_task() -> None:
     """Открытый интерес монет потока «ВСЕ» (лента OI в режиме всех монет).
 
@@ -473,9 +468,7 @@ async def liq_event_worker():
     while True:
         event = await _liq_queue.get()
         try:
-            append_history_event(event, HISTORY_FILE)
-            if len(LIQUIDATIONS) % 1000 == 0:
-                trim_history_file(HISTORY_FILE, HISTORY_MAX, HISTORY_TTL_HOURS)
+            HIST.add(event)          # дневной файл + часовая свёртка
             if BROADCAST_INTERVAL <= 0:
                 # без буферизации: событие уходит в сокеты в тот же момент
                 await send_liquidations([event])
@@ -522,6 +515,7 @@ async def on_trade(symbol: str, price: float, qty: float, ts: float,
             _cvd_add(symbol, tick_ts, signed)
             BOARD.add_cvd(symbol, tick_ts, signed)
             FLOWS.add_trade(symbol, tick_ts, signed)
+            HIST.add_flow(symbol, tick_ts, cvd=signed)
     except (TypeError, ValueError):
         pass
 
@@ -652,6 +646,7 @@ async def on_price(symbol: str, price: float, candle1m: Optional[dict]):
         vols[minute] = candle1m["volume"]
         if delta:
             FLOWS.add_volume(symbol, minute, delta)
+            HIST.add_flow(symbol, minute, vol=delta)
         if len(vols) > 400:
             for old in sorted(vols)[:200]:
                 vols.pop(old, None)
@@ -1337,7 +1332,9 @@ async def demo_flow_walk():
                 base = max(base * (1 + random.gauss(0, 0.0015)), 1e6)
                 levels[symbol] = base
                 FLOWS.add_oi(symbol, now, base)
-                FLOWS.add_volume(symbol, now, random.uniform(5e4, 9e5))
+                vol = random.uniform(5e4, 9e5)
+                FLOWS.add_volume(symbol, now, vol)
+                HIST.add_flow(symbol, now, vol=vol)
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -1391,8 +1388,23 @@ async def lifespan(app: FastAPI):
     # чтобы первый клиент сразу увидел вчерашние ликвидации
     if HISTORY_FILE:
         try:
+            # сначала читаем дневные шарды (месяц), затем одиночный файл
+            # прежних версий — иначе после обновления история обрывалась бы
             loaded = await asyncio.to_thread(
+                HIST.query, time.time() - HISTORY_TTL_HOURS * 3600, None,
+                None, 0.0, HISTORY_MAX, False)
+            legacy = await asyncio.to_thread(
                 load_history_file, HISTORY_FILE, HISTORY_MAX, HISTORY_TTL_HOURS)
+            seen = {e.get("id") for e in loaded}
+            loaded.extend(e for e in legacy if e.get("id") not in seen)
+            loaded.sort(key=lambda e: float(e.get("timestamp") or 0))
+            loaded = loaded[-HISTORY_MAX:]
+            # Старый одиночный файл больше не пишем: события из него переезжают
+            # в дневные шарды вместе с часовыми свёртками, файл убираем.
+            moved = await asyncio.to_thread(HIST.import_legacy, seen)
+            if moved:
+                log.info("История: перенесено в дневные файлы — %d событий", moved)
+            await asyncio.to_thread(HIST.cleanup)
             for ev in loaded:
                 LIQUIDATIONS.append(ev)
                 BOARD.add_liq(ev)
@@ -1400,6 +1412,11 @@ async def lifespan(app: FastAPI):
                 log.info("История ликвидаций восстановлена с диска: %d событий", len(loaded))
         except Exception as e:
             log.warning("Не удалось загрузить историю с диска: %s", e)
+
+    # Хранить историю надо за месяц — и OI-снимки, и часовые ячейки стенда
+    # (стенд кормит посты и дайджест, ему нужен весь день, а не 12 часов).
+    OI.keep = OI_KEEP_MIN * 60
+    BOARD.keep_hours = max(BOARD.keep_hours, int(HISTORY_TTL_HOURS))
 
     global feed
     feed = MarketFeed(on_liquidation=on_liquidation,
@@ -1417,6 +1434,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(liquidation_broadcaster(), name="liq-broadcast"),
         asyncio.create_task(flow_broadcaster(), name="flow-broadcast"),
         asyncio.create_task(flow_oi_task(), name="flow-oi"),
+        asyncio.create_task(history_task(), name="history"),
         asyncio.create_task(price_broadcaster(), name="price-broadcast"),
         asyncio.create_task(stats_broadcaster(), name="stats-broadcast"),
         asyncio.create_task(kline_refresher(), name="kline-refresh"),
@@ -1460,6 +1478,10 @@ async def lifespan(app: FastAPI):
     finally:
         for t in tasks:
             t.cancel()
+        try:
+            await asyncio.to_thread(HIST.flush, True)
+        except Exception:  # noqa: BLE001
+            pass
         await tg_bot.stop()
         await feed.stop()
 
@@ -1693,6 +1715,42 @@ def _demo_oi_payload(symbol: str) -> dict:
             "ts": time.time(), "stale_sec": 0.0}
 
 
+def _fnum(v, default: float = 0.0) -> float:
+    """Число из чего угодно: история может отдать None, строку или NaN."""
+    try:
+        n = float(v)
+    except (TypeError, ValueError):
+        return default
+    return n if n == n else default
+
+
+def aggregate_hour_cell(h: float, cell: dict, symbol: Optional[str] = None) -> dict:
+    """Часовой итог по одной монете или по всему рынку (для /api/history)."""
+    syms = cell.get("sym") or {}
+    if symbol:
+        val = syms.get(symbol) or {}
+        return {
+            "h": int(h), "usd": round(_fnum(val.get("usd")), 2),
+            "count": int(_fnum(val.get("n"))),
+            "long_usd": round(_fnum(val.get("long")), 2),
+            "short_usd": round(_fnum(val.get("short")), 2),
+            "cvd": round(_fnum(val.get("cvd")), 2),
+            "vol": round(_fnum(val.get("vol")), 2),
+            "by_symbol": {}, "by_exchange": {},
+        }
+    return {
+        "h": int(h), "usd": round(_fnum(cell.get("liq_usd")), 2),
+        "count": int(_fnum(cell.get("liq_count"))),
+        "long_usd": round(_fnum(cell.get("liq_long")), 2),
+        "short_usd": round(_fnum(cell.get("liq_short")), 2),
+        "cvd": round(_fnum(cell.get("cvd")), 2),
+        "vol": round(_fnum(cell.get("vol")), 2),
+        "max_symbol": cell.get("max_symbol") or "",
+        "by_symbol": cell.get("sym") or {},
+        "by_exchange": cell.get("exch") or {},
+    }
+
+
 @app.get("/api/liquidations")
 async def api_liquidations(symbol: Optional[str] = None,
                            exchange: Optional[str] = None,
@@ -1707,6 +1765,54 @@ async def api_liquidations(symbol: Optional[str] = None,
     if min_usd > 0:
         res = [x for x in res if x["usd"] >= min_usd]
     return {"liquidations": res[-min(limit, 2000):], "total": len(res)}
+
+
+@app.get("/api/history")
+async def api_history(since: Optional[float] = None, until: Optional[float] = None,
+                      hours: float = 0.0, symbol: Optional[str] = None,
+                      min_usd: float = 0.0, limit: int = 2000,
+                      bucket: str = "raw", step_hours: int = 1):
+    """История рынка за месяц: сырые ликвидации или часовые/дневные свёртки.
+
+    bucket=raw    — события (для списков и модалок);
+    bucket=hour   — часовые итоги (ликвидации, CVD, объём, биржи, монеты);
+    bucket=day    — то же по суткам (месячные графики);
+    bucket=series — ряды по часам для графиков на сайте.
+    """
+    now = time.time()
+    until = float(until) if until else now
+    if since:
+        start = float(since)
+    elif hours:
+        start = until - float(hours) * 3600
+    else:
+        start = until - 24 * 3600
+    start = max(start, until - HISTORY_TTL_HOURS * 3600)
+    sym = canon(symbol) if symbol and symbol != "ALL" else None
+    bucket = (bucket or "raw").strip().lower()
+    if bucket == "hour":
+        cells = await asyncio.to_thread(HIST.hours_range, start, until)
+        rows = []
+        for h, cell in cells:
+            agg = aggregate_hour_cell(h, cell, sym)
+            if agg["count"] or agg["vol"] or agg["cvd"]:
+                rows.append(agg)
+        return {"bucket": "hour", "since": start, "until": until,
+                "ttl_hours": HISTORY_TTL_HOURS, "hours": rows}
+    if bucket == "day":
+        rows = await asyncio.to_thread(HIST.days, start, until, sym)
+        return {"bucket": "day", "since": start, "until": until,
+                "ttl_hours": HISTORY_TTL_HOURS, "days": rows}
+    if bucket == "series":
+        data = await asyncio.to_thread(HIST.series, start, until, None,
+                                       int(step_hours or 1))
+        return {"bucket": "series", "since": start, "until": until,
+                "ttl_hours": HISTORY_TTL_HOURS, **data}
+    rows = await asyncio.to_thread(HIST.query, start, until, sym, float(min_usd),
+                                   int(limit))
+    return {"bucket": "raw", "since": start, "until": until,
+            "ttl_hours": HISTORY_TTL_HOURS, "total": len(rows),
+            "liquidations": rows}
 
 
 @app.get("/api/stats")
@@ -1730,6 +1836,8 @@ async def api_health():
             "history_max": HISTORY_MAX,
             "history_persist": bool(HISTORY_FILE),
             "history_ttl_hours": HISTORY_TTL_HOURS,
+            "history": HIST.stats(),
+            "oi_history_keep_min": OI_KEEP_MIN,
         },
     }
     data.update(feed.health() if feed else {"sources": {}})

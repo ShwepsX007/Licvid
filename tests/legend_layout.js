@@ -2,7 +2,9 @@
  *
  *  Структура: в плашке у всех слоёв подпись+цифра в .layer-cell,
  *  а все 4 кнопки выезжают сверху горизонтальной панелью по кнопке
- *  «☰ Слои» (закрытие: повторный клик, клик мимо, Esc).
+ *  «☰ Слои» (закрытие: повторный клик, клик мимо, Esc). Расшифровка цветов
+ *  («Ликв. лонгов», «Кит ($100k+)», «CVD ▼») живёт в этой же плашке —
+ *  столбиком над кнопками, а не строкой в шапке графика.
  *  Кнопки: nowrap, inline-flex, line-height 1.3
  *  (текст не вылезает), активный слой подсвечен цветом своих фигур.
  *  Цифры: inline-block, ширина строго по содержимому (без min-width —
@@ -114,6 +116,27 @@ async function main() {
       stat.parentElement.classList.contains("layer-cell") &&
       !!prev && prev.classList.contains("layer-label"));
   });
+
+  // --- расшифровка цветов: в плашке слоёв, столбиком над кнопками ---
+  check("в шапке графика расшифровки нет",
+    doc.querySelectorAll(".chart-legend .legend-item").length === 0,
+    doc.querySelectorAll(".chart-legend .legend-item").length + " пунктов");
+  const legendBox = doc.getElementById("layer-legend");
+  const legendItems = Array.prototype.slice.call(doc.querySelectorAll(".legend-item"));
+  check("расшифровка лежит в плашке слоёв",
+    !!legendBox && legendItems.length === 5 &&
+    legendItems.every((el) => legendBox.contains(el)),
+    legendItems.length + " пунктов");
+  check("расшифровка над кнопками слоёв",
+    !!legendBox && legendBox.parentElement.id === "layer-pop" &&
+    legendBox.parentElement.firstElementChild === legendBox);
+  check("пункты идут столбиком",
+    !!legendBox && cs(legendBox).flexDirection === "column",
+    legendBox ? cs(legendBox).flexDirection : "нет блока");
+  check("расшифровка говорит про лонгов, шортов, китов и CVD",
+    !!legendBox && ["Ликв. лонгов", "Ликв. шортов", "Кит ($100k+)", "CVD ▲", "CVD ▼"]
+      .every((t) => legendBox.textContent.indexOf(t) !== -1),
+    legendBox ? legendBox.textContent.replace(/\s+/g, " ").trim().slice(0, 90) : "нет блока");
 
   // --- кнопки не рвут текст ---
   pairs.forEach(([b]) => {

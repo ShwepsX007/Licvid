@@ -999,30 +999,22 @@
         });
     }
 
-    /* ---------- сервис «Корреляции валют»: тепловая карта и облако связей ---------- */
+    /* ---------- сервис «Корреляции валют»: тепловая карта ---------- */
     /* Почему сервис раньше «туго» отвечал на нажатия: доска перерисовывалась
        целиком на каждом автообновлении (раз в 30 с) — вместе с разметкой
        умирали все обработчики, и клик по чипу уходил в пустоту. Теперь:
        1) обработчики висят на контейнере доски (делегирование) — перерисовка
           их не сносит; 2) клик сразу переключает чип и перерисовывает картину
           из уже пришедших данных, а запрос к серверу идёт фоном; 3) автообнов-
-          ление обновляет только цифры (потоки, карту, график, пары, статус),
-          а не всю доску. */
+          ление обновляет только цифры (потоки, карту, гистограмму, пары,
+          статус), а не всю доску. */
     var corData = null, corTimer = null, corCfg = { window: "24h", metric: "liq" };
     var corSaveT = null;
-    var corAxes = { x: "liq", y: "vol" };      // оси «облака связей»
-    var corPts = [];                           // точки графика: наведение и клик
-    var corPinned = null;                      // пара, закреплённая кликом
-    var corTip = null;                         // подсказка под курсором
-    var corGeom = { w: 0, h: 0 };
-
     var COR_LABEL = { liq: "LIQ", vol: "📦 Объём", cvd: "🌊 CVD", oi: "📊 OI" };
     var COR_HINT = {
         liq: "по ликвидациям", vol: "по объёму",
         cvd: "по потоку CVD", oi: "по открытому интересу",
     };
-    //: какая метрика логично дополняет выбранную (вторая ось графика)
-    var COR_PAIR = { liq: "vol", vol: "liq", cvd: "liq", oi: "vol" };
     var COR_ORDER = ["liq", "vol", "cvd", "oi"];
 
     function corShort(sym) {
@@ -1062,34 +1054,6 @@
                 var r = corR(d, metric, syms[i], syms[j]);
                 if (r === null) continue;
                 out.push({ a: syms[i], b: syms[j], r: r });
-            }
-        }
-        return out;
-    }
-
-    function corPairWeight(d, a, b) {
-        var coins = (d && d.coins) || {};
-        var wa = Math.abs(Number((coins[a] || {}).liq_usd) || 0);
-        var wb = Math.abs(Number((coins[b] || {}).liq_usd) || 0);
-        return wa + wb;
-    }
-
-    function corChartData(d) {
-        /* Точки «облака связей»: пара монет = точка, оси — корреляция по двум
-           метрикам, размер — насколько крупно эта пара торговалась и горела. */
-        var xk = corAxes.x, yk = corAxes.y;
-        var out = { x: xk, y: yk, pts: [], maxW: 0 };
-        var syms = (d && d.symbols) || [];
-        for (var i = 0; i < syms.length; i++) {
-            for (var j = i + 1; j < syms.length; j++) {
-                var a = syms[i], b = syms[j];
-                var rx = corR(d, xk, a, b);
-                if (rx === null) continue;
-                var ry = (xk === yk) ? rx : corR(d, yk, a, b);
-                if (ry === null) continue;
-                var w = corPairWeight(d, a, b);
-                out.maxW = Math.max(out.maxW, w);
-                out.pts.push({ a: a, b: b, x: rx, y: ry, w: w });
             }
         }
         return out;
@@ -1208,157 +1172,6 @@
         return html + "</tbody></table></div>";
     }
 
-    /* ---- «облако связей»: пары монет в координатах двух метрик ------------ */
-    function corQuadrant(px, py) {
-        if (px >= 0 && py >= 0) return ["pos", "идут вместе"];
-        if (px < 0 && py < 0) return ["neg", "вместе падают"];
-        return ["mix", "метрики спорят"];
-    }
-
-    function corDotColor(px, py) {
-        if (px >= 0 && py >= 0) return "rgba(0,230,118,0.85)";
-        if (px < 0 && py < 0) return "rgba(255,42,95,0.85)";
-        return "rgba(255,193,7,0.85)";
-    }
-
-    function drawCorChart(d) {
-        var cv = $("cor-scatter");
-        if (!cv || !cv.getContext) return;
-        var box = cv.parentNode;
-        var w = Math.max(260, Math.round((box && box.clientWidth) || cv.clientWidth || 460));
-        var h = 260;
-        var dpr = (global.devicePixelRatio || 1);
-        if (dpr > 2) dpr = 2;
-        cv.width = Math.round(w * dpr);
-        cv.height = Math.round(h * dpr);
-        cv.style.width = w + "px";
-        cv.style.height = h + "px";
-        corGeom = { w: w, h: h };
-        var ctx = cv.getContext("2d");
-        if (!ctx) return;
-        if (ctx.setTransform) ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-        var data = corChartData(d);
-        corPts = [];
-        var padL = 34, padR = 12, padT = 14, padB = 30;
-        var iw = Math.max(40, w - padL - padR), ih = Math.max(40, h - padT - padB);
-        function X(r) { return padL + (iw * (Number(r) + 1)) / 2; }
-        function Y(r) { return padT + ih - (ih * (Number(r) + 1)) / 2; }
-        ctx.clearRect(0, 0, w, h);
-        // фон по квадрантам: спокойный, чтобы точки читались
-        ctx.fillStyle = "rgba(0,230,118,0.05)";
-        ctx.fillRect(X(0), padT, X(1) - X(0), Y(0) - padT);
-        ctx.fillRect(padL, Y(0), X(0) - padL, Y(-1) - Y(0));
-        ctx.fillStyle = "rgba(255,42,95,0.05)";
-        ctx.fillRect(padL, padT, X(0) - padL, Y(0) - padT);
-        ctx.fillRect(X(0), Y(0), X(1) - X(0), Y(-1) - Y(0));
-        // сетка и подписи шкалы корреляции
-        ctx.strokeStyle = "rgba(132,147,168,0.18)";
-        ctx.lineWidth = 1;
-        if (ctx.font) ctx.font = "10px system-ui, sans-serif";
-        [-1, -0.5, 0.5, 1].forEach(function (v) {
-            ctx.beginPath(); ctx.moveTo(X(v), padT); ctx.lineTo(X(v), padT + ih); ctx.stroke();
-            ctx.beginPath(); ctx.moveTo(padL, Y(v)); ctx.lineTo(padL + iw, Y(v)); ctx.stroke();
-            if (ctx.fillText) {
-                ctx.fillStyle = "#8d9cb4";
-                ctx.fillText(String(v), X(v) - 8, padT + ih + 14);
-                ctx.fillText(String(v), 6, Y(v) + 3);
-            }
-        });
-        ctx.strokeStyle = "rgba(160,180,210,0.55)";
-        ctx.beginPath(); ctx.moveTo(X(0), padT); ctx.lineTo(X(0), padT + ih); ctx.stroke();
-        ctx.beginPath(); ctx.moveTo(padL, Y(0)); ctx.lineTo(padL + iw, Y(0)); ctx.stroke();
-        // диагональ «одинаково по обеим метрикам»
-        ctx.setLineDash && ctx.setLineDash([4, 4]);
-        ctx.strokeStyle = "rgba(120,140,175,0.35)";
-        ctx.beginPath(); ctx.moveTo(X(-1), Y(-1)); ctx.lineTo(X(1), Y(1)); ctx.stroke();
-        ctx.setLineDash && ctx.setLineDash([]);
-        // точки: размер — оборот пары, цвет — знак связи по обеим метрикам
-        data.pts.forEach(function (p) {
-            var wgt = data.maxW > 0 ? Math.sqrt(p.w / data.maxW) : 0.4;
-            var rad = 3 + 6 * wgt;
-            var px = X(p.x), py = Y(p.y);
-            ctx.beginPath();
-            if (ctx.arc) ctx.arc(px, py, rad, 0, Math.PI * 2);
-            ctx.fillStyle = corDotColor(p.x, p.y);
-            ctx.fill();
-            ctx.strokeStyle = "rgba(12,18,28,0.75)";
-            ctx.stroke();
-            p.px = px; p.py = py; p.rad = rad;
-            corPts.push(p);
-        });
-        if (ctx.fillText) {
-            ctx.fillStyle = "#9fb0c8";
-            ctx.fillText("r · " + corLabelOf(data.x), padL, padT - 3);
-            ctx.save && ctx.save();
-            if (ctx.translate && ctx.rotate) {
-                ctx.translate(10, padT + ih / 2 + 26);
-                ctx.rotate(-Math.PI / 2);
-                ctx.fillText("r · " + corLabelOf(data.y), 0, 0);
-                ctx.restore && ctx.restore();
-            }
-        }
-        corTip = $("cor-tip");
-        if (corTip && corPinned) corPaintTip(corPinned, true);
-    }
-
-    function corPaintTip(p, pinned) {
-        var tip = $("cor-tip");
-        if (!tip) return;
-        if (!p) { tip.classList.add("hidden"); return; }
-        var q = corQuadrant(p.x, p.y);
-        tip.className = "cor-tip " + q[0] + (pinned ? " pinned" : "");
-        var verdict = q[0] === "pos" ? "обе метрики идут вместе"
-            : q[0] === "neg" ? "обе метрики в противофазе"
-                : "знаки разные — связи по метрикам спорят";
-        tip.innerHTML = "<b>" + esc(corShort(p.a)) + " ↔ " + esc(corShort(p.b)) + "</b>" +
-            '<span class="cor-tip-grid">' +
-            "<i>" + esc(corLabelOf(corAxes.x)) + "</i><i>r = " + p.x.toFixed(2) + "</i>" +
-            "<i>" + esc(corLabelOf(corAxes.y)) + "</i><i>r = " + p.y.toFixed(2) + "</i>" +
-            "</span><span class=\"cor-tip-note\">" + esc(verdict) + " · " +
-            esc(alMoney(p.w)) + " ликвидаций на двоих</span>";
-    }
-
-    function corPick(px, py) {
-        var best = null, bestD = 14 * 14;
-        corPts.forEach(function (p) {
-            var dx = p.px - px, dy = p.py - py;
-            var d2 = dx * dx + dy * dy;
-            if (d2 <= Math.max(bestD, (p.rad + 6) * (p.rad + 6)) && (best === null || d2 < bestD)) {
-                best = p; bestD = d2;
-            }
-        });
-        return best;
-    }
-
-    function corChartBox(d) {
-        var data = corChartData(d);
-        var strong = data.pts.filter(function (p) { return Math.abs(p.x) >= 0.6 || Math.abs(p.y) >= 0.6; });
-        var together = data.pts.filter(function (p) { return p.x >= 0.4 && p.y >= 0.4; }).length;
-        var opposite = data.pts.filter(function (p) { return p.x <= -0.4 || p.y <= -0.4; }).length;
-        return '<div class="cor-chart">' +
-            '<div class="cor-chart-head">' +
-            "<div><b>📐 Облако связей</b> <span class=\"cor-chart-sub\">каждая точка — пара монет: " +
-            "по горизонтали связь «" + esc(corLabelOf(corAxes.x)) + "», по вертикали — «" +
-            esc(corLabelOf(corAxes.y)) + "». Размер точки — оборот пары, цвет — знак связи. " +
-            "Правее и выше — пары, которые ходят вместе; левее и ниже — в противофазе.</span></div>" +
-            "</div>" +
-            '<div class="cor-chart-axes"><span class="cor-axis-label">Ось X</span>' +
-            '<span class="al-chips" id="cor-axis-x">' +
-            corMetricChips(d, corAxes.x, "data-corx") + "</span>" +
-            '<span class="cor-axis-label">Ось Y</span>' +
-            '<span class="al-chips" id="cor-axis-y">' +
-            corMetricChips(d, corAxes.y, "data-cory") + "</span></div>" +
-            '<div class="cor-canvas-wrap"><canvas id="cor-scatter"></canvas>' +
-            '<div class="cor-tip hidden" id="cor-tip"></div></div>' +
-            '<div class="cor-hist-wrap"><span class="cor-hist-title">Распределение связей · ' +
-            esc(corLabelOf(d.metric)) + "</span>" +
-            '<div class="cor-hist" id="cor-hist">' + corHist(d.metric) + "</div></div>" +
-            '<div class="cor-chart-note">пар в расчёте: ' + data.pts.length +
-            " · сильных связей: " + strong.length +
-            " · ходят вместе: " + together + " · в противофазе: " + opposite +
-            "</div></div>";
-    }
-
     function corHist(metric) {
         /* Сколько пар попало в каждый интервал коэффициента: сразу видно,
            рынок движется одним куском или монеты живут сами по себе. */
@@ -1408,16 +1221,17 @@
             '<div class="al-label">Метрика</div><div class="al-chips" id="cor-mets">' +
             corMetricChips(d, d.metric, "data-cormet") + "</div>" +
             '<div class="cor-flows" id="cor-flows">' + corFlowsBox() + "</div>" +
+            '<div class="al-label">График корреляций</div>' +
+            '<div class="cor-hist-wrap"><span class="cor-hist-title">Распределение связей · ' +
+            esc(corLabelOf(d.metric)) + "</span>" +
+            '<div class="cor-hist" id="cor-hist">' + corHist(d.metric) + "</div></div>" +
             '<div class="al-label">Тепловая карта · ' + esc(corMetricTitle(d, d.metric)) +
             " · " + esc(winLabel) + "</div>" +
             '<div id="cor-heat-box">' + corHeat(d) + "</div>" +
-            '<div class="al-label">График корреляций</div>' +
-            '<div id="cor-chart-box">' + corChartBox(d) + "</div>" +
             '<div class="al-label">Самые сильные связи</div>' +
             '<div class="cor-pairs" id="cor-pairs">' + corPairsList() + "</div>" +
             '<div class="al-status" id="cor-status">' + esc(corStatusText()) + "</div>";
         if (bind) bindCorrelations();
-        drawCorChart(d);
     }
 
     function paintCorrelationsLive(d) {
@@ -1433,8 +1247,7 @@
         var pairs = $("cor-pairs");
         if (pairs) pairs.innerHTML = corPairsList();
         var st = $("cor-status");
-        if (st && !corPinned) st.textContent = corStatusText();
-        drawCorChart(d);
+        if (st) st.textContent = corStatusText();
     }
 
     function corMarkChips() {
@@ -1446,12 +1259,6 @@
         });
         board.querySelectorAll("#cor-mets .al-chip").forEach(function (b) {
             b.classList.toggle("on", b.getAttribute("data-cormet") === String(corCfg.metric));
-        });
-        board.querySelectorAll("#cor-axis-x .al-chip").forEach(function (b) {
-            b.classList.toggle("on", b.getAttribute("data-corx") === String(corAxes.x));
-        });
-        board.querySelectorAll("#cor-axis-y .al-chip").forEach(function (b) {
-            b.classList.toggle("on", b.getAttribute("data-cory") === String(corAxes.y));
         });
     }
 
@@ -1481,8 +1288,7 @@
         if (corTimer) clearInterval(corTimer);
         corTimer = setInterval(function () {
             if (!document.hidden && $("corr-board") &&
-                $("corr-board").offsetParent !== null &&
-                !document.querySelector("#corr-board .cor-tip.pinned")) loadCorrelations(false);
+                $("corr-board").offsetParent !== null) loadCorrelations(false);
         }, 30000);
     }
 
@@ -1504,8 +1310,7 @@
         board.addEventListener("click", function (e) {
             var t = e.target;
             while (t && t !== board && !(t.getAttribute && (t.getAttribute("data-corwin") ||
-                t.getAttribute("data-cormet") || t.getAttribute("data-corx") ||
-                t.getAttribute("data-cory") || t.getAttribute("data-corpair")))) {
+                t.getAttribute("data-cormet") || t.getAttribute("data-corpair")))) {
                 t = t.parentNode;
             }
             if (!t || t === board) return;
@@ -1528,20 +1333,6 @@
                 saveCorrelations();
                 return;
             }
-            var ax = t.getAttribute("data-corx");
-            if (ax) {
-                corAxes.x = ax;
-                corMarkChips();
-                if (corData) { drawCorChart(corData); }
-                return;
-            }
-            var ay = t.getAttribute("data-cory");
-            if (ay) {
-                corAxes.y = ay;
-                corMarkChips();
-                if (corData) { drawCorChart(corData); }
-                return;
-            }
             var pi = t.getAttribute("data-corpair");
             if (pi !== null && pi !== undefined && pi !== "") {
                 var p = corPairsOf(corData, (corData && corData.metric) || "liq")
@@ -1554,32 +1345,6 @@
                     ((corData && (corData.window_label || corData.window)) || ""), true);
             }
         });
-        var cv = $("cor-scatter");
-        if (cv) {
-            cv.addEventListener("mousemove", function (e) {
-                var rect = cv.getBoundingClientRect ? cv.getBoundingClientRect() : { left: 0, top: 0 };
-                var p = corPick(e.clientX - rect.left, e.clientY - rect.top);
-                corPaintTip(p, false);
-            });
-            cv.addEventListener("mouseleave", function () { corPaintTip(null, false); });
-            cv.addEventListener("click", function (e) {
-                var rect = cv.getBoundingClientRect ? cv.getBoundingClientRect() : { left: 0, top: 0 };
-                var p = corPick(e.clientX - rect.left, e.clientY - rect.top);
-                corPinned = p || null;
-                corPaintTip(corPinned, true);
-                if (p) {
-                    corSetStatus("пара " + corShort(p.a) + " ↔ " + corShort(p.b) +
-                        ": " + corLabelOf(corAxes.x) + " r = " + p.x.toFixed(2) + ", " +
-                        corLabelOf(corAxes.y) + " r = " + p.y.toFixed(2), true);
-                }
-            });
-        }
-        if (global.addEventListener && !global._corResize) {
-            global._corResize = true;
-            global.addEventListener("resize", function () {
-                if (corData && $("cor-scatter")) drawCorChart(corData);
-            });
-        }
     }
 
     /* ---------- сервис «Сторож монет»: гистограмма пампов/дампов ---------- */
@@ -1589,6 +1354,13 @@
        сразу переключает чип и пересобирает картину из уже пришедших данных, а
        автообновление меняет только цифры. */
     var pumpData = null, pumpTimer = null, pumpCfg = null, pumpSaveT = null;
+    /* Нажатые, но ещё не подтверждённые сервером настройки. Раньше клик по
+       «Период свечей» / «Сколько свечей» тут же просил свежий снимок у сервера,
+       снимок приходил со старым значением, доска перерисовывалась — и чип
+       отскакивал назад, а сохранение уходило со старым числом («скачет и
+       остаётся на месте»). Теперь нажатие — источник правды, пока сервер его
+       не подтвердил, а снимки только дополняют картину. */
+    var pumpPending = {};
     var PUMP_MODE_LABEL = { pump: "🚀 Пампы", dump: "🩸 Дампы", both: "⚖️ Сразу оба" };
 
     function bootPumps() {
@@ -1602,15 +1374,41 @@
         }, 12000);
     }
 
+    function pumpPendingAny() {
+        for (var k in pumpPending) {
+            if (Object.prototype.hasOwnProperty.call(pumpPending, k)) return true;
+        }
+        return false;
+    }
+
+    /** Локальный выбор важнее снимка с сервера, пока сервер его не подтвердил. */
+    function pumpMergeCfg(cfg) {
+        var out = Object.assign({}, cfg || {});
+        Object.keys(pumpPending).forEach(function (k) { out[k] = pumpPending[k]; });
+        return out;
+    }
+
+    /** Настройка, выбранная в панели: сразу видна и защищена от старых снимков. */
+    function pumpSet(key, value) {
+        if (!pumpCfg) pumpCfg = {};
+        pumpCfg[key] = value;
+        pumpPending[key] = value;
+    }
+
     function loadPumps(full) {
         return api("/api/account/watchlist").then(function (d) {
             if (!d || !d.ok) return d;
+            var first = !pumpCfg || !$("pump-bars");
             pumpData = d;
-            if (full || !pumpCfg || !$("pump-bars")) {
-                pumpCfg = d.config || pumpCfg;
+            if (d.config) pumpCfg = pumpMergeCfg(d.config);
+            /* Пока настройка не подтверждена сервером, доску целиком не
+               пересобираем: перерисовка снесла бы чипы, которые только что
+               нажали. Обновляем цифры и подсветку — этого достаточно. */
+            if ((full || first) && !pumpPendingAny()) {
                 paintPumps(d, true);
             } else {
-                paintPumps(d, false);
+                pumpMarkChips();
+                paintPumpsLive(d);
             }
             return d;
         });
@@ -1618,17 +1416,25 @@
 
     function savePumps() {
         if (!pumpCfg) return;
+        pumpSaveT = null;
+        var sent = Object.assign({}, pumpCfg);       // что именно уйдёт на сервер
         api("/api/account/watchlist", {
             method: "POST",
-            body: JSON.stringify(pumpCfg),
+            body: JSON.stringify(sent),
         }).then(function (d) {
             var st = $("pump-status");
-            if (d && d.config) pumpCfg = d.config;
+            // подтверждение пришло: «ожидание» снимаем только с тех полей,
+            // которые не успели измениться, пока запрос был в пути
+            Object.keys(pumpPending).forEach(function (k) {
+                if (String(sent[k]) === String(pumpCfg[k])) delete pumpPending[k];
+            });
+            if (d && d.config) pumpCfg = pumpMergeCfg(d.config);
             if (d && d.movers) pumpData = Object.assign({}, pumpData || {}, { movers: d.movers, hits: d.hits || [] });
             if (d && d.hits) {
                 var hits = $("pump-hits-box");
                 if (hits) hits.innerHTML = pumpHitsBox(d);
             }
+            pumpMarkChips();                         // окно сигнала — по факту
             if (st) {
                 st.className = "al-status " + (d && d.ok ? "ok" : "");
                 st.textContent = d && d.ok ? "сохранено · сигналы придут в Telegram"
@@ -1868,22 +1674,22 @@
             }
             if (!t || t === board) return;
             if (t.id === "pump-sw") {
-                pumpCfg.enabled = !pumpCfg.enabled;
+                pumpSet("enabled", !pumpCfg.enabled);
                 pumpMarkChips();
                 pumpDebounce();
                 return;
             }
             var mode = t.getAttribute("data-pumpmode");
             if (mode) {
-                pumpCfg.mode = mode;
-                pumpCfg.enabled = true;
+                pumpSet("mode", mode);
+                pumpSet("enabled", true);
                 pumpRepaintNow();          // картина меняется сразу
                 pumpDebounce();
                 return;
             }
             var thr = t.getAttribute("data-pumpthr");
             if (thr !== null && thr !== undefined && thr !== "") {
-                pumpCfg.threshold = Number(thr);
+                pumpSet("threshold", Number(thr));
                 var inp = $("pump-thr-in");
                 if (inp) inp.value = pumpCfg.threshold;
                 pumpRepaintNow();
@@ -1892,17 +1698,17 @@
             }
             var per = t.getAttribute("data-pumpper");
             if (per) {
-                pumpCfg.period = per;
+                // период и число свечей считаются на клиенте: окно сигнала —
+                // период × свечи, минуты периода уже пришли со снимком
+                pumpSet("period", per);
                 pumpMarkChips();
-                loadPumps(true);           // окно сигнала считает сервер
                 pumpDebounce();
                 return;
             }
             var cnd = t.getAttribute("data-pumpcn");
             if (cnd) {
-                pumpCfg.candles = Number(cnd);
+                pumpSet("candles", Number(cnd));
                 pumpMarkChips();
-                loadPumps(true);
                 pumpDebounce();
                 return;
             }
@@ -1910,7 +1716,7 @@
         board.addEventListener("change", function (e) {
             var inp = e.target;
             if (!inp || inp.id !== "pump-thr-in") return;
-            pumpCfg.threshold = Number(inp.value) || pumpCfg.threshold;
+            pumpSet("threshold", Number(inp.value) || pumpCfg.threshold);
             pumpRepaintNow();
             pumpDebounce();
         });

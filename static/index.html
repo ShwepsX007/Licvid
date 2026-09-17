@@ -7,10 +7,10 @@
           content="LiqScope Terminal — live-лента ликвидаций крипто-фьючерсов с 8 бирж, свечной график, кластеры и профиль объёмов.">
     <title data-i18n="terminal.title">LiqScope Terminal — Live Liquidation Stream & Cluster Chart</title>
     <link rel="icon" type="image/png" href="/static/logo.png">
-    <link rel="stylesheet" href="/static/style.css?v=thresh1">
+    <link rel="stylesheet" href="/static/style.css?v=clear1">
     <!-- Local Lightweight Charts v5 -->
     <script src="/static/lightweight-charts.js"></script>
-    <script src="/static/i18n.js?v=thresh1"></script>
+    <script src="/static/i18n.js?v=clear1"></script>
     <script src="/static/account.js"></script>
 </head>
 <body class="dark-theme">
@@ -86,9 +86,23 @@
             <button class="btn btn-icon btn-outline" id="sound-toggle-btn" data-i18n-title="sound.title" title="Звуковой сигнал">
                 <span id="sound-icon">🔇</span>
             </button>
-            <button class="btn btn-outline" id="clear-clusters-btn" data-i18n-title="clear.title" title="Очистить">
-                <span data-i18n="clear.btn">🧹 Очистить</span>
-            </button>
+            <!-- Очистка ленты и графика. Рядом «▾»: если стёр по ошибке — в
+                 выпадающем списке есть «Возобновить историю», она вернёт всё. -->
+            <div class="clear-ctl" id="clear-ctl">
+                <button class="btn btn-outline" id="clear-clusters-btn" data-i18n-title="clear.title" title="Очистить">
+                    <span data-i18n="clear.btn">🧹 Очистить</span>
+                </button>
+                <button class="btn btn-outline clear-caret" id="clear-menu-btn" type="button"
+                        aria-haspopup="true" aria-expanded="false" aria-controls="clear-menu"
+                        data-i18n-title="clear.menu_title" title="Очистить или вернуть историю">▾</button>
+                <div class="clear-menu hidden" id="clear-menu" role="menu">
+                    <button type="button" role="menuitem" data-clear-act="clear">
+                        <span data-i18n="clear.do">🧹 Очистить график</span></button>
+                    <button type="button" role="menuitem" data-clear-act="restore" id="clear-undo-item">
+                        <span data-i18n="clear.undo">↩️ Возобновить историю</span>
+                        <span class="clear-note" id="clear-undo-note"></span></button>
+                </div>
+            </div>
         </div>
     </header>
 
@@ -201,11 +215,6 @@
                     <span class="data-source" id="data-source"></span>
                 </div>
                 <div class="chart-legend">
-                    <span class="legend-item"><span class="cluster-dot liq-long"></span> <span data-i18n="chart.long">Ликв. лонгов</span></span>
-                    <span class="legend-item"><span class="cluster-dot liq-short"></span> <span data-i18n="chart.short">Ликв. шортов</span></span>
-                    <span class="legend-item" data-i18n-title="chart.whale_title" title="Шкала китов: $100K — жёлтый … $1M+ — ярко-красный"><span class="cluster-dot liq-whale"></span> <span data-i18n="chart.whale">Кит ($100k+)</span></span>
-                    <span class="legend-item"><span class="cluster-dot cvd-buy"></span> <span data-i18n="chart.cvd_buy">CVD ▲</span></span>
-                    <span class="legend-item"><span class="cluster-dot cvd-sell"></span> <span data-i18n="chart.cvd_sell">CVD ▼</span></span>
                     <span class="layer-cell"><span class="layer-label" data-i18n="chart.liq_label">Ликвидации</span>
                     <span class="live-stat" id="liq-stat" data-i18n-title="chart.live_liq"
                             title="Ликвидации текущей свечи"></span></span>
@@ -235,6 +244,16 @@
                             title="Развернуть график на весь экран">⛶</button>
                 </div>
                 <div class="layer-pop hidden" id="layer-pop">
+                    <!-- Подсказка «что значит цвет» переехала из шапки графика сюда:
+                         открыл слои — видишь расшифровку, и она не занимает место
+                         в строке. Пункты идут один над другим, а не в ряд. -->
+                    <div class="layer-pop-legend" id="layer-legend">
+                        <span class="legend-item"><span class="cluster-dot liq-long"></span> <span data-i18n="chart.long">Ликв. лонгов</span></span>
+                        <span class="legend-item"><span class="cluster-dot liq-short"></span> <span data-i18n="chart.short">Ликв. шортов</span></span>
+                        <span class="legend-item" data-i18n-title="chart.whale_title" title="Шкала китов: $100K — жёлтый … $1M+ — ярко-красный"><span class="cluster-dot liq-whale"></span> <span data-i18n="chart.whale">Кит ($100k+)</span></span>
+                        <span class="legend-item"><span class="cluster-dot cvd-buy"></span> <span data-i18n="chart.cvd_buy">CVD ▲</span></span>
+                        <span class="legend-item"><span class="cluster-dot cvd-sell"></span> <span data-i18n="chart.cvd_sell">CVD ▼</span></span>
+                    </div>
                     <button class="profile-toggle liq-toggle" id="liq-toggle" type="button"
                             data-i18n-title="chart.liq_on" data-i18n="chart.liq"
                             title="Скрыть прямоугольники ликвидаций">⚡ Ликвидации</button>
@@ -427,6 +446,6 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=thresh1"></script>
+    <script src="/static/app.js?v=clear1"></script>
 </body>
 </html>

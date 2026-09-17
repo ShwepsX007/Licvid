@@ -209,24 +209,16 @@ async function main() {
   check("у сторожа включён сигнал (как в демо-подписке)",
         /СИГНАЛ (ВКЛ|ВЫКЛ)/.test(pump.textContent), q("#pump-sw") && q("#pump-sw").textContent);
 
-  // График корреляций рядом с тепловой картой: облако связей (пары монет по
-  // двум метрикам) и распределение коэффициентов.
-  check("есть график корреляций (облако связей)", !!$("cor-scatter") && !!q("#cor-chart-box"),
-        q("#cor-chart-box") ? q("#cor-chart-box").textContent.slice(0, 60) : "нет");
-  check("у графика две оси с выбором метрики",
-        qa("#cor-axis-x .al-chip").length >= 4 && qa("#cor-axis-y .al-chip").length >= 4,
-        qa("#cor-axis-x .al-chip").length + "/" + qa("#cor-axis-y .al-chip").length);
-  check("есть распределение связей по интервалам r", qa(".cor-hist i").length >= 8,
+  // «Облако связей» из сервиса корреляций убрано: вместе с тепловой картой
+  // осталось распределение связей (гистограмма коэффициентов).
+  check("облака связей больше нет в сервисе корреляций",
+        !$("cor-scatter") && !q("#cor-chart-box") && !q("#cor-axis-x") && !q("#cor-axis-y"),
+        [$("cor-scatter") ? "canvas" : "", q("#cor-chart-box") ? "box" : "",
+         q("#cor-axis-x") ? "оси" : ""].join(" "));
+  check("распределение связей по интервалам r осталось", qa(".cor-hist i").length >= 8,
         qa(".cor-hist i").length + " столбиков");
-  const axisChip = qa("#cor-axis-y .al-chip").filter((b) => /OI/.test(b.textContent))[0];
-  if (axisChip) {
-    const beforeAxis = apiCalls.length;
-    axisChip.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, view: win }));
-    await sleep(200);
-    check("выбор оси графика не ждёт сервер (мгновенно)",
-          apiCalls.length === beforeAxis && axisChip.classList.contains("on"),
-          apiCalls.length - beforeAxis + " запросов");
-  }
+  check("тепловая карта на месте", qa("#cor-heat-box .cor-heat-cell").length >= 4,
+        qa("#cor-heat-box .cor-heat-cell").length + " клеток");
 
   // сохранение настройки: порог 30%
   const before = apiCalls.filter((c) => c.method === "POST" &&
@@ -243,6 +235,43 @@ async function main() {
     check("в панели появилась плашка сохранения",
           /сохранено|ошибка|null/.test($("pump-status") ? $("pump-status").textContent : ""),
           $("pump-status") && $("pump-status").textContent);
+  }
+
+  // Регрессия «Период свечей / Сколько свечей скачут и остаются на месте»:
+  // клик по чипу тут же просил свежий снимок у сервера, снимок приходил со
+  // старым значением, доска пересобиралась — чип отскакивал назад, а на сервер
+  // уходило старое число. Теперь нажатие — источник правды, пока сервер его
+  // не подтвердил.
+  // Чипы выбора держим с самым коротким окном (1m × 1 свеча): демо-стенд
+  // копит минутные срезы, и длинное окно оставило бы доску без движений.
+  const perChip = qa("#pump-per .al-chip").filter((b) => b.textContent.trim() === "1m")[0];
+  const cndChip = qa("#pump-cnd .al-chip").filter((b) => b.textContent.trim() === "1 свеч.")[0];
+  check("есть чипы «1m» и «1 свеч.»", !!perChip && !!cndChip);
+  const windowText = () => ($("pump-window") ? $("pump-window").textContent : "");
+  const markedCandles = () => Number(String((qa("#pump-cnd .al-chip")
+    .filter((b) => b.classList.contains("on"))[0] || {}).textContent || "").replace(/\D+/g, "")) || 0;
+  if (perChip && cndChip) {
+    perChip.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, view: win }));
+    await sleep(250);
+    check("клик по периоду подсветил чип сразу", perChip.classList.contains("on"), perChip.className);
+    const expectWin = (1 * markedCandles()) + "м";
+    check("окно сигнала пересчитано сразу (период × свечи)",
+          windowText().indexOf(expectWin) !== -1, windowText().slice(0, 60) + " | ждали " + expectWin);
+    await sleep(1200);
+    check("период не отскакивает назад после снимка сервера",
+          perChip.classList.contains("on"), perChip.className);
+    cndChip.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, view: win }));
+    await sleep(1400);
+    check("число свечей не отскакивает назад после снимка сервера",
+          cndChip.classList.contains("on"), cndChip.className);
+    check("окно сигнала с одной свечой — один период",
+          windowText().indexOf("1м") !== -1, windowText().slice(0, 60));
+    const lastSave = apiCalls.filter((c) => c.method === "POST" &&
+      c.url.indexOf("/api/account/watchlist") === 0).slice(-1)[0];
+    check("на сервер ушли выбранные период и свечи",
+          !!lastSave && /"period":"1m"/.test(String(lastSave.body)) &&
+          /"candles":1/.test(String(lastSave.body)),
+          lastSave && String(lastSave.body).slice(0, 140));
   }
 
   // Регрессия «кнопки в новых сервисах туго отвечают»: доски сторожа и

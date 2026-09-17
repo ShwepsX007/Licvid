@@ -165,6 +165,8 @@
     const soundToggleBtn = $("sound-toggle-btn");
     const soundIcon = $("sound-icon");
     const clearBtn = $("clear-clusters-btn");
+    const clearMenuBtn = $("clear-menu-btn");
+    const clearMenu = $("clear-menu");
     const topCoinsContainer = $("top-coins-list");
     const chartWrapper = $("chart-wrapper");
     const clusterCanvas = $("cluster-canvas");
@@ -5205,7 +5207,10 @@
         if (state.soundEnabled) playSound(1000, "BUY");
     });
 
-    clearBtn.addEventListener("click", () => {
+    /** Стереть ленту и метки на графике. История при этом не теряется: она
+     *  лежит на сервере и в локальном кэше, поэтому её можно вернуть кнопкой
+     *  «↩️ Возобновить историю» в выпадающем списке рядом с «Очистить». */
+    function clearChart() {
         state.liquidations = [];
         historyLoaded.clear();   // при след. выборе пары история подтянется заново
         feedTbody.innerHTML = "";
@@ -5213,7 +5218,78 @@
         feedEmptyEl.classList.remove("hidden");
         applyMarkers([]);
         queueRedraw();
+    }
+
+    /** Вернуть всё, что было до очистки: события снова забираются с сервера
+     *  (плюс локальный кэш), поэтому на графике появляется та же история. */
+    function restoreChart() {
+        const sym = chartSymbol();
+        historyLoaded.clear();
+        setClearMenuOpen(false);
+        // что уже лежит рядом — показываем сразу, не дожидаясь сети
+        Promise.all([loadCachedLiquidations(sym, MAX_HISTORY),
+                     state.symbol !== "ALL" && state.symbol !== sym
+                         ? loadCachedLiquidations(state.symbol, MAX_HISTORY)
+                         : Promise.resolve([])]).then(([a, b]) => {
+            mergeLiquidations(a);
+            mergeLiquidations(b);
+            rebuildFeed();
+            updateMarkers();
+            updateLiveStats();
+            queueRedraw();
+        }).catch(() => { /* кэш может быть недоступен — сервер всё равно ответит */ });
+        // сервер — источник правды: тот же путь, что и при выборе пары
+        loadHistoryFor(sym, true);
+        if (state.symbol !== "ALL" && state.symbol !== sym) {
+            loadHistoryFor(state.symbol, true);
+        }
+    }
+
+    function setClearMenuOpen(open) {
+        if (!clearMenu) return;
+        // подсказка: что именно сделает «Возобновить историю» (с учётом языка)
+        const note = $("clear-undo-note");
+        if (note) note.textContent = I18n.t("clear.undone");
+        clearMenu.classList.toggle("hidden", !open);
+        if (clearMenuBtn) clearMenuBtn.setAttribute("aria-expanded", open ? "true" : "false");
+    }
+
+    function runClearAction(act) {
+        if (act === "restore") restoreChart();
+        else clearChart();
+        setClearMenuOpen(false);
+    }
+
+    clearBtn.addEventListener("click", () => {
+        clearChart();
+        setClearMenuOpen(false);
     });
+    if (clearMenuBtn) {
+        clearMenuBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            setClearMenuOpen(clearMenu ? clearMenu.classList.contains("hidden") : false);
+        });
+    }
+    if (clearMenu) {
+        // список не закрывается от клика по самому себе
+        clearMenu.addEventListener("click", (e) => e.stopPropagation());
+        clearMenu.addEventListener("click", (e) => {
+            const btn = e.target && e.target.closest ? e.target.closest("[data-clear-act]") : null;
+            if (btn) runClearAction(btn.dataset.clearAct);
+        });
+        document.addEventListener("click", () => setClearMenuOpen(false));
+        document.addEventListener("keydown", (e) => {
+            if (e.key === "Escape") setClearMenuOpen(false);
+        });
+        setClearMenuOpen(false);      // подсказка заполнена ещё до раскрытия
+    }
+    window.LiqScopeClear = {      // тестовый API для tests/clear_restore.js
+        clear: clearChart,
+        restore: restoreChart,
+        isOpen: () => !!(clearMenu && !clearMenu.classList.contains("hidden")),
+        setOpen: setClearMenuOpen,
+        count: () => state.liquidations.length,
+    };
 
     function closeModal() {
         // закрываем окно закреплённого кластера — снимаем и подсветку ленты

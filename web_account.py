@@ -45,6 +45,8 @@ class Ctx:
     ws_clients_fn = staticmethod(lambda: 0)
     alerts_market_fn = staticmethod(lambda: {})
     symbols_fn = staticmethod(lambda: [])
+    # Корреляции валют: (окно, метрика) → готовая картина по истории
+    correlations_fn = staticmethod(lambda window="24h", metric="liq": {})
 
 
 ctx = Ctx()
@@ -872,6 +874,57 @@ def register_account_routes(app) -> None:
             "subscribed": True,
             "live": live_snapshot(cfg, market),
         }
+
+    @router.get("/api/account/correlations")
+    async def api_correlations(request: Request, window: str = "", metric: str = ""):
+        from correlations import DEFAULT_METRIC, DEFAULT_WINDOW, WINDOWS, window_key
+        user = current_user(request)
+        if not user:
+            return _need_auth()
+        if not _verify_allowed(user):
+            return _need_verified()
+        row = ctx.store.get_user_service(user["id"], "correlations")
+        cfg = (row or {}).get("config") or {}
+        win = window_key(window or cfg.get("window") or DEFAULT_WINDOW)
+        met = metric or cfg.get("metric") or DEFAULT_METRIC
+        data = {}
+        try:
+            data = ctx.correlations_fn(win, met) or {}
+        except Exception as e:
+            log.warning("correlations: %s", e)
+        if not data:
+            # история ещё не набрана или источник упал — отдаём пустую, но
+            # полную картину: страница должна рисоваться, а не падать
+            from correlations import build
+            data = build([], window=win, metric=met)
+        data = dict(data)
+        data["subscribed"] = bool(row and row.get("enabled"))
+        data["config"] = {"window": win, "metric": met}
+        data["windows"] = data.get("windows") or [
+            {"key": k, "minutes": m} for k, m in WINDOWS]
+        return {"ok": True, **data}
+
+    @router.post("/api/account/correlations")
+    async def api_correlations_save(request: Request):
+        from correlations import DEFAULT_METRIC, DEFAULT_WINDOW, window_key
+        user = current_user(request)
+        if not user:
+            return _need_auth()
+        if not _verify_allowed(user):
+            return _need_verified()
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        cfg = {
+            "window": window_key((body or {}).get("window") or DEFAULT_WINDOW),
+            "metric": str((body or {}).get("metric") or DEFAULT_METRIC),
+        }
+        r = ctx.store.set_user_service_config(
+            user["id"], "correlations", cfg, enabled=True)
+        if not r.get("ok"):
+            return JSONResponse(r, status_code=400)
+        return {"ok": True, "config": cfg, "subscribed": True}
 
     # ----- admin ----------------------------------------------------------
     def _admin(request: Request):

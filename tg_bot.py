@@ -116,6 +116,8 @@ class TelegramBot:
         # и по этой паре видно, ушло ли после меню что-то ещё (алерты, отчёты).
         self._last_msg: Dict[int, int] = {}
         self.alerts_market_fn: Optional[Callable[[], Any]] = None
+        # Корреляции валют: (окно, метрика) → готовая картина по истории
+        self.correlations_fn: Optional[Callable[[str, str], Any]] = None
         self._poll_fails = 0          # подряд неудачных getUpdates
         self._conflict_warned_at = 0.0  # когда последний раз слали 409-предупреждение
         self._conflict_mode = False     # конфликт: короткий опрос, быстрые повторы
@@ -2030,6 +2032,8 @@ class TelegramBot:
             await self.show_menu(chat_id, self._liq_text(), self._reply_kb(user))
         elif text.startswith("/services"):
             await self.show_menu(chat_id, self._services_text(user), self._services_kb(user))
+        elif text.startswith("/correlations") or text.startswith("/corr"):
+            await self.show_menu(chat_id, self._corr_text(user), self._corr_kb(user))
         elif text.startswith("/alerts"):
             await self.show_menu(chat_id, self._alert_text(user), self._alert_kb(user))
         elif text.startswith("/terminal"):
@@ -2165,6 +2169,9 @@ class TelegramBot:
             if data == "al" or data.startswith("al:"):
                 await self._on_alert_cb(chat_id, user, data, message_id)
                 return
+            if data == "cor" or data.startswith("cor:"):
+                await self._on_corr_cb(chat_id, user, data, message_id)
+                return
             if data != "ch:check" and not await self._ensure_channel(
                     chat_id, user, message_id=message_id):
                 return
@@ -2218,6 +2225,11 @@ class TelegramBot:
                             if s["slug"] == "alerts"), None)
                 if row and not row.get("coming_soon"):
                     return self._alert_text(user), self._alert_kb(user)
+            if slug == "correlations":
+                row = next((s for s in self.store.list_services(False)
+                            if s["slug"] == "correlations"), None)
+                if row and not row.get("coming_soon"):
+                    return self._corr_text(user), self._corr_kb(user)
             have = set(self.store.user_service_slugs(user["id"]))
             on = slug not in have
             self.store.toggle_user_service(user["id"], slug, on)
@@ -2750,6 +2762,7 @@ class TelegramBot:
             "/liq — последние события",
             "/services — сервисы кабинета",
             "/alerts — алерты по объёму",
+            "/correlations — корреляции валют",
             "/bot — состояние опроса бота",
         ]
         email = (user.get("email") or "").strip()
@@ -2966,19 +2979,20 @@ class TelegramBot:
         have = set(self.store.user_service_slugs(user["id"]))
         lines = [
             "<b>Сервисы кабинета</b>",
-            "Те же, что на сайте. Алерты по объёму уже работают — откройте 🔔.",
+            "Те же, что на сайте: 🔔 алерты и 🔗 корреляции валют уже работают.",
             "",
         ]
         for s in self.store.list_services(include_disabled=False):
             mark = "✓" if s["slug"] in have else "○"
-            if s["slug"] == "alerts" and not s.get("coming_soon"):
-                extra = " · настроить"
+            if s["slug"] in ("alerts", "correlations", "watchlist") and not s.get("coming_soon"):
+                extra = " · открыть"
             else:
                 extra = " · скоро" if s["coming_soon"] else ""
             lines.append(f"{mark} {s['icon']} <b>{_esc(s['title'])}</b>{extra}")
             if s.get("description"):
                 lines.append(f"    {_esc(s['description'])}")
-        lines.append("\nАлерты открывают настройки. Остальное — лист ожидания, пока «скоро».")
+        lines.append("\nРаботающие сервисы открывают свои настройки, "
+                     "остальные — лист ожидания, пока «скоро».")
         return "\n".join(lines) + self.site_footer()
 
     def _users_text(self) -> str:
@@ -3141,6 +3155,90 @@ class TelegramBot:
             self._alert_save(user, cfg)
             return f"{'Порог' if kind == 'thr' else 'Мин. удар'} {metric}: {money(n)}"
         return "Не понял."
+
+    # ----- сервис «Корреляции валют» --------------------------------------
+    def _corr_cfg(self, user: dict) -> dict:
+        from correlations import DEFAULT_METRIC, DEFAULT_WINDOW, window_key
+        row = self.store.get_user_service(user["id"], "correlations") if self.store else None
+        cfg = (row or {}).get("config") or {}
+        return {"window": window_key(cfg.get("window") or DEFAULT_WINDOW),
+                "metric": str(cfg.get("metric") or DEFAULT_METRIC)}
+
+    def _corr_save(self, user: dict, cfg: dict) -> None:
+        self.store.set_user_service_config(
+            user["id"], "correlations", cfg, enabled=True)
+
+    def _corr_data(self, cfg: dict) -> dict:
+        fn = self.correlations_fn
+        if not fn:
+            return {}
+        try:
+            return fn(cfg.get("window", "24h"), cfg.get("metric", "liq")) or {}
+        except Exception as e:  # noqa: BLE001
+            log.debug("корреляции: %s", e)
+            return {}
+
+    def _corr_text(self, user: dict) -> str:
+        from correlations import format_text, metric_title, window_label
+        cfg = self._corr_cfg(user)
+        data = self._corr_data(cfg)
+        if not data:
+            return ("<b>🔗 Корреляции валют</b>\n"
+                    "История ещё собирается: сервис считает связи монет по часовым "
+                    "свёрткам ликвидаций, объёма, CVD и OI. Загляните позже — или "
+                    "посмотрите тепловую карту на сайте."
+                    + self.site_footer())
+        body = format_text(data, "ru", site=self.site_url("/cabinet"))
+        lines = body.split("\n")
+        lines[0] = (f"<b>🔗 Корреляции валют</b> · {window_label(cfg['window'])} · "
+                    f"{metric_title(cfg['metric'])}")
+        return "\n".join(lines) + self.site_footer()
+
+    def _corr_kb(self, user: dict) -> dict:
+        from correlations import WINDOWS, window_label
+        cfg = self._corr_cfg(user)
+        rows = []
+        for key, _minutes in WINDOWS:
+            mark = "✓ " if key == cfg["window"] else ""
+            rows.append({"text": mark + window_label(key),
+                         "callback_data": "cor:w:" + key})
+        kb = [rows[i:i + 3] for i in range(0, len(rows), 3)]
+        kb.append([
+            {"text": ("✓ " if cfg["metric"] == "liq" else "") + "💥 LIQ",
+             "callback_data": "cor:m:liq"},
+            {"text": ("✓ " if cfg["metric"] == "vol" else "") + "📦 Объём",
+             "callback_data": "cor:m:vol"},
+        ])
+        kb.append([
+            {"text": ("✓ " if cfg["metric"] == "cvd" else "") + "🌊 CVD",
+             "callback_data": "cor:m:cvd"},
+            {"text": ("✓ " if cfg["metric"] == "oi" else "") + "📊 OI",
+             "callback_data": "cor:m:oi"},
+        ])
+        kb.append([{"text": "🔄 Пересчитать", "callback_data": "cor:now"},
+                   {"text": "🌐 Тепловая карта", "url":
+                    self.site_url("/cabinet#correlations")}])
+        kb.append([{"text": "← Назад", "callback_data": "services"}])
+        return {"inline_keyboard": kb}
+
+    async def _on_corr_cb(self, chat_id, user: dict, data: str, message_id) -> None:
+        cfg = self._corr_cfg(user)
+        parts = data.split(":")
+        if data == "cor" or data == "cor:now":
+            await self.reply(chat_id, self._corr_text(user), self._corr_kb(user),
+                             message_id=message_id)
+            return
+        if len(parts) >= 3 and parts[1] == "w":
+            cfg["window"] = parts[2]
+        elif len(parts) >= 3 and parts[1] == "m":
+            cfg["metric"] = parts[2]
+        else:
+            await self.reply(chat_id, self._corr_text(user), self._corr_kb(user),
+                             message_id=message_id)
+            return
+        self._corr_save(user, cfg)
+        await self.reply(chat_id, self._corr_text(user), self._corr_kb(user),
+                         message_id=message_id)
 
     async def _on_alert_cb(self, chat_id, user: dict, data: str, message_id) -> None:
         tg_id = int(user.get("tg_id") or 0)

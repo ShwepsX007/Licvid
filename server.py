@@ -818,6 +818,33 @@ def sync_hot_symbols():
     feed.set_flow_symbols(flow)
 
 
+def correlations_snapshot(window: str = "24h", metric: str = "liq") -> dict:
+    """Картина корреляций по месячной истории: часовые свёртки + ряды OI.
+
+    Данные берём из истории (history.HistoryStore) и снимков OI — за окно от
+    часа до недели, поэтому сервис видит больше, чем минутный поток в памяти.
+    """
+    from correlations import build, window_minutes
+    now = time.time()
+    minutes = window_minutes(window)
+    cells = HIST.hours_range(now - minutes * 60, now, now)
+    oi_series: Dict[str, list] = {}
+    tracker = getattr(OI, "_series", None)
+    if isinstance(tracker, dict):
+        for sym, series in list(tracker.items()):
+            try:
+                oi_series[sym] = [(t, v) for t, v in (series or [])]
+            except Exception:  # noqa: BLE001
+                continue
+    oi_flat = getattr(OI, "_flat", None)
+    if isinstance(oi_flat, dict):
+        for sym, rows in list(oi_flat.items()):
+            oi_series.setdefault(sym, list(rows or []))
+    prices = dict(feed.prices) if feed else {}
+    return build(cells, oi_series, prices, window=window, metric=metric,
+                 now=now)
+
+
 def alerts_market_snapshot() -> dict:
     """Снимок для движка алертов и кабинета."""
     now = time.time()
@@ -1470,6 +1497,7 @@ async def lifespan(app: FastAPI):
     tg_bot.ws_clients_fn = lambda: len(hub.clients)
     tg_bot.digest_fn = build_channel_digest
     tg_bot.alerts_market_fn = alerts_market_snapshot
+    tg_bot.correlations_fn = correlations_snapshot
     tg_bot.public_url = PUBLIC_URL
     await tg_bot.start()
 
@@ -1512,6 +1540,7 @@ account_ctx.stats_fn = compute_stats
 account_ctx.liqs_fn = lambda: list(LIQUIDATIONS)[-8:]
 account_ctx.ws_clients_fn = lambda: len(hub.clients)
 account_ctx.alerts_market_fn = alerts_market_snapshot
+account_ctx.correlations_fn = correlations_snapshot
 account_ctx.symbols_fn = lambda: list((feed.symbols if feed else [])[:40])
 register_account_routes(app)
 

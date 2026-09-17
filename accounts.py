@@ -110,10 +110,11 @@ DEFAULT_SERVICES = (
         "slug": "correlations",
         "title": "Корреляции валют",
         "title_en": "Coin correlations",
-        "description": "Связь ликвидаций и CVD между монетами за выбранный период.",
+        "description": ("Какие монеты ходят вместе за час-неделю: ликвидации, "
+                        "объём, CVD и OI. Где выносило лонги, а где шорты."),
         "icon": "🔗",
         "enabled": 1,
-        "coming_soon": 1,
+        "coming_soon": 0,
         "sort": 20,
     },
     {
@@ -137,6 +138,41 @@ DEFAULT_SERVICES = (
         "sort": 40,
     },
 )
+
+
+#: какие значения вообще пускаем в настройки сервиса (простые и короткие)
+CONFIG_MAX_KEYS = 24
+CONFIG_MAX_LIST = 40
+
+
+def clean_service_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Чистка настроек сервиса: только простые значения и без мусора.
+
+    Ключи приходят с сайта и из бота, так что лимиты нужны: строка — до 120
+    символов, список — до 40 коротких значений, глубже одного уровня не пускаем.
+    """
+    out: Dict[str, Any] = {}
+    for key, val in list((config or {}).items())[:CONFIG_MAX_KEYS]:
+        name = str(key)[:40]
+        if isinstance(val, bool) or isinstance(val, (int, float)):
+            out[name] = val
+        elif isinstance(val, str):
+            out[name] = val[:120]
+        elif isinstance(val, (list, tuple)):
+            items = []
+            for item in list(val)[:CONFIG_MAX_LIST]:
+                if isinstance(item, (str, int, float, bool)):
+                    items.append(item[:120] if isinstance(item, str) else item)
+            out[name] = items
+        elif isinstance(val, dict):
+            flat = {}
+            for k2, v2 in list(val.items())[:CONFIG_MAX_KEYS]:
+                if isinstance(v2, bool) or isinstance(v2, (int, float)):
+                    flat[str(k2)[:40]] = v2
+                elif isinstance(v2, str):
+                    flat[str(k2)[:40]] = v2[:120]
+            out[name] = flat
+    return out
 
 
 def _now() -> float:
@@ -391,13 +427,15 @@ class Store:
                         (s["slug"], s["title"], s["title_en"], s["description"],
                          s["icon"], s["enabled"], s["coming_soon"], s["sort"]),
                     )
-            # первый живой сервис — снимаем «скоро» даже на старых базах
-            alerts = next((s for s in DEFAULT_SERVICES if s["slug"] == "alerts"), None)
-            if alerts:
-                self._db.execute(
-                    "UPDATE services SET coming_soon=0, description=?, title=? WHERE slug='alerts'",
-                    (alerts["description"], alerts["title"]),
-                )
+            # работающие сервисы — снимаем «скоро» даже на старых базах
+            for slug in ("alerts", "correlations"):
+                live = next((s for s in DEFAULT_SERVICES if s["slug"] == slug), None)
+                if live:
+                    self._db.execute(
+                        "UPDATE services SET coming_soon=0, description=?, title=? "
+                        "WHERE slug=?",
+                        (live["description"], live["title"], slug),
+                    )
             self._db.commit()
         self._migrate_users()
         self._seed_digest()
@@ -1473,7 +1511,11 @@ class Store:
     def set_user_service_config(self, user_id: int, slug: str, config: Dict[str, Any],
                                 enabled: Optional[bool] = None) -> Dict[str, Any]:
         from alerts import normalize_config
-        cfg = normalize_config(config or {})
+        # У алертов свой строгий формат — его и нормализуем. Остальные сервисы
+        # (корреляции, сторож монет) хранят собственные ключи: раньше их
+        # настройки молча терялись, потому что проходили через ту же чистку.
+        cfg = (normalize_config(config or {}) if slug == "alerts"
+               else clean_service_config(config or {}))
         blob = json.dumps(cfg, ensure_ascii=False, separators=(",", ":"))
         now = _now()
         with self._lock:

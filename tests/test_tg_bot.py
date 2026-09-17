@@ -182,6 +182,63 @@ class BotMenuTest(unittest.TestCase):
         self.assertIn("nav:home", _datas(akb))
         self.assertIn("a:health", _datas(akb))
 
+    def test_correlations_screen_live(self):
+        """Корреляции валют: экран показывает связи, направления и настройки."""
+        from correlations import build
+        pic = build([], window="24h", metric="liq", now=1789669572.0)
+        pic.update({
+            "symbols": ["BTC_USDT", "ETH_USDT"],
+            "pairs": {"liq": [{"a": "BTC_USDT", "b": "ETH_USDT", "r": 0.83}],
+                      "cvd": []},
+            "flows": {"liquidated_long": ["BTC_USDT"],
+                      "liquidated_short": ["ETH_USDT"],
+                      "cvd_sellers": ["BTC_USDT"], "cvd_buyers": ["ETH_USDT"],
+                      "oi_up": ["BTC_USDT"], "oi_down": ["ETH_USDT"]},
+        })
+        calls = []
+
+        def fn(window="24h", metric="liq"):
+            calls.append((window, metric))
+            return pic
+
+        self.bot.correlations_fn = fn
+        text, kb = self.bot._screen(self.user, "svc:correlations")
+        self.assertIn("Корреляции валют", text)
+        self.assertIn("BTC, ETH", text)
+        self.assertIn("Где выносило шорты", text)
+        self.assertIn("OI падает", text)
+        datas = _datas(kb)
+        self.assertIn("cor:w:4h", datas)
+        self.assertIn("cor:m:cvd", datas)
+        self.assertIn("cor:now", datas)
+        self.assertIn("services", datas)
+        self.assertTrue(any(b.get("url", "").endswith("/cabinet#correlations")
+                            for row in kb["inline_keyboard"] for b in row))
+        self.assertEqual(calls[-1], ("24h", "liq"))
+
+    def test_correlations_screen_without_history(self):
+        self.bot.correlations_fn = lambda window="24h", metric="liq": {}
+        text, _kb = self.bot._screen(self.user, "svc:correlations")
+        self.assertIn("История ещё собирается", text)
+
+    def test_correlations_choice_is_saved(self):
+        import asyncio
+        sent = []
+
+        async def fake_reply(chat_id, text, markup=None, message_id=None, **kw):
+            sent.append(text)
+            return True
+
+        self.bot.reply = fake_reply
+        self.bot.correlations_fn = lambda window="24h", metric="liq": {}
+        asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
+            self.bot._on_corr_cb(1, self.user, "cor:w:7d", None))
+        cfg = self.bot._corr_cfg(self.user)
+        self.assertEqual(cfg["window"], "7d")
+        row = self.store.get_user_service(self.user["id"], "correlations")
+        self.assertTrue(row["enabled"])
+        self.assertEqual(row["config"]["window"], "7d")
+
     def test_admin_leaves_back_to_admin(self):
         for data in ("users", "visits", "broadcast", "a:health"):
             _t, kb = self.bot._screen(self.admin, data)

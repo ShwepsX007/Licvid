@@ -487,6 +487,15 @@ class OpenInterestTracker:
             return _num(hist[-1].get("sumOpenInterestValue"))
         return None
 
+    async def binance_usd(self, symbol: str) -> Optional[float]:
+        """Только Binance: один запрос на монету — для потока «ВСЕ».
+
+        Полный опрос по всем биржам для десятка чужих монет слишком дорог, а
+        сравнивать монеты между собой честнее на одной бирже: тогда рост и
+        падение OI в ленте — про одно и то же место рынка.
+        """
+        return await self._fetch_binance(symbol)
+
     async def _fetch_bybit(self, symbol: str) -> Optional[float]:
         px = self._price(symbol)
         if px is None:

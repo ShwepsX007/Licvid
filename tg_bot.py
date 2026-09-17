@@ -15,10 +15,21 @@ from typing import Any, Callable, Dict, List, Optional
 
 import aiohttp
 
+from refs import ex_link, gate_line, gate_url
+
 log = logging.getLogger("liqscope.bot")
 
 API = "https://api.telegram.org/bot{token}/{method}"
 DEFAULT_PUBLIC_URL = "https://liqscope.online"
+# Сторож опроса. Если успешного getUpdates не было дольше этого времени,
+# задача опроса считается зависшей и пересоздаётся: иначе «бот пишет уведомления,
+# но не видит кнопки» лечится только ручным перезапуском сервиса, а
+# /api/health при этом показывает running: true и fails: 0.
+POLL_STALE_SEC = float(os.getenv("LIQSCOPE_BOT_POLL_STALE_SEC", "180"))
+# Как часто сверять роли каналов с их названиями в Telegram. Название —
+# единственная подсказка, которую бот может получить сам: если русский пост
+# уходит в «…Eng», getChat это покажет.
+CHANNEL_CHECK_SEC = float(os.getenv("LIQSCOPE_CHANNEL_CHECK_SEC", "1800"))
 
 
 def normalize_public_url(url: str = "") -> str:
@@ -31,6 +42,13 @@ def normalize_public_url(url: str = "") -> str:
     if host in ("liqscope.online", "www.liqscope.online", "78.17.66.215"):
         return DEFAULT_PUBLIC_URL
     return s
+
+
+def _strip_html(s: str) -> str:
+    """Текст без разметки — для повтора, когда Telegram отверг parse_mode."""
+    import html as _html
+    import re
+    return _html.unescape(re.sub(r"<[^>]+>", "", s or ""))
 
 
 def _esc(s: Any) -> str:
@@ -62,7 +80,19 @@ class TelegramBot:
                             or "https://t.me/+4S1LsZtH1Pc5YWZi").strip()
         self._channel_id_cfg = (channel_id or os.getenv("LIQSCOPE_CHANNEL_ID")
                                 or "").strip()
+        # Второй канал — английская копия тех же сводок. Ссылки-приглашения
+        # даёт админ (LIQSCOPE_CHANNEL2_URL / LIQSCOPE_CHANNEL2_ID), id
+        # подхватывается и сам, когда бота добавляют в канал админом.
+        self.channel2_url = (os.getenv("LIQSCOPE_CHANNEL2_URL")
+                             or "https://t.me/+a13HtmoE9jNhY2M6").strip()
+        self._channel2_id_cfg = (os.getenv("LIQSCOPE_CHANNEL2_ID") or "").strip()
+        self._join_ok: Dict[int, float] = {}   # tg_id -> до какого времени пускать
         self.digest_fn = digest_fn or (lambda: {})
+        self.ai = None                      # ai_text.AiWriter из server.py (может не быть)
+        self._ai_recent: List[str] = []      # последние ИИ-шапки (рус)
+        self._ai_recent_en: List[str] = []   # последние ИИ-шапки (англ)
+        self._ai_state: Dict[str, Any] = {}  # что ответил ИИ (для админки)
+        self._draft: Optional[Dict[str, Any]] = None   # непринятый пост (контроль)
         self._digest_task: Optional[asyncio.Task] = None
         self._ch_ok: Dict[int, float] = {}   # tg_id -> cache until
         self._ch_warn_at = 0.0               # троттлинг варнинга про канал
@@ -77,12 +107,35 @@ class TelegramBot:
         self._wait_broadcast: Dict[int, bool] = {}  # tg_id -> waiting for text
         self._wait_tpl: Dict[int, str] = {}         # tg_id -> "head"|"photo"
         self._wait_alert: Dict[int, str] = {}       # tg_id -> "coin"|"win"|"thr:liq"|...
+        self._wait_email: Dict[int, float] = {}     # tg_id -> ждём адрес почты до
+        self._mail_at: Dict[str, float] = {}        # "tg:адрес" -> когда слали письмо
+        self.mailer = None                          # mailer.Mailer из server.py
         self._menu_msg: Dict[int, int] = {}         # chat_id -> последнее меню
+        # chat_id -> id последнего отправленного сообщения. Нужен, чтобы не
+        # править меню, которое уже уехало вверх: id сообщений в чате растут,
+        # и по этой паре видно, ушло ли после меню что-то ещё (алерты, отчёты).
+        self._last_msg: Dict[int, int] = {}
         self.alerts_market_fn: Optional[Callable[[], Any]] = None
+        # Корреляции валют: (окно, метрика) → готовая картина по истории
+        self.correlations_fn: Optional[Callable[[str, str], Any]] = None
+        # Сторож монет: (настройки) → пампы, дампы и последние сигналы
+        self.pump_snapshot_fn: Optional[Callable[[dict], Any]] = None
         self._poll_fails = 0          # подряд неудачных getUpdates
         self._conflict_warned_at = 0.0  # когда последний раз слали 409-предупреждение
         self._conflict_mode = False     # конфликт: короткий опрос, быстрые повторы
         self._conflict_ok_streak = 0    # подряд успешных getUpdates в конфликт-режиме
+        # Диагностика и сторож. Без этих полей «бот молчит, а health зелёный»
+        # неотличим от «бот работает»: running — это флаг, выставленный один раз
+        # при старте, он не говорит, жива ли задача опроса и доходят ли ответы.
+        self._watchdog_task: Optional[asyncio.Task] = None
+        self._last_ok_at = 0.0        # последний успешный getUpdates
+        self._last_update_at = 0.0    # последний полученный апдейт
+        self._updates_seen = 0
+        self._send_fails = 0          # Telegram отказался принять сообщение (429/403/parse)
+        self._retry_after_until = 0.0  # пауза после 429 (flood control)
+        self._flood_warned_at = 0.0
+        self._watchdog_restarts = 0
+        self._saved_offset = 0
 
     @property
     def enabled(self) -> bool:
@@ -119,11 +172,16 @@ class TelegramBot:
         name = (self.username or os.getenv("LIQSCOPE_BOT_USERNAME") or "LiqScopeBot")
         return f"https://t.me/{str(name).lstrip('@')}"
 
-    def channel_link_kb(self) -> dict:
-        return {"inline_keyboard": [[
-            {"text": "liqscope", "url": self.site_url()},
-            {"text": "бот", "url": self.bot_url()},
-        ]]}
+    def channel_link_kb(self, lang: str = "ru") -> dict:
+        """Кнопки под постом в канале: сайт, бот и партнёрская ссылка Gate."""
+        gate = gate_url(lang)
+        return {"inline_keyboard": [
+            [{"text": "🌐 liqscope", "url": self.site_url()},
+             {"text": "🤖 " + ("бот" if not str(lang).startswith("en") else "bot"),
+              "url": self.bot_url()}],
+            [{"text": ("💠 Торговать на Gate" if not str(lang).startswith("en")
+                       else "💠 Trade on Gate"), "url": gate}],
+        ]}
 
     # ----- красивые ссылки ------------------------------------------------
     def site_a(self, label: str, path: str = "") -> str:
@@ -187,6 +245,7 @@ class TelegramBot:
 
     def _reply_kb(self, user: Optional[dict] = None) -> dict:
         rows = [
+            [{"text": "☰ Меню"}],                     # всегда под рукой
             [{"text": "👤 Кабинет"}, {"text": "⚡ Терминал"}],
             [{"text": "📊 Статистика"}, {"text": "🩺 Биржи"}],
             [{"text": "🛠 Сервисы"}, {"text": "📰 Лента"}],
@@ -194,6 +253,11 @@ class TelegramBot:
         ]
         if user and user.get("is_admin"):
             rows.append([{"text": "★ Админка"}])
+        if user is not None:
+            email = (user.get("email") or "").strip()
+            if not email or not user.get("email_verified"):
+                # Основной вход — почта: напоминаем, пока адрес не подтверждён
+                rows.append([{"text": "✉️ Подтвердить почту"}])
         return {
             "keyboard": rows,
             "resize_keyboard": True,
@@ -203,9 +267,14 @@ class TelegramBot:
 
     def _reply_cmd(self, text: str) -> str:
         key = " ".join((text or "").strip().lower().split())
+        # Кнопка меню: одна на все случаи — если панель пропала после /start
+        # или обновления Telegram, она возвращает и панель, и экран с командами.
+        if key in ("☰ меню", "меню", "menu", "/menu", "команды"):
+            return "help"
         key = key.replace("★ ", "").replace("👤 ", "").replace("⚡ ", "")
         key = key.replace("📊 ", "").replace("🩺 ", "").replace("🛠 ", "")
         key = key.replace("📰 ", "").replace("🔔 ", "").replace("📣 ", "")
+        key = key.replace("✉️ ", "").replace("📧 ", "")
         return {
             "кабинет": "cabinet",
             "терминал": "terminal",
@@ -214,6 +283,9 @@ class TelegramBot:
             "сервисы": "services",
             "лента": "liq",
             "лента liq": "liq",
+            "подтвердить почту": "mail",
+            "почта": "mail",
+            "email": "mail",
             "алерты": "al",
             "алерты по объёму": "al",
             "канал": "channel",
@@ -224,6 +296,8 @@ class TelegramBot:
         if not self.token:
             log.warning("LIQSCOPE_BOT_TOKEN не задан — Telegram-бот выключен")
             return
+        if self.running:
+            return
         # getUpdates живёт до 50 с, остальные методы — короткие.
         # total на сессии не ставим: иначе длинный long-poll съедает лимит
         # и следующий edit/answer может оборваться.
@@ -231,9 +305,19 @@ class TelegramBot:
             timeout=aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=70),
             connector=aiohttp.TCPConnector(limit=8),
         )
-        me = await self._call("getMe")
+        # getMe на старте может отвалиться (сеть, 5xx у Telegram). Раньше в этом
+        # случае бот молча оставался без опроса — кнопки не работали до
+        # перезапуска сервиса. Повторяем несколько раз.
+        me = None
+        for attempt in range(5):
+            me = await self._call("getMe")
+            if me and me.get("ok"):
+                break
+            log.warning("getMe не удался (%d/5): %s", attempt + 1,
+                        (me or {}).get("description") or "нет ответа")
+            await asyncio.sleep(min(15.0, 3.0 * (attempt + 1)))
         if not me or not me.get("ok"):
-            log.error("Не удалось получить бота getMe: %s", me)
+            log.error("Не удалось получить бота getMe: %s — опрос не запущен", me)
             return
         self.username = me["result"]["username"]
         self.bot_id = int(me["result"]["id"])
@@ -241,14 +325,28 @@ class TelegramBot:
         if dw and not dw.get("ok"):
             log.error("Не удалось снять вебхук: %s — getUpdates может конфликтовать",
                       dw.get("description"))
+        # offset переживает рестарт: иначе Telegram отдаёт старую очередь
+        # апдейтов, и первые минуты после перезапуска бот отвечает «прошлым»
+        # нажатиям, а свежие кнопки ждут своей очереди.
+        try:
+            # Ключ привязан к id бота: у разных ботов update_id нумеруются
+            # независимо, и чужой offset заставил бы нового бота пропускать
+            # апдейты (выглядит как «кнопки не работают после смены токена»).
+            self._offset = int(
+                self.store.get_setting(f"bot_offset:{self.bot_id}", "0") or 0)
+        except (TypeError, ValueError, AttributeError):
+            self._offset = 0
+        self._saved_offset = self._offset
         self.running = True
+        self._last_ok_at = time.time()
         self._task = asyncio.create_task(self._poll(), name="tg-bot")
         self._digest_task = asyncio.create_task(self._channel_loop(), name="tg-channel")
-        log.info("Telegram-бот @%s запущен", self.username)
+        self._watchdog_task = asyncio.create_task(self._watchdog(), name="tg-watchdog")
+        log.info("Telegram-бот @%s запущен (offset=%s)", self.username, self._offset)
 
     async def stop(self) -> None:
         self.running = False
-        for t in (self._task, self._digest_task):
+        for t in (self._task, self._digest_task, self._watchdog_task):
             if not t:
                 continue
             t.cancel()
@@ -258,6 +356,7 @@ class TelegramBot:
                 pass
         self._task = None
         self._digest_task = None
+        self._watchdog_task = None
         if self._session:
             await self._session.close()
             self._session = None
@@ -269,18 +368,69 @@ class TelegramBot:
         timeout = aiohttp.ClientTimeout(total=70, sock_read=70) if method == "getUpdates" \
             else aiohttp.ClientTimeout(total=15)
         try:
-            async with self._session.post(url, json=payload or {}, timeout=timeout) as r:
-                data = await r.json(content_type=None)
+            for attempt in (0, 1):
+                async with self._session.post(url, json=payload or {},
+                                              timeout=timeout) as r:
+                    data = await r.json(content_type=None)
+                # 429 (flood control) от Telegram: ждём столько, сколько сказано,
+                # и пробуем ещё раз — иначе нажатие кнопки молча теряется,
+                # а бот выглядит «сломанным», пока лимит не остынет.
+                wait = self._flood_wait(data) if attempt == 0 else 0.0
+                if method == "getUpdates" or not wait:
+                    break
+                log.warning("tg %s: флуд-лимит, ждём %.0f с и повторяем",
+                            method, wait)
+                await asyncio.sleep(wait)
             if method != "getUpdates" and data and not data.get("ok"):
                 desc = str(data.get("description") or "")
                 # «message is not modified» — повторный клик по той же кнопке,
                 # для Telegram это не ошибка.
                 if "not modified" not in desc.lower():
-                    log.warning("tg %s: %s", method, desc)
+                    self._last_tg_err = desc
+                    self._send_fails += 1
+                    # chat_id в логе обязателен: иначе непонятно, кого именно
+                    # Telegram не пускает (флуд-лимит 429, бот заблокирован 403,
+                    # битый HTML) — а без этого «кнопки не работают» не отладить.
+                    who = (payload or {}).get("chat_id")
+                    log.warning("tg %s chat=%s: %s", method, who, desc)
+                    if "retry after" in desc.lower() or data.get("error_code") == 429:
+                        self._retry_after_until = time.time() + self._retry_after(data)
             return data
         except Exception as e:
+            if method != "getUpdates":
+                self._send_fails += 1
+                self._last_tg_err = f"{method}: {e}"
             log.warning("tg %s: %s", method, e)
             return None
+
+    @staticmethod
+    def _flood_wait(res: Optional[dict]) -> float:
+        """Сколько ждать перед повтором при 429. 0 — это не флуд-лимит."""
+        if not res or res.get("ok"):
+            return 0.0
+        desc = str(res.get("description") or "").lower()
+        code = res.get("error_code")
+        if code != 429 and "retry after" not in desc and "too many requests" not in desc:
+            return 0.0
+        sec = TelegramBot._retry_after(res)
+        # Дольше 20 с ждать смысла нет: пользователь всё равно уже не ждёт,
+        # а опрос и очередь обновлений встанут.
+        return min(sec, 20.0)
+
+    @staticmethod
+    def _retry_after(res: Optional[dict]) -> float:
+        """Сколько секунд ждать после 429 (Telegram кладёт retry_after)."""
+        try:
+            params = (res or {}).get("parameters") or {}
+            sec = float(params.get("retry_after") or 0)
+            if sec > 0:
+                return sec
+        except (TypeError, ValueError, AttributeError):
+            pass
+        desc = str((res or {}).get("description") or "")
+        tail = desc.split("retry after", 1)[-1]
+        digits = "".join(ch for ch in tail if ch.isdigit())
+        return max(1.0, float(digits)) if digits else 5.0
 
     @staticmethod
     def _inline_markup(markup: Optional[dict]) -> dict:
@@ -305,20 +455,45 @@ class TelegramBot:
             desc = str((res or {}).get("description") or "нет ответа")
             self._last_tg_err = desc
             if parse and ("parse entit" in desc.lower() or "can't find end of the entity" in desc.lower()):
+                # Разметку Telegram не принял: шлём тот же текст без тегов —
+                # иначе в чате окажутся голые <pre>/<code>/<b>.
                 body.pop("parse_mode", None)
+                body["text"] = _strip_html(body.get("text") or "")
                 res = await self._call("sendMessage", body)
                 if res and res.get("ok"):
                     mid = (res.get("result") or {}).get("message_id")
-                    try:
-                        return int(mid) if mid is not None else None
-                    except (TypeError, ValueError):
-                        return None
+                    return self._note_sent(chat_id, mid)
             return None
         mid = (res.get("result") or {}).get("message_id")
+        return self._note_sent(chat_id, mid)
+
+    def _note_sent(self, chat_id, message_id) -> Optional[int]:
+        """Запомнить последнее сообщение чата: id растут по времени.
+
+        Нужно для меню: пока id меню-сообщения не меньше последнего
+        отправленного, оно лежит внизу и правка не сдвинет ленту.
+        """
         try:
-            return int(mid) if mid is not None else None
+            cid, mid = int(chat_id), int(message_id)
         except (TypeError, ValueError):
             return None
+        self._last_msg[cid] = max(mid, self._last_msg.get(cid, 0))
+        return mid
+
+    def _menu_is_last(self, chat_id: int, mid: Optional[int]) -> bool:
+        """Меню — последнее сообщение чата? Тогда правим на месте.
+
+        Если после меню бот прислал что-то ещё (сигналы алертов, отчёт о
+        сводке, черновик), старое сообщение уже выше по ленте: правка
+        показывает именно его, и пользователю приходится мотать чат вверх.
+        """
+        if not mid:
+            return False
+        try:
+            last = int(self._last_msg.get(int(chat_id)) or 0)
+            return not last or int(mid) >= last
+        except (TypeError, ValueError):
+            return False
 
     async def edit(self, chat_id: int, message_id: int, text: str,
                    markup: Optional[dict] = None, parse: str = "HTML") -> bool:
@@ -342,7 +517,10 @@ class TelegramBot:
             t = body.get("text") or ""
             body["text"] = t[:-1] if t.endswith("\u200b") else (t + "\u200b")
             res2 = await self._call("editMessageText", body)
-            return bool(res2 and res2.get("ok")) or True
+            # Раньше здесь стояло `or True`: правка, которую Telegram не принял
+            # (флуд-лимит, сообщение удалено, битый HTML), считалась успешной —
+            # и меню молча не перерисовывалось, а show_menu не слал новое.
+            return bool(res2 and res2.get("ok"))
         if "parse entit" in desc or "can't find end of the entity" in desc:
             body.pop("parse_mode", None)
             res = await self._call("editMessageText", body)
@@ -357,25 +535,49 @@ class TelegramBot:
             "chat_id": chat_id, "message_id": int(message_id),
         })
 
+    def _stale_menus(self) -> int:
+        """Сколько чатов живут с меню, уехавшим вверх по ленте (диагностика)."""
+        return sum(1 for cid, mid in self._menu_msg.items()
+                   if not self._menu_is_last(cid, mid))
+
     async def show_menu(self, chat_id: int, text: str, markup: Optional[dict] = None,
                         old_id: Optional[int] = None) -> bool:
-        """Тот же экран: правим сообщение на месте, без пуша и удаления.
+        """Экран меню — всегда внизу чата, под сигналами и отчётами.
 
-        ReplyKeyboard живёт у чата и не требует нового send. Инлайн под текстом
-        обновляется через editMessageText. Новое сообщение — только если править
-        нечего (первый /start или бот перезапустился); тогда без звука.
+        Пока меню — последнее сообщение, правим его на месте: без новых
+        сообщений, пуша и мусора. Но если после меню бот прислал что-то ещё
+        (сигналы алертов, отчёт, черновик), править старое нельзя: Telegram
+        показывает именно его, и лента уезжает наверх — приходилось мотать
+        чат. Тогда шлём свежий экран вниз, а старое меню убираем, чтобы в
+        чате оставался один актуальный экран.
+
+        ReplyKeyboard живёт у чата и приезжает вместе с новым send. Инлайн
+        под текстом обновляется через editMessageText.
         """
         chat_id = int(chat_id)
         inline = self._inline_markup(markup)
         mid = old_id or self._menu_msg.get(chat_id)
-        if mid:
+        stale = bool(mid) and not self._menu_is_last(chat_id, mid)
+        if mid and not stale:
             if await self.edit(chat_id, int(mid), text, inline):
                 self._menu_msg[chat_id] = int(mid)
+                self._note_sent(chat_id, mid)
                 return True
         new_id = await self.send(chat_id, text, markup, silent=True)
         if not new_id:
+            # Ни правка, ни новое сообщение не прошли: без этой строки в логе
+            # вообще ничего не видно, хотя для пользователя бот «просто молчит».
+            log.error("меню не доставлено chat=%s: %s", chat_id,
+                      self._last_tg_err or "Telegram не ответил")
             return False
-        self._menu_msg[chat_id] = int(new_id)
+        new_id = int(new_id)
+        self._menu_msg[chat_id] = new_id
+        if stale:
+            # Старые экраны больше не нужны: пользователь просил меню
+            # последним сообщением, а не стопку меню между алертами.
+            for old in {int(mid or 0), int(old_id or 0)}:
+                if old and old != new_id:
+                    await self.drop_menu(chat_id, old)
         return True
 
     async def reply(self, chat_id: int, text: str, markup: Optional[dict] = None,
@@ -383,59 +585,307 @@ class TelegramBot:
         return await self.show_menu(chat_id, text, markup, old_id=message_id)
 
     def channel_chat_id(self) -> str:
-        return (self._channel_id_cfg
-                or (self.store.get_setting("channel_id", "") if self.store else "")
-                or "").strip()
+        """id русского канала: выбор админа в боте важнее env.
+
+        Переменные LIQSCOPE_CHANNEL_ID/CHANNEL2_ID — это стартовое значение
+        для первого запуска; если админ потом перепривязал канал кнопками,
+        главным становится его выбор (иначе пост уходит не туда, и по логам
+        это не видно).
+        """
+        d = self._channel_bindings()          # выбор админа важнее env
+        return (str(d.get("ru") or "").strip() or self._channel_id_cfg.strip())
+
+    def channel_chat_id_en(self) -> str:
+        d = self._channel_bindings()
+        return (str(d.get("en") or "").strip() or self._channel2_id_cfg.strip())
+
+    def channel_source(self, code: str = "ru") -> str:
+        """Откуда взялся id: «кнопки» (админ) или env (переменная окружения)."""
+        d = self._channel_bindings()
+        if code == "en":
+            saved = str(d.get("en") or "").strip()
+            return "bot" if saved else ("env" if self._channel2_id_cfg else "")
+        saved = str(d.get("ru") or "").strip()
+        return "bot" if saved else ("env" if self._channel_id_cfg else "")
+
+    def channel_url_en(self) -> str:
+        return self.channel2_url
+
+    def remember_channel_en(self, chat_id, title: str = "") -> str:
+        cid = str(chat_id).strip()
+        if not cid:
+            return ""
+        self.remember_channel_role("en", cid, title)
+        log.info("английский канал привязан chat_id=%s title=%s", cid, title)
+        return cid
+
+    def channel_role(self, code: str) -> dict:
+        """Что сейчас привязано к роли: {id, title, url}."""
+        if code == "en":
+            cid = self.channel_chat_id_en()
+            title = (self.store.get_setting("channel_title_en", "") if self.store else "") or ""
+            return {"code": "en", "id": cid, "title": title or self.channel2_name(),
+                    "url": self.channel_url_en()}
+        cid = self.channel_chat_id()
+        # id из env имеет приоритет — показываем именно его
+        if self._channel_id_cfg and cid == self._channel_id_cfg:
+            title = (self.store.get_setting("channel_title", "") if self.store else "") or ""
+        else:
+            title = (self.store.get_setting("channel_title", "") if self.store else "") or ""
+        return {"code": "ru", "id": cid, "title": title or "LiqScopeRUS",
+                "url": self.channel_url}
+
+    def channel2_name(self) -> str:
+        return os.getenv("LIQSCOPE_CHANNEL_EN_NAME") or "LiqScopeEng"
+
+    def remember_channel_role(self, code: str, chat_id, title: str = "") -> str:
+        """Жёстко закрепляет канал за языком.
+
+        Заодно снимает ту же роль с другого канала: один канал не может быть
+        и русским, и английским, иначе посты уходят не туда.
+        """
+        cid = str(chat_id).strip()
+        if not cid or code not in ("ru", "en"):
+            return ""
+        d = self._channel_bindings()
+        d[code] = cid
+        if title:
+            d.setdefault("titles", {})[code] = str(title)[:80]
+        # если этот же id стоял на другой роли — убираем оттуда
+        for other in ("ru", "en"):
+            if other != code and d.get(other) == cid:
+                d[other] = ""
+        self._save_channel_bindings(d)
+        log.info("канал %s привязан: %s (%s)", code, cid, title)
+        return cid
+
+    def _channel_bindings(self) -> dict:
+        if self.store:
+            try:
+                raw = self.store.get_setting("channel_bindings", "")
+                if raw:
+                    d = json.loads(raw)
+                    if isinstance(d, dict):
+                        return {"ru": str(d.get("ru") or ""), "en": str(d.get("en") or ""),
+                                "titles": d.get("titles") or {}}
+            except Exception as e:
+                log.debug("channel_bindings: %s", e)
+        return {"ru": self.store.get_setting("channel_id", "") if self.store else "",
+                "en": self.store.get_setting("channel_id_en", "") if self.store else "",
+                "titles": {}}
+
+    def _save_channel_bindings(self, d: dict) -> None:
+        if not self.store:
+            return
+        d = {"ru": str(d.get("ru") or ""), "en": str(d.get("en") or ""),
+             "titles": d.get("titles") or {}}
+        self.store.set_setting("channel_bindings", json.dumps(d, ensure_ascii=False))
+        # держим и старые ключи: их читают channel_chat_id() и проверка подписки
+        self.store.set_setting("channel_id", d["ru"])
+        self.store.set_setting("channel_id_en", d["en"])
+        t = d.get("titles") or {}
+        if t.get("ru"):
+            self.store.set_setting("channel_title", str(t["ru"])[:80])
+        if t.get("en"):
+            self.store.set_setting("channel_title_en", str(t["en"])[:80])
+
+    LANG_MARKS = {
+        "en": ("eng", "english", "_en", " en", "intl", "global"),
+        "ru": ("rus", "russian", "_ru", " ru", "русс", "рус"),
+    }
+
+    @classmethod
+    def _title_lang(cls, title: str) -> str:
+        """Язык канала по названию: «LiqScopeEng» → en, «LiqScopeRUS» → ru."""
+        low = (title or "").lower()
+        for code in ("en", "ru"):
+            if any(m in low for m in cls.LANG_MARKS[code]):
+                return code
+        return ""
+
+    async def channel_titles_live(self) -> dict:
+        """Свежие названия каналов из Telegram: {код: название}."""
+        out = {}
+        for code in ("ru", "en"):
+            cid = self.channel_chat_id() if code == "ru" else self.channel_chat_id_en()
+            if not cid:
+                continue
+            res = await self._call("getChat", {"chat_id": cid})
+            chat = res.get("result") if isinstance(res, dict) else None
+            if not isinstance(chat, dict):
+                continue
+            title = str(chat.get("title") or chat.get("username") or "").strip()
+            if title:
+                out[code] = title
+        return out
+
+    async def verify_channel_roles(self, force: bool = False) -> str:
+        """Сверить роли каналов с их названиями и починить перепутанные.
+
+        Бот админ в обоих каналах, значит getChat отдаёт актуальное название:
+        «LiqScopeEng» — английский, «LiqScopeRUS» — русский. Если название
+        говорит, что русский пост уходит в английский канал (а английский —
+        в русский), молча меняем роли местами и говорим об этом админу: иначе
+        «сводка не туда» лечится только перепривязкой каналов вручную.
+        """
+        now = time.time()
+        last = 0.0
+        if self.store:
+            try:
+                last = float(self.store.get_setting("channel_roles_check", "0") or 0)
+            except (TypeError, ValueError):
+                last = 0.0
+        if not force and now - last < CHANNEL_CHECK_SEC:
+            return ""
+        if self.store:
+            self.store.set_setting("channel_roles_check", str(int(now)))
+        titles = {}
+        try:
+            titles = await self.channel_titles_live()
+        except Exception as e:
+            log.debug("названия каналов: %s", e)
+        if not titles:
+            return ""
+        # Роли берём так же, как их видит публикация: выбор админа, иначе env.
+        # Тогда перепутанные id, пришедшие только из переменных окружения, тоже
+        # лечатся — а именно так «русский пост уходил в английский канал».
+        ru = self.channel_chat_id().strip()
+        en = self.channel_chat_id_en().strip()
+        langs = {c: self._title_lang(t) for c, t in titles.items()}
+        note = ""
+        if ru and en and langs.get("ru") == "en" and langs.get("en") == "ru":
+            self.remember_channel_role("ru", en, titles.get("en", ""))
+            self.remember_channel_role("en", ru, titles.get("ru", ""))
+            log.warning("каналы были перепутаны — поменяли местами")
+            note = "каналы были перепутаны: поменяли местами"
+        elif ru and not en and langs.get("ru") == "en":
+            log.warning("русская роль стоит на английском канале %s", ru)
+            note = "русская роль стоит на английском канале"
+        # названия в настройках держим актуальными: их видит админ на экране
+        if self.store:
+            for code, title in titles.items():
+                key = "channel_title_en" if code == "en" else "channel_title"
+                if not self.store.get_setting(key, ""):
+                    self.store.set_setting(key, str(title)[:80])
+        return note
+
+    def channel_route_text(self) -> str:
+        """Куда уходит каждая сводка: две строки с id — ответ на «пост не туда»."""
+        lines = []
+        for code, flag in (("ru", "🇷🇺"), ("en", "🇬🇧")):
+            role = self.channel_role(code)
+            cid = role.get("id") or "—"
+            title = role.get("title") or "—"
+            lines.append(f"{flag} <code>{_esc(str(cid))}</code> · {_esc(str(title))}")
+        return "\n".join(lines)
+
+    def channel_pair(self) -> list:
+        """Каналы для подписки: (код, название, url, id)."""
+        return [
+            ("ru", os.getenv("LIQSCOPE_CHANNEL_RU_NAME") or "LiqScopeRUS",
+             self.channel_url, self.channel_chat_id()),
+            ("en", os.getenv("LIQSCOPE_CHANNEL_EN_NAME") or "LiqScopeEng",
+             self.channel_url_en(), self.channel_chat_id_en()),
+        ]
 
     def _join_text(self, extra: str = "") -> str:
-        link = f'<a href="{_esc(self.channel_url)}">📣 открыть канал</a>'
         more = f"\n\n{extra}" if extra else ""
-        return (
-            "<b>Сначала канал</b>\n"
-            "Чтобы пользоваться ботом LiqScope, подпишитесь на канал со сводками "
-            "ликвидаций, OI и CVD.\n\n"
-            "Раз в 4 часа туда уходит разбор рынка: кто кого вынес и на каких биржах.\n"
-            f"Канал: {link}{more}"
-        )
+        lines = [
+            "<b>Выберите канал</b>",
+            "Чтобы пользоваться ботом, подпишитесь на любой из двух каналов —",
+            "содержание одно и то же, отличается язык:",
+        ]
+        for code, name, url, _cid in self.channel_pair():
+            extra_txt = " 🇷🇺" if code == "ru" else " 🇬🇧"
+            lines.append(f'• <a href="{_esc(url)}">{_esc(name)}</a>{extra_txt}')
+        lines.append("")
+        lines.append("Раз в 4 часа туда уходит разбор рынка: кто кого вынес,"
+                     " на каких биржах, что с открытым интересом.")
+        lines.append("Подписки на любой из них достаточно — бот откроется"
+                     " полностью.")
+        return "\n".join(lines) + more
 
     def _kb_join(self) -> dict:
-        return {"inline_keyboard": [
-            [{"text": "📣 Подписаться", "url": self.channel_url}],
-            [{"text": "✅ Я подписался", "callback_data": "ch:check"}],
-        ]}
+        rows = []
+        for code, name, url, _cid in self.channel_pair():
+            if url:
+                rows.append([{"text": f"📣 {name}", "url": url}])
+        rows.append([{"text": "✅ Я подписался", "callback_data": "ch:check"}])
+        return {"inline_keyboard": rows}
+
+    async def _chat_member_status(self, cid: str, tg_id: int) -> Optional[bool]:
+        """True — подписан, False — точно нет, None — проверить не удалось.
+
+        Разница важна: «нет ответа» (бот не админ канала, сеть) не повод
+        запирать человека, а вот честное «не участник» — повод.
+        """
+        if not cid or not tg_id:
+            return None
+        res = await self._call("getChatMember", {"chat_id": cid, "user_id": int(tg_id)})
+        if not res:
+            return None
+        if not res.get("ok"):
+            desc = str(res.get("description") or "").lower()
+            # «chat not found» — это про канал, а не про человека: значит,
+            # проверить подписку нельзя (бот не в канале), а не «не подписан».
+            if ("user not found" in desc or "user_not_participant" in desc
+                    or "not a member" in desc or "participant" in desc):
+                return False
+            if time.time() - self._ch_warn_at > 600:
+                self._ch_warn_at = time.time()
+                log.warning("getChatMember %s: %s — проверка канала недоступна,"
+                            " пользователи пропускаются без неё",
+                            cid, res.get("description") or "нет ответа")
+            return None
+        status = str(((res or {}).get("result") or {}).get("status") or "").lower()
+        return status in ("creator", "administrator", "member", "restricted")
 
     async def _is_member(self, tg_id: int) -> bool:
+        """Подписка на основной канал; None-ответ трактуем как «пропустить»."""
         cid = self.channel_chat_id()
         if not cid or not tg_id:
             return False
         until = self._ch_ok.get(int(tg_id), 0)
         if until > time.time():
             return True
-        res = await self._call("getChatMember", {"chat_id": cid, "user_id": int(tg_id)})
-        if not res or not res.get("ok"):
-            # Проверка недоступна (бот не админ канала, неверный id, отвал сети).
-            # Не запирать же всех в меню подписки: пропускаем, но громко.
-            if time.time() - self._ch_warn_at > 600:
-                self._ch_warn_at = time.time()
-                log.warning("getChatMember %s: %s — проверка канала отключена, "
-                            "пользователи пропускаются без неё",
-                            cid, (res or {}).get("description") or "нет ответа")
+        st = await self._chat_member_status(cid, int(tg_id))
+        if st is None:
             return True
-        status = str(((res or {}).get("result") or {}).get("status") or "").lower()
-        ok = status in ("creator", "administrator", "member", "restricted")
-        if ok:
+        if st:
             self._ch_ok[int(tg_id)] = time.time() + 180
         else:
             self._ch_ok.pop(int(tg_id), None)
-        return ok
+        return st
+
+    async def _is_member_any(self, tg_id: int) -> bool:
+        """Подписки достаточно на ЛЮБОЙ из каналов: русский или английский."""
+        uid = int(tg_id or 0)
+        if not uid:
+            return False
+        if self._join_ok.get(uid, 0) > time.time():
+            return True
+        seen_any = False
+        unknown = False
+        for _code, _name, _url, cid in self.channel_pair():
+            if not cid:
+                continue
+            seen_any = True
+            st = await self._chat_member_status(cid, uid)
+            if st is True:
+                self._join_ok[uid] = time.time() + 180
+                return True
+            if st is None:
+                unknown = True
+        if not seen_any or unknown:
+            # id каналов ещё не знаем или Telegram молчит — запирать не за что
+            return True
+        return False
 
     async def _ensure_channel(self, chat_id: int, user: dict,
                               message_id: Optional[int] = None,
                               extra: str = "") -> bool:
-        """True — можно показывать меню. Без id канала не блокируем (нечего проверить)."""
-        if not self.channel_chat_id():
-            return True
-        if await self._is_member(int(user.get("tg_id") or 0)):
+        """True — можно показывать меню. Без id каналов не блокируем."""
+        if await self._is_member_any(int(user.get("tg_id") or 0)):
             return True
         await self.show_menu(chat_id, self._join_text(extra), self._kb_join(),
                              old_id=message_id)
@@ -443,8 +893,11 @@ class TelegramBot:
 
     def _digest_result_text(self, ok: bool) -> str:
         if ok:
-            cid = self.channel_chat_id() or "—"
-            return f"Сводка ушла в канал.\n<code>{_esc(cid)}</code>"
+            routes = getattr(self, "_digest_routes", "") or self.channel_route_text()
+            return ("Сводка ушла в канал.\n" + routes
+                    + "\n\nЕсли адрес не тот — меню «📣 Каналы» → «🔄 Поменять"
+                      " местами», либо перешлите боту пост из нужного канала"
+                      " и выберите язык.")
         err = _esc(self._digest_err or "неизвестная ошибка")
         return (
             "<b>Не удалось отправить сводку</b>\n"
@@ -454,29 +907,127 @@ class TelegramBot:
         )
 
     async def _bind_channel_from_message(self, msg: dict, chat_id: int) -> bool:
-        """Админ переслал пост из канала → запоминаем id."""
+        """Админ переслал пост из канала → спрашиваем, какой это язык.
+
+        Раньше язык угадывался (по названию и порядку пересылки) — и канал
+        легко вставал не на ту роль: русский пост уходил в английский канал.
+        Теперь решает админ: две кнопки, без догадок.
+        """
         chat = self._extract_forward_chat(msg)
         if not chat:
             return False
-        cid = self.remember_channel(chat.get("id"), chat.get("title") or "")
-        title = _esc(chat.get("title") or cid)
+        cid = str(chat.get("id") or "").strip()
+        if not cid:
+            return False
+        title = chat.get("title") or cid
+        self._pending_channel = {"id": cid, "title": str(title)}
+        if self.store:
+            # Кнопка роли может прийти уже после перезапуска бота: держим
+            # ожидание в настройках, а не только в памяти процесса.
+            try:
+                self.store.set_setting("channel_pending",
+                                       json.dumps(self._pending_channel,
+                                                  ensure_ascii=False))
+            except Exception as e:
+                log.debug("channel_pending: %s", e)
+        rows = [[{"text": "🇷🇺 Русский", "callback_data": "ch:role:ru"},
+                 {"text": "🇬🇧 English", "callback_data": "ch:role:en"}]]
         await self.show_menu(
             chat_id,
-            f"Канал привязан: <b>{title}</b>\n<code>{_esc(cid)}</code>\n\n"
-            "Теперь /digest отправит сводку туда. "
+            f"Канал <b>{_esc(str(title))}</b>\n<code>{_esc(cid)}</code>\n\n"
+            "Куда слать сводки — на русском или на английском?\n"
+            "Посты пойдут в оба канала: русский в русский, английский"
+            " в английский.\n"
             "У бота должно быть право «Публикация сообщений».",
-            self._admin_kb(),
+            {"inline_keyboard": rows},
         )
         return True
+
+    async def _set_channel_role(self, code: str, chat_id: int) -> None:
+        pend = getattr(self, "_pending_channel", None) or {}
+        if not pend and self.store:
+            try:
+                pend = json.loads(self.store.get_setting("channel_pending", "") or "{}")
+            except Exception as e:
+                log.debug("channel_pending: %s", e)
+                pend = {}
+        pend = pend if isinstance(pend, dict) else {}
+        cid = str(pend.get("id") or "")
+        if not cid:
+            await self.show_menu(chat_id, "Не помню, из какого канала был пост."
+                                            " Перешлите его ещё раз.",
+                                 self._admin_kb())
+            return
+        self.remember_channel_role(code, cid, pend.get("title") or "")
+        self._pending_channel = None
+        if self.store:
+            self.store.set_setting("channel_pending", "")
+        await self.show_menu(chat_id, self._channels_text(), self._channels_kb())
+
+    def _channels_text(self) -> str:
+        ru, en = self.channel_role("ru"), self.channel_role("en")
+        def line(role: dict, flag: str) -> str:
+            cid = role.get("id") or "—"
+            src = self.channel_source(str(role.get("code") or "ru"))
+            note = {"bot": " · выбрано в боте", "env": " · из переменной окружения"}.get(src, "")
+            return (f"{flag} <b>{_esc(role.get('title') or '—')}</b>{note}"
+                    f"\n   <code>{_esc(cid)}</code>")
+        warn = ""
+        if not ru.get("id") or not en.get("id"):
+            warn = ("\n\n⚠️ Пока привязан один канал — сводка уходит только в него.\n"
+                    "Добавьте бота админом во второй канал и перешлите сюда его пост.")
+        elif ru.get("id") == en.get("id"):
+            warn = "\n\n⚠️ Оба языка указывают на один канал — перешлите пост из второго."
+        return ("<b>📣 Каналы бота</b>\n"
+                "Русская сводка — в русский канал, английская — в английский.\n\n"
+                f"{line(ru, '🇷🇺')}\n\n{line(en, '🇬🇧')}{warn}\n\n"
+                "Чтобы сменить канал: перешлите боту любой пост из него и выберите язык."
+                + self.site_footer())
+
+    def _channels_kb(self) -> dict:
+        ru, en = self.channel_role("ru"), self.channel_role("en")
+        rows = []
+        if ru.get("url"):
+            rows.append([{"text": f"🇷🇺 {ru.get('title') or 'русский'}", "url": ru["url"]}])
+        if en.get("url"):
+            rows.append([{"text": f"🇬🇧 {en.get('title') or 'английский'}", "url": en["url"]}])
+        rows.append([{"text": "🔄 Поменять местами", "callback_data": "ch:swap"}])
+        rows.append([{"text": "← Назад", "callback_data": "nav:home"}])
+        return {"inline_keyboard": rows}
+
+    def remember_channel_auto(self, chat_id, title: str = "") -> tuple:
+        """Какой это канал: русский или английский.
+
+        Первый привязанный канал считается русским (он же основной), второй —
+        английским. Так админу достаточно добавить бота в оба канала и
+        переслать по посту из каждого: id подхватятся сами.
+        """
+        cid = str(chat_id).strip()
+        ru = self.channel_chat_id()
+        en = self.channel_chat_id_en()
+        if ru and cid == ru:
+            return ("ru", ru)
+        if en and cid == en:
+            return ("en", en)
+        if self._channel_id_cfg and cid == self._channel_id_cfg:
+            return ("ru", self.remember_channel(cid, title))
+        # Название надёжнее порядка: «LiqScopeEng» — английский, «LiqScopeRUS» —
+        # русский, даже если админ переслал их в обратном порядке.
+        low = (title or "").lower()
+        if not en and ("eng" in low or low.endswith("_en") or low.endswith(" en")):
+            return ("en", self.remember_channel_en(cid, title))
+        if not ru and ("rus" in low or low.endswith("_ru") or low.endswith(" ru")):
+            return ("ru", self.remember_channel(cid, title))
+        if not ru:
+            return ("ru", self.remember_channel(cid, title))
+        return ("en", self.remember_channel_en(cid, title))
 
     def remember_channel(self, chat_id, title: str = "") -> str:
         cid = str(chat_id).strip()
         if not cid:
             return ""
-        self.store.set_setting("channel_id", cid)
-        if title:
-            self.store.set_setting("channel_title", str(title)[:80])
-        log.info("канал привязан chat_id=%s title=%s", cid, title)
+        self.remember_channel_role("ru", cid, title)
+        log.info("русский канал привязан chat_id=%s title=%s", cid, title)
         return cid
 
     def _extract_forward_chat(self, msg: dict) -> Optional[dict]:
@@ -500,7 +1051,7 @@ class TelegramBot:
         st = str(new.get("status") or "")
         cid = chat.get("id")
         if cid and st in ("administrator", "creator"):
-            self.remember_channel(cid, chat.get("title") or "")
+            self.remember_channel_auto(cid, chat.get("title") or "")
         elif cid and st in ("left", "kicked"):
             log.warning("бота убрали из канала chat_id=%s", cid)
 
@@ -537,10 +1088,7 @@ class TelegramBot:
             log.warning("tg sendPhoto: %s", desc)
             return None
         mid = (res.get("result") or {}).get("message_id")
-        try:
-            return int(mid) if mid is not None else None
-        except (TypeError, ValueError):
-            return None
+        return self._note_sent(chat_id, mid)
 
     async def _channel_loop(self) -> None:
         from channel_digest import WINDOW_SEC
@@ -569,6 +1117,65 @@ class TelegramBot:
             except asyncio.CancelledError:
                 break
 
+    # --- ИИ-шапка и контроль публикации -----------------------------------
+    def ai_status(self) -> Dict[str, Any]:
+        """Состояние ИИ для админки и /api/admin/overview."""
+        ai = getattr(self, "ai", None)
+        out: Dict[str, Any] = dict(ai.status()) if ai is not None else {"enabled": False}
+        try:
+            out["review"] = self._review_on()
+        except Exception:
+            out["review"] = False
+        out["last_post"] = dict(self._ai_state or {})
+        return out
+
+    def _review_on(self) -> bool:
+        """Контроль публикации: черновик у админа вместо поста в канал."""
+        try:
+            v = (self.store.get_setting("channel_digest_review") or "").strip().lower()
+        except Exception:
+            return False
+        return v in ("1", "on", "true", "yes")
+
+    def _set_review(self, on: bool, actor_id: Optional[int] = None) -> None:
+        self.store.set_setting("channel_digest_review", "1" if on else "0",
+                               actor_id=actor_id)
+
+    async def _ai_headline(self, snap: dict, variant: int = 0,
+                           lang: str = "ru") -> tuple:
+        """(шапка или None, короткая пометка для админа).
+
+        variant — номер поста: по нему ИИ выбирает новый акцент, чтобы
+        подряд идущие сводки не начинались одинаково. lang="en" — отдельная
+        английская шапка для второго канала (русские не повторяем).
+        """
+        ai = getattr(self, "ai", None)
+        en = str(lang).startswith("en")
+        if ai is None or not getattr(ai, "enabled", False):
+            if not en:
+                self._ai_state = {"provider": "", "ok": False, "reason": "ИИ не настроен"}
+            return None, "ИИ не настроен — шапка из шаблонов"
+        recent = self._ai_recent_en if en else self._ai_recent
+        try:
+            head = await ai.headline(snap, recent=list(recent),
+                                     variant=int(variant or 0), lang=lang)
+        except Exception as e:                      # сеть, лимиты, что угодно
+            log.warning("ИИ-шапка: %s", e)
+            head = None
+        st = dict(ai.status().get("last") or {})
+        if not en:
+            self._ai_state = st
+        if head:
+            if en:
+                self._ai_recent_en = (self._ai_recent_en + [head])[-8:]
+            else:
+                self._ai_recent = (self._ai_recent + [head])[-8:]
+            note = f"ИИ: {st.get('provider') or '?'} · {st.get('ms') or 0} мс"
+        else:
+            note = (f"ИИ не ответил ({st.get('reason') or 'все сервисы'}) —"
+                    " шапка из шаблонов")
+        return head, note
+
     def _digest_fail(self, reason: str) -> bool:
         self._digest_err = reason
         log.warning("сводка: %s", reason)
@@ -576,10 +1183,20 @@ class TelegramBot:
 
     async def post_channel_digest(self, force: bool = False) -> bool:
         from channel_digest import (
-            active_headlines, active_images, pick_image, render_post,
+            active_headlines, active_images, pick_image, post_has_hours,
+            render_post, render_top7,
         )
         self._digest_err = ""
         self._last_tg_err = ""
+        try:
+            # Названия каналов важнее памяти: если роли перепутаны, пост уйдёт
+            # не туда — проверяем перед каждой отправкой (не чаще 30 минут).
+            note = await self.verify_channel_roles()
+            if note:
+                self._digest_err = ""
+                log.info("сводка: %s", note)
+        except Exception as e:
+            log.debug("проверка каналов: %s", e)
         cid = self.channel_chat_id()
         if not cid:
             return self._digest_fail(
@@ -598,24 +1215,81 @@ class TelegramBot:
             hours = int(snap.get("window_h") or 4)
         except (TypeError, ValueError):
             hours = 4
+        images = active_images(self.store)
+        img = pick_image(n, images=images)
+        # Русский пост — основной; английский уходит копией в свой канал.
+        ai_head, ai_note = await self._ai_headline(snap, variant=n)
         caption = render_post(
             snap, n,
             headlines=active_headlines(self.store, hours),
+            head_override=ai_head,
             site_url=self.site_url(),
             bot_url=self.bot_url(),
         )
-        img = pick_image(n, images=active_images(self.store))
-        markup = self.channel_link_kb()
-        # одно сообщение: фото с подписью, иначе только текст. Никогда фото+текст.
+        ai_head_en, _note_en = await self._ai_headline(snap, variant=n, lang="en")
+        caption_en = render_post(
+            snap, n,
+            headlines=active_headlines(self.store, hours, lang="en"),
+            head_override=ai_head_en or None,
+            site_url=self.site_url(),
+            bot_url=self.bot_url(),
+            lang="en",
+        )
+        # Один пост вместо двух: часы уже внутри подписи (render_post сам
+        # решает, каким видом они влезают). Второе сообщение — только аварийный
+        # путь: если в подпись не попал ни один час.
+        top = "" if post_has_hours(caption) else render_top7(snap.get("board"))
+        top_en = ("" if post_has_hours(caption_en)
+                  else render_top7(snap.get("board"), "en"))
+        posts = [
+            {"lang": "ru", "cid": cid, "caption": caption, "top": top},
+        ]
+        cid_en = self.channel_chat_id_en()
+        if cid_en:
+            posts.append({"lang": "en", "cid": cid_en, "caption": caption_en,
+                          "top": top_en})
+        else:
+            log.info("английский канал не привязан — пост только по-русски")
+        if self._review_on():
+            return await self._send_draft(posts, img, n, ai_note)
+        return await self._publish_digest(posts, img, n)
+
+    async def _publish_one(self, cid, caption: str, img, top: str = "",
+                           lang: str = "ru") -> bool:
+        """Пост в один канал: одно сообщение — фото и подпись под ним.
+
+        В подписи уже есть и шапка, и топ-7 по часам. ``top`` непустой только
+        в аварийном случае (подпись исчерпана до первого часа) — тогда текст
+        уходит вторым сообщением, чтобы данные не потерялись.
+        """
+        markup = self.channel_link_kb(lang)
         ok = False
         if img and len(caption) <= 1024:
             ok = bool(await self.send_photo(cid, img, caption, markup))
         if not ok:
             ok = bool(await self.send(cid, caption, markup))
-        if ok:
+        if ok and top:
+            sent = await self.send(cid, top)
+            if not sent:
+                log.warning("топ-7 не ушёл в канал %s", cid)
+        return ok
+
+    async def _publish_digest(self, posts, img, n: int) -> bool:
+        """Отправка готового поста в каналы (русский и английский)."""
+        delivered = 0
+        for post in posts or []:
+            cid = post.get("cid")
+            if not cid:
+                continue
+            if await self._publish_one(cid, post.get("caption") or "", img,
+                                       post.get("top") or "",
+                                       post.get("lang") or "ru"):
+                delivered += 1
+        if delivered:
+            self._digest_routes = self.channel_route_text()
             self.store.set_setting("channel_digest_n", str(n + 1))
             self.store.set_setting("channel_digest_ts", str(int(time.time())))
-            log.info("сводка в канал n=%s chat=%s", n, cid)
+            log.info("сводка n=%s ушла в каналы: %d", n, delivered)
             return True
         err = getattr(self, "_last_tg_err", "") or "Telegram отклонил пост"
         low = err.lower()
@@ -626,6 +1300,267 @@ class TelegramBot:
             extra = (" В канале у бота должно быть право «Публикация сообщений» "
                      "(и «Прикрепление файлов», если шлём картинку).")
         return self._digest_fail(err + extra)
+
+    async def _send_draft(self, posts, img, n: int, note: str) -> bool:
+        """Контроль публикации: показываем пост админу, в канал не отправляем."""
+        admin = 0
+        try:
+            admins = self.store.admin_tg_ids() if self.store else []
+            admin = int(admins[0]) if admins else 0
+        except Exception:
+            admin = 0
+        if not admin:
+            return self._digest_fail(
+                "Контроль публикации включён, но у бота нет админа с Telegram. "
+                "Выключите контроль в «Шаблоны канала» или привяжите Telegram админу")
+        self._draft = {"posts": posts, "img": img, "n": int(n), "note": note}
+        kb = {"inline_keyboard": [[
+            {"text": "✅ Опубликовать", "callback_data": "d:pub"},
+            {"text": "🔄 Перегенерировать", "callback_data": "d:regen"},
+            {"text": "✖️ Отмена", "callback_data": "d:no"}]]}
+        text = (f"<b>Черновик сводки</b>\n<i>{_esc(note)}</i>\n"
+                "В каналы уйдёт только после «Опубликовать».")
+        for post in posts or []:
+            mark = "🇬🇧" if post.get("lang") == "en" else "🇷🇺"
+            text += f"\n\n{mark} <b>{(post.get('cid') or '')}</b>\n" + (post.get("caption") or "")
+        await self.send(admin, text, kb)
+        # топ-7 по часам — тем же сообщением не влезает, шлём следом
+        for post in posts or []:
+            if post.get("top"):
+                await self.send(admin, (post.get("top") or "")[:3900])
+        log.info("сводка: черновик отправлен админу %s (n=%s)", admin, n)
+        return True
+
+    async def _on_draft_cb(self, chat_id, user: dict, data: str, message_id) -> None:
+        """Кнопки под черновиком: опубликовать / перегенерировать / отменить."""
+        d = dict(self._draft or {})
+        if data == "d:regen":
+            self._draft = None
+            await self.reply(chat_id, "Готовлю новый вариант…", None,
+                             message_id=message_id)
+            await self.post_channel_digest(force=True)
+            return
+        if data == "d:no":
+            self._draft = None
+            await self.reply(chat_id, "Черновик отменён, в канал ничего не ушло.",
+                             self._admin_kb(), message_id=message_id)
+            return
+        if data == "d:pub":
+            if not d:
+                await self.reply(chat_id, "Черновик уже неактуален — нажмите "
+                                 "«Сводка в канал» ещё раз.",
+                                 self._admin_kb(), message_id=message_id)
+                return
+            cid = self.channel_chat_id()
+            ok = False
+            if cid:
+                posts = d.get("posts") or [{"lang": "ru", "cid": cid,
+                                            "caption": d.get("caption") or "",
+                                            "top": d.get("top") or ""}]
+                ok = await self._publish_digest(posts, d.get("img"),
+                                                int(d.get("n") or 0))
+            self._draft = None
+            await self.reply(chat_id, self._digest_result_text(ok), self._admin_kb(),
+                             message_id=message_id)
+
+    # --- дневной дайджест (вечерний выпуск за сутки) ----------------------
+    def daily_status(self) -> Dict[str, Any]:
+        """Что известно про дневной дайджест — для админки и логов."""
+        out: Dict[str, Any] = dict(getattr(self, "_daily_state", None) or {})
+        out["review"] = self._review_on()
+        out["wired"] = bool(getattr(self, "daily_run_fn", None))
+        return out
+
+    async def publish_daily_digest(self, rec: dict, langs=("ru", "en"),
+                                   force: bool = False) -> Dict[str, Any]:
+        """Разложить готовый дайджест по каналам: {язык: [ок, ошибка]}.
+
+        Запись собирает сервер (api_digest): здесь только отправка и контроль
+        публикации — если он включён, посты уходят админу черновиком.
+        """
+        from channel_digest import active_images, pick_image
+        from daily_digest import render_post
+
+        self._digest_err = ""
+        self._last_tg_err = ""
+        try:
+            await self.verify_channel_roles()
+        except Exception as e:
+            log.debug("проверка каналов: %s", e)
+        day = str((rec or {}).get("day") or "")
+        posts: List[dict] = []
+        result: Dict[str, Any] = {}
+        seen: set = set()
+        for lang in langs or ("ru", "en"):
+            lang = "en" if str(lang).startswith("en") else "ru"
+            if lang in seen:
+                continue
+            seen.add(lang)
+            cid = self.channel_chat_id_en() if lang == "en" else self.channel_chat_id()
+            if not cid:
+                result[lang] = [False, ("английский канал не привязан"
+                                        if lang == "en" else
+                                        "канал не привязан — перешлите боту пост из канала")]
+                continue
+            caption = render_post(rec, lang, self.site_url())
+            posts.append({"lang": lang, "cid": cid, "caption": caption, "top": ""})
+        if not posts:
+            err = next((v[1] for v in result.values()), "каналы не привязаны")
+            self._digest_err = err
+            self._daily_state = {"ok": False, "day": day, "error": err,
+                                 "at": time.time()}
+            return result
+        images = active_images(self.store)
+        try:
+            variant = int(day.replace("-", "")[-2:] or 0)
+        except (TypeError, ValueError):
+            variant = 0
+        img = pick_image(variant, images=images)
+        if self._review_on():
+            ok = await self._send_daily_draft(posts, img, day)
+            for post in posts:
+                result[post["lang"]] = [False, "" if ok else
+                                        (self._digest_err or "черновик не ушёл")]
+            self._daily_state = {"ok": False, "day": day, "draft": bool(ok),
+                                 "at": time.time()}
+            return result
+        sent = await self._publish_daily_posts(posts, img)
+        result.update(sent)
+        return result
+
+    async def _publish_daily_posts(self, posts, img) -> Dict[str, Any]:
+        """Отправка постов дайджеста по каналам (один пост = одно сообщение)."""
+        out: Dict[str, Any] = {}
+        for post in posts or []:
+            lang = post.get("lang") or "ru"
+            cid = post.get("cid")
+            if not cid:
+                out[lang] = [False, "канал не привязан"]
+                continue
+            ok = await self._publish_one(cid, post.get("caption") or "", img,
+                                         post.get("top") or "", lang)
+            err = "" if ok else (getattr(self, "_last_tg_err", "")
+                                 or "Telegram отклонил пост")
+            if not ok:
+                low = err.lower()
+                if "chat not found" in low:
+                    err += " Перешлите боту любой пост из канала, чтобы привязать id."
+                elif ("not enough right" in low or "need administrator" in low
+                      or "have no rights" in low):
+                    err += (" В канале у бота должно быть право «Публикация "
+                            "сообщений» (и «Прикрепление файлов», если шлём картинку).")
+            out[lang] = [bool(ok), err]
+        delivered = [l for l, v in out.items() if v[0]]
+        if delivered:
+            self._digest_routes = self.channel_route_text()
+            try:
+                self.store.set_setting("daily_digest_ts", str(int(time.time())))
+            except Exception as e:
+                log.debug("дайджест: метка времени не сохранилась: %s", e)
+            log.info("дневной дайджест ушёл в каналы: %s", ", ".join(delivered))
+            self._daily_state = {"ok": True, "langs": delivered, "at": time.time()}
+        else:
+            self._daily_state = {"ok": False,
+                                 "error": next((v[1] for v in out.values()), ""),
+                                 "at": time.time()}
+        return out
+
+    async def _send_daily_draft(self, posts, img, day: str) -> bool:
+        """Контроль публикации: дневной дайджест показываем админу, не в канал."""
+        admin = 0
+        try:
+            admins = self.store.admin_tg_ids() if self.store else []
+            admin = int(admins[0]) if admins else 0
+        except Exception:
+            admin = 0
+        if not admin:
+            return self._digest_fail(
+                "Контроль публикации включён, но у бота нет админа с Telegram. "
+                "Выключите контроль в «Шаблоны канала» или привяжите Telegram админу")
+        self._daily_draft = {"posts": posts, "img": img, "day": day}
+        kb = {"inline_keyboard": [[
+            {"text": "✅ Опубликовать", "callback_data": "dd:pub"},
+            {"text": "🔄 Перегенерировать", "callback_data": "dd:regen"},
+            {"text": "✖️ Отмена", "callback_data": "dd:no"}]]}
+        text = (f"<b>Черновик дневного дайджеста</b> · {_esc(day)}\n"
+                "Это суточный выпуск (не сводка за 4 часа). В каналы он уйдёт "
+                "только после «Опубликовать».")
+        await self.send(admin, text, kb)
+        for post in posts or []:
+            mark = "🇬🇧" if post.get("lang") == "en" else "🇷🇺"
+            await self.send(admin, f"{mark} {post.get('caption') or ''}")
+        log.info("дневной дайджест: черновик отправлен админу %s (%s)", admin, day)
+        return True
+
+    async def _on_daily_cb(self, chat_id, user: dict, data: str, message_id) -> None:
+        """Кнопки под черновиком дайджеста: выложить / перегенерировать / отмена."""
+        d = dict(getattr(self, "_daily_draft", None) or {})
+        if data == "dd:regen":
+            self._daily_draft = None
+            await self.reply(chat_id, "Собираю новый дайджест за сутки…", None,
+                             message_id=message_id)
+            await self.post_daily_digest(force=True)
+            return
+        if data == "dd:no":
+            self._daily_draft = None
+            await self.reply(chat_id, "Черновик отменён, в каналы ничего не ушло.",
+                             self._admin_kb(), message_id=message_id)
+            return
+        if data == "dd:pub":
+            if not d:
+                await self.reply(chat_id, "Черновик уже неактуален — нажмите "
+                                 "«🗞 Дайджест за сутки» ещё раз.",
+                                 self._admin_kb(), message_id=message_id)
+                return
+            res = await self._publish_daily_posts(d.get("posts") or [],
+                                                  d.get("img"))
+            self._daily_draft = None
+            ok = any(v[0] for v in res.values())
+            await self.reply(chat_id, self._daily_result_text(ok, res),
+                             self._admin_kb(), message_id=message_id)
+
+    async def post_daily_digest(self, force: bool = True, langs=("ru", "en"),
+                                reason: str = "bot") -> bool:
+        """Кнопка «выложить в любое время»: собрать суточный дайджест и отправить."""
+        fn = getattr(self, "daily_run_fn", None)
+        if fn is None:
+            return self._digest_fail("дневной дайджест не подключён на сервере")
+        try:
+            rec = fn(force=bool(force), langs=list(langs), reason=reason)
+            if asyncio.iscoroutine(rec):
+                rec = await rec
+        except Exception as e:
+            return self._digest_fail(f"дайджест не собрался: {e}")
+        if not isinstance(rec, dict):
+            return self._digest_fail("дайджест не собрался: пустой ответ")
+        pub = rec.get("published") or {}
+        ok = any(bool((v or {}).get("ok")) for v in pub.values())
+        if not ok and self._review_on():
+            # черновик уже у админа — это не ошибка, а режим контроля
+            return bool(getattr(self, "_daily_state", {}).get("draft"))
+        self._daily_state = {"ok": ok, "day": rec.get("day"), "at": time.time(),
+                             "published": pub}
+        return ok
+
+    def _daily_result_text(self, ok: bool, result=None) -> str:
+        if ok:
+            routes = getattr(self, "_digest_routes", "") or self.channel_route_text()
+            return ("Дневной дайджест ушёл в каналы.\n" + routes
+                    + "\n\nПрошлые выпуски — на сайте в разделе «Дайджест».")
+        if self._review_on():
+            return ("Черновик дневного дайджеста — выше в чате. Проверьте текст "
+                    "и нажмите «✅ Опубликовать».")
+        err = _esc(self._digest_err or "неизвестная ошибка")
+        detail = ""
+        if isinstance(result, dict):
+            for lang, val in result.items():
+                if isinstance(val, (list, tuple)) and val and not val[0]:
+                    mark = "🇬🇧" if lang == "en" else "🇷🇺"
+                    detail += f"\n{mark} {_esc(val[1] if len(val) > 1 else '')}"
+        return ("<b>Не удалось отправить дневной дайджест</b>\n"
+                f"{err}{detail}\n\n"
+                "Если бот уже админ — перешлите сюда любой пост из канала "
+                "и попробуйте снова.")
 
     async def answer_cb(self, cb_id: str, text: str = "") -> None:
         # Пустой text Telegram иногда отвергает — тогда клиент «залипает»
@@ -651,6 +1586,11 @@ class TelegramBot:
         fails = 0
         while self.running:
             try:
+                # 429 (flood control): молотить дальше нельзя — Telegram продлевает
+                # запрет, и бот не видит кнопки. Ждём столько, сколько сказано.
+                pause = self._retry_after_until - time.time()
+                if pause > 0:
+                    await asyncio.sleep(min(60.0, pause))
                 res = await self._call("getUpdates", {
                     "offset": self._offset,
                     # в конфликт-режиме короткие опросы: быстрее перехватываем
@@ -665,6 +1605,7 @@ class TelegramBot:
                     fails += 1
                     await asyncio.sleep(sleep_s)
                     continue
+                self._last_ok_at = time.time()
                 if fails:
                     log.info("getUpdates снова в строю после %d сбоев — "
                              "кнопки и команды опять отвечают", fails)
@@ -679,10 +1620,24 @@ class TelegramBot:
                                  "возвращаем обычный опрос")
                 for upd in res.get("result") or []:
                     self._offset = int(upd["update_id"]) + 1
+                    self._last_update_at = time.time()
+                    self._updates_seen += 1
                     try:
                         await self._on_update(upd)
                     except Exception as e:
-                        log.warning("update %s: %s", upd.get("update_id"), e)
+                        # С трейсбеком: без него в журнале видно только текст
+                        # ошибки, и «кнопка молчит» неоткуда отладить.
+                        log.exception("update %s: %s", upd.get("update_id"), e)
+                # offset на диск: чтобы после перезапуска не разбирать заново
+                # старую очередь апдейтов (иначе первые минуты бот отвечает
+                # вчерашним нажатиям, а свежие кнопки ждут очереди).
+                if self._offset and self._offset != self._saved_offset:
+                    try:
+                        self.store.set_setting(f"bot_offset:{self.bot_id}",
+                                               str(self._offset))
+                        self._saved_offset = self._offset
+                    except Exception as e:
+                        log.debug("offset не сохранён: %s", e)
                 if self._conflict_mode:
                     await asyncio.sleep(0.5)
             except asyncio.CancelledError:
@@ -691,19 +1646,148 @@ class TelegramBot:
                 log.warning("poll: %s", e)
                 await asyncio.sleep(3)
 
+    def _watchdog_problem(self) -> str:
+        """Пустая строка — опрос жив; иначе причина, по которой его надо пересоздать."""
+        task = self._task
+        if task is None or task.done():
+            exc = None
+            if task is not None:
+                try:
+                    exc = task.exception()
+                except (asyncio.CancelledError, Exception):
+                    exc = None
+            return f"задача опроса остановилась ({exc!r})"
+        if self._last_ok_at and (time.time() - self._last_ok_at) > POLL_STALE_SEC:
+            return ("от Telegram не было успешных getUpdates "
+                    f"{time.time() - self._last_ok_at:.0f} с")
+        return ""
+
+    async def _watchdog_restart(self, reason: str) -> None:
+        """Пересоздаёт задачу опроса и говорит об этом админам.
+
+        Без этого «running: true, fails: 0, а кнопки не отвечают» лечится
+        только ручным `systemctl restart`.
+        """
+        log.error("сторож бота: %s — пересоздаю опрос", reason)
+        self._watchdog_restarts += 1
+        self._poll_fails = 0
+        self._conflict_mode = False
+        self._conflict_ok_streak = 0
+        self._retry_after_until = 0.0
+        self._last_ok_at = time.time()
+        old = self._task
+        if old is not None and not old.done():
+            old.cancel()
+        self._task = asyncio.create_task(self._poll(), name="tg-bot")
+        text = ("♻️ <b>Опрос Telegram перезапущен</b>\n"
+                f"{_esc(reason)}. "
+                f"Перезапусков сторожем: {self._watchdog_restarts}.\n"
+                "Кнопки и команды снова должны отвечать. Если это повторяется, "
+                "смотрите журнал: <code>journalctl -u licvid -n 200</code>")
+        for tg_id in self._admin_tg_ids():
+            try:
+                await self.send(tg_id, text, parse="HTML")
+            except Exception as e:
+                log.warning("сторож: не смог предупредить %s: %s", tg_id, e)
+
+    async def _watchdog(self) -> None:
+        """Сторож опроса: зависшую или упавшую задачу getUpdates пересоздаём.
+
+        «Бот отвечает какое-то время после перезапуска, потом молчит, а
+        /api/health показывает running: true и fails: 0» — ровно этот случай:
+        флаг жив, а опрос стоит.
+        """
+        while self.running:
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                break
+            if not self.running:
+                break
+            problem = self._watchdog_problem()
+            if problem:
+                await self._watchdog_restart(problem)
+
     def poll_status(self) -> Dict[str, Any]:
         """Срез состояния опроса getUpdates для /api/health.
 
         conflict=true — токен параллельно дёргает чужой процесс: команды
         и кнопки могут приходить ему, а не нам.
+        task_alive/poll_ok_sec/last_update_sec отвечают на вопрос «бот правда
+        живой?»: running — это флаг, выставленный при старте, он ничего не
+        говорит ни о задаче опроса, ни о том, доходят ли ответы до Telegram.
         """
+        now = time.time()
         return {
             "enabled": bool(self.token),
             "running": bool(self.running),
             "fails": self._poll_fails,
             "conflict": bool(self._conflict_mode),
             "offset": int(self._offset),
+            "task_alive": bool(self._task and not self._task.done()),
+            "poll_ok_sec": (round(now - self._last_ok_at, 1)
+                            if self._last_ok_at else None),
+            "last_update_sec": (round(now - self._last_update_at, 1)
+                                if self._last_update_at else None),
+            "updates_seen": int(self._updates_seen),
+            "send_fails": int(self._send_fails),
+            "last_err": (self._last_tg_err or "")[:160],
+            "watchdog_restarts": int(self._watchdog_restarts),
+            "waits": (len(self._wait_alert) + len(self._wait_tpl)
+                      + len(self._wait_broadcast)),
         }
+
+    def poll_line(self) -> str:
+        """Одна строка о самом боте — видно прямо в чате, без curl."""
+        st = self.poll_status()
+        if not st["enabled"]:
+            return "🤖 Бот: токен не задан"
+        if not st["running"] or not st["task_alive"]:
+            return ("🤖 Бот: ⚠️ опрос не идёт "
+                    f"(running={st['running']}, задача={st['task_alive']}) — "
+                    "кнопки не отвечают, нужен перезапуск сервиса")
+        ok = st["poll_ok_sec"]
+        bits = []
+        if ok is not None and ok > POLL_STALE_SEC:
+            bits.append(f"⚠️ опрос завис {ok:.0f} с")
+        else:
+            bits.append(f"опрос ок ({'—' if ok is None else f'{ok:.0f} с'})")
+        fresh = st["last_update_sec"]
+        bits.append("апдейт " + ("—" if fresh is None else f"{fresh:.0f} с назад"))
+        if st["send_fails"]:
+            bits.append(f"отказов Telegram {st['send_fails']}: "
+                        f"{_esc(st['last_err'][:60])}")
+        if st["conflict"]:
+            bits.append("409: токен тянет кто-то ещё")
+        if st["watchdog_restarts"]:
+            bits.append(f"перезапусков сторожем {st['watchdog_restarts']}")
+        return "🤖 Бот: " + " · ".join(bits)
+
+    def poll_text(self) -> str:
+        """Подробный разбор состояния бота (команда /bot)."""
+        st = self.poll_status()
+        def ago(v):
+            return "—" if v is None else f"{v:.0f} с назад"
+        lines = [
+            "<b>🤖 Состояние бота</b>",
+            f"опрос: {'идёт' if st['running'] and st['task_alive'] else 'НЕ идёт'}"
+            f" · задача опроса {'жива' if st['task_alive'] else 'мертва'}"
+            + (f" · завис {st['poll_ok_sec']:.0f} с" if st['poll_ok_sec'] and
+               st['poll_ok_sec'] > POLL_STALE_SEC else ""),
+            f"успешный getUpdates: {ago(st['poll_ok_sec'])}",
+            f"последний апдейт: {ago(st['last_update_sec'])}"
+            f" · обработано апдейтов: {st['updates_seen']}",
+            f"сбоев getUpdates подряд: {st['fails']}"
+            f" · 409-конфликт: {'да' if st['conflict'] else 'нет'}",
+            f"отказов Telegram (отправка/правка): {st['send_fails']}"
+            + (f"\nпоследняя: <code>{_esc(st['last_err'])}</code>"
+               if st["last_err"] else ""),
+            f"перезапусков сторожем: {st['watchdog_restarts']}"
+            f" · чатов с меню: {len(self._menu_msg)}"
+            f" · меню не внизу: {self._stale_menus()}"
+            f" · ожиданий ввода: {st['waits']}",
+        ]
+        return "\n".join(lines) + self.site_footer()
 
     async def _poll_fail_step(self, res: Optional[dict]) -> float:
         """Классифицирует ошибку getUpdates, возвращает секунды до повтора.
@@ -763,11 +1847,11 @@ class TelegramBot:
             "которая всё ещё висит на сервере.\n"
             "Один токен может опрашивать только один процесс.\n"
             "На сервере:\n"
-            "• <code>ps aux | grep -i tg_bot</code> — ищем дубли (особенно "
-            "запущенные давно);\n"
+            "• <code>ps aux | grep -E \"main\\.py|tg_bot|uvicorn|server:app\"</code> — "
+            "ищем дубли (особенно запущенные давно);\n"
             "• <code>systemctl list-units | grep -i liq</code> — нет ли второго "
-            "сервиса;\n"
-            "• убили лишнее — <code>systemctl restart liqscope</code>, меню "
+            "сервиса (старый liqscope из /root/LiqScope занимает тот же порт 8000);\n"
+            "• убили лишнее — <code>systemctl restart licvid</code>, меню "
             "оживёт.\n"
             "Напоминаю каждые ~30 минут, пока конфликт не исчезнет."
         )
@@ -825,6 +1909,19 @@ class TelegramBot:
                 await self.show_menu(chat_id, msg_ok + "\n\n" + self._alert_text(user),
                                      self._alert_kb(user))
                 return
+        until = float(self._wait_email.get(tg_id) or 0)
+        if until and until < time.time():
+            self._wait_email.pop(tg_id, None)
+            until = 0
+        if until:
+            if text.startswith("/"):
+                self._wait_email.pop(tg_id, None)
+                if text.startswith("/cancel"):
+                    await self.show_menu(chat_id, "Отмена.", self._cabinet_kb(user))
+                    return
+            else:
+                await self._handle_email_input(chat_id, user, text)
+                return
         wait = self._wait_tpl.get(tg_id)
         if wait and user.get("is_admin"):
             if text.startswith("/"):
@@ -876,23 +1973,44 @@ class TelegramBot:
             return
         nav = self._reply_cmd(text)
         if nav:
+            if nav == "help":
+                body, kb = self._screen(user, "help")
+                await self.show_menu(chat_id, body, kb)
+                return
             if nav == "admin":
                 await self._cmd_admin(chat_id, user)
                 return
             if nav == "channel":
-                link = f'<a href="{_esc(self.channel_url)}">📣 канал LiqScope</a>'
+                links = "\n".join(
+                    f'• <a href="{_esc(url)}">{_esc(name)}</a>'
+                    + (" 🇷🇺" if code == "ru" else " 🇬🇧")
+                    for code, name, url, _cid in self.channel_pair())
                 await self.show_menu(
                     chat_id,
-                    "<b>📣 Канал</b>\n"
-                    "Сводки ликвидаций, OI и CVD раз в 4 часа.\n"
-                    f"{link} — подписывайтесь, чтобы не пропустить."
+                    "<b>📣 Каналы LiqScope</b>\n"
+                    "Сводки ликвидаций, OI и CVD раз в 4 часа — тот же разбор,"
+                    " что в боте.\n"
+                    "Содержание одинаковое, отличается язык: русский и английский.\n"
+                    f"{links}\n\n"
+                    "Подписки на любой из них достаточно."
                     + self.site_footer(),
                     self._reply_kb(user))
                 return
             if nav == "al":
                 await self.show_menu(chat_id, self._alert_text(user), self._alert_kb(user))
                 return
-            body, kb = self._screen(user, nav)
+            try:
+                body, kb = self._screen(user, nav)
+            except Exception as e:
+                # «Кнопка молчит» не должна быть немой: если экран упал,
+                # пользователь видит причину, а не тишину.
+                log.exception("экран %s: %s", nav, e)
+                await self.show_menu(
+                    chat_id,
+                    "⚠️ Экран не открылся: <code>" + _esc(str(e)[:120])
+                    + "</code>\nОшибка записана в журнал сервиса.",
+                    self._reply_kb(user))
+                return
             await self.show_menu(chat_id, body, kb)
             return
         if text.startswith("/digest") and user.get("is_admin"):
@@ -903,14 +2021,23 @@ class TelegramBot:
             await self.show_menu(chat_id, self._help(user), self._reply_kb(user))
         elif text.startswith("/cabinet"):
             await self.show_menu(chat_id, self._cabinet_text(user), self._reply_kb(user))
+        elif text.startswith("/mail"):
+            body, kb = self._screen(user, "mail")
+            await self.show_menu(chat_id, body, kb)
         elif text.startswith("/stats"):
             await self.show_menu(chat_id, self._stats_text(), self._reply_kb(user))
         elif text.startswith("/status") or text.startswith("/health"):
             await self.show_menu(chat_id, self._health_text(), self._reply_kb(user))
+        elif text.startswith("/bot"):
+            await self.show_menu(chat_id, self.poll_text(), self._reply_kb(user))
         elif text.startswith("/liq"):
             await self.show_menu(chat_id, self._liq_text(), self._reply_kb(user))
         elif text.startswith("/services"):
             await self.show_menu(chat_id, self._services_text(user), self._services_kb(user))
+        elif text.startswith("/pumps") or text.startswith("/watch"):
+            await self.show_menu(chat_id, self._pump_text(user), self._pump_kb(user))
+        elif text.startswith("/correlations") or text.startswith("/corr"):
+            await self.show_menu(chat_id, self._corr_text(user), self._corr_kb(user))
         elif text.startswith("/alerts"):
             await self.show_menu(chat_id, self._alert_text(user), self._alert_kb(user))
         elif text.startswith("/terminal"):
@@ -941,34 +2068,116 @@ class TelegramBot:
             self._wait_broadcast.pop(tg_id, None)
             self._wait_tpl.pop(tg_id, None)
             self._wait_alert.pop(tg_id, None)
+            self._wait_email.pop(tg_id, None)
         # Сначала снимаем «часики»: если answer уйдёт после edit или с
         # пустым text, клиент залипает и следующие кнопки не нажимаются.
         await self.answer_cb(cb["id"])
         try:
+            if data.startswith("ch:role:"):
+                if not user.get("is_admin"):
+                    await self.show_menu(chat_id, "Привязывать каналы может только"
+                                                    " администратор.",
+                                         self._reply_kb(user))
+                    return
+                await self._set_channel_role(data.split(":")[-1], chat_id)
+                return
+            if data == "ch:swap":
+                if not user.get("is_admin"):
+                    return
+                ru = self.channel_chat_id()
+                en = self.channel_chat_id_en()
+                if ru and en:
+                    d = self._channel_bindings()
+                    d["ru"], d["en"] = en, ru
+                    t = d.get("titles") or {}
+                    t["ru"], t["en"] = t.get("en", ""), t.get("ru", "")
+                    d["titles"] = t
+                    self._save_channel_bindings(d)
+                await self.show_menu(chat_id, self._channels_text(), self._channels_kb())
+                return
+            if data == "a:channels":
+                # Экран открывают, чтобы понять «куда уходит пост»: перед
+                # показом сверяем роли с названиями каналов (getChat) — если
+                # они перепутаны, админ увидит уже исправленные строки.
+                try:
+                    await self.verify_channel_roles(force=True)
+                except Exception as e:
+                    log.debug("проверка каналов: %s", e)
+                await self.show_menu(chat_id, self._channels_text(), self._channels_kb())
+                return
             if data == "ch:check":
-                if await self._is_member(tg_id):
+                if await self._is_member_any(tg_id):
                     text, markup = self._home_text(user), self._reply_kb(user)
                     ok = await self.reply(chat_id, text, markup, message_id=message_id)
                 else:
-                    extra = ("Telegram ещё не видит подписку. Откройте канал, "
-                             "затем нажмите «Я подписался» ещё раз.")
+                    extra = ("Telegram ещё не видит подписку. Откройте любой из"
+                             " каналов (LiqScopeRUS или LiqScopeEng), затем нажмите"
+                             " «Я подписался» ещё раз.")
                     ok = await self.show_menu(chat_id, self._join_text(extra),
                                               self._kb_join(), old_id=message_id)
                 if not ok:
                     log.warning("меню не обновилось data=%s chat=%s msg=%s",
                                 data, chat_id, message_id)
                 return
+            if data == "a:vmail":
+                self._wait_email[int(tg_id or 0)] = time.time() + 900
+                await self.show_menu(
+                    chat_id,
+                    "Пришлите адрес почты следующим сообщением.\n"
+                    "На него уйдёт письмо со ссылкой — по ней почта привяжется"
+                    " к этому аккаунту, и вы сможете входить на сайт.\n\n"
+                    "/cancel — отмена.",
+                    self._cabinet_kb(user))
+                return
+            if data == "a:vchk":
+                fresh = self.store.get_user(int(user["id"])) or user
+                email = (fresh.get("email") or "").strip()
+                if email and fresh.get("email_verified"):
+                    await self.show_menu(
+                        chat_id,
+                        f"Готово: <code>{_esc(email)}</code> подтверждена ✅\n"
+                        "Теперь можно входить на сайт и этим адресом, и Telegram.",
+                        self._cabinet_kb(fresh))
+                elif email:
+                    await self.show_menu(
+                        chat_id,
+                        f"Почта <code>{_esc(email)}</code> пока не подтверждена.\n"
+                        "Откройте письмо от LiqScope и нажмите в нём кнопку —"
+                        " ссылка живёт 24 часа.",
+                        self._cabinet_kb(fresh))
+                else:
+                    await self.show_menu(chat_id, "Почта ещё не привязана.",
+                                         self._cabinet_kb(fresh))
+                return
             if data == "a:digest" and user.get("is_admin"):
                 posted = await self.post_channel_digest(force=True)
                 await self.reply(chat_id, self._digest_result_text(posted),
                                  self._admin_kb(), message_id=message_id)
                 return
+            if data == "a:ddigest" and user.get("is_admin"):
+                posted = await self.post_daily_digest(force=True)
+                await self.reply(chat_id, self._daily_result_text(posted),
+                                 self._admin_kb(), message_id=message_id)
+                return
+            if user.get("is_admin") and data.startswith("dd:"):
+                await self._on_daily_cb(chat_id, user, data, message_id)
+                return
+            if user.get("is_admin") and data.startswith("d:"):
+                await self._on_draft_cb(chat_id, user, data, message_id)
+                return
             if user.get("is_admin") and (
-                    data == "a:tpl" or data.startswith("a:th") or data.startswith("a:tp")):
+                    data == "a:tpl" or data.startswith("a:th") or data.startswith("a:tp")
+                    or data in ("a:rv", "a:ai")):
                 await self._on_tpl_cb(chat_id, user, data, message_id)
                 return
             if data == "al" or data.startswith("al:"):
                 await self._on_alert_cb(chat_id, user, data, message_id)
+                return
+            if data == "cor" or data.startswith("cor:"):
+                await self._on_corr_cb(chat_id, user, data, message_id)
+                return
+            if data == "pw" or data.startswith("pw:"):
+                await self._on_pump_cb(chat_id, user, data, message_id)
                 return
             if data != "ch:check" and not await self._ensure_channel(
                     chat_id, user, message_id=message_id):
@@ -979,16 +2188,30 @@ class TelegramBot:
                 log.warning("меню не обновилось data=%s chat=%s msg=%s",
                             data, chat_id, message_id)
         except Exception as e:
-            log.warning("cb %s: %s", data, e)
+            log.exception("cb %s: %s", data, e)
+            # Раньше ошибка экрана оставалась только в журнале, а для
+            # пользователя кнопка просто «ничего не делала».
+            try:
+                await self.send(
+                    chat_id,
+                    "⚠️ Экран не открылся: <code>" + _esc(str(e)[:120])
+                    + "</code>\nОшибка записана в журнал сервиса.",
+                    parse="HTML")
+            except Exception:
+                pass
 
     def _screen(self, user: dict, data: str) -> tuple:
         """Текст и клавиатура экрана."""
         if data in ("menu", "back", "nav:home", "home", "help", ""):
             if data == "help":
-                return self._help(user), self._reply_kb(user)
+                return self._commands_text(user), self._commands_kb(user)
             return self._home_text(user), self._reply_kb(user)
         if data == "cabinet":
             return self._cabinet_text(user), self._reply_kb(user)
+        if data == "mail":
+            # Напоминание из кабинета: ждём адрес почты следующим сообщением
+            self._wait_email[int(user.get("tg_id") or 0)] = time.time() + 900
+            return self._mail_screen(user), self._cabinet_kb(user)
         if data == "stats":
             return self._stats_text(), self._reply_kb(user)
         if data == "health":
@@ -1009,6 +2232,16 @@ class TelegramBot:
                             if s["slug"] == "alerts"), None)
                 if row and not row.get("coming_soon"):
                     return self._alert_text(user), self._alert_kb(user)
+            if slug == "correlations":
+                row = next((s for s in self.store.list_services(False)
+                            if s["slug"] == "correlations"), None)
+                if row and not row.get("coming_soon"):
+                    return self._corr_text(user), self._corr_kb(user)
+            if slug == "watchlist":
+                row = next((s for s in self.store.list_services(False)
+                            if s["slug"] == "watchlist"), None)
+                if row and not row.get("coming_soon"):
+                    return self._pump_text(user), self._pump_kb(user)
             have = set(self.store.user_service_slugs(user["id"]))
             on = slug not in have
             self.store.toggle_user_service(user["id"], slug, on)
@@ -1030,6 +2263,40 @@ class TelegramBot:
     async def _cmd_start(self, chat_id: int, user: dict, text: str) -> None:
         parts = text.split(maxsplit=1)
         payload = parts[1].strip() if len(parts) > 1 else ""
+        if payload.startswith("link_"):
+            # Кабинет попросил привязать Telegram к аккаунту с почтой:
+            # отдельная регистрация не нужна, аккаунт тот же.
+            nonce = payload[5:]
+            r = self.store.confirm_tg_link(nonce, user)
+            if r.get("ok"):
+                linked = r.get("user") or {}
+                extra = ""
+                if linked.get("email"):
+                    extra = f"\nПочта аккаунта: <code>{_esc(linked['email'])}</code>"
+                if r.get("merged"):
+                    extra += ("\nВесь профиль из Telegram перенесён в этот аккаунт"
+                              " — история алертов и подписки на месте.")
+                await self.show_menu(
+                    chat_id,
+                    f"✅ Telegram привязан к аккаунту LiqScope, {_esc(user['display_name'])}."
+                    f"{extra}\n"
+                    "Теперь сигналы алертов придут сюда, а вход в кабинет — "
+                    "по почте или этим же Telegram.\n"
+                    f"🌍 {self.site_a('открыть кабинет на сайте', '/cabinet')}",
+                    self._reply_kb(user),
+                )
+                return
+            err = r.get("error")
+            if err == "taken":
+                msg = ("Этот Telegram уже привязан к аккаунту с почтой — "
+                       "сначала отвяжите его в кабинете того аккаунта.")
+            elif err in ("expired", "used", "unknown"):
+                msg = ("Ссылка привязки устарела. Нажмите «Привязать Telegram» "
+                       "в кабинете ещё раз.")
+            else:
+                msg = "Не получилось привязать Telegram. Попробуйте ещё раз из кабинета."
+            await self.show_menu(chat_id, msg, self._reply_kb(user))
+            return
         if payload.startswith("login_"):
             nonce = payload[6:]
             if self.store.confirm_nonce(nonce, user["id"]):
@@ -1118,6 +2385,21 @@ class TelegramBot:
             lines.append(f"… и ещё {len(heads) - 15}")
         if not heads:
             lines.append("Шапки пусты — в постах дефолтные из кода.")
+        lines.append("")
+        ai = getattr(self, "ai", None)
+        st = ai.status() if ai is not None else {"enabled": False}
+        if st.get("enabled"):
+            chain = " → ".join(str(x.get("name")) for x in (st.get("providers") or []))
+            last = st.get("last") or {}
+            tail = (f"последняя: {last.get('provider')} · {last.get('ms')} мс"
+                    if last.get("ok") else f"последняя: ошибка — {last.get('reason') or '—'}")
+            lines.append(f"🤖 ИИ-шапка: включена · {_esc(chain)}")
+            lines.append(f"   {_esc(tail)}")
+        else:
+            lines.append("🤖 ИИ-шапка: выключена (нет ключей) — шапки из шаблонов")
+        lines.append("🧪 Контроль постов: " +
+                     ("включён — черновик приходит сюда" if self._review_on()
+                      else "выключен — пост уходит сразу в канал"))
         return "\n".join(lines)
 
     def _tpl_kb(self) -> dict:
@@ -1126,6 +2408,9 @@ class TelegramBot:
              {"text": "➕ Фото", "callback_data": "a:tp+"}],
             [{"text": "🗑 Удалить шапку", "callback_data": "a:th-"},
              {"text": "🗑 Удалить фото", "callback_data": "a:tp-"}],
+            [{"text": f"🧪 Контроль: {'вкл' if self._review_on() else 'выкл'}",
+              "callback_data": "a:rv"},
+             {"text": "🤖 Проверить ИИ", "callback_data": "a:ai"}],
             [{"text": "← Назад", "callback_data": "nav:admin"}],
         ]}
 
@@ -1164,6 +2449,32 @@ class TelegramBot:
         if data == "a:tpl":
             await self.reply(chat_id, self._tpl_home_text(), self._tpl_kb(),
                              message_id=message_id)
+            return
+        if data == "a:rv":
+            on = not self._review_on()
+            self._set_review(on, actor_id=user.get("id"))
+            await self.reply(chat_id, self._tpl_home_text(), self._tpl_kb(),
+                             message_id=message_id)
+            return
+        if data == "a:ai":
+            snap: dict = {}
+            try:
+                raw = self.digest_fn() if self.digest_fn else {}
+                if asyncio.iscoroutine(raw):
+                    raw = await raw
+                snap = raw if isinstance(raw, dict) else {}
+            except Exception as e:
+                log.warning("проверка ИИ: снимок не собрался: %s", e)
+            n = 0
+            try:
+                n = int(self.store.get_setting("channel_digest_n") or 0)
+            except (TypeError, ValueError):
+                n = 0
+            head, note = await self._ai_headline(snap, variant=n)
+            body = (f"🤖 <b>Проверка ИИ</b>\n<i>{_esc(note)}</i>\n\n"
+                    + (f"<b>{_esc(head)}</b>" if head
+                       else "Шапка: <i>не получилось, будет из шаблонов</i>"))
+            await self.reply(chat_id, body, self._tpl_kb(), message_id=message_id)
             return
         if data == "a:th+":
             self._wait_tpl[tg_id] = "head"
@@ -1231,6 +2542,184 @@ class TelegramBot:
             return {"ok": False, "error": str(e)[:80]}
         return self.store.add_digest_photo(blob, filename=name, actor_id=user["id"])
 
+    def _cabinet_kb(self, user: dict) -> dict:
+        """Кнопки кабинета: напоминание про почту и возврат в меню."""
+        rows = []
+        email = (user.get("email") or "").strip()
+        if not email or not user.get("email_verified"):
+            rows.append([{"text": "✉️ Подтвердить почту",
+                          "callback_data": "a:vmail"}])
+        if email and not user.get("email_verified"):
+            rows.append([{"text": "✅ Я подтвердил почту",
+                          "callback_data": "a:vchk"}])
+        rows.append([{"text": "← В меню", "callback_data": "nav:home"}])
+        return {"inline_keyboard": rows}
+
+    def _commands_kb(self, user: dict) -> dict:
+        """Меню по кнопке «☰ Меню»: команды, которые не надо набирать руками."""
+        admin = bool(user.get("is_admin"))
+        rows = [
+            [{"text": "🏠 /start", "callback_data": "nav:home"}],
+            [{"text": "👤 Кабинет", "callback_data": "cabinet"},
+             {"text": "⚡ Терминал", "callback_data": "terminal"}],
+            [{"text": "📊 Статистика", "callback_data": "stats"},
+             {"text": "🩺 Биржи", "callback_data": "health"}],
+            [{"text": "🛠 Сервисы", "callback_data": "services"},
+             {"text": "📰 Лента", "callback_data": "liq"}],
+            [{"text": "🔔 Алерты", "callback_data": "al"},
+             {"text": "📣 Канал", "callback_data": "channel"}],
+        ]
+        email = (user.get("email") or "").strip()
+        if not email or not user.get("email_verified"):
+            rows.append([{"text": "✉️ Подтвердить почту", "callback_data": "a:vmail"}])
+        if admin:
+            rows.append([{"text": "★ Админка", "callback_data": "nav:admin"}])
+        # Партнёрская ссылка кнопкой: url-кнопку Telegram подсвечивает как ссылку
+        rows.append([{"text": "💠 Торговать на Gate — скидка на комиссию",
+                      "url": gate_url()}])
+        return {"inline_keyboard": rows}
+
+    def _commands_text(self, user: dict) -> str:
+        return (
+            "<b>☰ Меню LiqScope</b>\n"
+            "Всё то же, что в панели внизу, — кнопками. Ничего набирать"
+            " руками не нужно.\n\n"
+            "/start — эта панель заново, /help — полный список команд."
+            + self.site_footer()
+        )
+
+
+    def _mail_screen(self, user: dict) -> str:
+        email = (user.get("email") or "").strip()
+        head = "<b>✉️ Подтверждение почты</b>\n"
+        if email and user.get("email_verified"):
+            return (head + f"Почта <code>{_esc(email)}</code> уже подтверждена ✅\n"
+                    "Она работает и на сайте, и здесь." + self.site_footer())
+        lines = [
+            head.rstrip(),
+            "Почта — основной вход на сайт: по ней приходит ссылка для входа"
+            " и сброс пароля.",
+        ]
+        if email:
+            lines += [
+                f"Сейчас привязана <code>{_esc(email)}</code>, но она"
+                " <b>не подтверждена</b> — вход на сайт закрыт.",
+                "Пришлите адрес ещё раз, если нужно письмо с новой ссылкой.",
+            ]
+        else:
+            lines.append("Сейчас почта к аккаунту не привязана.")
+        lines.append("Пришлите адрес следующим сообщением — отправлю письмо"
+                     " со ссылкой. /cancel — отмена.")
+        return "\n".join(lines) + self.site_footer()
+
+    def _mail_left(self, tg_id: int, email: str, wait: float = 90.0) -> int:
+        """Сколько секунд ждать до следующего письма (0 — можно слать)."""
+        key = f"{int(tg_id)}:{email}"
+        last = float(self._mail_at.get(key) or 0)
+        left = int(wait - (time.time() - last)) if last else 0
+        if left > 0:
+            return left
+        self._mail_at[key] = time.time()
+        return 0
+
+    def _mail_send(self, kind: str, to: str, token: str, name: str = "") -> bool:
+        """Письмо из бота: mailer тот же, что у сайта (server.py подкладывает)."""
+        m = self.mailer
+        if not m or not getattr(m, "enabled", False):
+            log.warning("Бот: почта не настроена — письмо «%s» для %s не отправлено",
+                        kind, to)
+            return False
+        try:
+            if kind == "verify":
+                return bool(m.send_verify(to, token, name=name))
+            if kind == "attach":
+                return bool(m.send_tg_attach(to, token, tg_name=name))
+        except Exception as e:
+            log.warning("Бот: письмо «%s» для %s не ушло: %s", kind, to, e)
+        return False
+
+    async def _handle_email_input(self, chat_id: int, user: dict, text: str) -> None:
+        """Человек прислал адрес почты из кабинета бота."""
+        from accounts import normalize_email, valid_email
+
+        self._wait_email.pop(int(user.get("tg_id") or 0), None)
+        email = normalize_email(text)
+        if not valid_email(email):
+            self._wait_email[int(user.get("tg_id") or 0)] = time.time() + 900
+            await self.show_menu(
+                chat_id,
+                "Это не похоже на адрес. Пришлите почту ещё раз,"
+                " например <code>name@mail.ru</code>.\n/cancel — отмена.",
+                self._cabinet_kb(user))
+            return
+        tg_id = int(user.get("tg_id") or 0)
+        left = self._mail_left(tg_id, email)
+        if left:
+            await self.show_menu(
+                chat_id,
+                f"Письмо уже отправил — подождите {left} с и проверьте ящик"
+                f" (и папку «Спам»).",
+                self._cabinet_kb(user))
+            return
+        me = self.store.get_user(int(user["id"])) or user
+        if (me.get("email") or "") == email and me.get("email_verified"):
+            await self.show_menu(chat_id, f"Почта <code>{_esc(email)}</code>"
+                                          " уже подтверждена ✅",
+                                 self._cabinet_kb(me))
+            return
+        att = self.store.attach_email(int(me["id"]), email)
+        if att.get("ok"):
+            # адрес свободен или остался от незавершённой регистрации —
+            # это тот же человек, просто просим подтвердить почту
+            token = self.store.new_email_token(int(att["user"]["id"]), "verify", email=email)
+            sent = self._mail_send("verify", email, token,
+                                   name=att["user"].get("first_name") or "")
+            if not sent:
+                await self.show_menu(
+                    chat_id,
+                    "Почта не ушла: отправка писем на сервере не настроена."
+                    " Адрес сохранил, но подтвердить его пока нельзя.",
+                    self._cabinet_kb(att["user"]))
+                return
+            fresh = self.store.get_user(int(att["user"]["id"])) or att["user"]
+            await self.show_menu(
+                chat_id,
+                f"Письмо ушло на <code>{_esc(email)}</code>.\n"
+                "Откройте ссылку из письма — и почта станет входом на сайт.\n"
+                "Пока адрес не подтверждён, вход на сайте закрыт.",
+                self._cabinet_kb(fresh))
+            return
+        if att.get("error") != "taken":
+            await self.show_menu(chat_id, "Не получилось привязать адрес — попробуйте позже.",
+                                 self._cabinet_kb(me))
+            return
+        # Адрес уже подтверждён в кабинете на сайте. Чтобы чужой человек не забрал
+        # его себе, привязку подтверждает владелец почты — письмом.
+        other = self.store.get_user_by_email(email)
+        if not other:
+            await self.show_menu(chat_id, "Не получилось привязать адрес — попробуйте позже.",
+                                 self._cabinet_kb(me))
+            return
+        token = self.store.new_tg_attach(int(other["id"]), {"tg_id": tg_id,
+                                                           "username": me.get("username") or "",
+                                                           "first_name": me.get("first_name") or "",
+                                                           "last_name": me.get("last_name") or ""})
+        sent = self._mail_send("attach", email, token,
+                               name=me.get("username") or me.get("first_name") or "Telegram")
+        if not sent:
+            await self.show_menu(
+                chat_id,
+                "Почта не ушла: отправка писем на сервере не настроена.",
+                self._cabinet_kb(me))
+            return
+        await self.show_menu(
+            chat_id,
+            f"На <code>{_esc(email)}</code> отправлено письмо с подтверждением.\n"
+            "Нажмите в нём «Привязать Telegram» — и этот Telegram станет вашим"
+            " входом в кабинет на сайте.\n"
+            "Ссылка живёт 2 часа.",
+            self._cabinet_kb(me))
+
     def _kb_back(self, to: str = "nav:home") -> dict:
         aliases = {"menu": "nav:home", "home": "nav:home", "back": "nav:home",
                    "admin": "nav:admin"}
@@ -1247,7 +2736,9 @@ class TelegramBot:
             [{"text": "📣 Рассылка", "callback_data": "broadcast"},
              {"text": "🩺 Здоровье", "callback_data": "a:health"}],
             [{"text": "📰 Сводка в канал", "callback_data": "a:digest"}],
-            [{"text": "🎨 Шаблоны канала", "callback_data": "a:tpl"}],
+            [{"text": "🗞 Дайджест за сутки", "callback_data": "a:ddigest"}],
+            [{"text": "📣 Каналы", "callback_data": "a:channels"},
+             {"text": "🎨 Шаблоны", "callback_data": "a:tpl"}],
             [{"text": "← Назад", "callback_data": "nav:home"}],
         ]}
 
@@ -1266,7 +2757,8 @@ class TelegramBot:
         return (
             f"<b>LiqScope</b>\n"
             f"Привет, {_esc(user['display_name'])}!\n"
-            "Выберите раздел — кнопки внизу экрана."
+            "Выберите раздел — кнопки внизу экрана.\n"
+            + gate_line()
             + self.site_footer()
         )
 
@@ -1274,6 +2766,7 @@ class TelegramBot:
         lines = [
             "<b>Команды LiqScope</b>",
             "/start — регистрация / вход на сайт",
+            "☰ Меню — кнопки разделов вместо ручного ввода",
             "/cabinet — профиль",
             "/terminal — ссылка на терминал",
             "/stats — ликвидации 24ч",
@@ -1281,7 +2774,14 @@ class TelegramBot:
             "/liq — последние события",
             "/services — сервисы кабинета",
             "/alerts — алерты по объёму",
+            "/correlations — корреляции валют",
+            "/pumps — сторож монет: пампы и дампы",
+            "/bot — состояние опроса бота",
         ]
+        email = (user.get("email") or "").strip()
+        if not email or not user.get("email_verified"):
+            lines.append("/mail — привязать и подтвердить почту"
+                         " (основной вход на сайт)")
         if user.get("is_admin"):
             lines += [
                 "",
@@ -1297,15 +2797,29 @@ class TelegramBot:
         have = self.store.user_service_slugs(user["id"])
         svc = ", ".join(have) if have else "пока не выбраны"
         role = "👑 администратор" if user["is_admin"] else "👤 пользователь"
-        return (
-            f"<b>👤 Кабинет</b>\n"
-            f"{_esc(user['display_name'])} · {un}\n"
-            f"Telegram ID: <code>{user['tg_id']}</code>\n"
-            f"Роль: {role}\n"
-            f"Сервисы: {_esc(svc)}\n"
-            f"🌍 {self.site_a('кабинет на сайте', '/cabinet')}"
-            + self.site_footer()
-        )
+        lines = [
+            "<b>👤 Кабинет</b>",
+            f"{_esc(user['display_name'])} · {un}",
+        ]
+        # Основной вход — почта, Telegram может быть и не привязан
+        email = (user.get("email") or "").strip()
+        if email:
+            mark = " ✅" if user.get("email_verified") else " (не подтверждена)"
+            lines.append(f"Почта: <code>{_esc(email)}</code>{mark}")
+        if not email:
+            lines.append("Почта: <b>не привязана</b> — входить на сайт нечем,"
+                         " кроме Telegram")
+        elif not user.get("email_verified"):
+            lines.append("⚠️ Почта не подтверждена — вход на сайт закрыт,"
+                         " пока не перейдёте по ссылке из письма")
+        if user.get("tg_id"):
+            lines.append(f"Telegram ID: <code>{user['tg_id']}</code>")
+        lines += [
+            f"Роль: {role}",
+            f"Сервисы: {_esc(svc)}",
+            f"🌍 {self.site_a('кабинет на сайте', '/cabinet')}",
+        ]
+        return "\n".join(lines) + self.site_footer()
 
     def _terminal_text(self) -> str:
         return (
@@ -1365,18 +2879,36 @@ class TelegramBot:
             total += 1
             ev = int(s.get("events") or 0)
             events_total += ev
-            if s.get("connected"):
+            dead = s.get("supervisor_alive") is False
+            if dead:
+                # Слушателя нет вовсе: попыток больше не будет, пока сторож
+                # не поднимет поток заново. Раньше это выглядело как «нет
+                # связи» без единой попытки — источник молчал до рестарта.
+                respawns = int(s.get("respawns") or 0)
+                tries = int(s.get("attempts") or 0)
+                rows.append(
+                    f"🟠 <b>{ex_link(name, fallback=self.ex_name(name))}</b> · "
+                    f"слушатель не запущен — поднимает сторож"
+                    + (f" · попыток: {self.fmt_int(tries)}" if tries else "")
+                    + (f" (подъёмов: {respawns})" if respawns else ""))
+            elif s.get("connected"):
                 live += 1
                 fresh = ""
                 sec = s.get("seconds_since_event")
                 if isinstance(sec, (int, float)):
                     fresh = f" · {self.ago_label(sec)}"
+                again = int(s.get("attempts") or 0)
+                if again > 1:
+                    fresh += f" · попыток: {self.fmt_int(again)}"
                 rows.append(
-                    f"🟢 <b>{_esc(self.ex_name(name))}</b> · "
+                    f"🟢 <b>{ex_link(name, fallback=self.ex_name(name))}</b> · "
                     f"{self.fmt_int(ev)} событий{fresh}")
             else:
                 err = _esc(str(s.get("last_error") or "нет связи")[:42])
-                rows.append(f"🔴 <b>{_esc(self.ex_name(name))}</b> · {err}")
+                attempts = int(s.get("attempts") or 0)
+                tail = f" · попыток: {attempts}" if attempts else ""
+                rows.append(f"🔴 <b>{ex_link(name, fallback=self.ex_name(name))}</b>"
+                            f" · {err}{tail}")
         lines = ["<b>🩺 Биржи · эфир</b>", ""]
         lines.extend(rows or ["сервер ещё собирает источники"])
         lines.append("")
@@ -1384,6 +2916,10 @@ class TelegramBot:
             f"📡 В эфире <b>{live}/{total or '—'}</b> · "
             f"событий в памяти: {self.fmt_int(events_total)} · "
             f"зрителей WS: {self.ws_clients_fn()}")
+        # Строка о самом боте: по ней видно «молчит, потому что не опрашивает»
+        # прямо из чата, без curl к /api/health.
+        lines.append("")
+        lines.append(self.poll_line())
         return "\n".join(lines) + self.site_footer()
 
     def _liq_line(self, x: dict) -> str:
@@ -1395,8 +2931,12 @@ class TelegramBot:
             tm = "--:--:--"
         sym = str(x.get("symbol") or "?").replace("_", "/")
         mark = "🔴" if x.get("side") == "SELL" else "🟢"
+        # строка ленты — обычный текст (не <pre>), значит биржу можно сделать
+        # ссылкой: Gate ведёт на партнёрскую, остальные — просто название
+        ex_key = x.get("exchange")
         return (f"{tm} {mark} {_esc(sym)}  "
-                f"{self.fmt_usd(x.get('usd'))}  {_esc(self.ex_name(x.get('exchange')))}")
+                f"{self.fmt_usd(x.get('usd'))}  "
+                f"{ex_link(ex_key, fallback=self.ex_name(ex_key))}")
 
     def _liq_text(self, limit: int = 3600) -> str:
         """Лента: максимум событий, которые влезают в сообщение Telegram."""
@@ -1421,7 +2961,7 @@ class TelegramBot:
             ex = str(x.get("exchange") or "?")
             by_ex[ex] = by_ex.get(ex, 0) + 1
         ex_bits = " · ".join(
-            f"{self.ex_name(k)} {v}"
+            f"{ex_link(k, fallback=self.ex_name(k))} {v}"
             for k, v in sorted(by_ex.items(), key=lambda kv: -kv[1])[:6])
         head = (
             "<b>📰 Лента ликвидаций</b>\n"
@@ -1452,19 +2992,21 @@ class TelegramBot:
         have = set(self.store.user_service_slugs(user["id"]))
         lines = [
             "<b>Сервисы кабинета</b>",
-            "Те же, что на сайте. Алерты по объёму уже работают — откройте 🔔.",
+            "Те же, что на сайте: 🔔 алерты, 🔗 корреляции валют и 👁 сторож "
+            "монет уже работают.",
             "",
         ]
         for s in self.store.list_services(include_disabled=False):
             mark = "✓" if s["slug"] in have else "○"
-            if s["slug"] == "alerts" and not s.get("coming_soon"):
-                extra = " · настроить"
+            if s["slug"] in ("alerts", "correlations", "watchlist") and not s.get("coming_soon"):
+                extra = " · открыть"
             else:
                 extra = " · скоро" if s["coming_soon"] else ""
             lines.append(f"{mark} {s['icon']} <b>{_esc(s['title'])}</b>{extra}")
             if s.get("description"):
                 lines.append(f"    {_esc(s['description'])}")
-        lines.append("\nАлерты открывают настройки. Остальное — лист ожидания, пока «скоро».")
+        lines.append("\nРаботающие сервисы открывают свои настройки, "
+                     "остальные — лист ожидания, пока «скоро».")
         return "\n".join(lines) + self.site_footer()
 
     def _users_text(self) -> str:
@@ -1494,12 +3036,17 @@ class TelegramBot:
         v = self.store.visit_stats(1)
         h = self.health_fn() or {}
         live = h.get("live_exchanges") or []
+        ru, en = self.channel_role("ru"), self.channel_role("en")
+        def ch(role: dict) -> str:
+            return f"{_esc(role.get('title') or '—')} <code>{_esc(role.get('id') or '—')}</code>"
         return (
             f"<b>★ Админка LiqScope</b>\n"
             f"👥 Пользователи: {c['total']} (за сутки {c['active_24h']}, новых {c['new_24h']})\n"
             f"👁 Визиты сегодня: {v['today_views']} / {v['today_uniques']} уник.\n"
             f"📡 Онлайн WS: {self.ws_clients_fn()}\n"
             f"🩺 Биржи в эфире: {len(live)}\n"
+            f"🇷🇺 Канал: {ch(ru)}\n"
+            f"🇬🇧 Канал: {ch(en)}\n"
             f"🛠 {self.site_a('панель на сайте', '/admin')}"
             + self.site_footer()
         )
@@ -1622,6 +3169,226 @@ class TelegramBot:
             self._alert_save(user, cfg)
             return f"{'Порог' if kind == 'thr' else 'Мин. удар'} {metric}: {money(n)}"
         return "Не понял."
+
+    # ----- сервис «Сторож монет»: пампы и дампы ---------------------------
+    @staticmethod
+    def _user_lang(user: dict) -> str:
+        """Язык пользователя для ссылок и текстов сигналов."""
+        lang = (user or {}).get("language_code") or (user or {}).get("language") or ""
+        return "en" if str(lang).startswith("en") else "ru"
+
+    def _pump_cfg(self, user: dict) -> dict:
+        from pump_scan import normalize
+        row = self.store.get_user_service(user["id"], "watchlist") if self.store else None
+        cfg = normalize((row or {}).get("config") or {})
+        if row is None:
+            cfg["enabled"] = True
+        return cfg
+
+    def _pump_save(self, user: dict, cfg: dict) -> None:
+        self.store.set_user_service_config(
+            user["id"], "watchlist", cfg, enabled=bool(cfg.get("enabled")))
+
+    def _pump_data(self, cfg: dict) -> dict:
+        fn = self.pump_snapshot_fn
+        if not fn:
+            return {}
+        try:
+            return fn(cfg) or {}
+        except Exception as e:  # noqa: BLE001
+            log.debug("сторож монет: %s", e)
+            return {}
+
+    def _pump_text(self, user: dict) -> str:
+        from pump_scan import format_settings_text, money, price_str
+        cfg = self._pump_cfg(user)
+        data = self._pump_data(cfg)
+        status = data.get("status") or {}
+        lines = ["<b>👁 Сторож монет: пампы и дампы</b>",
+                 format_settings_text(cfg)]
+        if not status.get("coins"):
+            lines.append("")
+            lines.append("Цены Gate ещё не подтянулись — сторож начнёт считать "
+                         "минутную историю с первого удачного опроса.")
+        else:
+            lines.append(f"под наблюдением монет: <b>{status['coins']}</b>"
+                         + (f" · данные {int(status['age_sec'])} с назад"
+                            if status.get("age_sec") is not None else ""))
+        movers = data.get("movers") or []
+        if movers:
+            lines.append("")
+            lines.append("<b>Самые резкие движения сейчас</b>")
+            for m in movers[:5]:
+                arrow = "🚀" if m["change_pct"] > 0 else "🩸"
+                lines.append(f"{arrow} {m['symbol'].replace('_USDT', '')} "
+                             f"{m['change_pct']:+.2f}% · {price_str(m.get('price'))}"
+                             f" · оборот {money(m.get('volume24h'))}")
+        hits = data.get("hits") or []
+        if hits:
+            lines.append("")
+            lines.append("<b>Уже за порогом</b>")
+            for h in hits[:3]:
+                kind = "памп" if h["kind"] == "pump" else "дамп"
+                lines.append(f"· {h['symbol'].replace('_USDT', '')} — {kind} "
+                             f"{h['change_pct']:+.2f}% за {int(h['span_min'])} мин")
+        lines.append("")
+        lines.append("Кнопки ниже — режим, порог, период и число свечей. "
+                     "Сигналы приходят отдельными сообщениями со ссылкой на Gate.")
+        return "\n".join(lines) + self.site_footer()
+
+    def _pump_kb(self, user: dict) -> dict:
+        from pump_scan import CANDLE_PRESETS, THRESHOLDS, period_label
+        cfg = self._pump_cfg(user)
+
+        def mark(on: bool, label: str) -> str:
+            return ("✓ " if on else "") + label
+
+        on = "🔔 Следить ВКЛ" if cfg.get("enabled") else "🔕 Следить выкл"
+        kb = [
+            [{"text": mark(cfg["mode"] in ("pump", "both"), "🚀 Пампы"),
+              "callback_data": "pw:mode:pump"},
+             {"text": mark(cfg["mode"] in ("dump", "both"), "🩸 Дампы"),
+              "callback_data": "pw:mode:dump"},
+             {"text": mark(cfg["mode"] == "both", "⚖️ Оба"),
+              "callback_data": "pw:mode:both"}],
+        ]
+        thr = [{"text": mark(abs(cfg["threshold"] - t) < 1e-9, f"{t:g}%"),
+                "callback_data": f"pw:thr:{t:g}"} for t in THRESHOLDS[:4]]
+        kb.append(thr)
+        kb.append([{"text": mark(abs(cfg["threshold"] - t) < 1e-9, f"{t:g}%"),
+                    "callback_data": f"pw:thr:{t:g}"} for t in THRESHOLDS[4:]])
+        kb.append([{"text": mark(cfg["period"] == k, k),
+                    "callback_data": f"pw:per:{period_label(k)}"}
+                   for k in ("1m", "5m", "15m")])
+        kb.append([{"text": mark(cfg["period"] == k, k),
+                    "callback_data": f"pw:per:{period_label(k)}"}
+                   for k in ("30m", "1h", "4h")])
+        kb.append([{"text": mark(cfg["candles"] == n, f"{n} свеч."),
+                    "callback_data": f"pw:cn:{n}"} for n in CANDLE_PRESETS[:5]])
+        kb.append([{"text": on, "callback_data": "pw:on"},
+                   {"text": "🔄 Проверить", "callback_data": "pw:now"}])
+        kb.append([{"text": "💠 Gate", "url": gate_url(self._user_lang(user))},
+                   {"text": "← Назад", "callback_data": "services"}])
+        return {"inline_keyboard": kb}
+
+    async def _on_pump_cb(self, chat_id, user: dict, data: str, message_id) -> None:
+        from pump_scan import normalize
+        cfg = self._pump_cfg(user)
+        parts = data.split(":")
+        changed = True
+        if data in ("pw", "pw:now"):
+            changed = False
+        elif data == "pw:on":
+            cfg["enabled"] = not cfg.get("enabled")
+        elif len(parts) >= 3 and parts[1] == "mode":
+            mode = parts[2]
+            if mode not in ("pump", "dump", "both"):
+                mode = "both"
+            cfg["mode"] = mode
+            cfg["enabled"] = True
+        elif len(parts) >= 3 and parts[1] == "thr":
+            try:
+                cfg["threshold"] = float(parts[2])
+            except ValueError:
+                pass
+        elif len(parts) >= 3 and parts[1] == "per":
+            cfg["period"] = parts[2]
+        elif len(parts) >= 3 and parts[1] == "cn":
+            try:
+                cfg["candles"] = int(parts[2])
+            except ValueError:
+                pass
+        else:
+            changed = False
+        if changed:
+            cfg = normalize(cfg)
+            self._pump_save(user, cfg)
+        await self.reply(chat_id, self._pump_text(user), self._pump_kb(user),
+                         message_id=message_id)
+
+    # ----- сервис «Корреляции валют» --------------------------------------
+    def _corr_cfg(self, user: dict) -> dict:
+        from correlations import DEFAULT_METRIC, DEFAULT_WINDOW, window_key
+        row = self.store.get_user_service(user["id"], "correlations") if self.store else None
+        cfg = (row or {}).get("config") or {}
+        return {"window": window_key(cfg.get("window") or DEFAULT_WINDOW),
+                "metric": str(cfg.get("metric") or DEFAULT_METRIC)}
+
+    def _corr_save(self, user: dict, cfg: dict) -> None:
+        self.store.set_user_service_config(
+            user["id"], "correlations", cfg, enabled=True)
+
+    def _corr_data(self, cfg: dict) -> dict:
+        fn = self.correlations_fn
+        if not fn:
+            return {}
+        try:
+            return fn(cfg.get("window", "24h"), cfg.get("metric", "liq")) or {}
+        except Exception as e:  # noqa: BLE001
+            log.debug("корреляции: %s", e)
+            return {}
+
+    def _corr_text(self, user: dict) -> str:
+        from correlations import format_text, metric_title, window_label
+        cfg = self._corr_cfg(user)
+        data = self._corr_data(cfg)
+        if not data:
+            return ("<b>🔗 Корреляции валют</b>\n"
+                    "История ещё собирается: сервис считает связи монет по часовым "
+                    "свёрткам ликвидаций, объёма, CVD и OI. Загляните позже — или "
+                    "посмотрите тепловую карту на сайте."
+                    + self.site_footer())
+        body = format_text(data, "ru", site=self.site_url("/cabinet"))
+        lines = body.split("\n")
+        lines[0] = (f"<b>🔗 Корреляции валют</b> · {window_label(cfg['window'])} · "
+                    f"{metric_title(cfg['metric'])}")
+        return "\n".join(lines) + self.site_footer()
+
+    def _corr_kb(self, user: dict) -> dict:
+        from correlations import WINDOWS, window_label
+        cfg = self._corr_cfg(user)
+        rows = []
+        for key, _minutes in WINDOWS:
+            mark = "✓ " if key == cfg["window"] else ""
+            rows.append({"text": mark + window_label(key),
+                         "callback_data": "cor:w:" + key})
+        kb = [rows[i:i + 3] for i in range(0, len(rows), 3)]
+        kb.append([
+            {"text": ("✓ " if cfg["metric"] == "liq" else "") + "💥 LIQ",
+             "callback_data": "cor:m:liq"},
+            {"text": ("✓ " if cfg["metric"] == "vol" else "") + "📦 Объём",
+             "callback_data": "cor:m:vol"},
+        ])
+        kb.append([
+            {"text": ("✓ " if cfg["metric"] == "cvd" else "") + "🌊 CVD",
+             "callback_data": "cor:m:cvd"},
+            {"text": ("✓ " if cfg["metric"] == "oi" else "") + "📊 OI",
+             "callback_data": "cor:m:oi"},
+        ])
+        kb.append([{"text": "🔄 Пересчитать", "callback_data": "cor:now"},
+                   {"text": "🌐 Тепловая карта", "url":
+                    self.site_url("/cabinet#correlations")}])
+        kb.append([{"text": "← Назад", "callback_data": "services"}])
+        return {"inline_keyboard": kb}
+
+    async def _on_corr_cb(self, chat_id, user: dict, data: str, message_id) -> None:
+        cfg = self._corr_cfg(user)
+        parts = data.split(":")
+        if data == "cor" or data == "cor:now":
+            await self.reply(chat_id, self._corr_text(user), self._corr_kb(user),
+                             message_id=message_id)
+            return
+        if len(parts) >= 3 and parts[1] == "w":
+            cfg["window"] = parts[2]
+        elif len(parts) >= 3 and parts[1] == "m":
+            cfg["metric"] = parts[2]
+        else:
+            await self.reply(chat_id, self._corr_text(user), self._corr_kb(user),
+                             message_id=message_id)
+            return
+        self._corr_save(user, cfg)
+        await self.reply(chat_id, self._corr_text(user), self._corr_kb(user),
+                         message_id=message_id)
 
     async def _on_alert_cb(self, chat_id, user: dict, data: str, message_id) -> None:
         tg_id = int(user.get("tg_id") or 0)

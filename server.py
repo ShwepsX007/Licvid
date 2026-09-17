@@ -47,12 +47,25 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from market_feed import MarketFeed, TF_MINUTES, base_of, canon
+from market_feed import GATE_REST, MarketFeed, TF_MINUTES, base_of, canon, _get_json
 from timeframes import parse_tf
 from oi_feed import map_candles_to_oi
+from hour_board import BOARD, OI, build_snapshot
 from accounts import Store
+from flow_feed import FlowFeed
+from history import HistoryStore, MONTH_HOURS
+from pump_scan import PumpScanner, filter_new as pump_filter_new
+from pump_scan import format_signal_html as pump_signal_html
+from refs import gate_url
+from mailer import build_mailer
+from ai_text import build_ai
+import api_digest
+from api_digest import DigestScheduler, ctx as digest_ctx, register_digest_routes
+from daily_digest import DigestStore
 from tg_bot import TelegramBot, normalize_public_url
 from web_account import ctx as account_ctx, register_account_routes
+import web_bot_admin
+from web_bot_admin import register_bot_admin_routes
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -72,16 +85,23 @@ TICK_SOURCES = [x.strip().lower() for x in
                 os.getenv("LIQSCOPE_TICK_SOURCE", "binance,binance-raw,bybit").split(",")
                 if x.strip()]
 DEMO_MODE = os.getenv("LIQSCOPE_DEMO", "0").strip() in ("1", "true", "yes", "on")
+DEMO_PUMP_VOL: Dict[str, float] = {}   # демо-оборот 24ч по монетам для сторожа
 HISTORY_MAX = int(os.getenv("LIQSCOPE_HISTORY_MAX", "60000"))
 # Дисковое сохранение истории ликвидаций (переживает рестарт сервера).
-# Путь: LIQSCOPE_HISTORY_FILE ("" / "0" / "off" — отключить), TTL — сколько часов
-# держать при загрузке/урезании файла.
+# Путь — каталог дневных файлов ("" / "0" / "off" — не хранить вовсе),
+# TTL — сколько часов держать историю.
 HISTORY_FILE = os.getenv("LIQSCOPE_HISTORY_FILE",
                          os.path.join(HERE, "data", "liq_history.jsonl")).strip()
 if HISTORY_FILE.lower() in ("0", "none", "off", "false"):
     HISTORY_FILE = ""
-HISTORY_TTL_HOURS = float(os.getenv("LIQSCOPE_HISTORY_TTL_HOURS", "24"))
-HISTORY_FILE_MAX_BYTES = 64 * 1024 * 1024   # страховка: урезаем файл при разрастании
+# Сколько истории держать на диске. По умолчанию — 31 сутки: ликвидации,
+# CVD, объём и OI должны быть доступны за месяц, а не за сутки.
+HISTORY_TTL_HOURS = float(os.getenv("LIQSCOPE_HISTORY_TTL_HOURS", str(MONTH_HOURS)))
+# Лимит одного дневного файла сырых ликвидаций: мельче $50k в переполненный
+# день не пишем (часовые свёртки при этом остаются полными)
+HISTORY_SHARD_MAX_MB = float(os.getenv("LIQSCOPE_HISTORY_SHARD_MB", "48"))
+# Как часто свёртки дня и уборка старых дней уходят на диск
+HISTORY_FLUSH_SEC = max(30.0, float(os.getenv("LIQSCOPE_HISTORY_FLUSH_SEC", "180")))
 
 BOT_TOKEN = os.getenv("LIQSCOPE_BOT_TOKEN", "").strip()
 PUBLIC_URL = normalize_public_url(os.getenv("LIQSCOPE_PUBLIC_URL", ""))
@@ -93,11 +113,34 @@ for _x in os.getenv("LIQSCOPE_ADMIN_IDS", "").replace(";", ",").split(","):
     _x = _x.strip()
     if _x.isdigit():
         ADMIN_IDS.append(int(_x))
+# Админы, которые регистрируются по почте (через запятую или точку с запятой)
+ADMIN_EMAILS = [x.strip().lower() for x in
+                os.getenv("LIQSCOPE_ADMIN_EMAILS", "").replace(";", ",").split(",")
+                if x.strip()]
+# Жёсткий режим: без подтверждения почты кабинет закрыт (по умолчанию так)
+REQUIRE_EMAIL_VERIFICATION = os.getenv(
+    "LIQSCOPE_REQUIRE_EMAIL_VERIFICATION", "1").strip().lower() not in ("0", "false", "no")
 ACCOUNTS_DB = os.getenv("LIQSCOPE_ACCOUNTS_DB",
                         os.path.join(HERE, "data", "accounts.db"))
-account_store = Store(ACCOUNTS_DB, SECRET, ADMIN_IDS)
+# Дневной дайджест: архив выпусков и время вечерней публикации (МСК).
+# LIQSCOPE_DIGEST_FILE="" — не хранить историю (страница будет пустой).
+DIGEST_FILE = os.getenv("LIQSCOPE_DIGEST_FILE",
+                        os.path.join(HERE, "data", "digests.json")).strip()
+if DIGEST_FILE.lower() in ("0", "none", "off", "false"):
+    DIGEST_FILE = ""
+DIGEST_HOUR = int(os.getenv("LIQSCOPE_DIGEST_HOUR", "22") or 22)
+DIGEST_MINUTE = int(os.getenv("LIQSCOPE_DIGEST_MIN", "0") or 0)
+DIGEST_JITTER_MIN = int(os.getenv("LIQSCOPE_DIGEST_JITTER_MIN", "10") or 10)
+DIGEST_SCHED = os.getenv("LIQSCOPE_DIGEST_SCHED", "1").strip().lower() \
+    not in ("0", "false", "no", "off")
+account_store = Store(ACCOUNTS_DB, SECRET, ADMIN_IDS, ADMIN_EMAILS)
+# Письма: SMTP из окружения; без настроек сервер работает, письма не уходят
+mailer = build_mailer(PUBLIC_URL)
 tg_bot = TelegramBot(BOT_TOKEN, account_store, PUBLIC_URL,
                      channel_url=CHANNEL_URL, channel_id=CHANNEL_ID)
+# ИИ-шапки для постов в канал: Gemini → Groq → OpenRouter (ключи из окружения).
+# Без ключей None — сводка уходит с шаблонными шапками, как раньше.
+tg_bot.ai = build_ai()
 
 KLINE_TTL = 20.0            # сек: как часто перезапрашивать историю с биржи
 # Ликвидации уходят клиенту сразу; интервал — только предохранитель от флуда
@@ -113,8 +156,39 @@ STATS_INTERVAL = float(os.getenv("LIQSCOPE_STATS_INTERVAL_MS", "2000")) / 1000.0
 #  Состояние
 # =============================================================================
 LIQUIDATIONS: Deque[dict] = deque(maxlen=HISTORY_MAX)
+# Месячная история: сырые события по дням + часовые свёртки (ликвидации,
+# CVD, объём). В памяти — только свежий хвост, всё остальное на диске.
+HIST = HistoryStore(HISTORY_FILE, ttl_hours=HISTORY_TTL_HOURS,
+                    shard_max_mb=HISTORY_SHARD_MAX_MB)
+# Сторож пампов и дампов: минутные цены всех монет Gate + сигналы.
+PUMPS = PumpScanner(keep_min=int(os.getenv("LIQSCOPE_PUMP_KEEP_MIN",
+                                         str(3 * 24 * 60)) or 3 * 24 * 60))
+PUMP_SIGNALS: Deque[dict] = deque(maxlen=300)      # последние сработавшие сигналы
+PUMP_LAST_FIRED: Dict[str, float] = {}             # "символ|режим" -> когда сообщили
+PUMP_POLL_SEC = max(10.0, float(os.getenv("LIQSCOPE_PUMP_POLL_SEC", "25") or 25))
+PUMP_OFF = os.getenv("LIQSCOPE_PUMP_OFF", "").strip() in ("1", "true", "yes", "on")
+# Заполняются из pump_scan при старте (так их видит и кабинет, и бот).
+PUMP_PERIODS: list = []
+PUMP_THRESHOLDS: list = []
+PUMP_CANDLES: list = []
+# История открытого интереса: уровень пишется каждые OI_SNAP_SEC секунд,
+# лежит на диске — после рестарта стенд в канале не пустует первые часы.
+OI_HISTORY_FILE = os.getenv("LIQSCOPE_OI_HISTORY",
+                            os.path.join(HERE, "data", "oi_history.json"))
+OI_SNAP_SEC = max(60.0, float(os.getenv("LIQSCOPE_OI_SNAP_SEC", "300")))
+# OI: история снимков тоже за месяц (снимок раз в OI_SNAP_SEC ≈ 5 минут)
+OI_KEEP_MIN = int(os.getenv("LIQSCOPE_OI_KEEP_MIN", str(MONTH_HOURS * 60)))
 CANDLES: Dict[str, dict] = {}            # "SYM|tf" -> {"candles": [...], "ts", "source"}
 MINUTE_VOL: Dict[str, Dict[int, float]] = {}   # symbol -> {minute_ts: volume}
+# Минутные потоки по всем монетам: лента «ВСЕ» (CVD/OI), сводки и сервисы.
+FLOWS = FlowFeed(keep_min=int(os.getenv("LIQSCOPE_FLOW_KEEP_MIN", "720") or 720))
+# Сколько монет потока держать в тиках, когда кто-то смотрит ленту «ВСЕ»
+FLOW_SYMBOLS_MAX = int(os.getenv("LIQSCOPE_FLOW_SYMBOLS_MAX", "12") or 0)
+# Окно ленты «ВСЕ» (минуты) и частота рассылки строк по WS
+FLOW_WINDOW_MIN = max(1, int(os.getenv("LIQSCOPE_FLOW_WINDOW_MIN", "5") or 5))
+FLOW_WS_SEC = max(1.0, float(os.getenv("LIQSCOPE_FLOW_WS_SEC", "3") or 3))
+# Как часто обновлять OI монет потока (секунды, одна биржа — Binance)
+FLOW_OI_SEC = max(10.0, float(os.getenv("LIQSCOPE_FLOW_OI_SEC", "30") or 30))
 # Живая CVD: "SYM|tf" -> {время_начала_свечи: дельта USDT (покупки-продажи)}.
 # Считается из ленты сделок (тейкер-сторона) и дополняет исторические свечи.
 CVD_ACC: Dict[str, Dict[int, float]] = {}
@@ -132,9 +206,6 @@ def _key(symbol: str, tf: int) -> str:
 # =============================================================================
 #  Дисковая история ликвидаций (JSONL): переживает рестарт сервера
 # =============================================================================
-_hist_warned = False
-
-
 def load_history_file(path: str, maxlen: int, ttl_hours: float) -> List[dict]:
     """Вернуть события из JSONL-файла (не старше TTL) в хронологическом порядке."""
     if not path or not os.path.exists(path):
@@ -163,42 +234,6 @@ def load_history_file(path: str, maxlen: int, ttl_hours: float) -> List[dict]:
     return rows
 
 
-def append_history_event(event: dict, path: str) -> None:
-    """Дописать одно событие в JSONL (append). Ошибки не роняют поток данных."""
-    global _hist_warned
-    if not path:
-        return
-    try:
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")))
-            f.write("\n")
-        _hist_warned = False
-    except OSError:
-        if not _hist_warned:
-            _hist_warned = True
-            log.warning("Не удаётся писать историю ликвидаций в %s — продолжаем без диска",
-                        path)
-
-
-def trim_history_file(path: str, maxlen: int, ttl_hours: float) -> None:
-    """Если файл разросся — переписать его свежим хвостом (последние maxlen)."""
-    if not path or not os.path.exists(path):
-        return
-    try:
-        if os.path.getsize(path) <= HISTORY_FILE_MAX_BYTES:
-            return
-        keep = load_history_file(path, maxlen, ttl_hours)
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            for ev in keep:
-                f.write(json.dumps(ev, ensure_ascii=False, separators=(",", ":")))
-                f.write("\n")
-        os.replace(tmp, path)
-    except OSError:
-        pass
-
-
 def _fmt_id() -> str:
     global _event_seq
     _event_seq += 1
@@ -216,7 +251,18 @@ class Client:
         self.tf = 5
         self.min_usd = 0.0
         self.exchange = "ALL"
+        self.feed = "liq"        # лента клиента: liq | cvd | oi
         self.alive = True
+
+    @property
+    def wants_flow(self) -> bool:
+        """Нужен ли поток по ВСЕМ монетам: лента CVD/OI в режиме «ВСЕ».
+
+        По свечам графика такая лента не строится — она про одну монету,
+        поэтому сервер шлёт минутные потоки по всем, а клиент показывает их
+        в тех же колонках.
+        """
+        return self.symbol == "ALL" and self.feed in ("cvd", "oi")
 
     @property
     def chart_symbol(self) -> str:
@@ -326,6 +372,8 @@ async def on_liquidation(ev: dict):
             event["liq"] = {k: v for k, v in ev["liquidation"].items()
                             if k in ("liquidatedUser", "markPx", "method")}
     LIQUIDATIONS.append(event)
+    BOARD.add_liq(event)          # часовой стенд для постов в канал
+    FLOWS.add_liq(event)          # минутный поток по всем монетам (лента «ВСЕ»)
     try:
         _liq_queue.put_nowait(event)
     except asyncio.QueueFull:
@@ -338,6 +386,94 @@ async def on_liquidation(ev: dict):
                         _liq_dropped)
 
 
+async def history_task() -> None:
+    """Раз в несколько минут: свёртки дня на диск и уборка старых дней.
+
+    Свёртки держат ликвидации, CVD и объём по часам, поэтому их потеря при
+    рестарте означала бы дырку в месячной истории — пишем часто.
+    """
+    while True:
+        try:
+            saved = await asyncio.to_thread(HIST.flush)
+            removed = await asyncio.to_thread(HIST.cleanup)
+            if removed:
+                log.info("История: удалено старых файлов — %d (TTL %.0f ч)",
+                         removed, HISTORY_TTL_HOURS)
+            if saved:
+                log.debug("История: свёртки дней сохранены (%d)", saved)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            log.debug("история: %s", e)
+        await asyncio.sleep(HISTORY_FLUSH_SEC)
+
+
+async def flow_oi_task() -> None:
+    """Открытый интерес монет потока «ВСЕ» (лента OI в режиме всех монет).
+
+    Берём одну биржу — так уровни сравнимы между монетами, а столбик OI в
+    ленте не пустует, пока по монете нет полного опроса по всем биржам.
+    """
+    await asyncio.sleep(8)          # дать ценам и спецификациям подтянуться
+    while True:
+        try:
+            if feed:
+                tracker = getattr(feed, "oi", None)
+                flow_syms = sorted(getattr(feed, "flow_symbols", ()) or ())
+                if tracker is not None and flow_syms:
+                    for sym in flow_syms:
+                        try:
+                            usd = await tracker.binance_usd(sym)
+                            if usd:
+                                FLOWS.add_oi(sym, time.time(), usd)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as e:  # noqa: BLE001
+                            log.debug("OI потока %s: %s", sym, e)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            log.debug("OI потока: %s", e)
+        await asyncio.sleep(FLOW_OI_SEC)
+
+
+async def oi_history_task() -> None:
+    """Каждые OI_SNAP_SEC кладём уровни OI по монетам в историю.
+
+    Источник — трекер бирж (``feed.oi``), тот же, что питает индикатор OI в
+    терминале. Монеты, которых нет в трекере, в срез не попадают: лучше
+    прочерк в стенде, чем выдуманный уровень.
+    """
+    loaded = 0
+    if OI_HISTORY_FILE:
+        try:
+            loaded = await asyncio.to_thread(OI.load, OI_HISTORY_FILE)
+        except Exception as e:  # noqa: BLE001
+            log.debug("история OI не загрузилась: %s", e)
+    if loaded:
+        log.info("История OI восстановлена: монет %d", loaded)
+    while True:
+        try:
+            tracker = getattr(feed, "oi", None) if feed else None
+            if tracker is not None:
+                symbols = set()
+                try:
+                    symbols.update(getattr(tracker, "_series", {}).keys() or [])
+                except Exception:  # noqa: BLE001
+                    pass
+                for sym in list(symbols)[:80]:
+                    try:
+                        payload = tracker.payload(sym)
+                        OI.add(sym, payload.get("total_usd"), payload.get("ts"))
+                    except Exception as e:  # noqa: BLE001
+                        log.debug("OI-срез %s: %s", sym, e)
+            if OI_HISTORY_FILE:
+                await asyncio.to_thread(OI.save, OI_HISTORY_FILE)
+        except Exception as e:  # noqa: BLE001
+            log.warning("история OI: %s", e)
+        await asyncio.sleep(OI_SNAP_SEC)
+
+
 async def liq_event_worker():
     """Один обработчик очереди ликвидаций: диск + рассылка.
 
@@ -347,9 +483,7 @@ async def liq_event_worker():
     while True:
         event = await _liq_queue.get()
         try:
-            append_history_event(event, HISTORY_FILE)
-            if len(LIQUIDATIONS) % 1000 == 0:
-                trim_history_file(HISTORY_FILE, HISTORY_MAX, HISTORY_TTL_HOURS)
+            HIST.add(event)          # дневной файл + часовая свёртка
             if BROADCAST_INTERVAL <= 0:
                 # без буферизации: событие уходит в сокеты в тот же момент
                 await send_liquidations([event])
@@ -389,9 +523,14 @@ async def on_trade(symbol: str, price: float, qty: float, ts: float,
     LAST_TICK_TS[symbol] = time.time()
     LAST_TICK_PRICE[symbol] = price
     try:
+        FLOWS.set_price(symbol, price)
         if side in ("BUY", "SELL") and price > 0 and qty > 0:
             signed = float(price) * float(qty) * (1 if side == "BUY" else -1)
-            _cvd_add(symbol, float(ts) if ts else time.time(), signed)
+            tick_ts = float(ts) if ts else time.time()
+            _cvd_add(symbol, tick_ts, signed)
+            BOARD.add_cvd(symbol, tick_ts, signed)
+            FLOWS.add_trade(symbol, tick_ts, signed)
+            HIST.add_flow(symbol, tick_ts, cvd=signed)
     except (TypeError, ValueError):
         pass
 
@@ -520,6 +659,9 @@ async def on_price(symbol: str, price: float, candle1m: Optional[dict]):
         prev = vols.get(minute, 0.0)
         delta = max(candle1m["volume"] - prev, 0.0)
         vols[minute] = candle1m["volume"]
+        if delta:
+            FLOWS.add_volume(symbol, minute, delta)
+            HIST.add_flow(symbol, minute, vol=delta)
         if len(vols) > 400:
             for old in sorted(vols)[:200]:
                 vols.pop(old, None)
@@ -527,6 +669,7 @@ async def on_price(symbol: str, price: float, candle1m: Optional[dict]):
     if time.time() - LAST_TICK_TS.get(symbol, 0.0) < 2.0:
         # тиковая цена свежее снимка kline — берём её
         price = LAST_TICK_PRICE.get(symbol, price)
+    FLOWS.set_price(symbol, price)
 
     updated = _apply_price_to_candles(symbol, price, vol_delta=delta)
     for tf, candle in updated:
@@ -680,6 +823,41 @@ def sync_hot_symbols():
     if not hot and feed.symbols:
         hot = {feed.symbols[0]}          # держим BTC тёплым для быстрого старта
     feed.set_hot_symbols(hot)
+    # Лента «ВСЕ» в CVD/OI: её монетам нужны тики сделок (CVD). Графики у
+    # этих монет не открыты, поэтому в hot_symbols они не попадают — иначе
+    # заодно вырос бы опрос OI по всем биржам.
+    want_flow = FLOW_SYMBOLS_MAX > 0 and any(c.wants_flow for c in hub.clients)
+    flow = []
+    if want_flow:
+        flow = [s for s in (feed.symbols or []) if s not in hot][:FLOW_SYMBOLS_MAX]
+    feed.set_flow_symbols(flow)
+
+
+def correlations_snapshot(window: str = "24h", metric: str = "liq") -> dict:
+    """Картина корреляций по месячной истории: часовые свёртки + ряды OI.
+
+    Данные берём из истории (history.HistoryStore) и снимков OI — за окно от
+    часа до недели, поэтому сервис видит больше, чем минутный поток в памяти.
+    """
+    from correlations import build, window_minutes
+    now = time.time()
+    minutes = window_minutes(window)
+    cells = HIST.hours_range(now - minutes * 60, now, now)
+    oi_series: Dict[str, list] = {}
+    tracker = getattr(OI, "_series", None)
+    if isinstance(tracker, dict):
+        for sym, series in list(tracker.items()):
+            try:
+                oi_series[sym] = [(t, v) for t, v in (series or [])]
+            except Exception:  # noqa: BLE001
+                continue
+    oi_flat = getattr(OI, "_flat", None)
+    if isinstance(oi_flat, dict):
+        for sym, rows in list(oi_flat.items()):
+            oi_series.setdefault(sym, list(rows or []))
+    prices = dict(feed.prices) if feed else {}
+    return build(cells, oi_series, prices, window=window, metric=metric,
+                 now=now)
 
 
 def alerts_market_snapshot() -> dict:
@@ -703,6 +881,162 @@ def alerts_market_snapshot() -> dict:
                 except Exception:
                     pass
     return {"now": now, "events": events, "cvd": cvd, "oi": oi}
+
+
+def pump_watchers() -> List[dict]:
+    """Кто следит за пампами: подписчики сервиса «Сторож монет»."""
+    out = []
+    for sub in account_store.list_service_subscribers("watchlist"):
+        cfg = pump_normalize(sub.get("config") or {})
+        if cfg.get("enabled"):
+            row = dict(sub)
+            row["pump"] = cfg
+            row["lang"] = ("en" if str(sub.get("language") or "").startswith("en")
+                           else "ru")
+            out.append(row)
+    return out
+
+
+def pump_normalize(config: Optional[dict]) -> dict:
+    from pump_scan import normalize
+    return normalize(config)
+
+
+def pump_snapshot(config: Optional[dict] = None, lang: str = "ru") -> dict:
+    """Картина для кабинета и бота: настройки, резкие движения, сигналы."""
+    from pump_scan import CANDLE_PRESETS as _CANDS, PERIODS as _PERIODS
+    from pump_scan import THRESHOLDS as _THR
+    cfg = pump_normalize(config or {})
+    now = time.time()
+    return {
+        "now": now,
+        "config": cfg,
+        "settings_text": pump_settings_text(cfg),
+        "status": {
+            "coins": PUMPS.known(),
+            "updated": PUMPS.last_update(),
+            "age_sec": (now - PUMPS.last_update()) if PUMPS.last_update() else None,
+            "poll_sec": PUMP_POLL_SEC,
+            "signals_total": len(PUMP_SIGNALS),
+            "lang": lang,
+        },
+        "movers": PUMPS.movers(cfg, limit=12),
+        "hits": PUMPS.scan(cfg)[:12],
+        "signals": list(PUMP_SIGNALS)[-30:][::-1],
+        "periods": [{"key": k, "minutes": m} for k, m in (PUMP_PERIODS or _PERIODS)],
+        "thresholds": list(PUMP_THRESHOLDS or _THR),
+        "candles": list(PUMP_CANDLES or _CANDS),
+    }
+
+
+def pump_settings_text(cfg: dict) -> str:
+    from pump_scan import format_settings_text
+    return format_settings_text(cfg)
+
+
+async def gate_ticker_snapshot() -> dict:
+    """Один запрос Gate за всеми USDT-контрактами: цены, оборот, изменение."""
+    session = getattr(feed, "_session", None) if feed else None
+    if session is None:
+        return {}
+    data = await _get_json(session, f"{GATE_REST}/tickers", timeout=15)
+    out = {"prices": {}, "volume": {}, "change24": {}}
+    for t in data or []:
+        contract = str(t.get("contract") or "")
+        if not contract.endswith("_USDT"):
+            continue
+        sym = canon(contract)
+        out["prices"][sym] = float(t.get("last") or 0)
+        out["volume"][sym] = float(t.get("volume_24h_quote")
+                                   or t.get("volume_24h_usd")
+                                   or t.get("volume_24h") or 0)
+        out["change24"][sym] = float(t.get("change_percentage") or 0)
+    return out
+
+
+async def pump_loop():
+    """Сторож монет: минутные цены всех монет Gate и сигналы в Telegram.
+
+    Один REST-запрос отдаёт все USDT-контракты сразу, поэтому следить за всем
+    рынком дешевле, чем за подписками по каждой паре. Сигнал уходит тем, кто
+    включил сервис «Сторож монет», и предлагает посмотреть монету на Gate.
+    """
+    from pump_scan import CANDLE_PRESETS as _CANDS, THRESHOLDS as _THR
+    global PUMP_CANDLES, PUMP_PERIODS, PUMP_THRESHOLDS
+    PUMP_CANDLES, PUMP_THRESHOLDS = _CANDS, _THR
+    if PUMP_OFF:
+        log.info("Сторож монет выключен (LIQSCOPE_PUMP_OFF=1)")
+        return
+    from pump_scan import PERIODS
+    PUMP_PERIODS = PERIODS
+    await asyncio.sleep(10)
+    fails = 0
+    while True:
+        try:
+            snap = await gate_ticker_snapshot()
+            if snap.get("prices"):
+                added = PUMPS.add_prices(snap["prices"], volume=snap["volume"],
+                                         change24=snap["change24"])
+                fails = 0
+                if added:
+                    log.debug("Сторож монет: %d монет, новых минуток %d",
+                              PUMPS.known(), added)
+                await pump_notify()
+            else:
+                fails += 1
+                if fails in (1, 5, 30):
+                    log.info("Сторож монет: Gate не отдал тикеры (попытка %d) — "
+                             "в демо-режиме это нормально", fails)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:  # noqa: BLE001
+            fails += 1
+            if fails in (1, 10):
+                log.warning("Сторож монет: %s", e)
+        try:
+            await asyncio.sleep(PUMP_POLL_SEC)
+        except asyncio.CancelledError:
+            break
+
+
+async def pump_notify():
+    """Разослать сигналы подписчикам: один сигнал — одна монета и режим."""
+    watchers = pump_watchers()
+    if not watchers:
+        return
+    now = time.time()
+    by_user: Dict[int, list] = {}
+    for w in watchers:
+        hits = PUMPS.scan(w["pump"])
+        if not hits:
+            continue
+        fresh = pump_filter_new(hits, PUMP_LAST_FIRED, now,
+                                w["pump"].get("cooldown_min", 10))
+        if fresh:
+            by_user[int(w["user_id"])] = fresh
+    for user_id, fresh in by_user.items():
+        for hit in fresh:
+            event = dict(hit)
+            event["ts"] = now
+            event["user_id"] = user_id
+            PUMP_SIGNALS.append(event)
+    if not by_user:
+        return
+    for w in watchers:
+        fresh = by_user.get(int(w["user_id"]))
+        if not fresh:
+            continue
+        tg_id = int(w.get("tg_id") or 0)
+        if not tg_id or not tg_bot.running:
+            continue
+        for hit in fresh[:3]:
+            lang = w.get("lang") or "ru"
+            await tg_bot.send(
+                tg_id, pump_signal_html(hit, lang),
+                markup={"inline_keyboard": [[
+                    {"text": "💠 Открыть на Gate", "url": gate_url(lang)},
+                    {"text": "🌐 Терминал", "url": PUBLIC_URL + "/terminal"},
+                ]]})
 
 
 async def alerts_oi_warmup():
@@ -876,6 +1210,66 @@ def _cvd_window(symbol: str, sec: float = 14400.0) -> Optional[float]:
     return None
 
 
+async def hour_flows(need: int = 5) -> Dict[str, dict]:
+    """Часовые потоки по монетам: {монета: {начало часа: {cvd, vol, has_cvd}}}.
+
+    Объём часа в USDT и тейкер-дельта — из часовых свечей (Binance/Bybit/OKX,
+    что отдаст feed). Это база для строки «CVD за 4ч» и для доли CVD в объёме
+    рынка по каждому часу: без свечей доля не считается, и пост остаётся с
+    ликвидациями.
+    """
+    try:
+        cells = BOARD.hours(need)
+    except Exception as e:
+        log.debug("потоки: часы не собрались: %s", e)
+        cells = []
+    volume: Dict[str, float] = {}
+    for hr in cells:
+        for sym, usd in (hr.get("coins") or {}).items():
+            volume[sym] = volume.get(sym, 0.0) + float(usd)
+    coins = [s for s, _v in sorted(volume.items(), key=lambda kv: kv[1],
+                                   reverse=True)[:16]]
+    if not coins:
+        return {}
+    sem = asyncio.Semaphore(5)
+
+    async def one(sym: str):
+        async with sem:
+            try:
+                entry = await asyncio.wait_for(get_candles(sym, 60), timeout=20)
+            except Exception as e:
+                log.debug("потоки %s: %s", sym, e)
+                return sym, None
+            return sym, entry
+
+    out: Dict[str, dict] = {}
+    for sym, entry in await asyncio.gather(*(one(s) for s in coins)):
+        rows = (entry or {}).get("candles") or []
+        by_hour: Dict[int, dict] = {}
+        for c in rows[-8:]:
+            try:
+                h = int(float(c.get("time") or 0))
+            except (TypeError, ValueError):
+                continue
+            if not h:
+                continue
+            cell = by_hour.setdefault(h, {"cvd": 0.0, "vol": 0.0,
+                                          "has_cvd": False})
+            try:
+                cell["vol"] += float(c.get("volume") or 0)
+            except (TypeError, ValueError):
+                pass
+            if c.get("cvd") is not None:
+                try:
+                    cell["cvd"] += float(c["cvd"])
+                except (TypeError, ValueError):
+                    continue
+                cell["has_cvd"] = True
+        if by_hour:
+            out[sym] = by_hour
+    return out
+
+
 async def build_channel_digest() -> dict:
     """Снимок рынка за 4ч для поста в канал: лидеры, биржи, OI, CVD."""
     from channel_digest import collect_digest
@@ -885,7 +1279,9 @@ async def build_channel_digest() -> dict:
     oi: Dict[str, dict] = {}
     cvd: Dict[str, float] = {}
     tracker = getattr(feed, "oi", None) if feed else None
-    for c in (preview.get("top_coins") or [])[:4]:
+    # шесть монет: в компактной сводке таблица «Монеты» — пять строк,
+    # и каждая должна получить свою метрику (OI или CVD)
+    for c in (preview.get("top_coins") or [])[:6]:
         sym = c.get("symbol")
         if not sym:
             continue
@@ -899,12 +1295,84 @@ async def build_channel_digest() -> dict:
             oi[sym] = tracker.payload(sym)
         except Exception as e:
             log.debug("digest oi %s: %s", sym, e)
-    return collect_digest(events, now=now, oi=oi, cvd=cvd)
+    snap = collect_digest(events, now=now, oi=oi, cvd=cvd)
+    # Часовой стенд (ликвы по календарным часам, перекос CVD, OI за каждый час)
+    # считается по накопленной истории: в посте он идёт сразу после шапки.
+    try:
+        flows = await hour_flows()
+        snap["board"] = build_snapshot(BOARD, OI, now=now, flows=flows)
+    except Exception as e:
+        log.warning("стенд для поста не собрался: %s", e)
+    return snap
+
+
+async def oi_payload(symbol: str) -> Optional[dict]:
+    """Снимок открытого интереса по монете (для дайджеста и кабинета)."""
+    tracker = getattr(feed, "oi", None) if feed else None
+    if tracker is None:
+        return None
+    try:
+        await tracker.ensure_symbol(symbol)
+    except Exception as e:
+        log.debug("oi %s: %s", symbol, e)
+        return None
+    try:
+        return tracker.payload(symbol)
+    except Exception as e:
+        log.debug("oi payload %s: %s", symbol, e)
+        return None
+
+
+async def digest_ai(facts: dict, lang: str = "ru") -> Optional[str]:
+    """Рассказ для дневного дайджеста: ИИ, если ключи есть."""
+    ai = getattr(tg_bot, "ai", None)
+    if ai is None or not getattr(ai, "enabled", False):
+        return None
+    try:
+        return await ai.narrative(facts, lang)
+    except Exception as e:
+        log.warning("ИИ-дайджест (%s): %s", lang, e)
+        return None
 
 
 # =============================================================================
 #  Фоновые рассылки
 # =============================================================================
+def flow_snapshot(now: Optional[float] = None, limit: int = 60) -> dict:
+    """Строки ленты «ВСЕ»: CVD, OI и ликвидации по всем монетам за окно."""
+    now = float(now if now is not None else time.time())
+    return {
+        "type": "flow_all",
+        "window_min": FLOW_WINDOW_MIN,
+        "ts": now,
+        "cvd": FLOWS.rows("cvd", FLOW_WINDOW_MIN, now, limit=limit),
+        "oi": FLOWS.rows("oi", FLOW_WINDOW_MIN, now, limit=limit),
+        "liq": FLOWS.rows("liq", FLOW_WINDOW_MIN, now, limit=limit),
+        "summary": FLOWS.summary(60, now),
+    }
+
+
+async def flow_broadcaster():
+    """Рассылка минутных потоков тем, у кого лента CVD/OI в режиме «ВСЕ».
+
+    Пока таких клиентов нет, ничего не считаем: строки собираются по запросу.
+    """
+    while True:
+        try:
+            await asyncio.sleep(FLOW_WS_SEC)
+            async with hub._lock:
+                clients = [c for c in hub.clients if c.wants_flow]
+            if not clients:
+                continue
+            payload = flow_snapshot()
+            for c in clients:
+                await c.send(payload)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            log.debug("flow broadcaster: %s", e)
+
+
 async def liquidation_broadcaster():
     """Работает только если включена буферизация (LIQSCOPE_LIQ_FLUSH_MS > 0)."""
     if BROADCAST_INTERVAL <= 0:
@@ -1001,6 +1469,72 @@ async def demo_generator():
 
 
 # Ориентировочные цены только для демо-режима (когда биржи недоступны)
+def demo_pump_seed(minutes: int = 20) -> None:
+    """Демо-история сторожа: минутки по всем монетам, чтобы панель была живой.
+
+    Без сети Gate тикеры не приходят, и «Сторож монет» показывал бы пустую
+    панель. Наполняем минутную историю случайным ходом, а паре монет даём
+    заметный памп и дамп — как это выглядит на живом рынке.
+    """
+    syms = list((feed.symbols if feed else []) or list(DEMO_SEED_PRICES))[:120]
+    if not syms:
+        syms = list(DEMO_SEED_PRICES)
+    now = time.time()
+    minute = int(now // 60) * 60
+    up_sym = random.choice(syms)
+    others = [x for x in syms if x != up_sym] or syms
+    down_sym = random.choice(others)
+    for sym in syms:
+        base = feed.prices.get(sym) if feed else None
+        base = base or DEMO_SEED_PRICES.get(sym) or random.uniform(1, 100)
+        DEMO_PUMP_VOL[sym] = random.uniform(4e5, 6e7)
+        price = base
+        series = []
+        for i in range(minutes - 1, -1, -1):
+            price = max(price * (1 + random.gauss(0.0, 0.004)), 1e-12)
+            series.append((minute - 60 * i, price))
+        kind = 0.32 if sym == up_sym else (-0.28 if sym == down_sym else 0.0)
+        if kind:
+            tail = 6
+            for j in range(tail):
+                idx = len(series) - tail + j
+                ts, p = series[idx]
+                series[idx] = (ts, max(p * (1 + kind * (j + 1) / tail), 1e-12))
+        for ts, p in series:
+            PUMPS.add_prices({sym: p}, ts=ts)
+        last = series[-1][1]
+        PUMPS.add_prices({sym: last}, ts=now, volume={sym: DEMO_PUMP_VOL[sym]},
+                         change24={sym: round((last / series[0][1] - 1) * 100, 2)})
+
+
+async def demo_pump_walk():
+    """Демо-цены сторожа: живые минутки всех монет и редкие всплески."""
+    await asyncio.sleep(2.0)
+    while True:
+        try:
+            await asyncio.sleep(5.0)
+            now = time.time()
+            syms = list((feed.symbols if feed else []) or list(DEMO_SEED_PRICES))[:120]
+            prices = {}
+            for sym in syms:
+                p = (PUMPS.price_now(sym) or DEMO_SEED_PRICES.get(sym)
+                     or random.uniform(1, 100))
+                if random.random() < 0.01:
+                    p *= random.choice((1.10, 1.22, 0.90, 0.78))
+                else:
+                    p *= 1 + random.gauss(0, 0.0025)
+                prices[sym] = max(p, 1e-12)
+                if feed and sym in feed.prices:
+                    feed.prices[sym] = prices[sym]
+            PUMPS.add_prices(prices, ts=now, volume=DEMO_PUMP_VOL)
+            if PUMPS.known():
+                await pump_notify()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:  # noqa: BLE001
+            log.debug("demo pumps: %s", e)
+
+
 DEMO_SEED_PRICES = {
     "BTC_USDT": 96000.0, "ETH_USDT": 3300.0, "SOL_USDT": 190.0, "XRP_USDT": 2.3,
     "DOGE_USDT": 0.32, "BNB_USDT": 690.0, "ADA_USDT": 0.95, "AVAX_USDT": 38.0,
@@ -1021,9 +1555,14 @@ async def demo_tick_walk():
     while True:
         try:
             await asyncio.sleep(0.05)
-            if not feed or not feed.hot_symbols:
+            if not feed:
                 continue
-            for symbol in list(feed.hot_symbols):
+            # монеты потока «ВСЕ» тоже ходят демо-тиками: без бирж CVD-лента
+            # в режиме всех монет иначе осталась бы пустой
+            walk = set(feed.hot_symbols) | set(feed.flow_symbols)
+            if not walk:
+                continue
+            for symbol in list(walk):
                 p = feed.prices.get(symbol) or DEMO_SEED_PRICES.get(symbol) or 100.0
                 p = max(p * (1 + random.gauss(0, 0.00025)), 1e-12)
                 feed.prices[symbol] = p
@@ -1033,6 +1572,37 @@ async def demo_tick_walk():
             break
         except Exception as e:
             log.debug("demo ticks: %s", e)
+
+
+async def demo_flow_walk():
+    """Демо-наполнение потока «ВСЕ»: объём и OI по монетам без бирж.
+
+    Нужен только для демо-режима: там тики синтетические, и лента CVD/OI в
+    режиме всех монет иначе показывала бы перекос, но пустой объём и OI.
+    """
+    levels: Dict[str, float] = {}
+    while True:
+        try:
+            await asyncio.sleep(1.0)
+            if not feed:
+                continue
+            syms = (set(feed.flow_symbols) | set(feed.hot_symbols)
+                    or set(feed.symbols[:FLOW_SYMBOLS_MAX or 12]))
+            now = time.time()
+            for symbol in list(syms)[:24]:
+                base = levels.get(symbol)
+                if base is None:
+                    base = levels[symbol] = random.uniform(2e7, 4e9)
+                base = max(base * (1 + random.gauss(0, 0.0015)), 1e6)
+                levels[symbol] = base
+                FLOWS.add_oi(symbol, now, base)
+                vol = random.uniform(5e4, 9e5)
+                FLOWS.add_volume(symbol, now, vol)
+                HIST.add_flow(symbol, now, vol=vol)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            log.debug("demo flow: %s", e)
 
 
 async def demo_price_walk():
@@ -1082,14 +1652,35 @@ async def lifespan(app: FastAPI):
     # чтобы первый клиент сразу увидел вчерашние ликвидации
     if HISTORY_FILE:
         try:
+            # сначала читаем дневные шарды (месяц), затем одиночный файл
+            # прежних версий — иначе после обновления история обрывалась бы
             loaded = await asyncio.to_thread(
+                HIST.query, time.time() - HISTORY_TTL_HOURS * 3600, None,
+                None, 0.0, HISTORY_MAX, False)
+            legacy = await asyncio.to_thread(
                 load_history_file, HISTORY_FILE, HISTORY_MAX, HISTORY_TTL_HOURS)
+            seen = {e.get("id") for e in loaded}
+            loaded.extend(e for e in legacy if e.get("id") not in seen)
+            loaded.sort(key=lambda e: float(e.get("timestamp") or 0))
+            loaded = loaded[-HISTORY_MAX:]
+            # Старый одиночный файл больше не пишем: события из него переезжают
+            # в дневные шарды вместе с часовыми свёртками, файл убираем.
+            moved = await asyncio.to_thread(HIST.import_legacy, seen)
+            if moved:
+                log.info("История: перенесено в дневные файлы — %d событий", moved)
+            await asyncio.to_thread(HIST.cleanup)
             for ev in loaded:
                 LIQUIDATIONS.append(ev)
+                BOARD.add_liq(ev)
             if loaded:
                 log.info("История ликвидаций восстановлена с диска: %d событий", len(loaded))
         except Exception as e:
             log.warning("Не удалось загрузить историю с диска: %s", e)
+
+    # Хранить историю надо за месяц — и OI-снимки, и часовые ячейки стенда
+    # (стенд кормит посты и дайджест, ему нужен весь день, а не 12 часов).
+    OI.keep = OI_KEEP_MIN * 60
+    BOARD.keep_hours = max(BOARD.keep_hours, int(HISTORY_TTL_HOURS))
 
     global feed
     feed = MarketFeed(on_liquidation=on_liquidation,
@@ -1103,17 +1694,33 @@ async def lifespan(app: FastAPI):
 
     tasks = [
         asyncio.create_task(liq_event_worker(), name="liq-worker"),
+        asyncio.create_task(oi_history_task(), name="oi-history"),
         asyncio.create_task(liquidation_broadcaster(), name="liq-broadcast"),
+        asyncio.create_task(flow_broadcaster(), name="flow-broadcast"),
+        asyncio.create_task(flow_oi_task(), name="flow-oi"),
+        asyncio.create_task(history_task(), name="history"),
+        asyncio.create_task(pump_loop(), name="pumps"),
         asyncio.create_task(price_broadcaster(), name="price-broadcast"),
         asyncio.create_task(stats_broadcaster(), name="stats-broadcast"),
         asyncio.create_task(kline_refresher(), name="kline-refresh"),
         asyncio.create_task(hot_symbols_watcher(), name="hot-symbols"),
         asyncio.create_task(alert_loop(), name="alerts"),
     ]
+    # Дневной дайджест: вечерний выпуск в оба канала и в архив на сайте
+    digest_sched = DigestScheduler(hour=DIGEST_HOUR, minute=DIGEST_MINUTE,
+                                   jitter_min=DIGEST_JITTER_MIN,
+                                   enabled=DIGEST_SCHED)
+    app.state.digest_scheduler = digest_sched
+    tasks.append(asyncio.create_task(api_digest.scheduler_loop(digest_sched),
+                                     name="digest"))
     if DEMO_MODE:
         tasks.append(asyncio.create_task(demo_generator(), name="demo"))
         tasks.append(asyncio.create_task(demo_price_walk(), name="demo-prices"))
         tasks.append(asyncio.create_task(demo_tick_walk(), name="demo-ticks"))
+        tasks.append(asyncio.create_task(demo_flow_walk(), name="demo-flow"))
+        # сторож монет в демо: минутная история всех монет и редкие всплески
+        demo_pump_seed()
+        tasks.append(asyncio.create_task(demo_pump_walk(), name="demo-pumps"))
 
     # прогреваем свечи популярных монет, чтобы первый клиент увидел график сразу
     async def warmup():
@@ -1131,6 +1738,8 @@ async def lifespan(app: FastAPI):
     tg_bot.ws_clients_fn = lambda: len(hub.clients)
     tg_bot.digest_fn = build_channel_digest
     tg_bot.alerts_market_fn = alerts_market_snapshot
+    tg_bot.correlations_fn = correlations_snapshot
+    tg_bot.pump_snapshot_fn = pump_snapshot
     tg_bot.public_url = PUBLIC_URL
     await tg_bot.start()
 
@@ -1139,6 +1748,10 @@ async def lifespan(app: FastAPI):
     finally:
         for t in tasks:
             t.cancel()
+        try:
+            await asyncio.to_thread(HIST.flush, True)
+        except Exception:  # noqa: BLE001
+            pass
         await tg_bot.stop()
         await feed.stop()
 
@@ -1160,13 +1773,78 @@ account_ctx.public_url = PUBLIC_URL
 account_ctx.secret = SECRET
 account_ctx.cookie_secure = os.getenv("LIQSCOPE_COOKIE_SECURE", "").strip() in ("1", "true", "yes")
 account_ctx.dev_login = os.getenv("LIQSCOPE_DEV_LOGIN", "").strip() in ("1", "true", "yes")
+account_ctx.mailer = mailer
+# Бот подтверждает почту теми же письмами, что и сайт
+tg_bot.mailer = mailer
+account_ctx.require_email_verification = REQUIRE_EMAIL_VERIFICATION
 account_ctx.health_fn = health_summary
 account_ctx.stats_fn = compute_stats
 account_ctx.liqs_fn = lambda: list(LIQUIDATIONS)[-8:]
 account_ctx.ws_clients_fn = lambda: len(hub.clients)
 account_ctx.alerts_market_fn = alerts_market_snapshot
+account_ctx.correlations_fn = correlations_snapshot
+account_ctx.pump_snapshot_fn = pump_snapshot
 account_ctx.symbols_fn = lambda: list((feed.symbols if feed else [])[:40])
 register_account_routes(app)
+
+# Настройки вечернего выпуска: значения из окружения замораживаем, остальные
+# (час, минуты, разброс, авто-публикация) админ сайта может менять на лету.
+DIGEST_ENV = {
+    "hour": ("LIQSCOPE_DIGEST_HOUR", DIGEST_HOUR),
+    "minute": ("LIQSCOPE_DIGEST_MIN", DIGEST_MINUTE),
+    "jitter_min": ("LIQSCOPE_DIGEST_JITTER_MIN", DIGEST_JITTER_MIN),
+}
+digest_ctx.env_locked = {k: name for k, (name, _v) in DIGEST_ENV.items()
+                         if os.getenv(name) not in (None, "")}
+if os.getenv("LIQSCOPE_DIGEST_SCHED") not in (None, ""):
+    digest_ctx.env_locked["enabled"] = "LIQSCOPE_DIGEST_SCHED"
+
+
+def digest_settings() -> dict:
+    """Настройки планировщика: где молчит окружение — берём из базы (сайт)."""
+    out: dict = {}
+    for key, (_env_name, default) in DIGEST_ENV.items():
+        if key in digest_ctx.env_locked:
+            out[key] = default
+            continue
+        raw = account_store.get_setting(f"digest_{key}", "")
+        try:
+            out[key] = int(float(raw)) if str(raw).strip() != "" else default
+        except (TypeError, ValueError):
+            out[key] = default
+    if "enabled" in digest_ctx.env_locked:
+        out["enabled"] = DIGEST_SCHED
+    else:
+        raw = str(account_store.get_setting("digest_enabled", "") or "").strip().lower()
+        out["enabled"] = DIGEST_SCHED if not raw else raw not in ("0", "false", "no", "off")
+    return out
+
+
+digest_ctx.settings_fn = digest_settings
+digest_ctx.set_setting_fn = (
+    lambda key, val, actor=None:
+    account_store.set_setting(str(key), str(val), actor_id=actor))
+
+# Дневной дайджест: архив выпусков, данные с сервера и публикация через бота
+digest_ctx.store = DigestStore(DIGEST_FILE)
+digest_ctx.liqs_fn = lambda: list(LIQUIDATIONS)
+digest_ctx.symbols_fn = lambda: list(feed.symbols if feed else [])
+digest_ctx.candles_fn = get_candles
+digest_ctx.oi_fn = oi_payload
+digest_ctx.ai_fn = digest_ai
+digest_ctx.publish_fn = tg_bot.publish_daily_digest
+digest_ctx.public_url = PUBLIC_URL
+register_digest_routes(app)
+# Кнопка «🗞 Дайджест за сутки» в админке бота собирает выпуск прямо сейчас
+tg_bot.daily_run_fn = api_digest.publish_digest
+
+# Админка бота на сайте: каналы, публикация постов, контроль, здоровье бирж
+web_bot_admin.ctx.bot = tg_bot
+web_bot_admin.ctx.store = account_store
+web_bot_admin.ctx.health_fn = health_summary
+web_bot_admin.ctx.ws_clients_fn = lambda: len(hub.clients)
+web_bot_admin.ctx.public_url = PUBLIC_URL
+register_bot_admin_routes(app)
 
 
 @app.get("/api/symbols")
@@ -1309,6 +1987,42 @@ def _demo_oi_payload(symbol: str) -> dict:
             "ts": time.time(), "stale_sec": 0.0}
 
 
+def _fnum(v, default: float = 0.0) -> float:
+    """Число из чего угодно: история может отдать None, строку или NaN."""
+    try:
+        n = float(v)
+    except (TypeError, ValueError):
+        return default
+    return n if n == n else default
+
+
+def aggregate_hour_cell(h: float, cell: dict, symbol: Optional[str] = None) -> dict:
+    """Часовой итог по одной монете или по всему рынку (для /api/history)."""
+    syms = cell.get("sym") or {}
+    if symbol:
+        val = syms.get(symbol) or {}
+        return {
+            "h": int(h), "usd": round(_fnum(val.get("usd")), 2),
+            "count": int(_fnum(val.get("n"))),
+            "long_usd": round(_fnum(val.get("long")), 2),
+            "short_usd": round(_fnum(val.get("short")), 2),
+            "cvd": round(_fnum(val.get("cvd")), 2),
+            "vol": round(_fnum(val.get("vol")), 2),
+            "by_symbol": {}, "by_exchange": {},
+        }
+    return {
+        "h": int(h), "usd": round(_fnum(cell.get("liq_usd")), 2),
+        "count": int(_fnum(cell.get("liq_count"))),
+        "long_usd": round(_fnum(cell.get("liq_long")), 2),
+        "short_usd": round(_fnum(cell.get("liq_short")), 2),
+        "cvd": round(_fnum(cell.get("cvd")), 2),
+        "vol": round(_fnum(cell.get("vol")), 2),
+        "max_symbol": cell.get("max_symbol") or "",
+        "by_symbol": cell.get("sym") or {},
+        "by_exchange": cell.get("exch") or {},
+    }
+
+
 @app.get("/api/liquidations")
 async def api_liquidations(symbol: Optional[str] = None,
                            exchange: Optional[str] = None,
@@ -1323,6 +2037,54 @@ async def api_liquidations(symbol: Optional[str] = None,
     if min_usd > 0:
         res = [x for x in res if x["usd"] >= min_usd]
     return {"liquidations": res[-min(limit, 2000):], "total": len(res)}
+
+
+@app.get("/api/history")
+async def api_history(since: Optional[float] = None, until: Optional[float] = None,
+                      hours: float = 0.0, symbol: Optional[str] = None,
+                      min_usd: float = 0.0, limit: int = 2000,
+                      bucket: str = "raw", step_hours: int = 1):
+    """История рынка за месяц: сырые ликвидации или часовые/дневные свёртки.
+
+    bucket=raw    — события (для списков и модалок);
+    bucket=hour   — часовые итоги (ликвидации, CVD, объём, биржи, монеты);
+    bucket=day    — то же по суткам (месячные графики);
+    bucket=series — ряды по часам для графиков на сайте.
+    """
+    now = time.time()
+    until = float(until) if until else now
+    if since:
+        start = float(since)
+    elif hours:
+        start = until - float(hours) * 3600
+    else:
+        start = until - 24 * 3600
+    start = max(start, until - HISTORY_TTL_HOURS * 3600)
+    sym = canon(symbol) if symbol and symbol != "ALL" else None
+    bucket = (bucket or "raw").strip().lower()
+    if bucket == "hour":
+        cells = await asyncio.to_thread(HIST.hours_range, start, until)
+        rows = []
+        for h, cell in cells:
+            agg = aggregate_hour_cell(h, cell, sym)
+            if agg["count"] or agg["vol"] or agg["cvd"]:
+                rows.append(agg)
+        return {"bucket": "hour", "since": start, "until": until,
+                "ttl_hours": HISTORY_TTL_HOURS, "hours": rows}
+    if bucket == "day":
+        rows = await asyncio.to_thread(HIST.days, start, until, sym)
+        return {"bucket": "day", "since": start, "until": until,
+                "ttl_hours": HISTORY_TTL_HOURS, "days": rows}
+    if bucket == "series":
+        data = await asyncio.to_thread(HIST.series, start, until, None,
+                                       int(step_hours or 1))
+        return {"bucket": "series", "since": start, "until": until,
+                "ttl_hours": HISTORY_TTL_HOURS, **data}
+    rows = await asyncio.to_thread(HIST.query, start, until, sym, float(min_usd),
+                                   int(limit))
+    return {"bucket": "raw", "since": start, "until": until,
+            "ttl_hours": HISTORY_TTL_HOURS, "total": len(rows),
+            "liquidations": rows}
 
 
 @app.get("/api/stats")
@@ -1346,6 +2108,8 @@ async def api_health():
             "history_max": HISTORY_MAX,
             "history_persist": bool(HISTORY_FILE),
             "history_ttl_hours": HISTORY_TTL_HOURS,
+            "history": HIST.stats(),
+            "oi_history_keep_min": OI_KEEP_MIN,
         },
     }
     data.update(feed.health() if feed else {"sources": {}})
@@ -1396,6 +2160,10 @@ async def ws_endpoint(websocket: WebSocket):
             "health": health_summary(),
             "recent_liquidations": list(LIQUIDATIONS)[-200:],
             "stats": compute_stats(),
+            # Лента «ВСЕ» в CVD/OI строится не по свечам графика, а по
+            # минутным потокам всех монет — отдаём их сразу, чтобы не ждать
+            # первой рассылки.
+            "flow": flow_snapshot(),
         })
         while True:
             raw = await websocket.receive_json()
@@ -1417,6 +2185,9 @@ async def ws_endpoint(websocket: WebSocket):
                         pass
                 if raw.get("exchange"):
                     client.exchange = str(raw["exchange"])
+                feed_tab = str(raw.get("feed") or "").strip().lower()
+                if feed_tab in ("liq", "cvd", "oi"):
+                    client.feed = feed_tab
                 sync_hot_symbols()
                 entry = await get_candles(client.chart_symbol, client.tf)
                 await client.send({
@@ -1426,6 +2197,16 @@ async def ws_endpoint(websocket: WebSocket):
                     "source": entry["source"],
                     "candles": entry["candles"],
                 })
+            elif action == "feed":
+                # переключение ленты в терминале: «ВСЕ» + CVD/OI → клиент ждёт
+                # поток по всем монетам, поэтому сразу отдаём срез, не дожидаясь
+                # следующего тика рассылки
+                feed_tab = str(raw.get("feed") or "").strip().lower()
+                if feed_tab in ("liq", "cvd", "oi"):
+                    client.feed = feed_tab
+                sync_hot_symbols()
+                if client.wants_flow:
+                    await client.send(flow_snapshot())
             elif action == "ping":
                 await client.send({"type": "pong", "t": time.time()})
     except WebSocketDisconnect:

@@ -1910,6 +1910,27 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
 }
 .pane-draw.armed.erase { cursor: not-allowed; }
 
+/* Автоследование графика: включено — синий акцент, пауза (отлистали
+   в историю) — янтарный, чтобы это не выглядело как «кнопка не работает» */
+.profile-toggle.follow-toggle.active {
+    border-color: var(--color-blue);
+    color: var(--color-blue);
+}
+.profile-toggle.follow-toggle.paused {
+    border-color: var(--color-gold);
+    color: var(--color-gold);
+    border-style: dashed;
+}
+/* Пояснение в окне строки потока «ВСЕ»: строка — минутки монеты, не свеча */
+.flow-note {
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px dashed #2a3350;
+    color: var(--text-muted);
+    font-size: 0.82rem;
+    line-height: 1.35;
+}
+
 .layer-pop-sep {
     width: 1px;
     align-self: stretch;

@@ -93,6 +93,28 @@ async function main() {
             recent_liquidations: liqs,
             exchanges: ["BINANCE", "BYBIT", "GATE"],
             stats: {},
+            // поток по всем монетам: в режиме «ВСЕ» лента CVD/OI живёт им,
+            // а не свечами графика (см. tests/feed_flow_all.js)
+            flow: {
+              type: "flow_all", window_min: 5, ts: NOW,
+              cvd: [
+                { symbol: "ETH_USDT", ts: NOW, window_min: 5, cvd: -840000,
+                  cvd_share: -38.5, vol: 2180000, liq_long: 0, liq_short: 0,
+                  liq_count: 0, oi_delta: -1200000, oi_usd: 3e9, price: 2500 },
+                { symbol: "BTC_USDT", ts: NOW, window_min: 5, cvd: 520000,
+                  cvd_share: 11.0, vol: 4700000, liq_long: 0, liq_short: 0,
+                  liq_count: 0, oi_delta: 900000, oi_usd: 1.1e10, price: 50050 },
+              ],
+              oi: [
+                { symbol: "ETH_USDT", ts: NOW, window_min: 5, cvd: -840000,
+                  cvd_share: -38.5, vol: 2180000, liq_long: 0, liq_short: 0,
+                  liq_count: 0, oi_delta: -1200000, oi_usd: 3e9, price: 2500 },
+                { symbol: "BTC_USDT", ts: NOW, window_min: 5, cvd: 520000,
+                  cvd_share: 11.0, vol: 4700000, liq_long: 0, liq_short: 0,
+                  liq_count: 0, oi_delta: 900000, oi_usd: 1.1e10, price: 50050 },
+              ],
+              liq: [], summary: { window_min: 60 },
+            },
           };
           if (sock.onopen) sock.onopen();
           if (sock.onmessage) sock.onmessage({ data: JSON.stringify(init) });
@@ -163,12 +185,15 @@ async function main() {
   check("title back to all-coins mode", /все монеты|all coins/i.test(title.textContent),
         title.textContent);
 
-  // --- то же из лент CVD и OI: там строки про монету графика (сейчас ETH) ---
+  // --- то же из лент CVD и OI ---
+  // В режиме «ВСЕ» обе ленты идут потоком по всем монетам: строки — минутки
+  // разных монет, а не свечи графика. Клик по монете сужает ленту до неё.
   tab("cvd");
   await sleep(300);
   const cvdCoins = coinTexts();
-  check("cvd feed is about the chart coin",
-        cvdCoins.length > 0 && cvdCoins.every((t) => t === "ETH/USDT"), cvdCoins.join(","));
+  check("cvd feed in all-coins mode lists flow coins",
+        cvdCoins.indexOf("ETH/USDT") !== -1 && cvdCoins.indexOf("BTC/USDT") !== -1,
+        cvdCoins.join(","));
   check("clicked ETH in cvd feed", clickCoin("ETH"));
   await sleep(400);
   check("cvd click filters feed", !chip.classList.contains("hidden") &&
@@ -184,17 +209,21 @@ async function main() {
   await sleep(300);
   tab("oi");
   await sleep(300);
-  // в колонке «OI Δ» — изменение за свечу (oiChg), а не уровень интереса:
-  // раньше сюда попадал уровень (миллиарды), и все строки были «▲»
+  const oiCoins = coinTexts();
+  check("oi feed in all-coins mode lists flow coins",
+        oiCoins.indexOf("ETH/USDT") !== -1 && oiCoins.indexOf("BTC/USDT") !== -1,
+        oiCoins.join(","));
+  check("clicked ETH in oi feed", clickCoin("ETH"));
+  await sleep(400);
+  check("oi click filters feed", !chip.classList.contains("hidden") &&
+        chip.textContent.indexOf("ETH/USDT") === 0, chip.textContent);
+  // по выбранной монете строки снова по свечам графика: в колонке «OI Δ» —
+  // изменение за свечу (oiChg), а не уровень интереса (иначе все строки «▲»)
   const oiRow = doc.querySelector("#feed-table tbody tr");
   const oiRowText = oiRow ? oiRow.textContent : "";
   check("oi feed shows the change, not the level",
         /1\D?200\D?000/.test(oiRowText) && oiRowText.indexOf("525") === -1,
         oiRowText);
-  check("clicked ETH in oi feed", clickCoin("ETH"));
-  await sleep(400);
-  check("oi click filters feed", !chip.classList.contains("hidden") &&
-        chip.textContent.indexOf("ETH/USDT") === 0, chip.textContent);
   tab("liq");
   await sleep(300);
   check("liq feed still ETH only after oi click",

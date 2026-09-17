@@ -1279,6 +1279,10 @@ class MarketFeed:
         # «Горячие» монеты — те, чей график сейчас открыт у клиентов.
         # По ним идёт потиковый поток сделок (aggTrade / publicTrade).
         self.hot_symbols: set = set()
+        # Монеты потока «ВСЕ»: их тики нужны ленте CVD/OI, хотя график открыт
+        # по другой монете. Держим отдельно от hot_symbols — тот ещё и гоняет
+        # опрос OI по всем биржам, а для потока хватает тиков сделок.
+        self.flow_symbols: set = set()
         self.tick_subscriptions: set = set()
         # Порядок источников тиков; можно задать через LIQSCOPE_TICK_SOURCE,
         # если известно, что какая-то биржа на этом сервере молчит.
@@ -3613,6 +3617,21 @@ class MarketFeed:
                      ", ".join(sorted(new)) if new else "нет")
 
 
+    def set_flow_symbols(self, symbols: Iterable[str]):
+        """Монеты, по которым нужен CVD в ленте «ВСЕ» (тики сделок)."""
+        new = {canon(s) for s in (symbols or []) if s}
+        if new != self.flow_symbols:
+            self.flow_symbols = new
+            self._hot_version += 1
+            self._hot_changed.set()
+            log.info("[ticks] поток «ВСЕ»: %d монет (%s)", len(new),
+                     ", ".join(sorted(new)[:6]) or "нет")
+
+    @property
+    def tick_symbols(self) -> set:
+        """Кого слушаем по сделкам: открытые графики + поток «ВСЕ»."""
+        return set(self.hot_symbols) | set(self.flow_symbols)
+
     async def _oi_engine(self):
         """Живой опрос OI всех 7 бирж по тёплым символам (график/статистика).
 
@@ -3736,7 +3755,7 @@ class MarketFeed:
     async def _binance_trade_combined(self) -> str:
         """aggTrade через combined-стрим; при смене монет — переподключение."""
         st = self.status["ticks"]
-        syms = sorted(to_binance(x).lower() for x in self.hot_symbols)
+        syms = sorted(to_binance(x).lower() for x in self.tick_symbols)
         if not syms:
             # графиков нет — ждём появления, соединение не держим
             self._hot_changed.clear()

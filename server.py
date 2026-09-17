@@ -52,6 +52,7 @@ from timeframes import parse_tf
 from oi_feed import map_candles_to_oi
 from hour_board import BOARD, OI, build_snapshot
 from accounts import Store
+from flow_feed import FlowFeed
 from mailer import build_mailer
 from ai_text import build_ai
 import api_digest
@@ -152,6 +153,15 @@ OI_SNAP_SEC = max(60.0, float(os.getenv("LIQSCOPE_OI_SNAP_SEC", "300")))
 OI_KEEP_MIN = int(os.getenv("LIQSCOPE_OI_KEEP_MIN", "360"))
 CANDLES: Dict[str, dict] = {}            # "SYM|tf" -> {"candles": [...], "ts", "source"}
 MINUTE_VOL: Dict[str, Dict[int, float]] = {}   # symbol -> {minute_ts: volume}
+# Минутные потоки по всем монетам: лента «ВСЕ» (CVD/OI), сводки и сервисы.
+FLOWS = FlowFeed(keep_min=int(os.getenv("LIQSCOPE_FLOW_KEEP_MIN", "180") or 180))
+# Сколько монет потока держать в тиках, когда кто-то смотрит ленту «ВСЕ»
+FLOW_SYMBOLS_MAX = int(os.getenv("LIQSCOPE_FLOW_SYMBOLS_MAX", "12") or 0)
+# Окно ленты «ВСЕ» (минуты) и частота рассылки строк по WS
+FLOW_WINDOW_MIN = max(1, int(os.getenv("LIQSCOPE_FLOW_WINDOW_MIN", "5") or 5))
+FLOW_WS_SEC = max(1.0, float(os.getenv("LIQSCOPE_FLOW_WS_SEC", "3") or 3))
+# Как часто обновлять OI монет потока (секунды, одна биржа — Binance)
+FLOW_OI_SEC = max(10.0, float(os.getenv("LIQSCOPE_FLOW_OI_SEC", "30") or 30))
 # Живая CVD: "SYM|tf" -> {время_начала_свечи: дельта USDT (покупки-продажи)}.
 # Считается из ленты сделок (тейкер-сторона) и дополняет исторические свечи.
 CVD_ACC: Dict[str, Dict[int, float]] = {}
@@ -253,7 +263,18 @@ class Client:
         self.tf = 5
         self.min_usd = 0.0
         self.exchange = "ALL"
+        self.feed = "liq"        # лента клиента: liq | cvd | oi
         self.alive = True
+
+    @property
+    def wants_flow(self) -> bool:
+        """Нужен ли поток по ВСЕМ монетам: лента CVD/OI в режиме «ВСЕ».
+
+        По свечам графика такая лента не строится — она про одну монету,
+        поэтому сервер шлёт минутные потоки по всем, а клиент показывает их
+        в тех же колонках.
+        """
+        return self.symbol == "ALL" and self.feed in ("cvd", "oi")
 
     @property
     def chart_symbol(self) -> str:
@@ -364,6 +385,7 @@ async def on_liquidation(ev: dict):
                             if k in ("liquidatedUser", "markPx", "method")}
     LIQUIDATIONS.append(event)
     BOARD.add_liq(event)          # часовой стенд для постов в канал
+    FLOWS.add_liq(event)          # минутный поток по всем монетам (лента «ВСЕ»)
     try:
         _liq_queue.put_nowait(event)
     except asyncio.QueueFull:
@@ -374,6 +396,35 @@ async def on_liquidation(ev: dict):
             _liq_drop_warn_at = now
             log.warning("очередь ликвидаций переполнена: пропущено %d событий",
                         _liq_dropped)
+
+
+async def flow_oi_task() -> None:
+    """Открытый интерес монет потока «ВСЕ» (лента OI в режиме всех монет).
+
+    Берём одну биржу — так уровни сравнимы между монетами, а столбик OI в
+    ленте не пустует, пока по монете нет полного опроса по всем биржам.
+    """
+    await asyncio.sleep(8)          # дать ценам и спецификациям подтянуться
+    while True:
+        try:
+            if feed:
+                tracker = getattr(feed, "oi", None)
+                flow_syms = sorted(getattr(feed, "flow_symbols", ()) or ())
+                if tracker is not None and flow_syms:
+                    for sym in flow_syms:
+                        try:
+                            usd = await tracker.binance_usd(sym)
+                            if usd:
+                                FLOWS.add_oi(sym, time.time(), usd)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as e:  # noqa: BLE001
+                            log.debug("OI потока %s: %s", sym, e)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            log.debug("OI потока: %s", e)
+        await asyncio.sleep(FLOW_OI_SEC)
 
 
 async def oi_history_task() -> None:
@@ -464,11 +515,13 @@ async def on_trade(symbol: str, price: float, qty: float, ts: float,
     LAST_TICK_TS[symbol] = time.time()
     LAST_TICK_PRICE[symbol] = price
     try:
+        FLOWS.set_price(symbol, price)
         if side in ("BUY", "SELL") and price > 0 and qty > 0:
             signed = float(price) * float(qty) * (1 if side == "BUY" else -1)
             tick_ts = float(ts) if ts else time.time()
             _cvd_add(symbol, tick_ts, signed)
             BOARD.add_cvd(symbol, tick_ts, signed)
+            FLOWS.add_trade(symbol, tick_ts, signed)
     except (TypeError, ValueError):
         pass
 
@@ -597,6 +650,8 @@ async def on_price(symbol: str, price: float, candle1m: Optional[dict]):
         prev = vols.get(minute, 0.0)
         delta = max(candle1m["volume"] - prev, 0.0)
         vols[minute] = candle1m["volume"]
+        if delta:
+            FLOWS.add_volume(symbol, minute, delta)
         if len(vols) > 400:
             for old in sorted(vols)[:200]:
                 vols.pop(old, None)
@@ -604,6 +659,7 @@ async def on_price(symbol: str, price: float, candle1m: Optional[dict]):
     if time.time() - LAST_TICK_TS.get(symbol, 0.0) < 2.0:
         # тиковая цена свежее снимка kline — берём её
         price = LAST_TICK_PRICE.get(symbol, price)
+    FLOWS.set_price(symbol, price)
 
     updated = _apply_price_to_candles(symbol, price, vol_delta=delta)
     for tf, candle in updated:
@@ -757,6 +813,14 @@ def sync_hot_symbols():
     if not hot and feed.symbols:
         hot = {feed.symbols[0]}          # держим BTC тёплым для быстрого старта
     feed.set_hot_symbols(hot)
+    # Лента «ВСЕ» в CVD/OI: её монетам нужны тики сделок (CVD). Графики у
+    # этих монет не открыты, поэтому в hot_symbols они не попадают — иначе
+    # заодно вырос бы опрос OI по всем биржам.
+    want_flow = FLOW_SYMBOLS_MAX > 0 and any(c.wants_flow for c in hub.clients)
+    flow = []
+    if want_flow:
+        flow = [s for s in (feed.symbols or []) if s not in hot][:FLOW_SYMBOLS_MAX]
+    feed.set_flow_symbols(flow)
 
 
 def alerts_market_snapshot() -> dict:
@@ -1081,6 +1145,41 @@ async def digest_ai(facts: dict, lang: str = "ru") -> Optional[str]:
 # =============================================================================
 #  Фоновые рассылки
 # =============================================================================
+def flow_snapshot(now: Optional[float] = None, limit: int = 60) -> dict:
+    """Строки ленты «ВСЕ»: CVD, OI и ликвидации по всем монетам за окно."""
+    now = float(now if now is not None else time.time())
+    return {
+        "type": "flow_all",
+        "window_min": FLOW_WINDOW_MIN,
+        "ts": now,
+        "cvd": FLOWS.rows("cvd", FLOW_WINDOW_MIN, now, limit=limit),
+        "oi": FLOWS.rows("oi", FLOW_WINDOW_MIN, now, limit=limit),
+        "liq": FLOWS.rows("liq", FLOW_WINDOW_MIN, now, limit=limit),
+        "summary": FLOWS.summary(60, now),
+    }
+
+
+async def flow_broadcaster():
+    """Рассылка минутных потоков тем, у кого лента CVD/OI в режиме «ВСЕ».
+
+    Пока таких клиентов нет, ничего не считаем: строки собираются по запросу.
+    """
+    while True:
+        try:
+            await asyncio.sleep(FLOW_WS_SEC)
+            async with hub._lock:
+                clients = [c for c in hub.clients if c.wants_flow]
+            if not clients:
+                continue
+            payload = flow_snapshot()
+            for c in clients:
+                await c.send(payload)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            log.debug("flow broadcaster: %s", e)
+
+
 async def liquidation_broadcaster():
     """Работает только если включена буферизация (LIQSCOPE_LIQ_FLUSH_MS > 0)."""
     if BROADCAST_INTERVAL <= 0:
@@ -1197,9 +1296,14 @@ async def demo_tick_walk():
     while True:
         try:
             await asyncio.sleep(0.05)
-            if not feed or not feed.hot_symbols:
+            if not feed:
                 continue
-            for symbol in list(feed.hot_symbols):
+            # монеты потока «ВСЕ» тоже ходят демо-тиками: без бирж CVD-лента
+            # в режиме всех монет иначе осталась бы пустой
+            walk = set(feed.hot_symbols) | set(feed.flow_symbols)
+            if not walk:
+                continue
+            for symbol in list(walk):
                 p = feed.prices.get(symbol) or DEMO_SEED_PRICES.get(symbol) or 100.0
                 p = max(p * (1 + random.gauss(0, 0.00025)), 1e-12)
                 feed.prices[symbol] = p
@@ -1209,6 +1313,35 @@ async def demo_tick_walk():
             break
         except Exception as e:
             log.debug("demo ticks: %s", e)
+
+
+async def demo_flow_walk():
+    """Демо-наполнение потока «ВСЕ»: объём и OI по монетам без бирж.
+
+    Нужен только для демо-режима: там тики синтетические, и лента CVD/OI в
+    режиме всех монет иначе показывала бы перекос, но пустой объём и OI.
+    """
+    levels: Dict[str, float] = {}
+    while True:
+        try:
+            await asyncio.sleep(1.0)
+            if not feed:
+                continue
+            syms = (set(feed.flow_symbols) | set(feed.hot_symbols)
+                    or set(feed.symbols[:FLOW_SYMBOLS_MAX or 12]))
+            now = time.time()
+            for symbol in list(syms)[:24]:
+                base = levels.get(symbol)
+                if base is None:
+                    base = levels[symbol] = random.uniform(2e7, 4e9)
+                base = max(base * (1 + random.gauss(0, 0.0015)), 1e6)
+                levels[symbol] = base
+                FLOWS.add_oi(symbol, now, base)
+                FLOWS.add_volume(symbol, now, random.uniform(5e4, 9e5))
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            log.debug("demo flow: %s", e)
 
 
 async def demo_price_walk():
@@ -1282,6 +1415,8 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(liq_event_worker(), name="liq-worker"),
         asyncio.create_task(oi_history_task(), name="oi-history"),
         asyncio.create_task(liquidation_broadcaster(), name="liq-broadcast"),
+        asyncio.create_task(flow_broadcaster(), name="flow-broadcast"),
+        asyncio.create_task(flow_oi_task(), name="flow-oi"),
         asyncio.create_task(price_broadcaster(), name="price-broadcast"),
         asyncio.create_task(stats_broadcaster(), name="stats-broadcast"),
         asyncio.create_task(kline_refresher(), name="kline-refresh"),
@@ -1299,6 +1434,7 @@ async def lifespan(app: FastAPI):
         tasks.append(asyncio.create_task(demo_generator(), name="demo"))
         tasks.append(asyncio.create_task(demo_price_walk(), name="demo-prices"))
         tasks.append(asyncio.create_task(demo_tick_walk(), name="demo-ticks"))
+        tasks.append(asyncio.create_task(demo_flow_walk(), name="demo-flow"))
 
     # прогреваем свечи популярных монет, чтобы первый клиент увидел график сразу
     async def warmup():
@@ -1644,6 +1780,10 @@ async def ws_endpoint(websocket: WebSocket):
             "health": health_summary(),
             "recent_liquidations": list(LIQUIDATIONS)[-200:],
             "stats": compute_stats(),
+            # Лента «ВСЕ» в CVD/OI строится не по свечам графика, а по
+            # минутным потокам всех монет — отдаём их сразу, чтобы не ждать
+            # первой рассылки.
+            "flow": flow_snapshot(),
         })
         while True:
             raw = await websocket.receive_json()
@@ -1665,6 +1805,9 @@ async def ws_endpoint(websocket: WebSocket):
                         pass
                 if raw.get("exchange"):
                     client.exchange = str(raw["exchange"])
+                feed_tab = str(raw.get("feed") or "").strip().lower()
+                if feed_tab in ("liq", "cvd", "oi"):
+                    client.feed = feed_tab
                 sync_hot_symbols()
                 entry = await get_candles(client.chart_symbol, client.tf)
                 await client.send({

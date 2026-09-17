@@ -60,12 +60,56 @@
         lastOI: null,
         statWin: { liq: "24h", cvd: "24h", oi: "24h" },
         modalItem: null,
-        feedTab: "liq",         // лента: liq | cvd | oi
+        feedTab: "liq",
+        // Минутные потоки всех монет с сервера (лента CVD/OI в режиме «ВСЕ»)
+        flowAll: null,         // лента: liq | cvd | oi
+        chartFollow: true,      // автоследование: окно само едет за ценой
+        followPaused: false,    // график отлистали вручную — ждём кнопки
+        followMoved: 0,         // сколько раз окно подвинулось (для тестов/диагностики)
     };
 
     let connState = { status: "pulse yellow", key: "conn.connecting" };
 
     const MAX_HISTORY = 4000;
+
+    // --- Автоследование графика -------------------------------------------
+    // Окно само двигается за ценой: слева свеча подходит к правому краю —
+    // сдвигаем окно на шаг (тот же зум), а по вертикали цена остаётся в поле
+    // зрения с зазором FOLLOW_MARGIN сверху и снизу. Горизонтальный зазор
+    // маленький (FOLLOW_KEEP_BARS свечей) — «почти вплотную к шкале», как
+    // и просили: свеча не уезжает за край.
+    const FOLLOW_EDGE_BARS = 3;   // за сколько свечей до края начинаем двигать
+    const FOLLOW_KEEP_BARS = 1;   // сколько свечей оставляем справа после сдвига
+    const FOLLOW_MARGIN = 0.15;   // зазор по вертикали, доля высоты графика
+    const PRICE_MARGINS_DEFAULT = { top: 0.06, bottom: 0.24 };
+
+    /** Куда сдвинуть окно времени: null — двигать не надо.
+     *
+     * Чистая функция — её гоняет tests/chart_follow.js без браузера.
+     * lr — видимый логический диапазон (from/to), last — индекс последней
+     * свечи. Вправо уезжаем только если свеча подошла к краю: если админ
+     * отлистал график вручную, автоследование не дёргает его назад.
+     */
+    function followRange(lr, last, edgeBars, keepBars) {
+        if (!lr || !isFinite(lr.from) || !isFinite(lr.to) || last < 0) return null;
+        const span = Number(lr.to) - Number(lr.from);
+        if (!(span > 0)) return null;
+        const edge = Number(lr.to) - Number(last);
+        // Дальше зоны слежения не лезем: если график отлистали в историю
+        // (свеча уехала вправо) или, наоборот, окно кончается задолго до неё —
+        // это осознанное действие, автоследование встаёт на паузу.
+        if (edge > edgeBars || edge < -edgeBars) return null;
+        const to = Number(last) + keepBars;
+        if (Math.abs(edge - keepBars) < 1e-9) return null;   // уже стоит как надо
+        return { from: to - span, to: to };
+    }
+
+    /** Настройки цены для режима слежения и обратно. */
+    function followPriceOptions(on) {
+        return on
+            ? { autoScale: true, scaleMargins: { top: FOLLOW_MARGIN, bottom: FOLLOW_MARGIN } }
+            : { autoScale: true, scaleMargins: Object.assign({}, PRICE_MARGINS_DEFAULT) };
+    }
 
     let ws = null;
     let wsReconnectTimer = null;
@@ -488,8 +532,156 @@
         window.addEventListener("resize", handleResize);
         setTimeout(handleResize, 80);
 
-        chart.timeScale().subscribeVisibleLogicalRangeChange(queueRedraw);
+        chart.timeScale().subscribeVisibleLogicalRangeChange((lr) => {
+            queueRedraw();
+            if (followSelfScroll) {           // это наш собственный сдвиг
+                followSelfScroll = false;
+                return;
+            }
+            noteFollowPan(lr);
+        });
         markersApi = null;
+        applyFollowMode();
+    }
+
+    /** Включить/выключить настройки цены и сдвинуть окно по текущей свече. */
+    function applyFollowMode() {
+        if (!chart) return;
+        try {
+            const scale = chart.priceScale("right");
+            if (scale && scale.applyOptions) scale.applyOptions(followPriceOptions(state.chartFollow));
+        } catch (e) { /* ignore */ }
+        try {
+            const ts = chart.timeScale();
+            if (ts && ts.applyOptions) {
+                // справа почти вплотную к шкале
+                ts.applyOptions({ rightOffset: state.chartFollow ? 1 : 6 });
+            }
+        } catch (e) { /* ignore */ }
+        followChartNow();
+    }
+
+    let followSelfScroll = false;   // мы сами подвинули окно — не считаем это панорамой
+
+    /** Один шаг автоследования: подвинуть окно времени (если пора). */
+    function followChartNow() {
+        if (!chart || !state.chartFollow || state.followPaused) return false;
+        if (!state.candles.length) return false;
+        let lr = null;
+        try {
+            lr = chart.timeScale().getVisibleLogicalRange();
+        } catch (e) { return false; }
+        const next = followRange(lr, state.candles.length - 1,
+                                 FOLLOW_EDGE_BARS, FOLLOW_KEEP_BARS);
+        if (!next) return false;
+        return applyFollowRange(next);
+    }
+
+    function applyFollowRange(next) {
+        try {
+            followSelfScroll = true;
+            chart.timeScale().setVisibleLogicalRange(next);
+        } catch (e) { followSelfScroll = false; return false; }
+        // библиотека может не позвать подписчика синхронно — тогда сбрасываем
+        // флаг сами, иначе следующий ручной сдвиг не заметим (слежение
+        // молча перестало бы ставиться на паузу)
+        setTimeout(() => { followSelfScroll = false; }, 0);
+        state.followMoved += 1;
+        return true;
+    }
+
+    /** Прыжок к последней свече: включаем автоследование — сразу к цене. */
+    function anchorToLast() {
+        if (!chart || !state.candles.length) return false;
+        let lr = null;
+        try { lr = chart.timeScale().getVisibleLogicalRange(); } catch (e) { return false; }
+        const span = lr && lr.to > lr.from ? (lr.to - lr.from) : 80;
+        const to = state.candles.length - 1 + FOLLOW_KEEP_BARS;
+        return applyFollowRange({ from: to - span, to: to });
+    }
+
+    /** Ручная прокрутка в историю ставит автоследование на паузу. */
+    function noteFollowPan(lr) {
+        if (!state.chartFollow || followSelfScroll) return;
+        const last = state.candles.length - 1;
+        if (last < 0 || !lr) return;
+        if (lr.to < last - FOLLOW_EDGE_BARS) setFollowPaused(true);
+    }
+
+    function setFollowPaused(on) {
+        if (state.followPaused === !!on) return;
+        state.followPaused = !!on;
+        paintFollowButtons();
+    }
+
+    /** Кнопка/попап: включить автоследование и запомнить выбор. */
+    function setChartFollow(on) {
+        state.chartFollow = !!on;
+        if (on) state.followPaused = false;
+        try { localStorage.setItem("liqscope.chartFollow", on ? "1" : "0"); }
+        catch (e) { /* ignore */ }
+        paintFollowButtons();
+        applyFollowMode();
+        if (on) anchorToLast();   // включили — сразу к актуальной свече
+    }
+
+    function paintFollowButtons() {
+        const on = state.chartFollow && !state.followPaused;
+        [$("follow-toggle"), $("follow-toggle-pop")].forEach((btn) => {
+            if (!btn) return;
+            btn.classList.toggle("active", on);
+            btn.classList.toggle("paused", !!state.followPaused);
+            btn.setAttribute("aria-pressed", on ? "true" : "false");
+            const key = state.followPaused ? "chart.follow_paused"
+                : (state.chartFollow ? "chart.follow_on" : "chart.follow_off");
+            btn.title = I18n.t(key);
+        });
+    }
+
+    function setupFollowToggle() {
+        const btns = [$("follow-toggle"), $("follow-toggle-pop")];
+        if (!btns.some(Boolean)) return;
+        try {
+            const v = localStorage.getItem("liqscope.chartFollow");
+            if (v === "0") state.chartFollow = false;
+            else if (v === "1") state.chartFollow = true;
+        } catch (e) { /* ignore */ }
+        btns.forEach((btn) => {
+            if (!btn) return;
+            btn.addEventListener("click", () => setChartFollow(!state.chartFollow));
+        });
+        I18n.onChange(paintFollowButtons);
+        paintFollowButtons();
+        applyFollowMode();
+        window.LiQScopeFollow = window.LiQScopeFollow || {};
+        window.LiQScopeFollow = {
+            // для tests/chart_follow.js: состояние, чистая математика и ручной шаг
+            enabled: () => !!state.chartFollow,
+            setEnabled: setChartFollow,
+            range: followRange,
+            priceOptions: followPriceOptions,
+            moved: () => state.followMoved,
+            paused: () => !!state.followPaused,
+            pan: (range) => noteFollowPan(range),
+            anchor: () => anchorToLast(),
+            step: () => followChartNow(),
+            edgeBars: FOLLOW_EDGE_BARS,
+            keepBars: FOLLOW_KEEP_BARS,
+            margin: FOLLOW_MARGIN,
+            // настройки шкалы цены, что реально ушли в график
+            priceScaleOptions: () => {
+                try {
+                    const sc = chart && chart.priceScale("right");
+                    return sc && sc.options ? sc.options() : null;
+                } catch (e) { return null; }
+            },
+            timeScaleOptions: () => {
+                try {
+                    const ts = chart && chart.timeScale();
+                    return ts && ts.options ? ts.options() : null;
+                } catch (e) { return null; }
+            },
+        };
     }
 
     function applyPricePrecision(price) {
@@ -542,6 +734,7 @@
         updateLiveStats();
         queueRedraw();
         queueShapeFeed();
+        followChartNow();
     }
 
     function updateCandle(c) {
@@ -572,6 +765,7 @@
         updateLiveStats();
         queueRedraw();
         queueShapeFeed();
+        followChartNow();
     }
 
     // --- Индикатор «живости» тиков ------------------------------------------
@@ -3091,7 +3285,38 @@
         return field === "oi" ? Number(c.oiChg) : Number(c[field]);
     }
 
+    /** Лента «ВСЕ»: строки не по свечам графика, а по минутным потокам всех
+     *  монет (сообщение flow_all). Раньше при переключении с монеты на «все»
+     *  лента молча оставалась прежней — строилась только по свечам графика. */
+    const isFlowFeed = (field) =>
+        state.symbol === "ALL" && (field === "cvd" || field === "oi");
+
+    function flowFeedItems(field) {
+        const src = (state.flowAll && state.flowAll[field]) || [];
+        const items = [];
+        src.forEach((row) => {
+            const raw = field === "cvd" ? row.cvd : row.oi_delta;
+            const d = Number(raw);
+            if (!isFinite(d) || d === 0) return;
+            const ts = Number(row.ts) || Number(state.flowAll && state.flowAll.ts) || 0;
+            items.push({
+                _kind: field,
+                flow: true,
+                agg: row,
+                time: ts,
+                timestamp: ts,
+                symbol: row.symbol,
+                usd: Math.abs(d),
+                delta: d,
+                price: row.price,
+                live: false,          // окно, а не формирующаяся свеча
+            });
+        });
+        return items;
+    }
+
     function shapeFeedItems(field) {
+        if (isFlowFeed(field)) return flowFeedItems(field);
         const candles = state.candles;
         const items = [];
         if (!candles.length) return items;
@@ -3124,7 +3349,9 @@
     }
 
     function shapeFeedKey(item) {
-        return item._kind + "_" + item.time;
+        // в режиме «ВСЕ» строки идут по всем монетам сразу — монета в ключе,
+        // иначе строки разных монет в одну минуту затирали бы друг друга
+        return item._kind + "_" + (item.flow ? item.symbol + "_" : "") + item.time;
     }
 
     function shapeFeedType(item) {
@@ -3144,11 +3371,22 @@
         };
     }
 
+    function shapeFeedTypeLabel(item) {
+        const t = shapeFeedType(item);
+        if (!item.flow) return t;
+        // в потоке «ВСЕ» подписываем окно: строка — сумма за N минут
+        const win = Number((item.agg && item.agg.window_min) ||
+                           (state.flowAll && state.flowAll.window_min) || 5);
+        return Object.assign({}, t, {
+            typeLabel: t.typeLabel + " · " + I18n.t("flow.window_short", { n: win }),
+        });
+    }
+
     function paintShapeFeedCells(tr, item) {
         tr._feedItem = item;
         tr.dataset.feedKey = shapeFeedKey(item);
         tr.classList.toggle("feed-row-live", !!item.live);
-        const t = shapeFeedType(item);
+        const t = shapeFeedTypeLabel(item);
         let usdTd = tr.querySelector(".td-usd-amount");
         if (!usdTd) {
             const openTitle = I18n.t("feed.open_chart", { sym: pretty(item.symbol) });
@@ -3176,11 +3414,43 @@
         }
     }
 
+    /** Окно строки потока «ВСЕ»: на графике этой монеты нет, поэтому вместо
+     *  подсветки фигуры показываем разбор строки — чем и как продавали. */
+    function openFlowModal(item) {
+        const a = item.agg || {};
+        const isCvd = item._kind === "cvd";
+        const win = Number(a.window_min || (state.flowAll && state.flowAll.window_min) || 5);
+        const money = (v) => (Number(v) >= 0 ? "+" : "−") +
+            "$" + fmtUsdFull(Math.abs(Number(v) || 0));
+        const share = (a.cvd_share == null) ? "—"
+            : (Number(a.cvd_share) >= 0 ? "+" : "") + Number(a.cvd_share) + "%";
+        const rows = [
+            ["flow.window", I18n.t("flow.window_val", { n: win })],
+            isCvd ? ["flow.cvd", money(item.delta)] : ["flow.oi_delta", money(item.delta)],
+        ];
+        if (isCvd) rows.push(["flow.share", share]);
+        rows.push(["flow.oi_level", a.oi_usd == null ? "—" : "$" + fmtUsdFull(a.oi_usd)]);
+        rows.push(["flow.liq_long", "$" + fmtUsdFull(a.liq_long || 0)]);
+        rows.push(["flow.liq_short", "$" + fmtUsdFull(a.liq_short || 0)]);
+        rows.push(["flow.vol", "$" + fmtUsdFull(a.vol || 0)]);
+        if (item.price) rows.push(["flow.price", fmtPrice(item.price)]);
+        state.modalItem = null;
+        modalTitle.textContent = pretty(item.symbol) + " · " +
+            I18n.t(isCvd ? "feed.col_cvd" : "feed.col_oi");
+        modalBody.innerHTML =
+            rows.map((r) => "<p><strong>" + I18n.t(r[0]) + "</strong> " + r[1] + "</p>").join("") +
+            '<p class="flow-note">' + I18n.t("flow.note") + "</p>";
+        unpinShape();
+        detailModal.classList.remove("hidden");
+        detailModal.classList.remove("peek", "peek-pinned");
+    }
+
     function shapeFeedRow(item) {
         const tr = document.createElement("tr");
         paintShapeFeedCells(tr, item);
         tr.addEventListener("click", () => {
             const it = tr._feedItem || item;
+            if (it.flow) { openFlowModal(it); return; }
             const hit = hitFromFeedItem(it);
             if (hit) {
                 applyFeedHighlight(hit, true);
@@ -3188,8 +3458,15 @@
                 openShapeModal(hit.kind, hit);
             }
         });
-        tr.addEventListener("mouseenter", () => highlightFromFeed(tr._feedItem || item, false));
-        tr.addEventListener("mouseleave", () => highlightFromFeed(null, false));
+        tr.addEventListener("mouseenter", () => {
+            const it = tr._feedItem || item;
+            if (it.flow) return;      // фигуры этой монеты на графике нет
+            highlightFromFeed(it, false);
+        });
+        tr.addEventListener("mouseleave", () => {
+            if ((tr._feedItem || item).flow) return;
+            highlightFromFeed(null, false);
+        });
         const coinBtn = tr.querySelector(".coin-link");
         if (coinBtn) {
             coinBtn.addEventListener("click", (e) => {
@@ -3203,7 +3480,9 @@
     function finishShapeFeed(field, n) {
         feedCountEl.textContent = feedCountLabel(n);
         if (feedEmptyEl) {
-            feedEmptyEl.textContent = I18n.t(field === "cvd" ? "feed.empty_cvd" : "feed.empty_oi");
+            feedEmptyEl.textContent = isFlowFeed(field)
+                ? I18n.t("feed.empty_flow")
+                : I18n.t(field === "cvd" ? "feed.empty_cvd" : "feed.empty_oi");
             feedEmptyEl.classList.toggle("hidden", n > 0);
         }
     }
@@ -3284,6 +3563,7 @@
         state.feedTab = tab;
         try { localStorage.setItem("liqscope.feedTab", tab); } catch (e) { /* ignore */ }
         rebuildFeed();
+        sendFeedConfig();     // «ВСЕ» + CVD/OI → сервер начинает поток всех монет
     }
 
     function setupFeedTabs() {
@@ -4652,9 +4932,17 @@
             symbol: state.symbol,          // фильтр ленты
             chart: chartSymbol(),          // символ графика (может отличаться)
             tf: state.timeframe,
+            feed: state.feedTab,           // лента: liq | cvd | oi
             min_usd: 0,
             exchange: "ALL",               // фильтр бирж применяется на клиенте
         }));
+    }
+
+    /** Сказать серверу, какая лента открыта: в режиме «ВСЕ» для CVD/OI он
+     *  начинает гнать минутные потоки по всем монетам, а не по графику. */
+    function sendFeedConfig() {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        ws.send(JSON.stringify({ action: "feed", feed: state.feedTab }));
     }
 
     function setConn(status, key, vars) {
@@ -4722,6 +5010,7 @@
                 }
                 updateSymbolTitle();
                 renderStats(msg.stats);
+                if (msg.flow) state.flowAll = msg.flow;
                 rebuildFeed();
                 sendConfig();
                 loadCandles();
@@ -4769,6 +5058,13 @@
                     && candlesMatchTf(msg.candles, state.timeframe)) {
                     setCandles(msg.candles, msg.source);
                 }
+                break;
+            }
+            case "flow_all": {
+                state.flowAll = msg;
+                // лента CVD/OI в режиме «ВСЕ» живёт этими строками: тик
+                // обновляет ячейки на месте, без перерисовки DOM
+                if (isFlowFeed(state.feedTab)) syncShapeFeed(state.feedTab);
                 break;
             }
             case "stats": {
@@ -4883,7 +5179,8 @@
         // сначала узнаём, кто смотрит график, потом вешаем переключатели.
         applyAuthGate().then((allowed) => {
             setupLayerToggles(allowed);
-            setupLayerPop();   // попап кнопок слоёв по «☰ Слои»
+            setupLayerPop();
+            setupFollowToggle();     // 🎯 автоследование графика за ценой
             setupIndicatorPanes();   // окна LIQ/CVD/OI под графиком + крестики
             updateMarkers();
             queueRedraw();

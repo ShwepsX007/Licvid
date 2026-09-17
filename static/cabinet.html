@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>LiqScope — кабинет</title>
 <link rel="icon" type="image/png" href="/static/logo.png">
-<link rel="stylesheet" href="/static/account.css?v=alerts5">
+<link rel="stylesheet" href="/static/account.css?v=email1">
 </head>
 <body data-page="cabinet">
 <header class="site-header">
@@ -27,8 +27,14 @@
             <div>
                 <h1 class="page-title" id="cab-name">…</h1>
                 <span class="badge" id="cab-role">пользователь</span>
+                <span class="badge" id="cab-verified"></span>
                 <div class="meta" id="cab-meta"></div>
             </div>
+        </div>
+        <div class="verify-bar hidden" id="verify-bar">
+            <span>✉</span>
+            <span id="verify-bar-hint">Подтвердите почту — ссылка есть в письме от LiqScope.</span>
+            <button type="button" class="btn btn-ghost" id="verify-resend">Отправить письмо ещё раз</button>
         </div>
         <div class="row-actions">
             <a class="btn btn-primary" href="/terminal">⚡ Открыть терминал</a>
@@ -36,12 +42,27 @@
                target="_blank" rel="noopener">Бот в Telegram</a>
             <button type="button" class="btn btn-ghost" id="cab-logout">Выйти</button>
         </div>
+        <!-- Telegram — запасной вход и канал сигналов: привязывается к аккаунту -->
+        <div class="tg-card" id="tg-card">
+            <div class="meta" id="tg-state">Telegram не привязан</div>
+            <div class="row-actions" style="margin-top:8px">
+                <button type="button" class="btn btn-ghost btn-small" id="tg-link">🔗 Привязать Telegram</button>
+                <button type="button" class="btn btn-ghost btn-small hidden" id="tg-unlink">Отвязать</button>
+            </div>
+        </div>
     </div>
+
+    <p class="partner-line">
+        <a href="https://www.gate.com/ru/signup/VLFCAVWMBW?ref_type=103"
+           target="_blank" rel="noopener sponsored">
+            💠 Торговать на Gate — скидка на комиссию
+        </a>
+    </p>
 
     <h2 style="margin-top:34px;font-size:1.2rem">Сервисы</h2>
     <p class="lead">Нажмите сервис, чтобы развернуть панель. Алерты: ликвидации, CVD и OI — каждый своим выключателем и своей лентой.</p>
     <div id="svc-acc"></div>
 </main>
-<script src="/static/account.js?v=alerts5"></script>
+<script src="/static/account.js?v=email1"></script>
 </body>
 </html>

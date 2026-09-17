@@ -238,7 +238,9 @@ async function main() {
   const t = txt();
   check("candle row", t.indexOf("Свеча:") !== -1 && t.indexOf("–") !== -1);
   const lvl = t.match(/Уровень:\s*≈\s*\$([\d,\.]+)/);
-  check("level ≈ 50060", !!lvl && Math.abs(Number(lvl[1].replace(/,/g, "")) - 50060) < 1,
+  // Две ликвидации часа (50050 и 50060 по 60000) — в одной плашке на свечу,
+  // поэтому уровень показывается средневзвешенной ценой ликвидаций
+  check("level ≈ 50055", !!lvl && Math.abs(Number(lvl[1].replace(/,/g, "")) - 50055) < 1,
     lvl && lvl[1]);
   check("dominant long", t.indexOf("LONG (принудительная продажа)") !== -1);
   check("total + whale", norm(t).indexOf("$120000") !== -1 && t.indexOf("кит") !== -1 &&

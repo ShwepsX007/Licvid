@@ -26,11 +26,46 @@ Environment=LIQSCOPE_EXCHANGES=binance,bybit,okx,gate,bitget,htx,bitmex,hyperliq
 # Кабинет / бот / HTTPS (см. deploy/HTTPS.md):
 Environment=LIQSCOPE_PUBLIC_URL=https://liqscope.online
 Environment=LIQSCOPE_COOKIE_SECURE=1
-# Токен бота, админы и секрет — только в /etc/systemd/system/licvid.service
+# Токен бота, админы, почта и секрет — только в /etc/systemd/system/licvid.service
 # (или drop-in), не в git:
+# ИИ-шапка постов в канал: Gemini → Groq → OpenRouter (все с бесплатными
+# тарифами). Без ключей сводка уходит с шаблонными шапками, как раньше.
+# Проверка: python3 tools/ai_check.py
+# Environment=LIQSCOPE_AI_GEMINI_KEY=
+# Environment=LIQSCOPE_AI_GROQ_KEY=
+# Environment=LIQSCOPE_AI_OPENROUTER_KEY=
+# Environment=LIQSCOPE_AI_ORDER=gemini,groq,openrouter
+# Своя модель у сервиса (по умолчанию — актуальная Flash-Lite у Gemini;
+# если модель устарела, код подберёт замену сам):
+# Environment=LIQSCOPE_AI_GEMINI_MODEL=gemini-3.5-flash-lite
+# Environment=LIQSCOPE_AI_GROQ_MODEL=qwen/qwen3.8-27b
+#   (в Groq модель надо включить в Settings → Project → Models; из доступного
+#    набора для текста годятся qwen/qwen3.8-27b, openai/gpt-oss-20b,
+#    openai/gpt-oss-120b, groq/compound-mini)
+# Модель может быть выключена в настройках проекта сервиса — тогда код
+# переберёт доступные сам; список смотрите: python3 tools/ai_check.py --models
 # Environment=LIQSCOPE_BOT_TOKEN=
-# Environment=LIQSCOPE_ADMIN_IDS=
+# Environment=LIQSCOPE_ADMIN_IDS=          # telegram id админов
+# Environment=LIQSCOPE_ADMIN_EMAILS=       # админы, зарегистрированные по почте
 # Environment=LIQSCOPE_SECRET=
+# Почта — основной вход (подтверждение адреса, вход по ссылке, сброс пароля).
+# Без SMTP регистрация работает, но письма не уходят: в логе будет
+# «SMTP не настроен», а ссылка для ручной выдачи пишется в журнал:
+# journalctl -u licvid | grep "Ссылка для ручной выдачи"
+# Environment=LIQSCOPE_SMTP_HOST=smtp.yandex.ru
+# Environment=LIQSCOPE_SMTP_PORT=465
+# Environment=LIQSCOPE_SMTP_TLS=ssl
+# Environment=LIQSCOPE_SMTP_USER=no-reply@liqscope.online
+# Environment=LIQSCOPE_SMTP_PASSWORD=пароль-приложения
+# Environment=LIQSCOPE_SMTP_FROM=LiqScope <no-reply@liqscope.online>
+# Проверка настроек и сети: python3 tools/smtp_check.py --ports
+# Environment=LIQSCOPE_SMTP_IPV4=1
+# Если хостинг закрыл SMTP-порты — шлём через HTTPS-API (443) сервиса рассылок:
+# Environment=LIQSCOPE_MAIL_API=resend
+# Environment=LIQSCOPE_MAIL_API_KEY=re_…
+# Environment=LIQSCOPE_MAIL_API_SECRET=            # только для SendPulse
+# Стенд без реального ящика: письма складываются в папку
+# Environment=LIQSCOPE_MAIL_DIR=/tmp/liqscope-mail
 #
 # В Type=simple разрешена РОВНО одна строка ExecStart.
 # Две сразу (например, venv и /usr/bin) →

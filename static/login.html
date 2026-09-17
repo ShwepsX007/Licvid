@@ -3,9 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LiqScope — вход через Telegram</title>
+<title>LiqScope — вход и регистрация</title>
 <link rel="icon" type="image/png" href="/static/logo.png">
-<link rel="stylesheet" href="/static/account.css">
+<link rel="stylesheet" href="/static/account.css?v=email1">
 </head>
 <body data-page="login">
 <header class="site-header">
@@ -22,19 +22,68 @@
 <main class="wrap login-box">
     <div class="card">
         <img src="/static/logo.png" alt="" style="width:72px;height:72px;margin-bottom:12px">
-        <h1 class="page-title">Вход через Telegram</h1>
-        <p class="lead">Кабинет на сайте и бот — один аккаунт. Без паролей: подтверждаете вход в Telegram.</p>
-        <div style="margin-top:22px">
-            <button type="button" class="btn btn-tg" id="login-btn">✈ Открыть бота Telegram</button>
+        <h1 class="page-title" id="auth-title">Вход в кабинет</h1>
+        <p class="lead" id="auth-lead">Регистрация по почте — за минуту. Telegram можно привязать позже,
+            чтобы получать сигналы в бота.</p>
+
+        <div class="auth-tabs" id="auth-tabs" role="tablist">
+            <button type="button" class="auth-tab active" role="tab" data-tab="login">Вход</button>
+            <button type="button" class="auth-tab" role="tab" data-tab="register">Регистрация</button>
+            <button type="button" class="auth-tab" role="tab" data-tab="link">Ссылка на почту</button>
         </div>
-        <div id="tg-widget" style="margin-top:16px"></div>
+
+        <form id="email-form" autocomplete="on" style="margin-top:16px">
+            <label class="field hidden" id="field-name">
+                <span>Имя (необязательно)</span>
+                <input type="text" id="in-name" autocomplete="name" maxlength="64" placeholder="Как к вам обращаться">
+            </label>
+            <label class="field">
+                <span>Почта</span>
+                <input type="email" id="in-email" autocomplete="email" required
+                       inputmode="email" placeholder="you@example.com">
+            </label>
+            <label class="field" id="field-pass">
+                <span>Пароль</span>
+                <input type="password" id="in-password" autocomplete="current-password"
+                       minlength="8" placeholder="не короче 8 символов">
+            </label>
+            <label class="field hidden" id="field-captcha">
+                <span><span id="captcha-label">Проверка</span>
+                      <b id="captcha-question">…</b></span>
+                <input type="text" id="in-captcha" inputmode="numeric" autocomplete="off"
+                       placeholder="ответ цифрой">
+                <button type="button" class="link-btn" id="captcha-refresh">Другой пример</button>
+            </label>
+            <button type="submit" class="btn btn-primary" id="email-submit">Войти</button>
+        </form>
+
         <p class="login-status" id="login-status"></p>
+
+        <div class="auth-help">
+            <button type="button" class="link-btn" id="to-reset">Забыли пароль?</button>
+            <span class="dot">·</span>
+            <button type="button" class="link-btn" id="resend-verify">Отправить письмо ещё раз</button>
+        </div>
+
+        <div class="tg-alt" id="tg-alt">
+            <div class="or-sep"><span>или</span></div>
+            <button type="button" class="btn btn-tg btn-tg-wide" id="login-btn">
+                ✈ Зарегистрироваться через Telegram
+            </button>
+            <p class="lead tg-note">
+                Тот же аккаунт, что и в боте: подтверждать нечего, пароль не нужен.
+                Запасной способ — если почта недоступна. Почту можно привязать позже.
+            </p>
+            <div id="tg-widget" style="margin-top:12px"></div>
+        </div>
+
         <p class="lead" style="margin-top:18px;font-size:0.78rem">
+            Основной способ — почта: она же восстанавливает пароль и присылает письма.
             Терминал ликвидаций по-прежнему открыт без регистрации.
             Кабинет нужен для алертов, корреляций и других сервисов.
         </p>
     </div>
 </main>
-<script src="/static/account.js"></script>
+<script src="/static/account.js?v=email1"></script>
 </body>
 </html>

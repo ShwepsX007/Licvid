@@ -657,6 +657,20 @@ body.dark-theme {
 body.split-dragging { user-select: none; cursor: col-resize; }
 body.split-dragging.split-dragging-y { cursor: row-resize; }
 
+/* Стек графика: главный график и окна индикаторов — блоки одной колонки.
+   Главный забирает остаток, окна — свои px (переменные --ind-h-*), поэтому
+   разделители тянут высоту «относительно друг друга», вплоть до нуля. */
+.chart-stack {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+.chart-stack > .chart-wrapper { height: auto; }
+/* Как только пользователь сам двигал высоты — главный график можно сузить
+   до нуля (по умолчанию держим привычные 300px, чтобы окна его не съели). */
+.chart-stack.sized > .chart-wrapper { min-height: 0; }
+
 /* Chart Section */
 .chart-section {
     background: var(--bg-dark);
@@ -764,7 +778,10 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
     z-index: 30;
     display: flex;
     flex-wrap: wrap;
-    max-width: min(560px, calc(100vw - 40px));
+    /* ширина — по содержимому, но не уже доступного места: на узком экране
+       окно растягивается почти до правого края графика, а не жмётся в комок */
+    width: max-content;
+    max-width: calc(100% - 24px);
     gap: 8px;
     padding: 8px 10px;
     background: rgba(10, 14, 24, 0.96);
@@ -1022,6 +1039,45 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
     border-radius: 10px;
     font-size: 0.68rem;
     font-weight: 600;
+}
+
+.exch-health-pop .exch-ref {
+    display: block;
+    margin-top: 6px;
+    padding: 6px 8px;
+    border-radius: 8px;
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: #7fe3c0;
+    background: rgba(0, 230, 118, 0.10);
+    border: 1px solid rgba(0, 230, 118, 0.35);
+    text-align: center;
+}
+
+.exch-health-pop .exch-ref:hover {
+    background: rgba(0, 230, 118, 0.20);
+}
+
+.feed-filter-chip {
+    background: rgba(56, 189, 248, 0.14);
+    border: 1px solid rgba(56, 189, 248, 0.45);
+    color: var(--accent, #38bdf8);
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 0.68rem;
+    font-weight: 700;
+    cursor: pointer;
+    margin-right: 6px;
+    white-space: nowrap;
+    line-height: 1.5;
+}
+
+.feed-filter-chip:hover {
+    background: rgba(56, 189, 248, 0.24);
+}
+
+.feed-filter-chip.hidden {
+    display: none;
 }
 
 .feed-table-container {
@@ -1835,7 +1891,46 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
 
 /* --- Индикаторные окна (LIQ/CVD/OI) под графиком -------------------------
    Те же живые данные, что в кабинете «Алерты по объёму»: короткие окна
-   с сеткой и цифрами, выровнены по свечам основного графика. */
+   с сеткой и цифрами, выровнены по свечам основного графика.
+   Раскладка — в столбик, как в мобильной версии: в ряд на широком экране
+   окна получались узкими и обрезали цифры шкалы. */
+/* Слой фигур теханализа поверх нижних окон: тот же инструмент, что на
+   основном графике — линии, Фибоначчи и т.д. живут в своих окнах. */
+.pane-draw {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 3;
+}
+.pane-draw.armed {
+    pointer-events: auto;
+    cursor: crosshair;
+}
+.pane-draw.armed.erase { cursor: not-allowed; }
+
+/* Автоследование графика: включено — синий акцент, пауза (отлистали
+   в историю) — янтарный, чтобы это не выглядело как «кнопка не работает» */
+.profile-toggle.follow-toggle.active {
+    border-color: var(--color-blue);
+    color: var(--color-blue);
+}
+.profile-toggle.follow-toggle.paused {
+    border-color: var(--color-gold);
+    color: var(--color-gold);
+    border-style: dashed;
+}
+/* Пояснение в окне строки потока «ВСЕ»: строка — минутки монеты, не свеча */
+.flow-note {
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px dashed #2a3350;
+    color: var(--text-muted);
+    font-size: 0.82rem;
+    line-height: 1.35;
+}
+
 .layer-pop-sep {
     width: 1px;
     align-self: stretch;
@@ -1843,13 +1938,40 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
     margin: 0 2px;
 }
 .indicator-panes {
-    flex-shrink: 0;
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-    gap: 6px;
-    padding: 6px 10px 8px;
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    padding: 0 10px 6px;
     background: var(--bg-dark);
 }
+/* Высота полотна окна — своя переменная: её двигает разделитель над окном
+   (двойной клик по разделителю возвращает исходные 64px). */
+#ind-pane-liq { --ind-h: var(--ind-h-liq, 64px); }
+#ind-pane-cvd { --ind-h: var(--ind-h-cvd, 64px); }
+#ind-pane-oi  { --ind-h: var(--ind-h-oi, 64px); }
+.ind-pane { flex: 0 0 auto; }
+.stack-splitter { position: relative; }
+.stack-splitter::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 44px;
+    height: 3px;
+    margin: -1.5px 0 0 -22px;
+    border-radius: 2px;
+    background: rgba(132, 147, 168, 0.55);
+    opacity: 0;
+    transition: opacity 0.15s ease, background 0.15s ease;
+    pointer-events: none;
+}
+.stack-splitter:hover::after,
+.stack-splitter.active::after {
+    opacity: 1;
+    background: #fff;
+}
+.chart-section.collapsed .stack-splitter { display: none; }
 .indicator-panes.all-hidden { display: none; }
 .ind-pane {
     border: 1px solid var(--border-color);
@@ -1889,7 +2011,13 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
     border-radius: 5px;
 }
 .ind-close:hover { color: var(--text-primary); background: rgba(255, 255, 255, 0.06); }
-.ind-canvas-wrap { position: relative; height: 64px; }
+.ind-canvas-wrap { position: relative; height: var(--ind-h, 64px); }
+
+/* Низкое и широкое окно: главному графику хватит 200px вместо 300,
+   окна ниже — их высоты двигает разделитель (.chart-stack.sized). */
+@media (max-height: 780px) and (min-width: 901px) {
+    .chart-wrapper { min-height: 200px; }
+}
 .ind-canvas-wrap canvas {
     position: absolute;
     inset: 0;
@@ -1968,6 +2096,18 @@ body.chart-fullscreen { overflow: hidden; }
 
     .chart-wrapper { min-height: 240px; }
 
+    /* Разделителей блоков на телефоне нет (пальцем высоты не потаскаешь):
+       главный график держит свои 240px, окна — фиксированные и скроллятся. */
+    .chart-stack.sized > .chart-wrapper { min-height: 240px; }
+    #ind-pane-liq, #ind-pane-cvd, #ind-pane-oi { --ind-h: 54px; }
+    .indicator-panes {
+        gap: 6px;
+        padding: 6px 10px 8px;
+        max-height: 50%;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+    }
+
 
     .chart-header {
         flex-wrap: wrap;
@@ -2024,7 +2164,12 @@ body.chart-fullscreen { overflow: hidden; }
     .coin-link { font-size: 0.72rem; }
     .coin-link-icon { opacity: 0.85; }
     .profile-toggle { padding: 2px 6px; font-size: 0.6rem; }
-    .layer-pop { left: 8px; right: 8px; justify-content: center; }
+    /* узкий экран: кнопки занимают всю ширину графика и текут в строки,
+       фон больше не жмётся в узкий столбик посреди плашки */
+    .layer-pop {
+        left: 8px; right: 8px; width: auto; max-width: none;
+        justify-content: center; gap: 6px; padding: 6px 8px;
+    }
 
     .symbol-search-box { max-width: 100%; }
     .filter-btn { min-width: 104px; font-size: 0.7rem; }

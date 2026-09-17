@@ -1,7 +1,9 @@
 /** OI-шарики и CVD-треугольники: формы, тиры, цвета.
  *
- *  OI-шарики: мини (<$1M, r=6, без подписи), тиры 1/2/3 (r=9/9.9/10.8,
- *  кегль 8/9/10, свечение 6/9/12), цвет — зелёная/красная шкала по тиру.
+ *  OI-шарики: мини (<$1M, r=9, без подписи), тиры 1/2/3 (r=13.5/14.85/16.2,
+ *  кегль 12/13.5/15, свечение 9/14/18) — базовая геометрия умножена
+ *  на OI_BALL_SCALE=1.5, иначе цифры внутри не читались.
+ *  Цвет — зелёная/красная шкала по тиру.
  *  CVD-треугольники: фиолет/оранж, размер от p90, подпись когда влезает.
  *  Рекордер пишет вызовы cluster-canvas: шарики опознаём по дугам arc()
  *  с OI-заливками, треугольники — по путям из 3 точек с CVD-заливками,
@@ -193,24 +195,26 @@ async function main() {
   };
 
   check("all 4 balls drawn", balls.length >= 4, balls.length);
-  check("mini r=6", hasR(6), JSON.stringify(radii));
-  check("tier1 r=9", hasR(9));
-  check("tier2 r=9.9", hasR(9.9));
-  check("tier3 r=10.8", hasR(10.8));
-  check("growth: 10<max<=15", Math.max.apply(null, radii.concat([0])) > 10 &&
-        Math.max.apply(null, radii.concat([0])) <= 15);
+  check("mini r=9 (6×1.5)", hasR(9), JSON.stringify(radii));
+  check("tier1 r=13.5 (9×1.5)", hasR(13.5));
+  check("tier2 r=14.85 (9.9×1.5)", hasR(14.85));
+  check("tier3 r=16.2 (10.8×1.5)", hasR(16.2));
+  check("масштаб 1.5: mini больше прежних 6px", hasR(6 * 1.5));
+  check("размеры в пределах 9..22.5",
+        Math.min.apply(null, radii) >= 9 &&
+        Math.max.apply(null, radii) <= 22.5, JSON.stringify(radii));
   check("mini unlabeled", ovals.indexOf("$500K") === -1, JSON.stringify(ovals));
   check("tier1 labeled $2M", ovals.indexOf("$2M") !== -1);
   check("tier2 labeled $10M", ovals.indexOf("$10M") !== -1);
   check("tier3 labeled $50M", ovals.indexOf("$50M") !== -1);
-  check("tier1 font 8px", ofont("$2M") === "8px", ofont("$2M"));
-  check("tier2 font 9px", ofont("$10M") === "9px", ofont("$10M"));
-  check("tier3 font 10px", ofont("$50M") === "10px", ofont("$50M"));
+  check("tier1 font 12px", ofont("$2M") === "12px", ofont("$2M"));
+  check("tier2 font 13.5px", ofont("$10M") === "13.5px", ofont("$10M"));
+  check("tier3 font 15px", ofont("$50M") === "15px", ofont("$50M"));
   check("down text red-dark", ocolor("$2M") === "#1c060d" && ocolor("$50M") === "#1c060d");
   check("up text green-dark", ocolor("$10M") === "#04160b");
-  check("glow 6 present", oglows.indexOf(6) !== -1, JSON.stringify(oglows));
-  check("glow 9 present", oglows.indexOf(9) !== -1);
-  check("glow 12 present", oglows.indexOf(12) !== -1);
+  check("glow 9 present", oglows.indexOf(9) !== -1, JSON.stringify(oglows));
+  check("glow 14 present", oglows.indexOf(14) !== -1);
+  check("glow 18 present", oglows.indexOf(18) !== -1);
   check("tier2 green", balls.some((t) => t.fill === oiFill(UP_SHADES[2])),
     JSON.stringify(balls.map((t) => t.fill)));
   check("tier3 red-hot", balls.some((t) => t.fill === oiFill(DOWN_SHADES[3])));

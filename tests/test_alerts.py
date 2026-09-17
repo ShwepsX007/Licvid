@@ -35,6 +35,14 @@ class AlertsTest(unittest.TestCase):
         self.assertEqual(oi_window_key(60), "h1")
         self.assertIn("K", money(12_500))
 
+    def test_window_presets_are_five(self):
+        """Кнопок окна агрегации ровно пять — и в боте, и в кабинете."""
+        from alerts import WINDOW_PRESETS, presets
+        self.assertEqual(len(WINDOW_PRESETS), 5)
+        self.assertEqual(list(WINDOW_PRESETS), [1, 15, 30, 60, 240])
+        self.assertNotIn(5, WINDOW_PRESETS)          # «5м» убрана
+        self.assertEqual(presets()["windows"], list(WINDOW_PRESETS))
+
     def test_normalize_io_alias_and_flat_threshold(self):
         c = normalize_config({
             "watch": ["IO", "liquidations"],

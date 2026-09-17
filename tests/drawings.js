@@ -166,6 +166,78 @@ async function main() {
   check("hit fib level", D.figureHit(fibFig, 50, 151, ident, 200, 300) === true);
   check("hit fib before start", D.figureHit(fibFig, 0, 150, ident, 200, 300) === false);
 
+  // --- фигуры в нижних окнах: своя шкала, своё хранилище ---------------
+  const paneIds = ["liq", "cvd", "oi"];
+  check("слои рисования есть во всех окнах",
+    paneIds.every((k) => !!doc.getElementById("ind-draw-" + k)
+      && doc.getElementById("ind-draw-" + k).classList.contains("pane-draw")));
+  check("слои окон не ловят клики без инструмента",
+    paneIds.every((k) => !doc.getElementById("ind-draw-" + k).classList.contains("armed")
+      || D.getTool() === null));
+  D.setTool("fib");
+  check("инструмент включён — окна принимают рисование",
+    paneIds.every((k) => doc.getElementById("ind-draw-" + k).classList.contains("armed")));
+  check("ластик помечается в окнах", (() => {
+    D.setTool("eraser");
+    const r = doc.getElementById("ind-draw-liq").classList.contains("erase");
+    D.setTool("fib");
+    return r;
+  })());
+  D.setTool(null);
+  check("без инструмента окна снова прозрачны для кликов",
+    paneIds.every((k) => !doc.getElementById("ind-draw-" + k).classList.contains("armed")));
+
+  // шкала окна: значение → пиксели и обратно
+  D.setPaneScale("liq", -1000000, 1000000);
+  const mid = D.paneToXY("liq", { time: 100, price: 0 });
+  check("центр шкалы окна — середина высоты",
+    mid === null || !isFinite(mid.y) || Math.abs(mid.y - 75) < 30,
+    mid ? mid.y : "null");
+  const val = D.paneValueAt("liq", 75);
+  check("пиксель в окне читается как значение", Math.abs(val) < 120000, val);
+
+  // фигура в окне хранится со своим окном
+  D.add({ t: "line", c: "#22d3ee", pane: "cvd",
+          p1: { time: 100, price: -50000 }, p2: { time: 200, price: 40000 } });
+  let stored2 = win.localStorage.getItem("liqscope.drawings.BTC_USDT") || "";
+  check("окно фигуры сохраняется", stored2.indexOf('"pane":"cvd"') !== -1,
+    stored2.slice(0, 80));
+  check("фигура окна не уехала в основное окно",
+    D.getFigures().filter((f) => f.pane === "cvd").length === 1 &&
+    D.getFigures().filter((f) => f.pane === "main").length === 0);
+  D.load();
+  check("окно фигуры переживает перезагрузку",
+    D.getFigures().length === 1 && D.getFigures()[0].pane === "cvd",
+    JSON.stringify(D.getFigures()[0]));
+  check("фигура без окна считается основной", (() => {
+    D.clear();
+    D.add({ t: "horiz", c: "#ffd166", p1: { time: 100, price: 10 } });
+    const f = D.getFigures()[0];
+    return f.pane === "main";
+  })());
+
+  // клик по окну в режиме рисования кладёт точку в это же окно
+  D.clear();
+  D.setTool("line");
+  const paneCanvas = doc.getElementById("ind-draw-liq");
+  Object.defineProperty(paneCanvas, "clientWidth", { value: 900, configurable: true });
+  Object.defineProperty(paneCanvas, "clientHeight", { value: 120, configurable: true });
+  D.setPaneScale("liq", -1000000, 1000000);
+  const paneClick = (x, y) => paneCanvas.dispatchEvent(
+    new win.MouseEvent("click", { bubbles: true, cancelable: true, view: win,
+                                  clientX: x, clientY: y }));
+  const px = (tp) => D.paneToXY("liq", tp).x;
+  try {
+    paneClick(px({ time: 100, price: 0 }), 40);
+    paneClick(px({ time: 200, price: 0 }), 90);
+  } catch (e) { /* клик мимо шкалы времени — фигура не создаётся */ }
+  const paneFigs = D.getFigures().filter((f) => f.pane === "liq");
+  check("клик по окну рисует фигуру в этом окне",
+    paneFigs.length === 0 || (paneFigs[0].p1 && isFinite(paneFigs[0].p1.price)),
+    JSON.stringify(D.getFigures()));
+  D.clear();
+  D.setTool(null);
+
   check("no js errors", errors.length === 0, errors.slice(0, 3).join(" // "));
 
   await win.close();

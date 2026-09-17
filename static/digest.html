@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LiqScope — дневной дайджест</title>
+<meta name="description" content="Дневной дайджест рынка: ликвидации, биржи, открытый интерес, цены и настроение рынка за сутки." data-i18n-meta="dig.meta">
+<link rel="icon" type="image/png" href="/static/logo.png">
+<link rel="stylesheet" href="/static/account.css?v=digest1">
+<style>
+.dig-wrap { max-width: 1180px; margin: 0 auto; padding: 26px 22px 70px; }
+.dig-head { margin: 8px 0 22px; }
+.dig-head h1 { font-size: 1.9rem; line-height: 1.2; }
+.dig-lead { color: var(--muted); margin-top: 10px; max-width: 820px; line-height: 1.55; font-size: 0.95rem; }
+.dig-chips { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+.chip {
+    font-size: 0.75rem; color: var(--muted); border: 1px solid var(--border);
+    background: rgba(13, 18, 32, 0.6); padding: 5px 10px; border-radius: 999px;
+}
+.chip b { color: var(--text); }
+.chip.live { color: var(--cyan); border-color: rgba(0, 214, 255, 0.35); }
+.dig-grid { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 20px; align-items: start; }
+@media (max-width: 900px) { .dig-grid { grid-template-columns: 1fr; } .dig-wrap { padding: 20px 14px 60px; } }
+.dig-list-col h2 { font-size: 1rem; margin-bottom: 10px; letter-spacing: 0.3px; }
+.dig-list { display: flex; flex-direction: column; gap: 10px; }
+.dig-card {
+    display: block; width: 100%; text-align: left; cursor: pointer;
+    border: 1px solid var(--border); background: rgba(13, 18, 32, 0.72);
+    border-radius: 12px; padding: 12px 14px; color: inherit; font-family: inherit;
+    transition: border-color 0.15s, transform 0.15s;
+}
+.dig-card:hover { border-color: rgba(61, 112, 255, 0.55); transform: translateY(-1px); }
+.dig-card.active { border-color: var(--blue); background: rgba(61, 112, 255, 0.10); }
+.dig-card .dc-day { font-weight: 700; font-size: 0.95rem; }
+.dig-card .dc-brief { color: var(--muted); font-size: 0.78rem; margin-top: 5px; line-height: 1.45; }
+.dig-card .dc-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.tag { font-size: 0.66rem; letter-spacing: 0.4px; text-transform: uppercase; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+.tag.ok { color: var(--green); border-color: rgba(0, 230, 118, 0.35); }
+.dig-article { padding: 24px 26px 30px; line-height: 1.62; }
+.dig-article h2 { font-size: 1.35rem; margin-bottom: 6px; }
+.dig-article .art-meta { color: var(--muted); font-size: 0.8rem; margin-bottom: 18px; }
+.dig-article h3 { font-size: 1.02rem; margin: 22px 0 8px; }
+.dig-article p { margin: 10px 0; font-size: 0.95rem; }
+.dig-article p:first-of-type { font-size: 1.02rem; color: #f2f6ff; }
+.dig-article ul { margin: 8px 0 8px 20px; }
+.dig-article li { margin: 4px 0; font-size: 0.93rem; }
+.dig-article b { color: #fff; }
+.dig-article i { color: var(--muted); font-style: normal; font-size: 0.85rem; }
+.dig-empty { color: var(--muted); font-size: 0.88rem; padding: 14px 0; }
+.dig-post { margin-top: 26px; border-top: 1px solid var(--border); padding-top: 16px; }
+.dig-post summary { cursor: pointer; color: var(--muted); font-size: 0.85rem; }
+.dig-post pre {
+    margin-top: 12px; white-space: pre-wrap; word-break: break-word;
+    background: rgba(7, 10, 16, 0.75); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px; font-size: 0.82rem; color: #cfd8e6;
+    font-family: var(--mono);
+}
+</style>
+</head>
+<body data-page="digest">
+
+<header class="site-header">
+    <a class="brand" href="/">
+        <img class="logo" src="/static/logo.png" alt="LiqScope">
+        <span class="name">LIQSCOPE</span>
+        <span class="tag">DIGEST</span>
+    </a>
+    <nav class="site-nav">
+        <select id="lang-select" class="lang-select" aria-label="Language / Язык" title="Language / Язык">
+            <option value="ru">🇷🇺 Русский</option>
+            <option value="en">🇬🇧 English</option>
+            <option value="zh">🇨🇳 中文</option>
+            <option value="hi">🇮🇳 हिन्दी</option>
+            <option value="es">🇪🇸 Español</option>
+        </select>
+        <a class="btn btn-ghost btn-compact" href="/terminal">⚡ <span data-i18n="dig.back">К терминалу</span></a>
+        <span id="nav-account"></span>
+    </nav>
+</header>
+
+<main class="dig-wrap">
+    <div class="dig-head">
+        <h1 data-i18n="dig.title">Дневной дайджест рынка</h1>
+        <p class="dig-lead" data-i18n="dig.lead">Каждый вечер около 22:00 МСК — итоги дня: крупнейшая
+            ликвидация, биржи, монеты с самым тяжёлым открытым интересом, цены топ-5 и настроение рынка.</p>
+        <div class="dig-chips">
+            <span class="chip live" data-i18n="dig.schedule">Выходит каждый вечер ~22:00 МСК</span>
+            <span class="chip" id="dig-latest">—</span>
+            <span class="chip"><span data-i18n="dig.total">Ликвидации за сутки</span>: <b id="dig-total">—</b></span>
+        </div>
+    </div>
+    <div class="dig-grid">
+        <aside class="dig-list-col">
+            <h2 data-i18n="dig.archive">Выпуски</h2>
+            <div id="dig-list" class="dig-list">
+                <div class="dig-empty" data-i18n="dig.loading">Загружаю…</div>
+            </div>
+        </aside>
+        <article id="dig-article" class="dig-article card">
+            <div class="dig-empty" data-i18n="dig.loading">Загружаю…</div>
+        </article>
+    </div>
+</main>
+
+<script src="/static/i18n.js"></script>
+<script src="/static/digest.js?v=digest1"></script>
+</body>
+</html>

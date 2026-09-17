@@ -60,12 +60,56 @@
         lastOI: null,
         statWin: { liq: "24h", cvd: "24h", oi: "24h" },
         modalItem: null,
-        feedTab: "liq",         // лента: liq | cvd | oi
+        feedTab: "liq",
+        // Минутные потоки всех монет с сервера (лента CVD/OI в режиме «ВСЕ»)
+        flowAll: null,         // лента: liq | cvd | oi
+        chartFollow: true,      // автоследование: окно само едет за ценой
+        followPaused: false,    // график отлистали вручную — ждём кнопки
+        followMoved: 0,         // сколько раз окно подвинулось (для тестов/диагностики)
     };
 
     let connState = { status: "pulse yellow", key: "conn.connecting" };
 
     const MAX_HISTORY = 4000;
+
+    // --- Автоследование графика -------------------------------------------
+    // Окно само двигается за ценой: слева свеча подходит к правому краю —
+    // сдвигаем окно на шаг (тот же зум), а по вертикали цена остаётся в поле
+    // зрения с зазором FOLLOW_MARGIN сверху и снизу. Горизонтальный зазор
+    // маленький (FOLLOW_KEEP_BARS свечей) — «почти вплотную к шкале», как
+    // и просили: свеча не уезжает за край.
+    const FOLLOW_EDGE_BARS = 3;   // за сколько свечей до края начинаем двигать
+    const FOLLOW_KEEP_BARS = 1;   // сколько свечей оставляем справа после сдвига
+    const FOLLOW_MARGIN = 0.15;   // зазор по вертикали, доля высоты графика
+    const PRICE_MARGINS_DEFAULT = { top: 0.06, bottom: 0.24 };
+
+    /** Куда сдвинуть окно времени: null — двигать не надо.
+     *
+     * Чистая функция — её гоняет tests/chart_follow.js без браузера.
+     * lr — видимый логический диапазон (from/to), last — индекс последней
+     * свечи. Вправо уезжаем только если свеча подошла к краю: если админ
+     * отлистал график вручную, автоследование не дёргает его назад.
+     */
+    function followRange(lr, last, edgeBars, keepBars) {
+        if (!lr || !isFinite(lr.from) || !isFinite(lr.to) || last < 0) return null;
+        const span = Number(lr.to) - Number(lr.from);
+        if (!(span > 0)) return null;
+        const edge = Number(lr.to) - Number(last);
+        // Дальше зоны слежения не лезем: если график отлистали в историю
+        // (свеча уехала вправо) или, наоборот, окно кончается задолго до неё —
+        // это осознанное действие, автоследование встаёт на паузу.
+        if (edge > edgeBars || edge < -edgeBars) return null;
+        const to = Number(last) + keepBars;
+        if (Math.abs(edge - keepBars) < 1e-9) return null;   // уже стоит как надо
+        return { from: to - span, to: to };
+    }
+
+    /** Настройки цены для режима слежения и обратно. */
+    function followPriceOptions(on) {
+        return on
+            ? { autoScale: true, scaleMargins: { top: FOLLOW_MARGIN, bottom: FOLLOW_MARGIN } }
+            : { autoScale: true, scaleMargins: Object.assign({}, PRICE_MARGINS_DEFAULT) };
+    }
 
     let ws = null;
     let wsReconnectTimer = null;
@@ -98,6 +142,7 @@
     const feedTbody = $("feed-tbody");
     const feedEmptyEl = $("feed-empty");
     const feedCountEl = $("feed-count");
+    const feedFilterEl = $("feed-filter");          // плашка «фильтр: монета»
     const minUsdBtn = $("min-usd-btn");
     const minUsdInput = $("min-usd-input");
     const minUsdApply = $("min-usd-apply");
@@ -487,8 +532,156 @@
         window.addEventListener("resize", handleResize);
         setTimeout(handleResize, 80);
 
-        chart.timeScale().subscribeVisibleLogicalRangeChange(queueRedraw);
+        chart.timeScale().subscribeVisibleLogicalRangeChange((lr) => {
+            queueRedraw();
+            if (followSelfScroll) {           // это наш собственный сдвиг
+                followSelfScroll = false;
+                return;
+            }
+            noteFollowPan(lr);
+        });
         markersApi = null;
+        applyFollowMode();
+    }
+
+    /** Включить/выключить настройки цены и сдвинуть окно по текущей свече. */
+    function applyFollowMode() {
+        if (!chart) return;
+        try {
+            const scale = chart.priceScale("right");
+            if (scale && scale.applyOptions) scale.applyOptions(followPriceOptions(state.chartFollow));
+        } catch (e) { /* ignore */ }
+        try {
+            const ts = chart.timeScale();
+            if (ts && ts.applyOptions) {
+                // справа почти вплотную к шкале
+                ts.applyOptions({ rightOffset: state.chartFollow ? 1 : 6 });
+            }
+        } catch (e) { /* ignore */ }
+        followChartNow();
+    }
+
+    let followSelfScroll = false;   // мы сами подвинули окно — не считаем это панорамой
+
+    /** Один шаг автоследования: подвинуть окно времени (если пора). */
+    function followChartNow() {
+        if (!chart || !state.chartFollow || state.followPaused) return false;
+        if (!state.candles.length) return false;
+        let lr = null;
+        try {
+            lr = chart.timeScale().getVisibleLogicalRange();
+        } catch (e) { return false; }
+        const next = followRange(lr, state.candles.length - 1,
+                                 FOLLOW_EDGE_BARS, FOLLOW_KEEP_BARS);
+        if (!next) return false;
+        return applyFollowRange(next);
+    }
+
+    function applyFollowRange(next) {
+        try {
+            followSelfScroll = true;
+            chart.timeScale().setVisibleLogicalRange(next);
+        } catch (e) { followSelfScroll = false; return false; }
+        // библиотека может не позвать подписчика синхронно — тогда сбрасываем
+        // флаг сами, иначе следующий ручной сдвиг не заметим (слежение
+        // молча перестало бы ставиться на паузу)
+        setTimeout(() => { followSelfScroll = false; }, 0);
+        state.followMoved += 1;
+        return true;
+    }
+
+    /** Прыжок к последней свече: включаем автоследование — сразу к цене. */
+    function anchorToLast() {
+        if (!chart || !state.candles.length) return false;
+        let lr = null;
+        try { lr = chart.timeScale().getVisibleLogicalRange(); } catch (e) { return false; }
+        const span = lr && lr.to > lr.from ? (lr.to - lr.from) : 80;
+        const to = state.candles.length - 1 + FOLLOW_KEEP_BARS;
+        return applyFollowRange({ from: to - span, to: to });
+    }
+
+    /** Ручная прокрутка в историю ставит автоследование на паузу. */
+    function noteFollowPan(lr) {
+        if (!state.chartFollow || followSelfScroll) return;
+        const last = state.candles.length - 1;
+        if (last < 0 || !lr) return;
+        if (lr.to < last - FOLLOW_EDGE_BARS) setFollowPaused(true);
+    }
+
+    function setFollowPaused(on) {
+        if (state.followPaused === !!on) return;
+        state.followPaused = !!on;
+        paintFollowButtons();
+    }
+
+    /** Кнопка/попап: включить автоследование и запомнить выбор. */
+    function setChartFollow(on) {
+        state.chartFollow = !!on;
+        if (on) state.followPaused = false;
+        try { localStorage.setItem("liqscope.chartFollow", on ? "1" : "0"); }
+        catch (e) { /* ignore */ }
+        paintFollowButtons();
+        applyFollowMode();
+        if (on) anchorToLast();   // включили — сразу к актуальной свече
+    }
+
+    function paintFollowButtons() {
+        const on = state.chartFollow && !state.followPaused;
+        [$("follow-toggle"), $("follow-toggle-pop")].forEach((btn) => {
+            if (!btn) return;
+            btn.classList.toggle("active", on);
+            btn.classList.toggle("paused", !!state.followPaused);
+            btn.setAttribute("aria-pressed", on ? "true" : "false");
+            const key = state.followPaused ? "chart.follow_paused"
+                : (state.chartFollow ? "chart.follow_on" : "chart.follow_off");
+            btn.title = I18n.t(key);
+        });
+    }
+
+    function setupFollowToggle() {
+        const btns = [$("follow-toggle"), $("follow-toggle-pop")];
+        if (!btns.some(Boolean)) return;
+        try {
+            const v = localStorage.getItem("liqscope.chartFollow");
+            if (v === "0") state.chartFollow = false;
+            else if (v === "1") state.chartFollow = true;
+        } catch (e) { /* ignore */ }
+        btns.forEach((btn) => {
+            if (!btn) return;
+            btn.addEventListener("click", () => setChartFollow(!state.chartFollow));
+        });
+        I18n.onChange(paintFollowButtons);
+        paintFollowButtons();
+        applyFollowMode();
+        window.LiQScopeFollow = window.LiQScopeFollow || {};
+        window.LiQScopeFollow = {
+            // для tests/chart_follow.js: состояние, чистая математика и ручной шаг
+            enabled: () => !!state.chartFollow,
+            setEnabled: setChartFollow,
+            range: followRange,
+            priceOptions: followPriceOptions,
+            moved: () => state.followMoved,
+            paused: () => !!state.followPaused,
+            pan: (range) => noteFollowPan(range),
+            anchor: () => anchorToLast(),
+            step: () => followChartNow(),
+            edgeBars: FOLLOW_EDGE_BARS,
+            keepBars: FOLLOW_KEEP_BARS,
+            margin: FOLLOW_MARGIN,
+            // настройки шкалы цены, что реально ушли в график
+            priceScaleOptions: () => {
+                try {
+                    const sc = chart && chart.priceScale("right");
+                    return sc && sc.options ? sc.options() : null;
+                } catch (e) { return null; }
+            },
+            timeScaleOptions: () => {
+                try {
+                    const ts = chart && chart.timeScale();
+                    return ts && ts.options ? ts.options() : null;
+                } catch (e) { return null; }
+            },
+        };
     }
 
     function applyPricePrecision(price) {
@@ -541,6 +734,7 @@
         updateLiveStats();
         queueRedraw();
         queueShapeFeed();
+        followChartNow();
     }
 
     function updateCandle(c) {
@@ -571,6 +765,7 @@
         updateLiveStats();
         queueRedraw();
         queueShapeFeed();
+        followChartNow();
     }
 
     // --- Индикатор «живости» тиков ------------------------------------------
@@ -776,22 +971,119 @@
         drawIndicatorPanes();   // окна LIQ/CVD/OI под графиком
     }
 
-    // --- Прямоугольники ликвидаций ---------------------------------------------
-    // Каждый кластер — скруглённый прямоугольник с суммой. Мелкие (ниже кита)
-    // красятся по стороне (маджента/циан), киты — по тепловой шкале объёма.
-    // Пороги масштабируются от оборота монеты (для BTC кит — $100K).
-    // Совсем мелкие (ниже $2K × масштаб) рисуются чипом без текста; подписанные
-    // прямоугольники не налезают друг на друга (жадная раскладка).
+    // --- Плашки ликвидаций ------------------------------------------------------
+    // Плашка — компактная метка кластера ликвидаций: она стоит **там, где были
+    // ликвидации** (по цене, внутри свечи), а не растянута по её телу.
+    // Габариты:
+    //   • высота — как была: 15px у обычной плашки, 16–22px у кита (от суммы),
+    //     10px у чипа без цифр. Сверху ограничена телом свечи с зазором 3%
+    //     с каждой стороны — тело никогда не закрывается целиком;
+    //   • ширина — слот свечи: тянете график вширь — свечи и плашки растут
+    //     вместе, сужаете — сжимаются вместе с ними.
+    // Цифры внутри показываем, только если помещаются: кегль растёт вместе с
+    // шириной, при сужении подпись убирается совсем (остаётся цвет стороны).
+    const LIQ_PLATE_GAP = 0.03;      // зазор до тела свечи с каждой стороны
+    const LIQ_PLATE_H = 15;          // высота обычной плашки (как было)
+    const LIQ_PLATE_CHIP_H = 10;     // чип без цифр
+    const LIQ_PLATE_WHALE_H = 16;    // базовая высота плашки кита (+ до 6px)
+    const LIQ_PLATE_W_FRAC = 0.86;   // доля слота свечи по ширине
+    const LIQ_PLATE_MIN_W = 3;       // совсем узкий слот: плашка-штрих
+    const LIQ_PLATE_MIN_H = 2;
+    const LIQ_PLATE_FONT_MIN = 7.5;  // ниже этого цифры не читаются — убираем
+    const LIQ_PLATE_FONT_MAX = 14;   // крупнее подпись не становится
+    const LIQ_PLATE_TEXT_PAD = 4;    // рамка плашки по бокам подписи
+    const LIQ_PLATE_FONT_W = 0.9;    // кегль как доля ширины плашки
+    const LIQ_PLATE_FONT_H = 0.74;   // кегль как доля высоты плашки
+
+    // Высота плашки: как была, с поправкой на сумму для китов.
+    function liqPlateBaseH(wantLabel, whale, total) {
+        if (!wantLabel) return LIQ_PLATE_CHIP_H;
+        if (!whale) return LIQ_PLATE_H;
+        const extra = Math.min(6, Math.max(-3,
+            (Math.log10(Math.max(Number(total) || 10, 10)) - 5) * 2.5));
+        return LIQ_PLATE_WHALE_H + extra;
+    }
+
+    // Габариты плашки по телу свечи и слоту; подпись — если помещается.
+    // Чистая функция (проверяется в tests/liq_plates.js): measure(text, font)
+    // возвращает ширину текста в пикселях на заданном кегле.
+    function liqPlateGeom(bodyPx, slotPx, label, measure, baseH) {
+        const slot = Math.max(1, Number(slotPx) || 1);
+        const body = Math.max(0, Number(bodyPx) || 0);
+        const base = Math.max(LIQ_PLATE_MIN_H, Number(baseH) || LIQ_PLATE_H);
+        const w = Math.max(LIQ_PLATE_MIN_W, Math.round(slot * LIQ_PLATE_W_FRAC));
+        // Потолок по телу: 3% зазора с каждой стороны (floor — чтобы округление
+        // не съедало зазор). На тонкой свече плашка становится тоньше её тела.
+        const cap = Math.floor(body * (1 - 2 * LIQ_PLATE_GAP));
+        const h = Math.max(LIQ_PLATE_MIN_H, cap > 0 ? Math.min(base, cap)
+                                                   : LIQ_PLATE_MIN_H);
+        const out = { w: w, h: h, font: 0, showLabel: false, text: "" };
+        const text = String(label || "");
+        if (!text || typeof measure !== "function") return out;
+        const room = w - LIQ_PLATE_TEXT_PAD;
+        const per = measure(text, 1);      // ширина подписи на кегле 1
+        if (!(per > 0) || !(room > 0)) return out;
+        // Кегль хотим как можно крупнее — растёт вместе с шириной плашки,
+        // но подпись обязана в неё влезть.
+        let font = Math.min(w * LIQ_PLATE_FONT_W, h * LIQ_PLATE_FONT_H,
+                            LIQ_PLATE_FONT_MAX, room / per);
+        // Ширина текста в канвасе растёт от кегля почти линейно, но не строго:
+        // подгоняем по реальной мере, чтобы подпись гарантированно влезла.
+        for (let i = 0; i < 3; i++) {
+            const wide = measure(text, font);
+            if (!(wide > room)) break;
+            font = font * (room / wide) * 0.97;
+        }
+        if (font < LIQ_PLATE_FONT_MIN) return out;   // узко/мелко — цифры убираем
+        if (measure(text, font) > room) return out;  // не влезла даже сжатой
+        out.font = font;
+        out.showLabel = true;
+        out.text = text;
+        return out;
+    }
+
+    // Пикселей на свечу: ширина слота (barSpacing), медиана по свечам или
+    // ширина канваса, делённая на число видимых свечей.
+    function plateSlotPx() {
+        try {
+            const opt = chart && chart.timeScale && chart.timeScale().options
+                ? chart.timeScale().options() : null;
+            const bs = opt ? Number(opt.barSpacing) : NaN;
+            if (isFinite(bs) && bs > 0) return bs;
+        } catch (e) { /* ниже — считаем сами */ }
+        const gaps = [];
+        const cds = state.candles || [];
+        for (let i = 1; i < cds.length && gaps.length < 40; i++) {
+            try {
+                const a = chart.timeScale().timeToCoordinate(cds[i - 1].time);
+                const b = chart.timeScale().timeToCoordinate(cds[i].time);
+                if (isFinite(a) && isFinite(b) && b > a) gaps.push(b - a);
+            } catch (e) { /* пропускаем */ }
+        }
+        if (gaps.length) {
+            gaps.sort((x, y) => x - y);
+            return gaps[Math.floor(gaps.length / 2)];
+        }
+        const W = clusterCanvas ? Number(clusterCanvas.width) || 0 : 0;
+        let visible = 0;
+        try {
+            const r = chart.timeScale().getVisibleLogicalRange();
+            if (r && isFinite(r.to - r.from) && r.to > r.from) {
+                visible = Math.ceil(r.to - r.from);
+            }
+        } catch (e) { /* нет шкалы — считаем по свечам */ }
+        if (!visible) visible = Math.min(cds.length, 80);
+        if (W > 0 && visible > 0) return W / visible;
+        return 8;
+    }
+
     function drawLiqRects(ctx) {
         const tfSec = state.timeframe * 60;
         const kvol = chartVolScale();
         const items = visibleLiquidations();
         if (!items.length || !state.candles.length) return;
 
-        // Свечи по времени: прямоугольник рисуем только там, где свеча реально
-        // есть, и прижимаем цену к её диапазону low..high. Биржи отдают цену
-        // банкротства, она может уходить далеко от рынка — раньше из-за этого
-        // метки улетали в пустоту.
+        // Свечи по времени: плашка рисуется только там, где свеча реально есть.
         const bars = new Map();
         state.candles.forEach((c) => bars.set(c.time, c));
 
@@ -805,95 +1097,117 @@
             let price = Number(item.price);
             if (!isFinite(price)) price = bar.close;
             price = Math.min(Math.max(price, lo), hi);
-            // Внутри свечи раскладываем по 6 уровням, чтобы близкие
-            // ликвидации слипались в один прямоугольник.
+            // Внутри свечи — шесть уровней (как и было): кластер стоит там,
+            // где были ликвидации, а не растянут по всему телу свечи.
             const span = hi - lo;
             const level = span > 0 ? Math.round(((price - lo) / span) * 5) : 0;
-            const key = t + "_" + level;
-            const c = clusters.get(key) || {
-                key: key, time: t, lo: lo, hi: hi, level: level,
-                longUsd: 0, shortUsd: 0, total: 0, count: 0, longN: 0, shortN: 0, ids: [],
-                exchs: {},
-            };
+            const key = "b" + t + "_" + level;
+            let c = clusters.get(key);
+            if (!c) {
+                c = {
+                    key: key, time: t, bar: bar, lo: lo, hi: hi, level: level,
+                    longUsd: 0, shortUsd: 0, total: 0, count: 0, longN: 0,
+                    shortN: 0, ids: [], exchs: {}, pxSum: 0,
+                };
+                clusters.set(key, c);
+            }
             if (item.side === "SELL") { c.longUsd += item.usd; c.longN += 1; }
             else { c.shortUsd += item.usd; c.shortN += 1; }
             c.total += item.usd;
             c.count += 1;
+            c.pxSum += price * item.usd;
             const exKey = String(item.exchange || "?").toUpperCase();
             const slot = c.exchs[exKey] || { n: 0, usd: 0 };
             slot.n += 1;
             slot.usd += item.usd;
             c.exchs[exKey] = slot;
             if (item.id != null) c.ids.push(item.id);
-            clusters.set(key, c);
         });
         if (!clusters.size) return;
 
+        const priceOf = (c) => (c.total > 0 ? c.pxSum / c.total
+                                            : Number(c.bar.close));
         const ts = chart.timeScale();
+        const slotPx = plateSlotPx();
+        const measure = (text, font) => {
+            ctx.font = "bold " + font.toFixed(1) + "px 'JetBrains Mono', monospace";
+            return ctx.measureText ? ctx.measureText(text).width : 0;
+        };
+        // От слабых к сильным: крупные плашки рисуются последними, поверх
         const list = Array.from(clusters.values()).sort((a, b) => a.total - b.total);
         const activeKey = pinHitKey || hoverHitKey;   // закреплённый важнее
 
         clusterHits = [];
-        const labeled = [];   // подписанные прямоугольники — защита от налезания
+        const drawn = [];    // наложение: сначала чип без цифр, потом пропуск
         ctx.save();
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
         list.forEach((c) => {
-            const price = c.hi > c.lo ? c.lo + ((c.hi - c.lo) * c.level) / 5 : c.lo;
-            let x, y;
+            const bar = c.bar;
+            let x, yO, yC, y;
             try {
                 x = ts.timeToCoordinate(c.time);
-                y = candleSeries.priceToCoordinate(price);
+                yO = candleSeries.priceToCoordinate(Number(bar.open));
+                yC = candleSeries.priceToCoordinate(Number(bar.close));
+                y = candleSeries.priceToCoordinate(priceOf(c));
             } catch (e) { return; }
-            if (x === null || y === null || x === undefined || y === undefined) return;
+            if (x === null || x === undefined || !isFinite(x)) return;
+            if (!isFinite(yO) || !isFinite(yC)) return;
             if (x < -40 || x > clusterCanvas.width + 40) return;
-            if (y < -30 || y > clusterCanvas.height + 30) return;
+            const bodyPx = Math.abs(yC - yO);
 
             const whale = c.total >= WHALE_USD * kvol;
             const isLong = c.longUsd >= c.shortUsd;
-            const theme = whale ? heatTheme(c.total, kvol) : (isLong ? LIQ_COLORS.long : LIQ_COLORS.short);
+            const theme = whale ? heatTheme(c.total, kvol)
+                                : (isLong ? LIQ_COLORS.long : LIQ_COLORS.short);
             const wantLabel = whale || c.total >= LIQ_LABEL_MIN_USD * kvol;
-
-            let bw, bh, label;
-            if (wantLabel) {
-                ctx.font = "bold 9px 'JetBrains Mono', monospace";
-                label = fmtCompact(c.total);
-                bw = Math.max(30, Math.ceil(ctx.measureText(label).width) + 12);
-                bh = whale ? 16 + Math.min(6, Math.max(-3, (Math.log10(c.total) - 5) * 2.5)) : 15;
-            } else {
-                bw = 10; bh = 10; label = "";
+            const full = fmtCompact(c.total);
+            const baseH = liqPlateBaseH(wantLabel, whale, c.total);
+            let geom = liqPlateGeom(bodyPx, slotPx, wantLabel ? full : "",
+                                    measure, baseH);
+            if (wantLabel && !geom.showLabel && full.charAt(0) === "$") {
+                // Не влезла подпись со знаком валюты — пробуем без него:
+                // в узком слоте выигранный символ и есть шанс показать цифры.
+                const alt = liqPlateGeom(bodyPx, slotPx, full.slice(1),
+                                         measure, baseH);
+                if (alt.showLabel) geom = alt;
             }
-            const bx = Math.round(x - bw / 2), by = Math.round(y - bh / 2);
-
-            // Подписанный прямоугольник, налезающий на другой подписанный, —
-            // рисуем чипом без текста (кроме китов: киты всегда с текстом).
-            let showLabel = wantLabel;
-            if (wantLabel && !whale) {
-                for (let j = 0; j < labeled.length; j++) {
-                    const p = labeled[j];
-                    if (bx < p.x + p.w + 2 && bx + bw + 2 > p.x &&
-                        by < p.y + p.h + 2 && by + bh + 2 > p.y) {
-                        showLabel = false;
-                        bw = 10; bh = 10;
-                        break;
-                    }
+            // Центр плашки — ровно на цене ликвидаций (в моменте), а не в
+            // середине тела: по положению видно уровень, где снесло позиции.
+            const cy = isFinite(y) ? y : (yO + yC) / 2;
+            const place = (g) => {
+                const bx = Math.round(x - g.w / 2), by = Math.round(cy - g.h / 2);
+                for (let j = 0; j < drawn.length; j++) {
+                    const d = drawn[j];
+                    if (bx < d.x + d.w && bx + g.w > d.x &&
+                            by < d.y + d.h && by + g.h > d.y) return null;
                 }
+                return { fx: bx, fy: by, bw: g.w, bh: g.h };
+            };
+            let box = place(geom);
+            if (!box && geom.showLabel) {
+                // Налезает на соседнюю плашку — как и раньше, показываем чипом
+                // без цифр: уровень виден, цифры не наслаиваются.
+                const chip = liqPlateGeom(bodyPx, slotPx, "", measure,
+                                          LIQ_PLATE_CHIP_H);
+                box = place(chip);
+                if (box) geom = chip;
             }
-            const fx = showLabel ? bx : Math.round(x - bw / 2);
-            const fy = showLabel ? by : Math.round(y - bh / 2);
-            if (showLabel) labeled.push({ x: fx, y: fy, w: bw, h: bh });
+            if (!box) return;
+            const fx = box.fx, fy = box.fy, bw = box.bw, bh = box.bh;
+            drawn.push({ x: fx, y: fy, w: bw, h: bh });
 
             const isActive = activeKey === c.key;
-            clusterHits.push({ kind: "liq", x: fx, y: fy, w: bw, h: bh, key: c.key, ids: c.ids,
-                time: c.time, price: price, total: c.total, count: c.count,
-                longUsd: c.longUsd, shortUsd: c.shortUsd,
+            clusterHits.push({ kind: "liq", x: fx, y: fy, w: bw, h: bh, key: c.key,
+                ids: c.ids, time: c.time, price: priceOf(c), total: c.total,
+                count: c.count, longUsd: c.longUsd, shortUsd: c.shortUsd,
                 longN: c.longN, shortN: c.shortN, whale: whale, exchs: c.exchs });
 
             const glow = 6 + Math.min(12, (Math.log10(Math.max(c.total, 10)) - 3) * 3);
-            const rad = showLabel ? 4 : 3;
+            const rad = Math.max(1, Math.min(3, bh / 2));
 
-            // Тёмная подложка отделяет прямоугольник от тела свечи любого цвета
-            rrPath(ctx, fx - 1.5, fy - 1.5, bw + 3, bh + 3, rad + 1);
+            // Тёмная подложка отделяет плашку от тела свечи любого цвета
+            rrPath(ctx, fx - 1, fy - 1, bw + 2, bh + 2, rad + 0.5);
             ctx.fillStyle = "rgba(5,8,14,0.85)";
             ctx.fill();
 
@@ -903,22 +1217,37 @@
             ctx.fillStyle = theme.fill;
             ctx.fill();
             ctx.shadowBlur = 0;
-            ctx.lineWidth = whale ? 1.8 : 1.2;
+            ctx.lineWidth = whale ? 1.6 : 1.1;
             ctx.strokeStyle = theme.ring;
             ctx.stroke();
 
-            // Активный прямоугольник (наведение/нажатие) — белое кольцо поверх
+            // Активная плашка (наведение в ленте или нажатие на графике) —
+            // ярко-белая подсветка: мягкий ореол, резкий контур и светлая
+            // вуаль поверх цвета, чтобы нужный кластер было видно сразу.
             if (isActive) {
-                rrPath(ctx, fx - 3.5, fy - 3.5, bw + 7, bh + 7, rad + 2);
-                ctx.lineWidth = 1.8;
-                ctx.strokeStyle = "rgba(255,255,255,0.95)";
+                ctx.save();
+                rrPath(ctx, fx - 3, fy - 3, bw + 6, bh + 6, rad + 2);
+                ctx.lineWidth = 3;
+                ctx.strokeStyle = "rgba(255,255,255,0.6)";
+                ctx.shadowColor = "#ffffff";
+                ctx.shadowBlur = 16;
                 ctx.stroke();
+                ctx.shadowBlur = 0;
+                rrPath(ctx, fx - 2.2, fy - 2.2, bw + 4.4, bh + 4.4, rad + 1.6);
+                ctx.lineWidth = 2.2;
+                ctx.strokeStyle = "#ffffff";
+                ctx.stroke();
+                rrPath(ctx, fx, fy, bw, bh, rad);
+                ctx.fillStyle = "rgba(255,255,255,0.24)";
+                ctx.fill();
+                ctx.restore();
             }
 
-            if (showLabel) {
-                ctx.font = "bold 9px 'JetBrains Mono', monospace";
+            if (geom.showLabel) {
+                ctx.font = "bold " + geom.font.toFixed(1) +
+                    "px 'JetBrains Mono', monospace";
                 ctx.fillStyle = theme.text;
-                ctx.fillText(label, x, y + 0.5);
+                ctx.fillText(geom.text || full, x, cy + 0.5);
             }
         });
         ctx.restore();
@@ -1408,6 +1737,10 @@
     // крупняк — чуть больше и с более сильным свечением. Размер нарочно
     // сдержанный (потолок вдвое ниже прежнего): главную работу делает цвет.
     const OI_TIER_MIN = 1000000;
+    // Масштаб шариков: на прежних размерах цифры внутри не читались
+    // (мини r≈6, подписи 8px). Всё, что рисуем, умножаем на этот множитель —
+    // пропорции и формула вписывания текста остаются прежними.
+    const OI_BALL_SCALE = 1.5;
     const OI_TIER_STYLE = [
         null,   // 0 — мини
         { mult: 1.0,  font: 0, glow: 6  },   // $1M+
@@ -1427,7 +1760,8 @@
         const st = OI_TIER_STYLE[tier] || OI_TIER_STYLE[1];
         return {
             fill: "rgba(" + c[0] + "," + c[1] + "," + c[2] + ",0.95)",
-            ring: b.ring, text: b.text, glow: st.glow,
+            ring: b.ring, text: b.text,
+            glow: Math.round(st.glow * OI_BALL_SCALE),
         };
     }
 
@@ -1496,27 +1830,39 @@
             const abs = Math.abs(d);
             const tier = oiTier(abs, kvol);
             const val = fmtCompact(abs);
-            let r, fs = 0;
+            // Подбор размера считаем в «базовых» единицах (как раньше),
+            // а в конце умножаем геометрию на OI_BALL_SCALE — иначе подпись
+            // внутри шарика уходила в 6.5-8px и не читалась.
+            const s = OI_BALL_SCALE;
+            let rB = 0, fsB = 0;
             if (tier > 0) {
                 ctx.font = "bold 8px 'JetBrains Mono', monospace";
                 const tw8 = ctx.measureText(val).width;
                 if (tw8 <= 1.9 * 18 - 5) {
-                    r = Math.min(15, Math.max(9, (tw8 + 5) / 1.9));
+                    rB = Math.min(15, Math.max(9, (tw8 + 5) / 1.9));
                     const sizes = [8, 7, 6.5];
                     for (let f = 0; f < sizes.length; f++) {
                         ctx.font = "bold " + sizes[f] + "px 'JetBrains Mono', monospace";
-                        if (ctx.measureText(val).width <= 1.9 * r - 5) { fs = sizes[f]; break; }
+                        if (ctx.measureText(val).width <= 1.9 * rB - 5) { fsB = sizes[f]; break; }
                     }
                 }
             }
-            if (!fs) { r = 6; }
-            else if (tier >= 2) {
-                const st = OI_TIER_STYLE[tier];
-                fs = Math.min(10, fs + st.font);
+            let r, fs = 0;
+            if (!fsB) {
+                r = 6 * s;   // мелочь без подписи
+            } else {
+                if (tier >= 2) {
+                    const st = OI_TIER_STYLE[tier];
+                    fsB = Math.min(10, fsB + st.font);
+                    ctx.font = "bold " + fsB + "px 'JetBrains Mono', monospace";
+                    rB = Math.min(15, Math.max(rB * st.mult,
+                                               (ctx.measureText(val).width + 5) / 1.9));
+                }
+                fs = Math.round(fsB * s * 10) / 10;
+                r = rB * s;
                 ctx.font = "bold " + fs + "px 'JetBrains Mono', monospace";
-                r = Math.min(15, Math.max(r * st.mult, (ctx.measureText(val).width + 5) / 1.9));
             }
-            const gap = 10 + tier * 2;   // чем крупнее, тем дальше от свечи
+            const gap = (10 + tier * 2) * s;   // чем крупнее, тем дальше от свечи
             const cy = up ? yRef - gap - r : yRef + gap + r;
             if (x < -r || x > W + r || cy < -r || cy > H + r) continue;
 
@@ -1751,7 +2097,13 @@
     let drawColor = "#ffd166";
     let drawDraft = null;         // первая точка двухточечной фигуры {time, price}
     let drawHover = null;         // {x, y} в пикселях для предпросмотра
-    let drawFiguresList = [];     // [{t, c, p1:{time,price}, p2?}]
+    let drawFiguresList = [];     // [{t, c, pane, p1:{time,price}, p2?}]
+    let drawDraftPane = null;     // в каком окне начата фигура
+    let drawHoverPane = null;     // {x, y} чьего окна сейчас под курсором
+    // Шкалы нижних окон (lo…hi по значениям) — заполняются, когда окно рисуется
+    const paneScales = {};
+    // Отступы шкалы внутри окна: те же, что в рисовании самих окон
+    const PANE_PAD = { liq: 6, cvd: 6, oi: 8 };
 
     function drawKey() { return "liqscope.drawings." + chartSymbol(); }
 
@@ -1770,9 +2122,11 @@
                 if (!f.p1 || !isFinite(Number(f.p1.time)) || !isFinite(Number(f.p1.price))) return;
                 if (f.t !== "horiz" &&
                         (!f.p2 || !isFinite(Number(f.p2.time)) || !isFinite(Number(f.p2.price)))) return;
+                const pane = DRAW_PANES.indexOf(f.pane) === -1 ? "main" : f.pane;
                 drawFiguresList.push({
                     t: f.t,
                     c: typeof f.c === "string" ? f.c : drawColor,
+                    pane: pane,
                     p1: { time: Number(f.p1.time), price: Number(f.p1.price) },
                     p2: f.p2 ? { time: Number(f.p2.time), price: Number(f.p2.price) } : null,
                 });
@@ -1785,6 +2139,7 @@
     }
 
     function drawAddFigure(fig) {
+        if (fig && !fig.pane) fig.pane = "main";
         drawFiguresList.push(fig);
         saveDrawings();
         queueRedraw();
@@ -1797,7 +2152,70 @@
         queueRedraw();
     }
 
-    // время+цена → пиксели (null, если точка вне видимости)
+    // Время+цена → пиксели (null, если точка вне видимости).
+    // Окна нижних графиков: x берём из общей шкалы времени, y — из шкалы окна.
+    const DRAW_PANES = ["main", "liq", "cvd", "oi"];
+
+    function paneHeight(kind) {
+        const P = IND_PANES[kind];
+        if (!P) return 0;
+        const cv = $(P.canvas) || $(P.draw);
+        if (!cv) return 0;
+        return cv.clientHeight || cv.height || 0;
+    }
+
+    function paneYOf(kind, value, h) {
+        const sc = paneScales[kind];
+        let lo = sc ? Number(sc.lo) : 0, hi = sc ? Number(sc.hi) : 1;
+        if (!isFinite(lo) || !isFinite(hi) || hi - lo < 1e-9) { lo = 0; hi = 1; }
+        const pad = PANE_PAD[kind] === undefined ? 8 : PANE_PAD[kind];
+        const H = h || paneHeight(kind) || 1;
+        return H - pad - (H - 2 * pad) * (Number(value) - lo) / (hi - lo);
+    }
+
+    function paneValueAt(kind, y, h) {
+        const sc = paneScales[kind];
+        let lo = sc ? Number(sc.lo) : 0, hi = sc ? Number(sc.hi) : 1;
+        if (!isFinite(lo) || !isFinite(hi) || hi - lo < 1e-9) { lo = 0; hi = 1; }
+        const pad = PANE_PAD[kind] === undefined ? 8 : PANE_PAD[kind];
+        const H = h || paneHeight(kind) || 1;
+        const frac = (H - pad - Number(y)) / (H - 2 * pad);
+        return lo + (hi - lo) * frac;
+    }
+
+    // точка фигуры главного окна → пиксели нижнего: x по времени, y по доле
+    // видимого диапазона цен (чтобы уровень читался в масштабе окна)
+    function projectToXY(kind, tp) {
+        if (!chart || !candleSeries || !tp) return null;
+        const H = paneHeight(kind);
+        if (!H) return null;
+        try {
+            const x = chart.timeScale().timeToCoordinate(Number(tp.time));
+            const ym = candleSeries.priceToCoordinate(Number(tp.price));
+            const Hm = (drawCanvas && (drawCanvas.clientHeight || drawCanvas.height)) || 0;
+            if (!isFinite(x) || !isFinite(ym) || !Hm) return null;
+            const frac = Math.min(1, Math.max(0, 1 - ym / Hm));
+            const pad = PANE_PAD[kind] === undefined ? 8 : PANE_PAD[kind];
+            return { x: x, y: H - pad - (H - 2 * pad) * frac };
+        } catch (e) { return null; }
+    }
+
+    // конвертер для конкретного окна: своя фигура — по своим значениям,
+    // фигура с главного графика — проекцией
+    function paneToXY(kind, fig) {
+        return function (tp) {
+            if (!tp) return null;
+            if (fig && fig.pane && fig.pane !== "main") {
+                try {
+                    const x = chart.timeScale().timeToCoordinate(Number(tp.time));
+                    if (!isFinite(x)) return null;
+                    return { x: x, y: paneYOf(kind, Number(tp.price), paneHeight(kind)) };
+                } catch (e) { return null; }
+            }
+            return projectToXY(kind, tp);
+        };
+    }
+
     function drawToXY(tp) {
         if (!chart || !candleSeries || !tp) return null;
         try {
@@ -1908,24 +2326,25 @@
         ctx.stroke();
     }
 
-    function drawFigureShape(ctx, fig, W, H, preview) {
+    function drawFigureShape(ctx, fig, W, H, preview, toXY) {
+        const cvt = toXY || drawToXY;
         ctx.strokeStyle = fig.c;
         ctx.fillStyle = fig.c;
         ctx.setLineDash(preview ? [5, 4] : []);
         if (fig.t === "horiz") {
-            const a = drawToXY(fig.p1);
+            const a = cvt(fig.p1);
             if (a) drawLineSeg(ctx, 0, a.y, W, a.y);
         } else if (fig.t === "line") {
-            const a = drawToXY(fig.p1), b = drawToXY(fig.p2);
+            const a = cvt(fig.p1), b = cvt(fig.p2);
             if (a && b) drawLineSeg(ctx, a.x, a.y, b.x, b.y);
         } else if (fig.t === "ray") {
-            const a = drawToXY(fig.p1), b = drawToXY(fig.p2);
+            const a = cvt(fig.p1), b = cvt(fig.p2);
             if (a && b) {
                 const f = rayFar(a, b, W, H);
                 drawLineSeg(ctx, a.x, a.y, f.x, f.y);
             }
         } else if (fig.t === "rect") {
-            const a = drawToXY(fig.p1), b = drawToXY(fig.p2);
+            const a = cvt(fig.p1), b = cvt(fig.p2);
             if (a && b) {
                 const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y);
                 const w = Math.abs(b.x - a.x), h = Math.abs(b.y - a.y);
@@ -1935,14 +2354,14 @@
                 ctx.strokeRect(x + 0.5, y + 0.5, w, h);
             }
         } else if (fig.t === "fib") {
-            const a = drawToXY(fig.p1);
+            const a = cvt(fig.p1);
             if (a) {
                 ctx.lineWidth = 1;
                 ctx.font = "11px Inter, system-ui, sans-serif";
                 ctx.textBaseline = "bottom";
                 FIB_RATIOS.forEach((r) => {
                     const lvl = fibPrice(fig.p1, fig.p2, r);
-                    const pt = drawToXY({ time: fig.p1.time, price: lvl });
+                    const pt = cvt({ time: fig.p1.time, price: lvl });
                     if (!pt) return;
                     drawLineSeg(ctx, a.x, pt.y, W, pt.y);
                     const label = (r * 100).toFixed(1) + "%  " + lvl.toFixed(priceDigits(lvl));
@@ -1955,18 +2374,231 @@
         ctx.setLineDash([]);
     }
 
+    function paneOf(fig) {
+        return fig && DRAW_PANES.indexOf(fig.pane) !== -1 ? fig.pane : "main";
+    }
+
     function drawFigures() {
         if (!drawCanvas || !chart || !candleSeries) return;
         const ctx = drawCanvas.getContext("2d");
         const W = drawCanvas.width, H = drawCanvas.height;
         ctx.clearRect(0, 0, W, H);
         ctx.lineWidth = 2;
-        drawFiguresList.forEach((fig) => drawFigureShape(ctx, fig, W, H, false));
+        drawFiguresList.forEach((fig) => {
+            if (paneOf(fig) === "main") drawFigureShape(ctx, fig, W, H, false);
+        });
         drawPreview(ctx, W, H);
+    }
+
+    // --- фигуры в нижних окнах (LIQ/CVD/OI) --------------------------------
+    // В окне видны: свои фигуры (по его шкале значений) и проекции фигур
+    // основного графика — приглушённо, чтобы уровни читались по всей стопке.
+    function paneOverlayCtx(kind) {
+        const P = IND_PANES[kind];
+        if (!P) return null;
+        const canvas = $(P.draw);
+        if (!canvas || !state[P.skey]) return null;
+        const parent = canvas.parentElement || {};
+        const w = canvas.clientWidth || parent.clientWidth || 0;
+        const h = canvas.clientHeight || parent.clientHeight || 0;
+        if (w < 10 || h < 8) return { canvas: canvas, ctx: canvas.getContext("2d"), w: 0, h: 0 };
+        const dpr = window.devicePixelRatio || 1;
+        const W = Math.round(w * dpr), H = Math.round(h * dpr);
+        if (canvas.width !== W || canvas.height !== H) {
+            canvas.width = W; canvas.height = H;
+        }
+        const ctx = canvas.getContext("2d");
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, w, h);
+        return { canvas: canvas, ctx: ctx, w: w, h: h };
+    }
+
+    function drawPaneFigures(kind) {
+        const p = paneOverlayCtx(kind);
+        if (!p || !p.w) return;
+        const { ctx, w, h } = p;
+        ctx.lineWidth = 2;
+        drawFiguresList.forEach((fig) => {
+            const cvt = paneToXY(kind, fig);
+            if (paneOf(fig) === kind) {
+                drawFigureShape(ctx, fig, w, h, false, cvt);
+                return;
+            }
+            if (paneOf(fig) !== "main") return;
+            ctx.save();
+            ctx.globalAlpha = 0.5;
+            drawFigureShape(ctx, fig, w, h, true, cvt);
+            ctx.restore();
+        });
+        drawPanePreview(kind, ctx, w, h);
+    }
+
+    // tests/ind_panes.js: состояние рисования — без мыши в jsdom его не
+    // выставить, а проверить предпросмотр фигуры в окне нужно.
+    function drawTestState(patch) {
+        if (patch) {
+            if ("tool" in patch) drawTool = patch.tool;
+            if ("draft" in patch) drawDraft = patch.draft;
+            if ("draftPane" in patch) drawDraftPane = patch.draftPane;
+            if ("hover" in patch) drawHover = patch.hover;
+            if ("hoverPane" in patch) drawHoverPane = patch.hoverPane;
+        }
+        return { tool: drawTool, draft: drawDraft, draftPane: drawDraftPane,
+                 hover: drawHover, hoverPane: drawHoverPane };
+    }
+
+    function drawPanePreview(kind, ctx, w, h) {
+        if (!drawTool || drawTool === "eraser") return;
+        const ownDraft = drawDraftPane === kind;      // фигура начата в этом окне
+        if (drawTool === "horiz") {
+            if (!drawHover || drawHoverPane !== kind) return;
+            ctx.strokeStyle = drawColor;
+            ctx.setLineDash([5, 4]);
+            drawLineSeg(ctx, 0, drawHover.y, w, drawHover.y);
+            ctx.setLineDash([]);
+            return;
+        }
+        if (!ownDraft) {
+            // Фигура начата в другом окне: показываем только её проекцию —
+            // тянуть «резинку» в чужой шкале нельзя (значения окон разные).
+            if (!drawDraft || drawDraftPane === "main") return;
+            const a = paneToXY(kind, { pane: "main" })(drawDraft);
+            if (!a) return;
+            ctx.fillStyle = drawColor;
+            ctx.beginPath();
+            ctx.arc(a.x, a.y, 4, 0, Math.PI * 2);
+            ctx.fill();
+            return;
+        }
+        // Своя фигура окна рисуется ПО ШКАЛЕ ЭТОГО ОКНА: раньше предпросмотр
+        // уходил в проекцию главного графика (значение окна как цена), из-за
+        // чего линия при перетаскивании прилипала к верхней кромке окна.
+        const cvt = paneToXY(kind, { pane: kind });
+        if (drawDraft) {
+            const a = cvt(drawDraft);
+            if (a) {
+                ctx.fillStyle = drawColor;
+                ctx.beginPath();
+                ctx.arc(a.x, a.y, 4, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+        if (!drawHover || drawHoverPane !== kind || !drawDraft) return;
+        const a = cvt(drawDraft);
+        if (!a) return;
+        const tp = panePixelToTP(kind, drawHover.x, drawHover.y);
+        if (!tp) return;
+        drawFigureShape(ctx, { t: drawTool, c: drawColor, pane: kind,
+                               p1: drawDraft, p2: tp }, w, h, true, cvt);
+    }
+
+    // время по пикселю в окне: шкала времени общая с графиком, но если
+    // coordinateToTime молчит — берём ближайшую свечу (точка «липнет»
+    // к свече, как и положено при рисовании по свечам)
+    function paneTimeAt(x) {
+        if (!chart) return null;
+        try {
+            const t = chart.timeScale().coordinateToTime(x);
+            if (t !== null && t !== undefined && isFinite(Number(t))) return Number(t);
+        } catch (e) { /* ниже — обходной путь */ }
+        let best = null, bestD = Infinity;
+        (state.candles || []).forEach((c) => {
+            let cx = null;
+            try { cx = chart.timeScale().timeToCoordinate(c.time); } catch (e) { return; }
+            if (cx === null || cx === undefined || !isFinite(cx)) return;
+            const d = Math.abs(cx - x);
+            if (d < bestD) { bestD = d; best = Number(c.time); }
+        });
+        return best;
+    }
+
+    // пиксель в окне → время (общая шкала) и значение шкалы окна
+    function panePixelToTP(kind, x, y) {
+        const time = paneTimeAt(x);
+        if (time === null || !isFinite(time)) return null;
+        return { time: time, price: paneValueAt(kind, y, paneHeight(kind)) };
+    }
+
+    function drawPaneDrawings() {
+        Object.keys(IND_PANES).forEach((kind) => {
+            try { drawPaneFigures(kind); } catch (e) { /* окно не должно ломать график */ }
+        });
+    }
+
+    // клик по окну: та же логика, что на основном графике
+    function drawPointAt(tp, pane) {
+        const p = pane || "main";
+        if (drawTool === "horiz") {
+            drawAddFigure({ t: "horiz", c: drawColor, pane: p, p1: tp, p2: null });
+            return;
+        }
+        if (!drawDraft || drawDraftPane !== p) {
+            drawDraft = tp;
+            drawDraftPane = p;
+            queueRedraw();
+            return;
+        }
+        drawAddFigure({ t: drawTool, c: drawColor, pane: p, p1: drawDraft, p2: tp });
+        drawDraft = null;
+        drawDraftPane = null;
+    }
+
+    function paneErase(kind, x, y) {
+        const h = paneHeight(kind);
+        const w = (paneOverlayCtx(kind) || {}).w || 0;
+        for (let i = drawFiguresList.length - 1; i >= 0; i--) {
+            const fig = drawFiguresList[i];
+            const own = paneOf(fig) === kind;
+            if (!own && paneOf(fig) !== "main") continue;
+            const cvt = paneToXY(kind, fig);
+            if (drawFigureHit(fig, x, y, cvt, w, h)) {
+                drawFiguresList.splice(i, 1);
+                saveDrawings();
+                queueRedraw();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function setupPaneDrawings() {
+        Object.keys(IND_PANES).forEach((kind) => {
+            const P = IND_PANES[kind];
+            const canvas = $(P.draw);
+            if (!canvas) return;
+            canvas.addEventListener("click", (e) => {
+                if (!drawTool) return;
+                const x = e.offsetX, y = e.offsetY;
+                if (drawTool === "eraser") { paneErase(kind, x, y); return; }
+                const tp = panePixelToTP(kind, x, y);
+                if (!tp) return;
+                drawPointAt(tp, kind);
+            });
+            canvas.addEventListener("mousemove", (e) => {
+                if (!drawTool) return;
+                drawHover = { x: e.offsetX, y: e.offsetY };
+                drawHoverPane = kind;
+                queueRedraw();
+            });
+            canvas.addEventListener("mouseleave", () => {
+                if (drawHoverPane !== kind) return;
+                drawHover = null;
+                drawHoverPane = null;
+                queueRedraw();
+            });
+            canvas.addEventListener("contextmenu", (e) => {
+                if (!drawTool) return;
+                e.preventDefault();
+                if (drawDraft) { drawDraft = null; drawDraftPane = null; queueRedraw(); }
+                else setDrawTool(null);
+            });
+        });
     }
 
     function drawPreview(ctx, W, H) {
         if (!drawTool || drawTool === "eraser") return;
+        if (drawHoverPane && drawHoverPane !== "main") return;
+        if (drawDraft && drawDraftPane && drawDraftPane !== "main") return;
         if (drawTool === "horiz") {
             if (!drawHover) return;
             ctx.strokeStyle = drawColor;
@@ -1992,7 +2624,15 @@
     function setDrawTool(tool) {
         drawTool = tool;
         drawDraft = null;
+        drawDraftPane = null;
         drawHover = null;
+        drawHoverPane = null;
+        Object.keys(IND_PANES).forEach((kind) => {
+            const cv = $(IND_PANES[kind].draw);
+            if (!cv) return;
+            cv.classList.toggle("armed", !!tool);
+            cv.classList.toggle("erase", tool === "eraser");
+        });
         if (drawToolbar) {
             drawToolbar.querySelectorAll("[data-draw-tool]").forEach((b) =>
                 b.classList.toggle("active", b.getAttribute("data-draw-tool") === tool));
@@ -2030,17 +2670,7 @@
         }
         const tp = drawClickToTP(param);
         if (!tp) return;
-        if (drawTool === "horiz") {
-            drawAddFigure({ t: "horiz", c: drawColor, p1: tp, p2: null });
-            return;
-        }
-        if (!drawDraft) {
-            drawDraft = tp;
-            queueRedraw();
-            return;
-        }
-        drawAddFigure({ t: drawTool, c: drawColor, p1: drawDraft, p2: tp });
-        drawDraft = null;
+        drawPointAt(tp, "main");
     }
 
     function setupDrawToolbar() {
@@ -2081,8 +2711,50 @@
             });
         }
         // тестовый API для jsdom-гарнесса tests/drawings.js
+        setupPaneDrawings();
+        window.LiqScopeLiq = {
+            plateGeom: liqPlateGeom,
+            slotPx: plateSlotPx,
+            plateGap: LIQ_PLATE_GAP,
+            plateBaseH: liqPlateBaseH,
+            fontMin: LIQ_PLATE_FONT_MIN,
+            // для tests/liq_plates.js: что реально нарисовано и как свеча
+            // отображается в пиксели при текущем масштабе
+            hits: () => clusterHits.map((h) => ({ x: h.x, y: h.y, w: h.w,
+                                                  h: h.h, key: h.key,
+                                                  price: h.price, total: h.total,
+                                                  count: h.count })),
+            priceToY: (v) => candleSeries.priceToCoordinate(Number(v)),
+            timeToX: (t) => chart.timeScale().timeToCoordinate(Number(t)),
+            // для tests/liq_hover.js: подсветка кластера, как при наведении
+            // строки ленты (в jsdom мышью не походишь)
+            setHover: (key) => { hoverHitKey = key || null; queueRedraw(); },
+            // Растягивание графика: в jsdom библиотека не пересчитывает
+            // ширину слота, поэтому tests/liq_plates.js подменяет у шкалы
+            // времени timeToCoordinate — свечи и плашки растут вместе,
+            // ровно как при живом зуме.
+            timeScale: () => chart.timeScale(),
+            candles: () => (state.candles || []).map((c) => ({
+                time: c.time, open: c.open, close: c.close,
+                high: c.high, low: c.low,
+            })),
+            redraw: () => drawClusters(),
+        };
         window.LiqScopeDraw = {
             fibPrice, distToSegment, rayFar,
+            paneCanvas: (kind) => {
+                const P = IND_PANES[kind];
+                return P ? $(P.draw) : null;
+            },
+            paneToXY: (kind, tp) => paneToXY(kind, { pane: kind })(tp),
+            testState: drawTestState,
+            projectToXY: projectToXY,
+            setPaneScale: (kind, lo, hi) => { paneScales[kind] = { lo: lo, hi: hi }; },
+            paneValueAt: paneValueAt,
+            panePixelToTP: panePixelToTP,
+            paneTimeAt: paneTimeAt,
+            clickPoint: (tp, pane) => drawPointAt(tp, pane),
+            drawAt: drawPaneDrawings,
             figureHit: (fig, x, y, toXY, W, H) => drawFigureHit(fig, x, y, toXY, W, H),
             add: drawAddFigure,
             clear: drawClearAll,
@@ -2150,24 +2822,57 @@
     // --- Регулируемые панели: размеры сохраняются в браузере -----------------
     function clampPx(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
-    function initSplitters() {
-        const root = document.documentElement;
-        const layout = { feedW: 430, coinsH: 170 };
+    // Высоты блоков графика: главный тянется сам (занимает остаток стека),
+    // окна LIQ/CVD/OI — своим полотном в px. Складываем всё в тот же
+    // liqscope.layout, что и лента с «Лидерами».
+    const IND_KINDS = ["liq", "cvd", "oi"];
+    const IND_DEFAULT_CANVAS_H = 64;   // высота полотна окна по умолчанию
+    const IND_MIN_CANVAS_H = 0;        // полное сужение разрешено
+    const IND_HEAD_H = 26;             // шапка окна (в переменную высоты не входит)
+    const SPLIT_H = 8;                 // высота разделителя
+    const STACK_SLACK_H = 12;          // отступы контейнера окон + запас на округления
+    const LAYOUT = {
+        feedW: 430, coinsH: 170,
+        indLiq: IND_DEFAULT_CANVAS_H, indCvd: IND_DEFAULT_CANVAS_H,
+        indOi: IND_DEFAULT_CANVAS_H,
+        sized: false,      // пользователь сам двигал высоты блоков графика
+    };
+    let layoutReady = false;
+
+    function indKey(kind) {
+        return "ind" + kind.charAt(0).toUpperCase() + kind.slice(1);
+    }
+
+    function loadLayout() {
         try {
             const raw = localStorage.getItem("liqscope.layout");
-            if (raw) {
-                const o = JSON.parse(raw) || {};
-                layout.feedW = clampPx(Number(o.feedW) || 430, 280, 720);
-                layout.coinsH = clampPx(Number(o.coinsH) || 170, 90, 460);
-            }
+            if (!raw) return;
+            const o = JSON.parse(raw) || {};
+            LAYOUT.feedW = clampPx(Number(o.feedW) || 430, 280, 720);
+            LAYOUT.coinsH = clampPx(Number(o.coinsH) || 170, 90, 460);
+            IND_KINDS.forEach((k) => {
+                const v = Number(o[indKey(k)]);
+                LAYOUT[indKey(k)] = clampPx(isFinite(v) ? v : IND_DEFAULT_CANVAS_H, 0, 900);
+            });
+            LAYOUT.sized = !!o.sized;
         } catch (e) { /* ignore */ }
-        const applyLayout = () => {
-            root.style.setProperty("--feed-width", layout.feedW + "px");
-            root.style.setProperty("--coins-height", layout.coinsH + "px");
-        };
-        const saveLayout = () => {
-            try { localStorage.setItem("liqscope.layout", JSON.stringify(layout)); } catch (e) { /* ignore */ }
-        };
+    }
+
+    function saveLayout() {
+        try { localStorage.setItem("liqscope.layout", JSON.stringify(LAYOUT)); } catch (e) { /* ignore */ }
+    }
+
+    function applyLayoutValues() {
+        const root = document.documentElement;
+        root.style.setProperty("--feed-width", LAYOUT.feedW + "px");
+        root.style.setProperty("--coins-height", LAYOUT.coinsH + "px");
+        IND_KINDS.forEach((k) => root.style.setProperty("--ind-h-" + k, LAYOUT[indKey(k)] + "px"));
+        const stack = $("chart-stack");
+        if (stack) stack.classList.toggle("sized", !!LAYOUT.sized);
+    }
+
+    function initSplitters() {
+        loadLayout();
         const bind = (el, axis) => {
             if (!el) return;
             el.addEventListener("pointerdown", (e) => {
@@ -2176,18 +2881,18 @@
                 document.body.classList.add("split-dragging");
                 if (axis === "y") document.body.classList.add("split-dragging-y");
                 const start = axis === "x" ? e.clientX : e.clientY;
-                const startVal = axis === "x" ? layout.feedW : layout.coinsH;
+                const startVal = axis === "x" ? LAYOUT.feedW : LAYOUT.coinsH;
                 const move = (ev) => {
                     ev.preventDefault();
                     const delta = (axis === "x" ? ev.clientX : ev.clientY) - start;
                     if (axis === "x") {
                         // лента прижата к правому краю: тянем разделитель вправо →
                         // её ширина УМЕНЬШАЕТСЯ (иначе блоки «уезжают» влево)
-                        layout.feedW = clampPx(startVal - delta, 280, 720);
+                        LAYOUT.feedW = clampPx(startVal - delta, 280, 720);
                     } else {
-                        layout.coinsH = clampPx(startVal - delta, 90, 460);
+                        LAYOUT.coinsH = clampPx(startVal - delta, 90, 460);
                     }
-                    applyLayout();
+                    applyLayoutValues();
                 };
                 const up = () => {
                     el.classList.remove("active");
@@ -2204,7 +2909,157 @@
         };
         bind($("split-feed-x"), "x");
         bind($("split-coins-y"), "y");
-        applyLayout();
+        bindStackSplitters();
+        layoutReady = true;
+        normalizeHeights();
+        applyLayoutValues();
+    }
+
+    // --- Блоки графика: главный график и окна LIQ/CVD/OI тянутся по высоте ---
+    // Разделитель над окном забирает высоту у блока выше: у соседнего окна —
+    // напрямую, у главного графика — просто из остатка стека. Сузить можно
+    // до нуля, включая главный график; двойной клик возвращает исходное.
+
+    // Телефон/планшет: разделители скрыты, окна держат фиксированную высоту
+    // и скроллятся внутри своей области — высоты там не считаем.
+    function mobileLayout() {
+        return !!(window.matchMedia && window.matchMedia("(max-width: 900px)").matches);
+    }
+
+    function paneVisible(kind) {
+        const P = IND_PANES[kind];
+        return !!(P && state[P.skey]);
+    }
+
+    function visiblePaneKinds() { return IND_KINDS.filter(paneVisible); }
+
+    function visibleSplitCount() {
+        return document.querySelectorAll("#chart-stack .splitter:not(.hidden)").length;
+    }
+
+    // Ниже 120px стек считается «нераскладочным» (свёрнутый график, крошечное
+    // окно, jsdom): тогда высоты не пересчитываем и не ужимаем окна в ноль.
+    function stackHeight() {
+        const stack = $("chart-stack");
+        const h = (stack && stack.clientHeight) || 0;
+        return h >= 120 ? h : 0;
+    }
+
+    // min-height главного графика: пока пользователь не двигал высоты, окна не
+    // имеют права съесть график целиком (в «сжатом» режиме он тоже в ноль).
+    function chartMinHeight() {
+        if (LAYOUT.sized) return 0;
+        const wrap = document.querySelector("#chart-stack > .chart-wrapper");
+        if (!wrap || !window.getComputedStyle) return 0;
+        let mh = NaN;
+        try { mh = parseFloat(window.getComputedStyle(wrap).minHeight); } catch (e) { /* ignore */ }
+        return isFinite(mh) && mh > 0 ? mh : 0;
+    }
+
+    // Сколько всего пикселей полотен есть у видимых окон: высота стека минус
+    // шапки окон, разделители и то, что оставлено главному графику.
+    function panesBudget() {
+        const total = stackHeight();
+        if (!total) return 0;
+        return Math.max(0, total - chartMinHeight() - STACK_SLACK_H
+            - visiblePaneKinds().length * IND_HEAD_H - visibleSplitCount() * SPLIT_H);
+    }
+
+    // Сколько максимум может занять полотно окна, чтобы блоки не вылезли
+    // за стек: главный график при этом считается сжимаемым до нуля.
+    function maxCanvasFor(kind) {
+        if (!stackHeight() || mobileLayout()) return 900;   // раскладки нет (телефон, jsdom)
+        let others = 0;
+        visiblePaneKinds().forEach((k) => { if (k !== kind) others += LAYOUT[indKey(k)]; });
+        return Math.max(IND_MIN_CANVAS_H, panesBudget() - others);
+    }
+
+    // Если окна в сумме больше стека (например, окно уменьшили или включили
+    // ещё одно) — ужимаем их пропорционально, сохраняя соотношение высот.
+    function normalizeHeights() {
+        if (!layoutReady) return;
+        if (!stackHeight() || mobileLayout()) return;
+        const kinds = visiblePaneKinds();
+        if (!kinds.length) return;
+        const avail = panesBudget();
+        const sum = kinds.reduce((s, k) => s + LAYOUT[indKey(k)], 0);
+        if (sum <= avail || sum <= 0) return;
+        const k = avail / sum;
+        kinds.forEach((kind) => {
+            LAYOUT[indKey(kind)] = Math.round(LAYOUT[indKey(kind)] * k);
+        });
+    }
+
+    let layoutRaf = 0;
+    function redrawAfterLayout() {
+        if (typeof queueRedraw === "function") queueRedraw();
+        if (layoutRaf) return;
+        const raf = window.requestAnimationFrame || ((f) => setTimeout(f, 16));
+        layoutRaf = raf(() => {
+            layoutRaf = 0;
+            // главный график пересчитывает размер по своему контейнеру
+            window.dispatchEvent(new Event("resize"));
+        });
+    }
+
+    function resetStackHeights() {
+        IND_KINDS.forEach((k) => { LAYOUT[indKey(k)] = IND_DEFAULT_CANVAS_H; });
+        LAYOUT.sized = false;
+        applyLayoutValues();
+        redrawAfterLayout();
+        saveLayout();
+    }
+
+    function bindStackSplitters() {
+        const list = document.querySelectorAll("#chart-stack .stack-splitter");
+        Array.prototype.forEach.call(list, (el) => {
+            const kind = el.getAttribute("data-pane");
+            if (!kind) return;
+            el.addEventListener("pointerdown", (e) => {
+                e.preventDefault();
+                const kinds = visiblePaneKinds();
+                const i = kinds.indexOf(kind);
+                if (i < 0) return;                    // окно выключено — тянуть нечего
+                const prevKind = i > 0 ? kinds[i - 1] : "";   // "" — выше главный график
+                const startY = e.clientY;
+                const startH = LAYOUT[indKey(kind)];
+                const startPrev = prevKind ? LAYOUT[indKey(prevKind)] : 0;
+                el.classList.add("active");
+                document.body.classList.add("split-dragging", "split-dragging-y");
+                const move = (ev) => {
+                    ev.preventDefault();
+                    const grow = startY - ev.clientY;   // тянем вверх — окно растёт
+                    let want = startH + grow;
+                    if (prevKind) {
+                        // высоту отдаёт соседнее окно и только до своего нуля
+                        const take = clampPx(want - startH, -startH, startPrev);
+                        want = startH + take;
+                        LAYOUT[indKey(prevKind)] = Math.round(startPrev - take);
+                    }
+                    want = clampPx(want, IND_MIN_CANVAS_H, maxCanvasFor(kind));
+                    LAYOUT[indKey(kind)] = Math.round(want);
+                    LAYOUT.sized = true;
+                    applyLayoutValues();
+                    redrawAfterLayout();
+                };
+                const up = () => {
+                    el.classList.remove("active");
+                    document.body.classList.remove("split-dragging", "split-dragging-y");
+                    window.removeEventListener("pointermove", move);
+                    window.removeEventListener("pointerup", up);
+                    window.removeEventListener("pointercancel", up);
+                    saveLayout();
+                };
+                window.addEventListener("pointermove", move);
+                window.addEventListener("pointerup", up);
+                window.addEventListener("pointercancel", up);
+            });
+            el.addEventListener("dblclick", resetStackHeights);
+        });
+        window.addEventListener("resize", () => {
+            normalizeHeights();
+            applyLayoutValues();
+        });
     }
 
     // --- Топ пар: выпадающий вертикальный список -----------------------------
@@ -2372,11 +3227,22 @@
         const coinBtn = tr.querySelector(".coin-link");
         if (coinBtn) {
             coinBtn.addEventListener("click", (e) => {
-                e.stopPropagation();          // не открываем модалку — открываем график
-                selectChartSymbol(decodeURIComponent(coinBtn.dataset.symbol));
+                e.stopPropagation();      // не открываем модалку — фильтруем ленту
+                selectSymbol(decodeURIComponent(coinBtn.dataset.symbol));
             });
         }
         return tr;
+    }
+
+    /** Плашка активного фильтра ленты: клик по ней возвращает все монеты. */
+    function updateFeedFilter() {
+        if (!feedFilterEl) return;
+        const on = state.symbol !== "ALL";
+        feedFilterEl.classList.toggle("hidden", !on);
+        if (!on) return;
+        feedFilterEl.textContent = pretty(state.symbol) + " ✕";
+        feedFilterEl.title = I18n.t("feed.chip_title");
+        feedFilterEl.setAttribute("aria-label", I18n.t("feed.chip_title"));
     }
 
     function feedCountLabel(n) {
@@ -2412,21 +3278,59 @@
         });
     }
 
+    // Значение ленты CVD/OI за свечу. У OI в свече лежит уровень открытого
+    // интереса (миллиарды), а изменение за свечу — в oiChg: лента показывает
+    // именно дельту, как и шары на графике (столбец так и называется «OI Δ»).
+    function shapeFeedValue(c, field) {
+        return field === "oi" ? Number(c.oiChg) : Number(c[field]);
+    }
+
+    /** Лента «ВСЕ»: строки не по свечам графика, а по минутным потокам всех
+     *  монет (сообщение flow_all). Раньше при переключении с монеты на «все»
+     *  лента молча оставалась прежней — строилась только по свечам графика. */
+    const isFlowFeed = (field) =>
+        state.symbol === "ALL" && (field === "cvd" || field === "oi");
+
+    function flowFeedItems(field) {
+        const src = (state.flowAll && state.flowAll[field]) || [];
+        const items = [];
+        src.forEach((row) => {
+            const raw = field === "cvd" ? row.cvd : row.oi_delta;
+            const d = Number(raw);
+            if (!isFinite(d) || d === 0) return;
+            const ts = Number(row.ts) || Number(state.flowAll && state.flowAll.ts) || 0;
+            items.push({
+                _kind: field,
+                flow: true,
+                agg: row,
+                time: ts,
+                timestamp: ts,
+                symbol: row.symbol,
+                usd: Math.abs(d),
+                delta: d,
+                price: row.price,
+                live: false,          // окно, а не формирующаяся свеча
+            });
+        });
+        return items;
+    }
+
     function shapeFeedItems(field) {
+        if (isFlowFeed(field)) return flowFeedItems(field);
         const candles = state.candles;
         const items = [];
         if (!candles.length) return items;
         const lastIdx = candles.length - 1;
         const absVals = [];
         for (let i = 0; i < candles.length; i++) {
-            const d = Math.abs(Number(candles[i][field]));
+            const d = Math.abs(shapeFeedValue(candles[i], field));
             if (isFinite(d) && d > 0) absVals.push(d);
         }
         absVals.sort((a, b) => a - b);
         const p90 = absVals.length ? (absVals[Math.floor(0.9 * (absVals.length - 1))] || 0) : 0;
         const minAbs = Math.max(1000 * chartVolScale(), p90 * 0.05);
         for (let i = candles.length - 1; i >= 0 && items.length < 150; i--) {
-            const d = Number(candles[i][field]);
+            const d = shapeFeedValue(candles[i], field);
             if (!isFinite(d) || Math.abs(d) < minAbs) continue;
             if (state.minUsd > 0 && Math.abs(d) < state.minUsd) continue;
             items.push({
@@ -2445,7 +3349,9 @@
     }
 
     function shapeFeedKey(item) {
-        return item._kind + "_" + item.time;
+        // в режиме «ВСЕ» строки идут по всем монетам сразу — монета в ключе,
+        // иначе строки разных монет в одну минуту затирали бы друг друга
+        return item._kind + "_" + (item.flow ? item.symbol + "_" : "") + item.time;
     }
 
     function shapeFeedType(item) {
@@ -2465,11 +3371,22 @@
         };
     }
 
+    function shapeFeedTypeLabel(item) {
+        const t = shapeFeedType(item);
+        if (!item.flow) return t;
+        // в потоке «ВСЕ» подписываем окно: строка — сумма за N минут
+        const win = Number((item.agg && item.agg.window_min) ||
+                           (state.flowAll && state.flowAll.window_min) || 5);
+        return Object.assign({}, t, {
+            typeLabel: t.typeLabel + " · " + I18n.t("flow.window_short", { n: win }),
+        });
+    }
+
     function paintShapeFeedCells(tr, item) {
         tr._feedItem = item;
         tr.dataset.feedKey = shapeFeedKey(item);
         tr.classList.toggle("feed-row-live", !!item.live);
-        const t = shapeFeedType(item);
+        const t = shapeFeedTypeLabel(item);
         let usdTd = tr.querySelector(".td-usd-amount");
         if (!usdTd) {
             const openTitle = I18n.t("feed.open_chart", { sym: pretty(item.symbol) });
@@ -2497,11 +3414,43 @@
         }
     }
 
+    /** Окно строки потока «ВСЕ»: на графике этой монеты нет, поэтому вместо
+     *  подсветки фигуры показываем разбор строки — чем и как продавали. */
+    function openFlowModal(item) {
+        const a = item.agg || {};
+        const isCvd = item._kind === "cvd";
+        const win = Number(a.window_min || (state.flowAll && state.flowAll.window_min) || 5);
+        const money = (v) => (Number(v) >= 0 ? "+" : "−") +
+            "$" + fmtUsdFull(Math.abs(Number(v) || 0));
+        const share = (a.cvd_share == null) ? "—"
+            : (Number(a.cvd_share) >= 0 ? "+" : "") + Number(a.cvd_share) + "%";
+        const rows = [
+            ["flow.window", I18n.t("flow.window_val", { n: win })],
+            isCvd ? ["flow.cvd", money(item.delta)] : ["flow.oi_delta", money(item.delta)],
+        ];
+        if (isCvd) rows.push(["flow.share", share]);
+        rows.push(["flow.oi_level", a.oi_usd == null ? "—" : "$" + fmtUsdFull(a.oi_usd)]);
+        rows.push(["flow.liq_long", "$" + fmtUsdFull(a.liq_long || 0)]);
+        rows.push(["flow.liq_short", "$" + fmtUsdFull(a.liq_short || 0)]);
+        rows.push(["flow.vol", "$" + fmtUsdFull(a.vol || 0)]);
+        if (item.price) rows.push(["flow.price", fmtPrice(item.price)]);
+        state.modalItem = null;
+        modalTitle.textContent = pretty(item.symbol) + " · " +
+            I18n.t(isCvd ? "feed.col_cvd" : "feed.col_oi");
+        modalBody.innerHTML =
+            rows.map((r) => "<p><strong>" + I18n.t(r[0]) + "</strong> " + r[1] + "</p>").join("") +
+            '<p class="flow-note">' + I18n.t("flow.note") + "</p>";
+        unpinShape();
+        detailModal.classList.remove("hidden");
+        detailModal.classList.remove("peek", "peek-pinned");
+    }
+
     function shapeFeedRow(item) {
         const tr = document.createElement("tr");
         paintShapeFeedCells(tr, item);
         tr.addEventListener("click", () => {
             const it = tr._feedItem || item;
+            if (it.flow) { openFlowModal(it); return; }
             const hit = hitFromFeedItem(it);
             if (hit) {
                 applyFeedHighlight(hit, true);
@@ -2509,13 +3458,20 @@
                 openShapeModal(hit.kind, hit);
             }
         });
-        tr.addEventListener("mouseenter", () => highlightFromFeed(tr._feedItem || item, false));
-        tr.addEventListener("mouseleave", () => highlightFromFeed(null, false));
+        tr.addEventListener("mouseenter", () => {
+            const it = tr._feedItem || item;
+            if (it.flow) return;      // фигуры этой монеты на графике нет
+            highlightFromFeed(it, false);
+        });
+        tr.addEventListener("mouseleave", () => {
+            if ((tr._feedItem || item).flow) return;
+            highlightFromFeed(null, false);
+        });
         const coinBtn = tr.querySelector(".coin-link");
         if (coinBtn) {
             coinBtn.addEventListener("click", (e) => {
-                e.stopPropagation();
-                selectChartSymbol(decodeURIComponent(coinBtn.dataset.symbol));
+                e.stopPropagation();      // фильтр ленты + выбор монеты на графике
+                selectSymbol(decodeURIComponent(coinBtn.dataset.symbol));
             });
         }
         return tr;
@@ -2524,7 +3480,9 @@
     function finishShapeFeed(field, n) {
         feedCountEl.textContent = feedCountLabel(n);
         if (feedEmptyEl) {
-            feedEmptyEl.textContent = I18n.t(field === "cvd" ? "feed.empty_cvd" : "feed.empty_oi");
+            feedEmptyEl.textContent = isFlowFeed(field)
+                ? I18n.t("feed.empty_flow")
+                : I18n.t(field === "cvd" ? "feed.empty_cvd" : "feed.empty_oi");
             feedEmptyEl.classList.toggle("hidden", n > 0);
         }
     }
@@ -2605,6 +3563,7 @@
         state.feedTab = tab;
         try { localStorage.setItem("liqscope.feedTab", tab); } catch (e) { /* ignore */ }
         rebuildFeed();
+        sendFeedConfig();     // «ВСЕ» + CVD/OI → сервер начинает поток всех монет
     }
 
     function setupFeedTabs() {
@@ -2918,10 +3877,13 @@
     // (общий timeScale), листаются/зумятся вместе с ним.
     const IND_PANES = {
         liq: { canvas: "ind-canvas-liq", val: "ind-liq-val", pane: "ind-pane-liq",
+               draw: "ind-draw-liq",
                skey: "paneLiq", toggle: "pane-liq-toggle", off: "chart.pane_liq_off" },
         cvd: { canvas: "ind-canvas-cvd", val: "ind-cvd-val", pane: "ind-pane-cvd",
+               draw: "ind-draw-cvd",
                skey: "paneCvd", toggle: "pane-cvd-toggle", off: "chart.pane_cvd_off" },
         oi:  { canvas: "ind-canvas-oi",  val: "ind-oi-val",  pane: "ind-pane-oi",
+               draw: "ind-draw-oi",
                skey: "paneOi", toggle: "pane-oi-toggle", off: "chart.pane_oi_off" },
     };
 
@@ -2930,11 +3892,17 @@
         if (!P) return;
         const el = $(P.pane);
         if (el) el.classList.toggle("hidden", !state[P.skey]);
+        // разделитель показываем только у включённого окна: у выключенного
+        // он висел бы пустой полосой
+        const sp = $("split-" + kind + "-y");
+        if (sp) sp.classList.toggle("hidden", !state[P.skey]);
         const box = $("indicator-panes");
         if (box) {
             const any = Object.keys(IND_PANES).some((k) => state[IND_PANES[k].skey]);
             box.classList.toggle("all-hidden", !any);
         }
+        // высоты блоков пересчитываем: включение/выключение окна меняет остаток
+        normalizeHeights();
     }
 
     function setupIndicatorPanes() {
@@ -2942,6 +3910,10 @@
         if (!state.layersAllowed) {
             const box = $("indicator-panes");
             if (box) box.classList.add("all-hidden");
+            // окон нет вовсе — разделители блоков тоже прячем, иначе под
+            // графиком осталась бы пустая полоса из трёх полосок
+            const splits = document.querySelectorAll("#chart-stack .stack-splitter");
+            Array.prototype.forEach.call(splits, (el) => el.classList.add("hidden"));
             return;
         }
         Object.keys(IND_PANES).forEach((kind) => {
@@ -2956,6 +3928,8 @@
             }
             syncPaneVisibility(kind);
         });
+        // после синхронизации раскладываем сохранённые высоты блоков
+        applyLayoutValues();
     }
 
     // Подписи чисел в окнах: $1.2K / $3.4M… с плюсом, если надо
@@ -3025,8 +3999,8 @@
         if (!canvas || !state[P.skey]) return null;
         const dpr = window.devicePixelRatio || 1;
         const w = canvas.clientWidth || (canvas.parentElement || {}).clientWidth || 0;
-        const h = canvas.clientHeight || 64;
-        if (w < 10) return null;
+        const h = canvas.clientHeight || 0;
+        if (w < 10 || h < 8) return null;   // окно сужено в ноль — рисовать нечего
         const W = Math.round(w * dpr), H = Math.round(h * dpr);
         if (canvas.width !== W || canvas.height !== H) {
             canvas.width = W; canvas.height = H;
@@ -3035,6 +4009,43 @@
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         ctx.clearRect(0, 0, w, h);
         return { P: P, canvas: canvas, ctx: ctx, w: w, h: h };
+    }
+
+    // Полупрозрачная кривая «в моменте» — как линия OI: точки по свечам,
+    // мягкая заливка под ней и точка последнего значения. Своя шкала
+    // (lo…hi считается по переданным точкам), поэтому кривая накопления
+    // спокойно живёт рядом со столбиками, у которых шкала своя.
+    function indCurve(ctx, w, h, pts, color, fill, symmetric) {
+        if (!pts || pts.length < 2) return false;
+        let lo = Infinity, hi = -Infinity;
+        pts.forEach((p) => { lo = Math.min(lo, p.v); hi = Math.max(hi, p.v); });
+        if (!isFinite(lo) || !isFinite(hi)) return false;
+        if (symmetric) {
+            const m = Math.max(Math.abs(lo), Math.abs(hi));
+            lo = -m; hi = m;
+        }
+        if (hi - lo < 1e-9) { hi = lo + 1; }
+        const pad = 8;
+        const yOf = (v) => h - pad - (h - 2 * pad) * (v - lo) / (hi - lo);
+        ctx.save();
+        ctx.beginPath();
+        pts.forEach((p, i) => {
+            if (!i) ctx.moveTo(p.x, yOf(p.v)); else ctx.lineTo(p.x, yOf(p.v));
+        });
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.4;
+        ctx.stroke();
+        // заливка под линией — «полупрозрачная», как на OI
+        const first = pts[0], last = pts[pts.length - 1];
+        ctx.lineTo(last.x, h); ctx.lineTo(first.x, h); ctx.closePath();
+        ctx.fillStyle = fill;
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(last.x, yOf(last.v), 2.4, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.restore();
+        return true;
     }
 
     function indNoData(p, text) {
@@ -3095,6 +4106,8 @@
             indSetVal("liq", "Σ $0", "");
             return;
         }
+        // шкала окна — для фигур теханализа, которые тут рисуют
+        paneScales.liq = { lo: -maxSide, hi: maxSide };
         const kTop = (h / 2 - 6) / maxSide;   // вверх — шорты
         const kBot = (h / 2 - 6) / maxSide;   // вниз — лонги
         pts.forEach((pt) => {
@@ -3109,6 +4122,11 @@
                 ctx.fillRect(pt.x - bw / 2, mid, bw, hh);
             }
         });
+        // Накопленный перевес за видимый диапазон: шорты (+), лонги (−).
+        // Полупрозрачная кривая «в моменте» — как линия OI.
+        let acc = 0;
+        const cum = pts.map((pt) => { acc += pt.S - pt.L; return { x: pt.x, v: acc }; });
+        indCurve(ctx, w, h, cum, "rgba(255,209,102,0.85)", "rgba(255,209,102,0.08)", true);
         // подписи краёв шкалы
         ctx.font = "9px 'JetBrains Mono', monospace";
         ctx.textAlign = "right";
@@ -3117,7 +4135,8 @@
         ctx.fillStyle = "rgba(255,42,95,0.8)";
         ctx.fillText("▼ " + indMoney(maxSide), w - 3, h - 8);
         indSetVal("liq", "Σ " + indMoney(totL + totS), "",
-                   "Лонги " + indMoney(totL) + " / шорты " + indMoney(totS));
+                   "Столбики: лонги " + indMoney(totL) + " / шорты " + indMoney(totS)
+                   + " · кривая: накопленный перевес " + indMoney(acc, true));
     }
 
     // CVD: гистограмма тейкер-дельты по свечам (зелёный — покупки, красный — продажи)
@@ -3142,6 +4161,7 @@
                 net += d; has = true;
             }
         });
+        paneScales.cvd = { lo: lo, hi: hi };
         indGrid(ctx, w, h, lo, hi);
         indVerticals(ctx, w, h, spacing);
         if (!has) { indNoData(p); indSetVal("cvd", "—", ""); return; }
@@ -3157,8 +4177,14 @@
             const top = Math.min(y, y0), hh = Math.max(1, Math.abs(y - y0));
             ctx.fillRect(pt.x - bw / 2, top, bw, hh);
         });
+        // Накопленная дельта по видимым свечам — полупрозрачная кривая
+        // «в моменте», как линия OI: видно, куда рынок перевесил.
+        let acc = 0;
+        const cum = pts.map((pt) => { acc += pt.d; return { x: pt.x, v: acc }; });
+        indCurve(ctx, w, h, cum, "rgba(167,139,250,0.9)", "rgba(167,139,250,0.10)", true);
         indSetVal("cvd", indMoney(net, true), net >= 0 ? "pos" : "neg",
-                  "Сумма тейкер-дельты по видимым свечам");
+                  "Сумма тейкер-дельты по видимым свечам: " + indMoney(net, true)
+                  + " · кривая — накопление по свечам");
     }
 
     // OI: линия открытого интереса по свечам (золото) + дельта в шапке
@@ -3188,28 +4214,11 @@
             indSetVal("oi", "—", "");
             return;
         }
+        paneScales.oi = { lo: lo, hi: hi };
         indGrid(ctx, w, h, lo, hi);
         indVerticals(ctx, w, h, spacing);
-        const span = Math.max(1e-9, hi - lo);
-        const pad = 8;
-        const yOf = (v) => h - pad - (h - 2 * pad) * (v - lo) / span;
-        ctx.beginPath();
-        pts.forEach((pt, i) => {
-            if (!i) ctx.moveTo(pt.x, yOf(pt.v)); else ctx.lineTo(pt.x, yOf(pt.v));
-        });
-        ctx.strokeStyle = "#ffd54f";
-        ctx.lineWidth = 1;
-        ctx.stroke();
-        // мягкая подсветка под линией
-        const lastPt = pts[pts.length - 1];
-        ctx.lineTo(lastPt.x, h); ctx.lineTo(pts[0].x, h); ctx.closePath();
-        ctx.fillStyle = "rgba(255,213,79,0.07)";
-        ctx.fill();
-        // точка последнего значения
-        ctx.beginPath();
-        ctx.arc(lastPt.x, yOf(lastPt.v), 2, 0, Math.PI * 2);
-        ctx.fillStyle = "#ffd54f";
-        ctx.fill();
+        // линия OI + мягкая подсветка под ней (та же геометрия, что у CVD/LIQ)
+        indCurve(ctx, w, h, pts, "#ffd54f", "rgba(255,213,79,0.07)", false);
         const chg = last - first;
         indSetVal("oi", indMoney(chg, true), chg >= 0 ? "pos" : "neg",
                   "Изменение OI за видимый диапазон · сейчас " + indMoney(last));
@@ -3221,6 +4230,7 @@
             if (state.paneLiq) drawPaneLiq();
             if (state.paneCvd) drawPaneCvd();
             if (state.paneOi) drawPaneOi();
+            drawPaneDrawings();   // фигуры теханализа поверх окон
         } catch (e) { /* индикаторные окна не должны ломать график */ }
     }
 
@@ -3413,6 +4423,7 @@
             loadDrawings();   // фигуры — свои у каждой монеты
         }
         updateSymbolTitle();
+        updateFeedFilter();
         renderSymbolButtons();
         sendConfig();
         if (chartChanged) loadCandles();        // иначе график не трогаем вовсе
@@ -3432,10 +4443,21 @@
         state.lastTickAt = 0;
         state.lagMs = null;
         updateSymbolTitle();
+        updateFeedFilter();
         renderSymbolButtons();
         sendConfig();
         loadCandles();
         loadHistoryFor(s);   // пузырьки новой пары сразу с полной историей
+    }
+
+    if (feedFilterEl) {
+        feedFilterEl.addEventListener("click", () => selectSymbol("ALL"));
+        feedFilterEl.addEventListener("keydown", (e) => {
+            if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                selectSymbol("ALL");
+            }
+        });
     }
 
     function renderExchangeOptions(exchanges) {
@@ -3685,6 +4707,13 @@
         }[c]));
     }
 
+    // Партнёрская ссылка Gate (ru — русская страница, остальным — английская)
+    const GATE_REFS = {
+        ru: "https://www.gate.com/ru/signup/VLFCAVWMBW?ref_type=103",
+        en: "https://www.gate.com/signup/VLFCAVWMBW?ref_type=103",
+    };
+    function gateRefUrl() { return GATE_REFS[I18n.lang()] || GATE_REFS.en; }
+
     function renderHealth(health) {
         if (!health || !health.sources) return;
         state.lastHealth = health;
@@ -3712,6 +4741,10 @@
                 title.replace(/"/g, "&quot;") + '"><span>' + label + "</span>" +
                 (s.connected ? "" : '<span>✕</span>') + "</span>");
         });
+        // Партнёрская строка — в том же списке, что и биржи
+        parts.push('<a class="exch-ref" href="' + gateRefUrl() +
+            '" target="_blank" rel="noopener sponsored">' +
+            I18n.t("health.gate_ref") + "</a>");
         const dot = (okN === total && total) ? "ok" : (okN ? "mixed" : "bad");
         const wasOpen = exchHealthEl.classList.contains("open");
         exchHealthEl.innerHTML =
@@ -3899,9 +4932,17 @@
             symbol: state.symbol,          // фильтр ленты
             chart: chartSymbol(),          // символ графика (может отличаться)
             tf: state.timeframe,
+            feed: state.feedTab,           // лента: liq | cvd | oi
             min_usd: 0,
             exchange: "ALL",               // фильтр бирж применяется на клиенте
         }));
+    }
+
+    /** Сказать серверу, какая лента открыта: в режиме «ВСЕ» для CVD/OI он
+     *  начинает гнать минутные потоки по всем монетам, а не по графику. */
+    function sendFeedConfig() {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        ws.send(JSON.stringify({ action: "feed", feed: state.feedTab }));
     }
 
     function setConn(status, key, vars) {
@@ -3952,7 +4993,10 @@
                 renderExchangeOptions(msg.exchanges);
                 renderHealth(msg.health);
                 renderSymbolButtons();
-                if (state.symbol !== "ALL" && state.symbols.indexOf(state.symbol) === -1) {
+                if (state.symbol !== "ALL" && state.symbols.indexOf(state.symbol) === -1 &&
+                        !(state.liquidations || []).some((x) => x.symbol === state.symbol)) {
+                    // монеты нет в списке сервера и событий по ней тоже нет —
+                    // только тогда возвращаем ленту ко всем монетам
                     state.symbol = "ALL";
                 }
                 if (!state.chartSymbol) {
@@ -3966,6 +5010,7 @@
                 }
                 updateSymbolTitle();
                 renderStats(msg.stats);
+                if (msg.flow) state.flowAll = msg.flow;
                 rebuildFeed();
                 sendConfig();
                 loadCandles();
@@ -4013,6 +5058,13 @@
                     && candlesMatchTf(msg.candles, state.timeframe)) {
                     setCandles(msg.candles, msg.source);
                 }
+                break;
+            }
+            case "flow_all": {
+                state.flowAll = msg;
+                // лента CVD/OI в режиме «ВСЕ» живёт этими строками: тик
+                // обновляет ячейки на месте, без перерисовки DOM
+                if (isFlowFeed(state.feedTab)) syncShapeFeed(state.feedTab);
                 break;
             }
             case "stats": {
@@ -4127,7 +5179,8 @@
         // сначала узнаём, кто смотрит график, потом вешаем переключатели.
         applyAuthGate().then((allowed) => {
             setupLayerToggles(allowed);
-            setupLayerPop();   // попап кнопок слоёв по «☰ Слои»
+            setupLayerPop();
+            setupFollowToggle();     // 🎯 автоследование графика за ценой
             setupIndicatorPanes();   // окна LIQ/CVD/OI под графиком + крестики
             updateMarkers();
             queueRedraw();

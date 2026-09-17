@@ -203,6 +203,10 @@
                     <button class="profile-toggle layer-call" id="layer-call" type="button"
                             data-i18n-title="chart.layers_title" data-i18n="chart.layers"
                             title="Показать/скрыть кнопки слоёв">☰ Слои</button>
+                    <button class="profile-toggle follow-toggle" id="follow-toggle" type="button"
+                            data-i18n-title="chart.follow_on" data-i18n="chart.follow"
+                            aria-pressed="false"
+                            title="График сам едет за ценой: свеча не уходит за край, цена — в поле зрения">🎯 Авто</button>
                     <button class="tool-toggle" id="draw-toggle" type="button"
                             data-i18n-title="chart.draw_title"
                             title="Рисовать фигуры теханализа">✎</button>
@@ -236,75 +240,101 @@
                     <button class="profile-toggle pane-toggle" id="pane-oi-toggle" type="button"
                             data-i18n-title="chart.pane_oi_on" data-i18n="chart.pane_oi"
                             title="Окно OI под графиком">📈 Окно OI</button>
+                    <span class="layer-pop-sep" aria-hidden="true"></span>
+                    <button class="profile-toggle follow-toggle" id="follow-toggle-pop" type="button"
+                            data-i18n-title="chart.follow_on" data-i18n="chart.follow_full"
+                            aria-pressed="false"
+                            title="График сам едет за ценой: свеча не уходит за край, цена — в поле зрения">🎯 Автоследование за ценой</button>
                 </div>
             </div>
 
-            <div class="chart-wrapper" id="chart-wrapper">
-                <!-- Lightweight Charts Container -->
-                <div id="tv-chart-container"></div>
-                <!-- Cluster Canvas Overlay: ликвидации + профиль по ценам -->
-                <canvas id="cluster-canvas"></canvas>
-                <!-- Draw Canvas Overlay: фигуры теханализа пользователя -->
-                <canvas id="draw-canvas"></canvas>
-                <div class="draw-toolbar hidden" id="draw-toolbar" role="toolbar">
-                    <button type="button" data-draw-tool="line" data-i18n-title="draw.line"
-                            title="Трендовая линия">╲</button>
-                    <button type="button" data-draw-tool="ray" data-i18n-title="draw.ray"
-                            title="Луч">→</button>
-                    <button type="button" data-draw-tool="horiz" data-i18n-title="draw.horiz"
-                            title="Горизонтальная линия">─</button>
-                    <button type="button" data-draw-tool="rect" data-i18n-title="draw.rect"
-                            title="Прямоугольник">▭</button>
-                    <button type="button" data-draw-tool="fib" data-i18n-title="draw.fib"
-                            title="Уровни Фибоначчи">F</button>
-                    <button type="button" data-draw-tool="eraser" data-i18n-title="draw.eraser"
-                            title="Ластик: клик по фигуре удаляет её">⌫</button>
-                    <span class="draw-colors">
-                        <button type="button" data-draw-color="#ffd166" class="active"
-                                style="background:#ffd166" aria-label="gold"></button>
-                        <button type="button" data-draw-color="#22d3ee"
-                                style="background:#22d3ee" aria-label="cyan"></button>
-                        <button type="button" data-draw-color="#a78bfa"
-                                style="background:#a78bfa" aria-label="violet"></button>
-                        <button type="button" data-draw-color="#fb7185"
-                                style="background:#fb7185" aria-label="rose"></button>
-                    </span>
-                    <button type="button" id="draw-clear" data-i18n-title="draw.clear"
-                            title="Убрать все фигуры">🗑</button>
-                    <button type="button" id="draw-close" data-i18n-title="draw.close"
-                            title="Закрыть рисование">✕</button>
+            <!-- Стек графика: главный график и окна индикаторов — отдельные
+                 блоки. Высоту каждого тянет разделитель над ним: у соседнего
+                 окна высота отбирается, у главного графика — просто остаток,
+                 поэтому сузить можно до нуля, включая главный график.
+                 Двойной клик по разделителю возвращает исходные высоты. -->
+            <div class="chart-stack" id="chart-stack">
+                <div class="chart-wrapper" id="chart-wrapper">
+                    <!-- Lightweight Charts Container -->
+                    <div id="tv-chart-container"></div>
+                    <!-- Cluster Canvas Overlay: ликвидации + профиль по ценам -->
+                    <canvas id="cluster-canvas"></canvas>
+                    <!-- Draw Canvas Overlay: фигуры теханализа пользователя -->
+                    <canvas id="draw-canvas"></canvas>
+                    <div class="draw-toolbar hidden" id="draw-toolbar" role="toolbar">
+                        <button type="button" data-draw-tool="line" data-i18n-title="draw.line"
+                                title="Трендовая линия">╲</button>
+                        <button type="button" data-draw-tool="ray" data-i18n-title="draw.ray"
+                                title="Луч">→</button>
+                        <button type="button" data-draw-tool="horiz" data-i18n-title="draw.horiz"
+                                title="Горизонтальная линия">─</button>
+                        <button type="button" data-draw-tool="rect" data-i18n-title="draw.rect"
+                                title="Прямоугольник">▭</button>
+                        <button type="button" data-draw-tool="fib" data-i18n-title="draw.fib"
+                                title="Уровни Фибоначчи">F</button>
+                        <button type="button" data-draw-tool="eraser" data-i18n-title="draw.eraser"
+                                title="Ластик: клик по фигуре удаляет её">⌫</button>
+                        <span class="draw-colors">
+                            <button type="button" data-draw-color="#ffd166" class="active"
+                                    style="background:#ffd166" aria-label="gold"></button>
+                            <button type="button" data-draw-color="#22d3ee"
+                                    style="background:#22d3ee" aria-label="cyan"></button>
+                            <button type="button" data-draw-color="#a78bfa"
+                                    style="background:#a78bfa" aria-label="violet"></button>
+                            <button type="button" data-draw-color="#fb7185"
+                                    style="background:#fb7185" aria-label="rose"></button>
+                        </span>
+                        <button type="button" id="draw-clear" data-i18n-title="draw.clear"
+                                title="Убрать все фигуры">🗑</button>
+                        <button type="button" id="draw-close" data-i18n-title="draw.close"
+                                title="Закрыть рисование">✕</button>
+                    </div>
                 </div>
-            </div>
 
-            <!-- Индикаторные окна: те же данные, что в кабинете «Алерты по объёму».
-                 Включаются в «☰ Слои», крестик на окне прячет его обратно. -->
-            <div class="indicator-panes" id="indicator-panes">
-                <div class="ind-pane" id="ind-pane-liq">
-                    <div class="ind-pane-head">
-                        <span class="ind-title liq" data-i18n="chart.pane_liq_head">💥 LIQ</span>
-                        <span class="ind-val" id="ind-liq-val">—</span>
-                        <button class="ind-close" id="ind-close-liq" type="button"
-                                data-i18n-title="chart.pane_close" title="Скрыть окно">✕</button>
+                <!-- Разделитель над окном LIQ: тянет высоту главного графика и окна -->
+                <div class="splitter splitter-y stack-splitter" id="split-liq-y" data-pane="liq"
+                     role="separator" aria-orientation="horizontal" tabindex="-1"
+                     data-i18n-title="layout.pane_split"
+                     title="Высота блока: потяните за разделитель, двойной клик — сброс"></div>
+
+                <!-- Индикаторные окна: те же данные, что в кабинете «Алерты по объёму».
+                     Включаются в «☰ Слои», крестик на окне прячет его обратно. -->
+                <div class="indicator-panes" id="indicator-panes">
+                    <div class="ind-pane" id="ind-pane-liq">
+                        <div class="ind-pane-head">
+                            <span class="ind-title liq" data-i18n="chart.pane_liq_head">💥 LIQ</span>
+                            <span class="ind-val" id="ind-liq-val">—</span>
+                            <button class="ind-close" id="ind-close-liq" type="button"
+                                    data-i18n-title="chart.pane_close" title="Скрыть окно">✕</button>
+                        </div>
+                        <div class="ind-canvas-wrap"><canvas id="ind-canvas-liq"></canvas><canvas class="pane-draw" id="ind-draw-liq" data-i18n-title="draw.pane_hint" title="Здесь тоже можно рисовать фигуры теханализа"></canvas></div>
                     </div>
-                    <div class="ind-canvas-wrap"><canvas id="ind-canvas-liq"></canvas></div>
-                </div>
-                <div class="ind-pane" id="ind-pane-cvd">
-                    <div class="ind-pane-head">
-                        <span class="ind-title cvd" data-i18n="chart.pane_cvd_head">🌊 CVD</span>
-                        <span class="ind-val" id="ind-cvd-val">—</span>
-                        <button class="ind-close" id="ind-close-cvd" type="button"
-                                data-i18n-title="chart.pane_close" title="Скрыть окно">✕</button>
+                <div class="splitter splitter-y stack-splitter" id="split-cvd-y" data-pane="cvd"
+                     role="separator" aria-orientation="horizontal" tabindex="-1"
+                     data-i18n-title="layout.pane_split"
+                     title="Высота блока: потяните за разделитель, двойной клик — сброс"></div>
+                    <div class="ind-pane" id="ind-pane-cvd">
+                        <div class="ind-pane-head">
+                            <span class="ind-title cvd" data-i18n="chart.pane_cvd_head">🌊 CVD</span>
+                            <span class="ind-val" id="ind-cvd-val">—</span>
+                            <button class="ind-close" id="ind-close-cvd" type="button"
+                                    data-i18n-title="chart.pane_close" title="Скрыть окно">✕</button>
+                        </div>
+                        <div class="ind-canvas-wrap"><canvas id="ind-canvas-cvd"></canvas><canvas class="pane-draw" id="ind-draw-cvd" data-i18n-title="draw.pane_hint" title="Здесь тоже можно рисовать фигуры теханализа"></canvas></div>
                     </div>
-                    <div class="ind-canvas-wrap"><canvas id="ind-canvas-cvd"></canvas></div>
-                </div>
-                <div class="ind-pane" id="ind-pane-oi">
-                    <div class="ind-pane-head">
-                        <span class="ind-title oi" data-i18n="chart.pane_oi_head">📈 OI</span>
-                        <span class="ind-val" id="ind-oi-val">—</span>
-                        <button class="ind-close" id="ind-close-oi" type="button"
-                                data-i18n-title="chart.pane_close" title="Скрыть окно">✕</button>
+                <div class="splitter splitter-y stack-splitter" id="split-oi-y" data-pane="oi"
+                     role="separator" aria-orientation="horizontal" tabindex="-1"
+                     data-i18n-title="layout.pane_split"
+                     title="Высота блока: потяните за разделитель, двойной клик — сброс"></div>
+                    <div class="ind-pane" id="ind-pane-oi">
+                        <div class="ind-pane-head">
+                            <span class="ind-title oi" data-i18n="chart.pane_oi_head">📈 OI</span>
+                            <span class="ind-val" id="ind-oi-val">—</span>
+                            <button class="ind-close" id="ind-close-oi" type="button"
+                                    data-i18n-title="chart.pane_close" title="Скрыть окно">✕</button>
+                        </div>
+                        <div class="ind-canvas-wrap"><canvas id="ind-canvas-oi"></canvas><canvas class="pane-draw" id="ind-draw-oi" data-i18n-title="draw.pane_hint" title="Здесь тоже можно рисовать фигуры теханализа"></canvas></div>
                     </div>
-                    <div class="ind-canvas-wrap"><canvas id="ind-canvas-oi"></canvas></div>
                 </div>
             </div>
         </section>
@@ -329,6 +359,8 @@
                             data-feed="oi" id="feed-tab-oi" aria-selected="false"
                             data-i18n="feed.tab_oi">● OI</button>
                 </div>
+                <span class="feed-filter-chip hidden" id="feed-filter" role="button"
+                      tabindex="0" title="Показать все монеты"></span>
                 <span class="feed-count-badge" id="feed-count">0 событий</span>
             </div>
 

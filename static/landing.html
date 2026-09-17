@@ -244,6 +244,22 @@ a { color: inherit; text-decoration: none; }
 .cta .btn { margin-top: 26px; }
 .cta-note { margin-top: 14px; color: var(--muted); font-size: 0.8rem; }
 
+.partner {
+    text-align: center;
+    padding: 14px 28px 0;
+}
+.partner-link {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 10px 18px; border-radius: 8px; font-weight: 700; font-size: 0.9rem;
+    color: #7fe3c0;
+    background: rgba(0, 230, 118, 0.08);
+    border: 1px solid rgba(0, 230, 118, 0.35);
+}
+.partner-link:hover { background: rgba(0, 230, 118, 0.16); }
+.partner-note {
+    margin-top: 8px; color: var(--muted); font-size: 0.74rem;
+}
+
 .site-footer {
     max-width: 1080px; margin: 0 auto; padding: 26px 28px 40px;
     display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;
@@ -301,6 +317,7 @@ a { color: inherit; text-decoration: none; }
         <a class="nav-desk" href="#live" data-i18n="land.nav.live">Живой эфир</a>
         <a class="nav-desk" href="#features" data-i18n="land.nav.features">Возможности</a>
         <a class="nav-desk" href="#how" data-i18n="land.nav.how">Как работает</a>
+        <a class="nav-desk" href="/digest" data-i18n="land.nav.digest">Дайджест</a>
         <span id="nav-account"></span>
         <a class="btn btn-primary btn-terminal" href="/terminal">
             <span class="cta-full" data-i18n="land.cta.open">⚡ Открыть терминал</span>
@@ -431,9 +448,20 @@ a { color: inherit; text-decoration: none; }
     <p class="cta-note" data-i18n="land.cta.note">Бесплатно · без регистрации · без API-ключей · данные с публичных потоков бирж</p>
 </section>
 
+<section class="partner" id="partner">
+    <a class="partner-link" id="gate-ref"
+       href="https://www.gate.com/ru/signup/VLFCAVWMBW?ref_type=103"
+       target="_blank" rel="noopener sponsored" data-i18n="land.gate.link">
+        💠 Торговать на Gate — скидка на комиссию
+    </a>
+    <p class="partner-note" data-i18n="land.gate.note">
+        Партнёрская ссылка: регистрация на Gate.io поддерживает проект — терминал остаётся бесплатным.
+    </p>
+</section>
+
 <footer class="site-footer">
     <span data-i18n="land.footer.copy">© 2026 LiqScope Terminal · данные с публичных WebSocket бирж</span>
-    <span><span data-i18n="land.footer.race">Не является инвестиционной рекомендацией</span> · <a href="/terminal" data-i18n="land.footer.open">Открыть терминал →</a></span>
+    <span><span data-i18n="land.footer.race">Не является инвестиционной рекомендацией</span> · <a href="/terminal" data-i18n="land.footer.open">Открыть терминал →</a> · <a href="/digest" data-i18n="land.nav.digest">Дайджест</a></span>
 </footer>
 
 <script>
@@ -650,8 +678,21 @@ a { color: inherit; text-decoration: none; }
         langSelect.value = I18n.lang();
         langSelect.addEventListener("change", function (e) { I18n.set(e.target.value); });
     }
+    // Партнёрская ссылка Gate: у русского — русская страница, у остальных
+    // языков английская (регистрация Gate локализована не на все наши языки).
+    var GATE_REFS = {
+        ru: "https://www.gate.com/ru/signup/VLFCAVWMBW?ref_type=103",
+        en: "https://www.gate.com/signup/VLFCAVWMBW?ref_type=103",
+    };
+    function applyGateRef() {
+        var a = el("gate-ref");
+        if (a) a.href = GATE_REFS[I18n.lang()] || GATE_REFS.en;
+    }
+    applyGateRef();
+
     I18n.onChange(function () {
         document.title = I18n.t("land.title");
+        applyGateRef();
         if (langSelect) langSelect.value = I18n.lang();
         fillStats(last.stats, last.health);
         renderRows(last.rows);

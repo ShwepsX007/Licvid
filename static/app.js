@@ -25,7 +25,9 @@
         symbol: "ALL",          // фильтр ленты: конкретная монета или ALL
         chartSymbol: "",        // монета графика — живёт отдельно от фильтра
         timeframe: 5,
-        minUsd: 0,
+        minUsd: 0,              // порог ликвидаций, $
+        minCvd: 0,              // порог |CVD| за свечу, $ (треугольники и лента)
+        minOi: 0,               // порог |OI Δ| за свечу, $ (шарики и лента)
         exchanges: null,        // null = все биржи включены; иначе Set включённых
         availableExchanges: [],
         customSymbols: [],
@@ -145,6 +147,8 @@
     const feedFilterEl = $("feed-filter");          // плашка «фильтр: монета»
     const minUsdBtn = $("min-usd-btn");
     const minUsdInput = $("min-usd-input");
+    const minCvdInput = $("min-cvd-input");
+    const minOiInput = $("min-oi-input");
     const minUsdApply = $("min-usd-apply");
     const minUsdPresets = $("min-usd-presets");
     const minUsdPanel = $("min-usd-panel");
@@ -250,11 +254,28 @@
         return state.exchanges.has(name);
     }
 
+    // Пороги объёма по видам ленты: ликвидации, CVD за свечу и OI Δ за свечу.
+    // У каждого свой ключ в localStorage: фильтр ликвидаций не должен менять
+    // порог CVD, и наоборот.
+    const THRESHOLDS = {
+        liq: { key: "minUsd", store: "liqscope.minUsd" },
+        cvd: { key: "minCvd", store: "liqscope.minCvd" },
+        oi: { key: "minOi", store: "liqscope.minOi" },
+    };
+
+    function thresholdOf(kind) {
+        const cfg = THRESHOLDS[kind] || THRESHOLDS.liq;
+        return Math.max(0, Number(state[cfg.key]) || 0);
+    }
+
     function loadSavedFilters() {
-        try {
-            const v = localStorage.getItem("liqscope.minUsd");
-            if (v !== null) state.minUsd = Math.max(0, parseFloat(v) || 0);
-        } catch (e) { /* ignore */ }
+        Object.keys(THRESHOLDS).forEach((kind) => {
+            const cfg = THRESHOLDS[kind];
+            try {
+                const v = localStorage.getItem(cfg.store);
+                if (v !== null) state[cfg.key] = Math.max(0, parseFloat(v) || 0);
+            } catch (e) { /* ignore */ }
+        });
         try {
             const raw = localStorage.getItem("liqscope.exchanges");
             if (raw !== null) {
@@ -268,8 +289,13 @@
         } catch (e) { /* ignore */ }
     }
 
+    function saveThreshold(kind) {
+        const cfg = THRESHOLDS[kind] || THRESHOLDS.liq;
+        try { localStorage.setItem(cfg.store, String(state[cfg.key] || 0)); } catch (e) { /* ignore */ }
+    }
+
     function saveMinUsd() {
-        try { localStorage.setItem("liqscope.minUsd", String(state.minUsd || 0)); } catch (e) { /* ignore */ }
+        saveThreshold("liq");
     }
 
     function saveExchanges() {
@@ -1308,9 +1334,12 @@
         // чтобы при тесноте выживали самые важные сигналы.
         const lastIdx = candles.length - 1;
         const cand = [];
+        // Порог CVD из панели фильтра: нулевой — рисуем всё, что прошло
+        // автоотбор; заданный — режет слабые свечи, как порог ликвидаций.
+        const thr = Math.max(minAbs, state.minCvd > 0 ? state.minCvd : 0);
         for (let i = 0; i < candles.length; i++) {
             const d = Number(candles[i].cvd);
-            if (isFinite(d) && Math.abs(d) >= minAbs) {
+            if (isFinite(d) && Math.abs(d) >= thr) {
                 cand.push({ c: candles[i], d: d, live: i === lastIdx });
             }
         }
@@ -1798,9 +1827,10 @@
         const minAbs = Math.max(1000 * kvol, p90 * 0.05);
 
         const cand = [];
+        const thr = Math.max(minAbs, state.minOi > 0 ? state.minOi : 0);
         for (let i = 0; i < candles.length; i++) {
             const d = Number(candles[i].oiChg);
-            if (isFinite(d) && Math.abs(d) >= minAbs) {
+            if (isFinite(d) && Math.abs(d) >= thr) {
                 cand.push({ c: candles[i], d: d, live: i === candles.length - 1 });
             }
         }
@@ -3276,6 +3306,9 @@
             btn.classList.toggle("active", on);
             btn.setAttribute("aria-selected", on ? "true" : "false");
         });
+        // Порог у каждой ленты свой: подсвечиваем поле открытой вкладки,
+        // чтобы пресеты и подпись кнопки было с чем сверять.
+        refreshFilterButtons();
     }
 
     // Значение ленты CVD/OI за свечу. У OI в свече лежит уровень открытого
@@ -3332,7 +3365,8 @@
         for (let i = candles.length - 1; i >= 0 && items.length < 150; i--) {
             const d = shapeFeedValue(candles[i], field);
             if (!isFinite(d) || Math.abs(d) < minAbs) continue;
-            if (state.minUsd > 0 && Math.abs(d) < state.minUsd) continue;
+            const thr = field === "cvd" ? state.minCvd : state.minOi;
+            if (thr > 0 && Math.abs(d) < thr) continue;
             items.push({
                 _kind: field === "cvd" ? "cvd" : "oi",
                 time: candles[i].time,
@@ -4504,12 +4538,31 @@
         applyFiltersFull();
     }
 
+    function thresholdLabel() {
+        const parts = [];
+        const liq = thresholdOf("liq"), cvd = thresholdOf("cvd"), oi = thresholdOf("oi");
+        if (liq > 0) {
+            parts.push(I18n.t("filter.th_short_liq") + " " +
+                       I18n.t("filter.th_ge", { v: I18n.number(liq) }));
+        }
+        if (cvd > 0) parts.push("CVD " + I18n.t("filter.th_ge", { v: I18n.number(cvd) }));
+        if (oi > 0) parts.push("OI Δ " + I18n.t("filter.th_ge", { v: I18n.number(oi) }));
+        return parts.length ? parts.join(" · ") + " ▾" : I18n.t("filter.all_usd");
+    }
+
     function refreshFilterButtons() {
         if (!minUsdBtn) return;
-        minUsdBtn.textContent = state.minUsd > 0
-            ? I18n.t("filter.min_ge", { v: I18n.number(state.minUsd) })
-            : I18n.t("filter.all_usd");
-        if (minUsdInput) minUsdInput.value = state.minUsd > 0 ? String(state.minUsd) : "";
+        minUsdBtn.textContent = thresholdLabel();
+        const fields = [[minUsdInput, "liq"], [minCvdInput, "cvd"], [minOiInput, "oi"]];
+        fields.forEach(([el, kind]) => {
+            const v = thresholdOf(kind);
+            if (el) {
+                el.value = v > 0 ? String(v) : "";
+                // подсветим поле той ленты, что открыта: пресеты и Enter
+                // работают именно с ней
+                el.classList.toggle("filter-active", state.feedTab === kind);
+            }
+        });
         if (exchangeBtn) {
             if (!state.exchanges || state.exchanges.size === state.availableExchanges.length) {
                 exchangeBtn.textContent = I18n.t("filter.all_exchanges");
@@ -4523,9 +4576,28 @@
         }
     }
 
-    function setMinUsd(v, closePanel) {
-        state.minUsd = Math.max(0, parseFloat(v) || 0);
-        saveMinUsd();
+    function setThreshold(kind, v, closePanel) {
+        const cfg = THRESHOLDS[kind] || THRESHOLDS.liq;
+        state[cfg.key] = Math.max(0, parseFloat(v) || 0);
+        saveThreshold(kind);
+        refreshFilterButtons();
+        applyFiltersFull();
+        if (closePanel && minUsdPanel) minUsdPanel.classList.add("hidden");
+    }
+
+    function setMinUsd(v, closePanel) {          // совместимость со старыми вызовами
+        setThreshold("liq", v, closePanel);
+    }
+
+    /** OK в панели: применяем все три поля разом — ликвидации, CVD и OI Δ. */
+    function applyThresholdInputs(closePanel) {
+        [[minUsdInput, "liq"], [minCvdInput, "cvd"], [minOiInput, "oi"]].forEach(([el, kind]) => {
+            if (el) {
+                const cfg = THRESHOLDS[kind];
+                state[cfg.key] = Math.max(0, parseFloat(el.value) || 0);
+            }
+        });
+        ["liq", "cvd", "oi"].forEach(saveThreshold);
         refreshFilterButtons();
         applyFiltersFull();
         if (closePanel && minUsdPanel) minUsdPanel.classList.add("hidden");
@@ -4542,16 +4614,20 @@
             });
         }
         if (minUsdApply) {
-            minUsdApply.addEventListener("click", () => setMinUsd(minUsdInput.value, true));
+            minUsdApply.addEventListener("click", () => applyThresholdInputs(true));
         }
-        if (minUsdInput) {
-            minUsdInput.addEventListener("keydown", (e) => {
-                if (e.key === "Enter") setMinUsd(minUsdInput.value, true);
+        // У каждого порога своё поле: Enter применяет именно его.
+        [[minUsdInput, "liq"], [minCvdInput, "cvd"], [minOiInput, "oi"]].forEach(([el, kind]) => {
+            if (!el) return;
+            el.addEventListener("keydown", (e) => {
+                if (e.key === "Enter") setThreshold(kind, el.value, true);
             });
-        }
+        });
+        // Пресеты — для той ленты, что открыта: на вкладке CVD $25K станет
+        // порогом CVD, на вкладке ликвидаций — порогом ликвидаций.
         if (minUsdPresets) {
             Array.prototype.forEach.call(minUsdPresets.querySelectorAll("button"), (b) => {
-                b.addEventListener("click", () => setMinUsd(b.dataset.v, true));
+                b.addEventListener("click", () => setThreshold(state.feedTab, b.dataset.v, true));
             });
         }
         if (exchangeBtn && exchangePanel) {

@@ -122,6 +122,54 @@ BODY_SYSTEM_PROMPT_EN = (
 )
 
 
+# ---------------------------------------------------------------------------
+#  Промты из админки сайта
+# ---------------------------------------------------------------------------
+# Владелец канала может переписать инструкцию модели под себя: один промт для
+# шапки поста, другой — для дневного дайджеста (и для каждого — русский и
+# английский вариант, потому что посты уходят в два канала). В базе они лежат
+# настройками ai_prompt_head_ru / ai_prompt_digest_en и т.д.; пока настройки
+# нет, работает встроенный шаблон ниже — админ видит его в форме как образец.
+_PROMPT_SOURCE = None       # callable(kind, lang) -> str, подключает server.py
+
+
+def set_prompt_source(fn) -> None:
+    """Подключить читалку админских промтов (настройки сайта)."""
+    global _PROMPT_SOURCE
+    _PROMPT_SOURCE = fn
+
+
+def prompt_setting(kind: str, lang: str = "ru") -> str:
+    """Имя настройки промта: ai_prompt_head_ru, ai_prompt_digest_en."""
+    kind = "digest" if str(kind or "").strip().lower() == "digest" else "head"
+    code = "en" if str(lang or "").startswith("en") else "ru"
+    return f"ai_prompt_{kind}_{code}"
+
+
+def default_prompt(kind: str, lang: str = "ru") -> str:
+    """Встроенный промт: он же показывается в админке как шаблон."""
+    en = str(lang or "").startswith("en")
+    if str(kind or "").strip().lower() == "digest":
+        return BODY_SYSTEM_PROMPT_EN if en else BODY_SYSTEM_PROMPT
+    return SYSTEM_PROMPT_EN if en else SYSTEM_PROMPT
+
+
+def custom_prompt(kind: str, lang: str = "ru") -> str:
+    """Промт из админки; пусто — значит, админ его не переписывал."""
+    if _PROMPT_SOURCE is None:
+        return ""
+    try:
+        return str(_PROMPT_SOURCE(kind, lang) or "").strip()
+    except Exception as e:                       # noqa: BLE001
+        log.debug("промт %s/%s: %s", kind, lang, e)
+        return ""
+
+
+def active_prompt(kind: str, lang: str = "ru") -> str:
+    """Промт, который реально уходит модели: админский или встроенный."""
+    return custom_prompt(kind, lang) or default_prompt(kind, lang)
+
+
 def clean_body(raw: str) -> str:
     """Чистим рассказ: без markdown, ссылок и лишних пустых строк."""
     t = (raw or "").strip()
@@ -796,11 +844,17 @@ class AiWriter:
         return self._switch_model(p, set()) is not None
 
     def _attempt(self, p: Provider, prompt: str, lang: str = "ru",
-                 tokens: Optional[int] = None) -> Optional[str]:
-        """Один запрос к сервису (с учётом добавки к лимиту ответа)."""
+                 tokens: Optional[int] = None,
+                 system: Optional[str] = None) -> Optional[str]:
+        """Один запрос к сервису (с учётом добавки к лимиту ответа).
+
+        ``system`` — инструкция модели: у шапки и у дневного дайджеста они
+        разные, и обе можно переписать в админке (см. ``active_prompt``).
+        """
         if tokens is None:
             tokens = self.max_tokens + self._extra.get(p.name, 0)
-        system = SYSTEM_PROMPT_EN if str(lang).startswith("en") else SYSTEM_PROMPT
+        if system is None:
+            system = active_prompt("head", lang)
         url, body, headers = request_for(p, prompt, system,
                                          self.temperature, tokens)
         data = post_json(url, body, headers, self.timeout)
@@ -911,6 +965,7 @@ class AiWriter:
             return None
         from daily_digest import day_prompt
         prompt = day_prompt(facts, lang, variant)
+        system = active_prompt("digest", lang)
         for p in self.providers:
             st = self.state[p.name]
             if st.get("dead"):
@@ -921,7 +976,8 @@ class AiWriter:
             try:
                 while True:
                     try:
-                        raw = self._attempt(p, prompt, lang, tokens=tokens)
+                        raw = self._attempt(p, prompt, lang, tokens=tokens,
+                                            system=system)
                         text = clean_body(raw)
                         problem = body_problem(text, lang)
                         if problem:

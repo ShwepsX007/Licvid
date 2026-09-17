@@ -58,7 +58,8 @@ from pump_scan import PumpScanner, filter_new as pump_filter_new
 from pump_scan import format_signal_html as pump_signal_html
 from refs import gate_url
 from mailer import build_mailer
-from ai_text import build_ai
+import ai_text
+from ai_text import build_ai, prompt_setting
 import api_digest
 from api_digest import DigestScheduler, ctx as digest_ctx, register_digest_routes
 from daily_digest import DigestStore
@@ -147,6 +148,11 @@ tg_bot = TelegramBot(BOT_TOKEN, account_store, PUBLIC_URL,
 # ИИ-шапки для постов в канал: Gemini → Groq → OpenRouter (ключи из окружения).
 # Без ключей None — сводка уходит с шаблонными шапками, как раньше.
 tg_bot.ai = build_ai()
+# Промты ИИ (шапка поста и дневной дайджест) можно переписать в админке сайта:
+# они лежат настройками ai_prompt_head_ru / ai_prompt_digest_en и т.д., а
+# встроенные шаблоны остаются образцом, пока админ своего текста не сохранил.
+ai_text.set_prompt_source(
+    lambda kind, lang="ru": account_store.get_setting(prompt_setting(kind, lang)))
 
 KLINE_TTL = 20.0            # сек: как часто перезапрашивать историю с биржи
 # Ликвидации уходят клиенту сразу; интервал — только предохранитель от флуда

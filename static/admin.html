@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>LiqScope — админка</title>
 <link rel="icon" type="image/png" href="/static/logo.png">
-<link rel="stylesheet" href="/static/account.css?v=postint1">
+<link rel="stylesheet" href="/static/account.css?v=prompts1">
 </head>
 <body data-page="admin">
 <header class="site-header">
@@ -187,7 +187,13 @@
             </div>
         </div>
     </div>
+
+    <div class="card" id="ai-prompts" style="margin-top:14px">
+        <h3>🤖 Промты для ИИ</h3>
+        <p class="lead">Инструкции, по которым ИИ пишет <b>шапку поста</b> в канал и <b>текст дневного дайджеста</b>. В поле уже стоит стандартный промт — правьте прямо в нём; «Вернуть шаблон» очищает поле и снова включает встроенный текст. Пустое поле = стандарт, свои цифры и факты ИИ по-прежнему берёт из сводки.</p>
+        <div id="ai-prompt-blocks"><p class="meta">загружаю промты…</p></div>
+    </div>
 </main>
-<script src="/static/account.js?v=postint1"></script>
+<script src="/static/account.js?v=prompts1"></script>
 </body>
 </html>

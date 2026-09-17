@@ -1698,6 +1698,11 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
 .filter-row-between { justify-content: space-between; }
 .filter-number { width: 110px; }
 .filter-note { font-size: 0.62rem; color: var(--text-muted); }
+/* Пороги объёма: подпись ряда, три поля (ликвидации, CVD, OI Δ) и подсветка
+   поля открытой вкладки ленты — пресеты и Enter применяются именно к нему. */
+.filter-th-label { font-size: 0.66rem; color: var(--text-muted); white-space: nowrap;
+    min-width: 96px; }
+.filter-number.filter-active { border-color: var(--color-blue); box-shadow: 0 0 0 1px rgba(77, 163, 255, 0.35); }
 
 .preset-chips {
     display: flex;

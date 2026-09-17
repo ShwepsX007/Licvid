@@ -106,6 +106,30 @@ async function openPage(path, { me = {}, handler, env = {} } = {}) {
   return { win: dom.window, doc: dom.window.document, calls };
 }
 
+const AI_PROMPTS_STUB = {
+  kinds: { head: "Шапка поста", digest: "Дневной дайджест" },
+  langs: { ru: "Русский", en: "English" },
+  limit: 4000,
+  blocks: [
+    { kind: "head", title: "Шапка поста", langs: [
+      { lang: "ru", setting: "ai_prompt_head_ru", custom: false,
+        text: "Ты — редактор Telegram-канала. Пишешь шапку к сводке ликвидаций.",
+        default: "Ты — редактор Telegram-канала. Пишешь шапку к сводке ликвидаций." },
+      { lang: "en", setting: "ai_prompt_head_en", custom: false,
+        text: "You are the editor of a crypto-futures Telegram channel.",
+        default: "You are the editor of a crypto-futures Telegram channel." },
+    ] },
+    { kind: "digest", title: "Дневной дайджест", langs: [
+      { lang: "ru", setting: "ai_prompt_digest_ru", custom: false,
+        text: "Ты — аналитик терминала LiqScope. Пишешь вечерний дайджест.",
+        default: "Ты — аналитик терминала LiqScope. Пишешь вечерний дайджест." },
+      { lang: "en", setting: "ai_prompt_digest_en", custom: false,
+        text: "You are an analyst at the LiqScope terminal.",
+        default: "You are an analyst at the LiqScope terminal." },
+    ] },
+  ],
+};
+
 function adminHandler(u, opts, calls) {
   if (u.indexOf("/api/auth/me") === 0) return { ok: true, user: ADMIN };
   if (u.indexOf("/api/admin/overview") === 0) {
@@ -131,6 +155,27 @@ function adminHandler(u, opts, calls) {
              photos: [postPhoto, digestPhoto],
              photos_by_kind: { post: [postPhoto], digest: [digestPhoto] },
              using_default_heads: false, using_default_photos: false };
+  }
+  if (u.indexOf("/api/admin/ai/prompts") === 0) {
+    const last = calls[calls.length - 1];
+    const body = last && last.body ? JSON.parse(last.body) : {};
+    if (String((opts && opts.method) || "GET").toUpperCase() === "POST") {
+      const text = String(body.text || "");
+      const blocks = AI_PROMPTS_STUB.blocks.map((b) => Object.assign({}, b, {
+        langs: b.langs.map((r) => Object.assign({}, r, {
+          custom: r.custom || (r.lang === body.lang && !!text),
+          text: (r.lang === body.lang)
+            ? (text || r.default)
+            : r.text,
+        })),
+      }));
+      return { ok: true, prompts: Object.assign({}, AI_PROMPTS_STUB, { blocks: blocks }),
+               message: text ? "Промт для «" + (body.kind === "digest" ? "Дневной дайджест" : "Шапка поста") +
+                               "» (" + body.lang + ") сохранён."
+                             : "Промт для «" + (body.kind === "digest" ? "Дневной дайджест" : "Шапка поста") +
+                               "» (" + body.lang + ") снова по шаблону." };
+    }
+    return { ok: true, prompts: AI_PROMPTS_STUB };
   }
   if (u.indexOf("/api/admin/bot") === 0) {
     const last = calls[calls.length - 1];
@@ -340,6 +385,46 @@ function click(win, el) {
       /сохранено|ok/i.test(doc.querySelector("#tpl-photo-status-digest").textContent),
       doc.querySelector("#tpl-photo-status-digest").textContent);
   }
+
+  // --- 🤖 промты ИИ: раздел с шаблоном и сохранением ----------------------
+  check("карточка промтов ИИ есть", !!doc.querySelector("#ai-prompts"));
+  const aiBlocks = doc.querySelectorAll("#ai-prompt-blocks .ai-block");
+  check("два блока промтов: шапка и дайджест", aiBlocks.length === 2, aiBlocks.length);
+  const aiTexts = doc.querySelectorAll("#ai-prompt-blocks .ai-text");
+  check("четыре поля: два языка у каждого промта", aiTexts.length === 4, aiTexts.length);
+  check("в поле уже стоит шаблон промта",
+    /редактор Telegram-канала/.test(aiTexts[0].value), aiTexts[0].value.slice(0, 60));
+  check("шаблон помечен как стандарт",
+    /стандарт/.test(doc.querySelector("#ai-prompt-blocks .ai-badge").textContent),
+    doc.querySelector("#ai-prompt-blocks .ai-badge").textContent);
+
+  const headRow = doc.querySelector('#ai-prompt-blocks .ai-row[data-kind="head"][data-lang="ru"]');
+  const headTa = headRow.querySelector(".ai-text");
+  headTa.value = "Пиши шапку одним предложением со суммой и монетой.";
+  click(win, headRow.querySelector("[data-ai-save]"));
+  await new Promise((r) => setTimeout(r, 250));
+  const saveCall = calls.filter((c) => c.url.indexOf("/api/admin/ai/prompts") === 0 &&
+                                        /"head"/.test(String(c.body))).pop();
+  check("промт шапки уходит на сервер", !!saveCall && /одним предложением/.test(saveCall.body),
+    saveCall && saveCall.body.slice(0, 80));
+  check("после сохранения поле помечено своим",
+    /свой/.test(doc.querySelector('#ai-prompt-blocks .ai-row[data-kind="head"][data-lang="ru"] .ai-badge')
+      .textContent));
+  check("сохранение подтверждено на странице",
+    /сохранён/i.test(doc.querySelector('#ai-prompt-blocks .ai-row[data-kind="head"][data-lang="ru"] .ai-status')
+      .textContent));
+
+  const digestRow = doc.querySelector('#ai-prompt-blocks .ai-row[data-kind="digest"][data-lang="en"]');
+  check("у дайджеста свой промт (английский)", !!digestRow &&
+    /LiqScope terminal/.test(digestRow.querySelector(".ai-text").value),
+    digestRow && digestRow.querySelector(".ai-text").value.slice(0, 60));
+  // после сохранения блок перерисован — берём строку заново
+  const headRow2 = doc.querySelector('#ai-prompt-blocks .ai-row[data-kind="head"][data-lang="ru"]');
+  click(win, headRow2.querySelector("[data-ai-reset]"));
+  await new Promise((r) => setTimeout(r, 250));
+  const resetCall = calls.filter((c) => c.url.indexOf("/api/admin/ai/prompts") === 0 &&
+                                         /"text":""/.test(String(c.body))).pop();
+  check("«вернуть шаблон» очищает промт", !!resetCall, resetCall && resetCall.body);
 
   check("ошибок страницы нет", errors.length === 0, errors.join(" | "));
   await win.close();

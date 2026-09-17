@@ -2048,6 +2048,87 @@
         });
         bootDigestTpl();
         bootBotAdmin();
+        bootAiPrompts();
+    }
+
+    /* ---------------- 🤖 ИИ-промты: шапка поста и дневной дайджест ---------- */
+
+    var AI_PROMPTS = null;      // ответ /api/admin/ai/prompts
+
+    function aiRow(r, kind) {
+        var mark = r.custom
+            ? '<span class="ai-badge ai-badge-own">свой</span>'
+            : '<span class="ai-badge">стандарт</span>';
+        return '<div class="ai-row" data-kind="' + esc(kind) + '" data-lang="' + esc(r.lang) + '">' +
+            '<div class="ai-row-head"><b>' + esc((AI_PROMPTS.langs || {})[r.lang] || r.lang) + "</b>" +
+            mark + '<span class="meta">настройка <code>' + esc(r.setting) + "</code></span></div>" +
+            '<textarea class="ai-text" rows="7" spellcheck="false">' + esc(r.text || "") + "</textarea>" +
+            '<div class="row-actions">' +
+            '<button class="btn btn-primary" type="button" data-ai-save="' + esc(kind) +
+            '" data-ai-lang="' + esc(r.lang) + '">Сохранить</button>' +
+            '<button class="btn" type="button" data-ai-reset="' + esc(kind) +
+            '" data-ai-lang="' + esc(r.lang) + '">Вернуть шаблон</button>' +
+            '<span class="meta ai-status"></span></div></div>';
+    }
+
+    function renderAiPrompts(d) {
+        var box = $("ai-prompt-blocks");
+        if (!box || !d) return;
+        AI_PROMPTS = d;
+        box.innerHTML = (d.blocks || []).map(function (b) {
+            return '<div class="ai-block"><h4>' + esc(b.title) + "</h4>" +
+                (b.langs || []).map(function (r) { return aiRow(r, b.kind); }).join("") +
+                "</div>";
+        }).join("");
+    }
+
+    function loadAiPrompts() {
+        api("/api/admin/ai/prompts").then(function (d) {
+            if (d && d.ok) renderAiPrompts(d.prompts || {});
+        });
+    }
+
+    function saveAiPrompt(kind, lang, text, reset) {
+        var row = document.querySelector('#ai-prompt-blocks .ai-row[data-kind="' + kind +
+                                          '"][data-lang="' + lang + '"]');
+        var st = row ? row.querySelector(".ai-status") : null;
+        if (st) st.textContent = "Сохраняю…";
+        api("/api/admin/ai/prompts", {
+            method: "POST",
+            body: JSON.stringify({ kind: kind, lang: lang, text: reset ? "" : text }),
+        }).then(function (d) {
+            if (d && d.ok) {
+                renderAiPrompts(d.prompts || {});
+                var again = document.querySelector('#ai-prompt-blocks .ai-row[data-kind="' + kind +
+                                                    '"][data-lang="' + lang + '"] .ai-status');
+                if (again) again.textContent = d.message || "Сохранено.";
+            } else if (st) {
+                st.textContent = (d && (d.message || d.error)) || "ошибка";
+            }
+        }).catch(function () {
+            if (st) st.textContent = "ошибка сети";
+        });
+    }
+
+    function bootAiPrompts() {
+        var box = $("ai-prompt-blocks");
+        if (!box) return;
+        loadAiPrompts();
+        // Делегированный клик: разметку перерисовывает loadAiPrompts, поэтому
+        // обработчики на кнопках не выживают — слушаем контейнер.
+        box.addEventListener("click", function (e) {
+            var t = e.target && e.target.closest ? e.target.closest("button") : null;
+            if (!t) return;
+            var row = t.closest(".ai-row");
+            var ta = row ? row.querySelector(".ai-text") : null;
+            if (t.getAttribute("data-ai-save")) {
+                saveAiPrompt(t.getAttribute("data-ai-save"),
+                             t.getAttribute("data-ai-lang"), ta ? ta.value : "", false);
+            } else if (t.getAttribute("data-ai-reset")) {
+                saveAiPrompt(t.getAttribute("data-ai-reset"),
+                             t.getAttribute("data-ai-lang"), "", true);
+            }
+        });
     }
 
     /* ---------------- админка бота на сайте ---------------- */
@@ -2339,8 +2420,8 @@
     function tplPhotoTile(p, kind) {
         var other = kind === "post" ? "digest" : "post";
         return '<div class="tpl-photo"><img alt="" src="' + esc(p.url) + '">' +
-            '<button type="button" class="btn btn-danger btn-small" data-pid="' + p.id +
-            '" title="Удалить">×</button>' +
+            '<button type="button" class="btn btn-danger btn-small tpl-del" data-pid="' + p.id +
+            '" title="Удалить фото">✕</button>' +
             '<button type="button" class="btn btn-small tpl-move" data-move="' + p.id +
             '" data-to="' + other + '" title="Перенести в другую рубрику">⇄</button></div>';
     }

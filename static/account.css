@@ -246,7 +246,29 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
     overflow: hidden; background: var(--bg-dark);
 }
 .tpl-photo img { width: 100%; height: 88px; object-fit: cover; display: block; }
-.tpl-photo .btn { position: absolute; top: 6px; right: 6px; padding: 3px 7px; }
+/* Две кнопки на плитке: удалить (слева) и перенести в другую рубрику (справа).
+   Раньше обе стояли в правом верхнем углу и накрывали друг друга — «×» было
+   не видно, будто кнопки удаления нет вовсе. */
+.tpl-photo .btn { position: absolute; top: 6px; padding: 3px 7px; z-index: 2;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45); }
+.tpl-photo .tpl-del { left: 6px; }
+.tpl-photo .tpl-move { right: 6px; }
+
+/* 🤖 ИИ-промты в админке: блоки «шапка поста» и «дневной дайджест» */
+.ai-block { margin: 14px 0 0; padding: 12px 14px; border: 1px solid var(--border);
+    border-radius: 12px; background: var(--bg-dark); }
+.ai-block h4 { margin: 0 0 6px; }
+.ai-row { margin-top: 10px; }
+.ai-row-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    font-size: 0.82rem; color: var(--muted); }
+.ai-row-head b { color: var(--text); font-size: 0.86rem; }
+.ai-badge { border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px;
+    font-size: 0.72rem; color: var(--muted); }
+.ai-badge-own { border-color: var(--accent, #4da3ff); color: var(--accent, #4da3ff); }
+.ai-text { width: 100%; margin: 6px 0 8px; min-height: 120px; resize: vertical;
+    font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 0.78rem;
+    line-height: 1.45; }
+.ai-row .ai-status { align-self: center; }
 /* Админка бота на сайте: переключатели и маленькие числовые поля */
 .bot-check {
     display: flex; align-items: center; gap: 8px;

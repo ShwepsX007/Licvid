@@ -1122,13 +1122,22 @@ def register_account_routes(app) -> None:
             photos.append({
                 "id": p["id"],
                 "name": p.get("name") or "",
+                "kind": str(p.get("kind") or "post"),
                 "exists": bool(p.get("exists")),
                 "url": f"/api/admin/digest/photos/{p['id']}/file",
             })
+        # Фото разложены по рубрикам: в сводку канала (раз в N часов) и в
+        # вечерний дайджест. Так админ видит, что уйдёт в каждый пост.
+        by_kind = {"post": [], "digest": []}
+        for p in photos:
+            by_kind.setdefault(str(p.get("kind") or "post"), []).append(p)
         return {
             "ok": True,
             "heads": heads,
             "photos": photos,
+            "photos_by_kind": by_kind,
+            "kinds": {"post": "Сводка в канал",
+                      "digest": "Дневной дайджест"},
             "using_default_heads": not bool(heads),
             "using_default_photos": not bool(photos),
         }
@@ -1166,13 +1175,21 @@ def register_account_routes(app) -> None:
             return JSONResponse(
                 {"ok": False, "error": "bad_data", "hint": PHOTO_ERR["bad_data"]},
                 status_code=400)
-        r = ctx.store.add_digest_photo(blob, filename=filename, actor_id=actor["id"])
+        # Рубрика: "post" — сводка раз в N часов, "digest" — дневной дайджест.
+        # Приходит из формы; всё незнакомое считаем постовым фото, как раньше.
+        kind = str(request.query_params.get("kind")
+                   or request.headers.get("x-photo-kind") or "").strip().lower()
+        if kind not in ("post", "digest"):
+            kind = "post"
+        r = ctx.store.add_digest_photo(blob, filename=filename,
+                                       actor_id=actor["id"], kind=kind)
         if not r.get("ok"):
             code = str(r.get("error") or "error")
             r = dict(r)
             r["hint"] = PHOTO_ERR.get(code, code)
             return JSONResponse(r, status_code=400)
-        return {"ok": True, "id": r["id"], "name": r.get("name")}
+        return {"ok": True, "id": r["id"], "name": r.get("name"),
+                "kind": r.get("kind") or kind}
 
     @router.get("/api/admin/digest/photos/{photo_id}/file")
     async def admin_digest_photo_file(request: Request, photo_id: int):
@@ -1184,6 +1201,22 @@ def register_account_routes(app) -> None:
         if not row or not os.path.isfile(path):
             return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
         return FileResponse(path)
+
+    @router.post("/api/admin/digest/photos/{photo_id}/kind")
+    async def admin_digest_photo_kind(request: Request, photo_id: int):
+        """Перенести фото в другую рубрику: сводка ⇄ дневной дайджест."""
+        actor, err = _admin(request)
+        if err:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        kind = "digest" if str((body or {}).get("kind") or "").strip().lower() == "digest" \
+            else "post"
+        if not ctx.store.set_digest_photo_kind(photo_id, kind, actor_id=actor["id"]):
+            return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
+        return {"ok": True, "id": photo_id, "kind": kind}
 
     @router.post("/api/admin/digest/photos/{photo_id}/delete")
     async def admin_digest_del_photo(request: Request, photo_id: int):

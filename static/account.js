@@ -436,7 +436,8 @@
                           t("digestOpen") + "</a>"
                         : "") +
                     '<button class="btn btn-ghost btn-small" data-slug="' +
-                    s.slug + '" data-on="' + (s.subscribed ? "0" : "1") + '">' + label +
+                    s.slug + '" data-soon="' + (s.coming_soon ? "1" : "0") +
+                    '" data-on="' + (s.subscribed ? "0" : "1") + '">' + label +
                     "</button></div>";
             return '<div class="svc-fold' + (isOpen ? " open" : "") + '" data-fold="' + s.slug + '">' +
                 '<button type="button" class="svc-fold-h" data-toggle="' + s.slug + '">' +
@@ -460,10 +461,22 @@
         box.querySelectorAll("button[data-slug]").forEach(function (btn) {
             btn.addEventListener("click", function (e) {
                 e.stopPropagation();
+                // Не перезагружаем весь кабинет: кнопка переключается на месте,
+                // ответ сервера только подтверждает (или откатывает) выбор.
+                var want = btn.getAttribute("data-on") === "1";
+                paintSvcBtn(btn, want);
+                btn.disabled = true;
                 api("/api/account/services/" + btn.getAttribute("data-slug"), {
                     method: "POST",
-                    body: JSON.stringify({ enabled: btn.getAttribute("data-on") === "1" }),
-                }).then(function () { bootCabinet(); });
+                    body: JSON.stringify({ enabled: want }),
+                }).then(function (d) {
+                    btn.disabled = false;
+                    if (!d || d.ok === false) paintSvcBtn(btn, !want);
+                    else bootOpenBoard(btn.getAttribute("data-slug"));
+                }).catch(function () {
+                    btn.disabled = false;
+                    paintSvcBtn(btn, !want);
+                });
             });
         });
         bootAlerts();
@@ -476,6 +489,26 @@
     var tgLinkTimer = null;
 
     /* ---------- Telegram в кабинете: привязка и отвязка ---------- */
+    function paintSvcBtn(btn, subscribed) {
+        /* Кнопка «подписаться/отписаться» без перерисовки всей гармошки:
+           переключаем подпись и цель на самой кнопке. */
+        var soon = btn.getAttribute("data-soon") === "1";
+        btn.setAttribute("data-on", subscribed ? "0" : "1");
+        btn.textContent = soon
+            ? (subscribed ? t("waitlistOn") : t("waitlistOff"))
+            : (subscribed ? t("subscribed") : t("subscribe"));
+    }
+
+    function bootOpenBoard(slug) {
+        /* Доска раскрытого сервиса обновляется сама: перезагрузка кабинета
+           на каждое нажатие только мигала бы экраном. */
+        var fold = document.querySelector('.svc-fold[data-fold="' + slug + '"]');
+        if (!fold || !fold.classList.contains("open")) return;
+        if (slug === "correlations") bootCorrelations();
+        else if (slug === "watchlist") bootPumps();
+        else if (slug === "alerts") bootAlerts();
+    }
+
     function paintTgCard(u, payload) {
         var box = $("tg-card");
         if (!box) return;
@@ -966,40 +999,122 @@
         });
     }
 
-        /* ---------- сервис «Корреляции валют»: тепловая карта ---------- */
+    /* ---------- сервис «Корреляции валют»: тепловая карта и облако связей ---------- */
+    /* Почему сервис раньше «туго» отвечал на нажатия: доска перерисовывалась
+       целиком на каждом автообновлении (раз в 30 с) — вместе с разметкой
+       умирали все обработчики, и клик по чипу уходил в пустоту. Теперь:
+       1) обработчики висят на контейнере доски (делегирование) — перерисовка
+          их не сносит; 2) клик сразу переключает чип и перерисовывает картину
+          из уже пришедших данных, а запрос к серверу идёт фоном; 3) автообнов-
+          ление обновляет только цифры (потоки, карту, график, пары, статус),
+          а не всю доску. */
     var corData = null, corTimer = null, corCfg = { window: "24h", metric: "liq" };
-    var corPairs = null;
+    var corSaveT = null;
+    var corAxes = { x: "liq", y: "vol" };      // оси «облака связей»
+    var corPts = [];                           // точки графика: наведение и клик
+    var corPinned = null;                      // пара, закреплённая кликом
+    var corTip = null;                         // подсказка под курсором
+    var corGeom = { w: 0, h: 0 };
 
-    function bootCorrelations() {
-        if (!$("corr-board")) return;
-        loadCorrelations(true);
-        if (corTimer) clearInterval(corTimer);
-        corTimer = setInterval(function () {
-            if (!document.hidden && $("corr-board") &&
-                $("corr-board").offsetParent !== null) loadCorrelations(false);
-        }, 30000);
+    var COR_LABEL = { liq: "LIQ", vol: "📦 Объём", cvd: "🌊 CVD", oi: "📊 OI" };
+    var COR_HINT = {
+        liq: "по ликвидациям", vol: "по объёму",
+        cvd: "по потоку CVD", oi: "по открытому интересу",
+    };
+    //: какая метрика логично дополняет выбранную (вторая ось графика)
+    var COR_PAIR = { liq: "vol", vol: "liq", cvd: "liq", oi: "vol" };
+    var COR_ORDER = ["liq", "vol", "cvd", "oi"];
+
+    function corShort(sym) {
+        return String(sym == null ? "" : sym).replace("_USDT", "");
     }
 
-    function loadCorrelations(full) {
-        api("/api/account/correlations?window=" + corCfg.window + "&metric=" + corCfg.metric)
-            .then(function (d) {
-                if (!d || !d.ok) return;
-                if (full || !corData) { corData = d; paintCorrelations(d, true); }
-                else { corData = d; paintCorrelations(d, false); }
-            });
+    function corLabelOf(key) {
+        return COR_LABEL[key] || String(key || "");
     }
 
-    function corHeatColor(r) {
-        var a = Math.max(0, Math.min(1, Math.abs(Number(r) || 0)));
-        var alpha = (0.06 + 0.7 * a).toFixed(2);
-        return Number(r) >= 0
-            ? "background:rgba(0,230,118," + alpha + ")"
-            : "background:rgba(255,42,95," + alpha + ")";
+    function corMetricTitle(d, key) {
+        var list = (d && d.metrics) || [];
+        for (var i = 0; i < list.length; i++) {
+            var m = list[i];
+            var k = (typeof m === "object") ? (m.key || m.metric) : m;
+            if (String(k) === String(key)) {
+                return (typeof m === "object" && m.title) || corLabelOf(key);
+            }
+        }
+        return corLabelOf(key);
     }
 
-    function corTile(sym) {
-        var short = String(sym || "").replace("_USDT", "");
-        return '<span class="cor-sym">' + esc(short) + "</span>";
+    function corMatrix(d, metric) {
+        return ((d && d.matrices) || {})[metric] || {};
+    }
+
+    function corR(d, metric, a, b) {
+        var v = (corMatrix(d, metric)[a] || {})[b];
+        return (v === undefined || v === null) ? null : Number(v);
+    }
+
+    function corPairsOf(d, metric) {
+        var syms = (d && d.symbols) || [];
+        var out = [];
+        for (var i = 0; i < syms.length; i++) {
+            for (var j = i + 1; j < syms.length; j++) {
+                var r = corR(d, metric, syms[i], syms[j]);
+                if (r === null) continue;
+                out.push({ a: syms[i], b: syms[j], r: r });
+            }
+        }
+        return out;
+    }
+
+    function corPairWeight(d, a, b) {
+        var coins = (d && d.coins) || {};
+        var wa = Math.abs(Number((coins[a] || {}).liq_usd) || 0);
+        var wb = Math.abs(Number((coins[b] || {}).liq_usd) || 0);
+        return wa + wb;
+    }
+
+    function corChartData(d) {
+        /* Точки «облака связей»: пара монет = точка, оси — корреляция по двум
+           метрикам, размер — насколько крупно эта пара торговалась и горела. */
+        var xk = corAxes.x, yk = corAxes.y;
+        var out = { x: xk, y: yk, pts: [], maxW: 0 };
+        var syms = (d && d.symbols) || [];
+        for (var i = 0; i < syms.length; i++) {
+            for (var j = i + 1; j < syms.length; j++) {
+                var a = syms[i], b = syms[j];
+                var rx = corR(d, xk, a, b);
+                if (rx === null) continue;
+                var ry = (xk === yk) ? rx : corR(d, yk, a, b);
+                if (ry === null) continue;
+                var w = corPairWeight(d, a, b);
+                out.maxW = Math.max(out.maxW, w);
+                out.pts.push({ a: a, b: b, x: rx, y: ry, w: w });
+            }
+        }
+        return out;
+    }
+
+    function corChip(on, attr, label) {
+        return '<button type="button" class="al-chip' + (on ? " on" : "") + '" ' +
+            attr + ">" + esc(label) + "</button>";
+    }
+
+    function corWindowChips(d) {
+        var wins = d.windows || [];
+        var cur = d.window;
+        return wins.map(function (v) {
+            var key = (typeof v === "object") ? (v.key || v.window) : v;
+            var label = (typeof v === "object" && (v.label || v.title)) || key;
+            return corChip(String(key) === String(cur), 'data-corwin="' + key + '"', label);
+        }).join("");
+    }
+
+    function corMetricChips(d, cur, attr) {
+        return COR_ORDER.map(function (key) {
+            return corChip(String(key) === String(cur), attr + '="' + key + '"',
+                corLabelOf(key));
+        }).join("");
     }
 
     function corFlow(title, cls, items, unit) {
@@ -1019,7 +1134,7 @@
                 extra = (c.oi_pct >= 0 ? "+" : "") + Number(c.oi_pct || 0).toFixed(2) + "% OI";
             }
             return '<div class="cor-flow-row"><span class="cor-flow-sym">' +
-                esc(String(sym).replace("_USDT", "")) + "</span>" +
+                esc(corShort(sym)) + "</span>" +
                 '<span class="cor-flow-val ' + cls + '">' + alMoney(val) + "</span>" +
                 '<span class="cor-flow-x">' + esc(extra) + "</span></div>";
         });
@@ -1028,32 +1143,54 @@
             rows.join("") + "</div>";
     }
 
-    function corPairsList(d) {
-        var pairs = (d.pairs || {})[d.metric] || [];
-        if (!pairs.length) return '<div class="cor-flow-empty">связей пока нет — мало истории</div>';
-        return pairs.map(function (p, i) {
+    function corFlowsBox() {
+        if (!corData) return "";
+        var flows = corData.flows || {};
+        return corFlow("🩸 Где выносило шорты", "neg", flows.liquidated_short, "liq") +
+            corFlow("💥 Где выносило лонги", "gold", flows.liquidated_long, "liq") +
+            corFlow("🌊 CVD на сторону продавцов", "neg", flows.cvd_sellers, "cvd") +
+            corFlow("🌊 CVD на сторону покупателей", "pos", flows.cvd_buyers, "cvd") +
+            corFlow("📈 OI растёт", "pos", flows.oi_up, "oi") +
+            corFlow("📉 OI падает", "neg", flows.oi_down, "oi");
+    }
+
+    function corPairsList() {
+        var pairs = corPairsOf(corData, (corData && corData.metric) || "liq");
+        if (!pairs.length) {
+            return '<div class="cor-flow-empty">связей пока нет — мало истории</div>';
+        }
+        pairs.sort(function (p, q) { return Math.abs(q.r) - Math.abs(p.r); });
+        return pairs.slice(0, 6).map(function (p, i) {
             var r = Number(p.r) || 0;
             var w = Math.max(6, Math.min(100, Math.round(Math.abs(r) * 100)));
             var cls = r >= 0 ? "pos" : "neg";
-            return '<div class="cor-pair" data-i="' + i + '">' +
-                '<span class="cor-pair-names">' + esc(String(p.a).replace("_USDT", "")) +
-                " ↔ " + esc(String(p.b).replace("_USDT", "")) + "</span>" +
+            return '<div class="cor-pair" data-corpair="' + i + '">' +
+                '<span class="cor-pair-names">' + esc(corShort(p.a)) + " ↔ " +
+                esc(corShort(p.b)) + "</span>" +
                 '<span class="cor-pair-bar ' + cls + '"><i style="width:' + w + '%"></i></span>' +
                 '<span class="cor-pair-r ' + cls + '">' + r.toFixed(2) + "</span></div>";
         }).join("");
     }
 
+    function corHeatColor(r) {
+        var a = Math.max(0, Math.min(1, Math.abs(Number(r) || 0)));
+        var alpha = (0.06 + 0.7 * a).toFixed(2);
+        return Number(r) >= 0
+            ? "background:rgba(0,230,118," + alpha + ")"
+            : "background:rgba(255,42,95," + alpha + ")";
+    }
+
     function corHeat(d) {
         var syms = (d.symbols || []).slice(0, 10);
-        var m = (d.matrices || {})[d.metric] || {};
+        var m = corMatrix(d, d.metric);
         if (syms.length < 2) {
             return '<div class="cor-flow-empty">мало монет с историей за это окно</div>';
         }
         var html = '<div class="cor-heat-wrap"><table class="cor-heat"><thead><tr><th></th>' +
-            syms.map(function (s) { return "<th>" + esc(String(s).replace("_USDT", "")) + "</th>"; })
-                .join("") + "</tr></thead><tbody>";
+            syms.map(function (s) { return "<th>" + esc(corShort(s)) + "</th>"; }).join("") +
+            "</tr></thead><tbody>";
         syms.forEach(function (a) {
-            html += "<tr><th>" + esc(String(a).replace("_USDT", "")) + "</th>";
+            html += "<tr><th>" + esc(corShort(a)) + "</th>";
             syms.forEach(function (b) {
                 var v = (m[a] || {})[b];
                 var same = a === b;
@@ -1071,92 +1208,392 @@
         return html + "</tbody></table></div>";
     }
 
+    /* ---- «облако связей»: пары монет в координатах двух метрик ------------ */
+    function corQuadrant(px, py) {
+        if (px >= 0 && py >= 0) return ["pos", "идут вместе"];
+        if (px < 0 && py < 0) return ["neg", "вместе падают"];
+        return ["mix", "метрики спорят"];
+    }
+
+    function corDotColor(px, py) {
+        if (px >= 0 && py >= 0) return "rgba(0,230,118,0.85)";
+        if (px < 0 && py < 0) return "rgba(255,42,95,0.85)";
+        return "rgba(255,193,7,0.85)";
+    }
+
+    function drawCorChart(d) {
+        var cv = $("cor-scatter");
+        if (!cv || !cv.getContext) return;
+        var box = cv.parentNode;
+        var w = Math.max(260, Math.round((box && box.clientWidth) || cv.clientWidth || 460));
+        var h = 260;
+        var dpr = (global.devicePixelRatio || 1);
+        if (dpr > 2) dpr = 2;
+        cv.width = Math.round(w * dpr);
+        cv.height = Math.round(h * dpr);
+        cv.style.width = w + "px";
+        cv.style.height = h + "px";
+        corGeom = { w: w, h: h };
+        var ctx = cv.getContext("2d");
+        if (!ctx) return;
+        if (ctx.setTransform) ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        var data = corChartData(d);
+        corPts = [];
+        var padL = 34, padR = 12, padT = 14, padB = 30;
+        var iw = Math.max(40, w - padL - padR), ih = Math.max(40, h - padT - padB);
+        function X(r) { return padL + (iw * (Number(r) + 1)) / 2; }
+        function Y(r) { return padT + ih - (ih * (Number(r) + 1)) / 2; }
+        ctx.clearRect(0, 0, w, h);
+        // фон по квадрантам: спокойный, чтобы точки читались
+        ctx.fillStyle = "rgba(0,230,118,0.05)";
+        ctx.fillRect(X(0), padT, X(1) - X(0), Y(0) - padT);
+        ctx.fillRect(padL, Y(0), X(0) - padL, Y(-1) - Y(0));
+        ctx.fillStyle = "rgba(255,42,95,0.05)";
+        ctx.fillRect(padL, padT, X(0) - padL, Y(0) - padT);
+        ctx.fillRect(X(0), Y(0), X(1) - X(0), Y(-1) - Y(0));
+        // сетка и подписи шкалы корреляции
+        ctx.strokeStyle = "rgba(132,147,168,0.18)";
+        ctx.lineWidth = 1;
+        if (ctx.font) ctx.font = "10px system-ui, sans-serif";
+        [-1, -0.5, 0.5, 1].forEach(function (v) {
+            ctx.beginPath(); ctx.moveTo(X(v), padT); ctx.lineTo(X(v), padT + ih); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(padL, Y(v)); ctx.lineTo(padL + iw, Y(v)); ctx.stroke();
+            if (ctx.fillText) {
+                ctx.fillStyle = "#8d9cb4";
+                ctx.fillText(String(v), X(v) - 8, padT + ih + 14);
+                ctx.fillText(String(v), 6, Y(v) + 3);
+            }
+        });
+        ctx.strokeStyle = "rgba(160,180,210,0.55)";
+        ctx.beginPath(); ctx.moveTo(X(0), padT); ctx.lineTo(X(0), padT + ih); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(padL, Y(0)); ctx.lineTo(padL + iw, Y(0)); ctx.stroke();
+        // диагональ «одинаково по обеим метрикам»
+        ctx.setLineDash && ctx.setLineDash([4, 4]);
+        ctx.strokeStyle = "rgba(120,140,175,0.35)";
+        ctx.beginPath(); ctx.moveTo(X(-1), Y(-1)); ctx.lineTo(X(1), Y(1)); ctx.stroke();
+        ctx.setLineDash && ctx.setLineDash([]);
+        // точки: размер — оборот пары, цвет — знак связи по обеим метрикам
+        data.pts.forEach(function (p) {
+            var wgt = data.maxW > 0 ? Math.sqrt(p.w / data.maxW) : 0.4;
+            var rad = 3 + 6 * wgt;
+            var px = X(p.x), py = Y(p.y);
+            ctx.beginPath();
+            if (ctx.arc) ctx.arc(px, py, rad, 0, Math.PI * 2);
+            ctx.fillStyle = corDotColor(p.x, p.y);
+            ctx.fill();
+            ctx.strokeStyle = "rgba(12,18,28,0.75)";
+            ctx.stroke();
+            p.px = px; p.py = py; p.rad = rad;
+            corPts.push(p);
+        });
+        if (ctx.fillText) {
+            ctx.fillStyle = "#9fb0c8";
+            ctx.fillText("r · " + corLabelOf(data.x), padL, padT - 3);
+            ctx.save && ctx.save();
+            if (ctx.translate && ctx.rotate) {
+                ctx.translate(10, padT + ih / 2 + 26);
+                ctx.rotate(-Math.PI / 2);
+                ctx.fillText("r · " + corLabelOf(data.y), 0, 0);
+                ctx.restore && ctx.restore();
+            }
+        }
+        corTip = $("cor-tip");
+        if (corTip && corPinned) corPaintTip(corPinned, true);
+    }
+
+    function corPaintTip(p, pinned) {
+        var tip = $("cor-tip");
+        if (!tip) return;
+        if (!p) { tip.classList.add("hidden"); return; }
+        var q = corQuadrant(p.x, p.y);
+        tip.className = "cor-tip " + q[0] + (pinned ? " pinned" : "");
+        var verdict = q[0] === "pos" ? "обе метрики идут вместе"
+            : q[0] === "neg" ? "обе метрики в противофазе"
+                : "знаки разные — связи по метрикам спорят";
+        tip.innerHTML = "<b>" + esc(corShort(p.a)) + " ↔ " + esc(corShort(p.b)) + "</b>" +
+            '<span class="cor-tip-grid">' +
+            "<i>" + esc(corLabelOf(corAxes.x)) + "</i><i>r = " + p.x.toFixed(2) + "</i>" +
+            "<i>" + esc(corLabelOf(corAxes.y)) + "</i><i>r = " + p.y.toFixed(2) + "</i>" +
+            "</span><span class=\"cor-tip-note\">" + esc(verdict) + " · " +
+            esc(alMoney(p.w)) + " ликвидаций на двоих</span>";
+    }
+
+    function corPick(px, py) {
+        var best = null, bestD = 14 * 14;
+        corPts.forEach(function (p) {
+            var dx = p.px - px, dy = p.py - py;
+            var d2 = dx * dx + dy * dy;
+            if (d2 <= Math.max(bestD, (p.rad + 6) * (p.rad + 6)) && (best === null || d2 < bestD)) {
+                best = p; bestD = d2;
+            }
+        });
+        return best;
+    }
+
+    function corChartBox(d) {
+        var data = corChartData(d);
+        var strong = data.pts.filter(function (p) { return Math.abs(p.x) >= 0.6 || Math.abs(p.y) >= 0.6; });
+        var together = data.pts.filter(function (p) { return p.x >= 0.4 && p.y >= 0.4; }).length;
+        var opposite = data.pts.filter(function (p) { return p.x <= -0.4 || p.y <= -0.4; }).length;
+        return '<div class="cor-chart">' +
+            '<div class="cor-chart-head">' +
+            "<div><b>📐 Облако связей</b> <span class=\"cor-chart-sub\">каждая точка — пара монет: " +
+            "по горизонтали связь «" + esc(corLabelOf(corAxes.x)) + "», по вертикали — «" +
+            esc(corLabelOf(corAxes.y)) + "». Размер точки — оборот пары, цвет — знак связи. " +
+            "Правее и выше — пары, которые ходят вместе; левее и ниже — в противофазе.</span></div>" +
+            "</div>" +
+            '<div class="cor-chart-axes"><span class="cor-axis-label">Ось X</span>' +
+            '<span class="al-chips" id="cor-axis-x">' +
+            corMetricChips(d, corAxes.x, "data-corx") + "</span>" +
+            '<span class="cor-axis-label">Ось Y</span>' +
+            '<span class="al-chips" id="cor-axis-y">' +
+            corMetricChips(d, corAxes.y, "data-cory") + "</span></div>" +
+            '<div class="cor-canvas-wrap"><canvas id="cor-scatter"></canvas>' +
+            '<div class="cor-tip hidden" id="cor-tip"></div></div>' +
+            '<div class="cor-hist-wrap"><span class="cor-hist-title">Распределение связей · ' +
+            esc(corLabelOf(d.metric)) + "</span>" +
+            '<div class="cor-hist" id="cor-hist">' + corHist(d.metric) + "</div></div>" +
+            '<div class="cor-chart-note">пар в расчёте: ' + data.pts.length +
+            " · сильных связей: " + strong.length +
+            " · ходят вместе: " + together + " · в противофазе: " + opposite +
+            "</div></div>";
+    }
+
+    function corHist(metric) {
+        /* Сколько пар попало в каждый интервал коэффициента: сразу видно,
+           рынок движется одним куском или монеты живут сами по себе. */
+        var buckets = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];   // −1…−0.8 … 0.8…1
+        corPairsOf(corData, metric).forEach(function (p) {
+            var idx = Math.min(9, Math.max(0, Math.floor((p.r + 1) / 0.2)));
+            if (p.r === 1) idx = 9;
+            buckets[idx] += 1;
+        });
+        var max = Math.max.apply(null, buckets.concat([1]));
+        return buckets.map(function (n, i) {
+            var lo = -1 + i * 0.2;
+            var cls = lo < 0 ? "neg" : "pos";
+            var pct = Math.round(100 * n / max);
+            var title = (!n ? "нет пар" : n + " пар") + " · r " +
+                (lo >= 0 ? "+" : "") + lo.toFixed(1) + "…" +
+                (lo + 0.2 >= 0 ? "+" : "") + (lo + 0.2).toFixed(1);
+            return '<i class="' + cls + '" style="height:' + Math.max(2, pct) +
+                '%" title="' + esc(title) + '"></i>';
+        }).join("");
+    }
+
+    function corStatusText() {
+        if (!corData) return "";
+        var pairs = corPairsOf(corData, corData.metric);
+        var active = pairs.filter(function (p) { return Math.abs(p.r) >= 0.4; }).length;
+        var text = "монет: " + ((corData.symbols || []).length) +
+            " · точек в окне: " + (corData.hours || 0) +
+            " · пар: " + pairs.length + " · сильных: " + active;
+        return text;
+    }
+
     function paintCorrelations(d, bind) {
         var board = $("corr-board");
         if (!board) return;
-        var wins = d.windows || [];
-        var mets = d.metrics || [];
-        var labels = { liq: "LIQ", vol: "📦 Объём", cvd: "🌊 CVD", oi: "📊 OI" };
+        corData = d;
+        if (d.config && d.config.metric) corCfg.metric = d.config.metric;
+        if (d.config && d.config.window) corCfg.window = d.config.window;
         var winLabel = (d.window_label || d.window || "");
-        function chips(list, cur, attr, fmt) {
-            return list.map(function (v) {
-                var key = typeof v === "object" ? (v.key || v.window || v.metric) : v;
-                var on = String(key) === String(cur);
-                return '<button type="button" class="al-chip' + (on ? " on" : "") +
-                    '" ' + attr + '="' + key + '">' + esc(fmt ? fmt(v, key) : key) + "</button>";
-            }).join("");
-        }
-        var flows = d.flows || {};
-        var head = "<div class=\"al-head\"><div><h3>🔗 Корреляции валют</h3>" +
+        var head = '<div class="al-head"><div><h3>🔗 Корреляции валют</h3>' +
             '<div class="al-sub">Кто ходит вместе за ' + esc(winLabel) +
             ", а кто в противофазе: ликвидации и объём, CVD и OI. Видно, где выносило шорты, " +
             "а где лонги, куда перекошен CVD и где растёт открытый интерес.</div></div></div>";
         board.innerHTML = head +
             '<div class="al-label">Окно</div><div class="al-chips" id="cor-wins">' +
-            chips(wins, d.window, "data-corwin", function (v, key) {
-                return (typeof v === "object" && (v.label || v.title)) || key;
-            }) + "</div>" +
+            corWindowChips(d) + "</div>" +
             '<div class="al-label">Метрика</div><div class="al-chips" id="cor-mets">' +
-            chips(mets, d.metric, "data-cormet", function (v, key) {
-                return labels[key] || key;
-            }) + "</div>" +
-            '<div class="cor-flows">' +
-            corFlow("🩸 Где выносило шорты", "neg", flows.liquidated_short, "liq") +
-            corFlow("💥 Где выносило лонги", "gold", flows.liquidated_long, "liq") +
-            corFlow("🌊 CVD на сторону продавцов", "neg", flows.cvd_sellers, "cvd") +
-            corFlow("🌊 CVD на сторону покупателей", "pos", flows.cvd_buyers, "cvd") +
-            corFlow("📈 OI растёт", "pos", flows.oi_up, "oi") +
-            corFlow("📉 OI падает", "neg", flows.oi_down, "oi") +
-            "</div>" +
-            '<div class="al-label">Тепловая карта · ' + esc(labels[d.metric] || d.metric) +
-            " · " + esc(winLabel) + "</div>" + corHeat(d) +
+            corMetricChips(d, d.metric, "data-cormet") + "</div>" +
+            '<div class="cor-flows" id="cor-flows">' + corFlowsBox() + "</div>" +
+            '<div class="al-label">Тепловая карта · ' + esc(corMetricTitle(d, d.metric)) +
+            " · " + esc(winLabel) + "</div>" +
+            '<div id="cor-heat-box">' + corHeat(d) + "</div>" +
+            '<div class="al-label">График корреляций</div>' +
+            '<div id="cor-chart-box">' + corChartBox(d) + "</div>" +
             '<div class="al-label">Самые сильные связи</div>' +
-            '<div class="cor-pairs" id="cor-pairs">' + corPairsList(d) + "</div>" +
-            '<div class="al-status" id="cor-status">монет: ' + (d.symbols || []).length +
-            " · точек в окне: " + (d.hours || 0) + "</div>";
+            '<div class="cor-pairs" id="cor-pairs">' + corPairsList() + "</div>" +
+            '<div class="al-status" id="cor-status">' + esc(corStatusText()) + "</div>";
         if (bind) bindCorrelations();
+        drawCorChart(d);
+    }
+
+    function paintCorrelationsLive(d) {
+        /* Автообновление: только цифры. Разметку и чипы не трогаем — иначе
+           обработчики кнопок умирали бы каждые 30 секунд. */
+        corData = d;
+        var flows = $("cor-flows");
+        if (flows) flows.innerHTML = corFlowsBox();
+        var heat = $("cor-heat-box");
+        if (heat) heat.innerHTML = corHeat(d);
+        var hist = $("cor-hist");
+        if (hist) hist.innerHTML = corHist(d.metric);
+        var pairs = $("cor-pairs");
+        if (pairs) pairs.innerHTML = corPairsList();
+        var st = $("cor-status");
+        if (st && !corPinned) st.textContent = corStatusText();
+        drawCorChart(d);
+    }
+
+    function corMarkChips() {
+        /* Подсветка выбранного — мгновенно, не дожидаясь ответа сервера. */
+        var board = $("corr-board");
+        if (!board) return;
+        board.querySelectorAll("#cor-wins .al-chip").forEach(function (b) {
+            b.classList.toggle("on", b.getAttribute("data-corwin") === String(corCfg.window));
+        });
+        board.querySelectorAll("#cor-mets .al-chip").forEach(function (b) {
+            b.classList.toggle("on", b.getAttribute("data-cormet") === String(corCfg.metric));
+        });
+        board.querySelectorAll("#cor-axis-x .al-chip").forEach(function (b) {
+            b.classList.toggle("on", b.getAttribute("data-corx") === String(corAxes.x));
+        });
+        board.querySelectorAll("#cor-axis-y .al-chip").forEach(function (b) {
+            b.classList.toggle("on", b.getAttribute("data-cory") === String(corAxes.y));
+        });
+    }
+
+    function corSetStatus(text, ok) {
+        var st = $("cor-status");
+        if (!st) return;
+        st.className = "al-status" + (ok ? " ok" : "");
+        st.textContent = text || corStatusText();
+    }
+
+    function saveCorrelations() {
+        if (corSaveT) clearTimeout(corSaveT);
+        corSaveT = setTimeout(function () {
+            api("/api/account/correlations", {
+                method: "POST",
+                body: JSON.stringify({ window: corCfg.window, metric: corCfg.metric }),
+            }).then(function (d) {
+                if (d && d.ok === false) corSetStatus(d.error || "настройка не сохранилась");
+            }).catch(function () { corSetStatus("настройка не сохранилась: сеть"); });
+        }, 250);
+    }
+
+    function bootCorrelations() {
+        if (!$("corr-board")) return;
+        bindCorrelations();
+        loadCorrelations(true);
+        if (corTimer) clearInterval(corTimer);
+        corTimer = setInterval(function () {
+            if (!document.hidden && $("corr-board") &&
+                $("corr-board").offsetParent !== null &&
+                !document.querySelector("#corr-board .cor-tip.pinned")) loadCorrelations(false);
+        }, 30000);
+    }
+
+    function loadCorrelations(full) {
+        return api("/api/account/correlations?window=" + corCfg.window + "&metric=" + corCfg.metric)
+            .then(function (d) {
+                if (!d || !d.ok) return d;
+                corData = d;
+                if (full || !$("cor-heat-box")) paintCorrelations(d, true);
+                else paintCorrelationsLive(d);
+                return d;
+            });
     }
 
     function bindCorrelations() {
-        document.querySelectorAll("#cor-wins .al-chip").forEach(function (b) {
-            b.addEventListener("click", function () {
-                corCfg.window = b.getAttribute("data-corwin");
+        var board = $("corr-board");
+        if (!board || board._bound) return;
+        board._bound = true;              // обработчики живут на контейнере
+        board.addEventListener("click", function (e) {
+            var t = e.target;
+            while (t && t !== board && !(t.getAttribute && (t.getAttribute("data-corwin") ||
+                t.getAttribute("data-cormet") || t.getAttribute("data-corx") ||
+                t.getAttribute("data-cory") || t.getAttribute("data-corpair")))) {
+                t = t.parentNode;
+            }
+            if (!t || t === board) return;
+            var win = t.getAttribute("data-corwin");
+            if (win) {
+                corCfg.window = win;
+                corMarkChips();
+                corSetStatus("окно " + win + " · считаю…");
                 loadCorrelations(true);
-            });
-        });
-        document.querySelectorAll("#cor-mets .al-chip").forEach(function (b) {
-            b.addEventListener("click", function () {
-                corCfg.metric = b.getAttribute("data-cormet");
-                loadCorrelations(true);
-            });
-        });
-        document.querySelectorAll("#cor-pairs .cor-pair").forEach(function (row) {
-            row.addEventListener("click", function () {
-                if (!corData) return;
-                var p = ((corData.pairs || {})[corData.metric] || [])[Number(row.getAttribute("data-i"))];
+                saveCorrelations();
+                return;
+            }
+            var met = t.getAttribute("data-cormet");
+            if (met) {
+                corCfg.metric = met;
+                corMarkChips();
+                if (corData) paintCorrelationsLive(corData);   // карта и графики — сразу
+                corSetStatus(corStatusText());
+                loadCorrelations(true);                        // цифры подтверждаем фоном
+                saveCorrelations();
+                return;
+            }
+            var ax = t.getAttribute("data-corx");
+            if (ax) {
+                corAxes.x = ax;
+                corMarkChips();
+                if (corData) { drawCorChart(corData); }
+                return;
+            }
+            var ay = t.getAttribute("data-cory");
+            if (ay) {
+                corAxes.y = ay;
+                corMarkChips();
+                if (corData) { drawCorChart(corData); }
+                return;
+            }
+            var pi = t.getAttribute("data-corpair");
+            if (pi !== null && pi !== undefined && pi !== "") {
+                var p = corPairsOf(corData, (corData && corData.metric) || "liq")
+                    .sort(function (x, y) { return Math.abs(y.r) - Math.abs(x.r); })[Number(pi)];
                 if (!p) return;
-                var st = $("cor-status");
-                var a = String(p.a).replace("_USDT", ""), b = String(p.b).replace("_USDT", "");
-                if (!st) return;
-                st.textContent = a + " и " + b + ": r = " + Number(p.r).toFixed(2) +
-                    (Number(p.r) >= 0 ? " — движутся вместе" : " — в противофазе") +
-                    " · " + (labelsForMetric(corData.metric));
-            });
+                var verdict = p.r >= 0 ? "движутся вместе" : "в противофазе";
+                corSetStatus(corShort(p.a) + " и " + corShort(p.b) + ": r = " +
+                    Number(p.r).toFixed(2) + " — " + verdict + " · " +
+                    COR_HINT[(corData && corData.metric) || "liq"] + " · окно " +
+                    ((corData && (corData.window_label || corData.window)) || ""), true);
+            }
         });
-    }
-
-    function labelsForMetric(m) {
-        if (m === "cvd") return "по потоку CVD";
-        if (m === "oi") return "по открытому интересу";
-        if (m === "vol") return "по объёму";
-        return "по ликвидациям";
+        var cv = $("cor-scatter");
+        if (cv) {
+            cv.addEventListener("mousemove", function (e) {
+                var rect = cv.getBoundingClientRect ? cv.getBoundingClientRect() : { left: 0, top: 0 };
+                var p = corPick(e.clientX - rect.left, e.clientY - rect.top);
+                corPaintTip(p, false);
+            });
+            cv.addEventListener("mouseleave", function () { corPaintTip(null, false); });
+            cv.addEventListener("click", function (e) {
+                var rect = cv.getBoundingClientRect ? cv.getBoundingClientRect() : { left: 0, top: 0 };
+                var p = corPick(e.clientX - rect.left, e.clientY - rect.top);
+                corPinned = p || null;
+                corPaintTip(corPinned, true);
+                if (p) {
+                    corSetStatus("пара " + corShort(p.a) + " ↔ " + corShort(p.b) +
+                        ": " + corLabelOf(corAxes.x) + " r = " + p.x.toFixed(2) + ", " +
+                        corLabelOf(corAxes.y) + " r = " + p.y.toFixed(2), true);
+                }
+            });
+        }
+        if (global.addEventListener && !global._corResize) {
+            global._corResize = true;
+            global.addEventListener("resize", function () {
+                if (corData && $("cor-scatter")) drawCorChart(corData);
+            });
+        }
     }
 
     /* ---------- сервис «Сторож монет»: гистограмма пампов/дампов ---------- */
+    /* Доска сторожа жила по тому же принципу, что и корреляции: автообновление
+       (раз в 12 с) перерисовывало всю разметку, обработчики кнопок исчезали, и
+       чипы переставали отвечать. Теперь обработчики висят на контейнере, клик
+       сразу переключает чип и пересобирает картину из уже пришедших данных, а
+       автообновление меняет только цифры. */
     var pumpData = null, pumpTimer = null, pumpCfg = null, pumpSaveT = null;
+    var PUMP_MODE_LABEL = { pump: "🚀 Пампы", dump: "🩸 Дампы", both: "⚖️ Сразу оба" };
 
     function bootPumps() {
         if (!$("pump-board")) return;
+        bindPumps();
         loadPumps(true);
         if (pumpTimer) clearInterval(pumpTimer);
         pumpTimer = setInterval(function () {
@@ -1166,11 +1603,16 @@
     }
 
     function loadPumps(full) {
-        api("/api/account/watchlist").then(function (d) {
-            if (!d || !d.ok) return;
+        return api("/api/account/watchlist").then(function (d) {
+            if (!d || !d.ok) return d;
             pumpData = d;
-            if (full || !pumpCfg) { pumpCfg = d.config || pumpCfg; paintPumps(d, true); }
-            else paintPumps(d, false);
+            if (full || !pumpCfg || !$("pump-bars")) {
+                pumpCfg = d.config || pumpCfg;
+                paintPumps(d, true);
+            } else {
+                paintPumps(d, false);
+            }
+            return d;
         });
     }
 
@@ -1182,6 +1624,11 @@
         }).then(function (d) {
             var st = $("pump-status");
             if (d && d.config) pumpCfg = d.config;
+            if (d && d.movers) pumpData = Object.assign({}, pumpData || {}, { movers: d.movers, hits: d.hits || [] });
+            if (d && d.hits) {
+                var hits = $("pump-hits-box");
+                if (hits) hits.innerHTML = pumpHitsBox(d);
+            }
             if (st) {
                 st.className = "al-status " + (d && d.ok ? "ok" : "");
                 st.textContent = d && d.ok ? "сохранено · сигналы придут в Telegram"
@@ -1228,6 +1675,44 @@
         }).join("") + "</div>";
     }
 
+    function pumpHits(d) {
+        /* «Уже за порогом» считаем из тех же движений рынка: смена порога
+           не должна ждать ответа сервера. */
+        var thr = Math.abs(Number((pumpCfg && pumpCfg.threshold) || 0));
+        var mode = (pumpCfg && pumpCfg.mode) || "both";
+        var rows = (d.hits || []).slice();
+        if (d.movers && d.movers.length) {
+            rows = d.movers.filter(function (m) {
+                var pct = Number(m.change_pct) || 0;
+                if (pct >= thr && (mode === "pump" || mode === "both")) return true;
+                if (pct <= -thr && (mode === "dump" || mode === "both")) return true;
+                return false;
+            }).map(function (m) {
+                var row = Object.assign({}, m);
+                row.kind = (Number(m.change_pct) || 0) >= 0 ? "pump" : "dump";
+                row.threshold = thr;
+                return row;
+            });
+        }
+        return rows;
+    }
+
+    function pumpHitsBox(d) {
+        var thr = Number((pumpCfg && pumpCfg.threshold) || 10);
+        var hot = pumpHits(d);
+        if (!hot.length) {
+            return '<div class="cor-flow-empty">тихо: ни одна монета не прошла порог</div>';
+        }
+        return '<div class="pump-hits">' + hot.slice(0, 8).map(function (h) {
+            var up = String(h.kind) === "pump";
+            return '<div class="pump-hit ' + (up ? "pos" : "neg") + '">' +
+                (up ? "🚀" : "🩸") + " " +
+                esc(String(h.symbol).replace("_USDT", "")) + " " +
+                (up ? "+" : "−") + Math.abs(Number(h.change_pct) || 0).toFixed(2) +
+                "% за " + esc(alWin(h.span_min || 0)) + "</div>";
+        }).join("") + "</div>";
+    }
+
     function alPrice(v) {
         v = Number(v) || 0;
         if (v >= 1000) return "$" + v.toFixed(0);
@@ -1252,22 +1737,25 @@
         }).join("");
     }
 
-    function paintPumps(d, bind) {
-        var board = $("pump-board");
-        if (!board || !pumpCfg) return;
-        var st = d.status || {};
-        function chips(list, cur, attr, fmt) {
-            return (list || []).map(function (v) {
-                var key = typeof v === "object" ? (v.key || v) : v;
-                var on = String(key) === String(cur);
-                return '<button type="button" class="al-chip' + (on ? " on" : "") + '" ' +
-                    attr + '="' + key + '">' + esc(fmt ? fmt(v, key) : key) + "</button>";
-            }).join("");
-        }
+    function pumpStatusText(d) {
+        var st = (d && d.status) || {};
+        return "под наблюдением монет: " + (st.coins || 0) +
+            (st.age_sec != null ? " · данные " + Math.round(st.age_sec) + " с назад" : "") +
+            " · сигналов за сессию: " + (st.signals_total || 0);
+    }
+
+    function pumpChips(list, cur, attr, fmt) {
+        return (list || []).map(function (v) {
+            var key = typeof v === "object" ? (v.key || v) : v;
+            var on = String(key) === String(cur);
+            return '<button type="button" class="al-chip' + (on ? " on" : "") + '" ' +
+                attr + '="' + key + '">' + esc(fmt ? fmt(v, key) : key) + "</button>";
+        }).join("");
+    }
+
+    function pumpShell(d) {
         var thr = Number(pumpCfg.threshold || 10);
-        var hot = (d.hits || []);
-        board.innerHTML =
-            '<div class="al-head"><div><h3>👁 Сторож монет</h3>' +
+        return '<div class="al-head"><div><h3>👁 Сторож монет</h3>' +
             '<div class="al-sub">Пампы и дампы всех монет Gate. Порог — изменение цены в % ' +
             'за выбранный период свечей; текущая, ещё формирующаяся свеча считается. ' +
             'Сигнал уходит в Telegram и предлагает посмотреть монету на Gate.</div></div>' +
@@ -1275,84 +1763,156 @@
             "<i></i><span>" + (pumpCfg.enabled ? "СИГНАЛ ВКЛ" : "СИГНАЛ ВЫКЛ") +
             "</span></label></div>" +
             '<div class="al-label">Что ловим</div><div class="al-chips" id="pump-mode">' +
-            chips([{ key: "pump", label: "🚀 Пампы" }, { key: "dump", label: "🩸 Дампы" },
+            pumpChips([{ key: "pump", label: "🚀 Пампы" }, { key: "dump", label: "🩸 Дампы" },
                 { key: "both", label: "⚖️ Сразу оба" }], pumpCfg.mode, "data-pumpmode",
                 function (v) { return v.label; }) + "</div>" +
             '<div class="al-label">Порог изменения цены</div><div class="al-chips" id="pump-thr">' +
-            chips(d.thresholds || [3, 5, 10, 20, 30, 50], thr, "data-pumpthr",
+            pumpChips(d.thresholds || [3, 5, 10, 20, 30, 50], thr, "data-pumpthr",
                 function (v) { return v + "%"; }) + "</div>" +
             '<div class="al-row" style="margin-top:8px"><input id="pump-thr-in" type="number" ' +
             'min="0.5" max="500" step="0.5" value="' + thr + '">' +
             '<span class="pump-hint">свой порог, %</span></div>' +
             '<div class="al-label">Период свечей</div><div class="al-chips" id="pump-per">' +
-            chips(d.periods || [{ key: "1m" }, { key: "5m" }], pumpCfg.period, "data-pumpper",
+            pumpChips(d.periods || [{ key: "1m" }, { key: "5m" }], pumpCfg.period, "data-pumpper",
                 function (v) { return v.key || v; }) + "</div>" +
             '<div class="al-label">Сколько свечей</div><div class="al-chips" id="pump-cnd">' +
-            chips(d.candles || [1, 2, 3, 5, 10], pumpCfg.candles, "data-pumpcn",
+            pumpChips(d.candles || [1, 2, 3, 5, 10], pumpCfg.candles, "data-pumpcn",
                 function (v) { return v + " свеч."; }) + "</div>" +
             '<div class="pump-window" id="pump-window">окно сигнала: ' +
             esc(alWin(pumpSpan(d))) + " (период × свечи, текущая свеча считается)</div>" +
-            '<div class="al-label">Пампы и дампы сейчас</div>' + pumpBars(d) +
+            '<div class="al-label">Пампы и дампы сейчас</div><div id="pump-bars">' +
+            pumpBars(d) + "</div>" +
             '<div class="al-label">Уже за порогом ' + thr + "%</div>" +
-            (hot.length
-                ? '<div class="pump-hits">' + hot.slice(0, 8).map(function (h) {
-                    var up = String(h.kind) === "pump";
-                    return '<div class="pump-hit ' + (up ? "pos" : "neg") + '">' +
-                        (up ? "🚀" : "🩸") + " " +
-                        esc(String(h.symbol).replace("_USDT", "")) + " " +
-                        (up ? "+" : "−") + Math.abs(Number(h.change_pct) || 0).toFixed(2) +
-                        "% за " + esc(alWin(h.span_min || 0)) + "</div>";
-                }).join("") + "</div>"
-                : '<div class="cor-flow-empty">тихо: ни одна монета не прошла порог</div>') +
-            '<div class="al-label">Последние сигналы</div><div class="al-tape">' +
+            '<div id="pump-hits-box">' + pumpHitsBox(d) + "</div>" +
+            '<div class="al-label">Последние сигналы</div><div class="al-tape" id="pump-tape">' +
             pumpTape(d) + "</div>" +
-            '<div class="al-status" id="pump-status">под наблюдением монет: ' +
-            (st.coins || 0) + (st.age_sec != null ? " · данные " + Math.round(st.age_sec) + " с назад" : "") +
-            " · сигналов за сессию: " + (st.signals_total || 0) + "</div>";
+            '<div class="al-status" id="pump-status">' + esc(pumpStatusText(d)) + "</div>";
+    }
+
+    function paintPumps(d, bind) {
+        var board = $("pump-board");
+        if (!board || !pumpCfg) return;
+        pumpData = d;
+        board.innerHTML = pumpShell(d);
         if (bind) bindPumps();
     }
 
-    function bindPumps() {
+    function paintPumpsLive(d) {
+        /* Автообновление: цифры меняются, кнопки остаются на месте. */
+        pumpData = d;
+        var bars = $("pump-bars");
+        if (bars) bars.innerHTML = pumpBars(d);
+        var hits = $("pump-hits-box");
+        if (hits) hits.innerHTML = pumpHitsBox(d);
+        var tape = $("pump-tape");
+        if (tape) tape.innerHTML = pumpTape(d);
+        var st = $("pump-status");
+        if (st) st.textContent = pumpStatusText(d);
+    }
+
+    function pumpMarkChips() {
+        var board = $("pump-board");
+        if (!board || !pumpCfg) return;
+        board.querySelectorAll("#pump-mode .al-chip").forEach(function (b) {
+            b.classList.toggle("on", b.getAttribute("data-pumpmode") === String(pumpCfg.mode));
+        });
+        board.querySelectorAll("#pump-thr .al-chip").forEach(function (b) {
+            b.classList.toggle("on", Number(b.getAttribute("data-pumpthr")) === Number(pumpCfg.threshold));
+        });
+        board.querySelectorAll("#pump-per .al-chip").forEach(function (b) {
+            b.classList.toggle("on", b.getAttribute("data-pumpper") === String(pumpCfg.period));
+        });
+        board.querySelectorAll("#pump-cnd .al-chip").forEach(function (b) {
+            b.classList.toggle("on", Number(b.getAttribute("data-pumpcn")) === Number(pumpCfg.candles));
+        });
+        var w = $("pump-window");
+        if (w) w.textContent = "окно сигнала: " + alWin(pumpSpan(pumpData || {})) +
+            " (период × свечи, текущая свеча считается)";
         var sw = $("pump-sw");
-        if (sw) sw.addEventListener("click", function () {
-            pumpCfg.enabled = !pumpCfg.enabled;
-            sw.classList.toggle("on", pumpCfg.enabled);
-            sw.querySelector("span").textContent = pumpCfg.enabled ? "СИГНАЛ ВКЛ" : "СИГНАЛ ВЫКЛ";
-            pumpDebounce();
+        if (sw) {
+            sw.classList.toggle("on", !!pumpCfg.enabled);
+            var sp = sw.querySelector("span");
+            if (sp) sp.textContent = pumpCfg.enabled ? "СИГНАЛ ВКЛ" : "СИГНАЛ ВЫКЛ";
+        }
+    }
+
+    function pumpRepaintNow() {
+        /* Мгновенная реакция на нажатие: пересобираем зависимые блоки из того,
+           что уже пришло с сервера — без ожидания сети. */
+        pumpMarkChips();
+        var d = pumpData || {};
+        var hits = $("pump-hits-box");
+        if (hits) hits.innerHTML = pumpHitsBox(d);
+        var label = document.querySelector("#pump-board .al-label + #pump-hits-box");
+        void label;
+        var bars = $("pump-bars");
+        if (bars) bars.innerHTML = pumpBars(d);
+        var thrs = document.querySelectorAll("#pump-board .al-label");
+        thrs.forEach(function (el) {
+            if (/^Уже за порогом/.test(el.textContent || "")) {
+                el.textContent = "Уже за порогом " + Number(pumpCfg.threshold || 0) + "%";
+            }
         });
-        document.querySelectorAll("#pump-mode .al-chip").forEach(function (b) {
-            b.addEventListener("click", function () {
-                pumpCfg.mode = b.getAttribute("data-pumpmode");
+    }
+
+    function bindPumps() {
+        var board = $("pump-board");
+        if (!board || board._bound) return;
+        board._bound = true;             // один раз и навсегда — перерисовка не страшна
+        board.addEventListener("click", function (e) {
+            var t = e.target;
+            while (t && t !== board && !(t.getAttribute && (t.getAttribute("data-pumpmode") ||
+                t.getAttribute("data-pumpthr") || t.getAttribute("data-pumpper") ||
+                t.getAttribute("data-pumpcn") || t.id === "pump-sw"))) {
+                t = t.parentNode;
+            }
+            if (!t || t === board) return;
+            if (t.id === "pump-sw") {
+                pumpCfg.enabled = !pumpCfg.enabled;
+                pumpMarkChips();
+                pumpDebounce();
+                return;
+            }
+            var mode = t.getAttribute("data-pumpmode");
+            if (mode) {
+                pumpCfg.mode = mode;
                 pumpCfg.enabled = true;
+                pumpRepaintNow();          // картина меняется сразу
+                pumpDebounce();
+                return;
+            }
+            var thr = t.getAttribute("data-pumpthr");
+            if (thr !== null && thr !== undefined && thr !== "") {
+                pumpCfg.threshold = Number(thr);
+                var inp = $("pump-thr-in");
+                if (inp) inp.value = pumpCfg.threshold;
+                pumpRepaintNow();
+                pumpDebounce();
+                return;
+            }
+            var per = t.getAttribute("data-pumpper");
+            if (per) {
+                pumpCfg.period = per;
+                pumpMarkChips();
+                loadPumps(true);           // окно сигнала считает сервер
+                pumpDebounce();
+                return;
+            }
+            var cnd = t.getAttribute("data-pumpcn");
+            if (cnd) {
+                pumpCfg.candles = Number(cnd);
+                pumpMarkChips();
                 loadPumps(true);
                 pumpDebounce();
-            });
+                return;
+            }
         });
-        document.querySelectorAll("#pump-thr .al-chip").forEach(function (b) {
-            b.addEventListener("click", function () {
-                pumpCfg.threshold = Number(b.getAttribute("data-pumpthr"));
-                paintPumps(pumpData || {}, false);
-                pumpDebounce();
-            });
-        });
-        var tIn = $("pump-thr-in");
-        if (tIn) tIn.addEventListener("change", function () {
-            pumpCfg.threshold = Number(tIn.value) || pumpCfg.threshold;
+        board.addEventListener("change", function (e) {
+            var inp = e.target;
+            if (!inp || inp.id !== "pump-thr-in") return;
+            pumpCfg.threshold = Number(inp.value) || pumpCfg.threshold;
+            pumpRepaintNow();
             pumpDebounce();
-        });
-        document.querySelectorAll("#pump-per .al-chip").forEach(function (b) {
-            b.addEventListener("click", function () {
-                pumpCfg.period = b.getAttribute("data-pumpper");
-                loadPumps(true);
-                pumpDebounce();
-            });
-        });
-        document.querySelectorAll("#pump-cnd .al-chip").forEach(function (b) {
-            b.addEventListener("click", function () {
-                pumpCfg.candles = Number(b.getAttribute("data-pumpcn"));
-                loadPumps(true);
-                pumpDebounce();
-            });
         });
     }
 
@@ -1550,6 +2110,7 @@
             if (ch.warn) probeBox.innerHTML += "<li class='meta'>⚠️ " + esc(ch.warn) + "</li>";
         }
         if ($("bot-review")) $("bot-review").checked = !!d.review;
+        renderPostInterval(d.interval || {});
         var h = d.health || {};
         botSet("bot-health-line", "В эфире " + (h.live === undefined ? "—" : h.live) +
             "/" + (h.total || "—") + " · событий в памяти " + (h.events_total || 0) +
@@ -1604,6 +2165,61 @@
         var ch = (BOT_SNAP || {}).channels || {};
         box.innerHTML = "<li>" + botChannelLine("ru", probes.ru, ch.ru) + "</li>" +
             "<li>" + botChannelLine("en", probes.en, ch.en) + "</li>";
+    }
+
+    // Частота сводки: раз в N часов. Окно поста — эти же N часов, блок анализа
+    // внутри поста — четверть окна. Кнопки применяются сразу: админ не должен
+    // ждать ночного цикла публикации, чтобы проверить новую частоту.
+    var POST_INT = { hours: 4, min: 1, max: 10, block: "" };
+
+    function markPostIntChips(hours) {
+        // Подсвечиваем выбор в тех же кнопках, что уже на странице: перерисовка
+        // списка на каждый клик выглядела бы как «кнопка не нажалась».
+        var box = $("post-int-btns");
+        if (!box) return;
+        Array.prototype.forEach.call(box.querySelectorAll("[data-pi]"), function (btn) {
+            var h = Number(btn.getAttribute("data-pi")) || 0;
+            var on = h === Number(hours);
+            btn.className = "al-chip" + (on ? " on" : "");
+            btn.textContent = (on ? "✓ " : "") + h + " ч";
+        });
+    }
+
+    function renderPostInterval(info, busy) {
+        POST_INT = Object.assign({}, POST_INT, info || {});
+        var box = $("post-int-btns");
+        if (box) {
+            var n = Number(POST_INT.hours) || 4;
+            var min = Number(POST_INT.min) || 1, max = Number(POST_INT.max) || 10;
+            var chips = "";
+            for (var h = min; h <= max; h++) {
+                chips += '<button type="button" class="al-chip' + (h === n ? " on" : "") +
+                    '" data-pi="' + h + '">' + (h === n ? "✓ " : "") + h + " ч</button>";
+            }
+            box.innerHTML = chips;
+            Array.prototype.forEach.call(box.querySelectorAll("[data-pi]"), function (btn) {
+                btn.addEventListener("click", function () {
+                    var hours = Number(btn.getAttribute("data-pi")) || 4;
+                    markPostIntChips(hours);            // сразу подсветили выбор
+                    botSet("post-int-note", "Сохраняю частоту…");
+                    api("/api/admin/bot/interval", {
+                        method: "POST", body: JSON.stringify({ hours: hours }),
+                    }).then(function (d) {
+                        if (d && d.ok) {
+                            renderPostInterval(d.interval || {});
+                            botSet("post-int-note", d.message || "Частота применена.");
+                        } else {
+                            markPostIntChips(POST_INT.hours);
+                            botSet("post-int-note", (d && (d.message || d.error)) || "ошибка");
+                        }
+                    });
+                });
+            });
+        }
+        var text = POST_INT.text
+            ? ("Сейчас: " + POST_INT.text + ".")
+            : ("Сейчас: раз в " + (POST_INT.hours || 4) + " ч.");
+        if (!busy) botSet("post-int-note", text);
     }
 
     function loadBotAdmin() {
@@ -1711,6 +2327,58 @@
         });
     }
 
+    // Фото канала по рубрикам: сводка раз в N часов ("post") и вечерний
+    // дайджест ("digest"). Кнопка ⇄ переносит фото в другую рубрику — так
+    // админ раскладывает картинки между постами, не перезагружая их.
+    var TPL_KINDS = [
+        { key: "post", box: "tpl-photos", input: "tpl-photo-in", status: "tpl-photo-status" },
+        { key: "digest", box: "tpl-photos-digest", input: "tpl-photo-in-digest",
+          status: "tpl-photo-status-digest" },
+    ];
+
+    function tplPhotoTile(p, kind) {
+        var other = kind === "post" ? "digest" : "post";
+        return '<div class="tpl-photo"><img alt="" src="' + esc(p.url) + '">' +
+            '<button type="button" class="btn btn-danger btn-small" data-pid="' + p.id +
+            '" title="Удалить">×</button>' +
+            '<button type="button" class="btn btn-small tpl-move" data-move="' + p.id +
+            '" data-to="' + other + '" title="Перенести в другую рубрику">⇄</button></div>';
+    }
+
+    function renderDigestPhotos(d) {
+        var all = d.photos || [];
+        var byKind = d.photos_by_kind || {};
+        if (!d.photos_by_kind) {
+            // старый ответ сервера: рубрик нет — всё считаем постовыми фото
+            byKind = { post: all, digest: [] };
+        }
+        TPL_KINDS.forEach(function (k) {
+            var box = $(k.box);
+            if (!box) return;
+            var list = (byKind[k.key] || []).filter(function (p) { return p.exists !== false; });
+            var empty = k.key === "post"
+                ? (d.using_default_photos
+                    ? "<p class='lead'>В постах картинки из комплекта. Загрузите свои — набор заменится.</p>"
+                    : "<p class='lead'>Фото нет: пост уйдёт текстом.</p>")
+                : "<p class='lead'>Пусто: дайджест возьмёт фото постов.</p>";
+            box.innerHTML = list.map(function (p) { return tplPhotoTile(p, k.key); }).join("") || empty;
+            Array.prototype.forEach.call(box.querySelectorAll("[data-pid]"), function (btn) {
+                btn.addEventListener("click", function () {
+                    api("/api/admin/digest/photos/" + btn.getAttribute("data-pid") + "/delete", {
+                        method: "POST", body: "{}",
+                    }).then(loadDigestTpl);
+                });
+            });
+            Array.prototype.forEach.call(box.querySelectorAll("[data-move]"), function (btn) {
+                btn.addEventListener("click", function () {
+                    api("/api/admin/digest/photos/" + btn.getAttribute("data-move") + "/kind", {
+                        method: "POST", body: JSON.stringify({ kind: btn.getAttribute("data-to") }),
+                    }).then(loadDigestTpl);
+                });
+            });
+        });
+    }
+
     function loadDigestTpl() {
         api("/api/admin/digest").then(function (d) {
             if (!d.ok) return;
@@ -1731,28 +2399,12 @@
                     });
                 });
             }
-            var box = $("tpl-photos");
-            if (box) {
-                box.innerHTML = (d.photos || []).map(function (p) {
-                    return '<div class="tpl-photo"><img alt="" src="' + p.url + '">' +
-                        '<button type="button" class="btn btn-danger btn-small" data-pid="' + p.id +
-                        '">×</button></div>';
-                }).join("") || (d.using_default_photos
-                    ? "<p class='lead'>В постах дефолтные картинки. Загрузите свои.</p>"
-                    : "");
-                box.querySelectorAll("button[data-pid]").forEach(function (btn) {
-                    btn.addEventListener("click", function () {
-                        api("/api/admin/digest/photos/" + btn.getAttribute("data-pid") + "/delete", {
-                            method: "POST", body: "{}",
-                        }).then(loadDigestTpl);
-                    });
-                });
-            }
+            renderDigestPhotos(d);
         });
     }
 
     function bootDigestTpl() {
-        if (!$("tpl-heads") && !$("tpl-photos")) return;
+        if (!$("tpl-heads") && !$("tpl-photos") && !$("tpl-photos-digest")) return;
         loadDigestTpl();
         var add = $("tpl-head-add");
         if (add) add.addEventListener("click", function () {
@@ -1767,32 +2419,35 @@
                 loadDigestTpl();
             });
         });
-        var inp = $("tpl-photo-in");
-        if (inp) inp.addEventListener("change", function () {
-            var f = inp.files && inp.files[0];
-            var st = $("tpl-photo-status");
-            if (!f) return;
-            if (f.size > 12 * 1000 * 1000) {
-                if (st) st.textContent = "файл больше 12 МБ";
-                inp.value = "";
-                return;
-            }
-            if (st) st.textContent = "загрузка…";
-            uploadDigestPhoto(f).then(function (d) {
-                if (st) st.textContent = d.ok ? t("saved") : (d.hint || d.error || "ошибка загрузки");
-                inp.value = "";
-                loadDigestTpl();
-            }).catch(function () {
-                if (st) st.textContent = "ошибка сети";
-                inp.value = "";
+        TPL_KINDS.forEach(function (k) {
+            var inp = $(k.input);
+            if (!inp) return;
+            inp.addEventListener("change", function () {
+                var f = inp.files && inp.files[0];
+                var st = $(k.status);
+                if (!f) return;
+                if (f.size > 12 * 1000 * 1000) {
+                    if (st) st.textContent = "файл больше 12 МБ";
+                    inp.value = "";
+                    return;
+                }
+                if (st) st.textContent = "загрузка…";
+                uploadDigestPhoto(f, k.key).then(function (d) {
+                    if (st) st.textContent = d.ok ? t("saved") : (d.hint || d.error || "ошибка загрузки");
+                    inp.value = "";
+                    loadDigestTpl();
+                }).catch(function () {
+                    if (st) st.textContent = "ошибка сети";
+                    inp.value = "";
+                });
             });
         });
     }
 
-    function uploadDigestPhoto(file) {
+    function uploadDigestPhoto(file, kind) {
         var fd = new FormData();
         fd.append("file", file, file.name || "photo.jpg");
-        return fetch("/api/admin/digest/photos", {
+        return fetch("/api/admin/digest/photos?kind=" + encodeURIComponent(kind || "post"), {
             method: "POST",
             body: fd,
             credentials: "same-origin",

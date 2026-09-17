@@ -199,6 +199,37 @@ def daily_state(app=None, bot=None) -> dict:
     return out
 
 
+def interval_state(bot=None) -> dict:
+    """Частота постов в канал: раз в N часов и производная длина блока.
+
+    Окно поста равно промежутку между постами, а блок анализа внутри поста —
+    четверти окна. Панель показывает и то, и другое: админ выбирает часы, а
+    видит, по сколько минут будет разбор.
+    """
+    from channel_digest import (DEFAULT_INTERVAL_H, MAX_INTERVAL_H,
+                                MIN_INTERVAL_H, block_secs, window_word)
+    hours = DEFAULT_INTERVAL_H
+    try:
+        if bot is not None and hasattr(bot, "channel_interval_h"):
+            hours = int(bot.channel_interval_h())
+        else:
+            from channel_digest import interval_hours
+            hours = int(interval_hours(ctx.store))
+    except Exception as e:                       # noqa: BLE001
+        log.debug("частота постов: %s", e)
+    block = block_secs(hours)
+    return {
+        "hours": hours,
+        "min": MIN_INTERVAL_H,
+        "max": MAX_INTERVAL_H,
+        "block_sec": block,
+        "window": f"{hours}ч",
+        "block": window_word(block),
+        "text": (f"раз в {hours} ч · окно {hours} ч · анализ по "
+                 f"{window_word(block)}"),
+    }
+
+
 async def _bot_user_id(bot) -> int:
     """id самого бота (нужен, чтобы спросить его права в канале)."""
     token = str(getattr(bot, "token", "") or "")
@@ -293,6 +324,7 @@ def register_bot_admin_routes(app) -> None:
             "ai": {},
             "health": health_state(),
             "daily": daily_state(app, bot),
+            "interval": interval_state(bot),
         }
         # Права бота в каналах спрашиваем сразу: админ должен видеть, дойдёт
         # ли пост, не нажимая «Сверить роли». Без токена — пропускаем.
@@ -440,6 +472,47 @@ def register_bot_admin_routes(app) -> None:
         return {"ok": True, "note": note, "probes": probes,
                 "channels": channels_state(bot),
                 "message": note or "Роли каналов сверены."}
+
+    @router.post("/api/admin/bot/interval")
+    async def api_bot_interval(request: Request,
+                               body: Optional[dict] = Body(default=None)):
+        """🕒 Частота сводки: раз в N часов (1…10) с блоком анализа в четверть."""
+        user, err = _admin(request)
+        if err:
+            return err
+        body = body or {}
+        st = _store()
+        if st is None:
+            return JSONResponse({"ok": False, "error": "no_store",
+                                 "message": "База настроек недоступна."},
+                                status_code=503)
+        raw = body.get("hours", body.get("interval"))
+        if raw in (None, ""):
+            return JSONResponse({"ok": False, "error": "no_hours",
+                                 "message": "Укажите частоту в часах (1…10)."},
+                                status_code=400)
+        try:
+            from channel_digest import clamp_interval
+            hours = clamp_interval(raw)
+        except Exception as e:                   # noqa: BLE001
+            return JSONResponse({"ok": False, "error": "bad_hours",
+                                 "message": f"Не понял частоту: {e}"},
+                                status_code=400)
+        bot = ctx.bot
+        try:
+            if bot is not None and hasattr(bot, "set_channel_interval"):
+                bot.set_channel_interval(hours, actor_id=user.get("id"))
+            else:
+                from channel_digest import INTERVAL_SETTING
+                st.set_setting(INTERVAL_SETTING, str(hours), actor_id=user.get("id"))
+        except Exception as e:                   # noqa: BLE001
+            return JSONResponse({"ok": False, "error": str(e)[:160]},
+                                status_code=500)
+        _audit(user, "bot_interval", f"{hours}h")
+        return {"ok": True, "interval": interval_state(bot),
+                "message": (f"Сводка раз в {hours} ч: блок анализа — "
+                            f"{interval_state(bot)['block']}. Расписание "
+                            "применяется сразу.")}
 
     @router.post("/api/admin/bot/publish")
     async def api_bot_publish(request: Request,

@@ -274,6 +274,104 @@ class DigestTest(unittest.TestCase):
         self.assertLessEqual(len(t), CAPTION_LIMIT)
         self.assertIn("4ч", t)
 
+    def test_interval_sets_window_and_block(self):
+        """Частота постов 1…10 ч: блок анализа — четверть окна."""
+        from channel_digest import (MAX_INTERVAL_H, MIN_INTERVAL_H, block_secs,
+                                    clamp_interval, interval_hours, window_word)
+        self.assertEqual((MIN_INTERVAL_H, MAX_INTERVAL_H), (1, 10))
+        self.assertEqual(block_secs(4), 3600)          # раз в 4 ч → по часу
+        self.assertEqual(block_secs(1), 900)           # раз в час → по 15 минут
+        self.assertEqual(block_secs(10), 9000)         # раз в 10 ч → по 2.5 часа
+        self.assertEqual(window_word(3600), "1ч")
+        self.assertEqual(window_word(900), "15м")
+        self.assertEqual(window_word(9000), "2ч30м")
+        self.assertEqual(window_word(900, "en"), "15m")
+        for bad in (0, -3, 99, None, "мусор"):
+            self.assertTrue(MIN_INTERVAL_H <= clamp_interval(bad) <= MAX_INTERVAL_H)
+        # в базе пусто — работает значение по умолчанию (переменная окружения)
+        os.environ.pop("LIQSCOPE_POST_INTERVAL_H", None)
+        self.assertEqual(interval_hours(None), 4)
+        os.environ["LIQSCOPE_POST_INTERVAL_H"] = "7"
+        try:
+            self.assertEqual(interval_hours(None), 7)
+        finally:
+            os.environ.pop("LIQSCOPE_POST_INTERVAL_H", None)
+
+    def test_interval_from_store_wins(self):
+        """Настройка из админки важнее окружения — расписание меняют на ходу."""
+
+        class Store:
+            def __init__(self, value):
+                self.value = value
+
+            def get_setting(self, key):
+                return self.value
+
+        from channel_digest import INTERVAL_SETTING, interval_hours
+        os.environ["LIQSCOPE_POST_INTERVAL_H"] = "4"
+        try:
+            self.assertEqual(interval_hours(Store("2")), 2)
+            self.assertEqual(interval_hours(Store("11")), 10)   # прижали к границе
+            self.assertEqual(interval_hours(Store("")), 4)      # пусто → окружение
+        finally:
+            os.environ.pop("LIQSCOPE_POST_INTERVAL_H", None)
+
+    def test_quarter_hour_blocks_are_labelled(self):
+        """Пост раз в час: блоки по 15 минут подписаны временем начала."""
+        base = 986_400
+        hours = []
+        for i in range(4):
+            hours.append({
+                "h": base + i * 900, "tz": 3 * 3600, "block_sec": 900,
+                "total": 500_000 - i * 100_000, "count": 1, "longs": 400_000.0,
+                "shorts": 100_000.0, "side_sum": 400_000.0, "bias": "long",
+                "coins": [{"symbol": "BTC_USDT", "usd": 500_000 - i * 100_000,
+                           "flow": None, "pct": None}],
+                "cvd": {}, "cvd_sum": 0.0, "liq_pct": None, "count_pct": None,
+                "live": i == 3, "vol_usd": 10_000_000.0, "cvd_net": 0.0,
+                "cvd_share": 1.5, "oi": {"value": 1e9, "pct": 0.5},
+            })
+        snap = collect_digest([], window_sec=3600, now=self.now)
+        snap["board"] = {
+            "tz": 3 * 3600, "window_hours": 1, "span_hours": 4, "span_blocks": 4,
+            "block_sec": 900, "slot_sec": 900, "group": 1, "window_sec": 3600,
+            "total_usd": 1_400_000, "count": 4, "prev_total": 1_000_000,
+            "diff_pct": 40.0, "oi_now_usd": 1e9, "oi_4h_pct": 1.0,
+            "cvd_4h": 100_000.0, "cvd_4h_share": 1.5, "vol_4h": 40_000_000.0,
+            "hours": hours, "top_hours": [],
+            "oi_hours": [{"h": h["h"], "pct": 0.5, "value": 1e9} for h in hours],
+        }
+        t = render_post(snap, 0)
+        for hh in ("13:00", "13:15", "13:30", "13:45"):
+            self.assertIn(hh, t, hh)
+        self.assertEqual(t.count("🕘 <b>"), 4)
+        self.assertIn("за 1ч", t)                    # окно поста — тот же час
+        self.assertLessEqual(len(t), CAPTION_LIMIT)
+
+    def test_headline_word_follows_number(self):
+        """Слово после числа часов согласуется: 1 час, 2 часа, 5 часов."""
+        self.assertIn("за 1 час.", format_headline("Сводка за {h} часа.", 1))
+        self.assertIn("2 часа", format_headline("Сводка за {h} часа.", 2))
+        self.assertIn("5 часов", format_headline("Сводка за {h} часа.", 5))
+        self.assertIn("11 часов", format_headline("Сводка за {h} часа.", 11))
+        self.assertIn("1 hour", format_headline("Recap for {h} hours", 1, "en"))
+        self.assertIn("3 hours", format_headline("Recap for {h} hours", 3, "en"))
+        # шаблон с «{h}ч» остаётся как есть — там согласовывать нечего
+        self.assertIn("4ч", format_headline("Разбор за {h}ч", 4))
+
+    def test_carousel_rotates_photos(self):
+        """Карусель: в пост идут все фото, обложкой по очереди бывает каждое."""
+        from channel_digest import carousel
+        imgs = list_images()
+        self.assertGreaterEqual(len(imgs), 2, imgs)
+        first = carousel(imgs, 0)
+        self.assertEqual(len(first), min(len(imgs), 10))
+        self.assertEqual(sorted(first), sorted(imgs[:len(first)]))
+        second = carousel(imgs, 1)
+        self.assertEqual(second[0], first[1])        # обложка сдвинулась
+        self.assertEqual(len(second), len(first))
+        self.assertEqual(carousel([], 0), [])        # фото нет — пустой список
+
     def test_images_exist(self):
         imgs = list_images()
         self.assertGreaterEqual(len(imgs), 6, imgs)

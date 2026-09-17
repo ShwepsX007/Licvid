@@ -799,7 +799,7 @@ class TelegramBot:
             extra_txt = " 🇷🇺" if code == "ru" else " 🇬🇧"
             lines.append(f'• <a href="{_esc(url)}">{_esc(name)}</a>{extra_txt}')
         lines.append("")
-        lines.append("Раз в 4 часа туда уходит разбор рынка: кто кого вынес,"
+        lines.append(f"Раз в {self.channel_interval_h()} ч туда уходит разбор рынка: кто кого вынес,"
                      " на каких биржах, что с открытым интересом.")
         lines.append("Подписки на любой из них достаточно — бот откроется"
                      " полностью.")
@@ -1090,9 +1090,79 @@ class TelegramBot:
         mid = (res.get("result") or {}).get("message_id")
         return self._note_sent(chat_id, mid)
 
+    async def send_media_group(self, chat_id, paths: List[str], caption: str = "",
+                               limit: int = 10) -> Optional[list]:
+        """Карусель: несколько фото одним альбомом (sendMediaGroup).
+
+        Подпись Telegram показывает под первым фото, поэтому в альбом она и
+        уходит — с тем же HTML, что и раньше. Кнопок у альбома не бывает
+        (reply_markup в этом методе не поддерживается), но ссылки на сайт, бота
+        и Gate уже стоят в самой подписи, так что пост не теряет ничего.
+        """
+        files = [p for p in (paths or []) if p and os.path.isfile(p)][:max(2, int(limit))]
+        if not self._session or len(files) < 2:
+            return None
+        media: List[dict] = []
+        form = aiohttp.FormData()
+        form.add_field("chat_id", str(chat_id))
+        for i, path in enumerate(files):
+            item = {"type": "photo", "media": f"attach://photo{i}"}
+            if i == 0 and caption:
+                item["caption"] = caption[:1024]
+                item["parse_mode"] = "HTML"
+            media.append(item)
+            try:
+                data = open(path, "rb").read()
+            except OSError as e:
+                log.warning("альбом, фото %s: %s", path, e)
+                return None
+            name = os.path.basename(path)
+            ctype = "image/png" if name.lower().endswith(".png") else "image/jpeg"
+            form.add_field(f"photo{i}", data, filename=name, content_type=ctype)
+        form.add_field("media", json.dumps(media, ensure_ascii=False))
+        url = API.format(token=self.token, method="sendMediaGroup")
+        try:
+            async with self._session.post(
+                    url, data=form, timeout=aiohttp.ClientTimeout(total=60)) as r:
+                res = await r.json(content_type=None)
+        except Exception as e:                       # noqa: BLE001
+            log.warning("tg sendMediaGroup: %s", e)
+            return None
+        if not res or not res.get("ok"):
+            desc = str((res or {}).get("description") or "нет ответа")
+            self._last_tg_err = desc
+            log.warning("tg sendMediaGroup: %s", desc)
+            return None
+        mids = [m.get("message_id") for m in (res.get("result") or [])]
+        if mids:
+            self._note_sent(chat_id, mids[-1])
+        log.info("карусель в канал: фото %d", len(files))
+        return mids
+
+    async def _sleep_between_posts(self, chunk: float = 60.0) -> None:
+        """Пауза до следующего поста.
+
+        Спим кусками и каждый раз заново спрашиваем частоту: смена расписания
+        в админке (раз в 1…10 часов) применяется без перезапуска сервиса.
+        """
+        while self.running:
+            period = self.channel_window_sec()
+            try:
+                last = float(self.store.get_setting("channel_digest_ts") or 0)
+            except (TypeError, ValueError):
+                last = 0.0
+            if not last:
+                return
+            left = last + period - time.time()
+            if left <= 0:
+                return
+            try:
+                await asyncio.sleep(min(chunk, max(1.0, left)))
+            except asyncio.CancelledError:
+                raise
+
     async def _channel_loop(self) -> None:
-        from channel_digest import WINDOW_SEC
-        # первый пост не сразу: пусть фиды прогреются; дальше — каждые 4 часа
+        # первый пост не сразу: пусть фиды прогреются; дальше — по расписанию
         first = 90.0
         last = 0.0
         try:
@@ -1100,7 +1170,7 @@ class TelegramBot:
         except (TypeError, ValueError):
             last = 0.0
         if last > 0:
-            first = max(30.0, WINDOW_SEC - (time.time() - last))
+            first = max(30.0, self.channel_window_sec() - (time.time() - last))
         try:
             await asyncio.sleep(first)
         except asyncio.CancelledError:
@@ -1113,7 +1183,7 @@ class TelegramBot:
             except Exception as e:
                 log.warning("channel digest: %s", e)
             try:
-                await asyncio.sleep(WINDOW_SEC)
+                await self._sleep_between_posts()
             except asyncio.CancelledError:
                 break
 
@@ -1128,6 +1198,42 @@ class TelegramBot:
             out["review"] = False
         out["last_post"] = dict(self._ai_state or {})
         return out
+
+    def channel_interval_h(self) -> int:
+        """Частота постов в канал: раз в N часов (1…10).
+
+        Окно поста равно промежутку между постами, а блок анализа внутри поста
+        — четверти окна: раз в час → по 15 минут, раз в 4 часа → по часу.
+        """
+        from channel_digest import interval_hours
+        try:
+            return interval_hours(self.store)
+        except Exception as e:                    # noqa: BLE001
+            log.debug("частота постов: %s", e)
+            from channel_digest import DEFAULT_INTERVAL_H
+            return DEFAULT_INTERVAL_H
+
+    def channel_window_sec(self) -> int:
+        """Окно поста в секундах: оно равно промежутку между постами."""
+        return max(1, self.channel_interval_h()) * 3600
+
+    def set_channel_interval(self, hours, actor_id: Optional[int] = None) -> int:
+        """Сохранить частоту постов: применяется без перезапуска сервиса."""
+        from channel_digest import INTERVAL_SETTING, clamp_interval
+        n = clamp_interval(hours)
+        if self.store:
+            try:
+                self.store.set_setting(INTERVAL_SETTING, str(n), actor_id=actor_id)
+            except Exception as e:                # noqa: BLE001
+                log.warning("частота постов не сохранилась: %s", e)
+        return n
+
+    def interval_text(self) -> str:
+        """«раз в 4 ч · окно 4 ч · анализ по 1 ч» — для админки и /bot."""
+        from channel_digest import block_secs, window_word
+        h = self.channel_interval_h()
+        return (f"раз в {h} ч · окно {h} ч · анализ по "
+                f"{window_word(block_secs(h))}")
 
     def _review_on(self) -> bool:
         """Контроль публикации: черновик у админа вместо поста в канал."""
@@ -1183,7 +1289,7 @@ class TelegramBot:
 
     async def post_channel_digest(self, force: bool = False) -> bool:
         from channel_digest import (
-            active_headlines, active_images, pick_image, post_has_hours,
+            active_headlines, active_images, carousel, pick_image, post_has_hours,
             render_post, render_top7,
         )
         self._digest_err = ""
@@ -1215,8 +1321,11 @@ class TelegramBot:
             hours = int(snap.get("window_h") or 4)
         except (TypeError, ValueError):
             hours = 4
-        images = active_images(self.store)
+        images = active_images(self.store, "post")
         img = pick_image(n, images=images)
+        # Карусель: в пост идут все фото рубрики, порядок сдвигается от поста
+        # к посту — обложкой по очереди бывает каждое.
+        carriage = carousel(images, n)
         # Русский пост — основной; английский уходит копией в свой канал.
         ai_head, ai_note = await self._ai_headline(snap, variant=n)
         caption = render_post(
@@ -1251,21 +1360,30 @@ class TelegramBot:
         else:
             log.info("английский канал не привязан — пост только по-русски")
         if self._review_on():
-            return await self._send_draft(posts, img, n, ai_note)
-        return await self._publish_digest(posts, img, n)
+            return await self._send_draft(posts, carriage, n, ai_note)
+        return await self._publish_digest(posts, carriage, n)
 
     async def _publish_one(self, cid, caption: str, img, top: str = "",
-                           lang: str = "ru") -> bool:
-        """Пост в один канал: одно сообщение — фото и подпись под ним.
+                           lang: str = "ru", images: Optional[List[str]] = None) -> bool:
+        """Пост в один канал: карусель фото и подпись под ней.
 
-        В подписи уже есть и шапка, и топ-7 по часам. ``top`` непустой только
+        Фото из админки уходят альбомом (каруселью) — все сразу, а не по
+        одному на пост. Если фото одно (или Telegram не принял альбом),
+        работает прежний путь: одно фото с подписью. Подпись превышает 1024
+        символа — фото не отправляем вовсе, только текст.
+
+        В подписи уже есть и шапка, и часы с топ-7. ``top`` непустой только
         в аварийном случае (подпись исчерпана до первого часа) — тогда текст
         уходит вторым сообщением, чтобы данные не потерялись.
         """
         markup = self.channel_link_kb(lang)
+        photos = [x for x in (images if images is not None else
+                              ([img] if img else [])) if x and os.path.isfile(x)]
         ok = False
-        if img and len(caption) <= 1024:
-            ok = bool(await self.send_photo(cid, img, caption, markup))
+        if len(photos) > 1 and len(caption) <= 1024:
+            ok = bool(await self.send_media_group(cid, photos, caption))
+        if not ok and photos and len(caption) <= 1024:
+            ok = bool(await self.send_photo(cid, photos[0], caption, markup))
         if not ok:
             ok = bool(await self.send(cid, caption, markup))
         if ok and top:
@@ -1274,16 +1392,26 @@ class TelegramBot:
                 log.warning("топ-7 не ушёл в канал %s", cid)
         return ok
 
+    @staticmethod
+    def _photo_list(img) -> List[str]:
+        """Фото поста одним списком: карусель внутри, одиночный путь снаружи."""
+        if isinstance(img, (list, tuple)):
+            return [x for x in img if x]
+        return [img] if img else []
+
     async def _publish_digest(self, posts, img, n: int) -> bool:
         """Отправка готового поста в каналы (русский и английский)."""
         delivered = 0
+        images = self._photo_list(img)
         for post in posts or []:
             cid = post.get("cid")
             if not cid:
                 continue
-            if await self._publish_one(cid, post.get("caption") or "", img,
+            if await self._publish_one(cid, post.get("caption") or "",
+                                       images[0] if images else None,
                                        post.get("top") or "",
-                                       post.get("lang") or "ru"):
+                                       post.get("lang") or "ru",
+                                       images=images):
                 delivered += 1
         if delivered:
             self._digest_routes = self.channel_route_text()
@@ -1313,7 +1441,8 @@ class TelegramBot:
             return self._digest_fail(
                 "Контроль публикации включён, но у бота нет админа с Telegram. "
                 "Выключите контроль в «Шаблоны канала» или привяжите Telegram админу")
-        self._draft = {"posts": posts, "img": img, "n": int(n), "note": note}
+        self._draft = {"posts": posts, "img": img, "n": int(n), "note": note,
+                       "images": list(img) if isinstance(img, (list, tuple)) else [img]}
         kb = {"inline_keyboard": [[
             {"text": "✅ Опубликовать", "callback_data": "d:pub"},
             {"text": "🔄 Перегенерировать", "callback_data": "d:regen"},
@@ -1324,6 +1453,14 @@ class TelegramBot:
             mark = "🇬🇧" if post.get("lang") == "en" else "🇷🇺"
             text += f"\n\n{mark} <b>{(post.get('cid') or '')}</b>\n" + (post.get("caption") or "")
         await self.send(admin, text, kb)
+        # Карусель показываем админу целиком: он должен видеть пост так же,
+        # как его увидят в канале.
+        imgs = [x for x in (self._draft.get("images") or []) if x and os.path.isfile(x)]
+        if len(imgs) > 1:
+            await self.send_media_group(admin, imgs,
+                                       (posts[0].get("caption") if posts else "") or "")
+        elif imgs:
+            await self.send_photo(admin, imgs[0], "")
         # топ-7 по часам — тем же сообщением не влезает, шлём следом
         for post in posts or []:
             if post.get("top"):
@@ -1357,7 +1494,7 @@ class TelegramBot:
                 posts = d.get("posts") or [{"lang": "ru", "cid": cid,
                                             "caption": d.get("caption") or "",
                                             "top": d.get("top") or ""}]
-                ok = await self._publish_digest(posts, d.get("img"),
+                ok = await self._publish_digest(posts, d.get("images") or d.get("img"),
                                                 int(d.get("n") or 0))
             self._draft = None
             await self.reply(chat_id, self._digest_result_text(ok), self._admin_kb(),
@@ -1378,7 +1515,7 @@ class TelegramBot:
         Запись собирает сервер (api_digest): здесь только отправка и контроль
         публикации — если он включён, посты уходят админу черновиком.
         """
-        from channel_digest import active_images, pick_image
+        from channel_digest import active_images, carousel, digest_images, pick_image
         from daily_digest import render_post
 
         self._digest_err = ""
@@ -1410,35 +1547,42 @@ class TelegramBot:
             self._daily_state = {"ok": False, "day": day, "error": err,
                                  "at": time.time()}
             return result
-        images = active_images(self.store)
+        # Фото рубрики «дневной дайджест» (если админ их загрузил); иначе —
+        # общий набор сводки. Уходим каруселью: все фото альбомом, как в
+        # постах сводки, порядок сдвигается по номеру дня.
+        images = digest_images(self.store)
         try:
             variant = int(day.replace("-", "")[-2:] or 0)
         except (TypeError, ValueError):
             variant = 0
         img = pick_image(variant, images=images)
+        carriage = carousel(images, variant)
         if self._review_on():
-            ok = await self._send_daily_draft(posts, img, day)
+            ok = await self._send_daily_draft(posts, carriage, day)
             for post in posts:
                 result[post["lang"]] = [False, "" if ok else
                                         (self._digest_err or "черновик не ушёл")]
             self._daily_state = {"ok": False, "day": day, "draft": bool(ok),
                                  "at": time.time()}
             return result
-        sent = await self._publish_daily_posts(posts, img)
+        sent = await self._publish_daily_posts(posts, carriage)
         result.update(sent)
         return result
 
     async def _publish_daily_posts(self, posts, img) -> Dict[str, Any]:
         """Отправка постов дайджеста по каналам (один пост = одно сообщение)."""
         out: Dict[str, Any] = {}
+        images = self._photo_list(img)
         for post in posts or []:
             lang = post.get("lang") or "ru"
             cid = post.get("cid")
             if not cid:
                 out[lang] = [False, "канал не привязан"]
                 continue
-            ok = await self._publish_one(cid, post.get("caption") or "", img,
-                                         post.get("top") or "", lang)
+            ok = await self._publish_one(cid, post.get("caption") or "",
+                                         images[0] if images else None,
+                                         post.get("top") or "", lang,
+                                         images=images)
             err = "" if ok else (getattr(self, "_last_tg_err", "")
                                  or "Telegram отклонил пост")
             if not ok:
@@ -1483,9 +1627,14 @@ class TelegramBot:
             {"text": "🔄 Перегенерировать", "callback_data": "dd:regen"},
             {"text": "✖️ Отмена", "callback_data": "dd:no"}]]}
         text = (f"<b>Черновик дневного дайджеста</b> · {_esc(day)}\n"
-                "Это суточный выпуск (не сводка за 4 часа). В каналы он уйдёт "
+                "Это суточный выпуск (не сводка за окно поста). В каналы он уйдёт "
                 "только после «Опубликовать».")
         await self.send(admin, text, kb)
+        imgs = [x for x in self._photo_list(img) if x and os.path.isfile(x)]
+        if len(imgs) > 1:
+            await self.send_media_group(admin, imgs)
+        elif imgs:
+            await self.send_photo(admin, imgs[0], "")
         for post in posts or []:
             mark = "🇬🇧" if post.get("lang") == "en" else "🇷🇺"
             await self.send(admin, f"{mark} {post.get('caption') or ''}")
@@ -1988,7 +2137,7 @@ class TelegramBot:
                 await self.show_menu(
                     chat_id,
                     "<b>📣 Каналы LiqScope</b>\n"
-                    "Сводки ликвидаций, OI и CVD раз в 4 часа — тот же разбор,"
+                    f"Сводки ликвидаций, OI и CVD раз в {self.channel_interval_h()} ч — тот же разбор,"
                     " что в боте.\n"
                     "Содержание одинаковое, отличается язык: русский и английский.\n"
                     f"{links}\n\n"
@@ -2246,6 +2395,15 @@ class TelegramBot:
             on = slug not in have
             self.store.toggle_user_service(user["id"], slug, on)
             return self._services_text(user), self._services_kb(user)
+        if data == "a:interval" and user.get("is_admin"):
+            return self._post_int_text(), self._post_int_kb()
+        if data.startswith("pi:") and user.get("is_admin"):
+            try:
+                self.set_channel_interval(data.split(":", 1)[1], actor_id=user.get("id"))
+            except Exception as e:                # noqa: BLE001
+                return (f"⚠️ Не сохранил частоту: {_esc(str(e)[:120])}",
+                        self._post_int_kb())
+            return self._post_int_text(), self._post_int_kb()
         if data in ("admin", "nav:admin") and user.get("is_admin"):
             self._wait_broadcast.pop(int(user.get("tg_id") or 0), None)
             self._wait_tpl.pop(int(user.get("tg_id") or 0), None)
@@ -2411,6 +2569,7 @@ class TelegramBot:
             [{"text": f"🧪 Контроль: {'вкл' if self._review_on() else 'выкл'}",
               "callback_data": "a:rv"},
              {"text": "🤖 Проверить ИИ", "callback_data": "a:ai"}],
+            [{"text": "🕒 Частота сводки", "callback_data": "a:interval"}],
             [{"text": "← Назад", "callback_data": "nav:admin"}],
         ]}
 
@@ -2729,13 +2888,47 @@ class TelegramBot:
     def _menu(self, user: dict) -> dict:
         return self._reply_kb(user)
 
+    def _post_int_text(self) -> str:
+        """Экран «Частота постов»: окно поста и блок анализа."""
+        from channel_digest import MAX_INTERVAL_H, MIN_INTERVAL_H, block_secs, window_word
+        h = self.channel_interval_h()
+        return (
+            "<b>🕒 Частота сводки в канал</b>\n"
+            f"Сейчас: {self.interval_text()}\n\n"
+            "Пост выходит раз в N часов, окно поста — те же N часов, а блок "
+            "анализа внутри поста — четверть окна:\n"
+            "• раз в 4 ч → разбор по часу;\n"
+            "• раз в 2 ч → по 30 минут;\n"
+            "• раз в 1 ч → по 15 минут.\n\n"
+            f"Выберите частоту ({MIN_INTERVAL_H}…{MAX_INTERVAL_H} ч) — применяется "
+            "сразу, перезапуск не нужен.\n"
+            f"Текущий блок анализа: <b>{window_word(block_secs(h))}</b>."
+            + self.site_footer()
+        )
+
+    def _post_int_kb(self) -> dict:
+        cur = self.channel_interval_h()
+        rows: List[list] = []
+        row: list = []
+        for n in range(1, 11):
+            row.append({"text": (f"✓ {n} ч" if n == cur else f"{n} ч"),
+                        "callback_data": f"pi:{n}"})
+            if len(row) == 5:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+        rows.append([{"text": "← Назад", "callback_data": "nav:admin"}])
+        return {"inline_keyboard": rows}
+
     def _admin_kb(self) -> dict:
         return {"inline_keyboard": [
             [{"text": "👥 Пользователи", "callback_data": "users"},
              {"text": "📈 Визиты", "callback_data": "visits"}],
             [{"text": "📣 Рассылка", "callback_data": "broadcast"},
              {"text": "🩺 Здоровье", "callback_data": "a:health"}],
-            [{"text": "📰 Сводка в канал", "callback_data": "a:digest"}],
+            [{"text": "📰 Сводка в канал", "callback_data": "a:digest"},
+             {"text": "🕒 Частота", "callback_data": "a:interval"}],
             [{"text": "🗞 Дайджест за сутки", "callback_data": "a:ddigest"}],
             [{"text": "📣 Каналы", "callback_data": "a:channels"},
              {"text": "🎨 Шаблоны", "callback_data": "a:tpl"}],
@@ -3047,6 +3240,7 @@ class TelegramBot:
             f"🩺 Биржи в эфире: {len(live)}\n"
             f"🇷🇺 Канал: {ch(ru)}\n"
             f"🇬🇧 Канал: {ch(en)}\n"
+            f"🕒 Сводка: {self.interval_text()}\n"
             f"🛠 {self.site_a('панель на сайте', '/admin')}"
             + self.site_footer()
         )

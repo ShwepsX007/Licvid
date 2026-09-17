@@ -9,13 +9,68 @@ import os
 import re
 from typing import Any, Dict, List, Optional
 
-from hour_board import hour_hhmm, tz_offset
+from hour_board import HOUR as HOUR_SEC
+from hour_board import slot_hhmm, tz_offset
 from refs import ex_link, gate_line
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 IMAGES_DIR = os.path.join(HERE, "static", "channel")
 
 WINDOW_SEC = 4 * 3600
+#: Частота постов в канал: раз в N часов (1…10). Окно поста равно промежутку
+#: между постами, а блок анализа внутри поста — четверти этого промежутка:
+#: пост раз в час разбирает по 15 минут, раз в 4 часа — по часу, раз в 10
+#: часов — по 2.5 часа. Значение живёт в настройках (админка сайта и бота),
+#: а WINDOW_SEC остаётся значением по умолчанию.
+MIN_INTERVAL_H = 1
+MAX_INTERVAL_H = 10
+DEFAULT_INTERVAL_H = int(WINDOW_SEC // 3600)
+INTERVAL_SETTING = "channel_digest_interval_h"
+INTERVAL_ENV = "LIQSCOPE_POST_INTERVAL_H"
+
+
+def clamp_interval(value, default: int = DEFAULT_INTERVAL_H) -> int:
+    """Частота постов: целое число часов в границах 1…10."""
+    try:
+        n = int(round(float(value)))
+    except (TypeError, ValueError):
+        n = int(default)
+    return max(MIN_INTERVAL_H, min(MAX_INTERVAL_H, n))
+
+
+def interval_hours(store=None, default=None) -> int:
+    """Частота постов: настройка из базы, иначе окружение, иначе 4 часа."""
+    base = default
+    if base is None:
+        base = clamp_interval(os.getenv(INTERVAL_ENV) or DEFAULT_INTERVAL_H)
+    if store is None:
+        return clamp_interval(base)
+    try:
+        raw = store.get_setting(INTERVAL_SETTING)
+    except Exception:                        # noqa: BLE001 — база может молчать
+        raw = ""
+    if raw in (None, ""):
+        return clamp_interval(base)
+    return clamp_interval(raw, clamp_interval(base))
+
+
+def block_secs(interval: int) -> int:
+    """Длина блока анализа: четверть промежутка между постами."""
+    return int(clamp_interval(interval) * 3600 / 4)
+
+
+def window_word(secs: float, lang: str = "ru") -> str:
+    """Длина окна коротко: «4ч», «15м», «2ч30м» (en: «4h», «15m»)."""
+    en = str(lang).startswith("en")
+    total_min = int(round(float(secs or 0) / 60.0))
+    if total_min < 60:
+        return f"{total_min}{'m' if en else 'м'}"
+    hours, minutes = divmod(total_min, 60)
+    if not minutes:
+        return f"{hours}{'h' if en else 'ч'}"
+    if en:
+        return f"{hours}h{minutes:02d}m"
+    return f"{hours}ч{minutes:02d}м"
 CAPTION_LIMIT = 1024
 
 # Шаблоны шапок. {h} — окно в часах. Админ может удалить/добавить свои в БД.
@@ -105,14 +160,14 @@ LABELS = {
         "liqs": "ликвидаций",
         "liq1": "ликвидация",
         "liq2": "ликвидации",
-        "oi_4h": "OI за 4ч",
-        "vs_prev": "к прошлым 4ч",
+        "oi_4h": "OI за {w}",
+        "vs_prev": "к прошлым {w}",
         "no_data": "—",
         "top_title": "крупнейшие за час",
         "top_hours": "Топ-7 по часам",
         "empty_hour": "тихо",
         "of_volume": "объёма",
-        "cvd_4h": "CVD за 4ч",
+        "cvd_4h": "CVD за {w}",
         "going": "идёт",
     },
     "en": {
@@ -142,14 +197,14 @@ LABELS = {
         "liqs": "liquidations",
         "liq1": "fill",
         "liq2": "fills",
-        "oi_4h": "OI over 4h",
-        "vs_prev": "vs previous 4h",
+        "oi_4h": "OI over {w}",
+        "vs_prev": "vs previous {w}",
         "no_data": "—",
         "top_title": "biggest of the hour",
         "top_hours": "Top 7 by hour",
         "empty_hour": "quiet",
         "of_volume": "of volume",
-        "cvd_4h": "CVD over 4h",
+        "cvd_4h": "CVD over {w}",
         "going": "in progress",
     },
 }
@@ -165,6 +220,38 @@ def liqs_word(n: int, lang: str = "ru") -> str:
     if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
         return lbl(lang, "liq2")
     return lbl(lang, "liqs")
+
+
+def board_window_sec(board: Optional[dict]) -> int:
+    """Длина окна поста в секундах: блок × число блоков (по умолчанию 1ч × 4)."""
+    board = board or {}
+    try:
+        win = int(board.get("window_sec") or 0)
+    except (TypeError, ValueError):
+        win = 0
+    if win:
+        return win
+    try:
+        block = int(board.get("block_sec") or HOUR_SEC)
+        span = int(board.get("span_blocks") or board.get("span_hours") or 4)
+    except (TypeError, ValueError):
+        block, span = HOUR_SEC, 4
+    return block * max(1, span)
+
+
+def slot_label(hour: dict, lang: str = "ru") -> str:
+    """Подпись блока поста: «21:00» у часа, «21:15» у четверти часа,
+    «18:30–21:00» у блока длиной больше часа."""
+    tz = int(hour.get("tz") or tz_offset())
+    ts = float(hour.get("h") or 0)
+    try:
+        sec = int(hour.get("block_sec") or HOUR_SEC)
+    except (TypeError, ValueError):
+        sec = HOUR_SEC
+    start = slot_hhmm(ts, tz)
+    if sec <= HOUR_SEC:
+        return start
+    return f"{start}–{slot_hhmm(ts + sec, tz)}"
 
 
 def lbl(lang: str, key: str, **kw) -> str:
@@ -594,7 +681,7 @@ def hour_block(hour: dict, lang: str = "ru") -> str:
         🌊 CVD 🟢 3.4% объёма
         🔝 BTC ▲31% · ETH ▲12% · SOL ▼8%
     """
-    hh = hour_hhmm(hour.get("h") or 0, hour.get("tz") or tz_offset())
+    hh = slot_label(hour, lang)
     total = float(hour.get("total") or 0)
     head = f"🕘 <b>{hh}</b>"
     if hour.get("live"):
@@ -622,7 +709,7 @@ def hour_block(hour: dict, lang: str = "ru") -> str:
 
 def short_hour_block(hour: dict, lang: str = "ru") -> str:
     """Час одной строкой — когда четыре полных блока в подпись не влезают."""
-    hh = hour_hhmm(hour.get("h") or 0, hour.get("tz") or tz_offset())
+    hh = slot_label(hour, lang)
     total = float(hour.get("total") or 0)
     mark = f" ({lbl(lang, 'going')})" if hour.get("live") else ""
     if total > 0:
@@ -659,7 +746,7 @@ def hour_rows(hours: list, lang: str = "ru", with_oi: bool = True) -> List[List[
     """
     rows: List[List[tuple]] = []
     for hr in hours or []:
-        hh = hour_hhmm(hr.get("h") or 0, tz_offset())
+        hh = slot_label(hr, lang)
         total = float(hr.get("total") or 0)
         cnt = int(hr.get("count") or 0)
         if not total and not cnt:
@@ -708,7 +795,7 @@ def board_block(board: Optional[dict], lang: str = "ru") -> str:
     hours = board.get("hours") or []
     if not hours:
         return ""
-    span = board.get("span_hours") or len(hours)
+    span = board.get("window_hours") or board.get("span_hours") or len(hours)
     mark = "⚖️" if abs(float(board.get("diff_pct") or 0)) <= 0.5 else (
         "📈" if float(board.get("diff_pct") or 0) > 0 else "📉")
     parts: List[str] = []
@@ -720,7 +807,7 @@ def board_block(board: Optional[dict], lang: str = "ru") -> str:
     prev = board.get("prev_total")
     if prev:
         total_line += (f"   {mark} {_arrow(board.get('diff_pct'), lang)}"
-                       f" ({lbl(lang, 'vs_prev')})")
+                       f" ({lbl(lang, 'vs_prev', w=window_word(board_window_sec(board), lang))})")
     oi_rows = board.get("oi_hours") or []
     # OI показываем только если хоть что-то набралось: пустая колонка
     # прочерков в посте выглядит как поломка, а не как «данных ещё нет»
@@ -753,14 +840,15 @@ def oi_line_of(board: Optional[dict], lang: str = "ru") -> str:
         if pct is None:
             # уровень без изменения ничего не говорит о часе — прочерк не пишем
             continue
-        hh = hour_hhmm(cell.get("h") or 0, tz)
+        hh = slot_label(dict(cell, tz=tz, block_sec=board.get("block_sec")), lang)
         cells.append(f"{hh} {_arrow(pct, lang)}")
     head4 = money(board.get("oi_now_usd")) if board.get("oi_now_usd") else ""
     if head4 and board.get("oi_4h_pct") is not None:
         head4 += f" {_arrow(board['oi_4h_pct'], lang)}"
     if not head4 and not cells:
         return ""
-    line = f"📊 {lbl(lang, 'oi_4h')}: {head4}".rstrip()
+    win = board_window_sec(board)
+    line = f"📊 {lbl(lang, 'oi_4h', w=window_word(win, lang))}: {head4}".rstrip()
     if cells:
         line += (" · " if head4 else "") + " · ".join(cells)
     return line
@@ -775,7 +863,7 @@ def top_hour_block(hour: dict, lang: str = "ru", compact: int = 0) -> str:
     items = hour.get("items") or []
     if not items:
         return ""
-    hh = hour_hhmm(hour.get("h") or 0, hour.get("tz") or tz_offset())
+    hh = slot_label(hour, lang)
     title = f"<b>🏆 {hh} · {lbl(lang, 'top_title')}</b>"
     if compact:
         bits = []
@@ -808,7 +896,7 @@ def render_top7(board: Optional[dict], lang: str = "ru") -> str:
         items = hr.get("items") or []
         if not items:
             continue
-        hh = hour_hhmm(hr.get("h") or 0, tz)
+        hh = slot_label(dict(hr, tz=tz), lang)
         rows = []
         for i, it in enumerate(items):
             side = "🔴" if it.get("side") == "SELL" else "🟢"
@@ -907,13 +995,36 @@ def _facts(snap: dict, lang: str = "ru", tables: bool = False) -> dict:
     return out
 
 
-def format_headline(tpl: str, h: int = 4) -> str:
-    """Подставляет {h} и оборачивает в <b>, если админ прислал голый текст."""
+def hours_word(n: int, lang: str = "ru") -> str:
+    """Слово после числа часов: 1 час, 2 часа, 5 часов (en: hour/hours)."""
+    n = abs(int(n or 0))
+    if str(lang).startswith("en"):
+        return "hour" if n == 1 else "hours"
+    if n % 10 == 1 and n % 100 != 11:
+        return "час"
+    if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+        return "часа"
+    return "часов"
+
+
+def format_headline(tpl: str, h: int = 4, lang: str = "ru") -> str:
+    """Подставляет {h} и оборачивает в <b>, если админ прислал голый текст.
+
+    За числом часа идёт слово — его согласуем с числом: при частых постах окно
+    бывает и один час, и десять, и «1 часа» в шапке выглядело бы опечаткой.
+    Шаблоны админов с «{h} часа»/«{h} hours» продолжают работать, слово просто
+    встаёт в правильную форму.
+    """
     import html as _html
     s = (tpl or "").strip()
     if not s:
         return ""
-    s = s.replace("{h}", str(int(h))).replace("{H}", str(int(h)))
+    word = hours_word(h, lang)
+    s = re.sub(r"\{h\}\s*часов|\{h\}\s*часа|\{h\}\s*час\b",
+               str(int(h)) + " " + word, s, flags=re.IGNORECASE)
+    s = re.sub(r"\{h\}\s*hours|\{h\}\s*hour\b",
+               str(int(h)) + " " + word, s, flags=re.IGNORECASE)
+    s = s.replace("{H}", str(int(h))).replace("{h}", str(int(h)))
     s = s[:HEAD_MAX_LEN + 32]
     if "<" in s:
         return s
@@ -935,7 +1046,7 @@ def format_ai_head(text: str, h: int = 4) -> str:
 def _headlines(h: int, lang: str = "ru") -> tuple:
     """Встроенные шапки (пока в БД нет своих)."""
     table = DEFAULT_HEAD_TEMPLATES_EN if str(lang).startswith("en") else DEFAULT_HEAD_TEMPLATES
-    return tuple(format_headline(t, h) for t in table)
+    return tuple(format_headline(t, h, lang) for t in table)
 
 
 def active_headlines(store=None, h: int = 4, lang: str = "ru") -> List[str]:
@@ -952,25 +1063,62 @@ def active_headlines(store=None, h: int = 4, lang: str = "ru") -> List[str]:
             rows = store.list_digest_heads()
         except Exception:
             rows = []
-    out = [format_headline(r.get("text") or "", h) for r in (rows or [])]
+    out = [format_headline(r.get("text") or "", h, lang) for r in (rows or [])]
     out = [x for x in out if x]
     return out or list(_headlines(h, lang))
 
 
-def active_images(store=None) -> List[str]:
-    """Фото из админки; если пусто — bundled static/channel."""
-    rows = []
-    if store is not None:
+def _photo_paths(store, kind: str = "") -> List[str]:
+    """Пути существующих фото из базы: только эта рубрика, иначе — все."""
+    if store is None:
+        return []
+    try:
+        rows = store.list_digest_photos(kind)
+    except TypeError:                     # старая база: выборки по рубрике нет
         try:
             rows = store.list_digest_photos()
-        except Exception:
+        except Exception:                 # noqa: BLE001
             rows = []
+    except Exception:                     # noqa: BLE001
+        rows = []
     out = []
     for r in rows or []:
         p = r.get("path") or ""
         if p and os.path.isfile(p):
             out.append(p)
+    return out
+
+
+def active_images(store=None, kind: str = "post") -> List[str]:
+    """Фото для сводки из админки; если пусто — bundled static/channel."""
+    out = _photo_paths(store, kind)
+    if not out and kind:
+        out = _photo_paths(store, "")      # фото есть, но рубрика не проставлена
     return out or list_images()
+
+
+def digest_images(store=None) -> List[str]:
+    """Фото для дневного дайджеста: своя рубрика, иначе — общие постовые."""
+    return _photo_paths(store, "digest") or active_images(store, "post")
+
+
+def carousel(images: Optional[List[str]] = None, variant: int = 0,
+             limit: int = 10) -> List[str]:
+    """Карусель поста: все фото по кругу, начиная со следующего по счёту.
+
+    Telegram приносит альбом одним постом, а подпись показывает под первым
+    фото. Чтобы обложка не залипала на одной картинке, каждый следующий пост
+    сдвигает порядок: второе фото становится первым, третье — вторым и так
+    далее. Так все фото по очереди бывают обложкой (раньше в пост попадало
+    ровно одно фото — остальные не видел никто).
+    """
+    imgs = [p for p in (images if images is not None else list_images())
+            if p and os.path.isfile(p)]
+    if not imgs:
+        return []
+    imgs = imgs[:max(1, int(limit))]
+    shift = int(variant) % len(imgs)
+    return imgs[shift:] + imgs[:shift]
 
 
 HOUR_MARK = r"🕘[^\n]{0,12}\d{2}:\d{2}"
@@ -1083,7 +1231,8 @@ def _flow_line(board: Optional[dict], lang: str = "ru") -> str:
     except (TypeError, ValueError):
         return ""
     emo = "🟢" if v > 0.5 else ("🔴" if v < -0.5 else "⚖️")
-    line = (f"🌊 {lbl(lang, 'cvd_4h')}: {emo} {_pct_txt(v)} "
+    win = board_window_sec(board)
+    line = (f"🌊 {lbl(lang, 'cvd_4h', w=window_word(win, lang))}: {emo} {_pct_txt(v)} "
             f"{lbl(lang, 'of_volume')}")
     net = (board or {}).get("cvd_4h")
     if net and abs(float(net)) >= 1000:
@@ -1114,7 +1263,7 @@ def _total_line(snap: dict, lang: str = "ru") -> str:
     line = f"💥 <b>{money(total)}</b> · {int(count or 0)} {liqs_word(count or 0, lang)}"
     diff = board.get("diff_pct")
     if diff is not None and board.get("prev_total"):
-        line += _updown(diff, lang) + f" ({lbl(lang, 'vs_prev')})"
+        line += _updown(diff, lang) + f" ({lbl(lang, 'vs_prev', w=window_word(board_window_sec(board), lang))})"
     return line
 
 

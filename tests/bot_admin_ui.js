@@ -39,6 +39,8 @@ const BOT_SNAP = {
   },
   review: true,
   templates: { heads: 3, photos: 2, using_default_heads: false, using_default_photos: false },
+  interval: { hours: 4, min: 1, max: 10, block_sec: 3600, window: "4ч", block: "1ч",
+              text: "раз в 4 ч · окно 4 ч · анализ по 1 ч" },
   ai: { enabled: true, providers: [{ name: "gemini" }, { name: "groq" }],
         last: { ok: true, provider: "gemini", ms: 812 } },
   health: {
@@ -116,9 +118,19 @@ function adminHandler(u, opts, calls) {
   }
   if (u.indexOf("/api/admin/users") === 0) return { ok: true, users: [], total: 0 };
   if (u.indexOf("/api/admin/stats") === 0) return { ok: true, stats: {} };
+  if (u.indexOf("/api/admin/digest/photos") === 0) {
+    const kind = u.indexOf("kind=digest") !== -1 ? "digest" : "post";
+    return { ok: true, id: 9, kind: kind, name: "new.jpg" };
+  }
   if (u.indexOf("/api/admin/digest") === 0) {
-    return { ok: true, heads: [], photos: [], using_default_heads: true,
-             using_default_photos: true };
+    const postPhoto = { id: 1, name: "post.jpg", kind: "post", exists: true,
+                        url: "/api/admin/digest/photos/1/file" };
+    const digestPhoto = { id: 2, name: "digest.jpg", kind: "digest", exists: true,
+                          url: "/api/admin/digest/photos/2/file" };
+    return { ok: true, heads: [{ id: 1, text: "☕ Моя шапка за {h}ч" }],
+             photos: [postPhoto, digestPhoto],
+             photos_by_kind: { post: [postPhoto], digest: [digestPhoto] },
+             using_default_heads: false, using_default_photos: false };
   }
   if (u.indexOf("/api/admin/bot") === 0) {
     const last = calls[calls.length - 1];
@@ -135,6 +147,16 @@ function adminHandler(u, opts, calls) {
     if (u.indexOf("/api/admin/bot/channels") === 0) {
       return { ok: true, channels: BOT_SNAP.channels, probes: BOT_SNAP.probes,
                note: "Роли каналов сверены по названиям." };
+    }
+    if (u.indexOf("/api/admin/bot/interval") === 0) {
+      const hours = Number(body.hours);
+      const block = hours === 1 ? "15м" : (hours === 2 ? "30м" : "1ч");
+      return { ok: true,
+               interval: { hours: hours, min: 1, max: 10, block: block,
+                           window: hours + "ч",
+                           text: "раз в " + hours + " ч · окно " + hours +
+                                 " ч · анализ по " + block },
+               message: "Сводка раз в " + hours + " ч: блок анализа — " + block + "." };
     }
     if (u.indexOf("/api/admin/bot/ai-check") === 0) {
       return { ok: true, head: "Ночь на рынке выдалась горячей — снесло $120M",
@@ -261,6 +283,63 @@ function click(win, el) {
   check("после сверки виден список каналов с правами",
     /публикация разрешена/.test(doc.querySelector("#bot-ch-probe").textContent),
     doc.querySelector("#bot-ch-probe").textContent);
+
+  // Частота сводки: окно поста и блок анализа внутри него
+  const intNote = doc.querySelector("#post-int-note");
+  check("частота сводки показана", /раз в 4 ч/.test(intNote.textContent) &&
+    /анализ по 1 ч/.test(intNote.textContent), intNote.textContent);
+  const chips = doc.querySelectorAll("#post-int-btns [data-pi]");
+  check("есть кнопки частоты 1…10 часов", chips.length === 10, chips.length + " кнопок");
+  check("текущая частота отмечена",
+    doc.querySelector("#post-int-btns [data-pi='4']").className.indexOf("on") !== -1,
+    doc.querySelector("#post-int-btns [data-pi='4']").className);
+  const hourChip = doc.querySelector("#post-int-btns [data-pi='1']");
+  click(win, hourChip);
+  check("клик по частоте подсвечивает её сразу",
+    hourChip.className.indexOf("on") !== -1, hourChip.className);
+  await new Promise((r) => setTimeout(r, 250));
+  const intCall = calls.filter((c) => c.url.indexOf("/api/admin/bot/interval") === 0).pop();
+  check("частота уходит на сервер", !!intCall && /"hours":1/.test(intCall.body),
+    intCall && intCall.body);
+  check("и подтверждается на странице",
+    /раз в 1 ч/.test(doc.querySelector("#post-int-note").textContent) &&
+    /15м/.test(doc.querySelector("#post-int-note").textContent),
+    doc.querySelector("#post-int-note").textContent);
+
+  // Фото: рубрики сводки и дневного дайджеста
+  const postBox = doc.querySelector("#tpl-photos");
+  const digestBox = doc.querySelector("#tpl-photos-digest");
+  check("галерея фото постов есть", !!postBox && postBox.querySelectorAll(".tpl-photo").length === 1,
+    postBox && postBox.querySelectorAll(".tpl-photo").length);
+  check("галерея дневного дайджеста есть",
+    !!digestBox && digestBox.querySelectorAll(".tpl-photo").length === 1,
+    digestBox && digestBox.querySelectorAll(".tpl-photo").length);
+  check("фото дайджеста не подмешивается в посты",
+    /photos\/1\/file/.test(postBox.innerHTML) && !/photos\/2\/file/.test(postBox.innerHTML),
+    postBox.innerHTML.slice(0, 120));
+  const moveBtn = postBox.querySelector("[data-move]");
+  check("у фото есть перенос в другую рубрику", !!moveBtn);
+  if (moveBtn) {
+    click(win, moveBtn);
+    await new Promise((r) => setTimeout(r, 200));
+    const mv = calls.filter((c) => /photos\/\d+\/kind/.test(c.url)).pop();
+    check("перенос фото уходит на сервер", !!mv && /"kind":"digest"/.test(mv.body),
+      mv && (mv.url + " " + mv.body));
+  }
+  const digestInput = doc.querySelector("#tpl-photo-in-digest");
+  check("загрузка фото дайджеста с сайта есть", !!digestInput);
+  if (digestInput) {
+    const file = new win.File([new Uint8Array([1, 2, 3])], "d.jpg", { type: "image/jpeg" });
+    Object.defineProperty(digestInput, "files", { value: [file], configurable: true });
+    digestInput.dispatchEvent(new win.Event("change", { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 250));
+    const up = calls.filter((c) => c.url.indexOf("/api/admin/digest/photos") === 0).pop();
+    check("фото уходит в рубрику дневного дайджеста",
+      !!up && /kind=digest/.test(up.url), up && up.url);
+    check("загрузка подтверждена на странице",
+      /сохранено|ok/i.test(doc.querySelector("#tpl-photo-status-digest").textContent),
+      doc.querySelector("#tpl-photo-status-digest").textContent);
+  }
 
   check("ошибок страницы нет", errors.length === 0, errors.join(" | "));
   await win.close();

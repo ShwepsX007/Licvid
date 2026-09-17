@@ -50,7 +50,7 @@ from fastapi.staticfiles import StaticFiles
 from market_feed import GATE_REST, MarketFeed, TF_MINUTES, base_of, canon, _get_json
 from timeframes import parse_tf
 from oi_feed import map_candles_to_oi
-from hour_board import BOARD, OI, build_snapshot
+from hour_board import BOARD, OI, SLOTS, build_snapshot
 from accounts import Store
 from flow_feed import FlowFeed
 from history import HistoryStore, MONTH_HOURS
@@ -133,6 +133,12 @@ DIGEST_MINUTE = int(os.getenv("LIQSCOPE_DIGEST_MIN", "0") or 0)
 DIGEST_JITTER_MIN = int(os.getenv("LIQSCOPE_DIGEST_JITTER_MIN", "10") or 10)
 DIGEST_SCHED = os.getenv("LIQSCOPE_DIGEST_SCHED", "1").strip().lower() \
     not in ("0", "false", "no", "off")
+# Частота постов в канал: раз в N часов (1…10), по умолчанию 4. Живёт в
+# настройках (меняется из админки сайта и бота без перезапуска), окружение —
+# стартовое значение. Блок анализа поста = N/4 часа.
+from channel_digest import DEFAULT_INTERVAL_H, clamp_interval  # noqa: E402
+POST_INTERVAL_H = clamp_interval(os.getenv("LIQSCOPE_POST_INTERVAL_H") or
+                                 DEFAULT_INTERVAL_H)
 account_store = Store(ACCOUNTS_DB, SECRET, ADMIN_IDS, ADMIN_EMAILS)
 # Письма: SMTP из окружения; без настроек сервер работает, письма не уходят
 mailer = build_mailer(PUBLIC_URL)
@@ -372,7 +378,8 @@ async def on_liquidation(ev: dict):
             event["liq"] = {k: v for k, v in ev["liquidation"].items()
                             if k in ("liquidatedUser", "markPx", "method")}
     LIQUIDATIONS.append(event)
-    BOARD.add_liq(event)          # часовой стенд для постов в канал
+    BOARD.add_liq(event)          # часовой стенд (история в терминале)
+    SLOTS.add_liq(event)          # 15-минутная сетка постов в канал
     FLOWS.add_liq(event)          # минутный поток по всем монетам (лента «ВСЕ»)
     try:
         _liq_queue.put_nowait(event)
@@ -529,6 +536,7 @@ async def on_trade(symbol: str, price: float, qty: float, ts: float,
             tick_ts = float(ts) if ts else time.time()
             _cvd_add(symbol, tick_ts, signed)
             BOARD.add_cvd(symbol, tick_ts, signed)
+            SLOTS.add_cvd(symbol, tick_ts, signed)
             FLOWS.add_trade(symbol, tick_ts, signed)
             HIST.add_flow(symbol, tick_ts, cvd=signed)
     except (TypeError, ValueError):
@@ -833,12 +841,52 @@ def sync_hot_symbols():
     feed.set_flow_symbols(flow)
 
 
+# Снимки для кабинета (корреляции, сторож) собираются по истории и опросам.
+# Один и тот же ответ нужен всем открытым вкладкам, а опрос идёт каждые 30 и
+# 12 секунд: без кэша сервер пересчитывал матрицы корреляций на каждый запрос
+# в потоке событий — из-за этого кнопки в кабинете отзывались «туго».
+_SNAP_CACHE: Dict[str, tuple] = {}
+SNAP_CACHE_TTL = float(os.getenv("LIQSCOPE_SNAP_CACHE_SEC", "12") or 12)
+
+
+def cached_snapshot(key: str, build, ttl: Optional[float] = None):
+    """Готовый снимок из кэша: считаем не чаще, чем раз в ``ttl`` секунд."""
+    ttl = SNAP_CACHE_TTL if ttl is None else float(ttl)
+    now = time.time()
+    hit = _SNAP_CACHE.get(key)
+    if hit and now - hit[0] < ttl:
+        return hit[1]
+    data = build()
+    _SNAP_CACHE[key] = (now, data)
+    if len(_SNAP_CACHE) > 64:                 # ключи редкие, но мусор не копим
+        for k in sorted(_SNAP_CACHE, key=lambda k: _SNAP_CACHE[k][0])[:-32]:
+            _SNAP_CACHE.pop(k, None)
+    return data
+
+
 def correlations_snapshot(window: str = "24h", metric: str = "liq") -> dict:
     """Картина корреляций по месячной истории: часовые свёртки + ряды OI.
 
     Данные берём из истории (history.HistoryStore) и снимков OI — за окно от
     часа до недели, поэтому сервис видит больше, чем минутный поток в памяти.
+    Матрицы считаются по всем метрикам сразу, поэтому кэш — по окну: смена
+    метрики в кабинете обходится без пересчёта и отвечает мгновенно.
     """
+    minutes = 0
+    try:
+        from correlations import window_minutes as _wm
+        minutes = _wm(window)
+    except Exception:  # noqa: BLE001
+        minutes = 0
+    data = cached_snapshot(f"corr|{window}", lambda: _correlations_build(window))
+    if isinstance(data, dict):
+        out = dict(data)
+        out["metric"] = metric or out.get("metric")
+        return out
+    return data
+
+
+def _correlations_build(window: str = "24h") -> dict:
     from correlations import build, window_minutes
     now = time.time()
     minutes = window_minutes(window)
@@ -856,8 +904,7 @@ def correlations_snapshot(window: str = "24h", metric: str = "liq") -> dict:
         for sym, rows in list(oi_flat.items()):
             oi_series.setdefault(sym, list(rows or []))
     prices = dict(feed.prices) if feed else {}
-    return build(cells, oi_series, prices, window=window, metric=metric,
-                 now=now)
+    return build(cells, oi_series, prices, window=window, now=now)
 
 
 def alerts_market_snapshot() -> dict:
@@ -903,30 +950,44 @@ def pump_normalize(config: Optional[dict]) -> dict:
 
 
 def pump_snapshot(config: Optional[dict] = None, lang: str = "ru") -> dict:
-    """Картина для кабинета и бота: настройки, резкие движения, сигналы."""
+    """Картина для кабинета и бота: настройки, резкие движения, сигналы.
+
+    Перебор всех контрактов Gate — самая тяжёлая часть ответа, а спрашивают его
+    все открытые кабинеты каждые 12 секунд (и бот — при каждом нажатии). Держим
+    короткий кэш на настройки, а живые поля (время, счётчики, лента сигналов)
+    считаем заново: админ не должен ждать, пока доска дорисуется.
+    """
     from pump_scan import CANDLE_PRESETS as _CANDS, PERIODS as _PERIODS
     from pump_scan import THRESHOLDS as _THR
     cfg = pump_normalize(config or {})
+
+    def build() -> dict:
+        return {
+            "config": cfg,
+            "settings_text": pump_settings_text(cfg),
+            "movers": PUMPS.movers(cfg, limit=12),
+            "hits": PUMPS.scan(cfg)[:12],
+            "periods": [{"key": k, "minutes": m} for k, m in (PUMP_PERIODS or _PERIODS)],
+            "thresholds": list(PUMP_THRESHOLDS or _THR),
+            "candles": list(PUMP_CANDLES or _CANDS),
+        }
+
+    key = "pump|" + json.dumps(cfg, sort_keys=True) + "|" + str(lang)
+    data = dict(cached_snapshot(key, build, ttl=4))
     now = time.time()
-    return {
-        "now": now,
-        "config": cfg,
-        "settings_text": pump_settings_text(cfg),
-        "status": {
-            "coins": PUMPS.known(),
-            "updated": PUMPS.last_update(),
-            "age_sec": (now - PUMPS.last_update()) if PUMPS.last_update() else None,
-            "poll_sec": PUMP_POLL_SEC,
-            "signals_total": len(PUMP_SIGNALS),
-            "lang": lang,
-        },
-        "movers": PUMPS.movers(cfg, limit=12),
-        "hits": PUMPS.scan(cfg)[:12],
-        "signals": list(PUMP_SIGNALS)[-30:][::-1],
-        "periods": [{"key": k, "minutes": m} for k, m in (PUMP_PERIODS or _PERIODS)],
-        "thresholds": list(PUMP_THRESHOLDS or _THR),
-        "candles": list(PUMP_CANDLES or _CANDS),
+    upd = PUMPS.last_update()
+    data["now"] = now
+    data["config"] = cfg
+    data["status"] = {
+        "coins": PUMPS.known(),
+        "updated": upd,
+        "age_sec": (now - upd) if upd else None,
+        "poll_sec": PUMP_POLL_SEC,
+        "signals_total": len(PUMP_SIGNALS),
+        "lang": lang,
     }
+    data["signals"] = list(PUMP_SIGNALS)[-30:][::-1]
+    return data
 
 
 def pump_settings_text(cfg: dict) -> str:
@@ -1210,72 +1271,156 @@ def _cvd_window(symbol: str, sec: float = 14400.0) -> Optional[float]:
     return None
 
 
-async def hour_flows(need: int = 5) -> Dict[str, dict]:
-    """Часовые потоки по монетам: {монета: {начало часа: {cvd, vol, has_cvd}}}.
+async def slot_flows(need_slots: int = 40) -> Dict[str, dict]:
+    """Потоки по слотам постов: {монета: {начало слота: {cvd, vol, has_cvd}}}.
 
-    Объём часа в USDT и тейкер-дельта — из часовых свечей (Binance/Bybit/OKX,
-    что отдаст feed). Это база для строки «CVD за 4ч» и для доли CVD в объёме
-    рынка по каждому часу: без свечей доля не считается, и пост остаётся с
-    ликвидациями.
+    Слот — базовая сетка постов (15 минут), поэтому блок анализа поста
+    (N/4 часа при частоте раз в N часов) складывается из целых слотов и доля
+    CVD в объёме рынка честная и на четверти часа, и на двух с половиной.
+
+    Источник первый — минутные потоки процесса (``FLOWS``): по ним объём и
+    тейкер-дельта уже сведены по минутам без походов в сеть, и после рестарта
+    они наполняются с нуля. Если по монете минут нет (например, сервис только
+    поднялся), слоты добираются 15-минутными свечами биржи.
     """
+    from hour_board import SLOT_SEC
+    need_slots = max(4, int(need_slots))
+    out: Dict[str, dict] = {}
     try:
-        cells = BOARD.hours(need)
-    except Exception as e:
-        log.debug("потоки: часы не собрались: %s", e)
-        cells = []
+        out = FLOWS.by_slot(SLOT_SEC, need_slots)
+    except Exception as e:                       # noqa: BLE001
+        log.debug("потоки постов: минутки не собрались: %s", e)
+        out = {}
+    # Монеты, по которым минут нет вовсе — тем нужны свечи
+    cells = []
+    try:
+        cells = SLOTS.slots(need_slots)
+    except Exception as e:                       # noqa: BLE001
+        log.debug("потоки постов: слоты не собрались: %s", e)
     volume: Dict[str, float] = {}
-    for hr in cells:
-        for sym, usd in (hr.get("coins") or {}).items():
-            volume[sym] = volume.get(sym, 0.0) + float(usd)
+    for cell in cells:
+        for sym, usd in (cell.get("coins") or {}).items():
+            volume[sym] = volume.get(sym, 0.0) + float(usd or 0)
     coins = [s for s, _v in sorted(volume.items(), key=lambda kv: kv[1],
                                    reverse=True)[:16]]
-    if not coins:
-        return {}
-    sem = asyncio.Semaphore(5)
+    missing = [s for s in coins if not out.get(s)]
+    if missing:
+        sem = asyncio.Semaphore(5)
 
-    async def one(sym: str):
-        async with sem:
-            try:
-                entry = await asyncio.wait_for(get_candles(sym, 60), timeout=20)
-            except Exception as e:
-                log.debug("потоки %s: %s", sym, e)
-                return sym, None
-            return sym, entry
-
-    out: Dict[str, dict] = {}
-    for sym, entry in await asyncio.gather(*(one(s) for s in coins)):
-        rows = (entry or {}).get("candles") or []
-        by_hour: Dict[int, dict] = {}
-        for c in rows[-8:]:
-            try:
-                h = int(float(c.get("time") or 0))
-            except (TypeError, ValueError):
-                continue
-            if not h:
-                continue
-            cell = by_hour.setdefault(h, {"cvd": 0.0, "vol": 0.0,
-                                          "has_cvd": False})
-            try:
-                cell["vol"] += float(c.get("volume") or 0)
-            except (TypeError, ValueError):
-                pass
-            if c.get("cvd") is not None:
+        async def one(sym: str):
+            async with sem:
                 try:
-                    cell["cvd"] += float(c["cvd"])
+                    entry = await asyncio.wait_for(get_candles(sym, 15), timeout=20)
+                except Exception as e:           # noqa: BLE001
+                    log.debug("потоки постов %s: %s", sym, e)
+                    return sym, None
+                return sym, entry
+
+        for sym, entry in await asyncio.gather(*(one(s) for s in missing)):
+            rows = (entry or {}).get("candles") or []
+            by_slot: Dict[int, dict] = {}
+            for c in rows[-max(need_slots + 2, 8):]:
+                try:
+                    h = int(float(c.get("time") or 0))
                 except (TypeError, ValueError):
                     continue
-                cell["has_cvd"] = True
-        if by_hour:
-            out[sym] = by_hour
+                if not h:
+                    continue
+                cell = by_slot.setdefault(h, {"cvd": 0.0, "vol": 0.0,
+                                              "has_cvd": False})
+                try:
+                    cell["vol"] += float(c.get("volume") or 0)
+                except (TypeError, ValueError):
+                    pass
+                if c.get("cvd") is not None:
+                    try:
+                        cell["cvd"] += float(c["cvd"])
+                    except (TypeError, ValueError):
+                        continue
+                    cell["has_cvd"] = True
+            if by_slot:
+                out[sym] = by_slot
     return out
 
 
+def post_interval_hours() -> int:
+    """Частота постов в канал прямо сейчас: настройка админки, иначе окружение."""
+    from channel_digest import interval_hours
+    return interval_hours(account_store, default=POST_INTERVAL_H)
+
+
+def set_post_interval_hours(value, actor_id: Optional[int] = None) -> int:
+    """Сохранить частоту постов (1…10 часов). Возвращает применённое значение."""
+    from channel_digest import INTERVAL_SETTING, clamp_interval
+    hours = clamp_interval(value)
+    account_store.set_setting(INTERVAL_SETTING, str(hours), actor_id=actor_id)
+    return hours
+
+
+def _board_window_facts(board: dict) -> dict:
+    """Итоги окна поста из блоков стенда: суммы, монеты и крупнейший удар.
+
+    Кольцевой буфер событий держит 60 тысяч ликвидаций — на окне в 10 часов
+    (пост раз в 10 ч) он обрезается, и в посте выходила заниженная касса. Блоки
+    стенда копят те же события без обрезки, поэтому итог берём по ним.
+    """
+    hours = (board or {}).get("hours") or []
+    total = longs = shorts = 0.0
+    count = 0
+    coins: Dict[str, dict] = {}
+    best: Optional[dict] = None
+    for hr in hours:
+        total += float(hr.get("total") or 0)
+        longs += float(hr.get("longs") or 0)
+        shorts += float(hr.get("shorts") or 0)
+        count += int(hr.get("count") or 0)
+        for sym, usd in (hr.get("coins") or {}).items():
+            c = coins.setdefault(sym, {"symbol": sym, "usd": 0.0, "longs": 0.0,
+                                       "shorts": 0.0, "count": 0})
+            c["usd"] += float(usd or 0)
+        for it in (hr.get("top") or []):
+            try:
+                usd = float(it.get("usd") or 0)
+            except (TypeError, ValueError):
+                continue
+            if usd > 0 and (best is None or usd > float(best.get("usd") or 0)):
+                best = dict(it, usd=usd)
+    top_coins = sorted(coins.values(), key=lambda c: c["usd"], reverse=True)
+    return {
+        "total_usd": total,
+        "longs_usd": longs,
+        "shorts_usd": shorts,
+        "count": count,
+        "top_coins": top_coins[:8],
+        "biggest": best,
+    }
+
+
+def _window_exchanges(now: float, window_sec: float) -> Dict[str, float]:
+    """Раскладка окна по биржам из месячной истории (часовые свёртки)."""
+    try:
+        cells = HIST.hours_range(now - float(window_sec), now, now)
+        from history import aggregate_hours
+        agg = aggregate_hours(cells) or {}
+        return dict(agg.get("by_exchange") or {})
+    except Exception as e:                       # noqa: BLE001
+        log.debug("биржи окна: %s", e)
+        return {}
+
+
 async def build_channel_digest() -> dict:
-    """Снимок рынка за 4ч для поста в канал: лидеры, биржи, OI, CVD."""
-    from channel_digest import collect_digest
+    """Снимок рынка за окно поста в канал: лидеры, биржи, OI, CVD.
+
+    Окно равно промежутку между постами (частота задаётся в админке), а блок
+    анализа внутри поста — четверти окна: пост раз в час разбирает по 15 минут,
+    раз в 4 часа — по часу, раз в 10 часов — по 2.5 часа.
+    """
+    from channel_digest import block_secs, collect_digest
+    interval = post_interval_hours()
+    window_sec = interval * 3600
     now = time.time()
     events = list(LIQUIDATIONS)
-    preview = collect_digest(events, now=now)
+    preview = collect_digest(events, window_sec=window_sec, now=now)
     oi: Dict[str, dict] = {}
     cvd: Dict[str, float] = {}
     tracker = getattr(feed, "oi", None) if feed else None
@@ -1295,12 +1440,34 @@ async def build_channel_digest() -> dict:
             oi[sym] = tracker.payload(sym)
         except Exception as e:
             log.debug("digest oi %s: %s", sym, e)
-    snap = collect_digest(events, now=now, oi=oi, cvd=cvd)
-    # Часовой стенд (ликвы по календарным часам, перекос CVD, OI за каждый час)
-    # считается по накопленной истории: в посте он идёт сразу после шапки.
+    snap = collect_digest(events, window_sec=window_sec, now=now, oi=oi, cvd=cvd)
+    snap["interval_h"] = interval
+    snap["block_sec"] = block_secs(interval)
+    snap["window_sec"] = window_sec
+    # Стенд постов: блоки по N/4 часа на 15-минутной сетке (ликвы, перекос CVD,
+    # OI), в посте он идёт сразу после шапки.
     try:
-        flows = await hour_flows()
-        snap["board"] = build_snapshot(BOARD, OI, now=now, flows=flows)
+        flows = await slot_flows((2 * 4 + 2) * interval)
+        board = build_snapshot(SLOTS, OI, now=now, span=4, group=interval,
+                               flows=flows)
+        snap["board"] = board
+        # Итог окна — по блокам стенда: он не зависит от того, обрезался ли
+        # буфер событий (для частых постов это неважно, для раз в 10 часов —
+        # принципиально). Если стенд ещё пуст, остаются цифры по событиям.
+        facts = _board_window_facts(board)
+        if facts["total_usd"] > float(snap.get("total_usd") or 0):
+            snap["total_usd"] = facts["total_usd"]
+            snap["longs_usd"] = facts["longs_usd"]
+            snap["shorts_usd"] = facts["shorts_usd"]
+            snap["count"] = facts["count"]
+            if facts["top_coins"]:
+                snap["top_coins"] = facts["top_coins"]
+            if facts["biggest"]:
+                snap["biggest"] = facts["biggest"]
+            snap["totals_source"] = "board"
+        exchanges = _window_exchanges(now, window_sec)
+        if exchanges:
+            snap["exchanges"] = exchanges
     except Exception as e:
         log.warning("стенд для поста не собрался: %s", e)
     return snap

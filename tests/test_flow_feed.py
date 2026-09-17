@@ -147,6 +147,49 @@ class TestFlowFeed(unittest.TestCase):
         self.assertAlmostEqual(series[2]["oi_delta"], 5e6, places=0)
         self.assertAlmostEqual(series[2]["oi"], 1.1e8, places=0)
 
+    def test_by_slot_folds_minutes(self):
+        """Минутки → слоты постов: объём и CVD складываются, границы честные."""
+        f = FlowFeed()
+        slot = 900                                  # 15 минут, как в постах
+        base = int(NOW // slot * slot)
+        now = base + slot + 300                     # заглядываем на два слота
+        f.add_trade("BTC_USDT", base + 60, 100.0)
+        f.add_trade("BTC_USDT", base + 120, -40.0)
+        f.add_volume("BTC_USDT", base + 120, 500.0)
+        f.add_trade("BTC_USDT", base + slot + 60, 30.0)
+        f.add_volume("BTC_USDT", base + slot + 60, 700.0)
+        f.add_trade("ETH_USDT", base + 60, -5.0)
+        out = f.by_slot(slot, 2, now)
+        self.assertEqual(sorted(out), ["BTC_USDT", "ETH_USDT"])
+        btc = out["BTC_USDT"]
+        self.assertEqual(sorted(btc), [base, base + slot])
+        self.assertAlmostEqual(btc[base]["cvd"], 60.0, places=6)
+        self.assertAlmostEqual(btc[base]["vol"], 500.0, places=6)
+        self.assertTrue(btc[base]["has_cvd"])
+        self.assertAlmostEqual(btc[base + slot]["cvd"], 30.0, places=6)
+        self.assertAlmostEqual(btc[base + slot]["vol"], 700.0, places=6)
+
+    def test_by_slot_without_cvd_keeps_volume(self):
+        """Объём без тейкер-делты не пропадает: долю CVD по слоту не считаем."""
+        f = FlowFeed()
+        slot = 900
+        base = int(NOW // slot * slot)
+        f.add_volume("BTC_USDT", base + 60, 400.0)
+        out = f.by_slot(slot, 1, NOW)
+        self.assertAlmostEqual(out["BTC_USDT"][base]["vol"], 400.0, places=6)
+        self.assertFalse(out["BTC_USDT"][base]["has_cvd"])
+        self.assertEqual(out["BTC_USDT"][base]["cvd"], 0.0)
+
+    def test_by_slot_skips_old_minutes(self):
+        """За окном слотов минут нет: в блок поста не подмешивается прошлый день."""
+        f = FlowFeed()
+        slot = 900
+        base = int(NOW // slot * slot)
+        f.add_trade("BTC_USDT", base - 5 * slot, 999.0)
+        f.add_trade("BTC_USDT", base + 60, 10.0)
+        out = f.by_slot(slot, 2, NOW)
+        self.assertEqual(sorted(out["BTC_USDT"]), [base])
+
     def test_limit(self):
         f = FlowFeed()
         for i in range(30):

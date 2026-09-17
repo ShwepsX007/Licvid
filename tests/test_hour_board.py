@@ -218,13 +218,70 @@ class HourBoardTest(unittest.TestCase):
 
         Стенд умеет рендериться и сам по себе, но в посты он попадает только
         через snap["board"] — однажды это звено уже было забыто, и посты
-        уходили без таблицы часов.
+        уходили без таблицы часов. Частота постов задаёт длину блока (N/4 часа),
+        поэтому снимок обязан нести и её: иначе пост вернётся к «часу на блок».
         """
         src = open(os.path.join(HERE, "server.py"), encoding="utf-8").read()
         body = src[src.index("async def build_channel_digest"):]
         body = body[:body.index("\n\nasync def ", 1)]
-        self.assertIn("build_snapshot(BOARD, OI", body)
+        self.assertIn("build_snapshot(SLOTS, OI", body)
+        self.assertIn("group=interval", body)
+        self.assertIn("post_interval_hours", body)
+        self.assertIn("slot_flows", body)
+        self.assertIn("group=interval", body)
         self.assertIn('snap["board"]', body)
+
+    def test_block_groups_fold_slots(self):
+        """Частота постов задаёт блок: 15 минут × N слотов на один блок."""
+        from hour_board import SLOT_SEC, HourBoard, build_snapshot
+        now = 986_400 + 53 * 60          # 13:53 МСК, внутри четверти часа
+        board = HourBoard(slot_sec=SLOT_SEC, keep_hours=64)
+        for i in range(16):              # 16 четвертей = 4 часа истории
+            for k in range(i + 1):
+                board.add_liq({"symbol": "BTC_USDT", "usd": 100_000.0,
+                               "side": "SELL", "exchange": "binance",
+                               "timestamp": now - i * SLOT_SEC - k})
+        snap = build_snapshot(board, OiHistory(), now=now, span=4, group=4)
+        self.assertEqual(snap["block_sec"], 4 * SLOT_SEC)     # блок — час
+        self.assertEqual(len(snap["hours"]), 4)               # четыре блока
+        self.assertEqual(snap["group"], 4)
+        self.assertEqual(snap["slot_sec"], SLOT_SEC)
+        self.assertEqual(snap["window_sec"], 4 * 3600)
+        self.assertGreater(snap["total_usd"], 0)
+        # блок из четырёх четвертей больше одной четверти
+        self.assertGreater(snap["hours"][0]["total"], 100_000.0)
+        # часовая группировка: последний блок — тот же час, что и слот now
+        from hour_board import slot_start
+        self.assertEqual(snap["hours"][-1]["h"] + snap["block_sec"],
+                         slot_start(now, board.tz, 3600) + 3600)
+        # одиночные слоты (частота раз в час) дают блоки по 15 минут
+        snap1 = build_snapshot(board, OiHistory(), now=now, span=4, group=1)
+        self.assertEqual(snap1["block_sec"], SLOT_SEC)
+        self.assertEqual(len(snap1["hours"]), 4)
+        self.assertTrue(snap1["hours"][-1]["live"])           # текущая четверть идёт
+        self.assertFalse(snap1["hours"][0]["live"])
+
+    def test_slot_flows_fold_into_blocks(self):
+        """CVD и объём блоков складываются из четвертей: доля считается честно."""
+        from hour_board import SLOT_SEC, HourBoard, OiHistory, build_snapshot
+        now = 986_400 + 53 * 60
+        board = HourBoard(slot_sec=SLOT_SEC, keep_hours=64)
+        for i in range(12):
+            board.add_liq({"symbol": "BTC_USDT", "usd": 10_000.0, "side": "BUY",
+                           "exchange": "okx", "timestamp": now - i * SLOT_SEC})
+        flows = {}
+        for i in range(12):
+            slots = flows.setdefault("BTC_USDT", {})
+            slots[int((now - i * SLOT_SEC) // SLOT_SEC * SLOT_SEC)] = {
+                "cvd": 1_000.0, "vol": 100_000.0, "has_cvd": True,
+            }
+        snap = build_snapshot(board, OiHistory(), now=now, span=4, group=3,
+                              flows=flows)
+        self.assertEqual(snap["block_sec"], 3 * SLOT_SEC)     # 45 минут
+        self.assertAlmostEqual(snap["cvd_4h"], 12 * 1_000.0, places=3)
+        self.assertAlmostEqual(snap["vol_4h"], 12 * 100_000.0, places=3)
+        self.assertAlmostEqual(snap["cvd_4h_share"], 1.0, places=6)
+        self.assertAlmostEqual(snap["hours"][-1]["cvd_share"], 1.0, places=6)
 
     def test_liqs_word_declines(self):
         from channel_digest import liqs_word

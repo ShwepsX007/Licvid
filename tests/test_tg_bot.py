@@ -1086,6 +1086,137 @@ class BotMenuTest(unittest.TestCase):
         self.assertIn("https://liqscope.online", urls)
         self.assertTrue(any("t.me/" in (u or "") for u in urls))
 
+    # --- карусель фото и частота постов -----------------------------------
+    PNG = (b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)        # хватает проверки формата
+
+    def _add_photos(self, n, kind="post"):
+        """Загружает n фото в рубрику — как это делает админка сайта."""
+        out = []
+        for i in range(n):
+            r = self.store.add_digest_photo(self.PNG, filename=f"p{i}.png", kind=kind)
+            self.assertTrue(r.get("ok"), r)
+            out.append(r["path"])
+        return out
+
+    def test_photos_go_as_carousel(self):
+        """Фото рубрики уходят альбомом: сразу все, обложка сдвигается."""
+        self.store.delete_digest_photo  # noqa: B018 — метод есть в базе
+        for p in self.store.list_digest_photos():
+            self.store.delete_digest_photo(p["id"])
+        paths = self._add_photos(3)
+        self.bot._channel_id_cfg = "-100111"
+        self.bot._set_review(False)
+        albums, singles = [], []
+
+        async def fake_album(cid, files, caption="", limit=10):
+            albums.append((str(cid), list(files), caption))
+            return [11, 12, 13]
+
+        async def fake_photo(cid, path, caption="", markup=None, **_kw):
+            singles.append((str(cid), path))
+            return 11
+
+        async def fake_send(*_a, **_k):
+            return 22
+
+        self.bot.send_media_group = fake_album       # type: ignore
+        self.bot.send_photo = fake_photo             # type: ignore
+        self.bot.send = fake_send                    # type: ignore
+        self.assertTrue(asyncio.run(self.bot.post_channel_digest()))
+        self.assertEqual(len(albums), 1, albums)
+        cid, files, caption = albums[0]
+        self.assertEqual(cid, "-100111")
+        self.assertEqual(sorted(files), sorted(paths))     # все фото в посте
+        self.assertEqual(len(files), 3)
+        self.assertIn("LiqScope", caption)                 # подпись под альбомом
+        self.assertEqual(singles, [])                      # одиночных фото нет
+        # подпись уходит только с первым фото альбома — порядок сдвигается
+        # от поста к посту за счёт счётчика channel_digest_n
+        self.assertEqual(self.store.get_setting("channel_digest_n", "0"), "1")
+        asyncio.run(self.bot.post_channel_digest())
+        self.assertEqual(albums[1][1][0], albums[0][1][1], "обложка должна смениться")
+
+    def test_single_photo_still_goes_alone(self):
+        """Одно фото — обычный sendPhoto с кнопками (альбом не нужен)."""
+        for p in self.store.list_digest_photos():
+            self.store.delete_digest_photo(p["id"])
+        self._add_photos(1)
+        self.bot._channel_id_cfg = "-100111"
+        albums, singles = [], []
+
+        async def fake_album(*a, **k):
+            albums.append(a)
+            return [11]
+
+        async def fake_photo(cid, path, caption="", markup=None, **_kw):
+            singles.append((str(cid), path, markup))
+            return 11
+
+        async def fake_send(*_a, **_k):
+            return 22
+
+        self.bot.send_media_group = fake_album  # type: ignore
+        self.bot.send_photo = fake_photo        # type: ignore
+        self.bot.send = fake_send               # type: ignore
+        self.assertTrue(asyncio.run(self.bot.post_channel_digest()))
+        self.assertEqual(albums, [])
+        self.assertEqual(len(singles), 1)
+        self.assertTrue(singles[0][2], "у одиночного фото остаются кнопки канала")
+
+    def test_daily_digest_uses_its_own_photo_rubric(self):
+        """Фото дневного дайджеста берутся из своей рубрики, а не из постовой."""
+        from channel_digest import digest_images
+        for p in self.store.list_digest_photos():
+            self.store.delete_digest_photo(p["id"])
+        post_path = self._add_photos(1, kind="post")[0]
+        self.assertEqual(digest_images(self.store), [post_path],
+                         "пустая рубрика дайджеста берёт фото постов")
+        digest_path = self._add_photos(1, kind="digest")[0]
+        self.assertEqual(digest_images(self.store), [digest_path])
+        # перенос кнопкой ⇄ меняет рубрику
+        pid = self.store.list_digest_photos("digest")[0]["id"]
+        self.assertTrue(self.store.set_digest_photo_kind(pid, "post"))
+        self.assertIn(pid, [p["id"] for p in self.store.list_digest_photos("post")])
+
+    def test_interval_setting_switches_schedule(self):
+        """Частота постов: раз в N часов, блок анализа — четверть окна."""
+        from channel_digest import INTERVAL_SETTING
+        self.assertEqual(self.bot.channel_interval_h(), 4)       # по умолчанию
+        self.bot.set_channel_interval(2)
+        self.assertEqual(self.store.get_setting(INTERVAL_SETTING), "2")
+        self.assertEqual(self.bot.channel_interval_h(), 2)
+        self.assertEqual(self.bot.channel_window_sec(), 2 * 3600)
+        self.assertIn("раз в 2 ч", self.bot.interval_text())
+        self.assertIn("30м", self.bot.interval_text())           # блок анализа
+        self.bot.set_channel_interval(99)                        # прижимаем к 10
+        self.assertEqual(self.bot.channel_interval_h(), 10)
+        text = self.bot._post_int_text()
+        self.assertIn("2ч30м", text)
+        kb = self.bot._post_int_kb()
+        datas = [b["callback_data"] for row in kb["inline_keyboard"] for b in row]
+        self.assertEqual([d for d in datas if d.startswith("pi:")],
+                         [f"pi:{n}" for n in range(1, 11)])
+
+    def test_sleep_between_posts_follows_interval(self):
+        """Пауза считается от последней публикации и слушает новую частоту."""
+        self.bot.set_channel_interval(1)
+        self.store.set_setting("channel_digest_ts", str(int(time.time()) - 3595))
+        # до конца часа осталось ~5 секунд: пауза короткая, а не «ещё час»
+        t0 = time.time()
+        asyncio.run(asyncio.wait_for(self.bot._sleep_between_posts(chunk=0.2), 6))
+        self.assertLess(time.time() - t0, 5.5)
+        # частота сменилась на «раз в 10 часов» — пауза стала длинной
+        self.bot.running = True
+        self.bot.set_channel_interval(10)
+        self.store.set_setting("channel_digest_ts", str(int(time.time())))
+        async def short():
+            try:
+                await asyncio.wait_for(self.bot._sleep_between_posts(chunk=0.2), 0.6)
+                return "спал"
+            except asyncio.TimeoutError:
+                return "ждёт"
+        self.assertEqual(asyncio.run(short()), "ждёт")
+
     def test_digest_long_caption_still_one_message(self):
         self.bot._channel_id_cfg = "-100111"
         import channel_digest

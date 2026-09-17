@@ -512,6 +512,38 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
 .cor-pair-bar.neg i { background: linear-gradient(90deg, #7a1030, #ff2a5f); }
 .cor-pair-r { text-align: right; font-weight: 800; font-variant-numeric: tabular-nums; }
 
+/* «Облако связей» — график корреляций рядом с тепловой картой */
+.cor-chart { background: rgba(20, 26, 38, 0.55); border: 1px solid rgba(120, 140, 175, 0.18);
+    border-radius: 10px; padding: 10px 12px 12px; margin: 4px 0 10px; }
+.cor-chart-head b { font-size: 0.86rem; }
+.cor-chart-sub { font-size: 0.76rem; color: #8d9cb4; line-height: 1.35; }
+.cor-chart-axes { display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+    margin: 8px 0 6px; }
+.cor-axis-label { font-size: 0.74rem; font-weight: 800; color: #9fb0c8;
+    text-transform: uppercase; letter-spacing: 0.4px; }
+.cor-canvas-wrap { position: relative; }
+.cor-canvas-wrap canvas { display: block; width: 100%; height: 260px; }
+.cor-tip { position: absolute; right: 8px; top: 8px; max-width: 62%;
+    background: rgba(12, 18, 28, 0.94); border: 1px solid rgba(120, 140, 175, 0.32);
+    border-radius: 8px; padding: 7px 9px; font-size: 0.75rem; color: #dce5f2;
+    pointer-events: none; display: grid; gap: 3px; }
+.cor-tip.pos { border-color: rgba(0, 230, 118, 0.55); }
+.cor-tip.neg { border-color: rgba(255, 42, 95, 0.55); }
+.cor-tip.mix { border-color: rgba(255, 193, 7, 0.55); }
+.cor-tip.pinned { box-shadow: 0 0 0 1px rgba(120, 140, 175, 0.35); }
+.cor-tip-grid { display: grid; grid-template-columns: auto auto; gap: 2px 10px;
+    font-variant-numeric: tabular-nums; }
+.cor-tip-grid i { font-style: normal; color: #9fb0c8; }
+.cor-tip-note { color: #8d9cb4; }
+.cor-hist-wrap { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+.cor-hist-title { font-size: 0.74rem; color: #9fb0c8; white-space: nowrap; }
+.cor-hist { display: flex; align-items: flex-end; gap: 3px; height: 54px; flex: 1;
+    background: rgba(120, 140, 175, 0.07); border-radius: 6px; padding: 4px 5px; }
+.cor-hist i { flex: 1; display: block; min-height: 2px; border-radius: 2px 2px 0 0; }
+.cor-hist i.pos { background: linear-gradient(180deg, #00e676, #0b6b3a); }
+.cor-hist i.neg { background: linear-gradient(180deg, #ff2a5f, #7a1030); }
+.cor-chart-note { font-size: 0.74rem; color: #8d9cb4; margin-top: 6px; }
+
 .pump-bars { display: grid; gap: 4px; margin: 6px 0 10px; }
 .pump-row { display: grid; grid-template-columns: 62px 1fr 78px minmax(120px, 150px);
     align-items: center; gap: 8px; padding: 2px 0; }

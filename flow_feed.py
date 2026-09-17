@@ -257,6 +257,44 @@ class FlowFeed:
             out.append(c)
         return out
 
+    def by_slot(self, slot_sec: int = 900, count: int = 40,
+                now: Optional[float] = None,
+                tz: int = 0) -> Dict[str, Dict[int, dict]]:
+        """Минутки → слоты постов: {монета: {начало слота: {cvd, vol, has_cvd}}}.
+
+        Сетку задаёт вызывающий: посты в канал складывают блок анализа из
+        слотов по ``slot_sec`` секунд (15 минут). Собираем из минут, что уже
+        есть в памяти, — без походов в сеть, поэтому и после рестарта слоты
+        наполняются сразу, а не ждут свечей.
+
+        Слот без тейкер-делты (CVD) не выкидываем: объём в нём может быть, а
+        долю CVD по такому слоту просто не считаем (``has_cvd`` = False).
+        """
+        slot_sec = max(60, int(slot_sec))
+        count = max(1, int(count))
+        now = float(now if now is not None else time.time())
+        last = int((now + tz) // slot_sec) * slot_sec - tz
+        first = last - (count - 1) * slot_sec
+        out: Dict[str, Dict[int, dict]] = {}
+        for sym, rows in self._by_sym.items():
+            by_slot: Dict[int, dict] = {}
+            for m in sorted(rows):
+                if m < first or m > now:
+                    continue
+                c = rows[m] or {}
+                start = int((float(m) + tz) // slot_sec) * slot_sec - tz
+                cell = by_slot.get(start)
+                if cell is None:
+                    cell = {"cvd": 0.0, "vol": 0.0, "has_cvd": False}
+                    by_slot[start] = cell
+                cell["vol"] += float(c.get("vol") or 0.0)
+                if c.get("has_cvd"):
+                    cell["cvd"] += float(c.get("cvd") or 0.0)
+                    cell["has_cvd"] = True
+            if by_slot:
+                out[sym] = by_slot
+        return out
+
     def symbols(self) -> List[str]:
         return sorted(self._by_sym)
 

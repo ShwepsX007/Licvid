@@ -209,8 +209,28 @@ async function main() {
   check("у сторожа включён сигнал (как в демо-подписке)",
         /СИГНАЛ (ВКЛ|ВЫКЛ)/.test(pump.textContent), q("#pump-sw") && q("#pump-sw").textContent);
 
+  // График корреляций рядом с тепловой картой: облако связей (пары монет по
+  // двум метрикам) и распределение коэффициентов.
+  check("есть график корреляций (облако связей)", !!$("cor-scatter") && !!q("#cor-chart-box"),
+        q("#cor-chart-box") ? q("#cor-chart-box").textContent.slice(0, 60) : "нет");
+  check("у графика две оси с выбором метрики",
+        qa("#cor-axis-x .al-chip").length >= 4 && qa("#cor-axis-y .al-chip").length >= 4,
+        qa("#cor-axis-x .al-chip").length + "/" + qa("#cor-axis-y .al-chip").length);
+  check("есть распределение связей по интервалам r", qa(".cor-hist i").length >= 8,
+        qa(".cor-hist i").length + " столбиков");
+  const axisChip = qa("#cor-axis-y .al-chip").filter((b) => /OI/.test(b.textContent))[0];
+  if (axisChip) {
+    const beforeAxis = apiCalls.length;
+    axisChip.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, view: win }));
+    await sleep(200);
+    check("выбор оси графика не ждёт сервер (мгновенно)",
+          apiCalls.length === beforeAxis && axisChip.classList.contains("on"),
+          apiCalls.length - beforeAxis + " запросов");
+  }
+
   // сохранение настройки: порог 30%
-  const before = apiCalls.filter((c) => c.method === "POST").length;
+  const before = apiCalls.filter((c) => c.method === "POST" &&
+    c.url.indexOf("/api/account/watchlist") === 0).length;
   const chip30 = qa("#pump-thr .al-chip").filter((b) => b.textContent.trim() === "30%")[0];
   check("есть чип порога 30%", !!chip30);
   if (chip30) {
@@ -223,6 +243,26 @@ async function main() {
     check("в панели появилась плашка сохранения",
           /сохранено|ошибка|null/.test($("pump-status") ? $("pump-status").textContent : ""),
           $("pump-status") && $("pump-status").textContent);
+  }
+
+  // Регрессия «кнопки в новых сервисах туго отвечают»: доски сторожа и
+  // корреляций перерисовывались целиком на автообновлении (12 и 30 секунд) —
+  // обработчики чипов исчезали, и нажатие уходило в пустоту. Ждём тик
+  // автообновления сторожа и проверяем, что клик по чипу по-прежнему работает.
+  await sleep(13000);
+  const beforeTick = apiCalls.filter((c) => c.method === "POST" &&
+    c.url.indexOf("/api/account/watchlist") === 0).length;
+  const chipAfterTick = qa("#pump-thr .al-chip").filter((b) => b.textContent.trim() === "20%")[0];
+  check("после автообновления доски чипы на месте", !!chipAfterTick);
+  if (chipAfterTick) {
+    chipAfterTick.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, view: win }));
+    await sleep(900);
+    const afterTick = apiCalls.filter((c) => c.method === "POST" &&
+      c.url.indexOf("/api/account/watchlist") === 0).length;
+    check("после автообновления доски чип всё ещё сохраняет настройку",
+          afterTick > beforeTick, afterTick - beforeTick + " запросов");
+    check("после автообновления клик сразу подсветил чип",
+          chipAfterTick.classList.contains("on"), chipAfterTick.className);
   }
 
   const viewportWarn = [];

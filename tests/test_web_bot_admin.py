@@ -119,6 +119,16 @@ class FakeTelegram:
         return {"ok": False, "description": "unknown method"}
 
     # --- контроль и публикация --------------------------------------------
+    def channel_interval_h(self) -> int:
+        from channel_digest import interval_hours
+        return interval_hours(self.store)
+
+    def set_channel_interval(self, hours, actor_id=None) -> int:
+        from channel_digest import INTERVAL_SETTING, clamp_interval
+        n = clamp_interval(hours)
+        self.store.set_setting(INTERVAL_SETTING, str(n), actor_id=actor_id)
+        return n
+
     def _review_on(self) -> bool:
         return str(self.store.get_setting("channel_digest_review") or "") in ("1", "on")
 
@@ -231,6 +241,35 @@ class BotAdminTest(unittest.TestCase):
         self.assertEqual(d["probes"]["ru"]["title"], "LiqScopeRUS")
         self.assertTrue(d["ai"]["enabled"])
         self.assertEqual(d["ai"]["providers"][0]["name"], "gemini")
+
+    def test_snapshot_carries_post_frequency(self):
+        """Снимок панели несёт частоту постов: окно и длину блока анализа."""
+        d = self.admin.get("/api/admin/bot").json()
+        self.assertEqual(d["interval"]["hours"], 4)
+        self.assertEqual(d["interval"]["block_sec"], 3600)
+        self.assertIn("раз в 4 ч", d["interval"]["text"])
+
+    def test_interval_saved_and_block_follows(self):
+        """Частота 1…10 ч: блок анализа — четверть окна (раз в час → 15 минут)."""
+        r = self.admin.post("/api/admin/bot/interval", json={"hours": 1})
+        self.assertTrue(r.json()["ok"])
+        self.assertEqual(r.json()["interval"]["block_sec"], 900)
+        self.assertEqual(r.json()["interval"]["block"], "15м")
+        self.assertEqual(self.store.get_setting("channel_digest_interval_h"), "1")
+        # выходит за границы — прижимаем, а не падаем
+        r = self.admin.post("/api/admin/bot/interval", json={"hours": 99})
+        self.assertEqual(r.json()["interval"]["hours"], 10)
+        self.assertEqual(r.json()["interval"]["block"], "2ч30м")
+        r = self.admin.post("/api/admin/bot/interval", json={"hours": 0})
+        self.assertEqual(r.json()["interval"]["hours"], 1)
+        r = self.admin.post("/api/admin/bot/interval", json={})
+        self.assertEqual(r.status_code, 400)
+
+    def test_interval_needs_admin(self):
+        self.assertEqual(
+            self.plain.post("/api/admin/bot/interval", json={"hours": 2}).status_code, 403)
+        self.assertEqual(
+            self.client.post("/api/admin/bot/interval", json={"hours": 2}).status_code, 401)
 
     def test_no_bot_returns_503_not_page_error(self):
         web_bot_admin.ctx.bot = None

@@ -401,6 +401,7 @@ class Store:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     path TEXT NOT NULL,
                     name TEXT,
+                    kind TEXT DEFAULT 'post',
                     created_at REAL NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS alert_events (
@@ -439,6 +440,7 @@ class Store:
                     )
             self._db.commit()
         self._migrate_users()
+        self._migrate_digest_photos()
         self._seed_digest()
         self._digest_service_live()
 
@@ -466,6 +468,27 @@ class Store:
             self.set_setting("digest_service_live", "1")
         except Exception:
             pass
+
+    def _migrate_digest_photos(self) -> None:
+        """Колонка kind: фото для сводки постов или для дневного дайджеста.
+
+        Раньше картинки были одни на всё: и в посты раз в N часов, и в вечерний
+        выпуск. Теперь рубрика у фото своя, а старые строки считаем постовыми —
+        как они и работали.
+        """
+        try:
+            with self._lock:
+                cols = {r["name"] for r in
+                        self._db.execute("PRAGMA table_info(digest_photos)")}
+                if cols and "kind" not in cols:
+                    self._db.execute(
+                        "ALTER TABLE digest_photos ADD COLUMN kind TEXT DEFAULT 'post'")
+                    self._db.commit()
+                self._db.execute(
+                    "UPDATE digest_photos SET kind='post' WHERE kind IS NULL OR kind=''")
+                self._db.commit()
+        except Exception as e:                    # noqa: BLE001
+            log.debug("фото канала: миграция kind: %s", e)
 
     def _migrate_users(self) -> None:
         """Догоняем старые базы: почта/пароль и tg_id без NOT NULL.
@@ -1366,8 +1389,9 @@ class Store:
                 now = _now()
                 for path in list_images():
                     self._db.execute(
-                        "INSERT INTO digest_photos(path, name, created_at) VALUES(?,?,?)",
-                        (path, os.path.basename(path), now),
+                        "INSERT INTO digest_photos(path, name, kind, created_at)"
+                        " VALUES(?,?,?,?)",
+                        (path, os.path.basename(path), "post", now),
                     )
             self._db.commit()
 
@@ -1406,11 +1430,23 @@ class Store:
             self.audit(actor_id, "digest_head_del", str(head_id))
         return ok
 
-    def list_digest_photos(self) -> List[Dict[str, Any]]:
+    def list_digest_photos(self, kind: str = "") -> List[Dict[str, Any]]:
+        """Фото канала: ``kind`` — "post" (сводка), "digest" (дневной выпуск).
+
+        Пустой ``kind`` — все фото: так их видит админка и старые вызовы.
+        """
+        kind = (kind or "").strip()
         with self._lock:
-            rows = self._db.execute(
-                "SELECT id, path, name, created_at FROM digest_photos ORDER BY id"
-            ).fetchall()
+            if kind:
+                rows = self._db.execute(
+                    "SELECT id, path, name, kind, created_at FROM digest_photos"
+                    " WHERE COALESCE(kind,'post')=? ORDER BY id", (kind,)
+                ).fetchall()
+            else:
+                rows = self._db.execute(
+                    "SELECT id, path, name, kind, created_at FROM digest_photos"
+                    " ORDER BY id"
+                ).fetchall()
         out = []
         for r in rows:
             d = dict(r)
@@ -1418,8 +1454,22 @@ class Store:
             out.append(d)
         return out
 
+    def set_digest_photo_kind(self, photo_id: int, kind: str,
+                              actor_id: Optional[int] = None) -> bool:
+        """Перенести фото в другую рубрику: сводка ⇄ дневной дайджест."""
+        kind = "digest" if str(kind or "").strip().lower() == "digest" else "post"
+        with self._lock:
+            cur = self._db.execute("UPDATE digest_photos SET kind=? WHERE id=?",
+                                   (kind, int(photo_id)))
+            self._db.commit()
+        if not cur.rowcount:
+            return False
+        self.audit(actor_id, "digest_photo_kind", f"{photo_id}→{kind}")
+        return True
+
     def add_digest_photo(self, data: bytes, filename: str = "",
-                         actor_id: Optional[int] = None) -> Dict[str, Any]:
+                         actor_id: Optional[int] = None,
+                         kind: str = "post") -> Dict[str, Any]:
         data = data or b""
         if len(data) < 24:
             return {"ok": False, "error": "empty"}
@@ -1434,6 +1484,7 @@ class Store:
             ext = ".webp"
         if not ext:
             return {"ok": False, "error": "not_image"}
+        kind = "digest" if str(kind or "").strip().lower() == "digest" else "post"
         with self._lock:
             n = self._db.execute("SELECT COUNT(*) FROM digest_photos").fetchone()[0]
             if n >= 40:
@@ -1449,18 +1500,19 @@ class Store:
         orig = os.path.basename(filename or name)[:80]
         with self._lock:
             cur = self._db.execute(
-                "INSERT INTO digest_photos(path, name, created_at) VALUES(?,?,?)",
-                (path, orig, _now()),
+                "INSERT INTO digest_photos(path, name, kind, created_at)"
+                " VALUES(?,?,?,?)",
+                (path, orig, kind, _now()),
             )
             self._db.commit()
             pid = int(cur.lastrowid)
-        self.audit(actor_id, "digest_photo_add", orig)
-        return {"ok": True, "id": pid, "path": path, "name": orig}
+        self.audit(actor_id, "digest_photo_add", f"{kind}:{orig}")
+        return {"ok": True, "id": pid, "path": path, "name": orig, "kind": kind}
 
     def get_digest_photo(self, photo_id: int) -> Optional[Dict[str, Any]]:
         with self._lock:
             row = self._db.execute(
-                "SELECT id, path, name, created_at FROM digest_photos WHERE id=?",
+                "SELECT id, path, name, kind, created_at FROM digest_photos WHERE id=?",
                 (int(photo_id),),
             ).fetchone()
         return dict(row) if row else None

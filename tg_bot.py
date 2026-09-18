@@ -37,6 +37,16 @@ CHANNEL_CHECK_SEC = float(os.getenv("LIQSCOPE_CHANNEL_CHECK_SEC", "1800"))
 CAPTION_LIMIT = 1024
 
 
+def caption_len(text: str) -> int:
+    """Длина подписи так, как её считает Telegram: UTF-16, эмодзи = 2 знака.
+
+    Лимит подписи под фотографией — 1024 «знака»; в UTF-16 эмодзи занимают по
+    две единицы, поэтому пост, который по ``len()`` проходит, Telegram может
+    отклонить. Считаем честно — тогда фото не теряется из-за пары эмодзи.
+    """
+    return len(str(text or "").encode("utf-16-le")) // 2
+
+
 def normalize_public_url(url: str = "") -> str:
     """Канонический сайт. Пустое значение, IP и :8000 → https://liqscope.online."""
     s = (url or "").strip().rstrip("/")
@@ -180,6 +190,22 @@ class TelegramBot:
     def bot_url(self) -> str:
         name = (self.username or os.getenv("LIQSCOPE_BOT_USERNAME") or "LiqScopeBot")
         return f"https://t.me/{str(name).lstrip('@')}"
+
+    def digest_kb(self, lang: str = "ru") -> dict:
+        """Кнопки под дневным выпуском: сверху — ссылка на полный разбор на сайте.
+
+        В подписи под фотографией ссылка тоже есть, но кнопка заметнее: она
+        ведёт на страницу /digest, где лежит весь рассказ и все блоки дня.
+        """
+        kb = dict(self.channel_link_kb(lang))
+        rows = [list(r) for r in (kb.get("inline_keyboard") or [])]
+        url = self.site_url("/digest")
+        label = ("📖 Full day breakdown" if str(lang).startswith("en")
+                 else "📖 Полный разбор дня")
+        if url:
+            rows.insert(0, [{"text": label, "url": url}])
+        kb["inline_keyboard"] = rows
+        return kb
 
     def channel_link_kb(self, lang: str = "ru") -> dict:
         """Кнопки под постом в канале: сайт, бот и партнёрская ссылка Gate."""
@@ -1481,7 +1507,8 @@ class TelegramBot:
         return await self._publish_digest(posts, img, n)
 
     async def _publish_one(self, cid, caption: str, img, top: str = "",
-                           lang: str = "ru", images: Optional[List[str]] = None) -> bool:
+                           lang: str = "ru", images: Optional[List[str]] = None,
+                           kb: Optional[dict] = None) -> bool:
         """Пост в один канал: одно фото и подпись под ним.
 
         В канал уходит ровно одна картинка. Раньше весь набор из админки
@@ -1495,11 +1522,11 @@ class TelegramBot:
         в аварийном случае (подпись исчерпана до первого часа) — тогда текст
         уходит вторым сообщением, чтобы данные не потерялись.
         """
-        markup = self.channel_link_kb(lang)
+        markup = kb if kb else self.channel_link_kb(lang)
         photos = [x for x in (images if images is not None else
                               ([img] if img else [])) if x and os.path.isfile(x)]
         ok = False
-        if photos and len(caption) <= CAPTION_LIMIT:
+        if photos and caption_len(caption) <= CAPTION_LIMIT:
             ok = bool(await self.send_photo(cid, photos[0], caption, markup))
         if not ok:
             ok = bool(await self.send(cid, caption, markup))
@@ -1517,7 +1544,7 @@ class TelegramBot:
         обычно длиннее — тогда он уходит текстом, без картинки. Админ видит
         это ещё в черновике и решает, укорачивать ли рассказ промтом.
         """
-        sizes = [(p.get("lang") or "ru", len(p.get("caption") or ""))
+        sizes = [(p.get("lang") or "ru", caption_len(p.get("caption") or ""))
                  for p in (posts or [])]
         if not sizes:
             return ""
@@ -1683,7 +1710,8 @@ class TelegramBot:
             # фотографией (1024 знака) и фото уходит всегда; большой текст
             # целиком живёт на странице /digest.
             caption = render_channel(rec, lang, self.site_url())
-            posts.append({"lang": lang, "cid": cid, "caption": caption, "top": ""})
+            posts.append({"lang": lang, "cid": cid, "caption": caption, "top": "",
+                          "kb": self.digest_kb(lang)})
         if not posts:
             err = next((v[1] for v in result.values()), "каналы не привязаны")
             self._digest_err = err
@@ -1724,7 +1752,8 @@ class TelegramBot:
             ok = await self._publish_one(cid, post.get("caption") or "",
                                          images[0] if images else None,
                                          post.get("top") or "", lang,
-                                         images=images)
+                                         images=images,
+                                         kb=post.get("kb") or None)
             err = "" if ok else (getattr(self, "_last_tg_err", "")
                                  or "Telegram отклонил пост")
             if not ok:

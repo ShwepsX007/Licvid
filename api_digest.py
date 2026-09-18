@@ -55,6 +55,8 @@ class Ctx:
         self.hours_pull = 25         # часовых свечей на монету (24ч + запас)
         self.last: Dict[str, Any] = {}
         self.busy = False
+        self.retry_at = 0.0          # когда снова пробовать выпуск после сбоя
+        self.retry_note = ""         # почему выпуск не ушёл в прошлый раз
         # Настройки вечернего выпуска: их читает сервер (store + env),
         # планировщик только получает готовый словарь — модуль без базы.
         self.settings_fn = None
@@ -427,7 +429,31 @@ class DigestScheduler:
             "error": self.last_error,
             "env_locked": dict(ctx.env_locked or {}),
             "archive": len(ctx.store.list()) if isinstance(ctx.store, DigestStore) else 0,
+            "retry_at": float(ctx.retry_at or 0),
+            "retry_note": ctx.retry_note,
         }
+
+
+RETRY_SEC = 900.0        # повтор после сбоя: не чаще, чем раз в 15 минут
+
+
+def publish_done(rec: Optional[dict]) -> bool:
+    """Ушёл ли выпуск — или его надо повторить.
+
+    Повторяем в двух случаях: выпуск пропущен (пустой день: история может
+    восстановиться) и ни один канал не принял пост (не привязан канал, Telegram
+    отклонил). Черновик админу (режим контроля публикации) считается
+    отправленным: он ждёт кнопку «Опубликовать», и повторять его не нужно.
+    """
+    if not rec or rec.get("skipped"):
+        return False
+    pub = rec.get("published") or {}
+    if not pub:
+        return False
+    if any(bool((v or [False])[0]) for v in pub.values()):
+        return True
+    # ни одна языковая версия не ушла; пустая ошибка = ушло черновиком админу
+    return not any(str((v or ["", ""])[1] or "").strip() for v in pub.values())
 
 
 async def scheduler_loop(sched: DigestScheduler, check_sec: float = 60.0) -> None:
@@ -439,15 +465,26 @@ async def scheduler_loop(sched: DigestScheduler, check_sec: float = 60.0) -> Non
         try:
             now = time.time()
             day = sched.due(now)
-            if day and not ctx.busy:
+            if day and not ctx.busy and now >= float(ctx.retry_at or 0):
                 ctx.busy = True
                 try:
                     rec = await publish_digest(now=now, langs=("ru", "en"), force=True,
                                                reason="schedule")
-                    # пустой выпуск не отмечаем: история может восстановиться,
-                    # и выпуск всё-таки соберётся в этом окне
-                    if rec and not rec.get("skipped"):
+                    if publish_done(rec):
+                        # выпуск ушёл (или ждёт кнопки «Опубликовать» у админа)
                         sched.mark(day)
+                        ctx.retry_at = 0.0
+                        ctx.retry_note = ""
+                    else:
+                        # пустой день или каналы не приняли пост: попробуем ещё
+                        # раз, но не чаще, чем раз в RETRY_SEC — сборка выпуска
+                        # тянет ИИ и свечи, долбить ими каждую минуту нельзя
+                        ctx.retry_at = now + RETRY_SEC
+                        ctx.retry_note = ((rec or {}).get("skipped")
+                                          or _publish_error(rec)
+                                          or "выпуск не ушёл")
+                        log.info("Дайджест %s: %s — повтор через %d мин",
+                                 day, ctx.retry_note, int(RETRY_SEC // 60))
                 finally:
                     ctx.busy = False
         except asyncio.CancelledError:
@@ -456,6 +493,15 @@ async def scheduler_loop(sched: DigestScheduler, check_sec: float = 60.0) -> Non
             sched.last_error = f"{type(e).__name__}: {e}"
             log.warning("Дайджест: планировщик споткнулся: %s", e)
         await asyncio.sleep(check_sec)
+
+
+def _publish_error(rec: Optional[dict]) -> str:
+    """Первая ошибка публикации — для лога и повторов."""
+    for v in ((rec or {}).get("published") or {}).values():
+        err = str((v or ["", ""])[1] or "").strip()
+        if err:
+            return err
+    return ""
 
 
 def empty_day_reason(facts: Optional[dict]) -> str:

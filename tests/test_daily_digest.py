@@ -591,6 +591,29 @@ class BotPublishTest(unittest.TestCase):
         self.assertIn("Крупнейшая:", msg["text"])
         self.assertIn("/digest", msg["text"], "ссылка на полный разбор на сайте")
 
+    def test_digest_post_has_button_to_full_breakdown(self):
+        """Под дневным выпуском — кнопка на полный разбор на сайте."""
+        import asyncio
+        self._upload_photo()
+        rec = self._rec()
+        asyncio.get_event_loop().run_until_complete(
+            self.bot.publish_daily_digest(rec, ("ru", "en"), force=True))
+        for cid in ("-100111", "-100222"):
+            msg = [m for m in self.sent if m["cid"] == cid][0]
+            rows = (msg.get("kb") or {}).get("inline_keyboard") or []
+            urls = [b.get("url") for row in rows for b in row]
+            self.assertTrue(any(str(u).endswith("/digest") for u in urls), urls)
+            texts = [b.get("text") for row in rows for b in row]
+            self.assertTrue(any("разбор" in str(t) or "breakdown" in str(t)
+                                for t in texts), texts)
+
+    def test_caption_length_counts_emoji_like_telegram(self):
+        """Эмодзи в UTF-16 занимают два знака — лимит подписи считаем так же."""
+        from tg_bot import caption_len
+        self.assertEqual(caption_len("абв"), 3)
+        self.assertEqual(caption_len("🎯"), 2)
+        self.assertEqual(caption_len(""), 0)
+
     def test_long_story_keeps_channel_post_small_and_full_text_on_site(self):
         """Рассказ длинный — в канале всё равно короткий пост с фото.
 
@@ -789,6 +812,24 @@ class EmptyDayPublishTest(unittest.TestCase):
         self.assertFalse(ru[0])
         self.assertIn("ни одной ликвидации", ru[1])
         self.assertIn("liquidations_in_memory", ru[1])
+
+    def test_retry_only_when_the_digest_did_not_go_out(self):
+        """Повтор выпуска — только если он не ушёл: пустой день или отказ канала.
+
+        Черновик админу повтора не требует (его ждёт кнопка «Опубликовать»), а
+        неудачная отправка требует — но с паузой, иначе сборка с ИИ крутится
+        каждую минуту.
+        """
+        done = self.api.publish_done
+        self.assertFalse(done(None))
+        self.assertFalse(done({"skipped": "no_liquidations",
+                               "published": {"ru": [False, "пусто"]}}))
+        self.assertTrue(done({"published": {"ru": [True, ""]}}))
+        self.assertTrue(done({"published": {"ru": [False, ""]}}))       # черновик
+        self.assertFalse(done({"published": {
+            "ru": [False, "канал не привязан"], "en": [False, "нет канала"]}}))
+        self.assertFalse(done({"published": {}}))
+        self.assertGreaterEqual(self.api.RETRY_SEC, 300)
 
     def test_reason_explains_what_to_check(self):
         text = self.api.empty_day_reason({"liq_count": 0, "liq_total_usd": 0})

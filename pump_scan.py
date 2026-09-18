@@ -22,6 +22,8 @@ from __future__ import annotations
 from collections import deque
 from typing import Dict, Iterable, List, Optional, Tuple
 
+from alerts import footer_html
+
 MINUTE = 60
 #: период свечи → минуты
 PERIODS: Tuple[Tuple[str, int], ...] = (
@@ -255,10 +257,19 @@ def filter_new(hits: Iterable[dict], last_fired: Dict[str, float], now: float,
     return out
 
 
-def money(value) -> str:
+def money(value, lang: str = "ru") -> str:
+    """Сумма в коротком виде. ``lang='en'`` — без русских суффиксов."""
     v = _num(value)
     sign = "−" if v < 0 else ""
     v = abs(v)
+    if str(lang).lower().startswith("en"):
+        if v >= 1e9:
+            return f"{sign}${v / 1e9:.2f}B"
+        if v >= 1e6:
+            return f"{sign}${v / 1e6:.2f}M"
+        if v >= 1e3:
+            return f"{sign}${v / 1e3:.1f}K"
+        return f"{sign}${v:.0f}"
     if v >= 1e9:
         return f"{sign}${v / 1e9:.2f} млрд"
     if v >= 1e6:
@@ -276,8 +287,13 @@ def price_str(p) -> str:
     return f"${v:,.{digits}f}"
 
 
-def format_signal_html(hit: dict, lang: str = "ru") -> str:
-    """Сообщение о пампе или дампе: что, насколько, за какое окно и где смотреть."""
+def format_signal_html(hit: dict, lang: str = "ru",
+                       site_url: str = "https://liqscope.online") -> str:
+    """Сигнал пампа или дампа.
+
+    Оформление то же, что у алертов по объёму: шапка с иконкой, крупные числа
+    в разметке (``<b>``/``<code>``), подпись и общий подвал LiqScope.
+    """
     en = str(lang).lower().startswith("en")
     coin = str(hit.get("symbol") or "").replace("_USDT", "")
     is_pump = str(hit.get("kind")) == "pump"
@@ -287,20 +303,21 @@ def format_signal_html(hit: dict, lang: str = "ru") -> str:
     candles = int(hit.get("candles") or 1)
     period = hit.get("period") or DEFAULT_PERIOD
     if en:
-        title = f"{arrow} <b>{'Pump' if is_pump else 'Dump'}: {coin} {pct:+.2f}%</b>"
-        window = (f"Window: {candles} × {period} ≈ {span} min "
-                  f"(open candle counted)")
-        price = (f"Price: {price_str(hit.get('price'))} "
-                 f"(from {price_str(hit.get('price_from'))})")
-        extra = f"24h volume: {money(hit.get('volume24h'))}"
+        title = f"{arrow} <b>{'Pump' if is_pump else 'Dump'} · {coin}</b>"
+        window = (f"<b>{pct:+.2f}%</b> over {span} min · {candles} × {period}")
+        price = (f"price <code>{price_str(hit.get('price'))}</code>"
+                 f" ← <code>{price_str(hit.get('price_from'))}</code>")
+        extra = f"24h volume <code>{money(hit.get('volume24h'), 'en')}</code>"
+        note = "<i>open candle counted</i>"
     else:
-        title = f"{arrow} <b>{'Памп' if is_pump else 'Дамп'}: {coin} {pct:+.2f}%</b>"
-        window = (f"Окно: {candles} × {period} ≈ {span} мин "
-                  f"(текущая свеча учтена)")
-        price = (f"Цена: {price_str(hit.get('price'))} "
-                 f"(была {price_str(hit.get('price_from'))})")
-        extra = f"Оборот 24ч: {money(hit.get('volume24h'))}"
-    return "\n".join([title, window, price, extra])
+        title = f"{arrow} <b>{'Памп' if is_pump else 'Дамп'} · {coin}</b>"
+        window = f"<b>{pct:+.2f}%</b> за {span} мин · {candles} × {period}"
+        price = (f"цена <code>{price_str(hit.get('price'))}</code>"
+                 f" → <code>{price_str(hit.get('price_from'))}</code>")
+        extra = f"оборот 24ч <code>{money(hit.get('volume24h'))}</code>"
+        note = "<i>текущая свеча учтена</i>"
+    return "\n".join([title, window, price, extra, note,
+                       footer_html(site_url, lang)])
 
 
 def format_settings_text(cfg: dict, lang: str = "ru") -> str:
@@ -308,7 +325,9 @@ def format_settings_text(cfg: dict, lang: str = "ru") -> str:
     cfg = normalize(cfg)
     span = period_minutes(cfg["period"]) * cfg["candles"]
     mode = {"pump": "пампы", "dump": "дампы", "both": "пампы и дампы"}[cfg["mode"]]
-    return (f"режим: {mode} · порог {cfg['threshold']:g}% · "
-            f"{cfg['candles']} × {cfg['period']} ≈ {span} мин · "
-            f"пауза {cfg['cooldown_min']} мин"
-            + (f" · оборот от {money(cfg['min_vol'])}" if cfg.get("min_vol") else ""))
+    # числа — в разметке: сообщения бота должны выглядеть одинаково
+    return (f"режим: {mode} · порог <b>{cfg['threshold']:g}%</b>"
+            f" · <code>{cfg['candles']} × {cfg['period']} ≈ {span} мин</code>"
+            f" · пауза <code>{cfg['cooldown_min']} мин</code>"
+            + (f" · оборот от <code>{money(cfg['min_vol'])}</code>"
+               if cfg.get("min_vol") else ""))

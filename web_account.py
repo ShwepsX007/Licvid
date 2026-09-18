@@ -823,6 +823,17 @@ def register_account_routes(app) -> None:
         enabled = bool(body.get("enabled", True))
         return ctx.store.toggle_user_service(user["id"], slug, enabled)
 
+    def _alert_since(store, user):
+        """Время прошлых сигналов метрик: якорь перезапуска окна."""
+        def last_fire(metric, symbol):
+            try:
+                if not symbol or str(symbol).upper() in ("ALL", ""):
+                    return store.last_alert_any(user["id"], metric)
+                return store.last_alert_ts(user["id"], metric, symbol)
+            except Exception:
+                return None
+        return last_fire
+
     @router.get("/api/account/alerts")
     async def api_alerts_get(request: Request):
         from alerts import live_snapshot, normalize_config, presets
@@ -843,7 +854,9 @@ def register_account_routes(app) -> None:
             "config": cfg,
             "subscribed": bool(row and row.get("enabled")),
             "presets": presets(),
-            "live": live_snapshot(cfg, market),
+            # превью считаем от прошлого сигнала: в кабинете видно ровно то,
+            # из чего соберётся следующее сообщение (окно метрики заново)
+            "live": live_snapshot(cfg, market, since=_alert_since(ctx, user)),
             "history": ctx.store.list_alert_events(user["id"], 48),
             "symbols": list(ctx.symbols_fn() or [])[:60],
         }
@@ -874,7 +887,7 @@ def register_account_routes(app) -> None:
             "ok": True,
             "config": cfg,
             "subscribed": True,
-            "live": live_snapshot(cfg, market),
+            "live": live_snapshot(cfg, market, since=_alert_since(ctx.store, user)),
         }
 
     @router.get("/api/account/correlations")

@@ -1683,7 +1683,8 @@ class Store:
                  float(hit.get("threshold") or 0),
                  int(hit.get("window_min") or 5),
                  json.dumps({k: hit.get(k) for k in
-                             ("count", "longs", "shorts", "pct") if k in hit},
+                             ("count", "longs", "shorts", "pct", "span_min",
+                              "peers") if k in hit},
                             ensure_ascii=False)[:400]),
             )
             if secrets.randbelow(40) == 0:
@@ -1699,7 +1700,16 @@ class Store:
                 "SELECT * FROM alert_events WHERE user_id=? ORDER BY id DESC LIMIT ?",
                 (int(user_id), limit),
             ).fetchall()
-        return [dict(r) for r in rows]
+        out = []
+        for r in rows:
+            d = dict(r)
+            if isinstance(d.get("detail"), str) and d["detail"]:
+                try:                                  # detail хранится строкой
+                    d["detail"] = json.loads(d["detail"])
+                except (ValueError, TypeError):
+                    d["detail"] = {}
+            out.append(d)
+        return out
 
     def last_alert_ts(self, user_id: int, metric: str, symbol: str) -> Optional[float]:
         with self._lock:
@@ -1707,5 +1717,20 @@ class Store:
                 "SELECT ts FROM alert_events WHERE user_id=? AND metric=? AND symbol=?"
                 " ORDER BY ts DESC LIMIT 1",
                 (int(user_id), str(metric)[:12], str(symbol)[:32]),
+            ).fetchone()
+        return float(row["ts"]) if row else None
+
+    def last_alert_any(self, user_id: int, metric: str) -> Optional[float]:
+        """Последний сигнал метрики по любой монете — якорь окна в режиме ALL.
+
+        Подписка «все монеты» ловит лидера каждой метрики: сигналы хранятся
+        под конкретными монетами, поэтому окно перезапускаем от самого
+        свежего из них.
+        """
+        with self._lock:
+            row = self._db.execute(
+                "SELECT ts FROM alert_events WHERE user_id=? AND metric=?"
+                " ORDER BY ts DESC LIMIT 1",
+                (int(user_id), str(metric)[:12]),
             ).fetchone()
         return float(row["ts"]) if row else None

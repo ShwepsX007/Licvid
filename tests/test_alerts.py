@@ -177,5 +177,258 @@ class AlertsTest(unittest.TestCase):
         self.assertEqual(len(snap["cvd"]["spark"]), 24)
 
 
+class PerMetricWindowTest(unittest.TestCase):
+    """Окно агрегации у каждой метрики своё."""
+
+    def test_defaults_are_per_metric(self):
+        from alerts import DEFAULT_WINDOWS
+        c = normalize_config({})
+        self.assertEqual(c["windows"], {"liq": 5, "cvd": 15, "oi": 60})
+        self.assertEqual(c["windows"], dict(DEFAULT_WINDOWS))
+
+    def test_legacy_single_window_spreads_over_metrics(self):
+        """Старая настройка с одним числом по-прежнему читается."""
+        c = normalize_config({"window_min": 30, "watch": ["liq", "cvd"]})
+        self.assertEqual(c["windows"], {"liq": 30, "cvd": 30, "oi": 30})
+        self.assertEqual(c["window_min"], 30)
+        c2 = normalize_config({"window": 15})
+        self.assertEqual(c2["windows"]["cvd"], 15)
+
+    def test_partial_windows_keep_other_defaults(self):
+        c = normalize_config({"windows": {"cvd": 240}})
+        self.assertEqual(c["windows"], {"liq": 5, "cvd": 240, "oi": 60})
+
+    def test_windows_are_clamped(self):
+        from alerts import window_minutes, window_of
+        c = normalize_config({"windows": {"liq": 0, "cvd": 99999, "oi": 7}})
+        self.assertEqual(c["windows"], {"liq": 1, "cvd": 1440, "oi": 7})
+        self.assertEqual(window_of({"windows": {"oi": 90}}, "oi"), 90)
+        self.assertEqual(window_of({"window_min": 12}, "oi"), 12)
+        self.assertEqual(window_minutes("30"), 30)
+
+    def test_evaluate_uses_each_window(self):
+        now = 1_000_000.0
+        cfg = {"watch": ["liq", "cvd"], "enabled": True,
+               "windows": {"liq": 5, "cvd": 15},
+               "threshold": {"liq": 100, "cvd": 100}, "min_event": 0,
+               "symbol": "ALL"}
+        market = {"now": now,
+                  "events": [_liq("BTC_USDT", 500, now - 10 * 60)],   # старше 5м
+                  "cvd": {"BTC_USDT|1": {int(now - 10 * 60): 900.0}},
+                  "oi": {}}
+        hits = evaluate(cfg, market)
+        by_metric = {h["metric"]: h for h in hits}
+        self.assertNotIn("liq", by_metric)          # в 5м окно не попало
+        self.assertIn("cvd", by_metric)             # а в 15м попало
+        self.assertEqual(by_metric["cvd"]["window_min"], 15)
+
+
+class WindowRestartTest(unittest.TestCase):
+    """После сигнала окно метрики начинается заново.
+
+    Это главное требование: в следующее сообщение попадают только данные
+    новее прошлого сигнала, старые не повторяются.
+    """
+
+    def test_events_before_signal_are_dropped(self):
+        now = 1_000_000.0
+        events = [_liq("BTC_USDT", 600_000, now - 240),
+                  _liq("BTC_USDT", 300_000, now - 30)]
+        rows = liq_by_symbol(events, 300, 0, now, "ALL", since=now - 120)
+        self.assertEqual(rows["BTC_USDT"]["usd"], 300_000)
+
+    def test_evaluate_marks_restart_and_span(self):
+        now = 1_000_000.0
+        cfg = {"watch": ["liq"], "enabled": True, "window_min": 5,
+               "threshold": {"liq": 100_000}, "min_event": 0, "symbol": "ALL"}
+        market = {"now": now,
+                  "events": [_liq("BTC_USDT", 400_000, now - 30),
+                             _liq("BTC_USDT", 400_000, now - 200)],
+                  "cvd": {}, "oi": {}}
+        full = evaluate(cfg, market)[0]
+        self.assertEqual(full["value"], 800_000)
+        self.assertEqual(full["span_min"], 5)
+        self.assertFalse(full["reset"])
+        # сигнал ушёл 100 секунд назад: старое событие (200 с) уже не считается
+        fresh = evaluate(cfg, market, since={"liq": now - 100})[0]
+        self.assertEqual(fresh["value"], 400_000)
+        self.assertEqual(fresh["span_min"], 2)
+        self.assertTrue(fresh["reset"])
+        text = format_alert_html(fresh)
+        self.assertIn("за 2м · окно 5м", text)
+        self.assertIn("окно после сигнала начато заново", text)
+
+    def test_no_new_data_no_second_message(self):
+        """Ровно случай из жалобы: через минуту после сигнала — тишина."""
+        now = 1_000_000.0
+        cfg = {"watch": ["liq"], "enabled": True, "windows": {"liq": 5},
+               "threshold": {"liq": 500_000}, "min_event": 0, "symbol": "ALL"}
+        old = [_liq("BTC_USDT", 900_000, now - 60),
+               _liq("ETH_USDT", 700_000, now - 30)]
+        market = {"now": now, "events": old, "cvd": {}, "oi": {}}
+        self.assertTrue(evaluate(cfg, market))                  # сигнал есть
+        # прошло 60 секунд, новых событий нет — окно чистое
+        market2 = {"now": now + 60, "events": list(old), "cvd": {}, "oi": {}}
+        self.assertEqual(evaluate(cfg, market2, since={"liq": now}), [])
+        # пришло новое событие — сообщение только про него
+        market3 = {"now": now + 60, "events": old + [_liq("BTC_USDT", 800_000, now + 20)],
+                   "cvd": {}, "oi": {}}
+        hits = evaluate(cfg, market3, since={"liq": now})
+        self.assertEqual([(h["symbol"], h["value"]) for h in hits],
+                         [("BTC_USDT", 800_000)])
+
+    def test_cvd_buckets_before_signal_dropped(self):
+        now = 1_000_000.0
+        acc = {"BTC_USDT|1": {int(now - 240): 900_000.0, int(now - 30): 400_000.0}}
+        rows = cvd_by_symbol(acc, 900, 0, now, "ALL", since=now - 120)
+        self.assertEqual(rows["BTC_USDT"]["usd"], 400_000)
+
+    def test_oi_is_rebased_on_level_series(self):
+        """У OI окна посчитаны трекером — пересчитываем от прошлого сигнала."""
+        from alerts import oi_from_series
+        now = 1_000_000.0
+        series = {int(now - 3600): 40_000_000.0, int(now - 600): 41_000_000.0,
+                  int(now): 42_000_000.0}
+        part = oi_from_series(series, now - 300, now)
+        self.assertEqual(part["usd"], 1_000_000.0)
+        self.assertAlmostEqual(part["pct"], 2.439, places=2)
+        cfg = {"watch": ["oi"], "enabled": True, "windows": {"oi": 60},
+               "threshold": {"oi": 100_000}, "min_event": 0, "symbol": "ALL"}
+        market = {"now": now, "events": [], "cvd": {},
+                  "oi": {"BTC_USDT": {"changes": {"h1": {"usd": 2_000_000.0, "pct": 5.0}},
+                                      "total_usd": 42_000_000.0, "_series": series}}}
+        self.assertEqual(evaluate(cfg, market)[0]["value"], 2_000_000.0)
+        fresh = evaluate(cfg, market, since={"oi": now - 300})[0]
+        self.assertEqual(fresh["value"], 1_000_000.0)
+        self.assertTrue(fresh["rebased"])
+
+    def test_should_fire_has_minute_pause(self):
+        from alerts import MIN_GAP_SEC
+        self.assertEqual(MIN_GAP_SEC, 60)
+        now = 1000.0
+        self.assertFalse(should_fire(now - 30, now, MIN_GAP_SEC / 60.0))
+        self.assertTrue(should_fire(now - 61, now, MIN_GAP_SEC / 60.0))
+
+    def test_top_per_metric_keeps_leader_and_peers(self):
+        from alerts import top_per_metric
+        hits = [
+            {"metric": "liq", "symbol": "ETH_USDT", "value": 1_500_000, "abs": 1.5e6},
+            {"metric": "liq", "symbol": "BTC_USDT", "value": 900_000, "abs": 9e5},
+            {"metric": "cvd", "symbol": "SOL_USDT", "value": -700_000, "abs": 7e5},
+        ]
+        out = top_per_metric(hits)
+        self.assertEqual([h["metric"] for h in out], ["liq", "cvd"])
+        self.assertEqual(out[0]["symbol"], "ETH_USDT")
+        self.assertEqual([p["symbol"] for p in out[0]["peers"]], ["BTC_USDT"])
+        self.assertEqual(out[1]["peers"], [])
+        text = format_alert_html(out[0])
+        self.assertIn("ещё в волне: BTC $900.0K", text)
+
+    def test_live_snapshot_shows_restarted_window(self):
+        from alerts import live_snapshot
+        now = 1_000_000.0
+        cfg = {"watch": ["liq"], "windows": {"liq": 5}, "min_event": 0}
+        market = {"now": now, "events": [_liq("BTC_USDT", 500_000, now - 20)],
+                  "cvd": {}, "oi": {}}
+        snap = live_snapshot(cfg, market, since={"liq": now - 60})
+        self.assertEqual(snap["liq"]["window_min"], 5)
+        self.assertEqual(snap["liq"]["span_min"], 1)
+        self.assertEqual(snap["windows"]["liq"], 5)
+
+
+class AlertDeliveryTest(unittest.TestCase):
+    """Серверная доставка: пауза, окно заново, одна карточка на метрику."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ["LIQSCOPE_ACCOUNTS_DB"] = ""
+        os.environ["LIQSCOPE_PUMPS"] = "off"
+        import server
+        cls.srv = server
+
+    def test_due_hits_restart_window_after_send(self):
+        from alerts import format_alert_html
+        srv = self.srv
+        now = 1_000_000.0
+        cfg = {"watch": ["liq"], "enabled": True, "windows": {"liq": 5},
+               "threshold": {"liq": 500_000}, "min_event": 0, "symbol": "ALL"}
+        fired = {"liq": None}
+
+        def last_fire(metric, symbol):
+            return fired.get(metric)
+
+        market = {"now": now,
+                  "events": [_liq("BTC_USDT", 900_000, now - 60),
+                             _liq("ETH_USDT", 600_000, now - 30)],
+                  "cvd": {}, "oi": {}}
+        first = srv.alerts_due(cfg, market, last_fire, now)
+        self.assertEqual(len(first), 1)                  # одна карточка на метрику
+        self.assertEqual(first[0]["symbol"], "BTC_USDT")
+        self.assertIn("ещё в волне: ETH $600.0K", format_alert_html(first[0]))
+        fired["liq"] = now                               # сигнал ушёл
+        # следующий тик через 8 секунд: пауза, повторно не шлём
+        self.assertEqual(srv.alerts_due(cfg, dict(market, now=now + 8),
+                                        last_fire, now + 8), [])
+        # через минуту с новым объёмом — новое сообщение только про новое
+        market2 = {"now": now + 60,
+                   "events": [_liq("BTC_USDT", 900_000, now - 60),
+                              _liq("BTC_USDT", 700_000, now + 20)],
+                   "cvd": {}, "oi": {}}
+        second = srv.alerts_due(cfg, market2, last_fire, now + 60)
+        self.assertEqual([(h["symbol"], h["value"]) for h in second],
+                         [("BTC_USDT", 700_000)])
+        text = format_alert_html(second[0])
+        self.assertIn("$700.0K", text)                    # только новое
+        self.assertNotIn("$900.0K", text.split("порог")[0])
+        self.assertIn("за 1м · окно 5м", text)
+
+    def test_oi_row_carries_level_series(self):
+        """Ряд уровней OI нужен движку, чтобы перезапустить окно метрики."""
+        class _Tracker:
+            def payload(self, sym):
+                return {"changes": {"h1": {"usd": 5.0, "pct": 1.0}}, "total_usd": 10.0}
+
+            def series(self, sym):
+                return {1: 1.0, 2: 2.0}
+
+        class _Broken:
+            def payload(self, sym):
+                return {"changes": {}}
+
+            def series(self, sym):
+                raise RuntimeError("нет ряда")
+
+        row = self.srv._oi_row(_Tracker(), "BTC_USDT")
+        self.assertEqual(row["_series"], {1: 1.0, 2: 2.0})
+        self.assertEqual(row["changes"]["h1"]["usd"], 5.0)
+        self.assertEqual(self.srv._oi_row(_Broken(), "BTC_USDT")["_series"], {})
+
+    def test_store_remembers_last_signal_per_metric_and_coin(self):
+        """Якорь окна: последний сигнал метрики (и по монете, и по всем)."""
+        import tempfile
+        from accounts import Store
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(os.path.join(tmp, "a.db"), secret="s")
+            uid = store.upsert_telegram_user({"id": 7, "first_name": "T"})["id"]
+            store.add_alert_event(uid, {"metric": "liq", "symbol": "BTC_USDT",
+                                        "value": 1.0, "threshold": 1.0,
+                                        "window_min": 5, "span_min": 2, "count": 3})
+            store.add_alert_event(uid, {"metric": "cvd", "symbol": "SOL_USDT",
+                                        "value": -1.0, "threshold": 1.0,
+                                        "window_min": 15, "count": 1})
+            self.assertTrue(store.last_alert_ts(uid, "liq", "BTC_USDT"))
+            self.assertIsNone(store.last_alert_ts(uid, "liq", "ETH_USDT"))
+            self.assertEqual(store.last_alert_any(uid, "liq"),
+                             store.last_alert_ts(uid, "liq", "BTC_USDT"))
+            self.assertIsNone(store.last_alert_any(uid, "oi"))
+            rows = store.list_alert_events(uid)
+            self.assertIsInstance(rows[0]["detail"], dict)   # разобрано из JSON
+            self.assertEqual(rows[0]["detail"]["count"], 1)
+            liq_row = [r for r in rows if r["metric"] == "liq"][0]
+            self.assertEqual(liq_row["detail"]["span_min"], 2)
+            self.assertEqual(liq_row["detail"]["count"], 3)
+            store.close()
+
+
 if __name__ == "__main__":
     unittest.main()

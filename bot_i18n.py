@@ -403,6 +403,21 @@ RU_EN: Dict[str, str] = {
     "покупки": "buys",
     "продажи": "sells",
     "ничего": "nothing",
+    # «5 событий</code>» — число и слово внутри одного тега: правило для чисел
+    # смотрит на цифру перед хвостом, а между ними теги
+    " событий</code>": " events</code>",
+    " событий</code> в памяти · зрителей WS: <code>": " events</code> in memory · WS viewers: <code>",
+    " событий</code> в памяти · касса <code>": " events</code> in memory · cash <code>",
+    "📣 <b>Сводка ушла в канал</b>\n": "📣 <b>The digest went to the channel</b>\n",
+    "🗞 <b>Дневной дайджест ушёл в каналы</b>\n": "🗞 <b>The daily digest went to the channels</b>\n",
+    # окно агрегации у каждой метрики своё
+    "Окно какой метрики? У каждой своё.": "Which metric's window? Each has its own.",
+    "← Другая метрика": "← Another metric",
+    # «за 1м из 5м» — окно метрики после сигнала начинается заново
+    "ещё в волне: ": "others in the wave: ",
+    "<i>окно после сигнала начато заново</i>": "<i>window restarted after the signal</i>",
+    "за ": "over ",
+    " из ": " of ",
     "<b>Алерт · ": "<b>Alert · ",
     " <b>Алерт · ": " <b>Alert · ",
     " ударов · 🔴 ": " hits · 🔴 ",

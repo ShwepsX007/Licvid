@@ -634,6 +634,12 @@
     function alHas(m) {
         return alCfg && (alCfg.watch || []).indexOf(m) >= 0;
     }
+    function alWinOf(m) {
+        var w = alCfg && alCfg.windows;
+        var v = w && w[m];
+        if (!v) v = (alCfg && alCfg.window_min) || 5;
+        return Number(v) || 5;
+    }
     function alChip(on, attrs, label) {
         return '<button type="button" class="al-chip' + (on ? " on" : "") + '" ' + attrs + ">" +
             label + "</button>";
@@ -750,6 +756,13 @@
             min_event: [0, 10000, 25000, 50000, 100000],
             coins: ["ALL", "BTC_USDT", "ETH_USDT", "SOL_USDT"] };
         function chips(list, cur, attr, fmt) {
+            list = (list || []).slice();
+            // текущее значение показываем всегда: у ликвидаций окно 5м, а
+            // среди пресетов её нет — иначе ни один чип не подсвечен
+            if (cur !== undefined && cur !== null && cur !== "" &&
+                !list.some(function (v) { return String(v) === String(cur); })) {
+                list.unshift(cur);
+            }
             return list.map(function (v) {
                 return alChip(String(v) === String(cur), attr + '="' + v + '"', fmt ? fmt(v) : String(v));
             }).join("");
@@ -775,6 +788,13 @@
                 alMoney(val) + '</div><div class="s">' + extra + " / порог " + alMoney(thr) +
                 '</div><div class="al-bar"><i style="width:' + pct + '%"></i></div></div>' +
                 alSparkSvg(alSparkBuf[key]) +
+                '<div class="al-label" data-winlabel="' + key + '">Окно ' + title +
+                " · " + alWin(alWinOf(key)) + "</div>" +
+                '<div class="al-chips" data-winbox="' + key + '">' +
+                chips(p.windows || [], alWinOf(key), "data-win", alWin) + "</div>" +
+                '<div class="al-row" style="margin-top:6px"><input data-winin="' + key +
+                '" type="number" min="1" max="1440" placeholder="минуты" value="' +
+                alWinOf(key) + '"></div>' +
                 '<div class="al-label">Порог ' + title + "</div>" +
                 '<div class="al-chips" data-thr="' + key + '">' +
                 chips(alThrList(key), thr, "data-thrval", alMoney) + "</div>" +
@@ -787,7 +807,7 @@
         var coinLabel = coin === "ALL" ? "все" : String(coin).split("_")[0];
         board.innerHTML =
             '<div class="al-head"><div><h3>Алерты по объёму</h3>' +
-            '<div class="al-sub">Включайте ликвидации, CVD и OI по отдельности — можно слушать один источник или два. Порог CVD/OI крупнее, чем у ликвидаций.</div></div>' +
+            '<div class="al-sub">Включайте ликвидации, CVD и OI по отдельности — можно слушать один источник или два. Порог CVD/OI крупнее, чем у ликвидаций, и окно у каждой метрики своё. После сигнала окно начинается заново: в следующее сообщение попадут только новые данные.</div></div>' +
             '<label class="al-switch' + (alCfg.enabled ? " on" : "") + '" id="al-sw">' +
             "<i></i><span>" + (alCfg.enabled ? "СИГНАЛ ВКЛ" : "СИГНАЛ ВЫКЛ") + "</span></label></div>" +
             '<div class="al-label">Монета</div><div class="al-chips" id="al-coins">' +
@@ -798,10 +818,6 @@
             (coin === "ALL" ? "" : coin) + '"><datalist id="al-sym-list">' +
             (symbols || []).map(function (s) { return "<option value=\"" + s + "\">"; }).join("") +
             "</datalist></div>" +
-            '<div class="al-label">Окно агрегации</div><div class="al-chips" id="al-wins">' +
-            chips(p.windows || [], alCfg.window_min, "data-win", alWin) +
-            '</div><div class="al-row" style="margin-top:8px"><input id="al-win-in" type="number" min="1" max="1440" placeholder="минуты" value="' +
-            alCfg.window_min + '"></div>' +
             '<div class="al-feeds">' +
             feed("liq", "LIQ") + feed("cvd", "CVD") + feed("oi", "OI") +
             "</div>" +
@@ -815,7 +831,9 @@
                     '" type="number" min="0" step="1000" value="' + Math.round(cur || 0) + '"></div>';
             }).join("") +
             '<div class="al-status" id="al-status">монета: ' + coinLabel +
-            " · окно " + alWin(alCfg.window_min) + "</div>";
+            " · окна: LIQ " + alWin(alWinOf("liq")) +
+            " · CVD " + alWin(alWinOf("cvd")) +
+            " · OI " + alWin(alWinOf("oi")) + "</div>";
         if (bind) bindAlerts();
     }
 
@@ -844,7 +862,9 @@
                 '<span class="m">' + icon + "</span>" +
                 '<span class="sym">' + (sym === "ALL" ? "все" : sym) + "</span>" +
                 '<span class="val ' + cls + '">' + alMoney(val) + "</span>" +
-                '<span class="thr">/ ' + alMoney(thr) + " · " + alWin(h.window_min) + "</span>" +
+                '<span class="thr">/ ' + alMoney(thr) + " · " + alWin(h.window_min) +
+                (h.detail && h.detail.span_min ? " · новых " + alWin(h.detail.span_min) : "") +
+                "</span>" +
                 '<i class="tape-bar"></i></div>';
         }).join("");
     }
@@ -934,22 +954,41 @@
             alCfg.symbol = v || "ALL";
             alDebounce();
         });
+        function alSetWin(m, n) {
+            n = Math.max(1, Math.min(1440, Number(n) || 5));
+            alCfg.windows = alCfg.windows || {};
+            alCfg.windows[m] = n;
+            if (alCfg.watch && alCfg.watch.indexOf(m) >= 0) alCfg.window_min = n;
+            var box = document.querySelector('[data-winbox="' + m + '"]');
+            if (box) {
+                box.parentNode.querySelectorAll("[data-win]").forEach(function (b) {
+                    b.classList.toggle("on",
+                        Number(b.getAttribute("data-win")) === n);
+                });
+            }
+            var inp = document.querySelector('[data-winin="' + m + '"]');
+            if (inp) inp.value = n;
+            var lab = document.querySelector('[data-winlabel="' + m + '"]');
+            if (lab) {
+                var titles = { liq: "LIQ", cvd: "CVD", oi: "OI" };
+                lab.textContent = "Окно " + (titles[m] || m) + " · " + alWin(n);
+            }
+            alDebounce();
+        }
         document.querySelectorAll("[data-win]").forEach(function (btn) {
             btn.addEventListener("click", function () {
-                alCfg.window_min = Number(btn.getAttribute("data-win")) || 5;
-                document.querySelectorAll("[data-win]").forEach(function (b) {
-                    b.classList.toggle("on", b === btn);
-                });
-                var inp = $("al-win-in");
-                if (inp) inp.value = alCfg.window_min;
-                alDebounce();
+                var box = btn.parentNode;
+                var m = box && box.getAttribute("data-winbox");
+                if (!m) return;
+                alSetWin(m, btn.getAttribute("data-win"));
             });
         });
-        var win = $("al-win-in");
-        if (win) win.addEventListener("change", function () {
-            var n = Math.max(1, Math.min(1440, Number(win.value) || 5));
-            alCfg.window_min = n;
-            alDebounce();
+        document.querySelectorAll("[data-winin]").forEach(function (inp) {
+            inp.addEventListener("change", function () {
+                var m = inp.getAttribute("data-winin");
+                if (!m) return;
+                alSetWin(m, inp.value);
+            });
         });
         document.querySelectorAll("[data-thrval]").forEach(function (btn) {
             btn.addEventListener("click", function () {

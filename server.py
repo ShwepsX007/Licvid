@@ -913,6 +913,21 @@ def _correlations_build(window: str = "24h") -> dict:
     return build(cells, oi_series, prices, window=window, now=now)
 
 
+def _oi_row(tracker, sym: str) -> dict:
+    """Строка OI для алертов: готовые окна + ряд уровней для перезапуска окна.
+
+    Окна трекера (m5/h1/…) посчитаны от «сейчас минус окно», а после сигнала
+    окно метрики должно начаться заново — для этого рядом кладём непрерывный
+    ряд уровней: по нему движок сам считает ΔOI от прошлого сигнала.
+    """
+    row = tracker.payload(sym)
+    try:
+        row["_series"] = tracker.series(sym)
+    except Exception:
+        row["_series"] = {}
+    return row
+
+
 def alerts_market_snapshot() -> dict:
     """Снимок для движка алертов и кабинета."""
     now = time.time()
@@ -924,13 +939,13 @@ def alerts_market_snapshot() -> dict:
     if tracker is not None:
         for sym in list(alert_watch_symbols())[:16]:
             try:
-                oi[sym] = tracker.payload(sym)
+                oi[sym] = _oi_row(tracker, sym)
             except Exception:
                 pass
         if not oi:
             for sym in list(getattr(tracker, "_watched", {}) or {})[:8]:
                 try:
-                    oi[sym] = tracker.payload(sym)
+                    oi[sym] = _oi_row(tracker, sym)
                 except Exception:
                     pass
     return {"now": now, "events": events, "cvd": cvd, "oi": oi}
@@ -1118,9 +1133,38 @@ async def alerts_oi_warmup():
             log.debug("alerts oi %s: %s", sym, e)
 
 
+def alerts_due(cfg: dict, market: dict, last_fire, now: float) -> List[dict]:
+    """Что из пороговых сигналов реально уходит в чат.
+
+    Три правила против повторов:
+
+    * у каждой метрики своё окно (``windows``);
+    * окно метрики начинается заново после её прошлого сигнала — данные, из
+      которых сигнал уже ушёл, в следующее сообщение не попадают
+      (даёт ``since`` в :func:`alerts.evaluate`);
+    * пауза ``MIN_GAP_SEC`` и одна карточка на метрику (лидер, остальные
+      монеты — строкой «ещё в волне»), иначе одна волна рассыпается на
+      пачку сообщений.
+
+    ``last_fire(metric, symbol)`` — время прошлого сигнала у пользователя.
+    """
+    from alerts import (MIN_GAP_SEC, evaluate, normalize_config, should_fire,
+                        top_per_metric)
+    cfg = normalize_config(cfg)
+    out: List[dict] = []
+    for hit in top_per_metric(evaluate(cfg, market, since=last_fire)):
+        last = last_fire(hit["metric"], hit["symbol"])
+        if not should_fire(last, now, MIN_GAP_SEC / 60.0):
+            continue
+        out.append(hit)
+        if len(out) >= 3:
+            break
+    return out
+
+
 async def alert_loop():
     """Раз в несколько секунд проверяет пороги и шлёт в Telegram."""
-    from alerts import evaluate, format_alert_html, normalize_config, should_fire
+    from alerts import format_alert_html, normalize_config
     try:
         await asyncio.sleep(20)
     except asyncio.CancelledError:
@@ -1137,14 +1181,20 @@ async def alert_loop():
                 cfg = normalize_config(sub.get("config"))
                 if not cfg.get("enabled"):
                     continue
-                hits = evaluate(cfg, market)
-                sent = 0
-                for hit in hits:
-                    last = account_store.last_alert_ts(
-                        sub["user_id"], hit["metric"], hit["symbol"])
-                    if not should_fire(last, now, hit["window_min"]):
-                        continue
-                    account_store.add_alert_event(sub["user_id"], hit)
+                uid = sub["user_id"]
+
+                def last_fire(metric, symbol, _uid=uid):
+                    """Когда метрика последний раз сигналила у юзера.
+
+                    Для подписки на все монеты сигналы лежат под конкретными
+                    монетами — берём самый свежий по метрике.
+                    """
+                    if not symbol or str(symbol).upper() in ("ALL", ""):
+                        return account_store.last_alert_any(_uid, metric)
+                    return account_store.last_alert_ts(_uid, metric, symbol)
+
+                for hit in alerts_due(cfg, market, last_fire, now):
+                    account_store.add_alert_event(uid, hit)
                     tg_id = int(sub.get("tg_id") or 0)
                     if tg_id and tg_bot.running:
                         await tg_bot.send(
@@ -1152,9 +1202,7 @@ async def alert_loop():
                             format_alert_html(hit, tg_bot.site_url()),
                             markup=tg_bot.site_link_kb("посмотреть в терминале"),
                         )
-                    sent += 1
-                    if sent >= 3:
-                        break
+
         except asyncio.CancelledError:
             break
         except Exception as e:

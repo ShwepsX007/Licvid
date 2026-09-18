@@ -215,6 +215,70 @@ class BotMenuTest(unittest.TestCase):
         text2, _kb2 = self.bot._screen(self.user, "svc:alerts")
         self.assertIn("включён", text2)
 
+    def test_alert_windows_are_per_metric(self):
+        """Окно агрегации у каждой метрики своё — в боте тоже."""
+        import asyncio
+        sent = []
+
+        async def fake_reply(chat_id, text, markup=None, message_id=None, **kw):
+            sent.append((text, markup))
+            return True
+
+        self.bot.reply = fake_reply
+        loop = asyncio.get_event_loop_policy().new_event_loop()
+
+        _t, kb = self.bot._screen(self.user, "svc:alerts")
+        self.assertIn("al:w", _datas(kb))
+        loop.run_until_complete(self.bot._on_alert_cb(1, self.user, "al:w", None))
+        text, kb = sent[-1]
+        self.assertIn("Окно какой метрики", text)
+        self.assertEqual(_datas(kb)[:3], ["al:w:liq", "al:w:cvd", "al:w:oi"])
+        self.assertIn("LIQ · 5м", _btns(kb)[0])
+        self.assertIn("CVD · 15м", _btns(kb)[1])
+        self.assertIn("OI · 1ч", _btns(kb)[2])
+
+        loop.run_until_complete(self.bot._on_alert_cb(1, self.user, "al:w:cvd", None))
+        text, kb = sent[-1]
+        self.assertIn("Окно CVD", text)
+        self.assertIn("al:w:cvd:60", _datas(kb))
+        self.assertIn("свои минуты · 🌊 CVD", _btns(kb))
+
+        loop.run_until_complete(self.bot._on_alert_cb(1, self.user, "al:w:cvd:60", None))
+        cfg = self.bot._alert_cfg(self.user)
+        self.assertEqual(cfg["windows"], {"liq": 5, "cvd": 60, "oi": 60})
+        self.assertEqual(cfg["window_min"], 5)       # старое поле не сломано
+
+        # «свои минуты» для конкретной метрики
+        loop.run_until_complete(self.bot._on_alert_cb(1, self.user, "al:w:oi:?", None))
+        self.assertIn("win:oi", list(self.bot._wait_alert.values()))
+        self.assertIn("90", self.bot._alert_apply_text(self.user, "win:oi", "90"))
+        cfg = self.bot._alert_cfg(self.user)
+        self.assertEqual(cfg["windows"]["oi"], 90)
+        self.assertEqual(cfg["windows"]["liq"], 5)
+        self.assertEqual(cfg["windows"]["cvd"], 60)
+
+        # старый колбэк al:w:<минут> из уже отправленных меню: ставит окно
+        # включённым метрикам, а у остальных остаётся своё
+        loop.run_until_complete(self.bot._on_alert_cb(1, self.user, "al:w:15", None))
+        cfg = self.bot._alert_cfg(self.user)
+        self.assertEqual(cfg["windows"]["liq"], 15)
+        self.assertEqual(cfg["window_min"], 15)
+        self.assertEqual(cfg["windows"]["cvd"], 60)
+        self.assertEqual(cfg["windows"]["oi"], 90)
+
+    def test_alert_screen_shows_windows_and_live_numbers(self):
+        """На экране алертов — окна по метрикам и живые суммы в разметке."""
+        self.bot.alerts_market_fn = lambda: {
+            "now": 1789669572.0,
+            "events": [{"symbol": "BTC_USDT", "usd": 900_000.0,
+                        "timestamp": 1789669572.0 - 30, "side": "SELL"}],
+            "cvd": {}, "oi": {}}
+        text, _kb = self.bot._screen(self.user, "svc:alerts")
+        self.assertIn("💥 <b>ликвидации</b> · окно <code>5м</code>", text)
+        self.assertIn("🌊 <b>CVD</b> · выкл · окно <code>15м</code>", text)
+        self.assertIn("📊 <b>OI</b> · выкл · окно <code>1ч</code>", text)
+        self.assertIn("<code>$900.0K</code>", text)
+
     def test_services_and_admin_have_back(self):
         _t, skb = self.bot._screen(self.user, "services")
         self.assertIn("← Назад", _btns(skb))
@@ -1777,10 +1841,13 @@ class BotMenuTest(unittest.TestCase):
         self.bot.ws_clients_fn = lambda: 3
         text = self.bot._health_text()
         self.assertIn("слушатель не запущен", text)
-        self.assertIn("подъёмов: 2", text)
-        self.assertIn("попыток: 7", text)      # красная строка тоже со счётчиком
-        self.assertIn("попыток: 3", text)      # зелёная строка — сколько раз поднимался
+        # числа — в разметке, как в алертах: так их видно в чате
+        self.assertIn("подъёмов: <code>2</code>", text)
+        self.assertIn("попыток: <code>7</code>", text)   # красная строка тоже со счётчиком
+        self.assertIn("попыток: <code>3</code>", text)   # зелёная строка
+        self.assertIn("<code>900 событий</code>", text)
         self.assertIn("В эфире <b>1/3</b>", text)
+        self.assertIn("зрителей WS: <code>3</code>", text)
 
     def test_call_429_sets_retry_pause(self):
         """429: Telegram сам говорит, сколько ждать — иначе бот продлевает бан."""

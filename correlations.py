@@ -367,8 +367,8 @@ def format_text(res: dict, lang: str = "ru", site: str = "") -> str:
         lines.append(f"Window: {res.get('hours')} hourly points, coins: {len(res.get('symbols') or [])}")
     else:
         lines.append(f"<b>🔗 Корреляции валют · окно {res.get('window_label')}</b>")
-        lines.append(f"Точек по часам: {res.get('hours')} · монет в расчёте: "
-                     f"{len(res.get('symbols') or [])}")
+        lines.append(f"Точек по часам: <code>{res.get('hours')}</code>"
+                     f" · монет в расчёте: <code>{len(res.get('symbols') or [])}</code>")
     if pos:
         head = "Moving together:" if en else "Шли вместе:"
         lines.append("\n<b>" + head + "</b>")

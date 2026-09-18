@@ -909,6 +909,7 @@ RU_EN.update({
     "<i>Подпись: ": "<i>Caption: ",
     " знаков — ": " characters — ",
     "влезает в подпись под фото": "fits into the caption under the photo",
+    "Полный разбор дня — на сайте: ": "Full breakdown of the day — on the site: ",
     "длиннее лимита подписи (1024) — фото не прикрепится, пост уйдёт текстом":
         "is longer than the caption limit (1024) — the photo will not be "
         "attached, the post goes as text",

@@ -2,9 +2,12 @@
 
 Модуль чистый (никакой сети): данные приносит server.py, публикует бот.
 Один дайджест = одна запись в архиве (`DigestStore`), из неё же собираются:
-    * пост в русский канал (Telegram HTML, ≤ 3900 знаков);
-    * пост в английский канал (тот же состав данных, английский язык);
-    * статья на сайте (HTML для страницы /digest, архив за прошлые дни).
+    * небольшой пост в русский канал (Telegram HTML, ≤ 1000 знаков) —
+      шапка, лид рассказа, цифры дня и ссылка на полный разбор на сайте
+      (`render_channel`), поэтому пост влезает в подпись под фотографией;
+    * такой же пост в английский канал (тот же состав данных, английский язык);
+    * полный разбор на сайте (HTML для страницы /digest, архив за прошлые дни) —
+      рассказ целиком и все блоки (`render_post`).
 
 Факты дня (то, что просил показать):
     * максимальная ликвидация за сутки (сумма, монета, биржа, время, сторона);
@@ -29,6 +32,8 @@ DAY_SEC = 86400
 TEXT_LIMIT = 3900               # сообщение Telegram (лимит 4096, оставляем запас)
 NARRATIVE_MIN = 320             # короче — считаем текстом-заглушкой
 DEFAULT_KEEP = 400              # сколько дайджестов хранить в архиве
+CHANNEL_LIMIT = 1000            # подпись под фото в канале (лимит Telegram 1024)
+CHANNEL_LEAD_MIN = 60           # короче лида не бывает: остаются цифры и ссылка
 
 MONTHS_RU = ("января", "февраля", "марта", "апреля", "мая", "июня", "июля",
              "августа", "сентября", "октября", "ноября", "декабря")
@@ -654,6 +659,107 @@ def mood_block(facts: dict, lang: str = "ru") -> str:
         out.append(("· " + ", ".join(reasons[:4]) + ".") if en
                    else ("Причины: " + ", ".join(reasons[:4]) + "."))
     return "\n".join(out)
+
+
+def lead_of(narrative: str, budget: int) -> str:
+    """Первые предложения рассказа — короткий лид для поста в канале.
+
+    Полный разбор живёт на сайте, в канал уходит небольшой пост с фотографией:
+    под фотографию Telegram пускает не больше 1024 знаков, а сухие блоки дня
+    съедают их почти целиком. Поэтому берём начало рассказа, режем **по границе
+    предложения** и добавляем «…» — дальше читателя ведёт ссылка на сайт.
+    """
+    text = " ".join(str(narrative or "").split())
+    if budget <= 0:
+        return ""
+    if len(text) <= budget:
+        return text
+    cut = text[:budget]
+    stop = -1
+    for mark in (". ", "! ", "? ", "… "):
+        i = cut.rfind(mark)
+        if i > stop:
+            stop = i
+    if stop >= 0:
+        return cut[:stop + 1].strip() + " …"
+    i = cut.rfind(" ")
+    return (cut[:i].strip() if i > 0 else cut.strip()) + " …"
+
+
+def channel_stats_block(facts: dict, lang: str = "ru") -> str:
+    """Цифры дня одной компактной стопкой — то, что видно в канале сразу."""
+    f = facts or {}
+    en = is_en(lang)
+    mx = f.get("max") or {}
+    total = money(f.get("liq_total_usd"))
+    cnt = int(f.get("liq_count") or 0)
+    mood = (f.get("mood") or {})
+    label = (mood.get("label") or {}).get("en" if en else "ru", "—")
+    rows: List[str] = []
+    if en:
+        rows.append(f"💥 <b>{total}</b> liquidated in a day · "
+                    f"{cnt} liquidation{'s' if cnt != 1 else ''}")
+        rows.append(f"longs {money(f.get('longs_usd'))} · "
+                    f"shorts {money(f.get('shorts_usd'))}")
+        if mx:
+            rows.append(f"🏆 Biggest: <b>{money(mx.get('usd'))}</b> · "
+                        f"{coin(mx.get('symbol'))} · {exch(mx.get('exchange'))} · "
+                        f"{'long' if mx.get('side') == 'SELL' else 'short'} · "
+                        f"{hour_hhmm(mx.get('timestamp'), tz_offset())}")
+        rows.append(f"🧭 Market mood: {label}")
+    else:
+        rows.append(f"💥 За сутки снесено <b>{total}</b> · "
+                    f"{cnt} {liqs_word(cnt, 'ru')}")
+        rows.append(f"лонги {money(f.get('longs_usd'))} · "
+                    f"шорты {money(f.get('shorts_usd'))}")
+        if mx:
+            side = "лонг" if mx.get("side") == "SELL" else "шорт"
+            rows.append(f"🏆 Крупнейшая: <b>{money(mx.get('usd'))}</b> · "
+                        f"{coin(mx.get('symbol'))} · {exch(mx.get('exchange'))} · "
+                        f"{side} · {hour_hhmm(mx.get('timestamp'), tz_offset())}")
+        rows.append(f"🧭 Настроение рынка: {label}")
+    return "\n".join(rows)
+
+
+def channel_link_block(site_url: str, lang: str = "ru") -> str:
+    """Красивая ссылка на полный разбор дня на сайте."""
+    base = str(site_url or "").strip().rstrip("/")
+    if not base.startswith("http"):
+        return ""
+    url = f"{base}/digest"
+    pretty = url.split("//", 1)[-1]
+    if is_en(lang):
+        return (f'📖 <b>Full breakdown of the day — on the site</b>\n'
+                f'👉 <a href="{url}">{pretty}</a>')
+    return (f'📖 <b>Полный разбор дня — на сайте</b>\n'
+            f'👉 <a href="{url}">{pretty}</a>')
+
+
+def render_channel(rec: dict, lang: str = "ru", site_url: str = "",
+                   limit: int = CHANNEL_LIMIT) -> str:
+    """Небольшой пост в канал: шапка, лид рассказа, цифры и ссылка на сайт.
+
+    Так пост целиком укладывается в подпись под фотографией (её Telegram
+    разрешает до 1024 знаков), поэтому фото уходит всегда. Большой разбор с
+    рассказом и всеми блоками остаётся на сайте — на него и ведёт ссылка
+    (`render_post` для страницы /digest).
+    """
+    rec = rec or {}
+    facts = rec.get("facts") or {}
+    en = is_en(lang)
+    day = rec.get("day") or ""
+    narrative = ((rec.get("ai") or {}).get("en" if en else "ru") or "")
+    if len(str(narrative)) < NARRATIVE_MIN:
+        narrative = fallback_narrative(facts, lang)
+    head = (f"🧭 <b>{'Daily digest' if en else 'Дневной дайджест'} · "
+            f"{day_label(day, lang)}</b>")
+    stats = channel_stats_block(facts, lang)
+    link = channel_link_block(site_url, lang)
+    fixed = len(head) + len(stats) + len(link)
+    room = min(int(limit), CHANNEL_LIMIT) - fixed - 6      # 3 разделителя по \n\n
+    lead = lead_of(narrative, room) if room >= CHANNEL_LEAD_MIN else ""
+    parts = [x for x in (head, lead, stats, link) if x]
+    return "\n\n".join(parts).strip()
 
 
 def render_post(rec: dict, lang: str = "ru", site_url: str = "") -> str:

@@ -1655,7 +1655,7 @@ class TelegramBot:
         публикации — если он включён, посты уходят админу черновиком.
         """
         from channel_digest import active_images, digest_images, pick_image
-        from daily_digest import render_post
+        from daily_digest import render_channel
 
         self._digest_err = ""
         self._last_tg_err = ""
@@ -1678,7 +1678,11 @@ class TelegramBot:
                                         if lang == "en" else
                                         "канал не привязан — перешлите боту пост из канала")]
                 continue
-            caption = render_post(rec, lang, self.site_url())
+            # В канал — небольшой пост: шапка, лид рассказа, цифры дня и
+            # ссылка на полный разбор на сайте. Так он влезает в подпись под
+            # фотографией (1024 знака) и фото уходит всегда; большой текст
+            # целиком живёт на странице /digest.
+            caption = render_channel(rec, lang, self.site_url())
             posts.append({"lang": lang, "cid": cid, "caption": caption, "top": ""})
         if not posts:
             err = next((v[1] for v in result.values()), "каналы не привязаны")
@@ -1777,6 +1781,11 @@ class TelegramBot:
             mark = "🇬🇧" if post.get("lang") == "en" else "🇷🇺"
             # raw=True: это будущая публикация в её собственном языке
             await self.send(admin, f"{mark} {post.get('caption') or ''}", raw=True)
+        # В канал уходит короткая версия: рассказ целиком и все блоки —
+        # на сайте, поэтому админу говорим, где смотреть полный текст.
+        site = str(self.site_url() or "").rstrip("/")
+        if site.startswith("http"):
+            await self.send(admin, f"Полный разбор дня — на сайте: {site}/digest")
         log.info("дневной дайджест: черновик отправлен админу %s (%s)", admin, day)
         return True
 

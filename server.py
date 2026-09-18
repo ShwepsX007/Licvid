@@ -68,6 +68,8 @@ from tg_bot import TelegramBot, normalize_public_url
 from web_account import ctx as account_ctx, register_account_routes
 import web_bot_admin
 from web_bot_admin import register_bot_admin_routes
+import ads as ads_mod
+from ads import AdService, register_ad_routes
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -2080,6 +2082,9 @@ async def lifespan(app: FastAPI):
     app.state.digest_scheduler = digest_sched
     tasks.append(asyncio.create_task(api_digest.scheduler_loop(digest_sched),
                                      name="digest"))
+    # 📣 Реклама: отправка по выбранному времени и автоудаление по сроку
+    tasks.append(asyncio.create_task(ads_mod.scheduler_loop(ad_service),
+                                     name="ads"))
     if DEMO_MODE:
         tasks.append(asyncio.create_task(demo_generator(), name="demo"))
         tasks.append(asyncio.create_task(demo_price_walk(), name="demo-prices"))
@@ -2212,6 +2217,15 @@ web_bot_admin.ctx.health_fn = health_summary
 web_bot_admin.ctx.ws_clients_fn = lambda: len(hub.clients)
 web_bot_admin.ctx.public_url = PUBLIC_URL
 register_bot_admin_routes(app)
+
+# 📣 Рекламные посты: панель в админке, рассылка ботом/в каналы и баннер на главной
+ads_mod.ctx.store = account_store
+ads_mod.ctx.bot = tg_bot
+ads_mod.ctx.public_url = PUBLIC_URL
+ads_mod.ctx.site_url = PUBLIC_URL
+ad_service = AdService(store=account_store, bot=tg_bot, site_url=PUBLIC_URL)
+app.state.ad_service = ad_service
+register_ad_routes(app, ad_service)
 
 
 @app.get("/api/symbols")

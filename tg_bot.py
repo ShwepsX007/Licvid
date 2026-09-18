@@ -635,12 +635,17 @@ class TelegramBot:
         """Запомнить последнее сообщение чата: id растут по времени.
 
         Нужно для меню: пока id меню-сообщения не меньше последнего
-        отправленного, оно лежит внизу и правка не сдвинет ленту.
+        отправленного, оно лежит внизу и правка не сдвинет ленту. Канал можно
+        указать и именем (@channel) — тогда ключом остаётся имя, а не число.
         """
         try:
-            cid, mid = int(chat_id), int(message_id)
+            mid = int(message_id)
         except (TypeError, ValueError):
             return None
+        try:
+            cid = int(chat_id)
+        except (TypeError, ValueError):
+            cid = str(chat_id)
         self._last_msg[cid] = max(mid, self._last_msg.get(cid, 0))
         return mid
 
@@ -1914,6 +1919,50 @@ class TelegramBot:
             await asyncio.sleep(0.04)  # ~25 msg/s
         self.store.audit(actor_id, "broadcast", f"ok={ok} fail={fail}")
         return {"ok": ok, "fail": fail, "total": len(ids)}
+
+    async def broadcast_post(self, text: str, photo: str = "",
+                             markup: Optional[dict] = None,
+                             raw: bool = True,
+                             actor_id: Optional[int] = None) -> Dict[str, int]:
+        """Рассылка рекламного поста: с фото — картинкой с подписью, без — текстом.
+
+        ``raw=True`` по умолчанию: реклама уходит ровно так, как её написал
+        админ. Текст, который бот переводит сам, здесь не нужен — иначе
+        «рекламное» объявление менялось бы от языка получателя.
+        """
+        targets = (self.store.broadcast_targets() if hasattr(self.store, "broadcast_targets")
+                   else [{"tg_id": i} for i in self.store.tg_ids_for_broadcast()])
+        ids = [int(t["tg_id"]) for t in targets]
+        has_photo = bool(photo and os.path.isfile(photo))
+        ok = fail = 0
+        for tg_id in ids:
+            mid = (await self.send_photo(tg_id, photo, text, markup, raw=raw)
+                   if has_photo else await self.send(tg_id, text, markup, raw=raw))
+            if mid:
+                ok += 1
+            else:
+                fail += 1
+            await asyncio.sleep(0.04)  # ~25 msg/s
+        self.store.audit(actor_id, "broadcast_post", f"ok={ok} fail={fail} photo={has_photo}")
+        return {"ok": ok, "fail": fail, "total": len(ids)}
+
+    async def delete_message(self, chat_id: Any, message_id: Any) -> bool:
+        """Удалить своё сообщение: так снимается реклама по истечении срока.
+
+        В каналах работает для любого возраста поста (бот — админ), в личке
+        Telegram разрешает удалять свои сообщения только первые 48 часов.
+        """
+        try:
+            mid = int(message_id)
+        except (TypeError, ValueError):
+            return False
+        if not mid:
+            return False
+        cid = chat_id
+        if str(chat_id).lstrip("-").isdigit():
+            cid = int(str(chat_id))
+        res = await self._call("deleteMessage", {"chat_id": cid, "message_id": mid})
+        return bool(res and res.get("ok"))
 
     async def _poll(self) -> None:
         fails = 0

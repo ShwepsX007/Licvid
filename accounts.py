@@ -418,6 +418,20 @@ class Store:
                     kind TEXT DEFAULT 'post',
                     created_at REAL NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS ads (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    text TEXT NOT NULL,
+                    photo TEXT DEFAULT '',
+                    photo_name TEXT DEFAULT '',
+                    targets TEXT NOT NULL DEFAULT '{}',
+                    send_at REAL NOT NULL DEFAULT 0,
+                    expires_at REAL NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'draft',
+                    results TEXT NOT NULL DEFAULT '{}',
+                    sent_at REAL NOT NULL DEFAULT 0,
+                    created_at REAL NOT NULL,
+                    author_id INTEGER
+                );
                 CREATE TABLE IF NOT EXISTS alert_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     ts REAL NOT NULL,
@@ -1635,6 +1649,223 @@ class Store:
                 pass
         self.audit(actor_id, "digest_photo_del", str(photo_id))
         return True
+
+    # --- 📣 Рекламные посты -------------------------------------------------
+    #
+    # Реклама живёт отдельно от постов канала: у неё свой текст, своё фото,
+    # свой список получателей и свой срок. Записи никогда не участвуют в
+    # карусели шапок и картинок — иначе реклама всплыла бы в обычной сводке.
+
+    AD_ACTIVE = ("scheduled", "sending", "sent")
+    AD_STATUSES = ("draft", "scheduled", "sending", "sent", "expired",
+                   "cancelled", "failed")
+
+    def ad_photo_dir(self) -> str:
+        d = os.path.join(os.path.dirname(os.path.abspath(self.path)) or ".", "ads")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    @staticmethod
+    def _ad_row(row: Any) -> Dict[str, Any]:
+        d = dict(row)
+        for key in ("targets", "results"):
+            try:
+                val = json.loads(d.get(key) or "{}")
+            except (TypeError, ValueError):
+                val = {}
+            d[key] = val if isinstance(val, dict) else {}
+        d["has_photo"] = bool(d.get("photo") and os.path.isfile(d["photo"]))
+        return d
+
+    def list_ads(self, limit: int = 40, prune_days: int = 30) -> List[Dict[str, Any]]:
+        """Рекламные посты: сначала те, что ещё в работе, потом архив."""
+        self.prune_ads(prune_days)
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM ads ORDER BY id DESC LIMIT ?", (int(limit),)
+            ).fetchall()
+        out = [self._ad_row(r) for r in rows]
+        order = {"scheduled": 0, "sending": 0, "sent": 1, "draft": 2}
+        out.sort(key=lambda a: (order.get(a.get("status") or "", 3),
+                                -(a.get("send_at") or a.get("created_at") or 0)))
+        return out
+
+    def prune_ads(self, days: int = 30) -> int:
+        """Завершённую рекламу не держим вечно: месяц истории и хватит."""
+        edge = _now() - max(1, int(days)) * 86400
+        with self._lock:
+            cur = self._db.execute(
+                "DELETE FROM ads WHERE status IN ('expired','cancelled','failed')"
+                " AND created_at < ?",
+                (edge,))
+            self._db.commit()
+        return int(cur.rowcount or 0)
+
+    def get_ad(self, ad_id: int) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._db.execute("SELECT * FROM ads WHERE id=?", (int(ad_id),)).fetchone()
+        return self._ad_row(row) if row else None
+
+    def add_ad(self, text: str, targets: Optional[Dict[str, Any]] = None,
+               send_at: float = 0.0, expires_at: float = 0.0,
+               photo: str = "", photo_name: str = "", status: str = "draft",
+               author_id: Optional[int] = None) -> Dict[str, Any]:
+        text = (text or "").strip()
+        if not text and not (photo or ""):
+            return {"ok": False, "error": "empty"}
+        if status not in self.AD_STATUSES:
+            status = "draft"
+        with self._lock:
+            cur = self._db.execute(
+                "INSERT INTO ads(text, photo, photo_name, targets, send_at,"
+                " expires_at, status, results, sent_at, created_at, author_id)"
+                " VALUES(?,?,?,?,?,?,?,'{}',0,?,?)",
+                (text[:4000], photo or "", os.path.basename(photo_name or "")[:80],
+                 json.dumps(targets or {}, ensure_ascii=False), float(send_at or 0),
+                 float(expires_at or 0), status, _now(), author_id),
+            )
+            self._db.commit()
+            ad_id = int(cur.lastrowid)
+        self.audit(author_id, "ad_add", f"#{ad_id} {status} {text[:60]}")
+        return {"ok": True, "id": ad_id, "ad": self.get_ad(ad_id)}
+
+    def update_ad(self, ad_id: int, **fields: Any) -> Optional[Dict[str, Any]]:
+        """Точечная правка: текст, получатели, сроки, статус, отчёт о отправке."""
+        allowed = ("text", "targets", "send_at", "expires_at", "status",
+                   "results", "sent_at")
+        sets, vals = [], []
+        for key in allowed:
+            if key not in fields:
+                continue
+            val = fields[key]
+            if key in ("targets", "results"):
+                val = json.dumps(val or {}, ensure_ascii=False)
+            elif key in ("send_at", "expires_at", "sent_at"):
+                val = float(val or 0)
+            elif key == "status":
+                val = str(val or "") if str(val or "") in self.AD_STATUSES else "draft"
+            sets.append(f"{key}=?")
+            vals.append(val)
+        if not sets:
+            return self.get_ad(ad_id)
+        vals.append(int(ad_id))
+        with self._lock:
+            cur = self._db.execute(f"UPDATE ads SET {', '.join(sets)} WHERE id=?", vals)
+            self._db.commit()
+        return self.get_ad(ad_id) if cur.rowcount else None
+
+    def delete_ad(self, ad_id: int, actor_id: Optional[int] = None) -> bool:
+        row = self.get_ad(ad_id)
+        if not row:
+            return False
+        with self._lock:
+            self._db.execute("DELETE FROM ads WHERE id=?", (int(ad_id),))
+            self._db.commit()
+        path = os.path.abspath(row.get("photo") or "")
+        root = os.path.abspath(self.ad_photo_dir())
+        if path.startswith(root + os.sep):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        self.audit(actor_id, "ad_del", str(ad_id))
+        return True
+
+    def save_ad_photo(self, ad_id: int, data: bytes, filename: str = "",
+                      actor_id: Optional[int] = None) -> Dict[str, Any]:
+        """Фото рекламы: те же проверки, что у фото канала (jpg/png/webp ≤ 12 МБ)."""
+        row = self.get_ad(ad_id)
+        if not row:
+            return {"ok": False, "error": "not_found"}
+        data = data or b""
+        if len(data) < 24:
+            return {"ok": False, "error": "empty"}
+        if len(data) > 12_000_000:
+            return {"ok": False, "error": "too_big"}
+        ext = ""
+        if data[:2] == b"\xff\xd8":
+            ext = ".jpg"
+        elif data[:8] == b"\x89PNG\r\n\x1a\n":
+            ext = ".png"
+        elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            ext = ".webp"
+        if not ext:
+            return {"ok": False, "error": "not_image"}
+        folder = self.ad_photo_dir()
+        name = f"ad{int(ad_id)}_{int(_now() * 1000)}{ext}"
+        path = os.path.join(folder, name)
+        try:
+            with open(path, "wb") as f:
+                f.write(data)
+        except OSError as e:
+            return {"ok": False, "error": str(e)[:80]}
+        old = row.get("photo") or ""
+        with self._lock:
+            self._db.execute(
+                "UPDATE ads SET photo=?, photo_name=? WHERE id=?",
+                (path, os.path.basename(filename or name)[:80], int(ad_id)),
+            )
+            self._db.commit()
+        root = os.path.abspath(folder)
+        if old and os.path.abspath(old).startswith(root + os.sep):
+            try:
+                os.remove(old)
+            except OSError:
+                pass
+        self.audit(actor_id, "ad_photo", f"#{ad_id} {os.path.basename(path)}")
+        return {"ok": True, "id": int(ad_id), "path": path,
+                "name": os.path.basename(filename or name)}
+
+    def clear_ad_photo(self, ad_id: int, actor_id: Optional[int] = None) -> bool:
+        row = self.get_ad(ad_id)
+        if not row or not row.get("photo"):
+            return False
+        path = os.path.abspath(row["photo"])
+        with self._lock:
+            self._db.execute("UPDATE ads SET photo='', photo_name='' WHERE id=?",
+                             (int(ad_id),))
+            self._db.commit()
+        root = os.path.abspath(self.ad_photo_dir())
+        if path.startswith(root + os.sep):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        self.audit(actor_id, "ad_photo_del", str(ad_id))
+        return True
+
+    def due_ads(self, now: Optional[float] = None) -> List[Dict[str, Any]]:
+        """Пора публиковать: время пришло, а пост ещё не отправлен."""
+        now = _now() if now is None else float(now)
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM ads WHERE status='scheduled' AND send_at>0"
+                " AND send_at<=? ORDER BY send_at LIMIT 5", (now,)
+            ).fetchall()
+        return [self._ad_row(r) for r in rows]
+
+    def expired_ads(self, now: Optional[float] = None) -> List[Dict[str, Any]]:
+        """Срок вышел: показ надо снять (баннер на сайте и посты в каналах)."""
+        now = _now() if now is None else float(now)
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM ads WHERE status='sent' AND expires_at>0"
+                " AND expires_at<=? ORDER BY expires_at LIMIT 20", (now,)
+            ).fetchall()
+        return [self._ad_row(r) for r in rows]
+
+    def active_site_ads(self, now: Optional[float] = None,
+                        limit: int = 3) -> List[Dict[str, Any]]:
+        """Что показывать баннером на главной: отправлено, для сайта, не истекло."""
+        now = _now() if now is None else float(now)
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM ads WHERE status='sent' AND send_at<=?"
+                " AND (expires_at=0 OR expires_at>?) ORDER BY send_at DESC, id DESC"
+                " LIMIT ?", (now, now, int(limit))
+            ).fetchall()
+        out = [self._ad_row(r) for r in rows]
+        return [a for a in out if (a.get("targets") or {}).get("site")]
 
     def tg_ids_for_broadcast(self) -> List[int]:
         with self._lock:

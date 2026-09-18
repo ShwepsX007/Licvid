@@ -710,3 +710,34 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
     font-size: 0.76rem; color: var(--muted); display: grid; gap: 4px;
 }
 .cookie-list code { color: var(--cyan); }
+
+/* ---------- 📣 Рекламные посты в админке ---------- */
+.ad-chip {
+    display: inline-block; padding: 1px 9px; border-radius: 999px;
+    border: 1px solid var(--border); font-size: 0.72rem; font-weight: 700;
+    letter-spacing: 0.3px;
+}
+.ad-item {
+    display: flex; gap: 12px; align-items: flex-start;
+    padding: 12px 0; border-top: 1px solid var(--border);
+}
+.ad-item:first-child { border-top: none; }
+.ad-thumb {
+    width: 96px; height: 68px; object-fit: cover; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--bg-dark); flex: 0 0 auto;
+}
+.ad-thumb-empty {
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.68rem; color: var(--muted);
+}
+.ad-item-body { flex: 1 1 auto; min-width: 0; }
+.ad-item-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.ad-item-text {
+    margin: 6px 0; font-size: 0.88rem; line-height: 1.45;
+    white-space: pre-line; word-break: break-word;
+}
+.ad-item .row-actions { margin-top: 6px; }
+@media (max-width: 640px) {
+    .ad-item { flex-direction: column; }
+    .ad-thumb { width: 100%; height: 140px; }
+}

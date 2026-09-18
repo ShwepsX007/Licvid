@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>LiqScope — админка</title>
 <link rel="icon" type="image/png" href="/static/logo.png">
-<link rel="stylesheet" href="/static/account.css?v=alerts7">
+<link rel="stylesheet" href="/static/account.css?v=ads8">
 </head>
 <body data-page="admin">
 <header class="site-header">
@@ -189,13 +189,78 @@
         </div>
     </div>
 
+    <div class="card" id="ads-panel" style="margin-top:14px">
+        <h3>📣 Рекламные посты</h3>
+        <p class="lead">Свой текст и фотография, а дальше — куда и когда отправить: в бота, в каналы
+            и баннером на главной. Объявление уйдёт само в выбранное время, а через выбранный срок
+            снимется: баннер с главной пропадёт, посты в каналах удалятся.</p>
+        <div class="grid grid-2" style="margin-top:12px">
+            <div>
+                <label>Текст поста</label>
+                <textarea id="ad-text" placeholder="О чём объявление… Ссылки можно писать прямо в тексте — они станут кликабельными."></textarea>
+                <p class="meta" id="ad-len">0 знаков</p>
+                <label>Фотография</label>
+                <div class="row-actions">
+                    <label class="btn btn-primary file-btn">
+                        Загрузить фото
+                        <input id="ad-photo-in" type="file" accept="image/jpeg,image/jpg,image/png,image/webp,image/*">
+                    </label>
+                    <button class="btn" id="ad-photo-clear" type="button">Убрать фото</button>
+                </div>
+                <p class="meta" id="ad-photo-status">jpg, png, webp — до 12 МБ. С фотографией текст до 1024 знаков, без неё — до 4000.</p>
+                <div class="tpl-photos" id="ad-photo-prev"></div>
+            </div>
+            <div>
+                <h4>Куда отправить</h4>
+                <div id="ad-targets"><p class="meta">загружаю каналы…</p></div>
+                <div class="row-actions" style="margin-top:6px">
+                    <button class="btn btn-small" id="ad-all" type="button">Отметить всё</button>
+                    <button class="btn btn-small" id="ad-none" type="button">Снять всё</button>
+                </div>
+                <label>Свой канал или чат — id либо @имя</label>
+                <input class="search" id="ad-extra" placeholder="-1001234567890, @mychannel" autocomplete="off">
+                <label>Время отправки</label>
+                <div class="row-actions">
+                    <select class="search" id="ad-when-mode">
+                        <option value="now">Отправить сразу</option>
+                        <option value="later">В выбранное время</option>
+                    </select>
+                    <input class="search" id="ad-when" type="datetime-local" disabled>
+                </div>
+                <label>Удалить через</label>
+                <select class="search" id="ad-ttl">
+                    <option value="0">Не удалять — пока не сниму сам</option>
+                    <option value="15">15 минут</option>
+                    <option value="60">1 час</option>
+                    <option value="180">3 часа</option>
+                    <option value="360">6 часов</option>
+                    <option value="720">12 часов</option>
+                    <option value="1440">1 сутки</option>
+                    <option value="4320">3 суток</option>
+                    <option value="10080">7 суток</option>
+                </select>
+                <p class="meta">Срок считается от отправки: баннер на главной исчезнет, посты в каналах бот удалит. В личке у пользователей сообщения остаются — Telegram разрешает боту удалять свои сообщения только первые 48 часов.</p>
+                <div class="row-actions">
+                    <button class="btn btn-primary" id="ad-save" type="button">📤 Отправить</button>
+                    <button class="btn" id="ad-draft" type="button">💾 Сохранить черновик</button>
+                    <button class="btn" id="ad-reset" type="button">↺ Очистить форму</button>
+                    <span class="meta" id="ad-status"></span>
+                </div>
+                <p class="meta" id="ad-note"></p>
+            </div>
+        </div>
+        <h4 style="margin-top:18px">Очередь и история</h4>
+        <p class="meta" id="ad-service">—</p>
+        <div id="ad-list"><p class="meta">загружаю…</p></div>
+    </div>
+
     <div class="card" id="ai-prompts" style="margin-top:14px">
         <h3>🤖 Промты для ИИ</h3>
         <p class="lead">Инструкции, по которым ИИ пишет <b>шапку поста</b> в канал и <b>текст дневного дайджеста</b>. В поле уже стоит стандартный промт — правьте прямо в нём; «Вернуть шаблон» очищает поле и снова включает встроенный текст. Пустое поле = стандарт, свои цифры и факты ИИ по-прежнему берёт из сводки.</p>
         <div id="ai-prompt-blocks"><p class="meta">загружаю промты…</p></div>
     </div>
 </main>
-<script src="/static/account.js?v=alerts7"></script>
+<script src="/static/account.js?v=ads8"></script>
 <script src="/static/consent.js?v=consent1"></script>
 </body>
 </html>

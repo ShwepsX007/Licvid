@@ -84,6 +84,57 @@ class AccountsTest(unittest.TestCase):
         self.assertTrue(r["ok"])
         self.assertIn("alerts", self.store.user_service_slugs(u["id"]))
 
+    def test_bots_do_not_count_as_visitors(self):
+        """Служебные запросы не идут ни в переходы, ни в посетителей."""
+        self.store.record_visit("/", "vid1", None, "abcd", ua="Mozilla/5.0", bot=False)
+        for _ in range(5):
+            self.store.record_visit("/", "", None, "abcd",
+                                    ua="TelegramBot (like TwitterBot)", bot=True)
+        v = self.store.visit_stats(7)
+        self.assertEqual(v["today_views"], 1)
+        self.assertEqual(v["today_uniques"], 1)
+        self.assertEqual(v["today_bots"], 5)
+        self.assertEqual(v["paths"][0]["path"], "/")
+
+    def test_cookie_less_guest_does_not_multiply(self):
+        """Один гость без cookie — один посетитель, сколько бы страниц ни открыл."""
+        ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        vid = "same-vid"
+        # middleware спрашивает у базы: vid этой связки ip+ua уже выдан?
+        self.assertEqual(self.store.visit_vid("iphash", ua), "")
+        for path in ("/", "/terminal", "/cabinet"):
+            self.store.record_visit(path, vid, None, "iphash", ua=ua)
+        self.assertEqual(self.store.visit_vid("iphash", ua), vid)
+        v = self.store.visit_stats(7)
+        self.assertEqual(v["today_views"], 3)
+        self.assertEqual(v["today_uniques"], 1)
+        # другой ip с тем же браузером — это уже другой посетитель
+        self.store.record_visit("/", "vid2", None, "other", ua=ua)
+        v2 = self.store.visit_stats(7)
+        self.assertEqual(v2["today_uniques"], 2)
+        # служебные визиты не подсказывают vid
+        self.assertEqual(self.store.visit_vid("iphash", "curl/8.0"), "")
+
+    def test_days_report_bots_separately(self):
+        self.store.record_visit("/", "vid1", None, "abcd", ua="Mozilla/5.0")
+        self.store.record_visit("/", "", None, "abcd", ua="Googlebot/2.1", bot=True)
+        v = self.store.visit_stats(7)
+        day = v["days"][-1]
+        self.assertEqual(day["views"], 1)
+        self.assertEqual(day["uniques"], 1)
+        self.assertEqual(day["bots"], 1)
+
+    def test_browser_and_bot_agents_are_told_apart(self):
+        """Кто гость, а кто служебный запрос — отдельный разбор user-agent."""
+        import web_account as W
+        browser = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15"
+                   " (KHTML, like Gecko) Version/17.0 Safari/605.1.15")
+        self.assertFalse(W._is_bot_ua(browser))
+        for ua in ("curl/8.4.0", "python-requests/2.31", "Googlebot/2.1",
+                   "TelegramBot (like TwitterBot)", "Mozilla/5.0 (compatible; YandexBot/3.0)",
+                   "WhatsApp/2.23 A", "", "axios/1.6.0"):
+            self.assertTrue(W._is_bot_ua(ua), ua)
+
     def test_telegram_widget_hash(self):
         token = "123:abc"
         data = {

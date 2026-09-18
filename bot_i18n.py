@@ -455,6 +455,17 @@ RU_EN: Dict[str, str] = {
     "</code>\nОшибка записана в журнал сервиса.":
         "</code>\nThe error is written to the service log.",
     "Онлайн WS: ": "WS online: ",
+    # --- статистика посещений: переходы, посетители, служебный шум ---------
+    " переходов</code>, <code>": " page views</code>, <code>",
+    " посетителей</code>": " visitors</code>",
+    " посетителей</code>\n📡 Онлайн WS: <code>":
+        " visitors</code>\n📡 WS online: <code>",
+    " переходов / ": " page views / ",
+    "Служебных запросов отсеяно: <code>": "Service requests filtered out: <code>",
+    "<i>Считаем только браузерные переходы: краулеры и превью в статистику"
+    " не идут, один гость без cookie не размножается на каждой странице.</i>":
+        "<i>We count browser page views only: crawlers and link previews stay"
+        " out, and a guest without a cookie is not multiplied by every page.</i>",
     " уник.\n📡 Онлайн WS: ": " unique\n📡 WS online: ",
     "<b>Визиты</b>": "<b>Visits</b>",
     "Сегодня: ": "Today: ",

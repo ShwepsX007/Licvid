@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>LiqScope — админка</title>
 <link rel="icon" type="image/png" href="/static/logo.png">
-<link rel="stylesheet" href="/static/account.css?v=corr3">
+<link rel="stylesheet" href="/static/account.css?v=alerts3">
 </head>
 <body data-page="admin">
 <header class="site-header">
@@ -26,8 +26,9 @@
     <div class="grid grid-4" style="margin-top:22px">
         <div class="card"><span class="stat-value" id="st-users">—</span><span class="stat-label">Пользователей</span></div>
         <div class="card"><span class="stat-value" id="st-new">—</span><span class="stat-label">Новых за 24ч</span></div>
-        <div class="card"><span class="stat-value" id="st-views">—</span><span class="stat-label">Просмотров сегодня</span></div>
-        <div class="card"><span class="stat-value" id="st-uniq">—</span><span class="stat-label">Уникальных сегодня</span></div>
+        <div class="card"><span class="stat-value" id="st-views">—</span><span class="stat-label">Переходов сегодня</span></div>
+        <div class="card"><span class="stat-value" id="st-uniq">—</span><span class="stat-label">Уникальных посетителей</span></div>
+        <div class="card"><span class="stat-value" id="st-bots">—</span><span class="stat-label">Служебных отсеяно</span></div>
         <div class="card"><span class="stat-value" id="st-ws">—</span><span class="stat-label">Онлайн WS</span></div>
         <div class="card"><span class="stat-value" id="st-exch">—</span><span class="stat-label">Бирж в эфире</span></div>
         <div class="card"><span class="stat-value" id="st-bot" style="font-size:1.05rem">—</span><span class="stat-label">Telegram-бот</span></div>
@@ -194,6 +195,7 @@
         <div id="ai-prompt-blocks"><p class="meta">загружаю промты…</p></div>
     </div>
 </main>
-<script src="/static/account.js?v=corr3"></script>
+<script src="/static/account.js?v=alerts3"></script>
+<script src="/static/consent.js?v=consent1"></script>
 </body>
 </html>

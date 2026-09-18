@@ -372,7 +372,9 @@ class Store:
                     path TEXT NOT NULL,
                     vid TEXT,
                     user_id INTEGER,
-                    ip_hash TEXT
+                    ip_hash TEXT,
+                    ua TEXT,
+                    bot INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS idx_visits_ts ON visits(ts);
                 CREATE TABLE IF NOT EXISTS settings (
@@ -453,6 +455,7 @@ class Store:
             self._db.commit()
         self._migrate_users()
         self._migrate_digest_photos()
+        self._migrate_visits()
         self._seed_digest()
         self._digest_service_live()
 
@@ -480,6 +483,29 @@ class Store:
             self.set_setting("digest_service_live", "1")
         except Exception:
             pass
+
+    def _migrate_visits(self) -> None:
+        """Колонки ua/bot: чтобы отсеивать роботов и не плодить «уникальных».
+
+        Раньше визит писал только vid, а vid выдавался каждому запросу без
+        cookie — из-за этого просмотры и «уникальные» почти совпадали (каждый
+        прогон краулера выглядел новым посетителем). Теперь пишем
+        user-agent и признак «служебный запрос», а посетителя без cookie
+        привязываем к уже выданному vid той же связки ip+ua.
+        """
+        try:
+            with self._lock:
+                cols = {r["name"] for r in
+                        self._db.execute("PRAGMA table_info(visits)")}
+                if cols and "ua" not in cols:
+                    self._db.execute("ALTER TABLE visits ADD COLUMN ua TEXT")
+                if cols and "bot" not in cols:
+                    self._db.execute(
+                        "ALTER TABLE visits ADD COLUMN bot INTEGER NOT NULL DEFAULT 0")
+                self._db.execute("UPDATE visits SET bot=0 WHERE bot IS NULL")
+                self._db.commit()
+        except Exception as e:                    # noqa: BLE001
+            log.debug("визиты: миграция ua/bot: %s", e)
 
     def _migrate_digest_photos(self) -> None:
         """Колонка kind: фото для сводки постов или для дневного дайджеста.
@@ -1269,17 +1295,49 @@ class Store:
         return {"ok": False, "pending": True}
 
     # ----- visits ---------------------------------------------------------
-    def record_visit(self, path: str, vid: str, user_id: Optional[int], ip_hash: str) -> None:
+    def record_visit(self, path: str, vid: str, user_id: Optional[int], ip_hash: str,
+                     ua: str = "", bot: bool = False) -> None:
+        """Записать просмотр страницы.
+
+        ``bot`` — служебный запрос (краулер, превью мессенджера, скрипт): в
+        счётчики просмотров и посетителей он не идёт, но хранится — админ
+        видит, сколько такого шума отсеяно.
+        """
         path = (path or "/")[:120]
         with self._lock:
             self._db.execute(
-                "INSERT INTO visits(ts,path,vid,user_id,ip_hash) VALUES(?,?,?,?,?)",
-                (_now(), path, (vid or "")[:40], user_id, ip_hash),
+                "INSERT INTO visits(ts,path,vid,user_id,ip_hash,ua,bot)"
+                " VALUES(?,?,?,?,?,?,?)",
+                (_now(), path, ("" if bot else (vid or ""))[:40], user_id,
+                 ip_hash, (ua or "")[:180], 1 if bot else 0),
             )
             # не копим бесконечно: раз в ~200 визитов чистим старше 90 дней
             if secrets.randbelow(200) == 0:
                 self._db.execute("DELETE FROM visits WHERE ts<?", (_now() - 90 * 86400,))
             self._db.commit()
+
+    def visit_vid(self, ip_hash: str, ua: str, window_sec: int = 86400) -> str:
+        """vid, уже выданный этой связке ip+ua: браузер без cookie не «множится».
+
+        Возвращаем последний vid за окно (по умолчанию сутки) — так гость,
+        который не сохраняет cookie (или скрипт, прикинувшийся браузером),
+        в уникальных считается один раз, а не каждой страницей.
+        """
+        if not ip_hash:
+            return ""
+        try:
+            since = _now() - max(60, int(window_sec))
+            with self._lock:
+                row = self._db.execute(
+                    "SELECT vid FROM visits WHERE ip_hash=? AND COALESCE(ua,'')=?"
+                    " AND bot=0 AND COALESCE(vid,'')!='' AND ts>=?"
+                    " ORDER BY ts DESC LIMIT 1",
+                    (ip_hash, (ua or "")[:180], since),
+                ).fetchone()
+        except Exception as e:                    # noqa: BLE001
+            log.debug("визиты: поиск vid: %s", e)
+            return ""
+        return str(row["vid"] or "") if row else ""
 
     def visit_stats(self, days: int = 14) -> Dict[str, Any]:
         days = max(1, min(int(days), 90))
@@ -1287,26 +1345,34 @@ class Store:
         day0 = _now() - (_now() % 86400)
         with self._lock:
             today_views = self._db.execute(
-                "SELECT COUNT(*) FROM visits WHERE ts>=?", (day0,)
+                "SELECT COUNT(*) FROM visits WHERE ts>=? AND bot=0", (day0,)
             ).fetchone()[0]
             today_uniques = self._db.execute(
-                "SELECT COUNT(DISTINCT vid) FROM visits WHERE ts>=? AND vid!=''", (day0,)
+                "SELECT COUNT(DISTINCT vid) FROM visits WHERE ts>=? AND bot=0"
+                " AND COALESCE(vid,'')!=''", (day0,)
+            ).fetchone()[0]
+            today_bots = self._db.execute(
+                "SELECT COUNT(*) FROM visits WHERE ts>=? AND bot=1", (day0,)
             ).fetchone()[0]
             rows = self._db.execute(
                 "SELECT strftime('%Y-%m-%d', ts, 'unixepoch') AS day,"
-                " COUNT(*) AS views, COUNT(DISTINCT vid) AS uniques"
+                " SUM(CASE WHEN bot=0 THEN 1 ELSE 0 END) AS views,"
+                " COUNT(DISTINCT CASE WHEN bot=0 THEN vid END) AS uniques,"
+                " SUM(CASE WHEN bot=1 THEN 1 ELSE 0 END) AS bots"
                 " FROM visits WHERE ts>=? GROUP BY day ORDER BY day",
                 (since,),
             ).fetchall()
             top_paths = self._db.execute(
-                "SELECT path, COUNT(*) AS n FROM visits WHERE ts>=?"
+                "SELECT path, COUNT(*) AS n FROM visits WHERE ts>=? AND bot=0"
                 " GROUP BY path ORDER BY n DESC LIMIT 8",
                 (since,),
             ).fetchall()
-        by_day = [{"day": r["day"], "views": r["views"], "uniques": r["uniques"]} for r in rows]
+        by_day = [{"day": r["day"], "views": r["views"], "uniques": r["uniques"],
+                   "bots": r["bots"]} for r in rows]
         return {
             "today_views": today_views,
             "today_uniques": today_uniques,
+            "today_bots": today_bots,
             "days": by_day,
             "paths": [{"path": r["path"], "n": r["n"]} for r in top_paths],
         }

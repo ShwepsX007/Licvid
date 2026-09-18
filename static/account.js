@@ -616,6 +616,7 @@
     var alSaveT = null;
     var alBusy = false;
     var alSparkBuf = { liq: [], cvd: [], oi: [] };
+    var alHist = [];            // сигналы метрик: их присылает сервер
 
     function alMoney(v) {
         v = Number(v) || 0;
@@ -686,6 +687,7 @@
         api("/api/account/alerts").then(function (d) {
             if (!d.ok) return;
             alPresets = d.presets || alPresets;
+            if (d.history) alHist = d.history;
             if (full || !alCfg) {
                 alCfg = d.config || alCfg;
                 paintAlerts(d, true);
@@ -712,7 +714,7 @@
                     alCoinLabel(alCoinOf("liq")) + " / " + alCoinLabel(alCoinOf("cvd")) +
                     " / " + alCoinLabel(alCoinOf("oi"))) : (d.error || "ошибка");
             }
-            if (d.live) paintAlertsLive({ live: d.live, history: null, config: alCfg });
+            if (d.live) paintAlertsLive({ live: d.live, history: alHist, config: alCfg });
         }).catch(function () { alBusy = false; });
     }
 
@@ -780,7 +782,8 @@
         var board = $("alerts-board");
         if (!board || !alCfg) return;
         var live = d.live || {};
-        var hist = d.history || [];
+        var hist = d.history || alHist || [];
+        alHist = hist;
         var symbols = d.symbols || [];
         var p = alPresets || { windows: [1, 5, 15, 30, 60, 240],
             thresholds: [50000, 100000, 250000, 500000, 1000000, 5000000],
@@ -798,6 +801,9 @@
                 return alChip(String(v) === String(cur), attr + '="' + v + '"', fmt ? fmt(v) : String(v));
             }).join("");
         }
+        /* Метрика — горизонтальная строка во всю ширину, как у корреляций:
+           слева значение с микрографиком, посередине настройки сигнала
+           (окно, порог, монета), справа живая лента потока. */
         function feed(key, title) {
             var row = live[key] || {};
             alPushSpark(key, row);
@@ -811,35 +817,47 @@
             if (key === "liq" && row.market) extra = "рынок " + alMoney(row.market.usd);
             else extra = (row.symbol && row.symbol !== "ALL" ? String(row.symbol).split("_")[0] : "") +
                 (row.count ? " · " + row.count + " шт." : "");
-            return '<div class="al-feed' + (on ? " on" : "") + (hot ? " hot" : "") +
-                '" data-feed="' + key + '"><div class="al-feed-h">' +
+            return '<section class="al-feed' + (on ? " on" : "") + (hot ? " hot" : "") +
+                '" data-feed="' + key + '">' +
+                '<div class="al-feed-h">' +
                 '<label class="al-switch' + (on ? " on" : "") + '" data-metric="' + key + '">' +
-                "<i></i><span>" + title + (on ? " · ON" : " · выкл") + "</span></label></div>" +
-                '<div class="al-meter" data-metric="' + key + '"><div class="v ' + cls + '">' +
-                alMoney(val) + '</div><div class="s">' + extra + " / порог " + alMoney(thr) +
-                '</div><div class="al-bar"><i style="width:' + pct + '%"></i></div></div>' +
+                "<i></i><span>" + title + (on ? " · ON" : " · выкл") + "</span></label>" +
+                '<span class="al-feed-meta" data-feedmeta="' + key + '">' +
+                esc(alFeedMeta(key, row, extra, thr)) + "</span></div>" +
+                '<div class="al-feed-grid">' +
+                '<div class="al-feed-col al-col-now">' +
                 alSparkSvg(alSparkBuf[key]) +
-                '<div class="al-label" data-winlabel="' + key + '">Окно ' + title +
-                " · " + alWin(alWinOf(key)) + "</div>" +
-                '<div class="al-chips" data-winbox="' + key + '">' +
+                '<div class="al-meter' + (hot ? " hot" : "") + '" data-metric="' + key + '">' +
+                '<div class="v ' + cls + '">' + alMoney(val) + '</div>' +
+                '<div class="s">' + extra + " / порог " + alMoney(thr) +
+                '</div><div class="al-bar"><i style="width:' + pct + '%"></i></div></div>' +
+                "</div>" +
+                '<div class="al-feed-col al-col-set">' +
+                '<div class="al-label" data-winlabel="' + key + '">Окно · ' + alWin(alWinOf(key)) +
+                '</div><div class="al-chips" data-winbox="' + key + '">' +
                 chips(p.windows || [], alWinOf(key), "data-win", alWin) + "</div>" +
-                '<div class="al-row" style="margin-top:6px"><input data-winin="' + key +
+                '<div class="al-row"><input data-winin="' + key +
                 '" type="number" min="1" max="1440" placeholder="минуты" value="' +
                 alWinOf(key) + '"></div>' +
-                '<div class="al-label">Порог ' + title + "</div>" +
+                '<div class="al-label">Порог</div>' +
                 '<div class="al-chips" data-thr="' + key + '">' +
                 chips(alThrList(key), thr, "data-thrval", alMoney) + "</div>" +
-                '<div class="al-row" style="margin-top:6px"><input data-thrin="' + key +
+                '<div class="al-row"><input data-thrin="' + key +
                 '" type="number" min="0" step="1000" value="' + Math.round(thr || 0) + '"></div>' +
-                '<div class="al-label">Монета ' + title + " · <span data-coinlabel='" +
-                key + "'>" + esc(alCoinLabel(alCoinOf(key))) + "</span></div>" +
+                '<div class="al-label">Монета · <span data-coinlabel="' +
+                key + '">' + esc(alCoinLabel(alCoinOf(key))) + "</span></div>" +
                 '<div class="al-chips" data-coinbox="' + key + '">' +
                 alCoinChips(key, p.coins || []) + "</div>" +
-                '<div class="al-row" style="margin-top:6px"><input data-coinin="' + key +
+                '<div class="al-row"><input data-coinin="' + key +
                 '" type="text" list="al-sym-list" placeholder="BTC_USDT или тикер" value="' +
                 (alCoinOf(key) === "ALL" ? "" : alCoinOf(key)) + '"></div>' +
-                '<div class="al-label">Лента ' + title + "</div>" +
-                '<div class="al-tape" id="al-tape-' + key + '">' + alTape(hist, key) + "</div></div>";
+                "</div>" +
+                '<div class="al-feed-col al-col-tape">' +
+                '<div class="al-label">Лента · <span data-flowmeta="' + key + '">' +
+                esc(alFlowLabel(row)) + '</span></div>' +
+                '<div class="al-tape" id="al-tape-' + key + '">' +
+                alTape(hist, row.flow, key) + "</div>" +
+                "</div></div></section>";
         }
         board.innerHTML =
             '<div class="al-head"><div><h3>Алерты по объёму</h3>' +
@@ -870,14 +888,52 @@
         if (bind) bindAlerts();
     }
 
-    function alTape(hist, metric) {
+    /* Сводка строки в заголовке: значение метрики, её порог, окно и монета. */
+    function alFeedMeta(key, row, extra, thr) {
+        var title = key.toUpperCase();
+        var val = alMoney((row && row.value) || 0);
+        return title + " " + val +
+            (extra ? " · " + extra : "") +
+            " · порог " + alMoney(thr) +
+            " · окно " + alWin(alWinOf(key)) +
+            " · монета " + alCoinLabel(alCoinOf(key));
+    }
+
+    /* Подпись ленты: сколько событий потока видно в окне. */
+    function alFlowLabel(row) {
+        var n = ((row && row.flow) || []).length;
+        return n ? "поток окна · " + n + " событий" : "поток окна";
+    }
+
+    function alFlowRow(f) {
+        /* Строка живого потока: время · монета · сумма · обстоятельства.
+           Это не сигнал, а то, что происходит в окне прямо сейчас, — иначе
+           между редкими сигналами лента выглядела мёртвой. */
+        var ts = f.ts ? new Date(Number(f.ts) * 1000) : null;
+        var tm = ts ? ts.toLocaleTimeString([], {
+            hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "—";
+        var sym = String(f.symbol || "").split("_")[0];
+        var val = Number(f.value) || 0;
+        var cls = val >= 0 ? "pos" : "neg";
+        var side = String(f.side || "");
+        var what = side === "LONG" ? "лонг" : side === "SHORT" ? "шорт" : "";
+        var bmin = Number(f.bucket_min) || 0;
+        var extra = [what, bmin ? "за " + alWin(bmin) : "",
+                     f.exchange ? String(f.exchange) : ""].filter(Boolean).join(" · ");
+        return '<div class="row flow"><span class="t">' + tm + "</span>" +
+            '<span class="m">' + (cls === "pos" ? "🟢" : "🔴") + "</span>" +
+            '<span class="sym">' + esc(sym || "все") + "</span>" +
+            '<span class="val ' + cls + '">' + alMoney(Math.abs(val)) + "</span>" +
+            '<span class="thr">' + esc(extra) + "</span></div>";
+    }
+
+    function alTape(hist, flow, metric) {
         var rows = (hist || []).filter(function (h) {
             return !metric || String(h.metric || "") === metric;
         });
-        if (!rows.length) return '<div class="s">пока тихо</div>';
         // ярко, как лента терминала: время · монета · сумма · порог/окно,
         // цвет по метрике/знаку, полоса накачки |значения| к порогу
-        return rows.map(function (h) {
+        var sig = rows.map(function (h) {
             var ts = h.ts ? new Date(Number(h.ts) * 1000) : null;
             var tm = ts ? ts.toLocaleTimeString([], {
                 hour: "2-digit", minute: "2-digit", second: "2-digit",
@@ -900,6 +956,12 @@
                 "</span>" +
                 '<i class="tape-bar"></i></div>';
         }).join("");
+        // Ниже сигналов — живой поток метрики: сигналы редкие, а поток идёт,
+        // и лента должна это показывать (иначе «пока тихо» на всех метриках).
+        var fl = (flow || []).map(alFlowRow).join("");
+        if (!sig && !fl) return '<div class="s">пока тихо</div>';
+        return (sig ? '<div class="tape-sig">🔔 сигналы</div>' + sig : "") +
+            (fl ? '<div class="tape-sig">поток окна</div>' + fl : "");
     }
 
     function paintAlertsLive(d) {
@@ -913,6 +975,11 @@
             var thr = (alCfg && alCfg.threshold && alCfg.threshold[key]) || 1;
             var pct = Math.max(4, Math.min(100, Math.round(100 * Math.abs(val) / thr)));
             var hot = alHas(key) && Math.abs(val) >= thr;
+            var extra = "";
+            if (key === "liq" && row.market) extra = "рынок " + alMoney(row.market.usd);
+            else extra = (row.symbol && row.symbol !== "ALL"
+                ? String(row.symbol).split("_")[0] : "") +
+                (row.count ? " · " + row.count + " шт." : "");
             if (feed) {
                 feed.classList.toggle("on", alHas(key));
                 feed.classList.toggle("hot", hot);
@@ -922,24 +989,28 @@
                     wrap.innerHTML = alSparkSvg(alSparkBuf[key]);
                     spark.replaceWith(wrap.firstChild);
                 }
+                var meta = feed.querySelector('[data-feedmeta="' + key + '"]');
+                if (meta) meta.textContent = alFeedMeta(key, row, extra, thr);
+                var flowMeta = feed.querySelector('[data-flowmeta="' + key + '"]');
+                if (flowMeta) flowMeta.textContent = alFlowLabel(row);
             }
-            if (!el) return;
-            el.classList.toggle("on", alHas(key));
-            el.classList.toggle("hot", hot);
-            var v = el.querySelector(".v");
-            if (v) {
-                v.textContent = alMoney(val);
-                v.className = "v " + (key === "liq" ? "gold" : (val >= 0 ? "pos" : "neg"));
+            if (el) {
+                el.classList.toggle("hot", hot);
+                var v = el.querySelector(".v");
+                if (v) {
+                    v.textContent = alMoney(val);
+                    v.className = "v " + (key === "liq" ? "gold" : (val >= 0 ? "pos" : "neg"));
+                }
+                var s2 = el.querySelector(".s");
+                if (s2) s2.textContent = extra + " / порог " + alMoney(thr);
+                var bar = el.querySelector(".al-bar i");
+                if (bar) bar.style.width = pct + "%";
             }
-            var bar = el.querySelector(".al-bar i");
-            if (bar) bar.style.width = pct + "%";
+            // лента обновляется на каждом опросе: поток — это живые данные,
+            // а не только редкие сигналы
+            var tape = $("al-tape-" + key);
+            if (tape) tape.innerHTML = alTape(d.history || alHist, row.flow, key);
         });
-        if (d.history) {
-            ["liq", "cvd", "oi"].forEach(function (key) {
-                var tape = $("al-tape-" + key);
-                if (tape) tape.innerHTML = alTape(d.history, key);
-            });
-        }
     }
 
     function bindAlerts() {
@@ -2073,12 +2144,20 @@
         var el = $("visit-bars");
         if (!el) return;
         var max = 1;
-        (days || []).forEach(function (d) { if (d.views > max) max = d.views; });
+        (days || []).forEach(function (d) {
+            if (d.uniques > max) max = d.uniques;
+            if (d.views > max) max = d.views;
+        });
         el.innerHTML = (days || []).map(function (d) {
-            var h = Math.max(6, Math.round(100 * d.views / max));
+            var hv = Math.max(6, Math.round(100 * d.views / max));
+            var hu = Math.max(4, Math.round(100 * (d.uniques || 0) / max));
             var label = String(d.day || "").slice(5);
-            return '<div class="bar" style="height:' + h + 'px" title="' +
-                d.day + ": " + d.views + " / " + d.uniques + '"><span>' + label + "</span></div>";
+            var title = d.day + ": " + d.views + " переходов, " +
+                d.uniques + " посетителей";
+            if (d.bots) title += ", служебных отсеяно " + d.bots;
+            return '<div class="bar" style="height:' + hv + 'px" title="' + title +
+                '"><i class="bar-u" style="height:' + hu + '%"></i><span>' + label +
+                "</span></div>";
         }).join("");
     }
 
@@ -2132,6 +2211,7 @@
                 $("st-new") && ($("st-new").textContent = du.new_24h);
                 $("st-views") && ($("st-views").textContent = dv.today_views);
                 $("st-uniq") && ($("st-uniq").textContent = dv.today_uniques);
+                $("st-bots") && ($("st-bots").textContent = dv.today_bots || 0);
                 $("st-ws") && ($("st-ws").textContent = d.ws_clients);
                 $("st-bot") && ($("st-bot").textContent = d.bot.ready ? ("@" + d.bot.username) : "—");
                 var live = (d.health.live_exchanges || []).length;

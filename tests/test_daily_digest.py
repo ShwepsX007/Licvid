@@ -15,6 +15,7 @@ import unittest
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
 
+import daily_digest  # noqa: E402
 from ai_text import body_problem, clean_body, fit_body  # noqa: E402
 from daily_digest import (  # noqa: E402
     DigestStore, brief, collect_day, day_key, day_label, day_prompt,
@@ -483,6 +484,50 @@ class BotPublishTest(unittest.TestCase):
                                                "en": ["numbers are even"]}}},
                 "ai": {"ru": "Русский рассказ про день. " * 20,
                        "en": "English story about the day. " * 20}}
+
+    def _upload_photo(self, kind="digest"):
+        """Кладём фото рубрики так же, как это делает админка."""
+        png = (b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+        res = self.store.add_digest_photo(png, "cover.png", actor_id=1001, kind=kind)
+        self.assertTrue(res.get("ok"), res)
+        return res.get("path") or ""
+
+    def test_daily_post_goes_with_photo_even_if_long(self):
+        """Пост за сутки длиннее 1024 знаков — раньше уходил текстом без фото."""
+        import asyncio
+        path = self._upload_photo()
+        rec = self._rec()
+        rec["ai"] = {"ru": "Русский рассказ про день. " * 120,   # ~3000 знаков
+                     "en": "English story about the day. " * 120}
+        long_post = daily_digest.render_post(rec, "ru", "https://liqscope.online")
+        self.assertGreater(len(long_post), 1024, "фикстура должна быть длинной")
+        asyncio.get_event_loop().run_until_complete(
+            self.bot.publish_daily_digest(rec, ("ru",), force=True))
+        msg = [m for m in self.sent if m["cid"] == "-100111"][0]
+        self.assertEqual(msg.get("photo"), path, "фото должно уйти вместе с постом")
+        self.assertLessEqual(len(msg["text"]), 1024)
+        self.assertIn("Дневной дайджест", msg["text"])
+        self.assertIn("Крупнейшая ликвидация", msg["text"])   # факты не потерялись
+        self.assertIn("…", msg["text"])                        # рассказ подрезан
+        self.assertTrue(msg["text"].rstrip().endswith("</a>"))
+
+    def test_daily_post_without_photos_stays_full_text(self):
+        """Без фото лимит подписи не действует — пост полный."""
+        import asyncio
+        import channel_digest
+        rec = self._rec()
+        rec["ai"] = {"ru": "Русский рассказ про день. " * 120,
+                     "en": "English story about the day. " * 120}
+        old_pick = channel_digest.pick_image
+        channel_digest.pick_image = lambda *a, **k: None
+        try:
+            asyncio.get_event_loop().run_until_complete(
+                self.bot.publish_daily_digest(rec, ("ru",), force=True))
+        finally:
+            channel_digest.pick_image = old_pick
+        msg = [m for m in self.sent if m["cid"] == "-100111"][0]
+        self.assertNotIn("photo", msg)
+        self.assertGreater(len(msg["text"]), 1024)
 
     def test_publishes_to_both_channels(self):
         import asyncio

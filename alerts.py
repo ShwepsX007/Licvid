@@ -268,6 +268,122 @@ def threshold_presets(metric: str) -> List[int]:
     return list(THRESHOLD_PRESETS_LIQ)
 
 
+def flow_rows(metric: str, market: Dict[str, Any], cfg: Dict[str, Any],
+              now: float, limit: int = 12) -> List[dict]:
+    """Живой поток метрики — «что происходит в окне прямо сейчас».
+
+    Сигналы редкие: порог, пауза, «одно сообщение на метрику». Из-за этого
+    лента сервиса между сигналами выглядела мёртвой — «пока тихо» на всех
+    трёх переменных, хотя поток идёт. Здесь то же окно, что и у значения
+    метрики, но показаны сами события: последние ликвидации, минутные дельты
+    CVD и свежие изменения OI. Строки отсортированы от свежих к старым.
+    """
+    cfg = normalize_config(cfg)
+    metric = str(metric or "liq")
+    win_min = window_of(cfg, metric)
+    win_sec = win_min * 60
+    coin = symbol_of(cfg, metric)
+    want = canon_symbol(coin)
+    start = window_start(now, win_sec, None)
+    rows: List[dict] = []
+
+    if metric == "liq":
+        min_usd = _num(cfg["min_event"].get("liq"))
+        for x in (market.get("events") or []):
+            try:
+                ts = float(x.get("timestamp") or 0)
+                usd = float(x.get("usd") or 0)
+            except (TypeError, ValueError):
+                continue
+            if ts < start or ts > now + 60 or usd < min_usd or usd <= 0:
+                continue
+            sym = canon_symbol(str(x.get("symbol") or ""))
+            if want != "ALL" and sym != want:
+                continue
+            rows.append({"ts": ts, "symbol": sym, "value": round(usd, 2),
+                         "count": 1, "side": str(x.get("side") or ""),
+                         "exchange": str(x.get("exchange") or "")})
+    elif metric == "cvd":
+        min_bucket = _num(cfg["min_event"].get("cvd"))
+        buckets: Dict[float, Dict[str, float]] = {}
+        for key, acc in (market.get("cvd") or {}).items():
+            if "|" not in str(key):
+                continue
+            sym, tf_s = str(key).rsplit("|", 1)
+            try:
+                if int(tf_s) != 1:          # поток показываем минутными дельтами
+                    continue
+            except (TypeError, ValueError):
+                continue
+            sym = canon_symbol(sym)
+            if want != "ALL" and sym != want:
+                continue
+            for b, v in (acc or {}).items():
+                try:
+                    ts = float(b)
+                    val = float(v)
+                except (TypeError, ValueError):
+                    continue
+                if ts < start or ts > now + 60 or abs(val) < min_bucket:
+                    continue
+                buckets.setdefault(ts, {})[sym] = val
+        for ts, per_sym in buckets.items():
+            for sym, val in per_sym.items():
+                rows.append({"ts": ts, "symbol": sym, "value": round(val, 2),
+                             "count": 1, "side": "LONG" if val >= 0 else "SHORT"})
+    else:
+        min_usd = _num(cfg["min_event"].get("oi"))
+        for sym, payload in (market.get("oi") or {}).items():
+            sym = canon_symbol(sym)
+            if want != "ALL" and sym != want:
+                continue
+            series = (payload or {}).get("_series") or {}
+            keys = sorted(float(k) for k in series)
+            if len(keys) < 2:
+                continue
+            for i in range(len(keys) - 1, 0, -1):
+                ts = keys[i]
+                if ts < start or ts > now + 60:
+                    continue
+                try:
+                    val = float(series[keys[i]]) - float(series[keys[i - 1]])
+                except (TypeError, ValueError):
+                    continue
+                if abs(val) < min_usd:
+                    continue
+                rows.append({"ts": ts, "symbol": sym, "value": round(val, 2),
+                             "count": 1, "side": "LONG" if val >= 0 else "SHORT",
+                             "bucket_min": int(round((ts - keys[i - 1]) / 60.0)) or 1})
+    rows.sort(key=lambda r: (r["ts"], abs(r["value"])), reverse=True)
+    return rows[:max(1, int(limit))]
+
+
+def oi_points(oi_map: Dict[str, dict], symbol: str = "ALL",
+              limit: int = 400) -> Dict[float, float]:
+    """Ряд ΔOI по бакетам — из него рисуется микрографик OI.
+
+    Готовых окон у трекера хватает для цифры, а для графика нужен ряд:
+    считаем разницу соседних уровней непрерывной серии (``_series``).
+    """
+    want = canon_symbol(symbol)
+    out: Dict[float, float] = {}
+    for sym, payload in (oi_map or {}).items():
+        if want != "ALL" and canon_symbol(sym) != want:
+            continue
+        series = (payload or {}).get("_series") or {}
+        keys = sorted(float(k) for k in series)
+        for i in range(1, len(keys)):
+            try:
+                out[keys[i]] = out.get(keys[i], 0.0) + (
+                    float(series[keys[i]]) - float(series[keys[i - 1]]))
+            except (TypeError, ValueError):
+                continue
+    if len(out) > limit:
+        for old in sorted(out)[:len(out) - limit]:
+            out.pop(old, None)
+    return out
+
+
 def sparkline(points: Dict[Any, float], now: float, window_sec: float,
               n: int = 24) -> List[float]:
     n = max(2, int(n or 24))
@@ -556,7 +672,15 @@ def live_snapshot(cfg: Dict[str, Any], market: Dict[str, Any],
             cvd_pts[int(ts)] = cvd_pts.get(int(ts), 0.0) + val
     out["liq"]["spark"] = sparkline(liq_pts, now, w_liq * 60)
     out["cvd"]["spark"] = sparkline(cvd_pts, now, w_cvd * 60)
-    out["oi"]["spark"] = []
+    # OI: готовых окон трекера для микрографика мало — берём разницы уровней
+    # ряда, иначе график OI всегда стоял пустым («поток не идёт»).
+    oi_flat: Dict[str, dict] = {}
+    for sym, payload in (market.get("oi") or {}).items():
+        oi_flat[canon_symbol(sym)] = payload
+    out["oi"]["spark"] = sparkline(oi_points(oi_flat, syms["oi"]), now, w_oi * 60)
+    # Ленты метрик: не только сигналы, но и сам поток (см. flow_rows)
+    for m in METRICS:
+        out[m]["flow"] = flow_rows(m, market, cfg, now)
     for m, win, lr in (("liq", w_liq, liq), ("cvd", w_cvd, cvd),
                        ("oi", w_oi, oi)):
         out[m]["window_min"] = win

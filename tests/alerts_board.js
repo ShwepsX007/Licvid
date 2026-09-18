@@ -193,8 +193,60 @@ async function main() {
   const labels = ["liq", "cvd", "oi"].map((m) =>
     (q('[data-winlabel="' + m + '"]') || {}).textContent);
   check("в карточках подписаны текущие окна метрик",
-        JSON.stringify(labels) === JSON.stringify(["Окно LIQ · 5м", "Окно CVD · 15м", "Окно OI · 1ч"]),
+        JSON.stringify(labels) === JSON.stringify(["Окно · 5м", "Окно · 15м", "Окно · 1ч"]),
         labels.join(" | "));
+
+  /* --- вид доски: каждая метрика — горизонтальная строка ------------------ */
+  const css2 = (el, prop) => win.getComputedStyle(el)[prop];
+  const feeds = qa("#alerts-board .al-feed");
+  check("метрик ровно три строки", feeds.length === 3, feeds.length + " строк");
+  const feedsBox = q("#alerts-board .al-feeds");
+  check("строки метрик идут друг под другом (одна колонка у доски)",
+        !!feedsBox && css2(feedsBox, "gridTemplateColumns") === "1fr",
+        feedsBox ? css2(feedsBox, "gridTemplateColumns") : "нет сетки");
+  const rowGrids = qa("#alerts-board .al-feed > .al-feed-grid");
+  check("внутри строки — горизонтальная раскладка в несколько колонок",
+        rowGrids.length === 3 && rowGrids.every((g) =>
+          (css2(g, "gridTemplateColumns").match(/minmax/g) || []).length >= 3),
+        rowGrids.length + " строк: " +
+        (rowGrids[0] ? css2(rowGrids[0], "gridTemplateColumns") : "нет"));
+  check("значение, настройки и лента стоят в одной строке, а не столбиком",
+        rowGrids.length === 3 && rowGrids.every((g) =>
+          !!g.querySelector(":scope > .al-col-now [data-metric]") &&
+          !!g.querySelector(":scope > .al-col-set [data-winbox]") &&
+          !!g.querySelector(":scope > .al-col-tape .al-tape")),
+        rowGrids.length + " строк");
+  const metas = qa("#alerts-board [data-feedmeta]");
+  check("в заголовке строки — сводка метрики (значение, порог, окно, монета)",
+        metas.length === 3 && metas.every((m) =>
+          /^(LIQ|CVD|OI) /.test(m.textContent) && /порог /.test(m.textContent) &&
+          /окно /.test(m.textContent) && /монета /.test(m.textContent)),
+        metas.length + " сводок: " + (metas[0] ? metas[0].textContent : "нет"));
+
+  /* --- ленты живые: сигналы отдельно, поток окна отдельно ---------------- */
+  const tapes = qa("#alerts-board .al-tape");
+  check("у каждой метрики своя лента", tapes.length === 3, tapes.length + " лент");
+  const flowRows = qa("#alerts-board .al-tape .row.flow");
+  check("в лентах видно поток окна, а не только сигналы",
+        flowRows.length >= 3,
+        flowRows.length + " строк потока: " +
+        (flowRows[0] ? flowRows[0].textContent.replace(/\s+/g, " ") : "нет"));
+  const flowMarks = qa("#alerts-board .al-tape .tape-sig");
+  check("у ленты есть разделы «сигналы» и «поток окна»",
+        flowMarks.some((m) => /поток окна/.test(m.textContent)),
+        flowMarks.map((m) => m.textContent).slice(0, 3).join(" | "));
+  const flowMeta = qa("#alerts-board [data-flowmeta]");
+  check("в подписи ленты — сколько событий в окне",
+        flowMeta.length === 3 && flowMeta.every((m) => /поток окна/.test(m.textContent)),
+        flowMeta.map((m) => m.textContent).join(" | "));
+  const sparks = qa("#alerts-board .al-spark");
+  check("микрографик есть у каждой метрики (включая OI)",
+        sparks.length === 3, sparks.length + " графиков");
+  const oiPts = qa('#alerts-board [data-feed="oi"] .al-spark polyline');
+  const cvdPts = qa('#alerts-board [data-feed="cvd"] .al-spark polyline');
+  check("у OI и CVD микрографик нарисован ломаной, а не пустой сеткой",
+        oiPts.length === 1 && cvdPts.length === 1,
+        "oi: " + oiPts.length + ", cvd: " + cvdPts.length);
   check("в статусе доски перечислены окна всех трёх метрик",
         /окна: LIQ 5м · CVD 15м · OI 1ч/.test($("al-status") ? $("al-status").textContent : ""),
         $("al-status") && $("al-status").textContent);

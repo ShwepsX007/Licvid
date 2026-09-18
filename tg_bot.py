@@ -1633,7 +1633,7 @@ class TelegramBot:
         публикации — если он включён, посты уходят админу черновиком.
         """
         from channel_digest import active_images, digest_images, pick_image
-        from daily_digest import render_post
+        from daily_digest import CAPTION_LIMIT, render_post
 
         self._digest_err = ""
         self._last_tg_err = ""
@@ -1642,6 +1642,19 @@ class TelegramBot:
         except Exception as e:
             log.debug("проверка каналов: %s", e)
         day = str((rec or {}).get("day") or "")
+        # Фото рубрики «дневной дайджест» (если админ их загрузил); иначе —
+        # общий набор сводки. Одно фото на пост: порядок сдвигается по номеру
+        # дня, альбома нет — как и в постах сводки.
+        images = digest_images(self.store)
+        try:
+            variant = int(day.replace("-", "")[-2:] or 0)
+        except (TypeError, ValueError):
+            variant = 0
+        img = pick_image(variant, images=images)
+        # С фотографией Telegram разрешает подпись не длиннее 1024 знаков:
+        # раньше пост за сутки (он длиннее) уходил текстом без картинки —
+        # теперь под фото пост собирается под этот лимит (рассказ подрезается)
+        limit = CAPTION_LIMIT if (img and os.path.isfile(img)) else None
         posts: List[dict] = []
         result: Dict[str, Any] = {}
         seen: set = set()
@@ -1656,7 +1669,8 @@ class TelegramBot:
                                         if lang == "en" else
                                         "канал не привязан — перешлите боту пост из канала")]
                 continue
-            caption = render_post(rec, lang, self.site_url())
+            caption = render_post(rec, lang, self.site_url(), limit=limit) if limit \
+                else render_post(rec, lang, self.site_url())
             posts.append({"lang": lang, "cid": cid, "caption": caption, "top": ""})
         if not posts:
             err = next((v[1] for v in result.values()), "каналы не привязаны")
@@ -1664,15 +1678,6 @@ class TelegramBot:
             self._daily_state = {"ok": False, "day": day, "error": err,
                                  "at": time.time()}
             return result
-        # Фото рубрики «дневной дайджест» (если админ их загрузил); иначе —
-        # общий набор сводки. Одно фото на пост: порядок сдвигается по номеру
-        # дня, альбома нет — как и в постах сводки.
-        images = digest_images(self.store)
-        try:
-            variant = int(day.replace("-", "")[-2:] or 0)
-        except (TypeError, ValueError):
-            variant = 0
-        img = pick_image(variant, images=images)
         if self._review_on():
             ok = await self._send_daily_draft(posts, img, day)
             for post in posts:
@@ -3354,12 +3359,17 @@ class TelegramBot:
         v = self.store.visit_stats(7)
         lines = [
             "<b>Визиты</b>",
-            f"Сегодня: <code>{v['today_views']} просмотров</code>,"
-            f" <code>{v['today_uniques']} уникальных</code>",
+            f"Сегодня: <code>{v['today_views']} переходов</code>,"
+            f" <code>{v['today_uniques']} посетителей</code>",
+            f"Служебных запросов отсеяно: <code>{v.get('today_bots', 0)}</code>",
             f"Онлайн WS: <code>{self.ws_clients_fn()}</code>",
         ]
         for d in v["days"][-7:]:
-            lines.append(f"· {d['day']}: <code>{d['views']} / {d['uniques']} уник.</code>")
+            lines.append(f"· {d['day']}: <code>{d['views']} переходов /"
+                         f" {d['uniques']} посетителей</code>")
+        lines.append("<i>Считаем только браузерные переходы: краулеры и превью"
+                     " в статистику не идут, один гость без cookie не"
+                     " размножается на каждой странице.</i>")
         return "\n".join(lines) + self.site_footer()
 
     def _admin_text(self) -> str:
@@ -3375,7 +3385,8 @@ class TelegramBot:
             f"👥 Пользователи: <code>{c['total']}</code>"
             f" (за сутки <code>{c['active_24h']}</code>,"
             f" новых <code>{c['new_24h']}</code>)\n"
-            f"👁 Визиты сегодня: <code>{v['today_views']} / {v['today_uniques']} уник.</code>\n"
+            f"👁 Визиты сегодня: <code>{v['today_views']} переходов /"
+            f" {v['today_uniques']} посетителей</code>\n"
             f"📡 Онлайн WS: <code>{self.ws_clients_fn()}</code>\n"
             f"🩺 Биржи в эфире: <code>{len(live)}</code>\n"
             f"🇷🇺 Канал: {ch(ru)}\n"

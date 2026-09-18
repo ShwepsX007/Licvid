@@ -37,6 +37,7 @@ import json
 import logging
 import os
 import random
+import threading
 import time
 from collections import deque
 from contextlib import asynccontextmanager
@@ -952,6 +953,29 @@ def alerts_market_snapshot() -> dict:
                     oi[sym] = _oi_row(tracker, sym)
                 except Exception:
                     pass
+    def _oi_has_data(rows: Dict[str, dict]) -> bool:
+        for r in (rows or {}).values():
+            for ch in ((r or {}).get("changes") or {}).values():
+                if ch and ch.get("usd") is not None:
+                    return True
+        return False
+
+    if DEMO_MODE and not _oi_has_data(oi):
+        # трекер бирж в демо пуст — берём демо-ряд: без него сервис «Алерты по
+        # объёму» показывал OI нулём, а лента и график стояли пустыми
+        demo = {}
+        for sym in sorted(oi) or list(alert_watch_symbols())[:8]:
+            payload = _demo_oi_payload_from_series(sym)
+            demo[sym] = {"symbol": sym, "total_usd": payload["total_usd"],
+                         "changes": payload["changes"],
+                         "_series": payload["_series"]}
+        if not demo:
+            for sym in ("BTC_USDT", "ETH_USDT", "SOL_USDT"):
+                payload = _demo_oi_payload_from_series(sym)
+                demo[sym] = {"symbol": sym, "total_usd": payload["total_usd"],
+                             "changes": payload["changes"],
+                             "_series": payload["_series"]}
+        oi = demo
     return {"now": now, "events": events, "cvd": cvd, "oi": oi}
 
 
@@ -2288,8 +2312,77 @@ async def api_oi(symbol: str = Query("BTC_USDT")):
         log.debug("oi %s: %s", symbol, e)
     out = tracker.payload(symbol)
     if DEMO_MODE and out["total_usd"] is None:
-        out = _demo_oi_payload(symbol)
+        # демо: ряд уровней ведёт себя как настоящий — цифра и график живут
+        out = _demo_oi_payload_from_series(symbol)
     return out
+
+
+# Демо-ряд OI: один на процесс и по монете. Раньше демо-OI был случайной
+# картинкой на каждый запрос, а в «Алертах по объёму» его вообще не было —
+# трекер бирж в демо-режиме пуст, поэтому OI показывал ноль, гребёнка стояла
+# пустой, и лента метрики выглядела мёртвой. Ряд тикает сам: уровни копятся
+# шагом DEMO_OI_STEP_SEC, изменения окон считаются по нему же.
+DEMO_OI_STEP_SEC = 300
+DEMO_OI_POINTS = 288                    # сутки шагом 5 минут
+_DEMO_OI_LOCK = threading.Lock()
+_DEMO_OI_SERIES: Dict[str, Dict[int, float]] = {}
+
+
+def _demo_oi_level(prev: float) -> float:
+    return max(1e6, float(prev) * (1.0 + random.gauss(0, 0.0015)))
+
+
+def _demo_oi_series(symbol: str) -> Dict[int, float]:
+    """Непрерывный демо-ряд уровней OI по монете (обновляется на месте)."""
+    now = time.time()
+    bucket = int(now // DEMO_OI_STEP_SEC) * DEMO_OI_STEP_SEC
+    with _DEMO_OI_LOCK:
+        series = _DEMO_OI_SERIES.get(symbol)
+        if not series:
+            series = {}
+            level = 4e8 * (1 - random.uniform(0, 0.02))
+            start = bucket - (DEMO_OI_POINTS - 1) * DEMO_OI_STEP_SEC
+            for i in range(DEMO_OI_POINTS):
+                level = _demo_oi_level(level)
+                series[start + i * DEMO_OI_STEP_SEC] = round(level, 2)
+            _DEMO_OI_SERIES[symbol] = series
+        last = max(series)
+        while last < bucket:
+            last += DEMO_OI_STEP_SEC
+            series[last] = round(_demo_oi_level(series[last - DEMO_OI_STEP_SEC]), 2)
+        if len(series) > DEMO_OI_POINTS:
+            for old_key in sorted(series)[:len(series) - DEMO_OI_POINTS]:
+                series.pop(old_key, None)
+        return dict(series)
+
+
+def _demo_oi_payload_from_series(symbol: str) -> dict:
+    """Демо-ответ OI: тотал и окна — по тому же ряду, что рисует график."""
+    from oi_feed import OI_WINDOWS
+    series = _demo_oi_series(symbol)
+    keys = sorted(series)
+    total = float(series[keys[-1]])
+    legs = ["binance", "bybit", "okx", "gate", "bitget", "htx"]
+    weights = [0.35, 0.22, 0.14, 0.12, 0.10, 0.07]
+    per = {e: round(total * w, 2) for e, w in zip(legs, weights)}
+    now = time.time()
+    changes: Dict[str, Optional[dict]] = {}
+    for name, window in OI_WINDOWS:
+        base_key = None
+        for t in keys:
+            if t <= now - window:
+                base_key = t
+            else:
+                break
+        base = float(series[base_key]) if base_key is not None else None
+        usd = round(total - base, 2) if base else None
+        changes[name] = ({"usd": usd, "pct": round(usd / base * 100, 3)}
+                         if base else None)
+    return {"symbol": symbol, "total_usd": round(total, 2),
+            "per_exchange": per, "live_exchanges": legs,
+            "hist_exchanges": ["binance", "bybit", "gate"],
+            "changes": changes, "partial": {k: False for k, _ in OI_WINDOWS},
+            "ts": now, "stale_sec": 0.0, "_series": series}
 
 
 def _demo_oi_payload(symbol: str) -> dict:

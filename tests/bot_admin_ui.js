@@ -134,7 +134,8 @@ function adminHandler(u, opts, calls) {
   if (u.indexOf("/api/auth/me") === 0) return { ok: true, user: ADMIN };
   if (u.indexOf("/api/admin/overview") === 0) {
     return { ok: true, users: { total: 5, new_24h: 1, active_24h: 3 },
-             visits: { today_views: 10, today_uniques: 4, days: [] },
+             visits: { today_views: 10, today_uniques: 4, today_bots: 3,
+                       days: [{ day: "2026-09-17", views: 10, uniques: 4, bots: 3 }] },
              ws_clients: 7, bot: { ready: true, username: "LiqScopeBot" },
              health: { live_exchanges: ["binance"] },
              settings: { bot_welcome: "привет", site_notice: "" },
@@ -229,6 +230,33 @@ function click(win, el) {
   const page = await openPage("/admin", { handler: adminHandler });
   const { win, doc, calls } = page;
   await new Promise((r) => setTimeout(r, 250));
+
+  // Статистика посещений: переходы и уникальные — разные числа, служебные отдельно
+  check("переходы показаны своей цифрой",
+    doc.querySelector("#st-views").textContent === "10",
+    doc.querySelector("#st-views").textContent);
+  check("уникальные посетители — своей",
+    doc.querySelector("#st-uniq").textContent === "4",
+    doc.querySelector("#st-uniq").textContent);
+  check("служебных запросов отсеяно — отдельной цифрой",
+    doc.querySelector("#st-bots").textContent === "3",
+    doc.querySelector("#st-bots").textContent);
+  const statLabels = Array.prototype.map.call(
+    doc.querySelectorAll(".stat-label"), (el) => el.textContent);
+  check("подписи не путают переходы и посетителей",
+    statLabels.indexOf("Переходов сегодня") !== -1 &&
+    statLabels.indexOf("Уникальных посетителей") !== -1 &&
+    statLabels.indexOf("Служебных отсеяно") !== -1,
+    statLabels.join(" | "));
+  const bar = doc.querySelector("#visit-bars .bar");
+  check("в столбике суток видно и переходы, и посетителей, и службу",
+    !!bar && /10 переходов/.test(bar.getAttribute("title")) &&
+    /4 посетителей/.test(bar.getAttribute("title")) &&
+    /служебных отсеяно 3/.test(bar.getAttribute("title")),
+    bar ? bar.getAttribute("title") : "нет столбика");
+  check("переходы и посетители нарисованы разными слоями",
+    !!bar && !!bar.querySelector(".bar-u"),
+    bar ? bar.innerHTML.slice(0, 80) : "нет");
 
   check("карточка управления ботом есть", !!doc.querySelector("#bot-admin"));
   check("строка состояния бота заполнена",

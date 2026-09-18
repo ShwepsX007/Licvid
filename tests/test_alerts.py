@@ -10,9 +10,9 @@ sys.path.insert(0, HERE)
 
 from alerts import (  # noqa: E402
     THRESHOLD_PRESETS_FLOW, canon_symbol, cooldown_sec, cvd_by_symbol, evaluate,
-    format_alert_html, liq_by_symbol, live_snapshot, money, normalize_config,
-    oi_by_symbol, oi_window_key, presets, should_fire, sparkline, symbol_of,
-    threshold_presets, window_label,
+    flow_rows, format_alert_html, liq_by_symbol, live_snapshot, money,
+    normalize_config, oi_by_symbol, oi_points, oi_window_key, presets,
+    should_fire, sparkline, symbol_of, threshold_presets, window_label,
 )
 
 
@@ -505,6 +505,89 @@ class CoinsPerMetricTest(unittest.TestCase):
         self.assertEqual(live["coins"]["liq"], "BTC_USDT")
         self.assertEqual(live["liq"]["coin"], "BTC_USDT")
         self.assertEqual(live["liq"]["symbol"], "BTC_USDT")
+
+
+class LiveFlowTest(unittest.TestCase):
+    """Лента и микрографик должны быть живыми, а не только по сигналам.
+
+    Раньше в сервисе «Алерты по объёму» ленты стояли с «пока тихо» (сигналы
+    редкие), а микрографик OI вообще был пустым: у трекера нет ряда для
+    графика. Проверяем, что поток собирается по всем трём метрикам, а из ряда
+    OI получается гребёнка.
+    """
+
+    def setUp(self):
+        self.now = 4_000_000.0
+        self.market = {
+            "now": self.now,
+            "events": [_liq("BTC_USDT", 900_000, self.now - 5),
+                       _liq("SOL_USDT", 300_000, self.now - 40),
+                       _liq("BTC_USDT", 100, self.now - 60)],
+            "cvd": {"BTC_USDT|1": {int(self.now) - 60: -120_000.0,
+                                   int(self.now) - 120: 40_000.0},
+                    "SOL_USDT|1": {int(self.now): 15_000.0},
+                    "BTC_USDT|5": {int(self.now): 999_999.0}},
+            "oi": {"BTC_USDT": {
+                "total_usd": 4e8, "_series": {
+                    int(self.now) - 600: 400_000_000.0,
+                    int(self.now) - 300: 401_000_000.0,
+                    int(self.now): 400_200_000.0},
+                "changes": {"h1": {"usd": 200_000.0, "pct": 0.05}}}},
+        }
+
+    def cfg(self, **over):
+        raw = {"enabled": True, "watch": ["liq", "cvd", "oi"],
+               "coins": {"liq": "ALL", "cvd": "ALL", "oi": "ALL"}}
+        raw.update(over)
+        return normalize_config(raw)
+
+    def test_flow_has_rows_for_every_metric(self):
+        live = live_snapshot(self.cfg(), self.market)
+        for metric in ("liq", "cvd", "oi"):
+            rows = live[metric]["flow"]
+            self.assertTrue(rows, metric)
+            self.assertTrue(all("ts" in r and "value" in r for r in rows), metric)
+
+    def test_flow_is_newest_first_and_limited(self):
+        rows = flow_rows("liq", self.market, self.cfg(), self.now, limit=2)
+        self.assertEqual(len(rows), 2)
+        self.assertGreaterEqual(rows[0]["ts"], rows[1]["ts"])
+        self.assertEqual(rows[0]["symbol"], "BTC_USDT")
+
+    def test_flow_respects_coin_and_min_event(self):
+        cfg = self.cfg(coins={"liq": "SOL_USDT", "cvd": "ALL", "oi": "ALL"})
+        rows = flow_rows("liq", self.market, cfg, self.now)
+        self.assertEqual([r["symbol"] for r in rows], ["SOL_USDT"])
+        cfg2 = self.cfg(min_event={"liq": 500_000, "cvd": 0, "oi": 0})
+        rows2 = flow_rows("liq", self.market, cfg2, self.now)
+        self.assertEqual([r["symbol"] for r in rows2], ["BTC_USDT"])
+
+    def test_cvd_flow_uses_minute_buckets(self):
+        """Поток CVD — минутные дельты, крупный таймфрейм окна не дублируем."""
+        rows = flow_rows("cvd", self.market, self.cfg(), self.now)
+        self.assertEqual(len(rows), 3)          # m5-бакет 999_999 не попал
+        self.assertEqual(rows[0]["symbol"], "SOL_USDT")   # свежайший бакет
+        btc = [r for r in rows if r["symbol"] == "BTC_USDT"]
+        self.assertEqual(len(btc), 2)
+        self.assertAlmostEqual(btc[0]["value"], -120_000.0)
+
+    def test_oi_flow_and_spark_come_from_series(self):
+        live = live_snapshot(self.cfg(), self.market)
+        rows = live["oi"]["flow"]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["symbol"], "BTC_USDT")
+        self.assertAlmostEqual(rows[0]["value"], -800_000.0)
+        self.assertEqual(rows[0]["bucket_min"], 5)
+        self.assertTrue(live["oi"]["spark"], "гребешка OI не должна быть пустой")
+        self.assertTrue(any(live["oi"]["spark"]), "гребешка OI из нулей")
+        self.assertEqual(len(oi_points(self.market["oi"], "ALL")), 2)
+
+    def test_spark_of_each_metric_is_filled(self):
+        live = live_snapshot(self.cfg(), self.market)
+        for metric in ("liq", "cvd", "oi"):
+            spark = live[metric]["spark"]
+            self.assertEqual(len(spark), 24, metric)
+            self.assertTrue(any(spark), metric)
 
 
 if __name__ == "__main__":

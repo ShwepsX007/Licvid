@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import secrets
 import threading
 import time
@@ -77,6 +78,43 @@ def _set_vid(response: Response, vid: str) -> None:
         max_age=400 * 86400, path="/",
         secure=ctx.cookie_secure,
     )
+
+
+# Кто не посетитель: краулеры, превью мессенджеров, скрипты и мониторинги.
+# Иначе один прогон бота выглядит как десятки «уникальных посетителей».
+BOT_RE = re.compile(
+    r"bot|crawler|spider|crawl|slurp|curl|wget|python-requests|python-httpx|"
+    r"httpx|aiohttp|okhttp|java/|libwww|feed|scrapy|httpclient|headless|"
+    r"phantom|puppeteer|playwright|monitor|uptime|pingdom|preview|facebook|"
+    r"telegram|whatsapp|skype|slack|discord|twitter|linkedin|embedly|"
+    r"googlebot|bingbot|yandex|duckduck|baidu|semrush|ahrefs|mj12|dotbot|"
+    r"petal|applebot|petalbot|dataprovider|go-http-client|axios|node-fetch|"
+    r"postmanruntime|insomnia",
+    re.I,
+)
+
+
+def _ua_text(request: Request) -> str:
+    return (request.headers.get("user-agent") or "").strip()[:180]
+
+
+def _is_bot_ua(ua: str) -> bool:
+    ua = (ua or "").strip()
+    if not ua:                      # без UA — точно не браузер
+        return True
+    if BOT_RE.search(ua):
+        return True
+    # браузерные маркеры: у настоящих браузеров есть хотя бы один из них
+    return not re.search(r"Mozilla/5\.0|AppleWebKit|Gecko/|Presto/|Trident/", ua)
+
+
+def _wants_html(request: Request) -> bool:
+    """Запрос страницы, а не картинки/ассета: важно для счётчика переходов."""
+    dest = (request.headers.get("sec-fetch-dest") or "").strip().lower()
+    if dest:
+        return dest in ("document", "iframe", "empty")
+    accept = (request.headers.get("accept") or "").lower()
+    return ("text/html" in accept) or accept.startswith("*/*")
 
 
 def current_user(request: Request) -> Optional[dict]:
@@ -1258,15 +1296,27 @@ def register_account_routes(app) -> None:
     @app.middleware("http")
     async def visit_and_vid(request: Request, call_next):
         path = request.url.path or "/"
+        ua = _ua_text(request)
+        bot = _is_bot_ua(ua)
+        iph = hash_ip(ctx.secret, _client_ip(request))
         vid = request.cookies.get(COOKIE_VID) or ""
         new_vid = ""
-        if not vid:
-            new_vid = secrets.token_urlsafe(12)
-            vid = new_vid
+        if not vid and not bot:
+            # Тот же гость без cookie не должен «размножаться»: если этой
+            # связке ip+ua vid уже выдан за сутки — берём его.
+            vid = ""
+            if ctx.store:
+                try:
+                    vid = ctx.store.visit_vid(iph, ua)
+                except Exception as e:            # noqa: BLE001
+                    log.debug("visit vid: %s", e)
+            if not vid:
+                new_vid = secrets.token_urlsafe(12)
+                vid = new_vid
         response = await call_next(request)
         if new_vid:
             _set_vid(response, new_vid)
-        # страницы, не статика/апи/ws
+        # переходы по страницам: не статика/апи/ws и не служебные запросы
         if (
             ctx.store
             and request.method in ("GET", "HEAD")
@@ -1274,11 +1324,12 @@ def register_account_routes(app) -> None:
             and not path.startswith("/static")
             and not path.startswith("/api")
             and path != "/ws"
+            and _wants_html(request)
         ):
             try:
                 user = current_user(request)
-                iph = hash_ip(ctx.secret, _client_ip(request))
-                ctx.store.record_visit(path, vid, user["id"] if user else None, iph)
+                ctx.store.record_visit(path, vid, user["id"] if user else None, iph,
+                                       ua=ua, bot=bot)
             except Exception as e:
                 log.debug("visit: %s", e)
         return response

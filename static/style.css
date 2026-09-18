@@ -1944,16 +1944,34 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
 }
 .pane-draw.armed.erase { cursor: not-allowed; }
 
-/* Автоследование графика: включено — синий акцент, пауза (отлистали
-   в историю) — янтарный, чтобы это не выглядело как «кнопка не работает» */
-.profile-toggle.follow-toggle.active {
-    border-color: var(--color-blue);
-    color: var(--color-blue);
+/* Автоследование графика. Горит ⇔ слежение включено; когда оно выключено,
+   кнопка погасена и ничего не светит. Пауза (график отлистали в историю) —
+   это по-прежнему «включено», поэтому кнопка остаётся горящей, но пунктиром
+   и с ⏸: раньше пауза красилась янтарным и выглядела ярче самого слежения,
+   из-за чего состояние читалось наоборот. */
+.profile-toggle.follow-toggle {
+    border-color: #2a3350;
+    color: var(--text-secondary);
+    background: var(--bg-card);
+    box-shadow: none;
 }
-.profile-toggle.follow-toggle.paused {
-    border-color: var(--color-gold);
-    color: var(--color-gold);
+.profile-toggle.follow-toggle.active {
+    border-color: rgba(0, 214, 255, 0.85);
+    color: #9beaff;
+    background: rgba(0, 214, 255, 0.16);
+    box-shadow: 0 0 12px rgba(0, 214, 255, 0.35);
+}
+.profile-toggle.follow-toggle.active:hover {
+    border-color: #00d6ff;
+    background: rgba(0, 214, 255, 0.24);
+}
+.profile-toggle.follow-toggle[data-state="paused"] {
     border-style: dashed;
+}
+.profile-toggle.follow-toggle[data-state="paused"]::before {
+    content: "⏸ ";
+    font-size: 0.86em;
+    opacity: 0.9;
 }
 /* Пояснение в окне строки потока «ВСЕ»: строка — минутки монеты, не свеча */
 .flow-note {

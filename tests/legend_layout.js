@@ -235,11 +235,12 @@ async function main() {
     cssBlock("#layer-call").indexOf("margin-left: auto") !== -1);
   const legendKids = Array.from(doc.querySelector(".chart-legend").children);
   const kidIds = legendKids.map((k) => k.id || k.className);
-  // справа: слои, автоследование за ценой, рисование, свернуть/развернуть
+  // справа: слои, рисование, свернуть/развернуть.
+  // автоследование убрано из шапки — оно живёт в плашке слоёв
   check("right cluster order",
-    kidIds.slice(-5).join(",") ===
-      "layer-call,follow-toggle,draw-toggle,chart-toggle,chart-expand",
-    kidIds.slice(-5).join(","));
+    kidIds.slice(-4).join(",") ===
+      "layer-call,draw-toggle,chart-toggle,chart-expand",
+    kidIds.slice(-4).join(","));
   check("toggles last in legend",
     legendKids.length >= 2 &&
     legendKids[legendKids.length - 2].id === "chart-toggle" &&

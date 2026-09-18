@@ -236,6 +236,69 @@
         });
     }
 
+    // --- Время на графике: местное, как в ленте -----------------------------
+    // Библиотека графика по умолчанию подписывает ось временем Гринвича, из-за
+    // чего низ графика жил в UTC, а лента — в поясе пользователя. Подставляем
+    // свои форматеры: и деления оси, и подпись перекрестия идут в местном
+    // времени и на языке интерфейса.
+    const TICK_YEAR = 0, TICK_MONTH = 1, TICK_DAY = 2, TICK_TIME = 3, TICK_TIME_SEC = 4;
+
+    function chartTimeText(t, tickType) {
+        const d = new Date((Number(t) || 0) * 1000);
+        if (isNaN(d.getTime())) return "";
+        const tag = (I18n && I18n.localeTag) ? I18n.localeTag() : undefined;
+        const daily = Number(state.timeframe) >= 1440;
+        try {
+            switch (tickType) {
+                case TICK_YEAR: return String(d.getFullYear());
+                case TICK_MONTH: return d.toLocaleDateString(tag, { month: "short" });
+                case TICK_DAY:
+                    return d.toLocaleDateString(tag, { day: "2-digit", month: "short" });
+                case TICK_TIME_SEC:
+                    return d.toLocaleTimeString(tag, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+                case TICK_TIME:
+                    return daily ? d.toLocaleDateString(tag, { day: "2-digit", month: "2-digit" })
+                                 : d.toLocaleTimeString(tag, { hour: "2-digit", minute: "2-digit" });
+                default:
+                    // Неизвестный тип деления: на дневках — дата, иначе время
+                    return daily
+                        ? d.toLocaleDateString(tag, { day: "2-digit", month: "2-digit" })
+                        : d.toLocaleTimeString(tag, { hour: "2-digit", minute: "2-digit" });
+            }
+        } catch (e) { return ""; }
+    }
+
+    /** Подпись перекрестия (и метка на оси): дата + местное время. */
+    function chartCrosshairText(t) {
+        const d = new Date((Number(t) || 0) * 1000);
+        if (isNaN(d.getTime())) return "";
+        const tag = (I18n && I18n.localeTag) ? I18n.localeTag() : undefined;
+        const daily = Number(state.timeframe) >= 1440;
+        try {
+            const date = d.toLocaleDateString(tag, { day: "2-digit", month: "short", year: "numeric" });
+            if (daily) return date;
+            return date + " " + d.toLocaleTimeString(tag, { hour: "2-digit", minute: "2-digit" });
+        } catch (e) { return ""; }
+    }
+
+    /** Форматеры оси: применяются к графику и переприменяются при смене языка. */
+    function chartTimeOptions() {
+        return {
+            timeScale: {
+                tickMarkFormatter: (t, tickType) => chartTimeText(t, tickType),
+            },
+            localization: {
+                locale: (I18n && I18n.localeTag) ? I18n.localeTag() : undefined,
+                timeFormatter: (t) => chartCrosshairText(t),
+            },
+        };
+    }
+
+    function applyChartTimeOptions() {
+        if (!chart || !chart.applyOptions) return;
+        try { chart.applyOptions(chartTimeOptions()); } catch (e) { /* ignore */ }
+    }
+
     // График не привязан к фильтру ленты: включив «ВСЕ», пользователь видит
     // все ликвидации в эфире, а график остаётся на выбранной монете.
     const chartSymbol = () => state.chartSymbol || state.symbols[0] || "BTC_USDT";
@@ -516,9 +579,16 @@
             },
             crosshair: { mode: LightweightCharts.CrosshairMode ? LightweightCharts.CrosshairMode.Normal : 0 },
             rightPriceScale: { borderColor: "#212938", scaleMargins: { top: 0.06, bottom: 0.24 } },
-            timeScale: { borderColor: "#212938", timeVisible: true, secondsVisible: false, rightOffset: 6 },
+            timeScale: {
+                borderColor: "#212938", timeVisible: true, secondsVisible: false, rightOffset: 6,
+                // Деления оси — в местном времени пользователя (как в ленте),
+                // а не в UTC, который библиотека ставит по умолчанию
+                tickMarkFormatter: (t, tickType) => chartTimeText(t, tickType),
+            },
             localization: {
                 priceFormatter: (p) => Number(p).toFixed(priceDigits(p)),
+                locale: (I18n && I18n.localeTag) ? I18n.localeTag() : undefined,
+                timeFormatter: (t) => chartCrosshairText(t),
             },
         });
 
@@ -660,15 +730,25 @@
         if (on) anchorToLast();   // включили — сразу к актуальной свече
     }
 
+    /** Подсветка кнопки: горит ⇔ автоследование включено.
+     *
+     * Раньше «горит» означало «следим прямо сейчас», а на паузе (отлистали в
+     * историю) кнопка гасла и становилась янтарной — со стороны это читалось
+     * наоборот: пока график стоит на паузе, кнопка ярче, чем когда он едет.
+     * Теперь состояний два, и они не путаются: включено — кнопка горит синим
+     * (на паузе тот же синий, но пунктиром и со ⏸), выключено — кнопка погасла.
+     */
     function paintFollowButtons() {
-        const on = state.chartFollow && !state.followPaused;
+        const on = !!state.chartFollow;
+        const paused = on && !!state.followPaused;
         [$("follow-toggle"), $("follow-toggle-pop")].forEach((btn) => {
             if (!btn) return;
             btn.classList.toggle("active", on);
-            btn.classList.toggle("paused", !!state.followPaused);
+            btn.classList.toggle("paused", paused);
             btn.setAttribute("aria-pressed", on ? "true" : "false");
-            const key = state.followPaused ? "chart.follow_paused"
-                : (state.chartFollow ? "chart.follow_on" : "chart.follow_off");
+            btn.setAttribute("data-state", on ? (paused ? "paused" : "on") : "off");
+            const key = paused ? "chart.follow_paused"
+                : (on ? "chart.follow_on" : "chart.follow_off");
             btn.title = I18n.t(key);
         });
     }
@@ -683,9 +763,18 @@
         } catch (e) { /* ignore */ }
         btns.forEach((btn) => {
             if (!btn) return;
-            btn.addEventListener("click", () => setChartFollow(!state.chartFollow));
+            btn.addEventListener("click", () => {
+                // На паузе клик — это «верни меня к цене», а не «выключи
+                // слежение»: иначе кнопка читалась как выключение ровно
+                // тогда, когда пользователь просил вернуть график.
+                if (state.chartFollow && state.followPaused) {
+                    setChartFollow(true);
+                    return;
+                }
+                setChartFollow(!state.chartFollow);
+            });
         });
-        I18n.onChange(paintFollowButtons);
+        I18n.onChange(() => { paintFollowButtons(); applyChartTimeOptions(); });
         paintFollowButtons();
         applyFollowMode();
         window.LiQScopeFollow = window.LiQScopeFollow || {};
@@ -714,6 +803,17 @@
                 try {
                     const ts = chart && chart.timeScale();
                     return ts && ts.options ? ts.options() : null;
+                } catch (e) { return null; }
+            },
+        };
+        // Для tests/chart_time.js: подписи времени можно проверить без графика
+        window.LiQScopeChartTime = {
+            tick: (t, type) => chartTimeText(t, type),
+            crosshair: (t) => chartCrosshairText(t),
+            apply: () => applyChartTimeOptions(),
+            options: () => {
+                try {
+                    return chart && chart.options ? chart.options() : null;
                 } catch (e) { return null; }
             },
         };

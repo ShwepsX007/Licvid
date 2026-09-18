@@ -1,8 +1,12 @@
-/** Автоследование графика за ценой: кнопка «🎯 Авто» рядом с «☰ Слои».
+/** Автоследование графика за ценой: кнопка «🎯 Автоследование за ценой»
+ *  живёт только в плашке слоёв («☰ Слои»).
  *
  *  Что проверяем:
- *    * кнопка есть и в верхней плашке, и в попапе слоёв, состояние
+ *    * кнопка есть в попапе слоёв и её нет в шапке графика; состояние
  *      сохраняется между заходами (localStorage liqscope.chartFollow);
+ *    * кнопка горит ⇔ слежение включено: на паузе остаётся подсвеченной
+ *      (⏸), при выключении гаснет, а клик на паузе возвращает к цене,
+ *      а не выключает слежение;
  *    * горизонталь — когда свеча подошла к правому краю, окно сдвигается
  *      ровно на шаг, сохраняя зум (чистая функция followRange);
  *    * вертикаль — цена удерживается в поле зрения зазором 15% сверху и снизу
@@ -199,17 +203,19 @@ async function part1() {
   const click = (el) => el.dispatchEvent(
     new win.MouseEvent("click", { bubbles: true, cancelable: true, view: win }));
 
-  check("кнопка автоследования в верхней плашке", !!doc.getElementById("follow-toggle"));
-  check("и в попапе слоёв", !!doc.getElementById("follow-toggle-pop"));
-  check("рядом с кнопкой слоёв",
-    doc.getElementById("follow-toggle").previousElementSibling.id === "layer-call",
-    doc.getElementById("follow-toggle").previousElementSibling.id);
+  check("кнопки в шапке графика больше нет", !doc.getElementById("follow-toggle"));
+  check("кнопка переехала в плашку слоёв", !!doc.getElementById("follow-toggle-pop"));
+  check("в шапке на её месте — рисование",
+    doc.getElementById("layer-call").nextElementSibling.id === "draw-toggle",
+    doc.getElementById("layer-call").nextElementSibling.id);
   check("тестовый API доступен", !!F && typeof F.range === "function");
 
-  const btn = doc.getElementById("follow-toggle");
+  const btn = doc.getElementById("follow-toggle-pop");
   check("кнопка подписана", /Авто/.test(btn.textContent), btn.textContent);
   check("по умолчанию автоследование включено", F.enabled() === true);
-  check("включённая кнопка подсвечена", btn.classList.contains("active"));
+  check("включённая кнопка подсвечена",
+    btn.classList.contains("active") && btn.getAttribute("data-state") === "on",
+    btn.className + " / " + btn.getAttribute("data-state"));
   check("зазор по вертикали 15%",
     F.margin === 0.15 && F.priceOptions(true).scaleMargins.top === 0.15 &&
     F.priceOptions(true).scaleMargins.bottom === 0.15,
@@ -244,11 +250,16 @@ async function part1() {
   const pausedBefore = rec.ranges.length;
   F.step();
   check("на паузе окно не дёргается", rec.ranges.length === pausedBefore);
-  check("кнопка показывает паузу", btn.classList.contains("paused") &&
-    !btn.classList.contains("active"), btn.className);
-  click(btn);   // выключили
-  click(btn);   // и снова включили — должны вернуться к свече
+  check("на паузе кнопка остаётся горящей: видно ⏸, но она не гаснет",
+    btn.classList.contains("paused") && btn.classList.contains("active") &&
+    btn.getAttribute("data-state") === "paused",
+    btn.className + " / " + btn.getAttribute("data-state"));
+  click(btn);   // на паузе клик — «верни меня к цене», а не «выключи»
   await sleep(60);
+  check("клик на паузе вернул слежение, а не выключил его",
+    F.enabled() === true && F.paused() === false &&
+    btn.getAttribute("data-state") === "on",
+    String(F.enabled()) + "/" + String(F.paused()) + " / " + btn.getAttribute("data-state"));
   const anchor = rec.ranges[rec.ranges.length - 1];
   check("включение возвращает к актуальной свече",
     F.paused() === false && anchor && Math.abs(anchor.to - (last + F.keepBars)) < 1e-6,
@@ -258,7 +269,10 @@ async function part1() {
   click(btn);
   await sleep(50);
   check("клик выключил автоследование", F.enabled() === false);
-  check("кнопка погасла", !btn.classList.contains("active"));
+  check("кнопка погасла и ничего не светит",
+    !btn.classList.contains("active") && !btn.classList.contains("paused") &&
+    btn.getAttribute("data-state") === "off",
+    btn.className + " / " + btn.getAttribute("data-state"));
   check("вернулись прежние отступы цены",
     rec.price.some((o) => o.scaleMargins && o.scaleMargins.bottom === 0.24 &&
                           o.scaleMargins.top === 0.06),

@@ -79,6 +79,7 @@
             servicesLead: "Подписка сохранится: когда сервис заработает, он появится и в кабинете, и в боте.",
             soon: "скоро",
             digestOpen: "Открыть дайджест",
+            digest: "Дайджест",
             waitlistOn: "В листе ожидания",
             waitlistOff: "В лист ожидания",
             subscribed: "Подключено",
@@ -172,6 +173,7 @@
             servicesLead: "Your subscription is kept: when a service ships, it appears in the cabinet and the bot.",
             soon: "soon",
             digestOpen: "Open digest",
+            digest: "Digest",
             waitlistOn: "On the waitlist",
             waitlistOff: "Join waitlist",
             subscribed: "On",
@@ -237,6 +239,12 @@
             return;
         }
         var html = "";
+        // Дайджест — из любой страницы в шапке: раньше в него можно было
+        // попасть только кнопкой внутри сервиса или через логотип и главную
+        if (path !== "/digest") {
+            html += '<a class="btn btn-ghost btn-compact" href="/digest">📰 ' +
+                t("digest") + "</a>";
+        }
         if (path !== "/cabinet") {
             html += '<a class="btn btn-ghost btn-compact" href="/cabinet">' + t("cabinet") + "</a>";
         }
@@ -729,12 +737,17 @@
         return p.thresholds_liq || p.thresholds || [50000, 100000, 250000, 500000, 1e6, 5e6];
     }
     function alPushSpark(key, row) {
+        /* Микрографик метрики. Первый кадр берём у сервера (накопительная
+           кривая окна), дальше ведём свой буфер: на каждом опросе дописываем
+           итог окна. Так линия двигается даже между редкими бакетами CVD/OI —
+           раньше серверная «гребёнка» не менялась, и график стоял картинкой. */
+        var buf = alSparkBuf[key] || [];
         var src = (row && row.spark && row.spark.length) ? row.spark : null;
-        if (src) { alSparkBuf[key] = src.slice(); return; }
-        var a = alSparkBuf[key] || [];
-        a.push(Number(row && row.value) || 0);
-        if (a.length > 36) a = a.slice(-36);
-        alSparkBuf[key] = a;
+        if (!buf.length && src) { alSparkBuf[key] = src.slice(-36); return; }
+        var v = Number(row && (row.total !== undefined ? row.total : row.value)) || 0;
+        buf.push(v);
+        if (buf.length > 36) buf = buf.slice(-36);
+        alSparkBuf[key] = buf;
     }
     function alSparkGrid(w, h) {
         // прозрачная сетка, как на биржевом графике
@@ -918,7 +931,9 @@
         var side = String(f.side || "");
         var what = side === "LONG" ? "лонг" : side === "SHORT" ? "шорт" : "";
         var bmin = Number(f.bucket_min) || 0;
-        var extra = [what, bmin ? "за " + alWin(bmin) : "",
+        var bsec = Number(f.bucket_sec) || 0;
+        var span = bsec ? "за " + bsec + "с" : (bmin ? "за " + alWin(bmin) : "");
+        var extra = [what, span,
                      f.exchange ? String(f.exchange) : ""].filter(Boolean).join(" · ");
         return '<div class="row flow"><span class="t">' + tm + "</span>" +
             '<span class="m">' + (cls === "pos" ? "🟢" : "🔴") + "</span>" +

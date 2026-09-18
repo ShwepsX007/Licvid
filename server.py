@@ -934,6 +934,12 @@ def _oi_row(tracker, sym: str) -> dict:
         row["_series"] = tracker.series(sym)
     except Exception:
         row["_series"] = {}
+    # ряд живых опросов (десятки секунд): по нему микрографик OI двигается,
+    # а не стоит картинкой до следующего 5-минутного бакета
+    try:
+        row["_live"] = tracker.live_series(sym)
+    except Exception:
+        row["_live"] = {}
     return row
 
 
@@ -2335,8 +2341,11 @@ async def api_oi(symbol: str = Query("BTC_USDT")):
 # шагом DEMO_OI_STEP_SEC, изменения окон считаются по нему же.
 DEMO_OI_STEP_SEC = 300
 DEMO_OI_POINTS = 288                    # сутки шагом 5 минут
+DEMO_OI_LIVE_SEC = 15                   # живой опрос демо-ряда (как у трекера)
+DEMO_OI_LIVE_POINTS = 40                # столько живых точек держим для графика
 _DEMO_OI_LOCK = threading.Lock()
 _DEMO_OI_SERIES: Dict[str, Dict[int, float]] = {}
+_DEMO_OI_LIVE: Dict[str, Dict[int, float]] = {}
 
 
 def _demo_oi_level(prev: float) -> float:
@@ -2364,6 +2373,19 @@ def _demo_oi_series(symbol: str) -> Dict[int, float]:
         if len(series) > DEMO_OI_POINTS:
             for old_key in sorted(series)[:len(series) - DEMO_OI_POINTS]:
                 series.pop(old_key, None)
+        # Живой ряд: как кольцо опросов настоящего трекера — тик раз в
+        # DEMO_OI_LIVE_SEC, а 5-минутный бакет догоняет последний уровень.
+        live = _DEMO_OI_LIVE.setdefault(symbol, {})
+        tick = int(now // DEMO_OI_LIVE_SEC) * DEMO_OI_LIVE_SEC
+        if not live:
+            live[tick] = round(max(1e6, series[max(series)]), 2)
+        while max(live) < tick:
+            prev = live[max(live)]
+            live[max(live) + DEMO_OI_LIVE_SEC] = round(
+                max(1e6, prev * (1.0 + random.gauss(0, 0.0004))), 2)
+        for old_key in sorted(live)[:max(0, len(live) - DEMO_OI_LIVE_POINTS)]:
+            live.pop(old_key, None)
+        series[bucket] = live[max(live)]        # бакет догоняет живой уровень
         return dict(series)
 
 
@@ -2389,11 +2411,22 @@ def _demo_oi_payload_from_series(symbol: str) -> dict:
         usd = round(total - base, 2) if base else None
         changes[name] = ({"usd": usd, "pct": round(usd / base * 100, 3)}
                          if base else None)
+    # m1 — по живому ряду (как у трекера по кольцу опросов), иначе окно
+    # «минута» показывало то же, что 5-минутный бакет
+    live = dict(_DEMO_OI_LIVE.get(symbol) or {})
+    lkeys = sorted(live)
+    if len(lkeys) >= 2:
+        cur_ts = lkeys[-1]
+        ref = min(lkeys[:-1], key=lambda t: abs(t - (cur_ts - 60)))
+        base_l = float(live[ref])
+        if base_l > 0:
+            usd_l = round(float(live[cur_ts]) - base_l, 2)
+            changes["m1"] = {"usd": usd_l, "pct": round(usd_l / base_l * 100, 3)}
     return {"symbol": symbol, "total_usd": round(total, 2),
             "per_exchange": per, "live_exchanges": legs,
             "hist_exchanges": ["binance", "bybit", "gate"],
             "changes": changes, "partial": {k: False for k, _ in OI_WINDOWS},
-            "ts": now, "stale_sec": 0.0, "_series": series}
+            "ts": now, "stale_sec": 0.0, "_series": series, "_live": live}
 
 
 def _demo_oi_payload(symbol: str) -> dict:

@@ -18,14 +18,14 @@ import asyncio
 import logging
 import os
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Body, Request
 from fastapi.responses import FileResponse, JSONResponse
 
-from daily_digest import (DAY_SEC, NARRATIVE_MIN, DigestStore, brief, collect_day,
-                          day_key, day_label, fallback_narrative, render_article,
-                          render_post)
+from daily_digest import (DAY_SEC, DEFAULT_KEEP, NARRATIVE_MIN, DigestStore, brief,
+                          collect_day, day_key, day_label, fallback_narrative,
+                          render_article, render_post)
 from hour_board import tz_offset
 
 log = logging.getLogger("liqscope.digest")
@@ -437,6 +437,39 @@ class DigestScheduler:
 RETRY_SEC = 900.0        # повтор после сбоя: не чаще, чем раз в 15 минут
 
 
+def day_index(rec: dict, lang: str = "ru") -> dict:
+    """Строка календаря выпусков: дата, подпись, статус.
+
+    Лёгкая запись без поста и статьи: архив отдаёт её на каждый выпуск (их
+    сотни), и рендерить текст ради кнопки в календаре не нужно.
+    """
+    facts = rec.get("facts") or {}
+    return {
+        "day": rec.get("day"),
+        "label": day_label(rec.get("day"), lang),
+        "published": bool((rec.get("published") or {}).get("ru")
+                          or (rec.get("published") or {}).get("en")),
+        "total_usd": facts.get("liq_total_usd"),
+        "liq_count": facts.get("liq_count"),
+    }
+
+
+def pub_state(value) -> Tuple[bool, str]:
+    """Привести запись о публикации к паре (ушло, ошибка).
+
+    В архиве лежат две формы: результат отправки ``[ok, err]`` и отметка
+    ``DigestStore.mark_published`` — ``{"ok": …, "at": …, "chat": …}``.
+    """
+    if isinstance(value, dict):
+        return (bool(value.get("ok")),
+                str(value.get("error") or value.get("err") or "").strip())
+    if isinstance(value, (list, tuple)):
+        ok = bool(value[0]) if value else False
+        err = str(value[1] or "") if len(value) > 1 else ""
+        return ok, err.strip()
+    return bool(value), ""
+
+
 def publish_done(rec: Optional[dict]) -> bool:
     """Ушёл ли выпуск — или его надо повторить.
 
@@ -450,10 +483,23 @@ def publish_done(rec: Optional[dict]) -> bool:
     pub = rec.get("published") or {}
     if not pub:
         return False
-    if any(bool((v or [False])[0]) for v in pub.values()):
+    sent = retry = draft = False
+    for v in pub.values():
+        ok, err = pub_state(v)
+        if ok:
+            sent = True
+        elif isinstance(v, dict):
+            # отметка архива: в канал не ушло (черновик в архиве не отмечают)
+            retry = True
+        elif err:
+            # результат отправки с ошибкой: канал не привязан, Telegram отказал
+            retry = True
+        else:
+            # результат отправки без ошибки = черновик админу, ждёт «Опубликовать»
+            draft = True
+    if sent:
         return True
-    # ни одна языковая версия не ушла; пустая ошибка = ушло черновиком админу
-    return not any(str((v or ["", ""])[1] or "").strip() for v in pub.values())
+    return not retry and draft
 
 
 async def scheduler_loop(sched: DigestScheduler, check_sec: float = 60.0) -> None:
@@ -498,7 +544,7 @@ async def scheduler_loop(sched: DigestScheduler, check_sec: float = 60.0) -> Non
 def _publish_error(rec: Optional[dict]) -> str:
     """Первая ошибка публикации — для лога и повторов."""
     for v in ((rec or {}).get("published") or {}).values():
-        err = str((v or ["", ""])[1] or "").strip()
+        err = pub_state(v)[1]
         if err:
             return err
     return ""
@@ -559,11 +605,21 @@ def register_digest_routes(app) -> None:
         return FileResponse(os.path.join(STATIC_DIR, "digest.html"))
 
     @router.get("/api/digest")
-    async def api_list(lang: str = "ru", limit: int = 60):
-        items = [public_record(r, lang) for r in ctx.store.list()[:max(1, limit)]]
+    async def api_list(lang: str = "ru", limit: int = 12):
+        """Архив выпусков: свежие — полностью, все даты — лёгким индексом.
+
+        ``items`` уходят в ленту свежих выпусков (их немного), ``days`` — в
+        календарь: по нему видно, за какие даты выпуск есть, и можно открыть
+        любой старый, не заваливая страницу списком.
+        """
+        all_recs = ctx.store.list()
+        items = [public_record(r, lang) for r in all_recs[:max(1, limit)]]
         return {
             "ok": True,
             "items": items,
+            "days": [day_index(r, lang) for r in all_recs],
+            "count": len(all_recs),
+            "keep": DEFAULT_KEEP,
             "now": day_key(time.time()),
             "tz_hours": round(tz_offset() / 3600.0, 2),
             "schedule": {"hour": 22, "minute": 0, "jitter_min": 10,

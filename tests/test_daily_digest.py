@@ -18,7 +18,7 @@ sys.path.insert(0, HERE)
 import daily_digest  # noqa: E402
 from ai_text import body_problem, clean_body, fit_body  # noqa: E402
 from daily_digest import (  # noqa: E402
-    DigestStore, brief, collect_day, day_key, day_label, day_prompt,
+    DEFAULT_KEEP, DigestStore, brief, collect_day, day_key, day_label, day_prompt,
     channel_link_block, fallback_narrative, headline_block, lead_of, mood_of,
     oi_block, price_txt, render_channel,
     prices_block, render_article, render_post, weekday_label,
@@ -829,12 +829,77 @@ class EmptyDayPublishTest(unittest.TestCase):
         self.assertFalse(done({"published": {
             "ru": [False, "канал не привязан"], "en": [False, "нет канала"]}}))
         self.assertFalse(done({"published": {}}))
+        # вторая форма записи — отметка DigestStore.mark_published (словарь:
+        # {ok, at, chat}); на ней планировщик падал с KeyError: 0, поэтому
+        # день не отмечался выпущенным и выпуск собирался заново каждую минуту
+        self.assertTrue(done({"published": {"ru": {"ok": True, "chat": "-100"}}}))
+        self.assertFalse(done({"published": {"ru": {"ok": False, "at": 1,
+                                                    "chat": ""}}}))
+        self.assertFalse(done({"published": {"ru": {"ok": False, "at": 1},
+                                             "en": {"ok": False, "at": 1}}}))
         self.assertGreaterEqual(self.api.RETRY_SEC, 300)
 
     def test_reason_explains_what_to_check(self):
         text = self.api.empty_day_reason({"liq_count": 0, "liq_total_usd": 0})
         self.assertIn("история не восстановилась", text)
         self.assertIn("/api/health", text)
+
+
+class ArchiveIndexTest(unittest.TestCase):
+    """Архив выпусков для страницы дайджестов: свежие + индекс всех дат.
+
+    Список свежих выпусков короткий (в ленте они не копятся), а на каждую дату
+    архива сервер отдаёт лёгкую строку — по ней рисуется календарь и видно, за
+    какие дни выпуск есть. Пост и статью на эти строки не рендерим: в архиве
+    сотни выпусков, и это было бы дорого.
+    """
+
+    def setUp(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        import api_digest
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = DigestStore(os.path.join(self.tmp.name, "dig.json"))
+        self.now = 1_770_000_000.0
+        for i, day in enumerate(("2026-09-18", "2026-09-17", "2026-08-30")):
+            events = _events(self.now - i * 86400,
+                             [("BTC_USDT", "binance", "SELL", 900_000 - i, 1)])
+            facts = collect_day(events, now=self.now - i * 86400, oi={}, prices={})
+            self.store.save({"id": day, "day": day, "facts": facts,
+                             "ai": {"ru": "Рассказ дня. " * 30},
+                             "created": self.now - i,
+                             "published": {"ru": {"ok": True}}})
+        api_digest.ctx.store = self.store
+        api_digest.ctx.public_url = ""
+        app = FastAPI()
+        api_digest.register_digest_routes(app)
+        self.client = TestClient(app)
+
+    def tearDown(self):
+        import api_digest
+        api_digest.ctx.store = DigestStore("")
+
+    def test_days_index_covers_every_issue(self):
+        d = self.client.get("/api/digest?lang=ru").json()
+        self.assertEqual(d["count"], 3)
+        self.assertEqual([x["day"] for x in d["days"]],
+                         ["2026-09-18", "2026-09-17", "2026-08-30"])
+        self.assertTrue(all("label" in x and "published" in x for x in d["days"]))
+        self.assertTrue(all("post" not in x and "article" not in x
+                            for x in d["days"]), "индекс не должен тянуть посты")
+
+    def test_fresh_list_is_short_but_days_are_whole(self):
+        d = self.client.get("/api/digest?lang=ru&limit=2").json()
+        self.assertEqual(len(d["items"]), 2)                # в ленте всего два
+        self.assertEqual(len(d["days"]), 3)                 # а даты все
+        self.assertEqual(d["keep"], DEFAULT_KEEP)
+
+    def test_day_index_labels_follow_language(self):
+        import api_digest
+        rec = self.store.get("2026-09-18")
+        self.assertEqual(api_digest.day_index(rec, "ru")["label"], "18 сентября")
+        self.assertEqual(api_digest.day_index(rec, "en")["label"], "18 September")
 
 
 class SettingsApiTest(unittest.TestCase):

@@ -2177,6 +2177,12 @@ class TelegramBot:
                     await self.show_menu(chat_id, "Отмена.", self._alert_kb(user))
                     return
             else:
+                if str(wait_al).startswith("corr:"):
+                    msg_ok = self._corr_apply_text(user, wait_al, text or msg)
+                    self._wait_alert.pop(tg_id, None)
+                    await self.show_menu(chat_id, msg_ok + "\n\n" + self._corr_text(user),
+                                         self._corr_kb(user))
+                    return
                 msg_ok = self._alert_apply_text(user, wait_al, text or msg)
                 self._wait_alert.pop(tg_id, None)
                 await self.show_menu(chat_id, msg_ok + "\n\n" + self._alert_text(user),
@@ -3472,10 +3478,19 @@ class TelegramBot:
             [{"text": "← Назад", "callback_data": "services"}],
         ]}
 
-    def _alert_coins_kb(self) -> dict:
-        from alerts import COIN_PRESETS, coin_name
-        rows = [[{"text": coin_name(c), "callback_data": f"al:c:{c}"}] for c in COIN_PRESETS]
-        rows.append([{"text": "своя монета", "callback_data": "al:c:?"}])
+    def _alert_coins_kb(self, user: dict, metric: str) -> dict:
+        """Монеты для одной метрики: у каждой она своя."""
+        from alerts import COIN_PRESETS, METRIC_ICON, METRIC_TITLE, coin_name, symbol_of
+        cfg = self._alert_cfg(user)
+        cur = symbol_of(cfg, metric)
+        rows = []
+        for c in COIN_PRESETS:
+            mark = "✓ " if cur == c else ""
+            rows.append([{"text": mark + coin_name(c),
+                          "callback_data": f"al:c:{metric}:{c}"}])
+        rows.append([{"text": "своя монета", "callback_data": f"al:c:{metric}:?"}])
+        rows.append([{"text": f"← {METRIC_ICON[metric]} {METRIC_TITLE[metric]}",
+                      "callback_data": "al:c"}])
         rows.append([{"text": "← К алертам", "callback_data": "al"}])
         return {"inline_keyboard": rows}
 
@@ -3522,7 +3537,7 @@ class TelegramBot:
         return {"inline_keyboard": rows}
 
     def _alert_metric_pick_kb(self, field: str) -> dict:
-        letter = "t" if field == "thr" else "n"
+        letter = {"thr": "t", "min": "n", "coin": "c"}[field]
         return {"inline_keyboard": [
             [{"text": "LIQ", "callback_data": f"al:{letter}:liq"},
              {"text": "CVD", "callback_data": f"al:{letter}:cvd"},
@@ -3534,8 +3549,20 @@ class TelegramBot:
         from alerts import canon_symbol, money, window_label
         cfg = self._alert_cfg(user)
         text = raw if isinstance(raw, str) else ""
-        if wait == "coin":
-            cfg["symbol"] = canon_symbol(text)
+        if wait == "coin" or wait.startswith("coin:"):
+            from alerts import METRICS
+            coin = canon_symbol(text)
+            if ":" in wait:
+                metric = wait.split(":", 1)[1]
+                coins = dict(cfg.get("coins") or {})
+                coins[metric] = coin
+                cfg["coins"] = coins
+                self._alert_save(user, cfg)
+                from alerts import METRIC_TITLE
+                return f"Монета {METRIC_TITLE.get(metric, metric)}: {coin}"
+            # старый ввод: одна монета на все метрики
+            cfg["symbol"] = coin
+            cfg["coins"] = {m: coin for m in METRICS}
             self._alert_save(user, cfg)
             return f"Монета: {cfg['symbol']}"
         if wait == "win" or wait.startswith("win:"):
@@ -3708,11 +3735,14 @@ class TelegramBot:
 
     # ----- сервис «Корреляции валют» --------------------------------------
     def _corr_cfg(self, user: dict) -> dict:
-        from correlations import DEFAULT_METRIC, DEFAULT_WINDOW, window_key
+        from correlations import (DEFAULT_METRIC, DEFAULT_WINDOW, normalize_alerts,
+                                  window_key)
         row = self.store.get_user_service(user["id"], "correlations") if self.store else None
         cfg = (row or {}).get("config") or {}
         return {"window": window_key(cfg.get("window") or DEFAULT_WINDOW),
-                "metric": str(cfg.get("metric") or DEFAULT_METRIC)}
+                "metric": str(cfg.get("metric") or DEFAULT_METRIC),
+                # алерты по корреляции: у каждой метрики своё окно и два порога
+                "alerts": normalize_alerts(cfg)}
 
     def _corr_save(self, user: dict, cfg: dict) -> None:
         self.store.set_user_service_config(
@@ -3732,16 +3762,22 @@ class TelegramBot:
         from correlations import format_text, metric_title, window_label
         cfg = self._corr_cfg(user)
         data = self._corr_data(cfg)
+        from correlations import alerts_line
         if not data:
+            # история ещё копится, но алерты уже можно настраивать: сигналы
+            # пойдут, как только появятся часы для расчёта связи
             return ("<b>🔗 Корреляции валют</b>\n"
                     "История ещё собирается: сервис считает связи монет по часовым "
                     "свёрткам ликвидаций, объёма, CVD и OI. Загляните позже — или "
-                    "посмотрите тепловую карту на сайте."
+                    "посмотрите тепловую карту на сайте.\n\n"
+                    + alerts_line(cfg.get("alerts"))
                     + self.site_footer())
         body = format_text(data, "ru", site=self.site_url("/cabinet"))
         lines = body.split("\n")
         lines[0] = (f"<b>🔗 Корреляции валют</b> · {window_label(cfg['window'])} · "
                     f"{metric_title(cfg['metric'])}")
+        lines.append("")
+        lines.append(alerts_line(cfg.get("alerts")))
         return "\n".join(lines) + self.site_footer()
 
     def _corr_kb(self, user: dict) -> dict:
@@ -3765,17 +3801,184 @@ class TelegramBot:
             {"text": ("✓ " if cfg["metric"] == "oi" else "") + "📊 OI",
              "callback_data": "cor:m:oi"},
         ])
+        kb.append([{"text": "🔔 Алерты", "callback_data": "cor:a"}])
         kb.append([{"text": "🔄 Пересчитать", "callback_data": "cor:now"},
                    {"text": "🌐 Тепловая карта", "url":
                     self.site_url("/cabinet#correlations")}])
         kb.append([{"text": "← Назад", "callback_data": "services"}])
         return {"inline_keyboard": kb}
 
+    def _corr_num(self, v) -> str:
+        return f"{float(v):+.2f}".replace("-", "−")
+
+    def _corr_alerts_text(self, user: dict) -> str:
+        from correlations import format_alerts_config
+        cfg = self._corr_cfg(user)
+        return (format_alerts_config(cfg.get("alerts")) +
+                "\n\nУ каждой метрики своё окно и свои пороги. «В противофазе» — "
+                "связь со знаком минус, «в одну сторону» — со знаком плюс: "
+                "порог 0.5 значит «коэффициент 0.5 и выше». Поставьте порог — "
+                "сигнал включится сам." + self.site_footer())
+
+    def _corr_alerts_kb(self, user: dict) -> dict:
+        from correlations import METRICS, metric_icon, metric_title, window_label
+        cfg = self._corr_cfg(user)
+        alerts = cfg.get("alerts") or {}
+        rows = []
+        for key, _title, _hint in METRICS:
+            row = alerts.get(key) or {}
+            mark = "✓ " if row.get("enabled") else ""
+            label = (f"{mark}{metric_icon(key)} {metric_title(key)} · "
+                     f"{window_label(row.get('window') or '24h')}")
+            rows.append([{"text": label, "callback_data": f"cor:a:{key}"}])
+        rows.append([{"text": "← К корреляциям", "callback_data": "cor"}])
+        return {"inline_keyboard": rows}
+
+    def _corr_metric_text(self, user: dict, metric: str) -> str:
+        from correlations import metric_icon, metric_title, window_label
+        cfg = self._corr_cfg(user)
+        row = (cfg.get("alerts") or {}).get(metric) or {}
+        on = "включён" if row.get("enabled") else "выключен"
+        return "\n".join([
+            f"{metric_icon(metric)} <b>Алерты · {metric_title(metric)}</b>",
+            f"сигнал: <b>{on}</b>",
+            f"окно: <b>{window_label(row.get('window') or '24h')}</b>",
+            f"в противофазе: порог <code>{self._corr_num(row.get('opp') or 0)}</code>",
+            f"в одну сторону: порог <code>{self._corr_num(row.get('same') or 0)}</code>",
+            "\nСигнал — пара монет с такой связью. Пороги нажимаются кнопками "
+            "или вводятся руками.",
+        ]) + self.site_footer()
+
+    def _corr_metric_kb(self, user: dict, metric: str) -> dict:
+        from correlations import ALERT_THRESHOLDS, WINDOWS, window_label
+        cfg = self._corr_cfg(user)
+        row = (cfg.get("alerts") or {}).get(metric) or {}
+        on = "🔔 Сигнал ВКЛ" if row.get("enabled") else "🔕 Сигнал выкл"
+        kb = [[{"text": on, "callback_data": f"cor:a:{metric}:on"}]]
+        wins = [{"text": ("· " if key == (row.get("window") or "24h") else "") +
+                         window_label(key),
+                 "callback_data": f"cor:a:{metric}:w:{key}"}
+                for key, _m in WINDOWS]
+        kb += [wins[i:i + 3] for i in range(0, len(wins), 3)]
+        opp = [{"text": ("· " if abs(float(v) - float(row.get("opp") or 0)) < 1e-9
+                         else "") + f"−{v:.1f}",
+                "callback_data": f"cor:a:{metric}:opp:{v}"} for v in ALERT_THRESHOLDS]
+        same = [{"text": ("· " if abs(float(v) - float(row.get("same") or 0)) < 1e-9
+                          else "") + f"+{v:.1f}",
+                 "callback_data": f"cor:a:{metric}:same:{v}"} for v in ALERT_THRESHOLDS]
+        kb.append([{"text": "противофаза", "callback_data": f"cor:a:{metric}"}])
+        kb += [opp[i:i + 3] for i in range(0, len(opp), 3)]
+        kb.append([{"text": "в одну сторону", "callback_data": f"cor:a:{metric}"}])
+        kb += [same[i:i + 3] for i in range(0, len(same), 3)]
+        kb.append([{"text": "свой порог: противофаза",
+                    "callback_data": f"cor:a:{metric}:?:opp"},
+                   {"text": "свой порог: в одну сторону",
+                    "callback_data": f"cor:a:{metric}:?:same"}])
+        kb.append([{"text": "← Алерты", "callback_data": "cor:a"}])
+        kb.append([{"text": "← К корреляциям", "callback_data": "cor"}])
+        return {"inline_keyboard": kb}
+
+    def _corr_alert_row(self, cfg: dict, metric: str) -> dict:
+        from correlations import normalize_alerts
+        alerts = cfg.get("alerts") or normalize_alerts({})
+        return dict(alerts.get(metric) or {})
+
+    def _corr_alert_store(self, user: dict, cfg: dict, metric: str, row: dict) -> None:
+        alerts = dict(cfg.get("alerts") or {})
+        alerts[metric] = row
+        cfg["alerts"] = alerts
+        self._corr_save(user, cfg)
+
+    def _corr_apply_text(self, user: dict, wait: str, raw) -> str:
+        from correlations import METRIC_KEYS, metric_title
+        text = raw if isinstance(raw, str) else ""
+        parts = str(wait).split(":")
+        metric = parts[1] if len(parts) > 1 else "liq"
+        field = parts[2] if len(parts) > 2 else "opp"
+        if metric not in METRIC_KEYS:
+            return "Неизвестная метрика."
+        cfg = self._corr_cfg(user)
+        row = self._corr_alert_row(cfg, metric)
+        try:
+            n = float(text.replace(" ", "").replace(",", ".").replace("−", "-"))
+        except (TypeError, ValueError):
+            return "Нужно число от 0 до 1, например 0.5."
+        if field == "opp":
+            row["opp"] = round(max(-1.0, min(0.0, -abs(n))), 3)
+        else:
+            row["same"] = round(max(0.0, min(1.0, abs(n))), 3)
+        row["enabled"] = True        # поставил порог — ждём сигнал
+        self._corr_alert_store(user, cfg, metric, row)
+        title = metric_title(metric)
+        sign = "−" if field == "opp" else "+"
+        word = "противофаза" if field == "opp" else "в одну сторону"
+        return (f"{title}: {word} {sign}{abs(n):.2f} · сигнал включён")
+
     async def _on_corr_cb(self, chat_id, user: dict, data: str, message_id) -> None:
         cfg = self._corr_cfg(user)
         parts = data.split(":")
         if data == "cor" or data == "cor:now":
             await self.reply(chat_id, self._corr_text(user), self._corr_kb(user),
+                             message_id=message_id)
+            return
+        if data == "cor:a" or data.startswith("cor:a:"):
+            from correlations import METRIC_KEYS, window_key
+            parts = data.split(":")
+            if len(parts) == 2:
+                await self.reply(chat_id, self._corr_alerts_text(user),
+                                 self._corr_alerts_kb(user), message_id=message_id)
+                return
+            metric = parts[2]
+            if metric not in METRIC_KEYS:
+                await self.reply(chat_id, self._corr_alerts_text(user),
+                                 self._corr_alerts_kb(user), message_id=message_id)
+                return
+            row = self._corr_alert_row(cfg, metric)
+            if len(parts) == 3:
+                await self.reply(chat_id, self._corr_metric_text(user, metric),
+                                 self._corr_metric_kb(user, metric),
+                                 message_id=message_id)
+                return
+            action = parts[3]
+            if action == "on":
+                row["enabled"] = not row.get("enabled")
+                self._corr_alert_store(user, cfg, metric, row)
+                await self.reply(chat_id, self._corr_metric_text(user, metric),
+                                 self._corr_metric_kb(user, metric),
+                                 message_id=message_id)
+                return
+            if action == "?":
+                tg_id = int(user.get("tg_id") or 0)
+                self._wait_alert[tg_id] = f"corr:{metric}:{parts[4] if len(parts) > 4 else 'opp'}"
+                await self.reply(
+                    chat_id,
+                    "Пришлите порог от 0 до 1, например 0.5.\n/cancel — отмена.",
+                    self._kb_back("cor"), message_id=message_id)
+                return
+            value = parts[4] if len(parts) > 4 else ""
+            if action == "w":
+                row["window"] = window_key(value)
+            elif action in ("opp", "same"):
+                if value == "?":
+                    tg_id = int(user.get("tg_id") or 0)
+                    self._wait_alert[tg_id] = f"corr:{metric}:{action}"
+                    await self.reply(
+                        chat_id,
+                        "Пришлите порог от 0 до 1, например 0.5.\n/cancel — отмена.",
+                        self._kb_back("cor"), message_id=message_id)
+                    return
+                try:
+                    num = float(str(value).replace("−", "-"))
+                except ValueError:
+                    num = 0.5
+                if action == "opp":
+                    row["opp"] = round(max(-1.0, min(0.0, -abs(num))), 3)
+                else:
+                    row["same"] = round(max(0.0, min(1.0, abs(num))), 3)
+                row["enabled"] = True    # поставил порог — ждём сигнал
+            self._corr_alert_store(user, cfg, metric, row)
+            await self.reply(chat_id, self._corr_metric_text(user, metric),
+                             self._corr_metric_kb(user, metric),
                              message_id=message_id)
             return
         if len(parts) >= 3 and parts[1] == "w":
@@ -3816,17 +4019,50 @@ class TelegramBot:
                              message_id=message_id)
             return
         if data == "al:c":
-            await self.reply(chat_id, "Какую монету смотреть?", self._alert_coins_kb(),
+            await self.reply(chat_id, "Монета какой метрики? У каждой она своя.",
+                             self._alert_metric_pick_kb("coin"),
                              message_id=message_id)
             return
-        if data == "al:c:?":
-            self._wait_alert[tg_id] = "coin"
-            await self.reply(chat_id, "Пришлите тикер, например BTC или ETHUSDT.\n/cancel — отмена.",
-                             self._kb_back("al"), message_id=message_id)
-            return
         if data.startswith("al:c:"):
-            from alerts import canon_symbol
-            cfg["symbol"] = canon_symbol(data.split(":", 2)[2])
+            from alerts import METRIC_ICON, METRIC_TITLE, METRICS, canon_symbol
+            parts = data.split(":")
+            # al:c:<монета> — старый колбэк: одна монета на все метрики
+            if len(parts) == 3 and parts[2] not in METRICS:
+                if parts[2] == "?":
+                    self._wait_alert[tg_id] = "coin"
+                    await self.reply(
+                        chat_id,
+                        "Пришлите тикер, например BTC или ETHUSDT.\n/cancel — отмена.",
+                        self._kb_back("al"), message_id=message_id)
+                    return
+                coin = canon_symbol(parts[2])
+                cfg["coins"] = {m: coin for m in METRICS}
+                self._alert_save(user, cfg)
+                await self.reply(chat_id, self._alert_text(user), self._alert_kb(user),
+                                 message_id=message_id)
+                return
+            metric = parts[2]
+            if metric not in METRICS:
+                await self.reply(chat_id, self._alert_text(user), self._alert_kb(user),
+                                 message_id=message_id)
+                return
+            if len(parts) == 3:
+                title = f"{METRIC_ICON[metric]} {METRIC_TITLE[metric]}"
+                await self.reply(chat_id, f"Монета метрики {title}:",
+                                 self._alert_coins_kb(user, metric),
+                                 message_id=message_id)
+                return
+            val = parts[3]
+            if val == "?":
+                self._wait_alert[tg_id] = f"coin:{metric}"
+                await self.reply(
+                    chat_id,
+                    "Пришлите тикер, например BTC или ETHUSDT.\n/cancel — отмена.",
+                    self._kb_back("al"), message_id=message_id)
+                return
+            coins = dict(cfg.get("coins") or {})
+            coins[metric] = canon_symbol(val)
+            cfg["coins"] = coins
             self._alert_save(user, cfg)
             await self.reply(chat_id, self._alert_text(user), self._alert_kb(user),
                              message_id=message_id)

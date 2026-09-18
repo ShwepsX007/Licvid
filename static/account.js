@@ -640,6 +640,35 @@
         if (!v) v = (alCfg && alCfg.window_min) || 5;
         return Number(v) || 5;
     }
+    function alCoinOf(m) {
+        /* Монета метрики: у ликвидаций, CVD и OI она своя. Старое поле
+           alCfg.symbol читаем как «одна монета на все метрики». */
+        var coins = alCfg && alCfg.coins;
+        var v = coins && coins[m];
+        if (!v) v = (alCfg && alCfg.symbol) || "ALL";
+        return String(v);
+    }
+    function alCoinLabel(v) {
+        return String(v) === "ALL" ? "все" : String(v).split("_")[0];
+    }
+    function alCoinInput(raw) {
+        /* «btc» → «BTC_USDT»: пишем так, как хранит сервер, чтобы подпись и
+           чипы совпадали с ответом и человек видел итог сразу. */
+        var v = String(raw == null ? "" : raw).trim().toUpperCase()
+            .replace(/\s+/g, "").replace("-", "_").replace("/", "_");
+        if (!v) return "ALL";
+        if (v === "ALL" || v === "*" || v === "ВСЕ") return "ALL";
+        return v.indexOf("_") === -1 ? v + "_USDT" : v;
+    }
+    function alCoinChips(key, list) {
+        list = (list || []).slice();
+        var cur = alCoinOf(key);
+        if (!list.some(function (v) { return String(v) === cur; })) list.unshift(cur);
+        return list.map(function (v) {
+            return alChip(String(v) === cur,
+                'data-coinval="' + v + '" data-coinmetric="' + key + '"', alCoinLabel(v));
+        }).join("");
+    }
     function alChip(on, attrs, label) {
         return '<button type="button" class="al-chip' + (on ? " on" : "") + '" ' + attrs + ">" +
             label + "</button>";
@@ -679,7 +708,9 @@
             if (d.config) alCfg = d.config;
             if (st) {
                 st.className = "al-status " + (d.ok ? "ok" : "");
-                st.textContent = d.ok ? "сохранено · то же в боте" : (d.error || "ошибка");
+                st.textContent = d.ok ? ("сохранено · монеты: " +
+                    alCoinLabel(alCoinOf("liq")) + " / " + alCoinLabel(alCoinOf("cvd")) +
+                    " / " + alCoinLabel(alCoinOf("oi"))) : (d.error || "ошибка");
             }
             if (d.live) paintAlertsLive({ live: d.live, history: null, config: alCfg });
         }).catch(function () { alBusy = false; });
@@ -800,24 +831,24 @@
                 chips(alThrList(key), thr, "data-thrval", alMoney) + "</div>" +
                 '<div class="al-row" style="margin-top:6px"><input data-thrin="' + key +
                 '" type="number" min="0" step="1000" value="' + Math.round(thr || 0) + '"></div>' +
+                '<div class="al-label">Монета ' + title + " · <span data-coinlabel='" +
+                key + "'>" + esc(alCoinLabel(alCoinOf(key))) + "</span></div>" +
+                '<div class="al-chips" data-coinbox="' + key + '">' +
+                alCoinChips(key, p.coins || []) + "</div>" +
+                '<div class="al-row" style="margin-top:6px"><input data-coinin="' + key +
+                '" type="text" list="al-sym-list" placeholder="BTC_USDT или тикер" value="' +
+                (alCoinOf(key) === "ALL" ? "" : alCoinOf(key)) + '"></div>' +
                 '<div class="al-label">Лента ' + title + "</div>" +
                 '<div class="al-tape" id="al-tape-' + key + '">' + alTape(hist, key) + "</div></div>";
         }
-        var coin = alCfg.symbol || "ALL";
-        var coinLabel = coin === "ALL" ? "все" : String(coin).split("_")[0];
         board.innerHTML =
             '<div class="al-head"><div><h3>Алерты по объёму</h3>' +
             '<div class="al-sub">Включайте ликвидации, CVD и OI по отдельности — можно слушать один источник или два. Порог CVD/OI крупнее, чем у ликвидаций, и окно у каждой метрики своё. После сигнала окно начинается заново: в следующее сообщение попадут только новые данные.</div></div>' +
             '<label class="al-switch' + (alCfg.enabled ? " on" : "") + '" id="al-sw">' +
             "<i></i><span>" + (alCfg.enabled ? "СИГНАЛ ВКЛ" : "СИГНАЛ ВЫКЛ") + "</span></label></div>" +
-            '<div class="al-label">Монета</div><div class="al-chips" id="al-coins">' +
-            chips(p.coins || [], coin, "data-coin", function (v) {
-                return v === "ALL" ? "все" : String(v).split("_")[0];
-            }) + "</div>" +
-            '<div class="al-row" style="margin-top:8px"><input id="al-coin-in" type="text" list="al-sym-list" placeholder="BTC_USDT или тикер" value="' +
-            (coin === "ALL" ? "" : coin) + '"><datalist id="al-sym-list">' +
+            '<datalist id="al-sym-list">' +
             (symbols || []).map(function (s) { return "<option value=\"" + s + "\">"; }).join("") +
-            "</datalist></div>" +
+            "</datalist>" +
             '<div class="al-feeds">' +
             feed("liq", "LIQ") + feed("cvd", "CVD") + feed("oi", "OI") +
             "</div>" +
@@ -830,7 +861,9 @@
                     '</div><div class="al-row" style="margin-top:6px"><input data-minin="' + m +
                     '" type="number" min="0" step="1000" value="' + Math.round(cur || 0) + '"></div>';
             }).join("") +
-            '<div class="al-status" id="al-status">монета: ' + coinLabel +
+            '<div class="al-status" id="al-status">монеты: LIQ ' + alCoinLabel(alCoinOf("liq")) +
+            " · CVD " + alCoinLabel(alCoinOf("cvd")) +
+            " · OI " + alCoinLabel(alCoinOf("oi")) +
             " · окна: LIQ " + alWin(alWinOf("liq")) +
             " · CVD " + alWin(alWinOf("cvd")) +
             " · OI " + alWin(alWinOf("oi")) + "</div>";
@@ -937,22 +970,39 @@
                 alDebounce();
             });
         });
-        document.querySelectorAll("[data-coin]").forEach(function (btn) {
+        document.querySelectorAll("[data-coinval]").forEach(function (btn) {
             btn.addEventListener("click", function () {
-                alCfg.symbol = btn.getAttribute("data-coin");
-                document.querySelectorAll("[data-coin]").forEach(function (b) {
-                    b.classList.toggle("on", b === btn);
-                });
-                var inp = $("al-coin-in");
-                if (inp) inp.value = alCfg.symbol === "ALL" ? "" : alCfg.symbol;
+                var m = btn.getAttribute("data-coinmetric");
+                alCfg.coins = alCfg.coins || {};
+                alCfg.coins[m] = btn.getAttribute("data-coinval");
+                document.querySelectorAll('[data-coinbox="' + m + '"] [data-coinval]')
+                    .forEach(function (b) { b.classList.toggle("on", b === btn); });
+                var inp = document.querySelector('[data-coinin="' + m + '"]');
+                if (inp) inp.value = alCfg.coins[m] === "ALL" ? "" : alCfg.coins[m];
+                var lab = document.querySelector('[data-coinlabel="' + m + '"]');
+                if (lab) lab.textContent = alCoinLabel(alCoinOf(m));
+                var st = $("al-status");
+                if (st) {
+                    st.textContent = "монеты: LIQ " + alCoinLabel(alCoinOf("liq")) +
+                        " · CVD " + alCoinLabel(alCoinOf("cvd")) +
+                        " · OI " + alCoinLabel(alCoinOf("oi")) +
+                        " · окна: LIQ " + alWin(alWinOf("liq")) +
+                        " · CVD " + alWin(alWinOf("cvd")) +
+                        " · OI " + alWin(alWinOf("oi"));
+                }
                 alDebounce();
             });
         });
-        var cin = $("al-coin-in");
-        if (cin) cin.addEventListener("change", function () {
-            var v = (cin.value || "").trim().toUpperCase().replace("-", "_");
-            alCfg.symbol = v || "ALL";
-            alDebounce();
+        document.querySelectorAll("[data-coinin]").forEach(function (cin) {
+            cin.addEventListener("change", function () {
+                var m = cin.getAttribute("data-coinin");
+                alCfg.coins = alCfg.coins || {};
+                alCfg.coins[m] = alCoinInput(cin.value);
+                cin.value = alCfg.coins[m] === "ALL" ? "" : alCfg.coins[m];
+                var lab = document.querySelector('[data-coinlabel="' + m + '"]');
+                if (lab) lab.textContent = alCoinLabel(alCfg.coins[m]);
+                alDebounce();
+            });
         });
         function alSetWin(m, n) {
             n = Math.max(1, Math.min(1440, Number(n) || 5));
@@ -1157,33 +1207,8 @@
             corFlow("📉 OI падает", "neg", flows.oi_down, "oi");
     }
 
-    function corPairsList() {
-        var pairs = corPairsOf(corData, (corData && corData.metric) || "liq");
-        if (!pairs.length) {
-            return '<div class="cor-flow-empty">связей пока нет — мало истории</div>';
-        }
-        pairs.sort(function (p, q) { return Math.abs(q.r) - Math.abs(p.r); });
-        return pairs.slice(0, 6).map(function (p, i) {
-            var r = Number(p.r) || 0;
-            var w = Math.max(6, Math.min(100, Math.round(Math.abs(r) * 100)));
-            var cls = r >= 0 ? "pos" : "neg";
-            return '<div class="cor-pair" data-corpair="' + i + '">' +
-                '<span class="cor-pair-names">' + esc(corShort(p.a)) + " ↔ " +
-                esc(corShort(p.b)) + "</span>" +
-                '<span class="cor-pair-bar ' + cls + '"><i style="width:' + w + '%"></i></span>' +
-                '<span class="cor-pair-r ' + cls + '">' + r.toFixed(2) + "</span></div>";
-        }).join("");
-    }
-
-    // Что означает цвет клетки и что в неё смотреть: собирается из подписи
-    // метрики, знака коэффициента и самих монет. Раньше клетки карты были
-    // просто цветными квадратами без единого слова — по наведению ничего
-    // не объяснялось.
-    var COR_COEF_TEXT = "Коэффициент Пирсона по часовым точкам: +1 — метрика " +
-        "движется синхронно, 0 — связи нет, −1 — в противофазе.";
-
-    function corPairExplanation(a, b, r) {
-        var metric = (corData && corData.metric) || corCfg.metric;
+    function corPairExplanation(a, b, r, metric) {
+        metric = metric || (corData && corData.metric) || corCfg.metric;
         var what = corMetricHint(metric);
         var ar = Math.abs(r), side = r >= 0 ? "в одну сторону" : "в противофазе";
         var verdict = ar >= 0.6 ? "сильная связь" : ar >= 0.4 ? "заметная связь"
@@ -1193,6 +1218,312 @@
             " «" + what + "» у этих двух монет за " + corWinLabel() +
             ". " + COR_COEF_TEXT;
     }
+
+    function corStatusText() {
+        /* Статус по всей доске: у каждой переменной своя карта, поэтому
+           считаем пары и сильные связи по всем метрикам сразу. */
+        if (!corData) return "";
+        var pairs = [], strong = 0;
+        COR_ORDER.forEach(function (m) {
+            corPairsOf(corData, m).forEach(function (p) {
+                pairs.push(p);
+                if (Math.abs(p.r) >= 0.4) strong += 1;
+            });
+        });
+        return "монет: " + ((corData.symbols || []).length) +
+            " · точек в окне: " + (corData.hours || 0) +
+            " · пар: " + pairs.length + " · сильных: " + strong +
+            " · карт: " + COR_ORDER.length;
+    }
+
+    /* Настройки алертов по корреляции — свои у каждой переменной: окно,
+       порог «в противофазе» (минус) и порог «в одну сторону» (плюс). */
+    function corAlertOf(metric) {
+        var alerts = corCfg.alerts || (corData && corData.alerts) || {};
+        var row = alerts[metric] || {};
+        return {
+            enabled: !!row.enabled,
+            window: row.window || (corData && corData.window) || corCfg.window || "24h",
+            opp: (row.opp === undefined || row.opp === null) ? -0.6 : Number(row.opp),
+            same: (row.same === undefined || row.same === null) ? 0.6 : Number(row.same),
+        };
+    }
+
+    function corAlertSave(metric, patch) {
+        var alerts = Object.assign({}, corCfg.alerts || {});
+        alerts[metric] = Object.assign({}, alerts[metric] || {}, patch);
+        corCfg.alerts = alerts;
+        saveCorrelations();
+    }
+
+    function corAlertNum(v) {
+        var n = Number(v) || 0;
+        return (n < 0 ? "−" : "+") + Math.abs(n).toFixed(2);
+    }
+
+    function corAlertBlock(d, metric) {
+        var cfg = corAlertOf(metric);
+        var wins = (d.windows || []).map(function (v) {
+            var key = (typeof v === "object") ? (v.key || v.window) : v;
+            var label = (typeof v === "object" && (v.label || v.title)) || key;
+            var on = String(key) === String(cfg.window);
+            return '<button type="button" class="al-chip' + (on ? " on" : "") +
+                '" data-corawin="' + esc(metric + "|" + key) + '">' + esc(label) + "</button>";
+        }).join("");
+        return '<div class="cor-alert" data-coralert="' + esc(metric) + '">' +
+            '<div class="cor-alert-h"><label class="al-switch' + (cfg.enabled ? " on" : "") +
+            '" data-coralon="' + esc(metric) + '"><i></i><span>' +
+            (cfg.enabled ? "СИГНАЛ ВКЛ" : "СИГНАЛ ВЫКЛ") + "</span></label>" +
+            '<span class="cor-alert-now">в противофазе ' + corAlertNum(cfg.opp) +
+            " · в одну сторону " + corAlertNum(cfg.same) + "</span></div>" +
+            '<div class="al-label">Окно сигнала</div><div class="al-chips">' + wins + "</div>" +
+            '<div class="al-row cor-alert-nums">' +
+            '<label class="cor-num">в противофазе <input data-coraopp="' + esc(metric) +
+            '" type="number" min="-1" max="0" step="0.05" value="' + cfg.opp.toFixed(2) +
+            '"></label>' +
+            '<label class="cor-num">в одну сторону <input data-corasame="' + esc(metric) +
+            '" type="number" min="0" max="1" step="0.05" value="' + cfg.same.toFixed(2) +
+            '"></label></div>' +
+            '<div class="cor-alert-hint">Сигнал придёт, когда пара монет перешагнёт порог: ' +
+            "«в противофазе» — связь со знаком минус, «в одну сторону» — со знаком плюс " +
+            "(порог 0.5 значит «коэффициент 0.5 и выше»).</div></div>";
+    }
+
+    function corMetricBlock(d, metric) {
+        var note = "Что это: " + String(corMetricTitle(d, metric)).toLowerCase() +
+            " — " + corMetricHint(metric) +
+            ". Клетка — пара монет, число — коэффициент за " + corWinLabel(d) +
+            " (зелёный: вместе, красный: наоборот). Наведите на клетку или нажмите её: " +
+            "покажу, что именно показывает эта цифра.";
+        return '<section class="cor-map" data-cormap="' + esc(metric) + '">' +
+            '<div class="cor-map-h">🎨 Тепловая карта · ' + esc(corMetricTitle(d, metric)) +
+            " · " + esc(corWinLabel(d)) + "</div>" +
+            '<div class="cor-heat-note">' + esc(note) + "</div>" +
+            '<div class="cor-heat-box" data-corheat="' + esc(metric) + '">' +
+            corHeat(d, metric) + "</div>" +
+            '<div class="cor-hist-wrap"><span class="cor-hist-title">Распределение связей · ' +
+            esc(COR_LABEL[metric] || metric) + '</span><div class="cor-hist" data-corhist="' +
+            esc(metric) + '">' + corHist(metric) + "</div></div>" +
+            '<div class="al-label">Самые сильные связи · ' + esc(COR_LABEL[metric] || metric) +
+            '</div><div class="cor-pairs" data-corpairs="' + esc(metric) + '">' +
+            corPairsList(metric) + "</div>" +
+            corAlertBlock(d, metric) +
+            "</section>";
+    }
+
+    function paintCorrelations(d, bind) {
+        var board = $("corr-board");
+        if (!board) return;
+        corData = d;
+        if (d.config && d.config.metric) corCfg.metric = d.config.metric;
+        if (d.config && d.config.window) corCfg.window = d.config.window;
+        if (d.alerts) corCfg.alerts = d.alerts;
+        var winLabel = (d.window_label || d.window || "");
+        var head = '<div class="al-head"><div><h3>🔗 Корреляции валют</h3>' +
+            '<div class="al-sub">Кто ходит вместе за ' + esc(winLabel) +
+            ", а кто в противофазе: ликвидации и объём, CVD и OI. У каждой переменной " +
+            "своя тепловая карта — выбирать метрику не нужно. Видно, где выносило шорты, " +
+            "а где лонги, куда перекошен CVD и где растёт открытый интерес.</div></div></div>";
+        board.innerHTML = head +
+            '<div class="al-label">Окно</div><div class="al-chips" id="cor-wins">' +
+            corWindowChips(d) + "</div>" +
+            '<div class="cor-flows" id="cor-flows">' + corFlowsBox() + "</div>" +
+            '<div class="cor-maps" id="cor-maps">' +
+            COR_ORDER.map(function (m) { return corMetricBlock(d, m); }).join("") +
+            "</div>" +
+            '<div class="al-status" id="cor-status">' + esc(corStatusText()) + "</div>";
+        if (bind) bindCorrelations();
+    }
+
+    function paintCorrelationsLive(d) {
+        /* Автообновление: только цифры. Разметку и чипы не трогаем — иначе
+           обработчики кнопок умирали бы каждые 30 секунд. */
+        corData = d;
+        var flows = $("cor-flows");
+        if (flows) flows.innerHTML = corFlowsBox();
+        COR_ORDER.forEach(function (m) {
+            var heat = board_query('[data-corheat="' + m + '"]');
+            if (heat) heat.innerHTML = corHeat(d, m);
+            var hist = board_query('[data-corhist="' + m + '"]');
+            if (hist) hist.innerHTML = corHist(m);
+            var pairs = board_query('[data-corpairs="' + m + '"]');
+            if (pairs) pairs.innerHTML = corPairsList(m);
+        });
+        var st = $("cor-status");
+        if (st) st.textContent = corStatusText();
+    }
+
+    function board_query(sel) {
+        var board = $("corr-board");
+        return board ? board.querySelector(sel) : null;
+    }
+
+    function corMarkChips() {
+        /* Подсветка выбранного окна — мгновенно, не дожидаясь ответа сервера. */
+        var board = $("corr-board");
+        if (!board) return;
+        board.querySelectorAll("#cor-wins .al-chip").forEach(function (b) {
+            b.classList.toggle("on", b.getAttribute("data-corwin") === String(corCfg.window));
+        });
+    }
+
+    function corSetStatus(text, ok) {
+        var st = $("cor-status");
+        if (!st) return;
+        st.className = "al-status" + (ok ? " ok" : "");
+        st.textContent = text || corStatusText();
+    }
+
+    function saveCorrelations() {
+        if (corSaveT) clearTimeout(corSaveT);
+        corSaveT = setTimeout(function () {
+            api("/api/account/correlations", {
+                method: "POST",
+                body: JSON.stringify({ window: corCfg.window, metric: corCfg.metric,
+                                       alerts: corCfg.alerts || {} }),
+            }).then(function (d) {
+                if (d && d.ok === false) corSetStatus(d.error || "настройка не сохранилась");
+            }).catch(function () { corSetStatus("настройка не сохранилась: сеть"); });
+        }, 250);
+    }
+
+    function bootCorrelations() {
+        if (!$("corr-board")) return;
+        bindCorrelations();
+        loadCorrelations(true);
+        if (corTimer) clearInterval(corTimer);
+        corTimer = setInterval(function () {
+            if (!document.hidden && $("corr-board") &&
+                $("corr-board").offsetParent !== null) loadCorrelations(false);
+        }, 30000);
+    }
+
+    function loadCorrelations(full) {
+        return api("/api/account/correlations?window=" + corCfg.window + "&metric=" + corCfg.metric)
+            .then(function (d) {
+                if (!d || !d.ok) return d;
+                corData = d;
+                if (d.alerts) corCfg.alerts = d.alerts;
+                if (full || !board_query('[data-corheat="liq"]')) paintCorrelations(d, true);
+                else paintCorrelationsLive(d);
+                return d;
+            });
+    }
+
+    function corAttr(node, board, attr) {
+        var t = node;
+        while (t && t !== board) {
+            if (t.getAttribute && t.getAttribute(attr)) return t;
+            t = t.parentNode;
+        }
+        return null;
+    }
+
+    function bindCorrelations() {
+        var board = $("corr-board");
+        if (!board || board._bound) return;
+        board._bound = true;              // обработчики живут на контейнере
+        board.addEventListener("click", function (e) {
+            var t = e.target;
+            var cell = corAttr(t, board, "data-corcell");
+            if (cell) {
+                // Клик по клетке тепловой карты: то же объяснение, что и в
+                // подсказке, но ещё и текстом под картой — на телефоне
+                // наведения нет, а вопрос «что это за цифра» остаётся.
+                var parts = cell.getAttribute("data-corcell").split("|");
+                var line = parts[3]
+                    ? corPairExplanation(parts[1] + "_USDT", parts[2] + "_USDT",
+                                         Number(parts[3]), parts[0])
+                    : parts[1] + " — сама с собой: r = 1, диагональ карты";
+                corSetStatus(line, true);
+                return;
+            }
+            var win = corAttr(t, board, "data-corwin");
+            if (win) {
+                corCfg.window = win.getAttribute("data-corwin");
+                corMarkChips();
+                corSetStatus("окно " + corCfg.window + " · считаю…");
+                loadCorrelations(true);
+                saveCorrelations();
+                return;
+            }
+            var awin = corAttr(t, board, "data-corawin");
+            if (awin) {
+                var wp = awin.getAttribute("data-corawin").split("|");
+                var metric = wp[0];
+                corAlertSave(metric, { window: wp[1] });
+                var box = board_query('[data-coralert="' + metric + '"]');
+                if (box) {
+                    box.querySelectorAll(".al-chips .al-chip").forEach(function (b) {
+                        b.classList.toggle("on", b === awin);
+                    });
+                }
+                corSetStatus("сигнал " + metric.toUpperCase() + " · окно " + wp[1]);
+                return;
+            }
+            var aon = corAttr(t, board, "data-coralon");
+            if (aon) {
+                var am = aon.getAttribute("data-coralon");
+                var acfg = corAlertOf(am);
+                acfg.enabled = !acfg.enabled;
+                corAlertSave(am, { enabled: acfg.enabled });
+                aon.classList.toggle("on", acfg.enabled);
+                var sp = aon.querySelector("span");
+                if (sp) sp.textContent = acfg.enabled ? "СИГНАЛ ВКЛ" : "СИГНАЛ ВЫКЛ";
+                corSetStatus("сигнал " + am.toUpperCase() +
+                    (acfg.enabled ? " включён" : " выключен"));
+                return;
+            }
+            var pair = corAttr(t, board, "data-corpair");
+            if (pair) {
+                var map = corAttr(t, board, "data-cormap");
+                var pm = map ? map.getAttribute("data-cormap") : corCfg.metric;
+                var pi = Number(pair.getAttribute("data-corpair"));
+                var p = corPairsOf(corData, pm)
+                    .sort(function (x, y) { return Math.abs(y.r) - Math.abs(x.r); })[pi];
+                if (!p) return;
+                var verdict = p.r >= 0 ? "движутся вместе" : "в противофазе";
+                corSetStatus(corShort(p.a) + " и " + corShort(p.b) + ": r = " +
+                    Number(p.r).toFixed(2) + " — " + verdict + " · " +
+                    COR_HINT[pm] + " · окно " + corWinLabel(), true);
+            }
+        });
+        board.addEventListener("change", function (e) {
+            var opp = corAttr(e.target, board, "data-coraopp");
+            var same = corAttr(e.target, board, "data-corasame");
+            if (!opp && !same) return;
+            var node = opp || same;
+            var metric = node.getAttribute(opp ? "data-coraopp" : "data-corasame");
+            var raw = Number(node.value);
+            if (!isFinite(raw)) return;
+            var patch = {};
+            if (opp) patch.opp = Math.max(-1, Math.min(0, -Math.abs(raw)));
+            else patch.same = Math.max(0, Math.min(1, Math.abs(raw)));
+            patch.enabled = true;              // поставил порог — ждём сигнал
+            corAlertSave(metric, patch);
+            var box = board_query('[data-coralert="' + metric + '"]');
+            if (box) {
+                var sw = box.querySelector("[data-coralon]");
+                if (sw && !sw.classList.contains("on")) {
+                    sw.classList.add("on");
+                    var sp2 = sw.querySelector("span");
+                    if (sp2) sp2.textContent = "СИГНАЛ ВКЛ";
+                }
+                var now = box.querySelector(".cor-alert-now");
+                var cfg2 = corAlertOf(metric);
+                if (now) now.textContent = "в противофазе " + corAlertNum(cfg2.opp) +
+                    " · в одну сторону " + corAlertNum(cfg2.same);
+            }
+            corSetStatus("сигнал " + metric.toUpperCase() + " включён");
+        });
+    }
+
+    // Что означает цвет клетки и что в неё смотреть: собирается из подписи
+    // метрики, знака коэффициента и самих монет. Раньше клетки карты были
+    // просто цветными квадратами без единого слова — по наведению ничего
+    // не объяснялось.
+    var COR_COEF_TEXT = "Коэффициент Пирсона по часовым точкам: +1 — метрика " +
+        "движется синхронно, 0 — связи нет, −1 — в противофазе.";
 
     function corMetricHint(metric) {
         var list = (corData && corData.metrics) || [];
@@ -1206,9 +1537,10 @@
         return COR_HINT[String(metric)] || corLabelOf(metric);
     }
 
-    function corWinLabel() {
-        if (corData && (corData.window_label || corData.window)) {
-            return corData.window_label || corData.window;
+    function corWinLabel(d) {
+        d = d || corData;
+        if (d && (d.window_label || d.window)) {
+            return d.window_label || d.window;
         }
         return String(corCfg.window || "");
     }
@@ -1221,9 +1553,10 @@
             : "background:rgba(255,42,95," + alpha + ")";
     }
 
-    function corHeat(d) {
-        var syms = (d.symbols || []).slice(0, 10);
-        var m = corMatrix(d, d.metric);
+    function corHeat(d, metric) {
+        metric = metric || (d && d.metric) || "liq";
+        var syms = (d && d.symbols || []).slice(0, 10);
+        var m = corMatrix(d, metric);
         if (syms.length < 2) {
             return '<div class="cor-flow-empty">мало монет с историей за это окно</div>';
         }
@@ -1242,10 +1575,10 @@
                 var r = Number(v);
                 var tip = same
                     ? corShort(a) + " — сама с собой: r = 1, диагональ карты"
-                    : corPairExplanation(a, b, r);
+                    : corPairExplanation(a, b, r, metric);
                 html += '<td class="cor-heat-cell' + (same ? " diag" : "") +
-                    '" data-corcell="' + esc(corShort(a) + "|" + corShort(b) + "|" +
-                        (same ? "" : r.toFixed(2))) +
+                    '" data-corcell="' + esc(metric + "|" + corShort(a) + "|" +
+                        corShort(b) + "|" + (same ? "" : r.toFixed(2))) +
                     '" title="' + esc(tip) + '" style="' +
                     (same ? "" : corHeatColor(r)) + '">' +
                     (same ? "1" : r.toFixed(2)) + "</td>";
@@ -1277,176 +1610,44 @@
         }).join("");
     }
 
-    function corStatusText() {
-        if (!corData) return "";
-        var pairs = corPairsOf(corData, corData.metric);
-        var active = pairs.filter(function (p) { return Math.abs(p.r) >= 0.4; }).length;
-        var text = "монет: " + ((corData.symbols || []).length) +
-            " · точек в окне: " + (corData.hours || 0) +
-            " · пар: " + pairs.length + " · сильных: " + active;
-        return text;
+    function corPairsList(metric) {
+        var pairs = corPairsOf(corData, metric || (corData && corData.metric) || "liq");
+        if (!pairs.length) {
+            return '<div class="cor-flow-empty">связей пока нет — мало истории</div>';
+        }
+        pairs.sort(function (p, q) { return Math.abs(q.r) - Math.abs(p.r); });
+        return pairs.slice(0, 6).map(function (p, i) {
+            var r = Number(p.r) || 0;
+            var w = Math.max(6, Math.min(100, Math.round(Math.abs(r) * 100)));
+            var cls = r >= 0 ? "pos" : "neg";
+            return '<div class="cor-pair" data-corpair="' + i + '">' +
+                '<span class="cor-pair-names">' + esc(corShort(p.a)) + " ↔ " +
+                esc(corShort(p.b)) + "</span>" +
+                '<span class="cor-pair-bar ' + cls + '"><i style="width:' + w + '%"></i></span>' +
+                '<span class="cor-pair-r ' + cls + '">' + r.toFixed(2) + "</span></div>";
+        }).join("");
     }
 
-    function paintCorrelations(d, bind) {
-        var board = $("corr-board");
-        if (!board) return;
-        corData = d;
-        if (d.config && d.config.metric) corCfg.metric = d.config.metric;
-        if (d.config && d.config.window) corCfg.window = d.config.window;
-        var winLabel = (d.window_label || d.window || "");
-        var head = '<div class="al-head"><div><h3>🔗 Корреляции валют</h3>' +
-            '<div class="al-sub">Кто ходит вместе за ' + esc(winLabel) +
-            ", а кто в противофазе: ликвидации и объём, CVD и OI. Видно, где выносило шорты, " +
-            "а где лонги, куда перекошен CVD и где растёт открытый интерес.</div></div></div>";
-        board.innerHTML = head +
-            '<div class="al-label">Окно</div><div class="al-chips" id="cor-wins">' +
-            corWindowChips(d) + "</div>" +
-            '<div class="al-label">Метрика</div><div class="al-chips" id="cor-mets">' +
-            corMetricChips(d, d.metric, "data-cormet") + "</div>" +
-            '<div class="cor-flows" id="cor-flows">' + corFlowsBox() + "</div>" +
-            '<div class="al-label">График корреляций</div>' +
-            '<div class="cor-hist-wrap"><span class="cor-hist-title">Распределение связей · ' +
-            esc(corLabelOf(d.metric)) + "</span>" +
-            '<div class="cor-hist" id="cor-hist">' + corHist(d.metric) + "</div></div>" +
-            '<div class="al-label">Тепловая карта · ' + esc(corMetricTitle(d, d.metric)) +
-            " · " + esc(winLabel) + "</div>" +
-            '<div class="cor-heat-note" id="cor-heat-note">Что это: ' +
-            esc(corMetricTitle(d, d.metric)).toLowerCase() + " — " +
-            esc(corMetricHint(d.metric)) +
-            ". Клетка — пара монет, число — коэффициент за " + esc(winLabel) +
-            " (зелёный: вместе, красный: наоборот). Наведите на клетку или " +
-            "нажмите её: покажу, что именно показывает эта цифра.</div>" +
-            '<div id="cor-heat-box">' + corHeat(d) + "</div>" +
-            '<div class="al-label">Самые сильные связи</div>' +
-            '<div class="cor-pairs" id="cor-pairs">' + corPairsList() + "</div>" +
-            '<div class="al-status" id="cor-status">' + esc(corStatusText()) + "</div>";
-        if (bind) bindCorrelations();
-    }
-
-    function paintCorrelationsLive(d) {
-        /* Автообновление: только цифры. Разметку и чипы не трогаем — иначе
-           обработчики кнопок умирали бы каждые 30 секунд. */
-        corData = d;
-        var flows = $("cor-flows");
-        if (flows) flows.innerHTML = corFlowsBox();
-        var heat = $("cor-heat-box");
-        if (heat) heat.innerHTML = corHeat(d);
-        var hist = $("cor-hist");
-        if (hist) hist.innerHTML = corHist(d.metric);
-        var pairs = $("cor-pairs");
-        if (pairs) pairs.innerHTML = corPairsList();
-        var st = $("cor-status");
-        if (st) st.textContent = corStatusText();
-    }
-
-    function corMarkChips() {
-        /* Подсветка выбранного — мгновенно, не дожидаясь ответа сервера. */
-        var board = $("corr-board");
-        if (!board) return;
-        board.querySelectorAll("#cor-wins .al-chip").forEach(function (b) {
-            b.classList.toggle("on", b.getAttribute("data-corwin") === String(corCfg.window));
+    function corHist(metric) {
+        /* Сколько пар попало в каждый интервал коэффициента: сразу видно,
+           рынок движется одним куском или монеты живут сами по себе. */
+        var buckets = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];   // −1…−0.8 … 0.8…1
+        corPairsOf(corData, metric).forEach(function (p) {
+            var idx = Math.min(9, Math.max(0, Math.floor((p.r + 1) / 0.2)));
+            if (p.r === 1) idx = 9;
+            buckets[idx] += 1;
         });
-        board.querySelectorAll("#cor-mets .al-chip").forEach(function (b) {
-            b.classList.toggle("on", b.getAttribute("data-cormet") === String(corCfg.metric));
-        });
-    }
-
-    function corSetStatus(text, ok) {
-        var st = $("cor-status");
-        if (!st) return;
-        st.className = "al-status" + (ok ? " ok" : "");
-        st.textContent = text || corStatusText();
-    }
-
-    function saveCorrelations() {
-        if (corSaveT) clearTimeout(corSaveT);
-        corSaveT = setTimeout(function () {
-            api("/api/account/correlations", {
-                method: "POST",
-                body: JSON.stringify({ window: corCfg.window, metric: corCfg.metric }),
-            }).then(function (d) {
-                if (d && d.ok === false) corSetStatus(d.error || "настройка не сохранилась");
-            }).catch(function () { corSetStatus("настройка не сохранилась: сеть"); });
-        }, 250);
-    }
-
-    function bootCorrelations() {
-        if (!$("corr-board")) return;
-        bindCorrelations();
-        loadCorrelations(true);
-        if (corTimer) clearInterval(corTimer);
-        corTimer = setInterval(function () {
-            if (!document.hidden && $("corr-board") &&
-                $("corr-board").offsetParent !== null) loadCorrelations(false);
-        }, 30000);
-    }
-
-    function loadCorrelations(full) {
-        return api("/api/account/correlations?window=" + corCfg.window + "&metric=" + corCfg.metric)
-            .then(function (d) {
-                if (!d || !d.ok) return d;
-                corData = d;
-                if (full || !$("cor-heat-box")) paintCorrelations(d, true);
-                else paintCorrelationsLive(d);
-                return d;
-            });
-    }
-
-    function bindCorrelations() {
-        var board = $("corr-board");
-        if (!board || board._bound) return;
-        board._bound = true;              // обработчики живут на контейнере
-        board.addEventListener("click", function (e) {
-            var t = e.target;
-            while (t && t !== board && !(t.getAttribute && (t.getAttribute("data-corwin") ||
-                t.getAttribute("data-cormet") || t.getAttribute("data-corpair") ||
-                t.getAttribute("data-corcell")))) {
-                t = t.parentNode;
-            }
-            if (!t || t === board) return;
-            var cell = t.getAttribute("data-corcell");
-            if (cell !== null && cell !== undefined && cell !== "") {
-                // Клик по клетке тепловой карты: то же объяснение, что и в
-                // подсказке, но ещё и текстом под картой — на телефоне
-                // наведения нет, а вопрос «что это за цифра» остаётся.
-                var parts = cell.split("|");
-                var line = parts[2]
-                    ? corPairExplanation(parts[0] + "_USDT", parts[1] + "_USDT", Number(parts[2]))
-                    : parts[0] + " — сама с собой: r = 1, диагональ карты";
-                corSetStatus(line, true);
-                return;
-            }
-            var win = t.getAttribute("data-corwin");
-            if (win) {
-                corCfg.window = win;
-                corMarkChips();
-                corSetStatus("окно " + win + " · считаю…");
-                loadCorrelations(true);
-                saveCorrelations();
-                return;
-            }
-            var met = t.getAttribute("data-cormet");
-            if (met) {
-                corCfg.metric = met;
-                corMarkChips();
-                if (corData) paintCorrelationsLive(corData);   // карта и графики — сразу
-                corSetStatus(corStatusText());
-                loadCorrelations(true);                        // цифры подтверждаем фоном
-                saveCorrelations();
-                return;
-            }
-            var pi = t.getAttribute("data-corpair");
-            if (pi !== null && pi !== undefined && pi !== "") {
-                var p = corPairsOf(corData, (corData && corData.metric) || "liq")
-                    .sort(function (x, y) { return Math.abs(y.r) - Math.abs(x.r); })[Number(pi)];
-                if (!p) return;
-                var verdict = p.r >= 0 ? "движутся вместе" : "в противофазе";
-                corSetStatus(corShort(p.a) + " и " + corShort(p.b) + ": r = " +
-                    Number(p.r).toFixed(2) + " — " + verdict + " · " +
-                    COR_HINT[(corData && corData.metric) || "liq"] + " · окно " +
-                    ((corData && (corData.window_label || corData.window)) || ""), true);
-            }
-        });
+        var max = Math.max.apply(null, buckets.concat([1]));
+        return buckets.map(function (n, i) {
+            var lo = -1 + i * 0.2;
+            var cls = lo < 0 ? "neg" : "pos";
+            var pct = Math.round(100 * n / max);
+            var title = (!n ? "нет пар" : n + " пар") + " · r " +
+                (lo >= 0 ? "+" : "") + lo.toFixed(1) + "…" +
+                (lo + 0.2 >= 0 ? "+" : "") + (lo + 0.2).toFixed(1);
+            return '<i class="' + cls + '" style="height:' + Math.max(2, pct) +
+                '%" title="' + esc(title) + '"></i>';
+        }).join("");
     }
 
     /* ---------- сервис «Сторож монет»: гистограмма пампов/дампов ---------- */

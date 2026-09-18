@@ -44,6 +44,9 @@ OI_WIN_BY_MIN = (
 DEFAULT_WINDOW_MIN = 5
 #: окна по метрикам: у ликвидаций минуты, у CVD и OI — крупнее
 DEFAULT_WINDOWS: Dict[str, int] = {"liq": 5, "cvd": 15, "oi": 60}
+#: монета по умолчанию — у каждой метрики своя: можно слушать ликвидации
+#: BTC, CVD эфира и OI сола сразу, и сигналы придут независимо
+DEFAULT_COINS: Dict[str, str] = {m: "ALL" for m in METRICS}
 #: минимальная пауза между сигналами одной метрики, сек: окно может
 #: перезапуститься и сразу переполниться (крупный удар пришёл одним событием),
 #: и один сигнал не должен разъезжаться на два сообщения
@@ -55,6 +58,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "symbol": "ALL",
     "window_min": 5,                       # для старых настроек и клиентов
     "windows": dict(DEFAULT_WINDOWS),
+    "coins": dict(DEFAULT_COINS),          # монета каждой метрики
     "threshold": {"liq": 500_000, "cvd": 1_000_000, "oi": 1_000_000},
     "min_event": {"liq": 0, "cvd": 0, "oi": 0},
 }
@@ -77,6 +81,19 @@ def coin_name(symbol: str) -> str:
     if s == "ALL":
         return "все монеты"
     return (s.split("_")[0] or s).upper()
+
+
+def symbol_of(cfg: Dict[str, Any], metric: str) -> str:
+    """Монета метрики: своя из ``coins``, иначе общее поле ``symbol``.
+
+    Старые настройки хранили одну монету на все метрики (``symbol``) — она
+    читается как значение по умолчанию, чтобы выбор пользователя не потерялся.
+    """
+    metric = str(metric or "liq").lower()
+    coins = cfg.get("coins") if isinstance(cfg.get("coins"), dict) else {}
+    if coins.get(metric):
+        return canon_symbol(str(coins.get(metric)))
+    return canon_symbol(str(cfg.get("symbol") or "ALL"))
 
 
 def money(v: Any) -> str:
@@ -163,6 +180,12 @@ def normalize_config(raw: Any) -> Dict[str, Any]:
         else:
             windows[m] = window_minutes(DEFAULT_WINDOWS[m])
     window = windows[watch[0]] if watch else windows["liq"]
+    legacy_symbol = canon_symbol(str(src.get("symbol") or "ALL"))
+    raw_coins = src.get("coins") if isinstance(src.get("coins"), dict) else {}
+    coins = {}
+    for m in METRICS:
+        given = raw_coins.get(m)
+        coins[m] = canon_symbol(str(given)) if given else legacy_symbol
     thr = _metric_map(src.get("threshold"), DEFAULT_CONFIG["threshold"])
     mins = _metric_map(src.get("min_event"), DEFAULT_CONFIG["min_event"])
     enabled = src.get("enabled")
@@ -171,7 +194,10 @@ def normalize_config(raw: Any) -> Dict[str, Any]:
     return {
         "enabled": bool(enabled),
         "watch": watch,
-        "symbol": canon_symbol(str(src.get("symbol") or "ALL")),
+        # старое единое поле остаётся в конфиге (его читают клиенты), но
+        # движок берёт монету метрики из coins — они могут быть разными
+        "symbol": legacy_symbol,
+        "coins": coins,
         "window_min": window,
         "windows": windows,
         "threshold": thr,
@@ -445,7 +471,9 @@ def live_snapshot(cfg: Dict[str, Any], market: Dict[str, Any],
     """
     cfg = normalize_config(cfg)
     now = _num(market.get("now"))
-    sym = cfg["symbol"]
+    # монета каждой метрики своя — превью в кабинете считает то же, что уйдёт
+    syms = {m: symbol_of(cfg, m) for m in METRICS}
+    sym = syms["liq"]
     out: Dict[str, Any] = {}
     w_liq = window_of(cfg, "liq")
     w_cvd = window_of(cfg, "cvd")
@@ -454,11 +482,11 @@ def live_snapshot(cfg: Dict[str, Any], market: Dict[str, Any],
                         cfg["min_event"]["liq"], now, sym,
                         since_of(since, "liq", sym))
     cvd = cvd_by_symbol(market.get("cvd") or {}, w_cvd * 60,
-                        cfg["min_event"]["cvd"], now, sym,
-                        since_of(since, "cvd", sym))
+                        cfg["min_event"]["cvd"], now, syms["cvd"],
+                        since_of(since, "cvd", syms["cvd"]))
     oi = oi_by_symbol(market.get("oi") or {}, w_oi,
-                      cfg["min_event"]["oi"], sym,
-                      since_of(since, "oi", sym), now)
+                      cfg["min_event"]["oi"], syms["oi"],
+                      since_of(since, "oi", syms["oi"]), now)
 
     def pack(rows: Dict[str, dict], signed: bool) -> dict:
         ranked = sorted(rows.values(),
@@ -507,12 +535,13 @@ def live_snapshot(cfg: Dict[str, Any], market: Dict[str, Any],
             continue
         liq_pts[int(ts)] = liq_pts.get(int(ts), 0.0) + usd
     cvd_pts: Dict[Any, float] = {}
+    cvd_want = canon_symbol(syms["cvd"])
     for key, acc in (market.get("cvd") or {}).items():
         if "|" not in str(key):
             continue
         csym, _tf = str(key).rsplit("|", 1)
         csym = canon_symbol(csym)
-        if want != "ALL" and csym != want:
+        if cvd_want != "ALL" and csym != cvd_want:
             continue
         for b, v in (acc or {}).items():
             try:
@@ -531,10 +560,13 @@ def live_snapshot(cfg: Dict[str, Any], market: Dict[str, Any],
     for m, win, lr in (("liq", w_liq, liq), ("cvd", w_cvd, cvd),
                        ("oi", w_oi, oi)):
         out[m]["window_min"] = win
-        out[m]["span_min"] = span_minutes(now, win * 60, since_of(since, m, sym))
+        out[m]["span_min"] = span_minutes(now, win * 60,
+                                          since_of(since, m, syms[m]))
+        out[m]["coin"] = syms[m]
     out["window_min"] = cfg["window_min"]
     out["windows"] = dict(cfg["windows"])
     out["symbol"] = cfg["symbol"]
+    out["coins"] = dict(syms)
     return out
 
 
@@ -554,16 +586,19 @@ def evaluate(cfg: Dict[str, Any], market: Dict[str, Any],
         if thr <= 0:
             continue
         win = window_of(cfg, metric)
-        start = since_of(since, metric, cfg["symbol"])
+        # монета у каждой метрики своя: ликвидации BTC и CVD эфира слушаются
+        # одновременно и сигналят независимо друг от друга
+        coin = symbol_of(cfg, metric)
+        start = since_of(since, metric, coin)
         if metric == "liq":
             rows = liq_by_symbol(market.get("events") or [], win * 60,
-                                 cfg["min_event"]["liq"], now, cfg["symbol"], start)
+                                 cfg["min_event"]["liq"], now, coin, start)
         elif metric == "cvd":
             rows = cvd_by_symbol(market.get("cvd") or {}, win * 60,
-                                 cfg["min_event"]["cvd"], now, cfg["symbol"], start)
+                                 cfg["min_event"]["cvd"], now, coin, start)
         else:
             rows = oi_by_symbol(market.get("oi") or {}, win,
-                                cfg["min_event"]["oi"], cfg["symbol"], start, now)
+                                cfg["min_event"]["oi"], coin, start, now)
         ranked = sorted(rows.values(),
                         key=lambda r: abs(_num(r.get("usd"))), reverse=True)
         n = 0
@@ -574,7 +609,7 @@ def evaluate(cfg: Dict[str, Any], market: Dict[str, Any],
             span = span_minutes(now, win * 60, start)
             hits.append({
                 "metric": metric,
-                "symbol": row.get("symbol") or cfg["symbol"],
+                "symbol": row.get("symbol") or coin,
                 "value": val,
                 "abs": abs(val),
                 "threshold": thr,
@@ -701,14 +736,15 @@ def format_config_text(cfg: Dict[str, Any]) -> str:
         "🔔 <b>Алерты по объёму</b>",
         f"сигнал: <b>{on}</b>",
         f"смотрю: {html.escape(watch)}",
-        f"монета: <b>{html.escape(coin_name(cfg['symbol']))}</b>",
     ]
     # строку показываем у каждой метрики, даже выключенной: окно у неё своё,
     # и видно, с чего начнётся, если её включить
     for m in METRICS:
         mark = "" if m in cfg["watch"] else " · выкл"
+        coin = coin_name(symbol_of(cfg, m))
         lines.append(
             f"{METRIC_ICON[m]} <b>{html.escape(METRIC_TITLE[m])}</b>{mark}"
+            f" · монета <b>{html.escape(coin)}</b>"
             f" · окно <code>{html.escape(window_label(window_of(cfg, m)))}</code>"
             f" · порог <code>{html.escape(money(cfg['threshold'][m]))}</code>"
             f" · мин. <code>{html.escape(money(cfg['min_event'][m]))}</code>"

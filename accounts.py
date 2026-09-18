@@ -146,34 +146,45 @@ CONFIG_MAX_KEYS = 24
 CONFIG_MAX_LIST = 40
 
 
+#: насколько глубоко пускаем вложенность настроек сервиса: конфиг → метрика →
+#: её поля. Глубже не нужно, а «мусор» из запроса отсекаем лимитами.
+CONFIG_MAX_DEPTH = 3
+
+
+def _clean_value(val: Any, depth: int = 0) -> Any:
+    """Одно значение настроек: скаляр как есть, словарь/список — с лимитами."""
+    if isinstance(val, bool) or isinstance(val, (int, float)):
+        return val
+    if isinstance(val, str):
+        return val[:120]
+    if isinstance(val, (list, tuple)):
+        items = []
+        for item in list(val)[:CONFIG_MAX_LIST]:
+            if isinstance(item, (str, int, float, bool)):
+                items.append(item[:120] if isinstance(item, str) else item)
+        return items
+    if isinstance(val, dict) and depth < CONFIG_MAX_DEPTH:
+        out: Dict[str, Any] = {}
+        for k, v in list(val.items())[:CONFIG_MAX_KEYS]:
+            clean = _clean_value(v, depth + 1)
+            if clean is not None or v is None:
+                out[str(k)[:40]] = clean
+        return out
+    return None
+
+
 def clean_service_config(config: Dict[str, Any]) -> Dict[str, Any]:
     """Чистка настроек сервиса: только простые значения и без мусора.
 
     Ключи приходят с сайта и из бота, так что лимиты нужны: строка — до 120
-    символов, список — до 40 коротких значений, глубже одного уровня не пускаем.
+    символов, список — до 40 коротких значений, вложенность — до
+    ``CONFIG_MAX_DEPTH`` уровней. Вложенность нужна настоящая: алерты по
+    корреляции держат настройки каждой метрики (окно и два порога), и без
+    второго уровня они молча терялись бы при сохранении.
     """
-    out: Dict[str, Any] = {}
-    for key, val in list((config or {}).items())[:CONFIG_MAX_KEYS]:
-        name = str(key)[:40]
-        if isinstance(val, bool) or isinstance(val, (int, float)):
-            out[name] = val
-        elif isinstance(val, str):
-            out[name] = val[:120]
-        elif isinstance(val, (list, tuple)):
-            items = []
-            for item in list(val)[:CONFIG_MAX_LIST]:
-                if isinstance(item, (str, int, float, bool)):
-                    items.append(item[:120] if isinstance(item, str) else item)
-            out[name] = items
-        elif isinstance(val, dict):
-            flat = {}
-            for k2, v2 in list(val.items())[:CONFIG_MAX_KEYS]:
-                if isinstance(v2, bool) or isinstance(v2, (int, float)):
-                    flat[str(k2)[:40]] = v2
-                elif isinstance(v2, str):
-                    flat[str(k2)[:40]] = v2[:120]
-            out[name] = flat
-    return out
+    if not isinstance(config, dict):
+        return {}
+    return _clean_value(dict(config), 0) or {}
 
 
 def _now() -> float:

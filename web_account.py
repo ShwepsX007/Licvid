@@ -892,7 +892,8 @@ def register_account_routes(app) -> None:
 
     @router.get("/api/account/correlations")
     async def api_correlations(request: Request, window: str = "", metric: str = ""):
-        from correlations import DEFAULT_METRIC, DEFAULT_WINDOW, WINDOWS, window_key
+        from correlations import (DEFAULT_METRIC, DEFAULT_WINDOW, WINDOWS,
+                                  normalize_alerts, window_key)
         user = current_user(request)
         if not user:
             return _need_auth()
@@ -915,13 +916,16 @@ def register_account_routes(app) -> None:
         data = dict(data)
         data["subscribed"] = bool(row and row.get("enabled"))
         data["config"] = {"window": win, "metric": met}
+        # алерты по корреляции: у каждой метрики своё окно и два порога
+        data["alerts"] = normalize_alerts(cfg)
         data["windows"] = data.get("windows") or [
             {"key": k, "minutes": m} for k, m in WINDOWS]
         return {"ok": True, **data}
 
     @router.post("/api/account/correlations")
     async def api_correlations_save(request: Request):
-        from correlations import DEFAULT_METRIC, DEFAULT_WINDOW, window_key
+        from correlations import (DEFAULT_METRIC, DEFAULT_WINDOW,
+                                  normalize_alerts, window_key)
         user = current_user(request)
         if not user:
             return _need_auth()
@@ -931,15 +935,24 @@ def register_account_routes(app) -> None:
             body = await request.json()
         except Exception:
             body = {}
+        row = ctx.store.get_user_service(user["id"], "correlations")
+        prev = (row or {}).get("config") or {}
+        # если клиент прислал только окно и метрику (старая страница в кэше
+        # браузера) — настройки алертов не затираем, а оставляем как были
+        alerts_raw = (body or {}).get("alerts")
+        alerts = normalize_alerts(alerts_raw if alerts_raw is not None else prev)
         cfg = {
             "window": window_key((body or {}).get("window") or DEFAULT_WINDOW),
             "metric": str((body or {}).get("metric") or DEFAULT_METRIC),
+            "alerts": alerts,
         }
         r = ctx.store.set_user_service_config(
             user["id"], "correlations", cfg, enabled=True)
         if not r.get("ok"):
             return JSONResponse(r, status_code=400)
-        return {"ok": True, "config": cfg, "subscribed": True}
+        return {"ok": True, "config": {"window": cfg["window"],
+                                       "metric": cfg["metric"]},
+                "alerts": alerts, "subscribed": True}
 
     @router.get("/api/account/watchlist")
     async def api_watchlist(request: Request):

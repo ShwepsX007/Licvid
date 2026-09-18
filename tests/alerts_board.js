@@ -243,10 +243,61 @@ async function main() {
           JSON.stringify(body.windows || null));
   }
 
+  // Монета — своя у каждой метрики: ликвидации могут смотреть BTC, а CVD — ETH,
+  // и сигналы идут независимо. Общий чип «монета на всё» из доски убран.
+  const coinBoxes = qa("[data-coinbox]");
+  check("монета настраивается у каждой метрики (LIQ/CVD/OI)",
+        coinBoxes.length === 3 &&
+        ["liq", "cvd", "oi"].every((m) => !!q('[data-coinbox="' + m + '"]')),
+        coinBoxes.length + " блоков");
+  check("общего блока «монета на все метрики» больше нет",
+        !q("[data-coin]") && !$("al-coin-in"), "старый блок остался");
+  const liqCoins = qa('[data-coinbox="liq"] [data-coinval]');
+  const ethChip = liqCoins.filter((b) => b.textContent.trim() === "ETH")[0];
+  check("в монетах ликвидаций есть ETH", !!ethChip, liqCoins.map((b) => b.textContent.trim()).join(","));
+  if (ethChip) {
+    click(ethChip);
+    await sleep(900);
+    const posts = apiCalls.filter((c) => c.method === "POST" &&
+      c.url.indexOf("/api/account/alerts") === 0);
+    const last = posts[posts.length - 1];
+    let body = {};
+    try { body = JSON.parse((last && last.body) || "{}"); } catch (e) { body = {}; }
+    check("монета сохранилась только ликвидациям",
+          body.coins && body.coins.liq === "ETH_USDT" &&
+          body.coins.cvd !== "ETH_USDT" && body.coins.oi !== "ETH_USDT",
+          JSON.stringify(body.coins || null));
+    check("чип ETH подсветился сразу", ethChip.classList.contains("on"), ethChip.className);
+    check("в статусе видно монеты метрик",
+          /(монеты: LIQ ETH|сохранено · монеты: ETH)/.test(
+            $("al-status") ? $("al-status").textContent : ""),
+          $("al-status") && $("al-status").textContent);
+    const liqCoinLabel = q('[data-coinlabel="liq"]') || {};
+    check("в карточке ликвидаций подписана монета ETH",
+          String(liqCoinLabel.textContent).trim() === "ETH", String(liqCoinLabel.textContent));
+  }
+  // своя монета для CVD — своё поле ввода
+  const cvdCoinIn = q('[data-coinin="cvd"]');
+  check("у CVD есть своё поле ввода монеты", !!cvdCoinIn);
+  if (cvdCoinIn) {
+    cvdCoinIn.value = "sol";
+    cvdCoinIn.dispatchEvent(new win.Event("change", { bubbles: true }));
+    await sleep(900);
+    const posts = apiCalls.filter((c) => c.method === "POST" &&
+      c.url.indexOf("/api/account/alerts") === 0);
+    let body = {};
+    try { body = JSON.parse((posts[posts.length - 1] && posts[posts.length - 1].body) || "{}"); }
+    catch (e) { body = {}; }
+    check("тикер без пары понят: CVD смотрит SOL_USDT",
+          body.coins && body.coins.cvd === "SOL_USDT" && body.coins.liq === "ETH_USDT",
+          JSON.stringify(body.coins || null));
+  }
+
   check("ошибок страницы нет", errors.length === 0, errors.slice(0, 2).join(" | ") || "ok");
 
   // вернуть демо-аккаунту умолчания, чтобы повторный прогон был чистым
-  await api(cookie, { windows: DEFAULTS, window_min: DEFAULTS.liq, enabled: true });
+  await api(cookie, { windows: DEFAULTS, window_min: DEFAULTS.liq, enabled: true,
+                      coins: { liq: "ALL", cvd: "ALL", oi: "ALL" } });
 
   console.log("\nитог: " + ok + " ок, " + fail + " ошибок");
   dom.window.close();

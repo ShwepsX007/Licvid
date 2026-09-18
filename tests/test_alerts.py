@@ -10,9 +10,9 @@ sys.path.insert(0, HERE)
 
 from alerts import (  # noqa: E402
     THRESHOLD_PRESETS_FLOW, canon_symbol, cooldown_sec, cvd_by_symbol, evaluate,
-    format_alert_html, liq_by_symbol, money, normalize_config, oi_by_symbol,
-    oi_window_key, presets, should_fire, sparkline, threshold_presets,
-    window_label,
+    format_alert_html, liq_by_symbol, live_snapshot, money, normalize_config,
+    oi_by_symbol, oi_window_key, presets, should_fire, sparkline, symbol_of,
+    threshold_presets, window_label,
 )
 
 
@@ -428,6 +428,83 @@ class AlertDeliveryTest(unittest.TestCase):
             self.assertEqual(liq_row["detail"]["span_min"], 2)
             self.assertEqual(liq_row["detail"]["count"], 3)
             store.close()
+
+
+class CoinsPerMetricTest(unittest.TestCase):
+    """Монета — своя у каждой метрики: ликвидации могут смотреть BTC, CVD — ETH.
+
+    Требование: в сервисе алертов по объёму у каждой переменной (liq/cvd/oi)
+    своя монета, и сигналы идут независимо друг от друга.
+    """
+
+    def test_normalize_keeps_coins_per_metric(self):
+        cfg = normalize_config({"watch": ["liq", "cvd", "oi"],
+                                "coins": {"liq": "btc-usdt", "cvd": "eth-usdt"}})
+        self.assertEqual(symbol_of(cfg, "liq"), "BTC_USDT")
+        self.assertEqual(symbol_of(cfg, "cvd"), "ETH_USDT")
+        self.assertEqual(symbol_of(cfg, "oi"), "ALL")
+        self.assertEqual(cfg["coins"]["oi"], "ALL")
+
+    def test_legacy_single_symbol_spreads_over_metrics(self):
+        cfg = normalize_config({"symbol": "sol-usdt", "watch": ["liq", "cvd"]})
+        self.assertEqual(symbol_of(cfg, "liq"), "SOL_USDT")
+        self.assertEqual(symbol_of(cfg, "cvd"), "SOL_USDT")
+        self.assertEqual(symbol_of(cfg, "oi"), "SOL_USDT")
+
+    def test_evaluate_uses_own_coin_per_metric(self):
+        now = 1_000_000.0
+        market = {
+            "now": now,
+            "events": [
+                _liq("BTC_USDT", 700_000, now - 30),
+                _liq("ETH_USDT", 700_000, now - 20),
+            ],
+            "cvd": {"BTC_USDT|1": {int(now - 5): 800_000},
+                    "ETH_USDT|1": {int(now - 5): -900_000}},
+            "oi": {},
+        }
+        cfg = normalize_config({
+            "enabled": True, "watch": ["liq", "cvd"],
+            "coins": {"liq": "BTC_USDT", "cvd": "ETH_USDT"},
+            "threshold": {"liq": 500_000, "cvd": 500_000},
+            "windows": {"liq": 5, "cvd": 15},
+        })
+        hits = evaluate(cfg, market)
+        got = {(h["metric"], h["symbol"]) for h in hits}
+        self.assertIn(("liq", "BTC_USDT"), got)
+        self.assertIn(("cvd", "ETH_USDT"), got)
+        self.assertNotIn(("liq", "ETH_USDT"), got)
+        self.assertNotIn(("cvd", "BTC_USDT"), got)
+
+    def test_signals_are_independent(self):
+        """Монета ликвидаций не влияет на CVD: только своя метрика в сигнале."""
+        now = 2_000_000.0
+        market = {
+            "now": now,
+            "events": [_liq("BTC_USDT", 900_000, now - 10)],
+            "cvd": {"SOL_USDT|1": {int(now - 5): 400_000}},
+            "oi": {},
+        }
+        cfg = normalize_config({
+            "enabled": True, "watch": ["liq", "cvd"],
+            "coins": {"liq": "BTC_USDT", "cvd": "ETH_USDT"},
+            "threshold": {"liq": 500_000, "cvd": 300_000},
+        })
+        hits = evaluate(cfg, market)
+        metrics = {h["metric"] for h in hits}
+        self.assertEqual(metrics, {"liq"})          # ETH не двигался — CVD молчит
+
+    def test_live_snapshot_reports_each_coin(self):
+        now = 3_000_000.0
+        market = {"now": now,
+                  "events": [_liq("BTC_USDT", 900_000, now - 10)],
+                  "cvd": {}, "oi": {}}
+        cfg = normalize_config({"enabled": True, "watch": ["liq"],
+                                "coins": {"liq": "BTC_USDT"}})
+        live = live_snapshot(cfg, market)
+        self.assertEqual(live["coins"]["liq"], "BTC_USDT")
+        self.assertEqual(live["liq"]["coin"], "BTC_USDT")
+        self.assertEqual(live["liq"]["symbol"], "BTC_USDT")
 
 
 if __name__ == "__main__":

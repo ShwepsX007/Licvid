@@ -274,9 +274,10 @@ class BotMenuTest(unittest.TestCase):
                         "timestamp": 1789669572.0 - 30, "side": "SELL"}],
             "cvd": {}, "oi": {}}
         text, _kb = self.bot._screen(self.user, "svc:alerts")
-        self.assertIn("💥 <b>ликвидации</b> · окно <code>5м</code>", text)
-        self.assertIn("🌊 <b>CVD</b> · выкл · окно <code>15м</code>", text)
-        self.assertIn("📊 <b>OI</b> · выкл · окно <code>1ч</code>", text)
+        # у каждой метрики своя монета и своё окно — строка читается целиком
+        self.assertIn("💥 <b>ликвидации</b> · монета <b>все монеты</b> · окно <code>5м</code>", text)
+        self.assertIn("🌊 <b>CVD</b> · выкл · монета <b>все монеты</b> · окно <code>15м</code>", text)
+        self.assertIn("📊 <b>OI</b> · выкл · монета <b>все монеты</b> · окно <code>1ч</code>", text)
         self.assertIn("<code>$900.0K</code>", text)
 
     def test_services_and_admin_have_back(self):
@@ -411,6 +412,129 @@ class BotMenuTest(unittest.TestCase):
         row = self.store.get_user_service(self.user["id"], "correlations")
         self.assertTrue(row["enabled"])
         self.assertEqual(row["config"]["window"], "7d")
+
+    def test_alert_coins_are_per_metric(self):
+        """Монета — у каждой метрики своя, сигналы идут независимо."""
+        import asyncio
+        sent = []
+
+        async def fake_reply(chat_id, text, markup=None, message_id=None, **kw):
+            sent.append((text, markup))
+            return True
+
+        self.bot.reply = fake_reply
+        loop = asyncio.get_event_loop_policy().new_event_loop()
+
+        loop.run_until_complete(self.bot._on_alert_cb(1, self.user, "al:c", None))
+        text, kb = sent[-1]
+        self.assertIn("Монета какой метрики", text)
+        self.assertEqual(_datas(kb)[:3], ["al:c:liq", "al:c:cvd", "al:c:oi"])
+
+        loop.run_until_complete(self.bot._on_alert_cb(1, self.user, "al:c:liq", None))
+        text, kb = sent[-1]
+        self.assertIn("Монета метрики", text)
+        self.assertIn("своя монета", _btns(kb))
+        self.assertIn("al:c:liq:?", _datas(kb))
+        self.assertIn("al:c:liq:BTC_USDT", _datas(kb))
+
+        # своя монета только ликвидациям — остальные остаются «все монеты»
+        loop.run_until_complete(self.bot._on_alert_cb(1, self.user, "al:c:liq:BTC_USDT", None))
+        cfg = self.bot._alert_cfg(self.user)
+        self.assertEqual(cfg["coins"]["liq"], "BTC_USDT")
+        self.assertEqual(cfg["coins"]["cvd"], "ALL")
+        text, _kb = self._screen_text("svc:alerts")
+        self.assertIn("монета <b>BTC</b>", text)
+
+        # ввод руками — «своя монета» конкретной метрики
+        loop.run_until_complete(self.bot._on_alert_cb(1, self.user, "al:c:cvd:?", None))
+        self.assertIn("coin:cvd", list(self.bot._wait_alert.values()))
+        self.bot._alert_apply_text(self.user, "coin:cvd", "sol")
+        cfg = self.bot._alert_cfg(self.user)
+        self.assertEqual(cfg["coins"]["cvd"], "SOL")   # тикер без пары понят
+        self.assertEqual(cfg["coins"]["liq"], "BTC_USDT")
+
+        # старый колбэк al:c:<монета> из уже отправленных меню: одна на все
+        loop.run_until_complete(self.bot._on_alert_cb(1, self.user, "al:c:ETH_USDT", None))
+        cfg = self.bot._alert_cfg(self.user)
+        self.assertEqual(set(cfg["coins"].values()), {"ETH_USDT"})
+
+    def _screen_text(self, key):
+        text, kb = self.bot._screen(self.user, key)
+        return text, kb
+
+    def test_corr_alerts_screen_and_thresholds(self):
+        """Алерты по корреляции: своё окно и два порога на каждую переменную."""
+        import asyncio
+        sent = []
+
+        async def fake_reply(chat_id, text, markup=None, message_id=None, **kw):
+            sent.append((text, markup))
+            return True
+
+        self.bot.reply = fake_reply
+        loop = asyncio.get_event_loop_policy().new_event_loop()
+
+        _t, kb = self.bot._screen(self.user, "svc:correlations")
+        self.assertIn("cor:a", _datas(kb))
+
+        loop.run_until_complete(self.bot._on_corr_cb(1, self.user, "cor:a", None))
+        text, kb = sent[-1]
+        self.assertIn("Алерты по корреляции", text)
+        self.assertIn("Ликвидации", text)
+        self.assertIn("в одну сторону", text)
+        datas = _datas(kb)
+        for m in ("liq", "vol", "cvd", "oi"):
+            self.assertIn(f"cor:a:{m}", datas)
+
+        loop.run_until_complete(self.bot._on_corr_cb(1, self.user, "cor:a:liq", None))
+        text, kb = sent[-1]
+        self.assertIn("Алерты · Ликвидации", text)
+        self.assertIn("выключен", text)
+        datas = _datas(kb)
+        self.assertIn("cor:a:liq:on", datas)
+        self.assertIn("cor:a:liq:w:1h", datas)
+        self.assertIn("cor:a:liq:opp:0.5", datas)
+        self.assertIn("cor:a:liq:same:0.5", datas)
+
+        # нажатие порога включает сигнал и не трогает остальные метрики
+        loop.run_until_complete(self.bot._on_corr_cb(1, self.user, "cor:a:liq:opp:0.5", None))
+        alerts = self.bot._corr_cfg(self.user)["alerts"]
+        self.assertTrue(alerts["liq"]["enabled"])
+        self.assertEqual(alerts["liq"]["opp"], -0.5)
+        self.assertEqual(alerts["liq"]["window"], "24h")
+        self.assertFalse(alerts["vol"]["enabled"])
+        # и это легло в базу, а не осталось в памяти
+        row = self.store.get_user_service(self.user["id"], "correlations")
+        self.assertEqual(row["config"]["alerts"]["liq"]["opp"], -0.5)
+
+        loop.run_until_complete(self.bot._on_corr_cb(1, self.user, "cor:a:liq:w:1h", None))
+        alerts = self.bot._corr_cfg(self.user)["alerts"]
+        self.assertEqual(alerts["liq"]["window"], "1h")
+        self.assertFalse(alerts["cvd"]["enabled"])
+
+        # «в одну сторону» — порог по плюсу
+        loop.run_until_complete(self.bot._on_corr_cb(1, self.user, "cor:a:cvd:same:0.5", None))
+        alerts = self.bot._corr_cfg(self.user)["alerts"]
+        self.assertTrue(alerts["cvd"]["enabled"])
+        self.assertEqual(alerts["cvd"]["same"], 0.5)
+        self.assertEqual(alerts["cvd"]["window"], "24h")
+
+        # свой порог руками: «в противофазе» −0.7
+        loop.run_until_complete(self.bot._on_corr_cb(1, self.user, "cor:a:vol:?:opp", None))
+        self.assertIn("corr:vol:opp", list(self.bot._wait_alert.values()))
+        msg = self.bot._corr_apply_text(self.user, "corr:vol:opp", "−0.7")
+        self.assertIn("противофаза", msg)
+        alerts = self.bot._corr_cfg(self.user)["alerts"]
+        self.assertEqual(alerts["vol"]["opp"], -0.7)
+        self.assertTrue(alerts["vol"]["enabled"])
+
+        # выключение сигнала
+        loop.run_until_complete(self.bot._on_corr_cb(1, self.user, "cor:a:liq:on", None))
+        self.assertFalse(self.bot._corr_cfg(self.user)["alerts"]["liq"]["enabled"])
+
+        # экран корреляций показывает, где сигналы включены
+        text, _kb = self.bot._screen(self.user, "svc:correlations")
+        self.assertIn("Алерты", text)
 
     def test_admin_leaves_back_to_admin(self):
         for data in ("users", "visits", "broadcast", "a:health"):

@@ -177,6 +177,8 @@ PUMPS = PumpScanner(keep_min=int(os.getenv("LIQSCOPE_PUMP_KEEP_MIN",
                                          str(3 * 24 * 60)) or 3 * 24 * 60))
 PUMP_SIGNALS: Deque[dict] = deque(maxlen=300)      # последние сработавшие сигналы
 PUMP_LAST_FIRED: Dict[str, float] = {}             # "символ|режим" -> когда сообщили
+CORR_SIGNALS: Deque[dict] = deque(maxlen=300)      # сигналы по корреляции
+CORR_LAST_FIRED: Dict[str, float] = {}             # "юзер|метрика|пара|вид" -> когда
 PUMP_POLL_SEC = max(10.0, float(os.getenv("LIQSCOPE_PUMP_POLL_SEC", "25") or 25))
 PUMP_OFF = os.getenv("LIQSCOPE_PUMP_OFF", "").strip() in ("1", "true", "yes", "on")
 # Заполняются из pump_scan при старте (так их видит и кабинет, и бот).
@@ -800,7 +802,7 @@ def _demo_oi(series: list) -> None:
 
 def alert_watch_symbols() -> Set[str]:
     """Монеты, которые смотрят алерты — их нужно держать в тиках/OI."""
-    from alerts import normalize_config
+    from alerts import normalize_config, symbol_of
     out: Set[str] = set()
     need_all = False
     try:
@@ -811,11 +813,13 @@ def alert_watch_symbols() -> Set[str]:
         cfg = normalize_config(s.get("config"))
         if not cfg.get("enabled"):
             continue
-        if cfg["symbol"] == "ALL":
-            if "cvd" in cfg["watch"] or "oi" in cfg["watch"]:
+        # монета у каждой метрики своя — держим в тиках все выбранные
+        for metric in cfg["watch"]:
+            coin = symbol_of(cfg, metric)
+            if coin == "ALL":
                 need_all = True
-        else:
-            out.add(cfg["symbol"])
+            else:
+                out.add(coin)
     if need_all:
         now = time.time()
         totals: Dict[str, float] = {}
@@ -1209,6 +1213,102 @@ async def alert_loop():
             log.warning("alerts: %s", e)
         try:
             await asyncio.sleep(8)
+        except asyncio.CancelledError:
+            break
+
+
+def corr_alert_pictures(alerts_cfg: dict) -> Dict[str, dict]:
+    """Картины корреляций по окнам, которые включены в алертах.
+
+    Матрицы в снимке считаются сразу по всем метрикам, поэтому разных окон
+    ровно столько, сколько включено у пользователя, — пересчёт не на каждый
+    сигнал, а один раз на окно (и всё это под общим кэшем снимков).
+    """
+    from correlations import normalize_alerts
+    pics: Dict[str, dict] = {}
+    cfg = normalize_alerts(alerts_cfg)
+    for key, row in cfg.items():
+        if not row.get("enabled"):
+            continue
+        win = row.get("window") or "24h"
+        if win in pics:
+            continue
+        try:
+            pics[win] = correlations_snapshot(win, key) or {}
+        except Exception as e:                             # noqa: BLE001
+            log.debug("corr alerts %s/%s: %s", key, win, e)
+            pics[win] = {}
+    return pics
+
+
+def corr_alerts_due(alerts_cfg: dict, pictures: Dict[str, dict], last_fire,
+                    now: float, limit: int = 3) -> List[dict]:
+    """Сигналы по корреляции к отправке: пауза по паре, не больше трёх карточек.
+
+    ``last_fire(metric, symbol)`` — когда пара последний раз сигналила у
+    пользователя: одна и та же связь не должна приходить каждые двадцать
+    секунд, пауза считается от окна метрики (:func:`correlations.alert_gap_sec`).
+    """
+    from correlations import alert_gap_sec, evaluate_alerts
+    out: List[dict] = []
+    for hit in evaluate_alerts(alerts_cfg, pictures):
+        last = last_fire(hit.get("metric"), hit.get("symbol"))
+        if last and now - last < alert_gap_sec(hit.get("window_min") or 0):
+            continue
+        out.append(hit)
+        if len(out) >= max(1, int(limit)):
+            break
+    return out
+
+
+async def corr_alert_loop():
+    """Алерты по корреляции: у каждой метрики своё окно и свои пороги.
+
+    Сигнал — пара монет, у которой связь перешагнула порог: «в противофазе»
+    (минус, например −0.5 на часе) или «в одну сторону» (плюс: 0.5 значит
+    «коэффициент 0.5 и выше»). Повтор по той же паре молчит четверть окна,
+    иначе одна и та же связь уходила бы сообщением каждые восемь секунд.
+    """
+    from correlations import format_alert_html, normalize_alerts
+    try:
+        await asyncio.sleep(30)
+    except asyncio.CancelledError:
+        return
+    while True:
+        try:
+            subs = account_store.list_service_subscribers("correlations")
+            if subs:
+                tg_bot.warm_langs(subs)
+            for sub in subs:
+                cfg = normalize_alerts(sub.get("config"))
+                if not any(r.get("enabled") for r in cfg.values()):
+                    continue
+                uid = sub["user_id"]
+                now = time.time()
+                pics = corr_alert_pictures(cfg)
+
+                def last_fire(metric, symbol, _uid=uid):
+                    return account_store.last_alert_ts(
+                        _uid, f"corr_{metric}", str(symbol or ""))
+
+                for hit in corr_alerts_due(cfg, pics, last_fire, now):
+                    metric = str(hit.get("metric") or "")
+                    anchor_metric = f"corr_{metric}"
+                    account_store.add_alert_event(uid, dict(hit, metric=anchor_metric))
+                    CORR_SIGNALS.append(dict(hit, ts=now, user_id=uid))
+                    tg_id = int(sub.get("tg_id") or 0)
+                    if tg_id and tg_bot.running:
+                        await tg_bot.send(
+                            tg_id,
+                            format_alert_html(hit, tg_bot.site_url()),
+                            markup=tg_bot.site_link_kb("тепловая карта"),
+                        )
+        except asyncio.CancelledError:
+            break
+        except Exception as e:                                 # noqa: BLE001
+            log.warning("corr alerts: %s", e)
+        try:
+            await asyncio.sleep(20)
         except asyncio.CancelledError:
             break
 
@@ -1930,6 +2030,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(kline_refresher(), name="kline-refresh"),
         asyncio.create_task(hot_symbols_watcher(), name="hot-symbols"),
         asyncio.create_task(alert_loop(), name="alerts"),
+        asyncio.create_task(corr_alert_loop(), name="corr-alerts"),
     ]
     # Дневной дайджест: вечерний выпуск в оба канала и в архив на сайте
     digest_sched = DigestScheduler(hour=DIGEST_HOUR, minute=DIGEST_MINUTE,

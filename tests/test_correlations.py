@@ -1,6 +1,6 @@
 """Тесты сервиса «Корреляции валют» (correlations.py).
 
-Сервис отвечает за n времени на вопросы: у каких пар совпадали ликвидации,
+Сервис отвечает на вопросы: у каких пар совпадали ликвидации,
 объём, CVD и рост OI; где выносило лонги, а где шорты; где перекос CVD на
 продавцов, а где на покупателей; где OI растёт, а где падает. Считаем по
 часовым свёрткам месячной истории и снимкам OI.
@@ -15,8 +15,11 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from correlations import (  # noqa: E402
-    DEFAULT_METRIC, DEFAULT_WINDOW, MIN_POINTS, WINDOWS, build, format_text,
-    metric_title, oi_hourly, pearson, window_key, window_label, window_minutes,
+    ALERT_THRESHOLDS, DEFAULT_ALERT_OPP, DEFAULT_ALERT_SAME, DEFAULT_METRIC,
+    DEFAULT_WINDOW, MIN_ALERT_GAP_SEC, MIN_POINTS, WINDOWS, alert_gap_sec,
+    build, evaluate_alerts, find_pairs, format_alert_html, format_alerts_config,
+    format_text, metric_title, normalize_alerts, oi_hourly, pearson, window_key,
+    window_label, window_minutes,
 )
 
 HOUR = 3600
@@ -224,6 +227,166 @@ class TestText(unittest.TestCase):
         res = build([], now=NOW)
         text = format_text(res, "ru")
         self.assertIn("Устойчивых связей пока нет", text)
+
+
+class TestAlerts(unittest.TestCase):
+    """Алерты по корреляции: у каждой переменной своё окно и свои пороги.
+
+    Требование пользователя: настройки — по каждой метрике отдельно. «В
+    противофазе» — порог по минусу (окно 1 ч и −0.5: ждём расхождение монет),
+    «в одну сторону» — по плюсу (0.5 значит «коэффициент 0.5 и выше»).
+    """
+
+    def test_defaults_are_off_and_per_metric(self):
+        cfg = normalize_alerts({})
+        self.assertEqual(set(cfg), {"liq", "vol", "cvd", "oi"})
+        for row in cfg.values():
+            self.assertFalse(row["enabled"])
+            self.assertEqual(row["window"], DEFAULT_WINDOW)
+            self.assertEqual(row["opp"], DEFAULT_ALERT_OPP)
+            self.assertEqual(row["same"], DEFAULT_ALERT_SAME)
+
+    def test_per_metric_settings_are_kept(self):
+        cfg = normalize_alerts({"alerts": {
+            "liq": {"enabled": True, "window": "1h", "opp": -0.5},
+            "cvd": {"on": True, "window": 240, "same": 0.5},
+        }})
+        self.assertTrue(cfg["liq"]["enabled"])
+        self.assertEqual(cfg["liq"]["window"], "1h")
+        self.assertEqual(cfg["liq"]["opp"], -0.5)
+        self.assertTrue(cfg["cvd"]["enabled"])
+        self.assertEqual(cfg["cvd"]["window"], "4h")
+        self.assertEqual(cfg["cvd"]["same"], 0.5)
+        self.assertFalse(cfg["vol"]["enabled"])          # остальные не тронуты
+
+    def test_thresholds_are_clamped(self):
+        cfg = normalize_alerts({"liq": {"enabled": True, "opp": -5, "same": 9}})
+        self.assertEqual(cfg["liq"]["opp"], -1.0)
+        self.assertEqual(cfg["liq"]["same"], 1.0)
+
+    def test_find_pairs_includes_threshold(self):
+        """0.5 значит «выше порога или равен ему» — включающий порог."""
+        matrix = {"A": {"A": 1.0, "B": 0.5, "C": -0.5, "D": 0.49}}
+        same = find_pairs(matrix, -0.9, 0.5)
+        self.assertEqual([p["a"] for p in same], ["A"])
+        self.assertEqual([p["b"] for p in same], ["B"])
+        self.assertEqual(same[0]["kind"], "same")
+        opp = find_pairs(matrix, -0.5, 0.9)
+        self.assertEqual([p["b"] for p in opp], ["C"])
+        self.assertEqual(opp[0]["kind"], "opp")
+
+    def test_evaluate_alerts_gives_one_card_per_metric(self):
+        cells = TestBuild().make_cells()
+        pic = build(cells, now=NOW, window="12h")
+        cfg = normalize_alerts({"alerts": {
+            "liq": {"enabled": True, "window": "12h", "opp": -0.5, "same": 0.9},
+            "cvd": {"enabled": False},
+        }})
+        hits = evaluate_alerts(cfg, {"12h": pic})
+        self.assertEqual([h["metric"] for h in hits], ["liq"])
+        hit = hits[0]
+        self.assertEqual(hit["kind"], "same")
+        self.assertIn("|", hit["symbol"])
+        self.assertEqual(hit["threshold"], 0.9)
+        self.assertEqual(hit["window_label"], "12 ч")
+        # «ещё …» — только связи того же знака, что и лидер
+        for peer in hit["peers"]:
+            self.assertEqual(peer["kind"], "same")
+        text = format_alert_html(hit, "https://liqscope.online")
+        self.assertIn("Алерт · корреляции", text)
+        self.assertIn("в одну сторону", text)
+        self.assertIn("тепловая карта", text)
+
+    def test_antiphase_hit_carries_pair_and_threshold(self):
+        """Пример пользователя: окно 1 ч и −0.5 — ждём противофазу монет."""
+        pic = {"matrices": {"liq": {"BTC_USDT": {"BTC_USDT": 1.0, "SOL_USDT": -0.72},
+                                    "SOL_USDT": {"BTC_USDT": -0.72, "SOL_USDT": 1.0}}},
+               "symbols": ["BTC_USDT", "SOL_USDT"], "hours": 12}
+        cfg = normalize_alerts({"liq": {"enabled": True, "window": "1h",
+                                        "opp": -0.5, "same": 0.5}})
+        hits = evaluate_alerts(cfg, {"1h": pic})
+        self.assertEqual(len(hits), 1)
+        hit = hits[0]
+        self.assertEqual(hit["kind"], "opp")
+        self.assertEqual(hit["symbol"], "BTC_USDT|SOL_USDT")
+        self.assertEqual(hit["value"], -0.72)
+        self.assertEqual(hit["threshold"], -0.5)
+        self.assertEqual(hit["window_label"], "1 ч")
+        text = format_alert_html(hit, "https://liqscope.online")
+        self.assertIn("в противофазе", text)
+        self.assertIn("-0.72", text)
+        self.assertIn("cabinet#correlations", text)
+
+    def test_limits_and_gap(self):
+        self.assertEqual(alert_gap_sec(60), max(MIN_ALERT_GAP_SEC, 900.0))
+        self.assertEqual(alert_gap_sec(1440), 6 * 3600.0)
+        self.assertTrue(ALERT_THRESHOLDS and 0.5 in ALERT_THRESHOLDS)
+
+    def test_config_text_lists_every_metric(self):
+        cfg = normalize_alerts({"liq": {"enabled": True, "window": "1h",
+                                        "opp": -0.5, "same": 0.5}})
+        text = format_alerts_config(cfg)
+        self.assertIn("Алерты по корреляции", text)
+        for title in ("Ликвидации", "Объём", "CVD", "OI"):
+            self.assertIn(title, text)
+        self.assertIn("выключен", text)
+        self.assertIn("включён", text)
+        self.assertIn("-0.50", text)
+        self.assertIn("+0.50", text)
+
+
+class TestCorrDelivery(unittest.TestCase):
+    """Серверная доставка алертов по корреляции: окна, пауза, лимит карточек."""
+
+    @classmethod
+    def setUpClass(cls):
+        os.environ["LIQSCOPE_ACCOUNTS_DB"] = ""
+        os.environ["LIQSCOPE_PUMPS"] = "off"
+        import server
+        cls.srv = server
+
+    def test_pictures_only_for_enabled_windows(self):
+        srv = self.srv
+        asked: list = []
+        original = srv.correlations_snapshot
+
+        def fake(window="24h", metric="liq"):
+            asked.append((window, metric))
+            return {"matrices": {}, "symbols": [], "hours": 0}
+
+        srv.correlations_snapshot = fake
+        try:
+            pics = srv.corr_alert_pictures({"liq": {"enabled": True, "window": "1h"},
+                                            "cvd": {"enabled": True, "window": "1h"},
+                                            "vol": {"enabled": False, "window": "7d"}})
+        finally:
+            srv.correlations_snapshot = original
+        self.assertEqual(set(pics), {"1h"})            # одно окно — один расчёт
+        self.assertEqual(len(asked), 1)
+
+    def test_due_respects_gap_and_limit(self):
+        srv = self.srv
+        pic = {"matrices": {"liq": {
+            "A": {"A": 1.0, "B": -0.9, "C": -0.8, "D": -0.7},
+            "B": {"A": -0.9, "B": 1.0, "C": -0.85, "D": -0.75},
+            "C": {"A": -0.8, "B": -0.85, "C": 1.0, "D": -0.65},
+            "D": {"A": -0.7, "B": -0.75, "C": -0.65, "D": 1.0}}},
+            "symbols": ["A", "B", "C", "D"], "hours": 12}
+        cfg = normalize_alerts({"liq": {"enabled": True, "window": "1h",
+                                        "opp": -0.5, "same": 0.5}})
+        fired: dict = {}
+
+        def last_fire(metric, symbol):
+            return fired.get((metric, symbol))
+
+        hits = srv.corr_alerts_due(cfg, {"1h": pic}, last_fire, NOW)
+        self.assertEqual(len(hits), 1)                 # одна карточка на метрику
+        hit = hits[0]
+        self.assertEqual(hit["symbol"], "A|B")
+        fired[("liq", hit["symbol"])] = NOW
+        self.assertEqual(srv.corr_alerts_due(cfg, {"1h": pic}, last_fire, NOW + 60), [])
+        later = srv.corr_alerts_due(cfg, {"1h": pic}, last_fire, NOW + 3600)
+        self.assertEqual(len(later), 1)                # окно прошло — сигнал снова
 
 
 if __name__ == "__main__":

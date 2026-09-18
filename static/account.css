@@ -568,3 +568,35 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
     border: 1px solid currentColor; }
 .pump-hit.pos { color: #00e676; }
 .pump-hit.neg { color: #ff2a5f; }
+
+/* ---------- корреляции: карта у каждой переменной своя --------------------- */
+/* Раньше тепловая карта была одна, и над ней стоял переключатель метрик: чтобы
+   сравнить ликвидации с CVD, приходилось щёлкать чипы. Теперь карты идут
+   списком — по одной на переменную, и все видны сразу. Блоки держим в общей
+   сетке: на широком экране две колонки, на узком — одна. */
+.cor-maps { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+    gap: 12px; margin: 6px 0 4px; }
+.cor-map { background: rgba(20, 26, 38, 0.55); border: 1px solid rgba(120, 140, 175, 0.18);
+    border-radius: 12px; padding: 10px 12px 12px; min-width: 0; }
+.cor-map-h { font-size: 0.84rem; font-weight: 800; letter-spacing: 0.3px;
+    margin: 2px 0 6px; }
+.cor-map .cor-heat-note { margin: 0 0 8px; }
+.cor-map .al-label { margin: 8px 0 6px; }
+.cor-map .cor-heat-wrap { margin: 4px 0 8px; }
+.cor-map .cor-hist-wrap { margin: 4px 0 8px; }
+
+/* Настройки сигнала по этой переменной: окно и два порога */
+.cor-alert { border-top: 1px dashed rgba(120, 140, 175, 0.25); margin-top: 10px;
+    padding-top: 8px; }
+.cor-alert-h { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.cor-alert-now { margin-left: auto; font-size: 0.76rem; color: #9fb0c8;
+    font-variant-numeric: tabular-nums; }
+.cor-alert-nums { margin-top: 8px; gap: 12px; }
+.cor-num { display: flex; align-items: center; gap: 6px; font-size: 0.76rem;
+    color: #9fb0c8; }
+.cor-num input { width: 76px; }
+.cor-alert-hint { font-size: 0.72rem; color: #8d9cb4; line-height: 1.45;
+    margin-top: 6px; }
+@media (max-width: 720px) {
+    .cor-maps { grid-template-columns: 1fr; }
+}

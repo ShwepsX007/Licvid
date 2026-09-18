@@ -845,6 +845,57 @@ TEXT_METHODS = {
 }
 
 
+# ---------------------------------------------------------------------------
+#  Третья порция: монета у каждой метрики и алерты по корреляции
+#  (настройки сигналов: окно, «в противофазе», «в одну сторону»).
+# ---------------------------------------------------------------------------
+RU_EN.update({
+    # alerts.py: монета метрики в строке настроек
+    " · монета <b>": " · coin <b>",
+    # tg_bot.py: экран алертов и ввод своей монеты
+    "Монета какой метрики? У каждой она своя.":
+        "Coin of which metric? Each has its own.",
+    "Монета метрики ": "Coin of metric ",
+    # correlations.py: сигналы и настройки алертов по корреляции
+    "🔗 <b>Алерт · корреляции · ": "🔗 <b>Alert · correlations · ",
+    "🔔 <b>Алерты по корреляции</b>": "🔔 <b>Correlation alerts</b>",
+    "в противофазе: порог <code>": "in opposite phase: threshold <code>",
+    "в одну сторону: порог <code>": "same direction: threshold <code>",
+    "</code> · противофаза <code>": "</code> · opposite phase <code>",
+    "</code> · в одну сторону <code>": "</code> · same direction <code>",
+    "ещё в противофазе": "more in opposite phase",
+    "ещё в одну сторону": "more in the same direction",
+    "точек по часам: <code>": "hourly points: <code>",
+    "выключены": "off",
+    "в противофазе": "in opposite phase",
+    "в одну сторону": "same direction",
+    "противофаза": "opposite phase",
+    "свой порог: противофаза": "custom threshold: opposite phase",
+    "свой порог: в одну сторону": "custom threshold: same direction",
+    '">тепловая карта</a>': '">heat map</a>',
+    # tg_bot.py: алерты по корреляции — тексты экранов и кнопок
+    " <b>Алерты · ": " <b>Alerts · ",
+    " · сигнал включён": " · signal on",
+    "\n\nУ каждой метрики своё окно и свои пороги. «В противофазе» — связь со "
+    "знаком минус, «в одну сторону» — со знаком плюс: порог 0.5 значит "
+    "«коэффициент 0.5 и выше». Поставьте порог — сигнал включится сам.":
+        "\n\nEach metric has its own window and its own thresholds. "
+        "«In opposite phase» is a link with a minus sign, «same direction» — "
+        "with a plus sign: a threshold of 0.5 means «coefficient 0.5 or "
+        "higher». Set a threshold and the signal turns on by itself.",
+    "\nСигнал — пара монет с такой связью. Пороги нажимаются кнопками или "
+    "вводятся руками.":
+        "\nA signal is a pair of coins with such a link. Thresholds are set "
+        "by buttons or typed by hand.",
+    "Нужно число от 0 до 1, например 0.5.":
+        "A number from 0 to 1 is needed, for example 0.5.",
+    "Неизвестная метрика.": "Unknown metric.",
+    "Пришлите порог от 0 до 1, например 0.5.\n/cancel — отмена.":
+        "Send a threshold from 0 to 1, for example 0.5.\n/cancel — cancel.",
+    "← Алерты": "← Alerts",
+    "← К корреляциям": "← To correlations",
+})
+
 def translate_payload(method: str, payload: Optional[dict],
                       lang: str) -> Optional[dict]:
     """Перевести исходящий запрос к Telegram целиком.

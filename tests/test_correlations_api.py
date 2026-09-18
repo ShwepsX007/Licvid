@@ -155,6 +155,57 @@ class CorrelationsApiTest(unittest.TestCase):
         other = Store(os.path.join(self.tmp.name, "b.db"), secret="s")
         self.assertIsNone(other.get_user_service(self.user_id, "correlations"))
 
+    # --- алерты по корреляции ----------------------------------------------
+    def test_picture_carries_alert_settings(self):
+        """Настройки сигналов приходят вместе с картиной — по каждой метрике."""
+        d = self.client.get("/api/account/correlations").json()
+        alerts = d["alerts"]
+        self.assertEqual(set(alerts), {"liq", "vol", "cvd", "oi"})
+        for row in alerts.values():
+            self.assertFalse(row["enabled"])
+            self.assertIn("window", row)
+            self.assertIn("opp", row)
+            self.assertIn("same", row)
+
+    def test_alert_settings_are_saved_per_metric(self):
+        body = {"window": "24h", "metric": "liq", "alerts": {
+            "liq": {"enabled": True, "window": "1h", "opp": -0.5, "same": 0.5},
+            "cvd": {"enabled": True, "window": "24h", "opp": -0.6, "same": 0.8},
+        }}
+        r = self.client.post("/api/account/correlations", json=body)
+        self.assertEqual(r.status_code, 200)
+        alerts = r.json()["alerts"]
+        self.assertTrue(alerts["liq"]["enabled"])
+        self.assertEqual(alerts["liq"]["window"], "1h")
+        self.assertEqual(alerts["liq"]["opp"], -0.5)
+        self.assertEqual(alerts["cvd"]["same"], 0.8)
+        self.assertFalse(alerts["vol"]["enabled"])
+        # вложенные настройки не потерялись на пути к базе
+        row = self.store.get_user_service(self.user_id, "correlations")
+        self.assertEqual(row["config"]["alerts"]["liq"]["window"], "1h")
+        self.assertEqual(row["config"]["alerts"]["cvd"]["same"], 0.8)
+        # и вернулись тем же в следующем GET
+        again = self.client.get("/api/account/correlations").json()
+        self.assertEqual(again["alerts"]["liq"]["opp"], -0.5)
+        self.assertEqual(again["alerts"]["cvd"]["window"], "24h")
+
+    def test_old_page_does_not_wipe_alerts(self):
+        """Старая страница в кэше шлёт только окно и метрику — сигналы целы."""
+        self.client.post("/api/account/correlations", json={
+            "window": "24h", "metric": "liq",
+            "alerts": {"liq": {"enabled": True, "window": "1h", "opp": -0.5}}})
+        r = self.client.post("/api/account/correlations",
+                             json={"window": "4h", "metric": "cvd"})
+        alerts = r.json()["alerts"]
+        self.assertTrue(alerts["liq"]["enabled"])
+        self.assertEqual(alerts["liq"]["window"], "1h")
+        self.assertEqual(r.json()["config"]["window"], "4h")
+
+    def test_alerts_off_by_default_in_fresh_service(self):
+        d = self.client.get("/api/account/correlations").json()
+        self.assertFalse(d["subscribed"])
+        self.assertEqual(sum(1 for x in d["alerts"].values() if x["enabled"]), 0)
+
     def test_service_is_live_in_list(self):
         r = self.client.get("/api/account/services")
         row = next(s for s in r.json()["services"] if s["slug"] == "correlations")

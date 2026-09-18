@@ -582,6 +582,75 @@ class LiveFlowTest(unittest.TestCase):
         self.assertTrue(any(live["oi"]["spark"]), "гребешка OI из нулей")
         self.assertEqual(len(oi_points(self.market["oi"], "ALL")), 2)
 
+    def test_oi_live_polls_beat_five_minute_buckets(self):
+        """Живые опросы важнее бакетов: по ним график и лента двигаются.
+
+        Бакеты пишутся раз в 5 минут, поэтому между ними микрографик OI стоял
+        картинкой. Кольцо живых опросов приходит каждые десятки секунд —
+        берём его, а к бакетам возвращаемся, только если живого ряда нет.
+        """
+        from alerts import oi_levels, oi_points
+        # живые опросы идут внутри окна метрики (по умолчанию OI — час)
+        t0 = self.now - 900
+        payload = {"_series": {t0 - 300: 100.0, t0: 200.0},
+                   "_live": {t0: 200.0, t0 + 15: 210.0, t0 + 30: 205.0}}
+        levels, live = oi_levels(payload)
+        self.assertTrue(live)
+        self.assertEqual(sorted(levels), [t0, t0 + 15, t0 + 30])
+        # шаг живой ленты — в секундах, а не «за 0м»
+        market = {"now": self.now,
+                  "events": [], "cvd": {},
+                  "oi": {"BTC_USDT": dict(payload, ts=self.now)}}
+        rows = flow_rows("oi", market, self.cfg(), self.now)
+        self.assertTrue(rows)
+        self.assertIn("bucket_sec", rows[0])
+        self.assertNotIn("bucket_min", rows[0])
+        self.assertEqual(rows[0]["bucket_sec"], 15)
+        # без живого ряда — прежние бакеты, шаг в минутах
+        levels2, live2 = oi_levels({"_series": {300: 100.0, 600: 200.0}})
+        self.assertFalse(live2)
+        self.assertEqual(sorted(levels2), [300.0, 600.0])
+        market2 = {"now": self.now, "events": [], "cvd": {},
+                   "oi": {"BTC_USDT": {"_series": {int(self.now) - 600: 1e8,
+                                                   int(self.now) - 300: 1.01e8}}}}
+        rows2 = flow_rows("oi", market2, self.cfg(), self.now)
+        self.assertTrue(rows2)
+        self.assertIn("bucket_min", rows2[0])
+        self.assertEqual(oi_points(market["oi"], "ALL"),
+                         {t0 + 15: 10.0, t0 + 30: -5.0})
+
+    def test_spark_accumulates_so_empty_buckets_do_not_break_the_line(self):
+        """График метрики — накопительная кривая окна, а не суммы по шагам.
+
+        CVD и OI приходят бакетами реже шага графика: в пошаговом виде линия
+        обрывалась нулями и «не шла». Накопительная кривая заполняет окно и
+        сравнивается с итогом метрики, который кабинет дописывает сам.
+        """
+        from alerts import sparkline
+        pts = {self.now - 100: 5.0, self.now - 20: 7.0}
+        step = sparkline(pts, self.now, 600, n=6)
+        cum = sparkline(pts, self.now, 600, n=6, cum=True)
+        self.assertEqual(len(step), len(cum))
+        # пустые шаги у накопительной кривой не оставляют провалов: нулей
+        # столько же, сколько шагов до первого события, и ни одного после
+        self.assertLessEqual(cum.count(0.0), step.count(0.0))
+        self.assertEqual(cum[-1], 12.0)                     # итог окна
+        running = 0.0
+        for i, v in enumerate(step):
+            running += v
+            self.assertAlmostEqual(cum[i], round(running, 2))
+        live = live_snapshot(self.cfg(), self.market)
+        for metric in ("liq", "cvd", "oi"):
+            spark = live[metric]["spark"]
+            self.assertEqual(len(spark), 24, metric)
+            self.assertTrue(any(spark), metric)
+            # последняя точка накопительной кривой — это итог окна метрики:
+            # у ликвидаций он сходится с суммой строк окна (у CVD график
+            # считает все бакеты, а лента — только минутные, так и задумано)
+            self.assertNotEqual(spark[-1], 0.0, metric)
+            if metric == "liq":
+                self.assertAlmostEqual(spark[-1], live[metric]["total"], places=1)
+
     def test_spark_of_each_metric_is_filled(self):
         live = live_snapshot(self.cfg(), self.market)
         for metric in ("liq", "cvd", "oi"):

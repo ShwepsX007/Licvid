@@ -425,6 +425,17 @@ function click(win, el) {
   check("шаблон помечен как стандарт",
     /стандарт/.test(doc.querySelector("#ai-prompt-blocks .ai-badge").textContent),
     doc.querySelector("#ai-prompt-blocks .ai-badge").textContent);
+  // у промта дайджеста видна арифметика подписи: сколько знаков влезает фото
+  const digestBlock = aiBlocks[1].textContent;
+  check("в блоке дайджеста сказано про лимит подписи 1024",
+    /1024/.test(digestBlock), digestBlock.slice(0, 90));
+  check("в блоке дайджеста сказано, что в канал уходит небольшой пост со ссылкой",
+    /небольшой пост/.test(digestBlock) && /ссылк/.test(digestBlock),
+    digestBlock.slice(0, 140));
+  check("в блоке дайджеста сказано, что фото прикрепляется всегда",
+    /подпись под фото/.test(digestBlock), digestBlock.slice(0, 160));
+  check("подсказка про подпись есть только у дайджеста",
+    !/1024/.test(aiBlocks[0].textContent));
 
   const headRow = doc.querySelector('#ai-prompt-blocks .ai-row[data-kind="head"][data-lang="ru"]');
   const headTa = headRow.querySelector(".ai-text");

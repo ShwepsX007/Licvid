@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 import html
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 METRICS = ("liq", "cvd", "oi")
 METRIC_TITLE = {
@@ -337,47 +337,68 @@ def flow_rows(metric: str, market: Dict[str, Any], cfg: Dict[str, Any],
             sym = canon_symbol(sym)
             if want != "ALL" and sym != want:
                 continue
-            series = (payload or {}).get("_series") or {}
-            keys = sorted(float(k) for k in series)
+            levels, live = oi_levels(payload)
+            keys = sorted(levels)
             if len(keys) < 2:
                 continue
             for i in range(len(keys) - 1, 0, -1):
                 ts = keys[i]
                 if ts < start or ts > now + 60:
                     continue
-                try:
-                    val = float(series[keys[i]]) - float(series[keys[i - 1]])
-                except (TypeError, ValueError):
-                    continue
+                val = levels[keys[i]] - levels[keys[i - 1]]
                 if abs(val) < min_usd:
                     continue
-                rows.append({"ts": ts, "symbol": sym, "value": round(val, 2),
-                             "count": 1, "side": "LONG" if val >= 0 else "SHORT",
-                             "bucket_min": int(round((ts - keys[i - 1]) / 60.0)) or 1})
+                span = ts - keys[i - 1]
+                row = {"ts": ts, "symbol": sym, "value": round(val, 2),
+                       "count": 1, "side": "LONG" if val >= 0 else "SHORT"}
+                if live and span < 90:
+                    # живой опрос: шаг в секундах, «за 15с» честнее «за 0м»
+                    row["bucket_sec"] = max(1, int(round(span)))
+                else:
+                    row["bucket_min"] = max(1, int(round(span / 60.0)))
+                rows.append(row)
     rows.sort(key=lambda r: (r["ts"], abs(r["value"])), reverse=True)
     return rows[:max(1, int(limit))]
 
 
+def oi_levels(payload: dict) -> Tuple[Dict[float, float], bool]:
+    """Ряд уровней OI и признак «это живые опросы».
+
+    У трекера есть кольцо живых опросов (``_live``, десятки секунд) и
+    5-минутные бакеты (``_series``). Для графика и ленты берём живой ряд, если
+    он есть: по бакетам микрографик OI стоял картинкой до следующего бакета.
+    """
+    p = payload or {}
+    def _clean(src: Any) -> Dict[float, float]:
+        out: Dict[float, float] = {}
+        for k, v in (src or {}).items():
+            try:
+                out[float(k)] = float(v)
+            except (TypeError, ValueError):
+                continue
+        return out
+    live = _clean(p.get("_live"))
+    if len(live) >= 2:
+        return live, True
+    return _clean(p.get("_series")), False
+
+
 def oi_points(oi_map: Dict[str, dict], symbol: str = "ALL",
               limit: int = 400) -> Dict[float, float]:
-    """Ряд ΔOI по бакетам — из него рисуется микрографик OI.
+    """Ряд ΔOI — из него рисуется микрографик и лента OI.
 
     Готовых окон у трекера хватает для цифры, а для графика нужен ряд:
-    считаем разницу соседних уровней непрерывной серии (``_series``).
+    считаем разницу соседних уровней (живые опросы, иначе бакеты).
     """
     want = canon_symbol(symbol)
     out: Dict[float, float] = {}
     for sym, payload in (oi_map or {}).items():
         if want != "ALL" and canon_symbol(sym) != want:
             continue
-        series = (payload or {}).get("_series") or {}
-        keys = sorted(float(k) for k in series)
+        levels, _live = oi_levels(payload)
+        keys = sorted(levels)
         for i in range(1, len(keys)):
-            try:
-                out[keys[i]] = out.get(keys[i], 0.0) + (
-                    float(series[keys[i]]) - float(series[keys[i - 1]]))
-            except (TypeError, ValueError):
-                continue
+            out[keys[i]] = out.get(keys[i], 0.0) + (levels[keys[i]] - levels[keys[i - 1]])
     if len(out) > limit:
         for old in sorted(out)[:len(out) - limit]:
             out.pop(old, None)
@@ -385,7 +406,13 @@ def oi_points(oi_map: Dict[str, dict], symbol: str = "ALL",
 
 
 def sparkline(points: Dict[Any, float], now: float, window_sec: float,
-              n: int = 24) -> List[float]:
+              n: int = 24, cum: bool = False) -> List[float]:
+    """Микрографик метрики: сумма окна по шагам.
+
+    ``cum=True`` — накопительная кривая потока: пустые шаги не оставляют
+    нулевые провалы (CVD и OI приходят бакетами реже шага графика), линия идёт
+    ровно и видно, как поток набегает за окно.
+    """
     n = max(2, int(n or 24))
     win = max(1.0, float(window_sec or 1))
     step = win / n
@@ -401,7 +428,14 @@ def sparkline(points: Dict[Any, float], now: float, window_sec: float,
             continue
         idx = min(n - 1, max(0, int((win - age) / step)))
         bins[idx] += v
-    return bins
+    if not cum:
+        return bins
+    total = 0.0
+    out: List[float] = []
+    for v in bins:
+        total += v
+        out.append(round(total, 2))
+    return out
 
 
 def presets() -> Dict[str, Any]:
@@ -670,14 +704,20 @@ def live_snapshot(cfg: Dict[str, Any], market: Dict[str, Any],
             if ts > now + 60:
                 continue
             cvd_pts[int(ts)] = cvd_pts.get(int(ts), 0.0) + val
-    out["liq"]["spark"] = sparkline(liq_pts, now, w_liq * 60)
-    out["cvd"]["spark"] = sparkline(cvd_pts, now, w_cvd * 60)
+    # Все три графика — накопительная кривая окна: она сравнивается с итогом
+    # метрики (``total``), который кабинет дописывает в буфер на каждом опросе,
+    # поэтому линия живёт и не рвётся между нулевыми бакетами
+    out["liq"]["spark"] = sparkline(liq_pts, now, w_liq * 60, cum=True)
+    # CVD и OI приходят бакетами реже шага графика: накопительная кривая не
+    # оставляет нулевых провалов и показывает, как поток набегает за окно
+    out["cvd"]["spark"] = sparkline(cvd_pts, now, w_cvd * 60, cum=True)
     # OI: готовых окон трекера для микрографика мало — берём разницы уровней
     # ряда, иначе график OI всегда стоял пустым («поток не идёт»).
     oi_flat: Dict[str, dict] = {}
     for sym, payload in (market.get("oi") or {}).items():
         oi_flat[canon_symbol(sym)] = payload
-    out["oi"]["spark"] = sparkline(oi_points(oi_flat, syms["oi"]), now, w_oi * 60)
+    out["oi"]["spark"] = sparkline(oi_points(oi_flat, syms["oi"]), now,
+                                   w_oi * 60, cum=True)
     # Ленты метрик: не только сигналы, но и сам поток (см. flow_rows)
     for m in METRICS:
         out[m]["flow"] = flow_rows(m, market, cfg, now)

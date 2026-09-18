@@ -18,8 +18,9 @@ sys.path.insert(0, HERE)
 import daily_digest  # noqa: E402
 from ai_text import body_problem, clean_body, fit_body  # noqa: E402
 from daily_digest import (  # noqa: E402
-    DigestStore, brief, collect_day, day_key, day_label, day_prompt,
-    fallback_narrative, headline_block, mood_of, oi_block, price_txt,
+    DEFAULT_KEEP, DigestStore, brief, collect_day, day_key, day_label, day_prompt,
+    channel_link_block, fallback_narrative, headline_block, lead_of, mood_of,
+    oi_block, price_txt, render_channel,
     prices_block, render_article, render_post, weekday_label,
 )
 
@@ -422,6 +423,88 @@ class SchedulerTest(unittest.TestCase):
         self.assertEqual((s.hour, s.minute, s.jitter_min), (22, 0, 10))
 
 
+class ChannelPostTest(unittest.TestCase):
+    """Пост в канал: небольшой (влезает в подпись под фото) и со ссылкой на сайт.
+
+    Полный разбор с рассказом живёт на сайте (`render_post` → страница
+    /digest), поэтому канал получает короткую версию: шапка, лид рассказа,
+    цифры дня и красивая ссылка. Так фото прикрепляется к каждому выпуску.
+    """
+
+    def setUp(self):
+        self.now = 1_770_000_000.0
+
+    def _rec(self, story_ru=None, story_en=None):
+        events = _events(self.now, [
+            ("BTC_USDT", "binance", "SELL", 1_800_000, 1),
+            ("ETH_USDT", "bybit", "BUY", 400_000, 2),
+        ])
+        facts = collect_day(events, now=self.now, oi={}, prices={})
+        # рассказ из разных предложений: так видно, что в пост попал только лид
+        long_ru = " ".join(f"Фраза {i} про рынок и ликвидации." for i in range(1, 61))
+        long_en = " ".join(f"Sentence {i} about the market." for i in range(1, 61))
+        return {"id": "2026-09-16", "day": "2026-09-16", "facts": facts,
+                "ai": {"ru": story_ru if story_ru is not None else long_ru,
+                       "en": story_en if story_en is not None else long_en}}
+
+    def test_long_story_post_fits_caption(self):
+        """Даже с рассказом на 2000 знаков пост влезает в подпись под фото."""
+        rec = self._rec()
+        for lang in ("ru", "en"):
+            out = render_channel(rec, lang, "https://liqscope.online")
+            self.assertLessEqual(len(out), 1024, (lang, len(out)))
+            self.assertIn("/digest", out, lang)
+            self.assertIn("liqscope.online", out, lang)
+            self.assertIn(" …", out, lang)                  # лид оборван, есть куда идти
+            story = rec["ai"][lang].strip()
+            self.assertNotIn(story[-200:], out, lang)        # рассказ в пост не влез
+            self.assertLess(len(out), len(story), lang)
+
+    def test_channel_post_has_numbers_and_head(self):
+        story = "Рынок весь день шёл боком, но к вечеру продавцы сдали. " * 8
+        rec = self._rec(story_ru=story)
+        out = render_channel(rec, "ru", "https://liqscope.online")
+        self.assertIn("Дневной дайджест", out)
+        self.assertIn("За сутки снесено", out)
+        self.assertIn("Крупнейшая:", out)
+        self.assertIn("Настроение рынка", out)
+        self.assertIn("Полный разбор дня — на сайте", out)
+        self.assertIn("Рынок весь день шёл боком", out)       # лид берётся из рассказа
+        # совсем короткий рассказ заменяется шаблоном — как и в большом посте
+        tiny = render_channel(self._rec(story_ru="Коротко."), "ru", "")
+        self.assertIn("За сутки снесено", tiny)
+        self.assertNotIn("Коротко.", tiny)
+
+    def test_lead_cuts_at_sentence_boundary(self):
+        long = "Первое предложение про рынок. " * 40
+        out = lead_of(long, 200)
+        self.assertLessEqual(len(out), 200)
+        self.assertTrue(out.endswith("…"), out[-30:])
+        self.assertTrue(out[:-2].rstrip().endswith("."), out[-40:])
+        # текст короче лимита не трогаем
+        self.assertEqual(lead_of("Короткий рассказ.", 200), "Короткий рассказ.")
+
+    def test_post_without_site_url_has_no_link_but_still_fits(self):
+        rec = self._rec()
+        out = render_channel(rec, "ru", "")
+        self.assertNotIn("/digest", out)
+        self.assertLessEqual(len(out), 1024, len(out))
+
+    def test_link_block_points_to_digest_page(self):
+        self.assertIn('href="https://liqscope.online/digest"',
+                      channel_link_block("https://liqscope.online", "ru"))
+        self.assertIn("liqscope.online/digest",
+                      channel_link_block("https://liqscope.online", "en"))
+        self.assertEqual(channel_link_block("", "ru"), "")
+
+    def test_site_version_keeps_whole_story(self):
+        rec = self._rec()
+        out = render_post(rec, "ru", "https://liqscope.online")
+        self.assertIn(rec["ai"]["ru"].strip(), out)
+        self.assertIn("Биржи", out)                     # полные блоки остаются
+        self.assertNotIn("  …", out[:len(rec["ai"]["ru"]) + 60])
+
+
 class BotPublishTest(unittest.TestCase):
     """Публикация дневного дайджеста ботом: каналы, черновик, языки."""
 
@@ -486,48 +569,90 @@ class BotPublishTest(unittest.TestCase):
                        "en": "English story about the day. " * 20}}
 
     def _upload_photo(self, kind="digest"):
-        """Кладём фото рубрики так же, как это делает админка."""
+        """Фото рубрики так же, как его кладёт админка."""
         png = (b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
         res = self.store.add_digest_photo(png, "cover.png", actor_id=1001, kind=kind)
         self.assertTrue(res.get("ok"), res)
         return res.get("path") or ""
 
-    def test_daily_post_goes_with_photo_even_if_long(self):
-        """Пост за сутки длиннее 1024 знаков — раньше уходил текстом без фото."""
+    def test_channel_post_goes_with_photo_and_link_to_site(self):
+        """В канал уходит небольшой пост: фото, цифры дня и ссылка на сайт."""
         import asyncio
         path = self._upload_photo()
         rec = self._rec()
-        rec["ai"] = {"ru": "Русский рассказ про день. " * 120,   # ~3000 знаков
-                     "en": "English story about the day. " * 120}
-        long_post = daily_digest.render_post(rec, "ru", "https://liqscope.online")
-        self.assertGreater(len(long_post), 1024, "фикстура должна быть длинной")
+        rec["ai"] = {"ru": "Короткий рассказ про сутки. " * 8,
+                     "en": "Short story about the day. " * 8}
         asyncio.get_event_loop().run_until_complete(
             self.bot.publish_daily_digest(rec, ("ru",), force=True))
         msg = [m for m in self.sent if m["cid"] == "-100111"][0]
-        self.assertEqual(msg.get("photo"), path, "фото должно уйти вместе с постом")
-        self.assertLessEqual(len(msg["text"]), 1024)
-        self.assertIn("Дневной дайджест", msg["text"])
-        self.assertIn("Крупнейшая ликвидация", msg["text"])   # факты не потерялись
-        self.assertIn("…", msg["text"])                        # рассказ подрезан
-        self.assertTrue(msg["text"].rstrip().endswith("</a>"))
+        self.assertEqual(msg.get("photo"), path, "фото должно уйти с постом")
+        self.assertLessEqual(len(msg["text"]), 1024, len(msg["text"]))
+        self.assertIn("За сутки снесено", msg["text"])
+        self.assertIn("Крупнейшая:", msg["text"])
+        self.assertIn("/digest", msg["text"], "ссылка на полный разбор на сайте")
 
-    def test_daily_post_without_photos_stays_full_text(self):
-        """Без фото лимит подписи не действует — пост полный."""
+    def test_digest_post_has_button_to_full_breakdown(self):
+        """Под дневным выпуском — кнопка на полный разбор на сайте."""
         import asyncio
-        import channel_digest
+        self._upload_photo()
         rec = self._rec()
-        rec["ai"] = {"ru": "Русский рассказ про день. " * 120,
-                     "en": "English story about the day. " * 120}
-        old_pick = channel_digest.pick_image
-        channel_digest.pick_image = lambda *a, **k: None
-        try:
-            asyncio.get_event_loop().run_until_complete(
-                self.bot.publish_daily_digest(rec, ("ru",), force=True))
-        finally:
-            channel_digest.pick_image = old_pick
+        asyncio.get_event_loop().run_until_complete(
+            self.bot.publish_daily_digest(rec, ("ru", "en"), force=True))
+        for cid in ("-100111", "-100222"):
+            msg = [m for m in self.sent if m["cid"] == cid][0]
+            rows = (msg.get("kb") or {}).get("inline_keyboard") or []
+            urls = [b.get("url") for row in rows for b in row]
+            self.assertTrue(any(str(u).endswith("/digest") for u in urls), urls)
+            texts = [b.get("text") for row in rows for b in row]
+            self.assertTrue(any("разбор" in str(t) or "breakdown" in str(t)
+                                for t in texts), texts)
+
+    def test_caption_length_counts_emoji_like_telegram(self):
+        """Эмодзи в UTF-16 занимают два знака — лимит подписи считаем так же."""
+        from tg_bot import caption_len
+        self.assertEqual(caption_len("абв"), 3)
+        self.assertEqual(caption_len("🎯"), 2)
+        self.assertEqual(caption_len(""), 0)
+
+    def test_long_story_keeps_channel_post_small_and_full_text_on_site(self):
+        """Рассказ длинный — в канале всё равно короткий пост с фото.
+
+        Полный разбор (рассказ целиком + все блоки) остаётся на сайте: в канал
+        уходит шапка, первые предложения рассказа, цифры дня и ссылка. Так пост
+        влезает в подпись под фотографией, и фото уходит всегда.
+        """
+        import asyncio
+        self._upload_photo()
+        rec = self._rec()
+        long_story = "Подробный рассказ про сутки. " * 60      # ~1600 знаков
+        rec["ai"] = {"ru": long_story, "en": "Long story about the day. " * 60}
+        asyncio.get_event_loop().run_until_complete(
+            self.bot.publish_daily_digest(rec, ("ru",), force=True))
         msg = [m for m in self.sent if m["cid"] == "-100111"][0]
-        self.assertNotIn("photo", msg)
-        self.assertGreater(len(msg["text"]), 1024)
+        self.assertIn("photo", msg, "короткий пост влезает в подпись под фото")
+        caption = msg["text"]
+        self.assertLessEqual(len(caption), 1024, len(caption))
+        self.assertNotIn(long_story.strip(), caption)           # рассказ не целиком
+        self.assertIn("Подробный рассказ про сутки.", caption)  # но лид из него
+        self.assertIn("…", caption, "лид обрывается по границе и ведёт на сайт")
+        self.assertIn("/digest", caption)
+        # сайт получает рассказ целиком, без обрезки
+        site = daily_digest.render_post(rec, "ru", "https://liqscope.online")
+        self.assertIn(long_story.strip(), site)
+        self.assertNotIn("…", site)
+
+    def test_channel_draft_says_photo_fits_even_with_long_story(self):
+        """В черновике сразу видно: фото прикрепится (пост короткий по замыслу)."""
+        import asyncio
+        self.bot._set_review(True)
+        rec = self._rec()
+        rec["ai"] = {"ru": "Длинный рассказ про сутки. " * 80,
+                     "en": "Long story about the day. " * 80}
+        asyncio.get_event_loop().run_until_complete(
+            self.bot.publish_daily_digest(rec, ("ru",), force=True))
+        draft = self.sent[0]["text"]
+        self.assertIn("Подпись:", draft)
+        self.assertIn("влезает в подпись под фото", draft)
 
     def test_publishes_to_both_channels(self):
         import asyncio
@@ -568,6 +693,34 @@ class BotPublishTest(unittest.TestCase):
         datas = [b.get("callback_data") for row in
                  (self.sent[0]["kb"] or {}).get("inline_keyboard", []) for b in row]
         self.assertEqual(datas, ["dd:pub", "dd:regen", "dd:no"])
+
+    def test_draft_tells_about_photo_caption_limit(self):
+        """Черновик заранее говорит, влезает ли пост в подпись под фото.
+
+        Telegram принимает подпись не длиннее 1024 знаков: админ должен видеть
+        арифметику до «Опубликовать», а не удивляться отсутствию картинки.
+        """
+        import asyncio
+        self.bot._set_review(True)
+        rec = self._rec()
+        rec["ai"] = {"ru": "Рассказ про сутки. " * 20,
+                     "en": "Story about the day. " * 20}
+        asyncio.get_event_loop().run_until_complete(
+            self.bot.publish_daily_digest(rec, ("ru",), force=True))
+        draft = "\n".join(m["text"] for m in self.sent)
+        self.assertIn("Подпись:", draft)
+        self.assertIn("знаков", draft)
+        self.assertIn("/digest", draft, "видно, где смотреть полный разбор")
+
+    def test_draft_says_photo_fits(self):
+        import asyncio
+        self.bot._set_review(True)
+        rec = self._rec()
+        rec["ai"] = {"ru": "Короткий рассказ. " * 10, "en": "Short story. " * 10}
+        asyncio.get_event_loop().run_until_complete(
+            self.bot.publish_daily_digest(rec, ("ru",), force=True))
+        draft = self.sent[0]["text"]
+        self.assertIn("влезает в подпись под фото", draft)
 
     def test_admin_keyboard_has_digest_button(self):
         texts = [b.get("text") for row in self.bot._admin_kb()["inline_keyboard"]
@@ -612,6 +765,141 @@ class BodyLimitTest(unittest.TestCase):
         self.assertIn("нейтральный", line)
         self.assertNotIn("\n", line)
         self.assertIn("neutral", brief(rec, "en"))
+
+
+class EmptyDayPublishTest(unittest.TestCase):
+    """Пустой выпуск (в памяти нет событий за сутки) в канал не уходит.
+
+    Так выглядел настоящий сбой: после перезапуска история не восстановилась,
+    и в канал ушёл пост с «$0 · 0 ликвидаций» да ещё и с рассказом из одной
+    фразы. Теперь сервис честно говорит админу, что проверить.
+    """
+
+    def setUp(self):
+        import api_digest
+        self.api = api_digest
+        self.sent = []
+
+        async def fake_publish(rec, langs, force):
+            self.sent.append((rec.get("day"), list(langs), bool(force)))
+            return {lang: [True, ""] for lang in langs}
+
+        async def fake_build(now=None, window=None, save=True, ai=True):
+            return {"id": "2026-09-18", "day": "2026-09-18",
+                    "facts": {"liq_total_usd": 0, "liq_count": 0,
+                              "mood": {"kind": "flat", "score": 0.5,
+                                       "label": {"ru": "⚪ нейтральный"},
+                                       "reasons": {"ru": []}}},
+                    "ai": {"ru": "According to liqscope.online. …"}}
+
+        self._old_build = api_digest.build_digest
+        self._old_publish = api_digest.ctx.publish_fn
+        api_digest.build_digest = fake_build
+        api_digest.ctx.publish_fn = fake_publish
+
+    def tearDown(self):
+        self.api.build_digest = self._old_build
+        self.api.ctx.publish_fn = self._old_publish
+
+    def test_empty_day_is_not_published(self):
+        import asyncio
+        rec = asyncio.get_event_loop().run_until_complete(
+            self.api.publish_digest(now=1.7e9, langs=("ru", "en"), force=True,
+                                    reason="schedule"))
+        self.assertEqual(self.sent, [], "в канал ничего не ушло")
+        self.assertEqual(rec.get("skipped"), "no_liquidations")
+        ru = rec["published"]["ru"]
+        self.assertFalse(ru[0])
+        self.assertIn("ни одной ликвидации", ru[1])
+        self.assertIn("liquidations_in_memory", ru[1])
+
+    def test_retry_only_when_the_digest_did_not_go_out(self):
+        """Повтор выпуска — только если он не ушёл: пустой день или отказ канала.
+
+        Черновик админу повтора не требует (его ждёт кнопка «Опубликовать»), а
+        неудачная отправка требует — но с паузой, иначе сборка с ИИ крутится
+        каждую минуту.
+        """
+        done = self.api.publish_done
+        self.assertFalse(done(None))
+        self.assertFalse(done({"skipped": "no_liquidations",
+                               "published": {"ru": [False, "пусто"]}}))
+        self.assertTrue(done({"published": {"ru": [True, ""]}}))
+        self.assertTrue(done({"published": {"ru": [False, ""]}}))       # черновик
+        self.assertFalse(done({"published": {
+            "ru": [False, "канал не привязан"], "en": [False, "нет канала"]}}))
+        self.assertFalse(done({"published": {}}))
+        # вторая форма записи — отметка DigestStore.mark_published (словарь:
+        # {ok, at, chat}); на ней планировщик падал с KeyError: 0, поэтому
+        # день не отмечался выпущенным и выпуск собирался заново каждую минуту
+        self.assertTrue(done({"published": {"ru": {"ok": True, "chat": "-100"}}}))
+        self.assertFalse(done({"published": {"ru": {"ok": False, "at": 1,
+                                                    "chat": ""}}}))
+        self.assertFalse(done({"published": {"ru": {"ok": False, "at": 1},
+                                             "en": {"ok": False, "at": 1}}}))
+        self.assertGreaterEqual(self.api.RETRY_SEC, 300)
+
+    def test_reason_explains_what_to_check(self):
+        text = self.api.empty_day_reason({"liq_count": 0, "liq_total_usd": 0})
+        self.assertIn("история не восстановилась", text)
+        self.assertIn("/api/health", text)
+
+
+class ArchiveIndexTest(unittest.TestCase):
+    """Архив выпусков для страницы дайджестов: свежие + индекс всех дат.
+
+    Список свежих выпусков короткий (в ленте они не копятся), а на каждую дату
+    архива сервер отдаёт лёгкую строку — по ней рисуется календарь и видно, за
+    какие дни выпуск есть. Пост и статью на эти строки не рендерим: в архиве
+    сотни выпусков, и это было бы дорого.
+    """
+
+    def setUp(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        import api_digest
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = DigestStore(os.path.join(self.tmp.name, "dig.json"))
+        self.now = 1_770_000_000.0
+        for i, day in enumerate(("2026-09-18", "2026-09-17", "2026-08-30")):
+            events = _events(self.now - i * 86400,
+                             [("BTC_USDT", "binance", "SELL", 900_000 - i, 1)])
+            facts = collect_day(events, now=self.now - i * 86400, oi={}, prices={})
+            self.store.save({"id": day, "day": day, "facts": facts,
+                             "ai": {"ru": "Рассказ дня. " * 30},
+                             "created": self.now - i,
+                             "published": {"ru": {"ok": True}}})
+        api_digest.ctx.store = self.store
+        api_digest.ctx.public_url = ""
+        app = FastAPI()
+        api_digest.register_digest_routes(app)
+        self.client = TestClient(app)
+
+    def tearDown(self):
+        import api_digest
+        api_digest.ctx.store = DigestStore("")
+
+    def test_days_index_covers_every_issue(self):
+        d = self.client.get("/api/digest?lang=ru").json()
+        self.assertEqual(d["count"], 3)
+        self.assertEqual([x["day"] for x in d["days"]],
+                         ["2026-09-18", "2026-09-17", "2026-08-30"])
+        self.assertTrue(all("label" in x and "published" in x for x in d["days"]))
+        self.assertTrue(all("post" not in x and "article" not in x
+                            for x in d["days"]), "индекс не должен тянуть посты")
+
+    def test_fresh_list_is_short_but_days_are_whole(self):
+        d = self.client.get("/api/digest?lang=ru&limit=2").json()
+        self.assertEqual(len(d["items"]), 2)                # в ленте всего два
+        self.assertEqual(len(d["days"]), 3)                 # а даты все
+        self.assertEqual(d["keep"], DEFAULT_KEEP)
+
+    def test_day_index_labels_follow_language(self):
+        import api_digest
+        rec = self.store.get("2026-09-18")
+        self.assertEqual(api_digest.day_index(rec, "ru")["label"], "18 сентября")
+        self.assertEqual(api_digest.day_index(rec, "en")["label"], "18 September")
 
 
 class SettingsApiTest(unittest.TestCase):

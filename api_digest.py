@@ -18,14 +18,14 @@ import asyncio
 import logging
 import os
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Body, Request
 from fastapi.responses import FileResponse, JSONResponse
 
-from daily_digest import (DAY_SEC, NARRATIVE_MIN, DigestStore, brief, collect_day,
-                          day_key, day_label, fallback_narrative, render_article,
-                          render_post)
+from daily_digest import (DAY_SEC, DEFAULT_KEEP, NARRATIVE_MIN, DigestStore, brief,
+                          collect_day, day_key, day_label, fallback_narrative,
+                          render_article, render_post)
 from hour_board import tz_offset
 
 log = logging.getLogger("liqscope.digest")
@@ -55,6 +55,8 @@ class Ctx:
         self.hours_pull = 25         # часовых свечей на монету (24ч + запас)
         self.last: Dict[str, Any] = {}
         self.busy = False
+        self.retry_at = 0.0          # когда снова пробовать выпуск после сбоя
+        self.retry_note = ""         # почему выпуск не ушёл в прошлый раз
         # Настройки вечернего выпуска: их читает сервер (store + env),
         # планировщик только получает готовый словарь — модуль без базы.
         self.settings_fn = None
@@ -427,7 +429,77 @@ class DigestScheduler:
             "error": self.last_error,
             "env_locked": dict(ctx.env_locked or {}),
             "archive": len(ctx.store.list()) if isinstance(ctx.store, DigestStore) else 0,
+            "retry_at": float(ctx.retry_at or 0),
+            "retry_note": ctx.retry_note,
         }
+
+
+RETRY_SEC = 900.0        # повтор после сбоя: не чаще, чем раз в 15 минут
+
+
+def day_index(rec: dict, lang: str = "ru") -> dict:
+    """Строка календаря выпусков: дата, подпись, статус.
+
+    Лёгкая запись без поста и статьи: архив отдаёт её на каждый выпуск (их
+    сотни), и рендерить текст ради кнопки в календаре не нужно.
+    """
+    facts = rec.get("facts") or {}
+    return {
+        "day": rec.get("day"),
+        "label": day_label(rec.get("day"), lang),
+        "published": bool((rec.get("published") or {}).get("ru")
+                          or (rec.get("published") or {}).get("en")),
+        "total_usd": facts.get("liq_total_usd"),
+        "liq_count": facts.get("liq_count"),
+    }
+
+
+def pub_state(value) -> Tuple[bool, str]:
+    """Привести запись о публикации к паре (ушло, ошибка).
+
+    В архиве лежат две формы: результат отправки ``[ok, err]`` и отметка
+    ``DigestStore.mark_published`` — ``{"ok": …, "at": …, "chat": …}``.
+    """
+    if isinstance(value, dict):
+        return (bool(value.get("ok")),
+                str(value.get("error") or value.get("err") or "").strip())
+    if isinstance(value, (list, tuple)):
+        ok = bool(value[0]) if value else False
+        err = str(value[1] or "") if len(value) > 1 else ""
+        return ok, err.strip()
+    return bool(value), ""
+
+
+def publish_done(rec: Optional[dict]) -> bool:
+    """Ушёл ли выпуск — или его надо повторить.
+
+    Повторяем в двух случаях: выпуск пропущен (пустой день: история может
+    восстановиться) и ни один канал не принял пост (не привязан канал, Telegram
+    отклонил). Черновик админу (режим контроля публикации) считается
+    отправленным: он ждёт кнопку «Опубликовать», и повторять его не нужно.
+    """
+    if not rec or rec.get("skipped"):
+        return False
+    pub = rec.get("published") or {}
+    if not pub:
+        return False
+    sent = retry = draft = False
+    for v in pub.values():
+        ok, err = pub_state(v)
+        if ok:
+            sent = True
+        elif isinstance(v, dict):
+            # отметка архива: в канал не ушло (черновик в архиве не отмечают)
+            retry = True
+        elif err:
+            # результат отправки с ошибкой: канал не привязан, Telegram отказал
+            retry = True
+        else:
+            # результат отправки без ошибки = черновик админу, ждёт «Опубликовать»
+            draft = True
+    if sent:
+        return True
+    return not retry and draft
 
 
 async def scheduler_loop(sched: DigestScheduler, check_sec: float = 60.0) -> None:
@@ -439,12 +511,26 @@ async def scheduler_loop(sched: DigestScheduler, check_sec: float = 60.0) -> Non
         try:
             now = time.time()
             day = sched.due(now)
-            if day and not ctx.busy:
+            if day and not ctx.busy and now >= float(ctx.retry_at or 0):
                 ctx.busy = True
                 try:
-                    if await publish_digest(now=now, langs=("ru", "en"), force=True,
-                                            reason="schedule"):
+                    rec = await publish_digest(now=now, langs=("ru", "en"), force=True,
+                                               reason="schedule")
+                    if publish_done(rec):
+                        # выпуск ушёл (или ждёт кнопки «Опубликовать» у админа)
                         sched.mark(day)
+                        ctx.retry_at = 0.0
+                        ctx.retry_note = ""
+                    else:
+                        # пустой день или каналы не приняли пост: попробуем ещё
+                        # раз, но не чаще, чем раз в RETRY_SEC — сборка выпуска
+                        # тянет ИИ и свечи, долбить ими каждую минуту нельзя
+                        ctx.retry_at = now + RETRY_SEC
+                        ctx.retry_note = ((rec or {}).get("skipped")
+                                          or _publish_error(rec)
+                                          or "выпуск не ушёл")
+                        log.info("Дайджест %s: %s — повтор через %d мин",
+                                 day, ctx.retry_note, int(RETRY_SEC // 60))
                 finally:
                     ctx.busy = False
         except asyncio.CancelledError:
@@ -455,16 +541,45 @@ async def scheduler_loop(sched: DigestScheduler, check_sec: float = 60.0) -> Non
         await asyncio.sleep(check_sec)
 
 
+def _publish_error(rec: Optional[dict]) -> str:
+    """Первая ошибка публикации — для лога и повторов."""
+    for v in ((rec or {}).get("published") or {}).values():
+        err = pub_state(v)[1]
+        if err:
+            return err
+    return ""
+
+
+def empty_day_reason(facts: Optional[dict]) -> str:
+    """Почему выпуск нельзя публиковать: за сутки не собрано ни одной ликвидации.
+
+    Так бывает, когда сервер перезапустили, а дисковая история за сутки не
+    восстановилась: в памяти ноль событий, и пост выходит с «$0 · 0 ликвидаций»
+    и без единой крупной ликвидации. Такой выпуск хуже, чем пропуск: вместо
+    публикации сервис говорит админу, что проверить.
+    """
+    facts = facts or {}
+    return ("за сутки не собрано ни одной ликвидации — похоже, история не "
+            "восстановилась после перезапуска (в /api/health смотрите "
+            "liquidations_in_memory); выпуск не отправлен")
+
+
 async def publish_digest(now: Optional[float] = None, langs=("ru", "en"),
                          force: bool = False, reason: str = "manual",
                          window: Optional[int] = None,
                          publish: bool = True) -> Optional[dict]:
     """Собрать выпуск и опубликовать его в каналах (если есть чем)."""
     rec = await build_digest(now=now, window=window, save=True, ai=True)
+    facts = rec.get("facts") or {}
     log.info("Дайджест за %s собран (%s): %s ликвидаций на %s",
-             rec.get("day"), reason,
-             (rec.get("facts") or {}).get("liq_count"),
-             (rec.get("facts") or {}).get("liq_total_usd"))
+             rec.get("day"), reason, facts.get("liq_count"),
+             facts.get("liq_total_usd"))
+    if float(facts.get("liq_total_usd") or 0) <= 0 and int(facts.get("liq_count") or 0) <= 0:
+        text = empty_day_reason(facts)
+        rec["skipped"] = "no_liquidations"
+        rec["published"] = {str(lang): [False, text] for lang in (langs or ("ru",))}
+        log.warning("Дайджест %s: %s", rec.get("day"), text)
+        return rec
     if publish and ctx.publish_fn is not None:
         try:
             result = await ctx.publish_fn(rec, list(langs), bool(force))
@@ -490,11 +605,21 @@ def register_digest_routes(app) -> None:
         return FileResponse(os.path.join(STATIC_DIR, "digest.html"))
 
     @router.get("/api/digest")
-    async def api_list(lang: str = "ru", limit: int = 60):
-        items = [public_record(r, lang) for r in ctx.store.list()[:max(1, limit)]]
+    async def api_list(lang: str = "ru", limit: int = 12):
+        """Архив выпусков: свежие — полностью, все даты — лёгким индексом.
+
+        ``items`` уходят в ленту свежих выпусков (их немного), ``days`` — в
+        календарь: по нему видно, за какие даты выпуск есть, и можно открыть
+        любой старый, не заваливая страницу списком.
+        """
+        all_recs = ctx.store.list()
+        items = [public_record(r, lang) for r in all_recs[:max(1, limit)]]
         return {
             "ok": True,
             "items": items,
+            "days": [day_index(r, lang) for r in all_recs],
+            "count": len(all_recs),
+            "keep": DEFAULT_KEEP,
             "now": day_key(time.time()),
             "tz_hours": round(tz_offset() / 3600.0, 2),
             "schedule": {"hour": 22, "minute": 0, "jitter_min": 10,

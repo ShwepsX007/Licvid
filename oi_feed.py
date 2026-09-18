@@ -649,6 +649,24 @@ class OpenInterestTracker:
                 self._prune_symbol(symbol)
         return legs
 
+    def live_series(self, symbol: str) -> Dict[float, float]:
+        """Сумма OI по живым опросам: {время: тотал}.
+
+        Кольцо ``_live_hist`` обновляется каждым опросом (десятки секунд), а
+        5-минутные бакеты — редко: по бакетам микрографик OI стоял «как
+        картинка». Здесь тот же горизонт, что у m1, но плотным рядом.
+        """
+        hist = list(self._live_hist.get(symbol) or [])
+        out: Dict[float, float] = {}
+        for ts, legs in hist:
+            try:
+                total = sum(float(v) for v in (legs or {}).values())
+            except (TypeError, ValueError):
+                continue
+            if total > 0:
+                out[round(float(ts), 3)] = round(total, 2)
+        return out
+
     def _prune_symbol(self, symbol: str):
         cutoff = time.time() - SERIES_KEEP_SEC
         buckets = self._series.get(symbol)

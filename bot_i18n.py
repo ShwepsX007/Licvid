@@ -905,6 +905,15 @@ RU_EN.update({
         "Send a threshold from 0 to 1, for example 0.5.\n/cancel — cancel.",
     "← Алерты": "← Alerts",
     "← К корреляциям": "← To correlations",
+    # tg_bot.py: арифметика подписи в черновике дневного дайджеста
+    "<i>Подпись: ": "<i>Caption: ",
+    " знаков — ": " characters — ",
+    "влезает в подпись под фото": "fits into the caption under the photo",
+    "Полный разбор дня — на сайте: ": "Full breakdown of the day — on the site: ",
+    "📖 Полный разбор дня": "📖 Full day breakdown",
+    "длиннее лимита подписи (1024) — фото не прикрепится, пост уйдёт текстом":
+        "is longer than the caption limit (1024) — the photo will not be "
+        "attached, the post goes as text",
 })
 
 def translate_payload(method: str, payload: Optional[dict],

@@ -32,6 +32,19 @@ POLL_STALE_SEC = float(os.getenv("LIQSCOPE_BOT_POLL_STALE_SEC", "180"))
 # единственная подсказка, которую бот может получить сам: если русский пост
 # уходит в «…Eng», getChat это покажет.
 CHANNEL_CHECK_SEC = float(os.getenv("LIQSCOPE_CHANNEL_CHECK_SEC", "1800"))
+# Предел подписи под фотографией в Telegram. Пост длиннее уходит текстом без
+# картинки — это и есть причина «дневной дайджест вышел без фото».
+CAPTION_LIMIT = 1024
+
+
+def caption_len(text: str) -> int:
+    """Длина подписи так, как её считает Telegram: UTF-16, эмодзи = 2 знака.
+
+    Лимит подписи под фотографией — 1024 «знака»; в UTF-16 эмодзи занимают по
+    две единицы, поэтому пост, который по ``len()`` проходит, Telegram может
+    отклонить. Считаем честно — тогда фото не теряется из-за пары эмодзи.
+    """
+    return len(str(text or "").encode("utf-16-le")) // 2
 
 
 def normalize_public_url(url: str = "") -> str:
@@ -177,6 +190,22 @@ class TelegramBot:
     def bot_url(self) -> str:
         name = (self.username or os.getenv("LIQSCOPE_BOT_USERNAME") or "LiqScopeBot")
         return f"https://t.me/{str(name).lstrip('@')}"
+
+    def digest_kb(self, lang: str = "ru") -> dict:
+        """Кнопки под дневным выпуском: сверху — ссылка на полный разбор на сайте.
+
+        В подписи под фотографией ссылка тоже есть, но кнопка заметнее: она
+        ведёт на страницу /digest, где лежит весь рассказ и все блоки дня.
+        """
+        kb = dict(self.channel_link_kb(lang))
+        rows = [list(r) for r in (kb.get("inline_keyboard") or [])]
+        url = self.site_url("/digest")
+        label = ("📖 Full day breakdown" if str(lang).startswith("en")
+                 else "📖 Полный разбор дня")
+        if url:
+            rows.insert(0, [{"text": label, "url": url}])
+        kb["inline_keyboard"] = rows
+        return kb
 
     def channel_link_kb(self, lang: str = "ru") -> dict:
         """Кнопки под постом в канале: сайт, бот и партнёрская ссылка Gate."""
@@ -606,12 +635,17 @@ class TelegramBot:
         """Запомнить последнее сообщение чата: id растут по времени.
 
         Нужно для меню: пока id меню-сообщения не меньше последнего
-        отправленного, оно лежит внизу и правка не сдвинет ленту.
+        отправленного, оно лежит внизу и правка не сдвинет ленту. Канал можно
+        указать и именем (@channel) — тогда ключом остаётся имя, а не число.
         """
         try:
-            cid, mid = int(chat_id), int(message_id)
+            mid = int(message_id)
         except (TypeError, ValueError):
             return None
+        try:
+            cid = int(chat_id)
+        except (TypeError, ValueError):
+            cid = str(chat_id)
         self._last_msg[cid] = max(mid, self._last_msg.get(cid, 0))
         return mid
 
@@ -1478,7 +1512,8 @@ class TelegramBot:
         return await self._publish_digest(posts, img, n)
 
     async def _publish_one(self, cid, caption: str, img, top: str = "",
-                           lang: str = "ru", images: Optional[List[str]] = None) -> bool:
+                           lang: str = "ru", images: Optional[List[str]] = None,
+                           kb: Optional[dict] = None) -> bool:
         """Пост в один канал: одно фото и подпись под ним.
 
         В канал уходит ровно одна картинка. Раньше весь набор из админки
@@ -1492,11 +1527,11 @@ class TelegramBot:
         в аварийном случае (подпись исчерпана до первого часа) — тогда текст
         уходит вторым сообщением, чтобы данные не потерялись.
         """
-        markup = self.channel_link_kb(lang)
+        markup = kb if kb else self.channel_link_kb(lang)
         photos = [x for x in (images if images is not None else
                               ([img] if img else [])) if x and os.path.isfile(x)]
         ok = False
-        if photos and len(caption) <= 1024:
+        if photos and caption_len(caption) <= CAPTION_LIMIT:
             ok = bool(await self.send_photo(cid, photos[0], caption, markup))
         if not ok:
             ok = bool(await self.send(cid, caption, markup))
@@ -1505,6 +1540,25 @@ class TelegramBot:
             if not sent:
                 log.warning("топ-7 не ушёл в канал %s", cid)
         return ok
+
+    @staticmethod
+    def _caption_note(posts) -> str:
+        """Что будет с фото: влезает ли пост в подпись под фотографией.
+
+        Telegram разрешает подпись не длиннее 1024 знаков, а дневной выпуск
+        обычно длиннее — тогда он уходит текстом, без картинки. Админ видит
+        это ещё в черновике и решает, укорачивать ли рассказ промтом.
+        """
+        sizes = [(p.get("lang") or "ru", caption_len(p.get("caption") or ""))
+                 for p in (posts or [])]
+        if not sizes:
+            return ""
+        shown = " · ".join(
+            f"{'🇬🇧' if lang == 'en' else '🇷🇺'} {n}" for lang, n in sizes)
+        long = max(n for _, n in sizes) > CAPTION_LIMIT
+        tail = ("длиннее лимита подписи (1024) — фото не прикрепится, пост уйдёт "
+                "текстом" if long else "влезает в подпись под фото")
+        return f"<i>Подпись: {shown} знаков — {tail}.</i>"
 
     @staticmethod
     def _photo_list(img) -> List[str]:
@@ -1633,7 +1687,7 @@ class TelegramBot:
         публикации — если он включён, посты уходят админу черновиком.
         """
         from channel_digest import active_images, digest_images, pick_image
-        from daily_digest import CAPTION_LIMIT, render_post
+        from daily_digest import render_channel
 
         self._digest_err = ""
         self._last_tg_err = ""
@@ -1642,19 +1696,6 @@ class TelegramBot:
         except Exception as e:
             log.debug("проверка каналов: %s", e)
         day = str((rec or {}).get("day") or "")
-        # Фото рубрики «дневной дайджест» (если админ их загрузил); иначе —
-        # общий набор сводки. Одно фото на пост: порядок сдвигается по номеру
-        # дня, альбома нет — как и в постах сводки.
-        images = digest_images(self.store)
-        try:
-            variant = int(day.replace("-", "")[-2:] or 0)
-        except (TypeError, ValueError):
-            variant = 0
-        img = pick_image(variant, images=images)
-        # С фотографией Telegram разрешает подпись не длиннее 1024 знаков:
-        # раньше пост за сутки (он длиннее) уходил текстом без картинки —
-        # теперь под фото пост собирается под этот лимит (рассказ подрезается)
-        limit = CAPTION_LIMIT if (img and os.path.isfile(img)) else None
         posts: List[dict] = []
         result: Dict[str, Any] = {}
         seen: set = set()
@@ -1669,15 +1710,28 @@ class TelegramBot:
                                         if lang == "en" else
                                         "канал не привязан — перешлите боту пост из канала")]
                 continue
-            caption = render_post(rec, lang, self.site_url(), limit=limit) if limit \
-                else render_post(rec, lang, self.site_url())
-            posts.append({"lang": lang, "cid": cid, "caption": caption, "top": ""})
+            # В канал — небольшой пост: шапка, лид рассказа, цифры дня и
+            # ссылка на полный разбор на сайте. Так он влезает в подпись под
+            # фотографией (1024 знака) и фото уходит всегда; большой текст
+            # целиком живёт на странице /digest.
+            caption = render_channel(rec, lang, self.site_url())
+            posts.append({"lang": lang, "cid": cid, "caption": caption, "top": "",
+                          "kb": self.digest_kb(lang)})
         if not posts:
             err = next((v[1] for v in result.values()), "каналы не привязаны")
             self._digest_err = err
             self._daily_state = {"ok": False, "day": day, "error": err,
                                  "at": time.time()}
             return result
+        # Фото рубрики «дневной дайджест» (если админ их загрузил); иначе —
+        # общий набор сводки. Одно фото на пост: порядок сдвигается по номеру
+        # дня, альбома нет — как и в постах сводки.
+        images = digest_images(self.store)
+        try:
+            variant = int(day.replace("-", "")[-2:] or 0)
+        except (TypeError, ValueError):
+            variant = 0
+        img = pick_image(variant, images=images)
         if self._review_on():
             ok = await self._send_daily_draft(posts, img, day)
             for post in posts:
@@ -1703,7 +1757,8 @@ class TelegramBot:
             ok = await self._publish_one(cid, post.get("caption") or "",
                                          images[0] if images else None,
                                          post.get("top") or "", lang,
-                                         images=images)
+                                         images=images,
+                                         kb=post.get("kb") or None)
             err = "" if ok else (getattr(self, "_last_tg_err", "")
                                  or "Telegram отклонил пост")
             if not ok:
@@ -1749,7 +1804,8 @@ class TelegramBot:
             {"text": "✖️ Отмена", "callback_data": "dd:no"}]]}
         text = (f"<b>Черновик дневного дайджеста</b> · {_esc(day)}\n"
                 "Это суточный выпуск (не сводка за окно поста). В каналы он уйдёт "
-                "только после «Опубликовать».")
+                "только после «Опубликовать».\n"
+                + self._caption_note(posts))
         await self.send(admin, text, kb)
         imgs = [x for x in self._photo_list(img) if x and os.path.isfile(x)]
         if imgs:
@@ -1759,6 +1815,11 @@ class TelegramBot:
             mark = "🇬🇧" if post.get("lang") == "en" else "🇷🇺"
             # raw=True: это будущая публикация в её собственном языке
             await self.send(admin, f"{mark} {post.get('caption') or ''}", raw=True)
+        # В канал уходит короткая версия: рассказ целиком и все блоки —
+        # на сайте, поэтому админу говорим, где смотреть полный текст.
+        site = str(self.site_url() or "").rstrip("/")
+        if site.startswith("http"):
+            await self.send(admin, f"Полный разбор дня — на сайте: {site}/digest")
         log.info("дневной дайджест: черновик отправлен админу %s (%s)", admin, day)
         return True
 
@@ -1858,6 +1919,50 @@ class TelegramBot:
             await asyncio.sleep(0.04)  # ~25 msg/s
         self.store.audit(actor_id, "broadcast", f"ok={ok} fail={fail}")
         return {"ok": ok, "fail": fail, "total": len(ids)}
+
+    async def broadcast_post(self, text: str, photo: str = "",
+                             markup: Optional[dict] = None,
+                             raw: bool = True,
+                             actor_id: Optional[int] = None) -> Dict[str, int]:
+        """Рассылка рекламного поста: с фото — картинкой с подписью, без — текстом.
+
+        ``raw=True`` по умолчанию: реклама уходит ровно так, как её написал
+        админ. Текст, который бот переводит сам, здесь не нужен — иначе
+        «рекламное» объявление менялось бы от языка получателя.
+        """
+        targets = (self.store.broadcast_targets() if hasattr(self.store, "broadcast_targets")
+                   else [{"tg_id": i} for i in self.store.tg_ids_for_broadcast()])
+        ids = [int(t["tg_id"]) for t in targets]
+        has_photo = bool(photo and os.path.isfile(photo))
+        ok = fail = 0
+        for tg_id in ids:
+            mid = (await self.send_photo(tg_id, photo, text, markup, raw=raw)
+                   if has_photo else await self.send(tg_id, text, markup, raw=raw))
+            if mid:
+                ok += 1
+            else:
+                fail += 1
+            await asyncio.sleep(0.04)  # ~25 msg/s
+        self.store.audit(actor_id, "broadcast_post", f"ok={ok} fail={fail} photo={has_photo}")
+        return {"ok": ok, "fail": fail, "total": len(ids)}
+
+    async def delete_message(self, chat_id: Any, message_id: Any) -> bool:
+        """Удалить своё сообщение: так снимается реклама по истечении срока.
+
+        В каналах работает для любого возраста поста (бот — админ), в личке
+        Telegram разрешает удалять свои сообщения только первые 48 часов.
+        """
+        try:
+            mid = int(message_id)
+        except (TypeError, ValueError):
+            return False
+        if not mid:
+            return False
+        cid = chat_id
+        if str(chat_id).lstrip("-").isdigit():
+            cid = int(str(chat_id))
+        res = await self._call("deleteMessage", {"chat_id": cid, "message_id": mid})
+        return bool(res and res.get("ok"))
 
     async def _poll(self) -> None:
         fails = 0

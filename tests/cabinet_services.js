@@ -195,6 +195,35 @@ async function main() {
         qa("#corr-board [data-corasame]").length === 4 &&
         qa("#corr-board [data-corawin]").length >= 16,
         qa("#corr-board [data-coralert]").length + " блоков настроек");
+  // Вид доски: каждая переменная — горизонтальная строка во всю ширину, строки
+  // идут друг под другом (раньше карты стояли столбиками рядом, каждая в своём).
+  const css2 = (el, prop) => win.getComputedStyle(el)[prop];
+  const mapsBox = $("cor-maps");
+  check("строки переменных идут друг под другом (одна колонка у доски)",
+        !!mapsBox && css2(mapsBox, "gridTemplateColumns") === "1fr",
+        mapsBox ? css2(mapsBox, "gridTemplateColumns") : "нет доски");
+  const rowGrids = qa("#corr-board .cor-map > .cor-map-grid");
+  check("внутри строки — горизонтальная раскладка в несколько колонок",
+        rowGrids.length === 4 && rowGrids.every((g) =>
+          (css2(g, "gridTemplateColumns").match(/minmax/g) || []).length >= 3),
+        rowGrids.length + " строк: " +
+        (rowGrids[0] ? css2(rowGrids[0], "gridTemplateColumns") : "нет"));
+  check("карта переменной, её связи и сигнал стоят в одной строке, а не столбиком",
+        rowGrids.length === 4 && rowGrids.every((g) =>
+          !!g.querySelector(":scope > .cor-col-heat [data-corheat]") &&
+          !!g.querySelector(":scope > .cor-col-links [data-corpairs]") &&
+          !!g.querySelector(":scope > .cor-col-alert [data-coralert]")),
+        rowGrids.length + " строк");
+  check("порядок строк — как переменные: liq, vol, cvd, oi",
+        qa("#cor-maps > .cor-map").map((m) => m.getAttribute("data-cormap")).join(",") ===
+        "liq,vol,cvd,oi",
+        qa("#cor-maps > .cor-map").map((m) => m.getAttribute("data-cormap")).join(","));
+  const metas = qa("#corr-board [data-cormeta]");
+  check("в заголовке строки — сводка по переменной (окно, монеты, связи, сигнал)",
+        metas.length === 4 && metas.every((m) =>
+          /окно /.test(m.textContent) && /монет /.test(m.textContent) &&
+          /связей /.test(m.textContent) && /сигнал: (вкл|выкл)/.test(m.textContent)),
+        metas.length + " сводок: " + (metas[0] ? metas[0].textContent : "нет"));
   // связей может не быть, если в окне мало часов с историей — тогда доска
   // честно говорит об этом; иначе показываем пары и клик по паре
   const pairRows = qa("#corr-board [data-corpairs] .cor-pair");

@@ -572,22 +572,55 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
 /* ---------- корреляции: карта у каждой переменной своя --------------------- */
 /* Раньше тепловая карта была одна, и над ней стоял переключатель метрик: чтобы
    сравнить ликвидации с CVD, приходилось щёлкать чипы. Теперь карты идут
-   списком — по одной на переменную, и все видны сразу. Блоки держим в общей
-   сетке: на широком экране две колонки, на узком — одна. */
-.cor-maps { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
-    gap: 12px; margin: 6px 0 4px; }
+   списком — по одной на переменную, и все видны сразу.
+   Каждая переменная — ГОРИЗОНТАЛЬНАЯ строка во всю ширину доски, строки идут
+   друг под другом. Внутри строки три части: тепловая карта со своим пояснением
+   и распределением связей, список сильнейших связей и настройки сигнала — они
+   стоят рядом, а не столбиком в узкой колонке. На средней ширине строка
+   складывается в две колонки, на узком экране — в одну. */
+.cor-maps { display: grid; grid-template-columns: 1fr; gap: 14px;
+    margin: 8px 0 4px; }
 .cor-map { background: rgba(20, 26, 38, 0.55); border: 1px solid rgba(120, 140, 175, 0.18);
-    border-radius: 12px; padding: 10px 12px 12px; min-width: 0; }
-.cor-map-h { font-size: 0.84rem; font-weight: 800; letter-spacing: 0.3px;
-    margin: 2px 0 6px; }
+    border-radius: 12px; padding: 10px 14px 12px; min-width: 0; }
+.cor-map-h { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+    padding-bottom: 8px; margin-bottom: 10px;
+    border-bottom: 1px solid rgba(120, 140, 175, 0.16); }
+.cor-map-title { font-size: 0.9rem; font-weight: 800; letter-spacing: 0.3px; }
+.cor-map-meta { margin-left: auto; font-size: 0.74rem; color: #8d9cb4;
+    font-variant-numeric: tabular-nums; }
+.cor-map-grid { display: grid; gap: 12px 16px; align-items: start;
+    grid-template-columns: minmax(380px, 1.4fr) minmax(250px, 0.9fr) minmax(280px, 1fr);
+    grid-template-areas: "heat links alert"; }
+.cor-map-col { min-width: 0; }
+.cor-col-heat { grid-area: heat; }
+.cor-col-links { grid-area: links; }
+.cor-col-alert { grid-area: alert; }
+.cor-map-col + .cor-map-col { border-left: 1px dashed rgba(120, 140, 175, 0.2);
+    padding-left: 16px; }
 .cor-map .cor-heat-note { margin: 0 0 8px; }
-.cor-map .al-label { margin: 8px 0 6px; }
+.cor-map .al-label { margin: 0 0 6px; }
 .cor-map .cor-heat-wrap { margin: 4px 0 8px; }
-.cor-map .cor-hist-wrap { margin: 4px 0 8px; }
+.cor-map .cor-hist-wrap { margin: 4px 0 4px; }
+/* Строка широкая — карта может занять её целиком: клетки тянутся по ширине. */
+.cor-map .cor-heat { width: 100%; }
+.cor-map .cor-pair { grid-template-columns: minmax(120px, 1fr) 1.4fr 48px; }
+/* Пороги в колонке сигнала — своей строкой под тумблером: места в колонке
+   меньше, чем было в широкой карте. */
+.cor-col-alert .cor-alert-now { margin-left: 0; width: 100%; }
+@media (max-width: 1180px) {
+    .cor-map-grid { grid-template-columns: minmax(320px, 1.25fr) minmax(260px, 1fr);
+        grid-template-areas: "heat links" "heat alert"; }
+}
+@media (max-width: 820px) {
+    .cor-map-grid { grid-template-columns: 1fr;
+        grid-template-areas: "heat" "links" "alert"; }
+    .cor-map-meta { margin-left: 0; }
+    .cor-map-col + .cor-map-col { border-left: 0; padding-left: 0; padding-top: 10px;
+        border-top: 1px dashed rgba(120, 140, 175, 0.2); }
+}
 
 /* Настройки сигнала по этой переменной: окно и два порога */
-.cor-alert { border-top: 1px dashed rgba(120, 140, 175, 0.25); margin-top: 10px;
-    padding-top: 8px; }
+.cor-alert { margin-top: 0; padding-top: 0; }
 .cor-alert-h { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .cor-alert-now { margin-left: auto; font-size: 0.76rem; color: #9fb0c8;
     font-variant-numeric: tabular-nums; }
@@ -597,6 +630,3 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
 .cor-num input { width: 76px; }
 .cor-alert-hint { font-size: 0.72rem; color: #8d9cb4; line-height: 1.45;
     margin-top: 6px; }
-@media (max-width: 720px) {
-    .cor-maps { grid-template-columns: 1fr; }
-}

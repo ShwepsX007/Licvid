@@ -1289,6 +1289,28 @@
             "(порог 0.5 значит «коэффициент 0.5 и выше»).</div></div>";
     }
 
+    /* Иконка переменной — для заголовка строки: «💥 Ликвидации». */
+    var COR_ICON = { liq: "💥", vol: "📦", cvd: "🌊", oi: "📊" };
+
+    /* Короткая сводка в заголовке строки: окно, сколько монет и связей и
+       включён ли сигнал по этой переменной. */
+    function corMapMeta(d, metric) {
+        var pairs = corPairsOf(d, metric) || [];
+        var strong = 0;
+        pairs.forEach(function (p) {
+            if (Math.abs(Number(p.r)) >= 0.4) strong += 1;
+        });
+        var cfg = corAlertOf(metric);
+        return "окно " + corWinLabel(d) +
+            " · монет " + ((d && d.symbols) || []).length +
+            " · связей " + pairs.length + " · сильных " + strong +
+            " · сигнал: " + (cfg.enabled ? "вкл" : "выкл");
+    }
+
+    /* Одна переменная — одна горизонтальная строка во всю ширину доски.
+       Внутри строка делится на три части: тепловая карта со своим пояснением и
+       распределением связей, список сильнейших связей и настройки сигнала.
+       Раньше карты стояли столбиками рядом и каждая была узкой колонкой. */
     function corMetricBlock(d, metric) {
         var note = "Что это: " + String(corMetricTitle(d, metric)).toLowerCase() +
             " — " + corMetricHint(metric) +
@@ -1296,19 +1318,28 @@
             " (зелёный: вместе, красный: наоборот). Наведите на клетку или нажмите её: " +
             "покажу, что именно показывает эта цифра.";
         return '<section class="cor-map" data-cormap="' + esc(metric) + '">' +
-            '<div class="cor-map-h">🎨 Тепловая карта · ' + esc(corMetricTitle(d, metric)) +
-            " · " + esc(corWinLabel(d)) + "</div>" +
+            '<div class="cor-map-h">' +
+            '<span class="cor-map-title">' + (COR_ICON[metric] || "🎨") + " " +
+            esc(corMetricTitle(d, metric)) + "</span>" +
+            '<span class="cor-map-meta" data-cormeta="' + esc(metric) + '">' +
+            esc(corMapMeta(d, metric)) + "</span></div>" +
+            '<div class="cor-map-grid">' +
+            '<div class="cor-map-col cor-col-heat">' +
             '<div class="cor-heat-note">' + esc(note) + "</div>" +
             '<div class="cor-heat-box" data-corheat="' + esc(metric) + '">' +
             corHeat(d, metric) + "</div>" +
             '<div class="cor-hist-wrap"><span class="cor-hist-title">Распределение связей · ' +
             esc(COR_LABEL[metric] || metric) + '</span><div class="cor-hist" data-corhist="' +
             esc(metric) + '">' + corHist(metric) + "</div></div>" +
+            "</div>" +
+            '<div class="cor-map-col cor-col-links">' +
             '<div class="al-label">Самые сильные связи · ' + esc(COR_LABEL[metric] || metric) +
             '</div><div class="cor-pairs" data-corpairs="' + esc(metric) + '">' +
-            corPairsList(metric) + "</div>" +
-            corAlertBlock(d, metric) +
-            "</section>";
+            corPairsList(metric) + "</div></div>" +
+            '<div class="cor-map-col cor-col-alert">' +
+            '<div class="al-label">🔔 Сигнал по переменной</div>' +
+            corAlertBlock(d, metric) + "</div>" +
+            "</div></section>";
     }
 
     function paintCorrelations(d, bind) {
@@ -1348,6 +1379,8 @@
             if (hist) hist.innerHTML = corHist(m);
             var pairs = board_query('[data-corpairs="' + m + '"]');
             if (pairs) pairs.innerHTML = corPairsList(m);
+            var meta = board_query('[data-cormeta="' + m + '"]');
+            if (meta) meta.textContent = corMapMeta(d, m);
         });
         var st = $("cor-status");
         if (st) st.textContent = corStatusText();
@@ -1616,7 +1649,9 @@
             return '<div class="cor-flow-empty">связей пока нет — мало истории</div>';
         }
         pairs.sort(function (p, q) { return Math.abs(q.r) - Math.abs(p.r); });
-        return pairs.slice(0, 6).map(function (p, i) {
+        // Строка переменной широкая: в колонке связей помещается больше пар,
+        // чем помещалось в узкой карте-столбике.
+        return pairs.slice(0, 10).map(function (p, i) {
             var r = Number(p.r) || 0;
             var w = Math.max(6, Math.min(100, Math.round(Math.abs(r) * 100)));
             var cls = r >= 0 ? "pos" : "neg";

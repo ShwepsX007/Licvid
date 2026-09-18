@@ -769,7 +769,9 @@
             if (followReleaseTimer) clearTimeout(followReleaseTimer);
             followReleaseTimer = setTimeout(() => {
                 followReleaseTimer = null;
-                followChartNow();
+                // жест двигает и время, и шкалу цены — возвращаем обе: свечу к
+                // 3% справа, цену к 15% от края, если её из коридора вывели
+                anchorFollowAll();
             }, FOLLOW_RELEASE_MS);
         };
         el.addEventListener("pointerdown", hold, true);
@@ -784,7 +786,7 @@
             followReleaseTimer = setTimeout(() => {
                 followReleaseTimer = null;
                 followHold = false;
-                followChartNow();
+                anchorFollowAll();
             }, FOLLOW_RELEASE_MS);
         }, { passive: true, capture: true });
         // Страховка: если слежение включено, а тиков по монете нет, шаг всё
@@ -909,6 +911,40 @@
         return true;
     }
 
+    /** Возврат после жеста: свеча — на 3% от правого края, цена — ровно на
+     *  15% от края, если жест вывел её из коридора.
+     *
+     *  Внутри коридора вертикаль не трогаем: цена и так видна с запасом не
+     *  меньше 15%, а лишний прыжок после каждого жеста читался бы как
+     *  дрожание. Гистерезис здесь выключен — это как раз случай «вернуть
+     *  график к минимальным отступам», а не «терпеть шум».
+     */
+    function anchorFollowAll() {
+        const movedTime = anchorToLast();
+        const movedPrice = followPriceSnap();
+        return movedTime || movedPrice;
+    }
+
+    /** Цена за коридором — ставим её ровно на 15% от той границы, за которую
+     *  она ушла. Окна цены нет — подгоняем по видимым свечам. */
+    function followPriceSnap() {
+        if (!chart) return false;
+        const scale = rightPriceScale();
+        if (!scale || !scale.setVisibleRange) return false;
+        const price = lastChartPrice();
+        if (price === null) return false;
+        let cur = null;
+        try { cur = scale.getVisibleRange ? scale.getVisibleRange() : null; } catch (e) { cur = null; }
+        const next = (cur && isFinite(cur.from) && isFinite(cur.to) && Number(cur.to) > Number(cur.from))
+            ? followPriceShift(cur, price, FOLLOW_MARGIN, 0)
+            : followPriceFit(visiblePriceBand(), price, FOLLOW_MARGIN);
+        if (!next) return false;
+        try {
+            scale.setVisibleRange(next);
+        } catch (e) { return false; }
+        return true;
+    }
+
     /** Прыжок к последней свече: включаем автоследование — сразу к цене. */
     function anchorToLast() {
         if (!chart || !state.candles.length) return false;
@@ -975,6 +1011,8 @@
             tick: () => followTick(),
             setTicker: (v) => setFollowTicker(v),
             anchor: () => anchorToLast(),
+            anchorAll: () => anchorFollowAll(),
+            priceSnap: () => followPriceSnap(),
             step: () => followChartNow(),
             edgePct: FOLLOW_EDGE_PCT,
             driftPct: FOLLOW_DRIFT_PCT,

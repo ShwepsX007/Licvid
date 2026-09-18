@@ -197,6 +197,22 @@ async function main() {
     return true;
   }
 
+  /** Возврат после жеста — копия followPriceSnap() из app.js:
+   *  цена вне коридора встаёт РОВНО на 15% от той границы, за которую ушла
+   *  (гистерезис выключен), внутри коридора не двигаем. */
+  function priceSnap() {
+    const price = lastPrice();
+    let cur = null;
+    try { cur = pr(); } catch (e) { cur = null; }
+    const next = (cur && isFinite(cur.from) && isFinite(cur.to) && Number(cur.to) > Number(cur.from))
+      ? F.followPriceShift(cur, price, M, 0)
+      : F.followPriceFit(band(), price, M);
+    if (!next) return false;
+    ps.setVisibleRange(next);
+    priceWrites++;
+    return true;
+  }
+
   /** Один шаг слежения — копия followChartNow() из app.js. */
   function step() {
     const r = lr();
@@ -350,6 +366,27 @@ async function main() {
   check("ручной уход в историю — окно вернулось к 3% справа",
     Math.abs(edge() - keepBars()) < 0.05 && timeWrites === tBefore + 1,
     "edge=" + edge().toFixed(3) + " keep=" + keepBars() + " записей " + (timeWrites - tBefore));
+
+  // ================= жест утащил шкалу цены: возврат ставит цену в 15% =================
+  const pNow = lastPrice();
+  ps.setVisibleRange({ from: pNow - 140, to: pNow + 20 });      // как будто потянули мышью
+  const snapWrites = priceWrites;
+  priceSnap();
+  const snapRange = pr();
+  const snapSpan = snapRange.to - snapRange.from;
+  check("после жеста цена вернулась ровно на 15% от верха",
+    priceWrites === snapWrites + 1 && Math.abs((snapRange.to - pNow) / snapSpan - M) < 1e-9,
+    JSON.stringify(snapRange) + " цена " + pNow);
+  check("возврат после жеста размах шкалы цены не меняет",
+    Math.abs(snapSpan - 160) < 1e-9, "ширина " + snapSpan.toFixed(3) + " было 160");
+  // а внутри коридора возврат вертикаль не трогает
+  ps.setVisibleRange({ from: pNow - 500, to: pNow + 500 });
+  const quietWrites = priceWrites;
+  const quietRange = JSON.stringify(pr());
+  priceSnap();
+  check("внутри коридора возврат после жеста шкалу цены не трогает",
+    priceWrites === quietWrites && JSON.stringify(pr()) === quietRange,
+    JSON.stringify(pr()) + " было " + quietRange);
 
   // ================= зум: слежение двигает окно, но ширину не меняет =================
   const zoomSpan = 45, zoomKeep = F.followKeepBars(zoomSpan, KEEP);

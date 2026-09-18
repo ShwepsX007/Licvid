@@ -12,8 +12,10 @@
  *      границы, размах (зум) при этом сохраняется; у границы есть гистерезис;
  *    * по горизонтали свеча не подходит к правому краю ближе 0.5% ширины, а
  *      после сдвига и после ручного ухода встаёт на 3% от края;
- *    * ручной сдвиг графика (мышью) возвращается к границам: пока жест
- *      удерживается — шаги молчат, после отпускания график возвращается;
+ *    * ручной сдвиг графика (мышью или колесом) возвращается к границам по
+ *      обеим осям: пока жест удерживается — шаги молчат, после отпускания
+ *      свеча встаёт на 3% справа, а цена — ровно на 15% от края, если жест
+ *      вывел её из коридора;
  *    * при выключении библиотеке возвращаются её настройки (autoScale,
  *      отступы 6%/24%, rightOffset 6).
  *
@@ -348,6 +350,25 @@ async function part1() {
     Math.abs(auto.to - (last + F.keepBars(auto.to - auto.from))) < 1e-6,
     JSON.stringify(auto));
 
+  // жест двигает и шкалу цены: после отпускания цена возвращается в 15% от края
+  const priceNow = CANDLES[CANDLES.length - 1].close;
+  rec.priceScale._vr = { from: priceNow - 140, to: priceNow + 20 };
+  container.dispatchEvent(new win.Event("pointerdown", { bubbles: true }));
+  win.dispatchEvent(new win.Event("pointerup"));
+  await sleep(600);
+  const prSnap = rec.priceRanges[rec.priceRanges.length - 1];
+  const prSnapSpan = prSnap ? prSnap.to - prSnap.from : 0;
+  check("после жеста цена вернулась ровно на 15% от верха",
+    prSnap && Math.abs((prSnap.to - priceNow) / prSnapSpan - 0.15) < 1e-9,
+    JSON.stringify(prSnap));
+  // а внутри коридора вертикаль после жеста не прыгает
+  rec.priceScale._vr = { from: priceNow - 500, to: priceNow + 500 };
+  const prQuiet = rec.priceRanges.length;
+  F.setHold(false);
+  F.anchorAll();
+  check("внутри коридора возврат после жеста вертикаль не трогает",
+    rec.priceRanges.length === prQuiet, rec.priceRanges.length - prQuiet);
+
   // колесо (зум) — тоже жест: пока крутят, шаги молчат, потом возврат
   F.setHold(false);
   rec.timeScale.setVisibleLogicalRange({ from: last - 500, to: last - 60 });
@@ -478,6 +499,15 @@ async function part1() {
     followPriceShift(null, 150, M, H) === null &&
     followPriceShift({ from: 5, to: 5 }, 5, M, H) === null &&
     followPriceShift({ from: 1, to: 2 }, NaN, M, H) === null);
+  // возврат после жеста: гистерезис выключен — цена встаёт ровно на 15%
+  const snap = followPriceShift({ from: 100, to: 200 }, 186, M, 0);
+  check("возврат после жеста: цена вне коридора — ровно 15% от края",
+    snap && Math.abs((snap.to - (snap.to - snap.from) * M) - 186) < 1e-9 &&
+    Math.abs((snap.to - snap.from) - 100) < 1e-9, JSON.stringify(snap));
+  check("возврат после жеста: та же цена в пределах гистерезиса тик не двигает",
+    followPriceShift({ from: 100, to: 200 }, 186, M, H) === null);
+  check("возврат после жеста: внутри коридора вертикаль не трогаем",
+    followPriceShift({ from: 100, to: 200 }, 170, M, 0) === null);
 
   // первичная подгонка: видимые свечи и цена с зазорами
   const fit = followPriceFit({ low: 100, high: 200 }, 150, M);

@@ -999,10 +999,10 @@ class BotMenuTest(unittest.TestCase):
             return 11
 
         self.bot.send = fake_send          # черновик админу
-        self.bot.send_photo = fake_photo   # публикация в канал
+        self.bot.send_photo = fake_photo   # обложка черновика и публикация
         self.assertTrue(asyncio.run(self.bot.post_channel_digest()))
-        # в канал ничего не ушло, черновик — админу (tg_id 1001)
-        self.assertEqual(photo, [])
+        # в канал ничего не ушло: фото обложки видел только админ (tg_id 1001)
+        self.assertEqual([cid for cid, _c in photo], ["1001"], photo)
         self.assertEqual([x[0] for x in sent], ["1001"])
         self.assertIn("Черновик сводки", sent[0][1])
         datas = [b["callback_data"] for row in sent[0][2]["inline_keyboard"] for b in row]
@@ -1041,6 +1041,8 @@ class BotMenuTest(unittest.TestCase):
         self.bot.send = fake_send  # type: ignore
         self.bot.send_photo = fake_photo  # type: ignore
         asyncio.run(self.bot.post_channel_digest())
+        # обложку черновика админ видел, в канал не ушло ничего
+        self.assertEqual([cid for cid in photo if cid != "1001"], [])
 
         async def fake_call(method, payload=None):
             return {"ok": True, "result": {"message_id": 79}}
@@ -1049,7 +1051,7 @@ class BotMenuTest(unittest.TestCase):
         cb = {"id": "cb3", "from": {"id": 1001, "username": "boss", "first_name": "Ada"},
               "data": "d:no", "message": {"message_id": 7, "chat": {"id": 1001}}}
         asyncio.run(self.bot._on_callback(cb))
-        self.assertEqual(photo, [])
+        self.assertEqual([cid for cid in photo if cid != "1001"], [], photo)
         self.assertIsNone(self.bot._draft)
         self.assertEqual(self.store.get_setting("channel_digest_n", "0"), "0")
 
@@ -1086,7 +1088,7 @@ class BotMenuTest(unittest.TestCase):
         self.assertIn("https://liqscope.online", urls)
         self.assertTrue(any("t.me/" in (u or "") for u in urls))
 
-    # --- карусель фото и частота постов -----------------------------------
+    # --- фото постов и частота публикаций ----------------------------------
     PNG = (b"\x89PNG\r\n\x1a\n" + b"\x00" * 32)        # хватает проверки формата
 
     def _add_photos(self, n, kind="post"):
@@ -1098,70 +1100,68 @@ class BotMenuTest(unittest.TestCase):
             out.append(r["path"])
         return out
 
-    def test_photos_go_as_carousel(self):
-        """Фото рубрики уходят альбомом: сразу все, обложка сдвигается."""
+    def test_photos_go_one_per_post(self):
+        """Три фото в наборе — три поста, в каждом ровно одно фото.
+
+        Раньше набор уходил альбомом и все фото валились в один пост: это
+        читалось как сбой публикации. Теперь альбома нет вовсе, а обложка
+        листается по счётчику постов.
+        """
         self.store.delete_digest_photo  # noqa: B018 — метод есть в базе
         for p in self.store.list_digest_photos():
             self.store.delete_digest_photo(p["id"])
         paths = self._add_photos(3)
         self.bot._channel_id_cfg = "-100111"
         self.bot._set_review(False)
-        albums, singles = [], []
-
-        async def fake_album(cid, files, caption="", limit=10):
-            albums.append((str(cid), list(files), caption))
-            return [11, 12, 13]
+        singles = []
 
         async def fake_photo(cid, path, caption="", markup=None, **_kw):
-            singles.append((str(cid), path))
+            singles.append((str(cid), path, caption, markup))
             return 11
 
         async def fake_send(*_a, **_k):
             return 22
 
-        self.bot.send_media_group = fake_album       # type: ignore
         self.bot.send_photo = fake_photo             # type: ignore
         self.bot.send = fake_send                    # type: ignore
+        self.assertFalse(hasattr(self.bot, "send_media_group"),
+                         "альбомов в постах быть не должно")
         self.assertTrue(asyncio.run(self.bot.post_channel_digest()))
-        self.assertEqual(len(albums), 1, albums)
-        cid, files, caption = albums[0]
-        self.assertEqual(cid, "-100111")
-        self.assertEqual(sorted(files), sorted(paths))     # все фото в посте
-        self.assertEqual(len(files), 3)
-        self.assertIn("LiqScope", caption)                 # подпись под альбомом
-        self.assertEqual(singles, [])                      # одиночных фото нет
-        # подпись уходит только с первым фото альбома — порядок сдвигается
-        # от поста к посту за счёт счётчика channel_digest_n
+        self.assertEqual(len(singles), 1, singles)         # одно фото на пост
+        self.assertEqual(singles[0][0], "-100111")
+        self.assertEqual(singles[0][1], paths[0])          # первое из набора
+        self.assertIn("LiqScope", singles[0][2])           # подпись под фото
+        self.assertTrue(singles[0][3], "у фото остаются кнопки канала")
         self.assertEqual(self.store.get_setting("channel_digest_n", "0"), "1")
-        asyncio.run(self.bot.post_channel_digest())
-        self.assertEqual(albums[1][1][0], albums[0][1][1], "обложка должна смениться")
+        # следующий пост берёт следующее фото — все по очереди бывают обложкой
+        self.assertTrue(asyncio.run(self.bot.post_channel_digest()))
+        self.assertEqual(len(singles), 2, singles)
+        self.assertEqual(singles[1][1], paths[1], "обложка должна смениться")
 
-    def test_single_photo_still_goes_alone(self):
-        """Одно фото — обычный sendPhoto с кнопками (альбом не нужен)."""
+    def test_photo_failure_falls_back_to_text(self):
+        """Фото не ушло — пост всё равно уходит: сводка важнее обложки."""
         for p in self.store.list_digest_photos():
             self.store.delete_digest_photo(p["id"])
         self._add_photos(1)
         self.bot._channel_id_cfg = "-100111"
-        albums, singles = [], []
-
-        async def fake_album(*a, **k):
-            albums.append(a)
-            return [11]
+        self.bot._set_review(False)
+        texts, singles = [], []
 
         async def fake_photo(cid, path, caption="", markup=None, **_kw):
-            singles.append((str(cid), path, markup))
-            return 11
+            singles.append((str(cid), path))
+            return None                              # Telegram отверг фото
 
-        async def fake_send(*_a, **_k):
+        async def fake_send(cid, text, markup=None, **_kw):
+            texts.append((str(cid), text))
             return 22
 
-        self.bot.send_media_group = fake_album  # type: ignore
         self.bot.send_photo = fake_photo        # type: ignore
         self.bot.send = fake_send               # type: ignore
         self.assertTrue(asyncio.run(self.bot.post_channel_digest()))
-        self.assertEqual(albums, [])
         self.assertEqual(len(singles), 1)
-        self.assertTrue(singles[0][2], "у одиночного фото остаются кнопки канала")
+        self.assertEqual(len(texts), 1)
+        self.assertIn("LiqScope", texts[0][1])
+        self.assertEqual(texts[0][0], "-100111")
 
     def test_daily_digest_uses_its_own_photo_rubric(self):
         """Фото дневного дайджеста берутся из своей рубрики, а не из постовой."""

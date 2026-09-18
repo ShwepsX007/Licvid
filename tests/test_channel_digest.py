@@ -57,14 +57,30 @@ def _board(total=4_640_000, count=5):
                        "flow": None, "pct": -12.0 + i},
                       {"symbol": "SOL_USDT", "usd": 250_000, "flow": None,
                        "pct": 6.0 + i}],
-            "cvd": {}, "cvd_sum": 0.0,
+            # сколько событий дала монета и её вклад в CVD: из этого пост
+            # берёт «лидера часа» и «лидера окна»
+            "cnt": {"BTC_USDT": 120 - i * 10, "ETH_USDT": 40 + i * 40,
+                    "SOL_USDT": 15},
+            "cvd": {"BTC_USDT": -12_500_000.0, "ETH_USDT": 3_200_000.0,
+                    "SOL_USDT": -5_000_000.0},
+            "cvd_sum": -14_300_000.0,
             "oi": {"value": 1.2e9, "pct": pct},
             "liq_pct": None if i == 0 else 8.0 - i,
             "count_pct": None, "vol_usd": 20_000_000.0,
             "cvd_net": 900_000.0 - i * 300_000, "cvd_share": share,
         })
+    leaders = {
+        "vol": {"symbol": "BTC_USDT", "usd": 9_000_000.0, "count": 420,
+                "share": 61.9},
+        "count": {"symbol": "ETH_USDT", "count": 166, "usd": 4_100_000.0,
+                  "share": 55.9},
+        "cvd": {"symbol": "ETH_USDT", "net": 50_000_000.0, "usd": 4_100_000.0,
+                "count": 166},
+        "oi": {"symbol": "SOL_USDT", "usd": 120_000_000.0, "pct": 2.4},
+    }
     return {
         "tz": 3, "span_hours": 4, "total_usd": total, "count": count,
+        "leaders": leaders,
         "prev_total": 4_000_000, "diff_pct": 16.0,
         "cvd_4h": 2_400_000.0, "cvd_4h_share": 3.6, "vol_4h": 66_000_000.0,
         "hours": out_hours, "top_hours": top,
@@ -140,25 +156,66 @@ class DigestTest(unittest.TestCase):
         self.assertTrue(post_has_hours(t))   # второй пост с топом не нужен
 
     def test_hours_have_liqs_oi_and_cvd(self):
-        """По каждому часу: ликвы, OI и CVD долей объёма — простыми строками."""
+        """Час — одной строкой: касса, OI и CVD долей объёма в одном ряду."""
         snap = collect_digest(self.events, now=self.now, oi=self.oi, cvd=self.cvd)
         snap["board"] = _board()
         t = render_post(snap, 0)
         # четыре часа: касса с эмодзи направления, OI, CVD от объёма
         # процент к предыдущему часу — у каждого часа, кроме самого первого
         with_pct = re.findall(
-            r"🕘 <b>\d{2}:00</b>(?: \(идёт\))? · 💥 <b>\$[\d.]+[KMB]</b> [📈📉]", t)
+            r"🕘 <b>\d{2}:00</b>(?: \(идёт\))? 💥 <b>\$[\d.]+[KMB]</b> [📈📉]", t)
         self.assertEqual(len(with_pct), 3, t)
-        self.assertEqual(t.count("📊 OI "), 4)
-        self.assertEqual(t.count("% объёма"), 5)   # четыре часа + строка окна
-        self.assertEqual(t.count("🌊 CVD"), 5)     # четыре часа + строка окна
+        self.assertEqual(t.count("📊 OI "), 4)          # OI часа — в его же строке
+        self.assertEqual(t.count("% объёма"), 5)        # четыре часа + строка окна
+        self.assertEqual(t.count("🌊 CVD"), 5)          # четыре часа + строка окна
         self.assertIn("🌊 CVD за 4ч", t)
         self.assertGreaterEqual(t.count("📈"), 3)
         self.assertGreaterEqual(t.count("📉"), 2)
-        # монеты часа — с изменением объёма к предыдущему часу
-        self.assertIn("🔝 BTC", t)
-        self.assertIn(" ▲31%", t)
-        self.assertIn(" ▼12%", t)
+        # час — ровно одна строка цифр: OI и CVD стоят в ней же, а не под ней
+        for line in t.splitlines():
+            if line.startswith("🕘 <b>"):
+                self.assertIn("📊 OI", line, line)
+                self.assertIn("🌊 CVD", line, line)
+
+    def test_leaders_of_window_and_hour(self):
+        """Лидеры: окно by money и по событиям, час — своим лидером."""
+        snap = collect_digest(self.events, now=self.now, oi=self.oi, cvd=self.cvd)
+        snap["board"] = _board()
+        t = render_post(snap, 0)
+        self.assertIn("🏆 Лидирует <b>BTC</b>", t)
+        self.assertIn("$9.00M", t)
+        self.assertIn("420 событий", t)
+        # лидер по количеству — другая монета: монета и число, слово уже выше
+        self.assertIn("· 🥇 ETH 166", t)
+        # каждый час подписан своим лидером (по числу событий и с суммой)
+        self.assertEqual(t.count("🏆 Лидер часа:"), 4, t)
+        self.assertIn("🏆 Лидер часа: <b>BTC</b> · 120 событий · $2.4M", t)
+        # в одном из часов лидер по количеству — не тот, кто по деньгам
+        self.assertIn("🏆 Лидер часа: <b>ETH</b> · 160 событий · $950K", t)
+        # сумма монеты-лидера окна в часах не повторяется: она уже строкой выше
+        self.assertNotIn("💰 BTC $2.1M", t)
+        self.assertIn("🌊 CVD за 4ч", t)
+        # когда шапка короткая и в подпись влезает всё — видны и перекос CVD
+        # с монетой, которая его дала, и сдвиг OI со своей монетой
+        short = render_post(snap, 0, head_override="🧪 Коротко")
+        self.assertIn("🌊 Перекос CVD · <b>ETH</b>", short)
+        self.assertIn("$50.00M", short)
+        self.assertIn("📊 Сдвиг OI · <b>SOL</b>", short)
+        self.assertIn("+$120M", short)
+        self.assertIn("📈 2.4%", short)
+        self.assertEqual(short.count("🏆 Лидер часа:"), 4, short)
+        # если лидер окна по деньгам — не та монета, что в часе, её сумма
+        # снова появляется в часах: без неё монета осталась бы без цифры
+        board2 = _board()
+        board2["leaders"]["vol"]["symbol"] = "SOL_USDT"
+        snap2 = collect_digest(self.events, now=self.now, oi=self.oi, cvd=self.cvd)
+        snap2["board"] = board2
+        t2 = render_post(snap2, 0, head_override="🧪 Коротко")
+        self.assertIn("💰 BTC $2.1M", t2)
+        self.assertIn("🏆 Лидирует <b>SOL</b>", t2)
+        # длинная шапка не должна сжимать часы до одной строки: лидеры часов
+        # важнее сводки окна
+        self.assertIn("🏆 Лидер часа:", t)
 
     def test_long_headline_keeps_all_hours(self):
         """Полные сроки часов не влезли — часы уходят короткими строками."""
@@ -359,18 +416,22 @@ class DigestTest(unittest.TestCase):
         # шаблон с «{h}ч» остаётся как есть — там согласовывать нечего
         self.assertIn("4ч", format_headline("Разбор за {h}ч", 4))
 
-    def test_carousel_rotates_photos(self):
-        """Карусель: в пост идут все фото, обложкой по очереди бывает каждое."""
-        from channel_digest import carousel
+    def test_cover_photo_rotates(self):
+        """Обложка листается: обложкой по очереди бывает каждое фото набора.
+
+        Альбома в постах больше нет — в канал уходит ровно одна картинка,
+        поэтому ротация проверяется на выборе обложки.
+        """
         imgs = list_images()
         self.assertGreaterEqual(len(imgs), 2, imgs)
-        first = carousel(imgs, 0)
-        self.assertEqual(len(first), min(len(imgs), 10))
-        self.assertEqual(sorted(first), sorted(imgs[:len(first)]))
-        second = carousel(imgs, 1)
-        self.assertEqual(second[0], first[1])        # обложка сдвинулась
-        self.assertEqual(len(second), len(first))
-        self.assertEqual(carousel([], 0), [])        # фото нет — пустой список
+        first = pick_image(0, images=imgs)
+        second = pick_image(1, images=imgs)
+        self.assertEqual(first, imgs[0])
+        self.assertEqual(second, imgs[1])            # обложка сдвинулась
+        # по кругу: после последнего фото снова первое
+        self.assertEqual(pick_image(len(imgs), images=imgs), imgs[0])
+        # пустой набор из админки — берутся картинки из комплекта
+        self.assertEqual(pick_image(0, images=[]), list_images()[0])
 
     def test_images_exist(self):
         imgs = list_images()

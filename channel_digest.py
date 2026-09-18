@@ -169,6 +169,14 @@ LABELS = {
         "of_volume": "объёма",
         "cvd_4h": "CVD за {w}",
         "going": "идёт",
+        "events": "событий",
+        "event1": "событие",
+        "event2": "события",
+        "lead_window": "Лидирует",
+        "lead_hour": "Лидер часа",
+        "lead_cvd": "Перекос CVD",
+        "lead_oi": "Сдвиг OI",
+        "lead_by_vol": "по объёму",
     },
     "en": {
         "exchanges": "Exchanges",
@@ -206,6 +214,14 @@ LABELS = {
         "of_volume": "of volume",
         "cvd_4h": "CVD over {w}",
         "going": "in progress",
+        "events": "fills",
+        "event1": "fill",
+        "event2": "fills",
+        "lead_window": "Leader",
+        "lead_hour": "Hour leader",
+        "lead_cvd": "CVD skew",
+        "lead_oi": "OI shift",
+        "lead_by_vol": "by volume",
     },
 }
 
@@ -220,6 +236,48 @@ def liqs_word(n: int, lang: str = "ru") -> str:
     if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
         return lbl(lang, "liq2")
     return lbl(lang, "liqs")
+
+
+def events_word(n: int, lang: str = "ru") -> str:
+    """«1 событие», «2 события», «114 событий» — для лидеров по количеству."""
+    n = abs(int(n or 0))
+    if str(lang).startswith("en"):
+        return lbl(lang, "event1") if n == 1 else lbl(lang, "event2")
+    if n % 10 == 1 and n % 100 != 11:
+        return lbl(lang, "event1")
+    if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+        return lbl(lang, "event2")
+    return lbl(lang, "events")
+
+
+def events_txt(n: int, lang: str = "ru") -> str:
+    """«114 событий» одной строкой."""
+    return f"{int(n or 0)} {events_word(n, lang)}"
+
+
+def _leader_of(board: Optional[dict], key: str) -> dict:
+    """Лидер окна из снимка стенда: {"vol", "count", "cvd", "oi"}."""
+    return dict(((board or {}).get("leaders") or {}).get(key) or {})
+
+
+def _hour_leaders(hour: dict) -> dict:
+    """Лидеры одного блока: считает сервер, пост только показывает."""
+    got = hour.get("leaders")
+    if isinstance(got, dict) and got:
+        return got
+    # запасной путь: снимок без готовых лидеров (старые данные в памяти)
+    cell = {"coins": {}, "cnt": {}, "cvd": {}}
+    for c in (hour.get("coins") or []):
+        if isinstance(c, dict) and c.get("symbol"):
+            cell["coins"][c["symbol"]] = float(c.get("usd") or 0)
+    counts = hour.get("cnt") or {}
+    if isinstance(counts, dict):
+        cell["cnt"] = {k: int(v or 0) for k, v in counts.items()}
+    flow = hour.get("cvd") or {}
+    if isinstance(flow, dict):
+        cell["cvd"] = {k: float(v or 0) for k, v in flow.items()}
+    from hour_board import leaders_of
+    return leaders_of(cell)
 
 
 def board_window_sec(board: Optional[dict]) -> int:
@@ -642,89 +700,83 @@ def _cvd_bit(hour: dict, lang: str = "ru") -> str:
     return f"🌊 CVD {emo} {money(abs(n))}"
 
 
-def _coins_bit(hour: dict, lang: str = "ru") -> str:
-    """Монеты часа строкой: сумма и её изменение к предыдущему часу.
+def hour_line(hour: dict, lang: str = "ru") -> str:
+    """Час одной строкой: касса с изменением, OI и CVD от объёма.
 
-    Монеты берутся из часового стенда (три сильнее всех); если стенд отдал
-    только топ ударов часа — считаем по ним, без процентов.
+        🕘 <b>21:00</b> (идёт) 💥 $44.6M 📈 ▲662% · 📊 OI $43.1B ⚖️ →0% · 🌊 CVD 🟢 7.4% объёма
+
+    Так час читается как одна мысль: сколько горело, куда сдвинулся открытый
+    интерес и на чьей стороне был поток. Раньше те же цифры шли тремя
+    строками и ряд часов растягивал пост.
     """
-    coins = hour.get("coins") or []
-    if not coins:
-        coins = [{"symbol": it.get("symbol"), "usd": it.get("usd"), "pct": None}
-                 for it in (hour.get("items") or [])[:3]]
-    bits: List[str] = []
-    for c in coins[:3]:
-        if not c.get("symbol"):
-            continue
-        piece = f"{coin(c['symbol'])} {short_money(c.get('usd'))}"
-        pct = c.get("pct")
-        if pct is not None:
-            try:
-                v = float(pct)
-            except (TypeError, ValueError):
-                v = None
-            if v is not None:
-                piece += (" ▲" if v > 0 else " ▼") + f"{abs(v):.0f}%"
-        bits.append(piece)
-    return " · ".join(bits)
-
-
-def hour_block(hour: dict, lang: str = "ru") -> str:
-    """Один час поста: ликвидации, OI и CVD — своими строками, без рамки.
-
-    Раньше час был таблицей в <pre>: моноширинное окно выравнивало столбики,
-    но читалось как вставка из терминала, а цифры «наезжали» друг на друга.
-    Теперь час — обычные строки:
-
-        🕘 21:00 · 💥 $12.40M 📈 ▲18%
-        📊 OI $18.20B 📉 ▼2%
-        🌊 CVD 🟢 3.4% объёма
-        🔝 BTC ▲31% · ETH ▲12% · SOL ▼8%
-    """
-    hh = slot_label(hour, lang)
-    total = float(hour.get("total") or 0)
-    head = f"🕘 <b>{hh}</b>"
-    if hour.get("live"):
-        # час ещё идёт: суммы не финальные, читателю это важно знать
-        head += f" ({lbl(lang, 'going')})"
-    if total > 0:
-        head += (f" · 💥 <b>{money(total)}</b>"
-                 + _updown(hour.get("liq_pct"), lang))
-    else:
-        head += f" · {lbl(lang, 'empty_hour')}"
-    lines = [head]
-
-    oi = hour.get("oi") or {}
-    if oi.get("value"):
-        lines.append(f"📊 {lbl(lang, 'oi')} {money(oi['value'])}"
-                     + _updown(oi.get("pct"), lang))
-    cvd = _cvd_bit(hour, lang)
-    if cvd:
-        lines.append(cvd)
-    coins = _coins_bit(hour, lang)
-    if coins:
-        lines.append("🔝 " + coins)
-    return "\n".join(lines)
-
-
-def short_hour_block(hour: dict, lang: str = "ru") -> str:
-    """Час одной строкой — когда четыре полных блока в подпись не влезают."""
     hh = slot_label(hour, lang)
     total = float(hour.get("total") or 0)
     mark = f" ({lbl(lang, 'going')})" if hour.get("live") else ""
     if total > 0:
-        bits = [f"🕘 <b>{hh}</b>{mark} 💥 {short_money(total)}"
+        bits = [f"🕘 <b>{hh}</b>{mark} 💥 <b>{short_money(total)}</b>"
                 + _updown(hour.get("liq_pct"), lang)]
     else:
         bits = [f"🕘 <b>{hh}</b>{mark} {lbl(lang, 'empty_hour')}"]
     oi = hour.get("oi") or {}
     if oi.get("value"):
-        bits.append(f"{lbl(lang, 'oi')} {short_money(oi['value'])}"
+        bits.append(f"📊 {lbl(lang, 'oi')} {short_money(oi['value'])}"
                     + _updown(oi.get("pct"), lang))
     cvd = _cvd_bit(hour, lang)
     if cvd:
         bits.append(cvd)
     return " · ".join(bits)
+
+
+def hour_leader_line(hour: dict, lang: str = "ru",
+                     skip_money: Optional[str] = None) -> str:
+    """Кто задавал час: лидер по числу событий и, если это другой, по деньгам.
+
+        🏆 Лидер часа: ETH · 114 событий · $5.6M · 💰 BTC $8.3M
+
+    Число событий и деньги — разные истории: одна монета горит одной крупной
+    ликвидацией, другая — сотней мелких. Поэтому после лидера по событиям
+    дописывается 💰 — монета, которая взяла больше всех денег, если это не он.
+
+    ``skip_money`` — монета, уже названная лидером окна: её сумма стоит строкой
+    выше, и повторять её в каждом часе незачем (в подписи 1024 символа).
+    """
+    lead = _hour_leaders(hour)
+    top = lead.get("count") or lead.get("vol") or {}
+    sym = top.get("symbol")
+    if not sym:
+        return ""
+    bits = [f"🏆 {lbl(lang, 'lead_hour')}: <b>{coin(sym)}</b>"]
+    if top.get("count"):
+        bits.append(events_txt(top["count"], lang))
+    if top.get("usd"):
+        bits.append(short_money(top["usd"]))
+    line = " · ".join(bits)
+    by_vol = lead.get("vol") or {}
+    if (by_vol.get("symbol") and by_vol.get("symbol") != sym
+            and by_vol.get("symbol") != skip_money and by_vol.get("usd")):
+        # 💰 — не тот же лидер, но по деньгам: у подписи 1024 символа, и
+        # словами это стоило бы две лишние строки на каждый час
+        line += f" · 💰 {coin(by_vol['symbol'])} {short_money(by_vol['usd'])}"
+    return line
+
+
+def hour_block(hour: dict, lang: str = "ru",
+               skip_money: Optional[str] = None) -> str:
+    """Блок часа в посте: строка цифр и под ней строка лидера.
+
+    Полный вид поста. Если четыре таких блока в подпись не влезают, часы
+    уходят короткими строками без лидеров (см. ``short_hour_block``).
+    """
+    parts = [hour_line(hour, lang)]
+    lead = hour_leader_line(hour, lang, skip_money=skip_money)
+    if lead:
+        parts.append(lead)
+    return "\n".join(p for p in parts if p)
+
+
+def short_hour_block(hour: dict, lang: str = "ru") -> str:
+    """Час одной строкой без лидера — когда четыре полных блока не влезают."""
+    return hour_line(hour, lang)
 
 
 def _coin_cell(c: dict, lang: str = "ru") -> str:
@@ -1102,25 +1154,6 @@ def digest_images(store=None) -> List[str]:
     return _photo_paths(store, "digest") or active_images(store, "post")
 
 
-def carousel(images: Optional[List[str]] = None, variant: int = 0,
-             limit: int = 10) -> List[str]:
-    """Карусель поста: все фото по кругу, начиная со следующего по счёту.
-
-    Telegram приносит альбом одним постом, а подпись показывает под первым
-    фото. Чтобы обложка не залипала на одной картинке, каждый следующий пост
-    сдвигает порядок: второе фото становится первым, третье — вторым и так
-    далее. Так все фото по очереди бывают обложкой (раньше в пост попадало
-    ровно одно фото — остальные не видел никто).
-    """
-    imgs = [p for p in (images if images is not None else list_images())
-            if p and os.path.isfile(p)]
-    if not imgs:
-        return []
-    imgs = imgs[:max(1, int(limit))]
-    shift = int(variant) % len(imgs)
-    return imgs[shift:] + imgs[:shift]
-
-
 HOUR_MARK = r"🕘[^\n]{0,12}\d{2}:\d{2}"
 
 
@@ -1138,15 +1171,19 @@ def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = N
                 bot_url: str = "https://t.me/LiqScopeBot",
                 head_override: Optional[str] = None,
                 lang: str = "ru") -> str:
-    """Сводка одним сообщением: шапка, строка окна и часы по порядку.
+    """Сводка одним сообщением: шапка, строки окна и часы по порядку.
 
-    Каждый час — обычными строками, без <pre>-рамки: касса часа с изменением
-    к предыдущему часу, OI с тем же процентом, CVD как доля объёма рынка и
-    три монеты, которые горели сильнее всех (тоже с изменением). Часы идут от
-    свежего к старому и добавляются, пока влезают в подпись (1024); если
-    четыре полных блока не помещаются — весь ряд уходит короткими строками,
-    чтобы часы не выглядели разнобоем.
-    head_override — шапка от ИИ: та же раскладка, меняется только текст.
+    Строки окна: итог (касса, число ликвидаций, сравнение с прошлым окном),
+    лидер по деньгам и по числу событий, CVD окна долей объёма, перекос CVD
+    и сдвиг OI по монетам. Дальше часы от свежего к старому, у каждого — своя
+    строка цифр (касса с процентом, OI, CVD долей объёма) и строка лидера часа
+    (кто дал больше всех событий) — как в шаблоне поста.
+
+    Подпись Telegram держит 1024 символа, поэтому пост сам выбирает, чем
+    пожертвовать: сначала уходят строки окна (по одной, начиная со сдвига OI),
+    а если и подробные часы не влезают — часы сжимаются до одной строки, но ни
+    один блок не пропадает. head_override — шапка от ИИ: та же раскладка,
+    меняется только текст.
     """
     import html as _html
     f = _facts(snap, lang)
@@ -1168,9 +1205,9 @@ def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = N
     head = (format_ai_head(head_override, h) if head_override
             else heads[v % max(1, len(heads))])
 
-    # Компоновка поста: шапка → строка итога → CVD окна → часы по порядку
-    # (свежий первым) → хвост. Рамочной таблицы <pre> больше нет: цифры идут
-    # обычными строками и больше не «наезжают» друг на друга.
+    # Компоновка поста: шапка → строка итога → лидер окна → CVD окна →
+    # строки-подробности окна → часы по порядку (свежий первым) → хвост.
+    # Рамочной таблицы <pre> больше нет: цифры идут обычными строками.
     board = snap.get("board") or {}
     tz = board.get("tz") or tz_offset()
     hours = [dict(x) for x in (board.get("hours") or [])]
@@ -1196,16 +1233,39 @@ def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = N
         return len(text) <= CAPTION_LIMIT
 
     parts: List[str] = [head, _total_line(snap, lang)]
-    flow = _flow_line(board, lang)
-    if flow and fits(parts + [flow]):
-        parts.append(flow)
-    # Сначала полный вид часа (ликвы, OI и CVD своими строками). Если четыре
-    # часа так не влезают — весь ряд сжимается в строку, но часы остаются все.
-    blocks = [hour_block(x, lang) for x in hours]
-    if blocks and not fits(parts + blocks):
-        blocks = [short_hour_block(x, lang) for x in hours]
+    # Строки окна в порядке поста: лидер по деньгам (и по событиям, если он
+    # другой), CVD окна, кто дал перекос, чей сдвинулся открытый интерес.
+    win = [_window_leader_line(board, lang), _flow_line(board, lang),
+           _cvd_leader_line(board, lang), _oi_leader_line(board, lang)]
+    # Если подпись не влезает, строки окна уходят по одной, и первой — сдвиг
+    # OI: он дублирует процент OI в каждом часе. Последней уходит строка CVD
+    # окна: без неё пост теряет вторую половину сводки.
+    drop_order = (3, 2, 0, 1)
+    variants: List[List[str]] = []
+    for k in range(len(drop_order) + 1):
+        killed = set(drop_order[:k])
+        variants.append([x for i, x in enumerate(win) if x and i not in killed])
+    # Лестница видов. Сначала пробуем самый подробный вид часов — строка цифр
+    # плюс строка лидера часа; если он не влезает даже с пустым набором строк
+    # окна, часы сжимаются до одной строки. Число событий в лидере часа
+    # дописывает сам пост: без него час отвечает только «на сколько горело».
+    # Монета, уже названная лидером окна: в часах её сумма не повторяется
+    win_money = (_leader_of(board, "vol") or {}).get("symbol")
+    full_blocks = [hour_block(x, lang, skip_money=win_money) for x in hours]
+    short_blocks = [short_hour_block(x, lang) for x in hours]
+    picked: List[str] = []
+    picked_blocks = short_blocks
+    found = False
+    for blocks in (full_blocks, short_blocks):
+        for variant in variants:
+            if blocks and fits(parts + variant + blocks):
+                picked, picked_blocks, found = variant, blocks, True
+                break
+        if found:
+            break
+    parts.extend(picked)
     added = 0
-    for block in blocks:
+    for block in picked_blocks:
         if block and fits(parts + [block]):
             parts.append(block)
             added += 1
@@ -1238,6 +1298,79 @@ def _flow_line(board: Optional[dict], lang: str = "ru") -> str:
     if net and abs(float(net)) >= 1000:
         line += f" ({money(abs(float(net)))})"
     return line
+
+
+def _window_leader_line(board: Optional[dict], lang: str = "ru") -> str:
+    """Лидер окна по деньгам и по числу событий.
+
+        🏆 Лидирует BTC · $61.97M · 1100 событий · 🥇 ETH 12146
+
+    Две монеты рядом бывают разными (крупная одиночная ликвидация против
+    сотни мелких), поэтому лидер по количеству дописывается, если он другой:
+    🥇 — монета и число событий, без повтора слова «событий».
+    """
+    top = _leader_of(board, "vol") or _leader_of(board, "count")
+    sym = top.get("symbol")
+    if not sym:
+        return ""
+    bits = [f"🏆 {lbl(lang, 'lead_window')} <b>{coin(sym)}</b>"]
+    if top.get("usd"):
+        bits.append(money(top["usd"]))
+    if top.get("count"):
+        bits.append(events_txt(top["count"], lang))
+    line = " · ".join(bits)
+    by_cnt = _leader_of(board, "count")
+    if by_cnt.get("symbol") and by_cnt.get("symbol") != sym and by_cnt.get("count"):
+        # Второй лидер — только монета и число: слово «событий» уже стоит выше
+        # в этой же строке, а подпись в 1024 символа считает каждый знак.
+        line += f" · 🥇 {coin(by_cnt['symbol'])} {int(by_cnt['count'])}"
+    return line
+
+
+def _cvd_leader_line(board: Optional[dict], lang: str = "ru") -> str:
+    """По какой монете сильнее всего перекошен поток за окно.
+
+        🌊 Перекос CVD · ETH · $50.00M 🟢
+
+    Рядом со строкой CVD окна — иначе видно силу перекоса, но не видно, кто
+    его дал. Знак перекоса показывает сторону (🟢 покупки / 🔴 продажи).
+    """
+    lead = _leader_of(board, "cvd")
+    sym = lead.get("symbol")
+    if not sym:
+        return ""
+    try:
+        net = float(lead.get("net") or 0)
+    except (TypeError, ValueError):
+        net = 0.0
+    emo = "🟢" if net >= 0 else "🔴"
+    line = (f"🌊 {lbl(lang, 'lead_cvd')} · <b>{coin(sym)}</b> · "
+            f"{money(abs(net))} {emo}")
+    if lead.get("count"):
+        line += f" · {events_txt(lead['count'], lang)}"
+    return line
+
+
+def _oi_leader_line(board: Optional[dict], lang: str = "ru") -> str:
+    """По какой монете сильнее всего сдвинулся открытый интерес.
+
+        📊 Сдвиг OI · SOL · +$120.0M (▲2.4%)
+
+    Одна строка к строке окна: у OI свой лидер, и он часто не совпадает с
+    лидером по ликвидациям.
+    """
+    lead = _leader_of(board, "oi")
+    sym = lead.get("symbol")
+    if not sym:
+        return ""
+    try:
+        usd = float(lead.get("usd") or 0)
+        pct = float(lead.get("pct") or 0)
+    except (TypeError, ValueError):
+        return ""
+    emo = "📈" if pct > 0.05 else ("📉" if pct < -0.05 else "⚖️")
+    return (f"📊 {lbl(lang, 'lead_oi')} · <b>{coin(sym)}</b> · "
+            f"{'+' if usd >= 0 else '−'}{short_money(abs(usd))} ({emo} {_pct_txt(pct)})")
 
 
 def _board_bias_line(board: Optional[dict], lang: str = "ru") -> str:

@@ -1245,6 +1245,23 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
 }
 .top-coins-box.closed .top-coins-list { display: none; }
 
+/* Список лидеров разбит на две группы: по объёму и по числу событий —
+   подпись группы объясняет, что за цифра стоит в карточках */
+.top-coins-group {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+.top-coins-group + .top-coins-group { margin-top: 7px; }
+.top-coins-group-title {
+    font-family: var(--font-sans);
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    color: var(--text-muted);
+    padding: 2px 2px 1px;
+}
+
 .top-coin-card {
     background: var(--bg-card);
     border: 1px solid var(--border-color);
@@ -1947,9 +1964,10 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
 .layer-pop-legend {
     flex: 1 0 100%;
     display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 3px;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 14px;
     padding-bottom: 6px;
     margin-bottom: 2px;
     border-bottom: 1px solid var(--border-color);

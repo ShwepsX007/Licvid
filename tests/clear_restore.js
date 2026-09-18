@@ -149,9 +149,11 @@ async function main() {
   check("подсказка идёт над кнопками слоёв",
         $("layer-pop").firstElementChild === $("layer-legend"),
         $("layer-pop") && $("layer-pop").firstElementChild.className);
-  check("пункты подсказки — столбиком, а не в ряд",
-        win.getComputedStyle($("layer-legend")).flexDirection === "column",
-        win.getComputedStyle($("layer-legend")).flexDirection);
+  check("пункты подсказки идут в ряд и переносятся",
+        win.getComputedStyle($("layer-legend")).flexDirection === "row" &&
+        win.getComputedStyle($("layer-legend")).flexWrap === "wrap",
+        win.getComputedStyle($("layer-legend")).flexDirection + "/" +
+        win.getComputedStyle($("layer-legend")).flexWrap);
   check("расшифровка на месте по тексту",
         /Ликв\. лонгов/.test($("layer-legend").textContent) &&
         /CVD ▼/.test($("layer-legend").textContent),

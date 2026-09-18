@@ -101,8 +101,10 @@ class HourBoard:
         h = slot_start(ts, self.tz, self.slot_sec)
         cell = self._hours.get(h)
         if cell is None:
+            # cnt — сколько событий дала монета: лидер часа считается и по
+            # количеству ликвидаций, а не только по деньгам
             cell = {"h": h, "total": 0.0, "longs": 0.0, "shorts": 0.0, "count": 0,
-                    "coins": {}, "cvd": {}, "top": []}
+                    "coins": {}, "cnt": {}, "cvd": {}, "top": []}
             self._hours[h] = cell
             # старые часы больше не нужны: сравнение идёт на 4-8 часов назад
             if len(self._hours) > self.keep_hours:
@@ -132,6 +134,7 @@ class HourBoard:
             else:
                 cell["shorts"] += usd
             cell["coins"][sym] = cell["coins"].get(sym, 0.0) + usd
+            cell["cnt"][sym] = cell["cnt"].get(sym, 0) + 1
             top = cell["top"]
             top.append({"symbol": sym, "exchange": str(event.get("exchange") or ""),
                         "usd": usd, "side": side, "ts": ts})
@@ -167,13 +170,14 @@ class HourBoard:
                 cell = self._hours.get(h)
                 if cell is None:
                     out.append({"h": h, "total": 0.0, "longs": 0.0, "shorts": 0.0,
-                                "count": 0, "coins": {}, "cvd": {}, "top": [],
-                                "empty": True})
+                                "count": 0, "coins": {}, "cnt": {}, "cvd": {},
+                                "top": [], "empty": True})
                     continue
                 top = sorted(cell["top"], key=lambda x: x["usd"], reverse=True)[:self.top_n]
                 out.append({"h": h, "total": cell["total"], "longs": cell["longs"],
                             "shorts": cell["shorts"], "count": cell["count"],
-                            "coins": dict(cell["coins"]), "cvd": dict(cell["cvd"]),
+                            "coins": dict(cell["coins"]), "cnt": dict(cell["cnt"]),
+                            "cvd": dict(cell["cvd"]),
                             "top": top, "empty": False})
         return out
 
@@ -382,6 +386,7 @@ def fold_slots(cells: List[dict], group: int = 1) -> List[dict]:
             continue
         head = dict(chunk[0])
         coins: Dict[str, float] = {}
+        cnt: Dict[str, int] = {}
         cvd: Dict[str, float] = {}
         top: List[dict] = []
         total = longs = shorts = 0.0
@@ -393,6 +398,8 @@ def fold_slots(cells: List[dict], group: int = 1) -> List[dict]:
             count += int(c.get("count") or 0)
             for sym, usd in (c.get("coins") or {}).items():
                 coins[sym] = coins.get(sym, 0.0) + float(usd or 0)
+            for sym, n in (c.get("cnt") or {}).items():
+                cnt[sym] = cnt.get(sym, 0) + int(n or 0)
             for sym, val in (c.get("cvd") or {}).items():
                 cvd[sym] = cvd.get(sym, 0.0) + float(val or 0)
             top.extend(c.get("top") or [])
@@ -400,7 +407,7 @@ def fold_slots(cells: List[dict], group: int = 1) -> List[dict]:
         head.update({
             "h": chunk[0].get("h"),
             "total": total, "longs": longs, "shorts": shorts, "count": count,
-            "coins": coins, "cvd": cvd, "top": top[:TOP_N],
+            "coins": coins, "cnt": cnt, "cvd": cvd, "top": top[:TOP_N],
             "empty": all(c.get("empty") for c in chunk),
             "group": group,
         })
@@ -425,6 +432,47 @@ def _bias_word(longs: float, shorts: float) -> str:
     if shorts > longs * 1.25:
         return "short"
     return ""
+
+
+def leaders_of(cell: Optional[dict], oi_rows: Optional[list] = None) -> Dict[str, Any]:
+    """Лидеры блока: по деньгам, по числу событий и по перекосу CVD.
+
+    Пост отвечает не только «на сколько горело», но и «где именно»: кто взял
+    больше всех денег за окно, кто дал больше всех событий (одна крупная
+    ликвидация и сотня мелких — разные истории) и по какой монете сильнее
+    всего перекошен поток. Раньше лидера считали только по деньгам, и
+    «лидер по количеству» в тексте было взять неоткуда.
+    """
+    cell = cell or {}
+    coins = {str(k): float(v or 0) for k, v in (cell.get("coins") or {}).items()}
+    counts = {str(k): int(v or 0) for k, v in (cell.get("cnt") or {}).items()}
+    cvd = {str(k): float(v or 0) for k, v in (cell.get("cvd") or {}).items()}
+    total = sum(coins.values()) or 0.0
+    out: Dict[str, Any] = {}
+    if coins:
+        sym = max(coins, key=lambda k: coins[k])
+        out["vol"] = {"symbol": sym, "usd": coins[sym], "count": counts.get(sym, 0),
+                      "share": (coins[sym] / total * 100.0) if total > 0 else None}
+    if counts:
+        sym = max(counts, key=lambda k: (counts[k], coins.get(k, 0.0)))
+        out["count"] = {"symbol": sym, "count": counts[sym], "usd": coins.get(sym, 0.0),
+                        "share": (counts[sym] / sum(counts.values()) * 100.0)
+                                 if sum(counts.values()) else None}
+    if cvd:
+        sym = max(cvd, key=lambda k: abs(cvd[k]))
+        out["cvd"] = {"symbol": sym, "net": cvd[sym],
+                      "usd": coins.get(sym, 0.0), "count": counts.get(sym, 0)}
+    # OI: самый заметный рост открытого интереса за окно (ряд уже посчитан)
+    best = None
+    for sym, days_ in (oi_rows or {}).items():
+        for delta, pct in (days_ or []):
+            if delta is None or pct is None:
+                continue
+            if best is None or abs(delta) > abs(best["usd"]):
+                best = {"symbol": sym, "usd": float(delta), "pct": float(pct)}
+    if best:
+        out["oi"] = best
+    return out
 
 
 def pct_change(cur: float, base: float) -> Optional[float]:
@@ -497,6 +545,29 @@ def build_snapshot(board: "HourBoard", oi: "OiHistory", now: Optional[float] = N
     spans = [(int(hr.get("h") or 0), min(int(hr.get("h") or 0) + block_sec, int(now)))
              for hr in hours]
     slices: Dict[str, list] = {c: oi.range_slices(c, spans) for c in oi_coins}
+    # Изменение OI по монете внутри каждого блока (и за окно целиком): из него
+    # берётся «лидер по OI» — самая заметная перекладка открытого интереса.
+    oi_delta: List[Dict[str, tuple]] = [dict() for _ in range(span)]
+    oi_win: Dict[str, list] = {}
+    for _c, rows in (slices or {}).items():
+        acc_from = 0.0
+        acc_delta = 0.0
+        for i, cell in enumerate(rows or []):
+            if not cell or i >= span:
+                continue
+            try:
+                frm, to = float(cell.get("from") or 0), float(cell.get("to") or 0)
+            except (TypeError, ValueError):
+                continue
+            if not frm or not to:
+                continue
+            delta = to - frm
+            oi_delta[i][_c] = (delta, (delta / frm * 100.0) if frm else 0.0)
+            if not acc_from:
+                acc_from = frm
+            acc_delta += delta
+        if acc_from:
+            oi_win[_c] = [(acc_delta, acc_delta / acc_from * 100.0)]
     oi_value = [0.0] * span
     oi_from = [0.0] * span
     have_value = [False] * span
@@ -543,6 +614,9 @@ def build_snapshot(board: "HourBoard", oi: "OiHistory", now: Optional[float] = N
             "longs": longs, "shorts": shorts,
             "side_sum": max(longs, shorts) if bias else 0.0,
             "bias": bias, "coins": coins, "cvd": dict(cvd),
+            # сколько событий дала каждая монета блока: из этого лидер по
+            # количеству в посте и в сумме лидеров окна
+            "cnt": dict(hr.get("cnt") or {}),
             "cvd_sum": sum(float(v) for v in cvd.values()),
             # сравнение с предыдущим часом: видно, больше или меньше стало
             "liq_pct": pct_change(hr.get("total"), was.get("total")),
@@ -554,6 +628,9 @@ def build_snapshot(board: "HourBoard", oi: "OiHistory", now: Optional[float] = N
             "cvd_share": (m_cvd / m_vol * 100.0) if m_vol > 0 else None,
             "vol_usd": m_vol if m_vol > 0 else None,
             "oi": {"value": oi_value[i] if have_value[i] else None, "pct": pct},
+            # Лидеры блока: по деньгам, по числу событий, по перекосу CVD и по
+            # сдвигу открытого интереса — из них собирается строка «Лидер часа»
+            "leaders": leaders_of(hr, {c: [v] for c, v in (oi_delta[i] or {}).items()}),
         })
         oi_hours.append({"h": hr.get("h"), "value": oi_value[i] if have_value[i] else None,
                          "pct": pct})
@@ -574,6 +651,16 @@ def build_snapshot(board: "HourBoard", oi: "OiHistory", now: Optional[float] = N
         if base:
             oi_4h_pct = (oi_value[last_ok] - base) / base * 100.0
 
+    win_cell: Dict[str, dict] = {"coins": {}, "cnt": {}, "cvd": {}}
+    for hr in hours:
+        for sym, usd in (hr.get("coins") or {}).items():
+            win_cell["coins"][sym] = win_cell["coins"].get(sym, 0.0) + float(usd or 0)
+        for sym, n in (hr.get("cnt") or {}).items():
+            win_cell["cnt"][sym] = win_cell["cnt"].get(sym, 0) + int(n or 0)
+        for sym, val in (hr.get("cvd") or {}).items():
+            win_cell["cvd"][sym] = win_cell["cvd"].get(sym, 0.0) + float(val or 0)
+    win_leaders = leaders_of(win_cell, oi_win)
+
     win_vol = sum(float((market.get(float(hr.get("h") or 0)) or {}).get("vol") or 0)
                   for hr in hours)
     win_cvd = sum(float((market.get(float(hr.get("h") or 0)) or {}).get("cvd") or 0)
@@ -590,6 +677,7 @@ def build_snapshot(board: "HourBoard", oi: "OiHistory", now: Optional[float] = N
         "cvd_4h_share": (win_cvd / win_vol * 100.0) if win_vol > 0 else None,
         "vol_4h": win_vol if win_vol > 0 else None,
         "hours": out_hours,
+        "leaders": win_leaders,
         "top_hours": top_hours,
         "total_usd": total,
         "count": count,

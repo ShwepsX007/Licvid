@@ -4851,6 +4851,21 @@
     }
 
     // --- Статистика ----------------------------------------------------------
+    // Группа лидеров: подпись и карточки монет. data-symbol на карточке —
+    // чтобы клик открывал монету так же, как в одиночном списке.
+    function topCoinGroup(title, coins, valueOf) {
+        if (!coins || !coins.length) return "";
+        return '<div class="top-coins-group">' +
+            '<div class="top-coins-group-title">' + title + "</div>" +
+            coins.map((c) =>
+                '<div class="top-coin-card" data-symbol="' + c.symbol + '"' +
+                ' title="' + pretty(c.symbol) + " · $" + fmtUsdShort(c.usd) + " · " +
+                I18n.t("top.count", { n: I18n.number(c.count || 0) }) + '">' +
+                '<div class="top-coin-name">' + pretty(c.symbol) + "</div>" +
+                '<div class="top-coin-val">' + valueOf(c) + "</div></div>").join("") +
+            "</div>";
+    }
+
     function renderStats(data) {
         if (!data) return;
         state.lastStats = data;
@@ -4863,13 +4878,22 @@
         longRatioBar.style.width = longPct + "%";
 
         if (data.top_coins) {
-            topCoinsContainer.innerHTML = data.top_coins.slice(0, 8).map((c) =>
-                '<div class="top-coin-card" data-symbol="' + c.symbol + '">' +
-                '<div class="top-coin-name">' + pretty(c.symbol) + "</div>" +
-                '<div class="top-coin-val">$' + fmtUsdShort(c.usd) + "</div></div>").join("");
-            Array.prototype.forEach.call(topCoinsContainer.children, (el) => {
-                el.addEventListener("click", () => selectSymbol(el.dataset.symbol));
-            });
+            // Два списка лидеров: по деньгам и по числу событий. Одна монета
+            // может гореть одной крупной ликвидацией, другая — сотней мелких,
+            // поэтому вопросы «кто на кассе» и «кого рвало чаще» — разные.
+            const byVol = data.top_coins.slice(0, 4);
+            const byCnt = data.top_coins
+                .filter((c) => Number(c.count) > 0)
+                .sort((a, b) => Number(b.count) - Number(a.count))
+                .slice(0, 4);
+            topCoinsContainer.innerHTML =
+                topCoinGroup(I18n.t("top.by_vol"), byVol, (c) => "$" + fmtUsdShort(c.usd)) +
+                topCoinGroup(I18n.t("top.by_count"), byCnt,
+                             (c) => I18n.t("top.count", { n: I18n.number(c.count) }));
+            Array.prototype.forEach.call(
+                topCoinsContainer.querySelectorAll(".top-coin-card"), (el) => {
+                    el.addEventListener("click", () => selectSymbol(el.dataset.symbol));
+                });
         }
 
         // подписи «сколько ликвидаций по монете» в кнопках

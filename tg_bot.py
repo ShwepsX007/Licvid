@@ -1090,55 +1090,6 @@ class TelegramBot:
         mid = (res.get("result") or {}).get("message_id")
         return self._note_sent(chat_id, mid)
 
-    async def send_media_group(self, chat_id, paths: List[str], caption: str = "",
-                               limit: int = 10) -> Optional[list]:
-        """Карусель: несколько фото одним альбомом (sendMediaGroup).
-
-        Подпись Telegram показывает под первым фото, поэтому в альбом она и
-        уходит — с тем же HTML, что и раньше. Кнопок у альбома не бывает
-        (reply_markup в этом методе не поддерживается), но ссылки на сайт, бота
-        и Gate уже стоят в самой подписи, так что пост не теряет ничего.
-        """
-        files = [p for p in (paths or []) if p and os.path.isfile(p)][:max(2, int(limit))]
-        if not self._session or len(files) < 2:
-            return None
-        media: List[dict] = []
-        form = aiohttp.FormData()
-        form.add_field("chat_id", str(chat_id))
-        for i, path in enumerate(files):
-            item = {"type": "photo", "media": f"attach://photo{i}"}
-            if i == 0 and caption:
-                item["caption"] = caption[:1024]
-                item["parse_mode"] = "HTML"
-            media.append(item)
-            try:
-                data = open(path, "rb").read()
-            except OSError as e:
-                log.warning("альбом, фото %s: %s", path, e)
-                return None
-            name = os.path.basename(path)
-            ctype = "image/png" if name.lower().endswith(".png") else "image/jpeg"
-            form.add_field(f"photo{i}", data, filename=name, content_type=ctype)
-        form.add_field("media", json.dumps(media, ensure_ascii=False))
-        url = API.format(token=self.token, method="sendMediaGroup")
-        try:
-            async with self._session.post(
-                    url, data=form, timeout=aiohttp.ClientTimeout(total=60)) as r:
-                res = await r.json(content_type=None)
-        except Exception as e:                       # noqa: BLE001
-            log.warning("tg sendMediaGroup: %s", e)
-            return None
-        if not res or not res.get("ok"):
-            desc = str((res or {}).get("description") or "нет ответа")
-            self._last_tg_err = desc
-            log.warning("tg sendMediaGroup: %s", desc)
-            return None
-        mids = [m.get("message_id") for m in (res.get("result") or [])]
-        if mids:
-            self._note_sent(chat_id, mids[-1])
-        log.info("карусель в канал: фото %d", len(files))
-        return mids
-
     async def _sleep_between_posts(self, chunk: float = 60.0) -> None:
         """Пауза до следующего поста.
 
@@ -1289,7 +1240,7 @@ class TelegramBot:
 
     async def post_channel_digest(self, force: bool = False) -> bool:
         from channel_digest import (
-            active_headlines, active_images, carousel, pick_image, post_has_hours,
+            active_headlines, active_images, pick_image, post_has_hours,
             render_post, render_top7,
         )
         self._digest_err = ""
@@ -1322,10 +1273,11 @@ class TelegramBot:
         except (TypeError, ValueError):
             hours = 4
         images = active_images(self.store, "post")
+        # Одно фото на пост. Набор из админки листается по кругу (каждое
+        # фото по очереди становится обложкой), но альбомом он больше не
+        # уходит: альбом валил все загруженные фото в один пост, и это
+        # читалось как сбой публикации.
         img = pick_image(n, images=images)
-        # Карусель: в пост идут все фото рубрики, порядок сдвигается от поста
-        # к посту — обложкой по очереди бывает каждое.
-        carriage = carousel(images, n)
         # Русский пост — основной; английский уходит копией в свой канал.
         ai_head, ai_note = await self._ai_headline(snap, variant=n)
         caption = render_post(
@@ -1360,17 +1312,19 @@ class TelegramBot:
         else:
             log.info("английский канал не привязан — пост только по-русски")
         if self._review_on():
-            return await self._send_draft(posts, carriage, n, ai_note)
-        return await self._publish_digest(posts, carriage, n)
+            return await self._send_draft(posts, img, n, ai_note)
+        return await self._publish_digest(posts, img, n)
 
     async def _publish_one(self, cid, caption: str, img, top: str = "",
                            lang: str = "ru", images: Optional[List[str]] = None) -> bool:
-        """Пост в один канал: карусель фото и подпись под ней.
+        """Пост в один канал: одно фото и подпись под ним.
 
-        Фото из админки уходят альбомом (каруселью) — все сразу, а не по
-        одному на пост. Если фото одно (или Telegram не принял альбом),
-        работает прежний путь: одно фото с подписью. Подпись превышает 1024
-        символа — фото не отправляем вовсе, только текст.
+        В канал уходит ровно одна картинка. Раньше весь набор из админки
+        уходил альбомом (sendMediaGroup), и все загруженные фото валились в
+        один пост: порядок листался, но исправлять это альбомом не нужно —
+        альбома в постах больше нет. Если фото нет или Telegram его не принял,
+        уходит текст: сводка важнее обложки. Подпись длиннее 1024 символов
+        (лимит подписи) тоже уходит текстом.
 
         В подписи уже есть и шапка, и часы с топ-7. ``top`` непустой только
         в аварийном случае (подпись исчерпана до первого часа) — тогда текст
@@ -1380,9 +1334,7 @@ class TelegramBot:
         photos = [x for x in (images if images is not None else
                               ([img] if img else [])) if x and os.path.isfile(x)]
         ok = False
-        if len(photos) > 1 and len(caption) <= 1024:
-            ok = bool(await self.send_media_group(cid, photos, caption))
-        if not ok and photos and len(caption) <= 1024:
+        if photos and len(caption) <= 1024:
             ok = bool(await self.send_photo(cid, photos[0], caption, markup))
         if not ok:
             ok = bool(await self.send(cid, caption, markup))
@@ -1394,7 +1346,11 @@ class TelegramBot:
 
     @staticmethod
     def _photo_list(img) -> List[str]:
-        """Фото поста одним списком: карусель внутри, одиночный путь снаружи."""
+        """Фото поста одним списком: одиночный путь снаружи, список изнутри.
+
+        Список остаётся ради обратной совместимости вызовов: в канал уходит
+        только первый элемент, альбомов в постах больше нет.
+        """
         if isinstance(img, (list, tuple)):
             return [x for x in img if x]
         return [img] if img else []
@@ -1453,14 +1409,10 @@ class TelegramBot:
             mark = "🇬🇧" if post.get("lang") == "en" else "🇷🇺"
             text += f"\n\n{mark} <b>{(post.get('cid') or '')}</b>\n" + (post.get("caption") or "")
         await self.send(admin, text, kb)
-        # Карусель показываем админу целиком: он должен видеть пост так же,
-        # как его увидят в канале.
+        # Черновик показывается так же, как уйдёт в канал: одна картинка.
         imgs = [x for x in (self._draft.get("images") or []) if x and os.path.isfile(x)]
-        if len(imgs) > 1:
-            await self.send_media_group(admin, imgs,
-                                       (posts[0].get("caption") if posts else "") or "")
-        elif imgs:
-            await self.send_photo(admin, imgs[0], "")
+        if imgs:
+            await self.send_photo(admin, imgs[0], "Обложка поста — как уйдёт в канал")
         # топ-7 по часам — тем же сообщением не влезает, шлём следом
         for post in posts or []:
             if post.get("top"):
@@ -1515,7 +1467,7 @@ class TelegramBot:
         Запись собирает сервер (api_digest): здесь только отправка и контроль
         публикации — если он включён, посты уходят админу черновиком.
         """
-        from channel_digest import active_images, carousel, digest_images, pick_image
+        from channel_digest import active_images, digest_images, pick_image
         from daily_digest import render_post
 
         self._digest_err = ""
@@ -1548,24 +1500,23 @@ class TelegramBot:
                                  "at": time.time()}
             return result
         # Фото рубрики «дневной дайджест» (если админ их загрузил); иначе —
-        # общий набор сводки. Уходим каруселью: все фото альбомом, как в
-        # постах сводки, порядок сдвигается по номеру дня.
+        # общий набор сводки. Одно фото на пост: порядок сдвигается по номеру
+        # дня, альбома нет — как и в постах сводки.
         images = digest_images(self.store)
         try:
             variant = int(day.replace("-", "")[-2:] or 0)
         except (TypeError, ValueError):
             variant = 0
         img = pick_image(variant, images=images)
-        carriage = carousel(images, variant)
         if self._review_on():
-            ok = await self._send_daily_draft(posts, carriage, day)
+            ok = await self._send_daily_draft(posts, img, day)
             for post in posts:
                 result[post["lang"]] = [False, "" if ok else
                                         (self._digest_err or "черновик не ушёл")]
             self._daily_state = {"ok": False, "day": day, "draft": bool(ok),
                                  "at": time.time()}
             return result
-        sent = await self._publish_daily_posts(posts, carriage)
+        sent = await self._publish_daily_posts(posts, img)
         result.update(sent)
         return result
 
@@ -1631,10 +1582,8 @@ class TelegramBot:
                 "только после «Опубликовать».")
         await self.send(admin, text, kb)
         imgs = [x for x in self._photo_list(img) if x and os.path.isfile(x)]
-        if len(imgs) > 1:
-            await self.send_media_group(admin, imgs)
-        elif imgs:
-            await self.send_photo(admin, imgs[0], "")
+        if imgs:
+            await self.send_photo(admin, imgs[0], "Обложка поста — как уйдёт в канал")
         for post in posts or []:
             mark = "🇬🇧" if post.get("lang") == "en" else "🇷🇺"
             await self.send(admin, f"{mark} {post.get('caption') or ''}")

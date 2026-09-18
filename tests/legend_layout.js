@@ -130,9 +130,9 @@ async function main() {
   check("расшифровка над кнопками слоёв",
     !!legendBox && legendBox.parentElement.id === "layer-pop" &&
     legendBox.parentElement.firstElementChild === legendBox);
-  check("пункты идут столбиком",
-    !!legendBox && cs(legendBox).flexDirection === "column",
-    legendBox ? cs(legendBox).flexDirection : "нет блока");
+  check("пункты идут в ряд и переносятся",
+    !!legendBox && cs(legendBox).flexDirection === "row" && cs(legendBox).flexWrap === "wrap",
+    legendBox ? cs(legendBox).flexDirection + "/" + cs(legendBox).flexWrap : "нет блока");
   check("расшифровка говорит про лонгов, шортов, китов и CVD",
     !!legendBox && ["Ликв. лонгов", "Ликв. шортов", "Кит ($100k+)", "CVD ▲", "CVD ▼"]
       .every((t) => legendBox.textContent.indexOf(t) !== -1),

@@ -15,7 +15,7 @@ from hour_board import (  # noqa: E402
     OI, HourBoard, OiHistory, build_snapshot, hour_hhmm, hour_start, tz_offset,
 )
 from channel_digest import (  # noqa: E402
-    CAPTION_LIMIT, post_has_hours, render_post, render_top7,
+    CAPTION_LIMIT, events_word, post_has_hours, render_post, render_top7,
 )
 
 MSK = 3 * 3600
@@ -180,6 +180,49 @@ class HourBoardTest(unittest.TestCase):
         self.assertEqual([c["pct"] for c in snap["oi_hours"]],
                          [c["pct"] for c in snap["oi_hours"]])
 
+    def test_counts_and_leaders_per_hour_and_window(self):
+        """Лидеры считаются и по числу событий, а не только по деньгам.
+
+        Одна монета горит одной крупной ликвидацией, другая — сотней мелких,
+        поэтому стенд копит по каждой монете и число событий: из него пост
+        берёт «Лидер часа» и второго лидера окна (🥇).
+        """
+        board = self._full(flows=self._flows())
+        for hr in board["hours"]:
+            self.assertTrue(hr["cnt"], hr)                  # счётчики по монетам
+            self.assertTrue(hr["leaders"].get("vol"), hr)
+            self.assertTrue(hr["leaders"].get("count"), hr)
+        # счётчики по монетам сходятся с числом событий блока
+        for hr in board["hours"]:
+            self.assertEqual(sum(hr["cnt"].values()), hr["count"], hr["cnt"])
+            top = hr["leaders"]["count"]
+            self.assertEqual(top["count"], hr["cnt"][top["symbol"]])
+        lead = board["leaders"]
+        self.assertIn("vol", lead)
+        self.assertIn("count", lead)
+        self.assertGreater(lead["count"]["count"], 0)
+        # лидер окна по количеству — монета с большим числом событий за окно
+        per_coin = {}
+        for hr in board["hours"]:
+            for sym, n in hr["cnt"].items():
+                per_coin[sym] = per_coin.get(sym, 0) + n
+        self.assertEqual(lead["count"]["symbol"], max(per_coin, key=per_coin.get))
+        self.assertEqual(lead["count"]["count"], per_coin[lead["count"]["symbol"]])
+        # пост показывает лидера часа с числом событий этой монеты
+        snap = {"window_h": 4, "count": 30, "total_usd": board["total_usd"],
+                "longs_usd": 6_000_000, "shorts_usd": 5_700_000,
+                "top_coins": [], "exchanges": {"gate": 3_000_000}, "board": board}
+        ru = render_post(snap, 0)
+        self.assertIn("🏆 Лидер часа:", ru)
+        hour = board["hours"][-1]
+        sym = hour["leaders"]["count"]["symbol"]
+        n = hour["leaders"]["count"]["count"]
+        want = f"🏆 Лидер часа: <b>{sym.split('_')[0]}</b> · {n} {events_word(n)}"
+        self.assertIn(want, ru)
+        self.assertIn("🏆 Лидирует", ru)                    # лидер окна по деньгам
+        self.assertIn("· 🥇", ru)                           # второй лидер окна
+        self.assertIn("🏆 Hour leader:", render_post(snap, 0, lang="en"))
+
     def test_post_shows_hours_without_frame(self):
         """Пост: четыре часа, у каждого OI и CVD — простым текстом, без <pre>."""
         board = self._full(flows=self._flows())
@@ -308,7 +351,7 @@ class HourBoardTest(unittest.TestCase):
         # появился уровень — появилась строка, процент без истории не выдуман
         board["hours"][0]["oi"] = {"value": 1.2e9, "pct": None}
         text2 = render_post({"window_h": 4, "board": board, "total_usd": 1e6})
-        self.assertIn("📊 OI $1.20B", text2)
+        self.assertIn("📊 OI $1.2B", text2)      # в часах OI идёт короткой суммой
         self.assertIsNone(re.search(r"\d{2}:00 —", text2))
 
     def test_post_is_not_empty_even_without_data(self):

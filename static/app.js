@@ -66,7 +66,6 @@
         // Минутные потоки всех монет с сервера (лента CVD/OI в режиме «ВСЕ»)
         flowAll: null,         // лента: liq | cvd | oi
         chartFollow: true,      // автоследование: окно само едет за ценой
-        followPaused: false,    // график отлистали вручную — ждём кнопки
         followMoved: 0,         // сколько раз окно подвинулось (для тестов/диагностики)
     };
 
@@ -75,96 +74,124 @@
     const MAX_HISTORY = 4000;
 
     // --- Автоследование графика -------------------------------------------
-    // Окно само двигается за ценой: слева свеча подходит к правому краю —
-    // сдвигаем окно на шаг (тот же зум), а по вертикали цена остаётся в поле
-    // зрения с зазором FOLLOW_MARGIN сверху и снизу. Горизонтальный зазор
-    // маленький (FOLLOW_KEEP_BARS свечей) — «почти вплотную к шкале», как
-    // и просили: свеча не уезжает за край.
-    const FOLLOW_EDGE_BARS = 3;   // за сколько свечей до края начинаем двигать
-    const FOLLOW_KEEP_BARS = 1;   // сколько свечей оставляем справа после сдвига
-    const FOLLOW_MARGIN = 0.15;   // зазор по вертикали, доля высоты графика
+    // Пока автоследование включено, шкалой цены управляем мы, а не библиотека:
+    // её собственный autoScale пересчитывает диапазон на каждой свече и на
+    // каждом тике, из-за чего график дёргался вверх-вниз. Поэтому:
+    //   * размах (зум) шкалы цены фиксируется — его задаёт пользователь или
+    //     первичная подгонка, а слежение размах не меняет;
+    //   * цена держится в «коридоре»: не ближе FOLLOW_MARGIN от верха и низа.
+    //     Пока цена внутри коридора, окно не двигается вообще (никакого
+    //     дрожания на каждом тике); как только цена вышла за границу —
+    //     окно сдвигается ровно так, чтобы цена встала на эту границу.
+    //   * у границы есть гистерезис (FOLLOW_PRICE_HYST): шум в пару пунктов
+    //     не заставляет график ёрзать.
+    // По горизонтали последняя свеча не подходит к правому краю ближе
+    // FOLLOW_DRIFT_PCT, а после сдвига (и после ручного ухода) встаёт на
+    // FOLLOW_EDGE_PCT от края — то есть «вплотную, но не за край».
+    const FOLLOW_MARGIN = 0.15;        // коридор цены: доля высоты окна
+    const FOLLOW_EDGE_PCT = 0.03;      // на сколько отступить от правого края
+    const FOLLOW_DRIFT_PCT = 0.005;    // ближе этого к краю свечу не подпускаем
+    const FOLLOW_PRICE_HYST = 0.01;    // гистерезис у границы коридора
+    const FOLLOW_RELEASE_MS = 350;     // пауза после жеста — и возврат к границам
     const PRICE_MARGINS_DEFAULT = { top: 0.06, bottom: 0.24 };
+
+    /** Сколько свечей соответствует доле ширины окна (минимум одна). */
+    function followKeepBars(span, pct) {
+        const n = Math.round(Number(span) * Number(pct));
+        return Number.isFinite(n) && n > 1 ? n : 1;
+    }
 
     /** Куда сдвинуть окно времени: null — двигать не надо.
      *
      * Чистая функция — её гоняет tests/chart_follow.js без браузера.
      * lr — видимый логический диапазон (from/to), last — индекс последней
-     * свечи. Вправо уезжаем только если свеча подошла к краю: если админ
-     * отлистал график вручную, автоследование не дёргает его назад.
+     * свечи, keepPct — отступ от правого края (доля ширины), driftPct —
+     * ближе какого расстояния свечу к краю не подпускаем.
+     *
+     * Двигаем в двух случаях: свеча подошла к краю ближе driftPct (тогда
+     * ставим её на keepPct) и когда окно уехало не туда — ручной сдвиг или
+     * прыжок вправо (тогда возвращаем её на keepPct, как и просили: график
+     * при включённом слежении всегда возвращается к своим границам).
      */
-    function followRange(lr, last, edgeBars, keepBars) {
+    function followRange(lr, last, keepPct, driftPct) {
         if (!lr || !isFinite(lr.from) || !isFinite(lr.to) || last < 0) return null;
         const span = Number(lr.to) - Number(lr.from);
         if (!(span > 0)) return null;
+        const keep = followKeepBars(span, keepPct);
+        const drift = Math.max(0, span * Number(driftPct || 0));
         const edge = Number(lr.to) - Number(last);
-        // Дальше зоны слежения не лезем: если график отлистали в историю
-        // (свеча уехала вправо) или, наоборот, окно кончается задолго до неё —
-        // это осознанное действие, автоследование встаёт на паузу.
-        if (edge > edgeBars || edge < -edgeBars) return null;
-        const to = Number(last) + keepBars;
-        if (Math.abs(edge - keepBars) < 1e-9) return null;   // уже стоит как надо
+        // 0.05 свечи — допуск на округления библиотеки: иначе окно «подъезжало»
+        // бы бесконечно на доли бара
+        if (edge <= keep + 0.05 && edge >= drift) return null;
+        const to = Number(last) + keep;
         return { from: to - span, to: to };
     }
 
-    /** Настройки цены для режима слежения и обратно. */
+    /** Настройки цены для режима слежения и обратно.
+     *
+     * Слежение ведём сами: autoScale выключаем (иначе библиотека пересчитает
+     * диапазон на каждом тике и график будет дёргаться). При выключении
+     * возвращаем библиотеке её обычное поведение.
+     */
     function followPriceOptions(on) {
         return on
-            ? { autoScale: true, scaleMargins: { top: FOLLOW_MARGIN, bottom: FOLLOW_MARGIN } }
+            ? { autoScale: false, scaleMargins: { top: FOLLOW_MARGIN, bottom: FOLLOW_MARGIN } }
             : { autoScale: true, scaleMargins: Object.assign({}, PRICE_MARGINS_DEFAULT) };
     }
 
-    /** Вертикальное окно цены: цена не должна выходить за края графика.
+    /** Сдвиг окна цены, когда цена вышла за коридор: null — не трогаем.
      *
-     * Чистая функция — её гоняет tests/chart_follow.js без браузера.
-     *   cur    — текущее видимое окно цены {from,to} (null — неизвестно);
-     *   band   — {low,high} видимых свечей; price — последняя цена;
-     *   margin — зазор от края, доля высоты окна.
-     * Возвращает новое окно или null, если текущего достаточно. Окно никогда
-     * не сжимается само (иначе график «дышал» бы на каждом тике): сначала
-     * сдвигаем вслед за ценой, и только если диапазон не влезает — расширяем.
+     * Чистая функция — гоняется tests/chart_follow.js. Размах окна сохраняем
+     * (зум не меняем), цену ставим ровно на границу коридора — margin от
+     * верха при движении вверх и margin от низа при движении вниз. Выход за
+     * границу должен быть больше гистерезиса, иначе ничего не двигаем.
      */
-    function followPriceRange(cur, band, price, margin) {
-        if (!band) return null;
+    function followPriceShift(cur, price, margin, hyst) {
+        if (!cur) return null;
+        const from = Number(cur.from), to = Number(cur.to), p = Number(price);
+        if (!isFinite(from) || !isFinite(to) || !isFinite(p) || !(to > from)) return null;
+        const span = to - from;
+        let m = Number(margin);
+        if (!isFinite(m) || m < 0) m = 0;
+        m = Math.min(m, 0.4);
+        const pad = span * m;
+        let hy = Number(hyst);
+        if (!isFinite(hy) || hy < 0) hy = 0;
+        const eps = span * hy;
+        if (p > to - pad + eps) {                 // ушла вверх — ставим на 15% от верха
+            const nTo = p + pad;
+            return { from: nTo - span, to: nTo };
+        }
+        if (p < from + pad - eps) {               // ушла вниз — ставим на 15% от низа
+            const nFrom = p - pad;
+            return { from: nFrom, to: nFrom + span };
+        }
+        return null;                              // цена в коридоре — не дёргаем
+    }
+
+    /** Первичная подгонка окна цены: видимые свечи и цена с зазорами.
+     *
+     * Нужна, когда своего окна ещё нет и когда цена ушла на другой уровень
+     * (переключили монету): сдвигать прежнее окно там бессмысленно.
+     */
+    function followPriceFit(band, price, margin) {
         const p = Number(price);
-        const low0 = Number(band.low), high0 = Number(band.high);
-        if (!isFinite(low0) || !isFinite(high0)) return null;
-        let low = Math.min(low0, isFinite(p) ? p : low0);
-        let high = Math.max(high0, isFinite(p) ? p : high0);
-        if (high <= low) {                       // плоская цена: даём хоть какой-то размах
-            const pad = Math.max(Math.abs(high) * 1e-4, 1e-9);
-            low -= pad; high += pad;
+        const hasPrice = price !== null && price !== undefined && isFinite(p);
+        if (!band && !hasPrice) return null;
+        let low = band ? Number(band.low) : p;
+        let high = band ? Number(band.high) : p;
+        if (hasPrice) { low = Math.min(low, p); high = Math.max(high, p); }
+        if (!isFinite(low) || !isFinite(high)) return null;
+        if (high <= low) {
+            const pad0 = Math.max(Math.abs(high) * 1e-4, 1e-9);
+            low -= pad0; high += pad0;
         }
         let m = Number(margin);
         if (!isFinite(m) || m < 0) m = 0;
-        m = Math.min(m, 0.4);                    // 0.4 и выше — окно схлопнулось бы
-        const hasCur = !!cur && isFinite(cur.from) && isFinite(cur.to) &&
-                       Number(cur.to) > Number(cur.from);
-        if (!hasCur) {                           // окно неизвестно — считаем заново
-            const need = (high - low) / (1 - 2 * m);
-            const mid = (low + high) / 2;
-            return { from: mid - need / 2, to: mid + need / 2 };
-        }
-        let from = Number(cur.from), to = Number(cur.to);
-        const pad = (to - from) * m;
-        if (high > to - pad) {                   // цена убежала вверх — сдвигаем окно
-            const shift = high - (to - pad);
-            from += shift; to += shift;
-        }
-        if (low < from + pad) {                  // вниз — тоже сдвигаем
-            const shift = (from + pad) - low;
-            from -= shift; to -= shift;
-        }
-        const span = to - from;
-        if (high - low > span * (1 - 2 * m) - 1e-9) {
-            // сдвигом не помогло: видимый диапазон шире окна — расширяем,
-            // поставив цену в середину (зазоры одинаковые сверху и снизу)
-            const need = (high - low) / (1 - 2 * m);
-            const mid = (low + high) / 2;
-            from = mid - need / 2; to = mid + need / 2;
-        }
-        if (Math.abs(from - Number(cur.from)) < 1e-9 &&
-            Math.abs(to - Number(cur.to)) < 1e-9) return null;
-        return { from, to };
+        m = Math.min(m, 0.4);
+        const need = (high - low) / (1 - 2 * m);
+        const mid = (low + high) / 2;
+        return { from: mid - need / 2, to: mid + need / 2 };
     }
 
     let ws = null;
@@ -685,36 +712,85 @@
         window.addEventListener("resize", handleResize);
         setTimeout(handleResize, 80);
 
-        chart.timeScale().subscribeVisibleLogicalRangeChange((lr) => {
-            queueRedraw();
-            if (followSelfScroll) {           // это наш собственный сдвиг
-                followSelfScroll = false;
-                return;
-            }
-            noteFollowPan(lr);
-        });
+        // Окно поехало (мы или вручную) — перерисовать плашки кластеров.
+        // Возврат к границам делает шаг автоследования: см. followChartNow.
+        chart.timeScale().subscribeVisibleLogicalRangeChange(() => queueRedraw());
         markersApi = null;
+        watchFollowGestures(container);
         applyFollowMode();
     }
 
-    /** Включить/выключить настройки цены и сдвинуть окно по текущей свече. */
+    /** Включить/выключить режим слежения и сразу поставить график по местам. */
     function applyFollowMode() {
         if (!chart) return;
         try {
             const scale = rightPriceScale();
-            if (scale && scale.applyOptions) scale.applyOptions(followPriceOptions(state.chartFollow));
+            if (scale && scale.applyOptions) {
+                scale.applyOptions(followPriceOptions(state.chartFollow));
+            }
         } catch (e) { /* ignore */ }
         try {
             const ts = chart.timeScale();
             if (ts && ts.applyOptions) {
-                // справа почти вплотную к шкале
-                ts.applyOptions({ rightOffset: state.chartFollow ? 1 : 6 });
+                // Пока следим сами — правый отступ 0: положение последней свечи
+                // задаём мы (3% от края), иначе библиотека тянула бы её к самому
+                // краю своим автоскроллом.
+                ts.applyOptions({ rightOffset: state.chartFollow ? 0 : 6 });
             }
         } catch (e) { /* ignore */ }
         followChartNow();
     }
 
-    let followSelfScroll = false;   // мы сами подвинули окно — не считаем это панорамой
+    // Пока пользователь тянет график рукой, шаги слежения молчат; после
+    // отпускания возвращаем график к его границам (3% справа, 15% сверху/снизу).
+    let followHold = false;
+    let followReleaseTimer = null;
+    let followTimer = null;
+
+    /** Шаг по таймеру: страховка на случай, когда тиков по монете нет. */
+    function followTick() {
+        if (state.chartFollow && !followHold) followChartNow();
+    }
+
+    function setFollowTicker(on) {
+        if (followTimer) { clearInterval(followTimer); followTimer = null; }
+        if (on !== false) followTimer = setInterval(followTick, 500);
+    }
+
+    function watchFollowGestures(el) {
+        if (!el || !el.addEventListener) return;
+        const hold = () => {
+            followHold = true;
+            if (followReleaseTimer) { clearTimeout(followReleaseTimer); followReleaseTimer = null; }
+        };
+        const release = () => {
+            if (!followHold) return;
+            followHold = false;
+            if (followReleaseTimer) clearTimeout(followReleaseTimer);
+            followReleaseTimer = setTimeout(() => {
+                followReleaseTimer = null;
+                followChartNow();
+            }, FOLLOW_RELEASE_MS);
+        };
+        el.addEventListener("pointerdown", hold, true);
+        window.addEventListener("pointerup", release);
+        window.addEventListener("pointercancel", release);
+        // Колесо (зум/прокрутка) — тоже жест: пока крутят, шаги молчат (иначе
+        // слежение тянуло бы окно на каждый шаг колеса), а после — возврат
+        // к границам. Слушаем без passive-предупреждений: ничего не отменяем.
+        el.addEventListener("wheel", () => {
+            hold();
+            if (followReleaseTimer) clearTimeout(followReleaseTimer);
+            followReleaseTimer = setTimeout(() => {
+                followReleaseTimer = null;
+                followHold = false;
+                followChartNow();
+            }, FOLLOW_RELEASE_MS);
+        }, { passive: true, capture: true });
+        // Страховка: если слежение включено, а тиков по монете нет, шаг всё
+        // равно вернёт график к границам после случайного сдвига
+        setFollowTicker(true);
+    }
 
     /** Шкала цены справа: через серию (v4/v5), с запасным путём через график. */
     function rightPriceScale() {
@@ -763,60 +839,63 @@
         return isFinite(p) && p > 0 ? p : null;
     }
 
-    /** Вертикальная часть автоследования: держим цену в поле зрения.
+    /** Вертикальная часть автоследования: цена не выходит за коридор.
      *
-     * Библиотека сама подгоняет шкалу цены под видимые свечи, но стоит
-     * пользователю тронуть шкалу (потянуть за неё или покрутить колесом) —
-     * autoScale выключается, и цена уезжает за верх или низ: по горизонтали
-     * окно продолжает ехать, а по вертикали нет. Поэтому на каждом шаге
-     * слежения: (1) возвращаем autoScale с зазорами 15%, если он погас;
-     * (2) если окно всё равно не держит цену — ставим диапазон сами.
-     * Ручной зум цены при этом, разумеется, отключается: пока слежение включено,
-     * цену ведём мы; хочешь свободную шкалу — выключи слежение.
+     * Шкалой цены в режиме слежения управляем мы (autoScale выключен в
+     * applyFollowMode), поэтому шаг такой:
+     *   1. читаем текущее окно цены;
+     *   2. если окна нет или цена ушла на другой уровень (переключили монету) —
+     *      подгоняем окно заново по видимым свечам;
+     *   3. иначе — двигаем окно только если цена вышла за границу коридора,
+     *      и ровно настолько, чтобы встать на эту границу. Внутри коридора
+     *      не делаем ничего: именно это убирает дрожание на каждом тике.
      */
     function followPriceNow() {
         if (!chart) return false;
         const scale = rightPriceScale();
-        if (!scale) return false;
-        let changed = false;
-        try {
-            const opts = scale.options ? scale.options() : null;
-            if (!opts || opts.autoScale !== true) {
-                scale.applyOptions(followPriceOptions(true));
-                changed = true;
-            }
-        } catch (e) { /* ignore */ }
-        const band = visiblePriceBand();
+        if (!scale || !scale.setVisibleRange) return false;
         const price = lastChartPrice();
-        if (!band || price === null) return changed;
+        if (price === null) return false;
         let cur = null;
         try {
             cur = scale.getVisibleRange ? scale.getVisibleRange() : null;
         } catch (e) { cur = null; }
-        // окно неизвестно — не трогаем: библиотека сама подгонит шкалу,
-        // а autoScale мы уже вернули
-        if (!cur) return changed;
-        const next = followPriceRange(cur, band, price, FOLLOW_MARGIN);
-        if (!next) return changed;
+        const okCur = !!cur && isFinite(cur.from) && isFinite(cur.to) &&
+                      Number(cur.to) > Number(cur.from);
+        let next = null;
+        if (okCur) {
+            const from = Number(cur.from), to = Number(cur.to), span = to - from;
+            // цена вообще не из этого окна (другая монета) — подгоняем заново,
+            // иначе «сдвиг» растянул бы окно на тысячи процентов
+            const far = price < from - span || price > to + span;
+            next = far ? followPriceFit(visiblePriceBand(), price, FOLLOW_MARGIN)
+                       : followPriceShift(cur, price, FOLLOW_MARGIN, FOLLOW_PRICE_HYST);
+        } else {
+            next = followPriceFit(visiblePriceBand(), price, FOLLOW_MARGIN);
+        }
+        if (!next) return false;
         try {
-            if (scale.setVisibleRange) {
-                scale.setVisibleRange(next);
-                changed = true;
-            }
-        } catch (e) { /* ignore */ }
-        return changed;
+            scale.setVisibleRange(next);
+        } catch (e) { return false; }
+        return true;
     }
 
-    /** Один шаг автоследования: окно времени вслед за свечой + цена в кадре. */
+    /** Один шаг автоследования: свеча — к правому краю, цена — в коридоре.
+     *
+     * Пока пользователь тянет график рукой (followHold), шагов не делаем:
+     * иначе жест и автоследование тянули бы окно в разные стороны. Как только
+     * жест отпущен, шаг возвращает график к его границам — 3% справа и
+     * коридор 15% сверху и снизу.
+     */
     function followChartNow() {
-        if (!chart || !state.chartFollow || state.followPaused) return false;
+        if (!chart || !state.chartFollow || followHold) return false;
         if (!state.candles.length) return false;
         let lr = null;
         try {
             lr = chart.timeScale().getVisibleLogicalRange();
         } catch (e) { return false; }
         const next = followRange(lr, state.candles.length - 1,
-                                 FOLLOW_EDGE_BARS, FOLLOW_KEEP_BARS);
+                                 FOLLOW_EDGE_PCT, FOLLOW_DRIFT_PCT);
         const movedTime = next ? applyFollowRange(next) : false;
         const movedPrice = followPriceNow();
         return movedTime || movedPrice;
@@ -824,13 +903,8 @@
 
     function applyFollowRange(next) {
         try {
-            followSelfScroll = true;
             chart.timeScale().setVisibleLogicalRange(next);
-        } catch (e) { followSelfScroll = false; return false; }
-        // библиотека может не позвать подписчика синхронно — тогда сбрасываем
-        // флаг сами, иначе следующий ручной сдвиг не заметим (слежение
-        // молча перестало бы ставиться на паузу)
-        setTimeout(() => { followSelfScroll = false; }, 0);
+        } catch (e) { return false; }
         state.followMoved += 1;
         return true;
     }
@@ -841,28 +915,13 @@
         let lr = null;
         try { lr = chart.timeScale().getVisibleLogicalRange(); } catch (e) { return false; }
         const span = lr && lr.to > lr.from ? (lr.to - lr.from) : 80;
-        const to = state.candles.length - 1 + FOLLOW_KEEP_BARS;
+        const to = state.candles.length - 1 + followKeepBars(span, FOLLOW_EDGE_PCT);
         return applyFollowRange({ from: to - span, to: to });
-    }
-
-    /** Ручная прокрутка в историю ставит автоследование на паузу. */
-    function noteFollowPan(lr) {
-        if (!state.chartFollow || followSelfScroll) return;
-        const last = state.candles.length - 1;
-        if (last < 0 || !lr) return;
-        if (lr.to < last - FOLLOW_EDGE_BARS) setFollowPaused(true);
-    }
-
-    function setFollowPaused(on) {
-        if (state.followPaused === !!on) return;
-        state.followPaused = !!on;
-        paintFollowButtons();
     }
 
     /** Кнопка/попап: включить автоследование и запомнить выбор. */
     function setChartFollow(on) {
         state.chartFollow = !!on;
-        if (on) state.followPaused = false;
         try { localStorage.setItem("liqscope.chartFollow", on ? "1" : "0"); }
         catch (e) { /* ignore */ }
         paintFollowButtons();
@@ -872,24 +931,19 @@
 
     /** Подсветка кнопки: горит ⇔ автоследование включено.
      *
-     * Раньше «горит» означало «следим прямо сейчас», а на паузе (отлистали в
-     * историю) кнопка гасла и становилась янтарной — со стороны это читалось
-     * наоборот: пока график стоит на паузе, кнопка ярче, чем когда он едет.
-     * Теперь состояний два, и они не путаются: включено — кнопка горит синим
-     * (на паузе тот же синий, но пунктиром и со ⏸), выключено — кнопка погасла.
+     * Состояний ровно два: включено — кнопка горит синим, выключено — гаснет.
+     * Паузы больше нет: с включённым слежением график всегда возвращается к
+     * своим границам, даже если его подвинули руками.
      */
     function paintFollowButtons() {
         const on = !!state.chartFollow;
-        const paused = on && !!state.followPaused;
         [$("follow-toggle"), $("follow-toggle-pop")].forEach((btn) => {
             if (!btn) return;
             btn.classList.toggle("active", on);
-            btn.classList.toggle("paused", paused);
+            btn.classList.remove("paused");
             btn.setAttribute("aria-pressed", on ? "true" : "false");
-            btn.setAttribute("data-state", on ? (paused ? "paused" : "on") : "off");
-            const key = paused ? "chart.follow_paused"
-                : (on ? "chart.follow_on" : "chart.follow_off");
-            btn.title = I18n.t(key);
+            btn.setAttribute("data-state", on ? "on" : "off");
+            btn.title = I18n.t(on ? "chart.follow_on" : "chart.follow_off");
         });
     }
 
@@ -903,16 +957,7 @@
         } catch (e) { /* ignore */ }
         btns.forEach((btn) => {
             if (!btn) return;
-            btn.addEventListener("click", () => {
-                // На паузе клик — это «верни меня к цене», а не «выключи
-                // слежение»: иначе кнопка читалась как выключение ровно
-                // тогда, когда пользователь просил вернуть график.
-                if (state.chartFollow && state.followPaused) {
-                    setChartFollow(true);
-                    return;
-                }
-                setChartFollow(!state.chartFollow);
-            });
+            btn.addEventListener("click", () => setChartFollow(!state.chartFollow));
         });
         I18n.onChange(() => { paintFollowButtons(); applyChartTimeOptions(); });
         paintFollowButtons();
@@ -925,13 +970,17 @@
             range: followRange,
             priceOptions: followPriceOptions,
             moved: () => state.followMoved,
-            paused: () => !!state.followPaused,
-            pan: (range) => noteFollowPan(range),
+            hold: () => followHold,
+            setHold: (v) => { followHold = !!v; },
+            tick: () => followTick(),
+            setTicker: (v) => setFollowTicker(v),
             anchor: () => anchorToLast(),
             step: () => followChartNow(),
-            edgeBars: FOLLOW_EDGE_BARS,
-            keepBars: FOLLOW_KEEP_BARS,
+            edgePct: FOLLOW_EDGE_PCT,
+            driftPct: FOLLOW_DRIFT_PCT,
+            keepBars: (span) => followKeepBars(span, FOLLOW_EDGE_PCT),
             margin: FOLLOW_MARGIN,
+            hyst: FOLLOW_PRICE_HYST,
             // настройки шкалы цены, что реально ушли в график
             priceScaleOptions: () => {
                 try {
@@ -940,7 +989,8 @@
                 } catch (e) { return null; }
             },
             // вертикальное окно цены: чистая математика + что реально в графике
-            priceRange: followPriceRange,
+            priceShift: followPriceShift,
+            priceFit: followPriceFit,
             priceStep: () => followPriceNow(),
             priceVisibleRange: () => {
                 try {

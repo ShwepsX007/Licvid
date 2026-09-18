@@ -1964,14 +1964,6 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
     border-color: #00d6ff;
     background: rgba(0, 214, 255, 0.24);
 }
-.profile-toggle.follow-toggle[data-state="paused"] {
-    border-style: dashed;
-}
-.profile-toggle.follow-toggle[data-state="paused"]::before {
-    content: "⏸ ";
-    font-size: 0.86em;
-    opacity: 0.9;
-}
 /* Пояснение в окне строки потока «ВСЕ»: строка — минутки монеты, не свеча */
 .flow-note {
     margin-top: 10px;

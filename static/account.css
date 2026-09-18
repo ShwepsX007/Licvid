@@ -219,6 +219,13 @@ table.data tr:hover td { background: rgba(61,112,255,.06); }
     position: absolute; bottom: -18px; left: 50%; transform: translateX(-50%);
     font-size: 0.58rem; color: var(--muted); white-space: nowrap;
 }
+/* Внутри столбика — доля реальных посетителей: столбик целиком = переходы,
+   светлая часть = сколько из них уникальные гости. */
+.bar .bar-u {
+    position: absolute; left: 0; right: 0; bottom: 0; display: block;
+    background: linear-gradient(180deg, #ffd166, #ff9f43); opacity: 0.95;
+    border-radius: 4px 4px 0 0;
+}
 .search {
     background: var(--bg-dark); border: 1px solid var(--border); color: var(--text);
     border-radius: 8px; padding: 8px 12px; font-family: inherit; width: 100%; max-width: 280px;
@@ -246,7 +253,29 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
     overflow: hidden; background: var(--bg-dark);
 }
 .tpl-photo img { width: 100%; height: 88px; object-fit: cover; display: block; }
-.tpl-photo .btn { position: absolute; top: 6px; right: 6px; padding: 3px 7px; }
+/* Две кнопки на плитке: удалить (слева) и перенести в другую рубрику (справа).
+   Раньше обе стояли в правом верхнем углу и накрывали друг друга — «×» было
+   не видно, будто кнопки удаления нет вовсе. */
+.tpl-photo .btn { position: absolute; top: 6px; padding: 3px 7px; z-index: 2;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45); }
+.tpl-photo .tpl-del { left: 6px; }
+.tpl-photo .tpl-move { right: 6px; }
+
+/* 🤖 ИИ-промты в админке: блоки «шапка поста» и «дневной дайджест» */
+.ai-block { margin: 14px 0 0; padding: 12px 14px; border: 1px solid var(--border);
+    border-radius: 12px; background: var(--bg-dark); }
+.ai-block h4 { margin: 0 0 6px; }
+.ai-row { margin-top: 10px; }
+.ai-row-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    font-size: 0.82rem; color: var(--muted); }
+.ai-row-head b { color: var(--text); font-size: 0.86rem; }
+.ai-badge { border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px;
+    font-size: 0.72rem; color: var(--muted); }
+.ai-badge-own { border-color: var(--accent, #4da3ff); color: var(--accent, #4da3ff); }
+.ai-text { width: 100%; margin: 6px 0 8px; min-height: 120px; resize: vertical;
+    font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 0.78rem;
+    line-height: 1.45; }
+.ai-row .ai-status { align-self: center; }
 /* Админка бота на сайте: переключатели и маленькие числовые поля */
 .bot-check {
     display: flex; align-items: center; gap: 8px;
@@ -362,17 +391,53 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
 .al-bar { height: 3px; background: #1b2434; border-radius: 2px; margin-top: 10px; overflow: hidden; }
 .al-bar > i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, #3d70ff, #00d6ff); }
 .al-meter.hot .al-bar > i { background: linear-gradient(90deg, #ff2a5f, #ffd54f); }
-/* бегущая кривая метрики: низкое окно, тонкая линия, сетка и цифры как на графике */
-.al-feeds {
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-    gap: 12px; margin-top: 6px;
-}
+/* Бегущая кривая метрики: низкое окно, тонкая линия, сетка и цифры как на
+   графике. Каждая метрика — горизонтальная строка во всю ширину (как карты в
+   «Корреляциях валют»), строки идут друг под другом: раньше три карточки
+   стояли столбиками рядом, и всё внутри шло узкой колонкой. */
+.al-feeds { display: grid; grid-template-columns: 1fr; gap: 14px; margin-top: 6px; }
 .al-feed {
     border: 1px solid var(--border); border-radius: 12px;
-    padding: 12px; background: rgba(10, 14, 24, 0.5);
+    padding: 10px 14px 12px; background: rgba(10, 14, 24, 0.5); min-width: 0;
 }
 .al-feed.on { border-color: rgba(0, 214, 255, 0.35); }
 .al-feed.hot { border-color: rgba(255, 42, 95, 0.55); box-shadow: 0 0 22px rgba(255, 42, 95, 0.15); }
+/* Шапка строки: тумблер метрики и её сводка; дальше три части в ряд. */
+.al-feed .al-feed-h {
+    display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+    padding-bottom: 8px; margin-bottom: 10px;
+    border-bottom: 1px solid rgba(27, 36, 52, 0.8);
+}
+.al-feed .al-feed-meta { margin-left: auto; font-size: 0.74rem; color: var(--muted);
+    font-variant-numeric: tabular-nums; }
+.al-feed-grid {
+    display: grid; gap: 12px 16px; align-items: start;
+    grid-template-columns: minmax(220px, 0.9fr) minmax(240px, 0.9fr) minmax(300px, 1.3fr);
+    grid-template-areas: "now set tape";
+}
+.al-feed-col { min-width: 0; }
+.al-col-now { grid-area: now; }
+.al-col-set { grid-area: set; }
+.al-col-tape { grid-area: tape; }
+.al-feed-col + .al-feed-col { border-left: 1px dashed rgba(120, 140, 175, 0.2);
+    padding-left: 16px; }
+.al-col-now .al-spark-wrap { height: 76px; margin: 0 0 8px; }
+.al-col-now .al-meter .v { font-size: 1.5rem; }
+.al-col-set .al-label:first-child { margin-top: 0; }
+.al-tape .tape-sig { font-size: 0.66rem; letter-spacing: 0.6px; color: var(--muted);
+    text-transform: uppercase; padding: 4px 2px 2px; }
+.al-tape .row.flow .t { color: rgba(132, 147, 168, 0.8); }
+@media (max-width: 1080px) {
+    .al-feed-grid { grid-template-columns: minmax(200px, 0.9fr) minmax(260px, 1.1fr);
+        grid-template-areas: "now set" "tape tape"; }
+}
+@media (max-width: 760px) {
+    .al-feed-grid { grid-template-columns: 1fr;
+        grid-template-areas: "now" "set" "tape"; }
+    .al-feed .al-feed-meta { margin-left: 0; }
+    .al-feed-col + .al-feed-col { border-left: 0; padding-left: 0; padding-top: 10px;
+        border-top: 1px dashed rgba(120, 140, 175, 0.2); }
+}
 .al-spark-wrap {
     position: relative; height: 44px; margin: 10px 0 4px;
     border: 1px solid rgba(27, 36, 52, 0.7); border-radius: 8px;
@@ -498,7 +563,11 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
     white-space: nowrap; }
 .cor-heat tbody th { text-align: right; }
 .cor-heat-cell { padding: 6px 4px; border-radius: 6px; text-align: center; color: #eaf0f8;
-    min-width: 40px; }
+    min-width: 40px; cursor: help; }
+.cor-heat-cell:hover { outline: 1px solid #4c6ea8; outline-offset: 1px; }
+/* Пояснение к тепловой карте: что в клетке, что значит цвет и знак */
+.cor-heat-note { font-size: 0.76rem; line-height: 1.45; color: #8d9cb4;
+    margin: 2px 0 6px; }
 .cor-heat-cell.diag, .cor-heat-empty { background: rgba(120, 140, 175, 0.10); color: #6c7a90; }
 .cor-pairs { display: grid; gap: 4px; }
 .cor-pair { display: grid; grid-template-columns: minmax(120px, 1.2fr) 2fr 48px;
@@ -511,6 +580,15 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
 .cor-pair-bar.pos i { background: linear-gradient(90deg, #0b6b3a, #00e676); }
 .cor-pair-bar.neg i { background: linear-gradient(90deg, #7a1030, #ff2a5f); }
 .cor-pair-r { text-align: right; font-weight: 800; font-variant-numeric: tabular-nums; }
+
+/* Распределение связей — гистограмма коэффициентов рядом с тепловой картой */
+.cor-hist-wrap { display: flex; align-items: center; gap: 10px; margin: 6px 0 12px; }
+.cor-hist-title { font-size: 0.74rem; color: #9fb0c8; white-space: nowrap; }
+.cor-hist { display: flex; align-items: flex-end; gap: 3px; height: 54px; flex: 1;
+    background: rgba(120, 140, 175, 0.07); border-radius: 6px; padding: 4px 5px; }
+.cor-hist i { flex: 1; display: block; min-height: 2px; border-radius: 2px 2px 0 0; }
+.cor-hist i.pos { background: linear-gradient(180deg, #00e676, #0b6b3a); }
+.cor-hist i.neg { background: linear-gradient(180deg, #ff2a5f, #7a1030); }
 
 .pump-bars { display: grid; gap: 4px; margin: 6px 0 10px; }
 .pump-row { display: grid; grid-template-columns: 62px 1fr 78px minmax(120px, 150px);
@@ -533,3 +611,102 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
     border: 1px solid currentColor; }
 .pump-hit.pos { color: #00e676; }
 .pump-hit.neg { color: #ff2a5f; }
+
+/* ---------- корреляции: карта у каждой переменной своя --------------------- */
+/* Раньше тепловая карта была одна, и над ней стоял переключатель метрик: чтобы
+   сравнить ликвидации с CVD, приходилось щёлкать чипы. Теперь карты идут
+   списком — по одной на переменную, и все видны сразу.
+   Каждая переменная — ГОРИЗОНТАЛЬНАЯ строка во всю ширину доски, строки идут
+   друг под другом. Внутри строки три части: тепловая карта со своим пояснением
+   и распределением связей, список сильнейших связей и настройки сигнала — они
+   стоят рядом, а не столбиком в узкой колонке. На средней ширине строка
+   складывается в две колонки, на узком экране — в одну. */
+.cor-maps { display: grid; grid-template-columns: 1fr; gap: 14px;
+    margin: 8px 0 4px; }
+.cor-map { background: rgba(20, 26, 38, 0.55); border: 1px solid rgba(120, 140, 175, 0.18);
+    border-radius: 12px; padding: 10px 14px 12px; min-width: 0; }
+.cor-map-h { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+    padding-bottom: 8px; margin-bottom: 10px;
+    border-bottom: 1px solid rgba(120, 140, 175, 0.16); }
+.cor-map-title { font-size: 0.9rem; font-weight: 800; letter-spacing: 0.3px; }
+.cor-map-meta { margin-left: auto; font-size: 0.74rem; color: #8d9cb4;
+    font-variant-numeric: tabular-nums; }
+.cor-map-grid { display: grid; gap: 12px 16px; align-items: start;
+    grid-template-columns: minmax(380px, 1.4fr) minmax(250px, 0.9fr) minmax(280px, 1fr);
+    grid-template-areas: "heat links alert"; }
+.cor-map-col { min-width: 0; }
+.cor-col-heat { grid-area: heat; }
+.cor-col-links { grid-area: links; }
+.cor-col-alert { grid-area: alert; }
+.cor-map-col + .cor-map-col { border-left: 1px dashed rgba(120, 140, 175, 0.2);
+    padding-left: 16px; }
+.cor-map .cor-heat-note { margin: 0 0 8px; }
+.cor-map .al-label { margin: 0 0 6px; }
+.cor-map .cor-heat-wrap { margin: 4px 0 8px; }
+.cor-map .cor-hist-wrap { margin: 4px 0 4px; }
+/* Строка широкая — карта может занять её целиком: клетки тянутся по ширине. */
+.cor-map .cor-heat { width: 100%; }
+.cor-map .cor-pair { grid-template-columns: minmax(120px, 1fr) 1.4fr 48px; }
+/* Пороги в колонке сигнала — своей строкой под тумблером: места в колонке
+   меньше, чем было в широкой карте. */
+.cor-col-alert .cor-alert-now { margin-left: 0; width: 100%; }
+@media (max-width: 1180px) {
+    .cor-map-grid { grid-template-columns: minmax(320px, 1.25fr) minmax(260px, 1fr);
+        grid-template-areas: "heat links" "heat alert"; }
+}
+@media (max-width: 820px) {
+    .cor-map-grid { grid-template-columns: 1fr;
+        grid-template-areas: "heat" "links" "alert"; }
+    .cor-map-meta { margin-left: 0; }
+    .cor-map-col + .cor-map-col { border-left: 0; padding-left: 0; padding-top: 10px;
+        border-top: 1px dashed rgba(120, 140, 175, 0.2); }
+}
+
+/* Настройки сигнала по этой переменной: окно и два порога */
+.cor-alert { margin-top: 0; padding-top: 0; }
+.cor-alert-h { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.cor-alert-now { margin-left: auto; font-size: 0.76rem; color: #9fb0c8;
+    font-variant-numeric: tabular-nums; }
+.cor-alert-nums { margin-top: 8px; gap: 12px; }
+.cor-num { display: flex; align-items: center; gap: 6px; font-size: 0.76rem;
+    color: #9fb0c8; }
+.cor-num input { width: 76px; }
+.cor-alert-hint { font-size: 0.72rem; color: #8d9cb4; line-height: 1.45;
+    margin-top: 6px; }
+
+/* --- плашка о cookie для новых гостей --------------------------------- */
+.cookie-bar {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 400;
+    background: rgba(9, 13, 21, 0.97); border-top: 1px solid var(--border);
+    box-shadow: 0 -12px 34px rgba(0, 0, 0, 0.45);
+    transform: translateY(110%); transition: transform 0.26s ease;
+    padding: 12px 16px; backdrop-filter: blur(8px);
+}
+.cookie-bar.on { transform: translateY(0); }
+.cookie-in {
+    max-width: 1180px; margin: 0 auto; display: flex; align-items: center;
+    gap: 12px; flex-wrap: wrap;
+}
+.cookie-ico { font-size: 1.35rem; line-height: 1; }
+.cookie-txt { flex: 1 1 320px; font-size: 0.82rem; color: var(--muted); line-height: 1.5; }
+.cookie-txt b { color: var(--text); }
+.cookie-note { display: block; margin-top: 2px; font-size: 0.74rem; color: var(--muted); opacity: 0.85; }
+.cookie-acts { display: flex; gap: 8px; align-items: center; margin-left: auto; }
+.cookie-more-btn {
+    background: none; border: none; color: var(--muted); cursor: pointer;
+    font-family: inherit; font-size: 0.78rem; text-decoration: underline dotted;
+    padding: 6px 4px;
+}
+.cookie-more-btn:hover { color: var(--text); }
+.cookie-ok {
+    background: linear-gradient(135deg, var(--blue), var(--cyan)); border: none;
+    color: #05121b; font-family: inherit; font-weight: 700; font-size: 0.82rem;
+    padding: 9px 20px; border-radius: 999px; cursor: pointer; white-space: nowrap;
+}
+.cookie-ok:hover { filter: brightness(1.08); }
+.cookie-list {
+    max-width: 1180px; margin: 10px auto 0; padding: 10px 0 0;
+    border-top: 1px dashed var(--border); list-style: none;
+    font-size: 0.76rem; color: var(--muted); display: grid; gap: 4px;
+}
+.cookie-list code { color: var(--cyan); }

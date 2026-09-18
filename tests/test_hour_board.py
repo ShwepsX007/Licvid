@@ -15,7 +15,7 @@ from hour_board import (  # noqa: E402
     OI, HourBoard, OiHistory, build_snapshot, hour_hhmm, hour_start, tz_offset,
 )
 from channel_digest import (  # noqa: E402
-    CAPTION_LIMIT, post_has_hours, render_post, render_top7,
+    CAPTION_LIMIT, events_word, post_has_hours, render_post, render_top7,
 )
 
 MSK = 3 * 3600
@@ -180,6 +180,49 @@ class HourBoardTest(unittest.TestCase):
         self.assertEqual([c["pct"] for c in snap["oi_hours"]],
                          [c["pct"] for c in snap["oi_hours"]])
 
+    def test_counts_and_leaders_per_hour_and_window(self):
+        """Лидеры считаются и по числу событий, а не только по деньгам.
+
+        Одна монета горит одной крупной ликвидацией, другая — сотней мелких,
+        поэтому стенд копит по каждой монете и число событий: из него пост
+        берёт «Лидер часа» и второго лидера окна (🥇).
+        """
+        board = self._full(flows=self._flows())
+        for hr in board["hours"]:
+            self.assertTrue(hr["cnt"], hr)                  # счётчики по монетам
+            self.assertTrue(hr["leaders"].get("vol"), hr)
+            self.assertTrue(hr["leaders"].get("count"), hr)
+        # счётчики по монетам сходятся с числом событий блока
+        for hr in board["hours"]:
+            self.assertEqual(sum(hr["cnt"].values()), hr["count"], hr["cnt"])
+            top = hr["leaders"]["count"]
+            self.assertEqual(top["count"], hr["cnt"][top["symbol"]])
+        lead = board["leaders"]
+        self.assertIn("vol", lead)
+        self.assertIn("count", lead)
+        self.assertGreater(lead["count"]["count"], 0)
+        # лидер окна по количеству — монета с большим числом событий за окно
+        per_coin = {}
+        for hr in board["hours"]:
+            for sym, n in hr["cnt"].items():
+                per_coin[sym] = per_coin.get(sym, 0) + n
+        self.assertEqual(lead["count"]["symbol"], max(per_coin, key=per_coin.get))
+        self.assertEqual(lead["count"]["count"], per_coin[lead["count"]["symbol"]])
+        # пост показывает лидера часа с числом событий этой монеты
+        snap = {"window_h": 4, "count": 30, "total_usd": board["total_usd"],
+                "longs_usd": 6_000_000, "shorts_usd": 5_700_000,
+                "top_coins": [], "exchanges": {"gate": 3_000_000}, "board": board}
+        ru = render_post(snap, 0)
+        self.assertIn("🏆 Лидер часа:", ru)
+        hour = board["hours"][-1]
+        sym = hour["leaders"]["count"]["symbol"]
+        n = hour["leaders"]["count"]["count"]
+        want = f"🏆 Лидер часа: <b>{sym.split('_')[0]}</b> · {n} {events_word(n)}"
+        self.assertIn(want, ru)
+        self.assertIn("🏆 Лидирует", ru)                    # лидер окна по деньгам
+        self.assertIn("· 🥇", ru)                           # второй лидер окна
+        self.assertIn("🏆 Hour leader:", render_post(snap, 0, lang="en"))
+
     def test_post_shows_hours_without_frame(self):
         """Пост: четыре часа, у каждого OI и CVD — простым текстом, без <pre>."""
         board = self._full(flows=self._flows())
@@ -218,13 +261,70 @@ class HourBoardTest(unittest.TestCase):
 
         Стенд умеет рендериться и сам по себе, но в посты он попадает только
         через snap["board"] — однажды это звено уже было забыто, и посты
-        уходили без таблицы часов.
+        уходили без таблицы часов. Частота постов задаёт длину блока (N/4 часа),
+        поэтому снимок обязан нести и её: иначе пост вернётся к «часу на блок».
         """
         src = open(os.path.join(HERE, "server.py"), encoding="utf-8").read()
         body = src[src.index("async def build_channel_digest"):]
         body = body[:body.index("\n\nasync def ", 1)]
-        self.assertIn("build_snapshot(BOARD, OI", body)
+        self.assertIn("build_snapshot(SLOTS, OI", body)
+        self.assertIn("group=interval", body)
+        self.assertIn("post_interval_hours", body)
+        self.assertIn("slot_flows", body)
+        self.assertIn("group=interval", body)
         self.assertIn('snap["board"]', body)
+
+    def test_block_groups_fold_slots(self):
+        """Частота постов задаёт блок: 15 минут × N слотов на один блок."""
+        from hour_board import SLOT_SEC, HourBoard, build_snapshot
+        now = 986_400 + 53 * 60          # 13:53 МСК, внутри четверти часа
+        board = HourBoard(slot_sec=SLOT_SEC, keep_hours=64)
+        for i in range(16):              # 16 четвертей = 4 часа истории
+            for k in range(i + 1):
+                board.add_liq({"symbol": "BTC_USDT", "usd": 100_000.0,
+                               "side": "SELL", "exchange": "binance",
+                               "timestamp": now - i * SLOT_SEC - k})
+        snap = build_snapshot(board, OiHistory(), now=now, span=4, group=4)
+        self.assertEqual(snap["block_sec"], 4 * SLOT_SEC)     # блок — час
+        self.assertEqual(len(snap["hours"]), 4)               # четыре блока
+        self.assertEqual(snap["group"], 4)
+        self.assertEqual(snap["slot_sec"], SLOT_SEC)
+        self.assertEqual(snap["window_sec"], 4 * 3600)
+        self.assertGreater(snap["total_usd"], 0)
+        # блок из четырёх четвертей больше одной четверти
+        self.assertGreater(snap["hours"][0]["total"], 100_000.0)
+        # часовая группировка: последний блок — тот же час, что и слот now
+        from hour_board import slot_start
+        self.assertEqual(snap["hours"][-1]["h"] + snap["block_sec"],
+                         slot_start(now, board.tz, 3600) + 3600)
+        # одиночные слоты (частота раз в час) дают блоки по 15 минут
+        snap1 = build_snapshot(board, OiHistory(), now=now, span=4, group=1)
+        self.assertEqual(snap1["block_sec"], SLOT_SEC)
+        self.assertEqual(len(snap1["hours"]), 4)
+        self.assertTrue(snap1["hours"][-1]["live"])           # текущая четверть идёт
+        self.assertFalse(snap1["hours"][0]["live"])
+
+    def test_slot_flows_fold_into_blocks(self):
+        """CVD и объём блоков складываются из четвертей: доля считается честно."""
+        from hour_board import SLOT_SEC, HourBoard, OiHistory, build_snapshot
+        now = 986_400 + 53 * 60
+        board = HourBoard(slot_sec=SLOT_SEC, keep_hours=64)
+        for i in range(12):
+            board.add_liq({"symbol": "BTC_USDT", "usd": 10_000.0, "side": "BUY",
+                           "exchange": "okx", "timestamp": now - i * SLOT_SEC})
+        flows = {}
+        for i in range(12):
+            slots = flows.setdefault("BTC_USDT", {})
+            slots[int((now - i * SLOT_SEC) // SLOT_SEC * SLOT_SEC)] = {
+                "cvd": 1_000.0, "vol": 100_000.0, "has_cvd": True,
+            }
+        snap = build_snapshot(board, OiHistory(), now=now, span=4, group=3,
+                              flows=flows)
+        self.assertEqual(snap["block_sec"], 3 * SLOT_SEC)     # 45 минут
+        self.assertAlmostEqual(snap["cvd_4h"], 12 * 1_000.0, places=3)
+        self.assertAlmostEqual(snap["vol_4h"], 12 * 100_000.0, places=3)
+        self.assertAlmostEqual(snap["cvd_4h_share"], 1.0, places=6)
+        self.assertAlmostEqual(snap["hours"][-1]["cvd_share"], 1.0, places=6)
 
     def test_liqs_word_declines(self):
         from channel_digest import liqs_word
@@ -251,7 +351,7 @@ class HourBoardTest(unittest.TestCase):
         # появился уровень — появилась строка, процент без истории не выдуман
         board["hours"][0]["oi"] = {"value": 1.2e9, "pct": None}
         text2 = render_post({"window_h": 4, "board": board, "total_usd": 1e6})
-        self.assertIn("📊 OI $1.20B", text2)
+        self.assertIn("📊 OI $1.2B", text2)      # в часах OI идёт короткой суммой
         self.assertIsNone(re.search(r"\d{2}:00 —", text2))
 
     def test_post_is_not_empty_even_without_data(self):

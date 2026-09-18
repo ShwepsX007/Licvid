@@ -1245,6 +1245,23 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
 }
 .top-coins-box.closed .top-coins-list { display: none; }
 
+/* Список лидеров разбит на две группы: по объёму и по числу событий —
+   подпись группы объясняет, что за цифра стоит в карточках */
+.top-coins-group {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+.top-coins-group + .top-coins-group { margin-top: 7px; }
+.top-coins-group-title {
+    font-family: var(--font-sans);
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    color: var(--text-muted);
+    padding: 2px 2px 1px;
+}
+
 .top-coin-card {
     background: var(--bg-card);
     border: 1px solid var(--border-color);
@@ -1698,6 +1715,11 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
 .filter-row-between { justify-content: space-between; }
 .filter-number { width: 110px; }
 .filter-note { font-size: 0.62rem; color: var(--text-muted); }
+/* Пороги объёма: подпись ряда, три поля (ликвидации, CVD, OI Δ) и подсветка
+   поля открытой вкладки ленты — пресеты и Enter применяются именно к нему. */
+.filter-th-label { font-size: 0.66rem; color: var(--text-muted); white-space: nowrap;
+    min-width: 96px; }
+.filter-number.filter-active { border-color: var(--color-blue); box-shadow: 0 0 0 1px rgba(77, 163, 255, 0.35); }
 
 .preset-chips {
     display: flex;
@@ -1729,6 +1751,18 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
 }
 .check-row:hover { background: var(--bg-hover); }
 .check-row input { accent-color: var(--color-green); cursor: pointer; }
+/* Источник с примечанием из /api/health: приглушён и с пометкой, чтобы
+   ноль событий по нему не читался как поломка терминала */
+.check-row-warn { opacity: 0.72; }
+.check-row-warn .check-note {
+    margin-left: auto;
+    font-size: 0.6rem;
+    text-transform: none;
+    color: var(--color-gold);
+    border: 1px solid var(--border-color);
+    border-radius: 3px;
+    padding: 0 4px;
+}
 
 .link-btn {
     background: none;
@@ -1785,7 +1819,6 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
 /* Бейджи новых бирж */
 .exch-badge.bitget { background: rgba(0, 245, 174, 0.14); color: #00f5ae; }
 .exch-badge.htx    { background: rgba(255, 122, 0, 0.14);  color: #ff9d3d; }
-.exch-badge.bitmex { background: rgba(255, 61, 113, 0.14); color: #ff6b8a; }
 .exch-badge.hyperliquid { background: rgba(151, 252, 228, 0.12); color: #97fce4; }
 .exch-badge.dydx        { background: rgba(112, 191, 255, 0.12); color: #70bfff; }
 .exch-badge.kraken      { background: rgba(147, 112, 219, 0.14); color: #b39ddb; }
@@ -1910,16 +1943,26 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
 }
 .pane-draw.armed.erase { cursor: not-allowed; }
 
-/* Автоследование графика: включено — синий акцент, пауза (отлистали
-   в историю) — янтарный, чтобы это не выглядело как «кнопка не работает» */
-.profile-toggle.follow-toggle.active {
-    border-color: var(--color-blue);
-    color: var(--color-blue);
+/* Автоследование графика. Горит ⇔ слежение включено; когда оно выключено,
+   кнопка погасена и ничего не светит. Пауза (график отлистали в историю) —
+   это по-прежнему «включено», поэтому кнопка остаётся горящей, но пунктиром
+   и с ⏸: раньше пауза красилась янтарным и выглядела ярче самого слежения,
+   из-за чего состояние читалось наоборот. */
+.profile-toggle.follow-toggle {
+    border-color: #2a3350;
+    color: var(--text-secondary);
+    background: var(--bg-card);
+    box-shadow: none;
 }
-.profile-toggle.follow-toggle.paused {
-    border-color: var(--color-gold);
-    color: var(--color-gold);
-    border-style: dashed;
+.profile-toggle.follow-toggle.active {
+    border-color: rgba(0, 214, 255, 0.85);
+    color: #9beaff;
+    background: rgba(0, 214, 255, 0.16);
+    box-shadow: 0 0 12px rgba(0, 214, 255, 0.35);
+}
+.profile-toggle.follow-toggle.active:hover {
+    border-color: #00d6ff;
+    background: rgba(0, 214, 255, 0.24);
 }
 /* Пояснение в окне строки потока «ВСЕ»: строка — минутки монеты, не свеча */
 .flow-note {
@@ -1937,6 +1980,65 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
     background: var(--border-color);
     margin: 0 2px;
 }
+/* Подсказка «что значит цвет» внутри плашки слоёв: пункты идут друг под
+   другом (не в ряд), кнопки слоёв — ниже. */
+.layer-pop-legend {
+    flex: 1 0 100%;
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px 14px;
+    padding-bottom: 6px;
+    margin-bottom: 2px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+/* Очистка + «▾» со «Возобновить историю»: выпадающий список под кнопкой. */
+.clear-ctl { position: relative; display: inline-flex; align-items: stretch; }
+.clear-ctl .clear-caret {
+    padding: 0 7px;
+    margin-left: -1px;
+    font-size: 0.7rem;
+    line-height: 1;
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+}
+.clear-ctl #clear-clusters-btn { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.clear-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 40;
+    display: flex;
+    flex-direction: column;
+    min-width: 230px;
+    padding: 6px;
+    gap: 4px;
+    background: rgba(10, 14, 24, 0.97);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    box-shadow: 0 10px 26px rgba(0, 0, 0, 0.6);
+}
+.clear-menu button {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    width: 100%;
+    padding: 7px 9px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    color: var(--text-color);
+    font: inherit;
+    font-size: 0.76rem;
+    text-align: left;
+    cursor: pointer;
+}
+.clear-menu button:hover { background: rgba(255, 255, 255, 0.06); border-color: var(--border-color); }
+.clear-menu button[disabled] { opacity: 0.45; cursor: default; }
+.clear-note { font-size: 0.64rem; color: var(--text-muted); }
 .indicator-panes {
     flex: 0 0 auto;
     display: flex;
@@ -2177,3 +2279,40 @@ body.chart-fullscreen { overflow: hidden; }
     .search-result-data { display: none; }
     .search-result-add { padding: 2px 6px; font-size: 0.66rem; }
 }
+
+/* --- плашка о cookie для новых гостей --------------------------------- */
+.cookie-bar {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 400;
+    background: rgba(9, 12, 16, 0.97); border-top: 1px solid var(--border-color);
+    box-shadow: 0 -12px 34px rgba(0, 0, 0, 0.45);
+    transform: translateY(110%); transition: transform 0.26s ease;
+    padding: 12px 16px; backdrop-filter: blur(8px);
+}
+.cookie-bar.on { transform: translateY(0); }
+.cookie-in {
+    max-width: 1180px; margin: 0 auto; display: flex; align-items: center;
+    gap: 12px; flex-wrap: wrap;
+}
+.cookie-ico { font-size: 1.35rem; line-height: 1; }
+.cookie-txt { flex: 1 1 320px; font-size: 0.82rem; color: var(--text-muted); line-height: 1.5; }
+.cookie-txt b { color: var(--text-primary); }
+.cookie-note { display: block; margin-top: 2px; font-size: 0.74rem; color: var(--text-muted); opacity: 0.85; }
+.cookie-acts { display: flex; gap: 8px; align-items: center; margin-left: auto; }
+.cookie-more-btn {
+    background: none; border: none; color: var(--text-muted); cursor: pointer;
+    font-family: inherit; font-size: 0.78rem; text-decoration: underline dotted;
+    padding: 6px 4px;
+}
+.cookie-more-btn:hover { color: var(--text-primary); }
+.cookie-ok {
+    background: linear-gradient(135deg, var(--color-blue), #00d6ff); border: none;
+    color: #05121b; font-family: inherit; font-weight: 700; font-size: 0.82rem;
+    padding: 9px 20px; border-radius: 999px; cursor: pointer; white-space: nowrap;
+}
+.cookie-ok:hover { filter: brightness(1.08); }
+.cookie-list {
+    max-width: 1180px; margin: 10px auto 0; padding: 10px 0 0;
+    border-top: 1px dashed var(--border-color); list-style: none;
+    font-size: 0.76rem; color: var(--text-muted); display: grid; gap: 4px;
+}
+.cookie-list code { color: #00d6ff; }

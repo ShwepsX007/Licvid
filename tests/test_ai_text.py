@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import unittest
 from unittest import mock
@@ -35,7 +36,10 @@ SNAP = {
 KEYS = ("LIQSCOPE_AI_GEMINI_KEY", "LIQSCOPE_AI_GROQ_KEY", "LIQSCOPE_AI_OPENROUTER_KEY",
         "LIQSCOPE_AI_DEEPSEEK_KEY", "LIQSCOPE_AI_KEY", "LIQSCOPE_AI_URL",
         "LIQSCOPE_AI_MODEL", "LIQSCOPE_AI_ORDER", "LIQSCOPE_AI_DISABLED",
-        "LIQSCOPE_AI_GEMINI_MODEL", "LIQSCOPE_AI_GROQ_MODEL")
+        "LIQSCOPE_AI_GEMINI_MODEL", "LIQSCOPE_AI_GROQ_MODEL",
+        "LIQSCOPE_AI_GEMINI_KEYS", "LIQSCOPE_AI_GROQ_KEYS",
+        "LIQSCOPE_AI_OPENROUTER_KEYS", "LIQSCOPE_AI_DEEPSEEK_KEYS",
+        "LIQSCOPE_AI_KEYS")
 
 
 class EnvMixin(unittest.TestCase):
@@ -480,6 +484,125 @@ class GroqProjectTest(EnvMixin):
         self.assertEqual(head, "Окно на $12.40M: лонги BTC $9.00M перевесили шорты")
         self.assertEqual(limits[0], 120)
         self.assertGreaterEqual(limits[1], 400)
+
+
+class MultiKeyTest(EnvMixin):
+    """Несколько ключей на сервис: лимит одного не останавливает работу.
+
+    Ключи задаются списком (LIQSCOPE_AI_<СЕРВИС>_KEYS), и когда сервис
+    отвечает 429/quota, запрос уходит со следующего ключа того же сервиса.
+    Раньше лимит первого ключа ронял весь сервис, и шапка шла из шаблона.
+    """
+
+    def test_keys_parse_from_list_and_single_name(self):
+        os.environ["LIQSCOPE_AI_GEMINI_KEYS"] = "k1, k2 ;k3\nk1"
+        os.environ["LIQSCOPE_AI_GEMINI_KEY"] = "k4"
+        keys = ai_text.keys_for("gemini", "LIQSCOPE_AI_GEMINI_KEY")
+        self.assertEqual(keys, ["k1", "k2", "k3", "k4"])   # дубли не повторяем
+        os.environ.pop("LIQSCOPE_AI_GEMINI_KEYS")
+        self.assertEqual(ai_text.keys_for("gemini", "LIQSCOPE_AI_GEMINI_KEY"), ["k4"])
+
+    def test_provider_keeps_all_keys(self):
+        os.environ["LIQSCOPE_AI_GROQ_KEYS"] = "q1,q2,q3"
+        provs = {p.name: p for p in build_providers()}
+        self.assertEqual(provs["groq"].keys, ["q1", "q2", "q3"])
+        self.assertEqual(provs["groq"].key, "q1")
+        self.assertEqual(provs["groq"].public()["keys"], "3")
+
+    def test_quota_on_first_key_moves_to_second(self):
+        os.environ["LIQSCOPE_AI_GEMINI_KEYS"] = "g1,g2"
+        w = AiWriter(build_providers())
+        seen = []
+
+        def fake_post(url, payload, headers, timeout=12.0):
+            key = re.search(r"key=(\w+)", url)
+            seen.append(key.group(1) if key else "")
+            if "key=g1" in url:
+                raise RuntimeError("HTTP 429: quota exceeded")
+            return {"candidates": [{"content": {"parts": [
+                {"text": "Лонги BTC на $9.00M против $3.40M шортов"}]}}]}
+
+        with mock.patch.object(ai_text, "post_json", fake_post):
+            head = w.headline_sync(SNAP)
+        self.assertEqual(seen, ["g1", "g2"])               # тот же сервис, второй ключ
+        self.assertEqual(head, "Лонги BTC на $9.00M против $3.40M шортов")
+        st = w.status()["providers"][0]
+        self.assertFalse(st["dead"])                       # сервис жив, ключ исчерпан
+        self.assertEqual(st["key_index"], 2)
+
+    def test_all_keys_limited_falls_to_next_service(self):
+        os.environ["LIQSCOPE_AI_GEMINI_KEYS"] = "g1,g2"
+        os.environ["LIQSCOPE_AI_GROQ_KEY"] = "q-key"
+
+        def fake_post(url, payload, headers, timeout=12.0):
+            if "generativelanguage" in url:
+                raise RuntimeError("HTTP 429: rate limit exceeded")
+            return {"choices": [{"message": {"content": "ETH потерял $3.10M, перевес у лонгов"}}]}
+
+        w = AiWriter(build_providers())
+        with mock.patch.object(ai_text, "post_json", fake_post):
+            head = w.headline_sync(SNAP)
+        self.assertEqual(head, "ETH потерял $3.10M, перевес у лонгов")
+        self.assertEqual(w.status()["last"]["provider"], "groq")
+
+    def test_single_key_with_quota_is_not_marked_dead(self):
+        os.environ["LIQSCOPE_AI_GEMINI_KEY"] = "g-key"
+        w = AiWriter(build_providers())
+
+        def fake_post(url, payload, headers, timeout=12.0):
+            raise RuntimeError("HTTP 429: rate limit")
+
+        with mock.patch.object(ai_text, "post_json", fake_post):
+            self.assertIsNone(w.headline_sync(SNAP))
+        self.assertFalse(w.status()["providers"][0]["dead"])   # лимит обновится
+
+    def test_auth_error_is_still_dead(self):
+        os.environ["LIQSCOPE_AI_GEMINI_KEY"] = "g-key"
+        w = AiWriter(build_providers())
+
+        def fake_post(url, payload, headers, timeout=12.0):
+            raise RuntimeError("HTTP 401: invalid api key")
+
+        with mock.patch.object(ai_text, "post_json", fake_post):
+            self.assertIsNone(w.headline_sync(SNAP))
+        self.assertTrue(w.status()["providers"][0]["dead"])
+
+    def test_quota_matcher(self):
+        self.assertTrue(ai_text.quota_error("HTTP 429: rate limit"))
+        self.assertTrue(ai_text.quota_error("resource_exhausted: quota"))
+        self.assertTrue(ai_text.quota_error("insufficient credits"))
+        self.assertFalse(ai_text.quota_error("HTTP 404: model not found"))
+        self.assertFalse(ai_text.auth_error("HTTP 429: rate limit"))
+        self.assertTrue(ai_text.auth_error("HTTP 401: invalid api key"))
+
+    def test_custom_provider_keys_list(self):
+        os.environ["LIQSCOPE_AI_URL"] = "http://127.0.0.1:11434/v1/chat/completions"
+        os.environ["LIQSCOPE_AI_KEYS"] = "c1,c2"
+        provs = {p.name: p for p in build_providers()}
+        self.assertEqual(provs["custom"].keys, ["c1", "c2"])
+
+    def test_digest_narrative_switches_key(self):
+        os.environ["LIQSCOPE_AI_GEMINI_KEYS"] = "g1,g2"
+        w = AiWriter(build_providers())
+        seen = []
+        text = ("Часовые данные показывают: ликвидации BTC за окно превысили три "
+                "миллиона долларов, перевес на стороне лонгов, и это заметно на "
+                "фоне остальных монет. Объём открытого интереса вырос за тот же "
+                "период, а поток CVD перекошен в сторону покупателей.")
+
+        def fake_post(url, payload, headers, timeout=12.0):
+            seen.append("g1" if "key=g1" in url else "g2")
+            if "key=g1" in url:
+                raise RuntimeError("HTTP 429: quota")
+            return {"candidates": [{"content": {"parts": [{"text": text}]}}]}
+
+        facts = {"lang": "ru", "hours": 24}
+        with mock.patch.object(ai_text, "post_json", fake_post), \
+                mock.patch.object(ai_text, "fit_body", lambda t, limit=0: t), \
+                mock.patch.object(ai_text, "body_problem", lambda t, lang="ru": ""):
+            out = w.narrative_sync(facts)
+        self.assertEqual(seen, ["g1", "g2"])
+        self.assertEqual(out, text)
 
 
 class RenderTest(unittest.TestCase):

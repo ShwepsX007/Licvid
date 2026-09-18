@@ -25,7 +25,9 @@
         symbol: "ALL",          // фильтр ленты: конкретная монета или ALL
         chartSymbol: "",        // монета графика — живёт отдельно от фильтра
         timeframe: 5,
-        minUsd: 0,
+        minUsd: 0,              // порог ликвидаций, $
+        minCvd: 0,              // порог |CVD| за свечу, $ (треугольники и лента)
+        minOi: 0,               // порог |OI Δ| за свечу, $ (шарики и лента)
         exchanges: null,        // null = все биржи включены; иначе Set включённых
         availableExchanges: [],
         customSymbols: [],
@@ -64,7 +66,6 @@
         // Минутные потоки всех монет с сервера (лента CVD/OI в режиме «ВСЕ»)
         flowAll: null,         // лента: liq | cvd | oi
         chartFollow: true,      // автоследование: окно само едет за ценой
-        followPaused: false,    // график отлистали вручную — ждём кнопки
         followMoved: 0,         // сколько раз окно подвинулось (для тестов/диагностики)
     };
 
@@ -73,42 +74,124 @@
     const MAX_HISTORY = 4000;
 
     // --- Автоследование графика -------------------------------------------
-    // Окно само двигается за ценой: слева свеча подходит к правому краю —
-    // сдвигаем окно на шаг (тот же зум), а по вертикали цена остаётся в поле
-    // зрения с зазором FOLLOW_MARGIN сверху и снизу. Горизонтальный зазор
-    // маленький (FOLLOW_KEEP_BARS свечей) — «почти вплотную к шкале», как
-    // и просили: свеча не уезжает за край.
-    const FOLLOW_EDGE_BARS = 3;   // за сколько свечей до края начинаем двигать
-    const FOLLOW_KEEP_BARS = 1;   // сколько свечей оставляем справа после сдвига
-    const FOLLOW_MARGIN = 0.15;   // зазор по вертикали, доля высоты графика
+    // Пока автоследование включено, шкалой цены управляем мы, а не библиотека:
+    // её собственный autoScale пересчитывает диапазон на каждой свече и на
+    // каждом тике, из-за чего график дёргался вверх-вниз. Поэтому:
+    //   * размах (зум) шкалы цены фиксируется — его задаёт пользователь или
+    //     первичная подгонка, а слежение размах не меняет;
+    //   * цена держится в «коридоре»: не ближе FOLLOW_MARGIN от верха и низа.
+    //     Пока цена внутри коридора, окно не двигается вообще (никакого
+    //     дрожания на каждом тике); как только цена вышла за границу —
+    //     окно сдвигается ровно так, чтобы цена встала на эту границу.
+    //   * у границы есть гистерезис (FOLLOW_PRICE_HYST): шум в пару пунктов
+    //     не заставляет график ёрзать.
+    // По горизонтали последняя свеча не подходит к правому краю ближе
+    // FOLLOW_DRIFT_PCT, а после сдвига (и после ручного ухода) встаёт на
+    // FOLLOW_EDGE_PCT от края — то есть «вплотную, но не за край».
+    const FOLLOW_MARGIN = 0.15;        // коридор цены: доля высоты окна
+    const FOLLOW_EDGE_PCT = 0.03;      // на сколько отступить от правого края
+    const FOLLOW_DRIFT_PCT = 0.005;    // ближе этого к краю свечу не подпускаем
+    const FOLLOW_PRICE_HYST = 0.01;    // гистерезис у границы коридора
+    const FOLLOW_RELEASE_MS = 350;     // пауза после жеста — и возврат к границам
     const PRICE_MARGINS_DEFAULT = { top: 0.06, bottom: 0.24 };
+
+    /** Сколько свечей соответствует доле ширины окна (минимум одна). */
+    function followKeepBars(span, pct) {
+        const n = Math.round(Number(span) * Number(pct));
+        return Number.isFinite(n) && n > 1 ? n : 1;
+    }
 
     /** Куда сдвинуть окно времени: null — двигать не надо.
      *
      * Чистая функция — её гоняет tests/chart_follow.js без браузера.
      * lr — видимый логический диапазон (from/to), last — индекс последней
-     * свечи. Вправо уезжаем только если свеча подошла к краю: если админ
-     * отлистал график вручную, автоследование не дёргает его назад.
+     * свечи, keepPct — отступ от правого края (доля ширины), driftPct —
+     * ближе какого расстояния свечу к краю не подпускаем.
+     *
+     * Двигаем в двух случаях: свеча подошла к краю ближе driftPct (тогда
+     * ставим её на keepPct) и когда окно уехало не туда — ручной сдвиг или
+     * прыжок вправо (тогда возвращаем её на keepPct, как и просили: график
+     * при включённом слежении всегда возвращается к своим границам).
      */
-    function followRange(lr, last, edgeBars, keepBars) {
+    function followRange(lr, last, keepPct, driftPct) {
         if (!lr || !isFinite(lr.from) || !isFinite(lr.to) || last < 0) return null;
         const span = Number(lr.to) - Number(lr.from);
         if (!(span > 0)) return null;
+        const keep = followKeepBars(span, keepPct);
+        const drift = Math.max(0, span * Number(driftPct || 0));
         const edge = Number(lr.to) - Number(last);
-        // Дальше зоны слежения не лезем: если график отлистали в историю
-        // (свеча уехала вправо) или, наоборот, окно кончается задолго до неё —
-        // это осознанное действие, автоследование встаёт на паузу.
-        if (edge > edgeBars || edge < -edgeBars) return null;
-        const to = Number(last) + keepBars;
-        if (Math.abs(edge - keepBars) < 1e-9) return null;   // уже стоит как надо
+        // 0.05 свечи — допуск на округления библиотеки: иначе окно «подъезжало»
+        // бы бесконечно на доли бара
+        if (edge <= keep + 0.05 && edge >= drift) return null;
+        const to = Number(last) + keep;
         return { from: to - span, to: to };
     }
 
-    /** Настройки цены для режима слежения и обратно. */
+    /** Настройки цены для режима слежения и обратно.
+     *
+     * Слежение ведём сами: autoScale выключаем (иначе библиотека пересчитает
+     * диапазон на каждом тике и график будет дёргаться). При выключении
+     * возвращаем библиотеке её обычное поведение.
+     */
     function followPriceOptions(on) {
         return on
-            ? { autoScale: true, scaleMargins: { top: FOLLOW_MARGIN, bottom: FOLLOW_MARGIN } }
+            ? { autoScale: false, scaleMargins: { top: FOLLOW_MARGIN, bottom: FOLLOW_MARGIN } }
             : { autoScale: true, scaleMargins: Object.assign({}, PRICE_MARGINS_DEFAULT) };
+    }
+
+    /** Сдвиг окна цены, когда цена вышла за коридор: null — не трогаем.
+     *
+     * Чистая функция — гоняется tests/chart_follow.js. Размах окна сохраняем
+     * (зум не меняем), цену ставим ровно на границу коридора — margin от
+     * верха при движении вверх и margin от низа при движении вниз. Выход за
+     * границу должен быть больше гистерезиса, иначе ничего не двигаем.
+     */
+    function followPriceShift(cur, price, margin, hyst) {
+        if (!cur) return null;
+        const from = Number(cur.from), to = Number(cur.to), p = Number(price);
+        if (!isFinite(from) || !isFinite(to) || !isFinite(p) || !(to > from)) return null;
+        const span = to - from;
+        let m = Number(margin);
+        if (!isFinite(m) || m < 0) m = 0;
+        m = Math.min(m, 0.4);
+        const pad = span * m;
+        let hy = Number(hyst);
+        if (!isFinite(hy) || hy < 0) hy = 0;
+        const eps = span * hy;
+        if (p > to - pad + eps) {                 // ушла вверх — ставим на 15% от верха
+            const nTo = p + pad;
+            return { from: nTo - span, to: nTo };
+        }
+        if (p < from + pad - eps) {               // ушла вниз — ставим на 15% от низа
+            const nFrom = p - pad;
+            return { from: nFrom, to: nFrom + span };
+        }
+        return null;                              // цена в коридоре — не дёргаем
+    }
+
+    /** Первичная подгонка окна цены: видимые свечи и цена с зазорами.
+     *
+     * Нужна, когда своего окна ещё нет и когда цена ушла на другой уровень
+     * (переключили монету): сдвигать прежнее окно там бессмысленно.
+     */
+    function followPriceFit(band, price, margin) {
+        const p = Number(price);
+        const hasPrice = price !== null && price !== undefined && isFinite(p);
+        if (!band && !hasPrice) return null;
+        let low = band ? Number(band.low) : p;
+        let high = band ? Number(band.high) : p;
+        if (hasPrice) { low = Math.min(low, p); high = Math.max(high, p); }
+        if (!isFinite(low) || !isFinite(high)) return null;
+        if (high <= low) {
+            const pad0 = Math.max(Math.abs(high) * 1e-4, 1e-9);
+            low -= pad0; high += pad0;
+        }
+        let m = Number(margin);
+        if (!isFinite(m) || m < 0) m = 0;
+        m = Math.min(m, 0.4);
+        const need = (high - low) / (1 - 2 * m);
+        const mid = (low + high) / 2;
+        return { from: mid - need / 2, to: mid + need / 2 };
     }
 
     let ws = null;
@@ -145,6 +228,8 @@
     const feedFilterEl = $("feed-filter");          // плашка «фильтр: монета»
     const minUsdBtn = $("min-usd-btn");
     const minUsdInput = $("min-usd-input");
+    const minCvdInput = $("min-cvd-input");
+    const minOiInput = $("min-oi-input");
     const minUsdApply = $("min-usd-apply");
     const minUsdPresets = $("min-usd-presets");
     const minUsdPanel = $("min-usd-panel");
@@ -161,6 +246,8 @@
     const soundToggleBtn = $("sound-toggle-btn");
     const soundIcon = $("sound-icon");
     const clearBtn = $("clear-clusters-btn");
+    const clearMenuBtn = $("clear-menu-btn");
+    const clearMenu = $("clear-menu");
     const topCoinsContainer = $("top-coins-list");
     const chartWrapper = $("chart-wrapper");
     const clusterCanvas = $("cluster-canvas");
@@ -230,6 +317,69 @@
         });
     }
 
+    // --- Время на графике: местное, как в ленте -----------------------------
+    // Библиотека графика по умолчанию подписывает ось временем Гринвича, из-за
+    // чего низ графика жил в UTC, а лента — в поясе пользователя. Подставляем
+    // свои форматеры: и деления оси, и подпись перекрестия идут в местном
+    // времени и на языке интерфейса.
+    const TICK_YEAR = 0, TICK_MONTH = 1, TICK_DAY = 2, TICK_TIME = 3, TICK_TIME_SEC = 4;
+
+    function chartTimeText(t, tickType) {
+        const d = new Date((Number(t) || 0) * 1000);
+        if (isNaN(d.getTime())) return "";
+        const tag = (I18n && I18n.localeTag) ? I18n.localeTag() : undefined;
+        const daily = Number(state.timeframe) >= 1440;
+        try {
+            switch (tickType) {
+                case TICK_YEAR: return String(d.getFullYear());
+                case TICK_MONTH: return d.toLocaleDateString(tag, { month: "short" });
+                case TICK_DAY:
+                    return d.toLocaleDateString(tag, { day: "2-digit", month: "short" });
+                case TICK_TIME_SEC:
+                    return d.toLocaleTimeString(tag, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+                case TICK_TIME:
+                    return daily ? d.toLocaleDateString(tag, { day: "2-digit", month: "2-digit" })
+                                 : d.toLocaleTimeString(tag, { hour: "2-digit", minute: "2-digit" });
+                default:
+                    // Неизвестный тип деления: на дневках — дата, иначе время
+                    return daily
+                        ? d.toLocaleDateString(tag, { day: "2-digit", month: "2-digit" })
+                        : d.toLocaleTimeString(tag, { hour: "2-digit", minute: "2-digit" });
+            }
+        } catch (e) { return ""; }
+    }
+
+    /** Подпись перекрестия (и метка на оси): дата + местное время. */
+    function chartCrosshairText(t) {
+        const d = new Date((Number(t) || 0) * 1000);
+        if (isNaN(d.getTime())) return "";
+        const tag = (I18n && I18n.localeTag) ? I18n.localeTag() : undefined;
+        const daily = Number(state.timeframe) >= 1440;
+        try {
+            const date = d.toLocaleDateString(tag, { day: "2-digit", month: "short", year: "numeric" });
+            if (daily) return date;
+            return date + " " + d.toLocaleTimeString(tag, { hour: "2-digit", minute: "2-digit" });
+        } catch (e) { return ""; }
+    }
+
+    /** Форматеры оси: применяются к графику и переприменяются при смене языка. */
+    function chartTimeOptions() {
+        return {
+            timeScale: {
+                tickMarkFormatter: (t, tickType) => chartTimeText(t, tickType),
+            },
+            localization: {
+                locale: (I18n && I18n.localeTag) ? I18n.localeTag() : undefined,
+                timeFormatter: (t) => chartCrosshairText(t),
+            },
+        };
+    }
+
+    function applyChartTimeOptions() {
+        if (!chart || !chart.applyOptions) return;
+        try { chart.applyOptions(chartTimeOptions()); } catch (e) { /* ignore */ }
+    }
+
     // График не привязан к фильтру ленты: включив «ВСЕ», пользователь видит
     // все ликвидации в эфире, а график остаётся на выбранной монете.
     const chartSymbol = () => state.chartSymbol || state.symbols[0] || "BTC_USDT";
@@ -238,8 +388,9 @@
     // --- Фильтры (мин. объём + биржи) ----------------------------------------
     // Как биржа подписывается в интерфейсе (код биржи -> читаемое имя)
     const EXCH_NAMES = {
-        dydx: "dYdX", okx: "OKX", htx: "HTX", bitmex: "BitMEX",
+        dydx: "dYdX", okx: "OKX", htx: "HTX",
     };
+
     function exchangeName(e) {
         const k = String(e || "").toLowerCase();
         return EXCH_NAMES[k] || (k.charAt(0).toUpperCase() + k.slice(1));
@@ -250,11 +401,28 @@
         return state.exchanges.has(name);
     }
 
+    // Пороги объёма по видам ленты: ликвидации, CVD за свечу и OI Δ за свечу.
+    // У каждого свой ключ в localStorage: фильтр ликвидаций не должен менять
+    // порог CVD, и наоборот.
+    const THRESHOLDS = {
+        liq: { key: "minUsd", store: "liqscope.minUsd" },
+        cvd: { key: "minCvd", store: "liqscope.minCvd" },
+        oi: { key: "minOi", store: "liqscope.minOi" },
+    };
+
+    function thresholdOf(kind) {
+        const cfg = THRESHOLDS[kind] || THRESHOLDS.liq;
+        return Math.max(0, Number(state[cfg.key]) || 0);
+    }
+
     function loadSavedFilters() {
-        try {
-            const v = localStorage.getItem("liqscope.minUsd");
-            if (v !== null) state.minUsd = Math.max(0, parseFloat(v) || 0);
-        } catch (e) { /* ignore */ }
+        Object.keys(THRESHOLDS).forEach((kind) => {
+            const cfg = THRESHOLDS[kind];
+            try {
+                const v = localStorage.getItem(cfg.store);
+                if (v !== null) state[cfg.key] = Math.max(0, parseFloat(v) || 0);
+            } catch (e) { /* ignore */ }
+        });
         try {
             const raw = localStorage.getItem("liqscope.exchanges");
             if (raw !== null) {
@@ -268,8 +436,13 @@
         } catch (e) { /* ignore */ }
     }
 
+    function saveThreshold(kind) {
+        const cfg = THRESHOLDS[kind] || THRESHOLDS.liq;
+        try { localStorage.setItem(cfg.store, String(state[cfg.key] || 0)); } catch (e) { /* ignore */ }
+    }
+
     function saveMinUsd() {
-        try { localStorage.setItem("liqscope.minUsd", String(state.minUsd || 0)); } catch (e) { /* ignore */ }
+        saveThreshold("liq");
     }
 
     function saveExchanges() {
@@ -481,9 +654,16 @@
             },
             crosshair: { mode: LightweightCharts.CrosshairMode ? LightweightCharts.CrosshairMode.Normal : 0 },
             rightPriceScale: { borderColor: "#212938", scaleMargins: { top: 0.06, bottom: 0.24 } },
-            timeScale: { borderColor: "#212938", timeVisible: true, secondsVisible: false, rightOffset: 6 },
+            timeScale: {
+                borderColor: "#212938", timeVisible: true, secondsVisible: false, rightOffset: 6,
+                // Деления оси — в местном времени пользователя (как в ленте),
+                // а не в UTC, который библиотека ставит по умолчанию
+                tickMarkFormatter: (t, tickType) => chartTimeText(t, tickType),
+            },
             localization: {
                 priceFormatter: (p) => Number(p).toFixed(priceDigits(p)),
+                locale: (I18n && I18n.localeTag) ? I18n.localeTag() : undefined,
+                timeFormatter: (t) => chartCrosshairText(t),
             },
         });
 
@@ -532,92 +712,264 @@
         window.addEventListener("resize", handleResize);
         setTimeout(handleResize, 80);
 
-        chart.timeScale().subscribeVisibleLogicalRangeChange((lr) => {
-            queueRedraw();
-            if (followSelfScroll) {           // это наш собственный сдвиг
-                followSelfScroll = false;
-                return;
-            }
-            noteFollowPan(lr);
-        });
+        // Окно поехало (мы или вручную) — перерисовать плашки кластеров.
+        // Возврат к границам делает шаг автоследования: см. followChartNow.
+        chart.timeScale().subscribeVisibleLogicalRangeChange(() => queueRedraw());
         markersApi = null;
+        watchFollowGestures(container);
         applyFollowMode();
     }
 
-    /** Включить/выключить настройки цены и сдвинуть окно по текущей свече. */
+    /** Включить/выключить режим слежения и сразу поставить график по местам. */
     function applyFollowMode() {
         if (!chart) return;
         try {
-            const scale = chart.priceScale("right");
-            if (scale && scale.applyOptions) scale.applyOptions(followPriceOptions(state.chartFollow));
+            const scale = rightPriceScale();
+            if (scale && scale.applyOptions) {
+                scale.applyOptions(followPriceOptions(state.chartFollow));
+            }
         } catch (e) { /* ignore */ }
         try {
             const ts = chart.timeScale();
             if (ts && ts.applyOptions) {
-                // справа почти вплотную к шкале
-                ts.applyOptions({ rightOffset: state.chartFollow ? 1 : 6 });
+                // Пока следим сами — правый отступ 0: положение последней свечи
+                // задаём мы (3% от края), иначе библиотека тянула бы её к самому
+                // краю своим автоскроллом. И окно на новой свече библиотека не
+                // сдвигает: со включённым слежением его ставим мы сами, а с
+                // выключенным график обязан стоять там, где его оставили, — иначе
+                // каждый новый бар тянул бы вид вправо и промотать назад было бы
+                // нельзя.
+                ts.applyOptions({ rightOffset: state.chartFollow ? 0 : 6,
+                                  shiftVisibleRangeOnNewBar: false });
             }
         } catch (e) { /* ignore */ }
         followChartNow();
     }
 
-    let followSelfScroll = false;   // мы сами подвинули окно — не считаем это панорамой
+    // Пока пользователь тянет график рукой, шаги слежения молчат; после
+    // отпускания возвращаем график к его границам (3% справа, 15% сверху/снизу).
+    let followHold = false;
+    let followReleaseTimer = null;
+    let followTimer = null;
 
-    /** Один шаг автоследования: подвинуть окно времени (если пора). */
+    /** Шаг по таймеру: страховка на случай, когда тиков по монете нет. */
+    function followTick() {
+        if (state.chartFollow && !followHold) followChartNow();
+    }
+
+    function setFollowTicker(on) {
+        if (followTimer) { clearInterval(followTimer); followTimer = null; }
+        if (on !== false) followTimer = setInterval(followTick, 500);
+    }
+
+    function watchFollowGestures(el) {
+        if (!el || !el.addEventListener) return;
+        const hold = () => {
+            followHold = true;
+            if (followReleaseTimer) { clearTimeout(followReleaseTimer); followReleaseTimer = null; }
+        };
+        const release = () => {
+            if (!followHold) return;
+            followHold = false;
+            if (followReleaseTimer) clearTimeout(followReleaseTimer);
+            // Возврат к границам — только пока автоследование включено. С
+            // выключенной кнопкой график статичен: его двигают руками, и он
+            // остаётся там, где его оставили.
+            if (!state.chartFollow) return;
+            followReleaseTimer = setTimeout(() => {
+                followReleaseTimer = null;
+                // жест двигает и время, и шкалу цены — возвращаем обе: свечу к
+                // 3% справа, цену к 15% от края, если её из коридора вывели
+                anchorFollowAll();
+            }, FOLLOW_RELEASE_MS);
+        };
+        el.addEventListener("pointerdown", hold, true);
+        window.addEventListener("pointerup", release);
+        window.addEventListener("pointercancel", release);
+        // Колесо (зум/прокрутка) — тоже жест: пока крутят, шаги молчат (иначе
+        // слежение тянуло бы окно на каждый шаг колеса), а после — возврат
+        // к границам. Слушаем без passive-предупреждений: ничего не отменяем.
+        el.addEventListener("wheel", () => {
+            hold();
+            if (followReleaseTimer) clearTimeout(followReleaseTimer);
+            followReleaseTimer = setTimeout(() => {
+                followReleaseTimer = null;
+                followHold = false;
+                // с выключенным слежением колесо ничего не откидывает назад
+                if (state.chartFollow) anchorFollowAll();
+            }, FOLLOW_RELEASE_MS);
+        }, { passive: true, capture: true });
+        // Страховка: если слежение включено, а тиков по монете нет, шаг всё
+        // равно вернёт график к границам после случайного сдвига
+        setFollowTicker(true);
+    }
+
+    /** Шкала цены справа: через серию (v4/v5), с запасным путём через график. */
+    function rightPriceScale() {
+        try {
+            if (candleSeries && candleSeries.priceScale) {
+                const s = candleSeries.priceScale();
+                if (s && s.applyOptions) return s;
+            }
+        } catch (e) { /* ignore */ }
+        try {
+            const s = chart && chart.priceScale ? chart.priceScale("right") : null;
+            if (s && s.applyOptions) return s;
+        } catch (e) { /* ignore */ }
+        return null;
+    }
+
+    /** Границы цены по видимым свечам (для вертикального слежения). */
+    function visiblePriceBand() {
+        const candles = state.candles || [];
+        if (!candles.length) return null;
+        let from = 0, to = candles.length - 1;
+        try {
+            const lr = chart.timeScale().getVisibleLogicalRange();
+            if (lr && isFinite(lr.from) && isFinite(lr.to)) {
+                from = Math.max(0, Math.floor(Number(lr.from)));
+                to = Math.min(candles.length - 1, Math.ceil(Number(lr.to)));
+            }
+        } catch (e) { /* окно неизвестно — берём все свечи */ }
+        let low = Infinity, high = -Infinity;
+        for (let i = from; i <= to; i++) {
+            const c = candles[i];
+            if (!c) continue;
+            const lo = Number(c.low), hi = Number(c.high);
+            if (isFinite(lo) && lo < low) low = lo;
+            if (isFinite(hi) && hi > high) high = hi;
+        }
+        if (!isFinite(low) || !isFinite(high)) return null;
+        return { low: low, high: high };
+    }
+
+    /** Последняя цена на графике (закрытие живой свечи). */
+    function lastChartPrice() {
+        const candles = state.candles || [];
+        const c = candles[candles.length - 1];
+        const p = c ? Number(c.close) : NaN;
+        return isFinite(p) && p > 0 ? p : null;
+    }
+
+    /** Вертикальная часть автоследования: цена не выходит за коридор.
+     *
+     * Шкалой цены в режиме слежения управляем мы (autoScale выключен в
+     * applyFollowMode), поэтому шаг такой:
+     *   1. читаем текущее окно цены;
+     *   2. если окна нет или цена ушла на другой уровень (переключили монету) —
+     *      подгоняем окно заново по видимым свечам;
+     *   3. иначе — двигаем окно только если цена вышла за границу коридора,
+     *      и ровно настолько, чтобы встать на эту границу. Внутри коридора
+     *      не делаем ничего: именно это убирает дрожание на каждом тике.
+     */
+    function followPriceNow() {
+        if (!chart || !state.chartFollow) return false;
+        const scale = rightPriceScale();
+        if (!scale || !scale.setVisibleRange) return false;
+        const price = lastChartPrice();
+        if (price === null) return false;
+        let cur = null;
+        try {
+            cur = scale.getVisibleRange ? scale.getVisibleRange() : null;
+        } catch (e) { cur = null; }
+        const okCur = !!cur && isFinite(cur.from) && isFinite(cur.to) &&
+                      Number(cur.to) > Number(cur.from);
+        let next = null;
+        if (okCur) {
+            const from = Number(cur.from), to = Number(cur.to), span = to - from;
+            // цена вообще не из этого окна (другая монета) — подгоняем заново,
+            // иначе «сдвиг» растянул бы окно на тысячи процентов
+            const far = price < from - span || price > to + span;
+            next = far ? followPriceFit(visiblePriceBand(), price, FOLLOW_MARGIN)
+                       : followPriceShift(cur, price, FOLLOW_MARGIN, FOLLOW_PRICE_HYST);
+        } else {
+            next = followPriceFit(visiblePriceBand(), price, FOLLOW_MARGIN);
+        }
+        if (!next) return false;
+        try {
+            scale.setVisibleRange(next);
+        } catch (e) { return false; }
+        return true;
+    }
+
+    /** Один шаг автоследования: свеча — к правому краю, цена — в коридоре.
+     *
+     * Пока пользователь тянет график рукой (followHold), шагов не делаем:
+     * иначе жест и автоследование тянули бы окно в разные стороны. Как только
+     * жест отпущен, шаг возвращает график к его границам — 3% справа и
+     * коридор 15% сверху и снизу.
+     */
     function followChartNow() {
-        if (!chart || !state.chartFollow || state.followPaused) return false;
+        if (!chart || !state.chartFollow || followHold) return false;
         if (!state.candles.length) return false;
         let lr = null;
         try {
             lr = chart.timeScale().getVisibleLogicalRange();
         } catch (e) { return false; }
         const next = followRange(lr, state.candles.length - 1,
-                                 FOLLOW_EDGE_BARS, FOLLOW_KEEP_BARS);
-        if (!next) return false;
-        return applyFollowRange(next);
+                                 FOLLOW_EDGE_PCT, FOLLOW_DRIFT_PCT);
+        const movedTime = next ? applyFollowRange(next) : false;
+        const movedPrice = followPriceNow();
+        return movedTime || movedPrice;
     }
 
     function applyFollowRange(next) {
         try {
-            followSelfScroll = true;
             chart.timeScale().setVisibleLogicalRange(next);
-        } catch (e) { followSelfScroll = false; return false; }
-        // библиотека может не позвать подписчика синхронно — тогда сбрасываем
-        // флаг сами, иначе следующий ручной сдвиг не заметим (слежение
-        // молча перестало бы ставиться на паузу)
-        setTimeout(() => { followSelfScroll = false; }, 0);
+        } catch (e) { return false; }
         state.followMoved += 1;
+        return true;
+    }
+
+    /** Возврат после жеста: свеча — на 3% от правого края, цена — ровно на
+     *  15% от края, если жест вывел её из коридора.
+     *
+     *  Внутри коридора вертикаль не трогаем: цена и так видна с запасом не
+     *  меньше 15%, а лишний прыжок после каждого жеста читался бы как
+     *  дрожание. Гистерезис здесь выключен — это как раз случай «вернуть
+     *  график к минимальным отступам», а не «терпеть шум».
+     */
+    function anchorFollowAll() {
+        // Выключено — не двигаем ничего: график остаётся там, где его оставили.
+        if (!state.chartFollow) return false;
+        const movedTime = anchorToLast();
+        const movedPrice = followPriceSnap();
+        return movedTime || movedPrice;
+    }
+
+    /** Цена за коридором — ставим её ровно на 15% от той границы, за которую
+     *  она ушла. Окна цены нет — подгоняем по видимым свечам. */
+    function followPriceSnap() {
+        if (!chart || !state.chartFollow) return false;
+        const scale = rightPriceScale();
+        if (!scale || !scale.setVisibleRange) return false;
+        const price = lastChartPrice();
+        if (price === null) return false;
+        let cur = null;
+        try { cur = scale.getVisibleRange ? scale.getVisibleRange() : null; } catch (e) { cur = null; }
+        const next = (cur && isFinite(cur.from) && isFinite(cur.to) && Number(cur.to) > Number(cur.from))
+            ? followPriceShift(cur, price, FOLLOW_MARGIN, 0)
+            : followPriceFit(visiblePriceBand(), price, FOLLOW_MARGIN);
+        if (!next) return false;
+        try {
+            scale.setVisibleRange(next);
+        } catch (e) { return false; }
         return true;
     }
 
     /** Прыжок к последней свече: включаем автоследование — сразу к цене. */
     function anchorToLast() {
-        if (!chart || !state.candles.length) return false;
+        if (!chart || !state.chartFollow || !state.candles.length) return false;
         let lr = null;
         try { lr = chart.timeScale().getVisibleLogicalRange(); } catch (e) { return false; }
         const span = lr && lr.to > lr.from ? (lr.to - lr.from) : 80;
-        const to = state.candles.length - 1 + FOLLOW_KEEP_BARS;
+        const to = state.candles.length - 1 + followKeepBars(span, FOLLOW_EDGE_PCT);
         return applyFollowRange({ from: to - span, to: to });
-    }
-
-    /** Ручная прокрутка в историю ставит автоследование на паузу. */
-    function noteFollowPan(lr) {
-        if (!state.chartFollow || followSelfScroll) return;
-        const last = state.candles.length - 1;
-        if (last < 0 || !lr) return;
-        if (lr.to < last - FOLLOW_EDGE_BARS) setFollowPaused(true);
-    }
-
-    function setFollowPaused(on) {
-        if (state.followPaused === !!on) return;
-        state.followPaused = !!on;
-        paintFollowButtons();
     }
 
     /** Кнопка/попап: включить автоследование и запомнить выбор. */
     function setChartFollow(on) {
         state.chartFollow = !!on;
-        if (on) state.followPaused = false;
         try { localStorage.setItem("liqscope.chartFollow", on ? "1" : "0"); }
         catch (e) { /* ignore */ }
         paintFollowButtons();
@@ -625,16 +977,21 @@
         if (on) anchorToLast();   // включили — сразу к актуальной свече
     }
 
+    /** Подсветка кнопки: горит ⇔ автоследование включено.
+     *
+     * Состояний ровно два: включено — кнопка горит синим, выключено — гаснет.
+     * Паузы больше нет: с включённым слежением график всегда возвращается к
+     * своим границам, даже если его подвинули руками.
+     */
     function paintFollowButtons() {
-        const on = state.chartFollow && !state.followPaused;
+        const on = !!state.chartFollow;
         [$("follow-toggle"), $("follow-toggle-pop")].forEach((btn) => {
             if (!btn) return;
             btn.classList.toggle("active", on);
-            btn.classList.toggle("paused", !!state.followPaused);
+            btn.classList.remove("paused");
             btn.setAttribute("aria-pressed", on ? "true" : "false");
-            const key = state.followPaused ? "chart.follow_paused"
-                : (state.chartFollow ? "chart.follow_on" : "chart.follow_off");
-            btn.title = I18n.t(key);
+            btn.setAttribute("data-state", on ? "on" : "off");
+            btn.title = I18n.t(on ? "chart.follow_on" : "chart.follow_off");
         });
     }
 
@@ -650,7 +1007,7 @@
             if (!btn) return;
             btn.addEventListener("click", () => setChartFollow(!state.chartFollow));
         });
-        I18n.onChange(paintFollowButtons);
+        I18n.onChange(() => { paintFollowButtons(); applyChartTimeOptions(); });
         paintFollowButtons();
         applyFollowMode();
         window.LiQScopeFollow = window.LiQScopeFollow || {};
@@ -661,24 +1018,52 @@
             range: followRange,
             priceOptions: followPriceOptions,
             moved: () => state.followMoved,
-            paused: () => !!state.followPaused,
-            pan: (range) => noteFollowPan(range),
+            hold: () => followHold,
+            setHold: (v) => { followHold = !!v; },
+            tick: () => followTick(),
+            setTicker: (v) => setFollowTicker(v),
             anchor: () => anchorToLast(),
+            anchorAll: () => anchorFollowAll(),
+            priceSnap: () => followPriceSnap(),
             step: () => followChartNow(),
-            edgeBars: FOLLOW_EDGE_BARS,
-            keepBars: FOLLOW_KEEP_BARS,
+            edgePct: FOLLOW_EDGE_PCT,
+            driftPct: FOLLOW_DRIFT_PCT,
+            keepBars: (span) => followKeepBars(span, FOLLOW_EDGE_PCT),
             margin: FOLLOW_MARGIN,
+            hyst: FOLLOW_PRICE_HYST,
             // настройки шкалы цены, что реально ушли в график
             priceScaleOptions: () => {
                 try {
-                    const sc = chart && chart.priceScale("right");
+                    const sc = rightPriceScale();
                     return sc && sc.options ? sc.options() : null;
                 } catch (e) { return null; }
             },
+            // вертикальное окно цены: чистая математика + что реально в графике
+            priceShift: followPriceShift,
+            priceFit: followPriceFit,
+            priceStep: () => followPriceNow(),
+            priceVisibleRange: () => {
+                try {
+                    const sc = rightPriceScale();
+                    return sc && sc.getVisibleRange ? sc.getVisibleRange() : null;
+                } catch (e) { return null; }
+            },
+            band: () => visiblePriceBand(),
             timeScaleOptions: () => {
                 try {
                     const ts = chart && chart.timeScale();
                     return ts && ts.options ? ts.options() : null;
+                } catch (e) { return null; }
+            },
+        };
+        // Для tests/chart_time.js: подписи времени можно проверить без графика
+        window.LiQScopeChartTime = {
+            tick: (t, type) => chartTimeText(t, type),
+            crosshair: (t) => chartCrosshairText(t),
+            apply: () => applyChartTimeOptions(),
+            options: () => {
+                try {
+                    return chart && chart.options ? chart.options() : null;
                 } catch (e) { return null; }
             },
         };
@@ -1308,9 +1693,12 @@
         // чтобы при тесноте выживали самые важные сигналы.
         const lastIdx = candles.length - 1;
         const cand = [];
+        // Порог CVD из панели фильтра: нулевой — рисуем всё, что прошло
+        // автоотбор; заданный — режет слабые свечи, как порог ликвидаций.
+        const thr = Math.max(minAbs, state.minCvd > 0 ? state.minCvd : 0);
         for (let i = 0; i < candles.length; i++) {
             const d = Number(candles[i].cvd);
-            if (isFinite(d) && Math.abs(d) >= minAbs) {
+            if (isFinite(d) && Math.abs(d) >= thr) {
                 cand.push({ c: candles[i], d: d, live: i === lastIdx });
             }
         }
@@ -1798,9 +2186,10 @@
         const minAbs = Math.max(1000 * kvol, p90 * 0.05);
 
         const cand = [];
+        const thr = Math.max(minAbs, state.minOi > 0 ? state.minOi : 0);
         for (let i = 0; i < candles.length; i++) {
             const d = Number(candles[i].oiChg);
-            if (isFinite(d) && Math.abs(d) >= minAbs) {
+            if (isFinite(d) && Math.abs(d) >= thr) {
                 cand.push({ c: candles[i], d: d, live: i === candles.length - 1 });
             }
         }
@@ -3276,6 +3665,9 @@
             btn.classList.toggle("active", on);
             btn.setAttribute("aria-selected", on ? "true" : "false");
         });
+        // Порог у каждой ленты свой: подсвечиваем поле открытой вкладки,
+        // чтобы пресеты и подпись кнопки было с чем сверять.
+        refreshFilterButtons();
     }
 
     // Значение ленты CVD/OI за свечу. У OI в свече лежит уровень открытого
@@ -3332,7 +3724,8 @@
         for (let i = candles.length - 1; i >= 0 && items.length < 150; i--) {
             const d = shapeFeedValue(candles[i], field);
             if (!isFinite(d) || Math.abs(d) < minAbs) continue;
-            if (state.minUsd > 0 && Math.abs(d) < state.minUsd) continue;
+            const thr = field === "cvd" ? state.minCvd : state.minOi;
+            if (thr > 0 && Math.abs(d) < thr) continue;
             items.push({
                 _kind: field === "cvd" ? "cvd" : "oi",
                 time: candles[i].time,
@@ -4484,8 +4877,22 @@
             cb.dataset.exch = e;
             const name = document.createElement("span");
             name.textContent = exchangeName(e);
-            label.appendChild(cb);
-            label.appendChild(name);
+            const note = sourceNote(e);
+            if (note) {
+                // Примечание источника из /api/health: биржа сама объясняет,
+                // почему по ней может не быть событий.
+                label.classList.add("check-row-warn");
+                label.title = note;
+                label.appendChild(cb);
+                label.appendChild(name);
+                const tag = document.createElement("span");
+                tag.className = "check-note";
+                tag.textContent = note.length > 28 ? note.slice(0, 27) + "…" : note;
+                label.appendChild(tag);
+            } else {
+                label.appendChild(cb);
+                label.appendChild(name);
+            }
             exchListEl.appendChild(label);
         });
         Array.prototype.forEach.call(exchListEl.querySelectorAll("input[type=checkbox]"), (cb) => {
@@ -4504,12 +4911,31 @@
         applyFiltersFull();
     }
 
+    function thresholdLabel() {
+        const parts = [];
+        const liq = thresholdOf("liq"), cvd = thresholdOf("cvd"), oi = thresholdOf("oi");
+        if (liq > 0) {
+            parts.push(I18n.t("filter.th_short_liq") + " " +
+                       I18n.t("filter.th_ge", { v: I18n.number(liq) }));
+        }
+        if (cvd > 0) parts.push("CVD " + I18n.t("filter.th_ge", { v: I18n.number(cvd) }));
+        if (oi > 0) parts.push("OI Δ " + I18n.t("filter.th_ge", { v: I18n.number(oi) }));
+        return parts.length ? parts.join(" · ") + " ▾" : I18n.t("filter.all_usd");
+    }
+
     function refreshFilterButtons() {
         if (!minUsdBtn) return;
-        minUsdBtn.textContent = state.minUsd > 0
-            ? I18n.t("filter.min_ge", { v: I18n.number(state.minUsd) })
-            : I18n.t("filter.all_usd");
-        if (minUsdInput) minUsdInput.value = state.minUsd > 0 ? String(state.minUsd) : "";
+        minUsdBtn.textContent = thresholdLabel();
+        const fields = [[minUsdInput, "liq"], [minCvdInput, "cvd"], [minOiInput, "oi"]];
+        fields.forEach(([el, kind]) => {
+            const v = thresholdOf(kind);
+            if (el) {
+                el.value = v > 0 ? String(v) : "";
+                // подсветим поле той ленты, что открыта: пресеты и Enter
+                // работают именно с ней
+                el.classList.toggle("filter-active", state.feedTab === kind);
+            }
+        });
         if (exchangeBtn) {
             if (!state.exchanges || state.exchanges.size === state.availableExchanges.length) {
                 exchangeBtn.textContent = I18n.t("filter.all_exchanges");
@@ -4523,9 +4949,28 @@
         }
     }
 
-    function setMinUsd(v, closePanel) {
-        state.minUsd = Math.max(0, parseFloat(v) || 0);
-        saveMinUsd();
+    function setThreshold(kind, v, closePanel) {
+        const cfg = THRESHOLDS[kind] || THRESHOLDS.liq;
+        state[cfg.key] = Math.max(0, parseFloat(v) || 0);
+        saveThreshold(kind);
+        refreshFilterButtons();
+        applyFiltersFull();
+        if (closePanel && minUsdPanel) minUsdPanel.classList.add("hidden");
+    }
+
+    function setMinUsd(v, closePanel) {          // совместимость со старыми вызовами
+        setThreshold("liq", v, closePanel);
+    }
+
+    /** OK в панели: применяем все три поля разом — ликвидации, CVD и OI Δ. */
+    function applyThresholdInputs(closePanel) {
+        [[minUsdInput, "liq"], [minCvdInput, "cvd"], [minOiInput, "oi"]].forEach(([el, kind]) => {
+            if (el) {
+                const cfg = THRESHOLDS[kind];
+                state[cfg.key] = Math.max(0, parseFloat(el.value) || 0);
+            }
+        });
+        ["liq", "cvd", "oi"].forEach(saveThreshold);
         refreshFilterButtons();
         applyFiltersFull();
         if (closePanel && minUsdPanel) minUsdPanel.classList.add("hidden");
@@ -4542,16 +4987,20 @@
             });
         }
         if (minUsdApply) {
-            minUsdApply.addEventListener("click", () => setMinUsd(minUsdInput.value, true));
+            minUsdApply.addEventListener("click", () => applyThresholdInputs(true));
         }
-        if (minUsdInput) {
-            minUsdInput.addEventListener("keydown", (e) => {
-                if (e.key === "Enter") setMinUsd(minUsdInput.value, true);
+        // У каждого порога своё поле: Enter применяет именно его.
+        [[minUsdInput, "liq"], [minCvdInput, "cvd"], [minOiInput, "oi"]].forEach(([el, kind]) => {
+            if (!el) return;
+            el.addEventListener("keydown", (e) => {
+                if (e.key === "Enter") setThreshold(kind, el.value, true);
             });
-        }
+        });
+        // Пресеты — для той ленты, что открыта: на вкладке CVD $25K станет
+        // порогом CVD, на вкладке ликвидаций — порогом ликвидаций.
         if (minUsdPresets) {
             Array.prototype.forEach.call(minUsdPresets.querySelectorAll("button"), (b) => {
-                b.addEventListener("click", () => setMinUsd(b.dataset.v, true));
+                b.addEventListener("click", () => setThreshold(state.feedTab, b.dataset.v, true));
             });
         }
         if (exchangeBtn && exchangePanel) {
@@ -4714,6 +5163,14 @@
     };
     function gateRefUrl() { return GATE_REFS[I18n.lang()] || GATE_REFS.en; }
 
+    // Примечание источника из /api/health (например, «биржа закрывается»):
+    // сервер может отдать его в note — показываем прямо в фильтре.
+    function sourceNote(name) {
+        const k = String(name || "").toLowerCase();
+        const s = state.lastHealth && state.lastHealth.sources && state.lastHealth.sources[k];
+        return (s && (s.note || s.sunset_note)) || "";
+    }
+
     function renderHealth(health) {
         if (!health || !health.sources) return;
         state.lastHealth = health;
@@ -4734,9 +5191,11 @@
             let label = name;
             if (name.indexOf("prices") === 0) label = I18n.t("health.prices");
             else if (name.indexOf("ticks") === 0) label = I18n.t("health.ticks");
-            const title = s.connected
+            let title = s.connected
                 ? I18n.t("health.connected", { n: s.events })
                 : I18n.t("health.noconn", { err: s.last_error || "—" });
+            const note = sourceNote(name);
+            if (note) title += " · " + note;
             parts.push('<span class="exch-chip ' + cls + '" title="' +
                 title.replace(/"/g, "&quot;") + '"><span>' + label + "</span>" +
                 (s.connected ? "" : '<span>✕</span>') + "</span>");
@@ -4773,6 +5232,21 @@
     }
 
     // --- Статистика ----------------------------------------------------------
+    // Группа лидеров: подпись и карточки монет. data-symbol на карточке —
+    // чтобы клик открывал монету так же, как в одиночном списке.
+    function topCoinGroup(title, coins, valueOf) {
+        if (!coins || !coins.length) return "";
+        return '<div class="top-coins-group">' +
+            '<div class="top-coins-group-title">' + title + "</div>" +
+            coins.map((c) =>
+                '<div class="top-coin-card" data-symbol="' + c.symbol + '"' +
+                ' title="' + pretty(c.symbol) + " · $" + fmtUsdShort(c.usd) + " · " +
+                I18n.t("top.count", { n: I18n.number(c.count || 0) }) + '">' +
+                '<div class="top-coin-name">' + pretty(c.symbol) + "</div>" +
+                '<div class="top-coin-val">' + valueOf(c) + "</div></div>").join("") +
+            "</div>";
+    }
+
     function renderStats(data) {
         if (!data) return;
         state.lastStats = data;
@@ -4785,13 +5259,22 @@
         longRatioBar.style.width = longPct + "%";
 
         if (data.top_coins) {
-            topCoinsContainer.innerHTML = data.top_coins.slice(0, 8).map((c) =>
-                '<div class="top-coin-card" data-symbol="' + c.symbol + '">' +
-                '<div class="top-coin-name">' + pretty(c.symbol) + "</div>" +
-                '<div class="top-coin-val">$' + fmtUsdShort(c.usd) + "</div></div>").join("");
-            Array.prototype.forEach.call(topCoinsContainer.children, (el) => {
-                el.addEventListener("click", () => selectSymbol(el.dataset.symbol));
-            });
+            // Два списка лидеров: по деньгам и по числу событий. Одна монета
+            // может гореть одной крупной ликвидацией, другая — сотней мелких,
+            // поэтому вопросы «кто на кассе» и «кого рвало чаще» — разные.
+            const byVol = data.top_coins.slice(0, 4);
+            const byCnt = data.top_coins
+                .filter((c) => Number(c.count) > 0)
+                .sort((a, b) => Number(b.count) - Number(a.count))
+                .slice(0, 4);
+            topCoinsContainer.innerHTML =
+                topCoinGroup(I18n.t("top.by_vol"), byVol, (c) => "$" + fmtUsdShort(c.usd)) +
+                topCoinGroup(I18n.t("top.by_count"), byCnt,
+                             (c) => I18n.t("top.count", { n: I18n.number(c.count) }));
+            Array.prototype.forEach.call(
+                topCoinsContainer.querySelectorAll(".top-coin-card"), (el) => {
+                    el.addEventListener("click", () => selectSymbol(el.dataset.symbol));
+                });
         }
 
         // подписи «сколько ликвидаций по монете» в кнопках
@@ -5129,7 +5612,10 @@
         if (state.soundEnabled) playSound(1000, "BUY");
     });
 
-    clearBtn.addEventListener("click", () => {
+    /** Стереть ленту и метки на графике. История при этом не теряется: она
+     *  лежит на сервере и в локальном кэше, поэтому её можно вернуть кнопкой
+     *  «↩️ Возобновить историю» в выпадающем списке рядом с «Очистить». */
+    function clearChart() {
         state.liquidations = [];
         historyLoaded.clear();   // при след. выборе пары история подтянется заново
         feedTbody.innerHTML = "";
@@ -5137,7 +5623,78 @@
         feedEmptyEl.classList.remove("hidden");
         applyMarkers([]);
         queueRedraw();
+    }
+
+    /** Вернуть всё, что было до очистки: события снова забираются с сервера
+     *  (плюс локальный кэш), поэтому на графике появляется та же история. */
+    function restoreChart() {
+        const sym = chartSymbol();
+        historyLoaded.clear();
+        setClearMenuOpen(false);
+        // что уже лежит рядом — показываем сразу, не дожидаясь сети
+        Promise.all([loadCachedLiquidations(sym, MAX_HISTORY),
+                     state.symbol !== "ALL" && state.symbol !== sym
+                         ? loadCachedLiquidations(state.symbol, MAX_HISTORY)
+                         : Promise.resolve([])]).then(([a, b]) => {
+            mergeLiquidations(a);
+            mergeLiquidations(b);
+            rebuildFeed();
+            updateMarkers();
+            updateLiveStats();
+            queueRedraw();
+        }).catch(() => { /* кэш может быть недоступен — сервер всё равно ответит */ });
+        // сервер — источник правды: тот же путь, что и при выборе пары
+        loadHistoryFor(sym, true);
+        if (state.symbol !== "ALL" && state.symbol !== sym) {
+            loadHistoryFor(state.symbol, true);
+        }
+    }
+
+    function setClearMenuOpen(open) {
+        if (!clearMenu) return;
+        // подсказка: что именно сделает «Возобновить историю» (с учётом языка)
+        const note = $("clear-undo-note");
+        if (note) note.textContent = I18n.t("clear.undone");
+        clearMenu.classList.toggle("hidden", !open);
+        if (clearMenuBtn) clearMenuBtn.setAttribute("aria-expanded", open ? "true" : "false");
+    }
+
+    function runClearAction(act) {
+        if (act === "restore") restoreChart();
+        else clearChart();
+        setClearMenuOpen(false);
+    }
+
+    clearBtn.addEventListener("click", () => {
+        clearChart();
+        setClearMenuOpen(false);
     });
+    if (clearMenuBtn) {
+        clearMenuBtn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            setClearMenuOpen(clearMenu ? clearMenu.classList.contains("hidden") : false);
+        });
+    }
+    if (clearMenu) {
+        // список не закрывается от клика по самому себе
+        clearMenu.addEventListener("click", (e) => e.stopPropagation());
+        clearMenu.addEventListener("click", (e) => {
+            const btn = e.target && e.target.closest ? e.target.closest("[data-clear-act]") : null;
+            if (btn) runClearAction(btn.dataset.clearAct);
+        });
+        document.addEventListener("click", () => setClearMenuOpen(false));
+        document.addEventListener("keydown", (e) => {
+            if (e.key === "Escape") setClearMenuOpen(false);
+        });
+        setClearMenuOpen(false);      // подсказка заполнена ещё до раскрытия
+    }
+    window.LiqScopeClear = {      // тестовый API для tests/clear_restore.js
+        clear: clearChart,
+        restore: restoreChart,
+        isOpen: () => !!(clearMenu && !clearMenu.classList.contains("hidden")),
+        setOpen: setClearMenuOpen,
+        count: () => state.liquidations.length,
+    };
 
     function closeModal() {
         // закрываем окно закреплённого кластера — снимаем и подсветку ленты

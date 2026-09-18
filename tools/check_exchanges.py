@@ -190,8 +190,6 @@ async def main():
                          "https://api.bitget.com/api/v3/market/current-fund-rate?category=USDT-FUTURES&symbol=BTCUSDT")
         await check_rest(s, "HTX linear swap index",
                          "https://api.hbdm.com/linear-swap-api/v1/swap_contract_info?contract_code=BTC-USDT")
-        await check_rest(s, "BitMEX instruments",
-                         "https://www.bitmex.com/api/v1/instrument/active")
         await check_rest_post(s, "Hyperliquid meta universe",
                               "https://api.hyperliquid.xyz/info", {"type": "meta"})
         await check_rest(s, "dYdX v4 perpetualMarkets",
@@ -263,11 +261,6 @@ async def main():
                        gzipped=True,
                        on_message=lambda p: ({"op": "pong", "ts": p.get("ts")}
                                              if p.get("op") == "ping" else None),
-                       wait=max(WAIT, 20))
-        await check_ws(s, "BitMEX liquidation",
-                       "wss://ws.bitmex.com/realtime?subscribe=liquidation",
-                       match=lambda p: p.get("table") == "liquidation"
-                       and p.get("action") == "insert",
                        wait=max(WAIT, 20))
         await check_ws(s, "Gate futures.public_liquidates",
                        "wss://fx-ws.gateio.ws/v4/ws/usdt",

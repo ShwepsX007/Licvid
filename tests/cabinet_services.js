@@ -66,6 +66,13 @@ async function main() {
   }
 
   const html = await (await fetch(URL_BASE + "/cabinet", { headers: { cookie } })).text();
+  // Тест трогает настройки сервисов (окно и порог сигнала корреляции, период и
+  // число свечей сторожа). Запоминаем их, чтобы вернуть после прогона: стенд
+  // должен оставаться в том состоянии, в каком его открывает человек.
+  const readJson = async (path) =>
+    (await fetch(URL_BASE + path, { headers: { cookie } })).json();
+  const beforeCorr = await readJson("/api/account/correlations");
+  const beforePump = await readJson("/api/account/watchlist");
   const apiCalls = [];
   const vc = new VirtualConsole();
   vc.on("jsdomError", (e) => errors.push("jsdomError: " + String(e.message || e).slice(0, 200)));
@@ -143,37 +150,141 @@ async function main() {
         apiCalls.map((c) => c.url).filter((u) => u.indexOf("correlations") === 0).join(" "));
   const cells = qa("#corr-board .cor-heat-cell");
   check("тепловая карта: клетки с коэффициентами", cells.length >= 4, cells.length + " клеток");
+  // Пояснение к тепловой карте: что за цифра в клетке и что значит цвет.
+  // Спрашивается у пользователя дважды — наведением и кликом.
+  const heatNotes = qa("#corr-board .cor-heat-note");
+  check("у каждой карты своё пояснение, что показывают данные",
+        heatNotes.length >= 4 && heatNotes.every((n) =>
+          /Что это/.test(n.textContent) && n.textContent.length > 80),
+        heatNotes.length + " блоков: " + (heatNotes[0] ? heatNotes[0].textContent.slice(0, 80) : "нет"));
+  check("в пояснении названы метрика, окно и смысл цвета",
+        heatNotes.some((n) => /зелёный/.test(n.textContent)) &&
+        heatNotes.some((n) => /красный/.test(n.textContent)) &&
+        heatNotes.some((n) => /коэффициент/.test(n.textContent)),
+        heatNotes[0] ? heatNotes[0].textContent.slice(0, 160) : "нет блоков");
+  const cellsWithTip = cells.filter((c) => (c.getAttribute("title") || "").length > 40);
+  check("у клеток есть подсказка при наведении (что за пара и что значит число)",
+        cellsWithTip.length === cells.length,
+        cellsWithTip.length + "/" + cells.length);
   check("в клетках есть числа корреляции",
         cells.some((c) => /^-?\d\.\d\d$/.test(c.textContent.trim())), cells[0] && cells[0].textContent);
   check("есть блоки потоков (шорты/лонги/CVD/OI)",
         qa("#corr-board .cor-flow-h").length >= 6, qa("#corr-board .cor-flow-h").length + " блоков");
-  check("есть окна и метрики для выбора",
-        qa("#cor-wins .al-chip").length >= 4 && qa("#cor-mets .al-chip").length >= 4,
-        qa("#cor-wins .al-chip").length + "/" + qa("#cor-mets .al-chip").length);
+  check("есть чипы окна",
+        qa("#cor-wins .al-chip").length >= 4,
+        qa("#cor-wins .al-chip").length + " чипов окна");
+  // Требование: у каждой переменной своя тепловая карта и выбирать, какую
+  // смотреть, не нужно — метрики показываются все сразу.
+  const maps = qa("#corr-board .cor-map");
+  check("тепловая карта есть у каждой переменной сразу (4 шт.)",
+        maps.length === 4 &&
+        ["liq", "vol", "cvd", "oi"].every((m) => !!q("#corr-board [data-cormap=\"" + m + "\"]")),
+        maps.length + " карт");
+  check("переключателя метрик больше нет (карты не выбирают)",
+        !q("#cor-mets") && !q("#corr-board [data-cormet]"),
+        q("#cor-mets") ? "селектор на месте" : "селектора нет");
+  check("у каждой карты свой блок клеток",
+        qa("#corr-board [data-corheat]").length === 4,
+        qa("#corr-board [data-corheat]").length + " блоков");
+  check("под каждой картой — свои сильные связи",
+        qa("#corr-board [data-corpairs]").length === 4,
+        qa("#corr-board [data-corpairs]").length + " списков");
+  check("в каждой карте есть настройки сигнала по этой переменной",
+        qa("#corr-board [data-coralert]").length === 4 &&
+        qa("#corr-board [data-coraopp]").length === 4 &&
+        qa("#corr-board [data-corasame]").length === 4 &&
+        qa("#corr-board [data-corawin]").length >= 16,
+        qa("#corr-board [data-coralert]").length + " блоков настроек");
+  // Вид доски: каждая переменная — горизонтальная строка во всю ширину, строки
+  // идут друг под другом (раньше карты стояли столбиками рядом, каждая в своём).
+  const css2 = (el, prop) => win.getComputedStyle(el)[prop];
+  const mapsBox = $("cor-maps");
+  check("строки переменных идут друг под другом (одна колонка у доски)",
+        !!mapsBox && css2(mapsBox, "gridTemplateColumns") === "1fr",
+        mapsBox ? css2(mapsBox, "gridTemplateColumns") : "нет доски");
+  const rowGrids = qa("#corr-board .cor-map > .cor-map-grid");
+  check("внутри строки — горизонтальная раскладка в несколько колонок",
+        rowGrids.length === 4 && rowGrids.every((g) =>
+          (css2(g, "gridTemplateColumns").match(/minmax/g) || []).length >= 3),
+        rowGrids.length + " строк: " +
+        (rowGrids[0] ? css2(rowGrids[0], "gridTemplateColumns") : "нет"));
+  check("карта переменной, её связи и сигнал стоят в одной строке, а не столбиком",
+        rowGrids.length === 4 && rowGrids.every((g) =>
+          !!g.querySelector(":scope > .cor-col-heat [data-corheat]") &&
+          !!g.querySelector(":scope > .cor-col-links [data-corpairs]") &&
+          !!g.querySelector(":scope > .cor-col-alert [data-coralert]")),
+        rowGrids.length + " строк");
+  check("порядок строк — как переменные: liq, vol, cvd, oi",
+        qa("#cor-maps > .cor-map").map((m) => m.getAttribute("data-cormap")).join(",") ===
+        "liq,vol,cvd,oi",
+        qa("#cor-maps > .cor-map").map((m) => m.getAttribute("data-cormap")).join(","));
+  const metas = qa("#corr-board [data-cormeta]");
+  check("в заголовке строки — сводка по переменной (окно, монеты, связи, сигнал)",
+        metas.length === 4 && metas.every((m) =>
+          /окно /.test(m.textContent) && /монет /.test(m.textContent) &&
+          /связей /.test(m.textContent) && /сигнал: (вкл|выкл)/.test(m.textContent)),
+        metas.length + " сводок: " + (metas[0] ? metas[0].textContent : "нет"));
   // связей может не быть, если в окне мало часов с историей — тогда доска
   // честно говорит об этом; иначе показываем пары и клик по паре
-  const pairRows = qa("#cor-pairs .cor-pair");
-  const pairHint = /мало истории|связей пока нет/.test(
-    ($("cor-pairs") ? $("cor-pairs").textContent : ""));
+  const pairRows = qa("#corr-board [data-corpairs] .cor-pair");
+  const pairHint = qa("#corr-board [data-corpairs]").some((b) =>
+    /мало истории|связей пока нет/.test(b.textContent));
   check("есть список связей или честная подсказка про мало истории",
         pairRows.length >= 1 || pairHint,
         pairRows.length + " пар | " + (pairHint ? "подсказка есть" : "нет"));
 
-  // переключение метрики на CVD идёт на сервер
-  const cvdChip = qa("#cor-mets .al-chip").filter((b) => /CVD/.test(b.textContent))[0];
-  check("чип CVD есть", !!cvdChip);
-  if (cvdChip) {
-    cvdChip.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, view: win }));
-    await sleep(1200);
-    check("после клика картина запрошена по CVD",
-          apiCalls.some((c) => c.url.indexOf("metric=cvd") !== -1),
-          apiCalls.map((c) => c.url).filter((u) => u.indexOf("correlations") === 0).slice(-1)[0]);
-    check("клетки тепловой карты пересобраны", qa("#corr-board .cor-heat-cell").length >= 4,
-          qa("#corr-board .cor-heat-cell").length);
+  // Карты не выбирают — но окно сигнала у каждой переменной своё: клик по
+  // чипу окна в карте ликвидаций сохраняет его только ликвидациям.
+  const liqAlert = q("#corr-board [data-coralert=\"liq\"]");
+  const win1h = liqAlert && liqAlert.querySelector('[data-corawin="liq|1h"]');
+  check("у ликвидаций есть своё окно сигнала (1 ч)", !!win1h);
+  if (win1h) {
+    const before = apiCalls.filter((c) => c.method === "POST" &&
+      c.url.indexOf("/api/account/correlations") === 0).length;
+    win1h.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, view: win }));
+    await sleep(700);
+    const posts = apiCalls.filter((c) => c.method === "POST" &&
+      c.url.indexOf("/api/account/correlations") === 0);
+    check("окно сигнала ушло на сервер только для ликвидаций",
+          posts.length > before && /"liq":\{[^}]*"window":"1h"/.test(String(posts.slice(-1)[0].body)),
+          posts.slice(-1)[0] && String(posts.slice(-1)[0].body).slice(0, 200));
+    check("чип окна подсветился сразу", win1h.classList.contains("on"), win1h.className);
+  }
+  // Порог «в одну сторону»: ставим и проверяем, что ушло в настройки.
+  const sameIn = q("#corr-board [data-corasame=\"liq\"]");
+  if (sameIn) {
+    sameIn.value = "0.5";
+    sameIn.dispatchEvent(new win.Event("change", { bubbles: true }));
+    await sleep(700);
+    const last = apiCalls.filter((c) => c.method === "POST" &&
+      c.url.indexOf("/api/account/correlations") === 0).slice(-1)[0];
+    check("порог «в одну сторону» сохранён и включил сигнал",
+          !!last && /"same":0.5/.test(String(last.body)) && /"enabled":true/.test(String(last.body)),
+          last && String(last.body).slice(0, 200));
+    check("переключатель сигнала загорелся",
+          !!q("#corr-board [data-coralert=\"liq\"] [data-coralon].on"),
+          "нет подсветки");
+  }
+
+  const cellsNow = qa("#corr-board .cor-heat-cell:not(.diag)");
+  check("в клетках карт есть числа корреляции",
+        cellsNow.length >= 4 && cellsNow.some((c) => /^-?\d\.\d\d$/.test(c.textContent.trim())),
+        cellsNow.length + " клеток, первая: " + (cellsNow[0] && cellsNow[0].textContent));
+
+  // клик по клетке карты объясняет её текстом (на телефоне наведения нет)
+  const cell = q("[data-corheat] .cor-heat-cell:not(.diag)");
+  if (cell) {
+    const before = $("cor-status").textContent;
+    cell.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, view: win }));
+    await sleep(200);
+    const after = $("cor-status").textContent;
+    check("клик по клетке карты объясняет пару словами",
+          /r = /.test(after) && /в одну сторону|противофазе/.test(after) && after !== before,
+          after.slice(0, 160));
   }
 
   // клик по паре объясняет связь словами
-  const pair = q("#cor-pairs .cor-pair");
+  const pair = q("[data-corpairs] .cor-pair");
   if (pair) {
     pair.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, view: win }));
     await sleep(200);
@@ -209,8 +320,21 @@ async function main() {
   check("у сторожа включён сигнал (как в демо-подписке)",
         /СИГНАЛ (ВКЛ|ВЫКЛ)/.test(pump.textContent), q("#pump-sw") && q("#pump-sw").textContent);
 
+  // «Облако связей» из сервиса корреляций убрано: вместе с тепловой картой
+  // осталось распределение связей (гистограмма коэффициентов).
+  check("облака связей больше нет в сервисе корреляций",
+        !$("cor-scatter") && !q("#cor-chart-box") && !q("#cor-axis-x") && !q("#cor-axis-y"),
+        [$("cor-scatter") ? "canvas" : "", q("#cor-chart-box") ? "box" : "",
+         q("#cor-axis-x") ? "оси" : ""].join(" "));
+  check("распределение связей по интервалам r осталось", qa(".cor-hist i").length >= 8,
+        qa(".cor-hist i").length + " столбиков");
+  check("тепловые карты всех переменных на месте",
+        qa("#corr-board [data-corheat] .cor-heat-cell").length >= 16,
+        qa("#corr-board [data-corheat] .cor-heat-cell").length + " клеток");
+
   // сохранение настройки: порог 30%
-  const before = apiCalls.filter((c) => c.method === "POST").length;
+  const before = apiCalls.filter((c) => c.method === "POST" &&
+    c.url.indexOf("/api/account/watchlist") === 0).length;
   const chip30 = qa("#pump-thr .al-chip").filter((b) => b.textContent.trim() === "30%")[0];
   check("есть чип порога 30%", !!chip30);
   if (chip30) {
@@ -224,6 +348,85 @@ async function main() {
           /сохранено|ошибка|null/.test($("pump-status") ? $("pump-status").textContent : ""),
           $("pump-status") && $("pump-status").textContent);
   }
+
+  // Регрессия «Период свечей / Сколько свечей скачут и остаются на месте»:
+  // клик по чипу тут же просил свежий снимок у сервера, снимок приходил со
+  // старым значением, доска пересобиралась — чип отскакивал назад, а на сервер
+  // уходило старое число. Теперь нажатие — источник правды, пока сервер его
+  // не подтвердил.
+  // Чипы выбора держим с самым коротким окном (1m × 1 свеча): демо-стенд
+  // копит минутные срезы, и длинное окно оставило бы доску без движений.
+  const perChip = qa("#pump-per .al-chip").filter((b) => b.textContent.trim() === "1m")[0];
+  const cndChip = qa("#pump-cnd .al-chip").filter((b) => b.textContent.trim() === "1 свеч.")[0];
+  check("есть чипы «1m» и «1 свеч.»", !!perChip && !!cndChip);
+  const windowText = () => ($("pump-window") ? $("pump-window").textContent : "");
+  const markedCandles = () => Number(String((qa("#pump-cnd .al-chip")
+    .filter((b) => b.classList.contains("on"))[0] || {}).textContent || "").replace(/\D+/g, "")) || 0;
+  if (perChip && cndChip) {
+    perChip.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, view: win }));
+    await sleep(250);
+    check("клик по периоду подсветил чип сразу", perChip.classList.contains("on"), perChip.className);
+    const expectWin = (1 * markedCandles()) + "м";
+    check("окно сигнала пересчитано сразу (период × свечи)",
+          windowText().indexOf(expectWin) !== -1, windowText().slice(0, 60) + " | ждали " + expectWin);
+    await sleep(1200);
+    check("период не отскакивает назад после снимка сервера",
+          perChip.classList.contains("on"), perChip.className);
+    cndChip.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, view: win }));
+    await sleep(1400);
+    check("число свечей не отскакивает назад после снимка сервера",
+          cndChip.classList.contains("on"), cndChip.className);
+    check("окно сигнала с одной свечой — один период",
+          windowText().indexOf("1м") !== -1, windowText().slice(0, 60));
+    const lastSave = apiCalls.filter((c) => c.method === "POST" &&
+      c.url.indexOf("/api/account/watchlist") === 0).slice(-1)[0];
+    check("на сервер ушли выбранные период и свечи",
+          !!lastSave && /"period":"1m"/.test(String(lastSave.body)) &&
+          /"candles":1/.test(String(lastSave.body)),
+          lastSave && String(lastSave.body).slice(0, 140));
+  }
+
+  // Регрессия «кнопки в новых сервисах туго отвечают»: доски сторожа и
+  // корреляций перерисовывались целиком на автообновлении (12 и 30 секунд) —
+  // обработчики чипов исчезали, и нажатие уходило в пустоту. Ждём тик
+  // автообновления сторожа и проверяем, что клик по чипу по-прежнему работает.
+  await sleep(13000);
+  const beforeTick = apiCalls.filter((c) => c.method === "POST" &&
+    c.url.indexOf("/api/account/watchlist") === 0).length;
+  const chipAfterTick = qa("#pump-thr .al-chip").filter((b) => b.textContent.trim() === "20%")[0];
+  check("после автообновления доски чипы на месте", !!chipAfterTick);
+  if (chipAfterTick) {
+    chipAfterTick.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, view: win }));
+    await sleep(900);
+    const afterTick = apiCalls.filter((c) => c.method === "POST" &&
+      c.url.indexOf("/api/account/watchlist") === 0).length;
+    check("после автообновления доски чип всё ещё сохраняет настройку",
+          afterTick > beforeTick, afterTick - beforeTick + " запросов");
+    check("после автообновления клик сразу подсветил чип",
+          chipAfterTick.classList.contains("on"), chipAfterTick.className);
+  }
+
+  // Возвращаем настройки сервисов как были — и проверяем, что вернулись.
+  const restore = async (path, body) => (
+    await fetch(URL_BASE + path, {
+      method: "POST",
+      headers: { cookie, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    })
+  ).ok;
+  const corrBack = await restore("/api/account/correlations", {
+    window: beforeCorr.config && beforeCorr.config.window,
+    metric: beforeCorr.config && beforeCorr.config.metric,
+    alerts: beforeCorr.alerts,
+  });
+  const pumpBack = await restore("/api/account/watchlist", beforePump.config);
+  const afterCorr = await readJson("/api/account/correlations");
+  const alertsSame = ["liq", "vol", "cvd", "oi"].every((m) =>
+    JSON.stringify((afterCorr.alerts || {})[m]) ===
+    JSON.stringify((beforeCorr.alerts || {})[m]));
+  check("сигналы корреляции возвращены как были после прогона", corrBack && alertsSame,
+        JSON.stringify(afterCorr.alerts).slice(0, 160));
+  check("настройки сторожа возвращены как были после прогона", pumpBack);
 
   const viewportWarn = [];
   check("ошибок страницы нет", errors.length === 0,

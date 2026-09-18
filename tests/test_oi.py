@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from oi_feed import (EXCHANGES, OpenInterestTracker, bucket_5m,  # noqa: E402
                      bucket_changes, map_candles_to_oi, parse_binance_hist,
                      parse_binance_spot, parse_bitfinex_oi, parse_bitget_oi,
-                     parse_bitmex_oi, parse_bybit_hist, parse_bybit_oi,
+                     parse_bybit_hist, parse_bybit_oi,
                      parse_dydx_oi, parse_gate_stats, parse_hl_oi,
                      parse_htx_oi, parse_kraken_oi, parse_okx_oi)
 
@@ -61,15 +61,6 @@ check("bitget", parse_bitget_oi({"data": {"openInterestAmount": "2"}}, 100.0) ==
 check("bitget none", parse_bitget_oi({}, 100.0) is None)
 check("htx", parse_htx_oi({"data": [{"amount": 3.0, "volume": 30}]}, 100.0) == 300.0)
 check("htx empty", parse_htx_oi({"data": []}, 100.0) is None)
-check("bitmex inverse",
-      parse_bitmex_oi([{"openInterest": 1000}], {"inverse": True}, 0) == 1000)
-check("bitmex linear fallback price",
-      parse_bitmex_oi([{"openInterest": 10, "lastPrice": 3000}],
-                      {"inverse": False, "multiplier": 0.001}, None) == 30.0)
-check("bitmex no meta",
-      parse_bitmex_oi([{"openInterest": 10}], {"inverse": False, "multiplier": 0}, 5) is None)
-check("bitmex empty", parse_bitmex_oi([], {}, 1) is None)
-
 print("parsers: history")
 bh = parse_binance_hist([
     {"sumOpenInterestValue": "100.0", "timestamp": (B0 + 300) * 1000},
@@ -124,8 +115,7 @@ check("map empty", map_candles_to_oi([100], 5, {}, {}) ==
       {100: {"oi": None, "oiChg": None}})
 
 print("tracker: changes/snapshot/payload")
-tr = OpenInterestTracker(price_fn=lambda s: 50000.0,
-                         bitmex_meta_fn=lambda: {"XBTUSD": {"inverse": True}})
+tr = OpenInterestTracker(price_fn=lambda s: 50000.0)
 now_b = int(time.time() // 300) * 300
 tr._series["BTC_USDT"] = {
     now_b - 86400: {"binance": 100.0, "gate": 50.0},
@@ -167,12 +157,6 @@ check("series anchors first", ser[1000] == 100.0, ser)
 check("series no coverage jump", ser[1300] == 110.0 and ser[1600] == 130.0, ser)
 check("bucket_chg passthrough", tr2.bucket_chg("X") == {1300: 10.0, 1600: 20.0})
 
-print("tracker: bitmex symbols")
-check("bitmex btc", tr.bitmex_symbol("BTC_USDT") == "XBTUSD")
-check("bitmex unknown cached none", tr.bitmex_symbol("DOGE_USDT") is None)
-tr3 = OpenInterestTracker(bitmex_meta_fn=lambda: {"DOGEUSDT": {}})
-check("bitmex prefers usdt", tr3.bitmex_symbol("DOGE_USDT") == "DOGEUSDT")
-
 print("tracker: watch LRU")
 tr4 = OpenInterestTracker()
 for i in range(15):
@@ -212,8 +196,7 @@ class FakeSession:
 
 
 async def _fetch_all():
-    fx = OpenInterestTracker(price_fn=lambda s: 100.0,
-                             bitmex_meta_fn=lambda: {"XBTUSD": {"inverse": True}})
+    fx = OpenInterestTracker(price_fn=lambda s: 100.0)
     fx.bind(FakeSession({
         "fapi/v1/openInterest": {"openInterest": "10"},
         "premiumIndex": {"markPrice": "100"},
@@ -224,7 +207,6 @@ async def _fetch_all():
         "contract_stats": [{"time": B0 + 300, "open_interest_usd": "33"}],
         "mix/market/open-interest": {"data": {"openInterestAmount": "7"}},
         "swap_open_interest": {"data": [{"amount": 9.0}]},
-        "instrument": [{"openInterest": 111, "lastPrice": 100.0}],
     }))
     import liq_api
     real_spec = liq_api.get_okx_spec
@@ -241,7 +223,6 @@ async def _fetch_all():
             "gate": await fx._fetch_gate("BTC_USDT"),
             "bitget": await fx._fetch_bitget("BTC_USDT"),
             "htx": await fx._fetch_htx("BTC_USDT"),
-            "bitmex": await fx._fetch_bitmex("BTC_USDT"),
         }, fx
     finally:
         liq_api.get_okx_spec = real_spec
@@ -255,12 +236,10 @@ check("fetch okx", res["okx"] == 1000.0, res["okx"])
 check("fetch gate", res["gate"] == 33.0, res["gate"])
 check("fetch bitget", res["bitget"] == 700.0, res["bitget"])
 check("fetch htx", res["htx"] == 900.0, res["htx"])
-check("fetch bitmex", res["bitmex"] == 111.0, res["bitmex"])
 
 
 async def _sample_merge():
-    fx = OpenInterestTracker(price_fn=lambda s: 100.0,
-                             bitmex_meta_fn=lambda: {"XBTUSD": {"inverse": True}})
+    fx = OpenInterestTracker(price_fn=lambda s: 100.0)
     fx.bind(FakeSession({
         "fapi/v1/openInterest": {"openInterest": "10"},
         "v5/market/open-interest": {"result": {"list": [
@@ -269,7 +248,6 @@ async def _sample_merge():
         "contract_stats": [{"time": int(time.time()), "open_interest_usd": "33"}],
         "mix/market/open-interest": {"data": {"openInterestAmount": "7"}},
         "swap_open_interest": {"data": [{"amount": 9.0}]},
-        "instrument": [{"openInterest": 111}],
     }))
     import liq_api
     real_spec = liq_api.get_okx_spec
@@ -287,7 +265,7 @@ async def _sample_merge():
 
 print("sample merge")
 legs, fx = asyncio.run(_sample_merge())
-check("sample 7 legs", len(legs) == 7, sorted(legs))
+check("sample 6 legs", len(legs) == 6, sorted(legs))
 check("sample live stored", "binance" in (fx._live.get("BTC_USDT") or {}))
 check("sample bucket merged",
       "binance" in fx._series["BTC_USDT"][bucket_5m(time.time())])
@@ -408,7 +386,7 @@ check("oi demo win keys",
       set(_demo["partial"]) == {k for k, _ in OI_WINDOWS})
 
 print("OI: dYdX / Kraken Futures / Bitfinex / Hyperliquid")
-check("в опросе 11 бирж", len(EXCHANGES) == 11, EXCHANGES)
+check("в опросе 10 бирж", len(EXCHANGES) == 10, EXCHANGES)
 for name in ("dydx", "kraken", "bitfinex", "hyperliquid"):
     check(f"  {name} в списке опроса", name in EXCHANGES, EXCHANGES)
 check("dYdX: openInterest в базовой монете * цена",

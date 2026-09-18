@@ -43,8 +43,24 @@ class PumpNotifyTest(unittest.TestCase):
             running = True
             pump_snapshot_fn = None
 
+            def __init__(self):
+                # Бот знает язык получателя и переводит исходящее сам:
+                # заглушка повторяет этот интерфейс, иначе проверка падает
+                # не на логике сигналов, а на отсутствующем методе.
+                self.langs = {}
+
+            def remember_lang(self, tg_id, lang):
+                self.langs[int(tg_id)] = "en" if str(lang or "").startswith("en") else "ru"
+                return self.langs[int(tg_id)]
+
+            def warm_langs(self, rows):
+                for row in rows or []:
+                    if isinstance(row, dict) and (row.get("tg_id") or row.get("chat_id")):
+                        self.remember_lang(row.get("tg_id") or row.get("chat_id"),
+                                           row.get("language") or row.get("lang") or "")
+
             async def send(self, chat_id, text, markup=None, parse=None,
-                           silent=False):
+                           silent=False, raw=False):
                 self_outer.sent.append({"chat_id": chat_id, "text": text,
                                         "markup": markup})
                 return 1

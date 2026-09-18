@@ -2,7 +2,9 @@
  *
  *  Структура: в плашке у всех слоёв подпись+цифра в .layer-cell,
  *  а все 4 кнопки выезжают сверху горизонтальной панелью по кнопке
- *  «☰ Слои» (закрытие: повторный клик, клик мимо, Esc).
+ *  «☰ Слои» (закрытие: повторный клик, клик мимо, Esc). Расшифровка цветов
+ *  («Ликв. лонгов», «Кит ($100k+)», «CVD ▼») живёт в этой же плашке —
+ *  столбиком над кнопками, а не строкой в шапке графика.
  *  Кнопки: nowrap, inline-flex, line-height 1.3
  *  (текст не вылезает), активный слой подсвечен цветом своих фигур.
  *  Цифры: inline-block, ширина строго по содержимому (без min-width —
@@ -115,6 +117,27 @@ async function main() {
       !!prev && prev.classList.contains("layer-label"));
   });
 
+  // --- расшифровка цветов: в плашке слоёв, столбиком над кнопками ---
+  check("в шапке графика расшифровки нет",
+    doc.querySelectorAll(".chart-legend .legend-item").length === 0,
+    doc.querySelectorAll(".chart-legend .legend-item").length + " пунктов");
+  const legendBox = doc.getElementById("layer-legend");
+  const legendItems = Array.prototype.slice.call(doc.querySelectorAll(".legend-item"));
+  check("расшифровка лежит в плашке слоёв",
+    !!legendBox && legendItems.length === 5 &&
+    legendItems.every((el) => legendBox.contains(el)),
+    legendItems.length + " пунктов");
+  check("расшифровка над кнопками слоёв",
+    !!legendBox && legendBox.parentElement.id === "layer-pop" &&
+    legendBox.parentElement.firstElementChild === legendBox);
+  check("пункты идут в ряд и переносятся",
+    !!legendBox && cs(legendBox).flexDirection === "row" && cs(legendBox).flexWrap === "wrap",
+    legendBox ? cs(legendBox).flexDirection + "/" + cs(legendBox).flexWrap : "нет блока");
+  check("расшифровка говорит про лонгов, шортов, китов и CVD",
+    !!legendBox && ["Ликв. лонгов", "Ликв. шортов", "Кит ($100k+)", "CVD ▲", "CVD ▼"]
+      .every((t) => legendBox.textContent.indexOf(t) !== -1),
+    legendBox ? legendBox.textContent.replace(/\s+/g, " ").trim().slice(0, 90) : "нет блока");
+
   // --- кнопки не рвут текст ---
   pairs.forEach(([b]) => {
     const st = cs(doc.getElementById(b));
@@ -212,11 +235,12 @@ async function main() {
     cssBlock("#layer-call").indexOf("margin-left: auto") !== -1);
   const legendKids = Array.from(doc.querySelector(".chart-legend").children);
   const kidIds = legendKids.map((k) => k.id || k.className);
-  // справа: слои, автоследование за ценой, рисование, свернуть/развернуть
+  // справа: слои, рисование, свернуть/развернуть.
+  // автоследование убрано из шапки — оно живёт в плашке слоёв
   check("right cluster order",
-    kidIds.slice(-5).join(",") ===
-      "layer-call,follow-toggle,draw-toggle,chart-toggle,chart-expand",
-    kidIds.slice(-5).join(","));
+    kidIds.slice(-4).join(",") ===
+      "layer-call,draw-toggle,chart-toggle,chart-expand",
+    kidIds.slice(-4).join(","));
   check("toggles last in legend",
     legendKids.length >= 2 &&
     legendKids[legendKids.length - 2].id === "chart-toggle" &&

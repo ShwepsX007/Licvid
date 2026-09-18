@@ -183,7 +183,8 @@ class TestSignalText(unittest.TestCase):
     def test_ru_text(self):
         text = format_signal_html(self.hit, "ru")
         self.assertIn("Дамп", text)
-        self.assertIn("SOL -31.42%", text)
+        self.assertIn("SOL", text)
+        self.assertIn("-31.42%", text)
         self.assertIn("3 × 5m", text)
         self.assertIn("15 мин", text)
         self.assertIn("текущая свеча учтена", text)
@@ -191,11 +192,31 @@ class TestSignalText(unittest.TestCase):
         self.assertIn("$222.10", text)
         self.assertIn("12.50 млн", text)
 
+    def test_text_is_pretty_like_alerts(self):
+        """Оформление сигнала — как у алертов по объёму.
+
+        Шапка «иконка · монета», крупные числа в разметке Telegram и общий
+        подвал LiqScope: сообщения бота должны выглядеть одинаково.
+        """
+        from alerts import footer_html
+        text = format_signal_html(self.hit, "ru")
+        head = text.split("\n")[0]
+        self.assertTrue(head.startswith("🩸 <b>Дамп · SOL</b>"), head)
+        self.assertIn("<b>-31.42%</b>", text)
+        self.assertIn("<code>$152.40</code>", text)
+        self.assertIn("<code>$222.10</code>", text)
+        self.assertIn("<code>$12.50 млн</code>", text)
+        self.assertIn(footer_html(), text)
+
     def test_en_text(self):
         text = format_signal_html(self.hit, "en")
         self.assertIn("Dump", text)
         self.assertIn("open candle counted", text)
         self.assertNotIn("Дамп", text)
+        # суммы в английском — без русских суффиксов
+        self.assertIn("$12.50M", text)
+        self.assertNotIn("млн", text)
+        self.assertIn("a live liquidation stream", text)
 
     def test_pump_text(self):
         pump = dict(self.hit, kind="pump", change_pct=44.0)

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>LiqScope — админка</title>
 <link rel="icon" type="image/png" href="/static/logo.png">
-<link rel="stylesheet" href="/static/account.css">
+<link rel="stylesheet" href="/static/account.css?v=alerts3">
 </head>
 <body data-page="admin">
 <header class="site-header">
@@ -26,8 +26,9 @@
     <div class="grid grid-4" style="margin-top:22px">
         <div class="card"><span class="stat-value" id="st-users">—</span><span class="stat-label">Пользователей</span></div>
         <div class="card"><span class="stat-value" id="st-new">—</span><span class="stat-label">Новых за 24ч</span></div>
-        <div class="card"><span class="stat-value" id="st-views">—</span><span class="stat-label">Просмотров сегодня</span></div>
-        <div class="card"><span class="stat-value" id="st-uniq">—</span><span class="stat-label">Уникальных сегодня</span></div>
+        <div class="card"><span class="stat-value" id="st-views">—</span><span class="stat-label">Переходов сегодня</span></div>
+        <div class="card"><span class="stat-value" id="st-uniq">—</span><span class="stat-label">Уникальных посетителей</span></div>
+        <div class="card"><span class="stat-value" id="st-bots">—</span><span class="stat-label">Служебных отсеяно</span></div>
         <div class="card"><span class="stat-value" id="st-ws">—</span><span class="stat-label">Онлайн WS</span></div>
         <div class="card"><span class="stat-value" id="st-exch">—</span><span class="stat-label">Бирж в эфире</span></div>
         <div class="card"><span class="stat-value" id="st-bot" style="font-size:1.05rem">—</span><span class="stat-label">Telegram-бот</span></div>
@@ -92,15 +93,26 @@
                 <ul class="tpl-list" id="tpl-heads"></ul>
             </div>
             <div>
-                <label>Новое фото (jpg / png / webp)</label>
+                <h4>📸 Фото постов в канал</h4>
+                <p class="meta">В пост уходит одно фото: набор листается от поста к посту — обложкой по очереди бывает каждое. Альбома нет: он валил все загруженные фото в один пост. Пусто — берутся картинки из комплекта.</p>
                 <div class="row-actions">
                     <label class="btn btn-primary file-btn">
-                        Выбрать файл
+                        Добавить фото
                         <input id="tpl-photo-in" type="file" accept="image/jpeg,image/jpg,image/png,image/webp,image/*">
                     </label>
                     <span class="meta" id="tpl-photo-status">jpg, png, webp — до 12 МБ</span>
                 </div>
                 <div class="tpl-photos" id="tpl-photos"></div>
+                <h4 style="margin-top:14px">🗞 Фото дневного дайджеста</h4>
+                <p class="meta">Свои картинки для вечернего выпуска. Если пусто — дайджест возьмёт фото постов. Карусель та же.</p>
+                <div class="row-actions">
+                    <label class="btn btn-primary file-btn">
+                        Добавить фото
+                        <input id="tpl-photo-in-digest" type="file" accept="image/jpeg,image/jpg,image/png,image/webp,image/*">
+                    </label>
+                    <span class="meta" id="tpl-photo-status-digest">jpg, png, webp — до 12 МБ</span>
+                </div>
+                <div class="tpl-photos" id="tpl-photos-digest"></div>
             </div>
         </div>
     </div>
@@ -135,6 +147,10 @@
                     <button class="btn btn-primary" id="bot-daily" type="button">🗞 Дайджест за сутки</button>
                 </div>
                 <p class="meta" id="bot-post-status"></p>
+                <h4 style="margin-top:16px">🕒 Частота сводки</h4>
+                <p class="meta">Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут). Расписание применяется сразу, перезапуск не нужен.</p>
+                <div class="row-actions" id="post-int-btns"></div>
+                <p class="meta" id="post-int-note"></p>
                 <h4 style="margin-top:16px">🕗 Вечерний дайджест</h4>
                 <div class="row-actions">
                     <label class="bot-num">Часы <input id="dig-hour" type="number" min="0" max="23" step="1"></label>
@@ -172,7 +188,14 @@
             </div>
         </div>
     </div>
+
+    <div class="card" id="ai-prompts" style="margin-top:14px">
+        <h3>🤖 Промты для ИИ</h3>
+        <p class="lead">Инструкции, по которым ИИ пишет <b>шапку поста</b> в канал и <b>текст дневного дайджеста</b>. В поле уже стоит стандартный промт — правьте прямо в нём; «Вернуть шаблон» очищает поле и снова включает встроенный текст. Пустое поле = стандарт, свои цифры и факты ИИ по-прежнему берёт из сводки.</p>
+        <div id="ai-prompt-blocks"><p class="meta">загружаю промты…</p></div>
+    </div>
 </main>
-<script src="/static/account.js"></script>
+<script src="/static/account.js?v=alerts3"></script>
+<script src="/static/consent.js?v=consent1"></script>
 </body>
 </html>

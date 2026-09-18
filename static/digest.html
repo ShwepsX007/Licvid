@@ -6,13 +6,14 @@
 <title>LiqScope — дневной дайджест</title>
 <meta name="description" content="Дневной дайджест рынка: ликвидации, биржи, открытый интерес, цены и настроение рынка за сутки." data-i18n-meta="dig.meta">
 <link rel="icon" type="image/png" href="/static/logo.png">
-<link rel="stylesheet" href="/static/account.css?v=digest1">
+<link rel="stylesheet" href="/static/account.css?v=fb9">
 <style>
 .dig-wrap { max-width: 1180px; margin: 0 auto; padding: 26px 22px 70px; }
 .dig-head { margin: 8px 0 22px; }
 .dig-head h1 { font-size: 1.9rem; line-height: 1.2; }
 .dig-lead { color: var(--muted); margin-top: 10px; max-width: 820px; line-height: 1.55; font-size: 0.95rem; }
 .dig-chips { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+.dig-jump { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
 .chip {
     font-size: 0.75rem; color: var(--muted); border: 1px solid var(--border);
     background: rgba(13, 18, 32, 0.6); padding: 5px 10px; border-radius: 999px;
@@ -36,6 +37,37 @@
 .dig-card .dc-tags { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
 .tag { font-size: 0.66rem; letter-spacing: 0.4px; text-transform: uppercase; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
 .tag.ok { color: var(--green); border-color: rgba(0, 230, 118, 0.35); }
+.dig-more { color: var(--muted); font-size: 0.74rem; line-height: 1.5; margin-top: 10px; }
+/* --- календарь выпусков --- */
+.dig-pick-h { font-size: 1rem; margin: 22px 0 10px; letter-spacing: 0.3px; }
+.dig-cal { border: 1px solid var(--border); background: rgba(13, 18, 32, 0.72); border-radius: 12px; padding: 12px 12px 10px; }
+.cal-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.cal-title { font-size: 0.86rem; font-weight: 600; text-transform: capitalize; }
+.cal-nav {
+    border: 1px solid var(--border); background: rgba(7, 10, 16, 0.6); color: var(--text);
+    width: 26px; height: 26px; border-radius: 8px; cursor: pointer; line-height: 1;
+    font-family: inherit; font-size: 0.95rem;
+}
+.cal-nav:hover:not(:disabled) { border-color: rgba(61, 112, 255, 0.55); }
+.cal-nav:disabled { opacity: 0.35; cursor: default; }
+.cal-week, .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+.cal-week { margin-bottom: 4px; }
+.cal-week span { text-align: center; font-size: 0.66rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.3px; }
+.cal-day {
+    height: 30px; border-radius: 8px; border: 1px solid transparent; background: transparent;
+    color: var(--muted); font-family: inherit; font-size: 0.78rem; display: flex;
+    align-items: center; justify-content: center; padding: 0;
+}
+.cal-day.has {
+    cursor: pointer; color: var(--text); border-color: var(--border);
+    background: rgba(61, 112, 255, 0.10);
+}
+.cal-day.has:hover { border-color: rgba(61, 112, 255, 0.6); }
+.cal-day.on { background: var(--blue); border-color: var(--blue); color: #fff; font-weight: 700; }
+.cal-day.today { border-color: rgba(0, 214, 255, 0.45); }
+.cal-day.empty { opacity: 0.28; }
+.cal-legend { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 0.7rem; margin-top: 9px; }
+.cal-legend i { width: 10px; height: 10px; border-radius: 3px; background: rgba(61, 112, 255, 0.35); border: 1px solid var(--border); display: inline-block; }
 .dig-article { padding: 24px 26px 30px; line-height: 1.62; }
 .dig-article h2 { font-size: 1.35rem; margin-bottom: 6px; }
 .dig-article .art-meta { color: var(--muted); font-size: 0.8rem; margin-bottom: 18px; }
@@ -88,12 +120,29 @@
             <span class="chip" id="dig-latest">—</span>
             <span class="chip"><span data-i18n="dig.total">Ликвидации за сутки</span>: <b id="dig-total">—</b></span>
         </div>
+        <!-- быстрый переход: с дайджеста — в кабинет, в админку и в терминал -->
+        <div class="dig-jump" id="dig-jump"></div>
     </div>
     <div class="dig-grid">
         <aside class="dig-list-col">
-            <h2 data-i18n="dig.archive">Выпуски</h2>
+            <h2 data-i18n="dig.fresh">Свежие выпуски</h2>
             <div id="dig-list" class="dig-list">
                 <div class="dig-empty" data-i18n="dig.loading">Загружаю…</div>
+            </div>
+            <p class="dig-more" id="dig-more"></p>
+            <h2 class="dig-pick-h" data-i18n="dig.pick">Выбрать дату</h2>
+            <div class="dig-cal">
+                <div class="cal-head">
+                    <button type="button" class="cal-nav" id="cal-prev"
+                            data-i18n-title="dig.prev">‹</button>
+                    <span class="cal-title" id="cal-title">—</span>
+                    <button type="button" class="cal-nav" id="cal-next"
+                            data-i18n-title="dig.next">›</button>
+                </div>
+                <div class="cal-week" id="cal-week"></div>
+                <div class="cal-grid" id="cal-grid"></div>
+                <div class="cal-legend"><i></i><span id="cal-legend"
+                    data-i18n="dig.has">есть выпуск</span></div>
             </div>
         </aside>
         <article id="dig-article" class="dig-article card">
@@ -103,7 +152,7 @@
 </main>
 
 <script src="/static/i18n.js"></script>
-<script src="/static/digest.js?v=digest1"></script>
+<script src="/static/digest.js?v=digest2"></script>
 <script src="/static/consent.js?v=consent1"></script>
 </body>
 </html>

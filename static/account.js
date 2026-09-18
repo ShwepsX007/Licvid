@@ -79,6 +79,7 @@
             servicesLead: "Подписка сохранится: когда сервис заработает, он появится и в кабинете, и в боте.",
             soon: "скоро",
             digestOpen: "Открыть дайджест",
+            digest: "Дайджест",
             waitlistOn: "В листе ожидания",
             waitlistOff: "В лист ожидания",
             subscribed: "Подключено",
@@ -172,6 +173,7 @@
             servicesLead: "Your subscription is kept: when a service ships, it appears in the cabinet and the bot.",
             soon: "soon",
             digestOpen: "Open digest",
+            digest: "Digest",
             waitlistOn: "On the waitlist",
             waitlistOff: "Join waitlist",
             subscribed: "On",
@@ -237,6 +239,12 @@
             return;
         }
         var html = "";
+        // Дайджест — из любой страницы в шапке: раньше в него можно было
+        // попасть только кнопкой внутри сервиса или через логотип и главную
+        if (path !== "/digest") {
+            html += '<a class="btn btn-ghost btn-compact" href="/digest">📰 ' +
+                t("digest") + "</a>";
+        }
         if (path !== "/cabinet") {
             html += '<a class="btn btn-ghost btn-compact" href="/cabinet">' + t("cabinet") + "</a>";
         }
@@ -580,6 +588,7 @@
         if (tgBtn && !tgBtn._bound) { tgBtn._bound = true; tgBtn.addEventListener("click", linkTelegram); }
         var tgOff = $("tg-unlink");
         if (tgOff && !tgOff._bound) { tgOff._bound = true; tgOff.addEventListener("click", unlinkTelegram); }
+        bootFeedbackUser();
         Promise.all([
             api("/api/auth/me"),
             api("/api/account/services"),
@@ -729,12 +738,17 @@
         return p.thresholds_liq || p.thresholds || [50000, 100000, 250000, 500000, 1e6, 5e6];
     }
     function alPushSpark(key, row) {
+        /* Микрографик метрики. Первый кадр берём у сервера (накопительная
+           кривая окна), дальше ведём свой буфер: на каждом опросе дописываем
+           итог окна. Так линия двигается даже между редкими бакетами CVD/OI —
+           раньше серверная «гребёнка» не менялась, и график стоял картинкой. */
+        var buf = alSparkBuf[key] || [];
         var src = (row && row.spark && row.spark.length) ? row.spark : null;
-        if (src) { alSparkBuf[key] = src.slice(); return; }
-        var a = alSparkBuf[key] || [];
-        a.push(Number(row && row.value) || 0);
-        if (a.length > 36) a = a.slice(-36);
-        alSparkBuf[key] = a;
+        if (!buf.length && src) { alSparkBuf[key] = src.slice(-36); return; }
+        var v = Number(row && (row.total !== undefined ? row.total : row.value)) || 0;
+        buf.push(v);
+        if (buf.length > 36) buf = buf.slice(-36);
+        alSparkBuf[key] = buf;
     }
     function alSparkGrid(w, h) {
         // прозрачная сетка, как на биржевом графике
@@ -918,7 +932,9 @@
         var side = String(f.side || "");
         var what = side === "LONG" ? "лонг" : side === "SHORT" ? "шорт" : "";
         var bmin = Number(f.bucket_min) || 0;
-        var extra = [what, bmin ? "за " + alWin(bmin) : "",
+        var bsec = Number(f.bucket_sec) || 0;
+        var span = bsec ? "за " + bsec + "с" : (bmin ? "за " + alWin(bmin) : "");
+        var extra = [what, span,
                      f.exchange ? String(f.exchange) : ""].filter(Boolean).join(" · ");
         return '<div class="row flow"><span class="t">' + tm + "</span>" +
             '<span class="m">' + (cls === "pos" ? "🟢" : "🔴") + "</span>" +
@@ -2270,9 +2286,665 @@
                 if (st) st.textContent = d.ok ? t("saved") : (d.error || "error");
             });
         });
+        bootFolds();            // разделы сворачиваются — до остальных панелей, им нужны id
         bootDigestTpl();
         bootBotAdmin();
         bootAiPrompts();
+        bootAds();
+        bootFeedbackAdmin();
+    }
+
+    /* ---------------- 🗂 Сворачиваемые разделы админки ---------------------
+     *
+     * Админка растёт — каждая карточка превращается в <details>: заголовок
+     * кликается, содержимое прячется. Состояние разделов живёт в localStorage,
+     * поэтому страница открывается такой, какой её оставил админ. Сверху —
+     * кнопки «Развернуть всё» и «Свернуть всё».
+     */
+
+    var FOLDS_KEY = "liqscope.admin.folds";
+
+    function foldState() {
+        try {
+            var raw = localStorage.getItem(FOLDS_KEY) || "{}";
+            var obj = JSON.parse(raw);
+            return obj && typeof obj === "object" ? obj : {};
+        } catch (e) { return {}; }
+    }
+
+    function foldSave(id, open) {
+        var st = foldState();
+        st[id] = !!open;
+        try { localStorage.setItem(FOLDS_KEY, JSON.stringify(st)); } catch (e) {}
+    }
+
+    function foldHead(card) {
+        for (var i = 0; i < card.children.length; i++) {
+            if (card.children[i].tagName === "H3") return card.children[i];
+        }
+        return null;
+    }
+
+    /** Карточка → сворачиваемый блок. Возвращает <details> или null. */
+    function toFold(card, index) {
+        if (!card || card.tagName === "DETAILS") return null;
+        var head = foldHead(card);
+        if (!head) return null;
+        var id = card.id || ("fold-" + index);
+        var det = document.createElement("details");
+        det.className = (card.className || "") + " fold";
+        det.id = id;
+        if (card.getAttribute("style")) det.setAttribute("style", card.getAttribute("style"));
+        var sum = document.createElement("summary");
+        sum.appendChild(head);
+        var hint = card.getAttribute("data-hint") || "";
+        if (hint) {
+            var hintEl = document.createElement("span");
+            hintEl.className = "fold-hint";
+            hintEl.textContent = hint;
+            sum.appendChild(hintEl);
+        }
+        det.appendChild(sum);
+        var body = document.createElement("div");
+        body.className = "fold-body";
+        while (card.firstChild) body.appendChild(card.firstChild);
+        det.appendChild(body);
+        card.parentNode.replaceChild(det, card);
+        det.foldId = id;
+        // По умолчанию разделы свёрнуты: админка должна открываться компактной,
+        // а раскрытым остаётся то, что админ раскрыл сам.
+        var st = foldState();
+        det.open = st[id] === true;
+        det.addEventListener("toggle", function () { foldSave(id, det.open); });
+        return det;
+    }
+
+    function foldAll(folds, open) {
+        folds.forEach(function (d) {
+            d.open = !!open;
+            foldSave(d.foldId || d.id, !!open);
+        });
+    }
+
+    function bootFolds() {
+        var page = (document.body && document.body.getAttribute("data-page")) || "";
+        if (page !== "admin") return [];
+        var wrap = document.querySelector("main.wrap");
+        if (!wrap) return [];
+        var cards = Array.prototype.slice.call(wrap.querySelectorAll(".card"));
+        var folds = [];
+        cards.forEach(function (card, i) {
+            var det = toFold(card, i);
+            if (det) folds.push(det);
+        });
+        if (folds.length && !wrap.querySelector(".fold-tools")) {
+            var lead = wrap.querySelector("p.lead");
+            var tools = document.createElement("div");
+            tools.className = "fold-tools";
+            tools.innerHTML =
+                '<button class="btn btn-small" type="button" id="folds-open">⤢ Развернуть всё</button>' +
+                '<button class="btn btn-small" type="button" id="folds-close">⤡ Свернуть всё</button>' +
+                '<span class="meta">Разделы сворачиваются в блоки — админка открывается ' +
+                "с теми, что были раскрыты в прошлый раз</span>";
+            if (lead && lead.parentNode) lead.parentNode.insertBefore(tools, lead.nextSibling);
+            else wrap.insertBefore(tools, wrap.firstChild);
+            var open = tools.querySelector("#folds-open"), close = tools.querySelector("#folds-close");
+            if (open) open.addEventListener("click", function () { foldAll(folds, true); });
+            if (close) close.addEventListener("click", function () { foldAll(folds, false); });
+        }
+        return folds;
+    }
+
+    /* ---------------- 💬 Обратная связь: «по всем вопросам» ---------------- */
+
+    function fbTime(ts) {
+        if (!ts) return "";
+        var d = new Date(Number(ts) * 1000);
+        return adPad(d.getDate()) + "." + adPad(d.getMonth() + 1) + " " +
+            adPad(d.getHours()) + ":" + adPad(d.getMinutes());
+    }
+
+    function fbBubble(m) {
+        var mine = !!m.mine;
+        var who = mine ? "вы" : (m.admin ? "админ" : "пользователь");
+        return '<div class="fb-msg' + (mine ? " mine" : "") + '"><div class="fb-bubble">' +
+            '<span class="fb-who">' + esc(who) + "</span>" + esc(m.text) +
+            '<span class="fb-time">' + fbTime(m.at) + "</span></div></div>";
+    }
+
+    function fbPaint(threadId, messages) {
+        var box = $(threadId);
+        if (!box) return;
+        box.innerHTML = (messages || []).map(fbBubble).join("") ||
+            '<p class="meta">Переписки пока нет — напишите первым.</p>';
+        box.scrollTop = box.scrollHeight;
+    }
+
+    function fbBadge(n) {
+        [ $("fb-dot"), $("fb-dot-2"), $("fb-admin-badge") ].forEach(function (el) {
+            if (!el) return;
+            el.textContent = n ? String(n) : "";
+            el.classList.toggle("hidden", !n);
+            el.style.display = n ? "" : "none";
+        });
+        var box = $("fb-admin-badge");
+        if (box) box.style.display = n ? "" : "none";
+    }
+
+    /** Диалог пользователя в кабинете. */
+    function bootFeedbackUser() {
+        var card = $("fb-card");
+        if (!card || !$("fb-thread")) return;
+        function load() {
+            return api("/api/feedback").then(function (d) {
+                if (!d.ok) return;
+                fbPaint("fb-thread", d.messages);
+                fbBadge(d.unread);
+                var jump = $("fb-jump");
+                if (jump) jump.setAttribute("data-unread", d.unread || 0);
+            });
+        }
+        load();
+        var send = $("fb-send"), ta = $("fb-text");
+        function submit() {
+            var text = (ta && ta.value || "").trim();
+            var st = $("fb-status");
+            if (!text) { if (st) st.textContent = "напишите сообщение"; return; }
+            if (st) st.textContent = "отправляю…";
+            api("/api/feedback", { method: "POST", body: JSON.stringify({ text: text }) })
+                .then(function (d) {
+                    if (!d.ok) { if (st) st.textContent = d.hint || d.error || "ошибка"; return; }
+                    if (st) st.textContent = "отправлено — ответ придёт сюда";
+                    if (ta) ta.value = "";
+                    load();
+                })
+                .catch(function () { if (st) st.textContent = "ошибка сети"; });
+        }
+        if (send) send.addEventListener("click", submit);
+        if (ta) ta.addEventListener("keydown", function (e) {
+            if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) submit();
+        });
+        // новые ответы подтягиваем не перезагружая страницу
+        setInterval(function () {
+            if (document.hidden) return;
+            api("/api/feedback/unread").then(function (d) {
+                if (d.ok) fbBadge(d.unread);
+            });
+        }, 60000);
+    }
+
+    /** Список диалогов у админа. */
+    function bootFeedbackAdmin() {
+        if (!$("fb-admin")) return;
+        var current = 0;
+        function paintList(d) {
+            var box = $("fb-list");
+            if (!box) return;
+            var threads = d.threads || [];
+            fbBadge(d.unread);
+            if (!threads.length) {
+                box.innerHTML = "<p class='meta'>Пока никто не писал. Здесь появятся диалоги " +
+                    "из кабинета — с историей и возможностью ответить.</p>";
+                return;
+            }
+            box.innerHTML = threads.map(function (t) {
+                return '<div class="fb-item' + (t.unread ? " unread" : "") +
+                    (String(t.id) === String(current) ? " on" : "") + '" data-thread="' + t.id + '">' +
+                    '<div class="fb-item-name">' + esc(t.name) +
+                    (t.unread ? ' <span class="fb-dot">' + t.unread + "</span>" : "") + "</div>" +
+                    '<div class="fb-item-last">' + (t.last_admin ? "вы: " : "") +
+                    esc(String(t.last_text || "").slice(0, 90)) + "</div>" +
+                    '<div class="meta">' + fbTime(t.updated_at) + " · сообщений: " + t.total +
+                    (t.link ? " · " + esc(t.link) : "") +
+                    (t.email ? " · " + esc(t.email) : "") + "</div></div>";
+            }).join("");
+            box.querySelectorAll("[data-thread]").forEach(function (el) {
+                el.addEventListener("click", function () {
+                    openThread(el.getAttribute("data-thread"));
+                });
+            });
+        }
+        function openThread(id) {
+            current = Number(id) || 0;
+            api("/api/admin/feedback/" + current).then(function (d) {
+                if (!d.ok) return;
+                var t = d.thread || {};
+                var head = $("fb-conv-head");
+                if (head) {
+                    head.innerHTML = esc(t.name || ("#" + current)) +
+                        (t.username ? ' <span class="meta">@' + esc(t.username) + "</span>" : "") +
+                        (t.email ? ' <span class="meta">' + esc(t.email) + "</span>" : "") +
+                        ' <span class="meta">переписка за ' + fbTime(t.created_at) + "</span>";
+                }
+                fbPaint("fb-admin-thread",
+                        (d.messages || []).map(function (m) {
+                            return Object.assign({}, m, { mine: m.admin });
+                        }));
+                fbBadge(d.unread);
+                load();
+            });
+        }
+        function load() {
+            api("/api/admin/feedback").then(function (d) {
+                if (d.ok) paintList(d);
+            });
+        }
+        load();
+        var send = $("fb-admin-send"), ta = $("fb-admin-text");
+        if (send) send.addEventListener("click", function () {
+            var text = (ta && ta.value || "").trim();
+            var st = $("fb-admin-status");
+            if (!current) { if (st) st.textContent = "выберите диалог слева"; return; }
+            if (!text) { if (st) st.textContent = "напишите ответ"; return; }
+            if (st) st.textContent = "отправляю…";
+            api("/api/admin/feedback/" + current, {
+                method: "POST", body: JSON.stringify({ text: text }),
+            }).then(function (d) {
+                if (!d.ok) { if (st) st.textContent = d.hint || d.error || "ошибка"; return; }
+                if (st) st.textContent = "ответ ушёл (и в Telegram, если связан)";
+                if (ta) ta.value = "";
+                openThread(current);
+            }).catch(function () { if (st) st.textContent = "ошибка сети"; });
+        });
+        if (ta) ta.addEventListener("keydown", function (e) {
+            if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && send) send.click();
+        });
+        var card = $("fb-admin");
+        if (card) card.addEventListener("toggle", function () {
+            if (card.open) load();          // раскрыли — показать свежие диалоги
+        });
+        setInterval(function () {
+            if (!document.hidden) load();
+        }, 45000);
+    }
+
+    /* ---------------- 📣 Рекламные посты: бот, каналы и баннер на главной --- */
+    //
+    // Панель рекламы: текст, фото, источники (бот / каналы / главная сайта),
+    // время отправки и срок автоудаления. Отправка идёт через /api/admin/ads,
+    // а показ на главной — публичным /api/ads, который отдаёт только живые
+    // объявления: срок вышел — баннер исчезает сам, без действий админа.
+
+    var ADS = {
+        id: 0,
+        photo: "",              // data-URL только что выбранного фото
+        photoName: "",
+        channels: [],
+        limits: { plain: 4000, photo: 1024 },
+    };
+
+    var AD_CHIPS = {
+        draft: ["черновик", "#8493a8"],
+        scheduled: ["к отправке", "#ffd54f"],
+        sending: ["отправляется", "#ffd54f"],
+        sent: ["отправлен", "#00e676"],
+        expired: ["срок вышел", "#8493a8"],
+        cancelled: ["снят", "#ff2a5f"],
+        failed: ["не ушло", "#ff2a5f"],
+    };
+
+    function adPad(n) { return String(n).padStart(2, "0"); }
+
+    function adTime(ts) {
+        if (!ts) return "—";
+        var d = new Date(Number(ts) * 1000);
+        return adPad(d.getDate()) + "." + adPad(d.getMonth() + 1) + " " +
+            adPad(d.getHours()) + ":" + adPad(d.getMinutes());
+    }
+
+    function adLeft(ts) {
+        // «осталось 2 ч» — админу проще, чем пересчитывать время самому
+        var sec = Math.round(Number(ts) - Date.now() / 1000);
+        if (sec <= 0) return "вот-вот снимется";
+        if (sec < 3600) return "ещё " + Math.max(1, Math.round(sec / 60)) + " мин";
+        if (sec < 86400) return "ещё " + Math.round(sec / 3600) + " ч";
+        return "ещё " + Math.round(sec / 86400) + " сут";
+    }
+
+    function adChip(st) {
+        var c = AD_CHIPS[st] || [st || "—", "#8493a8"];
+        return '<span class="ad-chip" style="border-color:' + c[1] + ";color:" + c[1] + '">' +
+            esc(c[0]) + "</span>";
+    }
+
+    function adTargetRow(key, label, note) {
+        return '<label class="bot-check" style="display:flex;gap:8px;align-items:flex-start;margin:6px 0">' +
+            '<input type="checkbox" data-ad-target="' + esc(key) + '"> <span><b>' + label +
+            "</b>" + (note ? ' <span class="meta">' + note + "</span>" : "") + "</span></label>";
+    }
+
+    function adLimit() {
+        return ADS.photo ? (ADS.limits.photo || 1024) : (ADS.limits.plain || 4000);
+    }
+
+    function adCount() {
+        var ta = $("ad-text"), el = $("ad-len");
+        if (!ta || !el) return;
+        var n = ta.value.length, lim = adLimit();
+        el.textContent = n + " / " + lim + " знаков" +
+            (ADS.photo ? " (с фото)" : " (без фото)") +
+            (n > lim ? " — Telegram не примет" : "");
+        el.style.color = n > lim ? "var(--red)" : "";
+    }
+
+    function adShowPhoto() {
+        var box = $("ad-photo-prev");
+        if (box) {
+            box.innerHTML = ADS.photo
+                ? '<div class="tpl-photo"><img alt="" src="' + ADS.photo + '"></div>'
+                : "";
+        }
+        adCount();
+    }
+
+    function renderAdTargets(d) {
+        var box = $("ad-targets");
+        if (!box) return;
+        ADS.channels = d.channels || [];
+        var html = adTargetRow("bot", "🤖 Telegram-бот",
+                               "— в личку всем, кто запускал бота")
+            + adTargetRow("site", "🌐 Главная сайта",
+                          "— баннер под кнопками «Терминал» и «Что умеет»");
+        (d.channels || []).forEach(function (c) {
+            html += adTargetRow("ch:" + c.id, esc(c.label || "📣 Канал"),
+                                "— id " + esc(c.id));
+        });
+        if (!(d.channels || []).length) {
+            html += '<p class="meta">Каналы в боте не привязаны: впишите id или @имя ниже ' +
+                "либо отправьте пост только в бота и на главную.</p>";
+        }
+        box.innerHTML = html;
+    }
+
+    function adCheckboxes() {
+        return Array.prototype.slice.call(
+            document.querySelectorAll("#ad-targets input[data-ad-target]"));
+    }
+
+    function renderAdList(d) {
+        var box = $("ad-list");
+        if (!box) return;
+        var items = d.items || [];
+        if (!items.length) {
+            box.innerHTML = "<p class='meta'>Пока пусто. Заполните форму выше — пост появится здесь " +
+                "и уйдёт сам в выбранное время.</p>";
+            return;
+        }
+        box.innerHTML = items.map(function (a) {
+            var photo = a.has_photo
+                ? '<img class="ad-thumb" alt="" src="/api/admin/ads/' + a.id + '/photo">'
+                : '<span class="ad-thumb ad-thumb-empty">без фото</span>';
+            var when = a.status === "sent"
+                ? "отправлен " + adTime(a.sent_at)
+                : (a.send_at ? (a.status === "draft" ? "черновик · время " : "уйдёт ") + adTime(a.send_at)
+                             : "черновик");
+            var life = a.expires_at
+                ? "снимется " + adTime(a.expires_at) +
+                  (a.status === "sent" ? " (" + adLeft(a.expires_at) + ")" : "")
+                : "без автоудаления";
+            var acts = [];
+            if (a.status !== "sent" && a.status !== "expired") {
+                acts.push('<button class="btn btn-small" data-ad-act="send" data-ad-id="' + a.id + '">⚡ Сейчас</button>');
+            }
+            acts.push('<button class="btn btn-small" data-ad-act="edit" data-ad-id="' + a.id + '">✎ Править</button>');
+            if (a.status === "sent" || a.status === "scheduled") {
+                acts.push('<button class="btn btn-small" data-ad-act="stop" data-ad-id="' + a.id + '">⏹ Снять</button>');
+            }
+            acts.push('<button class="btn btn-danger btn-small" data-ad-act="del" data-ad-id="' + a.id + '">🗑 Удалить</button>');
+            return '<div class="ad-item">' + photo +
+                '<div class="ad-item-body"><div class="ad-item-head">' + adChip(a.status) +
+                '<span class="meta">' + esc(when) + " · " + esc(life) + "</span></div>" +
+                '<div class="ad-item-text">' + (esc(a.text).slice(0, 240) || "<i>без текста</i>") + "</div>" +
+                '<div class="meta">Куда: ' + esc(a.human_targets || "—") + "</div>" +
+                '<div class="meta">' + esc(a.line || "") + "</div>" +
+                '<div class="row-actions">' + acts.join("") + "</div></div></div>";
+        }).join("");
+        box.querySelectorAll("button[data-ad-act]").forEach(function (btn) {
+            btn.addEventListener("click", function () {
+                var id = btn.getAttribute("data-ad-id");
+                var act = btn.getAttribute("data-ad-act");
+                if (act === "edit") { adEdit(id); return; }
+                if (act === "del" && !confirm("Удалить запись? Посты в каналах, если они вышли, тоже удалятся.")) return;
+                if (act === "stop" && !confirm("Снять объявление сейчас? Баннер уберётся, посты в каналах удалятся.")) return;
+                var path = act === "send" ? "/send" : (act === "stop" ? "/stop" : "/delete");
+                var st = $("ad-status");
+                if (st) st.textContent = "выполняю…";
+                api("/api/admin/ads/" + id + path, { method: "POST", body: "{}" }).then(function (r) {
+                    if (st) {
+                        st.textContent = r.ok
+                            ? (act === "send" ? ("отправлено: " + ((r.item || {}).line || "ok"))
+                                              : (r.hint || "готово"))
+                            : (r.hint || r.error || "ошибка");
+                    }
+                    loadAds();
+                });
+            });
+        });
+    }
+
+    function adEdit(id) {
+        var d = (ADS.last || { items: [] });
+        var a = (d.items || []).filter(function (x) { return String(x.id) === String(id); })[0];
+        if (!a) return;
+        ADS.id = a.id;
+        ADS.photo = "";
+        ADS.photoName = "";
+        var ta = $("ad-text");
+        if (ta) ta.value = a.text || "";
+        var extra = $("ad-extra");
+        var known = (d.channels || []).map(function (c) { return String(c.id); });
+        if (extra) {
+            extra.value = ((a.targets || {}).channels || []).filter(function (c) {
+                return known.indexOf(String(c)) < 0;
+            }).join(", ");
+        }
+        adCheckboxes().forEach(function (inp) {
+            var key = inp.getAttribute("data-ad-target");
+            var t = a.targets || {};
+            inp.checked = key === "bot" ? !!t.bot
+                : (key === "site" ? !!t.site
+                    : ((t.channels || []).map(String).indexOf(key.slice(3)) >= 0));
+        });
+        var mode = $("ad-when-mode"), when = $("ad-when");
+        if (mode && when && a.send_at && a.send_at > Date.now() / 1000 + 5) {
+            mode.value = "later";
+            when.disabled = false;
+            var dt = new Date(a.send_at * 1000);
+            when.value = dt.getFullYear() + "-" + adPad(dt.getMonth() + 1) + "-" + adPad(dt.getDate()) +
+                "T" + adPad(dt.getHours()) + ":" + adPad(dt.getMinutes());
+        }
+        var ttl = $("ad-ttl");
+        if (ttl) {
+            var mins = a.send_at && a.expires_at
+                ? Math.max(0, Math.round((a.expires_at - a.send_at) / 60)) : 0;
+            var have = Array.prototype.some.call(ttl.options, function (o) {
+                return Number(o.value) === mins;
+            });
+            ttl.value = have ? String(mins) : "0";
+        }
+        adShowPhoto();
+        var st = $("ad-status");
+        if (st) st.textContent = "правим #" + a.id + " — «Отправить» перезапишет запись";
+        if (ta && ta.scrollIntoView) ta.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+
+    function adCollect(draft) {
+        var targets = { bot: false, site: false, channels: [] };
+        adCheckboxes().forEach(function (inp) {
+            if (!inp.checked) return;
+            var key = inp.getAttribute("data-ad-target");
+            if (key === "bot") targets.bot = true;
+            else if (key === "site") targets.site = true;
+            else if (key.indexOf("ch:") === 0) targets.channels.push(key.slice(3));
+        });
+        ((($("ad-extra") || {}).value) || "").split(/[\s,;]+/).forEach(function (x) {
+            if (x && x !== "@" && targets.channels.indexOf(x) < 0) targets.channels.push(x);
+        });
+        var payload = {
+            text: (($("ad-text") || {}).value || "").trim(),
+            targets: targets,
+        };
+        if (ADS.photo) {
+            payload.photo = ADS.photo;
+            payload.photo_name = ADS.photoName || "ad.jpg";
+        }
+        if (!draft) {
+            var mode = ($("ad-when-mode") || {}).value || "now";
+            if (mode === "later") {
+                var raw = (($("ad-when") || {}).value) || "";
+                var ts = raw ? Math.round(new Date(raw).getTime() / 1000) : 0;
+                payload.send_at = ts || Math.round(Date.now() / 1000);
+            } else {
+                payload.send_at = Math.round(Date.now() / 1000);
+            }
+            payload.ttl_min = Number((($("ad-ttl") || {}).value) || 0);
+        } else {
+            payload.draft = true;
+        }
+        return payload;
+    }
+
+    function saveAd(draft) {
+        var st = $("ad-status");
+        var payload = adCollect(draft);
+        if (draft && !payload.text && !ADS.photo) {
+            if (st) st.textContent = "пусто: нужен текст или фотография";
+            return;
+        }
+        if (st) st.textContent = draft ? "сохраняю черновик…" : "отправляю…";
+        var path = ADS.id ? "/api/admin/ads/" + ADS.id : "/api/admin/ads";
+        api(path, { method: "POST", body: JSON.stringify(payload) }).then(function (d) {
+            if (!d.ok) {
+                if (st) st.textContent = d.hint || d.error || "ошибка";
+                if (d.id) loadAds();
+                return;
+            }
+            var item = d.item || {};
+            var now = !draft && item.status !== "scheduled" && item.status !== "draft";
+            if (draft) {
+                if (st) st.textContent = "черновик сохранён";
+                loadAds();
+            } else if (ADS.id && ($("ad-when-mode") || {}).value === "now") {
+                api("/api/admin/ads/" + ADS.id + "/send", { method: "POST", body: "{}" })
+                    .then(function (r) {
+                        if (st) st.textContent = r.ok ? ("ушло: " + ((r.item || {}).line || "ok"))
+                                                      : (r.hint || r.error || "не ушло");
+                        loadAds();
+                    });
+            } else {
+                if (st) st.textContent = now
+                    ? ("ушло: " + (item.line || "ok"))
+                    : ("запланировано на " + adTime(item.send_at));
+                loadAds();
+            }
+            if (now) adResetForm(false);
+        }).catch(function () {
+            if (st) st.textContent = "ошибка сети";
+        });
+    }
+
+    function adResetForm(full) {
+        ADS.id = 0;
+        ADS.photo = "";
+        ADS.photoName = "";
+        var ta = $("ad-text");
+        if (ta) ta.value = "";
+        var extra = $("ad-extra");
+        if (extra) extra.value = "";
+        adCheckboxes().forEach(function (i) { i.checked = false; });
+        var mode = $("ad-when-mode"), when = $("ad-when"), ttl = $("ad-ttl");
+        if (mode) mode.value = "now";
+        if (when) { when.disabled = true; when.value = ""; }
+        if (ttl) ttl.value = "0";
+        var inp = $("ad-photo-in");
+        if (inp) inp.value = "";
+        adShowPhoto();
+        if (full) {
+            var st = $("ad-status");
+            if (st) st.textContent = "";
+        }
+    }
+
+    function loadAds() {
+        api("/api/admin/ads").then(function (d) {
+            if (!d.ok) return;
+            ADS.last = d;
+            ADS.limits = d.limits || ADS.limits;
+            renderAdTargets(d);
+            renderAdList(d);
+            var svc = d.service || {};
+            var line = "Планировщик: " + (svc.bot ? "бот на связи" : "бот не подключён") +
+                " · отправлено за сессию: " + (svc.sent_total || 0) +
+                " · снято по сроку: " + (svc.expired_total || 0);
+            if (svc.error) line += " · ошибка: " + svc.error;
+            if ((svc.log || []).length) line += "\n" + svc.log.slice(-4).join("\n");
+            var el = $("ad-service");
+            if (el) { el.textContent = line; el.style.whiteSpace = "pre-line"; }
+            var note = $("ad-note");
+            if (note) {
+                note.textContent = "Баннер на главной: " + (d.site || "") +
+                    " · сейчас на сервере " + adTime(d.now);
+            }
+            adCount();
+        });
+    }
+
+    function bootAds() {
+        if (!$("ads-panel")) return;
+        loadAds();
+        var ta = $("ad-text");
+        if (ta) ta.addEventListener("input", adCount);
+        var mode = $("ad-when-mode"), when = $("ad-when");
+        if (mode && when) {
+            mode.addEventListener("change", function () {
+                var later = mode.value === "later";
+                when.disabled = !later;
+                if (later && !when.value) {
+                    var d = new Date(Date.now() + 3600 * 1000);
+                    when.value = d.getFullYear() + "-" + adPad(d.getMonth() + 1) + "-" +
+                        adPad(d.getDate()) + "T" + adPad(d.getHours()) + ":" + adPad(d.getMinutes());
+                }
+            });
+        }
+        var all = $("ad-all"), none = $("ad-none");
+        if (all) all.addEventListener("click", function () {
+            adCheckboxes().forEach(function (i) { i.checked = true; });
+        });
+        if (none) none.addEventListener("click", function () {
+            adCheckboxes().forEach(function (i) { i.checked = false; });
+        });
+        var inp = $("ad-photo-in");
+        if (inp) inp.addEventListener("change", function () {
+            var f = inp.files && inp.files[0];
+            var st = $("ad-photo-status");
+            if (!f) return;
+            if (f.size > 12 * 1000 * 1000) {
+                if (st) st.textContent = "файл больше 12 МБ";
+                inp.value = "";
+                return;
+            }
+            var reader = new FileReader();
+            reader.onload = function () {
+                ADS.photo = String(reader.result || "");
+                ADS.photoName = f.name || "ad.jpg";
+                if (st) st.textContent = "фото выбрано: " + ADS.photoName + " — уйдёт вместе с постом";
+                adShowPhoto();
+            };
+            reader.readAsDataURL(f);
+        });
+        var clr = $("ad-photo-clear");
+        if (clr) clr.addEventListener("click", function () {
+            ADS.photo = "";
+            ADS.photoName = "";
+            if (inp) inp.value = "";
+            var st = $("ad-photo-status");
+            if (st) st.textContent = "фото убрано";
+            adShowPhoto();
+        });
+        var save = $("ad-save"), draft = $("ad-draft"), reset = $("ad-reset");
+        if (save) save.addEventListener("click", function () { saveAd(false); });
+        if (draft) draft.addEventListener("click", function () { saveAd(true); });
+        if (reset) reset.addEventListener("click", function () { adResetForm(true); });
     }
 
     /* ---------------- 🤖 ИИ-промты: шапка поста и дневной дайджест ---------- */
@@ -2301,6 +2973,13 @@
         AI_PROMPTS = d;
         box.innerHTML = (d.blocks || []).map(function (b) {
             return '<div class="ai-block"><h4>' + esc(b.title) + "</h4>" +
+                (b.kind === "digest" ? ("<p class=\"meta\">Этот рассказ идёт на страницу дайджеста " +
+                    "на сайте — целиком, без обрезки. В канал уходит небольшой пост: шапка, " +
+                    "первые предложения рассказа, цифры дня и ссылка на полный разбор. Так он " +
+                    "влезает в <b>подпись под фото</b> (Telegram разрешает до 1024 знаков), " +
+                    "поэтому фотография прикрепляется к каждому выпуску. Под постом — кнопка " +
+                    "«📖 Полный разбор дня». Промт можно не укорачивать: длина рассказа " +
+                    "влияет только на статью на сайте.</p>") : "") +
                 (b.langs || []).map(function (r) { return aiRow(r, b.kind); }).join("") +
                 "</div>";
         }).join("");

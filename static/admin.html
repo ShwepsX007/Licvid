@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>LiqScope — админка</title>
 <link rel="icon" type="image/png" href="/static/logo.png">
-<link rel="stylesheet" href="/static/account.css?v=alerts3">
+<link rel="stylesheet" href="/static/account.css?v=fb9">
 </head>
 <body data-page="admin">
 <header class="site-header">
@@ -36,11 +36,11 @@
     </div>
 
     <div class="grid grid-2">
-        <div class="card">
+        <div class="card" data-hint="переходы, уникальные, служебные">
             <h3>Визиты за 2 недели</h3>
             <div class="bars" id="visit-bars"></div>
         </div>
-        <div class="card">
+        <div class="card" data-hint="сообщение всем, кто запускал бота">
             <h3>Рассылка в Telegram</h3>
             <p class="lead">Уйдёт всем, кто запускал бота и не в бане.</p>
             <textarea id="broadcast-text" placeholder="Текст сообщения…"></textarea>
@@ -51,7 +51,7 @@
         </div>
     </div>
 
-    <div class="card" style="margin-top:14px">
+    <div class="card" style="margin-top:14px" data-hint="поиск, роль, бан">
         <h3>Пользователи</h3>
         <input class="search" id="user-q" placeholder="поиск: имя, @username, id">
         <table class="data">
@@ -61,7 +61,7 @@
     </div>
 
     <div class="grid grid-2">
-        <div class="card">
+        <div class="card" data-hint="приветствие бота и объявление в кабинете">
             <h3>Настройки</h3>
             <label>Приветствие бота (/start)</label>
             <textarea id="bot-welcome"></textarea>
@@ -72,14 +72,14 @@
                 <span class="meta" id="settings-status"></span>
             </div>
         </div>
-        <div class="card">
+        <div class="card" data-hint="какие сервисы видят пользователи">
             <h3>Сервисы</h3>
             <p class="lead">Снимите галочку «скоро», когда сервис готов для пользователей (сайт + бот).</p>
             <div id="admin-svc"></div>
         </div>
     </div>
 
-    <div class="card" style="margin-top:14px">
+    <div class="card" style="margin-top:14px" data-hint="шапки и картинки постов">
         <h3>Сводка в канал — шапки и фото</h3>
         <p class="lead">Каждый пост берёт следующую шапку и картинку по кругу. Можно писать как блогер; <code>{h}</code> подставится как «4» (окно в часах). То же самое есть в боте: Админка → Шаблоны канала.</p>
         <div class="grid grid-2" style="margin-top:12px">
@@ -117,7 +117,7 @@
         </div>
     </div>
 
-    <div class="card" id="bot-admin" style="margin-top:14px">
+    <div class="card" id="bot-admin" style="margin-top:14px" data-hint="каналы, публикация, дайджест, здоровье, ИИ">
         <h3>🤖 Бот и каналы — то же, что в админке бота</h3>
         <p class="lead">Каналы, публикация сводки и дневного дайджеста, контроль постов, время вечернего выпуска, здоровье бирж и проверка ИИ. Действия применяются сразу — открывать Telegram не нужно.</p>
         <p class="meta" id="bot-line">состояние бота…</p>
@@ -189,13 +189,97 @@
         </div>
     </div>
 
-    <div class="card" id="ai-prompts" style="margin-top:14px">
+    <div class="card" id="ads-panel" style="margin-top:14px" data-hint="текст, фото, куда и когда отправить">
+        <h3>📣 Рекламные посты</h3>
+        <p class="lead">Свой текст и фотография, а дальше — куда и когда отправить: в бота, в каналы
+            и баннером на главной. Объявление уйдёт само в выбранное время, а через выбранный срок
+            снимется: баннер с главной пропадёт, посты в каналах удалятся.</p>
+        <div class="grid grid-2" style="margin-top:12px">
+            <div>
+                <label>Текст поста</label>
+                <textarea id="ad-text" placeholder="О чём объявление… Ссылки можно писать прямо в тексте — они станут кликабельными."></textarea>
+                <p class="meta" id="ad-len">0 знаков</p>
+                <label>Фотография</label>
+                <div class="row-actions">
+                    <label class="btn btn-primary file-btn">
+                        Загрузить фото
+                        <input id="ad-photo-in" type="file" accept="image/jpeg,image/jpg,image/png,image/webp,image/*">
+                    </label>
+                    <button class="btn" id="ad-photo-clear" type="button">Убрать фото</button>
+                </div>
+                <p class="meta" id="ad-photo-status">jpg, png, webp — до 12 МБ. С фотографией текст до 1024 знаков, без неё — до 4000.</p>
+                <div class="tpl-photos" id="ad-photo-prev"></div>
+            </div>
+            <div>
+                <h4>Куда отправить</h4>
+                <div id="ad-targets"><p class="meta">загружаю каналы…</p></div>
+                <div class="row-actions" style="margin-top:6px">
+                    <button class="btn btn-small" id="ad-all" type="button">Отметить всё</button>
+                    <button class="btn btn-small" id="ad-none" type="button">Снять всё</button>
+                </div>
+                <label>Свой канал или чат — id либо @имя</label>
+                <input class="search" id="ad-extra" placeholder="-1001234567890, @mychannel" autocomplete="off">
+                <label>Время отправки</label>
+                <div class="row-actions">
+                    <select class="search" id="ad-when-mode">
+                        <option value="now">Отправить сразу</option>
+                        <option value="later">В выбранное время</option>
+                    </select>
+                    <input class="search" id="ad-when" type="datetime-local" disabled>
+                </div>
+                <label>Удалить через</label>
+                <select class="search" id="ad-ttl">
+                    <option value="0">Не удалять — пока не сниму сам</option>
+                    <option value="15">15 минут</option>
+                    <option value="60">1 час</option>
+                    <option value="180">3 часа</option>
+                    <option value="360">6 часов</option>
+                    <option value="720">12 часов</option>
+                    <option value="1440">1 сутки</option>
+                    <option value="4320">3 суток</option>
+                    <option value="10080">7 суток</option>
+                </select>
+                <p class="meta">Срок считается от отправки: баннер на главной исчезнет, посты в каналах бот удалит. В личке у пользователей сообщения остаются — Telegram разрешает боту удалять свои сообщения только первые 48 часов.</p>
+                <div class="row-actions">
+                    <button class="btn btn-primary" id="ad-save" type="button">📤 Отправить</button>
+                    <button class="btn" id="ad-draft" type="button">💾 Сохранить черновик</button>
+                    <button class="btn" id="ad-reset" type="button">↺ Очистить форму</button>
+                    <span class="meta" id="ad-status"></span>
+                </div>
+                <p class="meta" id="ad-note"></p>
+            </div>
+        </div>
+        <h4 style="margin-top:18px">Очередь и история</h4>
+        <p class="meta" id="ad-service">—</p>
+        <div id="ad-list"><p class="meta">загружаю…</p></div>
+    </div>
+
+    <div class="card" id="fb-admin" style="margin-top:14px" data-hint="диалоги из кабинета — можно ответить">
+        <h3>💬 Обратная связь<span class="fb-dot hidden" id="fb-admin-badge"></span></h3>
+        <p class="lead">Всё, что пользователи написали в кабинете кнопкой «По всем вопросам». Отвечайте
+            здесь — ответ появится в их кабинете, а если Telegram привязан, придёт и в бота.</p>
+        <div class="fb-layout" style="margin-top:12px">
+            <div class="fb-list" id="fb-list"><p class="meta">загружаю диалоги…</p></div>
+            <div>
+                <div class="fb-conv-head" id="fb-conv-head">Выберите диалог слева</div>
+                <div class="fb-thread" id="fb-admin-thread"></div>
+                <textarea class="fb-input" id="fb-admin-text" rows="3" maxlength="2000"
+                          placeholder="Ответ пользователю…"></textarea>
+                <div class="row-actions">
+                    <button class="btn btn-primary" type="button" id="fb-admin-send">Ответить</button>
+                    <span class="meta" id="fb-admin-status"></span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card" id="ai-prompts" style="margin-top:14px" data-hint="шапка поста и рассказ дайджеста">
         <h3>🤖 Промты для ИИ</h3>
         <p class="lead">Инструкции, по которым ИИ пишет <b>шапку поста</b> в канал и <b>текст дневного дайджеста</b>. В поле уже стоит стандартный промт — правьте прямо в нём; «Вернуть шаблон» очищает поле и снова включает встроенный текст. Пустое поле = стандарт, свои цифры и факты ИИ по-прежнему берёт из сводки.</p>
         <div id="ai-prompt-blocks"><p class="meta">загружаю промты…</p></div>
     </div>
 </main>
-<script src="/static/account.js?v=alerts3"></script>
+<script src="/static/account.js?v=fb9"></script>
 <script src="/static/consent.js?v=consent1"></script>
 </body>
 </html>

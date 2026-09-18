@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>LiqScope — кабинет</title>
 <link rel="icon" type="image/png" href="/static/logo.png">
-<link rel="stylesheet" href="/static/account.css?v=alerts3">
+<link rel="stylesheet" href="/static/account.css?v=fb9">
 </head>
 <body data-page="cabinet">
 <header class="site-header">
@@ -40,6 +40,8 @@
             <a class="btn btn-primary" href="/terminal">⚡ Открыть терминал</a>
             <a class="btn btn-ghost" href="https://t.me/LiqScopeBot" id="cab-bot-link"
                target="_blank" rel="noopener">Бот в Telegram</a>
+            <a class="btn btn-ghost" href="#fb-card" id="fb-jump">💬 По всем вопросам<span
+                    class="fb-dot hidden" id="fb-dot"></span></a>
             <button type="button" class="btn btn-ghost" id="cab-logout">Выйти</button>
         </div>
         <!-- Telegram — запасной вход и канал сигналов: привязывается к аккаунту -->
@@ -59,11 +61,31 @@
         </a>
     </p>
 
+    <!-- 💬 Обратная связь: пишем админу здесь же, ответ приходит в этот диалог -->
+    <details class="card fold fb-card" id="fb-card" open>
+        <summary>
+            <h3>💬 По всем вопросам<span class="fb-dot hidden" id="fb-dot-2"></span></h3>
+            <span class="fold-hint">вопрос, идея, проблема — ответ придёт сюда</span>
+        </summary>
+        <div class="fold-body">
+            <p class="lead">Админ читает эти сообщения в админке и отвечает здесь же.
+                Пишите, что не работает, чего не хватает или что хочется видеть в терминале —
+                переписка хранится, ответ не потеряется.</p>
+            <div class="fb-thread" id="fb-thread"><p class="meta">загружаю переписку…</p></div>
+            <textarea class="fb-input" id="fb-text" rows="3" maxlength="2000"
+                      placeholder="Ваше сообщение админу…"></textarea>
+            <div class="row-actions">
+                <button class="btn btn-primary" type="button" id="fb-send">Отправить</button>
+                <span class="meta" id="fb-status"></span>
+            </div>
+        </div>
+    </details>
+
     <h2 style="margin-top:34px;font-size:1.2rem">Сервисы</h2>
     <p class="lead">Нажмите сервис, чтобы развернуть панель. Алерты: ликвидации, CVD и OI — каждый своим выключателем и своей лентой.</p>
     <div id="svc-acc"></div>
 </main>
-<script src="/static/account.js?v=alerts3"></script>
+<script src="/static/account.js?v=fb9"></script>
 <script src="/static/consent.js?v=consent1"></script>
 </body>
 </html>

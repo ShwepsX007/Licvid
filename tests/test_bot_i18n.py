@@ -146,9 +146,12 @@ class LangButtonTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_panel_button_replaces_alerts(self):
+        """Внизу — одна кнопка меню, разделы и язык — инлайном."""
         kb = self.bot._reply_kb(self.user)
-        texts = _texts(kb)
-        self.assertIn(bot_i18n.SWITCH_TEXT, texts)
+        self.assertEqual(_texts(kb), ["☰ Меню"])          # твёрдая кнопка одна
+        menu = self.bot._menu_kb(self.user)
+        texts = _texts(menu, inline=True)
+        self.assertIn(bot_i18n.SWITCH_TEXT, texts)        # язык на месте
         self.assertNotIn("🔔 Алерты", texts)
         # алерты по-прежнему открываются из сервисов
         self.assertIn("🛠 Сервисы", texts)
@@ -170,7 +173,7 @@ class LangButtonTest(unittest.TestCase):
         self.assertEqual(_datas(kb), ["setlang:ru", "setlang:en", "nav:home"])
 
     def test_english_panel_labels_work_too(self):
-        """После переключения на английский кнопки панели должны работать."""
+        """Напечатанные по-английски названия разделов тоже открывают экраны."""
         for label, want in (("👤 Account", "cabinet"), ("📊 Stats", "stats"),
                             ("🩺 Exchanges", "health"), ("🛠 Services", "services"),
                             ("📰 Feed", "liq"), ("🔔 Alerts", "al"),

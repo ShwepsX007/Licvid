@@ -139,12 +139,12 @@ RU_EN: Dict[str, str] = {
     "Привет, ": "Hi, ",
     "<b>Команды LiqScope</b>": "<b>LiqScope commands</b>",
     "<b>☰ Меню LiqScope</b>": "<b>☰ LiqScope menu</b>",
-    "Всё то же, что в панели внизу, — кнопками. Ничего набирать руками не нужно.":
-        "Everything from the bottom panel, as buttons. No need to type anything.",
-    "/start — эта панель заново, /help — полный список команд.":
-        "/start — this panel again, /help — the full command list.",
-    "!\nВыберите раздел — кнопки внизу экрана.\n":
-        "!\nPick a section — the buttons are at the bottom of the screen.\n",
+    "Разделы — кнопками ниже: набирать команды руками не нужно.\nВнизу экрана остаётся одна твёрдая кнопка ☰ Меню — она всегда возвращает этот экран.":
+        "Sections are the buttons below — no need to type commands.\nOnly one fixed button stays at the bottom, ☰ Menu — it always brings this screen back.",
+    "/start — экран заново, /help — полный список команд.":
+        "/start — the screen again, /help — the full command list.",
+    "!\nВыберите раздел — кнопки под сообщением, внизу экрана только ☰ Меню.\n":
+        "!\nPick a section — the buttons are in the message, only ☰ Menu stays below.\n",
     "/start — регистрация / вход на сайт": "/start — sign up / log into the site",
     "/cabinet — профиль": "/cabinet — profile",
     "/terminal — ссылка на терминал": "/terminal — link to the terminal",
@@ -163,6 +163,9 @@ RU_EN: Dict[str, str] = {
     "/lang — язык бота: RU / ENG": "/lang — bot language: RU / ENG",
     "меню внизу экрана · язык кнопкой RU/ENG":
         "menu at the bottom · switch the language with the RU/ENG button",
+    "меню — кнопкой ☰ внизу, разделы — кнопками в сообщении":
+        "menu — the ☰ button below, sections — the buttons in the message",
+    "<b>📣 Каналы LiqScope</b>": "<b>📣 LiqScope channels</b>",
     "<b>Выберите канал</b>": "<b>Pick a channel</b>",
     "Чтобы пользоваться ботом, подпишитесь на любой из двух каналов —":
         "To use the bot, subscribe to either of the two channels —",

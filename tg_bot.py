@@ -204,7 +204,7 @@ class TelegramBot:
     EXCHANGE_NAMES = {
         "binance": "Binance", "bybit": "Bybit", "okx": "OKX",
         "gate": "Gate.io", "bitget": "Bitget", "htx": "HTX",
-        "bitmex": "BitMEX", "hyperliquid": "Hyperliquid", "dydx": "dYdX",
+        "hyperliquid": "Hyperliquid", "dydx": "dYdX",
         "kraken": "Kraken", "bitfinex": "Bitfinex", "oxa": "0xArchive",
     }
 
@@ -250,28 +250,71 @@ class TelegramBot:
         return []
 
     def _reply_kb(self, user: Optional[dict] = None) -> dict:
+        """Твёрдая клавиатура чата: одна кнопка «☰ Меню».
+
+        Раньше внизу висело полотно из восьми кнопок-разделов — низ экрана
+        занимал пол-чата, а часть кнопок дублировала друг друга. Теперь там
+        одна кнопка: она открывает меню, а все разделы приходят
+        инлайн-кнопками под сообщением (см. ``_menu_kb``).
+        """
+        return {
+            "keyboard": [[{"text": "☰ Меню"}]],
+            "resize_keyboard": True,
+            "is_persistent": True,
+            "input_field_placeholder": "меню — кнопкой ☰ внизу, разделы — кнопками в сообщении",
+        }
+
+    def _menu_rows(self, user: Optional[dict] = None) -> List[List[dict]]:
+        """Ряды инлайн-меню: разделы, язык, канал, админ, напоминание о почте."""
+        user = user or {}
         rows = [
-            [{"text": "☰ Меню"}],                     # всегда под рукой
-            [{"text": "👤 Кабинет"}, {"text": "⚡ Терминал"}],
-            [{"text": "📊 Статистика"}, {"text": "🩺 Биржи"}],
-            [{"text": "🛠 Сервисы"}, {"text": "📰 Лента"}],
-            # Вместо второй кнопки алертов — переключатель языка. Сами
-            # алерты никуда не делись: они открываются из «🛠 Сервисы».
-            [{"text": SWITCH_TEXT}, {"text": "📣 Канал"}],
+            [{"text": "👤 Кабинет", "callback_data": "cabinet"},
+             {"text": "⚡ Терминал", "callback_data": "terminal"}],
+            [{"text": "📊 Статистика", "callback_data": "stats"},
+             {"text": "🩺 Биржи", "callback_data": "health"}],
+            [{"text": "🛠 Сервисы", "callback_data": "services"},
+             {"text": "📰 Лента", "callback_data": "liq"}],
+            # Язык — рядом с каналом: переключатель один на весь бот
+            [{"text": SWITCH_TEXT, "callback_data": "lang"},
+             {"text": "📣 Канал", "callback_data": "channel"}],
         ]
-        if user and user.get("is_admin"):
-            rows.append([{"text": "★ Админка"}])
-        if user is not None:
+        if user:
             email = (user.get("email") or "").strip()
             if not email or not user.get("email_verified"):
                 # Основной вход — почта: напоминаем, пока адрес не подтверждён
-                rows.append([{"text": "✉️ Подтвердить почту"}])
-        return {
-            "keyboard": rows,
-            "resize_keyboard": True,
-            "is_persistent": True,
-            "input_field_placeholder": "меню внизу экрана · язык кнопкой RU/ENG",
-        }
+                rows.append([{"text": "✉️ Подтвердить почту",
+                              "callback_data": "a:vmail"}])
+            if user.get("is_admin"):
+                rows.append([{"text": "★ Админка", "callback_data": "nav:admin"}])
+        # Партнёрская ссылка кнопкой: url-кнопку Telegram подсвечивает
+        # как ссылку, а не как действие бота
+        rows.append([{"text": "💠 Торговать на Gate — скидка на комиссию",
+                      "url": gate_url()}])
+        return rows
+
+    def _menu_kb(self, user: Optional[dict] = None) -> dict:
+        """Инлайн-меню под сообщением — то, что раньше висело кнопками внизу."""
+        return {"inline_keyboard": self._menu_rows(user)}
+
+    async def push_reply_kb(self, chat_id: int, user: Optional[dict] = None) -> None:
+        """Поставить внизу чата одну твёрдую кнопку «☰ Меню».
+
+        Твёрдая клавиатура приезжает вместе с сообщением и остаётся в чате до
+        замены, поэтому служебное сообщение сразу удаляем: в чате остаётся
+        только экран с инлайн-кнопками, а кнопка внизу — на месте.
+        """
+        mid = await self.send(chat_id, "⌨️", self._reply_kb(user), silent=True)
+        if not mid:
+            return
+        await self.drop_menu(chat_id, mid)
+        try:
+            cid = int(chat_id)
+            # Удалённый id не должен считаться «последним сообщением»: иначе
+            # меню решит, что уехало вверх, и пришлёт лишний экран.
+            if self._last_msg.get(cid) == int(mid):
+                self._last_msg[cid] = int(self._menu_msg.get(cid) or 0)
+        except (TypeError, ValueError):
+            pass
 
     def _reply_cmd(self, text: str) -> str:
         key = " ".join((text or "").strip().lower().split())
@@ -1055,6 +1098,20 @@ class TelegramBot:
         if self.store:
             self.store.set_setting("channel_pending", "")
         await self.show_menu(chat_id, self._channels_text(), self._channels_kb())
+
+    def _channel_text(self) -> str:
+        """Экран «Каналы»: те же посты, что уходят в канал, — в двух языках."""
+        links = "\n".join(
+            f'• <a href="{_esc(url)}">{_esc(name)}</a>'
+            + (" 🇷🇺" if code == "ru" else " 🇬🇧")
+            for code, name, url, _cid in self.channel_pair())
+        return ("<b>📣 Каналы LiqScope</b>\n"
+                f"Сводки ликвидаций, OI и CVD раз в {self.channel_interval_h()} ч — тот же разбор,"
+                " что в боте.\n"
+                "Содержание одинаковое, отличается язык: русский и английский.\n"
+                f"{links}\n\n"
+                "Подписки на любой из них достаточно."
+                + self.site_footer())
 
     def _channels_text(self) -> str:
         ru, en = self.channel_role("ru"), self.channel_role("en")
@@ -2193,20 +2250,7 @@ class TelegramBot:
                 await self._cmd_admin(chat_id, user)
                 return
             if nav == "channel":
-                links = "\n".join(
-                    f'• <a href="{_esc(url)}">{_esc(name)}</a>'
-                    + (" 🇷🇺" if code == "ru" else " 🇬🇧")
-                    for code, name, url, _cid in self.channel_pair())
-                await self.show_menu(
-                    chat_id,
-                    "<b>📣 Каналы LiqScope</b>\n"
-                    f"Сводки ликвидаций, OI и CVD раз в {self.channel_interval_h()} ч — тот же разбор,"
-                    " что в боте.\n"
-                    "Содержание одинаковое, отличается язык: русский и английский.\n"
-                    f"{links}\n\n"
-                    "Подписки на любой из них достаточно."
-                    + self.site_footer(),
-                    self._reply_kb(user))
+                await self.show_menu(chat_id, self._channel_text(), self._menu_kb(user))
                 return
             if nav == "al":
                 await self.show_menu(chat_id, self._alert_text(user), self._alert_kb(user))
@@ -2224,7 +2268,7 @@ class TelegramBot:
                     chat_id,
                     "⚠️ Экран не открылся: <code>" + _esc(str(e)[:120])
                     + "</code>\nОшибка записана в журнал сервиса.",
-                    self._reply_kb(user))
+                    self._menu_kb(user))
                 return
             await self.show_menu(chat_id, body, kb)
             return
@@ -2233,22 +2277,22 @@ class TelegramBot:
             await self.show_menu(chat_id, self._digest_result_text(ok),
                                  self._admin_kb())
         elif text.startswith("/help"):
-            await self.show_menu(chat_id, self._help(user), self._reply_kb(user))
+            await self.show_menu(chat_id, self._help(user), self._menu_kb(user))
         elif text.startswith("/cabinet"):
-            await self.show_menu(chat_id, self._cabinet_text(user), self._reply_kb(user))
+            await self.show_menu(chat_id, self._cabinet_text(user), self._menu_kb(user))
         elif text.startswith("/mail"):
             body, kb = self._screen(user, "mail")
             await self.show_menu(chat_id, body, kb)
         elif text.startswith("/lang") or text.startswith("/language"):
             await self.show_menu(chat_id, self._lang_text(user), self._lang_kb(user))
         elif text.startswith("/stats"):
-            await self.show_menu(chat_id, self._stats_text(), self._reply_kb(user))
+            await self.show_menu(chat_id, self._stats_text(), self._menu_kb(user))
         elif text.startswith("/status") or text.startswith("/health"):
-            await self.show_menu(chat_id, self._health_text(), self._reply_kb(user))
+            await self.show_menu(chat_id, self._health_text(), self._menu_kb(user))
         elif text.startswith("/bot"):
-            await self.show_menu(chat_id, self.poll_text(), self._reply_kb(user))
+            await self.show_menu(chat_id, self.poll_text(), self._menu_kb(user))
         elif text.startswith("/liq"):
-            await self.show_menu(chat_id, self._liq_text(), self._reply_kb(user))
+            await self.show_menu(chat_id, self._liq_text(), self._menu_kb(user))
         elif text.startswith("/services"):
             await self.show_menu(chat_id, self._services_text(user), self._services_kb(user))
         elif text.startswith("/pumps") or text.startswith("/watch"):
@@ -2268,7 +2312,7 @@ class TelegramBot:
         elif text.startswith("/broadcast"):
             await self._cmd_broadcast(chat_id, user, text)
         else:
-            await self.show_menu(chat_id, "Не понял. Нажмите кнопку или /help.", self._reply_kb(user))
+            await self.show_menu(chat_id, "Не понял. Нажмите кнопку или /help.", self._menu_kb(user))
 
     async def _on_callback(self, cb: dict) -> None:
         from_u = cb.get("from") or {}
@@ -2295,7 +2339,7 @@ class TelegramBot:
                 if not user.get("is_admin"):
                     await self.show_menu(chat_id, "Привязывать каналы может только"
                                                     " администратор.",
-                                         self._reply_kb(user))
+                                         self._menu_kb(user))
                     return
                 await self._set_channel_role(data.split(":")[-1], chat_id)
                 return
@@ -2334,7 +2378,7 @@ class TelegramBot:
                 return
             if data == "ch:check":
                 if await self._is_member_any(tg_id):
-                    text, markup = self._home_text(user), self._reply_kb(user)
+                    text, markup = self._home_text(user), self._menu_kb(user)
                     ok = await self.reply(chat_id, text, markup, message_id=message_id)
                 else:
                     extra = ("Telegram ещё не видит подписку. Откройте любой из"
@@ -2432,28 +2476,32 @@ class TelegramBot:
         if data in ("menu", "back", "nav:home", "home", "help", ""):
             if data == "help":
                 return self._commands_text(user), self._commands_kb(user)
-            return self._home_text(user), self._reply_kb(user)
+            return self._home_text(user), self._menu_kb(user)
         if data == "lang":
             return self._lang_text(user), self._lang_kb(user)
         if data == "cabinet":
-            return self._cabinet_text(user), self._reply_kb(user)
+            return self._cabinet_text(user), self._menu_kb(user)
         if data == "mail":
             # Напоминание из кабинета: ждём адрес почты следующим сообщением
             self._wait_email[int(user.get("tg_id") or 0)] = time.time() + 900
             return self._mail_screen(user), self._cabinet_kb(user)
         if data == "stats":
-            return self._stats_text(), self._reply_kb(user)
+            return self._stats_text(), self._menu_kb(user)
         if data == "health":
-            return self._health_text(), self._reply_kb(user)
+            return self._health_text(), self._menu_kb(user)
         if data == "a:health" and user.get("is_admin"):
             return self._health_text(), self._kb_back("nav:admin")
         if data == "liq":
-            return self._liq_text(), self._reply_kb(user)
+            return self._liq_text(), self._menu_kb(user)
         if data == "terminal":
             # сразу на сайт: большая URL-кнопка, сообщение уходит без звука
             return self._terminal_text(), self._terminal_kb()
         if data == "services":
             return self._services_text(user), self._services_kb(user)
+        if data == "channel":
+            # Кнопка «📣 Канал» в инлайн-меню: раньше её не знал _screen и
+            # нажатие молча выбрасывало на главный экран
+            return self._channel_text(), self._menu_kb(user)
         if data.startswith("svc:"):
             slug = data.split(":", 1)[1]
             if slug == "alerts":
@@ -2496,7 +2544,7 @@ class TelegramBot:
             self._wait_broadcast[int(user.get("tg_id") or 0)] = True
             return ("Пришлите текст рассылки следующим сообщением.\n"
                     "/cancel — отмена.", self._kb_back("nav:admin"))
-        return self._home_text(user), self._reply_kb(user)
+        return self._home_text(user), self._menu_kb(user)
 
     async def _cmd_start(self, chat_id: int, user: dict, text: str) -> None:
         parts = text.split(maxsplit=1)
@@ -2521,7 +2569,7 @@ class TelegramBot:
                     "Теперь сигналы алертов придут сюда, а вход в кабинет — "
                     "по почте или этим же Telegram.\n"
                     f"🌍 {self.site_a('открыть кабинет на сайте', '/cabinet')}",
-                    self._reply_kb(user),
+                    self._menu_kb(user),
                 )
                 return
             err = r.get("error")
@@ -2533,7 +2581,7 @@ class TelegramBot:
                        "в кабинете ещё раз.")
             else:
                 msg = "Не получилось привязать Telegram. Попробуйте ещё раз из кабинета."
-            await self.show_menu(chat_id, msg, self._reply_kb(user))
+            await self.show_menu(chat_id, msg, self._menu_kb(user))
             return
         if payload.startswith("login_"):
             nonce = payload[6:]
@@ -2545,13 +2593,13 @@ class TelegramBot:
                     f"Вход подтверждён, {_esc(user['display_name'])}.\n"
                     "Вернитесь во вкладку браузера — кабинет откроется сам.\n"
                     f"🌍 {self.site_a('открыть кабинет на сайте', '/cabinet')}",
-                    self._reply_kb(user),
+                    self._menu_kb(user),
                 )
                 return
             await self.show_menu(
                 chat_id,
                 "Код входа недействителен или устарел. Нажмите «Войти» на сайте ещё раз.",
-                self._reply_kb(user),
+                self._menu_kb(user),
             )
             return
         if not await self._ensure_channel(chat_id, user):
@@ -2563,33 +2611,37 @@ class TelegramBot:
         )
         extra = (f"\n🌍 {self.site_a('кабинет на сайте', '/cabinet')} · "
                  f"{self.site_a('терминал', '/terminal')}")
+        # Твёрдая клавиатура — одна кнопка ☰ Меню: ставим её здесь (в чате
+        # она приезжает служебным сообщением, которое сразу удаляется), а
+        # разделы уходят инлайн-кнопками под приветствием.
+        await self.push_reply_kb(chat_id, user)
         await self.show_menu(
             chat_id,
             f"Привет, {_esc(user.get('display_name') or 'друг')}!\n\n{welcome}{extra}",
-            self._reply_kb(user),
+            self._menu_kb(user),
         )
 
     async def _cmd_admin(self, chat_id: int, user: dict) -> None:
         if not user["is_admin"]:
-            await self.show_menu(chat_id, "Недостаточно прав.", self._reply_kb(user))
+            await self.show_menu(chat_id, "Недостаточно прав.", self._menu_kb(user))
             return
         await self.show_menu(chat_id, self._admin_text(), self._admin_kb())
 
     async def _cmd_users(self, chat_id: int, user: dict) -> None:
         if not user["is_admin"]:
-            await self.show_menu(chat_id, "Недостаточно прав.", self._reply_kb(user))
+            await self.show_menu(chat_id, "Недостаточно прав.", self._menu_kb(user))
             return
         await self.show_menu(chat_id, self._users_text(), self._kb_back("nav:admin"))
 
     async def _cmd_visits(self, chat_id: int, user: dict) -> None:
         if not user["is_admin"]:
-            await self.show_menu(chat_id, "Недостаточно прав.", self._reply_kb(user))
+            await self.show_menu(chat_id, "Недостаточно прав.", self._menu_kb(user))
             return
         await self.show_menu(chat_id, self._visits_text(), self._kb_back("nav:admin"))
 
     async def _cmd_broadcast(self, chat_id: int, user: dict, text: str) -> None:
         if not user["is_admin"]:
-            await self.show_menu(chat_id, "Недостаточно прав.", self._reply_kb(user))
+            await self.show_menu(chat_id, "Недостаточно прав.", self._menu_kb(user))
             return
         rest = text.split(maxsplit=1)
         body = rest[1].strip() if len(rest) > 1 else ""
@@ -2795,35 +2847,22 @@ class TelegramBot:
         return {"inline_keyboard": rows}
 
     def _commands_kb(self, user: dict) -> dict:
-        """Меню по кнопке «☰ Меню»: команды, которые не надо набирать руками."""
-        admin = bool(user.get("is_admin"))
-        rows = [
-            [{"text": "🏠 /start", "callback_data": "nav:home"}],
-            [{"text": "👤 Кабинет", "callback_data": "cabinet"},
-             {"text": "⚡ Терминал", "callback_data": "terminal"}],
-            [{"text": "📊 Статистика", "callback_data": "stats"},
-             {"text": "🩺 Биржи", "callback_data": "health"}],
-            [{"text": "🛠 Сервисы", "callback_data": "services"},
-             {"text": "📰 Лента", "callback_data": "liq"}],
-            [{"text": SWITCH_TEXT, "callback_data": "lang"},
-             {"text": "📣 Канал", "callback_data": "channel"}],
-        ]
-        email = (user.get("email") or "").strip()
-        if not email or not user.get("email_verified"):
-            rows.append([{"text": "✉️ Подтвердить почту", "callback_data": "a:vmail"}])
-        if admin:
-            rows.append([{"text": "★ Админка", "callback_data": "nav:admin"}])
-        # Партнёрская ссылка кнопкой: url-кнопку Telegram подсвечивает как ссылку
-        rows.append([{"text": "💠 Торговать на Gate — скидка на комиссию",
-                      "url": gate_url()}])
+        """Меню по кнопке «☰ Меню»: разделы кнопками под сообщением.
+
+        Твёрдая клавиатура внизу теперь одна (☰ Меню), поэтому всё
+        остальное приходит здесь — инлайном.
+        """
+        rows = [[{"text": "🏠 /start", "callback_data": "nav:home"}]]
+        rows += self._menu_rows(user)
         return {"inline_keyboard": rows}
 
     def _commands_text(self, user: dict) -> str:
         return (
             "<b>☰ Меню LiqScope</b>\n"
-            "Всё то же, что в панели внизу, — кнопками. Ничего набирать"
-            " руками не нужно.\n\n"
-            "/start — эта панель заново, /help — полный список команд."
+            "Разделы — кнопками ниже: набирать команды руками не нужно.\n"
+            "Внизу экрана остаётся одна твёрдая кнопка ☰ Меню — она всегда"
+            " возвращает этот экран.\n\n"
+            "/start — экран заново, /help — полный список команд."
             + self.site_footer()
         )
 
@@ -2966,7 +3005,7 @@ class TelegramBot:
         return {"inline_keyboard": [[{"text": "← Назад", "callback_data": to}]]}
 
     def _menu(self, user: dict) -> dict:
-        return self._reply_kb(user)
+        return self._menu_kb(user)
 
     def _post_int_text(self) -> str:
         """Экран «Частота постов»: окно поста и блок анализа."""
@@ -3030,7 +3069,8 @@ class TelegramBot:
         return (
             f"<b>LiqScope</b>\n"
             f"Привет, {_esc(user['display_name'])}!\n"
-            "Выберите раздел — кнопки внизу экрана.\n"
+            "Выберите раздел — кнопки под сообщением, внизу экрана только"
+            " ☰ Меню.\n"
             + gate_line()
             + self.site_footer()
         )
@@ -3370,7 +3410,7 @@ class TelegramBot:
             except Exception as e:                       # noqa: BLE001
                 log.warning("язык не сохранился (%s): %s", lang, e)
         self.remember_lang(chat_id, lang)
-        await self.show_menu(chat_id, self._lang_text(user), self._reply_kb(user))
+        await self.show_menu(chat_id, self._lang_text(user), self._menu_kb(user))
 
     def _alert_cfg(self, user: dict) -> dict:
         from alerts import normalize_config

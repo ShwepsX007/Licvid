@@ -10,11 +10,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from market_feed import (bitfinex_symbol_map, canon, canon_bitmex,
+from market_feed import (bitfinex_symbol_map, canon, canon_xbt,
                          dydx_symbol_map, hl_close_reason, hl_coin_map,
                          kraken_symbol_map, parse_binance_msg,
                          parse_bitfinex_liquidations, parse_bitget_msg,
-                         parse_bitmex_msg, parse_bybit_msg, parse_dydx_msg,
+                         parse_bybit_msg, parse_dydx_msg,
                          parse_gate_msg, parse_htx_msg,
                          parse_hyperliquid_msg, parse_kraken_msg,
                          parse_okx_msg, to_binance, to_bybit, to_gate, to_okx)
@@ -169,58 +169,10 @@ check("без turnover считаем сами", parse_htx_msg(buy)[0]["usd"] is
 check("чужой топик игнор",
       parse_htx_msg({"topic": "market.BTC-USDT.trade.detail", "data": []}) == [])
 
-print("bitmex liquidation")
-check("canon XBTUSD", canon_bitmex("XBTUSD") == "BTC_USDT")
-check("canon XBTUSDT", canon_bitmex("XBTUSDT") == "BTC_USDT")
-check("canon ETHUSD", canon_bitmex("ETHUSD") == "ETH_USDT")
-bitmex_inverse = {
-    "table": "liquidation", "action": "insert",
-    "data": [{"orderID": "98ae1dad", "symbol": "XBTUSD", "side": "Sell",
-              "price": 13854.5, "leavesQty": 314930}],
-}
-instr = {"XBTUSD": {"inverse": True, "multiplier": 0.0},
-         "XBTUSDT": {"inverse": False, "multiplier": 1e-6}}
-res = parse_bitmex_msg(bitmex_inverse, instr)
-check("1 событие", len(res) == 1, res)
-check("Sell → LONG", res[0]["side"] == "LONG")
-check("инверсный: usd = контракты", abs(res[0]["usd"] - 314930) < 1e-6)
-check("инверсный: qty в BTC", abs(res[0]["qty"] - 314930 / 13854.5) < 1e-9)
-linear = {"table": "liquidation", "action": "insert",
-          "data": [{"symbol": "XBTUSDT", "side": "Buy", "price": 90000,
-                    "leavesQty": 1000000}]}
-res = parse_bitmex_msg(linear, instr)
-check("Buy → SHORT", res[0]["side"] == "SHORT")
-check("линейный: множитель контракта", abs(res[0]["qty"] - 1.0) < 1e-9, res)
-check("линейный: usd = qty*price", abs(res[0]["usd"] - 90000) < 1e-6)
-check("update не учитываем (задвоение объёма)",
-      parse_bitmex_msg({"table": "liquidation", "action": "update",
-                        "data": [{"symbol": "XBTUSD", "leavesQty": 305515}]},
-                       instr) == [])
-# Без метаданных инструментов лента больше не молчит: инверсный контракт
-# считается как есть, линейному подставляется микроконтракт (1 контракт =
-# 1e-6 базовой монеты) — раньше на этом шаге ВСЕ события биржи отбрасывались,
-# и она выглядела зависшей.
-bm_stats = {}
-res = parse_bitmex_msg(linear, {}, bm_stats)
-check("без метаданных линейный считается по микроконтракту",
-      res and abs(res[0]["qty"] - 1.0) < 1e-9 and abs(res[0]["usd"] - 90000) < 1e-6,
-      (res, bm_stats))
-check("счётчик догадки виден", bm_stats.get("no_meta_micro") == 1, bm_stats)
-inv_stats = {}
-res = parse_bitmex_msg(bitmex_inverse, {}, inv_stats)
-check("без метаданных инверсный считается как инверсный",
-      res and abs(res[0]["usd"] - 314930) < 1e-6, (res, inv_stats))
-check("инверсному множитель не нужен", inv_stats.get("no_meta_inverse") == 1, inv_stats)
-check("разбор считает разобранные строки",
-      bm_stats.get("rows") == 1 and inv_stats.get("rows") == 1, (bm_stats, inv_stats))
-bad = {"table": "liquidation", "action": "insert",
-       "data": [{"symbol": "XBTUSD", "price": 0, "leavesQty": 5},
-                {"symbol": "XBTUSD", "price": "abc", "leavesQty": 5}]}
-bad_stats = {}
-check("пустые строки не считаются событиями",
-      parse_bitmex_msg(bad, {}, bad_stats) == [], bad_stats)
-check("причины отбрасывания видны в счётчиках",
-      bad_stats.get("empty_row") == 1 and bad_stats.get("bad_row") == 1, bad_stats)
+print("kraken XBT-символы")
+check("canon XBTUSD", canon_xbt("XBTUSD") == "BTC_USDT")
+check("canon XBTUSDT", canon_xbt("XBTUSDT") == "BTC_USDT")
+check("canon ETHUSD", canon_xbt("ETHUSD") == "ETH_USDT")
 
 print("hyperliquid trades")
 hl_universe = ["BTC", "ETH", "kPEPE", "KAS", "HYPE"]

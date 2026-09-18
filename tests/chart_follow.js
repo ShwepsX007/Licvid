@@ -50,13 +50,16 @@ function mathPart() {
   const consts = ["FOLLOW_EDGE_BARS", "FOLLOW_KEEP_BARS", "FOLLOW_MARGIN"]
     .map((n) => src.match(new RegExp("const " + n + " = [^;]+;"))[0]).join("\n");
   const fn = grab(src, "function", "followRange");
+  const priceFn = grab(src, "function", "followPriceRange");
   const opts = grab(src, "function", "followPriceOptions");
   const margins = src.match(/const PRICE_MARGINS_DEFAULT = \{[^}]+\};/)[0];
   // eslint-disable-next-line no-new-func
   const followRange = new Function(consts + "\n" + fn + "\nreturn followRange;")();
+  const followPriceRange = new Function(
+    consts + "\n" + priceFn + "\nreturn followPriceRange;")();
   const followPriceOptions = new Function(
     consts + "\n" + margins + "\n" + opts + "\nreturn followPriceOptions;")();
-  return { followRange, followPriceOptions, src };
+  return { followRange, followPriceRange, followPriceOptions, src };
 }
 
 /* ================= часть 1: страница терминала ================= */
@@ -97,7 +100,7 @@ async function part1() {
   vc.on("error", (...a) => errors.push("console.error: " +
     a.map((x) => String((x && x.message) || x)).join(" ").slice(0, 200)));
 
-  const rec = { ranges: [], price: [], time: [] };
+  const rec = { ranges: [], price: [], priceRanges: [], time: [] };
   const dom = await JSDOM.fromURL(URL_BASE + "/terminal", {
     runScripts: "dangerously", resources: "usable", pretendToBeVisual: true,
     virtualConsole: vc,
@@ -160,7 +163,14 @@ async function part1() {
         applyOptions(o) { rec.price.push(o); this._o = Object.assign({}, this._o, o); },
         options: () => Object.assign({ autoScale: true, scaleMargins: { top: 0.06, bottom: 0.24 } },
                                      priceScale._o || {}),
+        // видимое окно цены: как у настоящей шкалы — можно прочитать и задать
+        getVisibleRange: () => priceScale._vr || null,
+        setVisibleRange(r) {
+          priceScale._vr = { from: r.from, to: r.to };
+          rec.priceRanges.push({ from: r.from, to: r.to });
+        },
       };
+      rec.priceScale = priceScale;
       const series = () => ({
         setData() {}, update() {}, applyOptions() {},
         priceToCoordinate: (v) => Number(v), coordinateToPrice: (v) => Number(v),
@@ -243,6 +253,41 @@ async function part1() {
   F.step();
   check("второй шаг без новой свечи не дёргает окно", rec.ranges.length === before);
 
+  // вертикаль: библиотека гасит autoScale, едва пользователь тронул шкалу
+  // цены (потянул за неё) — тогда цена уезжает за верх/низ, хотя по горизонтали
+  // окно продолжает ехать. Слежение обязано вернуть autoScale само.
+  const beforeAuto = rec.price.length;
+  rec.priceScale._o = { autoScale: false };
+  const beforeStepRanges = rec.ranges.length;
+  check("шаг слежения вернул autoScale: цена не уедет за край",
+    F.step() === true &&
+    rec.price.slice(beforeAuto).some((o) => o.autoScale === true &&
+      o.scaleMargins && o.scaleMargins.top === 0.15 && o.scaleMargins.bottom === 0.15),
+    JSON.stringify(rec.price.slice(beforeAuto)));
+  check("горизонталь на этом шаге уже стояла — окно времени не дёрнулось",
+    rec.ranges.length === beforeStepRanges, rec.ranges.length);
+
+  // а если окно всё же не держит цену — ставим диапазон сами
+  const band = F.band();
+  check("видимые свечи дали диапазон цены", !!band && band.high > band.low,
+    JSON.stringify(band));
+  check("вертикальная часть доступна и без графика (чистая математика)",
+    typeof F.priceRange === "function" && typeof F.priceStep === "function");
+  rec.priceScale.setVisibleRange({ from: band.high + 100, to: band.high + 200 });
+  const beforeVR = rec.priceRanges.length;
+  F.priceStep();
+  const fixed = rec.priceRanges[rec.priceRanges.length - 1];
+  const fixedSpan = fixed ? fixed.to - fixed.from : 0;
+  check("цена вне окна — окно цены поправлено с зазором 15% сверху и снизу",
+    rec.priceRanges.length > beforeVR && fixed &&
+    Math.abs((fixed.to - fixedSpan * 0.15) - band.high) < 1e-6 &&
+    Math.abs((fixed.from + fixedSpan * 0.15) - Math.min(band.low, 50050)) < 1e-6,
+    JSON.stringify(fixed) + " band=" + JSON.stringify(band));
+  const steady = rec.priceRanges.length;
+  F.priceStep();
+  check("цена в кадре — окно цены больше не дёргаем",
+    rec.priceRanges.length === steady, rec.priceRanges.length - steady);
+
   // ручная прокрутка в историю — автоследование встаёт на паузу
   const panRange = { from: last - 300, to: last - 40 };
   rec.timeScale.setVisibleLogicalRange(panRange);
@@ -313,7 +358,7 @@ async function part1() {
 /* ================= прогон ================= */
 (async () => {
   console.log("автоследование графика: кнопка, горизонталь и вертикаль");
-  const { followRange, followPriceOptions } = mathPart();
+  const { followRange, followPriceRange: FpRange, followPriceOptions } = mathPart();
 
   // горизонталь: свеча подошла к краю — едем, сохраняя ширину окна
   const r1 = followRange({ from: 90, to: 103 }, 100, 3, 1);
@@ -352,6 +397,40 @@ async function part1() {
   check("выключено: прежние отступы",
     off.autoScale === true && off.scaleMargins.top === 0.06 && off.scaleMargins.bottom === 0.24,
     JSON.stringify(off.scaleMargins));
+
+  // вертикаль: цена не должна уходить за верх/низ — окно цены ведём сами
+  const M = 0.15;
+  check("вертикаль: цена с запасом внутри окна — окно не трогаем",
+    FpRange({ from: 49900, to: 50100 }, { low: 49950, high: 50050 }, 50000, M) === null);
+  const upTop = FpRange({ from: 49900, to: 50100 }, { low: 49950, high: 50130 },
+                        50100, M);
+  const upSpan = upTop ? upTop.to - upTop.from : 0;
+  check("вертикаль: цена подошла к верху — окно съезжает вверх с зазором 15%",
+    !!upTop && upTop.from > 49900 && upSpan > 0 &&
+    Math.abs((upTop.to - upSpan * M) - 50130) < 1e-6, JSON.stringify(upTop));
+  const dn = FpRange({ from: 49900, to: 50100 }, { low: 49700, high: 50050 },
+                     49800, M);
+  const dnSpan = dn ? dn.to - dn.from : 0;
+  check("вертикаль: цена ушла вниз — окно уходит вниз, зазор 15% с обеих сторон",
+    !!dn && dn.from < 49900 &&
+    Math.abs((dn.from + dnSpan * M) - 49700) < 1e-6 &&
+    Math.abs((dn.to - dnSpan * M) - 50050) < 1e-6, JSON.stringify(dn));
+  const wideV = FpRange({ from: 49990, to: 50010 }, { low: 49000, high: 51000 },
+                        50000, M);
+  const wSpan = wideV ? wideV.to - wideV.from : 0;
+  check("вертикаль: видимый диапазон шире окна — расширяем и центруем",
+    !!wideV && Math.abs((wideV.from + wSpan * M) - 49000) < 1e-6 &&
+    Math.abs((wideV.to - wSpan * M) - 51000) < 1e-6, JSON.stringify(wideV));
+  const fresh = FpRange(null, { low: 49900, high: 50100 }, 50100, M);
+  check("вертикаль: окно неизвестно — собираем заново по видимым свечам",
+    !!fresh && fresh.from < 49900 && fresh.to > 50100, JSON.stringify(fresh));
+  check("вертикаль: плоская цена не роняет расчёт",
+    !!FpRange(null, { low: 50000, high: 50000 }, 50000, M));
+  check("вертикаль: без данных окно не трогаем",
+    FpRange({ from: 1, to: 2 }, null, 1, M) === null);
+  check("вертикаль: окно растягивается, но не сжимается",
+    (() => { const r = FpRange({ from: 0, to: 100 }, { low: 40, high: 60 }, 60, M);
+             return r === null; })());
 
   try { await part1(); } catch (e) { fail++; console.log("  FAIL часть 1: " + e.message); }
   console.log(`\nитог: ${ok} ок, ${fail} ошибок`);

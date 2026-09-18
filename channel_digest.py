@@ -325,7 +325,6 @@ EXCH_NAMES = {
     "gate": "Gate",
     "bitget": "Bitget",
     "htx": "HTX",
-    "bitmex": "BitMEX",
     "hyperliquid": "Hyperliquid",
     "dydx": "dYdX",
     "kraken": "Kraken",

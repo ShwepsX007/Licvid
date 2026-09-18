@@ -113,6 +113,60 @@
             : { autoScale: true, scaleMargins: Object.assign({}, PRICE_MARGINS_DEFAULT) };
     }
 
+    /** Вертикальное окно цены: цена не должна выходить за края графика.
+     *
+     * Чистая функция — её гоняет tests/chart_follow.js без браузера.
+     *   cur    — текущее видимое окно цены {from,to} (null — неизвестно);
+     *   band   — {low,high} видимых свечей; price — последняя цена;
+     *   margin — зазор от края, доля высоты окна.
+     * Возвращает новое окно или null, если текущего достаточно. Окно никогда
+     * не сжимается само (иначе график «дышал» бы на каждом тике): сначала
+     * сдвигаем вслед за ценой, и только если диапазон не влезает — расширяем.
+     */
+    function followPriceRange(cur, band, price, margin) {
+        if (!band) return null;
+        const p = Number(price);
+        const low0 = Number(band.low), high0 = Number(band.high);
+        if (!isFinite(low0) || !isFinite(high0)) return null;
+        let low = Math.min(low0, isFinite(p) ? p : low0);
+        let high = Math.max(high0, isFinite(p) ? p : high0);
+        if (high <= low) {                       // плоская цена: даём хоть какой-то размах
+            const pad = Math.max(Math.abs(high) * 1e-4, 1e-9);
+            low -= pad; high += pad;
+        }
+        let m = Number(margin);
+        if (!isFinite(m) || m < 0) m = 0;
+        m = Math.min(m, 0.4);                    // 0.4 и выше — окно схлопнулось бы
+        const hasCur = !!cur && isFinite(cur.from) && isFinite(cur.to) &&
+                       Number(cur.to) > Number(cur.from);
+        if (!hasCur) {                           // окно неизвестно — считаем заново
+            const need = (high - low) / (1 - 2 * m);
+            const mid = (low + high) / 2;
+            return { from: mid - need / 2, to: mid + need / 2 };
+        }
+        let from = Number(cur.from), to = Number(cur.to);
+        const pad = (to - from) * m;
+        if (high > to - pad) {                   // цена убежала вверх — сдвигаем окно
+            const shift = high - (to - pad);
+            from += shift; to += shift;
+        }
+        if (low < from + pad) {                  // вниз — тоже сдвигаем
+            const shift = (from + pad) - low;
+            from -= shift; to -= shift;
+        }
+        const span = to - from;
+        if (high - low > span * (1 - 2 * m) - 1e-9) {
+            // сдвигом не помогло: видимый диапазон шире окна — расширяем,
+            // поставив цену в середину (зазоры одинаковые сверху и снизу)
+            const need = (high - low) / (1 - 2 * m);
+            const mid = (low + high) / 2;
+            from = mid - need / 2; to = mid + need / 2;
+        }
+        if (Math.abs(from - Number(cur.from)) < 1e-9 &&
+            Math.abs(to - Number(cur.to)) < 1e-9) return null;
+        return { from, to };
+    }
+
     let ws = null;
     let wsReconnectTimer = null;
     let chart = null;
@@ -307,13 +361,7 @@
     // --- Фильтры (мин. объём + биржи) ----------------------------------------
     // Как биржа подписывается в интерфейсе (код биржи -> читаемое имя)
     const EXCH_NAMES = {
-        dydx: "dYdX", okx: "OKX", htx: "HTX", bitmex: "BitMEX",
-    };
-    // Источники, чьи площадки сворачивают торговлю: ноль событий у них —
-    // ожидаемая картина, а не сломанный WS.
-    const SUNSET_NOTES = {
-        bitmex: "Биржа BitMEX закрывается 23 сентября 2026: торговля свёрнута, " +
-                "ликвидаций почти нет — это не поломка источника",
+        dydx: "dYdX", okx: "OKX", htx: "HTX",
     };
 
     function exchangeName(e) {
@@ -653,7 +701,7 @@
     function applyFollowMode() {
         if (!chart) return;
         try {
-            const scale = chart.priceScale("right");
+            const scale = rightPriceScale();
             if (scale && scale.applyOptions) scale.applyOptions(followPriceOptions(state.chartFollow));
         } catch (e) { /* ignore */ }
         try {
@@ -668,7 +716,98 @@
 
     let followSelfScroll = false;   // мы сами подвинули окно — не считаем это панорамой
 
-    /** Один шаг автоследования: подвинуть окно времени (если пора). */
+    /** Шкала цены справа: через серию (v4/v5), с запасным путём через график. */
+    function rightPriceScale() {
+        try {
+            if (candleSeries && candleSeries.priceScale) {
+                const s = candleSeries.priceScale();
+                if (s && s.applyOptions) return s;
+            }
+        } catch (e) { /* ignore */ }
+        try {
+            const s = chart && chart.priceScale ? chart.priceScale("right") : null;
+            if (s && s.applyOptions) return s;
+        } catch (e) { /* ignore */ }
+        return null;
+    }
+
+    /** Границы цены по видимым свечам (для вертикального слежения). */
+    function visiblePriceBand() {
+        const candles = state.candles || [];
+        if (!candles.length) return null;
+        let from = 0, to = candles.length - 1;
+        try {
+            const lr = chart.timeScale().getVisibleLogicalRange();
+            if (lr && isFinite(lr.from) && isFinite(lr.to)) {
+                from = Math.max(0, Math.floor(Number(lr.from)));
+                to = Math.min(candles.length - 1, Math.ceil(Number(lr.to)));
+            }
+        } catch (e) { /* окно неизвестно — берём все свечи */ }
+        let low = Infinity, high = -Infinity;
+        for (let i = from; i <= to; i++) {
+            const c = candles[i];
+            if (!c) continue;
+            const lo = Number(c.low), hi = Number(c.high);
+            if (isFinite(lo) && lo < low) low = lo;
+            if (isFinite(hi) && hi > high) high = hi;
+        }
+        if (!isFinite(low) || !isFinite(high)) return null;
+        return { low: low, high: high };
+    }
+
+    /** Последняя цена на графике (закрытие живой свечи). */
+    function lastChartPrice() {
+        const candles = state.candles || [];
+        const c = candles[candles.length - 1];
+        const p = c ? Number(c.close) : NaN;
+        return isFinite(p) && p > 0 ? p : null;
+    }
+
+    /** Вертикальная часть автоследования: держим цену в поле зрения.
+     *
+     * Библиотека сама подгоняет шкалу цены под видимые свечи, но стоит
+     * пользователю тронуть шкалу (потянуть за неё или покрутить колесом) —
+     * autoScale выключается, и цена уезжает за верх или низ: по горизонтали
+     * окно продолжает ехать, а по вертикали нет. Поэтому на каждом шаге
+     * слежения: (1) возвращаем autoScale с зазорами 15%, если он погас;
+     * (2) если окно всё равно не держит цену — ставим диапазон сами.
+     * Ручной зум цены при этом, разумеется, отключается: пока слежение включено,
+     * цену ведём мы; хочешь свободную шкалу — выключи слежение.
+     */
+    function followPriceNow() {
+        if (!chart) return false;
+        const scale = rightPriceScale();
+        if (!scale) return false;
+        let changed = false;
+        try {
+            const opts = scale.options ? scale.options() : null;
+            if (!opts || opts.autoScale !== true) {
+                scale.applyOptions(followPriceOptions(true));
+                changed = true;
+            }
+        } catch (e) { /* ignore */ }
+        const band = visiblePriceBand();
+        const price = lastChartPrice();
+        if (!band || price === null) return changed;
+        let cur = null;
+        try {
+            cur = scale.getVisibleRange ? scale.getVisibleRange() : null;
+        } catch (e) { cur = null; }
+        // окно неизвестно — не трогаем: библиотека сама подгонит шкалу,
+        // а autoScale мы уже вернули
+        if (!cur) return changed;
+        const next = followPriceRange(cur, band, price, FOLLOW_MARGIN);
+        if (!next) return changed;
+        try {
+            if (scale.setVisibleRange) {
+                scale.setVisibleRange(next);
+                changed = true;
+            }
+        } catch (e) { /* ignore */ }
+        return changed;
+    }
+
+    /** Один шаг автоследования: окно времени вслед за свечой + цена в кадре. */
     function followChartNow() {
         if (!chart || !state.chartFollow || state.followPaused) return false;
         if (!state.candles.length) return false;
@@ -678,8 +817,9 @@
         } catch (e) { return false; }
         const next = followRange(lr, state.candles.length - 1,
                                  FOLLOW_EDGE_BARS, FOLLOW_KEEP_BARS);
-        if (!next) return false;
-        return applyFollowRange(next);
+        const movedTime = next ? applyFollowRange(next) : false;
+        const movedPrice = followPriceNow();
+        return movedTime || movedPrice;
     }
 
     function applyFollowRange(next) {
@@ -795,10 +935,20 @@
             // настройки шкалы цены, что реально ушли в график
             priceScaleOptions: () => {
                 try {
-                    const sc = chart && chart.priceScale("right");
+                    const sc = rightPriceScale();
                     return sc && sc.options ? sc.options() : null;
                 } catch (e) { return null; }
             },
+            // вертикальное окно цены: чистая математика + что реально в графике
+            priceRange: followPriceRange,
+            priceStep: () => followPriceNow(),
+            priceVisibleRange: () => {
+                try {
+                    const sc = rightPriceScale();
+                    return sc && sc.getVisibleRange ? sc.getVisibleRange() : null;
+                } catch (e) { return null; }
+            },
+            band: () => visiblePriceBand(),
             timeScaleOptions: () => {
                 try {
                     const ts = chart && chart.timeScale();
@@ -4629,17 +4779,15 @@
             name.textContent = exchangeName(e);
             const note = sourceNote(e);
             if (note) {
-                // Биржа сворачивает торговлю (BitMEX закрывается 23.09.2026):
-                // ноль событий по ней — не поломка терминала, и об этом честно
-                // написано прямо в фильтре и подсказкой.
+                // Примечание источника из /api/health: биржа сама объясняет,
+                // почему по ней может не быть событий.
                 label.classList.add("check-row-warn");
                 label.title = note;
-                name.textContent += " ⚠";
                 label.appendChild(cb);
                 label.appendChild(name);
                 const tag = document.createElement("span");
                 tag.className = "check-note";
-                tag.textContent = I18n.t("exch.sunset_tag");
+                tag.textContent = note.length > 28 ? note.slice(0, 27) + "…" : note;
                 label.appendChild(tag);
             } else {
                 label.appendChild(cb);
@@ -4916,13 +5064,11 @@
     function gateRefUrl() { return GATE_REFS[I18n.lang()] || GATE_REFS.en; }
 
     // Примечание источника из /api/health (например, «биржа закрывается»):
-    // сервер отдаёт его в sunset_note, а если health ещё не приходил — берём
-    // из заранее известного списка, чтобы фильтр не молчал.
+    // сервер может отдать его в note — показываем прямо в фильтре.
     function sourceNote(name) {
         const k = String(name || "").toLowerCase();
         const s = state.lastHealth && state.lastHealth.sources && state.lastHealth.sources[k];
-        if (s && s.sunset_note) return s.sunset_note;
-        return SUNSET_NOTES[k] || "";
+        return (s && (s.note || s.sunset_note)) || "";
     }
 
     function renderHealth(health) {

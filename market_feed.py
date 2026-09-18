@@ -85,14 +85,31 @@ OKX_REST = "https://www.okx.com"
 OKX_WS = "wss://ws.okx.com:8443/ws/v5/public"
 GATE_REST = "https://api.gateio.ws/api/v4/futures/usdt"
 GATE_WS = "wss://fx-ws.gateio.ws/v4/ws/usdt"
+# Адреса REST Gate по порядку. С части хостингов api.gateio.ws недоступен
+# (DNS/маршрут/блокировка у провайдера) — тогда пробуем второй адрес. Свой
+# можно задать через LIQSCOPE_GATE_REST (через запятую).
+GATE_RESTS = [u.strip().rstrip("/") for u in
+              os.getenv("LIQSCOPE_GATE_REST",
+                        "https://api.gateio.ws/api/v4/futures/usdt,"
+                        "https://fx-api.gateio.ws/api/v4/futures/usdt").split(",")
+              if u.strip()]
+# Паузы повторов при загрузке спецификаций Gate (в тестах обнуляются).
+GATE_SPECS_RETRY_SLEEP = 1.5
+GATE_SPECS_BACKOFF = 2.0
+# Предел времени на точечную догрузку контрактов: сорок монет по двум адресам
+# с таймаутом 6 с могли бы занять минуты, а супервизор всё это время ждёт.
+GATE_SPECS_PER_CONTRACT_SEC = 20.0
+# Кэш спецификаций контрактов: если REST Gate недоступен, но листинг когда-то
+# выгружался, лента продолжает считать объёмы по нему, а не молчит.
+GATE_SPECS_FILE = os.getenv(
+    "LIQSCOPE_GATE_SPECS_FILE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                 "data", "gate_contracts.json"))
 # Bitget: публичный канал ликвидаций появился в UTA v3 (ноябрь 2025)
 BITGET_WS = "wss://ws.bitget.com/v3/ws/public"
 BITGET_REST = "https://api.bitget.com"
 # HTX (Huobi) USDT-M: public.*.liquidation_orders, кадры gzip
 HTX_WS = "wss://api.hbdm.com/linear-swap-notification"
-# BitMEX: таблица liquidation
-BITMEX_WS = "wss://ws.bitmex.com/realtime?subscribe=liquidation"
-BITMEX_REST = "https://www.bitmex.com/api/v1"
 # dYdX v4: публичный индексатор, канал v4_trades, ликвидация — тип сделки
 DYDX_WS = os.getenv("LIQSCOPE_DYDX_WS", "wss://indexer.dydx.trade/v4/ws")
 # Kraken Futures: публичный фид trade, ликвидация — поле type
@@ -228,11 +245,11 @@ def canon(symbol: str) -> str:
     return s
 
 
-def canon_bitmex(symbol: str) -> str:
-    """XBTUSD / XBTUSDT / ETHUSD_250627 -> BTC_USDT / ETH_USDT.
+def canon_xbt(symbol: str) -> str:
+    """PF_XBTUSD / XBTUSD / ETHUSD -> BTC_USDT / ETH_USDT (продукты Kraken).
 
-    Инверсные USD-контракты сводим к _USDT: это тот же рынок того же актива,
-    и в общей ленте их логично считать вместе.
+    Kraken называет биткоин XBT, а инверсные контракты — в USD: сводим их к
+    общему стакану _USDT, чтобы одна монета не двоилась в ленте.
     """
     s = str(symbol or "").upper().split("_")[0]
     if not s:
@@ -329,6 +346,50 @@ async def _get_json(session: aiohttp.ClientSession, url: str, timeout: float = 1
 def _chunks(items: List, size: int) -> Iterable[List]:
     for i in range(0, len(items), size):
         yield items[i:i + size]
+
+
+def _num_ok(v) -> bool:
+    try:
+        return float(v) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _gate_err(url: str, e: Exception) -> str:
+    """Короткая причина отказа для журнала и health: «хост: что случилось».
+
+    Длинные URL в тексте ошибки мешали: сообщение обрезалось на середине
+    адреса, и настоящая причина («HTTP 403», «таймаут») терялась.
+    """
+    host = url.split("//", 1)[-1].split("/", 1)[0]
+    msg = str(e) or type(e).__name__
+    for marker in (url, url.split("/api/")[0]):
+        if marker:
+            msg = msg.replace(marker, "").strip(" :")
+    if msg.endswith(" for"):                 # «HTTP 403 for <url>» → «HTTP 403»
+        msg = msg[:-4].strip()
+    return f"{host}: {msg}"[:100]
+
+
+def _gate_parse_specs(data) -> Dict[str, float]:
+    """Множители контрактов Gate из ответа REST.
+
+    Принимает и листинг (`/contracts` — список), и один контракт
+    (`/contracts/{name}` — объект). Ошибка в теле (Gate умеет отвечать
+    ``{"label": ..., "message": ...}`` с кодом 200) не превращается в
+    молчаливую пустую карту: вызывающий увидит пустой словарь и попробует
+    следующий путь.
+    """
+    rows = data if isinstance(data, list) else [data]
+    out: Dict[str, float] = {}
+    for c in rows:
+        if not isinstance(c, dict):
+            continue
+        name = str(c.get("name") or "").upper()
+        mult = c.get("quanto_multiplier")
+        if name and _num_ok(mult):
+            out[name] = float(mult)
+    return out
 
 
 # ----------------------------------------------------------------------------
@@ -560,109 +621,6 @@ def parse_htx_msg(payload: dict) -> List[dict]:
             "usd": turnover or None,
             "ts": ts or time.time(),
         })
-    return out
-
-
-# Микроконтракт линейных контрактов BitMEX (XBTUSDT, ETHUSDT…): 1 контракт =
-# 1e-6 базовой монеты. Нужен только как запасной путь, когда метаданные
-# инструментов не загрузились (см. _bitmex_liquidation_multiplier).
-BITMEX_MICRO = 1e-6
-
-
-def bitmex_is_inverse(raw_symbol: str) -> bool:
-    """Инверсный ли контракт — по имени, когда метаданных нет.
-
-    «XBTUSD», «ETHUSD», «SOLUSD» — инверсные (контракт номинирован в USD),
-    «XBTUSDT»/«ETHUSDC» — линейные. Имена подсказку дают всегда, поэтому
-    отсутствие метаданных не повод молчать: раньше на этом шаге события
-    отбрасывались, и биржа выглядела «зависшей».
-    """
-    s = str(raw_symbol or "").upper().split("_")[0]
-    if not s:
-        return False
-    for quote in ("USDT", "USDC"):
-        if s.endswith(quote) and len(s) > len(quote):
-            return False
-    return True
-
-
-def bitmex_liquidation_multiplier(raw_symbol: str,
-                                  instruments: Optional[Dict[str, dict]] = None,
-                                  stats: Optional[dict] = None) -> tuple:
-    """Как перевести контракты ликвидации в монеты: (inverse, multiplier).
-
-    Сначала метаданные инструментов; если их нет — по имени: инверсный контракт
-    не требует множителя вовсе, линейному подставляем микроконтракт (1e-6) как
-    задокументированный запасной путь. Каждый такой случай считаем в ``stats``:
-    в /api/health видно, работает ли биржа на метаданных или на догадке.
-    """
-    meta = (instruments or {}).get(raw_symbol) or {}
-    if meta:
-        inverse = bool(meta.get("inverse"))
-        try:
-            mult = float(meta.get("multiplier") or 0)
-        except (TypeError, ValueError):
-            mult = 0.0
-        if inverse or mult > 0:
-            return inverse, mult
-    inverse = bitmex_is_inverse(raw_symbol)
-    if inverse:
-        if stats is not None:
-            stats["no_meta_inverse"] = stats.get("no_meta_inverse", 0) + 1
-        return True, 0.0
-    if stats is not None:
-        stats["no_meta_micro"] = stats.get("no_meta_micro", 0) + 1
-    return False, BITMEX_MICRO
-
-
-def parse_bitmex_msg(payload: dict,
-                     instruments: Optional[Dict[str, dict]] = None,
-                     stats: Optional[dict] = None) -> List[dict]:
-    """BitMEX: table=liquidation.
-
-    Берём только action=insert — это новая заявка на ликвидацию. Дальнейшие
-    update/delete по тому же orderID это её исполнение, их учитывать нельзя,
-    иначе объём задвоится.
-    Размер в контрактах: у инверсных (XBTUSD) 1 контракт = 1 USD,
-    у линейных пересчитываем через underlyingToPositionMultiplier.
-    ``stats`` — счётчики для /api/health: сколько строк разобрано и почему
-    часть отброшена (биржа закрывается — в ленте видно, жива она или нет).
-    """
-    if not isinstance(payload, dict):
-        return []
-    if payload.get("table") != "liquidation" or payload.get("action") != "insert":
-        return []
-    instruments = instruments or {}
-    out = []
-    for it in payload.get("data") or []:
-        raw_symbol = str(it.get("symbol") or "")
-        try:
-            price = float(it.get("price") or 0)
-            contracts = float(it.get("leavesQty") or 0)
-        except (TypeError, ValueError):
-            if stats is not None:
-                stats["bad_row"] = stats.get("bad_row", 0) + 1
-            continue
-        if price <= 0 or contracts <= 0:
-            if stats is not None:
-                stats["empty_row"] = stats.get("empty_row", 0) + 1
-            continue
-        inverse, mult = bitmex_liquidation_multiplier(raw_symbol, instruments, stats)
-        if inverse:
-            qty = contracts / price          # контракты номинированы в USD
-            usd = contracts
-        else:
-            qty = contracts * mult
-            usd = qty * price
-        out.append({
-            "symbol": canon_bitmex(raw_symbol),
-            # side — сторона заявки: Sell = вынесли ЛОНГ
-            "side": "LONG" if str(it.get("side", "")).lower() == "sell" else "SHORT",
-            "price": price, "qty": qty, "usd": usd,
-            "ts": time.time(),
-        })
-        if stats is not None:
-            stats["rows"] = stats.get("rows", 0) + 1
     return out
 
 
@@ -1169,7 +1127,7 @@ def parse_kraken_msg(payload, sym_map: Optional[Dict[str, str]] = None,
             continue
         pid = str(r.get("product_id") or product)
         out.append({
-            "symbol": sym_map.get(pid) or canon_bitmex(pid.replace("PF_", "")),
+            "symbol": sym_map.get(pid) or canon_xbt(pid.replace("PF_", "")),
             "side": "LONG" if str(r.get("side") or "").lower() == "sell" else "SHORT",
             "price": price, "qty": qty, "ts": ts or time.time(),
             "kind": rtype,
@@ -1284,12 +1242,6 @@ class SourceStatus:
         return d
 
 
-SUNSET_NOTES = {
-    "bitmex": "биржа закрывается 23 сентября 2026: торговля свёрнута, "
-              "ликвидаций почти нет — это не поломка источника",
-}
-
-
 # ----------------------------------------------------------------------------
 # Основной класс
 # ----------------------------------------------------------------------------
@@ -1339,7 +1291,6 @@ class MarketFeed:
         self._dydx_market_set: Optional[set] = None
         self._kraken_product_set: Optional[set] = None
         self.gate_multipliers: Dict[str, float] = {}
-        self.bitmex_instruments: Dict[str, dict] = {}
         # «Горячие» монеты — те, чей график сейчас открыт у клиентов.
         # По ним идёт потиковый поток сделок (aggTrade / publicTrade).
         self.hot_symbols: set = set()
@@ -1362,7 +1313,7 @@ class MarketFeed:
         self.status: Dict[str, SourceStatus] = {
             name: SourceStatus(name)
             for name in ("binance", "bybit", "okx", "gate", "bitget", "htx",
-                         "bitmex", "hyperliquid", "dydx", "kraken", "bitfinex",
+                         "hyperliquid", "dydx", "kraken", "bitfinex",
                          "oxa", "prices", "ticks")
         }
         for name, st in self.status.items():
@@ -1370,8 +1321,7 @@ class MarketFeed:
                 st.enabled = name in self.enabled_exchanges
 
         self.oi = OpenInterestTracker(
-            price_fn=lambda sym: self.prices.get(sym),
-            bitmex_meta_fn=lambda: self.bitmex_instruments)
+            price_fn=lambda sym: self.prices.get(sym))
 
         self.hl_coin_map: Dict[str, str] = {}   # монета HL -> канон (из universe)
         # Монеты, которые HL не принял: счётчик срывов и постоянный бан.
@@ -1425,7 +1375,6 @@ class MarketFeed:
             "gate": self._gate_liquidations,
             "bitget": self._bitget_liquidations,
             "htx": self._htx_liquidations,
-            "bitmex": self._bitmex_liquidations,
             "hyperliquid": self._hyperliquid_liquidations,
             "dydx": self._dydx_liquidations,
             "kraken": self._kraken_liquidations,
@@ -1557,16 +1506,6 @@ class MarketFeed:
         except ValueError:
             return 1800.0
 
-    # Биржи, которые сворачивают торговлю: поток ликвидаций у них вянет сам по
-    # себе, и переподключение тут ничего не лечит. BitMEX закрывается
-    # 23 сентября 2026 (с 26 августа — «только закрытие позиций», новые не
-    # открываются): ликвидаций у него теперь почти нет, и сторож, считавший
-    # тишину поломкой, бесконечно дёргал биржу. Цифра в подсказке говорит не
-    # «сломалось», а «у биржи больше нечего слушать».
-    SUNSET_SOURCES = {
-        "bitmex": "биржа закрывается 23 сентября 2026, торговля свёрнута",
-    }
-
     def silent_sources(self) -> List[str]:
         """Подключённые источники, от которых давно нет событий."""
         limit = self.silence_limit()
@@ -1574,11 +1513,6 @@ class MarketFeed:
         out = []
         for name, st in self.status.items():
             if name in ("prices", "ticks") or not st.enabled or not st.connected:
-                continue
-            if name in self.SUNSET_SOURCES:
-                # Переподключение тут ничего не лечит: ликвидаций у биржи
-                # больше нет, и «пнуть» её значит просто дёргать закрывающийся
-                # сервис. Причина нуля событий остаётся в health (sunset_note).
                 continue
             since = (now - st.last_event_ts) if st.last_event_ts else (now - st.connected_since)
             if since >= limit:
@@ -2241,7 +2175,7 @@ class MarketFeed:
         for attempt in range(3):
             if self.gate_multipliers:
                 break
-            await self._gate_load_specs()
+            await self._gate_load_specs(needed=[to_gate(s) for s in self.symbols])
             if self.gate_multipliers:
                 break
             # Пустая карта — не «тихая биржа», а поломка: подписка уходит на
@@ -2249,9 +2183,13 @@ class MarketFeed:
             # оставался в этом состоянии навсегда — Gate «подключён», данных нет.
             log.warning("[gate] нет спецификаций контрактов (попытка %d/3)",
                         attempt + 1)
-            await asyncio.sleep(2.0 * (attempt + 1))
+            await asyncio.sleep(GATE_SPECS_BACKOFF * (attempt + 1))
         if not self.gate_multipliers:
-            raise RuntimeError("не загрузились спецификации контрактов Gate")
+            # В тексте ошибки — настоящая причина (HTTP 403, таймаут, DNS):
+            # её видно и в журнале, и в /api/health → gate.specs_error
+            raise RuntimeError("не загрузились спецификации контрактов Gate ("
+                               + (st.extra.get("specs_error") or "нет ответа")[:160]
+                               + ")")
         async with self._session.ws_connect(GATE_WS, heartbeat=20, timeout=25) as ws:
             st.up()
             subscribed = set()
@@ -2288,27 +2226,153 @@ class MarketFeed:
                     except Exception:
                         continue
                     if payload.get("error"):
-                        st.last_error = str(payload["error"])[:200]
+                        err = payload["error"]
+                        if isinstance(err, dict):
+                            err = f"{err.get('code', '')} {err.get('message') or err}".strip()
+                        st.last_error = str(err)[:200]
+                        low = st.last_error.lower()
+                        if "invalid argument" in low or "time" in low:
+                            # Gate сверяет поле time в подписке со своими
+                            # часами: такие ошибки — обычно сбитые часы сервера
+                            st.last_error += (" (похоже на сбитые часы сервера:"
+                                              " Gate сверяет time в подписке"
+                                              " со своим временем — проверьте NTP)")
                         log.warning("[gate] ошибка канала: %s", st.last_error)
                         continue
+                    if payload.get("event") == "subscribe":
+                        status = str((payload.get("result") or {}).get("status") or "?")
+                        st.extra["subscribe"] = status
+                        if status != "success":
+                            log.warning("[gate] подписка не подтверждена: %s",
+                                        str(payload)[:200])
                     for ev in parse_gate_msg(payload, self.gate_multipliers):
                         await self._emit("gate", ev["symbol"], ev["side"],
                                          ev["price"], ev["qty"], ev["ts"])
             finally:
                 syncer.cancel()
 
-    async def _gate_load_specs(self):
-        try:
-            data = await _get_json(self._session, f"{GATE_REST}/contracts")
-            for c in data:
+    async def _gate_load_specs(self, needed: Optional[Iterable[str]] = None) -> bool:
+        """Спецификации контрактов Gate (quanto_multiplier) — с запасными путями.
+
+        Без них подписка уходит в никуда: Gate шлёт размеры в контрактах, и
+        множитель нужен, чтобы посчитать объём. Путь такой:
+
+        1. листинг `/contracts` по каждому адресу (LIQSCOPE_GATE_REST) с
+           повтором — на части хостингов основной домен не отвечает;
+        2. точечно по нужным контрактам `/contracts/{name}` — дешевле, чем
+           вся биржа, и работает, когда листинг режется;
+        3. кэш на диске (LIQSCOPE_GATE_SPECS_FILE) — если REST лежит, а
+           спецификации раньше выгружались;
+        4. если совсем ничего — настоящая причина уходит в status.last_error и
+           /api/health (`specs_error`), а не общее «нет связи».
+        """
+        st = self.status["gate"]
+        errors: List[str] = []
+
+        def _why(n: int) -> str:
+            """Уникальные причины по порядку, без обрезки посреди слова."""
+            uniq = list(dict.fromkeys(errors))
+            return " | ".join(uniq[:n])[:300]
+
+        # 1) листинг по каждому адресу: сперва все адреса по одному разу,
+        #    второй проход — повтор для тех, кто не ответил
+        for attempt in range(2):
+            if attempt:
+                await asyncio.sleep(GATE_SPECS_RETRY_SLEEP)
+            for rest in GATE_RESTS:
                 try:
-                    self.gate_multipliers[str(c["name"]).upper()] = float(c.get("quanto_multiplier") or 0)
-                except (TypeError, ValueError, KeyError):
-                    continue
-            self.gate_multipliers = {k: v for k, v in self.gate_multipliers.items() if v > 0}
-            log.info("[gate] загружено %d спецификаций контрактов", len(self.gate_multipliers))
-        except Exception as e:
-            log.warning("[gate] не удалось загрузить контракты: %s", e)
+                    data = await _get_json(self._session, f"{rest}/contracts",
+                                           timeout=15.0)
+                    got = _gate_parse_specs(data)
+                    if got:
+                        self.gate_multipliers.update(got)
+                        st.extra["specs_source"] = rest
+                        st.extra.pop("specs_error", None)
+                        st.last_error = ""
+                        log.info("[gate] загружено %d спецификаций контрактов (%s)",
+                                 len(got), rest)
+                        self._gate_save_specs()
+                        return True
+                    errors.append(f"{rest.split('//')[-1].split('/')[0]}: "
+                                  "пустой список контрактов")
+                except Exception as e:                     # noqa: BLE001
+                    errors.append(_gate_err(f"{rest}/contracts", e))
+
+        # 2) точечно по нужным контрактам — по обоим адресам, но с пределом
+        #    по времени: лучше собрать половину и подписаться, чем ждать
+        #    минуты, пока супервизор считает источник мёртвым
+        names = sorted({str(n).upper() for n in (needed or []) if n})
+        if names:
+            got: Dict[str, float] = {}
+            deadline = time.monotonic() + GATE_SPECS_PER_CONTRACT_SEC
+            for rest in GATE_RESTS:
+                for name in names:
+                    if name in got:
+                        continue
+                    if time.monotonic() > deadline:
+                        break
+                    try:
+                        data = await _get_json(self._session,
+                                               f"{rest}/contracts/{name}",
+                                               timeout=6.0)
+                        got.update(_gate_parse_specs(data))
+                    except Exception as e:                 # noqa: BLE001
+                        errors.append(_gate_err(f"{rest}/contracts/{name}", e))
+                if len(got) >= len(names) or time.monotonic() > deadline:
+                    break
+            if got:
+                self.gate_multipliers.update(got)
+                st.extra["specs_source"] = "по контрактам"
+                st.extra.pop("specs_error", None)
+                st.last_error = ""
+                log.info("[gate] спецификации догружены по контрактам: %d из %d",
+                         len(got), len(names))
+                return True
+
+        # 3) кэш с диска: лучше устаревшие множители, чем пустая лента
+        cached = self._gate_read_specs()
+        if cached:
+            self.gate_multipliers.update(cached)
+            st.extra["specs_source"] = "кэш"
+            st.extra["specs_cached"] = len(cached)
+            st.last_error = ("REST Gate недоступен — спецификации контрактов "
+                             "взяты из кэша")
+            st.extra["specs_error"] = _why(3)
+            log.warning("[gate] REST недоступен, спецификации из кэша: %d",
+                        len(cached))
+            return True
+
+        # 4) ничего не вышло: причина видна в health, супервизор повторит
+        reason = ("REST Gate недоступен: "
+                  + (_why(2).replace(" | ", "; ") if errors else "нет ответа"))
+        st.extra["specs_error"] = _why(4)
+        st.last_error = reason[:200]
+        log.warning("[gate] спецификации контрактов не загрузились: %s",
+                    st.extra["specs_error"] or "нет ответа")
+        return False
+
+    def _gate_save_specs(self) -> None:
+        """Сложить множители на диск: REST может отвалиться в любой момент."""
+        try:
+            path = GATE_SPECS_FILE
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"ts": time.time(),
+                           "multipliers": self.gate_multipliers}, f)
+        except Exception as e:                             # noqa: BLE001
+            log.debug("[gate] не сохранил кэш спецификаций: %s", e)
+
+    def _gate_read_specs(self) -> Dict[str, float]:
+        try:
+            with open(GATE_SPECS_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            mult = data.get("multipliers") if isinstance(data, dict) else None
+            if not isinstance(mult, dict):
+                return {}
+            return {str(k).upper(): float(v) for k, v in mult.items()
+                    if _num_ok(v)}
+        except Exception:
+            return {}
 
     # -- Цены ----------------------------------------------------------------
     async def _price_engine(self):
@@ -2555,94 +2619,6 @@ class MarketFeed:
                     continue
                 for ev in parse_htx_msg(payload):
                     await self._emit("htx", ev["symbol"], ev["side"],
-                                     ev["price"], ev["qty"], ev["ts"], usd=ev.get("usd"))
-
-    # -- BitMEX ----------------------------------------------------------------
-    async def _bitmex_load_instruments(self):
-        """Множители контрактов: без них не перевести контракты в монеты.
-
-        Список тянем повторно, если первая попытка не удалась (биржа отвечает
-        не всегда), а сам разбор умеет работать и без метаданных.
-        """
-        try:
-            rows = await _get_json(self._session,
-                                   f"{BITMEX_REST}/instrument/active", timeout=10)
-        except Exception as e:
-            log.warning("[bitmex] не удалось загрузить инструменты: %s", e)
-            self.status["bitmex"].extra["instruments_error"] = f"{type(e).__name__}: {e}"[:200]
-            return
-        meta = {}
-        for r in rows or []:
-            sym = r.get("symbol")
-            if not sym:
-                continue
-            u2p = r.get("underlyingToPositionMultiplier") or 0
-            meta[sym] = {
-                "inverse": bool(r.get("isInverse")),
-                "multiplier": (1.0 / u2p) if u2p else 0.0,
-            }
-        if meta:
-            self.bitmex_instruments = meta
-            self.status["bitmex"].extra["instruments"] = len(meta)
-            self.status["bitmex"].extra.pop("instruments_error", None)
-            log.info("[bitmex] загружено инструментов: %d", len(meta))
-
-    async def _bitmex_liquidations(self):
-        st = self.status["bitmex"]
-        if not self.bitmex_instruments:
-            await self._bitmex_load_instruments()
-        # Метаданные инструментов нужны только линейным контрактам, но и без
-        # них лента жива (см. bitmex_liquidation_multiplier): разбор больше не
-        # молчит, а счётчики из ``stats`` уходят в /api/health.
-        stats: Dict[str, Any] = st.extra.setdefault("parse", {})
-        next_meta = time.time() + 300.0
-        async with self._session.ws_connect(BITMEX_WS, heartbeat=20, timeout=25) as ws:
-            st.up()
-            # Подписка есть и в адресе (?subscribe=liquidation), но её же
-            # отправляем и сообщением: так сервис отвечает success/error, и в
-            # журнале видно, встала ли подписка, — «0 событий» перестаёт быть
-            # загадкой (у BitMEX лимит на подписки отвечает 429 с retryAfter).
-            try:
-                await ws.send_json({"op": "subscribe", "args": ["liquidation"]})
-            except Exception as e:                       # noqa: BLE001
-                log.debug("[bitmex] подписка сообщением не ушла: %s", e)
-            log.info("[bitmex] подписка на таблицу liquidation "
-                     "(инструментов: %d)", len(self.bitmex_instruments))
-            while not self._stop.is_set():
-                try:
-                    msg = await ws.receive(timeout=5.0)
-                except asyncio.TimeoutError:
-                    msg = None
-                if msg is None:
-                    # Тихо на линии — не беда, но если метаданные так и не
-                    # пришли, пробуем ещё: без них линейные контракты считаются
-                    # по микроконтракту, а это уже догадка.
-                    if not self.bitmex_instruments and time.time() >= next_meta:
-                        await self._bitmex_load_instruments()
-                        next_meta = time.time() + 300.0
-                    continue
-                if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING,
-                                aiohttp.WSMsgType.ERROR):
-                    break
-                if msg.type != aiohttp.WSMsgType.TEXT:
-                    continue
-                try:
-                    payload = json.loads(msg.data)
-                except Exception:
-                    continue
-                if payload.get("error"):
-                    st.last_error = str(payload["error"])[:200]
-                    st.extra["subscribe_error"] = st.last_error
-                    log.warning("[bitmex] ошибка: %s", st.last_error)
-                    continue
-                if payload.get("success") and payload.get("subscribe"):
-                    log.info("[bitmex] подписка подтверждена: %s", payload["subscribe"])
-                    continue
-                events = parse_bitmex_msg(payload, self.bitmex_instruments, stats)
-                st.extra["instruments"] = len(self.bitmex_instruments)
-                st.extra["parse"] = stats
-                for ev in events:
-                    await self._emit("bitmex", ev["symbol"], ev["side"],
                                      ev["price"], ev["qty"], ev["ts"], usd=ev.get("usd"))
 
     # -- Списки рынков: не подписываемся на то, чего у биржи нет -------------
@@ -4503,11 +4479,6 @@ class MarketFeed:
             since = d.get("seconds_since_event")
             d["silent_sec"] = since
             d["stale"] = k in silent
-            note = SUNSET_NOTES.get(k)
-            if note:
-                # «Тихо» у свёрнутой биржи — это не поломка: пишем в health,
-                # чтобы по нулям в ленте не искали сломанный WS.
-                d["sunset_note"] = note
             if k in self._engines:
                 task = self._engine_tasks.get(k)
                 d["supervisor_alive"] = bool(task is not None and not task.done())

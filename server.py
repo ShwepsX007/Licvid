@@ -18,7 +18,7 @@ LiqScope Web Server — терминал ликвидаций в реально�
 
 Переменные окружения:
     LIQSCOPE_SYMBOLS_LIMIT  сколько монет держать в списке (по умолчанию 40)
-    LIQSCOPE_EXCHANGES      binance,bybit,okx,gate,bitget,htx,bitmex,hyperliquid,
+    LIQSCOPE_EXCHANGES      binance,bybit,okx,gate,bitget,htx,hyperliquid,
                             dydx,kraken,bitfinex (по умолчанию все)
     LIQSCOPE_TICK_SOURCE    порядок источников тиков (CVD):
                             binance,binance-raw,bybit,dydx,kraken,
@@ -78,7 +78,7 @@ STATIC_DIR = os.path.join(HERE, "static")
 SYMBOLS_LIMIT = int(os.getenv("LIQSCOPE_SYMBOLS_LIMIT", "40"))
 EXCHANGES = [e.strip().lower() for e in
              os.getenv("LIQSCOPE_EXCHANGES",
-                       "binance,bybit,okx,gate,bitget,htx,bitmex,hyperliquid,"
+                       "binance,bybit,okx,gate,bitget,htx,hyperliquid,"
                        "dydx,kraken,bitfinex").split(",")
              if e.strip()]
 # Порядок источников потиковых данных для графика (первый рабочий побеждает)
@@ -1611,8 +1611,8 @@ async def stats_broadcaster():
 # =============================================================================
 async def demo_generator():
     log.warning("ВКЛЮЧЁН ДЕМО-РЕЖИМ: поток ликвидаций синтетический (LIQSCOPE_DEMO=1)")
-    exchanges = ["binance", "bybit", "okx", "gate", "bitget", "htx", "bitmex",
-                   "hyperliquid", "dydx", "kraken", "bitfinex"]
+    exchanges = ["binance", "bybit", "okx", "gate", "bitget", "htx",
+                 "hyperliquid", "dydx", "kraken", "bitfinex"]
     while True:
         try:
             await asyncio.sleep(random.uniform(0.15, 0.9))
@@ -2145,8 +2145,8 @@ async def api_oi(symbol: str = Query("BTC_USDT")):
 
 def _demo_oi_payload(symbol: str) -> dict:
     total = 4e8 + random.uniform(-2e7, 2e7)
-    legs = ["binance", "bybit", "okx", "gate", "bitget", "htx", "bitmex"]
-    weights = [0.34, 0.21, 0.13, 0.12, 0.09, 0.06, 0.05]
+    legs = ["binance", "bybit", "okx", "gate", "bitget", "htx"]
+    weights = [0.35, 0.22, 0.14, 0.12, 0.10, 0.07]
     per = {e: round(total * w, 2) for e, w in zip(legs, weights)}
 
     def _chg(scale):

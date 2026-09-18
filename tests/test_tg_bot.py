@@ -111,28 +111,70 @@ class BotMenuTest(unittest.TestCase):
         self.store.close()
         self.tmp.cleanup()
 
-    def test_main_menu_has_no_back(self):
+    def test_reply_panel_is_one_menu_button(self):
+        """Твёрдая клавиатура — одна кнопка «☰ Меню».
+
+        Раньше внизу висело восемь кнопок-разделов; теперь разделы приходят
+        инлайн-кнопками под сообщением, а внизу остаётся только возврат в меню.
+        """
         kb = self.bot._reply_kb(self.user)
         texts = [b.get("text") for row in kb["keyboard"] for b in row]
-        self.assertNotIn("← Назад", texts)
-        self.assertTrue(any("Кабинет" in t for t in texts))
+        self.assertEqual(texts, ["☰ Меню"])
+        self.assertEqual(len(kb["keyboard"]), 1)
         self.assertTrue(kb.get("is_persistent"))
-        self.assertNotIn("cabinet", _datas(kb))
-        # «☰ Меню» — постоянная кнопка: если панель пропала, она её вернёт
-        self.assertIn("☰ Меню", texts)
+        # панель — это только кнопка меню, разделов в ней больше нет
+        self.assertFalse(kb.get("inline_keyboard"))
+        for gone in ("👤 Кабинет", "⚡ Терминал", "📊 Статистика", "🩺 Биржи",
+                     "🛠 Сервисы", "📰 Лента", "📣 Канал", "★ Админка"):
+            self.assertNotIn(gone, texts)
         self.assertEqual(self.bot._reply_cmd("☰ Меню"), "help")
         self.assertEqual(self.bot._reply_cmd("меню"), "help")
         self.assertEqual(self.bot._reply_cmd("/menu"), "help")
 
-    def test_leaf_screens_use_reply_panel(self):
+    def test_menu_button_screen_is_inline(self):
+        """Экран «☰ Меню» отдаёт разделы инлайн-кнопками, а не панелью внизу."""
+        text, kb = self.bot._screen(self.user, "help")
+        datas = _datas(kb)
+        self.assertFalse(kb.get("keyboard"))
+        for want in ("cabinet", "terminal", "stats", "health",
+                     "services", "liq", "lang", "channel"):
+            self.assertIn(want, datas)
+        self.assertIn("кнопками", text)
+
+    def test_push_reply_kb_sets_single_button(self):
+        """Кнопка внизу ставится служебным сообщением и сразу удаляется."""
+        calls = []
+        n = {"id": 300}
+
+        async def fake(method, payload=None):
+            calls.append((method, payload or {}))
+            if method == "sendMessage":
+                n["id"] += 1
+                return {"ok": True, "result": {"message_id": n["id"]}}
+            return {"ok": True}
+
+        self.bot._call = fake  # type: ignore
+        self.bot._menu_msg.clear()
+        self.bot._last_msg.clear()
+        asyncio.run(self.bot.push_reply_kb(2002, self.user))
+        sent = [p for m, p in calls if m == "sendMessage"][0]
+        self.assertEqual(sent["reply_markup"]["keyboard"], [[{"text": "☰ Меню"}]])
+        self.assertTrue(sent.get("disable_notification"))
+        # сообщение удалено, чтобы в чате остался только экран с меню
+        self.assertEqual([p.get("message_id") for m, p in calls
+                          if m == "deleteMessage"], [301])
+        self.assertEqual(self.bot._last_msg.get(2002), 0)
+
+    def test_leaf_screens_use_inline_menu(self):
         for data in ("cabinet", "stats", "health", "liq"):
             text, kb = self.bot._screen(self.user, data)
-            rows = kb.get("keyboard") or []
-            texts = [b.get("text") for row in rows for b in row]
-            self.assertTrue(kb.get("is_persistent"), data)
-            self.assertTrue(any("Кабинет" in t for t in texts), data)
-            self.assertNotIn("← Назад", texts)
-            self.assertFalse(kb.get("inline_keyboard"), data)
+            datas = _datas(kb)
+            self.assertFalse(kb.get("keyboard"), data)      # твёрдой панели нет
+            self.assertIn("cabinet", datas, data)
+            self.assertIn("services", datas, data)
+            self.assertIn("lang", datas, data)
+            # главный экран раздела — без «Назад»: назад ведёт кнопка меню
+            self.assertNotIn("nav:home", datas, data)
 
     def test_terminal_screen_opens_site_directly(self):
         """⚡ Терминал — сразу на /terminal: URL-кнопка, без лишнего звука."""
@@ -311,12 +353,16 @@ class BotMenuTest(unittest.TestCase):
             _t, kb = self.bot._screen(self.admin, data)
             self.assertEqual(_datas(kb), ["nav:admin"], data)
 
-    def test_back_returns_main_keyboard(self):
+    def test_back_returns_inline_menu(self):
         for data in ("nav:home", "menu", "back"):
             _t, kb = self.bot._screen(self.user, data)
-            texts = [b.get("text") for row in (kb.get("keyboard") or []) for b in row]
-            self.assertTrue(any("Кабинет" in t for t in texts), data)
-            self.assertTrue(kb.get("is_persistent"), data)
+            datas = _datas(kb)
+            self.assertFalse(kb.get("keyboard"), data)
+            self.assertIn("cabinet", datas, data)
+            self.assertIn("terminal", datas, data)
+        # модератору в том же меню видно админку
+        _t, kb_admin = self.bot._screen(self.admin, "menu")
+        self.assertIn("nav:admin", _datas(kb_admin))
 
     def test_callback_edits_same_message(self):
         calls = []
@@ -444,8 +490,11 @@ class BotMenuTest(unittest.TestCase):
         self.assertNotIn("deleteMessage", [m for m, _ in calls])
         edited = [p for m, p in calls if m == "editMessageText"][0]
         self.assertEqual(edited["message_id"], 88)
-        self.assertIn("кнопки внизу", edited["text"])
-        self.assertEqual((edited.get("reply_markup") or {}).get("inline_keyboard"), [])
+        # главный экран теперь с инлайн-меню: кнопки разделов под сообщением
+        rows = (edited.get("reply_markup") or {}).get("inline_keyboard") or []
+        datas = [b.get("callback_data") for row in rows for b in row]
+        self.assertIn("cabinet", datas)
+        self.assertIn("channel", datas)
 
     def test_start_links_telegram_to_email_account(self):
         """/start link_<nonce> привязывает Telegram к аккаунту с почтой."""
@@ -579,19 +628,23 @@ class BotMenuTest(unittest.TestCase):
         self.bot._call = fake  # type: ignore
         user = self.user
         asyncio.run(self.bot._cmd_start(2002, user, "/start"))
-        self.assertEqual(self.bot._menu_msg[2002], 11)
+        # 11 — служебное сообщение с кнопкой «☰ Меню» (сразу удаляется),
+        # 12 — сам экран с инлайн-меню
+        self.assertEqual(self.bot._menu_msg[2002], 12)
+        calls.clear()
         asyncio.run(self.bot._cmd_start(2002, user, "/start"))
-        self.assertEqual(self.bot._menu_msg[2002], 11)
-        self.assertEqual([m for m, _ in calls if m == "sendMessage"], ["sendMessage"])
+        # второй /start: служебное сообщение (13) + правка экрана на месте
         self.assertIn("editMessageText", [m for m, _ in calls])
-        self.assertNotIn("deleteMessage", [m for m, _ in calls])
         sent = [p for m, p in calls if m == "sendMessage"][0]
         self.assertTrue(sent.get("disable_notification"))
+        self.assertEqual(sent["reply_markup"]["keyboard"], [[{"text": "☰ Меню"}]])
+        self.assertEqual(self.bot._menu_msg[2002], 12)
 
     def test_menu_has_channel_url(self):
-        kb = self.bot._reply_kb(self.user)
-        texts = [b.get("text") for row in kb["keyboard"] for b in row]
+        _t, kb = self.bot._screen(self.user, "menu")
+        texts = [b.get("text") for row in kb["inline_keyboard"] for b in row]
         self.assertTrue(any("Канал" in t for t in texts))
+        self.assertTrue(any("Gate" in t for t in texts))   # партнёрская ссылка
         self.assertEqual(self.bot._reply_cmd("👤 Кабинет"), "cabinet")
         self.assertEqual(self.bot._reply_cmd("🔔 Алерты"), "al")
         self.assertEqual(self.bot.bot_url(), "https://t.me/LiqScopeBot")
@@ -627,6 +680,13 @@ class BotMenuTest(unittest.TestCase):
         self.assertIn("LiqScopeEng", str(sent.get("reply_markup")))
         self.assertNotIn("cabinet", _datas(sent.get("reply_markup")))
 
+    def test_channel_screen_from_button(self):
+        """Кнопка «📣 Канал» открывает экран каналов, а не выбрасывает в меню."""
+        text, kb = self.bot._screen(self.user, "channel")
+        self.assertIn("Каналы LiqScope", text)
+        datas = _datas(kb)
+        self.assertIn("cabinet", datas)      # экран остаётся внутри меню
+
     def test_channel_check_unavailable_does_not_lock_users(self):
         """getChatMember падает (бот не админ канала) — меню не запирается."""
         self.bot._channel_id_cfg = "-100111"
@@ -643,10 +703,13 @@ class BotMenuTest(unittest.TestCase):
 
         self.bot._call = fake  # type: ignore
         asyncio.run(self.bot._cmd_start(2002, self.user, "/start"))
-        sent = [p for m, p in calls if m == "sendMessage"][0]
-        # вместо экрана «Сначала канал» — обычное приветствие с меню
-        self.assertNotIn("Подписаться", str(sent.get("reply_markup")))
-        self.assertIn("Привет", str(sent.get("text")))
+        sent = [p for m, p in calls if m == "sendMessage"]
+        # первое — служебное с кнопкой меню, второе — приветствие с инлайн-меню
+        self.assertEqual(len(sent), 2)
+        self.assertEqual(sent[0]["reply_markup"]["keyboard"], [[{"text": "☰ Меню"}]])
+        self.assertNotIn("Подписаться", str(sent[1].get("reply_markup")))
+        self.assertIn("Привет", str(sent[1].get("text")))
+        self.assertTrue((sent[1].get("reply_markup") or {}).get("inline_keyboard"))
 
     def test_check_callback_opens_menu_when_member(self):
         self.bot._channel_id_cfg = "-100111"
@@ -1802,8 +1865,10 @@ class BotMailTest(unittest.TestCase):
                         "text": text}}))
 
     def test_cabinet_asks_to_confirm_email(self):
-        kb = self.bot._reply_kb(self.user)
-        texts = [b.get("text") for row in kb["keyboard"] for b in row]
+        # Напоминание о почте переехало из твёрдой панели в инлайн-меню:
+        # внизу теперь одна кнопка «☰ Меню».
+        kb = self.bot._menu_kb(self.user)
+        texts = [b.get("text") for row in kb["inline_keyboard"] for b in row]
         self.assertIn("✉️ Подтвердить почту", texts)
         self.assertIn("не привязана", self.bot._cabinet_text(self.user))
         self.assertEqual(self.bot._reply_cmd("✉️ Подтвердить почту"), "mail")
@@ -1813,11 +1878,15 @@ class BotMailTest(unittest.TestCase):
         self.assertTrue(r["ok"])
         unverified = r["user"]
         self.assertIn("не подтверждена", self.bot._cabinet_text(unverified))
-        texts = [b.get("text") for row in self.bot._reply_kb(unverified)["keyboard"] for b in row]
+        texts = [b.get("text") for row in self.bot._menu_kb(unverified)["inline_keyboard"]
+                 for b in row]
         self.assertIn("✉️ Подтвердить почту", texts)
         ok_user = self.store.mark_email_verified(self.user["id"])
-        texts = [b.get("text") for row in self.bot._reply_kb(ok_user)["keyboard"] for b in row]
+        texts = [b.get("text") for row in self.bot._menu_kb(ok_user)["inline_keyboard"]
+                 for b in row]
         self.assertNotIn("✉️ Подтвердить почту", texts)
+        # а твёрдая клавиатура у всех одна и та же
+        self.assertEqual(self.bot._reply_kb(ok_user)["keyboard"], [[{"text": "☰ Меню"}]])
         self.assertIn("уже подтверждена", self.bot._mail_screen(ok_user))
 
     def test_mail_screen_waits_for_address(self):

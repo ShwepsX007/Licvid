@@ -173,6 +173,10 @@ LIQUIDATIONS: Deque[dict] = deque(maxlen=HISTORY_MAX)
 # CVD, объём). В памяти — только свежий хвост, всё остальное на диске.
 HIST = HistoryStore(HISTORY_FILE, ttl_hours=HISTORY_TTL_HOURS,
                     shard_max_mb=HISTORY_SHARD_MAX_MB)
+# Что получилось при восстановлении истории на старте. Нужен диагностике: если
+# после перезапуска в памяти ноль событий, дневной дайджест собирается «пустым»
+# («$0 · 0 ликвидаций»), и по этому полю сразу видно, в чём дело.
+HISTORY_RESTORE: Dict[str, Any] = {"events": 0, "error": "", "at": 0.0}
 # Сторож пампов и дампов: минутные цены всех монет Gate + сигналы.
 PUMPS = PumpScanner(keep_min=int(os.getenv("LIQSCOPE_PUMP_KEEP_MIN",
                                          str(3 * 24 * 60)) or 3 * 24 * 60))
@@ -2021,9 +2025,16 @@ async def lifespan(app: FastAPI):
             for ev in loaded:
                 LIQUIDATIONS.append(ev)
                 BOARD.add_liq(ev)
+            HISTORY_RESTORE.update({"events": len(loaded), "error": "",
+                                    "at": time.time()})
             if loaded:
                 log.info("История ликвидаций восстановлена с диска: %d событий", len(loaded))
+            else:
+                log.warning("История ликвидаций на диске пуста: лента и дневной "
+                            "дайджест будут считать только новые события")
         except Exception as e:
+            HISTORY_RESTORE.update({"events": 0, "error": str(e)[:200],
+                                    "at": time.time()})
             log.warning("Не удалось загрузить историю с диска: %s", e)
 
     # Хранить историю надо за месяц — и OI-снимки, и часовые ячейки стенда
@@ -2528,6 +2539,7 @@ async def api_health():
             "history_persist": bool(HISTORY_FILE),
             "history_ttl_hours": HISTORY_TTL_HOURS,
             "history": HIST.stats(),
+            "history_restore": dict(HISTORY_RESTORE),
             "oi_history_keep_min": OI_KEEP_MIN,
         },
     }

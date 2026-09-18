@@ -27,7 +27,6 @@ from hour_board import hour_hhmm, tz_offset
 HERE = os.path.dirname(os.path.abspath(__file__))
 DAY_SEC = 86400
 TEXT_LIMIT = 3900               # сообщение Telegram (лимит 4096, оставляем запас)
-CAPTION_LIMIT = 1000            # подпись под фото (лимит Telegram 1024)
 NARRATIVE_MIN = 320             # короче — считаем текстом-заглушкой
 DEFAULT_KEEP = 400              # сколько дайджестов хранить в архиве
 
@@ -657,68 +656,29 @@ def mood_block(facts: dict, lang: str = "ru") -> str:
     return "\n".join(out)
 
 
-def _trim_narrative(text: str, limit: int) -> str:
-    """Подрезать рассказ по границе предложения — дальше идёт «…».
-
-    Рассказ — единственная гибкая часть поста: факты (главная ликвидация,
-    биржи, монеты, настроение) должны остаться целиком, иначе пост перестаёт
-    быть дайджестом.
-    """
-    text = str(text or "").strip()
-    limit = max(0, int(limit))
-    if limit <= 0:
-        return ""
-    if len(text) <= limit:
-        return text
-    cut = text[:limit]
-    for mark in (". ", "! ", "? ", "। "):
-        i = cut.rfind(mark)
-        if i > limit * 0.4:
-            return cut[: i + 1].rstrip() + " …"
-    i = cut.rfind(" ")
-    return (cut[:i] if i > 0 else cut).rstrip() + " …"
-
-
-def render_post(rec: dict, lang: str = "ru", site_url: str = "",
-                limit: int = TEXT_LIMIT) -> str:
-    """Пост в канал: живой рассказ + сухие блоки с фактами.
-
-    ``limit`` — сколько знаков должно получиться. Для поста с фотографией
-    Telegram разрешает подпись не длиннее 1024 знаков, поэтому публикация
-    просит CAPTION_LIMIT и рассказ подрезается — раньше пост за 1024 знака
-    уходил текстом без картинки (фото просто отбрасывалось).
-    """
+def render_post(rec: dict, lang: str = "ru", site_url: str = "") -> str:
+    """Пост в канал: живой рассказ + сухие блоки с фактами."""
     en = is_en(lang)
     facts = (rec or {}).get("facts") or {}
     day = (rec or {}).get("day") or ""
     narrative = ((rec or {}).get("ai") or {}).get("en" if en else "ru") or ""
     if len(str(narrative)) < NARRATIVE_MIN:
         narrative = fallback_narrative(facts, lang)
-    narrative = str(narrative).strip()
     head = (f"🧭 <b>{'Daily digest' if en else 'Дневной дайджест'} · "
             f"{day_label(day, lang)}</b>")
+    blocks = [head, "", str(narrative).strip(), "",
+              headline_block(facts, lang), "",
+              exchanges_block(facts, lang), "",
+              oi_block(facts, lang), "",
+              prices_block(facts, lang), "",
+              mood_block(facts, lang)]
+    text = "\n".join([b for b in blocks if b is not None]).strip()
+    text = _squeeze(text, TEXT_LIMIT)
     link = str(site_url or "").strip()
-    suffix = ""
     if link.startswith("http"):
-        suffix = (f"\n\n🌐 <a href=\"{link.rstrip('/')}/digest\">"
-                  f"{'Full digest on the site' if en else 'Все дайджесты на сайте'}</a>")
-
-    def build(story: str) -> str:
-        blocks = [head, "", story, "",
-                  headline_block(facts, lang), "",
-                  exchanges_block(facts, lang), "",
-                  oi_block(facts, lang), "",
-                  prices_block(facts, lang), "",
-                  mood_block(facts, lang)]
-        return "\n".join([b for b in blocks if b is not None]).strip()
-
-    text = build(narrative)
-    room = max(120, int(limit) - len(suffix))
-    if len(text) > room:
-        narrative = _trim_narrative(narrative, len(narrative) - (len(text) - room))
-        text = build(narrative)
-    text = _squeeze(text, room)
-    return text + suffix
+        text += (f"\n\n🌐 <a href=\"{link.rstrip('/')}/digest\">"
+                 f"{'Full digest on the site' if en else 'Все дайджесты на сайте'}</a>")
+    return text
 
 
 def _squeeze(text: str, limit: int) -> str:

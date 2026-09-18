@@ -32,6 +32,9 @@ POLL_STALE_SEC = float(os.getenv("LIQSCOPE_BOT_POLL_STALE_SEC", "180"))
 # единственная подсказка, которую бот может получить сам: если русский пост
 # уходит в «…Eng», getChat это покажет.
 CHANNEL_CHECK_SEC = float(os.getenv("LIQSCOPE_CHANNEL_CHECK_SEC", "1800"))
+# Предел подписи под фотографией в Telegram. Пост длиннее уходит текстом без
+# картинки — это и есть причина «дневной дайджест вышел без фото».
+CAPTION_LIMIT = 1024
 
 
 def normalize_public_url(url: str = "") -> str:
@@ -1496,7 +1499,7 @@ class TelegramBot:
         photos = [x for x in (images if images is not None else
                               ([img] if img else [])) if x and os.path.isfile(x)]
         ok = False
-        if photos and len(caption) <= 1024:
+        if photos and len(caption) <= CAPTION_LIMIT:
             ok = bool(await self.send_photo(cid, photos[0], caption, markup))
         if not ok:
             ok = bool(await self.send(cid, caption, markup))
@@ -1505,6 +1508,25 @@ class TelegramBot:
             if not sent:
                 log.warning("топ-7 не ушёл в канал %s", cid)
         return ok
+
+    @staticmethod
+    def _caption_note(posts) -> str:
+        """Что будет с фото: влезает ли пост в подпись под фотографией.
+
+        Telegram разрешает подпись не длиннее 1024 знаков, а дневной выпуск
+        обычно длиннее — тогда он уходит текстом, без картинки. Админ видит
+        это ещё в черновике и решает, укорачивать ли рассказ промтом.
+        """
+        sizes = [(p.get("lang") or "ru", len(p.get("caption") or ""))
+                 for p in (posts or [])]
+        if not sizes:
+            return ""
+        shown = " · ".join(
+            f"{'🇬🇧' if lang == 'en' else '🇷🇺'} {n}" for lang, n in sizes)
+        long = max(n for _, n in sizes) > CAPTION_LIMIT
+        tail = ("длиннее лимита подписи (1024) — фото не прикрепится, пост уйдёт "
+                "текстом" if long else "влезает в подпись под фото")
+        return f"<i>Подпись: {shown} знаков — {tail}.</i>"
 
     @staticmethod
     def _photo_list(img) -> List[str]:
@@ -1633,7 +1655,7 @@ class TelegramBot:
         публикации — если он включён, посты уходят админу черновиком.
         """
         from channel_digest import active_images, digest_images, pick_image
-        from daily_digest import CAPTION_LIMIT, render_post
+        from daily_digest import render_post
 
         self._digest_err = ""
         self._last_tg_err = ""
@@ -1642,19 +1664,6 @@ class TelegramBot:
         except Exception as e:
             log.debug("проверка каналов: %s", e)
         day = str((rec or {}).get("day") or "")
-        # Фото рубрики «дневной дайджест» (если админ их загрузил); иначе —
-        # общий набор сводки. Одно фото на пост: порядок сдвигается по номеру
-        # дня, альбома нет — как и в постах сводки.
-        images = digest_images(self.store)
-        try:
-            variant = int(day.replace("-", "")[-2:] or 0)
-        except (TypeError, ValueError):
-            variant = 0
-        img = pick_image(variant, images=images)
-        # С фотографией Telegram разрешает подпись не длиннее 1024 знаков:
-        # раньше пост за сутки (он длиннее) уходил текстом без картинки —
-        # теперь под фото пост собирается под этот лимит (рассказ подрезается)
-        limit = CAPTION_LIMIT if (img and os.path.isfile(img)) else None
         posts: List[dict] = []
         result: Dict[str, Any] = {}
         seen: set = set()
@@ -1669,8 +1678,7 @@ class TelegramBot:
                                         if lang == "en" else
                                         "канал не привязан — перешлите боту пост из канала")]
                 continue
-            caption = render_post(rec, lang, self.site_url(), limit=limit) if limit \
-                else render_post(rec, lang, self.site_url())
+            caption = render_post(rec, lang, self.site_url())
             posts.append({"lang": lang, "cid": cid, "caption": caption, "top": ""})
         if not posts:
             err = next((v[1] for v in result.values()), "каналы не привязаны")
@@ -1678,6 +1686,15 @@ class TelegramBot:
             self._daily_state = {"ok": False, "day": day, "error": err,
                                  "at": time.time()}
             return result
+        # Фото рубрики «дневной дайджест» (если админ их загрузил); иначе —
+        # общий набор сводки. Одно фото на пост: порядок сдвигается по номеру
+        # дня, альбома нет — как и в постах сводки.
+        images = digest_images(self.store)
+        try:
+            variant = int(day.replace("-", "")[-2:] or 0)
+        except (TypeError, ValueError):
+            variant = 0
+        img = pick_image(variant, images=images)
         if self._review_on():
             ok = await self._send_daily_draft(posts, img, day)
             for post in posts:
@@ -1749,7 +1766,8 @@ class TelegramBot:
             {"text": "✖️ Отмена", "callback_data": "dd:no"}]]}
         text = (f"<b>Черновик дневного дайджеста</b> · {_esc(day)}\n"
                 "Это суточный выпуск (не сводка за окно поста). В каналы он уйдёт "
-                "только после «Опубликовать».")
+                "только после «Опубликовать».\n"
+                + self._caption_note(posts))
         await self.send(admin, text, kb)
         imgs = [x for x in self._photo_list(img) if x and os.path.isfile(x)]
         if imgs:

@@ -442,8 +442,11 @@ async def scheduler_loop(sched: DigestScheduler, check_sec: float = 60.0) -> Non
             if day and not ctx.busy:
                 ctx.busy = True
                 try:
-                    if await publish_digest(now=now, langs=("ru", "en"), force=True,
-                                            reason="schedule"):
+                    rec = await publish_digest(now=now, langs=("ru", "en"), force=True,
+                                               reason="schedule")
+                    # пустой выпуск не отмечаем: история может восстановиться,
+                    # и выпуск всё-таки соберётся в этом окне
+                    if rec and not rec.get("skipped"):
                         sched.mark(day)
                 finally:
                     ctx.busy = False
@@ -455,16 +458,36 @@ async def scheduler_loop(sched: DigestScheduler, check_sec: float = 60.0) -> Non
         await asyncio.sleep(check_sec)
 
 
+def empty_day_reason(facts: Optional[dict]) -> str:
+    """Почему выпуск нельзя публиковать: за сутки не собрано ни одной ликвидации.
+
+    Так бывает, когда сервер перезапустили, а дисковая история за сутки не
+    восстановилась: в памяти ноль событий, и пост выходит с «$0 · 0 ликвидаций»
+    и без единой крупной ликвидации. Такой выпуск хуже, чем пропуск: вместо
+    публикации сервис говорит админу, что проверить.
+    """
+    facts = facts or {}
+    return ("за сутки не собрано ни одной ликвидации — похоже, история не "
+            "восстановилась после перезапуска (в /api/health смотрите "
+            "liquidations_in_memory); выпуск не отправлен")
+
+
 async def publish_digest(now: Optional[float] = None, langs=("ru", "en"),
                          force: bool = False, reason: str = "manual",
                          window: Optional[int] = None,
                          publish: bool = True) -> Optional[dict]:
     """Собрать выпуск и опубликовать его в каналах (если есть чем)."""
     rec = await build_digest(now=now, window=window, save=True, ai=True)
+    facts = rec.get("facts") or {}
     log.info("Дайджест за %s собран (%s): %s ликвидаций на %s",
-             rec.get("day"), reason,
-             (rec.get("facts") or {}).get("liq_count"),
-             (rec.get("facts") or {}).get("liq_total_usd"))
+             rec.get("day"), reason, facts.get("liq_count"),
+             facts.get("liq_total_usd"))
+    if float(facts.get("liq_total_usd") or 0) <= 0 and int(facts.get("liq_count") or 0) <= 0:
+        text = empty_day_reason(facts)
+        rec["skipped"] = "no_liquidations"
+        rec["published"] = {str(lang): [False, text] for lang in (langs or ("ru",))}
+        log.warning("Дайджест %s: %s", rec.get("day"), text)
+        return rec
     if publish and ctx.publish_fn is not None:
         try:
             result = await ctx.publish_fn(rec, list(langs), bool(force))

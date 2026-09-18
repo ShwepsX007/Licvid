@@ -166,6 +166,10 @@ class HistoryApiCase(unittest.TestCase):
         self.assertEqual(cfg["history_ttl_hours"], 744)
         self.assertTrue(cfg["history"]["first_day"])
         self.assertEqual(cfg["oi_history_keep_min"], 744 * 60)
+        # видно, сколько событий поднялось с диска на старте: если ноль —
+        # дневной дайджест соберётся пустым
+        self.assertIn("history_restore", cfg)
+        self.assertIn("events", cfg["history_restore"])
         self.assertGreaterEqual(cfg["history"]["days_on_disk"], 1)
 
 

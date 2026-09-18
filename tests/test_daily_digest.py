@@ -486,48 +486,48 @@ class BotPublishTest(unittest.TestCase):
                        "en": "English story about the day. " * 20}}
 
     def _upload_photo(self, kind="digest"):
-        """Кладём фото рубрики так же, как это делает админка."""
+        """Фото рубрики так же, как его кладёт админка."""
         png = (b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
         res = self.store.add_digest_photo(png, "cover.png", actor_id=1001, kind=kind)
         self.assertTrue(res.get("ok"), res)
         return res.get("path") or ""
 
-    def test_daily_post_goes_with_photo_even_if_long(self):
-        """Пост за сутки длиннее 1024 знаков — раньше уходил текстом без фото."""
+    def test_daily_post_goes_with_photo_when_it_fits(self):
+        """Короткий пост за сутки уходит фотографией с подписью."""
         import asyncio
         path = self._upload_photo()
         rec = self._rec()
-        rec["ai"] = {"ru": "Русский рассказ про день. " * 120,   # ~3000 знаков
-                     "en": "English story about the day. " * 120}
-        long_post = daily_digest.render_post(rec, "ru", "https://liqscope.online")
-        self.assertGreater(len(long_post), 1024, "фикстура должна быть длинной")
+        rec["ai"] = {"ru": "Короткий рассказ про сутки. " * 8,
+                     "en": "Short story about the day. " * 8}
+        caption = daily_digest.render_post(rec, "ru", "https://liqscope.online")
+        self.assertLessEqual(len(caption), 1024, len(caption))
         asyncio.get_event_loop().run_until_complete(
             self.bot.publish_daily_digest(rec, ("ru",), force=True))
         msg = [m for m in self.sent if m["cid"] == "-100111"][0]
-        self.assertEqual(msg.get("photo"), path, "фото должно уйти вместе с постом")
-        self.assertLessEqual(len(msg["text"]), 1024)
-        self.assertIn("Дневной дайджест", msg["text"])
-        self.assertIn("Крупнейшая ликвидация", msg["text"])   # факты не потерялись
-        self.assertIn("…", msg["text"])                        # рассказ подрезан
-        self.assertTrue(msg["text"].rstrip().endswith("</a>"))
+        self.assertEqual(msg.get("photo"), path, "фото должно уйти с постом")
+        self.assertIn("Крупнейшая ликвидация", msg["text"])
 
-    def test_daily_post_without_photos_stays_full_text(self):
-        """Без фото лимит подписи не действует — пост полный."""
+    def test_long_daily_post_keeps_story_and_goes_without_photo(self):
+        """Пост длиннее подписи (1024) уходит текстом — рассказ НЕ подрезаем.
+
+        Так решил владелец: длину рассказа держим промтом, а не обрезкой.
+        Раньше бот в этом случае подрезал рассказ под подпись, и выпуск
+        получался из одной фразы с пустыми блоками цифр.
+        """
         import asyncio
-        import channel_digest
+        self._upload_photo()
         rec = self._rec()
-        rec["ai"] = {"ru": "Русский рассказ про день. " * 120,
-                     "en": "English story about the day. " * 120}
-        old_pick = channel_digest.pick_image
-        channel_digest.pick_image = lambda *a, **k: None
-        try:
-            asyncio.get_event_loop().run_until_complete(
-                self.bot.publish_daily_digest(rec, ("ru",), force=True))
-        finally:
-            channel_digest.pick_image = old_pick
+        long_story = "Подробный рассказ про сутки. " * 60      # ~1600 знаков
+        rec["ai"] = {"ru": long_story, "en": "Long story about the day. " * 60}
+        caption = daily_digest.render_post(rec, "ru", "https://liqscope.online")
+        self.assertGreater(len(caption), 1024, len(caption))
+        asyncio.get_event_loop().run_until_complete(
+            self.bot.publish_daily_digest(rec, ("ru",), force=True))
         msg = [m for m in self.sent if m["cid"] == "-100111"][0]
         self.assertNotIn("photo", msg)
-        self.assertGreater(len(msg["text"]), 1024)
+        self.assertIn(long_story.strip(), msg["text"])          # рассказ целиком
+        self.assertNotIn("…", msg["text"])
+        self.assertIn("Крупнейшая ликвидация", msg["text"])
 
     def test_publishes_to_both_channels(self):
         import asyncio
@@ -568,6 +568,34 @@ class BotPublishTest(unittest.TestCase):
         datas = [b.get("callback_data") for row in
                  (self.sent[0]["kb"] or {}).get("inline_keyboard", []) for b in row]
         self.assertEqual(datas, ["dd:pub", "dd:regen", "dd:no"])
+
+    def test_draft_tells_about_photo_caption_limit(self):
+        """Черновик заранее говорит, прикрепится ли фото к посту.
+
+        Telegram принимает подпись под фото не длиннее 1024 знаков: дневной
+        выпуск обычно длиннее, и пост уходит текстом без картинки. Админ
+        должен видеть это до «Опубликовать», а не удивляться потом.
+        """
+        import asyncio
+        self.bot._set_review(True)
+        rec = self._rec()
+        rec["ai"] = {"ru": "Длинный рассказ про сутки. " * 80,
+                     "en": "Long story about the day. " * 80}
+        asyncio.get_event_loop().run_until_complete(
+            self.bot.publish_daily_digest(rec, ("ru",), force=True))
+        draft = self.sent[0]["text"]
+        self.assertIn("Подпись:", draft)
+        self.assertIn("фото не прикрепится", draft)
+
+    def test_draft_says_photo_fits_when_short(self):
+        import asyncio
+        self.bot._set_review(True)
+        rec = self._rec()
+        rec["ai"] = {"ru": "Короткий рассказ. " * 10, "en": "Short story. " * 10}
+        asyncio.get_event_loop().run_until_complete(
+            self.bot.publish_daily_digest(rec, ("ru",), force=True))
+        draft = self.sent[0]["text"]
+        self.assertIn("влезает в подпись под фото", draft)
 
     def test_admin_keyboard_has_digest_button(self):
         texts = [b.get("text") for row in self.bot._admin_kb()["inline_keyboard"]
@@ -612,6 +640,58 @@ class BodyLimitTest(unittest.TestCase):
         self.assertIn("нейтральный", line)
         self.assertNotIn("\n", line)
         self.assertIn("neutral", brief(rec, "en"))
+
+
+class EmptyDayPublishTest(unittest.TestCase):
+    """Пустой выпуск (в памяти нет событий за сутки) в канал не уходит.
+
+    Так выглядел настоящий сбой: после перезапуска история не восстановилась,
+    и в канал ушёл пост с «$0 · 0 ликвидаций» да ещё и с рассказом из одной
+    фразы. Теперь сервис честно говорит админу, что проверить.
+    """
+
+    def setUp(self):
+        import api_digest
+        self.api = api_digest
+        self.sent = []
+
+        async def fake_publish(rec, langs, force):
+            self.sent.append((rec.get("day"), list(langs), bool(force)))
+            return {lang: [True, ""] for lang in langs}
+
+        async def fake_build(now=None, window=None, save=True, ai=True):
+            return {"id": "2026-09-18", "day": "2026-09-18",
+                    "facts": {"liq_total_usd": 0, "liq_count": 0,
+                              "mood": {"kind": "flat", "score": 0.5,
+                                       "label": {"ru": "⚪ нейтральный"},
+                                       "reasons": {"ru": []}}},
+                    "ai": {"ru": "According to liqscope.online. …"}}
+
+        self._old_build = api_digest.build_digest
+        self._old_publish = api_digest.ctx.publish_fn
+        api_digest.build_digest = fake_build
+        api_digest.ctx.publish_fn = fake_publish
+
+    def tearDown(self):
+        self.api.build_digest = self._old_build
+        self.api.ctx.publish_fn = self._old_publish
+
+    def test_empty_day_is_not_published(self):
+        import asyncio
+        rec = asyncio.get_event_loop().run_until_complete(
+            self.api.publish_digest(now=1.7e9, langs=("ru", "en"), force=True,
+                                    reason="schedule"))
+        self.assertEqual(self.sent, [], "в канал ничего не ушло")
+        self.assertEqual(rec.get("skipped"), "no_liquidations")
+        ru = rec["published"]["ru"]
+        self.assertFalse(ru[0])
+        self.assertIn("ни одной ликвидации", ru[1])
+        self.assertIn("liquidations_in_memory", ru[1])
+
+    def test_reason_explains_what_to_check(self):
+        text = self.api.empty_day_reason({"liq_count": 0, "liq_total_usd": 0})
+        self.assertIn("история не восстановилась", text)
+        self.assertIn("/api/health", text)
 
 
 class SettingsApiTest(unittest.TestCase):

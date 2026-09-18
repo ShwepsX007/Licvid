@@ -50,6 +50,18 @@ function stubCanvas(win) {
 }
 
 async function main() {
+  // Какие биржи вообще сконфигурированы на сервере: демо-стенд поднимается
+  // с LIQSCOPE_EXCHANGES= (offline, без бирж), поэтому «в списке ≥4 галочки»
+  // и чип Hyperliquid проверяем только там, где источник включён.
+  let serverExchanges = null;   // null = сервер не сказал → проверяем как раньше
+  try {
+    const h = await httpGet(URL_BASE + "/api/health");
+    const cfg = JSON.parse(h.body).config || {};
+    if (Array.isArray(cfg.exchanges)) serverExchanges = cfg.exchanges.map(String);
+  } catch (e) { /* ignore */ }
+  const exchExpect = serverExchanges ? Math.min(4, serverExchanges.length) : 4;
+  const wantHL = !serverExchanges || serverExchanges.indexOf("hyperliquid") !== -1;
+
   const vc = new VirtualConsole();
   vc.on("jsdomError", (e) => errors.push("jsdomError: " + String(e.message || e).slice(0, 300)));
   vc.on("error", (...a) =>
@@ -104,8 +116,16 @@ async function main() {
         } else if (u.indexOf("/api/klines") === 0) {
           body = { symbol: "BTC_USDT", timeframe: 5, source: "demo", candles: [] };
         } else if (u.indexOf("/api/stats") === 0) {
-          body = { total_usd_24h: 0, longs_usd_24h: 0, shorts_usd_24h: 0,
-                   total_usd_1h: 0, total_usd_5m: 0, top_coins: [] };
+          // top_coins не пустой: проверка ниже смотрит, что в панели лидеров
+          // действительно есть обе группы карточек — по объёму и по числу
+          body = { total_usd_24h: 1_000_000, longs_usd_24h: 600_000, shorts_usd_24h: 400_000,
+                   total_usd_1h: 0, total_usd_5m: 0,
+                   top_coins: [
+                     { symbol: "ETH_USDT", usd: 500_000, longs: 300_000, shorts: 200_000, count: 12 },
+                     { symbol: "BTC_USDT", usd: 300_000, longs: 100_000, shorts: 200_000, count: 4 },
+                     { symbol: "SOL_USDT", usd: 120_000, longs: 60_000, shorts: 60_000, count: 31 },
+                     { symbol: "DOGE_USDT", usd: 80_000, longs: 40_000, shorts: 40_000, count: 7 },
+                   ] };
         } else if (u.indexOf("/api/liquidations") === 0) {
           // терминал догружает историю пузырьков после F5 — отдаём стаб
           body = { liquidations: [], total: 0 };
@@ -334,6 +354,8 @@ async function main() {
     dataSource: text("data-source"),
     legend: doc.querySelector(".chart-legend").textContent.replace(/\s+/g, " ").trim(),
     health: text("exch-health"),
+    serverExchanges,
+    exchExpect,
     hasProfileToggle: !!profileToggleBtn,
     profileToggleActive,
     profileToggleAfter,
@@ -410,7 +432,8 @@ async function main() {
     out.gramChip &&
     out.hasMinUsdInput &&
     normLabel.indexOf("500 000") !== -1 &&
-    out.exchCheckboxCount >= 4 &&
+    (exchExpect === 0 ? out.exchCheckboxCount === 0      // бирж нет — и списка нет
+                      : out.exchCheckboxCount >= exchExpect) &&
     out.feedRowsAfterNone === 0 &&
     out.exchLabel.indexOf("Все биржи") === 0 &&
     out.coinLinkCount > 0 &&
@@ -441,7 +464,7 @@ async function main() {
     out.topCoinsClosed &&                 // клик по заголовку сворачивает список
     // oxa — транспорт для ликвидаций Hyperliquid, а не отдельная площадка:
     // чип Hyperliquid уже есть, вторая плашка его дублировала
-    /hyperliquid/i.test(out.health) &&
+    (!wantHL || /hyperliquid/i.test(out.health)) &&
     !/0xArchive/i.test(out.health);
 
   console.log(JSON.stringify(out, null, 2));

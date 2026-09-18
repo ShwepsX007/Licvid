@@ -177,6 +177,39 @@ class DigestTest(unittest.TestCase):
                 self.assertIn("📊 OI", line, line)
                 self.assertIn("🌊 CVD", line, line)
 
+    def test_hour_leaders_survive_in_both_languages(self):
+        """Лидеры часа есть и в русском посте, и в английском.
+
+        Регрессия из живого канала: русский текст длиннее, и лестница видов
+        выбирала часы БЕЗ лидеров, пока английский их показывал — в одном
+        канале данные были, в другом нет. Теперь часы (с лидерами) выбираются
+        первыми, а строки окна заполняют остаток.
+        """
+        snap = collect_digest(self.events, now=self.now, oi=self.oi, cvd=self.cvd)
+        snap["board"] = _board()
+        for lang, mark in (("ru", "🏆 Лидер часа:"), ("en", "🏆 Hour leader:")):
+            t = render_post(snap, 0, lang=lang)
+            self.assertEqual(t.count(mark), 4, (lang, t))
+            self.assertEqual(t.count("🕘 <b>"), 4, (lang, t))
+        # длинная шапка сжимает строки окна, но лидеры часа остаются в обоих
+        long_head = "🧪 " + "очень длинная шапка от ИИ " * 5
+        for lang in ("ru", "en"):
+            t = render_post(snap, 0, lang=lang, head_override=long_head)
+            self.assertEqual(t.count("🕘 <b>"), 4, (lang, t))
+            self.assertIn("🏆", t, (lang, t))
+            # все пять строк с 🏆: лидер окна и четыре лидера часов
+            stars = [ln for ln in t.splitlines() if ln.startswith("🏆")]
+            self.assertEqual(len(stars), 5, (lang, t))
+            self.assertLessEqual(len(t), CAPTION_LIMIT, (lang, len(t)))
+        # совсем тесная подпись: лидер часа уходит в короткий вид без слов
+        # «Лидер часа», но не пропадает
+        huge = "🧪 " + "шапка " * 40
+        t = render_post(snap, 0, lang="ru", head_override=huge)
+        self.assertNotIn("🏆 Лидер часа:", t)
+        under_hours = [ln for ln in t.splitlines() if ln.startswith("🏆 <b>")]
+        self.assertEqual(len(under_hours), 4, t)              # все четыре часа
+        self.assertLessEqual(len(t), CAPTION_LIMIT, len(t))
+
     def test_leaders_of_window_and_hour(self):
         """Лидеры: окно by money и по событиям, час — своим лидером."""
         snap = collect_digest(self.events, now=self.now, oi=self.oi, cvd=self.cvd)

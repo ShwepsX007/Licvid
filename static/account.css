@@ -520,7 +520,11 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
     white-space: nowrap; }
 .cor-heat tbody th { text-align: right; }
 .cor-heat-cell { padding: 6px 4px; border-radius: 6px; text-align: center; color: #eaf0f8;
-    min-width: 40px; }
+    min-width: 40px; cursor: help; }
+.cor-heat-cell:hover { outline: 1px solid #4c6ea8; outline-offset: 1px; }
+/* Пояснение к тепловой карте: что в клетке, что значит цвет и знак */
+.cor-heat-note { font-size: 0.76rem; line-height: 1.45; color: #8d9cb4;
+    margin: 2px 0 6px; }
 .cor-heat-cell.diag, .cor-heat-empty { background: rgba(120, 140, 175, 0.10); color: #6c7a90; }
 .cor-pairs { display: grid; gap: 4px; }
 .cor-pair { display: grid; grid-template-columns: minmax(120px, 1.2fr) 2fr 48px;

@@ -196,8 +196,31 @@ check("update не учитываем (задвоение объёма)",
       parse_bitmex_msg({"table": "liquidation", "action": "update",
                         "data": [{"symbol": "XBTUSD", "leavesQty": 305515}]},
                        instr) == [])
-check("без метаданных линейный пропускаем",
-      parse_bitmex_msg(linear, {}) == [])
+# Без метаданных инструментов лента больше не молчит: инверсный контракт
+# считается как есть, линейному подставляется микроконтракт (1 контракт =
+# 1e-6 базовой монеты) — раньше на этом шаге ВСЕ события биржи отбрасывались,
+# и она выглядела зависшей.
+bm_stats = {}
+res = parse_bitmex_msg(linear, {}, bm_stats)
+check("без метаданных линейный считается по микроконтракту",
+      res and abs(res[0]["qty"] - 1.0) < 1e-9 and abs(res[0]["usd"] - 90000) < 1e-6,
+      (res, bm_stats))
+check("счётчик догадки виден", bm_stats.get("no_meta_micro") == 1, bm_stats)
+inv_stats = {}
+res = parse_bitmex_msg(bitmex_inverse, {}, inv_stats)
+check("без метаданных инверсный считается как инверсный",
+      res and abs(res[0]["usd"] - 314930) < 1e-6, (res, inv_stats))
+check("инверсному множитель не нужен", inv_stats.get("no_meta_inverse") == 1, inv_stats)
+check("разбор считает разобранные строки",
+      bm_stats.get("rows") == 1 and inv_stats.get("rows") == 1, (bm_stats, inv_stats))
+bad = {"table": "liquidation", "action": "insert",
+       "data": [{"symbol": "XBTUSD", "price": 0, "leavesQty": 5},
+                {"symbol": "XBTUSD", "price": "abc", "leavesQty": 5}]}
+bad_stats = {}
+check("пустые строки не считаются событиями",
+      parse_bitmex_msg(bad, {}, bad_stats) == [], bad_stats)
+check("причины отбрасывания видны в счётчиках",
+      bad_stats.get("empty_row") == 1 and bad_stats.get("bad_row") == 1, bad_stats)
 
 print("hyperliquid trades")
 hl_universe = ["BTC", "ETH", "kPEPE", "KAS", "HYPE"]

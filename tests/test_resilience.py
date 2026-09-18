@@ -318,6 +318,49 @@ async def scenario_silence_watchdog():
         pass
 
 
+async def scenario_bitmex_wind_down():
+    print("3в) BitMEX: биржа сворачивает торговлю — ноль событий это не «завис»")
+    feed = MarketFeed(on_liquidation=on_liq, on_price=noop_price, exchanges=[])
+    st = feed.status["bitmex"]
+    st.enabled = True
+    st.up()
+    # живём тихо двое суток: у свёрнутой биржи ликвидаций больше нет
+    st.events = 0
+    st.connected_since = time.time() - 2 * 86400
+    st.last_event_ts = 0.0
+    check("свёрнутая биржа не считается зависшей", feed.silent_sources() == [],
+          feed.silent_sources())
+    check("в health видно причину нуля событий",
+          "закрывается" in (feed.health()["sources"]["bitmex"].get("sunset_note") or ""),
+          feed.health()["sources"]["bitmex"].get("sunset_note"))
+    # исключение — только для свёрнутой биржи: живая площадка в том же
+    # состоянии по-прежнему требует переподключения
+    feed.status["gate"].enabled = True
+    feed.status["gate"].up()
+    feed.status["gate"].events = 0
+    feed.status["gate"].connected_since = time.time() - 2 * 86400
+    check("живая биржа в такой же тишине сторожем поднимается",
+          feed.silent_sources() == ["gate"], feed.silent_sources())
+
+    # лента без метаданных инструментов больше не молчит: инверсный контракт
+    # считается как есть, линейному подставляется микроконтракт
+    from market_feed import parse_bitmex_msg
+    payload = {"table": "liquidation", "action": "insert", "data": [
+        {"symbol": "XBTUSD", "side": "Sell", "price": 50000, "leavesQty": 100000},
+        {"symbol": "XBTUSDT", "side": "Buy", "price": 50000, "leavesQty": 100000},
+    ]}
+    stats = {}
+    events = parse_bitmex_msg(payload, {}, stats)
+    check("события BitMEX не теряются без списка инструментов",
+          len(events) == 2, f"{len(events)} событий, {stats}")
+    check("инверсный контракт посчитан верно",
+          abs(events[0]["usd"] - 100000) < 1e-6, events[0])
+    check("линейный посчитан по микроконтракту",
+          abs(events[1]["qty"] - 0.1) < 1e-9, events[1])
+    check("догадка видна в счётчиках для /api/health",
+          stats.get("no_meta_inverse") == 1 and stats.get("no_meta_micro") == 1, stats)
+
+
 async def scenario_dead_supervisor_respawns():
     print("3г) биржа: умер супервизор — сторож поднимает источник заново")
     feed = MarketFeed(on_liquidation=on_liq, on_price=noop_price,
@@ -519,6 +562,7 @@ async def main():
         await scenario_watchdog_keeps_quiet_alive()
         await scenario_supervise_backoff()
         await scenario_silence_watchdog()
+        await scenario_bitmex_wind_down()
         await scenario_gate_needs_contract_specs()
         await scenario_dead_supervisor_respawns()
         await scenario_client_send_timeout()

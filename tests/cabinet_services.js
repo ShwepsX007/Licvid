@@ -143,6 +143,20 @@ async function main() {
         apiCalls.map((c) => c.url).filter((u) => u.indexOf("correlations") === 0).join(" "));
   const cells = qa("#corr-board .cor-heat-cell");
   check("тепловая карта: клетки с коэффициентами", cells.length >= 4, cells.length + " клеток");
+  // Пояснение к тепловой карте: что за цифра в клетке и что значит цвет.
+  // Спрашивается у пользователя дважды — наведением и кликом.
+  const heatNote = $("cor-heat-note");
+  check("под картой есть пояснение, что показывают данные",
+        !!heatNote && /Что это/.test(heatNote.textContent) && heatNote.textContent.length > 80,
+        heatNote ? heatNote.textContent.slice(0, 120) : "нет блока");
+  check("в пояснении названы метрика, окно и смысл цвета",
+        !!heatNote && /зелёный/.test(heatNote.textContent) &&
+        /красный/.test(heatNote.textContent) && /коэффициент/.test(heatNote.textContent),
+        heatNote ? heatNote.textContent.slice(0, 160) : "нет блока");
+  const cellsWithTip = cells.filter((c) => (c.getAttribute("title") || "").length > 40);
+  check("у клеток есть подсказка при наведении (что за пара и что значит число)",
+        cellsWithTip.length === cells.length,
+        cellsWithTip.length + "/" + cells.length);
   check("в клетках есть числа корреляции",
         cells.some((c) => /^-?\d\.\d\d$/.test(c.textContent.trim())), cells[0] && cells[0].textContent);
   check("есть блоки потоков (шорты/лонги/CVD/OI)",
@@ -170,6 +184,18 @@ async function main() {
           apiCalls.map((c) => c.url).filter((u) => u.indexOf("correlations") === 0).slice(-1)[0]);
     check("клетки тепловой карты пересобраны", qa("#corr-board .cor-heat-cell").length >= 4,
           qa("#corr-board .cor-heat-cell").length);
+  }
+
+  // клик по клетке карты объясняет её текстом (на телефоне наведения нет)
+  const cell = q("#cor-heat-box .cor-heat-cell:not(.diag)");
+  if (cell) {
+    const before = $("cor-status").textContent;
+    cell.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, view: win }));
+    await sleep(200);
+    const after = $("cor-status").textContent;
+    check("клик по клетке карты объясняет пару словами",
+          /r = /.test(after) && /в одну сторону|противофазе/.test(after) && after !== before,
+          after.slice(0, 160));
   }
 
   // клик по паре объясняет связь словами

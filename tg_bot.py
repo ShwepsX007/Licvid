@@ -15,6 +15,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 import aiohttp
 
+from bot_i18n import (DEFAULT_LANG, LANGS, SWITCH_TEXT, lang_label,
+                      normalize_lang, other_lang, translate, translate_payload)
 from refs import ex_link, gate_line, gate_url
 
 log = logging.getLogger("liqscope.bot")
@@ -111,6 +113,10 @@ class TelegramBot:
         self._mail_at: Dict[str, float] = {}        # "tg:адрес" -> когда слали письмо
         self.mailer = None                          # mailer.Mailer из server.py
         self._menu_msg: Dict[int, int] = {}         # chat_id -> последнее меню
+        # chat_id -> язык пользователя. Держим рядом с обработчиками, а не
+        # ходим в базу на каждое сообщение: язык нужен и при отправке алертов,
+        # которым некогда ждать SQLite.
+        self._langs: Dict[int, str] = {}
         # chat_id -> id последнего отправленного сообщения. Нужен, чтобы не
         # править меню, которое уже уехало вверх: id сообщений в чате растут,
         # и по этой паре видно, ушло ли после меню что-то ещё (алерты, отчёты).
@@ -249,7 +255,9 @@ class TelegramBot:
             [{"text": "👤 Кабинет"}, {"text": "⚡ Терминал"}],
             [{"text": "📊 Статистика"}, {"text": "🩺 Биржи"}],
             [{"text": "🛠 Сервисы"}, {"text": "📰 Лента"}],
-            [{"text": "🔔 Алерты"}, {"text": "📣 Канал"}],
+            # Вместо второй кнопки алертов — переключатель языка. Сами
+            # алерты никуда не делись: они открываются из «🛠 Сервисы».
+            [{"text": SWITCH_TEXT}, {"text": "📣 Канал"}],
         ]
         if user and user.get("is_admin"):
             rows.append([{"text": "★ Админка"}])
@@ -262,7 +270,7 @@ class TelegramBot:
             "keyboard": rows,
             "resize_keyboard": True,
             "is_persistent": True,
-            "input_field_placeholder": "меню внизу экрана",
+            "input_field_placeholder": "меню внизу экрана · язык кнопкой RU/ENG",
         }
 
     def _reply_cmd(self, text: str) -> str:
@@ -274,6 +282,7 @@ class TelegramBot:
         key = key.replace("★ ", "").replace("👤 ", "").replace("⚡ ", "")
         key = key.replace("📊 ", "").replace("🩺 ", "").replace("🛠 ", "")
         key = key.replace("📰 ", "").replace("🔔 ", "").replace("📣 ", "")
+        key = key.replace("🌐 ", "")
         key = key.replace("✉️ ", "").replace("📧 ", "")
         return {
             "кабинет": "cabinet",
@@ -290,6 +299,24 @@ class TelegramBot:
             "алерты по объёму": "al",
             "канал": "channel",
             "админка": "admin",
+            # Английские подписи панели — тот же язык, другая раскладка:
+            # после переключения на английский кнопки иначе не работали бы.
+            "account": "cabinet",
+            "terminal": "terminal",
+            "stats": "stats",
+            "exchanges": "health",
+            "services": "services",
+            "feed": "liq",
+            "feed liq": "liq",
+            "alerts": "al",
+            "volume alerts": "al",
+            "channel": "channel",
+            "admin": "admin",
+            "verify email": "mail",
+            "menu": "help",
+            "ru / eng": "lang",
+            "ru/eng": "lang",
+            "lang": "lang",
         }.get(key, "")
 
     async def start(self) -> None:
@@ -361,9 +388,70 @@ class TelegramBot:
             await self._session.close()
             self._session = None
 
+    def lang_of(self, chat_id: Any) -> str:
+        """Язык получателя: то, что человек выбрал кнопкой «🌐 RU/ENG».
+
+        Пишем язык в кэш при каждом сообщении и в аккаунт при переключении,
+        поэтому здесь не бывает походов в базу: функция зовётся на каждой
+        отправке, в том числе из рассылки алертов.
+        """
+        try:
+            return self._langs.get(int(chat_id), DEFAULT_LANG)
+        except (TypeError, ValueError):
+            return DEFAULT_LANG
+
+    def remember_lang(self, chat_id: Any, lang: str) -> str:
+        """Запомнить язык получателя (и записать в аккаунт, если он есть)."""
+        code = normalize_lang(lang)
+        try:
+            self._langs[int(chat_id)] = code
+        except (TypeError, ValueError):
+            pass
+        return code
+
+    def warm_langs(self, rows) -> None:
+        """Запомнить языки получателей перед массовой отправкой.
+
+        Сигналы алертов и рассылка уходят людям, которые могли ни разу не
+        написать боту после рестарта: без прогрева кэша они получили бы
+        русский текст, даже выбрав английский.
+        """
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            tg_id = row.get("tg_id") or row.get("chat_id")
+            if tg_id:
+                self.remember_lang(tg_id, row.get("language") or row.get("lang") or "")
+
+    def _channel_chats(self) -> set:
+        """Чаты каналов: их сообщения переводить нельзя.
+
+        Пост в русский канал уже русский нарочно (английская версия идёт во
+        второй канал), поэтому «перевести всё исходящее» здесь не годится.
+        """
+        out = set()
+        for value in (self.channel_chat_id(), self.channel_chat_id_en()):
+            text = str(value or "").strip()
+            if text:
+                out.add(text)
+                try:
+                    out.add(str(int(text)))
+                except ValueError:
+                    pass
+        return out
+
     async def _call(self, method: str, payload: Optional[dict] = None) -> Optional[dict]:
         if not self._session:
             return None
+        if payload:
+            # Метка «как есть»: черновики постов админу показывают будущую
+            # публикацию в её собственном языке — переводить её нельзя, иначе
+            # админ не увидит, что уйдёт в русский канал.
+            raw = bool(payload.pop("_raw", False))
+            chat_id = payload.get("chat_id")
+            if not raw and chat_id is not None \
+                    and str(chat_id) not in self._channel_chats():
+                payload = translate_payload(method, payload, self.lang_of(chat_id))
         url = API.format(token=self.token, method=method)
         timeout = aiohttp.ClientTimeout(total=70, sock_read=70) if method == "getUpdates" \
             else aiohttp.ClientTimeout(total=15)
@@ -439,13 +527,17 @@ class TelegramBot:
         return {"inline_keyboard": rows if rows else []}
 
     async def send(self, chat_id: int, text: str, markup: Optional[dict] = None,
-                   parse: str = "HTML", silent: bool = False) -> Optional[int]:
+                   parse: str = "HTML", silent: bool = False,
+                   raw: bool = False) -> Optional[int]:
+        """``raw=True`` — отправить текст как есть, без перевода на язык чата."""
         body: Dict[str, Any] = {
             "chat_id": chat_id,
             "text": text[:3900],
             "parse_mode": parse,
             "disable_web_page_preview": True,
         }
+        if raw:
+            body["_raw"] = True
         if silent:
             body["disable_notification"] = True
         if markup:
@@ -1056,9 +1148,20 @@ class TelegramBot:
             log.warning("бота убрали из канала chat_id=%s", cid)
 
     async def send_photo(self, chat_id, path: str, caption: str = "",
-                         markup: Optional[dict] = None) -> Optional[int]:
+                         markup: Optional[dict] = None,
+                         raw: bool = False) -> Optional[int]:
+        """Фото с подписью. ``raw=True`` — подпись не переводить.
+
+        Подпись уходит multipart-запросом мимо ``_call``, поэтому язык здесь
+        применяем сами: иначе подпись под фото осталась бы русской у тех, кто
+        выбрал английский, а preview чужого поста — наоборот, переведённой.
+        """
         if not self._session or not path or not os.path.isfile(path):
             return None
+        if not raw and str(chat_id) not in self._channel_chats():
+            lang = self.lang_of(chat_id)
+            caption = translate(caption, lang)
+            markup = translate_markup(markup, lang)
         url = API.format(token=self.token, method="sendPhoto")
         form = aiohttp.FormData()
         form.add_field("chat_id", str(chat_id))
@@ -1408,11 +1511,14 @@ class TelegramBot:
         for post in posts or []:
             mark = "🇬🇧" if post.get("lang") == "en" else "🇷🇺"
             text += f"\n\n{mark} <b>{(post.get('cid') or '')}</b>\n" + (post.get("caption") or "")
-        await self.send(admin, text, kb)
+        # raw=True: черновик — это будущий пост, а не сообщение админу.
+        # Перевод подписи скрыл бы от админа, что уйдёт в русский канал.
+        await self.send(admin, text, kb, raw=True)
         # Черновик показывается так же, как уйдёт в канал: одна картинка.
         imgs = [x for x in (self._draft.get("images") or []) if x and os.path.isfile(x)]
         if imgs:
-            await self.send_photo(admin, imgs[0], "Обложка поста — как уйдёт в канал")
+            await self.send_photo(admin, imgs[0], "Обложка поста — как уйдёт в канал",
+                                  raw=True)
         # топ-7 по часам — тем же сообщением не влезает, шлём следом
         for post in posts or []:
             if post.get("top"):
@@ -1583,10 +1689,12 @@ class TelegramBot:
         await self.send(admin, text, kb)
         imgs = [x for x in self._photo_list(img) if x and os.path.isfile(x)]
         if imgs:
-            await self.send_photo(admin, imgs[0], "Обложка поста — как уйдёт в канал")
+            await self.send_photo(admin, imgs[0], "Обложка поста — как уйдёт в канал",
+                                  raw=True)
         for post in posts or []:
             mark = "🇬🇧" if post.get("lang") == "en" else "🇷🇺"
-            await self.send(admin, f"{mark} {post.get('caption') or ''}")
+            # raw=True: это будущая публикация в её собственном языке
+            await self.send(admin, f"{mark} {post.get('caption') or ''}", raw=True)
         log.info("дневной дайджест: черновик отправлен админу %s (%s)", admin, day)
         return True
 
@@ -1669,7 +1777,12 @@ class TelegramBot:
         await self._call("answerCallbackQuery", body)
 
     async def broadcast(self, text: str, actor_id: Optional[int] = None) -> Dict[str, int]:
-        ids = self.store.tg_ids_for_broadcast()
+        # Язык каждого получателя известен заранее: текст переведётся при
+        # отправке (перевод идёт в _call), поэтому переводим не здесь.
+        targets = (self.store.broadcast_targets() if hasattr(self.store, "broadcast_targets")
+                   else [{"tg_id": i} for i in self.store.tg_ids_for_broadcast()])
+        self.warm_langs(targets)
+        ids = [int(t["tg_id"]) for t in targets]
         ok = fail = 0
         for tg_id in ids:
             if await self.send(tg_id, text, parse="HTML"):
@@ -1990,6 +2103,7 @@ class TelegramBot:
         if not chat_id or from_u.get("is_bot"):
             return
         user = self.store.upsert_telegram_user(from_u)
+        self.remember_lang(chat_id, user.get("language"))
         if user["is_banned"]:
             await self.send(chat_id, "Доступ закрыт.")
             return
@@ -2097,6 +2211,9 @@ class TelegramBot:
             if nav == "al":
                 await self.show_menu(chat_id, self._alert_text(user), self._alert_kb(user))
                 return
+            if nav == "lang":
+                await self.show_menu(chat_id, self._lang_text(user), self._lang_kb(user))
+                return
             try:
                 body, kb = self._screen(user, nav)
             except Exception as e:
@@ -2122,6 +2239,8 @@ class TelegramBot:
         elif text.startswith("/mail"):
             body, kb = self._screen(user, "mail")
             await self.show_menu(chat_id, body, kb)
+        elif text.startswith("/lang") or text.startswith("/language"):
+            await self.show_menu(chat_id, self._lang_text(user), self._lang_kb(user))
         elif text.startswith("/stats"):
             await self.show_menu(chat_id, self._stats_text(), self._reply_kb(user))
         elif text.startswith("/status") or text.startswith("/health"):
@@ -2158,6 +2277,7 @@ class TelegramBot:
         chat_id = (msg.get("chat") or {}).get("id") or from_u.get("id")
         message_id = msg.get("message_id")
         user = self.store.upsert_telegram_user(from_u)
+        self.remember_lang(chat_id, user.get("language"))
         if user["is_banned"]:
             await self.answer_cb(cb["id"], "Доступ закрыт")
             return
@@ -2178,6 +2298,15 @@ class TelegramBot:
                                          self._reply_kb(user))
                     return
                 await self._set_channel_role(data.split(":")[-1], chat_id)
+                return
+            if data == "lang":
+                await self.show_menu(chat_id, self._lang_text(user), self._lang_kb(user),
+                                     old_id=message_id)
+                return
+            if data.startswith("setlang:"):
+                code = data.split(":", 1)[1]
+                await self.answer_cb(cb["id"], lang_label(code))
+                await self.set_lang(chat_id, user, code)
                 return
             if data == "ch:swap":
                 if not user.get("is_admin"):
@@ -2304,6 +2433,8 @@ class TelegramBot:
             if data == "help":
                 return self._commands_text(user), self._commands_kb(user)
             return self._home_text(user), self._reply_kb(user)
+        if data == "lang":
+            return self._lang_text(user), self._lang_kb(user)
         if data == "cabinet":
             return self._cabinet_text(user), self._reply_kb(user)
         if data == "mail":
@@ -2674,7 +2805,7 @@ class TelegramBot:
              {"text": "🩺 Биржи", "callback_data": "health"}],
             [{"text": "🛠 Сервисы", "callback_data": "services"},
              {"text": "📰 Лента", "callback_data": "liq"}],
-            [{"text": "🔔 Алерты", "callback_data": "al"},
+            [{"text": SWITCH_TEXT, "callback_data": "lang"},
              {"text": "📣 Канал", "callback_data": "channel"}],
         ]
         email = (user.get("email") or "").strip()
@@ -2919,6 +3050,7 @@ class TelegramBot:
             "/correlations — корреляции валют",
             "/pumps — сторож монет: пампы и дампы",
             "/bot — состояние опроса бота",
+            "/lang — язык бота: RU / ENG",
         ]
         email = (user.get("email") or "").strip()
         if not email or not user.get("email_verified"):
@@ -3193,6 +3325,52 @@ class TelegramBot:
             f"🛠 {self.site_a('панель на сайте', '/admin')}"
             + self.site_footer()
         )
+
+    # --- язык интерфейса -------------------------------------------------
+    def lang_of_user(self, user: Optional[dict]) -> str:
+        """Язык пользователя: выбор кнопкой важнее языка клиента Telegram."""
+        if isinstance(user, dict):
+            return normalize_lang(user.get("language"))
+        return self.lang_of(user)
+
+    def _lang_text(self, user: Optional[dict] = None) -> str:
+        """Экран «🌐 Язык бота».
+
+        Текст всегда русский: при выбранном английском его переведёт тот же
+        слой, что и остальные сообщения (см. bot_i18n), поэтому второй копии
+        экрана на английском не нужно.
+        """
+        cur = self.lang_of_user(user) if isinstance(user, dict) else self.lang_of(user)
+        return ("<b>🌐 Язык бота</b>\n"
+                f"Сейчас выбран {lang_label(cur)}.\n"
+                "Выберите язык — меню, сигналы и сводки будут на нём."
+                + self.site_footer())
+
+    def _lang_kb(self, user: Optional[dict] = None) -> dict:
+        """Две кнопки языка: текущая помечена галочкой."""
+        cur = self.lang_of_user(user) if isinstance(user, dict) else \
+            self.lang_of(user)
+        rows = []
+        for code in ("ru", "en"):
+            info = LANGS[code]
+            mark = "✓ " if code == cur else ""
+            rows.append([{"text": f"{mark}{info['flag']} {info['label']}",
+                          "callback_data": f"setlang:{code}"}])
+        rows.append([{"text": "← В меню", "callback_data": "nav:home"}])
+        return {"inline_keyboard": rows}
+
+    async def set_lang(self, chat_id: int, user: dict, code: str) -> None:
+        """Переключить язык пользователя и подтвердить это на новом языке."""
+        lang = normalize_lang(code)
+        if self.store and user.get("id"):
+            try:
+                fresh = self.store.set_user_language(user["id"], lang)
+                if isinstance(fresh, dict):
+                    user.update(fresh)
+            except Exception as e:                       # noqa: BLE001
+                log.warning("язык не сохранился (%s): %s", lang, e)
+        self.remember_lang(chat_id, lang)
+        await self.show_menu(chat_id, self._lang_text(user), self._reply_kb(user))
 
     def _alert_cfg(self, user: dict) -> dict:
         from alerts import normalize_config

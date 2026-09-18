@@ -246,6 +246,13 @@
     const EXCH_NAMES = {
         dydx: "dYdX", okx: "OKX", htx: "HTX", bitmex: "BitMEX",
     };
+    // Источники, чьи площадки сворачивают торговлю: ноль событий у них —
+    // ожидаемая картина, а не сломанный WS.
+    const SUNSET_NOTES = {
+        bitmex: "Биржа BitMEX закрывается 23 сентября 2026: торговля свёрнута, " +
+                "ликвидаций почти нет — это не поломка источника",
+    };
+
     function exchangeName(e) {
         const k = String(e || "").toLowerCase();
         return EXCH_NAMES[k] || (k.charAt(0).toUpperCase() + k.slice(1));
@@ -4520,8 +4527,24 @@
             cb.dataset.exch = e;
             const name = document.createElement("span");
             name.textContent = exchangeName(e);
-            label.appendChild(cb);
-            label.appendChild(name);
+            const note = sourceNote(e);
+            if (note) {
+                // Биржа сворачивает торговлю (BitMEX закрывается 23.09.2026):
+                // ноль событий по ней — не поломка терминала, и об этом честно
+                // написано прямо в фильтре и подсказкой.
+                label.classList.add("check-row-warn");
+                label.title = note;
+                name.textContent += " ⚠";
+                label.appendChild(cb);
+                label.appendChild(name);
+                const tag = document.createElement("span");
+                tag.className = "check-note";
+                tag.textContent = I18n.t("exch.sunset_tag");
+                label.appendChild(tag);
+            } else {
+                label.appendChild(cb);
+                label.appendChild(name);
+            }
             exchListEl.appendChild(label);
         });
         Array.prototype.forEach.call(exchListEl.querySelectorAll("input[type=checkbox]"), (cb) => {
@@ -4792,6 +4815,16 @@
     };
     function gateRefUrl() { return GATE_REFS[I18n.lang()] || GATE_REFS.en; }
 
+    // Примечание источника из /api/health (например, «биржа закрывается»):
+    // сервер отдаёт его в sunset_note, а если health ещё не приходил — берём
+    // из заранее известного списка, чтобы фильтр не молчал.
+    function sourceNote(name) {
+        const k = String(name || "").toLowerCase();
+        const s = state.lastHealth && state.lastHealth.sources && state.lastHealth.sources[k];
+        if (s && s.sunset_note) return s.sunset_note;
+        return SUNSET_NOTES[k] || "";
+    }
+
     function renderHealth(health) {
         if (!health || !health.sources) return;
         state.lastHealth = health;
@@ -4812,9 +4845,11 @@
             let label = name;
             if (name.indexOf("prices") === 0) label = I18n.t("health.prices");
             else if (name.indexOf("ticks") === 0) label = I18n.t("health.ticks");
-            const title = s.connected
+            let title = s.connected
                 ? I18n.t("health.connected", { n: s.events })
                 : I18n.t("health.noconn", { err: s.last_error || "—" });
+            const note = sourceNote(name);
+            if (note) title += " · " + note;
             parts.push('<span class="exch-chip ' + cls + '" title="' +
                 title.replace(/"/g, "&quot;") + '"><span>' + label + "</span>" +
                 (s.connected ? "" : '<span>✕</span>') + "</span>");

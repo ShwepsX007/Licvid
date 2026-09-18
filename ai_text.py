@@ -14,6 +14,14 @@ OI/CVD), она уходит модели, а ответ проверяется:
     LIQSCOPE_AI_DEEPSEEK_KEY     ключ DeepSeek (API платный, но очень дешёвый)
     LIQSCOPE_AI_KEY, LIQSCOPE_AI_URL, LIQSCOPE_AI_MODEL
                                  свой OpenAI-совместимый сервис (или локальный)
+    LIQSCOPE_AI_GEMINI_KEYS, LIQSCOPE_AI_GROQ_KEYS, LIQSCOPE_AI_OPENROUTER_KEYS,
+    LIQSCOPE_AI_DEEPSEEK_KEYS, LIQSCOPE_AI_KEYS
+                                 НЕСКОЛЬКО ключей на сервис (через запятую или
+                                 точку с запятой). Когда у ключа кончился лимит
+                                 (429, quota, rate limit), сервис отвечает
+                                 отказом — работа переходит на следующий ключ,
+                                 а потом на следующий сервис. Так лимит одного
+                                 ключа не останавливает шапки и дайджесты
     LIQSCOPE_AI_ORDER            порядок сервисов, по умолчанию
                                  gemini,groq,openrouter,deepseek,custom
     LIQSCOPE_AI_<СЕРВИС>_MODEL   своя модель у сервиса (по умолчанию берём
@@ -377,33 +385,97 @@ def build_prompt(snap: dict, recent: Optional[List[str]] = None,
 class Provider:
     name: str
     kind: str                    # "gemini" | "openai"
-    key: str
+    key: str                     # текущий ключ (может меняться при лимите)
     url: str
     model: str = ""
     headers: Dict[str, str] = field(default_factory=dict)
     models_url: str = ""                 # где спросить список моделей
     explicit_model: bool = False         # модель задана админом вручную
+    keys: List[str] = field(default_factory=list)   # все ключи сервиса по порядку
+    key_index: int = 0                   # на каком ключе работаем сейчас
 
     def public(self) -> Dict[str, str]:
-        return {"name": self.name, "model": self.model}
+        return {"name": self.name, "model": self.model,
+                "keys": str(len(self.keys) or 1),
+                "key_index": str(self.key_index + 1)}
+
+    def next_key(self) -> Optional[str]:
+        """Следующий ключ сервиса: лимит на текущем — берём неиспробованный.
+
+        Возвращает ключ или None, если ключи кончились (тогда вызывающий идёт
+        к другому сервису). Счётчик ключа крутится по кольцу: если ключи были
+        исчерпаны, но лимиты обновились, сервис снова оживает.
+        """
+        if len(self.keys) < 2:
+            return None
+        self.key_index = (self.key_index + 1) % len(self.keys)
+        self.key = self.keys[self.key_index]
+        return self.key
 
 
 def _env(name: str, default: str = "") -> str:
     return (os.getenv(name) or default).strip()
 
 
+def _split_keys(raw: str) -> List[str]:
+    """«ключ1, ключ2 ; ключ3» → список ключей без пустых."""
+    parts = re.split(r"[,;\s]+", raw or "")
+    return [p for p in (x.strip() for x in parts) if p]
+
+
+def keys_for(name: str, key_env: str) -> List[str]:
+    """Ключи сервиса по порядку: LIQSCOPE_AI_<СЕРВИС>_KEYS, затем по одному.
+
+    Несколько ключей нужны, когда у одного кончился лимит: запрос повторяется
+    со следующим ключом того же сервиса, а потом уже идёт следующий сервис.
+    Дубли (один и тот же ключ в списке и в старом имени) не повторяем.
+    """
+    out = _split_keys(_env(f"LIQSCOPE_AI_{name.upper()}_KEYS"))
+    single = _env(key_env)
+    if single:
+        out.append(single)
+    seen: set = set()
+    uniq: List[str] = []
+    for k in out:
+        if k not in seen:
+            seen.add(k)
+            uniq.append(k)
+    return uniq
+
+
+#: Лимит одного ключа исчерпан: сервис отвечает 429/quota, но ключ рабочий.
+#: Такой провайдер не «мёртв» — просто на этом ключе работа кончилась.
+def quota_error(err: str) -> bool:
+    text = str(err or "")
+    return bool(re.search(
+        r"HTTP (429|402)\b|rate[_ ]?limit|quota|resource[_ ]?exhausted|"
+        r"insufficient[_ ]?(quota|balance|credits)|too many requests|"
+        r"limit exceeded|exceeded your current quota",
+        text, re.I))
+
+
+def auth_error(err: str) -> bool:
+    """Ключ не принят вовсе — его дальше пробовать бессмысленно."""
+    text = str(err or "")
+    if quota_error(text) or model_error(text):
+        return False
+    return bool(re.search(r"HTTP (401|403)\b|invalid[_ ]?api[_ ]?key|"
+                          r"unauthorized|api[_ ]?key[_ ]?not[_ ]?valid", text, re.I))
+
+
 def _provider(name: str, default_model: str, key_env: str,
               model_env: str) -> Optional[Provider]:
-    key = _env(key_env)
-    if not key:
+    keys = keys_for(name, key_env)
+    if not keys:
         return None
+    key = keys[0]
     explicit = bool(_env(model_env) or _env("LIQSCOPE_AI_MODEL"))
     model = _env(model_env) or _env("LIQSCOPE_AI_MODEL") or default_model
     if name == "gemini":
         url = _env("LIQSCOPE_AI_GEMINI_URL",
                    "https://generativelanguage.googleapis.com/v1beta/models")
         return Provider(name=name, kind="gemini", key=key, url=url, model=model,
-                        models_url=url, explicit_model=explicit)
+                        models_url=url, explicit_model=explicit, keys=keys)
     urls = {
         "groq": "https://api.groq.com/openai/v1/chat/completions",
         "openrouter": "https://openrouter.ai/api/v1/chat/completions",
@@ -415,17 +487,21 @@ def _provider(name: str, default_model: str, key_env: str,
     url = _env(f"LIQSCOPE_AI_{name.upper()}_URL", urls.get(name, ""))
     return Provider(name=name, kind="openai", key=key, url=url, model=model,
                     models_url=url.rsplit("/chat/completions", 1)[0] + "/models",
-                    headers=headers, explicit_model=explicit)
+                    headers=headers, explicit_model=explicit, keys=keys)
 
 
 def custom_provider() -> Optional[Provider]:
-    """Любой OpenAI-совместимый сервис: LIQSCOPE_AI_URL + LIQSCOPE_AI_KEY."""
-    url, key = _env("LIQSCOPE_AI_URL"), _env("LIQSCOPE_AI_KEY")
-    if not (url and key):
+    """Любой OpenAI-совместимый сервис: LIQSCOPE_AI_URL + LIQSCOPE_AI_KEY.
+
+    Ключей тоже может быть несколько: LIQSCOPE_AI_KEYS (или LIQSCOPE_AI_KEY).
+    """
+    url = _env("LIQSCOPE_AI_URL")
+    keys = _split_keys(_env("LIQSCOPE_AI_KEYS")) or _split_keys(_env("LIQSCOPE_AI_KEY"))
+    if not (url and keys):
         return None
-    return Provider(name="custom", kind="openai", key=key, url=url,
+    return Provider(name="custom", kind="openai", key=keys[0], url=url,
                     model=_env("LIQSCOPE_AI_MODEL") or "gpt-4o-mini",
-                    explicit_model=bool(_env("LIQSCOPE_AI_MODEL")))
+                    explicit_model=bool(_env("LIQSCOPE_AI_MODEL")), keys=keys)
 
 
 def build_providers() -> List[Provider]:
@@ -790,7 +866,9 @@ class AiWriter:
         self.temperature = float(temperature)
         self.state: Dict[str, Dict[str, Any]] = {
             p.name: {"name": p.name, "model": p.model, "ok": False,
-                     "reason": "не пробовали", "dead": False, "ms": 0}
+                     "reason": "не пробовали", "dead": False, "ms": 0,
+                     "keys": len(p.keys) or 1, "key_index": p.key_index + 1,
+                     "keys_used": 0}
             for p in self.providers}
         self.last: Dict[str, Any] = {"provider": "", "ok": False, "reason": "",
                                      "ms": 0, "ts": 0.0}
@@ -807,6 +885,12 @@ class AiWriter:
         return bool(self.providers)
 
     def status(self) -> Dict[str, Any]:
+        # В состояние добавляем счётчики ключей: сколько их у сервиса и на
+        # каком работаем — это видно в админке.
+        for p in self.providers:
+            st = self.state.setdefault(p.name, {})
+            st["keys"] = len(p.keys) or 1
+            st["key_index"] = p.key_index + 1
         return {
             "enabled": self.enabled,
             "providers": [dict(v) for v in self.state.values()],
@@ -843,6 +927,28 @@ class AiWriter:
         """Модель устарела — спрашиваем у сервиса актуальную и пробуем снова."""
         return self._switch_model(p, set()) is not None
 
+    def _switch_key(self, p: Provider, tried: set) -> Optional[str]:
+        """Следующий ключ сервиса, когда на текущем кончился лимит.
+
+        Перебираем все ключи по кольцу (начиная со следующего), но каждый — не
+        больше одного раза за запрос: ключ, который только что ответил «лимит»,
+        второй раз спрашивать бессмысленно. Возвращаем рабочий ключ или None.
+        """
+        st = self.state.setdefault(p.name, {})
+        tried.add(p.key)                 # текущий ключ уже ответил «лимит»
+        remaining = [k for k in p.keys if k not in tried]
+        if not remaining:
+            return None
+        chosen = remaining[0]
+        p.key = chosen
+        p.key_index = p.keys.index(chosen)
+        tried.add(chosen)
+        st["key_index"] = p.key_index + 1
+        st["keys_used"] = min(len(p.keys), int(st.get("keys_used", 0)) + 1)
+        log.warning("ИИ (%s): лимит ключа #%d — перехожу на ключ #%d из %d",
+                    p.name, len(tried), p.key_index + 1, len(p.keys))
+        return chosen
+
     def _attempt(self, p: Provider, prompt: str, lang: str = "ru",
                  tokens: Optional[int] = None,
                  system: Optional[str] = None) -> Optional[str]:
@@ -872,6 +978,7 @@ class AiWriter:
                 continue
             started = time.time()
             tried: set = set()
+            tried_keys: set = set()
             repeats = 0        # сколько раз переспрашивали из-за повтора
             try:
                 while True:
@@ -926,6 +1033,10 @@ class AiWriter:
                                 log.info("ИИ (%s): пустой ответ — повтор с лимитом %s",
                                          p.name, self.max_tokens + self._extra[p.name])
                                 continue
+                        if quota_error(str(e)) and self._switch_key(p, tried_keys):
+                            # Лимит одного ключа — не повод терять сервис:
+                            # тот же запрос уходит со следующего ключа.
+                            continue
                         raise
                 st.update({"ok": True, "reason": "",
                            "ms": int((time.time() - started) * 1000)})
@@ -941,8 +1052,7 @@ class AiWriter:
                            "ms": int((time.time() - started) * 1000)})
                 # мёртвым сервис считаем только при неверном ключе: модели
                 # (404/403 в проекте) уже перебраны выше, лимиты и сеть — временное
-                if re.search(r"HTTP 401|invalid api key|unauthorized", str(e), re.I) \
-                        and not model_error(str(e)):
+                if auth_error(str(e)):
                     st["dead"] = True
                 self.fails += 1
                 self.last = {"provider": p.name, "ok": False, "reason": reason[:220],
@@ -972,6 +1082,7 @@ class AiWriter:
                 continue
             started = time.time()
             tried: set = set()
+            tried_keys: set = set()
             tokens = max(700, self.max_tokens * 3)
             try:
                 while True:
@@ -1004,6 +1115,10 @@ class AiWriter:
                             log.info("ИИ (%s): пустой рассказ — повтор с лимитом %s",
                                      p.name, tokens)
                             continue
+                        if quota_error(str(e)) and self._switch_key(p, tried_keys):
+                            # Ключ упёрся в лимит — рассказ досочинит следующий
+                            # ключ того же сервиса (или следующий сервис в цепи).
+                            continue
                         raise
                 st.update({"ok": True, "reason": "",
                            "ms": int((time.time() - started) * 1000)})
@@ -1018,8 +1133,7 @@ class AiWriter:
                 reason = str(e)[:160] + (f" — {hint}" if hint else "")
                 st.update({"ok": False, "reason": reason[:220],
                            "ms": int((time.time() - started) * 1000)})
-                if re.search(r"HTTP 401|invalid api key|unauthorized", str(e), re.I) \
-                        and not model_error(str(e)):
+                if auth_error(str(e)):
                     st["dead"] = True
                 self.fails += 1
                 self.last = {"provider": p.name, "ok": False, "reason": reason[:220],

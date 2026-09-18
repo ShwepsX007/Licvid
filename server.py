@@ -1098,6 +1098,7 @@ async def pump_notify():
             continue
         for hit in fresh[:3]:
             lang = w.get("lang") or "ru"
+            tg_bot.remember_lang(tg_id, lang)
             await tg_bot.send(
                 tg_id, pump_signal_html(hit, lang),
                 markup={"inline_keyboard": [[
@@ -1129,7 +1130,10 @@ async def alert_loop():
             await alerts_oi_warmup()
             market = alerts_market_snapshot()
             now = market["now"]
-            for sub in account_store.list_alert_subscribers():
+            subs = account_store.list_alert_subscribers()
+            # Язык подписчика — до отправки: сигнал уходит на его языке
+            tg_bot.warm_langs(subs)
+            for sub in subs:
                 cfg = normalize_config(sub.get("config"))
                 if not cfg.get("enabled"):
                     continue

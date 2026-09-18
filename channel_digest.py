@@ -728,10 +728,12 @@ def hour_line(hour: dict, lang: str = "ru") -> str:
 
 
 def hour_leader_line(hour: dict, lang: str = "ru",
-                     skip_money: Optional[str] = None) -> str:
+                     skip_money: Optional[str] = None,
+                     short: bool = False) -> str:
     """Кто задавал час: лидер по числу событий и, если это другой, по деньгам.
 
         🏆 Лидер часа: ETH · 114 событий · $5.6M · 💰 BTC $8.3M
+        🏆 ETH · 114 событий · $5.6M              (short=True)
 
     Число событий и деньги — разные истории: одна монета горит одной крупной
     ликвидацией, другая — сотней мелких. Поэтому после лидера по событиям
@@ -739,13 +741,16 @@ def hour_leader_line(hour: dict, lang: str = "ru",
 
     ``skip_money`` — монета, уже названная лидером окна: её сумма стоит строкой
     выше, и повторять её в каждом часе незачем (в подписи 1024 символа).
+    ``short`` — убрать слова «Лидер часа»: их четыре штуки подряд, а место в
+    подписи считаное. Смысл строки держит 🏆.
     """
     lead = _hour_leaders(hour)
     top = lead.get("count") or lead.get("vol") or {}
     sym = top.get("symbol")
     if not sym:
         return ""
-    bits = [f"🏆 {lbl(lang, 'lead_hour')}: <b>{coin(sym)}</b>"]
+    head = "🏆 " if short else f"🏆 {lbl(lang, 'lead_hour')}: "
+    bits = [f"{head}<b>{coin(sym)}</b>"]
     if top.get("count"):
         bits.append(events_txt(top["count"], lang))
     if top.get("usd"):
@@ -761,14 +766,16 @@ def hour_leader_line(hour: dict, lang: str = "ru",
 
 
 def hour_block(hour: dict, lang: str = "ru",
-               skip_money: Optional[str] = None) -> str:
+               skip_money: Optional[str] = None, short: bool = False) -> str:
     """Блок часа в посте: строка цифр и под ней строка лидера.
 
-    Полный вид поста. Если четыре таких блока в подпись не влезают, часы
-    уходят короткими строками без лидеров (см. ``short_hour_block``).
+    Полный вид поста. ``short`` — лидер без слов «Лидер часа» (см.
+    ``hour_leader_line``); совсем без лидеров часы остаются, только если и
+    такой вид не влезает — у русского канала текст длиннее, и раньше он терял
+    лидеров целиком.
     """
     parts = [hour_line(hour, lang)]
-    lead = hour_leader_line(hour, lang, skip_money=skip_money)
+    lead = hour_leader_line(hour, lang, skip_money=skip_money, short=short)
     if lead:
         parts.append(lead)
     return "\n".join(p for p in parts if p)
@@ -1233,36 +1240,44 @@ def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = N
         return len(text) <= CAPTION_LIMIT
 
     parts: List[str] = [head, _total_line(snap, lang)]
-    # Строки окна в порядке поста: лидер по деньгам (и по событиям, если он
-    # другой), CVD окна, кто дал перекос, чей сдвинулся открытый интерес.
+    # Монета, уже названная лидером окна: в часах её сумма не повторяется.
+    win_money = (_leader_of(board, "vol") or {}).get("symbol")
+    # Виды поста от самого подробного к самому скромному: подробная строка
+    # лидера часа → короткая (без слов «Лидер часа») → часы без лидеров.
+    # Лидер часа важнее подробностей окна: раньше лестница выбирала вид часов
+    # до того, как считала строки окна, и русский пост (текст длиннее) терял
+    # лидеров часа целиком, пока английский их показывал.
+    blocks_by_style = {
+        "verbose": [hour_block(x, lang, skip_money=win_money) for x in hours],
+        "short": [hour_block(x, lang, skip_money=win_money, short=True)
+                  for x in hours],
+        "plain": [short_hour_block(x, lang) for x in hours],
+    }
     win = [_window_leader_line(board, lang), _flow_line(board, lang),
            _cvd_leader_line(board, lang), _oi_leader_line(board, lang)]
-    # Если подпись не влезает, строки окна уходят по одной, и первой — сдвиг
-    # OI: он дублирует процент OI в каждом часе. Последней уходит строка CVD
-    # окна: без неё пост теряет вторую половину сводки.
-    drop_order = (3, 2, 0, 1)
-    variants: List[List[str]] = []
-    for k in range(len(drop_order) + 1):
-        killed = set(drop_order[:k])
-        variants.append([x for i, x in enumerate(win) if x and i not in killed])
-    # Лестница видов. Сначала пробуем самый подробный вид часов — строка цифр
-    # плюс строка лидера часа; если он не влезает даже с пустым набором строк
-    # окна, часы сжимаются до одной строки. Число событий в лидере часа
-    # дописывает сам пост: без него час отвечает только «на сколько горело».
-    # Монета, уже названная лидером окна: в часах её сумма не повторяется
-    win_money = (_leader_of(board, "vol") or {}).get("symbol")
-    full_blocks = [hour_block(x, lang, skip_money=win_money) for x in hours]
-    short_blocks = [short_hour_block(x, lang) for x in hours]
-    picked: List[str] = []
-    picked_blocks = short_blocks
-    found = False
-    for blocks in (full_blocks, short_blocks):
-        for variant in variants:
-            if blocks and fits(parts + variant + blocks):
-                picked, picked_blocks, found = variant, blocks, True
-                break
-        if found:
+    # Порядок по важности: сначала строка CVD окна (вторая половина сводки),
+    # потом лидер окна, потом перекос CVD и сдвиг OI — он дублирует процент OI
+    # из каждого часа. В посте они всё равно стоят в своём порядке (``win``).
+    fill_order = (1, 0, 2, 3)
+
+    picked_style = "plain"
+    picked_blocks: List[str] = blocks_by_style["plain"]
+    for style in ("verbose", "short", "plain"):
+        blocks = blocks_by_style[style]
+        if blocks and fits(parts + blocks):
+            picked_style, picked_blocks = style, blocks
             break
+    # Часы уже выбраны, и место под них занято: строки окна добавляются по
+    # одной, пока влезают, — и всегда в порядке поста.
+    kept: List[int] = []
+    for idx in fill_order:
+        line = win[idx]
+        if not line:
+            continue
+        trial = sorted(kept + [idx])
+        if fits(parts + [win[i] for i in trial] + picked_blocks):
+            kept = trial
+    picked = [win[i] for i in kept]
     parts.extend(picked)
     added = 0
     for block in picked_blocks:

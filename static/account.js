@@ -1136,6 +1136,44 @@
         }).join("");
     }
 
+    // Что означает цвет клетки и что в неё смотреть: собирается из подписи
+    // метрики, знака коэффициента и самих монет. Раньше клетки карты были
+    // просто цветными квадратами без единого слова — по наведению ничего
+    // не объяснялось.
+    var COR_COEF_TEXT = "Коэффициент Пирсона по часовым точкам: +1 — метрика " +
+        "движется синхронно, 0 — связи нет, −1 — в противофазе.";
+
+    function corPairExplanation(a, b, r) {
+        var metric = (corData && corData.metric) || corCfg.metric;
+        var what = corMetricHint(metric);
+        var ar = Math.abs(r), side = r >= 0 ? "в одну сторону" : "в противофазе";
+        var verdict = ar >= 0.6 ? "сильная связь" : ar >= 0.4 ? "заметная связь"
+            : ar >= 0.2 ? "слабая связь" : "связи почти нет";
+        return corShort(a) + " ↔ " + corShort(b) + ": r = " + r.toFixed(2) +
+            " · " + verdict + " (" + side + "). В клетке — как вела себя метрика" +
+            " «" + what + "» у этих двух монет за " + corWinLabel() +
+            ". " + COR_COEF_TEXT;
+    }
+
+    function corMetricHint(metric) {
+        var list = (corData && corData.metrics) || [];
+        for (var i = 0; i < list.length; i++) {
+            var m = list[i];
+            var k = (typeof m === "object") ? (m.key || m.metric) : m;
+            if (String(k) === String(metric)) {
+                return (typeof m === "object" && m.hint) || corLabelOf(metric);
+            }
+        }
+        return COR_HINT[String(metric)] || corLabelOf(metric);
+    }
+
+    function corWinLabel() {
+        if (corData && (corData.window_label || corData.window)) {
+            return corData.window_label || corData.window;
+        }
+        return String(corCfg.window || "");
+    }
+
     function corHeatColor(r) {
         var a = Math.max(0, Math.min(1, Math.abs(Number(r) || 0)));
         var alpha = (0.06 + 0.7 * a).toFixed(2);
@@ -1163,7 +1201,13 @@
                     return;
                 }
                 var r = Number(v);
-                html += '<td class="cor-heat-cell' + (same ? " diag" : "") + '" style="' +
+                var tip = same
+                    ? corShort(a) + " — сама с собой: r = 1, диагональ карты"
+                    : corPairExplanation(a, b, r);
+                html += '<td class="cor-heat-cell' + (same ? " diag" : "") +
+                    '" data-corcell="' + esc(corShort(a) + "|" + corShort(b) + "|" +
+                        (same ? "" : r.toFixed(2))) +
+                    '" title="' + esc(tip) + '" style="' +
                     (same ? "" : corHeatColor(r)) + '">' +
                     (same ? "1" : r.toFixed(2)) + "</td>";
             });
@@ -1227,6 +1271,12 @@
             '<div class="cor-hist" id="cor-hist">' + corHist(d.metric) + "</div></div>" +
             '<div class="al-label">Тепловая карта · ' + esc(corMetricTitle(d, d.metric)) +
             " · " + esc(winLabel) + "</div>" +
+            '<div class="cor-heat-note" id="cor-heat-note">Что это: ' +
+            esc(corMetricTitle(d, d.metric)).toLowerCase() + " — " +
+            esc(corMetricHint(d.metric)) +
+            ". Клетка — пара монет, число — коэффициент за " + esc(winLabel) +
+            " (зелёный: вместе, красный: наоборот). Наведите на клетку или " +
+            "нажмите её: покажу, что именно показывает эта цифра.</div>" +
             '<div id="cor-heat-box">' + corHeat(d) + "</div>" +
             '<div class="al-label">Самые сильные связи</div>' +
             '<div class="cor-pairs" id="cor-pairs">' + corPairsList() + "</div>" +
@@ -1310,10 +1360,23 @@
         board.addEventListener("click", function (e) {
             var t = e.target;
             while (t && t !== board && !(t.getAttribute && (t.getAttribute("data-corwin") ||
-                t.getAttribute("data-cormet") || t.getAttribute("data-corpair")))) {
+                t.getAttribute("data-cormet") || t.getAttribute("data-corpair") ||
+                t.getAttribute("data-corcell")))) {
                 t = t.parentNode;
             }
             if (!t || t === board) return;
+            var cell = t.getAttribute("data-corcell");
+            if (cell !== null && cell !== undefined && cell !== "") {
+                // Клик по клетке тепловой карты: то же объяснение, что и в
+                // подсказке, но ещё и текстом под картой — на телефоне
+                // наведения нет, а вопрос «что это за цифра» остаётся.
+                var parts = cell.split("|");
+                var line = parts[2]
+                    ? corPairExplanation(parts[0] + "_USDT", parts[1] + "_USDT", Number(parts[2]))
+                    : parts[0] + " — сама с собой: r = 1, диагональ карты";
+                corSetStatus(line, true);
+                return;
+            }
             var win = t.getAttribute("data-corwin");
             if (win) {
                 corCfg.window = win;
@@ -2017,7 +2080,10 @@
         var ai = d.ai || {};
         botSet("bot-ai-line", ai.enabled
             ? ("Шапка постов: включена · " + ((ai.providers || []).map(function (p) {
-                return p.name;
+                // Ключей может быть несколько: видно, на каком работаем и
+                // сколько их у сервиса — при лимите запрос уходит на следующий.
+                var n = Number(p.keys || 1);
+                return p.name + (n > 1 ? " (" + n + " кл., №" + (p.key_index || 1) + ")" : "");
             }).join(" → ") || "цепочка не готова") +
                (ai.last && ai.last.provider ? " · последняя: " + ai.last.provider +
                    (ai.last.ms ? " · " + ai.last.ms + " мс" : "") : ""))

@@ -563,8 +563,61 @@ def parse_htx_msg(payload: dict) -> List[dict]:
     return out
 
 
+# Микроконтракт линейных контрактов BitMEX (XBTUSDT, ETHUSDT…): 1 контракт =
+# 1e-6 базовой монеты. Нужен только как запасной путь, когда метаданные
+# инструментов не загрузились (см. _bitmex_liquidation_multiplier).
+BITMEX_MICRO = 1e-6
+
+
+def bitmex_is_inverse(raw_symbol: str) -> bool:
+    """Инверсный ли контракт — по имени, когда метаданных нет.
+
+    «XBTUSD», «ETHUSD», «SOLUSD» — инверсные (контракт номинирован в USD),
+    «XBTUSDT»/«ETHUSDC» — линейные. Имена подсказку дают всегда, поэтому
+    отсутствие метаданных не повод молчать: раньше на этом шаге события
+    отбрасывались, и биржа выглядела «зависшей».
+    """
+    s = str(raw_symbol or "").upper().split("_")[0]
+    if not s:
+        return False
+    for quote in ("USDT", "USDC"):
+        if s.endswith(quote) and len(s) > len(quote):
+            return False
+    return True
+
+
+def bitmex_liquidation_multiplier(raw_symbol: str,
+                                  instruments: Optional[Dict[str, dict]] = None,
+                                  stats: Optional[dict] = None) -> tuple:
+    """Как перевести контракты ликвидации в монеты: (inverse, multiplier).
+
+    Сначала метаданные инструментов; если их нет — по имени: инверсный контракт
+    не требует множителя вовсе, линейному подставляем микроконтракт (1e-6) как
+    задокументированный запасной путь. Каждый такой случай считаем в ``stats``:
+    в /api/health видно, работает ли биржа на метаданных или на догадке.
+    """
+    meta = (instruments or {}).get(raw_symbol) or {}
+    if meta:
+        inverse = bool(meta.get("inverse"))
+        try:
+            mult = float(meta.get("multiplier") or 0)
+        except (TypeError, ValueError):
+            mult = 0.0
+        if inverse or mult > 0:
+            return inverse, mult
+    inverse = bitmex_is_inverse(raw_symbol)
+    if inverse:
+        if stats is not None:
+            stats["no_meta_inverse"] = stats.get("no_meta_inverse", 0) + 1
+        return True, 0.0
+    if stats is not None:
+        stats["no_meta_micro"] = stats.get("no_meta_micro", 0) + 1
+    return False, BITMEX_MICRO
+
+
 def parse_bitmex_msg(payload: dict,
-                     instruments: Optional[Dict[str, dict]] = None) -> List[dict]:
+                     instruments: Optional[Dict[str, dict]] = None,
+                     stats: Optional[dict] = None) -> List[dict]:
     """BitMEX: table=liquidation.
 
     Берём только action=insert — это новая заявка на ликвидацию. Дальнейшие
@@ -572,6 +625,8 @@ def parse_bitmex_msg(payload: dict,
     иначе объём задвоится.
     Размер в контрактах: у инверсных (XBTUSD) 1 контракт = 1 USD,
     у линейных пересчитываем через underlyingToPositionMultiplier.
+    ``stats`` — счётчики для /api/health: сколько строк разобрано и почему
+    часть отброшена (биржа закрывается — в ленте видно, жива она или нет).
     """
     if not isinstance(payload, dict):
         return []
@@ -585,17 +640,18 @@ def parse_bitmex_msg(payload: dict,
             price = float(it.get("price") or 0)
             contracts = float(it.get("leavesQty") or 0)
         except (TypeError, ValueError):
+            if stats is not None:
+                stats["bad_row"] = stats.get("bad_row", 0) + 1
             continue
         if price <= 0 or contracts <= 0:
+            if stats is not None:
+                stats["empty_row"] = stats.get("empty_row", 0) + 1
             continue
-        meta = instruments.get(raw_symbol) or {}
-        if meta.get("inverse"):
+        inverse, mult = bitmex_liquidation_multiplier(raw_symbol, instruments, stats)
+        if inverse:
             qty = contracts / price          # контракты номинированы в USD
             usd = contracts
         else:
-            mult = meta.get("multiplier") or 0
-            if mult <= 0:
-                continue                     # без метаданных не гадаем
             qty = contracts * mult
             usd = qty * price
         out.append({
@@ -605,6 +661,8 @@ def parse_bitmex_msg(payload: dict,
             "price": price, "qty": qty, "usd": usd,
             "ts": time.time(),
         })
+        if stats is not None:
+            stats["rows"] = stats.get("rows", 0) + 1
     return out
 
 
@@ -1226,6 +1284,12 @@ class SourceStatus:
         return d
 
 
+SUNSET_NOTES = {
+    "bitmex": "биржа закрывается 23 сентября 2026: торговля свёрнута, "
+              "ликвидаций почти нет — это не поломка источника",
+}
+
+
 # ----------------------------------------------------------------------------
 # Основной класс
 # ----------------------------------------------------------------------------
@@ -1493,6 +1557,16 @@ class MarketFeed:
         except ValueError:
             return 1800.0
 
+    # Биржи, которые сворачивают торговлю: поток ликвидаций у них вянет сам по
+    # себе, и переподключение тут ничего не лечит. BitMEX закрывается
+    # 23 сентября 2026 (с 26 августа — «только закрытие позиций», новые не
+    # открываются): ликвидаций у него теперь почти нет, и сторож, считавший
+    # тишину поломкой, бесконечно дёргал биржу. Цифра в подсказке говорит не
+    # «сломалось», а «у биржи больше нечего слушать».
+    SUNSET_SOURCES = {
+        "bitmex": "биржа закрывается 23 сентября 2026, торговля свёрнута",
+    }
+
     def silent_sources(self) -> List[str]:
         """Подключённые источники, от которых давно нет событий."""
         limit = self.silence_limit()
@@ -1500,6 +1574,11 @@ class MarketFeed:
         out = []
         for name, st in self.status.items():
             if name in ("prices", "ticks") or not st.enabled or not st.connected:
+                continue
+            if name in self.SUNSET_SOURCES:
+                # Переподключение тут ничего не лечит: ликвидаций у биржи
+                # больше нет, и «пнуть» её значит просто дёргать закрывающийся
+                # сервис. Причина нуля событий остаётся в health (sunset_note).
                 continue
             since = (now - st.last_event_ts) if st.last_event_ts else (now - st.connected_since)
             if since >= limit:
@@ -2480,12 +2559,17 @@ class MarketFeed:
 
     # -- BitMEX ----------------------------------------------------------------
     async def _bitmex_load_instruments(self):
-        """Множители контрактов: без них не перевести контракты в монеты."""
+        """Множители контрактов: без них не перевести контракты в монеты.
+
+        Список тянем повторно, если первая попытка не удалась (биржа отвечает
+        не всегда), а сам разбор умеет работать и без метаданных.
+        """
         try:
             rows = await _get_json(self._session,
                                    f"{BITMEX_REST}/instrument/active", timeout=10)
         except Exception as e:
             log.warning("[bitmex] не удалось загрузить инструменты: %s", e)
+            self.status["bitmex"].extra["instruments_error"] = f"{type(e).__name__}: {e}"[:200]
             return
         meta = {}
         for r in rows or []:
@@ -2499,19 +2583,43 @@ class MarketFeed:
             }
         if meta:
             self.bitmex_instruments = meta
+            self.status["bitmex"].extra["instruments"] = len(meta)
+            self.status["bitmex"].extra.pop("instruments_error", None)
             log.info("[bitmex] загружено инструментов: %d", len(meta))
 
     async def _bitmex_liquidations(self):
         st = self.status["bitmex"]
         if not self.bitmex_instruments:
             await self._bitmex_load_instruments()
+        # Метаданные инструментов нужны только линейным контрактам, но и без
+        # них лента жива (см. bitmex_liquidation_multiplier): разбор больше не
+        # молчит, а счётчики из ``stats`` уходят в /api/health.
+        stats: Dict[str, Any] = st.extra.setdefault("parse", {})
+        next_meta = time.time() + 300.0
         async with self._session.ws_connect(BITMEX_WS, heartbeat=20, timeout=25) as ws:
             st.up()
-            log.info("[bitmex] подписка на таблицу liquidation")
+            # Подписка есть и в адресе (?subscribe=liquidation), но её же
+            # отправляем и сообщением: так сервис отвечает success/error, и в
+            # журнале видно, встала ли подписка, — «0 событий» перестаёт быть
+            # загадкой (у BitMEX лимит на подписки отвечает 429 с retryAfter).
+            try:
+                await ws.send_json({"op": "subscribe", "args": ["liquidation"]})
+            except Exception as e:                       # noqa: BLE001
+                log.debug("[bitmex] подписка сообщением не ушла: %s", e)
+            log.info("[bitmex] подписка на таблицу liquidation "
+                     "(инструментов: %d)", len(self.bitmex_instruments))
             while not self._stop.is_set():
                 try:
                     msg = await ws.receive(timeout=5.0)
                 except asyncio.TimeoutError:
+                    msg = None
+                if msg is None:
+                    # Тихо на линии — не беда, но если метаданные так и не
+                    # пришли, пробуем ещё: без них линейные контракты считаются
+                    # по микроконтракту, а это уже догадка.
+                    if not self.bitmex_instruments and time.time() >= next_meta:
+                        await self._bitmex_load_instruments()
+                        next_meta = time.time() + 300.0
                     continue
                 if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING,
                                 aiohttp.WSMsgType.ERROR):
@@ -2524,9 +2632,16 @@ class MarketFeed:
                     continue
                 if payload.get("error"):
                     st.last_error = str(payload["error"])[:200]
+                    st.extra["subscribe_error"] = st.last_error
                     log.warning("[bitmex] ошибка: %s", st.last_error)
                     continue
-                for ev in parse_bitmex_msg(payload, self.bitmex_instruments):
+                if payload.get("success") and payload.get("subscribe"):
+                    log.info("[bitmex] подписка подтверждена: %s", payload["subscribe"])
+                    continue
+                events = parse_bitmex_msg(payload, self.bitmex_instruments, stats)
+                st.extra["instruments"] = len(self.bitmex_instruments)
+                st.extra["parse"] = stats
+                for ev in events:
                     await self._emit("bitmex", ev["symbol"], ev["side"],
                                      ev["price"], ev["qty"], ev["ts"], usd=ev.get("usd"))
 
@@ -4388,6 +4503,11 @@ class MarketFeed:
             since = d.get("seconds_since_event")
             d["silent_sec"] = since
             d["stale"] = k in silent
+            note = SUNSET_NOTES.get(k)
+            if note:
+                # «Тихо» у свёрнутой биржи — это не поломка: пишем в health,
+                # чтобы по нулям в ленте не искали сломанный WS.
+                d["sunset_note"] = note
             if k in self._engines:
                 task = self._engine_tasks.get(k)
                 d["supervisor_alive"] = bool(task is not None and not task.done())

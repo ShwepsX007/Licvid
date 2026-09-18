@@ -236,9 +236,13 @@ def parse_bitmex_oi(payload, meta: Optional[dict],
     try:
         mult = float(mult)
     except (TypeError, ValueError):
-        return None
+        mult = 0.0
     if mult <= 0:
-        return None
+        # Метаданных нет (список инструментов не загрузился) — не молчим:
+        # у линейных контрактов BitMEX микроконтракт, 1e-6 базовой монеты.
+        # Та же догадка, что и в лентах ликвидаций (market_feed).
+        from market_feed import BITMEX_MICRO
+        mult = BITMEX_MICRO
     px = _num(price)
     if px is None:                           # запасной путь — цена из ответа
         px = _num(rows[0].get("lastPrice"))

@@ -1751,6 +1751,18 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
 }
 .check-row:hover { background: var(--bg-hover); }
 .check-row input { accent-color: var(--color-green); cursor: pointer; }
+/* Свёрнутая биржа (BitMEX закрывается 23.09.2026): приглушена и с пометкой,
+   чтобы ноль событий по ней не читался как поломка терминала */
+.check-row-warn { opacity: 0.72; }
+.check-row-warn .check-note {
+    margin-left: auto;
+    font-size: 0.6rem;
+    text-transform: none;
+    color: var(--color-gold);
+    border: 1px solid var(--border-color);
+    border-radius: 3px;
+    padding: 0 4px;
+}
 
 .link-btn {
     background: none;

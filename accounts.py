@@ -220,6 +220,7 @@ def public_user(row: sqlite3.Row | Dict[str, Any]) -> Dict[str, Any]:
         "last_name": d.get("last_name") or "",
         "photo_url": d.get("photo_url") or "",
         "language": d.get("language") or "ru",
+        "lang_manual": int(d.get("lang_manual") or 0),
         "is_admin": bool(d.get("is_admin")),
         "is_banned": bool(d.get("is_banned")),
         "created_at": float(d.get("created_at") or 0),
@@ -505,6 +506,9 @@ class Store:
                 ("email_verified", "INTEGER NOT NULL DEFAULT 0"),
                 ("email_verified_at", "REAL"),
                 ("tg_linked_at", "REAL"),
+                # язык, выбранный кнопкой «🌐 RU/ENG» в боте: его нельзя
+                # затирать языком клиента Telegram при каждом входе
+                ("lang_manual", "INTEGER NOT NULL DEFAULT 0"),
             ):
                 if name not in cols:
                     self._db.execute(f"ALTER TABLE users ADD COLUMN {name} {ddl}")
@@ -968,6 +972,23 @@ class Store:
         self.audit(user_id, "tg_unlink", f"tg_id={tg_id}")
         return public_user(row)
 
+    def set_user_language(self, user_id: int, lang: str) -> Dict[str, Any]:
+        """Язык, выбранный в боте кнопкой «🌐 RU/ENG».
+
+        Помечаем выбор флагом lang_manual: он главнее языка клиента Telegram,
+        который приходит при каждом сообщении и иначе затирал бы выбор.
+        """
+        code = "en" if str(lang or "").strip().lower().startswith("en") else "ru"
+        with self._lock:
+            self._db.execute(
+                "UPDATE users SET language=?, lang_manual=1 WHERE id=?",
+                (code, int(user_id)))
+            self._db.commit()
+            row = self._db.execute("SELECT * FROM users WHERE id=?",
+                                   (int(user_id),)).fetchone()
+        self.audit(int(user_id), "set_language", code)
+        return public_user(row)
+
     # ----- users (Telegram) -----------------------------------------------
     def upsert_telegram_user(self, tg: Dict[str, Any]) -> Dict[str, Any]:
         tg_id = int(tg["id"] if "id" in tg else tg["tg_id"])
@@ -982,12 +1003,16 @@ class Store:
             is_admin = 1 if (tg_id in self.admin_ids or (row and int(row["is_admin"]))) else 0
             if row:
                 self._db.execute(
+                    # Язык обновляем только у тех, кто не выбирал его сам:
+                    # иначе клиент Telegram с русской локалью возвращал бы
+                    # английский интерфейс к русскому при каждом сообщении.
                     "UPDATE users SET username=?, first_name=?, last_name=?, photo_url=?,"
                     " language=?, is_admin=?, last_seen=?, login_count=login_count+1"
                     " WHERE tg_id=?",
                     (username or row["username"], first or row["first_name"],
                      last or row["last_name"], photo or row["photo_url"],
-                     lang or row["language"], is_admin, now, tg_id),
+                     (row["language"] if int(row["lang_manual"] or 0) else
+                      (lang or row["language"])), is_admin, now, tg_id),
                 )
             else:
                 self._db.execute(
@@ -1541,6 +1566,21 @@ class Store:
             ).fetchall()
         return [int(r["tg_id"]) for r in rows]
 
+    def broadcast_targets(self) -> List[Dict[str, Any]]:
+        """Получатели рассылки вместе с языком: рассылка тоже двуязычная.
+
+        Язык нужен боту, чтобы перевести текст до отправки: без него адресат,
+        ни разу не написавший боту после рестарта, получил бы русский текст
+        независимо от своего выбора.
+        """
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT tg_id, language FROM users "
+                "WHERE is_banned=0 AND tg_id IS NOT NULL"
+            ).fetchall()
+        return [{"tg_id": int(r["tg_id"]), "language": r["language"] or "ru"}
+                for r in rows]
+
     def _parse_svc_config(self, raw: str) -> Dict[str, Any]:
         try:
             data = json.loads(raw or "{}")
@@ -1618,7 +1658,7 @@ class Store:
     def list_alert_subscribers(self) -> List[Dict[str, Any]]:
         with self._lock:
             rows = self._db.execute(
-                "SELECT u.id AS user_id, u.tg_id, us.config, us.enabled "
+                "SELECT u.id AS user_id, u.tg_id, u.language, us.config, us.enabled "
                 "FROM user_services us JOIN users u ON u.id=us.user_id "
                 "WHERE us.slug='alerts' AND us.enabled=1 AND u.is_banned=0"
             ).fetchall()

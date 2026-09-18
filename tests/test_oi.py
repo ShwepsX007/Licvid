@@ -66,8 +66,14 @@ check("bitmex inverse",
 check("bitmex linear fallback price",
       parse_bitmex_oi([{"openInterest": 10, "lastPrice": 3000}],
                       {"inverse": False, "multiplier": 0.001}, None) == 30.0)
-check("bitmex no meta",
-      parse_bitmex_oi([{"openInterest": 10}], {"inverse": False, "multiplier": 0}, 5) is None)
+# Без метаданных инструментов линейный контракт считается по микроконтракту
+# BitMEX (1 контракт = 1e-6 монеты): иначе OI по бирже пропадал вовсе.
+check("bitmex no meta -> микроконтракт",
+      parse_bitmex_oi([{"openInterest": 10}], {"inverse": False, "multiplier": 0},
+                      5) == 10 * 1e-6 * 5)
+check("bitmex без цены и без lastPrice — None",
+      parse_bitmex_oi([{"openInterest": 10}], {"inverse": False, "multiplier": 0},
+                      None) is None)
 check("bitmex empty", parse_bitmex_oi([], {}, 1) is None)
 
 print("parsers: history")

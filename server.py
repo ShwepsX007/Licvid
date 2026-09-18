@@ -70,6 +70,8 @@ import web_bot_admin
 from web_bot_admin import register_bot_admin_routes
 import ads as ads_mod
 from ads import AdService, register_ad_routes
+import feedback as feedback_mod
+from feedback import register_feedback_routes
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -2226,6 +2228,12 @@ ads_mod.ctx.site_url = PUBLIC_URL
 ad_service = AdService(store=account_store, bot=tg_bot, site_url=PUBLIC_URL)
 app.state.ad_service = ad_service
 register_ad_routes(app, ad_service)
+
+# 💬 Обратная связь: «по всем вопросам» из кабинета, ответы из админки
+feedback_mod.ctx.store = account_store
+feedback_mod.ctx.bot = tg_bot
+feedback_mod.ctx.public_url = PUBLIC_URL
+register_feedback_routes(app)
 
 
 @app.get("/api/symbols")

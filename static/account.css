@@ -741,3 +741,90 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
     .ad-item { flex-direction: column; }
     .ad-thumb { width: 100%; height: 140px; }
 }
+
+/* ---------- Сворачиваемые разделы админки ----------
+   Каждая карточка — <details>: заголовок кликается, содержимое живёт внутри,
+   поэтому админка не разрастается в простыню. Состояние запоминается. */
+.card.fold { padding: 0; overflow: hidden; }
+.card.fold > summary {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 16px 20px; cursor: pointer; list-style: none;
+    user-select: none; transition: background .15s;
+}
+.card.fold > summary::-webkit-details-marker { display: none; }
+.card.fold > summary:hover { background: rgba(61, 112, 255, 0.06); }
+.card.fold > summary > h3 { margin: 0; }
+.card.fold > summary::after {
+    content: "▾"; margin-left: auto; color: var(--muted);
+    font-size: 0.9rem; transition: transform .18s;
+}
+.card.fold[open] > summary::after { transform: rotate(180deg); }
+.card.fold[open] > summary { border-bottom: 1px solid var(--border); }
+.card.fold > .fold-body { padding: 16px 20px 18px; }
+.fold-hint { font-size: 0.74rem; color: var(--muted); }
+.fold-tools {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    margin: 14px 0 0;
+}
+.fold-tools .meta { font-size: 0.74rem; }
+
+/* ---------- 💬 Обратная связь ---------- */
+.fb-dot {
+    display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 6px;
+    border-radius: 999px; background: var(--red); color: #fff;
+    font-size: 0.68rem; font-weight: 700; line-height: 18px; text-align: center;
+    vertical-align: middle;
+}
+.fb-thread {
+    display: flex; flex-direction: column; gap: 10px;
+    max-height: 380px; overflow-y: auto;
+    margin: 12px 0; padding: 4px 2px;
+}
+.fb-msg { display: flex; }
+.fb-msg.mine { justify-content: flex-end; }
+.fb-bubble {
+    max-width: min(78%, 640px); padding: 10px 13px; border-radius: 12px;
+    background: var(--bg-dark); border: 1px solid var(--border);
+    font-size: 0.86rem; line-height: 1.5; white-space: pre-line;
+    overflow-wrap: anywhere;
+}
+.fb-msg.mine .fb-bubble {
+    background: linear-gradient(135deg, rgba(61, 112, 255, 0.22), rgba(0, 214, 255, 0.14));
+    border-color: rgba(61, 112, 255, 0.5);
+}
+.fb-who {
+    display: block; margin-bottom: 4px; font-size: 0.66rem;
+    letter-spacing: 0.4px; text-transform: uppercase; color: var(--muted);
+}
+.fb-time { display: block; margin-top: 5px; font-size: 0.66rem; color: var(--muted); }
+.fb-input {
+    width: 100%; min-height: 76px; resize: vertical;
+    background: var(--bg-dark); border: 1px solid var(--border);
+    border-radius: 10px; color: var(--text); font-family: inherit;
+    font-size: 0.88rem; padding: 11px 13px; outline: none;
+}
+.fb-input:focus { border-color: var(--blue); }
+.fb-layout { display: grid; grid-template-columns: minmax(240px, 320px) 1fr; gap: 16px; }
+.fb-list { display: flex; flex-direction: column; gap: 6px; max-height: 480px; overflow-y: auto; }
+.fb-item {
+    padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px;
+    background: var(--bg-dark); cursor: pointer; transition: border-color .15s;
+}
+.fb-item:hover { border-color: var(--blue); }
+.fb-item.on { border-color: var(--cyan); background: rgba(0, 214, 255, 0.06); }
+.fb-item.unread { border-left: 3px solid var(--red); }
+.fb-item-name { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 0.86rem; }
+.fb-item-last {
+    margin-top: 4px; font-size: 0.76rem; color: var(--muted);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.fb-conv-head {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    margin-bottom: 10px; font-weight: 700;
+}
+.fb-conv-head .meta { font-weight: 400; }
+@media (max-width: 820px) {
+    .fb-layout { grid-template-columns: 1fr; }
+    .fb-list { max-height: 220px; }
+    .fb-bubble { max-width: 88%; }
+}

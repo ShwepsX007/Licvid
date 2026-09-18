@@ -432,6 +432,26 @@ class Store:
                     created_at REAL NOT NULL,
                     author_id INTEGER
                 );
+                CREATE TABLE IF NOT EXISTS feedback_threads (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    user_read_at REAL NOT NULL DEFAULT 0,
+                    admin_read_at REAL NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'open'
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_fb_thread_user
+                    ON feedback_threads(user_id);
+                CREATE TABLE IF NOT EXISTS feedback_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    thread_id INTEGER NOT NULL,
+                    author_id INTEGER,
+                    is_admin INTEGER NOT NULL DEFAULT 0,
+                    text TEXT NOT NULL,
+                    created_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_fb_msg ON feedback_messages(thread_id, id);
                 CREATE TABLE IF NOT EXISTS alert_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     ts REAL NOT NULL,
@@ -1866,6 +1886,138 @@ class Store:
             ).fetchall()
         out = [self._ad_row(r) for r in rows]
         return [a for a in out if (a.get("targets") or {}).get("site")]
+
+    # --- 💬 Обратная связь: «по всем вопросам» ------------------------------
+    #
+    # Один диалог на пользователя: он пишет из кабинета, админ отвечает из
+    # админки. Непрочитанное считаем по времени последнего прочтения каждой
+    # стороны, поэтому и у гостя, и у админа есть честный счётчик.
+
+    FB_MAX_LEN = 2000
+
+    @staticmethod
+    def _fb_row(row: Any) -> Dict[str, Any]:
+        d = dict(row)
+        d["is_admin"] = bool(d.get("is_admin"))
+        return d
+
+    def feedback_thread(self, user_id: int, create: bool = True) -> Optional[Dict[str, Any]]:
+        """Диалог пользователя; при ``create`` заводится при первом сообщении."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM feedback_threads WHERE user_id=?", (int(user_id),)
+            ).fetchone()
+            if row or not create:
+                return dict(row) if row else None
+            now = _now()
+            cur = self._db.execute(
+                "INSERT INTO feedback_threads(user_id, created_at, updated_at,"
+                " user_read_at, admin_read_at, status) VALUES(?,?,?,?,?, 'open')",
+                (int(user_id), now, now, now, 0.0),
+            )
+            self._db.commit()
+            row = self._db.execute("SELECT * FROM feedback_threads WHERE id=?",
+                                   (int(cur.lastrowid),)).fetchone()
+        return dict(row) if row else None
+
+    def feedback_add(self, thread_id: int, text: str, author_id: Optional[int] = None,
+                     is_admin: bool = False) -> Dict[str, Any]:
+        text = (text or "").strip()
+        if not text:
+            return {"ok": False, "error": "empty"}
+        if len(text) > self.FB_MAX_LEN:
+            text = text[:self.FB_MAX_LEN]
+        now = _now()
+        with self._lock:
+            row = self._db.execute("SELECT id FROM feedback_threads WHERE id=?",
+                                   (int(thread_id),)).fetchone()
+            if not row:
+                return {"ok": False, "error": "not_found"}
+            cur = self._db.execute(
+                "INSERT INTO feedback_messages(thread_id, author_id, is_admin, text,"
+                " created_at) VALUES(?,?,?,?,?)",
+                (int(thread_id), author_id, 1 if is_admin else 0, text, now),
+            )
+            # Своё сообщение прочитано сразу: счётчик считает только чужие.
+            field = "admin_read_at" if is_admin else "user_read_at"
+            self._db.execute(
+                f"UPDATE feedback_threads SET updated_at=?, {field}=?, status='open'"
+                " WHERE id=?", (now, now, int(thread_id)),
+            )
+            self._db.commit()
+            mid = int(cur.lastrowid)
+        return {"ok": True, "id": mid, "created_at": now, "text": text,
+                "is_admin": bool(is_admin), "author_id": author_id,
+                "thread_id": int(thread_id)}
+
+    def feedback_messages(self, thread_id: int, limit: int = 300) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM feedback_messages WHERE thread_id=? ORDER BY id LIMIT ?",
+                (int(thread_id), int(limit)),
+            ).fetchall()
+        return [self._fb_row(r) for r in rows]
+
+    def feedback_mark_read(self, thread_id: int, who: str = "user") -> bool:
+        field = "admin_read_at" if str(who) == "admin" else "user_read_at"
+        with self._lock:
+            cur = self._db.execute(
+                f"UPDATE feedback_threads SET {field}=? WHERE id=?", (_now(), int(thread_id)))
+            self._db.commit()
+        return bool(cur.rowcount)
+
+    def feedback_unread(self, user_id: int) -> int:
+        """Сколько ответов админа пользователь ещё не видел."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT COUNT(*) FROM feedback_messages m JOIN feedback_threads t"
+                " ON t.id=m.thread_id WHERE t.user_id=? AND m.is_admin=1"
+                " AND m.created_at>t.user_read_at", (int(user_id),)
+            ).fetchone()
+        return int(row[0] if row else 0)
+
+    def feedback_for_user(self, user_id: int) -> Dict[str, Any]:
+        thread = self.feedback_thread(user_id, create=False)
+        if not thread:
+            return {"thread": None, "messages": [], "unread": 0}
+        return {"thread": thread,
+                "messages": self.feedback_messages(thread["id"]),
+                "unread": self.feedback_unread(user_id)}
+
+    def feedback_threads(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Диалоги для админки: кто писал, последняя реплика и непрочитанное."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT t.*, u.first_name, u.last_name, u.username, u.email, u.tg_id,"
+                " (SELECT COUNT(*) FROM feedback_messages m WHERE m.thread_id=t.id"
+                "  AND m.is_admin=0 AND m.created_at>t.admin_read_at) AS unread,"
+                " (SELECT COUNT(*) FROM feedback_messages m WHERE m.thread_id=t.id)"
+                "  AS total,"
+                " (SELECT m.text FROM feedback_messages m WHERE m.thread_id=t.id"
+                "  ORDER BY m.id DESC LIMIT 1) AS last_text,"
+                " (SELECT m.is_admin FROM feedback_messages m WHERE m.thread_id=t.id"
+                "  ORDER BY m.id DESC LIMIT 1) AS last_admin"
+                " FROM feedback_threads t LEFT JOIN users u ON u.id=t.user_id"
+                " ORDER BY t.updated_at DESC LIMIT ?", (int(limit),)
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["unread"] = int(d.get("unread") or 0)
+            d["total"] = int(d.get("total") or 0)
+            d["last_admin"] = bool(d.get("last_admin"))
+            d["name"] = display_name(d) or f"#{d.get('user_id')}"
+            d["link"] = ("@" + str(d["username"])) if d.get("username") else ""
+            out.append(d)
+        return out
+
+    def feedback_admin_unread(self) -> int:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT COUNT(*) FROM feedback_messages m JOIN feedback_threads t"
+                " ON t.id=m.thread_id WHERE m.is_admin=0 AND m.created_at>t.admin_read_at"
+            ).fetchone()
+        return int(row[0] if row else 0)
 
     def tg_ids_for_broadcast(self) -> List[int]:
         with self._lock:

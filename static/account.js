@@ -588,6 +588,7 @@
         if (tgBtn && !tgBtn._bound) { tgBtn._bound = true; tgBtn.addEventListener("click", linkTelegram); }
         var tgOff = $("tg-unlink");
         if (tgOff && !tgOff._bound) { tgOff._bound = true; tgOff.addEventListener("click", unlinkTelegram); }
+        bootFeedbackUser();
         Promise.all([
             api("/api/auth/me"),
             api("/api/account/services"),
@@ -2285,10 +2286,276 @@
                 if (st) st.textContent = d.ok ? t("saved") : (d.error || "error");
             });
         });
+        bootFolds();            // разделы сворачиваются — до остальных панелей, им нужны id
         bootDigestTpl();
         bootBotAdmin();
         bootAiPrompts();
         bootAds();
+        bootFeedbackAdmin();
+    }
+
+    /* ---------------- 🗂 Сворачиваемые разделы админки ---------------------
+     *
+     * Админка растёт — каждая карточка превращается в <details>: заголовок
+     * кликается, содержимое прячется. Состояние разделов живёт в localStorage,
+     * поэтому страница открывается такой, какой её оставил админ. Сверху —
+     * кнопки «Развернуть всё» и «Свернуть всё».
+     */
+
+    var FOLDS_KEY = "liqscope.admin.folds";
+
+    function foldState() {
+        try {
+            var raw = localStorage.getItem(FOLDS_KEY) || "{}";
+            var obj = JSON.parse(raw);
+            return obj && typeof obj === "object" ? obj : {};
+        } catch (e) { return {}; }
+    }
+
+    function foldSave(id, open) {
+        var st = foldState();
+        st[id] = !!open;
+        try { localStorage.setItem(FOLDS_KEY, JSON.stringify(st)); } catch (e) {}
+    }
+
+    function foldHead(card) {
+        for (var i = 0; i < card.children.length; i++) {
+            if (card.children[i].tagName === "H3") return card.children[i];
+        }
+        return null;
+    }
+
+    /** Карточка → сворачиваемый блок. Возвращает <details> или null. */
+    function toFold(card, index) {
+        if (!card || card.tagName === "DETAILS") return null;
+        var head = foldHead(card);
+        if (!head) return null;
+        var id = card.id || ("fold-" + index);
+        var det = document.createElement("details");
+        det.className = (card.className || "") + " fold";
+        det.id = id;
+        if (card.getAttribute("style")) det.setAttribute("style", card.getAttribute("style"));
+        var sum = document.createElement("summary");
+        sum.appendChild(head);
+        var hint = card.getAttribute("data-hint") || "";
+        if (hint) {
+            var hintEl = document.createElement("span");
+            hintEl.className = "fold-hint";
+            hintEl.textContent = hint;
+            sum.appendChild(hintEl);
+        }
+        det.appendChild(sum);
+        var body = document.createElement("div");
+        body.className = "fold-body";
+        while (card.firstChild) body.appendChild(card.firstChild);
+        det.appendChild(body);
+        card.parentNode.replaceChild(det, card);
+        det.foldId = id;
+        // По умолчанию разделы свёрнуты: админка должна открываться компактной,
+        // а раскрытым остаётся то, что админ раскрыл сам.
+        var st = foldState();
+        det.open = st[id] === true;
+        det.addEventListener("toggle", function () { foldSave(id, det.open); });
+        return det;
+    }
+
+    function foldAll(folds, open) {
+        folds.forEach(function (d) {
+            d.open = !!open;
+            foldSave(d.foldId || d.id, !!open);
+        });
+    }
+
+    function bootFolds() {
+        var page = (document.body && document.body.getAttribute("data-page")) || "";
+        if (page !== "admin") return [];
+        var wrap = document.querySelector("main.wrap");
+        if (!wrap) return [];
+        var cards = Array.prototype.slice.call(wrap.querySelectorAll(".card"));
+        var folds = [];
+        cards.forEach(function (card, i) {
+            var det = toFold(card, i);
+            if (det) folds.push(det);
+        });
+        if (folds.length && !wrap.querySelector(".fold-tools")) {
+            var lead = wrap.querySelector("p.lead");
+            var tools = document.createElement("div");
+            tools.className = "fold-tools";
+            tools.innerHTML =
+                '<button class="btn btn-small" type="button" id="folds-open">⤢ Развернуть всё</button>' +
+                '<button class="btn btn-small" type="button" id="folds-close">⤡ Свернуть всё</button>' +
+                '<span class="meta">Разделы сворачиваются в блоки — админка открывается ' +
+                "с теми, что были раскрыты в прошлый раз</span>";
+            if (lead && lead.parentNode) lead.parentNode.insertBefore(tools, lead.nextSibling);
+            else wrap.insertBefore(tools, wrap.firstChild);
+            var open = tools.querySelector("#folds-open"), close = tools.querySelector("#folds-close");
+            if (open) open.addEventListener("click", function () { foldAll(folds, true); });
+            if (close) close.addEventListener("click", function () { foldAll(folds, false); });
+        }
+        return folds;
+    }
+
+    /* ---------------- 💬 Обратная связь: «по всем вопросам» ---------------- */
+
+    function fbTime(ts) {
+        if (!ts) return "";
+        var d = new Date(Number(ts) * 1000);
+        return adPad(d.getDate()) + "." + adPad(d.getMonth() + 1) + " " +
+            adPad(d.getHours()) + ":" + adPad(d.getMinutes());
+    }
+
+    function fbBubble(m) {
+        var mine = !!m.mine;
+        var who = mine ? "вы" : (m.admin ? "админ" : "пользователь");
+        return '<div class="fb-msg' + (mine ? " mine" : "") + '"><div class="fb-bubble">' +
+            '<span class="fb-who">' + esc(who) + "</span>" + esc(m.text) +
+            '<span class="fb-time">' + fbTime(m.at) + "</span></div></div>";
+    }
+
+    function fbPaint(threadId, messages) {
+        var box = $(threadId);
+        if (!box) return;
+        box.innerHTML = (messages || []).map(fbBubble).join("") ||
+            '<p class="meta">Переписки пока нет — напишите первым.</p>';
+        box.scrollTop = box.scrollHeight;
+    }
+
+    function fbBadge(n) {
+        [ $("fb-dot"), $("fb-dot-2"), $("fb-admin-badge") ].forEach(function (el) {
+            if (!el) return;
+            el.textContent = n ? String(n) : "";
+            el.classList.toggle("hidden", !n);
+            el.style.display = n ? "" : "none";
+        });
+        var box = $("fb-admin-badge");
+        if (box) box.style.display = n ? "" : "none";
+    }
+
+    /** Диалог пользователя в кабинете. */
+    function bootFeedbackUser() {
+        var card = $("fb-card");
+        if (!card || !$("fb-thread")) return;
+        function load() {
+            return api("/api/feedback").then(function (d) {
+                if (!d.ok) return;
+                fbPaint("fb-thread", d.messages);
+                fbBadge(d.unread);
+                var jump = $("fb-jump");
+                if (jump) jump.setAttribute("data-unread", d.unread || 0);
+            });
+        }
+        load();
+        var send = $("fb-send"), ta = $("fb-text");
+        function submit() {
+            var text = (ta && ta.value || "").trim();
+            var st = $("fb-status");
+            if (!text) { if (st) st.textContent = "напишите сообщение"; return; }
+            if (st) st.textContent = "отправляю…";
+            api("/api/feedback", { method: "POST", body: JSON.stringify({ text: text }) })
+                .then(function (d) {
+                    if (!d.ok) { if (st) st.textContent = d.hint || d.error || "ошибка"; return; }
+                    if (st) st.textContent = "отправлено — ответ придёт сюда";
+                    if (ta) ta.value = "";
+                    load();
+                })
+                .catch(function () { if (st) st.textContent = "ошибка сети"; });
+        }
+        if (send) send.addEventListener("click", submit);
+        if (ta) ta.addEventListener("keydown", function (e) {
+            if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) submit();
+        });
+        // новые ответы подтягиваем не перезагружая страницу
+        setInterval(function () {
+            if (document.hidden) return;
+            api("/api/feedback/unread").then(function (d) {
+                if (d.ok) fbBadge(d.unread);
+            });
+        }, 60000);
+    }
+
+    /** Список диалогов у админа. */
+    function bootFeedbackAdmin() {
+        if (!$("fb-admin")) return;
+        var current = 0;
+        function paintList(d) {
+            var box = $("fb-list");
+            if (!box) return;
+            var threads = d.threads || [];
+            fbBadge(d.unread);
+            if (!threads.length) {
+                box.innerHTML = "<p class='meta'>Пока никто не писал. Здесь появятся диалоги " +
+                    "из кабинета — с историей и возможностью ответить.</p>";
+                return;
+            }
+            box.innerHTML = threads.map(function (t) {
+                return '<div class="fb-item' + (t.unread ? " unread" : "") +
+                    (String(t.id) === String(current) ? " on" : "") + '" data-thread="' + t.id + '">' +
+                    '<div class="fb-item-name">' + esc(t.name) +
+                    (t.unread ? ' <span class="fb-dot">' + t.unread + "</span>" : "") + "</div>" +
+                    '<div class="fb-item-last">' + (t.last_admin ? "вы: " : "") +
+                    esc(String(t.last_text || "").slice(0, 90)) + "</div>" +
+                    '<div class="meta">' + fbTime(t.updated_at) + " · сообщений: " + t.total +
+                    (t.link ? " · " + esc(t.link) : "") +
+                    (t.email ? " · " + esc(t.email) : "") + "</div></div>";
+            }).join("");
+            box.querySelectorAll("[data-thread]").forEach(function (el) {
+                el.addEventListener("click", function () {
+                    openThread(el.getAttribute("data-thread"));
+                });
+            });
+        }
+        function openThread(id) {
+            current = Number(id) || 0;
+            api("/api/admin/feedback/" + current).then(function (d) {
+                if (!d.ok) return;
+                var t = d.thread || {};
+                var head = $("fb-conv-head");
+                if (head) {
+                    head.innerHTML = esc(t.name || ("#" + current)) +
+                        (t.username ? ' <span class="meta">@' + esc(t.username) + "</span>" : "") +
+                        (t.email ? ' <span class="meta">' + esc(t.email) + "</span>" : "") +
+                        ' <span class="meta">переписка за ' + fbTime(t.created_at) + "</span>";
+                }
+                fbPaint("fb-admin-thread",
+                        (d.messages || []).map(function (m) {
+                            return Object.assign({}, m, { mine: m.admin });
+                        }));
+                fbBadge(d.unread);
+                load();
+            });
+        }
+        function load() {
+            api("/api/admin/feedback").then(function (d) {
+                if (d.ok) paintList(d);
+            });
+        }
+        load();
+        var send = $("fb-admin-send"), ta = $("fb-admin-text");
+        if (send) send.addEventListener("click", function () {
+            var text = (ta && ta.value || "").trim();
+            var st = $("fb-admin-status");
+            if (!current) { if (st) st.textContent = "выберите диалог слева"; return; }
+            if (!text) { if (st) st.textContent = "напишите ответ"; return; }
+            if (st) st.textContent = "отправляю…";
+            api("/api/admin/feedback/" + current, {
+                method: "POST", body: JSON.stringify({ text: text }),
+            }).then(function (d) {
+                if (!d.ok) { if (st) st.textContent = d.hint || d.error || "ошибка"; return; }
+                if (st) st.textContent = "ответ ушёл (и в Telegram, если связан)";
+                if (ta) ta.value = "";
+                openThread(current);
+            }).catch(function () { if (st) st.textContent = "ошибка сети"; });
+        });
+        if (ta) ta.addEventListener("keydown", function (e) {
+            if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && send) send.click();
+        });
+        var card = $("fb-admin");
+        if (card) card.addEventListener("toggle", function () {
+            if (card.open) load();          // раскрыли — показать свежие диалоги
+        });
+        setInterval(function () {
+            if (!document.hidden) load();
+        }, 45000);
     }
 
     /* ---------------- 📣 Рекламные посты: бот, каналы и баннер на главной --- */

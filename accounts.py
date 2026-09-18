@@ -146,34 +146,45 @@ CONFIG_MAX_KEYS = 24
 CONFIG_MAX_LIST = 40
 
 
+#: насколько глубоко пускаем вложенность настроек сервиса: конфиг → метрика →
+#: её поля. Глубже не нужно, а «мусор» из запроса отсекаем лимитами.
+CONFIG_MAX_DEPTH = 3
+
+
+def _clean_value(val: Any, depth: int = 0) -> Any:
+    """Одно значение настроек: скаляр как есть, словарь/список — с лимитами."""
+    if isinstance(val, bool) or isinstance(val, (int, float)):
+        return val
+    if isinstance(val, str):
+        return val[:120]
+    if isinstance(val, (list, tuple)):
+        items = []
+        for item in list(val)[:CONFIG_MAX_LIST]:
+            if isinstance(item, (str, int, float, bool)):
+                items.append(item[:120] if isinstance(item, str) else item)
+        return items
+    if isinstance(val, dict) and depth < CONFIG_MAX_DEPTH:
+        out: Dict[str, Any] = {}
+        for k, v in list(val.items())[:CONFIG_MAX_KEYS]:
+            clean = _clean_value(v, depth + 1)
+            if clean is not None or v is None:
+                out[str(k)[:40]] = clean
+        return out
+    return None
+
+
 def clean_service_config(config: Dict[str, Any]) -> Dict[str, Any]:
     """Чистка настроек сервиса: только простые значения и без мусора.
 
     Ключи приходят с сайта и из бота, так что лимиты нужны: строка — до 120
-    символов, список — до 40 коротких значений, глубже одного уровня не пускаем.
+    символов, список — до 40 коротких значений, вложенность — до
+    ``CONFIG_MAX_DEPTH`` уровней. Вложенность нужна настоящая: алерты по
+    корреляции держат настройки каждой метрики (окно и два порога), и без
+    второго уровня они молча терялись бы при сохранении.
     """
-    out: Dict[str, Any] = {}
-    for key, val in list((config or {}).items())[:CONFIG_MAX_KEYS]:
-        name = str(key)[:40]
-        if isinstance(val, bool) or isinstance(val, (int, float)):
-            out[name] = val
-        elif isinstance(val, str):
-            out[name] = val[:120]
-        elif isinstance(val, (list, tuple)):
-            items = []
-            for item in list(val)[:CONFIG_MAX_LIST]:
-                if isinstance(item, (str, int, float, bool)):
-                    items.append(item[:120] if isinstance(item, str) else item)
-            out[name] = items
-        elif isinstance(val, dict):
-            flat = {}
-            for k2, v2 in list(val.items())[:CONFIG_MAX_KEYS]:
-                if isinstance(v2, bool) or isinstance(v2, (int, float)):
-                    flat[str(k2)[:40]] = v2
-                elif isinstance(v2, str):
-                    flat[str(k2)[:40]] = v2[:120]
-            out[name] = flat
-    return out
+    if not isinstance(config, dict):
+        return {}
+    return _clean_value(dict(config), 0) or {}
 
 
 def _now() -> float:
@@ -220,6 +231,7 @@ def public_user(row: sqlite3.Row | Dict[str, Any]) -> Dict[str, Any]:
         "last_name": d.get("last_name") or "",
         "photo_url": d.get("photo_url") or "",
         "language": d.get("language") or "ru",
+        "lang_manual": int(d.get("lang_manual") or 0),
         "is_admin": bool(d.get("is_admin")),
         "is_banned": bool(d.get("is_banned")),
         "created_at": float(d.get("created_at") or 0),
@@ -360,7 +372,9 @@ class Store:
                     path TEXT NOT NULL,
                     vid TEXT,
                     user_id INTEGER,
-                    ip_hash TEXT
+                    ip_hash TEXT,
+                    ua TEXT,
+                    bot INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS idx_visits_ts ON visits(ts);
                 CREATE TABLE IF NOT EXISTS settings (
@@ -401,6 +415,7 @@ class Store:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     path TEXT NOT NULL,
                     name TEXT,
+                    kind TEXT DEFAULT 'post',
                     created_at REAL NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS alert_events (
@@ -439,6 +454,8 @@ class Store:
                     )
             self._db.commit()
         self._migrate_users()
+        self._migrate_digest_photos()
+        self._migrate_visits()
         self._seed_digest()
         self._digest_service_live()
 
@@ -467,6 +484,50 @@ class Store:
         except Exception:
             pass
 
+    def _migrate_visits(self) -> None:
+        """Колонки ua/bot: чтобы отсеивать роботов и не плодить «уникальных».
+
+        Раньше визит писал только vid, а vid выдавался каждому запросу без
+        cookie — из-за этого просмотры и «уникальные» почти совпадали (каждый
+        прогон краулера выглядел новым посетителем). Теперь пишем
+        user-agent и признак «служебный запрос», а посетителя без cookie
+        привязываем к уже выданному vid той же связки ip+ua.
+        """
+        try:
+            with self._lock:
+                cols = {r["name"] for r in
+                        self._db.execute("PRAGMA table_info(visits)")}
+                if cols and "ua" not in cols:
+                    self._db.execute("ALTER TABLE visits ADD COLUMN ua TEXT")
+                if cols and "bot" not in cols:
+                    self._db.execute(
+                        "ALTER TABLE visits ADD COLUMN bot INTEGER NOT NULL DEFAULT 0")
+                self._db.execute("UPDATE visits SET bot=0 WHERE bot IS NULL")
+                self._db.commit()
+        except Exception as e:                    # noqa: BLE001
+            log.debug("визиты: миграция ua/bot: %s", e)
+
+    def _migrate_digest_photos(self) -> None:
+        """Колонка kind: фото для сводки постов или для дневного дайджеста.
+
+        Раньше картинки были одни на всё: и в посты раз в N часов, и в вечерний
+        выпуск. Теперь рубрика у фото своя, а старые строки считаем постовыми —
+        как они и работали.
+        """
+        try:
+            with self._lock:
+                cols = {r["name"] for r in
+                        self._db.execute("PRAGMA table_info(digest_photos)")}
+                if cols and "kind" not in cols:
+                    self._db.execute(
+                        "ALTER TABLE digest_photos ADD COLUMN kind TEXT DEFAULT 'post'")
+                    self._db.commit()
+                self._db.execute(
+                    "UPDATE digest_photos SET kind='post' WHERE kind IS NULL OR kind=''")
+                self._db.commit()
+        except Exception as e:                    # noqa: BLE001
+            log.debug("фото канала: миграция kind: %s", e)
+
     def _migrate_users(self) -> None:
         """Догоняем старые базы: почта/пароль и tg_id без NOT NULL.
 
@@ -482,6 +543,9 @@ class Store:
                 ("email_verified", "INTEGER NOT NULL DEFAULT 0"),
                 ("email_verified_at", "REAL"),
                 ("tg_linked_at", "REAL"),
+                # язык, выбранный кнопкой «🌐 RU/ENG» в боте: его нельзя
+                # затирать языком клиента Telegram при каждом входе
+                ("lang_manual", "INTEGER NOT NULL DEFAULT 0"),
             ):
                 if name not in cols:
                     self._db.execute(f"ALTER TABLE users ADD COLUMN {name} {ddl}")
@@ -945,6 +1009,23 @@ class Store:
         self.audit(user_id, "tg_unlink", f"tg_id={tg_id}")
         return public_user(row)
 
+    def set_user_language(self, user_id: int, lang: str) -> Dict[str, Any]:
+        """Язык, выбранный в боте кнопкой «🌐 RU/ENG».
+
+        Помечаем выбор флагом lang_manual: он главнее языка клиента Telegram,
+        который приходит при каждом сообщении и иначе затирал бы выбор.
+        """
+        code = "en" if str(lang or "").strip().lower().startswith("en") else "ru"
+        with self._lock:
+            self._db.execute(
+                "UPDATE users SET language=?, lang_manual=1 WHERE id=?",
+                (code, int(user_id)))
+            self._db.commit()
+            row = self._db.execute("SELECT * FROM users WHERE id=?",
+                                   (int(user_id),)).fetchone()
+        self.audit(int(user_id), "set_language", code)
+        return public_user(row)
+
     # ----- users (Telegram) -----------------------------------------------
     def upsert_telegram_user(self, tg: Dict[str, Any]) -> Dict[str, Any]:
         tg_id = int(tg["id"] if "id" in tg else tg["tg_id"])
@@ -959,12 +1040,16 @@ class Store:
             is_admin = 1 if (tg_id in self.admin_ids or (row and int(row["is_admin"]))) else 0
             if row:
                 self._db.execute(
+                    # Язык обновляем только у тех, кто не выбирал его сам:
+                    # иначе клиент Telegram с русской локалью возвращал бы
+                    # английский интерфейс к русскому при каждом сообщении.
                     "UPDATE users SET username=?, first_name=?, last_name=?, photo_url=?,"
                     " language=?, is_admin=?, last_seen=?, login_count=login_count+1"
                     " WHERE tg_id=?",
                     (username or row["username"], first or row["first_name"],
                      last or row["last_name"], photo or row["photo_url"],
-                     lang or row["language"], is_admin, now, tg_id),
+                     (row["language"] if int(row["lang_manual"] or 0) else
+                      (lang or row["language"])), is_admin, now, tg_id),
                 )
             else:
                 self._db.execute(
@@ -1210,17 +1295,49 @@ class Store:
         return {"ok": False, "pending": True}
 
     # ----- visits ---------------------------------------------------------
-    def record_visit(self, path: str, vid: str, user_id: Optional[int], ip_hash: str) -> None:
+    def record_visit(self, path: str, vid: str, user_id: Optional[int], ip_hash: str,
+                     ua: str = "", bot: bool = False) -> None:
+        """Записать просмотр страницы.
+
+        ``bot`` — служебный запрос (краулер, превью мессенджера, скрипт): в
+        счётчики просмотров и посетителей он не идёт, но хранится — админ
+        видит, сколько такого шума отсеяно.
+        """
         path = (path or "/")[:120]
         with self._lock:
             self._db.execute(
-                "INSERT INTO visits(ts,path,vid,user_id,ip_hash) VALUES(?,?,?,?,?)",
-                (_now(), path, (vid or "")[:40], user_id, ip_hash),
+                "INSERT INTO visits(ts,path,vid,user_id,ip_hash,ua,bot)"
+                " VALUES(?,?,?,?,?,?,?)",
+                (_now(), path, ("" if bot else (vid or ""))[:40], user_id,
+                 ip_hash, (ua or "")[:180], 1 if bot else 0),
             )
             # не копим бесконечно: раз в ~200 визитов чистим старше 90 дней
             if secrets.randbelow(200) == 0:
                 self._db.execute("DELETE FROM visits WHERE ts<?", (_now() - 90 * 86400,))
             self._db.commit()
+
+    def visit_vid(self, ip_hash: str, ua: str, window_sec: int = 86400) -> str:
+        """vid, уже выданный этой связке ip+ua: браузер без cookie не «множится».
+
+        Возвращаем последний vid за окно (по умолчанию сутки) — так гость,
+        который не сохраняет cookie (или скрипт, прикинувшийся браузером),
+        в уникальных считается один раз, а не каждой страницей.
+        """
+        if not ip_hash:
+            return ""
+        try:
+            since = _now() - max(60, int(window_sec))
+            with self._lock:
+                row = self._db.execute(
+                    "SELECT vid FROM visits WHERE ip_hash=? AND COALESCE(ua,'')=?"
+                    " AND bot=0 AND COALESCE(vid,'')!='' AND ts>=?"
+                    " ORDER BY ts DESC LIMIT 1",
+                    (ip_hash, (ua or "")[:180], since),
+                ).fetchone()
+        except Exception as e:                    # noqa: BLE001
+            log.debug("визиты: поиск vid: %s", e)
+            return ""
+        return str(row["vid"] or "") if row else ""
 
     def visit_stats(self, days: int = 14) -> Dict[str, Any]:
         days = max(1, min(int(days), 90))
@@ -1228,26 +1345,34 @@ class Store:
         day0 = _now() - (_now() % 86400)
         with self._lock:
             today_views = self._db.execute(
-                "SELECT COUNT(*) FROM visits WHERE ts>=?", (day0,)
+                "SELECT COUNT(*) FROM visits WHERE ts>=? AND bot=0", (day0,)
             ).fetchone()[0]
             today_uniques = self._db.execute(
-                "SELECT COUNT(DISTINCT vid) FROM visits WHERE ts>=? AND vid!=''", (day0,)
+                "SELECT COUNT(DISTINCT vid) FROM visits WHERE ts>=? AND bot=0"
+                " AND COALESCE(vid,'')!=''", (day0,)
+            ).fetchone()[0]
+            today_bots = self._db.execute(
+                "SELECT COUNT(*) FROM visits WHERE ts>=? AND bot=1", (day0,)
             ).fetchone()[0]
             rows = self._db.execute(
                 "SELECT strftime('%Y-%m-%d', ts, 'unixepoch') AS day,"
-                " COUNT(*) AS views, COUNT(DISTINCT vid) AS uniques"
+                " SUM(CASE WHEN bot=0 THEN 1 ELSE 0 END) AS views,"
+                " COUNT(DISTINCT CASE WHEN bot=0 THEN vid END) AS uniques,"
+                " SUM(CASE WHEN bot=1 THEN 1 ELSE 0 END) AS bots"
                 " FROM visits WHERE ts>=? GROUP BY day ORDER BY day",
                 (since,),
             ).fetchall()
             top_paths = self._db.execute(
-                "SELECT path, COUNT(*) AS n FROM visits WHERE ts>=?"
+                "SELECT path, COUNT(*) AS n FROM visits WHERE ts>=? AND bot=0"
                 " GROUP BY path ORDER BY n DESC LIMIT 8",
                 (since,),
             ).fetchall()
-        by_day = [{"day": r["day"], "views": r["views"], "uniques": r["uniques"]} for r in rows]
+        by_day = [{"day": r["day"], "views": r["views"], "uniques": r["uniques"],
+                   "bots": r["bots"]} for r in rows]
         return {
             "today_views": today_views,
             "today_uniques": today_uniques,
+            "today_bots": today_bots,
             "days": by_day,
             "paths": [{"path": r["path"], "n": r["n"]} for r in top_paths],
         }
@@ -1366,8 +1491,9 @@ class Store:
                 now = _now()
                 for path in list_images():
                     self._db.execute(
-                        "INSERT INTO digest_photos(path, name, created_at) VALUES(?,?,?)",
-                        (path, os.path.basename(path), now),
+                        "INSERT INTO digest_photos(path, name, kind, created_at)"
+                        " VALUES(?,?,?,?)",
+                        (path, os.path.basename(path), "post", now),
                     )
             self._db.commit()
 
@@ -1406,11 +1532,23 @@ class Store:
             self.audit(actor_id, "digest_head_del", str(head_id))
         return ok
 
-    def list_digest_photos(self) -> List[Dict[str, Any]]:
+    def list_digest_photos(self, kind: str = "") -> List[Dict[str, Any]]:
+        """Фото канала: ``kind`` — "post" (сводка), "digest" (дневной выпуск).
+
+        Пустой ``kind`` — все фото: так их видит админка и старые вызовы.
+        """
+        kind = (kind or "").strip()
         with self._lock:
-            rows = self._db.execute(
-                "SELECT id, path, name, created_at FROM digest_photos ORDER BY id"
-            ).fetchall()
+            if kind:
+                rows = self._db.execute(
+                    "SELECT id, path, name, kind, created_at FROM digest_photos"
+                    " WHERE COALESCE(kind,'post')=? ORDER BY id", (kind,)
+                ).fetchall()
+            else:
+                rows = self._db.execute(
+                    "SELECT id, path, name, kind, created_at FROM digest_photos"
+                    " ORDER BY id"
+                ).fetchall()
         out = []
         for r in rows:
             d = dict(r)
@@ -1418,8 +1556,22 @@ class Store:
             out.append(d)
         return out
 
+    def set_digest_photo_kind(self, photo_id: int, kind: str,
+                              actor_id: Optional[int] = None) -> bool:
+        """Перенести фото в другую рубрику: сводка ⇄ дневной дайджест."""
+        kind = "digest" if str(kind or "").strip().lower() == "digest" else "post"
+        with self._lock:
+            cur = self._db.execute("UPDATE digest_photos SET kind=? WHERE id=?",
+                                   (kind, int(photo_id)))
+            self._db.commit()
+        if not cur.rowcount:
+            return False
+        self.audit(actor_id, "digest_photo_kind", f"{photo_id}→{kind}")
+        return True
+
     def add_digest_photo(self, data: bytes, filename: str = "",
-                         actor_id: Optional[int] = None) -> Dict[str, Any]:
+                         actor_id: Optional[int] = None,
+                         kind: str = "post") -> Dict[str, Any]:
         data = data or b""
         if len(data) < 24:
             return {"ok": False, "error": "empty"}
@@ -1434,6 +1586,7 @@ class Store:
             ext = ".webp"
         if not ext:
             return {"ok": False, "error": "not_image"}
+        kind = "digest" if str(kind or "").strip().lower() == "digest" else "post"
         with self._lock:
             n = self._db.execute("SELECT COUNT(*) FROM digest_photos").fetchone()[0]
             if n >= 40:
@@ -1449,18 +1602,19 @@ class Store:
         orig = os.path.basename(filename or name)[:80]
         with self._lock:
             cur = self._db.execute(
-                "INSERT INTO digest_photos(path, name, created_at) VALUES(?,?,?)",
-                (path, orig, _now()),
+                "INSERT INTO digest_photos(path, name, kind, created_at)"
+                " VALUES(?,?,?,?)",
+                (path, orig, kind, _now()),
             )
             self._db.commit()
             pid = int(cur.lastrowid)
-        self.audit(actor_id, "digest_photo_add", orig)
-        return {"ok": True, "id": pid, "path": path, "name": orig}
+        self.audit(actor_id, "digest_photo_add", f"{kind}:{orig}")
+        return {"ok": True, "id": pid, "path": path, "name": orig, "kind": kind}
 
     def get_digest_photo(self, photo_id: int) -> Optional[Dict[str, Any]]:
         with self._lock:
             row = self._db.execute(
-                "SELECT id, path, name, created_at FROM digest_photos WHERE id=?",
+                "SELECT id, path, name, kind, created_at FROM digest_photos WHERE id=?",
                 (int(photo_id),),
             ).fetchone()
         return dict(row) if row else None
@@ -1488,6 +1642,21 @@ class Store:
                 "SELECT tg_id FROM users WHERE is_banned=0 AND tg_id IS NOT NULL"
             ).fetchall()
         return [int(r["tg_id"]) for r in rows]
+
+    def broadcast_targets(self) -> List[Dict[str, Any]]:
+        """Получатели рассылки вместе с языком: рассылка тоже двуязычная.
+
+        Язык нужен боту, чтобы перевести текст до отправки: без него адресат,
+        ни разу не написавший боту после рестарта, получил бы русский текст
+        независимо от своего выбора.
+        """
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT tg_id, language FROM users "
+                "WHERE is_banned=0 AND tg_id IS NOT NULL"
+            ).fetchall()
+        return [{"tg_id": int(r["tg_id"]), "language": r["language"] or "ru"}
+                for r in rows]
 
     def _parse_svc_config(self, raw: str) -> Dict[str, Any]:
         try:
@@ -1566,7 +1735,7 @@ class Store:
     def list_alert_subscribers(self) -> List[Dict[str, Any]]:
         with self._lock:
             rows = self._db.execute(
-                "SELECT u.id AS user_id, u.tg_id, us.config, us.enabled "
+                "SELECT u.id AS user_id, u.tg_id, u.language, us.config, us.enabled "
                 "FROM user_services us JOIN users u ON u.id=us.user_id "
                 "WHERE us.slug='alerts' AND us.enabled=1 AND u.is_banned=0"
             ).fetchall()
@@ -1591,7 +1760,8 @@ class Store:
                  float(hit.get("threshold") or 0),
                  int(hit.get("window_min") or 5),
                  json.dumps({k: hit.get(k) for k in
-                             ("count", "longs", "shorts", "pct") if k in hit},
+                             ("count", "longs", "shorts", "pct", "span_min",
+                              "peers") if k in hit},
                             ensure_ascii=False)[:400]),
             )
             if secrets.randbelow(40) == 0:
@@ -1607,7 +1777,16 @@ class Store:
                 "SELECT * FROM alert_events WHERE user_id=? ORDER BY id DESC LIMIT ?",
                 (int(user_id), limit),
             ).fetchall()
-        return [dict(r) for r in rows]
+        out = []
+        for r in rows:
+            d = dict(r)
+            if isinstance(d.get("detail"), str) and d["detail"]:
+                try:                                  # detail хранится строкой
+                    d["detail"] = json.loads(d["detail"])
+                except (ValueError, TypeError):
+                    d["detail"] = {}
+            out.append(d)
+        return out
 
     def last_alert_ts(self, user_id: int, metric: str, symbol: str) -> Optional[float]:
         with self._lock:
@@ -1615,5 +1794,20 @@ class Store:
                 "SELECT ts FROM alert_events WHERE user_id=? AND metric=? AND symbol=?"
                 " ORDER BY ts DESC LIMIT 1",
                 (int(user_id), str(metric)[:12], str(symbol)[:32]),
+            ).fetchone()
+        return float(row["ts"]) if row else None
+
+    def last_alert_any(self, user_id: int, metric: str) -> Optional[float]:
+        """Последний сигнал метрики по любой монете — якорь окна в режиме ALL.
+
+        Подписка «все монеты» ловит лидера каждой метрики: сигналы хранятся
+        под конкретными монетами, поэтому окно перезапускаем от самого
+        свежего из них.
+        """
+        with self._lock:
+            row = self._db.execute(
+                "SELECT ts FROM alert_events WHERE user_id=? AND metric=?"
+                " ORDER BY ts DESC LIMIT 1",
+                (int(user_id), str(metric)[:12]),
             ).fetchone()
         return float(row["ts"]) if row else None

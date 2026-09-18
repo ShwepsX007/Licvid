@@ -17,7 +17,8 @@
 """
 from __future__ import annotations
 
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+import html
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 HOUR = 3600
 
@@ -33,12 +34,90 @@ METRICS: Tuple[Tuple[str, str, str], ...] = (
     ("cvd", "CVD", "перекос покупок и продаж за час, $"),
     ("oi", "OI", "изменение открытого интереса за час, $"),
 )
+#: ключи метрик по порядку — «liq», «vol», «cvd», «oi»
+METRIC_KEYS: Tuple[str, ...] = tuple(k for k, _t, _h in METRICS)
+#: иконки метрик для сообщений и экранов бота
+_METRIC_ICON: Dict[str, str] = {"liq": "💥", "vol": "📦", "cvd": "🌊", "oi": "📊"}
+
 DEFAULT_WINDOW = "24h"
 DEFAULT_METRIC = "liq"
 #: сколько монет показываем в матрице — больше смысла не имеет, только шум
 TOP_SYMBOLS = 10
 #: минимум часовых точек с движением, иначе коэффициент не считаем
 MIN_POINTS = 6
+
+#: пороги алертов по корреляции: «в одну сторону» (плюс) и «в противофазе»
+#: (минус). 0.5 — «монета выше порога 0.5 или равна ему».
+ALERT_THRESHOLDS: Tuple[float, ...] = (0.3, 0.4, 0.5, 0.6, 0.7, 0.8)
+#: значения по умолчанию: ждём сильную связь в любую сторону
+DEFAULT_ALERT_OPP = -0.6
+DEFAULT_ALERT_SAME = 0.6
+#: пауза между сигналами по одной паре, сек: связь не новость каждые 8 секунд
+MIN_ALERT_GAP_SEC = 300.0
+
+
+def default_alert() -> dict:
+    return {"enabled": False, "window": DEFAULT_WINDOW,
+            "opp": DEFAULT_ALERT_OPP, "same": DEFAULT_ALERT_SAME}
+
+
+#: настройки алертов по каждой метрике: окно и два порога — свои
+DEFAULT_ALERTS: Dict[str, dict] = {k: default_alert() for k, _t, _h in METRICS}
+
+
+def _clamp(v, lo: float, hi: float) -> float:
+    return max(lo, min(hi, v))
+
+
+def normalize_alerts(raw: Any) -> Dict[str, dict]:
+    """Настройки алертов по корреляции: у каждой метрики свои.
+
+    Читаются оба вида записи: новая (``{"liq": {...}, "cvd": {...}}``) и
+    старая плоская (окно и пороги лежат прямо в конфиге сервиса) — так
+    настройки, сохранённые прежними версиями, не теряются.
+    """
+    src = raw if isinstance(raw, dict) else {}
+    nested = src.get("alerts") if isinstance(src.get("alerts"), dict) else src
+    flat = isinstance(nested, dict) and any(
+        k in nested for k in ("opp", "same", "enabled", "on"))
+    out: Dict[str, dict] = {}
+    for key, _title, _hint in METRICS:
+        base = default_alert()
+        if flat:
+            row = dict(nested)
+        else:
+            row = nested.get(key) if isinstance(nested.get(key), dict) else {}
+        enabled = row.get("enabled")
+        if enabled is None:
+            enabled = row.get("on")
+        if enabled is not None:
+            base["enabled"] = bool(enabled)
+        if row.get("window"):
+            base["window"] = window_key(row.get("window"))
+        if row.get("opp") is not None:
+            base["opp"] = round(_clamp(_num(row.get("opp"), base["opp"]), -1.0, 0.0), 3)
+        if row.get("same") is not None:
+            base["same"] = round(_clamp(_num(row.get("same"), base["same"]), 0.0, 1.0), 3)
+        out[key] = base
+    return out
+
+
+def alert_gap_sec(window_min: int) -> float:
+    """Пауза пары: не чаще четверти окна, но не меньше пяти минут.
+
+    Связь монет живёт часами — сигнал про неё каждые восемь секунд был бы
+    спамом, поэтому окно 1 ч даёт четверть часа тишины, а сутки — шесть часов.
+    """
+    win = max(60.0, float(window_min or 0) * 60.0)
+    return max(MIN_ALERT_GAP_SEC, win / 4.0)
+
+
+def alert_thresholds() -> List[float]:
+    return list(ALERT_THRESHOLDS)
+
+
+def alert_enabled_count(alerts_cfg: Dict[str, dict]) -> int:
+    return sum(1 for row in (alerts_cfg or {}).values() if (row or {}).get("enabled"))
 
 
 def window_minutes(key: str) -> int:
@@ -83,6 +162,10 @@ def metric_title(key: str) -> str:
         if k == key:
             return title
     return METRICS[0][1]
+
+
+def metric_icon(key: str) -> str:
+    return _METRIC_ICON.get(str(key), "🔗")
 
 
 def metric_hint(key: str) -> str:
@@ -354,6 +437,127 @@ def _coin_list(symbols: Sequence[str]) -> str:
     return ", ".join(s.replace("_USDT", "") for s in symbols) if symbols else "—"
 
 
+def find_pairs(matrix: Dict[str, dict], opp: float, same: float,
+               limit: int = 60) -> List[dict]:
+    """Пары, перешагнувшие порог: ``opp`` — противофаза, ``same`` — в одну сторону.
+
+    Порог включающий: «монета выше порога 0.5 или равна ему» — это ``r >= 0.5``,
+    как и просил пользователь. Пары сортируются по силе связи.
+    """
+    out: List[dict] = []
+    for a, row in (matrix or {}).items():
+        for b, r in (row or {}).items():
+            if a >= b or r is None:
+                continue
+            val = _num(r)
+            if val <= opp:
+                out.append({"a": a, "b": b, "r": round(val, 3), "kind": "opp"})
+            elif val >= same:
+                out.append({"a": a, "b": b, "r": round(val, 3), "kind": "same"})
+    out.sort(key=lambda p: abs(p["r"]), reverse=True)
+    return out[:max(1, int(limit))]
+
+
+def evaluate_alerts(alerts_cfg: Dict[str, dict], pictures: Dict[str, dict],
+                    peers: int = 2) -> List[dict]:
+    """Сигналы по корреляции: одна карточка на метрику, лидер и «ещё».
+
+    ``pictures`` — готовые картины по окнам (``{ключ окна: build(...)}``).
+    У каждой метрики своё окно и свои пороги, поэтому и сигналы независимы:
+    ликвидации могут ждать противофазу на часе, а CVD — связь в одну сторону
+    на сутках.
+    """
+    out: List[dict] = []
+    for key, _title, _hint in METRICS:
+        cfg = (alerts_cfg or {}).get(key) or {}
+        if not cfg.get("enabled"):
+            continue
+        pic = (pictures or {}).get(cfg.get("window")) or {}
+        matrix = (pic.get("matrices") or {}).get(key) or {}
+        pairs = find_pairs(matrix, _num(cfg.get("opp"), DEFAULT_ALERT_OPP),
+                           _num(cfg.get("same"), DEFAULT_ALERT_SAME))
+        if not pairs:
+            continue
+        lead = pairs[0]
+        same_kind = [p for p in pairs[1:] if p["kind"] == lead["kind"]][:max(0, peers)]
+        out.append({
+            "metric": key,
+            "metric_title": metric_title(key),
+            "a": lead["a"], "b": lead["b"], "r": lead["r"], "kind": lead["kind"],
+            "threshold": (cfg.get("opp") if lead["kind"] == "opp" else cfg.get("same")),
+            "window": cfg.get("window") or DEFAULT_WINDOW,
+            "window_min": window_minutes(cfg.get("window") or DEFAULT_WINDOW),
+            "window_label": window_label(cfg.get("window") or DEFAULT_WINDOW),
+            "hours": pic.get("hours"),
+            "coins": len(pic.get("symbols") or []),
+            "symbol": f'{lead["a"]}|{lead["b"]}',
+            "value": lead["r"],
+            "abs": abs(lead["r"]),
+            "peers": same_kind,
+        })
+    out.sort(key=lambda h: abs(_num(h.get("r"))), reverse=True)
+    return out
+
+
+def peer_line(peers: Iterable[dict], kind: str, n: int = 2) -> str:
+    """«ещё в противофазе: SOL ↔ XRP −0.58» — остальные пары того же знака."""
+    head = "ещё в противофазе" if kind == "opp" else "ещё в одну сторону"
+    parts = []
+    for p in list(peers or [])[:max(0, int(n))]:
+        pair = (f"{_coin_list([p.get('a')])} ↔ {_coin_list([p.get('b')])}")
+        parts.append(f"{html.escape(pair)} <code>{float(p.get('r') or 0):+.2f}</code>")
+    return f"{head}: " + ", ".join(parts) if parts else ""
+
+
+def format_alert_html(hit: dict, site_url: str = "https://liqscope.online") -> str:
+    """Сигнал алерта по корреляции — тем же оформлением, что и остальные."""
+    from alerts import footer_html
+    kind = "opp" if str(hit.get("kind")) == "opp" else "same"
+    word = "в противофазе" if kind == "opp" else "в одну сторону"
+    a, b = _coin_list([hit.get("a")]), _coin_list([hit.get("b")])
+    r = _num(hit.get("r"))
+    thr = _num(hit.get("threshold"))
+    lines = [
+        f'🔗 <b>Алерт · корреляции · {html.escape(str(hit.get("metric_title") or ""))}</b>',
+        f"<b>{html.escape(a)} ↔ {html.escape(b)}</b>  <code>r = {r:+.2f}</code>",
+        f"{word} · порог <code>{thr:+.2f}</code> ·"
+        f" окно <code>{html.escape(str(hit.get('window_label') or ''))}</code>",
+    ]
+    extra = peer_line(hit.get("peers") or [], kind)
+    if extra:
+        lines.append(extra)
+    if hit.get("hours"):
+        lines.append(f"точек по часам: <code>{int(hit['hours'])}</code>")
+    site = (site_url or "https://liqscope.online").rstrip("/")
+    href = html.escape(f"{site}/cabinet#correlations", quote=True)
+    lines.append(f'<a href="{href}">тепловая карта</a>')
+    lines.append(footer_html(site))
+    return "\n".join(lines)
+
+
+def alerts_line(alerts_cfg: Dict[str, dict]) -> str:
+    """Короткая строка для экрана корреляций: где вообще включены сигналы."""
+    on = [metric_title(k) for k, _t, _h in METRICS
+          if (alerts_cfg or {}).get(k, {}).get("enabled")]
+    return "🔔 Алерты: " + (", ".join(on) if on else "выключены")
+
+
+def format_alerts_config(alerts_cfg: Dict[str, dict]) -> str:
+    """Экран настроек алертов корреляций: по строке на метрику."""
+    out = ["🔔 <b>Алерты по корреляции</b>"]
+    for key, _title, _hint in METRICS:
+        cfg = (alerts_cfg or {}).get(key) or {}
+        mark = "включён" if cfg.get("enabled") else "выключен"
+        out.append(
+            f"{_METRIC_ICON.get(key, '🔗')} <b>{html.escape(metric_title(key))}</b>"
+            f" · {mark}"
+            f" · окно <code>{html.escape(window_label(cfg.get('window') or DEFAULT_WINDOW))}</code>"
+            f" · противофаза <code>{_num(cfg.get('opp'), DEFAULT_ALERT_OPP):+.2f}</code>"
+            f" · в одну сторону <code>{_num(cfg.get('same'), DEFAULT_ALERT_SAME):+.2f}</code>"
+        )
+    return "\n".join(out)
+
+
 def format_text(res: dict, lang: str = "ru", site: str = "") -> str:
     """Текст сводки для Telegram (и подпись на сайте)."""
     en = str(lang).lower().startswith("en")
@@ -367,8 +571,8 @@ def format_text(res: dict, lang: str = "ru", site: str = "") -> str:
         lines.append(f"Window: {res.get('hours')} hourly points, coins: {len(res.get('symbols') or [])}")
     else:
         lines.append(f"<b>🔗 Корреляции валют · окно {res.get('window_label')}</b>")
-        lines.append(f"Точек по часам: {res.get('hours')} · монет в расчёте: "
-                     f"{len(res.get('symbols') or [])}")
+        lines.append(f"Точек по часам: <code>{res.get('hours')}</code>"
+                     f" · монет в расчёте: <code>{len(res.get('symbols') or [])}</code>")
     if pos:
         head = "Moving together:" if en else "Шли вместе:"
         lines.append("\n<b>" + head + "</b>")

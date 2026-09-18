@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import secrets
 import threading
 import time
@@ -77,6 +78,43 @@ def _set_vid(response: Response, vid: str) -> None:
         max_age=400 * 86400, path="/",
         secure=ctx.cookie_secure,
     )
+
+
+# Кто не посетитель: краулеры, превью мессенджеров, скрипты и мониторинги.
+# Иначе один прогон бота выглядит как десятки «уникальных посетителей».
+BOT_RE = re.compile(
+    r"bot|crawler|spider|crawl|slurp|curl|wget|python-requests|python-httpx|"
+    r"httpx|aiohttp|okhttp|java/|libwww|feed|scrapy|httpclient|headless|"
+    r"phantom|puppeteer|playwright|monitor|uptime|pingdom|preview|facebook|"
+    r"telegram|whatsapp|skype|slack|discord|twitter|linkedin|embedly|"
+    r"googlebot|bingbot|yandex|duckduck|baidu|semrush|ahrefs|mj12|dotbot|"
+    r"petal|applebot|petalbot|dataprovider|go-http-client|axios|node-fetch|"
+    r"postmanruntime|insomnia",
+    re.I,
+)
+
+
+def _ua_text(request: Request) -> str:
+    return (request.headers.get("user-agent") or "").strip()[:180]
+
+
+def _is_bot_ua(ua: str) -> bool:
+    ua = (ua or "").strip()
+    if not ua:                      # без UA — точно не браузер
+        return True
+    if BOT_RE.search(ua):
+        return True
+    # браузерные маркеры: у настоящих браузеров есть хотя бы один из них
+    return not re.search(r"Mozilla/5\.0|AppleWebKit|Gecko/|Presto/|Trident/", ua)
+
+
+def _wants_html(request: Request) -> bool:
+    """Запрос страницы, а не картинки/ассета: важно для счётчика переходов."""
+    dest = (request.headers.get("sec-fetch-dest") or "").strip().lower()
+    if dest:
+        return dest in ("document", "iframe", "empty")
+    accept = (request.headers.get("accept") or "").lower()
+    return ("text/html" in accept) or accept.startswith("*/*")
 
 
 def current_user(request: Request) -> Optional[dict]:
@@ -823,6 +861,17 @@ def register_account_routes(app) -> None:
         enabled = bool(body.get("enabled", True))
         return ctx.store.toggle_user_service(user["id"], slug, enabled)
 
+    def _alert_since(store, user):
+        """Время прошлых сигналов метрик: якорь перезапуска окна."""
+        def last_fire(metric, symbol):
+            try:
+                if not symbol or str(symbol).upper() in ("ALL", ""):
+                    return store.last_alert_any(user["id"], metric)
+                return store.last_alert_ts(user["id"], metric, symbol)
+            except Exception:
+                return None
+        return last_fire
+
     @router.get("/api/account/alerts")
     async def api_alerts_get(request: Request):
         from alerts import live_snapshot, normalize_config, presets
@@ -843,7 +892,9 @@ def register_account_routes(app) -> None:
             "config": cfg,
             "subscribed": bool(row and row.get("enabled")),
             "presets": presets(),
-            "live": live_snapshot(cfg, market),
+            # превью считаем от прошлого сигнала: в кабинете видно ровно то,
+            # из чего соберётся следующее сообщение (окно метрики заново)
+            "live": live_snapshot(cfg, market, since=_alert_since(ctx, user)),
             "history": ctx.store.list_alert_events(user["id"], 48),
             "symbols": list(ctx.symbols_fn() or [])[:60],
         }
@@ -874,12 +925,13 @@ def register_account_routes(app) -> None:
             "ok": True,
             "config": cfg,
             "subscribed": True,
-            "live": live_snapshot(cfg, market),
+            "live": live_snapshot(cfg, market, since=_alert_since(ctx.store, user)),
         }
 
     @router.get("/api/account/correlations")
     async def api_correlations(request: Request, window: str = "", metric: str = ""):
-        from correlations import DEFAULT_METRIC, DEFAULT_WINDOW, WINDOWS, window_key
+        from correlations import (DEFAULT_METRIC, DEFAULT_WINDOW, WINDOWS,
+                                  normalize_alerts, window_key)
         user = current_user(request)
         if not user:
             return _need_auth()
@@ -902,13 +954,16 @@ def register_account_routes(app) -> None:
         data = dict(data)
         data["subscribed"] = bool(row and row.get("enabled"))
         data["config"] = {"window": win, "metric": met}
+        # алерты по корреляции: у каждой метрики своё окно и два порога
+        data["alerts"] = normalize_alerts(cfg)
         data["windows"] = data.get("windows") or [
             {"key": k, "minutes": m} for k, m in WINDOWS]
         return {"ok": True, **data}
 
     @router.post("/api/account/correlations")
     async def api_correlations_save(request: Request):
-        from correlations import DEFAULT_METRIC, DEFAULT_WINDOW, window_key
+        from correlations import (DEFAULT_METRIC, DEFAULT_WINDOW,
+                                  normalize_alerts, window_key)
         user = current_user(request)
         if not user:
             return _need_auth()
@@ -918,15 +973,24 @@ def register_account_routes(app) -> None:
             body = await request.json()
         except Exception:
             body = {}
+        row = ctx.store.get_user_service(user["id"], "correlations")
+        prev = (row or {}).get("config") or {}
+        # если клиент прислал только окно и метрику (старая страница в кэше
+        # браузера) — настройки алертов не затираем, а оставляем как были
+        alerts_raw = (body or {}).get("alerts")
+        alerts = normalize_alerts(alerts_raw if alerts_raw is not None else prev)
         cfg = {
             "window": window_key((body or {}).get("window") or DEFAULT_WINDOW),
             "metric": str((body or {}).get("metric") or DEFAULT_METRIC),
+            "alerts": alerts,
         }
         r = ctx.store.set_user_service_config(
             user["id"], "correlations", cfg, enabled=True)
         if not r.get("ok"):
             return JSONResponse(r, status_code=400)
-        return {"ok": True, "config": cfg, "subscribed": True}
+        return {"ok": True, "config": {"window": cfg["window"],
+                                       "metric": cfg["metric"]},
+                "alerts": alerts, "subscribed": True}
 
     @router.get("/api/account/watchlist")
     async def api_watchlist(request: Request):
@@ -1122,13 +1186,22 @@ def register_account_routes(app) -> None:
             photos.append({
                 "id": p["id"],
                 "name": p.get("name") or "",
+                "kind": str(p.get("kind") or "post"),
                 "exists": bool(p.get("exists")),
                 "url": f"/api/admin/digest/photos/{p['id']}/file",
             })
+        # Фото разложены по рубрикам: в сводку канала (раз в N часов) и в
+        # вечерний дайджест. Так админ видит, что уйдёт в каждый пост.
+        by_kind = {"post": [], "digest": []}
+        for p in photos:
+            by_kind.setdefault(str(p.get("kind") or "post"), []).append(p)
         return {
             "ok": True,
             "heads": heads,
             "photos": photos,
+            "photos_by_kind": by_kind,
+            "kinds": {"post": "Сводка в канал",
+                      "digest": "Дневной дайджест"},
             "using_default_heads": not bool(heads),
             "using_default_photos": not bool(photos),
         }
@@ -1166,13 +1239,21 @@ def register_account_routes(app) -> None:
             return JSONResponse(
                 {"ok": False, "error": "bad_data", "hint": PHOTO_ERR["bad_data"]},
                 status_code=400)
-        r = ctx.store.add_digest_photo(blob, filename=filename, actor_id=actor["id"])
+        # Рубрика: "post" — сводка раз в N часов, "digest" — дневной дайджест.
+        # Приходит из формы; всё незнакомое считаем постовым фото, как раньше.
+        kind = str(request.query_params.get("kind")
+                   or request.headers.get("x-photo-kind") or "").strip().lower()
+        if kind not in ("post", "digest"):
+            kind = "post"
+        r = ctx.store.add_digest_photo(blob, filename=filename,
+                                       actor_id=actor["id"], kind=kind)
         if not r.get("ok"):
             code = str(r.get("error") or "error")
             r = dict(r)
             r["hint"] = PHOTO_ERR.get(code, code)
             return JSONResponse(r, status_code=400)
-        return {"ok": True, "id": r["id"], "name": r.get("name")}
+        return {"ok": True, "id": r["id"], "name": r.get("name"),
+                "kind": r.get("kind") or kind}
 
     @router.get("/api/admin/digest/photos/{photo_id}/file")
     async def admin_digest_photo_file(request: Request, photo_id: int):
@@ -1184,6 +1265,22 @@ def register_account_routes(app) -> None:
         if not row or not os.path.isfile(path):
             return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
         return FileResponse(path)
+
+    @router.post("/api/admin/digest/photos/{photo_id}/kind")
+    async def admin_digest_photo_kind(request: Request, photo_id: int):
+        """Перенести фото в другую рубрику: сводка ⇄ дневной дайджест."""
+        actor, err = _admin(request)
+        if err:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        kind = "digest" if str((body or {}).get("kind") or "").strip().lower() == "digest" \
+            else "post"
+        if not ctx.store.set_digest_photo_kind(photo_id, kind, actor_id=actor["id"]):
+            return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
+        return {"ok": True, "id": photo_id, "kind": kind}
 
     @router.post("/api/admin/digest/photos/{photo_id}/delete")
     async def admin_digest_del_photo(request: Request, photo_id: int):
@@ -1199,15 +1296,27 @@ def register_account_routes(app) -> None:
     @app.middleware("http")
     async def visit_and_vid(request: Request, call_next):
         path = request.url.path or "/"
+        ua = _ua_text(request)
+        bot = _is_bot_ua(ua)
+        iph = hash_ip(ctx.secret, _client_ip(request))
         vid = request.cookies.get(COOKIE_VID) or ""
         new_vid = ""
-        if not vid:
-            new_vid = secrets.token_urlsafe(12)
-            vid = new_vid
+        if not vid and not bot:
+            # Тот же гость без cookie не должен «размножаться»: если этой
+            # связке ip+ua vid уже выдан за сутки — берём его.
+            vid = ""
+            if ctx.store:
+                try:
+                    vid = ctx.store.visit_vid(iph, ua)
+                except Exception as e:            # noqa: BLE001
+                    log.debug("visit vid: %s", e)
+            if not vid:
+                new_vid = secrets.token_urlsafe(12)
+                vid = new_vid
         response = await call_next(request)
         if new_vid:
             _set_vid(response, new_vid)
-        # страницы, не статика/апи/ws
+        # переходы по страницам: не статика/апи/ws и не служебные запросы
         if (
             ctx.store
             and request.method in ("GET", "HEAD")
@@ -1215,11 +1324,12 @@ def register_account_routes(app) -> None:
             and not path.startswith("/static")
             and not path.startswith("/api")
             and path != "/ws"
+            and _wants_html(request)
         ):
             try:
                 user = current_user(request)
-                iph = hash_ip(ctx.secret, _client_ip(request))
-                ctx.store.record_visit(path, vid, user["id"] if user else None, iph)
+                ctx.store.record_visit(path, vid, user["id"] if user else None, iph,
+                                       ua=ua, bot=bot)
             except Exception as e:
                 log.debug("visit: %s", e)
         return response

@@ -1,7 +1,7 @@
 """Open Interest (открытый интерес) — мультибиржевой трекер.
 
 Все источники — публичные REST без ключей:
-  мгновенный OI: binance, bybit, okx, gate, bitget, htx, bitmex (опрос);
+  мгновенный OI: binance, bybit, okx, gate, bitget, htx (опрос);
   история 5m:    binance (openInterestHist, до 500 точек),
                  bybit (open-interest 5min, до 200),
                  gate (contract_stats 5m).
@@ -41,7 +41,7 @@ BACKFILL_TTL = 600.0                # историю обновляем раз �
 STALE_LEG_SEC = 300.0               # нога старше — не входит в текущий тотал
 MAX_WATCHED = 12                    # столько символов держим тёплыми
 
-EXCHANGES = ("binance", "bybit", "okx", "gate", "bitget", "htx", "bitmex",
+EXCHANGES = ("binance", "bybit", "okx", "gate", "bitget", "htx",
              "dydx", "kraken", "bitfinex", "hyperliquid")
 HIST_EXCHANGES = ("binance", "bybit", "gate")   # у кого есть 5m-история
 
@@ -51,7 +51,6 @@ OKX_REST = "https://www.okx.com"
 GATE_REST = "https://api.gateio.ws/api/v4/futures/usdt"
 BITGET_REST = "https://api.bitget.com"
 HTX_REST = "https://api.hbdm.com"
-BITMEX_REST = "https://www.bitmex.com/api/v1"
 DYDX_REST = os.getenv("DYDX_REST", "https://indexer.dydx.trade")
 KRAKEN_FUT_REST = os.getenv("KRAKEN_FUT_REST",
                             "https://futures.kraken.com/derivatives/api/v3")
@@ -210,41 +209,6 @@ def parse_htx_oi(payload, price: Optional[float]) -> Optional[float]:
     if amt is None or px is None:
         return None
     return amt * px
-
-
-def parse_bitmex_oi(payload, meta: Optional[dict],
-                    price: Optional[float]) -> Optional[float]:
-    """[{openInterest (контракты), lastPrice}].
-
-    У инверсных (XBTUSD) 1 контракт = 1 USD, у линейных — через
-    multiplier из метаданных инструментов (та же математика, что
-    и для ликвидаций в market_feed.parse_bitmex_msg).
-    """
-    rows = payload if isinstance(payload, list) else []
-    if not rows or not isinstance(rows[0], dict):
-        return None
-    try:
-        contracts = float(rows[0].get("openInterest") or 0)
-    except (TypeError, ValueError):
-        return None
-    if contracts <= 0:
-        return None
-    meta = meta or {}
-    if meta.get("inverse"):
-        return contracts
-    mult = meta.get("multiplier") or 0
-    try:
-        mult = float(mult)
-    except (TypeError, ValueError):
-        return None
-    if mult <= 0:
-        return None
-    px = _num(price)
-    if px is None:                           # запасной путь — цена из ответа
-        px = _num(rows[0].get("lastPrice"))
-    if px is None:
-        return None
-    return contracts * mult * px
 
 
 # ----------------------------------------------------------------------------
@@ -409,11 +373,9 @@ def parse_hl_oi(payload, coin: str, price: Optional[float]) -> Optional[float]:
 
 class OpenInterestTracker:
     def __init__(self,
-                 price_fn: Optional[Callable[[str], Optional[float]]] = None,
-                 bitmex_meta_fn: Optional[Callable[[], dict]] = None):
+                 price_fn: Optional[Callable[[str], Optional[float]]] = None):
         self._session: Optional[aiohttp.ClientSession] = None
         self._price = price_fn or (lambda s: None)
-        self._bitmex_meta = bitmex_meta_fn or (lambda: {})
         # symbol -> {bucket_ts: {exchange: usd}}
         self._series: Dict[str, Dict[int, Dict[str, float]]] = {}
         # symbol -> {exchange: (ts, usd)} — последний живой опрос
@@ -422,7 +384,6 @@ class OpenInterestTracker:
         self._live_hist: Dict[str, Deque[Tuple[float, Dict[str, float]]]] = {}
         self._watched: Dict[str, float] = {}          # symbol -> last access
         self._backfilled_at: Dict[str, float] = {}
-        self._bitmex_sym_cache: Dict[str, Optional[str]] = {}
         self._dydx_markets_cache: dict = {}
         self._kraken_meta: Optional[dict] = None
         self._kraken_meta_cache: dict = {}
@@ -436,20 +397,6 @@ class OpenInterestTracker:
     @staticmethod
     def _usd_pair(symbol: str) -> str:
         return f"{base_of(symbol)}USDT"
-
-    def bitmex_symbol(self, symbol: str) -> Optional[str]:
-        if symbol in self._bitmex_sym_cache:
-            return self._bitmex_sym_cache[symbol]
-        base = base_of(symbol)
-        cands = ["XBTUSD", "XBTUSDT"] if base == "BTC" else \
-            [f"{base}USDT", f"{base}USD"]
-        known = self._bitmex_meta() or {}
-        pick = next((c for c in cands if c in known), None)
-        if pick is None and (not known or base == "BTC"):
-            pick = cands[0]          # метаданные ещё не загрузились — пробуем
-        if pick is not None and (known or base == "BTC"):
-            self._bitmex_sym_cache[symbol] = pick
-        return pick
 
     def watched_symbols(self) -> List[str]:
         return sorted(self._watched, key=self._watched.get, reverse=True)
@@ -553,15 +500,6 @@ class OpenInterestTracker:
             self._session, f"{HTX_REST}/linear-swap-api/v1/swap_open_interest",
             {"contract_code": f"{base_of(symbol)}-USDT"})
         return parse_htx_oi(data, self._price(symbol))
-
-    async def _fetch_bitmex(self, symbol: str) -> Optional[float]:
-        bsym = self.bitmex_symbol(symbol)
-        if not bsym:
-            return None
-        data = await _get_json(
-            self._session, f"{BITMEX_REST}/instrument", {"symbol": bsym})
-        meta = (self._bitmex_meta() or {}).get(bsym) or {}
-        return parse_bitmex_oi(data, meta, self._price(symbol))
 
     async def _fetch_dydx(self, symbol: str) -> Optional[float]:
         base = base_of(symbol)
@@ -681,7 +619,6 @@ class OpenInterestTracker:
                 "gate": self._fetch_gate(symbol),
                 "bitget": self._fetch_bitget(symbol),
                 "htx": self._fetch_htx(symbol),
-                "bitmex": self._fetch_bitmex(symbol),
                 "dydx": self._fetch_dydx(symbol),
                 "kraken": self._fetch_kraken(symbol),
                 "bitfinex": self._fetch_bitfinex(symbol),

@@ -15,6 +15,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 import aiohttp
 
+from bot_i18n import (DEFAULT_LANG, LANGS, SWITCH_TEXT, lang_label,
+                      normalize_lang, other_lang, translate, translate_payload)
 from refs import ex_link, gate_line, gate_url
 
 log = logging.getLogger("liqscope.bot")
@@ -111,6 +113,10 @@ class TelegramBot:
         self._mail_at: Dict[str, float] = {}        # "tg:адрес" -> когда слали письмо
         self.mailer = None                          # mailer.Mailer из server.py
         self._menu_msg: Dict[int, int] = {}         # chat_id -> последнее меню
+        # chat_id -> язык пользователя. Держим рядом с обработчиками, а не
+        # ходим в базу на каждое сообщение: язык нужен и при отправке алертов,
+        # которым некогда ждать SQLite.
+        self._langs: Dict[int, str] = {}
         # chat_id -> id последнего отправленного сообщения. Нужен, чтобы не
         # править меню, которое уже уехало вверх: id сообщений в чате растут,
         # и по этой паре видно, ушло ли после меню что-то ещё (алерты, отчёты).
@@ -198,7 +204,7 @@ class TelegramBot:
     EXCHANGE_NAMES = {
         "binance": "Binance", "bybit": "Bybit", "okx": "OKX",
         "gate": "Gate.io", "bitget": "Bitget", "htx": "HTX",
-        "bitmex": "BitMEX", "hyperliquid": "Hyperliquid", "dydx": "dYdX",
+        "hyperliquid": "Hyperliquid", "dydx": "dYdX",
         "kraken": "Kraken", "bitfinex": "Bitfinex", "oxa": "0xArchive",
     }
 
@@ -244,26 +250,71 @@ class TelegramBot:
         return []
 
     def _reply_kb(self, user: Optional[dict] = None) -> dict:
+        """Твёрдая клавиатура чата: одна кнопка «☰ Меню».
+
+        Раньше внизу висело полотно из восьми кнопок-разделов — низ экрана
+        занимал пол-чата, а часть кнопок дублировала друг друга. Теперь там
+        одна кнопка: она открывает меню, а все разделы приходят
+        инлайн-кнопками под сообщением (см. ``_menu_kb``).
+        """
+        return {
+            "keyboard": [[{"text": "☰ Меню"}]],
+            "resize_keyboard": True,
+            "is_persistent": True,
+            "input_field_placeholder": "меню — кнопкой ☰ внизу, разделы — кнопками в сообщении",
+        }
+
+    def _menu_rows(self, user: Optional[dict] = None) -> List[List[dict]]:
+        """Ряды инлайн-меню: разделы, язык, канал, админ, напоминание о почте."""
+        user = user or {}
         rows = [
-            [{"text": "☰ Меню"}],                     # всегда под рукой
-            [{"text": "👤 Кабинет"}, {"text": "⚡ Терминал"}],
-            [{"text": "📊 Статистика"}, {"text": "🩺 Биржи"}],
-            [{"text": "🛠 Сервисы"}, {"text": "📰 Лента"}],
-            [{"text": "🔔 Алерты"}, {"text": "📣 Канал"}],
+            [{"text": "👤 Кабинет", "callback_data": "cabinet"},
+             {"text": "⚡ Терминал", "callback_data": "terminal"}],
+            [{"text": "📊 Статистика", "callback_data": "stats"},
+             {"text": "🩺 Биржи", "callback_data": "health"}],
+            [{"text": "🛠 Сервисы", "callback_data": "services"},
+             {"text": "📰 Лента", "callback_data": "liq"}],
+            # Язык — рядом с каналом: переключатель один на весь бот
+            [{"text": SWITCH_TEXT, "callback_data": "lang"},
+             {"text": "📣 Канал", "callback_data": "channel"}],
         ]
-        if user and user.get("is_admin"):
-            rows.append([{"text": "★ Админка"}])
-        if user is not None:
+        if user:
             email = (user.get("email") or "").strip()
             if not email or not user.get("email_verified"):
                 # Основной вход — почта: напоминаем, пока адрес не подтверждён
-                rows.append([{"text": "✉️ Подтвердить почту"}])
-        return {
-            "keyboard": rows,
-            "resize_keyboard": True,
-            "is_persistent": True,
-            "input_field_placeholder": "меню внизу экрана",
-        }
+                rows.append([{"text": "✉️ Подтвердить почту",
+                              "callback_data": "a:vmail"}])
+            if user.get("is_admin"):
+                rows.append([{"text": "★ Админка", "callback_data": "nav:admin"}])
+        # Партнёрская ссылка кнопкой: url-кнопку Telegram подсвечивает
+        # как ссылку, а не как действие бота
+        rows.append([{"text": "💠 Торговать на Gate — скидка на комиссию",
+                      "url": gate_url()}])
+        return rows
+
+    def _menu_kb(self, user: Optional[dict] = None) -> dict:
+        """Инлайн-меню под сообщением — то, что раньше висело кнопками внизу."""
+        return {"inline_keyboard": self._menu_rows(user)}
+
+    async def push_reply_kb(self, chat_id: int, user: Optional[dict] = None) -> None:
+        """Поставить внизу чата одну твёрдую кнопку «☰ Меню».
+
+        Твёрдая клавиатура приезжает вместе с сообщением и остаётся в чате до
+        замены, поэтому служебное сообщение сразу удаляем: в чате остаётся
+        только экран с инлайн-кнопками, а кнопка внизу — на месте.
+        """
+        mid = await self.send(chat_id, "⌨️", self._reply_kb(user), silent=True)
+        if not mid:
+            return
+        await self.drop_menu(chat_id, mid)
+        try:
+            cid = int(chat_id)
+            # Удалённый id не должен считаться «последним сообщением»: иначе
+            # меню решит, что уехало вверх, и пришлёт лишний экран.
+            if self._last_msg.get(cid) == int(mid):
+                self._last_msg[cid] = int(self._menu_msg.get(cid) or 0)
+        except (TypeError, ValueError):
+            pass
 
     def _reply_cmd(self, text: str) -> str:
         key = " ".join((text or "").strip().lower().split())
@@ -274,6 +325,7 @@ class TelegramBot:
         key = key.replace("★ ", "").replace("👤 ", "").replace("⚡ ", "")
         key = key.replace("📊 ", "").replace("🩺 ", "").replace("🛠 ", "")
         key = key.replace("📰 ", "").replace("🔔 ", "").replace("📣 ", "")
+        key = key.replace("🌐 ", "")
         key = key.replace("✉️ ", "").replace("📧 ", "")
         return {
             "кабинет": "cabinet",
@@ -290,6 +342,24 @@ class TelegramBot:
             "алерты по объёму": "al",
             "канал": "channel",
             "админка": "admin",
+            # Английские подписи панели — тот же язык, другая раскладка:
+            # после переключения на английский кнопки иначе не работали бы.
+            "account": "cabinet",
+            "terminal": "terminal",
+            "stats": "stats",
+            "exchanges": "health",
+            "services": "services",
+            "feed": "liq",
+            "feed liq": "liq",
+            "alerts": "al",
+            "volume alerts": "al",
+            "channel": "channel",
+            "admin": "admin",
+            "verify email": "mail",
+            "menu": "help",
+            "ru / eng": "lang",
+            "ru/eng": "lang",
+            "lang": "lang",
         }.get(key, "")
 
     async def start(self) -> None:
@@ -361,9 +431,70 @@ class TelegramBot:
             await self._session.close()
             self._session = None
 
+    def lang_of(self, chat_id: Any) -> str:
+        """Язык получателя: то, что человек выбрал кнопкой «🌐 RU/ENG».
+
+        Пишем язык в кэш при каждом сообщении и в аккаунт при переключении,
+        поэтому здесь не бывает походов в базу: функция зовётся на каждой
+        отправке, в том числе из рассылки алертов.
+        """
+        try:
+            return self._langs.get(int(chat_id), DEFAULT_LANG)
+        except (TypeError, ValueError):
+            return DEFAULT_LANG
+
+    def remember_lang(self, chat_id: Any, lang: str) -> str:
+        """Запомнить язык получателя (и записать в аккаунт, если он есть)."""
+        code = normalize_lang(lang)
+        try:
+            self._langs[int(chat_id)] = code
+        except (TypeError, ValueError):
+            pass
+        return code
+
+    def warm_langs(self, rows) -> None:
+        """Запомнить языки получателей перед массовой отправкой.
+
+        Сигналы алертов и рассылка уходят людям, которые могли ни разу не
+        написать боту после рестарта: без прогрева кэша они получили бы
+        русский текст, даже выбрав английский.
+        """
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            tg_id = row.get("tg_id") or row.get("chat_id")
+            if tg_id:
+                self.remember_lang(tg_id, row.get("language") or row.get("lang") or "")
+
+    def _channel_chats(self) -> set:
+        """Чаты каналов: их сообщения переводить нельзя.
+
+        Пост в русский канал уже русский нарочно (английская версия идёт во
+        второй канал), поэтому «перевести всё исходящее» здесь не годится.
+        """
+        out = set()
+        for value in (self.channel_chat_id(), self.channel_chat_id_en()):
+            text = str(value or "").strip()
+            if text:
+                out.add(text)
+                try:
+                    out.add(str(int(text)))
+                except ValueError:
+                    pass
+        return out
+
     async def _call(self, method: str, payload: Optional[dict] = None) -> Optional[dict]:
         if not self._session:
             return None
+        if payload:
+            # Метка «как есть»: черновики постов админу показывают будущую
+            # публикацию в её собственном языке — переводить её нельзя, иначе
+            # админ не увидит, что уйдёт в русский канал.
+            raw = bool(payload.pop("_raw", False))
+            chat_id = payload.get("chat_id")
+            if not raw and chat_id is not None \
+                    and str(chat_id) not in self._channel_chats():
+                payload = translate_payload(method, payload, self.lang_of(chat_id))
         url = API.format(token=self.token, method=method)
         timeout = aiohttp.ClientTimeout(total=70, sock_read=70) if method == "getUpdates" \
             else aiohttp.ClientTimeout(total=15)
@@ -439,13 +570,17 @@ class TelegramBot:
         return {"inline_keyboard": rows if rows else []}
 
     async def send(self, chat_id: int, text: str, markup: Optional[dict] = None,
-                   parse: str = "HTML", silent: bool = False) -> Optional[int]:
+                   parse: str = "HTML", silent: bool = False,
+                   raw: bool = False) -> Optional[int]:
+        """``raw=True`` — отправить текст как есть, без перевода на язык чата."""
         body: Dict[str, Any] = {
             "chat_id": chat_id,
             "text": text[:3900],
             "parse_mode": parse,
             "disable_web_page_preview": True,
         }
+        if raw:
+            body["_raw"] = True
         if silent:
             body["disable_notification"] = True
         if markup:
@@ -799,7 +934,7 @@ class TelegramBot:
             extra_txt = " 🇷🇺" if code == "ru" else " 🇬🇧"
             lines.append(f'• <a href="{_esc(url)}">{_esc(name)}</a>{extra_txt}')
         lines.append("")
-        lines.append("Раз в 4 часа туда уходит разбор рынка: кто кого вынес,"
+        lines.append(f"Раз в {self.channel_interval_h()} ч туда уходит разбор рынка: кто кого вынес,"
                      " на каких биржах, что с открытым интересом.")
         lines.append("Подписки на любой из них достаточно — бот откроется"
                      " полностью.")
@@ -894,16 +1029,18 @@ class TelegramBot:
     def _digest_result_text(self, ok: bool) -> str:
         if ok:
             routes = getattr(self, "_digest_routes", "") or self.channel_route_text()
-            return ("Сводка ушла в канал.\n" + routes
+            return ("📣 <b>Сводка ушла в канал</b>\n" + routes
                     + "\n\nЕсли адрес не тот — меню «📣 Каналы» → «🔄 Поменять"
                       " местами», либо перешлите боту пост из нужного канала"
-                      " и выберите язык.")
+                      " и выберите язык."
+                    + self.site_footer())
         err = _esc(self._digest_err or "неизвестная ошибка")
         return (
-            "<b>Не удалось отправить сводку</b>\n"
-            f"{err}\n\n"
+            "⚠️ <b>Не удалось отправить сводку</b>\n"
+            f"<code>{err}</code>\n\n"
             "Если бот уже админ — перешлите сюда любой пост из канала, "
             "затем снова /digest."
+            + self.site_footer()
         )
 
     async def _bind_channel_from_message(self, msg: dict, chat_id: int) -> bool:
@@ -963,6 +1100,20 @@ class TelegramBot:
         if self.store:
             self.store.set_setting("channel_pending", "")
         await self.show_menu(chat_id, self._channels_text(), self._channels_kb())
+
+    def _channel_text(self) -> str:
+        """Экран «Каналы»: те же посты, что уходят в канал, — в двух языках."""
+        links = "\n".join(
+            f'• <a href="{_esc(url)}">{_esc(name)}</a>'
+            + (" 🇷🇺" if code == "ru" else " 🇬🇧")
+            for code, name, url, _cid in self.channel_pair())
+        return ("<b>📣 Каналы LiqScope</b>\n"
+                f"Сводки ликвидаций, OI и CVD раз в {self.channel_interval_h()} ч — тот же разбор,"
+                " что в боте.\n"
+                "Содержание одинаковое, отличается язык: русский и английский.\n"
+                f"{links}\n\n"
+                "Подписки на любой из них достаточно."
+                + self.site_footer())
 
     def _channels_text(self) -> str:
         ru, en = self.channel_role("ru"), self.channel_role("en")
@@ -1056,9 +1207,20 @@ class TelegramBot:
             log.warning("бота убрали из канала chat_id=%s", cid)
 
     async def send_photo(self, chat_id, path: str, caption: str = "",
-                         markup: Optional[dict] = None) -> Optional[int]:
+                         markup: Optional[dict] = None,
+                         raw: bool = False) -> Optional[int]:
+        """Фото с подписью. ``raw=True`` — подпись не переводить.
+
+        Подпись уходит multipart-запросом мимо ``_call``, поэтому язык здесь
+        применяем сами: иначе подпись под фото осталась бы русской у тех, кто
+        выбрал английский, а preview чужого поста — наоборот, переведённой.
+        """
         if not self._session or not path or not os.path.isfile(path):
             return None
+        if not raw and str(chat_id) not in self._channel_chats():
+            lang = self.lang_of(chat_id)
+            caption = translate(caption, lang)
+            markup = translate_markup(markup, lang)
         url = API.format(token=self.token, method="sendPhoto")
         form = aiohttp.FormData()
         form.add_field("chat_id", str(chat_id))
@@ -1090,9 +1252,30 @@ class TelegramBot:
         mid = (res.get("result") or {}).get("message_id")
         return self._note_sent(chat_id, mid)
 
+    async def _sleep_between_posts(self, chunk: float = 60.0) -> None:
+        """Пауза до следующего поста.
+
+        Спим кусками и каждый раз заново спрашиваем частоту: смена расписания
+        в админке (раз в 1…10 часов) применяется без перезапуска сервиса.
+        """
+        while self.running:
+            period = self.channel_window_sec()
+            try:
+                last = float(self.store.get_setting("channel_digest_ts") or 0)
+            except (TypeError, ValueError):
+                last = 0.0
+            if not last:
+                return
+            left = last + period - time.time()
+            if left <= 0:
+                return
+            try:
+                await asyncio.sleep(min(chunk, max(1.0, left)))
+            except asyncio.CancelledError:
+                raise
+
     async def _channel_loop(self) -> None:
-        from channel_digest import WINDOW_SEC
-        # первый пост не сразу: пусть фиды прогреются; дальше — каждые 4 часа
+        # первый пост не сразу: пусть фиды прогреются; дальше — по расписанию
         first = 90.0
         last = 0.0
         try:
@@ -1100,7 +1283,7 @@ class TelegramBot:
         except (TypeError, ValueError):
             last = 0.0
         if last > 0:
-            first = max(30.0, WINDOW_SEC - (time.time() - last))
+            first = max(30.0, self.channel_window_sec() - (time.time() - last))
         try:
             await asyncio.sleep(first)
         except asyncio.CancelledError:
@@ -1113,7 +1296,7 @@ class TelegramBot:
             except Exception as e:
                 log.warning("channel digest: %s", e)
             try:
-                await asyncio.sleep(WINDOW_SEC)
+                await self._sleep_between_posts()
             except asyncio.CancelledError:
                 break
 
@@ -1128,6 +1311,42 @@ class TelegramBot:
             out["review"] = False
         out["last_post"] = dict(self._ai_state or {})
         return out
+
+    def channel_interval_h(self) -> int:
+        """Частота постов в канал: раз в N часов (1…10).
+
+        Окно поста равно промежутку между постами, а блок анализа внутри поста
+        — четверти окна: раз в час → по 15 минут, раз в 4 часа → по часу.
+        """
+        from channel_digest import interval_hours
+        try:
+            return interval_hours(self.store)
+        except Exception as e:                    # noqa: BLE001
+            log.debug("частота постов: %s", e)
+            from channel_digest import DEFAULT_INTERVAL_H
+            return DEFAULT_INTERVAL_H
+
+    def channel_window_sec(self) -> int:
+        """Окно поста в секундах: оно равно промежутку между постами."""
+        return max(1, self.channel_interval_h()) * 3600
+
+    def set_channel_interval(self, hours, actor_id: Optional[int] = None) -> int:
+        """Сохранить частоту постов: применяется без перезапуска сервиса."""
+        from channel_digest import INTERVAL_SETTING, clamp_interval
+        n = clamp_interval(hours)
+        if self.store:
+            try:
+                self.store.set_setting(INTERVAL_SETTING, str(n), actor_id=actor_id)
+            except Exception as e:                # noqa: BLE001
+                log.warning("частота постов не сохранилась: %s", e)
+        return n
+
+    def interval_text(self) -> str:
+        """«раз в 4 ч · окно 4 ч · анализ по 1 ч» — для админки и /bot."""
+        from channel_digest import block_secs, window_word
+        h = self.channel_interval_h()
+        return (f"раз в {h} ч · окно {h} ч · анализ по "
+                f"{window_word(block_secs(h))}")
 
     def _review_on(self) -> bool:
         """Контроль публикации: черновик у админа вместо поста в канал."""
@@ -1215,7 +1434,11 @@ class TelegramBot:
             hours = int(snap.get("window_h") or 4)
         except (TypeError, ValueError):
             hours = 4
-        images = active_images(self.store)
+        images = active_images(self.store, "post")
+        # Одно фото на пост. Набор из админки листается по кругу (каждое
+        # фото по очереди становится обложкой), но альбомом он больше не
+        # уходит: альбом валил все загруженные фото в один пост, и это
+        # читалось как сбой публикации.
         img = pick_image(n, images=images)
         # Русский пост — основной; английский уходит копией в свой канал.
         ai_head, ai_note = await self._ai_headline(snap, variant=n)
@@ -1255,17 +1478,26 @@ class TelegramBot:
         return await self._publish_digest(posts, img, n)
 
     async def _publish_one(self, cid, caption: str, img, top: str = "",
-                           lang: str = "ru") -> bool:
-        """Пост в один канал: одно сообщение — фото и подпись под ним.
+                           lang: str = "ru", images: Optional[List[str]] = None) -> bool:
+        """Пост в один канал: одно фото и подпись под ним.
 
-        В подписи уже есть и шапка, и топ-7 по часам. ``top`` непустой только
+        В канал уходит ровно одна картинка. Раньше весь набор из админки
+        уходил альбомом (sendMediaGroup), и все загруженные фото валились в
+        один пост: порядок листался, но исправлять это альбомом не нужно —
+        альбома в постах больше нет. Если фото нет или Telegram его не принял,
+        уходит текст: сводка важнее обложки. Подпись длиннее 1024 символов
+        (лимит подписи) тоже уходит текстом.
+
+        В подписи уже есть и шапка, и часы с топ-7. ``top`` непустой только
         в аварийном случае (подпись исчерпана до первого часа) — тогда текст
         уходит вторым сообщением, чтобы данные не потерялись.
         """
         markup = self.channel_link_kb(lang)
+        photos = [x for x in (images if images is not None else
+                              ([img] if img else [])) if x and os.path.isfile(x)]
         ok = False
-        if img and len(caption) <= 1024:
-            ok = bool(await self.send_photo(cid, img, caption, markup))
+        if photos and len(caption) <= 1024:
+            ok = bool(await self.send_photo(cid, photos[0], caption, markup))
         if not ok:
             ok = bool(await self.send(cid, caption, markup))
         if ok and top:
@@ -1274,16 +1506,30 @@ class TelegramBot:
                 log.warning("топ-7 не ушёл в канал %s", cid)
         return ok
 
+    @staticmethod
+    def _photo_list(img) -> List[str]:
+        """Фото поста одним списком: одиночный путь снаружи, список изнутри.
+
+        Список остаётся ради обратной совместимости вызовов: в канал уходит
+        только первый элемент, альбомов в постах больше нет.
+        """
+        if isinstance(img, (list, tuple)):
+            return [x for x in img if x]
+        return [img] if img else []
+
     async def _publish_digest(self, posts, img, n: int) -> bool:
         """Отправка готового поста в каналы (русский и английский)."""
         delivered = 0
+        images = self._photo_list(img)
         for post in posts or []:
             cid = post.get("cid")
             if not cid:
                 continue
-            if await self._publish_one(cid, post.get("caption") or "", img,
+            if await self._publish_one(cid, post.get("caption") or "",
+                                       images[0] if images else None,
                                        post.get("top") or "",
-                                       post.get("lang") or "ru"):
+                                       post.get("lang") or "ru",
+                                       images=images):
                 delivered += 1
         if delivered:
             self._digest_routes = self.channel_route_text()
@@ -1313,7 +1559,8 @@ class TelegramBot:
             return self._digest_fail(
                 "Контроль публикации включён, но у бота нет админа с Telegram. "
                 "Выключите контроль в «Шаблоны канала» или привяжите Telegram админу")
-        self._draft = {"posts": posts, "img": img, "n": int(n), "note": note}
+        self._draft = {"posts": posts, "img": img, "n": int(n), "note": note,
+                       "images": list(img) if isinstance(img, (list, tuple)) else [img]}
         kb = {"inline_keyboard": [[
             {"text": "✅ Опубликовать", "callback_data": "d:pub"},
             {"text": "🔄 Перегенерировать", "callback_data": "d:regen"},
@@ -1323,7 +1570,14 @@ class TelegramBot:
         for post in posts or []:
             mark = "🇬🇧" if post.get("lang") == "en" else "🇷🇺"
             text += f"\n\n{mark} <b>{(post.get('cid') or '')}</b>\n" + (post.get("caption") or "")
-        await self.send(admin, text, kb)
+        # raw=True: черновик — это будущий пост, а не сообщение админу.
+        # Перевод подписи скрыл бы от админа, что уйдёт в русский канал.
+        await self.send(admin, text, kb, raw=True)
+        # Черновик показывается так же, как уйдёт в канал: одна картинка.
+        imgs = [x for x in (self._draft.get("images") or []) if x and os.path.isfile(x)]
+        if imgs:
+            await self.send_photo(admin, imgs[0], "Обложка поста — как уйдёт в канал",
+                                  raw=True)
         # топ-7 по часам — тем же сообщением не влезает, шлём следом
         for post in posts or []:
             if post.get("top"):
@@ -1357,7 +1611,7 @@ class TelegramBot:
                 posts = d.get("posts") or [{"lang": "ru", "cid": cid,
                                             "caption": d.get("caption") or "",
                                             "top": d.get("top") or ""}]
-                ok = await self._publish_digest(posts, d.get("img"),
+                ok = await self._publish_digest(posts, d.get("images") or d.get("img"),
                                                 int(d.get("n") or 0))
             self._draft = None
             await self.reply(chat_id, self._digest_result_text(ok), self._admin_kb(),
@@ -1378,8 +1632,8 @@ class TelegramBot:
         Запись собирает сервер (api_digest): здесь только отправка и контроль
         публикации — если он включён, посты уходят админу черновиком.
         """
-        from channel_digest import active_images, pick_image
-        from daily_digest import render_post
+        from channel_digest import active_images, digest_images, pick_image
+        from daily_digest import CAPTION_LIMIT, render_post
 
         self._digest_err = ""
         self._last_tg_err = ""
@@ -1388,6 +1642,19 @@ class TelegramBot:
         except Exception as e:
             log.debug("проверка каналов: %s", e)
         day = str((rec or {}).get("day") or "")
+        # Фото рубрики «дневной дайджест» (если админ их загрузил); иначе —
+        # общий набор сводки. Одно фото на пост: порядок сдвигается по номеру
+        # дня, альбома нет — как и в постах сводки.
+        images = digest_images(self.store)
+        try:
+            variant = int(day.replace("-", "")[-2:] or 0)
+        except (TypeError, ValueError):
+            variant = 0
+        img = pick_image(variant, images=images)
+        # С фотографией Telegram разрешает подпись не длиннее 1024 знаков:
+        # раньше пост за сутки (он длиннее) уходил текстом без картинки —
+        # теперь под фото пост собирается под этот лимит (рассказ подрезается)
+        limit = CAPTION_LIMIT if (img and os.path.isfile(img)) else None
         posts: List[dict] = []
         result: Dict[str, Any] = {}
         seen: set = set()
@@ -1402,7 +1669,8 @@ class TelegramBot:
                                         if lang == "en" else
                                         "канал не привязан — перешлите боту пост из канала")]
                 continue
-            caption = render_post(rec, lang, self.site_url())
+            caption = render_post(rec, lang, self.site_url(), limit=limit) if limit \
+                else render_post(rec, lang, self.site_url())
             posts.append({"lang": lang, "cid": cid, "caption": caption, "top": ""})
         if not posts:
             err = next((v[1] for v in result.values()), "каналы не привязаны")
@@ -1410,12 +1678,6 @@ class TelegramBot:
             self._daily_state = {"ok": False, "day": day, "error": err,
                                  "at": time.time()}
             return result
-        images = active_images(self.store)
-        try:
-            variant = int(day.replace("-", "")[-2:] or 0)
-        except (TypeError, ValueError):
-            variant = 0
-        img = pick_image(variant, images=images)
         if self._review_on():
             ok = await self._send_daily_draft(posts, img, day)
             for post in posts:
@@ -1431,14 +1693,17 @@ class TelegramBot:
     async def _publish_daily_posts(self, posts, img) -> Dict[str, Any]:
         """Отправка постов дайджеста по каналам (один пост = одно сообщение)."""
         out: Dict[str, Any] = {}
+        images = self._photo_list(img)
         for post in posts or []:
             lang = post.get("lang") or "ru"
             cid = post.get("cid")
             if not cid:
                 out[lang] = [False, "канал не привязан"]
                 continue
-            ok = await self._publish_one(cid, post.get("caption") or "", img,
-                                         post.get("top") or "", lang)
+            ok = await self._publish_one(cid, post.get("caption") or "",
+                                         images[0] if images else None,
+                                         post.get("top") or "", lang,
+                                         images=images)
             err = "" if ok else (getattr(self, "_last_tg_err", "")
                                  or "Telegram отклонил пост")
             if not ok:
@@ -1483,12 +1748,17 @@ class TelegramBot:
             {"text": "🔄 Перегенерировать", "callback_data": "dd:regen"},
             {"text": "✖️ Отмена", "callback_data": "dd:no"}]]}
         text = (f"<b>Черновик дневного дайджеста</b> · {_esc(day)}\n"
-                "Это суточный выпуск (не сводка за 4 часа). В каналы он уйдёт "
+                "Это суточный выпуск (не сводка за окно поста). В каналы он уйдёт "
                 "только после «Опубликовать».")
         await self.send(admin, text, kb)
+        imgs = [x for x in self._photo_list(img) if x and os.path.isfile(x)]
+        if imgs:
+            await self.send_photo(admin, imgs[0], "Обложка поста — как уйдёт в канал",
+                                  raw=True)
         for post in posts or []:
             mark = "🇬🇧" if post.get("lang") == "en" else "🇷🇺"
-            await self.send(admin, f"{mark} {post.get('caption') or ''}")
+            # raw=True: это будущая публикация в её собственном языке
+            await self.send(admin, f"{mark} {post.get('caption') or ''}", raw=True)
         log.info("дневной дайджест: черновик отправлен админу %s (%s)", admin, day)
         return True
 
@@ -1545,8 +1815,9 @@ class TelegramBot:
     def _daily_result_text(self, ok: bool, result=None) -> str:
         if ok:
             routes = getattr(self, "_digest_routes", "") or self.channel_route_text()
-            return ("Дневной дайджест ушёл в каналы.\n" + routes
-                    + "\n\nПрошлые выпуски — на сайте в разделе «Дайджест».")
+            return ("🗞 <b>Дневной дайджест ушёл в каналы</b>\n" + routes
+                    + "\n\nПрошлые выпуски — на сайте в разделе «Дайджест»."
+                    + self.site_footer())
         if self._review_on():
             return ("Черновик дневного дайджеста — выше в чате. Проверьте текст "
                     "и нажмите «✅ Опубликовать».")
@@ -1557,10 +1828,11 @@ class TelegramBot:
                 if isinstance(val, (list, tuple)) and val and not val[0]:
                     mark = "🇬🇧" if lang == "en" else "🇷🇺"
                     detail += f"\n{mark} {_esc(val[1] if len(val) > 1 else '')}"
-        return ("<b>Не удалось отправить дневной дайджест</b>\n"
-                f"{err}{detail}\n\n"
+        return ("⚠️ <b>Не удалось отправить дневной дайджест</b>\n"
+                f"<code>{err}</code>{detail}\n\n"
                 "Если бот уже админ — перешлите сюда любой пост из канала "
-                "и попробуйте снова.")
+                "и попробуйте снова."
+                + self.site_footer())
 
     async def answer_cb(self, cb_id: str, text: str = "") -> None:
         # Пустой text Telegram иногда отвергает — тогда клиент «залипает»
@@ -1571,7 +1843,12 @@ class TelegramBot:
         await self._call("answerCallbackQuery", body)
 
     async def broadcast(self, text: str, actor_id: Optional[int] = None) -> Dict[str, int]:
-        ids = self.store.tg_ids_for_broadcast()
+        # Язык каждого получателя известен заранее: текст переведётся при
+        # отправке (перевод идёт в _call), поэтому переводим не здесь.
+        targets = (self.store.broadcast_targets() if hasattr(self.store, "broadcast_targets")
+                   else [{"tg_id": i} for i in self.store.tg_ids_for_broadcast()])
+        self.warm_langs(targets)
+        ids = [int(t["tg_id"]) for t in targets]
         ok = fail = 0
         for tg_id in ids:
             if await self.send(tg_id, text, parse="HTML"):
@@ -1892,6 +2169,7 @@ class TelegramBot:
         if not chat_id or from_u.get("is_bot"):
             return
         user = self.store.upsert_telegram_user(from_u)
+        self.remember_lang(chat_id, user.get("language"))
         if user["is_banned"]:
             await self.send(chat_id, "Доступ закрыт.")
             return
@@ -1904,6 +2182,12 @@ class TelegramBot:
                     await self.show_menu(chat_id, "Отмена.", self._alert_kb(user))
                     return
             else:
+                if str(wait_al).startswith("corr:"):
+                    msg_ok = self._corr_apply_text(user, wait_al, text or msg)
+                    self._wait_alert.pop(tg_id, None)
+                    await self.show_menu(chat_id, msg_ok + "\n\n" + self._corr_text(user),
+                                         self._corr_kb(user))
+                    return
                 msg_ok = self._alert_apply_text(user, wait_al, text or msg)
                 self._wait_alert.pop(tg_id, None)
                 await self.show_menu(chat_id, msg_ok + "\n\n" + self._alert_text(user),
@@ -1981,23 +2265,13 @@ class TelegramBot:
                 await self._cmd_admin(chat_id, user)
                 return
             if nav == "channel":
-                links = "\n".join(
-                    f'• <a href="{_esc(url)}">{_esc(name)}</a>'
-                    + (" 🇷🇺" if code == "ru" else " 🇬🇧")
-                    for code, name, url, _cid in self.channel_pair())
-                await self.show_menu(
-                    chat_id,
-                    "<b>📣 Каналы LiqScope</b>\n"
-                    "Сводки ликвидаций, OI и CVD раз в 4 часа — тот же разбор,"
-                    " что в боте.\n"
-                    "Содержание одинаковое, отличается язык: русский и английский.\n"
-                    f"{links}\n\n"
-                    "Подписки на любой из них достаточно."
-                    + self.site_footer(),
-                    self._reply_kb(user))
+                await self.show_menu(chat_id, self._channel_text(), self._menu_kb(user))
                 return
             if nav == "al":
                 await self.show_menu(chat_id, self._alert_text(user), self._alert_kb(user))
+                return
+            if nav == "lang":
+                await self.show_menu(chat_id, self._lang_text(user), self._lang_kb(user))
                 return
             try:
                 body, kb = self._screen(user, nav)
@@ -2009,7 +2283,7 @@ class TelegramBot:
                     chat_id,
                     "⚠️ Экран не открылся: <code>" + _esc(str(e)[:120])
                     + "</code>\nОшибка записана в журнал сервиса.",
-                    self._reply_kb(user))
+                    self._menu_kb(user))
                 return
             await self.show_menu(chat_id, body, kb)
             return
@@ -2018,20 +2292,22 @@ class TelegramBot:
             await self.show_menu(chat_id, self._digest_result_text(ok),
                                  self._admin_kb())
         elif text.startswith("/help"):
-            await self.show_menu(chat_id, self._help(user), self._reply_kb(user))
+            await self.show_menu(chat_id, self._help(user), self._menu_kb(user))
         elif text.startswith("/cabinet"):
-            await self.show_menu(chat_id, self._cabinet_text(user), self._reply_kb(user))
+            await self.show_menu(chat_id, self._cabinet_text(user), self._menu_kb(user))
         elif text.startswith("/mail"):
             body, kb = self._screen(user, "mail")
             await self.show_menu(chat_id, body, kb)
+        elif text.startswith("/lang") or text.startswith("/language"):
+            await self.show_menu(chat_id, self._lang_text(user), self._lang_kb(user))
         elif text.startswith("/stats"):
-            await self.show_menu(chat_id, self._stats_text(), self._reply_kb(user))
+            await self.show_menu(chat_id, self._stats_text(), self._menu_kb(user))
         elif text.startswith("/status") or text.startswith("/health"):
-            await self.show_menu(chat_id, self._health_text(), self._reply_kb(user))
+            await self.show_menu(chat_id, self._health_text(), self._menu_kb(user))
         elif text.startswith("/bot"):
-            await self.show_menu(chat_id, self.poll_text(), self._reply_kb(user))
+            await self.show_menu(chat_id, self.poll_text(), self._menu_kb(user))
         elif text.startswith("/liq"):
-            await self.show_menu(chat_id, self._liq_text(), self._reply_kb(user))
+            await self.show_menu(chat_id, self._liq_text(), self._menu_kb(user))
         elif text.startswith("/services"):
             await self.show_menu(chat_id, self._services_text(user), self._services_kb(user))
         elif text.startswith("/pumps") or text.startswith("/watch"):
@@ -2051,7 +2327,7 @@ class TelegramBot:
         elif text.startswith("/broadcast"):
             await self._cmd_broadcast(chat_id, user, text)
         else:
-            await self.show_menu(chat_id, "Не понял. Нажмите кнопку или /help.", self._reply_kb(user))
+            await self.show_menu(chat_id, "Не понял. Нажмите кнопку или /help.", self._menu_kb(user))
 
     async def _on_callback(self, cb: dict) -> None:
         from_u = cb.get("from") or {}
@@ -2060,6 +2336,7 @@ class TelegramBot:
         chat_id = (msg.get("chat") or {}).get("id") or from_u.get("id")
         message_id = msg.get("message_id")
         user = self.store.upsert_telegram_user(from_u)
+        self.remember_lang(chat_id, user.get("language"))
         if user["is_banned"]:
             await self.answer_cb(cb["id"], "Доступ закрыт")
             return
@@ -2077,9 +2354,18 @@ class TelegramBot:
                 if not user.get("is_admin"):
                     await self.show_menu(chat_id, "Привязывать каналы может только"
                                                     " администратор.",
-                                         self._reply_kb(user))
+                                         self._menu_kb(user))
                     return
                 await self._set_channel_role(data.split(":")[-1], chat_id)
+                return
+            if data == "lang":
+                await self.show_menu(chat_id, self._lang_text(user), self._lang_kb(user),
+                                     old_id=message_id)
+                return
+            if data.startswith("setlang:"):
+                code = data.split(":", 1)[1]
+                await self.answer_cb(cb["id"], lang_label(code))
+                await self.set_lang(chat_id, user, code)
                 return
             if data == "ch:swap":
                 if not user.get("is_admin"):
@@ -2107,7 +2393,7 @@ class TelegramBot:
                 return
             if data == "ch:check":
                 if await self._is_member_any(tg_id):
-                    text, markup = self._home_text(user), self._reply_kb(user)
+                    text, markup = self._home_text(user), self._menu_kb(user)
                     ok = await self.reply(chat_id, text, markup, message_id=message_id)
                 else:
                     extra = ("Telegram ещё не видит подписку. Откройте любой из"
@@ -2205,26 +2491,32 @@ class TelegramBot:
         if data in ("menu", "back", "nav:home", "home", "help", ""):
             if data == "help":
                 return self._commands_text(user), self._commands_kb(user)
-            return self._home_text(user), self._reply_kb(user)
+            return self._home_text(user), self._menu_kb(user)
+        if data == "lang":
+            return self._lang_text(user), self._lang_kb(user)
         if data == "cabinet":
-            return self._cabinet_text(user), self._reply_kb(user)
+            return self._cabinet_text(user), self._menu_kb(user)
         if data == "mail":
             # Напоминание из кабинета: ждём адрес почты следующим сообщением
             self._wait_email[int(user.get("tg_id") or 0)] = time.time() + 900
             return self._mail_screen(user), self._cabinet_kb(user)
         if data == "stats":
-            return self._stats_text(), self._reply_kb(user)
+            return self._stats_text(), self._menu_kb(user)
         if data == "health":
-            return self._health_text(), self._reply_kb(user)
+            return self._health_text(), self._menu_kb(user)
         if data == "a:health" and user.get("is_admin"):
             return self._health_text(), self._kb_back("nav:admin")
         if data == "liq":
-            return self._liq_text(), self._reply_kb(user)
+            return self._liq_text(), self._menu_kb(user)
         if data == "terminal":
             # сразу на сайт: большая URL-кнопка, сообщение уходит без звука
             return self._terminal_text(), self._terminal_kb()
         if data == "services":
             return self._services_text(user), self._services_kb(user)
+        if data == "channel":
+            # Кнопка «📣 Канал» в инлайн-меню: раньше её не знал _screen и
+            # нажатие молча выбрасывало на главный экран
+            return self._channel_text(), self._menu_kb(user)
         if data.startswith("svc:"):
             slug = data.split(":", 1)[1]
             if slug == "alerts":
@@ -2246,6 +2538,15 @@ class TelegramBot:
             on = slug not in have
             self.store.toggle_user_service(user["id"], slug, on)
             return self._services_text(user), self._services_kb(user)
+        if data == "a:interval" and user.get("is_admin"):
+            return self._post_int_text(), self._post_int_kb()
+        if data.startswith("pi:") and user.get("is_admin"):
+            try:
+                self.set_channel_interval(data.split(":", 1)[1], actor_id=user.get("id"))
+            except Exception as e:                # noqa: BLE001
+                return (f"⚠️ Не сохранил частоту: {_esc(str(e)[:120])}",
+                        self._post_int_kb())
+            return self._post_int_text(), self._post_int_kb()
         if data in ("admin", "nav:admin") and user.get("is_admin"):
             self._wait_broadcast.pop(int(user.get("tg_id") or 0), None)
             self._wait_tpl.pop(int(user.get("tg_id") or 0), None)
@@ -2258,7 +2559,7 @@ class TelegramBot:
             self._wait_broadcast[int(user.get("tg_id") or 0)] = True
             return ("Пришлите текст рассылки следующим сообщением.\n"
                     "/cancel — отмена.", self._kb_back("nav:admin"))
-        return self._home_text(user), self._reply_kb(user)
+        return self._home_text(user), self._menu_kb(user)
 
     async def _cmd_start(self, chat_id: int, user: dict, text: str) -> None:
         parts = text.split(maxsplit=1)
@@ -2283,7 +2584,7 @@ class TelegramBot:
                     "Теперь сигналы алертов придут сюда, а вход в кабинет — "
                     "по почте или этим же Telegram.\n"
                     f"🌍 {self.site_a('открыть кабинет на сайте', '/cabinet')}",
-                    self._reply_kb(user),
+                    self._menu_kb(user),
                 )
                 return
             err = r.get("error")
@@ -2295,7 +2596,7 @@ class TelegramBot:
                        "в кабинете ещё раз.")
             else:
                 msg = "Не получилось привязать Telegram. Попробуйте ещё раз из кабинета."
-            await self.show_menu(chat_id, msg, self._reply_kb(user))
+            await self.show_menu(chat_id, msg, self._menu_kb(user))
             return
         if payload.startswith("login_"):
             nonce = payload[6:]
@@ -2307,13 +2608,13 @@ class TelegramBot:
                     f"Вход подтверждён, {_esc(user['display_name'])}.\n"
                     "Вернитесь во вкладку браузера — кабинет откроется сам.\n"
                     f"🌍 {self.site_a('открыть кабинет на сайте', '/cabinet')}",
-                    self._reply_kb(user),
+                    self._menu_kb(user),
                 )
                 return
             await self.show_menu(
                 chat_id,
                 "Код входа недействителен или устарел. Нажмите «Войти» на сайте ещё раз.",
-                self._reply_kb(user),
+                self._menu_kb(user),
             )
             return
         if not await self._ensure_channel(chat_id, user):
@@ -2325,33 +2626,37 @@ class TelegramBot:
         )
         extra = (f"\n🌍 {self.site_a('кабинет на сайте', '/cabinet')} · "
                  f"{self.site_a('терминал', '/terminal')}")
+        # Твёрдая клавиатура — одна кнопка ☰ Меню: ставим её здесь (в чате
+        # она приезжает служебным сообщением, которое сразу удаляется), а
+        # разделы уходят инлайн-кнопками под приветствием.
+        await self.push_reply_kb(chat_id, user)
         await self.show_menu(
             chat_id,
             f"Привет, {_esc(user.get('display_name') or 'друг')}!\n\n{welcome}{extra}",
-            self._reply_kb(user),
+            self._menu_kb(user),
         )
 
     async def _cmd_admin(self, chat_id: int, user: dict) -> None:
         if not user["is_admin"]:
-            await self.show_menu(chat_id, "Недостаточно прав.", self._reply_kb(user))
+            await self.show_menu(chat_id, "Недостаточно прав.", self._menu_kb(user))
             return
         await self.show_menu(chat_id, self._admin_text(), self._admin_kb())
 
     async def _cmd_users(self, chat_id: int, user: dict) -> None:
         if not user["is_admin"]:
-            await self.show_menu(chat_id, "Недостаточно прав.", self._reply_kb(user))
+            await self.show_menu(chat_id, "Недостаточно прав.", self._menu_kb(user))
             return
         await self.show_menu(chat_id, self._users_text(), self._kb_back("nav:admin"))
 
     async def _cmd_visits(self, chat_id: int, user: dict) -> None:
         if not user["is_admin"]:
-            await self.show_menu(chat_id, "Недостаточно прав.", self._reply_kb(user))
+            await self.show_menu(chat_id, "Недостаточно прав.", self._menu_kb(user))
             return
         await self.show_menu(chat_id, self._visits_text(), self._kb_back("nav:admin"))
 
     async def _cmd_broadcast(self, chat_id: int, user: dict, text: str) -> None:
         if not user["is_admin"]:
-            await self.show_menu(chat_id, "Недостаточно прав.", self._reply_kb(user))
+            await self.show_menu(chat_id, "Недостаточно прав.", self._menu_kb(user))
             return
         rest = text.split(maxsplit=1)
         body = rest[1].strip() if len(rest) > 1 else ""
@@ -2411,6 +2716,7 @@ class TelegramBot:
             [{"text": f"🧪 Контроль: {'вкл' if self._review_on() else 'выкл'}",
               "callback_data": "a:rv"},
              {"text": "🤖 Проверить ИИ", "callback_data": "a:ai"}],
+            [{"text": "🕒 Частота сводки", "callback_data": "a:interval"}],
             [{"text": "← Назад", "callback_data": "nav:admin"}],
         ]}
 
@@ -2556,35 +2862,22 @@ class TelegramBot:
         return {"inline_keyboard": rows}
 
     def _commands_kb(self, user: dict) -> dict:
-        """Меню по кнопке «☰ Меню»: команды, которые не надо набирать руками."""
-        admin = bool(user.get("is_admin"))
-        rows = [
-            [{"text": "🏠 /start", "callback_data": "nav:home"}],
-            [{"text": "👤 Кабинет", "callback_data": "cabinet"},
-             {"text": "⚡ Терминал", "callback_data": "terminal"}],
-            [{"text": "📊 Статистика", "callback_data": "stats"},
-             {"text": "🩺 Биржи", "callback_data": "health"}],
-            [{"text": "🛠 Сервисы", "callback_data": "services"},
-             {"text": "📰 Лента", "callback_data": "liq"}],
-            [{"text": "🔔 Алерты", "callback_data": "al"},
-             {"text": "📣 Канал", "callback_data": "channel"}],
-        ]
-        email = (user.get("email") or "").strip()
-        if not email or not user.get("email_verified"):
-            rows.append([{"text": "✉️ Подтвердить почту", "callback_data": "a:vmail"}])
-        if admin:
-            rows.append([{"text": "★ Админка", "callback_data": "nav:admin"}])
-        # Партнёрская ссылка кнопкой: url-кнопку Telegram подсвечивает как ссылку
-        rows.append([{"text": "💠 Торговать на Gate — скидка на комиссию",
-                      "url": gate_url()}])
+        """Меню по кнопке «☰ Меню»: разделы кнопками под сообщением.
+
+        Твёрдая клавиатура внизу теперь одна (☰ Меню), поэтому всё
+        остальное приходит здесь — инлайном.
+        """
+        rows = [[{"text": "🏠 /start", "callback_data": "nav:home"}]]
+        rows += self._menu_rows(user)
         return {"inline_keyboard": rows}
 
     def _commands_text(self, user: dict) -> str:
         return (
             "<b>☰ Меню LiqScope</b>\n"
-            "Всё то же, что в панели внизу, — кнопками. Ничего набирать"
-            " руками не нужно.\n\n"
-            "/start — эта панель заново, /help — полный список команд."
+            "Разделы — кнопками ниже: набирать команды руками не нужно.\n"
+            "Внизу экрана остаётся одна твёрдая кнопка ☰ Меню — она всегда"
+            " возвращает этот экран.\n\n"
+            "/start — экран заново, /help — полный список команд."
             + self.site_footer()
         )
 
@@ -2727,7 +3020,40 @@ class TelegramBot:
         return {"inline_keyboard": [[{"text": "← Назад", "callback_data": to}]]}
 
     def _menu(self, user: dict) -> dict:
-        return self._reply_kb(user)
+        return self._menu_kb(user)
+
+    def _post_int_text(self) -> str:
+        """Экран «Частота постов»: окно поста и блок анализа."""
+        from channel_digest import MAX_INTERVAL_H, MIN_INTERVAL_H, block_secs, window_word
+        h = self.channel_interval_h()
+        return (
+            "<b>🕒 Частота сводки в канал</b>\n"
+            f"Сейчас: {self.interval_text()}\n\n"
+            "Пост выходит раз в N часов, окно поста — те же N часов, а блок "
+            "анализа внутри поста — четверть окна:\n"
+            "• раз в 4 ч → разбор по часу;\n"
+            "• раз в 2 ч → по 30 минут;\n"
+            "• раз в 1 ч → по 15 минут.\n\n"
+            f"Выберите частоту ({MIN_INTERVAL_H}…{MAX_INTERVAL_H} ч) — применяется "
+            "сразу, перезапуск не нужен.\n"
+            f"Текущий блок анализа: <b>{window_word(block_secs(h))}</b>."
+            + self.site_footer()
+        )
+
+    def _post_int_kb(self) -> dict:
+        cur = self.channel_interval_h()
+        rows: List[list] = []
+        row: list = []
+        for n in range(1, 11):
+            row.append({"text": (f"✓ {n} ч" if n == cur else f"{n} ч"),
+                        "callback_data": f"pi:{n}"})
+            if len(row) == 5:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+        rows.append([{"text": "← Назад", "callback_data": "nav:admin"}])
+        return {"inline_keyboard": rows}
 
     def _admin_kb(self) -> dict:
         return {"inline_keyboard": [
@@ -2735,7 +3061,8 @@ class TelegramBot:
              {"text": "📈 Визиты", "callback_data": "visits"}],
             [{"text": "📣 Рассылка", "callback_data": "broadcast"},
              {"text": "🩺 Здоровье", "callback_data": "a:health"}],
-            [{"text": "📰 Сводка в канал", "callback_data": "a:digest"}],
+            [{"text": "📰 Сводка в канал", "callback_data": "a:digest"},
+             {"text": "🕒 Частота", "callback_data": "a:interval"}],
             [{"text": "🗞 Дайджест за сутки", "callback_data": "a:ddigest"}],
             [{"text": "📣 Каналы", "callback_data": "a:channels"},
              {"text": "🎨 Шаблоны", "callback_data": "a:tpl"}],
@@ -2757,7 +3084,8 @@ class TelegramBot:
         return (
             f"<b>LiqScope</b>\n"
             f"Привет, {_esc(user['display_name'])}!\n"
-            "Выберите раздел — кнопки внизу экрана.\n"
+            "Выберите раздел — кнопки под сообщением, внизу экрана только"
+            " ☰ Меню.\n"
             + gate_line()
             + self.site_footer()
         )
@@ -2777,6 +3105,7 @@ class TelegramBot:
             "/correlations — корреляции валют",
             "/pumps — сторож монет: пампы и дампы",
             "/bot — состояние опроса бота",
+            "/lang — язык бота: RU / ENG",
         ]
         email = (user.get("email") or "").strip()
         if not email or not user.get("email_verified"):
@@ -2852,7 +3181,8 @@ class TelegramBot:
             return f"${n:.0f}"
         top = st.get("top_coins") or []
         top_s = ", ".join(
-            f"{(c.get('symbol') or '').replace('_', '/')} {usd(c.get('usd'))}"
+            f"{_esc((c.get('symbol') or '').replace('_', '/'))}"
+            f" <code>{usd(c.get('usd'))}</code>"
             for c in top[:5]
         ) or "—"
         return (
@@ -2861,7 +3191,7 @@ class TelegramBot:
             f"🔴 Лонги <code>{usd(st.get('longs_usd_24h'))}</code> · "
             f"🟢 шорты <code>{usd(st.get('shorts_usd_24h'))}</code>\n"
             f"⏱ За час: <code>{usd(st.get('total_usd_1h'))}</code>\n"
-            f"🏆 Лидеры: {_esc(top_s)}"
+            f"🏆 Лидеры: {top_s}"
             + self.site_footer()
         )
 
@@ -2889,8 +3219,8 @@ class TelegramBot:
                 rows.append(
                     f"🟠 <b>{ex_link(name, fallback=self.ex_name(name))}</b> · "
                     f"слушатель не запущен — поднимает сторож"
-                    + (f" · попыток: {self.fmt_int(tries)}" if tries else "")
-                    + (f" (подъёмов: {respawns})" if respawns else ""))
+                    + (f" · попыток: <code>{self.fmt_int(tries)}</code>" if tries else "")
+                    + (f" (подъёмов: <code>{respawns}</code>)" if respawns else ""))
             elif s.get("connected"):
                 live += 1
                 fresh = ""
@@ -2899,14 +3229,14 @@ class TelegramBot:
                     fresh = f" · {self.ago_label(sec)}"
                 again = int(s.get("attempts") or 0)
                 if again > 1:
-                    fresh += f" · попыток: {self.fmt_int(again)}"
+                    fresh += f" · попыток: <code>{self.fmt_int(again)}</code>"
                 rows.append(
                     f"🟢 <b>{ex_link(name, fallback=self.ex_name(name))}</b> · "
-                    f"{self.fmt_int(ev)} событий{fresh}")
+                    f"<code>{self.fmt_int(ev)} событий</code>{fresh}")
             else:
                 err = _esc(str(s.get("last_error") or "нет связи")[:42])
                 attempts = int(s.get("attempts") or 0)
-                tail = f" · попыток: {attempts}" if attempts else ""
+                tail = f" · попыток: <code>{attempts}</code>" if attempts else ""
                 rows.append(f"🔴 <b>{ex_link(name, fallback=self.ex_name(name))}</b>"
                             f" · {err}{tail}")
         lines = ["<b>🩺 Биржи · эфир</b>", ""]
@@ -2914,8 +3244,8 @@ class TelegramBot:
         lines.append("")
         lines.append(
             f"📡 В эфире <b>{live}/{total or '—'}</b> · "
-            f"событий в памяти: {self.fmt_int(events_total)} · "
-            f"зрителей WS: {self.ws_clients_fn()}")
+            f"<code>{self.fmt_int(events_total)} событий</code> в памяти · "
+            f"зрителей WS: <code>{self.ws_clients_fn()}</code>")
         # Строка о самом боте: по ней видно «молчит, потому что не опрашивает»
         # прямо из чата, без curl к /api/health.
         lines.append("")
@@ -2935,7 +3265,7 @@ class TelegramBot:
         # ссылкой: Gate ведёт на партнёрскую, остальные — просто название
         ex_key = x.get("exchange")
         return (f"{tm} {mark} {_esc(sym)}  "
-                f"{self.fmt_usd(x.get('usd'))}  "
+                f"<code>{self.fmt_usd(x.get('usd'))}</code>  "
                 f"{ex_link(ex_key, fallback=self.ex_name(ex_key))}")
 
     def _liq_text(self, limit: int = 3600) -> str:
@@ -2965,10 +3295,11 @@ class TelegramBot:
             for k, v in sorted(by_ex.items(), key=lambda kv: -kv[1])[:6])
         head = (
             "<b>📰 Лента ликвидаций</b>\n"
-            f"💥 <code>{self.fmt_int(len(rows))}</code> событий в памяти · "
-            f"касса {self.fmt_usd(total)}\n"
-            f"🔴 лонги {self.fmt_usd(longs)} · 🟢 шорты {self.fmt_usd(shorts)}\n"
-            f"🏛 {ex_bits}\n"
+            f"💥 <code>{self.fmt_int(len(rows))} событий</code> в памяти · "
+            f"касса <code>{self.fmt_usd(total)}</code>\n"
+            f"🔴 лонги <code>{self.fmt_usd(longs)}</code>"
+            f" · 🟢 шорты <code>{self.fmt_usd(shorts)}</code>\n"
+            f"🏛 <code>{ex_bits}</code>\n"
             "⏱ время UTC · новые сверху\n"
         )
         body: List[str] = []
@@ -3012,7 +3343,11 @@ class TelegramBot:
     def _users_text(self) -> str:
         data = self.store.list_users(limit=10)
         c = self.store.user_counts()
-        lines = [f"<b>Пользователи</b> · всего {c['total']} · за 24ч {c['active_24h']} · новых {c['new_24h']}"]
+        lines = [
+            f"<b>Пользователи</b> · всего <code>{c['total']}</code>"
+            f" · за 24ч <code>{c['active_24h']}</code>"
+            f" · новых <code>{c['new_24h']}</code>"
+        ]
         for u in data["users"]:
             flag = " ★" if u["is_admin"] else ""
             ban = " ⛔" if u["is_banned"] else ""
@@ -3024,11 +3359,17 @@ class TelegramBot:
         v = self.store.visit_stats(7)
         lines = [
             "<b>Визиты</b>",
-            f"Сегодня: {v['today_views']} просмотров, {v['today_uniques']} уникальных",
-            f"Онлайн WS: {self.ws_clients_fn()}",
+            f"Сегодня: <code>{v['today_views']} переходов</code>,"
+            f" <code>{v['today_uniques']} посетителей</code>",
+            f"Служебных запросов отсеяно: <code>{v.get('today_bots', 0)}</code>",
+            f"Онлайн WS: <code>{self.ws_clients_fn()}</code>",
         ]
         for d in v["days"][-7:]:
-            lines.append(f"· {d['day']}: {d['views']} / {d['uniques']} уник.")
+            lines.append(f"· {d['day']}: <code>{d['views']} переходов /"
+                         f" {d['uniques']} посетителей</code>")
+        lines.append("<i>Считаем только браузерные переходы: краулеры и превью"
+                     " в статистику не идут, один гость без cookie не"
+                     " размножается на каждой странице.</i>")
         return "\n".join(lines) + self.site_footer()
 
     def _admin_text(self) -> str:
@@ -3041,15 +3382,65 @@ class TelegramBot:
             return f"{_esc(role.get('title') or '—')} <code>{_esc(role.get('id') or '—')}</code>"
         return (
             f"<b>★ Админка LiqScope</b>\n"
-            f"👥 Пользователи: {c['total']} (за сутки {c['active_24h']}, новых {c['new_24h']})\n"
-            f"👁 Визиты сегодня: {v['today_views']} / {v['today_uniques']} уник.\n"
-            f"📡 Онлайн WS: {self.ws_clients_fn()}\n"
-            f"🩺 Биржи в эфире: {len(live)}\n"
+            f"👥 Пользователи: <code>{c['total']}</code>"
+            f" (за сутки <code>{c['active_24h']}</code>,"
+            f" новых <code>{c['new_24h']}</code>)\n"
+            f"👁 Визиты сегодня: <code>{v['today_views']} переходов /"
+            f" {v['today_uniques']} посетителей</code>\n"
+            f"📡 Онлайн WS: <code>{self.ws_clients_fn()}</code>\n"
+            f"🩺 Биржи в эфире: <code>{len(live)}</code>\n"
             f"🇷🇺 Канал: {ch(ru)}\n"
             f"🇬🇧 Канал: {ch(en)}\n"
+            f"🕒 Сводка: {self.interval_text()}\n"
             f"🛠 {self.site_a('панель на сайте', '/admin')}"
             + self.site_footer()
         )
+
+    # --- язык интерфейса -------------------------------------------------
+    def lang_of_user(self, user: Optional[dict]) -> str:
+        """Язык пользователя: выбор кнопкой важнее языка клиента Telegram."""
+        if isinstance(user, dict):
+            return normalize_lang(user.get("language"))
+        return self.lang_of(user)
+
+    def _lang_text(self, user: Optional[dict] = None) -> str:
+        """Экран «🌐 Язык бота».
+
+        Текст всегда русский: при выбранном английском его переведёт тот же
+        слой, что и остальные сообщения (см. bot_i18n), поэтому второй копии
+        экрана на английском не нужно.
+        """
+        cur = self.lang_of_user(user) if isinstance(user, dict) else self.lang_of(user)
+        return ("<b>🌐 Язык бота</b>\n"
+                f"Сейчас выбран {lang_label(cur)}.\n"
+                "Выберите язык — меню, сигналы и сводки будут на нём."
+                + self.site_footer())
+
+    def _lang_kb(self, user: Optional[dict] = None) -> dict:
+        """Две кнопки языка: текущая помечена галочкой."""
+        cur = self.lang_of_user(user) if isinstance(user, dict) else \
+            self.lang_of(user)
+        rows = []
+        for code in ("ru", "en"):
+            info = LANGS[code]
+            mark = "✓ " if code == cur else ""
+            rows.append([{"text": f"{mark}{info['flag']} {info['label']}",
+                          "callback_data": f"setlang:{code}"}])
+        rows.append([{"text": "← В меню", "callback_data": "nav:home"}])
+        return {"inline_keyboard": rows}
+
+    async def set_lang(self, chat_id: int, user: dict, code: str) -> None:
+        """Переключить язык пользователя и подтвердить это на новом языке."""
+        lang = normalize_lang(code)
+        if self.store and user.get("id"):
+            try:
+                fresh = self.store.set_user_language(user["id"], lang)
+                if isinstance(fresh, dict):
+                    user.update(fresh)
+            except Exception as e:                       # noqa: BLE001
+                log.warning("язык не сохранился (%s): %s", lang, e)
+        self.remember_lang(chat_id, lang)
+        await self.show_menu(chat_id, self._lang_text(user), self._menu_kb(user))
 
     def _alert_cfg(self, user: dict) -> dict:
         from alerts import normalize_config
@@ -3063,18 +3454,18 @@ class TelegramBot:
     def _alert_text(self, user: dict) -> str:
         from alerts import format_config_text, live_snapshot, money, window_label
         cfg = self._alert_cfg(user)
-        lines = ["<b>🔔 Алерты по объёму</b>", format_config_text(cfg)]
+        lines = [format_config_text(cfg)]
         fn = self.alerts_market_fn
         if fn:
             try:
                 market = fn() or {}
                 live = live_snapshot(cfg, market)
                 bits = []
-                for m, title in (("liq", "LIQ"), ("cvd", "CVD"), ("oi", "OI")):
+                for m, icon, title in (("liq", "💥", "LIQ"), ("cvd", "🌊", "CVD"),
+                                       ("oi", "📊", "OI")):
                     row = live.get(m) or {}
-                    bits.append(f"{title} {money(row.get('value'))}")
+                    bits.append(f"{icon} {title} <code>{money(row.get('value'))}</code>")
                 lines.append("сейчас: " + " · ".join(bits))
-                lines.append(f"окно {window_label(cfg['window_min'])}")
             except Exception:
                 pass
         lines.append("\nКнопки ниже — метрика, монета, окно, порог. Сигнал приходит отдельным сообщением.")
@@ -3098,19 +3489,44 @@ class TelegramBot:
             [{"text": "← Назад", "callback_data": "services"}],
         ]}
 
-    def _alert_coins_kb(self) -> dict:
-        from alerts import COIN_PRESETS, coin_name
-        rows = [[{"text": coin_name(c), "callback_data": f"al:c:{c}"}] for c in COIN_PRESETS]
-        rows.append([{"text": "своя монета", "callback_data": "al:c:?"}])
+    def _alert_coins_kb(self, user: dict, metric: str) -> dict:
+        """Монеты для одной метрики: у каждой она своя."""
+        from alerts import COIN_PRESETS, METRIC_ICON, METRIC_TITLE, coin_name, symbol_of
+        cfg = self._alert_cfg(user)
+        cur = symbol_of(cfg, metric)
+        rows = []
+        for c in COIN_PRESETS:
+            mark = "✓ " if cur == c else ""
+            rows.append([{"text": mark + coin_name(c),
+                          "callback_data": f"al:c:{metric}:{c}"}])
+        rows.append([{"text": "своя монета", "callback_data": f"al:c:{metric}:?"}])
+        rows.append([{"text": f"← {METRIC_ICON[metric]} {METRIC_TITLE[metric]}",
+                      "callback_data": "al:c"}])
         rows.append([{"text": "← К алертам", "callback_data": "al"}])
         return {"inline_keyboard": rows}
 
-    def _alert_win_kb(self) -> dict:
-        from alerts import WINDOW_PRESETS, window_label
-        row = [{"text": window_label(w), "callback_data": f"al:w:{w}"} for w in WINDOW_PRESETS]
+    def _alert_win_kb(self, user: dict) -> dict:
+        """Окна по метрикам: у ликвидаций, CVD и OI они свои."""
+        from alerts import METRIC_ICON, METRIC_TITLE, window_label, window_of
+        cfg = self._alert_cfg(user)
+        rows = []
+        for m in ("liq", "cvd", "oi"):
+            label = f"{METRIC_ICON[m]} {m.upper()} · {window_label(window_of(cfg, m))}"
+            rows.append([{"text": label, "callback_data": f"al:w:{m}"}])
+        rows.append([{"text": "← К алертам", "callback_data": "al"}])
+        return {"inline_keyboard": rows}
+
+    def _alert_win_metric_kb(self, metric: str, cfg: dict) -> dict:
+        """Пресеты минут для одной метрики: своё окно — свои кнопки."""
+        from alerts import METRIC_ICON, METRIC_TITLE, WINDOW_PRESETS, window_label
+        cur = window_label(cfg.get("windows", {}).get(metric) or cfg.get("window_min"))
+        row = [{"text": ("· " if window_label(w) == cur else "") + window_label(w),
+                "callback_data": f"al:w:{metric}:{w}"} for w in WINDOW_PRESETS]
         return {"inline_keyboard": [
             row[:3], row[3:],
-            [{"text": "свои минуты", "callback_data": "al:w:?"}],
+            [{"text": f"свои минуты · {METRIC_ICON[metric]} {METRIC_TITLE[metric]}",
+              "callback_data": f"al:w:{metric}:?"}],
+            [{"text": "← Другая метрика", "callback_data": "al:w"}],
             [{"text": "← К алертам", "callback_data": "al"}],
         ]}
 
@@ -3132,7 +3548,7 @@ class TelegramBot:
         return {"inline_keyboard": rows}
 
     def _alert_metric_pick_kb(self, field: str) -> dict:
-        letter = "t" if field == "thr" else "n"
+        letter = {"thr": "t", "min": "n", "coin": "c"}[field]
         return {"inline_keyboard": [
             [{"text": "LIQ", "callback_data": f"al:{letter}:liq"},
              {"text": "CVD", "callback_data": f"al:{letter}:cvd"},
@@ -3144,18 +3560,38 @@ class TelegramBot:
         from alerts import canon_symbol, money, window_label
         cfg = self._alert_cfg(user)
         text = raw if isinstance(raw, str) else ""
-        if wait == "coin":
-            cfg["symbol"] = canon_symbol(text)
+        if wait == "coin" or wait.startswith("coin:"):
+            from alerts import METRICS
+            coin = canon_symbol(text)
+            if ":" in wait:
+                metric = wait.split(":", 1)[1]
+                coins = dict(cfg.get("coins") or {})
+                coins[metric] = coin
+                cfg["coins"] = coins
+                self._alert_save(user, cfg)
+                from alerts import METRIC_TITLE
+                return f"Монета {METRIC_TITLE.get(metric, metric)}: {coin}"
+            # старый ввод: одна монета на все метрики
+            cfg["symbol"] = coin
+            cfg["coins"] = {m: coin for m in METRICS}
             self._alert_save(user, cfg)
             return f"Монета: {cfg['symbol']}"
-        if wait == "win":
+        if wait == "win" or wait.startswith("win:"):
+            from alerts import window_minutes
+            metric = wait.split(":", 1)[1] if ":" in wait else \
+                (cfg.get("watch") or ["liq"])[0]
             try:
                 n = int(float(text.replace(",", ".")))
             except (TypeError, ValueError):
                 return "Нужно число минут, например 5."
-            cfg["window_min"] = max(1, min(n, 1440))
+            wins = dict(cfg.get("windows") or {})
+            wins[metric] = window_minutes(n)
+            cfg["windows"] = wins
+            if metric in (cfg.get("watch") or []):
+                cfg["window_min"] = wins[metric]      # старое поле — под метрику
             self._alert_save(user, cfg)
-            return f"Окно: {window_label(cfg['window_min'])}"
+            titles = {"liq": "Ликвидации", "cvd": "CVD", "oi": "OI"}
+            return f"Окно {titles.get(metric, metric)}: {window_label(wins[metric])}"
         if wait.startswith("thr:") or wait.startswith("min:"):
             kind, metric = wait.split(":", 1)
             try:
@@ -3220,17 +3656,19 @@ class TelegramBot:
             lines.append("<b>Самые резкие движения сейчас</b>")
             for m in movers[:5]:
                 arrow = "🚀" if m["change_pct"] > 0 else "🩸"
-                lines.append(f"{arrow} {m['symbol'].replace('_USDT', '')} "
-                             f"{m['change_pct']:+.2f}% · {price_str(m.get('price'))}"
-                             f" · оборот {money(m.get('volume24h'))}")
+                lines.append(f"{arrow} <b>{m['symbol'].replace('_USDT', '')}</b> "
+                             f"<b>{m['change_pct']:+.2f}%</b>"
+                             f" · <code>{price_str(m.get('price'))}</code>"
+                             f" · оборот <code>{money(m.get('volume24h'))}</code>")
         hits = data.get("hits") or []
         if hits:
             lines.append("")
             lines.append("<b>Уже за порогом</b>")
             for h in hits[:3]:
                 kind = "памп" if h["kind"] == "pump" else "дамп"
-                lines.append(f"· {h['symbol'].replace('_USDT', '')} — {kind} "
-                             f"{h['change_pct']:+.2f}% за {int(h['span_min'])} мин")
+                lines.append(f"· <b>{h['symbol'].replace('_USDT', '')}</b> — {kind} "
+                             f"<b>{h['change_pct']:+.2f}%</b>"
+                             f" за {int(h['span_min'])} мин")
         lines.append("")
         lines.append("Кнопки ниже — режим, порог, период и число свечей. "
                      "Сигналы приходят отдельными сообщениями со ссылкой на Gate.")
@@ -3308,11 +3746,14 @@ class TelegramBot:
 
     # ----- сервис «Корреляции валют» --------------------------------------
     def _corr_cfg(self, user: dict) -> dict:
-        from correlations import DEFAULT_METRIC, DEFAULT_WINDOW, window_key
+        from correlations import (DEFAULT_METRIC, DEFAULT_WINDOW, normalize_alerts,
+                                  window_key)
         row = self.store.get_user_service(user["id"], "correlations") if self.store else None
         cfg = (row or {}).get("config") or {}
         return {"window": window_key(cfg.get("window") or DEFAULT_WINDOW),
-                "metric": str(cfg.get("metric") or DEFAULT_METRIC)}
+                "metric": str(cfg.get("metric") or DEFAULT_METRIC),
+                # алерты по корреляции: у каждой метрики своё окно и два порога
+                "alerts": normalize_alerts(cfg)}
 
     def _corr_save(self, user: dict, cfg: dict) -> None:
         self.store.set_user_service_config(
@@ -3332,16 +3773,22 @@ class TelegramBot:
         from correlations import format_text, metric_title, window_label
         cfg = self._corr_cfg(user)
         data = self._corr_data(cfg)
+        from correlations import alerts_line
         if not data:
+            # история ещё копится, но алерты уже можно настраивать: сигналы
+            # пойдут, как только появятся часы для расчёта связи
             return ("<b>🔗 Корреляции валют</b>\n"
                     "История ещё собирается: сервис считает связи монет по часовым "
                     "свёрткам ликвидаций, объёма, CVD и OI. Загляните позже — или "
-                    "посмотрите тепловую карту на сайте."
+                    "посмотрите тепловую карту на сайте.\n\n"
+                    + alerts_line(cfg.get("alerts"))
                     + self.site_footer())
         body = format_text(data, "ru", site=self.site_url("/cabinet"))
         lines = body.split("\n")
         lines[0] = (f"<b>🔗 Корреляции валют</b> · {window_label(cfg['window'])} · "
                     f"{metric_title(cfg['metric'])}")
+        lines.append("")
+        lines.append(alerts_line(cfg.get("alerts")))
         return "\n".join(lines) + self.site_footer()
 
     def _corr_kb(self, user: dict) -> dict:
@@ -3365,17 +3812,184 @@ class TelegramBot:
             {"text": ("✓ " if cfg["metric"] == "oi" else "") + "📊 OI",
              "callback_data": "cor:m:oi"},
         ])
+        kb.append([{"text": "🔔 Алерты", "callback_data": "cor:a"}])
         kb.append([{"text": "🔄 Пересчитать", "callback_data": "cor:now"},
                    {"text": "🌐 Тепловая карта", "url":
                     self.site_url("/cabinet#correlations")}])
         kb.append([{"text": "← Назад", "callback_data": "services"}])
         return {"inline_keyboard": kb}
 
+    def _corr_num(self, v) -> str:
+        return f"{float(v):+.2f}".replace("-", "−")
+
+    def _corr_alerts_text(self, user: dict) -> str:
+        from correlations import format_alerts_config
+        cfg = self._corr_cfg(user)
+        return (format_alerts_config(cfg.get("alerts")) +
+                "\n\nУ каждой метрики своё окно и свои пороги. «В противофазе» — "
+                "связь со знаком минус, «в одну сторону» — со знаком плюс: "
+                "порог 0.5 значит «коэффициент 0.5 и выше». Поставьте порог — "
+                "сигнал включится сам." + self.site_footer())
+
+    def _corr_alerts_kb(self, user: dict) -> dict:
+        from correlations import METRICS, metric_icon, metric_title, window_label
+        cfg = self._corr_cfg(user)
+        alerts = cfg.get("alerts") or {}
+        rows = []
+        for key, _title, _hint in METRICS:
+            row = alerts.get(key) or {}
+            mark = "✓ " if row.get("enabled") else ""
+            label = (f"{mark}{metric_icon(key)} {metric_title(key)} · "
+                     f"{window_label(row.get('window') or '24h')}")
+            rows.append([{"text": label, "callback_data": f"cor:a:{key}"}])
+        rows.append([{"text": "← К корреляциям", "callback_data": "cor"}])
+        return {"inline_keyboard": rows}
+
+    def _corr_metric_text(self, user: dict, metric: str) -> str:
+        from correlations import metric_icon, metric_title, window_label
+        cfg = self._corr_cfg(user)
+        row = (cfg.get("alerts") or {}).get(metric) or {}
+        on = "включён" if row.get("enabled") else "выключен"
+        return "\n".join([
+            f"{metric_icon(metric)} <b>Алерты · {metric_title(metric)}</b>",
+            f"сигнал: <b>{on}</b>",
+            f"окно: <b>{window_label(row.get('window') or '24h')}</b>",
+            f"в противофазе: порог <code>{self._corr_num(row.get('opp') or 0)}</code>",
+            f"в одну сторону: порог <code>{self._corr_num(row.get('same') or 0)}</code>",
+            "\nСигнал — пара монет с такой связью. Пороги нажимаются кнопками "
+            "или вводятся руками.",
+        ]) + self.site_footer()
+
+    def _corr_metric_kb(self, user: dict, metric: str) -> dict:
+        from correlations import ALERT_THRESHOLDS, WINDOWS, window_label
+        cfg = self._corr_cfg(user)
+        row = (cfg.get("alerts") or {}).get(metric) or {}
+        on = "🔔 Сигнал ВКЛ" if row.get("enabled") else "🔕 Сигнал выкл"
+        kb = [[{"text": on, "callback_data": f"cor:a:{metric}:on"}]]
+        wins = [{"text": ("· " if key == (row.get("window") or "24h") else "") +
+                         window_label(key),
+                 "callback_data": f"cor:a:{metric}:w:{key}"}
+                for key, _m in WINDOWS]
+        kb += [wins[i:i + 3] for i in range(0, len(wins), 3)]
+        opp = [{"text": ("· " if abs(float(v) - float(row.get("opp") or 0)) < 1e-9
+                         else "") + f"−{v:.1f}",
+                "callback_data": f"cor:a:{metric}:opp:{v}"} for v in ALERT_THRESHOLDS]
+        same = [{"text": ("· " if abs(float(v) - float(row.get("same") or 0)) < 1e-9
+                          else "") + f"+{v:.1f}",
+                 "callback_data": f"cor:a:{metric}:same:{v}"} for v in ALERT_THRESHOLDS]
+        kb.append([{"text": "противофаза", "callback_data": f"cor:a:{metric}"}])
+        kb += [opp[i:i + 3] for i in range(0, len(opp), 3)]
+        kb.append([{"text": "в одну сторону", "callback_data": f"cor:a:{metric}"}])
+        kb += [same[i:i + 3] for i in range(0, len(same), 3)]
+        kb.append([{"text": "свой порог: противофаза",
+                    "callback_data": f"cor:a:{metric}:?:opp"},
+                   {"text": "свой порог: в одну сторону",
+                    "callback_data": f"cor:a:{metric}:?:same"}])
+        kb.append([{"text": "← Алерты", "callback_data": "cor:a"}])
+        kb.append([{"text": "← К корреляциям", "callback_data": "cor"}])
+        return {"inline_keyboard": kb}
+
+    def _corr_alert_row(self, cfg: dict, metric: str) -> dict:
+        from correlations import normalize_alerts
+        alerts = cfg.get("alerts") or normalize_alerts({})
+        return dict(alerts.get(metric) or {})
+
+    def _corr_alert_store(self, user: dict, cfg: dict, metric: str, row: dict) -> None:
+        alerts = dict(cfg.get("alerts") or {})
+        alerts[metric] = row
+        cfg["alerts"] = alerts
+        self._corr_save(user, cfg)
+
+    def _corr_apply_text(self, user: dict, wait: str, raw) -> str:
+        from correlations import METRIC_KEYS, metric_title
+        text = raw if isinstance(raw, str) else ""
+        parts = str(wait).split(":")
+        metric = parts[1] if len(parts) > 1 else "liq"
+        field = parts[2] if len(parts) > 2 else "opp"
+        if metric not in METRIC_KEYS:
+            return "Неизвестная метрика."
+        cfg = self._corr_cfg(user)
+        row = self._corr_alert_row(cfg, metric)
+        try:
+            n = float(text.replace(" ", "").replace(",", ".").replace("−", "-"))
+        except (TypeError, ValueError):
+            return "Нужно число от 0 до 1, например 0.5."
+        if field == "opp":
+            row["opp"] = round(max(-1.0, min(0.0, -abs(n))), 3)
+        else:
+            row["same"] = round(max(0.0, min(1.0, abs(n))), 3)
+        row["enabled"] = True        # поставил порог — ждём сигнал
+        self._corr_alert_store(user, cfg, metric, row)
+        title = metric_title(metric)
+        sign = "−" if field == "opp" else "+"
+        word = "противофаза" if field == "opp" else "в одну сторону"
+        return (f"{title}: {word} {sign}{abs(n):.2f} · сигнал включён")
+
     async def _on_corr_cb(self, chat_id, user: dict, data: str, message_id) -> None:
         cfg = self._corr_cfg(user)
         parts = data.split(":")
         if data == "cor" or data == "cor:now":
             await self.reply(chat_id, self._corr_text(user), self._corr_kb(user),
+                             message_id=message_id)
+            return
+        if data == "cor:a" or data.startswith("cor:a:"):
+            from correlations import METRIC_KEYS, window_key
+            parts = data.split(":")
+            if len(parts) == 2:
+                await self.reply(chat_id, self._corr_alerts_text(user),
+                                 self._corr_alerts_kb(user), message_id=message_id)
+                return
+            metric = parts[2]
+            if metric not in METRIC_KEYS:
+                await self.reply(chat_id, self._corr_alerts_text(user),
+                                 self._corr_alerts_kb(user), message_id=message_id)
+                return
+            row = self._corr_alert_row(cfg, metric)
+            if len(parts) == 3:
+                await self.reply(chat_id, self._corr_metric_text(user, metric),
+                                 self._corr_metric_kb(user, metric),
+                                 message_id=message_id)
+                return
+            action = parts[3]
+            if action == "on":
+                row["enabled"] = not row.get("enabled")
+                self._corr_alert_store(user, cfg, metric, row)
+                await self.reply(chat_id, self._corr_metric_text(user, metric),
+                                 self._corr_metric_kb(user, metric),
+                                 message_id=message_id)
+                return
+            if action == "?":
+                tg_id = int(user.get("tg_id") or 0)
+                self._wait_alert[tg_id] = f"corr:{metric}:{parts[4] if len(parts) > 4 else 'opp'}"
+                await self.reply(
+                    chat_id,
+                    "Пришлите порог от 0 до 1, например 0.5.\n/cancel — отмена.",
+                    self._kb_back("cor"), message_id=message_id)
+                return
+            value = parts[4] if len(parts) > 4 else ""
+            if action == "w":
+                row["window"] = window_key(value)
+            elif action in ("opp", "same"):
+                if value == "?":
+                    tg_id = int(user.get("tg_id") or 0)
+                    self._wait_alert[tg_id] = f"corr:{metric}:{action}"
+                    await self.reply(
+                        chat_id,
+                        "Пришлите порог от 0 до 1, например 0.5.\n/cancel — отмена.",
+                        self._kb_back("cor"), message_id=message_id)
+                    return
+                try:
+                    num = float(str(value).replace("−", "-"))
+                except ValueError:
+                    num = 0.5
+                if action == "opp":
+                    row["opp"] = round(max(-1.0, min(0.0, -abs(num))), 3)
+                else:
+                    row["same"] = round(max(0.0, min(1.0, abs(num))), 3)
+                row["enabled"] = True    # поставил порог — ждём сигнал
+            self._corr_alert_store(user, cfg, metric, row)
+            await self.reply(chat_id, self._corr_metric_text(user, metric),
+                             self._corr_metric_kb(user, metric),
                              message_id=message_id)
             return
         if len(parts) >= 3 and parts[1] == "w":
@@ -3416,36 +4030,101 @@ class TelegramBot:
                              message_id=message_id)
             return
         if data == "al:c":
-            await self.reply(chat_id, "Какую монету смотреть?", self._alert_coins_kb(),
+            await self.reply(chat_id, "Монета какой метрики? У каждой она своя.",
+                             self._alert_metric_pick_kb("coin"),
                              message_id=message_id)
             return
-        if data == "al:c:?":
-            self._wait_alert[tg_id] = "coin"
-            await self.reply(chat_id, "Пришлите тикер, например BTC или ETHUSDT.\n/cancel — отмена.",
-                             self._kb_back("al"), message_id=message_id)
-            return
         if data.startswith("al:c:"):
-            from alerts import canon_symbol
-            cfg["symbol"] = canon_symbol(data.split(":", 2)[2])
+            from alerts import METRIC_ICON, METRIC_TITLE, METRICS, canon_symbol
+            parts = data.split(":")
+            # al:c:<монета> — старый колбэк: одна монета на все метрики
+            if len(parts) == 3 and parts[2] not in METRICS:
+                if parts[2] == "?":
+                    self._wait_alert[tg_id] = "coin"
+                    await self.reply(
+                        chat_id,
+                        "Пришлите тикер, например BTC или ETHUSDT.\n/cancel — отмена.",
+                        self._kb_back("al"), message_id=message_id)
+                    return
+                coin = canon_symbol(parts[2])
+                cfg["coins"] = {m: coin for m in METRICS}
+                self._alert_save(user, cfg)
+                await self.reply(chat_id, self._alert_text(user), self._alert_kb(user),
+                                 message_id=message_id)
+                return
+            metric = parts[2]
+            if metric not in METRICS:
+                await self.reply(chat_id, self._alert_text(user), self._alert_kb(user),
+                                 message_id=message_id)
+                return
+            if len(parts) == 3:
+                title = f"{METRIC_ICON[metric]} {METRIC_TITLE[metric]}"
+                await self.reply(chat_id, f"Монета метрики {title}:",
+                                 self._alert_coins_kb(user, metric),
+                                 message_id=message_id)
+                return
+            val = parts[3]
+            if val == "?":
+                self._wait_alert[tg_id] = f"coin:{metric}"
+                await self.reply(
+                    chat_id,
+                    "Пришлите тикер, например BTC или ETHUSDT.\n/cancel — отмена.",
+                    self._kb_back("al"), message_id=message_id)
+                return
+            coins = dict(cfg.get("coins") or {})
+            coins[metric] = canon_symbol(val)
+            cfg["coins"] = coins
             self._alert_save(user, cfg)
             await self.reply(chat_id, self._alert_text(user), self._alert_kb(user),
                              message_id=message_id)
             return
         if data == "al:w":
-            await self.reply(chat_id, "Окно агрегации:", self._alert_win_kb(),
-                             message_id=message_id)
-            return
-        if data == "al:w:?":
-            self._wait_alert[tg_id] = "win"
-            await self.reply(chat_id, "Сколько минут в окне? Число, например 7.\n/cancel — отмена.",
-                             self._kb_back("al"), message_id=message_id)
+            await self.reply(chat_id, "Окно какой метрики? У каждой своё.",
+                             self._alert_win_kb(user), message_id=message_id)
             return
         if data.startswith("al:w:"):
+            from alerts import METRIC_ICON, METRIC_TITLE, WINDOW_PRESETS, window_minutes
+            parts = data.split(":")
+            # al:w:<метрика> — пресеты этой метрики; al:w:<метрика>:<минут|?>
+            if len(parts) >= 3 and parts[2] in ("liq", "cvd", "oi"):
+                metric = parts[2]
+                if len(parts) == 3:
+                    await self.reply(chat_id,
+                                     f"{METRIC_ICON[metric]} Окно {METRIC_TITLE[metric]}:",
+                                     self._alert_win_metric_kb(metric, cfg),
+                                     message_id=message_id)
+                    return
+                val = parts[3]
+                if val == "?":
+                    self._wait_alert[tg_id] = f"win:{metric}"
+                    await self.reply(
+                        chat_id,
+                        "Сколько минут в окне? Число, например 7.\n/cancel — отмена.",
+                        self._kb_back("al"), message_id=message_id)
+                    return
+                try:
+                    n = int(val)
+                except ValueError:
+                    n = WINDOW_PRESETS[0]
+                wins = dict(cfg.get("windows") or {})
+                wins[metric] = window_minutes(n)
+                cfg["windows"] = wins
+                if metric in (cfg.get("watch") or []):
+                    cfg["window_min"] = wins[metric]
+                self._alert_save(user, cfg)
+                await self.reply(chat_id, self._alert_text(user), self._alert_kb(user),
+                                 message_id=message_id)
+                return
+            # старый колбэк al:w:<минут> из уже отправленных меню
             try:
-                n = int(data.split(":")[2])
+                n = window_minutes(int(parts[2]))
             except (IndexError, ValueError):
-                n = 5
-            cfg["window_min"] = max(1, min(n, 1440))
+                n = window_minutes(0)
+            wins = dict(cfg.get("windows") or {})
+            for m in (cfg.get("watch") or ["liq"]):
+                wins[m] = n
+            cfg["windows"] = wins
+            cfg["window_min"] = n
             self._alert_save(user, cfg)
             await self.reply(chat_id, self._alert_text(user), self._alert_kb(user),
                              message_id=message_id)

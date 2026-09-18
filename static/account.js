@@ -3,6 +3,40 @@
 
     var T = {
         ru: {
+            navHome: "🏠 Главная",
+            navDigest: "📰 Дайджест",
+            alTitle: "Алерты по объёму",
+            alSub: "Включайте ликвидации, CVD и OI по отдельности — можно слушать один источник или два. Порог CVD/OI крупнее, чем у ликвидаций, и окно у каждой метрики своё. После сигнала окно начинается заново: в следующее сообщение попадут только новые данные.",
+            alSigOn: "СИГНАЛ ВКЛ",
+            alSigOff: "СИГНАЛ ВЫКЛ",
+            alWindow: "Окно",
+            alThreshold: "Порог",
+            alCoin: "Монета",
+            alTape: "Лента",
+            alMinHit: "Мин. удар в окне",
+            alQuiet: "пока тихо",
+            alSignals: "🔔 сигналы",
+            alFlowWindow: "поток окна",
+            alMarket: "рынок",
+            alAll: "все",
+            alLong: "лонг",
+            alShort: "шорт",
+            alPieces: "шт.",
+            alMin: "м",
+            alHour: "ч",
+            corrTitle: "Корреляции валют",
+            corrSub: "Тепловая карта связей между монетами: какие активы двигаются синфазно, а где происходит раскорреляция.",
+            pumpTitle: "Сторож монет",
+            pumpSub: "Автоматический детектор резких всплесков объёма и цены (пампы и дампы) по парам на бирже.",
+            cabinetTitle: "Кабинет",
+            cabinetOpen: "Открыть терминал",
+            servicesTitle: "Сервисы",
+            servicesLeadText: "Нажмите сервис, чтобы развернуть панель. Алерты: ликвидации, CVD и OI — каждый своим выключателем и своей лентой.",
+            tgLinkBtn: "🔗 Привязать Telegram",
+            tgUnlinkBtn: "Отвязать",
+            cabLogout: "Выйти",
+            botInTg: "Бот в Telegram",
+            partnerDiscount: "💠 Торговать на Gate — скидка на комиссию",
             login: "Войти", cabinet: "Кабинет", admin: "Админка", logout: "Выйти",
             terminal: "Терминал",
             loginTitle: "Вход через Telegram",
@@ -97,6 +131,40 @@
             views: "просмотров", uniques: "уник.",
         },
         en: {
+            navHome: "🏠 Home",
+            navDigest: "📰 Digest",
+            alTitle: "Volume Alerts",
+            alSub: "Toggle liquidations, CVD, and OI individually. Thresholds and rolling time windows are configured per metric. Signals reset the window so only fresh data triggers future alerts.",
+            alSigOn: "ALERT ON",
+            alSigOff: "ALERT OFF",
+            alWindow: "Window",
+            alThreshold: "Threshold",
+            alCoin: "Coin",
+            alTape: "Feed",
+            alMinHit: "Min single event in window",
+            alQuiet: "quiet for now",
+            alSignals: "🔔 alerts",
+            alFlowWindow: "window stream",
+            alMarket: "market",
+            alAll: "all",
+            alLong: "long",
+            alShort: "short",
+            alPieces: "events",
+            alMin: "m",
+            alHour: "h",
+            corrTitle: "Coin Correlations",
+            corrSub: "Heatmap of inter-coin correlations: identify synced movements and diverging pairs across metrics.",
+            pumpTitle: "Coin Watcher",
+            pumpSub: "Real-time scanner detecting sudden abnormal price and volume spikes (pumps & dumps) across exchange pairs.",
+            cabinetTitle: "Cabinet",
+            cabinetOpen: "Open terminal",
+            servicesTitle: "Services",
+            servicesLeadText: "Click a service to expand its panel. Alerts: liquidations, CVD, and OI — each with its own switch and feed.",
+            tgLinkBtn: "🔗 Link Telegram",
+            tgUnlinkBtn: "Unlink",
+            cabLogout: "Log out",
+            botInTg: "Bot in Telegram",
+            partnerDiscount: "💠 Trade on Gate — fee discount",
             login: "Sign in", cabinet: "Cabinet", admin: "Admin", logout: "Log out",
             terminal: "Terminal",
             loginTitle: "Sign in with Telegram",
@@ -184,7 +252,411 @@
             ban: "Ban", unban: "Unban",
             views: "views", uniques: "unique",
         },
+        zh: {
+            navHome: "🏠 首页",
+            navDigest: "📰 日报",
+            alTitle: "异动预警通知",
+            alSub: "独立开关爆仓、CVD 与持仓量 OI 监控。每个指标拥有独立阈值和时间窗口。触发报警后窗口将自动重置以监控后续新数据。",
+            alSigOn: "报警开启",
+            alSigOff: "报警关闭",
+            alWindow: "时间窗口",
+            alThreshold: "报警阈值",
+            alCoin: "监控币种",
+            alTape: "实时流",
+            alMinHit: "单笔最低过滤",
+            alQuiet: "暂无信号",
+            alSignals: "🔔 触发信号",
+            alFlowWindow: "窗口数据流",
+            alMarket: "全网",
+            alAll: "全部",
+            alLong: "多单",
+            alShort: "空单",
+            alPieces: "笔",
+            alMin: "分",
+            alHour: "时",
+            corrTitle: "币种关联性矩阵",
+            corrSub: "主流币种热力图联动分析：快速发现同涨同跌与背离异动的币种组合。",
+            pumpTitle: "异常异动监测",
+            pumpSub: "实时扫描交易所全部币种价格与成交量暴涨暴跌异动。",
+            cabinetTitle: "个人中心",
+            cabinetOpen: "打开终端",
+            servicesTitle: "服务列表",
+            servicesLeadText: "点击服务展开控制面板。预警功能：爆仓、CVD 与持仓量 OI — 各自拥有独立开关与数据流。",
+            tgLinkBtn: "🔗 绑定 Telegram",
+            tgUnlinkBtn: "解除绑定",
+            cabLogout: "退出登录",
+            botInTg: "Telegram 机器人",
+            partnerDiscount: "💠 在 Gate 交易 — 手续费折扣",
+            login: "登录", cabinet: "个人中心", admin: "管理后台", logout: "退出",
+            terminal: "终端",
+            loginTitle: "通过 Telegram 登录",
+            loginLead: "个人中心与机器人共用一个账号。点击按钮在 Telegram 中确认 /start 即可返回。",
+            openBot: "打开 Telegram 机器人",
+            authTitleLogin: "登录个人中心",
+            authTitleRegister: "邮箱注册",
+            authTitleLink: "邮箱免密链接登录",
+            authLeadLogin: "输入邮箱和密码。随后可绑定 Telegram 以接收预警信号。",
+            authLeadRegister: "输入邮箱、密码并通过邮件链接激活。未激活前无法登录。",
+            authLeadLink: "我们将向您的邮箱发送一次性免密登录链接。",
+            tabLogin: "登录", tabRegister: "注册", tabLink: "邮件链接",
+            labelName: "昵称（可选）", labelEmail: "邮箱", labelPass: "密码",
+            submitLogin: "登录", submitRegister: "创建账号", submitLink: "发送链接",
+            forgot: "忘记密码？", resendVerify: "重新发送验证邮件",
+            tgAlt: "通过 Telegram 登录", tgAltBadge: "备用方式",
+            tgAltLead: "若邮箱不可用，可通过 Telegram 登录同一账号。",
+            registerSent: "验证邮件已发送至 {email}。请打开邮件点击“确认邮箱”。",
+            linkSent: "若该邮箱已注册，登录链接已在路上。链接有效时间为 30 分钟。",
+            verifySent: "验证邮件已重新发送 — 请检查收件箱与垃圾邮件箱。",
+            needEmail: "请输入邮箱地址。",
+            needPass: "请输入密码。",
+            captchaLead: "人机验证",
+            captchaLoading: "验证中 — 正在加载算式…",
+            captchaNeed: "请计算算式结果 — 以防止机器人滥用。",
+            captchaWrong: "计算错误。已刷新算式，请重新计算。",
+            captchaRefresh: "换一题",
+            weakShort: "密码长度不能少于 8 个字符。",
+            weakSimple: "密码过于简单 — 请设置更复杂的密码。",
+            verifyBad: "激活链接无效 — 请重新申请。",
+            verifyUsed: "该链接已被使用。请重新申请。",
+            verifyExpired: "链接已过期 — 请重新申请。",
+            verifyFirst: "请先通过邮件中的链接确认激活邮箱。",
+            linkBad: "登录链接无效 — 请重新申请。",
+            attachUsed: "绑定链接已被使用 — 请在机器人中重新获取。",
+            attachExpired: "绑定链接已过期 — 请在机器人中重新获取。",
+            attachBad: "绑定链接无效 — 请在机器人中重新获取。",
+            attachBlocked: "账号已被冻结 — 无法绑定。",
+            tgAttached: "Telegram 已成功绑定至个人中心 — 预警信号将直接推送至机器人。",
+            verifyNoMail: "未绑定邮箱。请在机器人中完成邮箱确认，以便用于登录与找回密码。",
+            openBot: "在机器人中确认邮箱",
+            mailOff: "服务器暂未配置邮件发送服务 — 请联系管理员。",
+            emailUnverified: "未验证邮箱",
+            emailVerified: "邮箱已验证",
+            tgLinked: "Telegram 已绑定",
+            tgNotLinked: "Telegram 未绑定",
+            tgWhy: "预警信号会发送至机器人，绑定后不错过任何异动",
+            tgLink: "绑定 Telegram",
+            tgUnlink: "解除绑定",
+            tgLinkOpened: "请在机器人中点击 Start — 页面将自动确认绑定。",
+            tgLinkOk: "Telegram 绑定成功 — 预警信号将推送至机器人。",
+            tgLinkTaken: "此 Telegram 账号已被其他邮箱账号绑定。",
+            tgUnlinkOk: "Telegram 已解绑。邮箱登录不受影响。",
+            tgUnlinkSure: "确定解除 Telegram 绑定吗？解绑后将停止接收机器人信号。",
+            resetTitle: "重置密码",
+            resetLead: "请为邮箱登录设置新密码。",
+            resetPass2: "再次输入密码",
+            resetSave: "保存新密码",
+            resetMismatch: "两次输入的密码不一致。",
+            resetOk: "密码修改成功 — 正在跳转至个人中心…",
+            resetBad: "重置链接无效 — 请在登录页重新申请找回密码。",
+            emailCol: "邮箱",
+            svcLocked: "服务将在确认邮箱后解锁。确认邮件已发出 — 请检查收件箱与垃圾箱（若未收到可点击上方“重新发送”）。",
+            waiting: "等待机器人确认中…",
+            ok: "完成，正在打开个人中心",
+            noBot: "机器人尚未配置。管理员需设置 LIQSCOPE_BOT_TOKEN。",
+            expired: "验证码已失效 — 请重新点击按钮。",
+            banned: "访问受限。",
+            member: "加入时间",
+            roleUser: "普通用户", roleAdmin: "管理员",
+            services: "功能服务",
+            servicesLead: "订阅将自动保留：当新服务上线时，将同步展示在个人中心与机器人中。",
+            soon: "即将推出",
+            digestOpen: "阅读简报",
+            waitlistOn: "已在候补名单",
+            waitlistOff: "加入候补名单",
+            subscribed: "已启用",
+            subscribe: "启用",
+            noticeEmpty: "暂无系统公告。",
+            users: "用户列表", visits: "访问量",
+            broadcast: "Telegram 全员群发", send: "发送", saved: "已保存",
+            health: "交易所状态", settings: "系统设置",
+            welcome: "机器人欢迎语", siteNotice: "全站置顶公告",
+            ban: "封禁", unban: "解封",
+            views: "浏览量", uniques: "独立访客",
+        },
+        hi: {
+            navHome: "🏠 होम",
+            navDigest: "📰 डाइजेस्ट",
+            alTitle: "वॉल्यूम अलर्ट",
+            alSub: "लिक्विडेशन, CVD और OI को व्यक्तिगत रूप से चालू या बंद करें। प्रत्येक मीट्रिक की अपनी सीमा और समय विंडो है।",
+            alSigOn: "अलर्ट चालू",
+            alSigOff: "अलर्ट बंद",
+            alWindow: "विंडो",
+            alThreshold: "सीमा",
+            alCoin: "कॉइन",
+            alTape: "फ़ीड",
+            alMinHit: "विंडो में न्यूनतम घटना",
+            alQuiet: "अभी शांत है",
+            alSignals: "🔔 अलर्ट",
+            alFlowWindow: "विंडो स्ट्रीम",
+            alMarket: "बाज़ार",
+            alAll: "सभी",
+            alLong: "लॉन्ग",
+            alShort: "शॉर्ट",
+            alPieces: "घटनाएँ",
+            alMin: "मि",
+            alHour: "घं",
+            corrTitle: "कॉइन सहसंबंध",
+            corrSub: "कॉइन सहसंबंध हीटमैप: जानिए कौन से कॉइन एक साथ चलते हैं।",
+            pumpTitle: "कॉइन वॉचर",
+            pumpSub: "अचानक मूल्य और वॉल्यूम वृद्धि (पंप और डंप) का रीयल-टाइम स्कैनर।",
+            cabinetTitle: "डैशबोर्ड",
+            cabinetOpen: "टर्मिनल खोलें",
+            servicesTitle: "सेवाएँ",
+            servicesLeadText: "पैनल देखने के लिए सेवा पर क्लिक करें। अलर्ट: लिक्विडेशन, CVD और OI — प्रत्येक का अपना स्विच और फ़ीड।",
+            tgLinkBtn: "🔗 Telegram जोड़ें",
+            tgUnlinkBtn: "हटाएँ",
+            cabLogout: "लॉग आउट",
+            botInTg: "Telegram में बॉट",
+            partnerDiscount: "💠 Gate पर ट्रेड करें — फ़ीस में छूट",
+            login: "लॉग इन", cabinet: "डैशबोर्ड", admin: "एडमिन", logout: "लॉग आउट",
+            terminal: "टर्मिनल",
+            loginTitle: "Telegram से लॉग इन करें",
+            loginLead: "डैशबोर्ड और बॉट का एक ही खाता है। बटन दबाएँ, Telegram में /start करें और वापस आएँ।",
+            openBot: "Telegram बॉट खोलें",
+            authTitleLogin: "डैशबोर्ड में प्रवेश",
+            authTitleRegister: "ईमेल से रजिस्टर करें",
+            authTitleLink: "ईमेल लिंक से प्रवेश",
+            authLeadLogin: "ईमेल और पासवर्ड। सिग्नल अलर्ट के लिए Telegram बाद में जोड़ सकते हैं।",
+            authLeadRegister: "ईमेल, पासवर्ड और पुष्टि लिंक। पुष्टि के बिना प्रवेश बंद रहेगा।",
+            authLeadLink: "हम आपको एक बार का लॉगिन लिंक भेजेंगे — पासवर्ड की आवश्यकता नहीं।",
+            tabLogin: "प्रवेश", tabRegister: "रजिस्ट्रेशन", tabLink: "ईमेल लिंक",
+            labelName: "नाम (वैकल्पिक)", labelEmail: "ईमेल", labelPass: "पासवर्ड",
+            submitLogin: "लॉग इन", submitRegister: "खाता बनाएँ", submitLink: "लिंक भेजें",
+            forgot: "पासवर्ड भूल गए?", resendVerify: "पत्र पुनः भेजें",
+            tgAlt: "Telegram से लॉग इन", tgAltBadge: "वैकल्पिक तरीका",
+            tgAltLead: "यदि ईमेल उपलब्ध नहीं है, तो Telegram के माध्यम से उसी खाते में लॉग इन करें।",
+            registerSent: "{email} पर पत्र भेजा गया। उसे खोलें और “ईमेल की पुष्टि करें” पर क्लिक करें।",
+            linkSent: "यदि पता पंजीकृत है, तो लिंक भेजा जा चुका है। लिंक 30 मिनट वैध है।",
+            verifySent: "पुष्टि पत्र पुनः भेजा गया — कृपया अपना इनबॉक्स और स्पैम फ़ोल्डर देखें।",
+            needEmail: "ईमेल दर्ज करें।",
+            needPass: "पासवर्ड दर्ज करें।",
+            captchaLead: "जाँच",
+            captchaLoading: "जाँच — उदाहरण लोड हो रहा है…",
+            captchaNeed: "उदाहरण हल करें — यह रोबोट को रोकता है।",
+            captchaWrong: "गलत उत्तर। नया उदाहरण हल करें।",
+            captchaRefresh: "दूसरा उदाहरण",
+            weakShort: "पासवर्ड 8 वर्णों से छोटा है।",
+            weakSimple: "पासवर्ड बहुत सरल है — एक मजबूत पासवर्ड चुनें।",
+            verifyBad: "पुष्टि लिंक अमान्य है — नया अनुरोध करें।",
+            verifyUsed: "लिंक पहले ही इस्तेमाल हो चुका है। नया अनुरोध करें।",
+            verifyExpired: "लिंक की समय सीमा समाप्त हो गई है — नया अनुरोध करें।",
+            verifyFirst: "पहले ईमेल में दिए लिंक से पुष्टि करें।",
+            linkBad: "लॉगिन लिंक काम नहीं कर रहा — नया अनुरोध करें।",
+            attachUsed: "लिंक पहले ही इस्तेमाल हो चुका है — बॉट में नया अनुरोध करें।",
+            attachExpired: "लिंक की समय सीमा समाप्त — बॉट में नया अनुरोध करें।",
+            attachBad: "लिंक अमान्य है — बॉट में नया अनुरोध करें।",
+            attachBlocked: "खाता अवरुद्ध है।",
+            tgAttached: "Telegram डैशबोर्ड से जुड़ गया है — अलर्ट सिग्नल बॉट में आएंगे।",
+            verifyNoMail: "ईमेल नहीं जुड़ा है। पासवर्ड रिकवरी के लिए बॉट में पुष्टि करें।",
+            openBot: "बॉट में ईमेल की पुष्टि करें",
+            mailOff: "सर्वर पर ईमेल भेजने की सुविधा अभी सेट नहीं है — व्यवस्थापक से संपर्क करें।",
+            emailUnverified: "ईमेल अपुष्ट",
+            emailVerified: "ईमेल पुष्ट",
+            tgLinked: "Telegram जुड़ा है",
+            tgNotLinked: "Telegram नहीं जुड़ा है",
+            tgWhy: "अलर्ट सिग्नल बॉट में आते हैं, जोड़ें ताकि वे छूटे नहीं",
+            tgLink: "Telegram जोड़ें",
+            tgUnlink: "हटाएँ",
+            tgLinkOpened: "बॉट खोलें और Start दबाएँ — लिंक यहाँ अपने आप सत्यापित होगा।",
+            tgLinkOk: "Telegram जुड़ा — सिग्नल बॉट में आएंगे।",
+            tgLinkTaken: "यह Telegram पहले से ही किसी अन्य खाते से जुड़ा है।",
+            tgUnlinkOk: "Telegram हटाया गया। ईमेल लॉगिन काम करता रहेगा।",
+            tgUnlinkSure: "क्या आप Telegram हटाना चाहते हैं? बॉट में सिग्नल आना बंद हो जाएंगे।",
+            resetTitle: "नया पासवर्ड",
+            resetLead: "ईमेल से लॉगिन के लिए एक पासवर्ड चुनें।",
+            resetPass2: "पासवर्ड पुनः दर्ज करें",
+            resetSave: "पासवर्ड सहेजें",
+            resetMismatch: "पासवर्ड मेल नहीं खाते।",
+            resetOk: "पासवर्ड सहेजा गया — डैशबोर्ड खुल रहा है…",
+            resetBad: "रीसेट लिंक अमान्य है — लॉगिन पृष्ठ पर नया अनुरोध करें।",
+            emailCol: "ईमेल",
+            svcLocked: "ईमेल पुष्टि के बाद सेवाएँ चालू होंगी। पत्र भेजा जा चुका है — इनबॉक्स और स्पैम देखें।",
+            waiting: "बॉट में पुष्टि की प्रतीक्षा है…",
+            ok: "तैयार, डैशबोर्ड खुल रहा है",
+            noBot: "बॉट अभी कॉन्फ़िगर नहीं है।",
+            expired: "कोड पुराना हो गया — पुनः प्रयास करें।",
+            banned: "पहुँच प्रतिबंधित है।",
+            member: "सदस्य बने",
+            roleUser: "उपयोगकर्ता", roleAdmin: "व्यवस्थापक",
+            services: "सेवाएँ",
+            servicesLead: "आपकी सदस्यता सुरक्षित रहेगी: सेवा तैयार होने पर यहाँ और बॉट में दिखाई देगी।",
+            soon: "शीघ्र",
+            digestOpen: "डाइजेस्ट खोलें",
+            waitlistOn: "प्रतीक्षा सूची में",
+            waitlistOff: "प्रतीक्षा सूची में शामिल हों",
+            subscribed: "सक्रिय",
+            subscribe: "सक्रिय करें",
+            noticeEmpty: "कोई घोषणा नहीं।",
+            users: "उपयोगकर्ता", visits: "विज़िट",
+            broadcast: "Telegram प्रसारण", send: "भेजें", saved: "सहेजा गया",
+            health: "लाइव एक्सचेंज", settings: "सेटिंग्स",
+            welcome: "बॉट स्वागत संदेश", siteNotice: "साइट सूचना",
+            ban: "प्रतिबंध", unban: "प्रतिबंध हटाएँ",
+            views: "देखे गए", uniques: "अद्वितीय",
+        },
+        es: {
+            navHome: "🏠 Inicio",
+            navDigest: "📰 Resumen",
+            alTitle: "Alertas de volumen",
+            alSub: "Activa liquidaciones, CVD y OI por separado. Cada métrica tiene su propio umbral y ventana temporal.",
+            alSigOn: "ALERTA ACTIVADA",
+            alSigOff: "ALERTA DESACTIVADA",
+            alWindow: "Ventana",
+            alThreshold: "Umbral",
+            alCoin: "Moneda",
+            alTape: "Feed",
+            alMinHit: "Mínimo por evento en ventana",
+            alQuiet: "sin actividad por ahora",
+            alSignals: "🔔 alertas",
+            alFlowWindow: "flujo de la ventana",
+            alMarket: "mercado",
+            alAll: "todas",
+            alLong: "long",
+            alShort: "short",
+            alPieces: "uds.",
+            alMin: "m",
+            alHour: "h",
+            corrTitle: "Correlaciones de monedas",
+            corrSub: "Mapa de calor de correlaciones: qué activos se mueven en sintonía.",
+            pumpTitle: "Vigilante de monedas",
+            pumpSub: "Detector en tiempo real de picos bruscos de volumen y precio (pumps y dumps).",
+            cabinetTitle: "Panel",
+            cabinetOpen: "Abrir terminal",
+            servicesTitle: "Servicios",
+            servicesLeadText: "Haz clic en un servicio para desplegar el panel. Alertas: liquidaciones, CVD y OI — cada uno con su interruptor y feed.",
+            tgLinkBtn: "🔗 Vincular Telegram",
+            tgUnlinkBtn: "Desvincular",
+            cabLogout: "Cerrar sesión",
+            botInTg: "Bot en Telegram",
+            partnerDiscount: "💠 Opera en Gate — descuento en comisiones",
+            login: "Iniciar sesión", cabinet: "Panel", admin: "Admin", logout: "Cerrar sesión",
+            terminal: "Terminal",
+            loginTitle: "Iniciar sesión con Telegram",
+            loginLead: "El panel y el bot comparten cuenta. Pulsa el botón, confirma /start en Telegram y vuelve aquí.",
+            openBot: "Abrir bot de Telegram",
+            authTitleLogin: "Iniciar sesión",
+            authTitleRegister: "Registro con correo",
+            authTitleLink: "Acceso con enlace por correo",
+            authLeadLogin: "Correo y contraseña. Puedes vincular Telegram más adelante para recibir alertas.",
+            authLeadRegister: "Correo, contraseña y enlace de confirmación. Sin confirmación no podrás acceder.",
+            authLeadLink: "Te enviaremos un enlace de acceso de un solo uso — sin contraseña.",
+            tabLogin: "Entrar", tabRegister: "Registro", tabLink: "Enlace por correo",
+            labelName: "Nombre (opcional)", labelEmail: "Correo", labelPass: "Contraseña",
+            submitLogin: "Entrar", submitRegister: "Crear cuenta", submitLink: "Enviar enlace",
+            forgot: "¿Olvidaste tu contraseña?", resendVerify: "Reenviar correo",
+            tgAlt: "Iniciar con Telegram", tgAltBadge: "método alternativo",
+            tgAltLead: "Si el correo no está disponible, accede con la misma cuenta a través de Telegram.",
+            registerSent: "Correo enviado a {email}. Ábrelo y pulsa “Confirmar correo”.",
+            linkSent: "Si la dirección está registrada, el enlace va en camino. Es válido por 30 minutos.",
+            verifySent: "Correo reenviado — revisa tu bandeja de entrada y la carpeta de spam.",
+            needEmail: "Introduce tu correo.",
+            needPass: "Introduce tu contraseña.",
+            captchaLead: "Verificación",
+            captchaLoading: "Verificando — cargando ejemplo…",
+            captchaNeed: "Resuelve la operación — esto evita robots.",
+            captchaWrong: "Respuesta incorrecta. Hemos actualizado el ejemplo — inténtalo de nuevo.",
+            captchaRefresh: "Otro ejemplo",
+            weakShort: "La contraseña tiene menos de 8 caracteres.",
+            weakSimple: "La contraseña es demasiado simple — elige una más segura.",
+            verifyBad: "El enlace de confirmación no es válido — solicita uno nuevo.",
+            verifyUsed: "El enlace ya ha sido utilizado. Solicita uno nuevo.",
+            verifyExpired: "El enlace ha caducado — solicita uno nuevo.",
+            verifyFirst: "Confirma primero tu correo desde el enlace recibido.",
+            linkBad: "El enlace de acceso no es válido — solicita uno nuevo.",
+            attachUsed: "Este enlace de vinculación ya se utilizó — solicita uno nuevo en el bot.",
+            attachExpired: "El enlace de vinculación ha caducado — solicita uno nuevo en el bot.",
+            attachBad: "El enlace de vinculación no es válido — solicita uno nuevo en el bot.",
+            attachBlocked: "La cuenta está bloqueada — no se pudo vincular.",
+            tgAttached: "Telegram vinculado al panel — las señales llegarán al bot.",
+            verifyNoMail: "No hay correo vinculado. Confírmalo en el bot para poder iniciar sesión y recuperar la contraseña.",
+            openBot: "Confirmar correo en el bot",
+            mailOff: "El envío de correos no está configurado en el servidor — contacta al administrador.",
+            emailUnverified: "correo no confirmado",
+            emailVerified: "correo confirmado",
+            tgLinked: "Telegram vinculado",
+            tgNotLinked: "Telegram no vinculado",
+            tgWhy: "las señales de alerta llegan al bot, vincúlalo para no perderlas",
+            tgLink: "Vincular Telegram",
+            tgUnlink: "Desvincular",
+            tgLinkOpened: "Abre el bot y pulsa Start — la vinculación se confirmará aquí automáticamente.",
+            tgLinkOk: "Telegram vinculado — las alertas llegarán al bot.",
+            tgLinkTaken: "Este Telegram ya está vinculado a otra cuenta.",
+            tgUnlinkOk: "Telegram desvinculado. El acceso por correo sigue funcionando.",
+            tgUnlinkSure: "¿Desvincular Telegram? Dejarás de recibir alertas en el bot.",
+            resetTitle: "Nueva contraseña",
+            resetLead: "Elige una contraseña para acceder con tu correo.",
+            resetPass2: "Repetir contraseña",
+            resetSave: "Guardar contraseña",
+            resetMismatch: "Las contraseñas no coinciden.",
+            resetOk: "Contraseña guardada — abriendo el panel…",
+            resetBad: "El enlace de restablecimiento no es válido — solicita uno nuevo en la página de acceso.",
+            emailCol: "Correo",
+            svcLocked: "Los servicios se desbloquearán cuando confirmes tu correo. Revisa tu buzón y la carpeta de spam.",
+            waiting: "Esperando confirmación en el bot…",
+            ok: "Listo, abriendo el panel",
+            noBot: "El bot aún no está configurado. El administrador debe definir LIQSCOPE_BOT_TOKEN.",
+            expired: "Código caducado — pulsa el botón de nuevo.",
+            banned: "Acceso denegado.",
+            member: "miembro desde",
+            roleUser: "usuario", roleAdmin: "administrador",
+            services: "Servicios",
+            servicesLead: "Tu suscripción se conservará: cuando el servicio esté disponible, aparecerá aquí y en el bot.",
+            soon: "pronto",
+            digestOpen: "Abrir resumen",
+            waitlistOn: "En lista de espera",
+            waitlistOff: "Unirse a lista de espera",
+            subscribed: "Activado",
+            subscribe: "Activar",
+            noticeEmpty: "No hay anuncios.",
+            users: "Usuarios", visits: "Visitas",
+            broadcast: "Difusión en Telegram", send: "Enviar", saved: "Guardado",
+            health: "Exchanges en vivo", settings: "Ajustes",
+            welcome: "Bienvenida del bot", siteNotice: "Aviso en la web",
+            ban: "Bloquear", unban: "Desbloquear",
+            views: "vistas", uniques: "únicos",
+        },
     };
+
+    var SERVICES_I18N = {
+        alerts: {
+            ru: { title: "Алерты по объёму", desc: "Ликвидации, CVD и OI: порог, окно, монета — сигнал в кабинет и в Telegram." },
+            en: { title: "Volume alerts", desc: "Liquidations, CVD and OI: threshold, window, coin — signals to cabinet and Telegram." },
+            zh: { title: "异动预警通知", desc: "爆仓、CVD 与持仓量 OI：自定义阈值、时间窗口与币种 — 网页与 Telegram 同步提醒。" },
+            hi: { title: "वॉल्यूम अलर्ट", desc: "लिक्विडेशन, CVD और OI: सीमा, विंडो, कॉइन — डैशबोर्ड और Telegram में अलर्ट।" },
+            es: { title: "Alertas de volumen", desc: "Liquidaciones, CVD y OI: umbral, ventana, moneda — señales al panel y Telegram." }
+        },
+        correlations: {
+            ru: { title: "Корреляции валют", desc: "Какие монеты ходят вместе за час-неделю: ликвидации, объём, CVD и OI. Где выносило лонги, а где шорты." },
+            en: { title: "Coin correlations", desc: "Which coins move together: liquidations, volume, CVD, and OI correlations across 1h to 1w." },
+            zh: { title: "币种关联性矩阵", desc: "哪些币种同频联动：分析 1小时至1周内爆仓、成交量、CVD 与持仓量的皮尔逊相关性。" },
+            hi: { title: "कॉइन सहसंबंध", desc: "कौन से कॉइन एक साथ चलते हैं: 1 घंटे से 1 सप्ताह में लिक्विडेशन, वॉल्यूम, CVD और OI।" },
+            es: { title: "Correlaciones de monedas", desc: "Qué monedas se mueven juntas: liquidaciones, volumen, CVD y OI de 1 hora a 1 semana." }
+        },
+        watchlist: {
+            ru: { title: "Сторож монет", desc: "Пампы и дампы всех монет Gate: порог в %, период свечей и их число. Сигнал в Telegram со ссылкой на Gate." },
+            en: { title: "Coin watcher", desc: "Pump and dump scanner for Gate coins: % threshold, candle period, and count. Telegram alert with Gate link." },
+            zh: { title: "异常异动监测", desc: "监控 Gate 全币种暴涨暴跌异动：设置涨跌幅阈值与周期。信号直连 Telegram。" },
+            hi: { title: "कॉइन वॉचर", desc: "Gate कॉइन के लिए पंप और डंप स्कैनर: % सीमा, कैंडल अवधि। Telegram अलर्ट।" },
+            es: { title: "Vigilante de monedas", desc: "Escáner de pumps y dumps: umbral en %, período de velas y recuento. Señal en Telegram." }
+        },
+        digest: {
+            ru: { title: "Дневной дайджест", desc: "Сводка рынка за сутки в кабинет и в Telegram." },
+            en: { title: "Daily digest", desc: "24-hour market recap sent to cabinet and Telegram." },
+            zh: { title: "每日加密简报", desc: "全网 24 小时合约市场爆仓与行情总结，同步发送至面板与 Telegram。" },
+            hi: { title: "दैनिक डाइजेस्ट", desc: "डैशबोर्ड और Telegram में 24 घंटे की बाज़ार रिपोर्ट।" },
+            es: { title: "Resumen diario", desc: "Resumen del mercado de 24 horas enviado al panel y a Telegram." }
+        }
+    };
+
+    function serviceMeta(slug, field, fallback) {
+        var l = lang();
+        var s = SERVICES_I18N[slug];
+        if (s) {
+            var item = s[l] || s.en || s.ru;
+            if (item && item[field]) return item[field];
+        }
+        return fallback;
+    }
 
     function lang() {
         try {
@@ -418,7 +890,9 @@
         }
         box.innerHTML = list.map(function (s) {
             var isOpen = open === s.slug;
-            var soon = s.coming_soon ? '<div class="soon">⏳ ' + t("soon") + "</div>" : "";
+            var title = serviceMeta(s.slug, "title", s.title || s.slug);
+            var desc = serviceMeta(s.slug, "desc", s.description || "");
+            var soon = s.coming_soon ? '<div class="soon">⏳ ' + t("soon") + '</div>' : '';
             var label = s.coming_soon
                 ? (s.subscribed ? t("waitlistOn") : t("waitlistOff"))
                 : (s.subscribed ? t("subscribed") : t("subscribe"));
@@ -428,23 +902,23 @@
                     ? '<div class="svc-board" id="corr-board"></div>'
                     : s.slug === "watchlist"
                         ? '<div class="svc-board" id="pump-board"></div>'
-                        : "<p>" + (s.description || "") + "</p>" + soon +
+                        : '<p>' + desc + '</p>' + soon +
                     '<div class="row-actions">' +
                     // у дайджеста есть своя страница: сразу ведём читать выпуски
                     (s.slug === "digest"
                         ? '<a class="btn btn-primary btn-small" href="/digest">📰 ' +
-                          t("digestOpen") + "</a>"
-                        : "") +
+                          t("digestOpen") + '</a>'
+                        : '') +
                     '<button class="btn btn-ghost btn-small" data-slug="' +
-                    s.slug + '" data-soon="' + (s.coming_soon ? "1" : "0") +
-                    '" data-on="' + (s.subscribed ? "0" : "1") + '">' + label +
-                    "</button></div>";
-            return '<div class="svc-fold' + (isOpen ? " open" : "") + '" data-fold="' + s.slug + '">' +
+                    s.slug + '" data-soon="' + (s.coming_soon ? '1' : '0') +
+                    '" data-on="' + (s.subscribed ? '0' : '1') + '">' + label +
+                    '</button></div>';
+            return '<div class="svc-fold' + (isOpen ? ' open' : '') + '" data-fold="' + s.slug + '">' +
                 '<button type="button" class="svc-fold-h" data-toggle="' + s.slug + '">' +
-                '<span class="ic">' + (s.icon || "•") + "</span><span><div>" +
-                (s.title || s.slug) + '</div><div class="svc-fold-sub">' +
-                (s.description || "") + "</div></span><span class=\"chev\">▼</span></button>" +
-                '<div class="svc-fold-b">' + body + "</div></div>";
+                '<span class="ic">' + (s.icon || '•') + '</span><span><div>' +
+                title + '</div><div class="svc-fold-sub">' +
+                desc + '</div></span><span class="chev">▼</span></button>' +
+                '<div class="svc-fold-b">' + body + '</div></div>';
         }).join("");
         box.querySelectorAll("[data-toggle]").forEach(function (btn) {
             btn.addEventListener("click", function () {
@@ -629,8 +1103,9 @@
     }
     function alWin(m) {
         m = Number(m) || 0;
-        if (m >= 60 && m % 60 === 0) return (m / 60) + "ч";
-        return m + "м";
+        var hStr = t("alHour") || "ч", mStr = t("alMin") || "м";
+        if (m >= 60 && m % 60 === 0) return (m / 60) + hStr;
+        return m + mStr;
     }
     function alHas(m) {
         return alCfg && (alCfg.watch || []).indexOf(m) >= 0;
@@ -650,7 +1125,7 @@
         return String(v);
     }
     function alCoinLabel(v) {
-        return String(v) === "ALL" ? "все" : String(v).split("_")[0];
+        return String(v) === "ALL" ? (t("alAll") || "все") : String(v).split("_")[0];
     }
     function alCoinInput(raw) {
         /* «btc» → «BTC_USDT»: пишем так, как хранит сервер, чтобы подпись и
@@ -833,18 +1308,18 @@
                 '</div><div class="al-bar"><i style="width:' + pct + '%"></i></div></div>' +
                 "</div>" +
                 '<div class="al-feed-col al-col-set">' +
-                '<div class="al-label" data-winlabel="' + key + '">Окно · ' + alWin(alWinOf(key)) +
+                '<div class="al-label" data-winlabel="' + key + '">' + t("alWindow") + ' · ' + alWin(alWinOf(key)) +
                 '</div><div class="al-chips" data-winbox="' + key + '">' +
                 chips(p.windows || [], alWinOf(key), "data-win", alWin) + "</div>" +
                 '<div class="al-row"><input data-winin="' + key +
                 '" type="number" min="1" max="1440" placeholder="минуты" value="' +
                 alWinOf(key) + '"></div>' +
-                '<div class="al-label">Порог</div>' +
+                '<div class="al-label">' + t("alThreshold") + '</div>' +
                 '<div class="al-chips" data-thr="' + key + '">' +
                 chips(alThrList(key), thr, "data-thrval", alMoney) + "</div>" +
                 '<div class="al-row"><input data-thrin="' + key +
                 '" type="number" min="0" step="1000" value="' + Math.round(thr || 0) + '"></div>' +
-                '<div class="al-label">Монета · <span data-coinlabel="' +
+                '<div class="al-label">' + t("alCoin") + ' · <span data-coinlabel="' +
                 key + '">' + esc(alCoinLabel(alCoinOf(key))) + "</span></div>" +
                 '<div class="al-chips" data-coinbox="' + key + '">' +
                 alCoinChips(key, p.coins || []) + "</div>" +
@@ -853,24 +1328,24 @@
                 (alCoinOf(key) === "ALL" ? "" : alCoinOf(key)) + '"></div>' +
                 "</div>" +
                 '<div class="al-feed-col al-col-tape">' +
-                '<div class="al-label">Лента · <span data-flowmeta="' + key + '">' +
+                '<div class="al-label">' + t("alTape") + ' · <span data-flowmeta="' + key + '">' +
                 esc(alFlowLabel(row)) + '</span></div>' +
                 '<div class="al-tape" id="al-tape-' + key + '">' +
                 alTape(hist, row.flow, key) + "</div>" +
                 "</div></div></section>";
         }
         board.innerHTML =
-            '<div class="al-head"><div><h3>Алерты по объёму</h3>' +
-            '<div class="al-sub">Включайте ликвидации, CVD и OI по отдельности — можно слушать один источник или два. Порог CVD/OI крупнее, чем у ликвидаций, и окно у каждой метрики своё. После сигнала окно начинается заново: в следующее сообщение попадут только новые данные.</div></div>' +
+            '<div class="al-head"><div><h3>' + t("alTitle") + '</h3>' +
+            '<div class="al-sub">' + t("alSub") + '</div></div>' +
             '<label class="al-switch' + (alCfg.enabled ? " on" : "") + '" id="al-sw">' +
-            "<i></i><span>" + (alCfg.enabled ? "СИГНАЛ ВКЛ" : "СИГНАЛ ВЫКЛ") + "</span></label></div>" +
+            "<i></i><span>" + (alCfg.enabled ? t("alSigOn") : t("alSigOff")) + "</span></label></div>" +
             '<datalist id="al-sym-list">' +
             (symbols || []).map(function (s) { return "<option value=\"" + s + "\">"; }).join("") +
             "</datalist>" +
             '<div class="al-feeds">' +
             feed("liq", "LIQ") + feed("cvd", "CVD") + feed("oi", "OI") +
             "</div>" +
-            '<div class="al-label">Мин. удар в окне</div>' +
+            '<div class="al-label">' + t("alMinHit") + '</div>' +
             ["liq", "cvd", "oi"].map(function (m) {
                 var cur = (alCfg.min_event || {})[m];
                 return '<div class="al-label" style="margin-top:8px">' + m.toUpperCase() + "</div>" +
@@ -916,13 +1391,13 @@
         var val = Number(f.value) || 0;
         var cls = val >= 0 ? "pos" : "neg";
         var side = String(f.side || "");
-        var what = side === "LONG" ? "лонг" : side === "SHORT" ? "шорт" : "";
+        var what = side === "LONG" ? t("alLong") : side === "SHORT" ? t("alShort") : "";
         var bmin = Number(f.bucket_min) || 0;
-        var extra = [what, bmin ? "за " + alWin(bmin) : "",
+        var extra = [what, bmin ? alWin(bmin) : "",
                      f.exchange ? String(f.exchange) : ""].filter(Boolean).join(" · ");
         return '<div class="row flow"><span class="t">' + tm + "</span>" +
             '<span class="m">' + (cls === "pos" ? "🟢" : "🔴") + "</span>" +
-            '<span class="sym">' + esc(sym || "все") + "</span>" +
+            '<span class="sym">' + esc(sym || t("alAll")) + "</span>" +
             '<span class="val ' + cls + '">' + alMoney(Math.abs(val)) + "</span>" +
             '<span class="thr">' + esc(extra) + "</span></div>";
     }
@@ -959,9 +1434,9 @@
         // Ниже сигналов — живой поток метрики: сигналы редкие, а поток идёт,
         // и лента должна это показывать (иначе «пока тихо» на всех метриках).
         var fl = (flow || []).map(alFlowRow).join("");
-        if (!sig && !fl) return '<div class="s">пока тихо</div>';
-        return (sig ? '<div class="tape-sig">🔔 сигналы</div>' + sig : "") +
-            (fl ? '<div class="tape-sig">поток окна</div>' + fl : "");
+        if (!sig && !fl) return '<div class="s">' + t("alQuiet") + '</div>';
+        return (sig ? '<div class="tape-sig">' + t("alSignals") + '</div>' + sig : "") +
+            (fl ? '<div class="tape-sig">' + t("alFlowWindow") + '</div>' + fl : "");
     }
 
     function paintAlertsLive(d) {
@@ -2301,6 +2776,13 @@
         AI_PROMPTS = d;
         box.innerHTML = (d.blocks || []).map(function (b) {
             return '<div class="ai-block"><h4>' + esc(b.title) + "</h4>" +
+                (b.kind === "digest" ? ("<p class=\"meta\">Этот рассказ идёт на страницу дайджеста " +
+                    "на сайте — целиком, без обрезки. В канал уходит небольшой пост: шапка, " +
+                    "первые предложения рассказа, цифры дня и ссылка на полный разбор. Так он " +
+                    "влезает в <b>подпись под фото</b> (Telegram разрешает до 1024 знаков), " +
+                    "поэтому фотография прикрепляется к каждому выпуску. Под постом — кнопка " +
+                    "«📖 Полный разбор дня». Промт можно не укорачивать: длина рассказа " +
+                    "влияет только на статью на сайте.</p>") : "") +
                 (b.langs || []).map(function (r) { return aiRow(r, b.kind); }).join("") +
                 "</div>";
         }).join("");
@@ -3018,7 +3500,79 @@
         });
     }
 
+    function applyPageI18n() {
+        var p = (document.body && document.body.getAttribute("data-page")) || "";
+        var titleMap = {
+            login: t("authTitleLogin") + " — LiqScope",
+            cabinet: t("cabinetTitle") + " — LiqScope",
+            reset: t("resetTitle") + " — LiqScope",
+            admin: t("admin") + " — LiqScope"
+        };
+        if (titleMap[p]) document.title = titleMap[p];
+
+        // Кнопки навигации в шапке
+        var homeBtn = document.getElementById("cab-home-link");
+        if (homeBtn) homeBtn.textContent = t("navHome");
+        var digBtn = document.getElementById("cab-digest-link");
+        if (digBtn) digBtn.textContent = t("navDigest");
+        var termBtn = document.querySelector(".site-nav a[href='/terminal']");
+        if (termBtn) termBtn.textContent = "⚡ " + t("terminal");
+
+        if (p === "login") {
+            var tabs = document.querySelectorAll(".auth-tab");
+            tabs.forEach(function (tab) {
+                var k = tab.getAttribute("data-tab");
+                if (k === "login") tab.textContent = t("tabLogin");
+                else if (k === "register") tab.textContent = t("tabRegister");
+                else if (k === "link") tab.textContent = t("tabLink");
+            });
+            var inName = $("in-name"); if (inName) inName.placeholder = t("labelName");
+            var fNameSpan = document.querySelector("#field-name span"); if (fNameSpan) fNameSpan.textContent = t("labelName");
+            var fPassSpan = document.querySelector("#field-pass span"); if (fPassSpan) fPassSpan.textContent = t("labelPass");
+            var inPass = $("in-password"); if (inPass) inPass.placeholder = t("weakShort");
+            var capLabel = $("captcha-label"); if (capLabel) capLabel.textContent = t("captchaLead");
+            var capRef = $("captcha-refresh"); if (capRef) capRef.textContent = t("captchaRefresh");
+            var toReset = $("to-reset"); if (toReset) toReset.textContent = t("forgot");
+            var resVer = $("resend-verify"); if (resVer) resVer.textContent = t("resendVerify");
+            var loginBtn = $("login-btn"); if (loginBtn) loginBtn.textContent = "✈ " + t("tgAlt");
+            var orSep = document.querySelector(".or-sep span"); if (orSep) orSep.textContent = (lang() === "ru" ? "или" : (lang() === "zh" ? "或者" : (lang() === "hi" ? "या" : (lang() === "es" ? "o" : "or"))));
+            var tgNote = document.querySelector(".tg-note"); if (tgNote) tgNote.textContent = t("tgAltLead");
+        } else if (p === "cabinet") {
+            var cabTitle = document.querySelector("h2");
+            if (cabTitle && cabTitle.textContent.indexOf("Сервисы") !== -1) cabTitle.textContent = t("servicesTitle");
+            var cabLead = document.querySelector(".wrap > p.lead");
+            if (cabLead) cabLead.textContent = t("servicesLeadText");
+            var cabOpen = document.querySelector(".row-actions a.btn-primary");
+            if (cabOpen && cabOpen.getAttribute("href") === "/terminal") cabOpen.textContent = "⚡ " + t("cabinetOpen");
+            var botLink = $("cab-bot-link"); if (botLink) botLink.textContent = t("botInTg");
+            var cabLo = $("cab-logout"); if (cabLo) cabLo.textContent = t("cabLogout");
+            var tgLink = $("tg-link"); if (tgLink) tgLink.textContent = t("tgLinkBtn");
+            var tgUnlink = $("tg-unlink"); if (tgUnlink) tgUnlink.textContent = t("tgUnlinkBtn");
+            var pLine = document.querySelector(".partner-line a");
+            if (pLine) pLine.textContent = t("partnerDiscount");
+        } else if (p === "reset") {
+            var rTitle = $("reset-title"); if (rTitle) rTitle.textContent = t("resetTitle");
+            var rLead = $("reset-lead"); if (rLead) rLead.textContent = t("resetLead");
+            var rSub = $("reset-submit"); if (rSub) rSub.textContent = t("resetSave");
+            var passLabels = document.querySelectorAll("#reset-form .field span");
+            if (passLabels.length >= 3) {
+                passLabels[0].textContent = t("labelEmail");
+                passLabels[1].textContent = t("labelPass");
+                passLabels[2].textContent = t("resetPass2");
+            }
+        }
+    }
+
     function boot() {
+        if (window.LiqScopeI18n && LiqScopeI18n.onChange) {
+            LiqScopeI18n.onChange(function () {
+                applyPageI18n();
+                var p = (document.body && document.body.getAttribute("data-page")) || "";
+                if (p === "login") paintAuthTab(authTab);
+                else if (p === "cabinet") bootCabinet();
+            });
+        }
+        applyPageI18n();
         var page = (document.body && document.body.getAttribute("data-page")) || "";
         if (page === "login") bootLogin();
         else if (page === "reset") bootReset();

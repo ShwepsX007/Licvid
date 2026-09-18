@@ -5584,7 +5584,22 @@
     function setupLanguage() {
         if (langSelect) {
             langSelect.value = I18n.lang();
-            langSelect.addEventListener("change", (e) => I18n.set(e.target.value));
+            langSelect.addEventListener("change", (e) => {
+                const newLang = e.target.value;
+                I18n.set(newLang);
+                const path = window.location.pathname;
+                const parts = path.split("/").filter(Boolean);
+                if (parts.length > 0 && ["ru", "en", "zh", "hi", "es"].indexOf(parts[0]) !== -1) {
+                    parts.shift();
+                }
+                const subPath = parts.join("/");
+                const targetUrl = (newLang === "en")
+                    ? ("/" + (subPath ? subPath : ""))
+                    : ("/" + newLang + (subPath ? "/" + subPath : ""));
+                if (window.location.pathname !== targetUrl) {
+                    window.location.href = targetUrl;
+                }
+            });
         }
         I18n.onChange(applyLanguage);
         applyLanguage();

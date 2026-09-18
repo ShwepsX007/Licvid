@@ -16,7 +16,7 @@ import time
 from typing import Dict, Optional, Tuple
 from urllib.parse import quote
 
-from fastapi import APIRouter, Request, Response
+from fastapi import APIRouter, Request, Response, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
 
@@ -393,6 +393,18 @@ def register_account_routes(app) -> None:
     @router.get("/admin")
     async def page_admin():
         return FileResponse(os.path.join(STATIC_DIR, "admin.html"))
+
+    @router.get("/{lang}/login")
+    async def localized_login(lang: str):
+        if lang in ("ru", "en", "zh", "hi", "es"):
+            return FileResponse(os.path.join(STATIC_DIR, "login.html"))
+        raise HTTPException(status_code=404, detail="Page not found")
+
+    @router.get("/{lang}/cabinet")
+    async def localized_cabinet(lang: str):
+        if lang in ("ru", "en", "zh", "hi", "es"):
+            return FileResponse(os.path.join(STATIC_DIR, "cabinet.html"))
+        raise HTTPException(status_code=404, detail="Page not found")
 
     @router.get("/api/auth/me")
     async def api_me(request: Request):

@@ -146,13 +146,21 @@
         if (params.get("lang") && I18n && I18n.set) I18n.set(params.get("lang"));
         if (I18n && I18n.onChange) I18n.onChange(function () { loadArchive(selected); });
         loadArchive(day);
-        // кто вошёл — тому ссылка в кабинет вместо «войти»
+        // Выход в кабинет или на страницу входа
         api("/api/auth/me").then(function (res) {
             var box = el("nav-account");
-            if (!box || !res || !res.ok || !res.user) return;
-            box.innerHTML = '<a class="btn btn-ghost btn-compact" href="/cabinet">👤 ' +
-                esc(res.user.display_name || res.user.username || "Кабинет") + "</a>";
-        }).catch(function () { /* не вошёл — и ладно */ });
+            if (!box) return;
+            if (res && res.ok && res.user) {
+                box.innerHTML = '<a class="btn btn-ghost btn-compact" href="/cabinet">👤 ' +
+                    esc(res.user.display_name || res.user.username || t("dig.cabinet")) + "</a>";
+            } else {
+                box.innerHTML = '<a class="btn btn-primary btn-compact" href="/login">' +
+                    esc(t("dig.login")) + "</a>";
+            }
+        }).catch(function () {
+            var box = el("nav-account");
+            if (box) box.innerHTML = '<a class="btn btn-primary btn-compact" href="/login">' + esc(t("dig.login")) + "</a>";
+        });
     }
 
     if (document.readyState === "loading") {

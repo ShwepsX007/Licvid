@@ -34,6 +34,20 @@
      * СЛОВАРИ
      * ===================================================================== */
     var RU = {
+        "land.nav.faq": "FAQ",
+        "land.faq.title": "Часто задаваемые вопросы",
+        "land.faq.q1": "Что такое ликвидации на криптовалютных фьючерсах?",
+        "land.faq.a1": "Ликвидация — это принудительное закрытие позиции биржей, когда убыток трейдера превышает сумму его залога (маржи). Отслеживание ликвидаций показывает зоны стоп-лоссов и уровни перегретого плеча.",
+        "land.faq.q2": "Какие биржи подключены к LiqScope?",
+        "land.faq.a2": "Терминал в реальном времени собирает сделки и ликвидации с 8 ведущих криптобирж: Binance, Bybit, OKX, Gate.io, Bitget, HTX, dYdX и Hyperliquid через прямые WebSocket потоки.",
+        "land.faq.q3": "Что показывает показатель CVD и как его использовать?",
+        "land.faq.a3": "CVD (кумулятивная дельта объёмов) считает разницу между агрессивными покупками и продажами по рынку (тейкерами). Рост CVD говорит о доминировании покупателей, падение — о преобладании рыночных продавцов.",
+        "land.faq.q4": "Терминал действительно полностью бесплатный?",
+        "land.faq.a4": "Да, LiqScope полностью бесплатен. Для работы не требуется регистрация или ввод приватных биржевых API-ключей.",
+        "dig.home": "На главную",
+        "dig.cabinet": "Кабинет",
+        "dig.login": "Войти",
+        "nav.brand_tag": "АККАУНТ",
         "terminal.title": "LiqScope Terminal — Live Liquidation Stream & Cluster Chart",
         "terminal.meta": "LiqScope Terminal — live-лента ликвидаций крипто-фьючерсов с 8 бирж, свечной график, кластеры и профиль объёмов.",
         "brand.badge": "TERMINAL",
@@ -348,6 +362,20 @@
     };
 
     var EN = {
+        "land.nav.faq": "FAQ",
+        "land.faq.title": "Frequently Asked Questions",
+        "land.faq.q1": "What is crypto futures liquidation?",
+        "land.faq.a1": "A liquidation happens when an exchange forcibly closes a trader's leveraged position because their margin balance drops below the maintenance threshold. Tracking them highlights key support/resistance levels and market sentiment.",
+        "land.faq.q2": "Which crypto exchanges does LiqScope aggregate?",
+        "land.faq.a2": "LiqScope aggregates live feeds directly via WebSockets from 8 top derivative exchanges: Binance, Bybit, OKX, Gate.io, Bitget, HTX, dYdX, and Hyperliquid.",
+        "land.faq.q3": "What is CVD (Cumulative Volume Delta)?",
+        "land.faq.a3": "CVD tracks the net cumulative difference between taker buy volume and taker sell volume. Positive rising CVD signifies strong aggressive buying pressure.",
+        "land.faq.q4": "Is LiqScope completely free to use?",
+        "land.faq.a4": "Yes, LiqScope is 100% free with no registration and no private API keys required.",
+        "dig.home": "Home",
+        "dig.cabinet": "Cabinet",
+        "dig.login": "Sign in",
+        "nav.brand_tag": "ACCOUNT",
         "terminal.title": "LiqScope Terminal — Live Liquidation Stream & Cluster Chart",
         "terminal.meta": "LiqScope Terminal — live crypto futures liquidation feed from 8 exchanges, candlestick chart, clusters and volume profile.",
         "brand.badge": "TERMINAL",
@@ -662,6 +690,20 @@
     };
 
     var ZH = {
+        "land.nav.faq": "常见问题",
+        "land.faq.title": "常见问题与解答",
+        "land.faq.q1": "什么是加密货币期货合约爆仓？",
+        "land.faq.a1": "当交易者持仓亏损导致保证金不足以维持仓位要求时，交易所将执行强制平仓（爆仓）。追踪大额爆仓能够帮交易者判断市场极端流动性分布和多空踩踏点位。",
+        "land.faq.q2": "LiqScope 接入了哪些交易所？",
+        "land.faq.a2": "终端通过官方公共 WebSocket 直连 8 家主流加密衍生品平台：Binance、Bybit、OKX、Gate.io、Bitget、HTX、dYdX 和 Hyperliquid。",
+        "land.faq.q3": "什么是 CVD（累积买卖成交量差）？",
+        "land.faq.a3": "CVD 统计主动吃单买入与卖出的累计差额。CVD 持续走高代表主动买盘占优，反之代表主动抛售占主导。",
+        "land.faq.q4": "使用 LiqScope 是否收费？",
+        "land.faq.a4": "完全免费，无需绑定 API 密钥，无需强制注册，随时随地打开网页即可查看全量实时行情。",
+        "dig.home": "返回首页",
+        "dig.cabinet": "个人中心",
+        "dig.login": "登录",
+        "nav.brand_tag": "账户",
         "terminal.title": "LiqScope 终端 — 实时爆仓流与K线图",
         "terminal.meta": "LiqScope 终端 — 来自8家交易所的实时加密货币期货爆仓流、K线图、爆仓聚类和成交量分布。",
         "brand.badge": "终端",
@@ -976,6 +1018,20 @@
     };
 
     var HI = {
+        "land.nav.faq": "FAQ",
+        "land.faq.title": "अक्सर पूछे जाने वाले सवाल",
+        "land.faq.q1": "क्रिप्टो फ्यूचर्स लिक्विडेशन क्या है?",
+        "land.faq.a1": "जब किसी ट्रेडर का मार्जिन नुकसान की भरपाई के लिए पर्याप्त नहीं होता, तो एक्सचेंज उसकी स्थिति जबरन बंद कर देता है। लिक्विडेशन डेटा से बाज़ार के अहम स्तरों का पता चलता है।",
+        "land.faq.q2": "LiqScope किन एक्सचेंजों का समर्थन करता है?",
+        "land.faq.a2": "LiqScope 8 प्रमुख एक्सचेंजों से रीयल-टाइम डेटा एकत्र करता है: Binance, Bybit, OKX, Gate.io, Bitget, HTX, dYdX और Hyperliquid।",
+        "land.faq.q3": "CVD क्या है?",
+        "land.faq.a3": "CVD बाज़ार में आक्रामक खरीदारों और विक्रेताओं के बीच के शुद्ध अंतर को दर्शाता है।",
+        "land.faq.q4": "क्या LiqScope पूरी तरह मुफ़्त है?",
+        "land.faq.a4": "हाँ, LiqScope बिना किसी रजिस्ट्रेशन या API कुंजी के सभी के लिए मुफ़्त उपलब्ध है।",
+        "dig.home": "होम पेज",
+        "dig.cabinet": "डैशबोर्ड",
+        "dig.login": "लॉग इन",
+        "nav.brand_tag": "खाता",
         "terminal.title": "LiqScope टर्मिनल — लाइव लिक्विडेशन स्ट्रीम और चार्ट",
         "terminal.meta": "LiqScope टर्मिनल — 8 एक्सचेंजों से क्रिप्टो फ्यूचर्स लिक्विडेशन की लाइव फ़ीड, कैंडल चार्ट, क्लस्टर और वॉल्यूम प्रोफ़ाइल।",
         "brand.badge": "टर्मिनल",
@@ -1283,6 +1339,20 @@
     };
 
     var ES = {
+        "land.nav.faq": "Preguntas frecuentes",
+        "land.faq.title": "Preguntas Frecuentes",
+        "land.faq.q1": "¿Qué es una liquidación en futuros de criptomonedas?",
+        "land.faq.a1": "Una liquidación ocurre cuando un exchange cierra forzosamente la posición de un trader por falta de margen de mantenimiento. Ayuda a identificar zonas clave de liquidez en el mercado.",
+        "land.faq.q2": "¿Qué exchanges cubre LiqScope?",
+        "land.faq.a2": "LiqScope se conecta en tiempo real a 8 plataformas principales: Binance, Bybit, OKX, Gate.io, Bitget, HTX, dYdX y Hyperliquid a través de WebSocket.",
+        "land.faq.q3": "¿Qué mide el indicador CVD?",
+        "land.faq.a3": "El CVD (Delta de Volumen Acumulado) calcula la diferencia neta entre compras y ventas a mercado de agresores (takers).",
+        "land.faq.q4": "¿LiqScope es gratuito?",
+        "land.faq.a4": "Sí, LiqScope es 100% gratuito, accesible directamente en el navegador sin claves API ni registro obligatorio.",
+        "dig.home": "Inicio",
+        "dig.cabinet": "Panel",
+        "dig.login": "Entrar",
+        "nav.brand_tag": "CUENTA",
         "terminal.title": "LiqScope Terminal — stream de liquidaciones en vivo y gráficos",
         "terminal.meta": "LiqScope Terminal — stream en vivo de liquidaciones de futuros cripto de 8 exchanges, gráfico de velas, clústeres y perfil de volúmenes.",
         "brand.badge": "TERMINAL",
@@ -1597,10 +1667,21 @@
      * Ядро
      * ===================================================================== */
     function detect() {
+        // 1. Приоритет: языковой префикс в URL (для SEO: /ru/..., /zh/..., /hi/..., /es/...)
+        try {
+            if (typeof window !== "undefined" && window.location && window.location.pathname) {
+                var parts = window.location.pathname.split("/").filter(Boolean);
+                if (parts.length > 0 && MESSAGES[parts[0]]) {
+                    return parts[0];
+                }
+            }
+        } catch (e) { /* ignore */ }
+        // 2. Язык из сохранённых настроек пользователя
         try {
             var saved = localStorage.getItem("liqscope.lang");
             if (saved && MESSAGES[saved]) return saved;
         } catch (e) { /* ignore */ }
+        // 3. Язык браузера
         var nav = String((typeof navigator !== "undefined" && navigator.language) || "").toLowerCase();
         if (nav.indexOf("zh") === 0) return "zh";
         if (nav.indexOf("hi") === 0) return "hi";

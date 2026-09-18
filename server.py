@@ -43,7 +43,7 @@ from collections import deque
 from contextlib import asynccontextmanager
 from typing import Deque, Dict, List, Optional, Set
 
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -59,6 +59,8 @@ from pump_scan import PumpScanner, filter_new as pump_filter_new
 from pump_scan import format_signal_html as pump_signal_html
 from refs import gate_url
 from mailer import build_mailer
+import seo_helpers
+from starlette.responses import Response, HTMLResponse
 import ai_text
 from ai_text import build_ai, prompt_setting
 import api_digest
@@ -2707,16 +2709,80 @@ async def ws_endpoint(websocket: WebSocket):
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
+# ---------------------------------------------------------------------------
+# SEO, Мультиязычность и Поисковая Оптимизация
+# ---------------------------------------------------------------------------
+
+def _render_seo_page(page_type: str, lang: str = "en") -> HTMLResponse:
+    """Рендерит HTML страницу с инжектированными метатегами под язык и канонические URL."""
+    file_map = {
+        "landing": "landing.html",
+        "terminal": "index.html",
+        "digest": "digest.html",
+    }
+    filename = file_map.get(page_type, "landing.html")
+    path = os.path.join(STATIC_DIR, filename)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw_html = f.read()
+    except Exception:
+        return HTMLResponse("Page not found", status_code=404)
+
+    base_url = PUBLIC_URL or "https://liqscope.online"
+    html_content = seo_helpers.inject_seo_into_html(raw_html, page_type, lang, base_url)
+    return HTMLResponse(content=html_content, media_type="text/html")
+
+
+@app.get("/robots.txt")
+async def robots_txt():
+    """robots.txt с указанием sitemap и языковых директив."""
+    base_url = PUBLIC_URL or "https://liqscope.online"
+    content = seo_helpers.generate_robots_txt(base_url)
+    return Response(content=content, media_type="text/plain")
+
+
+@app.get("/sitemap.xml")
+async def sitemap_xml():
+    """sitemap.xml со всеми языковыми альтернативами страниц."""
+    base_url = PUBLIC_URL or "https://liqscope.online"
+    content = seo_helpers.generate_sitemap_xml(base_url)
+    return Response(content=content, media_type="application/xml")
+
+
 @app.get("/")
 async def root():
-    """Лендинг: красивый вход в терминал."""
-    return FileResponse(os.path.join(STATIC_DIR, "landing.html"))
+    """Лендинг: дефолтная международная версия (EN)."""
+    return _render_seo_page("landing", "en")
 
 
 @app.get("/terminal")
 async def terminal():
-    """Сам терминал (страница приложения)."""
-    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+    """Сам терминал: дефолтная международная версия (EN)."""
+    return _render_seo_page("terminal", "en")
+
+
+# Локализованные роуты для лендинга: /ru, /zh, /hi, /es, /en
+@app.get("/{lang}")
+async def localized_landing(lang: str):
+    if lang in seo_helpers.SUPPORTED_LANGS:
+        return _render_seo_page("landing", lang)
+    raise HTTPException(status_code=404, detail="Page not found")
+
+
+# Локализованные роуты для терминала: /ru/terminal, /zh/terminal, /hi/terminal, /es/terminal, /en/terminal
+@app.get("/{lang}/terminal")
+async def localized_terminal(lang: str):
+    if lang in seo_helpers.SUPPORTED_LANGS:
+        return _render_seo_page("terminal", lang)
+    raise HTTPException(status_code=404, detail="Page not found")
+
+
+# Локализованные роуты для дайджеста: /ru/digest, /zh/digest, /hi/digest, /es/digest, /en/digest
+@app.get("/{lang}/digest")
+async def localized_digest(lang: str):
+    if lang in seo_helpers.SUPPORTED_LANGS:
+        return _render_seo_page("digest", lang)
+    raise HTTPException(status_code=404, detail="Page not found")
 
 
 if __name__ == "__main__":

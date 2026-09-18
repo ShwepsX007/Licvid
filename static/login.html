@@ -15,6 +15,16 @@
         <span class="tag">ACCOUNT</span>
     </a>
     <nav class="site-nav">
+        <select id="lang-select" class="lang-select" aria-label="Language / Язык" title="Language / Язык" style="background:rgba(13,18,32,0.7);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 10px;font-size:0.8rem;cursor:pointer;outline:none;">
+            <option value="ru">🇷🇺 Русский</option>
+            <option value="en">🇬🇧 English</option>
+            <option value="zh">🇨🇳 中文</option>
+            <option value="hi">🇮🇳 हिन्दी</option>
+            <option value="es">🇪🇸 Español</option>
+        </select>
+        <a class="btn btn-ghost btn-compact" href="/" id="cab-home-link">🏠 Главная</a>
+        <a class="btn btn-ghost btn-compact" href="/terminal">⚡ Терминал</a>
+        <a class="btn btn-ghost btn-compact" href="/digest" id="cab-digest-link">📰 Дайджест</a>
         <a class="btn btn-ghost btn-compact" href="/terminal">⚡ Терминал</a>
         <span id="nav-account"></span>
     </nav>
@@ -84,7 +94,19 @@
         </p>
     </div>
 </main>
+<script src="/static/i18n.js"></script>
 <script src="/static/account.js?v=alerts3"></script>
 <script src="/static/consent.js?v=consent1"></script>
+<script>
+(function() {
+    var sel = document.getElementById("lang-select");
+    if (sel && window.LiqScopeI18n) {
+        sel.value = LiqScopeI18n.lang();
+        sel.addEventListener("change", function(e) {
+            LiqScopeI18n.set(e.target.value);
+        });
+    }
+})();
+</script>
 </body>
 </html>

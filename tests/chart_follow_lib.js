@@ -448,6 +448,41 @@ async function main() {
     pr() && lastPrice() <= pr().to + 1e-9 && lastPrice() >= pr().from - 1e-9,
     "цена " + lastPrice() + " диапазон " + JSON.stringify(pr()));
 
+  // ================= выключено: новые свечи окно НЕ двигают =================
+  // Страница ставит shiftVisibleRangeOnNewBar:false (app.js, applyFollowMode):
+  // со включённым слежением окно ставим мы сами, а с выключенным график должен
+  // стоять там, где его оставили, — иначе каждый новый бар тянул бы вид вправо
+  // и промотать назад было бы нельзя.
+  ts.applyOptions({ shiftVisibleRangeOnNewBar: false, rightOffset: 6 });
+  ts.setVisibleLogicalRange({ from: lastIdx() - 40, to: lastIdx() + 6 });
+  await frame();
+  const lrStill = { ...lr() };
+  for (let i = 0; i < 5; i++) {
+    const c = { time: candles[candles.length - 1].time + T, open: 1, high: 1.01,
+                low: 0.99, close: 1 };
+    candles.push(c);
+    series.update(c);
+    await frame();
+  }
+  const lrAfter = lr();
+  check("выключено: новые свечи окно не сдвигают — график статичен",
+    lrAfter && Math.abs(lrAfter.from - lrStill.from) < 0.5 &&
+    Math.abs(lrAfter.to - lrStill.to) < 0.5,
+    JSON.stringify(lrAfter) + " было " + JSON.stringify(lrStill));
+  // для контраста: с включённым сдвигом библиотека тянет вид за свечами —
+  // именно это и приходилось видеть на выключенной кнопке до починки
+  ts.applyOptions({ shiftVisibleRangeOnNewBar: true });
+  const lrShift = { ...lr() };
+  for (let i = 0; i < 3; i++) {
+    const c = { time: candles[candles.length - 1].time + T, open: 1, high: 1.01,
+                low: 0.99, close: 1 };
+    candles.push(c);
+    series.update(c);
+    await frame();
+  }
+  check("а со включённым сдвигом библиотека тянула бы окно за свечами",
+    lr().to - lrShift.to > 2, JSON.stringify(lr()) + " было " + JSON.stringify(lrShift));
+
   check("падений страницы нет", crashes.length === 0, crashes.join(" ~ "));
 
   console.log(`\nитог: ${ok} ок, ${fail} ошибок`);

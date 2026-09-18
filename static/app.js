@@ -734,8 +734,13 @@
             if (ts && ts.applyOptions) {
                 // Пока следим сами — правый отступ 0: положение последней свечи
                 // задаём мы (3% от края), иначе библиотека тянула бы её к самому
-                // краю своим автоскроллом.
-                ts.applyOptions({ rightOffset: state.chartFollow ? 0 : 6 });
+                // краю своим автоскроллом. И окно на новой свече библиотека не
+                // сдвигает: со включённым слежением его ставим мы сами, а с
+                // выключенным график обязан стоять там, где его оставили, — иначе
+                // каждый новый бар тянул бы вид вправо и промотать назад было бы
+                // нельзя.
+                ts.applyOptions({ rightOffset: state.chartFollow ? 0 : 6,
+                                  shiftVisibleRangeOnNewBar: false });
             }
         } catch (e) { /* ignore */ }
         followChartNow();
@@ -767,6 +772,10 @@
             if (!followHold) return;
             followHold = false;
             if (followReleaseTimer) clearTimeout(followReleaseTimer);
+            // Возврат к границам — только пока автоследование включено. С
+            // выключенной кнопкой график статичен: его двигают руками, и он
+            // остаётся там, где его оставили.
+            if (!state.chartFollow) return;
             followReleaseTimer = setTimeout(() => {
                 followReleaseTimer = null;
                 // жест двигает и время, и шкалу цены — возвращаем обе: свечу к
@@ -786,7 +795,8 @@
             followReleaseTimer = setTimeout(() => {
                 followReleaseTimer = null;
                 followHold = false;
-                anchorFollowAll();
+                // с выключенным слежением колесо ничего не откидывает назад
+                if (state.chartFollow) anchorFollowAll();
             }, FOLLOW_RELEASE_MS);
         }, { passive: true, capture: true });
         // Страховка: если слежение включено, а тиков по монете нет, шаг всё
@@ -853,7 +863,7 @@
      *      не делаем ничего: именно это убирает дрожание на каждом тике.
      */
     function followPriceNow() {
-        if (!chart) return false;
+        if (!chart || !state.chartFollow) return false;
         const scale = rightPriceScale();
         if (!scale || !scale.setVisibleRange) return false;
         const price = lastChartPrice();
@@ -920,6 +930,8 @@
      *  график к минимальным отступам», а не «терпеть шум».
      */
     function anchorFollowAll() {
+        // Выключено — не двигаем ничего: график остаётся там, где его оставили.
+        if (!state.chartFollow) return false;
         const movedTime = anchorToLast();
         const movedPrice = followPriceSnap();
         return movedTime || movedPrice;
@@ -928,7 +940,7 @@
     /** Цена за коридором — ставим её ровно на 15% от той границы, за которую
      *  она ушла. Окна цены нет — подгоняем по видимым свечам. */
     function followPriceSnap() {
-        if (!chart) return false;
+        if (!chart || !state.chartFollow) return false;
         const scale = rightPriceScale();
         if (!scale || !scale.setVisibleRange) return false;
         const price = lastChartPrice();
@@ -947,7 +959,7 @@
 
     /** Прыжок к последней свече: включаем автоследование — сразу к цене. */
     function anchorToLast() {
-        if (!chart || !state.candles.length) return false;
+        if (!chart || !state.chartFollow || !state.candles.length) return false;
         let lr = null;
         try { lr = chart.timeScale().getVisibleLogicalRange(); } catch (e) { return false; }
         const span = lr && lr.to > lr.from ? (lr.to - lr.from) : 80;

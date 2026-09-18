@@ -17,7 +17,10 @@
  *      свеча встаёт на 3% справа, а цена — ровно на 15% от края, если жест
  *      вывел её из коридора;
  *    * при выключении библиотеке возвращаются её настройки (autoScale,
- *      отступы 6%/24%, rightOffset 6).
+ *      отступы 6%/24%, rightOffset 6);
+ *    * при ВЫКЛЮЧЕННОЙ кнопке график статичен: окно не откидывает ни после
+ *      жеста мышью, ни после колеса, ни по тику/шагу/возврату, а библиотеке
+ *      запрещено сдвигать окно на новых свечах (`shiftVisibleRangeOnNewBar`).
  *
  *  Часть 1 — реальная страница /terminal в jsdom с записывающей заглушкой
  *  шкал времени/цены. Часть 2 — математика без браузера.
@@ -418,6 +421,36 @@ async function part1() {
     rec.ranges.length - offRanges + "/" + (rec.priceRanges.length - offPrice));
   check("выключенное состояние сохранено",
     win.localStorage.getItem("liqscope.chartFollow") === "0");
+  check("выключено — библиотеке запрещено двигать окно на новой свече",
+    rec.time.some((o) => o.shiftVisibleRangeOnNewBar === false),
+    JSON.stringify(rec.time.slice(-2)));
+
+  /* --- выключено: график статичен, двигать можно как угодно --------------- */
+  rec.timeScale.setVisibleLogicalRange({ from: last - 420, to: last - 160 });
+  const kept = rec.timeScale.getVisibleLogicalRange();
+  const staticBefore = { r: rec.ranges.length, p: rec.priceRanges.length };
+  container.dispatchEvent(new win.Event("pointerdown", { bubbles: true }));
+  await sleep(60);
+  win.dispatchEvent(new win.Event("pointerup"));
+  await sleep(600);
+  check("выключено — после жеста окно не откидывает назад",
+    rec.ranges.length === staticBefore.r && rec.priceRanges.length === staticBefore.p,
+    (rec.ranges.length - staticBefore.r) + "/" + (rec.priceRanges.length - staticBefore.p));
+  const afterGesture = rec.timeScale.getVisibleLogicalRange();
+  check("выключено — вид остался там, где его оставили",
+    !!afterGesture && Math.abs(afterGesture.from - kept.from) < 1e-6 &&
+    Math.abs(afterGesture.to - kept.to) < 1e-6,
+    JSON.stringify(afterGesture) + " было " + JSON.stringify(kept));
+  container.dispatchEvent(wheelEvent);
+  await sleep(600);
+  check("выключено — колесо окно тоже не возвращает",
+    rec.ranges.length === staticBefore.r && F.hold() === false,
+    rec.ranges.length - staticBefore.r + " записей, hold=" + F.hold());
+  F.setTicker(false);
+  F.tick(); F.step(); F.anchorAll(); F.priceStep();
+  check("выключено — тик, шаг и возврат к границам молчат",
+    rec.ranges.length === staticBefore.r && rec.priceRanges.length === staticBefore.p,
+    (rec.ranges.length - staticBefore.r) + "/" + (rec.priceRanges.length - staticBefore.p));
   await win.close();
 
   // второй заход — состояние помним

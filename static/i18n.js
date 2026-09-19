@@ -369,7 +369,17 @@
         "cookie.note": "Продолжая пользоваться сайтом, вы соглашаетесь с этим.",
         "land.footer.race": "Не является инвестиционной рекомендацией",
         "land.footer.open": "Открыть терминал →",
-    };
+            "gate.title": "Зарегистрируйтесь бесплатно",
+        "gate.text": "Пробные 30 минут слоёв закончились. Регистрация бесплатная: она открывает слои и индикаторы, сигналы в Telegram и личный кабинет с сервисами.",
+        "gate.f1": "Слои и индикаторы графика",
+        "gate.f2": "Сигналы в Telegram",
+        "gate.f3": "Кабинет и сервисы",
+        "gate.cta": "Зарегистрироваться бесплатно",
+        "gate.later": "Продолжить без слоёв",
+        "gate.close_title": "Закрыть окно",
+        "gate.trial_badge": "{min}м",
+        "gate.trial_title": "Слои открыты без регистрации ещё {min} мин",
+};
 
     var EN = {
         "terminal.title": "LiqScope Terminal — Live Liquidation Stream & Cluster Chart",
@@ -696,7 +706,17 @@
         "cookie.note": "By continuing to use the site you agree to this.",
         "land.footer.race": "Not investment advice",
         "land.footer.open": "Open terminal →",
-    };
+            "gate.title": "Register for free",
+        "gate.text": "Your 30 free minutes of layers are over. Registration is free: it unlocks chart layers and indicators, Telegram signals and the personal cabinet with services.",
+        "gate.f1": "Chart layers and indicators",
+        "gate.f2": "Telegram signals",
+        "gate.f3": "Cabinet and services",
+        "gate.cta": "Register for free",
+        "gate.later": "Continue without layers",
+        "gate.close_title": "Close this window",
+        "gate.trial_badge": "{min}m",
+        "gate.trial_title": "Layers are open without registration for another {min} min",
+};
 
     var ZH = {
         "terminal.title": "LiqScope 终端 — 实时爆仓流与K线图",
@@ -1023,7 +1043,17 @@
         "cookie.note": "继续使用本站即表示你同意这一点。",
         "land.footer.race": "不构成投资建议",
         "land.footer.open": "打开终端 →",
-    };
+            "gate.title": "免费注册",
+        "gate.text": "30 分钟的免费图层试用已结束。注册免费：解锁图表图层与指标、Telegram 信号，以及带服务功能的个人中心。",
+        "gate.f1": "图表图层与指标",
+        "gate.f2": "Telegram 信号",
+        "gate.f3": "个人中心与服务",
+        "gate.cta": "免费注册",
+        "gate.later": "不用图层继续",
+        "gate.close_title": "关闭窗口",
+        "gate.trial_badge": "{min}分",
+        "gate.trial_title": "图层可免注册使用，还剩 {min} 分钟",
+};
 
     var HI = {
         "terminal.title": "LiqScope टर्मिनल — लाइव लिक्विडेशन स्ट्रीम और चार्ट",
@@ -1350,7 +1380,17 @@
         "cookie.note": "साइट का उपयोग जारी रखने का अर्थ है कि आप इससे सहमत हैं।",
         "land.footer.race": "यह निवेश सलाह नहीं है",
         "land.footer.open": "टर्मिनल खोलें →",
-    };
+            "gate.title": "मुफ़्त में रजिस्टर करें",
+        "gate.text": "लेयर के 30 मुफ़्त मिनट पूरे हो गए। रजिस्ट्रेशन मुफ़्त है: इससे लेयर और इंडिकेटर, Telegram सिग्नल और सेवाओं वाला कैबिनेट खुलता है।",
+        "gate.f1": "चार्ट लेयर और इंडिकेटर",
+        "gate.f2": "Telegram सिग्नल",
+        "gate.f3": "कैबिनेट और सेवाएँ",
+        "gate.cta": "मुफ़्त में रजिस्टर करें",
+        "gate.later": "लेयर के बिना जारी रखें",
+        "gate.close_title": "विंडो बंद करें",
+        "gate.trial_badge": "{min}मि",
+        "gate.trial_title": "लेयर बिना रजिस्ट्रेशन अभी और {min} मिनट खुले हैं",
+};
 
     var ES = {
         "terminal.title": "LiqScope Terminal — stream de liquidaciones en vivo y gráficos",
@@ -1677,7 +1717,17 @@
         "cookie.note": "Si sigues usando el sitio, aceptas esto.",
         "land.footer.race": "No es una recomendación de inversión",
         "land.footer.open": "Abrir terminal →",
-    };
+            "gate.title": "Regístrate gratis",
+        "gate.text": "Tus 30 minutos gratis de capas han terminado. El registro es gratis: abre las capas e indicadores, las señales en Telegram y el gabinete con servicios.",
+        "gate.f1": "Capas e indicadores del gráfico",
+        "gate.f2": "Señales en Telegram",
+        "gate.f3": "Gabinete y servicios",
+        "gate.cta": "Registrarse gratis",
+        "gate.later": "Seguir sin capas",
+        "gate.close_title": "Cerrar la ventana",
+        "gate.trial_badge": "{min}m",
+        "gate.trial_title": "Las capas están abiertas sin registro {min} min más",
+};
 
     var MESSAGES = { ru: RU, en: EN, zh: ZH, hi: HI, es: ES };
     var current = "ru";

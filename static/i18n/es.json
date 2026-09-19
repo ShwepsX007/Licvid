@@ -148,7 +148,10 @@
     "geo.zoom_in": "Acercar",
     "geo.zoom_out": "Alejar",
     "geo.zoom_fit": "Mapa completo",
-    "geo.map_hint": "El mapa se puede arrastrar y la rueda acerca"
+    "geo.map_hint": "El mapa se puede arrastrar y la rueda acerca",
+    "dig.cover_alt": "Portada del número",
+    "adm.trial_line": "Prueba de capas ({min} min): {n} invitados, {stuck} ya vieron la oferta de registro",
+    "adm.trial_none": "Prueba de capas ({min} min): todavía no hubo invitados"
   },
   "phrases": {
     "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "Un post cada N horas: la ventana del post son esas mismas N horas, y el bloque de análisis dentro del post ocupa un cuarto de la ventana (cada 4 h → una hora, cada 1 h → 15 minutos).",

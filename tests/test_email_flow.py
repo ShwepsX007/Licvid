@@ -310,6 +310,10 @@ class EmailFlowTest(unittest.TestCase):
         ov = self.client.get("/api/admin/overview").json()
         self.assertTrue(ov["mail"]["enabled"])
         self.assertIn("smtp", ov["mail"])
+        # заодно видно воронку пробного доступа к слоям (web_layers)
+        self.assertIn("layers_trials", ov)
+        self.assertEqual(ov["layers_trials"]["total"], 0)
+        self.assertEqual(ov["layers_trials"]["limit_sec"], 1800)
 
     # ----- Telegram: привязка через бота ----------------------------------
     def test_telegram_link_endpoints(self):

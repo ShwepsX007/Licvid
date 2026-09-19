@@ -251,8 +251,10 @@
                     <span class="live-stat" id="oi-stat" data-i18n-title="chart.live_oi"
                             title="Изменение OI текущей свечи"></span></span>
                     <button class="profile-toggle layer-call" id="layer-call" type="button"
-                            data-i18n-title="chart.layers_title" data-i18n="chart.layers"
-                            title="Показать/скрыть кнопки слоёв">☰ Слои</button>
+                            data-i18n-title="chart.layers_title"
+                            title="Показать/скрыть кнопки слоёв"><span
+                            data-i18n="chart.layers">☰ Слои</span><span
+                            class="layer-trial hidden" id="layer-trial"></span></button>
                     <!-- Автоследование живёт только в плашке слоёв (кнопка
                          «🎯 Автоследование за ценой»): в шапке графика она
                          дублировалась и мешала переключателям слоёв. -->
@@ -459,6 +461,33 @@
             </div>
         </aside>
     </main>
+
+    <!-- Пробный доступ к слоям закончился: гостю без регистрации предлагаем
+         бесплатную регистрацию. Крестик (или «Продолжить без слоёв») закрывает
+         окно — терминал работает дальше, но слои остаются выключенными. -->
+    <div id="layers-gate" class="modal layers-gate hidden" role="dialog"
+         aria-modal="true" aria-labelledby="layers-gate-title">
+        <div class="modal-content gate-box">
+            <button type="button" class="close-modal gate-close" id="gate-close"
+                    data-i18n-title="gate.close_title" title="Закрыть окно">×</button>
+            <span class="gate-icon" aria-hidden="true">☰</span>
+            <h3 class="gate-title" id="layers-gate-title"
+                data-i18n="gate.title">Зарегистрируйтесь бесплатно</h3>
+            <p class="gate-text" data-i18n="gate.text">Пробные 30 минут слоёв закончились.
+                Регистрация бесплатная: она открывает слои и индикаторы, сигналы в
+                Telegram и личный кабинет с сервисами.</p>
+            <div class="gate-feats">
+                <span class="gate-feat">📊 <span data-i18n="gate.f1">Слои и индикаторы графика</span></span>
+                <span class="gate-feat">🔔 <span data-i18n="gate.f2">Сигналы в Telegram</span></span>
+                <span class="gate-feat">👤 <span data-i18n="gate.f3">Кабинет и сервисы</span></span>
+            </div>
+            <a class="btn gate-cta" id="gate-cta"
+               href="/login?mode=register&amp;next=/terminal"
+               data-i18n="gate.cta">Зарегистрироваться бесплатно</a>
+            <button type="button" class="gate-later" id="gate-later"
+                    data-i18n="gate.later">Продолжить без слоёв</button>
+        </div>
+    </div>
 
     <!-- Modal -->
     <div id="detail-modal" class="modal hidden">

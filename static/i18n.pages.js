@@ -161,7 +161,10 @@ window.LIQSCOPE_I18N_PAGES =
       "geo.zoom_in": "Приблизить",
       "geo.zoom_out": "Отдалить",
       "geo.zoom_fit": "Вся карта",
-      "geo.map_hint": "Карту можно тянуть и приближать колесом"
+      "geo.map_hint": "Карту можно тянуть и приближать колесом",
+      "dig.cover_alt": "Обложка выпуска — фото дня",
+      "adm.trial_line": "Пробные {min} минут слоёв: {n} гостей, {stuck} уже увидели предложение регистрации",
+      "adm.trial_none": "Пробные {min} минут слоёв: гостей ещё не было"
     },
     "phrases": {
       "🗑 Стереть статистику": "🗑 Стереть статистику",
@@ -343,7 +346,10 @@ window.LIQSCOPE_I18N_PAGES =
       "geo.zoom_in": "Zoom in",
       "geo.zoom_out": "Zoom out",
       "geo.zoom_fit": "Whole map",
-      "geo.map_hint": "Drag the map and zoom with the wheel"
+      "geo.map_hint": "Drag the map and zoom with the wheel",
+      "dig.cover_alt": "Cover of the issue",
+      "adm.trial_line": "Layer trial ({min} min): {n} guests, {stuck} have already seen the sign-up offer",
+      "adm.trial_none": "Layer trial ({min} min): no guests yet"
     },
     "phrases": {
       "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "One post every N hours: the post window is those same N hours, and the analysis block inside the post is a quarter of the window (every 4 h → one hour, every 1 h → 15 minutes).",
@@ -1238,7 +1244,10 @@ window.LIQSCOPE_I18N_PAGES =
       "geo.zoom_in": "放大",
       "geo.zoom_out": "缩小",
       "geo.zoom_fit": "显示全图",
-      "geo.map_hint": "地图可以拖动，滚轮可缩放"
+      "geo.map_hint": "地图可以拖动，滚轮可缩放",
+      "dig.cover_alt": "本期封面",
+      "adm.trial_line": "图层试用 {min} 分钟：{n} 位访客，其中 {stuck} 位已看到注册提示",
+      "adm.trial_none": "图层试用 {min} 分钟：暂时没有访客"
     },
     "phrases": {
       "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "每 N 小时发一篇：帖子窗口就是这 N 小时，帖内的分析块占窗口的四分之一（每 4 小时 → 每小时，每 1 小时 → 每 15 分钟）。",
@@ -2134,7 +2143,10 @@ window.LIQSCOPE_I18N_PAGES =
       "geo.zoom_in": "ज़ूम इन",
       "geo.zoom_out": "ज़ूम आउट",
       "geo.zoom_fit": "पूरा नक्शा",
-      "geo.map_hint": "नक्शे को खींचें और स्क्रॉल से ज़ूम करें"
+      "geo.map_hint": "नक्शे को खींचें और स्क्रॉल से ज़ूम करें",
+      "dig.cover_alt": "इस अंक का कवर",
+      "adm.trial_line": "लेयर ट्रायल ({min} मिनट): {n} मेहमान, {stuck} ने रजिस्ट्रेशन का प्रस्ताव देख लिया",
+      "adm.trial_none": "लेयर ट्रायल ({min} मिनट): अभी कोई मेहमान नहीं"
     },
     "phrases": {
       "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "हर N घंटे में एक पोस्ट: पोस्ट विंडो वही N घंटे है, और पोस्ट के भीतर विश्लेषण ब्लॉक विंडो का चौथाई है (हर 4 घंटे → एक घंटा, हर 1 घंटा → 15 मिनट)।",
@@ -3031,7 +3043,10 @@ window.LIQSCOPE_I18N_PAGES =
       "geo.zoom_in": "Acercar",
       "geo.zoom_out": "Alejar",
       "geo.zoom_fit": "Mapa completo",
-      "geo.map_hint": "El mapa se puede arrastrar y la rueda acerca"
+      "geo.map_hint": "El mapa se puede arrastrar y la rueda acerca",
+      "dig.cover_alt": "Portada del número",
+      "adm.trial_line": "Prueba de capas ({min} min): {n} invitados, {stuck} ya vieron la oferta de registro",
+      "adm.trial_none": "Prueba de capas ({min} min): todavía no hubo invitados"
     },
     "phrases": {
       "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "Un post cada N horas: la ventana del post son esas mismas N horas, y el bloque de análisis dentro del post ocupa un cuarto de la ventana (cada 4 h → una hora, cada 1 h → 15 minutos).",

@@ -36,6 +36,11 @@ BAD_PASSWORDS = {"password", "passw0rd", "12345678", "123456789", "1234567890",
                  "qwertyui", "qwerty123", "11111111", "пароль123", "пароль1234"}
 SCRYPT_N, SCRYPT_R, SCRYPT_P = 2 ** 14, 8, 1
 
+#: Пробный доступ к слоям графика для гостей без регистрации: 30 минут.
+#: Считается на сервере по гостю (vid, а без cookie — по связке ip+ua),
+#: поэтому перезагрузка страницы и чистка localStorage испытание не сбрасывают.
+LAYERS_TRIAL_SEC = 1800
+
 # Сколько живут ссылки в письмах
 EMAIL_TOKEN_TTL = {
     "verify": 24 * 3600,   # подтверждение почты — сутки
@@ -495,6 +500,15 @@ class Store:
                     window_min INTEGER NOT NULL,
                     detail TEXT
                 );
+                CREATE TABLE IF NOT EXISTS layer_trials (
+                    who TEXT PRIMARY KEY,
+                    started_at REAL NOT NULL,
+                    last_seen REAL NOT NULL,
+                    hits INTEGER NOT NULL DEFAULT 0,
+                    user_id INTEGER
+                );
+                CREATE INDEX IF NOT EXISTS idx_layer_trials_started
+                    ON layer_trials(started_at);
                 CREATE INDEX IF NOT EXISTS idx_alert_user_ts ON alert_events(user_id, ts);
                 CREATE INDEX IF NOT EXISTS idx_alert_cool ON alert_events(user_id, metric, symbol, ts);
                 """
@@ -1435,6 +1449,74 @@ class Store:
             log.debug("визиты: поиск vid: %s", e)
             return ""
         return str(row["vid"] or "") if row else ""
+
+    # ----- пробный доступ к слоям (гость без регистрации) -------------------
+    def layer_trial(self, who: str, user_id: Optional[int] = None,
+                    limit_sec: int = LAYERS_TRIAL_SEC,
+                    now: Optional[float] = None) -> Dict[str, Any]:
+        """Сколько пробного времени осталось гостю: 30 минут и всё.
+
+        Считает сервер, а не браузер: строка на гостя (``who`` — vid, а если
+        cookie нет, связка ip+ua) заводится при первом обращении и живёт
+        дальше, поэтому перезагрузка страницы, чистка localStorage или другой
+        браузер испытание не начинают заново.
+
+        Зарегистрированному пробник не нужен: у него слои без ограничений.
+        """
+        limit = max(0, int(limit_sec))
+        if user_id:
+            return {"tracked": False, "guest": False, "allowed": True, "left": None,
+                    "limit": limit, "started": 0.0, "hits": 0, "expired": False,
+                    "ended": 0.0}
+        who = str(who or "")[:80]
+        if not who:
+            # гость без cookie: считать не по чему, не мешаем смотреть
+            return {"tracked": False, "guest": True, "allowed": True, "left": None,
+                    "limit": limit, "started": 0.0, "hits": 0, "expired": False,
+                    "ended": 0.0}
+        now = float(now if now is not None else _now())
+        with self._lock:
+            row = self._db.execute(
+                "SELECT started_at, hits FROM layer_trials WHERE who=?", (who,)
+            ).fetchone()
+            if row is None:
+                self._db.execute(
+                    "INSERT INTO layer_trials(who,started_at,last_seen,hits) "
+                    "VALUES(?,?,?,1)", (who, now, now))
+                started, hits = now, 1
+            else:
+                started, hits = float(row["started_at"]), int(row["hits"]) + 1
+                self._db.execute(
+                    "UPDATE layer_trials SET last_seen=?, hits=? WHERE who=?",
+                    (now, hits, who))
+                # редкая чистка: таблица маленькая, но пусть не растёт вечно
+                if secrets.randbelow(200) == 0:
+                    self._db.execute("DELETE FROM layer_trials WHERE last_seen<?",
+                                     (now - 120 * 86400,))
+            self._db.commit()
+        left = max(0.0, started + limit - now) if limit else 0.0
+        return {"tracked": True, "guest": True, "allowed": (left > 0) or not limit,
+                "left": round(left, 1), "limit": limit, "started": started,
+                "hits": hits, "expired": bool(limit and left <= 0),
+                "ended": round(started + limit, 1) if limit else 0.0}
+
+    def layer_trial_stats(self, now: Optional[float] = None,
+                          limit_sec: int = LAYERS_TRIAL_SEC) -> Dict[str, Any]:
+        """Сводка испытаний: сколько гостей признали, сколько уже упёрлось.
+
+        Нужна админке: видно, сколько людей знакомятся со слоями и сколько
+        дошло до стены регистрации.
+        """
+        now = float(now if now is not None else _now())
+        edge = now - max(0, int(limit_sec))
+        with self._lock:
+            row = self._db.execute(
+                "SELECT COUNT(*) AS n, SUM(started_at>=?) AS active FROM layer_trials",
+                (edge,)).fetchone()
+        total = int((row or {})["n"] or 0) if row is not None else 0
+        active = int((row or {})["active"] or 0) if row is not None else 0
+        return {"total": total, "active": active, "expired": max(0, total - active),
+                "limit_sec": int(limit_sec)}
 
     def visit_stats(self, days: int = 14) -> Dict[str, Any]:
         days = max(1, min(int(days), 90))

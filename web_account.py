@@ -1177,6 +1177,14 @@ def register_account_routes(app) -> None:
             return err
         c = ctx.store.user_counts()
         v = ctx.store.visit_stats(14)
+        # Воронка пробного доступа к слоям: сколько гостей знакомятся и сколько
+        # уже увидели предложение регистрации (web_layers)
+        try:
+            from web_layers import trial_limit_sec
+            trials = ctx.store.layer_trial_stats(limit_sec=trial_limit_sec())
+        except Exception as e:                        # noqa: BLE001
+            log.debug("слои: сводка испытаний недоступна: %s", e)
+            trials = {"total": 0, "active": 0, "expired": 0, "limit_sec": 0}
         h = ctx.health_fn() or {}
         bot_user = _bot_username()
         return {
@@ -1184,6 +1192,7 @@ def register_account_routes(app) -> None:
             "me": user,
             "users": c,
             "visits": v,
+            "layers_trials": trials,
             "ws_clients": ctx.ws_clients_fn(),
             "bot": {
                 "username": bot_user,

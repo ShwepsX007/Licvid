@@ -81,6 +81,7 @@ import feedback as feedback_mod
 from feedback import register_feedback_routes
 import geoip
 import web_geo
+import web_layers
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -2384,6 +2385,9 @@ digest_ctx.oi_fn = oi_payload
 digest_ctx.ai_fn = digest_ai
 digest_ctx.publish_fn = tg_bot.publish_daily_digest
 digest_ctx.public_url = PUBLIC_URL
+# Обложку выпуска выбираем при сборке дайджеста: то же фото уходит в канал и
+# показывается на странице /digest (фото рубрик живут в базе аккаунтов).
+digest_ctx.photo_store = account_store
 register_digest_routes(app)
 # Кнопка «🗞 Дайджест за сутки» в админке бота собирает выпуск прямо сейчас
 tg_bot.daily_run_fn = api_digest.publish_digest
@@ -2420,6 +2424,13 @@ web_geo.ctx.store = account_store
 web_geo.ctx.secret = SECRET
 web_geo.ctx.public_url = PUBLIC_URL
 web_geo.register_geo_routes(app)
+
+# ☰ Слои графика: гостю без регистрации — 30 минут пробного доступа,
+# дальше сайт предлагает зарегистрироваться (web_layers).
+web_layers.ctx.store = account_store
+web_layers.ctx.secret = SECRET
+web_layers.ctx.public_url = PUBLIC_URL
+web_layers.register_layer_routes(app)
 
 
 @app.get("/api/symbols")

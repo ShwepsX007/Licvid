@@ -136,6 +136,8 @@ function adminHandler(u, opts, calls) {
     return { ok: true, users: { total: 5, new_24h: 1, active_24h: 3 },
              visits: { today_views: 10, today_uniques: 4, today_bots: 3,
                        days: [{ day: "2026-09-17", views: 10, uniques: 4, bots: 3 }] },
+             // пробный доступ к слоям: 12 гостей, 5 уже увидели предложение
+             layers_trials: { total: 12, active: 7, expired: 5, limit_sec: 1800 },
              ws_clients: 7, bot: { ready: true, username: "LiqScopeBot" },
              health: { live_exchanges: ["binance"] },
              settings: { bot_welcome: "привет", site_notice: "" },
@@ -243,6 +245,12 @@ function click(win, el) {
   check("служебных запросов отсеяно — отдельной цифрой",
     doc.querySelector("#st-bots").textContent === "3",
     doc.querySelector("#st-bots").textContent);
+  // Воронка пробных слоёв: видно, сколько гостей знакомятся и сколько упёрлись
+  const trialLine = doc.querySelector("#visits-trial");
+  check("в карточке визитов — воронка пробных слоёв",
+    !!trialLine && /12 гостей/.test(trialLine.textContent) &&
+    /5 уже увидели/.test(trialLine.textContent),
+    trialLine && trialLine.textContent);
   const statLabels = Array.prototype.map.call(
     doc.querySelectorAll(".stat-label"), (el) => el.textContent);
   check("подписи не путают переходы и посетителей",
@@ -533,6 +541,16 @@ function click(win, el) {
     /LIQSCOPE_DIGEST_SCHED/.test(off.doc.querySelector("#dig-note").textContent),
     off.doc.querySelector("#dig-note").textContent);
   await off.win.close();
+
+  // --- английский язык: воронка пробных слоёв тоже переводится -----------
+  const en = await openPage("/admin", { handler: adminHandler });
+  en.win.LiqScopeI18n.set("en");
+  await new Promise((r) => setTimeout(r, 300));
+  const enTrials = en.doc.querySelector("#visits-trial");
+  check("на английском воронка пробных слоёв переведена",
+    /Layer trial/.test(enTrials.textContent) &&
+    /12 guests/.test(enTrials.textContent), enTrials.textContent);
+  await en.win.close();
 
   console.log(`\nитог: ${ok} ок, ${fail} ошибок`);
   process.exit(fail ? 1 : 0);

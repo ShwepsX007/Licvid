@@ -2248,6 +2248,31 @@
         });
     }
 
+    var lastTrials = null;      // последняя сводка испытаний: нужна при смене языка
+
+    /** Воронка пробного доступа к слоям: «12 гостей, 5 увидели предложение». */
+    function paintTrials(lt) {
+        lastTrials = lt || {};
+        var el = $("visits-trial");
+        if (!el) return;
+        var n = Number(lt.total || 0);
+        var stuck = Number(lt.expired || 0);
+        var minutes = Math.max(1, Math.round(Number(lt.limit_sec || 1800) / 60));
+        if (!n) {
+            el.textContent = window.LiqScopeI18n && LiqScopeI18n.t
+                ? LiqScopeI18n.t("adm.trial_none", { min: minutes }) : "";
+            return;
+        }
+        el.textContent = window.LiqScopeI18n && LiqScopeI18n.t
+            ? LiqScopeI18n.t("adm.trial_line", { min: minutes, n: n, stuck: stuck })
+            : "";
+    }
+
+    if (window.LiqScopeI18n && LiqScopeI18n.onChange) {
+        // язык переключили — строка воронки должна переехать вместе с сайтом
+        LiqScopeI18n.onChange(function () { if (lastTrials) paintTrials(lastTrials); });
+    }
+
     /** Цифры и график админки: перезагружаются после стирания статистики. */
     function loadOverview() {
         return api("/api/admin/overview").then(function (d) {
@@ -2264,6 +2289,7 @@
             var live = (d.health.live_exchanges || []).length;
             $("st-exch") && ($("st-exch").textContent = live);
             renderBars(dv.days || []);
+            paintTrials(d.layers_trials || {});
             if ($("bot-welcome")) $("bot-welcome").value = (d.settings && d.settings.bot_welcome) || "";
             if ($("site-notice-in")) $("site-notice-in").value = (d.settings && d.settings.site_notice) || "";
             var svc = $("admin-svc");

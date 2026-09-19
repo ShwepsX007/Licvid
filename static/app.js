@@ -43,7 +43,10 @@
         paneCvd: false,
         paneOi: false,
         userLoggedIn: false,    // слои и окна доступны только зарегистрированным
-        layersAllowed: false,   // userLoggedIn || dev-обход для тестов
+        layersAllowed: false,   // userLoggedIn | dev-обход | пробные 30 минут
+        layersBlocked: false,   // пробник кончился — кнопка слоёв закрыта
+        layersTrial: null,      // ответ /api/layers/trial: остаток времени гостя
+        trialTimer: 0,          // таймер сверки остатка с сервером
         symbols: [],
         details: {},
         prices: {},
@@ -4383,23 +4386,197 @@
     // видны только зарегистрированным пользователям (авторизация сайта).
     const LAYER_KEYS = ["profileEnabled", "liqEnabled", "cvdEnabled", "oiEnabled",
                         "paneLiq", "paneCvd", "paneOi"];
+    //: ключ слоя → кнопка-переключатель (заполняется в setupLayerToggles)
+    const LAYER_DEFS = {};
 
-    async function applyAuthGate() {
-        let user = null;
+    async function fetchAuthMe() {
         try {
             const r = await fetch("/api/auth/me", { credentials: "same-origin" });
             const d = await r.json();
-            user = (d && d.user) || null;
-        } catch (e) { user = null; }
+            return (d && d.user) || null;
+        } catch (e) { return null; }
+    }
+
+    // --- Пробный доступ к слоям -------------------------------------------
+    // Гостю без регистрации слои открыты 30 минут. Время считает сервер
+    // (/api/layers/trial по cookie гостя) — перезагрузка страницы и чистка
+    // localStorage его не сбрасывают. Когда время вышло: кнопка «☰ Слои»
+    // закрывается, слои выключаются, а на экране появляется предложение
+    // зарегистрироваться. Крестик закрывает окно — терминал работает дальше.
+    const GATE_DISMISS_KEY = "liqscope.gate.dismissed";
+    const GATE_TICK_MS = 30000;            // как часто переспрашиваем сервер
+
+    async function fetchLayersTrial() {
+        try {
+            const r = await fetch("/api/layers/trial", { credentials: "same-origin" });
+            if (!r.ok) return null;
+            const d = await r.json();
+            return (d && d.ok) ? d : null;
+        } catch (e) { return null; }       // сеть подвела — гостя не запираем
+    }
+
+    function gateDismissed() {
+        try { return sessionStorage.getItem(GATE_DISMISS_KEY) === "1"; } catch (e) { return false; }
+    }
+
+    function markGateDismissed() {
+        try { sessionStorage.setItem(GATE_DISMISS_KEY, "1"); } catch (e) { /* ignore */ }
+    }
+
+    function hideLayerCall() {
+        const call = $("layer-call");
+        if (call) call.classList.add("hidden");
+        const pop = $("layer-pop");
+        if (pop) pop.classList.add("hidden");
+    }
+
+    function trialMinutes(sec) {
+        return Math.max(1, Math.ceil(Math.max(0, Number(sec) || 0) / 60));
+    }
+
+    // Остаток пробника — прямо в кнопке: видно и то, что доступ идёт, и
+    // сколько осталось. Последние пять минут — предупреждающий цвет.
+    function paintLayerTrial() {
+        const badge = $("layer-trial"), call = $("layer-call");
+        if (!badge || !call) return;
+        const t = state.layersTrial || {};
+        const show = !state.userLoggedIn && !state.layersBlocked &&
+            !devLayers() && t.left_sec !== null && t.left_sec !== undefined;
+        if (!show) {
+            badge.classList.add("hidden");
+            badge.textContent = "";
+            call.title = I18n.t("chart.layers_title");
+            return;
+        }
+        const min = trialMinutes(t.left_sec);
+        badge.classList.remove("hidden");
+        badge.classList.toggle("low", Number(t.left_sec) <= 300);
+        badge.textContent = I18n.t("gate.trial_badge", { min: min });
+        call.title = I18n.t("chart.layers_title") + " · " +
+            I18n.t("gate.trial_title", { min: min });
+    }
+
+    function devLayers() {
+        try { return localStorage.getItem("liqscope.devLayers") === "1"; } catch (e) { return false; }
+    }
+
+    function layerToggleEls() {
+        return LAYER_KEYS.map((k) => LAYER_DEFS[k] && LAYER_DEFS[k].el).filter(Boolean);
+    }
+
+    // Выключить все слои так же, как это делает нажатие на переключатель:
+    // клик снимает подсветку ленты, прячет окно фигуры и перерисовывает график.
+    function turnOffAllLayers() {
+        layerToggleEls().forEach((el) => {
+            if (el.classList.contains("active")) el.click();
+        });
+        LAYER_KEYS.forEach((k) => { state[k] = false; });
+    }
+
+    function openLayerGate() {
+        const gate = $("layers-gate");
+        if (gate) gate.classList.remove("hidden");
+    }
+
+    function closeLayerGate(remember) {
+        const gate = $("layers-gate");
+        if (gate) gate.classList.add("hidden");
+        state.layersBlocked = true;        // закрыли — продолжаем без слоёв
+        if (remember) markGateDismissed();
+    }
+
+    // Время вышло: убираем кнопку слоёв, гасим включённое и предлагаем регистрацию
+    function expireLayers() {
+        state.layersBlocked = true;
+        state.layersAllowed = false;
+        state.layersTrial = state.layersTrial || {};
+        state.layersTrial.left_sec = 0;
+        turnOffAllLayers();
+        if (window.LiqScopeLayers && window.LiqScopeLayers.setOpen) {
+            window.LiqScopeLayers.setOpen(false);
+        }
+        hideLayerCall();
+        updateMarkers();
+        updateLiveStats();
+        queueRedraw();
+        if (!gateDismissed()) openLayerGate();
+    }
+
+    function stopTrialWatch() {
+        if (state.trialTimer) { clearInterval(state.trialTimer); state.trialTimer = 0; }
+    }
+
+    async function checkLayerTrial() {
+        const t = await fetchLayersTrial();
+        if (!t) return;                    // сервер молчит — не мешаем смотреть
+        state.layersTrial = t;
+        if (t.allowed === false) { expireLayers(); return; }
+        paintLayerTrial();
+    }
+
+    function watchLayerTrial() {
+        if (state.trialTimer) { clearInterval(state.trialTimer); }
+        state.trialTimer = setInterval(checkLayerTrial, GATE_TICK_MS);
+        // вернулись во вкладку — сразу сверим остаток: в спящей вкладке
+        // таймеры стоят, а время идёт
+        document.addEventListener("visibilitychange", () => {
+            if (document.visibilityState === "visible" && !state.layersBlocked) checkLayerTrial();
+        });
+    }
+
+    function setupLayerGate() {
+        const gate = $("layers-gate");
+        if (!gate) return;
+        const close = (e) => {
+            if (e) e.preventDefault();
+            closeLayerGate(true);
+        };
+        const x = $("gate-close"), later = $("gate-later"), cta = $("gate-cta");
+        if (x) x.addEventListener("click", close);
+        if (later) later.addEventListener("click", close);
+        if (cta) cta.addEventListener("click", () => markGateDismissed());
+        // клик мимо окна — то же самое: продолжаем без слоёв
+        gate.addEventListener("click", (e) => { if (e.target === gate) closeLayerGate(true); });
+        document.addEventListener("keydown", (e) => {
+            if (e.key === "Escape" && !gate.classList.contains("hidden")) closeLayerGate(true);
+        });
+        I18n.onChange(paintLayerTrial);    // остаток и подсказка — на языке страницы
+        window.LiqScopeLayersGate = {      // тестовый API для tests/layers_gate.js
+            isOpen: () => !gate.classList.contains("hidden"),
+            blocked: () => !!state.layersBlocked,
+            allowed: () => !!state.layersAllowed,
+            trial: () => state.layersTrial,
+            left: () => {
+                const t = state.layersTrial || {};
+                return t.left_sec === undefined ? null : t.left_sec;
+            },
+            expire: expireLayers,
+            dismiss: () => closeLayerGate(true),
+        };
+    }
+
+    async function applyAuthGate() {
+        const pair = await Promise.all([fetchAuthMe(), fetchLayersTrial()]);
+        const user = pair[0], trial = pair[1];
         state.userLoggedIn = !!user;
+        state.layersTrial = trial;
         // dev-обход для автотестов без Telegram-авторизации
-        let dev = false;
-        try { dev = localStorage.getItem("liqscope.devLayers") === "1"; } catch (e) { /* ignore */ }
-        state.layersAllowed = state.userLoggedIn || dev;
-        if (!state.layersAllowed) {
+        const dev = devLayers();
+        const trialOver = !!(trial && trial.allowed === false);
+        state.layersAllowed = state.userLoggedIn || dev || !trialOver;
+        if (state.layersAllowed) {
+            if (!state.userLoggedIn && !dev && trial && trial.left_sec !== null &&
+                    trial.left_sec !== undefined) {
+                paintLayerTrial();
+                watchLayerTrial();
+            }
+        } else {
+            state.layersBlocked = true;
             LAYER_KEYS.forEach((k) => { state[k] = false; });
-            const call = $("layer-call");
-            if (call) call.classList.add("hidden");
+            hideLayerCall();
+            // время вышло ещё в прошлый раз: окно показываем один раз за сессию,
+            // иначе оно встречало бы гостя при каждом обновлении страницы
+            if (!gateDismissed()) openLayerGate();
         }
         return state.layersAllowed;
     }
@@ -4424,6 +4601,7 @@
         ];
         defs.forEach((d) => {
             if (!d.el) return;
+            LAYER_DEFS[d.skey] = d;
             if (allowed) {
                 try {
                     const v = localStorage.getItem(d.store);
@@ -5938,6 +6116,8 @@
         applyAuthGate().then((allowed) => {
             setupLayerToggles(allowed);
             setupLayerPop();
+            setupLayerGate();       // окно «зарегистрируйтесь» после пробника
+            paintLayerTrial();
             setupFollowToggle();     // 🎯 автоследование графика за ценой
             setupIndicatorPanes();   // окна LIQ/CVD/OI под графиком + крестики
             updateMarkers();

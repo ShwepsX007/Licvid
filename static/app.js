@@ -2556,18 +2556,53 @@
         const matchTab = (kind === "liq" && state.feedTab === "liq")
             || (kind === "cvd" && state.feedTab === "cvd")
             || (kind === "oi" && state.feedTab === "oi");
-        const ids = (kind === "liq" && ball.ids) ? new Set(ball.ids.map(String)) : null;
+        // Для ликвидаций ids есть только у живых кластеров (из памяти).
+        // Исторические кластеры из /api/liq_clusters приходят без ids — у них
+        // только время свечи. Чтобы лента не «притухала без подсветки»,
+        // проверяем наличие ids и делаем fallback по времени свечи.
+        const hasIds = !!(kind === "liq" && ball.ids && ball.ids.length);
+        const ids = hasIds ? new Set(ball.ids.map(String)) : null;
         const feedKey = (kind === "cvd" || kind === "oi") ? (kind + "_" + ball.time) : null;
+        const tfSec = (kind === "liq" && ball.time) ? (state.timeframe * 60) : 0;
         let firstRow = null;
-        feedTbody.querySelectorAll("tr").forEach((tr) => {
+        let anyHit = false;
+        const rows = feedTbody.querySelectorAll("tr");
+        rows.forEach((tr) => {
             let hit = false;
             if (ball && matchTab) {
-                if (ids) hit = ids.has(String(tr.dataset.liqId));
-                else if (feedKey) hit = tr.dataset.feedKey === feedKey;
+                if (ids) {
+                    hit = ids.has(String(tr.dataset.liqId));
+                } else if (feedKey) {
+                    hit = tr.dataset.feedKey === feedKey;
+                } else if (kind === "liq" && tfSec > 0) {
+                    // Исторический кластер без ids — матчим по времени свечи:
+                    // событие ленты попадает в ту же свечу графика.
+                    const ts = Number(tr.dataset.ts || tr.dataset.time || 0) || 0;
+                    if (ts) {
+                        hit = ts >= ball.time && ts < ball.time + tfSec;
+                    }
+                }
+            }
+            if (hit) anyHit = true;
+            if (hit && !firstRow) firstRow = tr;
+        });
+        // Применяем классы только если есть хотя бы одно совпадение.
+        // Иначе исторический кластер просто подсвечивается на графике,
+        // а лента не притухает впустую (баг «притухает но не подсвечивает»).
+        rows.forEach((tr) => {
+            let hit = false;
+            if (ball && matchTab) {
+                if (ids) {
+                    hit = ids.has(String(tr.dataset.liqId));
+                } else if (feedKey) {
+                    hit = tr.dataset.feedKey === feedKey;
+                } else if (kind === "liq" && tfSec > 0) {
+                    const ts = Number(tr.dataset.ts || tr.dataset.time || 0) || 0;
+                    if (ts) hit = ts >= ball.time && ts < ball.time + tfSec;
+                }
             }
             tr.classList.toggle("feed-hit", !!hit);
-            tr.classList.toggle("feed-dim", !!(ball && matchTab) && !hit);
-            if (hit && !firstRow) firstRow = tr;
+            tr.classList.toggle("feed-dim", !!(anyHit && matchTab) && !hit);
         });
         if (firstRow) {
             try {
@@ -2608,6 +2643,36 @@
                     if (String(ids[j]) === sid) return clusterHits[i];
                 }
             }
+            // Фолбэк: кластер мог не нарисоваться из-за наложения (place()
+            // вернул null), но он есть в liqClusterRows — найдём его там,
+            // чтобы подсветка ленты всё равно работала и кластер можно было
+            // подсветить по времени свечи.
+            try {
+                const all = liqClusterRows();
+                for (let i = 0; i < all.length; i++) {
+                    const ids = all[i].ids || [];
+                    for (let j = 0; j < ids.length; j++) {
+                        if (String(ids[j]) === sid) {
+                            // Возвращаем синтетический хит с ключом и временем,
+                            // даже если он не был нарисован — applyFeedHighlight
+                            // всё равно подсветит ленту, а график подсветится
+                            // по времени свечи.
+                            return {
+                                kind: "liq",
+                                key: all[i].key,
+                                x: 0, y: 0, w: 0, h: 0,
+                                time: all[i].time,
+                                price: all[i].total > 0 ? all[i].pxSum / all[i].total : 0,
+                                total: all[i].total,
+                                count: all[i].count,
+                                ids: all[i].ids,
+                                longUsd: all[i].longUsd,
+                                shortUsd: all[i].shortUsd,
+                            };
+                        }
+                    }
+                }
+            } catch (e) { /* ignore */ }
         }
         return null;
     }
@@ -3837,6 +3902,10 @@
         const tr = document.createElement("tr");
         tr.className = whale ? "feed-row-whale" : "feed-row-new";
         if (item.id != null) tr.dataset.liqId = String(item.id);   // связь с шариком
+        if (item.timestamp != null) {
+            tr.dataset.ts = String(item.timestamp);
+            tr.dataset.time = String(item.timestamp);
+        }
         const d = new Date(item.timestamp * 1000);
         const valClass = whale ? "whale-val" : (isLong ? "long-val" : "short-val");
         const openTitle = I18n.t("feed.open_chart", { sym: pretty(item.symbol) });
@@ -4024,6 +4093,13 @@
     function paintShapeFeedCells(tr, item) {
         tr._feedItem = item;
         tr.dataset.feedKey = shapeFeedKey(item);
+        if (item.time != null) {
+            tr.dataset.ts = String(item.time);
+            tr.dataset.time = String(item.time);
+        }
+        if (item.timestamp != null && !tr.dataset.ts) {
+            tr.dataset.ts = String(item.timestamp);
+        }
         tr.classList.toggle("feed-row-live", !!item.live);
         const t = shapeFeedTypeLabel(item);
         let usdTd = tr.querySelector(".td-usd-amount");

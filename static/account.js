@@ -3422,7 +3422,8 @@
             });
         });
         function publish(kind, langs) {
-            botSet("bot-post-status", kind === "daily" ? "Собираю дайджест за сутки…" : "Готовлю сводку…");
+            botSet("bot-post-status", kind === "daily" ? "Собираю дайджест за сутки…"
+                : (kind === "hourly" ? "Собираю сводку для сайта…" : "Готовлю сводку…"));
             api("/api/admin/bot/publish", {
                 method: "POST", body: JSON.stringify({ kind: kind, langs: langs }),
             }).then(function (d) {
@@ -3435,6 +3436,10 @@
         if (daily) daily.addEventListener("click", function () {
             if (confirm("Собрать дневной дайджест за сутки и отправить в каналы?")) publish("daily");
         });
+        // Сводку можно положить в архив сайта (/hourly) и без поста в канал:
+        // раздел наполняется сразу после установки, а не через 4 часа
+        var hourly = $("bot-hourly");
+        if (hourly) hourly.addEventListener("click", function () { publish("hourly"); });
         var dsave = $("dig-save");
         if (dsave) dsave.addEventListener("click", function () {
             api("/api/digest/settings", {

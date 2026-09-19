@@ -193,7 +193,9 @@ function adminHandler(u, opts, calls) {
       return { ok: true, kind: body.kind, draft: false,
                message: body.kind === "daily"
                  ? "Дневной дайджест за 2026-09-17 отправлен: 🇷🇺 RU, 🇬🇧 EN"
-                 : "Сводка ушла в каналы. 🇷🇺 LiqScopeRUS · 🇬🇧 LiqScopeEng" };
+                 : (body.kind === "hourly"
+                    ? "Сводка 2026-09-17-1200 добавлена в архив раздела «Сводки по часам» — откройте /hourly."
+                    : "Сводка ушла в каналы. 🇷🇺 LiqScopeRUS · 🇬🇧 LiqScopeEng") };
     }
     if (u.indexOf("/api/admin/bot/channels") === 0) {
       return { ok: true, channels: BOT_SNAP.channels, probes: BOT_SNAP.probes,
@@ -331,6 +333,18 @@ function click(win, el) {
     !!daily && JSON.parse(daily.body).kind === "daily", daily && daily.body);
   check("и отчитывается, куда ушёл",
     /RU, 🇬🇧 EN/.test(doc.querySelector("#bot-post-status").textContent),
+    doc.querySelector("#bot-post-status").textContent);
+
+  // Кнопка «Сводка на сайт» наполняет раздел /hourly, не отправляя пост в канал
+  const beforeHourly = calls.length;
+  check("кнопка «Сводка на сайт» есть в панели", !!doc.querySelector("#bot-hourly"));
+  click(win, doc.querySelector("#bot-hourly"));
+  await new Promise((r) => setTimeout(r, 120));
+  const hourly = calls.slice(beforeHourly).find((c) => c.url.indexOf("/api/admin/bot/publish") === 0);
+  check("она шлёт сборку сводки для раздела",
+    !!hourly && JSON.parse(hourly.body).kind === "hourly", hourly && hourly.body);
+  check("и рассказывает, куда попала сводка",
+    /Сводки по часам/.test(doc.querySelector("#bot-post-status").textContent),
     doc.querySelector("#bot-post-status").textContent);
 
   const beforeAi = calls.length;

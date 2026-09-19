@@ -1776,23 +1776,26 @@
             ctx.stroke();
 
             // Активная плашка (наведение в ленте или нажатие на графике) —
-            // ярко-белая подсветка: мягкий ореол, резкий контур и светлая
-            // вуаль поверх цвета, чтобы нужный кластер было видно сразу.
+            // 100% ярче: двойной белый ореол с сильным свечением и плотная
+            // вуаль, чтобы кластер было видно сразу даже на яркой свече.
             if (isActive) {
                 ctx.save();
-                rrPath(ctx, fx - 3, fy - 3, bw + 6, bh + 6, rad + 2);
-                ctx.lineWidth = 3;
-                ctx.strokeStyle = "rgba(255,255,255,0.6)";
+                rrPath(ctx, fx - 5, fy - 5, bw + 10, bh + 10, rad + 3);
+                ctx.lineWidth = 5;
+                ctx.strokeStyle = "rgba(255,255,255,0.92)";
                 ctx.shadowColor = "#ffffff";
-                ctx.shadowBlur = 16;
+                ctx.shadowBlur = 32;
                 ctx.stroke();
                 ctx.shadowBlur = 0;
-                rrPath(ctx, fx - 2.2, fy - 2.2, bw + 4.4, bh + 4.4, rad + 1.6);
-                ctx.lineWidth = 2.2;
+                rrPath(ctx, fx - 3, fy - 3, bw + 6, bh + 6, rad + 2);
+                ctx.lineWidth = 3.5;
                 ctx.strokeStyle = "#ffffff";
+                ctx.shadowColor = "#ffffff";
+                ctx.shadowBlur = 18;
                 ctx.stroke();
+                ctx.shadowBlur = 0;
                 rrPath(ctx, fx, fy, bw, bh, rad);
-                ctx.fillStyle = "rgba(255,255,255,0.24)";
+                ctx.fillStyle = "rgba(255,255,255,0.42)";
                 ctx.fill();
                 ctx.restore();
             }
@@ -1933,12 +1936,28 @@
             ctx.strokeStyle = theme.ring;
             ctx.stroke();
 
-            // Активный треугольник (наведение/закреп) — белая обводка поверх
+            // Активный треугольник (наведение/закреп) — 100% ярче:
+            // двойной белый ореол с сильным свечением + плотная вуаль.
             if (shapeIsActive("cvd", triKey)) {
-                triPath(ctx, x, apexY, halfW, h, buy);
-                ctx.lineWidth = 1.8;
-                ctx.strokeStyle = "rgba(255,255,255,0.9)";
+                ctx.save();
+                triPath(ctx, x, buy ? apexY - 2.5 : apexY + 2.5, halfW + 3, h + 3, buy);
+                ctx.lineWidth = 4.5;
+                ctx.strokeStyle = "rgba(255,255,255,0.95)";
+                ctx.shadowColor = "#ffffff";
+                ctx.shadowBlur = 28;
                 ctx.stroke();
+                ctx.shadowBlur = 0;
+                triPath(ctx, x, apexY, halfW + 1.5, h + 1.5, buy);
+                ctx.lineWidth = 3;
+                ctx.strokeStyle = "#ffffff";
+                ctx.shadowColor = "#ffffff";
+                ctx.shadowBlur = 16;
+                ctx.stroke();
+                ctx.shadowBlur = 0;
+                triPath(ctx, x, apexY, halfW, h, buy);
+                ctx.fillStyle = "rgba(255,255,255,0.40)";
+                ctx.fill();
+                ctx.restore();
             }
 
             // Сумма — если влезает; шрифт подбираем под размер треугольника.
@@ -2462,13 +2481,31 @@
             ctx.strokeStyle = theme.ring;
             ctx.stroke();
 
-            // Активный шарик (наведение/закреп) — белое кольцо поверх
+            // Активный шарик (наведение/закреп) — 100% ярче:
+            // двойной белый ореол с сильным свечением + плотная вуаль.
             if (shapeIsActive("oi", ballKey)) {
+                ctx.save();
                 ctx.beginPath();
-                ctx.arc(x, cy, r + 3.5, 0, 2 * Math.PI);
-                ctx.lineWidth = 1.8;
-                ctx.strokeStyle = "rgba(255,255,255,0.9)";
+                ctx.arc(x, cy, r + 6, 0, 2 * Math.PI);
+                ctx.lineWidth = 5;
+                ctx.strokeStyle = "rgba(255,255,255,0.95)";
+                ctx.shadowColor = "#ffffff";
+                ctx.shadowBlur = 30;
                 ctx.stroke();
+                ctx.shadowBlur = 0;
+                ctx.beginPath();
+                ctx.arc(x, cy, r + 2.8, 0, 2 * Math.PI);
+                ctx.lineWidth = 3.2;
+                ctx.strokeStyle = "#ffffff";
+                ctx.shadowColor = "#ffffff";
+                ctx.shadowBlur = 18;
+                ctx.stroke();
+                ctx.shadowBlur = 0;
+                ctx.beginPath();
+                ctx.arc(x, cy, r, 0, 2 * Math.PI);
+                ctx.fillStyle = "rgba(255,255,255,0.42)";
+                ctx.fill();
+                ctx.restore();
             }
 
             if (fs > 0) {

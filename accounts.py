@@ -1588,6 +1588,9 @@ class Store:
             ).fetchall()
             top_paths = self._db.execute(
                 "SELECT path, COUNT(*) AS n FROM visits WHERE ts>=? AND bot=0"
+                " AND path NOT IN ('/manifest.webmanifest','/sw.js','/favicon.ico',"
+                " '/robots.txt','/sitemap.xml')"
+                " AND path NOT LIKE '%.webmanifest' AND path NOT LIKE '/static/%'"
                 " GROUP BY path ORDER BY n DESC LIMIT 8",
                 (since,),
             ).fetchall()
@@ -1843,6 +1846,9 @@ class Store:
                 (since,)).fetchone()
             paths = self._db.execute(
                 "SELECT path, COUNT(*) AS n FROM visits WHERE ts>=? AND bot=0"
+                " AND path NOT IN ('/manifest.webmanifest','/sw.js','/favicon.ico',"
+                " '/robots.txt','/sitemap.xml')"
+                " AND path NOT LIKE '%.webmanifest' AND path NOT LIKE '/static/%'"
                 " GROUP BY path ORDER BY n DESC LIMIT 8", (since,)).fetchall()
         # самый свежий внешний переход на гостя (строки уже отсортированы)
         src_map: Dict[str, Dict[str, str]] = {}

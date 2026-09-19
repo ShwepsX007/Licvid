@@ -1488,14 +1488,18 @@ def register_account_routes(app) -> None:
         response = await call_next(request)
         if new_vid:
             _set_vid(response, new_vid)
-        # переходы по страницам: не статика/апи/ws и не служебные запросы
+        # переходы по страницам: не статика/апи/ws и не служебные файлы
+        # (манифест, воркер, иконки, robots/sitemap) — их браузер тянет сам
+        # на каждой странице, и они не должны попадать в «популярные страницы».
         if (
             ctx.store
             and request.method in ("GET", "HEAD")
             and response.status_code < 400
             and not path.startswith("/static")
             and not path.startswith("/api")
-            and path != "/ws"
+            and path not in ("/ws", "/manifest.webmanifest", "/sw.js",
+                             "/favicon.ico", "/robots.txt", "/sitemap.xml")
+            and not path.endswith(".webmanifest")
             and _wants_html(request)
         ):
             try:

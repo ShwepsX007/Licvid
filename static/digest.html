@@ -92,6 +92,25 @@
 .cal-legend { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 0.7rem; margin-top: 9px; }
 .cal-legend i { width: 10px; height: 10px; border-radius: 3px; background: rgba(61, 112, 255, 0.35); border: 1px solid var(--border); display: inline-block; }
 .dig-article { padding: 24px 26px 30px; line-height: 1.62; }
+/* Обложка выпуска: то же фото, что ушло в Telegram — сайт тоже с фотоконтентом */
+.dig-cover { margin: 0 0 18px; }
+.dig-cover img {
+    display: block; width: 100%; max-height: 420px; object-fit: cover;
+    border-radius: 12px; border: 1px solid var(--border);
+    background: rgba(7, 10, 16, 0.6);
+}
+/* Миниатюра обложки в списке свежих выпусков */
+.dig-card.has-thumb { display: flex; gap: 11px; align-items: flex-start; padding: 10px 12px; }
+.dig-card .dc-thumb {
+    width: 62px; height: 62px; flex: 0 0 62px; object-fit: cover;
+    border-radius: 9px; border: 1px solid var(--border);
+    background: rgba(7, 10, 16, 0.6);
+}
+.dig-card .dc-text { min-width: 0; }
+@media (max-width: 560px) {
+    .dig-cover img { max-height: 260px; }
+    .dig-card .dc-thumb { width: 52px; height: 52px; flex-basis: 52px; }
+}
 .dig-article h2 { font-size: 1.35rem; margin-bottom: 6px; }
 .dig-article .art-meta { color: var(--muted); font-size: 0.8rem; margin-bottom: 18px; }
 .dig-article h3 { font-size: 1.02rem; margin: 22px 0 8px; }

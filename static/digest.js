@@ -65,13 +65,19 @@
             var tags = "";
             if (it.published) tags += '<span class="tag ok">' + esc(t("dig.published")) + "</span>";
             if (it.mood) tags += '<span class="tag">' + esc(it.mood) + "</span>";
+            // миниатюра обложки: у выпуска есть фото дня — оно и в списке
+            var thumb = it.photo && it.photo.url
+                ? '<img class="dc-thumb" src="' + esc(it.photo.url) + '" alt="" loading="lazy">'
+                : "";
             return '<button type="button" class="dig-card' +
                 (String(it.day) === String(selected) ? " active" : "") +
-                '" data-day="' + esc(it.day) + '">' +
+                (thumb ? " has-thumb" : "") +
+                '" data-day="' + esc(it.day) + '">' + thumb +
+                '<div class="dc-text">' +
                 '<div class="dc-day">' + esc(it.day_label || it.day) + "</div>" +
                 '<div class="dc-brief">' + esc(it.brief || "") + "</div>" +
                 (tags ? '<div class="dc-tags">' + tags + "</div>" : "") +
-                "</button>";
+                "</div></button>";
         }).join("");
         Array.prototype.forEach.call(box.querySelectorAll(".dig-card"), function (btn) {
             btn.addEventListener("click", function () { open(btn.getAttribute("data-day")); });
@@ -106,10 +112,16 @@
             ? '<details class="dig-post"><summary>Telegram · ' + esc(item.day_label || item.day) +
               "</summary><pre>" + esc(item.post) + "</pre></details>"
             : "";
+        // Обложка выпуска: то самое фото, что ушло в Telegram. Сайт не должен
+        // оставаться без фото-контента — картинка дня стоит первой в статье.
+        var cover = item.photo && item.photo.url
+            ? '<figure class="dig-cover"><img src="' + esc(item.photo.url) +
+              '" alt="' + esc(t("dig.cover_alt")) + '" loading="lazy"></figure>'
+            : "";
         box.innerHTML =
             "<h2>" + esc(item.day_label || item.day) + "</h2>" +
             '<div class="art-meta">' + esc(item.brief || "") + " " + tags + "</div>" +
-            (item.article || "") + post;
+            cover + (item.article || "") + post;
     }
 
     /* ---------- календарь по датам ---------- */

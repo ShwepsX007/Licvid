@@ -124,6 +124,12 @@ _META_RE = re.compile(r"<meta\b[^>]*\bdata-i18n-meta=\"([^\"]+)\"[^>]*>", re.I)
 _CONTENT_RE = re.compile(r"\bcontent=\"([^\"]*)\"", re.I)
 _OG_LOCALE_RE = re.compile(r'(<meta\b[^>]*\bproperty="og:locale"[^>]*\bcontent=")([^"]*)(")', re.I)
 _HTML_RE = re.compile(r"<html\b[^>]*>", re.I)
+#: og:image / twitter:image — их подменяем, если у страницы своя картинка
+_OG_IMG_RE = re.compile(
+    r'(<meta\b[^>]*\b(?:property="og:image"|name="twitter:image")[^>]*\bcontent=")([^"]*)(")',
+    re.I)
+_OG_DIM_RE = re.compile(
+    r'\s*<meta\b[^>]*\bproperty="og:image:(?:width|height)"[^>]*>', re.I)
 _CANON_RE = re.compile(r"(<link\b[^>]*\brel=\"canonical\"[^>]*\bhref=\")([^\"]*)(\")", re.I)
 
 
@@ -160,6 +166,7 @@ def render(
     *,
     indexable: bool = True,
     extra_head: str = "",
+    og_image: str = "",
 ) -> Response:
     """Отдаёт страницу с уже подставленным языком в head.
 
@@ -192,6 +199,14 @@ def render(
         return tag[:-1] + f' content="{_attr(value)}">'
 
     html = _META_RE.sub(meta_sub, html)
+
+    if og_image:
+        # у страницы есть своя картинка (обложка выпуска дайджеста): подставляем
+        # её в og:image и twitter:image. Размеры снимаем — у фото дня он свой,
+        # а не 1200×630 общей обложки: неверные цифры ломают превью.
+        html = _OG_IMG_RE.sub(
+            lambda m: m.group(1) + _attr(og_image) + m.group(3), html)
+        html = _OG_DIM_RE.sub("", html)
 
     # <html lang="…"> и выбранный язык для клиента: разметка сразу совпадает
     html = _HTML_RE.sub(
@@ -357,7 +372,9 @@ def manifest(public_url: Optional[str] = None) -> Response:
 
 
 #: JSON-LD: сайт, приложение и организация — одна структура на все страницы.
-def jsonld(kind: str = "landing", lang: str = DEFAULT_LANG) -> str:
+def jsonld(kind: str = "landing", lang: str = DEFAULT_LANG,
+           image: str = "") -> str:
+    """Разметка Schema.org. ``image`` — картинка страницы (обложка выпуска)."""
     lang = lang if lang in LANGS else DEFAULT_LANG
     common = {
         "@context": "https://schema.org",
@@ -397,6 +414,11 @@ def jsonld(kind: str = "landing", lang: str = DEFAULT_LANG) -> str:
         ]
     else:
         data = [{"@type": "WebPage", **common, "url": f"{SITE_URL}/terminal"}]
+    if image:
+        # картинка страницы: поисковик и мессенджер берут её для превью, а для
+        # выпуска дайджеста это то самое фото дня, что ушло в канал
+        for item in data:
+            item.setdefault("image", image)
     # Organization с логотипом-картинкой: поисковик берёт отсюда логотип для
     # брендовой панели, поэтому у картинки указаны реальные размеры.
     data.append({

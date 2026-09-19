@@ -1188,6 +1188,58 @@ def _pick_from_store(store, kind: str) -> str:
         return ""
 
 
+def bundle_dir() -> str:
+    """Папка встроенных картинок комплекта (static/channel)."""
+    return os.path.abspath(IMAGES_DIR)
+
+
+def cover_info(path: str, store=None) -> Dict[str, Any]:
+    """Описание обложки: путь, имя, откуда взялась и её id в базе.
+
+    ``source``: ``admin`` — фото загружено через админку, ``bundle`` — картинка
+    из комплекта ``static/channel``. id нужен админке (кнопки «перенести»
+    и «удалить»), сайту хватает имени и адреса.
+    """
+    path = str(path or "")
+    if not path:
+        return {}
+    out: Dict[str, Any] = {"path": path, "name": os.path.basename(path),
+                           "source": "bundle" if _is_bundled(path) else "admin",
+                           "id": 0}
+    if store is not None and out["source"] == "admin":
+        try:
+            for row in store.list_digest_photos("") or []:
+                if str(row.get("path") or "") == path:
+                    out["id"] = int(row.get("id") or 0)
+                    out["kind"] = str(row.get("kind") or "")
+                    break
+        except Exception:                     # noqa: BLE001
+            pass
+    return out
+
+
+def _is_bundled(path: str) -> bool:
+    """Картинка из комплекта или загруженная через админку?"""
+    try:
+        return os.path.abspath(os.path.dirname(path) or ".") == bundle_dir()
+    except Exception:                         # noqa: BLE001
+        return False
+
+
+def ensure_digest_cover(store=None, variant: int = 0) -> Dict[str, Any]:
+    """Обложка дневного выпуска: одно фото и для сайта, и для Telegram.
+
+    Фото выбирается тем же кругом без повторов, что и раньше
+    (``pick_digest_image``), но результат теперь описывается словарём и
+    сохраняется в записи выпуска: страница ``/digest`` показывает ту же
+    картинку, что ушла в канал, и её же отдаёт превью ссылки.
+    """
+    path = pick_digest_image(store, variant=variant)
+    if not path or not os.path.isfile(path):
+        return {}
+    return cover_info(path, store)
+
+
 def pick_active_image(store=None, kind: str = "post", variant: int = 0) -> Optional[str]:
     """Обложка поста из админки: фото, которое дольше всех не выходило.
 

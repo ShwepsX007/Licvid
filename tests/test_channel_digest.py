@@ -562,5 +562,88 @@ class DigestTest(unittest.TestCase):
             store.close()
 
 
+class DigestCoverTest(unittest.TestCase):
+    """Обложка выпуска: одна и та же картинка уходит в канал и на сайт."""
+
+    def setUp(self):
+        import tempfile
+        from accounts import Store
+        from daily_digest import DigestStore
+        import api_digest
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Store(os.path.join(self.tmp.name, "a.db"), secret="s")
+        self.api = api_digest
+        self._saved = (api_digest.ctx.photo_store, api_digest.ctx.store,
+                       api_digest.ctx.public_url)
+        api_digest.ctx.photo_store = self.store
+        api_digest.ctx.store = DigestStore(os.path.join(self.tmp.name, "d.json"))
+        api_digest.ctx.public_url = "https://liqscope.online"
+
+    def tearDown(self):
+        (self.api.ctx.photo_store, self.api.ctx.store,
+         self.api.ctx.public_url) = self._saved
+        self.store.close()
+        self.tmp.cleanup()
+
+    def test_cover_is_chosen_once_and_kept(self):
+        """Пересборка выпуска не меняет обложку: иначе сайт и канал разъедутся."""
+        rec = {"id": "2026-09-18", "day": "2026-09-18"}
+        cover = self.api.assign_cover(rec, "2026-09-18")
+        self.assertTrue(cover.get("path"), cover)
+        self.assertTrue(os.path.isfile(cover["path"]))
+        self.assertEqual(cover["source"], "bundle")
+        again = self.api.assign_cover(rec, "2026-09-18")
+        self.assertEqual(again["path"], cover["path"])
+
+    def test_days_in_a_row_get_different_covers(self):
+        names = []
+        for day in ("2026-09-19", "2026-09-20", "2026-09-21"):
+            rec = {"id": day, "day": day}
+            names.append(self.api.assign_cover(rec, day).get("name"))
+        self.assertEqual(len(set(names)), len(names), names)
+
+    def test_cover_from_admin_is_used_and_has_id(self):
+        batch = [(b"\xff\xd8\xff\xe0" + bytes([i]) * 64 + b"\xff\xd9",
+                  f"cover{i}.jpg") for i in range(3)]
+        self.store.add_digest_photos(batch, kind="digest")
+        rec = {"id": "2026-09-22", "day": "2026-09-22"}
+        cover = self.api.assign_cover(rec, "2026-09-22")
+        self.assertEqual(cover["source"], "admin")
+        self.assertGreater(cover["id"], 0, cover)
+        self.assertTrue(cover["path"].startswith(self.store.digest_photo_dir()),
+                        cover["path"])
+
+    def test_public_photo_points_to_the_cover_route(self):
+        rec = {"id": "2026-09-18", "day": "2026-09-18"}
+        self.api.assign_cover(rec, "2026-09-18")
+        pub = self.api.public_photo(rec)
+        self.assertEqual(pub["url"], "/api/digest/cover?day=2026-09-18")
+        self.assertEqual(pub["day"], "2026-09-18")
+        self.assertTrue(pub["name"])
+
+    def test_public_photo_is_empty_without_cover(self):
+        self.assertIsNone(self.api.public_photo({"id": "2026-09-18",
+                                                 "day": "2026-09-18"}))
+        # файл исчез (переехал сервер) — тоже честная пустота, а не битая картинка
+        rec = {"id": "2026-09-18", "day": "2026-09-18",
+               "photo": {"path": "/nowhere/gone.jpg", "name": "gone.jpg"}}
+        self.assertIsNone(self.api.public_photo(rec))
+
+    def test_record_carries_cover_into_public_view(self):
+        self.api.ctx.store.save({"id": "2026-09-18", "day": "2026-09-18",
+                                 "facts": {}, "ai": {}, "published": {}})
+        rec = self.api.ctx.store.get("2026-09-18")
+        self.api.assign_cover(rec, "2026-09-18")
+        self.api.ctx.store.save(rec)
+        item = self.api.public_record(self.api.ctx.store.get("2026-09-18"), "ru")
+        self.assertTrue(item["photo"], item)
+        self.assertIn("/api/digest/cover?day=2026-09-18", item["photo"]["url"])
+
+    def test_cover_variant_comes_from_the_day(self):
+        self.assertEqual(self.api.cover_variant("2026-09-07"), 7)
+        self.assertEqual(self.api.cover_variant(""), 0)
+        self.assertEqual(self.api.cover_variant("мусор"), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

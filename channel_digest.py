@@ -699,7 +699,7 @@ def _cvd_bit(hour: dict, lang: str = "ru") -> str:
     return f"🌊 CVD {emo} {money(abs(n))}"
 
 
-def hour_line(hour: dict, lang: str = "ru") -> str:
+def hour_line(hour: dict, lang: str = "ru", compact: bool = False) -> str:
     """Час одной строкой: касса с изменением, OI и CVD от объёма.
 
         🕘 <b>21:00</b> (идёт) 💥 $44.6M 📈 ▲662% · 📊 OI $43.1B ⚖️ →0% · 🌊 CVD 🟢 7.4% объёма
@@ -707,6 +707,13 @@ def hour_line(hour: dict, lang: str = "ru") -> str:
     Так час читается как одна мысль: сколько горело, куда сдвинулся открытый
     интерес и на чьей стороне был поток. Раньше те же цифры шли тремя
     строками и ряд часов растягивал пост.
+
+    ``compact`` — только час, касса и её изменение:
+
+        🕘 <b>21:00</b> (идёт) 💥 <b>$44.6M</b> 📈 ▲662%
+
+    Тесный вид нужен, когда подпись почти полна, а лидеры часа терять нельзя:
+    OI и CVD часа уходят, зато под каждым «🕘» остаётся «🏆 … 💰 …».
     """
     hh = slot_label(hour, lang)
     total = float(hour.get("total") or 0)
@@ -716,6 +723,8 @@ def hour_line(hour: dict, lang: str = "ru") -> str:
                 + _updown(hour.get("liq_pct"), lang)]
     else:
         bits = [f"🕘 <b>{hh}</b>{mark} {lbl(lang, 'empty_hour')}"]
+    if compact:
+        return " · ".join(bits)
     oi = hour.get("oi") or {}
     if oi.get("value"):
         bits.append(f"📊 {lbl(lang, 'oi')} {short_money(oi['value'])}"
@@ -765,15 +774,18 @@ def hour_leader_line(hour: dict, lang: str = "ru",
 
 
 def hour_block(hour: dict, lang: str = "ru",
-               skip_money: Optional[str] = None, short: bool = False) -> str:
+               skip_money: Optional[str] = None, short: bool = False,
+               compact: bool = False) -> str:
     """Блок часа в посте: строка цифр и под ней строка лидера.
 
     Полный вид поста. ``short`` — лидер без слов «Лидер часа» (см.
-    ``hour_leader_line``); совсем без лидеров часы остаются, только если и
-    такой вид не влезает — у русского канала текст длиннее, и раньше он терял
-    лидеров целиком.
+    ``hour_leader_line``); ``compact`` — сам час без OI и CVD (см.
+    ``hour_line``). Лидер часа остаётся в любом из этих видов: у русского
+    канала шапка длиннее (её пишет админка или ИИ), и раньше такой вид
+    пропадал целиком — в русском посте не было «🏆» под часами, пока
+    английский их показывал.
     """
-    parts = [hour_line(hour, lang)]
+    parts = [hour_line(hour, lang, compact=compact)]
     lead = hour_leader_line(hour, lang, skip_money=skip_money, short=short)
     if lead:
         parts.append(lead)
@@ -781,7 +793,8 @@ def hour_block(hour: dict, lang: str = "ru",
 
 
 def short_hour_block(hour: dict, lang: str = "ru") -> str:
-    """Час одной строкой без лидера — когда четыре полных блока не влезают."""
+    """Час одной строкой без лидера — самый тесный вид, когда даже
+    ``hour_block(compact=True)`` не влезает."""
     return hour_line(hour, lang)
 
 
@@ -1187,8 +1200,9 @@ def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = N
 
     Подпись Telegram держит 1024 символа, поэтому пост сам выбирает, чем
     пожертвовать: сначала уходят строки окна (по одной, начиная со сдвига OI),
-    а если и подробные часы не влезают — часы сжимаются до одной строки, но ни
-    один блок не пропадает. head_override — шапка от ИИ: та же раскладка,
+    а если и подробные часы не влезают — часы сжимаются (лидер без слов «Лидер
+    часа» → час без OI и CVD), но лидер часа остаётся; совсем без лидеров часы
+    идут только в крайнем случае. head_override — шапка от ИИ: та же раскладка,
     меняется только текст.
     """
     import html as _html
@@ -1250,6 +1264,12 @@ def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = N
         "verbose": [hour_block(x, lang, skip_money=win_money) for x in hours],
         "short": [hour_block(x, lang, skip_money=win_money, short=True)
                   for x in hours],
+        # Тесный вид: у часа остаются касса и её изменение, у лидера —
+        # монета, события и деньги. OI и CVD часа уходят первыми, лидер часа
+        # (🏆 … 💰) — последним: в русском канале шапка длиннее, и без этого
+        # вида русский пост терял лидеров часа, пока английский их показывал.
+        "tight": [hour_block(x, lang, skip_money=win_money, short=True,
+                             compact=True) for x in hours],
         "plain": [short_hour_block(x, lang) for x in hours],
     }
     win = [_window_leader_line(board, lang), _flow_line(board, lang),
@@ -1261,7 +1281,7 @@ def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = N
 
     picked_style = "plain"
     picked_blocks: List[str] = blocks_by_style["plain"]
-    for style in ("verbose", "short", "plain"):
+    for style in ("verbose", "short", "tight", "plain"):
         blocks = blocks_by_style[style]
         if blocks and fits(parts + blocks):
             picked_style, picked_blocks = style, blocks

@@ -762,6 +762,8 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
 .card.fold[open] > summary { border-bottom: 1px solid var(--border); }
 .card.fold > .fold-body { padding: 16px 20px 18px; }
 .fold-hint { font-size: 0.74rem; color: var(--muted); }
+/* «По всем вопросам» стоит в самом низу кабинета — отбиваем его от сервисов */
+#fb-card { margin-top: 22px; }
 .fold-tools {
     display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
     margin: 14px 0 0;

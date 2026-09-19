@@ -90,6 +90,34 @@ def _board(total=4_640_000, count=5):
     }
 
 
+def _live_board():
+    """Стенд с цифрами живого канала: крупные кассы, длинные тикеры.
+
+    На таких числах подпись почти полна, и раньше русский пост (шапка длиннее)
+    терял лидеров часа, пока английский их показывал. Лидер часа по событиям
+    (ETH) и по деньгам (BTC) — разные монеты, поэтому у каждого часа есть «💰»,
+    а лидер окна (SOL) ни с одним из них не совпадает.
+    """
+    board = _board()
+    for i, hr in enumerate(board["hours"]):
+        hr["total"] = 44_600_000 - i * 3_100_000
+        hr["count"] = 180 + i * 7
+        hr["liq_pct"] = 662 - i * 40
+        hr["oi"] = {"value": 43_100_000_000, "pct": 3 - i}
+        hr["cnt"] = {"ETH_USDT": 114 + i, "BTC_USDT": 60 + i}
+        hr["cvd"] = {"ETH_USDT": -12_500_000.0, "BTC_USDT": 3_200_000.0}
+    board["total_usd"] = 61_970_000
+    board["cvd_4h"] = 12_400_000.0
+    board["cvd_4h_share"] = -7.4
+    board["leaders"]["vol"] = {"symbol": "SOL_USDT", "usd": 61_970_000.0,
+                               "count": 1100, "share": 61.9}
+    board["leaders"]["count"] = {"symbol": "BTC_USDT", "count": 12146,
+                                 "usd": 41_000_000.0, "share": 55.9}
+    board["leaders"]["oi"] = {"symbol": "SOL_USDT", "usd": 320_000_000.0,
+                              "pct": 2.4}
+    return board
+
+
 class DigestTest(unittest.TestCase):
     def setUp(self):
         self.now = 1_000_000.0
@@ -209,6 +237,39 @@ class DigestTest(unittest.TestCase):
         under_hours = [ln for ln in t.splitlines() if ln.startswith("🏆 <b>")]
         self.assertEqual(len(under_hours), 4, t)              # все четыре часа
         self.assertLessEqual(len(t), CAPTION_LIMIT, len(t))
+
+    def test_hour_leaders_with_long_live_head(self):
+        """Живой случай: длинная шапка и крупные цифры — лидеры часа остаются.
+
+        Регрессия из канала: русская шапка приходит из админки или от ИИ и
+        бывает на всю длину (240 знаков), английская — короткий шаблон из кода.
+        На крупных цифрах русский пост не влезал ни в подробные часы, ни в
+        короткие, лестница брала часы совсем без лидеров и добивала место
+        строками окна — в русском канале «🏆» под часами пропадал, в
+        английском оставался. Теперь у часа есть тесный вид: касса и её
+        изменение строкой, под ней лидер часа с деньгами.
+        """
+        snap = collect_digest(self.events, now=self.now, oi=self.oi, cvd=self.cvd)
+        snap["board"] = _live_board()
+        long_head = "🧪 " + "рынок кипит " * 40          # длиннее 240 знаков
+        for lang in ("ru", "en"):
+            t = render_post(snap, 0, lang=lang, head_override=long_head)
+            self.assertLessEqual(len(t), CAPTION_LIMIT, (lang, len(t)))
+            lines = t.splitlines()
+            under = [i for i, ln in enumerate(lines) if ln.startswith("🕘 <b>")]
+            self.assertEqual(len(under), 4, (lang, t))
+            for i in under:
+                self.assertTrue(lines[i + 1].startswith("🏆 "), (lang, t))
+            # лидер окна и четыре лидера часа — каждый час с деньгами (💰)
+            stars = [ln for ln in lines if ln.startswith("🏆 ")]
+            self.assertEqual(len(stars), 5, (lang, t))
+            self.assertEqual(sum(1 for ln in stars if "💰" in ln), 4, (lang, t))
+        # у русского канала при этом нет слов «Лидер часа»: подпись и так полна
+        t = render_post(snap, 0, lang="ru", head_override=long_head)
+        self.assertNotIn("🏆 Лидер часа:", t)
+        # с обычной короткой шапкой русский пост остаётся подробным
+        t = render_post(snap, 0, lang="ru")
+        self.assertEqual(t.count("🏆 Лидер часа:"), 4, t)
 
     def test_leaders_of_window_and_hour(self):
         """Лидеры: окно by money и по событиям, час — своим лидером."""

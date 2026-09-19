@@ -48,6 +48,11 @@
         details: {},
         prices: {},
         liquidations: [],
+        // Кластеры из сохранённой истории: {время свечи: {l: [уровни], t: ts}}.
+        // Их считает сервер по дневным шардам, поэтому плашки видны за всю
+        // историю (до месяца), а не только за события этой вкладки.
+        liqHist: {},
+        liqCut: 0,
         candles: [],
         candleSource: "",
         sessionOpen: null,
@@ -457,6 +462,10 @@
         updateMarkers();
         updateLiveStats();
         queueRedraw();
+        // Фильтры ленты (порог и биржи) фильтруют и исторические кластеры:
+        // сервер считает свёртку с теми же условиями, поэтому перезапрашиваем
+        // её — ключ запроса включает порог и список включённых бирж.
+        loadLiqClusters();
     }
 
     // --- История ликвидаций: переживает F5 и рестарт сервера -----------------
@@ -546,6 +555,65 @@
         }
     }
 
+    // --- Кластеры из сохранённой истории ------------------------------------
+    // Плашки рисуются по свечам, а свечи живут максимум 300 штук: для часа это
+    // две недели, для минуты — пять часов. Раньше кластеры собирались только
+    // из памяти браузера (2000 последних событий с сервера + сутки в
+    // IndexedDB), поэтому всё, что случилось при закрытом терминале, на графике
+    // не появлялось. Теперь сервер отдаёт готовые кластеры по свечам из своей
+    // истории — как OI и CVD, которые тоже приходят вместе со свечами.
+    const LIQ_HIST_TTL = 60000;               // мс: как часто перезапрашивать
+    let liqHistKey = "";                      // что уже загружено (монета|тф|порог)
+    let liqHistAt = 0;
+    let liqHistReqId = 0;
+
+    // Включённые биржи строкой для /api/liq_clusters. Пусто — фильтра нет,
+    // сервер считает по всем: тогда и запрос, и ответ кэшируются как раньше.
+    // null — выключены все биржи: сохранённых плашек тоже быть не должно.
+    function liqExchParam() {
+        const all = state.availableExchanges || [];
+        if (!state.exchanges) return "";
+        if (!state.exchanges.size) return null;      // выключены все
+        if (!all.length) return Array.from(state.exchanges).sort().join(",");
+        if (state.exchanges.size >= all.length) return "";   // выбраны все
+        return all.filter((e) => state.exchanges.has(e)).sort().join(",");
+    }
+
+    async function loadLiqClusters(force) {
+        const sym = chartSymbol();
+        const tf = Number(state.timeframe);
+        if (!sym) return;
+        const exs = liqExchParam();
+        const key = sym + "|" + tf + "|" + (Number(state.minUsd) || 0) + "|" +
+                    (exs === null ? "none" : exs);
+        if (!force && key === liqHistKey && Date.now() - liqHistAt < LIQ_HIST_TTL) return;
+        if (exs === null) {
+            // Все биржи выключены — истории ликвидаций нет, как и живых событий:
+            // запрос не отправляем, старые плашки убираем.
+            liqHistKey = key;
+            liqHistAt = Date.now();
+            state.liqHist = {};
+            state.liqCut = 0;
+            queueRedraw();
+            return;
+        }
+        const req = ++liqHistReqId;
+        try {
+            const r = await fetch("/api/liq_clusters?symbol=" + encodeURIComponent(sym) +
+                "&timeframe=" + tf +
+                "&min_usd=" + (Number(state.minUsd) || 0) +
+                "&exchanges=" + encodeURIComponent(exs));
+            const data = await r.json();
+            if (req !== liqHistReqId) return;          // пришёл ответ по старой паре
+            if (chartSymbol() !== sym || Number(state.timeframe) !== tf) return;
+            state.liqHist = (data && data.candles) || {};
+            state.liqCut = Number(data && data.cut) || 0;
+            liqHistKey = key;
+            liqHistAt = Date.now();
+            queueRedraw();
+        } catch (e) { /* нет сети — рисуем по памяти, как раньше */ }
+    }
+
     async function loadHistoryFor(sym, force) {
         if (!sym || sym === "ALL") return;
         if (!force && historyLoaded.has(sym)) return;
@@ -612,6 +680,7 @@
     }
 
     function applyMarkers(markers) {
+        lastMarkers = (markers || []).slice();     // для тестов: что ушло на график
         if (!candleSeries) return;
         try {
             if (window.LightweightCharts && typeof LightweightCharts.createSeriesMarkers === "function") {
@@ -1115,6 +1184,8 @@
         state.sessionOpen = bars[0].open;
         updatePriceDisplay(bars[bars.length - 1].close);
         renderTickIndicator();
+        // Кластеры за всю сохранённую историю — под текущую пару и таймфрейм
+        loadLiqClusters();
         updateMarkers();
         updateLiveStats();
         queueRedraw();
@@ -1222,6 +1293,9 @@
         short: { fill: "rgba(0,214,255,0.92)",  ring: "#ccf6ff", text: "#04070d" },
     };
     const WHALE_USD = 100000;
+    // Шесть уровней цены внутри свечи — столько же у сервера в
+    // /api/liq_clusters: расклад плашек с историей должен совпадать.
+    const LIQ_LEVELS = 6;
     const LIQ_LABEL_MIN_USD = 2000;   // меньше — рисуем чип без подписи
 
     // --- Масштаб «крупности» от оборота монеты -------------------------------
@@ -1295,22 +1369,26 @@
         return "$" + fmtUsdShort(v).replace(/(\.\d)0+([KM])/, "$1$2").replace(/\.0+([KM])/, "$1");
     }
 
+    let lastMarkers = [];       // последние применённые метки-киты
+
     function updateMarkers() {
         if (!candleSeries) return;
         if (!state.liqEnabled) { applyMarkers([]); return; }
-        const tfSec = state.timeframe * 60;
         const byTime = new Map();
 
         // Метками помечаем только крупные события — всё остальное рисуем
         // прямоугольниками прямо на свече, чтобы не засорять поле графика.
         const kvol = chartVolScale();
-        visibleLiquidations().slice(-400).forEach((item) => {
-            if (item.usd < WHALE_USD * kvol) return;
-            const t = Math.floor(item.timestamp / tfSec) * tfSec;
-            const key = t + "_" + (item.side === "SELL" ? "L" : "S");
-            const cur = byTime.get(key) || { time: t, side: item.side, usd: 0 };
-            cur.usd += item.usd;
-            byTime.set(key, cur);
+        // Киты — из тех же рядов: метки остаются на графике и за те часы, когда
+        // терминал был закрыт (как треугольники CVD и круги OI).
+        liqClusterRows().forEach((r) => {
+            [[r.longUsd, "SELL"], [r.shortUsd, "BUY"]].forEach(([usd, side]) => {
+                if (!(usd >= WHALE_USD * kvol)) return;
+                const key = r.time + "_" + (side === "SELL" ? "L" : "S");
+                const cur = byTime.get(key) || { time: r.time, side: side, usd: 0 };
+                cur.usd += usd;
+                byTime.set(key, cur);
+            });
         });
 
         const markers = Array.from(byTime.values())
@@ -1462,52 +1540,140 @@
         return 8;
     }
 
-    function drawLiqRects(ctx) {
+    // Кластеры ликвидаций: сохранённая история с сервера + живой хвост из памяти.
+    //
+    // История (/api/liq_clusters) посчитана по дневным шардам за весь месяц и
+    // приходит по свечам графика — как CVD и OI, которые тоже приезжают вместе
+    // со свечами. Этих событий в памяти браузера может не быть вовсе: терминал
+    // был закрыт, — а кластеры за прошлые часы и дни на месте. Из памяти
+    // добавляется только то, что сервер ещё не посчитал (событие позже
+    // последнего посчитанного ``t`` этой свечи): иначе одна и та же ликвидация
+    // попала бы в плашку дважды.
+    //
+    // Ряд — свеча × уровень цены внутри свечи:
+    // {key, time, level, bar, lo, hi, longUsd, shortUsd, longN, shortN, total,
+    //  count, pxSum, ids, exchs}.
+    function liqClusterRows() {
         const tfSec = state.timeframe * 60;
-        const kvol = chartVolScale();
-        const items = visibleLiquidations();
-        if (!items.length || !state.candles.length) return;
-
-        // Свечи по времени: плашка рисуется только там, где свеча реально есть.
-        const bars = new Map();
-        state.candles.forEach((c) => bars.set(c.time, c));
-
-        const clusters = new Map();
-        items.forEach((item) => {
-            const t = Math.floor(item.timestamp / tfSec) * tfSec;
-            const bar = bars.get(t);
-            if (!bar) return;
-            const lo = Math.min(bar.low, bar.high);
-            const hi = Math.max(bar.low, bar.high);
-            let price = Number(item.price);
-            if (!isFinite(price)) price = bar.close;
-            price = Math.min(Math.max(price, lo), hi);
-            // Внутри свечи — шесть уровней (как и было): кластер стоит там,
-            // где были ликвидации, а не растянут по всему телу свечи.
-            const span = hi - lo;
-            const level = span > 0 ? Math.round(((price - lo) / span) * 5) : 0;
+        const hist = state.liqHist || {};
+        const rows = new Map();
+        const rowOf = (t, bar, lo, hi, level) => {
             const key = "b" + t + "_" + level;
-            let c = clusters.get(key);
-            if (!c) {
-                c = {
+            let r = rows.get(key);
+            if (!r) {
+                r = {
                     key: key, time: t, bar: bar, lo: lo, hi: hi, level: level,
                     longUsd: 0, shortUsd: 0, total: 0, count: 0, longN: 0,
                     shortN: 0, ids: [], exchs: {}, pxSum: 0,
                 };
-                clusters.set(key, c);
+                rows.set(key, r);
             }
-            if (item.side === "SELL") { c.longUsd += item.usd; c.longN += 1; }
-            else { c.shortUsd += item.usd; c.shortN += 1; }
-            c.total += item.usd;
-            c.count += 1;
-            c.pxSum += price * item.usd;
-            const exKey = String(item.exchange || "?").toUpperCase();
-            const slot = c.exchs[exKey] || { n: 0, usd: 0 };
-            slot.n += 1;
-            slot.usd += item.usd;
-            c.exchs[exKey] = slot;
-            if (item.id != null) c.ids.push(item.id);
+            return r;
+        };
+        // Строка истории сервера: [уровень, лонги, шорты, nлонги, nшорты,
+        // средняя цена, биржи]. Уже посчитана — раскладываем как есть.
+        const addHistory = (r, row) => {
+            const longUsd = Number(row[1]) || 0;
+            const shortUsd = Number(row[2]) || 0;
+            const usd = longUsd + shortUsd;
+            if (usd <= 0) return;
+            r.longUsd += longUsd;
+            r.longN += Number(row[3]) || 0;
+            r.shortUsd += shortUsd;
+            r.shortN += Number(row[4]) || 0;
+            r.total += usd;
+            r.count += (Number(row[3]) || 0) + (Number(row[4]) || 0);
+            r.pxSum += (Number(row[5]) || 0) * usd;
+            const ex = row[6] || {};
+            Object.keys(ex).forEach((name) => {
+                const slot = r.exchs[name] || { n: 0, usd: 0 };
+                slot.n += Number(ex[name][0]) || 0;
+                slot.usd += Number(ex[name][1]) || 0;
+                r.exchs[name] = slot;
+            });
+        };
+
+        // Живой хвост из памяти — сразу по свечам: события, которые сервер уже
+        // посчитал, пропускаем (иначе двойной счёт).
+        const live = new Map();
+        visibleLiquidations().forEach((item) => {
+            const t = Math.floor(item.timestamp / tfSec) * tfSec;
+            const served = hist[t];
+            if (served && served.t != null &&
+                    Number(item.timestamp) <= Number(served.t)) return;
+            const arr = live.get(t);
+            if (arr) arr.push(item); else live.set(t, [item]);
         });
+
+        // Идём по свечам графика: вне них плашек всё равно нет, зато работа не
+        // зависит от того, сколько истории накопил сервер (а он держит месяц).
+        state.candles.forEach((bar) => {
+            const t = Number(bar.time);
+            const lo = Math.min(bar.low, bar.high);
+            const hi = Math.max(bar.low, bar.high);
+            const served = hist[t];
+            if (served && served.l && served.l.length) {
+                served.l.forEach((row) => addHistory(
+                    rowOf(t, bar, lo, hi, Number(row[0]) || 0), row));
+            }
+            const items = live.get(t);
+            if (!items) return;
+            items.forEach((item) => {
+                let price = Number(item.price);
+                if (!isFinite(price)) price = Number(bar.close);
+                price = Math.min(Math.max(price, lo), hi);
+                const span = hi - lo;
+                const level = span > 0
+                    ? Math.round(((price - lo) / span) * (LIQ_LEVELS - 1)) : 0;
+                const r = rowOf(t, bar, lo, hi, level);
+                if (item.side === "SELL") { r.longUsd += item.usd; r.longN += 1; }
+                else { r.shortUsd += item.usd; r.shortN += 1; }
+                r.total += item.usd;
+                r.count += 1;
+                r.pxSum += price * item.usd;
+                const exKey = String(item.exchange || "?").toUpperCase();
+                const slot = r.exchs[exKey] || { n: 0, usd: 0 };
+                slot.n += 1;
+                slot.usd += item.usd;
+                r.exchs[exKey] = slot;
+                if (item.id != null) r.ids.push(item.id);
+            });
+        });
+        return Array.from(rows.values());
+    }
+
+    // Суммы по свечам (лонги/шорты/события) — из тех же рядов, что и плашки:
+    // индикатор ликвидаций и цифры в шапке видят всю историю, а не только то,
+    // что успело накопиться в открытом терминале.
+    function liqCandleSums() {
+        const out = new Map();
+        liqClusterRows().forEach((r) => {
+            let b = out.get(r.time);
+            if (!b) { b = { long: 0, short: 0, n: 0 }; out.set(r.time, b); }
+            b.long += r.longUsd;
+            b.short += r.shortUsd;
+            b.n += r.count;
+        });
+        return out;
+    }
+
+    // Ликвидации по цене: цена ряда — средняя по уровню свечи. Профиль объёма
+    // (и его цифра в шапке) тоже строится по всей истории.
+    function liqPriceRows() {
+        return liqClusterRows().map((r) => ({
+            time: r.time, bar: r.bar, level: r.level, count: r.count,
+            price: r.total > 0 ? r.pxSum / r.total : Number(r.bar.close),
+            long: r.longUsd, short: r.shortUsd, total: r.total,
+            exchs: r.exchs, ids: r.ids,
+        }));
+    }
+
+    function drawLiqRects(ctx) {
+        const kvol = chartVolScale();
+        const list0 = liqClusterRows();
+        if (!list0.length || !state.candles.length) return;
+        const clusters = new Map();
+        list0.forEach((r) => { clusters.set(r.key, r); });
         if (!clusters.size) return;
 
         const priceOf = (c) => (c.total > 0 ? c.pxSum / c.total
@@ -1814,12 +1980,19 @@
         const tfSec = state.timeframe * 60;
         const bucket = Math.floor(Date.now() / 1000 / tfSec) * tfSec;
         let sum = 0, n = 0;
-        const items = visibleLiquidations();
-        for (let i = 0; i < items.length; i++) {
-            const t = Math.floor((Number(items[i].timestamp) || 0) / tfSec) * tfSec;
-            if (t !== bucket) continue;
-            sum += Number(items[i].usd) || 0;
-            n += 1;
+        const cur = liqCandleSums().get(bucket);
+        if (cur) {
+            sum = cur.long + cur.short;
+            n = cur.n;
+        } else {
+            // свечи этого бакета ещё нет — считаем по памяти, как раньше
+            const items = visibleLiquidations();
+            for (let i = 0; i < items.length; i++) {
+                const t = Math.floor((Number(items[i].timestamp) || 0) / tfSec) * tfSec;
+                if (t !== bucket) continue;
+                sum += Number(items[i].usd) || 0;
+                n += 1;
+            }
         }
         if (!n) {
             liqStatEl.textContent = "—";
@@ -1838,12 +2011,11 @@
         let sum = 0;
         if (range) {
             const pad = state.timeframe * 60;
-            const items = visibleLiquidations();
-            for (let i = 0; i < items.length; i++) {
-                const ts = Number(items[i].timestamp) || 0;
-                if (ts < range.from - pad || ts > range.to + pad) continue;
-                sum += Number(items[i].usd) || 0;
-            }
+            // Профиль — тоже по всей истории: ряд на уровень свечи.
+            liqPriceRows().forEach((r) => {
+                if (r.time < range.from - pad || r.time > range.to + pad) return;
+                sum += r.total;
+            });
         }
         if (!(sum > 0)) {
             profileStatEl.textContent = "—";
@@ -3127,6 +3299,39 @@
                 time: c.time, open: c.open, close: c.close,
                 high: c.high, low: c.low,
             })),
+            // для tests/liq_plates.js: кластеры сохранённой истории приходят
+            // отдельным запросом — в тесте подставляем их руками, как если бы
+            // терминал был закрыт, а сервер всё сохранил
+            liqHistory: (rows, cut) => {
+                state.liqHist = rows || {};
+                state.liqCut = Number(cut) || 0;
+                queueRedraw();
+            },
+            liqHistRows: () => state.liqHist,
+            // для tests/liq_plates.js: история живёт не только плашками —
+            // те же ряды видит индикатор, цифры и метки-киты
+            liqRows: () => liqClusterRows().map((r) => ({
+                key: r.key, time: r.time, level: r.level, longUsd: r.longUsd,
+                shortUsd: r.shortUsd, total: r.total, count: r.count,
+                price: r.total > 0 ? r.pxSum / r.total : Number(r.bar.close),
+            })),
+            liqSums: () => Array.from(liqCandleSums().entries()).map(([t, b]) => ({
+                time: t, long: b.long, short: b.short, n: b.n })),
+            liqPriceRows: () => liqPriceRows(),
+            liqPaneVal: () => {
+                const el = $("ind-liq-val");
+                return el ? el.textContent : null;
+            },
+            refreshMarkers: () => { updateMarkers(); return lastMarkers.slice(); },
+            // фильтр бирж и слои: тесты проверяют, что история уходит на сервер
+            // и что окна не «немые»
+            liqExchParam: () => liqExchParam(),
+            setExchanges: (list) => { state.exchanges = list ? new Set(list) : null; },
+            reloadClusters: () => loadLiqClusters(true),
+            layerState: () => ({ liq: !!state.liqEnabled, cvd: !!state.cvdEnabled,
+                                 oi: !!state.oiEnabled, paneLiq: !!state.paneLiq,
+                                 paneCvd: !!state.paneCvd, paneOi: !!state.paneOi,
+                                 profile: !!state.profileEnabled }),
             redraw: () => drawClusters(),
         };
         window.LiqScopeDraw = {
@@ -3510,19 +3715,20 @@
         });
         if (!isFinite(minP) || !isFinite(maxP) || minP >= maxP) return;
 
-        const items = visibleLiquidations().filter((x) =>
-            x.timestamp >= range.from - pad && x.timestamp <= range.to + pad);
+        const items = liqPriceRows().filter((x) =>
+            x.time >= range.from - pad && x.time <= range.to + pad);
         if (!items.length) return;
 
         const bins = [];
         for (let i = 0; i < PROFILE_BINS; i++) bins.push({ long: 0, short: 0, total: 0 });
         const step = (maxP - minP) / PROFILE_BINS;
         items.forEach((x) => {
-            const idx = Math.min(Math.floor((Number(x.price) - minP) / step), PROFILE_BINS - 1);
+            const idx = Math.min(Math.floor((x.price - minP) / step), PROFILE_BINS - 1);
             if (idx < 0) return;
             const b = bins[idx];
-            if (x.side === "SELL") b.long += x.usd; else b.short += x.usd;
-            b.total += x.usd;
+            b.long += x.long;
+            b.short += x.short;
+            b.total += x.total;
         });
 
         let maxTotal = 0;
@@ -4464,14 +4670,9 @@
         const p = indPrepareCanvas("liq");
         if (!p) return;
         const { ctx, w, h } = p;
-        const tfSec = state.timeframe * 60;
-        const bars = new Map();
-        visibleLiquidations().forEach((x) => {
-            const t = Math.floor(x.timestamp / tfSec) * tfSec;
-            const b = bars.get(t) || { long: 0, short: 0 };
-            if (x.side === "SELL") b.long += x.usd; else b.short += x.usd;
-            bars.set(t, b);
-        });
+        // Столбики — по тем же рядам, что и плашки на графике: история с сервера
+        // плюс живой хвост. Раньше тут была только память открытого терминала.
+        const bars = liqCandleSums();
         const ts = chart.timeScale();
         const cs = state.candles;
         const spacing = indBarSpacing();

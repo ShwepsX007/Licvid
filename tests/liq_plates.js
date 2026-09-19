@@ -14,6 +14,15 @@
  *  сжимается вместе с телом и цифры убираются; при растягивании графика
  *  плашки растут вширь вместе со свечами и цифры появляются.
  *
+ *  Часть 3 — кластеры сохранённой истории (LiqScopeLiq.liqHistory): плашки
+ *  рисуются по свечам из данных сервера, даже если в памяти браузера этих
+ *  событий нет вовсе (терминал был закрыт), события уже посчитанные сервером
+ *  не считаются второй раз, а свежие события из памяти добавляются сверху.
+ *
+ *  Часть 4 — история видна не только плашками: те же ряды (сохранённая
+ *  история + живой хвост) кормят индикатор ликвидаций, цифры в шапке,
+ *  профиль объёма и метки-киты. Терминал был закрыт, а слои на месте.
+ *
  *  Запуск (сервер уже на 127.0.0.1:8000):
  *      npm install --no-save jsdom ws
  *      NODE_PATH=/tmp/smoke/node_modules node tests/liq_plates.js
@@ -33,13 +42,16 @@ const mono = (text, font) => String(text).length * font * 0.62;
 const NOW = Math.floor(Date.now() / 1000);
 const TF = 300;                                   // свечи пятиминутные
 const T4 = NOW - (NOW % TF);                      // текущая свеча
-const T3 = T4 - TF, T2 = T3 - TF, T1 = T2 - TF;
+const T3 = T4 - TF, T2 = T3 - TF, T1 = T2 - TF, T5 = T4 + TF;
 // Тела разной толщины: широкая свеча, средняя и две почти без тела (дожи).
 const candles = [
   { time: T1, open: 50000, high: 53000, low: 49000, close: 52000, volume: 10, cvd: 50 },
   { time: T2, open: 52000, high: 52500, low: 51000, close: 51000, volume: 10, cvd: -50 },
   { time: T3, open: 51000, high: 51100, low: 50900, close: 51005, volume: 5, cvd: 5 },
   { time: T4, open: 51000, high: 51050, low: 50950, close: 51001, volume: 2, cvd: 1 },
+  // Пятая свеча — «терминал был закрыт»: событий в памяти нет вовсе,
+  // кластеры по ней приходят только из сохранённой истории сервера.
+  { time: T5, open: 51000, high: 51200, low: 50800, close: 51100, volume: 4, cvd: 2 },
 ];
 // Ликвидации: у первой свечи их две и они на разных уровнях (верх и низ тела) —
 // значит в ней должно быть две плашки, каждая на своём уровне.
@@ -136,8 +148,10 @@ async function main() {
         return dummy;
       };
       const klines = { symbol: "BTC_USDT", timeframe: 5, source: "stub", candles };
+      win.__liqHistoryFetches = 0;
       win.fetch = async (url) => {
         const u = String(url);
+        if (u.indexOf("/api/liq_clusters") === 0) win.__liqHistoryFetches++;
         let body = {};
         if (u.indexOf("/api/klines") === 0) body = klines;
         else if (u.indexOf("/api/oi") === 0) body = {};
@@ -153,7 +167,7 @@ async function main() {
             type: "init", symbols: ["BTC_USDT"], custom_symbols: [],
             details: [{ symbol: "BTC_USDT", volAvg7d: 1e9 }],
             prices: { BTC_USDT: 51000 }, recent_liquidations: liqs,
-            exchanges: ["BINANCE", "OKX"], stats: {},
+            exchanges: ["BINANCE", "OKX", "BYBIT"], stats: {},
           }) });
         }, 30);
         return sock;
@@ -350,6 +364,157 @@ async function main() {
     check("сузили: высота по-прежнему маленькая",
       narrow2.hits.every((h) => h.h <= 22), JSON.stringify(narrow2.hits.map((h) => h.h)));
   }
+
+  // ---- Часть 3: кластеры сохранённой истории ------------------------------
+  // Терминал был закрыт, в памяти браузера событий нет — плашки по свече T5
+  // приходят из истории сервера (шесть уровней внутри свечи, как и раньше).
+  const histRow = (lvl, longUsd, shortUsd, longN, shortN, px, exchs) =>
+    [lvl, longUsd, shortUsd, longN, shortN, px, exchs || {}];
+  const before = probe();                     // до подстановки истории
+  check("без истории плашек по закрытой свече нет",
+    before && !before.hits.some((h) => String(h.key).indexOf("b" + T5 + "_") === 0),
+    before ? JSON.stringify(before.hits.map((h) => h.key)) : "нет плашек");
+
+  L.liqHistory({
+    [T5]: { t: T5 + 10, l: [
+      histRow(0, 500000, 100000, 5, 1, 50880, { BINANCE: [4, 450000], OKX: [2, 150000] }),
+      histRow(5, 0, 250000, 0, 2, 51150, { BINANCE: [2, 250000] }),
+    ] },
+  }, T5 + 10);
+  const histProbe = probe();
+  check("история: плашки по свече, которой нет в памяти", !!histProbe &&
+    histProbe.hits.filter((h) => String(h.key).indexOf("b" + T5 + "_") === 0).length === 2,
+    histProbe ? JSON.stringify(histProbe.hits.map((h) => [h.key, h.total])) : "нет плашек");
+  if (histProbe) {
+    const t5 = histProbe.hits.filter((h) => Number(/^b(\d+)/.exec(String(h.key))[1]) === T5)
+      .sort((a, b) => b.total - a.total);
+    check("история: суммы и направления сложены как в истории",
+      t5.length === 2 && Math.abs(t5[0].total - 600000) < 1 && t5[0].count === 6 &&
+      Math.abs(t5[1].total - 250000) < 1 && t5[1].count === 2,
+      JSON.stringify(t5.map((h) => [h.total, h.count])));
+    check("история: уровни разнесены по цене (низ и верх свечи)",
+      t5.length === 2 && t5[0].price !== t5[1].price,
+      JSON.stringify(t5.map((h) => h.price)));
+    check("история: плашки стоят на своей цене",
+      t5.every((h) => Math.abs((h.y + h.h / 2) - L.priceToY(h.price)) <= 1.5),
+      JSON.stringify(t5.map((h) => [h.y, L.priceToY(h.price)])));
+    check("история: живые свечи из памяти на месте",
+      histProbe.hits.length === 7,                    // 5 из памяти + 2 из истории
+      histProbe.hits.length + " " + JSON.stringify(histProbe.hits.map((h) => h.key)));
+  }
+
+  // Двойного счёта нет: события свечи уже посчитаны сервером (t новее их
+  // таймштампов) — плашка по свече ровно одна и с суммой истории.
+  L.liqHistory({
+    [T1]: { t: T1 + 10, l: [histRow(4, 700000, 0, 7, 0, 51900, {})] },
+    [T5]: { t: T5 + 10, l: [
+      histRow(0, 500000, 100000, 5, 1, 50880, {}),
+      histRow(5, 0, 250000, 0, 2, 51150, {}),
+    ] },
+  }, T1 + 10);
+  const dedup = probe();
+  check("история: события из памяти не считаются второй раз", !!dedup &&
+    dedup.hits.filter((h) => Number(/^b(\d+)/.exec(String(h.key))[1]) === T1).length === 1,
+    dedup ? JSON.stringify(dedup.hits.map((h) => h.key)) : "нет плашек");
+  check("история: в плашке свечи только посчитанное сервером",
+    !!dedup && dedup.hits.some((h) => Number(/^b(\d+)/.exec(String(h.key))[1]) === T1 &&
+      Math.abs(h.total - 700000) < 1),
+    dedup ? JSON.stringify(dedup.hits.map((h) => [h.key, h.total])) : "нет плашек");
+
+  // Живой хвост: свежие события свечи (новее посчитанного) добавляются сверху.
+  L.liqHistory({
+    [T3]: { t: T3 - 10, l: [histRow(3, 100000, 0, 1, 0, 51000, {})] },
+  }, T3 + 10);
+  const tail = probe();
+  const atCandle = (probeRes, t) => (probeRes ? probeRes.hits.filter(
+    (h) => Number(/^b(\d+)/.exec(String(h.key))[1]) === t) : []);
+  const t3 = atCandle(tail, T3);
+  check("история: свежие события из памяти добавляются к истории", t3.length === 2 &&
+    Math.abs(t3.reduce((s, h) => s + h.total, 0) - (100000 + 250000)) < 1 &&
+    t3.some((h) => Math.abs(h.total - 100000) < 1),
+    JSON.stringify(t3.map((h) => [h.key, h.total])));
+  check("история: свеча без истории рисуется по памяти, как раньше",
+    atCandle(tail, T4).length === 1 && Math.abs(atCandle(tail, T4)[0].total - 220000) < 1,
+    JSON.stringify(atCandle(tail, T4).map((h) => [h.key, h.total])));
+
+  L.liqHistory({}, 0);
+  const cleared = probe();
+  check("историю сбросили — рисуется только память", !!cleared &&
+    cleared.hits.length === 5, cleared ? cleared.hits.length : "нет плашек");
+
+  // ---- Часть 4: история в индикаторе, профиле и метках --------------------
+  // Плашки — не единственный слой ликвидаций: индикатор под графиком, цифры в
+  // шапке, профиль объёма по цене и метки-киты берут те же ряды. Значит, и они
+  // видят часы, когда терминал был закрыт.
+  const marksBefore = L.refreshMarkers().map((m) => m.time);
+
+  L.liqHistory({
+    [T5]: { t: T5 + 10, l: [
+      histRow(0, 500000, 100000, 5, 1, 50880, { BINANCE: [4, 450000] }),
+      histRow(5, 0, 250000, 0, 2, 51150, { BINANCE: [2, 250000] }),
+    ] },
+  }, T5 + 10);
+
+  const sums = L.liqSums();
+  const sumT5 = sums.filter((b) => b.time === T5)[0];
+  check("история: суммы по свечам видят закрытый терминал", !!sumT5 &&
+    Math.abs(sumT5.long - 500000) < 1 && Math.abs(sumT5.short - 350000) < 1 &&
+    sumT5.n === 8, JSON.stringify(sumT5));
+
+  const rowsT5 = L.liqRows().filter((r) => r.time === T5);
+  check("история: ряд на каждый уровень свечи", rowsT5.length === 2 &&
+    Math.abs(rowsT5.reduce((s, r) => s + r.total, 0) - 850000) < 1,
+    JSON.stringify(rowsT5.map((r) => [r.key, r.total])));
+  check("история: цена уровня внутри свечи",
+    rowsT5.every((r) => r.price >= 50800 && r.price <= 51200),
+    JSON.stringify(rowsT5.map((r) => r.price)));
+
+  const priceT5 = L.liqPriceRows().filter((r) => r.time === T5);
+  check("история: профиль объёма получает уровни свечи",
+    priceT5.length === 2 &&
+    Math.abs(priceT5.reduce((s, r) => s + r.total, 0) - 850000) < 1 &&
+    priceT5.every((r) => r.price > 0),
+    JSON.stringify(priceT5.map((r) => [r.level, r.total, r.price])));
+
+  check("история: суммы — тот же источник, что у окна ликвидаций",
+    L.liqSums().some((b) => b.time === T5 && Math.abs((b.long + b.short) - 850000) < 1),
+    JSON.stringify(L.liqSums()));
+
+  const marksAfter = L.refreshMarkers();
+  check("история: свеча из истории получает метку-кита",
+    marksAfter.some((m) => m.time === T5) && marksBefore.indexOf(T5) < 0,
+    JSON.stringify(marksAfter.map((m) => [m.time, m.text])));
+  check("история: метка сверху — вынесли лонги",
+    marksAfter.some((m) => m.time === T5 && m.position === "aboveBar" &&
+      m.text.indexOf("🔥") === 0),
+    JSON.stringify(marksAfter.filter((m) => m.time === T5)));
+
+  // ---- Часть 5: фильтр бирж уходит на сервер ------------------------------
+  // Кластеры истории считаются с теми же биржами, что и живая лента: иначе
+  // выключенная биржа оставалась бы в плашках за прошлые часы.
+  L.setExchanges(["BINANCE", "OKX", "BYBIT"]);   // выбраны все — фильтра нет
+  check("фильтр бирж: выбраны все — запрос без списка", L.liqExchParam() === "",
+    JSON.stringify(L.liqExchParam()));
+  L.setExchanges(["OKX"]);
+  check("фильтр бирж: включённые биржи уходят строкой", L.liqExchParam() === "OKX",
+    JSON.stringify(L.liqExchParam()));
+  L.setExchanges(["OKX", "BINANCE"]);
+  check("фильтр бирж: список отсортирован — одинаковый для кэша",
+    L.liqExchParam() === "BINANCE,OKX", JSON.stringify(L.liqExchParam()));
+  L.liqHistory({ [T5]: { t: T5 + 10, l: [histRow(0, 500000, 0, 5, 0, 50880, {})] } }, T5);
+  L.setExchanges([]);                        // выключены все биржи
+  check("фильтр бирж: выключены все — запроса нет и плашек нет",
+    L.liqExchParam() === null, JSON.stringify(L.liqExchParam()));
+  const fetchesBefore = win.__liqHistoryFetches;
+  L.reloadClusters();
+  check("фильтр бирж: при выключенных всех история не запрашивается",
+    win.__liqHistoryFetches === fetchesBefore &&
+    Object.keys(L.liqHistRows()).length === 0,
+    win.__liqHistoryFetches + " " + Object.keys(L.liqHistRows()).length);
+  L.setExchanges(null);
+  L.reloadClusters();
+  check("фильтр бирж: фильтр снят — свёртка запрашивается снова",
+    win.__liqHistoryFetches > fetchesBefore, win.__liqHistoryFetches);
 
   check("no js errors", errors.length === 0, errors.slice(0, 3).join(" // "));
 

@@ -8,6 +8,8 @@ LiqScope Web Server — терминал ликвидаций в реально�
     GET  /api/symbols       — список монет (авто-подбор по обороту) + цены
     GET  /api/klines        — реальные свечи (Binance → Bybit → OKX)
     GET  /api/liquidations  — история ликвидаций из памяти
+    GET  /api/liq_clusters  — кластеры по свечам из сохранённой истории (месяц),
+                              фильтры min_usd и exchanges — как у ленты
     GET  /api/stats         — агрегаты (лонги/шорты, топ монет, биржи)
     GET  /api/health        — состояние каждого WS-источника (для диагностики)
     WS   /ws                — живой поток: ликвидации, цены, свечи, статистика
@@ -25,6 +27,8 @@ LiqScope Web Server — терминал ликвидаций в реально�
                             bitfinex,hyperliquid
     LIQSCOPE_DEMO           1 — генерировать тестовый поток вместо биржевого
     LIQSCOPE_HISTORY_MAX    сколько событий держать в памяти (по умолчанию 60000)
+    LIQSCOPE_CLUSTER_MEM_SEC  сколько секунд кластеров брать из памяти, а не с
+                            диска (по умолчанию 300: диск пишется очередью)
     LIQSCOPE_CHANNEL_URL    инвайт канала (по умолчанию https://t.me/+4S1LsZtH1Pc5YWZi)
     LIQSCOPE_CHANNEL_ID     numeric id канала (-100…) — чтобы проверять подписку и постить;
                             если пусто, бот запомнит id, когда его добавят админом канала
@@ -35,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import random
 import threading
@@ -110,6 +115,16 @@ HISTORY_TTL_HOURS = float(os.getenv("LIQSCOPE_HISTORY_TTL_HOURS", str(MONTH_HOUR
 HISTORY_SHARD_MAX_MB = float(os.getenv("LIQSCOPE_HISTORY_SHARD_MB", "48"))
 # Как часто свёртки дня и уборка старых дней уходят на диск
 HISTORY_FLUSH_SEC = max(30.0, float(os.getenv("LIQSCOPE_HISTORY_FLUSH_SEC", "180")))
+# Кластеры ликвидаций на графике: сколько уровней цены внутри свечи (столько
+# же было в терминале) и на сколько секунд назад события берём из памяти, а
+# не с диска (диск пишется очередью, окно закрывает её задержку).
+LIQ_CLUSTER_LEVELS = 6
+LIQ_CLUSTER_MEM_SEC = max(60.0, float(os.getenv("LIQSCOPE_CLUSTER_MEM_SEC", "300")))
+#: Кластеры истории в памяти: (монета, тф, порог) -> свёртка по свечам.
+#: Живут столько же, сколько кэш свечей: за это время меняется только
+#: последняя свеча, а она всё равно пересчитывается.
+LIQ_CLUSTER_CACHE: Dict[tuple, dict] = {}
+LIQ_CLUSTER_CACHE_MAX = 64
 
 BOT_TOKEN = os.getenv("LIQSCOPE_BOT_TOKEN", "").strip()
 PUBLIC_URL = normalize_public_url(os.getenv("LIQSCOPE_PUBLIC_URL", ""))
@@ -721,6 +736,159 @@ def _attach_oi(candles: list, tf: int, levels: dict, chgs: dict) -> None:
             c["oi"] = m["oi"]
         if m["oiChg"] is not None:
             c["oiChg"] = m["oiChg"]
+
+
+def _round_half_up(v: float) -> int:
+    """Math.round из JavaScript: половина всегда вверх (0.5 -> 1, -0.5 -> 0)."""
+    return int(math.floor(float(v) + 0.5))
+
+
+def _liq_cluster_bars(candles: list, tf: int) -> dict:
+    """Свечи по времени: {начало свечи: (низ, верх)}, шаг сетки — tf в секундах."""
+    bars: Dict[int, tuple] = {}
+    for c in candles:
+        try:
+            t = int(c["time"])
+            lo = float(c["low"])
+            hi = float(c["high"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        bars[t] = (min(lo, hi), max(lo, hi))
+    return bars
+
+
+def _liq_cluster_add(bars: dict, tf: int, ev: dict, acc: dict) -> None:
+    """Событие → плашка свечи: шесть уровней внутри диапазона свечи.
+
+    Ровно тот же расклад, что был у клиента (``drawLiqRects``): плашка стоит
+    там, где была ликвидация, а не растянута по телу свечи. Считает сервер —
+    значит кластеры видит любой браузер и за всю сохранённую историю, а не
+    только за те события, что успели прилететь в открытый терминал.
+    """
+    ts = _fnum(ev.get("timestamp"))
+    if ts <= 0:
+        return
+    step = max(60, int(tf) * 60)
+    bucket = int(ts // step * step)
+    bar = bars.get(bucket)
+    if bar is None:
+        return
+    usd = _fnum(ev.get("usd"))
+    if usd <= 0:
+        return
+    lo, hi = bar
+    price = _fnum(ev.get("price"))
+    if not price > 0:
+        price = (lo + hi) / 2 if hi > lo else lo
+    price = min(max(price, lo), hi)
+    span = hi - lo
+    # Округление как у клиента (Math.round), а не банковское из Python:
+    # иначе плашка на границе уровня встала бы не туда, где её ждёт терминал
+    level = _round_half_up(((price - lo) / span) * (LIQ_CLUSTER_LEVELS - 1)) if span > 0 else 0
+    level = min(max(level, 0), LIQ_CLUSTER_LEVELS - 1)
+    cell = acc.setdefault(bucket, {"levels": {}, "ts": 0.0})
+    if ts > cell["ts"]:
+        cell["ts"] = ts
+    row = cell["levels"].get(level)
+    if row is None:
+        # [лонги, шорты, число лонгов, число шортов, сумма цена×деньги, биржи]
+        row = [0.0, 0.0, 0, 0, 0.0, {}]
+        cell["levels"][level] = row
+    if str(ev.get("side") or "") == "SELL":     # SELL = вынесли лонг
+        row[0] += usd
+        row[2] += 1
+    else:
+        row[1] += usd
+        row[3] += 1
+    row[4] += price * usd
+    exch = str(ev.get("exchange") or "?").upper()
+    slot = row[5].setdefault(exch, [0, 0.0])
+    slot[0] += 1
+    slot[1] += usd
+
+
+def _liq_cluster_map(candles: list, tf: int, symbol: str,
+                     min_usd: float = 0.0,
+                     exchanges: Optional[list] = None) -> tuple:
+    """Кластеры ликвидаций по свечам — из сохранённой истории, как OI и CVD.
+
+    Плашки на графике раньше жили только на том, что успел скачать браузер:
+    2000 последних событий из памяти сервера и сутки в IndexedDB. Вся история
+    при этом лежит на диске (дневные шарды ``HistoryStore``) и пишется туда
+    независимо от того, открыт ли у кого-то терминал. Здесь из неё собираются
+    кластеры по свечам и уровням цены — клиенту остаётся только нарисовать.
+
+    Свежий хвост (``LIQ_CLUSTER_MEM_SEC``) берём из памяти: события попадают
+    туда сразу, а на диск уходят через очередь — так в плашках нет ни дырки,
+    ни двойного счёта. Возвращает ``({время свечи: {"l": [уровни], "t": ts}},
+    время, докуда посчитана история)``.
+
+    ``exchanges`` — включённые в фильтре биржи: свёртка считается по ним, как и
+    живая лента. Пусто/None — все биржи.
+    """
+    bars = _liq_cluster_bars(candles, tf)
+    if not bars or not symbol:
+        return {}, 0.0
+    sym = canon(symbol)
+    now = time.time()
+    on_exch = {str(e).strip().upper() for e in (exchanges or []) if str(e).strip()}
+    on_exch = on_exch or None
+    key = (sym, int(tf), round(float(min_usd or 0.0), 2),
+           tuple(sorted(on_exch)) if on_exch else None)
+    hit = LIQ_CLUSTER_CACHE.get(key)
+    first, last = min(bars), max(bars)
+    if (hit and now - hit["ts"] < KLINE_TTL
+            and hit["first"] == first and hit["last"] == last):
+        return hit["rows"], hit["cut"]
+    step = max(60, int(tf) * 60)
+    cut = now - LIQ_CLUSTER_MEM_SEC
+    since = first
+    until = last + step
+    floor = max(0.0, float(min_usd or 0.0))
+    acc: dict = {}
+    if HISTORY_FILE:
+        # Читает диск: вызывающий уводит это в отдельный поток (to_thread).
+        for ev in HIST.iter_events(since, min(cut, until), sym):
+            if floor and _fnum(ev.get("usd")) < floor:
+                continue
+            if on_exch and str(ev.get("exchange") or "?").upper() not in on_exch:
+                continue
+            _liq_cluster_add(bars, tf, ev, acc)
+    # Без диска источник один — память: берём её целиком, иначе события старше
+    # окна свежести потерялись бы совсем (на диск их никто не писал)
+    mem_since = max(cut, since) if HISTORY_FILE else since
+    for ev in list(LIQUIDATIONS):
+        ts = _fnum(ev.get("timestamp"))
+        if ts < mem_since or ts > until:
+            continue
+        if ev.get("symbol") != sym:
+            continue
+        if floor and _fnum(ev.get("usd")) < floor:
+            continue
+        if on_exch and str(ev.get("exchange") or "?").upper() not in on_exch:
+            continue
+        _liq_cluster_add(bars, tf, ev, acc)
+    rows: dict = {}
+    for bucket, cell in acc.items():
+        bar = bars.get(bucket)
+        if bar is None:
+            continue
+        levels = []
+        for level in sorted(cell["levels"]):
+            lon, sho, nlon, nsho, pxsum, exchs = cell["levels"][level]
+            total = lon + sho
+            levels.append([level, round(lon, 2), round(sho, 2), nlon, nsho,
+                           round(pxsum / total, 8) if total else round(bar[0], 8),
+                           {k: [v[0], round(v[1], 2)] for k, v in exchs.items()}])
+        rows[str(bucket)] = {"l": levels, "t": round(cell["ts"], 3)}
+    if len(LIQ_CLUSTER_CACHE) >= LIQ_CLUSTER_CACHE_MAX:
+        for old_key in sorted(LIQ_CLUSTER_CACHE, key=lambda k: LIQ_CLUSTER_CACHE[k]["ts"])[:8]:
+            LIQ_CLUSTER_CACHE.pop(old_key, None)
+    LIQ_CLUSTER_CACHE[key] = {"ts": now, "first": first, "last": last,
+                              "rows": rows, "cut": min(cut, until)}
+    # пусто — значит по этой монете в истории ничего нет: клиент продолжает
+    # рисовать тем, что успел накопить сам (как и до истории на сервере)
+    return (rows, min(cut, until)) if rows else ({}, 0.0)
 
 
 async def get_candles(symbol: str, tf: int, force: bool = False) -> dict:
@@ -2332,6 +2500,35 @@ async def api_klines(symbol: str = Query("BTC_USDT"), timeframe: int = Query(5))
         "source": entry["source"],
         "candles": entry["candles"],
     }
+
+
+@app.get("/api/liq_clusters")
+async def api_liq_clusters(symbol: str = Query("BTC_USDT"),
+                           timeframe: int = Query(5),
+                           min_usd: float = Query(0.0),
+                           exchanges: str = Query("", max_length=400)):
+    """Кластеры ликвидаций по свечам за всю сохранённую историю.
+
+    Свечи графика — это 300 свечей выбранного ТФ; история при этом хранится
+    месяцем и пишется всегда, даже когда терминал закрыт. Эндпоинт отдаёт
+    готовые плашки по каждой свече (шесть уровней цены внутри свечи), поэтому
+    кластеры видны за любые часы и дни, а не только за те, что успели прийти
+    в открытое окно. Порог ``min_usd`` и список ``exchanges`` — те же фильтры,
+    что у ленты: иначе выключенная биржа осталась бы в плашках за прошлые часы.
+    """
+    symbol = canon(symbol)
+    tf = parse_tf(timeframe) or 5
+    entry = await get_candles(symbol, tf)
+    only = [x.strip() for x in str(exchanges or "").split(",") if x.strip()]
+    try:
+        rows, cut = await asyncio.to_thread(_liq_cluster_map, entry["candles"],
+                                            tf, symbol, float(min_usd or 0.0),
+                                            only or None)
+    except Exception as e:              # noqa: BLE001 — график важнее кластеров
+        log.warning("кластеры истории %s: %s", symbol, e)
+        rows, cut = {}, 0.0
+    return {"symbol": symbol, "timeframe": tf, "cut": cut,
+            "ttl_hours": HISTORY_TTL_HOURS, "candles": rows}
 
 
 @app.get("/api/oi")

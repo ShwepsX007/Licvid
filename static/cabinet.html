@@ -21,7 +21,7 @@
 <link rel="icon" type="image/png" href="/static/logo.png">
 <link rel="apple-touch-icon" href="/static/logo.png">
 <link rel="manifest" href="/manifest.webmanifest">
-<link rel="stylesheet" href="/static/account.css?v=fb10">
+<link rel="stylesheet" href="/static/account.css?v=fb11">
 </head>
 <body data-page="cabinet">
 <header class="site-header">
@@ -83,7 +83,12 @@
         </a>
     </p>
 
-    <!-- 💬 Обратная связь: пишем админу здесь же, ответ приходит в этот диалог -->
+    <h2 style="margin-top:34px;font-size:1.2rem" data-i18n="cab.services">Сервисы</h2>
+    <p class="lead" data-i18n="cab.services_lead">Нажмите сервис, чтобы развернуть панель. Алерты: ликвидации, CVD и OI — каждый своим выключателем и своей лентой.</p>
+    <div id="svc-acc"></div>
+
+    <!-- 💬 Обратная связь: пишем админу здесь же, ответ приходит в этот диалог.
+         Блок стоит в самом низу кабинета: сначала сервисы, диалог — последним. -->
     <details class="card fold fb-card" id="fb-card" open>
         <summary>
             <h3 data-i18n="cab.fb_title">💬 По всем вопросам<span class="fb-dot hidden" id="fb-dot-2"></span></h3>
@@ -102,10 +107,6 @@
             </div>
         </div>
     </details>
-
-    <h2 style="margin-top:34px;font-size:1.2rem" data-i18n="cab.services">Сервисы</h2>
-    <p class="lead" data-i18n="cab.services_lead">Нажмите сервис, чтобы развернуть панель. Алерты: ликвидации, CVD и OI — каждый своим выключателем и своей лентой.</p>
-    <div id="svc-acc"></div>
 </main>
 <script src="/static/i18n.pages.js"></script>
 <script src="/static/i18n.js"></script>

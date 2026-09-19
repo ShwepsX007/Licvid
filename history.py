@@ -24,7 +24,7 @@ import calendar
 import json
 import os
 import time
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, Iterator, List, Optional, Tuple
 
 HOUR = 3600
 DAY = 86400
@@ -303,6 +303,51 @@ class HistoryStore:
         return os.path.exists(self.hours_path(day)) or os.path.exists(self.shard_path(day))
 
     # ---- чтение сырых событий --------------------------------------------
+    def iter_events(self, since: float, until: Optional[float] = None,
+                    symbol: Optional[str] = None) -> Iterator[dict]:
+        """Поток событий за промежуток: дневные шарды читаются построчно.
+
+        Тот же порядок, что у ``query``, но без сбора списка и без лимита —
+        нужно там, где события сразу сворачиваются (кластеры графика). Строка
+        сначала проверяется подстрокой: разбирать JSON каждого события дня
+        ради одной монеты не нужно, а шард дня бывает в десятки мегабайт.
+        """
+        if not self.base_path:
+            return
+        until = float(until if until is not None else time.time())
+        since = float(since)
+        if until < since:
+            since, until = until, since
+        needle = symbol if symbol and symbol != "ALL" else None
+        day = day_key(since)
+        last_day = day_key(until)
+        guard = 0
+        while day <= last_day and guard < 400:
+            guard += 1
+            path = self.shard_path(day)
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        if not line or line == "\n":
+                            continue
+                        if needle and needle not in line:
+                            continue
+                        try:
+                            ev = json.loads(line)
+                        except ValueError:
+                            continue
+                        if not isinstance(ev, dict) or "id" not in ev:
+                            continue
+                        t = _num(ev.get("timestamp"), 0.0)
+                        if t < since or t > until:
+                            continue
+                        if needle and ev.get("symbol") != needle:
+                            continue
+                        yield ev
+            except OSError:
+                pass
+            day = next_day(day)
+
     def query(self, since: float, until: Optional[float] = None,
               symbol: Optional[str] = None, min_usd: float = 0.0,
               limit: int = 2000, newest_first: bool = True) -> List[dict]:

@@ -20,6 +20,7 @@ from fastapi import APIRouter, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
 
+import seo_pages
 from accounts import (COOKIE_SID, COOKIE_VID, hash_ip, hash_password,
                       normalize_email, password_problem, valid_email,
                       verify_password, verify_telegram_widget)
@@ -181,14 +182,44 @@ def _rate_key(request: Request, action: str, extra: str = "") -> str:
     return f"{action}:{_client_ip(request)}:{extra}"
 
 
+#: Языки сайта. Раньше подсказки формы были только ru/en, и человек,
+#: выбравший китайский, получал русское сообщение об ошибке.
+SITE_LANGS = ("ru", "en", "zh", "hi", "es")
+
+
+def _site_lang(value: str) -> str:
+    """Свести язык из запроса к одному из языков сайта (``zh-CN`` → ``zh``)."""
+    code = str(value or "").strip().lower()
+    if not code:
+        return ""
+    base = code.split("-")[0].split("_")[0]
+    return base if base in SITE_LANGS else ""
+
+
 def _lang_code(request: Request, body: Optional[dict] = None) -> str:
+    """Язык ответа: тот, что человек уже выбрал (тело, ``?lang=``, cookie).
+
+    Порядок тот же, что у страниц в ``seo_pages``: явный выбор важнее
+    заголовка браузера, а по ``Accept-Language`` берём только явные языки.
+    """
     if body:
-        lang = str((body or {}).get("language") or "").strip().lower()
-        if lang:
-            return lang[:5]
+        code = _site_lang(str((body or {}).get("language") or ""))
+        if code:
+            return code
+    try:
+        code = _site_lang(request.query_params.get("lang") or "")
+        if code:
+            return code
+        code = _site_lang(request.cookies.get("liqscope_lang") or "")
+        if code:
+            return code
+    except Exception:  # noqa: BLE001 - у тестового запроса может не быть свойств
+        pass
     head = (request.headers.get("accept-language") or "").lower()
-    if head.startswith("en"):
-        return "en"
+    for part in head.split(","):
+        code = _site_lang(part.split(";")[0])
+        if code:
+            return code
     return "ru"
 
 
@@ -212,7 +243,8 @@ def _mail_path(kind: str, token: str) -> str:
     return ""
 
 
-def _send_mail_blocking(kind: str, to: str, token: str, name: str = "") -> bool:
+def _send_mail_blocking(kind: str, to: str, token: str, name: str = "",
+                        lang: str = "ru") -> bool:
     m = _mailer()
     if not m or not getattr(m, "enabled", False):
         # Пока SMTP не настроен, регистрация не должна упираться в стену:
@@ -222,19 +254,20 @@ def _send_mail_blocking(kind: str, to: str, token: str, name: str = "") -> bool:
                     kind, to, (m.link(_mail_path(kind, token)) if m else _mail_path(kind, token)))
         return False
     if kind == "verify":
-        return m.send_verify(to, token, name=name)
+        return m.send_verify(to, token, name=name, lang=lang)
     if kind == "login":
-        return m.send_login_link(to, token)
+        return m.send_login_link(to, token, lang=lang)
     if kind == "reset":
-        return m.send_reset(to, token)
+        return m.send_reset(to, token, lang=lang)
     if kind == "attach":
-        return m.send_tg_attach(to, token, tg_name=name)
+        return m.send_tg_attach(to, token, tg_name=name, lang=lang)
     return False
 
 
-async def _send_mail(kind: str, to: str, token: str, name: str = "") -> bool:
+async def _send_mail(kind: str, to: str, token: str, name: str = "",
+                     lang: str = "ru") -> bool:
     """SMTP — блокирующий вызов: уводим его в поток, не морозя event loop."""
-    return await run_in_threadpool(_send_mail_blocking, kind, to, token, name)
+    return await run_in_threadpool(_send_mail_blocking, kind, to, token, name, lang)
 
 
 async def _json_body(request: Request) -> dict:
@@ -288,8 +321,69 @@ def _email_error(lang: str, code: str) -> str:
         "signed_in": "You are already signed in. Sign out first to register "
                      "another address.",
     }
-    table = en if str(lang).startswith("en") else ru
-    return table.get(code, code)
+    zh = {
+        "bad_email": "地址看起来有笔误。",
+        "email_unverified": "请先确认邮箱——链接就在我们发去的邮件里。",
+        "no_user": "这个邮箱还没有账号。",
+        "no_password": "该账号没有密码——请用邮件里的链接或 Telegram 登录。",
+        "short": "密码少于 8 个字符。",
+        "long": "密码太长了。",
+        "weak": "这个密码太简单了。",
+        "rate": "太频繁了。请过几分钟再试。",
+        "expired": "链接已过期——请重新申请。",
+        "used": "链接已经用过了。请重新申请。",
+        "unknown": "找不到这个链接——请重新申请。",
+        "taken": "该邮箱已注册——请登录或重置密码。",
+        "mail_failed": "邮件没有发出去。请检查地址或稍后再试。",
+        "captcha_wrong": "答案不对，请重试。",
+        "captcha_expired": "题目已过期——请刷新后重新作答。",
+        "captcha_missing": "请先解出下面的例子——这样能挡住机器人。",
+        "captcha_used": "这道题已经答过了——请刷新题目。",
+        "signed_in": "你已登录。要注册另一个地址，请先退出当前账号。",
+    }
+    hi = {
+        "bad_email": "पता ग़लत लग रहा है।",
+        "email_unverified": "पहले ईमेल की पुष्टि करें — लिंक हमारे भेजे ईमेल में है।",
+        "no_user": "इस ईमेल से कोई खाता नहीं है।",
+        "no_password": "इस खाते में पासवर्ड नहीं है — ईमेल लिंक या Telegram से आएँ।",
+        "short": "पासवर्ड 8 अक्षरों से छोटा है।",
+        "long": "पासवर्ड बहुत लंबा है।",
+        "weak": "यह पासवर्ड बहुत आसान है।",
+        "rate": "बहुत बार कोशिश हुई। कुछ मिनट बाद प्रयास करें।",
+        "expired": "लिंक पुराना हो गया — नया मंगाएँ।",
+        "used": "यह लिंक पहले ही इस्तेमाल हो चुका है। नया मंगाएँ।",
+        "unknown": "लिंक नहीं मिला — नया मंगाएँ।",
+        "taken": "यह ईमेल पहले से दर्ज है — साइन इन करें या पासवर्ड बदलें।",
+        "mail_failed": "ईमेल नहीं गया। पता जाँचें या बाद में प्रयास करें।",
+        "captcha_wrong": "जवाब ग़लत है। नया उदाहरण आज़माएँ।",
+        "captcha_expired": "उदाहरण पुराना हो गया — ताज़ा करके फिर हल करें।",
+        "captcha_missing": "नीचे दिया उदाहरण हल करें — इससे रोबोट रुकते हैं।",
+        "captcha_used": "यह उदाहरण हल हो चुका है — ताज़ा करें।",
+        "signed_in": "आप पहले से साइन इन हैं। दूसरा पता जोड़ने के लिए पहले साइन आउट करें।",
+    }
+    es = {
+        "bad_email": "Esa dirección parece tener un error.",
+        "email_unverified": "Confirme su correo primero: el enlace está en nuestra carta.",
+        "no_user": "No hay ninguna cuenta con este correo.",
+        "no_password": "Esta cuenta no tiene contraseña: entre con el enlace del correo o con Telegram.",
+        "short": "La contraseña tiene menos de 8 caracteres.",
+        "long": "La contraseña es demasiado larga.",
+        "weak": "Esa contraseña es demasiado simple.",
+        "rate": "Demasiados intentos. Pruebe en unos minutos.",
+        "expired": "El enlace caducó: pida uno nuevo.",
+        "used": "Ese enlace ya se usó. Pida uno nuevo.",
+        "unknown": "No encontramos el enlace: pida uno nuevo.",
+        "taken": "Este correo ya está registrado: entre o restablezca la contraseña.",
+        "mail_failed": "La carta no salió. Revise la dirección o pruebe más tarde.",
+        "captcha_wrong": "Respuesta incorrecta. Pruebe con el nuevo ejemplo.",
+        "captcha_expired": "El ejemplo caducó: actualícelo y resuélvalo de nuevo.",
+        "captcha_missing": "Resuelva el ejemplo de abajo: así frenamos a los robots.",
+        "captcha_used": "Ese ejemplo ya se resolvió: actualícelo.",
+        "signed_in": "Ya tiene la sesión iniciada. Cierre sesión para registrar otra dirección.",
+    }
+    TABLES = {"ru": ru, "en": en, "zh": zh, "hi": hi, "es": es}
+    table = TABLES.get(_site_lang(lang) or "ru", ru)
+    return table.get(code, ru.get(code, code))
 
 
 def _user_session(request: Request, response: Response, user: dict) -> str:
@@ -383,16 +477,17 @@ def register_account_routes(app) -> None:
     router = APIRouter()
 
     @router.get("/login")
-    async def page_login():
-        return FileResponse(os.path.join(STATIC_DIR, "login.html"))
+    async def page_login(request: Request):
+        return seo_pages.render("login.html", seo_pages.detect_lang(request), "/login")
 
     @router.get("/cabinet")
-    async def page_cabinet():
-        return FileResponse(os.path.join(STATIC_DIR, "cabinet.html"))
+    async def page_cabinet(request: Request):
+        # кабинет закрыт от индексации: внутренние данные пользователя
+        return seo_pages.render("cabinet.html", seo_pages.detect_lang(request), "/cabinet")
 
     @router.get("/admin")
-    async def page_admin():
-        return FileResponse(os.path.join(STATIC_DIR, "admin.html"))
+    async def page_admin(request: Request):
+        return seo_pages.render("admin.html", seo_pages.detect_lang(request), "/admin")
 
     @router.get("/api/auth/me")
     async def api_me(request: Request):
@@ -480,7 +575,8 @@ def register_account_routes(app) -> None:
                 user = att["user"]
                 token = ctx.store.new_email_token(user["id"], "verify", email=email)
                 sent = await _send_mail("verify", email, token,
-                                        name=user.get("first_name") or "")
+                                        name=user.get("first_name") or "",
+                                        lang=lang)
                 if not sent and _email_enabled():
                     return JSONResponse({"ok": False, "error": "mail_failed",
                                          "hint": _email_error(lang, "mail_failed")},
@@ -507,7 +603,8 @@ def register_account_routes(app) -> None:
             }, status_code=200)
         user = r["user"]
         token = ctx.store.new_email_token(user["id"], "verify", email=email)
-        sent = await _send_mail("verify", email, token, name=user.get("first_name") or "")
+        sent = await _send_mail("verify", email, token,
+                                name=user.get("first_name") or "", lang=lang)
         if not sent and _email_enabled():
             return JSONResponse({"ok": False, "error": "mail_failed",
                                  "hint": _email_error(lang, "mail_failed")}, status_code=502)
@@ -531,7 +628,8 @@ def register_account_routes(app) -> None:
         # ответ всегда одинаковый: не выдаём, зарегистрирован адрес или нет
         if user and not user.get("email_verified"):
             token = ctx.store.new_email_token(user["id"], "verify", email=email)
-            sent = await _send_mail("verify", email, token, name=user.get("first_name") or "")
+            sent = await _send_mail("verify", email, token,
+                                    name=user.get("first_name") or "", lang=lang)
             return {"ok": True, "sent": bool(sent), "email": email}
         return {"ok": True, "sent": True, "email": email}
 
@@ -578,7 +676,8 @@ def register_account_routes(app) -> None:
         if not _verify_allowed(user):
             # жёсткий режим: без клика по ссылке из письма входа нет
             token = ctx.store.new_email_token(user["id"], "verify", email=email)
-            sent = await _send_mail("verify", email, token, name=user.get("first_name") or "")
+            sent = await _send_mail("verify", email, token,
+                                    name=user.get("first_name") or "", lang=lang)
             return JSONResponse({"ok": False, "error": "email_unverified",
                                  "hint": _email_error(lang, "email_unverified"),
                                  "sent": bool(sent)}, status_code=403)
@@ -602,7 +701,7 @@ def register_account_routes(app) -> None:
         user = ctx.store.get_user_by_email(email) if ctx.store else None
         if user and not user["is_banned"]:
             token = ctx.store.new_email_token(user["id"], "login", email=email)
-            await _send_mail("login", email, token)
+            await _send_mail("login", email, token, lang=lang)
         return {"ok": True, "sent": True, "email": email}
 
     @router.get("/attach")
@@ -656,12 +755,12 @@ def register_account_routes(app) -> None:
         user = ctx.store.get_user_by_email(email) if ctx.store else None
         if user and not user["is_banned"]:
             token = ctx.store.new_email_token(user["id"], "reset", email=email)
-            await _send_mail("reset", email, token)
+            await _send_mail("reset", email, token, lang=lang)
         return {"ok": True, "sent": True, "email": email}
 
     @router.get("/reset")
     async def page_reset(request: Request, token: str = ""):
-        return FileResponse(os.path.join(STATIC_DIR, "reset.html"))
+        return seo_pages.render("reset.html", seo_pages.detect_lang(request), "/reset")
 
     @router.get("/api/auth/email/token")
     async def api_email_token_info(request: Request, token: str = ""):

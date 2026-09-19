@@ -3,24 +3,32 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LiqScope — админка</title>
+<title data-i18n="seo.admin.title">Админка — LiqScope</title>
+<meta name="description" data-i18n-meta="seo.admin.desc" content="Панель управления LiqScope: пользователи, визиты, сервисы, каналы Telegram, шаблоны постов и проверка ИИ.">
+<meta name="robots" content="noindex,nofollow">
+<link rel="canonical" href="https://liqscope.online/admin">
+<meta name="theme-color" content="#060a12">
 <link rel="icon" type="image/png" href="/static/logo.png">
-<link rel="stylesheet" href="/static/account.css?v=fb9">
+<link rel="apple-touch-icon" href="/static/logo.png">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="stylesheet" href="/static/account.css?v=fb10">
 </head>
 <body data-page="admin">
 <header class="site-header">
     <a class="brand" href="/">
         <img class="logo" src="/static/logo.png" alt="LiqScope">
         <span class="name">LIQSCOPE</span>
-        <span class="tag">ADMIN</span>
+        <span class="tag" data-i18n="brand.admin">АДМИНКА</span>
     </a>
     <nav class="site-nav">
+        <select id="lang-select" class="lang-select" data-lang-select
+                aria-label="Language / Язык" title="Language / Язык"></select>
         <a class="btn btn-ghost btn-compact" href="/terminal">⚡ Терминал</a>
         <span id="nav-account"></span>
     </nav>
 </header>
 <main class="wrap">
-    <h1 class="page-title">Панель управления</h1>
+    <h1 class="page-title" data-i18n="seo.admin.h1">Панель управления</h1>
     <p class="lead">Сайт, бот и пользователи. Те же цифры доступны командами /admin в Telegram.</p>
 
     <div class="grid grid-4" style="margin-top:22px">
@@ -43,7 +51,7 @@
         <div class="card" data-hint="сообщение всем, кто запускал бота">
             <h3>Рассылка в Telegram</h3>
             <p class="lead">Уйдёт всем, кто запускал бота и не в бане.</p>
-            <textarea id="broadcast-text" placeholder="Текст сообщения…"></textarea>
+            <textarea id="broadcast-text" data-i18n-skip placeholder="Текст сообщения…"></textarea>
             <div class="row-actions">
                 <button class="btn btn-primary" id="broadcast-send" type="button">Отправить</button>
                 <span class="meta" id="broadcast-status"></span>
@@ -64,9 +72,9 @@
         <div class="card" data-hint="приветствие бота и объявление в кабинете">
             <h3>Настройки</h3>
             <label>Приветствие бота (/start)</label>
-            <textarea id="bot-welcome"></textarea>
+            <textarea id="bot-welcome" data-i18n-skip></textarea>
             <label>Объявление в кабинете</label>
-            <textarea id="site-notice-in"></textarea>
+            <textarea id="site-notice-in" data-i18n-skip></textarea>
             <div class="row-actions">
                 <button class="btn btn-primary" id="settings-save" type="button">Сохранить</button>
                 <span class="meta" id="settings-status"></span>
@@ -85,7 +93,7 @@
         <div class="grid grid-2" style="margin-top:12px">
             <div>
                 <label>Новая шапка</label>
-                <textarea id="tpl-head-in" placeholder="☕ Пока вы пили кофе, лента уже намолотила кассу за {h}ч."></textarea>
+                <textarea id="tpl-head-in" data-i18n-skip placeholder="☕ Пока вы пили кофе, лента уже намолотила кассу за {h}ч."></textarea>
                 <div class="row-actions">
                     <button class="btn btn-primary" id="tpl-head-add" type="button">Добавить шапку</button>
                     <span class="meta" id="tpl-head-status"></span>
@@ -259,10 +267,10 @@
         <p class="lead">Всё, что пользователи написали в кабинете кнопкой «По всем вопросам». Отвечайте
             здесь — ответ появится в их кабинете, а если Telegram привязан, придёт и в бота.</p>
         <div class="fb-layout" style="margin-top:12px">
-            <div class="fb-list" id="fb-list"><p class="meta">загружаю диалоги…</p></div>
+            <div class="fb-list" id="fb-list" data-i18n-skip><p class="meta">загружаю диалоги…</p></div>
             <div>
                 <div class="fb-conv-head" id="fb-conv-head">Выберите диалог слева</div>
-                <div class="fb-thread" id="fb-admin-thread"></div>
+                <div class="fb-thread" id="fb-admin-thread" data-i18n-skip></div>
                 <textarea class="fb-input" id="fb-admin-text" rows="3" maxlength="2000"
                           placeholder="Ответ пользователю…"></textarea>
                 <div class="row-actions">
@@ -279,7 +287,9 @@
         <div id="ai-prompt-blocks"><p class="meta">загружаю промты…</p></div>
     </div>
 </main>
-<script src="/static/account.js?v=fb9"></script>
+<script src="/static/i18n.pages.js"></script>
+<script src="/static/i18n.js"></script>
+<script src="/static/account.js?v=fb10"></script>
 <script src="/static/consent.js?v=consent1"></script>
 </body>
 </html>

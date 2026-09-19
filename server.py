@@ -43,9 +43,11 @@ from collections import deque
 from contextlib import asynccontextmanager
 from typing import Deque, Dict, List, Optional, Set
 
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+
+import seo_pages
 from fastapi.staticfiles import StaticFiles
 
 from market_feed import GATE_REST, MarketFeed, TF_MINUTES, base_of, canon, _get_json
@@ -2708,15 +2710,44 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 @app.get("/")
-async def root():
-    """Лендинг: красивый вход в терминал."""
-    return FileResponse(os.path.join(STATIC_DIR, "landing.html"))
+async def root(request: Request):
+    """Лендинг: красивый вход в терминал.
+
+    Язык подставляем сразу в head (``seo_pages.render``) — поисковик должен
+    видеть язык в ``<html lang>``, заголовке и описании, а не только после
+    выполнения скриптов.
+    """
+    lang = seo_pages.detect_lang(request)
+    return seo_pages.render(
+        "landing.html", lang, "/", extra_head=seo_pages.jsonld("landing", lang)
+    )
 
 
 @app.get("/terminal")
-async def terminal():
+async def terminal(request: Request):
     """Сам терминал (страница приложения)."""
-    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+    lang = seo_pages.detect_lang(request)
+    return seo_pages.render(
+        "index.html", lang, "/terminal", extra_head=seo_pages.jsonld("terminal", lang)
+    )
+
+
+@app.get("/robots.txt")
+async def robots_txt():
+    """Правила обхода: служебное закрыто, карта сайта указана."""
+    return seo_pages.robots_txt()
+
+
+@app.get("/sitemap.xml")
+async def sitemap_xml():
+    """Карта сайта: основные страницы во всех языках (hreflang-альтернативы)."""
+    return seo_pages.sitemap_xml()
+
+
+@app.get("/manifest.webmanifest")
+async def manifest_webmanifest():
+    """Манифест приложения: имя, иконка, цвета."""
+    return seo_pages.manifest()
 
 
 if __name__ == "__main__":

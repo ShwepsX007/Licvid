@@ -1,11 +1,12 @@
 /**
- * LiqScope Terminal — мультиязычность.
+ * LiqScope — мультиязычность всего сайта.
  *
  * Поддерживаются: русский (по умолчанию), английский, китайский (мандарин),
- * хинди, испанский. Язык определяется по браузеру, переключается в шапке и
- * запоминается в localStorage.
+ * хинди, испанский. Язык определяется по серверу (?lang=, cookie, Accept-Language),
+ * затем по браузеру, переключается в шапке и запоминается в localStorage.
  *
  * Использование:
+ *   <script src="/static/i18n.pages.js"></script>   // словари кабинета и страниц
  *   <script src="/static/i18n.js"></script>
  *   LiqScopeI18n.init();                    // применить сохранённый/броузерный язык
  *   LiqScopeI18n.t("feed.title");           // перевод строки
@@ -17,18 +18,28 @@
  *   data-i18n-placeholder="key"   — placeholder
  *   data-i18n-title="key"         — title
  *   data-i18n-meta="key"          — content у <meta name="description">
+ *
+ * Динамический текст (кабинет, доски сервисов, админка) собирается кодом из
+ * русских кусков, поэтому переводится постфактум — прямо в DOM: см. блок
+ * «Перевод живого текста» ниже. Русский фрагмент ищется в текстовых узлах
+ * и подменяется переводом из ``phrases`` (файл i18n.pages.js). Атрибут
+ * ``data-i18n-skip`` защищает текст пользователя — переписку, рекламные
+ * посты, письма — от перевода.
  */
 (function (global) {
     "use strict";
 
     var LANGS = [
-        { code: "ru", label: "Русский", flag: "🇷🇺" },
-        { code: "en", label: "English", flag: "🇬🇧" },
-        { code: "zh", label: "中文", flag: "🇨🇳" },
-        { code: "hi", label: "हिन्दी", flag: "🇮🇳" },
-        { code: "es", label: "Español", flag: "🇪🇸" },
+        { code: "ru", label: "Русский", flag: "🇷🇺", hreflang: "ru" },
+        { code: "en", label: "English", flag: "🇬🇧", hreflang: "en" },
+        { code: "zh", label: "中文", flag: "🇨🇳", hreflang: "zh-Hans" },
+        { code: "hi", label: "हिन्दी", flag: "🇮🇳", hreflang: "hi" },
+        { code: "es", label: "Español", flag: "🇪🇸", hreflang: "es" },
     ];
     var LOCALE_TAGS = { ru: "ru-RU", en: "en-US", zh: "zh-CN", hi: "hi-IN", es: "es-ES" };
+    //: как язык зовётся в localStorage и в cookie сервера
+    var STORE_KEY = "liqscope.lang";
+    var COOKIE = "liqscope_lang";
 
     /* =====================================================================
      * СЛОВАРИ
@@ -1062,6 +1073,13 @@
         "filter.none": "कोई नहीं",
         "filter.all_exchanges": "सभी एक्सचेंज ▾",
         "filter.disabled": "बंद ▾",
+        "filter.th_liq": "लिक्विडेशन, $",
+        "filter.th_short_liq": "लिक्वि",
+        "filter.th_ge": "≥ ${v}",
+        "filter.th_cvd": "प्रति कैंडल CVD, $",
+        "filter.th_oi": "प्रति कैंडल OI Δ, $",
+        "filter.presets_for": "प्रीसेट खुली फ़ीड टैब पर लागू होते हैं:",
+        "filter.th_note": "हर थ्रेशोल्ड अपनी सीरीज़ फ़िल्टर करता है — फ़ीड और चार्ट के निशान: लिक्विडेशन, CVD त्रिकोण और OI गोले। शून्य = सब दिखाएँ।",
         "chart.long": "लॉन्ग लिक्विडेशन",
         "chart.short": "शॉर्ट लिक्विडेशन",
         "chart.whale": "व्हेल ($100k+)",
@@ -1382,6 +1400,13 @@
         "filter.none": "Ninguno",
         "filter.all_exchanges": "Todos los exchanges ▾",
         "filter.disabled": "Desactivados ▾",
+        "filter.th_liq": "Liquidaciones, $",
+        "filter.th_short_liq": "Liq",
+        "filter.th_ge": "≥ ${v}",
+        "filter.th_cvd": "CVD por vela, $",
+        "filter.th_oi": "OI Δ por vela, $",
+        "filter.presets_for": "Los presets se aplican a la pestaña abierta del feed:",
+        "filter.th_note": "Cada umbral filtra su propia serie — el feed y las marcas del gráfico: liquidaciones, triángulos de CVD y bolas de OI. Cero muestra todo.",
         "chart.long": "Liq. longs",
         "chart.short": "Liq. shorts",
         "chart.whale": "Ballena ($100k+)",
@@ -1657,20 +1682,66 @@
     var MESSAGES = { ru: RU, en: EN, zh: ZH, hi: HI, es: ES };
     var current = "ru";
     var listeners = [];
+    var PHRASES = { ru: {}, en: {}, zh: {}, hi: {}, es: {} };   // ru → перевод, по языкам
+
+    /* =====================================================================
+     * Словари страниц (i18n.pages.js)
+     *
+     * Кабинет, вход/регистрация, сброс пароля, дайджест, админка и то, что
+     * сервисы рисуют сами, живут отдельным файлом — он большой и правится
+     * чаще терминала. Формат простой и строго-JSON (его читает ещё и сервер,
+     * чтобы отдать страницу сразу на нужном языке): {lang: {keys, phrases}}.
+     * ===================================================================== */
+    var PAGES = (global && global.LIQSCOPE_I18N_PAGES) || null;
+    if (PAGES && typeof PAGES === "object") {
+        Object.keys(PAGES).forEach(function (code) {
+            var pack = PAGES[code];
+            if (!pack || typeof pack !== "object") return;
+            if (!MESSAGES[code]) MESSAGES[code] = {};
+            var keys = pack.keys || {};
+            Object.keys(keys).forEach(function (k) { MESSAGES[code][k] = keys[k]; });
+            // фразы кладём как есть: ищем их в живом тексте от длинных к коротким
+            if (pack.phrases && typeof pack.phrases === "object") {
+                PHRASES[code] = pack.phrases;
+            }
+        });
+    }
 
     /* =====================================================================
      * Ядро
      * ===================================================================== */
     function detect() {
+        // 1) выбор, который сделал сервер: ?lang=en, cookie или Accept-Language.
+        //    Он же попал в разметку (data-lang), поэтому страница уже
+        //    отрисована на этом языке — спорить с ней не нужно.
         try {
-            var saved = localStorage.getItem("liqscope.lang");
+            var fromServer = String(global.LIQSCOPE_LANG || "").toLowerCase();
+            if (fromServer && MESSAGES[fromServer]) return fromServer;
+        } catch (e) { /* ignore */ }
+        // 2) явный выбор в ссылке: /?lang=zh — так языки индексируются
+        try {
+            var m = /[?&]lang=([a-zA-Z-]+)/.exec(String((global.location && global.location.search) || ""));
+            var q = m ? m[1].toLowerCase().split("-")[0] : "";
+            if (q && MESSAGES[q]) return q;
+        } catch (e) { /* ignore */ }
+        // 3) прошлый выбор посетителя
+        try {
+            var saved = localStorage.getItem(STORE_KEY);
             if (saved && MESSAGES[saved]) return saved;
         } catch (e) { /* ignore */ }
+        // 4) язык браузера: и региональные варианты (zh-CN, zh-TW, es-419…)
         var nav = String((typeof navigator !== "undefined" && navigator.language) || "").toLowerCase();
-        if (nav.indexOf("zh") === 0) return "zh";
-        if (nav.indexOf("hi") === 0) return "hi";
-        if (nav.indexOf("es") === 0) return "es";
-        if (nav.indexOf("en") === 0) return "en";
+        var all = String((typeof navigator !== "undefined" && navigator.languages
+            && navigator.languages.join(",")) || nav).toLowerCase();
+        var pick = null;
+        all.split(",").some(function (tag) {
+            var base = String(tag).trim().split("-")[0];
+            if (MESSAGES[base]) { pick = base; return true; }
+            return false;
+        });
+        if (pick) return pick;
+        var base0 = nav.split("-")[0];
+        if (MESSAGES[base0]) return base0;
         return "ru";
     }
 
@@ -1727,6 +1798,253 @@
         for (i = 0; i < nodes.length; i++) {
             nodes[i].setAttribute("content", t(nodes[i].getAttribute("data-i18n-meta")));
         }
+        // динамический текст (кабинет, сервисы, админка) — отдельным проходом
+        localizeTree(root);
+    }
+
+    /* =====================================================================
+     * Перевод живого текста
+     *
+     * Терминал собран из ключей (data-i18n), а кабинет, доски сервисов и
+     * админка рисуются кодом из русских кусков: «Окно · », «пока тихо»,
+     * «сохранено · монеты: …». Переводить такое ключами — значит переписать
+     * половину файлов; поэтому текст переводится там, где он уже нарисован.
+     *
+     * Правила ровно те же, что у бота (bot_i18n.py):
+     *   * ищем самый длинный известный фрагмент за один проход — короткая
+     *     подпись не портит длинную фразу;
+     *   * фрагмент, начинающийся или кончающийся русской буквой, ищется как
+     *     целое слово: «бот» не залезает в «работает»;
+     *   * числа перед хвостом («5 мин», «3 ч», «12 шт.») переводят правила.
+     *
+     * Текст пользователя (переписка, реклама, письма) помечен
+     * ``data-i18n-skip`` и не трогается; складывается он в контейнеры со
+     * своим «языком» — см. SKIP_SELECTOR.
+     * ===================================================================== */
+
+    //: куда не заглядываем: код, стили, поля ввода и текст пользователя
+    var SKIP_SELECTOR = "script,style,noscript,code,pre,textarea,input," +
+        // сам переключатель языка не трогаем: «Русский» человек должен узнать
+        "select[data-lang-select],#lang-select," +
+        "[data-i18n-skip],[contenteditable=true]";
+
+    //: хвосты с числом: «5 мин» → «5 min». Порядок важен — длинные выше.
+    var NUM_TAILS = [
+        [/(\d+)\s*мин(?![\wА-Яа-яЁё])/g, function (n, l) { return n + tr(l, "min", "分钟", "मिनट", "min"); }],
+        [/(\d+)\s*ч(?![\wА-Яа-яЁё])/g, function (n, l) { return n + tr(l, "h", "小时", "घं", "h"); }],
+        [/(\d+)\s*сут(?![\wА-Яа-яЁё])/g, function (n, l) { return n + tr(l, "d", "天", "दिन", "d"); }],
+        [/(\d+)\s*дн(?![\wА-Яа-яЁё])/g, function (n, l) { return n + tr(l, "d", "天", "दिन", "d"); }],
+        [/(\d+)\s*сек(?![\wА-Яа-яЁё])/g, function (n, l) { return n + tr(l, "s", "秒", "से", "s"); }],
+        [/(\d+)\s*шт\.?/g, function (n, l) { return n + tr(l, "pcs", "笔", "इकाई", "uds"); }],
+        [/(\d+)\s*свеч\.?/g, function (n, l) { return n + tr(l, "candles", "根K线", "कैंडल", "velas"); }],
+        [/(\d+)\s*пар(?![\wА-Яа-яЁё])/g, function (n, l) { return n + tr(l, "pairs", "对", "जोड़े", "pares"); }],
+        [/(\d+)\s*знаков(?![\wА-Яа-яЁё])/g, function (n, l) { return n + tr(l, "chars", "字符", "अक्षर", "caracteres"); }],
+        [/(\d+)\s*событи\w*/g, function (n, l) { return n + tr(l, "events", "个事件", "इवेंट", "eventos"); }],
+        // «5м»/«2ч» — так окна пишет кабинет, пробела там нет
+        [/(\d+)\s*м(?![\wА-Яа-яЁё])/g, function (n, l) { return n + tr(l, "m", "分", "मि", "m"); }],
+        [/(\d+)\s*с(?![\wА-Яа-яЁё])/g, function (n, l) { return n + tr(l, "s", "秒", "से", "s"); }]
+    ];
+
+    function tr(l, en, zh, hi, es) {
+        if (l === "zh") return zh;
+        if (l === "hi") return hi;
+        if (l === "es") return es;
+        return en;
+    }
+
+    var CYR = /[А-Яа-яЁё]/;
+    var WORD_CHARS = "A-Za-z0-9_";
+
+    /** Русский фрагмент как регулярка: у краёв со словом — границы слова. */
+    function phraseRe(phrase) {
+        var head = phrase.charAt(0), tail = phrase.charAt(phrase.length - 1);
+        var core = phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        var pre = CYR.test(head) || new RegExp("[" + WORD_CHARS + "]").test(head) ? "(?<![" + WORD_CHARS + "А-Яа-яЁё])" : "";
+        var post = CYR.test(tail) || new RegExp("[" + WORD_CHARS + "]").test(tail) ? "(?![" + WORD_CHARS + "А-Яа-яЁё])" : "";
+        try {
+            return new RegExp(pre + core + post, "g");
+        } catch (e) {                                  // нет look-behind — ищем как есть
+            return new RegExp(core, "g");
+        }
+    }
+
+    /** Скомпилированные правила языка: длинные фразы применяются первыми. */
+    var COMPILED = {};
+    function rules(l) {
+        if (COMPILED[l]) return COMPILED[l];
+        var out = [];
+        var table = PHRASES[l] || {};
+        Object.keys(table).sort(function (a, b) { return b.length - a.length; })
+            .forEach(function (ru) {
+                out.push([phraseRe(ru), table[ru]]);
+            });
+        COMPILED[l] = out;
+        return out;
+    }
+
+    /** Перевести одну строку: фразы, затем хвосты с числами. */
+    function phrase(text, l) {
+        l = l || current;
+        if (l === "ru" || !text || !CYR.test(text)) return text;
+        // Разметку пишут с переносами строк: в абзаце между словами стоит
+        // «\n   », а в словаре — обычный пробел. Браузер всё равно сожмёт
+        // их в один пробел, поэтому сравниваем и отдаём уже сжатый текст.
+        var out = String(text).replace(/\s+/g, " ");
+        var list = rules(l);
+        for (var i = 0; i < list.length; i++) {
+            out = out.replace(list[i][0], list[i][1]);
+        }
+        for (var j = 0; j < NUM_TAILS.length; j++) {
+            out = out.replace(NUM_TAILS[j][0], function (m, n) {
+                return NUM_TAILS[j][1](n, l);
+            });
+        }
+        return out;
+    }
+
+    /** Полностью ли переводится русский текст (для тестов на полноту):
+        после подстановки фраз и хвостов с числами кириллицы остаться не должно. */
+    function hasPhrase(text, l) {
+        var out = phrase(text, l || current);
+        return !CYR.test(out);
+    }
+
+    //: «select» не глушим целиком: подписи в списках (срок удаления поста,
+    //: частота сводки) — обычный текст интерфейса. Пропускаем только
+    //: переключатель языка: «Русский» человек должен узнать в любом переводе.
+    var SKIP_TAGS = { SCRIPT: 1, STYLE: 1, NOSCRIPT: 1, CODE: 1, PRE: 1, TEXTAREA: 1, INPUT: 1 };
+    var LANG_SELECTOR = "select[data-lang-select],select#lang-select,select.lang-select";
+
+    function skipped(node) {
+        for (var n = node; n && n.nodeType === 1; n = n.parentNode) {
+            if (SKIP_TAGS[n.tagName]) return true;
+            if (n.tagName === "SELECT" && n.matches && n.matches(LANG_SELECTOR)) return true;
+            if (n.hasAttribute && n.hasAttribute("data-i18n-skip")) return true;
+            if (n.getAttribute && n.getAttribute("contenteditable") === "true") return true;
+        }
+        return false;
+    }
+
+    /** Текстовые узлы и подписи внутри поддерева — на выбранный язык. */
+    function localizeTree(root) {
+        if (!root) return;
+        if (current === "ru" && !root.querySelectorAll) return;
+        var doc = root.ownerDocument || (root.nodeType === 9 ? root : document);
+        if (!doc || !doc.createTreeWalker) return;
+        var walker = doc.createTreeWalker(root, 4 /* SHOW_TEXT */, null, false);
+        var nodes = [];
+        var node;
+        while ((node = walker.nextNode())) nodes.push(node);
+        for (var i = 0; i < nodes.length; i++) {
+            var n = nodes[i];
+            var src = n.nodeValue;
+            if (!src || !CYR.test(src)) continue;
+            if (skipped(n.parentNode)) continue;
+            n.nodeValue = phrase(src, current);
+        }
+        // подписи и подсказки: placeholder / title / aria-label / alt
+        var host = root.querySelectorAll ? root : null;
+        if (!host) return;
+        var attrs = ["placeholder", "title", "aria-label", "alt", "data-hint"];
+        for (var a = 0; a < attrs.length; a++) {
+            var list = host.querySelectorAll("[" + attrs[a] + "]");
+            for (var k = 0; k < list.length; k++) {
+                var el = list[k];
+                if (skipped(el)) continue;
+                var val = el.getAttribute(attrs[a]);
+                if (val && CYR.test(val)) el.setAttribute(attrs[a], phrase(val, current));
+            }
+        }
+    }
+
+    /* Динамика: кабинет и админка перерисовывают доски сами (автообновление,
+       ответы сервера). Следим за DOM и переводим только то, что появилось, —
+       целиком страницу на каждом тике терминала перебирать незачем. */
+    var observer = null;
+    var pending = null;
+
+    function watch() {
+        if (typeof MutationObserver === "undefined" || !document.body) return;
+        if (current === "ru") { stopWatch(); return; }
+        if (observer) return;
+        observer = new MutationObserver(function (records) {
+            // копим узлы и разбираем их одним проходом кадра
+            if (!pending) pending = [];
+            for (var i = 0; i < records.length; i++) {
+                var r = records[i];
+                if (r.type === "characterData" && r.target && r.target.parentNode) {
+                    pending.push(r.target.parentNode);
+                }
+                for (var j = 0; j < r.addedNodes.length; j++) {
+                    var n = r.addedNodes[j];
+                    pending.push(n.nodeType === 1 ? n : (n.parentNode || document.body));
+                }
+            }
+            if (pending.length > 400) pending = [document.body];
+            if (pending._planned) return;
+            pending._planned = true;
+            (global.requestAnimationFrame || function (f) { setTimeout(f, 16); })(function () {
+                var list = pending || [];
+                pending = null;
+                var seen = [];
+                for (var k = 0; k < list.length; k++) {
+                    if (seen.indexOf(list[k]) >= 0) continue;
+                    seen.push(list[k]);
+                    // к узлу мог прийти перевод ещё до кадра — лишняя работа не страшна
+                    localizeTree(list[k]);
+                }
+            });
+        });
+        observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    }
+
+    function stopWatch() {
+        if (!observer) return;
+        observer.disconnect();
+        observer = null;
+        pending = null;
+    }
+
+    /* =====================================================================
+     * Переключатель языка
+     *
+     * Разметку не дублируем: <select data-lang-select> наполняется отсюда,
+     * а data-i18n-* на самой странице переводят её. Смена языка не
+     * перезагружает страницу — обработчики данные перерисуют сами.
+     * ===================================================================== */
+    function fillSelect(sel) {
+        if (!sel || !sel.options) return;
+        sel.innerHTML = LANGS.map(function (l) {
+            return '<option value="' + l.code + '">' + l.flag + " " + l.label + "</option>";
+        }).join("");
+        sel.value = current;
+        sel.setAttribute("aria-label", "Language / Язык");
+        sel.setAttribute("title", "Language / Язык");
+    }
+
+    function bindSelect(sel) {
+        if (!sel || sel._i18nBound) return;
+        sel._i18nBound = true;
+        sel.addEventListener("change", function (e) { set(e.target.value); });
+    }
+
+    function wireSwitchers() {
+        if (!document.querySelectorAll) return;
+        var list = document.querySelectorAll("[data-lang-select]");
+        for (var i = 0; i < list.length; i++) {
+            fillSelect(list[i]);
+            bindSelect(list[i]);
+        }
+    }
+
+    /** Выбранный язык уходит и на сервер (cookie) — тогда SSR отдаёт
+        страницу сразу на нём, без мигания подписей. */
+    function remember(code) {
+        try { localStorage.setItem(STORE_KEY, code); } catch (e) { /* ignore */ }
+        try {
+            document.cookie = COOKIE + "=" + encodeURIComponent(code) +
+                ";path=/;max-age=31536000;samesite=lax";
+        } catch (e) { /* ignore */ }
     }
 
     function emit() {
@@ -1736,16 +2054,37 @@
     }
 
     function init() {
+        started = true;
         current = detect();
+        if (document.documentElement) document.documentElement.lang = localeTag();
+        wireSwitchers();
         apply(document);
+        if (document.body && document.body.setAttribute) {
+            document.body.setAttribute("data-lang", current);
+        }
+        watch();
+        // терминал и лендинг дорисовывают данные сами: даём им ещё один проход,
+        // когда страница уже показывается целиком
+        if (global.addEventListener) {
+            global.addEventListener("load", function () { apply(document); });
+        }
         emit();
     }
+
+    var started = false;
 
     function set(code) {
         if (!MESSAGES[code] || code === current) return;
         current = code;
-        try { localStorage.setItem("liqscope.lang", code); } catch (e) { /* ignore */ }
+        remember(code);
+        if (document.documentElement) document.documentElement.lang = localeTag();
+        if (document.body && document.body.setAttribute) {
+            document.body.setAttribute("data-lang", current);
+        }
         apply(document);
+        var list = document.querySelectorAll("[data-lang-select]");
+        for (var i = 0; i < list.length; i++) list[i].value = current;
+        if (current === "ru") stopWatch(); else watch();
         emit();
     }
 
@@ -1764,10 +2103,30 @@
         catch (e) { return ""; }
     }
 
+    /* Странице не нужно помнить про init(): словари подключаются обычным
+       <script>, а язык применяем сразу после разбора разметки. */
+    if (typeof document !== "undefined" && document.addEventListener) {
+        if (document.readyState === "loading") {
+            document.addEventListener("DOMContentLoaded", function () {
+                if (!started) init();
+            });
+        } else if (!started) {
+            init();
+        }
+    }
+
     global.LiqScopeI18n = {
         LANGS: LANGS,
         init: init, lang: lang, set: set, t: t, plural: plural,
         apply: apply, onChange: onChange,
         number: number, time: time, dateTime: dateTime, localeTag: localeTag, detect: detect,
+        // живой текст: перевод по фразам (кабинет, сервисы, админка)
+        phrase: phrase, localizeTree: localizeTree, hasPhrase: hasPhrase,
+        fillSelect: fillSelect, bindSelect: bindSelect,
+        messages: function () { return MESSAGES; },
+        hreflang: function () {
+            var one = LANGS.filter(function (l) { return l.code === current; })[0];
+            return (one && one.hreflang) || current;
+        },
     };
 })(typeof window !== "undefined" ? window : this);

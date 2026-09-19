@@ -194,6 +194,15 @@
             return T[c] ? c : "ru";
         } catch (e) { return "ru"; }
     }
+    /* Язык для сервера: он отвечает подсказками формы и письмами на нём.
+       Своих словарей у zh/hi/es здесь нет (тексты сайта подставляет
+       LiqScopeI18n), но серверу нужен именно выбранный код. */
+    function apiLang() {
+        try {
+            var c = (window.LiqScopeI18n && LiqScopeI18n.lang()) || "ru";
+            return c === "en" || c === "zh" || c === "hi" || c === "es" ? c : "ru";
+        } catch (e) { return "ru"; }
+    }
     function t(k, vars) {
         var s = (T[lang()] || T.ru)[k] || (T.en[k] || k);
         if (vars) {
@@ -373,7 +382,7 @@
                     vresend.onclick = function () {
                         api("/api/auth/email/resend", {
                             method: "POST",
-                            body: JSON.stringify({ email: u.email, language: lang() }),
+                            body: JSON.stringify({ email: u.email, language: apiLang() }),
                         }).then(function (d) {
                             if (vresend) {
                                 vresend.textContent = d.ok ? t("verifySent") : (d.error || "error");
@@ -3540,7 +3549,7 @@
             }
             if (!answer) { setStatus(status, t("captchaNeed"), "err"); return; }
         }
-        var body = { email: email, password: pass, name: name, language: lang() };
+        var body = { email: email, password: pass, name: name, language: apiLang() };
         if (authTab === "register") { body.captcha = captchaToken; body.answer = answer; }
         var path = authTab === "register" ? "/api/auth/email/register"
             : (authTab === "link" ? "/api/auth/email/link" : "/api/auth/email/login");
@@ -3579,7 +3588,7 @@
         var status = $("login-status");
         if (!email || email.indexOf("@") < 0) { setStatus(status, t("needEmail"), "err"); return; }
         api("/api/auth/email/resend", {
-            method: "POST", body: JSON.stringify({ email: email, language: lang() }),
+            method: "POST", body: JSON.stringify({ email: email, language: apiLang() }),
         }).then(function (d) {
             setStatus(status, d.ok ? t("verifySent") : authError(d), d.ok ? "ok" : "err");
         });
@@ -3634,7 +3643,7 @@
             var status = $("login-status");
             if (!email || email.indexOf("@") < 0) { setStatus(status, t("needEmail"), "err"); return; }
             api("/api/auth/email/reset", {
-                method: "POST", body: JSON.stringify({ email: email, language: lang() }),
+                method: "POST", body: JSON.stringify({ email: email, language: apiLang() }),
             }).then(function (d) {
                 setStatus(status, d.ok ? t("linkSent") : authError(d), d.ok ? "ok" : "err");
             });
@@ -3689,7 +3698,7 @@
                 method: "POST",
                 body: JSON.stringify({ token: token, password: p1,
                                        email: ($("reset-email") || {}).value || "",
-                                       language: lang() }),
+                                       language: apiLang() }),
             }).then(function (d) {
                 if (d.ok) { setStatus(status, t("resetOk"), "ok"); location.href = "/cabinet"; return; }
                 setStatus(status, authError(d), "err");

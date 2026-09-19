@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, Body, Request
 from fastapi.responses import FileResponse, JSONResponse
 
+import seo_pages
 from daily_digest import (DAY_SEC, DEFAULT_KEEP, NARRATIVE_MIN, DigestStore, brief,
                           collect_day, day_key, day_label, fallback_narrative,
                           render_article, render_post)
@@ -599,10 +600,13 @@ def register_digest_routes(app) -> None:
     router = APIRouter()
 
     @router.get("/digest")
-    async def page_digest():
+    async def page_digest(request: Request):
         if not ctx.page_ok:
             return JSONResponse({"ok": False, "error": "off"}, status_code=404)
-        return FileResponse(os.path.join(STATIC_DIR, "digest.html"))
+        lang = seo_pages.detect_lang(request)
+        return seo_pages.render(
+            "digest.html", lang, "/digest", extra_head=seo_pages.jsonld("digest", lang)
+        )
 
     @router.get("/api/digest")
     async def api_list(lang: str = "ru", limit: int = 12):

@@ -1,90 +1,116 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="ru" data-lang="ru">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LiqScope — вход и регистрация</title>
+<title data-i18n="seo.login.title">Вход и регистрация — LiqScope</title>
+<meta name="description" data-i18n-meta="seo.login.desc" content="Вход в кабинет LiqScope по почте или через Telegram. Регистрация за минуту: алерты по ликвидациям, CVD и открытому интересу приходят в кабинет и в бота.">
+<link rel="canonical" href="https://liqscope.online/login">
+<meta name="robots" content="index,follow">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="LiqScope">
+<meta property="og:url" content="https://liqscope.online/login">
+<meta property="og:title" data-i18n-meta="seo.login.title" content="Вход и регистрация — LiqScope">
+<meta property="og:description" data-i18n-meta="seo.login.desc" content="Вход в кабинет LiqScope по почте или через Telegram. Регистрация за минуту.">
+<meta property="og:image" content="https://liqscope.online/static/logo.png">
+<meta property="og:locale" content="ru_RU">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" data-i18n-meta="seo.login.title" content="Вход и регистрация — LiqScope">
+<meta name="twitter:description" data-i18n-meta="seo.login.desc" content="Вход в кабинет LiqScope по почте или через Telegram.">
+<meta name="theme-color" content="#060a12">
 <link rel="icon" type="image/png" href="/static/logo.png">
-<link rel="stylesheet" href="/static/account.css?v=fb9">
+<link rel="apple-touch-icon" href="/static/logo.png">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="stylesheet" href="/static/account.css?v=fb10">
 </head>
 <body data-page="login">
 <header class="site-header">
     <a class="brand" href="/">
-        <img class="logo" src="/static/logo.png" alt="LiqScope">
+        <img class="logo" src="/static/logo.png" alt="LiqScope" width="40" height="40">
         <span class="name">LIQSCOPE</span>
-        <span class="tag">ACCOUNT</span>
+        <span class="tag" data-i18n="brand.account">АККАУНТ</span>
     </a>
     <nav class="site-nav">
-        <a class="btn btn-ghost btn-compact" href="/terminal">⚡ Терминал</a>
+        <a class="btn btn-ghost btn-compact" href="/terminal" data-i18n="auth.terminal_link">⚡ Терминал</a>
+        <select id="lang-select" class="lang-select" data-lang-select aria-label="Language / Язык"
+                title="Language / Язык"></select>
         <span id="nav-account"></span>
     </nav>
 </header>
 <main class="wrap login-box">
     <div class="card">
-        <img src="/static/logo.png" alt="" style="width:72px;height:72px;margin-bottom:12px">
-        <h1 class="page-title" id="auth-title">Вход в кабинет</h1>
-        <p class="lead" id="auth-lead">Регистрация по почте — за минуту. Telegram можно привязать позже,
+        <img src="/static/logo.png" alt="" width="72" height="72" style="width:72px;height:72px;margin-bottom:12px">
+        <h1 class="page-title" id="auth-title" data-i18n="auth.title_login">Вход в кабинет</h1>
+        <p class="lead" id="auth-lead" data-i18n="auth.lead_login">Почта и пароль. Telegram можно привязать позже,
             чтобы получать сигналы в бота.</p>
 
         <div class="auth-tabs" id="auth-tabs" role="tablist">
-            <button type="button" class="auth-tab active" role="tab" data-tab="login">Вход</button>
-            <button type="button" class="auth-tab" role="tab" data-tab="register">Регистрация</button>
-            <button type="button" class="auth-tab" role="tab" data-tab="link">Ссылка на почту</button>
+            <button type="button" class="auth-tab active" role="tab" data-tab="login"
+                    data-i18n="auth.tab_login">Вход</button>
+            <button type="button" class="auth-tab" role="tab" data-tab="register"
+                    data-i18n="auth.tab_register">Регистрация</button>
+            <button type="button" class="auth-tab" role="tab" data-tab="link"
+                    data-i18n="auth.tab_link">Ссылка на почту</button>
         </div>
 
         <form id="email-form" autocomplete="on" style="margin-top:16px">
             <label class="field hidden" id="field-name">
-                <span>Имя (необязательно)</span>
-                <input type="text" id="in-name" autocomplete="name" maxlength="64" placeholder="Как к вам обращаться">
+                <span data-i18n="auth.label_name">Имя (необязательно)</span>
+                <input type="text" id="in-name" autocomplete="name" maxlength="64"
+                       data-i18n-placeholder="auth.ph_name" placeholder="Как к вам обращаться">
             </label>
             <label class="field">
-                <span>Почта</span>
+                <span data-i18n="auth.label_email">Почта</span>
                 <input type="email" id="in-email" autocomplete="email" required
                        inputmode="email" placeholder="you@example.com">
             </label>
             <label class="field" id="field-pass">
-                <span>Пароль</span>
+                <span data-i18n="auth.label_pass">Пароль</span>
                 <input type="password" id="in-password" autocomplete="current-password"
-                       minlength="8" placeholder="не короче 8 символов">
+                       minlength="8" data-i18n-placeholder="auth.ph_pass" placeholder="не короче 8 символов">
             </label>
             <label class="field hidden" id="field-captcha">
-                <span><span id="captcha-label">Проверка</span>
+                <span><span data-i18n="auth.label_captcha" id="captcha-label">Проверка</span>
                       <b id="captcha-question">…</b></span>
                 <input type="text" id="in-captcha" inputmode="numeric" autocomplete="off"
-                       placeholder="ответ цифрой">
-                <button type="button" class="link-btn" id="captcha-refresh">Другой пример</button>
+                       data-i18n-placeholder="auth.ph_captcha" placeholder="ответ цифрой">
+                <button type="button" class="link-btn" id="captcha-refresh"
+                        data-i18n="auth.captcha_refresh">Другой пример</button>
             </label>
-            <button type="submit" class="btn btn-primary" id="email-submit">Войти</button>
+            <button type="submit" class="btn btn-primary" id="email-submit"
+                    data-i18n="auth.submit_login">Войти</button>
         </form>
 
         <p class="login-status" id="login-status"></p>
 
         <div class="auth-help">
-            <button type="button" class="link-btn" id="to-reset">Забыли пароль?</button>
+            <button type="button" class="link-btn" id="to-reset" data-i18n="auth.forgot">Забыли пароль?</button>
             <span class="dot">·</span>
-            <button type="button" class="link-btn" id="resend-verify">Отправить письмо ещё раз</button>
+            <button type="button" class="link-btn" id="resend-verify"
+                    data-i18n="auth.resend">Отправить письмо ещё раз</button>
         </div>
 
         <div class="tg-alt" id="tg-alt">
-            <div class="or-sep"><span>или</span></div>
-            <button type="button" class="btn btn-tg btn-tg-wide" id="login-btn">
-                ✈ Зарегистрироваться через Telegram
-            </button>
-            <p class="lead tg-note">
+            <div class="or-sep"><span data-i18n="auth.or">или</span></div>
+            <button type="button" class="btn btn-tg btn-tg-wide" id="login-btn"
+                    data-i18n="auth.tg_btn">✈ Зарегистрироваться через Telegram</button>
+            <p class="lead tg-note" data-i18n="auth.tg_note">
                 Тот же аккаунт, что и в боте: подтверждать нечего, пароль не нужен.
                 Запасной способ — если почта недоступна. Почту можно привязать позже.
             </p>
             <div id="tg-widget" style="margin-top:12px"></div>
         </div>
 
-        <p class="lead" style="margin-top:18px;font-size:0.78rem">
+        <p class="lead" style="margin-top:18px;font-size:0.78rem" data-i18n="auth.footnote">
             Основной способ — почта: она же восстанавливает пароль и присылает письма.
             Терминал ликвидаций по-прежнему открыт без регистрации.
             Кабинет нужен для алертов, корреляций и других сервисов.
         </p>
     </div>
 </main>
-<script src="/static/account.js?v=fb9"></script>
-<script src="/static/consent.js?v=consent1"></script>
+<script src="/static/i18n.pages.js"></script>
+<script src="/static/i18n.js"></script>
+<script src="/static/account.js?v=fb10"></script>
+<script src="/static/consent.js?v=consent2"></script>
 </body>
 </html>

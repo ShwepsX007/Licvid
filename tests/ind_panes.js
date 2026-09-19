@@ -141,6 +141,23 @@ function part2() {
     querySelectorAll: () => ({ length: 3 }),   // три разделителя блоков видны
   };
 
+  // Суммы по свечам для окна ликвидаций: в терминале их собирает
+  // liqCandleSums (сохранённая история + живой хвост), здесь истории нет —
+  // считаем по тем же событиям, что отдаёт visibleLiquidations.
+  const histSums = new Map();          // добавка «сохранённой истории» для теста
+  const liqCandleSums = () => {
+    const out = new Map();
+    histSums.forEach((v, k) => out.set(k, { long: v.long, short: v.short, n: v.n }));
+    (liqs || []).forEach((x) => {
+      const t = Math.floor(x.timestamp / tfSec) * tfSec;
+      const b = out.get(t) || { long: 0, short: 0, n: 0 };
+      if (x.side === "SELL") b.long += x.usd; else b.short += x.usd;
+      b.n += 1;
+      out.set(t, b);
+    });
+    return out;
+  };
+
   const sandbox = {
     $: $stack,
     // главный график: цена → пиксели, а сам канвас нужен для проекции
@@ -194,10 +211,11 @@ function part2() {
     " paneYOf, paneValueAt, paneToXY, projectToXY, drawPaneFigures, drawPaneDrawings," +
     " drawFiguresList, paneScales, drawPanePreview, drawTestState };";
   const api = new Function("$", "window", "document", "localStorage", "I18n", "state",
-    "chart", "visibleLiquidations", "fmtUsdShort", "candleSeries", "drawCanvas", code)(
+    "chart", "visibleLiquidations", "fmtUsdShort", "candleSeries", "drawCanvas",
+    "liqCandleSums", code)(
     sandbox.$, sandbox.window, sandbox.document, sandbox.localStorage, sandbox.I18n,
     sandbox.state, sandbox.chart, sandbox.visibleLiquidations, sandbox.fmtUsdShort,
-    sandbox.candleSeries, sandbox.drawCanvas);
+    sandbox.candleSeries, sandbox.drawCanvas, liqCandleSums);
 
   // --- LIQ: двусторонние столбики -----------------------------------------
   api.drawPaneLiq();
@@ -212,6 +230,28 @@ function part2() {
   const liqVal = $("ind-liq-val").textContent;
   check("LIQ: сумма в шапке не нулевая", /^Σ \$[1-9]/.test(liqVal), liqVal);
   check("LIQ: канва получила размер", canvases["ind-canvas-liq"].width === 360);
+
+  // Терминал был закрыт: в памяти событий нет, но сохранённая история (её
+  // отдаёт liqCandleSums) рисует столбик — как CVD и OI из свечей.
+  const sumOf = (txt) => {                    // «Σ $1.08M» → 1080000
+    const m = /\$([\d.]+)\s*([KMB])?/.exec(String(txt || ""));
+    if (!m) return NaN;
+    return parseFloat(m[1]) * ({ K: 1e3, M: 1e6, B: 1e9 }[m[2] || ""] || 1);
+  };
+  const histCandle = candles[39].time;
+  const cyanBefore = rq.rects.filter((r) => r.fill.indexOf("0,214,255") >= 0).length;
+  const sumBefore = sumOf($("ind-liq-val").textContent);
+  histSums.set(histCandle, { long: 0, short: 777000, n: 3 });
+  canvases["ind-canvas-liq"]._rec.rects.length = 0;
+  api.drawPaneLiq();
+  const rq2 = canvases["ind-canvas-liq"]._rec;
+  const cyanAfter = rq2.rects.filter((r) => r.fill.indexOf("0,214,255") >= 0).length;
+  check("LIQ: сохранённая история рисуется окном без событий в памяти",
+        cyanAfter > cyanBefore, cyanBefore + " → " + cyanAfter);
+  check("LIQ: история попала в цифру окна",
+        isFinite(sumBefore) && sumOf($("ind-liq-val").textContent) > sumBefore + 700000,
+        sumBefore + " → " + $("ind-liq-val").textContent);
+  histSums.clear();
 
   // --- CVD: гистограмма дельты --------------------------------------------
   api.drawPaneCvd();
@@ -632,7 +672,10 @@ async function part1() {
   // первое окно не закрываем раньше времени: его WS продолжит сыпать
   // сообщения в мёртвый document и уронит процесс
 
-  // --- шлюз: анониму слои недоступны вообще ---
+  // --- шлюз: у гостя без регистрации — пробные 30 минут ---------------
+  // Само окно «зарегистрируйтесь бесплатно» и закрытие кнопки после
+  // пробника проверяет tests/layers_gate.js; здесь важно, что во время
+  // пробника кнопка и окна работают как у обычного пользователя.
   const vcAnon = new VirtualConsole();
   const domAnon = await JSDOM.fromURL(URL_BASE + "/terminal", {
     runScripts: "dangerously",
@@ -644,7 +687,8 @@ async function part1() {
   await new Promise((r) => setTimeout(r, 4000));
   const docAnon = domAnon.window.document;
   const callAnon = docAnon.getElementById("layer-call");
-  check("шлюз: «Слои» скрыты у анонима", !!callAnon && callAnon.classList.contains("hidden"));
+  check("шлюз: гостю кнопка слоёв видна (пробные минуты)",
+    !!callAnon && !callAnon.classList.contains("hidden"));
   const panesAnon = docAnon.getElementById("indicator-panes");
   check("шлюз: индикаторных окон у анонима нет",
     !!panesAnon && panesAnon.classList.contains("all-hidden"));

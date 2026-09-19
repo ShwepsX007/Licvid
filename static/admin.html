@@ -3,24 +3,37 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LiqScope — админка</title>
-<link rel="icon" type="image/png" href="/static/logo.png">
-<link rel="stylesheet" href="/static/account.css?v=fb9">
+<title data-i18n="seo.admin.title">Админка — LiqScope</title>
+<meta name="description" data-i18n-meta="seo.admin.desc" content="Панель управления LiqScope: пользователи, визиты, сервисы, каналы Telegram, шаблоны постов и проверка ИИ.">
+<meta name="robots" content="noindex,nofollow">
+<link rel="canonical" href="https://liqscope.online/admin">
+<meta name="theme-color" content="#060a12">
+<link rel="icon" href="/static/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="48x48" href="/static/icon-48.png">
+<link rel="icon" type="image/png" sizes="96x96" href="/static/icon-96.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/static/icon-192.png">
+<link rel="icon" type="image/png" sizes="144x144" href="/static/icon-144.png">
+<link rel="icon" type="image/png" sizes="512x512" href="/static/icon-512.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="stylesheet" href="/static/account.css?v=geo2">
 </head>
 <body data-page="admin">
 <header class="site-header">
     <a class="brand" href="/">
         <img class="logo" src="/static/logo.png" alt="LiqScope">
         <span class="name">LIQSCOPE</span>
-        <span class="tag">ADMIN</span>
+        <span class="tag" data-i18n="brand.admin">АДМИНКА</span>
     </a>
     <nav class="site-nav">
+        <select id="lang-select" class="lang-select" data-lang-select
+                aria-label="Language / Язык" title="Language / Язык"></select>
         <a class="btn btn-ghost btn-compact" href="/terminal">⚡ Терминал</a>
         <span id="nav-account"></span>
     </nav>
 </header>
 <main class="wrap">
-    <h1 class="page-title">Панель управления</h1>
+    <h1 class="page-title" data-i18n="seo.admin.h1">Панель управления</h1>
     <p class="lead">Сайт, бот и пользователи. Те же цифры доступны командами /admin в Telegram.</p>
 
     <div class="grid grid-4" style="margin-top:22px">
@@ -39,15 +52,52 @@
         <div class="card" data-hint="переходы, уникальные, служебные">
             <h3>Визиты за 2 недели</h3>
             <div class="bars" id="visit-bars"></div>
+            <!-- Пробный доступ к слоям у гостей без регистрации:
+                 сколько знакомятся и сколько уже упёрлось в предложение
+                 регистрации (web_layers, Store.layer_trial_stats) -->
+            <p class="meta" id="visits-trial">—</p>
+            <!-- Стирание статистики: кнопка открывает подтверждение, второй
+                 клик отправляет POST /api/admin/visits/clear
+                 (см. web_geo.py). Данные необратимы — потому и в два шага. -->
+            <div class="row-actions wipe-row">
+                <!-- фразы, а не ключи: i18n.js переводит живой текст и внутри
+                     новых узлов — подпись кнопки останется переведённой -->
+                <button class="btn btn-danger btn-small" id="visits-clear" type="button">🗑 Стереть статистику</button>
+                <span class="meta" id="visits-clear-status" role="status"></span>
+            </div>
+            <div class="wipe-box" id="visits-wipe" hidden>
+                <p class="wipe-lead">Стереть всю статистику посещений?</p>
+                <p class="meta">Исчезнут переходы и уникальные посетители, график за две недели, страны, источники переходов, время на сайте и список «кто онлайн». Пользователи, подписки и рассылки останутся. Вернуть статистику нельзя.</p>
+                <label class="wipe-opt">
+                    <input type="checkbox" id="visits-wipe-cache">
+                    <span>Заодно стереть кэш стран (адрес → страна): после этого страна каждого адреса определится заново</span>
+                </label>
+                <div class="row-actions">
+                    <button class="btn btn-ghost btn-small" id="visits-wipe-cancel" type="button">Отмена</button>
+                    <button class="btn btn-danger btn-small" id="visits-wipe-go" type="button">Да, стереть навсегда</button>
+                </div>
+            </div>
         </div>
         <div class="card" data-hint="сообщение всем, кто запускал бота">
             <h3>Рассылка в Telegram</h3>
             <p class="lead">Уйдёт всем, кто запускал бота и не в бане.</p>
-            <textarea id="broadcast-text" placeholder="Текст сообщения…"></textarea>
+            <textarea id="broadcast-text" data-i18n-skip placeholder="Текст сообщения…"></textarea>
             <div class="row-actions">
                 <button class="btn btn-primary" id="broadcast-send" type="button">Отправить</button>
                 <span class="meta" id="broadcast-status"></span>
             </div>
+        </div>
+    </div>
+
+    <!-- 🌍 Откуда приходят и сколько смотрят: карту, точки и таблицы рисует
+         static/geo_map.js, данные — GET /api/admin/geo (см. web_geo.py).
+         Карточка стоит второй: это ответ на вопросы «кто, откуда и как долго»,
+         а не отдельная игрушка на странице. -->
+    <div class="card" id="geo-card" style="margin-top:14px"
+         data-hint="страны, источники, время на сайте">
+        <h3 data-i18n="geo.title">🌍 Откуда приходят и как долго смотрят</h3>
+        <div id="geo-panel" class="geo-panel">
+            <p class="meta" data-i18n="cab.loading">загружаю…</p>
         </div>
     </div>
 
@@ -64,9 +114,9 @@
         <div class="card" data-hint="приветствие бота и объявление в кабинете">
             <h3>Настройки</h3>
             <label>Приветствие бота (/start)</label>
-            <textarea id="bot-welcome"></textarea>
+            <textarea id="bot-welcome" data-i18n-skip></textarea>
             <label>Объявление в кабинете</label>
-            <textarea id="site-notice-in"></textarea>
+            <textarea id="site-notice-in" data-i18n-skip></textarea>
             <div class="row-actions">
                 <button class="btn btn-primary" id="settings-save" type="button">Сохранить</button>
                 <span class="meta" id="settings-status"></span>
@@ -79,13 +129,33 @@
         </div>
     </div>
 
+    <!-- ☰ Пробный доступ к слоям (web_layers): сколько минут гость без
+         регистрации может включать слои в терминале. Значение живёт в
+         настройках сайта; если задана переменная окружения — она главнее, и
+         карточка об этом честно пишет. Живые гости с остатком времени — в
+         карточке карты: там же кнопка «дать ещё». -->
+    <div class="card" id="layers-card" style="margin-top:14px" data-hint="пробный доступ гостей к слоям">
+        <h3 data-i18n="adm.layers_title">☰ Пробный доступ к слоям</h3>
+        <p class="lead" data-i18n="adm.layers_lead">Сколько минут гость без регистрации может включать слои в терминале. 0 — слои открыты всем и всегда.</p>
+        <div class="row-actions">
+            <label class="bot-num"><span data-i18n="adm.layers_min">Минуты</span>
+                <input id="layers-min" type="number" min="0" max="1440" step="5"
+                       autocomplete="off"></label>
+            <button class="btn btn-primary" id="layers-save" type="button" data-i18n="adm.layers_save">Сохранить</button>
+            <button class="btn" id="layers-reset" type="button" data-i18n="adm.layers_reset_all">↺ Сбросить таймер всем</button>
+            <span class="meta" id="layers-status" role="status"></span>
+        </div>
+        <p class="meta" id="layers-stats"></p>
+        <p class="meta" id="layers-note"></p>
+    </div>
+
     <div class="card" style="margin-top:14px" data-hint="шапки и картинки постов">
         <h3>Сводка в канал — шапки и фото</h3>
         <p class="lead">Каждый пост берёт следующую шапку и картинку по кругу. Можно писать как блогер; <code>{h}</code> подставится как «4» (окно в часах). То же самое есть в боте: Админка → Шаблоны канала.</p>
         <div class="grid grid-2" style="margin-top:12px">
             <div>
                 <label>Новая шапка</label>
-                <textarea id="tpl-head-in" placeholder="☕ Пока вы пили кофе, лента уже намолотила кассу за {h}ч."></textarea>
+                <textarea id="tpl-head-in" data-i18n-skip placeholder="☕ Пока вы пили кофе, лента уже намолотила кассу за {h}ч."></textarea>
                 <div class="row-actions">
                     <button class="btn btn-primary" id="tpl-head-add" type="button">Добавить шапку</button>
                     <span class="meta" id="tpl-head-status"></span>
@@ -93,26 +163,36 @@
                 <ul class="tpl-list" id="tpl-heads"></ul>
             </div>
             <div>
-                <h4>📸 Фото постов в канал</h4>
-                <p class="meta">В пост уходит одно фото: набор листается от поста к посту — обложкой по очереди бывает каждое. Альбома нет: он валил все загруженные фото в один пост. Пусто — берутся картинки из комплекта.</p>
-                <div class="row-actions">
-                    <label class="btn btn-primary file-btn">
-                        Добавить фото
-                        <input id="tpl-photo-in" type="file" accept="image/jpeg,image/jpg,image/png,image/webp,image/*">
-                    </label>
-                    <span class="meta" id="tpl-photo-status">jpg, png, webp — до 12 МБ</span>
-                </div>
-                <div class="tpl-photos" id="tpl-photos"></div>
-                <h4 style="margin-top:14px">🗞 Фото дневного дайджеста</h4>
-                <p class="meta">Свои картинки для вечернего выпуска. Если пусто — дайджест возьмёт фото постов. Карусель та же.</p>
-                <div class="row-actions">
-                    <label class="btn btn-primary file-btn">
-                        Добавить фото
-                        <input id="tpl-photo-in-digest" type="file" accept="image/jpeg,image/jpg,image/png,image/webp,image/*">
-                    </label>
-                    <span class="meta" id="tpl-photo-status-digest">jpg, png, webp — до 12 МБ</span>
-                </div>
-                <div class="tpl-photos" id="tpl-photos-digest"></div>
+                <details class="tpl-fold" id="tpl-photos-fold" data-kind="post">
+                    <summary>
+                        <span class="tpl-fold-title">📸 Фото постов в канал</span>
+                        <span class="tpl-count" id="tpl-photos-count">—</span>
+                    </summary>
+                    <p class="meta">В пост уходит одно фото, и набор листается по кругу без повторов: обложкой идёт то фото, которое дольше всех не выходило, поэтому одинаковые картинки подряд не повторяются. Файлов можно выбрать сразу много — сохранятся все. Альбома нет: он валил все загруженные фото в один пост. Пусто — берутся картинки из комплекта.</p>
+                    <div class="row-actions">
+                        <label class="btn btn-primary file-btn">
+                            Добавить фото
+                            <input id="tpl-photo-in" type="file" multiple accept="image/jpeg,image/jpg,image/png,image/webp,image/*">
+                        </label>
+                        <span class="meta" id="tpl-photo-status">jpg, png, webp — до 12 МБ каждое, можно выбрать пачку</span>
+                    </div>
+                    <div class="tpl-photos" id="tpl-photos"></div>
+                </details>
+                <details class="tpl-fold" id="tpl-photos-fold-digest" data-kind="digest">
+                    <summary>
+                        <span class="tpl-fold-title">🗞 Фото дневного дайджеста</span>
+                        <span class="tpl-count" id="tpl-photos-count-digest">—</span>
+                    </summary>
+                    <p class="meta">Свои картинки для вечернего выпуска: тот же круг без повторов. Если пусто — дайджест возьмёт фото постов. Можно выбрать сразу много файлов.</p>
+                    <div class="row-actions">
+                        <label class="btn btn-primary file-btn">
+                            Добавить фото
+                            <input id="tpl-photo-in-digest" type="file" multiple accept="image/jpeg,image/jpg,image/png,image/webp,image/*">
+                        </label>
+                        <span class="meta" id="tpl-photo-status-digest">jpg, png, webp — до 12 МБ каждое, можно выбрать пачку</span>
+                    </div>
+                    <div class="tpl-photos" id="tpl-photos-digest"></div>
+                </details>
             </div>
         </div>
     </div>
@@ -145,6 +225,7 @@
                 <div class="row-actions">
                     <button class="btn btn-primary" id="bot-post" type="button">📰 Сводка в канал</button>
                     <button class="btn btn-primary" id="bot-daily" type="button">🗞 Дайджест за сутки</button>
+                    <button class="btn" id="bot-hourly" type="button">🕘 Сводка на сайт</button>
                 </div>
                 <p class="meta" id="bot-post-status"></p>
                 <h4 style="margin-top:16px">🕒 Частота сводки</h4>
@@ -259,10 +340,10 @@
         <p class="lead">Всё, что пользователи написали в кабинете кнопкой «По всем вопросам». Отвечайте
             здесь — ответ появится в их кабинете, а если Telegram привязан, придёт и в бота.</p>
         <div class="fb-layout" style="margin-top:12px">
-            <div class="fb-list" id="fb-list"><p class="meta">загружаю диалоги…</p></div>
+            <div class="fb-list" id="fb-list" data-i18n-skip><p class="meta">загружаю диалоги…</p></div>
             <div>
                 <div class="fb-conv-head" id="fb-conv-head">Выберите диалог слева</div>
-                <div class="fb-thread" id="fb-admin-thread"></div>
+                <div class="fb-thread" id="fb-admin-thread" data-i18n-skip></div>
                 <textarea class="fb-input" id="fb-admin-text" rows="3" maxlength="2000"
                           placeholder="Ответ пользователю…"></textarea>
                 <div class="row-actions">
@@ -279,7 +360,12 @@
         <div id="ai-prompt-blocks"><p class="meta">загружаю промты…</p></div>
     </div>
 </main>
-<script src="/static/account.js?v=fb9"></script>
+<script src="/static/i18n.pages.js"></script>
+<script src="/static/i18n.js"></script>
+<script src="/static/world-map.js?v=geo1"></script>
+<script src="/static/geo_map.js?v=geo2"></script>
+<script src="/static/presence.js?v=geo2"></script>
+<script src="/static/account.js?v=fb12"></script>
 <script src="/static/consent.js?v=consent1"></script>
 </body>
 </html>

@@ -3,10 +3,33 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LiqScope — дневной дайджест</title>
-<meta name="description" content="Дневной дайджест рынка: ликвидации, биржи, открытый интерес, цены и настроение рынка за сутки." data-i18n-meta="dig.meta">
-<link rel="icon" type="image/png" href="/static/logo.png">
-<link rel="stylesheet" href="/static/account.css?v=fb9">
+<title data-i18n="seo.digest.title">Дневной дайджест рынка крипто-фьючерсов</title>
+<meta name="description" content="Итоги дня на рынке крипто-фьючерсов: ликвидации, биржи, открытый интерес против оборота, цены топ-5 монет и настроение рынка." data-i18n-meta="seo.digest.desc">
+<meta name="robots" content="index,follow,max-image-preview:large">
+<meta name="theme-color" content="#060a12">
+<link rel="canonical" href="https://liqscope.online/digest">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="LiqScope">
+<meta property="og:url" content="https://liqscope.online/digest">
+<meta property="og:title" data-i18n-meta="seo.digest.title" content="Дневной дайджест рынка крипто-фьючерсов">
+<meta property="og:description" data-i18n-meta="seo.digest.desc" content="Итоги дня: ликвидации, биржи, открытый интерес, цены и настроение рынка.">
+<meta property="og:image" content="https://liqscope.online/static/og-cover.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:locale" content="ru_RU">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" data-i18n-meta="seo.digest.title" content="Дневной дайджест рынка крипто-фьючерсов">
+<meta name="twitter:description" data-i18n-meta="seo.digest.desc" content="Итоги дня: ликвидации, биржи, открытый интерес, цены и настроение рынка.">
+<meta name="twitter:image" content="https://liqscope.online/static/og-cover.png">
+<link rel="icon" href="/static/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="48x48" href="/static/icon-48.png">
+<link rel="icon" type="image/png" sizes="96x96" href="/static/icon-96.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/static/icon-192.png">
+<link rel="icon" type="image/png" sizes="144x144" href="/static/icon-144.png">
+<link rel="icon" type="image/png" sizes="512x512" href="/static/icon-512.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="stylesheet" href="/static/account.css?v=geo2">
 <style>
 .dig-wrap { max-width: 1180px; margin: 0 auto; padding: 26px 22px 70px; }
 .dig-head { margin: 8px 0 22px; }
@@ -69,6 +92,25 @@
 .cal-legend { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 0.7rem; margin-top: 9px; }
 .cal-legend i { width: 10px; height: 10px; border-radius: 3px; background: rgba(61, 112, 255, 0.35); border: 1px solid var(--border); display: inline-block; }
 .dig-article { padding: 24px 26px 30px; line-height: 1.62; }
+/* Обложка выпуска: то же фото, что ушло в Telegram — сайт тоже с фотоконтентом */
+.dig-cover { margin: 0 0 18px; }
+.dig-cover img {
+    display: block; width: 100%; max-height: 420px; object-fit: cover;
+    border-radius: 12px; border: 1px solid var(--border);
+    background: rgba(7, 10, 16, 0.6);
+}
+/* Миниатюра обложки в списке свежих выпусков */
+.dig-card.has-thumb { display: flex; gap: 11px; align-items: flex-start; padding: 10px 12px; }
+.dig-card .dc-thumb {
+    width: 62px; height: 62px; flex: 0 0 62px; object-fit: cover;
+    border-radius: 9px; border: 1px solid var(--border);
+    background: rgba(7, 10, 16, 0.6);
+}
+.dig-card .dc-text { min-width: 0; }
+@media (max-width: 560px) {
+    .dig-cover img { max-height: 260px; }
+    .dig-card .dc-thumb { width: 52px; height: 52px; flex-basis: 52px; }
+}
 .dig-article h2 { font-size: 1.35rem; margin-bottom: 6px; }
 .dig-article .art-meta { color: var(--muted); font-size: 0.8rem; margin-bottom: 18px; }
 .dig-article h3 { font-size: 1.02rem; margin: 22px 0 8px; }
@@ -105,6 +147,7 @@
             <option value="hi">🇮🇳 हिन्दी</option>
             <option value="es">🇪🇸 Español</option>
         </select>
+        <a class="btn btn-ghost btn-compact" href="/hourly">🕘 <span data-i18n="hour.title">Сводки по часам</span></a>
         <a class="btn btn-ghost btn-compact" href="/terminal">⚡ <span data-i18n="dig.back">К терминалу</span></a>
         <span id="nav-account"></span>
     </nav>
@@ -151,8 +194,10 @@
     </div>
 </main>
 
+<script src="/static/i18n.pages.js"></script>
 <script src="/static/i18n.js"></script>
 <script src="/static/digest.js?v=digest2"></script>
+<script src="/static/presence.js?v=geo2"></script>
 <script src="/static/consent.js?v=consent1"></script>
 </body>
 </html>

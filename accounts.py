@@ -36,6 +36,11 @@ BAD_PASSWORDS = {"password", "passw0rd", "12345678", "123456789", "1234567890",
                  "qwertyui", "qwerty123", "11111111", "пароль123", "пароль1234"}
 SCRYPT_N, SCRYPT_R, SCRYPT_P = 2 ** 14, 8, 1
 
+#: Пробный доступ к слоям графика для гостей без регистрации: 30 минут.
+#: Считается на сервере по гостю (vid, а без cookie — по связке ip+ua),
+#: поэтому перезагрузка страницы и чистка localStorage испытание не сбрасывают.
+LAYERS_TRIAL_SEC = 1800
+
 # Сколько живут ссылки в письмах
 EMAIL_TOKEN_TTL = {
     "verify": 24 * 3600,   # подтверждение почты — сутки
@@ -45,6 +50,12 @@ EMAIL_TOKEN_TTL = {
 }
 LINK_NONCE_TTL = 15 * 60   # привязка Telegram из кабинета
 CAPTCHA_TTL = 10 * 60      # арифметическая капча на регистрацию
+
+# Фото канала (шапки постов и обложки дайджеста). Раньше был общий потолок 40
+# на всё, и с пачкой в один запрос он упирался уже на седьмом фото. Теперь
+# лимит на рубрику и общий — загружать можно сразу много файлов.
+MAX_DIGEST_PHOTOS_KIND = 120
+MAX_DIGEST_PHOTOS = 200
 
 
 def normalize_email(raw: Any) -> str:
@@ -230,7 +241,11 @@ def public_user(row: sqlite3.Row | Dict[str, Any]) -> Dict[str, Any]:
         "first_name": d.get("first_name") or "",
         "last_name": d.get("last_name") or "",
         "photo_url": d.get("photo_url") or "",
-        "language": d.get("language") or "ru",
+        # Пустая строка = человек язык не выбирал. Не подставляем сюда «ru»:
+        # какой язык по умолчанию, решает бот (bot_i18n.DEFAULT_LANG) — сейчас
+        # это английский, а русский остаётся тем, кто выбрал его сам или пришёл
+        # с русской локалью Telegram.
+        "language": d.get("language") or "",
         "lang_manual": int(d.get("lang_manual") or 0),
         "is_admin": bool(d.get("is_admin")),
         "is_banned": bool(d.get("is_banned")),
@@ -377,6 +392,27 @@ class Store:
                     bot INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS idx_visits_ts ON visits(ts);
+                CREATE TABLE IF NOT EXISTS geo_cache (
+                    ip_hash TEXT PRIMARY KEY,
+                    country TEXT NOT NULL DEFAULT '',
+                    country_name TEXT,
+                    ts REAL NOT NULL,
+                    src TEXT
+                );
+                CREATE TABLE IF NOT EXISTS presence (
+                    vid TEXT PRIMARY KEY,
+                    first_ts REAL NOT NULL,
+                    ts REAL NOT NULL,
+                    user_id INTEGER,
+                    country TEXT,
+                    country_name TEXT,
+                    source TEXT,
+                    source_kind TEXT,
+                    path TEXT,
+                    ua TEXT,
+                    bot INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_presence_ts ON presence(ts);
                 CREATE TABLE IF NOT EXISTS settings (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
@@ -416,6 +452,7 @@ class Store:
                     path TEXT NOT NULL,
                     name TEXT,
                     kind TEXT DEFAULT 'post',
+                    used_at REAL DEFAULT 0,
                     created_at REAL NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS ads (
@@ -463,6 +500,15 @@ class Store:
                     window_min INTEGER NOT NULL,
                     detail TEXT
                 );
+                CREATE TABLE IF NOT EXISTS layer_trials (
+                    who TEXT PRIMARY KEY,
+                    started_at REAL NOT NULL,
+                    last_seen REAL NOT NULL,
+                    hits INTEGER NOT NULL DEFAULT 0,
+                    user_id INTEGER
+                );
+                CREATE INDEX IF NOT EXISTS idx_layer_trials_started
+                    ON layer_trials(started_at);
                 CREATE INDEX IF NOT EXISTS idx_alert_user_ts ON alert_events(user_id, ts);
                 CREATE INDEX IF NOT EXISTS idx_alert_cool ON alert_events(user_id, metric, symbol, ts);
                 """
@@ -537,16 +583,27 @@ class Store:
                     self._db.execute(
                         "ALTER TABLE visits ADD COLUMN bot INTEGER NOT NULL DEFAULT 0")
                 self._db.execute("UPDATE visits SET bot=0 WHERE bot IS NULL")
+                # география и источник перехода: колонки появились позже,
+                # у старых записей они пустые — это честно, страна неизвестна
+                for col in ("country", "country_name", "country_src",
+                            "source", "source_kind"):
+                    if cols and col not in cols:
+                        self._db.execute(f"ALTER TABLE visits ADD COLUMN {col} TEXT")
                 self._db.commit()
         except Exception as e:                    # noqa: BLE001
             log.debug("визиты: миграция ua/bot: %s", e)
 
     def _migrate_digest_photos(self) -> None:
-        """Колонка kind: фото для сводки постов или для дневного дайджеста.
+        """Колонки фото канала: рубрика (kind) и когда фото вышло (used_at).
 
-        Раньше картинки были одни на всё: и в посты раз в N часов, и в вечерний
+        ``kind``: фото для сводки постов или для дневного дайджеста. Раньше
+        картинки были одни на всё: и в посты раз в N часов, и в вечерний
         выпуск. Теперь рубрика у фото своя, а старые строки считаем постовыми —
         как они и работали.
+
+        ``used_at``: обложки листаются «по кругу без повторов» — перед постом
+        берём фото, которое дольше всех не выходило. По нулю у старых строк
+        видно, что они ещё не участвовали: круг начнётся с них.
         """
         try:
             with self._lock:
@@ -555,6 +612,10 @@ class Store:
                 if cols and "kind" not in cols:
                     self._db.execute(
                         "ALTER TABLE digest_photos ADD COLUMN kind TEXT DEFAULT 'post'")
+                    self._db.commit()
+                if cols and "used_at" not in cols:
+                    self._db.execute(
+                        "ALTER TABLE digest_photos ADD COLUMN used_at REAL DEFAULT 0")
                     self._db.commit()
                 self._db.execute(
                     "UPDATE digest_photos SET kind='post' WHERE kind IS NULL OR kind=''")
@@ -636,7 +697,9 @@ class Store:
         return 0
 
     def create_email_user(self, email: str, password_hash: str = "",
-                          first_name: str = "", language: str = "ru") -> Dict[str, Any]:
+                          first_name: str = "", language: str = "") -> Dict[str, Any]:
+        # language пустой = язык не выбирали: решает тот, кто отправляет
+        # (бот — язык по умолчанию, страницы сайта — язык запроса)
         """Регистрация по почте. Адрес занят → {"ok": False, "error": "taken"}."""
         email = normalize_email(email)
         if not valid_email(email):
@@ -654,7 +717,7 @@ class Store:
                     "UPDATE users SET password_hash=?, first_name=?, language=?,"
                     " is_admin=?, last_seen=? WHERE id=?",
                     (password_hash or row["password_hash"], (first_name or "")[:64],
-                     (language or "ru")[:8], is_admin or int(row["is_admin"]), now,
+                     (language or "")[:8], is_admin or int(row["is_admin"]), now,
                      int(row["id"])),
                 )
             else:
@@ -663,7 +726,7 @@ class Store:
                     "first_name,language,is_admin,is_banned,created_at,last_seen,login_count)"
                     " VALUES(NULL,?,?,0,?,?,?,0,?,?,0)",
                     (email, password_hash, (first_name or "")[:64],
-                     (language or "ru")[:8], is_admin, now, now),
+                     (language or "")[:8], is_admin, now, now),
                 )
             self._db.commit()
             row = self._db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
@@ -935,7 +998,7 @@ class Store:
             (tg_id, _now(),
              (tg.get("username") or "")[:64], (tg.get("first_name") or "")[:64],
              (tg.get("last_name") or "")[:64], (tg.get("photo_url") or "")[:500],
-             (tg.get("language_code") or tg.get("language") or "ru")[:8],
+             (tg.get("language_code") or tg.get("language") or "")[:8],
              self._admin_flag(tg_id=tg_id), _now(), user_id),
         )
         self._db.commit()
@@ -1067,7 +1130,7 @@ class Store:
         first = (tg.get("first_name") or "")[:64]
         last = (tg.get("last_name") or "")[:64]
         photo = (tg.get("photo_url") or "")[:500]
-        lang = (tg.get("language_code") or tg.get("language") or "ru")[:8]
+        lang = (tg.get("language_code") or tg.get("language") or "")[:8]
         now = _now()
         with self._lock:
             row = self._db.execute("SELECT * FROM users WHERE tg_id=?", (tg_id,)).fetchone()
@@ -1330,25 +1393,39 @@ class Store:
 
     # ----- visits ---------------------------------------------------------
     def record_visit(self, path: str, vid: str, user_id: Optional[int], ip_hash: str,
-                     ua: str = "", bot: bool = False) -> None:
+                     ua: str = "", bot: bool = False, country: str = "",
+                     country_name: str = "", country_src: str = "",
+                     source: str = "", source_kind: str = "") -> int:
         """Записать просмотр страницы.
 
         ``bot`` — служебный запрос (краулер, превью мессенджера, скрипт): в
         счётчики просмотров и посетителей он не идёт, но хранится — админ
         видит, сколько такого шума отсеяно.
+
+        ``country``/``source`` — откуда гость и как нашёл сайт: у первого
+        запроса страну иногда узнать не успеваем (IP спрашивают у внешнего
+        сервиса), поэтому возвращаем id строки — по нему страна допишется,
+        когда ответ придёт (``set_visit_country``).
         """
         path = (path or "/")[:120]
         with self._lock:
-            self._db.execute(
-                "INSERT INTO visits(ts,path,vid,user_id,ip_hash,ua,bot)"
-                " VALUES(?,?,?,?,?,?,?)",
+            cur = self._db.execute(
+                "INSERT INTO visits(ts,path,vid,user_id,ip_hash,ua,bot,country,"
+                "country_name,country_src,source,source_kind)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (_now(), path, ("" if bot else (vid or ""))[:40], user_id,
-                 ip_hash, (ua or "")[:180], 1 if bot else 0),
+                 ip_hash, (ua or "")[:180], 1 if bot else 0,
+                 (country or "")[:2].upper(), (country_name or "")[:60],
+                 (country_src or "")[:16], (source or "")[:60],
+                 (source_kind or "")[:16]),
             )
+            visit_id = int(cur.lastrowid or 0)
             # не копим бесконечно: раз в ~200 визитов чистим старше 90 дней
             if secrets.randbelow(200) == 0:
                 self._db.execute("DELETE FROM visits WHERE ts<?", (_now() - 90 * 86400,))
+                self._db.execute("DELETE FROM presence WHERE ts<?", (_now() - 30 * 86400,))
             self._db.commit()
+        return visit_id
 
     def visit_vid(self, ip_hash: str, ua: str, window_sec: int = 86400) -> str:
         """vid, уже выданный этой связке ip+ua: браузер без cookie не «множится».
@@ -1372,6 +1449,119 @@ class Store:
             log.debug("визиты: поиск vid: %s", e)
             return ""
         return str(row["vid"] or "") if row else ""
+
+    # ----- пробный доступ к слоям (гость без регистрации) -------------------
+    def layer_trial(self, who: str, user_id: Optional[int] = None,
+                    limit_sec: int = LAYERS_TRIAL_SEC,
+                    now: Optional[float] = None) -> Dict[str, Any]:
+        """Сколько пробного времени осталось гостю: 30 минут и всё.
+
+        Считает сервер, а не браузер: строка на гостя (``who`` — vid, а если
+        cookie нет, связка ip+ua) заводится при первом обращении и живёт
+        дальше, поэтому перезагрузка страницы, чистка localStorage или другой
+        браузер испытание не начинают заново.
+
+        Зарегистрированному пробник не нужен: у него слои без ограничений.
+        """
+        limit = max(0, int(limit_sec))
+        if user_id:
+            return {"tracked": False, "guest": False, "allowed": True, "left": None,
+                    "limit": limit, "started": 0.0, "hits": 0, "expired": False,
+                    "ended": 0.0}
+        who = str(who or "")[:80]
+        if not who:
+            # гость без cookie: считать не по чему, не мешаем смотреть
+            return {"tracked": False, "guest": True, "allowed": True, "left": None,
+                    "limit": limit, "started": 0.0, "hits": 0, "expired": False,
+                    "ended": 0.0}
+        now = float(now if now is not None else _now())
+        with self._lock:
+            row = self._db.execute(
+                "SELECT started_at, hits FROM layer_trials WHERE who=?", (who,)
+            ).fetchone()
+            if row is None:
+                self._db.execute(
+                    "INSERT INTO layer_trials(who,started_at,last_seen,hits) "
+                    "VALUES(?,?,?,1)", (who, now, now))
+                started, hits = now, 1
+            else:
+                started, hits = float(row["started_at"]), int(row["hits"]) + 1
+                self._db.execute(
+                    "UPDATE layer_trials SET last_seen=?, hits=? WHERE who=?",
+                    (now, hits, who))
+                # редкая чистка: таблица маленькая, но пусть не растёт вечно
+                if secrets.randbelow(200) == 0:
+                    self._db.execute("DELETE FROM layer_trials WHERE last_seen<?",
+                                     (now - 120 * 86400,))
+            self._db.commit()
+        left = max(0.0, started + limit - now) if limit else 0.0
+        return {"tracked": True, "guest": True, "allowed": (left > 0) or not limit,
+                "left": round(left, 1), "limit": limit, "started": started,
+                "hits": hits, "expired": bool(limit and left <= 0),
+                "ended": round(started + limit, 1) if limit else 0.0}
+
+    def layer_trial_stats(self, now: Optional[float] = None,
+                          limit_sec: int = LAYERS_TRIAL_SEC) -> Dict[str, Any]:
+        """Сводка испытаний: сколько гостей признали, сколько уже упёрлось.
+
+        Нужна админке: видно, сколько людей знакомятся со слоями и сколько
+        дошло до стены регистрации.
+        """
+        now = float(now if now is not None else _now())
+        edge = now - max(0, int(limit_sec))
+        with self._lock:
+            row = self._db.execute(
+                "SELECT COUNT(*) AS n, SUM(started_at>=?) AS active FROM layer_trials",
+                (edge,)).fetchone()
+        total = int((row or {})["n"] or 0) if row is not None else 0
+        active = int((row or {})["active"] or 0) if row is not None else 0
+        return {"total": total, "active": active, "expired": max(0, total - active),
+                "limit_sec": int(limit_sec)}
+
+    def layer_trial_reset(self, who: str = "") -> int:
+        """Сбросить пробный доступ к слоям: гостю (``who``) или всем (пусто).
+
+        Удаляем строку испытания — следующий запрос гостя заводит её заново и
+        получает полный лимит с текущей секунды. Админу это нужно, чтобы дать
+        человеку ещё времени, не меняя лимит для всех: сброс не выдаёт
+        бессрочный доступ, таймер просто начинается сначала.
+
+        Возвращаем, сколько строк удалили.
+        """
+        who = str(who or "").strip()[:80]
+        with self._lock:
+            if who:
+                cur = self._db.execute("DELETE FROM layer_trials WHERE who=?", (who,))
+            else:
+                cur = self._db.execute("DELETE FROM layer_trials")
+            self._db.commit()
+            return int(cur.rowcount or 0)
+
+    def layer_trials_of(self, whos: List[str]) -> Dict[str, Dict[str, Any]]:
+        """Что известно о пробниках этих гостей: когда пришли и сколько заходов.
+
+        Админке это нужно, чтобы рядом с живым гостем показать остаток пробного
+        доступа и кнопку «дать ещё»: ``who`` — тот же ключ, что и в
+        ``layer_trial`` (``v:<vid>`` у гостя с cookie, ``i:<хеш>`` без неё).
+        """
+        keys = [str(w or "")[:80] for w in (whos or []) if w]
+        if not keys:
+            return {}
+        out: Dict[str, Dict[str, Any]] = {}
+        marks = ",".join("?" for _ in keys)
+        with self._lock:
+            try:
+                rows = self._db.execute(
+                    f"SELECT who, started_at, last_seen, hits FROM layer_trials"
+                    f" WHERE who IN ({marks})", tuple(keys)).fetchall()
+            except Exception as e:                        # noqa: BLE001
+                log.debug("слои: пробники гостей не прочитались: %s", e)
+                return {}
+        for r in rows:
+            out[str(r["who"])] = {"started_at": float(r["started_at"] or 0.0),
+                                  "last_seen": float(r["last_seen"] or 0.0),
+                                  "hits": int(r["hits"] or 0)}
+        return out
 
     def visit_stats(self, days: int = 14) -> Dict[str, Any]:
         days = max(1, min(int(days), 90))
@@ -1409,6 +1599,356 @@ class Store:
             "today_bots": today_bots,
             "days": by_day,
             "paths": [{"path": r["path"], "n": r["n"]} for r in top_paths],
+        }
+
+    # ----- стирание статистики --------------------------------------------
+    def clear_visits(self, include_cache: bool = False) -> Dict[str, int]:
+        """Стереть статистику посещений: визиты, присутствие, (по желанию) кэш.
+
+        Админу это нужно, когда цифры надо начать с чистого листа — например,
+        после проверок, накрутки или переезда сайта. Что именно исчезает:
+
+        * ``visits`` — переходы, уникальные, график за две недели, страны,
+          источники и время на сайте;
+        * ``presence`` — «кто сейчас на сайте» и долгие визиты;
+        * ``geo_cache`` — только по флагу: это не статистика, а кэш «адрес →
+          страна». Его потеря безобидна, но после стирания страна каждого
+          адреса спрашивается у внешнего сервиса заново.
+
+        Аккаунты, сервисы, подписки и письма остаются на месте: стираются
+        только измерения посещаемости. Возвращаем, сколько строк удалили, —
+        админка показывает это в подтверждении.
+        """
+        counts = {"visits": 0, "presence": 0, "geo_cache": 0}
+        with self._lock:
+            pairs = [("visits", "DELETE FROM visits"),
+                     ("presence", "DELETE FROM presence")]
+            if include_cache:
+                pairs.append(("geo_cache", "DELETE FROM geo_cache"))
+            for name, sql in pairs:
+                try:
+                    counts[name] = int(self._db.execute(sql).rowcount or 0)
+                except Exception:                             # noqa: BLE001
+                    # базы прошлых версий: таблицы присутствия или кэша
+                    # могло ещё не быть — стирать нечего, и это не ошибка
+                    counts[name] = 0
+            self._db.commit()
+            # VACUUM после DELETE не запускаем: файл тот же, а блокировка на
+            # время уборки задержала бы запись новых визитов
+        return counts
+
+    def visits_volume(self) -> Dict[str, int]:
+        """Сколько сейчас лежит в базе: показываем в подтверждении стирания."""
+        with self._lock:
+            out = {}
+            for name, sql in (("visits", "SELECT COUNT(*) FROM visits"),
+                              ("presence", "SELECT COUNT(*) FROM presence"),
+                              ("geo_cache", "SELECT COUNT(*) FROM geo_cache")):
+                try:
+                    out[name] = int(self._db.execute(sql).fetchone()[0] or 0)
+                except Exception:                             # noqa: BLE001
+                    out[name] = 0
+        return out
+
+    # ----- география посещений -------------------------------------------
+    def geo_cached(self, ip_hash: str, ttl_sec: float = 0.0) -> Optional[Dict[str, Any]]:
+        """Что уже знаем об этом адресе: страна и когда спрашивали.
+
+        Кэш нужен, чтобы не спрашивать внешний сервис на каждый визит: адрес
+        спрашивают один раз, дальше страна берётся из базы. ``cc`` может быть
+        пустым — это тоже ответ («страна неизвестна»), и его держим недолго.
+        """
+        if not ip_hash:
+            return None
+        with self._lock:
+            row = self._db.execute(
+                "SELECT country, country_name, ts, src FROM geo_cache WHERE ip_hash=?",
+                (ip_hash,),
+            ).fetchone()
+        if not row:
+            return None
+        if _now() - float(row["ts"] or 0) > float(ttl_sec or 0.0):
+            return None
+        return {"cc": (row["country"] or "").upper(),
+                "name": row["country_name"] or "",
+                "src": row["src"] or "cache",
+                "ts": float(row["ts"] or 0),
+                "fresh": bool(ttl_sec)}
+
+    def geo_remember(self, ip_hash: str, cc: str, name: str = "",
+                     src: str = "provider") -> None:
+        """Запомнить страну адреса (в том числе «неизвестно»)."""
+        if not ip_hash:
+            return
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO geo_cache(ip_hash,country,country_name,ts,src)"
+                " VALUES(?,?,?,?,?)"
+                " ON CONFLICT(ip_hash) DO UPDATE SET country=excluded.country,"
+                " country_name=excluded.country_name, ts=excluded.ts, src=excluded.src",
+                (ip_hash, (cc or "")[:2].upper(), (name or "")[:60], _now(),
+                 (src or "")[:16]),
+            )
+            if secrets.randbelow(200) == 0:
+                self._db.execute("DELETE FROM geo_cache WHERE ts<?",
+                                 (_now() - 180 * 86400,))
+            self._db.commit()
+
+    def set_visit_country(self, visit_id: int, cc: str, name: str = "",
+                          src: str = "") -> None:
+        """Дописать страну в уже записанный визит (ответ пришёл позже визита)."""
+        if not visit_id or not cc:
+            return
+        with self._lock:
+            self._db.execute(
+                "UPDATE visits SET country=?, country_name=?, country_src=?"
+                " WHERE id=?",
+                ((cc or "")[:2].upper(), (name or "")[:60], (src or "")[:16],
+                 int(visit_id)),
+            )
+            self._db.commit()
+
+    def touch_presence(self, vid: str, user_id: Optional[int] = None,
+                       country: str = "", country_name: str = "",
+                       source: str = "", source_kind: str = "",
+                       path: str = "", ua: str = "", bot: bool = False,
+                       keep: float = 30 * 86400) -> Dict[str, Any]:
+        """Отметить, что гость сейчас на сайте: одно «сердцебиение» на гостя.
+
+        Строка одна на гостя: ``first_ts`` — когда он пришёл, ``ts`` — когда
+        последний раз подавал признаки жизни. Отсюда и «сколько уже на сайте»,
+        и «кто онлайн» (последние :data:`ONLINE_SEC` секунд). Страну и источник
+        заполняем один раз — первый заход важнее повторных.
+
+        ``keep`` — сколько дней держим строки: чистим их в том же запросе
+        (редко, чтобы не делать лишнюю работу на каждом пинге).
+        """
+        vid = (vid or "")[:40]
+        if not vid:
+            return {}
+        now = _now()
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO presence(vid,first_ts,ts,user_id,country,country_name,"
+                "source,source_kind,path,ua,bot) VALUES(?,?,?,?,?,?,?,?,?,?,?)"
+                " ON CONFLICT(vid) DO UPDATE SET ts=excluded.ts,"
+                " user_id=COALESCE(excluded.user_id, presence.user_id),"
+                " country=CASE WHEN COALESCE(presence.country,'')=''"
+                "   THEN excluded.country ELSE presence.country END,"
+                " country_name=CASE WHEN COALESCE(presence.country_name,'')=''"
+                "   THEN excluded.country_name ELSE presence.country_name END,"
+                " source=CASE WHEN COALESCE(presence.source,'')=''"
+                "   THEN excluded.source ELSE presence.source END,"
+                " source_kind=CASE WHEN COALESCE(presence.source_kind,'')=''"
+                "   THEN excluded.source_kind ELSE presence.source_kind END,"
+                " path=excluded.path, ua=excluded.ua, bot=excluded.bot",
+                (vid, now, now, user_id, (country or "")[:2].upper(),
+                 (country_name or "")[:60], (source or "")[:60],
+                 (source_kind or "")[:16], (path or "")[:120], (ua or "")[:180],
+                 1 if bot else 0),
+            )
+            if secrets.randbelow(200) == 0:
+                self._db.execute("DELETE FROM presence WHERE ts<?",
+                                 (now - float(keep or 30 * 86400),))
+            self._db.commit()
+            row = self._db.execute(
+                "SELECT * FROM presence WHERE vid=?", (vid,)).fetchone()
+        out = dict(row) if row else {}
+        if out:
+            out["sec"] = max(0.0, now - float(out.get("first_ts") or now))
+        return out
+
+    def set_presence_country(self, vid: str, cc: str, name: str = "") -> None:
+        """Дописать страну в строку присутствия, если её там ещё нет."""
+        if not vid or not cc:
+            return
+        with self._lock:
+            self._db.execute(
+                "UPDATE presence SET country=?, country_name=?"
+                " WHERE vid=? AND COALESCE(country,'')=''",
+                ((cc or "")[:2].upper(), (name or "")[:60], (vid or "")[:40]),
+            )
+            self._db.commit()
+
+    def geo_online(self, window_sec: float = 300.0,
+                   limit: int = 200) -> List[Dict[str, Any]]:
+        """Кто сейчас на сайте: свежие «сердцебиения» из presence.
+
+        ``window_sec`` берём как есть (пол — одна секунда): окно выбирает тот,
+        кто спрашивает — у админки оно своё (``web_geo.ONLINE_SEC``).
+        """
+        since = _now() - max(1.0, float(window_sec))
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM presence WHERE ts>=? AND bot=0"
+                " ORDER BY ts DESC LIMIT ?", (since, int(limit)),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def geo_stats(self, hours: float = 24.0, online_sec: float = 300.0,
+                  dots: int = 600) -> Dict[str, Any]:
+        """Картина посещаемости окна: гости, страны, источники, время на сайте.
+
+        Возвращаем «сырьё» без геометрии (широту и долготу стран добавляет
+        слой выше, у него есть справочник центроидов):
+
+        * ``guests`` — по одной строке на гостя: страна, откуда пришёл, сколько
+          визитов и сколько уже провёл на сайте (от первого визита до
+          последнего «сердцебиения»);
+        * ``points`` — те же гости, но только для карты (ограничение ``dots``);
+        * ``online`` — кто подал признак жизни за ``online_sec`` секунд;
+        * ``countries``/``sources`` — сводка «откуда» и «из какого источника».
+
+        Источник гостя — самый свежий *внешний* переход: внутренние переходы
+        по сайту (клики по меню) в таблице источников смысла не имеют.
+        """
+        now = _now()
+        hours = max(1.0, min(float(hours or 24.0), 24 * 90.0))
+        since = now - hours * 3600.0
+        online_window = max(30.0, float(online_sec))
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT vid, MAX(user_id) AS user_id, MIN(ts) AS first_ts,"
+                " MAX(ts) AS last_ts, COUNT(*) AS views"
+                " FROM visits WHERE ts>=? AND bot=0 AND COALESCE(vid,'')!=''"
+                " GROUP BY vid ORDER BY last_ts DESC LIMIT ?",
+                (since, max(1, int(dots) * 4)),
+            ).fetchall()
+            # страна гостя: код и имя берём из ОДНОЙ строки визита. Если взять
+            # MAX(country) и MAX(country_name) по отдельности, код и имя
+            # разъедутся (у одного визита страна FI, у другого DE) — и на
+            # карте «Финляндия» подпишется как «Spain». Берём первый известный
+            # визит: важно, откуда гость пришёл, а не куда его потом занесло.
+            cc_rows = self._db.execute(
+                "SELECT vid, ts, COALESCE(country,'') AS country,"
+                " COALESCE(country_name,'') AS country_name FROM visits"
+                " WHERE ts>=? AND bot=0 AND COALESCE(vid,'')!=''"
+                " AND COALESCE(country,'')!='' ORDER BY ts ASC LIMIT 20000",
+                (since,)).fetchall()
+            src_rows = self._db.execute(
+                "SELECT vid, ts, COALESCE(source,'') AS source,"
+                " COALESCE(source_kind,'') AS source_kind FROM visits"
+                " WHERE ts>=? AND bot=0 AND COALESCE(vid,'')!=''"
+                " AND COALESCE(source_kind,'') NOT IN ('', 'internal')"
+                " ORDER BY ts DESC LIMIT 20000", (since,)).fetchall()
+            pres = self._db.execute(
+                "SELECT vid, first_ts, ts, country, country_name, source,"
+                " source_kind, path, user_id FROM presence WHERE ts>=?",
+                (since,)).fetchall()
+            anon = self._db.execute(
+                "SELECT COUNT(*) AS n FROM visits WHERE ts>=? AND bot=0"
+                " AND COALESCE(vid,'')=''", (since,)).fetchone()
+            bots = self._db.execute(
+                "SELECT COUNT(*) AS n FROM visits WHERE ts>=? AND bot=1",
+                (since,)).fetchone()
+            paths = self._db.execute(
+                "SELECT path, COUNT(*) AS n FROM visits WHERE ts>=? AND bot=0"
+                " GROUP BY path ORDER BY n DESC LIMIT 8", (since,)).fetchall()
+        # самый свежий внешний переход на гостя (строки уже отсортированы)
+        src_map: Dict[str, Dict[str, str]] = {}
+        for r in src_rows:
+            src_map.setdefault(str(r["vid"]), {"source": r["source"],
+                                               "kind": r["source_kind"]})
+        # первая известная страна гостя — код и имя из той же строки
+        cc_map: Dict[str, Dict[str, str]] = {}
+        for r in cc_rows:
+            cc_map.setdefault(str(r["vid"]), {
+                "country": (r["country"] or "").upper(),
+                "country_name": r["country_name"] or ""})
+        pmap = {str(r["vid"]): dict(r) for r in pres}
+
+        def _src(vid: str, p: Dict[str, Any]) -> Dict[str, str]:
+            """Источник гостя: сначала строка присутствия, потом история визитов."""
+            if p.get("source"):
+                return {"source": p.get("source") or "",
+                        "kind": p.get("source_kind") or "direct"}
+            return src_map.get(vid) or {"source": "", "kind": "direct"}
+
+        guests: List[Dict[str, Any]] = []
+        for r in rows:
+            vid = str(r["vid"] or "")
+            v: Dict[str, Any] = dict(r)
+            p = pmap.get(vid) or {}
+            online = bool(p) and now - float(p.get("ts") or 0) <= online_window
+            last = float(v.get("last_ts") or 0)
+            if online:
+                last = max(last, float(p.get("ts") or 0))
+            cc = cc_map.get(vid) or {}
+            v["country"] = (p.get("country") or cc.get("country") or "").upper()
+            v["country_name"] = p.get("country_name") or cc.get("country_name") or ""
+            src = _src(vid, p)
+            v["source"], v["source_kind"] = src["source"], src["kind"]
+            v["online"] = online
+            v["first_ts"] = float(v.get("first_ts") or 0)
+            v["last_ts"] = last
+            v["sec"] = max(0.0, last - v["first_ts"])
+            v["path"] = (p.get("path") or "")
+            guests.append(v)
+        # кто-то только открыл страницу и уже прислал «сердцебиение», а визит
+        # запишется в фоне — его в списке гостей ещё нет, но онлайн он есть
+        known = {str(g["vid"]) for g in guests}
+        for vid, p in pmap.items():
+            if vid in known or now - float(p.get("ts") or 0) > online_window:
+                continue
+            guests.append({
+                "vid": vid, "user_id": p.get("user_id"),
+                "first_ts": float(p.get("first_ts") or 0),
+                "last_ts": float(p.get("ts") or 0),
+                "views": 0, "country": p.get("country") or "",
+                "country_name": p.get("country_name") or "",
+                "source": (p.get("source") or ""),
+                "source_kind": (p.get("source_kind") or "direct"),
+                "path": p.get("path") or "", "online": True,
+                "sec": max(0.0, now - float(p.get("first_ts") or now)),
+            })
+        guests.sort(key=lambda g: g["last_ts"], reverse=True)
+        countries: Dict[str, Dict[str, Any]] = {}
+        sources: Dict[Any, Dict[str, Any]] = {}
+        for g in guests:
+            c = countries.setdefault(g["country"] or "", {
+                "country": g["country"] or "", "name": g["country_name"] or "",
+                "visitors": 0, "views": 0, "online": 0, "sec": 0.0, "last": 0.0})
+            c["visitors"] += 1
+            c["views"] += int(g["views"] or 0)
+            c["sec"] += float(g["sec"] or 0)
+            c["online"] += 1 if g["online"] else 0
+            c["last"] = max(c["last"], g["last_ts"])
+            key = (g["source"], g["source_kind"])
+            b = sources.setdefault(key, {"source": g["source"],
+                                         "kind": g["source_kind"],
+                                         "visitors": 0, "views": 0, "online": 0,
+                                         "last": 0.0})
+            b["visitors"] += 1
+            b["views"] += int(g["views"] or 0)
+            b["online"] += 1 if g["online"] else 0
+            b["last"] = max(b["last"], g["last_ts"])
+        for c in countries.values():
+            c["avg_sec"] = (c["sec"] / c["visitors"]) if c["visitors"] else 0.0
+        total_sec = sum(float(g["sec"] or 0) for g in guests)
+        return {
+            "now": now,
+            "hours": hours,
+            "online_sec": online_window,
+            "guests": guests,
+            "points": guests[:max(1, int(dots))],
+            "online": [g for g in guests if g["online"]],
+            "countries": sorted(countries.values(),
+                                key=lambda b: (-b["visitors"], -b["last"])),
+            "sources": sorted(sources.values(),
+                              key=lambda b: (-b["visitors"], -b["last"])),
+            "long": sorted([g for g in guests if float(g["sec"] or 0) >= 60],
+                           key=lambda g: g["sec"], reverse=True)[:10],
+            "paths": [{"path": r["path"], "n": r["n"]} for r in paths],
+            "totals": {
+                "online": len([g for g in guests if g["online"]]),
+                "visitors": len(guests),
+                "views": sum(int(g["views"] or 0) for g in guests),
+                "anon_views": int((anon or {"n": 0})["n"] or 0),
+                "bots": int((bots or {"n": 0})["n"] or 0),
+                "countries": len([c for c in countries if c]),
+                "avg_sec": (total_sec / len(guests)) if guests else 0.0,
+                "long_60": len([g for g in guests if float(g["sec"] or 0) >= 60]),
+            },
         }
 
     # ----- services / settings / audit ------------------------------------
@@ -1570,17 +2110,20 @@ class Store:
         """Фото канала: ``kind`` — "post" (сводка), "digest" (дневной выпуск).
 
         Пустой ``kind`` — все фото: так их видит админка и старые вызовы.
+        ``used_at`` — когда фото последний раз было обложкой поста.
         """
         kind = (kind or "").strip()
         with self._lock:
             if kind:
                 rows = self._db.execute(
-                    "SELECT id, path, name, kind, created_at FROM digest_photos"
+                    "SELECT id, path, name, kind, used_at, created_at"
+                    " FROM digest_photos"
                     " WHERE COALESCE(kind,'post')=? ORDER BY id", (kind,)
                 ).fetchall()
             else:
                 rows = self._db.execute(
-                    "SELECT id, path, name, kind, created_at FROM digest_photos"
+                    "SELECT id, path, name, kind, used_at, created_at"
+                    " FROM digest_photos"
                     " ORDER BY id"
                 ).fetchall()
         out = []
@@ -1589,6 +2132,87 @@ class Store:
             d["exists"] = bool(d.get("path") and os.path.isfile(d["path"]))
             out.append(d)
         return out
+
+    def digest_photo_counts(self) -> Dict[str, int]:
+        """Сколько фото в каждой рубрике и всего — для счётчика в админке."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT COALESCE(kind,'post') AS k, COUNT(*) AS n"
+                " FROM digest_photos GROUP BY k"
+            ).fetchall()
+        out = {"post": 0, "digest": 0}
+        for r in rows:
+            out[str(r["k"] or "post")] = int(r["n"])
+        out["total"] = sum(out.values())
+        return out
+
+    def digest_photo_limits(self) -> Dict[str, int]:
+        """Лимиты загрузки: сколько всего и сколько на каждую рубрику."""
+        return {"total": MAX_DIGEST_PHOTOS, "kind": MAX_DIGEST_PHOTOS_KIND}
+
+    def _photo_round_start(self, key: str) -> float:
+        """Когда начался текущий круг обложек (0 — круга ещё не было)."""
+        with self._lock:
+            row = self._db.execute("SELECT value FROM settings WHERE key=?",
+                                   (key,)).fetchone()
+        try:
+            return float((row["value"] if row else "") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _photo_round_new(self, key: str, when: float) -> None:
+        """Отметить начало нового круга. Пишем напрямую: это служебная метка,
+        ей не место в журнале действий (set_setting пишет туда запись)."""
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO settings(key,value) VALUES(?,?)"
+                " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, repr(float(when))),
+            )
+            self._db.commit()
+
+    def pick_digest_photo(self, kind: str = "", actor_id: Optional[int] = None) -> str:
+        """Обложка поста по кругу без повторов.
+
+        У каждого фото помним, когда оно последний раз было обложкой
+        (``used_at``), а у рубрики — когда начался текущий круг. Из фото,
+        которые в этом круге ещё не выходили, берём случайное: весь набор
+        проходит по разу, прежде чем что-то повторится, и каждый новый круг
+        начинается с нового порядка — «однообразия» нет. Пустая строка — фото
+        нет (или файлы пропали с диска).
+        """
+        kind = str(kind or "").strip().lower()
+        if kind not in ("post", "digest"):
+            kind = ""
+        key = f"digest_photo_round_{kind or 'all'}"
+        with self._lock:
+            if kind:
+                rows = self._db.execute(
+                    "SELECT id, path, used_at FROM digest_photos"
+                    " WHERE COALESCE(kind,'post')=? ORDER BY id", (kind,)
+                ).fetchall()
+            else:
+                rows = self._db.execute(
+                    "SELECT id, path, used_at FROM digest_photos ORDER BY id"
+                ).fetchall()
+        live = [r for r in rows if r["path"] and os.path.isfile(r["path"])]
+        if not live:
+            return ""
+        start = self._photo_round_start(key)
+        pool = [r for r in live if float(r["used_at"] or 0) < start]
+        if not pool:
+            # Круг закончился: все фото вышли по разу. Начинаем новый — с новым
+            # случайным порядком, иначе обложки повторялись бы в том же порядке.
+            start = _now()
+            self._photo_round_new(key, start)
+            pool = live
+        pick = secrets.choice(pool)
+        with self._lock:
+            self._db.execute("UPDATE digest_photos SET used_at=? WHERE id=?",
+                             (start, int(pick["id"])))
+            self._db.commit()
+        log.debug("обложка: фото %s, в круге ещё %d", pick["id"], len(pool) - 1)
+        return str(pick["path"])
 
     def set_digest_photo_kind(self, photo_id: int, kind: str,
                               actor_id: Optional[int] = None) -> bool:
@@ -1606,6 +2230,48 @@ class Store:
     def add_digest_photo(self, data: bytes, filename: str = "",
                          actor_id: Optional[int] = None,
                          kind: str = "post") -> Dict[str, Any]:
+        """Одно фото: те же проверки, что и у пачки (см. ``add_digest_photos``)."""
+        r = self._save_digest_photo(data, filename, kind)
+        if r.get("ok"):
+            self.audit(actor_id, "digest_photo_add", f"{r['kind']}:{r.get('name')}")
+        return r
+
+    def add_digest_photos(self, items: Iterable[Tuple[bytes, str]] = (),
+                          actor_id: Optional[int] = None,
+                          kind: str = "post") -> Dict[str, Any]:
+        """Пачка фото из одной загрузки.
+
+        Админ выбирает сразу много файлов — сохраняем каждый (одна запись
+        аудита на пачку, чтобы журнал не пух), а ошибки по конкретным файлам
+        возвращаем списком: одно битое фото не отменяет остальные.
+        """
+        kind = "digest" if str(kind or "").strip().lower() == "digest" else "post"
+        added: List[int] = []
+        names: List[str] = []
+        errors: List[Dict[str, Any]] = []
+        for data, name in (items or []):
+            r = self._save_digest_photo(data, name, kind)
+            if r.get("ok"):
+                added.append(int(r["id"]))
+                names.append(str(r.get("name") or ""))
+            else:
+                err = {"name": os.path.basename(str(name or ""))[:80],
+                       "error": str(r.get("error") or "error")}
+                if r.get("scope"):
+                    err["scope"] = r["scope"]
+                errors.append(err)
+        if added:
+            detail = (f"{kind}:{names[0]}"[:80] if len(added) == 1
+                      else f"{kind}: {len(added)} шт.")
+            self.audit(actor_id, "digest_photo_add", detail)
+        counts = self.digest_photo_counts()
+        return {"ok": bool(added), "added": len(added), "ids": added,
+                "errors": errors, "kind": kind, "counts": counts,
+                "limits": self.digest_photo_limits()}
+
+    def _save_digest_photo(self, data: bytes, filename: str = "",
+                           kind: str = "post") -> Dict[str, Any]:
+        """Проверки и запись одного фото. Без аудита — его ведёт вызывающий."""
         data = data or b""
         if len(data) < 24:
             return {"ok": False, "error": "empty"}
@@ -1622,9 +2288,17 @@ class Store:
             return {"ok": False, "error": "not_image"}
         kind = "digest" if str(kind or "").strip().lower() == "digest" else "post"
         with self._lock:
-            n = self._db.execute("SELECT COUNT(*) FROM digest_photos").fetchone()[0]
-            if n >= 40:
-                return {"ok": False, "error": "limit"}
+            rows = self._db.execute(
+                "SELECT COALESCE(kind,'post') AS k, COUNT(*) AS n"
+                " FROM digest_photos GROUP BY k"
+            ).fetchall()
+            per_kind = {str(r["k"] or "post"): int(r["n"]) for r in rows}
+            if per_kind.get(kind, 0) >= MAX_DIGEST_PHOTOS_KIND:
+                return {"ok": False, "error": "limit", "scope": "kind",
+                        "limit": MAX_DIGEST_PHOTOS_KIND}
+            if sum(per_kind.values()) >= MAX_DIGEST_PHOTOS:
+                return {"ok": False, "error": "limit", "scope": "total",
+                        "limit": MAX_DIGEST_PHOTOS}
         folder = self.digest_photo_dir()
         name = f"{int(_now() * 1000)}_{secrets.token_hex(3)}{ext}"
         path = os.path.join(folder, name)
@@ -1642,7 +2316,6 @@ class Store:
             )
             self._db.commit()
             pid = int(cur.lastrowid)
-        self.audit(actor_id, "digest_photo_add", f"{kind}:{orig}")
         return {"ok": True, "id": pid, "path": path, "name": orig, "kind": kind}
 
     def get_digest_photo(self, photo_id: int) -> Optional[Dict[str, Any]]:
@@ -2038,7 +2711,9 @@ class Store:
                 "SELECT tg_id, language FROM users "
                 "WHERE is_banned=0 AND tg_id IS NOT NULL"
             ).fetchall()
-        return [{"tg_id": int(r["tg_id"]), "language": r["language"] or "ru"}
+        # Пустой язык не заменяем на русский: язык по умолчанию решает бот
+        # (bot_i18n.DEFAULT_LANG), и это английский — здесь мы про него не знаем
+        return [{"tg_id": int(r["tg_id"]), "language": r["language"] or ""}
                 for r in rows]
 
     def _parse_svc_config(self, raw: str) -> Dict[str, Any]:

@@ -1,11 +1,12 @@
 /**
- * LiqScope Terminal — мультиязычность.
+ * LiqScope — мультиязычность всего сайта.
  *
  * Поддерживаются: русский (по умолчанию), английский, китайский (мандарин),
- * хинди, испанский. Язык определяется по браузеру, переключается в шапке и
- * запоминается в localStorage.
+ * хинди, испанский. Язык определяется по серверу (?lang=, cookie, Accept-Language),
+ * затем по браузеру, переключается в шапке и запоминается в localStorage.
  *
  * Использование:
+ *   <script src="/static/i18n.pages.js"></script>   // словари кабинета и страниц
  *   <script src="/static/i18n.js"></script>
  *   LiqScopeI18n.init();                    // применить сохранённый/броузерный язык
  *   LiqScopeI18n.t("feed.title");           // перевод строки
@@ -17,18 +18,28 @@
  *   data-i18n-placeholder="key"   — placeholder
  *   data-i18n-title="key"         — title
  *   data-i18n-meta="key"          — content у <meta name="description">
+ *
+ * Динамический текст (кабинет, доски сервисов, админка) собирается кодом из
+ * русских кусков, поэтому переводится постфактум — прямо в DOM: см. блок
+ * «Перевод живого текста» ниже. Русский фрагмент ищется в текстовых узлах
+ * и подменяется переводом из ``phrases`` (файл i18n.pages.js). Атрибут
+ * ``data-i18n-skip`` защищает текст пользователя — переписку, рекламные
+ * посты, письма — от перевода.
  */
 (function (global) {
     "use strict";
 
     var LANGS = [
-        { code: "ru", label: "Русский", flag: "🇷🇺" },
-        { code: "en", label: "English", flag: "🇬🇧" },
-        { code: "zh", label: "中文", flag: "🇨🇳" },
-        { code: "hi", label: "हिन्दी", flag: "🇮🇳" },
-        { code: "es", label: "Español", flag: "🇪🇸" },
+        { code: "ru", label: "Русский", flag: "🇷🇺", hreflang: "ru" },
+        { code: "en", label: "English", flag: "🇬🇧", hreflang: "en" },
+        { code: "zh", label: "中文", flag: "🇨🇳", hreflang: "zh-Hans" },
+        { code: "hi", label: "हिन्दी", flag: "🇮🇳", hreflang: "hi" },
+        { code: "es", label: "Español", flag: "🇪🇸", hreflang: "es" },
     ];
     var LOCALE_TAGS = { ru: "ru-RU", en: "en-US", zh: "zh-CN", hi: "hi-IN", es: "es-ES" };
+    //: как язык зовётся в localStorage и в cookie сервера
+    var STORE_KEY = "liqscope.lang";
+    var COOKIE = "liqscope_lang";
 
     /* =====================================================================
      * СЛОВАРИ
@@ -273,6 +284,35 @@
         "land.nav.how": "Как работает",
 
         "land.nav.digest": "Дайджест",
+        "land.nav.hourly": "Сводки по часам",
+        "hour.title": "Сводки по часам",
+        "hour.meta": "LiqScope — сводки рынка крипто-фьючерсов каждые несколько часов: ликвидации окна, лидеры часов, оборот и открытый интерес. Те же посты, что вышли в канале, с фото.",
+        "hour.lead": "Бот публикует сводку рынка в свой канал несколько раз в сутки — здесь те же посты целиком: ликвидации окна, лидеры часов, оборот и открытый интерес, с тем же фото. Любой день открывается из календаря.",
+        "hour.fresh": "Свежие сводки",
+        "hour.pick": "Выбрать день",
+        "hour.total": "Сводок в архиве",
+        "hour.days": "Дней в архиве",
+        "hour.channel": "Канал в Telegram",
+        "hour.every": "каждые {h} ч",
+        "hour.window": "за {h} ч",
+        "hour.events": "{n} событий",
+        "hour.n_posts": "сводок: {n}",
+        "hour.has": "есть сводки",
+        "hour.in_archive": "в архиве {n}",
+        "hour.more": "В архиве {n} сводок: выше свежие, остальные открываются по дню.",
+        "hour.tz": "дни по {tz}",
+        "hour.prev": "Предыдущий месяц",
+        "hour.next": "Следующий месяц",
+        "hour.loading": "Загружаю…",
+        "hour.empty": "Сводок пока нет — первая появится после поста в канал.",
+        "hour.empty_day": "За этот день сводок нет.",
+        "hour.photo_alt": "Фото сводки",
+        "hour.link": "Ссылка на сводку",
+        "hour.digest": "Дайджест",
+        "hour.to_terminal": "К терминалу",
+        "hour.cabinet": "Кабинет",
+        "hour.admin": "Админка",
+        "hour.login": "Войти",
         "dig.title": "Дневной дайджест рынка",
         "dig.meta": "LiqScope — дневной дайджест рынка: ликвидации, биржи, открытый интерес, цены и настроение за сутки.",
         "dig.lead": "Каждый вечер около 22:00 МСК — итоги дня: крупнейшая ликвидация, биржи, монеты с самым тяжёлым открытым интересом относительно оборота, цены топ-5 и настроение рынка. Все выпуски хранятся здесь.",
@@ -358,7 +398,17 @@
         "cookie.note": "Продолжая пользоваться сайтом, вы соглашаетесь с этим.",
         "land.footer.race": "Не является инвестиционной рекомендацией",
         "land.footer.open": "Открыть терминал →",
-    };
+            "gate.title": "Зарегистрируйтесь бесплатно",
+        "gate.text": "Пробные 30 минут слоёв закончились. Регистрация бесплатная: она открывает слои и индикаторы, сигналы в Telegram и личный кабинет с сервисами.",
+        "gate.f1": "Слои и индикаторы графика",
+        "gate.f2": "Сигналы в Telegram",
+        "gate.f3": "Кабинет и сервисы",
+        "gate.cta": "Зарегистрироваться бесплатно",
+        "gate.later": "Продолжить без слоёв",
+        "gate.close_title": "Закрыть окно",
+        "gate.trial_badge": "{min}м",
+        "gate.trial_title": "Слои открыты без регистрации ещё {min} мин",
+};
 
     var EN = {
         "terminal.title": "LiqScope Terminal — Live Liquidation Stream & Cluster Chart",
@@ -600,6 +650,35 @@
         "land.nav.how": "How it works",
 
         "land.nav.digest": "Digest",
+        "land.nav.hourly": "Hourly summaries",
+        "hour.title": "Hourly market summaries",
+        "hour.meta": "LiqScope hourly market summaries: liquidations of the window, hour leaders, turnover and open interest. The very posts published in our channel, with photos.",
+        "hour.lead": "The bot posts a market summary to its channel several times a day — here are the same posts in full: liquidations of the window, hour leaders, turnover and open interest, with the same photo. Any day opens from the calendar.",
+        "hour.fresh": "Latest summaries",
+        "hour.pick": "Pick a day",
+        "hour.total": "Summaries in the archive",
+        "hour.days": "Days in the archive",
+        "hour.channel": "Telegram channel",
+        "hour.every": "every {h} h",
+        "hour.window": "{h} h window",
+        "hour.events": "{n} events",
+        "hour.n_posts": "{n} posts",
+        "hour.has": "summaries available",
+        "hour.in_archive": "{n} in the archive",
+        "hour.more": "{n} summaries in the archive: the latest are above, the rest open by day.",
+        "hour.tz": "days in {tz}",
+        "hour.prev": "Previous month",
+        "hour.next": "Next month",
+        "hour.loading": "Loading…",
+        "hour.empty": "No summaries yet — the first one arrives after the channel post.",
+        "hour.empty_day": "No summaries for this day.",
+        "hour.photo_alt": "Summary photo",
+        "hour.link": "Link to the summary",
+        "hour.digest": "Digest",
+        "hour.to_terminal": "To the terminal",
+        "hour.cabinet": "Account",
+        "hour.admin": "Admin",
+        "hour.login": "Sign in",
         "dig.title": "Daily market digest",
         "dig.meta": "LiqScope daily digest: liquidations, exchanges, open interest, prices and market mood for the last 24 hours.",
         "dig.lead": "Every evening around 22:00 MSK — the day in review: the biggest liquidation, exchanges, coins with the heaviest open interest against turnover, top-5 prices and the overall market mood. Every issue is kept here.",
@@ -685,7 +764,17 @@
         "cookie.note": "By continuing to use the site you agree to this.",
         "land.footer.race": "Not investment advice",
         "land.footer.open": "Open terminal →",
-    };
+            "gate.title": "Register for free",
+        "gate.text": "Your 30 free minutes of layers are over. Registration is free: it unlocks chart layers and indicators, Telegram signals and the personal cabinet with services.",
+        "gate.f1": "Chart layers and indicators",
+        "gate.f2": "Telegram signals",
+        "gate.f3": "Cabinet and services",
+        "gate.cta": "Register for free",
+        "gate.later": "Continue without layers",
+        "gate.close_title": "Close this window",
+        "gate.trial_badge": "{min}m",
+        "gate.trial_title": "Layers are open without registration for another {min} min",
+};
 
     var ZH = {
         "terminal.title": "LiqScope 终端 — 实时爆仓流与K线图",
@@ -927,6 +1016,35 @@
         "land.nav.how": "工作原理",
 
         "land.nav.digest": "日报",
+        "land.nav.hourly": "小时简报",
+        "hour.title": "小时市场简报",
+        "hour.meta": "LiqScope 小时简报：区间清算、小时冠军、成交额与未平仓合约。与频道发布的帖子相同，含图片。",
+        "hour.lead": "机器人每天多次把市场简报发到频道——这里保留同样的内容：区间清算、小时冠军、成交额与未平仓合约，照片也一样。任何一天都可以从日历打开。",
+        "hour.fresh": "最新简报",
+        "hour.pick": "选择日期",
+        "hour.total": "归档简报",
+        "hour.days": "归档天数",
+        "hour.channel": "Telegram 频道",
+        "hour.every": "每 {h} 小时",
+        "hour.window": "{h} 小时窗口",
+        "hour.events": "{n} 个事件",
+        "hour.n_posts": "{n} 条",
+        "hour.has": "有简报",
+        "hour.in_archive": "归档 {n}",
+        "hour.more": "归档共 {n} 条：上方为最新，其余按日期打开。",
+        "hour.tz": "日期按 {tz}",
+        "hour.prev": "上个月",
+        "hour.next": "下个月",
+        "hour.loading": "加载中…",
+        "hour.empty": "暂无简报——频道发布后就会出现第一条。",
+        "hour.empty_day": "这一天没有简报。",
+        "hour.photo_alt": "简报图片",
+        "hour.link": "简报链接",
+        "hour.digest": "日报",
+        "hour.to_terminal": "返回终端",
+        "hour.cabinet": "账户",
+        "hour.admin": "管理",
+        "hour.login": "登录",
         "dig.title": "每日市场日报",
         "dig.meta": "LiqScope 每日摘要：24 小时清算、交易所、未平仓合约、价格与市场情绪。",
         "dig.lead": "每晚约 22:00（莫斯科时间）发布当日总结：最大清算、交易所、未平仓合约相对成交额最重的币种、前五大币价与市场情绪。所有期号都保存在这里。",
@@ -1012,7 +1130,17 @@
         "cookie.note": "继续使用本站即表示你同意这一点。",
         "land.footer.race": "不构成投资建议",
         "land.footer.open": "打开终端 →",
-    };
+            "gate.title": "免费注册",
+        "gate.text": "30 分钟的免费图层试用已结束。注册免费：解锁图表图层与指标、Telegram 信号，以及带服务功能的个人中心。",
+        "gate.f1": "图表图层与指标",
+        "gate.f2": "Telegram 信号",
+        "gate.f3": "个人中心与服务",
+        "gate.cta": "免费注册",
+        "gate.later": "不用图层继续",
+        "gate.close_title": "关闭窗口",
+        "gate.trial_badge": "{min}分",
+        "gate.trial_title": "图层可免注册使用，还剩 {min} 分钟",
+};
 
     var HI = {
         "terminal.title": "LiqScope टर्मिनल — लाइव लिक्विडेशन स्ट्रीम और चार्ट",
@@ -1062,6 +1190,13 @@
         "filter.none": "कोई नहीं",
         "filter.all_exchanges": "सभी एक्सचेंज ▾",
         "filter.disabled": "बंद ▾",
+        "filter.th_liq": "लिक्विडेशन, $",
+        "filter.th_short_liq": "लिक्वि",
+        "filter.th_ge": "≥ ${v}",
+        "filter.th_cvd": "प्रति कैंडल CVD, $",
+        "filter.th_oi": "प्रति कैंडल OI Δ, $",
+        "filter.presets_for": "प्रीसेट खुली फ़ीड टैब पर लागू होते हैं:",
+        "filter.th_note": "हर थ्रेशोल्ड अपनी सीरीज़ फ़िल्टर करता है — फ़ीड और चार्ट के निशान: लिक्विडेशन, CVD त्रिकोण और OI गोले। शून्य = सब दिखाएँ।",
         "chart.long": "लॉन्ग लिक्विडेशन",
         "chart.short": "शॉर्ट लिक्विडेशन",
         "chart.whale": "व्हेल ($100k+)",
@@ -1247,6 +1382,35 @@
         "land.nav.how": "कैसे काम करता है",
 
         "land.nav.digest": "डाइजेस्ट",
+        "land.nav.hourly": "हर घंटे की सारांश",
+        "hour.title": "हर घंटे की बाज़ार सारांश",
+        "hour.meta": "LiqScope हर घंटे की सारांश: विंडो के लिक्विडेशन, घंटे के लीडर, टर्नओवर और ओपन इंटरेस्ट। वही पोस्ट जो चैनल में आते हैं, फ़ोटो के साथ।",
+        "hour.lead": "बॉट दिन में कई बार बाज़ार की सारांश अपने चैनल में भेजता है — यहाँ वही पोस्ट पूरी हैं: विंडो के लिक्विडेशन, घंटे के लीडर, टर्नओवर और ओपन इंटरेस्ट, उसी फ़ोटो के साथ। कोई भी दिन कैलेंडर से खुलता है।",
+        "hour.fresh": "नई सारांश",
+        "hour.pick": "दिन चुनें",
+        "hour.total": "संग्रह में सारांश",
+        "hour.days": "संग्रह में दिन",
+        "hour.channel": "Telegram चैनल",
+        "hour.every": "हर {h} घंटे",
+        "hour.window": "{h} घंटे की विंडो",
+        "hour.events": "{n} इवेंट",
+        "hour.n_posts": "{n} पोस्ट",
+        "hour.has": "सारांश उपलब्ध",
+        "hour.in_archive": "संग्रह में {n}",
+        "hour.more": "संग्रह में {n} सारांश: ऊपर नई, बाकी दिन से खुलती हैं।",
+        "hour.tz": "दिन {tz} में",
+        "hour.prev": "पिछला महीना",
+        "hour.next": "अगला महीना",
+        "hour.loading": "लोड हो रहा है…",
+        "hour.empty": "अभी कोई सारांश नहीं — चैनल में पोस्ट के बाद पहली आएगी।",
+        "hour.empty_day": "इस दिन कोई सारांश नहीं।",
+        "hour.photo_alt": "सारांश की फ़ोटो",
+        "hour.link": "सारांश का लिंक",
+        "hour.digest": "डाइजेस्ट",
+        "hour.to_terminal": "टर्मिनल पर",
+        "hour.cabinet": "खाता",
+        "hour.admin": "एडमिन",
+        "hour.login": "साइन इन",
         "dig.title": "रोज़ का बाज़ार डाइजेस्ट",
         "dig.meta": "LiqScope रोज़ का डाइजेस्ट: 24 घंटे के लिक्विडेशन, एक्सचेंज, ओपन इंटरेस्ट, कीमतें और बाज़ार का मूड।",
         "dig.lead": "हर शाम लगभग 22:00 MSK — दिन का सार: सबसे बड़ा लिक्विडेशन, एक्सचेंज, टर्नओवर के मुकाबले सबसे भारी ओपन इंटरेस्ट वाले सिक्के, टॉप-5 कीमतें और बाज़ार का मूड। सभी अंक यहाँ सुरक्षित रहते हैं।",
@@ -1332,7 +1496,17 @@
         "cookie.note": "साइट का उपयोग जारी रखने का अर्थ है कि आप इससे सहमत हैं।",
         "land.footer.race": "यह निवेश सलाह नहीं है",
         "land.footer.open": "टर्मिनल खोलें →",
-    };
+            "gate.title": "मुफ़्त में रजिस्टर करें",
+        "gate.text": "लेयर के 30 मुफ़्त मिनट पूरे हो गए। रजिस्ट्रेशन मुफ़्त है: इससे लेयर और इंडिकेटर, Telegram सिग्नल और सेवाओं वाला कैबिनेट खुलता है।",
+        "gate.f1": "चार्ट लेयर और इंडिकेटर",
+        "gate.f2": "Telegram सिग्नल",
+        "gate.f3": "कैबिनेट और सेवाएँ",
+        "gate.cta": "मुफ़्त में रजिस्टर करें",
+        "gate.later": "लेयर के बिना जारी रखें",
+        "gate.close_title": "विंडो बंद करें",
+        "gate.trial_badge": "{min}मि",
+        "gate.trial_title": "लेयर बिना रजिस्ट्रेशन अभी और {min} मिनट खुले हैं",
+};
 
     var ES = {
         "terminal.title": "LiqScope Terminal — stream de liquidaciones en vivo y gráficos",
@@ -1382,6 +1556,13 @@
         "filter.none": "Ninguno",
         "filter.all_exchanges": "Todos los exchanges ▾",
         "filter.disabled": "Desactivados ▾",
+        "filter.th_liq": "Liquidaciones, $",
+        "filter.th_short_liq": "Liq",
+        "filter.th_ge": "≥ ${v}",
+        "filter.th_cvd": "CVD por vela, $",
+        "filter.th_oi": "OI Δ por vela, $",
+        "filter.presets_for": "Los presets se aplican a la pestaña abierta del feed:",
+        "filter.th_note": "Cada umbral filtra su propia serie — el feed y las marcas del gráfico: liquidaciones, triángulos de CVD y bolas de OI. Cero muestra todo.",
         "chart.long": "Liq. longs",
         "chart.short": "Liq. shorts",
         "chart.whale": "Ballena ($100k+)",
@@ -1567,6 +1748,35 @@
         "land.nav.how": "Cómo funciona",
 
         "land.nav.digest": "Resumen",
+        "land.nav.hourly": "Resúmenes por horas",
+        "hour.title": "Resúmenes del mercado por horas",
+        "hour.meta": "Resúmenes de LiqScope: liquidaciones de la ventana, líderes de la hora, volumen e interés abierto. Las mismas publicaciones del canal, con foto.",
+        "hour.lead": "El bot publica un resumen del mercado en su canal varias veces al día — aquí están las mismas publicaciones completas: liquidaciones de la ventana, líderes de la hora, volumen e interés abierto, con la misma foto. Cualquier día se abre desde el calendario.",
+        "hour.fresh": "Resúmenes recientes",
+        "hour.pick": "Elegir día",
+        "hour.total": "Resúmenes en el archivo",
+        "hour.days": "Días en el archivo",
+        "hour.channel": "Canal de Telegram",
+        "hour.every": "cada {h} h",
+        "hour.window": "ventana de {h} h",
+        "hour.events": "{n} eventos",
+        "hour.n_posts": "{n} publicaciones",
+        "hour.has": "hay resúmenes",
+        "hour.in_archive": "{n} en el archivo",
+        "hour.more": "{n} resúmenes en el archivo: arriba los recientes, el resto se abren por día.",
+        "hour.tz": "días en {tz}",
+        "hour.prev": "Mes anterior",
+        "hour.next": "Mes siguiente",
+        "hour.loading": "Cargando…",
+        "hour.empty": "Todavía no hay resúmenes — el primero llega tras la publicación en el canal.",
+        "hour.empty_day": "No hay resúmenes para este día.",
+        "hour.photo_alt": "Foto del resumen",
+        "hour.link": "Enlace al resumen",
+        "hour.digest": "Resumen",
+        "hour.to_terminal": "Al terminal",
+        "hour.cabinet": "Cuenta",
+        "hour.admin": "Admin",
+        "hour.login": "Entrar",
         "dig.title": "Resumen diario del mercado",
         "dig.meta": "Resumen diario de LiqScope: liquidaciones de 24 h, exchanges, interés abierto, precios y el ánimo del mercado.",
         "dig.lead": "Cada tarde alrededor de las 22:00 MSK — el día en resumen: la mayor liquidación, los exchanges, las monedas con más interés abierto frente al volumen, los precios del top 5 y el ánimo general del mercado. Todas las ediciones se guardan aquí.",
@@ -1652,29 +1862,91 @@
         "cookie.note": "Si sigues usando el sitio, aceptas esto.",
         "land.footer.race": "No es una recomendación de inversión",
         "land.footer.open": "Abrir terminal →",
-    };
+            "gate.title": "Regístrate gratis",
+        "gate.text": "Tus 30 minutos gratis de capas han terminado. El registro es gratis: abre las capas e indicadores, las señales en Telegram y el gabinete con servicios.",
+        "gate.f1": "Capas e indicadores del gráfico",
+        "gate.f2": "Señales en Telegram",
+        "gate.f3": "Gabinete y servicios",
+        "gate.cta": "Registrarse gratis",
+        "gate.later": "Seguir sin capas",
+        "gate.close_title": "Cerrar la ventana",
+        "gate.trial_badge": "{min}m",
+        "gate.trial_title": "Las capas están abiertas sin registro {min} min más",
+};
 
     var MESSAGES = { ru: RU, en: EN, zh: ZH, hi: HI, es: ES };
     var current = "ru";
     var listeners = [];
+    var PHRASES = { ru: {}, en: {}, zh: {}, hi: {}, es: {} };   // ru → перевод, по языкам
+
+    /* =====================================================================
+     * Словари страниц (i18n.pages.js)
+     *
+     * Кабинет, вход/регистрация, сброс пароля, дайджест, админка и то, что
+     * сервисы рисуют сами, живут отдельным файлом — он большой и правится
+     * чаще терминала. Формат простой и строго-JSON (его читает ещё и сервер,
+     * чтобы отдать страницу сразу на нужном языке): {lang: {keys, phrases}}.
+     * ===================================================================== */
+    var PAGES = (global && global.LIQSCOPE_I18N_PAGES) || null;
+    if (PAGES && typeof PAGES === "object") {
+        Object.keys(PAGES).forEach(function (code) {
+            var pack = PAGES[code];
+            if (!pack || typeof pack !== "object") return;
+            if (!MESSAGES[code]) MESSAGES[code] = {};
+            var keys = pack.keys || {};
+            Object.keys(keys).forEach(function (k) { MESSAGES[code][k] = keys[k]; });
+            // фразы кладём как есть: ищем их в живом тексте от длинных к коротким
+            if (pack.phrases && typeof pack.phrases === "object") {
+                PHRASES[code] = pack.phrases;
+            }
+        });
+    }
 
     /* =====================================================================
      * Ядро
      * ===================================================================== */
     function detect() {
+        // 0) сервер пометил, что язык подобран за гостя (браузер или страна):
+        //    тогда его выбор — подсказка, а не приказ, и шаги ниже решают сами
+        var auto = false;
+        try { auto = !!global.LIQSCOPE_LANG_AUTO; } catch (e) { /* ignore */ }
+        var fromServer = "";
         try {
-            var saved = localStorage.getItem("liqscope.lang");
+            fromServer = String(global.LIQSCOPE_LANG || "").toLowerCase();
+        } catch (e) { /* ignore */ }
+        // 1) явный выбор в ссылке: /?lang=zh — так языки индексируются
+        try {
+            var m = /[?&]lang=([a-zA-Z-]+)/.exec(String((global.location && global.location.search) || ""));
+            var q = m ? m[1].toLowerCase().split("-")[0] : "";
+            if (q && MESSAGES[q]) return q;
+        } catch (e) { /* ignore */ }
+        // 2) прошлый выбор посетителя
+        try {
+            var saved = localStorage.getItem(STORE_KEY);
             if (saved && MESSAGES[saved]) return saved;
         } catch (e) { /* ignore */ }
+        // 3) выбор сервера по cookie или по ?lang= — он и решает
+        if (fromServer && MESSAGES[fromServer] && !auto) return fromServer;
+        // 4) язык браузера: и региональные варианты (zh-CN, zh-TW, es-419…)
         var nav = String((typeof navigator !== "undefined" && navigator.language) || "").toLowerCase();
-        if (nav.indexOf("zh") === 0) return "zh";
-        if (nav.indexOf("hi") === 0) return "hi";
-        if (nav.indexOf("es") === 0) return "es";
-        if (nav.indexOf("en") === 0) return "en";
-        return "ru";
+        var all = String((typeof navigator !== "undefined" && navigator.languages
+            && navigator.languages.join(",")) || nav).toLowerCase();
+        var pick = null;
+        all.split(",").some(function (tag) {
+            var base = String(tag).trim().split("-")[0];
+            if (MESSAGES[base]) { pick = base; return true; }
+            return false;
+        });
+        if (pick) return pick;
+        var base0 = nav.split("-")[0];
+        if (MESSAGES[base0]) return base0;
+        // 5) язык, подобранный сервером по стране, и если даже его нет —
+        //    английский: это язык сайта по умолчанию
+        if (fromServer && MESSAGES[fromServer]) return fromServer;
+        return "en";
     }
 
-    function localeTag() { return LOCALE_TAGS[current] || "ru-RU"; }
+    function localeTag() { return LOCALE_TAGS[current] || "en-US"; }
     function lang() { return current; }
 
     function t(key, vars) {
@@ -1707,13 +1979,34 @@
         return nn === 1 ? (f[0] || f[1]) : (f[2] || f[1] || f[0]);
     }
 
+    /** Перевод подписи элемента — без потери вложенных элементов.
+     *
+     * ``textContent = перевод`` сносил всех детей: счётчик непрочитанного
+     * (``<span class="fb-dot">``) внутри кнопки «По всем вопросам» исчезал
+     * вместе с цифрой, хотя по нему видно, что админ ответил. Меняем первый
+     * текстовый узел, а элементы оставляем на месте; если текста не было —
+     * вставляем его первым.
+     */
+    function setLabel(el, text) {
+        var kids = el.childNodes, done = false, i;
+        for (i = 0; i < kids.length; i++) {
+            if (kids[i].nodeType !== 3) continue;      // 3 — текстовый узел
+            if (done) { kids[i].nodeValue = ""; continue; }
+            kids[i].nodeValue = text;
+            done = true;
+        }
+        if (!done) {
+            el.insertBefore(el.ownerDocument.createTextNode(text), el.firstChild);
+        }
+    }
+
     function apply(root) {
         root = root || document;
         if (!root || !root.querySelectorAll) return;
         document.documentElement.lang = localeTag();
         var nodes = root.querySelectorAll("[data-i18n]");
         for (var i = 0; i < nodes.length; i++) {
-            nodes[i].textContent = t(nodes[i].getAttribute("data-i18n"));
+            setLabel(nodes[i], t(nodes[i].getAttribute("data-i18n")));
         }
         nodes = root.querySelectorAll("[data-i18n-placeholder]");
         for (i = 0; i < nodes.length; i++) {
@@ -1727,6 +2020,253 @@
         for (i = 0; i < nodes.length; i++) {
             nodes[i].setAttribute("content", t(nodes[i].getAttribute("data-i18n-meta")));
         }
+        // динамический текст (кабинет, сервисы, админка) — отдельным проходом
+        localizeTree(root);
+    }
+
+    /* =====================================================================
+     * Перевод живого текста
+     *
+     * Терминал собран из ключей (data-i18n), а кабинет, доски сервисов и
+     * админка рисуются кодом из русских кусков: «Окно · », «пока тихо»,
+     * «сохранено · монеты: …». Переводить такое ключами — значит переписать
+     * половину файлов; поэтому текст переводится там, где он уже нарисован.
+     *
+     * Правила ровно те же, что у бота (bot_i18n.py):
+     *   * ищем самый длинный известный фрагмент за один проход — короткая
+     *     подпись не портит длинную фразу;
+     *   * фрагмент, начинающийся или кончающийся русской буквой, ищется как
+     *     целое слово: «бот» не залезает в «работает»;
+     *   * числа перед хвостом («5 мин», «3 ч», «12 шт.») переводят правила.
+     *
+     * Текст пользователя (переписка, реклама, письма) помечен
+     * ``data-i18n-skip`` и не трогается; складывается он в контейнеры со
+     * своим «языком» — см. SKIP_SELECTOR.
+     * ===================================================================== */
+
+    //: куда не заглядываем: код, стили, поля ввода и текст пользователя
+    var SKIP_SELECTOR = "script,style,noscript,code,pre,textarea,input," +
+        // сам переключатель языка не трогаем: «Русский» человек должен узнать
+        "select[data-lang-select],#lang-select," +
+        "[data-i18n-skip],[contenteditable=true]";
+
+    //: хвосты с числом: «5 мин» → «5 min». Порядок важен — длинные выше.
+    var NUM_TAILS = [
+        [/(\d+)\s*мин(?![\wА-Яа-яЁё])/g, function (n, l) { return n + tr(l, "min", "分钟", "मिनट", "min"); }],
+        [/(\d+)\s*ч(?![\wА-Яа-яЁё])/g, function (n, l) { return n + tr(l, "h", "小时", "घं", "h"); }],
+        [/(\d+)\s*сут(?![\wА-Яа-яЁё])/g, function (n, l) { return n + tr(l, "d", "天", "दिन", "d"); }],
+        [/(\d+)\s*дн(?![\wА-Яа-яЁё])/g, function (n, l) { return n + tr(l, "d", "天", "दिन", "d"); }],
+        [/(\d+)\s*сек(?![\wА-Яа-яЁё])/g, function (n, l) { return n + tr(l, "s", "秒", "से", "s"); }],
+        [/(\d+)\s*шт\.?/g, function (n, l) { return n + tr(l, "pcs", "笔", "इकाई", "uds"); }],
+        [/(\d+)\s*свеч\.?/g, function (n, l) { return n + tr(l, "candles", "根K线", "कैंडल", "velas"); }],
+        [/(\d+)\s*пар(?![\wА-Яа-яЁё])/g, function (n, l) { return n + tr(l, "pairs", "对", "जोड़े", "pares"); }],
+        [/(\d+)\s*знаков(?![\wА-Яа-яЁё])/g, function (n, l) { return n + tr(l, "chars", "字符", "अक्षर", "caracteres"); }],
+        [/(\d+)\s*событи\w*/g, function (n, l) { return n + tr(l, "events", "个事件", "इवेंट", "eventos"); }],
+        // «5м»/«2ч» — так окна пишет кабинет, пробела там нет
+        [/(\d+)\s*м(?![\wА-Яа-яЁё])/g, function (n, l) { return n + tr(l, "m", "分", "मि", "m"); }],
+        [/(\d+)\s*с(?![\wА-Яа-яЁё])/g, function (n, l) { return n + tr(l, "s", "秒", "से", "s"); }]
+    ];
+
+    function tr(l, en, zh, hi, es) {
+        if (l === "zh") return zh;
+        if (l === "hi") return hi;
+        if (l === "es") return es;
+        return en;
+    }
+
+    var CYR = /[А-Яа-яЁё]/;
+    var WORD_CHARS = "A-Za-z0-9_";
+
+    /** Русский фрагмент как регулярка: у краёв со словом — границы слова. */
+    function phraseRe(phrase) {
+        var head = phrase.charAt(0), tail = phrase.charAt(phrase.length - 1);
+        var core = phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        var pre = CYR.test(head) || new RegExp("[" + WORD_CHARS + "]").test(head) ? "(?<![" + WORD_CHARS + "А-Яа-яЁё])" : "";
+        var post = CYR.test(tail) || new RegExp("[" + WORD_CHARS + "]").test(tail) ? "(?![" + WORD_CHARS + "А-Яа-яЁё])" : "";
+        try {
+            return new RegExp(pre + core + post, "g");
+        } catch (e) {                                  // нет look-behind — ищем как есть
+            return new RegExp(core, "g");
+        }
+    }
+
+    /** Скомпилированные правила языка: длинные фразы применяются первыми. */
+    var COMPILED = {};
+    function rules(l) {
+        if (COMPILED[l]) return COMPILED[l];
+        var out = [];
+        var table = PHRASES[l] || {};
+        Object.keys(table).sort(function (a, b) { return b.length - a.length; })
+            .forEach(function (ru) {
+                out.push([phraseRe(ru), table[ru]]);
+            });
+        COMPILED[l] = out;
+        return out;
+    }
+
+    /** Перевести одну строку: фразы, затем хвосты с числами. */
+    function phrase(text, l) {
+        l = l || current;
+        if (l === "ru" || !text || !CYR.test(text)) return text;
+        // Разметку пишут с переносами строк: в абзаце между словами стоит
+        // «\n   », а в словаре — обычный пробел. Браузер всё равно сожмёт
+        // их в один пробел, поэтому сравниваем и отдаём уже сжатый текст.
+        var out = String(text).replace(/\s+/g, " ");
+        var list = rules(l);
+        for (var i = 0; i < list.length; i++) {
+            out = out.replace(list[i][0], list[i][1]);
+        }
+        for (var j = 0; j < NUM_TAILS.length; j++) {
+            out = out.replace(NUM_TAILS[j][0], function (m, n) {
+                return NUM_TAILS[j][1](n, l);
+            });
+        }
+        return out;
+    }
+
+    /** Полностью ли переводится русский текст (для тестов на полноту):
+        после подстановки фраз и хвостов с числами кириллицы остаться не должно. */
+    function hasPhrase(text, l) {
+        var out = phrase(text, l || current);
+        return !CYR.test(out);
+    }
+
+    //: «select» не глушим целиком: подписи в списках (срок удаления поста,
+    //: частота сводки) — обычный текст интерфейса. Пропускаем только
+    //: переключатель языка: «Русский» человек должен узнать в любом переводе.
+    var SKIP_TAGS = { SCRIPT: 1, STYLE: 1, NOSCRIPT: 1, CODE: 1, PRE: 1, TEXTAREA: 1, INPUT: 1 };
+    var LANG_SELECTOR = "select[data-lang-select],select#lang-select,select.lang-select";
+
+    function skipped(node) {
+        for (var n = node; n && n.nodeType === 1; n = n.parentNode) {
+            if (SKIP_TAGS[n.tagName]) return true;
+            if (n.tagName === "SELECT" && n.matches && n.matches(LANG_SELECTOR)) return true;
+            if (n.hasAttribute && n.hasAttribute("data-i18n-skip")) return true;
+            if (n.getAttribute && n.getAttribute("contenteditable") === "true") return true;
+        }
+        return false;
+    }
+
+    /** Текстовые узлы и подписи внутри поддерева — на выбранный язык. */
+    function localizeTree(root) {
+        if (!root) return;
+        if (current === "ru" && !root.querySelectorAll) return;
+        var doc = root.ownerDocument || (root.nodeType === 9 ? root : document);
+        if (!doc || !doc.createTreeWalker) return;
+        var walker = doc.createTreeWalker(root, 4 /* SHOW_TEXT */, null, false);
+        var nodes = [];
+        var node;
+        while ((node = walker.nextNode())) nodes.push(node);
+        for (var i = 0; i < nodes.length; i++) {
+            var n = nodes[i];
+            var src = n.nodeValue;
+            if (!src || !CYR.test(src)) continue;
+            if (skipped(n.parentNode)) continue;
+            n.nodeValue = phrase(src, current);
+        }
+        // подписи и подсказки: placeholder / title / aria-label / alt
+        var host = root.querySelectorAll ? root : null;
+        if (!host) return;
+        var attrs = ["placeholder", "title", "aria-label", "alt", "data-hint"];
+        for (var a = 0; a < attrs.length; a++) {
+            var list = host.querySelectorAll("[" + attrs[a] + "]");
+            for (var k = 0; k < list.length; k++) {
+                var el = list[k];
+                if (skipped(el)) continue;
+                var val = el.getAttribute(attrs[a]);
+                if (val && CYR.test(val)) el.setAttribute(attrs[a], phrase(val, current));
+            }
+        }
+    }
+
+    /* Динамика: кабинет и админка перерисовывают доски сами (автообновление,
+       ответы сервера). Следим за DOM и переводим только то, что появилось, —
+       целиком страницу на каждом тике терминала перебирать незачем. */
+    var observer = null;
+    var pending = null;
+
+    function watch() {
+        if (typeof MutationObserver === "undefined" || !document.body) return;
+        if (current === "ru") { stopWatch(); return; }
+        if (observer) return;
+        observer = new MutationObserver(function (records) {
+            // копим узлы и разбираем их одним проходом кадра
+            if (!pending) pending = [];
+            for (var i = 0; i < records.length; i++) {
+                var r = records[i];
+                if (r.type === "characterData" && r.target && r.target.parentNode) {
+                    pending.push(r.target.parentNode);
+                }
+                for (var j = 0; j < r.addedNodes.length; j++) {
+                    var n = r.addedNodes[j];
+                    pending.push(n.nodeType === 1 ? n : (n.parentNode || document.body));
+                }
+            }
+            if (pending.length > 400) pending = [document.body];
+            if (pending._planned) return;
+            pending._planned = true;
+            (global.requestAnimationFrame || function (f) { setTimeout(f, 16); })(function () {
+                var list = pending || [];
+                pending = null;
+                var seen = [];
+                for (var k = 0; k < list.length; k++) {
+                    if (seen.indexOf(list[k]) >= 0) continue;
+                    seen.push(list[k]);
+                    // к узлу мог прийти перевод ещё до кадра — лишняя работа не страшна
+                    localizeTree(list[k]);
+                }
+            });
+        });
+        observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    }
+
+    function stopWatch() {
+        if (!observer) return;
+        observer.disconnect();
+        observer = null;
+        pending = null;
+    }
+
+    /* =====================================================================
+     * Переключатель языка
+     *
+     * Разметку не дублируем: <select data-lang-select> наполняется отсюда,
+     * а data-i18n-* на самой странице переводят её. Смена языка не
+     * перезагружает страницу — обработчики данные перерисуют сами.
+     * ===================================================================== */
+    function fillSelect(sel) {
+        if (!sel || !sel.options) return;
+        sel.innerHTML = LANGS.map(function (l) {
+            return '<option value="' + l.code + '">' + l.flag + " " + l.label + "</option>";
+        }).join("");
+        sel.value = current;
+        sel.setAttribute("aria-label", "Language / Язык");
+        sel.setAttribute("title", "Language / Язык");
+    }
+
+    function bindSelect(sel) {
+        if (!sel || sel._i18nBound) return;
+        sel._i18nBound = true;
+        sel.addEventListener("change", function (e) { set(e.target.value); });
+    }
+
+    function wireSwitchers() {
+        if (!document.querySelectorAll) return;
+        var list = document.querySelectorAll("[data-lang-select]");
+        for (var i = 0; i < list.length; i++) {
+            fillSelect(list[i]);
+            bindSelect(list[i]);
+        }
+    }
+
+    /** Выбранный язык уходит и на сервер (cookie) — тогда SSR отдаёт
+        страницу сразу на нём, без мигания подписей. */
+    function remember(code) {
+        try { localStorage.setItem(STORE_KEY, code); } catch (e) { /* ignore */ }
+        try {
+            document.cookie = COOKIE + "=" + encodeURIComponent(code) +
+                ";path=/;max-age=31536000;samesite=lax";
+        } catch (e) { /* ignore */ }
     }
 
     function emit() {
@@ -1736,16 +2276,37 @@
     }
 
     function init() {
+        started = true;
         current = detect();
+        if (document.documentElement) document.documentElement.lang = localeTag();
+        wireSwitchers();
         apply(document);
+        if (document.body && document.body.setAttribute) {
+            document.body.setAttribute("data-lang", current);
+        }
+        watch();
+        // терминал и лендинг дорисовывают данные сами: даём им ещё один проход,
+        // когда страница уже показывается целиком
+        if (global.addEventListener) {
+            global.addEventListener("load", function () { apply(document); });
+        }
         emit();
     }
+
+    var started = false;
 
     function set(code) {
         if (!MESSAGES[code] || code === current) return;
         current = code;
-        try { localStorage.setItem("liqscope.lang", code); } catch (e) { /* ignore */ }
+        remember(code);
+        if (document.documentElement) document.documentElement.lang = localeTag();
+        if (document.body && document.body.setAttribute) {
+            document.body.setAttribute("data-lang", current);
+        }
         apply(document);
+        var list = document.querySelectorAll("[data-lang-select]");
+        for (var i = 0; i < list.length; i++) list[i].value = current;
+        if (current === "ru") stopWatch(); else watch();
         emit();
     }
 
@@ -1764,10 +2325,30 @@
         catch (e) { return ""; }
     }
 
+    /* Странице не нужно помнить про init(): словари подключаются обычным
+       <script>, а язык применяем сразу после разбора разметки. */
+    if (typeof document !== "undefined" && document.addEventListener) {
+        if (document.readyState === "loading") {
+            document.addEventListener("DOMContentLoaded", function () {
+                if (!started) init();
+            });
+        } else if (!started) {
+            init();
+        }
+    }
+
     global.LiqScopeI18n = {
         LANGS: LANGS,
         init: init, lang: lang, set: set, t: t, plural: plural,
         apply: apply, onChange: onChange,
         number: number, time: time, dateTime: dateTime, localeTag: localeTag, detect: detect,
+        // живой текст: перевод по фразам (кабинет, сервисы, админка)
+        phrase: phrase, localizeTree: localizeTree, hasPhrase: hasPhrase,
+        fillSelect: fillSelect, bindSelect: bindSelect,
+        messages: function () { return MESSAGES; },
+        hreflang: function () {
+            var one = LANGS.filter(function (l) { return l.code === current; })[0];
+            return (one && one.hreflang) || current;
+        },
     };
 })(typeof window !== "undefined" ? window : this);

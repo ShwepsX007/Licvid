@@ -1,21 +1,46 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="ru" data-lang="ru">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LiqScope — кабинет</title>
-<link rel="icon" type="image/png" href="/static/logo.png">
-<link rel="stylesheet" href="/static/account.css?v=fb9">
+<title data-i18n="seo.cabinet.title">Личный кабинет — LiqScope</title>
+<meta name="description" data-i18n-meta="seo.cabinet.desc" content="Личный кабинет LiqScope: алерты по ликвидациям, CVD и открытому интересу, корреляции монет и сторож — всё в одном окне, сигналы приходят в Telegram.">
+<meta name="robots" content="noindex,follow">
+<link rel="canonical" href="https://liqscope.online/cabinet">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="LiqScope">
+<meta property="og:url" content="https://liqscope.online/cabinet">
+<meta property="og:title" data-i18n-meta="seo.cabinet.title" content="Личный кабинет — LiqScope">
+<meta property="og:description" data-i18n-meta="seo.cabinet.desc" content="Алерты по ликвидациям, CVD и открытому интересу в одном окне.">
+<meta property="og:image" content="https://liqscope.online/static/og-cover.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:locale" content="ru_RU">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" data-i18n-meta="seo.cabinet.title" content="Личный кабинет — LiqScope">
+<meta name="twitter:description" data-i18n-meta="seo.cabinet.desc" content="Алерты по ликвидациям, CVD и открытому интересу в одном окне.">
+<meta name="theme-color" content="#060a12">
+<link rel="icon" href="/static/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="48x48" href="/static/icon-48.png">
+<link rel="icon" type="image/png" sizes="96x96" href="/static/icon-96.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/static/icon-192.png">
+<link rel="icon" type="image/png" sizes="144x144" href="/static/icon-144.png">
+<link rel="icon" type="image/png" sizes="512x512" href="/static/icon-512.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="stylesheet" href="/static/account.css?v=geo2">
 </head>
 <body data-page="cabinet">
 <header class="site-header">
     <a class="brand" href="/">
-        <img class="logo" src="/static/logo.png" alt="LiqScope">
+        <img class="logo" src="/static/logo.png" alt="LiqScope" width="40" height="40">
         <span class="name">LIQSCOPE</span>
-        <span class="tag">ACCOUNT</span>
+        <span class="tag" data-i18n="brand.account">АККАУНТ</span>
     </a>
     <nav class="site-nav">
-        <a class="btn btn-ghost btn-compact" href="/terminal">⚡ Терминал</a>
+        <select id="lang-select" class="lang-select" data-lang-select
+                aria-label="Язык" title="Язык"></select>
+        <a class="btn btn-ghost btn-compact" href="/terminal" data-i18n="cab.nav_terminal">⚡ Терминал</a>
         <span id="nav-account"></span>
     </nav>
 </header>
@@ -26,66 +51,77 @@
             <div class="avatar" id="cab-avatar">?</div>
             <div>
                 <h1 class="page-title" id="cab-name">…</h1>
-                <span class="badge" id="cab-role">пользователь</span>
+                <span class="badge" id="cab-role"></span>
                 <span class="badge" id="cab-verified"></span>
                 <div class="meta" id="cab-meta"></div>
             </div>
         </div>
         <div class="verify-bar hidden" id="verify-bar">
             <span>✉</span>
-            <span id="verify-bar-hint">Подтвердите почту — ссылка есть в письме от LiqScope.</span>
-            <button type="button" class="btn btn-ghost" id="verify-resend">Отправить письмо ещё раз</button>
+            <span id="verify-bar-hint" data-i18n="cab.verify_hint">Подтвердите почту — ссылка есть в письме от LiqScope.</span>
+            <button type="button" class="btn btn-ghost" id="verify-resend"
+                    data-i18n="cab.verify_resend">Отправить письмо ещё раз</button>
         </div>
         <div class="row-actions">
-            <a class="btn btn-primary" href="/terminal">⚡ Открыть терминал</a>
+            <a class="btn btn-primary" href="/terminal" data-i18n="cab.open_terminal">⚡ Открыть терминал</a>
             <a class="btn btn-ghost" href="https://t.me/LiqScopeBot" id="cab-bot-link"
-               target="_blank" rel="noopener">Бот в Telegram</a>
-            <a class="btn btn-ghost" href="#fb-card" id="fb-jump">💬 По всем вопросам<span
+               target="_blank" rel="noopener" data-i18n="cab.bot_link">Бот в Telegram</a>
+            <button type="button" class="btn btn-ghost" id="cab-logout" data-i18n="cab.logout">Выйти</button>
+            <!-- «По всем вопросам» — маленькая кнопка у правого края строки:
+                 диалог внизу кабинета свёрнут по умолчанию, кнопка ведёт к нему
+                 и раскрывает его (обработчик — в account.js). -->
+            <a class="btn btn-ghost btn-small" href="#fb-card" id="fb-jump"
+               data-i18n="cab.feedback_link">💬 По всем вопросам<span
                     class="fb-dot hidden" id="fb-dot"></span></a>
-            <button type="button" class="btn btn-ghost" id="cab-logout">Выйти</button>
         </div>
         <!-- Telegram — запасной вход и канал сигналов: привязывается к аккаунту -->
         <div class="tg-card" id="tg-card">
-            <div class="meta" id="tg-state">Telegram не привязан</div>
+            <div class="meta" id="tg-state" data-i18n="cab.tg_none">Telegram не привязан</div>
             <div class="row-actions" style="margin-top:8px">
-                <button type="button" class="btn btn-ghost btn-small" id="tg-link">🔗 Привязать Telegram</button>
-                <button type="button" class="btn btn-ghost btn-small hidden" id="tg-unlink">Отвязать</button>
+                <button type="button" class="btn btn-ghost btn-small" id="tg-link"
+                        data-i18n="cab.tg_link">🔗 Привязать Telegram</button>
+                <button type="button" class="btn btn-ghost btn-small hidden" id="tg-unlink"
+                        data-i18n="cab.tg_unlink">Отвязать</button>
             </div>
         </div>
     </div>
 
     <p class="partner-line">
         <a href="https://www.gate.com/ru/signup/VLFCAVWMBW?ref_type=103"
-           target="_blank" rel="noopener sponsored">
+           target="_blank" rel="noopener sponsored" data-i18n="cab.partner">
             💠 Торговать на Gate — скидка на комиссию
         </a>
     </p>
 
-    <!-- 💬 Обратная связь: пишем админу здесь же, ответ приходит в этот диалог -->
-    <details class="card fold fb-card" id="fb-card" open>
+    <h2 style="margin-top:34px;font-size:1.2rem" data-i18n="cab.services">Сервисы</h2>
+    <p class="lead" data-i18n="cab.services_lead">Нажмите сервис, чтобы развернуть панель. Алерты: ликвидации, CVD и OI — каждый своим выключателем и своей лентой.</p>
+    <div id="svc-acc"></div>
+
+    <!-- 💬 Обратная связь: пишем админу здесь же, ответ приходит в этот диалог.
+         Блок стоит в самом низу кабинета: сначала сервисы, диалог — последним. -->
+    <details class="card fold fb-card" id="fb-card">
         <summary>
-            <h3>💬 По всем вопросам<span class="fb-dot hidden" id="fb-dot-2"></span></h3>
-            <span class="fold-hint">вопрос, идея, проблема — ответ придёт сюда</span>
+            <h3 data-i18n="cab.fb_title">💬 По всем вопросам<span class="fb-dot hidden" id="fb-dot-2"></span></h3>
+            <span class="fold-hint" data-i18n="cab.fb_hint">вопрос, идея, проблема — ответ придёт сюда</span>
         </summary>
         <div class="fold-body">
-            <p class="lead">Админ читает эти сообщения в админке и отвечает здесь же.
+            <p class="lead" data-i18n="cab.fb_lead">Админ читает эти сообщения в админке и отвечает здесь же.
                 Пишите, что не работает, чего не хватает или что хочется видеть в терминале —
                 переписка хранится, ответ не потеряется.</p>
-            <div class="fb-thread" id="fb-thread"><p class="meta">загружаю переписку…</p></div>
+            <div class="fb-thread" id="fb-thread" data-i18n-skip><p class="meta" data-i18n="cab.fb_loading">загружаю переписку…</p></div>
             <textarea class="fb-input" id="fb-text" rows="3" maxlength="2000"
-                      placeholder="Ваше сообщение админу…"></textarea>
+                      data-i18n-placeholder="cab.fb_ph" placeholder="Ваше сообщение админу…"></textarea>
             <div class="row-actions">
-                <button class="btn btn-primary" type="button" id="fb-send">Отправить</button>
+                <button class="btn btn-primary" type="button" id="fb-send" data-i18n="cab.fb_send">Отправить</button>
                 <span class="meta" id="fb-status"></span>
             </div>
         </div>
     </details>
-
-    <h2 style="margin-top:34px;font-size:1.2rem">Сервисы</h2>
-    <p class="lead">Нажмите сервис, чтобы развернуть панель. Алерты: ликвидации, CVD и OI — каждый своим выключателем и своей лентой.</p>
-    <div id="svc-acc"></div>
 </main>
-<script src="/static/account.js?v=fb9"></script>
+<script src="/static/i18n.pages.js"></script>
+<script src="/static/i18n.js"></script>
+<script src="/static/account.js?v=fb12"></script>
+<script src="/static/presence.js?v=geo2"></script>
 <script src="/static/consent.js?v=consent1"></script>
 </body>
 </html>

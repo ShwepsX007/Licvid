@@ -210,6 +210,7 @@ for (let i = 24; i >= 0; i--) {
 
 async function part1() {
   const { JSDOM, VirtualConsole } = require("jsdom");
+  const { ru } = require("./_ru");
   const vc = new VirtualConsole();
   vc.on("jsdomError", (e) => {
     const m = String((e && e.message) || e);
@@ -220,7 +221,7 @@ async function part1() {
     a.map((x) => String((x && x.message) || x)).join(" ").slice(0, 200)));
 
   const rec = { ranges: [], price: [], priceRanges: [], time: [] };
-  const dom = await JSDOM.fromURL(URL_BASE + "/terminal", {
+  const dom = await JSDOM.fromURL(ru(URL_BASE + "/terminal"), {
     runScripts: "dangerously", resources: "usable", pretendToBeVisual: true,
     virtualConsole: vc,
     beforeParse(win) { installStubs(win, rec, { candles: true }); },
@@ -455,7 +456,7 @@ async function part1() {
 
   // второй заход — состояние помним
   const rec2 = { ranges: [], price: [], priceRanges: [], time: [] };
-  const dom2 = await JSDOM.fromURL(URL_BASE + "/terminal", {
+  const dom2 = await JSDOM.fromURL(ru(URL_BASE + "/terminal"), {
     runScripts: "dangerously", resources: "usable", pretendToBeVisual: true,
     virtualConsole: vc,
     beforeParse(win2) {

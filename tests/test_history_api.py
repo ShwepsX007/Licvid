@@ -16,6 +16,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -36,8 +37,14 @@ import server  # noqa: E402
 from history import day_key  # noqa: E402
 
 HOUR = 3600
-# 17.09.2026, 10:17 UTC — середина суток, чтобы сдвиги не перескакивали день
-NOW = float(calendar.timegm((2026, 9, 17, 10, 17, 0, 0, 0, 0)))
+# «Сейчас» считаем от настоящих часов, а не от фиксированной даты: окно истории
+# и TTL отмеряются на сервере от текущего времени, поэтому жёсткая дата рано или
+# поздно уезжает за границу хранения и тест падает на здоровом коде. Берём
+# полдень сегодняшнего дня (или вчерашнего, если полдень ещё не наступил), чтобы
+# сдвиги на часы не перескакивали через сутки.
+_NOW = time.time()
+_DAY0 = float(calendar.timegm(tuple(time.gmtime(_NOW)[:3]) + (0, 0, 0, 0, 0)))
+NOW = _DAY0 + 12 * HOUR if _DAY0 + 12 * HOUR <= _NOW else _DAY0 - 12 * HOUR
 OLD_TS = NOW - 40 * 24 * HOUR          # за пределами TTL
 RECENT_TS = NOW - 3 * HOUR
 
@@ -126,7 +133,7 @@ class HistoryApiCase(unittest.TestCase):
         days = r.json()["days"]
         self.assertEqual(len(days), 1)
         day = days[0]
-        self.assertEqual(day["day"], "2026-09-17")
+        self.assertEqual(day["day"], day_key(NOW))   # сутки, в которых мы живём
         self.assertAlmostEqual(day["usd"], 480000.0, places=2)
         # CVD рынка: -400к + 120к
         self.assertAlmostEqual(day["cvd"], -280000.0, places=2)
@@ -150,7 +157,9 @@ class HistoryApiCase(unittest.TestCase):
 
     def test_month_window_kept(self):
         """Месяц данных не обрезается: граница — TTL, а не сутки."""
-        month_ago = NOW - 29 * 24 * HOUR
+        # 25 суток назад: и заведомо дальше суточного окна, и заведомо внутри
+        # TTL (31 сутки) — событие обязано вернуться
+        month_ago = NOW - 25 * 24 * HOUR
         path = server.HIST.shard_path(day_key(month_ago))
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "a", encoding="utf-8") as f:

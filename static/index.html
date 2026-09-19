@@ -3,14 +3,38 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" data-i18n-meta="terminal.meta"
-          content="LiqScope Terminal — live-лента ликвидаций крипто-фьючерсов с 8 бирж, свечной график, кластеры и профиль объёмов.">
-    <title data-i18n="terminal.title">LiqScope Terminal — Live Liquidation Stream & Cluster Chart</title>
-    <link rel="icon" type="image/png" href="/static/logo.png">
+    <meta name="description" data-i18n-meta="seo.terminal.desc"
+          content="Терминал LiqScope: живая лента ликвидаций с 8 бирж, свечной график с кластерами, профиль объёмов по ценам, CVD и открытый интерес по каждой монете.">
+    <title data-i18n="seo.terminal.title">Терминал — живая лента ликвидаций крипто-фьючерсов</title>
+    <meta name="robots" content="index,follow,max-image-preview:large">
+    <meta name="theme-color" content="#060a12">
+    <link rel="canonical" href="https://liqscope.online/terminal">
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="LiqScope">
+    <meta property="og:url" content="https://liqscope.online/terminal">
+    <meta property="og:title" data-i18n-meta="seo.terminal.title" content="Терминал — живая лента ликвидаций крипто-фьючерсов">
+    <meta property="og:description" data-i18n-meta="seo.terminal.desc" content="Живая лента ликвидаций с 8 бирж, кластеры, профиль объёмов, CVD и открытый интерес.">
+    <meta property="og:image" content="https://liqscope.online/static/og-cover.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+    <meta property="og:locale" content="ru_RU">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" data-i18n-meta="seo.terminal.title" content="Терминал — живая лента ликвидаций крипто-фьючерсов">
+    <meta name="twitter:description" data-i18n-meta="seo.terminal.desc" content="Живая лента ликвидаций с 8 бирж, кластеры, профиль объёмов, CVD и открытый интерес.">
+    <meta name="twitter:image" content="https://liqscope.online/static/og-cover.png">
+    <link rel="icon" href="/static/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="48x48" href="/static/icon-48.png">
+<link rel="icon" type="image/png" sizes="96x96" href="/static/icon-96.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/static/icon-192.png">
+<link rel="icon" type="image/png" sizes="144x144" href="/static/icon-144.png">
+<link rel="icon" type="image/png" sizes="512x512" href="/static/icon-512.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
+    <link rel="manifest" href="/manifest.webmanifest">
     <link rel="stylesheet" href="/static/style.css?v=static1">
     <!-- Local Lightweight Charts v5 -->
     <script src="/static/lightweight-charts.js"></script>
-    <script src="/static/i18n.js?v=static1"></script>
+    <script src="/static/i18n.pages.js"></script>
+    <script src="/static/i18n.js?v=liqhist1"></script>
     <script src="/static/account.js"></script>
 </head>
 <body class="dark-theme">
@@ -227,8 +251,10 @@
                     <span class="live-stat" id="oi-stat" data-i18n-title="chart.live_oi"
                             title="Изменение OI текущей свечи"></span></span>
                     <button class="profile-toggle layer-call" id="layer-call" type="button"
-                            data-i18n-title="chart.layers_title" data-i18n="chart.layers"
-                            title="Показать/скрыть кнопки слоёв">☰ Слои</button>
+                            data-i18n-title="chart.layers_title"
+                            title="Показать/скрыть кнопки слоёв"><span
+                            data-i18n="chart.layers">☰ Слои</span><span
+                            class="layer-trial hidden" id="layer-trial"></span></button>
                     <!-- Автоследование живёт только в плашке слоёв (кнопка
                          «🎯 Автоследование за ценой»): в шапке графика она
                          дублировалась и мешала переключателям слоёв. -->
@@ -436,6 +462,33 @@
         </aside>
     </main>
 
+    <!-- Пробный доступ к слоям закончился: гостю без регистрации предлагаем
+         бесплатную регистрацию. Крестик (или «Продолжить без слоёв») закрывает
+         окно — терминал работает дальше, но слои остаются выключенными. -->
+    <div id="layers-gate" class="modal layers-gate hidden" role="dialog"
+         aria-modal="true" aria-labelledby="layers-gate-title">
+        <div class="modal-content gate-box">
+            <button type="button" class="close-modal gate-close" id="gate-close"
+                    data-i18n-title="gate.close_title" title="Закрыть окно">×</button>
+            <span class="gate-icon" aria-hidden="true">☰</span>
+            <h3 class="gate-title" id="layers-gate-title"
+                data-i18n="gate.title">Зарегистрируйтесь бесплатно</h3>
+            <p class="gate-text" data-i18n="gate.text">Пробные 30 минут слоёв закончились.
+                Регистрация бесплатная: она открывает слои и индикаторы, сигналы в
+                Telegram и личный кабинет с сервисами.</p>
+            <div class="gate-feats">
+                <span class="gate-feat">📊 <span data-i18n="gate.f1">Слои и индикаторы графика</span></span>
+                <span class="gate-feat">🔔 <span data-i18n="gate.f2">Сигналы в Telegram</span></span>
+                <span class="gate-feat">👤 <span data-i18n="gate.f3">Кабинет и сервисы</span></span>
+            </div>
+            <a class="btn gate-cta" id="gate-cta"
+               href="/login?mode=register&amp;next=/terminal"
+               data-i18n="gate.cta">Зарегистрироваться бесплатно</a>
+            <button type="button" class="gate-later" id="gate-later"
+                    data-i18n="gate.later">Продолжить без слоёв</button>
+        </div>
+    </div>
+
     <!-- Modal -->
     <div id="detail-modal" class="modal hidden">
         <div class="modal-content">
@@ -445,7 +498,8 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=static1"></script>
-    <script src="/static/consent.js?v=consent1"></script>
+    <script src="/static/app.js?v=liqhist1"></script>
+    <script src="/static/presence.js?v=geo2"></script>
+<script src="/static/consent.js?v=consent1"></script>
 </body>
 </html>

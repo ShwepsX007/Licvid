@@ -73,6 +73,65 @@ def window_word(secs: float, lang: str = "ru") -> str:
     return f"{hours}ч{minutes:02d}м"
 CAPTION_LIMIT = 1024
 
+
+def caption_len(text: str) -> int:
+    """Длина подписи так, как её считает Telegram: UTF-16, эмодзи = 2 знака.
+
+    ``len()`` в Python считает знаки Unicode, а Telegram — единицы UTF-16:
+    каждый эмодзи (💥, 🕘, 📉…) весит два. Пост из строк с эмодзи «по len()»
+    укладывается в 1024, а для Telegram длиннее — и тогда он молча уходил без
+    фотографии: ``sendPhoto`` с такой подписью отклоняется, а бот отправлял
+    текст. Русский пост длиннее английского, поэтому фото терял именно он.
+    Считать (и подрезать) надо одинаково — этой функцией.
+    """
+    return len(str(text or "").encode("utf-16-le")) // 2
+
+
+def cut_utf16(text: str, limit: int) -> str:
+    """Обрезать текст до ``limit`` единиц UTF-16, не разрезая эмодзи пополам."""
+    if limit <= 0:
+        return ""
+    out: List[str] = []
+    width = 0
+    for ch in str(text or ""):
+        w = 2 if ord(ch) > 0xFFFF else 1
+        if width + w > limit:
+            break
+        out.append(ch)
+        width += w
+    return "".join(out)
+
+
+def caption_fit(text: str, limit: int = CAPTION_LIMIT) -> str:
+    """Подпись, гарантированно влезающая в лимит Telegram.
+
+    Последний абзац (подпись бренда со ссылками на сайт, бота и Gate) не
+    трогаем — без него пост теряет и бренд, и реферальную строку. Остальное
+    режем по целым строкам, начиная с самой нижней: у сводки это самые старые
+    часы. Так фото уходит всегда, даже если шапка от ИИ оказалась длиннее
+    обычного, — лучше пост с обрезанным хвостом, чем пост без картинки.
+    """
+    text = str(text or "")
+    if caption_len(text) <= limit:
+        return text
+    lines = text.split("\n")
+    end = len(lines)
+    while end > 0 and not lines[end - 1].strip():
+        end -= 1
+    start = end
+    while start > 0 and lines[start - 1].strip():
+        start -= 1
+    tail = lines[start:end]
+    body = lines[:start]
+    while body and caption_len("\n".join(body + [""] + tail)) > limit:
+        body.pop()
+        while body and not body[-1].strip():
+            body.pop()
+    head = "\n".join(body).rstrip()
+    out = (head + "\n\n" + "\n".join(tail)) if head else "\n".join(tail)
+    return _close_tags(out.strip())
+
+
 # Шаблоны шапок. {h} — окно в часах. Админ может удалить/добавить свои в БД.
 DEFAULT_HEAD_TEMPLATES = (
     "🌙 Ночная смена на ленте. {h} часа — и рынок снова кого-то съел.",
@@ -699,7 +758,7 @@ def _cvd_bit(hour: dict, lang: str = "ru") -> str:
     return f"🌊 CVD {emo} {money(abs(n))}"
 
 
-def hour_line(hour: dict, lang: str = "ru") -> str:
+def hour_line(hour: dict, lang: str = "ru", compact: bool = False) -> str:
     """Час одной строкой: касса с изменением, OI и CVD от объёма.
 
         🕘 <b>21:00</b> (идёт) 💥 $44.6M 📈 ▲662% · 📊 OI $43.1B ⚖️ →0% · 🌊 CVD 🟢 7.4% объёма
@@ -707,6 +766,13 @@ def hour_line(hour: dict, lang: str = "ru") -> str:
     Так час читается как одна мысль: сколько горело, куда сдвинулся открытый
     интерес и на чьей стороне был поток. Раньше те же цифры шли тремя
     строками и ряд часов растягивал пост.
+
+    ``compact`` — только час, касса и её изменение:
+
+        🕘 <b>21:00</b> (идёт) 💥 <b>$44.6M</b> 📈 ▲662%
+
+    Тесный вид нужен, когда подпись почти полна, а лидеры часа терять нельзя:
+    OI и CVD часа уходят, зато под каждым «🕘» остаётся «🏆 … 💰 …».
     """
     hh = slot_label(hour, lang)
     total = float(hour.get("total") or 0)
@@ -716,6 +782,8 @@ def hour_line(hour: dict, lang: str = "ru") -> str:
                 + _updown(hour.get("liq_pct"), lang)]
     else:
         bits = [f"🕘 <b>{hh}</b>{mark} {lbl(lang, 'empty_hour')}"]
+    if compact:
+        return " · ".join(bits)
     oi = hour.get("oi") or {}
     if oi.get("value"):
         bits.append(f"📊 {lbl(lang, 'oi')} {short_money(oi['value'])}"
@@ -764,16 +832,39 @@ def hour_leader_line(hour: dict, lang: str = "ru",
     return line
 
 
+def hour_caption_line(hour: dict, lang: str = "ru",
+                      skip_money: Optional[str] = None,
+                      short: bool = False) -> str:
+    """Час одной строкой вместе с лидером — так пост и уходит в канал.
+
+        🕘 <b>19:15</b> 💥 <b>$3.7M</b> 📉 ▼71% · 🏆 Лидер часа: ONE · 406 событий · $269K · 💰 1000PEPE $795K
+        🕘 <b>17:15</b> тихо
+
+    Раньше под каждым часом шло две строки: цифры часа (с OI и CVD) и лидер
+    часа. Вместе с двумя строками окна (CVD за окно и перекос CVD) пост выходил
+    длиннее лимита подписи Telegram — и уходил текстом, без фотографии. Теперь
+    у часа одна строка: когда горело, на сколько и кто задавал час. OI и CVD
+    часа остались в терминале, а в посте — только у окна и только если место
+    осталось.
+    """
+    line = hour_line(hour, lang, compact=True)
+    lead = hour_leader_line(hour, lang, skip_money=skip_money, short=short)
+    return f"{line} · {lead}" if lead else line
+
+
 def hour_block(hour: dict, lang: str = "ru",
-               skip_money: Optional[str] = None, short: bool = False) -> str:
+               skip_money: Optional[str] = None, short: bool = False,
+               compact: bool = False) -> str:
     """Блок часа в посте: строка цифр и под ней строка лидера.
 
     Полный вид поста. ``short`` — лидер без слов «Лидер часа» (см.
-    ``hour_leader_line``); совсем без лидеров часы остаются, только если и
-    такой вид не влезает — у русского канала текст длиннее, и раньше он терял
-    лидеров целиком.
+    ``hour_leader_line``); ``compact`` — сам час без OI и CVD (см.
+    ``hour_line``). Лидер часа остаётся в любом из этих видов: у русского
+    канала шапка длиннее (её пишет админка или ИИ), и раньше такой вид
+    пропадал целиком — в русском посте не было «🏆» под часами, пока
+    английский их показывал.
     """
-    parts = [hour_line(hour, lang)]
+    parts = [hour_line(hour, lang, compact=compact)]
     lead = hour_leader_line(hour, lang, skip_money=skip_money, short=short)
     if lead:
         parts.append(lead)
@@ -781,7 +872,8 @@ def hour_block(hour: dict, lang: str = "ru",
 
 
 def short_hour_block(hour: dict, lang: str = "ru") -> str:
-    """Час одной строкой без лидера — когда четыре полных блока не влезают."""
+    """Час одной строкой без лидера — самый тесный вид, когда даже
+    ``hour_block(compact=True)`` не влезает."""
     return hour_line(hour, lang)
 
 
@@ -1009,11 +1101,11 @@ def _pack(parts: List[str], tail: str, limit: int = CAPTION_LIMIT) -> str:
     text = join(chunks)
     # Режем хвост, но первый блок (шапка + стенд) не выбрасываем: пустой пост
     # хуже длинного. Если и он не влезает — обрежется по лимиту строкой ниже.
-    while len(text) > limit and len(chunks) > 1:
+    while caption_len(text) > limit and len(chunks) > 1:
         chunks.pop()
         text = join(chunks)
-    if len(text) > limit:
-        cut = text[:limit]
+    if caption_len(text) > limit:
+        cut = cut_utf16(text, limit)
         # режем по целой строке: половина строки таблицы читается как сбой
         nl = cut.rfind("\n")
         if nl > limit // 2:
@@ -1160,6 +1252,109 @@ def digest_images(store=None) -> List[str]:
     return _photo_paths(store, "digest") or active_images(store, "post")
 
 
+def _pick_from_store(store, kind: str) -> str:
+    """Просим базу отдать фото «по кругу без повторов». Нет такого — пусто."""
+    if store is None or not hasattr(store, "pick_digest_photo"):
+        return ""
+    try:
+        return str(store.pick_digest_photo(kind) or "")
+    except TypeError:                         # старая база: выбора по рубрике нет
+        try:
+            return str(store.pick_digest_photo() or "")
+        except Exception:                     # noqa: BLE001
+            return ""
+    except Exception:                         # noqa: BLE001
+        return ""
+
+
+def bundle_dir() -> str:
+    """Папка встроенных картинок комплекта (static/channel)."""
+    return os.path.abspath(IMAGES_DIR)
+
+
+def cover_info(path: str, store=None) -> Dict[str, Any]:
+    """Описание обложки: путь, имя, откуда взялась и её id в базе.
+
+    ``source``: ``admin`` — фото загружено через админку, ``bundle`` — картинка
+    из комплекта ``static/channel``. id нужен админке (кнопки «перенести»
+    и «удалить»), сайту хватает имени и адреса.
+    """
+    path = str(path or "")
+    if not path:
+        return {}
+    out: Dict[str, Any] = {"path": path, "name": os.path.basename(path),
+                           "source": "bundle" if _is_bundled(path) else "admin",
+                           "id": 0}
+    if store is not None and out["source"] == "admin":
+        try:
+            for row in store.list_digest_photos("") or []:
+                if str(row.get("path") or "") == path:
+                    out["id"] = int(row.get("id") or 0)
+                    out["kind"] = str(row.get("kind") or "")
+                    break
+        except Exception:                     # noqa: BLE001
+            pass
+    return out
+
+
+def _is_bundled(path: str) -> bool:
+    """Картинка из комплекта или загруженная через админку?"""
+    try:
+        return os.path.abspath(os.path.dirname(path) or ".") == bundle_dir()
+    except Exception:                         # noqa: BLE001
+        return False
+
+
+def ensure_digest_cover(store=None, variant: int = 0) -> Dict[str, Any]:
+    """Обложка дневного выпуска: одно фото и для сайта, и для Telegram.
+
+    Фото выбирается тем же кругом без повторов, что и раньше
+    (``pick_digest_image``), но результат теперь описывается словарём и
+    сохраняется в записи выпуска: страница ``/digest`` показывает ту же
+    картинку, что ушла в канал, и её же отдаёт превью ссылки.
+    """
+    path = pick_digest_image(store, variant=variant)
+    if not path or not os.path.isfile(path):
+        return {}
+    return cover_info(path, store)
+
+
+def pick_active_image(store=None, kind: str = "post", variant: int = 0) -> Optional[str]:
+    """Обложка поста из админки: фото, которое дольше всех не выходило.
+
+    Так набор листается без однообразия: каждое фото выходит по разу, прежде
+    чем что-то повторится, а среди одинаково давних выбор случайный — порядок
+    не выглядит линейкой. Фото в базе нет — берём комплект static/channel и
+    листаем по номеру поста, как раньше.
+    """
+    own = _photo_paths(store, kind)
+    if not own and kind:
+        own = _photo_paths(store, "")
+    if own:
+        picked = _pick_from_store(store, kind if _photo_paths(store, kind) else "")
+        if picked and os.path.isfile(picked):
+            return picked
+    return pick_image(variant, images=own or list_images())
+
+
+def pick_digest_image(store=None, variant: int = 0) -> Optional[str]:
+    """Обложка дневного выпуска: своя рубрика «по кругу», иначе фото постов.
+
+    Своих фото дайджеста нет — берём постовые, но тоже самым «давним»: один и
+    тот же вечерний выпуск не повторит вчерашнюю обложку, пока не выйдут все.
+    """
+    own = _photo_paths(store, "digest")
+    if own:
+        picked = _pick_from_store(store, "digest")
+        if picked and os.path.isfile(picked):
+            return picked
+    elif _photo_paths(store, "post"):
+        picked = _pick_from_store(store, "post")
+        if picked and os.path.isfile(picked):
+            return picked
+    return pick_image(variant, images=digest_images(store))
+
+
 HOUR_MARK = r"🕘[^\n]{0,12}\d{2}:\d{2}"
 
 
@@ -1185,11 +1380,15 @@ def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = N
     строка цифр (касса с процентом, OI, CVD долей объёма) и строка лидера часа
     (кто дал больше всех событий) — как в шаблоне поста.
 
-    Подпись Telegram держит 1024 символа, поэтому пост сам выбирает, чем
-    пожертвовать: сначала уходят строки окна (по одной, начиная со сдвига OI),
-    а если и подробные часы не влезают — часы сжимаются до одной строки, но ни
-    один блок не пропадает. head_override — шапка от ИИ: та же раскладка,
-    меняется только текст.
+    Каждый час — одна строка (когда горело, на сколько, кто задавал час):
+    OI и CVD часа в пост не идут, они остались в терминале. Строки окна (CVD
+    за окно, перекос CVD, сдвиг OI) добавляются сверху, только если вместе
+    с часами всё ещё влезают в подпись. Подпись Telegram держит 1024 знака
+    (эмодзи считаются за два — ``caption_len``), поэтому пост сам выбирает,
+    чем пожертвовать: сначала уходят подробности окна, потом из строки часа
+    пропадают слова «Лидер часа», в самом тесном случае часы идут без
+    лидеров, а из ряда часов уходят самые старые. head_override — шапка от
+    ИИ: та же раскладка, меняется только текст.
     """
     import html as _html
     f = _facts(snap, lang)
@@ -1236,53 +1435,64 @@ def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = N
 
     def fits(parts_: List[str]) -> bool:
         text = "\n\n".join([p for p in parts_ if p] + [tail])
-        return len(text) <= CAPTION_LIMIT
+        # считаем как Telegram: эмодзи весит два знака (caption_len), иначе
+        # подпись «влезает», а sendPhoto её отклоняет — и пост уходит без фото
+        return caption_len(text) <= CAPTION_LIMIT
 
     parts: List[str] = [head, _total_line(snap, lang)]
     # Монета, уже названная лидером окна: в часах её сумма не повторяется.
     win_money = (_leader_of(board, "vol") or {}).get("symbol")
-    # Виды поста от самого подробного к самому скромному: подробная строка
-    # лидера часа → короткая (без слов «Лидер часа») → часы без лидеров.
-    # Лидер часа важнее подробностей окна: раньше лестница выбирала вид часов
-    # до того, как считала строки окна, и русский пост (текст длиннее) терял
-    # лидеров часа целиком, пока английский их показывал.
-    blocks_by_style = {
-        "verbose": [hour_block(x, lang, skip_money=win_money) for x in hours],
-        "short": [hour_block(x, lang, skip_money=win_money, short=True)
-                  for x in hours],
-        "plain": [short_hour_block(x, lang) for x in hours],
-    }
+    # Часы идут одним блоком строк подряд — свежий первым. Виды от самого
+    # подробного к самому скромному: полный лидер часа → лидер без слов
+    # «Лидер часа» → часы без лидеров. Часы, которые не влезли, отбрасываем
+    # с конца (самые старые): лучше четыре часа без последнего, чем один
+    # свежий и потерянные остальные.
     win = [_window_leader_line(board, lang), _flow_line(board, lang),
            _cvd_leader_line(board, lang), _oi_leader_line(board, lang)]
-    # Порядок по важности: сначала строка CVD окна (вторая половина сводки),
-    # потом лидер окна, потом перекос CVD и сдвиг OI — он дублирует процент OI
-    # из каждого часа. В посте они всё равно стоят в своём порядке (``win``).
-    fill_order = (1, 0, 2, 3)
-
-    picked_style = "plain"
-    picked_blocks: List[str] = blocks_by_style["plain"]
-    for style in ("verbose", "short", "plain"):
-        blocks = blocks_by_style[style]
-        if blocks and fits(parts + blocks):
-            picked_style, picked_blocks = style, blocks
+    # Лидер окна — часть основы поста (главная цифра сводки), место под него
+    # бронируем ДО выбора вида часов: иначе подробные часы съедали строку, и
+    # пост оставался без лидера окна. Всё остальное (CVD окна, перекос CVD,
+    # сдвиг OI) — подробности: добавляются по одной, только если вместе
+    # с часами влезают в подпись. Так подробности не вытесняют часы.
+    base = list(parts) + ([win[0]] if win[0] else [])
+    styles = (
+        [hour_caption_line(x, lang, skip_money=win_money) for x in hours],
+        [hour_caption_line(x, lang, skip_money=win_money, short=True)
+         for x in hours],
+        [hour_line(x, lang, compact=True) for x in hours],
+    )
+    # Сначала пробуем показать все часы. Если все часы влезли — остаток
+    # отдаём подробностям окна, сколько поместится. Если весь ряд часов не
+    # влез даже в тесном виде, подробности не добавляем вовсе: часы и их
+    # лидеры важнее, а место освободившееся от них и так уходит часам.
+    hours_block, all_hours = "", False
+    for lines in styles:
+        block = "\n".join([ln for ln in lines if ln])
+        if block and fits(base + [block]):
+            hours_block, all_hours = block, True
             break
-    # Часы уже выбраны, и место под них занято: строки окна добавляются по
-    # одной, пока влезают, — и всегда в порядке поста.
+    if not hours_block:
+        # часы без слов «Лидер часа», потом совсем короткие строки — и так
+        # отбрасываем самые старые часы один за другим, пока ряд не влезет
+        for lines in styles[1:]:
+            for cut in range(len(lines) - 1, 0, -1):
+                block = "\n".join([ln for ln in lines[:cut] if ln])
+                if block and fits(base + [block]):
+                    hours_block = block
+                    break
+            if hours_block:
+                break
     kept: List[int] = []
-    for idx in fill_order:
-        line = win[idx]
-        if not line:
-            continue
-        trial = sorted(kept + [idx])
-        if fits(parts + [win[i] for i in trial] + picked_blocks):
-            kept = trial
-    picked = [win[i] for i in kept]
-    parts.extend(picked)
-    added = 0
-    for block in picked_blocks:
-        if block and fits(parts + [block]):
-            parts.append(block)
-            added += 1
+    if all_hours:
+        for idx in (1, 2, 3):
+            line = win[idx]
+            if not line:
+                continue
+            trial = sorted(kept + [idx])
+            if fits(base + [win[i] for i in trial] + [hours_block]):
+                kept = trial
+    parts = base + [win[i] for i in kept] + ([hours_block] if hours_block else [])
+    added = 1 if hours_block else 0
     if not added:
         # часов ещё нет (первый запуск): показываем хотя бы настроение ленты,
         # чтобы пост не состоял из одной суммы

@@ -338,6 +338,54 @@ class BotAdminTest(unittest.TestCase):
         self.assertFalse(d["ok"])
         self.assertIn("канал не привязан", d["message"])
 
+    def test_publish_hourly_fills_the_site_archive(self):
+        """«🕘 Сводка на сайт»: сводка ложится в архив раздела, бот не нужен."""
+        import api_hourly
+        seen = []
+
+        async def collect():
+            seen.append(True)
+            return {"id": "2026-09-17-1200", "ts": 1.0, "texts": {"ru": "x", "en": "y"}}
+
+        old_fn = api_hourly.ctx.collect_fn
+        api_hourly.ctx.collect_fn = collect
+        try:
+            d = self.admin.post("/api/admin/bot/publish", json={"kind": "hourly"}).json()
+        finally:
+            api_hourly.ctx.collect_fn = old_fn
+        self.assertTrue(d["ok"], d)
+        self.assertEqual(seen, [True])
+        self.assertFalse(d["draft"])                      # это не черновик в Telegram
+        self.assertIn("2026-09-17-1200", d["message"])
+        self.assertIn("/hourly", d["message"])
+        self.assertEqual([c for c in self.bot.calls if c[0] in ("post_channel", "post_daily")], [])
+
+    def test_publish_hourly_without_collector_says_so(self):
+        import api_hourly
+        old_fn = api_hourly.ctx.collect_fn
+        api_hourly.ctx.collect_fn = None
+        try:
+            d = self.admin.post("/api/admin/bot/publish", json={"kind": "hourly"}).json()
+        finally:
+            api_hourly.ctx.collect_fn = old_fn
+        self.assertFalse(d["ok"])
+        self.assertIn("выключен", d["message"])
+
+    def test_publish_hourly_empty_snapshot_is_not_archived(self):
+        import api_hourly
+
+        async def collect():
+            return {}
+
+        old_fn = api_hourly.ctx.collect_fn
+        api_hourly.ctx.collect_fn = collect
+        try:
+            d = self.admin.post("/api/admin/bot/publish", json={"kind": "hourly"}).json()
+        finally:
+            api_hourly.ctx.collect_fn = old_fn
+        self.assertFalse(d["ok"])
+        self.assertIn("пустой", d["message"])
+
     # --- ИИ ----------------------------------------------------------------
     def test_ai_check_shows_headline(self):
         d = self.admin.post("/api/admin/bot/ai-check", json={"lang": "ru"}).json()

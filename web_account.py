@@ -13,17 +13,20 @@ import re
 import secrets
 import threading
 import time
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
 
+import geoip
+import seo_pages
 from accounts import (COOKIE_SID, COOKIE_VID, hash_ip, hash_password,
                       normalize_email, password_problem, valid_email,
                       verify_password, verify_telegram_widget)
-from web_upload import PHOTO_ERR, decode_json_photo, parse_multipart_file
+from web_upload import (PHOTO_ERR, decode_json_photos, parse_multipart_file,
+                        parse_multipart_files)
 
 log = logging.getLogger("liqscope.account")
 
@@ -45,6 +48,8 @@ class Ctx:
     liqs_fn = staticmethod(lambda: [])
     ws_clients_fn = staticmethod(lambda: 0)
     alerts_market_fn = staticmethod(lambda: {})
+    #: Свои хосты сайта: переходы внутри него источником не считаются
+    site_hosts = ()
     symbols_fn = staticmethod(lambda: [])
     # Корреляции валют: (окно, метрика) → готовая картина по истории
     correlations_fn = staticmethod(lambda window="24h", metric="liq": {})
@@ -181,15 +186,46 @@ def _rate_key(request: Request, action: str, extra: str = "") -> str:
     return f"{action}:{_client_ip(request)}:{extra}"
 
 
+#: Языки сайта. Раньше подсказки формы были только ru/en, и человек,
+#: выбравший китайский, получал русское сообщение об ошибке.
+SITE_LANGS = ("ru", "en", "zh", "hi", "es")
+
+
+def _site_lang(value: str) -> str:
+    """Свести язык из запроса к одному из языков сайта (``zh-CN`` → ``zh``)."""
+    code = str(value or "").strip().lower()
+    if not code:
+        return ""
+    base = code.split("-")[0].split("_")[0]
+    return base if base in SITE_LANGS else ""
+
+
 def _lang_code(request: Request, body: Optional[dict] = None) -> str:
+    """Язык ответа: тот, что человек уже выбрал (тело, ``?lang=``, cookie).
+
+    Порядок тот же, что у страниц в ``seo_pages``: явный выбор важнее
+    заголовка браузера, а по ``Accept-Language`` берём только явные языки.
+    """
     if body:
-        lang = str((body or {}).get("language") or "").strip().lower()
-        if lang:
-            return lang[:5]
+        code = _site_lang(str((body or {}).get("language") or ""))
+        if code:
+            return code
+    try:
+        code = _site_lang(request.query_params.get("lang") or "")
+        if code:
+            return code
+        code = _site_lang(request.cookies.get("liqscope_lang") or "")
+        if code:
+            return code
+    except Exception:  # noqa: BLE001 - у тестового запроса может не быть свойств
+        pass
     head = (request.headers.get("accept-language") or "").lower()
-    if head.startswith("en"):
-        return "en"
-    return "ru"
+    for part in head.split(","):
+        code = _site_lang(part.split(";")[0])
+        if code:
+            return code
+    # ничего не знаем о языке гостя — показываем язык сайта по умолчанию
+    return seo_pages.DEFAULT_LANG
 
 
 def _mailer():
@@ -212,7 +248,8 @@ def _mail_path(kind: str, token: str) -> str:
     return ""
 
 
-def _send_mail_blocking(kind: str, to: str, token: str, name: str = "") -> bool:
+def _send_mail_blocking(kind: str, to: str, token: str, name: str = "",
+                        lang: str = "ru") -> bool:
     m = _mailer()
     if not m or not getattr(m, "enabled", False):
         # Пока SMTP не настроен, регистрация не должна упираться в стену:
@@ -222,19 +259,20 @@ def _send_mail_blocking(kind: str, to: str, token: str, name: str = "") -> bool:
                     kind, to, (m.link(_mail_path(kind, token)) if m else _mail_path(kind, token)))
         return False
     if kind == "verify":
-        return m.send_verify(to, token, name=name)
+        return m.send_verify(to, token, name=name, lang=lang)
     if kind == "login":
-        return m.send_login_link(to, token)
+        return m.send_login_link(to, token, lang=lang)
     if kind == "reset":
-        return m.send_reset(to, token)
+        return m.send_reset(to, token, lang=lang)
     if kind == "attach":
-        return m.send_tg_attach(to, token, tg_name=name)
+        return m.send_tg_attach(to, token, tg_name=name, lang=lang)
     return False
 
 
-async def _send_mail(kind: str, to: str, token: str, name: str = "") -> bool:
+async def _send_mail(kind: str, to: str, token: str, name: str = "",
+                     lang: str = "ru") -> bool:
     """SMTP — блокирующий вызов: уводим его в поток, не морозя event loop."""
-    return await run_in_threadpool(_send_mail_blocking, kind, to, token, name)
+    return await run_in_threadpool(_send_mail_blocking, kind, to, token, name, lang)
 
 
 async def _json_body(request: Request) -> dict:
@@ -288,8 +326,70 @@ def _email_error(lang: str, code: str) -> str:
         "signed_in": "You are already signed in. Sign out first to register "
                      "another address.",
     }
-    table = en if str(lang).startswith("en") else ru
-    return table.get(code, code)
+    zh = {
+        "bad_email": "地址看起来有笔误。",
+        "email_unverified": "请先确认邮箱——链接就在我们发去的邮件里。",
+        "no_user": "这个邮箱还没有账号。",
+        "no_password": "该账号没有密码——请用邮件里的链接或 Telegram 登录。",
+        "short": "密码少于 8 个字符。",
+        "long": "密码太长了。",
+        "weak": "这个密码太简单了。",
+        "rate": "太频繁了。请过几分钟再试。",
+        "expired": "链接已过期——请重新申请。",
+        "used": "链接已经用过了。请重新申请。",
+        "unknown": "找不到这个链接——请重新申请。",
+        "taken": "该邮箱已注册——请登录或重置密码。",
+        "mail_failed": "邮件没有发出去。请检查地址或稍后再试。",
+        "captcha_wrong": "答案不对，请重试。",
+        "captcha_expired": "题目已过期——请刷新后重新作答。",
+        "captcha_missing": "请先解出下面的例子——这样能挡住机器人。",
+        "captcha_used": "这道题已经答过了——请刷新题目。",
+        "signed_in": "你已登录。要注册另一个地址，请先退出当前账号。",
+    }
+    hi = {
+        "bad_email": "पता ग़लत लग रहा है।",
+        "email_unverified": "पहले ईमेल की पुष्टि करें — लिंक हमारे भेजे ईमेल में है।",
+        "no_user": "इस ईमेल से कोई खाता नहीं है।",
+        "no_password": "इस खाते में पासवर्ड नहीं है — ईमेल लिंक या Telegram से आएँ।",
+        "short": "पासवर्ड 8 अक्षरों से छोटा है।",
+        "long": "पासवर्ड बहुत लंबा है।",
+        "weak": "यह पासवर्ड बहुत आसान है।",
+        "rate": "बहुत बार कोशिश हुई। कुछ मिनट बाद प्रयास करें।",
+        "expired": "लिंक पुराना हो गया — नया मंगाएँ।",
+        "used": "यह लिंक पहले ही इस्तेमाल हो चुका है। नया मंगाएँ।",
+        "unknown": "लिंक नहीं मिला — नया मंगाएँ।",
+        "taken": "यह ईमेल पहले से दर्ज है — साइन इन करें या पासवर्ड बदलें।",
+        "mail_failed": "ईमेल नहीं गया। पता जाँचें या बाद में प्रयास करें।",
+        "captcha_wrong": "जवाब ग़लत है। नया उदाहरण आज़माएँ।",
+        "captcha_expired": "उदाहरण पुराना हो गया — ताज़ा करके फिर हल करें।",
+        "captcha_missing": "नीचे दिया उदाहरण हल करें — इससे रोबोट रुकते हैं।",
+        "captcha_used": "यह उदाहरण हल हो चुका है — ताज़ा करें।",
+        "signed_in": "आप पहले से साइन इन हैं। दूसरा पता जोड़ने के लिए पहले साइन आउट करें।",
+    }
+    es = {
+        "bad_email": "Esa dirección parece tener un error.",
+        "email_unverified": "Confirme su correo primero: el enlace está en nuestra carta.",
+        "no_user": "No hay ninguna cuenta con este correo.",
+        "no_password": "Esta cuenta no tiene contraseña: entre con el enlace del correo o con Telegram.",
+        "short": "La contraseña tiene menos de 8 caracteres.",
+        "long": "La contraseña es demasiado larga.",
+        "weak": "Esa contraseña es demasiado simple.",
+        "rate": "Demasiados intentos. Pruebe en unos minutos.",
+        "expired": "El enlace caducó: pida uno nuevo.",
+        "used": "Ese enlace ya se usó. Pida uno nuevo.",
+        "unknown": "No encontramos el enlace: pida uno nuevo.",
+        "taken": "Este correo ya está registrado: entre o restablezca la contraseña.",
+        "mail_failed": "La carta no salió. Revise la dirección o pruebe más tarde.",
+        "captcha_wrong": "Respuesta incorrecta. Pruebe con el nuevo ejemplo.",
+        "captcha_expired": "El ejemplo caducó: actualícelo y resuélvalo de nuevo.",
+        "captcha_missing": "Resuelva el ejemplo de abajo: así frenamos a los robots.",
+        "captcha_used": "Ese ejemplo ya se resolvió: actualícelo.",
+        "signed_in": "Ya tiene la sesión iniciada. Cierre sesión para registrar otra dirección.",
+    }
+    TABLES = {"ru": ru, "en": en, "zh": zh, "hi": hi, "es": es}
+    table = TABLES.get(_site_lang(lang) or seo_pages.DEFAULT_LANG,
+                       TABLES[seo_pages.DEFAULT_LANG])
+    return table.get(code, ru.get(code, code))
 
 
 def _user_session(request: Request, response: Response, user: dict) -> str:
@@ -363,36 +463,51 @@ def _public_url(request: Request) -> str:
     return str(request.base_url).rstrip("/")
 
 
-async def read_uploaded_photo(request: Request) -> Tuple[bytes, str]:
+async def read_uploaded_photos(request: Request) -> List[Tuple[bytes, str]]:
+    """Все файлы из запроса: админ выбирает пачку фото за один раз.
+
+    Раньше отсюда возвращался только первый файл, поэтому из выбранной пачки
+    сохранялось одно фото — и это выглядело как «лимит в 7 фото».
+    """
     ctype = (request.headers.get("content-type") or "").lower()
     if "multipart/form-data" in ctype:
         raw = await request.body()
-        return parse_multipart_file(raw, request.headers.get("content-type") or "")
+        return parse_multipart_files(raw, request.headers.get("content-type") or "")
     if "application/json" in ctype:
         try:
             body = await request.json()
         except Exception:
             body = {}
-        return decode_json_photo(body)
+        return decode_json_photos(body)
     if ctype.startswith("image/"):
-        return await request.body(), ""
-    return b"", ""
+        return [(await request.body(), "")]
+    return []
+
+
+async def read_uploaded_photo(request: Request) -> Tuple[bytes, str]:
+    """Первый файл из запроса — так грузят фото рекламы, платежей и т.п."""
+    items = await read_uploaded_photos(request)
+    return items[0] if items else (b"", "")
 
 
 def register_account_routes(app) -> None:
     router = APIRouter()
 
     @router.get("/login")
-    async def page_login():
-        return FileResponse(os.path.join(STATIC_DIR, "login.html"))
+    async def page_login(request: Request):
+        lang, auto = seo_pages.lang_of(request)
+        return seo_pages.render("login.html", lang, "/login", auto=auto)
 
     @router.get("/cabinet")
-    async def page_cabinet():
-        return FileResponse(os.path.join(STATIC_DIR, "cabinet.html"))
+    async def page_cabinet(request: Request):
+        # кабинет закрыт от индексации: внутренние данные пользователя
+        lang, auto = seo_pages.lang_of(request)
+        return seo_pages.render("cabinet.html", lang, "/cabinet", auto=auto)
 
     @router.get("/admin")
-    async def page_admin():
-        return FileResponse(os.path.join(STATIC_DIR, "admin.html"))
+    async def page_admin(request: Request):
+        lang, auto = seo_pages.lang_of(request)
+        return seo_pages.render("admin.html", lang, "/admin", auto=auto)
 
     @router.get("/api/auth/me")
     async def api_me(request: Request):
@@ -480,7 +595,8 @@ def register_account_routes(app) -> None:
                 user = att["user"]
                 token = ctx.store.new_email_token(user["id"], "verify", email=email)
                 sent = await _send_mail("verify", email, token,
-                                        name=user.get("first_name") or "")
+                                        name=user.get("first_name") or "",
+                                        lang=lang)
                 if not sent and _email_enabled():
                     return JSONResponse({"ok": False, "error": "mail_failed",
                                          "hint": _email_error(lang, "mail_failed")},
@@ -507,7 +623,8 @@ def register_account_routes(app) -> None:
             }, status_code=200)
         user = r["user"]
         token = ctx.store.new_email_token(user["id"], "verify", email=email)
-        sent = await _send_mail("verify", email, token, name=user.get("first_name") or "")
+        sent = await _send_mail("verify", email, token,
+                                name=user.get("first_name") or "", lang=lang)
         if not sent and _email_enabled():
             return JSONResponse({"ok": False, "error": "mail_failed",
                                  "hint": _email_error(lang, "mail_failed")}, status_code=502)
@@ -531,7 +648,8 @@ def register_account_routes(app) -> None:
         # ответ всегда одинаковый: не выдаём, зарегистрирован адрес или нет
         if user and not user.get("email_verified"):
             token = ctx.store.new_email_token(user["id"], "verify", email=email)
-            sent = await _send_mail("verify", email, token, name=user.get("first_name") or "")
+            sent = await _send_mail("verify", email, token,
+                                    name=user.get("first_name") or "", lang=lang)
             return {"ok": True, "sent": bool(sent), "email": email}
         return {"ok": True, "sent": True, "email": email}
 
@@ -578,7 +696,8 @@ def register_account_routes(app) -> None:
         if not _verify_allowed(user):
             # жёсткий режим: без клика по ссылке из письма входа нет
             token = ctx.store.new_email_token(user["id"], "verify", email=email)
-            sent = await _send_mail("verify", email, token, name=user.get("first_name") or "")
+            sent = await _send_mail("verify", email, token,
+                                    name=user.get("first_name") or "", lang=lang)
             return JSONResponse({"ok": False, "error": "email_unverified",
                                  "hint": _email_error(lang, "email_unverified"),
                                  "sent": bool(sent)}, status_code=403)
@@ -602,7 +721,7 @@ def register_account_routes(app) -> None:
         user = ctx.store.get_user_by_email(email) if ctx.store else None
         if user and not user["is_banned"]:
             token = ctx.store.new_email_token(user["id"], "login", email=email)
-            await _send_mail("login", email, token)
+            await _send_mail("login", email, token, lang=lang)
         return {"ok": True, "sent": True, "email": email}
 
     @router.get("/attach")
@@ -656,12 +775,13 @@ def register_account_routes(app) -> None:
         user = ctx.store.get_user_by_email(email) if ctx.store else None
         if user and not user["is_banned"]:
             token = ctx.store.new_email_token(user["id"], "reset", email=email)
-            await _send_mail("reset", email, token)
+            await _send_mail("reset", email, token, lang=lang)
         return {"ok": True, "sent": True, "email": email}
 
     @router.get("/reset")
     async def page_reset(request: Request, token: str = ""):
-        return FileResponse(os.path.join(STATIC_DIR, "reset.html"))
+        lang, auto = seo_pages.lang_of(request)
+        return seo_pages.render("reset.html", lang, "/reset", auto=auto)
 
     @router.get("/api/auth/email/token")
     async def api_email_token_info(request: Request, token: str = ""):
@@ -824,7 +944,8 @@ def register_account_routes(app) -> None:
             "username": data.get("username") or "dev",
             "first_name": data.get("first_name") or "Dev",
             "last_name": data.get("last_name") or "",
-            "language_code": data.get("language") or "ru",
+            # пусто = локаль неизвестна: язык подставит бот по умолчанию
+            "language_code": data.get("language") or "",
         })
         if data.get("is_admin"):
             user = ctx.store.set_admin(user["id"], True) or user
@@ -1062,6 +1183,14 @@ def register_account_routes(app) -> None:
             return err
         c = ctx.store.user_counts()
         v = ctx.store.visit_stats(14)
+        # Воронка пробного доступа к слоям: сколько гостей знакомятся и сколько
+        # уже увидели предложение регистрации (web_layers)
+        try:
+            from web_layers import trial_limit_sec
+            trials = ctx.store.layer_trial_stats(limit_sec=trial_limit_sec())
+        except Exception as e:                        # noqa: BLE001
+            log.debug("слои: сводка испытаний недоступна: %s", e)
+            trials = {"total": 0, "active": 0, "expired": 0, "limit_sec": 0}
         h = ctx.health_fn() or {}
         bot_user = _bot_username()
         return {
@@ -1069,6 +1198,7 @@ def register_account_routes(app) -> None:
             "me": user,
             "users": c,
             "visits": v,
+            "layers_trials": trials,
             "ws_clients": ctx.ws_clients_fn(),
             "bot": {
                 "username": bot_user,
@@ -1188,6 +1318,9 @@ def register_account_routes(app) -> None:
                 "name": p.get("name") or "",
                 "kind": str(p.get("kind") or "post"),
                 "exists": bool(p.get("exists")),
+                # used_at: когда фото последний раз было обложкой. По нулю
+                # видно, что оно ещё не выходило — круг до него не дошёл.
+                "used_at": float(p.get("used_at") or 0),
                 "url": f"/api/admin/digest/photos/{p['id']}/file",
             })
         # Фото разложены по рубрикам: в сводку канала (раз в N часов) и в
@@ -1195,11 +1328,21 @@ def register_account_routes(app) -> None:
         by_kind = {"post": [], "digest": []}
         for p in photos:
             by_kind.setdefault(str(p.get("kind") or "post"), []).append(p)
+        counts = (ctx.store.digest_photo_counts()
+                  if hasattr(ctx.store, "digest_photo_counts")
+                  else {"post": len(by_kind.get("post") or []),
+                        "digest": len(by_kind.get("digest") or []),
+                        "total": len(photos)})
+        limits = (ctx.store.digest_photo_limits()
+                  if hasattr(ctx.store, "digest_photo_limits")
+                  else {"total": 40, "kind": 40})
         return {
             "ok": True,
             "heads": heads,
             "photos": photos,
             "photos_by_kind": by_kind,
+            "photo_counts": counts,
+            "photo_limits": limits,
             "kinds": {"post": "Сводка в канал",
                       "digest": "Дневной дайджест"},
             "using_default_heads": not bool(heads),
@@ -1231,11 +1374,16 @@ def register_account_routes(app) -> None:
 
     @router.post("/api/admin/digest/photos")
     async def admin_digest_add_photo(request: Request):
+        """Загрузка фото: одна или сразу пачка (несколько частей ``file``).
+
+        Одно фото может не пройти проверку — остальные всё равно сохраняем и
+        возвращаем список ошибок: админ видит, что именно не загрузилось.
+        """
         actor, err = _admin(request)
         if err:
             return err
-        blob, filename = await read_uploaded_photo(request)
-        if not blob:
+        items = await read_uploaded_photos(request)
+        if not items:
             return JSONResponse(
                 {"ok": False, "error": "bad_data", "hint": PHOTO_ERR["bad_data"]},
                 status_code=400)
@@ -1245,15 +1393,39 @@ def register_account_routes(app) -> None:
                    or request.headers.get("x-photo-kind") or "").strip().lower()
         if kind not in ("post", "digest"):
             kind = "post"
-        r = ctx.store.add_digest_photo(blob, filename=filename,
-                                       actor_id=actor["id"], kind=kind)
-        if not r.get("ok"):
-            code = str(r.get("error") or "error")
-            r = dict(r)
-            r["hint"] = PHOTO_ERR.get(code, code)
-            return JSONResponse(r, status_code=400)
-        return {"ok": True, "id": r["id"], "name": r.get("name"),
-                "kind": r.get("kind") or kind}
+        if len(items) == 1 and hasattr(ctx.store, "add_digest_photo"):
+            r = ctx.store.add_digest_photo(items[0][0], filename=items[0][1],
+                                           actor_id=actor["id"], kind=kind)
+            if not r.get("ok"):
+                code = str(r.get("error") or "error")
+                r = dict(r)
+                r["hint"] = PHOTO_ERR.get(code, code)
+                return JSONResponse(r, status_code=400)
+            counts = (ctx.store.digest_photo_counts()
+                      if hasattr(ctx.store, "digest_photo_counts") else {})
+            limits = (ctx.store.digest_photo_limits()
+                      if hasattr(ctx.store, "digest_photo_limits") else {})
+            return {"ok": True, "id": r["id"], "ids": [r["id"]],
+                    "name": r.get("name"), "added": 1, "errors": [],
+                    "kind": r.get("kind") or kind,
+                    "photo_counts": counts, "photo_limits": limits}
+        r = ctx.store.add_digest_photos(items, actor_id=actor["id"], kind=kind)
+        if not r.get("added"):
+            first = (r.get("errors") or [{}])[0]
+            code = str(first.get("error") or "error")
+            return JSONResponse({"ok": False, "error": code,
+                                 "hint": PHOTO_ERR.get(code, code),
+                                 "errors": r.get("errors") or [],
+                                 "photo_counts": r.get("counts") or {},
+                                 "photo_limits": r.get("limits") or {}},
+                                status_code=400)
+        for e in r.get("errors") or []:
+            code = str(e.get("error") or "error")
+            e["hint"] = PHOTO_ERR.get(code, code)
+        return {"ok": True, "added": r["added"], "ids": r["ids"],
+                "id": r["ids"][0], "errors": r.get("errors") or [],
+                "kind": kind, "photo_counts": r.get("counts") or {},
+                "photo_limits": r.get("limits") or {}}
 
     @router.get("/api/admin/digest/photos/{photo_id}/file")
     async def admin_digest_photo_file(request: Request, photo_id: int):
@@ -1328,8 +1500,17 @@ def register_account_routes(app) -> None:
         ):
             try:
                 user = current_user(request)
-                ctx.store.record_visit(path, vid, user["id"] if user else None, iph,
-                                       ua=ua, bot=bot)
+                # Страну берём из заголовка CDN или кэша — это мгновенно.
+                # Если её нет, визит всё равно пишем сразу, а страну доспросим
+                # фоном (geoip): страница не должна ждать внешний сервис.
+                meta = geoip.visit_meta(request, ctx.site_hosts or ())
+                visit_id = ctx.store.record_visit(
+                    path, vid, user["id"] if user else None, iph, ua=ua, bot=bot,
+                    country=meta["cc"], country_name=meta["name"],
+                    country_src=meta["src"], source=meta["source"],
+                    source_kind=meta["source_kind"])
+                if not meta["cc"] and not bot:
+                    geoip.schedule_country(_client_ip(request), iph, visit_id, vid)
             except Exception as e:
                 log.debug("visit: %s", e)
         return response

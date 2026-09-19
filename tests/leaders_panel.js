@@ -10,6 +10,7 @@
  *      node tests/leaders_panel.js http://127.0.0.1:8011
  */
 const { JSDOM, VirtualConsole } = require("jsdom");
+const { ru } = require("./_ru");
 
 const URL_BASE = process.argv[2] || "http://127.0.0.1:8011";
 const errors = [];
@@ -52,7 +53,7 @@ async function main() {
   vc.on("jsdomError", (e) => errors.push("jsdomError: " + String(e.message || e).slice(0, 200)));
   vc.on("error", (...a) => errors.push("console.error: " + a.map(String).join(" ").slice(0, 200)));
 
-  const dom = await JSDOM.fromURL(URL_BASE + "/terminal", {
+  const dom = await JSDOM.fromURL(ru(URL_BASE + "/terminal"), {
     runScripts: "dangerously", resources: "usable", pretendToBeVisual: true,
     virtualConsole: vc,
     beforeParse(win) {

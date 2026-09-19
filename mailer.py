@@ -254,8 +254,14 @@ class FileTransport:
         os.makedirs(folder, exist_ok=True)
 
     def send(self, to: str, subject: str, html: str, text: str = "") -> Tuple[bool, str]:
-        name = f"{int(time.time() * 1000)}-{abs(hash(to)) % 100000}.eml"
-        path = os.path.join(self.folder, name)
+        name = f"{int(time.time() * 1000)}-{abs(hash(to)) % 100000}"
+        path = os.path.join(self.folder, name + ".eml")
+        # имена совпадают, если два письма ушли одному адресу в одну
+        # миллисекунду: дописываем счётчик, чтобы стенд не терял письма
+        seq = 1
+        while os.path.exists(path):
+            seq += 1
+            path = os.path.join(self.folder, f"{name}-{seq}.eml")
         body = (f"To: {to}\nSubject: {subject}\n\n"
                 + (text or html_to_text(html)) + "\n\n--- HTML ---\n" + html)
         try:
@@ -422,6 +428,291 @@ class ApiTransport:
                        self.timeout)
 
 
+#: Языки писем. Письмо уходит на том языке, который человек выбрал на сайте
+#: (форма регистрации присылает его в теле запроса).
+#: Язык письма, когда человек ещё ничего не выбирал: английский — язык сайта
+#: по умолчанию (``seo_pages.DEFAULT_LANG``; здесь он продублирован, чтобы
+#: рассылка не зависела от импорта страниц).
+DEFAULT_MAIL_LANG = "en"
+
+MAIL_TEXT = {
+    "ru": {
+        "verify": {
+            "subject": "подтвердите почту",
+            "title": "Привет!",
+            "title_name": "Привет, {name}!",
+            "lines": [
+                "Вы зарегистрировались на LiqScope — терминале ликвидаций крипто-фьючерсов.",
+                "Нажмите кнопку ниже, чтобы подтвердить почту и открыть кабинет:",
+                "Ссылка живёт 24 часа и одноразовая.",
+            ],
+            "button": "Подтвердить почту",
+            "footnote": "Если вы не регистрировались, просто удалите письмо — "
+                        "адрес никто не увидит.",
+        },
+        "login": {
+            "subject": "вход по ссылке",
+            "title": "Вход без пароля",
+            "lines": [
+                "Вы просили войти в кабинет LiqScope без пароля. Жмите кнопку:",
+                "Ссылка живёт 30 минут, одноразовая и работает в том же браузере,"
+                " откуда вы её запросили.",
+            ],
+            "button": "Войти в кабинет",
+            "footnote": "Если это были не вы — ничего делать не нужно, войти по ссылке"
+                        " без вашего клика нельзя.",
+        },
+        "attach": {
+            "subject": "подтвердите привязку Telegram",
+            "title": "Привет!",
+            "title_name": "Привет, {name}!",
+            "lines": [
+                "Аккаунт {who} просит привязать Telegram к кабинету LiqScope с этой почтой.",
+                "Если это вы — жмите кнопку, и Telegram станет вашим входом в кабинет:",
+                "Ссылка живёт 2 часа и одноразовая.",
+            ],
+            "button": "Привязать Telegram",
+            "footnote": "Если это не вы — просто удалите письмо: без вашего клика"
+                        " Telegram к кабинету не привяжется.",
+        },
+        "reset": {
+            "subject": "новый пароль",
+            "title": "Сброс пароля",
+            "lines": [
+                "Вы запросили смену пароля в LiqScope. Жмите кнопку и задайте новый:",
+                "Ссылка живёт час и одноразовая.",
+            ],
+            "button": "Задать новый пароль",
+            "footnote": "Если запрос делали не вы — просто удалите письмо,"
+                        " пароль не изменится.",
+        },
+    },
+    "en": {
+        "verify": {
+            "subject": "confirm your email",
+            "title": "Hi!",
+            "title_name": "Hi, {name}!",
+            "lines": [
+                "You signed up for LiqScope — the crypto futures liquidation terminal.",
+                "Press the button below to confirm your email and open the dashboard:",
+                "The link lives for 24 hours and works once.",
+            ],
+            "button": "Confirm email",
+            "footnote": "If it was not you, just delete the letter — nobody will see"
+                        " the address.",
+        },
+        "login": {
+            "subject": "sign-in link",
+            "title": "Sign in without a password",
+            "lines": [
+                "You asked to enter the LiqScope dashboard without a password."
+                " Press the button:",
+                "The link lives for 30 minutes, works once, and only in the same"
+                " browser you requested it from.",
+            ],
+            "button": "Open the dashboard",
+            "footnote": "If it was not you, do nothing: nobody can sign in with the"
+                        " link without your click.",
+        },
+        "attach": {
+            "subject": "confirm the Telegram link",
+            "title": "Hi!",
+            "title_name": "Hi, {name}!",
+            "lines": [
+                "The {who} account asks to link Telegram to the LiqScope dashboard"
+                " with this email.",
+                "If that is you, press the button and Telegram becomes your way into"
+                " the dashboard:",
+                "The link lives for 2 hours and works once.",
+            ],
+            "button": "Link Telegram",
+            "footnote": "If it was not you, just delete the letter: Telegram will not"
+                        " be linked without your click.",
+        },
+        "reset": {
+            "subject": "new password",
+            "title": "Password reset",
+            "lines": [
+                "You asked to change your LiqScope password. Press the button and"
+                " set a new one:",
+                "The link lives for an hour and works once.",
+            ],
+            "button": "Set a new password",
+            "footnote": "If you did not ask for it, just delete the letter: the"
+                        " password will not change.",
+        },
+    },
+    "zh": {
+        "verify": {
+            "subject": "请确认邮箱",
+            "title": "你好！",
+            "title_name": "你好，{name}！",
+            "lines": [
+                "你注册了 LiqScope——加密货币合约清算终端。",
+                "点击下面的按钮确认邮箱并打开个人中心：",
+                "链接 24 小时内有效，且只能使用一次。",
+            ],
+            "button": "确认邮箱",
+            "footnote": "如果不是你注册的，直接删除邮件即可——地址不会有人看到。",
+        },
+        "login": {
+            "subject": "登录链接",
+            "title": "免密码登录",
+            "lines": [
+                "你申请免密码进入 LiqScope 个人中心。请点击按钮：",
+                "链接 30 分钟内有效，只能使用一次，且仅在申请时的浏览器里生效。",
+            ],
+            "button": "进入个人中心",
+            "footnote": "如果不是你本人操作，无需理会：没有你的点击，链接无法登录。",
+        },
+        "attach": {
+            "subject": "请确认绑定 Telegram",
+            "title": "你好！",
+            "title_name": "你好，{name}！",
+            "lines": [
+                "{who} 账号申请把这个 Telegram 绑定到该邮箱的 LiqScope 个人中心。",
+                "如果这是你本人——点击按钮，Telegram 就会成为你的登录方式：",
+                "链接 2 小时内有效，且只能使用一次。",
+            ],
+            "button": "绑定 Telegram",
+            "footnote": "如果不是你本人——直接删除邮件：没有你的点击，Telegram 不会绑定。",
+        },
+        "reset": {
+            "subject": "新密码",
+            "title": "重置密码",
+            "lines": [
+                "你申请修改 LiqScope 的密码。请点击按钮设置新密码：",
+                "链接一小时内有效，且只能使用一次。",
+            ],
+            "button": "设置新密码",
+            "footnote": "如果不是你申请的——直接删除邮件，密码不会改变。",
+        },
+    },
+    "hi": {
+        "verify": {
+            "subject": "ईमेल की पुष्टि करें",
+            "title": "नमस्ते!",
+            "title_name": "नमस्ते, {name}!",
+            "lines": [
+                "आपने LiqScope पर रजिस्टर किया — यह क्रिप्टो फ्यूचर्स लिक्विडेशन टर्मिनल है।",
+                "ईमेल की पुष्टि और कैबिनेट खोलने के लिए नीचे का बटन दबाएँ:",
+                "लिंक 24 घंटे चलता है और एक ही बार काम करता है।",
+            ],
+            "button": "ईमेल की पुष्टि करें",
+            "footnote": "अगर आपने रजिस्टर नहीं किया, तो ईमेल हटा दें — पता किसी को नहीं दिखेगा।",
+        },
+        "login": {
+            "subject": "साइन-इन लिंक",
+            "title": "बिना पासवर्ड साइन इन",
+            "lines": [
+                "आपने बिना पासवर्ड LiqScope कैबिनेट में आने का अनुरोध किया। बटन दबाएँ:",
+                "लिंक 30 मिनट चलता है, एक ही बार काम करता है और उसी ब्राउज़र में जहाँ से माँगा गया।",
+            ],
+            "button": "कैबिनेट खोलें",
+            "footnote": "अगर यह आपने नहीं किया, कुछ करने की ज़रूरत नहीं: आपके क्लिक के बिना"
+                        " लिंक से साइन इन नहीं होगा।",
+        },
+        "attach": {
+            "subject": "Telegram लिंक की पुष्टि करें",
+            "title": "नमस्ते!",
+            "title_name": "नमस्ते, {name}!",
+            "lines": [
+                "{who} खाता इस ईमेल वाले LiqScope कैबिनेट से Telegram जोड़ने का अनुरोध कर रहा है।",
+                "अगर यह आप हैं — बटन दबाएँ, Telegram आपका लॉगिन बन जाएगा:",
+                "लिंक 2 घंटे चलता है और एक ही बार काम करता है।",
+            ],
+            "button": "Telegram जोड़ें",
+            "footnote": "अगर यह आप नहीं हैं — ईमेल हटा दें: आपके क्लिक के बिना Telegram नहीं जुड़ेगा।",
+        },
+        "reset": {
+            "subject": "नया पासवर्ड",
+            "title": "पासवर्ड रीसेट",
+            "lines": [
+                "आपने LiqScope का पासवर्ड बदलने का अनुरोध किया। बटन दबाएँ और नया पासवर्ड रखें:",
+                "लिंक एक घंटे चलता है और एक ही बार काम करता है।",
+            ],
+            "button": "नया पासवर्ड रखें",
+            "footnote": "अगर अनुरोध आपने नहीं किया — ईमेल हटा दें, पासवर्ड नहीं बदलेगा।",
+        },
+    },
+    "es": {
+        "verify": {
+            "subject": "confirme su correo",
+            "title": "¡Hola!",
+            "title_name": "¡Hola, {name}!",
+            "lines": [
+                "Se registró en LiqScope, el terminal de liquidaciones de futuros cripto.",
+                "Pulse el botón de abajo para confirmar su correo y abrir el panel:",
+                "El enlace dura 24 horas y funciona una sola vez.",
+            ],
+            "button": "Confirmar correo",
+            "footnote": "Si no se registró usted, borre la carta: nadie verá la dirección.",
+        },
+        "login": {
+            "subject": "enlace de acceso",
+            "title": "Entrar sin contraseña",
+            "lines": [
+                "Pidió entrar en el panel de LiqScope sin contraseña. Pulse el botón:",
+                "El enlace dura 30 minutos, funciona una vez y solo en el mismo navegador"
+                " desde el que lo pidió.",
+            ],
+            "button": "Abrir el panel",
+            "footnote": "Si no fue usted, no haga nada: sin su clic nadie puede entrar"
+                        " con el enlace.",
+        },
+        "attach": {
+            "subject": "confirme el vínculo de Telegram",
+            "title": "¡Hola!",
+            "title_name": "¡Hola, {name}!",
+            "lines": [
+                "La cuenta {who} pide vincular Telegram al panel de LiqScope con este correo.",
+                "Si es usted, pulse el botón y Telegram será su forma de entrar al panel:",
+                "El enlace dura 2 horas y funciona una sola vez.",
+            ],
+            "button": "Vincular Telegram",
+            "footnote": "Si no fue usted, borre la carta: sin su clic, Telegram no se vinculará.",
+        },
+        "reset": {
+            "subject": "nueva contraseña",
+            "title": "Restablecer contraseña",
+            "lines": [
+                "Pidió cambiar su contraseña de LiqScope. Pulse el botón y elija una nueva:",
+                "El enlace dura una hora y funciona una sola vez.",
+            ],
+            "button": "Definir nueva contraseña",
+            "footnote": "Si no lo pidió usted, borre la carta: la contraseña no cambiará.",
+        },
+    },
+}
+
+#: Подписи в письме, не зависящие от повода.
+MAIL_UI = {
+    "ru": {"default_who": "ваш Telegram",
+           "link_hint": "Если кнопка не работает, скопируйте ссылку:",
+           "footer": "LiqScope — живой терминал ликвидаций крипто-фьючерсов"},
+    "en": {"default_who": "your Telegram",
+           "link_hint": "If the button does not work, copy the link:",
+           "footer": "LiqScope — a live crypto futures liquidation terminal"},
+    "zh": {"default_who": "你的 Telegram",
+           "link_hint": "如果按钮不可用，请复制链接：",
+           "footer": "LiqScope——实时加密货币合约清算终端"},
+    "hi": {"default_who": "आपका Telegram",
+           "link_hint": "अगर बटन काम न करे, तो लिंक कॉपी करें:",
+           "footer": "LiqScope — लाइव क्रिप्टो फ्यूचर्स लिक्विडेशन टर्मिनल"},
+    "es": {"default_who": "su Telegram",
+           "link_hint": "Si el botón no funciona, copie el enlace:",
+           "footer": "LiqScope — terminal en vivo de liquidaciones de futuros cripto"},
+}
+
+
+def _hello(text: dict, name: str) -> str:
+    """Приветствие: с именем, если оно есть."""
+    name = str(name or "").strip()
+    if name:
+        return str(text.get("title_name") or text.get("title") or "").replace("{name}", name)
+    return str(text.get("title") or "")
+
+
 class Mailer:
     """Общая точка отправки: шаблоны, журнал отправок, сторож на ошибки."""
 
@@ -478,64 +769,58 @@ class Mailer:
             log.info("Письмо «%s» ушло на %s", kind or subject, to)
         return ok
 
-    def send_verify(self, to: str, token: str, name: str = "") -> bool:
-        url = self.link(f"/verify?token={token}")
-        subject = f"{BRAND}: подтвердите почту"
-        hello = f"Привет, {name}!" if name else "Привет!"
-        html = self._wrap(subject, hello, [
-            "Вы зарегистрировались на LiqScope — терминале ликвидаций крипто-фьючерсов.",
-            "Нажмите кнопку ниже, чтобы подтвердить почту и открыть кабинет:",
-            "Ссылка живёт 24 часа и одноразовая.",
-        ], url, "Подтвердить почту",
-            "Если вы не регистрировались, просто удалите письмо — адрес никто не увидит.")
-        return self.send(to, subject, html, kind="verify")
+    # ----- тексты писем: на языке, который человек выбрал на сайте --------
+    @staticmethod
+    def lang(value: str) -> str:
+        """Язык письма: выбранный человеком, иначе язык сайта по умолчанию."""
+        code = str(value or "").strip().lower().split("-")[0].split("_")[0]
+        return code if code in MAIL_TEXT else DEFAULT_MAIL_LANG
 
-    def send_login_link(self, to: str, token: str) -> bool:
+    def send_verify(self, to: str, token: str, name: str = "",
+                    lang: str = DEFAULT_MAIL_LANG) -> bool:
+        url = self.link(f"/verify?token={token}")
+        t = MAIL_TEXT[self.lang(lang)]["verify"]
+        html = self._wrap(f"{BRAND}: {t['subject']}", _hello(t, name), t["lines"],
+                          url, t["button"], t["footnote"], lang=lang)
+        return self.send(to, f"{BRAND}: {t['subject']}", html, kind="verify")
+
+    def send_login_link(self, to: str, token: str,
+                        lang: str = DEFAULT_MAIL_LANG) -> bool:
         url = self.link(f"/email-login?token={token}")
-        subject = f"{BRAND}: вход по ссылке"
-        html = self._wrap(subject, "Вход без пароля", [
-            "Вы просили войти в кабинет LiqScope без пароля. Жмите кнопку:",
-            "Ссылка живёт 30 минут, одноразовая и работает в том же браузере,"
-            " откуда вы её запросили.",
-        ], url, "Войти в кабинет",
-            "Если это были не вы — ничего делать не нужно, войти по ссылке без"
-            " вашего клика нельзя.")
-        return self.send(to, subject, html, kind="login")
+        t = MAIL_TEXT[self.lang(lang)]["login"]
+        html = self._wrap(f"{BRAND}: {t['subject']}", t["title"], t["lines"],
+                          url, t["button"], t["footnote"], lang=lang)
+        return self.send(to, f"{BRAND}: {t['subject']}", html, kind="login")
 
     def send_tg_attach(self, to: str, token: str, tg_name: str = "",
-                       name: str = "") -> bool:
+                       name: str = "", lang: str = DEFAULT_MAIL_LANG) -> bool:
         """Подтверждение привязки Telegram к кабинету с этой почтой."""
         url = self.link(f"/attach?token={token}")
-        subject = f"{BRAND}: подтвердите привязку Telegram"
-        who = tg_name or "ваш Telegram"
-        hello = f"Привет, {name}!" if name else "Привет!"
-        html = self._wrap(subject, hello, [
-            f"Аккаунт {who} просит привязать Telegram к кабинету LiqScope с этой почтой.",
-            "Если это вы — жмите кнопку, и Telegram станет вашим входом в кабинет:",
-            "Ссылка живёт 2 часа и одноразовая.",
-        ], url, "Привязать Telegram",
-            "Если это не вы — просто удалите письмо: без вашего клика Telegram "
-            "к кабинету не привяжется.")
-        return self.send(to, subject, html, kind="attach")
+        code = self.lang(lang)
+        t = MAIL_TEXT[code]["attach"]
+        who = tg_name or MAIL_UI[code]["default_who"]
+        lines = [ln.replace("{who}", who) for ln in t["lines"]]
+        html = self._wrap(f"{BRAND}: {t['subject']}", _hello(t, name), lines,
+                          url, t["button"], t["footnote"], lang=code)
+        return self.send(to, f"{BRAND}: {t['subject']}", html, kind="attach")
 
-    def send_reset(self, to: str, token: str) -> bool:
+    def send_reset(self, to: str, token: str,
+                   lang: str = DEFAULT_MAIL_LANG) -> bool:
         url = self.link(f"/reset?token={token}")
-        subject = f"{BRAND}: новый пароль"
-        html = self._wrap(subject, "Сброс пароля", [
-            "Вы запросили смену пароля в LiqScope. Жмите кнопку и задайте новый:",
-            "Ссылка живёт час и одноразовая.",
-        ], url, "Задать новый пароль",
-            "Если запрос делали не вы — просто удалите письмо, пароль не изменится.")
-        return self.send(to, subject, html, kind="reset")
+        t = MAIL_TEXT[self.lang(lang)]["reset"]
+        html = self._wrap(f"{BRAND}: {t['subject']}", t["title"], t["lines"],
+                          url, t["button"], t["footnote"], lang=lang)
+        return self.send(to, f"{BRAND}: {t['subject']}", html, kind="reset")
 
     @staticmethod
     def _wrap(subject: str, hello: str, lines: List[str], url: str, button: str,
-              footnote: str = "") -> str:
+              footnote: str = "", lang: str = DEFAULT_MAIL_LANG) -> str:
+        ui = MAIL_UI[Mailer.lang(lang)]
         body = "".join(f'<p style="margin:0 0 12px">{ln}</p>' for ln in lines)
         foot = (f'<p style="margin:18px 0 0;color:#8b98ad;font-size:12px">{footnote}</p>'
                 if footnote else "")
         return f"""<!DOCTYPE html>
-<html><body style="margin:0;padding:24px;background:#0b0f16;color:#e8edf7;
+<html lang="{Mailer.lang(lang)}"><body style="margin:0;padding:24px;background:#0b0f16;color:#e8edf7;
  font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif">
 <div style="max-width:520px;margin:0 auto;background:#121826;border:1px solid #1b2536;
  border-radius:14px;padding:24px">
@@ -544,14 +829,13 @@ class Mailer:
 {body}
 <p style="margin:18px 0"><a href="{url}" style="display:inline-block;background:#3d70ff;
  color:#fff;text-decoration:none;padding:12px 18px;border-radius:10px;font-weight:700">{button}</a></p>
-<p style="margin:0 0 6px;color:#8b98ad;font-size:12px">Если кнопка не работает, скопируйте ссылку:</p>
+<p style="margin:0 0 6px;color:#8b98ad;font-size:12px">{ui["link_hint"]}</p>
 <p style="margin:0;word-break:break-all;font-size:12px;color:#9fb0c9">{url}</p>
 {foot}
 </div>
 <p style="max-width:520px;margin:14px auto 0;color:#5f6b7f;font-size:11px;text-align:center">
- LiqScope — живой терминал ликвидаций крипто-фьючерсов</p>
+ {ui["footer"]}</p>
 </body></html>"""
-
 
 def build_mailer(public_url: str = "") -> Mailer:
     """Собираем отправщик по окружению (пусто — письма не уходят)."""

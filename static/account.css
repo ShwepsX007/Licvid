@@ -261,6 +261,27 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
 .tpl-photo .tpl-del { left: 6px; }
 .tpl-photo .tpl-move { right: 6px; }
 
+/* Фото канала в админке свёрнуты в блок: при пачке загрузок плитки больше не
+   растягивают карточку — открываются по клику, счётчик видно и в свёрнутом
+   виде. Раньше набор просто копился на странице. */
+.tpl-fold {
+    border: 1px solid var(--border); border-radius: 10px;
+    padding: 0 12px 12px; margin: 12px 0 0; background: rgba(48, 84, 152, 0.07);
+}
+.tpl-fold > summary {
+    display: flex; align-items: center; gap: 8px; cursor: pointer;
+    padding: 10px 0 8px; font-size: 0.95rem; font-weight: 600; list-style: none;
+}
+.tpl-fold > summary::-webkit-details-marker { display: none; }
+.tpl-fold > summary::before { content: "▸"; color: var(--muted); font-size: 0.8rem; }
+.tpl-fold[open] > summary::before { content: "▾"; }
+.tpl-fold-title { flex: 1; min-width: 0; }
+.tpl-count {
+    border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px;
+    font-size: 0.72rem; color: var(--muted); font-weight: 400;
+}
+.tpl-fold .tpl-photos { margin-top: 0; }
+
 /* 🤖 ИИ-промты в админке: блоки «шапка поста» и «дневной дайджест» */
 .ai-block { margin: 14px 0 0; padding: 12px 14px; border: 1px solid var(--border);
     border-radius: 12px; background: var(--bg-dark); }
@@ -762,6 +783,11 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
 .card.fold[open] > summary { border-bottom: 1px solid var(--border); }
 .card.fold > .fold-body { padding: 16px 20px 18px; }
 .fold-hint { font-size: 0.74rem; color: var(--muted); }
+/* «По всем вопросам» стоит в самом низу кабинета — отбиваем его от сервисов */
+#fb-card { margin-top: 22px; }
+/* Кнопка в шапке кабинета — маленькая и у правого края строки действий:
+   диалог свёрнут по умолчанию, кнопка ведёт к нему и раскрывает его */
+#fb-jump { margin-left: auto; }
 .fold-tools {
     display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
     margin: 14px 0 0;
@@ -827,4 +853,173 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
     .fb-layout { grid-template-columns: 1fr; }
     .fb-list { max-height: 220px; }
     .fb-bubble { max-width: 88%; }
+}
+
+/* ===== 🌍 Карта посещений (админка) ===================================== */
+/* Стирание статистики: кнопка и подтверждение в карточке визитов. Действие
+   необратимое, поэтому рамка красная — видно, что это «опасная» зона. */
+.wipe-row { align-items: center; gap: 10px; margin-top: 10px; }
+.wipe-box {
+    margin-top: 10px; padding: 12px 14px;
+    border: 1px solid rgba(255, 86, 86, 0.45); border-radius: 10px;
+    background: rgba(255, 86, 86, 0.06);
+}
+.wipe-box[hidden] { display: none; }
+.wipe-lead { margin: 0 0 6px; font-weight: 700; color: var(--red, #ff6b6b); }
+.wipe-opt {
+    display: flex; gap: 8px; align-items: flex-start;
+    margin: 10px 0 4px; font-size: 0.78rem; color: var(--muted);
+}
+.wipe-opt input { margin-top: 2px; }
+.wipe-box .row-actions { margin-top: 10px; }
+
+/* Название класса у карточки одно: geo. Внутри — кнопки периода, сводка,
+   карта мира, легенда и таблицы (страны, источники, онлайн, долгие визиты).
+   Карта — SVG с контурами из static/world-map.js; точки ставятся по той же
+   проекции, что и контуры, поэтому лежат точно на странах. */
+.geo-panel { margin-top: 12px; }
+.geo-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.geo-periods { display: flex; gap: 6px; }
+.geo-periods button {
+    background: var(--bg-dark); border: 1px solid var(--border); color: var(--muted);
+    border-radius: 999px; padding: 4px 12px; font-size: 0.74rem; cursor: pointer;
+    font-family: inherit; transition: border-color .15s, color .15s;
+}
+.geo-periods button:hover { border-color: var(--blue); color: var(--text); }
+.geo-periods button.on {
+    border-color: var(--cyan); color: var(--cyan);
+    background: rgba(0, 214, 255, 0.08);
+}
+.geo-lead { font-size: 0.78rem; color: var(--muted); }
+.geo-body { margin-top: 12px; }
+.geo-chips { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.geo-chip {
+    display: flex; flex-direction: column; gap: 2px;
+    border: 1px solid var(--border); border-radius: 10px;
+    background: var(--bg-dark); padding: 8px 14px; min-width: 104px;
+}
+.geo-chip b { font-size: 1.15rem; font-weight: 800; }
+.geo-chip span {
+    font-size: 0.66rem; letter-spacing: 0.4px; text-transform: uppercase;
+    color: var(--muted);
+}
+.geo-chip-on { border-color: rgba(0, 230, 118, 0.45); }
+.geo-chip-on b { color: var(--green); }
+.geo-map-wrap {
+    position: relative;
+    border: 1px solid var(--border); border-radius: 12px;
+    background: linear-gradient(180deg, rgba(10, 14, 24, 0.9), rgba(7, 10, 16, 0.9));
+    padding: 8px 10px 4px;
+}
+/* Карта вписана в карточку по ширине и двигается внутри себя: размер окна
+   задаёт svg (width:100%; height:auto), а видимую часть — viewBox. Ограничения
+   по высоте нет намеренно — иначе на узком экране карта сжималась бы в полоску. */
+.geo-map {
+    display: block; width: 100%; height: auto;
+    /* соотношение сторон задано явно: ширина берётся от карточки, высота — от
+       полотна карты (1000×398), поэтому мир виден целиком и ничего не режется */
+    aspect-ratio: 1000 / 398;
+    touch-action: pan-y;              /* пока масштаб 1× — палец прокручивает страницу */
+    cursor: grab; overflow: hidden;
+}
+.geo-map.geo-grabbing { cursor: grabbing; }
+.geo-map:focus { outline: 1px solid var(--blue); outline-offset: 2px; }
+/* Кнопки карты: ＋ приблизить, − отдалить, ⤢ вписать целиком. */
+.geo-map-tools {
+    position: absolute; top: 12px; right: 14px; z-index: 2;
+    display: flex; flex-direction: column; gap: 4px;
+}
+.geo-zoom {
+    width: 26px; height: 26px; padding: 0; line-height: 1;
+    font-size: 0.9rem; font-family: inherit; cursor: pointer;
+    color: var(--text); background: rgba(10, 14, 24, 0.82);
+    border: 1px solid var(--border); border-radius: 8px;
+    transition: border-color .15s, color .15s, opacity .15s;
+}
+.geo-zoom:hover:not(:disabled) { border-color: var(--blue); color: var(--cyan); }
+.geo-zoom:disabled { opacity: 0.35; cursor: default; }
+.geo-land { fill: #16203a; stroke: #24314f; stroke-width: 0.4; }
+.geo-bubble { fill: rgba(61, 112, 255, 0.28); stroke: var(--blue); stroke-width: 0.6; }
+.geo-bubble-on { fill: rgba(0, 230, 118, 0.22); stroke: var(--green); }
+.geo-dot { fill: var(--cyan); fill-opacity: 0.55; }
+/* Живая точка: внутри — пульсирующий ореол. Масштаб круга считается от его
+   собственного центра (transform-box), иначе он «уезжает» к началу координат. */
+.geo-pulse {
+    fill: var(--green); fill-opacity: 0.25;
+    transform-box: fill-box; transform-origin: center;
+    animation: geoPulse 2s ease-out infinite;
+}
+.geo-on {
+    fill: var(--green); stroke: #06170e; stroke-width: 0.8;
+    filter: drop-shadow(0 0 4px rgba(0, 230, 118, 0.85));
+}
+.geo-live-dot { transform-box: fill-box; transform-origin: center; }
+.geo-map-empty { fill: var(--muted); font-size: 13px; }
+@keyframes geoPulse {
+    0%   { transform: scale(0.55); fill-opacity: 0.45; }
+    70%  { transform: scale(1.5);  fill-opacity: 0.05; }
+    100% { transform: scale(1.5);  fill-opacity: 0; }
+}
+.geo-legend {
+    display: flex; gap: 14px; flex-wrap: wrap; align-items: center;
+    padding: 8px 2px 6px; font-size: 0.7rem; color: var(--muted);
+}
+.geo-key { display: inline-flex; align-items: center; gap: 6px; }
+.geo-key i {
+    width: 9px; height: 9px; border-radius: 999px; display: inline-block;
+}
+.geo-i-live { background: var(--green); box-shadow: 0 0 8px rgba(0, 230, 118, 0.8); }
+.geo-i-dot { background: var(--cyan); opacity: 0.6; }
+.geo-i-bubble {
+    background: rgba(61, 112, 255, 0.3);
+    border: 1px solid var(--blue); width: 11px; height: 11px;
+}
+.geo-note { color: var(--muted); opacity: 0.85; }
+.geo-cols {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 14px; margin-top: 12px;
+}
+.geo-col { min-width: 0; }
+.geo-col h4, .geo-panel > h4 {
+    font-size: 0.74rem; letter-spacing: 0.4px; text-transform: uppercase;
+    color: var(--cyan); margin: 10px 0 2px;
+}
+.geo-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+.geo-table th {
+    text-align: left; font-size: 0.66rem; letter-spacing: 0.3px;
+    text-transform: uppercase; color: var(--muted); padding: 6px 8px;
+    border-bottom: 1px solid var(--border);
+}
+.geo-table td {
+    padding: 6px 8px; border-bottom: 1px solid rgba(27, 36, 52, 0.5);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    max-width: 190px;
+}
+.geo-table tr:hover td { background: rgba(61, 112, 255, 0.06); }
+.geo-table .geo-num { text-align: right; font-variant-numeric: tabular-nums; }
+.geo-table .geo-hot { color: var(--green); font-weight: 700; }
+.geo-empty { color: var(--muted); text-align: center; }
+/* Кнопка «убрать старые точки»: рядом с периодами, вторым кликом подтверждает */
+.geo-dots-row { display: flex; align-items: center; gap: 8px; }
+.geo-dots-row .btn.ask {
+    border-color: var(--red, #ff5c7a); color: var(--red, #ff5c7a);
+}
+.geo-dots-row .meta { font-size: 0.72rem; color: var(--muted); }
+/* Колонка пробника слоёв в таблице «сейчас на сайте»: остаток и «дать ещё» */
+.geo-table .geo-trial { white-space: nowrap; }
+.geo-mini {
+    margin-left: 6px; padding: 1px 6px; font-size: 0.72rem; line-height: 1.4;
+    background: var(--bg-dark); color: var(--cyan); cursor: pointer;
+    border: 1px solid var(--border); border-radius: 6px; font-family: inherit;
+}
+.geo-mini:hover:not(:disabled) { border-color: var(--blue); color: var(--text); }
+.geo-mini:disabled { opacity: 0.4; cursor: default; }
+#layers-card .bot-num { display: inline-flex; align-items: center; gap: 6px; }
+#layers-card .bot-num input { width: 84px; }
+@media (max-width: 820px) {
+    .geo-chip { min-width: 88px; padding: 6px 10px; }
+    .geo-cols { grid-template-columns: 1fr; }
+    /* На телефоне кнопки крупнее — их нажимают пальцем */
+    .geo-map-tools { top: 8px; right: 10px; }
+    .geo-zoom { width: 30px; height: 30px; font-size: 1rem; }
 }

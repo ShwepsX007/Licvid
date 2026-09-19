@@ -193,6 +193,69 @@ class AccountsTest(unittest.TestCase):
         self.assertEqual(self.store.add_digest_photo(b"not-an-image-file-at-all!!").get("error"), "not_image")
         self.assertEqual(self.store.add_digest_photo(b"").get("error"), "empty")
 
+    def test_digest_photos_bulk_upload_saves_whole_batch(self):
+        """Пачка фото из одного запроса сохраняется целиком.
+
+        Регрессия: разбор multipart возвращал только первую часть, поэтому из
+        выбранных в проводнике файлов в базу попадало одно фото — админ видел
+        «лимит в 7 фото» и догружал по одному.
+        """
+        batch = [(b"\xff\xd8\xff\xe0" + bytes([i]) * 64 + b"\xff\xd9",
+                  f"shot{i}.jpg") for i in range(12)]
+        r = self.store.add_digest_photos(batch, kind="post")
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["added"], 12, r)
+        self.assertEqual(r["errors"], [])
+        self.assertEqual(len(r["ids"]), 12)
+        self.assertEqual(r["counts"]["post"], 6 + 12)
+        self.assertEqual(r["limits"]["kind"], 120)
+        for pid in r["ids"]:
+            self.store.delete_digest_photo(pid)
+
+    def test_digest_photos_moderated_errors_do_not_stop_batch(self):
+        """Одно битое фото не отменяет остальные: ошибки возвращаем списком."""
+        batch = [(b"not-an-image-at-all-just-text-here", "bad.jpg"),
+                 (b"", "empty.jpg"),
+                 (b"\xff\xd8\xff\xe0" + b"\x00" * 64 + b"\xff\xd9", "good.jpg")]
+        r = self.store.add_digest_photos(batch, kind="digest")
+        self.assertEqual(r["added"], 1, r)
+        self.assertEqual([e["error"] for e in r["errors"]], ["not_image", "empty"])
+        self.assertEqual(r["counts"]["digest"], 1, r)
+        self.store.delete_digest_photo(r["ids"][0])
+
+    def test_digest_photo_rotation_has_no_repeats_in_a_round(self):
+        """Круг обложек: каждое фото выходит по разу, порядок меняется."""
+        batch = [(b"\xff\xd8\xff\xe0" + bytes([i]) * 64 + b"\xff\xd9",
+                  f"r{i}.jpg") for i in range(5)]
+        added = self.store.add_digest_photos(batch, kind="post")["ids"]
+        n = len(self.store.list_digest_photos("post"))   # комплект + загруженные
+        rounds = []
+        for _ in range(3):
+            rounds.append([self.store.pick_digest_photo("post")
+                           for _ in range(n)])
+        for i, picks in enumerate(rounds, 1):
+            self.assertEqual(len(set(picks)), n, f"круг {i} повторил фото: {picks}")
+        self.assertTrue(rounds[0] != rounds[1] or rounds[1] != rounds[2],
+                        "порядок обложек не меняется от круга к кругу")
+        for pid in added:
+            self.store.delete_digest_photo(pid)
+
+    def test_digest_photo_kind_limit_is_reported_with_scope(self):
+        """Лимит рубрики виден в ошибке: админ понимает, куда упёрся."""
+        import accounts as A
+        was = A.MAX_DIGEST_PHOTOS_KIND
+        A.MAX_DIGEST_PHOTOS_KIND = 2
+        try:
+            batch = [(b"\xff\xd8\xff\xe0" + bytes([i]) * 64 + b"\xff\xd9",
+                      f"k{i}.jpg") for i in range(4)]
+            r = self.store.add_digest_photos(batch, kind="digest")
+            self.assertEqual(r["added"], 2, r)
+            self.assertEqual([e.get("scope") for e in r["errors"]], ["kind", "kind"])
+        finally:
+            A.MAX_DIGEST_PHOTOS_KIND = was
+            for p in self.store.list_digest_photos("digest"):
+                self.store.delete_digest_photo(p["id"])
+
     def test_alerts_service_is_live_and_stores_config(self):
         slugs = {s["slug"]: s for s in self.store.list_services()}
         self.assertFalse(slugs["alerts"]["coming_soon"])

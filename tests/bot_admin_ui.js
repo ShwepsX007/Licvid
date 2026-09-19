@@ -7,6 +7,7 @@
  *     node tests/bot_admin_ui.js [http://127.0.0.1:8000]
  */
 const { JSDOM, VirtualConsole } = require("jsdom");
+const { ru } = require("./_ru");
 
 const URL_BASE = process.argv[2] || "http://127.0.0.1:8000";
 const errors = [];
@@ -73,7 +74,7 @@ async function openPage(path, { me = {}, handler, env = {} } = {}) {
   vc.on("error", (...a) => errors.push("console.error: " +
     a.map((x) => String((x && x.message) || x)).join(" ").slice(0, 200)));
   const calls = [];
-  const dom = await JSDOM.fromURL(URL_BASE + path, {
+  const dom = await JSDOM.fromURL(ru(URL_BASE + path), {
     runScripts: "dangerously",
     resources: "usable",
     pretendToBeVisual: true,
@@ -136,6 +137,8 @@ function adminHandler(u, opts, calls) {
     return { ok: true, users: { total: 5, new_24h: 1, active_24h: 3 },
              visits: { today_views: 10, today_uniques: 4, today_bots: 3,
                        days: [{ day: "2026-09-17", views: 10, uniques: 4, bots: 3 }] },
+             // пробный доступ к слоям: 12 гостей, 5 уже увидели предложение
+             layers_trials: { total: 12, active: 7, expired: 5, limit_sec: 1800 },
              ws_clients: 7, bot: { ready: true, username: "LiqScopeBot" },
              health: { live_exchanges: ["binance"] },
              settings: { bot_welcome: "привет", site_notice: "" },
@@ -155,6 +158,8 @@ function adminHandler(u, opts, calls) {
     return { ok: true, heads: [{ id: 1, text: "☕ Моя шапка за {h}ч" }],
              photos: [postPhoto, digestPhoto],
              photos_by_kind: { post: [postPhoto], digest: [digestPhoto] },
+             photo_counts: { post: 1, digest: 1, total: 2 },
+             photo_limits: { total: 200, kind: 120 },
              using_default_heads: false, using_default_photos: false };
   }
   if (u.indexOf("/api/admin/ai/prompts") === 0) {
@@ -188,7 +193,9 @@ function adminHandler(u, opts, calls) {
       return { ok: true, kind: body.kind, draft: false,
                message: body.kind === "daily"
                  ? "Дневной дайджест за 2026-09-17 отправлен: 🇷🇺 RU, 🇬🇧 EN"
-                 : "Сводка ушла в каналы. 🇷🇺 LiqScopeRUS · 🇬🇧 LiqScopeEng" };
+                 : (body.kind === "hourly"
+                    ? "Сводка 2026-09-17-1200 добавлена в архив раздела «Сводки по часам» — откройте /hourly."
+                    : "Сводка ушла в каналы. 🇷🇺 LiqScopeRUS · 🇬🇧 LiqScopeEng") };
     }
     if (u.indexOf("/api/admin/bot/channels") === 0) {
       return { ok: true, channels: BOT_SNAP.channels, probes: BOT_SNAP.probes,
@@ -241,6 +248,12 @@ function click(win, el) {
   check("служебных запросов отсеяно — отдельной цифрой",
     doc.querySelector("#st-bots").textContent === "3",
     doc.querySelector("#st-bots").textContent);
+  // Воронка пробных слоёв: видно, сколько гостей знакомятся и сколько упёрлись
+  const trialLine = doc.querySelector("#visits-trial");
+  check("в карточке визитов — воронка пробных слоёв",
+    !!trialLine && /12 гостей/.test(trialLine.textContent) &&
+    /5 уже увидели/.test(trialLine.textContent),
+    trialLine && trialLine.textContent);
   const statLabels = Array.prototype.map.call(
     doc.querySelectorAll(".stat-label"), (el) => el.textContent);
   check("подписи не путают переходы и посетителей",
@@ -320,6 +333,18 @@ function click(win, el) {
     !!daily && JSON.parse(daily.body).kind === "daily", daily && daily.body);
   check("и отчитывается, куда ушёл",
     /RU, 🇬🇧 EN/.test(doc.querySelector("#bot-post-status").textContent),
+    doc.querySelector("#bot-post-status").textContent);
+
+  // Кнопка «Сводка на сайт» наполняет раздел /hourly, не отправляя пост в канал
+  const beforeHourly = calls.length;
+  check("кнопка «Сводка на сайт» есть в панели", !!doc.querySelector("#bot-hourly"));
+  click(win, doc.querySelector("#bot-hourly"));
+  await new Promise((r) => setTimeout(r, 120));
+  const hourly = calls.slice(beforeHourly).find((c) => c.url.indexOf("/api/admin/bot/publish") === 0);
+  check("она шлёт сборку сводки для раздела",
+    !!hourly && JSON.parse(hourly.body).kind === "hourly", hourly && hourly.body);
+  check("и рассказывает, куда попала сводка",
+    /Сводки по часам/.test(doc.querySelector("#bot-post-status").textContent),
     doc.querySelector("#bot-post-status").textContent);
 
   const beforeAi = calls.length;
@@ -414,6 +439,38 @@ function click(win, el) {
       doc.querySelector("#tpl-photo-status-digest").textContent);
   }
 
+  // Пачка фото: инпуты принимают много файлов, блоки свёрнуты, счётчик виден
+  const postFold = doc.querySelector("#tpl-photos-fold");
+  const digestFold = doc.querySelector("#tpl-photos-fold-digest");
+  check("блок фото постов сворачивается", !!postFold && postFold.tagName === "DETAILS",
+    postFold && postFold.tagName);
+  check("блок фото дайджеста сворачивается", !!digestFold && digestFold.tagName === "DETAILS",
+    digestFold && digestFold.tagName);
+  check("по умолчанию фото свёрнуты",
+    !(postFold && postFold.open) && !(digestFold && digestFold.open));
+  const postCount = doc.querySelector("#tpl-photos-count");
+  check("счётчик фото виден в свёрнутом блоке",
+    !!postCount && /1\s*\/\s*\d+/.test(postCount.textContent), postCount && postCount.textContent);
+  const postInput = doc.querySelector("#tpl-photo-in");
+  check("оба инпута принимают пачку файлов",
+    !!postInput && postInput.multiple === true && !!digestInput && digestInput.multiple === true);
+  if (postInput) {
+    const beforeBatch = calls.filter((c) => c.url.indexOf("/api/admin/digest/photos") === 0).length;
+    const batch = [1, 2, 3].map((i) => new win.File([new Uint8Array([i, i, i])],
+      "batch" + i + ".jpg", { type: "image/jpeg" }));
+    Object.defineProperty(postInput, "files", { value: batch, configurable: true });
+    postInput.dispatchEvent(new win.Event("change", { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 400));
+    const ups = calls.filter((c) => c.url.indexOf("/api/admin/digest/photos") === 0).length - beforeBatch;
+    check("пачка из трёх фото уходит тремя запросами", ups === 3, ups);
+    const statusText = (doc.querySelector("#tpl-photo-status") || {}).textContent || "";
+    check("итог пачки виден в статусе", /Сохранено: 3 шт/.test(statusText), statusText);
+    check("статус постовой рубрики, не дайджеста",
+      calls.filter((c) => c.url.indexOf("/api/admin/digest/photos") === 0)
+           .slice(-3).every((c) => c.url.indexOf("kind=post") !== -1),
+      calls.slice(-3).map((c) => c.url).join(" | "));
+  }
+
   // --- 🤖 промты ИИ: раздел с шаблоном и сохранением ----------------------
   check("карточка промтов ИИ есть", !!doc.querySelector("#ai-prompts"));
   const aiBlocks = doc.querySelectorAll("#ai-prompt-blocks .ai-block");
@@ -499,6 +556,16 @@ function click(win, el) {
     /LIQSCOPE_DIGEST_SCHED/.test(off.doc.querySelector("#dig-note").textContent),
     off.doc.querySelector("#dig-note").textContent);
   await off.win.close();
+
+  // --- английский язык: воронка пробных слоёв тоже переводится -----------
+  const en = await openPage("/admin", { handler: adminHandler });
+  en.win.LiqScopeI18n.set("en");
+  await new Promise((r) => setTimeout(r, 300));
+  const enTrials = en.doc.querySelector("#visits-trial");
+  check("на английском воронка пробных слоёв переведена",
+    /Layer trial/.test(enTrials.textContent) &&
+    /12 guests/.test(enTrials.textContent), enTrials.textContent);
+  await en.win.close();
 
   console.log(`\nитог: ${ok} ок, ${fail} ошибок`);
   process.exit(fail ? 1 : 0);

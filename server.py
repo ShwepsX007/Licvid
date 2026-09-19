@@ -8,6 +8,8 @@ LiqScope Web Server — терминал ликвидаций в реально�
     GET  /api/symbols       — список монет (авто-подбор по обороту) + цены
     GET  /api/klines        — реальные свечи (Binance → Bybit → OKX)
     GET  /api/liquidations  — история ликвидаций из памяти
+    GET  /api/liq_clusters  — кластеры по свечам из сохранённой истории (месяц),
+                              фильтры min_usd и exchanges — как у ленты
     GET  /api/stats         — агрегаты (лонги/шорты, топ монет, биржи)
     GET  /api/health        — состояние каждого WS-источника (для диагностики)
     WS   /ws                — живой поток: ликвидации, цены, свечи, статистика
@@ -25,6 +27,8 @@ LiqScope Web Server — терминал ликвидаций в реально�
                             bitfinex,hyperliquid
     LIQSCOPE_DEMO           1 — генерировать тестовый поток вместо биржевого
     LIQSCOPE_HISTORY_MAX    сколько событий держать в памяти (по умолчанию 60000)
+    LIQSCOPE_CLUSTER_MEM_SEC  сколько секунд кластеров брать из памяти, а не с
+                            диска (по умолчанию 300: диск пишется очередью)
     LIQSCOPE_CHANNEL_URL    инвайт канала (по умолчанию https://t.me/+4S1LsZtH1Pc5YWZi)
     LIQSCOPE_CHANNEL_ID     numeric id канала (-100…) — чтобы проверять подписку и постить;
                             если пусто, бот запомнит id, когда его добавят админом канала
@@ -35,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import random
 import threading
@@ -43,9 +48,11 @@ from collections import deque
 from contextlib import asynccontextmanager
 from typing import Deque, Dict, List, Optional, Set
 
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+
+import seo_pages
 from fastapi.staticfiles import StaticFiles
 
 from market_feed import GATE_REST, MarketFeed, TF_MINUTES, base_of, canon, _get_json
@@ -63,6 +70,8 @@ import ai_text
 from ai_text import build_ai, prompt_setting
 import api_digest
 from api_digest import DigestScheduler, ctx as digest_ctx, register_digest_routes
+from api_hourly import ctx as hourly_ctx, register_hourly_routes
+from hourly_posts import PostStore as HourlyStore, post_id as hourly_id
 from daily_digest import DigestStore
 from tg_bot import TelegramBot, normalize_public_url
 from web_account import ctx as account_ctx, register_account_routes
@@ -72,6 +81,9 @@ import ads as ads_mod
 from ads import AdService, register_ad_routes
 import feedback as feedback_mod
 from feedback import register_feedback_routes
+import geoip
+import web_geo
+import web_layers
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -108,6 +120,16 @@ HISTORY_TTL_HOURS = float(os.getenv("LIQSCOPE_HISTORY_TTL_HOURS", str(MONTH_HOUR
 HISTORY_SHARD_MAX_MB = float(os.getenv("LIQSCOPE_HISTORY_SHARD_MB", "48"))
 # Как часто свёртки дня и уборка старых дней уходят на диск
 HISTORY_FLUSH_SEC = max(30.0, float(os.getenv("LIQSCOPE_HISTORY_FLUSH_SEC", "180")))
+# Кластеры ликвидаций на графике: сколько уровней цены внутри свечи (столько
+# же было в терминале) и на сколько секунд назад события берём из памяти, а
+# не с диска (диск пишется очередью, окно закрывает её задержку).
+LIQ_CLUSTER_LEVELS = 6
+LIQ_CLUSTER_MEM_SEC = max(60.0, float(os.getenv("LIQSCOPE_CLUSTER_MEM_SEC", "300")))
+#: Кластеры истории в памяти: (монета, тф, порог) -> свёртка по свечам.
+#: Живут столько же, сколько кэш свечей: за это время меняется только
+#: последняя свеча, а она всё равно пересчитывается.
+LIQ_CLUSTER_CACHE: Dict[tuple, dict] = {}
+LIQ_CLUSTER_CACHE_MAX = 64
 
 BOT_TOKEN = os.getenv("LIQSCOPE_BOT_TOKEN", "").strip()
 PUBLIC_URL = normalize_public_url(os.getenv("LIQSCOPE_PUBLIC_URL", ""))
@@ -134,6 +156,16 @@ DIGEST_FILE = os.getenv("LIQSCOPE_DIGEST_FILE",
                         os.path.join(HERE, "data", "digests.json")).strip()
 if DIGEST_FILE.lower() in ("0", "none", "off", "false"):
     DIGEST_FILE = ""
+# Сводки по часам — раздел сайта: архив постов канала (то же, что ушло в
+# Telegram, плюс фото). LIQSCOPE_HOURLY_FILE="" — не хранить (раздел пустой).
+HOURLY_FILE = os.getenv("LIQSCOPE_HOURLY_FILE",
+                        os.path.join(HERE, "data", "channel_posts.json")).strip()
+if HOURLY_FILE.lower() in ("0", "none", "off", "false"):
+    HOURLY_FILE = ""
+try:
+    HOURLY_KEEP = max(50, int(os.getenv("LIQSCOPE_HOURLY_KEEP", "1200") or 1200))
+except ValueError:
+    HOURLY_KEEP = 1200
 DIGEST_HOUR = int(os.getenv("LIQSCOPE_DIGEST_HOUR", "22") or 22)
 DIGEST_MINUTE = int(os.getenv("LIQSCOPE_DIGEST_MIN", "0") or 0)
 DIGEST_JITTER_MIN = int(os.getenv("LIQSCOPE_DIGEST_JITTER_MIN", "10") or 10)
@@ -721,6 +753,159 @@ def _attach_oi(candles: list, tf: int, levels: dict, chgs: dict) -> None:
             c["oiChg"] = m["oiChg"]
 
 
+def _round_half_up(v: float) -> int:
+    """Math.round из JavaScript: половина всегда вверх (0.5 -> 1, -0.5 -> 0)."""
+    return int(math.floor(float(v) + 0.5))
+
+
+def _liq_cluster_bars(candles: list, tf: int) -> dict:
+    """Свечи по времени: {начало свечи: (низ, верх)}, шаг сетки — tf в секундах."""
+    bars: Dict[int, tuple] = {}
+    for c in candles:
+        try:
+            t = int(c["time"])
+            lo = float(c["low"])
+            hi = float(c["high"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        bars[t] = (min(lo, hi), max(lo, hi))
+    return bars
+
+
+def _liq_cluster_add(bars: dict, tf: int, ev: dict, acc: dict) -> None:
+    """Событие → плашка свечи: шесть уровней внутри диапазона свечи.
+
+    Ровно тот же расклад, что был у клиента (``drawLiqRects``): плашка стоит
+    там, где была ликвидация, а не растянута по телу свечи. Считает сервер —
+    значит кластеры видит любой браузер и за всю сохранённую историю, а не
+    только за те события, что успели прилететь в открытый терминал.
+    """
+    ts = _fnum(ev.get("timestamp"))
+    if ts <= 0:
+        return
+    step = max(60, int(tf) * 60)
+    bucket = int(ts // step * step)
+    bar = bars.get(bucket)
+    if bar is None:
+        return
+    usd = _fnum(ev.get("usd"))
+    if usd <= 0:
+        return
+    lo, hi = bar
+    price = _fnum(ev.get("price"))
+    if not price > 0:
+        price = (lo + hi) / 2 if hi > lo else lo
+    price = min(max(price, lo), hi)
+    span = hi - lo
+    # Округление как у клиента (Math.round), а не банковское из Python:
+    # иначе плашка на границе уровня встала бы не туда, где её ждёт терминал
+    level = _round_half_up(((price - lo) / span) * (LIQ_CLUSTER_LEVELS - 1)) if span > 0 else 0
+    level = min(max(level, 0), LIQ_CLUSTER_LEVELS - 1)
+    cell = acc.setdefault(bucket, {"levels": {}, "ts": 0.0})
+    if ts > cell["ts"]:
+        cell["ts"] = ts
+    row = cell["levels"].get(level)
+    if row is None:
+        # [лонги, шорты, число лонгов, число шортов, сумма цена×деньги, биржи]
+        row = [0.0, 0.0, 0, 0, 0.0, {}]
+        cell["levels"][level] = row
+    if str(ev.get("side") or "") == "SELL":     # SELL = вынесли лонг
+        row[0] += usd
+        row[2] += 1
+    else:
+        row[1] += usd
+        row[3] += 1
+    row[4] += price * usd
+    exch = str(ev.get("exchange") or "?").upper()
+    slot = row[5].setdefault(exch, [0, 0.0])
+    slot[0] += 1
+    slot[1] += usd
+
+
+def _liq_cluster_map(candles: list, tf: int, symbol: str,
+                     min_usd: float = 0.0,
+                     exchanges: Optional[list] = None) -> tuple:
+    """Кластеры ликвидаций по свечам — из сохранённой истории, как OI и CVD.
+
+    Плашки на графике раньше жили только на том, что успел скачать браузер:
+    2000 последних событий из памяти сервера и сутки в IndexedDB. Вся история
+    при этом лежит на диске (дневные шарды ``HistoryStore``) и пишется туда
+    независимо от того, открыт ли у кого-то терминал. Здесь из неё собираются
+    кластеры по свечам и уровням цены — клиенту остаётся только нарисовать.
+
+    Свежий хвост (``LIQ_CLUSTER_MEM_SEC``) берём из памяти: события попадают
+    туда сразу, а на диск уходят через очередь — так в плашках нет ни дырки,
+    ни двойного счёта. Возвращает ``({время свечи: {"l": [уровни], "t": ts}},
+    время, докуда посчитана история)``.
+
+    ``exchanges`` — включённые в фильтре биржи: свёртка считается по ним, как и
+    живая лента. Пусто/None — все биржи.
+    """
+    bars = _liq_cluster_bars(candles, tf)
+    if not bars or not symbol:
+        return {}, 0.0
+    sym = canon(symbol)
+    now = time.time()
+    on_exch = {str(e).strip().upper() for e in (exchanges or []) if str(e).strip()}
+    on_exch = on_exch or None
+    key = (sym, int(tf), round(float(min_usd or 0.0), 2),
+           tuple(sorted(on_exch)) if on_exch else None)
+    hit = LIQ_CLUSTER_CACHE.get(key)
+    first, last = min(bars), max(bars)
+    if (hit and now - hit["ts"] < KLINE_TTL
+            and hit["first"] == first and hit["last"] == last):
+        return hit["rows"], hit["cut"]
+    step = max(60, int(tf) * 60)
+    cut = now - LIQ_CLUSTER_MEM_SEC
+    since = first
+    until = last + step
+    floor = max(0.0, float(min_usd or 0.0))
+    acc: dict = {}
+    if HISTORY_FILE:
+        # Читает диск: вызывающий уводит это в отдельный поток (to_thread).
+        for ev in HIST.iter_events(since, min(cut, until), sym):
+            if floor and _fnum(ev.get("usd")) < floor:
+                continue
+            if on_exch and str(ev.get("exchange") or "?").upper() not in on_exch:
+                continue
+            _liq_cluster_add(bars, tf, ev, acc)
+    # Без диска источник один — память: берём её целиком, иначе события старше
+    # окна свежести потерялись бы совсем (на диск их никто не писал)
+    mem_since = max(cut, since) if HISTORY_FILE else since
+    for ev in list(LIQUIDATIONS):
+        ts = _fnum(ev.get("timestamp"))
+        if ts < mem_since or ts > until:
+            continue
+        if ev.get("symbol") != sym:
+            continue
+        if floor and _fnum(ev.get("usd")) < floor:
+            continue
+        if on_exch and str(ev.get("exchange") or "?").upper() not in on_exch:
+            continue
+        _liq_cluster_add(bars, tf, ev, acc)
+    rows: dict = {}
+    for bucket, cell in acc.items():
+        bar = bars.get(bucket)
+        if bar is None:
+            continue
+        levels = []
+        for level in sorted(cell["levels"]):
+            lon, sho, nlon, nsho, pxsum, exchs = cell["levels"][level]
+            total = lon + sho
+            levels.append([level, round(lon, 2), round(sho, 2), nlon, nsho,
+                           round(pxsum / total, 8) if total else round(bar[0], 8),
+                           {k: [v[0], round(v[1], 2)] for k, v in exchs.items()}])
+        rows[str(bucket)] = {"l": levels, "t": round(cell["ts"], 3)}
+    if len(LIQ_CLUSTER_CACHE) >= LIQ_CLUSTER_CACHE_MAX:
+        for old_key in sorted(LIQ_CLUSTER_CACHE, key=lambda k: LIQ_CLUSTER_CACHE[k]["ts"])[:8]:
+            LIQ_CLUSTER_CACHE.pop(old_key, None)
+    LIQ_CLUSTER_CACHE[key] = {"ts": now, "first": first, "last": last,
+                              "rows": rows, "cut": min(cut, until)}
+    # пусто — значит по этой монете в истории ничего нет: клиент продолжает
+    # рисовать тем, что успел накопить сам (как и до истории на сервере)
+    return (rows, min(cut, until)) if rows else ({}, 0.0)
+
+
 async def get_candles(symbol: str, tf: int, force: bool = False) -> dict:
     symbol = canon(symbol)
     parsed = parse_tf(tf)
@@ -1001,8 +1186,10 @@ def pump_watchers() -> List[dict]:
         if cfg.get("enabled"):
             row = dict(sub)
             row["pump"] = cfg
-            row["lang"] = ("en" if str(sub.get("language") or "").startswith("en")
-                           else "ru")
+            # язык сигнала: выбор человека или локаль Telegram, а если их нет —
+            # язык по умолчанию (сейчас английский)
+            from bot_i18n import normalize_lang
+            row["lang"] = normalize_lang(sub.get("language"))
             out.append(row)
     return out
 
@@ -2145,6 +2332,8 @@ account_ctx.store = account_store
 account_ctx.bot = tg_bot
 account_ctx.public_url = PUBLIC_URL
 account_ctx.secret = SECRET
+# свои хосты для «откуда пришёл»: переход внутри сайта — не источник
+account_ctx.site_hosts = tuple(x for x in (PUBLIC_URL, seo_pages.SITE_URL) if x)
 account_ctx.cookie_secure = os.getenv("LIQSCOPE_COOKIE_SECURE", "").strip() in ("1", "true", "yes")
 account_ctx.dev_login = os.getenv("LIQSCOPE_DEV_LOGIN", "").strip() in ("1", "true", "yes")
 account_ctx.mailer = mailer
@@ -2208,9 +2397,75 @@ digest_ctx.oi_fn = oi_payload
 digest_ctx.ai_fn = digest_ai
 digest_ctx.publish_fn = tg_bot.publish_daily_digest
 digest_ctx.public_url = PUBLIC_URL
+# Обложку выпуска выбираем при сборке дайджеста: то же фото уходит в канал и
+# показывается на странице /digest (фото рубрик живут в базе аккаунтов).
+digest_ctx.photo_store = account_store
 register_digest_routes(app)
 # Кнопка «🗞 Дайджест за сутки» в админке бота собирает выпуск прямо сейчас
 tg_bot.daily_run_fn = api_digest.publish_digest
+
+# Сводки по часам: посты канала живут ещё и на сайте. Архив наполняет бот
+# (каждая удачная публикация), а эта функция собирает сводку прямо сейчас —
+# её зовёт админская кнопка, чтобы раздел можно было наполнить не дожидаясь
+# поста в канал.
+async def collect_hourly_post() -> dict:
+    """Собрать сводку (RU и EN) и положить её в архив раздела «Сводки по часам»."""
+    from channel_digest import active_headlines, cover_info, pick_active_image, render_post
+    snap = await build_channel_digest()
+    if not isinstance(snap, dict) or not snap:
+        return {}
+    try:
+        n = int(account_store.get_setting("channel_digest_n") or 0)
+    except (TypeError, ValueError):
+        n = 0
+    try:
+        hours = int(snap.get("window_h") or POST_INTERVAL_H)
+    except (TypeError, ValueError):
+        hours = POST_INTERVAL_H
+    texts: Dict[str, str] = {}
+    for lang in ("ru", "en"):
+        head = ""
+        try:
+            head, _note = await tg_bot._ai_headline(snap, variant=n, lang=lang)
+        except Exception as e:                        # noqa: BLE001
+            log.debug("сводки по часам: ИИ-шапка (%s) не ответила: %s", lang, e)
+        texts[lang] = render_post(
+            snap, n,
+            headlines=active_headlines(account_store, hours, lang=lang),
+            head_override=head or None,
+            site_url=PUBLIC_URL,
+            bot_url=tg_bot.bot_url(),
+            lang=lang,
+        )
+    img = pick_active_image(account_store, "post", variant=n)
+    now = time.time()
+    rec = {
+        "id": hourly_id(now),
+        "ts": now,
+        "window_h": hours,
+        "interval_h": POST_INTERVAL_H,
+        "total_usd": snap.get("total_usd"),
+        "liq_count": snap.get("count"),
+        "longs_usd": snap.get("longs_usd"),
+        "shorts_usd": snap.get("shorts_usd"),
+        "texts": {k: v for k, v in texts.items() if v},
+        "sent": {},
+        "n": n,
+        "manual": True,
+    }
+    if img and os.path.isfile(img):
+        rec["photo"] = cover_info(img, account_store)
+    return hourly_ctx.store.add(rec)
+
+
+hourly_ctx.store = HourlyStore(HOURLY_FILE, keep=HOURLY_KEEP)
+hourly_ctx.collect_fn = collect_hourly_post
+hourly_ctx.public_url = PUBLIC_URL
+# Посты раздела выходят в английском канале — на странице ссылка на него
+hourly_ctx.channel_url_fn = tg_bot.channel_url_en
+register_hourly_routes(app)
+# Бот складывает в этот же архив каждый пост, который реально ушёл в канал
+tg_bot.hourly_store = hourly_ctx.store
 
 # Админка бота на сайте: каналы, публикация постов, контроль, здоровье бирж
 web_bot_admin.ctx.bot = tg_bot
@@ -2234,6 +2489,23 @@ feedback_mod.ctx.store = account_store
 feedback_mod.ctx.bot = tg_bot
 feedback_mod.ctx.public_url = PUBLIC_URL
 register_feedback_routes(app)
+
+# 🌍 География посетителей: страна по IP (заголовок CDN → кэш → внешний
+# сервис), источник перехода и «сколько уже на сайте». Пишет middleware
+# визитов в web_account, а «я ещё здесь» присылает presence.js.
+geoip.ctx.store = account_store
+geoip.ctx.secret = SECRET
+web_geo.ctx.store = account_store
+web_geo.ctx.secret = SECRET
+web_geo.ctx.public_url = PUBLIC_URL
+web_geo.register_geo_routes(app)
+
+# ☰ Слои графика: гостю без регистрации — 30 минут пробного доступа,
+# дальше сайт предлагает зарегистрироваться (web_layers).
+web_layers.ctx.store = account_store
+web_layers.ctx.secret = SECRET
+web_layers.ctx.public_url = PUBLIC_URL
+web_layers.register_layer_routes(app)
 
 
 @app.get("/api/symbols")
@@ -2330,6 +2602,35 @@ async def api_klines(symbol: str = Query("BTC_USDT"), timeframe: int = Query(5))
         "source": entry["source"],
         "candles": entry["candles"],
     }
+
+
+@app.get("/api/liq_clusters")
+async def api_liq_clusters(symbol: str = Query("BTC_USDT"),
+                           timeframe: int = Query(5),
+                           min_usd: float = Query(0.0),
+                           exchanges: str = Query("", max_length=400)):
+    """Кластеры ликвидаций по свечам за всю сохранённую историю.
+
+    Свечи графика — это 300 свечей выбранного ТФ; история при этом хранится
+    месяцем и пишется всегда, даже когда терминал закрыт. Эндпоинт отдаёт
+    готовые плашки по каждой свече (шесть уровней цены внутри свечи), поэтому
+    кластеры видны за любые часы и дни, а не только за те, что успели прийти
+    в открытое окно. Порог ``min_usd`` и список ``exchanges`` — те же фильтры,
+    что у ленты: иначе выключенная биржа осталась бы в плашках за прошлые часы.
+    """
+    symbol = canon(symbol)
+    tf = parse_tf(timeframe) or 5
+    entry = await get_candles(symbol, tf)
+    only = [x.strip() for x in str(exchanges or "").split(",") if x.strip()]
+    try:
+        rows, cut = await asyncio.to_thread(_liq_cluster_map, entry["candles"],
+                                            tf, symbol, float(min_usd or 0.0),
+                                            only or None)
+    except Exception as e:              # noqa: BLE001 — график важнее кластеров
+        log.warning("кластеры истории %s: %s", symbol, e)
+        rows, cut = {}, 0.0
+    return {"symbol": symbol, "timeframe": tf, "cut": cut,
+            "ttl_hours": HISTORY_TTL_HOURS, "candles": rows}
 
 
 @app.get("/api/oi")
@@ -2708,15 +3009,61 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
 @app.get("/")
-async def root():
-    """Лендинг: красивый вход в терминал."""
-    return FileResponse(os.path.join(STATIC_DIR, "landing.html"))
+async def root(request: Request):
+    """Лендинг: красивый вход в терминал.
+
+    Язык подставляем сразу в head (``seo_pages.render``) — поисковик должен
+    видеть язык в ``<html lang>``, заголовке и описании, а не только после
+    выполнения скриптов.
+    """
+    lang, auto = seo_pages.lang_of(request)
+    return seo_pages.render(
+        "landing.html", lang, "/", extra_head=seo_pages.jsonld("landing", lang),
+        auto=auto,
+    )
 
 
 @app.get("/terminal")
-async def terminal():
+async def terminal(request: Request):
     """Сам терминал (страница приложения)."""
-    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+    lang, auto = seo_pages.lang_of(request)
+    return seo_pages.render(
+        "index.html", lang, "/terminal", extra_head=seo_pages.jsonld("terminal", lang),
+        auto=auto,
+    )
+
+
+@app.get("/robots.txt")
+async def robots_txt():
+    """Правила обхода: служебное закрыто, карта сайта указана."""
+    return seo_pages.robots_txt()
+
+
+@app.get("/sitemap.xml")
+async def sitemap_xml():
+    """Карта сайта: основные страницы во всех языках (hreflang-альтернативы)."""
+    return seo_pages.sitemap_xml()
+
+
+@app.get("/manifest.webmanifest")
+async def manifest_webmanifest():
+    """Манифест приложения: имя, иконка, цвета."""
+    return seo_pages.manifest()
+
+
+@app.get("/favicon.ico")
+async def favicon():
+    """Фавиконка в корне сайта: её спрашивают браузер и роботы поисковиков.
+
+    Раньше этот адрес отдавал 404 — в выдаче вместо логотипа был пустой
+    значок, хотя ``<link rel="icon">`` на страницах стоял. Файл собирается
+    из ``static/logo.png`` скриптом ``tools/build_icons.py``.
+    """
+    path = os.path.join(STATIC_DIR, "favicon.ico")
+    if not os.path.isfile(path):
+        return JSONResponse({"ok": False, "error": "no_favicon"}, status_code=404)
+    return FileResponse(path, media_type="image/x-icon",
+                        headers={"Cache-Control": "public, max-age=604800"})
 
 
 if __name__ == "__main__":

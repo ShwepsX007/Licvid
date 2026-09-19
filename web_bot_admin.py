@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import Any, Dict, List, Optional
@@ -593,15 +594,46 @@ def register_bot_admin_routes(app) -> None:
     @router.post("/api/admin/bot/publish")
     async def api_bot_publish(request: Request,
                               body: Optional[dict] = Body(default=None)):
-        """Выложить пост сейчас: ``kind=channel`` — сводку, ``daily`` — дайджест."""
+        """Выложить пост сейчас: ``channel`` — сводку в каналы, ``daily`` — дайджест,
+        ``hourly`` — собрать сводку и положить её в архив раздела «Сводки по часам»
+        (последнее работает и без Telegram)."""
         user, err = _admin(request)
         if err:
             return err
+        body = body or {}
+        kind = str(body.get("kind") or "channel").lower()
+        if kind == "hourly":
+            # Кнопка «🕘 Сводка на сайт»: собрать сводку и положить её в архив
+            # раздела «Сводки по часам», не дожидаясь поста в канал. Бот тут не
+            # нужен — сводку собирает сайт по своей истории ликвидаций.
+            from api_hourly import ctx as hourly_ctx
+            bot_for_channels = ctx.bot
+            fn = getattr(hourly_ctx, "collect_fn", None)
+            rec, err_txt = None, ""
+            if fn is not None:
+                try:
+                    rec = fn()
+                    if asyncio.iscoroutine(rec):
+                        rec = await rec
+                except Exception as e:                  # noqa: BLE001
+                    err_txt = f"{type(e).__name__}: {e}"
+                    rec = None
+            if rec:
+                ok, msg = True, (f"Сводка {rec.get('id')} добавлена в архив раздела "
+                                 f"«Сводки по часам» — откройте /hourly.")
+            elif fn is None:
+                ok, msg = False, "Сборка сводок недоступна: раздел выключен."
+            else:
+                ok, msg = False, ("Сводка получилась пустой — в архив она не попала: "
+                                  "проверьте историю ликвидаций в /api/health."
+                                  + (f" Ошибка: {err_txt}" if err_txt else ""))
+            _audit(user, "bot_publish", f"{kind} ok={ok}")
+            return {"ok": ok, "kind": kind, "draft": False,
+                    "message": msg, "error": err_txt,
+                    "channels": channels_state(bot_for_channels)}
         bot = ctx.bot
         if bot is None or not getattr(bot, "token", ""):
             return _no_bot()
-        body = body or {}
-        kind = str(body.get("kind") or "channel").lower()
         review = False
         try:
             review = bool(bot._review_on())

@@ -112,10 +112,14 @@ class BotMenuTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_main_menu_has_no_back(self):
+        """Внизу — одна кнопка «☰ Меню», разделы уходят инлайн-кнопками."""
         kb = self.bot._reply_kb(self.user)
         texts = [b.get("text") for row in kb["keyboard"] for b in row]
+        self.assertEqual(texts, ["☰ Меню"])
         self.assertNotIn("← Назад", texts)
-        self.assertTrue(any("Кабинет" in t for t in texts))
+        inline = [b.get("text") for row in self.bot._menu_kb(self.user)["inline_keyboard"]
+                  for b in row]
+        self.assertTrue(any("Кабинет" in t for t in inline))
         self.assertTrue(kb.get("is_persistent"))
         self.assertNotIn("cabinet", _datas(kb))
         # «☰ Меню» — постоянная кнопка: если панель пропала, она её вернёт
@@ -125,14 +129,17 @@ class BotMenuTest(unittest.TestCase):
         self.assertEqual(self.bot._reply_cmd("/menu"), "help")
 
     def test_leaf_screens_use_reply_panel(self):
+        """Разделы не трогают панель внизу: кнопки приходят инлайн-меню."""
         for data in ("cabinet", "stats", "health", "liq"):
             text, kb = self.bot._screen(self.user, data)
-            rows = kb.get("keyboard") or []
+            rows = kb.get("inline_keyboard") or []
             texts = [b.get("text") for row in rows for b in row]
-            self.assertTrue(kb.get("is_persistent"), data)
             self.assertTrue(any("Кабинет" in t for t in texts), data)
             self.assertNotIn("← Назад", texts)
-            self.assertFalse(kb.get("inline_keyboard"), data)
+            self.assertNotIn("keyboard", kb, data)
+            # нижняя панель остаётся одна и та же — «☰ Меню»
+            self.assertEqual([b["text"] for row in self.bot._reply_kb(self.user)["keyboard"]
+                              for b in row], ["☰ Меню"], data)
 
     def test_terminal_screen_opens_site_directly(self):
         """⚡ Терминал — сразу на /terminal: URL-кнопка, без лишнего звука."""
@@ -314,9 +321,10 @@ class BotMenuTest(unittest.TestCase):
     def test_back_returns_main_keyboard(self):
         for data in ("nav:home", "menu", "back"):
             _t, kb = self.bot._screen(self.user, data)
-            texts = [b.get("text") for row in (kb.get("keyboard") or []) for b in row]
+            texts = [b.get("text") for row in
+                     (kb.get("inline_keyboard") or []) for b in row]
             self.assertTrue(any("Кабинет" in t for t in texts), data)
-            self.assertTrue(kb.get("is_persistent"), data)
+            self.assertNotIn("keyboard", kb, data)
 
     def test_callback_edits_same_message(self):
         calls = []
@@ -444,8 +452,11 @@ class BotMenuTest(unittest.TestCase):
         self.assertNotIn("deleteMessage", [m for m, _ in calls])
         edited = [p for m, p in calls if m == "editMessageText"][0]
         self.assertEqual(edited["message_id"], 88)
-        self.assertIn("кнопки внизу", edited["text"])
-        self.assertEqual((edited.get("reply_markup") or {}).get("inline_keyboard"), [])
+        self.assertIn("внизу экрана только ☰ Меню", edited["text"])
+        # под сообщением — разделы меню (а не пустая клавиатура)
+        labels = [b.get("text") for row in
+                  (edited.get("reply_markup") or {}).get("inline_keyboard") or [] for b in row]
+        self.assertTrue(any("Кабинет" in t for t in labels), labels)
 
     def test_start_links_telegram_to_email_account(self):
         """/start link_<nonce> привязывает Telegram к аккаунту с почтой."""
@@ -579,18 +590,26 @@ class BotMenuTest(unittest.TestCase):
         self.bot._call = fake  # type: ignore
         user = self.user
         asyncio.run(self.bot._cmd_start(2002, user, "/start"))
-        self.assertEqual(self.bot._menu_msg[2002], 11)
+        first = self.bot._menu_msg[2002]
         asyncio.run(self.bot._cmd_start(2002, user, "/start"))
-        self.assertEqual(self.bot._menu_msg[2002], 11)
-        self.assertEqual([m for m, _ in calls if m == "sendMessage"], ["sendMessage"])
+        self.assertEqual(self.bot._menu_msg[2002], first)
+        menu_sent = [p for m, p in calls if m == "sendMessage"
+                     and (p.get("reply_markup") or {}).get("inline_keyboard")]
+        self.assertEqual(len(menu_sent), 1, "меню шлётся один раз, дальше правится")
         self.assertIn("editMessageText", [m for m, _ in calls])
-        self.assertNotIn("deleteMessage", [m for m, _ in calls])
-        sent = [p for m, p in calls if m == "sendMessage"][0]
-        self.assertTrue(sent.get("disable_notification"))
+        # deleteMessage — только служебная панель «☰ Меню»: своё меню бот
+        # правит, а не удаляет и не шлёт вторым сообщением
+        deleted = [p.get("message_id") for m, p in calls if m == "deleteMessage"]
+        self.assertEqual(len(deleted), 2, deleted)     # по одной панели на /start
+        menu_mid = [p.get("message_id") for m, p in calls
+                    if m == "editMessageText"][0]
+        self.assertNotIn(menu_mid, deleted)
+        panels = [p for m, p in calls if m == "sendMessage" and str(p.get("text")) == "⌨️"]
+        self.assertTrue(panels and all(p.get("disable_notification") for p in panels))
 
     def test_menu_has_channel_url(self):
-        kb = self.bot._reply_kb(self.user)
-        texts = [b.get("text") for row in kb["keyboard"] for b in row]
+        kb = self.bot._menu_kb(self.user)
+        texts = [b.get("text") for row in kb["inline_keyboard"] for b in row]
         self.assertTrue(any("Канал" in t for t in texts))
         self.assertEqual(self.bot._reply_cmd("👤 Кабинет"), "cabinet")
         self.assertEqual(self.bot._reply_cmd("🔔 Алерты"), "al")
@@ -643,10 +662,11 @@ class BotMenuTest(unittest.TestCase):
 
         self.bot._call = fake  # type: ignore
         asyncio.run(self.bot._cmd_start(2002, self.user, "/start"))
-        sent = [p for m, p in calls if m == "sendMessage"][0]
+        sent = [p for m, p in calls if m == "sendMessage"
+                and "Привет" in str(p.get("text"))]
+        self.assertTrue(sent, "приветствия нет среди отправленного")
         # вместо экрана «Сначала канал» — обычное приветствие с меню
-        self.assertNotIn("Подписаться", str(sent.get("reply_markup")))
-        self.assertIn("Привет", str(sent.get("text")))
+        self.assertNotIn("Подписаться", str(sent[0].get("reply_markup")))
 
     def test_check_callback_opens_menu_when_member(self):
         self.bot._channel_id_cfg = "-100111"
@@ -828,8 +848,12 @@ class BotMenuTest(unittest.TestCase):
         self.assertEqual(posts[0]["kind"], "photo")
         caption = posts[0]["text"]
         self.assertEqual(caption.count("🕘 <b>"), 4)      # все четыре часа
-        self.assertEqual(caption.count("📊 OI"), 4)       # OI по каждому часу
-        self.assertIn("CVD", caption)                     # и CVD часа
+        # час — одна строка с кассой и лидером; OI и CVD часа в пост не идут
+        for line in caption.splitlines():
+            if line.startswith("🕘 <b>"):
+                self.assertIn("💥", line, line)
+                self.assertIn("🏆", line, line)
+                self.assertNotIn("📊 OI", line, line)
         self.assertNotIn("<pre>", caption)                # рамки с цифрами нет
         self.assertIn("к прошлым 4ч", caption)
         self.assertIn("Gate", caption)
@@ -1001,8 +1025,10 @@ class BotMenuTest(unittest.TestCase):
         self.bot.send = fake_send          # черновик админу
         self.bot.send_photo = fake_photo   # публикация в канал
         self.assertTrue(asyncio.run(self.bot.post_channel_digest()))
-        # в канал ничего не ушло, черновик — админу (tg_id 1001)
-        self.assertEqual(photo, [])
+        # в канал ничего не ушло, черновик — админу (tg_id 1001);
+        # обложка показывается админу как превью будущего поста
+        self.assertEqual([x for x in photo if x[0] == "-100111"], [])
+        self.assertEqual([x[0] for x in photo], ["1001"])
         self.assertEqual([x[0] for x in sent], ["1001"])
         self.assertIn("Черновик сводки", sent[0][1])
         datas = [b["callback_data"] for row in sent[0][2]["inline_keyboard"] for b in row]
@@ -1049,7 +1075,7 @@ class BotMenuTest(unittest.TestCase):
         cb = {"id": "cb3", "from": {"id": 1001, "username": "boss", "first_name": "Ada"},
               "data": "d:no", "message": {"message_id": 7, "chat": {"id": 1001}}}
         asyncio.run(self.bot._on_callback(cb))
-        self.assertEqual(photo, [])
+        self.assertEqual([x for x in photo if x == "-100111"], [])
         self.assertIsNone(self.bot._draft)
         self.assertEqual(self.store.get_setting("channel_digest_n", "0"), "0")
 
@@ -1087,14 +1113,27 @@ class BotMenuTest(unittest.TestCase):
         self.assertTrue(any("t.me/" in (u or "") for u in urls))
 
     def test_digest_long_caption_still_one_message(self):
+        """Подпись длиннее лимита — фото всё равно уходит, подпись подрезается.
+
+        Раньше такой пост отправлялся текстом: Telegram отклоняет подпись
+        длиннее 1024 знаков, и «фото важнее» решалось в пользу текста. Из-за
+        этого русский канал оставался без картинки, пока английский её получал.
+        Теперь режем хвост подписи по целым строкам и шлём фотографией.
+        """
         self.bot._channel_id_cfg = "-100111"
         import channel_digest
+        from channel_digest import CAPTION_LIMIT, caption_len
         orig = channel_digest.render_post
-        channel_digest.render_post = lambda *_a, **_k: "x" * 2000
+        tail = ("\n\n— <i>LiqScope</i>\n"
+                "🌐 <a href=\"https://liqscope.online\">liqscope.online</a> · 🤖 бот")
+        channel_digest.render_post = lambda *_a, **_k: ("💥 " + "рынок сыпется. " * 60
+                                                       + "\n🕘 19:15 💥 $3.7M" + tail)
         calls = []
+        captured = {}
 
-        async def fake_photo(*_a, **_k):
+        async def fake_photo(_cid, _path, caption="", *_a, **_k):
             calls.append("photo")
+            captured["caption"] = caption
             return 11
 
         async def fake_send(*_a, **_k):
@@ -1108,7 +1147,10 @@ class BotMenuTest(unittest.TestCase):
         finally:
             channel_digest.render_post = orig
         self.assertTrue(ok)
-        self.assertEqual(calls, ["text"])
+        self.assertEqual(calls, ["photo"], "фото не должно теряться из-за длины подписи")
+        cap = captured.get("caption") or ""
+        self.assertLessEqual(caption_len(cap), CAPTION_LIMIT)
+        self.assertIn("liqscope.online", cap, "подпись бренда остаётся")
 
     def test_digest_shows_telegram_error(self):
         self.bot._channel_id_cfg = "-100111"
@@ -1583,9 +1625,9 @@ class BotMenuTest(unittest.TestCase):
         self.bot.ws_clients_fn = lambda: 3
         text = self.bot._health_text()
         self.assertIn("слушатель не запущен", text)
-        self.assertIn("подъёмов: 2", text)
-        self.assertIn("попыток: 7", text)      # красная строка тоже со счётчиком
-        self.assertIn("попыток: 3", text)      # зелёная строка — сколько раз поднимался
+        self.assertRegex(text, r"подъёмов:\s*(<code>)?2")
+        self.assertRegex(text, r"попыток:\s*(<code>)?7")   # красная строка тоже со счётчиком
+        self.assertRegex(text, r"попыток:\s*(<code>)?3")   # зелёная строка
         self.assertIn("В эфире <b>1/3</b>", text)
 
     def test_call_429_sets_retry_pause(self):
@@ -1671,8 +1713,8 @@ class BotMailTest(unittest.TestCase):
                         "text": text}}))
 
     def test_cabinet_asks_to_confirm_email(self):
-        kb = self.bot._reply_kb(self.user)
-        texts = [b.get("text") for row in kb["keyboard"] for b in row]
+        kb = self.bot._cabinet_kb(self.user)
+        texts = [b.get("text") for row in kb["inline_keyboard"] for b in row]
         self.assertIn("✉️ Подтвердить почту", texts)
         self.assertIn("не привязана", self.bot._cabinet_text(self.user))
         self.assertEqual(self.bot._reply_cmd("✉️ Подтвердить почту"), "mail")
@@ -1682,10 +1724,12 @@ class BotMailTest(unittest.TestCase):
         self.assertTrue(r["ok"])
         unverified = r["user"]
         self.assertIn("не подтверждена", self.bot._cabinet_text(unverified))
-        texts = [b.get("text") for row in self.bot._reply_kb(unverified)["keyboard"] for b in row]
+        texts = [b.get("text") for row in self.bot._cabinet_kb(unverified)["inline_keyboard"]
+                 for b in row]
         self.assertIn("✉️ Подтвердить почту", texts)
         ok_user = self.store.mark_email_verified(self.user["id"])
-        texts = [b.get("text") for row in self.bot._reply_kb(ok_user)["keyboard"] for b in row]
+        texts = [b.get("text") for row in self.bot._cabinet_kb(ok_user)["inline_keyboard"]
+                 for b in row]
         self.assertNotIn("✉️ Подтвердить почту", texts)
         self.assertIn("уже подтверждена", self.bot._mail_screen(ok_user))
 

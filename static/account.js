@@ -80,6 +80,7 @@
             soon: "скоро",
             digestOpen: "Открыть дайджест",
             digest: "Дайджест",
+            hourly: "Сводки по часам",
             waitlistOn: "В листе ожидания",
             waitlistOff: "В лист ожидания",
             subscribed: "Подключено",
@@ -94,6 +95,11 @@
             settings: "Настройки",
             welcome: "Приветствие бота",
             siteNotice: "Объявление на сайте",
+            wipeDone: "Стёрто статистики: {v} визитов, {p} гостей, кэш стран: {c}.",
+            wipeEmpty: "Стирать нечего: статистика уже пуста.",
+            wipeErr: "Не получилось стереть — попробуйте ещё раз.",
+            wipeBusy: "Стираю…",
+            wipeNoVisits: "Пока пусто: переходов за это окно нет.",
             ban: "Бан", unban: "Разбан",
             views: "просмотров", uniques: "уник.",
         },
@@ -174,6 +180,7 @@
             soon: "soon",
             digestOpen: "Open digest",
             digest: "Digest",
+            hourly: "Hourly summaries",
             waitlistOn: "On the waitlist",
             waitlistOff: "Join waitlist",
             subscribed: "On",
@@ -183,6 +190,11 @@
             broadcast: "Telegram broadcast", send: "Send", saved: "Saved",
             health: "Live exchanges", settings: "Settings",
             welcome: "Bot welcome text", siteNotice: "Site notice",
+            wipeDone: "Statistics cleared: {v} visits, {p} guests, {c} cached countries.",
+            wipeEmpty: "Nothing to clear: the statistics are already empty.",
+            wipeErr: "Could not clear the statistics — try again.",
+            wipeBusy: "Clearing…",
+            wipeNoVisits: "Nothing yet: no page views in this window.",
             ban: "Ban", unban: "Unban",
             views: "views", uniques: "unique",
         },
@@ -194,12 +206,40 @@
             return T[c] ? c : "ru";
         } catch (e) { return "ru"; }
     }
+    /* Язык для сервера: он отвечает подсказками формы и письмами на нём.
+       Своих словарей у zh/hi/es здесь нет (тексты сайта подставляет
+       LiqScopeI18n), но серверу нужен именно выбранный код. */
+    function apiLang() {
+        try {
+            var c = (window.LiqScopeI18n && LiqScopeI18n.lang()) || "ru";
+            return c === "en" || c === "zh" || c === "hi" || c === "es" ? c : "ru";
+        } catch (e) { return "ru"; }
+    }
     function t(k, vars) {
-        var s = (T[lang()] || T.ru)[k] || (T.en[k] || k);
+        var code = lang();
+        var own = T[code] && T[code][k];          // своя строка словаря языка
+        var s = own !== undefined ? own : ((T[code] || T.ru)[k] || T.en[k]);
+        if (s === undefined) {
+            // Ключа нет в своих словарях — берём общий словарь страниц
+            // (static/i18n/*.json): там живут админские и гео-строки, и он
+            // знает все пять языков сайта, а не только ru и en.
+            if (window.LiqScopeI18n && LiqScopeI18n.t) {
+                var page = LiqScopeI18n.t(k, vars);
+                if (page !== k) return page;
+            }
+            s = k;
+        }
         if (vars) {
             Object.keys(vars).forEach(function (name) {
                 s = s.replace(new RegExp("\\{" + name + "\\}", "g"), vars[name]);
             });
+        }
+        // у account.js словари только RU/EN: остальным языкам строку отдаём
+        // общему словарю фраз (он переводит и куски внутри текста), но только
+        // если переводится ЦЕЛИКОМ — иначе лучше честный русский, чем смесь
+        if (!own && code !== "ru" && window.LiqScopeI18n &&
+            LiqScopeI18n.hasPhrase && LiqScopeI18n.hasPhrase(s, code)) {
+            s = LiqScopeI18n.phrase(s, code);
         }
         return s;
     }
@@ -244,6 +284,12 @@
         if (path !== "/digest") {
             html += '<a class="btn btn-ghost btn-compact" href="/digest">📰 ' +
                 t("digest") + "</a>";
+        }
+        // Сводки по часам — посты канала на сайте: та же ссылка из любой
+        // страницы кабинета, админки и входа
+        if (path !== "/hourly") {
+            html += '<a class="btn btn-ghost btn-compact" href="/hourly">🕘 ' +
+                t("hourly") + "</a>";
         }
         if (path !== "/cabinet") {
             html += '<a class="btn btn-ghost btn-compact" href="/cabinet">' + t("cabinet") + "</a>";
@@ -373,7 +419,7 @@
                     vresend.onclick = function () {
                         api("/api/auth/email/resend", {
                             method: "POST",
-                            body: JSON.stringify({ email: u.email, language: lang() }),
+                            body: JSON.stringify({ email: u.email, language: apiLang() }),
                         }).then(function (d) {
                             if (vresend) {
                                 vresend.textContent = d.ok ? t("verifySent") : (d.error || "error");
@@ -2159,6 +2205,12 @@
     function renderBars(days) {
         var el = $("visit-bars");
         if (!el) return;
+        if (!(days || []).length) {
+            // после стирания статистики пустое место выглядело бы поломкой
+            el.innerHTML = '<span class="meta">' +
+                esc(t("wipeNoVisits")) + "</span>";
+            return;
+        }
         var max = 1;
         (days || []).forEach(function (d) {
             if (d.uniques > max) max = d.uniques;
@@ -2214,48 +2266,243 @@
         });
     }
 
+    var lastTrials = null;      // последняя сводка испытаний: нужна при смене языка
+
+    /** Воронка пробного доступа к слоям: «12 гостей, 5 увидели предложение». */
+    function paintTrials(lt) {
+        lastTrials = lt || {};
+        var el = $("visits-trial");
+        if (!el) return;
+        var n = Number(lt.total || 0);
+        var stuck = Number(lt.expired || 0);
+        var minutes = Math.max(1, Math.round(Number(lt.limit_sec || 1800) / 60));
+        if (!n) {
+            el.textContent = window.LiqScopeI18n && LiqScopeI18n.t
+                ? LiqScopeI18n.t("adm.trial_none", { min: minutes }) : "";
+            return;
+        }
+        el.textContent = window.LiqScopeI18n && LiqScopeI18n.t
+            ? LiqScopeI18n.t("adm.trial_line", { min: minutes, n: n, stuck: stuck })
+            : "";
+    }
+
+    if (window.LiqScopeI18n && LiqScopeI18n.onChange) {
+        // язык переключили — строка воронки должна переехать вместе с сайтом
+        LiqScopeI18n.onChange(function () { if (lastTrials) paintTrials(lastTrials); });
+    }
+
+    // --- ☰ Пробный доступ к слоям ------------------------------------------
+    // Сколько минут гость без регистрации может включать слои в терминале
+    // (web_layers). Правится здесь, действует сразу: остаток считается от
+    // первого захода гостя, поэтому новый лимит меняет его немедленно.
+    var lastLayers = null;      // последний ответ: нужен при смене языка
+
+    /** Нарисовать лимит, источник и воронку пробного доступа. */
+    function paintLayers(d) {
+        lastLayers = d || {};
+        var min = $("layers-min"), st = $("layers-status"), note = $("layers-note");
+        var stats = $("layers-stats");
+        if (min && document.activeElement !== min) {
+            min.value = Number(d.minutes || 0);
+        }
+        var locked = !!d.locked;
+        if (min) min.disabled = locked;
+        var save = $("layers-save");
+        if (save) save.disabled = locked;
+        var s = d.stats || {};
+        if (stats) {
+            stats.textContent = t("adm.layers_stats", {
+                active: Number(s.active || 0), expired: Number(s.expired || 0),
+                total: Number(s.total || 0),
+            });
+        }
+        if (note) {
+            note.textContent = locked
+                ? t("adm.layers_locked", { env: d.env_var || "" })
+                : t("adm.layers_now", { min: Number(d.minutes || 0) });
+        }
+        if (st && !st.textContent) st.textContent = "";
+    }
+
+    function loadLayers() {
+        if (!$("layers-card")) return Promise.resolve();
+        return api("/api/admin/layers/settings").then(function (d) {
+            if (d && d.ok) paintLayers(d);
+        });
+    }
+
+    /** Сохранить лимит: 0 выключает ограничение целиком. */
+    function saveLayers() {
+        var min = $("layers-min"), st = $("layers-status");
+        if (!min) return;
+        if (st) st.textContent = t("cab.loading");
+        api("/api/admin/layers/settings", {
+            method: "POST",
+            body: JSON.stringify({ minutes: Number(min.value || 0) }),
+        }).then(function (d) {
+            if (!d || !d.ok) {
+                if (st) st.textContent = d && d.error === "locked"
+                    ? t("adm.layers_locked", { env: d.env_var || "" })
+                    : t("adm.layers_fail");
+                return;
+            }
+            paintLayers(d);
+            if (st) st.textContent = Number(d.minutes || 0) <= 0
+                ? t("adm.layers_off") : t("adm.layers_saved", { min: d.minutes });
+        });
+    }
+
+    /** Сбросить таймер всем гостям: знакомство со слоями начнётся заново. */
+    function resetAllLayers() {
+        var st = $("layers-status");
+        if (st) st.textContent = t("cab.loading");
+        api("/api/admin/layers/reset", {
+            method: "POST", body: JSON.stringify({ all: true }),
+        }).then(function (d) {
+            if (!d || !d.ok) {
+                if (st) st.textContent = t("adm.layers_fail");
+                return;
+            }
+            paintLayers(d);
+            var n = Number(d.reset || 0);
+            if (st) st.textContent = n ? t("adm.layers_reset_done", { n: n })
+                                       : t("adm.layers_reset_none");
+        });
+    }
+
+    function bootLayers() {
+        if (!$("layers-card")) return;
+        var save = $("layers-save"), reset = $("layers-reset");
+        if (save) save.addEventListener("click", saveLayers);
+        if (reset) reset.addEventListener("click", resetAllLayers);
+        loadLayers();
+    }
+
+    if (window.LiqScopeI18n && LiqScopeI18n.onChange) {
+        // язык переключили — карточка лимита должна переехать вместе с сайтом
+        LiqScopeI18n.onChange(function () { if (lastLayers) paintLayers(lastLayers); });
+    }
+
+    /** Цифры и график админки: перезагружаются после стирания статистики. */
+    function loadOverview() {
+        return api("/api/admin/overview").then(function (d) {
+            if (!d.ok) return;
+            var du = d.users || {};
+            var dv = d.visits || {};
+            $("st-users") && ($("st-users").textContent = du.total);
+            $("st-new") && ($("st-new").textContent = du.new_24h);
+            $("st-views") && ($("st-views").textContent = dv.today_views);
+            $("st-uniq") && ($("st-uniq").textContent = dv.today_uniques);
+            $("st-bots") && ($("st-bots").textContent = dv.today_bots || 0);
+            $("st-ws") && ($("st-ws").textContent = d.ws_clients);
+            $("st-bot") && ($("st-bot").textContent = d.bot.ready ? ("@" + d.bot.username) : "—");
+            var live = (d.health.live_exchanges || []).length;
+            $("st-exch") && ($("st-exch").textContent = live);
+            renderBars(dv.days || []);
+            paintTrials(d.layers_trials || {});
+            if ($("bot-welcome")) $("bot-welcome").value = (d.settings && d.settings.bot_welcome) || "";
+            if ($("site-notice-in")) $("site-notice-in").value = (d.settings && d.settings.site_notice) || "";
+            var svc = $("admin-svc");
+            if (svc) {
+                svc.innerHTML = (d.services || []).map(function (s) {
+                    return '<label style="display:flex;gap:10px;align-items:center;margin:8px 0">' +
+                        "<input type='checkbox' data-svc='" + s.slug + "' data-field='coming_soon' " +
+                        (s.coming_soon ? "" : "checked") + "> " +
+                        (s.icon || "") + " <b>" + s.title + "</b> — " +
+                        "<span style='color:var(--muted);font-size:0.8rem'>включён для пользователей</span>" +
+                        "</label>";
+                }).join("");
+                /* checkbox ON = not coming_soon (available) */
+                svc.querySelectorAll("input[data-svc]").forEach(function (inp) {
+                    inp.addEventListener("change", function () {
+                        api("/api/admin/services/" + inp.getAttribute("data-svc"), {
+                            method: "POST",
+                            body: JSON.stringify({ coming_soon: !inp.checked }),
+                        });
+                    });
+                });
+            }
+        });
+    }
+
+    // ----- стирание статистики посещений ---------------------------------
+    /** Свернуть подтверждение и снять галочку кэша. */
+    function wipeClose() {
+        var box = $("visits-wipe");
+        if (box) box.hidden = true;
+        var cache = $("visits-wipe-cache");
+        if (cache) cache.checked = false;
+    }
+
+    function wipeStatus(text) {
+        var el = $("visits-clear-status");
+        if (el) el.textContent = text || "";
+    }
+
+    /** Стереть статистику посещений: POST /api/admin/visits/clear.
+     *
+     * Слово подтверждения уходит на сервер вместе с запросом: без него ручка
+     * отказывается что-либо удалять, поэтому случайный вызов безопасен
+     * (см. web_geo: admin_visits_clear).
+     */
+    function wipeStats() {
+        var go = $("visits-wipe-go");
+        var cache = $("visits-wipe-cache");
+        if (go) go.disabled = true;
+        wipeStatus(t("wipeBusy"));
+        api("/api/admin/visits/clear", {
+            method: "POST",
+            body: JSON.stringify({ confirm: "clear",
+                                   cache: !!(cache && cache.checked) }),
+        }).then(function (d) {
+            if (go) go.disabled = false;
+            if (!d.ok) { wipeStatus(t("wipeErr")); return; }
+            var del = d.deleted || {};
+            var total = (del.visits || 0) + (del.presence || 0) + (del.geo_cache || 0);
+            wipeStatus(total ? t("wipeDone", { v: del.visits || 0,
+                                               p: del.presence || 0,
+                                               c: del.geo_cache || 0 })
+                             : t("wipeEmpty"));
+            wipeClose();
+            loadOverview();                       // цифры и график — с нуля
+            if (window.LiqScopeGeo && window.LiqScopeGeo.load) {
+                window.LiqScopeGeo.load();        // и карточка географии
+            }
+        }).catch(function () {
+            if (go) go.disabled = false;
+            wipeStatus(t("wipeErr"));
+        });
+    }
+
+    /** Кнопка «Стереть статистику»: первый клик открывает подтверждение. */
+    function bindWipe() {
+        var open = $("visits-clear");
+        if (!open) return;
+        open.addEventListener("click", function () {
+            var box = $("visits-wipe");
+            if (!box) return;
+            box.hidden = !box.hidden;             // второй клик закрывает
+            wipeStatus("");
+            if (!box.hidden) {
+                var go = $("visits-wipe-go");
+                if (go) go.focus();
+            }
+        });
+        var cancel = $("visits-wipe-cancel");
+        if (cancel) cancel.addEventListener("click", wipeClose);
+        var go = $("visits-wipe-go");
+        if (go) go.addEventListener("click", wipeStats);
+    }
+
     function bootAdmin() {
         api("/api/auth/me").then(function (me) {
             if (!me.user) { location.href = "/login?next=/admin"; return; }
             if (!me.user.is_admin) { location.href = "/cabinet"; return; }
             paintNav(me.user);
-            api("/api/admin/overview").then(function (d) {
-                if (!d.ok) return;
-                var du = d.users || {};
-                var dv = d.visits || {};
-                $("st-users") && ($("st-users").textContent = du.total);
-                $("st-new") && ($("st-new").textContent = du.new_24h);
-                $("st-views") && ($("st-views").textContent = dv.today_views);
-                $("st-uniq") && ($("st-uniq").textContent = dv.today_uniques);
-                $("st-bots") && ($("st-bots").textContent = dv.today_bots || 0);
-                $("st-ws") && ($("st-ws").textContent = d.ws_clients);
-                $("st-bot") && ($("st-bot").textContent = d.bot.ready ? ("@" + d.bot.username) : "—");
-                var live = (d.health.live_exchanges || []).length;
-                $("st-exch") && ($("st-exch").textContent = live);
-                renderBars(dv.days || []);
-                if ($("bot-welcome")) $("bot-welcome").value = (d.settings && d.settings.bot_welcome) || "";
-                if ($("site-notice-in")) $("site-notice-in").value = (d.settings && d.settings.site_notice) || "";
-                var svc = $("admin-svc");
-                if (svc) {
-                    svc.innerHTML = (d.services || []).map(function (s) {
-                        return '<label style="display:flex;gap:10px;align-items:center;margin:8px 0">' +
-                            "<input type='checkbox' data-svc='" + s.slug + "' data-field='coming_soon' " +
-                            (s.coming_soon ? "" : "checked") + "> " +
-                            (s.icon || "") + " <b>" + s.title + "</b> — " +
-                            "<span style='color:var(--muted);font-size:0.8rem'>включён для пользователей</span>" +
-                            "</label>";
-                    }).join("");
-                    /* checkbox ON = not coming_soon (available) */
-                    svc.querySelectorAll("input[data-svc]").forEach(function (inp) {
-                        inp.addEventListener("change", function () {
-                            api("/api/admin/services/" + inp.getAttribute("data-svc"), {
-                                method: "POST",
-                                body: JSON.stringify({ coming_soon: !inp.checked }),
-                            });
-                        });
-                    });
-                }
-            });
+            if (window.LiqScopeGeo && $("geo-panel")) {
+                window.LiqScopeGeo.mount($("geo-panel"));
+            }
+            loadOverview();
             loadUsers("");
             api("/api/admin/stats").then(function (d) {
                 if (!d.ok || !d.stats) return;
@@ -2263,6 +2510,7 @@
                 $("m-1h") && ($("m-1h").textContent = "$" + usd(d.stats.total_usd_1h));
             });
         });
+        bindWipe();
         var q = $("user-q");
         if (q) q.addEventListener("input", function () { loadUsers(q.value); });
         var bsend = $("broadcast-send");
@@ -2286,6 +2534,7 @@
                 if (st) st.textContent = d.ok ? t("saved") : (d.error || "error");
             });
         });
+        bootLayers();           // лимит пробного доступа к слоям (web_layers)
         bootFolds();            // разделы сворачиваются — до остальных панелей, им нужны id
         bootDigestTpl();
         bootBotAdmin();
@@ -2435,12 +2684,24 @@
     function bootFeedbackUser() {
         var card = $("fb-card");
         if (!card || !$("fb-thread")) return;
+        // Карточка диалога свёрнута по умолчанию — кабинет без неё компактнее.
+        // Кнопка «По всем вопросам» в шапке (маленькая, у правого края) ведёт
+        // к диалогу и раскрывает его.
+        var jump = $("fb-jump");
+        if (jump) {
+            jump.addEventListener("click", function (e) {
+                e.preventDefault();
+                card.open = true;
+                if (card.scrollIntoView) {
+                    card.scrollIntoView({ block: "start", behavior: "smooth" });
+                }
+            });
+        }
         function load() {
             return api("/api/feedback").then(function (d) {
                 if (!d.ok) return;
                 fbPaint("fb-thread", d.messages);
                 fbBadge(d.unread);
-                var jump = $("fb-jump");
                 if (jump) jump.setAttribute("data-unread", d.unread || 0);
             });
         }
@@ -3264,7 +3525,8 @@
             });
         });
         function publish(kind, langs) {
-            botSet("bot-post-status", kind === "daily" ? "Собираю дайджест за сутки…" : "Готовлю сводку…");
+            botSet("bot-post-status", kind === "daily" ? "Собираю дайджест за сутки…"
+                : (kind === "hourly" ? "Собираю сводку для сайта…" : "Готовлю сводку…"));
             api("/api/admin/bot/publish", {
                 method: "POST", body: JSON.stringify({ kind: kind, langs: langs }),
             }).then(function (d) {
@@ -3277,6 +3539,10 @@
         if (daily) daily.addEventListener("click", function () {
             if (confirm("Собрать дневной дайджест за сутки и отправить в каналы?")) publish("daily");
         });
+        // Сводку можно положить в архив сайта (/hourly) и без поста в канал:
+        // раздел наполняется сразу после установки, а не через 4 часа
+        var hourly = $("bot-hourly");
+        if (hourly) hourly.addEventListener("click", function () { publish("hourly"); });
         var dsave = $("dig-save");
         if (dsave) dsave.addEventListener("click", function () {
             api("/api/digest/settings", {
@@ -3318,10 +3584,16 @@
     // дайджест ("digest"). Кнопка ⇄ переносит фото в другую рубрику — так
     // админ раскладывает картинки между постами, не перезагружая их.
     var TPL_KINDS = [
-        { key: "post", box: "tpl-photos", input: "tpl-photo-in", status: "tpl-photo-status" },
+        { key: "post", box: "tpl-photos", input: "tpl-photo-in", status: "tpl-photo-status",
+          fold: "tpl-photos-fold", count: "tpl-photos-count" },
         { key: "digest", box: "tpl-photos-digest", input: "tpl-photo-in-digest",
-          status: "tpl-photo-status-digest" },
+          status: "tpl-photo-status-digest", fold: "tpl-photos-fold-digest",
+          count: "tpl-photos-count-digest" },
     ];
+
+    //: Сколько файлов шлём за одну пачку. Сервер принимает больше, но браузер
+    //: с сотней файлов подряд лучше не ждать: остальное — следующей пачкой.
+    var TPL_UPLOAD_MAX = 50;
 
     function tplPhotoTile(p, kind) {
         var other = kind === "post" ? "digest" : "post";
@@ -3339,10 +3611,18 @@
             // старый ответ сервера: рубрик нет — всё считаем постовыми фото
             byKind = { post: all, digest: [] };
         }
+        var limits = d.photo_limits || {};
         TPL_KINDS.forEach(function (k) {
             var box = $(k.box);
             if (!box) return;
             var list = (byKind[k.key] || []).filter(function (p) { return p.exists !== false; });
+            // Счётчик видно и в свёрнутом блоке: «7 / 120» — сколько фото в
+            // наборе и до какого лимита. Числа одинаковы на всех языках.
+            var cnt = k.count ? $(k.count) : null;
+            if (cnt) {
+                var lim = limits.kind || limits.total || 0;
+                cnt.textContent = list.length + (lim ? " / " + lim : "");
+            }
             var empty = k.key === "post"
                 ? (d.using_default_photos
                     ? "<p class='lead'>В постах картинки из комплекта. Загрузите свои — набор заменится.</p>"
@@ -3409,18 +3689,40 @@
         TPL_KINDS.forEach(function (k) {
             var inp = $(k.input);
             if (!inp) return;
+            bindTplFold(k);
             inp.addEventListener("change", function () {
-                var f = inp.files && inp.files[0];
                 var st = $(k.status);
-                if (!f) return;
-                if (f.size > 12 * 1000 * 1000) {
+                var all = Array.prototype.slice.call(inp.files || []);
+                if (!all.length) return;
+                // Слишком большие файлы даже не отправляем: сервер их всё
+                // равно отклонит, а ждать загрузку впустую незачем.
+                var big = all.filter(function (f) { return f.size > 12 * 1000 * 1000; });
+                var files = all.filter(function (f) { return f.size <= 12 * 1000 * 1000; });
+                var skipped = 0;
+                if (files.length > TPL_UPLOAD_MAX) {
+                    skipped = files.length - TPL_UPLOAD_MAX;
+                    files = files.slice(0, TPL_UPLOAD_MAX);
+                }
+                if (!files.length) {
                     if (st) st.textContent = "файл больше 12 МБ";
                     inp.value = "";
                     return;
                 }
-                if (st) st.textContent = "загрузка…";
-                uploadDigestPhoto(f, k.key).then(function (d) {
-                    if (st) st.textContent = d.ok ? t("saved") : (d.hint || d.error || "ошибка загрузки");
+                if (st) st.textContent = "Загружаю… 0 / " + files.length;
+                uploadDigestPhotos(files, k.key, function (done) {
+                    if (st) st.textContent = "Загружаю… " + done + " / " + files.length;
+                }).then(function (res) {
+                    var bad = res.errors.length + big.length;
+                    if (st) {
+                        if (res.added) {
+                            var tail = bad ? ", ошибок: " + bad : "";
+                            if (skipped) tail += ", сверх пачки: " + skipped;
+                            st.textContent = "Сохранено: " + res.added + " шт." + tail + ".";
+                        } else {
+                            st.textContent = "Ничего не сохранилось: " +
+                                ((res.errors[0] && res.errors[0].hint) || "ошибка загрузки");
+                        }
+                    }
                     inp.value = "";
                     loadDigestTpl();
                 }).catch(function () {
@@ -3429,6 +3731,51 @@
                 });
             });
         });
+    }
+
+    /* Свёрнутость блоков фото помним в localStorage: открыл один раз — так и
+       останется. По умолчанию закрыто, чтобы набор не растягивал админку. */
+    function bindTplFold(k) {
+        var det = k.fold ? $(k.fold) : null;
+        if (!det) return;
+        var key = "liqscope.admin.photos." + k.key;
+        try {
+            if (localStorage.getItem(key) === "1") det.open = true;
+        } catch (e) {}
+        det.addEventListener("toggle", function () {
+            try { localStorage.setItem(key, det.open ? "1" : "0"); } catch (e) {}
+        });
+    }
+
+    /* Пачка фото: по одному запросу на файл.
+
+       Одно битое фото не отменяет остальные — по каждому свой ответ, а в
+       статусе виден прогресс «3 / 12». Ответ сервера может быть и одиночным
+       (старое поле ``id``), и пачечным (``added``/``ids``) — считаем оба.
+    */
+    function uploadDigestPhotos(files, kind, onStep) {
+        var res = { added: 0, errors: [] };
+        var chain = Promise.resolve();
+        (files || []).forEach(function (f) {
+            chain = chain.then(function () {
+                return uploadDigestPhoto(f, kind).then(function (d) {
+                    if (d && d.ok) {
+                        res.added += (d.added || 1);
+                    } else {
+                        res.errors.push({
+                            name: (f && f.name) || "",
+                            hint: (d && (d.hint || d.error)) || "ошибка загрузки",
+                        });
+                    }
+                }).catch(function () {
+                    res.errors.push({ name: (f && f.name) || "", hint: "ошибка сети" });
+                }).then(function () {
+                    if (onStep) onStep(res.added + res.errors.length);
+                    return null;
+                });
+            });
+        });
+        return chain.then(function () { return res; });
     }
 
     function uploadDigestPhoto(file, kind) {
@@ -3540,7 +3887,7 @@
             }
             if (!answer) { setStatus(status, t("captchaNeed"), "err"); return; }
         }
-        var body = { email: email, password: pass, name: name, language: lang() };
+        var body = { email: email, password: pass, name: name, language: apiLang() };
         if (authTab === "register") { body.captcha = captchaToken; body.answer = answer; }
         var path = authTab === "register" ? "/api/auth/email/register"
             : (authTab === "link" ? "/api/auth/email/link" : "/api/auth/email/login");
@@ -3579,7 +3926,7 @@
         var status = $("login-status");
         if (!email || email.indexOf("@") < 0) { setStatus(status, t("needEmail"), "err"); return; }
         api("/api/auth/email/resend", {
-            method: "POST", body: JSON.stringify({ email: email, language: lang() }),
+            method: "POST", body: JSON.stringify({ email: email, language: apiLang() }),
         }).then(function (d) {
             setStatus(status, d.ok ? t("verifySent") : authError(d), d.ok ? "ok" : "err");
         });
@@ -3634,7 +3981,7 @@
             var status = $("login-status");
             if (!email || email.indexOf("@") < 0) { setStatus(status, t("needEmail"), "err"); return; }
             api("/api/auth/email/reset", {
-                method: "POST", body: JSON.stringify({ email: email, language: lang() }),
+                method: "POST", body: JSON.stringify({ email: email, language: apiLang() }),
             }).then(function (d) {
                 setStatus(status, d.ok ? t("linkSent") : authError(d), d.ok ? "ok" : "err");
             });
@@ -3689,7 +4036,7 @@
                 method: "POST",
                 body: JSON.stringify({ token: token, password: p1,
                                        email: ($("reset-email") || {}).value || "",
-                                       language: lang() }),
+                                       language: apiLang() }),
             }).then(function (d) {
                 if (d.ok) { setStatus(status, t("resetOk"), "ok"); location.href = "/cabinet"; return; }
                 setStatus(status, authError(d), "err");

@@ -70,10 +70,23 @@ class TranslateTest(unittest.TestCase):
         self.assertEqual(bot_i18n.normalize_lang("en-US"), "en")
         self.assertEqual(bot_i18n.normalize_lang("EN"), "en")
         self.assertEqual(bot_i18n.normalize_lang("ru"), "ru")
-        self.assertEqual(bot_i18n.normalize_lang("de"), "ru")
-        self.assertEqual(bot_i18n.normalize_lang(None), "ru")
+        self.assertEqual(bot_i18n.normalize_lang("ru-RU"), "ru")
         self.assertEqual(bot_i18n.other_lang("en"), "ru")
         self.assertEqual(bot_i18n.lang_label("en"), "🇬🇧 English")
+
+    def test_default_language_is_english(self):
+        """Язык по умолчанию — английский: русский только у русских клиентов.
+
+        Так решил владелец: аудитория международная, а переключиться на
+        русский — одна кнопка в меню. Русскую локаль Telegram уважаем: иначе
+        русскоязычный гость увидел бы английский, не спросив.
+        """
+        self.assertEqual(bot_i18n.DEFAULT_LANG, "en")
+        for code in ("de", "es", "uk", "", None, "  ", "zh-CN"):
+            self.assertEqual(bot_i18n.normalize_lang(code), "en", repr(code))
+        # и переводить на такой язык — значит переводить на английский
+        self.assertEqual(bot_i18n.translate("812 событий", "de"), "812 events")
+        self.assertEqual(bot_i18n.translate("812 событий"), "812 events")
 
     def test_russian_stays_untouched(self):
         text = "Сводка ушла в канал.\n💥 812 событий"
@@ -198,6 +211,46 @@ class LangButtonTest(unittest.TestCase):
         self.assertEqual(fresh["lang_manual"], 1)
         # подтверждение уходит на новом языке (клиент переводит на отправке)
         self.assertEqual(calls[-1][0], self.chat_id)
+
+    def test_new_user_gets_default_english(self):
+        """Новый гость — на английском, если Telegram не сказал «русский».
+
+        Язык по умолчанию у бота английский (решение владельца), но русскую
+        локаль клиента уважаем: иначе русскоязычный гость увидел бы английский,
+        не спросив. Проверяем оба случая и путь «язык не назван вовсе».
+        """
+        cases = (("de", "en"), ("es-ES", "en"), ("", "en"), ("en-GB", "en"),
+                 ("ru", "ru"), ("ru-RU", "ru"))
+        for i, (locale, want) in enumerate(cases):
+            tg_id = 9100 + i
+            user = self.store.upsert_telegram_user({
+                "id": tg_id, "first_name": "Guest", "language_code": locale,
+            })
+            self.assertEqual(self.bot.lang_of_user(user), want,
+                             f"{locale!r} → {self.bot.lang_of_user(user)}")
+            # и кэш, который наполняется при каждом сообщении, даёт то же самое
+            self.bot.remember_lang(tg_id, user.get("language"))
+            self.assertEqual(self.bot.lang_of(tg_id), want, repr(locale))
+        # перевод экрана идёт на язык по умолчанию: русских букв не остаётся
+        guest = self.store.upsert_telegram_user({"id": 9200, "first_name": "Ann",
+                                                 "language_code": "de"})
+        text = bot_i18n.translate("Онлайн WS: 3", self.bot.lang_of_user(guest))
+        self.assertFalse(bot_i18n._CYR.search(text), text)
+
+    def test_broadcast_and_alerts_keep_empty_language_for_default(self):
+        """Пустой язык в базе не превращается в русский: решает бот.
+
+        Иначе гость, ни разу не выбравший язык, получал бы русские сигналы —
+        ровно та настройка, которую владелец просил сменить на английскую.
+        """
+        guest = self.store.upsert_telegram_user({"id": 9300, "first_name": "Tim"})
+        self.assertEqual(guest["language"], "")
+        target = [r for r in self.store.broadcast_targets()
+                  if int(r["tg_id"]) == 9300][0]
+        self.assertEqual(target["language"], "")
+        # прогрев рассылки берёт пустой язык из базы — и выходит английский
+        self.bot.warm_langs([{"tg_id": 9300, "language": target["language"]}])
+        self.assertEqual(self.bot.lang_of(9300), "en")
 
     def test_chosen_language_survives_telegram_locale(self):
         """Выбор в боте главнее языка клиента: upsert его не перебивает."""

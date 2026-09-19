@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title data-i18n="seo.hourly.title">Сводки по часам — посты канала LiqScope</title>
+<meta name="description" content="Сводки рынка крипто-фьючерсов каждые несколько часов: ликвидации окна, лидеры часов, оборот и открытый интерес. Те же посты, что выходят в канале, с фото — архив по дням." data-i18n-meta="seo.hourly.desc">
+<meta name="robots" content="index,follow,max-image-preview:large">
+<meta name="theme-color" content="#060a12">
+<link rel="canonical" href="https://liqscope.online/hourly">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="LiqScope">
+<meta property="og:url" content="https://liqscope.online/hourly">
+<meta property="og:title" data-i18n-meta="seo.hourly.title" content="Сводки по часам — посты канала LiqScope">
+<meta property="og:description" data-i18n-meta="seo.hourly.desc" content="Сводки рынка крипто-фьючерсов: ликвидации, лидеры часов, оборот и открытый интерес. Архив по дням.">
+<meta property="og:image" content="https://liqscope.online/static/og-cover.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:locale" content="ru_RU">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" data-i18n-meta="seo.hourly.title" content="Сводки по часам — посты канала LiqScope">
+<meta name="twitter:description" data-i18n-meta="seo.hourly.desc" content="Сводки рынка крипто-фьючерсов: ликвидации, лидеры часов, оборот и открытый интерес. Архив по дням.">
+<meta name="twitter:image" content="https://liqscope.online/static/og-cover.png">
+<link rel="icon" href="/static/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="48x48" href="/static/icon-48.png">
+<link rel="icon" type="image/png" sizes="96x96" href="/static/icon-96.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/static/icon-192.png">
+<link rel="icon" type="image/png" sizes="144x144" href="/static/icon-144.png">
+<link rel="icon" type="image/png" sizes="512x512" href="/static/icon-512.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="stylesheet" href="/static/account.css?v=geo2">
+<style>
+.hour-wrap { max-width: 1180px; margin: 0 auto; padding: 26px 22px 70px; }
+.hour-head { margin: 8px 0 22px; }
+.hour-head h1 { font-size: 1.9rem; line-height: 1.2; }
+.hour-lead { color: var(--muted); margin-top: 10px; max-width: 860px; line-height: 1.55; font-size: 0.95rem; }
+.hour-chips { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+.hour-jump { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+.chip {
+    font-size: 0.75rem; color: var(--muted); border: 1px solid var(--border);
+    background: rgba(13, 18, 32, 0.6); padding: 5px 10px; border-radius: 999px;
+}
+.chip b { color: var(--text); }
+.chip.live { color: var(--cyan); border-color: rgba(0, 214, 255, 0.35); }
+.chip.link { text-decoration: none; }
+.chip.link:hover { border-color: rgba(0, 214, 255, 0.5); color: var(--text); }
+.hour-grid { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 20px; align-items: start; }
+@media (max-width: 900px) { .hour-grid { grid-template-columns: 1fr; } .hour-wrap { padding: 20px 14px 60px; } }
+.hour-list-col h2 { font-size: 1rem; margin-bottom: 10px; letter-spacing: 0.3px; }
+.hour-list { display: flex; flex-direction: column; gap: 10px; }
+.hour-card {
+    display: block; width: 100%; text-align: left; cursor: pointer;
+    border: 1px solid var(--border); background: rgba(13, 18, 32, 0.72);
+    border-radius: 12px; padding: 11px 13px; color: inherit; font-family: inherit;
+    transition: border-color 0.15s, transform 0.15s;
+}
+.hour-card:hover { border-color: rgba(61, 112, 255, 0.55); transform: translateY(-1px); }
+.hour-card.active { border-color: var(--blue); background: rgba(61, 112, 255, 0.10); }
+.hour-card .hc-line { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 0.92rem; }
+.hour-card .hc-day { color: var(--muted); font-weight: 500; font-size: 0.78rem; margin-top: 4px; }
+.hour-card .hc-sum { color: var(--muted); font-size: 0.78rem; margin-top: 4px; line-height: 1.45; }
+.hour-more { color: var(--muted); font-size: 0.74rem; line-height: 1.5; margin-top: 10px; }
+/* --- календарь дней --- */
+.hour-pick-h { font-size: 1rem; margin: 22px 0 10px; letter-spacing: 0.3px; }
+.dig-cal { border: 1px solid var(--border); background: rgba(13, 18, 32, 0.72); border-radius: 12px; padding: 12px 12px 10px; }
+.cal-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.cal-title { font-size: 0.86rem; font-weight: 600; text-transform: capitalize; }
+.cal-nav {
+    border: 1px solid var(--border); background: rgba(7, 10, 16, 0.6); color: var(--text);
+    width: 26px; height: 26px; border-radius: 8px; cursor: pointer; line-height: 1;
+    font-family: inherit; font-size: 0.95rem;
+}
+.cal-nav:hover:not(:disabled) { border-color: rgba(61, 112, 255, 0.55); }
+.cal-nav:disabled { opacity: 0.35; cursor: default; }
+.cal-week, .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+.cal-week { margin-bottom: 4px; }
+.cal-week span { text-align: center; font-size: 0.66rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.3px; }
+.cal-day {
+    height: 30px; border-radius: 8px; border: 1px solid transparent; background: transparent;
+    color: var(--muted); font-family: inherit; font-size: 0.78rem; display: flex;
+    align-items: center; justify-content: center; padding: 0;
+}
+.cal-day.has { cursor: pointer; color: var(--text); border-color: var(--border); background: rgba(61, 112, 255, 0.10); }
+.cal-day.has:hover { border-color: rgba(61, 112, 255, 0.6); }
+.cal-day.on { background: var(--blue); border-color: var(--blue); color: #fff; font-weight: 700; }
+.cal-day.today { border-color: rgba(0, 214, 255, 0.45); }
+.cal-day.empty { opacity: 0.28; }
+.cal-legend { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 0.7rem; margin-top: 9px; }
+.cal-legend i { width: 10px; height: 10px; border-radius: 3px; background: rgba(61, 112, 255, 0.35); border: 1px solid var(--border); display: inline-block; }
+/* --- посты дня: как в канале --- */
+.hour-posts { display: flex; flex-direction: column; gap: 16px; }
+.hour-day-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.hour-day-head h2 { font-size: 1.25rem; }
+.hour-day-head .hd-n { color: var(--muted); font-size: 0.8rem; }
+.tg-card {
+    border: 1px solid var(--border); background: rgba(13, 18, 32, 0.72);
+    border-radius: 14px; padding: 14px 16px 16px; scroll-margin-top: 90px;
+}
+.tg-card.hit { border-color: var(--cyan); box-shadow: 0 0 0 1px rgba(0, 214, 255, 0.35); }
+.tg-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.tg-time { font-weight: 700; font-size: 0.95rem; font-variant-numeric: tabular-nums; }
+.tg-day { color: var(--muted); font-size: 0.78rem; }
+.tg-langs { margin-left: auto; display: flex; gap: 6px; }
+.tg-langs button {
+    border: 1px solid var(--border); background: rgba(7, 10, 16, 0.6); color: var(--muted);
+    border-radius: 8px; padding: 3px 8px; font-size: 0.72rem; font-family: inherit; cursor: pointer;
+}
+.tg-langs button.on { color: var(--text); border-color: var(--blue); background: rgba(61, 112, 255, 0.16); }
+.tg-photo {
+    display: block; width: 100%; max-height: 380px; object-fit: cover;
+    border-radius: 12px; border: 1px solid var(--border); margin-bottom: 12px;
+    background: rgba(7, 10, 16, 0.6);
+}
+.tg-text {
+    white-space: pre-wrap; word-break: break-word; line-height: 1.6;
+    font-size: 0.92rem; color: #e7edf7;
+}
+.tg-text b { color: #fff; }
+.tg-text i { color: var(--muted); font-style: normal; }
+.tg-text a { color: var(--cyan); text-decoration: none; }
+.tg-text a:hover { text-decoration: underline; }
+.tg-text code { font-family: var(--mono); font-size: 0.86rem; color: #cfe6ff; }
+.tg-text pre { background: rgba(7, 10, 16, 0.75); border: 1px solid var(--border); border-radius: 10px; padding: 10px; overflow-x: auto; }
+.tg-foot { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 12px; color: var(--muted); font-size: 0.76rem; }
+.tg-foot .sep { opacity: 0.5; }
+.tg-foot a { color: var(--muted); }
+.tg-foot a:hover { color: var(--cyan); }
+.hour-empty { color: var(--muted); font-size: 0.88rem; padding: 14px 0; }
+@media (max-width: 560px) {
+    .tg-photo { max-height: 260px; }
+    .tg-card { padding: 12px 12px 14px; }
+}
+</style>
+</head>
+<body data-page="hourly">
+
+<header class="site-header">
+    <a class="brand" href="/">
+        <img class="logo" src="/static/logo.png" alt="LiqScope">
+        <span class="name">LIQSCOPE</span>
+        <span class="tag">HOURLY</span>
+    </a>
+    <nav class="site-nav">
+        <select id="lang-select" class="lang-select" aria-label="Language / Язык" title="Language / Язык">
+            <option value="ru">🇷🇺 Русский</option>
+            <option value="en">🇬🇧 English</option>
+            <option value="zh">🇨🇳 中文</option>
+            <option value="hi">🇮🇳 हिन्दी</option>
+            <option value="es">🇪🇸 Español</option>
+        </select>
+        <a class="btn btn-ghost btn-compact" href="/digest">📰 <span data-i18n="hour.digest">Дайджест</span></a>
+        <a class="btn btn-ghost btn-compact" href="/terminal">⚡ <span data-i18n="hour.to_terminal">К терминалу</span></a>
+        <span id="nav-account"></span>
+    </nav>
+</header>
+
+<main class="hour-wrap">
+    <div class="hour-head">
+        <h1 data-i18n="hour.title">Сводки по часам</h1>
+        <p class="hour-lead" data-i18n="hour.lead">Бот публикует сводку рынка в свой канал несколько раз в сутки —
+            здесь те же посты целиком: ликвидации окна, лидеры часов, оборот и открытый интерес, с тем же фото.
+            Любой день открывается из календаря.</p>
+        <div class="hour-chips">
+            <span class="chip live" id="hour-every">—</span>
+            <span class="chip"><span data-i18n="hour.total">Сводок в архиве</span>: <b id="hour-total">—</b></span>
+            <span class="chip"><span data-i18n="hour.days">Дней в архиве</span>: <b id="hour-days">—</b></span>
+            <span class="chip" id="hour-tz">—</span>
+            <a class="chip link hidden" id="hour-channel" href="#" target="_blank" rel="noopener"><span data-i18n="hour.channel">Канал в Telegram</span> →</a>
+        </div>
+        <div class="hour-jump" id="hour-jump"></div>
+    </div>
+    <div class="hour-grid">
+        <aside class="hour-list-col">
+            <h2 data-i18n="hour.fresh">Свежие сводки</h2>
+            <div id="hour-list" class="hour-list">
+                <div class="hour-empty" data-i18n="hour.loading">Загружаю…</div>
+            </div>
+            <p class="hour-more" id="hour-more"></p>
+            <h2 class="hour-pick-h" data-i18n="hour.pick">Выбрать день</h2>
+            <div class="dig-cal">
+                <div class="cal-head">
+                    <button type="button" class="cal-nav" id="cal-prev"
+                            data-i18n-title="hour.prev">‹</button>
+                    <span class="cal-title" id="cal-title">—</span>
+                    <button type="button" class="cal-nav" id="cal-next"
+                            data-i18n-title="hour.next">›</button>
+                </div>
+                <div class="cal-week" id="cal-week"></div>
+                <div class="cal-grid" id="cal-grid"></div>
+                <div class="cal-legend"><i></i><span id="cal-legend"
+                    data-i18n="hour.has">есть сводки</span></div>
+            </div>
+        </aside>
+        <section class="hour-posts" id="hour-posts">
+            <div class="hour-empty" data-i18n="hour.loading">Загружаю…</div>
+        </section>
+    </div>
+</main>
+
+<script src="/static/i18n.pages.js"></script>
+<script src="/static/i18n.js"></script>
+<script src="/static/hourly.js?v=hourly1"></script>
+<script src="/static/presence.js?v=geo2"></script>
+<script src="/static/consent.js?v=consent1"></script>
+</body>
+</html>

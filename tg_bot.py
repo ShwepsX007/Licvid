@@ -42,9 +42,12 @@ def caption_len(text: str) -> int:
 
     Лимит подписи под фотографией — 1024 «знака»; в UTF-16 эмодзи занимают по
     две единицы, поэтому пост, который по ``len()`` проходит, Telegram может
-    отклонить. Считаем честно — тогда фото не теряется из-за пары эмодзи.
+    отклонить. Считает одна общая функция (channel_digest.caption_len) —
+    иначе подбор блоков и отправка снова разъедутся, и русский пост опять
+    уйдёт без фото.
     """
-    return len(str(text or "").encode("utf-16-le")) // 2
+    from channel_digest import caption_len as shared
+    return shared(text)
 
 
 def normalize_public_url(url: str = "") -> str:
@@ -1436,7 +1439,7 @@ class TelegramBot:
 
     async def post_channel_digest(self, force: bool = False) -> bool:
         from channel_digest import (
-            active_headlines, active_images, pick_image, post_has_hours,
+            active_headlines, pick_active_image, post_has_hours,
             render_post, render_top7,
         )
         self._digest_err = ""
@@ -1468,12 +1471,12 @@ class TelegramBot:
             hours = int(snap.get("window_h") or 4)
         except (TypeError, ValueError):
             hours = 4
-        images = active_images(self.store, "post")
-        # Одно фото на пост. Набор из админки листается по кругу (каждое
-        # фото по очереди становится обложкой), но альбомом он больше не
-        # уходит: альбом валил все загруженные фото в один пост, и это
+        # Одно фото на пост. Набор из админки листается по кругу без повторов:
+        # обложкой идёт то фото, которое дольше всех не выходило, — при пачке
+        # загруженных картинок пост не повторяет вчерашнюю обложку. Альбомом
+        # набор не уходит: альбом валил все загруженные фото в один пост, и это
         # читалось как сбой публикации.
-        img = pick_image(n, images=images)
+        img = pick_active_image(self.store, "post", variant=n)
         # Русский пост — основной; английский уходит копией в свой канал.
         ai_head, ai_note = await self._ai_headline(snap, variant=n)
         caption = render_post(
@@ -1498,6 +1501,13 @@ class TelegramBot:
         top = "" if post_has_hours(caption) else render_top7(snap.get("board"))
         top_en = ("" if post_has_hours(caption_en)
                   else render_top7(snap.get("board"), "en"))
+        # Цифры окна: вместе с подписью и фото их складывает архив раздела
+        # «Сводки по часам» — на сайте видно то же, что ушло в канал
+        meta = {"window_h": hours,
+                "total_usd": snap.get("total_usd"),
+                "liq_count": snap.get("count"),
+                "longs_usd": snap.get("longs_usd"),
+                "shorts_usd": snap.get("shorts_usd")}
         posts = [
             {"lang": "ru", "cid": cid, "caption": caption, "top": top},
         ]
@@ -1508,8 +1518,8 @@ class TelegramBot:
         else:
             log.info("английский канал не привязан — пост только по-русски")
         if self._review_on():
-            return await self._send_draft(posts, img, n, ai_note)
-        return await self._publish_digest(posts, img, n)
+            return await self._send_draft(posts, img, n, ai_note, meta=meta)
+        return await self._publish_digest(posts, img, n, meta=meta)
 
     async def _publish_one(self, cid, caption: str, img, top: str = "",
                            lang: str = "ru", images: Optional[List[str]] = None,
@@ -1531,8 +1541,17 @@ class TelegramBot:
         photos = [x for x in (images if images is not None else
                               ([img] if img else [])) if x and os.path.isfile(x)]
         ok = False
-        if photos and caption_len(caption) <= CAPTION_LIMIT:
-            ok = bool(await self.send_photo(cid, photos[0], caption, markup))
+        if photos:
+            # фото важнее хвоста цифр: если подпись не влезает, подрезаем её
+            # (по целым строкам, подпись бренда оставляем) и всё равно шлём
+            # картинкой. Раньше пост с длинной подписью уходил текстом — так
+            # русский канал и остался без фото, пока английский его получал.
+            from channel_digest import caption_fit
+            fit = caption_fit(caption)
+            if fit != caption:
+                log.warning("подпись %s знаков > лимита %s — хвост обрезан, "
+                            "фото уходит", caption_len(caption), CAPTION_LIMIT)
+            ok = bool(await self.send_photo(cid, photos[0], fit, markup))
         if not ok:
             ok = bool(await self.send(cid, caption, markup))
         if ok and top:
@@ -1556,8 +1575,8 @@ class TelegramBot:
         shown = " · ".join(
             f"{'🇬🇧' if lang == 'en' else '🇷🇺'} {n}" for lang, n in sizes)
         long = max(n for _, n in sizes) > CAPTION_LIMIT
-        tail = ("длиннее лимита подписи (1024) — фото не прикрепится, пост уйдёт "
-                "текстом" if long else "влезает в подпись под фото")
+        tail = ("длиннее лимита подписи (1024) — хвост поста обрежется, но фото "
+                "уйдёт" if long else "влезает в подпись под фото")
         return f"<i>Подпись: {shown} знаков — {tail}.</i>"
 
     @staticmethod
@@ -1571,10 +1590,11 @@ class TelegramBot:
             return [x for x in img if x]
         return [img] if img else []
 
-    async def _publish_digest(self, posts, img, n: int) -> bool:
+    async def _publish_digest(self, posts, img, n: int, meta=None) -> bool:
         """Отправка готового поста в каналы (русский и английский)."""
         delivered = 0
         images = self._photo_list(img)
+        sent_langs: List[str] = []
         for post in posts or []:
             cid = post.get("cid")
             if not cid:
@@ -1585,7 +1605,13 @@ class TelegramBot:
                                        post.get("lang") or "ru",
                                        images=images):
                 delivered += 1
+                sent_langs.append("en" if str(post.get("lang") or "").startswith("en")
+                                  else "ru")
         if delivered:
+            # Тот же пост — в архив сайта: раздел «Сводки по часам» показывает
+            # подпись и фото ровно такими, какими они ушли в канал
+            self._archive_posts(posts, sent_langs, images[0] if images else "", n,
+                                meta=meta)
             self._digest_routes = self.channel_route_text()
             self.store.set_setting("channel_digest_n", str(n + 1))
             self.store.set_setting("channel_digest_ts", str(int(time.time())))
@@ -1601,7 +1627,56 @@ class TelegramBot:
                      "(и «Прикрепление файлов», если шлём картинку).")
         return self._digest_fail(err + extra)
 
-    async def _send_draft(self, posts, img, n: int, note: str) -> bool:
+    def _archive_posts(self, posts, langs, img, n: int, meta=None) -> None:
+        """Положить опубликованный пост в архив сайта («Сводки по часам»).
+
+        В архив идут только те языки, которые реально ушли в канал: если
+        английский канал не привязан, поста в нём и не было. Ошибка архива
+        публикацию не ломает — пост уже в канале, а сайт просто не пополнится.
+        """
+        store = getattr(self, "hourly_store", None)
+        if store is None:
+            return
+        langs = [x for x in (langs or []) if x]
+        if not langs:
+            return
+        meta = dict(meta or {})
+        try:
+            from channel_digest import cover_info
+            from hourly_posts import post_id
+            now = time.time()
+            texts: Dict[str, str] = {}
+            for post in posts or []:
+                lang = "en" if str(post.get("lang") or "").startswith("en") else "ru"
+                if lang not in langs or texts.get(lang):
+                    continue
+                cap = str(post.get("caption") or "").strip()
+                if cap:
+                    texts[lang] = cap
+            if not texts:
+                return
+            rec: Dict[str, Any] = {
+                "id": post_id(now),
+                "ts": now,
+                "window_h": meta.get("window_h"),
+                "interval_h": meta.get("window_h"),
+                "total_usd": meta.get("total_usd"),
+                "liq_count": meta.get("liq_count"),
+                "longs_usd": meta.get("longs_usd"),
+                "shorts_usd": meta.get("shorts_usd"),
+                "texts": texts,
+                "sent": {x: True for x in texts},
+                "n": int(n or 0),
+            }
+            if img and os.path.isfile(str(img)):
+                rec["photo"] = cover_info(str(img), self.store)
+            store.add(rec)
+            log.info("сводка n=%s добавлена в архив сайта: %s (%s)",
+                     n, rec["id"], ", ".join(sorted(texts)))
+        except Exception as e:                      # noqa: BLE001
+            log.warning("сводки по часам: пост не попал в архив: %s", e)
+
+    async def _send_draft(self, posts, img, n: int, note: str, meta=None) -> bool:
         """Контроль публикации: показываем пост админу, в канал не отправляем."""
         admin = 0
         try:
@@ -1614,6 +1689,7 @@ class TelegramBot:
                 "Контроль публикации включён, но у бота нет админа с Telegram. "
                 "Выключите контроль в «Шаблоны канала» или привяжите Telegram админу")
         self._draft = {"posts": posts, "img": img, "n": int(n), "note": note,
+                       "meta": dict(meta or {}),
                        "images": list(img) if isinstance(img, (list, tuple)) else [img]}
         kb = {"inline_keyboard": [[
             {"text": "✅ Опубликовать", "callback_data": "d:pub"},
@@ -1666,7 +1742,8 @@ class TelegramBot:
                                             "caption": d.get("caption") or "",
                                             "top": d.get("top") or ""}]
                 ok = await self._publish_digest(posts, d.get("images") or d.get("img"),
-                                                int(d.get("n") or 0))
+                                                int(d.get("n") or 0),
+                                                meta=d.get("meta"))
             self._draft = None
             await self.reply(chat_id, self._digest_result_text(ok), self._admin_kb(),
                              message_id=message_id)
@@ -1686,7 +1763,7 @@ class TelegramBot:
         Запись собирает сервер (api_digest): здесь только отправка и контроль
         публикации — если он включён, посты уходят админу черновиком.
         """
-        from channel_digest import active_images, digest_images, pick_image
+        from channel_digest import pick_digest_image
         from daily_digest import render_channel
 
         self._digest_err = ""
@@ -1724,14 +1801,23 @@ class TelegramBot:
                                  "at": time.time()}
             return result
         # Фото рубрики «дневной дайджест» (если админ их загрузил); иначе —
-        # общий набор сводки. Одно фото на пост: порядок сдвигается по номеру
-        # дня, альбома нет — как и в постах сводки.
-        images = digest_images(self.store)
-        try:
-            variant = int(day.replace("-", "")[-2:] or 0)
-        except (TypeError, ValueError):
-            variant = 0
-        img = pick_image(variant, images=images)
+        # общий набор сводки. Одно фото на пост, порядок — по кругу без
+        # повторов, альбома нет — как и в постах сводки.
+        #
+        # Обложка обычно уже выбрана при сборке выпуска (api_digest.assign_cover)
+        # и записана в запись — тогда её видит и страница /digest: в канале и на
+        # сайте одна и та же картинка. Своей обложки нет (старый выпуск или
+        # файл пропал) — выбираем здесь, как раньше: пост без фото не выходит.
+        img = str(((rec or {}).get("photo") or {}).get("path") or "")
+        if not img or not os.path.isfile(img):
+            try:
+                variant = int(day.replace("-", "")[-2:] or 0)
+            except (TypeError, ValueError):
+                variant = 0
+            # Своя рубрика есть — берём из неё; нет — постовые, но по тому же
+            # кругу без повторов: вечерний выпуск не повторяет вчерашнюю обложку.
+            # Совсем пусто (нет фото ни в базе, ни в комплекте) — пост уйдёт текстом.
+            img = pick_digest_image(self.store, variant=variant)
         if self._review_on():
             ok = await self._send_daily_draft(posts, img, day)
             for post in posts:
@@ -3714,9 +3800,15 @@ class TelegramBot:
     # ----- сервис «Сторож монет»: пампы и дампы ---------------------------
     @staticmethod
     def _user_lang(user: dict) -> str:
-        """Язык пользователя для ссылок и текстов сигналов."""
-        lang = (user or {}).get("language_code") or (user or {}).get("language") or ""
-        return "en" if str(lang).startswith("en") else "ru"
+        """Язык пользователя для ссылок и текстов сигналов.
+
+        Сначала выбор человека, потом локаль клиента Telegram, и только потом
+        язык по умолчанию (``normalize_lang``) — он же решает, что делать с
+        языком, которого бот не знает.
+        """
+        lang = ((user or {}).get("language_code") or
+                (user or {}).get("language") or "")
+        return normalize_lang(lang)
 
     def _pump_cfg(self, user: dict) -> dict:
         from pump_scan import normalize

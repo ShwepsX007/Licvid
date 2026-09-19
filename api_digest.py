@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, Body, Request
 from fastapi.responses import FileResponse, JSONResponse
 
+import seo_pages
 from daily_digest import (DAY_SEC, DEFAULT_KEEP, NARRATIVE_MIN, DigestStore, brief,
                           collect_day, day_key, day_label, fallback_narrative,
                           render_article, render_post)
@@ -39,6 +40,8 @@ class Ctx:
 
     def __init__(self) -> None:
         self.store: DigestStore = DigestStore("")
+        #: Store аккаунтов: в нём лежат фото рубрик (обложка выпуска)
+        self.photo_store = None
         self.liqs_fn = None          # () -> список событий ликвидаций
         self.symbols_fn = None       # () -> [монета] (по обороту, свежие первыми)
         self.candles_fn = None       # async (монета, таймфрейм) -> {"candles": [...]}
@@ -257,6 +260,7 @@ async def build_digest(now: Optional[float] = None, window: Optional[int] = None
     }
     if ai:
         rec["ai"] = await ai_narratives(facts)
+    assign_cover(rec, day)
     if save and isinstance(ctx.store, DigestStore):
         prev = ctx.store.get(day)
         if prev:
@@ -266,13 +270,75 @@ async def build_digest(now: Optional[float] = None, window: Optional[int] = None
             rec["versions"] = int(prev.get("versions") or 1) + 1
             if not ai and prev.get("ai"):
                 rec["ai"] = prev.get("ai") or {}
+            # обложка дня уже выбрана — пересборка её не меняет, иначе картинка
+            # на сайте и в канале разъезжались бы от каждого перезапуска сборки
+            if not rec.get("photo") and (prev.get("photo") or {}):
+                rec["photo"] = prev["photo"]
         ctx.store.save(rec)
         rec = ctx.store.get(day) or rec
     ctx.last = {"day": day, "at": now}
     return rec
 
 
-def public_record(rec: dict, lang: str = "ru", with_article: bool = False) -> dict:
+def cover_variant(day: str) -> int:
+    """Номер варианта обложки из даты: у комплекта картинок свой порядок."""
+    try:
+        return int(str(day or "").replace("-", "")[-2:] or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def assign_cover(rec: dict, day: str = "") -> dict:
+    """Выбрать обложку выпуска и запомнить её в записи.
+
+    Одно фото на выпуск: то же самое уходит и в Telegram, и на страницу
+    ``/digest`` — сайт не остаётся без картинки, а канал не повторяет вчерашнюю.
+    Фото выбирается «по кругу без повторов» (``channel_digest``), поэтому
+    функция вызывается один раз на день: если обложка уже выбрана и файл на
+    месте, она не меняется.
+    """
+    rec = rec if isinstance(rec, dict) else {}
+    day = day or str(rec.get("day") or "")
+    have = rec.get("photo") or {}
+    path = str(have.get("path") or "")
+    if path and os.path.isfile(path):
+        return have
+    if ctx.photo_store is None:
+        return {}
+    try:
+        from channel_digest import ensure_digest_cover
+        cover = ensure_digest_cover(ctx.photo_store, variant=cover_variant(day))
+    except Exception as e:                    # noqa: BLE001
+        log.debug("дайджест: обложка не выбралась: %s", e)
+        return {}
+    if cover:
+        rec["photo"] = cover
+    return cover
+
+
+def public_photo(rec: dict) -> Optional[dict]:
+    """Обложка для сайта: относительный адрес, имя файла и откуда он взялся.
+
+    Админские фото лежат вне static (в data/channel), поэтому отдаём их через
+    ``/api/digest/cover?day=…``: так страница показывает ровно ту картинку,
+    которая ушла в канал, и превью ссылки строится на неё же.
+    """
+    photo = (rec or {}).get("photo") or {}
+    path = str(photo.get("path") or "")
+    day = str((rec or {}).get("day") or (rec or {}).get("id") or "")
+    if not path or not os.path.isfile(path) or not day:
+        return None
+    out = {"url": f"/api/digest/cover?day={day}", "name": photo.get("name") or "",
+           "source": photo.get("source") or "admin", "day": day}
+    if photo.get("id"):
+        out["id"] = int(photo["id"])
+    if photo.get("kind"):
+        out["kind"] = str(photo["kind"])
+    return out
+
+
+def public_record(rec: dict, lang: str = seo_pages.DEFAULT_LANG,
+                  with_article: bool = False) -> dict:
     """Запись архива без внутренностей: то, что рисует сайт."""
     facts = rec.get("facts") or {}
     out = {
@@ -283,14 +349,17 @@ def public_record(rec: dict, lang: str = "ru", with_article: bool = False) -> di
         "window_h": rec.get("window_h"),
         "brief": brief(rec, lang),
         "mood": (facts.get("mood") or {}).get("label", {}).get(lang)
+                or (facts.get("mood") or {}).get("label", {}).get("en")
                 or (facts.get("mood") or {}).get("label", {}).get("ru") or "",
         "total_usd": facts.get("liq_total_usd"),
         "liq_count": facts.get("liq_count"),
         "published": bool((rec.get("published") or {}).get("ru")
                           or (rec.get("published") or {}).get("en")),
         "summary": (rec.get("ai") or {}).get(lang)
+                   or (rec.get("ai") or {}).get("en")
                    or (rec.get("ai") or {}).get("ru") or "",
         "post": render_post(rec, lang, ctx.public_url),
+        "photo": public_photo(rec),
     }
     if with_article:
         out["article"] = render_article(rec, lang)
@@ -437,7 +506,7 @@ class DigestScheduler:
 RETRY_SEC = 900.0        # повтор после сбоя: не чаще, чем раз в 15 минут
 
 
-def day_index(rec: dict, lang: str = "ru") -> dict:
+def day_index(rec: dict, lang: str = seo_pages.DEFAULT_LANG) -> dict:
     """Строка календаря выпусков: дата, подпись, статус.
 
     Лёгкая запись без поста и статьи: архив отдаёт её на каждый выпуск (их
@@ -599,13 +668,27 @@ def register_digest_routes(app) -> None:
     router = APIRouter()
 
     @router.get("/digest")
-    async def page_digest():
+    async def page_digest(request: Request, day: str = ""):
+        """Страница архива. Если открыт конкретный выпуск — превью ссылки
+        строится на его обложку: в мессенджере и в выдаче видно фото дня,
+        а не общий логотип."""
         if not ctx.page_ok:
             return JSONResponse({"ok": False, "error": "off"}, status_code=404)
-        return FileResponse(os.path.join(STATIC_DIR, "digest.html"))
+        lang, auto = seo_pages.lang_of(request)
+        items = ctx.store.list()
+        rec = ctx.store.get(day) if day else (items[0] if items else None)
+        photo = public_photo(rec) if rec else None
+        og_image = ""
+        if photo:
+            og_image = (ctx.public_url or seo_pages.SITE_URL).rstrip("/") + photo["url"]
+        return seo_pages.render(
+            "digest.html", lang, "/digest",
+            extra_head=seo_pages.jsonld("digest", lang, image=og_image),
+            og_image=og_image, auto=auto,
+        )
 
     @router.get("/api/digest")
-    async def api_list(lang: str = "ru", limit: int = 12):
+    async def api_list(lang: str = seo_pages.DEFAULT_LANG, limit: int = 12):
         """Архив выпусков: свежие — полностью, все даты — лёгким индексом.
 
         ``items`` уходят в ленту свежих выпусков (их немного), ``days`` — в
@@ -627,11 +710,29 @@ def register_digest_routes(app) -> None:
         }
 
     @router.get("/api/digest/today")
-    async def api_today(lang: str = "ru"):
+    async def api_today(lang: str = seo_pages.DEFAULT_LANG):
         items = ctx.store.list()
         if not items:
             return {"ok": True, "item": None}
         return {"ok": True, "item": public_record(items[0], lang, with_article=True)}
+
+    @router.get("/api/digest/cover")
+    async def api_cover(day: str = ""):
+        """Картинка-обложка выпуска: её показывает страница /digest.
+
+        Свои фото админка хранит вне static (в data/channel), поэтому отдаём
+        их здесь. Кэш на сутки: обложка выбранного дня не меняется.
+        """
+        items = ctx.store.list()
+        rec = ctx.store.get(day) if day else (items[0] if items else None)
+        path = str(((rec or {}).get("photo") or {}).get("path") or "")
+        if not path or not os.path.isfile(path):
+            return JSONResponse({"ok": False, "error": "no_cover"}, status_code=404)
+        ext = os.path.splitext(path)[1].lower()
+        media = {".png": "image/png", ".webp": "image/webp", ".gif": "image/gif",
+                 ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}.get(ext, "image/jpeg")
+        return FileResponse(path, media_type=media,
+                            headers={"Cache-Control": "public, max-age=86400"})
 
     @router.get("/api/digest/status")
     async def api_status():
@@ -641,7 +742,7 @@ def register_digest_routes(app) -> None:
                 "store_error": ctx.store.error}
 
     @router.get("/api/digest/{day}")
-    async def api_day(day: str, lang: str = "ru"):
+    async def api_day(day: str, lang: str = seo_pages.DEFAULT_LANG):
         rec = ctx.store.get(day)
         if rec is None:
             return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)

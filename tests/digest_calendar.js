@@ -9,6 +9,7 @@
  *      NODE_PATH=./node_modules node tests/digest_calendar.js
  */
 const { JSDOM, VirtualConsole } = require("jsdom");
+const { ru } = require("./_ru");
 
 const URL_BASE = process.argv[2] || "http://127.0.0.1:8011";
 const FRESH = 7;                       // столько свежих выпусков показывает лента
@@ -42,6 +43,7 @@ function archive() {
     days.push({
       day: key(d), label: label(key(d)),
       published: i % 3 !== 0, total_usd: 1.5e9 - i * 1e7, liq_count: 9000 - i * 100,
+      photo: i % 2 === 0,
     });
   });
   return days;
@@ -49,6 +51,12 @@ function archive() {
 
 function record(info) {
   return {
+    // Обложка выпуска: у чётных дней картинка есть — сайт показывает то же
+    // фото, что ушло в канал; у нечётных выпуск без обложки (старый архив).
+    photo: info.photo
+      ? { url: "/api/digest/cover?day=" + info.day, name: "cover.jpg",
+          source: "admin", day: info.day }
+      : null,
     id: info.day, day: info.day, day_label: info.label, brief: "Итоги дня " + info.label,
     published: info.published, total_usd: info.total_usd, window_h: 24,
     article: "<h3>Ликвидации</h3><p>Сводка за " + info.label + "</p>",
@@ -93,7 +101,7 @@ async function openPage(path, opts) {
   vc.on("error", (...a) => errors.push("console.error: " +
     a.map((x) => String((x && x.message) || x)).join(" ").slice(0, 200)));
 
-  const dom = await JSDOM.fromURL(URL_BASE + path, {
+  const dom = await JSDOM.fromURL(ru(URL_BASE + path), {
     runScripts: "dangerously",
     resources: "usable",
     pretendToBeVisual: true,
@@ -138,6 +146,30 @@ async function main() {
     $("#dig-article h2") && $("#dig-article h2").textContent);
 
   // --- календарь ------------------------------------------------------------
+  // --- обложки выпусков: фото из Telegram стоит и на сайте ---------------
+  const thumbs = $$("#dig-list .dc-thumb");
+  check("у выпусков с фото есть миниатюра обложки", thumbs.length > 0, thumbs.length);
+  check("миниатюра — та же картинка, что ушла в канал",
+    thumbs[0] && thumbs[0].getAttribute("src") ===
+      "/api/digest/cover?day=" + days[0].day,
+    thumbs[0] && thumbs[0].getAttribute("src"));
+  check("миниатюра не тормозит список (lazy)",
+    thumbs[0] && thumbs[0].getAttribute("loading") === "lazy");
+  const cardsWithThumb = $$("#dig-list .dig-card.has-thumb").length;
+  check("карточка без фото обложку не рисует",
+    cardsWithThumb === thumbs.length, cardsWithThumb + " / " + thumbs.length);
+  check("карточек в ленте столько же, сколько выпусков в списке",
+    $$("#dig-list .dig-card").length === thumbs.length + 1 ||
+    $$("#dig-list .dig-card").length === FRESH);
+  const firstCover = $("#dig-article .dig-cover img");
+  check("в открытом выпуске — большая обложка выпуска",
+    !!firstCover && firstCover.getAttribute("src") ===
+      "/api/digest/cover?day=" + days[0].day,
+    firstCover && firstCover.getAttribute("src"));
+  check("у обложки есть подпись для незрячих",
+    !!firstCover && firstCover.getAttribute("alt") === "Обложка выпуска — фото дня",
+    firstCover && firstCover.getAttribute("alt"));
+
   check("календарь нарисован", $$("#cal-grid .cal-day").length > 0);
   check("у дней недели есть подписи", $$("#cal-week span").length === 7);
   const title = $("#cal-title").textContent;

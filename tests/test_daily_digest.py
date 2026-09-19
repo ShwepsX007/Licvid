@@ -591,6 +591,43 @@ class BotPublishTest(unittest.TestCase):
         self.assertIn("Крупнейшая:", msg["text"])
         self.assertIn("/digest", msg["text"], "ссылка на полный разбор на сайте")
 
+    def test_channel_uses_the_cover_of_the_record(self):
+        """В канал уходит та же обложка, что записана за выпуском и видна на сайте.
+
+        Фото выбирает сборка выпуска (api_digest.assign_cover) — иначе картинка
+        на странице /digest и в канале могла бы разъехаться.
+        """
+        import asyncio
+        own = self._upload_photo(kind="digest")
+        rec = self._rec()
+        rec["photo"] = {"path": own, "name": "cover.png", "source": "admin", "id": 1}
+        asyncio.get_event_loop().run_until_complete(
+            self.bot.publish_daily_digest(rec, ("ru",), force=True))
+        msg = [m for m in self.sent if m["cid"] == "-100111"][0]
+        self.assertEqual(msg.get("photo"), own)
+
+    def test_channel_picks_a_cover_for_old_records(self):
+        """Старая запись без обложки: фото всё равно уходит — пост без картинки не выходит."""
+        import asyncio
+        path = self._upload_photo(kind="digest")
+        rec = self._rec()
+        asyncio.get_event_loop().run_until_complete(
+            self.bot.publish_daily_digest(rec, ("ru",), force=True))
+        msg = [m for m in self.sent if m["cid"] == "-100111"][0]
+        self.assertEqual(msg.get("photo"), path, "взяли фото рубрики дайджеста")
+
+    def test_caption_goes_on_the_record_cover_that_site_shows(self):
+        """Обложка записи живёт и в разметке страницы: одна картинка на два места."""
+        import api_digest
+        own = self._upload_photo(kind="digest")
+        rec = self._rec()
+        rec["photo"] = {"path": own, "name": "cover.png", "source": "admin", "id": 7}
+        pub = api_digest.public_photo(rec)
+        self.assertTrue(pub and pub["url"].endswith("day=" + rec["day"]), pub)
+        self.assertEqual(pub["id"], 7)
+        self.assertEqual(pub["name"], "cover.png")
+        self.assertEqual(pub["source"], "admin")
+
     def test_digest_post_has_button_to_full_breakdown(self):
         """Под дневным выпуском — кнопка на полный разбор на сайте."""
         import asyncio
@@ -879,6 +916,50 @@ class ArchiveIndexTest(unittest.TestCase):
     def tearDown(self):
         import api_digest
         api_digest.ctx.store = DigestStore("")
+
+    def test_cover_route_serves_the_issue_photo(self):
+        """Обложка выпуска отдаётся странице: то же фото, что ушло в канал."""
+        import api_digest
+        with tempfile.TemporaryDirectory() as tmp:
+            png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+            path = os.path.join(tmp, "cover.png")
+            with open(path, "wb") as fh:
+                fh.write(png)
+            rec = self.store.get("2026-09-18")
+            rec["photo"] = {"path": path, "name": "cover.png", "source": "admin"}
+            self.store.save(rec)
+            res = self.client.get("/api/digest/cover?day=2026-09-18")
+            self.assertEqual(res.status_code, 200)
+            self.assertEqual(res.headers["content-type"], "image/png")
+            self.assertEqual(res.content, png)
+            self.assertIn("max-age", res.headers.get("cache-control", ""))
+            # без обложки — честный 404, а не пустая картинка
+            self.assertEqual(self.client.get("/api/digest/cover?day=2026-09-17").status_code, 404)
+            # без даты отдаём обложку свежего выпуска (так строит превью страница)
+            self.assertEqual(self.client.get("/api/digest/cover").status_code, 200)
+            self.assertIn("/api/digest/cover?day=2026-09-18",
+                          self.client.get("/api/digest/today").json()["item"]["photo"]["url"])
+
+    def test_digest_page_preview_uses_the_cover(self):
+        """Превью ссылки на страницу выпуска — фото дня, без размеров общей обложки."""
+        import api_digest
+        api_digest.ctx.public_url = "https://liqscope.online"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "cover.jpg")
+            with open(path, "wb") as fh:
+                fh.write(b"\xff\xd8\xff\xe0" + b"\x00" * 16)
+            rec = self.store.get("2026-09-18")
+            rec["photo"] = {"path": path, "name": "cover.jpg", "source": "admin"}
+            self.store.save(rec)
+            page = self.client.get("/digest?day=2026-09-18").text
+        self.assertIn('property="og:image" content="https://liqscope.online'
+                      '/api/digest/cover?day=2026-09-18"', page)
+        self.assertIn('name="twitter:image" content="https://liqscope.online'
+                      '/api/digest/cover?day=2026-09-18"', page)
+        self.assertNotIn("og:image:width", page,
+                         "размеры общей обложки к фото дня не подходят")
+        self.assertIn("https://liqscope.online/api/digest/cover?day=2026-09-18",
+                      page, "картинка выпуска должна быть и в разметке Schema.org")
 
     def test_days_index_covers_every_issue(self):
         d = self.client.get("/api/digest?lang=ru").json()

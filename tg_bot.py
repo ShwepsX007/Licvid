@@ -1436,7 +1436,7 @@ class TelegramBot:
 
     async def post_channel_digest(self, force: bool = False) -> bool:
         from channel_digest import (
-            active_headlines, active_images, pick_image, post_has_hours,
+            active_headlines, pick_active_image, post_has_hours,
             render_post, render_top7,
         )
         self._digest_err = ""
@@ -1468,12 +1468,12 @@ class TelegramBot:
             hours = int(snap.get("window_h") or 4)
         except (TypeError, ValueError):
             hours = 4
-        images = active_images(self.store, "post")
-        # Одно фото на пост. Набор из админки листается по кругу (каждое
-        # фото по очереди становится обложкой), но альбомом он больше не
-        # уходит: альбом валил все загруженные фото в один пост, и это
+        # Одно фото на пост. Набор из админки листается по кругу без повторов:
+        # обложкой идёт то фото, которое дольше всех не выходило, — при пачке
+        # загруженных картинок пост не повторяет вчерашнюю обложку. Альбомом
+        # набор не уходит: альбом валил все загруженные фото в один пост, и это
         # читалось как сбой публикации.
-        img = pick_image(n, images=images)
+        img = pick_active_image(self.store, "post", variant=n)
         # Русский пост — основной; английский уходит копией в свой канал.
         ai_head, ai_note = await self._ai_headline(snap, variant=n)
         caption = render_post(
@@ -1686,7 +1686,7 @@ class TelegramBot:
         Запись собирает сервер (api_digest): здесь только отправка и контроль
         публикации — если он включён, посты уходят админу черновиком.
         """
-        from channel_digest import active_images, digest_images, pick_image
+        from channel_digest import pick_digest_image
         from daily_digest import render_channel
 
         self._digest_err = ""
@@ -1724,14 +1724,16 @@ class TelegramBot:
                                  "at": time.time()}
             return result
         # Фото рубрики «дневной дайджест» (если админ их загрузил); иначе —
-        # общий набор сводки. Одно фото на пост: порядок сдвигается по номеру
-        # дня, альбома нет — как и в постах сводки.
-        images = digest_images(self.store)
+        # общий набор сводки. Одно фото на пост, порядок — по кругу без
+        # повторов, альбома нет — как и в постах сводки.
         try:
             variant = int(day.replace("-", "")[-2:] or 0)
         except (TypeError, ValueError):
             variant = 0
-        img = pick_image(variant, images=images)
+        # Своя рубрика есть — берём из неё; нет — постовые, но по тому же
+        # кругу без повторов: вечерний выпуск не повторяет вчерашнюю обложку.
+        # Совсем пусто (нет фото ни в базе, ни в комплекте) — пост уйдёт текстом.
+        img = pick_digest_image(self.store, variant=variant)
         if self._review_on():
             ok = await self._send_daily_draft(posts, img, day)
             for post in posts:

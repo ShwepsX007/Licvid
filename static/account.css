@@ -261,6 +261,27 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
 .tpl-photo .tpl-del { left: 6px; }
 .tpl-photo .tpl-move { right: 6px; }
 
+/* Фото канала в админке свёрнуты в блок: при пачке загрузок плитки больше не
+   растягивают карточку — открываются по клику, счётчик видно и в свёрнутом
+   виде. Раньше набор просто копился на странице. */
+.tpl-fold {
+    border: 1px solid var(--border); border-radius: 10px;
+    padding: 0 12px 12px; margin: 12px 0 0; background: rgba(48, 84, 152, 0.07);
+}
+.tpl-fold > summary {
+    display: flex; align-items: center; gap: 8px; cursor: pointer;
+    padding: 10px 0 8px; font-size: 0.95rem; font-weight: 600; list-style: none;
+}
+.tpl-fold > summary::-webkit-details-marker { display: none; }
+.tpl-fold > summary::before { content: "▸"; color: var(--muted); font-size: 0.8rem; }
+.tpl-fold[open] > summary::before { content: "▾"; }
+.tpl-fold-title { flex: 1; min-width: 0; }
+.tpl-count {
+    border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px;
+    font-size: 0.72rem; color: var(--muted); font-weight: 400;
+}
+.tpl-fold .tpl-photos { margin-top: 0; }
+
 /* 🤖 ИИ-промты в админке: блоки «шапка поста» и «дневной дайджест» */
 .ai-block { margin: 14px 0 0; padding: 12px 14px; border: 1px solid var(--border);
     border-radius: 12px; background: var(--bg-dark); }

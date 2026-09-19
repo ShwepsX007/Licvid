@@ -2963,6 +2963,21 @@ async def manifest_webmanifest():
     return seo_pages.manifest()
 
 
+@app.get("/favicon.ico")
+async def favicon():
+    """Фавиконка в корне сайта: её спрашивают браузер и роботы поисковиков.
+
+    Раньше этот адрес отдавал 404 — в выдаче вместо логотипа был пустой
+    значок, хотя ``<link rel="icon">`` на страницах стоял. Файл собирается
+    из ``static/logo.png`` скриптом ``tools/build_icons.py``.
+    """
+    path = os.path.join(STATIC_DIR, "favicon.ico")
+    if not os.path.isfile(path):
+        return JSONResponse({"ok": False, "error": "no_favicon"}, status_code=404)
+    return FileResponse(path, media_type="image/x-icon",
+                        headers={"Cache-Control": "public, max-age=604800"})
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("server:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")))

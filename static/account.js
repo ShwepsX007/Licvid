@@ -3442,10 +3442,16 @@
     // дайджест ("digest"). Кнопка ⇄ переносит фото в другую рубрику — так
     // админ раскладывает картинки между постами, не перезагружая их.
     var TPL_KINDS = [
-        { key: "post", box: "tpl-photos", input: "tpl-photo-in", status: "tpl-photo-status" },
+        { key: "post", box: "tpl-photos", input: "tpl-photo-in", status: "tpl-photo-status",
+          fold: "tpl-photos-fold", count: "tpl-photos-count" },
         { key: "digest", box: "tpl-photos-digest", input: "tpl-photo-in-digest",
-          status: "tpl-photo-status-digest" },
+          status: "tpl-photo-status-digest", fold: "tpl-photos-fold-digest",
+          count: "tpl-photos-count-digest" },
     ];
+
+    //: Сколько файлов шлём за одну пачку. Сервер принимает больше, но браузер
+    //: с сотней файлов подряд лучше не ждать: остальное — следующей пачкой.
+    var TPL_UPLOAD_MAX = 50;
 
     function tplPhotoTile(p, kind) {
         var other = kind === "post" ? "digest" : "post";
@@ -3463,10 +3469,18 @@
             // старый ответ сервера: рубрик нет — всё считаем постовыми фото
             byKind = { post: all, digest: [] };
         }
+        var limits = d.photo_limits || {};
         TPL_KINDS.forEach(function (k) {
             var box = $(k.box);
             if (!box) return;
             var list = (byKind[k.key] || []).filter(function (p) { return p.exists !== false; });
+            // Счётчик видно и в свёрнутом блоке: «7 / 120» — сколько фото в
+            // наборе и до какого лимита. Числа одинаковы на всех языках.
+            var cnt = k.count ? $(k.count) : null;
+            if (cnt) {
+                var lim = limits.kind || limits.total || 0;
+                cnt.textContent = list.length + (lim ? " / " + lim : "");
+            }
             var empty = k.key === "post"
                 ? (d.using_default_photos
                     ? "<p class='lead'>В постах картинки из комплекта. Загрузите свои — набор заменится.</p>"
@@ -3533,18 +3547,40 @@
         TPL_KINDS.forEach(function (k) {
             var inp = $(k.input);
             if (!inp) return;
+            bindTplFold(k);
             inp.addEventListener("change", function () {
-                var f = inp.files && inp.files[0];
                 var st = $(k.status);
-                if (!f) return;
-                if (f.size > 12 * 1000 * 1000) {
+                var all = Array.prototype.slice.call(inp.files || []);
+                if (!all.length) return;
+                // Слишком большие файлы даже не отправляем: сервер их всё
+                // равно отклонит, а ждать загрузку впустую незачем.
+                var big = all.filter(function (f) { return f.size > 12 * 1000 * 1000; });
+                var files = all.filter(function (f) { return f.size <= 12 * 1000 * 1000; });
+                var skipped = 0;
+                if (files.length > TPL_UPLOAD_MAX) {
+                    skipped = files.length - TPL_UPLOAD_MAX;
+                    files = files.slice(0, TPL_UPLOAD_MAX);
+                }
+                if (!files.length) {
                     if (st) st.textContent = "файл больше 12 МБ";
                     inp.value = "";
                     return;
                 }
-                if (st) st.textContent = "загрузка…";
-                uploadDigestPhoto(f, k.key).then(function (d) {
-                    if (st) st.textContent = d.ok ? t("saved") : (d.hint || d.error || "ошибка загрузки");
+                if (st) st.textContent = "Загружаю… 0 / " + files.length;
+                uploadDigestPhotos(files, k.key, function (done) {
+                    if (st) st.textContent = "Загружаю… " + done + " / " + files.length;
+                }).then(function (res) {
+                    var bad = res.errors.length + big.length;
+                    if (st) {
+                        if (res.added) {
+                            var tail = bad ? ", ошибок: " + bad : "";
+                            if (skipped) tail += ", сверх пачки: " + skipped;
+                            st.textContent = "Сохранено: " + res.added + " шт." + tail + ".";
+                        } else {
+                            st.textContent = "Ничего не сохранилось: " +
+                                ((res.errors[0] && res.errors[0].hint) || "ошибка загрузки");
+                        }
+                    }
                     inp.value = "";
                     loadDigestTpl();
                 }).catch(function () {
@@ -3553,6 +3589,51 @@
                 });
             });
         });
+    }
+
+    /* Свёрнутость блоков фото помним в localStorage: открыл один раз — так и
+       останется. По умолчанию закрыто, чтобы набор не растягивал админку. */
+    function bindTplFold(k) {
+        var det = k.fold ? $(k.fold) : null;
+        if (!det) return;
+        var key = "liqscope.admin.photos." + k.key;
+        try {
+            if (localStorage.getItem(key) === "1") det.open = true;
+        } catch (e) {}
+        det.addEventListener("toggle", function () {
+            try { localStorage.setItem(key, det.open ? "1" : "0"); } catch (e) {}
+        });
+    }
+
+    /* Пачка фото: по одному запросу на файл.
+
+       Одно битое фото не отменяет остальные — по каждому свой ответ, а в
+       статусе виден прогресс «3 / 12». Ответ сервера может быть и одиночным
+       (старое поле ``id``), и пачечным (``added``/``ids``) — считаем оба.
+    */
+    function uploadDigestPhotos(files, kind, onStep) {
+        var res = { added: 0, errors: [] };
+        var chain = Promise.resolve();
+        (files || []).forEach(function (f) {
+            chain = chain.then(function () {
+                return uploadDigestPhoto(f, kind).then(function (d) {
+                    if (d && d.ok) {
+                        res.added += (d.added || 1);
+                    } else {
+                        res.errors.push({
+                            name: (f && f.name) || "",
+                            hint: (d && (d.hint || d.error)) || "ошибка загрузки",
+                        });
+                    }
+                }).catch(function () {
+                    res.errors.push({ name: (f && f.name) || "", hint: "ошибка сети" });
+                }).then(function () {
+                    if (onStep) onStep(res.added + res.errors.length);
+                    return null;
+                });
+            });
+        });
+        return chain.then(function () { return res; });
     }
 
     function uploadDigestPhoto(file, kind) {

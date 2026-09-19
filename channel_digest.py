@@ -1173,6 +1173,57 @@ def digest_images(store=None) -> List[str]:
     return _photo_paths(store, "digest") or active_images(store, "post")
 
 
+def _pick_from_store(store, kind: str) -> str:
+    """Просим базу отдать фото «по кругу без повторов». Нет такого — пусто."""
+    if store is None or not hasattr(store, "pick_digest_photo"):
+        return ""
+    try:
+        return str(store.pick_digest_photo(kind) or "")
+    except TypeError:                         # старая база: выбора по рубрике нет
+        try:
+            return str(store.pick_digest_photo() or "")
+        except Exception:                     # noqa: BLE001
+            return ""
+    except Exception:                         # noqa: BLE001
+        return ""
+
+
+def pick_active_image(store=None, kind: str = "post", variant: int = 0) -> Optional[str]:
+    """Обложка поста из админки: фото, которое дольше всех не выходило.
+
+    Так набор листается без однообразия: каждое фото выходит по разу, прежде
+    чем что-то повторится, а среди одинаково давних выбор случайный — порядок
+    не выглядит линейкой. Фото в базе нет — берём комплект static/channel и
+    листаем по номеру поста, как раньше.
+    """
+    own = _photo_paths(store, kind)
+    if not own and kind:
+        own = _photo_paths(store, "")
+    if own:
+        picked = _pick_from_store(store, kind if _photo_paths(store, kind) else "")
+        if picked and os.path.isfile(picked):
+            return picked
+    return pick_image(variant, images=own or list_images())
+
+
+def pick_digest_image(store=None, variant: int = 0) -> Optional[str]:
+    """Обложка дневного выпуска: своя рубрика «по кругу», иначе фото постов.
+
+    Своих фото дайджеста нет — берём постовые, но тоже самым «давним»: один и
+    тот же вечерний выпуск не повторит вчерашнюю обложку, пока не выйдут все.
+    """
+    own = _photo_paths(store, "digest")
+    if own:
+        picked = _pick_from_store(store, "digest")
+        if picked and os.path.isfile(picked):
+            return picked
+    elif _photo_paths(store, "post"):
+        picked = _pick_from_store(store, "post")
+        if picked and os.path.isfile(picked):
+            return picked
+    return pick_image(variant, images=digest_images(store))
+
+
 HOUR_MARK = r"🕘[^\n]{0,12}\d{2}:\d{2}"
 
 

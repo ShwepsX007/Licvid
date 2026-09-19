@@ -233,6 +233,10 @@ def robots_txt() -> Response:
         [
             "User-agent: *",
             "Allow: /",
+            "# Логотип и фавиконка должны быть доступны роботам: иначе в выдаче",
+            "# вместо значка сайта будет пустое место",
+            "Allow: /static/",
+            "Allow: /favicon.ico",
             "Disallow: /api/",
             "Disallow: /admin",
             "Disallow: /cabinet",
@@ -335,9 +339,15 @@ def manifest(public_url: Optional[str] = None) -> Response:
         "background_color": "#070a10",
         "theme_color": "#060a12",
         "lang": "ru",
+        # Иконки — реальные файлы из tools/build_icons.py: раньше здесь были
+        # размеры 512/192 при картинке 256×256, и установка приложения ломалась.
         "icons": [
-            {"src": "/static/logo.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
-            {"src": "/static/logo.png", "sizes": "192x192", "type": "image/png"},
+            {"src": "/static/icon-192.png", "sizes": "192x192", "type": "image/png",
+             "purpose": "any"},
+            {"src": "/static/icon-512.png", "sizes": "512x512", "type": "image/png",
+             "purpose": "any"},
+            {"src": "/static/icon-maskable-512.png", "sizes": "512x512",
+             "type": "image/png", "purpose": "maskable"},
         ],
     }
     return Response(
@@ -387,6 +397,19 @@ def jsonld(kind: str = "landing", lang: str = DEFAULT_LANG) -> str:
         ]
     else:
         data = [{"@type": "WebPage", **common, "url": f"{SITE_URL}/terminal"}]
+    # Organization с логотипом-картинкой: поисковик берёт отсюда логотип для
+    # брендовой панели, поэтому у картинки указаны реальные размеры.
+    data.append({
+        "@type": "Organization",
+        "name": "LiqScope",
+        "url": SITE_URL,
+        "logo": {
+            "@type": "ImageObject",
+            "url": f"{SITE_URL}/static/icon-512.png",
+            "width": 512,
+            "height": 512,
+        },
+    })
     return (
         '<script type="application/ld+json">'
         + json.dumps(data, ensure_ascii=False)

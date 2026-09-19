@@ -8,8 +8,13 @@
 <meta name="robots" content="noindex,nofollow">
 <link rel="canonical" href="https://liqscope.online/admin">
 <meta name="theme-color" content="#060a12">
-<link rel="icon" type="image/png" href="/static/logo.png">
-<link rel="apple-touch-icon" href="/static/logo.png">
+<link rel="icon" href="/static/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="48x48" href="/static/icon-48.png">
+<link rel="icon" type="image/png" sizes="96x96" href="/static/icon-96.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/static/icon-192.png">
+<link rel="icon" type="image/png" sizes="144x144" href="/static/icon-144.png">
+<link rel="icon" type="image/png" sizes="512x512" href="/static/icon-512.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="stylesheet" href="/static/account.css?v=geo2">
 </head>
@@ -134,26 +139,36 @@
                 <ul class="tpl-list" id="tpl-heads"></ul>
             </div>
             <div>
-                <h4>📸 Фото постов в канал</h4>
-                <p class="meta">В пост уходит одно фото: набор листается от поста к посту — обложкой по очереди бывает каждое. Альбома нет: он валил все загруженные фото в один пост. Пусто — берутся картинки из комплекта.</p>
-                <div class="row-actions">
-                    <label class="btn btn-primary file-btn">
-                        Добавить фото
-                        <input id="tpl-photo-in" type="file" accept="image/jpeg,image/jpg,image/png,image/webp,image/*">
-                    </label>
-                    <span class="meta" id="tpl-photo-status">jpg, png, webp — до 12 МБ</span>
-                </div>
-                <div class="tpl-photos" id="tpl-photos"></div>
-                <h4 style="margin-top:14px">🗞 Фото дневного дайджеста</h4>
-                <p class="meta">Свои картинки для вечернего выпуска. Если пусто — дайджест возьмёт фото постов. Карусель та же.</p>
-                <div class="row-actions">
-                    <label class="btn btn-primary file-btn">
-                        Добавить фото
-                        <input id="tpl-photo-in-digest" type="file" accept="image/jpeg,image/jpg,image/png,image/webp,image/*">
-                    </label>
-                    <span class="meta" id="tpl-photo-status-digest">jpg, png, webp — до 12 МБ</span>
-                </div>
-                <div class="tpl-photos" id="tpl-photos-digest"></div>
+                <details class="tpl-fold" id="tpl-photos-fold" data-kind="post">
+                    <summary>
+                        <span class="tpl-fold-title">📸 Фото постов в канал</span>
+                        <span class="tpl-count" id="tpl-photos-count">—</span>
+                    </summary>
+                    <p class="meta">В пост уходит одно фото, и набор листается по кругу без повторов: обложкой идёт то фото, которое дольше всех не выходило, поэтому одинаковые картинки подряд не повторяются. Файлов можно выбрать сразу много — сохранятся все. Альбома нет: он валил все загруженные фото в один пост. Пусто — берутся картинки из комплекта.</p>
+                    <div class="row-actions">
+                        <label class="btn btn-primary file-btn">
+                            Добавить фото
+                            <input id="tpl-photo-in" type="file" multiple accept="image/jpeg,image/jpg,image/png,image/webp,image/*">
+                        </label>
+                        <span class="meta" id="tpl-photo-status">jpg, png, webp — до 12 МБ каждое, можно выбрать пачку</span>
+                    </div>
+                    <div class="tpl-photos" id="tpl-photos"></div>
+                </details>
+                <details class="tpl-fold" id="tpl-photos-fold-digest" data-kind="digest">
+                    <summary>
+                        <span class="tpl-fold-title">🗞 Фото дневного дайджеста</span>
+                        <span class="tpl-count" id="tpl-photos-count-digest">—</span>
+                    </summary>
+                    <p class="meta">Свои картинки для вечернего выпуска: тот же круг без повторов. Если пусто — дайджест возьмёт фото постов. Можно выбрать сразу много файлов.</p>
+                    <div class="row-actions">
+                        <label class="btn btn-primary file-btn">
+                            Добавить фото
+                            <input id="tpl-photo-in-digest" type="file" multiple accept="image/jpeg,image/jpg,image/png,image/webp,image/*">
+                        </label>
+                        <span class="meta" id="tpl-photo-status-digest">jpg, png, webp — до 12 МБ каждое, можно выбрать пачку</span>
+                    </div>
+                    <div class="tpl-photos" id="tpl-photos-digest"></div>
+                </details>
             </div>
         </div>
     </div>

@@ -155,6 +155,8 @@ function adminHandler(u, opts, calls) {
     return { ok: true, heads: [{ id: 1, text: "☕ Моя шапка за {h}ч" }],
              photos: [postPhoto, digestPhoto],
              photos_by_kind: { post: [postPhoto], digest: [digestPhoto] },
+             photo_counts: { post: 1, digest: 1, total: 2 },
+             photo_limits: { total: 200, kind: 120 },
              using_default_heads: false, using_default_photos: false };
   }
   if (u.indexOf("/api/admin/ai/prompts") === 0) {
@@ -412,6 +414,38 @@ function click(win, el) {
     check("загрузка подтверждена на странице",
       /сохранено|ok/i.test(doc.querySelector("#tpl-photo-status-digest").textContent),
       doc.querySelector("#tpl-photo-status-digest").textContent);
+  }
+
+  // Пачка фото: инпуты принимают много файлов, блоки свёрнуты, счётчик виден
+  const postFold = doc.querySelector("#tpl-photos-fold");
+  const digestFold = doc.querySelector("#tpl-photos-fold-digest");
+  check("блок фото постов сворачивается", !!postFold && postFold.tagName === "DETAILS",
+    postFold && postFold.tagName);
+  check("блок фото дайджеста сворачивается", !!digestFold && digestFold.tagName === "DETAILS",
+    digestFold && digestFold.tagName);
+  check("по умолчанию фото свёрнуты",
+    !(postFold && postFold.open) && !(digestFold && digestFold.open));
+  const postCount = doc.querySelector("#tpl-photos-count");
+  check("счётчик фото виден в свёрнутом блоке",
+    !!postCount && /1\s*\/\s*\d+/.test(postCount.textContent), postCount && postCount.textContent);
+  const postInput = doc.querySelector("#tpl-photo-in");
+  check("оба инпута принимают пачку файлов",
+    !!postInput && postInput.multiple === true && !!digestInput && digestInput.multiple === true);
+  if (postInput) {
+    const beforeBatch = calls.filter((c) => c.url.indexOf("/api/admin/digest/photos") === 0).length;
+    const batch = [1, 2, 3].map((i) => new win.File([new Uint8Array([i, i, i])],
+      "batch" + i + ".jpg", { type: "image/jpeg" }));
+    Object.defineProperty(postInput, "files", { value: batch, configurable: true });
+    postInput.dispatchEvent(new win.Event("change", { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 400));
+    const ups = calls.filter((c) => c.url.indexOf("/api/admin/digest/photos") === 0).length - beforeBatch;
+    check("пачка из трёх фото уходит тремя запросами", ups === 3, ups);
+    const statusText = (doc.querySelector("#tpl-photo-status") || {}).textContent || "";
+    check("итог пачки виден в статусе", /Сохранено: 3 шт/.test(statusText), statusText);
+    check("статус постовой рубрики, не дайджеста",
+      calls.filter((c) => c.url.indexOf("/api/admin/digest/photos") === 0)
+           .slice(-3).every((c) => c.url.indexOf("kind=post") !== -1),
+      calls.slice(-3).map((c) => c.url).join(" | "));
   }
 
   // --- 🤖 промты ИИ: раздел с шаблоном и сохранением ----------------------

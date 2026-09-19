@@ -46,6 +46,12 @@ EMAIL_TOKEN_TTL = {
 LINK_NONCE_TTL = 15 * 60   # привязка Telegram из кабинета
 CAPTCHA_TTL = 10 * 60      # арифметическая капча на регистрацию
 
+# Фото канала (шапки постов и обложки дайджеста). Раньше был общий потолок 40
+# на всё, и с пачкой в один запрос он упирался уже на седьмом фото. Теперь
+# лимит на рубрику и общий — загружать можно сразу много файлов.
+MAX_DIGEST_PHOTOS_KIND = 120
+MAX_DIGEST_PHOTOS = 200
+
 
 def normalize_email(raw: Any) -> str:
     """Адреса сравниваем без регистра и пробелов: Foo@Mail.ru == foo@mail.ru."""
@@ -441,6 +447,7 @@ class Store:
                     path TEXT NOT NULL,
                     name TEXT,
                     kind TEXT DEFAULT 'post',
+                    used_at REAL DEFAULT 0,
                     created_at REAL NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS ads (
@@ -573,11 +580,16 @@ class Store:
             log.debug("визиты: миграция ua/bot: %s", e)
 
     def _migrate_digest_photos(self) -> None:
-        """Колонка kind: фото для сводки постов или для дневного дайджеста.
+        """Колонки фото канала: рубрика (kind) и когда фото вышло (used_at).
 
-        Раньше картинки были одни на всё: и в посты раз в N часов, и в вечерний
+        ``kind``: фото для сводки постов или для дневного дайджеста. Раньше
+        картинки были одни на всё: и в посты раз в N часов, и в вечерний
         выпуск. Теперь рубрика у фото своя, а старые строки считаем постовыми —
         как они и работали.
+
+        ``used_at``: обложки листаются «по кругу без повторов» — перед постом
+        берём фото, которое дольше всех не выходило. По нулю у старых строк
+        видно, что они ещё не участвовали: круг начнётся с них.
         """
         try:
             with self._lock:
@@ -586,6 +598,10 @@ class Store:
                 if cols and "kind" not in cols:
                     self._db.execute(
                         "ALTER TABLE digest_photos ADD COLUMN kind TEXT DEFAULT 'post'")
+                    self._db.commit()
+                if cols and "used_at" not in cols:
+                    self._db.execute(
+                        "ALTER TABLE digest_photos ADD COLUMN used_at REAL DEFAULT 0")
                     self._db.commit()
                 self._db.execute(
                     "UPDATE digest_photos SET kind='post' WHERE kind IS NULL OR kind=''")
@@ -1967,17 +1983,20 @@ class Store:
         """Фото канала: ``kind`` — "post" (сводка), "digest" (дневной выпуск).
 
         Пустой ``kind`` — все фото: так их видит админка и старые вызовы.
+        ``used_at`` — когда фото последний раз было обложкой поста.
         """
         kind = (kind or "").strip()
         with self._lock:
             if kind:
                 rows = self._db.execute(
-                    "SELECT id, path, name, kind, created_at FROM digest_photos"
+                    "SELECT id, path, name, kind, used_at, created_at"
+                    " FROM digest_photos"
                     " WHERE COALESCE(kind,'post')=? ORDER BY id", (kind,)
                 ).fetchall()
             else:
                 rows = self._db.execute(
-                    "SELECT id, path, name, kind, created_at FROM digest_photos"
+                    "SELECT id, path, name, kind, used_at, created_at"
+                    " FROM digest_photos"
                     " ORDER BY id"
                 ).fetchall()
         out = []
@@ -1986,6 +2005,87 @@ class Store:
             d["exists"] = bool(d.get("path") and os.path.isfile(d["path"]))
             out.append(d)
         return out
+
+    def digest_photo_counts(self) -> Dict[str, int]:
+        """Сколько фото в каждой рубрике и всего — для счётчика в админке."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT COALESCE(kind,'post') AS k, COUNT(*) AS n"
+                " FROM digest_photos GROUP BY k"
+            ).fetchall()
+        out = {"post": 0, "digest": 0}
+        for r in rows:
+            out[str(r["k"] or "post")] = int(r["n"])
+        out["total"] = sum(out.values())
+        return out
+
+    def digest_photo_limits(self) -> Dict[str, int]:
+        """Лимиты загрузки: сколько всего и сколько на каждую рубрику."""
+        return {"total": MAX_DIGEST_PHOTOS, "kind": MAX_DIGEST_PHOTOS_KIND}
+
+    def _photo_round_start(self, key: str) -> float:
+        """Когда начался текущий круг обложек (0 — круга ещё не было)."""
+        with self._lock:
+            row = self._db.execute("SELECT value FROM settings WHERE key=?",
+                                   (key,)).fetchone()
+        try:
+            return float((row["value"] if row else "") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _photo_round_new(self, key: str, when: float) -> None:
+        """Отметить начало нового круга. Пишем напрямую: это служебная метка,
+        ей не место в журнале действий (set_setting пишет туда запись)."""
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO settings(key,value) VALUES(?,?)"
+                " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, repr(float(when))),
+            )
+            self._db.commit()
+
+    def pick_digest_photo(self, kind: str = "", actor_id: Optional[int] = None) -> str:
+        """Обложка поста по кругу без повторов.
+
+        У каждого фото помним, когда оно последний раз было обложкой
+        (``used_at``), а у рубрики — когда начался текущий круг. Из фото,
+        которые в этом круге ещё не выходили, берём случайное: весь набор
+        проходит по разу, прежде чем что-то повторится, и каждый новый круг
+        начинается с нового порядка — «однообразия» нет. Пустая строка — фото
+        нет (или файлы пропали с диска).
+        """
+        kind = str(kind or "").strip().lower()
+        if kind not in ("post", "digest"):
+            kind = ""
+        key = f"digest_photo_round_{kind or 'all'}"
+        with self._lock:
+            if kind:
+                rows = self._db.execute(
+                    "SELECT id, path, used_at FROM digest_photos"
+                    " WHERE COALESCE(kind,'post')=? ORDER BY id", (kind,)
+                ).fetchall()
+            else:
+                rows = self._db.execute(
+                    "SELECT id, path, used_at FROM digest_photos ORDER BY id"
+                ).fetchall()
+        live = [r for r in rows if r["path"] and os.path.isfile(r["path"])]
+        if not live:
+            return ""
+        start = self._photo_round_start(key)
+        pool = [r for r in live if float(r["used_at"] or 0) < start]
+        if not pool:
+            # Круг закончился: все фото вышли по разу. Начинаем новый — с новым
+            # случайным порядком, иначе обложки повторялись бы в том же порядке.
+            start = _now()
+            self._photo_round_new(key, start)
+            pool = live
+        pick = secrets.choice(pool)
+        with self._lock:
+            self._db.execute("UPDATE digest_photos SET used_at=? WHERE id=?",
+                             (start, int(pick["id"])))
+            self._db.commit()
+        log.debug("обложка: фото %s, в круге ещё %d", pick["id"], len(pool) - 1)
+        return str(pick["path"])
 
     def set_digest_photo_kind(self, photo_id: int, kind: str,
                               actor_id: Optional[int] = None) -> bool:
@@ -2003,6 +2103,48 @@ class Store:
     def add_digest_photo(self, data: bytes, filename: str = "",
                          actor_id: Optional[int] = None,
                          kind: str = "post") -> Dict[str, Any]:
+        """Одно фото: те же проверки, что и у пачки (см. ``add_digest_photos``)."""
+        r = self._save_digest_photo(data, filename, kind)
+        if r.get("ok"):
+            self.audit(actor_id, "digest_photo_add", f"{r['kind']}:{r.get('name')}")
+        return r
+
+    def add_digest_photos(self, items: Iterable[Tuple[bytes, str]] = (),
+                          actor_id: Optional[int] = None,
+                          kind: str = "post") -> Dict[str, Any]:
+        """Пачка фото из одной загрузки.
+
+        Админ выбирает сразу много файлов — сохраняем каждый (одна запись
+        аудита на пачку, чтобы журнал не пух), а ошибки по конкретным файлам
+        возвращаем списком: одно битое фото не отменяет остальные.
+        """
+        kind = "digest" if str(kind or "").strip().lower() == "digest" else "post"
+        added: List[int] = []
+        names: List[str] = []
+        errors: List[Dict[str, Any]] = []
+        for data, name in (items or []):
+            r = self._save_digest_photo(data, name, kind)
+            if r.get("ok"):
+                added.append(int(r["id"]))
+                names.append(str(r.get("name") or ""))
+            else:
+                err = {"name": os.path.basename(str(name or ""))[:80],
+                       "error": str(r.get("error") or "error")}
+                if r.get("scope"):
+                    err["scope"] = r["scope"]
+                errors.append(err)
+        if added:
+            detail = (f"{kind}:{names[0]}"[:80] if len(added) == 1
+                      else f"{kind}: {len(added)} шт.")
+            self.audit(actor_id, "digest_photo_add", detail)
+        counts = self.digest_photo_counts()
+        return {"ok": bool(added), "added": len(added), "ids": added,
+                "errors": errors, "kind": kind, "counts": counts,
+                "limits": self.digest_photo_limits()}
+
+    def _save_digest_photo(self, data: bytes, filename: str = "",
+                           kind: str = "post") -> Dict[str, Any]:
+        """Проверки и запись одного фото. Без аудита — его ведёт вызывающий."""
         data = data or b""
         if len(data) < 24:
             return {"ok": False, "error": "empty"}
@@ -2019,9 +2161,17 @@ class Store:
             return {"ok": False, "error": "not_image"}
         kind = "digest" if str(kind or "").strip().lower() == "digest" else "post"
         with self._lock:
-            n = self._db.execute("SELECT COUNT(*) FROM digest_photos").fetchone()[0]
-            if n >= 40:
-                return {"ok": False, "error": "limit"}
+            rows = self._db.execute(
+                "SELECT COALESCE(kind,'post') AS k, COUNT(*) AS n"
+                " FROM digest_photos GROUP BY k"
+            ).fetchall()
+            per_kind = {str(r["k"] or "post"): int(r["n"]) for r in rows}
+            if per_kind.get(kind, 0) >= MAX_DIGEST_PHOTOS_KIND:
+                return {"ok": False, "error": "limit", "scope": "kind",
+                        "limit": MAX_DIGEST_PHOTOS_KIND}
+            if sum(per_kind.values()) >= MAX_DIGEST_PHOTOS:
+                return {"ok": False, "error": "limit", "scope": "total",
+                        "limit": MAX_DIGEST_PHOTOS}
         folder = self.digest_photo_dir()
         name = f"{int(_now() * 1000)}_{secrets.token_hex(3)}{ext}"
         path = os.path.join(folder, name)
@@ -2039,7 +2189,6 @@ class Store:
             )
             self._db.commit()
             pid = int(cur.lastrowid)
-        self.audit(actor_id, "digest_photo_add", f"{kind}:{orig}")
         return {"ok": True, "id": pid, "path": path, "name": orig, "kind": kind}
 
     def get_digest_photo(self, photo_id: int) -> Optional[Dict[str, Any]]:

@@ -13,7 +13,7 @@ import re
 import secrets
 import threading
 import time
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 from fastapi import APIRouter, Request, Response
@@ -25,7 +25,8 @@ import seo_pages
 from accounts import (COOKIE_SID, COOKIE_VID, hash_ip, hash_password,
                       normalize_email, password_problem, valid_email,
                       verify_password, verify_telegram_widget)
-from web_upload import PHOTO_ERR, decode_json_photo, parse_multipart_file
+from web_upload import (PHOTO_ERR, decode_json_photos, parse_multipart_file,
+                        parse_multipart_files)
 
 log = logging.getLogger("liqscope.account")
 
@@ -460,20 +461,31 @@ def _public_url(request: Request) -> str:
     return str(request.base_url).rstrip("/")
 
 
-async def read_uploaded_photo(request: Request) -> Tuple[bytes, str]:
+async def read_uploaded_photos(request: Request) -> List[Tuple[bytes, str]]:
+    """Все файлы из запроса: админ выбирает пачку фото за один раз.
+
+    Раньше отсюда возвращался только первый файл, поэтому из выбранной пачки
+    сохранялось одно фото — и это выглядело как «лимит в 7 фото».
+    """
     ctype = (request.headers.get("content-type") or "").lower()
     if "multipart/form-data" in ctype:
         raw = await request.body()
-        return parse_multipart_file(raw, request.headers.get("content-type") or "")
+        return parse_multipart_files(raw, request.headers.get("content-type") or "")
     if "application/json" in ctype:
         try:
             body = await request.json()
         except Exception:
             body = {}
-        return decode_json_photo(body)
+        return decode_json_photos(body)
     if ctype.startswith("image/"):
-        return await request.body(), ""
-    return b"", ""
+        return [(await request.body(), "")]
+    return []
+
+
+async def read_uploaded_photo(request: Request) -> Tuple[bytes, str]:
+    """Первый файл из запроса — так грузят фото рекламы, платежей и т.п."""
+    items = await read_uploaded_photos(request)
+    return items[0] if items else (b"", "")
 
 
 def register_account_routes(app) -> None:
@@ -1291,6 +1303,9 @@ def register_account_routes(app) -> None:
                 "name": p.get("name") or "",
                 "kind": str(p.get("kind") or "post"),
                 "exists": bool(p.get("exists")),
+                # used_at: когда фото последний раз было обложкой. По нулю
+                # видно, что оно ещё не выходило — круг до него не дошёл.
+                "used_at": float(p.get("used_at") or 0),
                 "url": f"/api/admin/digest/photos/{p['id']}/file",
             })
         # Фото разложены по рубрикам: в сводку канала (раз в N часов) и в
@@ -1298,11 +1313,21 @@ def register_account_routes(app) -> None:
         by_kind = {"post": [], "digest": []}
         for p in photos:
             by_kind.setdefault(str(p.get("kind") or "post"), []).append(p)
+        counts = (ctx.store.digest_photo_counts()
+                  if hasattr(ctx.store, "digest_photo_counts")
+                  else {"post": len(by_kind.get("post") or []),
+                        "digest": len(by_kind.get("digest") or []),
+                        "total": len(photos)})
+        limits = (ctx.store.digest_photo_limits()
+                  if hasattr(ctx.store, "digest_photo_limits")
+                  else {"total": 40, "kind": 40})
         return {
             "ok": True,
             "heads": heads,
             "photos": photos,
             "photos_by_kind": by_kind,
+            "photo_counts": counts,
+            "photo_limits": limits,
             "kinds": {"post": "Сводка в канал",
                       "digest": "Дневной дайджест"},
             "using_default_heads": not bool(heads),
@@ -1334,11 +1359,16 @@ def register_account_routes(app) -> None:
 
     @router.post("/api/admin/digest/photos")
     async def admin_digest_add_photo(request: Request):
+        """Загрузка фото: одна или сразу пачка (несколько частей ``file``).
+
+        Одно фото может не пройти проверку — остальные всё равно сохраняем и
+        возвращаем список ошибок: админ видит, что именно не загрузилось.
+        """
         actor, err = _admin(request)
         if err:
             return err
-        blob, filename = await read_uploaded_photo(request)
-        if not blob:
+        items = await read_uploaded_photos(request)
+        if not items:
             return JSONResponse(
                 {"ok": False, "error": "bad_data", "hint": PHOTO_ERR["bad_data"]},
                 status_code=400)
@@ -1348,15 +1378,39 @@ def register_account_routes(app) -> None:
                    or request.headers.get("x-photo-kind") or "").strip().lower()
         if kind not in ("post", "digest"):
             kind = "post"
-        r = ctx.store.add_digest_photo(blob, filename=filename,
-                                       actor_id=actor["id"], kind=kind)
-        if not r.get("ok"):
-            code = str(r.get("error") or "error")
-            r = dict(r)
-            r["hint"] = PHOTO_ERR.get(code, code)
-            return JSONResponse(r, status_code=400)
-        return {"ok": True, "id": r["id"], "name": r.get("name"),
-                "kind": r.get("kind") or kind}
+        if len(items) == 1 and hasattr(ctx.store, "add_digest_photo"):
+            r = ctx.store.add_digest_photo(items[0][0], filename=items[0][1],
+                                           actor_id=actor["id"], kind=kind)
+            if not r.get("ok"):
+                code = str(r.get("error") or "error")
+                r = dict(r)
+                r["hint"] = PHOTO_ERR.get(code, code)
+                return JSONResponse(r, status_code=400)
+            counts = (ctx.store.digest_photo_counts()
+                      if hasattr(ctx.store, "digest_photo_counts") else {})
+            limits = (ctx.store.digest_photo_limits()
+                      if hasattr(ctx.store, "digest_photo_limits") else {})
+            return {"ok": True, "id": r["id"], "ids": [r["id"]],
+                    "name": r.get("name"), "added": 1, "errors": [],
+                    "kind": r.get("kind") or kind,
+                    "photo_counts": counts, "photo_limits": limits}
+        r = ctx.store.add_digest_photos(items, actor_id=actor["id"], kind=kind)
+        if not r.get("added"):
+            first = (r.get("errors") or [{}])[0]
+            code = str(first.get("error") or "error")
+            return JSONResponse({"ok": False, "error": code,
+                                 "hint": PHOTO_ERR.get(code, code),
+                                 "errors": r.get("errors") or [],
+                                 "photo_counts": r.get("counts") or {},
+                                 "photo_limits": r.get("limits") or {}},
+                                status_code=400)
+        for e in r.get("errors") or []:
+            code = str(e.get("error") or "error")
+            e["hint"] = PHOTO_ERR.get(code, code)
+        return {"ok": True, "added": r["added"], "ids": r["ids"],
+                "id": r["ids"][0], "errors": r.get("errors") or [],
+                "kind": kind, "photo_counts": r.get("counts") or {},
+                "photo_limits": r.get("limits") or {}}
 
     @router.get("/api/admin/digest/photos/{photo_id}/file")
     async def admin_digest_photo_file(request: Request, photo_id: int):

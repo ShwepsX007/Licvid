@@ -533,6 +533,34 @@ class DigestTest(unittest.TestCase):
         self.assertTrue(os.path.isfile(pick_image(0)))
         self.assertNotEqual(pick_image(0), pick_image(1))
 
+    def test_cover_from_admin_goes_round_without_repeats(self):
+        """Фото из админки листаются по кругу без повторов.
+
+        Раньше обложка бралась по номеру поста: при небольшом наборе картинки
+        повторялись предсказуемо. Теперь база отдаёт самое «давнее» фото, а
+        порядок круга каждый раз новый.
+        """
+        import tempfile
+        from accounts import Store
+        from channel_digest import pick_active_image, pick_digest_image
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Store(os.path.join(tmp, "a.db"), secret="test-secret")
+            batch = [(b"\xff\xd8\xff\xe0" + bytes([i]) * 64 + b"\xff\xd9",
+                      f"p{i}.jpg") for i in range(4)]
+            store.add_digest_photos(batch, kind="post")
+            n = len(store.list_digest_photos("post"))
+            picks = [pick_active_image(store, "post") for _ in range(n)]
+            self.assertEqual(len(set(picks)), n, picks)
+            for path in picks:
+                self.assertTrue(os.path.isfile(path), path)
+            # своей рубрики дайджеста нет — берём постовые, тоже по кругу
+            d = [pick_digest_image(store) for _ in range(3)]
+            self.assertEqual(len(set(d)), 3, d)
+            # без базы остаётся комплект
+            self.assertTrue(os.path.isfile(pick_active_image(None, "post")))
+            store.close()
+
 
 if __name__ == "__main__":
     unittest.main()

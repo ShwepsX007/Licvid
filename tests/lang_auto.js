@@ -85,10 +85,11 @@ check("для робота язык браузера не учитывается
   langOf({ serverLang: "ru", auto: false, nav: "en-US", navs: ["en-US", "en"] }) === "ru");
 
 // --- что-то не то в подсказке сервера ----------------------------------------
-check("неизвестный язык сервера игнорируется",
-  langOf({ serverLang: "klingon", auto: true, nav: "fr-FR" }) === "ru");
-check("нет подсказок вовсе — русский по умолчанию",
-  langOf({ nav: "de-DE" }) === "ru");
+check("неизвестный язык сервера игнорируется — берём язык по умолчанию",
+  langOf({ serverLang: "klingon", auto: true, nav: "fr-FR" }) === "en",
+  langOf({ serverLang: "klingon", auto: true, nav: "fr-FR" }));
+check("подсказок нет вовсе — английский (язык сайта по умолчанию)",
+  langOf({ nav: "de-DE" }) === "en", langOf({ nav: "de-DE" }));
 
 // --- смена языка гостем ------------------------------------------------------
 const win = page({ serverLang: "en", auto: true, nav: "en-US" });

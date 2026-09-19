@@ -337,7 +337,8 @@ def public_photo(rec: dict) -> Optional[dict]:
     return out
 
 
-def public_record(rec: dict, lang: str = "ru", with_article: bool = False) -> dict:
+def public_record(rec: dict, lang: str = seo_pages.DEFAULT_LANG,
+                  with_article: bool = False) -> dict:
     """Запись архива без внутренностей: то, что рисует сайт."""
     facts = rec.get("facts") or {}
     out = {
@@ -348,12 +349,14 @@ def public_record(rec: dict, lang: str = "ru", with_article: bool = False) -> di
         "window_h": rec.get("window_h"),
         "brief": brief(rec, lang),
         "mood": (facts.get("mood") or {}).get("label", {}).get(lang)
+                or (facts.get("mood") or {}).get("label", {}).get("en")
                 or (facts.get("mood") or {}).get("label", {}).get("ru") or "",
         "total_usd": facts.get("liq_total_usd"),
         "liq_count": facts.get("liq_count"),
         "published": bool((rec.get("published") or {}).get("ru")
                           or (rec.get("published") or {}).get("en")),
         "summary": (rec.get("ai") or {}).get(lang)
+                   or (rec.get("ai") or {}).get("en")
                    or (rec.get("ai") or {}).get("ru") or "",
         "post": render_post(rec, lang, ctx.public_url),
         "photo": public_photo(rec),
@@ -503,7 +506,7 @@ class DigestScheduler:
 RETRY_SEC = 900.0        # повтор после сбоя: не чаще, чем раз в 15 минут
 
 
-def day_index(rec: dict, lang: str = "ru") -> dict:
+def day_index(rec: dict, lang: str = seo_pages.DEFAULT_LANG) -> dict:
     """Строка календаря выпусков: дата, подпись, статус.
 
     Лёгкая запись без поста и статьи: архив отдаёт её на каждый выпуск (их
@@ -685,7 +688,7 @@ def register_digest_routes(app) -> None:
         )
 
     @router.get("/api/digest")
-    async def api_list(lang: str = "ru", limit: int = 12):
+    async def api_list(lang: str = seo_pages.DEFAULT_LANG, limit: int = 12):
         """Архив выпусков: свежие — полностью, все даты — лёгким индексом.
 
         ``items`` уходят в ленту свежих выпусков (их немного), ``days`` — в
@@ -707,7 +710,7 @@ def register_digest_routes(app) -> None:
         }
 
     @router.get("/api/digest/today")
-    async def api_today(lang: str = "ru"):
+    async def api_today(lang: str = seo_pages.DEFAULT_LANG):
         items = ctx.store.list()
         if not items:
             return {"ok": True, "item": None}
@@ -739,7 +742,7 @@ def register_digest_routes(app) -> None:
                 "store_error": ctx.store.error}
 
     @router.get("/api/digest/{day}")
-    async def api_day(day: str, lang: str = "ru"):
+    async def api_day(day: str, lang: str = seo_pages.DEFAULT_LANG):
         rec = ctx.store.get(day)
         if rec is None:
             return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)

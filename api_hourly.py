@@ -92,7 +92,8 @@ def register_hourly_routes(app) -> None:
         )
 
     @router.get("/api/hourly")
-    async def api_list(lang: str = "ru", day: str = "", limit: int = 12):
+    async def api_list(lang: str = seo_pages.DEFAULT_LANG, day: str = "",
+                     limit: int = 12):
         """Посты раздела: за конкретный день или свежие.
 
         ``days`` — лёгкий индекс для календаря: по нему видно, за какие дни

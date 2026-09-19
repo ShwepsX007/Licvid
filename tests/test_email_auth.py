@@ -506,7 +506,9 @@ class ApiMailTest(unittest.TestCase):
             return {"id": "abc"}
 
         with mock.patch.object(mailer_module, "http_post_json", fake_post):
-            self.assertTrue(m.send_verify("bob@mail.ru", "TOK", name="Боб"))
+            # язык письма выбирает человек: без выбора письмо ушло бы на
+            # английском (язык сайта по умолчанию), здесь проверяем русский
+            self.assertTrue(m.send_verify("bob@mail.ru", "TOK", name="Боб", lang="ru"))
         url, payload, headers = calls[0]
         self.assertEqual(url, "https://api.resend.com/emails")
         self.assertEqual(headers["Authorization"], "Bearer re_test123")

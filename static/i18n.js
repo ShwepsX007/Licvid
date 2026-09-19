@@ -1940,12 +1940,13 @@
         if (pick) return pick;
         var base0 = nav.split("-")[0];
         if (MESSAGES[base0]) return base0;
-        // 5) язык, подобранный сервером по стране, иначе русский
+        // 5) язык, подобранный сервером по стране, и если даже его нет —
+        //    английский: это язык сайта по умолчанию
         if (fromServer && MESSAGES[fromServer]) return fromServer;
-        return "ru";
+        return "en";
     }
 
-    function localeTag() { return LOCALE_TAGS[current] || "ru-RU"; }
+    function localeTag() { return LOCALE_TAGS[current] || "en-US"; }
     function lang() { return current; }
 
     function t(key, vars) {

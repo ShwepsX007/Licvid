@@ -430,6 +430,11 @@ class ApiTransport:
 
 #: Языки писем. Письмо уходит на том языке, который человек выбрал на сайте
 #: (форма регистрации присылает его в теле запроса).
+#: Язык письма, когда человек ещё ничего не выбирал: английский — язык сайта
+#: по умолчанию (``seo_pages.DEFAULT_LANG``; здесь он продублирован, чтобы
+#: рассылка не зависела от импорта страниц).
+DEFAULT_MAIL_LANG = "en"
+
 MAIL_TEXT = {
     "ru": {
         "verify": {
@@ -767,17 +772,20 @@ class Mailer:
     # ----- тексты писем: на языке, который человек выбрал на сайте --------
     @staticmethod
     def lang(value: str) -> str:
+        """Язык письма: выбранный человеком, иначе язык сайта по умолчанию."""
         code = str(value or "").strip().lower().split("-")[0].split("_")[0]
-        return code if code in MAIL_TEXT else "ru"
+        return code if code in MAIL_TEXT else DEFAULT_MAIL_LANG
 
-    def send_verify(self, to: str, token: str, name: str = "", lang: str = "ru") -> bool:
+    def send_verify(self, to: str, token: str, name: str = "",
+                    lang: str = DEFAULT_MAIL_LANG) -> bool:
         url = self.link(f"/verify?token={token}")
         t = MAIL_TEXT[self.lang(lang)]["verify"]
         html = self._wrap(f"{BRAND}: {t['subject']}", _hello(t, name), t["lines"],
                           url, t["button"], t["footnote"], lang=lang)
         return self.send(to, f"{BRAND}: {t['subject']}", html, kind="verify")
 
-    def send_login_link(self, to: str, token: str, lang: str = "ru") -> bool:
+    def send_login_link(self, to: str, token: str,
+                        lang: str = DEFAULT_MAIL_LANG) -> bool:
         url = self.link(f"/email-login?token={token}")
         t = MAIL_TEXT[self.lang(lang)]["login"]
         html = self._wrap(f"{BRAND}: {t['subject']}", t["title"], t["lines"],
@@ -785,7 +793,7 @@ class Mailer:
         return self.send(to, f"{BRAND}: {t['subject']}", html, kind="login")
 
     def send_tg_attach(self, to: str, token: str, tg_name: str = "",
-                       name: str = "", lang: str = "ru") -> bool:
+                       name: str = "", lang: str = DEFAULT_MAIL_LANG) -> bool:
         """Подтверждение привязки Telegram к кабинету с этой почтой."""
         url = self.link(f"/attach?token={token}")
         code = self.lang(lang)
@@ -796,7 +804,8 @@ class Mailer:
                           url, t["button"], t["footnote"], lang=code)
         return self.send(to, f"{BRAND}: {t['subject']}", html, kind="attach")
 
-    def send_reset(self, to: str, token: str, lang: str = "ru") -> bool:
+    def send_reset(self, to: str, token: str,
+                   lang: str = DEFAULT_MAIL_LANG) -> bool:
         url = self.link(f"/reset?token={token}")
         t = MAIL_TEXT[self.lang(lang)]["reset"]
         html = self._wrap(f"{BRAND}: {t['subject']}", t["title"], t["lines"],
@@ -805,7 +814,7 @@ class Mailer:
 
     @staticmethod
     def _wrap(subject: str, hello: str, lines: List[str], url: str, button: str,
-              footnote: str = "", lang: str = "ru") -> str:
+              footnote: str = "", lang: str = DEFAULT_MAIL_LANG) -> str:
         ui = MAIL_UI[Mailer.lang(lang)]
         body = "".join(f'<p style="margin:0 0 12px">{ln}</p>' for ln in lines)
         foot = (f'<p style="margin:18px 0 0;color:#8b98ad;font-size:12px">{footnote}</p>'

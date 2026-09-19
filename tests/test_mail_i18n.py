@@ -72,9 +72,12 @@ class MailLangTest(unittest.TestCase):
         self.assertEqual(mailer.Mailer.lang("zh-CN"), "zh")
         self.assertEqual(mailer.Mailer.lang("ES_es"), "es")
         self.assertEqual(mailer.Mailer.lang("hi-IN"), "hi")
-        self.assertEqual(mailer.Mailer.lang("klingon"), "ru")
-        self.assertEqual(mailer.Mailer.lang(""), "ru")
-        self.assertEqual(mailer.Mailer.lang(None), "ru")
+        # язык не выбран или незнакомый — письмо уходит на языке сайта
+        # по умолчанию, английском
+        self.assertEqual(mailer.Mailer.lang("klingon"), "en")
+        self.assertEqual(mailer.Mailer.lang(""), "en")
+        self.assertEqual(mailer.Mailer.lang(None), "en")
+        self.assertEqual(mailer.DEFAULT_MAIL_LANG, "en")
 
     def test_hello_uses_name(self) -> None:
         self.assertIn("Аня", mailer._hello(mailer.MAIL_TEXT["ru"]["verify"], "Аня"))
@@ -98,7 +101,9 @@ class MailLangTest(unittest.TestCase):
         self.assertEqual(web_account._lang_code(Req(head="en-US,en;q=0.9")), "en")
         # явный выбор важнее заголовка браузера
         self.assertEqual(web_account._lang_code(Req(query="zh", head="en-US")), "zh")
-        self.assertEqual(web_account._lang_code(Req()), "ru")
+        # сказать нечего — отвечаем на языке сайта по умолчанию
+        self.assertEqual(web_account._lang_code(Req()), "en")
+        self.assertEqual(web_account._lang_code(Req(head="de-DE,de;q=0.9")), "en")
 
     def test_hints_in_every_site_language(self) -> None:
         import web_account
@@ -176,7 +181,7 @@ class MailDeliveryTest(unittest.TestCase):
     def test_address_survives_bad_language(self) -> None:
         self.assertTrue(self.mailer.send_verify("x@liqscope.test", "T", lang="tlh"))
         txt = self._emails()[0]
-        self.assertIn('<html lang="ru"', txt)
+        self.assertIn('<html lang="en"', txt)          # язык сайта по умолчанию
 
 
 if __name__ == "__main__":

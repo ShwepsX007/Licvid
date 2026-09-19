@@ -123,7 +123,7 @@ def texts_of(rec: dict) -> Dict[str, str]:
     return out
 
 
-def pick_text(rec: dict, lang: str = "ru") -> str:
+def pick_text(rec: dict, lang: str = "en") -> str:
     """Текст поста на языке сайта; нет своего — английский (канал-источник)."""
     texts = texts_of(rec)
     want = "en" if is_en(lang) else ("ru" if str(lang).startswith("ru") else "en")
@@ -264,7 +264,7 @@ def photo_url(rid: str) -> str:
     return f"/api/hourly/photo/{rid}"
 
 
-def public_post(rec: dict, lang: str = "ru", with_text: bool = True) -> dict:
+def public_post(rec: dict, lang: str = "en", with_text: bool = True) -> dict:
     """Пост для сайта: время, фото и подпись — как в канале.
 
     ``text`` — подпись на языке сайта (для остальных языков интерфейса это

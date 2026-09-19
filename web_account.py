@@ -224,7 +224,8 @@ def _lang_code(request: Request, body: Optional[dict] = None) -> str:
         code = _site_lang(part.split(";")[0])
         if code:
             return code
-    return "ru"
+    # ничего не знаем о языке гостя — показываем язык сайта по умолчанию
+    return seo_pages.DEFAULT_LANG
 
 
 def _mailer():
@@ -386,7 +387,8 @@ def _email_error(lang: str, code: str) -> str:
         "signed_in": "Ya tiene la sesión iniciada. Cierre sesión para registrar otra dirección.",
     }
     TABLES = {"ru": ru, "en": en, "zh": zh, "hi": hi, "es": es}
-    table = TABLES.get(_site_lang(lang) or "ru", ru)
+    table = TABLES.get(_site_lang(lang) or seo_pages.DEFAULT_LANG,
+                       TABLES[seo_pages.DEFAULT_LANG])
     return table.get(code, ru.get(code, code))
 
 

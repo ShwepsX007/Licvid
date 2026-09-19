@@ -2676,6 +2676,39 @@
                 }
             } catch (e) { /* ignore */ }
         }
+        // Фолбэк по времени свечи — как у CVD/OI: лента → график по времени
+        // Даже если id не нашёлся или кластер без ids (история), найдём ближайший
+        // кластер по timestamp события. Так наведение на строку ленты всегда
+        // зажигает прямоугольник на графике, как треугольники CVD и шарики OI.
+        try {
+            const ts = Number(item.timestamp || item.time || 0);
+            if (ts) {
+                const tfSec = state.timeframe * 60;
+                const t0 = Math.floor(ts / tfSec) * tfSec;
+                // Сначала ищем среди нарисованных
+                for (let i = 0; i < clusterHits.length; i++) {
+                    if (Number(clusterHits[i].time) === t0) return clusterHits[i];
+                }
+                // Затем среди всех рядов
+                const all = liqClusterRows();
+                for (let i = 0; i < all.length; i++) {
+                    if (Number(all[i].time) === t0) {
+                        return {
+                            kind: "liq",
+                            key: all[i].key,
+                            x: 0, y: 0, w: 0, h: 0,
+                            time: all[i].time,
+                            price: all[i].total > 0 ? all[i].pxSum / all[i].total : 0,
+                            total: all[i].total,
+                            count: all[i].count,
+                            ids: all[i].ids,
+                            longUsd: all[i].longUsd,
+                            shortUsd: all[i].shortUsd,
+                        };
+                    }
+                }
+            }
+        } catch (e) { /* ignore */ }
         return null;
     }
 

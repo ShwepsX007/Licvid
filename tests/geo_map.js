@@ -12,6 +12,7 @@
  *     NODE_PATH=/tmp/smoke/node_modules node tests/geo_map.js [http://127.0.0.1:8000]
  */
 const { JSDOM, VirtualConsole } = require("jsdom");
+const { ru } = require("./_ru");
 const http = require("http");
 
 const URL_BASE = process.argv[2] || "http://127.0.0.1:8000";
@@ -87,7 +88,7 @@ async function openAdmin(routes) {
   vc.on("error", (...a) => errors.push("console.error: " +
     a.map((x) => String((x && x.message) || x)).join(" ").slice(0, 200)));
 
-  const dom = await JSDOM.fromURL(URL_BASE + "/admin", {
+  const dom = await JSDOM.fromURL(ru(URL_BASE + "/admin"), {
     runScripts: "dangerously",
     resources: "usable",
     pretendToBeVisual: true,

@@ -154,20 +154,99 @@ class MarkupKeysTest(unittest.TestCase):
         self.assertFalse(missing, f"ключей нет в словарях: {missing}")
 
 
+CHROME_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/127.0 Safari/537.36")
+
+
+class Req:
+    """Запрос для проверки выбора языка: ссылка, cookie, браузер, страна, UA."""
+
+    def __init__(self, query="", cookie="", accept="", country="", ua=CHROME_UA):
+        self.query_params = query and {"lang": query} or {}
+        self.cookies = {"liqscope_lang": cookie} if cookie else {}
+        self.headers = {"accept-language": accept, "user-agent": ua}
+        if country:
+            self.headers["cf-ipcountry"] = country
+
+
 class SeoPagesTest(unittest.TestCase):
     def test_language_detection(self) -> None:
-        class Req:
-            def __init__(self, query="", cookie="", accept=""):
-                self.query_params = query and {"lang": query} or {}
-                self.cookies = {"liqscope_lang": cookie} if cookie else {}
-                self.headers = {"accept-language": accept}
-
         self.assertEqual(seo_pages.detect_lang(Req(query="en")), "en")
         self.assertEqual(seo_pages.detect_lang(Req(query="zh-CN")), "zh")
         self.assertEqual(seo_pages.detect_lang(Req(cookie="es")), "es")
-        # язык робота на разметку не влияет: адрес один — заголовок один
-        self.assertEqual(seo_pages.detect_lang(Req(accept="en-US,en;q=0.9")), "ru")
         self.assertEqual(seo_pages.detect_lang(Req(query="klingon")), "ru")
+        # явный выбор сильнее всего: он и в ссылке, и в cookie, и в браузере
+        self.assertEqual(seo_pages.detect_lang(Req(query="hi", cookie="es",
+                                                   accept="de-DE,de;q=0.9")), "hi")
+
+    def test_language_follows_the_browser(self) -> None:
+        """Гость из Европы или Америки видит свой язык, а не русский."""
+        self.assertEqual(seo_pages.detect_lang(Req(accept="en-US,en;q=0.9")), "en")
+        self.assertEqual(seo_pages.detect_lang(Req(accept="de-DE,de;q=0.9,en-US;q=0.8")), "en")
+        self.assertEqual(seo_pages.detect_lang(Req(accept="zh-CN,zh;q=0.9")), "zh")
+        self.assertEqual(seo_pages.detect_lang(Req(accept="es-419,es;q=0.9")), "es")
+        self.assertEqual(seo_pages.detect_lang(Req(accept="hi-IN,hi;q=0.9")), "hi")
+        # русскоязычный браузер — русский, где бы гость ни был
+        self.assertEqual(seo_pages.detect_lang(Req(accept="ru-RU,ru;q=0.9",
+                                                   country="DE")), "ru")
+
+    def test_language_falls_back_to_the_country(self) -> None:
+        """Браузер молчит или просит язык, которого на сайте нет — решает страна."""
+        self.assertEqual(seo_pages.detect_lang(Req(country="US")), "en")
+        self.assertEqual(seo_pages.detect_lang(Req(country="DE")), "en")
+        self.assertEqual(seo_pages.detect_lang(Req(accept="de", country="DE")), "en")
+        self.assertEqual(seo_pages.detect_lang(Req(country="ES")), "es")
+        self.assertEqual(seo_pages.detect_lang(Req(country="MX")), "es")
+        self.assertEqual(seo_pages.detect_lang(Req(country="CN")), "zh")
+        self.assertEqual(seo_pages.detect_lang(Req(country="IN")), "hi")
+        self.assertEqual(seo_pages.detect_lang(Req(country="RU")), "ru")
+        self.assertEqual(seo_pages.detect_lang(Req(country="KZ")), "ru")
+        # страны нет вовсе — остаёмся на языке по умолчанию
+        self.assertEqual(seo_pages.detect_lang(Req(accept="de")), "ru")
+
+    def test_robots_get_the_default_language(self) -> None:
+        """Поисковик и превью ссылки видят страницу как есть: адрес один."""
+        bot = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
+        self.assertEqual(seo_pages.detect_lang(Req(accept="en-US,en;q=0.9", ua=bot)), "ru")
+        self.assertEqual(seo_pages.detect_lang(Req(country="US", ua=bot)), "ru")
+        self.assertEqual(seo_pages.detect_lang(
+            Req(country="US", ua="TelegramBot (like TwitterBot)")), "ru")
+        self.assertEqual(seo_pages.detect_lang(Req(country="US", ua="")), "ru")
+        # ... но явная ссылка с языком работает и для них
+        self.assertEqual(seo_pages.detect_lang(Req(query="en", ua=bot)), "en")
+
+    def test_auto_pick_is_marked_and_not_saved(self) -> None:
+        """Автоматический выбор — подсказка: cookie за гостя не пишем."""
+        lang, auto = seo_pages.lang_of(Req(accept="en-US,en;q=0.9"))
+        self.assertEqual((lang, auto), ("en", True))
+        lang, auto = seo_pages.lang_of(Req(query="en"))
+        self.assertEqual((lang, auto), ("en", False))
+        lang, auto = seo_pages.lang_of(Req(cookie="zh"))
+        self.assertEqual((lang, auto), ("zh", False))
+
+        auto_resp = seo_pages.render("landing.html", "en", "/", auto=True)
+        auto_html = auto_resp.body.decode("utf-8")
+        self.assertIn("window.LIQSCOPE_LANG_AUTO = 1", auto_html)
+        # за гостя не решаем: cookie выбора не ставим
+        self.assertNotIn("liqscope_lang", str(auto_resp.headers.get("set-cookie") or ""))
+        chosen_resp = seo_pages.render("landing.html", "en", "/")
+        chosen = chosen_resp.body.decode("utf-8")
+        self.assertNotIn("LIQSCOPE_LANG_AUTO", chosen)
+        self.assertIn("liqscope_lang=en", str(chosen_resp.headers.get("set-cookie") or ""))
+        # кэшам сказано, что язык зависит и от cookie, и от заголовка браузера
+        self.assertIn("Accept-Language", chosen_resp.headers.get("vary", ""))
+
+    def test_header_and_country_helpers(self) -> None:
+        self.assertEqual(seo_pages.lang_from_header("en-GB,en;q=0.9,de;q=0.5"), "en")
+        self.assertEqual(seo_pages.lang_from_header("de-DE,de;q=0.9"), "")
+        self.assertEqual(seo_pages.lang_from_header(""), "")
+        self.assertEqual(seo_pages.lang_from_header("es;q=0.2,ru;q=0.9"), "ru")
+        self.assertEqual(seo_pages.lang_from_header("zh-Hans-CN,zh;q=0.9"), "zh")
+        self.assertEqual(seo_pages.lang_from_header("klingon"), "")
+        self.assertEqual(seo_pages.lang_from_country("de"), "en")
+        self.assertEqual(seo_pages.lang_from_country("BR"), "en")
+        self.assertEqual(seo_pages.lang_from_country("ES"), "es")
+        self.assertEqual(seo_pages.lang_from_country(""), "")
 
     def test_pages_render_in_requested_language(self) -> None:
         pages = {
@@ -178,6 +257,7 @@ class SeoPagesTest(unittest.TestCase):
             "cabinet.html": ("seo.cabinet.title", "en"),
             "reset.html": ("seo.reset.title", "zh"),
             "admin.html": ("seo.admin.title", "hi"),
+            "hourly.html": ("seo.hourly.title", "es"),
         }
         dictionaries = {lang: load(lang) for lang in LANGS}
         for name, (key, lang) in pages.items():
@@ -202,6 +282,8 @@ class SeoPagesTest(unittest.TestCase):
             self.assertIn(f'hreflang="{seo_pages.HREFLANG[code]}"', sitemap)
         self.assertIn("x-default", sitemap)
         self.assertIn("https://liqscope.online/digest", sitemap)
+        # раздел «Сводки по часам» — тоже контент, который стоит индексировать
+        self.assertIn("https://liqscope.online/hourly", sitemap)
         # вход открыт для поиска: страница переведена и может отвечать на
         # запрос «LiqScope войти», а robots.txt её не закрывает
         self.assertIn("https://liqscope.online/login?lang=zh", sitemap)
@@ -270,6 +352,40 @@ class ApiRoutesTest(unittest.TestCase):
         self.assertIn("https://liqscope.online/?lang=en", en.text)
         self.assertEqual(en.headers.get("content-language"), "en")
         self.assertIn("ru", ru.headers.get("content-language", "ru"))
+
+    def test_visitor_language_on_the_live_routes(self) -> None:
+        """Гость из Европы или Америки получает английский — на всех страницах."""
+        # клиент один на весь класс и держит cookie прошлых тестов — начинаем с чистого
+        self.client.cookies.clear()
+        ua = {"user-agent": CHROME_UA}
+        en_headers = dict(ua, **{"accept-language": "en-US,en;q=0.9"})
+        for path in ("/", "/terminal", "/digest", "/hourly"):
+            with self.subTest(path=path):
+                r = self.client.get(path, headers=en_headers)
+                self.assertEqual(r.status_code, 200)
+                self.assertIn('<html lang="en"', r.text)
+                # язык подобран за гостя — cookie выбора не ставим
+                self.assertNotIn("liqscope_lang=", str(r.headers.get("set-cookie") or ""))
+        # русскоязычный браузер остаётся русским — и тоже без cookie выбора
+        r = self.client.get("/", headers=dict(ua, **{"accept-language": "ru-RU,ru;q=0.9"}))
+        self.assertIn('<html lang="ru"', r.text)
+        self.assertNotIn("liqscope_lang", str(r.headers.get("set-cookie") or ""))
+        # браузер молчит — решает страна
+        self.assertIn('<html lang="en"', self.client.get(
+            "/", headers=dict(ua, **{"cf-ipcountry": "US"})).text)
+        self.assertIn('<html lang="ru"', self.client.get(
+            "/", headers=dict(ua, **{"cf-ipcountry": "RU"})).text)
+        # поисковику — язык по умолчанию, в выдаче ничего не «прыгает»
+        bot = self.client.get("/", headers={
+            "user-agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+            "accept-language": "en-US,en;q=0.9",
+            "cf-ipcountry": "US",
+        })
+        self.assertIn('<html lang="ru"', bot.text)
+        self.assertNotIn("LIQSCOPE_LANG_AUTO", bot.text)   # робот — язык по умолчанию
+        # прошлый выбор гостя сильнее всего
+        self.assertIn('<html lang="es"', self.client.get(
+            "/", headers=dict(en_headers, cookie="liqscope_lang=es")).text)
 
 
 if __name__ == "__main__":

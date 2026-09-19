@@ -493,16 +493,19 @@ def register_account_routes(app) -> None:
 
     @router.get("/login")
     async def page_login(request: Request):
-        return seo_pages.render("login.html", seo_pages.detect_lang(request), "/login")
+        lang, auto = seo_pages.lang_of(request)
+        return seo_pages.render("login.html", lang, "/login", auto=auto)
 
     @router.get("/cabinet")
     async def page_cabinet(request: Request):
         # кабинет закрыт от индексации: внутренние данные пользователя
-        return seo_pages.render("cabinet.html", seo_pages.detect_lang(request), "/cabinet")
+        lang, auto = seo_pages.lang_of(request)
+        return seo_pages.render("cabinet.html", lang, "/cabinet", auto=auto)
 
     @router.get("/admin")
     async def page_admin(request: Request):
-        return seo_pages.render("admin.html", seo_pages.detect_lang(request), "/admin")
+        lang, auto = seo_pages.lang_of(request)
+        return seo_pages.render("admin.html", lang, "/admin", auto=auto)
 
     @router.get("/api/auth/me")
     async def api_me(request: Request):
@@ -775,7 +778,8 @@ def register_account_routes(app) -> None:
 
     @router.get("/reset")
     async def page_reset(request: Request, token: str = ""):
-        return seo_pages.render("reset.html", seo_pages.detect_lang(request), "/reset")
+        lang, auto = seo_pages.lang_of(request)
+        return seo_pages.render("reset.html", lang, "/reset", auto=auto)
 
     @router.get("/api/auth/email/token")
     async def api_email_token_info(request: Request, token: str = ""):

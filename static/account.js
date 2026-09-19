@@ -80,6 +80,7 @@
             soon: "скоро",
             digestOpen: "Открыть дайджест",
             digest: "Дайджест",
+            hourly: "Сводки по часам",
             waitlistOn: "В листе ожидания",
             waitlistOff: "В лист ожидания",
             subscribed: "Подключено",
@@ -179,6 +180,7 @@
             soon: "soon",
             digestOpen: "Open digest",
             digest: "Digest",
+            hourly: "Hourly summaries",
             waitlistOn: "On the waitlist",
             waitlistOff: "Join waitlist",
             subscribed: "On",
@@ -272,6 +274,12 @@
         if (path !== "/digest") {
             html += '<a class="btn btn-ghost btn-compact" href="/digest">📰 ' +
                 t("digest") + "</a>";
+        }
+        // Сводки по часам — посты канала на сайте: та же ссылка из любой
+        // страницы кабинета, админки и входа
+        if (path !== "/hourly") {
+            html += '<a class="btn btn-ghost btn-compact" href="/hourly">🕘 ' +
+                t("hourly") + "</a>";
         }
         if (path !== "/cabinet") {
             html += '<a class="btn btn-ghost btn-compact" href="/cabinet">' + t("cabinet") + "</a>";

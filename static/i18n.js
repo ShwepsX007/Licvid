@@ -284,6 +284,35 @@
         "land.nav.how": "Как работает",
 
         "land.nav.digest": "Дайджест",
+        "land.nav.hourly": "Сводки по часам",
+        "hour.title": "Сводки по часам",
+        "hour.meta": "LiqScope — сводки рынка крипто-фьючерсов каждые несколько часов: ликвидации окна, лидеры часов, оборот и открытый интерес. Те же посты, что вышли в канале, с фото.",
+        "hour.lead": "Бот публикует сводку рынка в свой канал несколько раз в сутки — здесь те же посты целиком: ликвидации окна, лидеры часов, оборот и открытый интерес, с тем же фото. Любой день открывается из календаря.",
+        "hour.fresh": "Свежие сводки",
+        "hour.pick": "Выбрать день",
+        "hour.total": "Сводок в архиве",
+        "hour.days": "Дней в архиве",
+        "hour.channel": "Канал в Telegram",
+        "hour.every": "каждые {h} ч",
+        "hour.window": "за {h} ч",
+        "hour.events": "{n} событий",
+        "hour.n_posts": "сводок: {n}",
+        "hour.has": "есть сводки",
+        "hour.in_archive": "в архиве {n}",
+        "hour.more": "В архиве {n} сводок: выше свежие, остальные открываются по дню.",
+        "hour.tz": "дни по {tz}",
+        "hour.prev": "Предыдущий месяц",
+        "hour.next": "Следующий месяц",
+        "hour.loading": "Загружаю…",
+        "hour.empty": "Сводок пока нет — первая появится после поста в канал.",
+        "hour.empty_day": "За этот день сводок нет.",
+        "hour.photo_alt": "Фото сводки",
+        "hour.link": "Ссылка на сводку",
+        "hour.digest": "Дайджест",
+        "hour.to_terminal": "К терминалу",
+        "hour.cabinet": "Кабинет",
+        "hour.admin": "Админка",
+        "hour.login": "Войти",
         "dig.title": "Дневной дайджест рынка",
         "dig.meta": "LiqScope — дневной дайджест рынка: ликвидации, биржи, открытый интерес, цены и настроение за сутки.",
         "dig.lead": "Каждый вечер около 22:00 МСК — итоги дня: крупнейшая ликвидация, биржи, монеты с самым тяжёлым открытым интересом относительно оборота, цены топ-5 и настроение рынка. Все выпуски хранятся здесь.",
@@ -621,6 +650,35 @@
         "land.nav.how": "How it works",
 
         "land.nav.digest": "Digest",
+        "land.nav.hourly": "Hourly summaries",
+        "hour.title": "Hourly market summaries",
+        "hour.meta": "LiqScope hourly market summaries: liquidations of the window, hour leaders, turnover and open interest. The very posts published in our channel, with photos.",
+        "hour.lead": "The bot posts a market summary to its channel several times a day — here are the same posts in full: liquidations of the window, hour leaders, turnover and open interest, with the same photo. Any day opens from the calendar.",
+        "hour.fresh": "Latest summaries",
+        "hour.pick": "Pick a day",
+        "hour.total": "Summaries in the archive",
+        "hour.days": "Days in the archive",
+        "hour.channel": "Telegram channel",
+        "hour.every": "every {h} h",
+        "hour.window": "{h} h window",
+        "hour.events": "{n} events",
+        "hour.n_posts": "{n} posts",
+        "hour.has": "summaries available",
+        "hour.in_archive": "{n} in the archive",
+        "hour.more": "{n} summaries in the archive: the latest are above, the rest open by day.",
+        "hour.tz": "days in {tz}",
+        "hour.prev": "Previous month",
+        "hour.next": "Next month",
+        "hour.loading": "Loading…",
+        "hour.empty": "No summaries yet — the first one arrives after the channel post.",
+        "hour.empty_day": "No summaries for this day.",
+        "hour.photo_alt": "Summary photo",
+        "hour.link": "Link to the summary",
+        "hour.digest": "Digest",
+        "hour.to_terminal": "To the terminal",
+        "hour.cabinet": "Account",
+        "hour.admin": "Admin",
+        "hour.login": "Sign in",
         "dig.title": "Daily market digest",
         "dig.meta": "LiqScope daily digest: liquidations, exchanges, open interest, prices and market mood for the last 24 hours.",
         "dig.lead": "Every evening around 22:00 MSK — the day in review: the biggest liquidation, exchanges, coins with the heaviest open interest against turnover, top-5 prices and the overall market mood. Every issue is kept here.",
@@ -958,6 +1016,35 @@
         "land.nav.how": "工作原理",
 
         "land.nav.digest": "日报",
+        "land.nav.hourly": "小时简报",
+        "hour.title": "小时市场简报",
+        "hour.meta": "LiqScope 小时简报：区间清算、小时冠军、成交额与未平仓合约。与频道发布的帖子相同，含图片。",
+        "hour.lead": "机器人每天多次把市场简报发到频道——这里保留同样的内容：区间清算、小时冠军、成交额与未平仓合约，照片也一样。任何一天都可以从日历打开。",
+        "hour.fresh": "最新简报",
+        "hour.pick": "选择日期",
+        "hour.total": "归档简报",
+        "hour.days": "归档天数",
+        "hour.channel": "Telegram 频道",
+        "hour.every": "每 {h} 小时",
+        "hour.window": "{h} 小时窗口",
+        "hour.events": "{n} 个事件",
+        "hour.n_posts": "{n} 条",
+        "hour.has": "有简报",
+        "hour.in_archive": "归档 {n}",
+        "hour.more": "归档共 {n} 条：上方为最新，其余按日期打开。",
+        "hour.tz": "日期按 {tz}",
+        "hour.prev": "上个月",
+        "hour.next": "下个月",
+        "hour.loading": "加载中…",
+        "hour.empty": "暂无简报——频道发布后就会出现第一条。",
+        "hour.empty_day": "这一天没有简报。",
+        "hour.photo_alt": "简报图片",
+        "hour.link": "简报链接",
+        "hour.digest": "日报",
+        "hour.to_terminal": "返回终端",
+        "hour.cabinet": "账户",
+        "hour.admin": "管理",
+        "hour.login": "登录",
         "dig.title": "每日市场日报",
         "dig.meta": "LiqScope 每日摘要：24 小时清算、交易所、未平仓合约、价格与市场情绪。",
         "dig.lead": "每晚约 22:00（莫斯科时间）发布当日总结：最大清算、交易所、未平仓合约相对成交额最重的币种、前五大币价与市场情绪。所有期号都保存在这里。",
@@ -1295,6 +1382,35 @@
         "land.nav.how": "कैसे काम करता है",
 
         "land.nav.digest": "डाइजेस्ट",
+        "land.nav.hourly": "हर घंटे की सारांश",
+        "hour.title": "हर घंटे की बाज़ार सारांश",
+        "hour.meta": "LiqScope हर घंटे की सारांश: विंडो के लिक्विडेशन, घंटे के लीडर, टर्नओवर और ओपन इंटरेस्ट। वही पोस्ट जो चैनल में आते हैं, फ़ोटो के साथ।",
+        "hour.lead": "बॉट दिन में कई बार बाज़ार की सारांश अपने चैनल में भेजता है — यहाँ वही पोस्ट पूरी हैं: विंडो के लिक्विडेशन, घंटे के लीडर, टर्नओवर और ओपन इंटरेस्ट, उसी फ़ोटो के साथ। कोई भी दिन कैलेंडर से खुलता है।",
+        "hour.fresh": "नई सारांश",
+        "hour.pick": "दिन चुनें",
+        "hour.total": "संग्रह में सारांश",
+        "hour.days": "संग्रह में दिन",
+        "hour.channel": "Telegram चैनल",
+        "hour.every": "हर {h} घंटे",
+        "hour.window": "{h} घंटे की विंडो",
+        "hour.events": "{n} इवेंट",
+        "hour.n_posts": "{n} पोस्ट",
+        "hour.has": "सारांश उपलब्ध",
+        "hour.in_archive": "संग्रह में {n}",
+        "hour.more": "संग्रह में {n} सारांश: ऊपर नई, बाकी दिन से खुलती हैं।",
+        "hour.tz": "दिन {tz} में",
+        "hour.prev": "पिछला महीना",
+        "hour.next": "अगला महीना",
+        "hour.loading": "लोड हो रहा है…",
+        "hour.empty": "अभी कोई सारांश नहीं — चैनल में पोस्ट के बाद पहली आएगी।",
+        "hour.empty_day": "इस दिन कोई सारांश नहीं।",
+        "hour.photo_alt": "सारांश की फ़ोटो",
+        "hour.link": "सारांश का लिंक",
+        "hour.digest": "डाइजेस्ट",
+        "hour.to_terminal": "टर्मिनल पर",
+        "hour.cabinet": "खाता",
+        "hour.admin": "एडमिन",
+        "hour.login": "साइन इन",
         "dig.title": "रोज़ का बाज़ार डाइजेस्ट",
         "dig.meta": "LiqScope रोज़ का डाइजेस्ट: 24 घंटे के लिक्विडेशन, एक्सचेंज, ओपन इंटरेस्ट, कीमतें और बाज़ार का मूड।",
         "dig.lead": "हर शाम लगभग 22:00 MSK — दिन का सार: सबसे बड़ा लिक्विडेशन, एक्सचेंज, टर्नओवर के मुकाबले सबसे भारी ओपन इंटरेस्ट वाले सिक्के, टॉप-5 कीमतें और बाज़ार का मूड। सभी अंक यहाँ सुरक्षित रहते हैं।",
@@ -1632,6 +1748,35 @@
         "land.nav.how": "Cómo funciona",
 
         "land.nav.digest": "Resumen",
+        "land.nav.hourly": "Resúmenes por horas",
+        "hour.title": "Resúmenes del mercado por horas",
+        "hour.meta": "Resúmenes de LiqScope: liquidaciones de la ventana, líderes de la hora, volumen e interés abierto. Las mismas publicaciones del canal, con foto.",
+        "hour.lead": "El bot publica un resumen del mercado en su canal varias veces al día — aquí están las mismas publicaciones completas: liquidaciones de la ventana, líderes de la hora, volumen e interés abierto, con la misma foto. Cualquier día se abre desde el calendario.",
+        "hour.fresh": "Resúmenes recientes",
+        "hour.pick": "Elegir día",
+        "hour.total": "Resúmenes en el archivo",
+        "hour.days": "Días en el archivo",
+        "hour.channel": "Canal de Telegram",
+        "hour.every": "cada {h} h",
+        "hour.window": "ventana de {h} h",
+        "hour.events": "{n} eventos",
+        "hour.n_posts": "{n} publicaciones",
+        "hour.has": "hay resúmenes",
+        "hour.in_archive": "{n} en el archivo",
+        "hour.more": "{n} resúmenes en el archivo: arriba los recientes, el resto se abren por día.",
+        "hour.tz": "días en {tz}",
+        "hour.prev": "Mes anterior",
+        "hour.next": "Mes siguiente",
+        "hour.loading": "Cargando…",
+        "hour.empty": "Todavía no hay resúmenes — el primero llega tras la publicación en el canal.",
+        "hour.empty_day": "No hay resúmenes para este día.",
+        "hour.photo_alt": "Foto del resumen",
+        "hour.link": "Enlace al resumen",
+        "hour.digest": "Resumen",
+        "hour.to_terminal": "Al terminal",
+        "hour.cabinet": "Cuenta",
+        "hour.admin": "Admin",
+        "hour.login": "Entrar",
         "dig.title": "Resumen diario del mercado",
         "dig.meta": "Resumen diario de LiqScope: liquidaciones de 24 h, exchanges, interés abierto, precios y el ánimo del mercado.",
         "dig.lead": "Cada tarde alrededor de las 22:00 MSK — el día en resumen: la mayor liquidación, los exchanges, las monedas con más interés abierto frente al volumen, los precios del top 5 y el ánimo general del mercado. Todas las ediciones se guardan aquí.",
@@ -1761,24 +1906,27 @@
      * Ядро
      * ===================================================================== */
     function detect() {
-        // 1) выбор, который сделал сервер: ?lang=en, cookie или Accept-Language.
-        //    Он же попал в разметку (data-lang), поэтому страница уже
-        //    отрисована на этом языке — спорить с ней не нужно.
+        // 0) сервер пометил, что язык подобран за гостя (браузер или страна):
+        //    тогда его выбор — подсказка, а не приказ, и шаги ниже решают сами
+        var auto = false;
+        try { auto = !!global.LIQSCOPE_LANG_AUTO; } catch (e) { /* ignore */ }
+        var fromServer = "";
         try {
-            var fromServer = String(global.LIQSCOPE_LANG || "").toLowerCase();
-            if (fromServer && MESSAGES[fromServer]) return fromServer;
+            fromServer = String(global.LIQSCOPE_LANG || "").toLowerCase();
         } catch (e) { /* ignore */ }
-        // 2) явный выбор в ссылке: /?lang=zh — так языки индексируются
+        // 1) явный выбор в ссылке: /?lang=zh — так языки индексируются
         try {
             var m = /[?&]lang=([a-zA-Z-]+)/.exec(String((global.location && global.location.search) || ""));
             var q = m ? m[1].toLowerCase().split("-")[0] : "";
             if (q && MESSAGES[q]) return q;
         } catch (e) { /* ignore */ }
-        // 3) прошлый выбор посетителя
+        // 2) прошлый выбор посетителя
         try {
             var saved = localStorage.getItem(STORE_KEY);
             if (saved && MESSAGES[saved]) return saved;
         } catch (e) { /* ignore */ }
+        // 3) выбор сервера по cookie или по ?lang= — он и решает
+        if (fromServer && MESSAGES[fromServer] && !auto) return fromServer;
         // 4) язык браузера: и региональные варианты (zh-CN, zh-TW, es-419…)
         var nav = String((typeof navigator !== "undefined" && navigator.language) || "").toLowerCase();
         var all = String((typeof navigator !== "undefined" && navigator.languages
@@ -1792,6 +1940,8 @@
         if (pick) return pick;
         var base0 = nav.split("-")[0];
         if (MESSAGES[base0]) return base0;
+        // 5) язык, подобранный сервером по стране, иначе русский
+        if (fromServer && MESSAGES[fromServer]) return fromServer;
         return "ru";
     }
 

@@ -14,6 +14,7 @@
  *     node tests/layers_gate.js [http://127.0.0.1:8000]
  */
 const { JSDOM, VirtualConsole } = require("jsdom");
+const { ru } = require("./_ru");
 
 const URL_BASE = process.argv[2] || "http://127.0.0.1:8000";
 const errors = [];
@@ -52,7 +53,7 @@ async function openTerminal(trial, { search = "", seed } = {}) {
     errors.push("jsdomError: " + msg.slice(0, 200));
   });
   vc.on("console", () => {});
-  const dom = await JSDOM.fromURL(URL_BASE + "/terminal" + search, {
+  const dom = await JSDOM.fromURL(ru(URL_BASE + "/terminal" + search), {
     runScripts: "dangerously",
     resources: "usable",
     pretendToBeVisual: true,

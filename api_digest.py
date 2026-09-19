@@ -671,7 +671,7 @@ def register_digest_routes(app) -> None:
         а не общий логотип."""
         if not ctx.page_ok:
             return JSONResponse({"ok": False, "error": "off"}, status_code=404)
-        lang = seo_pages.detect_lang(request)
+        lang, auto = seo_pages.lang_of(request)
         items = ctx.store.list()
         rec = ctx.store.get(day) if day else (items[0] if items else None)
         photo = public_photo(rec) if rec else None
@@ -681,7 +681,7 @@ def register_digest_routes(app) -> None:
         return seo_pages.render(
             "digest.html", lang, "/digest",
             extra_head=seo_pages.jsonld("digest", lang, image=og_image),
-            og_image=og_image,
+            og_image=og_image, auto=auto,
         )
 
     @router.get("/api/digest")

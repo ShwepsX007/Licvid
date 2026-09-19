@@ -81,13 +81,97 @@ def _catalogue(lang: str) -> dict:
     return keys
 
 
-def detect_lang(request: Request) -> str:
-    """Язык страницы: ?lang= → cookie → русский.
+#: Кто на каком языке говорит: страна (по заголовку CDN) → язык сайта. Нужно
+#: только тем, кто ещё не выбрал язык сам и чей браузер молчит.
+LANG_COUNTRIES = {
+    "ru": ("RU", "BY", "KZ", "KG", "UZ", "TJ", "TM", "AM", "AZ", "MD"),
+    "zh": ("CN", "TW", "HK", "MO"),
+    "hi": ("IN",),
+    "es": ("ES", "MX", "AR", "CO", "CL", "PE", "VE", "UY", "PY", "BO", "EC",
+           "GT", "CR", "PA", "DO", "CU", "HN", "NI", "SV", "PR"),
+}
+#: Всем остальным (Европа, США, Азия…) показываем английский: это общий язык
+#: интернета, и человеку он полезнее русского, которого он, скорее всего, не знает.
+LANG_ABROAD = "en"
 
-    Заголовок Accept-Language намеренно не учитываем: адрес у страницы один,
-    и робот, и человек без явного выбора получают её на языке по умолчанию
-    (так же, как отдают заголовок `x-default`). Язык выбирается кнопкой и
-    запоминается в cookie.
+#: Роботов по языку браузера не подстраиваем: у страницы один адрес и один
+#: заголовок x-default — в выдаче она должна остаться той же, что и была.
+_BOT_MARKS = ("bot", "crawler", "spider", "slurp", "bingpreview", "yandex",
+              "baidu", "duckduck", "applebot", "python-requests", "curl/",
+              "wget", "httpclient", "facebookexternalhit", "whatsapp",
+              "telegrambot", "slackbot", "twitterbot", "discordbot",
+              "googlebot", "semrush", "ahrefs", "mj12", "petal", "gptbot",
+              "ccbot", "claudebot", "perplexity")
+
+
+def is_bot(request: Request) -> bool:
+    """Робот ли это (поисковик, превью ссылки, скрипт) — по User-Agent."""
+    try:
+        ua = str(request.headers.get("user-agent") or "").lower()
+    except Exception:                                     # noqa: BLE001
+        return False
+    if not ua:
+        return True                                       # пустой UA — не человек
+    return any(mark in ua for mark in _BOT_MARKS)
+
+
+def lang_from_header(value: str) -> str:
+    """Язык браузера из Accept-Language: первый поддерживаемый по весам.
+
+    ``de-DE,de;q=0.9,en-US;q=0.8`` → ``en``. Региональные варианты сводим к
+    базовому языку (zh-CN → zh, es-419 → es) — так же, как это делает клиент.
+    """
+    raw = str(value or "")
+    if not raw:
+        return ""
+    items = []
+    for order, part in enumerate(raw.split(",")):
+        piece = part.strip()
+        if not piece:
+            continue
+        tag, _, q = piece.partition(";")
+        base = tag.strip().lower().split("-")[0]
+        if base not in LANGS:
+            continue
+        try:
+            weight = float(q.split("=")[1]) if "=" in q else 1.0
+        except (TypeError, ValueError):
+            weight = 1.0
+        if weight <= 0:
+            continue
+        items.append((-weight, order, base))
+    if not items:
+        return ""
+    return sorted(items)[0][2]
+
+
+def lang_from_country(code: str) -> str:
+    """Язык сайта по стране гостя: своя страна — свой язык, чужая — английский."""
+    cc = str(code or "").strip().upper()
+    if not cc:
+        return ""
+    for lang, countries in LANG_COUNTRIES.items():
+        if cc in countries:
+            return lang
+    return LANG_ABROAD
+
+
+def country_of(request: Request) -> str:
+    """Страна гостя из заголовков CDN (Cloudflare и подобные) — без сети."""
+    try:
+        from geoip import header_country
+        return header_country(getattr(request, "headers", {}) or {})
+    except Exception:                                     # noqa: BLE001
+        return ""
+
+
+def lang_of(request: Request):
+    """Язык страницы и признак «выбран автоматически».
+
+    Порядок: ``?lang=`` → cookie выбора → язык браузера → страна → русский.
+    Явный выбор (?lang=, cookie) сильнее всего; браузер сильнее страны
+    (русскоязычный в Германии должен видеть русский); роботам страницу
+    отдаём как есть — на языке по умолчанию, чтобы выдача не «прыгала».
     """
     try:
         query = str(request.query_params.get("lang") or "").strip().lower()
@@ -96,7 +180,7 @@ def detect_lang(request: Request) -> str:
     if query:
         base = query.split("-")[0]
         if base in LANGS:
-            return base
+            return base, False
     try:
         cookie = str(request.cookies.get(COOKIE) or "").strip().lower()
     except Exception:  # noqa: BLE001
@@ -104,8 +188,25 @@ def detect_lang(request: Request) -> str:
     if cookie:
         base = cookie.split("-")[0]
         if base in LANGS:
-            return base
-    return DEFAULT_LANG
+            return base, False
+    if is_bot(request):
+        return DEFAULT_LANG, False
+    try:
+        header = str(request.headers.get("accept-language") or "")
+    except Exception:  # noqa: BLE001
+        header = ""
+    picked = lang_from_header(header)
+    if picked:
+        return picked, True
+    by_country = lang_from_country(country_of(request))
+    if by_country:
+        return by_country, True
+    return DEFAULT_LANG, True
+
+
+def detect_lang(request: Request) -> str:
+    """Язык страницы (без признака выбора) — для тех, кому нужен только язык."""
+    return lang_of(request)[0]
 
 
 def _text(lang: str, key: str, fallback: str = "") -> str:
@@ -167,11 +268,17 @@ def render(
     indexable: bool = True,
     extra_head: str = "",
     og_image: str = "",
+    auto: bool = False,
 ) -> Response:
     """Отдаёт страницу с уже подставленным языком в head.
 
     ``path`` — путь без языка (``/``, ``/digest``, ``/cabinet``…). Он нужен для
     canonical и hreflang: у каждой языковой версии свой адрес.
+
+    ``auto`` — язык подобран автоматически (браузер или страна). В этом случае
+    клиенту отдаём подсказку, что язык можно подобрать заново по браузеру, а в
+    cookie выбор не пишем: гость ещё ничего не выбирал, и запоминать за него
+    нечего.
     """
     lang = lang if lang in LANGS else DEFAULT_LANG
     page = os.path.join(STATIC_DIR, filename)
@@ -224,7 +331,11 @@ def render(
 
     # hreflang и подсказка о языке — в конец <head>
     block = _language_block(path)
-    block += f'\n<script>window.LIQSCOPE_LANG = "{lang}";</script>' 
+    block += f'\n<script>window.LIQSCOPE_LANG = "{lang}";</script>'
+    if auto:
+        # Язык подобран за гостя (браузер или страна): клиент может уточнить его
+        # сам — например, когда браузер прислал язык, которого на сайте нет
+        block += '\n<script>window.LIQSCOPE_LANG_AUTO = 1;</script>' 
     if extra_head:
         block += "\n" + extra_head
     # вставляем в самый конец <head>: язык успевает выставиться к моменту
@@ -232,10 +343,11 @@ def render(
     html = html.replace("</head>", block + "\n</head>", 1)
 
     resp = Response(content=html, media_type="text/html; charset=utf-8")
-    resp.headers["Vary"] = "Cookie"
+    # язык зависит и от cookie, и от Accept-Language — говорим об этом кэшам
+    resp.headers["Vary"] = "Cookie, Accept-Language"
     resp.headers["Cache-Control"] = "no-cache"
     resp.headers["Content-Language"] = HREFLANG[lang]
-    if lang != DEFAULT_LANG:
+    if lang != DEFAULT_LANG and not auto:
         resp.set_cookie(
             COOKIE, lang, max_age=31536000, samesite="lax", path="/"
         )
@@ -305,6 +417,7 @@ FEATURES = {
 #: Что кладём в sitemap: адрес и как часто меняется.
 _PAGES = (
     ("/", "hourly", "1.0"),
+    ("/hourly", "hourly", "0.9"),
     ("/digest", "daily", "0.9"),
     ("/terminal", "hourly", "0.8"),
     # страница входа открыта и переведена — по ней ищут «LiqScope войти»
@@ -313,7 +426,7 @@ _PAGES = (
 
 
 def sitemap_xml() -> Response:
-    """sitemap.xml: лендинг, дайджест, терминал и вход — на всех языках."""
+    """sitemap.xml: лендинг, сводки по часам, дайджест, терминал и вход — на всех языках."""
     last = time.strftime("%Y-%m-%d", time.gmtime())
     parts = [
         '<?xml version="1.0" encoding="UTF-8"?>',
@@ -401,6 +514,18 @@ def jsonld(kind: str = "landing", lang: str = DEFAULT_LANG,
                 "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"},
                 "featureList": FEATURES.get(lang, FEATURES[DEFAULT_LANG]),
             },
+        ]
+    elif kind == "hourly":
+        data = [
+            {
+                "@type": "CollectionPage",
+                **common,
+                "url": f"{SITE_URL}/hourly",
+                "inLanguage": list(HREFLANG.values()),
+                "description": _text(lang, "seo.hourly.desc"),
+                "isPartOf": {"@type": "Blog", "name": "LiqScope",
+                             "url": f"{SITE_URL}/hourly"},
+            }
         ]
     elif kind == "digest":
         data = [

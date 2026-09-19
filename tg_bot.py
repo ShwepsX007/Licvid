@@ -1498,6 +1498,13 @@ class TelegramBot:
         top = "" if post_has_hours(caption) else render_top7(snap.get("board"))
         top_en = ("" if post_has_hours(caption_en)
                   else render_top7(snap.get("board"), "en"))
+        # Цифры окна: вместе с подписью и фото их складывает архив раздела
+        # «Сводки по часам» — на сайте видно то же, что ушло в канал
+        meta = {"window_h": hours,
+                "total_usd": snap.get("total_usd"),
+                "liq_count": snap.get("count"),
+                "longs_usd": snap.get("longs_usd"),
+                "shorts_usd": snap.get("shorts_usd")}
         posts = [
             {"lang": "ru", "cid": cid, "caption": caption, "top": top},
         ]
@@ -1508,8 +1515,8 @@ class TelegramBot:
         else:
             log.info("английский канал не привязан — пост только по-русски")
         if self._review_on():
-            return await self._send_draft(posts, img, n, ai_note)
-        return await self._publish_digest(posts, img, n)
+            return await self._send_draft(posts, img, n, ai_note, meta=meta)
+        return await self._publish_digest(posts, img, n, meta=meta)
 
     async def _publish_one(self, cid, caption: str, img, top: str = "",
                            lang: str = "ru", images: Optional[List[str]] = None,
@@ -1571,10 +1578,11 @@ class TelegramBot:
             return [x for x in img if x]
         return [img] if img else []
 
-    async def _publish_digest(self, posts, img, n: int) -> bool:
+    async def _publish_digest(self, posts, img, n: int, meta=None) -> bool:
         """Отправка готового поста в каналы (русский и английский)."""
         delivered = 0
         images = self._photo_list(img)
+        sent_langs: List[str] = []
         for post in posts or []:
             cid = post.get("cid")
             if not cid:
@@ -1585,7 +1593,13 @@ class TelegramBot:
                                        post.get("lang") or "ru",
                                        images=images):
                 delivered += 1
+                sent_langs.append("en" if str(post.get("lang") or "").startswith("en")
+                                  else "ru")
         if delivered:
+            # Тот же пост — в архив сайта: раздел «Сводки по часам» показывает
+            # подпись и фото ровно такими, какими они ушли в канал
+            self._archive_posts(posts, sent_langs, images[0] if images else "", n,
+                                meta=meta)
             self._digest_routes = self.channel_route_text()
             self.store.set_setting("channel_digest_n", str(n + 1))
             self.store.set_setting("channel_digest_ts", str(int(time.time())))
@@ -1601,7 +1615,56 @@ class TelegramBot:
                      "(и «Прикрепление файлов», если шлём картинку).")
         return self._digest_fail(err + extra)
 
-    async def _send_draft(self, posts, img, n: int, note: str) -> bool:
+    def _archive_posts(self, posts, langs, img, n: int, meta=None) -> None:
+        """Положить опубликованный пост в архив сайта («Сводки по часам»).
+
+        В архив идут только те языки, которые реально ушли в канал: если
+        английский канал не привязан, поста в нём и не было. Ошибка архива
+        публикацию не ломает — пост уже в канале, а сайт просто не пополнится.
+        """
+        store = getattr(self, "hourly_store", None)
+        if store is None:
+            return
+        langs = [x for x in (langs or []) if x]
+        if not langs:
+            return
+        meta = dict(meta or {})
+        try:
+            from channel_digest import cover_info
+            from hourly_posts import post_id
+            now = time.time()
+            texts: Dict[str, str] = {}
+            for post in posts or []:
+                lang = "en" if str(post.get("lang") or "").startswith("en") else "ru"
+                if lang not in langs or texts.get(lang):
+                    continue
+                cap = str(post.get("caption") or "").strip()
+                if cap:
+                    texts[lang] = cap
+            if not texts:
+                return
+            rec: Dict[str, Any] = {
+                "id": post_id(now),
+                "ts": now,
+                "window_h": meta.get("window_h"),
+                "interval_h": meta.get("window_h"),
+                "total_usd": meta.get("total_usd"),
+                "liq_count": meta.get("liq_count"),
+                "longs_usd": meta.get("longs_usd"),
+                "shorts_usd": meta.get("shorts_usd"),
+                "texts": texts,
+                "sent": {x: True for x in texts},
+                "n": int(n or 0),
+            }
+            if img and os.path.isfile(str(img)):
+                rec["photo"] = cover_info(str(img), self.store)
+            store.add(rec)
+            log.info("сводка n=%s добавлена в архив сайта: %s (%s)",
+                     n, rec["id"], ", ".join(sorted(texts)))
+        except Exception as e:                      # noqa: BLE001
+            log.warning("сводки по часам: пост не попал в архив: %s", e)
+
+    async def _send_draft(self, posts, img, n: int, note: str, meta=None) -> bool:
         """Контроль публикации: показываем пост админу, в канал не отправляем."""
         admin = 0
         try:
@@ -1614,6 +1677,7 @@ class TelegramBot:
                 "Контроль публикации включён, но у бота нет админа с Telegram. "
                 "Выключите контроль в «Шаблоны канала» или привяжите Telegram админу")
         self._draft = {"posts": posts, "img": img, "n": int(n), "note": note,
+                       "meta": dict(meta or {}),
                        "images": list(img) if isinstance(img, (list, tuple)) else [img]}
         kb = {"inline_keyboard": [[
             {"text": "✅ Опубликовать", "callback_data": "d:pub"},
@@ -1666,7 +1730,8 @@ class TelegramBot:
                                             "caption": d.get("caption") or "",
                                             "top": d.get("top") or ""}]
                 ok = await self._publish_digest(posts, d.get("images") or d.get("img"),
-                                                int(d.get("n") or 0))
+                                                int(d.get("n") or 0),
+                                                meta=d.get("meta"))
             self._draft = None
             await self.reply(chat_id, self._digest_result_text(ok), self._admin_kb(),
                              message_id=message_id)

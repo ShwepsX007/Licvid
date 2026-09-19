@@ -70,6 +70,8 @@ import ai_text
 from ai_text import build_ai, prompt_setting
 import api_digest
 from api_digest import DigestScheduler, ctx as digest_ctx, register_digest_routes
+from api_hourly import ctx as hourly_ctx, register_hourly_routes
+from hourly_posts import PostStore as HourlyStore, post_id as hourly_id
 from daily_digest import DigestStore
 from tg_bot import TelegramBot, normalize_public_url
 from web_account import ctx as account_ctx, register_account_routes
@@ -154,6 +156,16 @@ DIGEST_FILE = os.getenv("LIQSCOPE_DIGEST_FILE",
                         os.path.join(HERE, "data", "digests.json")).strip()
 if DIGEST_FILE.lower() in ("0", "none", "off", "false"):
     DIGEST_FILE = ""
+# Сводки по часам — раздел сайта: архив постов канала (то же, что ушло в
+# Telegram, плюс фото). LIQSCOPE_HOURLY_FILE="" — не хранить (раздел пустой).
+HOURLY_FILE = os.getenv("LIQSCOPE_HOURLY_FILE",
+                        os.path.join(HERE, "data", "channel_posts.json")).strip()
+if HOURLY_FILE.lower() in ("0", "none", "off", "false"):
+    HOURLY_FILE = ""
+try:
+    HOURLY_KEEP = max(50, int(os.getenv("LIQSCOPE_HOURLY_KEEP", "1200") or 1200))
+except ValueError:
+    HOURLY_KEEP = 1200
 DIGEST_HOUR = int(os.getenv("LIQSCOPE_DIGEST_HOUR", "22") or 22)
 DIGEST_MINUTE = int(os.getenv("LIQSCOPE_DIGEST_MIN", "0") or 0)
 DIGEST_JITTER_MIN = int(os.getenv("LIQSCOPE_DIGEST_JITTER_MIN", "10") or 10)
@@ -2392,6 +2404,69 @@ register_digest_routes(app)
 # Кнопка «🗞 Дайджест за сутки» в админке бота собирает выпуск прямо сейчас
 tg_bot.daily_run_fn = api_digest.publish_digest
 
+# Сводки по часам: посты канала живут ещё и на сайте. Архив наполняет бот
+# (каждая удачная публикация), а эта функция собирает сводку прямо сейчас —
+# её зовёт админская кнопка, чтобы раздел можно было наполнить не дожидаясь
+# поста в канал.
+async def collect_hourly_post() -> dict:
+    """Собрать сводку (RU и EN) и положить её в архив раздела «Сводки по часам»."""
+    from channel_digest import active_headlines, cover_info, pick_active_image, render_post
+    snap = await build_channel_digest()
+    if not isinstance(snap, dict) or not snap:
+        return {}
+    try:
+        n = int(account_store.get_setting("channel_digest_n") or 0)
+    except (TypeError, ValueError):
+        n = 0
+    try:
+        hours = int(snap.get("window_h") or POST_INTERVAL_H)
+    except (TypeError, ValueError):
+        hours = POST_INTERVAL_H
+    texts: Dict[str, str] = {}
+    for lang in ("ru", "en"):
+        head = ""
+        try:
+            head, _note = await tg_bot._ai_headline(snap, variant=n, lang=lang)
+        except Exception as e:                        # noqa: BLE001
+            log.debug("сводки по часам: ИИ-шапка (%s) не ответила: %s", lang, e)
+        texts[lang] = render_post(
+            snap, n,
+            headlines=active_headlines(account_store, hours, lang=lang),
+            head_override=head or None,
+            site_url=PUBLIC_URL,
+            bot_url=tg_bot.bot_url(),
+            lang=lang,
+        )
+    img = pick_active_image(account_store, "post", variant=n)
+    now = time.time()
+    rec = {
+        "id": hourly_id(now),
+        "ts": now,
+        "window_h": hours,
+        "interval_h": POST_INTERVAL_H,
+        "total_usd": snap.get("total_usd"),
+        "liq_count": snap.get("count"),
+        "longs_usd": snap.get("longs_usd"),
+        "shorts_usd": snap.get("shorts_usd"),
+        "texts": {k: v for k, v in texts.items() if v},
+        "sent": {},
+        "n": n,
+        "manual": True,
+    }
+    if img and os.path.isfile(img):
+        rec["photo"] = cover_info(img, account_store)
+    return hourly_ctx.store.add(rec)
+
+
+hourly_ctx.store = HourlyStore(HOURLY_FILE, keep=HOURLY_KEEP)
+hourly_ctx.collect_fn = collect_hourly_post
+hourly_ctx.public_url = PUBLIC_URL
+# Посты раздела выходят в английском канале — на странице ссылка на него
+hourly_ctx.channel_url_fn = tg_bot.channel_url_en
+register_hourly_routes(app)
+# Бот складывает в этот же архив каждый пост, который реально ушёл в канал
+tg_bot.hourly_store = hourly_ctx.store
+
 # Админка бота на сайте: каналы, публикация постов, контроль, здоровье бирж
 web_bot_admin.ctx.bot = tg_bot
 web_bot_admin.ctx.store = account_store
@@ -2941,18 +3016,20 @@ async def root(request: Request):
     видеть язык в ``<html lang>``, заголовке и описании, а не только после
     выполнения скриптов.
     """
-    lang = seo_pages.detect_lang(request)
+    lang, auto = seo_pages.lang_of(request)
     return seo_pages.render(
-        "landing.html", lang, "/", extra_head=seo_pages.jsonld("landing", lang)
+        "landing.html", lang, "/", extra_head=seo_pages.jsonld("landing", lang),
+        auto=auto,
     )
 
 
 @app.get("/terminal")
 async def terminal(request: Request):
     """Сам терминал (страница приложения)."""
-    lang = seo_pages.detect_lang(request)
+    lang, auto = seo_pages.lang_of(request)
     return seo_pages.render(
-        "index.html", lang, "/terminal", extra_head=seo_pages.jsonld("terminal", lang)
+        "index.html", lang, "/terminal", extra_head=seo_pages.jsonld("terminal", lang),
+        auto=auto,
     )
 
 

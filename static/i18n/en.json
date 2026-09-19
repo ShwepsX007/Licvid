@@ -151,7 +151,9 @@
     "geo.map_hint": "Drag the map and zoom with the wheel",
     "dig.cover_alt": "Cover of the issue",
     "adm.trial_line": "Layer trial ({min} min): {n} guests, {stuck} have already seen the sign-up offer",
-    "adm.trial_none": "Layer trial ({min} min): no guests yet"
+    "adm.trial_none": "Layer trial ({min} min): no guests yet",
+    "seo.hourly.title": "Hourly market summaries — LiqScope channel posts",
+    "seo.hourly.desc": "Crypto futures market summaries every few hours: liquidations of the window, hour leaders, turnover and open interest. The very posts from our channel, with photos — day-by-day archive."
   },
   "phrases": {
     "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "One post every N hours: the post window is those same N hours, and the analysis block inside the post is a quarter of the window (every 4 h → one hour, every 1 h → 15 minutes).",

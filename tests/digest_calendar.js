@@ -9,6 +9,7 @@
  *      NODE_PATH=./node_modules node tests/digest_calendar.js
  */
 const { JSDOM, VirtualConsole } = require("jsdom");
+const { ru } = require("./_ru");
 
 const URL_BASE = process.argv[2] || "http://127.0.0.1:8011";
 const FRESH = 7;                       // столько свежих выпусков показывает лента
@@ -100,7 +101,7 @@ async function openPage(path, opts) {
   vc.on("error", (...a) => errors.push("console.error: " +
     a.map((x) => String((x && x.message) || x)).join(" ").slice(0, 200)));
 
-  const dom = await JSDOM.fromURL(URL_BASE + path, {
+  const dom = await JSDOM.fromURL(ru(URL_BASE + path), {
     runScripts: "dangerously",
     resources: "usable",
     pretendToBeVisual: true,

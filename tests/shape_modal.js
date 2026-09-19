@@ -12,6 +12,7 @@
  *      NODE_PATH=/tmp/smoke/node_modules node tests/shape_modal.js
  */
 const { JSDOM, VirtualConsole } = require("jsdom");
+const { ru } = require("./_ru");
 
 const URL_BASE = process.argv[2] || "http://127.0.0.1:8000";
 const errors = [];
@@ -116,7 +117,7 @@ async function main() {
   vc.on("error", (...a) => errors.push("console.error: " + a.map(String).join(" ").slice(0, 200)));
   const log = [];
 
-  const dom = await JSDOM.fromURL(URL_BASE + "/terminal", {
+  const dom = await JSDOM.fromURL(ru(URL_BASE + "/terminal"), {
     runScripts: "dangerously", resources: "usable", pretendToBeVisual: true,
     virtualConsole: vc,
     beforeParse(win) {

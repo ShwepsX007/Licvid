@@ -164,7 +164,9 @@ window.LIQSCOPE_I18N_PAGES =
       "geo.map_hint": "Карту можно тянуть и приближать колесом",
       "dig.cover_alt": "Обложка выпуска — фото дня",
       "adm.trial_line": "Пробные {min} минут слоёв: {n} гостей, {stuck} уже увидели предложение регистрации",
-      "adm.trial_none": "Пробные {min} минут слоёв: гостей ещё не было"
+      "adm.trial_none": "Пробные {min} минут слоёв: гостей ещё не было",
+      "seo.hourly.title": "Сводки по часам — посты канала LiqScope",
+      "seo.hourly.desc": "Сводки рынка крипто-фьючерсов каждые несколько часов: ликвидации окна, лидеры часов, оборот и открытый интерес. Те же посты, что выходят в канале, с фото — архив по дням."
     },
     "phrases": {
       "🗑 Стереть статистику": "🗑 Стереть статистику",
@@ -349,7 +351,9 @@ window.LIQSCOPE_I18N_PAGES =
       "geo.map_hint": "Drag the map and zoom with the wheel",
       "dig.cover_alt": "Cover of the issue",
       "adm.trial_line": "Layer trial ({min} min): {n} guests, {stuck} have already seen the sign-up offer",
-      "adm.trial_none": "Layer trial ({min} min): no guests yet"
+      "adm.trial_none": "Layer trial ({min} min): no guests yet",
+      "seo.hourly.title": "Hourly market summaries — LiqScope channel posts",
+      "seo.hourly.desc": "Crypto futures market summaries every few hours: liquidations of the window, hour leaders, turnover and open interest. The very posts from our channel, with photos — day-by-day archive."
     },
     "phrases": {
       "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "One post every N hours: the post window is those same N hours, and the analysis block inside the post is a quarter of the window (every 4 h → one hour, every 1 h → 15 minutes).",
@@ -1247,7 +1251,9 @@ window.LIQSCOPE_I18N_PAGES =
       "geo.map_hint": "地图可以拖动，滚轮可缩放",
       "dig.cover_alt": "本期封面",
       "adm.trial_line": "图层试用 {min} 分钟：{n} 位访客，其中 {stuck} 位已看到注册提示",
-      "adm.trial_none": "图层试用 {min} 分钟：暂时没有访客"
+      "adm.trial_none": "图层试用 {min} 分钟：暂时没有访客",
+      "seo.hourly.title": "小时市场简报 — LiqScope 频道帖子",
+      "seo.hourly.desc": "每几小时一次的加密期货市场简报：区间清算、小时冠军、成交额与未平仓合约。与频道发布的帖子相同，含图片，按日归档。"
     },
     "phrases": {
       "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "每 N 小时发一篇：帖子窗口就是这 N 小时，帖内的分析块占窗口的四分之一（每 4 小时 → 每小时，每 1 小时 → 每 15 分钟）。",
@@ -2146,7 +2152,9 @@ window.LIQSCOPE_I18N_PAGES =
       "geo.map_hint": "नक्शे को खींचें और स्क्रॉल से ज़ूम करें",
       "dig.cover_alt": "इस अंक का कवर",
       "adm.trial_line": "लेयर ट्रायल ({min} मिनट): {n} मेहमान, {stuck} ने रजिस्ट्रेशन का प्रस्ताव देख लिया",
-      "adm.trial_none": "लेयर ट्रायल ({min} मिनट): अभी कोई मेहमान नहीं"
+      "adm.trial_none": "लेयर ट्रायल ({min} मिनट): अभी कोई मेहमान नहीं",
+      "seo.hourly.title": "हर घंटे की बाज़ार सारांश — LiqScope चैनल पोस्ट",
+      "seo.hourly.desc": "हर कुछ घंटों में क्रिप्टो फ़्यूचर्स बाज़ार की सारांश: विंडो के लिक्विडेशन, घंटे के लीडर, टर्नओवर और ओपन इंटरेस्ट। चैनल की वही पोस्ट, फ़ोटो के साथ — दिन-वार संग्रह।"
     },
     "phrases": {
       "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "हर N घंटे में एक पोस्ट: पोस्ट विंडो वही N घंटे है, और पोस्ट के भीतर विश्लेषण ब्लॉक विंडो का चौथाई है (हर 4 घंटे → एक घंटा, हर 1 घंटा → 15 मिनट)।",
@@ -3046,7 +3054,9 @@ window.LIQSCOPE_I18N_PAGES =
       "geo.map_hint": "El mapa se puede arrastrar y la rueda acerca",
       "dig.cover_alt": "Portada del número",
       "adm.trial_line": "Prueba de capas ({min} min): {n} invitados, {stuck} ya vieron la oferta de registro",
-      "adm.trial_none": "Prueba de capas ({min} min): todavía no hubo invitados"
+      "adm.trial_none": "Prueba de capas ({min} min): todavía no hubo invitados",
+      "seo.hourly.title": "Resúmenes del mercado por horas — publicaciones del canal LiqScope",
+      "seo.hourly.desc": "Resúmenes del mercado de futuros cripto cada pocas horas: liquidaciones de la ventana, líderes de la hora, volumen e interés abierto. Las mismas publicaciones del canal, con foto, en un archivo por días."
     },
     "phrases": {
       "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "Un post cada N horas: la ventana del post son esas mismas N horas, y el bloque de análisis dentro del post ocupa un cuarto de la ventana (cada 4 h → una hora, cada 1 h → 15 minutos).",

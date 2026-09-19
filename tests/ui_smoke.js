@@ -14,6 +14,7 @@
  */
 
 const { JSDOM, VirtualConsole } = require("jsdom");
+const { ru } = require("./_ru");
 const http = require("http");
 
 const URL_BASE = process.argv[2] || "http://127.0.0.1:8000";
@@ -55,7 +56,7 @@ async function main() {
   vc.on("error", (...a) =>
     errors.push("console.error: " + a.map((x) => String((x && x.message) || x)).join(" ").slice(0, 300)));
 
-  const dom = await JSDOM.fromURL(URL_BASE + "/terminal", {
+  const dom = await JSDOM.fromURL(ru(URL_BASE + "/terminal"), {
     runScripts: "dangerously",
     resources: "usable",
     pretendToBeVisual: true,

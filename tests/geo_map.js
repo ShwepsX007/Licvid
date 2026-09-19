@@ -12,6 +12,7 @@
  *     NODE_PATH=/tmp/smoke/node_modules node tests/geo_map.js [http://127.0.0.1:8000]
  */
 const { JSDOM, VirtualConsole } = require("jsdom");
+const http = require("http");
 
 const URL_BASE = process.argv[2] || "http://127.0.0.1:8000";
 const errors = [];
@@ -126,20 +127,45 @@ function adminRoutes(geo) {
   };
 }
 
+/** Стили админки текстом: карта вписана в карточку именно правилами CSS. */
+function fetchCss() {
+  return new Promise((resolve) => {
+    const u = new URL(URL_BASE + "/static/account.css");
+    http.get({ hostname: u.hostname, port: u.port, path: u.pathname },
+      (res) => {
+        let body = "";
+        res.setEncoding("utf8");
+        res.on("data", (c) => { body += c; });
+        res.on("end", () => resolve(body));
+      }).on("error", () => resolve(""));
+  });
+}
+
 async function main() {
   console.log("🌍 карта посещений в админке");
   const page = await openAdmin(adminRoutes(FIXTURE));
   const { doc, win, reqs } = page;
+  const styles = await fetchCss();
 
   // --- карточка и карта ---------------------------------------------------
   check("карточка географии есть в админке", !!doc.getElementById("geo-card"));
   check("панель отрисована", !!doc.querySelector("#geo-panel .geo-body"));
   const land = doc.querySelectorAll("#geo-map .geo-land");
   check("контуры стран на карте (" + land.length + ")", land.length > 150, land.length);
+  // вьюбокс — РОВНО четыре числа: с шестью браузер его игнорирует, и карта
+  // рисуется в натуральную величину, обрезанной по краям карточки
+  const svg = doc.getElementById("geo-map");
+  const vb = (svg && svg.getAttribute("viewBox") || "").trim().split(/\s+/);
   check("карта — SVG с вьюбоксом без Антарктиды",
-        !!doc.getElementById("geo-map") &&
-        doc.getElementById("geo-map").getAttribute("viewBox") === "0 0 1000 12 1000 398",
-        doc.getElementById("geo-map") && doc.getElementById("geo-map").getAttribute("viewBox"));
+        !!svg && vb.length === 4 && vb[0] === "0" && vb[1] === "12" &&
+        vb[2] === "1000" && vb[3] === "398", vb.join(" "));
+  check("карта не шире карточки: ширина задана в процентах",
+        /width:\s*100%/.test(styles), "нет width:100% у .geo-map");
+  check("высота карты идёт от её пропорций, а не от содержимого",
+        /aspect-ratio:\s*1000\s*\/\s*398/.test(styles), "нет aspect-ratio у .geo-map");
+  check("под картой сказано, что её можно тянуть и приближать",
+        /тянуть|приближ/i.test(doc.querySelector(".geo-legend").textContent),
+        doc.querySelector(".geo-legend").textContent.slice(-90));
 
   // --- точки: онлайн пульсируют, гости за период — мелкими точками --------
   const live = doc.querySelectorAll("#geo-map .geo-live-dot .geo-on");
@@ -234,6 +260,100 @@ async function main() {
   check("подсветка перешла на выбранный период",
         btn7.classList.contains("on") &&
         !doc.querySelector('[data-period="24h"]').classList.contains("on"));
+
+  // возвращаем окно на сутки: дальше проверки ждут период по умолчанию
+  doc.querySelector('[data-period="24h"]')
+     .dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true }));
+  await wait(60);
+
+  // --- приближение и перетаскивание карты ---------------------------------
+  // карта после каждой перерисовки — новый SVG, поэтому берём его заново
+  const svgEl = () => doc.getElementById("geo-map");
+  const vpEl = () => doc.querySelector("#geo-map .geo-viewport");
+  const tf = () => (vpEl() && vpEl().getAttribute("transform")) || "";
+  const centre = () => {
+    const m = /translate\((-?[\d.]+) (-?[\d.]+)\)/.exec(tf());
+    return m ? { x: Number(m[1]), y: Number(m[2]) } : null;
+  };
+  check("контуры и точки лежат в одном слое-окне (его и двигаем)",
+        vpEl().querySelectorAll(".geo-land").length > 150 &&
+        vpEl().querySelectorAll(".geo-dot, .geo-on").length >= 3,
+        vpEl().querySelectorAll(".geo-land").length);
+  const zbtn = (kind) => doc.querySelector('#geo-map-tools [data-zoom="' + kind + '"]');
+  const zclick = (kind) => zbtn(kind).dispatchEvent(
+    new win.MouseEvent("click", { bubbles: true, cancelable: true }));
+  check("у карты есть кнопки приблизить/отдалить/вписать",
+        !!zbtn("in") && !!zbtn("out") && !!zbtn("fit"));
+  check("на целой карте «отдалить» и «вписать» выключены",
+        zbtn("out").disabled === true && zbtn("fit").disabled === true,
+        zbtn("out").disabled + "/" + zbtn("fit").disabled);
+  check("карта вписана целиком: масштаб 1 и сдвига нет",
+        /scale\(1(\.0+)?\)/.test(tf()) && centre() && !centre().x && !centre().y, tf());
+
+  zclick("in");
+  check("кнопка ＋ приближает карту", /scale\(1\.5/.test(tf()), tf());
+  check("после приближения «отдалить» включилась", zbtn("out").disabled === false);
+  check("жесты уходят карте только при приближении",
+        svgEl().style.touchAction === "none", svgEl().style.touchAction);
+
+  // масштаб держит край карты: утащить её в пустоту нельзя
+  const onDot = () => doc.querySelector("#geo-map .geo-on");
+  const cxBefore = Number(onDot().getAttribute("cx"));
+  const beforeDrag = centre();
+  svgEl().dispatchEvent(new win.MouseEvent("mousedown",
+    { bubbles: true, cancelable: true, clientX: 100, clientY: 100 }));
+  win.dispatchEvent(new win.MouseEvent("mousemove",
+    { bubbles: true, clientX: 130, clientY: 140 }));
+  win.dispatchEvent(new win.MouseEvent("mouseup", { bubbles: true }));
+  const afterDrag = centre();
+  check("карту можно утащить мышью",
+        !!beforeDrag && !!afterDrag && (afterDrag.x !== beforeDrag.x ||
+                                        afterDrag.y !== beforeDrag.y),
+        JSON.stringify([beforeDrag, afterDrag]));
+  check("тянем вправо-вниз — карта едет вправо-вниз",
+        afterDrag.x > beforeDrag.x && afterDrag.y > beforeDrag.y,
+        JSON.stringify([beforeDrag, afterDrag]));
+  check("сдвиг не сбивает точку с проекции (меняется только transform)",
+        Number(onDot().getAttribute("cx")) === cxBefore, cxBefore);
+  check("значки не растут вместе с картой (радиус поделён на масштаб)",
+        Math.abs(Number(onDot().getAttribute("r")) - 3.2 / 1.5) < 0.05,
+        onDot().getAttribute("r"));
+
+  // у края карта упирается: дальше вести некуда
+  svgEl().dispatchEvent(new win.MouseEvent("mousedown",
+    { bubbles: true, cancelable: true, clientX: 100, clientY: 100 }));
+  win.dispatchEvent(new win.MouseEvent("mousemove",
+    { bubbles: true, clientX: 2000, clientY: 2000 }));
+  win.dispatchEvent(new win.MouseEvent("mouseup", { bubbles: true }));
+  check("карта упирается в свой край, пустоты за ней нет",
+        centre().x <= 0.01 && centre().y <= 12.01,
+        JSON.stringify(centre()));
+
+  zclick("out");
+  zclick("fit");
+  check("кнопка ⤢ возвращает всю карту",
+        /scale\(1(\.0+)?\)/.test(tf()) && centre() && !centre().x && !centre().y, tf());
+  check("кнопка − отдаляет обратно до целой карты", zbtn("out").disabled === true);
+
+  // колесо приближает карту к курсору
+  svgEl().dispatchEvent(new win.WheelEvent("wheel",
+    { bubbles: true, cancelable: true, deltaY: -120, clientX: 400, clientY: 200 }));
+  check("колесо приближает карту", /scale\(1\.25/.test(tf()), tf());
+  check("приближение к курсору сдвигает карту (точка под курсором на месте)",
+        !!centre() && (centre().x !== 0 || centre().y !== 0), tf());
+
+  // смена периода перерисовывает карту — вид при этом сохраняется
+  const beforeRedraw = tf();
+  doc.querySelector('[data-period="7d"]').dispatchEvent(
+    new win.MouseEvent("click", { bubbles: true, cancelable: true }));
+  await wait(60);
+  check("после смены периода карта перерисована, но вид сохранён",
+        tf() === beforeRedraw, tf() + " ≠ " + beforeRedraw);
+  // и обратно на сутки: дальше проверки ждут период по умолчанию
+  zclick("fit");
+  doc.querySelector('[data-period="24h"]').dispatchEvent(
+    new win.MouseEvent("click", { bubbles: true, cancelable: true }));
+  await wait(60);
 
   // --- смена языка --------------------------------------------------------
   check("смена языка есть в API", typeof win.LiqScopeI18n.set === "function");

@@ -144,7 +144,11 @@
     "geo.u_views_many": "просмотров",
     "geo.u_countries_one": "страна",
     "geo.u_countries_few": "страны",
-    "geo.u_countries_many": "стран"
+    "geo.u_countries_many": "стран",
+    "geo.zoom_in": "Приблизить",
+    "geo.zoom_out": "Отдалить",
+    "geo.zoom_fit": "Вся карта",
+    "geo.map_hint": "Карту можно тянуть и приближать колесом"
   },
   "phrases": {}
 }

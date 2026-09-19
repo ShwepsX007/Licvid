@@ -868,11 +868,38 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
 .geo-chip-on { border-color: rgba(0, 230, 118, 0.45); }
 .geo-chip-on b { color: var(--green); }
 .geo-map-wrap {
+    position: relative;
     border: 1px solid var(--border); border-radius: 12px;
     background: linear-gradient(180deg, rgba(10, 14, 24, 0.9), rgba(7, 10, 16, 0.9));
     padding: 8px 10px 4px;
 }
-.geo-map { display: block; width: 100%; height: auto; }
+/* Карта вписана в карточку по ширине и двигается внутри себя: размер окна
+   задаёт svg (width:100%; height:auto), а видимую часть — viewBox. Ограничения
+   по высоте нет намеренно — иначе на узком экране карта сжималась бы в полоску. */
+.geo-map {
+    display: block; width: 100%; height: auto;
+    /* соотношение сторон задано явно: ширина берётся от карточки, высота — от
+       полотна карты (1000×398), поэтому мир виден целиком и ничего не режется */
+    aspect-ratio: 1000 / 398;
+    touch-action: pan-y;              /* пока масштаб 1× — палец прокручивает страницу */
+    cursor: grab; overflow: hidden;
+}
+.geo-map.geo-grabbing { cursor: grabbing; }
+.geo-map:focus { outline: 1px solid var(--blue); outline-offset: 2px; }
+/* Кнопки карты: ＋ приблизить, − отдалить, ⤢ вписать целиком. */
+.geo-map-tools {
+    position: absolute; top: 12px; right: 14px; z-index: 2;
+    display: flex; flex-direction: column; gap: 4px;
+}
+.geo-zoom {
+    width: 26px; height: 26px; padding: 0; line-height: 1;
+    font-size: 0.9rem; font-family: inherit; cursor: pointer;
+    color: var(--text); background: rgba(10, 14, 24, 0.82);
+    border: 1px solid var(--border); border-radius: 8px;
+    transition: border-color .15s, color .15s, opacity .15s;
+}
+.geo-zoom:hover:not(:disabled) { border-color: var(--blue); color: var(--cyan); }
+.geo-zoom:disabled { opacity: 0.35; cursor: default; }
 .geo-land { fill: #16203a; stroke: #24314f; stroke-width: 0.4; }
 .geo-bubble { fill: rgba(61, 112, 255, 0.28); stroke: var(--blue); stroke-width: 0.6; }
 .geo-bubble-on { fill: rgba(0, 230, 118, 0.22); stroke: var(--green); }
@@ -937,4 +964,7 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
 @media (max-width: 820px) {
     .geo-chip { min-width: 88px; padding: 6px 10px; }
     .geo-cols { grid-template-columns: 1fr; }
+    /* На телефоне кнопки крупнее — их нажимают пальцем */
+    .geo-map-tools { top: 8px; right: 10px; }
+    .geo-zoom { width: 30px; height: 30px; font-size: 1rem; }
 }

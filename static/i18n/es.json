@@ -144,7 +144,11 @@
     "geo.u_views_many": "vistas",
     "geo.u_countries_one": "país",
     "geo.u_countries_few": "países",
-    "geo.u_countries_many": "países"
+    "geo.u_countries_many": "países",
+    "geo.zoom_in": "Acercar",
+    "geo.zoom_out": "Alejar",
+    "geo.zoom_fit": "Mapa completo",
+    "geo.map_hint": "El mapa se puede arrastrar y la rueda acerca"
   },
   "phrases": {
     "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "Un post cada N horas: la ventana del post son esas mismas N horas, y el bloque de análisis dentro del post ocupa un cuarto de la ventana (cada 4 h → una hora, cada 1 h → 15 minutos).",

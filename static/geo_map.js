@@ -11,6 +11,14 @@
  * (equirectangular 1000×500), поэтому точки ложатся точно на контуры:
  *     x = (lon + 180) / 360 · 1000,   y = (90 − lat) / 180 · 500
  *
+ * Карта вписывается в карточку целиком (``viewBox`` показывает полосу без
+ * Антарктиды), но её можно приблизить и тащить: на телефоне карта шириной в
+ * пол-экрана мелкая, а на большом мониторе хочется разглядеть страну. Тянуть —
+ * мышью или пальцем, приближать — колесом, кнопками ＋/− или клавишами со
+ * стрелками, вернуться к целой карте — кнопкой ⤢ или клавишей 0. Масштаб и
+ * сдвиг живут между перерисовками: карточка обновляется сама раз в 20 секунд,
+ * и вид при этом не должен сбрасываться.
+ *
  * Подписи берутся ключами словаря (data-i18n и ``I18n.t``), поэтому карточка
  * говорит на том же языке, что и вся страница. При смене языка список
  * перерисовывается.
@@ -22,6 +30,13 @@
     var MAP_W = 1000, MAP_H = 500;  // размеры полотна карты (см. world-map.js)
     var VIEW_TOP = 12, VIEW_H = 398;   // видимая часть: без Антарктиды
     var MAX_BUBBLE = 26;
+    var MAX_K = 8;                  // предел приближения: 1× — вся карта, 8× — страна
+    var WHEEL_STEP = 1.25;          // один щелчок колеса
+    var BUTTON_STEP = 1.5;          // одно нажатие кнопки ＋ / −
+
+    //: Текущий вид карты: масштаб и сдвиг в координатах полотна. Живёт вне
+    //: разметки: карточка перерисовывается сама, и вид не должен «прыгать».
+    var view = { k: 1, x: 0, y: 0 };
 
     var I18n = global.LiqScopeI18n || { t: function (k) { return k; },
                                         number: function (n) { return String(n); },
@@ -103,7 +118,7 @@
     /** Имя страны на языке страницы: его умеет собирать сам браузер.
      *
      * Справочник ``geo_countries.py`` знает только английское имя (оно нужно
-     * серверу), а ``Intl.DisplayNames`` даёт «Финляндия»/「芬兰」/「Finlandia」
+     * серверу), а ``Intl.DisplayNames`` даёт «Финляндия»/「芬兰」/「Finlandia»
      * без таблиц на нашей стороне. Нет поддержки — остаётся имя из ответа.
      */
     var regions = null, regionsLang = "";
@@ -136,12 +151,17 @@
         return t("geo.guest") + (vid ? " #" + esc(vid.slice(0, 6)) : "");
     }
 
-    /** Контуры стран: рисуем один раз, дальше только точки. */
+    /** Контуры стран: рисуем один раз, дальше только точки.
+     *
+     * ``vector-effect`` держит береговую линию волоском на любом масштабе:
+     * без него на 8× контуры превращаются в толстые ленты.
+     */
     function landPaths() {
         var world = global.LIQSCOPE_WORLD;
         if (!world || !world.countries) return "";
         return world.countries.map(function (row) {
-            return '<path class="geo-land" d="' + row[1] + '"></path>';
+            return '<path class="geo-land" d="' + row[1] +
+                '" vector-effect="non-scaling-stroke"></path>';
         }).join("");
     }
 
@@ -164,7 +184,8 @@
                 (online ? " · " + t("geo.chip_online") : "");
             return '<circle class="geo-bubble' + (online ? " geo-bubble-on" : "") +
                 '" data-cc="' + esc(c.country) + '" cx="' + x(c.lon).toFixed(1) +
-                '" cy="' + y(c.lat).toFixed(1) + '" r="' + r.toFixed(1) + '">' +
+                '" cy="' + y(c.lat).toFixed(1) + '" r="' + r.toFixed(1) +
+                '" data-r="' + r.toFixed(1) + '" data-sw="0.6">' +
                 "<title>" + esc(title) + "</title></circle>";
         }).join("");
 
@@ -172,7 +193,7 @@
             return p.lat !== null && p.lon !== null && !p.online;
         }).map(function (p) {
             return '<circle class="geo-dot" cx="' + x(p.lon).toFixed(1) +
-                '" cy="' + y(p.lat).toFixed(1) + '" r="1.8"><title>' +
+                '" cy="' + y(p.lat).toFixed(1) + '" r="1.8" data-r="1.8"><title>' +
                 esc(pointTitle(p)) + "</title></circle>";
         }).join("");
 
@@ -182,22 +203,38 @@
         }).map(function (p) {
             var cx = x(p.lon).toFixed(1), cy = y(p.lat).toFixed(1);
             return '<g class="geo-live-dot"><circle class="geo-pulse" cx="' + cx +
-                '" cy="' + cy + '" r="9"></circle><circle class="geo-on" cx="' + cx +
-                '" cy="' + cy + '" r="3.2"><title>' + esc(pointTitle(p)) +
-                "</title></circle></g>";
+                '" cy="' + cy + '" r="9" data-r="9"></circle><circle class="geo-on" cx="' +
+                cx + '" cy="' + cy + '" r="3.2" data-r="3.2" data-sw="0.8"><title>' +
+                esc(pointTitle(p)) + "</title></circle></g>";
         }).join("");
 
         var empty = (!bubbles && !dots && !live)
             ? '<text class="geo-map-empty" x="500" y="200" text-anchor="middle">' +
               esc(t("geo.map_empty")) + "</text>"
             : "";
-        return '<svg class="geo-map" id="geo-map" viewBox="0 0 ' + MAP_W + " " +
-            VIEW_TOP + " " + MAP_W + " " + VIEW_H + '" role="img" ' +
+        // viewBox — четыре числа: левый верхний угол и размер видимой полосы
+        // (Антарктида снизу не нужна). Всё содержимое — внутри .geo-viewport:
+        // его transform и есть перетаскивание с масштабом.
+        return '<svg class="geo-map" id="geo-map" viewBox="0 ' + VIEW_TOP + " " +
+            MAP_W + " " + VIEW_H + '" role="img" tabindex="0" ' +
             'aria-label="' + esc(t("geo.map_alt")) + '">' +
+            '<g class="geo-viewport">' +
             '<g class="geo-lands">' + landPaths() + "</g>" +
             '<g class="geo-bubbles">' + bubbles + "</g>" +
             '<g class="geo-dots">' + dots + "</g>" +
-            '<g class="geo-live">' + live + "</g>" + empty + "</svg>";
+            '<g class="geo-live">' + live + "</g>" +
+            "</g>" + empty + "</svg>";
+    }
+
+    /** Кнопки карты: приблизить, отдалить, вписать в окно. */
+    function mapTools() {
+        var defs = [["in", "＋", "geo.zoom_in"], ["out", "−", "geo.zoom_out"],
+                    ["fit", "⤢", "geo.zoom_fit"]];
+        return '<div class="geo-map-tools" id="geo-map-tools">' + defs.map(function (d) {
+            return '<button type="button" class="geo-zoom" data-zoom="' + d[0] +
+                '" title="' + esc(t(d[2])) + '" aria-label="' + esc(t(d[2])) +
+                '">' + d[1] + "</button>";
+        }).join("") + "</div>";
     }
 
     function chips(data) {
@@ -224,7 +261,9 @@
                     '<span class="geo-key"><i class="geo-i-dot"></i>' +
                     esc(t("geo.legend_visits")) + "</span>",
                     '<span class="geo-key"><i class="geo-i-bubble"></i>' +
-                    esc(t("geo.legend_bubble")) + "</span>"];
+                    esc(t("geo.legend_bubble")) + "</span>",
+                    '<span class="geo-key geo-note">' + esc(t("geo.map_hint")) +
+                    "</span>"];
         var geo = data.geo || {};
         bits.push('<span class="geo-key geo-note">' + esc(geo.edge
             ? t("geo.src_edge") : t("geo.src_provider",
@@ -252,7 +291,6 @@
     function render(data) {
         last = data;
         if (!panel) return;
-        panel = panel;
         var countries = (data.countries || []).slice(0, 12).map(function (c) {
             return "<tr><td>" + countryName(c) + "</td>" +
                 '<td class="geo-num' + ((c.online ? " geo-hot" : "")) + '">' +
@@ -284,7 +322,7 @@
 
         body().innerHTML =
             '<div class="geo-chips">' + chips(data) + "</div>" +
-            '<div class="geo-map-wrap">' + mapSvg(data) +
+            '<div class="geo-map-wrap">' + mapTools() + mapSvg(data) +
             '<div class="geo-legend">' + legend(data) + "</div></div>" +
             '<div class="geo-cols">' +
             '<div class="geo-col">' + '<h4>' + esc(t("geo.countries")) + "</h4>" +
@@ -310,6 +348,210 @@
             table("geo-paths", ["geo.col_path", "geo.col_views"], paths,
                   "geo.empty") + "</div>" +
             "</div>";
+
+        bindMap();      // разметка новая — обработчики карты тоже
+    }
+
+    // ----- вид карты: вписать, приблизить, подвинуть ----------------------
+    function svgEl() {
+        return (panel && panel.querySelector("#geo-map")) || null;
+    }
+
+    function viewportEl() {
+        return (panel && panel.querySelector("#geo-map .geo-viewport")) || null;
+    }
+
+    /** Держим карту в кадре: при масштабе 1 видно весь мир, а при
+     * приближении карту нельзя утащить за край окна (как в картах). */
+    function clampView() {
+        view.k = Math.max(1, Math.min(MAX_K, Number(view.k) || 1));
+        var minX = MAP_W * (1 - view.k);
+        var minY = (VIEW_TOP + VIEW_H) * (1 - view.k);
+        var maxY = VIEW_TOP * (1 - view.k);
+        view.x = Math.min(0, Math.max(minX, view.x));
+        view.y = Math.min(maxY, Math.max(minY, view.y));
+    }
+
+    /** Значки не растут вместе с картой: иначе на 8× точка-гость становится
+     * размером со страну и закрывает то, что под ней. */
+    function scaleMarks() {
+        var svg = svgEl();
+        if (!svg) return;
+        var f = 1 / view.k;
+        Array.prototype.forEach.call(svg.querySelectorAll("[data-r]"), function (el) {
+            el.setAttribute("r", (Number(el.getAttribute("data-r")) * f).toFixed(2));
+        });
+        // обводку ставим стилем: правило из таблицы стилей сильнее атрибута
+        Array.prototype.forEach.call(svg.querySelectorAll("[data-sw]"), function (el) {
+            el.style.setProperty("stroke-width",
+                (Number(el.getAttribute("data-sw")) * f).toFixed(2));
+        });
+    }
+
+    function applyView() {
+        clampView();
+        var g = viewportEl();
+        if (g) {
+            g.setAttribute("transform", "translate(" + view.x.toFixed(2) + " " +
+                view.y.toFixed(2) + ") scale(" + view.k.toFixed(3) + ")");
+        }
+        var svg = svgEl();
+        if (svg) {
+            // На масштабе 1 карта и так видна целиком — не отбираем у страницы
+            // прокрутку пальцем. Приблизил — жесты уходят карте.
+            svg.style.touchAction = view.k > 1 ? "none" : "pan-y";
+        }
+        scaleMarks();
+        var tools = panel && panel.querySelector("#geo-map-tools");
+        if (tools) {
+            var out = tools.querySelector('[data-zoom="out"]');
+            var fitBtn = tools.querySelector('[data-zoom="fit"]');
+            var whole = view.k <= 1.001 && !view.x && !view.y;
+            if (out) out.disabled = view.k <= 1.001;
+            if (fitBtn) fitBtn.disabled = whole;
+        }
+    }
+
+    function fit() { view.k = 1; view.x = 0; view.y = 0; applyView(); }
+
+    /** Точка экрана → координаты полотна карты (viewBox). */
+    function viewBoxPoint(svg, clientX, clientY) {
+        var px = Number(clientX) || 0, py = Number(clientY) || 0;
+        if (svg.createSVGPoint && svg.getScreenCTM) {
+            try {
+                var pt = svg.createSVGPoint();
+                pt.x = px;
+                pt.y = py;
+                var m = svg.getScreenCTM();
+                if (m && m.inverse) return pt.matrixTransform(m.inverse());
+            } catch (e) { /* считаем по рамке ниже */ }
+        }
+        var box = svg.getBoundingClientRect ? svg.getBoundingClientRect() : null;
+        var w = (box && box.width) || MAP_W, h = (box && box.height) || VIEW_H;
+        return { x: (px - (box ? box.left : 0)) * (MAP_W / w),
+                 y: VIEW_TOP + (py - (box ? box.top : 0)) * (VIEW_H / h) };
+    }
+
+    /** Приблизить/отдалить так, чтобы точка под курсором осталась на месте. */
+    function zoomAt(px, py, factor) {
+        var k0 = view.k;
+        var k = Math.max(1, Math.min(MAX_K, k0 * factor));
+        if (Math.abs(k - k0) < 1e-6) { applyView(); return; }
+        // (p − t)/k — координата точки на полотне: она и должна сохраниться
+        var ux = (px - view.x) / k0, uy = (py - view.y) / k0;
+        view.k = k;
+        view.x = px - ux * k;
+        view.y = py - uy * k;
+        applyView();
+    }
+
+    function zoomCenter(factor) {
+        var p = { x: MAP_W / 2, y: VIEW_TOP + VIEW_H / 2 };
+        zoomAt(p.x, p.y, factor);
+    }
+
+    function onWheel(ev) {
+        var svg = svgEl();
+        if (!svg) return;
+        if (ev.preventDefault) ev.preventDefault();
+        var p = viewBoxPoint(svg, ev.clientX, ev.clientY);
+        zoomAt(p.x, p.y, Number(ev.deltaY) < 0 ? WHEEL_STEP : 1 / WHEEL_STEP);
+    }
+
+    //: Перетаскивание: запоминаем, где нажали, и сдвигаем карту от этой точки.
+    //: Клик по кнопкам карты и выделение текста не должны её двигать.
+    var drag = null;
+    var winBound = false;
+
+    function onDragStart(ev) {
+        var svg = svgEl();
+        if (!svg || drag) return;
+        if (ev.button !== undefined && ev.button !== null && ev.button !== 0) return;
+        if (ev.target && ev.target.closest && ev.target.closest("button")) return;
+        drag = { sx: Number(ev.clientX) || 0, sy: Number(ev.clientY) || 0,
+                 x0: view.x, y0: view.y };
+        svg.classList.add("geo-grabbing");
+        if (ev.pointerId !== undefined && svg.setPointerCapture) {
+            try { svg.setPointerCapture(ev.pointerId); } catch (e) { /* не беда */ }
+        }
+        if (ev.preventDefault && ev.cancelable !== false) ev.preventDefault();
+    }
+
+    function onDragMove(ev) {
+        var svg = svgEl();
+        if (!drag || !svg) return;
+        // пиксели тоже переводим в координаты полотна: на телефоне и на большом
+        // мониторе один и тот же жест двигает карту одинаково
+        var box = svg.getBoundingClientRect ? svg.getBoundingClientRect() : null;
+        var w = (box && box.width) || MAP_W, h = (box && box.height) || VIEW_H;
+        view.x = drag.x0 + (Number(ev.clientX) - drag.sx) * (MAP_W / w);
+        view.y = drag.y0 + (Number(ev.clientY) - drag.sy) * (VIEW_H / h);
+        applyView();
+    }
+
+    function onDragEnd() {
+        if (!drag) return;
+        drag = null;
+        var svg = svgEl();
+        if (svg) svg.classList.remove("geo-grabbing");
+    }
+
+    function onKey(ev) {
+        var key = ev.key || "";
+        var step = 40 / view.k;          // стрелка — ~10% видимой части карты
+        if (key === "ArrowLeft") view.x += step * 2.5;
+        else if (key === "ArrowRight") view.x -= step * 2.5;
+        else if (key === "ArrowUp") view.y += step;
+        else if (key === "ArrowDown") view.y -= step;
+        else if (key === "+" || key === "=" || key === "Add") zoomCenter(BUTTON_STEP);
+        else if (key === "-" || key === "_" || key === "Subtract") zoomCenter(1 / BUTTON_STEP);
+        else if (key === "0" || key === "Home") { fit(); ev.preventDefault(); return; }
+        else return;
+        ev.preventDefault();
+        applyView();
+    }
+
+    function onToolClick(ev) {
+        var btn = ev.target && ev.target.closest
+            ? ev.target.closest("[data-zoom]") : null;
+        if (!btn || btn.disabled) return;
+        var kind = btn.getAttribute("data-zoom");
+        if (kind === "in") zoomCenter(BUTTON_STEP);
+        else if (kind === "out") zoomCenter(1 / BUTTON_STEP);
+        else fit();
+    }
+
+    /** Вешаем обработчики на свежую разметку карты (её перерисовывает render).
+     *
+     * Слушатели окна — один раз за всю жизнь карточки: события мыши и касания
+     * продолжают приходить, даже когда палец ушёл за пределы карты. */
+    function bindWindow() {
+        if (winBound || !global.addEventListener) return;
+        winBound = true;
+        ["pointermove", "mousemove"].forEach(function (name) {
+            global.addEventListener(name, onDragMove);
+        });
+        ["pointerup", "pointercancel", "mouseup", "blur"].forEach(function (name) {
+            global.addEventListener(name, onDragEnd);
+        });
+    }
+
+    function bindMap() {
+        var svg = svgEl();
+        if (!svg) return;
+        bindWindow();
+        svg.addEventListener("pointerdown", onDragStart);
+        svg.addEventListener("mousedown", onDragStart);
+        svg.addEventListener("wheel", onWheel, { passive: false });
+        svg.addEventListener("keydown", onKey);
+        svg.addEventListener("dblclick", function (ev) {
+            if (ev.preventDefault) ev.preventDefault();
+            var p = viewBoxPoint(svg, ev.clientX, ev.clientY);
+            zoomAt(p.x, p.y, BUTTON_STEP);
+        });
+        var tools = panel && panel.querySelector("#geo-map-tools");
+        if (tools) tools.addEventListener("click", onToolClick);
+        applyView();
     }
 
     function load() {
@@ -378,5 +620,7 @@
 
     global.LiqScopeGeo = { mount: mount, load: load, render: render,
                            get period() { return period; }, fmtSec: fmtSec,
-                           displayName: displayName, REFRESH_MS: REFRESH_MS };
+                           displayName: displayName, REFRESH_MS: REFRESH_MS,
+                           MAX_K: MAX_K, view: view, fit: fit,
+                           element: svgEl };
 })(window);

@@ -157,7 +157,11 @@ window.LIQSCOPE_I18N_PAGES =
       "geo.u_views_many": "просмотров",
       "geo.u_countries_one": "страна",
       "geo.u_countries_few": "страны",
-      "geo.u_countries_many": "стран"
+      "geo.u_countries_many": "стран",
+      "geo.zoom_in": "Приблизить",
+      "geo.zoom_out": "Отдалить",
+      "geo.zoom_fit": "Вся карта",
+      "geo.map_hint": "Карту можно тянуть и приближать колесом"
     },
     "phrases": {}
   },
@@ -307,7 +311,11 @@ window.LIQSCOPE_I18N_PAGES =
       "geo.u_views_many": "views",
       "geo.u_countries_one": "country",
       "geo.u_countries_few": "countries",
-      "geo.u_countries_many": "countries"
+      "geo.u_countries_many": "countries",
+      "geo.zoom_in": "Zoom in",
+      "geo.zoom_out": "Zoom out",
+      "geo.zoom_fit": "Whole map",
+      "geo.map_hint": "Drag the map and zoom with the wheel"
     },
     "phrases": {
       "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "One post every N hours: the post window is those same N hours, and the analysis block inside the post is a quarter of the window (every 4 h → one hour, every 1 h → 15 minutes).",
@@ -1172,7 +1180,11 @@ window.LIQSCOPE_I18N_PAGES =
       "geo.u_views_many": "次浏览",
       "geo.u_countries_one": "个国家",
       "geo.u_countries_few": "个国家",
-      "geo.u_countries_many": "个国家"
+      "geo.u_countries_many": "个国家",
+      "geo.zoom_in": "放大",
+      "geo.zoom_out": "缩小",
+      "geo.zoom_fit": "显示全图",
+      "geo.map_hint": "地图可以拖动，滚轮可缩放"
     },
     "phrases": {
       "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "每 N 小时发一篇：帖子窗口就是这 N 小时，帖内的分析块占窗口的四分之一（每 4 小时 → 每小时，每 1 小时 → 每 15 分钟）。",
@@ -2038,7 +2050,11 @@ window.LIQSCOPE_I18N_PAGES =
       "geo.u_views_many": "व्यू",
       "geo.u_countries_one": "देश",
       "geo.u_countries_few": "देश",
-      "geo.u_countries_many": "देश"
+      "geo.u_countries_many": "देश",
+      "geo.zoom_in": "ज़ूम इन",
+      "geo.zoom_out": "ज़ूम आउट",
+      "geo.zoom_fit": "पूरा नक्शा",
+      "geo.map_hint": "नक्शे को खींचें और स्क्रॉल से ज़ूम करें"
     },
     "phrases": {
       "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "हर N घंटे में एक पोस्ट: पोस्ट विंडो वही N घंटे है, और पोस्ट के भीतर विश्लेषण ब्लॉक विंडो का चौथाई है (हर 4 घंटे → एक घंटा, हर 1 घंटा → 15 मिनट)।",
@@ -2905,7 +2921,11 @@ window.LIQSCOPE_I18N_PAGES =
       "geo.u_views_many": "vistas",
       "geo.u_countries_one": "país",
       "geo.u_countries_few": "países",
-      "geo.u_countries_many": "países"
+      "geo.u_countries_many": "países",
+      "geo.zoom_in": "Acercar",
+      "geo.zoom_out": "Alejar",
+      "geo.zoom_fit": "Mapa completo",
+      "geo.map_hint": "El mapa se puede arrastrar y la rueda acerca"
     },
     "phrases": {
       "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "Un post cada N horas: la ventana del post son esas mismas N horas, y el bloque de análisis dentro del post ocupa un cuarto de la ventana (cada 4 h → una hora, cada 1 h → 15 minutos).",

@@ -48,6 +48,9 @@
     var timer = null;
     var last = null;
     var req = 0;
+    var onlineSec = 300;            // окно «онлайн»: столько оставляем точкам при уборке
+    var askTimer = null;            // переспрос кнопки «убрать старые точки»
+    var dotsBusy = false;           // запрос уборки уже в пути
 
     function t(key, vars) {
         try { return I18n.t(key, vars); } catch (e) { return key; }
@@ -282,6 +285,24 @@
             "</tr></thead><tbody>" + body + "</tbody></table>";
     }
 
+    /** Сколько пробного доступа к слоям осталось гостю и кнопка «дать ещё».
+     *
+     * Пробник считается только у гостей без регистрации: вошедшему в кабинет
+     * слои доступны без ограничений, поэтому у него в колонке прочерк.
+     * Сброс — не «бессрочно», а «заново»: таймер начинается с текущей минуты.
+     */
+    function trialCell(p) {
+        var tr = p.trial;
+        if (!tr) return '<td class="geo-num geo-trial">—</td>';
+        var left = tr.expired ? t("geo.trial_over") : fmtSec(tr.left_sec);
+        return '<td class="geo-num geo-trial"><span class="' +
+            (tr.expired ? "geo-hot" : "") + '">' + esc(left) + "</span>" +
+            '<button type="button" class="geo-mini" data-trial="' + esc(tr.who || "") +
+            '" title="' + esc(t("geo.trial_more", { min: tr.minutes || 0 })) +
+            '" aria-label="' + esc(t("geo.trial_more", { min: tr.minutes || 0 })) +
+            '">↺</button></td>';
+    }
+
     /** Тело карточки: шапка с кнопками периода остаётся, меняется только оно. */
     function body() {
         var box = panel && panel.querySelector("#geo-body");
@@ -291,6 +312,8 @@
     function render(data) {
         last = data;
         if (!panel) return;
+        onlineSec = Number(data.online_sec || onlineSec) || onlineSec;
+        paintDots(data);
         var countries = (data.countries || []).slice(0, 12).map(function (c) {
             return "<tr><td>" + countryName(c) + "</td>" +
                 '<td class="geo-num' + ((c.online ? " geo-hot" : "")) + '">' +
@@ -308,7 +331,8 @@
         var live = (data.online || []).map(function (p) {
             return "<tr><td>" + guestLabel(p) + "</td><td>" + countryName(p) +
                 "</td><td>" + esc(p.path || "—") + "</td><td>" + sourceLabel(p) +
-                '</td><td class="geo-num">' + fmtSec(p.sec) + "</td></tr>";
+                '</td><td class="geo-num">' + fmtSec(p.sec) + "</td>" +
+                trialCell(p) + "</tr>";
         });
         var long = (data.long || []).slice(0, 8).map(function (p) {
             return "<tr><td>" + guestLabel(p) + "</td><td>" + countryName(p) +
@@ -338,7 +362,8 @@
             "<h4>" + esc(t("geo.live")) + " · " + num((data.totals || {}).online || 0) +
             "</h4>" + table("geo-live", ["geo.col_guest", "geo.col_country",
                                          "geo.col_path", "geo.col_source",
-                                         "geo.col_time"], live, "geo.no_online") +
+                                         "geo.col_time", "geo.col_trial"],
+                            live, "geo.no_online") +
             '<div class="geo-cols">' +
             '<div class="geo-col">' + "<h4>" + esc(t("geo.long_visits")) + "</h4>" +
             table("geo-long", ["geo.col_guest", "geo.col_country", "geo.col_time",
@@ -568,6 +593,110 @@
         } catch (e) { /* старый браузер — просто нет карточки */ }
     }
 
+    /** Кнопка уборки старых точек и подпись к ней.
+     *
+     * Точки копятся за весь период: за 30 дней карта превращается в кашу, и
+     * по ней уже не видно, кто приходит сейчас. Уборка ставит отметку времени
+     * (её хранит сервер, ``geo_dots_after``): карта показывает только гостей
+     * после неё. Статистика, страны и таблицы остаются целыми, поэтому уборка
+     * обратима — та же кнопка возвращает все точки назад.
+     */
+    function dotsBar(data) {
+        return '<div class="geo-dots-row">' +
+            '<button type="button" class="btn btn-small" id="geo-dots" ' +
+            'data-i18n="geo.dots_clear">' + esc(t("geo.dots_clear")) + "</button>" +
+            '<span class="meta" id="geo-dots-note" role="status"></span></div>';
+    }
+
+    function paintDots(data) {
+        var btn = panel && panel.querySelector("#geo-dots");
+        var note = panel && panel.querySelector("#geo-dots-note");
+        if (!btn) return;
+        var after = Number((data || {}).dots_after || 0);
+        var hidden = Number((data || {}).dots_hidden || 0);
+        btn.setAttribute("data-dots", after ? "restore" : "clear");
+        btn.setAttribute("data-i18n", after ? "geo.dots_restore" : "geo.dots_clear");
+        if (!askTimer) btn.textContent = after ? t("geo.dots_restore") : t("geo.dots_clear");
+        if (note) {
+            note.textContent = after
+                ? t("geo.dots_note", { n: num(hidden), time: fmtWhen(after) })
+                : "";
+        }
+    }
+
+    /** Запрос уборки точек: ``clear`` — спрятать старые, ``restore`` — вернуть. */
+    function dotsRequest(act, btn) {
+        if (dotsBusy) return;
+        dotsBusy = true;
+        var note = panel && panel.querySelector("#geo-dots-note");
+        if (note) note.textContent = t("cab.loading");
+        var url = act === "restore" ? "/api/admin/geo/dots/reset"
+                                    : "/api/admin/geo/dots/clear";
+        var body = act === "restore"
+            ? "{}" : JSON.stringify({ keep_sec: onlineSec });
+        try {
+            global.fetch(url, {
+                method: "POST", credentials: "same-origin",
+                headers: { "Content-Type": "application/json" }, body: body,
+            }).then(function (r) { return r.json(); }).then(function (d) {
+                dotsBusy = false;
+                if (btn) btn.classList.remove("ask");
+                if (!d || !d.ok) {
+                    if (note) note.textContent = t("geo.dots_fail");
+                    return;
+                }
+                load();
+            }).catch(function () {
+                dotsBusy = false;
+                if (note) note.textContent = t("geo.dots_fail");
+            });
+        } catch (e) {
+            dotsBusy = false;
+            if (note) note.textContent = t("geo.dots_fail");
+        }
+    }
+
+    /** Первый клик только переспрашивает: кнопка рядом с картой, промахнуться легко. */
+    function onDots(btn) {
+        var act = btn.getAttribute("data-dots") || "clear";
+        if (act === "restore") {
+            dotsRequest("restore", btn);
+            return;
+        }
+        if (btn.classList.contains("ask")) {
+            if (askTimer) { global.clearTimeout(askTimer); askTimer = null; }
+            btn.classList.remove("ask");
+            dotsRequest("clear", btn);
+            return;
+        }
+        btn.classList.add("ask");
+        btn.textContent = t("geo.dots_confirm");
+        if (askTimer) global.clearTimeout(askTimer);
+        askTimer = global.setTimeout(function () {
+            askTimer = null;
+            if (btn.isConnected === false) return;
+            btn.classList.remove("ask");
+            btn.textContent = t("geo.dots_clear");
+        }, 6000);
+    }
+
+    /** Дать гостю пробный доступ заново: сброс таймера слоёв (web_layers). */
+    function resetTrial(who, btn) {
+        if (!who) return;
+        if (btn) btn.disabled = true;
+        try {
+            global.fetch("/api/admin/layers/reset", {
+                method: "POST", credentials: "same-origin",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ who: who }),
+            }).then(function (r) { return r.json(); }).then(function (d) {
+                if (btn) btn.disabled = false;
+                if (!d || !d.ok) return;
+                load();
+            }).catch(function () { if (btn) btn.disabled = false; });
+        } catch (e) { if (btn) btn.disabled = false; }
+    }
+
     function periodButtons(data) {
         var list = (data && data.periods) || ["24h", "7d", "30d"];
         return list.map(function (key) {
@@ -581,13 +710,25 @@
     function shell() {
         return '<div class="geo-head"><div class="geo-periods" id="geo-periods">' +
             periodButtons() + "</div>" +
+            dotsBar() +
             '<p class="geo-lead" data-i18n="geo.lead">' + esc(t("geo.lead")) +
             "</p></div>" + '<div id="geo-body" class="geo-body"></div>';
     }
 
     function onClick(event) {
-        var btn = event.target && event.target.closest
-            ? event.target.closest("[data-period]") : null;
+        var target = event.target;
+        if (!target || !target.closest) return;
+        var trial = target.closest("[data-trial]");
+        if (trial) {
+            resetTrial(trial.getAttribute("data-trial") || "", trial);
+            return;
+        }
+        var dots = target.closest("[data-dots]");
+        if (dots) {
+            onDots(dots);
+            return;
+        }
+        var btn = target.closest("[data-period]");
         if (!btn) return;
         period = btn.getAttribute("data-period") || "24h";
         var box = global.document.getElementById("geo-periods");

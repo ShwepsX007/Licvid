@@ -10,9 +10,9 @@ HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
 
 from channel_digest import (  # noqa: E402
-    CAPTION_LIMIT, VARIANT_COUNT, _dwidth, _headlines, _mono, collect_digest,
-    format_headline, list_images, money, pick_image, post_has_hours,
-    render_post, short_money,
+    CAPTION_LIMIT, VARIANT_COUNT, _dwidth, _headlines, _mono, caption_fit,
+    caption_len, collect_digest, cut_utf16, format_headline, list_images, money,
+    pick_image, post_has_hours, render_post, short_money,
 )
 
 
@@ -180,30 +180,36 @@ class DigestTest(unittest.TestCase):
         self.assertLess(t.index("13:00"), t.index("10:00"))  # свежий первым
         self.assertNotIn("00:00", t)         # часы в МСК, а не в эпохе
         self.assertIn("к прошлым 4ч", t)
-        self.assertIn("📊 OI", t)
+        self.assertIn("📊 Сдвиг OI", t)      # OI окна — в строке подробностей
         self.assertTrue(post_has_hours(t))   # второй пост с топом не нужен
 
-    def test_hours_have_liqs_oi_and_cvd(self):
-        """Час — одной строкой: касса, OI и CVD долей объёма в одном ряду."""
+    def test_hour_line_carries_its_leader(self):
+        """Час — одна строка: когда горело, на сколько и кто задавал час.
+
+        Раньше под каждым часом шло ещё две строки (сам час с OI и CVD и
+        лидер). Пост выходил длиннее лимита подписи Telegram и уходил без
+        фотографии. Теперь у часа одна строка, а OI и CVD часа остались в
+        терминале и в строке окна.
+        """
         snap = collect_digest(self.events, now=self.now, oi=self.oi, cvd=self.cvd)
         snap["board"] = _board()
         t = render_post(snap, 0)
-        # четыре часа: касса с эмодзи направления, OI, CVD от объёма
         # процент к предыдущему часу — у каждого часа, кроме самого первого
         with_pct = re.findall(
             r"🕘 <b>\d{2}:00</b>(?: \(идёт\))? 💥 <b>\$[\d.]+[KMB]</b> [📈📉]", t)
         self.assertEqual(len(with_pct), 3, t)
-        self.assertEqual(t.count("📊 OI "), 4)          # OI часа — в его же строке
-        self.assertEqual(t.count("% объёма"), 5)        # четыре часа + строка окна
-        self.assertEqual(t.count("🌊 CVD"), 5)          # четыре часа + строка окна
+        hours = [ln for ln in t.splitlines() if ln.startswith("🕘 <b>")]
+        self.assertEqual(len(hours), 4, t)
+        for line in hours:
+            self.assertIn("💥", line, line)                 # касса часа
+            self.assertIn("🏆 Лидер часа:", line, line)     # и её лидер
+            self.assertNotIn("📊 OI", line, line)           # OI часа — не в посте
+            self.assertNotIn("🌊 CVD", line, line)          # CVD часа — не в посте
+        # строка окна (CVD за окно) остаётся, пока влезает в подпись
         self.assertIn("🌊 CVD за 4ч", t)
+        self.assertEqual(t.count("% объёма"), 1, t)
         self.assertGreaterEqual(t.count("📈"), 3)
-        self.assertGreaterEqual(t.count("📉"), 2)
-        # час — ровно одна строка цифр: OI и CVD стоят в ней же, а не под ней
-        for line in t.splitlines():
-            if line.startswith("🕘 <b>"):
-                self.assertIn("📊 OI", line, line)
-                self.assertIn("🌊 CVD", line, line)
+        self.assertLessEqual(caption_len(t), CAPTION_LIMIT, caption_len(t))
 
     def test_hour_leaders_survive_in_both_languages(self):
         """Лидеры часа есть и в русском посте, и в английском.
@@ -219,24 +225,25 @@ class DigestTest(unittest.TestCase):
             t = render_post(snap, 0, lang=lang)
             self.assertEqual(t.count(mark), 4, (lang, t))
             self.assertEqual(t.count("🕘 <b>"), 4, (lang, t))
-        # длинная шапка сжимает строки окна, но лидеры часа остаются в обоих
+        # длинная шапка убирает подробности окна, но часы с лидерами остаются
         long_head = "🧪 " + "очень длинная шапка от ИИ " * 5
         for lang in ("ru", "en"):
             t = render_post(snap, 0, lang=lang, head_override=long_head)
             self.assertEqual(t.count("🕘 <b>"), 4, (lang, t))
             self.assertIn("🏆", t, (lang, t))
-            # все пять строк с 🏆: лидер окна и четыре лидера часов
-            stars = [ln for ln in t.splitlines() if ln.startswith("🏆")]
-            self.assertEqual(len(stars), 5, (lang, t))
-            self.assertLessEqual(len(t), CAPTION_LIMIT, (lang, len(t)))
-        # совсем тесная подпись: лидер часа уходит в короткий вид без слов
-        # «Лидер часа», но не пропадает
+            # пять «🏆»: лидер окна и четыре лидера часов (по одному в строке)
+            self.assertEqual(t.count("🏆"), 5, (lang, t))
+            self.assertEqual(len([ln for ln in t.splitlines()
+                                  if ln.startswith("🕘 <b>") and "🏆" in ln]), 4,
+                             (lang, t))
+            self.assertLessEqual(caption_len(t), CAPTION_LIMIT, (lang, caption_len(t)))
+        # совсем тесная подпись: у часа остаётся касса и короткий лидер,
+        # но ни один час и ни один лидер не пропадает
         huge = "🧪 " + "шапка " * 40
         t = render_post(snap, 0, lang="ru", head_override=huge)
-        self.assertNotIn("🏆 Лидер часа:", t)
-        under_hours = [ln for ln in t.splitlines() if ln.startswith("🏆 <b>")]
-        self.assertEqual(len(under_hours), 4, t)              # все четыре часа
-        self.assertLessEqual(len(t), CAPTION_LIMIT, len(t))
+        self.assertEqual(t.count("🕘 <b>"), 4, t)              # все четыре часа
+        self.assertEqual(t.count("🏆"), 5, t)                  # и все их лидеры
+        self.assertLessEqual(caption_len(t), CAPTION_LIMIT, caption_len(t))
 
     def test_hour_leaders_with_long_live_head(self):
         """Живой случай: длинная шапка и крупные цифры — лидеры часа остаются.
@@ -254,16 +261,14 @@ class DigestTest(unittest.TestCase):
         long_head = "🧪 " + "рынок кипит " * 40          # длиннее 240 знаков
         for lang in ("ru", "en"):
             t = render_post(snap, 0, lang=lang, head_override=long_head)
-            self.assertLessEqual(len(t), CAPTION_LIMIT, (lang, len(t)))
-            lines = t.splitlines()
-            under = [i for i, ln in enumerate(lines) if ln.startswith("🕘 <b>")]
-            self.assertEqual(len(under), 4, (lang, t))
-            for i in under:
-                self.assertTrue(lines[i + 1].startswith("🏆 "), (lang, t))
-            # лидер окна и четыре лидера часа — каждый час с деньгами (💰)
-            stars = [ln for ln in lines if ln.startswith("🏆 ")]
-            self.assertEqual(len(stars), 5, (lang, t))
-            self.assertEqual(sum(1 for ln in stars if "💰" in ln), 4, (lang, t))
+            self.assertLessEqual(caption_len(t), CAPTION_LIMIT, (lang, caption_len(t)))
+            hours = [ln for ln in t.splitlines() if ln.startswith("🕘 <b>")]
+            self.assertEqual(len(hours), 4, (lang, t))
+            for line in hours:
+                self.assertIn("🏆", line, (lang, line))     # час не без лидера
+            # лидер окна и четыре лидера часа
+            self.assertEqual(t.count("🏆"), 5, (lang, t))
+            self.assertEqual(sum(1 for ln in hours if "💰" in ln), 4, (lang, t))
         # у русского канала при этом нет слов «Лидер часа»: подпись и так полна
         t = render_post(snap, 0, lang="ru", head_override=long_head)
         self.assertNotIn("🏆 Лидер часа:", t)
@@ -319,6 +324,7 @@ class DigestTest(unittest.TestCase):
         t = render_post(snap, 0, head_override=head)
         self.assertLessEqual(len(t), CAPTION_LIMIT)
         self.assertEqual(t.count("🕘 <b>"), 4)     # ни один час не потерялся
+        self.assertEqual(t.count("🏆"), 5)         # лидеры окна и часов — тоже
         self.assertIn("% объёма", t)
         self.assertNotIn("<pre>", t)
         self.assertNotIn("🔝", t)                  # короткий вид — без монет
@@ -643,6 +649,63 @@ class DigestCoverTest(unittest.TestCase):
         self.assertEqual(self.api.cover_variant("2026-09-07"), 7)
         self.assertEqual(self.api.cover_variant(""), 0)
         self.assertEqual(self.api.cover_variant("мусор"), 0)
+
+
+
+class CaptionLimitTest(unittest.TestCase):
+    """Подпись под фото: Telegram считает единицы UTF-16, а не «знаки» len().
+
+    Это была настоящая причина «в русский канал не пришло фото»: ``len()``
+    считает эмодзи одним знаком, Telegram — двумя. Пост на 1000 знаков с
+    тридцатью эмодзи весит 1030 — и ``sendPhoto`` такую подпись отклоняет,
+    а бот отправляет текст. Русский пост длиннее английского, поэтому фото
+    терял именно он.
+    """
+
+    def test_caption_len_counts_emoji_like_telegram(self) -> None:
+        self.assertEqual(caption_len("абв"), 3)
+        self.assertEqual(caption_len("💥"), 2)
+        self.assertEqual(caption_len("💥 4ч"), 5)
+        self.assertEqual(caption_len(""), 0)
+
+    def test_shared_with_the_bot(self) -> None:
+        """У бота и у сводки одно правило счёта: иначе снова разъедется."""
+        from tg_bot import caption_len as bot_len  # noqa: E402
+        for text in ("💥 $16.49M · 5303 ликвидации", "🌊 CVD за 4ч: 🔴 3.1% объёма"):
+            self.assertEqual(bot_len(text), caption_len(text))
+
+    def test_every_post_fits_the_caption_as_telegram_counts(self) -> None:
+        """Пост любой длины и на любом языке должен влезать в подпись под фото."""
+        for board in (_board(), _live_board()):
+            for lang in ("ru", "en"):
+                snap = {"window_h": 4, "total_usd": board["total_usd"],
+                        "count": board["count"], "longs_usd": 3_000_000.0,
+                        "shorts_usd": 1_000_000.0, "board": board}
+                t = render_post(snap, 0, lang=lang)
+                self.assertLessEqual(caption_len(t), CAPTION_LIMIT,
+                                     (lang, caption_len(t)))
+                self.assertTrue(post_has_hours(t), "часы в посте должны остаться")
+
+    def test_cut_utf16_does_not_split_an_emoji(self) -> None:
+        """Разрезанный эмодзи Telegram читает как мусор — режем по границе."""
+        self.assertEqual(cut_utf16("💥💥", 3), "💥")
+        self.assertEqual(cut_utf16("абв", 2), "аб")
+        self.assertEqual(cut_utf16("абв", 0), "")
+
+    def test_caption_fit_keeps_the_brand_tail(self) -> None:
+        """Подпись бренда со ссылками не режем: без неё пост теряет бренд."""
+        body = "\n".join(f"🕘 {12 + i}:15 💥 $3.7M · 📊 OI $47.4B · 🌊 CVD 🔴 0.5%"
+                          for i in range(40))
+        tail = "— <i>LiqScope</i>\n🌐 <a href=\"https://liqscope.online\">liqscope.online</a> · 🤖 бот\n💠 Торговать на Gate — скидка"
+        fit = caption_fit(body + "\n\n" + tail)
+        self.assertLessEqual(caption_len(fit), CAPTION_LIMIT)
+        self.assertIn("liqscope.online", fit)
+        self.assertIn("Gate", fit)
+
+    def test_caption_fit_leaves_a_short_post_alone(self) -> None:
+        text = "💥 $16.49M · 5303 ликвидации\n\n— <i>LiqScope</i>"
+        self.assertEqual(caption_fit(text), text)
+        self.assertEqual(caption_fit(""), "")
 
 
 if __name__ == "__main__":

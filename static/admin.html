@@ -129,6 +129,26 @@
         </div>
     </div>
 
+    <!-- ☰ Пробный доступ к слоям (web_layers): сколько минут гость без
+         регистрации может включать слои в терминале. Значение живёт в
+         настройках сайта; если задана переменная окружения — она главнее, и
+         карточка об этом честно пишет. Живые гости с остатком времени — в
+         карточке карты: там же кнопка «дать ещё». -->
+    <div class="card" id="layers-card" style="margin-top:14px" data-hint="пробный доступ гостей к слоям">
+        <h3 data-i18n="adm.layers_title">☰ Пробный доступ к слоям</h3>
+        <p class="lead" data-i18n="adm.layers_lead">Сколько минут гость без регистрации может включать слои в терминале. 0 — слои открыты всем и всегда.</p>
+        <div class="row-actions">
+            <label class="bot-num"><span data-i18n="adm.layers_min">Минуты</span>
+                <input id="layers-min" type="number" min="0" max="1440" step="5"
+                       autocomplete="off"></label>
+            <button class="btn btn-primary" id="layers-save" type="button" data-i18n="adm.layers_save">Сохранить</button>
+            <button class="btn" id="layers-reset" type="button" data-i18n="adm.layers_reset_all">↺ Сбросить таймер всем</button>
+            <span class="meta" id="layers-status" role="status"></span>
+        </div>
+        <p class="meta" id="layers-stats"></p>
+        <p class="meta" id="layers-note"></p>
+    </div>
+
     <div class="card" style="margin-top:14px" data-hint="шапки и картинки постов">
         <h3>Сводка в канал — шапки и фото</h3>
         <p class="lead">Каждый пост берёт следующую шапку и картинку по кругу. Можно писать как блогер; <code>{h}</code> подставится как «4» (окно в часах). То же самое есть в боте: Админка → Шаблоны канала.</p>

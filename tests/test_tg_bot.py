@@ -848,8 +848,12 @@ class BotMenuTest(unittest.TestCase):
         self.assertEqual(posts[0]["kind"], "photo")
         caption = posts[0]["text"]
         self.assertEqual(caption.count("🕘 <b>"), 4)      # все четыре часа
-        self.assertEqual(caption.count("📊 OI"), 4)       # OI по каждому часу
-        self.assertIn("CVD", caption)                     # и CVD часа
+        # час — одна строка с кассой и лидером; OI и CVD часа в пост не идут
+        for line in caption.splitlines():
+            if line.startswith("🕘 <b>"):
+                self.assertIn("💥", line, line)
+                self.assertIn("🏆", line, line)
+                self.assertNotIn("📊 OI", line, line)
         self.assertNotIn("<pre>", caption)                # рамки с цифрами нет
         self.assertIn("к прошлым 4ч", caption)
         self.assertIn("Gate", caption)
@@ -1109,14 +1113,27 @@ class BotMenuTest(unittest.TestCase):
         self.assertTrue(any("t.me/" in (u or "") for u in urls))
 
     def test_digest_long_caption_still_one_message(self):
+        """Подпись длиннее лимита — фото всё равно уходит, подпись подрезается.
+
+        Раньше такой пост отправлялся текстом: Telegram отклоняет подпись
+        длиннее 1024 знаков, и «фото важнее» решалось в пользу текста. Из-за
+        этого русский канал оставался без картинки, пока английский её получал.
+        Теперь режем хвост подписи по целым строкам и шлём фотографией.
+        """
         self.bot._channel_id_cfg = "-100111"
         import channel_digest
+        from channel_digest import CAPTION_LIMIT, caption_len
         orig = channel_digest.render_post
-        channel_digest.render_post = lambda *_a, **_k: "x" * 2000
+        tail = ("\n\n— <i>LiqScope</i>\n"
+                "🌐 <a href=\"https://liqscope.online\">liqscope.online</a> · 🤖 бот")
+        channel_digest.render_post = lambda *_a, **_k: ("💥 " + "рынок сыпется. " * 60
+                                                       + "\n🕘 19:15 💥 $3.7M" + tail)
         calls = []
+        captured = {}
 
-        async def fake_photo(*_a, **_k):
+        async def fake_photo(_cid, _path, caption="", *_a, **_k):
             calls.append("photo")
+            captured["caption"] = caption
             return 11
 
         async def fake_send(*_a, **_k):
@@ -1130,7 +1147,10 @@ class BotMenuTest(unittest.TestCase):
         finally:
             channel_digest.render_post = orig
         self.assertTrue(ok)
-        self.assertEqual(calls, ["text"])
+        self.assertEqual(calls, ["photo"], "фото не должно теряться из-за длины подписи")
+        cap = captured.get("caption") or ""
+        self.assertLessEqual(caption_len(cap), CAPTION_LIMIT)
+        self.assertIn("liqscope.online", cap, "подпись бренда остаётся")
 
     def test_digest_shows_telegram_error(self):
         self.bot._channel_id_cfg = "-100111"

@@ -153,7 +153,28 @@
     "adm.trial_line": "Layer trial ({min} min): {n} guests, {stuck} have already seen the sign-up offer",
     "adm.trial_none": "Layer trial ({min} min): no guests yet",
     "seo.hourly.title": "Hourly market summaries — LiqScope channel posts",
-    "seo.hourly.desc": "Crypto futures market summaries every few hours: liquidations of the window, hour leaders, turnover and open interest. The very posts from our channel, with photos — day-by-day archive."
+    "seo.hourly.desc": "Crypto futures market summaries every few hours: liquidations of the window, hour leaders, turnover and open interest. The very posts from our channel, with photos — day-by-day archive.",
+    "adm.layers_title": "☰ Layers trial access",
+    "adm.layers_lead": "How many minutes a guest without an account can use the chart layers in the terminal. 0 — layers are open to everyone, always.",
+    "adm.layers_min": "Minutes",
+    "adm.layers_save": "Save",
+    "adm.layers_reset_all": "↺ Restart everyone's timer",
+    "adm.layers_stats": "Trying the layers now: {active} · hit the wall: {expired} · guests total: {total}",
+    "adm.layers_now": "Applies at once: the clock runs from the guest's first visit, so the change also affects those already in the terminal.",
+    "adm.layers_locked": "The value is set on the server by {env} — it cannot be changed from the site.",
+    "adm.layers_saved": "Saved: guests get {min} min of trial access.",
+    "adm.layers_off": "Saved: the limit is off, layers are open to everyone.",
+    "adm.layers_fail": "Could not save — please try again.",
+    "adm.layers_reset_done": "Timer restarted for {n} guests: they start over.",
+    "adm.layers_reset_none": "Nothing to reset: there are no trial guests yet.",
+    "geo.dots_clear": "🧹 Hide old dots",
+    "geo.dots_confirm": "🧹 Hide them?",
+    "geo.dots_restore": "↩ Show all dots",
+    "geo.dots_note": "Dots after {time} · hidden: {n}",
+    "geo.dots_fail": "Could not change the dots — please try again.",
+    "geo.col_trial": "Layers trial",
+    "geo.trial_over": "over",
+    "geo.trial_more": "Give {min} more minutes of trial access"
   },
   "phrases": {
     "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "One post every N hours: the post window is those same N hours, and the analysis block inside the post is a quarter of the window (every 4 h → one hour, every 1 h → 15 minutes).",
@@ -896,6 +917,7 @@
     "сверх пачки:": "beyond the batch:",
     "В постах картинки из комплекта. Загрузите свои — набор заменится.": "Posts use pictures from the built-in set. Upload your own — the set is replaced.",
     "jpg, png, webp — до 12 МБ": "jpg, png, webp — up to 12 MB",
-    "шт.": "pcs"
+    "шт.": "pcs",
+    "пробный доступ гостей к слоям": "guest trial access to the layers"
   }
 }

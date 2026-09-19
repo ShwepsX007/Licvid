@@ -42,9 +42,12 @@ def caption_len(text: str) -> int:
 
     Лимит подписи под фотографией — 1024 «знака»; в UTF-16 эмодзи занимают по
     две единицы, поэтому пост, который по ``len()`` проходит, Telegram может
-    отклонить. Считаем честно — тогда фото не теряется из-за пары эмодзи.
+    отклонить. Считает одна общая функция (channel_digest.caption_len) —
+    иначе подбор блоков и отправка снова разъедутся, и русский пост опять
+    уйдёт без фото.
     """
-    return len(str(text or "").encode("utf-16-le")) // 2
+    from channel_digest import caption_len as shared
+    return shared(text)
 
 
 def normalize_public_url(url: str = "") -> str:
@@ -1538,8 +1541,17 @@ class TelegramBot:
         photos = [x for x in (images if images is not None else
                               ([img] if img else [])) if x and os.path.isfile(x)]
         ok = False
-        if photos and caption_len(caption) <= CAPTION_LIMIT:
-            ok = bool(await self.send_photo(cid, photos[0], caption, markup))
+        if photos:
+            # фото важнее хвоста цифр: если подпись не влезает, подрезаем её
+            # (по целым строкам, подпись бренда оставляем) и всё равно шлём
+            # картинкой. Раньше пост с длинной подписью уходил текстом — так
+            # русский канал и остался без фото, пока английский его получал.
+            from channel_digest import caption_fit
+            fit = caption_fit(caption)
+            if fit != caption:
+                log.warning("подпись %s знаков > лимита %s — хвост обрезан, "
+                            "фото уходит", caption_len(caption), CAPTION_LIMIT)
+            ok = bool(await self.send_photo(cid, photos[0], fit, markup))
         if not ok:
             ok = bool(await self.send(cid, caption, markup))
         if ok and top:
@@ -1563,8 +1575,8 @@ class TelegramBot:
         shown = " · ".join(
             f"{'🇬🇧' if lang == 'en' else '🇷🇺'} {n}" for lang, n in sizes)
         long = max(n for _, n in sizes) > CAPTION_LIMIT
-        tail = ("длиннее лимита подписи (1024) — фото не прикрепится, пост уйдёт "
-                "текстом" if long else "влезает в подпись под фото")
+        tail = ("длиннее лимита подписи (1024) — хвост поста обрежется, но фото "
+                "уйдёт" if long else "влезает в подпись под фото")
         return f"<i>Подпись: {shown} знаков — {tail}.</i>"
 
     @staticmethod

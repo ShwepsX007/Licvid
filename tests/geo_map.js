@@ -36,7 +36,9 @@ const FIXTURE = {
       user: { id: 1, name: "Вася" } },
     { vid: "cc22dd", country: "DE", name: "Germany", lat: 51.11, lon: 10.42,
       sec: 65, views: 2, path: "/cabinet", source: "", source_kind: "direct",
-      online: true, first_ts: NOW - 65, last_ts: NOW, user: null },
+      online: true, first_ts: NOW - 65, last_ts: NOW, user: null,
+      trial: { who: "v:cc22dd", left_sec: 900, hits: 3, expired: false,
+               minutes: 30 } },
   ],
   points: [
     { vid: "aa11bb", country: "FI", name: "Finland", lat: 65.48, lon: 25.77,
@@ -72,6 +74,8 @@ const FIXTURE = {
   ],
   paths: [{ path: "/terminal", n: 12 }, { path: "/", n: 8 }],
   geo: { edge: true, enabled: true, provider: "country.is", cache_days: 30 },
+  dots_after: 0, dots_shown: 3, dots_hidden: 0,
+  layers: { minutes: 30, locked: false, enabled: true },
   now: NOW,
 };
 
@@ -106,7 +110,8 @@ async function openAdmin(routes) {
       win.fetch = async (url, opts) => {
         const u = String(url);
         const method = ((opts || {}).method || "GET").toUpperCase();
-        reqs.push({ url: u, method });
+
+        reqs.push({ url: u, method, body: (opts || {}).body || "" });
         const data = routes(u, method, opts);
         return { ok: true, status: 200, json: async () => data };
       };
@@ -118,10 +123,27 @@ async function openAdmin(routes) {
 
 const ADMIN = { id: 1, first_name: "Босс", is_admin: true, email: "boss@liqscope.online" };
 
+const ALL_POINTS = FIXTURE.points.slice();
+
 function adminRoutes(geo) {
-  return (u) => {
+  return (u, method) => {
     if (u.indexOf("/api/auth/me") === 0) return { ok: true, user: ADMIN, verified: true };
+    if (u.indexOf("/api/admin/geo/dots/clear") === 0) {
+      // как сервер: старые точки прячем, живые гости остаются на карте
+      const all = geo.points || [];
+      geo.points = all.filter((p) => p.online);
+      geo.dots_after = NOW;
+      geo.dots_shown = geo.points.length;
+      geo.dots_hidden = all.length - geo.points.length;
+      return { ok: true, dots_after: NOW, keep_sec: 300 };
+    }
+    if (u.indexOf("/api/admin/geo/dots/reset") === 0) {
+      geo.points = ALL_POINTS.slice();
+      geo.dots_after = 0; geo.dots_shown = 3; geo.dots_hidden = 0;
+      return { ok: true, dots_after: 0 };
+    }
     if (u.indexOf("/api/admin/geo") === 0) return geo;
+    if (u.indexOf("/api/admin/layers/reset") === 0) return { ok: true, reset: 1 };
     if (u.indexOf("/api/visit/ping") === 0) return { ok: true, counted: true };
     if (u.indexOf("/api/feedback") === 0) return { ok: true, unread: 0, messages: [] };
     return { ok: false };
@@ -392,6 +414,83 @@ async function main() {
   check("пусто: видно, что страна берётся у внешнего сервиса",
         /country\.is/.test(edoc.querySelector(".geo-legend").textContent),
         edoc.querySelector(".geo-legend").textContent);
+
+  // --- пробник слоёв у живого гостя ---------------------------------------
+  win.LiqScopeI18n.set("ru");      // дальше проверяем русские подписи
+  await wait(120);
+  const trialHead = Array.prototype.map.call(
+    doc.querySelectorAll("#geo-live thead th"),
+    (th) => th.textContent).join(" ");
+  check("в таблице «сейчас на сайте» есть столбец пробника слоёв",
+        /Пробник слоёв/.test(trialHead), trialHead);
+  const liveRows = doc.querySelectorAll("#geo-live tbody tr");
+  const trialBtn = liveRows[1] && liveRows[1].querySelector("[data-trial]");
+  check("гостю видно остаток пробника (15 мин из 30)",
+        !!trialBtn && /15 мин/.test(liveRows[1].textContent),
+        liveRows[1] && liveRows[1].textContent);
+  check("у гостя без пробника — прочерк и нет кнопки",
+        !!liveRows[0] && !liveRows[0].querySelector("[data-trial]") &&
+        /—/.test(liveRows[0].textContent), liveRows[0] && liveRows[0].textContent);
+  check("кнопка «дать ещё» знает, кому сбрасывать таймер",
+        !!trialBtn && trialBtn.getAttribute("data-trial") === "v:cc22dd",
+        trialBtn && trialBtn.getAttribute("data-trial"));
+  if (trialBtn) {
+    trialBtn.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true }));
+    await wait(120);
+  }
+  const trialReq = reqs.filter((r) => r.url.indexOf("/api/admin/layers/reset") === 0).pop();
+  check("сброс таймера уходит на сервер с ключом гостя",
+        !!trialReq && trialReq.method === "POST" &&
+        /"who":"v:cc22dd"/.test(String(trialReq.body || "")),
+        trialReq && trialReq.method + " " + trialReq.body);
+
+  // --- кнопка «убрать старые точки» ---------------------------------------
+  const dotsBtn = doc.getElementById("geo-dots");
+  check("кнопка уборки точек стоит рядом с картой",
+        !!dotsBtn && /Убрать старые точки/.test(dotsBtn.textContent),
+        dotsBtn && dotsBtn.textContent);
+  check("пока точек не прятали — обещаем убрать, а не вернуть",
+        !!dotsBtn && dotsBtn.getAttribute("data-dots") === "clear");
+  const dotCount = () => doc.querySelectorAll(".geo-dot").length;
+  const markCount = () => doc.querySelectorAll(".geo-dot, .geo-live-dot").length;
+  check("до уборки на карте и старая точка, и живые гости",
+        dotCount() === 1 && markCount() === 3,
+        dotCount() + " точек, " + markCount() + " меток");
+  if (dotsBtn) {
+    dotsBtn.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true }));
+    await wait(60);
+  }
+  check("первый клик только переспрашивает",
+        !!dotsBtn && /Точно убрать/.test(dotsBtn.textContent) &&
+        !reqs.some((r) => r.url.indexOf("dots/clear") === 0),
+        dotsBtn && dotsBtn.textContent);
+  if (dotsBtn) {
+    dotsBtn.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true }));
+    await wait(160);
+  }
+  const clearReq = reqs.filter((r) => r.url.indexOf("/api/admin/geo/dots/clear") === 0).pop();
+  check("второй клик убирает старые точки и оставляет тех, кто онлайн",
+        !!clearReq && clearReq.method === "POST" && /"keep_sec":300/.test(String(clearReq.body)),
+        clearReq && clearReq.method + " " + clearReq.body);
+  check("после уборки карточка говорит, сколько точек скрыто",
+        /скрыто 1/.test((doc.getElementById("geo-dots-note") || {}).textContent || ""),
+        (doc.getElementById("geo-dots-note") || {}).textContent);
+  check("старая точка исчезла с карты, живые остались",
+        dotCount() === 0 && markCount() === 2,
+        dotCount() + " точек, " + markCount() + " меток");
+  check("кнопка превращается в «вернуть точки»",
+        !!dotsBtn && dotsBtn.getAttribute("data-dots") === "restore" &&
+        /Вернуть точки/.test(dotsBtn.textContent), dotsBtn && dotsBtn.textContent);
+  if (dotsBtn) {
+    dotsBtn.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true }));
+    await wait(160);
+  }
+  const resetReq = reqs.filter((r) => r.url.indexOf("/api/admin/geo/dots/reset") === 0).pop();
+  check("возврат точек — один клик и без переспроса",
+        !!resetReq && resetReq.method === "POST",
+        resetReq && resetReq.method);
+  check("точки вернулись на карту", dotCount() === 1 && markCount() === 3,
+        dotCount() + " точек, " + markCount() + " меток");
 
   console.log("\nошибок в консоли: " + errors.length);
   errors.slice(0, 6).forEach((e) => console.log("   ! " + e));

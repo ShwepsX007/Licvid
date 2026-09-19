@@ -1518,6 +1518,51 @@ class Store:
         return {"total": total, "active": active, "expired": max(0, total - active),
                 "limit_sec": int(limit_sec)}
 
+    def layer_trial_reset(self, who: str = "") -> int:
+        """Сбросить пробный доступ к слоям: гостю (``who``) или всем (пусто).
+
+        Удаляем строку испытания — следующий запрос гостя заводит её заново и
+        получает полный лимит с текущей секунды. Админу это нужно, чтобы дать
+        человеку ещё времени, не меняя лимит для всех: сброс не выдаёт
+        бессрочный доступ, таймер просто начинается сначала.
+
+        Возвращаем, сколько строк удалили.
+        """
+        who = str(who or "").strip()[:80]
+        with self._lock:
+            if who:
+                cur = self._db.execute("DELETE FROM layer_trials WHERE who=?", (who,))
+            else:
+                cur = self._db.execute("DELETE FROM layer_trials")
+            self._db.commit()
+            return int(cur.rowcount or 0)
+
+    def layer_trials_of(self, whos: List[str]) -> Dict[str, Dict[str, Any]]:
+        """Что известно о пробниках этих гостей: когда пришли и сколько заходов.
+
+        Админке это нужно, чтобы рядом с живым гостем показать остаток пробного
+        доступа и кнопку «дать ещё»: ``who`` — тот же ключ, что и в
+        ``layer_trial`` (``v:<vid>`` у гостя с cookie, ``i:<хеш>`` без неё).
+        """
+        keys = [str(w or "")[:80] for w in (whos or []) if w]
+        if not keys:
+            return {}
+        out: Dict[str, Dict[str, Any]] = {}
+        marks = ",".join("?" for _ in keys)
+        with self._lock:
+            try:
+                rows = self._db.execute(
+                    f"SELECT who, started_at, last_seen, hits FROM layer_trials"
+                    f" WHERE who IN ({marks})", tuple(keys)).fetchall()
+            except Exception as e:                        # noqa: BLE001
+                log.debug("слои: пробники гостей не прочитались: %s", e)
+                return {}
+        for r in rows:
+            out[str(r["who"])] = {"started_at": float(r["started_at"] or 0.0),
+                                  "last_seen": float(r["last_seen"] or 0.0),
+                                  "hits": int(r["hits"] or 0)}
+        return out
+
     def visit_stats(self, days: int = 14) -> Dict[str, Any]:
         days = max(1, min(int(days), 90))
         since = _now() - days * 86400

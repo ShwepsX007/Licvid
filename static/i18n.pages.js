@@ -166,7 +166,28 @@ window.LIQSCOPE_I18N_PAGES =
       "adm.trial_line": "Пробные {min} минут слоёв: {n} гостей, {stuck} уже увидели предложение регистрации",
       "adm.trial_none": "Пробные {min} минут слоёв: гостей ещё не было",
       "seo.hourly.title": "Сводки по часам — посты канала LiqScope",
-      "seo.hourly.desc": "Сводки рынка крипто-фьючерсов каждые несколько часов: ликвидации окна, лидеры часов, оборот и открытый интерес. Те же посты, что выходят в канале, с фото — архив по дням."
+      "seo.hourly.desc": "Сводки рынка крипто-фьючерсов каждые несколько часов: ликвидации окна, лидеры часов, оборот и открытый интерес. Те же посты, что выходят в канале, с фото — архив по дням.",
+      "adm.layers_title": "☰ Пробный доступ к слоям",
+      "adm.layers_lead": "Сколько минут гость без регистрации может включать слои в терминале. 0 — слои открыты всем и всегда.",
+      "adm.layers_min": "Минуты",
+      "adm.layers_save": "Сохранить",
+      "adm.layers_reset_all": "↺ Сбросить таймер всем",
+      "adm.layers_stats": "Сейчас знакомятся: {active} · упёрлись в стену: {expired} · всего гостей: {total}",
+      "adm.layers_now": "Действует сразу: остаток считается от первого захода гостя, поэтому время меняется и у тех, кто уже в терминале.",
+      "adm.layers_locked": "Значение задано на сервере переменной {env} — с сайта не меняется.",
+      "adm.layers_saved": "Сохранено: гостям {min} мин пробного доступа.",
+      "adm.layers_off": "Сохранено: ограничение выключено, слои открыты всем.",
+      "adm.layers_fail": "Не получилось сохранить — попробуйте ещё раз.",
+      "adm.layers_reset_done": "Таймер сброшен у {n} гостей: знакомство начнётся заново.",
+      "adm.layers_reset_none": "Сбрасывать нечего: пробных гостей пока нет.",
+      "geo.dots_clear": "🧹 Убрать старые точки",
+      "geo.dots_confirm": "🧹 Точно убрать?",
+      "geo.dots_restore": "↩ Вернуть точки",
+      "geo.dots_note": "Точки после {time} · скрыто {n}",
+      "geo.dots_fail": "Не получилось изменить точки — попробуйте ещё раз.",
+      "geo.col_trial": "Пробник слоёв",
+      "geo.trial_over": "закончился",
+      "geo.trial_more": "Дать ещё {min} мин пробного доступа"
     },
     "phrases": {
       "🗑 Стереть статистику": "🗑 Стереть статистику",
@@ -196,7 +217,8 @@ window.LIQSCOPE_I18N_PAGES =
       "ошибок:": "ошибок:",
       "сверх пачки:": "сверх пачки:",
       "В постах картинки из комплекта. Загрузите свои — набор заменится.": "В постах картинки из комплекта. Загрузите свои — набор заменится.",
-      "🕘 Сводка на сайт": "🕘 Сводка на сайт"
+      "🕘 Сводка на сайт": "🕘 Сводка на сайт",
+      "пробный доступ гостей к слоям": "пробный доступ гостей к слоям"
     }
   },
   "en": {
@@ -354,7 +376,28 @@ window.LIQSCOPE_I18N_PAGES =
       "adm.trial_line": "Layer trial ({min} min): {n} guests, {stuck} have already seen the sign-up offer",
       "adm.trial_none": "Layer trial ({min} min): no guests yet",
       "seo.hourly.title": "Hourly market summaries — LiqScope channel posts",
-      "seo.hourly.desc": "Crypto futures market summaries every few hours: liquidations of the window, hour leaders, turnover and open interest. The very posts from our channel, with photos — day-by-day archive."
+      "seo.hourly.desc": "Crypto futures market summaries every few hours: liquidations of the window, hour leaders, turnover and open interest. The very posts from our channel, with photos — day-by-day archive.",
+      "adm.layers_title": "☰ Layers trial access",
+      "adm.layers_lead": "How many minutes a guest without an account can use the chart layers in the terminal. 0 — layers are open to everyone, always.",
+      "adm.layers_min": "Minutes",
+      "adm.layers_save": "Save",
+      "adm.layers_reset_all": "↺ Restart everyone's timer",
+      "adm.layers_stats": "Trying the layers now: {active} · hit the wall: {expired} · guests total: {total}",
+      "adm.layers_now": "Applies at once: the clock runs from the guest's first visit, so the change also affects those already in the terminal.",
+      "adm.layers_locked": "The value is set on the server by {env} — it cannot be changed from the site.",
+      "adm.layers_saved": "Saved: guests get {min} min of trial access.",
+      "adm.layers_off": "Saved: the limit is off, layers are open to everyone.",
+      "adm.layers_fail": "Could not save — please try again.",
+      "adm.layers_reset_done": "Timer restarted for {n} guests: they start over.",
+      "adm.layers_reset_none": "Nothing to reset: there are no trial guests yet.",
+      "geo.dots_clear": "🧹 Hide old dots",
+      "geo.dots_confirm": "🧹 Hide them?",
+      "geo.dots_restore": "↩ Show all dots",
+      "geo.dots_note": "Dots after {time} · hidden: {n}",
+      "geo.dots_fail": "Could not change the dots — please try again.",
+      "geo.col_trial": "Layers trial",
+      "geo.trial_over": "over",
+      "geo.trial_more": "Give {min} more minutes of trial access"
     },
     "phrases": {
       "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "One post every N hours: the post window is those same N hours, and the analysis block inside the post is a quarter of the window (every 4 h → one hour, every 1 h → 15 minutes).",
@@ -1097,7 +1140,8 @@ window.LIQSCOPE_I18N_PAGES =
       "сверх пачки:": "beyond the batch:",
       "В постах картинки из комплекта. Загрузите свои — набор заменится.": "Posts use pictures from the built-in set. Upload your own — the set is replaced.",
       "jpg, png, webp — до 12 МБ": "jpg, png, webp — up to 12 MB",
-      "шт.": "pcs"
+      "шт.": "pcs",
+      "пробный доступ гостей к слоям": "guest trial access to the layers"
     }
   },
   "zh": {
@@ -1255,7 +1299,28 @@ window.LIQSCOPE_I18N_PAGES =
       "adm.trial_line": "图层试用 {min} 分钟：{n} 位访客，其中 {stuck} 位已看到注册提示",
       "adm.trial_none": "图层试用 {min} 分钟：暂时没有访客",
       "seo.hourly.title": "小时市场简报 — LiqScope 频道帖子",
-      "seo.hourly.desc": "每几小时一次的加密期货市场简报：区间清算、小时冠军、成交额与未平仓合约。与频道发布的帖子相同，含图片，按日归档。"
+      "seo.hourly.desc": "每几小时一次的加密期货市场简报：区间清算、小时冠军、成交额与未平仓合约。与频道发布的帖子相同，含图片，按日归档。",
+      "adm.layers_title": "☰ 图层试用权限",
+      "adm.layers_lead": "未注册访客在终端可使用图层功能的分钟数。0 — 对所有人完全开放。",
+      "adm.layers_min": "分钟",
+      "adm.layers_save": "保存",
+      "adm.layers_reset_all": "↺ 重置所有计时",
+      "adm.layers_stats": "正在试用：{active} · 已到期：{expired} · 访客总数：{total}",
+      "adm.layers_now": "立即生效：计时从访客首次访问开始，因此已在终端中的访客也会受影响。",
+      "adm.layers_locked": "该值由服务器环境变量 {env} 指定，无法从网站修改。",
+      "adm.layers_saved": "已保存：访客可试用 {min} 分钟。",
+      "adm.layers_off": "已保存：限制已关闭，图层对所有人开放。",
+      "adm.layers_fail": "保存失败，请重试。",
+      "adm.layers_reset_done": "已为 {n} 位访客重置计时。",
+      "adm.layers_reset_none": "无需重置：暂无试用访客。",
+      "geo.dots_clear": "🧹 隐藏旧的点",
+      "geo.dots_confirm": "🧹 确认隐藏？",
+      "geo.dots_restore": "↩ 显示全部点",
+      "geo.dots_note": "仅显示 {time} 之后的点 · 已隐藏 {n}",
+      "geo.dots_fail": "无法修改点，请重试。",
+      "geo.col_trial": "图层试用",
+      "geo.trial_over": "已结束",
+      "geo.trial_more": "再给 {min} 分钟试用"
     },
     "phrases": {
       "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "每 N 小时发一篇：帖子窗口就是这 N 小时，帖内的分析块占窗口的四分之一（每 4 小时 → 每小时，每 1 小时 → 每 15 分钟）。",
@@ -1999,7 +2064,8 @@ window.LIQSCOPE_I18N_PAGES =
       "сверх пачки:": "超出本批：",
       "В постах картинки из комплекта. Загрузите свои — набор заменится.": "帖子使用的是内置图集。上传自己的 — 图集会替换。",
       "jpg, png, webp — до 12 МБ": "jpg、png、webp — 最大 12 MB",
-      "шт.": "笔"
+      "шт.": "笔",
+      "пробный доступ гостей к слоям": "访客的图层试用"
     }
   },
   "hi": {
@@ -2157,7 +2223,28 @@ window.LIQSCOPE_I18N_PAGES =
       "adm.trial_line": "लेयर ट्रायल ({min} मिनट): {n} मेहमान, {stuck} ने रजिस्ट्रेशन का प्रस्ताव देख लिया",
       "adm.trial_none": "लेयर ट्रायल ({min} मिनट): अभी कोई मेहमान नहीं",
       "seo.hourly.title": "हर घंटे की बाज़ार सारांश — LiqScope चैनल पोस्ट",
-      "seo.hourly.desc": "हर कुछ घंटों में क्रिप्टो फ़्यूचर्स बाज़ार की सारांश: विंडो के लिक्विडेशन, घंटे के लीडर, टर्नओवर और ओपन इंटरेस्ट। चैनल की वही पोस्ट, फ़ोटो के साथ — दिन-वार संग्रह।"
+      "seo.hourly.desc": "हर कुछ घंटों में क्रिप्टो फ़्यूचर्स बाज़ार की सारांश: विंडो के लिक्विडेशन, घंटे के लीडर, टर्नओवर और ओपन इंटरेस्ट। चैनल की वही पोस्ट, फ़ोटो के साथ — दिन-वार संग्रह।",
+      "adm.layers_title": "☰ लेयर ट्रायल एक्सेस",
+      "adm.layers_lead": "बिना अकाउंट वाला मेहमान टर्मिनल में लेयर कितने मिनट चला सकता है। 0 — लेयर सबके लिए खुली हैं।",
+      "adm.layers_min": "मिनट",
+      "adm.layers_save": "सेव करें",
+      "adm.layers_reset_all": "↺ सबका टाइमर रीसेट करें",
+      "adm.layers_stats": "अभी आज़मा रहे: {active} · समय खत्म: {expired} · कुल मेहमान: {total}",
+      "adm.layers_now": "तुरंत लागू: समय मेहमान की पहली विज़िट से गिना जाता है, इसलिए टर्मिनल में मौजूद लोगों पर भी असर होता है।",
+      "adm.layers_locked": "यह मान सर्वर पर {env} से तय है — साइट से बदला नहीं जा सकता।",
+      "adm.layers_saved": "सेव हो गया: मेहमानों को {min} मिनट ट्रायल।",
+      "adm.layers_off": "सेव हो गया: सीमा बंद, लेयर सबके लिए खुली।",
+      "adm.layers_fail": "सेव नहीं हुआ — फिर कोशिश करें।",
+      "adm.layers_reset_done": "{n} मेहमानों का टाइमर रीसेट हो गया।",
+      "adm.layers_reset_none": "रीसेट करने को कुछ नहीं: अभी कोई ट्रायल मेहमान नहीं।",
+      "geo.dots_clear": "🧹 पुराने बिंदु हटाएँ",
+      "geo.dots_confirm": "🧹 हटाना तय है?",
+      "geo.dots_restore": "↩ सारे बिंदु दिखाएँ",
+      "geo.dots_note": "{time} के बाद के बिंदु · छिपे {n}",
+      "geo.dots_fail": "बिंदु बदल नहीं पाए — फिर कोशिश करें।",
+      "geo.col_trial": "लेयर ट्रायल",
+      "geo.trial_over": "खत्म",
+      "geo.trial_more": "{min} मिनट और ट्रायल दें"
     },
     "phrases": {
       "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "हर N घंटे में एक पोस्ट: पोस्ट विंडो वही N घंटे है, और पोस्ट के भीतर विश्लेषण ब्लॉक विंडो का चौथाई है (हर 4 घंटे → एक घंटा, हर 1 घंटा → 15 मिनट)।",
@@ -2902,7 +2989,8 @@ window.LIQSCOPE_I18N_PAGES =
       "сверх пачки:": "बैच से अधिक:",
       "В постах картинки из комплекта. Загрузите свои — набор заменится.": "पोस्ट में बिल्ट-इन सेट की तस्वीरें हैं। अपनी अपलोड करें — सेट बदल जाएगा।",
       "jpg, png, webp — до 12 МБ": "jpg, png, webp — 12 MB तक",
-      "шт.": "इकाई"
+      "шт.": "इकाई",
+      "пробный доступ гостей к слоям": "मेहमानों के लिए लेयर ट्रायल"
     }
   },
   "es": {
@@ -3060,7 +3148,28 @@ window.LIQSCOPE_I18N_PAGES =
       "adm.trial_line": "Prueba de capas ({min} min): {n} invitados, {stuck} ya vieron la oferta de registro",
       "adm.trial_none": "Prueba de capas ({min} min): todavía no hubo invitados",
       "seo.hourly.title": "Resúmenes del mercado por horas — publicaciones del canal LiqScope",
-      "seo.hourly.desc": "Resúmenes del mercado de futuros cripto cada pocas horas: liquidaciones de la ventana, líderes de la hora, volumen e interés abierto. Las mismas publicaciones del canal, con foto, en un archivo por días."
+      "seo.hourly.desc": "Resúmenes del mercado de futuros cripto cada pocas horas: liquidaciones de la ventana, líderes de la hora, volumen e interés abierto. Las mismas publicaciones del canal, con foto, en un archivo por días.",
+      "adm.layers_title": "☰ Acceso de prueba a las capas",
+      "adm.layers_lead": "Cuántos minutos puede usar las capas del terminal un visitante sin cuenta. 0 — las capas están abiertas para todos, siempre.",
+      "adm.layers_min": "Minutos",
+      "adm.layers_save": "Guardar",
+      "adm.layers_reset_all": "↺ Reiniciar el contador a todos",
+      "adm.layers_stats": "Probando ahora: {active} · sin tiempo: {expired} · visitantes en total: {total}",
+      "adm.layers_now": "Se aplica al momento: el tiempo corre desde la primera visita, así que también cambia para quienes ya están en el terminal.",
+      "adm.layers_locked": "El valor lo fija el servidor con {env}: no se cambia desde el sitio.",
+      "adm.layers_saved": "Guardado: los visitantes reciben {min} min de prueba.",
+      "adm.layers_off": "Guardado: el límite está apagado, las capas son para todos.",
+      "adm.layers_fail": "No se pudo guardar, inténtalo otra vez.",
+      "adm.layers_reset_done": "Contador reiniciado para {n} visitantes.",
+      "adm.layers_reset_none": "No hay nada que reiniciar: aún no hay visitantes de prueba.",
+      "geo.dots_clear": "🧹 Ocultar puntos antiguos",
+      "geo.dots_confirm": "🧹 ¿Ocultarlos?",
+      "geo.dots_restore": "↩ Mostrar todos los puntos",
+      "geo.dots_note": "Puntos después de {time} · ocultos: {n}",
+      "geo.dots_fail": "No se pudieron cambiar los puntos, inténtalo otra vez.",
+      "geo.col_trial": "Prueba de capas",
+      "geo.trial_over": "agotada",
+      "geo.trial_more": "Dar {min} minutos más de prueba"
     },
     "phrases": {
       "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "Un post cada N horas: la ventana del post son esas mismas N horas, y el bloque de análisis dentro del post ocupa un cuarto de la ventana (cada 4 h → una hora, cada 1 h → 15 minutos).",
@@ -3804,7 +3913,8 @@ window.LIQSCOPE_I18N_PAGES =
       "сверх пачки:": "por encima del lote:",
       "В постах картинки из комплекта. Загрузите свои — набор заменится.": "Los posts usan imágenes del conjunto integrado. Sube las tuyas: el conjunto se reemplaza.",
       "jpg, png, webp — до 12 МБ": "jpg, png, webp — hasta 12 MB",
-      "шт.": "uds"
+      "шт.": "uds",
+      "пробный доступ гостей к слоям": "prueba de capas para visitantes"
     }
   }
 };

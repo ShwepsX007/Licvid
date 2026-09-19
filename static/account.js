@@ -218,7 +218,17 @@
     function t(k, vars) {
         var code = lang();
         var own = T[code] && T[code][k];          // своя строка словаря языка
-        var s = own !== undefined ? own : ((T[code] || T.ru)[k] || T.en[k] || k);
+        var s = own !== undefined ? own : ((T[code] || T.ru)[k] || T.en[k]);
+        if (s === undefined) {
+            // Ключа нет в своих словарях — берём общий словарь страниц
+            // (static/i18n/*.json): там живут админские и гео-строки, и он
+            // знает все пять языков сайта, а не только ru и en.
+            if (window.LiqScopeI18n && LiqScopeI18n.t) {
+                var page = LiqScopeI18n.t(k, vars);
+                if (page !== k) return page;
+            }
+            s = k;
+        }
         if (vars) {
             Object.keys(vars).forEach(function (name) {
                 s = s.replace(new RegExp("\\{" + name + "\\}", "g"), vars[name]);
@@ -2281,6 +2291,98 @@
         LiqScopeI18n.onChange(function () { if (lastTrials) paintTrials(lastTrials); });
     }
 
+    // --- ☰ Пробный доступ к слоям ------------------------------------------
+    // Сколько минут гость без регистрации может включать слои в терминале
+    // (web_layers). Правится здесь, действует сразу: остаток считается от
+    // первого захода гостя, поэтому новый лимит меняет его немедленно.
+    var lastLayers = null;      // последний ответ: нужен при смене языка
+
+    /** Нарисовать лимит, источник и воронку пробного доступа. */
+    function paintLayers(d) {
+        lastLayers = d || {};
+        var min = $("layers-min"), st = $("layers-status"), note = $("layers-note");
+        var stats = $("layers-stats");
+        if (min && document.activeElement !== min) {
+            min.value = Number(d.minutes || 0);
+        }
+        var locked = !!d.locked;
+        if (min) min.disabled = locked;
+        var save = $("layers-save");
+        if (save) save.disabled = locked;
+        var s = d.stats || {};
+        if (stats) {
+            stats.textContent = t("adm.layers_stats", {
+                active: Number(s.active || 0), expired: Number(s.expired || 0),
+                total: Number(s.total || 0),
+            });
+        }
+        if (note) {
+            note.textContent = locked
+                ? t("adm.layers_locked", { env: d.env_var || "" })
+                : t("adm.layers_now", { min: Number(d.minutes || 0) });
+        }
+        if (st && !st.textContent) st.textContent = "";
+    }
+
+    function loadLayers() {
+        if (!$("layers-card")) return Promise.resolve();
+        return api("/api/admin/layers/settings").then(function (d) {
+            if (d && d.ok) paintLayers(d);
+        });
+    }
+
+    /** Сохранить лимит: 0 выключает ограничение целиком. */
+    function saveLayers() {
+        var min = $("layers-min"), st = $("layers-status");
+        if (!min) return;
+        if (st) st.textContent = t("cab.loading");
+        api("/api/admin/layers/settings", {
+            method: "POST",
+            body: JSON.stringify({ minutes: Number(min.value || 0) }),
+        }).then(function (d) {
+            if (!d || !d.ok) {
+                if (st) st.textContent = d && d.error === "locked"
+                    ? t("adm.layers_locked", { env: d.env_var || "" })
+                    : t("adm.layers_fail");
+                return;
+            }
+            paintLayers(d);
+            if (st) st.textContent = Number(d.minutes || 0) <= 0
+                ? t("adm.layers_off") : t("adm.layers_saved", { min: d.minutes });
+        });
+    }
+
+    /** Сбросить таймер всем гостям: знакомство со слоями начнётся заново. */
+    function resetAllLayers() {
+        var st = $("layers-status");
+        if (st) st.textContent = t("cab.loading");
+        api("/api/admin/layers/reset", {
+            method: "POST", body: JSON.stringify({ all: true }),
+        }).then(function (d) {
+            if (!d || !d.ok) {
+                if (st) st.textContent = t("adm.layers_fail");
+                return;
+            }
+            paintLayers(d);
+            var n = Number(d.reset || 0);
+            if (st) st.textContent = n ? t("adm.layers_reset_done", { n: n })
+                                       : t("adm.layers_reset_none");
+        });
+    }
+
+    function bootLayers() {
+        if (!$("layers-card")) return;
+        var save = $("layers-save"), reset = $("layers-reset");
+        if (save) save.addEventListener("click", saveLayers);
+        if (reset) reset.addEventListener("click", resetAllLayers);
+        loadLayers();
+    }
+
+    if (window.LiqScopeI18n && LiqScopeI18n.onChange) {
+        // язык переключили — карточка лимита должна переехать вместе с сайтом
+        LiqScopeI18n.onChange(function () { if (lastLayers) paintLayers(lastLayers); });
+    }
+
     /** Цифры и график админки: перезагружаются после стирания статистики. */
     function loadOverview() {
         return api("/api/admin/overview").then(function (d) {
@@ -2432,6 +2534,7 @@
                 if (st) st.textContent = d.ok ? t("saved") : (d.error || "error");
             });
         });
+        bootLayers();           // лимит пробного доступа к слоям (web_layers)
         bootFolds();            // разделы сворачиваются — до остальных панелей, им нужны id
         bootDigestTpl();
         bootBotAdmin();

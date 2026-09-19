@@ -153,7 +153,28 @@
     "adm.trial_line": "Prueba de capas ({min} min): {n} invitados, {stuck} ya vieron la oferta de registro",
     "adm.trial_none": "Prueba de capas ({min} min): todavía no hubo invitados",
     "seo.hourly.title": "Resúmenes del mercado por horas — publicaciones del canal LiqScope",
-    "seo.hourly.desc": "Resúmenes del mercado de futuros cripto cada pocas horas: liquidaciones de la ventana, líderes de la hora, volumen e interés abierto. Las mismas publicaciones del canal, con foto, en un archivo por días."
+    "seo.hourly.desc": "Resúmenes del mercado de futuros cripto cada pocas horas: liquidaciones de la ventana, líderes de la hora, volumen e interés abierto. Las mismas publicaciones del canal, con foto, en un archivo por días.",
+    "adm.layers_title": "☰ Acceso de prueba a las capas",
+    "adm.layers_lead": "Cuántos minutos puede usar las capas del terminal un visitante sin cuenta. 0 — las capas están abiertas para todos, siempre.",
+    "adm.layers_min": "Minutos",
+    "adm.layers_save": "Guardar",
+    "adm.layers_reset_all": "↺ Reiniciar el contador a todos",
+    "adm.layers_stats": "Probando ahora: {active} · sin tiempo: {expired} · visitantes en total: {total}",
+    "adm.layers_now": "Se aplica al momento: el tiempo corre desde la primera visita, así que también cambia para quienes ya están en el terminal.",
+    "adm.layers_locked": "El valor lo fija el servidor con {env}: no se cambia desde el sitio.",
+    "adm.layers_saved": "Guardado: los visitantes reciben {min} min de prueba.",
+    "adm.layers_off": "Guardado: el límite está apagado, las capas son para todos.",
+    "adm.layers_fail": "No se pudo guardar, inténtalo otra vez.",
+    "adm.layers_reset_done": "Contador reiniciado para {n} visitantes.",
+    "adm.layers_reset_none": "No hay nada que reiniciar: aún no hay visitantes de prueba.",
+    "geo.dots_clear": "🧹 Ocultar puntos antiguos",
+    "geo.dots_confirm": "🧹 ¿Ocultarlos?",
+    "geo.dots_restore": "↩ Mostrar todos los puntos",
+    "geo.dots_note": "Puntos después de {time} · ocultos: {n}",
+    "geo.dots_fail": "No se pudieron cambiar los puntos, inténtalo otra vez.",
+    "geo.col_trial": "Prueba de capas",
+    "geo.trial_over": "agotada",
+    "geo.trial_more": "Dar {min} minutos más de prueba"
   },
   "phrases": {
     "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "Un post cada N horas: la ventana del post son esas mismas N horas, y el bloque de análisis dentro del post ocupa un cuarto de la ventana (cada 4 h → una hora, cada 1 h → 15 minutos).",
@@ -897,6 +918,7 @@
     "сверх пачки:": "por encima del lote:",
     "В постах картинки из комплекта. Загрузите свои — набор заменится.": "Los posts usan imágenes del conjunto integrado. Sube las tuyas: el conjunto se reemplaza.",
     "jpg, png, webp — до 12 МБ": "jpg, png, webp — hasta 12 MB",
-    "шт.": "uds"
+    "шт.": "uds",
+    "пробный доступ гостей к слоям": "prueba de capas para visitantes"
   }
 }

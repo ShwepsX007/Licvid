@@ -224,7 +224,7 @@ class HourBoardTest(unittest.TestCase):
         self.assertIn("🏆 Hour leader:", render_post(snap, 0, lang="en"))
 
     def test_post_shows_hours_without_frame(self):
-        """Пост: четыре часа, у каждого OI и CVD — простым текстом, без <pre>."""
+        """Пост: четыре часа по строке на час, без <pre>."""
         board = self._full(flows=self._flows())
         snap = {"window_h": 4, "count": 30, "total_usd": board["total_usd"],
                 "longs_usd": 6_000_000, "shorts_usd": 5_700_000,
@@ -232,8 +232,14 @@ class HourBoardTest(unittest.TestCase):
         ru = render_post(snap, 0)
         self.assertIn("к прошлым 4ч", ru)              # сравнение окон
         self.assertEqual(ru.count("🕘 <b>"), 4)        # все четыре часа
-        self.assertEqual(ru.count("📊 OI"), 4)         # OI по каждому часу
-        self.assertIn("% объёма", ru)                  # CVD — доля объёма рынка
+        # у часа ровно одна строка: касса и лидер часа в ней же
+        for line in ru.splitlines():
+            if line.startswith("🕘 <b>"):
+                self.assertIn("💥", line, line)
+                self.assertIn("🏆 Лидер часа:", line, line)
+                self.assertNotIn("📊 OI", line, line)
+                self.assertNotIn("🌊 CVD", line, line)
+        self.assertIn("% объёма", ru)                  # CVD окна — доля объёма
         self.assertIn("🌊 CVD за 4ч", ru)
         self.assertNotIn("<pre>", ru)                  # рамочного окна нет
         self.assertNotIn("</code>", ru)
@@ -348,10 +354,12 @@ class HourBoardTest(unittest.TestCase):
         self.assertIsNone(re.search(r"\d{2}:00 —", text))   # часов-прочерков нет
         self.assertIn("🕘", text)                # час всё равно показан
         self.assertIn("$1.00M", text)
-        # появился уровень — появилась строка, процент без истории не выдуман
-        board["hours"][0]["oi"] = {"value": 1.2e9, "pct": None}
+        # OI часа в пост не идёт вовсе: он живёт в терминале и в строке окна
+        # («📊 Сдвиг OI»), а час остаётся одной строкой с лидером
+        board["hours"][0]["oi"] = {"value": 1.2e9, "pct": 1.5}
         text2 = render_post({"window_h": 4, "board": board, "total_usd": 1e6})
-        self.assertIn("📊 OI $1.2B", text2)      # в часах OI идёт короткой суммой
+        self.assertNotIn("📊 OI $1.2B", text2)
+        self.assertIn("🏆", text2)               # лидер часа на месте
         self.assertIsNone(re.search(r"\d{2}:00 —", text2))
 
     def test_post_is_not_empty_even_without_data(self):

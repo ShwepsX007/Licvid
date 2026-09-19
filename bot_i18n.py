@@ -923,9 +923,10 @@ RU_EN.update({
     "влезает в подпись под фото": "fits into the caption under the photo",
     "Полный разбор дня — на сайте: ": "Full breakdown of the day — on the site: ",
     "📖 Полный разбор дня": "📖 Full day breakdown",
-    "длиннее лимита подписи (1024) — фото не прикрепится, пост уйдёт текстом":
-        "is longer than the caption limit (1024) — the photo will not be "
-        "attached, the post goes as text",
+    # фото уходит всегда: длинная подпись подрезается по целым строкам
+    "длиннее лимита подписи (1024) — хвост поста обрежется, но фото уйдёт":
+        "is longer than the caption limit (1024) — the tail will be cut off, "
+        "but the photo goes with it",
 })
 
 def translate_payload(method: str, payload: Optional[dict],

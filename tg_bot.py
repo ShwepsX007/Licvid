@@ -1319,6 +1319,13 @@ class TelegramBot:
             last = float(self.store.get_setting("channel_digest_ts") or 0)
         except (TypeError, ValueError):
             last = 0.0
+        try:
+            # Учитываем и лог отправок — защита от дубля после рестарта
+            log_ts = float(self.store.last_channel_sent_ts("post") or 0)
+            if log_ts > last:
+                last = log_ts
+        except Exception:
+            pass
         if last > 0:
             first = max(30.0, self.channel_window_sec() - (time.time() - last))
         try:
@@ -1327,6 +1334,15 @@ class TelegramBot:
             return
         while self.running:
             try:
+                # Проверка вкл/выкл постов — если выключено, просто ждём интервал
+                try:
+                    raw = str(self.store.get_setting("channel_posts_enabled", "1") or "1").strip().lower()
+                    if raw in ("0", "false", "off", "no"):
+                        log.debug("сводка: отправка выключена, пропускаем цикл")
+                        await asyncio.sleep(self.channel_window_sec())
+                        continue
+                except Exception:
+                    pass
                 await self.post_channel_digest()
             except asyncio.CancelledError:
                 break
@@ -1444,6 +1460,34 @@ class TelegramBot:
         )
         self._digest_err = ""
         self._last_tg_err = ""
+        # Проверка вкл/выкл постов из админки
+        try:
+            raw = str(self.store.get_setting("channel_posts_enabled", "1") or "1").strip().lower()
+            if raw in ("0", "false", "off", "no"):
+                if not force:
+                    log.info("сводка: отправка выключена в админке (channel_posts_enabled=0)")
+                    return False
+        except Exception:
+            pass
+        # Защита от дубля после рестарта: если пост уже ушёл недавно (<80% интервала), не шлём повторно
+        if not force:
+            try:
+                import time as _time
+                last_ts = float(self.store.get_setting("channel_digest_ts") or 0)
+                # Дополнительно проверяем лог отправок
+                try:
+                    last_log = self.store.last_channel_sent_ts("post")
+                    if last_log:
+                        last_ts = max(last_ts, last_log)
+                except Exception:
+                    pass
+                interval = self.channel_window_sec()
+                if last_ts and (_time.time() - last_ts) < interval * 0.8:
+                    log.info("сводка: уже отправлялась %.0f мин назад — пропускаем дубль",
+                             (_time.time() - last_ts) / 60)
+                    return False
+            except Exception as e:
+                log.debug("сводка: проверка дубля: %s", e)
         try:
             # Названия каналов важнее памяти: если роли перепутаны, пост уйдёт
             # не туда — проверяем перед каждой отправкой (не чаще 30 минут).
@@ -1613,8 +1657,16 @@ class TelegramBot:
             self._archive_posts(posts, sent_langs, images[0] if images else "", n,
                                 meta=meta)
             self._digest_routes = self.channel_route_text()
+            now_ts = int(__import__("time").time())
             self.store.set_setting("channel_digest_n", str(n + 1))
-            self.store.set_setting("channel_digest_ts", str(int(time.time())))
+            self.store.set_setting("channel_digest_ts", str(now_ts))
+            # Лог отправки для защиты от дубля после рестарта
+            try:
+                import datetime as _dt
+                day = _dt.datetime.utcnow().strftime("%Y-%m-%d")
+                self.store.log_channel_sent("post", day, now_ts, f"n={n}")
+            except Exception as e:
+                log.debug("лог поста: %s", e)
             log.info("сводка n=%s ушла в каналы: %d", n, delivered)
             return True
         err = getattr(self, "_last_tg_err", "") or "Telegram отклонил пост"
@@ -1768,6 +1820,23 @@ class TelegramBot:
 
         self._digest_err = ""
         self._last_tg_err = ""
+        # Проверка вкл/выкл дайджеста из админки (отдельно от постов)
+        try:
+            raw = str(self.store.get_setting("digest_enabled", "1") or "1").strip().lower()
+            if raw in ("0", "false", "off", "no") and not force:
+                log.info("дайджест: отправка выключена в админке (digest_enabled=0)")
+                return {"ru": [False, "отправка дайджеста выключена в админке"]}
+        except Exception:
+            pass
+        # Защита от дубля после рестарта: один дайджест в сутки
+        day_check = str((rec or {}).get("day") or "").strip()
+        if day_check and not force:
+            try:
+                if self.store.was_channel_sent("digest", day_check):
+                    log.info("дайджест: %s уже отправлялся — пропускаем дубль", day_check)
+                    return {"ru": [False, f"дайджест за {day_check} уже отправлен"]}
+            except Exception as e:
+                log.debug("дайджест дубль чек: %s", e)
         try:
             await self.verify_channel_roles()
         except Exception as e:
@@ -1826,11 +1895,11 @@ class TelegramBot:
             self._daily_state = {"ok": False, "day": day, "draft": bool(ok),
                                  "at": time.time()}
             return result
-        sent = await self._publish_daily_posts(posts, img)
+        sent = await self._publish_daily_posts(posts, img, day)
         result.update(sent)
         return result
 
-    async def _publish_daily_posts(self, posts, img) -> Dict[str, Any]:
+    async def _publish_daily_posts(self, posts, img, day: str = "") -> Dict[str, Any]:
         """Отправка постов дайджеста по каналам (один пост = одно сообщение)."""
         out: Dict[str, Any] = {}
         images = self._photo_list(img)
@@ -1859,12 +1928,22 @@ class TelegramBot:
         delivered = [l for l, v in out.items() if v[0]]
         if delivered:
             self._digest_routes = self.channel_route_text()
+            now_ts = int(__import__("time").time())
             try:
-                self.store.set_setting("daily_digest_ts", str(int(time.time())))
+                self.store.set_setting("daily_digest_ts", str(now_ts))
             except Exception as e:
                 log.debug("дайджест: метка времени не сохранилась: %s", e)
+            # Лог отправки для защиты от дубля после рестарта (на сутки)
+            try:
+                import datetime as _dt
+                day_str = str(day or "").strip() or _dt.datetime.utcnow().strftime("%Y-%m-%d")
+                self.store.log_channel_sent("digest", day_str, now_ts, ",".join(delivered))
+                # Также обновляем daily_state с днём
+                self._daily_state = {"ok": True, "day": day_str, "langs": delivered, "at": float(now_ts)}
+            except Exception as e:
+                log.debug("лог дайджеста: %s", e)
+                self._daily_state = {"ok": True, "langs": delivered, "at": float(now_ts)}
             log.info("дневной дайджест ушёл в каналы: %s", ", ".join(delivered))
-            self._daily_state = {"ok": True, "langs": delivered, "at": time.time()}
         else:
             self._daily_state = {"ok": False,
                                  "error": next((v[1] for v in out.values()), ""),

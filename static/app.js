@@ -1729,29 +1729,31 @@
             // Центр плашки — ровно на цене ликвидаций (в моменте), а не в
             // середине тела: по положению видно уровень, где снесло позиции.
             const cy = isFinite(y) ? y : (yO + yC) / 2;
-            const place = (g) => {
+            const isActive = activeKey === c.key;
+            const place = (g, force) => {
                 const bx = Math.round(x - g.w / 2), by = Math.round(cy - g.h / 2);
-                for (let j = 0; j < drawn.length; j++) {
-                    const d = drawn[j];
-                    if (bx < d.x + d.w && bx + g.w > d.x &&
-                            by < d.y + d.h && by + g.h > d.y) return null;
+                if (!force) {
+                    for (let j = 0; j < drawn.length; j++) {
+                        const d = drawn[j];
+                        if (bx < d.x + d.w && bx + g.w > d.x &&
+                                by < d.y + d.h && by + g.h > d.y) return null;
+                    }
                 }
                 return { fx: bx, fy: by, bw: g.w, bh: g.h };
             };
-            let box = place(geom);
+            let box = place(geom, isActive);
             if (!box && geom.showLabel) {
                 // Налезает на соседнюю плашку — как и раньше, показываем чипом
                 // без цифр: уровень виден, цифры не наслаиваются.
+                // Активный кластер (подсветка из ленты) рисуем всегда, даже с наложением.
                 const chip = liqPlateGeom(bodyPx, slotPx, "", measure,
                                           LIQ_PLATE_CHIP_H);
-                box = place(chip);
+                box = place(chip, isActive);
                 if (box) geom = chip;
             }
             if (!box) return;
             const fx = box.fx, fy = box.fy, bw = box.bw, bh = box.bh;
             drawn.push({ x: fx, y: fy, w: bw, h: bh });
-
-            const isActive = activeKey === c.key;
             clusterHits.push({ kind: "liq", x: fx, y: fy, w: bw, h: bh, key: c.key,
                 ids: c.ids, time: c.time, price: priceOf(c), total: c.total,
                 count: c.count, longUsd: c.longUsd, shortUsd: c.shortUsd,

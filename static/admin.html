@@ -230,8 +230,14 @@
                 <p class="meta" id="bot-post-status"></p>
                 <h4 style="margin-top:16px">🕒 Частота сводки</h4>
                 <p class="meta">Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут). Расписание применяется сразу, перезапуск не нужен.</p>
+                <label class="bot-check"><input type="checkbox" id="post-enabled"> Отправлять сводки в канал (вкл/выкл посты)</label>
+                <p class="meta">Выключено — бот не шлёт сводки автоматически и по кнопке «Сводка в канал» только по force. Защита от дубля после рестарта — по логу.</p>
                 <div class="row-actions" id="post-int-btns"></div>
                 <p class="meta" id="post-int-note"></p>
+                <div class="row-actions" style="margin-top:8px">
+                    <button class="btn btn-small" id="post-enabled-save" type="button">Сохранить</button>
+                    <span class="meta" id="post-enabled-status"></span>
+                </div>
                 <h4 style="margin-top:16px">🕗 Вечерний дайджест</h4>
                 <div class="row-actions">
                     <label class="bot-num">Часы <input id="dig-hour" type="number" min="0" max="23" step="1"></label>
@@ -266,6 +272,16 @@
                 <p class="meta" id="bot-ai-head"></p>
                 <h4 style="margin-top:16px">📚 Последний дайджест</h4>
                 <p class="meta" id="bot-daily-line">—</p>
+                <h4 style="margin-top:16px">📝 Лог отправок (защита от дублей)</h4>
+                <p class="meta">Сохраняется в БД на 7 дней — после рестарта пост/дайджест не уйдёт повторно в тот же день.</p>
+                <div class="row-actions">
+                    <button class="btn btn-small" id="bot-sent-log" type="button">↻ Обновить лог</button>
+                    <span class="meta" id="bot-sent-status"></span>
+                </div>
+                <table class="data" style="margin-top:8px">
+                    <thead><tr><th>Тип</th><th>День</th><th>Время (UTC)</th><th>Детали</th></tr></thead>
+                    <tbody id="bot-sent-rows"><tr><td colspan="4" class="meta">—</td></tr></tbody>
+                </table>
             </div>
         </div>
     </div>

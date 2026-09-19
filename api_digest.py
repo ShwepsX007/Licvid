@@ -580,6 +580,16 @@ async def scheduler_loop(sched: DigestScheduler, check_sec: float = 60.0) -> Non
         try:
             now = time.time()
             day = sched.due(now)
+            # Защита от дубля после рестарта: если дайджест за этот день уже в логе — пропускаем
+            if day:
+                try:
+                    ps = getattr(ctx, "photo_store", None)
+                    if ps and hasattr(ps, "was_channel_sent") and ps.was_channel_sent("digest", day):
+                        log.info("Дайджест %s уже отправлялся (лог) — пропускаем дубль", day)
+                        sched.mark(day)
+                        day = None
+                except Exception as e:
+                    log.debug("дайджест дубль чек: %s", e)
             if day and not ctx.busy and now >= float(ctx.retry_at or 0):
                 ctx.busy = True
                 try:

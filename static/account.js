@@ -3435,6 +3435,10 @@
 
     function renderPostInterval(info, busy) {
         POST_INT = Object.assign({}, POST_INT, info || {});
+        if ($("post-enabled")) {
+            // enabled может прийти как info.enabled
+            if (info.enabled !== undefined) $("post-enabled").checked = !!info.enabled;
+        }
         var box = $("post-int-btns");
         if (box) {
             var n = Number(POST_INT.hours) || 4;
@@ -3477,7 +3481,35 @@
                 return d;
             }
             renderBotAdmin(d);
+            loadBotSentLog();
             return d;
+        });
+    }
+
+    function loadBotSentLog() {
+        var box = $("bot-sent-rows");
+        if (!box) return;
+        botSet("bot-sent-status", "Загружаю…");
+        api("/api/admin/bot/sent-log?days=7").then(function (d) {
+            if (!d || !d.ok) {
+                botSet("bot-sent-status", (d && (d.message || d.error)) || "ошибка");
+                return;
+            }
+            botSet("bot-sent-status", "за 7 дней: " + (d.rows || []).length);
+            var rows = d.rows || [];
+            if (!rows.length) {
+                box.innerHTML = "<tr><td colspan='4' class='meta'>пока пусто</td></tr>";
+                return;
+            }
+            box.innerHTML = rows.map(function (r) {
+                var ts = "";
+                try {
+                    var dt = new Date((r.ts || 0) * 1000);
+                    ts = dt.toISOString().replace("T", " ").slice(0, 19);
+                } catch (e) { ts = String(r.ts || ""); }
+                var kind = r.kind === "digest" ? "дайджест" : "пост";
+                return "<tr><td>" + esc(kind) + "</td><td>" + esc(r.day || "") + "</td><td class='meta'>" + esc(ts) + "</td><td class='meta'>" + esc(r.extra || "") + "</td></tr>";
+            }).join("");
         });
     }
 
@@ -3562,6 +3594,42 @@
                 if (d.ok) loadBotAdmin();
             });
         });
+        var postEnabledSave = $("post-enabled-save");
+        if (postEnabledSave) postEnabledSave.addEventListener("click", function () {
+            var en = !!($("post-enabled") || {}).checked;
+            botSet("post-enabled-status", "Сохраняю…");
+            api("/api/admin/bot/posts/enabled", {
+                method: "POST", body: JSON.stringify({ enabled: en }),
+            }).then(function (d) {
+                botSet("post-enabled-status", d.ok ? (d.message || "готово") : (d.message || d.error || "ошибка"));
+                if (d.ok) loadBotAdmin();
+            });
+        });
+        var postEnabledChk = $("post-enabled");
+        if (postEnabledChk) postEnabledChk.addEventListener("change", function () {
+            var en = !!postEnabledChk.checked;
+            botSet("post-enabled-status", "Сохраняю…");
+            api("/api/admin/bot/posts/enabled", {
+                method: "POST", body: JSON.stringify({ enabled: en }),
+            }).then(function (d) {
+                botSet("post-enabled-status", d.ok ? (d.message || "готово") : (d.message || d.error || "ошибка"));
+                if (d.ok) renderPostInterval(d.interval || { enabled: d.enabled });
+            });
+        });
+        var digEnabledChk = $("dig-enabled");
+        if (digEnabledChk) digEnabledChk.addEventListener("change", function () {
+            // Дублируем сохранение времени + вкл/выкл для быстрого переключения
+            var en = !!digEnabledChk.checked;
+            botSet("dig-status", "Сохраняю…");
+            api("/api/admin/bot/digest/enabled", {
+                method: "POST", body: JSON.stringify({ enabled: en }),
+            }).then(function (d) {
+                botSet("dig-status", d.ok ? (d.message || "готово") : (d.message || d.error || "ошибка"));
+                if (d.ok) loadBotAdmin();
+            });
+        });
+        var sentBtn = $("bot-sent-log");
+        if (sentBtn) sentBtn.addEventListener("click", loadBotSentLog);
         var aiBtn = $("bot-ai-check");
         if (aiBtn) aiBtn.addEventListener("click", function () {
             botSet("bot-ai-head", "Прошу ИИ написать шапку…");

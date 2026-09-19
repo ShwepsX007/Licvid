@@ -489,6 +489,15 @@ class Store:
                     created_at REAL NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_fb_msg ON feedback_messages(thread_id, id);
+                CREATE TABLE IF NOT EXISTS channel_sent_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kind TEXT NOT NULL,
+                    day TEXT NOT NULL,
+                    ts REAL NOT NULL,
+                    extra TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_channel_sent_kind_day_ts
+                    ON channel_sent_log(kind, day, ts);
                 CREATE TABLE IF NOT EXISTS alert_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     ts REAL NOT NULL,
@@ -2348,6 +2357,84 @@ class Store:
                 pass
         self.audit(actor_id, "digest_photo_del", str(photo_id))
         return True
+
+    # --- 📢 Лог отправки постов и дайджестов (защита от дублей) --------------
+    # Бот пишет сюда каждый успешный пост в канал: вид (post/digest), день
+    # YYYY-MM-DD и время. После перезапуска он проверяет лог и не шлёт
+    # повторно то, что уже ушло за эти сутки — даже если target_day в памяти
+    # сбросился. Для постов раз в N часов защита — по времени (последний пост
+    # должен быть старше окна), для дайджеста — по дню (один раз в сутки).
+
+    def log_channel_sent(self, kind: str, day: str = "", ts: float = 0.0,
+                         extra: str = "") -> None:
+        kind = str(kind or "").strip().lower()
+        if kind not in ("post", "digest"):
+            return
+        day = str(day or "").strip()[:12]
+        if not day:
+            try:
+                import datetime
+                day = datetime.datetime.utcnow().strftime("%Y-%m-%d")
+            except Exception:
+                day = ""
+        ts = float(ts or 0.0) or __import__("time").time()
+        extra = str(extra or "")[:500]
+        try:
+            with self._lock:
+                self._db.execute(
+                    "INSERT INTO channel_sent_log(kind, day, ts, extra) VALUES(?,?,?,?)",
+                    (kind, day, ts, extra))
+                self._db.commit()
+                # Чистим старье: держим неделю, остальное не нужно для защиты
+                self._db.execute("DELETE FROM channel_sent_log WHERE ts<?",
+                                 (ts - 7 * 86400,))
+                self._db.commit()
+        except Exception as e:
+            import logging
+            logging.getLogger("liqscope.accounts").debug("channel log: %s", e)
+
+    def was_channel_sent(self, kind: str, day: str = "") -> bool:
+        kind = str(kind or "").strip().lower()
+        day = str(day or "").strip()[:12]
+        if not day or kind not in ("post", "digest"):
+            return False
+        try:
+            with self._lock:
+                row = self._db.execute(
+                    "SELECT 1 FROM channel_sent_log WHERE kind=? AND day=? LIMIT 1",
+                    (kind, day)).fetchone()
+                return bool(row)
+        except Exception:
+            return False
+
+    def last_channel_sent_ts(self, kind: str) -> float:
+        kind = str(kind or "").strip().lower()
+        if kind not in ("post", "digest"):
+            return 0.0
+        try:
+            with self._lock:
+                row = self._db.execute(
+                    "SELECT ts FROM channel_sent_log WHERE kind=? ORDER BY ts DESC LIMIT 1",
+                    (kind,)).fetchone()
+                return float(row["ts"] or 0.0) if row else 0.0
+        except Exception:
+            return 0.0
+
+    def list_channel_sent(self, days: int = 7) -> List[Dict[str, Any]]:
+        days = max(1, min(int(days or 7), 30))
+        try:
+            import time
+            since = time.time() - days * 86400
+        except Exception:
+            since = 0
+        try:
+            with self._lock:
+                rows = self._db.execute(
+                    "SELECT kind, day, ts, extra FROM channel_sent_log WHERE ts>=? ORDER BY ts DESC LIMIT 200",
+                    (since,)).fetchall()
+                return [dict(r) for r in rows]
+        except Exception:
+            return []
 
     # --- 📣 Рекламные посты -------------------------------------------------
     #

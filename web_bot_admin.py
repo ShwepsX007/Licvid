@@ -200,6 +200,14 @@ def daily_state(app=None, bot=None) -> dict:
     return out
 
 
+def _posts_enabled() -> bool:
+    try:
+        raw = str(ctx.store.get_setting("channel_posts_enabled", "1") or "1").strip().lower()
+        return raw not in ("0", "false", "off", "no")
+    except Exception:
+        return True
+
+
 def interval_state(bot=None) -> dict:
     """Частота постов в канал: раз в N часов и производная длина блока.
 
@@ -228,6 +236,7 @@ def interval_state(bot=None) -> dict:
         "block": window_word(block),
         "text": (f"раз в {hours} ч · окно {hours} ч · анализ по "
                  f"{window_word(block)}"),
+        "enabled": _posts_enabled(),
     }
 
 
@@ -542,6 +551,92 @@ def register_bot_admin_routes(app) -> None:
                 "message": (f"Сводка раз в {hours} ч: блок анализа — "
                             f"{interval_state(bot)['block']}. Расписание "
                             "применяется сразу.")}
+
+    @router.post("/api/admin/bot/posts/enabled")
+    async def api_bot_posts_enabled(request: Request,
+                                    body: Optional[dict] = Body(default=None)):
+        """Вкл/выкл отправку постов (сводок раз в N часов) — отдельно от дайджеста."""
+        user, err = _admin(request)
+        if err:
+            return err
+        st = _store()
+        if st is None:
+            return JSONResponse({"ok": False, "error": "no_store"}, status_code=503)
+        body = body or {}
+        enabled = body.get("enabled")
+        if enabled is None:
+            # toggle если не передали
+            enabled = not _posts_enabled()
+        else:
+            enabled = bool(enabled)
+        try:
+            st.set_setting("channel_posts_enabled", "1" if enabled else "0",
+                           actor_id=user.get("id"))
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)[:160]}, status_code=500)
+        _audit(user, "bot_posts_enabled", "on" if enabled else "off")
+        return {"ok": True, "enabled": enabled, "interval": interval_state(ctx.bot),
+                "message": "Отправка постов включена" if enabled else "Отправка постов выключена"}
+
+    @router.post("/api/admin/bot/digest/enabled")
+    async def api_bot_digest_enabled(request: Request,
+                                     body: Optional[dict] = Body(default=None)):
+        """Вкл/выкл отправку дневного дайджеста — отдельно от постов."""
+        user, err = _admin(request)
+        if err:
+            return err
+        st = _store()
+        if st is None:
+            return JSONResponse({"ok": False, "error": "no_store"}, status_code=503)
+        body = body or {}
+        enabled = body.get("enabled")
+        if enabled is None:
+            try:
+                raw = str(st.get_setting("digest_enabled", "1") or "1").strip().lower()
+                cur = raw not in ("0", "false", "off", "no")
+            except Exception:
+                cur = True
+            enabled = not cur
+        else:
+            enabled = bool(enabled)
+        try:
+            st.set_setting("digest_enabled", "1" if enabled else "0",
+                           actor_id=user.get("id"))
+        except Exception as e:
+            return JSONResponse({"ok": False, "error": str(e)[:160]}, status_code=500)
+        _audit(user, "bot_digest_enabled", "on" if enabled else "off")
+        # Обновляем планировщик в памяти если есть
+        try:
+            from api_digest import ctx as dctx
+            if hasattr(dctx, "store") and hasattr(dctx.store, "list"):
+                # планировщик подтянет настройку сам в _sync()
+                pass
+            # Пытаемся найти scheduler в app.state
+            import server as _srv
+            # server не импортируем напрямую, но через app.state
+            app = request.app
+            sched = getattr(getattr(app, "state", None), "digest_scheduler", None)
+            if sched:
+                sched.enabled = bool(enabled)
+        except Exception:
+            pass
+        return {"ok": True, "enabled": enabled,
+                "message": "Отправка дайджеста включена" if enabled else "Отправка дайджеста выключена"}
+
+    @router.get("/api/admin/bot/sent-log")
+    async def api_bot_sent_log(request: Request, days: int = 7):
+        """Лог отправок постов и дайджестов за N дней — защита от дублей."""
+        user, err = _admin(request)
+        if err:
+            return err
+        st = _store()
+        if st is None:
+            return JSONResponse({"ok": False, "error": "no_store"}, status_code=503)
+        try:
+            rows = st.list_channel_sent(days=int(days or 7))
+        except Exception:
+            rows = []
+        return {"ok": True, "rows": rows}
 
     @router.get("/api/admin/ai/prompts")
     async def api_ai_prompts(request: Request):

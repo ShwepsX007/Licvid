@@ -2228,6 +2228,9 @@
             if (!me.user) { location.href = "/login?next=/admin"; return; }
             if (!me.user.is_admin) { location.href = "/cabinet"; return; }
             paintNav(me.user);
+            if (window.LiqScopeGeo && $("geo-panel")) {
+                window.LiqScopeGeo.mount($("geo-panel"));
+            }
             api("/api/admin/overview").then(function (d) {
                 if (!d.ok) return;
                 var du = d.users || {};

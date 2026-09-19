@@ -38,6 +38,8 @@ const SOURCES = [
   "static/cabinet.html",
   "static/reset.html",
   "static/admin.html",
+  "static/geo_map.js",
+  "static/presence.js",
   "static/digest.html",
   "static/index.html",
   "static/landing.html",

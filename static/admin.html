@@ -59,6 +59,18 @@
         </div>
     </div>
 
+    <!-- 🌍 Откуда приходят и сколько смотрят: карту, точки и таблицы рисует
+         static/geo_map.js, данные — GET /api/admin/geo (см. web_geo.py).
+         Карточка стоит второй: это ответ на вопросы «кто, откуда и как долго»,
+         а не отдельная игрушка на странице. -->
+    <div class="card" id="geo-card" style="margin-top:14px"
+         data-hint="страны, источники, время на сайте">
+        <h3 data-i18n="geo.title">🌍 Откуда приходят и как долго смотрят</h3>
+        <div id="geo-panel" class="geo-panel">
+            <p class="meta" data-i18n="cab.loading">загружаю…</p>
+        </div>
+    </div>
+
     <div class="card" style="margin-top:14px" data-hint="поиск, роль, бан">
         <h3>Пользователи</h3>
         <input class="search" id="user-q" placeholder="поиск: имя, @username, id">
@@ -289,6 +301,9 @@
 </main>
 <script src="/static/i18n.pages.js"></script>
 <script src="/static/i18n.js"></script>
+<script src="/static/world-map.js?v=geo1"></script>
+<script src="/static/geo_map.js?v=geo1"></script>
+<script src="/static/presence.js?v=geo2"></script>
 <script src="/static/account.js?v=fb12"></script>
 <script src="/static/consent.js?v=consent1"></script>
 </body>

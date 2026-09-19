@@ -20,6 +20,7 @@ from fastapi import APIRouter, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
 
+import geoip
 import seo_pages
 from accounts import (COOKIE_SID, COOKIE_VID, hash_ip, hash_password,
                       normalize_email, password_problem, valid_email,
@@ -46,6 +47,8 @@ class Ctx:
     liqs_fn = staticmethod(lambda: [])
     ws_clients_fn = staticmethod(lambda: 0)
     alerts_market_fn = staticmethod(lambda: {})
+    #: Свои хосты сайта: переходы внутри него источником не считаются
+    site_hosts = ()
     symbols_fn = staticmethod(lambda: [])
     # Корреляции валют: (окно, метрика) → готовая картина по истории
     correlations_fn = staticmethod(lambda window="24h", metric="liq": {})
@@ -1427,8 +1430,17 @@ def register_account_routes(app) -> None:
         ):
             try:
                 user = current_user(request)
-                ctx.store.record_visit(path, vid, user["id"] if user else None, iph,
-                                       ua=ua, bot=bot)
+                # Страну берём из заголовка CDN или кэша — это мгновенно.
+                # Если её нет, визит всё равно пишем сразу, а страну доспросим
+                # фоном (geoip): страница не должна ждать внешний сервис.
+                meta = geoip.visit_meta(request, ctx.site_hosts or ())
+                visit_id = ctx.store.record_visit(
+                    path, vid, user["id"] if user else None, iph, ua=ua, bot=bot,
+                    country=meta["cc"], country_name=meta["name"],
+                    country_src=meta["src"], source=meta["source"],
+                    source_kind=meta["source_kind"])
+                if not meta["cc"] and not bot:
+                    geoip.schedule_country(_client_ip(request), iph, visit_id, vid)
             except Exception as e:
                 log.debug("visit: %s", e)
         return response

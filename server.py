@@ -79,6 +79,8 @@ import ads as ads_mod
 from ads import AdService, register_ad_routes
 import feedback as feedback_mod
 from feedback import register_feedback_routes
+import geoip
+import web_geo
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -2315,6 +2317,8 @@ account_ctx.store = account_store
 account_ctx.bot = tg_bot
 account_ctx.public_url = PUBLIC_URL
 account_ctx.secret = SECRET
+# свои хосты для «откуда пришёл»: переход внутри сайта — не источник
+account_ctx.site_hosts = tuple(x for x in (PUBLIC_URL, seo_pages.SITE_URL) if x)
 account_ctx.cookie_secure = os.getenv("LIQSCOPE_COOKIE_SECURE", "").strip() in ("1", "true", "yes")
 account_ctx.dev_login = os.getenv("LIQSCOPE_DEV_LOGIN", "").strip() in ("1", "true", "yes")
 account_ctx.mailer = mailer
@@ -2404,6 +2408,16 @@ feedback_mod.ctx.store = account_store
 feedback_mod.ctx.bot = tg_bot
 feedback_mod.ctx.public_url = PUBLIC_URL
 register_feedback_routes(app)
+
+# 🌍 География посетителей: страна по IP (заголовок CDN → кэш → внешний
+# сервис), источник перехода и «сколько уже на сайте». Пишет middleware
+# визитов в web_account, а «я ещё здесь» присылает presence.js.
+geoip.ctx.store = account_store
+geoip.ctx.secret = SECRET
+web_geo.ctx.store = account_store
+web_geo.ctx.secret = SECRET
+web_geo.ctx.public_url = PUBLIC_URL
+web_geo.register_geo_routes(app)
 
 
 @app.get("/api/symbols")

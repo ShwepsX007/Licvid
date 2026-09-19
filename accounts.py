@@ -377,6 +377,27 @@ class Store:
                     bot INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE INDEX IF NOT EXISTS idx_visits_ts ON visits(ts);
+                CREATE TABLE IF NOT EXISTS geo_cache (
+                    ip_hash TEXT PRIMARY KEY,
+                    country TEXT NOT NULL DEFAULT '',
+                    country_name TEXT,
+                    ts REAL NOT NULL,
+                    src TEXT
+                );
+                CREATE TABLE IF NOT EXISTS presence (
+                    vid TEXT PRIMARY KEY,
+                    first_ts REAL NOT NULL,
+                    ts REAL NOT NULL,
+                    user_id INTEGER,
+                    country TEXT,
+                    country_name TEXT,
+                    source TEXT,
+                    source_kind TEXT,
+                    path TEXT,
+                    ua TEXT,
+                    bot INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_presence_ts ON presence(ts);
                 CREATE TABLE IF NOT EXISTS settings (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
@@ -537,6 +558,12 @@ class Store:
                     self._db.execute(
                         "ALTER TABLE visits ADD COLUMN bot INTEGER NOT NULL DEFAULT 0")
                 self._db.execute("UPDATE visits SET bot=0 WHERE bot IS NULL")
+                # география и источник перехода: колонки появились позже,
+                # у старых записей они пустые — это честно, страна неизвестна
+                for col in ("country", "country_name", "country_src",
+                            "source", "source_kind"):
+                    if cols and col not in cols:
+                        self._db.execute(f"ALTER TABLE visits ADD COLUMN {col} TEXT")
                 self._db.commit()
         except Exception as e:                    # noqa: BLE001
             log.debug("визиты: миграция ua/bot: %s", e)
@@ -1330,25 +1357,39 @@ class Store:
 
     # ----- visits ---------------------------------------------------------
     def record_visit(self, path: str, vid: str, user_id: Optional[int], ip_hash: str,
-                     ua: str = "", bot: bool = False) -> None:
+                     ua: str = "", bot: bool = False, country: str = "",
+                     country_name: str = "", country_src: str = "",
+                     source: str = "", source_kind: str = "") -> int:
         """Записать просмотр страницы.
 
         ``bot`` — служебный запрос (краулер, превью мессенджера, скрипт): в
         счётчики просмотров и посетителей он не идёт, но хранится — админ
         видит, сколько такого шума отсеяно.
+
+        ``country``/``source`` — откуда гость и как нашёл сайт: у первого
+        запроса страну иногда узнать не успеваем (IP спрашивают у внешнего
+        сервиса), поэтому возвращаем id строки — по нему страна допишется,
+        когда ответ придёт (``set_visit_country``).
         """
         path = (path or "/")[:120]
         with self._lock:
-            self._db.execute(
-                "INSERT INTO visits(ts,path,vid,user_id,ip_hash,ua,bot)"
-                " VALUES(?,?,?,?,?,?,?)",
+            cur = self._db.execute(
+                "INSERT INTO visits(ts,path,vid,user_id,ip_hash,ua,bot,country,"
+                "country_name,country_src,source,source_kind)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (_now(), path, ("" if bot else (vid or ""))[:40], user_id,
-                 ip_hash, (ua or "")[:180], 1 if bot else 0),
+                 ip_hash, (ua or "")[:180], 1 if bot else 0,
+                 (country or "")[:2].upper(), (country_name or "")[:60],
+                 (country_src or "")[:16], (source or "")[:60],
+                 (source_kind or "")[:16]),
             )
+            visit_id = int(cur.lastrowid or 0)
             # не копим бесконечно: раз в ~200 визитов чистим старше 90 дней
             if secrets.randbelow(200) == 0:
                 self._db.execute("DELETE FROM visits WHERE ts<?", (_now() - 90 * 86400,))
+                self._db.execute("DELETE FROM presence WHERE ts<?", (_now() - 30 * 86400,))
             self._db.commit()
+        return visit_id
 
     def visit_vid(self, ip_hash: str, ua: str, window_sec: int = 86400) -> str:
         """vid, уже выданный этой связке ip+ua: браузер без cookie не «множится».
@@ -1409,6 +1450,307 @@ class Store:
             "today_bots": today_bots,
             "days": by_day,
             "paths": [{"path": r["path"], "n": r["n"]} for r in top_paths],
+        }
+
+    # ----- география посещений -------------------------------------------
+    def geo_cached(self, ip_hash: str, ttl_sec: float = 0.0) -> Optional[Dict[str, Any]]:
+        """Что уже знаем об этом адресе: страна и когда спрашивали.
+
+        Кэш нужен, чтобы не спрашивать внешний сервис на каждый визит: адрес
+        спрашивают один раз, дальше страна берётся из базы. ``cc`` может быть
+        пустым — это тоже ответ («страна неизвестна»), и его держим недолго.
+        """
+        if not ip_hash:
+            return None
+        with self._lock:
+            row = self._db.execute(
+                "SELECT country, country_name, ts, src FROM geo_cache WHERE ip_hash=?",
+                (ip_hash,),
+            ).fetchone()
+        if not row:
+            return None
+        if _now() - float(row["ts"] or 0) > float(ttl_sec or 0.0):
+            return None
+        return {"cc": (row["country"] or "").upper(),
+                "name": row["country_name"] or "",
+                "src": row["src"] or "cache",
+                "ts": float(row["ts"] or 0),
+                "fresh": bool(ttl_sec)}
+
+    def geo_remember(self, ip_hash: str, cc: str, name: str = "",
+                     src: str = "provider") -> None:
+        """Запомнить страну адреса (в том числе «неизвестно»)."""
+        if not ip_hash:
+            return
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO geo_cache(ip_hash,country,country_name,ts,src)"
+                " VALUES(?,?,?,?,?)"
+                " ON CONFLICT(ip_hash) DO UPDATE SET country=excluded.country,"
+                " country_name=excluded.country_name, ts=excluded.ts, src=excluded.src",
+                (ip_hash, (cc or "")[:2].upper(), (name or "")[:60], _now(),
+                 (src or "")[:16]),
+            )
+            if secrets.randbelow(200) == 0:
+                self._db.execute("DELETE FROM geo_cache WHERE ts<?",
+                                 (_now() - 180 * 86400,))
+            self._db.commit()
+
+    def set_visit_country(self, visit_id: int, cc: str, name: str = "",
+                          src: str = "") -> None:
+        """Дописать страну в уже записанный визит (ответ пришёл позже визита)."""
+        if not visit_id or not cc:
+            return
+        with self._lock:
+            self._db.execute(
+                "UPDATE visits SET country=?, country_name=?, country_src=?"
+                " WHERE id=?",
+                ((cc or "")[:2].upper(), (name or "")[:60], (src or "")[:16],
+                 int(visit_id)),
+            )
+            self._db.commit()
+
+    def touch_presence(self, vid: str, user_id: Optional[int] = None,
+                       country: str = "", country_name: str = "",
+                       source: str = "", source_kind: str = "",
+                       path: str = "", ua: str = "", bot: bool = False,
+                       keep: float = 30 * 86400) -> Dict[str, Any]:
+        """Отметить, что гость сейчас на сайте: одно «сердцебиение» на гостя.
+
+        Строка одна на гостя: ``first_ts`` — когда он пришёл, ``ts`` — когда
+        последний раз подавал признаки жизни. Отсюда и «сколько уже на сайте»,
+        и «кто онлайн» (последние :data:`ONLINE_SEC` секунд). Страну и источник
+        заполняем один раз — первый заход важнее повторных.
+
+        ``keep`` — сколько дней держим строки: чистим их в том же запросе
+        (редко, чтобы не делать лишнюю работу на каждом пинге).
+        """
+        vid = (vid or "")[:40]
+        if not vid:
+            return {}
+        now = _now()
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO presence(vid,first_ts,ts,user_id,country,country_name,"
+                "source,source_kind,path,ua,bot) VALUES(?,?,?,?,?,?,?,?,?,?,?)"
+                " ON CONFLICT(vid) DO UPDATE SET ts=excluded.ts,"
+                " user_id=COALESCE(excluded.user_id, presence.user_id),"
+                " country=CASE WHEN COALESCE(presence.country,'')=''"
+                "   THEN excluded.country ELSE presence.country END,"
+                " country_name=CASE WHEN COALESCE(presence.country_name,'')=''"
+                "   THEN excluded.country_name ELSE presence.country_name END,"
+                " source=CASE WHEN COALESCE(presence.source,'')=''"
+                "   THEN excluded.source ELSE presence.source END,"
+                " source_kind=CASE WHEN COALESCE(presence.source_kind,'')=''"
+                "   THEN excluded.source_kind ELSE presence.source_kind END,"
+                " path=excluded.path, ua=excluded.ua, bot=excluded.bot",
+                (vid, now, now, user_id, (country or "")[:2].upper(),
+                 (country_name or "")[:60], (source or "")[:60],
+                 (source_kind or "")[:16], (path or "")[:120], (ua or "")[:180],
+                 1 if bot else 0),
+            )
+            if secrets.randbelow(200) == 0:
+                self._db.execute("DELETE FROM presence WHERE ts<?",
+                                 (now - float(keep or 30 * 86400),))
+            self._db.commit()
+            row = self._db.execute(
+                "SELECT * FROM presence WHERE vid=?", (vid,)).fetchone()
+        out = dict(row) if row else {}
+        if out:
+            out["sec"] = max(0.0, now - float(out.get("first_ts") or now))
+        return out
+
+    def set_presence_country(self, vid: str, cc: str, name: str = "") -> None:
+        """Дописать страну в строку присутствия, если её там ещё нет."""
+        if not vid or not cc:
+            return
+        with self._lock:
+            self._db.execute(
+                "UPDATE presence SET country=?, country_name=?"
+                " WHERE vid=? AND COALESCE(country,'')=''",
+                ((cc or "")[:2].upper(), (name or "")[:60], (vid or "")[:40]),
+            )
+            self._db.commit()
+
+    def geo_online(self, window_sec: float = 300.0,
+                   limit: int = 200) -> List[Dict[str, Any]]:
+        """Кто сейчас на сайте: свежие «сердцебиения» из presence.
+
+        ``window_sec`` берём как есть (пол — одна секунда): окно выбирает тот,
+        кто спрашивает — у админки оно своё (``web_geo.ONLINE_SEC``).
+        """
+        since = _now() - max(1.0, float(window_sec))
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM presence WHERE ts>=? AND bot=0"
+                " ORDER BY ts DESC LIMIT ?", (since, int(limit)),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def geo_stats(self, hours: float = 24.0, online_sec: float = 300.0,
+                  dots: int = 600) -> Dict[str, Any]:
+        """Картина посещаемости окна: гости, страны, источники, время на сайте.
+
+        Возвращаем «сырьё» без геометрии (широту и долготу стран добавляет
+        слой выше, у него есть справочник центроидов):
+
+        * ``guests`` — по одной строке на гостя: страна, откуда пришёл, сколько
+          визитов и сколько уже провёл на сайте (от первого визита до
+          последнего «сердцебиения»);
+        * ``points`` — те же гости, но только для карты (ограничение ``dots``);
+        * ``online`` — кто подал признак жизни за ``online_sec`` секунд;
+        * ``countries``/``sources`` — сводка «откуда» и «из какого источника».
+
+        Источник гостя — самый свежий *внешний* переход: внутренние переходы
+        по сайту (клики по меню) в таблице источников смысла не имеют.
+        """
+        now = _now()
+        hours = max(1.0, min(float(hours or 24.0), 24 * 90.0))
+        since = now - hours * 3600.0
+        online_window = max(30.0, float(online_sec))
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT vid, MAX(user_id) AS user_id, MIN(ts) AS first_ts,"
+                " MAX(ts) AS last_ts, COUNT(*) AS views"
+                " FROM visits WHERE ts>=? AND bot=0 AND COALESCE(vid,'')!=''"
+                " GROUP BY vid ORDER BY last_ts DESC LIMIT ?",
+                (since, max(1, int(dots) * 4)),
+            ).fetchall()
+            # страна гостя: код и имя берём из ОДНОЙ строки визита. Если взять
+            # MAX(country) и MAX(country_name) по отдельности, код и имя
+            # разъедутся (у одного визита страна FI, у другого DE) — и на
+            # карте «Финляндия» подпишется как «Spain». Берём первый известный
+            # визит: важно, откуда гость пришёл, а не куда его потом занесло.
+            cc_rows = self._db.execute(
+                "SELECT vid, ts, COALESCE(country,'') AS country,"
+                " COALESCE(country_name,'') AS country_name FROM visits"
+                " WHERE ts>=? AND bot=0 AND COALESCE(vid,'')!=''"
+                " AND COALESCE(country,'')!='' ORDER BY ts ASC LIMIT 20000",
+                (since,)).fetchall()
+            src_rows = self._db.execute(
+                "SELECT vid, ts, COALESCE(source,'') AS source,"
+                " COALESCE(source_kind,'') AS source_kind FROM visits"
+                " WHERE ts>=? AND bot=0 AND COALESCE(vid,'')!=''"
+                " AND COALESCE(source_kind,'') NOT IN ('', 'internal')"
+                " ORDER BY ts DESC LIMIT 20000", (since,)).fetchall()
+            pres = self._db.execute(
+                "SELECT vid, first_ts, ts, country, country_name, source,"
+                " source_kind, path, user_id FROM presence WHERE ts>=?",
+                (since,)).fetchall()
+            anon = self._db.execute(
+                "SELECT COUNT(*) AS n FROM visits WHERE ts>=? AND bot=0"
+                " AND COALESCE(vid,'')=''", (since,)).fetchone()
+            bots = self._db.execute(
+                "SELECT COUNT(*) AS n FROM visits WHERE ts>=? AND bot=1",
+                (since,)).fetchone()
+            paths = self._db.execute(
+                "SELECT path, COUNT(*) AS n FROM visits WHERE ts>=? AND bot=0"
+                " GROUP BY path ORDER BY n DESC LIMIT 8", (since,)).fetchall()
+        # самый свежий внешний переход на гостя (строки уже отсортированы)
+        src_map: Dict[str, Dict[str, str]] = {}
+        for r in src_rows:
+            src_map.setdefault(str(r["vid"]), {"source": r["source"],
+                                               "kind": r["source_kind"]})
+        # первая известная страна гостя — код и имя из той же строки
+        cc_map: Dict[str, Dict[str, str]] = {}
+        for r in cc_rows:
+            cc_map.setdefault(str(r["vid"]), {
+                "country": (r["country"] or "").upper(),
+                "country_name": r["country_name"] or ""})
+        pmap = {str(r["vid"]): dict(r) for r in pres}
+
+        def _src(vid: str, p: Dict[str, Any]) -> Dict[str, str]:
+            """Источник гостя: сначала строка присутствия, потом история визитов."""
+            if p.get("source"):
+                return {"source": p.get("source") or "",
+                        "kind": p.get("source_kind") or "direct"}
+            return src_map.get(vid) or {"source": "", "kind": "direct"}
+
+        guests: List[Dict[str, Any]] = []
+        for r in rows:
+            vid = str(r["vid"] or "")
+            v: Dict[str, Any] = dict(r)
+            p = pmap.get(vid) or {}
+            online = bool(p) and now - float(p.get("ts") or 0) <= online_window
+            last = float(v.get("last_ts") or 0)
+            if online:
+                last = max(last, float(p.get("ts") or 0))
+            cc = cc_map.get(vid) or {}
+            v["country"] = (p.get("country") or cc.get("country") or "").upper()
+            v["country_name"] = p.get("country_name") or cc.get("country_name") or ""
+            src = _src(vid, p)
+            v["source"], v["source_kind"] = src["source"], src["kind"]
+            v["online"] = online
+            v["first_ts"] = float(v.get("first_ts") or 0)
+            v["last_ts"] = last
+            v["sec"] = max(0.0, last - v["first_ts"])
+            v["path"] = (p.get("path") or "")
+            guests.append(v)
+        # кто-то только открыл страницу и уже прислал «сердцебиение», а визит
+        # запишется в фоне — его в списке гостей ещё нет, но онлайн он есть
+        known = {str(g["vid"]) for g in guests}
+        for vid, p in pmap.items():
+            if vid in known or now - float(p.get("ts") or 0) > online_window:
+                continue
+            guests.append({
+                "vid": vid, "user_id": p.get("user_id"),
+                "first_ts": float(p.get("first_ts") or 0),
+                "last_ts": float(p.get("ts") or 0),
+                "views": 0, "country": p.get("country") or "",
+                "country_name": p.get("country_name") or "",
+                "source": (p.get("source") or ""),
+                "source_kind": (p.get("source_kind") or "direct"),
+                "path": p.get("path") or "", "online": True,
+                "sec": max(0.0, now - float(p.get("first_ts") or now)),
+            })
+        guests.sort(key=lambda g: g["last_ts"], reverse=True)
+        countries: Dict[str, Dict[str, Any]] = {}
+        sources: Dict[Any, Dict[str, Any]] = {}
+        for g in guests:
+            c = countries.setdefault(g["country"] or "", {
+                "country": g["country"] or "", "name": g["country_name"] or "",
+                "visitors": 0, "views": 0, "online": 0, "sec": 0.0, "last": 0.0})
+            c["visitors"] += 1
+            c["views"] += int(g["views"] or 0)
+            c["sec"] += float(g["sec"] or 0)
+            c["online"] += 1 if g["online"] else 0
+            c["last"] = max(c["last"], g["last_ts"])
+            key = (g["source"], g["source_kind"])
+            b = sources.setdefault(key, {"source": g["source"],
+                                         "kind": g["source_kind"],
+                                         "visitors": 0, "views": 0, "online": 0,
+                                         "last": 0.0})
+            b["visitors"] += 1
+            b["views"] += int(g["views"] or 0)
+            b["online"] += 1 if g["online"] else 0
+            b["last"] = max(b["last"], g["last_ts"])
+        for c in countries.values():
+            c["avg_sec"] = (c["sec"] / c["visitors"]) if c["visitors"] else 0.0
+        total_sec = sum(float(g["sec"] or 0) for g in guests)
+        return {
+            "now": now,
+            "hours": hours,
+            "online_sec": online_window,
+            "guests": guests,
+            "points": guests[:max(1, int(dots))],
+            "online": [g for g in guests if g["online"]],
+            "countries": sorted(countries.values(),
+                                key=lambda b: (-b["visitors"], -b["last"])),
+            "sources": sorted(sources.values(),
+                              key=lambda b: (-b["visitors"], -b["last"])),
+            "long": sorted([g for g in guests if float(g["sec"] or 0) >= 60],
+                           key=lambda g: g["sec"], reverse=True)[:10],
+            "paths": [{"path": r["path"], "n": r["n"]} for r in paths],
+            "totals": {
+                "online": len([g for g in guests if g["online"]]),
+                "visitors": len(guests),
+                "views": sum(int(g["views"] or 0) for g in guests),
+                "anon_views": int((anon or {"n": 0})["n"] or 0),
+                "bots": int((bots or {"n": 0})["n"] or 0),
+                "countries": len([c for c in countries if c]),
+                "avg_sec": (total_sec / len(guests)) if guests else 0.0,
+                "long_60": len([g for g in guests if float(g["sec"] or 0) >= 60]),
+            },
         }
 
     # ----- services / settings / audit ------------------------------------

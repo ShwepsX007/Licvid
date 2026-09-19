@@ -94,6 +94,11 @@
             settings: "Настройки",
             welcome: "Приветствие бота",
             siteNotice: "Объявление на сайте",
+            wipeDone: "Стёрто статистики: {v} визитов, {p} гостей, кэш стран: {c}.",
+            wipeEmpty: "Стирать нечего: статистика уже пуста.",
+            wipeErr: "Не получилось стереть — попробуйте ещё раз.",
+            wipeBusy: "Стираю…",
+            wipeNoVisits: "Пока пусто: переходов за это окно нет.",
             ban: "Бан", unban: "Разбан",
             views: "просмотров", uniques: "уник.",
         },
@@ -183,6 +188,11 @@
             broadcast: "Telegram broadcast", send: "Send", saved: "Saved",
             health: "Live exchanges", settings: "Settings",
             welcome: "Bot welcome text", siteNotice: "Site notice",
+            wipeDone: "Statistics cleared: {v} visits, {p} guests, {c} cached countries.",
+            wipeEmpty: "Nothing to clear: the statistics are already empty.",
+            wipeErr: "Could not clear the statistics — try again.",
+            wipeBusy: "Clearing…",
+            wipeNoVisits: "Nothing yet: no page views in this window.",
             ban: "Ban", unban: "Unban",
             views: "views", uniques: "unique",
         },
@@ -204,11 +214,20 @@
         } catch (e) { return "ru"; }
     }
     function t(k, vars) {
-        var s = (T[lang()] || T.ru)[k] || (T.en[k] || k);
+        var code = lang();
+        var own = T[code] && T[code][k];          // своя строка словаря языка
+        var s = own !== undefined ? own : ((T[code] || T.ru)[k] || T.en[k] || k);
         if (vars) {
             Object.keys(vars).forEach(function (name) {
                 s = s.replace(new RegExp("\\{" + name + "\\}", "g"), vars[name]);
             });
+        }
+        // у account.js словари только RU/EN: остальным языкам строку отдаём
+        // общему словарю фраз (он переводит и куски внутри текста), но только
+        // если переводится ЦЕЛИКОМ — иначе лучше честный русский, чем смесь
+        if (!own && code !== "ru" && window.LiqScopeI18n &&
+            LiqScopeI18n.hasPhrase && LiqScopeI18n.hasPhrase(s, code)) {
+            s = LiqScopeI18n.phrase(s, code);
         }
         return s;
     }
@@ -2168,6 +2187,12 @@
     function renderBars(days) {
         var el = $("visit-bars");
         if (!el) return;
+        if (!(days || []).length) {
+            // после стирания статистики пустое место выглядело бы поломкой
+            el.innerHTML = '<span class="meta">' +
+                esc(t("wipeNoVisits")) + "</span>";
+            return;
+        }
         var max = 1;
         (days || []).forEach(function (d) {
             if (d.uniques > max) max = d.uniques;
@@ -2223,6 +2248,116 @@
         });
     }
 
+    /** Цифры и график админки: перезагружаются после стирания статистики. */
+    function loadOverview() {
+        return api("/api/admin/overview").then(function (d) {
+            if (!d.ok) return;
+            var du = d.users || {};
+            var dv = d.visits || {};
+            $("st-users") && ($("st-users").textContent = du.total);
+            $("st-new") && ($("st-new").textContent = du.new_24h);
+            $("st-views") && ($("st-views").textContent = dv.today_views);
+            $("st-uniq") && ($("st-uniq").textContent = dv.today_uniques);
+            $("st-bots") && ($("st-bots").textContent = dv.today_bots || 0);
+            $("st-ws") && ($("st-ws").textContent = d.ws_clients);
+            $("st-bot") && ($("st-bot").textContent = d.bot.ready ? ("@" + d.bot.username) : "—");
+            var live = (d.health.live_exchanges || []).length;
+            $("st-exch") && ($("st-exch").textContent = live);
+            renderBars(dv.days || []);
+            if ($("bot-welcome")) $("bot-welcome").value = (d.settings && d.settings.bot_welcome) || "";
+            if ($("site-notice-in")) $("site-notice-in").value = (d.settings && d.settings.site_notice) || "";
+            var svc = $("admin-svc");
+            if (svc) {
+                svc.innerHTML = (d.services || []).map(function (s) {
+                    return '<label style="display:flex;gap:10px;align-items:center;margin:8px 0">' +
+                        "<input type='checkbox' data-svc='" + s.slug + "' data-field='coming_soon' " +
+                        (s.coming_soon ? "" : "checked") + "> " +
+                        (s.icon || "") + " <b>" + s.title + "</b> — " +
+                        "<span style='color:var(--muted);font-size:0.8rem'>включён для пользователей</span>" +
+                        "</label>";
+                }).join("");
+                /* checkbox ON = not coming_soon (available) */
+                svc.querySelectorAll("input[data-svc]").forEach(function (inp) {
+                    inp.addEventListener("change", function () {
+                        api("/api/admin/services/" + inp.getAttribute("data-svc"), {
+                            method: "POST",
+                            body: JSON.stringify({ coming_soon: !inp.checked }),
+                        });
+                    });
+                });
+            }
+        });
+    }
+
+    // ----- стирание статистики посещений ---------------------------------
+    /** Свернуть подтверждение и снять галочку кэша. */
+    function wipeClose() {
+        var box = $("visits-wipe");
+        if (box) box.hidden = true;
+        var cache = $("visits-wipe-cache");
+        if (cache) cache.checked = false;
+    }
+
+    function wipeStatus(text) {
+        var el = $("visits-clear-status");
+        if (el) el.textContent = text || "";
+    }
+
+    /** Стереть статистику посещений: POST /api/admin/visits/clear.
+     *
+     * Слово подтверждения уходит на сервер вместе с запросом: без него ручка
+     * отказывается что-либо удалять, поэтому случайный вызов безопасен
+     * (см. web_geo: admin_visits_clear).
+     */
+    function wipeStats() {
+        var go = $("visits-wipe-go");
+        var cache = $("visits-wipe-cache");
+        if (go) go.disabled = true;
+        wipeStatus(t("wipeBusy"));
+        api("/api/admin/visits/clear", {
+            method: "POST",
+            body: JSON.stringify({ confirm: "clear",
+                                   cache: !!(cache && cache.checked) }),
+        }).then(function (d) {
+            if (go) go.disabled = false;
+            if (!d.ok) { wipeStatus(t("wipeErr")); return; }
+            var del = d.deleted || {};
+            var total = (del.visits || 0) + (del.presence || 0) + (del.geo_cache || 0);
+            wipeStatus(total ? t("wipeDone", { v: del.visits || 0,
+                                               p: del.presence || 0,
+                                               c: del.geo_cache || 0 })
+                             : t("wipeEmpty"));
+            wipeClose();
+            loadOverview();                       // цифры и график — с нуля
+            if (window.LiqScopeGeo && window.LiqScopeGeo.load) {
+                window.LiqScopeGeo.load();        // и карточка географии
+            }
+        }).catch(function () {
+            if (go) go.disabled = false;
+            wipeStatus(t("wipeErr"));
+        });
+    }
+
+    /** Кнопка «Стереть статистику»: первый клик открывает подтверждение. */
+    function bindWipe() {
+        var open = $("visits-clear");
+        if (!open) return;
+        open.addEventListener("click", function () {
+            var box = $("visits-wipe");
+            if (!box) return;
+            box.hidden = !box.hidden;             // второй клик закрывает
+            wipeStatus("");
+            if (!box.hidden) {
+                var go = $("visits-wipe-go");
+                if (go) go.focus();
+            }
+        });
+        var cancel = $("visits-wipe-cancel");
+        if (cancel) cancel.addEventListener("click", wipeClose);
+        var go = $("visits-wipe-go");
+        if (go) go.addEventListener("click", wipeStats);
+    }
+
     function bootAdmin() {
         api("/api/auth/me").then(function (me) {
             if (!me.user) { location.href = "/login?next=/admin"; return; }
@@ -2231,43 +2366,7 @@
             if (window.LiqScopeGeo && $("geo-panel")) {
                 window.LiqScopeGeo.mount($("geo-panel"));
             }
-            api("/api/admin/overview").then(function (d) {
-                if (!d.ok) return;
-                var du = d.users || {};
-                var dv = d.visits || {};
-                $("st-users") && ($("st-users").textContent = du.total);
-                $("st-new") && ($("st-new").textContent = du.new_24h);
-                $("st-views") && ($("st-views").textContent = dv.today_views);
-                $("st-uniq") && ($("st-uniq").textContent = dv.today_uniques);
-                $("st-bots") && ($("st-bots").textContent = dv.today_bots || 0);
-                $("st-ws") && ($("st-ws").textContent = d.ws_clients);
-                $("st-bot") && ($("st-bot").textContent = d.bot.ready ? ("@" + d.bot.username) : "—");
-                var live = (d.health.live_exchanges || []).length;
-                $("st-exch") && ($("st-exch").textContent = live);
-                renderBars(dv.days || []);
-                if ($("bot-welcome")) $("bot-welcome").value = (d.settings && d.settings.bot_welcome) || "";
-                if ($("site-notice-in")) $("site-notice-in").value = (d.settings && d.settings.site_notice) || "";
-                var svc = $("admin-svc");
-                if (svc) {
-                    svc.innerHTML = (d.services || []).map(function (s) {
-                        return '<label style="display:flex;gap:10px;align-items:center;margin:8px 0">' +
-                            "<input type='checkbox' data-svc='" + s.slug + "' data-field='coming_soon' " +
-                            (s.coming_soon ? "" : "checked") + "> " +
-                            (s.icon || "") + " <b>" + s.title + "</b> — " +
-                            "<span style='color:var(--muted);font-size:0.8rem'>включён для пользователей</span>" +
-                            "</label>";
-                    }).join("");
-                    /* checkbox ON = not coming_soon (available) */
-                    svc.querySelectorAll("input[data-svc]").forEach(function (inp) {
-                        inp.addEventListener("change", function () {
-                            api("/api/admin/services/" + inp.getAttribute("data-svc"), {
-                                method: "POST",
-                                body: JSON.stringify({ coming_soon: !inp.checked }),
-                            });
-                        });
-                    });
-                }
-            });
+            loadOverview();
             loadUsers("");
             api("/api/admin/stats").then(function (d) {
                 if (!d.ok || !d.stats) return;
@@ -2275,6 +2374,7 @@
                 $("m-1h") && ($("m-1h").textContent = "$" + usd(d.stats.total_usd_1h));
             });
         });
+        bindWipe();
         var q = $("user-q");
         if (q) q.addEventListener("input", function () { loadUsers(q.value); });
         var bsend = $("broadcast-send");

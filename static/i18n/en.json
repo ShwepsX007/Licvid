@@ -864,6 +864,20 @@
     "вы": "you",
     "за": "over",
     "ч.": "h",
-    "страны, источники, время на сайте": "countries, sources, time on site"
+    "страны, источники, время на сайте": "countries, sources, time on site",
+    "🗑 Стереть статистику": "🗑 Clear statistics",
+    "Стереть всю статистику посещений?": "Clear all visit statistics?",
+    "Исчезнут переходы и уникальные посетители, график за две недели, страны, источники переходов, время на сайте и список «кто онлайн». Пользователи, подписки и рассылки останутся. Вернуть статистику нельзя.": "Page views and unique visitors, the two-week chart, countries, traffic sources, time on site and the “who is online” list will be gone. Users, subscriptions and broadcasts stay. Statistics cannot be restored.",
+    "Заодно стереть кэш стран (адрес → страна): после этого страна каждого адреса определится заново": "Also drop the country cache (address → country): every address will be resolved again",
+    "Да, стереть навсегда": "Yes, clear permanently",
+    "Стёрто статистики: {v} визитов, {p} гостей, кэш стран: {c}.": "Statistics cleared: {v} visits, {p} guests, {c} cached countries.",
+    "Стирать нечего: статистика уже пуста.": "Nothing to clear: the statistics are already empty.",
+    "Не получилось стереть — попробуйте ещё раз.": "Could not clear the statistics — try again.",
+    "Стираю…": "Clearing…",
+    "Пока пусто: переходов за это окно нет.": "Nothing yet: no page views in this window.",
+    "Исчезнут переходы и уникальные посетители, график за две недели, страны, источники переходов, время на сайте и список «кто онлайн».": "Page views and unique visitors, the two-week chart, countries, traffic sources, time on site and the “who is online” list will be gone.",
+    "Пользователи, подписки и рассылки останутся.": "Users, subscriptions and broadcasts stay.",
+    "Вернуть статистику нельзя.": "Statistics cannot be restored.",
+    "Отмена": "Cancel"
   }
 }

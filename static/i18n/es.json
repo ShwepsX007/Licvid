@@ -865,6 +865,20 @@
     "вы": "tú",
     "за": "en",
     "ч.": "h",
-    "страны, источники, время на сайте": "países, fuentes, tiempo en el sitio"
+    "страны, источники, время на сайте": "países, fuentes, tiempo en el sitio",
+    "🗑 Стереть статистику": "🗑 Borrar estadísticas",
+    "Стереть всю статистику посещений?": "¿Borrar todas las estadísticas de visitas?",
+    "Исчезнут переходы и уникальные посетители, график за две недели, страны, источники переходов, время на сайте и список «кто онлайн». Пользователи, подписки и рассылки останутся. Вернуть статистику нельзя.": "Desaparecerán las visitas y los visitantes únicos, el gráfico de dos semanas, los países, las fuentes de tráfico, el tiempo en el sitio y la lista «quién está en línea». Los usuarios, las suscripciones y los envíos se quedan. Las estadísticas no se pueden recuperar.",
+    "Заодно стереть кэш стран (адрес → страна): после этого страна каждого адреса определится заново": "Borrar también la caché de países (dirección → país): cada dirección se resolverá de nuevo",
+    "Да, стереть навсегда": "Sí, borrar para siempre",
+    "Стёрто статистики: {v} визитов, {p} гостей, кэш стран: {c}.": "Estadísticas borradas: {v} visitas, {p} invitados, {c} países en caché.",
+    "Стирать нечего: статистика уже пуста.": "No hay nada que borrar: las estadísticas ya están vacías.",
+    "Не получилось стереть — попробуйте ещё раз.": "No se pudo borrar: inténtalo de nuevo.",
+    "Стираю…": "Borrando…",
+    "Пока пусто: переходов за это окно нет.": "Todavía vacío: no hay visitas en esta ventana.",
+    "Исчезнут переходы и уникальные посетители, график за две недели, страны, источники переходов, время на сайте и список «кто онлайн».": "Desaparecerán las visitas y los visitantes únicos, el gráfico de dos semanas, los países, las fuentes de tráfico, el tiempo en el sitio y la lista «quién está en línea».",
+    "Пользователи, подписки и рассылки останутся.": "Los usuarios, las suscripciones y los envíos se quedan.",
+    "Вернуть статистику нельзя.": "Las estadísticas no se pueden recuperar.",
+    "Отмена": "Cancelar"
   }
 }

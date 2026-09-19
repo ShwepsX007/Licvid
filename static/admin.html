@@ -47,6 +47,27 @@
         <div class="card" data-hint="переходы, уникальные, служебные">
             <h3>Визиты за 2 недели</h3>
             <div class="bars" id="visit-bars"></div>
+            <!-- Стирание статистики: кнопка открывает подтверждение, второй
+                 клик отправляет POST /api/admin/visits/clear
+                 (см. web_geo.py). Данные необратимы — потому и в два шага. -->
+            <div class="row-actions wipe-row">
+                <!-- фразы, а не ключи: i18n.js переводит живой текст и внутри
+                     новых узлов — подпись кнопки останется переведённой -->
+                <button class="btn btn-danger btn-small" id="visits-clear" type="button">🗑 Стереть статистику</button>
+                <span class="meta" id="visits-clear-status" role="status"></span>
+            </div>
+            <div class="wipe-box" id="visits-wipe" hidden>
+                <p class="wipe-lead">Стереть всю статистику посещений?</p>
+                <p class="meta">Исчезнут переходы и уникальные посетители, график за две недели, страны, источники переходов, время на сайте и список «кто онлайн». Пользователи, подписки и рассылки останутся. Вернуть статистику нельзя.</p>
+                <label class="wipe-opt">
+                    <input type="checkbox" id="visits-wipe-cache">
+                    <span>Заодно стереть кэш стран (адрес → страна): после этого страна каждого адреса определится заново</span>
+                </label>
+                <div class="row-actions">
+                    <button class="btn btn-ghost btn-small" id="visits-wipe-cancel" type="button">Отмена</button>
+                    <button class="btn btn-danger btn-small" id="visits-wipe-go" type="button">Да, стереть навсегда</button>
+                </div>
+            </div>
         </div>
         <div class="card" data-hint="сообщение всем, кто запускал бота">
             <h3>Рассылка в Telegram</h3>

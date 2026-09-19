@@ -1173,8 +1173,10 @@ def pump_watchers() -> List[dict]:
         if cfg.get("enabled"):
             row = dict(sub)
             row["pump"] = cfg
-            row["lang"] = ("en" if str(sub.get("language") or "").startswith("en")
-                           else "ru")
+            # язык сигнала: выбор человека или локаль Telegram, а если их нет —
+            # язык по умолчанию (сейчас английский)
+            from bot_i18n import normalize_lang
+            row["lang"] = normalize_lang(sub.get("language"))
             out.append(row)
     return out
 

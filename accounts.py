@@ -230,7 +230,11 @@ def public_user(row: sqlite3.Row | Dict[str, Any]) -> Dict[str, Any]:
         "first_name": d.get("first_name") or "",
         "last_name": d.get("last_name") or "",
         "photo_url": d.get("photo_url") or "",
-        "language": d.get("language") or "ru",
+        # Пустая строка = человек язык не выбирал. Не подставляем сюда «ru»:
+        # какой язык по умолчанию, решает бот (bot_i18n.DEFAULT_LANG) — сейчас
+        # это английский, а русский остаётся тем, кто выбрал его сам или пришёл
+        # с русской локалью Telegram.
+        "language": d.get("language") or "",
         "lang_manual": int(d.get("lang_manual") or 0),
         "is_admin": bool(d.get("is_admin")),
         "is_banned": bool(d.get("is_banned")),
@@ -663,7 +667,9 @@ class Store:
         return 0
 
     def create_email_user(self, email: str, password_hash: str = "",
-                          first_name: str = "", language: str = "ru") -> Dict[str, Any]:
+                          first_name: str = "", language: str = "") -> Dict[str, Any]:
+        # language пустой = язык не выбирали: решает тот, кто отправляет
+        # (бот — язык по умолчанию, страницы сайта — язык запроса)
         """Регистрация по почте. Адрес занят → {"ok": False, "error": "taken"}."""
         email = normalize_email(email)
         if not valid_email(email):
@@ -681,7 +687,7 @@ class Store:
                     "UPDATE users SET password_hash=?, first_name=?, language=?,"
                     " is_admin=?, last_seen=? WHERE id=?",
                     (password_hash or row["password_hash"], (first_name or "")[:64],
-                     (language or "ru")[:8], is_admin or int(row["is_admin"]), now,
+                     (language or "")[:8], is_admin or int(row["is_admin"]), now,
                      int(row["id"])),
                 )
             else:
@@ -690,7 +696,7 @@ class Store:
                     "first_name,language,is_admin,is_banned,created_at,last_seen,login_count)"
                     " VALUES(NULL,?,?,0,?,?,?,0,?,?,0)",
                     (email, password_hash, (first_name or "")[:64],
-                     (language or "ru")[:8], is_admin, now, now),
+                     (language or "")[:8], is_admin, now, now),
                 )
             self._db.commit()
             row = self._db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
@@ -962,7 +968,7 @@ class Store:
             (tg_id, _now(),
              (tg.get("username") or "")[:64], (tg.get("first_name") or "")[:64],
              (tg.get("last_name") or "")[:64], (tg.get("photo_url") or "")[:500],
-             (tg.get("language_code") or tg.get("language") or "ru")[:8],
+             (tg.get("language_code") or tg.get("language") or "")[:8],
              self._admin_flag(tg_id=tg_id), _now(), user_id),
         )
         self._db.commit()
@@ -1094,7 +1100,7 @@ class Store:
         first = (tg.get("first_name") or "")[:64]
         last = (tg.get("last_name") or "")[:64]
         photo = (tg.get("photo_url") or "")[:500]
-        lang = (tg.get("language_code") or tg.get("language") or "ru")[:8]
+        lang = (tg.get("language_code") or tg.get("language") or "")[:8]
         now = _now()
         with self._lock:
             row = self._db.execute("SELECT * FROM users WHERE tg_id=?", (tg_id,)).fetchone()
@@ -1451,6 +1457,55 @@ class Store:
             "days": by_day,
             "paths": [{"path": r["path"], "n": r["n"]} for r in top_paths],
         }
+
+    # ----- стирание статистики --------------------------------------------
+    def clear_visits(self, include_cache: bool = False) -> Dict[str, int]:
+        """Стереть статистику посещений: визиты, присутствие, (по желанию) кэш.
+
+        Админу это нужно, когда цифры надо начать с чистого листа — например,
+        после проверок, накрутки или переезда сайта. Что именно исчезает:
+
+        * ``visits`` — переходы, уникальные, график за две недели, страны,
+          источники и время на сайте;
+        * ``presence`` — «кто сейчас на сайте» и долгие визиты;
+        * ``geo_cache`` — только по флагу: это не статистика, а кэш «адрес →
+          страна». Его потеря безобидна, но после стирания страна каждого
+          адреса спрашивается у внешнего сервиса заново.
+
+        Аккаунты, сервисы, подписки и письма остаются на месте: стираются
+        только измерения посещаемости. Возвращаем, сколько строк удалили, —
+        админка показывает это в подтверждении.
+        """
+        counts = {"visits": 0, "presence": 0, "geo_cache": 0}
+        with self._lock:
+            pairs = [("visits", "DELETE FROM visits"),
+                     ("presence", "DELETE FROM presence")]
+            if include_cache:
+                pairs.append(("geo_cache", "DELETE FROM geo_cache"))
+            for name, sql in pairs:
+                try:
+                    counts[name] = int(self._db.execute(sql).rowcount or 0)
+                except Exception:                             # noqa: BLE001
+                    # базы прошлых версий: таблицы присутствия или кэша
+                    # могло ещё не быть — стирать нечего, и это не ошибка
+                    counts[name] = 0
+            self._db.commit()
+            # VACUUM после DELETE не запускаем: файл тот же, а блокировка на
+            # время уборки задержала бы запись новых визитов
+        return counts
+
+    def visits_volume(self) -> Dict[str, int]:
+        """Сколько сейчас лежит в базе: показываем в подтверждении стирания."""
+        with self._lock:
+            out = {}
+            for name, sql in (("visits", "SELECT COUNT(*) FROM visits"),
+                              ("presence", "SELECT COUNT(*) FROM presence"),
+                              ("geo_cache", "SELECT COUNT(*) FROM geo_cache")):
+                try:
+                    out[name] = int(self._db.execute(sql).fetchone()[0] or 0)
+                except Exception:                             # noqa: BLE001
+                    out[name] = 0
+        return out
 
     # ----- география посещений -------------------------------------------
     def geo_cached(self, ip_hash: str, ttl_sec: float = 0.0) -> Optional[Dict[str, Any]]:
@@ -2380,7 +2435,9 @@ class Store:
                 "SELECT tg_id, language FROM users "
                 "WHERE is_banned=0 AND tg_id IS NOT NULL"
             ).fetchall()
-        return [{"tg_id": int(r["tg_id"]), "language": r["language"] or "ru"}
+        # Пустой язык не заменяем на русский: язык по умолчанию решает бот
+        # (bot_i18n.DEFAULT_LANG), и это английский — здесь мы про него не знаем
+        return [{"tg_id": int(r["tg_id"]), "language": r["language"] or ""}
                 for r in rows]
 
     def _parse_svc_config(self, raw: str) -> Dict[str, Any]:

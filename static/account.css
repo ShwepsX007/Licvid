@@ -835,6 +835,23 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
 }
 
 /* ===== 🌍 Карта посещений (админка) ===================================== */
+/* Стирание статистики: кнопка и подтверждение в карточке визитов. Действие
+   необратимое, поэтому рамка красная — видно, что это «опасная» зона. */
+.wipe-row { align-items: center; gap: 10px; margin-top: 10px; }
+.wipe-box {
+    margin-top: 10px; padding: 12px 14px;
+    border: 1px solid rgba(255, 86, 86, 0.45); border-radius: 10px;
+    background: rgba(255, 86, 86, 0.06);
+}
+.wipe-box[hidden] { display: none; }
+.wipe-lead { margin: 0 0 6px; font-weight: 700; color: var(--red, #ff6b6b); }
+.wipe-opt {
+    display: flex; gap: 8px; align-items: flex-start;
+    margin: 10px 0 4px; font-size: 0.78rem; color: var(--muted);
+}
+.wipe-opt input { margin-top: 2px; }
+.wipe-box .row-actions { margin-top: 10px; }
+
 /* Название класса у карточки одно: geo. Внутри — кнопки периода, сводка,
    карта мира, легенда и таблицы (страны, источники, онлайн, долгие визиты).
    Карта — SVG с контурами из static/world-map.js; точки ставятся по той же

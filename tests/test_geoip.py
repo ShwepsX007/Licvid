@@ -12,7 +12,9 @@
 * ``geo_stats`` собирает точки, страны, источники и длительность визита из
   визитов и «сердцебиений», не путая роботов с гостями;
 * ручки: ``/api/visit/ping`` принимает только своих (по cookie) и не считает
-  роботов, ``/api/admin/geo`` — только для админа.
+  роботов, ``/api/admin/geo`` — только для админа;
+* ``/api/admin/visits/clear`` стирает статистику посещений только по слову
+  подтверждения и только админу, а аккаунты и подписки не трогает.
 
 Запуск:  python3 -m pytest tests/test_geoip.py -q
 """
@@ -198,6 +200,86 @@ class GeoStoreTest(unittest.TestCase):
         self.assertEqual(stats["totals"]["online"], 1)
         self.assertEqual(stats["points"][0]["country"], "FR")
         self.assertEqual(stats["points"][0]["views"], 0)
+
+
+class WipeTest(unittest.TestCase):
+    """Стирание статистики: что исчезает, что остаётся."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Store(os.path.join(self.tmp.name, "a.db"), secret="s")
+        self.user = self.store.create_email_user("vasya@example.com",
+                                                 password_hash="x")["user"]
+        self.uid = int(self.user["id"])
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self.tmp.cleanup()
+
+    def fill(self) -> None:
+        self.store.record_visit("/terminal", "v1", self.uid, hash_ip("s", "v1"),
+                                ua="Mozilla/5.0", country="FI",
+                                country_name="Finland", source="google.com",
+                                source_kind="search")
+        self.store.record_visit("/cabinet", "v1", self.uid, hash_ip("s", "v1"),
+                                ua="Mozilla/5.0")
+        self.store.record_visit("/", "bot1", None, hash_ip("s", "bot1"),
+                                ua="Googlebot", bot=True)
+        self.store.touch_presence("v1", user_id=self.uid, country="FI",
+                                  country_name="Finland", source="google.com",
+                                  source_kind="search", path="/cabinet",
+                                  ua="Mozilla/5.0")
+        self.store.geo_remember(hash_ip("s", "v1"), "FI", "Finland")
+
+    def test_wipe_removes_visits_and_presence_but_keeps_accounts(self) -> None:
+        self.fill()
+        self.store.set_user_service_config(self.uid, "alerts", {"enabled": True})
+        before = self.store.visits_volume()
+        self.assertEqual(before, {"visits": 3, "presence": 1, "geo_cache": 1})
+        counts = self.store.clear_visits()
+        self.assertEqual(counts["visits"], 3)
+        self.assertEqual(counts["presence"], 1)
+        self.assertEqual(counts["geo_cache"], 0)          # кэш не трогали
+        after = self.store.visits_volume()
+        self.assertEqual(after["visits"], 0)
+        self.assertEqual(after["presence"], 0)
+        self.assertEqual(after["geo_cache"], 1)
+        # картина посещаемости пуста, а не сломана
+        stats = self.store.geo_stats(24)
+        self.assertEqual(stats["totals"]["visitors"], 0)
+        self.assertEqual(stats["totals"]["views"], 0)
+        self.assertEqual(stats["online"], [])
+        self.assertEqual(stats["countries"], [])
+        days = self.store.visit_stats(14)["days"]
+        self.assertEqual(sum(d["views"] for d in days), 0)
+        self.assertEqual(sum(d["uniques"] for d in days), 0)
+        # аккаунт, подписка и журнал на месте: стёрта только статистика
+        self.assertIsNotNone(self.store.get_user(self.uid))
+        self.assertTrue(self.store.get_user_service(self.uid, "alerts"))
+
+    def test_wipe_can_take_the_country_cache_too(self) -> None:
+        self.fill()
+        counts = self.store.clear_visits(include_cache=True)
+        self.assertEqual(counts["geo_cache"], 1)
+        self.assertEqual(self.store.visits_volume()["geo_cache"], 0)
+        # после стирания кэша страна спрашивается заново, а не наследуется
+        self.assertIsNone(self.store.geo_cached(hash_ip("s", "v1"), ttl_sec=0))
+
+    def test_wipe_is_idempotent(self) -> None:
+        self.fill()
+        self.store.clear_visits()
+        self.assertEqual(self.store.clear_visits(),
+                         {"visits": 0, "presence": 0, "geo_cache": 0})
+
+    def test_clear_visit_gets_its_own_row_id_after_wipe(self) -> None:
+        """После стирания нумерация продолжается: страна не липнет к чужому id."""
+        self.fill()
+        self.store.clear_visits()
+        first = self.store.record_visit("/", "v9", None, hash_ip("s", "v9"))
+        self.assertGreater(first, 0)
+        self.store.set_visit_country(first, "ES", "Spain", "provider")
+        rows = self.store.geo_stats(24)["countries"]
+        self.assertEqual([c["country"] for c in rows], ["ES"])
 
 
 class ClassifyTest(unittest.TestCase):
@@ -475,6 +557,70 @@ class GeoRoutesTest(unittest.TestCase):
         body = self.admin.get("/api/admin/geo").json()
         self.assertEqual(sorted(body["periods"]), ["24h", "30d", "7d"])
         self.assertGreater(body["online_sec"], 0)
+
+    def test_visits_clear_requires_admin_and_confirm(self) -> None:
+        self.assertEqual(self.guest.post("/api/admin/visits/clear",
+                                         json={"confirm": "clear"}).status_code, 401)
+        self.assertEqual(self.user.post("/api/admin/visits/clear",
+                                        json={"confirm": "clear"}).status_code, 403)
+        # админ без слова подтверждения — отказ: статистику нельзя снести
+        # случайной кнопкой или чужим скриптом
+        for body in ({}, {"confirm": "yes"}, {"confirm": ""}, {"confirm": "clear!"}):
+            r = self.admin.post("/api/admin/visits/clear", json=body)
+            self.assertEqual(r.status_code, 400, body)
+            self.assertEqual(r.json()["error"], "confirm")
+        self.assertEqual(self.store.visits_volume()["visits"], 0)
+
+    def test_visits_clear_wipes_stats_and_keeps_accounts(self) -> None:
+        self.guest.post("/api/visit/ping", json={"path": "/"},
+                        headers={"CF-IPCountry": "fi"})
+        self.store.record_visit("/terminal", "u1", self.user_id,
+                                hash_ip("s", "u1"), country="ES",
+                                country_name="Spain", source="t.me",
+                                source_kind="social")
+        self.assertEqual(self.admin.get("/api/admin/geo").json()["totals"]["visitors"], 2)
+        before = self.store.visits_volume()
+        self.assertEqual(before["visits"], 1)      # визит вошедшего гостя
+        self.assertEqual(before["presence"], 1)    # и сердцебиение гостя с улицы
+        self.assertGreater(before["visits"] + before["presence"], 0)
+
+        r = self.admin.post("/api/admin/visits/clear", json={"confirm": "clear"})
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["deleted"]["visits"], before["visits"])
+        self.assertEqual(body["deleted"]["presence"], before["presence"])
+        self.assertEqual(body["deleted"]["geo_cache"], 0)
+        self.assertEqual(body["cache"], False)
+        self.assertEqual(body["before"], before)
+
+        # карточка географии пуста, счётчики визитов тоже
+        after = self.admin.get("/api/admin/geo").json()
+        self.assertEqual(after["totals"]["visitors"], 0)
+        self.assertEqual(after["totals"]["online"], 0)
+        self.assertEqual(after["points"], [])
+        self.assertEqual(after["countries"], [])
+        visits = self.store.visit_stats(14)
+        self.assertEqual(visits["days"], [])           # график пуст, а не врёт
+        self.assertEqual(visits["today_views"], 0)
+        self.assertEqual(visits["today_uniques"], 0)
+        self.assertEqual(visits["paths"], [])
+        # аккаунт не пострадал: стёрта статистика, а не люди
+        self.assertIsNotNone(self.store.get_user(self.user_id))
+        # в журнале админки остался след: кто и сколько стёр
+        marks = self.store.recent_audit(5)
+        self.assertTrue(any(m["action"] == "visits_clear" for m in marks), marks)
+
+    def test_visits_clear_can_drop_country_cache(self) -> None:
+        self.store.record_visit("/", "u1", self.user_id, hash_ip("s", "u1"),
+                                country="ES", country_name="Spain")
+        self.store.geo_remember(hash_ip("s", "u1"), "ES", "Spain")
+        self.assertEqual(self.store.visits_volume()["geo_cache"], 1)
+        r = self.admin.post("/api/admin/visits/clear",
+                            json={"confirm": "clear", "cache": True})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["deleted"]["geo_cache"], 1)
+        self.assertEqual(self.store.visits_volume()["geo_cache"], 0)
 
 
 if __name__ == "__main__":

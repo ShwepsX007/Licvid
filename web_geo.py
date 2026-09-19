@@ -1,9 +1,10 @@
 """🌍 Откуда приходят гости, как долго смотрят и кто сейчас на сайте.
 
-Две ручки:
+Три ручки:
 
     POST /api/visit/ping        — «я ещё здесь» (сердцебиение страницы)
     GET  /api/admin/geo?period= — картина для админки: точки, страны, источники
+    POST /api/admin/visits/clear — стереть статистику посещений (только админ)
 
 Сердцебиение шлёт ``static/presence.js`` со всех страниц: одна маленькая
 запись на гостя (``first_ts`` — когда пришёл, ``ts`` — когда последний раз
@@ -39,6 +40,11 @@ MAX_DOTS = 600
 #: Ограничение частоты сердцебиений: гостей много, а «я здесь» шлётся раз в минуту.
 RATE_LIMIT = 40
 RATE_WINDOW = 60.0
+
+#: Слово-подтверждение для стирания статистики. Не защита от взлома (ручка и
+#: так только для админа), а защита от случайного вызова: без него статистика
+#: не исчезнет ни от опечатки в коде, ни от чужого скрипта.
+CLEAR_WORD = "clear"
 
 
 class Ctx:
@@ -193,6 +199,45 @@ def register_geo_routes(app) -> None:
                 "lat": info["lat"], "lon": info["lon"],
                 "sec": round(float(row.get("sec") or 0.0), 1),
                 "online": len(ctx.store.geo_online(ONLINE_SEC))}
+
+    @router.post("/api/admin/visits/clear")
+    async def admin_visits_clear(request: Request,
+                                 payload: Dict[str, Any] = Body(default={})):
+        """Стереть статистику посещений: визиты, присутствие, кэш стран.
+
+        Только для админов, и только с подтверждением (``{"confirm": "clear"}``):
+        действие необратимое, поэтому его нельзя выстрелить одной случайной
+        кнопкой. Аккаунты, сервисы и подписки не трогаем — стирается ровно
+        статистика посещаемости.
+        """
+        from feedback import _admin
+        user, err = _admin(request)
+        if err:
+            return err
+        if ctx.store is None:
+            return JSONResponse({"ok": False, "error": "no_store"}, status_code=503)
+        body = payload or {}
+        if str(body.get("confirm") or "").strip().lower() != CLEAR_WORD:
+            return JSONResponse({"ok": False, "error": "confirm"}, status_code=400)
+        include_cache = bool(body.get("cache"))
+        before = {}
+        try:
+            before = ctx.store.visits_volume()
+            counts = ctx.store.clear_visits(include_cache=include_cache)
+        except Exception as e:                                # noqa: BLE001
+            log.warning("визиты: статистика не стёрлась: %s", e)
+            return JSONResponse({"ok": False, "error": "clear"}, status_code=500)
+        # след в журнале админки: кто и сколько строк стёр (detail — строка)
+        try:
+            ctx.store.audit(int((user or {}).get("id") or 0), "visits_clear",
+                            f"visits={counts['visits']} presence={counts['presence']}"
+                            f" cache={counts['geo_cache']}")
+        except Exception as e:                                # noqa: BLE001
+            log.debug("визиты: след в журнале не записался: %s", e)
+        log.info("визиты: статистика стёрта админом %s — %s (кэш: %s)",
+                 (user or {}).get("id"), counts, include_cache)
+        return {"ok": True, "deleted": counts, "before": before,
+                "cache": include_cache, "now": time.time()}
 
     @router.get("/api/admin/geo")
     async def admin_geo(request: Request, period: str = DEFAULT_PERIOD):

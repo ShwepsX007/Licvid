@@ -926,7 +926,8 @@ def register_account_routes(app) -> None:
             "username": data.get("username") or "dev",
             "first_name": data.get("first_name") or "Dev",
             "last_name": data.get("last_name") or "",
-            "language_code": data.get("language") or "ru",
+            # пусто = локаль неизвестна: язык подставит бот по умолчанию
+            "language_code": data.get("language") or "",
         })
         if data.get("is_admin"):
             user = ctx.store.set_admin(user["id"], True) or user

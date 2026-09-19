@@ -3714,9 +3714,15 @@ class TelegramBot:
     # ----- сервис «Сторож монет»: пампы и дампы ---------------------------
     @staticmethod
     def _user_lang(user: dict) -> str:
-        """Язык пользователя для ссылок и текстов сигналов."""
-        lang = (user or {}).get("language_code") or (user or {}).get("language") or ""
-        return "en" if str(lang).startswith("en") else "ru"
+        """Язык пользователя для ссылок и текстов сигналов.
+
+        Сначала выбор человека, потом локаль клиента Telegram, и только потом
+        язык по умолчанию (``normalize_lang``) — он же решает, что делать с
+        языком, которого бот не знает.
+        """
+        lang = ((user or {}).get("language_code") or
+                (user or {}).get("language") or "")
+        return normalize_lang(lang)
 
     def _pump_cfg(self, user: dict) -> dict:
         from pump_scan import normalize

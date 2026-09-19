@@ -149,7 +149,7 @@
     "geo.zoom_out": "Alejar",
     "geo.zoom_fit": "Mapa completo",
     "geo.map_hint": "El mapa se puede arrastrar y la rueda acerca",
-    "dig.cover_alt": "Portada del número",
+    "dig.cover_alt": "Portada de la edición",
     "adm.trial_line": "Prueba de capas ({min} min): {n} invitados, {stuck} ya vieron la oferta de registro",
     "adm.trial_none": "Prueba de capas ({min} min): todavía no hubo invitados",
     "seo.hourly.title": "Resúmenes del mercado por horas — publicaciones del canal LiqScope",
@@ -181,7 +181,17 @@
     "filter.oi_placeholder": "p. ej. 1000000",
     "chart.cvd_current_title": "Quién mueve el precio en la vela actual",
     "feed.show_all_title": "Mostrar todas las monedas",
-    "lang.select_title": "Idioma / Language"
+    "lang.select_title": "Idioma / Language",
+    "seo.404.title": "Página no encontrada — LiqScope",
+    "seo.404.desc": "Página no encontrada. Abre el terminal de liquidaciones, digest o resúmenes por hora.",
+    "404.title": "404 — página no encontrada",
+    "404.lead": "Parece que esta página no existe. El enlace puede estar desactualizado o mal escrito.",
+    "404.to_terminal": "⚡ Al terminal",
+    "404.to_landing": "Inicio",
+    "404.to_digest": "Digest",
+    "404.to_hourly": "Hourly",
+    "404.to_login": "Entrar",
+    "hour.photo_alt": "Foto del resumen"
   },
   "phrases": {
     "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "Un post cada N horas: la ventana del post son esas mismas N horas, y el bloque de análisis dentro del post ocupa un cuarto de la ventana (cada 4 h → una hora, cada 1 h → 15 minutos).",

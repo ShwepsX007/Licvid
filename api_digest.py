@@ -693,9 +693,30 @@ def register_digest_routes(app) -> None:
             og_image = (ctx.public_url or seo_pages.SITE_URL).rstrip("/") + photo["url"]
         # Каноникал — с днём, если открыт конкретный выпуск: у каждого дня свой URL в выдаче
         canon_path = f"/digest?day={day}" if day else "/digest"
+        # Article данные для JSON-LD: заголовок и описание дня
+        article = None
+        if rec:
+            try:
+                facts = (rec or {}).get("facts") or {}
+                total = facts.get("liq_total_usd") or 0
+                cnt = facts.get("liq_count") or 0
+                # Формируем описание вида "2026-09-20: $12.3M, 123 ликвидации"
+                desc = f"{day or rec.get('day')}: ${total} · {cnt} ликвидаций" if day else ""
+                # Если есть mood или топ-монета — добавим
+                mood = (rec.get("mood") or {}).get("label") or ""
+                if mood:
+                    desc = f"{desc} · {mood}" if desc else mood
+                article = {
+                    "day": str(day or rec.get("day") or ""),
+                    "title": f"Дневной дайджест — {day or rec.get('day')}" if lang == "ru" else f"Daily digest — {day or rec.get('day')}",
+                    "desc": desc or None,
+                    "date": str(day or rec.get("day") or ""),
+                }
+            except Exception:
+                article = {"day": str(day or "")}
         return seo_pages.render(
             "digest.html", lang, canon_path,
-            extra_head=seo_pages.jsonld("digest", lang, image=og_image),
+            extra_head=seo_pages.jsonld("digest", lang, image=og_image, article=article),
             og_image=og_image, auto=auto,
         )
 

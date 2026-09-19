@@ -181,7 +181,17 @@
     "filter.oi_placeholder": "e.g. 1000000",
     "chart.cvd_current_title": "Who moves the price in the current candle",
     "feed.show_all_title": "Show all coins",
-    "lang.select_title": "Language / Язык"
+    "lang.select_title": "Language / Язык",
+    "seo.404.title": "Page not found — LiqScope",
+    "seo.404.desc": "Page not found. Open the liquidation terminal, digest or hourly summaries.",
+    "404.title": "404 — page not found",
+    "404.lead": "Looks like this page doesn't exist. The link may be outdated or mistyped.",
+    "404.to_terminal": "⚡ To terminal",
+    "404.to_landing": "Home",
+    "404.to_digest": "Digest",
+    "404.to_hourly": "Hourly",
+    "404.to_login": "Sign in",
+    "hour.photo_alt": "Summary photo"
   },
   "phrases": {
     "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "One post every N hours: the post window is those same N hours, and the analysis block inside the post is a quarter of the window (every 4 h → one hour, every 1 h → 15 minutes).",

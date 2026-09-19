@@ -194,7 +194,17 @@ window.LIQSCOPE_I18N_PAGES =
       "filter.oi_placeholder": "Например 1000000",
       "chart.cvd_current_title": "Кто двигает цену в текущей свече",
       "feed.show_all_title": "Показать все монеты",
-      "lang.select_title": "Language / Язык"
+      "lang.select_title": "Language / Язык",
+      "seo.404.title": "Страница не найдена — LiqScope",
+      "seo.404.desc": "Страница не найдена. Откройте терминал ликвидаций, дайджест или сводки по часам.",
+      "404.title": "404 — страница не найдена",
+      "404.lead": "Похоже, такой страницы нет. Возможно, ссылка устарела или вы ошиблись адресом.",
+      "404.to_terminal": "⚡ К терминалу",
+      "404.to_landing": "На главную",
+      "404.to_digest": "Дайджест",
+      "404.to_hourly": "Сводки по часам",
+      "404.to_login": "Войти в кабинет",
+      "hour.photo_alt": "Фото сводки"
     },
     "phrases": {
       "🗑 Стереть статистику": "🗑 Стереть статистику",
@@ -422,7 +432,17 @@ window.LIQSCOPE_I18N_PAGES =
       "filter.oi_placeholder": "e.g. 1000000",
       "chart.cvd_current_title": "Who moves the price in the current candle",
       "feed.show_all_title": "Show all coins",
-      "lang.select_title": "Language / Язык"
+      "lang.select_title": "Language / Язык",
+      "seo.404.title": "Page not found — LiqScope",
+      "seo.404.desc": "Page not found. Open the liquidation terminal, digest or hourly summaries.",
+      "404.title": "404 — page not found",
+      "404.lead": "Looks like this page doesn't exist. The link may be outdated or mistyped.",
+      "404.to_terminal": "⚡ To terminal",
+      "404.to_landing": "Home",
+      "404.to_digest": "Digest",
+      "404.to_hourly": "Hourly",
+      "404.to_login": "Sign in",
+      "hour.photo_alt": "Summary photo"
     },
     "phrases": {
       "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "One post every N hours: the post window is those same N hours, and the analysis block inside the post is a quarter of the window (every 4 h → one hour, every 1 h → 15 minutes).",
@@ -1363,7 +1383,17 @@ window.LIQSCOPE_I18N_PAGES =
       "filter.oi_placeholder": "例如 1000000",
       "chart.cvd_current_title": "谁在推动当前K线的价格",
       "feed.show_all_title": "显示所有币种",
-      "lang.select_title": "Language / 语言"
+      "lang.select_title": "Language / 语言",
+      "seo.404.title": "页面未找到 — LiqScope",
+      "seo.404.desc": "页面未找到。打开清算终端、日报或小时汇总。",
+      "404.title": "404 — 页面未找到",
+      "404.lead": "看起来这个页面不存在。链接可能已过期或输入错误。",
+      "404.to_terminal": "⚡ 去终端",
+      "404.to_landing": "首页",
+      "404.to_digest": "日报",
+      "404.to_hourly": "小时汇总",
+      "404.to_login": "登录",
+      "hour.photo_alt": "简报图片"
     },
     "phrases": {
       "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "每 N 小时发一篇：帖子窗口就是这 N 小时，帖内的分析块占窗口的四分之一（每 4 小时 → 每小时，每 1 小时 → 每 15 分钟）。",
@@ -2273,7 +2303,7 @@ window.LIQSCOPE_I18N_PAGES =
       "geo.zoom_out": "ज़ूम आउट",
       "geo.zoom_fit": "पूरा नक्शा",
       "geo.map_hint": "नक्शे को खींचें और स्क्रॉल से ज़ूम करें",
-      "dig.cover_alt": "इस अंक का कवर",
+      "dig.cover_alt": "अंक की कवर",
       "adm.trial_line": "लेयर ट्रायल ({min} मिनट): {n} मेहमान, {stuck} ने रजिस्ट्रेशन का प्रस्ताव देख लिया",
       "adm.trial_none": "लेयर ट्रायल ({min} मिनट): अभी कोई मेहमान नहीं",
       "seo.hourly.title": "हर घंटे की बाज़ार सारांश — LiqScope चैनल पोस्ट",
@@ -2305,7 +2335,17 @@ window.LIQSCOPE_I18N_PAGES =
       "filter.oi_placeholder": "जैसे 1000000",
       "chart.cvd_current_title": "मौजूदा कैंडल में कीमत कौन चला रहा है",
       "feed.show_all_title": "सभी कॉइन्स दिखाएं",
-      "lang.select_title": "भाषा / Language"
+      "lang.select_title": "भाषा / Language",
+      "seo.404.title": "पेज नहीं मिला — LiqScope",
+      "seo.404.desc": "पेज नहीं मिला। लिक्विडेशन टर्मिनल, डाइजेस्ट या घंटेवार सारांश खोलें।",
+      "404.title": "404 — पेज नहीं मिला",
+      "404.lead": "लगता है यह पेज मौजूद नहीं है। लिंक पुराना हो सकता है या टाइपिंग गलती।",
+      "404.to_terminal": "⚡ टर्मिनल पर",
+      "404.to_landing": "होम",
+      "404.to_digest": "डाइजेस्ट",
+      "404.to_hourly": "घंटेवार",
+      "404.to_login": "साइन इन",
+      "hour.photo_alt": "सारांश की फ़ोटो"
     },
     "phrases": {
       "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "हर N घंटे में एक पोस्ट: पोस्ट विंडो वही N घंटे है, और पोस्ट के भीतर विश्लेषण ब्लॉक विंडो का चौथाई है (हर 4 घंटे → एक घंटा, हर 1 घंटा → 15 मिनट)।",
@@ -3216,7 +3256,7 @@ window.LIQSCOPE_I18N_PAGES =
       "geo.zoom_out": "Alejar",
       "geo.zoom_fit": "Mapa completo",
       "geo.map_hint": "El mapa se puede arrastrar y la rueda acerca",
-      "dig.cover_alt": "Portada del número",
+      "dig.cover_alt": "Portada de la edición",
       "adm.trial_line": "Prueba de capas ({min} min): {n} invitados, {stuck} ya vieron la oferta de registro",
       "adm.trial_none": "Prueba de capas ({min} min): todavía no hubo invitados",
       "seo.hourly.title": "Resúmenes del mercado por horas — publicaciones del canal LiqScope",
@@ -3248,7 +3288,17 @@ window.LIQSCOPE_I18N_PAGES =
       "filter.oi_placeholder": "p. ej. 1000000",
       "chart.cvd_current_title": "Quién mueve el precio en la vela actual",
       "feed.show_all_title": "Mostrar todas las monedas",
-      "lang.select_title": "Idioma / Language"
+      "lang.select_title": "Idioma / Language",
+      "seo.404.title": "Página no encontrada — LiqScope",
+      "seo.404.desc": "Página no encontrada. Abre el terminal de liquidaciones, digest o resúmenes por hora.",
+      "404.title": "404 — página no encontrada",
+      "404.lead": "Parece que esta página no existe. El enlace puede estar desactualizado o mal escrito.",
+      "404.to_terminal": "⚡ Al terminal",
+      "404.to_landing": "Inicio",
+      "404.to_digest": "Digest",
+      "404.to_hourly": "Hourly",
+      "404.to_login": "Entrar",
+      "hour.photo_alt": "Foto del resumen"
     },
     "phrases": {
       "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "Un post cada N horas: la ventana del post son esas mismas N horas, y el bloque de análisis dentro del post ocupa un cuarto de la ventana (cada 4 h → una hora, cada 1 h → 15 minutos).",

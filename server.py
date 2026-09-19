@@ -3069,6 +3069,22 @@ async def manifest_webmanifest(request: Request):
     return seo_pages.manifest(lang=lang)
 
 
+@app.exception_handler(404)
+async def not_found_handler(request: Request, exc):
+    """404 — страница не найдена: отдаём красивую страницу на языке гостя, noindex."""
+    try:
+        lang, auto = seo_pages.lang_of(request)
+    except Exception:
+        lang, auto = seo_pages.DEFAULT_LANG, False
+    # Для 404 — noindex, но hreflang и язык всё равно нужны
+    return seo_pages.render(
+        "404.html", lang, "/404",
+        extra_head=seo_pages.jsonld("404", lang),
+        auto=auto,
+        status_code=404,
+    )
+
+
 @app.get("/favicon.ico")
 async def favicon():
     """Фавиконка в корне сайта: её спрашивают браузер и роботы поисковиков.

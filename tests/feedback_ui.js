@@ -5,9 +5,10 @@
  *     NODE_PATH=./node_modules node tests/feedback_ui.js [http://127.0.0.1:8011]
  *
  * Сеть подменена заглушками, поэтому проверка не зависит от того, что лежит в
- * базе демо-стенда: важно, что кнопка «По всем вопросам» открывает диалог,
- * сообщение уходит, ответ админа виден в кабинете, а разделы админки
- * сворачиваются и помнят своё состояние.
+ * базе демо-стенда: важно, что кнопка «По всем вопросам» (маленькая, у правого
+ * края строки действий) раскрывает диалог — по умолчанию он свёрнут; сообщение
+ * уходит, ответ админа виден в кабинете, а разделы админки сворачиваются и
+ * помнят своё состояние.
  */
 const { JSDOM, VirtualConsole } = require("jsdom");
 
@@ -128,7 +129,33 @@ async function main() {
         !!jump && jump.textContent.indexOf("По всем вопросам") >= 0,
         jump && jump.textContent);
   check("кнопка ведёт к диалогу", jump && jump.getAttribute("href") === "#fb-card");
-  check("карточка диалога есть в кабинете", !!cdoc.querySelector("#fb-card"));
+  const card = cdoc.querySelector("#fb-card");
+  check("карточка диалога есть в кабинете", !!card);
+  // Диалог не мозолит глаза: свёрнут, пока его не открыли кнопкой.
+  check("диалог по умолчанию свёрнут", !!card && card.open === false,
+        card && card.open);
+  check("кнопка «По всем вопросам» — маленькая",
+        !!jump && String(jump.className).indexOf("btn-small") >= 0,
+        jump && jump.className);
+  const acts = cdoc.querySelectorAll(".row-actions")[0];
+  check("кнопка стоит последней в строке действий (правый край)",
+        !!acts && acts.lastElementChild === jump,
+        acts && acts.lastElementChild && acts.lastElementChild.id);
+  const cssTxt = await new Promise((res, rej) => {
+    require("http").get(URL_BASE + "/static/account.css", (r) => {
+      let b = ""; r.on("data", (c) => (b += c)); r.on("end", () => res(b));
+    }).on("error", rej);
+  });
+  check("CSS: кнопка прижата к правому краю строки",
+        /#fb-jump\s*\{[^}]*margin-left:\s*auto/.test(cssTxt));
+
+  jump.dispatchEvent(new cab.win.MouseEvent("click", { bubbles: true }));
+  await wait(80);
+  check("нажатие на кнопку раскрывает диалог", !!card && card.open === true,
+        card && card.open);
+  check("кнопка не уводит со страницы (href остался)", 
+        jump.getAttribute("href") === "#fb-card");
+
   const bubbles = cdoc.querySelectorAll("#fb-thread .fb-bubble");
   check("переписка показана обоими голосами", bubbles.length === 2, bubbles.length);
   check("ответ админа отличается от своего сообщения",

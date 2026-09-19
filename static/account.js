@@ -2444,12 +2444,24 @@
     function bootFeedbackUser() {
         var card = $("fb-card");
         if (!card || !$("fb-thread")) return;
+        // Карточка диалога свёрнута по умолчанию — кабинет без неё компактнее.
+        // Кнопка «По всем вопросам» в шапке (маленькая, у правого края) ведёт
+        // к диалогу и раскрывает его.
+        var jump = $("fb-jump");
+        if (jump) {
+            jump.addEventListener("click", function (e) {
+                e.preventDefault();
+                card.open = true;
+                if (card.scrollIntoView) {
+                    card.scrollIntoView({ block: "start", behavior: "smooth" });
+                }
+            });
+        }
         function load() {
             return api("/api/feedback").then(function (d) {
                 if (!d.ok) return;
                 fbPaint("fb-thread", d.messages);
                 fbBadge(d.unread);
-                var jump = $("fb-jump");
                 if (jump) jump.setAttribute("data-unread", d.unread || 0);
             });
         }

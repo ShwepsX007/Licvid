@@ -104,8 +104,13 @@ async function main() {
         } else if (u.indexOf("/api/klines") === 0) {
           body = { symbol: "BTC_USDT", timeframe: 5, source: "demo", candles: [] };
         } else if (u.indexOf("/api/stats") === 0) {
+          // Лидеров отдаём не пустыми: карточки «кто на кассе» рисуются сразу
+          // из REST, а не только из push'а по WS — иначе проверка
+          // topCoinsCardsCount зависела от того, успел ли прийти stats за 6 с.
           body = { total_usd_24h: 0, longs_usd_24h: 0, shorts_usd_24h: 0,
-                   total_usd_1h: 0, total_usd_5m: 0, top_coins: [] };
+                   total_usd_1h: 0, total_usd_5m: 0,
+                   top_coins: [{ symbol: "BTC_USDT", usd: 2_100_000, count: 120 },
+                               { symbol: "ETH_USDT", usd: 950_000, count: 80 }] };
         } else if (u.indexOf("/api/liquidations") === 0) {
           // терминал догружает историю пузырьков после F5 — отдаём стаб
           body = { liquidations: [], total: 0 };

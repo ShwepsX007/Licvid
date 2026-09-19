@@ -1778,13 +1778,34 @@
         return nn === 1 ? (f[0] || f[1]) : (f[2] || f[1] || f[0]);
     }
 
+    /** Перевод подписи элемента — без потери вложенных элементов.
+     *
+     * ``textContent = перевод`` сносил всех детей: счётчик непрочитанного
+     * (``<span class="fb-dot">``) внутри кнопки «По всем вопросам» исчезал
+     * вместе с цифрой, хотя по нему видно, что админ ответил. Меняем первый
+     * текстовый узел, а элементы оставляем на месте; если текста не было —
+     * вставляем его первым.
+     */
+    function setLabel(el, text) {
+        var kids = el.childNodes, done = false, i;
+        for (i = 0; i < kids.length; i++) {
+            if (kids[i].nodeType !== 3) continue;      // 3 — текстовый узел
+            if (done) { kids[i].nodeValue = ""; continue; }
+            kids[i].nodeValue = text;
+            done = true;
+        }
+        if (!done) {
+            el.insertBefore(el.ownerDocument.createTextNode(text), el.firstChild);
+        }
+    }
+
     function apply(root) {
         root = root || document;
         if (!root || !root.querySelectorAll) return;
         document.documentElement.lang = localeTag();
         var nodes = root.querySelectorAll("[data-i18n]");
         for (var i = 0; i < nodes.length; i++) {
-            nodes[i].textContent = t(nodes[i].getAttribute("data-i18n"));
+            setLabel(nodes[i], t(nodes[i].getAttribute("data-i18n")));
         }
         nodes = root.querySelectorAll("[data-i18n-placeholder]");
         for (i = 0; i < nodes.length; i++) {

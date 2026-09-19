@@ -174,7 +174,14 @@
     "geo.dots_fail": "No se pudieron cambiar los puntos, inténtalo otra vez.",
     "geo.col_trial": "Prueba de capas",
     "geo.trial_over": "agotada",
-    "geo.trial_more": "Dar {min} minutos más de prueba"
+    "geo.trial_more": "Dar {min} minutos más de prueba",
+    "filter.thresholds_title": "Umbrales de volumen: liquidaciones, CVD y OI Δ",
+    "filter.exchanges_title": "Filtrar por exchanges",
+    "filter.cvd_placeholder": "p. ej. 50000",
+    "filter.oi_placeholder": "p. ej. 1000000",
+    "chart.cvd_current_title": "Quién mueve el precio en la vela actual",
+    "feed.show_all_title": "Mostrar todas las monedas",
+    "lang.select_title": "Idioma / Language"
   },
   "phrases": {
     "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "Un post cada N horas: la ventana del post son esas mismas N horas, y el bloque de análisis dentro del post ocupa un cuarto de la ventana (cada 4 h → una hora, cada 1 h → 15 minutos).",
@@ -919,6 +926,17 @@
     "В постах картинки из комплекта. Загрузите свои — набор заменится.": "Los posts usan imágenes del conjunto integrado. Sube las tuyas: el conjunto se reemplaza.",
     "jpg, png, webp — до 12 МБ": "jpg, png, webp — hasta 12 MB",
     "шт.": "uds",
-    "пробный доступ гостей к слоям": "prueba de capas para visitantes"
+    "пробный доступ гостей к слоям": "prueba de capas para visitantes",
+    "День": "Día",
+    "Детали": "Detalles",
+    "Время (UTC)": "Hora (UTC)",
+    "↻ Обновить лог": "↻ Actualizar registro",
+    "📝 Лог отправок (защита от дублей)": "📝 Registro de envíos (anti-duplicados)",
+    "Защита от дубля после рестарта — по логу.": "Protección contra duplicados tras reinicio — vía registro.",
+    "Отправлять сводки в канал (вкл/выкл посты)": "Enviar resúmenes al canal (on/off)",
+    "Выключено — бот не шлёт сводки автоматически и по кнопке «Сводка в канал» только по force.": "Apagado — el bot no envía resúmenes automáticamente y vía 'Resumen al canal' solo con force.",
+    "Сохраняется в БД на 7 дней — после рестарта пост/дайджест не уйдёт повторно в тот же день.": "Guardado en BD 7 días — tras reinicio no se reenvía el mismo día.",
+    "пост": "post",
+    "за 7 дней:": "en 7 días:"
   }
 }

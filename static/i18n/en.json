@@ -174,7 +174,14 @@
     "geo.dots_fail": "Could not change the dots — please try again.",
     "geo.col_trial": "Layers trial",
     "geo.trial_over": "over",
-    "geo.trial_more": "Give {min} more minutes of trial access"
+    "geo.trial_more": "Give {min} more minutes of trial access",
+    "filter.thresholds_title": "Volume thresholds: liquidations, CVD and OI Δ",
+    "filter.exchanges_title": "Filter by exchanges",
+    "filter.cvd_placeholder": "e.g. 50000",
+    "filter.oi_placeholder": "e.g. 1000000",
+    "chart.cvd_current_title": "Who moves the price in the current candle",
+    "feed.show_all_title": "Show all coins",
+    "lang.select_title": "Language / Язык"
   },
   "phrases": {
     "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "One post every N hours: the post window is those same N hours, and the analysis block inside the post is a quarter of the window (every 4 h → one hour, every 1 h → 15 minutes).",
@@ -918,6 +925,17 @@
     "В постах картинки из комплекта. Загрузите свои — набор заменится.": "Posts use pictures from the built-in set. Upload your own — the set is replaced.",
     "jpg, png, webp — до 12 МБ": "jpg, png, webp — up to 12 MB",
     "шт.": "pcs",
-    "пробный доступ гостей к слоям": "guest trial access to the layers"
+    "пробный доступ гостей к слоям": "guest trial access to the layers",
+    "День": "Day",
+    "Детали": "Details",
+    "Время (UTC)": "Time (UTC)",
+    "↻ Обновить лог": "↻ Refresh log",
+    "📝 Лог отправок (защита от дублей)": "📝 Sent log (anti-duplicate)",
+    "Защита от дубля после рестарта — по логу.": "Duplicate protection after restart — via log.",
+    "Отправлять сводки в канал (вкл/выкл посты)": "Send summaries to channel (on/off posts)",
+    "Выключено — бот не шлёт сводки автоматически и по кнопке «Сводка в канал» только по force.": "Off — bot doesn't send summaries automatically and via 'Summary to channel' only with force.",
+    "Сохраняется в БД на 7 дней — после рестарта пост/дайджест не уйдёт повторно в тот же день.": "Stored in DB for 7 days — after restart post/digest won't be sent again the same day.",
+    "пост": "post",
+    "за 7 дней:": "for 7 days:"
   }
 }

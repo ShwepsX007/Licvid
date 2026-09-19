@@ -691,8 +691,10 @@ def register_digest_routes(app) -> None:
         og_image = ""
         if photo:
             og_image = (ctx.public_url or seo_pages.SITE_URL).rstrip("/") + photo["url"]
+        # Каноникал — с днём, если открыт конкретный выпуск: у каждого дня свой URL в выдаче
+        canon_path = f"/digest?day={day}" if day else "/digest"
         return seo_pages.render(
-            "digest.html", lang, "/digest",
+            "digest.html", lang, canon_path,
             extra_head=seo_pages.jsonld("digest", lang, image=og_image),
             og_image=og_image, auto=auto,
         )

@@ -85,8 +85,15 @@ def register_hourly_routes(app) -> None:
         og_image = ""
         if photo:
             og_image = (ctx.public_url or seo_pages.SITE_URL).rstrip("/") + photo["url"]
+        # Каноникал с днём/постом — у каждого дня свой URL
+        if post:
+            canon_path = f"/hourly?post={post}"
+        elif day:
+            canon_path = f"/hourly?day={day}"
+        else:
+            canon_path = "/hourly"
         return seo_pages.render(
-            "hourly.html", lang, "/hourly",
+            "hourly.html", lang, canon_path,
             extra_head=seo_pages.jsonld("hourly", lang, image=og_image),
             og_image=og_image, auto=auto,
         )

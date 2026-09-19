@@ -187,7 +187,14 @@ window.LIQSCOPE_I18N_PAGES =
       "geo.dots_fail": "Не получилось изменить точки — попробуйте ещё раз.",
       "geo.col_trial": "Пробник слоёв",
       "geo.trial_over": "закончился",
-      "geo.trial_more": "Дать ещё {min} мин пробного доступа"
+      "geo.trial_more": "Дать ещё {min} мин пробного доступа",
+      "filter.thresholds_title": "Пороги объёма: ликвидации, CVD и OI Δ",
+      "filter.exchanges_title": "Фильтр по биржам",
+      "filter.cvd_placeholder": "Например 50000",
+      "filter.oi_placeholder": "Например 1000000",
+      "chart.cvd_current_title": "Кто двигает цену в текущей свече",
+      "feed.show_all_title": "Показать все монеты",
+      "lang.select_title": "Language / Язык"
     },
     "phrases": {
       "🗑 Стереть статистику": "🗑 Стереть статистику",
@@ -218,7 +225,18 @@ window.LIQSCOPE_I18N_PAGES =
       "сверх пачки:": "сверх пачки:",
       "В постах картинки из комплекта. Загрузите свои — набор заменится.": "В постах картинки из комплекта. Загрузите свои — набор заменится.",
       "🕘 Сводка на сайт": "🕘 Сводка на сайт",
-      "пробный доступ гостей к слоям": "пробный доступ гостей к слоям"
+      "пробный доступ гостей к слоям": "пробный доступ гостей к слоям",
+      "День": "День",
+      "Детали": "Детали",
+      "Время (UTC)": "Время (UTC)",
+      "↻ Обновить лог": "↻ Обновить лог",
+      "📝 Лог отправок (защита от дублей)": "📝 Лог отправок (защита от дублей)",
+      "Защита от дубля после рестарта — по логу.": "Защита от дубля после рестарта — по логу.",
+      "Отправлять сводки в канал (вкл/выкл посты)": "Отправлять сводки в канал (вкл/выкл посты)",
+      "Выключено — бот не шлёт сводки автоматически и по кнопке «Сводка в канал» только по force.": "Выключено — бот не шлёт сводки автоматически и по кнопке «Сводка в канал» только по force.",
+      "Сохраняется в БД на 7 дней — после рестарта пост/дайджест не уйдёт повторно в тот же день.": "Сохраняется в БД на 7 дней — после рестарта пост/дайджест не уйдёт повторно в тот же день.",
+      "пост": "пост",
+      "за 7 дней:": "за 7 дней:"
     }
   },
   "en": {
@@ -397,7 +415,14 @@ window.LIQSCOPE_I18N_PAGES =
       "geo.dots_fail": "Could not change the dots — please try again.",
       "geo.col_trial": "Layers trial",
       "geo.trial_over": "over",
-      "geo.trial_more": "Give {min} more minutes of trial access"
+      "geo.trial_more": "Give {min} more minutes of trial access",
+      "filter.thresholds_title": "Volume thresholds: liquidations, CVD and OI Δ",
+      "filter.exchanges_title": "Filter by exchanges",
+      "filter.cvd_placeholder": "e.g. 50000",
+      "filter.oi_placeholder": "e.g. 1000000",
+      "chart.cvd_current_title": "Who moves the price in the current candle",
+      "feed.show_all_title": "Show all coins",
+      "lang.select_title": "Language / Язык"
     },
     "phrases": {
       "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "One post every N hours: the post window is those same N hours, and the analysis block inside the post is a quarter of the window (every 4 h → one hour, every 1 h → 15 minutes).",
@@ -1141,7 +1166,18 @@ window.LIQSCOPE_I18N_PAGES =
       "В постах картинки из комплекта. Загрузите свои — набор заменится.": "Posts use pictures from the built-in set. Upload your own — the set is replaced.",
       "jpg, png, webp — до 12 МБ": "jpg, png, webp — up to 12 MB",
       "шт.": "pcs",
-      "пробный доступ гостей к слоям": "guest trial access to the layers"
+      "пробный доступ гостей к слоям": "guest trial access to the layers",
+      "День": "Day",
+      "Детали": "Details",
+      "Время (UTC)": "Time (UTC)",
+      "↻ Обновить лог": "↻ Refresh log",
+      "📝 Лог отправок (защита от дублей)": "📝 Sent log (anti-duplicate)",
+      "Защита от дубля после рестарта — по логу.": "Duplicate protection after restart — via log.",
+      "Отправлять сводки в канал (вкл/выкл посты)": "Send summaries to channel (on/off posts)",
+      "Выключено — бот не шлёт сводки автоматически и по кнопке «Сводка в канал» только по force.": "Off — bot doesn't send summaries automatically and via 'Summary to channel' only with force.",
+      "Сохраняется в БД на 7 дней — после рестарта пост/дайджест не уйдёт повторно в тот же день.": "Stored in DB for 7 days — after restart post/digest won't be sent again the same day.",
+      "пост": "post",
+      "за 7 дней:": "for 7 days:"
     }
   },
   "zh": {
@@ -1320,7 +1356,14 @@ window.LIQSCOPE_I18N_PAGES =
       "geo.dots_fail": "无法修改点，请重试。",
       "geo.col_trial": "图层试用",
       "geo.trial_over": "已结束",
-      "geo.trial_more": "再给 {min} 分钟试用"
+      "geo.trial_more": "再给 {min} 分钟试用",
+      "filter.thresholds_title": "成交量阈值：清算、CVD 和 OI Δ",
+      "filter.exchanges_title": "按交易所筛选",
+      "filter.cvd_placeholder": "例如 50000",
+      "filter.oi_placeholder": "例如 1000000",
+      "chart.cvd_current_title": "谁在推动当前K线的价格",
+      "feed.show_all_title": "显示所有币种",
+      "lang.select_title": "Language / 语言"
     },
     "phrases": {
       "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "每 N 小时发一篇：帖子窗口就是这 N 小时，帖内的分析块占窗口的四分之一（每 4 小时 → 每小时，每 1 小时 → 每 15 分钟）。",
@@ -2065,7 +2108,18 @@ window.LIQSCOPE_I18N_PAGES =
       "В постах картинки из комплекта. Загрузите свои — набор заменится.": "帖子使用的是内置图集。上传自己的 — 图集会替换。",
       "jpg, png, webp — до 12 МБ": "jpg、png、webp — 最大 12 MB",
       "шт.": "笔",
-      "пробный доступ гостей к слоям": "访客的图层试用"
+      "пробный доступ гостей к слоям": "访客的图层试用",
+      "День": "日",
+      "Детали": "详情",
+      "Время (UTC)": "时间 (UTC)",
+      "↻ Обновить лог": "↻ 刷新日志",
+      "📝 Лог отправок (защита от дублей)": "📝 发送日志（防重复）",
+      "Защита от дубля после рестарта — по логу.": "重启后防重复——通过日志。",
+      "Отправлять сводки в канал (вкл/выкл посты)": "向频道发送摘要（开/关）",
+      "Выключено — бот не шлёт сводки автоматически и по кнопке «Сводка в канал» только по force.": "关闭——机器人不会自动发送摘要，仅通过 force 发送。",
+      "Сохраняется в БД на 7 дней — после рестарта пост/дайджест не уйдёт повторно в тот же день.": "在数据库中保存7天——重启后同一天不会重复发送。",
+      "пост": "帖子",
+      "за 7 дней:": "7天内："
     }
   },
   "hi": {
@@ -2244,7 +2298,14 @@ window.LIQSCOPE_I18N_PAGES =
       "geo.dots_fail": "बिंदु बदल नहीं पाए — फिर कोशिश करें।",
       "geo.col_trial": "लेयर ट्रायल",
       "geo.trial_over": "खत्म",
-      "geo.trial_more": "{min} मिनट और ट्रायल दें"
+      "geo.trial_more": "{min} मिनट और ट्रायल दें",
+      "filter.thresholds_title": "वॉल्यूम थ्रेशोल्ड: लिक्विडेशन, CVD और OI Δ",
+      "filter.exchanges_title": "एक्सचेंज के अनुसार फ़िल्टर",
+      "filter.cvd_placeholder": "जैसे 50000",
+      "filter.oi_placeholder": "जैसे 1000000",
+      "chart.cvd_current_title": "मौजूदा कैंडल में कीमत कौन चला रहा है",
+      "feed.show_all_title": "सभी कॉइन्स दिखाएं",
+      "lang.select_title": "भाषा / Language"
     },
     "phrases": {
       "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "हर N घंटे में एक पोस्ट: पोस्ट विंडो वही N घंटे है, और पोस्ट के भीतर विश्लेषण ब्लॉक विंडो का चौथाई है (हर 4 घंटे → एक घंटा, हर 1 घंटा → 15 मिनट)।",
@@ -2990,7 +3051,18 @@ window.LIQSCOPE_I18N_PAGES =
       "В постах картинки из комплекта. Загрузите свои — набор заменится.": "पोस्ट में बिल्ट-इन सेट की तस्वीरें हैं। अपनी अपलोड करें — सेट बदल जाएगा।",
       "jpg, png, webp — до 12 МБ": "jpg, png, webp — 12 MB तक",
       "шт.": "इकाई",
-      "пробный доступ гостей к слоям": "मेहमानों के लिए लेयर ट्रायल"
+      "пробный доступ гостей к слоям": "मेहमानों के लिए लेयर ट्रायल",
+      "День": "दिन",
+      "Детали": "विवरण",
+      "Время (UTC)": "समय (UTC)",
+      "↻ Обновить лог": "↻ लॉग रीफ्रेश करें",
+      "📝 Лог отправок (защита от дублей)": "📝 भेजा गया लॉग (डुप्लिकेट सुरक्षा)",
+      "Защита от дубля после рестарта — по логу.": "रीस्टार्ट के बाद डुप्लिकेट सुरक्षा — लॉग के माध्यम से।",
+      "Отправлять сводки в канал (вкл/выкл посты)": "चैनल में सारांश भेजें (चालू/बंद)",
+      "Выключено — бот не шлёт сводки автоматически и по кнопке «Сводка в канал» только по force.": "बंद — बॉट सारांश स्वचालित रूप से नहीं भेजता, केवल force के साथ।",
+      "Сохраняется в БД на 7 дней — после рестарта пост/дайджест не уйдёт повторно в тот же день.": "DB में 7 दिनों तक संग्रहीत — रीस्टार्ट के बाद उसी दिन दोबारा नहीं भेजा जाएगा।",
+      "пост": "पोस्ट",
+      "за 7 дней:": "7 दिनों के लिए:"
     }
   },
   "es": {
@@ -3169,7 +3241,14 @@ window.LIQSCOPE_I18N_PAGES =
       "geo.dots_fail": "No se pudieron cambiar los puntos, inténtalo otra vez.",
       "geo.col_trial": "Prueba de capas",
       "geo.trial_over": "agotada",
-      "geo.trial_more": "Dar {min} minutos más de prueba"
+      "geo.trial_more": "Dar {min} minutos más de prueba",
+      "filter.thresholds_title": "Umbrales de volumen: liquidaciones, CVD y OI Δ",
+      "filter.exchanges_title": "Filtrar por exchanges",
+      "filter.cvd_placeholder": "p. ej. 50000",
+      "filter.oi_placeholder": "p. ej. 1000000",
+      "chart.cvd_current_title": "Quién mueve el precio en la vela actual",
+      "feed.show_all_title": "Mostrar todas las monedas",
+      "lang.select_title": "Idioma / Language"
     },
     "phrases": {
       "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "Un post cada N horas: la ventana del post son esas mismas N horas, y el bloque de análisis dentro del post ocupa un cuarto de la ventana (cada 4 h → una hora, cada 1 h → 15 minutos).",
@@ -3914,7 +3993,18 @@ window.LIQSCOPE_I18N_PAGES =
       "В постах картинки из комплекта. Загрузите свои — набор заменится.": "Los posts usan imágenes del conjunto integrado. Sube las tuyas: el conjunto se reemplaza.",
       "jpg, png, webp — до 12 МБ": "jpg, png, webp — hasta 12 MB",
       "шт.": "uds",
-      "пробный доступ гостей к слоям": "prueba de capas para visitantes"
+      "пробный доступ гостей к слоям": "prueba de capas para visitantes",
+      "День": "Día",
+      "Детали": "Detalles",
+      "Время (UTC)": "Hora (UTC)",
+      "↻ Обновить лог": "↻ Actualizar registro",
+      "📝 Лог отправок (защита от дублей)": "📝 Registro de envíos (anti-duplicados)",
+      "Защита от дубля после рестарта — по логу.": "Protección contra duplicados tras reinicio — vía registro.",
+      "Отправлять сводки в канал (вкл/выкл посты)": "Enviar resúmenes al canal (on/off)",
+      "Выключено — бот не шлёт сводки автоматически и по кнопке «Сводка в канал» только по force.": "Apagado — el bot no envía resúmenes automáticamente y vía 'Resumen al canal' solo con force.",
+      "Сохраняется в БД на 7 дней — после рестарта пост/дайджест не уйдёт повторно в тот же день.": "Guardado en BD 7 días — tras reinicio no se reenvía el mismo día.",
+      "пост": "post",
+      "за 7 дней:": "en 7 días:"
     }
   }
 };

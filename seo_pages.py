@@ -238,8 +238,8 @@ _OG_DIM_RE = re.compile(
 _CANON_RE = re.compile(r"(<link\b[^>]*\brel=\"canonical\"[^>]*\bhref=\")([^\"]*)(\")", re.I)
 
 
-def _language_block(path: str) -> str:
-    """Ссылки hreflang: поисковик видит все языковые версии одной страницы."""
+def _language_block(path: str, lang: str = DEFAULT_LANG) -> str:
+    """Ссылки hreflang + og:locale:alternate: поисковик и соцсети видят все языки."""
     rows = []
     for code in LANGS:
         rows.append(
@@ -249,6 +249,13 @@ def _language_block(path: str) -> str:
     rows.append(
         f'<link rel="alternate" hreflang="x-default" href="{_attr(SITE_URL + path)}">'
     )
+    # og:locale:alternate для Facebook/Twitter — те же языки, что и hreflang
+    for code in LANGS:
+        if code == lang:
+            continue
+        rows.append(
+            f'<meta property="og:locale:alternate" content="{OG_LOCALE.get(code, code)}">'
+        )
     return "\n".join(rows)
 
 
@@ -334,7 +341,7 @@ def render(
     )
 
     # hreflang и подсказка о языке — в конец <head>
-    block = _language_block(path)
+    block = _language_block(path, lang)
     block += f'\n<script>window.LIQSCOPE_LANG = "{lang}";</script>'
     if auto:
         # Язык подобран за гостя (браузер или страна): клиент может уточнить его
@@ -429,50 +436,103 @@ _PAGES = (
 )
 
 
-def sitemap_xml() -> Response:
-    """sitemap.xml: лендинг, сводки по часам, дайджест, терминал и вход — на всех языках."""
+def sitemap_xml(digest_items=None, hourly_items=None) -> Response:
+    """sitemap.xml: лендинг, сводки по часам, дайджест, терминал и вход — на всех языках.
+
+    Плюс свежие выпуски дайджеста и сводок: каждый день/пост — отдельный URL
+    вида ``/digest?day=YYYY-MM-DD`` и ``/hourly?day=YYYY-MM-DD``. Поисковик
+    видит архив целиком, а не только шапку раздела.
+    """
     last = time.strftime("%Y-%m-%d", time.gmtime())
     parts = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"'
         ' xmlns:xhtml="http://www.w3.org/1999/xhtml">',
     ]
-    for path, freq, priority in _PAGES:
+
+    def add_url(loc_path: str, lastmod: str, freq: str, prio: str):
         for code in LANGS:
             parts.append("  <url>")
-            parts.append(f"    <loc>{html_mod.escape(_lang_url(SITE_URL + path, code))}</loc>")
-            parts.append(f"    <lastmod>{last}</lastmod>")
+            parts.append(f"    <loc>{html_mod.escape(_lang_url(SITE_URL + loc_path, code))}</loc>")
+            parts.append(f"    <lastmod>{html_mod.escape(lastmod)}</lastmod>")
             parts.append(f"    <changefreq>{freq}</changefreq>")
-            parts.append(f"    <priority>{priority}</priority>")
+            parts.append(f"    <priority>{prio}</priority>")
             for alt in LANGS:
                 parts.append(
                     f'    <xhtml:link rel="alternate" hreflang="{HREFLANG[alt]}"'
-                    f' href="{html_mod.escape(_lang_url(SITE_URL + path, alt))}"/>'
+                    f' href="{html_mod.escape(_lang_url(SITE_URL + loc_path, alt))}"/>'
                 )
             parts.append(
                 f'    <xhtml:link rel="alternate" hreflang="x-default"'
-                f' href="{html_mod.escape(SITE_URL + path)}"/>'
+                f' href="{html_mod.escape(SITE_URL + loc_path)}"/>'
             )
             parts.append("  </url>")
+
+    # Базовые страницы
+    for path, freq, priority in _PAGES:
+        add_url(path, last, freq, priority)
+
+    # Дайджест: последние 100 выпусков
+    try:
+        items = list(digest_items or [])[:100]
+        for rec in items:
+            day = str((rec or {}).get("day") or (rec or {}).get("id") or "").strip()
+            if not day:
+                continue
+            # lastmod — дата выпуска, если есть, иначе сегодня
+            lm = day if re.match(r"^\d{4}-\d{2}-\d{2}$", day) else last
+            add_url(f"/digest?day={day}", lm, "daily", "0.7")
+    except Exception:
+        pass
+
+    # Сводки по часам: последние 100 дней (каждый день — страница с постами)
+    try:
+        items = list(hourly_items or [])[:100]
+        seen_days = set()
+        for rec in items:
+            day = str((rec or {}).get("day") or "").strip()
+            if not day or day in seen_days:
+                continue
+            seen_days.add(day)
+            lm = day if re.match(r"^\d{4}-\d{2}-\d{2}$", day) else last
+            add_url(f"/hourly?day={day}", lm, "daily", "0.6")
+    except Exception:
+        pass
+
     parts.append("</urlset>")
     parts.append("")
     return Response(content="\n".join(parts), media_type="application/xml; charset=utf-8")
 
 
-def manifest(public_url: Optional[str] = None) -> Response:
-    """manifest.webmanifest — PWA-мелочи: имя, иконка, цвета."""
+def manifest(public_url: Optional[str] = None, lang: str = DEFAULT_LANG) -> Response:
+    """manifest.webmanifest — PWA-мелочи: имя, иконка, цвета.
+
+    Язык берём из запроса (``?lang=``/cookie/Accept-Language): у PWA имя и
+    описание должны совпадать с языком, на котором человек видит сайт,
+    иначе установка приложения покажет русский текст англоязычному гостю.
+    """
+    lang = lang if lang in LANGS else DEFAULT_LANG
+    # Имя и описание — из тех же словарей, что и <title> в поиске: заголовок
+    # в выдаче и заголовок в окне не разъезжаются.
+    name = _text(lang, "seo.land.title", "LiqScope — crypto futures liquidations")
+    desc = _text(lang, "seo.land.desc", "Live crypto futures liquidation feed")
+    # Короткое имя — всегда LiqScope, но для CJK можно оставить как есть
+    short = "LiqScope"
+    # start_url с языком, чтобы PWA открывалась на том же языке, на котором
+    # её установили: без параметра — всегда английский (DEFAULT_LANG).
+    start = _lang_url("/", lang) if lang != DEFAULT_LANG else "/"
     data = {
-        "name": "LiqScope — ликвидации крипто-фьючерсов",
-        "short_name": "LiqScope",
-        "description": _text(DEFAULT_LANG, "seo.land.desc"),
-        "start_url": "/",
+        "name": name,
+        "short_name": short,
+        "description": desc,
+        "start_url": start,
         "scope": "/",
         "display": "standalone",
         "background_color": "#070a10",
         "theme_color": "#060a12",
-        "lang": "ru",
-        # Иконки — реальные файлы из tools/build_icons.py: раньше здесь были
-        # размеры 512/192 при картинке 256×256, и установка приложения ломалась.
+        "lang": HREFLANG.get(lang, lang),
+        "dir": "ltr",
+        "categories": ["finance", "business", "utilities"],
         "icons": [
             {"src": "/static/icon-192.png", "sizes": "192x192", "type": "image/png",
              "purpose": "any"},
@@ -480,6 +540,27 @@ def manifest(public_url: Optional[str] = None) -> Response:
              "purpose": "any"},
             {"src": "/static/icon-maskable-512.png", "sizes": "512x512",
              "type": "image/png", "purpose": "maskable"},
+        ],
+        "shortcuts": [
+            {
+                "name": _text(lang, "seo.terminal.title", "Terminal"),
+                "short_name": "Terminal",
+                "description": _text(lang, "seo.terminal.desc", ""),
+                "url": _lang_url("/terminal", lang),
+                "icons": [{"src": "/static/icon-192.png", "sizes": "192x192"}],
+            },
+            {
+                "name": _text(lang, "seo.digest.title", "Digest"),
+                "short_name": "Digest",
+                "url": _lang_url("/digest", lang),
+                "icons": [{"src": "/static/icon-192.png", "sizes": "192x192"}],
+            },
+            {
+                "name": _text(lang, "seo.hourly.title", "Hourly"),
+                "short_name": "Hourly",
+                "url": _lang_url("/hourly", lang),
+                "icons": [{"src": "/static/icon-192.png", "sizes": "192x192"}],
+            },
         ],
     }
     return Response(
@@ -500,12 +581,32 @@ def jsonld(kind: str = "landing", lang: str = DEFAULT_LANG,
         "logo": f"{SITE_URL}/static/logo.png",
         "description": _text(lang, "seo.land.desc"),
     }
+    def breadcrumb(items):
+        # items: list of (name, url)
+        return {
+            "@type": "BreadcrumbList",
+            "itemListElement": [
+                {
+                    "@type": "ListItem",
+                    "position": i + 1,
+                    "name": n,
+                    "item": u,
+                }
+                for i, (n, u) in enumerate(items)
+            ],
+        }
+
     if kind == "landing":
         data = [
             {
                 "@type": "WebSite",
                 **common,
                 "inLanguage": list(HREFLANG.values()),
+                "potentialAction": {
+                    "@type": "SearchAction",
+                    "target": f"{SITE_URL}/terminal?search={{search_term_string}}",
+                    "query-input": "required name=search_term_string",
+                },
             },
             {
                 "@type": "SoftwareApplication",
@@ -518,6 +619,9 @@ def jsonld(kind: str = "landing", lang: str = DEFAULT_LANG,
                 "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"},
                 "featureList": FEATURES.get(lang, FEATURES[DEFAULT_LANG]),
             },
+            breadcrumb([
+                ("LiqScope", SITE_URL + "/"),
+            ]),
         ]
     elif kind == "hourly":
         data = [
@@ -529,7 +633,11 @@ def jsonld(kind: str = "landing", lang: str = DEFAULT_LANG,
                 "description": _text(lang, "seo.hourly.desc"),
                 "isPartOf": {"@type": "Blog", "name": "LiqScope",
                              "url": f"{SITE_URL}/hourly"},
-            }
+            },
+            breadcrumb([
+                ("LiqScope", SITE_URL + "/"),
+                (_text(lang, "seo.hourly.title", "Hourly"), SITE_URL + "/hourly"),
+            ]),
         ]
     elif kind == "digest":
         data = [
@@ -539,10 +647,20 @@ def jsonld(kind: str = "landing", lang: str = DEFAULT_LANG,
                 "url": f"{SITE_URL}/digest",
                 "inLanguage": list(HREFLANG.values()),
                 "description": _text(lang, "seo.digest.desc"),
-            }
+            },
+            breadcrumb([
+                ("LiqScope", SITE_URL + "/"),
+                (_text(lang, "seo.digest.title", "Digest"), SITE_URL + "/digest"),
+            ]),
         ]
     else:
-        data = [{"@type": "WebPage", **common, "url": f"{SITE_URL}/terminal"}]
+        data = [
+            {"@type": "WebPage", **common, "url": f"{SITE_URL}/terminal"},
+            breadcrumb([
+                ("LiqScope", SITE_URL + "/"),
+                (_text(lang, "seo.terminal.title", "Terminal"), SITE_URL + "/terminal"),
+            ]),
+        ]
     if image:
         # картинка страницы: поисковик и мессенджер берут её для превью, а для
         # выпуска дайджеста это то самое фото дня, что ушло в канал

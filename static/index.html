@@ -97,7 +97,7 @@
 
         <div class="header-controls">
             <span id="nav-account" class="acc-nav"></span>
-            <select id="lang-select" class="lang-select" aria-label="Language / Язык" title="Language / Язык">
+            <select id="lang-select" class="lang-select" aria-label="Language / Язык" data-i18n-title="lang.select_title" title="Language / Язык">
                 <option value="ru">🇷🇺 Русский</option>
                 <option value="en">🇬🇧 English</option>
                 <option value="zh">🇨🇳 中文</option>
@@ -170,7 +170,7 @@
             <label data-i18n="ctrl.minvol">Мин. объем:</label>
             <div class="filter-dropdown" id="min-usd-dd">
                 <button class="form-select filter-btn" id="min-usd-btn" type="button"
-                        title="Пороги объёма: ликвидации, CVD и OI Δ">Все ($0+) ▾</button>
+                        data-i18n-title="filter.thresholds_title" title="Пороги объёма: ликвидации, CVD и OI Δ">Все ($0+) ▾</button>
                 <div class="filter-panel hidden" id="min-usd-panel">
                     <div class="filter-row">
                         <label class="filter-th-label" for="min-usd-input"
@@ -183,13 +183,15 @@
                         <label class="filter-th-label" for="min-cvd-input"
                                data-i18n="filter.th_cvd">CVD за свечу, $</label>
                         <input type="number" id="min-cvd-input" class="form-input filter-number"
-                               min="0" step="1000" placeholder="Например 50000">
+                               min="0" step="1000" data-i18n-placeholder="filter.cvd_placeholder"
+                               placeholder="Например 50000">
                     </div>
                     <div class="filter-row">
                         <label class="filter-th-label" for="min-oi-input"
                                data-i18n="filter.th_oi">OI Δ за свечу, $</label>
                         <input type="number" id="min-oi-input" class="form-input filter-number"
-                               min="0" step="1000" placeholder="Например 1000000">
+                               min="0" step="1000" data-i18n-placeholder="filter.oi_placeholder"
+                               placeholder="Например 1000000">
                     </div>
                     <div class="filter-row filter-row-between">
                         <span class="filter-note" data-i18n="filter.presets_for">Пресеты — для открытой вкладки ленты:</span>
@@ -212,7 +214,7 @@
             <label data-i18n="ctrl.exchange">Биржа:</label>
             <div class="filter-dropdown" id="exchange-dd">
                 <button class="form-select filter-btn" id="exchange-btn" type="button"
-                        title="Фильтр по биржам">Все биржи ▾</button>
+                        data-i18n-title="filter.exchanges_title" title="Фильтр по биржам">Все биржи ▾</button>
                 <div class="filter-panel hidden exchange-panel" id="exchange-panel">
                     <div class="filter-row filter-row-between">
                         <span class="filter-note" data-i18n="filter.exch_header">Включённые биржи</span>
@@ -246,7 +248,7 @@
                     <span class="live-stat" id="profile-stat" data-i18n-title="chart.live_profile"
                             title="Ликвидации видимого диапазона"></span></span>
                     <span class="layer-cell"><span class="layer-label" data-i18n="chart.cvd_label">CVD</span>
-                    <span class="cvd-stat" id="cvd-stat" title="Кто двигает цену в текущей свече"></span></span>
+                    <span class="cvd-stat" id="cvd-stat" data-i18n-title="chart.cvd_current_title" title="Кто двигает цену в текущей свече"></span></span>
                     <span class="layer-cell"><span class="layer-label" data-i18n="chart.oi_label">OI</span>
                     <span class="live-stat" id="oi-stat" data-i18n-title="chart.live_oi"
                             title="Изменение OI текущей свечи"></span></span>
@@ -421,7 +423,7 @@
                             data-i18n="feed.tab_oi">● OI</button>
                 </div>
                 <span class="feed-filter-chip hidden" id="feed-filter" role="button"
-                      tabindex="0" title="Показать все монеты"></span>
+                      tabindex="0" data-i18n-title="feed.show_all_title" title="Показать все монеты"></span>
                 <span class="feed-count-badge" id="feed-count">0 событий</span>
             </div>
 

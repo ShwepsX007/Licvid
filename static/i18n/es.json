@@ -191,7 +191,9 @@
     "404.to_digest": "Digest",
     "404.to_hourly": "Hourly",
     "404.to_login": "Entrar",
-    "hour.photo_alt": "Foto del resumen"
+    "hour.photo_alt": "Foto del resumen",
+    "land.badge": "Flujo de liquidaciones en vivo",
+    "gate.text": "El acceso de prueba a las capas ha terminado. El registro es gratis: abre las capas e indicadores, las señales en Telegram y el gabinete con servicios."
   },
   "phrases": {
     "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "Un post cada N horas: la ventana del post son esas mismas N horas, y el bloque de análisis dentro del post ocupa un cuarto de la ventana (cada 4 h → una hora, cada 1 h → 15 minutos).",

@@ -204,7 +204,9 @@ window.LIQSCOPE_I18N_PAGES =
       "404.to_digest": "Дайджест",
       "404.to_hourly": "Сводки по часам",
       "404.to_login": "Войти в кабинет",
-      "hour.photo_alt": "Фото сводки"
+      "hour.photo_alt": "Фото сводки",
+      "land.badge": "Поток ликвидаций в прямом эфире",
+      "gate.text": "Пробный доступ к слоям закончился. Регистрация бесплатная: она открывает слои и индикаторы, сигналы в Telegram и личный кабинет с сервисами."
     },
     "phrases": {
       "🗑 Стереть статистику": "🗑 Стереть статистику",
@@ -442,7 +444,9 @@ window.LIQSCOPE_I18N_PAGES =
       "404.to_digest": "Digest",
       "404.to_hourly": "Hourly",
       "404.to_login": "Sign in",
-      "hour.photo_alt": "Summary photo"
+      "hour.photo_alt": "Summary photo",
+      "land.badge": "Live liquidation feed",
+      "gate.text": "Trial access to layers has ended. Registration is free: it unlocks chart layers and indicators, Telegram signals and the personal cabinet with services."
     },
     "phrases": {
       "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "One post every N hours: the post window is those same N hours, and the analysis block inside the post is a quarter of the window (every 4 h → one hour, every 1 h → 15 minutes).",
@@ -1393,7 +1397,9 @@ window.LIQSCOPE_I18N_PAGES =
       "404.to_digest": "日报",
       "404.to_hourly": "小时汇总",
       "404.to_login": "登录",
-      "hour.photo_alt": "简报图片"
+      "hour.photo_alt": "简报图片",
+      "land.badge": "实时清算流",
+      "gate.text": "图层试用已结束。注册免费：解锁图表图层与指标、Telegram 信号，以及带服务功能的个人中心。"
     },
     "phrases": {
       "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "每 N 小时发一篇：帖子窗口就是这 N 小时，帖内的分析块占窗口的四分之一（每 4 小时 → 每小时，每 1 小时 → 每 15 分钟）。",
@@ -2345,7 +2351,9 @@ window.LIQSCOPE_I18N_PAGES =
       "404.to_digest": "डाइजेस्ट",
       "404.to_hourly": "घंटेवार",
       "404.to_login": "साइन इन",
-      "hour.photo_alt": "सारांश की फ़ोटो"
+      "hour.photo_alt": "सारांश की फ़ोटो",
+      "land.badge": "लाइव लिक्विडेशन फीड",
+      "gate.text": "लेयर का ट्रायल खत्म हो गया है। रजिस्ट्रेशन मुफ़्त है: इससे लेयर और इंडिकेटर, Telegram सिग्नल और सेवाओं वाला कैबिनेट खुलता है।"
     },
     "phrases": {
       "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "हर N घंटे में एक पोस्ट: पोस्ट विंडो वही N घंटे है, और पोस्ट के भीतर विश्लेषण ब्लॉक विंडो का चौथाई है (हर 4 घंटे → एक घंटा, हर 1 घंटा → 15 मिनट)।",
@@ -3298,7 +3306,9 @@ window.LIQSCOPE_I18N_PAGES =
       "404.to_digest": "Digest",
       "404.to_hourly": "Hourly",
       "404.to_login": "Entrar",
-      "hour.photo_alt": "Foto del resumen"
+      "hour.photo_alt": "Foto del resumen",
+      "land.badge": "Flujo de liquidaciones en vivo",
+      "gate.text": "El acceso de prueba a las capas ha terminado. El registro es gratis: abre las capas e indicadores, las señales en Telegram y el gabinete con servicios."
     },
     "phrases": {
       "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "Un post cada N horas: la ventana del post son esas mismas N horas, y el bloque de análisis dentro del post ocupa un cuarto de la ventana (cada 4 h → una hora, cada 1 h → 15 minutos).",

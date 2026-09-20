@@ -191,7 +191,9 @@
     "404.to_digest": "Digest",
     "404.to_hourly": "Hourly",
     "404.to_login": "Sign in",
-    "hour.photo_alt": "Summary photo"
+    "hour.photo_alt": "Summary photo",
+    "land.badge": "Live liquidation feed",
+    "gate.text": "Trial access to layers has ended. Registration is free: it unlocks chart layers and indicators, Telegram signals and the personal cabinet with services."
   },
   "phrases": {
     "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "One post every N hours: the post window is those same N hours, and the analysis block inside the post is a quarter of the window (every 4 h → one hour, every 1 h → 15 minutes).",

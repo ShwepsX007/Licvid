@@ -1475,14 +1475,12 @@
     // возвращает ширину текста в пикселях на заданном кегле.
     function liqPlateGeom(bodyPx, slotPx, label, measure, baseH) {
         const slot = Math.max(1, Number(slotPx) || 1);
-        const body = Math.max(0, Number(bodyPx) || 0);
+        // body больше не ограничивает высоту: на доджи кластер сужался до 2px
+        // и становился невидимым. Теперь высота — фиксированная база (15px,
+        // чип 10px, кит 16–22px), независимо от тела свечи.
         const base = Math.max(LIQ_PLATE_MIN_H, Number(baseH) || LIQ_PLATE_H);
         const w = Math.max(LIQ_PLATE_MIN_W, Math.round(slot * LIQ_PLATE_W_FRAC));
-        // Потолок по телу: 3% зазора с каждой стороны (floor — чтобы округление
-        // не съедало зазор). На тонкой свече плашка становится тоньше её тела.
-        const cap = Math.floor(body * (1 - 2 * LIQ_PLATE_GAP));
-        const h = Math.max(LIQ_PLATE_MIN_H, cap > 0 ? Math.min(base, cap)
-                                                   : LIQ_PLATE_MIN_H);
+        const h = Math.max(LIQ_PLATE_MIN_H, base);
         const out = { w: w, h: h, font: 0, showLabel: false, text: "" };
         const text = String(label || "");
         if (!text || typeof measure !== "function") return out;

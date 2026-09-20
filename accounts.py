@@ -2915,6 +2915,16 @@ class Store:
                               "peers") if k in hit},
                             ensure_ascii=False)[:400]),
             )
+            # держим ленту компактной: максимум 30 сигналов на пользователя
+            # (по 10 на метрику liq/cvd/oi) — остальное подтирается
+            try:
+                self._db.execute(
+                    "DELETE FROM alert_events WHERE user_id=? AND id NOT IN "
+                    "(SELECT id FROM alert_events WHERE user_id=? ORDER BY id DESC LIMIT 30)",
+                    (int(user_id), int(user_id)),
+                )
+            except Exception:
+                pass
             if secrets.randbelow(40) == 0:
                 self._db.execute(
                     "DELETE FROM alert_events WHERE ts<?", (now - 14 * 86400,))

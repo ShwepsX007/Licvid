@@ -1016,7 +1016,7 @@ def register_account_routes(app) -> None:
             # превью считаем от прошлого сигнала: в кабинете видно ровно то,
             # из чего соберётся следующее сообщение (окно метрики заново)
             "live": live_snapshot(cfg, market, since=_alert_since(ctx, user)),
-            "history": ctx.store.list_alert_events(user["id"], 48),
+            "history": ctx.store.list_alert_events(user["id"], 30),
             "symbols": list(ctx.symbols_fn() or [])[:60],
         }
 

@@ -992,7 +992,7 @@
     function alTape(hist, flow, metric) {
         var rows = (hist || []).filter(function (h) {
             return !metric || String(h.metric || "") === metric;
-        });
+        }).slice(0, 10);
         // ярко, как лента терминала: время · монета · сумма · порог/окно,
         // цвет по метрике/знаку, полоса накачки |значения| к порогу
         var sig = rows.map(function (h) {

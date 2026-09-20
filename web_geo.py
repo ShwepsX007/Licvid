@@ -396,11 +396,22 @@ def register_geo_routes(app) -> None:
             log.warning("гео: статистика не собралась: %s", e)
             return JSONResponse({"ok": False, "error": "stats"}, status_code=500)
         header_cc = geoip.header_country(getattr(request, "headers", {}) or {})
-        # Точки карты: старые прячем по отметке из админки, статистика остаётся
+        # Точки карты: старые прячем по отметке из админки, статистика остаётся.
+        # Кнопка «стереть точки» теперь прячет и точки, и круги (страны): карта
+        # показывает только гостей, замеченных позже отметки.
         cutoff = dots_after()
         points = enrich(data["points"])
-        visible = [p for p in points
-                   if float(p.get("last_ts") or p.get("first_ts") or 0) >= cutoff]
+        if cutoff > 0:
+            visible = [p for p in points
+                       if float(p.get("last_ts") or p.get("first_ts") or 0) >= cutoff]
+        else:
+            visible = points
+        countries_all = enrich(data["countries"])
+        if cutoff > 0:
+            countries = [c for c in countries_all
+                         if float(c.get("last") or 0) >= cutoff]
+        else:
+            countries = countries_all
         online = _with_trial(enrich(data["online"]), float(data["now"]))
         try:
             from web_layers import trial_limit_minutes, trial_locked
@@ -417,7 +428,7 @@ def register_geo_routes(app) -> None:
             "online_sec": data["online_sec"],
             "online": online,
             "points": visible,
-            "countries": enrich(data["countries"]),
+            "countries": countries,
             "sources": data["sources"],
             "long": enrich(data["long"]),
             "paths": data["paths"],

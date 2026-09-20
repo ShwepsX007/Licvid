@@ -238,8 +238,8 @@ _OG_DIM_RE = re.compile(
 _CANON_RE = re.compile(r"(<link\b[^>]*\brel=\"canonical\"[^>]*\bhref=\")([^\"]*)(\")", re.I)
 
 
-def _language_block(path: str) -> str:
-    """Ссылки hreflang: поисковик видит все языковые версии одной страницы."""
+def _language_block(path: str, lang: str = DEFAULT_LANG) -> str:
+    """Ссылки hreflang + og:locale:alternate: поисковик и соцсети видят все языки."""
     rows = []
     for code in LANGS:
         rows.append(
@@ -249,6 +249,13 @@ def _language_block(path: str) -> str:
     rows.append(
         f'<link rel="alternate" hreflang="x-default" href="{_attr(SITE_URL + path)}">'
     )
+    # og:locale:alternate для Facebook/Twitter — те же языки, что и hreflang
+    for code in LANGS:
+        if code == lang:
+            continue
+        rows.append(
+            f'<meta property="og:locale:alternate" content="{OG_LOCALE.get(code, code)}">'
+        )
     return "\n".join(rows)
 
 
@@ -273,6 +280,7 @@ def render(
     extra_head: str = "",
     og_image: str = "",
     auto: bool = False,
+    status_code: int = 200,
 ) -> Response:
     """Отдаёт страницу с уже подставленным языком в head.
 
@@ -334,7 +342,7 @@ def render(
     )
 
     # hreflang и подсказка о языке — в конец <head>
-    block = _language_block(path)
+    block = _language_block(path, lang)
     block += f'\n<script>window.LIQSCOPE_LANG = "{lang}";</script>'
     if auto:
         # Язык подобран за гостя (браузер или страна): клиент может уточнить его
@@ -346,7 +354,7 @@ def render(
     # DOMContentLoaded, когда i18n.js применяет словари
     html = html.replace("</head>", block + "\n</head>", 1)
 
-    resp = Response(content=html, media_type="text/html; charset=utf-8")
+    resp = Response(content=html, media_type="text/html; charset=utf-8", status_code=status_code)
     # язык зависит и от cookie, и от Accept-Language — говорим об этом кэшам
     resp.headers["Vary"] = "Cookie, Accept-Language"
     resp.headers["Cache-Control"] = "no-cache"
@@ -429,50 +437,136 @@ _PAGES = (
 )
 
 
-def sitemap_xml() -> Response:
-    """sitemap.xml: лендинг, сводки по часам, дайджест, терминал и вход — на всех языках."""
+def sitemap_xml(digest_items=None, hourly_items=None) -> Response:
+    """sitemap.xml: лендинг, сводки по часам, дайджест, терминал и вход — на всех языках.
+
+    Плюс свежие выпуски дайджеста и сводок: каждый день/пост — отдельный URL
+    вида ``/digest?day=YYYY-MM-DD`` и ``/hourly?day=YYYY-MM-DD``. Поисковик
+    видит архив целиком, а не только шапку раздела. Для фото — image sitemap.
+    """
     last = time.strftime("%Y-%m-%d", time.gmtime())
     parts = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"'
-        ' xmlns:xhtml="http://www.w3.org/1999/xhtml">',
+        ' xmlns:xhtml="http://www.w3.org/1999/xhtml"'
+        ' xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">',
     ]
-    for path, freq, priority in _PAGES:
+
+    def add_url(loc_path: str, lastmod: str, freq: str, prio: str, images=None):
+        # images: list of image urls (absolute)
         for code in LANGS:
             parts.append("  <url>")
-            parts.append(f"    <loc>{html_mod.escape(_lang_url(SITE_URL + path, code))}</loc>")
-            parts.append(f"    <lastmod>{last}</lastmod>")
+            parts.append(f"    <loc>{html_mod.escape(_lang_url(SITE_URL + loc_path, code))}</loc>")
+            parts.append(f"    <lastmod>{html_mod.escape(lastmod)}</lastmod>")
             parts.append(f"    <changefreq>{freq}</changefreq>")
-            parts.append(f"    <priority>{priority}</priority>")
+            parts.append(f"    <priority>{prio}</priority>")
+            # Картинки — если есть обложка выпуска, поисковик индексирует её как image
+            if images:
+                for img_url in images[:3]:  # не больше 3 на URL
+                    parts.append(f"    <image:image><image:loc>{html_mod.escape(img_url)}</image:loc></image:image>")
             for alt in LANGS:
                 parts.append(
                     f'    <xhtml:link rel="alternate" hreflang="{HREFLANG[alt]}"'
-                    f' href="{html_mod.escape(_lang_url(SITE_URL + path, alt))}"/>'
+                    f' href="{html_mod.escape(_lang_url(SITE_URL + loc_path, alt))}"/>'
                 )
             parts.append(
                 f'    <xhtml:link rel="alternate" hreflang="x-default"'
-                f' href="{html_mod.escape(SITE_URL + path)}"/>'
+                f' href="{html_mod.escape(SITE_URL + loc_path)}"/>'
             )
             parts.append("  </url>")
+
+    # Базовые страницы — с общей обложкой
+    og_cover = f"{SITE_URL}/static/og-cover.png"
+    for path, freq, priority in _PAGES:
+        add_url(path, last, freq, priority, images=[og_cover])
+
+    # Дайджест: последние 100 выпусков
+    try:
+        items = list(digest_items or [])[:100]
+        for rec in items:
+            day = str((rec or {}).get("day") or (rec or {}).get("id") or "").strip()
+            if not day:
+                continue
+            lm = day if re.match(r"^\d{4}-\d{2}-\d{2}$", day) else last
+            # Пытаемся достать обложку выпуска для image sitemap
+            imgs = []
+            try:
+                photo = (rec or {}).get("photo") or {}
+                # Если фото уже имеет публичный url (через /api/digest/cover) — берём его
+                if photo.get("path"):
+                    # Абсолютный URL на обложку через API
+                    imgs.append(f"{SITE_URL}/api/digest/cover?day={day}")
+                else:
+                    imgs.append(og_cover)
+            except Exception:
+                imgs = [og_cover]
+            add_url(f"/digest?day={day}", lm, "daily", "0.7", images=imgs)
+    except Exception:
+        pass
+
+    # Сводки по часам: последние 100 дней
+    try:
+        items = list(hourly_items or [])[:100]
+        seen_days = set()
+        for rec in items:
+            day = str((rec or {}).get("day") or "").strip()
+            if not day or day in seen_days:
+                continue
+            seen_days.add(day)
+            lm = day if re.match(r"^\d{4}-\d{2}-\d{2}$", day) else last
+            imgs = []
+            try:
+                # У часовых постов тоже есть фото — берём первое
+                photo = (rec or {}).get("photo") or {}
+                if photo.get("path") or (rec or {}).get("id"):
+                    # Фото через /api/hourly/photo/{id} если id есть
+                    pid = str((rec or {}).get("id") or "")
+                    if pid:
+                        imgs.append(f"{SITE_URL}/api/hourly/photo/{pid}")
+                    else:
+                        imgs.append(f"{SITE_URL}/api/digest/cover?day={day}")
+                else:
+                    imgs.append(og_cover)
+            except Exception:
+                imgs = [og_cover]
+            add_url(f"/hourly?day={day}", lm, "daily", "0.6", images=imgs)
+    except Exception:
+        pass
+
     parts.append("</urlset>")
     parts.append("")
     return Response(content="\n".join(parts), media_type="application/xml; charset=utf-8")
 
 
-def manifest(public_url: Optional[str] = None) -> Response:
-    """manifest.webmanifest — PWA-мелочи: имя, иконка, цвета."""
+def manifest(public_url: Optional[str] = None, lang: str = DEFAULT_LANG) -> Response:
+    """manifest.webmanifest — PWA-мелочи: имя, иконка, цвета.
+
+    Язык берём из запроса (``?lang=``/cookie/Accept-Language): у PWA имя и
+    описание должны совпадать с языком, на котором человек видит сайт,
+    иначе установка приложения покажет русский текст англоязычному гостю.
+    """
+    lang = lang if lang in LANGS else DEFAULT_LANG
+    # Имя и описание — из тех же словарей, что и <title> в поиске: заголовок
+    # в выдаче и заголовок в окне не разъезжаются.
+    name = _text(lang, "seo.land.title", "LiqScope — crypto futures liquidations")
+    desc = _text(lang, "seo.land.desc", "Live crypto futures liquidation feed")
+    # Короткое имя — всегда LiqScope, но для CJK можно оставить как есть
+    short = "LiqScope"
+    # start_url с языком, чтобы PWA открывалась на том же языке, на котором
+    # её установили: без параметра — всегда английский (DEFAULT_LANG).
+    start = _lang_url("/", lang) if lang != DEFAULT_LANG else "/"
     data = {
-        "name": "LiqScope — ликвидации крипто-фьючерсов",
-        "short_name": "LiqScope",
-        "description": _text(DEFAULT_LANG, "seo.land.desc"),
-        "start_url": "/",
+        "name": name,
+        "short_name": short,
+        "description": desc,
+        "start_url": start,
         "scope": "/",
         "display": "standalone",
         "background_color": "#070a10",
         "theme_color": "#060a12",
-        "lang": "ru",
-        # Иконки — реальные файлы из tools/build_icons.py: раньше здесь были
-        # размеры 512/192 при картинке 256×256, и установка приложения ломалась.
+        "lang": HREFLANG.get(lang, lang),
+        "dir": "ltr",
+        "categories": ["finance", "business", "utilities"],
         "icons": [
             {"src": "/static/icon-192.png", "sizes": "192x192", "type": "image/png",
              "purpose": "any"},
@@ -481,6 +575,27 @@ def manifest(public_url: Optional[str] = None) -> Response:
             {"src": "/static/icon-maskable-512.png", "sizes": "512x512",
              "type": "image/png", "purpose": "maskable"},
         ],
+        "shortcuts": [
+            {
+                "name": _text(lang, "seo.terminal.title", "Terminal"),
+                "short_name": "Terminal",
+                "description": _text(lang, "seo.terminal.desc", ""),
+                "url": _lang_url("/terminal", lang),
+                "icons": [{"src": "/static/icon-192.png", "sizes": "192x192"}],
+            },
+            {
+                "name": _text(lang, "seo.digest.title", "Digest"),
+                "short_name": "Digest",
+                "url": _lang_url("/digest", lang),
+                "icons": [{"src": "/static/icon-192.png", "sizes": "192x192"}],
+            },
+            {
+                "name": _text(lang, "seo.hourly.title", "Hourly"),
+                "short_name": "Hourly",
+                "url": _lang_url("/hourly", lang),
+                "icons": [{"src": "/static/icon-192.png", "sizes": "192x192"}],
+            },
+        ],
     }
     return Response(
         content=json.dumps(data, ensure_ascii=False, indent=2),
@@ -488,10 +603,101 @@ def manifest(public_url: Optional[str] = None) -> Response:
     )
 
 
+#: FAQ для лендинга — на каждом языке, чтобы поисковик показывал ответы прямо в выдаче
+FAQ = {
+    "ru": [
+        ("Что такое LiqScope?", "LiqScope — бесплатный терминал ликвидаций крипто-фьючерсов: живая лента с 8 бирж (Binance, Bybit, OKX, Gate, Bitget, HTX, Hyperliquid, dYdX), свечной график с кластерами, профиль объёмов, CVD и открытый интерес."),
+        ("Нужно ли регистрироваться?", "Нет. Терминал открыт без регистрации и без API-ключей. Регистрация нужна только для алертов в Telegram, корреляций и других сервисов в кабинете."),
+        ("Как работает определение ликвидаций на Hyperliquid?", "Hyperliquid не публикует ликвидации напрямую: событие вычисляется по всплеску маркет-ордеров в ленте сделок и подтверждается через /info по адресу кошелька."),
+        ("Что такое CVD и OI?", "CVD — перевес агрессивных покупок над продажами за свечу, OI — изменение открытого интереса: рост — деньги заходят в позиции, падение — уходят."),
+        ("Где смотреть итоги дня?", "В разделе Дайджест — каждый вечер около 22:00 МСК, и в Сводках по часам — каждые несколько часов, те же посты что в Telegram-канале."),
+    ],
+    "en": [
+        ("What is LiqScope?", "LiqScope is a free crypto futures liquidation terminal: live feed from 8 exchanges (Binance, Bybit, OKX, Gate, Bitget, HTX, Hyperliquid, dYdX), candlestick chart with clusters, volume profile, CVD and open interest."),
+        ("Do I need to sign up?", "No. The terminal is open without sign-up and without API keys. Sign-up is only for Telegram alerts, correlations and other services in your account."),
+        ("How are Hyperliquid liquidations detected?", "Hyperliquid does not publish liquidations directly: the event is inferred from a market-order burst in the trade tape and confirmed via /info by wallet address."),
+        ("What are CVD and OI?", "CVD is the taker buy/sell imbalance per candle, OI is the change in open interest: rise — money flows in, fall — flows out."),
+        ("Where to see daily results?", "In Digest — every evening ~22:00 MSK, and in Hourly summaries — every few hours, the same posts as in our Telegram channel."),
+    ],
+    "zh": [
+        ("LiqScope 是什么？", "LiqScope 是免费的加密期货清算终端：来自 8 家交易所的实时流、带聚类的K线图、成交量分布、CVD 和未平仓量。"),
+        ("需要注册吗？", "不需要。终端无需注册、无需 API 密钥即可使用。注册仅用于 Telegram 提醒、相关性等账户服务。"),
+        ("Hyperliquid 的清算如何检测？", "Hyperliquid 不直接发布清算：通过交易带中的市价单爆发推断，并通过 /info 按钱包地址确认。"),
+        ("什么是 CVD 和 OI？", "CVD 是每根K线的吃单买卖不平衡，OI 是未平仓量变化：上升——资金流入，下降——流出。"),
+        ("在哪里查看每日总结？", "在 Digest——每晚约22:00 MSK，以及 Hourly——每隔几小时，与 Telegram 频道相同的帖子。"),
+    ],
+    "hi": [
+        ("LiqScope क्या है?", "LiqScope एक मुफ्त क्रिप्टो फ्यूचर्स लिक्विडेशन टर्मिनल है: 8 एक्सचेंजों से लाइव फीड, क्लस्टर वाला कैंडल चार्ट, वॉल्यूम प्रोफाइल, CVD और ओपन इंटरेस्ट।"),
+        ("क्या साइन-अप जरूरी है?", "नहीं। टर्मिनल बिना साइन-अप और बिना API कुंजी के खुला है। साइन-अप केवल Telegram अलर्ट, सहसंबंध आदि के लिए है।"),
+        ("Hyperliquid लिक्विडेशन कैसे पता चलते हैं?", "Hyperliquid सीधे लिक्विडेशन प्रकाशित नहीं करता: ट्रेड टेप में मार्केट-ऑर्डर बर्स्ट से अनुमान और /info द्वारा पुष्टि।"),
+        ("CVD और OI क्या हैं?", "CVD प्रति कैंडल टेकर खरीद/बिक्री असंतुलन है, OI ओपन इंटरेस्ट में बदलाव है।"),
+        ("दैनिक परिणाम कहाँ देखें?", "Digest में — हर शाम ~22:00 MSK, और Hourly में — हर कुछ घंटों में, Telegram चैनल जैसे ही पोस्ट।"),
+    ],
+    "es": [
+        ("¿Qué es LiqScope?", "LiqScope es un terminal gratuito de liquidaciones de futuros cripto: feed en vivo de 8 exchanges, gráfico de velas con clústeres, perfil de volumen, CVD e interés abierto."),
+        ("¿Necesito registrarme?", "No. El terminal está abierto sin registro y sin claves API. El registro es solo para alertas en Telegram, correlaciones y otros servicios."),
+        ("¿Cómo se detectan liquidaciones en Hyperliquid?", "Hyperliquid no publica liquidaciones directamente: se infiere de una ráfaga de órdenes de mercado en la cinta y se confirma vía /info por dirección."),
+        ("¿Qué son CVD y OI?", "CVD es el desequilibrio comprador/vendedor por vela, OI es el cambio en interés abierto."),
+        ("¿Dónde ver resultados diarios?", "En Digest — cada noche ~22:00 MSK, y en Hourly — cada pocas horas, los mismos posts que en el canal de Telegram."),
+    ],
+}
+
+HOWTO = {
+    "ru": {
+        "name": "Как работает LiqScope",
+        "steps": [
+            ("Слушаем биржи", "Публичные WebSocket-каналы ликвидаций и сделок — напрямую, без посредников."),
+            ("Нормализуем данные", "Пары, объёмы и стороны приводятся к единому виду, дубли отсекаются."),
+            ("Рисуем на графике", "Ликвидации ложатся на свечи в свою цену, профиль показывает их объёмы по уровням."),
+            ("Вы смотрите", "Лента, статистика 5м/1ч/24ч, топ монет — всё обновляется в реальном времени."),
+        ],
+    },
+    "en": {
+        "name": "How LiqScope works",
+        "steps": [
+            ("Listen to exchanges", "Public WebSocket liquidation and trade channels — directly, no middlemen."),
+            ("Normalize data", "Pairs, volumes and sides are unified, duplicates are dropped."),
+            ("Draw on chart", "Liquidations are placed at their price on candles, profile shows volume by levels."),
+            ("You watch", "Feed, 5m/1h/24h stats, top coins — everything updates in real time."),
+        ],
+    },
+    "zh": {
+        "name": "LiqScope 如何工作",
+        "steps": [
+            ("监听交易所", "公共 WebSocket 清算和交易通道——直接，无中介。"),
+            ("标准化数据", "交易对、成交量和方向统一，去重。"),
+            ("在图表上绘制", "清算按价格落在K线上，分布显示按价格的成交量。"),
+            ("你来观看", "流、5m/1h/24h 统计、热门币——全部实时更新。"),
+        ],
+    },
+    "hi": {
+        "name": "LiqScope कैसे काम करता है",
+        "steps": [
+            ("एक्सचेंज सुनें", "पब्लिक WebSocket लिक्विडेशन और ट्रेड चैनल — सीधे।"),
+            ("डेटा सामान्य करें", "पेयर, वॉल्यूम और साइड एकरूप, डुप्लिकेट हटते हैं।"),
+            ("चार्ट पर बनाएं", "लिक्विडेशन अपनी कीमत पर कैंडल पर लगते हैं।"),
+            ("आप देखें", "फीड, आँकड़े, टॉप कॉइन — सब रीयल-टाइम।"),
+        ],
+    },
+    "es": {
+        "name": "Cómo funciona LiqScope",
+        "steps": [
+            ("Escuchamos exchanges", "Canales WebSocket públicos de liquidaciones y trades — directo."),
+            ("Normalizamos datos", "Pares, volúmenes y lados unificados, duplicados eliminados."),
+            ("Dibujamos en el gráfico", "Las liquidaciones caen en su precio sobre las velas."),
+            ("Tú miras", "Feed, stats 5m/1h/24h, top monedas — todo en tiempo real."),
+        ],
+    },
+}
+
 #: JSON-LD: сайт, приложение и организация — одна структура на все страницы.
 def jsonld(kind: str = "landing", lang: str = DEFAULT_LANG,
-           image: str = "") -> str:
-    """Разметка Schema.org. ``image`` — картинка страницы (обложка выпуска)."""
+           image: str = "", article: Optional[dict] = None) -> str:
+    """Разметка Schema.org. ``image`` — картинка страницы (обложка выпуска).
+
+    ``article`` — для конкретного дня: {"day": "YYYY-MM-DD", "title": "...", "desc": "...", "date": "..."}
+    — тогда отдаём Article/BlogPosting вместо общей CollectionPage.
+    """
     lang = lang if lang in LANGS else DEFAULT_LANG
     common = {
         "@context": "https://schema.org",
@@ -500,12 +706,32 @@ def jsonld(kind: str = "landing", lang: str = DEFAULT_LANG,
         "logo": f"{SITE_URL}/static/logo.png",
         "description": _text(lang, "seo.land.desc"),
     }
+    def breadcrumb(items):
+        # items: list of (name, url)
+        return {
+            "@type": "BreadcrumbList",
+            "itemListElement": [
+                {
+                    "@type": "ListItem",
+                    "position": i + 1,
+                    "name": n,
+                    "item": u,
+                }
+                for i, (n, u) in enumerate(items)
+            ],
+        }
+
     if kind == "landing":
         data = [
             {
                 "@type": "WebSite",
                 **common,
                 "inLanguage": list(HREFLANG.values()),
+                "potentialAction": {
+                    "@type": "SearchAction",
+                    "target": f"{SITE_URL}/terminal?search={{search_term_string}}",
+                    "query-input": "required name=search_term_string",
+                },
             },
             {
                 "@type": "SoftwareApplication",
@@ -518,36 +744,144 @@ def jsonld(kind: str = "landing", lang: str = DEFAULT_LANG,
                 "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"},
                 "featureList": FEATURES.get(lang, FEATURES[DEFAULT_LANG]),
             },
+            breadcrumb([
+                ("LiqScope", SITE_URL + "/"),
+            ]),
+            {
+                "@type": "FAQPage",
+                "inLanguage": HREFLANG.get(lang, lang),
+                "mainEntity": [
+                    {
+                        "@type": "Question",
+                        "name": q,
+                        "acceptedAnswer": {"@type": "Answer", "text": a},
+                    }
+                    for q, a in FAQ.get(lang, FAQ.get(DEFAULT_LANG, []))
+                ],
+            },
+            {
+                "@type": "HowTo",
+                "name": HOWTO.get(lang, HOWTO.get(DEFAULT_LANG, {})).get("name", "How it works"),
+                "inLanguage": HREFLANG.get(lang, lang),
+                "step": [
+                    {
+                        "@type": "HowToStep",
+                        "name": s[0],
+                        "text": s[1],
+                        "position": i + 1,
+                    }
+                    for i, s in enumerate(HOWTO.get(lang, HOWTO.get(DEFAULT_LANG, {})).get("steps", []))
+                ],
+            },
         ]
     elif kind == "hourly":
-        data = [
-            {
-                "@type": "CollectionPage",
-                **common,
-                "url": f"{SITE_URL}/hourly",
-                "inLanguage": list(HREFLANG.values()),
-                "description": _text(lang, "seo.hourly.desc"),
-                "isPartOf": {"@type": "Blog", "name": "LiqScope",
-                             "url": f"{SITE_URL}/hourly"},
-            }
-        ]
+        # Если открыт конкретный день/пост — отдаём Article, иначе CollectionPage
+        if article and article.get("day"):
+            art_title = article.get("title") or _text(lang, "seo.hourly.title")
+            art_desc = article.get("desc") or _text(lang, "seo.hourly.desc")
+            art_date = article.get("date") or article.get("day")
+            data = [
+                {
+                    "@type": "BlogPosting",
+                    "headline": art_title,
+                    "description": art_desc,
+                    "url": f"{SITE_URL}/hourly?day={article.get('day')}" if article.get("day") else f"{SITE_URL}/hourly",
+                    "inLanguage": HREFLANG.get(lang, lang),
+                    "datePublished": art_date,
+                    "dateModified": art_date,
+                    "author": {"@type": "Organization", "name": "LiqScope", "url": SITE_URL},
+                    "publisher": {
+                        "@type": "Organization",
+                        "name": "LiqScope",
+                        "logo": {"@type": "ImageObject", "url": f"{SITE_URL}/static/icon-512.png", "width": 512, "height": 512},
+                    },
+                    "isPartOf": {"@type": "Blog", "name": "LiqScope Hourly", "url": f"{SITE_URL}/hourly"},
+                },
+                breadcrumb([
+                    ("LiqScope", SITE_URL + "/"),
+                    (_text(lang, "seo.hourly.title", "Hourly"), SITE_URL + "/hourly"),
+                    (article.get("day") or "Day", f"{SITE_URL}/hourly?day={article.get('day')}"),
+                ]),
+            ]
+        else:
+            data = [
+                {
+                    "@type": "CollectionPage",
+                    **common,
+                    "url": f"{SITE_URL}/hourly",
+                    "inLanguage": list(HREFLANG.values()),
+                    "description": _text(lang, "seo.hourly.desc"),
+                    "isPartOf": {"@type": "Blog", "name": "LiqScope", "url": f"{SITE_URL}/hourly"},
+                },
+                breadcrumb([
+                    ("LiqScope", SITE_URL + "/"),
+                    (_text(lang, "seo.hourly.title", "Hourly"), SITE_URL + "/hourly"),
+                ]),
+            ]
     elif kind == "digest":
+        if article and article.get("day"):
+            art_title = article.get("title") or f"{_text(lang, 'seo.digest.title')} — {article.get('day')}"
+            art_desc = article.get("desc") or _text(lang, "seo.digest.desc")
+            art_date = article.get("date") or article.get("day")
+            data = [
+                {
+                    "@type": "BlogPosting",
+                    "headline": art_title,
+                    "description": art_desc,
+                    "url": f"{SITE_URL}/digest?day={article.get('day')}",
+                    "inLanguage": HREFLANG.get(lang, lang),
+                    "datePublished": art_date,
+                    "dateModified": art_date,
+                    "author": {"@type": "Organization", "name": "LiqScope", "url": SITE_URL},
+                    "publisher": {
+                        "@type": "Organization",
+                        "name": "LiqScope",
+                        "logo": {"@type": "ImageObject", "url": f"{SITE_URL}/static/icon-512.png", "width": 512, "height": 512},
+                    },
+                    "isPartOf": {"@type": "Blog", "name": "LiqScope Digest", "url": f"{SITE_URL}/digest"},
+                },
+                breadcrumb([
+                    ("LiqScope", SITE_URL + "/"),
+                    (_text(lang, "seo.digest.title", "Digest"), SITE_URL + "/digest"),
+                    (article.get("day") or "Day", f"{SITE_URL}/digest?day={article.get('day')}"),
+                ]),
+            ]
+        else:
+            data = [
+                {
+                    "@type": "Blog",
+                    **common,
+                    "url": f"{SITE_URL}/digest",
+                    "inLanguage": list(HREFLANG.values()),
+                    "description": _text(lang, "seo.digest.desc"),
+                },
+                breadcrumb([
+                    ("LiqScope", SITE_URL + "/"),
+                    (_text(lang, "seo.digest.title", "Digest"), SITE_URL + "/digest"),
+                ]),
+            ]
+    elif kind == "404":
         data = [
-            {
-                "@type": "Blog",
-                **common,
-                "url": f"{SITE_URL}/digest",
-                "inLanguage": list(HREFLANG.values()),
-                "description": _text(lang, "seo.digest.desc"),
-            }
+            {"@type": "WebPage", **common, "url": f"{SITE_URL}/404", "name": _text(lang, "seo.404.title")},
+            breadcrumb([
+                ("LiqScope", SITE_URL + "/"),
+                (_text(lang, "404.title", "404"), SITE_URL + "/404"),
+            ]),
         ]
     else:
-        data = [{"@type": "WebPage", **common, "url": f"{SITE_URL}/terminal"}]
+        data = [
+            {"@type": "WebPage", **common, "url": f"{SITE_URL}/terminal"},
+            breadcrumb([
+                ("LiqScope", SITE_URL + "/"),
+                (_text(lang, "seo.terminal.title", "Terminal"), SITE_URL + "/terminal"),
+            ]),
+        ]
     if image:
         # картинка страницы: поисковик и мессенджер берут её для превью, а для
         # выпуска дайджеста это то самое фото дня, что ушло в канал
         for item in data:
-            item.setdefault("image", image)
+            if isinstance(item, dict) and item.get("@type") in ("BlogPosting", "CollectionPage", "Blog", "WebPage", "SoftwareApplication", "WebSite"):
+                item.setdefault("image", image)
     # Organization с логотипом-картинкой: поисковик берёт отсюда логотип для
     # брендовой панели, поэтому у картинки указаны реальные размеры.
     data.append({

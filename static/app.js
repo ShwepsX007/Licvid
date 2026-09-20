@@ -1475,14 +1475,12 @@
     // возвращает ширину текста в пикселях на заданном кегле.
     function liqPlateGeom(bodyPx, slotPx, label, measure, baseH) {
         const slot = Math.max(1, Number(slotPx) || 1);
-        const body = Math.max(0, Number(bodyPx) || 0);
+        // body больше не ограничивает высоту: на доджи кластер сужался до 2px
+        // и становился невидимым. Теперь высота — фиксированная база (15px,
+        // чип 10px, кит 16–22px), независимо от тела свечи.
         const base = Math.max(LIQ_PLATE_MIN_H, Number(baseH) || LIQ_PLATE_H);
         const w = Math.max(LIQ_PLATE_MIN_W, Math.round(slot * LIQ_PLATE_W_FRAC));
-        // Потолок по телу: 3% зазора с каждой стороны (floor — чтобы округление
-        // не съедало зазор). На тонкой свече плашка становится тоньше её тела.
-        const cap = Math.floor(body * (1 - 2 * LIQ_PLATE_GAP));
-        const h = Math.max(LIQ_PLATE_MIN_H, cap > 0 ? Math.min(base, cap)
-                                                   : LIQ_PLATE_MIN_H);
+        const h = Math.max(LIQ_PLATE_MIN_H, base);
         const out = { w: w, h: h, font: 0, showLabel: false, text: "" };
         const text = String(label || "");
         if (!text || typeof measure !== "function") return out;
@@ -1729,29 +1727,31 @@
             // Центр плашки — ровно на цене ликвидаций (в моменте), а не в
             // середине тела: по положению видно уровень, где снесло позиции.
             const cy = isFinite(y) ? y : (yO + yC) / 2;
-            const place = (g) => {
+            const isActive = activeKey === c.key;
+            const place = (g, force) => {
                 const bx = Math.round(x - g.w / 2), by = Math.round(cy - g.h / 2);
-                for (let j = 0; j < drawn.length; j++) {
-                    const d = drawn[j];
-                    if (bx < d.x + d.w && bx + g.w > d.x &&
-                            by < d.y + d.h && by + g.h > d.y) return null;
+                if (!force) {
+                    for (let j = 0; j < drawn.length; j++) {
+                        const d = drawn[j];
+                        if (bx < d.x + d.w && bx + g.w > d.x &&
+                                by < d.y + d.h && by + g.h > d.y) return null;
+                    }
                 }
                 return { fx: bx, fy: by, bw: g.w, bh: g.h };
             };
-            let box = place(geom);
+            let box = place(geom, isActive);
             if (!box && geom.showLabel) {
                 // Налезает на соседнюю плашку — как и раньше, показываем чипом
                 // без цифр: уровень виден, цифры не наслаиваются.
+                // Активный кластер (подсветка из ленты) рисуем всегда, даже с наложением.
                 const chip = liqPlateGeom(bodyPx, slotPx, "", measure,
                                           LIQ_PLATE_CHIP_H);
-                box = place(chip);
+                box = place(chip, isActive);
                 if (box) geom = chip;
             }
             if (!box) return;
             const fx = box.fx, fy = box.fy, bw = box.bw, bh = box.bh;
             drawn.push({ x: fx, y: fy, w: bw, h: bh });
-
-            const isActive = activeKey === c.key;
             clusterHits.push({ kind: "liq", x: fx, y: fy, w: bw, h: bh, key: c.key,
                 ids: c.ids, time: c.time, price: priceOf(c), total: c.total,
                 count: c.count, longUsd: c.longUsd, shortUsd: c.shortUsd,
@@ -1776,23 +1776,26 @@
             ctx.stroke();
 
             // Активная плашка (наведение в ленте или нажатие на графике) —
-            // ярко-белая подсветка: мягкий ореол, резкий контур и светлая
-            // вуаль поверх цвета, чтобы нужный кластер было видно сразу.
+            // 100% ярче: двойной белый ореол с сильным свечением и плотная
+            // вуаль, чтобы кластер было видно сразу даже на яркой свече.
             if (isActive) {
                 ctx.save();
-                rrPath(ctx, fx - 3, fy - 3, bw + 6, bh + 6, rad + 2);
-                ctx.lineWidth = 3;
-                ctx.strokeStyle = "rgba(255,255,255,0.6)";
+                rrPath(ctx, fx - 5, fy - 5, bw + 10, bh + 10, rad + 3);
+                ctx.lineWidth = 5;
+                ctx.strokeStyle = "rgba(255,255,255,0.92)";
                 ctx.shadowColor = "#ffffff";
-                ctx.shadowBlur = 16;
+                ctx.shadowBlur = 32;
                 ctx.stroke();
                 ctx.shadowBlur = 0;
-                rrPath(ctx, fx - 2.2, fy - 2.2, bw + 4.4, bh + 4.4, rad + 1.6);
-                ctx.lineWidth = 2.2;
+                rrPath(ctx, fx - 3, fy - 3, bw + 6, bh + 6, rad + 2);
+                ctx.lineWidth = 3.5;
                 ctx.strokeStyle = "#ffffff";
+                ctx.shadowColor = "#ffffff";
+                ctx.shadowBlur = 18;
                 ctx.stroke();
+                ctx.shadowBlur = 0;
                 rrPath(ctx, fx, fy, bw, bh, rad);
-                ctx.fillStyle = "rgba(255,255,255,0.24)";
+                ctx.fillStyle = "rgba(255,255,255,0.42)";
                 ctx.fill();
                 ctx.restore();
             }
@@ -1933,12 +1936,28 @@
             ctx.strokeStyle = theme.ring;
             ctx.stroke();
 
-            // Активный треугольник (наведение/закреп) — белая обводка поверх
+            // Активный треугольник (наведение/закреп) — 100% ярче:
+            // двойной белый ореол с сильным свечением + плотная вуаль.
             if (shapeIsActive("cvd", triKey)) {
-                triPath(ctx, x, apexY, halfW, h, buy);
-                ctx.lineWidth = 1.8;
-                ctx.strokeStyle = "rgba(255,255,255,0.9)";
+                ctx.save();
+                triPath(ctx, x, buy ? apexY - 2.5 : apexY + 2.5, halfW + 3, h + 3, buy);
+                ctx.lineWidth = 4.5;
+                ctx.strokeStyle = "rgba(255,255,255,0.95)";
+                ctx.shadowColor = "#ffffff";
+                ctx.shadowBlur = 28;
                 ctx.stroke();
+                ctx.shadowBlur = 0;
+                triPath(ctx, x, apexY, halfW + 1.5, h + 1.5, buy);
+                ctx.lineWidth = 3;
+                ctx.strokeStyle = "#ffffff";
+                ctx.shadowColor = "#ffffff";
+                ctx.shadowBlur = 16;
+                ctx.stroke();
+                ctx.shadowBlur = 0;
+                triPath(ctx, x, apexY, halfW, h, buy);
+                ctx.fillStyle = "rgba(255,255,255,0.40)";
+                ctx.fill();
+                ctx.restore();
             }
 
             // Сумма — если влезает; шрифт подбираем под размер треугольника.
@@ -2462,13 +2481,31 @@
             ctx.strokeStyle = theme.ring;
             ctx.stroke();
 
-            // Активный шарик (наведение/закреп) — белое кольцо поверх
+            // Активный шарик (наведение/закреп) — 100% ярче:
+            // двойной белый ореол с сильным свечением + плотная вуаль.
             if (shapeIsActive("oi", ballKey)) {
+                ctx.save();
                 ctx.beginPath();
-                ctx.arc(x, cy, r + 3.5, 0, 2 * Math.PI);
-                ctx.lineWidth = 1.8;
-                ctx.strokeStyle = "rgba(255,255,255,0.9)";
+                ctx.arc(x, cy, r + 6, 0, 2 * Math.PI);
+                ctx.lineWidth = 5;
+                ctx.strokeStyle = "rgba(255,255,255,0.95)";
+                ctx.shadowColor = "#ffffff";
+                ctx.shadowBlur = 30;
                 ctx.stroke();
+                ctx.shadowBlur = 0;
+                ctx.beginPath();
+                ctx.arc(x, cy, r + 2.8, 0, 2 * Math.PI);
+                ctx.lineWidth = 3.2;
+                ctx.strokeStyle = "#ffffff";
+                ctx.shadowColor = "#ffffff";
+                ctx.shadowBlur = 18;
+                ctx.stroke();
+                ctx.shadowBlur = 0;
+                ctx.beginPath();
+                ctx.arc(x, cy, r, 0, 2 * Math.PI);
+                ctx.fillStyle = "rgba(255,255,255,0.42)";
+                ctx.fill();
+                ctx.restore();
             }
 
             if (fs > 0) {
@@ -2519,18 +2556,53 @@
         const matchTab = (kind === "liq" && state.feedTab === "liq")
             || (kind === "cvd" && state.feedTab === "cvd")
             || (kind === "oi" && state.feedTab === "oi");
-        const ids = (kind === "liq" && ball.ids) ? new Set(ball.ids.map(String)) : null;
+        // Для ликвидаций ids есть только у живых кластеров (из памяти).
+        // Исторические кластеры из /api/liq_clusters приходят без ids — у них
+        // только время свечи. Чтобы лента не «притухала без подсветки»,
+        // проверяем наличие ids и делаем fallback по времени свечи.
+        const hasIds = !!(kind === "liq" && ball.ids && ball.ids.length);
+        const ids = hasIds ? new Set(ball.ids.map(String)) : null;
         const feedKey = (kind === "cvd" || kind === "oi") ? (kind + "_" + ball.time) : null;
+        const tfSec = (kind === "liq" && ball.time) ? (state.timeframe * 60) : 0;
         let firstRow = null;
-        feedTbody.querySelectorAll("tr").forEach((tr) => {
+        let anyHit = false;
+        const rows = feedTbody.querySelectorAll("tr");
+        rows.forEach((tr) => {
             let hit = false;
             if (ball && matchTab) {
-                if (ids) hit = ids.has(String(tr.dataset.liqId));
-                else if (feedKey) hit = tr.dataset.feedKey === feedKey;
+                if (ids) {
+                    hit = ids.has(String(tr.dataset.liqId));
+                } else if (feedKey) {
+                    hit = tr.dataset.feedKey === feedKey;
+                } else if (kind === "liq" && tfSec > 0) {
+                    // Исторический кластер без ids — матчим по времени свечи:
+                    // событие ленты попадает в ту же свечу графика.
+                    const ts = Number(tr.dataset.ts || tr.dataset.time || 0) || 0;
+                    if (ts) {
+                        hit = ts >= ball.time && ts < ball.time + tfSec;
+                    }
+                }
+            }
+            if (hit) anyHit = true;
+            if (hit && !firstRow) firstRow = tr;
+        });
+        // Применяем классы только если есть хотя бы одно совпадение.
+        // Иначе исторический кластер просто подсвечивается на графике,
+        // а лента не притухает впустую (баг «притухает но не подсвечивает»).
+        rows.forEach((tr) => {
+            let hit = false;
+            if (ball && matchTab) {
+                if (ids) {
+                    hit = ids.has(String(tr.dataset.liqId));
+                } else if (feedKey) {
+                    hit = tr.dataset.feedKey === feedKey;
+                } else if (kind === "liq" && tfSec > 0) {
+                    const ts = Number(tr.dataset.ts || tr.dataset.time || 0) || 0;
+                    if (ts) hit = ts >= ball.time && ts < ball.time + tfSec;
+                }
             }
             tr.classList.toggle("feed-hit", !!hit);
-            tr.classList.toggle("feed-dim", !!(ball && matchTab) && !hit);
-            if (hit && !firstRow) firstRow = tr;
+            tr.classList.toggle("feed-dim", !!(anyHit && matchTab) && !hit);
         });
         if (firstRow) {
             try {
@@ -2571,7 +2643,70 @@
                     if (String(ids[j]) === sid) return clusterHits[i];
                 }
             }
+            // Фолбэк: кластер мог не нарисоваться из-за наложения (place()
+            // вернул null), но он есть в liqClusterRows — найдём его там,
+            // чтобы подсветка ленты всё равно работала и кластер можно было
+            // подсветить по времени свечи.
+            try {
+                const all = liqClusterRows();
+                for (let i = 0; i < all.length; i++) {
+                    const ids = all[i].ids || [];
+                    for (let j = 0; j < ids.length; j++) {
+                        if (String(ids[j]) === sid) {
+                            // Возвращаем синтетический хит с ключом и временем,
+                            // даже если он не был нарисован — applyFeedHighlight
+                            // всё равно подсветит ленту, а график подсветится
+                            // по времени свечи.
+                            return {
+                                kind: "liq",
+                                key: all[i].key,
+                                x: 0, y: 0, w: 0, h: 0,
+                                time: all[i].time,
+                                price: all[i].total > 0 ? all[i].pxSum / all[i].total : 0,
+                                total: all[i].total,
+                                count: all[i].count,
+                                ids: all[i].ids,
+                                longUsd: all[i].longUsd,
+                                shortUsd: all[i].shortUsd,
+                            };
+                        }
+                    }
+                }
+            } catch (e) { /* ignore */ }
         }
+        // Фолбэк по времени свечи — как у CVD/OI: лента → график по времени
+        // Даже если id не нашёлся или кластер без ids (история), найдём ближайший
+        // кластер по timestamp события. Так наведение на строку ленты всегда
+        // зажигает прямоугольник на графике, как треугольники CVD и шарики OI.
+        try {
+            const ts = Number(item.timestamp || item.time || 0);
+            if (ts) {
+                const tfSec = state.timeframe * 60;
+                const t0 = Math.floor(ts / tfSec) * tfSec;
+                // Сначала ищем среди нарисованных
+                for (let i = 0; i < clusterHits.length; i++) {
+                    if (Number(clusterHits[i].time) === t0) return clusterHits[i];
+                }
+                // Затем среди всех рядов
+                const all = liqClusterRows();
+                for (let i = 0; i < all.length; i++) {
+                    if (Number(all[i].time) === t0) {
+                        return {
+                            kind: "liq",
+                            key: all[i].key,
+                            x: 0, y: 0, w: 0, h: 0,
+                            time: all[i].time,
+                            price: all[i].total > 0 ? all[i].pxSum / all[i].total : 0,
+                            total: all[i].total,
+                            count: all[i].count,
+                            ids: all[i].ids,
+                            longUsd: all[i].longUsd,
+                            shortUsd: all[i].shortUsd,
+                        };
+                    }
+                }
+            }
+        } catch (e) { /* ignore */ }
         return null;
     }
 
@@ -3800,6 +3935,10 @@
         const tr = document.createElement("tr");
         tr.className = whale ? "feed-row-whale" : "feed-row-new";
         if (item.id != null) tr.dataset.liqId = String(item.id);   // связь с шариком
+        if (item.timestamp != null) {
+            tr.dataset.ts = String(item.timestamp);
+            tr.dataset.time = String(item.timestamp);
+        }
         const d = new Date(item.timestamp * 1000);
         const valClass = whale ? "whale-val" : (isLong ? "long-val" : "short-val");
         const openTitle = I18n.t("feed.open_chart", { sym: pretty(item.symbol) });
@@ -3987,6 +4126,13 @@
     function paintShapeFeedCells(tr, item) {
         tr._feedItem = item;
         tr.dataset.feedKey = shapeFeedKey(item);
+        if (item.time != null) {
+            tr.dataset.ts = String(item.time);
+            tr.dataset.time = String(item.time);
+        }
+        if (item.timestamp != null && !tr.dataset.ts) {
+            tr.dataset.ts = String(item.timestamp);
+        }
         tr.classList.toggle("feed-row-live", !!item.live);
         const t = shapeFeedTypeLabel(item);
         let usdTd = tr.querySelector(".td-usd-amount");

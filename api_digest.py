@@ -580,6 +580,16 @@ async def scheduler_loop(sched: DigestScheduler, check_sec: float = 60.0) -> Non
         try:
             now = time.time()
             day = sched.due(now)
+            # Защита от дубля после рестарта: если дайджест за этот день уже в логе — пропускаем
+            if day:
+                try:
+                    ps = getattr(ctx, "photo_store", None)
+                    if ps and hasattr(ps, "was_channel_sent") and ps.was_channel_sent("digest", day):
+                        log.info("Дайджест %s уже отправлялся (лог) — пропускаем дубль", day)
+                        sched.mark(day)
+                        day = None
+                except Exception as e:
+                    log.debug("дайджест дубль чек: %s", e)
             if day and not ctx.busy and now >= float(ctx.retry_at or 0):
                 ctx.busy = True
                 try:
@@ -681,9 +691,32 @@ def register_digest_routes(app) -> None:
         og_image = ""
         if photo:
             og_image = (ctx.public_url or seo_pages.SITE_URL).rstrip("/") + photo["url"]
+        # Каноникал — с днём, если открыт конкретный выпуск: у каждого дня свой URL в выдаче
+        canon_path = f"/digest?day={day}" if day else "/digest"
+        # Article данные для JSON-LD: заголовок и описание дня
+        article = None
+        if rec:
+            try:
+                facts = (rec or {}).get("facts") or {}
+                total = facts.get("liq_total_usd") or 0
+                cnt = facts.get("liq_count") or 0
+                # Формируем описание вида "2026-09-20: $12.3M, 123 ликвидации"
+                desc = f"{day or rec.get('day')}: ${total} · {cnt} ликвидаций" if day else ""
+                # Если есть mood или топ-монета — добавим
+                mood = (rec.get("mood") or {}).get("label") or ""
+                if mood:
+                    desc = f"{desc} · {mood}" if desc else mood
+                article = {
+                    "day": str(day or rec.get("day") or ""),
+                    "title": f"Дневной дайджест — {day or rec.get('day')}" if lang == "ru" else f"Daily digest — {day or rec.get('day')}",
+                    "desc": desc or None,
+                    "date": str(day or rec.get("day") or ""),
+                }
+            except Exception:
+                article = {"day": str(day or "")}
         return seo_pages.render(
-            "digest.html", lang, "/digest",
-            extra_head=seo_pages.jsonld("digest", lang, image=og_image),
+            "digest.html", lang, canon_path,
+            extra_head=seo_pages.jsonld("digest", lang, image=og_image, article=article),
             og_image=og_image, auto=auto,
         )
 

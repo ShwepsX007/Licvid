@@ -85,9 +85,39 @@ def register_hourly_routes(app) -> None:
         og_image = ""
         if photo:
             og_image = (ctx.public_url or seo_pages.SITE_URL).rstrip("/") + photo["url"]
+        # Каноникал с днём/постом — у каждого дня свой URL
+        if post:
+            canon_path = f"/hourly?post={post}"
+        elif day:
+            canon_path = f"/hourly?day={day}"
+        else:
+            canon_path = "/hourly"
+        # Article для JSON-LD
+        article = None
+        try:
+            if rec:
+                d = str((rec or {}).get("day") or day or "")
+                # Заголовок вида "Сводки за 2026-09-20" / "Hourly — 2026-09-20"
+                title = f"Сводки за {d}" if lang == "ru" else f"Hourly — {d}" if d else None
+                # Описание из поста: первые 160 знаков текста
+                raw_text = str((rec or {}).get("text") or (rec or {}).get("caption") or "")[:180]
+                article = {
+                    "day": d,
+                    "title": title,
+                    "desc": raw_text or None,
+                    "date": d,
+                }
+            elif day:
+                article = {
+                    "day": str(day),
+                    "title": f"Сводки за {day}" if lang == "ru" else f"Hourly — {day}",
+                    "date": str(day),
+                }
+        except Exception:
+            article = {"day": str(day or "")}
         return seo_pages.render(
-            "hourly.html", lang, "/hourly",
-            extra_head=seo_pages.jsonld("hourly", lang, image=og_image),
+            "hourly.html", lang, canon_path,
+            extra_head=seo_pages.jsonld("hourly", lang, image=og_image, article=article),
             og_image=og_image, auto=auto,
         )
 

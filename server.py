@@ -3041,14 +3041,48 @@ async def robots_txt():
 
 @app.get("/sitemap.xml")
 async def sitemap_xml():
-    """Карта сайта: основные страницы во всех языках (hreflang-альтернативы)."""
-    return seo_pages.sitemap_xml()
+    """Карта сайта: основные страницы во всех языках (hreflang-альтернативы) + архив."""
+    digest_items = []
+    hourly_items = []
+    try:
+        # digest_ctx и hourly_ctx живут в модулях api_digest / api_hourly —
+        # берём их напрямую, чтобы не тянуть app.state
+        from api_digest import ctx as dctx
+        from api_hourly import ctx as hctx
+        try:
+            digest_items = list((getattr(dctx, "store", None) or {}).list() if hasattr(getattr(dctx, "store", None), "list") else [])
+        except Exception:
+            digest_items = []
+        try:
+            hourly_items = list((getattr(hctx, "store", None) or {}).list() if hasattr(getattr(hctx, "store", None), "list") else [])
+        except Exception:
+            hourly_items = []
+    except Exception:
+        pass
+    return seo_pages.sitemap_xml(digest_items=digest_items, hourly_items=hourly_items)
 
 
 @app.get("/manifest.webmanifest")
-async def manifest_webmanifest():
-    """Манифест приложения: имя, иконка, цвета."""
-    return seo_pages.manifest()
+async def manifest_webmanifest(request: Request):
+    """Манифест приложения: имя, иконка, цвета — на языке гостя."""
+    lang = seo_pages.detect_lang(request)
+    return seo_pages.manifest(lang=lang)
+
+
+@app.exception_handler(404)
+async def not_found_handler(request: Request, exc):
+    """404 — страница не найдена: отдаём красивую страницу на языке гостя, noindex."""
+    try:
+        lang, auto = seo_pages.lang_of(request)
+    except Exception:
+        lang, auto = seo_pages.DEFAULT_LANG, False
+    # Для 404 — noindex, но hreflang и язык всё равно нужны
+    return seo_pages.render(
+        "404.html", lang, "/404",
+        extra_head=seo_pages.jsonld("404", lang),
+        auto=auto,
+        status_code=404,
+    )
 
 
 @app.get("/favicon.ico")

@@ -213,6 +213,24 @@ class TelegramBot:
         kb["inline_keyboard"] = rows
         return kb
 
+    def hourly_kb(self, lang: str = "ru") -> dict:
+        """Кнопки под сводкой по часам: сверху — ссылка на раздел на сайте.
+
+        Подпись под фотографией Telegram режет по лимиту 1024 знаков, и пост
+        может уйти в канал обрезанным. Кнопка ведёт на страницу /hourly, где
+        сводка лежит целиком, — так же, как в дневном дайджесте кнопка ведёт
+        на /digest.
+        """
+        kb = dict(self.channel_link_kb(lang))
+        rows = [list(r) for r in (kb.get("inline_keyboard") or [])]
+        url = self.site_url("/hourly")
+        label = ("📖 Full recap on the site" if str(lang).startswith("en")
+                 else "📖 Сводка целиком на сайте")
+        if url:
+            rows.insert(0, [{"text": label, "url": url}])
+        kb["inline_keyboard"] = rows
+        return kb
+
     def channel_link_kb(self, lang: str = "ru") -> dict:
         """Кнопки под постом в канале: сайт, бот и партнёрская ссылка Gate."""
         gate = gate_url(lang)
@@ -1588,12 +1606,13 @@ class TelegramBot:
                 "shorts_usd": snap.get("shorts_usd")}
         posts = [
             {"lang": "ru", "cid": cid, "caption": caption, "top": top,
-             "full_caption": caption_full},
+             "full_caption": caption_full, "kb": self.hourly_kb("ru")},
         ]
         cid_en = self.channel_chat_id_en()
         if cid_en:
             posts.append({"lang": "en", "cid": cid_en, "caption": caption_en,
-                          "top": top_en, "full_caption": caption_full_en})
+                          "top": top_en, "full_caption": caption_full_en,
+                          "kb": self.hourly_kb("en")})
         else:
             log.info("английский канал не привязан — пост только по-русски")
         if self._review_on():
@@ -1682,7 +1701,8 @@ class TelegramBot:
                                        images[0] if images else None,
                                        post.get("top") or "",
                                        post.get("lang") or "ru",
-                                       images=images):
+                                       images=images,
+                                       kb=post.get("kb") or None):
                 delivered += 1
                 sent_langs.append("en" if str(post.get("lang") or "").startswith("en")
                                   else "ru")

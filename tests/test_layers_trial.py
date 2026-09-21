@@ -108,6 +108,8 @@ class TrialApiTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.store = Store(os.path.join(self.tmp.name, "a.db"), secret="s")
+        # включаем пробный период для тестов trial — по умолчанию в проде он выключен (свободный доступ)
+        self.store.set_setting("layers_trial_enabled", "1")
         self.user = self.store.create_email_user("vasya@example.com",
                                                  password_hash="x")["user"]
         app = FastAPI()
@@ -118,6 +120,7 @@ class TrialApiTest(unittest.TestCase):
         web_layers.register_layer_routes(app)
         self.client = TestClient(app)
         self._env = os.environ.pop("LIQSCOPE_LAYERS_TRIAL_MIN", None)
+        self._env_en = os.environ.pop("LIQSCOPE_LAYERS_TRIAL_ENABLED", None)
 
     def tearDown(self) -> None:
         web_account.ctx.store = self.old_store
@@ -126,6 +129,10 @@ class TrialApiTest(unittest.TestCase):
             os.environ["LIQSCOPE_LAYERS_TRIAL_MIN"] = self._env
         else:
             os.environ.pop("LIQSCOPE_LAYERS_TRIAL_MIN", None)
+        if self._env_en is not None:
+            os.environ["LIQSCOPE_LAYERS_TRIAL_ENABLED"] = self._env_en
+        else:
+            os.environ.pop("LIQSCOPE_LAYERS_TRIAL_ENABLED", None)
         self.store.close()
         self.tmp.cleanup()
 
@@ -188,6 +195,7 @@ class TrialApiTest(unittest.TestCase):
         self.assertEqual(web_layers.trial_limit_sec(), 0)
 
     def test_limit_comes_from_environment(self) -> None:
+        # enabled уже включён через настройку сайта (setUp)
         os.environ["LIQSCOPE_LAYERS_TRIAL_MIN"] = "15"
         self.assertEqual(web_layers.trial_limit_sec(), 15 * 60)
         os.environ["LIQSCOPE_LAYERS_TRIAL_MIN"] = "мусор"
@@ -196,6 +204,12 @@ class TrialApiTest(unittest.TestCase):
         self.assertEqual(web_layers.trial_limit_sec(), 24 * 60 * 60)
         os.environ.pop("LIQSCOPE_LAYERS_TRIAL_MIN", None)
         self.assertEqual(web_layers.trial_limit_sec(), 30 * 60)
+        # когда выключен — лимит 0 независимо от минут
+        self.store.set_setting("layers_trial_enabled", "0")
+        os.environ["LIQSCOPE_LAYERS_TRIAL_MIN"] = "15"
+        self.assertEqual(web_layers.trial_limit_sec(), 0)
+        self.store.set_setting("layers_trial_enabled", "1")
+        os.environ.pop("LIQSCOPE_LAYERS_TRIAL_MIN", None)
 
     def test_no_store_does_not_block_anybody(self) -> None:
         web_layers.ctx.store = None
@@ -225,6 +239,8 @@ class LayersAdminApiTest(unittest.TestCase):
             ADMIN_EMAIL, password_hash="x")["user"]["id"])
         self.plain_id = int(self.store.create_email_user(
             "vasya@example.com", password_hash="x")["user"]["id"])
+        # для тестов пробника включаем его — в проде по умолчанию выключен
+        self.store.set_setting("layers_trial_enabled", "1")
         self.old_store = web_account.ctx.store
         web_account.ctx.store = self.store
         web_layers.ctx.store = self.store
@@ -237,6 +253,7 @@ class LayersAdminApiTest(unittest.TestCase):
         self.plain = TestClient(app)
         self.plain.cookies.set(COOKIE_SID, self.store.create_session(self.plain_id))
         self._env = os.environ.pop("LIQSCOPE_LAYERS_TRIAL_MIN", None)
+        self._env_en = os.environ.pop("LIQSCOPE_LAYERS_TRIAL_ENABLED", None)
 
     def tearDown(self) -> None:
         web_account.ctx.store = self.old_store
@@ -245,6 +262,10 @@ class LayersAdminApiTest(unittest.TestCase):
             os.environ["LIQSCOPE_LAYERS_TRIAL_MIN"] = self._env
         else:
             os.environ.pop("LIQSCOPE_LAYERS_TRIAL_MIN", None)
+        if self._env_en is not None:
+            os.environ["LIQSCOPE_LAYERS_TRIAL_ENABLED"] = self._env_en
+        else:
+            os.environ.pop("LIQSCOPE_LAYERS_TRIAL_ENABLED", None)
         self.store.close()
         self.tmp.cleanup()
 
@@ -262,15 +283,23 @@ class LayersAdminApiTest(unittest.TestCase):
         self.assertEqual(self.client.post("/api/admin/layers/reset").status_code, 401)
 
     def test_default_is_thirty_minutes(self) -> None:
+        # по умолчанию пробник выключен (слои свободны), но настроенные минуты — 30
+        # в setUp мы включили его для других тестов, тут сбросим чтобы проверить default
+        self.store.set_setting("layers_trial_enabled", "")
         d = self.admin.get("/api/admin/layers/settings").json()
         self.assertTrue(d["ok"])
         self.assertEqual(d["minutes"], 30)
-        self.assertEqual(d["limit_sec"], LIMIT)
+        self.assertEqual(d["configured_sec"], LIMIT)
+        # когда выключен — limit_sec 0 (слои открыты всем)
+        self.assertEqual(d["limit_sec"], 0)
         self.assertEqual(d["default_min"], 30)
         self.assertEqual(d["source"], "default")
         self.assertFalse(d["locked"])
         self.assertEqual(d["env_var"], "LIQSCOPE_LAYERS_TRIAL_MIN")
         self.assertEqual(d["stats"]["total"], 0)
+        self.assertFalse(d["enabled"])
+        # вернём включённое для остальных тестов этого класса
+        self.store.set_setting("layers_trial_enabled", "1")
 
     # --- правка лимита ------------------------------------------------------
     def test_admin_changes_the_limit_and_guests_get_it(self) -> None:

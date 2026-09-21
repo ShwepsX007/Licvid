@@ -12,7 +12,7 @@ sys.path.insert(0, HERE)
 from channel_digest import (  # noqa: E402
     CAPTION_LIMIT, VARIANT_COUNT, _dwidth, _headlines, _mono, caption_fit,
     caption_len, collect_digest, cut_utf16, format_headline, list_images, money,
-    pick_image, post_has_hours, render_post, short_money,
+    pick_image, post_has_hours, render_post, render_top7, short_money,
 )
 
 
@@ -650,6 +650,89 @@ class DigestCoverTest(unittest.TestCase):
         self.assertEqual(self.api.cover_variant(""), 0)
         self.assertEqual(self.api.cover_variant("мусор"), 0)
 
+
+class DensePostTest(unittest.TestCase):
+    """Пост канала — плотной простынёй: пустых строк между блоками нет.
+
+    Раньше блоки склеивались двумя переносами, и в Telegram между шапкой,
+    суммой окна, рядом часов и подписью бренда зияли «дыры»: пост выглядел
+    сборкой обрывков, а на телефоне расползался на два экрана. Теперь
+    разделитель один — ``BLOCK_SEP`` (одинаковый перенос и в замере, и в
+    выводе, иначе «влезает по расчёту» расходилось бы с тем, что принимает
+    sendPhoto). Пустые строки срастаются и внутри блока: текст от ИИ приходит
+    с абзацами. Таблицы в ``<pre>`` не трогаем — там пустая строка и выравнивание
+    по пробелам часть вида.
+    """
+
+    def setUp(self):
+        self.now = 1_000_000.0
+        self.events = [
+            _ev("BTC_USDT", 2_400_000, "SELL", "binance", self.now - 60, 1),
+            _ev("BTC_USDT", 800_000, "BUY", "bybit", self.now - 120, 2),
+            _ev("ETH_USDT", 1_100_000, "SELL", "okx", self.now - 200, 3),
+            _ev("SOL_USDT", 250_000, "BUY", "binance", self.now - 300, 4),
+            _ev("DOGE_USDT", 90_000, "SELL", "gate", self.now - 400, 5),
+        ]
+        self.oi = {"BTC_USDT": {"total_usd": 12e9,
+                                "changes": {"h4": {"usd": -180_000_000, "pct": -1.45}}}}
+        self.cvd = {"BTC_USDT": -12_500_000, "ETH_USDT": 3_200_000}
+
+    def _snap(self):
+        snap = collect_digest(self.events, now=self.now, oi=self.oi, cvd=self.cvd)
+        snap["board"] = _live_board()
+        return snap
+
+    def test_no_blank_lines_in_both_channels(self) -> None:
+        """Ни в русском, ни в английском канале пустых строк в теле поста."""
+        for lang in ("ru", "en"):
+            for variant in range(VARIANT_COUNT):
+                t = render_post(self._snap(), variant, lang=lang)
+                self.assertNotIn("\n\n", t, (lang, variant))
+                self.assertTrue(t.strip(), "пост не должен стать пустым")
+                # строки на месте: пустые строки убраны, сами строки — нет
+                self.assertGreaterEqual(t.count("\n"), 6, (lang, variant))
+
+    def test_ai_paragraphs_are_tightened(self) -> None:
+        """Шапка от ИИ с абзацами влезает в пост без пустой строки."""
+        head = ("Рынок сыпется.\n\nЛонги BTC вынесли на $2.40M.\n\n\n"
+                "Подробности — по часам.")
+        for lang in ("ru", "en"):
+            t = render_post(self._snap(), 0, lang=lang, head_override=head)
+            self.assertNotIn("\n\n", t, lang)
+            self.assertIn("Рынок сыпется.", t)
+            self.assertIn("Подробности — по часам.", t)
+            self.assertLessEqual(caption_len(t), CAPTION_LIMIT, lang)
+
+    def test_tail_and_hours_stay_on_their_own_lines(self) -> None:
+        """Уплотнение не склеило строки: каждая цифра осталась с своей строки."""
+        t = render_post(self._snap(), 0, lang="ru")
+        lines = t.split("\n")
+        self.assertTrue(lines[0].startswith("<b>") or lines[0].startswith("💥"), lines[0])
+        self.assertTrue(any(ln.startswith("🕘") for ln in lines), "часы остались строками")
+        self.assertTrue(any(ln.startswith("💠") for ln in lines), "строка Gate осталась")
+        self.assertTrue(any("LiqScope" in ln for ln in lines[-3:]), lines[-3:])
+
+    def test_top7_reserve_message_is_dense_too(self) -> None:
+        """Аварийное сообщение (топ-7 отдельно) уплотнено так же, таблицы целы."""
+        t = render_top7(_board(), "ru")
+        self.assertNotIn("\n\n", t)
+        self.assertEqual(t.count("<pre><code>"), 4, "таблицы часов не схлопнуты")
+        self.assertEqual(t.count("</code></pre>"), 4)
+
+    def test_packer_and_tail_helper_agree(self) -> None:
+        """"Влезает" считается по тому же тексту, что потом уходит в канал."""
+        from channel_digest import BLOCK_SEP, _pack, tight  # noqa: E402
+        parts = ["шапка\n\nвторая строка", "строки окна", ""]
+        packed = _pack(list(parts), "— <i>LiqScope</i>", limit=10 ** 9)
+        self.assertEqual(packed, "шапка\nвторая строка\nстроки окна\n— <i>LiqScope</i>")
+        self.assertEqual(BLOCK_SEP, "\n")
+        self.assertEqual(tight("a  \n\n\nb \n"), "a\nb")
+        # ведущие пробелы — отступ, их не трогаем; хвостовые — только место в лимите
+        self.assertEqual(tight("a\n    b\n\n    c"), "a\n    b\n    c")
+        self.assertEqual(tight(""), "")
+        # таблица остаётся как есть
+        pre = "<pre><code>1. BTC $1M\n\n2. ETH $2</code></pre>"
+        self.assertEqual(tight(pre), pre)
 
 
 class CaptionLimitTest(unittest.TestCase):

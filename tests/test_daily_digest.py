@@ -497,6 +497,31 @@ class ChannelPostTest(unittest.TestCase):
                       channel_link_block("https://liqscope.online", "en"))
         self.assertEqual(channel_link_block("", "ru"), "")
 
+    def test_channel_post_has_no_blank_lines(self):
+        """Пост в канал — плотной простынёй: пустых строк нет ни в ru, ни в en.
+
+        Абзацы рассказа из ИИ и разделители блоков в Telegram выглядели как
+        «дыры»: пост читался сборкой обрывков. Разделитель теперь один
+        перенос, а пустые строки внутри абзацев срастаются.
+        """
+        # рассказ длиннее NARRATIVE_MIN, иначе канал получает заглушку,
+        # и три абзаца через пустые строки — ровно то, что в канале срастается
+        paragraphs = ("\n\n".join([
+            "Первый абзац про рынок: ликвидаций было много, продавливали лонги. " * 3,
+            "Второй абзац: к вечеру продавцы сдали, шорты получили своё. " * 3,
+            "Третий абзац — итоги по монетам и биржам за сутки. " * 3,
+        ])).replace("биржам за сутки.", "биржам за сутки.\n\n\nЧетвёртая строка.")
+        rec = self._rec(story_ru=paragraphs, story_en=paragraphs)
+        for lang in ("ru", "en"):
+            out = render_channel(rec, lang, "https://liqscope.online")
+            self.assertNotIn("\n\n", out, lang)
+            self.assertGreaterEqual(out.count("\n"), 5, lang)
+            self.assertIn("Первый абзац про рынок", out, lang)
+            self.assertIn("liqscope.online/digest", out, lang)
+            big = render_post(rec, lang, "https://liqscope.online")
+            self.assertNotIn("\n\n", big, lang)
+            self.assertIn("Четвёртая строка.", big, lang)
+
     def test_site_version_keeps_whole_story(self):
         rec = self._rec()
         out = render_post(rec, "ru", "https://liqscope.online")

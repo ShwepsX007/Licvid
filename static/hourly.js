@@ -349,8 +349,10 @@
     function open(day, push) {
         selected = day || "";
         if (!selected) selected = (days[0] && days[0].day) || "";
+        try { window._hour_selected = selected; } catch(e) {}
         if (dayMap[selected]) month = clampMonth(monthOfDay(selected));
         paintCalendar();
+        try { if (window.LiqScopeComments && window.LiqScopeComments.reload) window.LiqScopeComments.reload(); } catch(e) {}
         return api("/api/hourly?lang=" + encodeURIComponent(postLang()) +
                    "&day=" + encodeURIComponent(selected))
             .then(function (res) {

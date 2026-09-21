@@ -54,6 +54,17 @@
             tgWhy: "сигналы алертов приходят в бота, привяжите — и они не потеряются",
             tgLink: "Привязать Telegram",
             tgUnlink: "Отвязать",
+            nameEdit: "Изменить ник",
+            nameSave: "Сохранить",
+            nameCancel: "Отмена",
+            namePh: "Как к вам обращаться",
+            namePh2: "Ваш ник — как вас видят в чате и комментариях",
+            nameHint: "Это ваш ник на сайте — так вас видят в чате терминала и в комментариях к дайджесту и сводкам",
+            nameSaved: "Имя сохранено",
+            nameEmpty: "Введите имя — от 2 до 64 знаков.",
+            nameShort: "Имя слишком короткое — хотя бы 2 знака.",
+            nameLong: "Имя слишком длинное — до 64 знаков.",
+            nameErr: "Не получилось сохранить имя — попробуйте ещё раз.",
             tgLinkOpened: "Откройте бота и нажмите Start — привязка подтвердится здесь сама.",
             tgLinkOk: "Telegram привязан — сигналы придут в бота.",
             tgLinkTaken: "Этот Telegram уже привязан к другому аккаунту с почтой.",
@@ -154,6 +165,17 @@
             tgWhy: "alert signals arrive in the bot — link it so they are not lost",
             tgLink: "Link Telegram",
             tgUnlink: "Unlink",
+            nameEdit: "Edit nick",
+            nameSave: "Save",
+            nameCancel: "Cancel",
+            namePh: "How should we call you",
+            namePh2: "Your nick — shown in terminal chat and comments",
+            nameHint: "Your nick on site — shown in terminal chat and in digest/hourly comments",
+            nameSaved: "Name saved",
+            nameEmpty: "Enter a name — 2 to 64 characters.",
+            nameShort: "Name is too short — at least 2 characters.",
+            nameLong: "Name is too long — up to 64 characters.",
+            nameErr: "Could not save the name — try again.",
             tgLinkOpened: "Open the bot and press Start — the link will confirm here.",
             tgLinkOk: "Telegram linked — alerts will arrive in the bot.",
             tgLinkTaken: "This Telegram is already linked to another email account.",
@@ -197,6 +219,42 @@
             wipeNoVisits: "Nothing yet: no page views in this window.",
             ban: "Ban", unban: "Unban",
             views: "views", uniques: "unique",
+        },
+        zh: {
+            login: "登录", cabinet: "账户", admin: "管理", logout: "退出",
+            terminal: "终端",
+            nameEdit: "修改昵称", nameSave: "保存", nameCancel: "取消",
+            namePh: "怎么称呼您",
+            namePh2: "昵称 — 显示在聊天和评论中",
+            nameHint: "您的昵称 — 显示在终端聊天和评论中", nameSaved: "名称已保存",
+            nameEmpty: "请输入名称 — 2 到 64 个字符。",
+            nameShort: "名称太短 — 至少 2 个字符。",
+            nameLong: "名称太长 — 最多 64 个字符。",
+            nameErr: "无法保存名称 — 请重试。",
+        },
+        hi: {
+            login: "लॉग इन", cabinet: "कैबिनेट", admin: "एडमिन", logout: "लॉग आउट",
+            terminal: "टर्मिनल",
+            nameEdit: "निक बदलें", nameSave: "सहेजें", nameCancel: "रद्द करें",
+            namePh: "आपको क्या कहें",
+            namePh2: "आपका निक — चैट और कमेंट में दिखेगा",
+            nameHint: "आपका निक — टर्मिनल चैट और कमेंट में", nameSaved: "नाम सहेजा गया",
+            nameEmpty: "नाम लिखें — 2 से 64 अक्षर।",
+            nameShort: "नाम बहुत छोटा है — कम से कम 2 अक्षर।",
+            nameLong: "नाम बहुत लंबा है — 64 अक्षर तक।",
+            nameErr: "नाम सहेजा नहीं गया — फिर कोशिश करें।",
+        },
+        es: {
+            login: "Entrar", cabinet: "Cuenta", admin: "Admin", logout: "Salir",
+            terminal: "Terminal",
+            nameEdit: "Cambiar nick", nameSave: "Guardar", nameCancel: "Cancelar",
+            namePh: "Cómo te llamamos",
+            namePh2: "Tu nick — se ve en chat y comentarios",
+            nameHint: "Tu nick en el sitio — se ve en chat del terminal y en comentarios", nameSaved: "Nombre guardado",
+            nameEmpty: "Escribe un nombre — de 2 a 64 caracteres.",
+            nameShort: "Nombre demasiado corto — al menos 2 caracteres.",
+            nameLong: "Nombre demasiado largo — hasta 64 caracteres.",
+            nameErr: "No se pudo guardar el nombre — inténtalo de nuevo.",
         },
     };
 
@@ -275,7 +333,16 @@
         var path = location.pathname || "";
         if (!user) {
             if (path === "/login") { box.innerHTML = ""; return; }
-            box.innerHTML = '<a class="btn btn-primary btn-compact" href="/login">' + t("login") + "</a>";
+            var html = "";
+            // Дайджест и сводки — публичные разделы, доступны гостям без регистрации
+            if (path !== "/digest") {
+                html += '<a class="btn btn-ghost btn-compact" href="/digest">📰 ' + t("digest") + "</a>";
+            }
+            if (path !== "/hourly") {
+                html += '<a class="btn btn-ghost btn-compact" href="/hourly">🕘 ' + t("hourly") + "</a>";
+            }
+            html += '<a class="btn btn-primary btn-compact" href="/login">' + t("login") + "</a>";
+            box.innerHTML = html;
             return;
         }
         var html = "";
@@ -440,6 +507,7 @@
             }
         }
         paintTgCard(u, payload);
+        bindNameEdit(u);
         var botLink = $("cab-bot-link");
         if (botLink) {
             var href = (payload && payload.bot_link) || "";
@@ -580,6 +648,125 @@
             btn.title = (payload && payload.bot_ready) ? "" : t("noBot");
         }
         if (off) off.classList.toggle("hidden", !u.tg_linked);
+    }
+
+
+    var _cabUser = null;
+    var _nameDelegated = false;
+    function bindNameEdit(u) {
+        _cabUser = u || _cabUser;
+        // support both ids: new cab-name-form and legacy name-edit-form
+        var edit = $("cab-name-edit");
+        var form = $("cab-name-form") || $("name-edit-form");
+        var inp = $("cab-name-input");
+        var save = $("cab-name-save");
+        var cancel = $("cab-name-cancel");
+        var st = $("cab-name-status");
+        var row = $("name-edit-row") || $("cab-name-row");
+        var hint = $("cab-name-hint");
+        if (!edit || !form || !inp || !save || !cancel) {
+            setTimeout(function(){ try{ bindNameEdit(_cabUser); }catch(e){} }, 300);
+            return;
+        }
+        if (row) { row.classList.remove("hidden"); row.style.display = ""; }
+        if (hint) { hint.classList.remove("hidden"); hint.style.display = ""; }
+        var cur = (_cabUser && (_cabUser.display_name || _cabUser.first_name)) || "";
+        if (document.activeElement !== inp) inp.value = cur;
+
+        function showForm() {
+            var e2 = $("cab-name-edit");
+            var f2 = $("cab-name-form") || $("name-edit-form");
+            var i2 = $("cab-name-input");
+            var s2 = $("cab-name-status");
+            if (!f2 || !i2) return;
+            var cur2 = (_cabUser && (_cabUser.display_name || _cabUser.first_name)) || "";
+            i2.value = cur2;
+            f2.classList.remove("hidden");
+            f2.style.display = "";
+            if (e2) { e2.classList.add("hidden"); }
+            if (s2) s2.textContent = "";
+            try{ i2.focus(); i2.select(); }catch(e){}
+        }
+        function hideForm() {
+            var e2 = $("cab-name-edit");
+            var f2 = $("cab-name-form") || $("name-edit-form");
+            var i2 = $("cab-name-input");
+            var s2 = $("cab-name-status");
+            if (f2) { f2.classList.add("hidden"); }
+            if (e2) { e2.classList.remove("hidden"); e2.style.display = ""; }
+            if (s2) s2.textContent = "";
+            if (i2) i2.value = (_cabUser && (_cabUser.display_name || _cabUser.first_name)) || "";
+        }
+        function doSave() {
+            var i2 = $("cab-name-input");
+            var s2 = $("cab-name-save");
+            var st2 = $("cab-name-status");
+            if (!i2) return;
+            var raw = (i2.value || "").trim();
+            raw = raw.split(/\s+/).join(" ");
+            if (!raw) { if (st2) st2.textContent = t("nameEmpty"); return; }
+            if (raw.length < 2) { if (st2) st2.textContent = t("nameShort"); return; }
+            if (raw.length > 64) { if (st2) st2.textContent = t("nameLong"); return; }
+            if (s2) s2.disabled = true;
+            if (st2) st2.textContent = "…";
+            api("/api/account/name", {
+                method: "POST",
+                body: JSON.stringify({ name: raw, language: apiLang() }),
+            }).then(function (d) {
+                if (s2) s2.disabled = false;
+                if (!d.ok) { if (st2) st2.textContent = d.hint || d.error || t("nameErr"); return; }
+                var updated = d.user || {};
+                _cabUser = Object.assign({}, _cabUser || {}, updated);
+                var nameEl = $("cab-name");
+                if (nameEl) nameEl.textContent = updated.display_name || raw;
+                var av = $("cab-avatar");
+                if (av) fillAvatar(av, updated);
+                if (st2) st2.textContent = t("nameSaved");
+                setTimeout(function () { hideForm(); }, 900);
+            }).catch(function () {
+                if (s2) s2.disabled = false;
+                if (st2) st2.textContent = t("nameErr");
+            });
+        }
+
+        // always (re)bind – onclick is idempotent, survives re-renders
+        edit.onclick = function(e){ e.preventDefault(); showForm(); return false; };
+        cancel.onclick = function(e){ e.preventDefault(); hideForm(); return false; };
+        save.onclick = function(e){ e.preventDefault(); doSave(); return false; };
+        try{
+            edit.addEventListener("click", function(ev){ ev.preventDefault(); showForm(); });
+            cancel.addEventListener("click", function(ev){ ev.preventDefault(); hideForm(); });
+            save.addEventListener("click", function(ev){ ev.preventDefault(); doSave(); });
+            inp.addEventListener("keydown", function(e){
+                if (e.key === "Enter") { e.preventDefault(); doSave(); }
+                if (e.key === "Escape") { e.preventDefault(); hideForm(); }
+            });
+        }catch(e){}
+        if (!_nameDelegated) {
+            _nameDelegated = true;
+            try{
+                document.addEventListener("click", function(ev){
+                    var t = ev.target;
+                    while(t && t!==document){
+                        if (!t.getAttribute) { t=t.parentNode; continue; }
+                        var id = t.id || "";
+                        if (id==="cab-name-edit") { ev.preventDefault(); showForm(); return; }
+                        if (id==="cab-name-cancel") { ev.preventDefault(); hideForm(); return; }
+                        if (id==="cab-name-save") { ev.preventDefault(); doSave(); return; }
+                        // also handle clicks on inner span inside button
+                        if (t.closest) {
+                            var b = t.closest("#cab-name-edit");
+                            if (b) { ev.preventDefault(); showForm(); return; }
+                            b = t.closest("#cab-name-cancel");
+                            if (b) { ev.preventDefault(); hideForm(); return; }
+                            b = t.closest("#cab-name-save");
+                            if (b) { ev.preventDefault(); doSave(); return; }
+                        }
+                        t=t.parentNode;
+                    }
+                });
+            }catch(e){}
+        }
     }
 
     function linkTelegram() {
@@ -1485,9 +1672,8 @@
         var winLabel = (d.window_label || d.window || "");
         var head = '<div class="al-head"><div><h3>🔗 Корреляции валют</h3>' +
             '<div class="al-sub">Кто ходит вместе за ' + esc(winLabel) +
-            ", а кто в противофазе: ликвидации и объём, CVD и OI. У каждой переменной " +
-            "своя тепловая карта — выбирать метрику не нужно. Видно, где выносило шорты, " +
-            "а где лонги, куда перекошен CVD и где растёт открытый интерес.</div></div></div>";
+            ", а кто в противофазе: ликвидации и объём, CVD и OI. Тепловая карта." +
+            "</div></div></div>";
         board.innerHTML = head +
             '<div class="al-label">Окно</div><div class="al-chips" id="cor-wins">' +
             corWindowChips(d) + "</div>" +
@@ -2034,8 +2220,8 @@
         var thr = Number(pumpCfg.threshold || 10);
         return '<div class="al-head"><div><h3>👁 Сторож монет</h3>' +
             '<div class="al-sub">Пампы и дампы всех монет Gate. Порог — изменение цены в % ' +
-            'за выбранный период свечей; текущая, ещё формирующаяся свеча считается. ' +
-            'Сигнал уходит в Telegram и предлагает посмотреть монету на Gate.</div></div>' +
+            'за выбранный период свечей; текущая, ещё формирующаяся свеча считается.' +
+            "</div></div>" +
             '<label class="al-switch' + (pumpCfg.enabled ? " on" : "") + '" id="pump-sw">' +
             "<i></i><span>" + (pumpCfg.enabled ? "СИГНАЛ ВКЛ" : "СИГНАЛ ВЫКЛ") +
             "</span></label></div>" +
@@ -2229,33 +2415,98 @@
         }).join("");
     }
 
+    var _adminMe = null;
+    var _adminUsers = [];
+
     function renderUsers(list) {
         var tb = $("users-body");
         if (!tb) return;
+        _adminUsers = list || [];
         tb.innerHTML = (list || []).map(function (u) {
-            var role = u.is_admin ? "★" : "";
+            var isMe = _adminMe && Number(_adminMe.id) === Number(u.id);
+            var role = "";
+            if (u.is_owner) role = "👑 владелец";
+            else if (u.is_admin) role = "★ админ";
             var email = u.email
                 ? (esc(u.email) + (u.email_verified ? "" : " <span class='badge badge-warn'>не подтв.</span>"))
                 : "<span class='meta'>—</span>";
             var tg = u.tg_linked
                 ? (u.username ? "@" + esc(u.username) : "") + " <span class='meta mono'>" + u.tg_id + "</span>"
                 : "<span class='meta'>не привязан</span>";
-            var banBtn = u.is_banned
-                ? '<button class="btn btn-ghost btn-small" data-ban="0" data-id="' + u.id + '">' + t("unban") + "</button>"
-                : '<button class="btn btn-danger btn-small" data-ban="1" data-id="' + u.id + '">' + t("ban") + "</button>";
-            return "<tr class='" + (u.is_banned ? "banned" : "") + "'>" +
-                "<td>" + esc(u.display_name || "") + " " + role + "</td>" +
+            var actions = [];
+            var isOwner = !!u.is_owner;
+            var iAmOwner = _adminMe && !!_adminMe.is_owner;
+            // бан — нельзя банить владельца, нельзя банить себя, обычный админ не может банить админа
+            if (!isMe) {
+                if (!isOwner) {
+                    if (u.is_banned) {
+                        actions.push('<button class="btn btn-ghost btn-small" data-ban="0" data-id="' + u.id + '">' + t("unban") + "</button>");
+                    } else {
+                        // если цель админ и я не владелец — не показываем бан
+                        if (!u.is_admin || iAmOwner) {
+                            actions.push('<button class="btn btn-danger btn-small" data-ban="1" data-id="' + u.id + '">' + t("ban") + "</button>");
+                        }
+                    }
+                }
+                // админка — только владелец может назначать
+                if (iAmOwner) {
+                    if (isOwner) {
+                        actions.push('<span class="meta">владелец</span>');
+                    } else if (u.is_admin) {
+                        actions.push('<button class="btn btn-ghost btn-small" data-admin="0" data-id="' + u.id + '">Снять админа</button>');
+                    } else {
+                        actions.push('<button class="btn btn-primary btn-small" data-admin="1" data-id="' + u.id + '">Сделать админом</button>');
+                    }
+                } else {
+                    if (u.is_admin) actions.push('<span class="meta">админ</span>');
+                }
+            } else {
+                actions.push('<span class="meta">это вы</span>');
+                if (isOwner) actions.push('<span class="meta">👑 владелец</span>');
+            }
+            return "<tr class='" + (u.is_banned ? "banned" : "") + (u.is_owner ? " owner" : "") + "'>" +
+                "<td>" + esc(u.display_name || "") + " <span class='meta'>#" + u.id + "</span> " + role + "</td>" +
                 "<td class='mono'>" + email + "</td>" +
                 "<td class='mono'>" + tg + "</td>" +
                 "<td>" + fmtDate(u.last_seen) + "</td>" +
-                "<td>" + banBtn + "</td></tr>";
+                "<td><div class='row-actions' style='gap:6px'>" + actions.join("") + "</div></td></tr>";
         }).join("") || "<tr><td colspan='5'>—</td></tr>";
-        tb.querySelectorAll("button[data-id]").forEach(function (btn) {
+        tb.querySelectorAll("button[data-ban]").forEach(function (btn) {
             btn.addEventListener("click", function () {
-                api("/api/admin/users/" + btn.getAttribute("data-id") + "/ban", {
+                var id = btn.getAttribute("data-id");
+                var banned = btn.getAttribute("data-ban") === "1";
+                if (banned && !confirm("Забанить пользователя #" + id + "?")) return;
+                api("/api/admin/users/" + id + "/ban", {
                     method: "POST",
-                    body: JSON.stringify({ banned: btn.getAttribute("data-ban") === "1" }),
-                }).then(function () { loadUsers($("user-q") && $("user-q").value); });
+                    body: JSON.stringify({ banned: banned }),
+                }).then(function (r) {
+                    if (r && r.ok === false) {
+                        alert(r.error === "protected" ? "Нельзя забанить владельца" :
+                              r.error === "admin_protected" ? "Только владелец может банить админов" :
+                              r.error === "self" ? "Нельзя забанить себя" : (r.hint || r.error));
+                    }
+                    loadUsers($("user-q") && $("user-q").value);
+                });
+            });
+        });
+        tb.querySelectorAll("button[data-admin]").forEach(function (btn) {
+            btn.addEventListener("click", function () {
+                var id = btn.getAttribute("data-id");
+                var make = btn.getAttribute("data-admin") === "1";
+                if (!make && !confirm("Снять права админа у #" + id + "?")) return;
+                if (make && !confirm("Сделать пользователя #" + id + " администратором?")) return;
+                api("/api/admin/users/" + id + "/admin", {
+                    method: "POST",
+                    body: JSON.stringify({ admin: make }),
+                }).then(function (r) {
+                    if (r && r.ok === false) {
+                        alert(r.error === "protected" ? "Владельца нельзя снять" :
+                              r.error === "owner_only" ? "Только владелец может назначать админов" :
+                              r.error === "self" ? "Нельзя снять с себя" : (r.hint || r.error));
+                    }
+                    loadUsers($("user-q") && $("user-q").value);
+                    loadAdmins();
+                });
             });
         });
     }
@@ -2263,6 +2514,51 @@
     function loadUsers(q) {
         api("/api/admin/users?q=" + encodeURIComponent(q || "")).then(function (d) {
             if (d.ok) renderUsers(d.users);
+        });
+    }
+
+    function renderAdmins(list, isOwner) {
+        var box = $("admins-body");
+        var card = $("admins-card");
+        if (!box) return;
+        if (card) card.hidden = false;
+        var rows = list || [];
+        if (!rows.length) {
+            box.innerHTML = "<tr><td colspan='4' class='meta'>админов нет</td></tr>";
+            return;
+        }
+        box.innerHTML = rows.map(function (u) {
+            var role = u.is_owner ? "👑 владелец" : "★ админ";
+            var contact = u.email ? esc(u.email) : (u.username ? "@" + esc(u.username) : ("id " + (u.tg_id || u.id)));
+            var act = "";
+            if (isOwner && !u.is_owner && _adminMe && Number(_adminMe.id) !== Number(u.id)) {
+                act = '<button class="btn btn-ghost btn-small" data-admin-rm="' + u.id + '">Снять</button>';
+            } else if (u.is_owner) {
+                act = '<span class="meta">защищён</span>';
+            } else if (_adminMe && Number(_adminMe.id) === Number(u.id)) {
+                act = '<span class="meta">это вы</span>';
+            }
+            return "<tr><td>" + esc(u.display_name || "") + " #" + u.id + "</td><td>" + contact + "</td><td>" + role + "</td><td>" + act + "</td></tr>";
+        }).join("");
+        box.querySelectorAll("[data-admin-rm]").forEach(function (btn) {
+            btn.addEventListener("click", function () {
+                var id = btn.getAttribute("data-admin-rm");
+                if (!confirm("Снять админа #" + id + "?")) return;
+                api("/api/admin/users/" + id + "/admin", {
+                    method: "POST",
+                    body: JSON.stringify({ admin: false }),
+                }).then(function (r) {
+                    if (r && r.ok === false) alert(r.hint || r.error);
+                    loadUsers($("user-q") && $("user-q").value);
+                    loadAdmins();
+                });
+            });
+        });
+    }
+
+    function loadAdmins() {
+        api("/api/admin/admins").then(function (d) {
+            if (d && d.ok) renderAdmins(d.admins, d.is_owner);
         });
     }
 
@@ -2297,18 +2593,24 @@
     // первого захода гостя, поэтому новый лимит меняет его немедленно.
     var lastLayers = null;      // последний ответ: нужен при смене языка
 
-    /** Нарисовать лимит, источник и воронку пробного доступа. */
+    /** Нарисовать вкл/выкл пробника, лимит, источник и воронку. */
     function paintLayers(d) {
         lastLayers = d || {};
         var min = $("layers-min"), st = $("layers-status"), note = $("layers-note");
-        var stats = $("layers-stats");
+        var stats = $("layers-stats"), en = $("layers-enabled"), enNote = $("layers-enabled-note");
+        var configured = d.configured_min !== undefined ? Number(d.configured_min) : Number(d.minutes || 0);
         if (min && document.activeElement !== min) {
-            min.value = Number(d.minutes || 0);
+            min.value = configured;
         }
         var locked = !!d.locked;
+        var enLocked = !!d.enabled_locked;
         if (min) min.disabled = locked;
+        if (en) {
+            if (document.activeElement !== en) en.checked = !!d.enabled;
+            en.disabled = enLocked;
+        }
         var save = $("layers-save");
-        if (save) save.disabled = locked;
+        if (save) save.disabled = locked && enLocked;
         var s = d.stats || {};
         if (stats) {
             stats.textContent = t("adm.layers_stats", {
@@ -2317,9 +2619,20 @@
             });
         }
         if (note) {
-            note.textContent = locked
-                ? t("adm.layers_locked", { env: d.env_var || "" })
-                : t("adm.layers_now", { min: Number(d.minutes || 0) });
+            var parts = [];
+            if (locked) parts.push(t("adm.layers_locked", { env: d.env_var || "" }));
+            else parts.push(t("adm.layers_now", { min: configured }));
+            if (enLocked) parts.push(t("adm.layers_locked", { env: d.enabled_env_var || d.env_var || "" }));
+            note.textContent = parts.join(" · ");
+        }
+        if (enNote) {
+            if (!d.enabled) {
+                enNote.textContent = t("adm.layers_disabled_note") || "Выключено — слои открыты всем и всегда.";
+            } else {
+                enNote.textContent = configured <= 0
+                    ? (t("adm.layers_enabled_zero") || "Включено, но лимит 0 — слои всё ещё открыты всем.")
+                    : t("adm.layers_enabled_note", { min: configured });
+            }
         }
         if (st && !st.textContent) st.textContent = "";
     }
@@ -2331,24 +2644,29 @@
         });
     }
 
-    /** Сохранить лимит: 0 выключает ограничение целиком. */
+    /** Сохранить вкл/выкл + минуты. */
     function saveLayers() {
-        var min = $("layers-min"), st = $("layers-status");
-        if (!min) return;
+        var min = $("layers-min"), en = $("layers-enabled"), st = $("layers-status");
+        if (!min && !en) return;
         if (st) st.textContent = t("cab.loading");
+        var body = {};
+        if (min) body.minutes = Number(min.value || 0);
+        if (en) body.enabled = !!en.checked;
         api("/api/admin/layers/settings", {
             method: "POST",
-            body: JSON.stringify({ minutes: Number(min.value || 0) }),
+            body: JSON.stringify(body),
         }).then(function (d) {
             if (!d || !d.ok) {
                 if (st) st.textContent = d && d.error === "locked"
-                    ? t("adm.layers_locked", { env: d.env_var || "" })
+                    ? t("adm.layers_locked", { env: d.env_var || d.enabled_env_var || "" })
                     : t("adm.layers_fail");
                 return;
             }
             paintLayers(d);
-            if (st) st.textContent = Number(d.minutes || 0) <= 0
-                ? t("adm.layers_off") : t("adm.layers_saved", { min: d.minutes });
+            if (st) {
+                if (!d.enabled) st.textContent = t("adm.layers_off") || "Пробный доступ выключен — слои открыты всем.";
+                else st.textContent = t("adm.layers_saved", { min: d.minutes });
+            }
         });
     }
 
@@ -2373,8 +2691,18 @@
     function bootLayers() {
         if (!$("layers-card")) return;
         var save = $("layers-save"), reset = $("layers-reset");
+        var en = $("layers-enabled");
         if (save) save.addEventListener("click", saveLayers);
         if (reset) reset.addEventListener("click", resetAllLayers);
+        if (en) en.addEventListener("change", function () {
+            // мгновенная подсказка без ожидания сервера
+            var enNote = $("layers-enabled-note");
+            if (enNote) {
+                enNote.textContent = en.checked
+                    ? (t("adm.layers_enabled_note", { min: Number(($("layers-min") || {}).value || 0) }) || "Включено")
+                    : (t("adm.layers_disabled_note") || "Выключено — слои открыты всем.");
+            }
+        });
         loadLayers();
     }
 
@@ -2498,12 +2826,14 @@
         api("/api/auth/me").then(function (me) {
             if (!me.user) { location.href = "/login?next=/admin"; return; }
             if (!me.user.is_admin) { location.href = "/cabinet"; return; }
+            _adminMe = me.user;
             paintNav(me.user);
             if (window.LiqScopeGeo && $("geo-panel")) {
                 window.LiqScopeGeo.mount($("geo-panel"));
             }
             loadOverview();
             loadUsers("");
+            loadAdmins();
             api("/api/admin/stats").then(function (d) {
                 if (!d.ok || !d.stats) return;
                 $("m-24h") && ($("m-24h").textContent = "$" + usd(d.stats.total_usd_24h));
@@ -2601,9 +2931,14 @@
         card.parentNode.replaceChild(det, card);
         det.foldId = id;
         // По умолчанию разделы свёрнуты: админка должна открываться компактной,
-        // а раскрытым остаётся то, что админ раскрыл сам.
+        // а раскрытым остаётся то, что админ раскрыл сам. Исключение — рекламный
+        // баннер: его настройки (время сменяемости, плавность, режим, количество)
+        // должны быть легко находимы, поэтому #banner-panel и #ads-panel открыты
+        // по умолчанию, пока админ сам их не свернёт.
         var st = foldState();
-        det.open = st[id] === true;
+        if (st[id] === true) det.open = true;
+        else if (st[id] === false) det.open = false;
+        else det.open = (id === "banner-panel" || id === "ads-panel");
         det.addEventListener("toggle", function () { foldSave(id, det.open); });
         return det;
     }
@@ -2830,6 +3165,8 @@
         id: 0,
         photo: "",              // data-URL только что выбранного фото
         photoName: "",
+        html: "",               // HTML-баннер
+        type: "image",          // image | html
         channels: [],
         limits: { plain: 4000, photo: 1024 },
     };
@@ -2880,12 +3217,43 @@
 
     function adCount() {
         var ta = $("ad-text"), el = $("ad-len");
-        if (!ta || !el) return;
-        var n = ta.value.length, lim = adLimit();
-        el.textContent = n + " / " + lim + " знаков" +
-            (ADS.photo ? " (с фото)" : " (без фото)") +
-            (n > lim ? " — Telegram не примет" : "");
-        el.style.color = n > lim ? "var(--red)" : "";
+        if (ta && el) {
+            var n = ta.value.length, lim = adLimit();
+            el.textContent = n + " / " + lim + " знаков" +
+                (ADS.photo ? " (с фото)" : " (без фото)") +
+                (n > lim ? " — Telegram не примет" : "");
+            el.style.color = n > lim ? "var(--red)" : "";
+        }
+        var hta = $("ad-html"), hel = $("ad-html-len");
+        if (hta && hel) {
+            var hn = hta.value.length;
+            hel.textContent = hn + " знаков · до 20000" + (hn > 20000 ? " — слишком длинный" : "");
+            hel.style.color = hn > 20000 ? "var(--red)" : "";
+        }
+        var hta2 = $("ad-html-text");
+        var hta2len = null; // no counter yet
+        adShowHtmlPreview();
+    }
+
+    function adShowHtmlPreview() {
+        var box = $("ad-html-prev"), src = $("ad-html");
+        if (!box) return;
+        var code = (src && src.value) || ADS.html || "";
+        box.innerHTML = code || "<span class='meta'>предпросмотр пуст — вставьте HTML выше</span>";
+    }
+
+    function adType() {
+        var sel = $("ad-type");
+        return (sel && sel.value) || ADS.type || "image";
+    }
+
+    function adSetType(t) {
+        ADS.type = t === "html" ? "html" : "image";
+        var sel = $("ad-type");
+        if (sel) sel.value = ADS.type;
+        var imgBlock = $("ad-image-block"), htmlBlock = $("ad-html-block");
+        if (imgBlock) imgBlock.hidden = ADS.type === "html";
+        if (htmlBlock) htmlBlock.hidden = ADS.type !== "html";
     }
 
     function adShowPhoto() {
@@ -2905,14 +3273,21 @@
         var html = adTargetRow("bot", "🤖 Telegram-бот",
                                "— в личку всем, кто запускал бота")
             + adTargetRow("site", "🌐 Главная сайта",
-                          "— баннер под кнопками «Терминал» и «Что умеет»");
+                          "— баннер под кнопками «Терминал» и «Что умеет»; " +
+                          "фото целиком, подпись под ним")
+            + adTargetRow("terminal", "📈 Терминал",
+                          "— та же акция под основным графиком; для зарегистрированных скрывается (ad-free)")
+            + adTargetRow("digest", "📰 Дайджест",
+                          "— баннер над списком выпусков на /digest")
+            + adTargetRow("hourly", "🕘 Сводка по часам",
+                          "— баннер над списком на /hourly");
         (d.channels || []).forEach(function (c) {
             html += adTargetRow("ch:" + c.id, esc(c.label || "📣 Канал"),
                                 "— id " + esc(c.id));
         });
         if (!(d.channels || []).length) {
             html += '<p class="meta">Каналы в боте не привязаны: впишите id или @имя ниже ' +
-                "либо отправьте пост только в бота и на главную.</p>";
+                "либо отправьте пост только в бота и на страницы сайта.</p>";
         }
         box.innerHTML = html;
     }
@@ -2932,9 +3307,15 @@
             return;
         }
         box.innerHTML = items.map(function (a) {
-            var photo = a.has_photo
-                ? '<img class="ad-thumb" alt="" src="/api/admin/ads/' + a.id + '/photo">'
-                : '<span class="ad-thumb ad-thumb-empty">без фото</span>';
+            var thumb = "";
+            if (a.has_html) {
+                thumb = '<span class="ad-thumb" style="display:flex;align-items:center;justify-content:center;font-size:18px;background:var(--card)">📦 HTML</span>';
+            } else if (a.has_photo) {
+                thumb = '<img class="ad-thumb" alt="" src="/api/admin/ads/' + a.id + '/photo">';
+            } else {
+                thumb = '<span class="ad-thumb ad-thumb-empty">без фото</span>';
+            }
+            var photo = thumb;
             var when = a.status === "sent"
                 ? "отправлен " + adTime(a.sent_at)
                 : (a.send_at ? (a.status === "draft" ? "черновик · время " : "уйдёт ") + adTime(a.send_at)
@@ -2956,7 +3337,12 @@
                 '<div class="ad-item-body"><div class="ad-item-head">' + adChip(a.status) +
                 '<span class="meta">' + esc(when) + " · " + esc(life) + "</span></div>" +
                 '<div class="ad-item-text">' + (esc(a.text).slice(0, 240) || "<i>без текста</i>") + "</div>" +
-                '<div class="meta">Куда: ' + esc(a.human_targets || "—") + "</div>" +
+                '<div class="meta">Куда: ' + esc(a.human_targets || "—") +
+                "</div>" +
+                '<div class="meta">Клик: ' + (a.link
+                    ? '<a href="' + esc(a.link) + '" target="_blank" rel="noopener nofollow">' +
+                      esc(a.link) + "</a>"
+                    : "без ссылки — баннер не кликается") + "</div>" +
                 '<div class="meta">' + esc(a.line || "") + "</div>" +
                 '<div class="row-actions">' + acts.join("") + "</div></div></div>";
         }).join("");
@@ -2990,8 +3376,15 @@
         ADS.id = a.id;
         ADS.photo = "";
         ADS.photoName = "";
+        ADS.html = a.html || a.html_code || a.banner_html || "";
+        var isHtml = !!(a.has_html || ADS.html);
+        adSetType(isHtml ? "html" : "image");
         var ta = $("ad-text");
         if (ta) ta.value = a.text || "";
+        var hta = $("ad-html");
+        if (hta) hta.value = ADS.html || "";
+        var hta2 = $("ad-html-text");
+        if (hta2) hta2.value = a.text || "";
         var extra = $("ad-extra");
         var known = (d.channels || []).map(function (c) { return String(c.id); });
         if (extra) {
@@ -2999,12 +3392,17 @@
                 return known.indexOf(String(c)) < 0;
             }).join(", ");
         }
+        var link = $("ad-link");
+        if (link) link.value = a.link || "";
         adCheckboxes().forEach(function (inp) {
             var key = inp.getAttribute("data-ad-target");
-            var t = a.targets || {};
-            inp.checked = key === "bot" ? !!t.bot
-                : (key === "site" ? !!t.site
-                    : ((t.channels || []).map(String).indexOf(key.slice(3)) >= 0));
+            var tg = a.targets || {};
+            inp.checked = key === "bot" ? !!tg.bot
+                : (key === "site" ? !!tg.site
+                    : (key === "terminal" ? !!tg.terminal
+                        : (key === "digest" ? !!tg.digest
+                            : (key === "hourly" ? !!tg.hourly
+                                : ((tg.channels || []).map(String).indexOf(key.slice(3)) >= 0)))));
         });
         var mode = $("ad-when-mode"), when = $("ad-when");
         if (mode && when && a.send_at && a.send_at > Date.now() / 1000 + 5) {
@@ -3030,24 +3428,57 @@
     }
 
     function adCollect(draft) {
-        var targets = { bot: false, site: false, channels: [] };
+        var targets = { bot: false, site: false, terminal: false, digest: false, hourly: false, channels: [] };
         adCheckboxes().forEach(function (inp) {
             if (!inp.checked) return;
             var key = inp.getAttribute("data-ad-target");
             if (key === "bot") targets.bot = true;
             else if (key === "site") targets.site = true;
+            else if (key === "terminal") targets.terminal = true;
+            else if (key === "digest") targets.digest = true;
+            else if (key === "hourly") targets.hourly = true;
             else if (key.indexOf("ch:") === 0) targets.channels.push(key.slice(3));
         });
         ((($("ad-extra") || {}).value) || "").split(/[\s,;]+/).forEach(function (x) {
             if (x && x !== "@" && targets.channels.indexOf(x) < 0) targets.channels.push(x);
         });
+        var tp = adType();
+        var htmlVal = (($("ad-html") || {}).value || "").trim();
+        var textVal = "";
+        if (tp === "html") {
+            var ht = $("ad-html-text");
+            textVal = ((ht && ht.value) || "").trim();
+            // fallback to main text if html-text empty? keep separate
+        } else {
+            textVal = (($("ad-text") || {}).value || "").trim();
+        }
         var payload = {
-            text: (($("ad-text") || {}).value || "").trim(),
+            text: textVal,
+            link: (($("ad-link") || {}).value || "").trim(),
             targets: targets,
         };
+        if (tp === "html" && htmlVal) {
+            payload.html = htmlVal;
+            payload.html_code = htmlVal;
+            payload.banner_html = htmlVal;
+        } else if (ADS.html && tp === "html") {
+            payload.html = ADS.html;
+        }
         if (ADS.photo) {
             payload.photo = ADS.photo;
             payload.photo_name = ADS.photoName || "ad.jpg";
+        }
+        if (tp === "image") {
+            // переключаем на картинку — старый HTML нужно стереть, иначе баннер останется HTML
+            if (ADS.html) payload.clear_html = true;
+            // if html field still empty but editing existing html ad, tell backend to clear
+            var editingHtml = ADS.last && (ADS.last.items || []).some(function (x) {
+                return String(x.id) === String(ADS.id) && x.has_html;
+            });
+            if (editingHtml) payload.clear_html = true;
+            delete payload.html;
+            delete payload.html_code;
+            delete payload.banner_html;
         }
         if (!draft) {
             var mode = ($("ad-when-mode") || {}).value || "now";
@@ -3068,8 +3499,10 @@
     function saveAd(draft) {
         var st = $("ad-status");
         var payload = adCollect(draft);
-        if (draft && !payload.text && !ADS.photo) {
-            if (st) st.textContent = "пусто: нужен текст или фотография";
+        var hasHtml = !!(payload.html || payload.html_code || payload.banner_html);
+        if (draft && !payload.text && !ADS.photo && !hasHtml) {
+            if (st) st.textContent = "пусто: нужен текст, фотография или HTML " +
+                "(для баннера сайта достаточно только фотографии или HTML)";
             return;
         }
         if (st) st.textContent = draft ? "сохраняю черновик…" : "отправляю…";
@@ -3108,8 +3541,16 @@
         ADS.id = 0;
         ADS.photo = "";
         ADS.photoName = "";
+        ADS.html = "";
+        adSetType("image");
         var ta = $("ad-text");
         if (ta) ta.value = "";
+        var hta = $("ad-html");
+        if (hta) hta.value = "";
+        var hta2 = $("ad-html-text");
+        if (hta2) hta2.value = "";
+        var link = $("ad-link");
+        if (link) link.value = "";
         var extra = $("ad-extra");
         if (extra) extra.value = "";
         adCheckboxes().forEach(function (i) { i.checked = false; });
@@ -3120,6 +3561,7 @@
         var inp = $("ad-photo-in");
         if (inp) inp.value = "";
         adShowPhoto();
+        adCount();
         if (full) {
             var st = $("ad-status");
             if (st) st.textContent = "";
@@ -3133,6 +3575,7 @@
             ADS.limits = d.limits || ADS.limits;
             renderAdTargets(d);
             renderAdList(d);
+            renderBanner(d.banner);
             var svc = d.service || {};
             var line = "Планировщик: " + (svc.bot ? "бот на связи" : "бот не подключён") +
                 " · отправлено за сессию: " + (svc.sent_total || 0) +
@@ -3150,11 +3593,85 @@
         });
     }
 
+    /* ---------------- 🎛 Настройка баннера: смена, плавность, раскладка ----- */
+    //
+    // Числа живут в settings сервера (одна JSON-запись site_banner), а страница
+    // берёт их из /api/ads вместе со списком объявлений. Поэтому здесь только
+    // форма: сохранить — и на следующем показе главной или терминала баннер
+    // поедет с новым интервалом, сервер перезапускать не нужно.
+
+    var BANNER_FIELDS = {
+        rotate_sec: "ban-rotate", fade_ms: "ban-fade", layout: "ban-layout",
+        max: "ban-max", fit: "ban-fit", caption: "ban-caption",
+    };
+    var BANNER_NUMBERS = { rotate_sec: 1, fade_ms: 1, max: 1 };
+    var BANNER_LABELS = {
+        rotate_sec: "сек", fade_ms: "мс", layout: "режим", max: "шт",
+        fit: "фото", caption: "подпись",
+    };
+
+    function renderBanner(cfg) {
+        if (!$("banner-panel") || !cfg) return;
+        Object.keys(BANNER_FIELDS).forEach(function (key) {
+            var el = $(BANNER_FIELDS[key]);
+            if (!el || cfg[key] === undefined || cfg[key] === null) return;
+            el.value = String(cfg[key]);
+        });
+    }
+
+    function bannerCollect() {
+        var out = {};
+        Object.keys(BANNER_FIELDS).forEach(function (key) {
+            var el = $(BANNER_FIELDS[key]);
+            if (!el) return;
+            // числа — числами (и select «сколько показывать» тоже), слова —
+            // словами. Границы и варианты проверяет сервер, здесь не спорим.
+            out[key] = BANNER_NUMBERS[key] ? Number(el.value) : el.value;
+        });
+        return out;
+    }
+
+    function bannerLine(cfg) {
+        return Object.keys(BANNER_FIELDS).map(function (key) {
+            var unit = BANNER_LABELS[key] ? " " + BANNER_LABELS[key] : "";
+            return key + "=" + cfg[key] + unit;
+        }).join(" · ");
+    }
+
+    function saveBanner() {
+        var st = $("ban-status");
+        if (st) st.textContent = "сохраняю…";
+        api("/api/admin/ads/banner", { method: "POST", body: JSON.stringify(bannerCollect()) })
+            .then(function (d) {
+                if (!d.ok) {
+                    if (st) st.textContent = d.hint || d.error || "не вышло";
+                    return;
+                }
+                renderBanner(d.banner);       // сервер мог причесать значения
+                if (st) st.textContent = "готово: " + bannerLine(d.banner || {});
+            })
+            .catch(function () {
+                if (st) st.textContent = "ошибка сети";
+            });
+    }
+
     function bootAds() {
         if (!$("ads-panel")) return;
         loadAds();
         var ta = $("ad-text");
         if (ta) ta.addEventListener("input", adCount);
+        var hta = $("ad-html");
+        if (hta) hta.addEventListener("input", adCount);
+        var typeSel = $("ad-type");
+        if (typeSel) typeSel.addEventListener("change", function () { adSetType(typeSel.value); adCount(); });
+        var htmlClear = $("ad-html-clear");
+        if (htmlClear) htmlClear.addEventListener("click", function () {
+            var h = $("ad-html"); if (h) h.value = ""; ADS.html = ""; adCount();
+            var st = $("ad-photo-status"); // reuse
+            if ($("ad-html-prev")) $("ad-html-prev").innerHTML = "<span class='meta'>HTML убран</span>";
+        });
+        var htmlPrevBtn = $("ad-html-preview");
+        if (htmlPrevBtn) htmlPrevBtn.addEventListener("click", function () { adShowHtmlPreview(); });
         var mode = $("ad-when-mode"), when = $("ad-when");
         if (mode && when) {
             mode.addEventListener("change", function () {
@@ -3206,6 +3723,15 @@
         if (save) save.addEventListener("click", function () { saveAd(false); });
         if (draft) draft.addEventListener("click", function () { saveAd(true); });
         if (reset) reset.addEventListener("click", function () { adResetForm(true); });
+        var banSave = $("ban-save");
+        if (banSave) banSave.addEventListener("click", saveBanner);
+        Object.keys(BANNER_FIELDS).forEach(function (key) {
+            var el = $(BANNER_FIELDS[key]);
+            if (el) el.addEventListener("change", function () {
+                var st = $("ban-status");
+                if (st) st.textContent = "не сохранено";
+            });
+        });
     }
 
     /* ---------------- 🤖 ИИ-промты: шапка поста и дневной дайджест ---------- */
@@ -3680,6 +4206,7 @@
             byKind = { post: all, digest: [] };
         }
         var limits = d.photo_limits || {};
+        var orders = d.photo_orders || {};
         TPL_KINDS.forEach(function (k) {
             var box = $(k.box);
             if (!box) return;
@@ -3712,6 +4239,13 @@
                 });
             });
         });
+        // порядок выдачи фото: random vs queue — селекты в каждом блоке
+        try {
+            var selPost = $("tpl-photo-order-post");
+            if (selPost) selPost.value = orders.post || "random";
+            var selDig = $("tpl-photo-order-digest");
+            if (selDig) selDig.value = orders.digest || "random";
+        } catch (e) {}
     }
 
     function loadDigestTpl() {
@@ -3740,6 +4274,32 @@
 
     function bootDigestTpl() {
         if (!$("tpl-heads") && !$("tpl-photos") && !$("tpl-photos-digest")) return;
+        // порядок фото: рандом / по очереди — сохраняется через /api/admin/digest/photo-order
+        ["post", "digest"].forEach(function (kind) {
+            var sel = $("tpl-photo-order-" + kind);
+            if (!sel || sel._bound) return;
+            sel._bound = true;
+            sel.addEventListener("change", function () {
+                var st = $("tpl-photo-order-status-" + kind);
+                if (st) st.textContent = "сохраняю…";
+                api("/api/admin/digest/photo-order", {
+                    method: "POST",
+                    body: JSON.stringify({ kind: kind, order: sel.value }),
+                }).then(function (d) {
+                    if (st) st.textContent = d.ok ? "сохранено: " + (d.order || sel.value) : (d.error || "ошибка");
+                    if (d.ok && d.photo_orders) {
+                        try {
+                            var sP = $("tpl-photo-order-post");
+                            if (sP) sP.value = d.photo_orders.post || sP.value;
+                            var sD = $("tpl-photo-order-digest");
+                            if (sD) sD.value = d.photo_orders.digest || sD.value;
+                        } catch (e) {}
+                    }
+                }).catch(function () {
+                    if (st) st.textContent = "ошибка сети";
+                });
+            });
+        });
         loadDigestTpl();
         var add = $("tpl-head-add");
         if (add) add.addEventListener("click", function () {

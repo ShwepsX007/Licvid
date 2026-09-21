@@ -20,11 +20,13 @@
     <meta property="og:image" content="https://liqscope.online/static/og-cover.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="LiqScope — терминал ликвидаций">
     <meta property="og:locale" content="ru_RU">
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:title" data-i18n-meta="seo.terminal.title" content="Терминал — живая лента ликвидаций крипто-фьючерсов">
     <meta name="twitter:description" data-i18n-meta="seo.terminal.desc" content="Живая лента ликвидаций с 8 бирж, кластеры, профиль объёмов, CVD и открытый интерес.">
     <meta name="twitter:image" content="https://liqscope.online/static/og-cover.png">
+    <meta name="twitter:image:alt" content="LiqScope — терминал ликвидаций">
     <link rel="icon" href="/static/favicon.ico" sizes="any">
 <link rel="icon" type="image/png" sizes="48x48" href="/static/icon-48.png">
 <link rel="icon" type="image/png" sizes="96x96" href="/static/icon-96.png">
@@ -35,12 +37,24 @@
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="stylesheet" href="/static/style.css?v=static1">
     <!-- Local Lightweight Charts v5 -->
+    <link rel="stylesheet" href="/static/ads.css?v=banner2">
+    <link rel="stylesheet" href="/static/terminal_chat.css?v=2">
     <script src="/static/lightweight-charts.js"></script>
     <script src="/static/i18n.pages.js"></script>
     <script src="/static/i18n.js?v=liqhist1"></script>
     <script src="/static/account.js"></script>
 </head>
 <body class="dark-theme">
+    <!-- 💬 Мини-чат терминала: панель справа, кнопка в шапке рядом с LIVE WS -->
+    <div id="terminal-chat" class="tchat">
+      <button id="tchat-toggle" class="tchat-toggle hidden" type="button" aria-hidden="true" tabindex="-1">💬 Чат</button>
+      <span id="tchat-unread" class="tchat-unread hidden" aria-hidden="true">0</span>
+      <div id="tchat-panel" class="tchat-panel hidden">
+        <div class="tchat-head"><span>💬 Чат терминала</span><button id="tchat-close" class="tchat-close" type="button">✕</button></div>
+        <div id="tchat-list" class="tchat-list"></div>
+        <div class="tchat-foot"><input id="tchat-input" maxlength="500" placeholder="Сообщение… (Enter)"><button id="tchat-send" type="button">➤</button><div id="tchat-hint" class="tchat-hint"></div></div>
+      </div>
+    </div>
     <!-- Top Header -->
     <header class="top-nav">
         <div class="brand">
@@ -52,6 +66,7 @@
             </a>
             <span class="status-badge" id="conn-status"><span class="dot pulse yellow"></span> ПОДКЛЮЧЕНИЕ…</span>
             <span class="demo-badge hidden" id="demo-badge">DEMO</span>
+            <button id="tchat-header-btn" class="tchat-header-btn" type="button" title="Чат терминала">💬 Чат <span id="tchat-unread-hdr" class="tchat-unread hidden">0</span></button>
         </div>
 
         <div class="header-metrics">
@@ -144,7 +159,7 @@
                 <div class="symbol-search-results hidden" id="symbol-search-results"></div>
             </div>
             <div class="symbol-hint" id="symbol-hint" data-i18n="search.hint">
-                Топ по обороту 24ч + добавленные вручную пары. Пишите код монеты — найдём на биржах.
+                Поиск менее ликвидных монет.
             </div>
             <div class="symbol-dropdown-wrap" id="symbol-dropdown-wrap">
                 <button class="symbol-current" id="symbol-current" type="button"
@@ -403,6 +418,13 @@
                     </div>
                 </div>
             </div>
+
+            <!-- 📣 Рекламный баннер под основным графиком. Тот же блок и тот
+                 же скрипт, что на главной: фото видно целиком, подпись под
+                 ним, клик ведёт по ссылке объявления. Крестика нет — снимает
+                 только админка. В «на весь экран» блок скрыт стилями, чтобы
+                 реклама не лезла на график. -->
+            <div class="ad-host" id="ad-host" data-ad-place="terminal" hidden></div>
         </section>
 
         <!-- Вертикальный разделитель: ширина ленты -->
@@ -467,30 +489,28 @@
         </aside>
     </main>
 
-    <!-- Пробный доступ к слоям закончился: гостю без регистрации предлагаем
-         бесплатную регистрацию. Крестик (или «Продолжить без слоёв») закрывает
-         окно — терминал работает дальше, но слои остаются выключенными. -->
+    <!-- Слои доступны всем, но гостю показываем плашку с бонусами регистрации:
+         сигналы в Telegram и терминал без рекламы. Крестик / «Продолжить»
+         закрывает окно — терминал работает дальше, слои остаются включёнными. -->
     <div id="layers-gate" class="modal layers-gate hidden" role="dialog"
          aria-modal="true" aria-labelledby="layers-gate-title">
         <div class="modal-content gate-box">
             <button type="button" class="close-modal gate-close" id="gate-close"
                     data-i18n-title="gate.close_title" title="Закрыть окно">×</button>
-            <span class="gate-icon" aria-hidden="true">☰</span>
+            <span class="gate-icon" aria-hidden="true">✨</span>
             <h3 class="gate-title" id="layers-gate-title"
                 data-i18n="gate.title">Зарегистрируйтесь бесплатно</h3>
-            <p class="gate-text" data-i18n="gate.text">Пробный доступ к слоям закончился.
-                Регистрация бесплатная: она открывает слои и индикаторы, сигналы в
-                Telegram и личный кабинет с сервисами.</p>
+            <p class="gate-text" data-i18n="gate.text">Слои графика доступны всем. При регистрации вы получите сигналы в Telegram и терминал без рекламы.</p>
             <div class="gate-feats">
-                <span class="gate-feat">📊 <span data-i18n="gate.f1">Слои и индикаторы графика</span></span>
-                <span class="gate-feat">🔔 <span data-i18n="gate.f2">Сигналы в Telegram</span></span>
+                <span class="gate-feat">🔔 <span data-i18n="gate.f1">Сигналы в Telegram</span></span>
+                <span class="gate-feat">🚫 <span data-i18n="gate.f2">Терминал без рекламы</span></span>
                 <span class="gate-feat">👤 <span data-i18n="gate.f3">Кабинет и сервисы</span></span>
             </div>
             <a class="btn gate-cta" id="gate-cta"
                href="/login?mode=register&amp;next=/terminal"
                data-i18n="gate.cta">Зарегистрироваться бесплатно</a>
             <button type="button" class="gate-later" id="gate-later"
-                    data-i18n="gate.later">Продолжить без слоёв</button>
+                    data-i18n="gate.later">Продолжить</button>
         </div>
     </div>
 
@@ -504,6 +524,8 @@
     </div>
 
     <script src="/static/app.js?v=liqhist1"></script>
+    <script src="/static/ads.js?v=banner2"></script>
+    <script src="/static/terminal_chat.js?v=2"></script>
     <script src="/static/presence.js?v=geo2"></script>
 <script src="/static/consent.js?v=consent1"></script>
 </body>

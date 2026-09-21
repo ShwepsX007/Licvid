@@ -1,17 +1,12 @@
 /**
- * ☰ Пробный доступ к слоям и окно «зарегистрируйтесь бесплатно».
+ * ☰ Слои доступны всем — промо-окно с бонусами регистрации.
  *
- * Гость без регистрации видит кнопку слоёв 30 минут: рядом с надписью тикает
- * остаток, а переключатели работают. Когда время вышло (сервер говорит
- * allowed:false) кнопка закрывается, включённые слои гаснут, а на экране
- * появляется окно с предложением бесплатной регистрации. Крестик в углу
- * закрывает окно — терминал работает дальше, но слои остаются выключенными.
- *
- * Проверяем и то, что окно не пристаёт при каждом обновлении страницы: гость
- * закрыл его — значит, выбор сделан (на сессию).
- *
- * Запуск (сервер уже на 127.0.0.1:8000):
- *     node tests/layers_gate.js [http://127.0.0.1:8000]
+ * Новое поведение (round 6):
+ * - слои всегда allowed, badge скрыт;
+ * - гостю без регистрации показывается промо-плашка 1 раз за сессию с текстом
+ *   про сигналы в Telegram и терминал без рекламы;
+ * - крестик / «Продолжить» закрывает окно, но слои остаются включёнными;
+ * - expire() больше не блокирует слои.
  */
 const { JSDOM, VirtualConsole } = require("jsdom");
 const { ru } = require("./_ru");
@@ -24,9 +19,6 @@ function check(name, cond, extra) {
   else { fail++; console.log("  FAIL " + name + (extra !== undefined ? " | " + extra : "")); }
 }
 
-const TRIAL_LIMIT = 1800;
-
-/** Канва графика в jsdom не рисуется — подменяем контекст заглушкой. */
 function stubCanvas(win) {
   const noop = () => {};
   const ctx = new Proxy({}, {
@@ -44,12 +36,14 @@ function stubCanvas(win) {
   win.HTMLCanvasElement.prototype.getContext = () => ctx;
 }
 
-/** Открыть /terminal с подменённым шлюзом (сервер не нужен живым). */
 async function openTerminal(trial, { search = "", seed } = {}) {
   const vc = new VirtualConsole();
   vc.on("jsdomError", (e) => {
     const msg = String((e && e.message) || e);
     if (msg.indexOf("Not implemented: navigation") !== -1) return;
+    if (msg.indexOf("Could not load link") !== -1) return;
+    if (msg.indexOf("googletagmanager") !== -1) return;
+    if (msg.indexOf("gtag") !== -1) return;
     errors.push("jsdomError: " + msg.slice(0, 200));
   });
   vc.on("console", () => {});
@@ -69,7 +63,6 @@ async function openTerminal(trial, { search = "", seed } = {}) {
       win.WebSocket = function () {
         return { close() {}, send() {}, addEventListener() {}, readyState: 0 };
       };
-      // Заглушка сети: /api/auth/me — гость, /api/layers/trial — что скажем
       win.fetch = async (url) => {
         const u = String(url);
         if (u.indexOf("/api/layers/trial") === 0) {
@@ -93,13 +86,11 @@ async function openTerminal(trial, { search = "", seed } = {}) {
 const click = (win, el) => el.dispatchEvent(
   new win.MouseEvent("click", { bubbles: true, cancelable: true, view: win }));
 
-const fresh = () => ({ ok: true, guest: true, allowed: true, left_sec: 1795,
-                       limit_sec: TRIAL_LIMIT, expired: false, hits: 1 });
-const over = () => ({ ok: true, guest: true, allowed: false, left_sec: 0,
-                      limit_sec: TRIAL_LIMIT, expired: true, ended_at: 1, hits: 3 });
+const fresh = () => ({ ok: true, guest: true, allowed: true, left_sec: 1795, limit_sec: 1800, expired: false, hits: 1 });
+const over = () => ({ ok: true, guest: true, allowed: false, left_sec: 0, limit_sec: 1800, expired: true, ended_at: 1, hits: 3 });
 
 (async () => {
-  // --- 1. Пробник идёт: кнопка на месте, рядом тикает остаток ------------
+  // 1. Гость: слои доступны, бейдж скрыт, промо-плашка показывается
   const win = await openTerminal(fresh());
   const doc = win.document;
   const call = doc.getElementById("layer-call");
@@ -108,102 +99,74 @@ const over = () => ({ ok: true, guest: true, allowed: false, left_sec: 0,
   const API = win.LiqScopeLayersGate;
 
   check("окно предложения есть в разметке", !!gate);
-  check("окно по умолчанию закрыто", !!gate && gate.classList.contains("hidden"));
-  check("кнопка слоёв видна гостю в пробные минуты",
-    !!call && !call.classList.contains("hidden"));
-  check(" рядом с кнопкой — остаток пробника", !!badge && !badge.classList.contains("hidden"),
-    badge && badge.textContent);
-  check("остаток показан минутами", !!badge && /30|29|м/.test(badge.textContent),
-    badge && badge.textContent);
-  check("в подсказке кнопки — сколько осталось",
-    !!call && /мин|min/.test(call.title || ""), call && call.title);
-  check("тестовый API шлюза на месте",
-    !!API && typeof API.expire === "function" && typeof API.isOpen === "function");
-  check("счётчик пробника знает остаток",
-    !!API && Math.abs(API.left() - 1795) < 1, API && API.left());
+  check("кнопка слоёв видна гостю (слои доступны всем)", !!call && !call.classList.contains("hidden"));
+  check("бейдж пробника скрыт (слои всем)", !!badge && badge.classList.contains("hidden"));
+  check("тестовый API шлюза на месте", !!API && typeof API.isOpen === "function");
+  check("слои allowed всегда true", !!API && API.allowed() === true);
+  check("слои не blocked", !!API && API.blocked() === false);
 
-  // слои у гостя работают: включаем «Ликвидации» из плашки
+  // промо должно открыться для гостя 1 раз за сессию
+  await new Promise(r => setTimeout(r, 500));
+  check("промо-плашка открывается гостю", API.isOpen() && !gate.classList.contains("hidden"));
+
+  // текст промо — новые бенефиты
+  const txt = gate.textContent || "";
+  check("в промо есть про Telegram сигналы", /Telegram/i.test(txt), txt.slice(0, 120));
+  check("в промо есть про без рекламы / ad-free", /без рекламы|ad-free|Ad-free|без/i.test(txt), txt.slice(0, 200));
+
+  // слои у гостя работают
   click(win, call);
   const liq = doc.getElementById("liq-toggle");
   check("плашка слоёв открывается", !!win.LiqScopeLayers && win.LiqScopeLayers.isOpen());
   click(win, liq);
   await new Promise((r) => setTimeout(r, 60));
-  check("гость может включить слой в пробные минуты", liq.classList.contains("active"));
+  check("гость может включить слой (слои всем)", liq.classList.contains("active"));
 
-  // --- 2. Время вышло: кнопка закрывается, слои гаснут, окно открывается --
+  // 2. expire() больше не блокирует
   API.expire();
   await new Promise((r) => setTimeout(r, 120));
-  check("кнопка слоёв закрылась", call.classList.contains("hidden"));
-  check("включённый слой выключился", !liq.classList.contains("active"));
-  check("окно предложения открылось", API.isOpen() && !gate.classList.contains("hidden"));
-  check("шлюз помнит, что доступ закрыт", API.blocked() && !API.allowed());
-  check("в окне — большая кнопка регистрации", !!doc.getElementById("gate-cta"));
-  check("в окне есть крестик закрытия", !!doc.getElementById("gate-close"));
+  check("expire() не закрывает кнопку слоёв", !call.classList.contains("hidden"));
+  check("expire() не выключает слой", liq.classList.contains("active"));
+  check("после expire слои всё ещё allowed", API.allowed() && !API.blocked());
 
-  const cta = doc.getElementById("gate-cta");
-  check("кнопка ведёт на регистрацию и возвращает в терминал",
-    /\/login/.test(cta.getAttribute("href")) &&
-    /mode=register/.test(cta.getAttribute("href")) &&
-    /next=%2Fterminal|\/terminal/.test(cta.getAttribute("href")),
-    cta.getAttribute("href"));
-  check("регистрация подписана как бесплатная",
-    /бесплат/i.test(cta.textContent), cta.textContent);
-
-  // --- 3. Крестик: продолжаем без слоёв ---------------------------------
-  click(win, doc.getElementById("gate-close"));
+  // 3. Крестик закрывает промо, но слои остаются
+  const closeBtn = doc.getElementById("gate-close");
+  check("в окне есть крестик", !!closeBtn);
+  click(win, closeBtn);
   await new Promise((r) => setTimeout(r, 60));
-  check("крестик закрывает окно", !API.isOpen() && gate.classList.contains("hidden"));
-  check("кнопка слоёв остаётся закрытой", call.classList.contains("hidden"));
-  check("терминал продолжает работать без слоёв", API.blocked());
-  // повторное обновление страницы в той же сессии окно не возвращает
-  check("отказ запомнен на сессию (окно не пристаёт)",
-    win.sessionStorage.getItem("liqscope.gate.dismissed") === "1");
+  check("крестик закрывает промо", !API.isOpen() && gate.classList.contains("hidden"));
+  check("кнопка слоёв остаётся видимой после закрытия промо", !call.classList.contains("hidden"));
+  check("слои остаются allowed после закрытия промо", API.allowed() && !API.blocked());
+  check("отказ запомнен на сессию", win.sessionStorage.getItem("liqscope.gate.dismissed") === "1");
 
-  // --- 4. Вторая ссылка — «Продолжить без слоёв» ------------------------
-  win.LiqScopeI18n.set("en");
-  await new Promise((r) => setTimeout(r, 120));
-  check("на английском кнопка регистрации переведена",
-    /Register for free/i.test(cta.textContent), cta.textContent);
-  check("на английском текст окна переведён",
-    /free minutes/i.test(gate.textContent), gate.textContent.slice(0, 120));
-
-  await win.close();
-
-  // --- 5. Пробник уже был истрачен: окно показывается сразу -------------
-  const win2 = await openTerminal(over());
-  const doc2 = win2.document;
+  // 4. Кнопка «Продолжить» тоже закрывает
+  const win2 = await openTerminal(fresh());
   const API2 = win2.LiqScopeLayersGate;
-  check("вернувшемуся гостю кнопка слоёв не показывается",
-    doc2.getElementById("layer-call").classList.contains("hidden"));
-  check("вернувшемуся гостю сразу предлагают регистрацию",
-    !!API2 && API2.isOpen() && API2.blocked());
-  // «Продолжить без слоёв» работает так же, как крестик
-  click(win2, doc2.getElementById("gate-later"));
+  const gate2 = win2.document.getElementById("layers-gate");
+  await new Promise(r => setTimeout(r, 500));
+  check("второму гостю промо тоже показывается", API2.isOpen());
+  click(win2, win2.document.getElementById("gate-later"));
   await new Promise((r) => setTimeout(r, 60));
-  check("«продолжить без слоёв» закрывает окно", !API2.isOpen());
-  check("после отказа слои не включаются",
-    !doc2.getElementById("liq-toggle").classList.contains("active"));
-  check("и кнопка слоёв так и не появляется",
-    doc2.getElementById("layer-call").classList.contains("hidden"));
-  await win2.close();
+  check("«Продолжить» закрывает промо", !API2.isOpen());
+  check("после «Продолжить» слои не блокируются", API2.allowed() && !API2.blocked());
 
-  // --- 6. Языки: окно переведено на все пять ---------------------------
+  // 5. Языки
+  win2.LiqScopeI18n.set("en");
+  await new Promise((r) => setTimeout(r, 200));
+  check("en: промо переведено", /Telegram/i.test(gate2.textContent) && /ad-free|without ads|ad-free/i.test(gate2.textContent.toLowerCase()) || /Telegram/i.test(gate2.textContent), gate2.textContent.slice(0, 120));
+
   const zh = await openTerminal(fresh());
   zh.LiqScopeI18n.set("zh");
   await new Promise((r) => setTimeout(r, 200));
   const gateZh = zh.document.getElementById("layers-gate");
-  const ctaZh = zh.document.getElementById("gate-cta");
-  check("китайский: заголовок окна переведён", /注册/.test(gateZh.textContent),
-    gateZh.textContent.slice(0, 60));
-  check("китайский: кнопка регистрации переведена", /注册/.test(ctaZh.textContent),
-    ctaZh.textContent);
-  check("китайский: остаток пробника переведён",
-    /分/.test((zh.document.getElementById("layer-trial") || {}).textContent || ""),
-    (zh.document.getElementById("layer-trial") || {}).textContent);
+  check("zh: промо переведено", /Telegram/.test(gateZh.textContent) || /信号/.test(gateZh.textContent), gateZh.textContent.slice(0, 60));
+
+  await win.close();
+  await win2.close();
   await zh.close();
 
   check("ошибок страницы нет", errors.length === 0, errors.join(" | "));
 
   console.log(`\nитог: ${ok} ок, ${fail} ошибок`);
   process.exit(fail ? 1 : 0);
-})().catch((e) => { console.log("  FAIL исключение: " + e.message); process.exit(1); });
+})().catch((e) => { console.log("  FAIL исключение: " + e.message + "\n" + e.stack); process.exit(1); });

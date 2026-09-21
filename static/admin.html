@@ -7,6 +7,15 @@
 <meta name="description" data-i18n-meta="seo.admin.desc" content="Панель управления LiqScope: пользователи, визиты, сервисы, каналы Telegram, шаблоны постов и проверка ИИ.">
 <meta name="robots" content="noindex,nofollow">
 <link rel="canonical" href="https://liqscope.online/admin">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="LiqScope">
+<meta property="og:url" content="https://liqscope.online/admin">
+<meta property="og:title" content="Админка — LiqScope">
+<meta property="og:description" content="Панель управления LiqScope">
+<meta property="og:image" content="https://liqscope.online/static/og-cover.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="LiqScope">
 <meta name="theme-color" content="#060a12">
 <link rel="icon" href="/static/favicon.ico" sizes="any">
 <link rel="icon" type="image/png" sizes="48x48" href="/static/icon-48.png">
@@ -101,11 +110,20 @@
         </div>
     </div>
 
-    <div class="card" style="margin-top:14px" data-hint="поиск, роль, бан">
-        <h3>Пользователи</h3>
-        <input class="search" id="user-q" placeholder="поиск: имя, @username, id">
+    <div class="card" id="admins-card" style="margin-top:14px" data-hint="главный и назначенные админы">
+        <h3>👑 Администраторы</h3>
+        <p class="lead">Главный администратор задаётся в окружении <code>LIQSCOPE_ADMIN_IDS</code> / <code>LIQSCOPE_ADMIN_EMAILS</code> — его нельзя забанить или снять. Остальных админов назначает только главный. Они имеют доступ к админке, но не могут трогать владельца.</p>
         <table class="data">
-            <thead><tr><th>Имя</th><th>Почта</th><th>Telegram</th><th>Был</th><th></th></tr></thead>
+            <thead><tr><th>Имя</th><th>Контакт</th><th>Роль</th><th></th></tr></thead>
+            <tbody id="admins-body"></tbody>
+        </table>
+    </div>
+
+    <div class="card" style="margin-top:14px" data-hint="поиск, роль, бан, назначение админа">
+        <h3>Пользователи</h3>
+        <input class="search" id="user-q" placeholder="поиск: имя, @username, id, почта">
+        <table class="data">
+            <thead><tr><th>Имя</th><th>Почта</th><th>Telegram</th><th>Был</th><th>Действия</th></tr></thead>
             <tbody id="users-body"></tbody>
         </table>
     </div>
@@ -136,8 +154,12 @@
          карточке карты: там же кнопка «дать ещё». -->
     <div class="card" id="layers-card" style="margin-top:14px" data-hint="пробный доступ гостей к слоям">
         <h3 data-i18n="adm.layers_title">☰ Пробный доступ к слоям</h3>
-        <p class="lead" data-i18n="adm.layers_lead">Сколько минут гость без регистрации может включать слои в терминале. 0 — слои открыты всем и всегда.</p>
-        <div class="row-actions">
+        <p class="lead" data-i18n="adm.layers_lead">Включите пробный период — гость без регистрации получает N минут доступа к слоям терминала, потом предложение зарегистрироваться. Выключите — слои открыты всем и всегда, как сейчас.</p>
+        <div class="row-actions" style="flex-wrap:wrap;gap:12px">
+            <label class="bot-check" style="display:flex;align-items:center;gap:6px">
+                <input type="checkbox" id="layers-enabled">
+                <span data-i18n="adm.layers_enabled">Пробный период включён</span>
+            </label>
             <label class="bot-num"><span data-i18n="adm.layers_min">Минуты</span>
                 <input id="layers-min" type="number" min="0" max="1440" step="5"
                        autocomplete="off"></label>
@@ -147,8 +169,164 @@
         </div>
         <p class="meta" id="layers-stats"></p>
         <p class="meta" id="layers-note"></p>
+        <p class="meta" id="layers-enabled-note" style="font-style:italic"></p>
     </div>
 
+<div class="card" id="ads-panel" style="margin-top:14px" data-hint="текст, фото, куда и когда отправить">
+        <h3>📣 Рекламные посты</h3>
+        <p class="lead">Свой текст и фотография, а дальше — куда и когда отправить: в бота, в каналы
+            и баннером на сайте (главная, терминал, дайджест, сводка по часам). Объявление уйдёт само
+            в выбранное время, а через выбранный срок снимется: баннеры пропадут, посты в каналах удалятся.</p>
+        <div class="grid grid-2" style="margin-top:12px">
+            <div>
+                <label>Тип баннера</label>
+                <select class="search" id="ad-type">
+                    <option value="image">🖼 Картинка + ссылка — классический баннер</option>
+                    <option value="html">📦 HTML-код — произвольный блок в слоте баннера</option>
+                </select>
+                <p class="meta" id="ad-type-hint">Картинка — фото с кликом по ссылке. HTML — вставьте код партнёрки, iframe или верстку, он покажется в том же месте, где обычно картинка.</p>
+
+                <div id="ad-image-block">
+                    <label>Текст поста</label>
+                    <textarea id="ad-text" placeholder="О чём объявление… Ссылки можно писать прямо в тексте — они станут кликабельными. Для баннера на сайте текст не обязателен: хватит одной фотографии."></textarea>
+                    <p class="meta" id="ad-len">0 знаков</p>
+                    <label>Ссылка по клику на баннере</label>
+                    <input class="search" id="ad-link" autocomplete="off"
+                           placeholder="https://… — клик по фотографии ведёт сюда">
+                    <p class="meta">Только http/https. Ссылка есть — баннер кликабельный:
+                        по фотографии, а если в подписи нет своих ссылок, то и по подписи.
+                        Ссылки нет — баннер просто показывается.</p>
+                    <label>Фотография</label>
+                    <div class="row-actions">
+                        <label class="btn btn-primary file-btn">
+                            Загрузить фото
+                            <input id="ad-photo-in" type="file" accept="image/jpeg,image/jpg,image/png,image/webp,image/*">
+                        </label>
+                        <button class="btn" id="ad-photo-clear" type="button">Убрать фото</button>
+                    </div>
+                    <p class="meta" id="ad-photo-status">jpg, png, webp — до 12 МБ. С фотографией текст до 1024 знаков, без неё — до 4000.
+                        На сайте фото можно отправить и без текста, а на фотографии он не рисуется:
+                        вся подпись живёт под фото.</p>
+                    <div class="tpl-photos" id="ad-photo-prev"></div>
+                </div>
+
+                <div id="ad-html-block" hidden>
+                    <label>HTML-код баннера</label>
+                    <textarea id="ad-html" rows="10" data-i18n-skip
+                              placeholder="&lt;div style='background:#111;padding:12px;border-radius:8px'&gt;Ваш баннер… &lt;a href='https://…'&gt;Кнопка&lt;/a&gt;&lt;/div&gt;"></textarea>
+                    <p class="meta" id="ad-html-len">0 знаков · до 20000</p>
+                    <div class="row-actions">
+                        <button class="btn" id="ad-html-clear" type="button">Убрать HTML</button>
+                        <button class="btn btn-small" id="ad-html-preview" type="button">👁 Предпросмотр</button>
+                    </div>
+                    <p class="meta">Вставьте любой HTML: партнёрский блок, iframe, картинку с версткой. Ссылки внутри кода работают сами. Текст поста для Telegram можно оставить пустым, если баннер только для сайта.</p>
+                    <div id="ad-html-prev" class="ad-html-preview" style="margin-top:10px;border:1px dashed var(--border);padding:8px;border-radius:8px;min-height:40px"></div>
+                    <label style="margin-top:10px">Текст поста (необязательно для HTML-баннера на сайте)</label>
+                    <textarea id="ad-html-text" placeholder="Если хотите, чтобы тот же пост ушёл в Telegram — напишите текст здесь. Для чисто сайт-баннера оставьте пустым."></textarea>
+                    <p class="meta">Для Telegram текст всё равно нужен, если выбраны бот или каналы. Для сайта — достаточно одного HTML.</p>
+                </div>
+            </div>
+            <div>
+                <h4>Куда отправить</h4>
+                <div id="ad-targets"><p class="meta">загружаю каналы…</p></div>
+                <div class="row-actions" style="margin-top:6px">
+                    <button class="btn btn-small" id="ad-all" type="button">Отметить всё</button>
+                    <button class="btn btn-small" id="ad-none" type="button">Снять всё</button>
+                </div>
+                <label>Свой канал или чат — id либо @имя</label>
+                <input class="search" id="ad-extra" placeholder="-1001234567890, @mychannel" autocomplete="off">
+                <label>Время отправки</label>
+                <div class="row-actions">
+                    <select class="search" id="ad-when-mode">
+                        <option value="now">Отправить сразу</option>
+                        <option value="later">В выбранное время</option>
+                    </select>
+                    <input class="search" id="ad-when" type="datetime-local" disabled>
+                </div>
+                <label>Удалить через</label>
+                <select class="search" id="ad-ttl">
+                    <option value="0">Не удалять — пока не сниму сам</option>
+                    <option value="15">15 минут</option>
+                    <option value="60">1 час</option>
+                    <option value="180">3 часа</option>
+                    <option value="360">6 часов</option>
+                    <option value="720">12 часов</option>
+                    <option value="1440">1 сутки</option>
+                    <option value="4320">3 суток</option>
+                    <option value="10080">7 суток</option>
+                </select>
+                <p class="meta">Срок считается от отправки: баннеры на сайте исчезнут, посты в каналах бот удалит. В личке у пользователей сообщения остаются — Telegram разрешает боту удалять свои сообщения только первые 48 часов.</p>
+                <div class="row-actions">
+                    <button class="btn btn-primary" id="ad-save" type="button">📤 Отправить</button>
+                    <button class="btn" id="ad-draft" type="button">💾 Сохранить черновик</button>
+                    <button class="btn" id="ad-reset" type="button">↺ Очистить форму</button>
+                    <span class="meta" id="ad-status"></span>
+                </div>
+                <p class="meta" id="ad-note"></p>
+            </div>
+        </div>
+        <h4 style="margin-top:18px">Очередь и история</h4>
+        <p class="meta" id="ad-service">—</p>
+        <div id="ad-list"><p class="meta">загружаю…</p></div>
+    </div>
+
+    
+<div class="card" id="banner-panel" style="margin-top:14px"
+         data-hint="как крутить баннер: интервал, плавность, режим">
+        <h3>🎛 Баннер на сайте</h3>
+        <p class="lead">Сколько секунд стоит одна картинка, насколько плавно они
+            сменяются и показывать ли все акции сразу сеткой. Крестика у баннера нет
+            вовсе: снять объявление может только админка, а посетитель видит акцию всю
+            заданную ей срок. Настройки применяются на следующем показе страницы —
+            без перезапуска сервера.</p>
+        <div class="grid grid-2" style="margin-top:12px">
+            <div>
+                <label>Менять слайд каждые</label>
+                <input class="search" id="ban-rotate" type="number" min="2" max="120" step="1" value="8">
+                <p class="meta">секунд (2…120). При одном объявлении таймер не нужен —
+                    слайд стоит до истечения срока.</p>
+                <label>Плавность перехода</label>
+                <input class="search" id="ban-fade" type="number" min="0" max="2000" step="50" value="500">
+                <p class="meta">миллисекунды на затухание. 0 — резкая смена; система
+                    «уменьшить движение» в браузере включает 0 сама.</p>
+                <label>Сколько объявлений показывать</label>
+                <select class="search" id="ban-max">
+                    <option value="1">1</option>
+                    <option value="2">2</option>
+                    <option value="3">3</option>
+                    <option value="4">4</option>
+                    <option value="6">6</option>
+                    <option value="8">8</option>
+                </select>
+            </div>
+            <div>
+                <label>Режим</label>
+                <select class="search" id="ban-layout">
+                    <option value="carousel">Карусель — одна акция, сменяются плавно</option>
+                    <option value="grid">Сетка — все акции видны сразу</option>
+                </select>
+                <label>Фотография в блоке</label>
+                <select class="search" id="ban-fit">
+                    <option value="contain">Целиком, с полями по краям</option>
+                    <option value="cover">Заполнить блок, края обрезаются</option>
+                </select>
+                <label>Подпись</label>
+                <select class="search" id="ban-caption">
+                    <option value="below">Под фотографией</option>
+                    <option value="side">Сбоку (как раньше, на широком экране)</option>
+                </select>
+                <div class="row-actions" style="margin-top:10px">
+                    <button class="btn btn-primary" id="ban-save" type="button">💾 Сохранить баннер</button>
+                    <span class="meta" id="ban-status"></span>
+                </div>
+                <p class="meta">Где показывать акцию — отмечают в самой записи:
+                    🌐 <b>Главная</b>, 📈 <b>Терминал</b> (под графиком, скрывается для зарегистрированных),
+                    📰 <b>Дайджест</b> и 🕘 <b>Сводка по часам</b> — баннер над списком.</p>
+            </div>
+        </div>
+    </div>
+
+    
     <div class="card" style="margin-top:14px" data-hint="шапки и картинки постов">
         <h3>Сводка в канал — шапки и фото</h3>
         <p class="lead">Каждый пост берёт следующую шапку и картинку по кругу. Можно писать как блогер; <code>{h}</code> подставится как «4» (окно в часах). То же самое есть в боте: Админка → Шаблоны канала.</p>
@@ -170,6 +348,16 @@
                     </summary>
                     <p class="meta">В пост уходит одно фото, и набор листается по кругу без повторов: обложкой идёт то фото, которое дольше всех не выходило, поэтому одинаковые картинки подряд не повторяются. Файлов можно выбрать сразу много — сохранятся все. Альбома нет: он валил все загруженные фото в один пост. Пусто — берутся картинки из комплекта.</p>
                     <div class="row-actions">
+                        <label>Порядок:
+                            <select class="search" id="tpl-photo-order-post" style="max-width:220px">
+                                <option value="random">🎲 Рандом без повторов</option>
+                                <option value="queue">🔢 По очереди</option>
+                            </select>
+                        </label>
+                        <span class="meta" id="tpl-photo-order-status-post"></span>
+                    </div>
+                    <p class="meta">Рандом — каждый круг в новом случайном порядке (как раньше). Очередь — строго 1,2,3…N, снова 1,2,3… — удобно, когда загрузили пачку и хочется, чтобы каждая показалась по разу.</p>
+                    <div class="row-actions">
                         <label class="btn btn-primary file-btn">
                             Добавить фото
                             <input id="tpl-photo-in" type="file" multiple accept="image/jpeg,image/jpg,image/png,image/webp,image/*">
@@ -184,6 +372,16 @@
                         <span class="tpl-count" id="tpl-photos-count-digest">—</span>
                     </summary>
                     <p class="meta">Свои картинки для вечернего выпуска: тот же круг без повторов. Если пусто — дайджест возьмёт фото постов. Можно выбрать сразу много файлов.</p>
+                    <div class="row-actions">
+                        <label>Порядок:
+                            <select class="search" id="tpl-photo-order-digest" style="max-width:220px">
+                                <option value="random">🎲 Рандом без повторов</option>
+                                <option value="queue">🔢 По очереди</option>
+                            </select>
+                        </label>
+                        <span class="meta" id="tpl-photo-order-status-digest"></span>
+                    </div>
+                    <p class="meta">Рандом — каждый круг в новом случайном порядке. Очередь — 1,2,3…N по кругу.</p>
                     <div class="row-actions">
                         <label class="btn btn-primary file-btn">
                             Добавить фото
@@ -286,71 +484,6 @@
         </div>
     </div>
 
-    <div class="card" id="ads-panel" style="margin-top:14px" data-hint="текст, фото, куда и когда отправить">
-        <h3>📣 Рекламные посты</h3>
-        <p class="lead">Свой текст и фотография, а дальше — куда и когда отправить: в бота, в каналы
-            и баннером на главной. Объявление уйдёт само в выбранное время, а через выбранный срок
-            снимется: баннер с главной пропадёт, посты в каналах удалятся.</p>
-        <div class="grid grid-2" style="margin-top:12px">
-            <div>
-                <label>Текст поста</label>
-                <textarea id="ad-text" placeholder="О чём объявление… Ссылки можно писать прямо в тексте — они станут кликабельными."></textarea>
-                <p class="meta" id="ad-len">0 знаков</p>
-                <label>Фотография</label>
-                <div class="row-actions">
-                    <label class="btn btn-primary file-btn">
-                        Загрузить фото
-                        <input id="ad-photo-in" type="file" accept="image/jpeg,image/jpg,image/png,image/webp,image/*">
-                    </label>
-                    <button class="btn" id="ad-photo-clear" type="button">Убрать фото</button>
-                </div>
-                <p class="meta" id="ad-photo-status">jpg, png, webp — до 12 МБ. С фотографией текст до 1024 знаков, без неё — до 4000.</p>
-                <div class="tpl-photos" id="ad-photo-prev"></div>
-            </div>
-            <div>
-                <h4>Куда отправить</h4>
-                <div id="ad-targets"><p class="meta">загружаю каналы…</p></div>
-                <div class="row-actions" style="margin-top:6px">
-                    <button class="btn btn-small" id="ad-all" type="button">Отметить всё</button>
-                    <button class="btn btn-small" id="ad-none" type="button">Снять всё</button>
-                </div>
-                <label>Свой канал или чат — id либо @имя</label>
-                <input class="search" id="ad-extra" placeholder="-1001234567890, @mychannel" autocomplete="off">
-                <label>Время отправки</label>
-                <div class="row-actions">
-                    <select class="search" id="ad-when-mode">
-                        <option value="now">Отправить сразу</option>
-                        <option value="later">В выбранное время</option>
-                    </select>
-                    <input class="search" id="ad-when" type="datetime-local" disabled>
-                </div>
-                <label>Удалить через</label>
-                <select class="search" id="ad-ttl">
-                    <option value="0">Не удалять — пока не сниму сам</option>
-                    <option value="15">15 минут</option>
-                    <option value="60">1 час</option>
-                    <option value="180">3 часа</option>
-                    <option value="360">6 часов</option>
-                    <option value="720">12 часов</option>
-                    <option value="1440">1 сутки</option>
-                    <option value="4320">3 суток</option>
-                    <option value="10080">7 суток</option>
-                </select>
-                <p class="meta">Срок считается от отправки: баннер на главной исчезнет, посты в каналах бот удалит. В личке у пользователей сообщения остаются — Telegram разрешает боту удалять свои сообщения только первые 48 часов.</p>
-                <div class="row-actions">
-                    <button class="btn btn-primary" id="ad-save" type="button">📤 Отправить</button>
-                    <button class="btn" id="ad-draft" type="button">💾 Сохранить черновик</button>
-                    <button class="btn" id="ad-reset" type="button">↺ Очистить форму</button>
-                    <span class="meta" id="ad-status"></span>
-                </div>
-                <p class="meta" id="ad-note"></p>
-            </div>
-        </div>
-        <h4 style="margin-top:18px">Очередь и история</h4>
-        <p class="meta" id="ad-service">—</p>
-        <div id="ad-list"><p class="meta">загружаю…</p></div>
-    </div>
-
     <div class="card" id="fb-admin" style="margin-top:14px" data-hint="диалоги из кабинета — можно ответить">
         <h3>💬 Обратная связь<span class="fb-dot hidden" id="fb-admin-badge"></span></h3>
         <p class="lead">Всё, что пользователи написали в кабинете кнопкой «По всем вопросам». Отвечайте
@@ -381,7 +514,7 @@
 <script src="/static/world-map.js?v=geo1"></script>
 <script src="/static/geo_map.js?v=geo2"></script>
 <script src="/static/presence.js?v=geo2"></script>
-<script src="/static/account.js?v=fb12"></script>
+<script src="/static/account.js?v=admin14"></script>
 <script src="/static/consent.js?v=consent1"></script>
 </body>
 </html>

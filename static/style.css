@@ -46,12 +46,20 @@ body.dark-theme {
     padding: 8px 16px;
     min-height: 52px;   /* не height: боксы статистики выше 52px и должны помещаться */
     flex-shrink: 0;
+    /* узкое окно браузера: ряд шапки переносится, а не уезжает за край.
+       height у шапки не фиксированный, поэтому второй ряд просто добавляет
+       себе 6px — график от этого становится чуть ниже, но кнопки видны все. */
+    flex-wrap: wrap;
+    row-gap: 6px;
+    column-gap: 12px;
 }
 
 .brand {
     display: flex;
     align-items: center;
     gap: 8px;
+    flex: 0 1 auto;
+    min-width: 0;       /* иначе длинное имя не сжимается и выталкивает контролы */
 }
 
 /* Название сервиса — ссылка на главную (лендинг) */
@@ -359,6 +367,12 @@ body.dark-theme {
     display: flex;
     align-items: center;
     gap: 8px;
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 100%;
+    flex-wrap: wrap;     /* не влезли — перенеслись; за край ничего не уходит */
+    justify-content: flex-end;
+    margin-left: auto;
 }
 
 /* Переключатель языка */
@@ -1697,6 +1711,29 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
     .metric-card { min-width: 90px; }
 }
 
+/* 1240–900: шапке уже тесно. Убираем декор (бейдж TERMINAL), уплотняем боксы
+   метрик, а сам ряд метрик умеем проскроллить — так кнопки гарантированно
+   остаются в окне: либо переносятся на строку, либо уступают место метрикам. */
+@media (max-width: 1240px) {
+    .top-nav { padding: 6px 12px; }
+    .brand-badge { display: none; }
+    .status-badge { margin-left: 0; font-size: 0.66rem; padding: 2px 6px; }
+    .header-metrics {
+        gap: 6px;
+        flex: 1 1 auto;
+        min-width: 0;         /* можно сжать: боксы не выталкивают контролы */
+        max-width: 100%;
+        overflow-x: auto;     /* не влезло — листается, а не режется */
+        scrollbar-width: none;
+    }
+    .header-metrics::-webkit-scrollbar { display: none; }
+    .header-metrics > * { flex: 0 0 auto; }
+    .stat-box-head { min-width: 0; padding: 3px 8px 4px; }
+    .header-controls { gap: 6px; }
+    .lang-select { max-width: 118px; }
+    .exch-health { margin-right: 0; }
+}
+
 /* Потиковые обновления */
 .data-source.live { color: var(--color-green); }
 
@@ -2350,7 +2387,9 @@ body.chart-fullscreen { overflow: hidden; }
         padding-bottom: 2px;
         flex-wrap: nowrap;
         max-width: 100%;
+        scrollbar-width: none;
     }
+    .header-metrics::-webkit-scrollbar { display: none; }
     .header-controls {
         width: 100%;
         flex-wrap: wrap;

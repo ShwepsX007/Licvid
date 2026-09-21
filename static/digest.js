@@ -258,9 +258,12 @@
 
     function open(day, push) {
         selected = day || "";
+        try { window._dig_selected = selected; } catch(e) {}
         paintList();
         if (dayMap[selected]) month = clampMonth(monthOfDay(selected));
         paintCalendar();
+        // comments for this day
+        try { if (window.LiqScopeComments && window.LiqScopeComments.reload) window.LiqScopeComments.reload(); } catch(e) {}
         return api("/api/digest/" + encodeURIComponent(day) + "?lang=" + articleLang())
             .then(function (res) {
                 if (!res || !res.ok || !res.item) { paintArticle(null); return; }

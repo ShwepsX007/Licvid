@@ -19,11 +19,13 @@
 <meta property="og:image" content="https://liqscope.online/static/og-cover.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="LiqScope — сводки по часам">
 <meta property="og:locale" content="ru_RU">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" data-i18n-meta="seo.hourly.title" content="Сводки по часам — посты канала LiqScope">
 <meta name="twitter:description" data-i18n-meta="seo.hourly.desc" content="Сводки рынка крипто-фьючерсов: ликвидации, лидеры часов, оборот и открытый интерес. Архив по дням.">
 <meta name="twitter:image" content="https://liqscope.online/static/og-cover.png">
+<meta name="twitter:image:alt" content="LiqScope — сводки по часам">
 <link rel="icon" href="/static/favicon.ico" sizes="any">
 <link rel="icon" type="image/png" sizes="48x48" href="/static/icon-48.png">
 <link rel="icon" type="image/png" sizes="96x96" href="/static/icon-96.png">
@@ -33,6 +35,8 @@
 <link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="stylesheet" href="/static/account.css?v=geo2">
+<link rel="stylesheet" href="/static/comments.css?v=c3">
+<link rel="stylesheet" href="/static/ads.css?v=banner2">
 <style>
 .hour-wrap { max-width: 1180px; margin: 0 auto; padding: 26px 22px 70px; }
 .hour-head { margin: 8px 0 22px; }
@@ -161,9 +165,7 @@
 <main class="hour-wrap">
     <div class="hour-head">
         <h1 data-i18n="hour.title">Сводки по часам</h1>
-        <p class="hour-lead" data-i18n="hour.lead">Бот публикует сводку рынка в свой канал несколько раз в сутки —
-            здесь те же посты целиком: ликвидации окна, лидеры часов, оборот и открытый интерес, с тем же фото.
-            Любой день открывается из календаря.</p>
+        <p class="hour-lead" data-i18n="hour.lead">Публикация сводки рынка несколько раз в сутки.</p>
         <div class="hour-chips">
             <span class="chip live" id="hour-every">—</span>
             <span class="chip"><span data-i18n="hour.total">Сводок в архиве</span>: <b id="hour-total">—</b></span>
@@ -173,6 +175,7 @@
         </div>
         <div class="hour-jump" id="hour-jump"></div>
     </div>
+    <div id="ad-host" class="ad-host" data-ad-place="hourly" hidden></div>
     <div class="hour-grid">
         <aside class="hour-list-col">
             <h2 data-i18n="hour.fresh">Свежие сводки</h2>
@@ -199,11 +202,33 @@
             <div class="hour-empty" data-i18n="hour.loading">Загружаю…</div>
         </section>
     </div>
+
+        <div id="comments-host" class="comments-host">
+        <div class="cc-card">
+            <h3><span data-i18n="cc.title">💬 Комментарии</span> <span class="cc-count" id="cc-count">0</span></h3>
+            <p class="cc-sub" data-i18n="cc.sub_hourly">Обсуждение выпуска — только для зарегистрированных. Ник берётся из кабинета (как в чате терминала).</p>
+            <div id="cc-list" class="cc-list"></div>
+            <div class="cc-foot">
+                <textarea id="cc-input" maxlength="1000" data-i18n-placeholder="cc.ph_write" placeholder="Написать комментарий…"></textarea>
+                <button id="cc-send" type="button" data-i18n="cc.send">➤ Отправить</button>
+                <div id="cc-hint" class="cc-hint"></div>
+            </div>
+        </div>
+    </div>
+
+    <p class="partner-line">
+        <a href="https://www.gate.com/ru/signup/VLFCAVWMBW?ref_type=103" data-gate-ref
+           target="_blank" rel="noopener sponsored" data-i18n="land.gate.link">
+            💠 Торговать на Gate — скидка на комиссию
+        </a>
+    </p>
 </main>
 
 <script src="/static/i18n.pages.js"></script>
 <script src="/static/i18n.js"></script>
-<script src="/static/hourly.js?v=hourly1"></script>
+<script src="/static/hourly.js?v=hourly3"></script>
+<script src="/static/comments.js?v=c3"></script>
+<script src="/static/ads.js?v=banner2"></script>
 <script src="/static/presence.js?v=geo2"></script>
 <script src="/static/consent.js?v=consent1"></script>
 </body>

@@ -182,6 +182,14 @@ body[data-page="cabinet"] .wrap { max-width: min(1600px, 96vw); }
 .partner-line a { color: #7fe3c0; font-weight: 700; text-decoration: none; }
 .partner-line a:hover { text-decoration: underline; }
 .tg-card { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+.name-edit-row { margin-top: 14px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.name-edit-form { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.name-edit-form .name-input {
+    min-width: 200px; max-width: 320px;
+    background: var(--bg-dark); border: 1px solid var(--border); color: var(--text);
+    border-radius: 8px; padding: 7px 12px; font-family: inherit; font-size: 0.86rem;
+}
+.name-edit-form .name-input:focus { outline: none; border-color: var(--blue); }
 .tg-card .meta { margin-bottom: 8px; }
 .badge-tg { color: var(--tg); border-color: rgba(41, 171, 226, 0.45); }
 

@@ -33,7 +33,9 @@ from fastapi.testclient import TestClient  # noqa: E402
 import ads as ads_mod  # noqa: E402
 import web_account  # noqa: E402
 from accounts import COOKIE_SID, Store  # noqa: E402
-from ads import AdService, clean_targets, linkify_html, site_html, text_problem  # noqa: E402
+from ads import (AdService, banner_settings, clean_link, clean_targets,
+                    linkify_html, normalize_banner, save_banner_settings,
+                    site_html, text_problem)  # noqa: E402
 
 ADMIN_EMAIL = "boss@liqscope.online"
 RU_CHAT = "-1001112223334"
@@ -141,7 +143,31 @@ class TargetsTest(unittest.TestCase):
 
     def test_junk_targets_are_dropped(self):
         got = clean_targets("не словарь")
-        self.assertEqual(got, {"bot": False, "site": False, "channels": []})
+        self.assertEqual(got, {"bot": False, "site": False, "terminal": False,
+                               "digest": False, "hourly": False,
+                               "channels": []})
+
+    def test_terminal_is_a_place_of_its_own(self):
+        """Терминал — отдельная страница: хочется одну акцию везде или только там."""
+        got = clean_targets({"site": True, "terminal": 1, "bot": ""})
+        self.assertTrue(got["site"])
+        self.assertTrue(got["terminal"])
+        self.assertFalse(got["bot"])
+        self.assertFalse(got["digest"])
+        self.assertFalse(got["hourly"])
+        line = ads_mod.targets_text(got)
+        self.assertIn("главная сайта", line)
+
+    def test_digest_and_hourly_are_places_of_their_own(self):
+        """Дайджест и сводка — отдельные страницы: акцию можно отправить только туда."""
+        got = clean_targets({"digest": 1, "hourly": True})
+        self.assertTrue(got["digest"])
+        self.assertTrue(got["hourly"])
+        self.assertFalse(got["site"])
+        self.assertFalse(got["terminal"])
+        line = ads_mod.targets_text(got)
+        self.assertIn("дайджест", line)
+        self.assertIn("сводка по часам", line)
 
     def test_send_at_accepts_seconds_iso_and_empty(self):
         now = 1_788_000_000.0
@@ -152,6 +178,76 @@ class TargetsTest(unittest.TestCase):
         self.assertGreater(iso, now - 40000000)
         self.assertEqual(ads_mod.parse_when("не дата", now), 0.0)
         self.assertEqual(ads_mod.parse_when(1_788_000_000_000, now), 1_788_000_000.0)
+
+
+class LinkTest(unittest.TestCase):
+    """Клик по баннеру: своя ссылка у объявления — и только нормальная.
+
+    Ссылка попадает в ``href`` на публичной странице, поэтому сюда не должны
+    проходить ``javascript:``, чужие схемы и обрывки разметки: всё это стало бы
+    кликом в чужую сторону.
+    """
+
+    def test_domain_without_scheme_becomes_https(self) -> None:
+        self.assertEqual(clean_link("gate.com/promo"), "https://gate.com/promo")
+        self.assertEqual(clean_link("  https://a.example/x  "), "https://a.example/x")
+
+    def test_junk_schemes_are_rejected(self) -> None:
+        for bad in ("", "javascript:alert(1)", "data:text/html,hi", "ftp://a.example/x",
+                    "//gate.com/x", "не ссылка", "a.b"):
+            self.assertEqual(clean_link(bad), "", bad)
+
+    def test_markup_cannot_escape_the_attribute(self) -> None:
+        self.assertEqual(clean_link('https://a.example/x" onmouseover="x'), "")
+        self.assertEqual(clean_link("https://a.example/x\'"), "")
+        self.assertEqual(clean_link("https://a.example/" + "y" * 700), "")
+
+    def test_public_card_carries_the_link(self) -> None:
+        out = ads_mod.ad_public({"id": 3, "text": "", "link": "gate.com/promo",
+                                 "has_photo": True})
+        self.assertEqual(out["link"], "https://gate.com/promo")
+        self.assertEqual(out["photo"], "/api/ads/3/photo")
+        self.assertEqual(out["text"], "")      # подписи нет — баннер из одного фото
+
+
+class BannerSettingsTest(unittest.TestCase):
+    """Как крутить баннер: числа в разумных пределах, режимы — из списка."""
+
+    def test_defaults_when_nothing_saved(self) -> None:
+        self.assertEqual(banner_settings(None), {
+            "rotate_sec": 8, "fade_ms": 500, "layout": "carousel",
+            "max": 4, "fit": "contain", "caption": "below"})
+
+    def test_numbers_are_clamped_and_words_are_checked(self) -> None:
+        got = normalize_banner({"rotate_sec": 0, "fade_ms": 99999, "max": 900,
+                                "layout": "карусель", "fit": "squish",
+                                "caption": "wherever"})
+        self.assertEqual(got["rotate_sec"], 2)          # 0 выжигал бы CPU
+        self.assertEqual(got["fade_ms"], 2000)
+        self.assertEqual(got["max"], 8)                 # весь архив не тянем
+        self.assertEqual(got["layout"], "carousel")
+        self.assertEqual(got["fit"], "contain")
+        self.assertEqual(got["caption"], "below")
+
+    def test_junk_and_strings_still_give_numbers(self) -> None:
+        got = normalize_banner({"rotate_sec": "12", "fade_ms": None, "max": "abc"})
+        self.assertEqual(got["rotate_sec"], 12)
+        self.assertEqual(got["fade_ms"], 500)
+        self.assertEqual(got["max"], 4)
+
+    def test_grid_mode_is_a_choice_not_a_default(self) -> None:
+        self.assertEqual(normalize_banner({"layout": "grid"})["layout"], "grid")
+
+    def test_saved_values_survive_the_store(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store = Store(os.path.join(tmp.name, "b.db"), secret="s")
+        applied = save_banner_settings(store, {"rotate_sec": 3, "layout": "grid",
+                                               "max": 24})
+        self.assertEqual(applied["rotate_sec"], 3)
+        self.assertEqual(applied["layout"], "grid")
+        self.assertEqual(applied["max"], 8)             # причесано при сохранении
+        self.assertEqual(banner_settings(store), applied)
 
 
 class AdStoreTest(unittest.TestCase):
@@ -177,6 +273,61 @@ class AdStoreTest(unittest.TestCase):
 
     def test_empty_ad_is_rejected(self):
         self.assertEqual(self.store.add_ad("")["error"], "empty")
+
+    def test_photo_without_text_is_allowed(self):
+        """Баннер из одной картинки — законный пост: текст украшение, не обязательное поле.
+
+        Фотографию сервер пишет уже после создания записи (ей нужен id), поэтому
+        склад знает о ней по признанию ``photo_pending``: иначе «фото без текста»
+        нельзя было отправить вообще.
+        """
+        self.assertEqual(self.store.add_ad("", photo_pending=True,
+                                           targets={"site": True})["ok"], True)
+        self.assertEqual(self.store.add_ad("", photo="какой-то файл")["ok"], True)
+        self.assertEqual(self.store.add_ad("")["error"], "empty")
+
+    def test_link_survives_the_roundtrip_and_edits(self):
+        ad_id = self.add(link="https://gate.com/promo")
+        self.assertEqual(self.store.get_ad(ad_id)["link"], "https://gate.com/promo")
+        self.store.update_ad(ad_id, link="https://example.com/x")
+        self.assertEqual(self.store.get_ad(ad_id)["link"], "https://example.com/x")
+        self.store.update_ad(ad_id, link="   ")
+        self.assertEqual(self.store.get_ad(ad_id)["link"], "")
+
+    def test_banner_places_are_picked_per_page(self):
+        """Одно объявление может жить на главной, в терминале, дайджесте, сводке или на всех."""
+        now = time.time()
+        self.store.add_ad("обе", status="sent", send_at=now - 10,
+                          targets={"site": True, "terminal": True})
+        self.store.add_ad("главная", status="sent", send_at=now - 20,
+                          targets={"site": True})
+        self.store.add_ad("терминал", status="sent", send_at=now - 30,
+                          targets={"terminal": True})
+        self.store.add_ad("дайджест", status="sent", send_at=now - 40,
+                          targets={"digest": True})
+        self.store.add_ad("сводка", status="sent", send_at=now - 50,
+                          targets={"hourly": True})
+        self.assertEqual([a["text"] for a in self.store.active_site_ads(now, place="landing")],
+                         ["обе", "главная"])
+        self.assertEqual([a["text"] for a in self.store.active_site_ads(now, place="terminal")],
+                         ["обе", "терминал"])
+        self.assertEqual([a["text"] for a in self.store.active_site_ads(now, place="digest")],
+                         ["дайджест"])
+        self.assertEqual([a["text"] for a in self.store.active_site_ads(now, place="hourly")],
+                         ["сводка"])
+        self.assertEqual(len(self.store.active_site_ads(now, place="")), 5)
+
+    def test_banner_limit_is_honest_about_pages(self):
+        """Лимит «сколько показывать» applies after the page filter, not before."""
+        now = time.time()
+        for i in range(6):
+            self.store.add_ad(f"терминал {i}", status="sent", send_at=now - i,
+                              targets={"terminal": True})
+            self.store.add_ad(f"чужое {i}", status="sent", send_at=now - i - 0.5,
+                              targets={"site": True})
+        got = [a["text"] for a in self.store.active_site_ads(now, limit=3,
+                                                             place="terminal")]
+        self.assertEqual(got, ["терминал 0", "терминал 1", "терминал 2"])
 
     def test_due_and_expired_are_selected_by_time(self):
         now = time.time()
@@ -500,6 +651,129 @@ class AdRoutesTest(unittest.TestCase):
     def test_unknown_ad_gives_404(self):
         self.assertEqual(self.admin.post("/api/admin/ads/999/send", json={}).status_code, 404)
         self.assertEqual(self.admin.post("/api/admin/ads/999/delete", json={}).status_code, 404)
+
+
+class BannerRoutesTest(AdRoutesTest):
+    """Баннер как он теперь: фото без текста, две страницы и настройка смены.
+
+    Наследуем инфраструктуру ``AdRoutesTest`` (склад, бот-заглушка, админская
+    сессия) и проверяем ровно то, что просил админ: картинку можно выложить
+    без подписи, акция может жить на главной, в терминале или на обеих
+    страницах, а режим смены и плавности правится в админке без рестарта.
+    """
+
+    # --- фото без текста ----------------------------------------------------
+    def test_photo_only_ad_goes_to_the_site(self):
+        """Фотография без текста на сайт уходит: раньше это было невозможно."""
+        r = self.post_ad(text="", photo=png_data_url(),
+                         targets={"site": True, "terminal": True})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertTrue(r.json()["ok"], r.text)
+        item = r.json()["item"]
+        self.assertTrue(item["has_photo"])
+        self.assertEqual(item["text"], "")
+        live = self.client.get("/api/ads?place=landing").json()["items"]
+        self.assertEqual(len(live), 1, live)
+        self.assertTrue(live[0]["photo"].endswith("/photo"))
+        self.assertEqual(live[0]["text"], "")
+
+    def test_photo_only_ad_still_needs_a_site_target(self):
+        """В канал без текста идти нечего: там проверка на месте."""
+        r = self.post_ad(text="", photo=png_data_url(),
+                         targets={"channels": [RU_CHAT]})
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.json()["error"], "empty")
+
+    def test_nothing_at_all_is_rejected(self):
+        r = self.post_ad(text="", targets={"site": True})
+        self.assertEqual(r.status_code, 400)
+
+    # --- ссылка и страницы --------------------------------------------------
+    def test_link_reaches_the_page_and_can_be_edited(self):
+        r = self.post_ad(text="Скидка", link="gate.com/promo")
+        ad_id = r.json()["item"]["id"]
+        live = self.client.get("/api/ads").json()["items"][0]
+        self.assertEqual(live["link"], "https://gate.com/promo")
+        upd = self.admin.post("/api/admin/ads/%d" % ad_id,
+                              json={"link": "javascript:alert(1)"})
+        self.assertEqual(upd.json()["item"]["link"], "")
+        self.assertEqual(self.client.get("/api/ads").json()["items"][0]["link"], "")
+
+    def test_terminal_place_has_its_own_feed(self):
+        self.post_ad(text="только главная", targets={"site": True},
+                     send_at=int(time.time()) - 1)
+        self.post_ad(text="обе страницы", targets={"site": True, "terminal": True},
+                     send_at=int(time.time()) - 2)
+        landing = self.client.get("/api/ads?place=landing").json()["items"]
+        terminal = self.client.get("/api/ads?place=terminal").json()["items"]
+        self.assertEqual([a["text"] for a in landing], ["обе страницы", "только главная"])
+        self.assertEqual([a["text"] for a in terminal], ["обе страницы"])
+        # неизвестная страница = главная, а не «всё сразу»
+        junk = self.client.get("/api/ads?place=луну").json()
+        self.assertEqual(junk["place"], "landing")
+        self.assertEqual(len(junk["items"]), 2)
+
+    def test_banner_config_travels_with_the_items(self):
+        d = self.client.get("/api/ads").json()
+        self.assertEqual(d["banner"]["layout"], "carousel")
+        self.assertEqual(d["banner"]["rotate_sec"], 8)
+        self.assertEqual(d["banner"]["fade_ms"], 500)
+        self.assertEqual(d["banner"]["fit"], "contain")
+        self.assertEqual(d["banner"]["caption"], "below")
+
+    # --- настройка баннера -------------------------------------------------
+    def test_admin_sees_and_saves_banner_settings(self):
+        d = self.admin.get("/api/admin/ads").json()
+        self.assertEqual(d["banner"]["rotate_sec"], 8)
+        r = self.admin.post("/api/admin/ads/banner",
+                            json={"rotate_sec": 3, "fade_ms": 1200,
+                                  "layout": "grid", "max": 6, "fit": "cover",
+                                  "caption": "side"})
+        self.assertEqual(r.json()["banner"], {"rotate_sec": 3, "fade_ms": 1200,
+                                             "layout": "grid", "max": 6,
+                                             "fit": "cover", "caption": "side"})
+        page = self.client.get("/api/ads").json()["banner"]
+        self.assertEqual(page["layout"], "grid")
+        self.assertEqual(page["rotate_sec"], 3)
+        # значение вне границ прижимается, а не улетает в browser-meltdown
+        bad = self.admin.post("/api/admin/ads/banner",
+                             json={"rotate_sec": 0, "fade_ms": 999999,
+                                   "layout": "карусель", "max": 900})
+        self.assertEqual(bad.json()["banner"]["rotate_sec"], 2)
+        self.assertEqual(bad.json()["banner"]["fade_ms"], 2000)
+        self.assertEqual(bad.json()["banner"]["layout"], "carousel")
+        self.assertEqual(bad.json()["banner"]["max"], 8)
+
+    def test_max_limits_the_number_of_slides(self):
+        self.admin.post("/api/admin/ads/banner", json={"max": 1})
+        for i in range(3):
+            self.post_ad(text="акция %d" % i, send_at=int(time.time()) - 10 + i)
+        items = self.client.get("/api/ads").json()["items"]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["text"], "акция 2")   # свежая сверху
+
+    def test_banner_settings_are_admin_only(self):
+        self.assertEqual(self.client.post("/api/admin/ads/banner",
+                                          json={"max": 1}).status_code, 401)
+        self.assertEqual(self.plain.post("/api/admin/ads/banner",
+                                         json={"max": 1}).status_code, 403)
+
+    def test_settings_are_one_json_record(self):
+        """Настройка лежит одной записью settings: не надо мигрировать таблицу."""
+        self.admin.post("/api/admin/ads/banner", json={"rotate_sec": 5})
+        raw = self.store.get_setting("site_banner", "")
+        self.assertIn("rotate_sec", raw)
+        self.assertEqual(banner_settings(self.store)["rotate_sec"], 5)
+
+    def test_publish_line_names_both_pages(self):
+        r = self.post_ad(text="везде", targets={"site": True, "terminal": True,
+                                                "digest": True, "hourly": True},
+                         send_at=int(time.time()) - 1)
+        line = r.json()["item"]["line"]
+        self.assertIn("главная: баннер", line)
+        self.assertIn("терминал: баннер", line)
+        self.assertIn("дайджест: баннер", line)
+        self.assertIn("сводка: баннер", line)
 
 
 if __name__ == "__main__":

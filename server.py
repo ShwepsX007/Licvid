@@ -2434,14 +2434,19 @@ async def collect_hourly_post() -> dict:
             head, _note = await tg_bot._ai_headline(snap, variant=n, lang=lang)
         except Exception as e:                        # noqa: BLE001
             log.debug("сводки по часам: ИИ-шапка (%s) не ответила: %s", lang, e)
+        # На сайт идёт полный текст: ИИ-шапка без обрезки под подпись
+        # Telegram (_ai_head_full хранит её целиком после _ai_headline).
+        key = "en" if str(lang).startswith("en") else "ru"
+        full_head = (getattr(tg_bot, "_ai_head_full", {}) or {}).get(key) or head
         texts[lang] = render_post(
             snap, n,
             headlines=active_headlines(account_store, hours, lang=lang),
-            head_override=head or None,
+            head_override=full_head or None,
             site_url=PUBLIC_URL,
             bot_url=tg_bot.bot_url(),
             lang=lang,
             limit=10 ** 9,
+            head_full=True,
         )
     img = pick_active_image(account_store, "post", variant=n)
     now = time.time()

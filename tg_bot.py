@@ -110,6 +110,9 @@ class TelegramBot:
         self._ai_recent: List[str] = []      # последние ИИ-шапки (рус)
         self._ai_recent_en: List[str] = []   # последние ИИ-шапки (англ)
         self._ai_state: Dict[str, Any] = {}  # что ответил ИИ (для админки)
+        # Полный (не обрезанный) текст последней ИИ-шапки по языкам: в TG
+        # уходит короткая версия под лимит подписи, на сайт — весь текст.
+        self._ai_head_full: Dict[str, str] = {}
         self._draft: Optional[Dict[str, Any]] = None   # непринятый пост (контроль)
         self._digest_task: Optional[asyncio.Task] = None
         self._ch_ok: Dict[int, float] = {}   # tg_id -> cache until
@@ -1423,6 +1426,8 @@ class TelegramBot:
         """
         ai = getattr(self, "ai", None)
         en = str(lang).startswith("en")
+        key = "en" if en else "ru"
+        self._ai_head_full[key] = ""   # шапка прошлого поста не должна протечь
         if ai is None or not getattr(ai, "enabled", False):
             if not en:
                 self._ai_state = {"provider": "", "ok": False, "reason": "ИИ не настроен"}
@@ -1442,6 +1447,10 @@ class TelegramBot:
                 self._ai_recent_en = (self._ai_recent_en + [head])[-8:]
             else:
                 self._ai_recent = (self._ai_recent + [head])[-8:]
+            # Полный текст шапки (до обрезки под подпись Telegram) — для
+            # сайта: там пост идёт целиком, обрывать рассказ на полуслове нельзя.
+            full = str(getattr(ai, "last_full", "") or "").strip()
+            self._ai_head_full[key] = full or head
             note = f"ИИ: {st.get('provider') or '?'} · {st.get('ms') or 0} мс"
         else:
             note = (f"ИИ не ответил ({st.get('reason') or 'все сервисы'}) —"
@@ -1539,24 +1548,30 @@ class TelegramBot:
             bot_url=self.bot_url(),
             lang="en",
         )
-        # Полный текст для сайта /hourly — без лимита 1024 (как в daily_digest:
-        # в TG — коротко, на сайте — полностью)
+        # Полный текст для сайта /hourly — без лимита 1024 и без обрезки
+        # ИИ-шапки (как в daily_digest: в TG — коротко, на сайте — полностью).
+        # Шапка берётся целиком (_ai_head_full): рассказ не обрывается
+        # на полуслове, как в подписи под фото.
+        ai_head_full = self._ai_head_full.get("ru") or ai_head
+        ai_head_full_en = self._ai_head_full.get("en") or ai_head_en
         caption_full = render_post(
             snap, n,
             headlines=active_headlines(self.store, hours),
-            head_override=ai_head,
+            head_override=ai_head_full or None,
             site_url=self.site_url(),
             bot_url=self.bot_url(),
             limit=10 ** 9,
+            head_full=True,
         )
         caption_full_en = render_post(
             snap, n,
             headlines=active_headlines(self.store, hours, lang="en"),
-            head_override=ai_head_en or None,
+            head_override=ai_head_full_en or None,
             site_url=self.site_url(),
             bot_url=self.bot_url(),
             lang="en",
             limit=10 ** 9,
+            head_full=True,
         )
         # Один пост вместо двух: часы уже внутри подписи (render_post сам
         # решает, каким видом они влезают). Второе сообщение — только аварийный

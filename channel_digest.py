@@ -1204,15 +1204,18 @@ def format_headline(tpl: str, h: int = 4, lang: str = "ru") -> str:
     return f"<b>{_html.escape(s, quote=False)}</b>"
 
 
-def format_ai_head(text: str, h: int = 4) -> str:
+def format_ai_head(text: str, h: int = 4, limit: Optional[int] = HEAD_MAX_LEN) -> str:
     """Шапка от ИИ: всегда экранируем и оборачиваем в <b>.
 
     В отличие от шаблонов из админки (там можно прислать готовый HTML),
     текст модели — это только текст: случайный «<» сломает разметку Telegram.
+    ``limit`` — предел длины подписи под фото (HEAD_MAX_LEN); для сайта
+    передают None — там шапка идёт целиком, без обрезки.
     """
     import html as _html
     s = (text or "").strip().replace("{h}", str(int(h)))
-    s = s[:HEAD_MAX_LEN]
+    if limit and limit > 0:
+        s = s[:limit]
     return f"<b>{_html.escape(s, quote=False)}</b>" if s else ""
 
 
@@ -1395,7 +1398,8 @@ def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = N
                 bot_url: str = "https://t.me/LiqScopeBot",
                 head_override: Optional[str] = None,
                 lang: str = "ru",
-                limit: int = CAPTION_LIMIT) -> str:
+                limit: int = CAPTION_LIMIT,
+                head_full: bool = False) -> str:
     """Сводка одним сообщением: шапка, строки окна и часы по порядку.
 
     Строки окна: итог (касса, число ликвидаций, сравнение с прошлым окном),
@@ -1415,7 +1419,8 @@ def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = N
     чем пожертвовать: сначала уходят подробности окна, потом из строки часа
     пропадают слова «Лидер часа», в самом тесном случае часы идут без
     лидеров, а из ряда часов уходят самые старые. head_override — шапка от
-    ИИ: та же раскладка, меняется только текст.
+    ИИ: та же раскладка, меняется только текст. head_full=True — версия для
+    сайта: шапка не режется под лимит подписи Telegram и пост идёт целиком.
     """
     import html as _html
     f = _facts(snap, lang)
@@ -1434,7 +1439,11 @@ def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = N
     # шапку и компоновку крутим независимо: своя единственная шапка из админки
     # не должна «замораживать» раскладку — блоки продолжают чередоваться
     v = int(variant)
-    head = (format_ai_head(head_override, h) if head_override
+    # head_full=True — версия для сайта: шапка от ИИ идёт целиком, без
+    # обрезки под лимит подписи Telegram (в канале — та же шапка, но короче)
+    head = (format_ai_head(head_override, h,
+                           limit=None if head_full else HEAD_MAX_LEN)
+            if head_override
             else heads[v % max(1, len(heads))])
 
     # Компоновка поста: шапка → строка итога → лидер окна → CVD окна →

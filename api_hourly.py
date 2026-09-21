@@ -151,10 +151,21 @@ def register_hourly_routes(app) -> None:
 
     @router.get("/api/hourly/photo/{pid}")
     async def api_photo(pid: str):
-        """Фото поста: картинка лежит вне static (data/channel), отдаём её здесь."""
+        """Фото поста: картинка лежит вне static (data/channel), отдаём её здесь.
+
+        Если файл удалён (data очищена), отдаём fallback из комплекта
+        static/channel, чтобы старые посты не остались без картинки.
+        """
         rec = ctx.store.get(pid)
         path = str(((rec or {}).get("photo") or {}).get("path") or "")
         if not path or not os.path.isfile(path):
+            try:
+                from hourly_posts import _hourly_bundle_fallback
+                fb = _hourly_bundle_fallback(pid)
+                if fb and os.path.isfile(fb):
+                    return _photo_response(fb)
+            except Exception:
+                pass
             return JSONResponse({"ok": False, "error": "no_photo"}, status_code=404)
         return _photo_response(path)
 

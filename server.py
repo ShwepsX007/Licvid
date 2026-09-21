@@ -84,6 +84,10 @@ from feedback import register_feedback_routes
 import geoip
 import web_geo
 import web_layers
+import terminal_chat as terminal_chat_mod
+from terminal_chat import register_chat_routes as register_terminal_chat_routes
+import content_comments as content_comments_mod
+from content_comments import register_comment_routes as register_content_comment_routes
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -1270,7 +1274,8 @@ async def pump_loop():
 
     Один REST-запрос отдаёт все USDT-контракты сразу, поэтому следить за всем
     рынком дешевле, чем за подписками по каждой паре. Сигнал уходит тем, кто
-    включил сервис «Сторож монет», и предлагает посмотреть монету на Gate.
+    включил сервис «Сторож монет», и предлагает посмотреть монету на Gate
+    по партнёрской ссылке (refs.GATE_REF).
     """
     from pump_scan import CANDLE_PRESETS as _CANDS, THRESHOLDS as _THR
     global PUMP_CANDLES, PUMP_PERIODS, PUMP_THRESHOLDS
@@ -2436,6 +2441,7 @@ async def collect_hourly_post() -> dict:
             site_url=PUBLIC_URL,
             bot_url=tg_bot.bot_url(),
             lang=lang,
+            limit=10 ** 9,
         )
     img = pick_active_image(account_store, "post", variant=n)
     now = time.time()
@@ -2506,6 +2512,16 @@ web_layers.ctx.store = account_store
 web_layers.ctx.secret = SECRET
 web_layers.ctx.public_url = PUBLIC_URL
 web_layers.register_layer_routes(app)
+
+# 💬 Мини-чат терминала: 3 дня истории, пишет любой зарегистрированный
+terminal_chat_mod.ctx.store = account_store
+terminal_chat_mod.ctx.secret = SECRET
+register_terminal_chat_routes(app, hub=hub)
+
+# 💬 Комментарии к дайджесту и сводке по часам: читают все, пишут зарегистрированные
+content_comments_mod.ctx.store = account_store
+content_comments_mod.ctx.secret = SECRET
+register_content_comment_routes(app)
 
 
 @app.get("/api/symbols")

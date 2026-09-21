@@ -62,6 +62,14 @@ TRIAL_ENV = "LIQSCOPE_LAYERS_TRIAL_MIN"
 #: Границы: 0 — ограничения нет, больше суток давать бессмысленно.
 MIN_TRIAL_MIN, MAX_TRIAL_MIN = 0, 24 * 60
 
+#: Включение пробного периода: гостю — N минут, потом предложение регистрации.
+#: Выключено — слои открыты всем и всегда (как сейчас).
+TRIAL_ENABLED_SETTING = "layers_trial_enabled"
+TRIAL_ENABLED_ENV = "LIQSCOPE_LAYERS_TRIAL_ENABLED"
+#: По умолчанию — выключено (слои свободны для всех): так сейчас работает сайт,
+#: а включить ограничение админ может в один клик в админке.
+DEFAULT_ENABLED = False
+
 #: Метка «аргумент не передан»: пустое значение значит «взять хранилище из ctx».
 _DEFAULT = object()
 
@@ -80,6 +88,20 @@ ctx = Ctx()
 def _store_of(store: Any = _DEFAULT):
     """Хранилище: явно переданное (тесты) или то, что подключил сервер."""
     return ctx.store if store is _DEFAULT else store
+
+
+def _parse_bool(value: Any) -> Optional[bool]:
+    """Булево из строки/числа: None — значения нет или оно нечитаемое."""
+    if value is None:
+        return None
+    s = str(value).strip().lower()
+    if not s:
+        return None
+    if s in ("1", "true", "yes", "on", "enabled", "enable"):
+        return True
+    if s in ("0", "false", "no", "off", "disabled", "disable"):
+        return False
+    return None
 
 
 def _minutes(value: Any) -> Optional[int]:
@@ -102,6 +124,11 @@ def env_minutes() -> Optional[int]:
     return _minutes(os.getenv(TRIAL_ENV))
 
 
+def env_enabled() -> Optional[bool]:
+    """Включён ли пробный период из переменной окружения. None — не задана."""
+    return _parse_bool(os.getenv(TRIAL_ENABLED_ENV))
+
+
 def setting_minutes(store: Any = _DEFAULT) -> Optional[int]:
     """Минуты из настроек сайта (админка). None — в базе пусто."""
     store = _store_of(store)
@@ -115,6 +142,19 @@ def setting_minutes(store: Any = _DEFAULT) -> Optional[int]:
     return _minutes(raw)
 
 
+def setting_enabled(store: Any = _DEFAULT) -> Optional[bool]:
+    """Включён ли пробник из настроек сайта. None — в базе пусто."""
+    store = _store_of(store)
+    if store is None:
+        return None
+    try:
+        raw = store.get_setting(TRIAL_ENABLED_SETTING, "")
+    except Exception as e:                                # noqa: BLE001
+        log.debug("слои: настройка enabled недоступна: %s", e)
+        return None
+    return _parse_bool(raw)
+
+
 def trial_source(store: Any = _DEFAULT) -> str:
     """Откуда взялся лимит: ``env`` — переменная, ``site`` — админка, ``default``."""
     if env_minutes() is not None:
@@ -124,9 +164,34 @@ def trial_source(store: Any = _DEFAULT) -> str:
     return "default"
 
 
+def trial_enabled_source(store: Any = _DEFAULT) -> str:
+    """Откуда взялся флаг enabled: env / site / default."""
+    if env_enabled() is not None:
+        return "env"
+    if setting_enabled(store) is not None:
+        return "site"
+    return "default"
+
+
 def trial_locked() -> bool:
     """Лимит задан переменной окружения — с сайта его не поменять."""
     return env_minutes() is not None
+
+
+def trial_enabled_locked() -> bool:
+    """Флаг enabled задан переменной окружения — с сайта его не поменять."""
+    return env_enabled() is not None
+
+
+def trial_enabled(store: Any = _DEFAULT) -> bool:
+    """Включён ли пробный период: env → site → DEFAULT_ENABLED (False = свободный доступ)."""
+    env = env_enabled()
+    if env is not None:
+        return bool(env)
+    site = setting_enabled(store)
+    if site is not None:
+        return bool(site)
+    return bool(DEFAULT_ENABLED)
 
 
 def trial_limit_minutes(store: Any = _DEFAULT) -> int:
@@ -141,7 +206,18 @@ def trial_limit_minutes(store: Any = _DEFAULT) -> int:
 
 
 def trial_limit_sec(store: Any = _DEFAULT) -> int:
-    """Пробник в секундах. ``0`` — ограничения нет (слои открыты всем)."""
+    """Пробник в секундах. ``0`` — ограничения нет (слои открыты всем).
+
+    Если пробный период выключен (enabled=False) — возвращаем 0 независимо от минут:
+    слои свободны для всех как сейчас.
+    """
+    if not trial_enabled(store):
+        return 0
+    return trial_limit_minutes(store) * 60
+
+
+def trial_limit_sec_configured(store: Any = _DEFAULT) -> int:
+    """Настроенный лимит в секундах без учёта enabled (что было бы если включить)."""
     return trial_limit_minutes(store) * 60
 
 
@@ -191,12 +267,19 @@ def _stats(limit_sec: int) -> Dict[str, Any]:
 
 def admin_payload() -> Dict[str, Any]:
     """Что админке нужно знать о пробном доступе: лимит, источник, воронка."""
+    # настроенный лимит (даже если выключен) и фактический (0 если выключен)
+    configured_min = trial_limit_minutes()
+    configured_sec = configured_min * 60
     limit_sec = trial_limit_sec()
     source = trial_source()
+    enabled = trial_enabled()
+    enabled_src = trial_enabled_source()
     return {
         "ok": True,
-        "minutes": limit_sec // 60,
+        "minutes": configured_min,
         "limit_sec": limit_sec,
+        "configured_sec": configured_sec,
+        "configured_min": configured_min,
         "default_min": DEFAULT_TRIAL_MIN,
         "min": MIN_TRIAL_MIN,
         "max": MAX_TRIAL_MIN,
@@ -204,7 +287,12 @@ def admin_payload() -> Dict[str, Any]:
         "locked": source == "env",
         "env_var": TRIAL_ENV,
         "setting": TRIAL_SETTING,
-        "stats": _stats(limit_sec),
+        "enabled": bool(enabled),
+        "enabled_source": enabled_src,
+        "enabled_locked": enabled_src == "env",
+        "enabled_env_var": TRIAL_ENABLED_ENV,
+        "enabled_setting": TRIAL_ENABLED_SETTING,
+        "stats": _stats(limit_sec if limit_sec > 0 else configured_sec),
     }
 
 
@@ -214,6 +302,9 @@ def register_layer_routes(app) -> None:
     @router.get("/api/layers/trial")
     async def layers_trial(request: Request) -> Dict[str, Any]:
         """Пробный доступ гостя к слоям: остаток времени и решение шлюза."""
+        enabled = trial_enabled()
+        configured_min = trial_limit_minutes()
+        configured_sec = configured_min * 60
         limit = trial_limit_sec()
         from web_account import current_user
         user: Optional[dict] = None
@@ -222,12 +313,20 @@ def register_layer_routes(app) -> None:
         except Exception:                                 # noqa: BLE001
             user = None
         base: Dict[str, Any] = {
-            "ok": True, "guest": not bool(user), "limit_sec": limit,
-            "allowed": True, "left_sec": None, "expired": False,
-            "ended_at": 0.0, "hits": 0,
+            "ok": True,
+            "guest": not bool(user),
+            "enabled": bool(enabled),
+            "limit_sec": limit,
+            "configured_sec": configured_sec,
+            "configured_min": configured_min,
+            "allowed": True,
+            "left_sec": None,
+            "expired": False,
+            "ended_at": 0.0,
+            "hits": 0,
         }
-        # ограничение выключено — слои открыты всем
-        if limit <= 0:
+        # пробный период выключен — слои открыты всем и всегда
+        if not enabled or limit <= 0:
             base["disabled"] = True
             return base
         if user:
@@ -268,12 +367,14 @@ def register_layer_routes(app) -> None:
     @router.post("/api/admin/layers/settings")
     async def admin_layers_save(request: Request,
                                 payload: Optional[dict] = Body(default=None)) -> Any:
-        """Сохранить лимит пробника из админки.
+        """Сохранить настройки пробника из админки: вкл/выкл + минуты.
 
         Правка действует сразу и на тех, кто уже в терминале: остаток времени
         считается от первого захода гостя, поэтому новый лимит меняет его
         немедленно. Значение из переменной окружения главнее — тогда честно
         говорим, что с сайта менять нечего.
+
+        Тело: ``{enabled: bool, minutes: int}`` — можно передавать по одному.
         """
         from feedback import _admin
         user, err = _admin(request)
@@ -281,29 +382,74 @@ def register_layer_routes(app) -> None:
             return err
         if ctx.store is None:
             return JSONResponse({"ok": False, "error": "no_store"}, status_code=503)
-        if trial_locked():
+        body = payload or {}
+        has_minutes = "minutes" in body
+        has_enabled = "enabled" in body
+
+        if not has_minutes and not has_enabled:
+            return JSONResponse({"ok": False, "error": "bad_value", "key": "minutes"},
+                                status_code=400)
+
+        # проверка блокировок окружением
+        if has_minutes and trial_locked():
             return JSONResponse({"ok": False, "error": "locked",
                                  "env_var": TRIAL_ENV}, status_code=409)
-        body = payload or {}
-        if body.get("minutes") in (None, ""):
-            return JSONResponse({"ok": False, "error": "bad_value", "key": "minutes"},
-                                status_code=400)
-        minutes = _minutes(body.get("minutes"))
-        if minutes is None:
-            return JSONResponse({"ok": False, "error": "bad_value", "key": "minutes"},
-                                status_code=400)
-        try:
-            ctx.store.set_setting(TRIAL_SETTING, str(minutes), int((user or {}).get("id") or 0))
-        except Exception as e:                            # noqa: BLE001
-            log.warning("слои: настройка не сохранилась: %s", e)
-            return JSONResponse({"ok": False, "error": "save"}, status_code=500)
-        log.info("слои: пробник теперь %s мин (админ %s)", minutes,
-                 (user or {}).get("id"))
+        if has_enabled and trial_enabled_locked():
+            return JSONResponse({"ok": False, "error": "locked",
+                                 "env_var": TRIAL_ENABLED_ENV}, status_code=409)
+
+        saved_minutes = None
+        saved_enabled = None
+
+        if has_minutes:
+            if body.get("minutes") in (None, ""):
+                return JSONResponse({"ok": False, "error": "bad_value", "key": "minutes"},
+                                    status_code=400)
+            minutes = _minutes(body.get("minutes"))
+            if minutes is None:
+                return JSONResponse({"ok": False, "error": "bad_value", "key": "minutes"},
+                                    status_code=400)
+            try:
+                ctx.store.set_setting(TRIAL_SETTING, str(minutes),
+                                      int((user or {}).get("id") or 0))
+            except Exception as e:                        # noqa: BLE001
+                log.warning("слои: настройка минут не сохранилась: %s", e)
+                return JSONResponse({"ok": False, "error": "save"}, status_code=500)
+            saved_minutes = minutes
+            log.info("слои: пробник теперь %s мин (админ %s)", minutes,
+                     (user or {}).get("id"))
+
+        if has_enabled:
+            en = _parse_bool(body.get("enabled"))
+            if en is None:
+                return JSONResponse({"ok": False, "error": "bad_value", "key": "enabled"},
+                                    status_code=400)
+            try:
+                ctx.store.set_setting(TRIAL_ENABLED_SETTING, "1" if en else "0",
+                                      int((user or {}).get("id") or 0))
+            except Exception as e:                        # noqa: BLE001
+                log.warning("слои: настройка enabled не сохранилась: %s", e)
+                return JSONResponse({"ok": False, "error": "save"}, status_code=500)
+            saved_enabled = bool(en)
+            log.info("слои: пробник %s (админ %s)",
+                     "включён" if en else "выключен", (user or {}).get("id"))
+
         out = admin_payload()
-        out["saved"] = minutes
-        out["note"] = ("Пробный доступ выключен: слои открыты всем."
-                       if minutes <= 0 else
-                       f"Гостям выдаётся {minutes} мин пробного доступа.")
+        if saved_minutes is not None:
+            out["saved"] = saved_minutes
+        if saved_enabled is not None:
+            out["saved_enabled"] = saved_enabled
+
+        # человекочитаемая подсказка
+        en_now = out.get("enabled")
+        mins_now = out.get("minutes", 0)
+        if not en_now:
+            out["note"] = "Пробный доступ выключен: слои открыты всем."
+        else:
+            if mins_now <= 0:
+                out["note"] = "Пробный период включён, но лимит 0 — слои всё ещё открыты всем."
+            else:
+                out["note"] = f"Пробный доступ включён: гостям {mins_now} мин."
         return out
 
     @router.post("/api/admin/layers/reset")

@@ -61,16 +61,11 @@ def tg_html(text: Any) -> str:
     моноширинный текст и ссылки. Ссылки получают ``target`` и ``rel``: пост
     уходит на внешний сайт, но не отдаёт ему наш referrer.
     """
-    # Снимаем экранирование один раз (в канале разметка уже экранирована) и
-    # экранируем заново: амперсанды и кавычки на странице выглядят как в
-    # Telegram, а не как «&amp;amp;».
     raw = html_mod.escape(html_mod.unescape(str(text if text is not None else "")),
                           quote=True)
     raw = _BR_RE.sub("<br>", raw)
     raw = _TAG_RE.sub(lambda m: "<%s%s>" % ("/" if m.group(1) else "", m.group(2).lower()),
                       raw)
-    # Ссылки собираем вручную и следим за парностью: «висячий» </a> остаётся
-    # экранированным текстом и разметку страницы не ломает.
     out: List[str] = []
     pos = 0
     depth = 0
@@ -93,11 +88,7 @@ def tg_html(text: Any) -> str:
 
 
 def plain_text(text: Any) -> str:
-    """Подпись без разметки: описание для превью и поиска.
-
-    Telegram-теги вырезаем, ссылки оставляем словом, лишние пустые строки
-    сжимаем — в мете страницы это читается, а в ``<pre>`` не мешает.
-    """
+    """Подпись без разметки: описание для превью и поиска."""
     raw = re.sub(r"<a\s+[^>]*>", "", str(text if text is not None else ""), flags=re.I)
     raw = re.sub(r"</a>", "", raw, flags=re.I)
     raw = re.sub(r"<br\s*/?>", "\n", raw, flags=re.I)
@@ -129,17 +120,11 @@ def pick_text(rec: dict, lang: str = "en") -> str:
     want = "en" if is_en(lang) else ("ru" if str(lang).startswith("ru") else "en")
     if want == "ru":
         return texts.get("ru") or texts.get("en") or ""
-    # Остальные языки интерфейса читают английскую версию: из английского
-    # канала и приходят эти посты.
     return texts.get("en") or texts.get("ru") or ""
 
 
 class PostStore:
-    """Архив сводок: JSON-файл, свежие первыми.
-
-    Пишем атомарно (tmp + rename) — перезапуск сервера в момент записи не
-    должен оставить битый архив с постами.
-    """
+    """Архив сводок: JSON-файл, свежие первыми."""
 
     def __init__(self, path: str = "", keep: int = DEFAULT_KEEP):
         self.path = str(path or "")
@@ -148,7 +133,6 @@ class PostStore:
         self.error = ""
         self.load()
 
-    # --- чтение/запись -----------------------------------------------------
     def load(self) -> List[dict]:
         self.items = []
         self.error = ""
@@ -161,7 +145,7 @@ class PostStore:
                 data = data.get("items") or []
             self.items = [x for x in data if isinstance(x, dict)]
             self._sort()
-        except Exception as e:                      # битый файл не должен мешать
+        except Exception as e:
             self.error = f"{type(e).__name__}: {e}"
             self.items = []
         return self.items
@@ -178,9 +162,7 @@ class PostStore:
         except Exception as e:                      # noqa: BLE001
             self.error = f"{type(e).__name__}: {e}"
 
-    # --- операции ----------------------------------------------------------
     def add(self, rec: dict) -> dict:
-        """Положить пост в архив (по id заменяем, а не дублируем)."""
         rec = dict(rec or {})
         rid = str(rec.get("id") or "")
         if not rid:
@@ -197,7 +179,6 @@ class PostStore:
         return rec
 
     def _sort(self) -> None:
-        """Свежие посты первыми — даже если файл писали в другом порядке."""
         self.items.sort(key=lambda x: str(x.get("id") or ""), reverse=True)
 
     def get(self, rid: str) -> Optional[dict]:
@@ -210,7 +191,6 @@ class PostStore:
         return list(self.items)
 
     def by_day(self, day: str) -> List[dict]:
-        """Все посты одного дня (свежие первыми)."""
         want = str(day or "")
         return [x for x in self.items if str(x.get("day")) == want]
 
@@ -218,7 +198,6 @@ class PostStore:
         return self.items[:max(1, int(limit or 6))]
 
     def days(self) -> List[dict]:
-        """Индекс дней для календаря: дата, число постов и границы по времени."""
         out: Dict[str, dict] = {}
         for rec in self.items:
             day = str(rec.get("day") or "")
@@ -244,7 +223,6 @@ class PostStore:
         return rows
 
     def stats(self) -> Dict[str, Any]:
-        """Сводка архива: сколько постов и за какой период."""
         days = self.days()
         return {
             "count": len(self.items),
@@ -264,12 +242,31 @@ def photo_url(rid: str) -> str:
     return f"/api/hourly/photo/{rid}"
 
 
+def _hourly_bundle_fallback(rid: str = "") -> Optional[str]:
+    """Встроенная картинка, когда файл поста удалён."""
+    try:
+        from channel_digest import list_images, pick_image
+        var = 0
+        try:
+            var = int(str(rid or "").replace("-", "")[-4:] or 0)
+        except Exception:
+            var = 0
+        p = pick_image(var)
+        if p and os.path.isfile(p):
+            return p
+        imgs = list_images()
+        if imgs and os.path.isfile(imgs[0]):
+            return imgs[0]
+    except Exception:
+        return None
+    return None
+
+
 def public_post(rec: dict, lang: str = "en", with_text: bool = True) -> dict:
     """Пост для сайта: время, фото и подпись — как в канале.
 
-    ``text`` — подпись на языке сайта (для остальных языков интерфейса это
-    английская версия: посты берутся из английского канала), ``texts`` —
-    обе версии, чтобы страница могла переключить язык внутри поста.
+    Если файл фото удалён (data очищена), отдаём fallback из комплекта,
+    чтобы старые посты не остались без картинки.
     """
     rec = rec or {}
     rid = str(rec.get("id") or "")
@@ -289,9 +286,15 @@ def public_post(rec: dict, lang: str = "en", with_text: bool = True) -> dict:
         "langs": [k for k in ("ru", "en") if texts.get(k)],
         "sent": {k: bool(v) for k, v in (rec.get("sent") or {}).items()},
     }
-    if path and os.path.isfile(path):
+    has_file = path and os.path.isfile(path)
+    if has_file:
         out["photo"] = {"url": photo_url(rid), "name": photo.get("name") or "",
                         "source": photo.get("source") or "bundle"}
+    else:
+        fb = _hourly_bundle_fallback(rid)
+        if fb:
+            out["photo"] = {"url": photo_url(rid), "name": os.path.basename(fb),
+                            "source": "bundle"}
     if with_text:
         text = pick_text(rec, lang)
         out["text"] = text

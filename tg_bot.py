@@ -1655,30 +1655,9 @@ class TelegramBot:
         return [img] if img else []
 
     async def _publish_digest(self, posts, img, n: int, meta=None) -> bool:
-        """Отправка готового поста в каналы (русский и английский).
-
-        Порядок: сначала — полный текст на сайт /hourly (без лимита 1024),
-        потом — в Telegram как получится (может обрезаться до 1024). Так на
-        сайте всегда лежит весь предполагаемый текст, а в Telegram — заметка,
-        даже если не влезла.
-        """
+        """Отправка готового поста в каналы (русский и английский)."""
         delivered = 0
         images = self._photo_list(img)
-        # --- СНАЧАЛА на сайт полный текст без обрезки -------------------------
-        try:
-            # все языки, у которых есть full_caption — кладём на сайт сразу
-            all_langs = []
-            for p in posts or []:
-                lang = "en" if str(p.get("lang") or "").startswith("en") else "ru"
-                if lang not in all_langs and str(p.get("full_caption") or p.get("caption") or "").strip():
-                    all_langs.append(lang)
-            if all_langs:
-                self._archive_posts(posts, all_langs, images[0] if images else "", n,
-                                    meta=meta)
-        except Exception as e:  # noqa: BLE001 — архив не должен ломать публикацию
-            log.debug("сводки по часам: пред-архив не удался: %s", e)
-
-        # --- ПОТОМ в Telegram (может обрезаться) ------------------------------
         sent_langs: List[str] = []
         for post in posts or []:
             cid = post.get("cid")
@@ -1693,13 +1672,10 @@ class TelegramBot:
                 sent_langs.append("en" if str(post.get("lang") or "").startswith("en")
                                   else "ru")
         if delivered:
-            # Если в архив ушло раньше — этот вызов просто обновит sent-флаги
-            # (не мешает, если уже есть запись с тем же id — add() заменит)
-            try:
-                self._archive_posts(posts, sent_langs, images[0] if images else "", n,
-                                    meta=meta)
-            except Exception as e:  # noqa: BLE001
-                log.debug("сводки по часам: пост-архив не удался: %s", e)
+            # Тот же пост — в архив сайта: раздел «Сводки по часам» показывает
+            # подпись и фото ровно такими, какими они ушли в канал
+            self._archive_posts(posts, sent_langs, images[0] if images else "", n,
+                                meta=meta)
             self._digest_routes = self.channel_route_text()
             now_ts = int(__import__("time").time())
             self.store.set_setting("channel_digest_n", str(n + 1))
@@ -1724,13 +1700,13 @@ class TelegramBot:
         return self._digest_fail(err + extra)
 
     def _archive_posts(self, posts, langs, img, n: int, meta=None) -> None:
-        """Положить пост в архив сайта («Сводки по часам»).
+        """Положить опубликованный пост в архив сайта («Сводки по часам»).
 
-        На сайт кладём полный текст (full_caption) без лимита 1024, в TG уже
-        ушёл обрезанный caption. Раньше архив шёл только после успешной
-        отправки в Telegram и только по тем языкам, что реально ушли; теперь
-        сначала кладём полный на сайт (все языки с full_caption), потом —
-        в Telegram как получится. Ошибка архива публикацию не ломает.
+        В архив идут только те языки, которые реально ушли в канал: если
+        английский канал не привязан, поста в нём и не было. На сайт кладём
+        полный текст (full_caption), в TG уже ушёл обрезанный caption.
+        Ошибка архива публикацию не ломает — пост уже в канале, а сайт просто
+        не пополнится.
         """
         store = getattr(self, "hourly_store", None)
         if store is None:

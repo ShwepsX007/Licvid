@@ -316,25 +316,53 @@ def assign_cover(rec: dict, day: str = "") -> dict:
     return cover
 
 
+def _bundle_fallback(day: str = "") -> Optional[str]:
+    """Встроенная картинка комплекта, когда админское фото удалено."""
+    try:
+        from channel_digest import list_images, pick_image
+    except Exception:
+        return None
+    try:
+        var = cover_variant(day)
+        p = pick_image(var)
+        if p and os.path.isfile(p):
+            return p
+        imgs = list_images()
+        if imgs and os.path.isfile(imgs[0]):
+            return imgs[0]
+    except Exception:
+        return None
+    return None
+
+
 def public_photo(rec: dict) -> Optional[dict]:
     """Обложка для сайта: относительный адрес, имя файла и откуда он взялся.
 
     Админские фото лежат вне static (в data/channel), поэтому отдаём их через
     ``/api/digest/cover?day=…``: так страница показывает ровно ту картинку,
     которая ушла в канал, и превью ссылки строится на неё же.
+    Если файл удалён (data очищена), возвращаем fallback из комплекта
+    static/channel, чтобы страница не осталась без фото-контента.
     """
     photo = (rec or {}).get("photo") or {}
     path = str(photo.get("path") or "")
     day = str((rec or {}).get("day") or (rec or {}).get("id") or "")
-    if not path or not os.path.isfile(path) or not day:
+    if not day:
         return None
-    out = {"url": f"/api/digest/cover?day={day}", "name": photo.get("name") or "",
-           "source": photo.get("source") or "admin", "day": day}
-    if photo.get("id"):
-        out["id"] = int(photo["id"])
-    if photo.get("kind"):
-        out["kind"] = str(photo["kind"])
-    return out
+    if path and os.path.isfile(path):
+        out = {"url": f"/api/digest/cover?day={day}", "name": photo.get("name") or "",
+               "source": photo.get("source") or "admin", "day": day}
+        if photo.get("id"):
+            out["id"] = int(photo["id"])
+        if photo.get("kind"):
+            out["kind"] = str(photo["kind"])
+        return out
+    # файл удалён — fallback на комплект, чтобы фото не пропадало
+    fb = _bundle_fallback(day)
+    if fb:
+        return {"url": f"/api/digest/cover?day={day}", "name": os.path.basename(fb),
+                "source": "bundle", "day": day}
+    return None
 
 
 def public_record(rec: dict, lang: str = seo_pages.DEFAULT_LANG,
@@ -755,12 +783,18 @@ def register_digest_routes(app) -> None:
 
         Свои фото админка хранит вне static (в data/channel), поэтому отдаём
         их здесь. Кэш на сутки: обложка выбранного дня не меняется.
+        Если файл удалён (data очищена), отдаём fallback из комплекта
+        static/channel, чтобы старые выпуски не остались без картинки.
         """
         items = ctx.store.list()
         rec = ctx.store.get(day) if day else (items[0] if items else None)
         path = str(((rec or {}).get("photo") or {}).get("path") or "")
         if not path or not os.path.isfile(path):
-            return JSONResponse({"ok": False, "error": "no_cover"}, status_code=404)
+            fb = _bundle_fallback(day)
+            if fb and os.path.isfile(fb):
+                path = fb
+            else:
+                return JSONResponse({"ok": False, "error": "no_cover"}, status_code=404)
         ext = os.path.splitext(path)[1].lower()
         media = {".png": "image/png", ".webp": "image/webp", ".gif": "image/gif",
                  ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}.get(ext, "image/jpeg")

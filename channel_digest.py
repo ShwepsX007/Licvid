@@ -72,6 +72,28 @@ def window_word(secs: float, lang: str = "ru") -> str:
         return f"{hours}h{minutes:02d}m"
     return f"{hours}ч{minutes:02d}м"
 CAPTION_LIMIT = 1024
+#: Разделитель блоков в посте канала. Пустых строк между блоками нет: пост
+#: идёт плотной простынёй, иначе в Telegram между суммой окна, часами и
+#: хвостом зияют «дыры», и он читается как сборка обрывков, а не как текст.
+BLOCK_SEP = "\n"
+
+
+def tight(text: Any) -> str:
+    """Блок без пустых строк: переносы остаются, «дыры» внутри — срастаются.
+
+    Текст из ИИ или из админки приходит с абзацами; в канале они выглядели как
+    пропуски. Схлопываем их в один перенос и убираем хвостовые пробелы строк.
+    Таблицу в ``<pre>`` не трогаем: там каждая строка на счету, а пустая и
+    дополненная пробелами — часть отступа.
+    """
+    s = str(text or "")
+    if "<pre>" in s:
+        return s.strip()
+    # хвостовые пробелы в канале не видны, но место в подписи занимают —
+    # убираем их, иначе лимит расходовался на мусор
+    s = "\n".join(ln.rstrip() for ln in s.splitlines())
+    s = re.sub(r"\n{2,}", BLOCK_SEP, s)
+    return s.strip()
 
 
 def caption_len(text: str) -> int:
@@ -123,12 +145,12 @@ def caption_fit(text: str, limit: int = CAPTION_LIMIT) -> str:
         start -= 1
     tail = lines[start:end]
     body = lines[:start]
-    while body and caption_len("\n".join(body + [""] + tail)) > limit:
+    while body and caption_len(BLOCK_SEP.join(body + tail)) > limit:
         body.pop()
         while body and not body[-1].strip():
             body.pop()
     head = "\n".join(body).rstrip()
-    out = (head + "\n\n" + "\n".join(tail)) if head else "\n".join(tail)
+    out = (head + BLOCK_SEP + "\n".join(tail)) if head else "\n".join(tail)
     return _close_tags(out.strip())
 
 
@@ -1060,7 +1082,7 @@ def render_top7(board: Optional[dict], lang: str = "ru") -> str:
     if not blocks:
         return ""
     head = f"<b>🏆 {lbl(lang, 'top_hours')}</b>"
-    return head + "\n\n" + "\n\n".join(blocks) + "\n" + gate_line(lang)
+    return BLOCK_SEP.join([head] + blocks + [gate_line(lang)])
 
 
 def build_board(board: Optional[dict], lang: str = "ru") -> str:
@@ -1094,10 +1116,11 @@ def _close_tags(text: str) -> str:
 
 
 def _pack(parts: List[str], tail: str, limit: int = CAPTION_LIMIT) -> str:
-    chunks = [p for p in parts if p]
+    chunks = [x for x in (tight(p) for p in parts) if x]
     def join(cs: List[str]) -> str:
-        body = "\n\n".join(cs)
-        return f"{body}\n\n{tail}" if tail else body
+        body = BLOCK_SEP.join(cs)
+        end = tight(tail)
+        return f"{body}{BLOCK_SEP}{end}" if end else body
     text = join(chunks)
     # Режем хвост, но первый блок (шапка + стенд) не выбрасываем: пустой пост
     # хуже длинного. Если и он не влезает — обрежется по лимиту строкой ниже.
@@ -1371,7 +1394,8 @@ def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = N
                 site_url: str = "https://liqscope.online",
                 bot_url: str = "https://t.me/LiqScopeBot",
                 head_override: Optional[str] = None,
-                lang: str = "ru") -> str:
+                lang: str = "ru",
+                limit: int = CAPTION_LIMIT) -> str:
     """Сводка одним сообщением: шапка, строки окна и часы по порядку.
 
     Строки окна: итог (касса, число ликвидаций, сравнение с прошлым окном),
@@ -1383,7 +1407,10 @@ def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = N
     Каждый час — одна строка (когда горело, на сколько, кто задавал час):
     OI и CVD часа в пост не идут, они остались в терминале. Строки окна (CVD
     за окно, перекос CVD, сдвиг OI) добавляются сверху, только если вместе
-    с часами всё ещё влезают в подпись. Подпись Telegram держит 1024 знака
+    с часами всё ещё влезают в подпись. Блоки разделены одним переносом
+    (``BLOCK_SEP``): пустых строк в канале нет, иначе пост расползался «дырами»
+    между суммой окна, рядом часов и подписью бренда.
+    Подпись Telegram держит 1024 знака
     (эмодзи считаются за два — ``caption_len``), поэтому пост сам выбирает,
     чем пожертвовать: сначала уходят подробности окна, потом из строки часа
     пропадают слова «Лидер часа», в самом тесном случае часы идут без
@@ -1434,10 +1461,13 @@ def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = N
             x.setdefault("tz", tz)
 
     def fits(parts_: List[str]) -> bool:
-        text = "\n\n".join([p for p in parts_ if p] + [tail])
+        # собираем тем же _pack без лимита: замер и вывод обязаны совпадать,
+        # иначе пост «влезает» по расчёту и не влезает по факту
+        # (sendPhoto отклоняет подпись, и фото теряется)
+        text = _pack(list(parts_) + [tail], "", limit=10 ** 9)
         # считаем как Telegram: эмодзи весит два знака (caption_len), иначе
         # подпись «влезает», а sendPhoto её отклоняет — и пост уходит без фото
-        return caption_len(text) <= CAPTION_LIMIT
+        return caption_len(text) <= limit
 
     parts: List[str] = [head, _total_line(snap, lang)]
     # Монета, уже названная лидером окна: в часах её сумма не повторяется.
@@ -1497,7 +1527,7 @@ def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = N
         # часов ещё нет (первый запуск): показываем хотя бы настроение ленты,
         # чтобы пост не состоял из одной суммы
         parts.append(_board_bias_line(board, lang) or f["bias_line"])
-    return _pack(parts, tail)
+    return _pack(parts, tail, limit=limit)
 
 
 def _flow_line(board: Optional[dict], lang: str = "ru") -> str:

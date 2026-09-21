@@ -705,12 +705,12 @@ RU_EN.update({
     "👁 Сторож монет": "👁 Coin watcher",
     "📰 Дневной дайджест": "📰 Daily digest",
     "Дневной дайджест": "Daily digest",
-    "Ликвидации, CVD и OI: порог, окно, монета — сигнал в кабинет и в Telegram.":
-        "Liquidations, CVD and OI: threshold, window, coin — a signal to your account and to Telegram.",
+    "Ликвидации, CVD и OI: порог, окно, монета — сигналы в Telegram.":
+        "Liquidations, CVD and OI: threshold, window, coin — alerts in Telegram.",
     "Какие монеты ходят вместе за час-неделю: ликвидации, объём, CVD и OI. Где выносило лонги, а где шорты.":
         "Which coins move together over an hour to a week: liquidations, volume, CVD and OI. Where longs and where shorts got liquidated.",
-    "Пампы и дампы всех монет Gate: порог в %, период свечей и их число. Сигнал в Telegram со ссылкой на Gate.":
-        "Pumps and dumps across all Gate coins: percentage threshold, candle period and count. The signal arrives in Telegram with a Gate link.",
+    "Пампы и дампы всех монет Gate: порог в %, период свечей и их число. Сигнал в Telegram.":
+        "Pumps and dumps across all Gate coins: percentage threshold, candle period and count. The signal arrives in Telegram.",
     "Сводка рынка за сутки в кабинет и в Telegram.":
         "A 24-hour market recap to your account and to Telegram.",
 })

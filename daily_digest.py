@@ -24,7 +24,7 @@ import os
 import time
 from typing import Any, Dict, List, Optional
 
-from channel_digest import coin, exch, liqs_word, money
+from channel_digest import coin, exch, liqs_word, money, tight
 from hour_board import hour_hhmm, tz_offset
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -756,10 +756,11 @@ def render_channel(rec: dict, lang: str = "ru", site_url: str = "",
     stats = channel_stats_block(facts, lang)
     link = channel_link_block(site_url, lang)
     fixed = len(head) + len(stats) + len(link)
-    room = min(int(limit), CHANNEL_LIMIT) - fixed - 6      # 3 разделителя по \n\n
+    # 3 разделителя по одному переносу: пустых строк в канале нет
+    room = min(int(limit), CHANNEL_LIMIT) - fixed - 3
     lead = lead_of(narrative, room) if room >= CHANNEL_LEAD_MIN else ""
     parts = [x for x in (head, lead, stats, link) if x]
-    return "\n\n".join(parts).strip()
+    return "\n".join(parts).strip()
 
 
 def render_post(rec: dict, lang: str = "ru", site_url: str = "") -> str:
@@ -772,17 +773,20 @@ def render_post(rec: dict, lang: str = "ru", site_url: str = "") -> str:
         narrative = fallback_narrative(facts, lang)
     head = (f"🧭 <b>{'Daily digest' if en else 'Дневной дайджест'} · "
             f"{day_label(day, lang)}</b>")
-    blocks = [head, "", str(narrative).strip(), "",
-              headline_block(facts, lang), "",
-              exchanges_block(facts, lang), "",
-              oi_block(facts, lang), "",
-              prices_block(facts, lang), "",
+    blocks = [head, str(narrative).strip(),
+              headline_block(facts, lang),
+              exchanges_block(facts, lang),
+              oi_block(facts, lang),
+              prices_block(facts, lang),
               mood_block(facts, lang)]
-    text = "\n".join([b for b in blocks if b is not None]).strip()
+    # Пустых строк между блоками не оставляем: пост идёт плотной простынёй,
+    # как и сводка по часам (channel_digest.BLOCK_SEP). Абзацы рассказа ИИ
+    # тоже срастаются в один перенос — иначе в канале получались «дыры».
+    text = "\n".join(b for b in (tight(x) for x in blocks) if b)
     text = _squeeze(text, TEXT_LIMIT)
     link = str(site_url or "").strip()
     if link.startswith("http"):
-        text += (f"\n\n🌐 <a href=\"{link.rstrip('/')}/digest\">"
+        text += (f"\n🌐 <a href=\"{link.rstrip('/')}/digest\">"
                  f"{'Full digest on the site' if en else 'Все дайджесты на сайте'}</a>")
     return text
 

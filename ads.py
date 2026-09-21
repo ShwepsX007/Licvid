@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -47,6 +48,132 @@ AD_KEEP_LIMIT = 40             # столько записей держим в �
 
 URL_RE = re.compile(r"https?://[^\s<>()\[\]{}\"']+")
 CHAT_RE = re.compile(r"^(-?\d{5,20}|@[A-Za-z0-9_]{4,32})$")
+
+#: Кликабельная ссылка объявления: только http/https, иначе «ссылка» вида
+#: javascript:… превратила бы баннер в исполняемый код на чужой странице.
+LINK_MAX = 600
+#: HTML-баннер: произвольный код для слота баннера (партнёрский блок, iframe).
+#: Админ доверенный, но размер ограничиваем — страница не должна весить мегабайты.
+HTML_MAX = 20000
+
+#: Настройки баннера по умолчанию — «как крутить и как плавно менять».
+#: Хранятся в settings админки, поэтому меняются без перезапуска сервера.
+BANNER_DEFAULTS = {
+    "rotate_sec": 8,        # сколько секунд стоит один слайд
+    "fade_ms": 500,         # плавность перехода между слайдами
+    "layout": "carousel",   # carousel — листаем, grid — все сразу
+    "max": 4,               # сколько объявлений показываем
+    "fit": "contain",       # contain — фото видно целиком, cover — заполняет блок
+    "caption": "below",     # below — подпись под фото, side — сбоку (как раньше)
+}
+BANNER_LIMITS = {          # min, max — за пределы не выпускаем никогда
+    "rotate_sec": (2, 120),
+    "fade_ms": (0, 2000),
+    "max": (1, 8),
+}
+BANNER_CHOICES = {
+    "layout": ("carousel", "grid"),
+    "fit": ("contain", "cover"),
+    "caption": ("below", "side"),
+}
+BANNER_KEYS = tuple(BANNER_DEFAULTS)
+#: Ключ настройки в table settings — одна JSON-строка на весь блок.
+BANNER_SETTING = "site_banner"
+
+
+def clean_link(raw: Any) -> str:
+    """Ссылка объявления: голая, без пробелов, только http/https.
+
+    Баннер висит на публичной странице, поэтому «ссылка» тут — атрибут href,
+    и пропустить в него ``javascript:`` значит отдать клик на произвольный код.
+    Разрешаем ровно два вида: адрес со схемой http(s) и домен без схемы
+    («gate.com/promo» — админ пишет его с телефона), всё остальное — пусто.
+    """
+    val = str(raw or "").strip()
+    if not val:
+        return ""
+    if not re.match(r"^https?://", val, flags=re.I):
+        if "://" in val or val.startswith("//") or ":" in val.split("/", 1)[0]:
+            return ""                       # чужая схема: ftp, data, javascript…
+        if not re.match(r"^[\w.-]+\.[a-z]{2,}", val, flags=re.I):
+            return ""                       # не похоже на адрес — не угадываем
+        val = "https://" + val
+    if len(val) > LINK_MAX or re.search(r"[\s\"'<>\\]", val):
+        return ""
+    return val
+
+
+def clean_html_banner(raw: Any) -> str:
+    """HTML-баннер: произвольный код админа для слота баннера.
+
+    Админ — доверенный, поэтому теги не вырезаем (партнёрские блоки часто
+    требуют <script> или <iframe>), но размер ограничиваем и убираем
+    нулевые байты. Пустая строка — нет HTML-баннера.
+    """
+    val = str(raw or "").strip()
+    if not val:
+        return ""
+    # убираем нулевые байты и контролируем длину
+    val = val.replace("\x00", "")[:HTML_MAX]
+    return val.strip()
+
+
+def normalize_banner(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Настройка баннера в виде, который можно отдавать странице.
+
+    Значения проверяем здесь, а не в админке: рука может дать и ``rotate_sec``
+    равный нулю — тогда баннер выжигал бы CPU перегонками, а страница с
+    ``max: 999`` тянула бы весь архив объявлений.
+    """
+    raw = raw if isinstance(raw, dict) else {}
+    out: Dict[str, Any] = {}
+    for key, default in BANNER_DEFAULTS.items():
+        val = raw.get(key, default)
+        if key in BANNER_CHOICES:
+            choices = BANNER_CHOICES[key]
+            out[key] = str(val) if str(val) in choices else default
+            continue
+        lo, hi = BANNER_LIMITS[key]
+        try:
+            num = int(round(float(val)))
+        except (TypeError, ValueError):
+            num = int(default)
+        out[key] = max(lo, min(hi, num))
+    return out
+
+
+def banner_settings(store=None) -> Dict[str, Any]:
+    """Как крутить баннер: из настроек админки, поверх дефолтов из кода."""
+    store = store if store is not None else ctx.store
+    raw: Dict[str, Any] = {}
+    if store is not None:
+        try:
+            raw = json.loads(store.get_setting(BANNER_SETTING, "") or "{}")
+        except Exception:                               # noqa: BLE001
+            raw = {}
+    return normalize_banner(raw)
+
+
+def save_banner_settings(store, body: Dict[str, Any],
+                         actor_id: Optional[int] = None) -> Dict[str, Any]:
+    """Сохранить настройку баннера; на выходе — то, что реально применилось."""
+    store = store if store is not None else ctx.store
+    if store is None:
+        return dict(BANNER_DEFAULTS)
+    current: Dict[str, Any] = {}
+    try:
+        current = json.loads(store.get_setting(BANNER_SETTING, "") or "{}")
+    except Exception:                                   # noqa: BLE001
+        current = {}
+    if not isinstance(current, dict):
+        current = {}
+    for key in BANNER_KEYS:
+        if key in (body or {}):
+            current[key] = (body or {}).get(key)
+    applied = normalize_banner(current)
+    store.set_setting(BANNER_SETTING, json.dumps(applied, ensure_ascii=False),
+                      actor_id=actor_id)
+    return applied
 
 
 def _bot_ready(bot) -> bool:
@@ -119,11 +246,14 @@ def caption_len(text: str) -> int:
     return _len(text or "")
 
 
-def text_problem(text: str, has_photo: bool) -> str:
-    """Почему текст не примут: пусто или длиннее лимита для этого случая."""
+def text_problem(text: str, has_photo: bool, has_html: bool = False) -> str:
+    """Почему текст не примут: пусто или длиннее лимита для этого случая.
+
+    Если есть HTML-баннер, текст может быть пустым — баннер покажет HTML.
+    """
     text = (text or "").strip()
     if not text:
-        return "empty"
+        return "" if has_html else "empty"
     if caption_len(text) > (TEXT_MAX_PHOTO if has_photo else TEXT_MAX_PLAIN):
         return "too_long_photo" if has_photo else "too_long"
     return ""
@@ -133,7 +263,7 @@ def text_problem(text: str, has_photo: bool) -> str:
 #  Получатели
 # ---------------------------------------------------------------------------
 def clean_targets(raw: Any) -> Dict[str, Any]:
-    """Что выбрал админ: бот, каналы и/или главная страница сайта."""
+    """Что выбрал админ: бот, каналы и/или страницы сайта (главная, терминал, дайджест, сводка)."""
     raw = raw if isinstance(raw, dict) else {}
     channels: List[str] = []
     for item in (raw.get("channels") or []):
@@ -142,6 +272,9 @@ def clean_targets(raw: Any) -> Dict[str, Any]:
             channels.append(cid)
     return {"bot": bool(raw.get("bot")),
             "site": bool(raw.get("site")),
+            "terminal": bool(raw.get("terminal")),
+            "digest": bool(raw.get("digest")),
+            "hourly": bool(raw.get("hourly")),
             "channels": channels[:20]}
 
 
@@ -156,6 +289,12 @@ def targets_text(targets: Dict[str, Any], channels: Optional[List[dict]] = None)
         parts.append(names.get(str(cid)) or f"канал {cid}")
     if (targets or {}).get("site"):
         parts.append("главная сайта")
+    if (targets or {}).get("terminal"):
+        parts.append("терминал")
+    if (targets or {}).get("digest"):
+        parts.append("дайджест")
+    if (targets or {}).get("hourly"):
+        parts.append("сводка по часам")
     return ", ".join(parts) or "никуда"
 
 
@@ -180,13 +319,28 @@ def known_channels(bot=None) -> List[Dict[str, Any]]:
 
 
 def ad_public(ad: Dict[str, Any], with_text: bool = True) -> Dict[str, Any]:
-    """Объявление для страницы: без получателей и служебного отчёта."""
+    """Объявление для страницы: без получателей и служебного отчёта.
+
+    ``link`` — куда ведёт клик по баннеру. Отдельно от текста он нужен, чтобы
+    картинка была кликабельной целиком, а подпись оставалась подписью.
+    ``banner_html`` / ``html_banner`` — произвольный HTML-код баннера, если
+    админ выбрал HTML-тип вместо картинки.
+    """
+    raw_html = clean_html_banner(ad.get("html_banner") or ad.get("html_code") or ad.get("html") or "")
+    # если html_banner уже отделён от текстового html, берём его
+    if not raw_html:
+        # пробуем колонки из _ad_row нормализации
+        raw_html = clean_html_banner(ad.get("html_banner") or "")
     out = {
         "id": ad.get("id"),
         "sent_at": ad.get("sent_at") or 0,
         "expires_at": ad.get("expires_at") or 0,
         "has_photo": bool(ad.get("has_photo")),
         "photo": f"/api/ads/{ad.get('id')}/photo" if ad.get("has_photo") else "",
+        "link": clean_link(ad.get("link")),
+        "has_html": bool(raw_html),
+        "banner_html": raw_html,
+        "html_banner": raw_html,
     }
     if with_text:
         out["text"] = ad.get("text") or ""
@@ -197,6 +351,14 @@ def ad_public(ad: Dict[str, Any], with_text: bool = True) -> Dict[str, Any]:
 def ad_admin(ad: Dict[str, Any], channels: Optional[List[dict]] = None) -> Dict[str, Any]:
     """Объявление для панели: со статусом, получателями и отчётом отправки."""
     out = dict(ad)
+    out["link"] = clean_link(ad.get("link"))
+    raw_html = clean_html_banner(ad.get("html_banner") or ad.get("html_code") or ad.get("html") or "")
+    out["html_banner"] = raw_html
+    out["banner_html"] = raw_html
+    out["html_code"] = raw_html
+    # для совместимости: поле html в админке — это HTML-баннер, а не linkify
+    # но если нужен текст — он в out["text"]
+    out["has_html"] = bool(raw_html)
     out["human_targets"] = targets_text(ad.get("targets") or {}, channels)
     out.pop("photo", None)          # путь на диске админке не нужен
     out.pop("photo_name", None)
@@ -285,9 +447,15 @@ class AdService:
                 except Exception as e:                  # noqa: BLE001
                     results["bot"] = {"ok": False, "total": 0, "ok_count": 0,
                                       "fail": 0, "err": f"{type(e).__name__}: {e}"[:120]}
-        # --- сайт ---
+        # --- сайт: баннеры на всех страницах (главная, терминал, дайджест, сводка) ---
         if targets["site"]:
             results["site"] = {"ok": True, "err": ""}
+        if targets["terminal"]:
+            results["terminal"] = {"ok": True, "err": ""}
+        if targets["digest"]:
+            results["digest"] = {"ok": True, "err": ""}
+        if targets["hourly"]:
+            results["hourly"] = {"ok": True, "err": ""}
         ok_any = any(bool((v or {}).get("ok")) for v in results.values())
         status = "sent" if ok_any else "failed"
         store.update_ad(ad_id, status=status, sent_at=time.time(), results=results,
@@ -325,7 +493,7 @@ class AdService:
                 log.debug("удаление поста %s: %s", key, e)
         store.update_ad(ad_id, status="expired", results=results)
         self.expired_total += 1
-        self.note(f"#{ad_id} снят: баннер убран, постов удалено {removed}")
+        self.note(f"#{ad_id} снят: баннеры убраны, постов удалено {removed}")
         return store.get_ad(ad_id) or ad
 
     # --- один тик планировщика --------------------------------------------
@@ -365,6 +533,12 @@ class AdService:
             val = val if isinstance(val, dict) else {}
             if key == "site":
                 bits.append("главная: баннер" + ("" if val.get("ok") else " не встал"))
+            elif key == "terminal":
+                bits.append("терминал: баннер" + ("" if val.get("ok") else " не встал"))
+            elif key == "digest":
+                bits.append("дайджест: баннер" + ("" if val.get("ok") else " не встал"))
+            elif key == "hourly":
+                bits.append("сводка: баннер" + ("" if val.get("ok") else " не встал"))
             elif key == "bot":
                 if val.get("total"):
                     bits.append(f"бот: {val.get('ok_count', 0)}/{val.get('total')}")
@@ -430,14 +604,28 @@ def register_ad_routes(app, svc: AdService) -> None:
 
     # --- страница ----------------------------------------------------------
     @router.get("/api/ads")
-    async def api_ads():
-        """Активные объявления для баннера на главной (публично)."""
+    async def api_ads(request: Request):
+        """Активные объявления для баннера (публично) и как их крутить.
+
+        ``?place=landing`` — главная, ``?place=terminal`` — терминал под
+        графиком, ``?place=digest`` — дайджест, ``?place=hourly`` — сводка по
+        часам. Вместе со списком отдаём ``banner`` — настройку смены:
+        интервал, плавность, режим и как вписать фотографию. Страница не
+        хранит эти числа у себя, поэтому админ меняет их и видит результат
+        на следующем показе, без перезапуска сервера.
+        """
         store = svc.store
+        place = str(request.query_params.get("place") or "landing").strip().lower()
+        if place not in ("landing", "terminal", "digest", "hourly"):
+            place = "landing"
+        cfg = banner_settings(store)
         if store is None:
-            return {"ok": True, "items": [], "now": time.time()}
-        items = [ad_public(a) for a in store.active_site_ads(limit=3)]
-        return {"ok": True, "items": items, "now": time.time(),
-                "tz_hours": round(tz_offset() / 3600.0, 2)}
+            return {"ok": True, "items": [], "place": place,
+                    "banner": cfg, "now": time.time()}
+        items = [ad_public(a) for a in
+                 store.active_site_ads(limit=cfg["max"], place=place)]
+        return {"ok": True, "items": items, "place": place, "banner": cfg,
+                "now": time.time(), "tz_hours": round(tz_offset() / 3600.0, 2)}
 
     @router.get("/api/ads/{ad_id}/photo")
     async def api_ad_photo(request: Request, ad_id: int):
@@ -447,6 +635,8 @@ def register_ad_routes(app, svc: AdService) -> None:
         if not ad:
             return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
         user, _err = _admin(request)
+        # «живо» = показывается на любой из страниц: фото просят и баннер
+        # главной, и баннер терминала
         active = int(ad_id) in {int(a.get("id") or 0)
                                 for a in (store.active_site_ads(limit=10) if store else [])}
         if not active and not (user or {}).get("is_admin"):
@@ -470,6 +660,10 @@ def register_ad_routes(app, svc: AdService) -> None:
         for it in items:
             it["line"] = svc.publish_line(it)
         return {"ok": True, "items": items, "channels": channels,
+                "banner": banner_settings(store),
+                "banner_keys": list(BANNER_KEYS),
+                "banner_choices": {k: list(v) for k, v in BANNER_CHOICES.items()},
+                "banner_limits": {k: list(v) for k, v in BANNER_LIMITS.items()},
                 "bot": bool(svc.bot is not None),
                 "bot_ready": _bot_ready(svc.bot),
                 "limits": {"plain": TEXT_MAX_PLAIN, "photo": TEXT_MAX_PHOTO,
@@ -478,6 +672,18 @@ def register_ad_routes(app, svc: AdService) -> None:
                 "now": time.time(),
                 "tz_hours": round(tz_offset() / 3600.0, 2),
                 "service": svc.status()}
+
+    @router.post("/api/admin/ads/banner")
+    async def api_admin_banner(request: Request,
+                               body: Optional[dict] = Body(default=None)):
+        """Как показывать баннер: интервал смены, плавность, режим, подписи."""
+        user, err = _admin(request)
+        if err:
+            return err
+        applied = save_banner_settings(svc.store, body or {},
+                                       actor_id=(user or {}).get("id"))
+        svc.note("баннер: " + ", ".join(f"{k}={v}" for k, v in applied.items()))
+        return {"ok": True, "banner": applied}
 
     def _photo_blob(request: Request, body: Dict[str, Any]) -> Any:
         """Фото из тела запроса: data-URL (JSON) — так шлёт панель."""
@@ -509,21 +715,33 @@ def register_ad_routes(app, svc: AdService) -> None:
         blob = (blob_pair or (None, None))[0] or b""
         targets = clean_targets(body.get("targets"))
         text = str(body.get("text") or "").strip()
+        link = clean_link(body.get("link"))
+        html_raw = clean_html_banner(body.get("html") or body.get("html_banner")
+                                     or body.get("banner_html") or body.get("html_code") or "")
         now = time.time()
         draft = bool(body.get("draft"))
         when = parse_when(body.get("send_at"), now)
-        if not draft and not (targets["bot"] or targets["site"] or targets["channels"]):
+        if not draft and not (targets["bot"] or targets["site"]
+                              or targets["terminal"] or targets["digest"]
+                              or targets["hourly"] or targets["channels"]):
             return JSONResponse({"ok": False, "error": "no_targets",
                                  "hint": "Выберите хотя бы один источник: бот, канал или главную."},
                                 status_code=400)
+        # На сайте баннер из одной картинки или HTML-кода законен: подпись —
+        # украшение, а не обязательное поле (в каналы же без текста идти нечему,
+        # там проверка остаётся). Фотографию сохраняем после создания записи —
+        # ей нужен id, поэтому «будет фото» передаём в add_ad отдельным признаком.
+        site_only = bool(targets["site"] or targets["terminal"]
+                           or targets["digest"] or targets["hourly"])
+        has_html = bool(html_raw)
         if not draft:
             if not when or when <= now + 1:
                 when = now                    # «отправить сейчас»
-            if not targets["site"] and text_problem(text, bool(blob)):
-                code = text_problem(text, bool(blob))
-                if code == "empty" and not blob:
+            if (not site_only or (not blob and not has_html)) and text_problem(text, bool(blob), has_html):
+                code = text_problem(text, bool(blob), has_html)
+                if code == "empty" and not blob and not has_html:
                     return JSONResponse({"ok": False, "error": "empty",
-                                         "hint": "Пустой пост: нужен текст или фотография."},
+                                         "hint": "Пустой пост: нужен текст, фотография или HTML-баннер."},
                                         status_code=400)
                 if code:
                     limit = TEXT_MAX_PHOTO if blob else TEXT_MAX_PLAIN
@@ -532,6 +750,10 @@ def register_ad_routes(app, svc: AdService) -> None:
                          "hint": f"Текст длиннее {limit} знаков — Telegram не примет. "
                                  "Сократите или снимите фотографию."},
                         status_code=400)
+            # HTML-баннер только для сайта: если выбран HTML, а получатели — только бот/каналы, предупреждаем
+            if has_html and not site_only and (targets["bot"] or targets["channels"]):
+                # разрешаем, но текст для Telegram всё равно нужен, если его нет — уже проверили выше
+                pass
         else:
             when = when or 0.0
         ttl_min = int(body.get("ttl_min") or 0)
@@ -543,7 +765,9 @@ def register_ad_routes(app, svc: AdService) -> None:
         status = "draft" if draft else "scheduled"
         created = store.add_ad(text, targets=targets, send_at=when,
                                expires_at=expires, status=status,
-                               author_id=user.get("id"))
+                               author_id=user.get("id"), link=link,
+                               photo_pending=bool(blob) or has_html,
+                               html=html_raw)
         if not created.get("ok"):
             return JSONResponse({**created, "hint": "Нужен текст или фотография."},
                                 status_code=400)
@@ -591,6 +815,15 @@ def register_ad_routes(app, svc: AdService) -> None:
             fields["text"] = str(body.get("text") or "").strip()[:TEXT_MAX_PLAIN]
         if "targets" in body:
             fields["targets"] = clean_targets(body.get("targets"))
+        if "link" in body:
+            fields["link"] = clean_link(body.get("link"))
+        if any(k in body for k in ("html", "html_banner", "banner_html", "html_code")):
+            raw = body.get("html")
+            if raw is None:
+                raw = body.get("html_banner") or body.get("banner_html") or body.get("html_code")
+            html_clean = clean_html_banner(raw)
+            fields["html"] = html_clean
+            fields["html_code"] = html_clean
         if "send_at" in body:
             when = parse_when(body.get("send_at"), now)
             fields["send_at"] = when
@@ -602,6 +835,10 @@ def register_ad_routes(app, svc: AdService) -> None:
             fields["expires_at"] = (base + ttl_min * 60.0) if ttl_min > 0 else 0.0
         if "expires_at" in body and "ttl_min" not in body:
             fields["expires_at"] = parse_when(body.get("expires_at"), now)
+        # очистка HTML-баннера по флагу
+        if body.get("clear_html"):
+            fields["html"] = ""
+            fields["html_code"] = ""
         store.update_ad(ad_id, **fields)
         if blob_pair:
             up = store.save_ad_photo(ad_id, blob_pair[0], filename=blob_pair[1],
@@ -633,7 +870,9 @@ def register_ad_routes(app, svc: AdService) -> None:
             return JSONResponse({"ok": False, "error": "already_sent",
                                  "hint": "Этот пост уже отправлен."}, status_code=409)
         targets = clean_targets(ad.get("targets"))
-        if not (targets["bot"] or targets["site"] or targets["channels"]):
+        if not (targets["bot"] or targets["site"] or targets["terminal"]
+                or targets["digest"] or targets["hourly"]
+                or targets["channels"]):
             return JSONResponse({"ok": False, "error": "no_targets",
                                  "hint": "Выберите хотя бы один источник."}, status_code=400)
         if ad.get("photo") and text_problem(ad.get("text"), True) == "too_long_photo":

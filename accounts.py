@@ -111,7 +111,7 @@ DEFAULT_SERVICES = (
         "slug": "alerts",
         "title": "Алерты по объёму",
         "title_en": "Volume alerts",
-        "description": "Ликвидации, CVD и OI: порог, окно, монета — сигнал в кабинет и в Telegram.",
+        "description": "Ликвидации, CVD и OI: порог, окно, монета — сигналы в Telegram.",
         "icon": "🔔",
         "enabled": 1,
         "coming_soon": 0,
@@ -133,7 +133,7 @@ DEFAULT_SERVICES = (
         "title": "Сторож монет",
         "title_en": "Coin watcher",
         "description": ("Пампы и дампы всех монет Gate: порог в %, период свечей "
-                        "и их число. Сигнал в Telegram со ссылкой на Gate."),
+                        "и их число. Сигнал в Telegram."),
         "icon": "👁",
         "enabled": 1,
         "coming_soon": 0,
@@ -249,6 +249,8 @@ def public_user(row: sqlite3.Row | Dict[str, Any]) -> Dict[str, Any]:
         "lang_manual": int(d.get("lang_manual") or 0),
         "is_admin": bool(d.get("is_admin")),
         "is_banned": bool(d.get("is_banned")),
+        # владелец — определяется в Store.is_owner, здесь ставим False по умолчанию
+        "is_owner": bool(d.get("is_owner")),
         "created_at": float(d.get("created_at") or 0),
         "last_seen": float(d.get("last_seen") or 0),
         "login_count": int(d.get("login_count") or 0),
@@ -460,6 +462,9 @@ class Store:
                     text TEXT NOT NULL,
                     photo TEXT DEFAULT '',
                     photo_name TEXT DEFAULT '',
+                    link TEXT DEFAULT '',
+                    html TEXT DEFAULT '',
+                    html_code TEXT DEFAULT '',
                     targets TEXT NOT NULL DEFAULT '{}',
                     send_at REAL NOT NULL DEFAULT 0,
                     expires_at REAL NOT NULL DEFAULT 0,
@@ -520,6 +525,29 @@ class Store:
                     ON layer_trials(started_at);
                 CREATE INDEX IF NOT EXISTS idx_alert_user_ts ON alert_events(user_id, ts);
                 CREATE INDEX IF NOT EXISTS idx_alert_cool ON alert_events(user_id, metric, symbol, ts);
+                CREATE TABLE IF NOT EXISTS terminal_chat (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    display_name TEXT NOT NULL DEFAULT '',
+                    text TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL,
+                    is_admin INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_terminal_chat_ts ON terminal_chat(created_at);
+                CREATE INDEX IF NOT EXISTS idx_terminal_chat_id ON terminal_chat(id);
+                CREATE TABLE IF NOT EXISTS content_comments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kind TEXT NOT NULL,
+                    item_id TEXT NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    display_name TEXT NOT NULL DEFAULT '',
+                    text TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL,
+                    is_admin INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_content_comments_kind_item ON content_comments(kind, item_id, id);
+                CREATE INDEX IF NOT EXISTS idx_content_comments_ts ON content_comments(created_at);
+                CREATE INDEX IF NOT EXISTS idx_content_comments_user ON content_comments(user_id);
                 """
             )
             self._db.commit()
@@ -545,6 +573,7 @@ class Store:
         self._migrate_users()
         self._migrate_digest_photos()
         self._migrate_visits()
+        self._migrate_ads()
         self._seed_digest()
         self._digest_service_live()
 
@@ -632,6 +661,33 @@ class Store:
         except Exception as e:                    # noqa: BLE001
             log.debug("фото канала: миграция kind: %s", e)
 
+    def _migrate_ads(self) -> None:
+        """Колонки link и html: кликабельный баннер и HTML-баннер.
+
+        Раньше ссылкой становился только голый URL внутри текста объявления, и
+        чтобы вся реклама на сайте была кликабельной, админ должен был писать
+        адрес в текст. Теперь у объявления есть своё поле ссылки: оно ведёт
+        на страницу акции, а текст остаётся только подписью.
+
+        HTML-баннер — выбор админа: вместо картинки+ссылки в слот баннера
+        вставляется произвольный HTML-код (партнёрский блок, iframe, верстка).
+        Поле ``html`` хранит этот код, а ``html_code`` — алиас для совместимости.
+        """
+        try:
+            with self._lock:
+                cols = {r["name"] for r in
+                        self._db.execute("PRAGMA table_info(ads)")}
+                if cols:
+                    if "link" not in cols:
+                        self._db.execute("ALTER TABLE ads ADD COLUMN link TEXT DEFAULT ''")
+                    if "html" not in cols:
+                        self._db.execute("ALTER TABLE ads ADD COLUMN html TEXT DEFAULT ''")
+                    if "html_code" not in cols:
+                        self._db.execute("ALTER TABLE ads ADD COLUMN html_code TEXT DEFAULT ''")
+                self._db.commit()
+        except Exception as e:                                  # noqa: BLE001
+            log.debug("реклама: колонки link/html не добавлены: %s", e)
+
     def _migrate_users(self) -> None:
         """Догоняем старые базы: почта/пароль и tg_id без NOT NULL.
 
@@ -705,6 +761,43 @@ class Store:
             return 1
         return 0
 
+    def is_owner(self, user: Optional[Dict[str, Any]] | sqlite3.Row) -> bool:
+        """Главный админ (владелец) — тот, кто задан в окружении.
+
+        ``LIQSCOPE_ADMIN_IDS`` / ``LIQSCOPE_ADMIN_EMAILS`` — это вы. Такого
+        пользователя нельзя забанить или снять с админки обычным админом.
+        """
+        if not user:
+            return False
+        try:
+            d = dict(user) if not isinstance(user, dict) else user
+        except Exception:
+            return False
+        tg_id = d.get("tg_id")
+        try:
+            if tg_id and int(tg_id) in self.admin_ids:
+                return True
+        except Exception:
+            pass
+        email = normalize_email(d.get("email") or "")
+        if email and email in self.admin_emails:
+            return True
+        return False
+
+    def _pub(self, row: Optional[sqlite3.Row | Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        """public_user + is_owner (владелец по env)."""
+        if not row:
+            return None
+        u = public_user(row)
+        try:
+            u["is_owner"] = self.is_owner(row)
+        except Exception:
+            u["is_owner"] = False
+        # владелец всегда админ
+        if u.get("is_owner"):
+            u["is_admin"] = True
+        return u
+
     def create_email_user(self, email: str, password_hash: str = "",
                           first_name: str = "", language: str = "") -> Dict[str, Any]:
         # language пустой = язык не выбирали: решает тот, кто отправляет
@@ -739,7 +832,7 @@ class Store:
                 )
             self._db.commit()
             row = self._db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
-        return {"ok": True, "user": public_user(row), "resumed": resumed}
+        return {"ok": True, "user": self._pub(row), "resumed": resumed}
 
     def attach_email(self, user_id: int, email: str, password_hash: str = "") -> Dict[str, Any]:
         """Привязать почту к уже существующему аккаунту.
@@ -778,7 +871,7 @@ class Store:
             self._db.commit()
             row = self._db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
         self.audit(user_id, "email_attach", f"{email} merged={int(merged)}")
-        return {"ok": True, "user": public_user(row), "merged": merged}
+        return {"ok": True, "user": self._pub(row), "merged": merged}
 
     # ----- капча (арифметика на регистрацию) --------------------------------
     def new_captcha(self, answer: int, ttl: float = CAPTCHA_TTL) -> str:
@@ -844,7 +937,7 @@ class Store:
             return None
         with self._lock:
             row = self._db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
-        return public_user(row) if row else None
+        return self._pub(row) if row else None
 
     def set_user_password(self, user_id: int, password_hash: str) -> bool:
         with self._lock:
@@ -856,9 +949,13 @@ class Store:
         return cur.rowcount > 0
 
     def set_user_name(self, user_id: int, first_name: str) -> None:
+        # full nick: overwrite first_name with the whole string and clear last_name,
+        # so "Александр Швакин" -> "SHWePS" doesn't become "SHWePS Швакин".
+        name = (first_name or "").strip()[:64]
+        name = " ".join(name.split())
         with self._lock:
-            self._db.execute("UPDATE users SET first_name=? WHERE id=?",
-                             ((first_name or "")[:64], int(user_id)))
+            self._db.execute("UPDATE users SET first_name=?, last_name='' WHERE id=?",
+                             (name, int(user_id)))
             self._db.commit()
 
     def mark_email_verified(self, user_id: int, promote_admin: bool = True) -> Optional[Dict[str, Any]]:
@@ -877,7 +974,7 @@ class Store:
             )
             self._db.commit()
             row = self._db.execute("SELECT * FROM users WHERE id=?", (int(user_id),)).fetchone()
-        return public_user(row)
+        return self._pub(row)
 
     # ----- письма: одноразовые токены --------------------------------------
     def new_email_token(self, user_id: int, kind: str, email: str = "") -> str:
@@ -915,7 +1012,7 @@ class Store:
             user = self._db.execute("SELECT * FROM users WHERE id=?", (int(row["user_id"]),)).fetchone()
         if not user:
             return None, "unknown"
-        return public_user(user), ""
+        return self._pub(user), ""
 
     def consume_email_token(self, token: str, kind: str = "") -> Tuple[Optional[Dict[str, Any]], str]:
         user, err = self.email_token_user(token, kind)
@@ -977,7 +1074,7 @@ class Store:
                     return {"ok": False, "error": "expired"}
                 return {"ok": False, "pending": True}
             user = self._db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
-        return {"ok": True, "user": public_user(user) if user else None}
+        return {"ok": True, "user": self._pub(user) if user else None}
 
     def _link_tg_locked(self, user_id: int, tg: Dict[str, Any]) -> Dict[str, Any]:
         """Привязать Telegram к аккаунту (замок уже держим).
@@ -1012,7 +1109,7 @@ class Store:
         )
         self._db.commit()
         row = self._db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
-        return {"ok": True, "user": public_user(row), "merged": merged}
+        return {"ok": True, "user": self._pub(row), "merged": merged}
 
     def link_tg_to_user(self, user_id: int, tg: Dict[str, Any]) -> Dict[str, Any]:
         """Привязать Telegram к конкретному аккаунту (вход виджетом, вход ботом)."""
@@ -1023,7 +1120,7 @@ class Store:
             if r.get("ok") and want and uid:
                 self._db.execute("UPDATE users SET is_admin=1 WHERE id=?", (int(uid),))
                 self._db.commit()
-                r["user"] = public_user(
+                r["user"] = self._pub(
                     self._db.execute("SELECT * FROM users WHERE id=?", (int(uid),)).fetchone())
         if r.get("ok"):
             tg_id = int(tg.get("tg_id") or tg.get("id") or 0)
@@ -1103,7 +1200,7 @@ class Store:
             if not row:
                 return None
             if not row["tg_id"]:
-                return public_user(row)
+                return self._pub(row)
             tg_id = int(row["tg_id"])
             self._db.execute(
                 "UPDATE users SET tg_id=NULL, tg_linked_at=NULL, is_admin=? WHERE id=?",
@@ -1113,7 +1210,7 @@ class Store:
             self._db.commit()
             row = self._db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
         self.audit(user_id, "tg_unlink", f"tg_id={tg_id}")
-        return public_user(row)
+        return self._pub(row)
 
     def set_user_language(self, user_id: int, lang: str) -> Dict[str, Any]:
         """Язык, выбранный в боте кнопкой «🌐 RU/ENG».
@@ -1130,7 +1227,7 @@ class Store:
             row = self._db.execute("SELECT * FROM users WHERE id=?",
                                    (int(user_id),)).fetchone()
         self.audit(int(user_id), "set_language", code)
-        return public_user(row)
+        return self._pub(row)
 
     # ----- users (Telegram) -----------------------------------------------
     def upsert_telegram_user(self, tg: Dict[str, Any]) -> Dict[str, Any]:
@@ -1166,7 +1263,7 @@ class Store:
                 )
             self._db.commit()
             row = self._db.execute("SELECT * FROM users WHERE tg_id=?", (tg_id,)).fetchone()
-        return public_user(row)
+        return self._pub(row)
 
     # ----- привязка Telegram по ссылке из письма ----------------------------
     def new_tg_attach(self, user_id: int, tg: Dict[str, Any], ttl: float = 2 * 3600) -> str:
@@ -1209,7 +1306,7 @@ class Store:
                 "SELECT * FROM users WHERE id=?", (int(row["user_id"]),)).fetchone()
             if not user:
                 return None, "unknown"
-        return {"user": public_user(user), "tg_id": int(row["tg_id"]),
+        return {"user": self._pub(user), "tg_id": int(row["tg_id"]),
                 "profile": row["profile"] or "{}"}, ""
 
     def confirm_tg_attach(self, token: str) -> Dict[str, Any]:
@@ -1238,12 +1335,12 @@ class Store:
     def get_user(self, user_id: int) -> Optional[Dict[str, Any]]:
         with self._lock:
             row = self._db.execute("SELECT * FROM users WHERE id=?", (int(user_id),)).fetchone()
-        return public_user(row) if row else None
+        return self._pub(row) if row else None
 
     def get_user_by_tg(self, tg_id: int) -> Optional[Dict[str, Any]]:
         with self._lock:
             row = self._db.execute("SELECT * FROM users WHERE tg_id=?", (int(tg_id),)).fetchone()
-        return public_user(row) if row else None
+        return self._pub(row) if row else None
 
     def touch_user(self, user_id: int) -> None:
         with self._lock:
@@ -1251,25 +1348,68 @@ class Store:
             self._db.commit()
 
     def set_banned(self, user_id: int, banned: bool, actor_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        user_id = int(user_id)
         with self._lock:
-            self._db.execute("UPDATE users SET is_banned=? WHERE id=?", (1 if banned else 0, int(user_id)))
+            target = self._db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+            if not target:
+                return None
+            # защита владельца
+            if banned and self.is_owner(target):
+                actor = None
+                if actor_id:
+                    actor = self._db.execute("SELECT * FROM users WHERE id=?", (int(actor_id),)).fetchone()
+                if not actor or not self.is_owner(actor):
+                    # нельзя банить владельца обычным админом
+                    return {"ok": False, "error": "protected", "user": self._pub(target)}
+            # обычный админ не может банить другого админа
+            if banned and int(target["is_admin"]):
+                actor = None
+                if actor_id:
+                    actor = self._db.execute("SELECT * FROM users WHERE id=?", (int(actor_id),)).fetchone()
+                if actor and not self.is_owner(actor) and int(actor["id"]) != user_id:
+                    # админ пытается забанить админа — только владелец может
+                    return {"ok": False, "error": "admin_protected", "user": self._pub(target)}
+            if user_id == int(actor_id or 0) and banned:
+                return {"ok": False, "error": "self", "user": self._pub(target)}
+            self._db.execute("UPDATE users SET is_banned=? WHERE id=?", (1 if banned else 0, user_id))
             self._db.commit()
-            row = self._db.execute("SELECT * FROM users WHERE id=?", (int(user_id),)).fetchone()
+            row = self._db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
         if row:
             self.audit(actor_id, "ban" if banned else "unban", f"user_id={user_id} tg_id={row['tg_id']}")
             if banned:
-                self.drop_user_sessions(int(user_id))
-            return public_user(row)
+                self.drop_user_sessions(user_id)
+            return self._pub(row)
         return None
 
     def set_admin(self, user_id: int, admin: bool, actor_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        user_id = int(user_id)
         with self._lock:
-            self._db.execute("UPDATE users SET is_admin=? WHERE id=?", (1 if admin else 0, int(user_id)))
+            target = self._db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+            if not target:
+                return None
+            actor = None
+            if actor_id:
+                actor = self._db.execute("SELECT * FROM users WHERE id=?", (int(actor_id),)).fetchone()
+            # только владелец может назначать/снимать админов
+            if actor and not self.is_owner(actor):
+                return {"ok": False, "error": "owner_only", "user": self._pub(target)}
+            if not actor and self.admin_ids:
+                # если actor не найден, но есть список владельцев — требуем владельца
+                # (для dev-режима без actor разрешаем)
+                pass
+            # нельзя снять админку с владельца
+            if not admin and self.is_owner(target):
+                return {"ok": False, "error": "protected", "user": self._pub(target)}
+            if user_id == int(actor_id or 0) and not admin:
+                # нельзя снять с себя (чтобы не запереться), кроме владельца снимающего другого
+                # владелец может снять с себя? лучше запретить
+                return {"ok": False, "error": "self", "user": self._pub(target)}
+            self._db.execute("UPDATE users SET is_admin=? WHERE id=?", (1 if admin else 0, user_id))
             self._db.commit()
-            row = self._db.execute("SELECT * FROM users WHERE id=?", (int(user_id),)).fetchone()
+            row = self._db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
         if row:
             self.audit(actor_id, "admin_on" if admin else "admin_off", f"user_id={user_id}")
-            return public_user(row)
+            return self._pub(row)
         return None
 
     def list_users(self, q: str = "", limit: int = 50, offset: int = 0) -> Dict[str, Any]:
@@ -1296,7 +1436,7 @@ class Store:
                     (limit, offset),
                 ).fetchall()
                 matched = total
-        return {"total": total, "matched": matched, "users": [public_user(r) for r in rows]}
+        return {"total": total, "matched": matched, "users": [self._pub(r) for r in rows]}
 
     def user_counts(self) -> Dict[str, int]:
         now = _now()
@@ -1349,7 +1489,7 @@ class Store:
             return None
         if row["is_banned"]:
             return None
-        return public_user(row)
+        return self._pub(row)
 
     def drop_session(self, token: str) -> None:
         with self._lock:
@@ -2165,6 +2305,35 @@ class Store:
         """Лимиты загрузки: сколько всего и сколько на каждую рубрику."""
         return {"total": MAX_DIGEST_PHOTOS, "kind": MAX_DIGEST_PHOTOS_KIND}
 
+    def get_photo_order(self, kind: str = "post") -> str:
+        """Порядок выдачи фото: "random" (по умолчанию) или "queue" (по очереди).
+
+        "random" — круг без повторов, но внутри круга случайный выбор: набор
+        проходит по разу, порядок каждый круг новый (как было раньше).
+        "queue" — строго по очереди (id/used_at): 1,2,3…N, снова 1,2,3… —
+        удобно, когда загрузили пачку и хочется, чтобы каждая показалась.
+        """
+        kind = (kind or "").strip().lower()
+        if kind not in ("post", "digest"):
+            kind = "post"
+        key = f"photo_order_{kind}"
+        raw = (self.get_setting(key, "") or "").strip().lower()
+        if raw in ("queue", "ordered", "seq", "sequential", "order"):
+            return "queue"
+        return "random"
+
+    def set_photo_order(self, kind: str, order: str, actor_id: Optional[int] = None) -> str:
+        kind = (kind or "").strip().lower()
+        if kind not in ("post", "digest"):
+            kind = "post"
+        order = (order or "").strip().lower()
+        if order in ("queue", "ordered", "seq", "sequential", "order"):
+            order = "queue"
+        else:
+            order = "random"
+        self.set_setting(f"photo_order_{kind}", order, actor_id=actor_id)
+        return order
+
     def _photo_round_start(self, key: str) -> float:
         """Когда начался текущий круг обложек (0 — круга ещё не было)."""
         with self._lock:
@@ -2187,18 +2356,25 @@ class Store:
             self._db.commit()
 
     def pick_digest_photo(self, kind: str = "", actor_id: Optional[int] = None) -> str:
-        """Обложка поста по кругу без повторов.
+        """Обложка поста по кругу без повторов, с поддержкой порядка выдачи.
 
         У каждого фото помним, когда оно последний раз было обложкой
         (``used_at``), а у рубрики — когда начался текущий круг. Из фото,
-        которые в этом круге ещё не выходили, берём случайное: весь набор
-        проходит по разу, прежде чем что-то повторится, и каждый новый круг
-        начинается с нового порядка — «однообразия» нет. Пустая строка — фото
-        нет (или файлы пропали с диска).
+        которые в этом круге ещё не выходили, берём одно:
+        * ``random`` — случайное (как раньше): набор проходит по разу, порядок
+          каждый круг новый;
+        * ``queue`` — строго по очереди: по ``used_at``/``id``, 1,2,3…N, снова 1,2,3…
+        Пустая строка — фото нет (или файлы пропали с диска).
         """
         kind = str(kind or "").strip().lower()
         if kind not in ("post", "digest"):
             kind = ""
+        # порядок: post и digest настраиваются отдельно, по умолчанию random
+        order_kind = "digest" if kind == "digest" else "post"
+        try:
+            order = self.get_photo_order(order_kind)
+        except Exception:
+            order = "random"
         key = f"digest_photo_round_{kind or 'all'}"
         with self._lock:
             if kind:
@@ -2216,17 +2392,21 @@ class Store:
         start = self._photo_round_start(key)
         pool = [r for r in live if float(r["used_at"] or 0) < start]
         if not pool:
-            # Круг закончился: все фото вышли по разу. Начинаем новый — с новым
-            # случайным порядком, иначе обложки повторялись бы в том же порядке.
+            # Круг закончился: все фото вышли по разу. Начинаем новый круг.
             start = _now()
             self._photo_round_new(key, start)
             pool = live
-        pick = secrets.choice(pool)
+        if order == "queue":
+            # очередь: сначала те, что давно не показывались, затем по id
+            pool = sorted(pool, key=lambda r: (float(r["used_at"] or 0), int(r["id"])))
+            pick = pool[0]
+        else:
+            pick = secrets.choice(pool)
         with self._lock:
             self._db.execute("UPDATE digest_photos SET used_at=? WHERE id=?",
                              (start, int(pick["id"])))
             self._db.commit()
-        log.debug("обложка: фото %s, в круге ещё %d", pick["id"], len(pool) - 1)
+        log.debug("обложка: фото %s (%s), в круге ещё %d", pick["id"], order, len(pool) - 1)
         return str(pick["path"])
 
     def set_digest_photo_kind(self, photo_id: int, kind: str,
@@ -2461,6 +2641,12 @@ class Store:
                 val = {}
             d[key] = val if isinstance(val, dict) else {}
         d["has_photo"] = bool(d.get("photo") and os.path.isfile(d["photo"]))
+        # HTML-баннер: колонка html или html_code — единый ключ html_banner
+        raw_html = (d.get("html_code") or d.get("html") or "").strip()
+        d["html_banner"] = raw_html
+        # оставляем оба поля для совместимости, но нормируем
+        d["html"] = raw_html
+        d["html_code"] = raw_html
         return d
 
     def list_ads(self, limit: int = 40, prune_days: int = 30) -> List[Dict[str, Any]]:
@@ -2495,30 +2681,40 @@ class Store:
     def add_ad(self, text: str, targets: Optional[Dict[str, Any]] = None,
                send_at: float = 0.0, expires_at: float = 0.0,
                photo: str = "", photo_name: str = "", status: str = "draft",
-               author_id: Optional[int] = None) -> Dict[str, Any]:
+               author_id: Optional[int] = None, link: str = "",
+               photo_pending: bool = False, html: str = "") -> Dict[str, Any]:
+        """Новое объявление. ``photo_pending`` — фото приложат сразу после
+        создания (ему нужен id записи), поэтому «пустой» пост с фотографией
+        всё равно принимается: на сайте баннер из одной картинки законен.
+
+        ``html`` — HTML-баннер: если задан, текст/фото не обязательны — баннер
+        покажет произвольный HTML в слоте.
+        """
         text = (text or "").strip()
-        if not text and not (photo or ""):
+        html_raw = (html or "").strip()
+        if not text and not (photo or "") and not photo_pending and not html_raw:
             return {"ok": False, "error": "empty"}
         if status not in self.AD_STATUSES:
             status = "draft"
         with self._lock:
             cur = self._db.execute(
-                "INSERT INTO ads(text, photo, photo_name, targets, send_at,"
-                " expires_at, status, results, sent_at, created_at, author_id)"
-                " VALUES(?,?,?,?,?,?,?,'{}',0,?,?)",
+                "INSERT INTO ads(text, photo, photo_name, link, html, html_code, targets,"
+                " send_at, expires_at, status, results, sent_at, created_at,"
+                " author_id) VALUES(?,?,?,?,?,?,?,?,?,'{}',0,?,?)",
                 (text[:4000], photo or "", os.path.basename(photo_name or "")[:80],
+                 (link or "").strip()[:600], html_raw[:20000], html_raw[:20000],
                  json.dumps(targets or {}, ensure_ascii=False), float(send_at or 0),
                  float(expires_at or 0), status, _now(), author_id),
             )
             self._db.commit()
             ad_id = int(cur.lastrowid)
-        self.audit(author_id, "ad_add", f"#{ad_id} {status} {text[:60]}")
+        self.audit(author_id, "ad_add", f"#{ad_id} {status} {text[:60]} html={int(bool(html_raw))}")
         return {"ok": True, "id": ad_id, "ad": self.get_ad(ad_id)}
 
     def update_ad(self, ad_id: int, **fields: Any) -> Optional[Dict[str, Any]]:
         """Точечная правка: текст, получатели, сроки, статус, отчёт о отправке."""
         allowed = ("text", "targets", "send_at", "expires_at", "status",
-                   "results", "sent_at")
+                   "results", "sent_at", "link", "html", "html_code")
         sets, vals = [], []
         for key in allowed:
             if key not in fields:
@@ -2530,8 +2726,21 @@ class Store:
                 val = float(val or 0)
             elif key == "status":
                 val = str(val or "") if str(val or "") in self.AD_STATUSES else "draft"
+            elif key == "link":
+                val = str(val or "").strip()[:600]
+            elif key in ("html", "html_code"):
+                val = str(val or "").strip()[:20000]
             sets.append(f"{key}=?")
             vals.append(val)
+        # html — пишем в обе колонки для совместимости
+        if any(k in fields for k in ("html", "html_code")):
+            html_val = str(fields.get("html") or fields.get("html_code") or "").strip()[:20000]
+            if "html" not in fields:
+                sets.append("html=?")
+                vals.append(html_val)
+            if "html_code" not in fields:
+                sets.append("html_code=?")
+                vals.append(html_val)
         if not sets:
             return self.get_ad(ad_id)
         vals.append(int(ad_id))
@@ -2641,17 +2850,53 @@ class Store:
         return [self._ad_row(r) for r in rows]
 
     def active_site_ads(self, now: Optional[float] = None,
-                        limit: int = 3) -> List[Dict[str, Any]]:
-        """Что показывать баннером на главной: отправлено, для сайта, не истекло."""
+                        limit: int = 8, place: str = "") -> List[Dict[str, Any]]:
+        """Что показывать баннером на сайте: отправлено, не истекло, для этой страницы.
+
+        ``place`` — ``landing`` (главная), ``terminal`` (под графиком), ``digest``
+        (дайджест), ``hourly`` (сводка по часам); пусто — любая страница сайта.
+        Разметка «куда идти» живёт в JSON внутри ``targets``, поэтому отбор по
+        странице делаем в Python: в SQLite JSON фильтровался бы подстрокой и
+        путал ``"site"`` с ``"site_x"``.
+        """
         now = _now() if now is None else float(now)
         with self._lock:
             rows = self._db.execute(
                 "SELECT * FROM ads WHERE status='sent' AND send_at<=?"
                 " AND (expires_at=0 OR expires_at>?) ORDER BY send_at DESC, id DESC"
-                " LIMIT ?", (now, now, int(limit))
+                " LIMIT ?", (now, now, int(limit) * 2)
             ).fetchall()
         out = [self._ad_row(r) for r in rows]
-        return [a for a in out if (a.get("targets") or {}).get("site")]
+        # landing → site (историческое имя), terminal, digest, hourly — отдельные страницы
+        # Для digest/hourly баннер должен показываться всем как на главной:
+        # если объявление отмечено для главной (site), оно также подходит для
+        # дайджеста и сводки, иначе старые записи с site=true исчезли бы с этих
+        # страниц после расширения таргетинга.
+        place_norm = str(place or "").strip().lower()
+        key = {
+            "landing": "site",
+            "terminal": "terminal",
+            "digest": "digest",
+            "hourly": "hourly",
+        }.get(place_norm)
+        keep = []
+        for a in out:
+            tg = a.get("targets") or {}
+            if place_norm in ("digest", "hourly"):
+                # digest/hourly: показываем если явно отмечено для этой страницы
+                # ИЛИ если отмечено для главной (site) — так баннер возвращается
+                # на эти страницы и виден всем, как на лендинге.
+                if not (tg.get(key) or tg.get("site")):
+                    continue
+            elif key:
+                if not tg.get(key):
+                    continue
+            elif not (tg.get("site") or tg.get("terminal") or tg.get("digest") or tg.get("hourly")):
+                continue
+            keep.append(a)
+            if len(keep) >= max(1, int(limit)):
+                break
+        return keep
 
     # --- 💬 Обратная связь: «по всем вопросам» ------------------------------
     #
@@ -2972,3 +3217,172 @@ class Store:
                 (int(user_id), str(metric)[:12]),
             ).fetchone()
         return float(row["ts"]) if row else None
+
+    # ----- 💬 Мини-чат терминала (3 дня истории) -----------------------------
+    CHAT_MAX_LEN = 500
+    CHAT_KEEP_SEC = 3 * 86400
+    CHAT_LIMIT = 200
+
+    def add_chat_message(self, user_id: int, display_name: str, text: str,
+                         is_admin: bool = False) -> Dict[str, Any]:
+        """Сообщение в чат терминала: только зарегистрированные пишут."""
+        text = (text or "").strip()
+        if not text:
+            return {"ok": False, "error": "empty"}
+        if len(text) > self.CHAT_MAX_LEN:
+            text = text[:self.CHAT_MAX_LEN]
+        now = _now()
+        with self._lock:
+            edge = now - self.CHAT_KEEP_SEC
+            if secrets.randbelow(20) == 0:
+                self._db.execute("DELETE FROM terminal_chat WHERE created_at<?",
+                                 (edge,))
+            cur = self._db.execute(
+                "INSERT INTO terminal_chat(user_id, display_name, text, created_at, is_admin)"
+                " VALUES(?,?,?,?,?)",
+                (int(user_id), (display_name or "")[:80], text, now,
+                 1 if is_admin else 0),
+            )
+            self._db.commit()
+            mid = int(cur.lastrowid)
+        return {"ok": True, "id": mid, "created_at": now}
+
+    def list_chat_messages(self, limit: int = 100, after_id: int = 0,
+                           keep_sec: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Последние сообщения чата за 3 дня. ``after_id`` — только новее."""
+        now = _now()
+        keep = int(keep_sec) if keep_sec else self.CHAT_KEEP_SEC
+        edge = now - keep
+        limit = max(1, min(int(limit or 100), self.CHAT_LIMIT))
+        after_id = max(0, int(after_id or 0))
+        with self._lock:
+            if after_id:
+                rows = self._db.execute(
+                    "SELECT id, user_id, display_name, text, created_at, is_admin"
+                    " FROM terminal_chat WHERE created_at>=? AND id>? ORDER BY id",
+                    (edge, after_id),
+                ).fetchall()
+            else:
+                rows = self._db.execute(
+                    "SELECT id, user_id, display_name, text, created_at, is_admin"
+                    " FROM terminal_chat WHERE created_at>=? ORDER BY id DESC LIMIT ?",
+                    (edge, limit),
+                ).fetchall()
+                rows = list(reversed(rows))
+        return [dict(r) for r in rows]
+
+    def delete_chat_message(self, msg_id: int) -> bool:
+        with self._lock:
+            cur = self._db.execute("DELETE FROM terminal_chat WHERE id=?",
+                                   (int(msg_id),))
+            self._db.commit()
+            return bool(cur.rowcount)
+
+    def prune_chat(self, keep_sec: Optional[int] = None) -> int:
+        edge = _now() - (int(keep_sec) if keep_sec else self.CHAT_KEEP_SEC)
+        with self._lock:
+            cur = self._db.execute("DELETE FROM terminal_chat WHERE created_at<?",
+                                   (edge,))
+            self._db.commit()
+            return int(cur.rowcount or 0)
+
+    # ----- 💬 Комментарии к дайджесту и сводке по часам ----------------------
+    CONTENT_COMMENT_MAX_LEN = 1000
+    CONTENT_COMMENT_LIMIT = 200
+    CONTENT_COMMENT_KINDS = ("digest", "hourly")
+
+    def add_content_comment(self, user_id: int, display_name: str, kind: str,
+                            item_id: str, text: str,
+                            is_admin: bool = False) -> Dict[str, Any]:
+        """Комментарий к дайджесту/часовке: только зарегистрированные пишут.
+
+        ``kind`` — ``digest`` (дневной выпуск) или ``hourly`` (сводка по часам),
+        ``item_id`` — идентификатор: дата YYYY-MM-DD для дайджеста или дата/post-id
+        для часовки. Текст до 1000 знаков, хранится бессрочно (модерация — через удаление).
+        """
+        text = (text or "").strip()
+        if not text:
+            return {"ok": False, "error": "empty"}
+        if len(text) > self.CONTENT_COMMENT_MAX_LEN:
+            text = text[:self.CONTENT_COMMENT_MAX_LEN]
+        kind = str(kind or "").strip().lower()
+        if kind not in self.CONTENT_COMMENT_KINDS:
+            return {"ok": False, "error": "bad_kind"}
+        item_id = str(item_id or "").strip()[:120]
+        if not item_id:
+            return {"ok": False, "error": "bad_item"}
+        now = _now()
+        with self._lock:
+            cur = self._db.execute(
+                "INSERT INTO content_comments(kind, item_id, user_id, display_name, text, created_at, is_admin)"
+                " VALUES(?,?,?,?,?,?,?)",
+                (kind, item_id, int(user_id), (display_name or "")[:80], text, now,
+                 1 if is_admin else 0),
+            )
+            self._db.commit()
+            mid = int(cur.lastrowid)
+        return {"ok": True, "id": mid, "created_at": now}
+
+    def list_content_comments(self, kind: str, item_id: str,
+                              limit: int = 100, after_id: int = 0) -> List[Dict[str, Any]]:
+        """Комментарии к конкретному выпуску/посту. ``after_id`` — только новее."""
+        kind = str(kind or "").strip().lower()
+        if kind not in self.CONTENT_COMMENT_KINDS:
+            return []
+        item_id = str(item_id or "").strip()[:120]
+        if not item_id:
+            return []
+        limit = max(1, min(int(limit or 100), self.CONTENT_COMMENT_LIMIT))
+        after_id = max(0, int(after_id or 0))
+        with self._lock:
+            if after_id:
+                rows = self._db.execute(
+                    "SELECT id, kind, item_id, user_id, display_name, text, created_at, is_admin"
+                    " FROM content_comments WHERE kind=? AND item_id=? AND id>? ORDER BY id",
+                    (kind, item_id, after_id),
+                ).fetchall()
+            else:
+                rows = self._db.execute(
+                    "SELECT id, kind, item_id, user_id, display_name, text, created_at, is_admin"
+                    " FROM content_comments WHERE kind=? AND item_id=? ORDER BY id DESC LIMIT ?",
+                    (kind, item_id, limit),
+                ).fetchall()
+                rows = list(reversed(rows))
+        return [dict(r) for r in rows]
+
+    def list_content_comments_by_kind(self, kind: str, limit: int = 50) -> List[Dict[str, Any]]:
+        kind = str(kind or "").strip().lower()
+        if kind not in self.CONTENT_COMMENT_KINDS:
+            return []
+        limit = max(1, min(int(limit or 100), 200))
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT id, kind, item_id, user_id, display_name, text, created_at, is_admin"
+                " FROM content_comments WHERE kind=? ORDER BY id DESC LIMIT ?",
+                (kind, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_content_comment(self, comment_id: int) -> bool:
+        with self._lock:
+            cur = self._db.execute("DELETE FROM content_comments WHERE id=?",
+                                   (int(comment_id),))
+            self._db.commit()
+            return bool(cur.rowcount)
+
+    def content_comments_count(self, kind: str = "", item_id: str = "") -> int:
+        with self._lock:
+            if kind and item_id:
+                row = self._db.execute(
+                    "SELECT COUNT(*) FROM content_comments WHERE kind=? AND item_id=?",
+                    (str(kind).strip().lower(), str(item_id).strip()[:120]),
+                ).fetchone()
+            elif kind:
+                row = self._db.execute(
+                    "SELECT COUNT(*) FROM content_comments WHERE kind=?",
+                    (str(kind).strip().lower(),),
+                ).fetchone()
+            else:
+                row = self._db.execute("SELECT COUNT(*) FROM content_comments").fetchone()
+        return int(row[0] if row else 0)
+

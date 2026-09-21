@@ -59,6 +59,37 @@ OG_LOCALE = {
 #: Публичный адрес: и в hreflang, и в sitemap нужны абсолютные ссылки.
 SITE_URL = (os.getenv("LIQSCOPE_PUBLIC_URL") or "https://liqscope.online").rstrip("/")
 
+#: Google Analytics (gtag.js) — ID property из настроек счётчика. Переопределяется
+#: переменной окружения ``LIQSCOPE_GA_ID``; пустое значение выключает счётчик
+#: вовсе (например, на тестовом стенде, где визиты в статистику не нужны).
+GA_ID = os.getenv("LIQSCOPE_GA_ID", "G-S88MTSY09G").strip()
+
+
+def analytics_block() -> str:
+    """Счётчик Google Analytics — ровно тот код, что выдаёт Google для ``<head>``.
+
+    Вставляется один здесь, а не в каждый шаблон: страницы сайта собираются
+    ``render``, поэтому метрика оказывается сразу на всех публичных страницах
+    (лендинг, терминал, дайджест, сводки по часам, вход и кабинет) и не может
+    задвоиться, если кто-то поправит один файл и забудет про остальные.
+    В админ-панели счётчика нет: это служебная страница, её просмотры — не
+    аудитория, а шум в отчётах (и ``robots.txt`` её закрыт).
+    """
+    if not GA_ID:
+        return ""
+    return (
+        "<!-- Google tag (gtag.js) -->\n"
+        f'<script async src="https://www.googletagmanager.com/gtag/js?id={GA_ID}">'
+        "</script>\n"
+        "<script>\n"
+        "  window.dataLayer = window.dataLayer || [];\n"
+        "  function gtag(){dataLayer.push(arguments);}\n"
+        "  gtag('js', new Date());\n"
+        f"  gtag('config', '{GA_ID}');\n"
+        "</script>"
+    )
+
+
 _cache: Dict[str, tuple] = {}
 
 
@@ -281,6 +312,7 @@ def render(
     og_image: str = "",
     auto: bool = False,
     status_code: int = 200,
+    analytics: bool = True,
 ) -> Response:
     """Отдаёт страницу с уже подставленным языком в head.
 
@@ -343,6 +375,9 @@ def render(
 
     # hreflang и подсказка о языке — в конец <head>
     block = _language_block(path, lang)
+    # счётчик — тоже в head, но первым: async-загрузчик gtag.js не должен
+    # ждать ни разметки языка, ни JSON-LD
+    ga = analytics_block() if analytics else ""
     block += f'\n<script>window.LIQSCOPE_LANG = "{lang}";</script>'
     if auto:
         # Язык подобран за гостя (браузер или страна): клиент может уточнить его
@@ -352,6 +387,8 @@ def render(
         block += "\n" + extra_head
     # вставляем в самый конец <head>: язык успевает выставиться к моменту
     # DOMContentLoaded, когда i18n.js применяет словари
+    if ga:
+        block = ga + "\n" + block
     html = html.replace("</head>", block + "\n</head>", 1)
 
     resp = Response(content=html, media_type="text/html; charset=utf-8", status_code=status_code)

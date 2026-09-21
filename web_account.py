@@ -507,7 +507,9 @@ def register_account_routes(app) -> None:
     @router.get("/admin")
     async def page_admin(request: Request):
         lang, auto = seo_pages.lang_of(request)
-        return seo_pages.render("admin.html", lang, "/admin", auto=auto)
+        # без счётчика: визиты администратора — не аудитория, а шум в отчётах
+        return seo_pages.render("admin.html", lang, "/admin", auto=auto,
+                                analytics=False)
 
     @router.get("/api/auth/me")
     async def api_me(request: Request):
@@ -1167,6 +1169,42 @@ def register_account_routes(app) -> None:
         return {"ok": True, "config": cfg, "subscribed": True,
                 "movers": data.get("movers") or [], "hits": data.get("hits") or []}
 
+    @router.post("/api/account/name")
+    async def api_account_name(request: Request):
+        """Смена имени в кабинете: то, что показывается на сайте."""
+        user = current_user(request)
+        if not user:
+            return _need_auth()
+        body = await _json_body(request)
+        lang = _lang_code(request, body)
+        raw = str(body.get("name") or body.get("first_name") or "").strip()
+        raw = " ".join(raw.split())
+        if not raw:
+            return JSONResponse(
+                {"ok": False, "error": "empty",
+                 "hint": "Введите имя — от 2 до 64 знаков." if _site_lang(lang) == "ru"
+                 else "Enter a name — 2 to 64 characters."},
+                status_code=400)
+        if len(raw) < 2:
+            return JSONResponse(
+                {"ok": False, "error": "short",
+                 "hint": "Имя слишком короткое — хотя бы 2 знака." if _site_lang(lang) == "ru"
+                 else "Name is too short — at least 2 characters."},
+                status_code=400)
+        if len(raw) > 64:
+            return JSONResponse(
+                {"ok": False, "error": "long",
+                 "hint": "Имя слишком длинное — до 64 знаков." if _site_lang(lang) == "ru"
+                 else "Name is too long — up to 64 characters."},
+                status_code=400)
+        ctx.store.set_user_name(user["id"], raw)
+        updated = ctx.store.get_user(user["id"]) or {**user, "first_name": raw, "display_name": raw}
+        try:
+            ctx.store.audit(user["id"], "name_change", raw[:120])
+        except Exception:
+            pass
+        return {"ok": True, "user": updated}
+
     # ----- admin ----------------------------------------------------------
     def _admin(request: Request):
         user = current_user(request)
@@ -1174,6 +1212,24 @@ def register_account_routes(app) -> None:
             return None, _need_auth()
         if not user["is_admin"]:
             return None, _need_admin()
+        return user, None
+
+    def _owner(request: Request):
+        user = current_user(request)
+        if not user:
+            return None, _need_auth()
+        if not user["is_admin"]:
+            return None, _need_admin()
+        # владелец — по env (admin_ids/emails)
+        try:
+            if ctx.store and ctx.store.is_owner(user):
+                return user, None
+        except Exception:
+            pass
+        # если владелец не задан в env, считаем что первый админ — владелец?
+        # Для безопасности требуем is_owner, но в dev без env разрешаем любому админу
+        if ctx.store and (ctx.store.admin_ids or ctx.store.admin_emails):
+            return None, JSONResponse({"ok": False, "error": "owner_only"}, status_code=403)
         return user, None
 
     @router.get("/api/admin/overview")
@@ -1242,7 +1298,44 @@ def register_account_routes(app) -> None:
         u = ctx.store.set_banned(user_id, banned, actor_id=actor["id"])
         if not u:
             return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
+        if isinstance(u, dict) and u.get("ok") is False:
+            # защита владельца / админа
+            return JSONResponse(u, status_code=403)
         return {"ok": True, "user": u}
+
+    @router.post("/api/admin/users/{user_id}/admin")
+    async def admin_toggle_admin(request: Request, user_id: int):
+        actor, err = _admin(request)
+        if err:
+            return err
+        # назначать/снимать админов может только владелец (или любой админ если env не задан — dev)
+        if ctx.store and (ctx.store.admin_ids or ctx.store.admin_emails):
+            if not ctx.store.is_owner(actor):
+                return JSONResponse({"ok": False, "error": "owner_only",
+                                     "hint": "Только главный администратор может назначать админов"},
+                                    status_code=403)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        make_admin = bool(body.get("admin", True))
+        u = ctx.store.set_admin(user_id, make_admin, actor_id=actor["id"])
+        if not u:
+            return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
+        if isinstance(u, dict) and u.get("ok") is False:
+            return JSONResponse(u, status_code=403)
+        return {"ok": True, "user": u}
+
+    @router.get("/api/admin/admins")
+    async def admin_list_admins(request: Request):
+        actor, err = _admin(request)
+        if err:
+            return err
+        # список всех админов + владельцы
+        all_users = ctx.store.list_users(limit=200)
+        admins = [u for u in all_users["users"] if u.get("is_admin") or u.get("is_owner")]
+        return {"ok": True, "admins": admins, "me": actor,
+                "is_owner": bool(ctx.store.is_owner(actor)) if ctx.store else False}
 
     @router.post("/api/admin/broadcast")
     async def admin_broadcast(request: Request):
@@ -1336,6 +1429,15 @@ def register_account_routes(app) -> None:
         limits = (ctx.store.digest_photo_limits()
                   if hasattr(ctx.store, "digest_photo_limits")
                   else {"total": 40, "kind": 40})
+        # порядок выдачи фото: random (как раньше) или queue (по очереди)
+        try:
+            order_post = ctx.store.get_photo_order("post") if hasattr(ctx.store, "get_photo_order") else "random"
+        except Exception:
+            order_post = "random"
+        try:
+            order_digest = ctx.store.get_photo_order("digest") if hasattr(ctx.store, "get_photo_order") else "random"
+        except Exception:
+            order_digest = "random"
         return {
             "ok": True,
             "heads": heads,
@@ -1343,6 +1445,7 @@ def register_account_routes(app) -> None:
             "photos_by_kind": by_kind,
             "photo_counts": counts,
             "photo_limits": limits,
+            "photo_orders": {"post": order_post, "digest": order_digest},
             "kinds": {"post": "Сводка в канал",
                       "digest": "Дневной дайджест"},
             "using_default_heads": not bool(heads),
@@ -1453,6 +1556,37 @@ def register_account_routes(app) -> None:
         if not ctx.store.set_digest_photo_kind(photo_id, kind, actor_id=actor["id"]):
             return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
         return {"ok": True, "id": photo_id, "kind": kind}
+
+    @router.post("/api/admin/digest/photo-order")
+    async def admin_digest_photo_order(request: Request):
+        """Порядок выдачи фото: random (круг без повторов, внутри круга случайно)
+        или queue (по очереди: 1,2,3…N, снова 1,2,3…). Настраивается отдельно
+        для сводки (post) и дайджеста (digest)."""
+        actor, err = _admin(request)
+        if err:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        kind = str((body or {}).get("kind") or "post").strip().lower()
+        if kind not in ("post", "digest"):
+            kind = "post"
+        order = str((body or {}).get("order") or "").strip().lower()
+        if order not in ("random", "queue", "ordered", "seq", "sequential", "order"):
+            return JSONResponse({"ok": False, "error": "bad_order"}, status_code=400)
+        if not hasattr(ctx.store, "set_photo_order"):
+            return JSONResponse({"ok": False, "error": "not_supported"}, status_code=501)
+        saved = ctx.store.set_photo_order(kind, order, actor_id=actor["id"])
+        # вернуть оба порядка, чтобы фронт сразу нарисовал актуальное
+        try:
+            orders = {
+                "post": ctx.store.get_photo_order("post"),
+                "digest": ctx.store.get_photo_order("digest"),
+            }
+        except Exception:
+            orders = {kind: saved}
+        return {"ok": True, "kind": kind, "order": saved, "photo_orders": orders}
 
     @router.post("/api/admin/digest/photos/{photo_id}/delete")
     async def admin_digest_del_photo(request: Request, photo_id: int):

@@ -1539,6 +1539,25 @@ class TelegramBot:
             bot_url=self.bot_url(),
             lang="en",
         )
+        # Полный текст для сайта /hourly — без лимита 1024 (как в daily_digest:
+        # в TG — коротко, на сайте — полностью)
+        caption_full = render_post(
+            snap, n,
+            headlines=active_headlines(self.store, hours),
+            head_override=ai_head,
+            site_url=self.site_url(),
+            bot_url=self.bot_url(),
+            limit=10 ** 9,
+        )
+        caption_full_en = render_post(
+            snap, n,
+            headlines=active_headlines(self.store, hours, lang="en"),
+            head_override=ai_head_en or None,
+            site_url=self.site_url(),
+            bot_url=self.bot_url(),
+            lang="en",
+            limit=10 ** 9,
+        )
         # Один пост вместо двух: часы уже внутри подписи (render_post сам
         # решает, каким видом они влезают). Второе сообщение — только аварийный
         # путь: если в подпись не попал ни один час.
@@ -1546,19 +1565,20 @@ class TelegramBot:
         top_en = ("" if post_has_hours(caption_en)
                   else render_top7(snap.get("board"), "en"))
         # Цифры окна: вместе с подписью и фото их складывает архив раздела
-        # «Сводки по часам» — на сайте видно то же, что ушло в канал
+        # «Сводки по часам» — на сайте видно полный текст, в TG — обрезанный
         meta = {"window_h": hours,
                 "total_usd": snap.get("total_usd"),
                 "liq_count": snap.get("count"),
                 "longs_usd": snap.get("longs_usd"),
                 "shorts_usd": snap.get("shorts_usd")}
         posts = [
-            {"lang": "ru", "cid": cid, "caption": caption, "top": top},
+            {"lang": "ru", "cid": cid, "caption": caption, "top": top,
+             "full_caption": caption_full},
         ]
         cid_en = self.channel_chat_id_en()
         if cid_en:
             posts.append({"lang": "en", "cid": cid_en, "caption": caption_en,
-                          "top": top_en})
+                          "top": top_en, "full_caption": caption_full_en})
         else:
             log.info("английский канал не привязан — пост только по-русски")
         if self._review_on():
@@ -1635,9 +1655,30 @@ class TelegramBot:
         return [img] if img else []
 
     async def _publish_digest(self, posts, img, n: int, meta=None) -> bool:
-        """Отправка готового поста в каналы (русский и английский)."""
+        """Отправка готового поста в каналы (русский и английский).
+
+        Порядок: сначала — полный текст на сайт /hourly (без лимита 1024),
+        потом — в Telegram как получится (может обрезаться до 1024). Так на
+        сайте всегда лежит весь предполагаемый текст, а в Telegram — заметка,
+        даже если не влезла.
+        """
         delivered = 0
         images = self._photo_list(img)
+        # --- СНАЧАЛА на сайт полный текст без обрезки -------------------------
+        try:
+            # все языки, у которых есть full_caption — кладём на сайт сразу
+            all_langs = []
+            for p in posts or []:
+                lang = "en" if str(p.get("lang") or "").startswith("en") else "ru"
+                if lang not in all_langs and str(p.get("full_caption") or p.get("caption") or "").strip():
+                    all_langs.append(lang)
+            if all_langs:
+                self._archive_posts(posts, all_langs, images[0] if images else "", n,
+                                    meta=meta)
+        except Exception as e:  # noqa: BLE001 — архив не должен ломать публикацию
+            log.debug("сводки по часам: пред-архив не удался: %s", e)
+
+        # --- ПОТОМ в Telegram (может обрезаться) ------------------------------
         sent_langs: List[str] = []
         for post in posts or []:
             cid = post.get("cid")
@@ -1652,10 +1693,13 @@ class TelegramBot:
                 sent_langs.append("en" if str(post.get("lang") or "").startswith("en")
                                   else "ru")
         if delivered:
-            # Тот же пост — в архив сайта: раздел «Сводки по часам» показывает
-            # подпись и фото ровно такими, какими они ушли в канал
-            self._archive_posts(posts, sent_langs, images[0] if images else "", n,
-                                meta=meta)
+            # Если в архив ушло раньше — этот вызов просто обновит sent-флаги
+            # (не мешает, если уже есть запись с тем же id — add() заменит)
+            try:
+                self._archive_posts(posts, sent_langs, images[0] if images else "", n,
+                                    meta=meta)
+            except Exception as e:  # noqa: BLE001
+                log.debug("сводки по часам: пост-архив не удался: %s", e)
             self._digest_routes = self.channel_route_text()
             now_ts = int(__import__("time").time())
             self.store.set_setting("channel_digest_n", str(n + 1))
@@ -1680,11 +1724,13 @@ class TelegramBot:
         return self._digest_fail(err + extra)
 
     def _archive_posts(self, posts, langs, img, n: int, meta=None) -> None:
-        """Положить опубликованный пост в архив сайта («Сводки по часам»).
+        """Положить пост в архив сайта («Сводки по часам»).
 
-        В архив идут только те языки, которые реально ушли в канал: если
-        английский канал не привязан, поста в нём и не было. Ошибка архива
-        публикацию не ломает — пост уже в канале, а сайт просто не пополнится.
+        На сайт кладём полный текст (full_caption) без лимита 1024, в TG уже
+        ушёл обрезанный caption. Раньше архив шёл только после успешной
+        отправки в Telegram и только по тем языкам, что реально ушли; теперь
+        сначала кладём полный на сайт (все языки с full_caption), потом —
+        в Telegram как получится. Ошибка архива публикацию не ломает.
         """
         store = getattr(self, "hourly_store", None)
         if store is None:
@@ -1698,13 +1744,18 @@ class TelegramBot:
             from hourly_posts import post_id
             now = time.time()
             texts: Dict[str, str] = {}
+            sent: Dict[str, bool] = {}
             for post in posts or []:
                 lang = "en" if str(post.get("lang") or "").startswith("en") else "ru"
                 if lang not in langs or texts.get(lang):
                     continue
+                # Полный для сайта, обрезанный для отметки отправки
+                full = str(post.get("full_caption") or post.get("caption") or "").strip()
                 cap = str(post.get("caption") or "").strip()
-                if cap:
-                    texts[lang] = cap
+                if full:
+                    texts[lang] = full
+                    if cap:
+                        sent[lang] = True
             if not texts:
                 return
             rec: Dict[str, Any] = {
@@ -1717,7 +1768,7 @@ class TelegramBot:
                 "longs_usd": meta.get("longs_usd"),
                 "shorts_usd": meta.get("shorts_usd"),
                 "texts": texts,
-                "sent": {x: True for x in texts},
+                "sent": sent or {x: True for x in texts},
                 "n": int(n or 0),
             }
             if img and os.path.isfile(str(img)):

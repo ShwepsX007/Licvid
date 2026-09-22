@@ -125,6 +125,14 @@
             <div class="exch-health" id="exch-health"
                  data-i18n-title="health.open"
                  title="Состояние бирж — наведите или нажмите"></div>
+        </div>
+    </header>
+
+    <!-- Controls Bar -->
+    <section class="controls-bar">
+        <!-- Звук и очистка переехали сюда из шапки: место освободил
+             выбор монеты, который теперь живёт над графиком (как на биржах). -->
+        <div class="control-group quick-tools">
             <button class="btn btn-icon btn-outline" id="sound-toggle-btn" data-i18n-title="sound.title" title="Звуковой сигнал">
                 <span id="sound-icon">🔇</span>
             </button>
@@ -144,31 +152,6 @@
                         <span data-i18n="clear.undo">↩️ Возобновить историю</span>
                         <span class="clear-note" id="clear-undo-note"></span></button>
                 </div>
-            </div>
-        </div>
-    </header>
-
-    <!-- Controls Bar -->
-    <section class="controls-bar">
-        <div class="control-group symbol-group">
-            <label data-i18n="ctrl.moneta">Монета:</label>
-            <div class="symbol-search-box">
-                <input type="text" id="symbol-search" class="form-input symbol-search-input"
-                       data-i18n-placeholder="search.placeholder"
-                       placeholder="Поиск пары: BTC, SOL, GRAM…" autocomplete="off">
-                <div class="symbol-search-results hidden" id="symbol-search-results"></div>
-            </div>
-            <div class="symbol-hint" id="symbol-hint" data-i18n="search.hint">
-                Поиск менее ликвидных монет.
-            </div>
-            <div class="symbol-dropdown-wrap" id="symbol-dropdown-wrap">
-                <button class="symbol-current" id="symbol-current" type="button"
-                        aria-haspopup="listbox" aria-expanded="false"
-                        data-i18n-title="sym.choose" title="Выбрать монету">
-                    <span class="symbol-current-label" id="symbol-current-label">ВСЕ</span>
-                    <span class="box-caret" aria-hidden="true">▾</span>
-                </button>
-                <div class="symbol-dropdown hidden" id="symbol-dropdown" role="listbox"></div>
             </div>
         </div>
 
@@ -253,7 +236,30 @@
         <section class="chart-section">
             <div class="chart-header flex-between">
                 <div class="symbol-price-display">
-                    <h2 id="current-symbol-title">BTC/USDT</h2>
+                    <!-- Выбор монеты — прямо в названии пары над графиком (как на
+                         биржах). Панель со списком и поиском открывается по клику;
+                         id элементов прежние, логика в app.js не менялась. -->
+                    <div class="symbol-dropdown-wrap chart-symbol-wrap" id="symbol-dropdown-wrap">
+                        <button class="symbol-current chart-symbol-btn" id="symbol-current" type="button"
+                                aria-haspopup="listbox" aria-expanded="false"
+                                data-i18n-title="sym.choose" title="Выбрать монету">
+                            <h2 id="current-symbol-title">BTC/USDT</h2>
+                            <span class="symbol-current-label sr-only" id="symbol-current-label">ВСЕ</span>
+                            <span class="box-caret" aria-hidden="true">▾</span>
+                        </button>
+                        <div class="symbol-panel hidden" id="symbol-panel">
+                            <div class="symbol-search-box">
+                <input type="text" id="symbol-search" class="form-input symbol-search-input"
+                       data-i18n-placeholder="search.placeholder"
+                       placeholder="Поиск пары: BTC, SOL, GRAM…" autocomplete="off">
+                <div class="symbol-search-results hidden" id="symbol-search-results"></div>
+            </div>
+            <div class="symbol-hint" id="symbol-hint" data-i18n="search.hint">
+                Поиск менее ликвидных монет.
+            </div>
+                            <div class="symbol-dropdown hidden" id="symbol-dropdown" role="listbox"></div>
+                        </div>
+                    </div>
                     <span class="live-price" id="current-price">—</span>
                     <span class="price-change positive" id="price-change-pct">+0.00%</span>
                     <span class="data-source" id="data-source"></span>

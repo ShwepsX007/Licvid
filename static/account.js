@@ -550,7 +550,9 @@
                     ? '<div class="svc-board" id="corr-board"></div>'
                     : s.slug === "watchlist"
                         ? '<div class="svc-board" id="pump-board"></div>'
-                        : "<p>" + (s.description || "") + "</p>" + soon +
+                        : s.slug === "book"
+                            ? '<div class="svc-board" id="book-board"></div>'
+                            : "<p>" + (s.description || "") + "</p>" + soon +
                     '<div class="row-actions">' +
                     // у дайджеста есть своя страница: сразу ведём читать выпуски
                     (s.slug === "digest"
@@ -578,6 +580,7 @@
                 try { localStorage.setItem("liqscope.svc.open", was ? "" : slug); } catch (e) {}
                 if (!was && slug === "correlations") bootCorrelations();
                 if (!was && slug === "watchlist") bootPumps();
+                if (!was && slug === "book") bootBook();
             });
         });
         box.querySelectorAll("button[data-slug]").forEach(function (btn) {
@@ -606,6 +609,7 @@
         // сервер зря, а данные обновляются, пока сервис на экране
         if (open === "correlations") bootCorrelations();
         if (open === "watchlist") bootPumps();
+        if (open === "book") bootBook();
     }
 
     var tgLinkTimer = null;
@@ -628,8 +632,204 @@
         if (!fold || !fold.classList.contains("open")) return;
         if (slug === "correlations") bootCorrelations();
         else if (slug === "watchlist") bootPumps();
+        else if (slug === "book") bootBook();
         else if (slug === "alerts") bootAlerts();
     }
+
+    /* ---------- 📖 Стакан: стены лимиток ---------------------------------------
+       Кабинетная доска: порог, сторона, монеты и живая лента стен. Настройки
+       летят на сервер с мелким дебаунсом, список перерисовывается сам, пока
+       гармошка открыта (8 с — сервер за это время успевает обновить стакан). */
+    var bookCfg = null, bookTimer = null, bookSaveT = null, bookBuilt = false;
+
+    function bootBook() {
+        if (!$("book-board")) return;
+        bookBuilt = false;
+        loadBook(true);
+        if (bookTimer) clearInterval(bookTimer);
+        bookTimer = setInterval(function () {
+            if (!document.hidden && $("book-board") &&
+                $("book-board").offsetParent !== null) loadBook(false);
+        }, 8000);
+    }
+
+    function loadBook(full) {
+        return api("/api/account/book").then(function (d) {
+            if (!d || !d.ok) return d;
+            if (full || !bookCfg) bookCfg = d.config || {};
+            paintBook(d);
+            return d;
+        });
+    }
+
+    function bookSet(key, value) {
+        if (!bookCfg) bookCfg = {};
+        bookCfg[key] = value;
+        if (bookSaveT) clearTimeout(bookSaveT);
+        bookSaveT = setTimeout(function () {
+            bookSaveT = null;
+            var sent = JSON.parse(JSON.stringify(bookCfg));
+            api("/api/account/book", { method: "POST", body: JSON.stringify(sent) })
+                .then(function (d) {
+                    var st = $("book-status");
+                    if (st) {
+                        st.className = "bk-status" + (d && d.ok ? " ok" : "");
+                        st.textContent = d && d.ok ? "сохранено"
+                            : ((d && d.error) || "ошибка");
+                    }
+                    if (d && d.config) {
+                        bookCfg = d.config;
+                        paintBook(d.config ? Object.assign({}, d, { config: d.config }) : d);
+                    }
+                });
+        }, 300);
+    }
+
+    function bookAge(s) {
+        s = Math.max(0, Math.round(Number(s) || 0));
+        if (s < 60) return s + "с";
+        if (s < 3600) return Math.floor(s / 60) + "м";
+        if (s < 86400) return Math.floor(s / 3600) + "ч";
+        return Math.floor(s / 86400) + "д";
+    }
+
+    function bookChipHtml(on, attrs, text) {
+        return '<button type="button" class="al-chip' + (on ? " on" : "") +
+               '" ' + attrs + ">" + text + "</button>";
+    }
+
+    function paintBook(d) {
+        var board = $("book-board");
+        if (!board) return;
+        var cfg = (bookCfg || d.config || {});
+        if (!bookBuilt) {
+            var THRS = [[100000, "100K$"], [250000, "250K$"], [500000, "500K$"],
+                        [1000000, "1M$"], [2500000, "2.5M$"]];
+            var thr = THRS.map(function (x) {
+                return bookChipHtml(Math.abs((Number(cfg.min_usd) || 0) - x[0]) < 1,
+                                    'data-bk-thr="' + x[0] + '"', x[1]);
+            }).join("");
+            var side = [["both", "обе"], ["bid", "bids"], ["ask", "asks"]].map(function (x) {
+                return bookChipHtml((cfg.side || "both") === x[0],
+                                    'data-bk-side="' + x[0] + '"', x[1]);
+            }).join("");
+            board.innerHTML =
+                '<div class="bk-head">' +
+                '<label class="bk-sw"><input type="checkbox" id="bk-enabled"' +
+                    (cfg.enabled ? " checked" : "") + "> слежение</label>" +
+                '<label class="bk-sw"><input type="checkbox" id="bk-notify"' +
+                    (cfg.notify !== false ? " checked" : "") + "> сигнал в Telegram</label>" +
+                '<span class="bk-status" id="book-status"></span></div>' +
+                '<div class="al-label">порог стены</div><div class="al-chips" id="bk-thr">' + thr + "</div>" +
+                '<div class="al-label">сторона</div><div class="al-chips" id="bk-side">' + side + "</div>" +
+                '<div class="al-label">монеты (до 8)</div>' +
+                '<div class="bk-syms" id="bk-syms"></div>' +
+                '<div class="bk-rows" id="book-rows"></div>' +
+                '<div class="bk-note" id="book-note"></div>';
+            board.querySelectorAll("#bk-thr .al-chip").forEach(function (b) {
+                b.onclick = function () {
+                    bookSet("min_usd", Number(b.getAttribute("data-bk-thr")));
+                    board.querySelectorAll("#bk-thr .al-chip").forEach(function (x) {
+                        x.classList.toggle("on", x === b);
+                    });
+                };
+            });
+            board.querySelectorAll("#bk-side .al-chip").forEach(function (b) {
+                b.onclick = function () {
+                    bookSet("side", b.getAttribute("data-bk-side"));
+                    board.querySelectorAll("#bk-side .al-chip").forEach(function (x) {
+                        x.classList.toggle("on", x === b);
+                    });
+                };
+            });
+            var en = $("bk-enabled");
+            if (en) en.onchange = function () { bookSet("enabled", en.checked); };
+            var nt = $("bk-notify");
+            if (nt) nt.onchange = function () { bookSet("notify", nt.checked); };
+            bookBuilt = true;
+        }
+        paintBookSyms(cfg);
+        paintBookRows(d);
+    }
+
+    function paintBookSyms(cfg) {
+        var box = $("bk-syms");
+        if (!box) return;
+        var list = (cfg && cfg.symbols) || [];
+        var chips = list.map(function (s) {
+            return '<span class="bk-sym">' + esc(String(s).replace("_USDT", "")) +
+                   '<button type="button" class="bk-x" data-del="' + esc(s) +
+                   '" title="убрать">×</button></span>';
+        }).join("");
+        box.innerHTML = chips +
+            '<input class="bk-add" id="bk-add" placeholder="+ SOL_USDT" maxlength="20">';
+        box.querySelectorAll(".bk-x").forEach(function (b) {
+            b.onclick = function () {
+                var s = b.getAttribute("data-del");
+                var cur = ((bookCfg && bookCfg.symbols) || []).filter(function (x) {
+                    return x !== s;
+                });
+                bookSet("symbols", cur);
+            };
+        });
+        var add = $("bk-add");
+        if (add) add.onkeydown = function (e) {
+            if (e.key !== "Enter") return;
+            e.preventDefault();
+            var v = String(add.value || "").trim().toUpperCase().replace(/-/g, "_");
+            if (!v) return;
+            if (!/_USDT$/.test(v)) v += "_USDT";
+            var cur = ((bookCfg && bookCfg.symbols) || []).slice();
+            if (cur.indexOf(v) < 0 && cur.length < 8) cur.push(v);
+            add.value = "";
+            bookSet("symbols", cur);
+        };
+    }
+
+    function paintBookRows(d) {
+        var rows = $("book-rows");
+        if (!rows) return;
+        var data = d.walls_by_symbol || [];
+        if (!data.length) {
+            rows.innerHTML = '<div class="cor-flow-empty">включите слежение и ' +
+                'добавьте монету — стены появятся, как только сервер опросит биржи</div>';
+        } else {
+            rows.innerHTML = data.map(function (r) {
+                var walls = (r.walls || []).slice(0, 6);
+                var head = '<div class="bk-symhead">' + esc(r.symbol) +
+                    (r.mid ? ' <i>· цена ' + alPrice(r.mid) + "</i>" : "") +
+                    (r.spread_bps != null ? ' <i>· спред ' + r.spread_bps + " bps</i>" : "") +
+                    "</div>";
+                if (!walls.length) {
+                    return head + '<div class="bk-none">стен выше порога сейчас нет</div>';
+                }
+                return head + walls.map(function (w) {
+                    return '<div class="bk-row ' + (w.side === "bid" ? "bid" : "ask") + '">' +
+                        '<b>' + (w.side === "bid" ? "bid" : "ask") + "</b>" +
+                        "<span>" + alMoney(Math.max(Number(w.usdt) || 0, Number(w.peak) || 0)) + "</span>" +
+                        '<span class="bk-range">' + alPrice(w.lo) + "–" + alPrice(w.hi) + "</span>" +
+                        '<span class="bk-meta">' + (Number(w.levels) || 1) + " ур · " +
+                        esc((w.exchs || []).join(",")) + "</span>" +
+                        '<span class="bk-age">' + (w.live
+                            ? "висит " + bookAge(w.age_s)
+                            : "ушла " + bookAge(((Number(w.closed) || 0) - (Number(w.opened) || 0)) / 60) + " назад") +
+                        "</span></div>";
+                }).join("");
+            }).join("");
+        }
+        var note = $("book-note");
+        if (note) {
+            var st = d.status || {};
+            var ex = ["binance", "bybit", "okx", "gate"].map(function (k) {
+                var v = st[k];
+                if (!v) return k + " —";
+                return k + (v.ok ? " ✓" : " ✕");
+            }).join(" · ");
+            note.textContent = "опрос " + (Number(d.poll_sec) || 2) + " c · " + ex +
+                (st.mode === "demo" ? " · демо-данные" : "");
+        }
+    }
+
 
     function paintTgCard(u, payload) {
         var box = $("tg-card");

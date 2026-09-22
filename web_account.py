@@ -55,6 +55,8 @@ class Ctx:
     correlations_fn = staticmethod(lambda window="24h", metric="liq": {})
     # Сторож монет: (настройки) → пампы, дампы и последние сигналы
     pump_snapshot_fn = staticmethod(lambda config=None: {})
+    # 📖 Стакан: (настройки) → живые стены по выбранным монетам
+    book_snapshot_fn = staticmethod(lambda config=None: {})
 
 
 ctx = Ctx()
@@ -1168,6 +1170,54 @@ def register_account_routes(app) -> None:
             log.warning("сторож монет: %s", e)
         return {"ok": True, "config": cfg, "subscribed": True,
                 "movers": data.get("movers") or [], "hits": data.get("hits") or []}
+
+    # ----- 📖 стакан: стены лимиток ------------------------------------------------
+
+    @router.get("/api/account/book")
+    async def api_book(request: Request):
+        """Стакан: настройки слежения за стенами + живой снимок для доски."""
+        from book_feed import normalize_book_cfg
+        user = current_user(request)
+        if not user:
+            return _need_auth()
+        if not _verify_allowed(user):
+            return _need_verified()
+        row = ctx.store.get_user_service(user["id"], "book")
+        cfg = normalize_book_cfg((row or {}).get("config") or {})
+        data = {}
+        try:
+            data = ctx.book_snapshot_fn(cfg) or {}
+        except Exception as e:                            # noqa: BLE001
+            log.warning("стакан: %s", e)
+        data = dict(data)
+        data["subscribed"] = bool(row and row.get("enabled"))
+        data["config"] = cfg
+        return {"ok": True, **data}
+
+    @router.post("/api/account/book")
+    async def api_book_save(request: Request):
+        from book_feed import normalize_book_cfg
+        user = current_user(request)
+        if not user:
+            return _need_auth()
+        if not _verify_allowed(user):
+            return _need_verified()
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        cfg = normalize_book_cfg(body or {})
+        r = ctx.store.set_user_service_config(
+            user["id"], "book", cfg, enabled=bool(cfg.get("enabled")))
+        if not r.get("ok"):
+            return JSONResponse(r, status_code=400)
+        data = {}
+        try:
+            data = ctx.book_snapshot_fn(cfg) or {}
+        except Exception as e:                            # noqa: BLE001
+            log.warning("стакан: %s", e)
+        return {"ok": True, "config": cfg, "subscribed": True,
+                "walls_by_symbol": data.get("walls_by_symbol") or []}
 
     @router.post("/api/account/name")
     async def api_account_name(request: Request):

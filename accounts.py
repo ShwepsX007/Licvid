@@ -140,6 +140,17 @@ DEFAULT_SERVICES = (
         "sort": 30,
     },
     {
+        "slug": "book",
+        "title": "Стакан: стены",
+        "title_en": "Order book walls",
+        "description": ("Крупные лимитки в L2-стакане Binance, Bybit, OKX и Gate: "
+                        "полосы на графике и сигнал в Telegram, когда стена появляется."),
+        "icon": "📖",
+        "enabled": 1,
+        "coming_soon": 0,
+        "sort": 35,
+    },
+    {
         "slug": "digest",
         "title": "Дневной дайджест",
         "title_en": "Daily digest",

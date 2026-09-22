@@ -57,6 +57,8 @@ from fastapi.staticfiles import StaticFiles
 
 from market_feed import GATE_REST, MarketFeed, TF_MINUTES, base_of, canon, _get_json
 from timeframes import parse_tf
+from book_feed import (BookFeed, format_wall_html, normalize_book_cfg,
+                       register_book_routes)
 from oi_feed import map_candles_to_oi
 from hour_board import BOARD, OI, SLOTS, build_snapshot, HOUR, SLOT_SEC
 from accounts import COOKIE_SID, Store
@@ -121,6 +123,10 @@ if HISTORY_FILE.lower() in ("0", "none", "off", "false"):
 # Сколько истории держать на диске. По умолчанию — 31 сутки: ликвидации,
 # CVD, объём и OI должны быть доступны за месяц, а не за сутки.
 HISTORY_TTL_HOURS = float(os.getenv("LIQSCOPE_HISTORY_TTL_HOURS", str(MONTH_HOURS)))
+# 📖 Стакан: куда класть шейрды событий стен ("" — только память) и порог стены.
+BOOK_DIR = os.getenv("LIQSCOPE_BOOK_DIR", os.path.join(HERE, "data", "book_walls")).strip()
+if BOOK_DIR.lower() in ("0", "none", "off", "false"):
+    BOOK_DIR = ""
 # Лимит одного дневного файла сырых ликвидаций: мельче $50k в переполненный
 # день не пишем (часовые свёртки при этом остаются полными)
 HISTORY_SHARD_MAX_MB = float(os.getenv("LIQSCOPE_HISTORY_SHARD_MB", "48"))
@@ -393,6 +399,8 @@ class Hub:
 
 hub = Hub()
 feed: Optional[MarketFeed] = None
+# 📖 Стакан: опрос L2 и детектор стен (заполняется в lifespan; в тестах — подмена).
+book_feed_inst: Optional[BookFeed] = None
 _pending: List[dict] = []
 _pending_lock = asyncio.Lock()
 # Очередь «тяжёлой» обработки ликвидаций (диск + рассылка клиентам).
@@ -1057,6 +1065,90 @@ def alert_watch_symbols() -> Set[str]:
         if feed and feed.symbols:
             out.add(feed.symbols[0])
     return out
+
+
+def book_snapshot(cfg: Optional[dict] = None) -> Dict[str, Any]:
+    """Доска кабинета «Стакан»: живые стены по монетам из настроек + статус опроса."""
+    book = book_feed_inst
+    cfg = normalize_book_cfg(cfg or {})
+    if book is None:
+        return {"config": cfg, "walls_by_symbol": [], "status": {"mode": "off"}}
+    rows = []
+    for sym in cfg["symbols"][:4]:
+        snap = book.snapshot(sym, cfg["min_usd"])
+        rows.append({"symbol": sym, "ts": snap.get("ts"), "mid": snap.get("mid"),
+                     "spread_bps": snap.get("spread_bps"), "walls": snap.get("walls") or []})
+    return {"config": cfg, "walls_by_symbol": rows, "poll_sec": book.poll_sec,
+            "status": book.status_summary()}
+
+
+def book_sub_symbols() -> Set[str]:
+    """Монеты подписок «Стакан: стены» — их надо опрашивать, даже когда
+    никто не смотрит график (ради сигнала в Telegram)."""
+    out: Set[str] = set()
+    try:
+        for s in account_store.list_service_subscribers("book"):
+            cfg = normalize_book_cfg(s.get("config"))
+            if cfg["enabled"]:
+                out.update(cfg["symbols"])
+    except Exception as e:                          # noqa: BLE001
+        log.debug("book subs: %s", e)
+    return out
+
+
+async def book_alert_loop():
+    """📖 Стакан: сигнал в Telegram, когда на выбранной монете появляется
+    новая стена крупнее порога. Не спамим при старте — всё, что уже висело
+    в стакане до включения петли, считается «виденным»."""
+    try:
+        await asyncio.sleep(25)                     # дать фиду наполнить стакан
+    except asyncio.CancelledError:
+        return
+    seen: Dict[int, Dict[str, int]] = {}            # user_id -> {sym: max id}
+    while True:
+        try:
+            book = book_feed_inst
+            if book is not None:
+                subs = account_store.list_service_subscribers("book")
+                now = time.time()
+                for sub in subs:
+                    uid = int(sub["user_id"])
+                    cfg = normalize_book_cfg(sub.get("config"))
+                    if not cfg["enabled"]:
+                        continue
+                    last = seen.get(uid)
+                    if last is None:
+                        last = {sym: max((w["id"] for w in store.values()),
+                                         default=0)
+                                for sym, store in book.walls.items()}
+                        seen[uid] = last
+                        continue
+                    if not cfg["notify"]:
+                        continue
+                    tg_id = int(sub.get("tg_id") or 0)
+                    if not tg_id or not tg_bot.running:
+                        continue
+                    lang = str(sub.get("language") or "ru")[:2]
+                    for w in book.new_open_walls(cfg["symbols"], cfg["min_usd"],
+                                                 cfg["side"], now - 600):
+                        if w["id"] <= last.get(w["sym"], 0):
+                            continue
+                        last[w["sym"]] = w["id"]
+                        try:
+                            await tg_bot.send(
+                                tg_id, format_wall_html(w, lang),
+                                markup=tg_bot.site_link_kb("📖 посмотреть"),
+                            )
+                        except Exception as e:      # noqa: BLE001
+                            log.debug("book notify %s: %s", tg_id, e)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:                      # noqa: BLE001
+            log.debug("book alerts: %s", e)
+        try:
+            await asyncio.sleep(15)
+        except asyncio.CancelledError:
+            break
 
 
 def sync_hot_symbols():
@@ -2285,8 +2377,16 @@ async def lifespan(app: FastAPI):
     await feed.start()
     sync_hot_symbols()      # чтобы тики пошли сразу, не дожидаясь клиента
 
+    # 📖 Стакан: L2-опрос только для монет, на которые смотрят график или
+    # которые включены в подписке кабинета. В демо walls рисуются синтетикой.
+    global book_feed_inst
+    book_feed_inst = BookFeed(BOOK_DIR or None, demo=DEMO_MODE)
+    book_feed_inst.sub_symbols_fn = book_sub_symbols
+
     tasks = [
         asyncio.create_task(liq_event_worker(), name="liq-worker"),
+        asyncio.create_task(book_feed_inst.run(), name="book"),
+        asyncio.create_task(book_alert_loop(), name="book-alerts"),
         asyncio.create_task(oi_history_task(), name="oi-history"),
         asyncio.create_task(liquidation_broadcaster(), name="liq-broadcast"),
         asyncio.create_task(flow_broadcaster(), name="flow-broadcast"),
@@ -2384,8 +2484,12 @@ account_ctx.ws_clients_fn = lambda: len(hub.clients)
 account_ctx.alerts_market_fn = alerts_market_snapshot
 account_ctx.correlations_fn = correlations_snapshot
 account_ctx.pump_snapshot_fn = pump_snapshot
+account_ctx.book_snapshot_fn = book_snapshot
 account_ctx.symbols_fn = lambda: list((feed.symbols if feed else [])[:40])
 register_account_routes(app)
+
+# 📖 Стакан: снимок для графика, лента истории и диагностика опроса бирж.
+register_book_routes(app, lambda: book_feed_inst)
 
 # Настройки вечернего выпуска: значения из окружения замораживаем, остальные
 # (час, минуты, разброс, авто-публикация) админ сайта может менять на лету.

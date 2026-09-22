@@ -38,6 +38,9 @@
         cvdBars: 0,
         oiEnabled: false,       // OI-шарики: рост/падение открытого интереса за свечу
         oiBars: 0,
+        bookEnabled: false,     // 📖 стакан: полосы крупных лимиток (L2-стены)
+        bookData: null,         // живой снимок стен /api/book/snapshot
+        bookHist: [],           // лента «появилась → исчезла» /api/book/walls
         // индикаторные окна под графиком (те же данные, что в кабинете)
         paneLiq: false,
         paneCvd: false,
@@ -616,6 +619,54 @@
             liqHistAt = Date.now();
             queueRedraw();
         } catch (e) { /* нет сети — рисуем по памяти, как раньше */ }
+    }
+
+    // --- 📖 Стакан: стены лимиток ----------------------------------------------
+    // Сервер сам крутит опрос L2 (Binance/Bybit/OKX/Gate) и знает, где висят
+    // крупные лимитники и сколько они живут. Пока слой включён, раз в 4 с
+    // тянем снимок активных стен; ленту истории («появилась → исчезла») — при
+    // смене монеты и далее раз в минуту: стены живут минутами, чаще незачем.
+    // Слой выключен — ни одного запроса, и сервер перестаёт опрашивать биржи.
+    let bookTimer = null, bookHistAt = 0, bookHistSym = "", bookHistReq = 0;
+    async function bookSnapshot() {
+        if (!state.bookEnabled) return;
+        const sym = chartSymbol();
+        if (!sym || sym === "ALL") return;
+        try {
+            const r = await fetch("/api/book/snapshot?symbol=" + encodeURIComponent(sym),
+                                  { credentials: "same-origin" });
+            const d = await r.json();
+            if (d && d.ok && chartSymbol() === sym) {
+                state.bookData = d;
+                queueRedraw();
+            }
+        } catch (e) { /* нет сети — рисуем по последнему снимку */ }
+        if (sym !== bookHistSym || Date.now() - bookHistAt > 60000) {
+            bookHistSym = sym;
+            bookHistAt = Date.now();
+            const req = ++bookHistReq;
+            try {
+                const r = await fetch("/api/book/walls?symbol=" +
+                    encodeURIComponent(sym) + "&hours=6",
+                    { credentials: "same-origin" });
+                const d = await r.json();
+                if (req !== bookHistReq) return;       // пришёл ответ по старой паре
+                if (d && d.ok && chartSymbol() === sym) {
+                    state.bookHist = (d && d.walls) || [];
+                    queueRedraw();
+                }
+            } catch (e) { /* история не критична */ }
+        }
+    }
+    function bookWatchOn() {
+        bookSnapshot();
+        if (bookTimer) clearInterval(bookTimer);
+        bookTimer = setInterval(bookSnapshot, 4000);
+    }
+    function bookWatchOff() {
+        if (bookTimer) { clearInterval(bookTimer); bookTimer = null; }
+        state.bookData = null;
+        state.bookHist = [];
     }
 
     async function loadHistoryFor(sym, force) {
@@ -1425,6 +1476,7 @@
         ctx.clearRect(0, 0, clusterCanvas.width, clusterCanvas.height);
 
         drawLiquidationProfile(ctx);   // индикатор: полосы по ценовым уровням
+        drawBookWalls(ctx);            // 📖 стены лимиток — фон под остальными слоями
 
         clusterHits = [];              // актуальные геометрии — только если слой включён
         cvdHits = [];
@@ -1436,6 +1488,91 @@
         if (state.liqEnabled) drawLiqRects(ctx);
         drawFigures();   // фигуры теханализа — свой canvas поверх
         drawIndicatorPanes();   // окна LIQ/CVD/OI под графиком
+    }
+
+    // --- 📖 Стакан: стены ---------------------------------------------------------
+    // Полоса = коридор цен, где в стакане лежит крупный лимитник: по высоте —
+    // цена стены, по ширине — время жизни (появилась → исчезла; живая тянется
+    // до правого края). Прозрачность как у профиля, цвета другие: bid — циан,
+    // ask — фиолет. Внутри — объём в USDT и число УРОВНЕЙ: публичный L2 не
+    // отдаёт количество ордеров в уровне, это максимум честных цифр.
+    function drawBookWalls(ctx) {
+        if (!state.bookEnabled || !chart || !candleSeries) return;
+        const rows = [];
+        const seen = new Set();
+        ((state.bookData && state.bookData.walls) || []).forEach((w) => {
+            seen.add(w.id); rows.push(w);
+        });
+        (state.bookHist || []).forEach((w) => {
+            if (!seen.has(w.id)) rows.push(w);
+        });
+        if (!rows.length) return;
+        const minUsd = Number(state.bookData && state.bookData.min_usd) || 150000;
+        const ts = chart.timeScale();
+        const h = clusterCanvas.height, W = clusterCanvas.width;
+        ctx.save();
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        const drawn = [];    // перекрытия: слабые полосы под сильные не дублируем
+        rows.slice().sort((a, b) => (b.peak || b.usdt) - (a.peak || a.usdt))
+            .forEach((w) => {
+            if (Math.max(w.usdt, w.peak || 0) < minUsd) return;
+            let y1, y2;
+            try {
+                y1 = candleSeries.priceToCoordinate(w.hi);
+                y2 = candleSeries.priceToCoordinate(w.lo);
+            } catch (e) { return; }
+            if (y1 === null || y1 === undefined || y2 === null || y2 === undefined) return;
+            let top = Math.min(y1, y2), bot = Math.max(y1, y2);
+            if (bot - top < 3) { const c = (top + bot) / 2; top = c - 1.5; bot = c + 1.5; }
+            if (bot < -20 || top > h + 20) return;
+            let x0 = 0, x1 = W;
+            if (w.opened) {
+                try {
+                    const x = ts.timeToCoordinate(Number(w.opened));
+                    if (x !== null && x !== undefined && isFinite(x)) x0 = x;
+                } catch (e) { /* за левым краем — тянем от края */ }
+            }
+            if (!w.live && w.closed) {
+                try {
+                    const x = ts.timeToCoordinate(Number(w.closed));
+                    if (x !== null && x !== undefined && isFinite(x)) x1 = Math.max(x, x0 + 3);
+                } catch (e) { /* правый край уже ушёл — оставляем хвост у края */ }
+            }
+            if (x1 < -40 || x0 > W + 40) return;
+            x0 = Math.max(x0, 0);
+            x1 = Math.min(x1, W);
+            if (x1 - x0 < 3) x1 = Math.min(x0 + 3, W);
+            const bx = Math.round(x0), bw = Math.max(2, Math.round(x1 - x0));
+            const by = Math.round(top), bh = Math.max(3, Math.round(bot - top));
+            const clash = drawn.some((r) =>
+                bx < r.x + r.w && bx + bw > r.x && by < r.y + r.h && by + bh > r.y);
+            drawn.push({ x: bx, y: by, w: bw, h: bh });
+            const bid = w.side === "bid";
+            if (clash && !(w.usdt >= minUsd * 2)) return;
+            ctx.globalAlpha = 0.34;
+            ctx.fillStyle = bid ? "#67e8f9" : "#a78bfa";
+            ctx.fillRect(bx, by, bw, bh);
+            ctx.globalAlpha = 0.75;
+            ctx.strokeStyle = bid ? "#22d3ee" : "#8b5cf6";
+            ctx.lineWidth = 1;
+            ctx.strokeRect(bx + 0.5, by + 0.5, Math.max(1, bw - 1), Math.max(1, bh - 1));
+            if (w.usdt >= minUsd * 3) {      // очень крупная — лёгкое свечение
+                ctx.globalAlpha = 0.3;
+                ctx.strokeRect(bx - 0.5, by - 0.5, bw + 1, bh + 1);
+            }
+            ctx.globalAlpha = 1;
+            const label = fmtCompact(Math.max(w.usdt, w.peak || 0)) + " · " +
+                          (w.levels || 1);
+            ctx.font = "bold 9px 'JetBrains Mono', monospace";
+            const tw = ctx.measureText ? ctx.measureText(label).width : 0;
+            if (bh >= 11 && tw + 8 <= bw) {
+                const lx = bx + bw / 2, ly = by + bh / 2;
+                ctx.fillStyle = "rgba(240,250,253,0.85)";
+                ctx.fillText(label, lx, ly + 0.5);
+            }
+        });
+        ctx.restore();
     }
 
     // --- Плашки ликвидаций ------------------------------------------------------
@@ -3470,7 +3607,13 @@
             layerState: () => ({ liq: !!state.liqEnabled, cvd: !!state.cvdEnabled,
                                  oi: !!state.oiEnabled, paneLiq: !!state.paneLiq,
                                  paneCvd: !!state.paneCvd, paneOi: !!state.paneOi,
+                                 book: !!state.bookEnabled,
                                  profile: !!state.profileEnabled }),
+            // 📖 стакан: тесты проверяют переключатель, полосу запроса и отрисовку
+            bookState: () => ({ on: !!state.bookEnabled,
+                                live: ((state.bookData && state.bookData.walls) || []).length,
+                                hist: (state.bookHist || []).length }),
+            bookSnapshotNow: () => bookSnapshot(),
             redraw: () => drawClusters(),
         };
         window.LiqScopeDraw = {
@@ -4532,7 +4675,7 @@
     // По умолчанию при входе на график все слои выключены, а сами переключатели
     // видны только зарегистрированным пользователям (авторизация сайта).
     const LAYER_KEYS = ["profileEnabled", "liqEnabled", "cvdEnabled", "oiEnabled",
-                        "paneLiq", "paneCvd", "paneOi"];
+                        "bookEnabled", "paneLiq", "paneCvd", "paneOi"];
     //: ключ слоя → кнопка-переключатель (заполняется в setupLayerToggles)
     const LAYER_DEFS = {};
 
@@ -4779,6 +4922,8 @@
               on: "chart.cvd_on", off: "chart.cvd_off" },
             { el: $("oi-toggle"), skey: "oiEnabled", store: "liqscope.oiEnabled",
               on: "chart.oi_on", off: "chart.oi_off" },
+            { el: $("book-toggle"), skey: "bookEnabled", store: "liqscope.bookEnabled",
+              on: "chart.book_on", off: "chart.book_off" },
             // индикаторные окна под графиком — те же данные, что в кабинете
             { el: $("pane-liq-toggle"), skey: "paneLiq", store: "liqscope.paneLiq",
               on: "chart.pane_liq_on", off: "chart.pane_liq_off", pane: "liq" },
@@ -4826,6 +4971,11 @@
                     unpinShape();
                     hideShapeModal();
                 }
+                if (d.skey === "bookEnabled") {
+                    // стакан: включённый слой начинает тянуть снапшоты бирж,
+                    // выключенный — отпускает монету (сервер перестанет опрашивать)
+                    if (state.bookEnabled) bookWatchOn(); else bookWatchOff();
+                }
                 paint();
                 updateMarkers();
                 updateLiveStats();
@@ -4833,6 +4983,7 @@
             });
             I18n.onChange(paint);
             paint();
+            if (d.skey === "bookEnabled" && state.bookEnabled) bookWatchOn();
         });
     }
 

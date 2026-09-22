@@ -663,6 +663,51 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
 .pump-hit.pos { color: #00e676; }
 .pump-hit.neg { color: #ff2a5f; }
 
+/* ---------- 📖 стакан: стены лимиток в кабинете -----------------------------
+   Те же чипы настроек, что у алертов (.al-chip), своя лента: строка на стену.
+   Цвета зеркалят слой на графике — bid циан, ask фиолет. */
+.bk-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    margin: 2px 0 8px; font-size: 0.84rem; }
+.bk-sw { display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+    color: #c8d5e8; }
+.bk-sw input { accent-color: #67e8f9; }
+.bk-status { font-size: 0.76rem; color: #8d9cb4; min-height: 1em; }
+.bk-status.ok { color: #00e676; }
+.bk-syms { display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+    margin: 2px 0 10px; }
+.bk-sym { display: inline-flex; align-items: center; gap: 4px;
+    padding: 3px 8px; border-radius: 999px; font-size: 0.78rem; font-weight: 700;
+    background: rgba(103, 232, 249, 0.10); border: 1px solid rgba(103, 232, 249, 0.35);
+    color: #bfeff8; }
+.bk-sym .bk-x { background: none; border: none; color: inherit; cursor: pointer;
+    font-size: 0.9rem; line-height: 1; padding: 0 1px; opacity: 0.7; }
+.bk-sym .bk-x:hover { opacity: 1; }
+.bk-add { background: rgba(20, 26, 38, 0.6); border: 1px solid rgba(120, 140, 175, 0.25);
+    border-radius: 999px; color: #dce6f5; padding: 4px 10px; font-size: 0.78rem;
+    width: 120px; }
+.bk-add:focus { outline: none; border-color: rgba(103, 232, 249, 0.55); }
+.bk-rows { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
+.bk-symhead { font-size: 0.8rem; font-weight: 800; letter-spacing: 0.3px;
+    color: #dce6f5; margin: 6px 0 2px; }
+.bk-symhead i { font-style: normal; font-weight: 600; font-size: 0.74rem;
+    color: #8d9cb4; }
+.bk-none { font-size: 0.78rem; color: #8d9cb4; padding: 2px 0 4px; }
+.bk-row { display: grid; grid-template-columns: 34px 64px minmax(120px, 1fr) auto auto;
+    align-items: center; gap: 8px; padding: 4px 8px; border-radius: 8px;
+    font-size: 0.78rem; background: rgba(20, 26, 38, 0.55);
+    border-left: 3px solid transparent; font-variant-numeric: tabular-nums; }
+.bk-row.bid { border-left-color: #67e8f9; }
+.bk-row.ask { border-left-color: #a78bfa; }
+.bk-row b { font-size: 0.72rem; text-transform: uppercase; opacity: 0.9; }
+.bk-row.bid b { color: #67e8f9; }
+.bk-row.ask b { color: #a78bfa; }
+.bk-row > span:nth-child(2) { font-weight: 800; color: #eaf2ff; }
+.bk-range { color: #9fb0c8; }
+.bk-meta { color: #8d9cb4; }
+.bk-age { color: #8d9cb4; white-space: nowrap; }
+.bk-note { margin-top: 8px; font-size: 0.72rem; color: #74869f; }
+
+
 /* ---------- корреляции: карта у каждой переменной своя --------------------- */
 /* Раньше тепловая карта была одна, и над ней стоял переключатель метрик: чтобы
    сравнить ликвидации с CVD, приходилось щёлкать чипы. Теперь карты идут

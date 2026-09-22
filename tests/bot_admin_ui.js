@@ -40,8 +40,8 @@ const BOT_SNAP = {
   },
   review: true,
   templates: { heads: 3, photos: 2, using_default_heads: false, using_default_photos: false },
-  interval: { hours: 4, min: 1, max: 10, block_sec: 3600, window: "4ч", block: "1ч",
-              text: "раз в 4 ч · окно 4 ч · анализ по 1 ч" },
+  interval: { hours: 4, min: 1, max: 24, block_sec: 3600, window: "4ч", block: "1ч",
+              text: "раз в 4 ч · окно 4 ч · разбор по часам" },
   ai: { enabled: true, providers: [{ name: "gemini" }, { name: "groq" }],
         last: { ok: true, provider: "gemini", ms: 812 } },
   health: {
@@ -203,13 +203,13 @@ function adminHandler(u, opts, calls) {
     }
     if (u.indexOf("/api/admin/bot/interval") === 0) {
       const hours = Number(body.hours);
-      const block = hours === 1 ? "15м" : (hours === 2 ? "30м" : "1ч");
       return { ok: true,
-               interval: { hours: hours, min: 1, max: 10, block: block,
+               interval: { hours: hours, min: 1, max: 24, block_sec: 3600,
+                           block: "1ч",
                            window: hours + "ч",
                            text: "раз в " + hours + " ч · окно " + hours +
-                                 " ч · анализ по " + block },
-               message: "Сводка раз в " + hours + " ч: блок анализа — " + block + "." };
+                                 " ч · разбор по часам" },
+               message: "Сводка раз в " + hours + " ч: разбор по часам." };
     }
     if (u.indexOf("/api/admin/bot/ai-check") === 0) {
       return { ok: true, head: "Ночь на рынке выдалась горячей — снесло $120M",
@@ -385,9 +385,9 @@ function click(win, el) {
   // Частота сводки: окно поста и блок анализа внутри него
   const intNote = doc.querySelector("#post-int-note");
   check("частота сводки показана", /раз в 4 ч/.test(intNote.textContent) &&
-    /анализ по 1 ч/.test(intNote.textContent), intNote.textContent);
+    /разбор по часам/.test(intNote.textContent), intNote.textContent);
   const chips = doc.querySelectorAll("#post-int-btns [data-pi]");
-  check("есть кнопки частоты 1…10 часов", chips.length === 10, chips.length + " кнопок");
+  check("есть кнопки частоты 1…24 часов", chips.length === 24, chips.length + " кнопок");
   check("текущая частота отмечена",
     doc.querySelector("#post-int-btns [data-pi='4']").className.indexOf("on") !== -1,
     doc.querySelector("#post-int-btns [data-pi='4']").className);
@@ -401,7 +401,7 @@ function click(win, el) {
     intCall && intCall.body);
   check("и подтверждается на странице",
     /раз в 1 ч/.test(doc.querySelector("#post-int-note").textContent) &&
-    /15м/.test(doc.querySelector("#post-int-note").textContent),
+    /разбор по часам/.test(doc.querySelector("#post-int-note").textContent),
     doc.querySelector("#post-int-note").textContent);
 
   // Фото: рубрики сводки и дневного дайджеста

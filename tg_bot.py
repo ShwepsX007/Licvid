@@ -1314,7 +1314,7 @@ class TelegramBot:
         """Пауза до следующего поста.
 
         Спим кусками и каждый раз заново спрашиваем частоту: смена расписания
-        в админке (раз в 1…10 часов) применяется без перезапуска сервиса.
+        в админке (раз в 1…24 часов) применяется без перезапуска сервиса.
         """
         while self.running:
             period = self.channel_window_sec()
@@ -1387,10 +1387,10 @@ class TelegramBot:
         return out
 
     def channel_interval_h(self) -> int:
-        """Частота постов в канал: раз в N часов (1…10).
+        """Частота постов в канал: раз в N часов (1…24).
 
-        Окно поста равно промежутку между постами, а блок анализа внутри поста
-        — четверти окна: раз в час → по 15 минут, раз в 4 часа → по часу.
+        Окно поста — эти же N часов, сводка внутри поста почасовая: по одной
+        строке на каждый из N последних завершённых часов.
         """
         from channel_digest import interval_hours
         try:
@@ -1416,11 +1416,9 @@ class TelegramBot:
         return n
 
     def interval_text(self) -> str:
-        """«раз в 4 ч · окно 4 ч · анализ по 1 ч» — для админки и /bot."""
-        from channel_digest import block_secs, window_word
+        """«раз в 4 ч · окно 4 ч · разбор по часам» — для админки и /bot."""
         h = self.channel_interval_h()
-        return (f"раз в {h} ч · окно {h} ч · анализ по "
-                f"{window_word(block_secs(h))}")
+        return f"раз в {h} ч · окно {h} ч · разбор по часам"
 
     def _review_on(self) -> bool:
         """Контроль публикации: черновик у админа вместо поста в канал."""
@@ -3361,28 +3359,24 @@ class TelegramBot:
         return self._menu_kb(user)
 
     def _post_int_text(self) -> str:
-        """Экран «Частота постов»: окно поста и блок анализа."""
-        from channel_digest import MAX_INTERVAL_H, MIN_INTERVAL_H, block_secs, window_word
-        h = self.channel_interval_h()
+        """Экран «Частота постов»: окно поста и почасовой разбор."""
+        from channel_digest import MAX_INTERVAL_H, MIN_INTERVAL_H
         return (
             "<b>🕒 Частота сводки в канал</b>\n"
             f"Сейчас: {self.interval_text()}\n\n"
-            "Пост выходит раз в N часов, окно поста — те же N часов, а блок "
-            "анализа внутри поста — четверть окна:\n"
-            "• раз в 4 ч → разбор по часу;\n"
-            "• раз в 2 ч → по 30 минут;\n"
-            "• раз в 1 ч → по 15 минут.\n\n"
+            "Сводка почасовая: в посте — по строке на каждый из N последних "
+            "завершённых часов, независимо от частоты постов.\n\n"
             f"Выберите частоту ({MIN_INTERVAL_H}…{MAX_INTERVAL_H} ч) — применяется "
             "сразу, перезапуск не нужен.\n"
-            f"Текущий блок анализа: <b>{window_word(block_secs(h))}</b>."
             + self.site_footer()
         )
 
     def _post_int_kb(self) -> dict:
+        from channel_digest import MAX_INTERVAL_H
         cur = self.channel_interval_h()
         rows: List[list] = []
         row: list = []
-        for n in range(1, 11):
+        for n in range(1, MAX_INTERVAL_H + 1):
             row.append({"text": (f"✓ {n} ч" if n == cur else f"{n} ч"),
                         "callback_data": f"pi:{n}"})
             if len(row) == 5:

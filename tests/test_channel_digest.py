@@ -434,13 +434,15 @@ class DigestTest(unittest.TestCase):
         self.assertIn("4ч", t)
 
     def test_interval_sets_window_and_block(self):
-        """Частота постов 1…10 ч: блок анализа — четверть окна."""
+        """Частота постов 1…24 ч: блок анализа — всегда 1 час (сводка почасовая)."""
         from channel_digest import (MAX_INTERVAL_H, MIN_INTERVAL_H, block_secs,
                                     clamp_interval, interval_hours, window_word)
-        self.assertEqual((MIN_INTERVAL_H, MAX_INTERVAL_H), (1, 10))
-        self.assertEqual(block_secs(4), 3600)          # раз в 4 ч → по часу
-        self.assertEqual(block_secs(1), 900)           # раз в час → по 15 минут
-        self.assertEqual(block_secs(10), 9000)         # раз в 10 ч → по 2.5 часа
+        self.assertEqual((MIN_INTERVAL_H, MAX_INTERVAL_H), (1, 24))
+        # Блок не зависит от частоты: раз в час → 1 час, раз в 24 ч → 1 час
+        self.assertEqual(block_secs(1), 3600)
+        self.assertEqual(block_secs(4), 3600)
+        self.assertEqual(block_secs(10), 3600)
+        self.assertEqual(block_secs(24), 3600)
         self.assertEqual(window_word(3600), "1ч")
         self.assertEqual(window_word(900), "15м")
         self.assertEqual(window_word(9000), "2ч30м")
@@ -470,13 +472,19 @@ class DigestTest(unittest.TestCase):
         os.environ["LIQSCOPE_POST_INTERVAL_H"] = "4"
         try:
             self.assertEqual(interval_hours(Store("2")), 2)
-            self.assertEqual(interval_hours(Store("11")), 10)   # прижали к границе
-            self.assertEqual(interval_hours(Store("")), 4)      # пусто → окружение
+            self.assertEqual(interval_hours(Store("24")), 24)  # верхняя граница
+            self.assertEqual(interval_hours(Store("25")), 24)  # прижали к границе
+            self.assertEqual(interval_hours(Store("0")), 1)    # прижали к нижней
+            self.assertEqual(interval_hours(Store("")), 4)     # пусто → окружение
         finally:
             os.environ.pop("LIQSCOPE_POST_INTERVAL_H", None)
 
-    def test_quarter_hour_blocks_are_labelled(self):
-        """Пост раз в час: блоки по 15 минут подписаны временем начала."""
+    def test_sub_hour_blocks_are_labelled_by_start(self):
+        """Под-часовый блок подписан временем начала (свойство slot_label).
+
+        Продакшен-посты теперь всегда почасовые (блок = 1 час), но функция
+        подписи умеет и под-часовые блоки — проверяем её на 15-минутной сетке.
+        """
         base = 986_400
         hours = []
         for i in range(4):

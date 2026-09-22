@@ -206,10 +206,11 @@ RU_EN: Dict[str, str] = {
     "<b>Шаблоны сводки</b>": "<b>Digest templates</b>",
     "<b>🕒 Частота сводки в канал</b>\nСейчас: ":
         "<b>🕒 Channel digest frequency</b>\nCurrent: ",
-    "\n\nПост выходит раз в N часов, окно поста — те же N часов, а блок анализа внутри поста — четверть окна:\n• раз в 4 ч → разбор по часу;\n• раз в 2 ч → по 30 минут;\n• раз в 1 ч → по 15 минут.\n\nВыберите частоту (":
-        "\n\nThe post goes out every N hours, the post window is those N hours, and the analysis block inside the post is a quarter of the window:\n• every 4 h → hourly breakdown;\n• every 2 h → 30-minute breakdown;\n• every 1 h → 15-minute breakdown.\n\nPick the frequency (",
-    " ч) — применяется сразу, перезапуск не нужен.\nТекущий блок анализа: <b>":
-        " h) — applied immediately, no restart needed.\nCurrent analysis block: <b>",
+    "\n\nСводка почасовая: в посте — по строке на каждый из N последних завершённых часов, независимо от частоты постов.\n\nВыберите частоту (":
+        "\n\nThe summary is hourly: the post has one line per each of the N most recently completed hours, regardless of the post frequency.\n\nPick the frequency (",
+    " ч) — применяется сразу, перезапуск не нужен.\n":
+        " h) — applied immediately, no restart needed.\n",
+    " ч · разбор по часам": " h · hourly breakdown",
     "Раз в ": "Every ",
     "раз в ": "every ",
     "Пришлите текст шапки следующим сообщением.":
@@ -682,7 +683,6 @@ RU_EN.update({
     " уник.": " unique",
     " уникальных": " unique",
     "% за ": "% over ",
-    " ч · анализ по ": " h · analysis by ",
     " ч · окно ": " h · window ",
     " окно ": " window ",
     "На <code>": "On <code>",

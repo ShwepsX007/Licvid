@@ -17,20 +17,19 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 IMAGES_DIR = os.path.join(HERE, "static", "channel")
 
 WINDOW_SEC = 4 * 3600
-#: Частота постов в канал: раз в N часов (1…10). Окно поста равно промежутку
-#: между постами, а блок анализа внутри поста — четверти этого промежутка:
-#: пост раз в час разбирает по 15 минут, раз в 4 часа — по часу, раз в 10
-#: часов — по 2.5 часа. Значение живёт в настройках (админка сайта и бота),
-#: а WINDOW_SEC остаётся значением по умолчанию.
+#: Частота постов в канал: раз в N часов (1…24). Сводка почасовая: окно поста
+#: равно промежутку между постами, а внутри поста — по одной строке на каждый
+#: из N последних завершённых часов, независимо от частоты. Значение живёт в
+#: настройках (админка сайта и бота), а WINDOW_SEC — значение по умолчанию.
 MIN_INTERVAL_H = 1
-MAX_INTERVAL_H = 10
+MAX_INTERVAL_H = 24
 DEFAULT_INTERVAL_H = int(WINDOW_SEC // 3600)
 INTERVAL_SETTING = "channel_digest_interval_h"
 INTERVAL_ENV = "LIQSCOPE_POST_INTERVAL_H"
 
 
 def clamp_interval(value, default: int = DEFAULT_INTERVAL_H) -> int:
-    """Частота постов: целое число часов в границах 1…10."""
+    """Частота постов: целое число часов в границах 1…24."""
     try:
         n = int(round(float(value)))
     except (TypeError, ValueError):
@@ -54,9 +53,14 @@ def interval_hours(store=None, default=None) -> int:
     return clamp_interval(raw, clamp_interval(base))
 
 
-def block_secs(interval: int) -> int:
-    """Длина блока анализа: четверть промежутка между постами."""
-    return int(clamp_interval(interval) * 3600 / 4)
+def block_secs(interval: int = 0) -> int:
+    """Длина блока анализа: всегда 1 час.
+
+    Сводка почасовая независимо от частоты постов: при частоте раз в N часов
+    окно — N часов, в нём по строке на каждый из N часов. ``interval`` остался
+    в сигнатуре ради совместимости со старыми вызовами.
+    """
+    return HOUR_SEC
 
 
 def window_word(secs: float, lang: str = "ru") -> str:

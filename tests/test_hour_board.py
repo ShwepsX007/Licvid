@@ -151,11 +151,16 @@ class HourBoardTest(unittest.TestCase):
         hours = list(range(7, -1, -1))
         for idx, h in enumerate(hours):
             for i in range(12):
-                self.liq(h + 0.2 + i * 0.05, 50_000 * (i + 1),
-                         sym="BTC_USDT" if i % 2 else "ETH_USDT",
+                # BTC — несколько крупных (лидер по деньгам), ETH — много
+                # мелких (лидер по числу событий): два лидера различаются,
+                # и пост обязан показать «второго лидера» (🥇).
+                if i % 3 == 0:
+                    sym, usd = "BTC_USDT", 400_000 * (i + 1)
+                else:
+                    sym, usd = "ETH_USDT", 20_000 * (i + 1)
+                self.liq(h + 0.2 + i * 0.05, usd, sym=sym,
                          ex="gate" if i % 3 == 0 else "binance")
-                self.board.add_cvd("BTC_USDT" if i % 2 else "ETH_USDT",
-                                   self.now - h * 3600 - i * 60, -30_000)
+                self.board.add_cvd(sym, self.now - h * 3600 - i * 60, -30_000)
             hs = int(self.now // 3600 * 3600) - h * 3600
             nxt = series[min(idx + 1, len(series) - 1)]
             for sym, k in (("BTC_USDT", 1.0), ("ETH_USDT", 0.92)):
@@ -201,13 +206,17 @@ class HourBoardTest(unittest.TestCase):
         self.assertIn("vol", lead)
         self.assertIn("count", lead)
         self.assertGreater(lead["count"]["count"], 0)
-        # лидер окна по количеству — монета с большим числом событий за окно
+        # лидер окна по количеству — монета с максимальным числом событий
+        # за окно; при равенстве лидеров_of берёт монету с бо́льшей суммой
         per_coin = {}
         for hr in board["hours"]:
             for sym, n in hr["cnt"].items():
                 per_coin[sym] = per_coin.get(sym, 0) + n
-        self.assertEqual(lead["count"]["symbol"], max(per_coin, key=per_coin.get))
-        self.assertEqual(lead["count"]["count"], per_coin[lead["count"]["symbol"]])
+        max_n = max(per_coin.values())
+        self.assertIn(lead["count"]["symbol"],
+                      [s for s, n in per_coin.items() if n == max_n],
+                      per_coin)
+        self.assertEqual(lead["count"]["count"], max_n)
         # пост показывает лидера часа с числом событий этой монеты
         snap = {"window_h": 4, "count": 30, "total_usd": board["total_usd"],
                 "longs_usd": 6_000_000, "shorts_usd": 5_700_000,
@@ -267,43 +276,45 @@ class HourBoardTest(unittest.TestCase):
 
         Стенд умеет рендериться и сам по себе, но в посты он попадает только
         через snap["board"] — однажды это звено уже было забыто, и посты
-        уходили без таблицы часов. Частота постов задаёт длину блока (N/4 часа),
-        поэтому снимок обязан нести и её: иначе пост вернётся к «часу на блок».
+        уходили без таблицы часов. Частота постов задаёт число почасовых
+        блоков (span=interval, блок = 1 час), поэтому снимок обязан нести её:
+        иначе пост вернётся к четырём фиксированным блокам.
         """
         src = open(os.path.join(HERE, "server.py"), encoding="utf-8").read()
         body = src[src.index("async def build_channel_digest"):]
         body = body[:body.index("\n\nasync def ", 1)]
         self.assertIn("build_snapshot(SLOTS, OI", body)
-        self.assertIn("group=interval", body)
+        self.assertIn("span=interval", body)
+        self.assertIn("group=HOUR // SLOT_SEC", body)
         self.assertIn("post_interval_hours", body)
         self.assertIn("slot_flows", body)
-        self.assertIn("group=interval", body)
         self.assertIn('snap["board"]', body)
 
     def test_block_groups_fold_slots(self):
-        """Частота постов задаёт блок: 15 минут × N слотов на один блок."""
+        """Почасовые блоки: 15 минут × 4 слота; окно — завершённые часы."""
         from hour_board import SLOT_SEC, HourBoard, build_snapshot
-        now = 986_400 + 53 * 60          # 13:53 МСК, внутри четверти часа
+        now = 986_400 + 53 * 60          # 13:53 МСК, внутри часа
         board = HourBoard(slot_sec=SLOT_SEC, keep_hours=64)
-        for i in range(16):              # 16 четвертей = 4 часа истории
+        for i in range(16):              # 16 слотов = 4 часа истории
             for k in range(i + 1):
                 board.add_liq({"symbol": "BTC_USDT", "usd": 100_000.0,
                                "side": "SELL", "exchange": "binance",
                                "timestamp": now - i * SLOT_SEC - k})
         snap = build_snapshot(board, OiHistory(), now=now, span=4, group=4)
         self.assertEqual(snap["block_sec"], 4 * SLOT_SEC)     # блок — час
-        self.assertEqual(len(snap["hours"]), 4)               # четыре блока
+        self.assertEqual(len(snap["hours"]), 4)               # четыре часа
         self.assertEqual(snap["group"], 4)
         self.assertEqual(snap["slot_sec"], SLOT_SEC)
         self.assertEqual(snap["window_sec"], 4 * 3600)
         self.assertGreater(snap["total_usd"], 0)
-        # блок из четырёх четвертей больше одной четверти
-        self.assertGreater(snap["hours"][0]["total"], 100_000.0)
-        # часовая группировка: последний блок — тот же час, что и слот now
+        # свежий завершённый час (12:00–13:00) собрал больше одной сотки
+        self.assertGreater(snap["hours"][-1]["total"], 100_000.0)
+        # окно — завершённые календарные часы: последний показанный час
+        # заканчивается ровно на границе текущего (ещё идущего) часа
         from hour_board import slot_start
         self.assertEqual(snap["hours"][-1]["h"] + snap["block_sec"],
-                         slot_start(now, board.tz, 3600) + 3600)
-        # одиночные слоты (частота раз в час) дают блоки по 15 минут
+                         slot_start(now, board.tz, 3600))
+        # одиночные слоты (не почасовая сетка) дают блоки по 15 минут
         snap1 = build_snapshot(board, OiHistory(), now=now, span=4, group=1)
         self.assertEqual(snap1["block_sec"], SLOT_SEC)
         self.assertEqual(len(snap1["hours"]), 4)

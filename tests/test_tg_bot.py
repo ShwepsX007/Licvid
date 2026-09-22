@@ -818,8 +818,8 @@ class BotMenuTest(unittest.TestCase):
         self.assertIn("gate.com/ru/signup/VLFCAVWMBW", ru)
         self.assertIn("gate.com/signup/VLFCAVWMBW", en)
 
-    def test_one_post_carries_top7_inside_caption(self):
-        """Один пост: топ-7 по часам живёт в той же подписи, второго нет."""
+    def test_channel_post_has_no_hours_site_keeps_them(self):
+        """Пост в канал — без почасовых строк: они целиком живут на сайте."""
         self.bot._channel_id_cfg = "-100111"
         board = {
             "span_hours": 4, "tz": 3 * 3600, "total_usd": 12e6, "count": 40,
@@ -842,22 +842,24 @@ class BotMenuTest(unittest.TestCase):
                     "top_coins": [], "exchanges": {"gate": 3e6}}
 
         self.bot.digest_fn = digest          # type: ignore
+        from hourly_posts import PostStore
+        hourly = PostStore(os.path.join(self.tmp.name, "hourly.json"))
+        self.bot.hourly_store = hourly
         posts = self._capture_posts()
         self.assertTrue(asyncio.run(self.bot.post_channel_digest()))
         self.assertEqual(len(posts), 1, posts)            # одно сообщение, не два
         self.assertEqual(posts[0]["kind"], "photo")
         caption = posts[0]["text"]
-        self.assertEqual(caption.count("🕘 <b>"), 4)      # все четыре часа
-        # час — одна строка с кассой и лидером; OI и CVD часа в пост не идут
-        for line in caption.splitlines():
-            if line.startswith("🕘 <b>"):
-                self.assertIn("💥", line, line)
-                self.assertIn("🏆", line, line)
-                self.assertNotIn("📊 OI", line, line)
+        # в канале — только шапка и цифры окна: почасовой ряд убран намеренно
+        self.assertNotIn("🕘", caption)
+        self.assertIn("💥", caption)                      # итог окна на месте
         self.assertNotIn("<pre>", caption)                # рамки с цифрами нет
         self.assertIn("к прошлым 4ч", caption)
         self.assertIn("Gate", caption)
         self.assertLessEqual(len(caption), 1024, len(caption))
+        # версия для сайта полная: все четыре часа остались в архиве /hourly
+        rec = hourly.list()[0]
+        self.assertEqual(rec["texts"]["ru"].count("🕘 <b>"), 4)
 
     def test_subscription_accepts_either_channel(self):
         """Подписки на любой канал достаточно — русский или английский."""

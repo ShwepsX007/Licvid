@@ -2477,3 +2477,83 @@ body.chart-fullscreen { overflow: hidden; }
     font-size: 0.76rem; color: var(--text-muted); display: grid; gap: 4px;
 }
 .cookie-list code { color: #00d6ff; }
+
+/* --- Выбор монеты над графиком (как на биржах) ------------------------ */
+/* Кнопка — это сам заголовок пары: без рамки, только стрелка-подсказка. */
+.chart-symbol-wrap { min-width: 0; max-width: none; }
+.chart-symbol-btn {
+    width: auto;
+    padding: 2px 6px 2px 0;
+    background: transparent;
+    border: 1px solid transparent;
+    gap: 6px;
+}
+.chart-symbol-btn:hover, .chart-symbol-btn.open {
+    background: rgba(61, 112, 255, 0.10);
+    border-color: transparent;
+}
+.chart-symbol-btn h2 { margin: 0; white-space: nowrap; }
+.chart-symbol-btn .box-caret { color: var(--text-muted); font-size: 0.8rem; }
+.chart-symbol-btn:hover .box-caret, .chart-symbol-btn.open .box-caret { color: var(--color-blue); }
+/* Подпись выбранной монеты нужна скриптам/скринридерам, визуально её заменяет заголовок. */
+.chart-symbol-btn .sr-only {
+    position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+    overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+/* Панель: поиск + подсказка + список; ширина как раньше у окошка. */
+.symbol-panel {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    z-index: 60;
+    width: 320px;
+    max-width: calc(100vw - 24px);
+    padding: 8px;
+    background: rgba(13, 17, 26, 0.98);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55);
+}
+.symbol-panel .symbol-search-box { max-width: none; }
+.symbol-panel .symbol-hint { margin: 4px 2px 6px; }
+/* Список внутри панели — обычный поток, а не второе всплывающее окно. */
+.symbol-panel .symbol-dropdown {
+    position: static;
+    top: auto; left: auto; right: auto;
+    border: none; border-radius: 0; box-shadow: none;
+    background: transparent;
+    margin: 0 -8px -8px;
+    padding: 0 0 4px;
+    border-top: 1px solid var(--border-color);
+}
+/* Результаты поиска показываются поверх списка. */
+.symbol-panel .symbol-search-results { z-index: 5; }
+/* Звук и «Очистить» — в панели управления, слева от таймфрейма. */
+.quick-tools { gap: 6px; }
+.quick-tools .clear-menu { right: auto; left: 0; }
+@media (max-width: 560px) {
+    .symbol-panel { width: min(320px, calc(100vw - 24px)); }
+    .chart-symbol-btn h2 { font-size: 0.95rem; }
+}
+
+/* Цена рядом с названием пары: на узких экранах не наползает.
+   Кнопка-заголовок — гибкий элемент: при тесноте сжимается и режет свой
+   текст многоточием; цена и процент — целиком и всегда после неё. */
+.symbol-price-display { flex-wrap: wrap; min-width: 0; row-gap: 2px; }
+.chart-symbol-wrap { flex: 1 1 auto; min-width: 0; max-width: max-content; display: flex; }
+.chart-symbol-btn { max-width: 100%; min-width: 0; overflow: hidden; }
+.chart-symbol-btn h2 {
+    display: block; flex: 1 1 auto; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.live-price, .price-change, .data-source { white-space: nowrap; flex-shrink: 0; }
+@media (max-width: 900px) {
+    .symbol-price-display { width: 100%; gap: 6px 8px; }
+    .chart-symbol-btn h2 { font-size: 0.95rem; }
+    .live-price { font-size: 1.05rem; }
+}
+@media (max-width: 560px) {
+    .chart-symbol-btn h2 { font-size: 0.88rem; }
+    .live-price { font-size: 0.98rem; }
+    .price-change { font-size: 0.76rem; }
+}

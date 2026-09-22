@@ -209,14 +209,12 @@ def _posts_enabled() -> bool:
 
 
 def interval_state(bot=None) -> dict:
-    """Частота постов в канал: раз в N часов и производная длина блока.
+    """Частота постов в канал: раз в N часов.
 
-    Окно поста равно промежутку между постами, а блок анализа внутри поста —
-    четверти окна. Панель показывает и то, и другое: админ выбирает часы, а
-    видит, по сколько минут будет разбор.
+    Окно поста — эти же N часов, а сводка внутри поста почасовая: по одной
+    строке на каждый из N последних завершённых часов, независимо от частоты.
     """
-    from channel_digest import (DEFAULT_INTERVAL_H, MAX_INTERVAL_H,
-                                MIN_INTERVAL_H, block_secs, window_word)
+    from channel_digest import DEFAULT_INTERVAL_H, MAX_INTERVAL_H, MIN_INTERVAL_H
     hours = DEFAULT_INTERVAL_H
     try:
         if bot is not None and hasattr(bot, "channel_interval_h"):
@@ -226,16 +224,14 @@ def interval_state(bot=None) -> dict:
             hours = int(interval_hours(ctx.store))
     except Exception as e:                       # noqa: BLE001
         log.debug("частота постов: %s", e)
-    block = block_secs(hours)
     return {
         "hours": hours,
         "min": MIN_INTERVAL_H,
         "max": MAX_INTERVAL_H,
-        "block_sec": block,
+        "block_sec": 3600,
         "window": f"{hours}ч",
-        "block": window_word(block),
-        "text": (f"раз в {hours} ч · окно {hours} ч · анализ по "
-                 f"{window_word(block)}"),
+        "block": "1ч",
+        "text": f"раз в {hours} ч · окно {hours} ч · разбор по часам",
         "enabled": _posts_enabled(),
     }
 

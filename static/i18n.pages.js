@@ -223,9 +223,21 @@ window.LIQSCOPE_I18N_PAGES =
       "cab.name_hint": "Это ваш ник на сайте — так вас видят в чате терминала и в комментариях к дайджесту и сводкам",
       "cab.name_ph2": "Ваш ник — как вас видят в чате",
       "cc.title": "💬 Комментарии",
-      "cc.sub_digest": "Обсуждение выпуска — только для зарегистрированных. Ник берётся из кабинета (как в чате терминала).",
+      "cc.sub_digest": "Обсуждение выпуска — только для зарегистрированных.",
+      "cc.sub_hourly": "Обсуждение выпуска — только для зарегистрированных.",
       "cc.ph_write": "Написать комментарий…",
-      "cc.send": "➤ Отправить"
+      "cc.ph_login": "Войдите, чтобы писать комментарии",
+      "cc.send": "➤ Отправить",
+      "cc.empty": "Пока нет комментариев.",
+      "cc.open_first": "Выберите выпуск, чтобы открыть обсуждение.",
+      "cc.you": "Вы — {name} · до {max} знаков",
+      "cc.login": "Войти",
+      "cc.login_prompt": "Обсуждение открыто для зарегистрированных. {login}",
+      "cc.sending": "Отправляю…",
+      "cc.too_long": "Слишком длинно: максимум {max} знаков.",
+      "cc.error": "Не получилось отправить — попробуйте ещё раз.",
+      "cc.delete_confirm": "Удалить комментарий {id}?",
+      "cc.open_issue": "Сначала выберите выпуск."
     },
     "phrases": {
       "🗑 Стереть статистику": "🗑 Стереть статистику",
@@ -482,12 +494,23 @@ window.LIQSCOPE_I18N_PAGES =
       "cab.name_hint": "This is your nickname on the site — how others see you in terminal chat and in digest and hourly comments",
       "cab.name_ph2": "Your nickname — as seen in chat",
       "cc.title": "💬 Comments",
-      "cc.sub_digest": "Discussion of the issue — for registered users only. Nickname comes from account (same as in terminal chat).",
+      "cc.sub_digest": "Discussion of the issue — for registered users only.",
+      "cc.sub_hourly": "Discussion of the issue — for registered users only.",
       "cc.ph_write": "Write a comment…",
-      "cc.send": "➤ Send"
+      "cc.ph_login": "Log in to write comments",
+      "cc.send": "➤ Send",
+      "cc.empty": "No comments yet.",
+      "cc.open_first": "Select an issue to open the discussion.",
+      "cc.you": "You are {name} · up to {max} chars",
+      "cc.login": "Log in",
+      "cc.login_prompt": "Discussion is open to registered users. {login}",
+      "cc.sending": "Sending…",
+      "cc.too_long": "Too long: {max} chars max.",
+      "cc.error": "Could not send — please try again.",
+      "cc.delete_confirm": "Delete comment {id}?",
+      "cc.open_issue": "Select an issue first."
     },
     "phrases": {
-      "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "One post every N hours: the post window is those same N hours, and the analysis block inside the post is a quarter of the window (every 4 h → one hour, every 1 h → 15 minutes).",
       "В поле уже стоит стандартный промт — правьте прямо в нём; «Вернуть шаблон» очищает поле и снова включает встроенный текст.": "The field already holds the default prompt — edit it right there; “Restore template” clears the field and turns the built-in text back on.",
       "Каналы, публикация сводки и дневного дайджеста, контроль постов, время вечернего выпуска, здоровье бирж и проверка ИИ.": "Channels, publishing the summary and the daily digest, post review, evening release time, exchange health and an AI check.",
       "В личке у пользователей сообщения остаются — Telegram разрешает боту удалять свои сообщения только первые 48 часов.": "Messages stay in users' private chats — Telegram lets a bot delete its own messages only during the first 48 hours.",
@@ -698,7 +721,6 @@ window.LIQSCOPE_I18N_PAGES =
       "Выходит каждый вечер ~22:00 МСК": "Published every evening ~22:00 MSK",
       "Инструкции, по которым ИИ пишет": "Instructions the AI writes by",
       "Пример обновили — решите новый.": "The task was refreshed — solve the new one.",
-      "Укажите частоту в часах (1…10).": "Set the interval in hours (1–10).",
       "переходы, уникальные, служебные": "visits, unique, service",
       "шапка поста и рассказ дайджеста": "post header and the digest story",
       "Без подтверждения вход закрыт.": "Without confirmation sign-in stays locked.",
@@ -1233,7 +1255,9 @@ window.LIQSCOPE_I18N_PAGES =
       "Сохраняется в БД на 7 дней — после рестарта пост/дайджест не уйдёт повторно в тот же день.": "Stored in DB for 7 days — after restart post/digest won't be sent again the same day.",
       "пост": "post",
       "за 7 дней:": "for 7 days:",
-      "Тепловая карта.": "Heatmap."
+      "Тепловая карта.": "Heatmap.",
+      "Пост раз в N часов: сводка почасовая — по строке на каждый из N последних завершённых часов (вплоть до 24). Расписание применяется сразу, перезапуск не нужен.": "A post every N hours: the summary is hourly — one line per each of the N most recently completed hours (up to 24). The schedule is applied immediately, no restart needed.",
+      "Укажите частоту в часах (1…24).": "Set the interval in hours (1–24)."
     }
   },
   "zh": {
@@ -1448,12 +1472,23 @@ window.LIQSCOPE_I18N_PAGES =
       "cab.name_hint": "这是您在网站上的昵称——终端聊天以及日更和小时报评论中他人看到您的名字",
       "cab.name_ph2": "您的昵称——聊天中显示的名称",
       "cc.title": "💬 评论",
-      "cc.sub_digest": "本期讨论——仅限注册用户。昵称来自个人中心（与终端聊天相同）。",
+      "cc.sub_digest": "本期讨论——仅限注册用户。",
+      "cc.sub_hourly": "本期讨论——仅限注册用户。",
       "cc.ph_write": "写评论…",
-      "cc.send": "➤ 发送"
+      "cc.ph_login": "登录后即可发表评论",
+      "cc.send": "➤ 发送",
+      "cc.empty": "还没有评论。",
+      "cc.open_first": "选择一期以打开讨论。",
+      "cc.you": "您是 {name} · 最多 {max} 字符",
+      "cc.login": "登录",
+      "cc.login_prompt": "讨论仅对注册用户开放。{login}",
+      "cc.sending": "发送中…",
+      "cc.too_long": "太长了：最多 {max} 字符。",
+      "cc.error": "发送失败——请重试。",
+      "cc.delete_confirm": "删除评论 {id}？",
+      "cc.open_issue": "请先选择一期。"
     },
     "phrases": {
-      "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "每 N 小时发一篇：帖子窗口就是这 N 小时，帖内的分析块占窗口的四分之一（每 4 小时 → 每小时，每 1 小时 → 每 15 分钟）。",
       "В поле уже стоит стандартный промт — правьте прямо в нём; «Вернуть шаблон» очищает поле и снова включает встроенный текст.": "输入框里已是默认提示词 — 直接修改；«恢复模板» 会清空并重新启用内置文本。",
       "Каналы, публикация сводки и дневного дайджеста, контроль постов, время вечернего выпуска, здоровье бирж и проверка ИИ.": "频道、总结与每日摘要的发布、帖子审核、晚间发布时间、交易所状态与 AI 检查。",
       "В личке у пользователей сообщения остаются — Telegram разрешает боту удалять свои сообщения только первые 48 часов.": "用户私聊里的消息会保留 — Telegram 只允许机器人删除自己 48 小时内的消息。",
@@ -1664,7 +1699,6 @@ window.LIQSCOPE_I18N_PAGES =
       "Выходит каждый вечер ~22:00 МСК": "每晚约 22:00（莫斯科时间）发布",
       "Инструкции, по которым ИИ пишет": "AI 写作所依据的指令",
       "Пример обновили — решите новый.": "题目已更新 — 请做新题。",
-      "Укажите частоту в часах (1…10).": "请填写间隔小时数（1…10）。",
       "переходы, уникальные, служебные": "访问、独立、服务请求",
       "шапка поста и рассказ дайджеста": "帖子标题和摘要故事",
       "Без подтверждения вход закрыт.": "没有确认就无法登录。",
@@ -2200,7 +2234,9 @@ window.LIQSCOPE_I18N_PAGES =
       "Сохраняется в БД на 7 дней — после рестарта пост/дайджест не уйдёт повторно в тот же день.": "在数据库中保存7天——重启后同一天不会重复发送。",
       "пост": "帖子",
       "за 7 дней:": "7天内：",
-      "Тепловая карта.": "热力图。"
+      "Тепловая карта.": "热力图。",
+      "Пост раз в N часов: сводка почасовая — по строке на каждый из N последних завершённых часов (вплоть до 24). Расписание применяется сразу, перезапуск не нужен.": "每 N 小时发一篇：摘要按小时统计——每个最近已完成的 N 小时各一行（最多 24 小时）。排期立即生效，无需重启。",
+      "Укажите частоту в часах (1…24).": "请填写间隔小时数（1…24）。"
     }
   },
   "hi": {
@@ -2415,12 +2451,23 @@ window.LIQSCOPE_I18N_PAGES =
       "cab.name_hint": "यह साइट पर आपका निकनेम है — टर्मिनल चैट और डाइजेस्ट व आवरली टिप्पणियों में लोग आपको इसी नाम से देखेंगे",
       "cab.name_ph2": "आपका निक — चैट में जैसा दिखेगा",
       "cc.title": "💬 टिप्पणियाँ",
-      "cc.sub_digest": "अंक की चर्चा — केवल पंजीकृत उपयोगकर्ताओं के लिए। निकनेम अकाउंट से आता है (टर्मिनल चैट जैसा)।",
+      "cc.sub_digest": "अंक की चर्चा — केवल पंजीकृत उपयोगकर्ताओं के लिए।",
+      "cc.sub_hourly": "अंक की चर्चा — केवल पंजीकृत उपयोगकर्ताओं के लिए।",
       "cc.ph_write": "टिप्पणी लिखें…",
-      "cc.send": "➤ भेजें"
+      "cc.ph_login": "टिप्पणी लिखने के लिए लॉग इन करें",
+      "cc.send": "➤ भेजें",
+      "cc.empty": "अभी कोई टिप्पणी नहीं।",
+      "cc.open_first": "चर्चा खोलने के लिए एक अंक चुनें।",
+      "cc.you": "आप {name} हैं · अधिकतम {max} अक्षर",
+      "cc.login": "लॉग इन",
+      "cc.login_prompt": "चर्चा पंजीकृत उपयोगकर्ताओं के लिए खुली है। {login}",
+      "cc.sending": "भेजा जा रहा है…",
+      "cc.too_long": "बहुत लंबा: अधिकतम {max} अक्षर।",
+      "cc.error": "भेजा नहीं जा सका — फिर प्रयास करें।",
+      "cc.delete_confirm": "टिप्पणी {id} हटाएँ?",
+      "cc.open_issue": "पहले एक अंक चुनें।"
     },
     "phrases": {
-      "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "हर N घंटे में एक पोस्ट: पोस्ट विंडो वही N घंटे है, और पोस्ट के भीतर विश्लेषण ब्लॉक विंडो का चौथाई है (हर 4 घंटे → एक घंटा, हर 1 घंटा → 15 मिनट)।",
       "В поле уже стоит стандартный промт — правьте прямо в нём; «Вернуть шаблон» очищает поле и снова включает встроенный текст.": "फ़ील्ड में डिफ़ॉल्ट प्रॉम्ट पहले से है — उसी में बदलें; «टेम्पलेट वापस» फ़ील्ड साफ़ करके बिल्ट-इन टेक्स्ट फिर चालू कर देता है।",
       "Каналы, публикация сводки и дневного дайджеста, контроль постов, время вечернего выпуска, здоровье бирж и проверка ИИ.": "चैनल, सार और डेली डाइजेस्ट का पब्लिश, पोस्ट कंट्रोल, शाम के प्रकाशन का समय, एक्सचेंज हेल्थ और AI जाँच।",
       "В личке у пользователей сообщения остаются — Telegram разрешает боту удалять свои сообщения только первые 48 часов.": "यूज़र की निजी चैट में संदेश रह जाते हैं — Telegram बॉट को सिर्फ़ पहले 48 घंटे के अपने संदेश हटाने देता है।",
@@ -2632,7 +2679,6 @@ window.LIQSCOPE_I18N_PAGES =
       "Выходит каждый вечер ~22:00 МСК": "हर शाम ~22:00 MSK पर आता है",
       "Инструкции, по которым ИИ пишет": "जिन निर्देशों से AI लिखता है",
       "Пример обновили — решите новый.": "सवाल बदल दिया — नया हल करें।",
-      "Укажите частоту в часах (1…10).": "अंतराल घंटों में बताएँ (1…10)।",
       "переходы, уникальные, служебные": "विज़िट, यूनिक, सर्विस",
       "шапка поста и рассказ дайджеста": "पोस्ट हेडर और डाइजेस्ट कहानी",
       "Без подтверждения вход закрыт.": "पुष्टि के बिना लॉगिन बंद रहता है।",
@@ -3168,7 +3214,9 @@ window.LIQSCOPE_I18N_PAGES =
       "Сохраняется в БД на 7 дней — после рестарта пост/дайджест не уйдёт повторно в тот же день.": "DB में 7 दिनों तक संग्रहीत — रीस्टार्ट के बाद उसी दिन दोबारा नहीं भेजा जाएगा।",
       "пост": "पोस्ट",
       "за 7 дней:": "7 दिनों के लिए:",
-      "Тепловая карта.": "हीटमैप।"
+      "Тепловая карта.": "हीटमैप।",
+      "Пост раз в N часов: сводка почасовая — по строке на каждый из N последних завершённых часов (вплоть до 24). Расписание применяется сразу, перезапуск не нужен.": "हर N घंटे में एक पोस्ट: सारांश घंटा-वार है — पिछली N पूर्ण घंटों में से प्रत्येक के लिए एक पंक्ति (24 तक)। समय-सारणी तुरंत लागू होती है, रीस्टार्ट की ज़रूरत नहीं।",
+      "Укажите частоту в часах (1…24).": "अंतराल घंटों में बताएँ (1…24)।"
     }
   },
   "es": {
@@ -3383,12 +3431,23 @@ window.LIQSCOPE_I18N_PAGES =
       "cab.name_hint": "Este es tu apodo en el sitio — así te ven en el chat del terminal y en los comentarios del digest y de los resúmenes horarios",
       "cab.name_ph2": "Tu apodo — como se ve en el chat",
       "cc.title": "💬 Comentarios",
-      "cc.sub_digest": "Discusión del número — solo para registrados. El apodo viene de tu cuenta (como en el chat del terminal).",
+      "cc.sub_digest": "Discusión del número — solo para registrados.",
+      "cc.sub_hourly": "Discusión del número — solo para registrados.",
       "cc.ph_write": "Escribir un comentario…",
-      "cc.send": "➤ Enviar"
+      "cc.ph_login": "Inicia sesión para escribir comentarios",
+      "cc.send": "➤ Enviar",
+      "cc.empty": "Aún no hay comentarios.",
+      "cc.open_first": "Selecciona un número para abrir la discusión.",
+      "cc.you": "Eres {name} · hasta {max} caracteres",
+      "cc.login": "Iniciar sesión",
+      "cc.login_prompt": "La discusión está abierta para usuarios registrados. {login}",
+      "cc.sending": "Enviando…",
+      "cc.too_long": "Demasiado largo: máximo {max} caracteres.",
+      "cc.error": "No se pudo enviar — inténtalo de nuevo.",
+      "cc.delete_confirm": "¿Eliminar el comentario {id}?",
+      "cc.open_issue": "Primero selecciona un número."
     },
     "phrases": {
-      "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "Un post cada N horas: la ventana del post son esas mismas N horas, y el bloque de análisis dentro del post ocupa un cuarto de la ventana (cada 4 h → una hora, cada 1 h → 15 minutos).",
       "В поле уже стоит стандартный промт — правьте прямо в нём; «Вернуть шаблон» очищает поле и снова включает встроенный текст.": "El campo ya trae el prompt estándar: edítalo ahí mismo; “Restaurar plantilla” limpia el campo y reactiva el texto integrado.",
       "Каналы, публикация сводки и дневного дайджеста, контроль постов, время вечернего выпуска, здоровье бирж и проверка ИИ.": "Canales, publicación del resumen y del digest diario, control de posts, hora de la entrega vespertina, salud de los exchanges y comprobación de la IA.",
       "В личке у пользователей сообщения остаются — Telegram разрешает боту удалять свои сообщения только первые 48 часов.": "Los mensajes permanecen en los chats privados: Telegram solo deja al bot borrar sus propios mensajes durante las primeras 48 horas.",
@@ -3599,7 +3658,6 @@ window.LIQSCOPE_I18N_PAGES =
       "Выходит каждый вечер ~22:00 МСК": "Se publica cada tarde ~22:00 MSK",
       "Инструкции, по которым ИИ пишет": "Instrucciones con las que escribe la IA",
       "Пример обновили — решите новый.": "La tarea cambió: resuelve la nueva.",
-      "Укажите частоту в часах (1…10).": "Indique la frecuencia en horas (1…10).",
       "переходы, уникальные, служебные": "visitas, únicos, servicio",
       "шапка поста и рассказ дайджеста": "encabezado del post y relato del digest",
       "Без подтверждения вход закрыт.": "Sin confirmar, el acceso queda cerrado.",
@@ -4135,7 +4193,9 @@ window.LIQSCOPE_I18N_PAGES =
       "Сохраняется в БД на 7 дней — после рестарта пост/дайджест не уйдёт повторно в тот же день.": "Guardado en BD 7 días — tras reinicio no se reenvía el mismo día.",
       "пост": "post",
       "за 7 дней:": "en 7 días:",
-      "Тепловая карта.": "Mapa de calor."
+      "Тепловая карта.": "Mapa de calor.",
+      "Пост раз в N часов: сводка почасовая — по строке на каждый из N последних завершённых часов (вплоть до 24). Расписание применяется сразу, перезапуск не нужен.": "Un post cada N horas: el resumen es por horas — una línea por cada una de las N horas más recientes completadas (hasta 24). El horario se aplica de inmediato, sin reinicio.",
+      "Укажите частоту в часах (1…24).": "Indique la frecuencia en horas (1…24)."
     }
   }
 };

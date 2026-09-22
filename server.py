@@ -58,7 +58,7 @@ from fastapi.staticfiles import StaticFiles
 from market_feed import GATE_REST, MarketFeed, TF_MINUTES, base_of, canon, _get_json
 from timeframes import parse_tf
 from oi_feed import map_candles_to_oi
-from hour_board import BOARD, OI, SLOTS, build_snapshot
+from hour_board import BOARD, OI, SLOTS, build_snapshot, HOUR, SLOT_SEC
 from accounts import Store
 from flow_feed import FlowFeed
 from history import HistoryStore, MONTH_HOURS
@@ -175,9 +175,10 @@ DIGEST_MINUTE = int(os.getenv("LIQSCOPE_DIGEST_MIN", "0") or 0)
 DIGEST_JITTER_MIN = int(os.getenv("LIQSCOPE_DIGEST_JITTER_MIN", "10") or 10)
 DIGEST_SCHED = os.getenv("LIQSCOPE_DIGEST_SCHED", "1").strip().lower() \
     not in ("0", "false", "no", "off")
-# Частота постов в канал: раз в N часов (1…10), по умолчанию 4. Живёт в
+# Частота постов в канал: раз в N часов (1…24), по умолчанию 4. Живёт в
 # настройках (меняется из админки сайта и бота без перезапуска), окружение —
-# стартовое значение. Блок анализа поста = N/4 часа.
+# стартовое значение. Сводка поста почасовая: N последних часов, по часу на
+# строку.
 from channel_digest import DEFAULT_INTERVAL_H, clamp_interval  # noqa: E402
 POST_INTERVAL_H = clamp_interval(os.getenv("LIQSCOPE_POST_INTERVAL_H") or
                                  DEFAULT_INTERVAL_H)
@@ -1738,7 +1739,7 @@ def post_interval_hours() -> int:
 
 
 def set_post_interval_hours(value, actor_id: Optional[int] = None) -> int:
-    """Сохранить частоту постов (1…10 часов). Возвращает применённое значение."""
+    """Сохранить частоту постов (1…24 часов). Возвращает применённое значение."""
     from channel_digest import INTERVAL_SETTING, clamp_interval
     hours = clamp_interval(value)
     account_store.set_setting(INTERVAL_SETTING, str(hours), actor_id=actor_id)
@@ -1748,9 +1749,9 @@ def set_post_interval_hours(value, actor_id: Optional[int] = None) -> int:
 def _board_window_facts(board: dict) -> dict:
     """Итоги окна поста из блоков стенда: суммы, монеты и крупнейший удар.
 
-    Кольцевой буфер событий держит 60 тысяч ликвидаций — на окне в 10 часов
-    (пост раз в 10 ч) он обрезается, и в посте выходила заниженная касса. Блоки
-    стенда копят те же события без обрезки, поэтому итог берём по ним.
+    Кольцевой буфер событий держит 60 тысяч ликвидаций — на длинном окне
+    (пост раз в 10…24 ч) он обрезается, и в посте выходила заниженная касса.
+    Блоки стенда копят те же события без обрезки, поэтому итог берём по ним.
     """
     hours = (board or {}).get("hours") or []
     total = longs = shorts = 0.0
@@ -1799,9 +1800,9 @@ def _window_exchanges(now: float, window_sec: float) -> Dict[str, float]:
 async def build_channel_digest() -> dict:
     """Снимок рынка за окно поста в канал: лидеры, биржи, OI, CVD.
 
-    Окно равно промежутку между постами (частота задаётся в админке), а блок
-    анализа внутри поста — четверти окна: пост раз в час разбирает по 15 минут,
-    раз в 4 часа — по часу, раз в 10 часов — по 2.5 часа.
+    Окно равно промежутку между постами (частота задаётся в админке, 1…24 ч).
+    Сводка почасовая: внутри поста — по одной строке на каждый из N последних
+    завершённых часов, независимо от частоты.
     """
     from channel_digest import block_secs, collect_digest
     interval = post_interval_hours()
@@ -1832,12 +1833,14 @@ async def build_channel_digest() -> dict:
     snap["interval_h"] = interval
     snap["block_sec"] = block_secs(interval)
     snap["window_sec"] = window_sec
-    # Стенд постов: блоки по N/4 часа на 15-минутной сетке (ликвы, перекос CVD,
-    # OI), в посте он идёт сразу после шапки.
+    # Стенд постов: почасовые блоки на 15-минутной сетке (ликвы, перекос CVD,
+    # OI), в посте он идёт сразу после шапки. Блок — ровно 1 час, блоков —
+    # по числу часов окна (равно частоте постов): раз в час → 1 час,
+    # раз в 5 → 5 часов, вплоть до 24.
     try:
-        flows = await slot_flows((2 * 4 + 2) * interval)
-        board = build_snapshot(SLOTS, OI, now=now, span=4, group=interval,
-                               flows=flows)
+        flows = await slot_flows((2 * interval + 2) * (HOUR // SLOT_SEC))
+        board = build_snapshot(SLOTS, OI, now=now, span=interval,
+                               group=HOUR // SLOT_SEC, flows=flows)
         snap["board"] = board
         # Итог окна — по блокам стенда: он не зависит от того, обрезался ли
         # буфер событий (для частых постов это неважно, для раз в 10 часов —
@@ -2434,14 +2437,19 @@ async def collect_hourly_post() -> dict:
             head, _note = await tg_bot._ai_headline(snap, variant=n, lang=lang)
         except Exception as e:                        # noqa: BLE001
             log.debug("сводки по часам: ИИ-шапка (%s) не ответила: %s", lang, e)
+        # На сайт идёт полный текст: ИИ-шапка без обрезки под подпись
+        # Telegram (_ai_head_full хранит её целиком после _ai_headline).
+        key = "en" if str(lang).startswith("en") else "ru"
+        full_head = (getattr(tg_bot, "_ai_head_full", {}) or {}).get(key) or head
         texts[lang] = render_post(
             snap, n,
             headlines=active_headlines(account_store, hours, lang=lang),
-            head_override=head or None,
+            head_override=full_head or None,
             site_url=PUBLIC_URL,
             bot_url=tg_bot.bot_url(),
             lang=lang,
             limit=10 ** 9,
+            head_full=True,
         )
     img = pick_active_image(account_store, "post", variant=n)
     now = time.time()

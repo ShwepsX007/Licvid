@@ -210,12 +210,23 @@
     "cab.name_hint": "This is your nickname on the site — how others see you in terminal chat and in digest and hourly comments",
     "cab.name_ph2": "Your nickname — as seen in chat",
     "cc.title": "💬 Comments",
-    "cc.sub_digest": "Discussion of the issue — for registered users only. Nickname comes from account (same as in terminal chat).",
+    "cc.sub_digest": "Discussion of the issue — for registered users only.",
+    "cc.sub_hourly": "Discussion of the issue — for registered users only.",
     "cc.ph_write": "Write a comment…",
-    "cc.send": "➤ Send"
+    "cc.ph_login": "Log in to write comments",
+    "cc.send": "➤ Send",
+    "cc.empty": "No comments yet.",
+    "cc.open_first": "Select an issue to open the discussion.",
+    "cc.you": "You are {name} · up to {max} chars",
+    "cc.login": "Log in",
+    "cc.login_prompt": "Discussion is open to registered users. {login}",
+    "cc.sending": "Sending…",
+    "cc.too_long": "Too long: {max} chars max.",
+    "cc.error": "Could not send — please try again.",
+    "cc.delete_confirm": "Delete comment {id}?",
+    "cc.open_issue": "Select an issue first."
   },
   "phrases": {
-    "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "One post every N hours: the post window is those same N hours, and the analysis block inside the post is a quarter of the window (every 4 h → one hour, every 1 h → 15 minutes).",
     "В поле уже стоит стандартный промт — правьте прямо в нём; «Вернуть шаблон» очищает поле и снова включает встроенный текст.": "The field already holds the default prompt — edit it right there; “Restore template” clears the field and turns the built-in text back on.",
     "Каналы, публикация сводки и дневного дайджеста, контроль постов, время вечернего выпуска, здоровье бирж и проверка ИИ.": "Channels, publishing the summary and the daily digest, post review, evening release time, exchange health and an AI check.",
     "В личке у пользователей сообщения остаются — Telegram разрешает боту удалять свои сообщения только первые 48 часов.": "Messages stay in users' private chats — Telegram lets a bot delete its own messages only during the first 48 hours.",
@@ -426,7 +437,6 @@
     "Выходит каждый вечер ~22:00 МСК": "Published every evening ~22:00 MSK",
     "Инструкции, по которым ИИ пишет": "Instructions the AI writes by",
     "Пример обновили — решите новый.": "The task was refreshed — solve the new one.",
-    "Укажите частоту в часах (1…10).": "Set the interval in hours (1–10).",
     "переходы, уникальные, служебные": "visits, unique, service",
     "шапка поста и рассказ дайджеста": "post header and the digest story",
     "Без подтверждения вход закрыт.": "Without confirmation sign-in stays locked.",
@@ -961,6 +971,8 @@
     "Сохраняется в БД на 7 дней — после рестарта пост/дайджест не уйдёт повторно в тот же день.": "Stored in DB for 7 days — after restart post/digest won't be sent again the same day.",
     "пост": "post",
     "за 7 дней:": "for 7 days:",
-    "Тепловая карта.": "Heatmap."
+    "Тепловая карта.": "Heatmap.",
+    "Пост раз в N часов: сводка почасовая — по строке на каждый из N последних завершённых часов (вплоть до 24). Расписание применяется сразу, перезапуск не нужен.": "A post every N hours: the summary is hourly — one line per each of the N most recently completed hours (up to 24). The schedule is applied immediately, no restart needed.",
+    "Укажите частоту в часах (1…24).": "Set the interval in hours (1–24)."
   }
 }

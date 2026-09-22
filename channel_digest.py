@@ -17,20 +17,19 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 IMAGES_DIR = os.path.join(HERE, "static", "channel")
 
 WINDOW_SEC = 4 * 3600
-#: Частота постов в канал: раз в N часов (1…10). Окно поста равно промежутку
-#: между постами, а блок анализа внутри поста — четверти этого промежутка:
-#: пост раз в час разбирает по 15 минут, раз в 4 часа — по часу, раз в 10
-#: часов — по 2.5 часа. Значение живёт в настройках (админка сайта и бота),
-#: а WINDOW_SEC остаётся значением по умолчанию.
+#: Частота постов в канал: раз в N часов (1…24). Сводка почасовая: окно поста
+#: равно промежутку между постами, а внутри поста — по одной строке на каждый
+#: из N последних завершённых часов, независимо от частоты. Значение живёт в
+#: настройках (админка сайта и бота), а WINDOW_SEC — значение по умолчанию.
 MIN_INTERVAL_H = 1
-MAX_INTERVAL_H = 10
+MAX_INTERVAL_H = 24
 DEFAULT_INTERVAL_H = int(WINDOW_SEC // 3600)
 INTERVAL_SETTING = "channel_digest_interval_h"
 INTERVAL_ENV = "LIQSCOPE_POST_INTERVAL_H"
 
 
 def clamp_interval(value, default: int = DEFAULT_INTERVAL_H) -> int:
-    """Частота постов: целое число часов в границах 1…10."""
+    """Частота постов: целое число часов в границах 1…24."""
     try:
         n = int(round(float(value)))
     except (TypeError, ValueError):
@@ -54,9 +53,14 @@ def interval_hours(store=None, default=None) -> int:
     return clamp_interval(raw, clamp_interval(base))
 
 
-def block_secs(interval: int) -> int:
-    """Длина блока анализа: четверть промежутка между постами."""
-    return int(clamp_interval(interval) * 3600 / 4)
+def block_secs(interval: int = 0) -> int:
+    """Длина блока анализа: всегда 1 час.
+
+    Сводка почасовая независимо от частоты постов: при частоте раз в N часов
+    окно — N часов, в нём по строке на каждый из N часов. ``interval`` остался
+    в сигнатуре ради совместимости со старыми вызовами.
+    """
+    return HOUR_SEC
 
 
 def window_word(secs: float, lang: str = "ru") -> str:
@@ -1204,15 +1208,46 @@ def format_headline(tpl: str, h: int = 4, lang: str = "ru") -> str:
     return f"<b>{_html.escape(s, quote=False)}</b>"
 
 
-def format_ai_head(text: str, h: int = 4) -> str:
+HEAD_TG_LIMIT = 400             # шапка в канале: после ухода почасовых строк
+                                # места много, но и всю подпись (1024) она
+                                # съесть не должна
+
+
+def _head_cut(text: str, limit: int) -> str:
+    """Обрезать шапку до ``limit`` по границе предложения, не на полуслове.
+
+    Модель иногда пишет длиннее лимита; обрыв «…в шортах и» читается как
+    сбой, поэтому держимся за точку/восклицательный/вопросительный знак.
+    Если границы нет — режем по слову, в самом тесном случае — по знаку.
+    """
+    s = str(text or "")
+    if len(s) <= limit:
+        return s
+    cut = s[:limit]
+    stop = -1
+    for mark in (". ", "! ", "? ", "… "):
+        i = cut.rfind(mark)
+        if i > stop:
+            stop = i
+    if stop > limit // 2:
+        return cut[:stop + 1].strip()
+    i = cut.rfind(" ")
+    return (cut[:i].strip() if i > 0 else cut).strip()
+
+
+def format_ai_head(text: str, h: int = 4, limit: Optional[int] = HEAD_MAX_LEN) -> str:
     """Шапка от ИИ: всегда экранируем и оборачиваем в <b>.
 
     В отличие от шаблонов из админки (там можно прислать готовый HTML),
     текст модели — это только текст: случайный «<» сломает разметку Telegram.
+    ``limit`` — предел длины шапки; для сайта передают None — там шапка идёт
+    целиком, без обрезки. Режется по границе предложения (_head_cut), а не
+    по знакам: обрыв на полуслове читается как сбой.
     """
     import html as _html
     s = (text or "").strip().replace("{h}", str(int(h)))
-    s = s[:HEAD_MAX_LEN]
+    if limit and limit > 0:
+        s = _head_cut(s, limit)
     return f"<b>{_html.escape(s, quote=False)}</b>" if s else ""
 
 
@@ -1395,7 +1430,10 @@ def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = N
                 bot_url: str = "https://t.me/LiqScopeBot",
                 head_override: Optional[str] = None,
                 lang: str = "ru",
-                limit: int = CAPTION_LIMIT) -> str:
+                limit: int = CAPTION_LIMIT,
+                head_full: bool = False,
+                with_hours: bool = True,
+                head_limit: int = HEAD_MAX_LEN) -> str:
     """Сводка одним сообщением: шапка, строки окна и часы по порядку.
 
     Строки окна: итог (касса, число ликвидаций, сравнение с прошлым окном),
@@ -1415,7 +1453,13 @@ def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = N
     чем пожертвовать: сначала уходят подробности окна, потом из строки часа
     пропадают слова «Лидер часа», в самом тесном случае часы идут без
     лидеров, а из ряда часов уходят самые старые. head_override — шапка от
-    ИИ: та же раскладка, меняется только текст.
+    ИИ: та же раскладка, меняется только текст. head_full=True — версия для
+    сайта: шапка не режется под лимит подписи Telegram и пост идёт целиком.
+    with_hours=False — вид для канала: без почасовых строк (шапка и цифры
+    окна), почасовка целиком остаётся в версии для сайта. head_limit — предел
+    шапки в канале (режется по границе предложения): места после ухода
+    почасовых строк много, но и всю подпись в 1024 знака шапка съесть не
+    должна.
     """
     import html as _html
     f = _facts(snap, lang)
@@ -1434,7 +1478,12 @@ def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = N
     # шапку и компоновку крутим независимо: своя единственная шапка из админки
     # не должна «замораживать» раскладку — блоки продолжают чередоваться
     v = int(variant)
-    head = (format_ai_head(head_override, h) if head_override
+    # head_full=True — версия для сайта: шапка от ИИ идёт целиком, без
+    # обрезки. В канале шапка режется по границе предложения до head_limit
+    # (после ухода почасовых строк места много — HEAD_TG_LIMIT знаков).
+    head = (format_ai_head(head_override, h,
+                           limit=None if head_full else head_limit)
+            if head_override
             else heads[v % max(1, len(heads))])
 
     # Компоновка поста: шапка → строка итога → лидер окна → CVD окна →
@@ -1495,37 +1544,42 @@ def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = N
     # отдаём подробностям окна, сколько поместится. Если весь ряд часов не
     # влез даже в тесном виде, подробности не добавляем вовсе: часы и их
     # лидеры важнее, а место освободившееся от них и так уходит часам.
+    # with_hours=False — вид для канала: почасовой ряд не показываем вовсе
+    # (он целиком живёт на сайте /hourly), место отдаём строкам окна.
     hours_block, all_hours = "", False
-    for lines in styles:
-        block = "\n".join([ln for ln in lines if ln])
-        if block and fits(base + [block]):
-            hours_block, all_hours = block, True
-            break
-    if not hours_block:
-        # часы без слов «Лидер часа», потом совсем короткие строки — и так
-        # отбрасываем самые старые часы один за другим, пока ряд не влезет
-        for lines in styles[1:]:
-            for cut in range(len(lines) - 1, 0, -1):
-                block = "\n".join([ln for ln in lines[:cut] if ln])
-                if block and fits(base + [block]):
-                    hours_block = block
-                    break
-            if hours_block:
+    if with_hours:
+        for lines in styles:
+            block = "\n".join([ln for ln in lines if ln])
+            if block and fits(base + [block]):
+                hours_block, all_hours = block, True
                 break
+        if not hours_block:
+            # часы без слов «Лидер часа», потом совсем короткие строки — и так
+            # отбрасываем самые старые часы один за другим, пока ряд не влезет
+            for lines in styles[1:]:
+                for cut in range(len(lines) - 1, 0, -1):
+                    block = "\n".join([ln for ln in lines[:cut] if ln])
+                    if block and fits(base + [block]):
+                        hours_block = block
+                        break
+                if hours_block:
+                    break
     kept: List[int] = []
-    if all_hours:
+    if all_hours or not with_hours:
         for idx in (1, 2, 3):
             line = win[idx]
             if not line:
                 continue
             trial = sorted(kept + [idx])
-            if fits(base + [win[i] for i in trial] + [hours_block]):
+            if fits(base + [win[i] for i in trial] + ([hours_block] if hours_block else [])):
                 kept = trial
     parts = base + [win[i] for i in kept] + ([hours_block] if hours_block else [])
     added = 1 if hours_block else 0
-    if not added:
+    if not added and (with_hours or not hours):
         # часов ещё нет (первый запуск): показываем хотя бы настроение ленты,
-        # чтобы пост не состоял из одной суммы
+        # чтобы пост не состоял из одной суммы. В канале (with_hours=False)
+        # строка появляется только когда часовых данных нет вовсе — когда
+        # часы есть, они просто остались на сайте.
         parts.append(_board_bias_line(board, lang) or f["bias_line"])
     return _pack(parts, tail, limit=limit)
 

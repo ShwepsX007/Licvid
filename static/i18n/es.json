@@ -210,12 +210,23 @@
     "cab.name_hint": "Este es tu apodo en el sitio — así te ven en el chat del terminal y en los comentarios del digest y de los resúmenes horarios",
     "cab.name_ph2": "Tu apodo — como se ve en el chat",
     "cc.title": "💬 Comentarios",
-    "cc.sub_digest": "Discusión del número — solo para registrados. El apodo viene de tu cuenta (como en el chat del terminal).",
+    "cc.sub_digest": "Discusión del número — solo para registrados.",
+    "cc.sub_hourly": "Discusión del número — solo para registrados.",
     "cc.ph_write": "Escribir un comentario…",
-    "cc.send": "➤ Enviar"
+    "cc.ph_login": "Inicia sesión para escribir comentarios",
+    "cc.send": "➤ Enviar",
+    "cc.empty": "Aún no hay comentarios.",
+    "cc.open_first": "Selecciona un número para abrir la discusión.",
+    "cc.you": "Eres {name} · hasta {max} caracteres",
+    "cc.login": "Iniciar sesión",
+    "cc.login_prompt": "La discusión está abierta para usuarios registrados. {login}",
+    "cc.sending": "Enviando…",
+    "cc.too_long": "Demasiado largo: máximo {max} caracteres.",
+    "cc.error": "No se pudo enviar — inténtalo de nuevo.",
+    "cc.delete_confirm": "¿Eliminar el comentario {id}?",
+    "cc.open_issue": "Primero selecciona un número."
   },
   "phrases": {
-    "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "Un post cada N horas: la ventana del post son esas mismas N horas, y el bloque de análisis dentro del post ocupa un cuarto de la ventana (cada 4 h → una hora, cada 1 h → 15 minutos).",
     "В поле уже стоит стандартный промт — правьте прямо в нём; «Вернуть шаблон» очищает поле и снова включает встроенный текст.": "El campo ya trae el prompt estándar: edítalo ahí mismo; “Restaurar plantilla” limpia el campo y reactiva el texto integrado.",
     "Каналы, публикация сводки и дневного дайджеста, контроль постов, время вечернего выпуска, здоровье бирж и проверка ИИ.": "Canales, publicación del resumen y del digest diario, control de posts, hora de la entrega vespertina, salud de los exchanges y comprobación de la IA.",
     "В личке у пользователей сообщения остаются — Telegram разрешает боту удалять свои сообщения только первые 48 часов.": "Los mensajes permanecen en los chats privados: Telegram solo deja al bot borrar sus propios mensajes durante las primeras 48 horas.",
@@ -426,7 +437,6 @@
     "Выходит каждый вечер ~22:00 МСК": "Se publica cada tarde ~22:00 MSK",
     "Инструкции, по которым ИИ пишет": "Instrucciones con las que escribe la IA",
     "Пример обновили — решите новый.": "La tarea cambió: resuelve la nueva.",
-    "Укажите частоту в часах (1…10).": "Indique la frecuencia en horas (1…10).",
     "переходы, уникальные, служебные": "visitas, únicos, servicio",
     "шапка поста и рассказ дайджеста": "encabezado del post y relato del digest",
     "Без подтверждения вход закрыт.": "Sin confirmar, el acceso queda cerrado.",
@@ -962,6 +972,8 @@
     "Сохраняется в БД на 7 дней — после рестарта пост/дайджест не уйдёт повторно в тот же день.": "Guardado en BD 7 días — tras reinicio no se reenvía el mismo día.",
     "пост": "post",
     "за 7 дней:": "en 7 días:",
-    "Тепловая карта.": "Mapa de calor."
+    "Тепловая карта.": "Mapa de calor.",
+    "Пост раз в N часов: сводка почасовая — по строке на каждый из N последних завершённых часов (вплоть до 24). Расписание применяется сразу, перезапуск не нужен.": "Un post cada N horas: el resumen es por horas — una línea por cada una de las N horas más recientes completadas (hasta 24). El horario se aplica de inmediato, sin reinicio.",
+    "Укажите частоту в часах (1…24).": "Indique la frecuencia en horas (1…24)."
   }
 }

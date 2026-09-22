@@ -274,6 +274,7 @@
     const symbolCurrentBtn = $("symbol-current");
     const symbolCurrentLabel = $("symbol-current-label");
     const symbolDropdown = $("symbol-dropdown");
+    const symbolPanel = $("symbol-panel");        // панель выбора монеты над графиком
     const symbolSearchEl = $("symbol-search");
 
     const statBoxLiq = $("stat-box-liq"), statLiqHead = $("stat-liq-head"),
@@ -5254,6 +5255,11 @@
         symbolCurrentBtn.classList.toggle("open", symbolDropdownOpen);
         symbolCurrentBtn.setAttribute("aria-expanded", symbolDropdownOpen ? "true" : "false");
         symbolDropdown.classList.toggle("hidden", !symbolDropdownOpen);
+        // панель над графиком (поиск + подсказка + список) открывается вместе со списком
+        if (symbolPanel) symbolPanel.classList.toggle("hidden", !symbolDropdownOpen);
+        if (symbolDropdownOpen && symbolSearchEl) {
+            try { symbolSearchEl.focus({ preventScroll: true }); } catch (e) { /* ignore */ }
+        }
     }
 
     function openSymbolDropdown() {
@@ -5353,6 +5359,8 @@
             else openSymbolDropdown();
         });
         symbolDropdown.addEventListener("click", (e) => e.stopPropagation());
+        // клики внутри панели (поиск, подсказка) панель не закрывают
+        if (symbolPanel) symbolPanel.addEventListener("click", (e) => e.stopPropagation());
         document.addEventListener("click", () => closeSymbolDropdown());
         symbolSearchEl.addEventListener("keydown", (e) => {
             if (e.key === "Escape") closeSymbolDropdown();

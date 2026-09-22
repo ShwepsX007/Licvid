@@ -878,6 +878,10 @@ class AiWriter:
         self._models: Dict[str, List[str]] = {}     # кэш списка моделей сервиса
         self._rejected: Dict[str, set] = {}         # модели, которые не подошли
         self._extra: Dict[str, int] = {}            # добавка к лимиту ответа
+        # Полный текст последней удачной шапки — до обрезки fit_head.
+        # В канал уходит короткая версия (HEAD_MAX_LEN), а на сайт — весь
+        # рассказ целиком: сайт не ограничен подписью Telegram.
+        self.last_full: str = ""
 
     # --- состояние для админки ---
     @property
@@ -969,6 +973,7 @@ class AiWriter:
     def headline_sync(self, snap: dict, recent: Optional[List[str]] = None,
                       variant: int = 0, lang: str = "ru") -> Optional[str]:
         """Первый удачный ответ или None (тогда шапка будет из шаблонов)."""
+        self.last_full = ""     # полный текст прошлого поста не должен протечь
         if not self.providers:
             return None
         angle = int(variant)
@@ -1000,9 +1005,11 @@ class AiWriter:
                             log.info("ИИ (%s): шапка похожа на прошлую — меняю акцент",
                                      p.name)
                             continue
+                        head_full_text = head    # до обрезки: весь текст для сайта
                         head = fit_head(head)
                         if not head:
                             raise RuntimeError("ответ не годится: пусто после чистки")
+                        full = head_full_text        # полный ответ — для сайта
                         break
                     except Exception as e:
                         # Google шлёт в 404 готовую замену — пробуем её, а если её
@@ -1043,6 +1050,8 @@ class AiWriter:
                 self.calls += 1
                 self.last = {"provider": p.name, "ok": True, "reason": "",
                              "ms": st["ms"], "ts": time.time()}
+                # полный текст (без обрезки) — его берёт сайт; в TG уйдёт head
+                self.last_full = full
                 log.info("ИИ-шапка: %s (%s) за %s мс", p.name, p.model, st["ms"])
                 return head
             except Exception as e:

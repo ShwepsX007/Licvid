@@ -110,6 +110,9 @@ class TelegramBot:
         self._ai_recent: List[str] = []      # последние ИИ-шапки (рус)
         self._ai_recent_en: List[str] = []   # последние ИИ-шапки (англ)
         self._ai_state: Dict[str, Any] = {}  # что ответил ИИ (для админки)
+        # Полный (не обрезанный) текст последней ИИ-шапки по языкам: в TG
+        # уходит короткая версия под лимит подписи, на сайт — весь текст.
+        self._ai_head_full: Dict[str, str] = {}
         self._draft: Optional[Dict[str, Any]] = None   # непринятый пост (контроль)
         self._digest_task: Optional[asyncio.Task] = None
         self._ch_ok: Dict[int, float] = {}   # tg_id -> cache until
@@ -205,6 +208,24 @@ class TelegramBot:
         url = self.site_url("/digest")
         label = ("📖 Full day breakdown" if str(lang).startswith("en")
                  else "📖 Полный разбор дня")
+        if url:
+            rows.insert(0, [{"text": label, "url": url}])
+        kb["inline_keyboard"] = rows
+        return kb
+
+    def hourly_kb(self, lang: str = "ru") -> dict:
+        """Кнопки под сводкой по часам: сверху — ссылка на раздел на сайте.
+
+        Подпись под фотографией Telegram режет по лимиту 1024 знаков, и пост
+        может уйти в канал обрезанным. Кнопка ведёт на страницу /hourly, где
+        сводка лежит целиком, — так же, как в дневном дайджесте кнопка ведёт
+        на /digest.
+        """
+        kb = dict(self.channel_link_kb(lang))
+        rows = [list(r) for r in (kb.get("inline_keyboard") or [])]
+        url = self.site_url("/hourly")
+        label = ("📖 Full recap on the site" if str(lang).startswith("en")
+                 else "📖 Сводка целиком на сайте")
         if url:
             rows.insert(0, [{"text": label, "url": url}])
         kb["inline_keyboard"] = rows
@@ -1293,7 +1314,7 @@ class TelegramBot:
         """Пауза до следующего поста.
 
         Спим кусками и каждый раз заново спрашиваем частоту: смена расписания
-        в админке (раз в 1…10 часов) применяется без перезапуска сервиса.
+        в админке (раз в 1…24 часов) применяется без перезапуска сервиса.
         """
         while self.running:
             period = self.channel_window_sec()
@@ -1366,10 +1387,10 @@ class TelegramBot:
         return out
 
     def channel_interval_h(self) -> int:
-        """Частота постов в канал: раз в N часов (1…10).
+        """Частота постов в канал: раз в N часов (1…24).
 
-        Окно поста равно промежутку между постами, а блок анализа внутри поста
-        — четверти окна: раз в час → по 15 минут, раз в 4 часа → по часу.
+        Окно поста — эти же N часов, сводка внутри поста почасовая: по одной
+        строке на каждый из N последних завершённых часов.
         """
         from channel_digest import interval_hours
         try:
@@ -1395,11 +1416,9 @@ class TelegramBot:
         return n
 
     def interval_text(self) -> str:
-        """«раз в 4 ч · окно 4 ч · анализ по 1 ч» — для админки и /bot."""
-        from channel_digest import block_secs, window_word
+        """«раз в 4 ч · окно 4 ч · разбор по часам» — для админки и /bot."""
         h = self.channel_interval_h()
-        return (f"раз в {h} ч · окно {h} ч · анализ по "
-                f"{window_word(block_secs(h))}")
+        return f"раз в {h} ч · окно {h} ч · разбор по часам"
 
     def _review_on(self) -> bool:
         """Контроль публикации: черновик у админа вместо поста в канал."""
@@ -1423,6 +1442,8 @@ class TelegramBot:
         """
         ai = getattr(self, "ai", None)
         en = str(lang).startswith("en")
+        key = "en" if en else "ru"
+        self._ai_head_full[key] = ""   # шапка прошлого поста не должна протечь
         if ai is None or not getattr(ai, "enabled", False):
             if not en:
                 self._ai_state = {"provider": "", "ok": False, "reason": "ИИ не настроен"}
@@ -1442,6 +1463,10 @@ class TelegramBot:
                 self._ai_recent_en = (self._ai_recent_en + [head])[-8:]
             else:
                 self._ai_recent = (self._ai_recent + [head])[-8:]
+            # Полный текст шапки (до обрезки под подпись Telegram) — для
+            # сайта: там пост идёт целиком, обрывать рассказ на полуслове нельзя.
+            full = str(getattr(ai, "last_full", "") or "").strip()
+            self._ai_head_full[key] = full or head
             note = f"ИИ: {st.get('provider') or '?'} · {st.get('ms') or 0} мс"
         else:
             note = (f"ИИ не ответил ({st.get('reason') or 'все сервисы'}) —"
@@ -1455,8 +1480,7 @@ class TelegramBot:
 
     async def post_channel_digest(self, force: bool = False) -> bool:
         from channel_digest import (
-            active_headlines, pick_active_image, post_has_hours,
-            render_post, render_top7,
+            HEAD_TG_LIMIT, active_headlines, pick_active_image, render_post,
         )
         self._digest_err = ""
         self._last_tg_err = ""
@@ -1522,48 +1546,61 @@ class TelegramBot:
         # читалось как сбой публикации.
         img = pick_active_image(self.store, "post", variant=n)
         # Русский пост — основной; английский уходит копией в свой канал.
+        # Вид для канала: шапка и цифры окна (касса, лидер, CVD) без
+        # почасовых строк — почасовка целиком живёт на сайте /hourly,
+        # кнопка «📖 Сводка целиком на сайте» под постом ведёт туда.
+        # Шапка в канале — полный текст ИИ (как на сайте), но с пределом
+        # HEAD_TG_LIMIT по границе предложения: после ухода почасовых строк
+        # в подписи много места, а обрыв на полуслове читался как сбой.
         ai_head, ai_note = await self._ai_headline(snap, variant=n)
+        ai_head_full = self._ai_head_full.get("ru") or ai_head
         caption = render_post(
             snap, n,
             headlines=active_headlines(self.store, hours),
-            head_override=ai_head,
+            head_override=ai_head_full or None,
             site_url=self.site_url(),
             bot_url=self.bot_url(),
+            with_hours=False,
+            head_limit=HEAD_TG_LIMIT,
         )
         ai_head_en, _note_en = await self._ai_headline(snap, variant=n, lang="en")
+        ai_head_full_en = self._ai_head_full.get("en") or ai_head_en
         caption_en = render_post(
             snap, n,
             headlines=active_headlines(self.store, hours, lang="en"),
-            head_override=ai_head_en or None,
+            head_override=ai_head_full_en or None,
             site_url=self.site_url(),
             bot_url=self.bot_url(),
             lang="en",
+            with_hours=False,
+            head_limit=HEAD_TG_LIMIT,
         )
-        # Полный текст для сайта /hourly — без лимита 1024 (как в daily_digest:
-        # в TG — коротко, на сайте — полностью)
+        # Полный текст для сайта /hourly — без лимита 1024 и без обрезки
+        # ИИ-шапки: на сайте рассказ идёт целиком (ai_head_full выше).
         caption_full = render_post(
             snap, n,
             headlines=active_headlines(self.store, hours),
-            head_override=ai_head,
+            head_override=ai_head_full or None,
             site_url=self.site_url(),
             bot_url=self.bot_url(),
             limit=10 ** 9,
+            head_full=True,
         )
         caption_full_en = render_post(
             snap, n,
             headlines=active_headlines(self.store, hours, lang="en"),
-            head_override=ai_head_en or None,
+            head_override=ai_head_full_en or None,
             site_url=self.site_url(),
             bot_url=self.bot_url(),
             lang="en",
             limit=10 ** 9,
+            head_full=True,
         )
-        # Один пост вместо двух: часы уже внутри подписи (render_post сам
-        # решает, каким видом они влезают). Второе сообщение — только аварийный
-        # путь: если в подпись не попал ни один час.
-        top = "" if post_has_hours(caption) else render_top7(snap.get("board"))
-        top_en = ("" if post_has_hours(caption_en)
-                  else render_top7(snap.get("board"), "en"))
+        # Пост в канал — всегда один: почасовых строк в подписи больше нет
+        # (они живут на сайте /hourly), поэтому и аварийного второго
+        # сообщения с топ-7 не нужно — часы из канала убраны намеренно.
+        top = ""
+        top_en = ""
         # Цифры окна: вместе с подписью и фото их складывает архив раздела
         # «Сводки по часам» — на сайте видно полный текст, в TG — обрезанный
         meta = {"window_h": hours,
@@ -1573,12 +1610,13 @@ class TelegramBot:
                 "shorts_usd": snap.get("shorts_usd")}
         posts = [
             {"lang": "ru", "cid": cid, "caption": caption, "top": top,
-             "full_caption": caption_full},
+             "full_caption": caption_full, "kb": self.hourly_kb("ru")},
         ]
         cid_en = self.channel_chat_id_en()
         if cid_en:
             posts.append({"lang": "en", "cid": cid_en, "caption": caption_en,
-                          "top": top_en, "full_caption": caption_full_en})
+                          "top": top_en, "full_caption": caption_full_en,
+                          "kb": self.hourly_kb("en")})
         else:
             log.info("английский канал не привязан — пост только по-русски")
         if self._review_on():
@@ -1667,7 +1705,8 @@ class TelegramBot:
                                        images[0] if images else None,
                                        post.get("top") or "",
                                        post.get("lang") or "ru",
-                                       images=images):
+                                       images=images,
+                                       kb=post.get("kb") or None):
                 delivered += 1
                 sent_langs.append("en" if str(post.get("lang") or "").startswith("en")
                                   else "ru")
@@ -3320,28 +3359,24 @@ class TelegramBot:
         return self._menu_kb(user)
 
     def _post_int_text(self) -> str:
-        """Экран «Частота постов»: окно поста и блок анализа."""
-        from channel_digest import MAX_INTERVAL_H, MIN_INTERVAL_H, block_secs, window_word
-        h = self.channel_interval_h()
+        """Экран «Частота постов»: окно поста и почасовой разбор."""
+        from channel_digest import MAX_INTERVAL_H, MIN_INTERVAL_H
         return (
             "<b>🕒 Частота сводки в канал</b>\n"
             f"Сейчас: {self.interval_text()}\n\n"
-            "Пост выходит раз в N часов, окно поста — те же N часов, а блок "
-            "анализа внутри поста — четверть окна:\n"
-            "• раз в 4 ч → разбор по часу;\n"
-            "• раз в 2 ч → по 30 минут;\n"
-            "• раз в 1 ч → по 15 минут.\n\n"
+            "Сводка почасовая: в посте — по строке на каждый из N последних "
+            "завершённых часов, независимо от частоты постов.\n\n"
             f"Выберите частоту ({MIN_INTERVAL_H}…{MAX_INTERVAL_H} ч) — применяется "
             "сразу, перезапуск не нужен.\n"
-            f"Текущий блок анализа: <b>{window_word(block_secs(h))}</b>."
             + self.site_footer()
         )
 
     def _post_int_kb(self) -> dict:
+        from channel_digest import MAX_INTERVAL_H
         cur = self.channel_interval_h()
         rows: List[list] = []
         row: list = []
-        for n in range(1, 11):
+        for n in range(1, MAX_INTERVAL_H + 1):
             row.append({"text": (f"✓ {n} ч" if n == cur else f"{n} ч"),
                         "callback_data": f"pi:{n}"})
             if len(row) == 5:

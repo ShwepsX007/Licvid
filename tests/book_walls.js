@@ -54,6 +54,16 @@ const WALL_EATEN = {                            // «съедена»: оста�
   levels: 1, exchs: ["okx"], opened: NOW - 24 * TF, closed: NOW - 20 * TF,
   live: false, dur_s: 4 * TF,
 };
+const WALL_E2 = {                               // съеденная — в общую зону на -36TF
+  id: 107, side: "bid", lo: 49965, hi: 49985, px: 49975, usdt: 90000, peak: 250000,
+  levels: 1, exchs: ["bybit"], opened: NOW - 36 * TF + 120, closed: NOW - 30 * TF,
+  live: false, dur_s: 6 * TF,
+};
+const WALL_G2 = {                               // ушедшая — тоже в ту зону
+  id: 108, side: "bid", lo: 49940, hi: 49955, px: 49947, usdt: 160000, peak: 160000,
+  levels: 1, exchs: ["okx"], opened: NOW - 36 * TF + 180, closed: NOW - 34 * TF,
+  live: false, dur_s: 2 * TF,
+};
 const WALL_SMALL = {                            // ниже порога — не рисуется, не в ленте
   id: 104, side: "ask", lo: 50300, hi: 50320, px: 50310, usdt: 60000, peak: 60000,
   levels: 1, exchs: ["binance"], opened: NOW - 4 * TF, closed: null,
@@ -154,7 +164,8 @@ async function main() {
         } else if (u.indexOf("/api/book/walls") === 0) {
           calls.hist++;
           body = { ok: true, ts: NOW, symbol: "BTC_USDT",
-                   walls: [WALL, WALL_M, WALL_ASK, WALL_OLD, WALL_EATEN] };
+                   walls: [WALL, WALL_M, WALL_ASK, WALL_OLD, WALL_EATEN,
+                           WALL_E2, WALL_G2] };
         } else if (u.indexOf("/api/stats") === 0) body = {};
         else if (u.indexOf("/api/oi") === 0) body = {};
         else if (u.indexOf("/api/liquidations") === 0) body = { liquidations: [], total: 0 };
@@ -180,7 +191,7 @@ async function main() {
   })());
   check("слой включён (layerState.book)", layers.book === true, JSON.stringify(layers));
   check("снапшот получен (4 стены в т.ч. мелкая)", book && book.live === 4, JSON.stringify(book));
-  check("история подтянута (hist=5)", book && book.hist === 5, JSON.stringify(book));
+  check("история подтянута (hist=7)", book && book.hist === 7, JSON.stringify(book));
   check("poll-запросы шли на сервер", calls.snap >= 1 && calls.hist >= 1,
         JSON.stringify(calls));
 
@@ -190,15 +201,16 @@ async function main() {
   check("кластеров ровно 4 (две свечи bid, две ask)", rows.length === 4,
         JSON.stringify(rows.map((r) => [r.time, r.side, r.usdt])));
   check("стены не задваиваются (live перетирает историю, дедуп по id)",
-        uniq.size === 5 && !uniq.has(104), JSON.stringify([...uniq]));
+        uniq.size === 7 && !uniq.has(104), JSON.stringify([...uniq]));
   const mZone = rows.find((r) => r.time === NOW - 36 * TF && r.side === "bid");
-  check("пересёкшиеся коридоры одной свечи слились (2 стены, 3 уровня)",
-        mZone && mZone.count === 2 && mZone.levels === 3,
+  check("пересёкшиеся коридоры одной свечи слились (4 стены, 5 уровней)",
+        mZone && mZone.count === 4 && mZone.levels === 5,
         JSON.stringify(mZone));
-  check("объём зоны накопился (пик 650K + пик 320K)",
-        mZone && Math.abs(mZone.usdt - 970000) < 1, JSON.stringify(mZone));
-  check("коридор зоны расширился (49950–49980)",
-        mZone && mZone.lo === 49950 && mZone.hi === 49980, JSON.stringify(mZone && [mZone.lo, mZone.hi]));
+  check("объём зоны накопился (650K + 320K + 250K + 160K)",
+        mZone && Math.abs(mZone.usdt - 1380000) < 1, JSON.stringify(mZone));
+  check("коридор зоны расширился (49940–49985)",
+        mZone && mZone.lo === 49940 && mZone.hi === 49985,
+        JSON.stringify(mZone && [mZone.lo, mZone.hi]));
   check("живая стена живёт на СВОЕЙ свече, а не тянется до края",
         rows.every((r) => r.time % TF === 0) && mZone.live === true,
         JSON.stringify(rows.map((r) => r.time % TF)));
@@ -206,9 +218,51 @@ async function main() {
   check("«съеденная» стена помечена (остаток < 70% пика)",
         eaten && eaten.eaten === 1 && eaten.live === false, JSON.stringify(eaten));
 
+  check("зона знает состав по статусам (USDT живых/съеденных/ушедших)",
+        mZone && mZone.sums && Math.abs(mZone.sums.live - 970000) < 1 &&
+        Math.abs(mZone.sums.eaten - 250000) < 1 && Math.abs(mZone.sums.gone - 160000) < 1,
+        JSON.stringify(mZone && mZone.sums));
+  const mHit = api.bookHits().find((h) => h.time === NOW - 36 * TF && h.sums);
+  check("в плашке есть sums и для хита (модалка theirs)",
+        mHit && mHit.sums && mHit.sums.live === 970000, JSON.stringify(mHit));
+
+  // полосы сверяем по последнему кадру перерисовки (лог копится между кадрами);
+  // в jsdom слот мелкий и ширины округлены до пикселя — точные доли задаёт
+  // слой данных (sums выше), здесь проверяем сам факт трёх полос и порядок
+  const frameMark = log.length;
+  api.redraw();
+  await new Promise((r) => setTimeout(r, 120));
+  const frame = log.slice(frameMark);
+
   const hits = api.bookHits();
   const slot = Math.max(1, api.slotPx());
   check("плашки нарисованы (по числу кластеров)", hits.length === 4, hits.length);
+  check("высота плашки минимум 12px — профиль влезает",
+        hits.every((h) => h.h >= 12), JSON.stringify(hits.map((h) => h.h)));
+  // внутри — трёхцветный профиль статусов (в mixed-зоне все три ряда)
+  const profFills = frame.filter((e) => e.op === "fill" &&
+        (e.style === "#4ade80" || e.style === "#fb7185" || e.style === "#94a3b8"));
+  check("полосы профиля: зелёный/красный/серый рисуются",
+        profFills.some((e) => e.style === "#4ade80") &&
+        profFills.some((e) => e.style === "#fb7185") &&
+        profFills.some((e) => e.style === "#94a3b8"),
+        JSON.stringify(profFills.map((e) => e.style)));
+  if (mHit) {
+    const inZone = profFills.filter((e) =>
+      e.x >= mHit.x - 1 && e.x + e.w <= mHit.x + mHit.w + 1 &&
+      e.y >= mHit.y - 1 && e.y + e.h <= mHit.y + mHit.h + 1);
+    check("полосы сидят строго внутри плашки (15% отступы не выплёскивают)",
+          inZone.length === 3, JSON.stringify(inZone.map((e) => [e.style, Math.round(e.x), Math.round(e.w)])));
+    const byStyle = {};
+    inZone.forEach((e) => { byStyle[e.style] = Math.round(e.w); });
+    // при 1px-строке «красный/серый» могут совпасть — сравнение нестрогое;
+    // главный смысл: зелёная полоса длиннее и кратна ≈4 красным (70%/18%)
+    check("длины полос по долям USDT (зелёная — самая длинная)",
+          byStyle["#4ade80"] >= byStyle["#fb7185"] &&
+          byStyle["#fb7185"] >= byStyle["#94a3b8"] &&
+          byStyle["#4ade80"] >= 2 * byStyle["#94a3b8"],
+          JSON.stringify(byStyle));
+  }
   check("ширина — доля слота свечи: дальше тела не вылезает",
         hits.every((h) => h.w >= 3 && h.w <= Math.round(slot * 0.86) + 1 && h.w <= 96),
         JSON.stringify(hits.map((h) => [Math.round(h.x), h.w, slot])));
@@ -234,7 +288,7 @@ async function main() {
   await new Promise((r) => setTimeout(r, 400));
   check("лента переключилась", api.feedTab() === "book", api.feedTab());
   const tape = api.feedRowsDom();
-  check("лента заявок: 5 строк (стена ниже порога отсеяна)", tape.length === 5,
+  check("лента заявок: 7 строк (стена ниже порога отсеяна)", tape.length === 7,
         JSON.stringify(tape.map((r) => r.wallId)));
   check("строки знают свою стену (data-wall-id)",
         ["101", "102", "103", "105", "106"].every((id) =>
@@ -309,7 +363,7 @@ async function main() {
   api.setBookMin(0);
   await new Promise((r) => setTimeout(r, 250));
   check("сброс порога вернул все кластеры и ленту",
-        api.bookRows().length === 4 && api.feedRowsDom().length === 5);
+        api.bookRows().length === 4 && api.feedRowsDom().length === 7);
 
   // ---------- 4. лента заявок не зависит от кнопки слоя ----------
   const btn = win.document.getElementById("book-toggle");
@@ -319,7 +373,7 @@ async function main() {
   check("слой выключен", after.on === false, JSON.stringify(after));
   check("плашки с графика сняты", api.bookHits().length === 0);
   check("лента не погасла вместе со слоем: данные и строки живы",
-        after.live === 4 && after.hist === 5 && api.feedRowsDom().length === 5,
+        after.live === 4 && after.hist === 7 && api.feedRowsDom().length === 7,
         JSON.stringify({ live: after.live, hist: after.hist }));
   const snapDuringTape = calls.snap;
   await new Promise((r) => setTimeout(r, 4500));

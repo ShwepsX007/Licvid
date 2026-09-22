@@ -1581,6 +1581,7 @@
                         cur.count += 1;
                         cur.live = cur.live || !!w.live;
                         cur.eaten += wallStatus(w) === "eaten" ? 1 : 0;
+                        cur.sums[wallStatus(w)] += val;
                         cur.pxSum += px * val; cur.wSum += val;
                         cur.ids.push(w.id);
                         cur.walls.push(w);
@@ -1589,7 +1590,9 @@
                         cur = { time: t0, side: side, lo: Number(w.lo), hi: Number(w.hi),
                                 usdt: val, levels: w.levels || 1, count: 1,
                                 live: !!w.live, eaten: wallStatus(w) === "eaten" ? 1 : 0,
+                                sums: { live: 0, eaten: 0, gone: 0 },
                                 pxSum: px * val, wSum: val, ids: [w.id], walls: [w] };
+                        cur.sums[wallStatus(w)] += val;
                     }
                 });
                 flush();
@@ -1638,10 +1641,12 @@
             if (y1 === null || y1 === undefined || y2 === null || y2 === undefined) return;
             if (x < -bw || x > W + bw) return;   // свеча ушла за видимое окно
             let top = Math.min(y1, y2), bot = Math.max(y1, y2);
-            if (bot - top < 4) { const cy = (top + bot) / 2; top = cy - 2; bot = cy + 2; }
+            // внутри плашки живёт 3-рядный профиль статусов — под него держим
+            // минимум 12px высоты (коридор цены и без того шире не будет)
+            if (bot - top < 12) { const cy = (top + bot) / 2; top = cy - 6; bot = cy + 6; }
             if (bot < -20 || top > h + 20) return;
             const bx = Math.round(x - bw / 2), by = Math.round(top);
-            const bh = Math.max(4, Math.round(bot - top));
+            const bh = Math.max(12, Math.round(bot - top));
             const isActive = activeKey === c.key;
             if (!isActive && drawn.some((r) =>
                 bx < r.x + r.w && bx + bw > r.x && by < r.y + r.h && by + bh > r.y)) {
@@ -1651,13 +1656,14 @@
             bookHits.push({ kind: "book", x: bx, y: by, w: bw, h: bh, key: c.key,
                 time: c.time, ids: c.ids, total: c.usdt, levels: c.levels,
                 count: c.count, live: c.live, eaten: c.eaten, side: c.side,
+                sums: c.sums,
                 lo: c.lo, hi: c.hi, price: c.px,
                 wallsLite: c.walls.slice(0, 6).map((w) => ({
                     id: w.id, val: Math.max(Number(w.usdt) || 0, Number(w.peak) || 0),
                     st: wallStatus(w), opened: Number(w.opened) || 0 })) });
             const bid = c.side === "bid";
             // живая — яркая и со свечением; съеденная целиком — приглушена
-            ctx.globalAlpha = c.live ? 0.5 : (c.eaten === c.count ? 0.22 : 0.34);
+            ctx.globalAlpha = c.live ? 0.42 : (c.eaten === c.count ? 0.20 : 0.28);
             ctx.fillStyle = bid ? "#67e8f9" : "#a78bfa";
             if (c.live) {
                 ctx.shadowColor = bid ? "#22d3ee" : "#8b5cf6";
@@ -1679,13 +1685,39 @@
                 ctx.strokeRect(bx - 2.5, by - 2.5, bw + 5, bh + 5);
                 ctx.restore();
             }
+            // мини-профиль статусов: три горизонтальные полосы-шкалы (живые /
+            // съеденные / ушедшие), длина — доля USDT от объёма зоны. Отступ
+            // по 15% от всех краёв плашки; пустые статусы не рисуем, а ряды
+            // оставшихся растягиваем на всю область
+            const padX = Math.round(bw * 0.15);
+            const padY = Math.round(bh * 0.15);
+            const inX = bx + padX, inW = Math.max(2, bw - padX * 2);
+            const inY = by + padY, inH = Math.max(3, bh - padY * 2);
+            const segs = [["live", "#4ade80"], ["eaten", "#fb7185"], ["gone", "#94a3b8"]]
+                .map((rg) => ({ st: rg[0], color: rg[1], v: c.sums[rg[0]] || 0 }))
+                .filter((rg) => rg.v > 0);
+            let belowY = inY;                 // низ рядов — от него решаем про подпись
+            if (segs.length) {
+                const tot = segs.reduce((acc, rg) => acc + rg.v, 0);
+                const gap = segs.length > 1 ? 1 : 0;
+                const rowH = Math.min(4, Math.max(1, (inH - gap * (segs.length - 1)) / segs.length));
+                segs.forEach((rg, i) => {
+                    const ry = inY + i * (rowH + gap);
+                    const rw = Math.max(1, Math.round(inW * (rg.v / tot)));
+                    ctx.globalAlpha = 0.95;
+                    ctx.fillStyle = rg.color;
+                    ctx.fillRect(inX, Math.round(ry), rw, Math.max(1, Math.round(rowH)));
+                    belowY = Math.max(belowY, Math.round(ry + rowH));
+                });
+            }
             const label = fmtCompact(c.usdt) + " · " + c.levels;
             ctx.font = "bold 9px 'JetBrains Mono', monospace";
             const tw = ctx.measureText ? ctx.measureText(label).width : 0;
-            if (bh >= 11 && tw + 6 <= bw) {
+            // цифры — если под рядом профиля осталась строка и в ширину влезли
+            if (by + bh - belowY >= 10 && tw + 6 <= bw) {
                 ctx.globalAlpha = 0.95;
                 ctx.fillStyle = "rgba(240,250,253,0.9)";
-                ctx.fillText(label, bx + bw / 2, by + bh / 2 + 0.5);
+                ctx.fillText(label, bx + bw / 2, (belowY + by + bh) / 2 + 0.5);
             }
         });
         ctx.restore();
@@ -2891,11 +2923,14 @@
             }
             const tfSec = (state.timeframe || 5) * 60;
             const t0 = Math.floor(Number(item.time || item.timestamp || 0) / tfSec) * tfSec;
+            const sv = { live: 0, eaten: 0, gone: 0 };
+            sv[item.st === "live" ? "live" : item.st === "eaten" ? "eaten" : "gone"] =
+                item.usd || 0;
             return { kind: "book", key: "book_" + t0 + "_" + (item.side || "bid"),
                      x: 0, y: 0, w: 0, h: 0, time: t0, ids: [item.id],
                      total: item.usd || 0, count: 1, levels: item.levels || 1,
                      live: !!item.live, eaten: item.st === "eaten" ? 1 : 0,
-                     side: item.side, price: item.price,
+                     side: item.side, price: item.price, sums: sv,
                      lo: item.lo, hi: item.hi, wallsLite: null };
         }
         if (item._kind === "cvd") {
@@ -3764,10 +3799,12 @@
             bookRows: () => bookClusterRows().map((c) => ({
                 key: c.key, time: c.time, side: c.side, lo: c.lo, hi: c.hi,
                 usdt: c.usdt, levels: c.levels, count: c.count, px: c.px,
-                live: c.live, eaten: c.eaten, ids: c.ids.slice() })),
+                live: c.live, eaten: c.eaten, sums: Object.assign({}, c.sums),
+                ids: c.ids.slice() })),
             bookHits: () => bookHits.map((h) => ({ x: h.x, y: h.y, w: h.w, h: h.h,
                 key: h.key, time: h.time, total: h.total, count: h.count,
-                live: h.live, ids: h.ids.slice() })),
+                live: h.live, sums: h.sums ? Object.assign({}, h.sums) : null,
+                ids: h.ids.slice() })),
             bookTape: () => bookFeedItems().map((it) => ({
                 id: it.id, st: it.st, side: it.side, usd: it.usd,
                 time: it.time, levels: it.levels })),
@@ -4963,8 +5000,17 @@
                             : w.st === "eaten" ? "feed.book_eaten" : "feed.book_gone") +
                         " " + I18n.time(w.opened)).join("<br>") + "</p>";
             }
+            const sm = hit.sums || {};
+            const segHtml = [[sm.live, "#4ade80", "feed.book_live"],
+                             [sm.eaten, "#fb7185", "feed.book_eaten"],
+                             [sm.gone, "#94a3b8", "feed.book_gone"]]
+                .filter((rg) => rg[0] > 0)
+                .map((rg) => '<span style="color:' + rg[1] + '">● ' +
+                    I18n.t(rg[2]) + " $" + fmtUsdShort(rg[0]) + "</span>").join("  ");
             extraRows =
                 "<p><strong>" + I18n.t("modal.book_zone") + "</strong> " + zone + "</p>" +
+                (segHtml ? "<p><strong>" + I18n.t("modal.book_comp") + "</strong> " +
+                            segHtml + "</p>" : "") +
                 wallRows;
             about = I18n.t("modal.book_about");
         } else {

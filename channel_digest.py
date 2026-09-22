@@ -1399,7 +1399,8 @@ def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = N
                 head_override: Optional[str] = None,
                 lang: str = "ru",
                 limit: int = CAPTION_LIMIT,
-                head_full: bool = False) -> str:
+                head_full: bool = False,
+                with_hours: bool = True) -> str:
     """Сводка одним сообщением: шапка, строки окна и часы по порядку.
 
     Строки окна: итог (касса, число ликвидаций, сравнение с прошлым окном),
@@ -1421,6 +1422,8 @@ def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = N
     лидеров, а из ряда часов уходят самые старые. head_override — шапка от
     ИИ: та же раскладка, меняется только текст. head_full=True — версия для
     сайта: шапка не режется под лимит подписи Telegram и пост идёт целиком.
+    with_hours=False — вид для канала: без почасовых строк (шапка и цифры
+    окна), почасовка целиком остаётся в версии для сайта.
     """
     import html as _html
     f = _facts(snap, lang)
@@ -1504,37 +1507,42 @@ def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = N
     # отдаём подробностям окна, сколько поместится. Если весь ряд часов не
     # влез даже в тесном виде, подробности не добавляем вовсе: часы и их
     # лидеры важнее, а место освободившееся от них и так уходит часам.
+    # with_hours=False — вид для канала: почасовой ряд не показываем вовсе
+    # (он целиком живёт на сайте /hourly), место отдаём строкам окна.
     hours_block, all_hours = "", False
-    for lines in styles:
-        block = "\n".join([ln for ln in lines if ln])
-        if block and fits(base + [block]):
-            hours_block, all_hours = block, True
-            break
-    if not hours_block:
-        # часы без слов «Лидер часа», потом совсем короткие строки — и так
-        # отбрасываем самые старые часы один за другим, пока ряд не влезет
-        for lines in styles[1:]:
-            for cut in range(len(lines) - 1, 0, -1):
-                block = "\n".join([ln for ln in lines[:cut] if ln])
-                if block and fits(base + [block]):
-                    hours_block = block
-                    break
-            if hours_block:
+    if with_hours:
+        for lines in styles:
+            block = "\n".join([ln for ln in lines if ln])
+            if block and fits(base + [block]):
+                hours_block, all_hours = block, True
                 break
+        if not hours_block:
+            # часы без слов «Лидер часа», потом совсем короткие строки — и так
+            # отбрасываем самые старые часы один за другим, пока ряд не влезет
+            for lines in styles[1:]:
+                for cut in range(len(lines) - 1, 0, -1):
+                    block = "\n".join([ln for ln in lines[:cut] if ln])
+                    if block and fits(base + [block]):
+                        hours_block = block
+                        break
+                if hours_block:
+                    break
     kept: List[int] = []
-    if all_hours:
+    if all_hours or not with_hours:
         for idx in (1, 2, 3):
             line = win[idx]
             if not line:
                 continue
             trial = sorted(kept + [idx])
-            if fits(base + [win[i] for i in trial] + [hours_block]):
+            if fits(base + [win[i] for i in trial] + ([hours_block] if hours_block else [])):
                 kept = trial
     parts = base + [win[i] for i in kept] + ([hours_block] if hours_block else [])
     added = 1 if hours_block else 0
-    if not added:
+    if not added and (with_hours or not hours):
         # часов ещё нет (первый запуск): показываем хотя бы настроение ленты,
-        # чтобы пост не состоял из одной суммы
+        # чтобы пост не состоял из одной суммы. В канале (with_hours=False)
+        # строка появляется только когда часовых данных нет вовсе — когда
+        # часы есть, они просто остались на сайте.
         parts.append(_board_bias_line(board, lang) or f["bias_line"])
     return _pack(parts, tail, limit=limit)
 

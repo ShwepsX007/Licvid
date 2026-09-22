@@ -1482,8 +1482,7 @@ class TelegramBot:
 
     async def post_channel_digest(self, force: bool = False) -> bool:
         from channel_digest import (
-            active_headlines, pick_active_image, post_has_hours,
-            render_post, render_top7,
+            active_headlines, pick_active_image, render_post,
         )
         self._digest_err = ""
         self._last_tg_err = ""
@@ -1549,6 +1548,9 @@ class TelegramBot:
         # читалось как сбой публикации.
         img = pick_active_image(self.store, "post", variant=n)
         # Русский пост — основной; английский уходит копией в свой канал.
+        # Вид для канала: шапка и цифры окна (касса, лидер, CVD) без
+        # почасовых строк — почасовка целиком живёт на сайте /hourly,
+        # кнопка «📖 Сводка целиком на сайте» под постом ведёт туда.
         ai_head, ai_note = await self._ai_headline(snap, variant=n)
         caption = render_post(
             snap, n,
@@ -1556,6 +1558,7 @@ class TelegramBot:
             head_override=ai_head,
             site_url=self.site_url(),
             bot_url=self.bot_url(),
+            with_hours=False,
         )
         ai_head_en, _note_en = await self._ai_headline(snap, variant=n, lang="en")
         caption_en = render_post(
@@ -1565,6 +1568,7 @@ class TelegramBot:
             site_url=self.site_url(),
             bot_url=self.bot_url(),
             lang="en",
+            with_hours=False,
         )
         # Полный текст для сайта /hourly — без лимита 1024 и без обрезки
         # ИИ-шапки (как в daily_digest: в TG — коротко, на сайте — полностью).
@@ -1591,12 +1595,11 @@ class TelegramBot:
             limit=10 ** 9,
             head_full=True,
         )
-        # Один пост вместо двух: часы уже внутри подписи (render_post сам
-        # решает, каким видом они влезают). Второе сообщение — только аварийный
-        # путь: если в подпись не попал ни один час.
-        top = "" if post_has_hours(caption) else render_top7(snap.get("board"))
-        top_en = ("" if post_has_hours(caption_en)
-                  else render_top7(snap.get("board"), "en"))
+        # Пост в канал — всегда один: почасовых строк в подписи больше нет
+        # (они живут на сайте /hourly), поэтому и аварийного второго
+        # сообщения с топ-7 не нужно — часы из канала убраны намеренно.
+        top = ""
+        top_en = ""
         # Цифры окна: вместе с подписью и фото их складывает архив раздела
         # «Сводки по часам» — на сайте видно полный текст, в TG — обрезанный
         meta = {"window_h": hours,

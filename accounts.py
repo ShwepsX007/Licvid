@@ -2700,7 +2700,7 @@ class Store:
             cur = self._db.execute(
                 "INSERT INTO ads(text, photo, photo_name, link, html, html_code, targets,"
                 " send_at, expires_at, status, results, sent_at, created_at,"
-                " author_id) VALUES(?,?,?,?,?,?,?,?,?,'{}',0,?,?)",
+                " author_id) VALUES(?,?,?,?,?,?,?,?,?,?,'{}',0,?,?)",
                 (text[:4000], photo or "", os.path.basename(photo_name or "")[:80],
                  (link or "").strip()[:600], html_raw[:20000], html_raw[:20000],
                  json.dumps(targets or {}, ensure_ascii=False), float(send_at or 0),

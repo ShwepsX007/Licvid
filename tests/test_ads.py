@@ -311,10 +311,12 @@ class AdStoreTest(unittest.TestCase):
                          ["обе", "главная"])
         self.assertEqual([a["text"] for a in self.store.active_site_ads(now, place="terminal")],
                          ["обе", "терминал"])
+        # digest/hourly показывают и баннеры главной (site): так старые записи
+        # с site=true остаются видимыми на этих страницах (см. active_site_ads)
         self.assertEqual([a["text"] for a in self.store.active_site_ads(now, place="digest")],
-                         ["дайджест"])
+                         ["обе", "главная", "дайджест"])
         self.assertEqual([a["text"] for a in self.store.active_site_ads(now, place="hourly")],
-                         ["сводка"])
+                         ["обе", "главная", "сводка"])
         self.assertEqual(len(self.store.active_site_ads(now, place="")), 5)
 
     def test_banner_limit_is_honest_about_pages(self):

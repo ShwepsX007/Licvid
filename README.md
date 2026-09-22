@@ -1574,8 +1574,9 @@ tools/bot_i18n_check.py сторож перевода бота: литерал �
 deploy/liqscope.service пример systemd-юнита
 ```
 
-Файлы `liq_api.py`, `orderflow.py`, `chainlink_price.py`, `main.py`
-относятся к телеграм-боту и веб-сервисом больше не используются.
+Сигнальный бот (`main.py`) и его модули `orderflow.py`, `chainlink_price.py`
+из репозитория удалены: веб-сервис их не использует. `liq_api.py` остался —
+им пользуется `oi_feed.py`.
 
 ---
 

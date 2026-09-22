@@ -28,6 +28,7 @@
         minUsd: 0,              // порог ликвидаций, $
         minCvd: 0,              // порог |CVD| за свечу, $ (треугольники и лента)
         minOi: 0,               // порог |OI Δ| за свечу, $ (шарики и лента)
+        minBook: 0,             // 📖 минимальный объём стены, $ (график и лента заявок)
         exchanges: null,        // null = все биржи включены; иначе Set включённых
         availableExchanges: [],
         customSymbols: [],
@@ -38,6 +39,9 @@
         cvdBars: 0,
         oiEnabled: false,       // OI-шарики: рост/падение открытого интереса за свечу
         oiBars: 0,
+        bookEnabled: false,     // 📖 стакан: полосы крупных лимиток (L2-стены)
+        bookData: null,         // живой снимок стен /api/book/snapshot
+        bookHist: [],           // лента «появилась → исчезла» /api/book/walls
         // индикаторные окна под графиком (те же данные, что в кабинете)
         paneLiq: false,
         paneCvd: false,
@@ -238,6 +242,7 @@
     const minUsdInput = $("min-usd-input");
     const minCvdInput = $("min-cvd-input");
     const minOiInput = $("min-oi-input");
+    const minBookInput = $("min-book-input");
     const minUsdApply = $("min-usd-apply");
     const minUsdPresets = $("min-usd-presets");
     const minUsdPanel = $("min-usd-panel");
@@ -417,6 +422,7 @@
         liq: { key: "minUsd", store: "liqscope.minUsd" },
         cvd: { key: "minCvd", store: "liqscope.minCvd" },
         oi: { key: "minOi", store: "liqscope.minOi" },
+        book: { key: "minBook", store: "liqscope.minBook" },
     };
 
     function thresholdOf(kind) {
@@ -616,6 +622,70 @@
             liqHistAt = Date.now();
             queueRedraw();
         } catch (e) { /* нет сети — рисуем по памяти, как раньше */ }
+    }
+
+    // --- 📖 Стакан: стены лимиток ----------------------------------------------
+    // Сервер сам крутит опрос L2 (Binance/Bybit/OKX/Gate) и знает, где висят
+    // крупные лимитники и сколько они живут. Пока слой включён, раз в 4 с
+    // тянем снимок активных стен; ленту истории («появилась → исчезла») — при
+    // смене монеты и далее раз в минуту: стены живут минутами, чаще незачем.
+    // Слой выключен — ни одного запроса, и сервер перестаёт опрашивать биржи.
+    let bookTimer = null, bookHistAt = 0, bookHistSym = "", bookHistReq = 0;
+    async function bookSnapshot() {
+        // слой 📖 на графике — это рисовка; опрос живут и ради ленты заявок,
+        // поэтому здесь кнопки слоёв не касаемся (таймером рулит bookPollSync)
+        const sym = chartSymbol();
+        if (!sym || sym === "ALL") return;
+        try {
+            const r = await fetch("/api/book/snapshot?symbol=" + encodeURIComponent(sym),
+                                  { credentials: "same-origin" });
+            const d = await r.json();
+            if (d && d.ok && chartSymbol() === sym) {
+                state.bookData = d;
+                queueRedraw();
+                if (state.feedTab === "book") syncBookFeed();
+            }
+        } catch (e) { /* нет сети — рисуем по последнему снимку */ }
+        if (sym !== bookHistSym || Date.now() - bookHistAt > 60000) {
+            bookHistSym = sym;
+            bookHistAt = Date.now();
+            const req = ++bookHistReq;
+            try {
+                const r = await fetch("/api/book/walls?symbol=" +
+                    encodeURIComponent(sym) + "&hours=6",
+                    { credentials: "same-origin" });
+                const d = await r.json();
+                if (req !== bookHistReq) return;       // пришёл ответ по старой паре
+                if (d && d.ok && chartSymbol() === sym) {
+                    state.bookHist = (d && d.walls) || [];
+                    queueRedraw();
+                }
+            } catch (e) { /* история не критична */ }
+        }
+    }
+    // Кому нужен стакан: слою на графике или ленте «Заявки» — независимо.
+    function bookWantPoll() {
+        return state.bookEnabled || state.feedTab === "book";
+    }
+    // Единая точка включения/выключения поллера: пока хоть кому-то нужен —
+    // тянем снапшоты; не нужен никому — отпускаем монету (сервер перестанет
+    // опрашивать биржи) и чистим данные.
+    function bookPollSync() {
+        if (bookWantPoll()) {
+            if (!bookTimer) {
+                bookSnapshot();
+                bookTimer = setInterval(bookSnapshot, 4000);
+            }
+            return;
+        }
+        if (bookTimer) {
+            clearInterval(bookTimer);
+            bookTimer = null;
+            state.bookData = null;
+            state.bookHist = [];
+            bookHistAt = 0;        // кто вернётся — тот сразу получит и историю
+            queueRedraw();
+        }
     }
 
     async function loadHistoryFor(sym, force) {
@@ -1425,6 +1495,7 @@
         ctx.clearRect(0, 0, clusterCanvas.width, clusterCanvas.height);
 
         drawLiquidationProfile(ctx);   // индикатор: полосы по ценовым уровням
+        drawBookWalls(ctx);            // 📖 стены лимиток — фон под остальными слоями
 
         clusterHits = [];              // актуальные геометрии — только если слой включён
         cvdHits = [];
@@ -1436,6 +1507,305 @@
         if (state.liqEnabled) drawLiqRects(ctx);
         drawFigures();   // фигуры теханализа — свой canvas поверх
         drawIndicatorPanes();   // окна LIQ/CVD/OI под графиком
+    }
+
+    // --- 📖 Стакан: стены → кластеры у свечи -------------------------------------
+    // Раньше стена рисовалась полосой «от появления и до сих пор»: за пару часов
+    // график зарастал сплошной пеленой, и полосы приходилось ограничивать
+    // отступами. Теперь принцип тот же, что у плашек ликвидаций: стена
+    // привязана к СВОЕЙ свече — там, где её нашли. Живая стена живёт на этой
+    // свече, пока её не уберут или не исполнят; исчезла — плашка остаётся там,
+    // где стояла. Пересекающиеся коридоры одной свечи сливаются в зону
+    // («накапливаются»), ширина — чуть больше тела свечи и дальше слота не
+    // вылезает ни на одном таймфрейме. Время и количество — в подписи (когда
+    // влезает), при наведении и в ленте «Заявки».
+    let bookHits = [];   // хит-боксы кластеров: [{kind:"book", x,y,w,h, key, ...}]
+
+    // Все известные стены: история ленты + живой снимок (у live usdt свежее —
+    // он перетирает запись из истории, дедуп по id).
+    function bookWallsMerged() {
+        const byId = new Map();
+        (state.bookHist || []).forEach((w) => {
+            if (w && w.id != null) byId.set(w.id, w);
+        });
+        const liveIds = new Set();
+        ((state.bookData && state.bookData.walls) || []).forEach((w) => {
+            if (w && w.id != null) { byId.set(w.id, w); liveIds.add(w.id); }
+        });
+        // свежий снапшот — источник правды о живых: стены, которой в нём нет,
+        // в стакане уже нет, даже если история (кэш до минуты) ещё держит live
+        if (state.bookData && Array.isArray(state.bookData.walls)) {
+            const nowS = Number(state.bookData.ts) || Date.now() / 1000;
+            byId.forEach((w, id) => {
+                if (w.live && !liveIds.has(id)) {
+                    byId.set(id, Object.assign({}, w, { live: false,
+                        closed: w.closed || nowS, age_s: undefined }));
+                }
+            });
+        }
+        return byId;
+    }
+
+    // Вспышки «съели»: стена была живой в прошлом кадре данных, а теперь
+    // закрыта с остатком <70% пика — пару секунд горит красным, потом дырка.
+    // (закрытые из истории со свежим closed тоже вспыхивают — догоняем момент)
+    const BOOK_FLASH_MS = 2500;
+    const bookFlash = new Map();          // id → Date.now() начала вспышки
+    let bookLiveSeen = new Set();
+    let bookFlashTimer = null;
+    function bookNoteTransitions(byId) {
+        const now = Date.now();
+        const nowLive = new Set();
+        byId.forEach((w, id) => {
+            if (w.live) { nowLive.add(id); return; }
+            const wasLive = bookLiveSeen.has(id);
+            const fresh = Number(w.closed) > 0 && now / 1000 - Number(w.closed) < 3;
+            if ((wasLive || fresh) && !bookFlash.has(id) && wallStatus(w) === "eaten") {
+                bookFlash.set(id, now);
+            }
+        });
+        bookLiveSeen = nowLive;
+        bookFlash.forEach((t0, id) => { if (now - t0 > BOOK_FLASH_MS) bookFlash.delete(id); });
+        if (bookFlash.size && !bookFlashTimer) {
+            bookFlashTimer = setTimeout(() => { bookFlashTimer = null; queueRedraw(); }, 400);
+        }
+    }
+    function bookFlashPhase(id) {         // 1 → только что, 0 → погасла
+        const t0 = bookFlash.get(id);
+        if (t0 === undefined) return 0;
+        return Math.max(0, 1 - (Date.now() - t0) / BOOK_FLASH_MS);
+    }
+
+    // Статус стены: живёт / ушла / её «съели» (остаток <70% пика — исполняют).
+    function wallStatus(w) {
+        if (w.live) return "live";
+        const peak = Number(w.peak) || 0, cur = Number(w.usdt) || 0;
+        return (peak > 0 && cur < peak * 0.7) ? "eaten" : "gone";
+    }
+
+    // Порог отсечки стен: серверная полка (сервис в кабинете) и пользовательская
+    // из терминала — берём бо́льшую: ниже полки сервер просто не отдаёт стены.
+    function bookMinUsd() {
+        const srv = Number(state.bookData && state.bookData.min_usd) || 150000;
+        return Math.max(srv, Number(state.minBook) || 0);
+    }
+
+    // Кластеры: (свеча × сторона × ценовой коридор с перекрытием).
+    function bookClusterRows() {
+        const tfSec = (state.timeframe || 5) * 60;
+        const minUsd = bookMinUsd();
+        const buckets = new Map();              // t0 свечи → [стены]
+        const merged = bookWallsMerged();
+        bookNoteTransitions(merged);
+        merged.forEach((w) => {
+            const val = Math.max(Number(w.usdt) || 0, Number(w.peak) || 0);
+            if (val < minUsd) return;
+            const t0 = Math.floor(Number(w.opened) / tfSec) * tfSec;
+            if (!isFinite(t0)) return;
+            let a = buckets.get(t0);
+            if (!a) { a = []; buckets.set(t0, a); }
+            a.push(w);
+        });
+        const out = [];
+        buckets.forEach((walls, t0) => {
+            ["bid", "ask"].forEach((side) => {
+                let cur = null;
+                const flush = () => { if (cur) out.push(cur); cur = null; };
+                walls.filter((w) => w.side === side)
+                     .sort((a, b) => a.lo - b.lo)
+                     .forEach((w) => {
+                    const px = Number(w.px) || ((w.hi + w.lo) / 2);
+                    const val = Math.max(Number(w.usdt) || 0, Number(w.peak) || 0);
+                    if (cur && Number(w.lo) <= cur.hi + cur.hi * 0.001) {
+                        // коридор зацепился за зону — стена накапливается в ней
+                        cur.lo = Math.min(cur.lo, Number(w.lo));
+                        cur.hi = Math.max(cur.hi, Number(w.hi));
+                        cur.usdt += val;
+                        cur.levels += (w.levels || 1);
+                        cur.count += 1;
+                        cur.live = cur.live || !!w.live;
+                        cur.eaten += wallStatus(w) === "eaten" ? 1 : 0;
+                        cur.sums[wallStatus(w)] += val;
+                        cur.pxSum += px * val; cur.wSum += val;
+                        cur.ids.push(w.id);
+                        cur.walls.push(w);
+                    } else {
+                        flush();
+                        cur = { time: t0, side: side, lo: Number(w.lo), hi: Number(w.hi),
+                                usdt: val, levels: w.levels || 1, count: 1,
+                                live: !!w.live, eaten: wallStatus(w) === "eaten" ? 1 : 0,
+                                sums: { live: 0, eaten: 0, gone: 0 },
+                                pxSum: px * val, wSum: val, ids: [w.id], walls: [w] };
+                        cur.sums[wallStatus(w)] += val;
+                    }
+                });
+                flush();
+            });
+        });
+        // ключ зоны: свеча + сторона + порядковый коридор (нумеруем по lo)
+        const seq = new Map();
+        out.sort((a, b) => a.time - b.time || (a.side < b.side ? -1 : a.side > b.side ? 1 : 0)
+                 || a.lo - b.lo);
+        out.forEach((c) => {
+            const k = c.time + "|" + c.side;
+            const i = seq.get(k) || 0;
+            seq.set(k, i + 1);
+            c.key = "book_" + k.replace("|", "_") + "_" + i;
+            c.px = c.wSum > 0 ? c.pxSum / c.wSum : (c.hi + c.lo) / 2;
+            // живые интервалы цены (слитые) — только они закрашены; всё, что
+            // между ними внутри конверта зоны, — дырки от снятых/съеденных
+            const liveIv = c.walls.filter((w) => w.live)
+                .map((w) => [Number(w.lo), Number(w.hi)]).sort((a, b) => a[0] - b[0]);
+            const runs = [];
+            liveIv.forEach((iv) => {
+                const last = runs[runs.length - 1];
+                if (last && iv[0] <= last[1]) last[1] = Math.max(last[1], iv[1]);
+                else runs.push([iv[0], iv[1]]);
+            });
+            c.liveRuns = runs;
+            c.liveCount = liveIv.length;
+            c.liveUsdt = c.walls.filter((w) => w.live)
+                .reduce((acc, w) => acc + (Number(w.usdt) || 0), 0);
+            c.flashes = c.walls.filter((w) => !w.live && bookFlash.has(w.id))
+                .map((w) => ({ lo: Number(w.lo), hi: Number(w.hi), phase: bookFlashPhase(w.id) }));
+        });
+        // слабые рисуются первыми: крупные догоняются поверх, наложения режем
+        out.sort((a, b) => a.usdt - b.usdt);
+        return out;
+    }
+
+    function drawBookWalls(ctx) {
+        bookHits = [];
+        if (!state.bookEnabled || !chart || !candleSeries) return;
+        const clusters = bookClusterRows();
+        if (!clusters.length) return;
+        const ts = chart.timeScale();
+        const h = clusterCanvas.height, W = clusterCanvas.width;
+        const slotPx = plateSlotPx();
+        // ширина кластера — доля слота свечи: тело +hair, дальше слота ни на
+        // одном ТФ не вылезает, «пелена» невозможна по построению
+        const bw = Math.max(3, Math.min(96, Math.round(slotPx * 0.86)));
+        ctx.save();
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        const activeKey = pinHitKey || hoverHitKey;   // закреплённый важнее
+        const drawn = [];
+        clusters.forEach((c) => {
+            let x, y1, y2;
+            try {
+                x = ts.timeToCoordinate(c.time);
+                y1 = candleSeries.priceToCoordinate(c.hi);
+                y2 = candleSeries.priceToCoordinate(c.lo);
+            } catch (e) { return; }
+            if (x === null || x === undefined || !isFinite(x)) return;
+            if (y1 === null || y1 === undefined || y2 === null || y2 === undefined) return;
+            if (x < -bw || x > W + bw) return;   // свеча ушла за видимое окно
+            // зона без живых и без вспышки — разобрана: остаётся на графике
+            // прозрачным конвертом-историей (пунктир + лёгкая тонировка), как и
+            // все прочие кластеры; наводка/клик по-прежнему открывают состав
+            const emptied = !c.liveRuns.length && !c.flashes.length;
+            let top = Math.min(y1, y2), bot = Math.max(y1, y2);
+            if (bot - top < 6) { const cy = (top + bot) / 2; top = cy - 3; bot = cy + 3; }
+            if (bot < -20 || top > h + 20) return;
+            const bx = Math.round(x - bw / 2), by = Math.round(top);
+            const bh = Math.max(6, Math.round(bot - top));
+            const isActive = activeKey === c.key;
+            if (!isActive && drawn.some((r) =>
+                bx < r.x + r.w && bx + bw > r.x && by < r.y + r.h && by + bh > r.y)) {
+                return;    // слабая зона под сильной — не дублируем
+            }
+            drawn.push({ x: bx, y: by, w: bw, h: bh });
+            bookHits.push({ kind: "book", x: bx, y: by, w: bw, h: bh, key: c.key,
+                time: c.time, ids: c.ids, total: c.usdt, levels: c.levels,
+                count: c.count, live: c.live, eaten: c.eaten, side: c.side,
+                sums: c.sums, liveUsdt: c.liveUsdt, liveCount: c.liveCount,
+                emptied: emptied, lo: c.lo, hi: c.hi, price: c.px,
+                wallsLite: c.walls.slice(0, 6).map((w) => ({
+                    id: w.id, val: Math.max(Number(w.usdt) || 0, Number(w.peak) || 0),
+                    st: wallStatus(w), opened: Number(w.opened) || 0 })) });
+            const bid = c.side === "bid";
+            const fill = bid ? "#67e8f9" : "#a78bfa";
+            const line = bid ? "#22d3ee" : "#8b5cf6";
+            // y по цене внутри конверта; сегменты ≥ 2px, чтобы дырка читалась
+            const yOf = (price) => {
+                let yy = null;
+                try { yy = candleSeries.priceToCoordinate(price); } catch (e) { yy = null; }
+                if (yy === null || yy === undefined || !isFinite(yy)) {
+                    const span = (c.hi - c.lo) || 1;
+                    yy = bot - ((price - c.lo) / span) * (bot - top);
+                }
+                return Math.max(by, Math.min(by + bh, yy));
+            };
+            const segRect = (lo, hi) => {
+                let sTop = Math.round(Math.min(yOf(lo), yOf(hi)));
+                let sBot = Math.round(Math.max(yOf(lo), yOf(hi)));
+                if (sBot - sTop < 2) { sBot = Math.min(by + bh, sTop + 2); sTop = sBot - 2; }
+                return [sTop, sBot - sTop];
+            };
+            // конверт зоны — тонкий контур: показывает, где стены БЫЛИ (дырки);
+            // у разобранной зоны — чуть заметная тонировка, чтобы её было где ловить
+            if (emptied) {
+                ctx.globalAlpha = 0.10;
+                ctx.fillStyle = fill;
+                ctx.fillRect(bx, by, bw, bh);
+            }
+            ctx.globalAlpha = emptied ? 0.38 : 0.55;
+            ctx.strokeStyle = line;
+            ctx.lineWidth = 1;
+            ctx.setLineDash([2, 2]);
+            ctx.strokeRect(bx + 0.5, by + 0.5, Math.max(1, bw - 1), Math.max(1, bh - 1));
+            ctx.setLineDash([]);
+            // живые интервалы — залиты и светятся, пока стоят в стакане
+            c.liveRuns.forEach((run) => {
+                const sr = segRect(run[0], run[1]);
+                ctx.globalAlpha = 0.5;
+                ctx.fillStyle = fill;
+                ctx.shadowColor = line;
+                ctx.shadowBlur = 7;
+                ctx.fillRect(bx, sr[0], bw, sr[1]);
+                ctx.shadowBlur = 0;
+                ctx.globalAlpha = 0.95;
+                ctx.strokeStyle = line;
+                ctx.lineWidth = 1.1;
+                ctx.strokeRect(bx + 0.5, sr[0] + 0.5, Math.max(1, bw - 1), Math.max(1, sr[1] - 1));
+            });
+            // съеденные — красная вспышка на своём месте, гаснет и оставляет дырку
+            c.flashes.forEach((f) => {
+                const sr = segRect(f.lo, f.hi);
+                ctx.globalAlpha = 0.35 + 0.6 * f.phase;
+                ctx.fillStyle = "#f43f5e";
+                ctx.shadowColor = "#fb7185";
+                ctx.shadowBlur = 10 + 12 * f.phase;
+                ctx.fillRect(bx, sr[0], bw, sr[1]);
+                ctx.shadowBlur = 0;
+            });
+            if (isActive) {   // наведение в ленте / клик: белый ореол, как у плашек
+                ctx.save();
+                ctx.globalAlpha = 1;
+                ctx.strokeStyle = "rgba(255,255,255,0.92)";
+                ctx.lineWidth = 2.4;
+                ctx.shadowColor = "#ffffff";
+                ctx.shadowBlur = 14;
+                ctx.strokeRect(bx - 2.5, by - 2.5, bw + 5, bh + 5);
+                ctx.restore();
+            }
+            // подпись — что стоит СЕЙЧАС: живой объём · живых стен
+            if (c.liveRuns.length) {
+                const label = fmtCompact(c.liveUsdt) + " · " + c.liveCount;
+                ctx.font = "bold 9px 'JetBrains Mono', monospace";
+                const tw = ctx.measureText ? ctx.measureText(label).width : 0;
+                const big = c.liveRuns.reduce((acc, run) => {
+                    const sr = segRect(run[0], run[1]);
+                    return (!acc || sr[1] > acc[1]) ? sr : acc;
+                }, null);
+                if (big && big[1] >= 11 && tw + 6 <= bw) {
+                    ctx.globalAlpha = 0.95;
+                    ctx.fillStyle = "rgba(240,250,253,0.9)";
+                    ctx.fillText(label, bx + bw / 2, big[0] + big[1] / 2 + 0.5);
+                }
+            }
+        });
+        ctx.restore();
     }
 
     // --- Плашки ликвидаций ------------------------------------------------------
@@ -2538,6 +2908,14 @@
             const dx = px - b.x, dy = py - b.y, rr = b.r + 4;
             if (dx * dx + dy * dy <= rr * rr) return b;
         }
+        // стакан — самый нижний слой: конверт кластера крупный и накрывает
+        // треугольники/шары в своих границах, поэтому его берём последним —
+        // фигуры сверху остаются доступными для наведения
+        for (let i = bookHits.length - 1; i >= 0; i--) {
+            const b = bookHits[i];
+            if (px >= b.x - 3 && px <= b.x + b.w + 3 &&
+                py >= b.y - 3 && py <= b.y + b.h + 3) return b;
+        }
         return null;
     }
 
@@ -2548,20 +2926,22 @@
 
     function applyFeedHighlight(ball, pin) {
         if (pin) {
-            pinHitKey = (ball && ball.kind === "liq") ? ball.key : null;
+            pinHitKey = (ball && (ball.kind === "liq" || ball.kind === "book")) ? ball.key : null;
             if (!ball) hoverHitKey = null;
         } else {
-            hoverHitKey = (ball && ball.kind === "liq") ? ball.key : null;
+            hoverHitKey = (ball && (ball.kind === "liq" || ball.kind === "book")) ? ball.key : null;
         }
         const kind = ball && ball.kind;
         const matchTab = (kind === "liq" && state.feedTab === "liq")
             || (kind === "cvd" && state.feedTab === "cvd")
-            || (kind === "oi" && state.feedTab === "oi");
+            || (kind === "oi" && state.feedTab === "oi")
+            || (kind === "book" && state.feedTab === "book");
         // Для ликвидаций ids есть только у живых кластеров (из памяти).
         // Исторические кластеры из /api/liq_clusters приходят без ids — у них
         // только время свечи. Чтобы лента не «притухала без подсветки»,
         // проверяем наличие ids и делаем fallback по времени свечи.
-        const hasIds = !!(kind === "liq" && ball.ids && ball.ids.length);
+        // У стакана строки ленты — сами стены: матчим по id стены.
+        const hasIds = !!((kind === "liq" || kind === "book") && ball.ids && ball.ids.length);
         const ids = hasIds ? new Set(ball.ids.map(String)) : null;
         const feedKey = (kind === "cvd" || kind === "oi") ? (kind + "_" + ball.time) : null;
         const tfSec = (kind === "liq" && ball.time) ? (state.timeframe * 60) : 0;
@@ -2572,7 +2952,7 @@
             let hit = false;
             if (ball && matchTab) {
                 if (ids) {
-                    hit = ids.has(String(tr.dataset.liqId));
+                    hit = ids.has(String(tr.dataset.liqId || tr.dataset.wallId || ""));
                 } else if (feedKey) {
                     hit = tr.dataset.feedKey === feedKey;
                 } else if (kind === "liq" && tfSec > 0) {
@@ -2594,7 +2974,7 @@
             let hit = false;
             if (ball && matchTab) {
                 if (ids) {
-                    hit = ids.has(String(tr.dataset.liqId));
+                    hit = ids.has(String(tr.dataset.liqId || tr.dataset.wallId || ""));
                 } else if (feedKey) {
                     hit = tr.dataset.feedKey === feedKey;
                 } else if (kind === "liq" && tfSec > 0) {
@@ -2616,6 +2996,29 @@
     // Лента → график: наведение/клик по строке подсвечивает кластер/треугольник/шар.
     function hitFromFeedItem(item) {
         if (!item) return null;
+        if (item._kind === "book") {
+            // лента заявок → кластер на графике: строка ищет свою стену среди
+            // id нарисованной зоны; если зона не нарисована (ушла за окно или
+            // наложение) — синтетический хит по свече, лента подсветится всё равно
+            const sid = String(item.id);
+            for (let i = 0; i < bookHits.length; i++) {
+                const ids = bookHits[i].ids || [];
+                for (let j = 0; j < ids.length; j++) {
+                    if (String(ids[j]) === sid) return bookHits[i];
+                }
+            }
+            const tfSec = (state.timeframe || 5) * 60;
+            const t0 = Math.floor(Number(item.time || item.timestamp || 0) / tfSec) * tfSec;
+            const sv = { live: 0, eaten: 0, gone: 0 };
+            sv[item.st === "live" ? "live" : item.st === "eaten" ? "eaten" : "gone"] =
+                item.usd || 0;
+            return { kind: "book", key: "book_" + t0 + "_" + (item.side || "bid"),
+                     x: 0, y: 0, w: 0, h: 0, time: t0, ids: [item.id],
+                     total: item.usd || 0, count: 1, levels: item.levels || 1,
+                     live: !!item.live, eaten: item.st === "eaten" ? 1 : 0,
+                     side: item.side, price: item.price, sums: sv,
+                     lo: item.lo, hi: item.hi, wallsLite: null };
+        }
         if (item._kind === "cvd") {
             for (let i = 0; i < cvdHits.length; i++) {
                 if (Number(cvdHits[i].time) === Number(item.time)) return cvdHits[i];
@@ -2721,11 +3124,11 @@
             if (!shapePin) { shapeHover = null; queueRedraw(); }
             return;
         }
-        if (hit && hit.kind === "liq") {
+        if (hit && (hit.kind === "liq" || hit.kind === "book")) {
             applyFeedHighlight(hit, pin);
             if (pin) pinShape(hit);
             else if (!shapePin) {
-                shapeHover = { kind: "liq", key: hit.key };
+                shapeHover = { kind: hit.kind, key: hit.key };
                 queueRedraw();
             }
             return;
@@ -3470,8 +3873,46 @@
             layerState: () => ({ liq: !!state.liqEnabled, cvd: !!state.cvdEnabled,
                                  oi: !!state.oiEnabled, paneLiq: !!state.paneLiq,
                                  paneCvd: !!state.paneCvd, paneOi: !!state.paneOi,
+                                 book: !!state.bookEnabled,
                                  profile: !!state.profileEnabled }),
+            // 📖 стакан: тесты проверяют переключатель, полосу запроса и отрисовку
+            bookState: () => ({ on: !!state.bookEnabled,
+                                live: ((state.bookData && state.bookData.walls) || []).length,
+                                hist: (state.bookHist || []).length }),
+            bookSnapshotNow: () => bookSnapshot(),
             redraw: () => drawClusters(),
+            // 📖 tests/book_walls.js: кластеры по свече и лента заявок
+            bookRows: () => bookClusterRows().map((c) => ({
+                key: c.key, time: c.time, side: c.side, lo: c.lo, hi: c.hi,
+                usdt: c.usdt, levels: c.levels, count: c.count, px: c.px,
+                live: c.live, eaten: c.eaten, sums: Object.assign({}, c.sums),
+                liveRuns: c.liveRuns.map((r) => r.slice()), liveUsdt: c.liveUsdt,
+                liveCount: c.liveCount, flashes: c.flashes.length,
+                ids: c.ids.slice() })),
+            bookHits: () => bookHits.map((h) => ({ x: h.x, y: h.y, w: h.w, h: h.h,
+                key: h.key, time: h.time, total: h.total, count: h.count,
+                live: h.live, sums: h.sums ? Object.assign({}, h.sums) : null,
+                liveUsdt: h.liveUsdt, liveCount: h.liveCount, emptied: !!h.emptied,
+                ids: h.ids.slice() })),
+            bookTape: () => bookFeedItems().map((it) => ({
+                id: it.id, st: it.st, side: it.side, usd: it.usd,
+                time: it.time, levels: it.levels })),
+            feedTab: () => state.feedTab,
+            setFeed: (t) => setFeedTab(t),
+            bookMin: () => bookMinUsd(),
+            setBookMin: (v) => setThreshold("book", v, false),
+            bookRefetchHist: () => { bookHistAt = 0; return bookSnapshot(); },
+            hitAt: (x, y) => hitAt(x, y),
+            injectOiHit: (h) => { oiHits.push(h); },
+            bookPolling: () => ({ timer: !!bookTimer, want: bookWantPoll(),
+                                  enabled: !!state.bookEnabled,
+                                  tab: state.feedTab }),
+            feedRowsDom: () => (feedTbody
+                ? Array.from(feedTbody.children).map((tr) => ({
+                    key: tr.dataset.feedKey || null, wallId: tr.dataset.wallId || null,
+                    cls: String(tr.className),
+                    txt: tr.textContent.replace(/\s+/g, " ").trim() }))
+                : []),
         };
         window.LiqScopeDraw = {
             fibPrice, distToSegment, rayFar,
@@ -3536,7 +3977,7 @@
                 const hit = (param && param.point)
                     ? hitAt(param.point.x, param.point.y) : null;
                 const pinned = hit && (
-                    (hit.kind === "liq" && hit.key === pinHitKey) ||
+                    ((hit.kind === "liq" || hit.kind === "book") && hit.key === pinHitKey) ||
                     (shapePin && shapePin.kind === hit.kind && shapePin.key === hit.key)
                 );
                 if (!hit || pinned) {
@@ -4007,6 +4448,7 @@
         if (usd) {
             usd.textContent = state.feedTab === "cvd" ? I18n.t("feed.col_cvd")
                             : state.feedTab === "oi" ? I18n.t("feed.col_oi")
+                            : state.feedTab === "book" ? I18n.t("feed.col_book")
                             : I18n.t("feed.col_usd");
         }
         document.querySelectorAll(".feed-tab").forEach((btn) => {
@@ -4280,10 +4722,160 @@
         finishShapeFeed(field, items.length);
     }
 
+    // --- 📖 Лента заявок (стакан) -----------------------------------------------
+    // Строка ленты = одна стена лимитных ордеров: «появилась $2.6M · 3 ур. —
+    // жива/ушла/съедена». Тот же принцип, что у лент CVD/OI: наведение на
+    // строку подсвечивает кластер на графике, наведение на кластер — строку;
+    // клик закрепляет и открывает окно с составом зоны.
+    function bookDurShort(s) {
+        s = Math.max(0, Math.round(Number(s) || 0));
+        if (s < 60) return s + "s";
+        if (s < 3600) return Math.floor(s / 60) + "m" + (s % 60 ? " " + (s % 60) + "s" : "");
+        return Math.floor(s / 3600) + "h " + Math.floor((s % 3600) / 60) + "m";
+    }
+
+    function bookFeedItems() {
+        const sym0 = chartSymbol();
+        if (!sym0 || sym0 === "ALL") return [];   // «все монеты»: стакан не опрашивается
+        const now = Number((state.bookData && state.bookData.ts) || 0) ||
+                    (Date.now() / 1000);
+        const minUsd = bookMinUsd();
+        const items = [];
+        bookWallsMerged().forEach((w) => {
+            const val = Math.max(Number(w.usdt) || 0, Number(w.peak) || 0);
+            if (val < minUsd) return;
+            const end = Number(w.closed) || now;
+            items.push({
+                _kind: "book", id: w.id, symbol: chartSymbol(), side: w.side,
+                time: Number(w.opened) || 0, timestamp: Number(w.opened) || 0,
+                usd: val, price: Number(w.px) || (Number(w.hi) + Number(w.lo)) / 2,
+                lo: Number(w.lo), hi: Number(w.hi),
+                levels: w.levels || 1, live: !!w.live, st: wallStatus(w),
+                cur: Number(w.usdt) || 0, peak: Number(w.peak) || 0,
+                dur: Math.max(0, Math.round(end - (Number(w.opened) || end))),
+                exchs: w.exchs || [],
+            });
+        });
+        items.sort((a, b) => b.time - a.time);
+        return items.slice(0, 150);
+    }
+
+    function bookFeedKey(item) { return "book_" + item.id; }
+
+    function paintBookFeedCells(tr, item) {
+        tr._feedItem = item;
+        tr.dataset.wallId = String(item.id);
+        tr.dataset.feedKey = bookFeedKey(item);
+        tr.dataset.ts = String(Math.floor(Number(item.time) || 0));
+        tr.classList.toggle("feed-row-live", !!item.live);
+        const stLabel = item.st === "live"
+            ? I18n.t("feed.book_live") + " " + bookDurShort(item.dur)
+            : item.st === "eaten"
+                ? I18n.t("feed.book_eaten") + " · " + bookDurShort(item.dur)
+                : I18n.t("feed.book_gone") + " · " + bookDurShort(item.dur);
+        const openTitle = I18n.t("feed.open_chart", { sym: pretty(item.symbol) });
+        const openTitleHtml = openTitle.replace(/"/g, "&quot;");
+        const exch = (item.exchs || []).map((e) =>
+            '<span class="exch-badge ' + String(e) + '">' + String(e).toUpperCase() +
+            "</span>").join(" ");
+        tr.innerHTML =
+            '<td class="td-time">' + I18n.time(item.timestamp) + "</td>" +
+            '<td class="td-coin"><button class="coin-link" type="button" data-symbol="' +
+            encodeURIComponent(item.symbol) + '" title="' + openTitleHtml +
+            '" aria-label="' + openTitleHtml + '">' +
+            "<strong>" + pretty(item.symbol) + '</strong><span class="coin-link-icon">📈</span></button></td>' +
+            "<td>" + exch + "</td>" +
+            '<td><span class="badge-book-' + (item.side === "bid" ? "bid" : "ask") + '">' +
+            (item.side === "bid" ? "BID" : "ASK") + "</span> " +
+            '<span class="td-book-state">' + stLabel + "</span></td>" +
+            '<td class="td-usd-amount ' + (item.side === "bid" ? "book-bid-val" : "book-ask-val") + '">$' +
+            fmtUsdFull(item.usd) +
+            (item.st === "eaten"
+                ? ' <small class="td-book-now">→ $' + fmtUsdShort(item.cur) + "</small>"
+                : "") +
+            "</td>" +
+            '<td class="td-price">' + fmtPrice(item.price) + "</td>";
+    }
+
+    function bookFeedRow(item) {
+        const tr = document.createElement("tr");
+        paintBookFeedCells(tr, item);
+        tr.addEventListener("click", () => {
+            const it = tr._feedItem || item;
+            const hit = hitFromFeedItem(it);
+            if (hit) {
+                applyFeedHighlight(hit, true);
+                pinShape(hit);
+                openShapeModal("book", hit);
+            }
+        });
+        tr.addEventListener("mouseenter", () => highlightFromFeed(tr._feedItem || item, false));
+        tr.addEventListener("mouseleave", () => highlightFromFeed(null, false));
+        const coinBtn = tr.querySelector(".coin-link");
+        if (coinBtn) {
+            coinBtn.addEventListener("click", (e) => {
+                e.stopPropagation();      // фильтр ленты + выбор монеты на графике
+                selectSymbol(decodeURIComponent(coinBtn.dataset.symbol));
+            });
+        }
+        return tr;
+    }
+
+    function finishBookFeed(n) {
+        feedCountEl.textContent = feedCountLabel(n);
+        if (feedEmptyEl) {
+            // лента живёт и при выключенном слое: пустота — это «стен ещё нет»,
+            // а не «слой погас»
+            feedEmptyEl.textContent = I18n.t("feed.empty_book");
+            feedEmptyEl.classList.toggle("hidden", n > 0);
+        }
+    }
+
+    function rebuildBookFeed() {
+        const items = bookFeedItems();
+        feedTbody.innerHTML = "";
+        const frag = document.createDocumentFragment();
+        items.forEach((item) => frag.appendChild(bookFeedRow(item)));
+        feedTbody.appendChild(frag);
+        finishBookFeed(items.length);
+    }
+
+    // Как syncShapeFeed: обновление на месте, DOM строк не пересобираем —
+    // иначе ховер срывается, а подсветка графика мигает на каждом полите.
+    function syncBookFeed() {
+        if (!feedTbody) return;
+        const items = bookFeedItems();
+        if (!feedTbody.children.length) { rebuildBookFeed(); return; }
+        const have = new Map();
+        Array.from(feedTbody.children).forEach((tr) => {
+            if (tr.dataset.feedKey) have.set(tr.dataset.feedKey, tr);
+        });
+        const keep = new Set();
+        const ordered = [];
+        items.forEach((item) => {
+            const key = bookFeedKey(item);
+            keep.add(key);
+            let tr = have.get(key);
+            if (!tr) tr = bookFeedRow(item);
+            else paintBookFeedCells(tr, item);
+            ordered.push(tr);
+        });
+        Array.from(feedTbody.children).forEach((tr) => {
+            if (!keep.has(tr.dataset.feedKey)) feedTbody.removeChild(tr);
+        });
+        for (let i = 0; i < ordered.length; i++) {
+            if (feedTbody.children[i] !== ordered[i]) {
+                feedTbody.insertBefore(ordered[i], feedTbody.children[i] || null);
+            }
+        }
+        finishBookFeed(ordered.length);
+    }
+
     function rebuildFeed() {
         pinHitKey = null;
         hoverHitKey = null;
-        if (shapePin && (shapePin.kind === "liq" || shapePin.kind === "cvd" || shapePin.kind === "oi")) {
+        if (shapePin && (shapePin.kind === "liq" || shapePin.kind === "cvd" ||
+                         shapePin.kind === "oi" || shapePin.kind === "book")) {
             if (!state.modalItem) {
                 unpinShape();
                 hideShapeModal();
@@ -4292,6 +4884,7 @@
         paintFeedHeaders();
         if (state.feedTab === "cvd") { rebuildShapeFeed("cvd"); return; }
         if (state.feedTab === "oi") { rebuildShapeFeed("oi"); return; }
+        if (state.feedTab === "book") { rebuildBookFeed(); return; }
         if (feedEmptyEl) feedEmptyEl.textContent = I18n.t("feed.empty");
         const rows = state.liquidations.filter(passesFeedFilter).slice(-150).reverse();
         feedTbody.innerHTML = "";
@@ -4307,10 +4900,13 @@
     }
 
     function setFeedTab(tab) {
-        if (tab !== "liq" && tab !== "cvd" && tab !== "oi") return;
+        if (tab !== "liq" && tab !== "cvd" && tab !== "oi" && tab !== "book") return;
         if (state.feedTab === tab) return;
         state.feedTab = tab;
         try { localStorage.setItem("liqscope.feedTab", tab); } catch (e) { /* ignore */ }
+        // лента заявок тянет стакан независимо от кнопки слоя: открываем —
+        // поднимаем поллер, уходим со вкладки при выключенном слое — гасим
+        bookPollSync();
         rebuildFeed();
         sendFeedConfig();     // «ВСЕ» + CVD/OI → сервер начинает поток всех монет
     }
@@ -4318,7 +4914,7 @@
     function setupFeedTabs() {
         try {
             const v = localStorage.getItem("liqscope.feedTab");
-            if (v === "liq" || v === "cvd" || v === "oi") state.feedTab = v;
+            if (v === "liq" || v === "cvd" || v === "oi" || v === "book") state.feedTab = v;
         } catch (e) { /* ignore */ }
         const tabs = $("feed-tabs");
         if (!tabs) return;
@@ -4328,6 +4924,10 @@
             setFeedTab(btn.getAttribute("data-feed"));
         });
         paintFeedHeaders();
+        // лента заявок переживает слои: вкладка с прошлой сессии — поднимаем
+        // поллер и рисуем ленту, даже если кнопка 📖 в слоях не нажата
+        bookPollSync();
+        if (state.feedTab === "book") rebuildFeed();
     }
 
     let shapeFeedTimer = null;
@@ -4471,6 +5071,41 @@
             extraRows = "<p><strong>" + I18n.t("modal.strength") + "</strong> " +
                 strengthHtml + "</p>";
             about = I18n.t("modal.cvd_about");
+        } else if (kind === "book") {
+            modalTitle.textContent = I18n.t("modal.book_title", { sym: sym });
+            const bid = hit.side === "bid";
+            dirHtml = '<span class="badge-book-' + (bid ? "bid" : "ask") + '">' +
+                (bid ? "BID" : "ASK") + "</span>" +
+                (hit.live ? ' <em style="color:#67e8f9">' + I18n.t("feed.book_live") + "</em>" : "");
+            valRowHtml = usdRow("$" + fmtUsdFull(hit.total) +
+                ' <span style="font-size:.72rem;color:var(--color-text-dim)">' +
+                hit.count + " " + I18n.t("feed.book_walls_n") + " · " +
+                hit.levels + " " + I18n.t("feed.book_levels_n") + "</span>");
+            const zone = (isFinite(hit.lo) && isFinite(hit.hi) && hit.hi > hit.lo)
+                ? fmtPrice(hit.lo) + " – " + fmtPrice(hit.hi)
+                : "≈ " + fmtPrice(hit.price);
+            let wallRows = "";
+            if (hit.wallsLite && hit.wallsLite.length) {
+                wallRows = "<p><strong>" + I18n.t("modal.book_walls") + "</strong> " +
+                    hit.wallsLite.map((w) => "$" + fmtUsdShort(w.val) + " · " +
+                        I18n.t(w.st === "live" ? "feed.book_live"
+                            : w.st === "eaten" ? "feed.book_eaten" : "feed.book_gone") +
+                        " " + I18n.time(w.opened)).join("<br>") + "</p>";
+            }
+            const sm = hit.sums || {};
+            // живое — по текущему объёму (что реально стоит), снятое/съеденное — по пику
+            const segHtml = [[hit.liveUsdt != null ? hit.liveUsdt : sm.live, "#4ade80", "feed.book_live"],
+                             [sm.eaten, "#fb7185", "feed.book_eaten"],
+                             [sm.gone, "#94a3b8", "feed.book_gone"]]
+                .filter((rg) => rg[0] > 0)
+                .map((rg) => '<span style="color:' + rg[1] + '">● ' +
+                    I18n.t(rg[2]) + " $" + fmtUsdShort(rg[0]) + "</span>").join("  ");
+            extraRows =
+                "<p><strong>" + I18n.t("modal.book_zone") + "</strong> " + zone + "</p>" +
+                (segHtml ? "<p><strong>" + I18n.t("modal.book_comp") + "</strong> " +
+                            segHtml + "</p>" : "") +
+                wallRows;
+            about = I18n.t("modal.book_about");
         } else {
             modalTitle.textContent = I18n.t("modal.oi_of", { sym: sym });
             dirHtml = hit.up
@@ -4532,7 +5167,7 @@
     // По умолчанию при входе на график все слои выключены, а сами переключатели
     // видны только зарегистрированным пользователям (авторизация сайта).
     const LAYER_KEYS = ["profileEnabled", "liqEnabled", "cvdEnabled", "oiEnabled",
-                        "paneLiq", "paneCvd", "paneOi"];
+                        "bookEnabled", "paneLiq", "paneCvd", "paneOi"];
     //: ключ слоя → кнопка-переключатель (заполняется в setupLayerToggles)
     const LAYER_DEFS = {};
 
@@ -4616,7 +5251,7 @@
             call.title = I18n.t("chart.layers_title") + " · " +
                 I18n.t("gate.trial_title", { min: min });
         } catch {
-            badge.textContent = min + " мин";
+            badge.textContent = I18n.t("gate.min_short", { min: min });
         }
     }
 
@@ -4779,6 +5414,8 @@
               on: "chart.cvd_on", off: "chart.cvd_off" },
             { el: $("oi-toggle"), skey: "oiEnabled", store: "liqscope.oiEnabled",
               on: "chart.oi_on", off: "chart.oi_off" },
+            { el: $("book-toggle"), skey: "bookEnabled", store: "liqscope.bookEnabled",
+              on: "chart.book_on", off: "chart.book_off" },
             // индикаторные окна под графиком — те же данные, что в кабинете
             { el: $("pane-liq-toggle"), skey: "paneLiq", store: "liqscope.paneLiq",
               on: "chart.pane_liq_on", off: "chart.pane_liq_off", pane: "liq" },
@@ -4810,7 +5447,8 @@
                     localStorage.setItem(d.store, state[d.skey] ? "1" : "0");
                 } catch (e) { /* ignore */ }
                 if (d.pane) syncPaneVisibility(d.pane);
-                if (d.skey === "liqEnabled" && !state.liqEnabled) {
+                if ((d.skey === "liqEnabled" && !state.liqEnabled) ||
+                    (d.skey === "bookEnabled" && !state.bookEnabled)) {
                     // с прячущихся прямоугольников снимаем подсветку ленты и окно
                     pinHitKey = null;
                     hoverHitKey = null;
@@ -4826,6 +5464,12 @@
                     unpinShape();
                     hideShapeModal();
                 }
+                if (d.skey === "bookEnabled") {
+                    // стакан: слой отвечает только за рисовку; опрос живёт, пока
+                    // слой включён ИЛИ открыта лента заявок (bookPollSync)
+                    bookPollSync();
+                    if (state.feedTab === "book") rebuildBookFeed();
+                }
                 paint();
                 updateMarkers();
                 updateLiveStats();
@@ -4833,6 +5477,10 @@
             });
             I18n.onChange(paint);
             paint();
+            if (d.skey === "bookEnabled") bookPollSync();
+            // лента заявок могла быть открыта с прошлой сессии без слоя —
+            // стартовый поллер ставим один раз после восстановления тумблеров
+            if (state.feedTab === "book") bookPollSync();
         });
     }
 
@@ -5019,7 +5667,7 @@
         p.ctx.font = "10px Inter, sans-serif";
         p.ctx.textAlign = "center";
         p.ctx.textBaseline = "middle";
-        p.ctx.fillText(text || "нет данных", p.w / 2, p.h / 2);
+        p.ctx.fillText(text || I18n.t("ind.nodata"), p.w / 2, p.h / 2);
         p.ctx.restore();
     }
 
@@ -5095,8 +5743,8 @@
         ctx.fillStyle = "rgba(255,42,95,0.8)";
         ctx.fillText("▼ " + indMoney(maxSide), w - 3, h - 8);
         indSetVal("liq", "Σ " + indMoney(totL + totS), "",
-                   "Столбики: лонги " + indMoney(totL) + " / шорты " + indMoney(totS)
-                   + " · кривая: накопленный перевес " + indMoney(acc, true));
+                   I18n.t("ind.liq_hint", { l: indMoney(totL), s: indMoney(totS),
+                                            acc: indMoney(acc, true) }));
     }
 
     // CVD: гистограмма тейкер-дельты по свечам (зелёный — покупки, красный — продажи)
@@ -5143,8 +5791,7 @@
         const cum = pts.map((pt) => { acc += pt.d; return { x: pt.x, v: acc }; });
         indCurve(ctx, w, h, cum, "rgba(167,139,250,0.9)", "rgba(167,139,250,0.10)", true);
         indSetVal("cvd", indMoney(net, true), net >= 0 ? "pos" : "neg",
-                  "Сумма тейкер-дельты по видимым свечам: " + indMoney(net, true)
-                  + " · кривая — накопление по свечам");
+                  I18n.t("ind.cvd_hint", { net: indMoney(net, true) }));
     }
 
     // OI: линия открытого интереса по свечам (золото) + дельта в шапке
@@ -5170,7 +5817,7 @@
         });
         if (!pts.length) {
             indGrid(ctx, w, h, null, null);
-            indNoData(p, "OI: нет данных по бирже");
+            indNoData(p, I18n.t("ind.oi_nodata"));
             indSetVal("oi", "—", "");
             return;
         }
@@ -5181,7 +5828,7 @@
         indCurve(ctx, w, h, pts, "#ffd54f", "rgba(255,213,79,0.07)", false);
         const chg = last - first;
         indSetVal("oi", indMoney(chg, true), chg >= 0 ? "pos" : "neg",
-                  "Изменение OI за видимый диапазон · сейчас " + indMoney(last));
+                  I18n.t("ind.oi_hint", { last: indMoney(last) }));
     }
 
     function drawIndicatorPanes() {
@@ -5494,13 +6141,17 @@
         }
         if (cvd > 0) parts.push("CVD " + I18n.t("filter.th_ge", { v: I18n.number(cvd) }));
         if (oi > 0) parts.push("OI Δ " + I18n.t("filter.th_ge", { v: I18n.number(oi) }));
+        const bk = thresholdOf("book");
+        if (bk > 0) parts.push(I18n.t("filter.th_short_book") + " " +
+                               I18n.t("filter.th_ge", { v: I18n.number(bk) }));
         return parts.length ? parts.join(" · ") + " ▾" : I18n.t("filter.all_usd");
     }
 
     function refreshFilterButtons() {
         if (!minUsdBtn) return;
         minUsdBtn.textContent = thresholdLabel();
-        const fields = [[minUsdInput, "liq"], [minCvdInput, "cvd"], [minOiInput, "oi"]];
+        const fields = [[minUsdInput, "liq"], [minCvdInput, "cvd"],
+                        [minOiInput, "oi"], [minBookInput, "book"]];
         fields.forEach(([el, kind]) => {
             const v = thresholdOf(kind);
             if (el) {
@@ -5538,13 +6189,14 @@
 
     /** OK в панели: применяем все три поля разом — ликвидации, CVD и OI Δ. */
     function applyThresholdInputs(closePanel) {
-        [[minUsdInput, "liq"], [minCvdInput, "cvd"], [minOiInput, "oi"]].forEach(([el, kind]) => {
+        [[minUsdInput, "liq"], [minCvdInput, "cvd"], [minOiInput, "oi"],
+         [minBookInput, "book"]].forEach(([el, kind]) => {
             if (el) {
                 const cfg = THRESHOLDS[kind];
                 state[cfg.key] = Math.max(0, parseFloat(el.value) || 0);
             }
         });
-        ["liq", "cvd", "oi"].forEach(saveThreshold);
+        ["liq", "cvd", "oi", "book"].forEach(saveThreshold);
         refreshFilterButtons();
         applyFiltersFull();
         if (closePanel && minUsdPanel) minUsdPanel.classList.add("hidden");
@@ -5564,7 +6216,8 @@
             minUsdApply.addEventListener("click", () => applyThresholdInputs(true));
         }
         // У каждого порога своё поле: Enter применяет именно его.
-        [[minUsdInput, "liq"], [minCvdInput, "cvd"], [minOiInput, "oi"]].forEach(([el, kind]) => {
+        [[minUsdInput, "liq"], [minCvdInput, "cvd"], [minOiInput, "oi"],
+         [minBookInput, "book"]].forEach(([el, kind]) => {
             if (!el) return;
             el.addEventListener("keydown", (e) => {
                 if (e.key === "Enter") setThreshold(kind, el.value, true);
@@ -6126,6 +6779,7 @@
                 // лента CVD/OI в режиме «ВСЕ» живёт этими строками: тик
                 // обновляет ячейки на месте, без перерисовки DOM
                 if (isFlowFeed(state.feedTab)) syncShapeFeed(state.feedTab);
+                else if (state.feedTab === "book") syncBookFeed();
                 break;
             }
             case "stats": {
@@ -6134,7 +6788,9 @@
                 break;
             }
             case "terminal_chat":
-            case "terminal_chat_del": {
+            case "terminal_chat_del":
+            case "chat_dm":
+            case "chat_dm_room": {
                 try {
                     if (window.TerminalChat && window.TerminalChat.onWsMessage) {
                         window.TerminalChat.onWsMessage(msg);

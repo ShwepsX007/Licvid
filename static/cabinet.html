@@ -34,9 +34,28 @@
 <link rel="icon" type="image/png" sizes="512x512" href="/static/icon-512.png">
 <link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
 <link rel="manifest" href="/manifest.webmanifest">
-<link rel="stylesheet" href="/static/account.css?v=geo3">
+<link rel="stylesheet" href="/static/account.css?v=book2">
+<link rel="stylesheet" href="/static/terminal_chat.css?v=5">
 </head>
 <body data-page="cabinet">
+<!-- 💬 Чат LiqScope: тот же виджет, что в терминале (общий + личные диалоги) -->
+<div id="terminal-chat" class="tchat">
+  <button id="tchat-toggle" class="tchat-toggle hidden" type="button" aria-hidden="true" tabindex="-1">💬 Чат <span id="tchat-unread" class="tchat-unread hidden" aria-hidden="true">0</span></button>
+  <div id="tchat-panel" class="tchat-panel hidden">
+    <div class="tchat-head"><span>💬 Чат LiqScope</span><button id="tchat-close" class="tchat-close" type="button">✕</button></div>
+    <div class="tchat-tabs" id="tchat-tabs">
+      <button type="button" class="tchat-tab active" data-tab="public">Общий</button>
+      <button type="button" class="tchat-tab" data-tab="dm">🔒 Личные <span id="tchat-tab-dm-badge" class="tchat-tab-badge hidden">0</span></button>
+    </div>
+    <div id="tchat-list" class="tchat-list"></div>
+    <div id="tchat-dm" class="tchat-dm hidden"><div id="tchat-dm-list" class="tchat-dm-list"></div></div>
+    <div id="tchat-dm-chat" class="tchat-dm-chat hidden">
+      <div id="tchat-dm-head" class="tchat-dm-head"></div>
+      <div id="tchat-dm-msgs" class="tchat-list"></div>
+    </div>
+    <div class="tchat-foot"><input id="tchat-input" maxlength="500" placeholder="Сообщение… (Enter)"><button id="tchat-send" type="button">➤</button><div id="tchat-hint" class="tchat-hint"></div></div>
+  </div>
+</div>
 <header class="site-header">
     <a class="brand" href="/">
         <img class="logo" src="/static/logo.png" alt="LiqScope" width="40" height="40">
@@ -47,6 +66,7 @@
         <select id="lang-select" class="lang-select" data-lang-select
                 aria-label="Язык" title="Язык"></select>
         <a class="btn btn-ghost btn-compact" href="/terminal" data-i18n="cab.nav_terminal">⚡ Терминал</a>
+        <button id="tchat-header-btn" class="tchat-header-btn" type="button" title="Чат: общий и личные диалоги">💬 Чат <span id="tchat-online" class="tchat-online" title="онлайн в чате">0</span> <span id="tchat-unread-hdr" class="tchat-unread hidden">0</span></button>
         <span id="nav-account"></span>
     </nav>
 </header>
@@ -134,10 +154,11 @@
         </div>
     </details>
 </main>
-<script src="/static/i18n.pages.js"></script>
-<script src="/static/i18n.js"></script>
-<script src="/static/account.js?v=name6"></script>
+<script src="/static/i18n.pages.js?v=book8"></script>
+<script src="/static/i18n.js?v=book8"></script>
+<script src="/static/account.js?v=book2"></script>
 <script src="/static/presence.js?v=geo2"></script>
+<script src="/static/terminal_chat.js?v=5"></script>
 <script src="/static/consent.js?v=consent1"></script>
 </body>
 </html>

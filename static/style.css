@@ -1472,6 +1472,23 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
     font-size: 0.82rem;
     white-space: nowrap;
 }
+.badge-book-bid, .badge-book-ask {
+    display: inline-block;
+    padding: 1px 8px;
+    border-radius: 4px;
+    font-weight: 700;
+    font-size: 0.82rem;
+    white-space: nowrap;
+}
+/* 📖 лента заявок: циан bid, фиолет ask — та же палитра, что полосы на графике */
+.badge-book-bid { background: rgba(34,211,238,0.18); color: #67e8f9; }
+.badge-book-ask { background: rgba(139,92,246,0.22); color: #c4b0ff; }
+.feed-table .badge-book-bid,
+.feed-table .badge-book-ask { font-size: 0.68rem; padding: 2px 6px; }
+.td-usd-amount.book-bid-val { color: #67e8f9; }
+.td-usd-amount.book-ask-val { color: #c4b0ff; }
+.td-book-state { font-size: 0.68rem; opacity: 0.75; white-space: nowrap; }
+.td-book-now { opacity: 0.8; }
 .badge-cvd-buy { background: rgba(139,92,246,0.22); color: #c4b0ff; }
 .badge-cvd-sell { background: rgba(255,145,0,0.20); color: #ffc578; }
 .badge-oi-up { background: rgba(34,197,94,0.20); color: #6ee7a8; }

@@ -135,6 +135,12 @@
             <textarea id="bot-welcome" data-i18n-skip></textarea>
             <label>Объявление в кабинете</label>
             <textarea id="site-notice-in" data-i18n-skip></textarea>
+            <!-- 🔒 чат: через сколько минут бот напоминает в Telegram о безответном
+                 личном сообщении, если человек не ответил на сайте. 0 — выключено. -->
+            <label>💬 ЛС: напоминание в Telegram через N минут (0 — выкл)</label>
+            <input class="input" type="number" id="chat-dm-delay-min" min="0" max="1440" step="1"
+                   style="width:120px" data-i18n-skip>
+            <span class="meta">получателю, который привязал бота и не ответил на сайте</span>
             <div class="row-actions">
                 <button class="btn btn-primary" id="settings-save" type="button">Сохранить</button>
                 <span class="meta" id="settings-status"></span>
@@ -509,8 +515,8 @@
         <div id="ai-prompt-blocks"><p class="meta">загружаю промты…</p></div>
     </div>
 </main>
-<script src="/static/i18n.pages.js"></script>
-<script src="/static/i18n.js"></script>
+<script src="/static/i18n.pages.js?v=book8"></script>
+<script src="/static/i18n.js?v=book8"></script>
 <script src="/static/world-map.js?v=geo1"></script>
 <script src="/static/geo_map.js?v=geo2"></script>
 <script src="/static/presence.js?v=geo2"></script>

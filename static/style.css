@@ -2537,15 +2537,12 @@ body.chart-fullscreen { overflow: hidden; }
 }
 
 /* Цена рядом с названием пары: на узких экранах не наползает.
-   Кнопка-заголовок — гибкий элемент: при тесноте сжимается и режет свой
-   текст многоточием; цена и процент — целиком и всегда после неё. */
+   Блок переносится в несколько строк, заголовок при тесноте сжимается
+   с многоточием, цена и процент — целиком (не режутся). */
 .symbol-price-display { flex-wrap: wrap; min-width: 0; row-gap: 2px; }
-.chart-symbol-wrap { flex: 1 1 auto; min-width: 0; max-width: max-content; display: flex; }
-.chart-symbol-btn { max-width: 100%; min-width: 0; overflow: hidden; }
-.chart-symbol-btn h2 {
-    display: block; flex: 1 1 auto; min-width: 0;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
+.chart-symbol-wrap { flex: 0 1 auto; min-width: 0; }
+.chart-symbol-btn { max-width: 100%; min-width: 0; }
+.chart-symbol-btn h2 { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .live-price, .price-change, .data-source { white-space: nowrap; flex-shrink: 0; }
 @media (max-width: 900px) {
     .symbol-price-display { width: 100%; gap: 6px 8px; }

@@ -1,12 +1,18 @@
-/** 📖 Стакан: стены лимиток — слой, запросы и полосы на графике.
+/** 📖 Стакан: стены → кластеры у свечи + лента заявок в терминале.
  *
- *  Проверка на живом сервере (демо): терминал загружается с включённым слоем,
- *  тянет /api/book/snapshot и /api/book/walls, рисует на cluster-canvas
- *  полосы: bid цианом, ask фиолетом; живая стена тянется до правого края,
- *  закрытая — обрезана по времени исчезновения; мелкие стены ниже порога
- *  не рисуем; внутри полосы — объём и число уровней.
+ *  Раньше стена рисовалась полосой через весь график (появилась → тянется до
+ *  сих пор), и за пару часов холст зарастал «пеленой». Теперь принцип — как у
+ *  плашек ликвидаций:
+ *    • каждая стена привязана к СВОЕЙ свече (где её нашли) и живёт на ней,
+ *      пока не уберётся или не исполнится; исчезла — плашка остаётся там же;
+ *    • пересекающиеся коридоры одной свечи сливаются в зону и накапливаются
+ *      (объём, уровни, число стен складываются);
+ *    • ширина кластера — доля слота свечи: дальше тела не вылезает ни на
+ *      одном ТФ;
+ *    • ленты два конца: строка ленты «Заявки» подсвечивает кластер, наведение
+ *      на кластер подсвечивает строку.
  *
- *  Запуск (сервер уже на 127.0.0.1:8000):
+ *  Запуск (демо-сервер на 127.0.0.1:8011 или обычный на :8000):
  *      NODE_PATH=/tmp/smoke/node_modules node tests/book_walls.js [url]
  */
 const { JSDOM, VirtualConsole } = require("jsdom");
@@ -19,25 +25,40 @@ function check(name, cond, extra) {
   else { fail++; console.log("  FAIL " + name + (extra !== undefined ? " | " + extra : "")); }
 }
 
-const NOW = Math.floor(Date.now() / 1000);
-const TF = 300;                       // минутки графика — ТФ 5 (дефолт state.timeframe)
-const WALL = {
+const TF = 300;                               // минутки графика — ТФ 5 (дефолт)
+// время подравниваем к сетке свечей: t0 кластеров обязан совпадать со свечами
+const NOW = Math.floor(Date.now() / 1000 / TF) * TF;
+
+const WALL = {                                  // живая bid, «накапливается» с WALL_M
   id: 101, side: "bid", lo: 49950, hi: 49972, px: 49961, usdt: 400000, peak: 650000,
   levels: 2, exchs: ["binance", "bybit"], opened: NOW - 36 * TF, closed: null,
   live: true, age_s: 36 * TF,
 };
-const WALL_ASK = Object.assign({}, WALL, {
-  id: 102, side: "ask", lo: 50090, hi: 50112, usdt: 2600000, peak: 2600000,
-  opened: NOW - 12 * TF, age_s: 12 * TF, levels: 1,
-});
-const WALL_OLD = Object.assign({}, WALL, {
-  id: 103, side: "bid", lo: 49800, hi: 49822, usdt: 180000, peak: 220000,
-  levels: 1, opened: NOW - 100 * TF, closed: NOW - 60 * TF, live: false, dur_s: 40 * TF,
-});
-const WALL_SMALL = Object.assign({}, WALL, {
-  id: 104, side: "ask", lo: 50300, hi: 50320, usdt: 60000, peak: 60000,
-  levels: 1, opened: NOW - 40, age_s: 40, live: true,
-});
+const WALL_M = {                                // та же свеча, коридор пересёкся
+  id: 105, side: "bid", lo: 49960, hi: 49980, px: 49970, usdt: 300000, peak: 320000,
+  levels: 1, exchs: ["binance"], opened: NOW - 36 * TF + 60, closed: null,
+  live: true, age_s: 36 * TF - 60,
+};
+const WALL_ASK = {
+  id: 102, side: "ask", lo: 50090, hi: 50112, px: 50101, usdt: 2600000, peak: 2600000,
+  levels: 1, exchs: ["bybit"], opened: NOW - 12 * TF, closed: null,
+  live: true, age_s: 12 * TF,
+};
+const WALL_OLD = {                              // ушла, другой час — свой кластер
+  id: 103, side: "bid", lo: 49800, hi: 49822, px: 49811, usdt: 180000, peak: 220000,
+  levels: 1, exchs: ["binance"], opened: NOW - 100 * TF, closed: NOW - 60 * TF,
+  live: false, dur_s: 40 * TF,
+};
+const WALL_EATEN = {                            // «съедена»: остаток < 70% пика
+  id: 106, side: "ask", lo: 50080, hi: 50100, px: 50090, usdt: 90000, peak: 200000,
+  levels: 1, exchs: ["okx"], opened: NOW - 24 * TF, closed: NOW - 20 * TF,
+  live: false, dur_s: 4 * TF,
+};
+const WALL_SMALL = {                            // ниже порога — не рисуется, не в ленте
+  id: 104, side: "ask", lo: 50300, hi: 50320, px: 50310, usdt: 60000, peak: 60000,
+  levels: 1, exchs: ["binance"], opened: NOW - 4 * TF, closed: null,
+  live: true, age_s: 4 * TF,
+};
 
 function candles() {
   const out = [];
@@ -129,10 +150,11 @@ async function main() {
         } else if (u.indexOf("/api/book/snapshot") === 0) {
           calls.snap++;
           body = { ok: true, ts: NOW, symbol: "BTC_USDT", mid: 50000, spread_bps: 1.2,
-                   min_usd: 150000, walls: [WALL, WALL_ASK, WALL_SMALL] };
+                   min_usd: 150000, walls: [WALL, WALL_M, WALL_ASK, WALL_SMALL] };
         } else if (u.indexOf("/api/book/walls") === 0) {
           calls.hist++;
-          body = { ok: true, ts: NOW, symbol: "BTC_USDT", walls: [WALL, WALL_ASK, WALL_OLD] };
+          body = { ok: true, ts: NOW, symbol: "BTC_USDT",
+                   walls: [WALL, WALL_M, WALL_ASK, WALL_OLD, WALL_EATEN] };
         } else if (u.indexOf("/api/stats") === 0) body = {};
         else if (u.indexOf("/api/oi") === 0) body = {};
         else if (u.indexOf("/api/liquidations") === 0) body = { liquidations: [], total: 0 };
@@ -157,45 +179,126 @@ async function main() {
     return el && el.classList.contains("active");
   })());
   check("слой включён (layerState.book)", layers.book === true, JSON.stringify(layers));
-  check("снапшот получен (3 стены в состоянии)",
-        book && book.live === 3, JSON.stringify(book));
-  check("история подтянута (hist=3)", book && book.hist === 3, JSON.stringify(book));
+  check("снапшот получен (4 стены в т.ч. мелкая)", book && book.live === 4, JSON.stringify(book));
+  check("история подтянута (hist=5)", book && book.hist === 5, JSON.stringify(book));
   check("poll-запросы шли на сервер", calls.snap >= 1 && calls.hist >= 1,
         JSON.stringify(calls));
 
+  // ---------- 1. кластеры по свече вместо полос через весь график ----------
+  const rows = api.bookRows();
+  const uniq = new Set(rows.reduce((a, c) => a.concat(c.ids), []));
+  check("кластеров ровно 4 (две свечи bid, две ask)", rows.length === 4,
+        JSON.stringify(rows.map((r) => [r.time, r.side, r.usdt])));
+  check("стены не задваиваются (live перетирает историю, дедуп по id)",
+        uniq.size === 5 && !uniq.has(104), JSON.stringify([...uniq]));
+  const mZone = rows.find((r) => r.time === NOW - 36 * TF && r.side === "bid");
+  check("пересёкшиеся коридоры одной свечи слились (2 стены, 3 уровня)",
+        mZone && mZone.count === 2 && mZone.levels === 3,
+        JSON.stringify(mZone));
+  check("объём зоны накопился (пик 650K + пик 320K)",
+        mZone && Math.abs(mZone.usdt - 970000) < 1, JSON.stringify(mZone));
+  check("коридор зоны расширился (49950–49980)",
+        mZone && mZone.lo === 49950 && mZone.hi === 49980, JSON.stringify(mZone && [mZone.lo, mZone.hi]));
+  check("живая стена живёт на СВОЕЙ свече, а не тянется до края",
+        rows.every((r) => r.time % TF === 0) && mZone.live === true,
+        JSON.stringify(rows.map((r) => r.time % TF)));
+  const eaten = rows.find((r) => r.ids.indexOf(106) !== -1);
+  check("«съеденная» стена помечена (остаток < 70% пика)",
+        eaten && eaten.eaten === 1 && eaten.live === false, JSON.stringify(eaten));
+
+  const hits = api.bookHits();
+  const slot = Math.max(1, api.slotPx());
+  check("плашки нарисованы (по числу кластеров)", hits.length === 4, hits.length);
+  check("ширина — доля слота свечи: дальше тела не вылезает",
+        hits.every((h) => h.w >= 3 && h.w <= Math.round(slot * 0.86) + 1 && h.w <= 96),
+        JSON.stringify(hits.map((h) => [Math.round(h.x), h.w, slot])));
+  const offBy = hits.map((h) => {
+    const cx = api.timeToX(h.time);
+    return (cx === null || cx === undefined || !isFinite(cx))
+      ? 0 : Math.abs(h.x + h.w / 2 - cx);
+  });
+  check("центр плашки — на своей свече", offBy.every((d) => d <= 3), JSON.stringify(offBy));
   const fills = log.filter((e) => e.op === "fill");
-  const bidRects = fills.filter((e) => e.style === "#67e8f9");
-  const askRects = fills.filter((e) => e.style === "#a78bfa");
-  check("bid-стена: циановая полоса", bidRects.length >= 1, bidRects.length);
-  check("ask-стена: фиолетовая полоса", askRects.length >= 1, askRects.length);
+  check("никаких длинных полос: все заливки шире максимум на слот",
+        fills.filter((e) => e.style === "#67e8f9" || e.style === "#a78bfa")
+             .every((e) => e.w <= 100),
+        JSON.stringify(fills.map((e) => Math.round(e.w))));
+  check("bid — циан, ask — фиолет (обе стороны)",
+        fills.some((e) => e.style === "#67e8f9") && fills.some((e) => e.style === "#a78bfa"));
   check("обводка та же палитра", log.some((e) => e.op === "stroke" &&
         (e.style === "#22d3ee" || e.style === "#8b5cf6")));
-  // полосы держим внутри графика: по 15% отступ с каждой стороны
-  const L = 900 * 0.15, R = 900 * 0.85;
-  check("полосы не выходят за 15% отступы",
-        fills.filter((e) => e.style === "#67e8f9" || e.style === "#a78bfa")
-             .every((e) => e.x >= L - 2 && e.x + e.w <= R + 2),
-        JSON.stringify(fills.slice(0, 6).map((e) => [Math.round(e.x), Math.round(e.w)])));
-  // живая стена — до правого края зоны (85%), закрытая — короче
-  check("живая стена до правого края зоны", bidRects.some((e) => Math.abs(e.x + e.w - R) <= 2),
-        JSON.stringify(bidRects.slice(0, 4)));
-  const closedRect = fills.find((e) => e.style === "#67e8f9" && e.x + e.w < R - 3 && e.w < R);
-  check("закрытая стена обрезана по времени", Boolean(closedRect),
-        JSON.stringify(fills.map((e) => [Math.round(e.x), Math.round(e.w)])));
-  const texts = log.filter((e) => e.op === "text").map((e) => e.txt);
-  check("цифра объёма внутри полосы ($650K · 2 — пик)",
-        texts.some((t) => t.indexOf("$650K") === 0 && t.indexOf("· 2") > 0),
-        JSON.stringify(texts.slice(0, 8)));
-  check("стена ниже порога (60K) не подписана",
-        !texts.some((t) => t.indexOf("$60K") === 0), JSON.stringify(texts));
 
-  // переключатель выключает слой и запросы замирают
+  // ---------- 2. лента «📖 Заявки» ----------
+  check("вкладка «Заявки» есть", Boolean(win.document.getElementById("feed-tab-book")));
+  api.setFeed("book");
+  await new Promise((r) => setTimeout(r, 400));
+  check("лента переключилась", api.feedTab() === "book", api.feedTab());
+  const tape = api.feedRowsDom();
+  check("лента заявок: 5 строк (стена ниже порога отсеяна)", tape.length === 5,
+        JSON.stringify(tape.map((r) => r.wallId)));
+  check("строки знают свою стену (data-wall-id)",
+        ["101", "102", "103", "105", "106"].every((id) =>
+          tape.some((r) => r.wallId === id && r.key === "book_" + id)));
+  // строки локали не фиксируем: в jsdom-гарнисаге язык плавает (en/ru — тот же
+  // дрейф, что в cabinet_services), поэтому сверяем статусы по обоим языкам
+  check("значки сторон и статус: жива / съедена",
+        tape.every((r) => /BID|ASK/.test(r.txt)) &&
+        /жива|live/.test((tape.find((r) => r.wallId === "101") || {}).txt || "") &&
+        /съедена|eaten/.test((tape.find((r) => r.wallId === "106") || {}).txt || ""),
+        JSON.stringify(tape.map((r) => r.txt.slice(0, 60))));
+  check("«съеденная» строка показывает остаток (→ $90K)",
+        (tape.find((r) => r.wallId === "106") || {}).txt.indexOf("→") !== -1);
+  check("живые строки помечены полоской (feed-row-live)",
+        ["101", "102", "105"].every((id) =>
+          (tape.find((r) => r.wallId === id) || {}).cls.indexOf("feed-row-live") !== -1));
+
+  // наведение строки ленты → кластер на графике (hoverHitKey), обратно — подсветка строки
+  const tr102 = win.document.querySelector('#feed-tbody tr[data-wall-id="102"]');
+  check("строка ленты в DOM", Boolean(tr102));
+  if (tr102) {
+    tr102.dispatchEvent(new win.MouseEvent("mouseenter"));
+    await new Promise((r) => setTimeout(r, 120));
+    const t2 = api.feedRowsDom();
+    const hit102 = (t2.find((r) => r.wallId === "102") || {}).cls || "";
+    const dim101 = (t2.find((r) => r.wallId === "101") || {}).cls || "";
+    check("наведение в ленте: своя строка подсвечена, остальные притухли",
+          hit102.indexOf("feed-hit") !== -1 && dim101.indexOf("feed-dim") !== -1,
+          hit102 + " | " + dim101);
+    const h102 = (api.bookHits().find((h) => h.ids.indexOf(102) !== -1)) || null;
+    check("кластер ленты найден на графике (тот же id)", Boolean(h102),
+          JSON.stringify(api.bookHits().map((h) => h.ids)));
+    tr102.dispatchEvent(new win.MouseEvent("mouseleave"));
+    await new Promise((r) => setTimeout(r, 60));
+    const t3 = api.feedRowsDom();
+    check("уход курсора снимает подсветку",
+          t3.every((r) => r.cls.indexOf("feed-hit") === -1));
+    // клик по строке: закрепляет кластер и открывает окно зоны с составом
+    tr102.dispatchEvent(new win.MouseEvent("click", { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 120));
+    const modal = win.document.getElementById("detail-modal");
+    const mtxt = modal ? modal.textContent.replace(/\s+/g, " ") : "";
+    check("клик в ленте открывает окно кластера (зона + состав стены)",
+          modal && !modal.classList.contains("hidden") &&
+          /Кластер заявок|Order cluster/.test(mtxt) &&
+          /Зона цены|Price zone/.test(mtxt) && /\$2,600,000/.test(mtxt),
+          (mtxt || "").slice(0, 140));
+    const t4 = api.feedRowsDom();
+    check("закреплённая строка остаётся подсвеченной",
+          ((t4.find((r) => r.wallId === "102") || {}).cls || "").indexOf("feed-hit") !== -1);
+    api.setHover(null);
+  }
+
+  // ---------- 3. выключение слоя убирает ленту в «пусто» ----------
   const btn = win.document.getElementById("book-toggle");
   if (btn) btn.click();
   await new Promise((r) => setTimeout(r, 100));
   const after = api.bookState();
   check("клик выключил слой и сбросил данные",
         after.on === false && after.live === 0 && after.hist === 0, JSON.stringify(after));
+  check("лента заявок на выключенном слое пуста и подсказывает включить",
+        api.feedRowsDom().length === 0 &&
+        /выключен|is off/.test(win.document.getElementById("feed-empty").textContent));
+  check("кластеры с графика сняты", api.bookHits().length === 0);
   const snapBefore = calls.snap;
   await new Promise((r) => setTimeout(r, 4500));
   check("выключенный слой не дёргает сервер", calls.snap === snapBefore,

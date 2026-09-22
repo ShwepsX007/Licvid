@@ -433,8 +433,10 @@ class BookFeed:
                 wid, cur = hit
                 matched.add(wid)
                 prev_usdt = cur["usdt"]
-                cur.update(lo=min(cur["lo"], w["lo"]), hi=max(cur["hi"], w["hi"]),
-                           usdt=w["usdt"], px=w["px"], levels=max(cur["levels"], w["levels"]),
+                # границы полосы — текущее наблюдение, а не исторический охват:
+                # лимитка стоит на месте, «разъезжаться» ей некуда
+                cur.update(lo=w["lo"], hi=w["hi"], usdt=w["usdt"], px=w["px"],
+                           levels=max(cur["levels"], w["levels"]),
                            exchs=sorted(set(cur["exchs"]) | set(w["exchs"])),
                            last_seen=round(now, 3), miss=0)
                 new_peak = w["usdt"] > cur["peak"]

@@ -5251,7 +5251,7 @@
             call.title = I18n.t("chart.layers_title") + " · " +
                 I18n.t("gate.trial_title", { min: min });
         } catch {
-            badge.textContent = min + " мин";
+            badge.textContent = I18n.t("gate.min_short", { min: min });
         }
     }
 
@@ -5667,7 +5667,7 @@
         p.ctx.font = "10px Inter, sans-serif";
         p.ctx.textAlign = "center";
         p.ctx.textBaseline = "middle";
-        p.ctx.fillText(text || "нет данных", p.w / 2, p.h / 2);
+        p.ctx.fillText(text || I18n.t("ind.nodata"), p.w / 2, p.h / 2);
         p.ctx.restore();
     }
 
@@ -5743,8 +5743,8 @@
         ctx.fillStyle = "rgba(255,42,95,0.8)";
         ctx.fillText("▼ " + indMoney(maxSide), w - 3, h - 8);
         indSetVal("liq", "Σ " + indMoney(totL + totS), "",
-                   "Столбики: лонги " + indMoney(totL) + " / шорты " + indMoney(totS)
-                   + " · кривая: накопленный перевес " + indMoney(acc, true));
+                   I18n.t("ind.liq_hint", { l: indMoney(totL), s: indMoney(totS),
+                                            acc: indMoney(acc, true) }));
     }
 
     // CVD: гистограмма тейкер-дельты по свечам (зелёный — покупки, красный — продажи)
@@ -5791,8 +5791,7 @@
         const cum = pts.map((pt) => { acc += pt.d; return { x: pt.x, v: acc }; });
         indCurve(ctx, w, h, cum, "rgba(167,139,250,0.9)", "rgba(167,139,250,0.10)", true);
         indSetVal("cvd", indMoney(net, true), net >= 0 ? "pos" : "neg",
-                  "Сумма тейкер-дельты по видимым свечам: " + indMoney(net, true)
-                  + " · кривая — накопление по свечам");
+                  I18n.t("ind.cvd_hint", { net: indMoney(net, true) }));
     }
 
     // OI: линия открытого интереса по свечам (золото) + дельта в шапке
@@ -5818,7 +5817,7 @@
         });
         if (!pts.length) {
             indGrid(ctx, w, h, null, null);
-            indNoData(p, "OI: нет данных по бирже");
+            indNoData(p, I18n.t("ind.oi_nodata"));
             indSetVal("oi", "—", "");
             return;
         }
@@ -5829,7 +5828,7 @@
         indCurve(ctx, w, h, pts, "#ffd54f", "rgba(255,213,79,0.07)", false);
         const chg = last - first;
         indSetVal("oi", indMoney(chg, true), chg >= 0 ? "pos" : "neg",
-                  "Изменение OI за видимый диапазон · сейчас " + indMoney(last));
+                  I18n.t("ind.oi_hint", { last: indMoney(last) }));
     }
 
     function drawIndicatorPanes() {

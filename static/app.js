@@ -1700,8 +1700,10 @@
             if (x === null || x === undefined || !isFinite(x)) return;
             if (y1 === null || y1 === undefined || y2 === null || y2 === undefined) return;
             if (x < -bw || x > W + bw) return;   // свеча ушла за видимое окно
-            // зона без единой живой стены и без вспышки — её разобрали: не рисуем
-            if (!c.liveRuns.length && !c.flashes.length) return;
+            // зона без живых и без вспышки — разобрана: остаётся на графике
+            // прозрачным конвертом-историей (пунктир + лёгкая тонировка), как и
+            // все прочие кластеры; наводка/клик по-прежнему открывают состав
+            const emptied = !c.liveRuns.length && !c.flashes.length;
             let top = Math.min(y1, y2), bot = Math.max(y1, y2);
             if (bot - top < 6) { const cy = (top + bot) / 2; top = cy - 3; bot = cy + 3; }
             if (bot < -20 || top > h + 20) return;
@@ -1717,7 +1719,7 @@
                 time: c.time, ids: c.ids, total: c.usdt, levels: c.levels,
                 count: c.count, live: c.live, eaten: c.eaten, side: c.side,
                 sums: c.sums, liveUsdt: c.liveUsdt, liveCount: c.liveCount,
-                lo: c.lo, hi: c.hi, price: c.px,
+                emptied: emptied, lo: c.lo, hi: c.hi, price: c.px,
                 wallsLite: c.walls.slice(0, 6).map((w) => ({
                     id: w.id, val: Math.max(Number(w.usdt) || 0, Number(w.peak) || 0),
                     st: wallStatus(w), opened: Number(w.opened) || 0 })) });
@@ -1740,8 +1742,14 @@
                 if (sBot - sTop < 2) { sBot = Math.min(by + bh, sTop + 2); sTop = sBot - 2; }
                 return [sTop, sBot - sTop];
             };
-            // конверт зоны — тонкий контур: показывает, где стены БЫЛИ (дырки)
-            ctx.globalAlpha = 0.55;
+            // конверт зоны — тонкий контур: показывает, где стены БЫЛИ (дырки);
+            // у разобранной зоны — чуть заметная тонировка, чтобы её было где ловить
+            if (emptied) {
+                ctx.globalAlpha = 0.10;
+                ctx.fillStyle = fill;
+                ctx.fillRect(bx, by, bw, bh);
+            }
+            ctx.globalAlpha = emptied ? 0.38 : 0.55;
             ctx.strokeStyle = line;
             ctx.lineWidth = 1;
             ctx.setLineDash([2, 2]);
@@ -2890,13 +2898,6 @@
             if (px >= b.x - 4 && px <= b.x + b.w + 4 &&
                 py >= b.y - 4 && py <= b.y + b.h + 4) return b;
         }
-        // стакан: плашки — фон, но хит-тест следом за ликвидациями: с них
-        // начинаем, потому что triangles/шары мелкие и перетянуть их сложнее
-        for (let i = bookHits.length - 1; i >= 0; i--) {
-            const b = bookHits[i];
-            if (px >= b.x - 3 && px <= b.x + b.w + 3 &&
-                py >= b.y - 3 && py <= b.y + b.h + 3) return b;
-        }
         for (let i = cvdHits.length - 1; i >= 0; i--) {
             const b = cvdHits[i];
             const dx = px - b.x, dy = py - b.y, rr = b.r + 4;
@@ -2906,6 +2907,14 @@
             const b = oiHits[i];
             const dx = px - b.x, dy = py - b.y, rr = b.r + 4;
             if (dx * dx + dy * dy <= rr * rr) return b;
+        }
+        // стакан — самый нижний слой: конверт кластера крупный и накрывает
+        // треугольники/шары в своих границах, поэтому его берём последним —
+        // фигуры сверху остаются доступными для наведения
+        for (let i = bookHits.length - 1; i >= 0; i--) {
+            const b = bookHits[i];
+            if (px >= b.x - 3 && px <= b.x + b.w + 3 &&
+                py >= b.y - 3 && py <= b.y + b.h + 3) return b;
         }
         return null;
     }
@@ -3883,7 +3892,7 @@
             bookHits: () => bookHits.map((h) => ({ x: h.x, y: h.y, w: h.w, h: h.h,
                 key: h.key, time: h.time, total: h.total, count: h.count,
                 live: h.live, sums: h.sums ? Object.assign({}, h.sums) : null,
-                liveUsdt: h.liveUsdt, liveCount: h.liveCount,
+                liveUsdt: h.liveUsdt, liveCount: h.liveCount, emptied: !!h.emptied,
                 ids: h.ids.slice() })),
             bookTape: () => bookFeedItems().map((it) => ({
                 id: it.id, st: it.st, side: it.side, usd: it.usd,
@@ -3893,6 +3902,8 @@
             bookMin: () => bookMinUsd(),
             setBookMin: (v) => setThreshold("book", v, false),
             bookRefetchHist: () => { bookHistAt = 0; return bookSnapshot(); },
+            hitAt: (x, y) => hitAt(x, y),
+            injectOiHit: (h) => { oiHits.push(h); },
             bookPolling: () => ({ timer: !!bookTimer, want: bookWantPoll(),
                                   enabled: !!state.bookEnabled,
                                   tab: state.feedTab }),

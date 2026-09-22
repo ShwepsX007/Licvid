@@ -246,9 +246,19 @@ async function main() {
 
   const hits = api.bookHits();
   const slot = Math.max(1, api.slotPx());
-  check("на графике только зоны с живыми: 2 (разобранные -100TF и -24TF сняты)",
-        hits.length === 2 && hits.every((h) => h.liveCount > 0),
-        JSON.stringify(hits.map((h) => [h.time - NOW, h.liveCount])));
+  check("на графике все 4 зоны: 2 с живыми + 2 разобранные прозрачным конвертом",
+        hits.length === 4 && hits.filter((h) => h.liveCount > 0).length === 2 &&
+        hits.filter((h) => h.emptied).length === 2,
+        JSON.stringify(hits.map((h) => [h.time - NOW, h.liveCount, h.emptied])));
+  const deadHit = hits.find((h) => h.time === NOW - 100 * TF);
+  if (deadHit) {
+    const deadFills = frame.filter((e) => e.op === "fill" && e.style === "#67e8f9" &&
+      e.x >= deadHit.x - 1 && e.x + e.w <= deadHit.x + deadHit.w + 1 &&
+      e.y >= deadHit.y - 1 && e.y + e.h <= deadHit.y + deadHit.h + 1);
+    check("разобранная зона — лишь лёгкая тонировка всего конверта (без живых сегментов)",
+          deadFills.length === 1 && deadFills[0].h === deadHit.h,
+          JSON.stringify(deadFills.map((e) => [e.y, e.h, deadHit.h])));
+  }
   const mHit = hits.find((h) => h.time === NOW - 36 * TF);
   check("хит смешанной зоны — с живым объёмом для окна",
         mHit && mHit.liveUsdt === 700000 && mHit.liveCount === 2, JSON.stringify(mHit));
@@ -262,6 +272,17 @@ async function main() {
           JSON.stringify(fills.length ? [fills[0].y, fills[0].h, mHit.y, mHit.h] : null));
     check("вспышек нет — история старая, съеденное давно стало дыркой",
           !frame.some((e) => e.op === "fill" && e.style === "#f43f5e"));
+  }
+  // стакан — нижний слой: шар OI внутри конверта ловится раньше кластера
+  if (mHit) {
+    const cx = mHit.x + mHit.w / 2, cy = mHit.y + mHit.h / 2;
+    check("в пустом месте конверта хит — кластер стакана",
+          (api.hitAt(cx, cy) || {}).kind === "book");
+    api.injectOiHit({ kind: "oi", key: "oi_test", x: cx, y: cy, r: 4, time: mHit.time });
+    check("шар OI поверх конверта доступен при наведении (кластер не перекрывает)",
+          (api.hitAt(cx, cy) || {}).kind === "oi", JSON.stringify(api.hitAt(cx, cy)));
+    check("рядом с шаром, но в конверте — снова стакан",
+          (api.hitAt(mHit.x + 1, mHit.y + 1) || {}).kind === "book");
   }
 
   check("ширина — доля слота свечи: дальше тела не вылезает",
@@ -385,9 +406,11 @@ async function main() {
   await new Promise((r) => setTimeout(r, 2900));
   api.redraw(); await new Promise((r) => setTimeout(r, 100));
   const hitsAfter = api.bookHits();
-  check("не осталось живых стен — кластер -36TF исчез с графика (остался ask)",
-        hitsAfter.length === 1 && hitsAfter[0].time === NOW - 12 * TF,
-        JSON.stringify(hitsAfter.map((h) => h.time - NOW)));
+  const gone36 = hitsAfter.find((h) => h.time === NOW - 36 * TF);
+  check("не осталось живых стен — кластер -36TF остался историей (прозрачный, без живых)",
+        gone36 && gone36.emptied && gone36.liveCount === 0 &&
+        hitsAfter.some((h) => h.time === NOW - 12 * TF && h.liveCount > 0),
+        JSON.stringify(hitsAfter.map((h) => [h.time - NOW, h.liveCount, h.emptied])));
   // возвращаем базу для дальнейших секций
   win.__snapWalls = null; win.fetch = oldHist;
   await api.bookRefetchHist();
@@ -444,7 +467,7 @@ async function main() {
   if (btn) btn.click();                      // слой ОПЯТЬ вкл — всё оживает
   await new Promise((r) => setTimeout(r, 400));
   check("слой вернули — кластеры и лента готовы рисоваться",
-        api.bookRows().length === 4 && api.bookHits().length === 2,
+        api.bookRows().length === 4 && api.bookHits().length === 4,
         JSON.stringify({ rows: api.bookRows().length, hits: api.bookHits().length }));
 
   const real = errors.filter((e) => e.indexOf("Could not load script") === -1);

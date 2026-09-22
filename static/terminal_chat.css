@@ -6,8 +6,10 @@
   right: 14px;
   z-index: 1200;
   font-family: inherit;
-  /* draggable: left/top will be set via JS, right then becomes auto */
-  touch-action: none;
+  /* draggable: left/top will be set via JS, right then becomes auto.
+     touch-action:none сидит точечно на .tchat-head и .tchat-rz — на всём
+     корне он бы отключил пальцем скролл ленты сообщений внутри панели */
+  touch-action: auto;
 }
 #terminal-chat.tchat-dragging {
   opacity: 0.92;
@@ -222,8 +224,13 @@ body.tchat-open .tchat-header-btn {
 
 /* На узких экранах — почти на всю ширину */
 @media (max-width: 640px) {
-  #terminal-chat { right:8px; top:56px; }
+  #terminal-chat { right:8px; top:52px; }
   .tchat-panel { width: calc(100vw - 16px); height: min(62vh, 460px); }
+  /* на телефоне чат тоже тянется — просто цели под пальцы крупнее */
+  .tchat-rz-n, .tchat-rz-s { height: 18px; }
+  .tchat-rz-w, .tchat-rz-e { width: 18px; }
+  .tchat-rz-ne, .tchat-rz-nw, .tchat-rz-sw { width: 30px; height: 30px; }
+  .tchat-rz-se { width: 36px; height: 36px; }
 }
 
 /* draggable reset hint: double-click header to reset position */
@@ -245,16 +252,24 @@ body.tchat-open .tchat-header-btn {
 /* — панель: базовый размер теперь «режимный», при ресайзе пишет inline — */
 .tchat-panel.tchat-resized { max-height: none; max-width: none; }
 
-/* ручки растягивания по краям и углам */
-.tchat-rz { position:absolute; z-index:5; }
-.tchat-rz-n { top:-3px; left:10px; right:10px; height:7px; cursor:ns-resize; }
-.tchat-rz-s { bottom:-3px; left:10px; right:10px; height:7px; cursor:ns-resize; }
-.tchat-rz-w { left:-3px; top:10px; bottom:10px; width:7px; cursor:ew-resize; }
-.tchat-rz-e { right:-3px; top:10px; bottom:10px; width:7px; cursor:ew-resize; }
-.tchat-rz-ne { top:-3px; right:-3px; width:14px; height:14px; cursor:nesw-resize; }
-.tchat-rz-nw { top:-3px; left:-3px; width:14px; height:14px; cursor:nwse-resize; }
-.tchat-rz-se { bottom:-3px; right:-3px; width:14px; height:14px; cursor:nwse-resize; }
-.tchat-rz-sw { bottom:-3px; left:-3px; width:14px; height:14px; cursor:nesw-resize; }
+/* ручки растягивания по краям и углам — дети #terminal-chat, не панели:
+   у панели overflow:hidden, и торчащие за край лапки отрезались бы */
+.tchat-rz {
+  position:absolute; z-index:6;
+  touch-action:none;              /* палец на ручке не должен скроллить страницу */
+  -webkit-user-select:none; user-select:none;
+  -webkit-touch-callout:none;     /* никакого long-press меню на телефоне */
+}
+/* при закрытой панели ручек не видно (они прицеплены к корню виджета) */
+#terminal-chat:not(.open) .tchat-rz { display:none !important; }
+.tchat-rz-n { top:-4px; left:12px; right:12px; height:10px; cursor:ns-resize; }
+.tchat-rz-s { bottom:-4px; left:12px; right:12px; height:10px; cursor:ns-resize; }
+.tchat-rz-w { left:-4px; top:12px; bottom:12px; width:10px; cursor:ew-resize; }
+.tchat-rz-e { right:-4px; top:12px; bottom:12px; width:10px; cursor:ew-resize; }
+.tchat-rz-ne { top:-6px; right:-6px; width:20px; height:20px; cursor:nesw-resize; }
+.tchat-rz-nw { top:-6px; left:-6px; width:20px; height:20px; cursor:nwse-resize; }
+.tchat-rz-se { bottom:-6px; right:-6px; width:22px; height:22px; cursor:nwse-resize; }
+.tchat-rz-sw { bottom:-6px; left:-6px; width:20px; height:20px; cursor:nesw-resize; }
 /* зацепка в углу — видна при наведении на панель */
 .tchat-rz-se::after {
   content:""; position:absolute; right:3px; bottom:3px; width:8px; height:8px;
@@ -408,7 +423,5 @@ body .tchat-header-btn.tchat-notify,
   border-color:#1f7a4d;
   box-shadow:0 16px 40px rgba(0,0,0,.5), 0 0 18px rgba(34,197,94,.35);
 }
-@media (max-width: 640px) {
-  /* на узких экранах ручки не нужны — панель и так почти во весь экран */
-  .tchat-rz { display:none; }
-}
+/* 📱 мобильные ручки описаны в медиа-блоке выше: на телефоне чат тянется
+   так же, как на десктопе — только лапки шире под палец. */

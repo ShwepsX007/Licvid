@@ -96,6 +96,14 @@ async function openPage() {
         addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {},
         dispatchEvent() { return false; } });
       try { win.localStorage.clear(); } catch (e) {}
+      // «мобильный» сценарий: узкий вьюпорт + сохранённые размер/позиция —
+      // applyPos обязан восстановить их и на телефоне
+      if (process.env.CHATDM_MOBILE) {
+        Object.defineProperty(win, "innerWidth", { value: 375, configurable: true });
+        Object.defineProperty(win, "innerHeight", { value: 667, configurable: true });
+        win.localStorage.setItem("liqscope.tchat.pos",
+          JSON.stringify({ left: 10, top: 60, width: 340, height: 420 }));
+      }
       win.WebSocket = function FakeWs() {
         this.send = () => {}; this.close = () => {};
         this.addEventListener = () => {};
@@ -110,6 +118,20 @@ async function openPage() {
 
 (async () => {
   const { win, doc, calls } = await openPage();
+
+  // ---------- 0. мобильный: сохранённые размер/позиция применяются сразу ----------
+  if (process.env.CHATDM_MOBILE) {
+    const css = require("fs").readFileSync("static/terminal_chat.css", "utf8");
+    const p0 = doc.getElementById("tchat-panel");
+    check("мобильный: сохранённая ширина применена",
+      p0.style.width === "340px", p0.style.width);
+    check("мобильный: сохранённая высота применена",
+      p0.style.height === "420px", p0.style.height);
+    check("мобильный: CSS не прячет ручки на узких экранах",
+      css.indexOf(".tchat-rz { display:none; }") === -1 &&
+      /@media \(max-width: 640px\)[^]*?\.tchat-rz-se \{ width: 36px/.test(css));
+    check("мобильный: у ручек touch-action none", /\.tchat-rz\s*\{[^}]*touch-action:none/.test(css));
+  }
 
   // ---------- 1. структура вкладки/бейджи ----------
   const root = doc.getElementById("terminal-chat");
@@ -194,6 +216,8 @@ async function openPage() {
   // ---------- 6. растягивание панели ----------
   const handles = doc.querySelectorAll(".tchat-rz");
   check("ручки изменения размера (8 сторон)", handles.length === 8, handles.length);
+  check("ручки — дети корня виджета (panel overflow:hidden их бы резал)",
+    Array.from(handles).every((h) => h.parentElement && h.parentElement.id === "terminal-chat"));
   const east = doc.querySelector(".tchat-rz-e");
   if (east) {
     east.dispatchEvent(new win.MouseEvent("mousedown", { bubbles: true, clientX: 100, clientY: 100 }));

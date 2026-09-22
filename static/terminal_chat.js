@@ -66,12 +66,13 @@
     if (!root || !pos) return;
     const vw = window.innerWidth;
     const vh = window.innerHeight;
-    if (typeof pos.width === "number" && pos.width >= MIN_W && vw > 640) {
-      panel.style.width = clamp(pos.width, MIN_W, vw - 8) + "px";
+    // размер помнится и на телефоне тоже: просто жёстко режем по вьюпорту
+    if (typeof pos.width === "number" && pos.width >= MIN_W) {
+      panel.style.width = clamp(pos.width, MIN_W, Math.max(MIN_W, vw - 8)) + "px";
       panel.classList.add("tchat-resized");
     }
     if (typeof pos.height === "number" && pos.height >= MIN_H) {
-      panel.style.height = clamp(pos.height, MIN_H, vh - 12) + "px";
+      panel.style.height = clamp(pos.height, MIN_H, Math.max(MIN_H, vh - 12)) + "px";
       panel.classList.add("tchat-resized");
     }
     const rect = root.getBoundingClientRect();
@@ -334,12 +335,14 @@
     (function bindResize() {
       if (!panel) return;
       // ручки: n, s, e, w, ne, nw, se, sw
+      // Вешаем на root, а не на panel: у панели overflow:hidden, и торчащие
+      // за край ручки обрезались бы — на телефонных тач-целях это фатально.
       const dirs = ["n", "s", "e", "w", "ne", "nw", "se", "sw"];
       for (const d of dirs) {
         const h = document.createElement("span");
         h.className = "tchat-rz tchat-rz-" + d;
         h.dataset.rz = d;
-        panel.appendChild(h);
+        root.appendChild(h);
       }
       let rzDir = "";
       let sx = 0, sy = 0;
@@ -402,8 +405,8 @@
           panel.offsetWidth, panel.offsetHeight);
       }
 
-      panel.addEventListener("mousedown", down);
-      panel.addEventListener("touchstart", down, { passive: false });
+      root.addEventListener("mousedown", down);
+      root.addEventListener("touchstart", down, { passive: false });
       window.addEventListener("mousemove", move);
       window.addEventListener("touchmove", move, { passive: false });
       window.addEventListener("mouseup", up);

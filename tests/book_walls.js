@@ -170,10 +170,16 @@ async function main() {
   check("ask-стена: фиолетовая полоса", askRects.length >= 1, askRects.length);
   check("обводка та же палитра", log.some((e) => e.op === "stroke" &&
         (e.style === "#22d3ee" || e.style === "#8b5cf6")));
-  // живые стены тянутся до правого края (900px), закрытая — нет
-  check("живая стена до правого края", bidRects.some((e) => e.x + e.w >= 897),
+  // полосы держим внутри графика: по 15% отступ с каждой стороны
+  const L = 900 * 0.15, R = 900 * 0.85;
+  check("полосы не выходят за 15% отступы",
+        fills.filter((e) => e.style === "#67e8f9" || e.style === "#a78bfa")
+             .every((e) => e.x >= L - 2 && e.x + e.w <= R + 2),
+        JSON.stringify(fills.slice(0, 6).map((e) => [Math.round(e.x), Math.round(e.w)])));
+  // живая стена — до правого края зоны (85%), закрытая — короче
+  check("живая стена до правого края зоны", bidRects.some((e) => Math.abs(e.x + e.w - R) <= 2),
         JSON.stringify(bidRects.slice(0, 4)));
-  const closedRect = fills.find((e) => e.style === "#67e8f9" && e.x + e.w < 890 && e.w < 890);
+  const closedRect = fills.find((e) => e.style === "#67e8f9" && e.x + e.w < R - 3 && e.w < R);
   check("закрытая стена обрезана по времени", Boolean(closedRect),
         JSON.stringify(fills.map((e) => [Math.round(e.x), Math.round(e.w)])));
   const texts = log.filter((e) => e.op === "text").map((e) => e.txt);

@@ -94,6 +94,23 @@ async function main() {
   check("подвал статуса опроса", /опрос/.test(($("book-note") || {}).textContent || ""),
         ($("book-note") || {}).textContent);
 
+  // --- метрики: полоса давления, почасовая лента, чипы жизни -----------------
+  const press = $("book-rows").querySelector(".bk-press");
+  check("полоса давления bid/ask на доске", !!press &&
+        !!press.querySelector(".b") && !!press.querySelector(".a"));
+  const hours = $("book-rows").querySelector(".bk-hours");
+  check("нагрузка по часам: 24 ячейки", !!hours &&
+        hours.querySelectorAll("i").length === 24,
+        hours ? hours.querySelectorAll("i").length : "нет ленты");
+  check("у часов есть bid/ask сегменты с подписями", !!hours &&
+        Array.prototype.every.call(hours.querySelectorAll("i"), (c) =>
+          c.querySelectorAll("b.a").length === 1 && c.querySelectorAll("b.b").length === 1 &&
+          /·/.test(c.getAttribute("title") || "")));
+  check("чипы жизни: медиана, сдутые, спуфы",
+        /медиана жизни/.test($("book-rows").textContent) &&
+        /сдутых/.test($("book-rows").textContent) &&
+        /спуфов/.test($("book-rows").textContent));
+
   // чип порога → POST с сохранением
   const chip250 = chips.filter((c) => c.getAttribute("data-bk-thr") === "250000")[0];
   chip250.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, view: dom.window }));

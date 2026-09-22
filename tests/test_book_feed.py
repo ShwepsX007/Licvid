@@ -196,6 +196,57 @@ class LifecycleTests(unittest.TestCase):
         self.assertTrue(all(w["live"] for w in snap["walls"]))
 
 
+class MetricsTests(unittest.TestCase):
+    def setUp(self):
+        self.feed = bf.BookFeed(None, min_usd=150000, gone_after=1)
+        self.now = time.time()
+        self.sym = "BTC_USDT"
+
+    def _wall(self, side, opened, closed, peak, final=None, ):
+        wid = self.feed._next_id
+        self.feed._next_id += 1
+        self.feed.walls.setdefault(self.sym, {})[wid] = {
+            "id": wid, "sym": self.sym, "side": side, "lo": 1.0, "hi": 2.0, "px": 1.5,
+            "usdt": final if final is not None else peak, "peak": peak, "levels": 1,
+            "exchs": ["binance"], "opened": opened, "last_seen": closed or self.now,
+            "closed": closed, "miss": 0, "live": closed is None}
+
+    def test_metrics_hourly_pressure_life(self):
+        # 1) живые стены: bid 200k, ask 100k → перекос +0.333
+        self._wall("bid", self.now - 10, None, 200000.0)
+        self._wall("ask", self.now - 10, None, 100000.0)
+        # 2) закрытая: жила 2ч, peak 480k — размажется по ~2 часовым ячейкам
+        self._wall("bid", self.now - 3 * 3600, self.now - 1 * 3600, 480000.0)
+        # 3) спуф: 60 секунд
+        self._wall("ask", self.now - 70, self.now - 10, 300000.0)
+        # 4) сдутая: 1000k → 400k на последнем наблюдении
+        self._wall("bid", self.now - 600, self.now - 300, 1000000.0, final=400000.0)
+        m = self.feed.metrics(self.sym, hours=24)
+        self.assertTrue(m["ok"])
+        self.assertEqual(m["live"]["count"], 2)
+        self.assertAlmostEqual(m["pressure"]["imbalance"], 1 / 3, places=2)
+        # почасовая сумма = peak всех попавших в окно стен (2.4M + живые пики)
+        tot = sum(c["bid_usdt"] + c["ask_usdt"] for c in m["hourly"])
+        self.assertAlmostEqual(tot, 200000 + 100000 + 480000 + 300000 + 1000000, delta=0.5)
+        self.assertEqual(len(m["hourly"]), 24)
+        self.assertEqual(m["life"]["closed_n"], 3)
+        self.assertAlmostEqual(m["life"]["spoof_pct"], 100 / 3, places=0)
+        self.assertAlmostEqual(m["life"]["eaten_pct"], 100 / 3, places=0)
+        self.assertEqual(m["life"]["median_s"], 300.0)     # жизни закрытых: 60, 300, 7200
+        self.assertIsNone(self.feed.metrics("NOPE_USDT")["live"]["max"])
+
+    def test_metrics_route(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        app = FastAPI()
+        bf.register_book_routes(app, lambda: self.feed)
+        c = TestClient(app)
+        r = c.get("/api/book/metrics", params={"symbol": self.sym, "hours": 24})
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("hourly", r.json())
+        self.assertIn(self.sym, self.feed._viewers)
+
+
 class RouteTests(unittest.TestCase):
     def setUp(self):
         from fastapi import FastAPI

@@ -128,9 +128,52 @@ async function openPage() {
     check("мобильный: сохранённая высота применена",
       p0.style.height === "420px", p0.style.height);
     check("мобильный: CSS не прячет ручки на узких экранах",
-      css.indexOf(".tchat-rz { display:none; }") === -1 &&
-      /@media \(max-width: 640px\)[^]*?\.tchat-rz-se \{ width: 36px/.test(css));
+      css.indexOf(".tchat-rz { display:none; }") === -1);
     check("мобильный: у ручек touch-action none", /\.tchat-rz\s*\{[^}]*touch-action:none/.test(css));
+    check("мобильный: низ панели — широкая видимая «губа», а не тонкая полоска",
+      /@media \(max-width: 640px\)[^]*?\.tchat-rz-s \{[^}]*bottom:-26px[^}]*height:26px/.test(css) &&
+      /\.tchat-rz-s \{[^}]*background:/.test(css) && /\.tchat-rz-s::after/.test(css));
+    // ранний баг: мобильные оверрайды стояли ДО базовых .tchat-rz-* и
+    // перебивались ими — ручки оставались 10px. Следим за порядком в файле.
+    const baseS = css.indexOf(".tchat-rz-s { bottom:-4px;");
+    const mobS = css.indexOf(".tchat-rz-s { bottom:-26px;");
+    check("мобильный: оверрайд ручек идёт после базовых правил (каскад)",
+      baseS !== -1 && mobS !== -1 && mobS > baseS, baseS + " vs " + mobS);
+    check("мобильный: угловые ручки крупные (≥36px)",
+      /\.tchat-rz-se \{ width: 44px; height: 44px/.test(css) &&
+      /\.tchat-rz-sw \{ width: 40px; height: 40px/.test(css));
+    // тянем «губу» вниз тач-событиями: высота обязана вырасти и сохраниться
+    const lip = doc.querySelector(".tchat-rz-s");
+    if (lip) {
+      const mk = (x, y) => {
+        const e = new win.Event("touchmove", { bubbles: true, cancelable: true });
+        e.touches = [{ clientX: x, clientY: y }];
+        e.changedTouches = e.touches;
+        return e;
+      };
+      const st = new win.Event("touchstart", { bubbles: true, cancelable: true });
+      st.touches = [{ clientX: 100, clientY: 400 }];
+      lip.dispatchEvent(st);
+      win.dispatchEvent(mk(100, 560));
+      await sleep(50);
+      win.dispatchEvent(new win.Event("touchend", { bubbles: true }));
+      await sleep(80);
+      const h = parseFloat(p0.style.height || "0");
+      check("мобильный: drag губы вниз задал высоту (>0 — inline)", h > 0 && /px/.test(p0.style.height || ""),
+        p0.style.height);
+      check("мобильный: панель помечена как растянутая", p0.classList.contains("tchat-resized"));
+      const savedRaw = win.localStorage.getItem("liqscope.tchat.pos") || "";
+      check("мобильный: размер записан в localStorage",
+        /"height"/.test(savedRaw) && /"width"/.test(savedRaw), savedRaw);
+    } else {
+      check("мобильный: drag губы вниз задал высоту (>0 — inline)", false, "нет .tchat-rz-s");
+    }
+    // событие resize (выехал адрес-бар) не должно сбрасывать растянутый размер
+    win.dispatchEvent(new win.Event("resize"));
+    await sleep(120);
+    check("мобильный: после window.resize высота осталась inline",
+      /px/.test(doc.getElementById("tchat-panel").style.height || ""),
+      doc.getElementById("tchat-panel").style.height);
   }
 
   // ---------- 1. структура вкладки/бейджи ----------

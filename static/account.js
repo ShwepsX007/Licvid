@@ -796,14 +796,12 @@
         } else {
             rows.innerHTML = data.map(function (r) {
                 var walls = (r.walls || []).slice(0, 6);
+                var m = r.metrics || {};
                 var head = '<div class="bk-symhead">' + esc(r.symbol) +
                     (r.mid ? ' <i>· цена ' + alPrice(r.mid) + "</i>" : "") +
                     (r.spread_bps != null ? ' <i>· спред ' + r.spread_bps + " bps</i>" : "") +
                     "</div>";
-                if (!walls.length) {
-                    return head + '<div class="bk-none">стен выше порога сейчас нет</div>';
-                }
-                return head + walls.map(function (w) {
+                var list = walls.length ? walls.map(function (w) {
                     return '<div class="bk-row ' + (w.side === "bid" ? "bid" : "ask") + '">' +
                         '<b>' + (w.side === "bid" ? "bid" : "ask") + "</b>" +
                         "<span>" + alMoney(Math.max(Number(w.usdt) || 0, Number(w.peak) || 0)) + "</span>" +
@@ -814,7 +812,9 @@
                             ? "висит " + bookAge(w.age_s)
                             : "ушла " + bookAge(((Number(w.closed) || 0) - (Number(w.opened) || 0)) / 60) + " назад") +
                         "</span></div>";
-                }).join("");
+                }).join("") : '<div class="bk-none">стен выше порога сейчас нет</div>';
+                return head + bkPressHtml(m) + '<div class="bk-cap">нагрузка по часам · 24 ч</div>' +
+                       bkHoursHtml(m) + bkLifeHtml(m) + list;
             }).join("");
         }
         var note = $("book-note");
@@ -829,6 +829,58 @@
                 (st.mode === "demo" ? " · демо-данные" : "");
         }
     }
+
+    /* Метрики над стенами: полоса давления bid/ask, почасовая лента, сроки жизни. */
+    function bkPressHtml(m) {
+        var p = (m && m.pressure) || {};
+        var b = Number(p.bid_usdt) || 0, a = Number(p.ask_usdt) || 0;
+        var t = b + a;
+        var bw = t ? Math.max(4, Math.round(b / t * 100)) : 50;
+        return '<div class="bk-press" title="стены сейчас: bid ' + alMoney(b) +
+            " · ask " + alMoney(a) + '">' +
+            '<span class="b" style="width:' + bw + '%">' +
+                (bw >= 24 ? "bid " + alMoney(b) : "") + "</span>" +
+            '<span class="a" style="width:' + (100 - bw) + '%">' +
+                (100 - bw >= 24 ? alMoney(a) + " ask" : "") + "</span></div>";
+    }
+
+    function bkHoursHtml(m) {
+        var hours = (m && m.hourly) || [];
+        var max = 1;
+        hours.forEach(function (c) {
+            max = Math.max(max, Number(c.bid_usdt) || 0, Number(c.ask_usdt) || 0);
+        });
+        var cells = hours.map(function (c) {
+            var bh = Math.round((Number(c.bid_usdt) || 0) / max * 100);
+            var ah = Math.round((Number(c.ask_usdt) || 0) / max * 100);
+            var d = new Date((Number(c.t) || 0) * 1000);
+            var hh = ("0" + d.getHours()).slice(-2) + ":00";
+            return '<i title="' + hh + " · bid " + alMoney(c.bid_usdt) + " · ask " +
+                   alMoney(c.ask_usdt) + " · " + (Number(c.n) || 0) + ' стен"><b class="a" style="height:' +
+                   ah + '%"></b><b class="b" style="height:' + bh + '%"></b></i>';
+        }).join("");
+        return '<div class="bk-hours">' + cells + "</div>";
+    }
+
+    function bkLifeHtml(m) {
+        var l = (m && m.life) || {}, bd = (m && m.book) || {}, lv = (m && m.live) || {};
+        var parts = [];
+        if (Number(lv.count) > 0) {
+            parts.push("сейчас: " + lv.count + " шт · крупнейшая " +
+                       (lv.max ? alMoney(lv.max.usdt) : "—"));
+        }
+        parts.push(l.median_s == null ? "медиана жизни: —"
+                                      : "медиана жизни: " + bookAge(l.median_s));
+        parts.push("сдутых: " + (Number(l.eaten_pct) || 0) + "%");
+        parts.push("спуфов: " + (Number(l.spoof_pct) || 0) + "%");
+        if ((Number(bd.bid_usdt) || 0) + (Number(bd.ask_usdt) || 0) > 0) {
+            parts.push("стакан ±2%: bid " + alMoney(bd.bid_usdt) + " / ask " + alMoney(bd.ask_usdt));
+        }
+        return '<div class="bk-life">' + parts.map(function (s) {
+            return "<span>" + s + "</span>";
+        }).join("") + "</div>";
+    }
+
 
 
     function paintTgCard(u, payload) {

@@ -1075,9 +1075,16 @@ def book_snapshot(cfg: Optional[dict] = None) -> Dict[str, Any]:
         return {"config": cfg, "walls_by_symbol": [], "status": {"mode": "off"}}
     rows = []
     for sym in cfg["symbols"][:4]:
+        book.note_view(sym)   # открытая доска кабинета держит монету в опросе
         snap = book.snapshot(sym, cfg["min_usd"])
+        try:
+            met = book.metrics(sym)
+        except Exception as e:                          # noqa: BLE001
+            log.debug("book metrics %s: %s", sym, e)
+            met = {}
         rows.append({"symbol": sym, "ts": snap.get("ts"), "mid": snap.get("mid"),
-                     "spread_bps": snap.get("spread_bps"), "walls": snap.get("walls") or []})
+                     "spread_bps": snap.get("spread_bps"), "walls": snap.get("walls") or [],
+                     "metrics": met})
     return {"config": cfg, "walls_by_symbol": rows, "poll_sec": book.poll_sec,
             "status": book.status_summary()}
 

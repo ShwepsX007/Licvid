@@ -1540,9 +1540,13 @@
                 } catch (e) { /* правый край уже ушёл — оставляем хвост у края */ }
             }
             if (x1 < -40 || x0 > W + 40) return;
-            x0 = Math.max(x0, 0);
-            x1 = Math.min(x1, W);
-            if (x1 - x0 < 3) x1 = Math.min(x0 + 3, W);
+            // полосы не должны тянуться через весь график: держим их внутри,
+            // отступив по 15% от каждого края — по времени стена видна, а
+            // глаза отдыхают от «полосатого» экрана
+            const pad = Math.round(W * 0.15);
+            x0 = Math.min(Math.max(x0, pad), Math.max(pad, W - pad - 3));
+            x1 = Math.min(x1, W - pad);
+            if (x1 - x0 < 3) x1 = x0 + 3;
             const bx = Math.round(x0), bw = Math.max(2, Math.round(x1 - x0));
             const by = Math.round(top), bh = Math.max(3, Math.round(bot - top));
             const clash = drawn.some((r) =>

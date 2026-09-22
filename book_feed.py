@@ -155,6 +155,15 @@ def _median(vals):
     return (s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2.0)
 
 
+def _pct(vals, p):
+    """Перцентиль по уже отсортированному снимку (грубовато, но дёшево)."""
+    if not vals:
+        return None
+    s = sorted(vals)
+    i = min(len(s) - 1, max(0, int(round(p * (len(s) - 1)))))
+    return round(s[i], 1)
+
+
 def detect_walls(agg, min_usd=WALL_MIN_USD, rel_mult=WALL_REL_MULT):
     """Корзины → список стен. Стена = слипшиеся соседние корзины с суммой ≥ порога.
 
@@ -486,6 +495,8 @@ class BookFeed:
             agg = aggregate_depths(depths)
             if not agg:
                 continue
+            self.depths[sym] = depths
+            self.agg[sym] = agg
             self.mid[sym] = mid
             self._merge(sym, detect_walls(agg, self.min_usd), now)
             for exch in self.EXCHANGES:
@@ -632,6 +643,78 @@ class BookFeed:
         self._hist_cache[key] = (now, payload)
         return payload
 
+    # — Метрики для кабинета ------------------------------------------------------
+
+    def metrics(self, sym, hours=24.0):
+        """Агрегаты по стенам монеты: давление, почасовая нагрузка, сроки жизни.
+
+        Всё считается из того, что фид честно знает: момент появления, момент
+        ухода, текущий и пиковый объём. «Сдутая» стена — та, к моменту ухода
+        потеряла >30% пикового объёма (ели маркет-ордерами); «спуф» — простояла
+        меньше 90 секунд. По часам объём делится пропорционально времени,
+        которое стена провела внутри часа.
+        """
+        now = time.time()
+        sym = (sym or "").upper()
+        hours = max(1.0, min(float(hours or 24), 168.0))
+        since = now - hours * 3600
+        bucket = max(900.0, (now - since) / 24.0)
+        t0 = now - 24 * bucket
+        hourly = [{"t": int(t0 + i * bucket), "bid_usdt": 0.0, "ask_usdt": 0.0, "n": 0}
+                  for i in range(24)]
+        lives = []
+        spoofed = eaten = 0
+        live = {"count": 0, "bid_usdt": 0.0, "ask_usdt": 0.0, "max": None}
+        for w in self.walls.get(sym, {}).values():
+            end = w["closed"] or now
+            if end < since or w["opened"] > now:
+                continue
+            lo = max(w["opened"], t0)
+            hi = end
+            if hi > lo:                       # только то, что попало в окно часов
+                span = max(1.0, hi - lo)
+                for i, cell in enumerate(hourly):
+                    b_lo = t0 + i * bucket
+                    ov = min(hi, b_lo + bucket) - max(lo, b_lo)
+                    if ov <= 0:
+                        continue
+                    frac = ov / span
+                    cell[w["side"] + "_usdt"] = round(
+                        cell[w["side"] + "_usdt"] + (w["peak"] or w["usdt"]) * frac, 2)
+                    cell["n"] += 1
+            if w["live"]:
+                live["count"] += 1
+                live[w["side"] + "_usdt"] = round(
+                    live[w["side"] + "_usdt"] + w["usdt"], 2)
+                if not live["max"] or w["usdt"] > live["max"]["usdt"]:
+                    live["max"] = {"usdt": round(w["usdt"], 2), "side": w["side"],
+                                   "px": w["px"], "age_s": int(now - w["opened"])}
+            else:
+                life = max(0.0, end - w["opened"])
+                lives.append(life)
+                if life < 90:
+                    spoofed += 1
+                if w["usdt"] < 0.7 * (w["peak"] or 1):
+                    eaten += 1
+        total_side = live["bid_usdt"] + live["ask_usdt"]
+        agg = self.agg.get(sym) or {}
+        depth = {"bid_usdt": round(sum(b["usdt"] for b in agg.get("bids") or []), 2),
+                 "ask_usdt": round(sum(b["usdt"] for b in agg.get("asks") or []), 2),
+                 "spread_bps": agg.get("spread_bps")}
+        n_closed = len(lives)
+        return {"ok": True, "symbol": sym, "at": round(now, 1), "hours": hours,
+                "live": live,
+                "pressure": {"bid_usdt": live["bid_usdt"], "ask_usdt": live["ask_usdt"],
+                             "imbalance": (round((live["bid_usdt"] - live["ask_usdt"]) / total_side, 3)
+                                           if total_side > 0 else 0.0)},
+                "hourly": hourly,
+                "life": {"closed_n": n_closed,
+                         "median_s": _pct(lives, 0.5),
+                         "p90_s": _pct(lives, 0.9),
+                         "spoof_pct": round(100.0 * spoofed / n_closed, 1) if n_closed else 0.0,
+                         "eaten_pct": round(100.0 * eaten / n_closed, 1) if n_closed else 0.0},
+                "book": depth}
+
     # — Уведомления кабинета ----------------------------------------------------
 
     def new_open_walls(self, symbols, min_usd, side, since_ts):
@@ -686,5 +769,13 @@ def register_book_routes(app, get_feed):
             return JSONResponse({"ok": False, "error": "book feed is off"}, status_code=503)
         return {"ok": True, "wall_ids": sum(len(s) for s in feed.walls.values()),
                 **feed.status_summary()}
+
+    @router.get("/api/book/metrics")
+    async def book_metrics(symbol: str = Query("BTC_USDT"), hours: float = Query(24.0)):
+        feed = get_feed()
+        if feed is None:
+            return JSONResponse({"ok": False, "error": "book feed is off"}, status_code=503)
+        feed.note_view(symbol)
+        return feed.metrics(symbol, hours)
 
     app.include_router(router)

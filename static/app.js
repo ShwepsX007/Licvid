@@ -28,6 +28,7 @@
         minUsd: 0,              // порог ликвидаций, $
         minCvd: 0,              // порог |CVD| за свечу, $ (треугольники и лента)
         minOi: 0,               // порог |OI Δ| за свечу, $ (шарики и лента)
+        minBook: 0,             // 📖 минимальный объём стены, $ (график и лента заявок)
         exchanges: null,        // null = все биржи включены; иначе Set включённых
         availableExchanges: [],
         customSymbols: [],
@@ -241,6 +242,7 @@
     const minUsdInput = $("min-usd-input");
     const minCvdInput = $("min-cvd-input");
     const minOiInput = $("min-oi-input");
+    const minBookInput = $("min-book-input");
     const minUsdApply = $("min-usd-apply");
     const minUsdPresets = $("min-usd-presets");
     const minUsdPanel = $("min-usd-panel");
@@ -420,6 +422,7 @@
         liq: { key: "minUsd", store: "liqscope.minUsd" },
         cvd: { key: "minCvd", store: "liqscope.minCvd" },
         oi: { key: "minOi", store: "liqscope.minOi" },
+        book: { key: "minBook", store: "liqscope.minBook" },
     };
 
     function thresholdOf(kind) {
@@ -629,7 +632,8 @@
     // Слой выключен — ни одного запроса, и сервер перестаёт опрашивать биржи.
     let bookTimer = null, bookHistAt = 0, bookHistSym = "", bookHistReq = 0;
     async function bookSnapshot() {
-        if (!state.bookEnabled) return;
+        // слой 📖 на графике — это рисовка; опрос живут и ради ленты заявок,
+        // поэтому здесь кнопки слоёв не касаемся (таймером рулит bookPollSync)
         const sym = chartSymbol();
         if (!sym || sym === "ALL") return;
         try {
@@ -659,15 +663,29 @@
             } catch (e) { /* история не критична */ }
         }
     }
-    function bookWatchOn() {
-        bookSnapshot();
-        if (bookTimer) clearInterval(bookTimer);
-        bookTimer = setInterval(bookSnapshot, 4000);
+    // Кому нужен стакан: слою на графике или ленте «Заявки» — независимо.
+    function bookWantPoll() {
+        return state.bookEnabled || state.feedTab === "book";
     }
-    function bookWatchOff() {
-        if (bookTimer) { clearInterval(bookTimer); bookTimer = null; }
-        state.bookData = null;
-        state.bookHist = [];
+    // Единая точка включения/выключения поллера: пока хоть кому-то нужен —
+    // тянем снапшоты; не нужен никому — отпускаем монету (сервер перестанет
+    // опрашивать биржи) и чистим данные.
+    function bookPollSync() {
+        if (bookWantPoll()) {
+            if (!bookTimer) {
+                bookSnapshot();
+                bookTimer = setInterval(bookSnapshot, 4000);
+            }
+            return;
+        }
+        if (bookTimer) {
+            clearInterval(bookTimer);
+            bookTimer = null;
+            state.bookData = null;
+            state.bookHist = [];
+            bookHistAt = 0;        // кто вернётся — тот сразу получит и историю
+            queueRedraw();
+        }
     }
 
     async function loadHistoryFor(sym, force) {
@@ -1523,8 +1541,11 @@
         return (peak > 0 && cur < peak * 0.7) ? "eaten" : "gone";
     }
 
+    // Порог отсечки стен: серверная полка (сервис в кабинете) и пользовательская
+    // из терминала — берём бо́льшую: ниже полки сервер просто не отдаёт стены.
     function bookMinUsd() {
-        return Number(state.bookData && state.bookData.min_usd) || 150000;
+        const srv = Number(state.bookData && state.bookData.min_usd) || 150000;
+        return Math.max(srv, Number(state.minBook) || 0);
     }
 
     // Кластеры: (свеча × сторона × ценовой коридор с перекрытием).
@@ -3752,6 +3773,11 @@
                 time: it.time, levels: it.levels })),
             feedTab: () => state.feedTab,
             setFeed: (t) => setFeedTab(t),
+            bookMin: () => bookMinUsd(),
+            setBookMin: (v) => setThreshold("book", v, false),
+            bookPolling: () => ({ timer: !!bookTimer, want: bookWantPoll(),
+                                  enabled: !!state.bookEnabled,
+                                  tab: state.feedTab }),
             feedRowsDom: () => (feedTbody
                 ? Array.from(feedTbody.children).map((tr) => ({
                     key: tr.dataset.feedKey || null, wallId: tr.dataset.wallId || null,
@@ -4669,9 +4695,9 @@
     function finishBookFeed(n) {
         feedCountEl.textContent = feedCountLabel(n);
         if (feedEmptyEl) {
-            feedEmptyEl.textContent = state.bookEnabled
-                ? I18n.t("feed.empty_book")
-                : I18n.t("feed.book_off");
+            // лента живёт и при выключенном слое: пустота — это «стен ещё нет»,
+            // а не «слой погас»
+            feedEmptyEl.textContent = I18n.t("feed.empty_book");
             feedEmptyEl.classList.toggle("hidden", n > 0);
         }
     }
@@ -4747,14 +4773,11 @@
     function setFeedTab(tab) {
         if (tab !== "liq" && tab !== "cvd" && tab !== "oi" && tab !== "book") return;
         if (state.feedTab === tab) return;
-        if (tab === "book" && !state.bookEnabled && state.layersAllowed) {
-            // лента заявок без слоя бессмысленна: включаем его тем же путём,
-            // что и кнопка 📖 (сохранение, подписка на опрос, покраска кнопки)
-            const bt = $("book-toggle");
-            if (bt) bt.click();
-        }
         state.feedTab = tab;
         try { localStorage.setItem("liqscope.feedTab", tab); } catch (e) { /* ignore */ }
+        // лента заявок тянет стакан независимо от кнопки слоя: открываем —
+        // поднимаем поллер, уходим со вкладки при выключенном слое — гасим
+        bookPollSync();
         rebuildFeed();
         sendFeedConfig();     // «ВСЕ» + CVD/OI → сервер начинает поток всех монет
     }
@@ -4772,6 +4795,10 @@
             setFeedTab(btn.getAttribute("data-feed"));
         });
         paintFeedHeaders();
+        // лента заявок переживает слои: вкладка с прошлой сессии — поднимаем
+        // поллер и рисуем ленту, даже если кнопка 📖 в слоях не нажата
+        bookPollSync();
+        if (state.feedTab === "book") rebuildFeed();
     }
 
     let shapeFeedTimer = null;
@@ -5299,13 +5326,10 @@
                     hideShapeModal();
                 }
                 if (d.skey === "bookEnabled") {
-                    // стакан: включённый слой начинает тянуть снапшоты бирж,
-                    // выключенный — отпускает монету (сервер перестанет опрашивать)
-                    if (state.bookEnabled) bookWatchOn();
-                    else {
-                        bookWatchOff();
-                        if (state.feedTab === "book") rebuildBookFeed();
-                    }
+                    // стакан: слой отвечает только за рисовку; опрос живёт, пока
+                    // слой включён ИЛИ открыта лента заявок (bookPollSync)
+                    bookPollSync();
+                    if (state.feedTab === "book") rebuildBookFeed();
                 }
                 paint();
                 updateMarkers();
@@ -5314,7 +5338,10 @@
             });
             I18n.onChange(paint);
             paint();
-            if (d.skey === "bookEnabled" && state.bookEnabled) bookWatchOn();
+            if (d.skey === "bookEnabled") bookPollSync();
+            // лента заявок могла быть открыта с прошлой сессии без слоя —
+            // стартовый поллер ставим один раз после восстановления тумблеров
+            if (state.feedTab === "book") bookPollSync();
         });
     }
 
@@ -5976,13 +6003,17 @@
         }
         if (cvd > 0) parts.push("CVD " + I18n.t("filter.th_ge", { v: I18n.number(cvd) }));
         if (oi > 0) parts.push("OI Δ " + I18n.t("filter.th_ge", { v: I18n.number(oi) }));
+        const bk = thresholdOf("book");
+        if (bk > 0) parts.push(I18n.t("filter.th_short_book") + " " +
+                               I18n.t("filter.th_ge", { v: I18n.number(bk) }));
         return parts.length ? parts.join(" · ") + " ▾" : I18n.t("filter.all_usd");
     }
 
     function refreshFilterButtons() {
         if (!minUsdBtn) return;
         minUsdBtn.textContent = thresholdLabel();
-        const fields = [[minUsdInput, "liq"], [minCvdInput, "cvd"], [minOiInput, "oi"]];
+        const fields = [[minUsdInput, "liq"], [minCvdInput, "cvd"],
+                        [minOiInput, "oi"], [minBookInput, "book"]];
         fields.forEach(([el, kind]) => {
             const v = thresholdOf(kind);
             if (el) {
@@ -6006,12 +6037,6 @@
     }
 
     function setThreshold(kind, v, closePanel) {
-        // у ленты заявок свой порог — минималка стены на сервере (кабинет);
-        // пресеты здесь ничего не меняют, только закрываем панель
-        if (kind === "book") {
-            if (closePanel && minUsdPanel) minUsdPanel.classList.add("hidden");
-            return;
-        }
         const cfg = THRESHOLDS[kind] || THRESHOLDS.liq;
         state[cfg.key] = Math.max(0, parseFloat(v) || 0);
         saveThreshold(kind);
@@ -6026,13 +6051,14 @@
 
     /** OK в панели: применяем все три поля разом — ликвидации, CVD и OI Δ. */
     function applyThresholdInputs(closePanel) {
-        [[minUsdInput, "liq"], [minCvdInput, "cvd"], [minOiInput, "oi"]].forEach(([el, kind]) => {
+        [[minUsdInput, "liq"], [minCvdInput, "cvd"], [minOiInput, "oi"],
+         [minBookInput, "book"]].forEach(([el, kind]) => {
             if (el) {
                 const cfg = THRESHOLDS[kind];
                 state[cfg.key] = Math.max(0, parseFloat(el.value) || 0);
             }
         });
-        ["liq", "cvd", "oi"].forEach(saveThreshold);
+        ["liq", "cvd", "oi", "book"].forEach(saveThreshold);
         refreshFilterButtons();
         applyFiltersFull();
         if (closePanel && minUsdPanel) minUsdPanel.classList.add("hidden");
@@ -6052,7 +6078,8 @@
             minUsdApply.addEventListener("click", () => applyThresholdInputs(true));
         }
         // У каждого порога своё поле: Enter применяет именно его.
-        [[minUsdInput, "liq"], [minCvdInput, "cvd"], [minOiInput, "oi"]].forEach(([el, kind]) => {
+        [[minUsdInput, "liq"], [minCvdInput, "cvd"], [minOiInput, "oi"],
+         [minBookInput, "book"]].forEach(([el, kind]) => {
             if (!el) return;
             el.addEventListener("keydown", (e) => {
                 if (e.key === "Enter") setThreshold(kind, el.value, true);

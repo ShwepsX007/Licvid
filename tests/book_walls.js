@@ -288,21 +288,57 @@ async function main() {
     api.setHover(null);
   }
 
-  // ---------- 3. выключение слоя убирает ленту в «пусто» ----------
+  // ---------- 3. порог объёма заявок: фильтр графика и ленты ----------
+  const thBtn = win.document.getElementById("min-usd-btn");
+  api.setBookMin(500000);
+  await new Promise((r) => setTimeout(r, 250));
+  const rows5 = api.bookRows();
+  check("порог $500K: на графике только зоны ≥ порога",
+        rows5.length === 2 && rows5.every((r) => r.usdt >= 500000),
+        JSON.stringify(rows5.map((r) => [r.side, r.usdt])));
+  check("под зоной остаётся лишь стена 650K (партнёр 320K отсечён)",
+        rows5.some((r) => r.side === "bid" && r.ids.length === 1 && r.ids[0] === 101),
+        JSON.stringify(rows5.map((r) => r.ids)));
+  const tape5 = api.feedRowsDom();
+  check("порог режет и ленту заявок: остались 101 и 102",
+        tape5.length === 2 && tape5.every((r) => r.wallId === "101" || r.wallId === "102"),
+        JSON.stringify(tape5.map((r) => r.wallId)));
+  check("активный порог виден на кнопке фильтра",
+        thBtn && /500/.test(thBtn.textContent) && /Стены|Walls/.test(thBtn.textContent),
+        thBtn ? thBtn.textContent : "нет кнопки");
+  api.setBookMin(0);
+  await new Promise((r) => setTimeout(r, 250));
+  check("сброс порога вернул все кластеры и ленту",
+        api.bookRows().length === 4 && api.feedRowsDom().length === 5);
+
+  // ---------- 4. лента заявок не зависит от кнопки слоя ----------
   const btn = win.document.getElementById("book-toggle");
-  if (btn) btn.click();
-  await new Promise((r) => setTimeout(r, 100));
+  if (btn) btn.click();                      // слой ОФ, вкладка «Заявки» открыта
+  await new Promise((r) => setTimeout(r, 150));
   const after = api.bookState();
-  check("клик выключил слой и сбросил данные",
-        after.on === false && after.live === 0 && after.hist === 0, JSON.stringify(after));
-  check("лента заявок на выключенном слое пуста и подсказывает включить",
-        api.feedRowsDom().length === 0 &&
-        /выключен|is off/.test(win.document.getElementById("feed-empty").textContent));
-  check("кластеры с графика сняты", api.bookHits().length === 0);
-  const snapBefore = calls.snap;
+  check("слой выключен", after.on === false, JSON.stringify(after));
+  check("плашки с графика сняты", api.bookHits().length === 0);
+  check("лента не погасла вместе со слоем: данные и строки живы",
+        after.live === 4 && after.hist === 5 && api.feedRowsDom().length === 5,
+        JSON.stringify({ live: after.live, hist: after.hist }));
+  const snapDuringTape = calls.snap;
   await new Promise((r) => setTimeout(r, 4500));
-  check("выключенный слой не дёргает сервер", calls.snap === snapBefore,
-        snapBefore + " -> " + calls.snap);
+  check("полит идёт и при выключенном слое (ради ленты)",
+        calls.snap > snapDuringTape, snapDuringTape + " -> " + calls.snap);
+  // ни слоя, ни ленты — мониторим отпускание монеты серверу
+  api.setFeed("liq");
+  await new Promise((r) => setTimeout(r, 150));
+  const snapIdle = calls.snap;
+  await new Promise((r) => setTimeout(r, 4500));
+  check("нет слоя и нет вкладки — сервер не дёргается",
+        calls.snap === snapIdle, snapIdle + " -> " + calls.snap);
+  check("никто не смотрит — данные сброшены",
+        api.bookState().live === 0 && api.bookRows().length === 0);
+  if (btn) btn.click();                      // слой ОПЯТЬ вкл — всё оживает
+  await new Promise((r) => setTimeout(r, 400));
+  check("слой вернули — кластеры и лента готовы рисоваться",
+        api.bookRows().length === 4 && api.bookHits().length === 4,
+        JSON.stringify({ rows: api.bookRows().length, hits: api.bookHits().length }));
 
   const real = errors.filter((e) => e.indexOf("Could not load script") === -1);
   check("нет js-ошибок", real.length === 0, real.slice(0, 3).join(" // "));

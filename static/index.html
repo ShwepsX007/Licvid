@@ -41,7 +41,7 @@
     <link rel="stylesheet" href="/static/terminal_chat.css?v=5">
     <script src="/static/lightweight-charts.js"></script>
     <script src="/static/i18n.pages.js"></script>
-    <script src="/static/i18n.js?v=book3"></script>
+    <script src="/static/i18n.js?v=book4"></script>
     <script src="/static/account.js"></script>
 </head>
 <body class="dark-theme">
@@ -201,6 +201,13 @@
                         <input type="number" id="min-oi-input" class="form-input filter-number"
                                min="0" step="1000" data-i18n-placeholder="filter.oi_placeholder"
                                placeholder="Например 1000000">
+                    </div>
+                    <div class="filter-row">
+                        <label class="filter-th-label" for="min-book-input"
+                               data-i18n="filter.th_book">Стена стакана, $</label>
+                        <input type="number" id="min-book-input" class="form-input filter-number"
+                               min="0" step="1000" data-i18n-placeholder="filter.book_placeholder"
+                               placeholder="Например 500000">
                     </div>
                     <div class="filter-row filter-row-between">
                         <span class="filter-note" data-i18n="filter.presets_for">Пресеты — для открытой вкладки ленты:</span>
@@ -543,7 +550,7 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=book3"></script>
+    <script src="/static/app.js?v=book4"></script>
     <script src="/static/ads.js?v=banner2"></script>
     <script src="/static/terminal_chat.js?v=5"></script>
     <script src="/static/presence.js?v=geo2"></script>

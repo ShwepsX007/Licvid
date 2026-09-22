@@ -35,11 +35,16 @@ log = logging.getLogger("book")
 
 # --- Наблюдаемая зона и пороги ---------------------------------------------
 POLL_SEC = float(os.getenv("LIQSCOPE_BOOK_POLL_SEC", "2.0"))
-DEPTH_LIMIT = 150            # уровней на сторону с биржи (L2-«хвосты» не нужны)
+# Глубина запроса: у монет с мелким тиком (BTC: $0.1 при цене 60k+) 150 уровней
+# покрывают жалкие $15–50 — меньше одной корзины, стакан «схлопывается» в 1–2
+# корзины и стен не бывает вовсе. Берём максимум, что отдаёт биржа за один
+# запрос (per-exchange потолки ниже), окно ±SPAN_REL режется уже в агрегаторе.
+DEPTH_LIMIT = int(os.getenv("LIQSCOPE_BOOK_DEPTH", "1000"))
 SPAN_REL = 0.02              # смотрим ±2% от mid: дальше — мусор дальних уровней
 BUCKET_REL = 0.00035         # цена корзины ≈ 0.035% от mid (BTC 63k → ~$22)
 WALL_MIN_USD = float(os.getenv("LIQSCOPE_BOOK_MIN_USD", "150000"))
 WALL_REL_MULT = 6.0          # порог не ниже 6×медианы корзин — «выдавленность»
+REL_MIN_BUCKETS = 12         # относительный порог осмыслен только на широком стакане
 GONE_AFTER = 5               # пропущенных опросов подряд — стена ушла
 HISTORY_TTL_DAYS = 7         # сколько дней ленты хранить на диске
 SNAPSHOT_TTL = 4             # сек. — чаще не отдаваем историю (легкий дедуп)
@@ -96,7 +101,7 @@ def parse_depth(exchange, data, specs):
         raise ValueError(exchange)
     bids = sorted([r for r in rows[0] if r[1] > 0], key=lambda x: -x[0])
     asks = sorted([r for r in rows[1] if r[1] > 0], key=lambda x: x[0])
-    return bids[:DEPTH_LIMIT], asks[:DEPTH_LIMIT]
+    return bids, asks        # окно ±SPAN_REL режет aggregate_depths, здесь не обрезаем
 
 
 def aggregate_depths(depths, bucket_rel=BUCKET_REL, span_rel=SPAN_REL):
@@ -169,13 +174,18 @@ def detect_walls(agg, min_usd=WALL_MIN_USD, rel_mult=WALL_REL_MULT):
 
     Порог: max(min_usd, rel_mult × медиана корзин стороны) — на тощих монетах
     не плодим «стены» из мусора, на жирных — ловим именно выбивающиеся уровни.
+    Относительная часть включается только на широком стакане (≥ REL_MIN_BUCKETS
+    корзин): когда весь стакан уложился в пару корзин, «медиана» — это сама
+    стена, и порог 6×медианы отсекал бы всё подряд (так пропадал BTC).
     """
     walls = []
     for side in ("bids", "asks"):
         buckets = agg.get(side) or []
         if not buckets:
             continue
-        thr = max(min_usd, rel_mult * _median([b["usdt"] for b in buckets]))
+        thr = float(min_usd)
+        if len(buckets) >= REL_MIN_BUCKETS:
+            thr = max(thr, rel_mult * _median([b["usdt"] for b in buckets]))
         run = []
         for b in buckets + [None]:
             if b is not None and b["usdt"] >= thr:

@@ -61,6 +61,30 @@ class AggTests(unittest.TestCase):
         self.assertGreater(ask["px"], agg["mid"])
         self.assertLess(bid["px"], agg["mid"])
 
+    def test_btc_thin_tick_book_still_finds_walls(self):
+        """BTC: тик $0.1 при цене 60k → сотни уровней попадают в 2–3 корзины.
+        Медиана таких корзин — сама стена; относительный порог 6×медианы не
+        должен глушить стену, что и происходило (пустые кластеры на BTC)."""
+        mid = 63000.0
+        bids = [(mid - 0.1 * i, 3000.0) for i in range(1, 400)]     # ≈ $1.2M в ±$40
+        asks = [(mid + 0.1 * i, 3000.0) for i in range(1, 400)]
+        # плюс явная стена на одном уровне
+        bids[50] = (bids[50][0], 400000.0)
+        agg = bf.aggregate_depths({"binance": (bids, asks)})
+        self.assertLessEqual(len(agg["bids"]), 4, "стакан обязан лечь в пару корзин")
+        walls = bf.detect_walls(agg, 150000)
+        self.assertTrue(any(w["side"] == "bid" and w["usdt"] >= 400000 for w in walls),
+                        f"стена BTC потеряна: {walls}")
+
+    def test_parse_depth_not_truncated(self):
+        """Глубину режет окно ±2% в агрегаторе, а не счётчик уровней парсера:
+        иначе у BTC 150 уровней = $15 и половина окна пустая."""
+        raw = {"bids": [[str(60000 - i * 0.1), "1"] for i in range(1200)],
+               "asks": [[str(60000 + i * 0.1), "1"] for i in range(1200)]}
+        bids, asks = bf.parse_depth("binance", raw, {})
+        self.assertEqual(len(bids), 1200)
+        self.assertEqual(len(asks), 1200)
+
     def test_small_levels_not_walls(self):
         agg = bf.aggregate_depths(_depths(bid_extra=[(MID - 10 * STEP, 40000.0)]))
         self.assertEqual(bf.detect_walls(agg, 150000), [])

@@ -155,12 +155,13 @@ async function main() {
       win.fetch = async (url) => {
         const u = String(url);
         let body = {};
+        const snapWalls = win.__snapWalls || [WALL, WALL_M, WALL_ASK, WALL_SMALL];
         if (u.indexOf("/api/klines") === 0) {
           body = { symbol: "BTC_USDT", timeframe: 5, source: "stub", candles: candles() };
         } else if (u.indexOf("/api/book/snapshot") === 0) {
           calls.snap++;
           body = { ok: true, ts: NOW, symbol: "BTC_USDT", mid: 50000, spread_bps: 1.2,
-                   min_usd: 150000, walls: [WALL, WALL_M, WALL_ASK, WALL_SMALL] };
+                   min_usd: 150000, walls: snapWalls };
         } else if (u.indexOf("/api/book/walls") === 0) {
           calls.hist++;
           body = { ok: true, ts: NOW, symbol: "BTC_USDT",
@@ -222,13 +223,22 @@ async function main() {
         mZone && mZone.sums && Math.abs(mZone.sums.live - 970000) < 1 &&
         Math.abs(mZone.sums.eaten - 250000) < 1 && Math.abs(mZone.sums.gone - 160000) < 1,
         JSON.stringify(mZone && mZone.sums));
-  const mHit = api.bookHits().find((h) => h.time === NOW - 36 * TF && h.sums);
-  check("в плашке есть sums и для хита (модалка theirs)",
-        mHit && mHit.sums && mHit.sums.live === 970000, JSON.stringify(mHit));
+  // только живое залито: 101 (49950–49972) + 105 (49960–49980) = один сегмент;
+  // 108 (49940–49955, ушла) и 107 (49965–49985, съедена) — дырки по краям
+  check("залиты только живые интервалы (один слитый 49950–49980)",
+        mZone && mZone.liveRuns.length === 1 &&
+        mZone.liveRuns[0][0] === 49950 && mZone.liveRuns[0][1] === 49980,
+        JSON.stringify(mZone && mZone.liveRuns));
+  check("дырки по краям конверта: снизу 49940–49950, сверху 49980–49985",
+        mZone && mZone.lo === 49940 && mZone.hi === 49985 &&
+        mZone.liveRuns[0][0] > mZone.lo && mZone.liveRuns[0][1] < mZone.hi);
+  check("живой объём зоны — текущий (400K + 300K), а не пик",
+        mZone && Math.abs(mZone.liveUsdt - 700000) < 1 && mZone.liveCount === 2,
+        JSON.stringify(mZone && [mZone.liveUsdt, mZone.liveCount]));
+  const deadZone = rows.find((r) => r.time === NOW - 100 * TF);
+  check("зона из одной ушедшей стены (-100TF) есть в данных, но без живых",
+        deadZone && deadZone.liveRuns.length === 0, JSON.stringify(deadZone));
 
-  // полосы сверяем по последнему кадру перерисовки (лог копится между кадрами);
-  // в jsdom слот мелкий и ширины округлены до пикселя — точные доли задаёт
-  // слой данных (sums выше), здесь проверяем сам факт трёх полос и порядок
   const frameMark = log.length;
   api.redraw();
   await new Promise((r) => setTimeout(r, 120));
@@ -236,33 +246,24 @@ async function main() {
 
   const hits = api.bookHits();
   const slot = Math.max(1, api.slotPx());
-  check("плашки нарисованы (по числу кластеров)", hits.length === 4, hits.length);
-  check("высота плашки минимум 12px — профиль влезает",
-        hits.every((h) => h.h >= 12), JSON.stringify(hits.map((h) => h.h)));
-  // внутри — трёхцветный профиль статусов (в mixed-зоне все три ряда)
-  const profFills = frame.filter((e) => e.op === "fill" &&
-        (e.style === "#4ade80" || e.style === "#fb7185" || e.style === "#94a3b8"));
-  check("полосы профиля: зелёный/красный/серый рисуются",
-        profFills.some((e) => e.style === "#4ade80") &&
-        profFills.some((e) => e.style === "#fb7185") &&
-        profFills.some((e) => e.style === "#94a3b8"),
-        JSON.stringify(profFills.map((e) => e.style)));
+  check("на графике только зоны с живыми: 2 (разобранные -100TF и -24TF сняты)",
+        hits.length === 2 && hits.every((h) => h.liveCount > 0),
+        JSON.stringify(hits.map((h) => [h.time - NOW, h.liveCount])));
+  const mHit = hits.find((h) => h.time === NOW - 36 * TF);
+  check("хит смешанной зоны — с живым объёмом для окна",
+        mHit && mHit.liveUsdt === 700000 && mHit.liveCount === 2, JSON.stringify(mHit));
   if (mHit) {
-    const inZone = profFills.filter((e) =>
-      e.x >= mHit.x - 1 && e.x + e.w <= mHit.x + mHit.w + 1 &&
-      e.y >= mHit.y - 1 && e.y + e.h <= mHit.y + mHit.h + 1);
-    check("полосы сидят строго внутри плашки (15% отступы не выплёскивают)",
-          inZone.length === 3, JSON.stringify(inZone.map((e) => [e.style, Math.round(e.x), Math.round(e.w)])));
-    const byStyle = {};
-    inZone.forEach((e) => { byStyle[e.style] = Math.round(e.w); });
-    // при 1px-строке «красный/серый» могут совпасть — сравнение нестрогое;
-    // главный смысл: зелёная полоса длиннее и кратна ≈4 красным (70%/18%)
-    check("длины полос по долям USDT (зелёная — самая длинная)",
-          byStyle["#4ade80"] >= byStyle["#fb7185"] &&
-          byStyle["#fb7185"] >= byStyle["#94a3b8"] &&
-          byStyle["#4ade80"] >= 2 * byStyle["#94a3b8"],
-          JSON.stringify(byStyle));
+    const fills = frame.filter((e) => e.op === "fill" && e.style === "#67e8f9" &&
+      e.x >= mHit.x - 1 && e.x + e.w <= mHit.x + mHit.w + 1);
+    check("живой сегмент залит внутри конверта (циан)", fills.length === 1,
+          JSON.stringify(fills.map((e) => [e.y, e.h])));
+    check("залит не весь конверт — дырка видна (сегмент ниже высоты зоны)",
+          fills.length === 1 && fills[0].h < mHit.h - 1 && fills[0].y >= mHit.y,
+          JSON.stringify(fills.length ? [fills[0].y, fills[0].h, mHit.y, mHit.h] : null));
+    check("вспышек нет — история старая, съеденное давно стало дыркой",
+          !frame.some((e) => e.op === "fill" && e.style === "#f43f5e"));
   }
+
   check("ширина — доля слота свечи: дальше тела не вылезает",
         hits.every((h) => h.w >= 3 && h.w <= Math.round(slot * 0.86) + 1 && h.w <= 96),
         JSON.stringify(hits.map((h) => [Math.round(h.x), h.w, slot])));
@@ -342,6 +343,58 @@ async function main() {
     api.setHover(null);
   }
 
+  // ---------- 2b. динамика: съели → красная вспышка → дырка; сняли всех → нет зоны ----------
+  const EATEN_M = Object.assign({}, WALL_M, { live: false, usdt: 50000,
+                                             closed: Math.floor(Date.now() / 1000) });
+  win.__snapWalls = [WALL, WALL_ASK, WALL_SMALL];               // 105 пропала из live
+  // клиент узнаёт о закрытии стены из истории — подсовываем её туда же
+  const oldHist = win.fetch;
+  win.fetch = async (url) => {
+    const u = String(url);
+    if (u.indexOf("/api/book/walls") === 0) {
+      calls.hist++;
+      return { ok: true, status: 200, json: async () => ({ ok: true, ts: NOW, symbol: "BTC_USDT",
+        walls: [WALL, EATEN_M, WALL_ASK, WALL_OLD, WALL_EATEN, WALL_E2, WALL_G2] }) };
+    }
+    return oldHist(url);
+  };
+  await api.bookRefetchHist();
+  await new Promise((r) => setTimeout(r, 200));
+  let z = api.bookRows().find((r) => r.time === NOW - 36 * TF);
+  check("съеденная стена вспыхнула (flash активна, живых стало 1)",
+        z && z.flashes === 1 && z.liveCount === 1, JSON.stringify(z && [z.flashes, z.liveCount, z.liveRuns]));
+  let fm = log.length; api.redraw(); await new Promise((r) => setTimeout(r, 100));
+  check("вспышка нарисована красным на месте стены",
+        log.slice(fm).some((e) => e.op === "fill" && e.style === "#f43f5e"));
+  check("живой сегмент сузился до 101 (49950–49972)",
+        z && z.liveRuns.length === 1 && z.liveRuns[0][1] === 49972, JSON.stringify(z && z.liveRuns));
+  await new Promise((r) => setTimeout(r, 2800));
+  z = api.bookRows().find((r) => r.time === NOW - 36 * TF);
+  fm = log.length; api.redraw(); await new Promise((r) => setTimeout(r, 100));
+  check("через ~2.5с вспышка погасла — осталась дырка",
+        z && z.flashes === 0 && !log.slice(fm).some((e) => e.op === "fill" && e.style === "#f43f5e"),
+        JSON.stringify(z && z.flashes));
+  // сняли и 101 — в зоне -36TF нет живых: кластер разобран
+  win.__snapWalls = [WALL_ASK, WALL_SMALL];
+  await api.bookRefetchHist();
+  await new Promise((r) => setTimeout(r, 200));
+  // 101 пропала из снапшота с остатком 61% пика — это «съели»: сначала вспышка
+  z = api.bookRows().find((r) => r.time === NOW - 36 * TF);
+  check("стена, пропавшая из снапшота, закрыта клиентом сразу (не ждём историю)",
+        z && z.liveCount === 0 && z.flashes === 1, JSON.stringify(z && [z.liveCount, z.flashes]));
+  await new Promise((r) => setTimeout(r, 2900));
+  api.redraw(); await new Promise((r) => setTimeout(r, 100));
+  const hitsAfter = api.bookHits();
+  check("не осталось живых стен — кластер -36TF исчез с графика (остался ask)",
+        hitsAfter.length === 1 && hitsAfter[0].time === NOW - 12 * TF,
+        JSON.stringify(hitsAfter.map((h) => h.time - NOW)));
+  // возвращаем базу для дальнейших секций
+  win.__snapWalls = null; win.fetch = oldHist;
+  await api.bookRefetchHist();
+  await new Promise((r) => setTimeout(r, 200));
+  check("база восстановлена (4 живых, 7 в истории)",
+        api.bookState().live === 4 && api.bookState().hist === 7, JSON.stringify(api.bookState()));
+
   // ---------- 3. порог объёма заявок: фильтр графика и ленты ----------
   const thBtn = win.document.getElementById("min-usd-btn");
   api.setBookMin(500000);
@@ -391,7 +444,7 @@ async function main() {
   if (btn) btn.click();                      // слой ОПЯТЬ вкл — всё оживает
   await new Promise((r) => setTimeout(r, 400));
   check("слой вернули — кластеры и лента готовы рисоваться",
-        api.bookRows().length === 4 && api.bookHits().length === 4,
+        api.bookRows().length === 4 && api.bookHits().length === 2,
         JSON.stringify({ rows: api.bookRows().length, hits: api.bookHits().length }));
 
   const real = errors.filter((e) => e.indexOf("Could not load script") === -1);

@@ -1528,10 +1528,52 @@
         (state.bookHist || []).forEach((w) => {
             if (w && w.id != null) byId.set(w.id, w);
         });
+        const liveIds = new Set();
         ((state.bookData && state.bookData.walls) || []).forEach((w) => {
-            if (w && w.id != null) byId.set(w.id, w);
+            if (w && w.id != null) { byId.set(w.id, w); liveIds.add(w.id); }
         });
+        // свежий снапшот — источник правды о живых: стены, которой в нём нет,
+        // в стакане уже нет, даже если история (кэш до минуты) ещё держит live
+        if (state.bookData && Array.isArray(state.bookData.walls)) {
+            const nowS = Number(state.bookData.ts) || Date.now() / 1000;
+            byId.forEach((w, id) => {
+                if (w.live && !liveIds.has(id)) {
+                    byId.set(id, Object.assign({}, w, { live: false,
+                        closed: w.closed || nowS, age_s: undefined }));
+                }
+            });
+        }
         return byId;
+    }
+
+    // Вспышки «съели»: стена была живой в прошлом кадре данных, а теперь
+    // закрыта с остатком <70% пика — пару секунд горит красным, потом дырка.
+    // (закрытые из истории со свежим closed тоже вспыхивают — догоняем момент)
+    const BOOK_FLASH_MS = 2500;
+    const bookFlash = new Map();          // id → Date.now() начала вспышки
+    let bookLiveSeen = new Set();
+    let bookFlashTimer = null;
+    function bookNoteTransitions(byId) {
+        const now = Date.now();
+        const nowLive = new Set();
+        byId.forEach((w, id) => {
+            if (w.live) { nowLive.add(id); return; }
+            const wasLive = bookLiveSeen.has(id);
+            const fresh = Number(w.closed) > 0 && now / 1000 - Number(w.closed) < 3;
+            if ((wasLive || fresh) && !bookFlash.has(id) && wallStatus(w) === "eaten") {
+                bookFlash.set(id, now);
+            }
+        });
+        bookLiveSeen = nowLive;
+        bookFlash.forEach((t0, id) => { if (now - t0 > BOOK_FLASH_MS) bookFlash.delete(id); });
+        if (bookFlash.size && !bookFlashTimer) {
+            bookFlashTimer = setTimeout(() => { bookFlashTimer = null; queueRedraw(); }, 400);
+        }
+    }
+    function bookFlashPhase(id) {         // 1 → только что, 0 → погасла
+        const t0 = bookFlash.get(id);
+        if (t0 === undefined) return 0;
+        return Math.max(0, 1 - (Date.now() - t0) / BOOK_FLASH_MS);
     }
 
     // Статус стены: живёт / ушла / её «съели» (остаток <70% пика — исполняют).
@@ -1553,7 +1595,9 @@
         const tfSec = (state.timeframe || 5) * 60;
         const minUsd = bookMinUsd();
         const buckets = new Map();              // t0 свечи → [стены]
-        bookWallsMerged().forEach((w) => {
+        const merged = bookWallsMerged();
+        bookNoteTransitions(merged);
+        merged.forEach((w) => {
             const val = Math.max(Number(w.usdt) || 0, Number(w.peak) || 0);
             if (val < minUsd) return;
             const t0 = Math.floor(Number(w.opened) / tfSec) * tfSec;
@@ -1608,6 +1652,22 @@
             seq.set(k, i + 1);
             c.key = "book_" + k.replace("|", "_") + "_" + i;
             c.px = c.wSum > 0 ? c.pxSum / c.wSum : (c.hi + c.lo) / 2;
+            // живые интервалы цены (слитые) — только они закрашены; всё, что
+            // между ними внутри конверта зоны, — дырки от снятых/съеденных
+            const liveIv = c.walls.filter((w) => w.live)
+                .map((w) => [Number(w.lo), Number(w.hi)]).sort((a, b) => a[0] - b[0]);
+            const runs = [];
+            liveIv.forEach((iv) => {
+                const last = runs[runs.length - 1];
+                if (last && iv[0] <= last[1]) last[1] = Math.max(last[1], iv[1]);
+                else runs.push([iv[0], iv[1]]);
+            });
+            c.liveRuns = runs;
+            c.liveCount = liveIv.length;
+            c.liveUsdt = c.walls.filter((w) => w.live)
+                .reduce((acc, w) => acc + (Number(w.usdt) || 0), 0);
+            c.flashes = c.walls.filter((w) => !w.live && bookFlash.has(w.id))
+                .map((w) => ({ lo: Number(w.lo), hi: Number(w.hi), phase: bookFlashPhase(w.id) }));
         });
         // слабые рисуются первыми: крупные догоняются поверх, наложения режем
         out.sort((a, b) => a.usdt - b.usdt);
@@ -1640,13 +1700,13 @@
             if (x === null || x === undefined || !isFinite(x)) return;
             if (y1 === null || y1 === undefined || y2 === null || y2 === undefined) return;
             if (x < -bw || x > W + bw) return;   // свеча ушла за видимое окно
+            // зона без единой живой стены и без вспышки — её разобрали: не рисуем
+            if (!c.liveRuns.length && !c.flashes.length) return;
             let top = Math.min(y1, y2), bot = Math.max(y1, y2);
-            // внутри плашки живёт 3-рядный профиль статусов — под него держим
-            // минимум 12px высоты (коридор цены и без того шире не будет)
-            if (bot - top < 12) { const cy = (top + bot) / 2; top = cy - 6; bot = cy + 6; }
+            if (bot - top < 6) { const cy = (top + bot) / 2; top = cy - 3; bot = cy + 3; }
             if (bot < -20 || top > h + 20) return;
             const bx = Math.round(x - bw / 2), by = Math.round(top);
-            const bh = Math.max(12, Math.round(bot - top));
+            const bh = Math.max(6, Math.round(bot - top));
             const isActive = activeKey === c.key;
             if (!isActive && drawn.some((r) =>
                 bx < r.x + r.w && bx + bw > r.x && by < r.y + r.h && by + bh > r.y)) {
@@ -1656,25 +1716,61 @@
             bookHits.push({ kind: "book", x: bx, y: by, w: bw, h: bh, key: c.key,
                 time: c.time, ids: c.ids, total: c.usdt, levels: c.levels,
                 count: c.count, live: c.live, eaten: c.eaten, side: c.side,
-                sums: c.sums,
+                sums: c.sums, liveUsdt: c.liveUsdt, liveCount: c.liveCount,
                 lo: c.lo, hi: c.hi, price: c.px,
                 wallsLite: c.walls.slice(0, 6).map((w) => ({
                     id: w.id, val: Math.max(Number(w.usdt) || 0, Number(w.peak) || 0),
                     st: wallStatus(w), opened: Number(w.opened) || 0 })) });
             const bid = c.side === "bid";
-            // живая — яркая и со свечением; съеденная целиком — приглушена
-            ctx.globalAlpha = c.live ? 0.42 : (c.eaten === c.count ? 0.20 : 0.28);
-            ctx.fillStyle = bid ? "#67e8f9" : "#a78bfa";
-            if (c.live) {
-                ctx.shadowColor = bid ? "#22d3ee" : "#8b5cf6";
-                ctx.shadowBlur = 7;
-            }
-            ctx.fillRect(bx, by, bw, bh);
-            ctx.shadowBlur = 0;
-            ctx.globalAlpha = 0.9;
-            ctx.strokeStyle = bid ? "#22d3ee" : "#8b5cf6";
-            ctx.lineWidth = 1.1;
+            const fill = bid ? "#67e8f9" : "#a78bfa";
+            const line = bid ? "#22d3ee" : "#8b5cf6";
+            // y по цене внутри конверта; сегменты ≥ 2px, чтобы дырка читалась
+            const yOf = (price) => {
+                let yy = null;
+                try { yy = candleSeries.priceToCoordinate(price); } catch (e) { yy = null; }
+                if (yy === null || yy === undefined || !isFinite(yy)) {
+                    const span = (c.hi - c.lo) || 1;
+                    yy = bot - ((price - c.lo) / span) * (bot - top);
+                }
+                return Math.max(by, Math.min(by + bh, yy));
+            };
+            const segRect = (lo, hi) => {
+                let sTop = Math.round(Math.min(yOf(lo), yOf(hi)));
+                let sBot = Math.round(Math.max(yOf(lo), yOf(hi)));
+                if (sBot - sTop < 2) { sBot = Math.min(by + bh, sTop + 2); sTop = sBot - 2; }
+                return [sTop, sBot - sTop];
+            };
+            // конверт зоны — тонкий контур: показывает, где стены БЫЛИ (дырки)
+            ctx.globalAlpha = 0.55;
+            ctx.strokeStyle = line;
+            ctx.lineWidth = 1;
+            ctx.setLineDash([2, 2]);
             ctx.strokeRect(bx + 0.5, by + 0.5, Math.max(1, bw - 1), Math.max(1, bh - 1));
+            ctx.setLineDash([]);
+            // живые интервалы — залиты и светятся, пока стоят в стакане
+            c.liveRuns.forEach((run) => {
+                const sr = segRect(run[0], run[1]);
+                ctx.globalAlpha = 0.5;
+                ctx.fillStyle = fill;
+                ctx.shadowColor = line;
+                ctx.shadowBlur = 7;
+                ctx.fillRect(bx, sr[0], bw, sr[1]);
+                ctx.shadowBlur = 0;
+                ctx.globalAlpha = 0.95;
+                ctx.strokeStyle = line;
+                ctx.lineWidth = 1.1;
+                ctx.strokeRect(bx + 0.5, sr[0] + 0.5, Math.max(1, bw - 1), Math.max(1, sr[1] - 1));
+            });
+            // съеденные — красная вспышка на своём месте, гаснет и оставляет дырку
+            c.flashes.forEach((f) => {
+                const sr = segRect(f.lo, f.hi);
+                ctx.globalAlpha = 0.35 + 0.6 * f.phase;
+                ctx.fillStyle = "#f43f5e";
+                ctx.shadowColor = "#fb7185";
+                ctx.shadowBlur = 10 + 12 * f.phase;
+                ctx.fillRect(bx, sr[0], bw, sr[1]);
+                ctx.shadowBlur = 0;
+            });
             if (isActive) {   // наведение в ленте / клик: белый ореол, как у плашек
                 ctx.save();
                 ctx.globalAlpha = 1;
@@ -1685,39 +1781,20 @@
                 ctx.strokeRect(bx - 2.5, by - 2.5, bw + 5, bh + 5);
                 ctx.restore();
             }
-            // мини-профиль статусов: три горизонтальные полосы-шкалы (живые /
-            // съеденные / ушедшие), длина — доля USDT от объёма зоны. Отступ
-            // по 15% от всех краёв плашки; пустые статусы не рисуем, а ряды
-            // оставшихся растягиваем на всю область
-            const padX = Math.round(bw * 0.15);
-            const padY = Math.round(bh * 0.15);
-            const inX = bx + padX, inW = Math.max(2, bw - padX * 2);
-            const inY = by + padY, inH = Math.max(3, bh - padY * 2);
-            const segs = [["live", "#4ade80"], ["eaten", "#fb7185"], ["gone", "#94a3b8"]]
-                .map((rg) => ({ st: rg[0], color: rg[1], v: c.sums[rg[0]] || 0 }))
-                .filter((rg) => rg.v > 0);
-            let belowY = inY;                 // низ рядов — от него решаем про подпись
-            if (segs.length) {
-                const tot = segs.reduce((acc, rg) => acc + rg.v, 0);
-                const gap = segs.length > 1 ? 1 : 0;
-                const rowH = Math.min(4, Math.max(1, (inH - gap * (segs.length - 1)) / segs.length));
-                segs.forEach((rg, i) => {
-                    const ry = inY + i * (rowH + gap);
-                    const rw = Math.max(1, Math.round(inW * (rg.v / tot)));
+            // подпись — что стоит СЕЙЧАС: живой объём · живых стен
+            if (c.liveRuns.length) {
+                const label = fmtCompact(c.liveUsdt) + " · " + c.liveCount;
+                ctx.font = "bold 9px 'JetBrains Mono', monospace";
+                const tw = ctx.measureText ? ctx.measureText(label).width : 0;
+                const big = c.liveRuns.reduce((acc, run) => {
+                    const sr = segRect(run[0], run[1]);
+                    return (!acc || sr[1] > acc[1]) ? sr : acc;
+                }, null);
+                if (big && big[1] >= 11 && tw + 6 <= bw) {
                     ctx.globalAlpha = 0.95;
-                    ctx.fillStyle = rg.color;
-                    ctx.fillRect(inX, Math.round(ry), rw, Math.max(1, Math.round(rowH)));
-                    belowY = Math.max(belowY, Math.round(ry + rowH));
-                });
-            }
-            const label = fmtCompact(c.usdt) + " · " + c.levels;
-            ctx.font = "bold 9px 'JetBrains Mono', monospace";
-            const tw = ctx.measureText ? ctx.measureText(label).width : 0;
-            // цифры — если под рядом профиля осталась строка и в ширину влезли
-            if (by + bh - belowY >= 10 && tw + 6 <= bw) {
-                ctx.globalAlpha = 0.95;
-                ctx.fillStyle = "rgba(240,250,253,0.9)";
-                ctx.fillText(label, bx + bw / 2, (belowY + by + bh) / 2 + 0.5);
+                    ctx.fillStyle = "rgba(240,250,253,0.9)";
+                    ctx.fillText(label, bx + bw / 2, big[0] + big[1] / 2 + 0.5);
+                }
             }
         });
         ctx.restore();
@@ -3800,10 +3877,13 @@
                 key: c.key, time: c.time, side: c.side, lo: c.lo, hi: c.hi,
                 usdt: c.usdt, levels: c.levels, count: c.count, px: c.px,
                 live: c.live, eaten: c.eaten, sums: Object.assign({}, c.sums),
+                liveRuns: c.liveRuns.map((r) => r.slice()), liveUsdt: c.liveUsdt,
+                liveCount: c.liveCount, flashes: c.flashes.length,
                 ids: c.ids.slice() })),
             bookHits: () => bookHits.map((h) => ({ x: h.x, y: h.y, w: h.w, h: h.h,
                 key: h.key, time: h.time, total: h.total, count: h.count,
                 live: h.live, sums: h.sums ? Object.assign({}, h.sums) : null,
+                liveUsdt: h.liveUsdt, liveCount: h.liveCount,
                 ids: h.ids.slice() })),
             bookTape: () => bookFeedItems().map((it) => ({
                 id: it.id, st: it.st, side: it.side, usd: it.usd,
@@ -3812,6 +3892,7 @@
             setFeed: (t) => setFeedTab(t),
             bookMin: () => bookMinUsd(),
             setBookMin: (v) => setThreshold("book", v, false),
+            bookRefetchHist: () => { bookHistAt = 0; return bookSnapshot(); },
             bookPolling: () => ({ timer: !!bookTimer, want: bookWantPoll(),
                                   enabled: !!state.bookEnabled,
                                   tab: state.feedTab }),
@@ -5001,7 +5082,8 @@
                         " " + I18n.time(w.opened)).join("<br>") + "</p>";
             }
             const sm = hit.sums || {};
-            const segHtml = [[sm.live, "#4ade80", "feed.book_live"],
+            // живое — по текущему объёму (что реально стоит), снятое/съеденное — по пику
+            const segHtml = [[hit.liveUsdt != null ? hit.liveUsdt : sm.live, "#4ade80", "feed.book_live"],
                              [sm.eaten, "#fb7185", "feed.book_eaten"],
                              [sm.gone, "#94a3b8", "feed.book_gone"]]
                 .filter((rg) => rg[0] > 0)

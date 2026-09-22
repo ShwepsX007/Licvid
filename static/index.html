@@ -38,20 +38,28 @@
     <link rel="stylesheet" href="/static/style.css?v=static1">
     <!-- Local Lightweight Charts v5 -->
     <link rel="stylesheet" href="/static/ads.css?v=banner2">
-    <link rel="stylesheet" href="/static/terminal_chat.css?v=2">
+    <link rel="stylesheet" href="/static/terminal_chat.css?v=3">
     <script src="/static/lightweight-charts.js"></script>
     <script src="/static/i18n.pages.js"></script>
     <script src="/static/i18n.js?v=liqhist1"></script>
     <script src="/static/account.js"></script>
 </head>
 <body class="dark-theme">
-    <!-- 💬 Мини-чат терминала: панель справа, кнопка в шапке рядом с LIVE WS -->
+    <!-- 💬 Чат: общий + личные диалоги. Панель двигается и тянется за края. -->
     <div id="terminal-chat" class="tchat">
-      <button id="tchat-toggle" class="tchat-toggle hidden" type="button" aria-hidden="true" tabindex="-1">💬 Чат</button>
-      <span id="tchat-unread" class="tchat-unread hidden" aria-hidden="true">0</span>
+      <button id="tchat-toggle" class="tchat-toggle hidden" type="button" aria-hidden="true" tabindex="-1">💬 Чат <span id="tchat-unread" class="tchat-unread hidden" aria-hidden="true">0</span></button>
       <div id="tchat-panel" class="tchat-panel hidden">
-        <div class="tchat-head"><span>💬 Чат терминала</span><button id="tchat-close" class="tchat-close" type="button">✕</button></div>
+        <div class="tchat-head"><span>💬 Чат LiqScope</span><button id="tchat-close" class="tchat-close" type="button">✕</button></div>
+        <div class="tchat-tabs" id="tchat-tabs">
+          <button type="button" class="tchat-tab active" data-tab="public">Общий</button>
+          <button type="button" class="tchat-tab" data-tab="dm">🔒 Личные <span id="tchat-tab-dm-badge" class="tchat-tab-badge hidden">0</span></button>
+        </div>
         <div id="tchat-list" class="tchat-list"></div>
+        <div id="tchat-dm" class="tchat-dm hidden"><div id="tchat-dm-list" class="tchat-dm-list"></div></div>
+        <div id="tchat-dm-chat" class="tchat-dm-chat hidden">
+          <div id="tchat-dm-head" class="tchat-dm-head"></div>
+          <div id="tchat-dm-msgs" class="tchat-list"></div>
+        </div>
         <div class="tchat-foot"><input id="tchat-input" maxlength="500" placeholder="Сообщение… (Enter)"><button id="tchat-send" type="button">➤</button><div id="tchat-hint" class="tchat-hint"></div></div>
       </div>
     </div>
@@ -66,7 +74,7 @@
             </a>
             <span class="status-badge" id="conn-status"><span class="dot pulse yellow"></span> ПОДКЛЮЧЕНИЕ…</span>
             <span class="demo-badge hidden" id="demo-badge">DEMO</span>
-            <button id="tchat-header-btn" class="tchat-header-btn" type="button" title="Чат терминала">💬 Чат <span id="tchat-unread-hdr" class="tchat-unread hidden">0</span></button>
+            <button id="tchat-header-btn" class="tchat-header-btn" type="button" title="Чат: общий и личные диалоги">💬 Чат <span id="tchat-online" class="tchat-online" title="онлайн в чате">0</span> <span id="tchat-unread-hdr" class="tchat-unread hidden">0</span></button>
         </div>
 
         <div class="header-metrics">
@@ -531,7 +539,7 @@
 
     <script src="/static/app.js?v=liqhist1"></script>
     <script src="/static/ads.js?v=banner2"></script>
-    <script src="/static/terminal_chat.js?v=2"></script>
+    <script src="/static/terminal_chat.js?v=3"></script>
     <script src="/static/presence.js?v=geo2"></script>
 <script src="/static/consent.js?v=consent1"></script>
 </body>

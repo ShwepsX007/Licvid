@@ -1269,6 +1269,9 @@ def register_account_routes(app) -> None:
             "settings": {
                 "bot_welcome": ctx.store.get_setting("bot_welcome", ""),
                 "site_notice": ctx.store.get_setting("site_notice", ""),
+                # 🔒 чат: через сколько минут бот напоминает о безответном ЛС
+                "chat_dm_tg_delay_min": ctx.store.get_setting(
+                    "chat_dm_tg_delay_min", "10") or "10",
             },
             "services": ctx.store.list_services(True),
             "audit": ctx.store.recent_audit(20),
@@ -1369,6 +1372,18 @@ def register_account_routes(app) -> None:
             if k in allowed and isinstance(v, str):
                 ctx.store.set_setting(k, v[:2000], actor_id=actor["id"])
                 saved[k] = v[:2000]
+        # 🔒 чат: задержка TG-напоминания о безответных личных, минуты
+        if "chat_dm_tg_delay_min" in body:
+            try:
+                mins = float(body.get("chat_dm_tg_delay_min"))
+            except (TypeError, ValueError):
+                return JSONResponse({"ok": False, "error": "bad_delay",
+                                     "hint": "Нужно число минут (0 — выключено)"},
+                                    status_code=400)
+            mins = max(0.0, min(mins, 1440.0))
+            val = str(int(mins)) if mins == int(mins) else f"{mins:.1f}"
+            ctx.store.set_setting("chat_dm_tg_delay_min", val, actor_id=actor["id"])
+            saved["chat_dm_tg_delay_min"] = val
         return {"ok": True, "saved": saved}
 
     @router.post("/api/admin/services/{slug}")

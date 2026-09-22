@@ -1,10 +1,44 @@
 # Python
 __pycache__/
 *.py[cod]
+.pytest_cache/
 .venv/
-venv/
+venv*/
 env/
+envs/
 
-# Рантайм-данные (срезы оборота для volAvg7d)
+# node (тесты: npm install --no-save jsdom ws)
+node_modules/
+npm-debug.log*
+
+# Рантайм-данные (срезы оборота для volAvg7d, база аккаунтов, история)
 data/
 *.tmp
+
+# Логи и дампы — никогда в git
+*.log
+*.log.*
+uvicorn*.out
+server.out
+nohup.out
+bot.log*
+
+# База SQLite на всякий случай (штатно живёт в data/, игнорируется и так)
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# IDE / ОС — частые «утяжелители» папок перед загрузкой на git
+.idea/
+.vscode/
+*.sublime-workspace
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# Локальные секреты (токены/почта — только в окружении systemd, не в git)
+.env
+.env.*
+secrets*.json

@@ -6134,7 +6134,9 @@
                 break;
             }
             case "terminal_chat":
-            case "terminal_chat_del": {
+            case "terminal_chat_del":
+            case "chat_dm":
+            case "chat_dm_room": {
                 try {
                     if (window.TerminalChat && window.TerminalChat.onWsMessage) {
                         window.TerminalChat.onWsMessage(msg);

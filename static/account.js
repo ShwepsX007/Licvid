@@ -2730,6 +2730,8 @@
             paintTrials(d.layers_trials || {});
             if ($("bot-welcome")) $("bot-welcome").value = (d.settings && d.settings.bot_welcome) || "";
             if ($("site-notice-in")) $("site-notice-in").value = (d.settings && d.settings.site_notice) || "";
+            if ($("chat-dm-delay-min")) $("chat-dm-delay-min").value =
+                (d.settings && d.settings.chat_dm_tg_delay_min) || "10";
             var svc = $("admin-svc");
             if (svc) {
                 svc.innerHTML = (d.services || []).map(function (s) {
@@ -2858,6 +2860,7 @@
                 body: JSON.stringify({
                     bot_welcome: ($("bot-welcome") || {}).value || "",
                     site_notice: ($("site-notice-in") || {}).value || "",
+                    chat_dm_tg_delay_min: ($("chat-dm-delay-min") || {}).value || "10",
                 }),
             }).then(function (d) {
                 var st = $("settings-status");

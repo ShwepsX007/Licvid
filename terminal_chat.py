@@ -111,6 +111,42 @@ def _msg_public(m: dict) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# 💚 «Онлайн в чате»: виджет (терминал и кабинет) тихо пингует сервер,
+# пока страница открыта. TTL с запасом: мигнувший интернет не должен
+# «выкидывать» человека из онлайн-списка на кнопке.
+# ---------------------------------------------------------------------------
+_PRESENCE_LOCK = threading.Lock()
+_PRESENCE: Dict[int, float] = {}
+PRESENCE_TTL = 90.0            # секунд, что отметка считается живой
+PRESENCE_PING_SEC = 30         # с какой частотой виджет должен пинговать
+
+
+def _now_presence() -> float:
+    return time.time()
+
+
+def chat_presence_touch(user_id: int) -> None:
+    with _PRESENCE_LOCK:
+        _PRESENCE[int(user_id)] = _now_presence()
+        if len(_PRESENCE) > 4000:      # редкая уборка старых отметок
+            cut = _now_presence() - PRESENCE_TTL
+            for k in [k for k, v in _PRESENCE.items() if v < cut]:
+                _PRESENCE.pop(k, None)
+
+
+def chat_presence_online(user_id: int) -> bool:
+    with _PRESENCE_LOCK:
+        ts = _PRESENCE.get(int(user_id), 0.0)
+    return (_now_presence() - ts) < PRESENCE_TTL
+
+
+def chat_presence_ids() -> List[int]:
+    cut = _now_presence() - PRESENCE_TTL
+    with _PRESENCE_LOCK:
+        return sorted(int(k) for k, v in _PRESENCE.items() if v >= cut)
+
+
 async def _json_body(request: Request) -> dict:
     try:
         data = await request.json()
@@ -151,6 +187,42 @@ def register_chat_routes(app, hub=None) -> None:
                                      "is_admin": bool(u.get("is_admin"))},
                 "can_write": True}
 
+    @router.post("/api/terminal/chat/ping")
+    async def api_chat_ping(request: Request):
+        """«Я у чата» — виджет зовёт каждые PRESENCE_PING_SEC секунд."""
+        u = _current_user(request)
+        if not u:
+            return {"ok": True, "online": len(chat_presence_ids())}
+        chat_presence_touch(u["id"])
+        return {"ok": True, "online": len(chat_presence_ids())}
+
+    @router.get("/api/terminal/chat/online")
+    async def api_chat_online(request: Request):
+        ids = chat_presence_ids()
+        u = _current_user(request)
+        me = int(u["id"]) if u else 0
+        # счётчик на кнопке — сколько людей онлайн, кроме меня
+        others = [i for i in ids if i != me]
+        body = {"ok": True, "count": len(others)}
+        if u:
+            body["ids"] = ids
+        return body
+
+    @router.get("/api/terminal/chat/participants")
+    async def api_chat_participants(request: Request):
+        """Кто писал в общий чат за окно истории + кто сейчас онлайн."""
+        if not ctx.store:
+            return JSONResponse({"ok": False, "error": "no_store"}, status_code=503)
+        try:
+            parts = ctx.store.chat_participants(limit=50)
+        except Exception as e:  # noqa: BLE001
+            log.debug("participants: %s", e)
+            return JSONResponse({"ok": False, "error": "db"}, status_code=500)
+        online = set(chat_presence_ids())
+        for p in parts:
+            p["online"] = int(p["id"]) in online
+        return {"ok": True, "participants": parts, "now": _now()}
+
     @router.post("/api/terminal/chat")
     async def api_chat_post(request: Request):
         if not ctx.store:
@@ -158,6 +230,8 @@ def register_chat_routes(app, hub=None) -> None:
         u = _current_user(request)
         if not u:
             return _need_auth()
+        # раз пишет — значит у чата; обновляем отметку онлайн
+        chat_presence_touch(u["id"])
         body = await _json_body(request)
         txt = _clean_text(body.get("text") or "", limit=ctx.store.CHAT_MAX_LEN)
         if not txt:

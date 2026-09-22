@@ -59,7 +59,7 @@ from market_feed import GATE_REST, MarketFeed, TF_MINUTES, base_of, canon, _get_
 from timeframes import parse_tf
 from oi_feed import map_candles_to_oi
 from hour_board import BOARD, OI, SLOTS, build_snapshot, HOUR, SLOT_SEC
-from accounts import Store
+from accounts import COOKIE_SID, Store
 from flow_feed import FlowFeed
 from history import HistoryStore, MONTH_HOURS
 from pump_scan import PumpScanner, filter_new as pump_filter_new
@@ -86,6 +86,8 @@ import web_geo
 import web_layers
 import terminal_chat as terminal_chat_mod
 from terminal_chat import register_chat_routes as register_terminal_chat_routes
+import private_chat as private_chat_mod
+from private_chat import register_private_chat_routes
 import content_comments as content_comments_mod
 from content_comments import register_comment_routes as register_content_comment_routes
 
@@ -307,6 +309,9 @@ class Client:
     def __init__(self, ws: WebSocket):
         self.ws = ws
         self.symbol = "ALL"     # фильтр ленты (монета или ALL)
+        # пользователь сессии (COOKIE_SID) — для адресных чат-событий:
+        # личные сообщения и уведомления уходят только своим получателям
+        self.user_id: Optional[int] = None
         self.chart = ""         # символ графика — независим от фильтра ленты
         self.tf = 5
         self.min_usd = 0.0
@@ -445,6 +450,29 @@ async def on_liquidation(ev: dict):
             _liq_drop_warn_at = now
             log.warning("очередь ликвидаций переполнена: пропущено %d событий",
                         _liq_dropped)
+
+
+async def chat_notify_loop() -> None:
+    """🔒 Чат по таймеру: напоминания о безответных ЛС и уборка истории.
+
+    Раз в минуту: если получатель личного сообщения не читает и не отвечает
+    (задержка настраивается в админке), а Telegram привязан — бот стукнет
+    один раз. Заодно срезаем всё, что старше 3 дней (и ЛС, и общий чат).
+    """
+    while True:
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            raise
+        try:
+            await private_chat_mod.scan_reminders()
+        except Exception as e:  # noqa: BLE001
+            log.debug("chat reminders: %s", e)
+        try:
+            await asyncio.to_thread(account_store.prune_private)
+            await asyncio.to_thread(account_store.prune_chat)
+        except Exception as e:  # noqa: BLE001
+            log.debug("chat prune: %s", e)
 
 
 async def history_task() -> None:
@@ -2281,7 +2309,8 @@ async def lifespan(app: FastAPI):
                                      name="digest"))
     # 📣 Реклама: отправка по выбранному времени и автоудаление по сроку
     tasks.append(asyncio.create_task(ads_mod.scheduler_loop(ad_service),
-                                     name="ads"))
+                                     name="ads"))    # 🔒 чат: TG-напоминания о безответных личных + чистка истории
+    tasks.append(asyncio.create_task(chat_notify_loop(), name="chat-notify"))
     if DEMO_MODE:
         tasks.append(asyncio.create_task(demo_generator(), name="demo"))
         tasks.append(asyncio.create_task(demo_price_walk(), name="demo-prices"))
@@ -2525,6 +2554,13 @@ web_layers.register_layer_routes(app)
 terminal_chat_mod.ctx.store = account_store
 terminal_chat_mod.ctx.secret = SECRET
 register_terminal_chat_routes(app, hub=hub)
+
+# 🔒 Приватные диалоги: та же база и тот же hub, плюс бот для напоминаний
+private_chat_mod.ctx.store = account_store
+private_chat_mod.ctx.bot = tg_bot
+private_chat_mod.ctx.hub = hub
+private_chat_mod.ctx.public_url = PUBLIC_URL
+register_private_chat_routes(app)
 
 # 💬 Комментарии к дайджесту и сводке по часам: читают все, пишут зарегистрированные
 content_comments_mod.ctx.store = account_store
@@ -2956,6 +2992,17 @@ async def api_health():
 async def ws_endpoint(websocket: WebSocket):
     await websocket.accept()
     client = Client(websocket)
+    # кто это: та же сессия COOKIE_SID, что у кабинета и чата. Без куки
+    # клиент остаётся «гостем» — адресные чат-события ему не придут
+    try:
+        _sid = websocket.cookies.get(COOKIE_SID)
+        if _sid:
+            _su = account_store.user_by_session(_sid)
+            if _su:
+                client.user_id = int(_su["id"])
+                terminal_chat_mod.chat_presence_touch(client.user_id)
+    except Exception as e:  # noqa: BLE001
+        log.debug("ws user resolve: %s", e)
     await hub.add(client)
     try:
         sym_data = await api_symbols() if feed else {"details": [], "custom_symbols": []}

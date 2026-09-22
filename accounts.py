@@ -535,6 +535,38 @@ class Store:
                 );
                 CREATE INDEX IF NOT EXISTS idx_terminal_chat_ts ON terminal_chat(created_at);
                 CREATE INDEX IF NOT EXISTS idx_terminal_chat_id ON terminal_chat(id);
+                -- 🔒 Приватные диалоги: комната на пару (user_a < user_b), приглашение,
+                -- история 3 дня. Авторы — user_id: смена ника на диалог не влияет.
+                CREATE TABLE IF NOT EXISTS private_chats (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_a INTEGER NOT NULL,
+                    user_b INTEGER NOT NULL,
+                    invited_by INTEGER NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',  -- pending|active|declined
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_private_chats_pair
+                    ON private_chats(user_a, user_b);
+                CREATE INDEX IF NOT EXISTS idx_private_chats_a ON private_chats(user_a);
+                CREATE INDEX IF NOT EXISTS idx_private_chats_b ON private_chats(user_b);
+                CREATE TABLE IF NOT EXISTS private_messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    room_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    text TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_private_messages_room
+                    ON private_messages(room_id, id);
+                CREATE TABLE IF NOT EXISTS private_reads (
+                    room_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    last_read_id INTEGER NOT NULL DEFAULT 0,
+                    reminded_id INTEGER NOT NULL DEFAULT 0,
+                    reminded_at REAL NOT NULL DEFAULT 0,
+                    PRIMARY KEY (room_id, user_id)
+                );
                 CREATE TABLE IF NOT EXISTS content_comments (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     kind TEXT NOT NULL,
@@ -3285,6 +3317,409 @@ class Store:
                                    (edge,))
             self._db.commit()
             return int(cur.rowcount or 0)
+
+    # ----- 🔒 Приватные диалоги (3 дня истории, приглашение, юзер_id = якорь) --
+    PRIVATE_KEEP_SEC = 3 * 86400
+    PRIVATE_LIMIT = 200
+
+    def _private_pair(self, user_id: int, peer_id: int) -> tuple:
+        a, b = sorted((int(user_id), int(peer_id)))
+        return a, b
+
+    def private_room_for_pair(self, user_id: int,
+                              peer_id: int) -> Optional[Dict[str, Any]]:
+        a, b = self._private_pair(user_id, peer_id)
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM private_chats WHERE user_a=? AND user_b=?",
+                (a, b),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def private_room_get(self, room_id: int) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._db.execute("SELECT * FROM private_chats WHERE id=?",
+                                   (int(room_id),)).fetchone()
+        return dict(row) if row else None
+
+    def private_room_open(self, user_id: int,
+                          peer_id: int) -> Dict[str, Any]:
+        """Найти комнату пары или создать с приглашением peer_id.
+
+        Отклонённая комната при повторном приглашении снова становится
+        «pending». Один диалог на пару — смена ника ничего не ломает,
+        идентификаторы участников — user_id.
+        """
+        a, b = self._private_pair(user_id, peer_id)
+        if a == b:
+            return {"ok": False, "error": "self"}
+        now = _now()
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM private_chats WHERE user_a=? AND user_b=?",
+                (a, b),
+            ).fetchone()
+            if row:
+                r = dict(row)
+                if r.get("status") == "declined":
+                    self._db.execute(
+                        "UPDATE private_chats SET status='pending',"
+                        " invited_by=?, updated_at=? WHERE id=?",
+                        (int(user_id), now, r["id"]),
+                    )
+                    self._db.commit()
+                    r["status"] = "pending"
+                    r["invited_by"] = int(user_id)
+                    r["updated_at"] = now
+                return {"ok": True, "room": r, "created": False}
+            cur = self._db.execute(
+                "INSERT INTO private_chats(user_a,user_b,invited_by,status,"
+                "created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                (a, b, int(user_id), "pending", now, now),
+            )
+            self._db.commit()
+            rid = int(cur.lastrowid)
+        room = {"id": rid, "user_a": a, "user_b": b,
+                "invited_by": int(user_id), "status": "pending",
+                "created_at": now, "updated_at": now}
+        return {"ok": True, "room": room, "created": True}
+
+    def private_room_member(self, room: Dict[str, Any],
+                            user_id: int) -> bool:
+        uid = int(user_id)
+        return uid in (int(room["user_a"]), int(room["user_b"]))
+
+    def private_room_other(self, room: Dict[str, Any],
+                           user_id: int) -> int:
+        uid = int(user_id)
+        return int(room["user_b"]) if uid == int(room["user_a"]) \
+            else int(room["user_a"])
+
+    def private_room_set_status(self, room_id: int, status: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "UPDATE private_chats SET status=?, updated_at=? WHERE id=?",
+                (status, _now(), int(room_id)),
+            )
+            self._db.commit()
+
+    def private_add_message(self, room_id: int, user_id: int,
+                            text: str) -> Dict[str, Any]:
+        """Сообщение в приватный диалог. Копия на пару секунд в историю 3 дня."""
+        text = (text or "").strip()[: self.CHAT_MAX_LEN]
+        if not text:
+            return {"ok": False, "error": "empty"}
+        now = _now()
+        with self._lock:
+            edge = now - self.PRIVATE_KEEP_SEC
+            if secrets.randbelow(20) == 0:
+                self._db.execute(
+                    "DELETE FROM private_messages WHERE created_at<?", (edge,))
+            cur = self._db.execute(
+                "INSERT INTO private_messages(room_id,user_id,text,created_at)"
+                " VALUES(?,?,?,?)",
+                (int(room_id), int(user_id), text, now),
+            )
+            self._db.execute(
+                "UPDATE private_chats SET updated_at=? WHERE id=?",
+                (now, int(room_id)),
+            )
+            self._db.commit()
+            mid = int(cur.lastrowid)
+        return {"ok": True, "id": mid, "text": text, "created_at": now}
+
+    def private_room_messages(self, room_id: int, after_id: int = 0,
+                              limit: int = 200) -> List[Dict[str, Any]]:
+        """История комнаты за 3 дня. Имена — актуальные из профиля (ник менялся — имена свежие)."""
+        now = _now()
+        edge = now - self.PRIVATE_KEEP_SEC
+        limit = max(1, min(int(limit or 200), self.PRIVATE_LIMIT))
+        after_id = max(0, int(after_id or 0))
+        with self._lock:
+            if after_id:
+                rows = self._db.execute(
+                    "SELECT m.id, m.room_id, m.user_id, m.text, m.created_at"
+                    " FROM private_messages m WHERE m.room_id=? AND m.created_at>=?"
+                    " AND m.id>? ORDER BY m.id",
+                    (int(room_id), edge, after_id),
+                ).fetchall()
+            else:
+                rows = self._db.execute(
+                    "SELECT m.id, m.room_id, m.user_id, m.text, m.created_at"
+                    " FROM private_messages m WHERE m.room_id=? AND m.created_at>=?"
+                    " ORDER BY m.id DESC LIMIT ?",
+                    (int(room_id), edge, limit),
+                ).fetchall()
+                rows = list(reversed(rows))
+            # имена и флаги админа — по текущему состоянию профиля
+            names: Dict[int, tuple] = {}
+            out = []
+            uids = {int(r["user_id"]) for r in rows}
+            for uid in uids:
+                urow = self._db.execute(
+                    "SELECT id, first_name, last_name, username, email, tg_id,"
+                    " is_admin FROM users WHERE id=?", (uid,)).fetchone()
+                if urow:
+                    u = dict(urow)
+                    names[uid] = (display_name(u), bool(u.get("is_admin")))
+                else:
+                    names[uid] = (f"id{uid}", False)
+            for r in rows:
+                d = dict(r)
+                nm, adm = names.get(int(d["user_id"]), (f"id{d['user_id']}", False))
+                d["name"] = nm
+                d["is_admin"] = 1 if adm else 0
+                out.append(d)
+        return out
+
+    def private_mark_read(self, room_id: int, user_id: int,
+                          last_id: int) -> None:
+        """Отметка «дочитано до id» + снятие напоминаний до этого id."""
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO private_reads(room_id,user_id,last_read_id,"
+                " reminded_id, reminded_at) VALUES(?,?,?,0,0)"
+                " ON CONFLICT(room_id,user_id) DO UPDATE SET"
+                " last_read_id=MAX(last_read_id, excluded.last_read_id),"
+                " reminded_id=MAX(reminded_id, excluded.reminded_id)",
+                (int(room_id), int(user_id), int(last_id)),
+            )
+            self._db.commit()
+
+    def private_last_read(self, room_id: int, user_id: int) -> int:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT last_read_id FROM private_reads WHERE room_id=? AND user_id=?",
+                (int(room_id), int(user_id))).fetchone()
+        return int(row["last_read_id"]) if row else 0
+
+    def private_unread_for(self, user_id: int) -> Dict[int, int]:
+        """room_id -> сколько непрочитанных сообщений от собеседника."""
+        uid = int(user_id)
+        edge = _now() - self.PRIVATE_KEEP_SEC
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT c.id AS room,"
+                " (SELECT COUNT(*) FROM private_messages m"
+                "   WHERE m.room_id=c.id AND m.created_at>=? AND m.user_id!=?"
+                "     AND m.id > COALESCE((SELECT r.last_read_id FROM private_reads r"
+                "                 WHERE r.room_id=c.id AND r.user_id=?),0)) AS n"
+                " FROM private_chats c WHERE (c.user_a=? OR c.user_b=?)"
+                " AND c.updated_at>=?",
+                (edge, uid, uid, uid, uid, edge),
+            ).fetchall()
+        return {int(r["room"]): int(r["n"]) for r in rows if int(r["n"]) > 0}
+
+    def private_rooms_for(self, user_id: int) -> List[Dict[str, Any]]:
+        """Комнаты участника: карточка + последнее сообщение + непрочитанное."""
+        uid = int(user_id)
+        edge = _now() - self.PRIVATE_KEEP_SEC
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM private_chats WHERE (user_a=? OR user_b=?)"
+                " AND updated_at>=? ORDER BY updated_at DESC LIMIT 100",
+                (uid, uid, edge),
+            ).fetchall()
+        rooms: List[Dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            rid = int(d["id"])
+            other = self.private_room_other(d, uid)
+            u = self.get_user(other)
+            if u is None:
+                name, banned = f"id{other}", False
+            else:
+                name = u.get("display_name") or f"id{other}"
+                banned = bool(u.get("is_banned"))
+            with self._lock:
+                last = self._db.execute(
+                    "SELECT id, user_id, text, created_at FROM private_messages"
+                    " WHERE room_id=? ORDER BY id DESC LIMIT 1", (rid,)).fetchone()
+                unread_row = self._db.execute(
+                    "SELECT COUNT(*) AS n FROM private_messages m"
+                    " WHERE m.room_id=? AND m.created_at>=? AND m.user_id!=?"
+                    " AND m.id > COALESCE((SELECT r2.last_read_id FROM private_reads r2"
+                    "             WHERE r2.room_id=? AND r2.user_id=?),0)",
+                    (rid, edge, uid, rid, uid)).fetchone()
+            last_json = None
+            if last:
+                lm = dict(last)
+                lu = self.get_user(int(lm["user_id"]))
+                lm["name"] = (lu or {}).get("display_name") or f"id{lm['user_id']}"
+                lm["text"] = (lm.get("text") or "")[:80]
+                last_json = lm
+            rooms.append({
+                "id": rid,
+                "status": d.get("status") or "pending",
+                "invited_by": int(d.get("invited_by") or 0),
+                "peer": {"id": other, "name": name, "banned": banned},
+                "last": last_json,
+                "unread": int(unread_row["n"]) if unread_row else 0,
+                "updated_at": float(d.get("updated_at") or 0),
+                "created_at": float(d.get("created_at") or 0),
+            })
+        rooms.sort(key=lambda x: x["updated_at"], reverse=True)
+        return rooms
+
+    def private_notify_counts(self, user_id: int) -> Dict[str, int]:
+        """Счётчики для бейджа: непрочитанные сообщения и входящие приглашения."""
+        uid = int(user_id)
+        edge = _now() - self.PRIVATE_KEEP_SEC
+        unread = sum(self.private_unread_for(uid).values())
+        with self._lock:
+            row = self._db.execute(
+                "SELECT COUNT(*) AS n FROM private_chats"
+                " WHERE status='pending' AND updated_at>=?"
+                " AND ((user_a!=? AND user_b=?) OR (user_b!=? AND user_a=?))"
+                " AND invited_by!=?",
+                (edge, uid, uid, uid, uid, uid),
+            ).fetchone()
+        return {"unread": int(unread), "invites": int(row["n"]) if row else 0}
+
+    def private_reminder_state(self, room_id: int, user_id: int) -> tuple:
+        """(reminded_id, reminded_at) — до какого сообщения уже напоминали."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT reminded_id, reminded_at FROM private_reads"
+                " WHERE room_id=? AND user_id=?",
+                (int(room_id), int(user_id))).fetchone()
+        if not row:
+            return 0, 0.0
+        return int(row["reminded_id"] or 0), float(row["reminded_at"] or 0)
+
+    def private_reminder_mark(self, room_id: int, user_id: int,
+                              msg_id: int) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO private_reads(room_id,user_id,last_read_id,"
+                " reminded_id, reminded_at) VALUES(?,?,0,?,?)"
+                " ON CONFLICT(room_id,user_id) DO UPDATE SET"
+                " reminded_id=MAX(reminded_id, excluded.reminded_id),"
+                " reminded_at=excluded.reminded_at",
+                (int(room_id), int(user_id), int(msg_id), _now()),
+            )
+            self._db.commit()
+
+    def private_rooms_due(self, before_ts: float) -> List[Dict[str, Any]]:
+        """Комнаты с безответными сообщениями старше before_ts (для TG-напоминаний).
+
+        Для каждой комнаты отдаём самое свежее непрочитанное сообщение от
+        собеседника и обоих участников: «прочитал или ответил» = сигнал не слать.
+        """
+        edge = _now() - self.PRIVATE_KEEP_SEC
+        with self._lock:
+            rooms = self._db.execute(
+                "SELECT * FROM private_chats WHERE updated_at>=?"
+                " AND status IN ('pending','active')", (edge,)).fetchall()
+            due: List[Dict[str, Any]] = []
+            for r in rooms:
+                d = dict(r)
+                rid = int(d["id"])
+                for member in (int(d["user_a"]), int(d["user_b"])):
+                    last_read = self._db.execute(
+                        "SELECT COALESCE(MAX(last_read_id),0) AS x FROM private_reads"
+                        " WHERE room_id=? AND user_id=?", (rid, member)).fetchone()
+                    last_answer = self._db.execute(
+                        "SELECT COALESCE(MAX(id),0) AS x FROM private_messages"
+                        " WHERE room_id=? AND user_id=?", (rid, member)).fetchone()
+                    floor = max(int(last_read["x"] or 0),
+                                int(last_answer["x"] or 0))
+                    pending = self._db.execute(
+                        "SELECT m.id, m.user_id, m.text, m.created_at"
+                        " FROM private_messages m"
+                        " WHERE m.room_id=? AND m.created_at>=? AND m.user_id!=?"
+                        "   AND m.id>? AND m.created_at<?"
+                        " ORDER BY m.id DESC LIMIT 1",
+                        (rid, edge, member, floor, float(before_ts)),
+                    ).fetchone()
+                    if not pending:
+                        continue
+                    reminded = self._db.execute(
+                        "SELECT COALESCE(MAX(reminded_id),0) AS x FROM private_reads"
+                        " WHERE room_id=? AND user_id=?", (rid, member)).fetchone()
+                    if int(pending["id"]) <= int(reminded["x"] or 0):
+                        continue
+                    due.append({
+                        "room_id": rid,
+                        "member": member,
+                        "message_id": int(pending["id"]),
+                        "sender_id": int(pending["user_id"]),
+                        "text": pending["text"],
+                        "created_at": float(pending["created_at"]),
+                    })
+        return due
+
+    def prune_private(self, keep_sec: Optional[int] = None) -> int:
+        keep = int(keep_sec) if keep_sec else self.PRIVATE_KEEP_SEC
+        edge = _now() - keep
+        with self._lock:
+            msg = self._db.execute(
+                "DELETE FROM private_messages WHERE created_at<?", (edge,))
+            reads = self._db.execute(
+                "DELETE FROM private_reads WHERE room_id IN"
+                " (SELECT id FROM private_chats WHERE updated_at<?)", (edge,))
+            rooms = self._db.execute(
+                "DELETE FROM private_chats WHERE updated_at<?", (edge,))
+            self._db.commit()
+        return int((msg.rowcount or 0) + (reads.rowcount or 0)
+                   + (rooms.rowcount or 0))
+
+    def chat_participants(self, keep_sec: Optional[int] = None,
+                          limit: int = 50) -> List[Dict[str, Any]]:
+        """Кто писал в общий чат за окно истории (для списка и приглашений)."""
+        keep = int(keep_sec) if keep_sec else self.CHAT_KEEP_SEC
+        edge = _now() - keep
+        lim = max(1, min(int(limit), 100))
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT user_id, COUNT(*) AS cnt, MAX(id) AS last_mid,"
+                " MAX(created_at) AS last_at"
+                " FROM terminal_chat WHERE created_at>=?"
+                " GROUP BY user_id ORDER BY last_mid DESC LIMIT ?",
+                (edge, lim),
+            ).fetchall()
+        out = []
+        for r in rows:
+            uid = int(r["user_id"])
+            u = self.get_user(uid)
+            out.append({
+                "id": uid,
+                "name": (u or {}).get("display_name") or f"id{uid}",
+                "admin": bool((u or {}).get("is_admin")),
+                "messages": int(r["cnt"]),
+                "last_at": float(r["last_at"] or 0),
+            })
+        return out
+
+    def find_chat_users(self, q: str, limit: int = 8,
+                        exclude_id: int = 0) -> List[Dict[str, Any]]:
+        """Поиск кандидатов в личный диалог по началу ника/@username/имени.
+
+        Только для авторизованных; письма наружу не отдаём — в чате человек
+        представлен id и ником, и они же остаются якорем приватного диалога.
+        """
+        q = (q or "").strip().lstrip("@")[:64]
+        if len(q) < 2:
+            return []
+        lim = max(1, min(int(limit), 10))
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT id, first_name, last_name, username, is_admin FROM users"
+                " WHERE is_banned=0 AND id!=?"
+                "   AND (username LIKE ? OR first_name LIKE ? OR last_name LIKE ?"
+                "        OR email LIKE ?)"
+                " ORDER BY last_seen DESC LIMIT ?",
+                (int(exclude_id or 0), q + "%", q + "%", q + "%", q + "%", lim),
+            ).fetchall()
+        out = []
+        for r in rows:
+            u = dict(r)
+            out.append({"id": int(u["id"]),
+                        "name": display_name(u),
+                        "username": u.get("username") or "",
+                        "admin": bool(u.get("is_admin"))})
+        return out
+
 
     # ----- 💬 Комментарии к дайджесту и сводке по часам ----------------------
     CONTENT_COMMENT_MAX_LEN = 1000

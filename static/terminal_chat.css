@@ -234,3 +234,181 @@ body.tchat-open .tchat-header-btn {
   font-size: 10px;
 }
 
+
+/* ============================================================================
+   🔒 v3: растягивание, вкладки «Общий/Личные», приватные диалоги,
+   зелёный бейдж онлайна и подсветка неотвеченных уведомлений.
+   ============================================================================ */
+#tchat-list.hidden, .tchat-dm.hidden, .tchat-dm-chat.hidden,
+.tchat-invite-form.hidden, .hidden-soft.hidden { display:none !important; }
+
+/* — панель: базовый размер теперь «режимный», при ресайзе пишет inline — */
+.tchat-panel.tchat-resized { max-height: none; max-width: none; }
+
+/* ручки растягивания по краям и углам */
+.tchat-rz { position:absolute; z-index:5; }
+.tchat-rz-n { top:-3px; left:10px; right:10px; height:7px; cursor:ns-resize; }
+.tchat-rz-s { bottom:-3px; left:10px; right:10px; height:7px; cursor:ns-resize; }
+.tchat-rz-w { left:-3px; top:10px; bottom:10px; width:7px; cursor:ew-resize; }
+.tchat-rz-e { right:-3px; top:10px; bottom:10px; width:7px; cursor:ew-resize; }
+.tchat-rz-ne { top:-3px; right:-3px; width:14px; height:14px; cursor:nesw-resize; }
+.tchat-rz-nw { top:-3px; left:-3px; width:14px; height:14px; cursor:nwse-resize; }
+.tchat-rz-se { bottom:-3px; right:-3px; width:14px; height:14px; cursor:nwse-resize; }
+.tchat-rz-sw { bottom:-3px; left:-3px; width:14px; height:14px; cursor:nesw-resize; }
+/* зацепка в углу — видна при наведении на панель */
+.tchat-rz-se::after {
+  content:""; position:absolute; right:3px; bottom:3px; width:8px; height:8px;
+  border-right:2px solid #35508a; border-bottom:2px solid #35508a;
+  border-radius:0 0 3px 0; opacity:.6;
+}
+#terminal-chat .tchat-panel { position:relative; }
+
+/* — вкладки — */
+.tchat-tabs {
+  display:flex; gap:4px; padding:6px 8px 0;
+  background:#0e182d; border-bottom:1px solid #1e2e55;
+}
+.tchat-tab {
+  flex:0 0 auto; position:relative;
+  background:transparent; border:0; border-bottom:2px solid transparent;
+  color:#7f93b8; font-size:12.5px; font-weight:600; cursor:pointer;
+  padding:6px 10px; display:inline-flex; align-items:center; gap:6px;
+}
+.tchat-tab:hover { color:#c9d4f0; }
+.tchat-tab.active { color:#eaf1ff; border-bottom-color:#35508a; }
+.tchat-tab-badge {
+  background:#ff3b5c; color:#fff; font-size:10px; font-weight:700;
+  min-width:16px; height:16px; border-radius:999px;
+  display:inline-flex; align-items:center; justify-content:center; padding:0 4px;
+}
+.tchat-tab-badge.hidden { display:none !important; }
+
+/* — список личных диалогов — */
+.tchat-dm { flex:1 1 auto; overflow-y:auto; padding:8px; scrollbar-width:thin; }
+.tchat-dm-top { display:flex; gap:6px; margin-bottom:6px; flex-wrap:wrap; }
+.tchat-mini {
+  background:#162040; border:1px solid #2d4370; color:#c9d4f0;
+  border-radius:7px; padding:4px 9px; font-size:12px; cursor:pointer;
+}
+.tchat-mini:hover { background:#1c2b55; color:#fff; }
+.tchat-mini.ok { border-color:#1f7a4d; color:#7ee2b0; }
+.tchat-mini.no { border-color:#7a2436; color:#ff9aab; }
+.tchat-invite-form { display:flex; gap:6px; flex:1 1 100%; }
+.tchat-invite-form input {
+  flex:1 1 auto; min-width:0; background:#0a1226; border:1px solid #223055;
+  color:#dbe6ff; border-radius:7px; padding:5px 8px; font-size:12.5px; outline:none;
+}
+.tchat-invite-results { margin-top:6px; }
+.tchat-inv-item {
+  display:flex; align-items:center; gap:7px; padding:6px 8px;
+  border:1px solid #1c2a4a; border-radius:9px; background:#101a30;
+  margin-bottom:5px; cursor:pointer;
+}
+.tchat-inv-item:hover { border-color:#2d4370; background:#14203c; }
+.tchat-inv-name { flex:1 1 auto; font-size:12.5px; color:#c8d6f2; overflow:hidden; text-overflow:ellipsis; }
+
+.tchat-dm-item {
+  border:1px solid #1c2a4a; border-radius:10px; background:#101a30;
+  padding:8px 9px; margin-bottom:7px; cursor:pointer; transition:border-color .15s;
+}
+.tchat-dm-item:hover { border-color:#2d4370; }
+.tchat-dm-item.unread { border-color:#1f7a4d; background:#0f2118; }
+.tchat-peer { display:flex; align-items:center; gap:6px; font-size:13px; font-weight:600; color:#a9bee8; }
+.tchat-peer-head { font-size:13px; }
+.tchat-last { font-size:12px; color:#7f93b8; margin-top:3px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.tchat-last.muted { opacity:.7; }
+.tchat-dm-meta { display:flex; align-items:center; margin-top:4px; }
+.tchat-dm-meta .tchat-time { font-size:11px; color:#63769c; }
+.tchat-dm-unread {
+  margin-left:auto; background:#22c55e; color:#04140b; font-size:10.5px; font-weight:800;
+  min-width:17px; height:17px; border-radius:999px; display:inline-flex;
+  align-items:center; justify-content:center; padding:0 5px;
+}
+.tchat-dm-flag { font-size:10.5px; color:#8ab4ff; border:1px solid #2a4d8a; border-radius:6px; padding:0 5px; font-weight:600; }
+.tchat-dm-flag.inv { color:#7ee2b0; border-color:#1f7a4d; }
+.tchat-dm-actions { display:flex; gap:6px; margin-top:6px; }
+
+/* точка «онлайн в чате» у имени собеседника */
+.tchat-peer-dot { width:8px; height:8px; border-radius:50%; background:#3a4a6b; flex:0 0 auto; }
+.tchat-peer-dot.on { background:#22c55e; box-shadow:0 0 6px #22c55e; }
+
+/* — приватные пузыри — */
+.tchat-dm-chat { flex:1 1 auto; display:flex; flex-direction:column; min-height:0; }
+.tchat-dm-head {
+  display:flex; align-items:center; gap:7px; padding:7px 9px;
+  border-bottom:1px solid #1e2e55; background:#0e182d; flex-wrap:wrap;
+}
+.tchat-list .tchat-msg.mine {
+  background:#12321f; border-color:#1f7a4d; margin-left:auto; max-width:88%;
+}
+.tchat-list .tchat-msg.peer { margin-right:auto; max-width:92%; }
+
+/* ник как ссылка: клик — меню «ответить / написать лично» */
+.tchat-namelink {
+  background:none; border:0; padding:0; font:inherit; cursor:pointer;
+  color:inherit; text-decoration:none;
+}
+.tchat-namelink:hover { color:#8ab4ff; text-decoration:underline; }
+
+/* всплывающее меню пользователя */
+.tchat-usermenu {
+  position:fixed; z-index:1600; min-width:170px;
+  background:#101a30; border:1px solid #2d4370; border-radius:10px;
+  box-shadow:0 12px 30px rgba(0,0,0,.55); padding:5px;
+  font-family:inherit;
+}
+.tchat-usermenu-name { font-size:12px; color:#7f93b8; padding:4px 8px 6px; border-bottom:1px solid #1c2a4a; margin-bottom:4px; }
+.tchat-usermenu button {
+  display:block; width:100%; text-align:left; background:transparent; border:0;
+  color:#c9d4f0; font-size:12.5px; padding:6px 8px; border-radius:7px; cursor:pointer;
+}
+.tchat-usermenu button:hover { background:#1c2b55; color:#fff; }
+
+/* — 🟢 бейдж «сколько онлайн» на кнопке чата — */
+.tchat-online {
+  display:inline-flex; align-items:center; justify-content:center;
+  min-width:17px; height:17px; padding:0 5px; border-radius:999px;
+  font-size:10.5px; font-weight:800;
+  color:#41527a; background:#0a1226; border:1px solid #223055;
+  transition:color .2s, background .2s, border-color .2s, box-shadow .2s;
+}
+.tchat-online::before {
+  content:""; width:6px; height:6px; border-radius:50%;
+  background:#41527a; margin-right:4px; flex:0 0 auto;
+  transition:background .2s, box-shadow .2s;
+}
+/* есть люди — светим зелёным и слегка пульсируем */
+.tchat-online.on {
+  color:#b6ffcf; background:#08210f; border-color:#1f7a4d;
+  box-shadow:0 0 10px rgba(34,197,94,.55);
+}
+.tchat-online.on::before {
+  background:#22c55e;
+  box-shadow:0 0 8px #22c55e, 0 0 14px rgba(34,197,94,.7);
+  animation:tchat-online-pulse 1.6s ease-in-out infinite;
+}
+@keyframes tchat-online-pulse {
+  0%,100% { box-shadow:0 0 6px #22c55e; }
+  50% { box-shadow:0 0 12px #22c55e, 0 0 20px rgba(34,197,94,.75); }
+}
+
+/* — подсветка панели и кнопки, пока висят уведомления — */
+.tchat-notify { }
+body .tchat-header-btn.tchat-notify,
+#terminal-chat .tchat-toggle.tchat-notify {
+  border-color:#1f7a4d;
+  box-shadow:0 0 0 1px rgba(34,197,94,.35), 0 0 16px rgba(34,197,94,.45);
+  animation:tchat-notify-glow 1.8s ease-in-out infinite;
+}
+@keyframes tchat-notify-glow {
+  0%,100% { box-shadow:0 0 0 1px rgba(34,197,94,.30), 0 0 10px rgba(34,197,94,.35); }
+  50%     { box-shadow:0 0 0 1px rgba(34,197,94,.55), 0 0 22px rgba(34,197,94,.6); }
+}
+.tchat-panel.tchat-notify {
+  border-color:#1f7a4d;
+  box-shadow:0 16px 40px rgba(0,0,0,.5), 0 0 18px rgba(34,197,94,.35);
+}
+@media (max-width: 640px) {
+  /* на узких экранах ручки не нужны — панель и так почти во весь экран */
+  .tchat-rz { display:none; }
+}

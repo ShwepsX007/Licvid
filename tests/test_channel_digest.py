@@ -258,7 +258,9 @@ class DigestTest(unittest.TestCase):
         """
         snap = collect_digest(self.events, now=self.now, oi=self.oi, cvd=self.cvd)
         snap["board"] = _live_board()
-        long_head = "🧪 " + "рынок кипит " * 40          # длиннее 240 знаков
+        # шапка ровно в лимит 240 (обрез по точке внутри): граница «тесного»
+        # вида часов не должна зависеть от того, где влез пробел
+        long_head = "🧪 " + "м" * 235 + ". хвост после точки отрезается"
         for lang in ("ru", "en"):
             t = render_post(snap, 0, lang=lang, head_override=long_head)
             self.assertLessEqual(caption_len(t), CAPTION_LIMIT, (lang, caption_len(t)))

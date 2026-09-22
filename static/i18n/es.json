@@ -210,9 +210,21 @@
     "cab.name_hint": "Este es tu apodo en el sitio — así te ven en el chat del terminal y en los comentarios del digest y de los resúmenes horarios",
     "cab.name_ph2": "Tu apodo — como se ve en el chat",
     "cc.title": "💬 Comentarios",
-    "cc.sub_digest": "Discusión del número — solo para registrados. El apodo viene de tu cuenta (como en el chat del terminal).",
+    "cc.sub_digest": "Discusión del número — solo para registrados.",
+    "cc.sub_hourly": "Discusión del número — solo para registrados.",
     "cc.ph_write": "Escribir un comentario…",
-    "cc.send": "➤ Enviar"
+    "cc.ph_login": "Inicia sesión para escribir comentarios",
+    "cc.send": "➤ Enviar",
+    "cc.empty": "Aún no hay comentarios.",
+    "cc.open_first": "Selecciona un número para abrir la discusión.",
+    "cc.you": "Eres {name} · hasta {max} caracteres",
+    "cc.login": "Iniciar sesión",
+    "cc.login_prompt": "La discusión está abierta para usuarios registrados. {login}",
+    "cc.sending": "Enviando…",
+    "cc.too_long": "Demasiado largo: máximo {max} caracteres.",
+    "cc.error": "No se pudo enviar — inténtalo de nuevo.",
+    "cc.delete_confirm": "¿Eliminar el comentario {id}?",
+    "cc.open_issue": "Primero selecciona un número."
   },
   "phrases": {
     "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "Un post cada N horas: la ventana del post son esas mismas N horas, y el bloque de análisis dentro del post ocupa un cuarto de la ventana (cada 4 h → una hora, cada 1 h → 15 minutos).",

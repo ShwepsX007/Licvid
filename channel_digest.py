@@ -1204,18 +1204,46 @@ def format_headline(tpl: str, h: int = 4, lang: str = "ru") -> str:
     return f"<b>{_html.escape(s, quote=False)}</b>"
 
 
+HEAD_TG_LIMIT = 400             # шапка в канале: после ухода почасовых строк
+                                # места много, но и всю подпись (1024) она
+                                # съесть не должна
+
+
+def _head_cut(text: str, limit: int) -> str:
+    """Обрезать шапку до ``limit`` по границе предложения, не на полуслове.
+
+    Модель иногда пишет длиннее лимита; обрыв «…в шортах и» читается как
+    сбой, поэтому держимся за точку/восклицательный/вопросительный знак.
+    Если границы нет — режем по слову, в самом тесном случае — по знаку.
+    """
+    s = str(text or "")
+    if len(s) <= limit:
+        return s
+    cut = s[:limit]
+    stop = -1
+    for mark in (". ", "! ", "? ", "… "):
+        i = cut.rfind(mark)
+        if i > stop:
+            stop = i
+    if stop > limit // 2:
+        return cut[:stop + 1].strip()
+    i = cut.rfind(" ")
+    return (cut[:i].strip() if i > 0 else cut).strip()
+
+
 def format_ai_head(text: str, h: int = 4, limit: Optional[int] = HEAD_MAX_LEN) -> str:
     """Шапка от ИИ: всегда экранируем и оборачиваем в <b>.
 
     В отличие от шаблонов из админки (там можно прислать готовый HTML),
     текст модели — это только текст: случайный «<» сломает разметку Telegram.
-    ``limit`` — предел длины подписи под фото (HEAD_MAX_LEN); для сайта
-    передают None — там шапка идёт целиком, без обрезки.
+    ``limit`` — предел длины шапки; для сайта передают None — там шапка идёт
+    целиком, без обрезки. Режется по границе предложения (_head_cut), а не
+    по знакам: обрыв на полуслове читается как сбой.
     """
     import html as _html
     s = (text or "").strip().replace("{h}", str(int(h)))
     if limit and limit > 0:
-        s = s[:limit]
+        s = _head_cut(s, limit)
     return f"<b>{_html.escape(s, quote=False)}</b>" if s else ""
 
 
@@ -1400,7 +1428,8 @@ def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = N
                 lang: str = "ru",
                 limit: int = CAPTION_LIMIT,
                 head_full: bool = False,
-                with_hours: bool = True) -> str:
+                with_hours: bool = True,
+                head_limit: int = HEAD_MAX_LEN) -> str:
     """Сводка одним сообщением: шапка, строки окна и часы по порядку.
 
     Строки окна: итог (касса, число ликвидаций, сравнение с прошлым окном),
@@ -1423,7 +1452,10 @@ def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = N
     ИИ: та же раскладка, меняется только текст. head_full=True — версия для
     сайта: шапка не режется под лимит подписи Telegram и пост идёт целиком.
     with_hours=False — вид для канала: без почасовых строк (шапка и цифры
-    окна), почасовка целиком остаётся в версии для сайта.
+    окна), почасовка целиком остаётся в версии для сайта. head_limit — предел
+    шапки в канале (режется по границе предложения): места после ухода
+    почасовых строк много, но и всю подпись в 1024 знака шапка съесть не
+    должна.
     """
     import html as _html
     f = _facts(snap, lang)
@@ -1443,9 +1475,10 @@ def render_post(snap: dict, variant: int = 0, headlines: Optional[List[str]] = N
     # не должна «замораживать» раскладку — блоки продолжают чередоваться
     v = int(variant)
     # head_full=True — версия для сайта: шапка от ИИ идёт целиком, без
-    # обрезки под лимит подписи Telegram (в канале — та же шапка, но короче)
+    # обрезки. В канале шапка режется по границе предложения до head_limit
+    # (после ухода почасовых строк места много — HEAD_TG_LIMIT знаков).
     head = (format_ai_head(head_override, h,
-                           limit=None if head_full else HEAD_MAX_LEN)
+                           limit=None if head_full else head_limit)
             if head_override
             else heads[v % max(1, len(heads))])
 

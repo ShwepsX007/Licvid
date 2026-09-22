@@ -1482,7 +1482,7 @@ class TelegramBot:
 
     async def post_channel_digest(self, force: bool = False) -> bool:
         from channel_digest import (
-            active_headlines, pick_active_image, render_post,
+            HEAD_TG_LIMIT, active_headlines, pick_active_image, render_post,
         )
         self._digest_err = ""
         self._last_tg_err = ""
@@ -1551,31 +1551,34 @@ class TelegramBot:
         # Вид для канала: шапка и цифры окна (касса, лидер, CVD) без
         # почасовых строк — почасовка целиком живёт на сайте /hourly,
         # кнопка «📖 Сводка целиком на сайте» под постом ведёт туда.
+        # Шапка в канале — полный текст ИИ (как на сайте), но с пределом
+        # HEAD_TG_LIMIT по границе предложения: после ухода почасовых строк
+        # в подписи много места, а обрыв на полуслове читался как сбой.
         ai_head, ai_note = await self._ai_headline(snap, variant=n)
+        ai_head_full = self._ai_head_full.get("ru") or ai_head
         caption = render_post(
             snap, n,
             headlines=active_headlines(self.store, hours),
-            head_override=ai_head,
+            head_override=ai_head_full or None,
             site_url=self.site_url(),
             bot_url=self.bot_url(),
             with_hours=False,
+            head_limit=HEAD_TG_LIMIT,
         )
         ai_head_en, _note_en = await self._ai_headline(snap, variant=n, lang="en")
+        ai_head_full_en = self._ai_head_full.get("en") or ai_head_en
         caption_en = render_post(
             snap, n,
             headlines=active_headlines(self.store, hours, lang="en"),
-            head_override=ai_head_en or None,
+            head_override=ai_head_full_en or None,
             site_url=self.site_url(),
             bot_url=self.bot_url(),
             lang="en",
             with_hours=False,
+            head_limit=HEAD_TG_LIMIT,
         )
         # Полный текст для сайта /hourly — без лимита 1024 и без обрезки
-        # ИИ-шапки (как в daily_digest: в TG — коротко, на сайте — полностью).
-        # Шапка берётся целиком (_ai_head_full): рассказ не обрывается
-        # на полуслове, как в подписи под фото.
-        ai_head_full = self._ai_head_full.get("ru") or ai_head
-        ai_head_full_en = self._ai_head_full.get("en") or ai_head_en
+        # ИИ-шапки: на сайте рассказ идёт целиком (ai_head_full выше).
         caption_full = render_post(
             snap, n,
             headlines=active_headlines(self.store, hours),

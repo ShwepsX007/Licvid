@@ -210,9 +210,21 @@
     "cab.name_hint": "This is your nickname on the site — how others see you in terminal chat and in digest and hourly comments",
     "cab.name_ph2": "Your nickname — as seen in chat",
     "cc.title": "💬 Comments",
-    "cc.sub_digest": "Discussion of the issue — for registered users only. Nickname comes from account (same as in terminal chat).",
+    "cc.sub_digest": "Discussion of the issue — for registered users only.",
+    "cc.sub_hourly": "Discussion of the issue — for registered users only.",
     "cc.ph_write": "Write a comment…",
-    "cc.send": "➤ Send"
+    "cc.ph_login": "Log in to write comments",
+    "cc.send": "➤ Send",
+    "cc.empty": "No comments yet.",
+    "cc.open_first": "Select an issue to open the discussion.",
+    "cc.you": "You are {name} · up to {max} chars",
+    "cc.login": "Log in",
+    "cc.login_prompt": "Discussion is open to registered users. {login}",
+    "cc.sending": "Sending…",
+    "cc.too_long": "Too long: {max} chars max.",
+    "cc.error": "Could not send — please try again.",
+    "cc.delete_confirm": "Delete comment {id}?",
+    "cc.open_issue": "Select an issue first."
   },
   "phrases": {
     "Пост раз в N часов: окно поста — эти же N часов, а блок анализа внутри поста — четверть окна (раз в 4 ч → по часу, раз в 1 ч → по 15 минут).": "One post every N hours: the post window is those same N hours, and the analysis block inside the post is a quarter of the window (every 4 h → one hour, every 1 h → 15 minutes).",

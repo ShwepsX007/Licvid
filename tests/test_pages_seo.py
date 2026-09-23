@@ -367,6 +367,20 @@ class ArticlePagesSeoTest(unittest.TestCase):
         cards = self.client.get("/articles?lang=en").text
         self.assertIn('lang="ru"', cards)
 
+    def test_list_chrome_is_localized_on_the_server(self) -> None:
+        """Список статей: подписи карточек приходят сразу на языке гостя.
+
+        Заголовок страницы и описание сервер берёт из словаря, а «Читать →»
+        на карточке раньше был только русским или английским — китайский,
+        хинди и испанский гости видели английскую подпись.
+        """
+        for lang in LANGS:
+            with self.subTest(lang=lang):
+                html = self.client.get(f"/articles?lang={lang}").text
+                self.assertIn(seo_pages.text(lang, "art.read"), html)
+                if lang != "ru":
+                    self.assertNotIn('class="ac-more">Читать', html)
+
     def test_unknown_article_is_a_clean_404(self) -> None:
         r = self.client.get("/articles/nyet-takoy-stati")
         self.assertEqual(r.status_code, 404)

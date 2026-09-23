@@ -248,6 +248,15 @@ def _text(lang: str, key: str, fallback: str = "") -> str:
     return str(_catalogue(lang).get(key) or fallback)
 
 
+def text(lang: str, key: str, fallback: str = "") -> str:
+    """Строка словаря для страницы: ключ → текст языка (иначе ``fallback``).
+
+    Так сервер отдаёт подписи сразу на языке гостя — не дожидаясь, пока
+    браузер перерисует их из ``data-i18n``.
+    """
+    return _text(lang, key, fallback)
+
+
 def _attr(value: str) -> str:
     """Значение для атрибута: кавычки и угловые скобки не должны сломать разметку."""
     return html_mod.escape(str(value), quote=True)

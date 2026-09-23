@@ -495,6 +495,8 @@ def _card_html(item: dict, lang: str) -> str:
             + _esc_html(_date_label(ts, lang)) + "</time>") if ts else ""
     title_attr = _lang_attr(item.get("title_lang"), lang)
     text_attr = _lang_attr(item.get("text_lang"), lang)
+    # «Читать →» на карточке: у zh/hi/es тоже свой язык, а не английский
+    more = seo_pages.text(lang, "art.read", t_item(lang, "Читать", "Read"))
     return (
         '<a class="art-card" href="/articles/' + _attr(str(item.get("id") or "")) + '">'
         + img
@@ -503,7 +505,7 @@ def _card_html(item: dict, lang: str) -> str:
         + ('<p class="ac-sum"' + text_attr + ">"
            + _esc_html(item.get("excerpt") or "") + "</p>"
            if item.get("excerpt") else "")
-        + '<span class="ac-more">' + _esc_html(t_item(lang, "Читать", "Read"))
+        + '<span class="ac-more">' + _esc_html(more)
         + " →</span></div></a>"
     )
 

@@ -34,12 +34,17 @@ from market_feed import BINANCE_REST, BYBIT_REST, OKX_REST, GATE_REST, _get_json
 log = logging.getLogger("book")
 
 # --- Наблюдаемая зона и пороги ---------------------------------------------
-POLL_SEC = float(os.getenv("LIQSCOPE_BOOK_POLL_SEC", "2.0"))
+POLL_SEC = float(os.getenv("LIQSCOPE_BOOK_POLL_SEC", "3.0"))
 # Глубина запроса: у монет с мелким тиком (BTC: $0.1 при цене 60k+) 150 уровней
 # покрывают жалкие $15–50 — меньше одной корзины, стакан «схлопывается» в 1–2
-# корзины и стен не бывает вовсе. Берём максимум, что отдаёт биржа за один
-# запрос (per-exchange потолки ниже), окно ±SPAN_REL режется уже в агрегаторе.
-DEPTH_LIMIT = int(os.getenv("LIQSCOPE_BOOK_DEPTH", "1000"))
+# корзины и стен не бывает вовсе. Окно ±SPAN_REL режется уже в агрегаторе.
+# НО «максимум биржи» стоит дорого: Binance limit=1000 — вес 20 (против 2 у
+# 100), и при 2-сек опросе десятка монет IP уезжает в 429/418-бан на минуты —
+# фид глохнет целиком («биржи недоступны», новых стен нет). Поэтому глубина
+# и период опроса подобраны под лимиты: 500 уровней у Binance (вес 10), 200 у
+# Bybit/OKX, 300 у Gate (его потолок), опрос раз в 3 с и не более 10 монет.
+DEPTH_LIMIT = int(os.getenv("LIQSCOPE_BOOK_DEPTH", "500"))
+DEPTH_PER_EXCH = {"binance": 500, "bybit": 200, "okx": 200, "gate": 300}
 SPAN_REL = 0.02              # смотрим ±2% от mid: дальше — мусор дальних уровней
 BUCKET_REL = 0.00035         # цена корзины ≈ 0.035% от mid (BTC 63k → ~$22)
 WALL_MIN_USD = float(os.getenv("LIQSCOPE_BOOK_MIN_USD", "150000"))
@@ -48,7 +53,8 @@ REL_MIN_BUCKETS = 12         # относительный порог осмыс�
 GONE_AFTER = 5               # пропущенных опросов подряд — стена ушла
 HISTORY_TTL_DAYS = 7         # сколько дней ленты хранить на диске
 SNAPSHOT_TTL = 4             # сек. — чаще не отдаваем историю (легкий дедуп)
-MAX_SYMBOLS = 16             # потолок одновременно опрашиваемых монет
+MAX_SYMBOLS = int(os.getenv("LIQSCOPE_BOOK_MAX_SYMBOLS", "10"))   # монет в опросе
+BACKOFF_SEC = 75.0           # биржа ответила 429/418 — не трогаем её столько секунд
 
 
 # --- Утилиты ------------------------------------------------------------------
@@ -61,15 +67,20 @@ def depth_url(exchange, symbol):
     """URL стакана биржи для канон-символа BTC_USDT."""
     b = symbol.replace("_", "").upper()
     base = base_of(symbol)
+    n = min(DEPTH_LIMIT, DEPTH_PER_EXCH.get(exchange, DEPTH_LIMIT))
     if exchange == "binance":
-        return f"{BINANCE_REST}/fapi/v1/depth?symbol={b}&limit={min(DEPTH_LIMIT, 1000)}"
+        # допустимые limit: 5,10,20,50,100,500,1000 — иное биржа отвергает
+        n = max(v for v in (5, 10, 20, 50, 100, 500, 1000) if v <= max(n, 5))
+        return f"{BINANCE_REST}/fapi/v1/depth?symbol={b}&limit={n}"
     if exchange == "bybit":
         return (f"{BYBIT_REST}/v5/market/orderbook?category=linear"
-                f"&symbol={b}&limit={min(DEPTH_LIMIT, 500)}")
+                f"&symbol={b}&limit={n}")
     if exchange == "okx":
-        return f"{OKX_REST}/api/v5/market/books?instId={base}-USDT-SWAP&sz={min(DEPTH_LIMIT, 400)}"
+        return f"{OKX_REST}/api/v5/market/books?instId={base}-USDT-SWAP&sz={n}"
     if exchange == "gate":
-        return f"{GATE_REST}/order_book?contract={symbol.upper()}&last={min(DEPTH_LIMIT, 1000)}"
+        # параметр глубины — limit (макс. 300); «last» у этого метода нет:
+        # с ним Gate молча отдавал дефолтные 10 уровней
+        return f"{GATE_REST}/order_book?contract={symbol.upper()}&limit={min(n, 300)}"
     raise ValueError(f"unknown exchange {exchange}")
 
 
@@ -313,9 +324,17 @@ class BookFeed:
         self._hist_cache = {}   # (sym, hours bucket) -> (ts, payload)
         self._demo_walk = {}    # sym -> {"px":..., "v":...}
         self._viewers = {}      # sym -> ts последнего запроса с графика (TTL 90 c)
+        self._backoff = {}      # exch -> until_ts: биржа попросила паузу (429/418)
+        self._last_ok = 0.0     # когда последний раз хоть одна биржа ответила
         self._day = utc_day()
+        self._persist_ok = None    # None — ещё не писали; False — диск не даётся
         if self.data_dir:
-            os.makedirs(self.data_dir, exist_ok=True)
+            try:
+                os.makedirs(self.data_dir, exist_ok=True)
+            except OSError as exc:
+                log.error("book: каталог истории %s недоступен (%s) — стены не "
+                          "переживут рестарт", self.data_dir, exc)
+                self._persist_ok = False
             self._load_tail()
 
     # — Symbols
@@ -426,10 +445,23 @@ class BookFeed:
         self._merge(sym, [], time.time(), no_data=True)
 
     async def _fetch_depth(self, exch, sym, specs):
+        until = self._backoff.get(exch, 0.0)
+        if until > time.time():
+            raise RuntimeError(f"{exch} backoff {int(until - time.time())}s")
         url = depth_url(exch, sym)
-        data = await _get_json(self._session, url, timeout=5.0)
+        try:
+            data = await _get_json(self._session, url, timeout=5.0)
+        except Exception as exc:
+            msg = str(exc)
+            # лимит запросов: биржа просит отдохнуть — иначе IP уедет в бан
+            if "HTTP 429" in msg or "HTTP 418" in msg or "HTTP 403" in msg:
+                self._backoff[exch] = time.time() + BACKOFF_SEC
+                log.warning("book: %s rate-limited (%s) — пауза %.0fs", exch, msg[:60], BACKOFF_SEC)
+            self._mark(exch, msg[:160])
+            raise
         parsed = parse_depth(exch, data, specs)
         if not parsed or (not parsed[0] and not parsed[1]):
+            self._mark(exch, f"empty depth {sym}")
             raise ValueError(f"empty depth {exch}")
         self._mark(exch)
         return parsed
@@ -526,8 +558,14 @@ class BookFeed:
                 self._day = day
             with open(self._shard_path(day), "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(ev, ensure_ascii=False, separators=(",", ":")) + "\n")
-        except OSError:
-            log.warning("book shard write failed", exc_info=True)
+            self._persist_ok = True
+        except OSError as exc:
+            # не молчим: без шейрдов история живёт только до рестарта процесса
+            if self._persist_ok is not False:
+                log.error("book: запись истории в %s не удалась (%s) — стены "
+                          "пропадут при рестарте; проверьте каталог и права",
+                          self.data_dir, exc)
+            self._persist_ok = False
 
     def _load_tail(self):
         """Поднимаем хвост ленты (несколько последних дней) — стены и история
@@ -619,11 +657,20 @@ class BookFeed:
 
     def status_summary(self):
         mode = ("demo" if self.demo else "live") if self._session else "idle"
-        out = {"mode": mode, "symbols": self.wanted_symbols()}
+        now = time.time()
+        out = {"mode": mode, "symbols": self.wanted_symbols(), "poll_sec": self.poll_sec,
+               "depth": DEPTH_PER_EXCH, "data_dir": self.data_dir or None,
+               "persist_ok": self._persist_ok,
+               "live_walls": sum(1 for st in self.walls.values() for w in st.values() if w["live"]),
+               "known_walls": sum(len(st) for st in self.walls.values())}
         for exch, st in self.status.items():
             if exch in ("mode",):
                 continue
+            bo = self._backoff.get(exch, 0.0)
             out[exch] = {"ok": st.get("ok"), "last_ts": st.get("last_ts"),
+                         "age_s": int(now - st["last_ts"]) if st.get("last_ts") else None,
+                         "calls": st.get("calls"),
+                         "backoff_s": int(bo - now) if bo > now else 0,
                          "error": (st.get("error") or "")[:120] or None}
         return out
 
@@ -632,7 +679,8 @@ class BookFeed:
         сыгранный с диска хвост — на диск не лезем (PoC: всё в памяти)."""
         now = time.time()
         sym = (sym or "").upper()
-        since = now - max(0.25, float(hours)) * 3600
+        hours = min(max(0.25, float(hours or 6)), self.ttl_days * 24.0)
+        since = now - hours * 3600
         min_usd = max(float(min_usd or 0), self.min_usd)
         key = (sym, round(float(hours) * 4), round(min_usd / 1000))
         cached = self._hist_cache.get(key)
@@ -649,7 +697,7 @@ class BookFeed:
         bands.sort(key=lambda w: -w["opened"])
         payload = {"ok": True, "ts": round(now, 1), "symbol": sym, "since": since,
                    "hours": float(hours), "min_usd": min_usd, "count": len(bands),
-                   "walls": bands[:400]}
+                   "walls": bands[:1500]}
         self._hist_cache[key] = (now, payload)
         return payload
 

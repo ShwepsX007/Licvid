@@ -1192,6 +1192,15 @@ def register_account_routes(app) -> None:
         data = dict(data)
         data["subscribed"] = bool(row and row.get("enabled"))
         data["config"] = cfg
+        # каталог монет для выбора: топ фида + то, что уже в подписке
+        try:
+            syms = list(ctx.symbols_fn() or [])[:60]
+        except Exception:                                 # noqa: BLE001
+            syms = []
+        for s in cfg.get("symbols") or []:
+            if s not in syms:
+                syms.append(s)
+        data["symbols"] = syms
         return {"ok": True, **data}
 
     @router.post("/api/account/book")

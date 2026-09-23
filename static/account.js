@@ -713,17 +713,23 @@
                 return bookChipHtml((cfg.side || "both") === x[0],
                                     'data-bk-side="' + x[0] + '"', x[1]);
             }).join("");
+            /* Тумблеры — те же al-switch, что у алертов: единый вид сервисов */
             board.innerHTML =
                 '<div class="bk-head">' +
-                '<label class="bk-sw"><input type="checkbox" id="bk-enabled"' +
-                    (cfg.enabled ? " checked" : "") + "> слежение</label>" +
-                '<label class="bk-sw"><input type="checkbox" id="bk-notify"' +
-                    (cfg.notify !== false ? " checked" : "") + "> сигнал в Telegram</label>" +
+                '<label class="al-switch' + (cfg.enabled ? " on" : "") + '" id="bk-enabled">' +
+                    "<i></i><span>" + (cfg.enabled ? "СЛЕЖЕНИЕ ВКЛ" : "СЛЕЖЕНИЕ ВЫКЛ") + "</span></label>" +
+                '<label class="al-switch' + (cfg.notify !== false ? " on" : "") + '" id="bk-notify">' +
+                    "<i></i><span>" + (cfg.notify !== false ? "TELEGRAM ВКЛ" : "TELEGRAM ВЫКЛ") + "</span></label>" +
                 '<span class="bk-status" id="book-status"></span></div>' +
                 '<div class="al-label">порог стены</div><div class="al-chips" id="bk-thr">' + thr + "</div>" +
                 '<div class="al-label">сторона</div><div class="al-chips" id="bk-side">' + side + "</div>" +
-                '<div class="al-label">монеты (до 8)</div>' +
+                '<div class="al-label">монеты (до 8) · <span id="bk-symcount"></span></div>' +
                 '<div class="bk-syms" id="bk-syms"></div>' +
+                '<div class="al-label">добавить из списка</div>' +
+                '<div class="al-chips" id="bk-pick"></div>' +
+                '<div class="al-row"><input class="bk-add" id="bk-add" list="bk-sym-list" ' +
+                    'placeholder="или тикер: SOL, PEPE_USDT…" maxlength="20" autocomplete="off"></div>' +
+                '<datalist id="bk-sym-list"></datalist>' +
                 '<div class="bk-rows" id="book-rows"></div>' +
                 '<div class="bk-note" id="book-note"></div>';
             board.querySelectorAll("#bk-thr .al-chip").forEach(function (b) {
@@ -742,14 +748,41 @@
                     });
                 };
             });
-            var en = $("bk-enabled");
-            if (en) en.onchange = function () { bookSet("enabled", en.checked); };
-            var nt = $("bk-notify");
-            if (nt) nt.onchange = function () { bookSet("notify", nt.checked); };
+            function bindSwitch(id, key, onTxt, offTxt) {
+                var sw = $(id);
+                if (!sw) return;
+                sw.onclick = function (e) {
+                    e.preventDefault();
+                    var on = !sw.classList.contains("on");
+                    sw.classList.toggle("on", on);
+                    sw.querySelector("span").textContent = on ? onTxt : offTxt;
+                    bookSet(key, on);
+                };
+            }
+            bindSwitch("bk-enabled", "enabled", "СЛЕЖЕНИЕ ВКЛ", "СЛЕЖЕНИЕ ВЫКЛ");
+            bindSwitch("bk-notify", "notify", "TELEGRAM ВКЛ", "TELEGRAM ВЫКЛ");
             bookBuilt = true;
         }
+        if (d.symbols) bookSymbols = d.symbols;
         paintBookSyms(cfg);
         paintBookRows(d);
+    }
+    var bookSymbols = [];
+
+    function bookAddSymbol(raw) {
+        var v = String(raw || "").trim().toUpperCase().replace(/-/g, "_").replace(/\s+/g, "");
+        if (!v) return;
+        if (!/_USDT$/.test(v)) v = v.replace(/USDT$/, "") + "_USDT";
+        var cur = ((bookCfg && bookCfg.symbols) || []).slice();
+        if (cur.indexOf(v) >= 0) return;
+        if (cur.length >= 8) {
+            var st = $("book-status");
+            if (st) st.textContent = "не больше 8 монет — уберите лишнюю";
+            return;
+        }
+        cur.push(v);
+        bookSet("symbols", cur);
+        paintBookSyms(bookCfg);
     }
 
     function paintBookSyms(cfg) {
@@ -761,8 +794,9 @@
                    '<button type="button" class="bk-x" data-del="' + esc(s) +
                    '" title="убрать">×</button></span>';
         }).join("");
-        box.innerHTML = chips +
-            '<input class="bk-add" id="bk-add" placeholder="+ SOL_USDT" maxlength="20">';
+        box.innerHTML = chips || '<span class="bk-empty">пока пусто — выберите ниже</span>';
+        var cnt = $("bk-symcount");
+        if (cnt) cnt.textContent = list.length + " / 8";
         box.querySelectorAll(".bk-x").forEach(function (b) {
             b.onclick = function () {
                 var s = b.getAttribute("data-del");
@@ -770,20 +804,51 @@
                     return x !== s;
                 });
                 bookSet("symbols", cur);
+                paintBookSyms(bookCfg);
             };
         });
+        /* выбор из каталога: чипы топ-монет фида (+ те, что уже в подписке) */
+        var pick = $("bk-pick");
+        if (pick) {
+            var shown = (bookSymbols || []).slice(0, 24);
+            pick.innerHTML = shown.map(function (s) {
+                var on = list.indexOf(s) >= 0;
+                return '<button type="button" class="al-chip' + (on ? " on" : "") +
+                    '" data-bk-pick="' + esc(s) + '">' + esc(String(s).replace("_USDT", "")) + "</button>";
+            }).join("") || '<span class="bk-empty">каталог монет ещё грузится…</span>';
+            pick.querySelectorAll("[data-bk-pick]").forEach(function (b) {
+                b.onclick = function () {
+                    var s = b.getAttribute("data-bk-pick");
+                    if (list.indexOf(s) >= 0) {
+                        bookSet("symbols", list.filter(function (x) { return x !== s; }));
+                        paintBookSyms(bookCfg);
+                    } else {
+                        bookAddSymbol(s);
+                    }
+                };
+            });
+        }
+        var dl = $("bk-sym-list");
+        if (dl) dl.innerHTML = (bookSymbols || []).map(function (s) {
+            return '<option value="' + esc(s) + '">';
+        }).join("");
         var add = $("bk-add");
-        if (add) add.onkeydown = function (e) {
-            if (e.key !== "Enter") return;
-            e.preventDefault();
-            var v = String(add.value || "").trim().toUpperCase().replace(/-/g, "_");
-            if (!v) return;
-            if (!/_USDT$/.test(v)) v += "_USDT";
-            var cur = ((bookCfg && bookCfg.symbols) || []).slice();
-            if (cur.indexOf(v) < 0 && cur.length < 8) cur.push(v);
-            add.value = "";
-            bookSet("symbols", cur);
-        };
+        if (add && !add._bound) {
+            add._bound = true;
+            add.onkeydown = function (e) {
+                if (e.key !== "Enter") return;
+                e.preventDefault();
+                bookAddSymbol(add.value);
+                add.value = "";
+            };
+            /* выбор из выпадашки datalist — тоже добавляем без Enter */
+            add.onchange = function () {
+                if ((bookSymbols || []).indexOf(String(add.value || "").toUpperCase()) >= 0) {
+                    bookAddSymbol(add.value);
+                    add.value = "";
+                }
+            };
+        }
     }
 
     function paintBookRows(d) {

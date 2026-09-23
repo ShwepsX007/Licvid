@@ -683,8 +683,11 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
     font-size: 0.9rem; line-height: 1; padding: 0 1px; opacity: 0.7; }
 .bk-sym .bk-x:hover { opacity: 1; }
 .bk-add { background: rgba(20, 26, 38, 0.6); border: 1px solid rgba(120, 140, 175, 0.25);
-    border-radius: 999px; color: #dce6f5; padding: 4px 10px; font-size: 0.78rem;
-    width: 120px; }
+    border-radius: 999px; color: #dce6f5; padding: 5px 12px; font-size: 0.8rem;
+    width: 100%; max-width: 260px; }
+.bk-empty { font-size: 0.76rem; color: #8d9cb4; }
+#bk-pick { margin-bottom: 6px; }
+.bk-head .al-switch { margin: 0; }
 .bk-add:focus { outline: none; border-color: rgba(103, 232, 249, 0.55); }
 .bk-rows { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
 .bk-symhead { font-size: 0.8rem; font-weight: 800; letter-spacing: 0.3px;

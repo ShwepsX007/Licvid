@@ -652,7 +652,7 @@
             const req = ++bookHistReq;
             try {
                 const r = await fetch("/api/book/walls?symbol=" +
-                    encodeURIComponent(sym) + "&hours=6",
+                    encodeURIComponent(sym) + "&hours=48",
                     { credentials: "same-origin" });
                 const d = await r.json();
                 if (req !== bookHistReq) return;       // пришёл ответ по старой паре

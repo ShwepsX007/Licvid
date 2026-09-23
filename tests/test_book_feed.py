@@ -85,6 +85,30 @@ class AggTests(unittest.TestCase):
         self.assertEqual(len(bids), 1200)
         self.assertEqual(len(asks), 1200)
 
+    def test_depth_urls_within_exchange_limits(self):
+        """Глубина под лимиты бирж: Binance только допустимые значения и ≤500
+        (вес 10, не 20), Gate — параметр limit ≤300 (не «last»), Bybit/OKX 200.
+        Иначе IP улетает в 429/418 и фид глохнет — «стен нет ни на одной монете»."""
+        b = bf.depth_url("binance", "BTC_USDT")
+        self.assertIn("limit=500", b)
+        g = bf.depth_url("gate", "SOL_USDT")
+        self.assertIn("limit=300", g)
+        self.assertNotIn("last=", g)
+        self.assertIn("limit=200", bf.depth_url("bybit", "SOL_USDT"))
+        self.assertIn("sz=200", bf.depth_url("okx", "SOL_USDT"))
+
+    def test_binance_limit_snaps_to_allowed(self):
+        old = bf.DEPTH_PER_EXCH["binance"]
+        try:
+            bf.DEPTH_PER_EXCH["binance"] = 300          # недопустимое → вниз до 100
+            self.assertIn("limit=100", bf.depth_url("binance", "BTC_USDT"))
+        finally:
+            bf.DEPTH_PER_EXCH["binance"] = old
+
+    def test_poll_defaults_respect_rate_limits(self):
+        self.assertGreaterEqual(bf.POLL_SEC, 3.0)
+        self.assertLessEqual(bf.MAX_SYMBOLS, 10)
+
     def test_small_levels_not_walls(self):
         agg = bf.aggregate_depths(_depths(bid_extra=[(MID - 10 * STEP, 40000.0)]))
         self.assertEqual(bf.detect_walls(agg, 150000), [])
@@ -147,6 +171,50 @@ class LifecycleTests(unittest.TestCase):
         self.assertGreaterEqual(hist["walls"][0]["dur_s"], 1)
         # живой снимок — пусто
         self.assertEqual(self.feed.snapshot(self.sym)["walls"], [])
+
+    def test_rate_limit_backoff_and_status(self):
+        import asyncio
+
+        class _Sess:
+            pass
+
+        f = bf.BookFeed(None)
+        f._session = _Sess()
+
+        async def boom(session, url, timeout=5.0):
+            raise RuntimeError("HTTP 429 for " + url)
+
+        orig = bf._get_json
+        bf._get_json = boom
+        try:
+            with self.assertRaises(RuntimeError):
+                asyncio.run(f._fetch_depth("binance", "BTC_USDT", {}))
+            self.assertGreater(f._backoff.get("binance", 0), time.time() + 30)
+            # пока пауза — к бирже не ходим вообще (быстрый отказ)
+            with self.assertRaises(RuntimeError) as cm:
+                asyncio.run(f._fetch_depth("binance", "BTC_USDT", {}))
+            self.assertIn("backoff", str(cm.exception))
+        finally:
+            bf._get_json = orig
+        st = f.status_summary()
+        self.assertGreater(st["binance"]["backoff_s"], 0)
+        self.assertIn("HTTP 429", st["binance"]["error"])
+        self.assertIn("live_walls", st)
+        self.assertIn("persist_ok", st)
+
+    def test_history_hours_capped_and_wide(self):
+        f = bf.BookFeed(None)
+        now = time.time()
+        agg = bf.aggregate_depths(_depths(bid_extra=[(MID - 12 * STEP, 400000.0)]))
+        f._merge("BTC_USDT", bf.detect_walls(agg, 150000), now - 30 * 3600)
+        f._merge("BTC_USDT", [], now - 30 * 3600 + 20)   # miss…
+        for _ in range(bf.GONE_AFTER):
+            f._merge("BTC_USDT", [], now - 30 * 3600 + 30)
+        # стена закрылась 30 часов назад: в 6-часовом окне её нет, в 48-часовом есть
+        self.assertEqual(f.history("BTC_USDT", 6)["count"], 0)
+        self.assertGreater(f.history("BTC_USDT", 48)["count"], 0)
+        # окно не шире TTL хранения
+        self.assertLessEqual(f.history("BTC_USDT", 10000)["hours"], bf.HISTORY_TTL_DAYS * 24)
 
     def test_persist_roundtrip(self):
         t = self.now

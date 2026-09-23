@@ -478,3 +478,23 @@ body .tchat-header-btn.tchat-notify,
   #terminal-chat .tchat-rz-sw { width: 40px; height: 40px; bottom:-14px; left:-10px; }
   #terminal-chat .tchat-rz-se { width: 44px; height: 44px; bottom:-14px; right:-10px; }
 }
+
+/* 🌐 Чат на всех страницах: плавающая кнопка внизу справа, когда нет шапки терминала */
+#terminal-chat .tchat-toggle:not(.hidden) {
+  position: fixed;
+  bottom: 18px;
+  right: 18px;
+  top: auto;
+  left: auto;
+  z-index: 1201;
+  padding: 10px 16px;
+  font-size: 14px;
+  font-weight: 700;
+  background: #101a2e;
+  border: 1px solid #2d4370;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+}
+#terminal-chat.open .tchat-toggle:not(.hidden) { display:none !important; }
+@media (max-width: 640px) {
+  #terminal-chat .tchat-toggle:not(.hidden) { bottom: 12px; right: 12px; }
+}

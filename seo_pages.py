@@ -64,6 +64,36 @@ SITE_URL = (os.getenv("LIQSCOPE_PUBLIC_URL") or "https://liqscope.online").rstri
 #: вовсе (например, на тестовом стенде, где визиты в статистику не нужны).
 GA_ID = os.getenv("LIQSCOPE_GA_ID", "G-S88MTSY09G").strip()
 
+# 💬 Чат на всех страницах: виджет как в терминале (общий, личные, сервисы, поддержка).
+# Инжектируется в render(), если страница его ещё не содержит. Версия файла — v6.
+TCHAT_CSS = "/static/terminal_chat.css?v=7"
+TCHAT_JS = "/static/terminal_chat.js?v=7"
+TCHAT_HTML = """<div id=\"terminal-chat\" class=\"tchat\">
+  <button id=\"tchat-toggle\" class=\"tchat-toggle hidden\" type=\"button\" aria-hidden=\"true\" tabindex=\"-1\">💬 Чат <span id=\"tchat-unread\" class=\"tchat-unread hidden\" aria-hidden=\"true\">0</span></button>
+  <div id=\"tchat-panel\" class=\"tchat-panel hidden\">
+    <div class=\"tchat-head\"><span>💬 Чат LiqScope</span><button id=\"tchat-close\" class=\"tchat-close\" type=\"button\">✕</button></div>
+    <div class=\"tchat-tabs\" id=\"tchat-tabs\">
+      <button type=\"button\" class=\"tchat-tab active\" data-tab=\"public\">Общий</button>
+      <button type=\"button\" class=\"tchat-tab\" data-tab=\"dm\">🔒 Личные <span id=\"tchat-tab-dm-badge\" class=\"tchat-tab-badge hidden\">0</span></button>
+      <button type=\"button\" class=\"tchat-tab\" data-tab=\"services\">🔔 Сервисы <span id=\"tchat-tab-svc-badge\" class=\"tchat-tab-badge hidden\">0</span></button>
+      <button type=\"button\" class=\"tchat-tab\" data-tab=\"support\">🆘 Поддержка <span id=\"tchat-tab-sup-badge\" class=\"tchat-tab-badge hidden\">0</span></button>
+      <button type=\"button\" class=\"tchat-mute\" id=\"tchat-mute\" title=\"Вкл/выкл звук этой вкладки\">🔊</button>
+    </div>
+    <div id=\"tchat-list\" class=\"tchat-list\"></div>
+    <div id=\"tchat-dm\" class=\"tchat-dm hidden\"><div id=\"tchat-dm-list\" class=\"tchat-dm-list\"></div></div>
+    <div id=\"tchat-dm-chat\" class=\"tchat-dm-chat hidden\">
+      <div id=\"tchat-dm-head\" class=\"tchat-dm-head\"></div>
+      <div id=\"tchat-dm-msgs\" class=\"tchat-list\"></div>
+    </div>
+    <div id=\"tchat-services\" class=\"tchat-list hidden\"></div>
+    <div id=\"tchat-support\" class=\"tchat-support hidden\">
+      <div id=\"tchat-support-list\" class=\"tchat-list\"></div>
+      <div class=\"tchat-support-name hidden\" id=\"tchat-support-name-wrap\"><input id=\"tchat-support-name\" maxlength=\"40\" placeholder=\"Ваше имя (необязательно)\"></div>
+    </div>
+    <div class=\"tchat-foot\"><input id=\"tchat-input\" maxlength=\"500\" placeholder=\"Сообщение… (Enter)\"><button id=\"tchat-send\" type=\"button\">➤</button><div id=\"tchat-hint\" class=\"tchat-hint\"></div></div>
+  </div>
+</div>"""
+
 
 def analytics_block() -> str:
     """Счётчик Google Analytics — ровно тот код, что выдаёт Google для ``<head>``.
@@ -383,6 +413,9 @@ def render(
         # Язык подобран за гостя (браузер или страна): клиент может уточнить его
         # сам — например, когда браузер прислал язык, которого на сайте нет
         block += '\n<script>window.LIQSCOPE_LANG_AUTO = 1;</script>' 
+    # 💬 чат на всех страницах: CSS в head, если его ещё нет в шаблоне
+    if "terminal_chat.css" not in html:
+        block += f'\n<link rel="stylesheet" href="{TCHAT_CSS}">'
     if extra_head:
         block += "\n" + extra_head
     # вставляем в самый конец <head>: язык успевает выставиться к моменту
@@ -390,6 +423,20 @@ def render(
     if ga:
         block = ga + "\n" + block
     html = html.replace("</head>", block + "\n</head>", 1)
+
+    # 💬 чат-виджет: если страница ещё не содержит #terminal-chat — инжектим
+    # тот же HTML, что в терминале, и скрипт. Скрипт после виджета, чтобы DOM уже был.
+    if 'id="terminal-chat"' not in html:
+        inject_body = TCHAT_HTML
+        if "terminal_chat.js" not in html:
+            inject_body += f'\n<script src="{TCHAT_JS}"></script>'
+        if "</body>" in html:
+            html = html.replace("</body>", inject_body + "\n</body>", 1)
+        else:
+            html += inject_body
+    else:
+        if "terminal_chat.js" not in html and "</body>" in html:
+            html = html.replace("</body>", f'<script src="{TCHAT_JS}"></script>\n</body>', 1)
 
     resp = Response(content=html, media_type="text/html; charset=utf-8", status_code=status_code)
     # язык зависит и от cookie, и от Accept-Language — говорим об этом кэшам

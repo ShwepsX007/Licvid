@@ -216,20 +216,63 @@
     const root = $("#terminal-chat");
     if (!root) return;
     const toggle = $("#tchat-toggle");
-    const headerBtn = $("#tchat-header-btn");
+    let headerBtn = $("#tchat-header-btn");
     const panel = $("#tchat-panel");
     const closeBtn = $("#tchat-close");
     const listEl = $("#tchat-list");
     const input = $("#tchat-input");
     const sendBtn = $("#tchat-send");
     const hint = $("#tchat-hint");
-    const onlineEl = $("#tchat-online");
+    let onlineEl = $("#tchat-online");
     const svcListEl = $("#tchat-services");
     const supListEl = $("#tchat-support-list");
     const supWrap = $("#tchat-support");
     const supNameWrap = $("#tchat-support-name-wrap");
     const supNameInput = $("#tchat-support-name");
     const muteBtn = $("#tchat-mute");
+
+    // на страницах без кнопки в шапке — показываем плавающую кнопку 💬
+    const isTerminalPage = !!document.getElementById("tv-chart-container");
+    if (toggle && !headerBtn) {
+      toggle.classList.remove("hidden");
+      toggle.removeAttribute("aria-hidden");
+      toggle.removeAttribute("tabindex");
+      // на всех страницах кроме терминала — чат внизу справа как виджет поддержки
+      if (!isTerminalPage) {
+        root.style.top = "auto";
+        root.style.bottom = "18px";
+        root.style.right = "18px";
+        root.style.left = "auto";
+      }
+    }
+    // если это не терминал — панель тоже внизу справа по умолчанию
+    if (!isTerminalPage && !loadPos()) {
+      root.style.top = "auto";
+      root.style.bottom = "18px";
+      root.style.right = "18px";
+      root.style.left = "auto";
+    }
+    // если есть шапка-хидер — вставляем туда кнопку чата, если её нет
+    (function ensureHeaderBtn(){
+      if (headerBtn) return;
+      try {
+        const nav = document.querySelector(".site-nav, .header-controls, .top-nav, header");
+        if (!nav) return;
+        const btn = document.createElement("button");
+        btn.id = "tchat-header-btn";
+        btn.className = "tchat-header-btn";
+        btn.type = "button";
+        btn.title = "Чат";
+        btn.innerHTML = '💬 Чат <span id="tchat-online" class="tchat-online" title="онлайн в чате">0</span> <span id="tchat-unread-hdr" class="tchat-unread hidden">0</span>';
+        // вставим в конец nav
+        nav.appendChild(btn);
+      } catch {}
+    })();
+    // обновим ссылку после возможного инжекта
+    headerBtn = $("#tchat-header-btn") || headerBtn;
+    onlineEl = $("#tchat-online") || onlineEl;
+
+
 
     let me = null;
     let lastId = 0;

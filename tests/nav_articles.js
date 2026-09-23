@@ -1,12 +1,12 @@
 /**
- * Кнопка «Статьи» в шапке — в браузере (jsdom), а не в исходнике HTML.
+ * Перелинковка разделов — в браузере (jsdom), а не в исходнике HTML.
  *
- * На лендинге, в дайджесте, сводках, статьях и на 404 ссылка стоит прямо в
- * разметке, а на страницах с шапкой кабинета (терминал, вход, сброс пароля,
- * кабинет, админка) кнопки рисует `static/account.js`. Именно поэтому мало
- * проверить HTML: «Статьи» должны стоять рядом с дайджестом и сводками и у
- * гостя, и у вошедшего пользователя — иначе опубликованную статью просто
- * не найти с этих страниц.
+ * Правило простое: с любой страницы сайта можно уйти в любой раздел. Часть
+ * кнопок стоит прямо в разметке (их видит и гость без скриптов, и поисковик),
+ * часть рисует `static/account.js` — терминал, вход, сброс, кабинет, админка и
+ * 404 держат в шапке только язык и логотип. Если страница не подключит этот
+ * скрипт или он не нарисует меню без ответа сервера, раздел становится
+ * тупиком: из «Статей» нельзя было попасть в кабинет, а из кабинета — в статьи.
  *
  * Запуск (сервер уже на 127.0.0.1:8000):
  *     npm install --no-save jsdom
@@ -15,19 +15,23 @@
 
 const { JSDOM, VirtualConsole } = require("jsdom");
 
-const URL_BASE = process.argv[2] || "http://127.0.0.1:8000";
+const URL_BASE = process.env.LIQSCOPE_TEST_URL || process.argv[2] || "http://127.0.0.1:8000";
 
-//: подпись кнопки на каждом языке: её берут из словаря, а не из кода
+//: подпись раздела «Статьи» на каждом языке — её берут из словаря, не из кода
 const LABEL = { ru: "Статьи", en: "Articles", zh: "文章", hi: "लेख", es: "Artículos" };
-//: где шапку рисует скрипт — в HTML ссылок на разделы нет
-const SCRIPTED = {
-  guest: ["/terminal", "/login", "/reset"],
-  user: ["/terminal", "/cabinet", "/admin"],
-};
+//: разделы сайта: с любой страницы должен быть путь в каждый
+const SECTIONS = ["/terminal", "/digest", "/hourly", "/articles"];
+//: страницы сайта: публичные, служебные и 404
+const PAGES = ["/", "/terminal", "/digest", "/hourly", "/articles", "/net-takoy-stranicy"];
+//: кто смотрит страницу
+const STATES = [
+  { who: "гость", user: null },
+  { who: "вошедший", user: { id: 2, username: "user", first_name: "User", is_admin: false } },
+  { who: "админ", user: { id: 1, username: "live", first_name: "LiqScope", is_admin: true } },
+];
 
-// Страницы админки и кабинета грузят свои данные и на заглушке могут
-// споткнуться — для проверки меню это не важно, поэтому ошибку страницы
-// только отмечаем в логе, а не роняем весь прогон
+// Страницы кабинета и админки грузят свои данные и на заглушке могут
+// споткнуться — для проверки меню это не важно, ошибку только отмечаем
 const quiet = (e) => console.log("  ..   ошибка на странице: " +
   String((e && e.message) || e).slice(0, 70));
 process.on("uncaughtException", quiet);
@@ -39,52 +43,55 @@ function check(name, cond, extra) {
   else { fail++; console.log("  FAIL " + name + (extra !== undefined ? " | " + extra : "")); }
 }
 
-/** Кто «вошёл» на странице: ответ /api/auth/me подменяем в fetch. */
-function userStub(loggedIn) {
-  return {
-    ok: true, status: 200,
-    json: async () => ({
-      ok: true, services: [],
-      user: loggedIn
-        ? { id: 1, username: "live", first_name: "LiqScope", is_admin: true }
-        : null,
-    }),
+function wait(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+/** Заглушка API: про пользователя отвечаем честно, остальное — пустое «ок». */
+function apiStub(user) {
+  const body = {
+    ok: true, services: [], user, bot_ready: false, is_admin: !!(user && user.is_admin),
+    items: [], posts: [], item: null, rooms: [], messages: [], days: [], count: 0,
   };
+  return async () => ({ ok: true, status: 200, json: async () => body });
 }
 
-async function open(path, lang, loggedIn) {
+async function open(path, lang, user) {
   const vc = new VirtualConsole();
-  vc.on("jsdomError", () => {});        // gtag и переходы jsdom — не наша проверка
+  vc.on("jsdomError", () => {});        // gtag и внешние скрипты — не наша проверка
   vc.on("error", () => {});
+  const url = `${URL_BASE}${path}?lang=${lang}`;
+  const opts = {
+    runScripts: "dangerously",
+    resources: "usable",
+    pretendToBeVisual: true,
+    virtualConsole: vc,
+    beforeParse(win) {
+      win.fetch = apiStub(user);
+      win.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} };
+      if (!win.matchMedia) {
+        win.matchMedia = () => ({ matches: false, addEventListener() {},
+          removeEventListener() {}, addListener() {}, removeListener() {} });
+      }
+      win.requestIdleCallback = (fn) => setTimeout(fn, 0);
+      win.HTMLCanvasElement.prototype.getContext = () => new Proxy({}, {
+        get: (_t, p) => (p === "measureText" ? () => ({ width: 10 }) : () => {}),
+        set: () => true,
+      });
+    },
+  };
   let dom;
   try {
-    dom = await JSDOM.fromURL(`${URL_BASE}${path}?lang=${lang}`, {
-      runScripts: "dangerously",
-      resources: "usable",
-      pretendToBeVisual: true,
-      virtualConsole: vc,
-      beforeParse(win) {
-        // у jsdom нет fetch, а шапка им спрашивает пользователя: без заглушки
-        // скрипт падает до отрисовки меню
-        win.fetch = async () => userStub(loggedIn);
-        // терминал тянет биржевые графики: в jsdom у них нет ни ResizeObserver,
-        // ни наблюдателя за размерами — заглушки чтобы меню успело отрисоваться
-        win.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} };
-        if (!win.matchMedia) {
-          win.matchMedia = () => ({ matches: false, addEventListener() {},
-            removeEventListener() {}, addListener() {}, removeListener() {} });
-        }
-        win.requestIdleCallback = (fn) => setTimeout(fn, 0);
-        win.HTMLCanvasElement.prototype.getContext = () => new Proxy({}, {
-          get: (_t, p) => (p === "measureText" ? () => ({ width: 10 }) : () => {}),
-          set: () => true,
-        });
-      },
-    });
+    dom = await JSDOM.fromURL(url, opts);
   } catch (e) {
-    console.log("  ..   " + path + " [" + lang + "]: страница споткнулась (" +
-      String((e && e.message) || e).slice(0, 60) + ")");
-    return null;
+    // 404 отдаёт страницу со статусом 404, а fromURL такую не берёт: забираем
+    // разметку сами и отдаём jsdom с тем же адресом — страница та же самая
+    try {
+      const html = await (await fetch(url)).text();
+      dom = new JSDOM(html, Object.assign({ url }, opts));
+    } catch (e2) {
+      console.log("  ..   " + path + " [" + lang + "]: страница споткнулась (" +
+        String((e2 && e2.message) || e2).slice(0, 60) + ")");
+      return null;
+    }
   }
   await new Promise((done) => {
     if (dom.window.document.readyState === "complete") return setTimeout(done, 150);
@@ -94,45 +101,163 @@ async function open(path, lang, loggedIn) {
   return dom;
 }
 
-async function checkPage(path, lang, loggedIn) {
-  const who = loggedIn ? "вошёл" : "гость";
-  const dom = await open(path, lang, loggedIn);
-  if (!dom) { check(`${path} [${lang}, ${who}]: страница открылась`, false); return; }
+/** Меню страницы: кнопки разделов, вход, кабинет, админка. */
+function menu(doc) {
+  const box = doc.getElementById("nav-account");
+  const nav = (box && (box.closest("nav") || box.parentNode)) || doc;
+  const links = Array.from(nav.querySelectorAll("a[href]"));
+  return { box, nav, links };
+}
+
+async function checkPage(path, lang, state) {
+  const name = `${path} [${lang}, ${state.who}]`;
+  const dom = await open(path, lang, state.user);
+  if (!dom) { check(`${name}: страница открылась`, false); return; }
   const doc = dom.window.document;
-  const link = doc.querySelector('a[href="/articles"]');
-  check(`${path} [${lang}, ${who}]: кнопка «Статьи» в шапке`, !!link);
-  if (link) {
-    const nav = link.closest("nav") || link.parentElement;
-    check(`${path} [${lang}, ${who}]: кнопка рядом с дайджестом и сводками`,
-      !!(nav && nav.querySelector('a[href="/digest"]') &&
-         nav.querySelector('a[href="/hourly"]')));
-    const text = (link.textContent || "").trim();
-    check(`${path} [${lang}, ${who}]: подпись «${LABEL[lang]}»`,
-      text.indexOf(LABEL[lang]) !== -1, JSON.stringify(text));
+  const { box, nav, links } = menu(doc);
+  if (!box) {
+    check(`${name}: страница открылась`, false, "нет шапки #nav-account");
+    dom.window.close();
+    return;
   }
-  // язык страницы: словарь ставит полную локаль (ru-RU, zh-CN…), сервер — код
-  const htmlLang = doc.documentElement.getAttribute("lang") || "";
-  check(`${path} [${lang}, ${who}]: страница на языке ${lang}`,
-    htmlLang.toLowerCase().indexOf(lang) === 0, htmlLang);
+  // Ждём, пока скрипт нарисует кнопки (на публичных страницах часть ссылок
+  // уже стоит в разметке — тогда ждём кнопку входа/кабинета)
+  const until = Date.now() + 5000;
+  while (Date.now() < until && box.children.length === 0) await wait(120);
+
+  const own = SECTIONS.filter((s) => path === s || path.indexOf(s + "/") === 0);
+  const missing = SECTIONS.filter((s) =>
+    own.indexOf(s) === -1 && !nav.querySelector(`a[href="${s}"]`));
+  check(`${name}: все разделы, кроме своего`, missing.length === 0,
+    missing.length ? "нет ссылок на " + missing.join(", ") : "");
+
+  // Дубли мешают: на публичных страницах ссылка стоит в HTML и скрипт её
+  // рисовать не должен
+  const dupes = SECTIONS.filter((s) =>
+    nav.querySelectorAll(`a[href="${s}"]`).length > 1);
+  check(`${name}: разделы не задвоены`, dupes.length === 0, dupes.join(", "));
+
+  const has = (href) => !!nav.querySelector(`a[href="${href}"]`);
+  if (!state.user) {
+    check(`${name}: гость может войти`, path === "/login" || has("/login"));
+    check(`${name}: админки у гостя нет`, !has("/admin"));
+  } else {
+    check(`${name}: из раздела видно кабинет`, path === "/cabinet" || has("/cabinet"));
+    const expectAdmin = !!state.user.is_admin && path !== "/admin";
+    check(`${name}: админка ${expectAdmin ? "есть" : "не нужна"}`,
+      has("/admin") === expectAdmin);
+    check(`${name}: выход есть`, !!doc.getElementById("acc-logout"));
+  }
+
+  const art = nav.querySelector('a[href="/articles"]');
+  if (art && path !== "/articles") {
+    check(`${name}: подпись «${LABEL[lang]}»`, (art.textContent || "").indexOf(LABEL[lang]) !== -1,
+      JSON.stringify((art.textContent || "").trim()));
+  }
   dom.window.close();
 }
 
+/* ---------- настоящая сессия админа: сервер отвечает сам ---------------- */
+
+async function realCookie() {
+  const res = await fetch(URL_BASE + "/api/auth/email/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      email: process.env.LIQSCOPE_TEST_EMAIL || "live@liqscope.online",
+      password: process.env.LIQSCOPE_TEST_PASSWORD || "licvid-demo-2026",
+    }),
+  });
+  const list = res.headers.getSetCookie ? res.headers.getSetCookie() : [];
+  return list.map((c) => c.split(";")[0]).join("; ");
+}
+
+/** Открыть страницу с настоящей сессией: fetch идёт на сервер с cookie. */
+async function openAs(path, lang, cookie) {
+  const url = `${URL_BASE}${path}?lang=${lang}`;
+  const vc = new VirtualConsole();
+  vc.on("jsdomError", () => {});
+  vc.on("error", () => {});
+  let dom;
+  try {
+    dom = new JSDOM(await (await fetch(url, { headers: { Cookie: cookie } })).text(), {
+      url,
+      runScripts: "dangerously",
+      resources: "usable",
+      pretendToBeVisual: true,
+      virtualConsole: vc,
+      beforeParse(win) {
+        win.fetch = (u, o) => fetch(
+          String(u).startsWith("http") ? String(u) : URL_BASE + String(u),
+          Object.assign({}, o, { headers: Object.assign({}, (o && o.headers) || {},
+            { Cookie: cookie }) }));
+        win.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} };
+        if (!win.matchMedia) {
+          win.matchMedia = () => ({ matches: false, addEventListener() {},
+            removeEventListener() {}, addListener() {}, removeListener() {} });
+        }
+        win.requestIdleCallback = (fn) => setTimeout(fn, 0);
+      },
+    });
+  } catch (e) {
+    console.log("  ..   " + path + " (сессия): не открылась (" +
+      String((e && e.message) || e).slice(0, 60) + ")");
+    return null;
+  }
+  await new Promise((done) => setTimeout(done, 1500));
+  return dom;
+}
+
+async function checkLiveAdmin(slug) {
+  let cookie = "";
+  try { cookie = await realCookie(); } catch (e) { cookie = ""; }
+  if (!cookie) { console.log("  ..   без входа: живую сессию админа не проверить"); return; }
+  const pages = ["/articles", "/terminal", "/cabinet"];
+  if (slug) pages.push(`/articles/${slug}`);
+  for (const path of pages) {
+    const name = `${path} [ru, админ с сервера]`;
+    const dom = await openAs(path, "ru", cookie);
+    if (!dom) { check(`${name}: страница открылась`, false); continue; }
+    const doc = dom.window.document;
+    const { box, nav } = menu(doc);
+    const until = Date.now() + 5000;
+    while (Date.now() < until && box && !box.querySelector("a")) await wait(120);
+    const has = (href) => !!nav.querySelector(`a[href="${href}"]`);
+    // Себя страница не показывает: на «Кабинете» кнопки кабинета нет, на
+    // «Статьях» — ссылки на сами статьи
+    const own = SECTIONS.filter((s) => path === s || path.indexOf(s + "/") === 0);
+    const want = (path === "/cabinet" ? [] : ["/cabinet"]).concat(
+      path === "/admin" ? [] : ["/admin"]);
+    const noAcc = want.filter((h) => !has(h));
+    check(`${name}: кабинет и админка в шапке`, noAcc.length === 0,
+      "нет " + noAcc.join(", "));
+    const lost = SECTIONS.filter((s) => own.indexOf(s) === -1 && !has(s));
+    check(`${name}: разделы на месте`, lost.length === 0, lost.join(", "));
+    dom.window.close();
+  }
+}
+
 (async () => {
-  for (const [who, pages] of Object.entries(SCRIPTED)) {
-    for (const path of pages) {
+  console.log("Перелинковка разделов: " + URL_BASE);
+  for (const state of STATES) {
+    for (const path of PAGES) {
       for (const lang of ["ru", "en"]) {
-        await checkPage(path, lang, who === "user");
+        await checkPage(path, lang, state);
+      }
+      // прочие языки — на дайджесте: там ссылка на «Статьи» стоит прямо в
+      // разметке и подпись ей ставит словарь страницы
+      if (path === "/digest") {
+        for (const lang of ["zh", "hi", "es"]) await checkPage("/digest", lang, state);
       }
     }
   }
-
-  // На странице самих статей кнопка не нужна: гость уже здесь
-  const articles = await open("/articles", "ru", false);
-  if (articles) {
-    check("/articles [ru, гость]: сам себя в меню не дублирует",
-      !articles.window.document.querySelector('nav a[href="/articles"]'));
-    articles.window.close();
-  }
+  // последняя статья из списка: на её странице тоже должна быть шапка
+  let slug = "";
+  try {
+    const d = await (await fetch(URL_BASE + "/api/articles?lang=ru")).json();
+    slug = ((d.items || [])[0] || {}).id || "";
+  } catch (e) { slug = ""; }
+  await checkLiveAdmin(slug);
 
   console.log(`\nитог: ${ok} ок, ${fail} ошибок`);
   process.exit(fail ? 1 : 0);

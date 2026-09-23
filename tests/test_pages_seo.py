@@ -265,12 +265,16 @@ class PagesSeoTest(unittest.TestCase):
                         continue          # страница сама себе ссылкой не нужна
                     self.assertIn(f'href="{section}"', html,
                                   f"нет ссылки на раздел {section}")
-        # шапка кабинета/терминала/админки: кнопка живёт в скрипте
+        # шапка кабинета/терминала/админки: кнопки живёт в скрипте, и разделы
+        # там перечислены один раз — список общий для гостя и вошедшего
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         js = open(os.path.join(root, "static", "account.js"), encoding="utf-8").read()
-        self.assertEqual(js.count('href="/articles"'), 2,
-                         "кнопка «Статьи» должна быть и гостю, и вошедшему")
-        self.assertIn('art.title', js, "подпись кнопки берётся из словаря")
+        for section in ("/terminal", "/digest", "/hourly", "/articles"):
+            self.assertEqual(js.count('href: "%s"' % section), 1,
+                             f"раздел {section} должен быть в общей шапке ровно раз")
+        self.assertIn("sectionLinks", js, "разделы рисует общая функция шапки")
+        self.assertIn("ownSection", js, "на саму себя страница ссылкой не нужна")
+        self.assertIn("art.title", js, "подпись кнопки берётся из словаря")
 
     def test_section_pages_carry_the_same_menu(self) -> None:
         """Меню разделов одинаково на всех страницах: без ссылки на саму себя."""
@@ -288,6 +292,25 @@ class PagesSeoTest(unittest.TestCase):
                         continue
                     self.assertIn(f'href="{section}"', html,
                                   f"{name}: нет ссылки на {section}")
+
+
+    def test_every_header_loads_the_shared_menu(self) -> None:
+        """Шапку рисует один скрипт: страница без него — тупик.
+
+        Так раздел «Статьи» остался без кнопки кабинета: в разметке только
+        логотип и выбор языка, а ``static/account.js``, который дорисовывает
+        меню, к странице не подключили. Теперь это ловит тест, а не гость.
+        """
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        static = os.path.join(root, "static")
+        for name in sorted(os.listdir(static)):
+            if not name.endswith(".html"):
+                continue
+            html = open(os.path.join(static, name), encoding="utf-8").read()
+            with self.subTest(page=name):
+                self.assertIn('id="nav-account"', html, f"{name}: нет шапки с меню")
+                self.assertIn("/static/account.js", html,
+                              f"{name}: шапку рисует скрипт, а он не подключён")
 
 
 class ArticlePagesSeoTest(unittest.TestCase):

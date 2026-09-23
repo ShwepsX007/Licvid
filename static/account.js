@@ -327,57 +327,77 @@
         return String(n).slice(0, 1).toUpperCase();
     }
 
+    /* ---------- шапка: из любого раздела — в любой другой ---------------- */
+
+    /*: разделы сайта. Порядок и подписи те же, что в разметке страниц:
+        подпись берётся из словаря страниц, поэтому кнопка говорит на языке
+        гостя и на всех пяти языках сайта. */
+    var SECTIONS = [
+        { href: "/terminal", icon: "⚡", key: "hour.to_terminal" },
+        { href: "/digest", icon: "📰", key: "hour.digest" },
+        { href: "/hourly", icon: "🕘", key: "hour.title" },
+        { href: "/articles", icon: "📄", key: "art.title" }
+    ];
+
+    /** Раздел, в котором стоит гость: на саму себя страница не ссылается. */
+    function ownSection(path) {
+        for (var i = 0; i < SECTIONS.length; i++) {
+            var href = SECTIONS[i].href;
+            if (path === href || path.indexOf(href + "/") === 0) return href;
+        }
+        return "";
+    }
+
+    /** Есть ли ссылка на раздел уже в разметке страницы (не в нашей шапке). */
+    function linkInMarkup(nav, box, href) {
+        if (!nav || !nav.querySelectorAll) return false;
+        var links = nav.querySelectorAll('a[href="' + href + '"]');
+        for (var i = 0; i < links.length; i++) {
+            if (!box.contains(links[i])) return true;
+        }
+        return false;
+    }
+
+    /** Кнопки разделов, которых ещё нет в шапке страницы.
+
+     *  На публичных страницах ссылки стоят прямо в HTML — их видит и гость без
+     *  скриптов, и поисковик, поэтому второй раз их не рисуем. На страницах со
+     *  шапкой кабинета (терминал, вход, сброс, кабинет, админка, 404) в разметке
+     *  только язык и логотип — разделы рисует эта функция, иначе из этих
+     *  разделов нельзя было бы уйти никуда, кроме терминала.
+     */
+    function sectionLinks(nav, box, path) {
+        var own = ownSection(path), html = "";
+        SECTIONS.forEach(function (s) {
+            if (s.href === own) return;                       // страница сама себе
+            if (linkInMarkup(nav, box, s.href)) return;       // ссылка уже в HTML
+            html += '<a class="btn btn-ghost btn-compact" href="' + s.href + '">' +
+                s.icon + " " + t(s.key) + "</a>";
+        });
+        return html;
+    }
+
     function paintNav(user) {
         var box = $("nav-account");
         if (!box) return;
+        var nav = (box.closest && box.closest("nav")) || box.parentNode || document;
         var path = location.pathname || "";
+        var html = sectionLinks(nav, box, path);
         if (!user) {
-            var html = "";
-            // Дайджест и сводки — публичные разделы, доступны гостям без регистрации
-            if (path !== "/digest") {
-                html += '<a class="btn btn-ghost btn-compact" href="/digest">📰 ' + t("digest") + "</a>";
-            }
-            if (path !== "/hourly") {
-                html += '<a class="btn btn-ghost btn-compact" href="/hourly">🕘 ' + t("hourly") + "</a>";
-            }
-            // Статьи — такой же публичный раздел, как дайджест и сводки
-            if (path !== "/articles") {
-                html += '<a class="btn btn-ghost btn-compact" href="/articles">📄 ' +
-                    t("art.title") + "</a>";
-            }
-            // Кнопка «Войти» на самой странице входа не нужна: гость уже здесь,
-            // а вот разделы ему нужны — как и на всех остальных страницах
+            // Гость: «Войти» есть везде, кроме самой страницы входа —
+            // разделы ему нужны так же, как вошедшему
             if (path !== "/login") {
                 html += '<a class="btn btn-primary btn-compact" href="/login">' + t("login") + "</a>";
             }
-            box.innerHTML = html;
-            return;
+        } else {
+            if (path !== "/cabinet") {
+                html += '<a class="btn btn-ghost btn-compact" href="/cabinet">' + t("cabinet") + "</a>";
+            }
+            if (user.is_admin && path !== "/admin") {
+                html += '<a class="btn btn-ghost btn-compact" href="/admin">' + t("admin") + "</a>";
+            }
+            html += '<button type="button" class="btn btn-ghost btn-compact" id="acc-logout">' + t("logout") + "</button>";
         }
-        var html = "";
-        // Дайджест — из любой страницы в шапке: раньше в него можно было
-        // попасть только кнопкой внутри сервиса или через логотип и главную
-        if (path !== "/digest") {
-            html += '<a class="btn btn-ghost btn-compact" href="/digest">📰 ' +
-                t("digest") + "</a>";
-        }
-        // Сводки по часам — посты канала на сайте: та же ссылка из любой
-        // страницы кабинета, админки и входа
-        if (path !== "/hourly") {
-            html += '<a class="btn btn-ghost btn-compact" href="/hourly">🕘 ' +
-                t("hourly") + "</a>";
-        }
-        // Статьи — рядом с остальными разделами, из любой страницы
-        if (path !== "/articles") {
-            html += '<a class="btn btn-ghost btn-compact" href="/articles">📄 ' +
-                t("art.title") + "</a>";
-        }
-        if (path !== "/cabinet") {
-            html += '<a class="btn btn-ghost btn-compact" href="/cabinet">' + t("cabinet") + "</a>";
-        }
-        if (user.is_admin && path !== "/admin") {
-            html += '<a class="btn btn-ghost btn-compact" href="/admin">' + t("admin") + "</a>";
-        }
-        html += '<button type="button" class="btn btn-ghost btn-compact" id="acc-logout">' + t("logout") + "</button>";
         box.innerHTML = html;
         var lo = $("acc-logout");
         if (lo) lo.addEventListener("click", function (e) {
@@ -5155,14 +5175,17 @@
     }
 
     function boot() {
+        // Шапку рисуем сразу и для гостя: разделы и «Войти» не должны ждать
+        // ответа про пользователя. Иначе при обрыве сети на страницах без
+        // ссылок в разметке (терминал, вход, кабинет, админка) меню осталось
+        // бы пустой полоской, и уйти из раздела было бы некуда.
+        paintNav(null);
         var page = (document.body && document.body.getAttribute("data-page")) || "";
         if (page === "login") bootLogin();
         else if (page === "reset") bootReset();
         else if (page === "cabinet") bootCabinet();
         else if (page === "admin") bootAdmin();
-        else {
-            api("/api/auth/me").then(function (me) { paintNav(me.user); });
-        }
+        else api("/api/auth/me").then(function (me) { paintNav(me.user); });
     }
 
     global.LiqScopeAccount = { boot: boot, api: api, t: t, paintNav: paintNav };

@@ -92,6 +92,10 @@ import private_chat as private_chat_mod
 from private_chat import register_private_chat_routes
 import content_comments as content_comments_mod
 from content_comments import register_comment_routes as register_content_comment_routes
+import service_chat as service_chat_mod
+from service_chat import register_service_chat_routes
+import support_chat as support_chat_mod
+from support_chat import register_support_chat_routes
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -465,7 +469,7 @@ async def chat_notify_loop() -> None:
 
     Раз в минуту: если получатель личного сообщения не читает и не отвечает
     (задержка настраивается в админке), а Telegram привязан — бот стукнет
-    один раз. Заодно срезаем всё, что старше 3 дней (и ЛС, и общий чат).
+    один раз. Заодно срезаем старое: public 3 дня, private/support/services per-user 30 дней.
     """
     while True:
         try:
@@ -479,6 +483,9 @@ async def chat_notify_loop() -> None:
         try:
             await asyncio.to_thread(account_store.prune_private)
             await asyncio.to_thread(account_store.prune_chat)
+            await asyncio.to_thread(account_store.prune_service)
+            await asyncio.to_thread(account_store.prune_user_service)
+            await asyncio.to_thread(account_store.prune_support)
         except Exception as e:  # noqa: BLE001
             log.debug("chat prune: %s", e)
 
@@ -1103,21 +1110,37 @@ def book_sub_symbols() -> Set[str]:
     return out
 
 
+def _html_to_text(html: str) -> str:
+    """Грубо снять HTML-теги Telegram-сообщений для сервисного чата на сайте."""
+    import re, html as _h
+
+    if not html:
+        return ""
+    s = re.sub(r"<[^>]+>", " ", html)
+    s = _h.unescape(s)
+    s = re.sub(r"[ \t]{2,}", " ", s)
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    return s.strip()[:3500]
+
+
 async def book_alert_loop():
-    """📖 Стакан: сигнал в Telegram, когда на выбранной монете появляется
-    новая стена крупнее порога. Не спамим при старте — всё, что уже висело
-    в стакане до включения петли, считается «виденным»."""
+    """📖 Стакан: сигнал в Telegram + в персональный сервисный чат сайта.
+
+    Каждый пользователь получает стены только по своим настройкам стакана
+    (символы/min_usd/side), как в Telegram. Глобального спама в сервисы нет.
+    Не спамим при старте — всё, что уже висело до включения петли, считается виденным.
+    """
     try:
-        await asyncio.sleep(25)                     # дать фиду наполнить стакан
+        await asyncio.sleep(25)
     except asyncio.CancelledError:
         return
-    seen: Dict[int, Dict[str, int]] = {}            # user_id -> {sym: max id}
+    seen: Dict[int, Dict[str, int]] = {}
     while True:
         try:
             book = book_feed_inst
             if book is not None:
-                subs = account_store.list_service_subscribers("book")
                 now = time.time()
+                subs = account_store.list_service_subscribers("book")
                 for sub in subs:
                     uid = int(sub["user_id"])
                     cfg = normalize_book_cfg(sub.get("config"))
@@ -1125,32 +1148,45 @@ async def book_alert_loop():
                         continue
                     last = seen.get(uid)
                     if last is None:
-                        last = {sym: max((w["id"] for w in store.values()),
-                                         default=0)
+                        last = {sym: max((w["id"] for w in store.values()), default=0)
                                 for sym, store in book.walls.items()}
                         seen[uid] = last
                         continue
-                    if not cfg["notify"]:
-                        continue
-                    tg_id = int(sub.get("tg_id") or 0)
-                    if not tg_id or not tg_bot.running:
-                        continue
-                    lang = str(sub.get("language") or "ru")[:2]
+                    # персональные стены по настройкам пользователя
                     for w in book.new_open_walls(cfg["symbols"], cfg["min_usd"],
                                                  cfg["side"], now - 600):
                         if w["id"] <= last.get(w["sym"], 0):
                             continue
                         last[w["sym"]] = w["id"]
+                        # в личный сервисный чат — всегда, если enabled
+                        try:
+                            txt = _html_to_text(format_wall_html(w, "ru"))
+                            meta = {
+                                "symbol": w.get("sym"),
+                                "side": w.get("side"),
+                                "usd": w.get("usd"),
+                                "price": w.get("price"),
+                            }
+                            await service_chat_mod.broadcast_service_user(uid, "book", txt, meta)
+                        except Exception as e:  # noqa: BLE001
+                            log.debug("book service chat user %s: %s", uid, e)
+                        # в Telegram — только если notify включён
+                        if not cfg["notify"]:
+                            continue
+                        tg_id = int(sub.get("tg_id") or 0)
+                        if not tg_id or not tg_bot.running:
+                            continue
+                        lang = str(sub.get("language") or "ru")[:2]
                         try:
                             await tg_bot.send(
                                 tg_id, format_wall_html(w, lang),
                                 markup=tg_bot.site_link_kb("📖 посмотреть"),
                             )
-                        except Exception as e:      # noqa: BLE001
+                        except Exception as e:  # noqa: BLE001
                             log.debug("book notify %s: %s", tg_id, e)
         except asyncio.CancelledError:
             break
-        except Exception as e:                      # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
             log.debug("book alerts: %s", e)
         try:
             await asyncio.sleep(15)
@@ -1444,7 +1480,7 @@ async def pump_loop():
 
 
 async def pump_notify():
-    """Разослать сигналы подписчикам: один сигнал — одна монета и режим."""
+    """Разослать сигналы подписчикам — персонально в Telegram и в личный сервисный чат."""
     watchers = pump_watchers()
     if not watchers:
         return
@@ -1464,6 +1500,18 @@ async def pump_notify():
             event["ts"] = now
             event["user_id"] = user_id
             PUMP_SIGNALS.append(event)
+            # в личный сервисный чат сайта — персонально по настройкам пользователя
+            try:
+                txt = _html_to_text(pump_signal_html(hit, "ru"))
+                meta = {
+                    "symbol": hit.get("symbol"),
+                    "mode": hit.get("mode"),
+                    "change": hit.get("change"),
+                    "price": hit.get("price"),
+                }
+                await service_chat_mod.broadcast_service_user(int(user_id), "pump", txt, meta)
+            except Exception as e:  # noqa: BLE001
+                log.debug("pump service chat user %s: %s", user_id, e)
     if not by_user:
         return
     for w in watchers:
@@ -1525,7 +1573,7 @@ def alerts_due(cfg: dict, market: dict, last_fire, now: float) -> List[dict]:
 
 
 async def alert_loop():
-    """Раз в несколько секунд проверяет пороги и шлёт в Telegram."""
+    """Раз в несколько секунд проверяет пороги и шлёт персонально в Telegram + личный сайт-чат."""
     from alerts import format_alert_html, normalize_config
     try:
         await asyncio.sleep(20)
@@ -1537,7 +1585,6 @@ async def alert_loop():
             market = alerts_market_snapshot()
             now = market["now"]
             subs = account_store.list_alert_subscribers()
-            # Язык подписчика — до отправки: сигнал уходит на его языке
             tg_bot.warm_langs(subs)
             for sub in subs:
                 cfg = normalize_config(sub.get("config"))
@@ -1546,17 +1593,23 @@ async def alert_loop():
                 uid = sub["user_id"]
 
                 def last_fire(metric, symbol, _uid=uid):
-                    """Когда метрика последний раз сигналила у юзера.
-
-                    Для подписки на все монеты сигналы лежат под конкретными
-                    монетами — берём самый свежий по метрике.
-                    """
                     if not symbol or str(symbol).upper() in ("ALL", ""):
                         return account_store.last_alert_any(_uid, metric)
                     return account_store.last_alert_ts(_uid, metric, symbol)
 
                 for hit in alerts_due(cfg, market, last_fire, now):
                     account_store.add_alert_event(uid, hit)
+                    # персонально в сервисный чат сайта
+                    try:
+                        txt = _html_to_text(format_alert_html(hit, PUBLIC_URL + "/terminal"))
+                        meta = {
+                            "metric": hit.get("metric"),
+                            "symbol": hit.get("symbol"),
+                            "value": str(hit.get("value") or "")[:80],
+                        }
+                        await service_chat_mod.broadcast_service_user(int(uid), "alert", txt, meta)
+                    except Exception as e:  # noqa: BLE001
+                        log.debug("alert service chat user %s: %s", uid, e)
                     tg_id = int(sub.get("tg_id") or 0)
                     if tg_id and tg_bot.running:
                         await tg_bot.send(
@@ -1620,13 +1673,7 @@ def corr_alerts_due(alerts_cfg: dict, pictures: Dict[str, dict], last_fire,
 
 
 async def corr_alert_loop():
-    """Алерты по корреляции: у каждой метрики своё окно и свои пороги.
-
-    Сигнал — пара монет, у которой связь перешагнула порог: «в противофазе»
-    (минус, например −0.5 на часе) или «в одну сторону» (плюс: 0.5 значит
-    «коэффициент 0.5 и выше»). Повтор по той же паре молчит четверть окна,
-    иначе одна и та же связь уходила бы сообщением каждые восемь секунд.
-    """
+    """Алерты по корреляции: персонально Telegram + личный сайт-чат."""
     from correlations import format_alert_html, normalize_alerts
     try:
         await asyncio.sleep(30)
@@ -1654,6 +1701,13 @@ async def corr_alert_loop():
                     anchor_metric = f"corr_{metric}"
                     account_store.add_alert_event(uid, dict(hit, metric=anchor_metric))
                     CORR_SIGNALS.append(dict(hit, ts=now, user_id=uid))
+                    # персонально в сервисный чат
+                    try:
+                        txt = _html_to_text(format_alert_html(hit, PUBLIC_URL + "/terminal"))
+                        meta = {"metric": hit.get("metric"), "symbol": hit.get("symbol")}
+                        await service_chat_mod.broadcast_service_user(int(uid), "corr", txt, meta)
+                    except Exception as e:  # noqa: BLE001
+                        log.debug("corr service chat user %s: %s", uid, e)
                     tg_id = int(sub.get("tg_id") or 0)
                     if tg_id and tg_bot.running:
                         await tg_bot.send(
@@ -1663,7 +1717,7 @@ async def corr_alert_loop():
                         )
         except asyncio.CancelledError:
             break
-        except Exception as e:                                 # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
             log.warning("corr alerts: %s", e)
         try:
             await asyncio.sleep(20)
@@ -2665,6 +2719,18 @@ web_layers.register_layer_routes(app)
 terminal_chat_mod.ctx.store = account_store
 terminal_chat_mod.ctx.secret = SECRET
 register_terminal_chat_routes(app, hub=hub)
+
+# 🔔 Сервисные сигналы в чате: персональные per-user (book/pump/alert/corr)
+service_chat_mod.ctx.store = account_store
+service_chat_mod.ctx.hub = hub
+register_service_chat_routes(app, hub=hub)
+
+# 🆘 Поддержка в чате: персональные треды per-user + гость с временным ником
+support_chat_mod.ctx.store = account_store
+support_chat_mod.ctx.hub = hub
+support_chat_mod.ctx.bot = tg_bot
+support_chat_mod.ctx.secret = SECRET
+register_support_chat_routes(app, hub=hub)
 
 # 🔒 Приватные диалоги: та же база и тот же hub, плюс бот для напоминаний
 private_chat_mod.ctx.store = account_store

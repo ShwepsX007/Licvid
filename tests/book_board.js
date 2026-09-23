@@ -139,6 +139,43 @@ async function main() {
   check("монета добавлена (SOL_USDT)", (after3.config.symbols || []).indexOf("SOL_USDT") >= 0,
         JSON.stringify(after3.config.symbols));
 
+  // тумблеры — как у остальных сервисов (al-switch), не галочки
+  const swEn = $("bk-enabled"), swNt = $("bk-notify");
+  check("включение — ползунок al-switch, а не чекбокс",
+        swEn && swEn.classList.contains("al-switch") && !swEn.querySelector("input"));
+  check("telegram — тоже ползунок", swNt && swNt.classList.contains("al-switch"));
+  const wasOn = swEn.classList.contains("on");
+  swEn.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, view: dom.window }));
+  await sleep(900);
+  const after4 = await api("/api/account/book");
+  check("клик по ползунку переключил слежение и сохранил",
+        after4.config.enabled === !wasOn && swEn.classList.contains("on") === !wasOn,
+        JSON.stringify([wasOn, after4.config.enabled]));
+  check("подпись ползунка отражает состояние",
+        /ВКЛ|ВЫКЛ|ON|OFF/i.test(swEn.textContent));
+
+  // выбор монеты из списка чипов
+  const pick = qa("#bk-pick .al-chip");
+  check("каталог монет для выбора отрисован", pick.length >= 3, pick.length);
+  check("каталог пришёл с сервера (symbols)", Array.isArray(after4.symbols) && after4.symbols.length >= 3);
+  const cand = pick.find((c) => !c.classList.contains("on") &&
+                                 c.getAttribute("data-bk-pick") !== "SOL_USDT");
+  if (cand) {
+    const symPick = cand.getAttribute("data-bk-pick");
+    cand.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, view: dom.window }));
+    await sleep(900);
+    const after5 = await api("/api/account/book");
+    check("монета из списка добавлена: " + symPick,
+          (after5.config.symbols || []).indexOf(symPick) >= 0, JSON.stringify(after5.config.symbols));
+    const again = qa("#bk-pick .al-chip").find((c) => c.getAttribute("data-bk-pick") === symPick);
+    check("чип в каталоге подсвечен как выбранный", again && again.classList.contains("on"));
+    again.dispatchEvent(new dom.window.MouseEvent("click", { bubbles: true, view: dom.window }));
+    await sleep(900);
+    const after6 = await api("/api/account/book");
+    check("повторный клик убрал монету", (after6.config.symbols || []).indexOf(symPick) < 0);
+  }
+  check("счётчик монет виден (n / 8)", /\/ 8/.test(($("bk-symcount") || {}).textContent || ""));
+
   // возврат состояния стенда
   await api("/api/account/book", { method: "POST", body: JSON.stringify(before.config) });
   const back = await api("/api/account/book");

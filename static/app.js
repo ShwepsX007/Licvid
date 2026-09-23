@@ -652,7 +652,7 @@
             const req = ++bookHistReq;
             try {
                 const r = await fetch("/api/book/walls?symbol=" +
-                    encodeURIComponent(sym) + "&hours=6",
+                    encodeURIComponent(sym) + "&hours=48",
                     { credentials: "same-origin" });
                 const d = await r.json();
                 if (req !== bookHistReq) return;       // пришёл ответ по старой паре
@@ -1547,7 +1547,7 @@
     }
 
     // Вспышки «съели»: стена была живой в прошлом кадре данных, а теперь
-    // закрыта с остатком <70% пика — пару секунд горит красным, потом дырка.
+    // закрыта с остатком <70% пика — пару секунд горит красным, потом пустота.
     // (закрытые из истории со свежим closed тоже вспыхивают — догоняем момент)
     const BOOK_FLASH_MS = 2500;
     const bookFlash = new Map();          // id → Date.now() начала вспышки
@@ -1726,7 +1726,7 @@
             const bid = c.side === "bid";
             const fill = bid ? "#67e8f9" : "#a78bfa";
             const line = bid ? "#22d3ee" : "#8b5cf6";
-            // y по цене внутри конверта; сегменты ≥ 2px, чтобы дырка читалась
+            // y по цене внутри конверта; сегменты ≥ 2px, чтобы пустота читалась
             const yOf = (price) => {
                 let yy = null;
                 try { yy = candleSeries.priceToCoordinate(price); } catch (e) { yy = null; }

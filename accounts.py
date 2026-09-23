@@ -591,6 +591,50 @@ class Store:
                 CREATE INDEX IF NOT EXISTS idx_content_comments_kind_item ON content_comments(kind, item_id, id);
                 CREATE INDEX IF NOT EXISTS idx_content_comments_ts ON content_comments(created_at);
                 CREATE INDEX IF NOT EXISTS idx_content_comments_user ON content_comments(user_id);
+                -- 🔔 Сервисы: все сигналы, что уходят в Telegram (alerts, corr, pump, book)
+                CREATE TABLE IF NOT EXISTS service_chat (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kind TEXT NOT NULL DEFAULT '',
+                    text TEXT NOT NULL DEFAULT '',
+                    meta TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_service_chat_ts ON service_chat(created_at);
+                CREATE INDEX IF NOT EXISTS idx_service_chat_id ON service_chat(id);
+                -- 🆘 Поддержка: чат для всех, включая гостей
+                CREATE TABLE IF NOT EXISTS support_chat (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    display_name TEXT NOT NULL DEFAULT '',
+                    guest_token TEXT NOT NULL DEFAULT '',
+                    text TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL,
+                    is_admin INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_support_chat_ts ON support_chat(created_at);
+                CREATE INDEX IF NOT EXISTS idx_support_chat_id ON support_chat(id);
+                CREATE INDEX IF NOT EXISTS idx_support_chat_user ON support_chat(user_id);
+                CREATE INDEX IF NOT EXISTS idx_support_chat_guest ON support_chat(guest_token);
+                -- 🔔 Персональные сигналы сервисов (per-user)
+                CREATE TABLE IF NOT EXISTS user_service_chat (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    kind TEXT NOT NULL DEFAULT '',
+                    text TEXT NOT NULL DEFAULT '',
+                    meta TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_user_service_user ON user_service_chat(user_id, id);
+                CREATE INDEX IF NOT EXISTS idx_user_service_ts ON user_service_chat(created_at);
+                -- 🆘 Чтение поддержки per-thread
+                CREATE TABLE IF NOT EXISTS support_reads (
+                    thread_key TEXT PRIMARY KEY,
+                    user_id INTEGER,
+                    guest_token TEXT NOT NULL DEFAULT '',
+                    user_last_read_id INTEGER NOT NULL DEFAULT 0,
+                    admin_last_read_id INTEGER NOT NULL DEFAULT 0,
+                    updated_at REAL NOT NULL DEFAULT 0
+                );
                 """
             )
             self._db.commit()
@@ -3330,7 +3374,7 @@ class Store:
             return int(cur.rowcount or 0)
 
     # ----- 🔒 Приватные диалоги (3 дня истории, приглашение, юзер_id = якорь) --
-    PRIVATE_KEEP_SEC = 3 * 86400
+    PRIVATE_KEEP_SEC = 30 * 86400
     PRIVATE_LIMIT = 200
 
     def _private_pair(self, user_id: int, peer_id: int) -> tuple:
@@ -3831,4 +3875,412 @@ class Store:
             else:
                 row = self._db.execute("SELECT COUNT(*) FROM content_comments").fetchone()
         return int(row[0] if row else 0)
+
+    # ----- 🔔 Сервисный чат: все сигналы Telegram (alerts, corr, pump, book) -
+    # Старый глобальный (для совместимости) — теперь сервисы персональные per-user
+    SERVICE_KEEP_SEC = 3 * 86400
+    SERVICE_LIMIT = 300
+    USER_SERVICE_KEEP_SEC = 30 * 86400
+    USER_SERVICE_LIMIT = 500
+
+    def add_service_message(self, kind: str, text: str,
+                            meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        # legacy global — оставляем для совместимости, но новый код использует per-user
+        kind = str(kind or "").strip()[:32] or "alert"
+        text = (text or "").strip()
+        if not text:
+            return {"ok": False, "error": "empty"}
+        if len(text) > 4000:
+            text = text[:4000]
+        now = _now()
+        blob = json.dumps(meta or {}, ensure_ascii=False)[:2000]
+        with self._lock:
+            edge = now - self.SERVICE_KEEP_SEC
+            if secrets.randbelow(20) == 0:
+                self._db.execute("DELETE FROM service_chat WHERE created_at<?", (edge,))
+            cur = self._db.execute(
+                "INSERT INTO service_chat(kind,text,meta,created_at) VALUES(?,?,?,?)",
+                (kind, text, blob, now),
+            )
+            self._db.commit()
+            mid = int(cur.lastrowid)
+        return {"ok": True, "id": mid, "kind": kind, "text": text,
+                "meta": meta or {}, "created_at": now}
+
+    def add_user_service_message(self, user_id: int, kind: str, text: str,
+                                 meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        kind = str(kind or "").strip()[:32] or "alert"
+        text = (text or "").strip()
+        if not text:
+            return {"ok": False, "error": "empty"}
+        if len(text) > 4000:
+            text = text[:4000]
+        now = _now()
+        blob = json.dumps(meta or {}, ensure_ascii=False)[:2000]
+        with self._lock:
+            edge = now - self.USER_SERVICE_KEEP_SEC
+            if secrets.randbelow(20) == 0:
+                self._db.execute("DELETE FROM user_service_chat WHERE created_at<?", (edge,))
+            cur = self._db.execute(
+                "INSERT INTO user_service_chat(user_id,kind,text,meta,created_at) VALUES(?,?,?,?,?)",
+                (int(user_id), kind, text, blob, now),
+            )
+            # держим компактно: максимум 500 на пользователя
+            try:
+                self._db.execute(
+                    "DELETE FROM user_service_chat WHERE user_id=? AND id NOT IN "
+                    "(SELECT id FROM user_service_chat WHERE user_id=? ORDER BY id DESC LIMIT 500)",
+                    (int(user_id), int(user_id)),
+                )
+            except Exception:
+                pass
+            self._db.commit()
+            mid = int(cur.lastrowid)
+        return {"ok": True, "id": mid, "kind": kind, "text": text,
+                "meta": meta or {}, "created_at": now, "user_id": int(user_id)}
+
+    def list_service_messages(self, limit: int = 100, after_id: int = 0,
+                              keep_sec: Optional[int] = None) -> List[Dict[str, Any]]:
+        # legacy global list — для совместимости, теперь не используется для персональных
+        now = _now()
+        keep = int(keep_sec) if keep_sec else self.SERVICE_KEEP_SEC
+        edge = now - keep
+        limit = max(1, min(int(limit or 100), self.SERVICE_LIMIT))
+        after_id = max(0, int(after_id or 0))
+        with self._lock:
+            if after_id:
+                rows = self._db.execute(
+                    "SELECT id,kind,text,meta,created_at FROM service_chat"
+                    " WHERE created_at>=? AND id>? ORDER BY id",
+                    (edge, after_id),
+                ).fetchall()
+            else:
+                rows = self._db.execute(
+                    "SELECT id,kind,text,meta,created_at FROM service_chat"
+                    " WHERE created_at>=? ORDER BY id DESC LIMIT ?",
+                    (edge, limit),
+                ).fetchall()
+                rows = list(reversed(rows))
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["meta"] = json.loads(d.get("meta") or "{}")
+            except Exception:
+                d["meta"] = {}
+            out.append(d)
+        return out
+
+    def list_user_service_messages(self, user_id: int, limit: int = 200, after_id: int = 0,
+                                   keep_sec: Optional[int] = None) -> List[Dict[str, Any]]:
+        now = _now()
+        keep = int(keep_sec) if keep_sec else self.USER_SERVICE_KEEP_SEC
+        edge = now - keep
+        limit = max(1, min(int(limit or 100), self.USER_SERVICE_LIMIT))
+        after_id = max(0, int(after_id or 0))
+        with self._lock:
+            if after_id:
+                rows = self._db.execute(
+                    "SELECT id,user_id,kind,text,meta,created_at FROM user_service_chat"
+                    " WHERE user_id=? AND created_at>=? AND id>? ORDER BY id",
+                    (int(user_id), edge, after_id),
+                ).fetchall()
+            else:
+                rows = self._db.execute(
+                    "SELECT id,user_id,kind,text,meta,created_at FROM user_service_chat"
+                    " WHERE user_id=? AND created_at>=? ORDER BY id DESC LIMIT ?",
+                    (int(user_id), edge, limit),
+                ).fetchall()
+                rows = list(reversed(rows))
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["meta"] = json.loads(d.get("meta") or "{}")
+            except Exception:
+                d["meta"] = {}
+            out.append(d)
+        return out
+
+    def prune_service(self, keep_sec: Optional[int] = None) -> int:
+        edge = _now() - (int(keep_sec) if keep_sec else self.SERVICE_KEEP_SEC)
+        with self._lock:
+            cur = self._db.execute("DELETE FROM service_chat WHERE created_at<?", (edge,))
+            self._db.commit()
+            return int(cur.rowcount or 0)
+
+    def prune_user_service(self, keep_sec: Optional[int] = None) -> int:
+        edge = _now() - (int(keep_sec) if keep_sec else self.USER_SERVICE_KEEP_SEC)
+        with self._lock:
+            cur = self._db.execute("DELETE FROM user_service_chat WHERE created_at<?", (edge,))
+            self._db.commit()
+            return int(cur.rowcount or 0)
+
+    # ----- 🆘 Поддержка: персональные чаты (per-user + guest) ---------------
+    SUPPORT_MAX_LEN = 2000
+    SUPPORT_KEEP_SEC = 30 * 86400
+    SUPPORT_LIMIT = 500
+
+    def _support_thread_key(self, user_id: Optional[int], guest_token: str) -> str:
+        if user_id:
+            return f"u:{int(user_id)}"
+        gt = (guest_token or "").strip()[:80]
+        return f"g:{gt}" if gt else ""
+
+    def add_support_message(self, user_id: Optional[int], display_name: str,
+                            text: str, is_admin: bool = False,
+                            guest_token: str = "") -> Dict[str, Any]:
+        text = (text or "").strip()
+        if not text:
+            return {"ok": False, "error": "empty"}
+        if len(text) > self.SUPPORT_MAX_LEN:
+            text = text[:self.SUPPORT_MAX_LEN]
+        now = _now()
+        with self._lock:
+            edge = now - self.SUPPORT_KEEP_SEC
+            if secrets.randbelow(20) == 0:
+                self._db.execute("DELETE FROM support_chat WHERE created_at<?", (edge,))
+            cur = self._db.execute(
+                "INSERT INTO support_chat(user_id,display_name,guest_token,text,created_at,is_admin)"
+                " VALUES(?,?,?,?,?,?)",
+                (int(user_id) if user_id else None,
+                 (display_name or "")[:80],
+                 (guest_token or "")[:80],
+                 text, now, 1 if is_admin else 0),
+            )
+            # обновим support_reads
+            tkey = self._support_thread_key(user_id, guest_token)
+            if tkey:
+                self._db.execute(
+                    "INSERT INTO support_reads(thread_key,user_id,guest_token,user_last_read_id,admin_last_read_id,updated_at)"
+                    " VALUES(?,?,?,?,?,?)"
+                    " ON CONFLICT(thread_key) DO UPDATE SET updated_at=excluded.updated_at,"
+                    " user_id=COALESCE(excluded.user_id, support_reads.user_id),"
+                    " guest_token=COALESCE(NULLIF(excluded.guest_token,''), support_reads.guest_token),"
+                    " user_last_read_id=CASE WHEN excluded.user_id IS NOT NULL AND excluded.admin_last_read_id=0 THEN excluded.user_last_read_id ELSE support_reads.user_last_read_id END,"
+                    " admin_last_read_id=CASE WHEN excluded.admin_last_read_id!=0 THEN excluded.admin_last_read_id ELSE support_reads.admin_last_read_id END",
+                    (tkey, int(user_id) if user_id else None, (guest_token or "")[:80],
+                     0 if is_admin else int(cur.lastrowid), int(cur.lastrowid) if is_admin else 0, now),
+                )
+                # для не-админа — если это ответ админа, то user_last_read_id не трогаем, а admin_last_read_id обновится отдельно при чтении
+                # для простоты: при сообщении пользователя — user прочитал своё, админ нет
+                # при сообщении админа — админ прочитал своё, юзер нет
+            self._db.commit()
+            mid = int(cur.lastrowid)
+        return {"ok": True, "id": mid, "user_id": user_id,
+                "display_name": (display_name or "")[:80],
+                "guest_token": (guest_token or "")[:80],
+                "text": text, "created_at": now, "is_admin": bool(is_admin),
+                "thread_key": self._support_thread_key(user_id, guest_token)}
+
+    def list_support_messages(self, limit: int = 100, after_id: int = 0,
+                              keep_sec: Optional[int] = None,
+                              user_id: Optional[int] = None,
+                              guest_token: str = "",
+                              thread_key: str = "") -> List[Dict[str, Any]]:
+        now = _now()
+        keep = int(keep_sec) if keep_sec else self.SUPPORT_KEEP_SEC
+        edge = now - keep
+        limit = max(1, min(int(limit or 100), self.SUPPORT_LIMIT))
+        after_id = max(0, int(after_id or 0))
+        # фильтрация: если указан thread_key, парсим; иначе user_id / guest_token
+        filt_user = None
+        filt_guest = ""
+        if thread_key:
+            tk = str(thread_key).strip()
+            if tk.startswith("u:"):
+                try:
+                    filt_user = int(tk[2:])
+                except:
+                    filt_user = None
+            elif tk.startswith("g:"):
+                filt_guest = tk[2:]
+        else:
+            if user_id:
+                filt_user = int(user_id)
+            if guest_token:
+                filt_guest = str(guest_token)[:80]
+        with self._lock:
+            if filt_user and filt_guest:
+                # странно, но вернём по обоим (или)
+                if after_id:
+                    rows = self._db.execute(
+                        "SELECT id,user_id,display_name,guest_token,text,created_at,is_admin"
+                        " FROM support_chat WHERE created_at>=? AND id>? AND (user_id=? OR guest_token=?) ORDER BY id",
+                        (edge, after_id, filt_user, filt_guest),
+                    ).fetchall()
+                else:
+                    rows = self._db.execute(
+                        "SELECT id,user_id,display_name,guest_token,text,created_at,is_admin"
+                        " FROM support_chat WHERE created_at>=? AND (user_id=? OR guest_token=?) ORDER BY id DESC LIMIT ?",
+                        (edge, filt_user, filt_guest, limit),
+                    ).fetchall()
+                    rows = list(reversed(rows))
+            elif filt_user:
+                if after_id:
+                    rows = self._db.execute(
+                        "SELECT id,user_id,display_name,guest_token,text,created_at,is_admin"
+                        " FROM support_chat WHERE created_at>=? AND id>? AND user_id=? ORDER BY id",
+                        (edge, after_id, filt_user),
+                    ).fetchall()
+                else:
+                    rows = self._db.execute(
+                        "SELECT id,user_id,display_name,guest_token,text,created_at,is_admin"
+                        " FROM support_chat WHERE created_at>=? AND user_id=? ORDER BY id DESC LIMIT ?",
+                        (edge, filt_user, limit),
+                    ).fetchall()
+                    rows = list(reversed(rows))
+            elif filt_guest:
+                if after_id:
+                    rows = self._db.execute(
+                        "SELECT id,user_id,display_name,guest_token,text,created_at,is_admin"
+                        " FROM support_chat WHERE created_at>=? AND id>? AND guest_token=? ORDER BY id",
+                        (edge, after_id, filt_guest),
+                    ).fetchall()
+                else:
+                    rows = self._db.execute(
+                        "SELECT id,user_id,display_name,guest_token,text,created_at,is_admin"
+                        " FROM support_chat WHERE created_at>=? AND guest_token=? ORDER BY id DESC LIMIT ?",
+                        (edge, filt_guest, limit),
+                    ).fetchall()
+                    rows = list(reversed(rows))
+            else:
+                # без фильтра — для админа вернуть всё (старое поведение) — но теперь ограничим
+                if after_id:
+                    rows = self._db.execute(
+                        "SELECT id,user_id,display_name,guest_token,text,created_at,is_admin"
+                        " FROM support_chat WHERE created_at>=? AND id>? ORDER BY id",
+                        (edge, after_id),
+                    ).fetchall()
+                else:
+                    rows = self._db.execute(
+                        "SELECT id,user_id,display_name,guest_token,text,created_at,is_admin"
+                        " FROM support_chat WHERE created_at>=? ORDER BY id DESC LIMIT ?",
+                        (edge, limit),
+                    ).fetchall()
+                    rows = list(reversed(rows))
+        return [dict(r) for r in rows]
+
+    def list_support_threads(self, limit: int = 100) -> List[Dict[str, Any]]:
+        now = _now()
+        edge = now - self.SUPPORT_KEEP_SEC
+        with self._lock:
+            # группируем по user_id или guest_token: берём последнее сообщение каждого треда
+            rows = self._db.execute(
+                "SELECT COALESCE(user_id,0) as uid, guest_token, MAX(id) as last_id, MAX(created_at) as last_at,"
+                " (SELECT display_name FROM support_chat sc2 WHERE (sc2.user_id = support_chat.user_id OR (support_chat.user_id IS NULL AND sc2.guest_token = support_chat.guest_token)) ORDER BY sc2.id DESC LIMIT 1) as last_name,"
+                " (SELECT text FROM support_chat sc2 WHERE (sc2.user_id = support_chat.user_id OR (support_chat.user_id IS NULL AND sc2.guest_token = support_chat.guest_token)) ORDER BY sc2.id DESC LIMIT 1) as last_text,"
+                " (SELECT is_admin FROM support_chat sc2 WHERE (sc2.user_id = support_chat.user_id OR (support_chat.user_id IS NULL AND sc2.guest_token = support_chat.guest_token)) ORDER BY sc2.id DESC LIMIT 1) as last_admin,"
+                " COUNT(*) as total"
+                " FROM support_chat WHERE created_at>=? GROUP BY COALESCE(user_id,0), guest_token ORDER BY last_at DESC LIMIT ?",
+                (edge, int(limit)),
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            uid = int(d.get("uid") or 0)
+            gt = str(d.get("guest_token") or "")
+            tkey = f"u:{uid}" if uid else f"g:{gt}"
+            out.append({
+                "thread_key": tkey,
+                "user_id": uid if uid else None,
+                "guest_token": gt,
+                "display_name": d.get("last_name") or ("Гость" if gt else f"id{uid}"),
+                "last_text": (d.get("last_text") or "")[:200],
+                "last_at": float(d.get("last_at") or 0),
+                "last_id": int(d.get("last_id") or 0),
+                "last_admin": bool(d.get("last_admin")),
+                "total": int(d.get("total") or 0),
+            })
+        return out
+
+    def support_mark_read(self, thread_key: str, who: str = "user", last_id: int = 0) -> None:
+        tk = str(thread_key).strip()
+        if not tk:
+            return
+        now = _now()
+        with self._lock:
+            if who == "admin":
+                self._db.execute(
+                    "INSERT INTO support_reads(thread_key,admin_last_read_id,updated_at) VALUES(?,?,?)"
+                    " ON CONFLICT(thread_key) DO UPDATE SET admin_last_read_id=MAX(admin_last_read_id, excluded.admin_last_read_id), updated_at=excluded.updated_at",
+                    (tk, int(last_id), now),
+                )
+            else:
+                self._db.execute(
+                    "INSERT INTO support_reads(thread_key,user_last_read_id,updated_at) VALUES(?,?,?)"
+                    " ON CONFLICT(thread_key) DO UPDATE SET user_last_read_id=MAX(user_last_read_id, excluded.user_last_read_id), updated_at=excluded.updated_at",
+                    (tk, int(last_id), now),
+                )
+            self._db.commit()
+
+    def support_unread_counts(self) -> Dict[str, int]:
+        # для админа: сколько тредов с непрочитанными от пользователя
+        now = _now()
+        edge = now - self.SUPPORT_KEEP_SEC
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT thread_key, user_id, guest_token, user_last_read_id, admin_last_read_id FROM support_reads",
+            ).fetchall()
+            # считаем для каждого треда последнее сообщение от пользователя новее admin_last_read_id
+            unread = 0
+            for rr in rows:
+                tk = rr["thread_key"]
+                admin_last = int(rr["admin_last_read_id"] or 0)
+                # найдём есть ли сообщение от пользователя новее admin_last
+                if tk.startswith("u:"):
+                    try:
+                        uid = int(tk[2:])
+                        cnt = self._db.execute(
+                            "SELECT COUNT(*) FROM support_chat WHERE user_id=? AND id>? AND is_admin=0 AND created_at>=?",
+                            (uid, admin_last, edge),
+                        ).fetchone()[0]
+                    except:
+                        cnt = 0
+                else:
+                    gt = tk[2:]
+                    cnt = self._db.execute(
+                        "SELECT COUNT(*) FROM support_chat WHERE guest_token=? AND id>? AND is_admin=0 AND created_at>=?",
+                        (gt, admin_last, edge),
+                    ).fetchone()[0]
+                if cnt:
+                    unread += 1
+            # также треды без записи в support_reads, но с сообщениями от пользователя
+            all_threads = self.list_support_threads(200)
+            known_keys = {r["thread_key"] for r in rows}
+            for th in all_threads:
+                if th["thread_key"] in known_keys:
+                    continue
+                if not th["last_admin"]:
+                    unread += 1
+        return {"threads": unread}
+
+    def delete_support_message(self, msg_id: int) -> bool:
+        with self._lock:
+            cur = self._db.execute("DELETE FROM support_chat WHERE id=?", (int(msg_id),))
+            self._db.commit()
+            return bool(cur.rowcount)
+
+    def prune_support(self, keep_sec: Optional[int] = None) -> int:
+        edge = _now() - (int(keep_sec) if keep_sec else self.SUPPORT_KEEP_SEC)
+        with self._lock:
+            cur = self._db.execute("DELETE FROM support_chat WHERE created_at<?", (edge,))
+            cur2 = self._db.execute("DELETE FROM support_reads WHERE updated_at<?", (edge,))
+            self._db.commit()
+            return int((cur.rowcount or 0) + (cur2.rowcount or 0))
+
+    def delete_private_room(self, room_id: int, user_id: int) -> bool:
+        # удалить комнату и все её сообщения, если user_id участник
+        with self._lock:
+            row = self._db.execute("SELECT * FROM private_chats WHERE id=?", (int(room_id),)).fetchone()
+            if not row:
+                return False
+            if int(user_id) not in (int(row["user_a"]), int(row["user_b"])):
+                return False
+            self._db.execute("DELETE FROM private_messages WHERE room_id=?", (int(room_id),))
+            self._db.execute("DELETE FROM private_reads WHERE room_id=?", (int(room_id),))
+            self._db.execute("DELETE FROM private_chats WHERE id=?", (int(room_id),))
+            self._db.commit()
+            return True
+
 

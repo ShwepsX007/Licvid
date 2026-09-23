@@ -398,6 +398,46 @@ def register_private_chat_routes(app) -> None:
         summary = _room_json(store, store.private_room_get(room_id) or room, u["id"])
         return {"ok": True, "messages": msgs, "room": summary, "now": _now()}
 
+    @router.delete("/api/chat/dm/{room_id}")
+    async def api_delete_room(request: Request, room_id: int):
+        u = _current_user(request)
+        if not u:
+            return _need_auth()
+        store = _store()
+        if store is None:
+            return _err("no_store", 503)
+        room = store.private_room_get(room_id)
+        if not room or not store.private_room_member(room, u["id"]):
+            return _err("not_found", 404)
+        ok = False
+        try:
+            ok = store.delete_private_room(int(room_id), int(u["id"]))
+        except AttributeError:
+            # fallback manual delete if method missing
+            try:
+                with store._lock:
+                    store._db.execute("DELETE FROM private_messages WHERE room_id=?", (int(room_id),))
+                    store._db.execute("DELETE FROM private_reads WHERE room_id=?", (int(room_id),))
+                    store._db.execute("DELETE FROM private_rooms WHERE id=?", (int(room_id),))
+                    store._db.commit()
+                ok = True
+            except Exception as e:
+                log.debug("delete room fallback: %s", e)
+                ok = False
+        if not ok:
+            return _err("forbidden", 403, "Не удалось удалить")
+        # notify both sides
+        try:
+            other = store.private_room_other(room, u["id"])
+        except Exception:
+            other = 0
+        try:
+            await _bcast_user(other, {"type": "chat_dm_room", "room_id": int(room_id), "event": "deleted"})
+            await _bcast_user(u["id"], {"type": "chat_dm_room", "room_id": int(room_id), "event": "deleted"})
+        except Exception:
+            pass
+        return {"ok": True, "id": int(room_id)}
+
     @router.post("/api/chat/dm/{room_id}/messages")
     async def api_send(request: Request, room_id: int):
         u = _current_user(request)

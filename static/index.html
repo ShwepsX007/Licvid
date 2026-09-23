@@ -38,7 +38,7 @@
     <link rel="stylesheet" href="/static/style.css?v=static2">
     <!-- Local Lightweight Charts v5 -->
     <link rel="stylesheet" href="/static/ads.css?v=banner2">
-    <link rel="stylesheet" href="/static/terminal_chat.css?v=5">
+    <link rel="stylesheet" href="/static/terminal_chat.css?v=8">
     <script src="/static/lightweight-charts.js"></script>
     <script src="/static/i18n.pages.js?v=book8"></script>
     <script src="/static/i18n.js?v=book8"></script>
@@ -53,6 +53,9 @@
         <div class="tchat-tabs" id="tchat-tabs">
           <button type="button" class="tchat-tab active" data-tab="public">Общий</button>
           <button type="button" class="tchat-tab" data-tab="dm">🔒 Личные <span id="tchat-tab-dm-badge" class="tchat-tab-badge hidden">0</span></button>
+          <button type="button" class="tchat-tab" data-tab="services">🔔 Сервисы <span id="tchat-tab-svc-badge" class="tchat-tab-badge hidden">0</span></button>
+          <button type="button" class="tchat-tab" data-tab="support">🆘 Поддержка <span id="tchat-tab-sup-badge" class="tchat-tab-badge hidden">0</span></button>
+          <button type="button" class="tchat-mute" id="tchat-mute" title="Вкл/выкл звук этой вкладки">🔊</button>
         </div>
         <div id="tchat-list" class="tchat-list"></div>
         <div id="tchat-dm" class="tchat-dm hidden"><div id="tchat-dm-list" class="tchat-dm-list"></div></div>
@@ -60,7 +63,12 @@
           <div id="tchat-dm-head" class="tchat-dm-head"></div>
           <div id="tchat-dm-msgs" class="tchat-list"></div>
         </div>
-        <div class="tchat-foot"><input id="tchat-input" maxlength="500" placeholder="Сообщение… (Enter)"><button id="tchat-send" type="button">➤</button><div id="tchat-hint" class="tchat-hint"></div></div>
+        <div id="tchat-services" class="tchat-list hidden"></div>
+        <div id="tchat-support" class="tchat-support hidden">
+          <div id="tchat-support-list" class="tchat-list"></div>
+          <div class="tchat-support-name hidden" id="tchat-support-name-wrap"><input id="tchat-support-name" maxlength="40" placeholder="Ваше имя (необязательно)"></div>
+        </div>
+        <div class="tchat-foot"><input id="tchat-input" maxlength="2000" placeholder="Сообщение… (Enter)"><button id="tchat-send" type="button">➤</button><div id="tchat-hint" class="tchat-hint"></div></div>
       </div>
     </div>
     <!-- Top Header -->
@@ -552,7 +560,7 @@
 
     <script src="/static/app.js?v=book8"></script>
     <script src="/static/ads.js?v=banner2"></script>
-    <script src="/static/terminal_chat.js?v=5"></script>
+    <script src="/static/terminal_chat.js?v=8"></script>
     <script src="/static/presence.js?v=geo2"></script>
 <script src="/static/consent.js?v=consent1"></script>
 </body>

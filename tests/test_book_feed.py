@@ -135,6 +135,60 @@ class AggTests(unittest.TestCase):
         self.assertAlmostEqual(bids[0][1], 126000.0)
         self.assertAlmostEqual(asks[0][1], 94501.5)
 
+    def test_parse_bybit_shape(self):
+        """v5 «Get Orderbook» отдаёт стороны короткими именами: result.b/result.a.
+
+        Из-за чтения bids/asks стакан Bybit всегда приходил пустым — биржа
+        висела ✕ «empty depth», её уровни не попадали ни в корзины, ни в стены.
+        """
+        data = {"retCode": 0, "retMsg": "OK",
+                "result": {"s": "BTCUSDT", "u": 230704, "seq": 1432604333,
+                           "b": [["63000", "2.0"], ["62999", "1.0"]],
+                           "a": [["63001", "1.5"]]},
+                "retExtInfo": {}, "time": 1716863719382}
+        bids, asks = bf.parse_depth("bybit", data, {})
+        self.assertAlmostEqual(bids[0][0], 63000.0)
+        self.assertAlmostEqual(bids[0][1], 126000.0)
+        self.assertAlmostEqual(asks[0][1], 94501.5)
+
+    def test_parse_bybit_long_names_still_work(self):
+        """Развёрнутый вид (зеркало, прокси) не должен ломать стакан."""
+        data = {"retCode": 0,
+                "result": {"bids": [["63000", "2.0"]], "asks": [["63001", "1.5"]]}}
+        bids, asks = bf.parse_depth("bybit", data, {})
+        self.assertAlmostEqual(bids[0][1], 126000.0)
+        self.assertAlmostEqual(asks[0][1], 94501.5)
+
+    def test_parse_bybit_error_code_is_visible(self):
+        """retCode ≠ 0 — текст ошибки биржи, а не молчаливый пустой стакан."""
+        with self.assertRaises(ValueError) as cm:
+            bf.parse_depth("bybit", {"retCode": 10001, "retMsg": "params error",
+                                     "result": {}}, {})
+        self.assertIn("10001", str(cm.exception))
+        self.assertIn("params error", str(cm.exception))
+
+    def test_empty_depth_error_shows_answer_shape(self):
+        """«empty depth» объясняет себя: в статусе видны ключи ответа."""
+        import asyncio
+
+        f = bf.BookFeed(None)
+        f._session = object()
+
+        async def odd(session, url, timeout=5.0):
+            return {"retCode": 0, "result": {"unknown": []}}
+
+        orig = bf._get_json
+        bf._get_json = odd
+        try:
+            with self.assertRaises(ValueError):
+                asyncio.run(f._fetch_depth("bybit", "BTC_USDT", {}))
+        finally:
+            bf._get_json = orig
+        st = f.status_summary()
+        self.assertFalse(st["bybit"]["ok"])
+        self.assertIn("empty depth", st["bybit"]["error"])
+        self.assertIn("result", st["bybit"]["error"])
+
     def test_parse_okx_needs_ctval(self):
         data = {"data": [{"bids": [["63000", "10", "0", "3"]],
                           "asks": [["63001", "5", "0", "1"]]}]}

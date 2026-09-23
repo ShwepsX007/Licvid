@@ -1010,7 +1010,11 @@
                 var extra = "";
                 if (v.backoff_s) extra = " ⏳" + v.backoff_s + "с";
                 else if (v.age_s!=null) extra = " " + v.age_s + "с";
-                return k + (v.ok ? " ✓" : " ✕") + extra;
+                // почему ✕: причина отказа в самой подписи — иначе не отличить
+                // бан (429/403) от пустого ответа или смены формата биржи
+                var why = (!v.ok && v.error)
+                    ? " (" + String(v.error).replace(/\s+/g, " ").slice(0, 70) + ")" : "";
+                return k + (v.ok ? " ✓" : " ✕") + extra + why;
             }).join(" · ");
             var eff = Number(st.poll_sec) || Number(d.poll_sec) || 4;
             var base = Number(st.base_poll_sec) || eff;
@@ -1018,6 +1022,7 @@
             note.textContent = "плавающий опрос " + eff + "с (база " + base + "с, +" + (st.per_symbol_sec||0.4) + "с/монету) · монет " + wanted + "/" + (st.max_symbols||100) + " · " + ex +
                 (st.mode === "demo" ? " · демо-данные" : "") +
                 (st.persist_ok===false ? " · ⚠️ история не пишется" : "");
+            note.title = note.textContent;    // подпись узкая — подсказка целиком
         }
     }
 

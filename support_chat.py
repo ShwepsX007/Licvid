@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import html
 import logging
 import re
 import secrets
@@ -38,6 +39,21 @@ class Ctx:
     hub = None
     bot = None
     secret = ""
+    public_url = ""
+
+    def site_link(self, path: str = "/cabinet") -> str:
+        """Ссылка на сайт для письма в Telegram.
+
+        Пустой ``LIQSCOPE_PUBLIC_URL`` не должен давать относительную ссылку:
+        ``bot.site_url`` знает канонический адрес сайта, поэтому спрашиваем его,
+        а ``public_url`` — только запасной вариант.
+        """
+        try:
+            if callable(getattr(self.bot, "site_url", None)):
+                return self.bot.site_url(path)
+        except Exception:  # noqa: BLE001 — ссылка не должна ронять напоминание
+            pass
+        return (self.public_url or "").rstrip("/") + path
 
 
 ctx = Ctx()
@@ -124,44 +140,16 @@ def _parse_thread_key(tk: str):
     return None, ""
 
 
-async def _notify_admins_via_bot(text: str, thread_key: str, display_name: str, is_guest: bool):
-    bot = ctx.bot
-    store = ctx.store
-    if not bot or not store:
-        return
-    try:
-        if not getattr(bot, "running", False):
-            return
-    except Exception:
-        pass
-    try:
-        admin_ids = store.admin_tg_ids() if hasattr(store, "admin_tg_ids") else []
-    except Exception:
-        admin_ids = []
-    if not admin_ids:
-        return
-    who = f"👤 {display_name}" + (" (гость)" if is_guest else "")
-    preview = text[:400]
-    body = f"🆘 <b>Новое в поддержке</b>\n{who}\nТред: <code>{thread_key}</code>\n\n{preview}"
-    for tg_id in admin_ids:
-        try:
-            await bot.send(int(tg_id), body, raw=True)
-        except Exception as e:
-            log.debug("support bot notify %s: %s", tg_id, e)
-
-
 async def _broadcast_support(msg_public: dict, target_user_id=None, target_guest_token=""):
     hub = ctx.hub
     store = ctx.store
     if hub is None:
         return
-    # determine admin user_ids for broadcast
+    # Кому рассылать: автору треда и админам. admin_tg_ids не подходит — там
+    # telegram-id, а WS-клиенты опознаются по user_id, поэтому берём id админов.
     admin_user_ids = set()
     try:
         if store:
-            # fetch all admins from users table? Use admin_tg_ids not enough; need user ids.
-            # We'll try list_users and filter is_admin, or query directly.
-            # Simple: get all users where is_admin=1 via store._db if available, else fallback to broadcast to all with admin check.
             with store._lock:
                 rows = store._db.execute("SELECT id FROM users WHERE is_admin=1 AND is_banned=0").fetchall()
                 admin_user_ids = {int(r["id"]) for r in rows}
@@ -174,26 +162,7 @@ async def _broadcast_support(msg_public: dict, target_user_id=None, target_guest
         # also include thread_key in payload for admin UI
         payload["thread_key"] = f"u:{uid}"
 
-        async def _pred(c):
-            try:
-                cid = int(getattr(c, "user_id", 0) or 0)
-                if cid == uid:
-                    return True
-                if cid in admin_user_ids:
-                    return True
-                # also check if client user is admin via store lookup (fallback)
-                if store and cid:
-                    u = store.get_user(cid)
-                    if u and u.get("is_admin"):
-                        return True
-                return False
-            except Exception:
-                return False
-
         try:
-            await hub.broadcast(payload, predicate=lambda c: True if False else False)  # placeholder to avoid lambda capture issues
-            # actually we need async predicate? hub.broadcast expects sync predicate.
-            # We'll use sync version checking user_id in closure.
             await hub.broadcast(payload, predicate=lambda c, _uid=uid, _admins=admin_user_ids: (
                 int(getattr(c, "user_id", 0) or 0) == _uid or int(getattr(c, "user_id", 0) or 0) in _admins
             ))
@@ -202,15 +171,13 @@ async def _broadcast_support(msg_public: dict, target_user_id=None, target_guest
     elif target_guest_token:
         gt = str(target_guest_token)[:80]
         payload["thread_key"] = f"g:{gt}"
-        # for guest, broadcast to admins + optionally to all (guest clients have no user_id)
-        # we broadcast to admins via predicate, and also broadcast to all with guest_token match?
-        # simplest: broadcast to admins only via hub, guest will poll via REST.
+        # Гость в WS никак не опознаётся (user_id у него нет), поэтому шлём
+        # админам и всем анонимным клиентам: свой тред каждый отфильтрует по
+        # guest_token (см. static/terminal_chat.js).
         try:
             await hub.broadcast(payload, predicate=lambda c, _admins=admin_user_ids: (
                 int(getattr(c, "user_id", 0) or 0) in _admins
             ))
-            # also broadcast to all for guest realtime if they have WS (user_id None)
-            # we send second broadcast to clients with user_id None and include guest_token
             await hub.broadcast(payload, predicate=lambda c: not getattr(c, "user_id", None))
         except Exception as e:
             log.debug("support broadcast guest: %s", e)
@@ -277,22 +244,42 @@ async def scan_support_reminders() -> int:
 
     sent = 0
     for row in due:
-        tkey = row.get("thread_key") or ""
-        display_name = row.get("display_name") or "Гость" if row.get("guest_token") else f"id{row.get('user_id')}"
+        tkey = str(row.get("thread_key") or "")
         is_guest = bool(row.get("guest_token"))
-        preview = str(row.get("text") or "")[:300]
-        who = f"👤 {display_name}" + (" (гость)" if is_guest else "")
-        body = f"⏰ <b>Поддержка без ответа</b>\n{who}\nТред: <code>{tkey}</code>\n\n{preview}\n\n<i>Админ не ответил {int(dmin)} мин — напоминание</i>"
+        name = str(row.get("display_name") or "").strip()
+        if not name:
+            name = "Гость" if is_guest else f"id{row.get('user_id')}"
+        who = f"👤 {html.escape(name)}" + (" (гость)" if is_guest else "")
+        preview = html.escape(str(row.get("text") or "")[:300])
+        link = ctx.site_link("/cabinet?chat=1&tab=support")
+        body = (f"⏰ <b>Поддержка без ответа</b>\n{who}\n"
+                f"Тред: <code>{html.escape(tkey)}</code>\n\n{preview}\n\n"
+                f'<a href="{link}">открыть кабинет</a> — там чат поддержки\n'
+                f"<i>Админ не ответил {int(dmin)} мин — напоминание</i>")
+        delivered = 0
         for tg_id in admin_ids:
             try:
-                await bot.send(int(tg_id), body, raw=True)
+                markup = None
+                try:
+                    if callable(getattr(bot, "site_link_kb", None)):
+                        markup = bot.site_link_kb("🆘 Открыть кабинет",
+                                                  "/cabinet?chat=1&tab=support")
+                except Exception:  # noqa: BLE001
+                    markup = None
+                ok = await bot.send(int(tg_id), body, markup=markup, raw=True)
+                if ok:
+                    delivered += 1
             except Exception as e:
                 log.debug("support reminder %s: %s", tg_id, e)
                 continue
-        # помечаем как напомнили
+        if not delivered:
+            # Telegram не принял ни одного письма — не помечаем «напомнили»,
+            # чтобы напоминание не потерялось и ушло на следующем круге
+            continue
         try:
             import asyncio
-            await asyncio.to_thread(store.support_reminder_mark, tkey, int(row.get("message_id") or 0))
+            await asyncio.to_thread(store.support_reminder_mark, tkey,
+                                    int(row.get("message_id") or 0))
         except Exception:
             pass
         sent += 1

@@ -94,6 +94,38 @@ def depth_url(exchange, symbol):
     raise ValueError(f"unknown exchange {exchange}")
 
 
+def bybit_depth_rows(data):
+    """Строки стакана Bybit: ``result.b`` / ``result.a`` (v5 «Get Orderbook»).
+
+    В v5 стороны приходят короткими именами — ``b`` (bids) и ``a`` (asks), а не
+    ``bids``/``asks``. Пока код читал длинные имена, стакан Bybit всегда
+    получался пустым: биржа висела в статусе ✕ «empty depth» и её уровни не
+    попадали ни в корзины, ни в стены, — хотя отвечала нормально (не бан).
+
+    Длинные имена всё же поддерживаем: зеркала и прокси иногда отдают
+    развёрнутый вид. Ошибку биржи (``retCode`` ≠ 0) не глотаем, а показываем
+    текстом — иначе причина снова спрячется в «empty depth».
+    """
+    code = data.get("retCode")
+    if code not in (None, 0, "0"):
+        msg = str(data.get("retMsg") or "").strip()[:80]
+        raise ValueError(f"bybit retCode={code} {msg}".strip())
+    res = data.get("result") or {}
+    return (res.get("b") or res.get("bids") or [],
+            res.get("a") or res.get("asks") or [])
+
+
+def _shape_hint(data) -> str:
+    """Какие ключи пришли в ответе — для диагностики «empty depth»."""
+    try:
+        top = ",".join(list(data or {})[:6])
+        res = (data or {}).get("result")
+        inner = ",".join(list(res)[:6]) if isinstance(res, dict) else ""
+        return f"(keys: {top}{'/' + inner if inner else ''})"
+    except Exception:  # noqa: BLE001 — подсказка не должна ломать опрос
+        return ""
+
+
 def parse_depth(exchange, data, specs):
     """Ответ биржи → (bids[(px, usdt)], asks[(px, usdt)]) по убыванию/возрастанию цены."""
     if exchange == "binance":
@@ -101,8 +133,7 @@ def parse_depth(exchange, data, specs):
         rows = [(float(p), float(q) * float(p)) for p, q in raw_b], \
                [(float(p), float(q) * float(p)) for p, q in raw_a]
     elif exchange == "bybit":
-        res = data.get("result") or {}
-        raw_b, raw_a = res.get("bids") or [], res.get("asks") or []
+        raw_b, raw_a = bybit_depth_rows(data)
         rows = [(float(p), float(q) * float(p)) for p, q in raw_b], \
                [(float(p), float(q) * float(p)) for p, q in raw_a]
     elif exchange == "okx":
@@ -498,9 +529,15 @@ class BookFeed:
                 log.warning("book: %s rate-limited (%s) — пауза %.0fs", exch, msg[:60], BACKOFF_SEC)
             self._mark(exch, msg[:160])
             raise
-        parsed = parse_depth(exch, data, specs)
+        try:
+            parsed = parse_depth(exch, data, specs)
+        except Exception as exc:
+            # причина отказа (например, retCode биржи) должна попасть в статус:
+            # иначе в интерфейсе остаётся только ✕ без объяснения
+            self._mark(exch, str(exc)[:160])
+            raise
         if not parsed or (not parsed[0] and not parsed[1]):
-            self._mark(exch, f"empty depth {sym}")
+            self._mark(exch, f"empty depth {sym} {_shape_hint(data)}"[:160])
             raise ValueError(f"empty depth {exch}")
         self._mark(exch)
         return parsed

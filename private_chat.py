@@ -176,6 +176,21 @@ def delay_min() -> float:
     return max(0.0, min(v, 24 * 60.0))
 
 
+def _site_link(path: str) -> str:
+    """Ссылка на сайт для письма в Telegram.
+
+    Пустой ``LIQSCOPE_PUBLIC_URL`` не должен давать относительную ссылку:
+    ``bot.site_url`` знает канонический адрес сайта, поэтому спрашиваем его,
+    а ``public_url`` — только запасной вариант.
+    """
+    try:
+        if callable(getattr(ctx.bot, "site_url", None)):
+            return ctx.bot.site_url(path)
+    except Exception:  # noqa: BLE001 — ссылка не должна ронять напоминание
+        pass
+    return (ctx.public_url or "").rstrip("/") + path
+
+
 async def scan_reminders() -> int:
     """Разослать зависевшиеся напоминания о безответных личных сообщениях.
 
@@ -214,16 +229,17 @@ async def scan_reminders() -> int:
         sender = store.get_user(int(row["sender_id"])) or {}
         sname = sender.get("display_name") or f"id{row['sender_id']}"
         preview = html.escape(str(row.get("text") or "")[:180])
-        link = (ctx.public_url or "").rstrip("/") + f"/cabinet?chat=1&room={int(row['room_id'])}"
+        chat_path = f"/cabinet?chat=1&room={int(row['room_id'])}"
+        link = _site_link(chat_path)
         body = ("<b>💬 Личное сообщение — LiqScope</b>\n\n"
                 f"<b>{html.escape(str(sname))}</b>: {preview}\n\n"
-                f'Ответьте на сайте, и напоминание не понадобится: <a href="{link}">открыть чат</a>')
+                f'Ответьте на сайте, и напоминание не понадобится: '
+                f'<a href="{link}">открыть кабинет</a>')
         try:
             markup = None
             try:
                 if callable(getattr(bot, "site_link_kb", None)):
-                    markup = bot.site_link_kb(
-                        "открыть чат", f"/cabinet?chat=1&room={int(row['room_id'])}")
+                    markup = bot.site_link_kb("💬 Открыть кабинет", chat_path)
             except Exception:  # noqa: BLE001
                 markup = None
             ok = await bot.send(int(tg_id), body, markup=markup, raw=True)

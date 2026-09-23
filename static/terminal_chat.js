@@ -49,6 +49,22 @@
   }
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
+  // «Перемотка к последним записям». Контейнер, который только что открыли или
+  // впервые наполнили, всегда прыгает вниз: раньше при входе в чат человек
+  // листал всю историю руками. Если он сам ушёл вверх читать — не дёргаем.
+  const NEEDS_JUMP = new WeakSet();
+  function jumpToLast(container) { if (container) NEEDS_JUMP.add(container); }
+  function stickToBottom(container) {
+    if (!container) return;
+    const firstFill = container.dataset.tchatFilled !== "1";
+    container.dataset.tchatFilled = "1";
+    const gap = container.scrollHeight - container.scrollTop - container.clientHeight;
+    if (NEEDS_JUMP.has(container) || firstFill || gap < 120) {
+      NEEDS_JUMP.delete(container);
+      container.scrollTop = container.scrollHeight;
+    }
+  }
+
   function loadPos() {
     try {
       const raw = localStorage.getItem(LS_POS);
@@ -152,8 +168,7 @@
       div.innerHTML = `<div class="tchat-meta">${nameHtml}<span class="tchat-time">${time}</span>${canDel ? `<button data-del="${m.id}" title="Удалить" style="margin-left:auto;background:transparent;border:0;color:#6b7da0;cursor:pointer">✕</button>` : ""}</div><div class="tchat-text">${text}</div>`;
       container.appendChild(div);
     }
-    const nearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 120;
-    if (nearBottom) container.scrollTop = container.scrollHeight;
+    stickToBottom(container);
   }
 
   function renderSvcMsgs(list, container) {
@@ -178,8 +193,7 @@
       div.innerHTML = `<div class="tchat-meta"><span class="tchat-svc-kind">${kindLabel}${sym ? " · " + sym : ""}</span><span class="tchat-time">${time}</span></div><div class="tchat-text">${text}</div>`;
       container.appendChild(div);
     }
-    const nearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 120;
-    if (nearBottom) container.scrollTop = container.scrollHeight;
+    stickToBottom(container);
   }
 
   function renderSupMsgs(list, container, me) {
@@ -209,8 +223,7 @@
       div.innerHTML = `<div class="tchat-meta">${nameHtml}<span class="tchat-time">${time}</span>${canDel ? `<button data-del-sup="${m.id}" title="Удалить" style="margin-left:auto;background:transparent;border:0;color:#6b7da0;cursor:pointer">✕</button>` : ""}</div><div class="tchat-text">${text}</div>`;
       container.appendChild(div);
     }
-    const nearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 120;
-    if (nearBottom) container.scrollTop = container.scrollHeight;
+    stickToBottom(container);
   }
 
   async function fetchMe() {
@@ -409,9 +422,12 @@
         else if (tab === "public") b.classList.toggle("active", v === "public");
         else if (tab === "dm") b.classList.toggle("active", v === "rooms" || v === "room");
       });
-      if (v === "public") { publicUnread = 0; setBadge(); }
-      if (v === "services") { svcUnread = 0; setBadge(); if (svcListEl) svcListEl.scrollTop = svcListEl.scrollHeight; }
-      if (v === "support") { supUnread = 0; setBadge(); if (supListEl) supListEl.scrollTop = supListEl.scrollHeight; }
+      // Вход в раздел = «покажи последние записи»: метим контейнер, и первый же
+      // рендер после загрузки прыгнет вниз
+      if (v === "public") { publicUnread = 0; setBadge(); jumpToLast(listEl); }
+      if (v === "services") { svcUnread = 0; setBadge(); jumpToLast(svcListEl); }
+      if (v === "support") { supUnread = 0; setBadge(); jumpToLast(supListEl); }
+      if (v === "room") jumpToLast(dmMsgsEl());
       if (v === "room" && arg) {
         roomId = arg; roomInfo = null; roomLastId = 0;
         if (dmMsgsEl()) dmMsgsEl().innerHTML = '<div class="tchat-empty">загружаем…</div>';
@@ -432,9 +448,11 @@
       try { localStorage.setItem(LS_OPEN, isOpen ? "1" : "0"); } catch {}
       setBadge();
       if (isOpen) {
-        if (view === "public") { publicUnread = 0; setBadge(); if (listEl) listEl.scrollTop = listEl.scrollHeight; }
-        if (view === "services") svcUnread = 0;
-        if (view === "support") supUnread = 0;
+        // Панель открыли — снова к последним записям
+        if (view === "public") { publicUnread = 0; setBadge(); jumpToLast(listEl); }
+        if (view === "services") { svcUnread = 0; jumpToLast(svcListEl); }
+        if (view === "support") { supUnread = 0; jumpToLast(supListEl); }
+        if (view === "room") jumpToLast(dmMsgsEl());
         if (view === "room") refreshRoom(false);
         else if (view === "rooms") refreshRooms();
         else if (view === "services") refreshServices(false);
@@ -871,6 +889,7 @@
             supCurrentThreadKey = tk;
             lastSupId = 0;
             if (supListEl) supListEl.innerHTML = '<div class="tchat-empty">загружаем…</div>';
+            jumpToLast(supListEl);          // открыли тред — сразу к последним сообщениям
             await refreshSupport(true);
             updateAuthUI();
             renderSupThreads();

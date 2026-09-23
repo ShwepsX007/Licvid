@@ -90,6 +90,8 @@ import terminal_chat as terminal_chat_mod
 from terminal_chat import register_chat_routes as register_terminal_chat_routes
 import private_chat as private_chat_mod
 from private_chat import register_private_chat_routes
+import support_chat as support_chat_mod
+from support_chat import register_support_chat_routes
 import content_comments as content_comments_mod
 from content_comments import register_comment_routes as register_content_comment_routes
 
@@ -465,7 +467,10 @@ async def chat_notify_loop() -> None:
 
     Раз в минуту: если получатель личного сообщения не читает и не отвечает
     (задержка настраивается в админке), а Telegram привязан — бот стукнет
-    один раз. Заодно срезаем всё, что старше 3 дней (и ЛС, и общий чат).
+    один раз. Для поддержки правило то же: сообщение в Telegram уходит не
+    сразу, а через ``chat_dm_tg_delay_min`` минут, если админ так и не ответил
+    и его нет на сайте. Заодно срезаем всё, что старше 3 дней (и ЛС, и общий
+    чат).
     """
     while True:
         try:
@@ -476,6 +481,10 @@ async def chat_notify_loop() -> None:
             await private_chat_mod.scan_reminders()
         except Exception as e:  # noqa: BLE001
             log.debug("chat reminders: %s", e)
+        try:
+            await support_chat_mod.scan_support_reminders()
+        except Exception as e:  # noqa: BLE001
+            log.debug("support reminders: %s", e)
         try:
             await asyncio.to_thread(account_store.prune_private)
             await asyncio.to_thread(account_store.prune_chat)
@@ -2672,6 +2681,15 @@ private_chat_mod.ctx.bot = tg_bot
 private_chat_mod.ctx.hub = hub
 private_chat_mod.ctx.public_url = PUBLIC_URL
 register_private_chat_routes(app)
+
+# 🆘 Поддержка: персональный тред у каждого (и у гостя по временному нику).
+# Модуль был написан, но не подключён: /api/chat/support отвечал 404, вкладка
+# «Поддержка» в чате не работала и напоминания в Telegram не уходили.
+support_chat_mod.ctx.store = account_store
+support_chat_mod.ctx.bot = tg_bot
+support_chat_mod.ctx.hub = hub
+support_chat_mod.ctx.public_url = PUBLIC_URL
+register_support_chat_routes(app, hub=hub)
 
 # 💬 Комментарии к дайджесту и сводке по часам: читают все, пишут зарегистрированные
 content_comments_mod.ctx.store = account_store

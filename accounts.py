@@ -591,6 +591,28 @@ class Store:
                 CREATE INDEX IF NOT EXISTS idx_content_comments_kind_item ON content_comments(kind, item_id, id);
                 CREATE INDEX IF NOT EXISTS idx_content_comments_ts ON content_comments(created_at);
                 CREATE INDEX IF NOT EXISTS idx_content_comments_user ON content_comments(user_id);
+                -- 🔔 Сервисы: все сигналы, что уходят в Telegram (alerts, corr, pump, book)
+                CREATE TABLE IF NOT EXISTS service_chat (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kind TEXT NOT NULL DEFAULT '',
+                    text TEXT NOT NULL DEFAULT '',
+                    meta TEXT NOT NULL DEFAULT '{}',
+                    created_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_service_chat_ts ON service_chat(created_at);
+                CREATE INDEX IF NOT EXISTS idx_service_chat_id ON service_chat(id);
+                -- 🆘 Поддержка: чат для всех, включая гостей
+                CREATE TABLE IF NOT EXISTS support_chat (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    display_name TEXT NOT NULL DEFAULT '',
+                    guest_token TEXT NOT NULL DEFAULT '',
+                    text TEXT NOT NULL DEFAULT '',
+                    created_at REAL NOT NULL,
+                    is_admin INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_support_chat_ts ON support_chat(created_at);
+                CREATE INDEX IF NOT EXISTS idx_support_chat_id ON support_chat(id);
                 """
             )
             self._db.commit()
@@ -3831,4 +3853,137 @@ class Store:
             else:
                 row = self._db.execute("SELECT COUNT(*) FROM content_comments").fetchone()
         return int(row[0] if row else 0)
+
+    # ----- 🔔 Сервисный чат: все сигналы Telegram (alerts, corr, pump, book) -
+    SERVICE_KEEP_SEC = 3 * 86400
+    SERVICE_LIMIT = 300
+
+    def add_service_message(self, kind: str, text: str,
+                            meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        kind = str(kind or "").strip()[:32] or "alert"
+        text = (text or "").strip()
+        if not text:
+            return {"ok": False, "error": "empty"}
+        if len(text) > 4000:
+            text = text[:4000]
+        now = _now()
+        blob = json.dumps(meta or {}, ensure_ascii=False)[:2000]
+        with self._lock:
+            edge = now - self.SERVICE_KEEP_SEC
+            if secrets.randbelow(20) == 0:
+                self._db.execute("DELETE FROM service_chat WHERE created_at<?", (edge,))
+            cur = self._db.execute(
+                "INSERT INTO service_chat(kind,text,meta,created_at) VALUES(?,?,?,?)",
+                (kind, text, blob, now),
+            )
+            self._db.commit()
+            mid = int(cur.lastrowid)
+        return {"ok": True, "id": mid, "kind": kind, "text": text,
+                "meta": meta or {}, "created_at": now}
+
+    def list_service_messages(self, limit: int = 100, after_id: int = 0,
+                              keep_sec: Optional[int] = None) -> List[Dict[str, Any]]:
+        now = _now()
+        keep = int(keep_sec) if keep_sec else self.SERVICE_KEEP_SEC
+        edge = now - keep
+        limit = max(1, min(int(limit or 100), self.SERVICE_LIMIT))
+        after_id = max(0, int(after_id or 0))
+        with self._lock:
+            if after_id:
+                rows = self._db.execute(
+                    "SELECT id,kind,text,meta,created_at FROM service_chat"
+                    " WHERE created_at>=? AND id>? ORDER BY id",
+                    (edge, after_id),
+                ).fetchall()
+            else:
+                rows = self._db.execute(
+                    "SELECT id,kind,text,meta,created_at FROM service_chat"
+                    " WHERE created_at>=? ORDER BY id DESC LIMIT ?",
+                    (edge, limit),
+                ).fetchall()
+                rows = list(reversed(rows))
+        out = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["meta"] = json.loads(d.get("meta") or "{}")
+            except Exception:
+                d["meta"] = {}
+            out.append(d)
+        return out
+
+    def prune_service(self, keep_sec: Optional[int] = None) -> int:
+        edge = _now() - (int(keep_sec) if keep_sec else self.SERVICE_KEEP_SEC)
+        with self._lock:
+            cur = self._db.execute("DELETE FROM service_chat WHERE created_at<?", (edge,))
+            self._db.commit()
+            return int(cur.rowcount or 0)
+
+    # ----- 🆘 Поддержка: чат для всех, включая гостей ------------------------
+    SUPPORT_MAX_LEN = 2000
+    SUPPORT_KEEP_SEC = 14 * 86400
+    SUPPORT_LIMIT = 300
+
+    def add_support_message(self, user_id: Optional[int], display_name: str,
+                            text: str, is_admin: bool = False,
+                            guest_token: str = "") -> Dict[str, Any]:
+        text = (text or "").strip()
+        if not text:
+            return {"ok": False, "error": "empty"}
+        if len(text) > self.SUPPORT_MAX_LEN:
+            text = text[:self.SUPPORT_MAX_LEN]
+        now = _now()
+        with self._lock:
+            edge = now - self.SUPPORT_KEEP_SEC
+            if secrets.randbelow(20) == 0:
+                self._db.execute("DELETE FROM support_chat WHERE created_at<?", (edge,))
+            cur = self._db.execute(
+                "INSERT INTO support_chat(user_id,display_name,guest_token,text,created_at,is_admin)"
+                " VALUES(?,?,?,?,?,?)",
+                (int(user_id) if user_id else None,
+                 (display_name or "")[:80],
+                 (guest_token or "")[:80],
+                 text, now, 1 if is_admin else 0),
+            )
+            self._db.commit()
+            mid = int(cur.lastrowid)
+        return {"ok": True, "id": mid, "user_id": user_id,
+                "display_name": (display_name or "")[:80],
+                "text": text, "created_at": now, "is_admin": bool(is_admin)}
+
+    def list_support_messages(self, limit: int = 100, after_id: int = 0,
+                              keep_sec: Optional[int] = None) -> List[Dict[str, Any]]:
+        now = _now()
+        keep = int(keep_sec) if keep_sec else self.SUPPORT_KEEP_SEC
+        edge = now - keep
+        limit = max(1, min(int(limit or 100), self.SUPPORT_LIMIT))
+        after_id = max(0, int(after_id or 0))
+        with self._lock:
+            if after_id:
+                rows = self._db.execute(
+                    "SELECT id,user_id,display_name,guest_token,text,created_at,is_admin"
+                    " FROM support_chat WHERE created_at>=? AND id>? ORDER BY id",
+                    (edge, after_id),
+                ).fetchall()
+            else:
+                rows = self._db.execute(
+                    "SELECT id,user_id,display_name,guest_token,text,created_at,is_admin"
+                    " FROM support_chat WHERE created_at>=? ORDER BY id DESC LIMIT ?",
+                    (edge, limit),
+                ).fetchall()
+                rows = list(reversed(rows))
+        return [dict(r) for r in rows]
+
+    def delete_support_message(self, msg_id: int) -> bool:
+        with self._lock:
+            cur = self._db.execute("DELETE FROM support_chat WHERE id=?", (int(msg_id),))
+            self._db.commit()
+            return bool(cur.rowcount)
+
+    def prune_support(self, keep_sec: Optional[int] = None) -> int:
+        edge = _now() - (int(keep_sec) if keep_sec else self.SUPPORT_KEEP_SEC)
+        with self._lock:
+            cur = self._db.execute("DELETE FROM support_chat WHERE created_at<?", (edge,))
+            self._db.commit()
+            return int(cur.rowcount or 0)
 

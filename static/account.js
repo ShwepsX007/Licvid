@@ -1328,7 +1328,7 @@
         if (tgBtn && !tgBtn._bound) { tgBtn._bound = true; tgBtn.addEventListener("click", linkTelegram); }
         var tgOff = $("tg-unlink");
         if (tgOff && !tgOff._bound) { tgOff._bound = true; tgOff.addEventListener("click", unlinkTelegram); }
-        bootFeedbackUser();
+        // feedback moved to chat support tab
         Promise.all([
             api("/api/auth/me"),
             api("/api/account/services"),
@@ -3525,59 +3525,8 @@
         if (box) box.style.display = n ? "" : "none";
     }
 
-    /** Диалог пользователя в кабинете. */
-    function bootFeedbackUser() {
-        var card = $("fb-card");
-        if (!card || !$("fb-thread")) return;
-        // Карточка диалога свёрнута по умолчанию — кабинет без неё компактнее.
-        // Кнопка «По всем вопросам» в шапке (маленькая, у правого края) ведёт
-        // к диалогу и раскрывает его.
-        var jump = $("fb-jump");
-        if (jump) {
-            jump.addEventListener("click", function (e) {
-                e.preventDefault();
-                card.open = true;
-                if (card.scrollIntoView) {
-                    card.scrollIntoView({ block: "start", behavior: "smooth" });
-                }
-            });
-        }
-        function load() {
-            return api("/api/feedback").then(function (d) {
-                if (!d.ok) return;
-                fbPaint("fb-thread", d.messages);
-                fbBadge(d.unread);
-                if (jump) jump.setAttribute("data-unread", d.unread || 0);
-            });
-        }
-        load();
-        var send = $("fb-send"), ta = $("fb-text");
-        function submit() {
-            var text = (ta && ta.value || "").trim();
-            var st = $("fb-status");
-            if (!text) { if (st) st.textContent = "напишите сообщение"; return; }
-            if (st) st.textContent = "отправляю…";
-            api("/api/feedback", { method: "POST", body: JSON.stringify({ text: text }) })
-                .then(function (d) {
-                    if (!d.ok) { if (st) st.textContent = d.hint || d.error || "ошибка"; return; }
-                    if (st) st.textContent = "отправлено — ответ придёт сюда";
-                    if (ta) ta.value = "";
-                    load();
-                })
-                .catch(function () { if (st) st.textContent = "ошибка сети"; });
-        }
-        if (send) send.addEventListener("click", submit);
-        if (ta) ta.addEventListener("keydown", function (e) {
-            if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) submit();
-        });
-        // новые ответы подтягиваем не перезагружая страницу
-        setInterval(function () {
-            if (document.hidden) return;
-            api("/api/feedback/unread").then(function (d) {
-                if (d.ok) fbBadge(d.unread);
-            });
-        }, 60000);
-    }
+    /** Диалог пользователя в кабинете — moved to chat support tab. */
+    function bootFeedbackUser() { return; }
 
     /** Список диалогов у админа. */
     function bootFeedbackAdmin() {

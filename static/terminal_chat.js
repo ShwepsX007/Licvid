@@ -1,24 +1,32 @@
-/* 💬 Чат LiqScope — общий + личные диалоги.
+/* 💬 Чат LiqScope — общий + личные + сервисы + поддержка.
  *
- * Виджет живёт в /terminal и в личном кабинете (/cabinet):
- *   • панель двигается за шапку и тянется за любой край/угол (размер помнится);
- *   • «Общий» — как раньше: 3 дня истории, пишет любой зарегистрированный;
- *   • «Личные» — приватный диалог двух юзеров по приглашению, история 3 дня,
- *     якорь — user_id (смена ника диалог не ломает);
- *   • клик по нику — «ответить» в общем чате или «написать лично»;
- *   • бейдж: непрочитанные (красный) и онлайн-счётчик (зелёный, светится);
- *   • уведомления: бейдж + подсветка панели; TG-напоминание — на сервере.
+ * Виджет живёт в /terminal и в кабинете:
+ *   • панель двигается за шапку и тянется за края (размер помнится);
+ *   • «Общий» — 3 дня истории, пишут зарегистрированные;
+ *   • «Личные» — приватный диалог по приглашению, 3 дня;
+ *   • «Сервисы» — все сигналы, что уходят в Telegram-бота (alerts, corr, pump, book);
+ *     пишет только сервер, читают все;
+ *   • «Поддержка» — пишут все, включая гостей (перенесено из кабинета);
+ *   • звук на каждой вкладке, можно отключить отдельно (LS liqscope.tchat.mute.<tab>);
+ *   • клик по нику — ответить / написать лично.
  */
 (function () {
   const API = "/api/terminal/chat";
   const DM_API = "/api/chat/dm";
-  const POLL_MS = 3500;        // общий чат
-  const DM_POLL_MS = 5000;     // личные, пока открыт соответствующий вид
-  const BADGE_POLL_MS = 10000; // бейджи (непрочитанные + онлайн)
-  const PING_MS = 30000;       // «я у чата»
+  const SVC_API = "/api/chat/services";
+  const SUP_API = "/api/chat/support";
+  const POLL_MS = 3500;
+  const DM_POLL_MS = 5000;
+  const SVC_POLL_MS = 8000;
+  const SUP_POLL_MS = 6000;
+  const BADGE_POLL_MS = 10000;
+  const PING_MS = 30000;
   const LS_OPEN = "liqscope.tchat.open";
   const LS_LAST_ID = "liqscope.tchat.lastId";
   const LS_POS = "liqscope.tchat.pos";
+  const LS_MUTE_PFX = "liqscope.tchat.mute.";
+  const LS_SUP_NAME = "liqscope.tchat.supName";
+  const LS_SUP_GUEST = "liqscope.tchat.supGuest";
   const MIN_W = 280, MIN_H = 260;
 
   const $ = (s, r) => (r || document).querySelector(s);
@@ -66,7 +74,6 @@
     if (!root || !pos) return;
     const vw = window.innerWidth;
     const vh = window.innerHeight;
-    // размер помнится и на телефоне тоже: просто жёстко режем по вьюпорту
     if (typeof pos.width === "number" && pos.width >= MIN_W) {
       panel.style.width = clamp(pos.width, MIN_W, Math.max(MIN_W, vw - 8)) + "px";
       panel.classList.add("tchat-resized");
@@ -143,6 +150,59 @@
     if (nearBottom) container.scrollTop = container.scrollHeight;
   }
 
+  function renderSvcMsgs(list, container) {
+    if (!container) return;
+    if (!list.length && !container.children.length) {
+      container.innerHTML = '<div class="tchat-empty">Пока нет сигналов от сервисов.<br><small>Сюда приходят все алерты, которые уходят в Telegram</small></div>';
+      return;
+    }
+    const empty = container.querySelector(".tchat-empty");
+    if (empty && list.length) empty.remove();
+    for (const m of list) {
+      if (container.querySelector(`[data-mid="${m.id}"]`)) continue;
+      const div = document.createElement("div");
+      const kind = String(m.kind || "alert");
+      div.className = "tchat-msg svc " + esc(kind);
+      div.dataset.mid = m.id;
+      const time = fmtTime(m.ts);
+      const text = esc(m.text);
+      const meta = m.meta || {};
+      const sym = meta.symbol ? esc(meta.symbol) : "";
+      const kindLabel = { book: "📖 СТАКАН", pump: "💥 ПАМП", alert: "🔔 АЛЕРТ", corr: "🔗 КОРР" }[kind] || esc(kind.toUpperCase());
+      div.innerHTML = `<div class="tchat-meta"><span class="tchat-svc-kind">${kindLabel}${sym ? " · " + sym : ""}</span><span class="tchat-time">${time}</span></div><div class="tchat-text">${text}</div>`;
+      container.appendChild(div);
+    }
+    const nearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 120;
+    if (nearBottom) container.scrollTop = container.scrollHeight;
+  }
+
+  function renderSupMsgs(list, container, me) {
+    if (!container) return;
+    if (!list.length && !container.children.length) {
+      container.innerHTML = '<div class="tchat-empty">Напишите нам — отвечаем быстро 🆘<br><small>Могут писать все, включая гостей</small></div>';
+      return;
+    }
+    const empty = container.querySelector(".tchat-empty");
+    if (empty && list.length) empty.remove();
+    for (const m of list) {
+      if (container.querySelector(`[data-mid="${m.id}"]`)) continue;
+      const div = document.createElement("div");
+      const mine = !!(me && me.id && m.user_id === me.id);
+      div.className = "tchat-msg" + (m.admin ? " admin" : "") + (mine ? " mine" : "") + (m.guest ? " guest" : "");
+      div.dataset.mid = m.id;
+      const name = esc(m.name || (m.guest ? "Гость" : "anon"));
+      const time = fmtTime(m.ts);
+      const text = esc(m.text);
+      const canDel = me && me.is_admin;
+      const adminBadge = m.admin ? " 👑" : (m.guest ? " · гость" : "");
+      const nameHtml = `<span class="tchat-name">${name}${adminBadge}</span>`;
+      div.innerHTML = `<div class="tchat-meta">${nameHtml}<span class="tchat-time">${time}</span>${canDel ? `<button data-del-sup="${m.id}" title="Удалить" style="margin-left:auto;background:transparent;border:0;color:#6b7da0;cursor:pointer">✕</button>` : ""}</div><div class="tchat-text">${text}</div>`;
+      container.appendChild(div);
+    }
+    const nearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 120;
+    if (nearBottom) container.scrollTop = container.scrollHeight;
+  }
+
   async function fetchMe() {
     try {
       const r = await fetch(API + "/me", { credentials: "same-origin" });
@@ -154,7 +214,7 @@
 
   function init() {
     const root = $("#terminal-chat");
-    if (!root) return;   // страница без виджета — молча выходим
+    if (!root) return;
     const toggle = $("#tchat-toggle");
     const headerBtn = $("#tchat-header-btn");
     const panel = $("#tchat-panel");
@@ -164,22 +224,82 @@
     const sendBtn = $("#tchat-send");
     const hint = $("#tchat-hint");
     const onlineEl = $("#tchat-online");
+    const svcListEl = $("#tchat-services");
+    const supListEl = $("#tchat-support-list");
+    const supWrap = $("#tchat-support");
+    const supNameWrap = $("#tchat-support-name-wrap");
+    const supNameInput = $("#tchat-support-name");
+    const muteBtn = $("#tchat-mute");
 
     let me = null;
     let lastId = 0;
     try { lastId = parseInt(localStorage.getItem(LS_LAST_ID) || "0", 10) || 0; } catch { }
+    let lastSvcId = 0;
+    let lastSupId = 0;
     let publicUnread = 0;
+    let svcUnread = 0;
+    let supUnread = 0;
     let isOpen = false;
     try { isOpen = localStorage.getItem(LS_OPEN) === "1"; } catch { }
 
-    // ------- вид: общий чат / список личных / открытый диалог ---------------
-    let view = "public";          // public | rooms | room
+    // mute per tab
+    const muteMap = { public: false, dm: false, services: false, support: false };
+    function loadMute() {
+      for (const k of Object.keys(muteMap)) {
+        try {
+          const v = localStorage.getItem(LS_MUTE_PFX + k);
+          muteMap[k] = v === "1";
+        } catch { }
+      }
+    }
+    loadMute();
+    function saveMute(tab) {
+      try { localStorage.setItem(LS_MUTE_PFX + tab, muteMap[tab] ? "1" : "0"); } catch { }
+    }
+
+    // sound via WebAudio
+    let audioCtx = null;
+    function ensureAudio() {
+      if (audioCtx) return audioCtx;
+      try {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return null;
+        audioCtx = new AC();
+      } catch { return null; }
+      return audioCtx;
+    }
+    function playSound(tab) {
+      const t = tab || view;
+      if (muteMap[t]) return;
+      // don't beep if page hidden? still beep if not muted, user asked
+      try {
+        const ctx = ensureAudio();
+        if (!ctx) return;
+        if (ctx.state === "suspended") ctx.resume().catch(() => { });
+        const o = ctx.createOscillator();
+        const g = ctx.createGain();
+        o.connect(g); g.connect(ctx.destination);
+        // different pitch per tab
+        const freqs = { public: 880, dm: 1200, services: 660, support: 520 };
+        o.frequency.value = freqs[t] || 800;
+        o.type = "sine";
+        const now = ctx.currentTime;
+        g.gain.setValueAtTime(0, now);
+        g.gain.linearRampToValueAtTime(0.18, now + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.001, now + 0.35);
+        o.start(now);
+        o.stop(now + 0.38);
+      } catch { }
+    }
+
+    // ------- view: public | rooms | room | services | support ---------------
+    let view = "public";
     let rooms = [];
-    let roomId = 0;              // открытый диалог
+    let roomId = 0;
     let roomLastId = 0;
     let roomInfo = null;
     let dmCounters = { unread: 0, invites: 0 };
-    let dmTouchedAt = 0;         // когда последний раз трогали личные — для поллинга
+    let dmTouchedAt = 0;
 
     function dmlistEl() { return $("#tchat-dm-list"); }
     function dmViewEl() { return $("#tchat-dm"); }
@@ -188,13 +308,29 @@
     function dmHeadEl() { return $("#tchat-dm-head"); }
 
     function setBadge() {
-      const unread = publicUnread + dmCounters.unread + (dmCounters.invites ? dmCounters.invites : 0);
-      const notify = (dmCounters.unread + dmCounters.invites) > 0 || publicUnread > 0;
+      const total = publicUnread + dmCounters.unread + (dmCounters.invites || 0) + svcUnread + supUnread;
+      const notify = total > 0;
       [$("#tchat-unread"), $("#tchat-unread-hdr")].forEach((el) => {
         if (!el) return;
-        el.textContent = unread > 99 ? "99+" : String(unread);
-        el.classList.toggle("hidden", unread <= 0);
+        el.textContent = total > 99 ? "99+" : String(total);
+        el.classList.toggle("hidden", total <= 0);
       });
+      const dmBadge = $("#tchat-tab-dm-badge");
+      if (dmBadge) {
+        const s = dmCounters.unread + (dmCounters.invites || 0);
+        dmBadge.textContent = s > 99 ? "99+" : String(s);
+        dmBadge.classList.toggle("hidden", s <= 0);
+      }
+      const svcBadge = $("#tchat-tab-svc-badge");
+      if (svcBadge) {
+        svcBadge.textContent = svcUnread > 99 ? "99+" : String(svcUnread);
+        svcBadge.classList.toggle("hidden", svcUnread <= 0);
+      }
+      const supBadge = $("#tchat-tab-sup-badge");
+      if (supBadge) {
+        supBadge.textContent = supUnread > 99 ? "99+" : String(supUnread);
+        supBadge.classList.toggle("hidden", supUnread <= 0);
+      }
       root.classList.toggle("tchat-notify", !!notify && !isOpen);
       if (panel) panel.classList.toggle("tchat-notify", !!notify);
       if (headerBtn) headerBtn.classList.toggle("tchat-notify", !!notify && !isOpen);
@@ -209,18 +345,38 @@
       onlineEl.title = n > 0 ? n + " онлайн в чате" : "никто не онлайн";
     }
 
+    function updateMuteBtn() {
+      if (!muteBtn) return;
+      const tab = view === "rooms" || view === "room" ? "dm" : view;
+      const muted = !!muteMap[tab];
+      muteBtn.textContent = muted ? "🔇" : "🔊";
+      muteBtn.classList.toggle("muted", muted);
+      muteBtn.title = muted ? "Звук выкл — нажать чтобы включить" : "Звук вкл — нажать чтобы выключить";
+    }
+
     function setView(v, arg) {
       view = v;
       dmTouchedAt = Date.now();
-      const list = listEl, dm = dmViewEl(), chat = dmChatEl();
+      const list = listEl, dm = dmViewEl(), chat = dmChatEl(), svc = svcListEl, sup = supWrap;
       if (list) list.classList.toggle("hidden", v !== "public");
-      if (dm) dm.classList.toggle("hidden", v === "public" || v === "room");
+      if (dm) dm.classList.toggle("hidden", v !== "rooms");
       if (chat) chat.classList.toggle("hidden", v !== "room");
+      if (svc) svc.classList.toggle("hidden", v !== "services");
+      if (sup) sup.classList.toggle("hidden", v !== "support");
       document.querySelectorAll("#tchat-tabs .tchat-tab").forEach((b) => {
         const tab = b.getAttribute("data-tab");
-        b.classList.toggle("active", (tab === "public" && v === "public") ||
-          (tab === "dm" && v !== "public"));
+        const isActive = (tab === "public" && v === "public") ||
+          (tab === "dm" && (v === "rooms" || v === "room")) ||
+          (tab === tab && v === tab);
+        // second condition for services/support: exact match
+        if (tab === "services") b.classList.toggle("active", v === "services");
+        else if (tab === "support") b.classList.toggle("active", v === "support");
+        else if (tab === "public") b.classList.toggle("active", v === "public");
+        else if (tab === "dm") b.classList.toggle("active", v === "rooms" || v === "room");
       });
+      if (v === "public") { publicUnread = 0; setBadge(); }
+      if (v === "services") { svcUnread = 0; setBadge(); if (svcListEl) svcListEl.scrollTop = svcListEl.scrollHeight; }
+      if (v === "support") { supUnread = 0; setBadge(); if (supListEl) supListEl.scrollTop = supListEl.scrollHeight; }
       if (v === "room" && arg) {
         roomId = arg; roomInfo = null;
         roomLastId = 0;
@@ -229,7 +385,10 @@
         refreshRoom(true);
       }
       if (v === "rooms") refreshRooms();
+      if (v === "services") refreshServices(true);
+      if (v === "support") refreshSupport(true);
       updateAuthUI();
+      updateMuteBtn();
     }
 
     function setOpen(v) {
@@ -241,15 +400,18 @@
       try { localStorage.setItem(LS_OPEN, isOpen ? "1" : "0"); } catch { }
       setBadge();
       if (isOpen) {
-        publicUnread = 0;
-        setBadge();
-        if (view === "public" && listEl) listEl.scrollTop = listEl.scrollHeight;
+        if (view === "public") { publicUnread = 0; setBadge(); if (listEl) listEl.scrollTop = listEl.scrollHeight; }
+        if (view === "services") { svcUnread = 0; setBadge(); }
+        if (view === "support") { supUnread = 0; setBadge(); }
         if (view === "room") refreshRoom(false);
         else if (view === "rooms") refreshRooms();
+        else if (view === "services") refreshServices(false);
+        else if (view === "support") refreshSupport(false);
+        ensureAudio();
       }
     }
 
-    // ------- перетаскивание за шапку ------------------------------------------
+    // ------- drag header -------------------------------------------------------
     (function bindDrag() {
       const head = root.querySelector(".tchat-head");
       if (!head) return;
@@ -263,6 +425,7 @@
 
       function onDown(ev) {
         if (ev.target.closest && ev.target.closest("#tchat-close")) return;
+        if (ev.target.closest && ev.target.closest(".tchat-mute")) return;
         if (ev.type === "mousedown" && ev.button !== 0) return;
         const p = ev.touches ? ev.touches[0] : ev;
         if (!p) return;
@@ -318,10 +481,9 @@
       window.addEventListener("touchend", onUp);
       window.addEventListener("touchcancel", onUp);
 
-      // двойной клик по шапке — сброс позиции и размера
       head.addEventListener("dblclick", (ev) => {
         if (ev.target.closest && (ev.target.closest("#tchat-close") ||
-          ev.target.closest(".tchat-tab"))) return;
+          ev.target.closest(".tchat-tab") || ev.target.closest(".tchat-mute"))) return;
         resetPos(root, panel);
       });
 
@@ -331,12 +493,9 @@
       });
     })();
 
-    // ------- растягивание за края и углы --------------------------------------
+    // ------- resize handles ----------------------------------------------------
     (function bindResize() {
       if (!panel) return;
-      // ручки: n, s, e, w, ne, nw, se, sw
-      // Вешаем на root, а не на panel: у панели overflow:hidden, и торчащие
-      // за край ручки обрезались бы — на телефонных тач-целях это фатально.
       const dirs = ["n", "s", "e", "w", "ne", "nw", "se", "sw"];
       for (const d of dirs) {
         const h = document.createElement("span");
@@ -414,7 +573,7 @@
       window.addEventListener("touchcancel", up);
     })();
 
-    // ------- меню пользователя (клик по нику) ----------------------------------
+    // ------- user menu ---------------------------------------------------------
     let menuEl = null;
     function closeMenu() {
       if (menuEl) { menuEl.remove(); menuEl = null; }
@@ -459,7 +618,7 @@
     window.addEventListener("keydown", (ev) => { if (ev.key === "Escape") closeMenu(); });
     window.addEventListener("scroll", closeMenu, true);
 
-    async function bindNameClicks(container) {
+    function bindNameClicks(container) {
       if (!container || container.dataset.namelink) return;
       container.dataset.namelink = "1";
       container.addEventListener("click", (ev) => {
@@ -499,6 +658,35 @@
 
     function updateAuthUI() {
       if (!input || !sendBtn) return;
+      if (view === "services") {
+        input.disabled = true; sendBtn.disabled = true;
+        setHint("🔔 Только чтение — сигналы от сервисов сайта", false);
+        if (supNameWrap) supNameWrap.classList.add("hidden");
+        return;
+      }
+      if (view === "support") {
+        // поддержка — пишут все
+        input.disabled = false; sendBtn.disabled = false;
+        input.placeholder = me ? "Написать в поддержку… (Enter)" : "Сообщение в поддержку… (Enter) — можно как гость";
+        if (!me) {
+          if (supNameWrap) supNameWrap.classList.remove("hidden");
+          try {
+            const saved = localStorage.getItem(LS_SUP_NAME);
+            if (saved && supNameInput && !supNameInput.value) supNameInput.value = saved;
+          } catch { }
+          setHint("🆘 Поддержка — могут писать все, включая гостей", false);
+        } else {
+          if (supNameWrap) supNameWrap.classList.add("hidden");
+          setHint(`Вы: ${me.name || "id" + me.id} • поддержка`, false);
+        }
+        return;
+      }
+      if (view === "rooms") {
+        input.disabled = true; sendBtn.disabled = true;
+        setHint("Выберите диалог слева или пригласите пользователя", false);
+        if (supNameWrap) supNameWrap.classList.add("hidden");
+        return;
+      }
       if (view === "room" && roomInfo && roomInfo.status === "pending") {
         input.placeholder = "Ответ = принять приглашение… (Enter)";
       } else if (view === "room") {
@@ -506,11 +694,7 @@
       } else {
         input.placeholder = "Сообщение… (Enter)";
       }
-      if (view === "rooms") {
-        input.disabled = true; sendBtn.disabled = true;
-        setHint("Выберите диалог слева или пригласите пользователя", false);
-        return;
-      }
+      if (supNameWrap) supNameWrap.classList.add("hidden");
       if (!me) {
         input.placeholder = "Войдите, чтобы писать…";
         input.disabled = true;
@@ -532,7 +716,7 @@
       }
     }
 
-    // ------- общий чат ---------------------------------------------------------
+    // ------- public chat -------------------------------------------------------
     async function fetchList(afterId, limit) {
       try {
         let url = API + "?limit=" + (limit || 100);
@@ -547,6 +731,7 @@
     async function loadInitial() {
       me = await fetchMe();
       updateAuthUI();
+      updateMuteBtn();
       const msgs = await fetchList(0, 100);
       if (msgs.length) {
         lastId = Math.max(lastId, ...msgs.map(m => m.id));
@@ -556,6 +741,9 @@
         listEl.innerHTML = "";
         renderMsgs(msgs, listEl, me, {});
       }
+      // preload services/support counts
+      refreshServices(true).catch(() => { });
+      refreshSupport(true).catch(() => { });
     }
 
     async function poll() {
@@ -572,15 +760,97 @@
         if (newOnes) {
           try { localStorage.setItem(LS_LAST_ID, String(lastId)); } catch { }
           if (view === "public") renderMsgs(msgs, listEl, me, {});
-          if (!isOpen) {
-            publicUnread += newOnes;
+          else publicUnread += newOnes;
+          if (newOnes && view !== "public") playSound("public");
+          else if (newOnes && !isOpen) playSound("public");
+          setBadge();
+        }
+      } catch { }
+    }
+
+    // ------- services ----------------------------------------------------------
+    async function fetchSvc(afterId, limit) {
+      try {
+        let url = SVC_API + "?limit=" + (limit || 100);
+        if (afterId) url += "&after_id=" + afterId;
+        const r = await fetch(url, { credentials: "same-origin" });
+        if (!r.ok) return [];
+        const j = await r.json();
+        return (j && j.messages) ? j.messages : [];
+      } catch { return []; }
+    }
+
+    async function refreshServices(first) {
+      try {
+        const msgs = await fetchSvc(first ? 0 : lastSvcId, first ? 100 : 200);
+        if (!msgs.length) return;
+        let newOnes = 0;
+        for (const m of msgs) {
+          if (m.id > lastSvcId) { lastSvcId = m.id; newOnes++; }
+        }
+        if (first) {
+          if (svcListEl) { svcListEl.innerHTML = ""; renderSvcMsgs(msgs, svcListEl); }
+        } else {
+          if (view === "services") renderSvcMsgs(msgs, svcListEl);
+          else svcUnread += newOnes;
+          if (newOnes) {
+            if (view !== "services") playSound("services");
+            setBadge();
+          }
+        }
+        if (first && msgs.length) lastSvcId = Math.max(...msgs.map(m => m.id));
+      } catch { }
+    }
+
+    async function pollServices() {
+      if (document.hidden && !isOpen) { /* still poll but less */ }
+      await refreshServices(false);
+    }
+
+    // ------- support -----------------------------------------------------------
+    async function fetchSup(afterId, limit) {
+      try {
+        let url = SUP_API + "?limit=" + (limit || 100);
+        if (afterId) url += "&after_id=" + afterId;
+        const r = await fetch(url, { credentials: "same-origin" });
+        if (!r.ok) return [];
+        const j = await r.json();
+        return (j && j.messages) ? j.messages : [];
+      } catch { return []; }
+    }
+
+    async function refreshSupport(first) {
+      try {
+        const msgs = await fetchSup(first ? 0 : lastSupId, first ? 100 : 200);
+        if (!msgs.length) {
+          if (first && supListEl && !supListEl.children.length) {
+            renderSupMsgs([], supListEl, me);
+          }
+          return;
+        }
+        let newOnes = 0;
+        for (const m of msgs) {
+          if (m.id > lastSupId) { lastSupId = m.id; newOnes++; }
+        }
+        if (first) {
+          if (supListEl) { supListEl.innerHTML = ""; renderSupMsgs(msgs, supListEl, me); }
+          if (msgs.length) lastSupId = Math.max(...msgs.map(m => m.id));
+        } else {
+          if (view === "support") renderSupMsgs(msgs, supListEl, me);
+          else supUnread += newOnes;
+          if (newOnes) {
+            if (view !== "support") playSound("support");
             setBadge();
           }
         }
       } catch { }
     }
 
-    // ------- личные диалоги ------------------------------------------------------
+    async function pollSupport() {
+      await refreshSupport(false);
+    }
+
+    // ------- rooms -------------------------------------------------------------
     async function refreshRooms() {
       if (!me) return;
       try {
@@ -739,7 +1009,7 @@
       if (back) back.addEventListener("click", () => setView("rooms"));
     }
 
-    // ------- бейджи и онлайн -----------------------------------------------------
+    // ------- badges / online ---------------------------------------------------
     let lastOnlineIds = [];
     async function pollBadges() {
       try {
@@ -750,12 +1020,6 @@
         if (n && typeof n.unread === "number") {
           dmCounters.unread = n.unread | 0;
           dmCounters.invites = (n.invites | 0);
-        }
-        const tabBadge = $("#tchat-tab-dm-badge");
-        if (tabBadge) {
-          const s = dmCounters.unread + dmCounters.invites;
-          tabBadge.textContent = s > 99 ? "99+" : String(s);
-          tabBadge.classList.toggle("hidden", s <= 0);
         }
         setBadge();
         if (o && typeof o.count === "number") {
@@ -773,17 +1037,46 @@
       } catch { }
     }
 
-    // ------- отправка -------------------------------------------------------------
+    // ------- send --------------------------------------------------------------
     async function doSend() {
-      if (!me) { location.href = "/login?next=" + encodeURIComponent(location.pathname); return; }
       const txt = (input.value || "").trim();
       if (!txt) return;
-      if (txt.length > 500) { setHint("Слишком длинно — до 500 символов", true); return; }
+      // support: allow guest, max 2000
+      const isSup = view === "support";
+      const limit = isSup ? 2000 : 500;
+      if (txt.length > limit) { setHint(`Слишком длинно — до ${limit} символов`, true); return; }
+
+      if (!isSup && !me) { location.href = "/login?next=" + encodeURIComponent(location.pathname); return; }
+
       input.disabled = true;
       sendBtn.disabled = true;
       setHint("Отправка…", false);
       try {
-        if (view === "room" && roomId) {
+        if (view === "support") {
+          let guestToken = "";
+          try { guestToken = localStorage.getItem(LS_SUP_GUEST) || ""; } catch { }
+          if (!guestToken) {
+            guestToken = Math.random().toString(36).slice(2, 10);
+            try { localStorage.setItem(LS_SUP_GUEST, guestToken); } catch { }
+          }
+          let name = "";
+          if (!me && supNameInput) {
+            name = (supNameInput.value || "").trim().slice(0, 40);
+            try { if (name) localStorage.setItem(LS_SUP_NAME, name); } catch { }
+          }
+          const j = await jget(SUP_API, {
+            method: "POST", credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: txt, name: name, guest_token: guestToken }),
+          });
+          input.value = "";
+          const msg = j && j.message;
+          if (msg && msg.id) {
+            lastSupId = Math.max(lastSupId, msg.id);
+            renderSupMsgs([msg], supListEl, me);
+          }
+          setHint("🆘 поддержка • отправили", false);
+        } else if (view === "room" && roomId) {
           const j = await jget(DM_API + "/" + roomId + "/messages", {
             method: "POST", credentials: "same-origin",
             headers: { "Content-Type": "application/json" },
@@ -831,17 +1124,36 @@
     if (input) input.addEventListener("keydown", (ev) => {
       if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); doSend(); }
     });
+    if (supNameInput) {
+      supNameInput.addEventListener("change", () => {
+        try { localStorage.setItem(LS_SUP_NAME, (supNameInput.value || "").trim()); } catch { }
+      });
+    }
 
-    // табы
+    // mute toggle
+    if (muteBtn) {
+      muteBtn.addEventListener("click", () => {
+        const tab = view === "rooms" || view === "room" ? "dm" : view;
+        muteMap[tab] = !muteMap[tab];
+        saveMute(tab);
+        updateMuteBtn();
+        setHint(muteMap[tab] ? `🔇 Звук выкл для вкладки «${tab}»` : `🔊 Звук вкл для вкладки «${tab}»`, false);
+        if (!muteMap[tab]) playSound(tab);
+      });
+    }
+
+    // tabs
     document.querySelectorAll("#tchat-tabs .tchat-tab").forEach((b) => {
       b.addEventListener("click", () => {
         const tab = b.getAttribute("data-tab");
         if (tab === "public") setView("public");
-        else setView("rooms");
+        else if (tab === "dm") setView("rooms");
+        else if (tab === "services") setView("services");
+        else if (tab === "support") setView("support");
       });
     });
 
-    // делегирование удаления (админ, общий чат)
+    // delete handlers
     if (listEl) listEl.addEventListener("click", async (ev) => {
       const btn = ev.target.closest("[data-del]");
       if (!btn) return;
@@ -856,8 +1168,22 @@
         }
       } catch { }
     });
+    if (supListEl) supListEl.addEventListener("click", async (ev) => {
+      const btn = ev.target.closest("[data-del-sup]");
+      if (!btn) return;
+      const id = parseInt(btn.getAttribute("data-del-sup"), 10);
+      if (!id) return;
+      if (!confirm("Удалить сообщение поддержки #" + id + "?")) return;
+      try {
+        const r = await fetch(SUP_API + "/" + id, { method: "DELETE", credentials: "same-origin" });
+        if (r.ok) {
+          const el = supListEl.querySelector(`[data-mid="${id}"]`);
+          if (el) el.remove();
+        }
+      } catch { }
+    });
 
-    // WS live updates (если есть основной WS терминала)
+    // WS live updates
     if (!window._tchat_ws_hooked) {
       window._tchat_ws_hooked = true;
       document.addEventListener("liqscope:ws", (ev) => {
@@ -869,27 +1195,39 @@
             lastId = m.id;
             try { localStorage.setItem(LS_LAST_ID, String(lastId)); } catch { }
           }
-          if (!isOpen) {
-            publicUnread++;
-            setBadge();
-          } else if (view === "public") {
-            renderMsgs([m], listEl, me, {});
-          }
+          if (view === "public") renderMsgs([m], listEl, me, {});
+          else { publicUnread++; playSound("public"); setBadge(); }
         } else if (data.type === "terminal_chat_del" && data.id) {
           const el = listEl && listEl.querySelector(`[data-mid="${data.id}"]`);
+          if (el) el.remove();
+        } else if (data.type === "service_chat" && data.message) {
+          const m = data.message;
+          if (m.id > lastSvcId) lastSvcId = m.id;
+          if (view === "services") renderSvcMsgs([m], svcListEl);
+          else { svcUnread++; playSound("services"); setBadge(); }
+        } else if (data.type === "support_chat" && data.message) {
+          const m = data.message;
+          if (m.id > lastSupId) lastSupId = m.id;
+          if (view === "support") renderSupMsgs([m], supListEl, me);
+          else { supUnread++; playSound("support"); setBadge(); }
+        } else if (data.type === "support_chat_del" && data.id) {
+          const el = supListEl && supListEl.querySelector(`[data-mid="${data.id}"]`);
           if (el) el.remove();
         } else if (data.type === "chat_dm" && data.message) {
           if (view === "room" && data.room_id === roomId) {
             if (data.message.id > roomLastId) refreshRoom(false);
             dmCounters.unread = 0; setBadge();
+            playSound("dm");
           } else {
             pollBadges();
-            if (!isOpen) flashTitle();
+            if (!isOpen || view !== "rooms") playSound("dm");
             if (view === "rooms") refreshRooms();
+            else { dmCounters.unread = (dmCounters.unread || 0) + 1; setBadge(); }
           }
         } else if (data.type === "chat_dm_room") {
           if (data.event === "invite") {
             setHint("💌 Вам пришли в личные сообщения — вкладка «Личные»", false);
+            playSound("dm");
           } else if (data.event === "accepted") {
             setHint("✉ Приглашение принято — можно писать", false);
           }
@@ -901,7 +1239,6 @@
 
     let titleTimer = null;
     function flashTitle() {
-      // лёгкий маркер, что чат свернут, а там жизнь
       if (titleTimer) return;
       const orig = document.title;
       let on = false;
@@ -917,16 +1254,18 @@
       window.addEventListener("focus", stop);
     }
 
-    // старт: ссылка из Telegram вида ?chat=1&room=N открывает нужный диалог
+    // start
     setOpen(isOpen);
     try {
       const q = new URLSearchParams(location.search);
       if (q.get("chat") === "1") {
         setOpen(true);
         const r = parseInt(q.get("room") || "0", 10);
-        setView(r ? "rooms" : "public");
+        const tab = q.get("tab") || "";
+        if (tab === "services") setView("services");
+        else if (tab === "support") setView("support");
+        else setView(r ? "rooms" : "public");
         if (r) {
-          // комнату откроет init после загрузки me; ждём me через микрозадачу
           const t = setInterval(() => {
             if (me) {
               clearInterval(t);
@@ -938,12 +1277,16 @@
       }
     } catch { }
     bindNameClicks(root);
+    if (svcListEl) bindNameClicks(svcListEl);
+    if (supListEl) bindNameClicks(supListEl);
     loadInitial().then(() => {
       if (view === "rooms") renderRooms();
     });
     setInterval(poll, POLL_MS);
     setInterval(pollBadges, BADGE_POLL_MS);
     setInterval(pingPresence, PING_MS);
+    setInterval(pollServices, SVC_POLL_MS);
+    setInterval(pollSupport, SUP_POLL_MS);
     setInterval(() => {
       if (!isOpen) return;
       if (view === "room") refreshRoom(false);
@@ -952,17 +1295,22 @@
     pollBadges();
     pingPresence();
 
-    // наружу: app.js форвардит сюда WS-события чата
     window.TerminalChat = {
       onWsMessage: (msg) => {
         if (!msg) return;
         if (msg.type === "terminal_chat" || msg.type === "terminal_chat_del" ||
+          msg.type === "service_chat" || msg.type === "support_chat" ||
+          msg.type === "support_chat_del" ||
           msg.type === "chat_dm" || msg.type === "chat_dm_room") {
           document.dispatchEvent(new CustomEvent("liqscope:ws", { detail: msg }));
         }
       },
       open: (opts) => {
         setOpen(true);
+        if (opts && opts.tab) {
+          if (opts.tab === "services") setView("services");
+          else if (opts.tab === "support") setView("support");
+        }
         if (opts && opts.room) setView("room", opts.room);
       },
     };

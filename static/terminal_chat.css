@@ -292,6 +292,45 @@ body.tchat-open .tchat-header-btn {
   display:inline-flex; align-items:center; justify-content:center; padding:0 4px;
 }
 .tchat-tab-badge.hidden { display:none !important; }
+.tchat-mute {
+  margin-left:auto;
+  background:transparent;
+  border:1px solid #223055;
+  color:#7f93b8;
+  border-radius:7px;
+  padding:3px 8px;
+  font-size:13px;
+  cursor:pointer;
+  flex:0 0 auto;
+}
+.tchat-mute:hover { background:#162040; color:#c9d4f0; border-color:#2d4370; }
+.tchat-mute.muted { opacity:.55; text-decoration:line-through; }
+
+.tchat-support { flex:1 1 auto; display:flex; flex-direction:column; min-height:0; }
+.tchat-support.hidden { display:none !important; }
+.tchat-support-name { padding:6px 8px; border-top:1px solid #1e2e55; background:#0e182d; }
+.tchat-support-name.hidden { display:none !important; }
+.tchat-support-name input {
+  width:100%; background:#0a1226; border:1px solid #223055;
+  color:#dbe6ff; border-radius:7px; padding:6px 9px; font-size:12.5px; outline:none;
+}
+.tchat-support-name input:focus { border-color:#35508a; }
+
+.tchat-msg.svc { border-left:3px solid #2d5a9a; }
+.tchat-msg.svc.book { border-left-color:#f59e0b; }
+.tchat-msg.svc.pump { border-left-color:#22d3ee; }
+.tchat-msg.svc.alert { border-left-color:#a78bfa; }
+.tchat-msg.svc.corr { border-left-color:#fb7185; }
+.tchat-msg .tchat-svc-kind {
+  display:inline-flex; align-items:center; gap:4px;
+  font-size:10px; font-weight:700; letter-spacing:.04em;
+  background:#101a2e; border:1px solid #223055; border-radius:999px;
+  padding:1px 6px; margin-right:6px; color:#8aa0c8;
+}
+.tchat-msg.svc .tchat-text { font-size:12.5px; }
+
+#tchat-services.hidden { display:none !important; }
+.tchat-tabs { flex-wrap:wrap; }
 
 /* — список личных диалогов — */
 .tchat-dm { flex:1 1 auto; overflow-y:auto; padding:8px; scrollbar-width:thin; }

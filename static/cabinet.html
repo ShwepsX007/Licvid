@@ -103,12 +103,6 @@
             <a class="btn btn-ghost" href="https://t.me/LiqScopeBot" id="cab-bot-link"
                target="_blank" rel="noopener" data-i18n="cab.bot_link">Бот в Telegram</a>
             <button type="button" class="btn btn-ghost" id="cab-logout" data-i18n="cab.logout">Выйти</button>
-            <!-- «По всем вопросам» — маленькая кнопка у правого края строки:
-                 диалог внизу кабинета свёрнут по умолчанию, кнопка ведёт к нему
-                 и раскрывает его (обработчик — в account.js). -->
-            <a class="btn btn-ghost btn-small" href="#fb-card" id="fb-jump"
-               data-i18n="cab.feedback_link">💬 По всем вопросам<span
-                    class="fb-dot hidden" id="fb-dot"></span></a>
         </div>
         <!-- Telegram — запасной вход и канал сигналов: привязывается к аккаунту -->
         <div class="tg-card" id="tg-card">
@@ -133,26 +127,6 @@
     <p class="lead" data-i18n="cab.services_lead">Нажмите сервис, чтобы развернуть панель. Алерты: ликвидации, CVD и OI.</p>
     <div id="svc-acc"></div>
 
-    <!-- 💬 Обратная связь: пишем админу здесь же, ответ приходит в этот диалог.
-         Блок стоит в самом низу кабинета: сначала сервисы, диалог — последним. -->
-    <details class="card fold fb-card" id="fb-card">
-        <summary>
-            <h3 data-i18n="cab.fb_title">💬 По всем вопросам<span class="fb-dot hidden" id="fb-dot-2"></span></h3>
-            <span class="fold-hint" data-i18n="cab.fb_hint">вопрос, идея, проблема — ответ придёт сюда</span>
-        </summary>
-        <div class="fold-body">
-            <p class="lead" data-i18n="cab.fb_lead">Админ читает эти сообщения в админке и отвечает здесь же.
-                Пишите, что не работает, чего не хватает или что хочется видеть в терминале —
-                переписка хранится, ответ не потеряется.</p>
-            <div class="fb-thread" id="fb-thread" data-i18n-skip><p class="meta" data-i18n="cab.fb_loading">загружаю переписку…</p></div>
-            <textarea class="fb-input" id="fb-text" rows="3" maxlength="2000"
-                      data-i18n-placeholder="cab.fb_ph" placeholder="Ваше сообщение админу…"></textarea>
-            <div class="row-actions">
-                <button class="btn btn-primary" type="button" id="fb-send" data-i18n="cab.fb_send">Отправить</button>
-                <span class="meta" id="fb-status"></span>
-            </div>
-        </div>
-    </details>
 </main>
 <script src="/static/i18n.pages.js?v=book8"></script>
 <script src="/static/i18n.js?v=book8"></script>

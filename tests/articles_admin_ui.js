@@ -204,6 +204,12 @@ async function waitFor(fn, ms = 6000) {
         rows.filter((r) => /Тестовая статья/.test(r.textContent)).length === 1,
         "строк с таким заголовком: " +
         rows.filter((r) => /Тестовая статья/.test(r.textContent)).length);
+    // Админ не должен искать статью по разделу: после сохранения панель
+    // показывает, где она лежит на сайте (и где будет английская версия)
+    const linked = await waitFor(() =>
+        /href="\/articles\//.test((doc.getElementById("art-hint") || {}).innerHTML || ""));
+    ok("панель дала ссылку на статью на сайте", linked,
+        ((doc.getElementById("art-hint") || {}).innerHTML || "").slice(0, 120));
 
     // Убираем за собой: проверка не должна оставлять мусор в разделе.
     // Чистим все статьи с тестовым заголовком — их могло остаться и больше одной

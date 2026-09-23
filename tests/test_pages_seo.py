@@ -348,6 +348,60 @@ class ArticlePagesSeoTest(unittest.TestCase):
                 self.assertIn("BlogPosting", json.dumps(blocks, ensure_ascii=False))
                 self.assertIn(want, json.dumps(blocks, ensure_ascii=False))
 
+    def test_article_page_has_a_language_switch(self) -> None:
+        """Переключатель RU/EN на странице статьи: обе версии и текущая.
+
+        Гость видит, что у статьи есть английская версия, и может перейти на
+        неё одним кликом — без этого английский текст существовал, но найти
+        его было нечем (как на дайджесте и в сводках по часам).
+        """
+        for lang in ("ru", "en"):
+            with self.subTest(lang=lang):
+                html = self.client.get(f"/articles/{self.slug}?lang={lang}").text
+                box = re.search(r'id="art-langs">(.*?)</div>', html, re.S)
+                self.assertTrue(box, "переключателя языка нет на странице")
+                chips = re.findall(r"<a\b[^>]*class=\"art-lang[^\"]*\"[^>]*>", box.group(1))
+                self.assertEqual(len(chips), 2, "нужны обе версии: RU и EN")
+                for code in ("ru", "en"):
+                    chip = [c for c in chips if f'data-lang="{code}"' in c]
+                    self.assertEqual(len(chip), 1, f"нет ссылки на {code}")
+                    self.assertIn(f'href="?lang={code}"', chip[0])   # без JS тоже работает
+                    self.assertIn(f'hreflang="{code}"', chip[0])
+                current = [c for c in chips if 'class="art-lang on"' in c]
+                self.assertEqual(len(current), 1, "текущий язык помечен один раз")
+                self.assertIn(f'data-lang="{lang}"', current[0])
+                # подпись «Язык статьи:» — на языке самой страницы
+                self.assertIn(seo_pages.text(lang, "art.langs"), html)
+
+    def test_article_page_carries_both_texts_for_the_switcher(self) -> None:
+        """Обе версии текста едут вместе со страницей: переключение — без беготни.
+
+        Ссылка ``?lang=xx`` остаётся запасным путём для гостя без JS, а скрипт
+        берёт заголовок и текст из ``#art-versions`` и меняет их на месте.
+        """
+        html = self.client.get(f"/articles/{self.slug}?lang=ru").text
+        raw = re.search(r'id="art-versions">(.*?)</script>', html, re.S)
+        self.assertTrue(raw, "нет данных для переключения без перезагрузки")
+        # внутри <script> не должно быть «<»: иначе текст статьи закроет тег
+        self.assertNotIn("<", raw.group(1))
+        data = json.loads(raw.group(1))
+        self.assertEqual(set(data), {"ru", "en"})
+        self.assertEqual(data["ru"]["title"], "Проверка SEO")
+        self.assertEqual(data["en"]["title"], "SEO check")
+        self.assertIn("Первый абзац.", data["ru"]["html"])
+        self.assertIn("First paragraph.", data["en"]["html"])
+
+    def test_one_version_means_no_switch(self) -> None:
+        """Версия одна — переключать нечего: пустой блок и никаких ссылок."""
+        self.store.add({"id": "tolko-russkiy-link", "status": "published",
+                        "published_at": 1_700_000_200.0,
+                        "titles": {"ru": "Только по-русски"}})
+        html = self.client.get("/articles/tolko-russkiy-link?lang=ru").text
+        box = re.search(r'id="art-langs">(.*?)</div>', html, re.S)
+        self.assertTrue(box)
+        self.assertNotIn("art-lang\"", box.group(1))
+        self.assertNotIn("data-lang", box.group(1))
+
     def test_russian_text_on_the_english_page_is_marked(self) -> None:
         """Английской версии нет — русский текст помечаем ``lang="ru"``."""
         self.store.add({"id": "tolko-russkiy", "status": "published",

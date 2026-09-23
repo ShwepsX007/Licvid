@@ -235,6 +235,7 @@
     "art.all": "Todos los artículos",
     "art.to_hourly": "Resúmenes por hora",
     "art.read": "Leer",
+    "art.langs": "Idioma del artículo:",
     "art.more": "Mostrar más",
     "art.gone": "Este artículo ya no está publicado.",
     "art.cta_text": "¿Quieres ver estos datos en vivo? El terminal de LiqScope tiene el flujo de liquidaciones de 10 exchanges, clústeres, CVD e interés abierto.",
@@ -1227,6 +1228,13 @@
     "✅ Опубликовать": "✅ Publicar",
     "🌐 Перевести ИИ": "🌐 Traducir con IA",
     "📤 Отправить в Telegram": "📤 Enviar a Telegram",
-    "Цитата": "Cita"
+    "Цитата": "Cita",
+    "ИИ на связи — перевод придёт в окно «Текст статьи — English».": "IA en línea: la traducción llegará al cuadro “Article text — English”.",
+    "На сайте:": "En el sitio:",
+    "Посмотреть на сайте:": "Ver en el sitio:",
+    "Разметка та же, что в русской версии: кнопки над окном, ссылка — «Ссылка» (можно выделить слово и нажать).": "El marcado es el mismo que en la versión rusa: los botones están sobre el cuadro y “Enlace” inserta un enlace (puedes seleccionar una palabra antes).",
+    "английская появится после перевода": "la versión en inglés aparecerá tras la traducción",
+    "английской версии ещё нет": "todavía no hay versión en inglés",
+    "текст": "texto"
   }
 }

@@ -235,6 +235,7 @@
     "art.all": "All articles",
     "art.to_hourly": "Hourly recaps",
     "art.read": "Read",
+    "art.langs": "Article language:",
     "art.more": "Show more",
     "art.gone": "This article is no longer published.",
     "art.cta_text": "Want to see these numbers live? LiqScope Terminal has a liquidation feed from 10 exchanges, clusters, CVD and open interest.",
@@ -1226,6 +1227,13 @@
     "✅ Опубликовать": "✅ Publish",
     "🌐 Перевести ИИ": "🌐 Translate with AI",
     "📤 Отправить в Telegram": "📤 Send to Telegram",
-    "Цитата": "Quote"
+    "Цитата": "Quote",
+    "ИИ на связи — перевод придёт в окно «Текст статьи — English».": "AI is online — the translation will arrive in the “Article text — English” box.",
+    "На сайте:": "On the site:",
+    "Посмотреть на сайте:": "View on the site:",
+    "Разметка та же, что в русской версии: кнопки над окном, ссылка — «Ссылка» (можно выделить слово и нажать).": "The markup is the same as in the Russian version: the buttons are above the box, and “Link” inserts a link (you can select a word first).",
+    "английская появится после перевода": "the English version will appear after translation",
+    "английской версии ещё нет": "no English version yet",
+    "текст": "text"
   }
 }

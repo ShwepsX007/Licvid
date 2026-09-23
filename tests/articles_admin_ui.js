@@ -127,6 +127,43 @@ async function waitFor(fn, ms = 6000) {
     ok("предпросмотр нарисовал разметку",
         /<h3>|<strong>|<blockquote>/.test(
             (doc.getElementById("art-prev-ru") || {}).innerHTML || ""));
+
+    // Английский текст редактируется так же, как русский: над окном своя
+    // панель разметки, и «Ссылка» ставит ссылку на выделенное слово.
+    // Раньше панель была только у русского окна — из-за этого в английском
+    // тексте нельзя было сделать ссылки руками.
+    const enBar = doc.querySelector('[data-md="en"]');
+    const enText = doc.getElementById("art-text-en");
+    ok("у английского окна своя панель разметки",
+        !!enBar && !!enText, enBar ? "" : "панели нет");
+    ok("панель английского стоит над своим окном",
+        !!(enBar && enText && (enBar.compareDocumentPosition(enText) &
+            win.Node.DOCUMENT_POSITION_FOLLOWING)));
+    if (enBar && enText) {
+        enText.value = "Walls show where the crowd is trapped.";
+        enText.dispatchEvent(new win.Event("input"));
+        enText.selectionStart = 11;                 // «where»
+        enText.selectionEnd = 16;
+        const enLink = enBar.querySelector("button[data-sel]");
+        ok("в английской панели есть кнопка «Ссылка»", !!enLink);
+        if (enLink) enLink.dispatchEvent(new win.MouseEvent("click", { bubbles: true }));
+        ok("ссылка встала на английское слово",
+            /\[where\]\(https:\/\/\)/.test(enText.value), enText.value);
+        ok("английский предпросмотр ожил",
+            /<a\s/.test((doc.getElementById("art-prev-en") || {}).innerHTML || ""),
+            (doc.getElementById("art-prev-en") || {}).innerHTML);
+    }
+    // Русская панель не сломалась: заготовка ссылки осталась русской
+    const ruBar = doc.querySelector('[data-md="ru"]');
+    const ruText = doc.getElementById("art-text-ru");
+    const ruSaved = ruText.value;
+    ruText.selectionStart = ruText.selectionEnd = 0;
+    ruBar.querySelector("button[data-sel]").dispatchEvent(
+        new win.MouseEvent("click", { bubbles: true }));
+    ok("русская панель вставляет русскую заготовку ссылки",
+        /\[текст\]\(https:\/\/\)/.test(ruText.value), ruText.value.slice(0, 40));
+    ruText.value = ruSaved;
+    ruText.dispatchEvent(new win.Event("input"));
     ok("обложка показана в редакторе",
         /<img/.test((doc.getElementById("art-photo-prev") || {}).innerHTML || ""));
 

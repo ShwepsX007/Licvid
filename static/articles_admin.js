@@ -170,6 +170,23 @@
 
     /* ---------- редактор ---------- */
 
+    /** Панель разметки: своя у русского текста, своя у английского.
+
+     *  Кнопка «Ссылка» вставляет ``[слово](адрес)`` — для английского окна
+     *  заготовка английская, иначе в тексте оставалось русское «текст».
+     */
+    function mdBar(lang, linkWord) {
+        return '<div class="art-md-bar" data-md="' + lang + '">'
+            + '<button type="button" data-ins="## " data-line="1">H2</button>'
+            + '<button type="button" data-ins="**" data-wrap="1"><b>B</b></button>'
+            + '<button type="button" data-ins="*" data-wrap="1"><i>I</i></button>'
+            + '<button type="button" data-ins="[' + linkWord + '](https://)" data-sel="1">Ссылка</button>'
+            + '<button type="button" data-ins="- " data-line="1">Список</button>'
+            + '<button type="button" data-ins="> " data-line="1">Цитата</button>'
+            + '<button type="button" data-ins="\\n---\\n" data-line="1">Разделитель</button>'
+            + "</div>";
+    }
+
     function editorHtml() {
         var it = current || { titles: {}, texts: {}, sent: {} };
         var titles = it.titles || {}, texts = it.texts || {};
@@ -179,22 +196,21 @@
         var scheduled = it.status === "scheduled";
         return ''
             + '<p class="meta" style="margin-bottom:8px">'
-            + (it.id ? "Адрес статьи: <b>/articles/" + esc(it.id) + "</b>" : "Новая статья — адрес получит имя из заголовка")
+            + (it.id
+                ? "Адрес статьи: <b>/articles/" + esc(it.id) + "</b><br>Посмотреть на сайте: "
+                  + '<a href="/articles/' + esc(it.id) + '?lang=ru" target="_blank" rel="noopener">русская →</a>'
+                  + " · "
+                  + ((it.titles && it.titles.en)
+                      ? '<a href="/articles/' + esc(it.id) + '?lang=en" target="_blank" rel="noopener">english →</a>'
+                      : "английская появится после перевода")
+                : "Новая статья — адрес получит имя из заголовка")
             + "</p>"
             + '<label>Заголовок — русский</label>'
             + '<input class="search" id="art-title-ru" maxlength="160" autocomplete="off" value="' + esc(titles.ru || "") + '" placeholder="О чём статья, одной строкой">'
             + '<label>Заголовок — English</label>'
             + '<input class="search" id="art-title-en" maxlength="160" autocomplete="off" value="' + esc(titles.en || "") + '" placeholder="Появится сам после перевода ИИ — или впишите вручную">'
             + '<label>Текст статьи — русский</label>'
-            + '<div class="art-md-bar" data-md="ru">'
-            + '<button type="button" data-ins="## " data-line="1">H2</button>'
-            + '<button type="button" data-ins="**" data-wrap="1"><b>B</b></button>'
-            + '<button type="button" data-ins="*" data-wrap="1"><i>I</i></button>'
-            + '<button type="button" data-ins="[текст](https://)" data-sel="1">Ссылка</button>'
-            + '<button type="button" data-ins="- " data-line="1">Список</button>'
-            + '<button type="button" data-ins="> " data-line="1">Цитата</button>'
-            + '<button type="button" data-ins="\n---\n" data-line="1">Разделитель</button>'
-            + "</div>"
+            + mdBar("ru", "текст")
             + '<textarea id="art-text-ru" rows="14" placeholder="Абзацы разделяются пустой строкой. ## — подзаголовок, **жирный**, *курсив*, [ссылка](адрес), - пункт списка, > цитата, --- разделитель.">' + esc(texts.ru || "") + "</textarea>"
             + '<p class="meta" id="art-len-ru"></p>'
             + '<div class="art-prev" id="art-prev-ru"></div>'
@@ -203,6 +219,8 @@
             + '<button class="btn btn-small" type="button" id="art-translate">🌐 Перевести ИИ</button>'
             + '<span class="meta" id="art-ai-state"></span>'
             + "</div>"
+            + '<p class="meta">Разметка та же, что в русской версии: кнопки над окном, ссылка — «Ссылка» (можно выделить слово и нажать).</p>'
+            + mdBar("en", "text")
             + '<textarea id="art-text-en" rows="12" placeholder="Here goes the English version. Пусто — статья не опубликуется, пока перевод не появится.">' + esc(texts.en || "") + "</textarea>"
             + '<p class="meta" id="art-len-en"></p>'
             + '<div class="art-prev" id="art-prev-en"></div>'
@@ -242,7 +260,8 @@
         if (!box) return;
         box.innerHTML = editorHtml();
         var ru = el("art-text-ru"), en = el("art-text-en");
-        wireMarkdownBar(ru);
+        wireMarkdownBar(document.querySelector('[data-md="ru"]'), ru);
+        wireMarkdownBar(document.querySelector('[data-md="en"]'), en);
         bind("input", ru, function () { preview(ru, "art-prev-ru", "art-len-ru"); });
         bind("input", en, function () { preview(en, "art-prev-en", "art-len-en"); });
         preview(ru, "art-prev-ru", "art-len-ru");
@@ -270,7 +289,7 @@
         var ai = el("art-ai-state");
         if (ai) {
             if (state.ai && state.ai.enabled) {
-                ai.textContent = "ИИ на связи — перевод придёт в правое окно.";
+                ai.textContent = "ИИ на связи — перевод придёт в окно «Текст статьи — English».";
             } else {
                 ai.textContent = "ИИ недоступен: без английской версии публикации не будет — впишите её сами.";
             }
@@ -289,8 +308,7 @@
         if (len) len.textContent = text.length + " знаков";
     }
 
-    function wireMarkdownBar(node) {
-        var bar = document.querySelector('[data-md="ru"]');
+    function wireMarkdownBar(bar, node) {
         if (!bar || !node) return;
         bar.addEventListener("click", function (ev) {
             var btn = ev.target.closest("button[data-ins]");
@@ -382,15 +400,32 @@
             photo = null;
             removePhoto = false;
             current = b.item || null;
-            say(publish
+            say((publish
                 ? (b.ai === "translated"
                     ? "Опубликовано, английскую версию сделал ИИ."
                     : "Статья опубликована на сайте.")
                 : "Сохранено. Английская версия: "
                     + ((current && current.titles && current.titles.en)
-                        ? "есть." : "пока нет — без неё публикация не пройдёт."), "ok");
+                        ? "есть." : "пока нет — без неё публикация не пройдёт."))
+                + linkedTo(current), "ok");
             load(true);
         });
+    }
+
+    /** Ссылки на живую статью: русская и английская версии.
+
+     *  Админ не должен искать материал по разделу: после сохранения и
+     *  публикации панель даёт прямые ссылки на обе версии.
+     */
+    function linkedTo(item) {
+        if (!item || !item.id) return "";
+        var ru = '<a href="/articles/' + esc(item.id)
+            + '?lang=ru" target="_blank" rel="noopener">русская →</a>';
+        var en = (item.titles && item.titles.en) || (item.texts && item.texts.en)
+            ? '<a href="/articles/' + esc(item.id)
+              + '?lang=en" target="_blank" rel="noopener">english →</a>'
+            : "английской версии ещё нет";
+        return "<br>На сайте: " + ru + " · " + en;
     }
 
     function doTranslate() {

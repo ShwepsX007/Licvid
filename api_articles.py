@@ -47,7 +47,7 @@ from fastapi.responses import FileResponse, JSONResponse
 import seo_pages
 from articles import (ArticleStore, DEFAULT_KEEP, TITLE_MAX, article_path,
                       excerpt, index_row, public_article, slugify, text_problem,
-                      unique_slug)
+                      unique_slug, versions_html)
 from hour_board import tz_offset
 
 log = logging.getLogger("liqscope.articles")
@@ -257,11 +257,11 @@ def publish_problem(rec: dict) -> str:
         return problem
     titles = (rec or {}).get("titles") or {}
     if not _clean_title(titles.get("en")):
-        return ("Нет английского заголовка. Нажмите «🌐 Перевести ИИ» или "
-                "впишите перевод в правое окно.")
+        return ("Нет английского заголовка — впишите его в поле «Заголовок — "
+                "English» или нажмите «🌐 Перевести ИИ».")
     if _english_gap(rec):
-        return ("Нет английской версии. Нажмите «🌐 Перевести ИИ» или "
-                "впишите перевод в правое окно.")
+        return ("Нет английского текста — впишите перевод в окно «Текст статьи — "
+                "English» или нажмите «🌐 Перевести ИИ».")
     return ""
 
 
@@ -290,7 +290,7 @@ async def publish_now(aid: str, *, by: Optional[int] = None,
             ctx.store.add(rec)                     # сохраняем то, что уже есть
             return {"ok": False, "error": "ai_unavailable",
                     "hint": ("ИИ не смог перевести статью — впишите английскую "
-                             "версию вручную (правое окно), публикация подождёт."),
+                             "версию вручную (поля English), публикация подождёт."),
                     "reason": str(res.get("reason") or "")}
     elif not problem and _needs_translation(rec):
         problem = publish_problem(rec)             # просили без ИИ — говорим, чего нет
@@ -459,17 +459,47 @@ def admin_article(rec: dict, channels: Optional[dict] = None) -> dict:
 _PAGE_TEXT = {
     "ru": {"minutes": "мин чтения", "in": "Опубликовано", "all": "Все статьи",
            "empty": "Статей пока нет — первая появится здесь после публикации.",
-           "channel": "Канал в Telegram",
+           "channel": "Канал в Telegram", "art_langs": "Язык статьи:",
            "draft": "Черновик — статью видите только вы, гости её не откроют.",
            "planned": "Запланирована к публикации:",
            "unpublished": "Снята с публикации — гости её не видят."},
     "en": {"minutes": "min read", "in": "Published", "all": "All articles",
            "empty": "No articles yet — the first one will appear here.",
-           "channel": "Telegram channel",
+           "channel": "Telegram channel", "art_langs": "Article language:",
            "draft": "Draft — only you can see it, visitors cannot open the page.",
            "planned": "Scheduled for publication:",
            "unpublished": "Unpublished — visitors cannot see it."},
 }
+
+
+def switcher_html(versions: Dict[str, dict], lang: str) -> str:
+    """Переключатель RU/EN на странице статьи — как чипсы у сводок по часам.
+
+    Это обычные ссылки ``?lang=xx``: без JS читатель тоже попадёт в нужную
+    версию, а скрипт переключает текст на месте, не перезагружая страницу.
+    """
+    codes = [c for c in ("ru", "en") if (versions or {}).get(c)]
+    if len(codes) < 2:
+        return ""
+    here = "ru" if str(lang or "").startswith("ru") else "en"
+    label = seo_pages.text(lang, "art.langs",
+                           _page_text(lang)["art_langs"])
+    parts = ['<span class="art-ll">' + _esc_html(label) + "</span>"]
+    for code in codes:
+        cls = " on" if code == here else ""
+        name = "RU" if code == "ru" else "EN"
+        parts.append('<a class="art-lang' + cls + '" href="?lang=' + code
+                     + '" data-lang="' + code + '" hreflang="' + code + '">'
+                     + name + "</a>")
+    return "".join(parts)
+
+
+def versions_json(versions: Dict[str, dict]) -> str:
+    """Обе версии статьи для скрипта: вставляем в ``<script>``, потому что текст
+    статьи — это HTML, и его нельзя просто положить в атрибут."""
+    import json as json_mod
+    return (json_mod.dumps(versions or {}, ensure_ascii=False)
+            .replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026"))
 
 
 def _page_text(lang: str) -> Dict[str, str]:
@@ -682,6 +712,7 @@ def register_article_routes(app) -> None:
             cover = ('<img class="art-cover" id="art-cover" src="' + _attr(photo["url"])
                      + '" alt="' + _attr(item.get("title") or "")
                      + '" loading="eager" width="1200" height="630">')
+        versions = versions_html(rec)
         return seo_pages.render(
             "article.html", lang, "/articles/" + str(slug),
             extra_head=seo_pages.jsonld("article", lang, image=og_image,
@@ -689,7 +720,9 @@ def register_article_routes(app) -> None:
             og_image=og_image, auto=auto,
             title=item.get("title") or "",
             desc=item.get("excerpt") or "",
-            body={"title": _esc_html(item.get("title") or ""),
+            body={"langs": switcher_html(versions, lang),
+                  "versions": versions_json(versions),
+                  "title": _esc_html(item.get("title") or ""),
                   "title_lang": _lang_attr(item.get("title_lang"), lang),
                   "text_lang": _lang_attr(item.get("text_lang"), lang),
                   "meta": meta,

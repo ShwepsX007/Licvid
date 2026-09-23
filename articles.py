@@ -481,6 +481,25 @@ def public_article(rec: dict, lang: str = "en", with_text: bool = True) -> dict:
     return out
 
 
+def versions_html(rec: dict) -> Dict[str, dict]:
+    """Обе языковые версии статьи — для переключателя на странице.
+
+    Возвращаем только то, что есть: у старой статьи без английского текста в
+    словаре будет один ключ, и переключатель показывать нечего. Текст сразу в
+    HTML — тем же разбором, что и основная версия страницы.
+    """
+    texts, titles = texts_of(rec), titles_of(rec)
+    fallback = str(titles.get("ru") or titles.get("en") or "").strip()
+    out: Dict[str, dict] = {}
+    for code in LANGS:
+        raw = str(texts.get(code) or "").strip()
+        if not raw:
+            continue        # версии без текста нет: заголовок-заглушка ещё не версия
+        title = str(titles.get(code) or "").strip() or fallback
+        out[code] = {"title": title, "html": markdown_html(raw)}
+    return out
+
+
 def shown_lang(rec: dict, lang: str = "en") -> str:
     """На каком языке текст, который увидит посетитель.
 

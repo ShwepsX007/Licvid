@@ -248,6 +248,7 @@ window.LIQSCOPE_I18N_PAGES =
       "art.all": "Все статьи",
       "art.to_hourly": "Сводки по часам",
       "art.read": "Читать",
+      "art.langs": "Язык статьи:",
       "art.more": "Показать ещё",
       "art.gone": "Эта статья снята с публикации.",
       "art.cta_text": "Хотите видеть эти цифры вживую? В терминале LiqScope — лента ликвидаций с 10 бирж, кластеры, CVD и открытый интерес.",
@@ -532,7 +533,14 @@ window.LIQSCOPE_I18N_PAGES =
       "✅ Опубликовать": "✅ Опубликовать",
       "🌐 Перевести ИИ": "🌐 Перевести ИИ",
       "📤 Отправить в Telegram": "📤 Отправить в Telegram",
-      "Цитата": "Цитата"
+      "Цитата": "Цитата",
+      "ИИ на связи — перевод придёт в окно «Текст статьи — English».": "ИИ на связи — перевод придёт в окно «Текст статьи — English».",
+      "На сайте:": "На сайте:",
+      "Посмотреть на сайте:": "Посмотреть на сайте:",
+      "Разметка та же, что в русской версии: кнопки над окном, ссылка — «Ссылка» (можно выделить слово и нажать).": "Разметка та же, что в русской версии: кнопки над окном, ссылка — «Ссылка» (можно выделить слово и нажать).",
+      "английская появится после перевода": "английская появится после перевода",
+      "английской версии ещё нет": "английской версии ещё нет",
+      "текст": "текст"
     }
   },
   "en": {
@@ -772,6 +780,7 @@ window.LIQSCOPE_I18N_PAGES =
       "art.all": "All articles",
       "art.to_hourly": "Hourly recaps",
       "art.read": "Read",
+      "art.langs": "Article language:",
       "art.more": "Show more",
       "art.gone": "This article is no longer published.",
       "art.cta_text": "Want to see these numbers live? LiqScope Terminal has a liquidation feed from 10 exchanges, clusters, CVD and open interest.",
@@ -1763,7 +1772,14 @@ window.LIQSCOPE_I18N_PAGES =
       "✅ Опубликовать": "✅ Publish",
       "🌐 Перевести ИИ": "🌐 Translate with AI",
       "📤 Отправить в Telegram": "📤 Send to Telegram",
-      "Цитата": "Quote"
+      "Цитата": "Quote",
+      "ИИ на связи — перевод придёт в окно «Текст статьи — English».": "AI is online — the translation will arrive in the “Article text — English” box.",
+      "На сайте:": "On the site:",
+      "Посмотреть на сайте:": "View on the site:",
+      "Разметка та же, что в русской версии: кнопки над окном, ссылка — «Ссылка» (можно выделить слово и нажать).": "The markup is the same as in the Russian version: the buttons are above the box, and “Link” inserts a link (you can select a word first).",
+      "английская появится после перевода": "the English version will appear after translation",
+      "английской версии ещё нет": "no English version yet",
+      "текст": "text"
     }
   },
   "zh": {
@@ -2003,6 +2019,7 @@ window.LIQSCOPE_I18N_PAGES =
       "art.all": "所有文章",
       "art.to_hourly": "每小时汇总",
       "art.read": "阅读",
+      "art.langs": "文章语言：",
       "art.more": "显示更多",
       "art.gone": "这篇文章已下架。",
       "art.cta_text": "想实时看到这些数字？LiqScope 终端提供 10 家交易所的爆仓流、集群、CVD 与持仓量。",
@@ -2995,7 +3012,14 @@ window.LIQSCOPE_I18N_PAGES =
       "✅ Опубликовать": "✅ 发布",
       "🌐 Перевести ИИ": "🌐 AI 翻译",
       "📤 Отправить в Telegram": "📤 发送到 Telegram",
-      "Цитата": "引用"
+      "Цитата": "引用",
+      "ИИ на связи — перевод придёт в окно «Текст статьи — English».": "AI 在线 — 译文会出现在“正文 — English”框中。",
+      "На сайте:": "在网站上：",
+      "Посмотреть на сайте:": "在网站上查看：",
+      "Разметка та же, что в русской версии: кнопки над окном, ссылка — «Ссылка» (можно выделить слово и нажать).": "标记方式与俄文版相同：按钮在框上方，“链接”可插入链接（可先选中单词）。",
+      "английская появится после перевода": "英文版会在译文后出现",
+      "английской версии ещё нет": "还没有英文版",
+      "текст": "文本"
     }
   },
   "hi": {
@@ -3235,6 +3259,7 @@ window.LIQSCOPE_I18N_PAGES =
       "art.all": "सभी लेख",
       "art.to_hourly": "हर घंटे की समरी",
       "art.read": "पढ़ें",
+      "art.langs": "लेख की भाषा:",
       "art.more": "और दिखाएँ",
       "art.gone": "यह लेख अब प्रकाशित नहीं है।",
       "art.cta_text": "ये आँकड़े लाइव देखने हैं? LiqScope टर्मिनल में 10 एक्सचेंजों की लिक्विडेशन फ़ीड, क्लस्टर, CVD और ओपन इंटरेस्ट है।",
@@ -4228,7 +4253,14 @@ window.LIQSCOPE_I18N_PAGES =
       "✅ Опубликовать": "✅ पब्लिश करें",
       "🌐 Перевести ИИ": "🌐 AI से अनुवाद",
       "📤 Отправить в Telegram": "📤 Telegram पर भेजें",
-      "Цитата": "उद्धरण"
+      "Цитата": "उद्धरण",
+      "ИИ на связи — перевод придёт в окно «Текст статьи — English».": "AI ऑनलाइन है — अनुवाद “Article text — English” बॉक्स में आएगा।",
+      "На сайте:": "साइट पर:",
+      "Посмотреть на сайте:": "साइट पर देखें:",
+      "Разметка та же, что в русской версии: кнопки над окном, ссылка — «Ссылка» (можно выделить слово и нажать).": "मार्कअप रूसी संस्करण जैसा ही है: बटन बॉक्स के ऊपर, और “Link” लिंक डालता है (पहले शब्द चुन सकते हैं)।",
+      "английская появится после перевода": "अंग्रेज़ी संस्करण अनुवाद के बाद दिखेगा",
+      "английской версии ещё нет": "अंग्रेज़ी संस्करण अभी नहीं",
+      "текст": "टेक्स्ट"
     }
   },
   "es": {
@@ -4468,6 +4500,7 @@ window.LIQSCOPE_I18N_PAGES =
       "art.all": "Todos los artículos",
       "art.to_hourly": "Resúmenes por hora",
       "art.read": "Leer",
+      "art.langs": "Idioma del artículo:",
       "art.more": "Mostrar más",
       "art.gone": "Este artículo ya no está publicado.",
       "art.cta_text": "¿Quieres ver estos datos en vivo? El terminal de LiqScope tiene el flujo de liquidaciones de 10 exchanges, clústeres, CVD e interés abierto.",
@@ -5460,7 +5493,14 @@ window.LIQSCOPE_I18N_PAGES =
       "✅ Опубликовать": "✅ Publicar",
       "🌐 Перевести ИИ": "🌐 Traducir con IA",
       "📤 Отправить в Telegram": "📤 Enviar a Telegram",
-      "Цитата": "Cita"
+      "Цитата": "Cita",
+      "ИИ на связи — перевод придёт в окно «Текст статьи — English».": "IA en línea: la traducción llegará al cuadro “Article text — English”.",
+      "На сайте:": "En el sitio:",
+      "Посмотреть на сайте:": "Ver en el sitio:",
+      "Разметка та же, что в русской версии: кнопки над окном, ссылка — «Ссылка» (можно выделить слово и нажать).": "El marcado es el mismo que en la versión rusa: los botones están sobre el cuadro y “Enlace” inserta un enlace (puedes seleccionar una palabra antes).",
+      "английская появится после перевода": "la versión en inglés aparecerá tras la traducción",
+      "английской версии ещё нет": "todavía no hay versión en inglés",
+      "текст": "texto"
     }
   }
 };

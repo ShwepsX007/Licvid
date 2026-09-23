@@ -398,8 +398,9 @@ async function main() {
   check("панель рекламы есть в админке", !!doc.querySelector("#ads-panel"));
   const targetKeys = Array.from(doc.querySelectorAll("#ad-targets input[data-ad-target]"))
     .map((i) => i.getAttribute("data-ad-target"));
-  check("источники перечислены: бот, главная, терминал, дайджест, сводка и каналы",
-        targetKeys.join(",") === "bot,site,terminal,digest,hourly,ch:-1001112223334,ch:-1005556667778",
+  check("источники перечислены: бот, главная, терминал, дайджест, сводка, статьи и каналы",
+        targetKeys.join(",") ===
+          "bot,site,terminal,digest,hourly,articles,ch:-1001112223334,ch:-1005556667778",
         targetKeys.join(","));
   check("поле ссылки по клику есть в форме", !!doc.querySelector("#ad-link"));
   check("настройка баннера в админке есть", !!doc.querySelector("#banner-panel"));

@@ -22,6 +22,7 @@ import base64
 import io
 import json
 import os
+import re
 import struct
 import sys
 import tempfile
@@ -51,6 +52,17 @@ def png_bytes(size: int = 8, rgb=(30, 90, 200)) -> bytes:
     return (b"\x89PNG\r\n\x1a\n"
             + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0))
             + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+
+def visible_body(html: str) -> str:
+    """Видимый текст статьи: тело без данных для переключателя языка.
+
+    В ``#art-versions`` лежит вторая языковая версия — это не то, что гость
+    читает на странице, поэтому проверки «на странице нет чужого языка»
+    смотрят только на ``#art-body``.
+    """
+    m = re.search(r'id="art-body">(.*?)</div>\s*</article>', html, re.S)
+    return m.group(1) if m else html
 
 
 class FakeBot:
@@ -268,12 +280,15 @@ class PublicPageTest(ArticlesTestBase):
                             headers={"Cookie": "liqscope_lang=en"})
         self.assertEqual(ru.status_code, 200)
         self.assertIn("Стена", ru.text)
-        self.assertNotIn("A wall", ru.text)
         self.assertIn("A wall", en.text)
-        self.assertNotIn("Стена", en.text)
+        # Видимый текст — только на языке страницы. Вторая версия едет рядом,
+        # в #art-versions: переключатель языка меняет текст без перезагрузки.
+        self.assertNotIn("A wall", visible_body(ru.text))
+        self.assertNotIn("Стена", visible_body(en.text))
+        self.assertIn("art-versions", ru.text)
         # разметка статьи отрисована сервером: страница читается и без скриптов
-        self.assertIn("<strong>цену</strong>", ru.text)
-        self.assertIn("<blockquote>", ru.text)
+        self.assertIn("<strong>цену</strong>", visible_body(ru.text))
+        self.assertIn("<blockquote>", visible_body(ru.text))
 
     def test_admin_sees_why_the_article_is_not_live(self):
         """Черновик и расписание админ видит с пометкой: иначе кажется, что вышел."""

@@ -138,7 +138,8 @@ class PagesBundleTest(unittest.TestCase):
 class MarkupKeysTest(unittest.TestCase):
     """Ключи в разметке должны существовать — иначе на странице видно «auth.foo»."""
 
-    FILES = ("landing.html", "index.html", "digest.html", "login.html",
+    FILES = ("landing.html", "index.html", "digest.html", "hourly.html",
+             "articles.html", "article.html", "login.html",
              "reset.html", "cabinet.html", "admin.html")
 
     def test_markup_keys_exist(self) -> None:

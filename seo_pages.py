@@ -261,6 +261,12 @@ _CONTENT_RE = re.compile(r"\bcontent=\"([^\"]*)\"", re.I)
 _OG_LOCALE_RE = re.compile(r'(<meta\b[^>]*\bproperty="og:locale"[^>]*\bcontent=")([^"]*)(")', re.I)
 _HTML_RE = re.compile(r"<html\b[^>]*>", re.I)
 #: og:image / twitter:image — их подменяем, если у страницы своя картинка
+#: og:title / twitter:title — у статьи вместо общего заголовка свой
+_OG_TITLE_RE = re.compile(
+    r'(<meta\b[^>]*\bproperty="og:title"[^>]*\bcontent=")([^"]*)(")', re.I)
+_DESC_RE = re.compile(
+    r'(<meta\b[^>]*\bname="description"[^>]*\bcontent=")([^"]*)(")', re.I)
+
 _OG_IMG_RE = re.compile(
     r'(<meta\b[^>]*\b(?:property="og:image"|name="twitter:image")[^>]*\bcontent=")([^"]*)(")',
     re.I)
@@ -313,6 +319,9 @@ def render(
     auto: bool = False,
     status_code: int = 200,
     analytics: bool = True,
+    title: str = "",
+    desc: str = "",
+    body: Optional[Dict[str, str]] = None,
 ) -> Response:
     """Отдаёт страницу с уже подставленным языком в head.
 
@@ -323,6 +332,12 @@ def render(
     клиенту отдаём подсказку, что язык можно подобрать заново по браузеру, а в
     cookie выбор не пишем: гость ещё ничего не выбирал, и запоминать за него
     нечего.
+
+    ``title``/``desc`` — заголовок и описание конкретного материала (у статьи
+    свой текст, его не выразить ключом словаря). ``body`` — те же подстановки
+    в тело страницы: шаблон держит метки ``{{имя}}``, а сервер подставляет по
+    ним уже готовые куски (карточки списка, текст статьи). Так статья приходит
+    в HTML целиком, а не рисуется скриптом, — её читают и поисковики.
     """
     lang = lang if lang in LANGS else DEFAULT_LANG
     page = os.path.join(STATIC_DIR, filename)
@@ -350,6 +365,17 @@ def render(
         return tag[:-1] + f' content="{_attr(value)}">'
 
     html = _META_RE.sub(meta_sub, html)
+
+    if title:
+        # <title> и og:title у материала свои: у статьи свой заголовок
+        html = _TITLE_RE.sub(
+            lambda m: m.group(1) + html_mod.escape(str(title)) + m.group(4),
+            html, count=1)
+        html = _OG_TITLE_RE.sub(
+            lambda m: m.group(1) + _attr(title) + m.group(3), html)
+    if desc:
+        html = _DESC_RE.sub(
+            lambda m: m.group(1) + _attr(desc) + m.group(3), html)
 
     if og_image:
         # у страницы есть своя картинка (обложка выпуска дайджеста): подставляем
@@ -390,6 +416,10 @@ def render(
     if ga:
         block = ga + "\n" + block
     html = html.replace("</head>", block + "\n</head>", 1)
+
+    if body:
+        for key, value in body.items():
+            html = html.replace("{{" + str(key) + "}}", str(value))
 
     resp = Response(content=html, media_type="text/html; charset=utf-8", status_code=status_code)
     # язык зависит и от cookie, и от Accept-Language — говорим об этом кэшам
@@ -468,13 +498,14 @@ _PAGES = (
     ("/", "hourly", "1.0"),
     ("/hourly", "hourly", "0.9"),
     ("/digest", "daily", "0.9"),
+    ("/articles", "daily", "0.9"),
     ("/terminal", "hourly", "0.8"),
     # страница входа открыта и переведена — по ней ищут «LiqScope войти»
     ("/login", "monthly", "0.5"),
 )
 
 
-def sitemap_xml(digest_items=None, hourly_items=None) -> Response:
+def sitemap_xml(digest_items=None, hourly_items=None, article_items=None) -> Response:
     """sitemap.xml: лендинг, сводки по часам, дайджест, терминал и вход — на всех языках.
 
     Плюс свежие выпуски дайджеста и сводок: каждый день/пост — отдельный URL
@@ -516,6 +547,22 @@ def sitemap_xml(digest_items=None, hourly_items=None) -> Response:
     og_cover = f"{SITE_URL}/static/og-cover.png"
     for path, freq, priority in _PAGES:
         add_url(path, last, freq, priority, images=[og_cover])
+
+    # Статьи: у каждой свой URL, обложка — в image sitemap
+    try:
+        for rec in list(article_items or [])[:100]:
+            slug = str((rec or {}).get("id") or "").strip()
+            if not slug:
+                continue
+            ts = float((rec or {}).get("published_at") or (rec or {}).get("updated") or 0)
+            lm = (time.strftime("%Y-%m-%d", time.gmtime(ts)) if ts else last)
+            photos = []
+            photo = ((rec or {}).get("photo") or {})
+            if photo.get("path"):
+                photos.append(f"{SITE_URL}/api/articles/photo/{slug}")
+            add_url(f"/articles/{slug}", lm, "monthly", "0.7", images=photos or None)
+    except Exception:
+        pass
 
     # Дайджест: последние 100 выпусков
     try:
@@ -897,6 +944,55 @@ def jsonld(kind: str = "landing", lang: str = DEFAULT_LANG,
                     (_text(lang, "seo.digest.title", "Digest"), SITE_URL + "/digest"),
                 ]),
             ]
+    elif kind == "articles":
+        # Раздел статей: список материалов админа
+        data = [
+            {
+                "@type": "Blog",
+                **common,
+                "url": f"{SITE_URL}/articles",
+                "inLanguage": list(HREFLANG.values()),
+                "description": _text(lang, "seo.articles.desc"),
+                "isPartOf": {"@type": "WebSite", "name": "LiqScope", "url": SITE_URL},
+            },
+            breadcrumb([
+                ("LiqScope", SITE_URL + "/"),
+                (_text(lang, "seo.articles.title", "Articles"), SITE_URL + "/articles"),
+            ]),
+        ]
+    elif kind == "article":
+        # Конкретная статья: BlogPosting с датой публикации и рубрикой
+        art = article or {}
+        art_title = art.get("title") or _text(lang, "seo.articles.title")
+        art_desc = art.get("desc") or _text(lang, "seo.articles.desc")
+        art_date = art.get("date") or ""
+        data = [
+            {
+                "@type": "BlogPosting",
+                "headline": art_title,
+                "description": art_desc,
+                "url": art.get("url") or f"{SITE_URL}/articles",
+                "mainEntityOfPage": art.get("url") or f"{SITE_URL}/articles",
+                "inLanguage": HREFLANG.get(lang, lang),
+                "datePublished": art_date,
+                "dateModified": art_date,
+                "articleSection": _text(lang, "seo.articles.title", "Articles"),
+                "author": {"@type": "Organization", "name": "LiqScope", "url": SITE_URL},
+                "publisher": {
+                    "@type": "Organization",
+                    "name": "LiqScope",
+                    "logo": {"@type": "ImageObject", "url": f"{SITE_URL}/static/icon-512.png",
+                             "width": 512, "height": 512},
+                },
+                "isPartOf": {"@type": "Blog", "name": "LiqScope Articles",
+                             "url": f"{SITE_URL}/articles"},
+            },
+            breadcrumb([
+                ("LiqScope", SITE_URL + "/"),
+                (_text(lang, "seo.articles.title", "Articles"), SITE_URL + "/articles"),
+                (art_title[:80], art.get("url") or f"{SITE_URL}/articles"),
+            ]),
+        ]
     elif kind == "404":
         data = [
             {"@type": "WebPage", **common, "url": f"{SITE_URL}/404", "name": _text(lang, "seo.404.title")},

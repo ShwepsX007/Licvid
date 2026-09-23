@@ -3,7 +3,7 @@
 Читать могут все, писать — только зарегистрированные (сессия COOKIE_SID).
 Комментарий привязан к конкретному выпуску:
 
-    kind = digest | hourly
+    kind = digest | hourly | article
     item_id = YYYY-MM-DD (день дайджеста/часовки) или post-id часовки
 
 Эндпоинты:
@@ -125,9 +125,9 @@ def register_comment_routes(app) -> None:
             return JSONResponse({"ok": False, "error": "no_store"}, status_code=503)
         k = str(kind or "").strip().lower()
         it = str(item or "").strip()[:120]
-        if k not in ("digest", "hourly") or not it:
+        if k not in ("digest", "hourly", "article") or not it:
             return JSONResponse({"ok": False, "error": "bad_params",
-                                 "hint": "Нужны kind=digest|hourly и item (дата или id)"},
+                                 "hint": "Нужны kind=digest|hourly|article и item (дата, id поста или адрес статьи)"},
                                 status_code=400)
         try:
             lim = max(1, min(int(limit), 200))
@@ -147,7 +147,7 @@ def register_comment_routes(app) -> None:
             return JSONResponse({"ok": False, "error": "no_store"}, status_code=503)
         k = str(kind or "").strip().lower()
         it = str(item or "").strip()[:120]
-        if k and k not in ("digest", "hourly"):
+        if k and k not in ("digest", "hourly", "article"):
             return JSONResponse({"ok": False, "error": "bad_kind"}, status_code=400)
         cnt = ctx.store.content_comments_count(kind=k, item_id=it)
         return {"ok": True, "count": cnt, "kind": k, "item": it}
@@ -174,12 +174,14 @@ def register_comment_routes(app) -> None:
         k = str(body.get("kind") or body.get("type") or "").strip().lower()
         it = str(body.get("item") or body.get("item_id") or "").strip()[:120]
         txt = _clean_text(body.get("text") or "", limit=ctx.store.CONTENT_COMMENT_MAX_LEN)
-        if k not in ("digest", "hourly"):
+        if k not in ("digest", "hourly", "article"):
             return JSONResponse({"ok": False, "error": "bad_kind",
-                                 "hint": "kind должен быть digest или hourly"}, status_code=400)
+                                 "hint": "kind должен быть digest, hourly или article"},
+                                status_code=400)
         if not it:
             return JSONResponse({"ok": False, "error": "bad_item",
-                                 "hint": "Укажите item — дату выпуска или id поста"}, status_code=400)
+                                 "hint": "Укажите item — дату выпуска, id поста или адрес статьи"},
+                                status_code=400)
         if not txt:
             return JSONResponse({"ok": False, "error": "empty"}, status_code=400)
         if not _rate_ok(u["id"]):

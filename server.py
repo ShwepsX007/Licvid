@@ -73,9 +73,12 @@ from mailer import build_mailer
 import ai_text
 from ai_text import build_ai, prompt_setting
 import api_digest
+import api_articles
 from api_digest import DigestScheduler, ctx as digest_ctx, register_digest_routes
 from api_hourly import ctx as hourly_ctx, register_hourly_routes
+from api_articles import ctx as articles_ctx, register_article_routes
 from hourly_posts import PostStore as HourlyStore, post_id as hourly_id
+from articles import ArticleStore
 from daily_digest import DigestStore
 from tg_bot import TelegramBot, normalize_public_url
 from web_account import ctx as account_ctx, register_account_routes
@@ -184,6 +187,18 @@ try:
     HOURLY_KEEP = max(50, int(os.getenv("LIQSCOPE_HOURLY_KEEP", "1200") or 1200))
 except ValueError:
     HOURLY_KEEP = 1200
+# 📰 Статьи: материалы, которые админ пишет сам (заголовок, текст, обложка).
+# LIQSCOPE_ARTICLES_FILE="" — не хранить архив (раздел будет пустым).
+ARTICLES_FILE = os.getenv("LIQSCOPE_ARTICLES_FILE",
+                          os.path.join(HERE, "data", "articles.json")).strip()
+if ARTICLES_FILE.lower() in ("0", "none", "off", "false"):
+    ARTICLES_FILE = ""
+ARTICLES_DIR = os.getenv("LIQSCOPE_ARTICLES_DIR",
+                         os.path.join(HERE, "data", "articles")).strip()
+try:
+    ARTICLES_KEEP = max(20, int(os.getenv("LIQSCOPE_ARTICLES_KEEP", "500") or 500))
+except ValueError:
+    ARTICLES_KEEP = 500
 DIGEST_HOUR = int(os.getenv("LIQSCOPE_DIGEST_HOUR", "22") or 22)
 DIGEST_MINUTE = int(os.getenv("LIQSCOPE_DIGEST_MIN", "0") or 0)
 DIGEST_JITTER_MIN = int(os.getenv("LIQSCOPE_DIGEST_JITTER_MIN", "10") or 10)
@@ -2454,6 +2469,9 @@ async def lifespan(app: FastAPI):
     app.state.digest_scheduler = digest_sched
     tasks.append(asyncio.create_task(api_digest.scheduler_loop(digest_sched),
                                      name="digest"))
+    # 📰 Статьи: публикация на сайте по расписанию админа (в каналы — кнопкой)
+    tasks.append(asyncio.create_task(api_articles.scheduler_loop(),
+                                     name="articles"))
     # 📣 Реклама: отправка по выбранному времени и автоудаление по сроку
     tasks.append(asyncio.create_task(ads_mod.scheduler_loop(ad_service),
                                      name="ads"))    # 🔒 чат: TG-напоминания о безответных личных + чистка истории
@@ -2660,6 +2678,28 @@ hourly_ctx.channel_url_fn = tg_bot.channel_url_en
 register_hourly_routes(app)
 # Бот складывает в этот же архив каждый пост, который реально ушёл в канал
 tg_bot.hourly_store = hourly_ctx.store
+
+# 📰 Статьи: раздел сайта, который наполняет админ. Английскую версию делает
+# ИИ (перевод), а в каналы версии уходят по кнопке — русская в русский
+# канал, английская в английский.
+articles_ctx.store = ArticleStore(ARTICLES_FILE, keep=ARTICLES_KEEP)
+articles_ctx.photo_dir = ARTICLES_DIR
+articles_ctx.public_url = PUBLIC_URL
+articles_ctx.bot = tg_bot
+# ИИ для статей — тот же писатель, что делает шапки и дайджест: у него уже
+# есть перебор сервисов, ключей и моделей, поэтому перевод просто идёт по той
+# же цепи. Ключей нет — перевода нет, и статья ждёт ручной английской версии.
+_articles_ai = getattr(tg_bot, "ai", None)
+articles_ctx.ai_status_fn = (
+    (lambda: _articles_ai.status()) if _articles_ai else
+    (lambda: {"enabled": False, "providers": [], "last": {},
+              "hint": "Ключей ИИ нет: переведите статью вручную."}))
+if _articles_ai is not None:
+    async def translate_article(text: str):
+        """Перевод статьи RU → EN встроенным ИИ (None — ИИ не ответил)."""
+        return await _articles_ai.translate(text, target="en", src="ru")
+    articles_ctx.ai_fn = translate_article
+register_article_routes(app)
 
 # Админка бота на сайте: каналы, публикация постов, контроль, здоровье бирж
 web_bot_admin.ctx.bot = tg_bot
@@ -3299,11 +3339,13 @@ async def sitemap_xml():
     """Карта сайта: основные страницы во всех языках (hreflang-альтернативы) + архив."""
     digest_items = []
     hourly_items = []
+    article_items = []
     try:
         # digest_ctx и hourly_ctx живут в модулях api_digest / api_hourly —
         # берём их напрямую, чтобы не тянуть app.state
         from api_digest import ctx as dctx
         from api_hourly import ctx as hctx
+        from api_articles import ctx as actx
         try:
             digest_items = list((getattr(dctx, "store", None) or {}).list() if hasattr(getattr(dctx, "store", None), "list") else [])
         except Exception:
@@ -3312,9 +3354,16 @@ async def sitemap_xml():
             hourly_items = list((getattr(hctx, "store", None) or {}).list() if hasattr(getattr(hctx, "store", None), "list") else [])
         except Exception:
             hourly_items = []
+        try:
+            # в карту сайта идут только опубликованные статьи
+            store = getattr(actx, "store", None)
+            article_items = list(store.published() if store is not None else [])
+        except Exception:
+            article_items = []
     except Exception:
         pass
-    return seo_pages.sitemap_xml(digest_items=digest_items, hourly_items=hourly_items)
+    return seo_pages.sitemap_xml(digest_items=digest_items, hourly_items=hourly_items,
+                                 article_items=article_items)
 
 
 @app.get("/manifest.webmanifest")

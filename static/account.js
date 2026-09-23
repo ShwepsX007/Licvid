@@ -3744,7 +3744,9 @@
             + adTargetRow("digest", "📰 Дайджест",
                           "— баннер над списком выпусков на /digest")
             + adTargetRow("hourly", "🕘 Сводка по часам",
-                          "— баннер над списком на /hourly");
+                          "— баннер над списком на /hourly")
+            + adTargetRow("articles", "📄 Статьи",
+                          "— баннер в разделе статей: на списке и под статьёй");
         (d.channels || []).forEach(function (c) {
             html += adTargetRow("ch:" + c.id, esc(c.label || "📣 Канал"),
                                 "— id " + esc(c.id));
@@ -3892,7 +3894,8 @@
     }
 
     function adCollect(draft) {
-        var targets = { bot: false, site: false, terminal: false, digest: false, hourly: false, channels: [] };
+        var targets = { bot: false, site: false, terminal: false, digest: false,
+                        hourly: false, articles: false, channels: [] };
         adCheckboxes().forEach(function (inp) {
             if (!inp.checked) return;
             var key = inp.getAttribute("data-ad-target");
@@ -3901,6 +3904,7 @@
             else if (key === "terminal") targets.terminal = true;
             else if (key === "digest") targets.digest = true;
             else if (key === "hourly") targets.hourly = true;
+            else if (key === "articles") targets.articles = true;
             else if (key.indexOf("ch:") === 0) targets.channels.push(key.slice(3));
         });
         ((($("ad-extra") || {}).value) || "").split(/[\s,;]+/).forEach(function (x) {

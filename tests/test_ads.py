@@ -145,7 +145,7 @@ class TargetsTest(unittest.TestCase):
         got = clean_targets("не словарь")
         self.assertEqual(got, {"bot": False, "site": False, "terminal": False,
                                "digest": False, "hourly": False,
-                               "channels": []})
+                               "articles": False, "channels": []})
 
     def test_terminal_is_a_place_of_its_own(self):
         """Терминал — отдельная страница: хочется одну акцию везде или только там."""
@@ -317,7 +317,20 @@ class AdStoreTest(unittest.TestCase):
                          ["обе", "главная", "дайджест"])
         self.assertEqual([a["text"] for a in self.store.active_site_ads(now, place="hourly")],
                          ["обе", "главная", "сводка"])
-        self.assertEqual(len(self.store.active_site_ads(now, place="")), 5)
+        self.store.add_ad("статьи", status="sent", send_at=now - 60,
+                          targets={"articles": True})
+        # «Статьи» — своё место: баннер главной там виден, чужие — нет
+        self.assertEqual([a["text"] for a in self.store.active_site_ads(now, place="articles")],
+                         ["обе", "главная", "статьи"])
+        self.assertNotIn("статьи", [a["text"] for a in
+                                    self.store.active_site_ads(now, place="landing")])
+        # в подписи и в целях место названо по-русски
+        self.assertIn("статьи", ads_mod.targets_text({"articles": True}))
+        self.assertEqual(clean_targets({"articles": True}),
+                         {"bot": False, "site": False, "terminal": False,
+                          "digest": False, "hourly": False, "articles": True,
+                          "channels": []})
+        self.assertEqual(len(self.store.active_site_ads(now, place="")), 6)
 
     def test_banner_limit_is_honest_about_pages(self):
         """Лимит «сколько показывать» applies after the page filter, not before."""

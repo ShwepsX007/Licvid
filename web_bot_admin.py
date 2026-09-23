@@ -242,15 +242,17 @@ AI_PROMPT_LIMIT = 4000      # символов: длиннее инструкц�
 def ai_prompts_state() -> dict:
     """Промты ИИ для админки: что стоит сейчас и какой шаблон встроен.
 
-    Промтов два: инструкция для шапки поста в канал и для текста дневного
-    дайджеста. У каждого — русский и английский вариант, потому что посты
-    уходят в два канала; пустое поле значит «работает встроенный шаблон».
+    Промтов три: инструкция для шапки поста в канал, для текста дневного
+    дайджеста и для перевода статьи на английский. У каждого — русский и
+    английский вариант, потому что посты уходят в два канала; пустое поле
+    значит «работает встроенный шаблон».
     """
     from ai_text import active_prompt, custom_prompt, default_prompt, prompt_setting
-    out = {"kinds": {"head": "Шапка поста", "digest": "Дневной дайджест"},
+    out = {"kinds": {"head": "Шапка поста", "digest": "Дневной дайджест",
+                     "translate": "Перевод статьи на английский"},
            "langs": {"ru": "Русский", "en": "English"},
            "limit": AI_PROMPT_LIMIT, "blocks": []}
-    for kind in ("head", "digest"):
+    for kind in ("head", "digest", "translate"):
         rows = []
         for lang in ("ru", "en"):
             rows.append({
@@ -658,10 +660,11 @@ def register_bot_admin_routes(app) -> None:
         body = body or {}
         kind = str(body.get("kind") or "head").strip().lower()
         lang = str(body.get("lang") or "ru").strip().lower()
-        if kind not in ("head", "digest") or lang not in ("ru", "en"):
+        if kind not in ("head", "digest", "translate") or lang not in ("ru", "en"):
             return JSONResponse({"ok": False, "error": "bad_target",
-                                 "message": "Промт бывает только для шапки или "
-                                            "дайджеста, на русском или английском."},
+                                 "message": "Промт бывает для шапки, дайджеста или "
+                                            "перевода статьи — на русском или "
+                                            "английском."},
                                 status_code=400)
         text = str(body.get("text") or "").strip()
         if len(text) > AI_PROMPT_LIMIT:

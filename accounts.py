@@ -2960,7 +2960,8 @@ class Store:
         """Что показывать баннером на сайте: отправлено, не истекло, для этой страницы.
 
         ``place`` — ``landing`` (главная), ``terminal`` (под графиком), ``digest``
-        (дайджест), ``hourly`` (сводка по часам); пусто — любая страница сайта.
+        (дайджест), ``hourly`` (сводка по часам), ``articles`` (статьи);
+        пусто — любая страница сайта.
         Разметка «куда идти» живёт в JSON внутри ``targets``, поэтому отбор по
         странице делаем в Python: в SQLite JSON фильтровался бы подстрокой и
         путал ``"site"`` с ``"site_x"``.
@@ -2973,31 +2974,34 @@ class Store:
                 " LIMIT ?", (now, now, int(limit) * 2)
             ).fetchall()
         out = [self._ad_row(r) for r in rows]
-        # landing → site (историческое имя), terminal, digest, hourly — отдельные страницы
-        # Для digest/hourly баннер должен показываться всем как на главной:
-        # если объявление отмечено для главной (site), оно также подходит для
-        # дайджеста и сводки, иначе старые записи с site=true исчезли бы с этих
-        # страниц после расширения таргетинга.
+        # landing → site (историческое имя), terminal, digest, hourly — отдельные
+        # страницы.
+        # Для digest/hourly/articles баннер должен показываться всем как на
+        # главной: если объявление отмечено для главной (site), оно также
+        # подходит для этих страниц, иначе старые записи с site=true исчезли бы
+        # с них после расширения таргетинга.
         place_norm = str(place or "").strip().lower()
         key = {
             "landing": "site",
             "terminal": "terminal",
             "digest": "digest",
             "hourly": "hourly",
+            "articles": "articles",
         }.get(place_norm)
         keep = []
         for a in out:
             tg = a.get("targets") or {}
-            if place_norm in ("digest", "hourly"):
-                # digest/hourly: показываем если явно отмечено для этой страницы
-                # ИЛИ если отмечено для главной (site) — так баннер возвращается
-                # на эти страницы и виден всем, как на лендинге.
+            if place_norm in ("digest", "hourly", "articles"):
+                # digest/hourly/articles: показываем если явно отмечено для этой
+                # страницы ИЛИ для главной (site) — так баннер виден всем, как
+                # на лендинге.
                 if not (tg.get(key) or tg.get("site")):
                     continue
             elif key:
                 if not tg.get(key):
                     continue
-            elif not (tg.get("site") or tg.get("terminal") or tg.get("digest") or tg.get("hourly")):
+            elif not (tg.get("site") or tg.get("terminal") or tg.get("digest")
+                      or tg.get("hourly") or tg.get("articles")):
                 continue
             keep.append(a)
             if len(keep) >= max(1, int(limit)):
@@ -3798,16 +3802,17 @@ class Store:
     # ----- 💬 Комментарии к дайджесту и сводке по часам ----------------------
     CONTENT_COMMENT_MAX_LEN = 1000
     CONTENT_COMMENT_LIMIT = 200
-    CONTENT_COMMENT_KINDS = ("digest", "hourly")
+    CONTENT_COMMENT_KINDS = ("digest", "hourly", "article")
 
     def add_content_comment(self, user_id: int, display_name: str, kind: str,
                             item_id: str, text: str,
                             is_admin: bool = False) -> Dict[str, Any]:
         """Комментарий к дайджесту/часовке: только зарегистрированные пишут.
 
-        ``kind`` — ``digest`` (дневной выпуск) или ``hourly`` (сводка по часам),
-        ``item_id`` — идентификатор: дата YYYY-MM-DD для дайджеста или дата/post-id
-        для часовки. Текст до 1000 знаков, хранится бессрочно (модерация — через удаление).
+        ``kind`` — ``digest`` (дневной выпуск), ``hourly`` (сводка по часам) или
+        ``article`` (статья раздела «Статьи»), ``item_id`` — идентификатор: дата
+        YYYY-MM-DD для дайджеста, дата/post-id для часовки, адрес статьи (slug)
+        для статей. Текст до 1000 знаков, хранится бессрочно (модерация — через удаление).
         """
         text = (text or "").strip()
         if not text:

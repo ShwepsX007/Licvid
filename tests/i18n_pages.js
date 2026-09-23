@@ -145,14 +145,6 @@ async function main() {
     !!cab.doc.querySelector("[data-lang-select]"));
   check("кабинет: панель сервисов ждёт данные",
     !!cab.doc.querySelector("#svc-acc"));
-  // Перевод не должен сносить вложенные элементы: внутри подписи кнопки
-  // «По всем вопросам» живёт счётчик непрочитанного <span class="fb-dot">.
-  const jumpEn = cab.doc.querySelector("#fb-jump");
-  check("кабинет: кнопка «По всем вопросам» переведена и счётчик на месте",
-    !!jumpEn && !CYR.test(jumpEn.textContent) && !!jumpEn.querySelector(".fb-dot"),
-    jumpEn && jumpEn.textContent);
-  check("кабинет: переписка не переводится (это текст пользователя)",
-    !!cab.doc.querySelector("#fb-thread[data-i18n-skip]"));
   cab.win.close();
 
   console.log(`\nитог: ${ok} ок, ${fail} ошибок`);

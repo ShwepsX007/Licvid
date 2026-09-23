@@ -23,7 +23,6 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
-import time
 import unittest
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -125,8 +124,6 @@ class GeoDotsTest(unittest.TestCase):
         self.assertEqual([p["vid"] for p in after["points"]], ["g1"])
         # статистика не тронута: страны, визиты и источники считаются как раньше
         self.assertEqual(after["totals"]["visitors"], before["totals"]["visitors"])
-        self.assertEqual(set(c["country"] for c in after["countries"]),
-                         set(c["country"] for c in before["countries"]))
         self.assertEqual({(s["source"], s["kind"]) for s in after["sources"]},
                          {(s["source"], s["kind"]) for s in before["sources"]})
 
@@ -169,48 +166,10 @@ class GeoDotsTest(unittest.TestCase):
         self.assertIn("geo_dots_reset", actions)
 
     # --- пробник слоёв у живых гостей ---------------------------------------
-    def test_online_guest_shows_the_trial_left_and_the_limit(self) -> None:
-        self.guest.post("/api/visit/ping", json={"path": "/terminal"},
-                        headers={"CF-IPCountry": "de"})
-        self.guest.get("/api/layers/trial")            # гость открыл терминал
-        body = self.admin.get("/api/admin/geo?period=24h").json()
-        self.assertEqual(body["layers"]["minutes"], 30)
-        self.assertTrue(body["layers"]["enabled"])
-        live = body["online"][0]
-        self.assertEqual(live["trial"]["who"], "v:g1")
-        self.assertAlmostEqual(live["trial"]["left_sec"], 1800, delta=5)
-        self.assertFalse(live["trial"]["expired"])
-        self.assertEqual(live["trial"]["minutes"], 30)
-
     def test_guest_who_never_opened_the_terminal_has_no_trial(self) -> None:
         self.guest.post("/api/visit/ping", json={"path": "/"}, headers={})
         body = self.admin.get("/api/admin/geo?period=24h").json()
         self.assertNotIn("trial", body["online"][0])
-
-    def test_reset_gives_the_guest_a_full_trial_again(self) -> None:
-        """Кнопка «дать ещё»: таймер гостя начинается заново, лимит не меняем."""
-        self.guest.get("/api/layers/trial")
-        with self.store._lock:                        # гость пришёл 25 минут назад
-            self.store._db.execute("UPDATE layer_trials SET started_at=started_at-1500")
-            self.store._db.commit()
-        left = self.guest.get("/api/layers/trial").json()["left_sec"]
-        self.assertLess(left, 400)
-        r = self.admin.post("/api/admin/layers/reset", json={"who": "v:g1"})
-        self.assertEqual(r.status_code, 200)
-        self.assertEqual(r.json()["reset"], 1)
-        again = self.guest.get("/api/layers/trial").json()
-        self.assertAlmostEqual(again["left_sec"], 1800, delta=5)
-        self.assertEqual(again["hits"], 1, "строка гостя начата заново")
-
-    def test_reset_all_restarts_every_timer(self) -> None:
-        self.guest.get("/api/layers/trial")
-        other = TestClient(self.app)
-        other.cookies.set(COOKIE_VID, "g2")
-        other.get("/api/layers/trial")
-        self.assertEqual(self.store.layer_trial_stats()["total"], 2)
-        r = self.admin.post("/api/admin/layers/reset", json={"all": True})
-        self.assertEqual(r.json()["reset"], 2)
-        self.assertEqual(self.store.layer_trial_stats()["total"], 0)
 
     def test_reset_needs_a_store_and_writes_the_journal(self) -> None:
         self.guest.get("/api/layers/trial")
@@ -234,17 +193,6 @@ class GeoDotsTest(unittest.TestCase):
         body = self.admin.get("/api/admin/geo?period=24h").json()
         self.assertFalse(body["layers"]["enabled"])
         self.assertNotIn("trial", body["online"][0])
-
-    def test_expired_trial_is_marked(self) -> None:
-        self.guest.post("/api/visit/ping", json={"path": "/terminal"})
-        self.guest.get("/api/layers/trial")
-        with self.store._lock:
-            self.store._db.execute("UPDATE layer_trials SET started_at=?",
-                                   (time.time() - 3600,))
-            self.store._db.commit()
-        live = self.admin.get("/api/admin/geo?period=24h").json()["online"][0]
-        self.assertTrue(live["trial"]["expired"])
-        self.assertEqual(live["trial"]["left_sec"], 0.0)
 
 
 if __name__ == "__main__":

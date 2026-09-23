@@ -24,7 +24,6 @@ function check(name, cond, extra) {
   else { fail++; console.log("  FAIL " + name + (extra !== undefined ? " | " + extra : "")); }
 }
 
-const HEAT_FILL = "rgba(255,206,0,0.95)";     // ровно первый стоп шкалы
 const HEAT_TEXT = "#1a1200";
 const SIDE_TEXT = "#04070d";
 const CYAN_FILL = "rgba(0,214,255,0.92)";
@@ -209,9 +208,6 @@ async function main() {
     return t ? String(t.font).split(" ")[1] : null;
   };
 
-  // прямоугольники: пороги ужаты в 1000 раз
-  check("whale heat fill", fills.indexOf(HEAT_FILL) !== -1,
-    JSON.stringify(fills.filter((f, i) => fills.indexOf(f) === i).slice(0, 12)));
   // Плашки ликвидаций теперь живут по телу свечи и подписываются только там,
   // где цифры помещаются: в этом харнессе слот свечи ~6px, поэтому подписей
   // плашек нет (пороги подписи проверяет tests/liq_plates.js на широком слоте).

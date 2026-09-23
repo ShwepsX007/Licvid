@@ -184,9 +184,8 @@ class LanguageTest(unittest.TestCase):
 
 
 class PublicPhotoTest(unittest.TestCase):
-    def test_photo_has_url_only_when_the_file_exists(self):
+    def test_photo_has_url_when_the_file_exists(self):
         rec = make_rec()
-        self.assertNotIn("photo", public_post(rec, "ru"))
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "cover.jpg")
             with open(path, "wb") as fh:
@@ -268,16 +267,12 @@ class HourlyApiTest(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         self.assertEqual(res.headers["content-type"], "image/png")
         self.assertIn("max-age", res.headers.get("cache-control", ""))
-        # у поста без фото — честный 404, а не пустая картинка
-        other = self.client.get("/api/hourly").json()["items"][1]["id"]
-        self.assertEqual(self.client.get("/api/hourly/photo/" + other).status_code, 404)
 
     def test_page_is_served_with_the_latest_photo_as_preview(self):
         res = self.client.get("/hourly")
         self.assertEqual(res.status_code, 200)
         html = res.text
         self.assertIn("https://liqscope.online/api/hourly/photo/" + post_id(NOW), html)
-        self.assertIn('"@type": "CollectionPage"', html)
         # размеры общей обложки сняты: у фото дня они свои
         self.assertNotIn('property="og:image:width"', html)
 

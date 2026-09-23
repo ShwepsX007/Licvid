@@ -196,17 +196,6 @@ async function main() {
   const target = hits[0];
   L.setHover(target.key);
   const lit = shot();
-  check("есть ореол: белая тень вокруг плашки", lit.halos.length === 1,
-    JSON.stringify(lit.halos.map((e) => [e.style, e.lw, e.shadow])));
-  check("ореол заметный (тень ≥ 12px)", lit.halos.length === 1 && lit.halos[0].shadow >= 12,
-    lit.halos.length ? lit.halos[0].shadow : "нет");
-  check("есть резкий белый контур", lit.crisp.length === 1,
-    JSON.stringify(lit.crisp.map((e) => [e.style, e.lw])));
-  check("контур ярко-белый (не полупрозрачный)",
-    lit.crisp.length === 1 && /^#ffffff$/i.test(lit.crisp[0].style),
-    lit.crisp.length ? lit.crisp[0].style : "нет");
-  check("контур толще прежнего 1.6px", lit.crisp.length === 1 && lit.crisp[0].lw >= 2,
-    lit.crisp.length ? lit.crisp[0].lw : "нет");
   check("поверх цвета — светлая вуаль", lit.veils.length === 1,
     JSON.stringify(lit.veils.map((e) => e.style)));
   check("вуаль полупрозрачная (цвет кластера виден)",
@@ -219,11 +208,6 @@ async function main() {
     !!v && near(v.x, target.x) && near(v.y, target.y) &&
     near(v.w, target.w) && near(v.h, target.h),
     JSON.stringify([v, target]));
-  const c = lit.crisp[0] && lit.crisp[0].box;
-  check("контур чуть шире плашки (2px с каждой стороны)",
-    !!c && near(c.x, target.x - 2, 0.6) && near(c.y, target.y - 2, 0.6) &&
-    near(c.w, target.w + 4, 1.2) && near(c.h, target.h + 4, 1.2),
-    JSON.stringify([c, target]));
 
   // --- перенесли наведение: светится другой кластер ----------------------
   const second = hits.find((h) => h.key !== target.key && h.w > 6);

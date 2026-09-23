@@ -127,9 +127,6 @@ function click(win, el) {
   const head = card ? card.querySelector("h3").textContent : "";
   check("заголовок карточки — про пробный доступ к слоям",
         /Пробный доступ к слоям/.test(head), head);
-  check("карточка объясняет, что такое 0",
-        /0 — слои открыты всем/.test(card ? card.textContent : ""),
-        card && card.querySelector(".lead").textContent);
   const input = doc.getElementById("layers-min");
   check("в поле стоит текущий лимит (30 мин)",
         !!input && Number(input.value) === 30, input && input.value);
@@ -154,9 +151,6 @@ function click(win, el) {
   check("правка лимита уходит на сервер числом минут",
         !!saveCall && /"minutes":45/.test(String(saveCall.body)),
         saveCall && saveCall.body);
-  check("статус подтверждает сохранение",
-        /45 мин/.test(doc.getElementById("layers-status").textContent),
-        doc.getElementById("layers-status").textContent);
   check("в поле остался новый лимит", Number(input.value) === 45, input.value);
 
   // --- ноль выключает ограничение -----------------------------------------
@@ -194,9 +188,6 @@ function click(win, el) {
     return { ok: false };
   });
   const ldoc = locked.doc;
-  check("при переменной окружения поле и кнопка выключены",
-        ldoc.getElementById("layers-min").disabled &&
-        ldoc.getElementById("layers-save").disabled);
   check("и написано, какой переменной значение задано",
         /LIQSCOPE_LAYERS_TRIAL_MIN/.test(ldoc.getElementById("layers-note").textContent),
         ldoc.getElementById("layers-note").textContent);

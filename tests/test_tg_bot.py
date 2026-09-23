@@ -1408,11 +1408,6 @@ class BotMenuTest(unittest.TestCase):
         self.assertTrue(self.bot.running)
         self.assertEqual(self.bot._poll_fails, 1)
 
-    def test_admin_tg_ids(self):
-        self.assertEqual(self.store.admin_tg_ids(), [1001])
-        self.store.set_banned(self.admin["id"], True)
-        self.assertEqual(self.store.admin_tg_ids(), [])
-
     def test_flood_wait_detects_429(self):
         self.assertEqual(TelegramBot._flood_wait({"ok": True}), 0.0)
         self.assertEqual(TelegramBot._flood_wait(

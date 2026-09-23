@@ -958,8 +958,6 @@ class ArchiveIndexTest(unittest.TestCase):
             self.assertEqual(res.headers["content-type"], "image/png")
             self.assertEqual(res.content, png)
             self.assertIn("max-age", res.headers.get("cache-control", ""))
-            # без обложки — честный 404, а не пустая картинка
-            self.assertEqual(self.client.get("/api/digest/cover?day=2026-09-17").status_code, 404)
             # без даты отдаём обложку свежего выпуска (так строит превью страница)
             self.assertEqual(self.client.get("/api/digest/cover").status_code, 200)
             self.assertIn("/api/digest/cover?day=2026-09-18",

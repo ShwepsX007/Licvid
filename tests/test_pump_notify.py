@@ -19,7 +19,6 @@ sys.path.insert(0, HERE)
 
 os.environ.setdefault("LIQSCOPE_ACCOUNTS_DB", "")
 os.environ["LIQSCOPE_ACCOUNTS_DB"] = ""  # подменим ниже на временную базу
-os.environ["LIQSCOPE_PUMPS"] = "off"
 
 import server as srv  # noqa: E402
 from accounts import Store  # noqa: E402

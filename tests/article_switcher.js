@@ -18,7 +18,8 @@
 const { JSDOM, VirtualConsole } = require("jsdom");
 
 const URL_BASE = process.argv[2] || "http://127.0.0.1:8000";
-const SLUG = process.env.LIQSCOPE_TEST_SLUG || "kak-chitat-steny-v-stakane-5-pravil";
+//: адрес статьи: по умолчанию — первая опубликованная (в демо она одна)
+let SLUG = process.env.LIQSCOPE_TEST_SLUG || "";
 
 // Страница тянет gtag и живёт с чужими скриптами: чужая ошибка не должна
 // ронять проверку переключателя.
@@ -81,8 +82,19 @@ function chips(doc) {
   }));
 }
 
+async function pickSlug() {
+  if (SLUG) return SLUG;
+  const d = await (await fetch(URL_BASE + "/api/articles?lang=ru")).json();
+  SLUG = ((d.items || [])[0] || {}).id || "";
+  return SLUG;
+}
+
 async function main() {
   console.log("Переключатель языка статьи: " + URL_BASE);
+  if (!(await pickSlug())) {
+    console.log("  ..   опубликованных статей нет — проверять нечего");
+    process.exit(0);
+  }
 
   // --- русская страница: жмём EN -----------------------------------------
   const ru = await open(`/articles/${SLUG}?lang=ru`);

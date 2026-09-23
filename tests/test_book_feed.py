@@ -107,7 +107,16 @@ class AggTests(unittest.TestCase):
 
     def test_poll_defaults_respect_rate_limits(self):
         self.assertGreaterEqual(bf.POLL_SEC, 3.0)
-        self.assertLessEqual(bf.MAX_SYMBOLS, 10)
+        self.assertLessEqual(bf.MAX_SYMBOLS, 100)
+        # плавающий интервал должен держать вес под лимитом даже на 100 монетах
+        feed = bf.BookFeed(None, poll_sec=bf.POLL_SEC)
+        eff = feed._calc_poll_sec(bf.MAX_SYMBOLS)
+        # вес Binance на макс монетах не превышает safe (28 wps)
+        self.assertGreaterEqual(eff * bf.BINANCE_SAFE_WEIGHT_PER_SEC,
+                                bf.MAX_SYMBOLS * bf.BINANCE_WEIGHT_PER_REQ * 0.9)
+        # 1 монета = база 4с, 100 монет сильно больше
+        self.assertAlmostEqual(feed._calc_poll_sec(1), bf.POLL_SEC, delta=0.1)
+        self.assertGreater(feed._calc_poll_sec(100), 30)
 
     def test_small_levels_not_walls(self):
         agg = bf.aggregate_depths(_depths(bid_extra=[(MID - 10 * STEP, 40000.0)]))

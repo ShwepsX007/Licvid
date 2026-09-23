@@ -34,7 +34,10 @@ from market_feed import BINANCE_REST, BYBIT_REST, OKX_REST, GATE_REST, _get_json
 log = logging.getLogger("book")
 
 # --- Наблюдаемая зона и пороги ---------------------------------------------
-POLL_SEC = float(os.getenv("LIQSCOPE_BOOK_POLL_SEC", "3.0"))
+# Базовый интервал — минимум, который хочется видеть при 1 монете.
+# Реальный интервал — плавающий: растёт с числом монет, чтобы никогда не
+# улететь в бан по весу запросов (см. _calc_poll_sec).
+POLL_SEC = float(os.getenv("LIQSCOPE_BOOK_POLL_SEC", "4.0"))
 # Глубина запроса: у монет с мелким тиком (BTC: $0.1 при цене 60k+) 150 уровней
 # покрывают жалкие $15–50 — меньше одной корзины, стакан «схлопывается» в 1–2
 # корзины и стен не бывает вовсе. Окно ±SPAN_REL режется уже в агрегаторе.
@@ -42,7 +45,8 @@ POLL_SEC = float(os.getenv("LIQSCOPE_BOOK_POLL_SEC", "3.0"))
 # 100), и при 2-сек опросе десятка монет IP уезжает в 429/418-бан на минуты —
 # фид глохнет целиком («биржи недоступны», новых стен нет). Поэтому глубина
 # и период опроса подобраны под лимиты: 500 уровней у Binance (вес 10), 200 у
-# Bybit/OKX, 300 у Gate (его потолок), опрос раз в 3 с и не более 10 монет.
+# Bybit/OKX, 300 у Gate (его потолок). Плавающий интервал держит вес под лимитом
+# даже на 100 монетах — просто опрос становится реже.
 DEPTH_LIMIT = int(os.getenv("LIQSCOPE_BOOK_DEPTH", "500"))
 DEPTH_PER_EXCH = {"binance": 500, "bybit": 200, "okx": 200, "gate": 300}
 SPAN_REL = 0.02              # смотрим ±2% от mid: дальше — мусор дальних уровней
@@ -53,8 +57,14 @@ REL_MIN_BUCKETS = 12         # относительный порог осмыс�
 GONE_AFTER = 5               # пропущенных опросов подряд — стена ушла
 HISTORY_TTL_DAYS = 7         # сколько дней ленты хранить на диске
 SNAPSHOT_TTL = 4             # сек. — чаще не отдаваем историю (легкий дедуп)
-MAX_SYMBOLS = int(os.getenv("LIQSCOPE_BOOK_MAX_SYMBOLS", "10"))   # монет в опросе
+MAX_SYMBOLS = int(os.getenv("LIQSCOPE_BOOK_MAX_SYMBOLS", "100"))  # потолок монет в опросе (плавающий интервал держит бан подальше)
 BACKOFF_SEC = 75.0           # биржа ответила 429/418 — не трогаем её столько секунд
+# Плавающий интервал: сколько секунд добавляется за каждую доп. монету сверх первой.
+# 0.4 → 1 монета 4с, 2 монеты 4.4с, 10 монет 7.6с, 100 монет 43.6с.
+PER_SYMBOL_SEC = float(os.getenv("LIQSCOPE_BOOK_PER_SYMBOL_SEC", "0.40"))
+# Безопасный лимит веса Binance: 2400 weight/min → 40 weight/s, берём 70% = 28 weight/s.
+BINANCE_SAFE_WEIGHT_PER_SEC = float(os.getenv("LIQSCOPE_BOOK_SAFE_WPS", "28.0"))
+BINANCE_WEIGHT_PER_REQ = 10.0  # для limit=500
 
 
 # --- Утилиты ------------------------------------------------------------------
@@ -308,7 +318,9 @@ class BookFeed:
                  demo=False):
         self.data_dir = data_dir
         self.min_usd = float(min_usd)
-        self.poll_sec = max(0.5, float(poll_sec))
+        self._base_poll_sec = max(0.5, float(poll_sec))
+        self.poll_sec = self._base_poll_sec  # эффективный, меняется на лету
+        self._per_symbol_sec = max(0.0, float(PER_SYMBOL_SEC))
         self.gone_after = int(gone_after)
         self.ttl_days = int(ttl_days)
         self.sub_symbols_fn = sub_symbols_fn or (lambda: [])
@@ -328,6 +340,7 @@ class BookFeed:
         self._last_ok = 0.0     # когда последний раз хоть одна биржа ответила
         self._day = utc_day()
         self._persist_ok = None    # None — ещё не писали; False — диск не даётся
+        self._last_wanted_n = 0
         if self.data_dir:
             try:
                 os.makedirs(self.data_dir, exist_ok=True)
@@ -336,6 +349,24 @@ class BookFeed:
                           "переживут рестарт", self.data_dir, exc)
                 self._persist_ok = False
             self._load_tail()
+
+    def _calc_poll_sec(self, n: int) -> float:
+        """Плавающий интервал: чем больше монет, тем реже опрос, но без бана.
+
+        - base + (n-1)*per_symbol  → растёт с каждой монетой (1 монета 4с, 2 → 4.4с, 100 → ~44с)
+        - плюс защита по весу Binance: n*weight / safe_wps  → не даёт превысить лимит
+        Итог = max(base, adaptive, safe_needed)
+        """
+        if n <= 0:
+            return self._base_poll_sec
+        # безопасный интервал по весу
+        safe_needed = n * BINANCE_WEIGHT_PER_REQ / max(1.0, BINANCE_SAFE_WEIGHT_PER_SEC)
+        # адаптивный: растёт с каждой доп. монетой
+        adaptive = self._base_poll_sec + max(0, n - 1) * self._per_symbol_sec
+        return max(self._base_poll_sec, safe_needed, adaptive)
+
+    def effective_poll_sec(self) -> float:
+        return self._calc_poll_sec(len(self.wanted_symbols()))
 
     # — Symbols
 
@@ -356,6 +387,7 @@ class BookFeed:
         except Exception:
             subs = []
         out = list(dict.fromkeys(live + subs))
+        # потолок 100, но плавающий интервал растянет опрос, бана не будет
         return out[:MAX_SYMBOLS]
 
     # — Poll loop
@@ -377,7 +409,14 @@ class BookFeed:
                         self.demo_tick()
                     except Exception:
                         log.exception("book demo tick failed")
-                delay = max(0.2, self.poll_sec - (time.monotonic() - t0))
+                # плавающий интервал пересчитываем каждый круг
+                try:
+                    eff = self.effective_poll_sec()
+                    self.poll_sec = eff
+                    self._last_wanted_n = len(self.wanted_symbols())
+                except Exception:
+                    eff = self._base_poll_sec
+                delay = max(0.2, eff - (time.monotonic() - t0))
                 try:
                     await asyncio.sleep(delay)
                 except asyncio.CancelledError:
@@ -658,7 +697,15 @@ class BookFeed:
     def status_summary(self):
         mode = ("demo" if self.demo else "live") if self._session else "idle"
         now = time.time()
-        out = {"mode": mode, "symbols": self.wanted_symbols(), "poll_sec": self.poll_sec,
+        try:
+            eff = self.effective_poll_sec()
+        except Exception:
+            eff = self.poll_sec
+        out = {"mode": mode, "symbols": self.wanted_symbols(), "poll_sec": round(eff, 2),
+               "base_poll_sec": round(self._base_poll_sec, 2),
+               "per_symbol_sec": round(self._per_symbol_sec, 3),
+               "wanted_n": len(self.wanted_symbols()),
+               "max_symbols": MAX_SYMBOLS,
                "depth": DEPTH_PER_EXCH, "data_dir": self.data_dir or None,
                "persist_ok": self._persist_ok,
                "live_walls": sum(1 for st in self.walls.values() for w in st.values() if w["live"]),
@@ -704,13 +751,13 @@ class BookFeed:
     # — Метрики для кабинета ------------------------------------------------------
 
     def metrics(self, sym, hours=24.0):
-        """Агрегаты по стенам монеты: давление, почасовая нагрузка, сроки жизни.
+        """Агрегаты по стенам монеты: давление, почасовая + поминутная нагрузка, сроки жизни.
 
         Всё считается из того, что фид честно знает: момент появления, момент
         ухода, текущий и пиковый объём. «Сдутая» стена — та, к моменту ухода
         потеряла >30% пикового объёма (ели маркет-ордерами); «спуф» — простояла
         меньше 90 секунд. По часам объём делится пропорционально времени,
-        которое стена провела внутри часа.
+        которое стена провела внутри часа; по минутам — за последние 60 мин.
         """
         now = time.time()
         sym = (sym or "").upper()
@@ -720,6 +767,11 @@ class BookFeed:
         t0 = now - 24 * bucket
         hourly = [{"t": int(t0 + i * bucket), "bid_usdt": 0.0, "ask_usdt": 0.0, "n": 0}
                   for i in range(24)]
+        # поминутная лента: последние 60 минут, шаг 60с
+        min_bucket = 60.0
+        min_t0 = now - 60 * min_bucket
+        minutely = [{"t": int(min_t0 + i * min_bucket), "bid_usdt": 0.0, "ask_usdt": 0.0, "n": 0}
+                    for i in range(60)]
         lives = []
         spoofed = eaten = 0
         live = {"count": 0, "bid_usdt": 0.0, "ask_usdt": 0.0, "max": None}
@@ -740,6 +792,20 @@ class BookFeed:
                     cell[w["side"] + "_usdt"] = round(
                         cell[w["side"] + "_usdt"] + (w["peak"] or w["usdt"]) * frac, 2)
                     cell["n"] += 1
+                # поминутная: только то, что в последние 60 мин
+                lo_m = max(w["opened"], min_t0)
+                hi_m = min(end, now)
+                if hi_m > lo_m:
+                    span_m = max(1.0, hi_m - lo_m)
+                    for i, cell in enumerate(minutely):
+                        b_lo = min_t0 + i * min_bucket
+                        ov = min(hi_m, b_lo + min_bucket) - max(lo_m, b_lo)
+                        if ov <= 0:
+                            continue
+                        frac = ov / span_m
+                        cell[w["side"] + "_usdt"] = round(
+                            cell[w["side"] + "_usdt"] + (w["peak"] or w["usdt"]) * frac, 2)
+                        cell["n"] += 1
             if w["live"]:
                 live["count"] += 1
                 live[w["side"] + "_usdt"] = round(
@@ -766,6 +832,7 @@ class BookFeed:
                              "imbalance": (round((live["bid_usdt"] - live["ask_usdt"]) / total_side, 3)
                                            if total_side > 0 else 0.0)},
                 "hourly": hourly,
+                "minutely": minutely,
                 "life": {"closed_n": n_closed,
                          "median_s": _pct(lives, 0.5),
                          "p90_s": _pct(lives, 0.9),

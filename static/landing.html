@@ -43,7 +43,7 @@
 <link rel="stylesheet" href="/static/ads.css?v=banner2">
 <script src="/static/i18n.pages.js?v=book8"></script>
 <script src="/static/i18n.js?v=book8"></script>
-<script src="/static/account.js?v=nav1"></script>
+<script src="/static/account.js?v=nav2"></script>
 <script src="/static/presence.js?v=geo2"></script>
 <script src="/static/consent.js?v=consent1"></script>
 <script src="/static/ads.js?v=banner2"></script>
@@ -389,6 +389,13 @@ a.chip:hover { border-color: rgba(0, 214, 255, 0.55); color: var(--text); }
     .site-nav { justify-content: flex-start; }
     #nav-account { justify-content: flex-start; }
     .site-nav .lang-select { max-width: 100px; }
+}
+/* Наоборот к .nav-desk выше: кнопку раздела, которую шапка рисует вместо
+   скрытой на телефоне ссылки, видно только на телефоне — на широком экране
+   там стоит сама ссылка, и тот же раздел второй раз не нужен. То же правило
+   живёт в account.css: главная своих стилей не делит с остальными страницами. */
+@media (min-width: 761px) {
+    #nav-account a.nav-mob { display: none !important; }
 }
 
 </style>

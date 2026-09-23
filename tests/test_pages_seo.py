@@ -312,6 +312,41 @@ class PagesSeoTest(unittest.TestCase):
                 self.assertIn("/static/account.js", html,
                               f"{name}: шапку рисует скрипт, а он не подключён")
 
+        # Шапку рисует ровно один скрипт. Дайджест и сводки держали свою
+        # копию — она затирала общую и всегда показывала «Войти», даже когда
+        # человек уже вошёл (и проверяла у ответа /api/auth/me поле `ok`,
+        # которого там нет).
+        for name in sorted(os.listdir(static)):
+            if not name.endswith(".js") or name == "account.js":
+                continue
+            body = open(os.path.join(static, name), encoding="utf-8").read()
+            with self.subTest(script=name):
+                self.assertNotIn("nav-account", body,
+                                 f"{name}: шапку рисует только static/account.js")
+
+    def test_mobile_menu_complements_the_pages_own_links(self) -> None:
+        """Ссылки, скрытые на телефоне, шапка заменяет своими кнопками.
+
+        Главная держит разделы в разметке как ``nav-desk`` (CSS прячет их на
+        телефоне), а ``static/account.js`` дорисовывает кнопки ``nav-mob``
+        вместо них. Договор держится на двух правилах CSS: одно прячет ссылку
+        на телефоне, второе — кнопку на широком экране. Без второго на
+        компьютере каждый раздел показывался бы дважды.
+        """
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        static = os.path.join(root, "static")
+        landing = open(os.path.join(static, "landing.html"), encoding="utf-8").read()
+        account_css = open(os.path.join(static, "account.css"), encoding="utf-8").read()
+        account_js = open(os.path.join(static, "account.js"), encoding="utf-8").read()
+        self.assertIn(".nav-desk", landing, "разделы главной прячутся на телефоне")
+        self.assertIn("a.nav-mob", landing,
+                      "главная не прячет кнопки-замены на широком экране")
+        self.assertIn("a.nav-mob", account_css,
+                      "тем же правилом пользуются остальные страницы")
+        self.assertIn("nav-desk", account_js,
+                      "шапка должна знать про ссылки, скрытые на телефоне")
+        self.assertIn("nav-mob", account_js, "и рисовать себе пару")
+
 
 class ArticlePagesSeoTest(unittest.TestCase):
     """Страница статьи: свой адрес, свои заголовки и пометка языка текста."""

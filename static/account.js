@@ -348,14 +348,27 @@
         return "";
     }
 
-    /** Есть ли ссылка на раздел уже в разметке страницы (не в нашей шапке). */
-    function linkInMarkup(nav, box, href) {
-        if (!nav || !nav.querySelectorAll) return false;
+    /** Как раздел уже показан в разметке страницы (вне нашей шапки).
+
+     *  ``"here"`` — ссылка есть и видна на любой ширине: второй раз её рисовать
+     *  нельзя (дубль в шапке). ``"desk"`` — ссылка есть, но помечена классом
+     *  ``nav-desk``: CSS прячет такие на телефоне (``.nav-desk``), поэтому там
+     *  нужна наша кнопка — иначе раздел из шапки исчезает совсем (так пропадали
+     *  «Сводки», «Дайджест» и «Статьи» на главной). На широком экране наоборот:
+     *  ссылку показывает страница, а нашу кнопку прячет ``.nav-mob``.
+     *  ``""`` — ссылки нет вовсе, кнопка нужна всегда.
+     */
+    function markupLink(nav, box, href) {
+        if (!nav || !nav.querySelectorAll) return "";
         var links = nav.querySelectorAll('a[href="' + href + '"]');
+        var desk = false;
         for (var i = 0; i < links.length; i++) {
-            if (!box.contains(links[i])) return true;
+            var link = links[i];
+            if (box.contains(link)) continue;             // это наша же кнопка
+            if (/\bnav-desk\b/.test(link.className || "")) { desk = true; continue; }
+            return "here";
         }
-        return false;
+        return desk ? "desk" : "";
     }
 
     /** Кнопки разделов, которых ещё нет в шапке страницы.
@@ -370,8 +383,12 @@
         var own = ownSection(path), html = "";
         SECTIONS.forEach(function (s) {
             if (s.href === own) return;                       // страница сама себе
-            if (linkInMarkup(nav, box, s.href)) return;       // ссылка уже в HTML
-            html += '<a class="btn btn-ghost btn-compact" href="' + s.href + '">' +
+            var state = markupLink(nav, box, s.href);
+            if (state === "here") return;                     // ссылка уже в HTML
+            // ссылка страницы видна только на широком экране — наша кнопка
+            // работает на телефоне и прячется рядом с ней (класс nav-mob)
+            var cls = state === "desk" ? " nav-mob" : "";
+            html += '<a class="btn btn-ghost btn-compact' + cls + '" href="' + s.href + '">' +
                 s.icon + " " + t(s.key) + "</a>";
         });
         return html;

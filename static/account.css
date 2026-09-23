@@ -585,6 +585,12 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
     #nav-account { justify-content: flex-start; }
     .site-nav .lang-select { max-width: 100px; }
 }
+/* Наоборот к .nav-desk выше: кнопку раздела, которую шапка рисует вместо
+   скрытой на телефоне ссылки страницы, видно только на телефоне — на широком
+   экране там стоит сама ссылка, и второй раз тот же раздел не нужен. */
+@media (min-width: 761px) {
+    #nav-account a.nav-mob { display: none !important; }
+}
 
 
 /* ---------- доски сервисов в кабинете: корреляции и сторож монет -------- */

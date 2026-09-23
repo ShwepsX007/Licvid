@@ -14,6 +14,10 @@
  */
 
 const { JSDOM, VirtualConsole } = require("jsdom");
+// Видимость ссылок считаем с учётом мобильных правил CSS: на главной часть
+// разделов приходит кнопками `nav-mob`, которые прячутся на широком экране —
+// это «одна ссылка то на телефоне, то на компьютере», а не дубль.
+const { visibleLinks } = require("./_mobile");
 
 const URL_BASE = process.env.LIQSCOPE_TEST_URL || process.argv[2] || "http://127.0.0.1:8000";
 
@@ -21,6 +25,8 @@ const URL_BASE = process.env.LIQSCOPE_TEST_URL || process.argv[2] || "http://127
 const LABEL = { ru: "Статьи", en: "Articles", zh: "文章", hi: "लेख", es: "Artículos" };
 //: разделы сайта: с любой страницы должен быть путь в каждый
 const SECTIONS = ["/terminal", "/digest", "/hourly", "/articles"];
+//: эта проверка смотрит на широкий экран: телефон — в tests/nav_mobile.js
+const DESKTOP = 1280;
 //: страницы сайта: публичные, служебные и 404
 const PAGES = ["/", "/terminal", "/digest", "/hourly", "/articles", "/net-takoy-stranicy"];
 //: кто смотрит страницу
@@ -113,7 +119,8 @@ async function checkPage(path, lang, state) {
   const name = `${path} [${lang}, ${state.who}]`;
   const dom = await open(path, lang, state.user);
   if (!dom) { check(`${name}: страница открылась`, false); return; }
-  const doc = dom.window.document;
+  const win = dom.window;
+  const doc = win.document;
   const { box, nav, links } = menu(doc);
   if (!box) {
     check(`${name}: страница открылась`, false, "нет шапки #nav-account");
@@ -126,18 +133,17 @@ async function checkPage(path, lang, state) {
   while (Date.now() < until && box.children.length === 0) await wait(120);
 
   const own = SECTIONS.filter((s) => path === s || path.indexOf(s + "/") === 0);
-  const missing = SECTIONS.filter((s) =>
-    own.indexOf(s) === -1 && !nav.querySelector(`a[href="${s}"]`));
+  const seen = (href) => visibleLinks(win, nav, href, DESKTOP).length;
+  const missing = SECTIONS.filter((s) => own.indexOf(s) === -1 && !seen(s));
   check(`${name}: все разделы, кроме своего`, missing.length === 0,
     missing.length ? "нет ссылок на " + missing.join(", ") : "");
 
   // Дубли мешают: на публичных страницах ссылка стоит в HTML и скрипт её
   // рисовать не должен
-  const dupes = SECTIONS.filter((s) =>
-    nav.querySelectorAll(`a[href="${s}"]`).length > 1);
+  const dupes = SECTIONS.filter((s) => seen(s) > 1);
   check(`${name}: разделы не задвоены`, dupes.length === 0, dupes.join(", "));
 
-  const has = (href) => !!nav.querySelector(`a[href="${href}"]`);
+  const has = (href) => seen(href) > 0;
   if (!state.user) {
     check(`${name}: гость может войти`, path === "/login" || has("/login"));
     check(`${name}: админки у гостя нет`, !has("/admin"));
@@ -149,7 +155,7 @@ async function checkPage(path, lang, state) {
     check(`${name}: выход есть`, !!doc.getElementById("acc-logout"));
   }
 
-  const art = nav.querySelector('a[href="/articles"]');
+  const art = visibleLinks(win, nav, "/articles", DESKTOP)[0];
   if (art && path !== "/articles") {
     check(`${name}: подпись «${LABEL[lang]}»`, (art.textContent || "").indexOf(LABEL[lang]) !== -1,
       JSON.stringify((art.textContent || "").trim()));
@@ -222,7 +228,7 @@ async function checkLiveAdmin(slug) {
     const { box, nav } = menu(doc);
     const until = Date.now() + 5000;
     while (Date.now() < until && box && !box.querySelector("a")) await wait(120);
-    const has = (href) => !!nav.querySelector(`a[href="${href}"]`);
+    const has = (href) => visibleLinks(dom.window, nav, href, DESKTOP).length > 0;
     // Себя страница не показывает: на «Кабинете» кнопки кабинета нет, на
     // «Статьях» — ссылки на сами статьи
     const own = SECTIONS.filter((s) => path === s || path.indexOf(s + "/") === 0);

@@ -523,6 +523,10 @@ def _card_html(item: dict, lang: str) -> str:
                + _attr(item.get("title") or "") + '" loading="lazy" width="1200" height="630">')
     date = ('<time class="ac-date" data-ts="' + str(int(ts)) + '">'
             + _esc_html(_date_label(ts, lang)) + "</time>") if ts else ""
+    # «RU · EN» на карточке: иначе гость не знает, что у статьи есть вторая версия
+    have = [c for c in ("ru", "en") if c in (item.get("langs") or [])]
+    badge = ('<span class="ac-langs">' + " · ".join(c.upper() for c in have)
+             + "</span>") if len(have) > 1 else ""
     title_attr = _lang_attr(item.get("title_lang"), lang)
     text_attr = _lang_attr(item.get("text_lang"), lang)
     # «Читать →» на карточке: у zh/hi/es тоже свой язык, а не английский
@@ -530,7 +534,7 @@ def _card_html(item: dict, lang: str) -> str:
     return (
         '<a class="art-card" href="/articles/' + _attr(str(item.get("id") or "")) + '">'
         + img
-        + '<div class="ac-body">' + date
+        + '<div class="ac-body">' + date + badge
         + "<h2" + title_attr + ">" + _esc_html(item.get("title") or "") + "</h2>"
         + ('<p class="ac-sum"' + text_attr + ">"
            + _esc_html(item.get("excerpt") or "") + "</p>"

@@ -391,6 +391,25 @@ class ArticlePagesSeoTest(unittest.TestCase):
         self.assertIn("Первый абзац.", data["ru"]["html"])
         self.assertIn("First paragraph.", data["en"]["html"])
 
+    def test_list_card_shows_which_versions_exist(self) -> None:
+        """В списке видно, что у статьи есть английская версия.
+
+        Иначе гость читает русскую карточку и не знает, что материал есть и
+        на английском — ровно то, из-за чего английскую статью «не находили».
+        """
+        self.store.add({"id": "odna-versiya-karta", "status": "published",
+                        "published_at": 1_700_000_300.0,
+                        "titles": {"ru": "Только по-русски"},
+                        "texts": {"ru": "Первый абзац."}})
+        cards = self.client.get("/articles?lang=ru").text
+        two = re.search(r'href="/articles/' + re.escape(self.slug) + r'"[^>]*>.*?</a>',
+                        cards, re.S)
+        self.assertTrue(two, "карточка статьи не найдена в списке")
+        self.assertIn('<span class="ac-langs">RU · EN</span>', two.group(0))
+        one = re.search(r'href="/articles/odna-versiya-karta"[^>]*>.*?</a>', cards, re.S)
+        self.assertTrue(one, "карточка одноязычной статьи не найдена")
+        self.assertNotIn("ac-langs", one.group(0))
+
     def test_one_version_means_no_switch(self) -> None:
         """Версия одна — переключать нечего: пустой блок и никаких ссылок."""
         self.store.add({"id": "tolko-russkiy-link", "status": "published",

@@ -1,4 +1,4 @@
-/* 💬 Чат LiqScope v9 — per-user + collapsible support threads + TG reminders
+/* 💬 Чат LiqScope v10 — per-user + collapsible + persistent threads + delete thread support threads + TG reminders
  *
  *  • «Общий» — 3 дня, пишут зарегистрированные
  *  • «Личные» — 30 дней, можно удалить, TG-напоминание через chat_dm_tg_delay_min
@@ -823,7 +823,7 @@
           const total = t.total || 0;
           const isCur = tk === cur;
           return `<div class="tchat-dm-item${isCur ? " active" : ""}" data-tkey="${tk}" style="cursor:pointer">
-            <div class="tchat-peer">${name} <span class="tchat-time" style="margin-left:6px">${fmtTime(t.last_at || 0)}</span></div>
+            <div class="tchat-peer">${name} <span class="tchat-time" style="margin-left:6px">${fmtTime(t.last_at || 0)}</span><button type="button" class="tchat-mini" data-del-thread="${tk}" style="margin-left:auto" title="Удалить весь тред">🗑</button></div>
             <div class="tchat-last">${last || "—"}</div>
             <div class="tchat-dm-meta"><span class="tchat-time">${tk}</span><span class="tchat-dm-unread">${total}</span></div>
           </div>`;
@@ -833,8 +833,30 @@
       const h = supThreadsEl.querySelector("#tchat-sup-threads-toggle");
       if (h) h.addEventListener("click", () => { supThreadsCollapsed = !supThreadsCollapsed; try { localStorage.setItem(LS_SUP_THREADS_COLLAPSED, supThreadsCollapsed ? "1" : "0"); } catch {}; renderSupThreads(); });
       if (!collapsed) {
+        supThreadsEl.querySelectorAll("[data-del-thread]").forEach((btn) => {
+          btn.addEventListener("click", async (ev) => {
+            ev.stopPropagation();
+            const tk = btn.getAttribute("data-del-thread") || "";
+            if (!tk) return;
+            if (!confirm("Удалить весь тред поддержки " + tk + "? Все сообщения удалятся.")) return;
+            try {
+              await jget(SUP_API + "/thread/" + encodeURIComponent(tk), { method: "DELETE", credentials: "same-origin" });
+              if (supCurrentThreadKey === tk) {
+                supCurrentThreadKey = "";
+                lastSupId = 0;
+                if (supListEl) supListEl.innerHTML = '<div class="tchat-empty">Тред удалён</div>';
+              }
+              refreshSupThreads();
+              updateAuthUI();
+              setHint("🗑 Тред " + tk + " удалён", false);
+            } catch (e) {
+              setHint(e.message || "Не удалось удалить тред", true);
+            }
+          });
+        });
         supThreadsEl.querySelectorAll("[data-tkey]").forEach((el) => {
           el.addEventListener("click", async (ev) => {
+            if (ev.target.closest("[data-del-thread]")) return;
             ev.stopPropagation();
             const tk = el.getAttribute("data-tkey") || "";
             if (supCurrentThreadKey === tk) {
@@ -1135,6 +1157,13 @@
           if (me && me.is_admin) refreshSupThreads();
         } else if (data.type === "support_chat_del" && data.id) {
           const el = supListEl && supListEl.querySelector(`[data-mid="${data.id}"]`); if (el) el.remove();
+        } else if (data.type === "support_thread_del" && data.thread_key) {
+          if (supCurrentThreadKey === data.thread_key) {
+            supCurrentThreadKey = "";
+            lastSupId = 0;
+            if (supListEl) supListEl.innerHTML = '<div class="tchat-empty">Тред удалён админом</div>';
+          }
+          refreshSupThreads();
         } else if (data.type === "chat_dm" && data.message) {
           if (!me) return;
           if (view === "room" && data.room_id === roomId) {
@@ -1184,7 +1213,7 @@
     window.TerminalChat = {
       onWsMessage: (msg) => {
         if (!msg) return;
-        if (msg.type === "terminal_chat" || msg.type === "terminal_chat_del" || msg.type === "service_chat" || msg.type === "support_chat" || msg.type === "support_chat_del" || msg.type === "chat_dm" || msg.type === "chat_dm_room") {
+        if (msg.type === "terminal_chat" || msg.type === "terminal_chat_del" || msg.type === "service_chat" || msg.type === "support_chat" || msg.type === "support_chat_del" || msg.type === "support_thread_del" || msg.type === "chat_dm" || msg.type === "chat_dm_room") {
           document.dispatchEvent(new CustomEvent("liqscope:ws", { detail: msg }));
         }
       },

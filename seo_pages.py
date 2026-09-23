@@ -66,8 +66,8 @@ GA_ID = os.getenv("LIQSCOPE_GA_ID", "G-S88MTSY09G").strip()
 
 # 💬 Чат на всех страницах: виджет как в терминале (общий, личные, сервисы, поддержка).
 # Инжектируется в render(), если страница его ещё не содержит. Версия файла — v8 per-user.
-TCHAT_CSS = "/static/terminal_chat.css?v=9"
-TCHAT_JS = "/static/terminal_chat.js?v=9"
+TCHAT_CSS = "/static/terminal_chat.css?v=10"
+TCHAT_JS = "/static/terminal_chat.js?v=10"
 TCHAT_HTML = """<div id=\"terminal-chat\" class=\"tchat\">
   <button id=\"tchat-toggle\" class=\"tchat-toggle hidden\" type=\"button\" aria-hidden=\"true\" tabindex=\"-1\">💬 Чат <span id=\"tchat-unread\" class=\"tchat-unread hidden\" aria-hidden=\"true\">0</span></button>
   <div id=\"tchat-panel\" class=\"tchat-panel hidden\">

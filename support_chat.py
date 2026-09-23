@@ -478,7 +478,8 @@ def register_support_chat_routes(app, hub=None) -> None:
             msg = _msg_public(rec)
             import asyncio
             asyncio.create_task(_broadcast_support(msg, target_user_id=user_id))
-            asyncio.create_task(_notify_admins_via_bot(txt, f"u:{user_id}", name, False))
+            # TG-уведомление теперь только через задержку (scan_support_reminders),
+            # как в личных чатах: через N минут если админ не ответил и не на сайте
             return {"ok": True, "message": msg, "thread_key": f"u:{user_id}"}
         else:
             # guest: must provide name (temporary nick) and guest_token
@@ -489,7 +490,6 @@ def register_support_chat_routes(app, hub=None) -> None:
             guest_token = str(body.get("guest_token") or "")[:80]
             if not guest_token:
                 guest_token = secrets.token_hex(6)
-            # basic validation: guest_token alphanumeric?
             if len(guest_token) < 4:
                 guest_token = secrets.token_hex(6)
             user_id = None
@@ -500,8 +500,40 @@ def register_support_chat_routes(app, hub=None) -> None:
             msg = _msg_public(rec)
             import asyncio
             asyncio.create_task(_broadcast_support(msg, target_guest_token=guest_token))
-            asyncio.create_task(_notify_admins_via_bot(txt, f"g:{guest_token}", name, True))
+            # TG только через задержку, как в ЛС
             return {"ok": True, "message": msg, "thread_key": f"g:{guest_token}", "guest_token": guest_token}
+
+    @router.delete("/api/chat/support/thread/{thread_key:path}")
+    async def api_del_thread(request: Request, thread_key: str):
+        if not ctx.store:
+            return JSONResponse({"ok": False, "error": "no_store"}, status_code=503)
+        u = _current_user(request)
+        if not u or not u.get("is_admin"):
+            return JSONResponse({"ok": False, "error": "admin"}, status_code=403)
+        tk = str(thread_key or "").strip()[:100]
+        if not tk:
+            return JSONResponse({"ok": False, "error": "bad_thread"}, status_code=400)
+        try:
+            ok = ctx.store.delete_support_thread(tk)
+        except Exception as e:
+            log.debug("delete thread %s: %s", tk, e)
+            ok = False
+        if not ok:
+            return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
+        try:
+            if ctx.hub is not None:
+                import asyncio
+
+                async def _bcast_del_thread():
+                    try:
+                        await ctx.hub.broadcast({"type": "support_thread_del", "thread_key": tk})
+                    except Exception:
+                        pass
+
+                asyncio.create_task(_bcast_del_thread())
+        except Exception:
+            pass
+        return {"ok": True, "thread_key": tk}
 
     @router.delete("/api/chat/support/{msg_id}")
     async def api_del(request: Request, msg_id: int):

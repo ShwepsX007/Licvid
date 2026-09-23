@@ -4181,37 +4181,133 @@ class Store:
         return [dict(r) for r in rows]
 
     def list_support_threads(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Все треды поддержки для админа — висят постоянно до удаления админом.
+
+        Берём все ключи из support_reads (постоянные) + из support_chat (последние сообщения),
+        для каждого ищем последнее сообщение (если есть) и считаем total.
+        Сортируем по last_at (последняя активность) — свежие сверху.
+        """
         now = _now()
         edge = now - self.SUPPORT_KEEP_SEC
         with self._lock:
-            # группируем по user_id или guest_token: берём последнее сообщение каждого треда
-            rows = self._db.execute(
-                "SELECT COALESCE(user_id,0) as uid, guest_token, MAX(id) as last_id, MAX(created_at) as last_at,"
-                " (SELECT display_name FROM support_chat sc2 WHERE (sc2.user_id = support_chat.user_id OR (support_chat.user_id IS NULL AND sc2.guest_token = support_chat.guest_token)) ORDER BY sc2.id DESC LIMIT 1) as last_name,"
-                " (SELECT text FROM support_chat sc2 WHERE (sc2.user_id = support_chat.user_id OR (support_chat.user_id IS NULL AND sc2.guest_token = support_chat.guest_token)) ORDER BY sc2.id DESC LIMIT 1) as last_text,"
-                " (SELECT is_admin FROM support_chat sc2 WHERE (sc2.user_id = support_chat.user_id OR (support_chat.user_id IS NULL AND sc2.guest_token = support_chat.guest_token)) ORDER BY sc2.id DESC LIMIT 1) as last_admin,"
-                " COUNT(*) as total"
-                " FROM support_chat WHERE created_at>=? GROUP BY COALESCE(user_id,0), guest_token ORDER BY last_at DESC LIMIT ?",
-                (edge, int(limit)),
+            # все ключи из reads (постоянные) и из чата (активные)
+            read_keys = self._db.execute("SELECT thread_key, user_id, guest_token, updated_at FROM support_reads").fetchall()
+            chat_keys = self._db.execute(
+                "SELECT CASE WHEN user_id IS NOT NULL THEN 'u:'||user_id ELSE 'g:'||guest_token END as thread_key, "
+                "user_id, guest_token, MAX(created_at) as last_at FROM support_chat GROUP BY thread_key"
             ).fetchall()
-        out = []
-        for r in rows:
-            d = dict(r)
-            uid = int(d.get("uid") or 0)
-            gt = str(d.get("guest_token") or "")
-            tkey = f"u:{uid}" if uid else f"g:{gt}"
-            out.append({
-                "thread_key": tkey,
-                "user_id": uid if uid else None,
-                "guest_token": gt,
-                "display_name": d.get("last_name") or ("Гость" if gt else f"id{uid}"),
-                "last_text": (d.get("last_text") or "")[:200],
-                "last_at": float(d.get("last_at") or 0),
-                "last_id": int(d.get("last_id") or 0),
-                "last_admin": bool(d.get("last_admin")),
-                "total": int(d.get("total") or 0),
-            })
-        return out
+            # объединяем
+            merged: Dict[str, Dict[str, Any]] = {}
+            for r in read_keys:
+                tk = str(r["thread_key"] or "").strip()
+                if not tk:
+                    continue
+                merged[tk] = {
+                    "thread_key": tk,
+                    "user_id": r["user_id"],
+                    "guest_token": r["guest_token"] or "",
+                    "updated_at": float(r["updated_at"] or 0),
+                }
+            for r in chat_keys:
+                tk = str(r["thread_key"] or "").strip()
+                if not tk:
+                    continue
+                if tk not in merged:
+                    merged[tk] = {
+                        "thread_key": tk,
+                        "user_id": r["user_id"],
+                        "guest_token": r["guest_token"] or "",
+                        "updated_at": float(r["last_at"] or 0),
+                    }
+                else:
+                    # обновим updated_at если чат свежее
+                    if float(r["last_at"] or 0) > merged[tk].get("updated_at", 0):
+                        merged[tk]["updated_at"] = float(r["last_at"] or 0)
+
+            out = []
+            for tk, info in merged.items():
+                # последнее сообщение треда
+                if tk.startswith("u:"):
+                    try:
+                        uid = int(tk[2:])
+                    except Exception:
+                        continue
+                    last = self._db.execute(
+                        "SELECT id, display_name, text, created_at, is_admin FROM support_chat WHERE user_id=? ORDER BY id DESC LIMIT 1",
+                        (uid,),
+                    ).fetchone()
+                    total_row = self._db.execute(
+                        "SELECT COUNT(*) as c FROM support_chat WHERE user_id=? AND created_at>=?", (uid, edge)
+                    ).fetchone()
+                else:
+                    gt = tk[2:]
+                    if not gt:
+                        continue
+                    last = self._db.execute(
+                        "SELECT id, display_name, text, created_at, is_admin FROM support_chat WHERE guest_token=? ORDER BY id DESC LIMIT 1",
+                        (gt,),
+                    ).fetchone()
+                    total_row = self._db.execute(
+                        "SELECT COUNT(*) as c FROM support_chat WHERE guest_token=? AND created_at>=?", (gt, edge)
+                    ).fetchone()
+
+                if last:
+                    d_last = dict(last)
+                    last_id = int(d_last.get("id") or 0)
+                    last_at = float(d_last.get("created_at") or info.get("updated_at") or 0)
+                    last_name = d_last.get("display_name") or ""
+                    last_text = (d_last.get("text") or "")[:200]
+                    last_admin = bool(d_last.get("is_admin"))
+                else:
+                    # нет сообщений (удалены), но тред остаётся
+                    last_id = 0
+                    last_at = float(info.get("updated_at") or 0)
+                    last_name = ""
+                    last_text = ""
+                    last_admin = False
+
+                # имя: из последнего сообщения или из users
+                display_name = last_name
+                uid = None
+                guest_token = ""
+                if tk.startswith("u:"):
+                    try:
+                        uid_int = int(tk[2:])
+                        uid = uid_int
+                        if not display_name:
+                            urow = self._db.execute("SELECT first_name, last_name, username, email FROM users WHERE id=?", (uid_int,)).fetchone()
+                            if urow:
+                                from typing import cast
+                                # используем display_name helper
+                                try:
+                                    display_name = (urow["first_name"] or urow["username"] or (urow["email"] or "").split("@")[0] or f"id{uid_int}")
+                                except Exception:
+                                    display_name = f"id{uid_int}"
+                            else:
+                                display_name = f"id{uid_int}"
+                    except Exception:
+                        uid = None
+                else:
+                    guest_token = tk[2:]
+                    if not display_name:
+                        display_name = f"Гость {guest_token[:6]}" if guest_token else "Гость"
+
+                out.append({
+                    "thread_key": tk,
+                    "user_id": uid,
+                    "guest_token": guest_token,
+                    "display_name": display_name or ("Гость" if guest_token else f"id{uid}"),
+                    "last_text": last_text,
+                    "last_at": last_at,
+                    "last_id": last_id,
+                    "last_admin": last_admin,
+                    "total": int(total_row["c"] if total_row else 0),
+                    "updated_at": float(info.get("updated_at") or last_at),
+                })
+
+            # сортировка по последней активности
+            out.sort(key=lambda x: x.get("last_at") or x.get("updated_at") or 0, reverse=True)
+            return out[: max(1, int(limit))]
 
     def support_mark_read(self, thread_key: str, who: str = "user", last_id: int = 0) -> None:
         tk = str(thread_key).strip()
@@ -4371,13 +4467,43 @@ class Store:
             self._db.commit()
             return bool(cur.rowcount)
 
+    def delete_support_thread(self, thread_key: str) -> bool:
+        """Удалить весь тред поддержки (все сообщения + запись о чтении). Для админа."""
+        tk = str(thread_key or "").strip()
+        if not tk:
+            return False
+        with self._lock:
+            if tk.startswith("u:"):
+                try:
+                    uid = int(tk[2:])
+                    self._db.execute("DELETE FROM support_chat WHERE user_id=?", (uid,))
+                except Exception:
+                    return False
+            elif tk.startswith("g:"):
+                gt = tk[2:].strip()[:80]
+                if not gt:
+                    return False
+                self._db.execute("DELETE FROM support_chat WHERE guest_token=?", (gt,))
+            else:
+                return False
+            self._db.execute("DELETE FROM support_reads WHERE thread_key=?", (tk,))
+            self._db.commit()
+            return True
+
     def prune_support(self, keep_sec: Optional[int] = None) -> int:
+        """Чистка старых сообщений поддержки, но треды (support_reads) оставляем до удаления админом.
+
+        Раньше удалялись и сообщения и записи о чтении — из-за этого у админа
+        пропадали чаты, которые ему писали: они появлялись только когда писали снова.
+        Теперь сообщения старше keep_sec удаляются, а треды висят постоянно,
+        пока админ не удалит их явно через delete_support_thread.
+        """
         edge = _now() - (int(keep_sec) if keep_sec else self.SUPPORT_KEEP_SEC)
         with self._lock:
             cur = self._db.execute("DELETE FROM support_chat WHERE created_at<?", (edge,))
-            cur2 = self._db.execute("DELETE FROM support_reads WHERE updated_at<?", (edge,))
+            # support_reads не трогаем — треды остаются видимыми для админа
             self._db.commit()
-            return int((cur.rowcount or 0) + (cur2.rowcount or 0))
+            return int(cur.rowcount or 0)
 
     def delete_private_room(self, room_id: int, user_id: int) -> bool:
         # удалить комнату и все её сообщения, если user_id участник

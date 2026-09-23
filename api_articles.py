@@ -493,12 +493,15 @@ def _card_html(item: dict, lang: str) -> str:
                + _attr(item.get("title") or "") + '" loading="lazy" width="1200" height="630">')
     date = ('<time class="ac-date" data-ts="' + str(int(ts)) + '">'
             + _esc_html(_date_label(ts, lang)) + "</time>") if ts else ""
+    title_attr = _lang_attr(item.get("title_lang"), lang)
+    text_attr = _lang_attr(item.get("text_lang"), lang)
     return (
         '<a class="art-card" href="/articles/' + _attr(str(item.get("id") or "")) + '">'
         + img
         + '<div class="ac-body">' + date
-        + "<h2>" + _esc_html(item.get("title") or "") + "</h2>"
-        + ('<p class="ac-sum">' + _esc_html(item.get("excerpt") or "") + "</p>"
+        + "<h2" + title_attr + ">" + _esc_html(item.get("title") or "") + "</h2>"
+        + ('<p class="ac-sum"' + text_attr + ">"
+           + _esc_html(item.get("excerpt") or "") + "</p>"
            if item.get("excerpt") else "")
         + '<span class="ac-more">' + _esc_html(t_item(lang, "Читать", "Read"))
         + " →</span></div></a>"
@@ -522,6 +525,21 @@ def _date_label(ts: float, lang: str) -> str:
         return f"{months_en[tm.tm_mon - 1]} {tm.tm_mday}, {tm.tm_year}"
     except Exception:                                    # noqa: BLE001
         return ""
+
+
+def _lang_attr(content_lang: str, page_lang: str) -> str:
+    """`` lang="ru"`` для русского текста на странице другого языка.
+
+    Опубликовать статью без английской версии нельзя, но у старых материалов
+    её может не быть — тогда на английской странице стоит русский текст, и об
+    этом надо сказать разметкой: иначе поисковик считает его английским, а
+    скринридер читает с неверным произношением.
+    """
+    code = str(content_lang or "").lower()
+    page = "ru" if str(page_lang or "").startswith("ru") else "en"
+    if not code or code == page:
+        return ""
+    return f' lang="{_attr(code)}"'
 
 
 def _attr(value: Any) -> str:
@@ -603,15 +621,13 @@ def register_article_routes(app) -> None:
             channel = ('<a class="chip link" id="art-channel" href="' + _attr(url)
                        + '" target="_blank" rel="noopener">'
                        + _esc_html(words["channel"]) + " →</a>")
+        # Заголовок и описание списка берём из словаря (ключи seo.articles.*):
+        # у всех пяти языков свои строки, а подставленные «на лету» русский с
+        # английским оставляли zh/hi/es без локализации и расходились с og:*
         return seo_pages.render(
             "articles.html", lang, "/articles",
             extra_head=seo_pages.jsonld("articles", lang, image=og_image),
             og_image=og_image, auto=auto,
-            title=t_item(lang, "Статьи — разборы рынка крипто-фьючерсов LiqScope",
-                         "Articles — LiqScope crypto futures research"),
-            desc=t_item(lang,
-                        "Разборы рынка крипто-фьючерсов: ликвидации, открытый интерес, объём.",
-                        "Crypto futures research: liquidations, open interest, volume."),
             body={"articles": cards, "total": str(len(items)),
                   "fresh": _esc_html(_date_label(fresh_ts, lang)) or "—",
                   "channel": channel},
@@ -672,6 +688,8 @@ def register_article_routes(app) -> None:
             title=item.get("title") or "",
             desc=item.get("excerpt") or "",
             body={"title": _esc_html(item.get("title") or ""),
+                  "title_lang": _lang_attr(item.get("title_lang"), lang),
+                  "text_lang": _lang_attr(item.get("text_lang"), lang),
                   "meta": meta,
                   "note": (_esc_html(note) if note else ""),
                   "body": item.get("html") or "",

@@ -332,7 +332,6 @@
         if (!box) return;
         var path = location.pathname || "";
         if (!user) {
-            if (path === "/login") { box.innerHTML = ""; return; }
             var html = "";
             // Дайджест и сводки — публичные разделы, доступны гостям без регистрации
             if (path !== "/digest") {
@@ -341,7 +340,16 @@
             if (path !== "/hourly") {
                 html += '<a class="btn btn-ghost btn-compact" href="/hourly">🕘 ' + t("hourly") + "</a>";
             }
-            html += '<a class="btn btn-primary btn-compact" href="/login">' + t("login") + "</a>";
+            // Статьи — такой же публичный раздел, как дайджест и сводки
+            if (path !== "/articles") {
+                html += '<a class="btn btn-ghost btn-compact" href="/articles">📄 ' +
+                    t("art.title") + "</a>";
+            }
+            // Кнопка «Войти» на самой странице входа не нужна: гость уже здесь,
+            // а вот разделы ему нужны — как и на всех остальных страницах
+            if (path !== "/login") {
+                html += '<a class="btn btn-primary btn-compact" href="/login">' + t("login") + "</a>";
+            }
             box.innerHTML = html;
             return;
         }
@@ -357,6 +365,11 @@
         if (path !== "/hourly") {
             html += '<a class="btn btn-ghost btn-compact" href="/hourly">🕘 ' +
                 t("hourly") + "</a>";
+        }
+        // Статьи — рядом с остальными разделами, из любой страницы
+        if (path !== "/articles") {
+            html += '<a class="btn btn-ghost btn-compact" href="/articles">📄 ' +
+                t("art.title") + "</a>";
         }
         if (path !== "/cabinet") {
             html += '<a class="btn btn-ghost btn-compact" href="/cabinet">' + t("cabinet") + "</a>";

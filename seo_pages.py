@@ -263,9 +263,20 @@ _HTML_RE = re.compile(r"<html\b[^>]*>", re.I)
 #: og:image / twitter:image — их подменяем, если у страницы своя картинка
 #: og:title / twitter:title — у статьи вместо общего заголовка свой
 _OG_TITLE_RE = re.compile(
-    r'(<meta\b[^>]*\bproperty="og:title"[^>]*\bcontent=")([^"]*)(")', re.I)
+    r'(<meta\b[^>]*\b(?:property="og:title"|name="twitter:title")[^>]*\bcontent=")([^"]*)(")',
+    re.I)
+#: описание страницы: и для поисковика, и для превью ссылки — один и тот же текст
 _DESC_RE = re.compile(
-    r'(<meta\b[^>]*\bname="description"[^>]*\bcontent=")([^"]*)(")', re.I)
+    r'(<meta\b[^>]*\b(?:name="(?:description|twitter:description)"'
+    r'|property="og:description")[^>]*\bcontent=")([^"]*)(")',
+    re.I)
+#: og:url — адрес самой страницы, а не раздела: у статьи и выпуска он свой
+_OG_URL_RE = re.compile(
+    r'(<meta\b[^>]*\bproperty="og:url"[^>]*\bcontent=")([^"]*)(")', re.I)
+#: подпись картинки в превью: у материала это его заголовок
+_IMG_ALT_RE = re.compile(
+    r'(<meta\b[^>]*\b(?:property="og:image:alt"|name="twitter:image:alt")[^>]*\bcontent=")([^"]*)(")',
+    re.I)
 
 _OG_IMG_RE = re.compile(
     r'(<meta\b[^>]*\b(?:property="og:image"|name="twitter:image")[^>]*\bcontent=")([^"]*)(")',
@@ -376,6 +387,11 @@ def render(
     if desc:
         html = _DESC_RE.sub(
             lambda m: m.group(1) + _attr(desc) + m.group(3), html)
+    if title:
+        # подпись картинки в превью ссылки: «Статья — LiqScope» ничего не говорит,
+        # а заголовок материала читается и в соцсети, и скринридером
+        html = _IMG_ALT_RE.sub(
+            lambda m: m.group(1) + _attr(title) + m.group(3), html)
 
     if og_image:
         # у страницы есть своя картинка (обложка выпуска дайджеста): подставляем
@@ -397,6 +413,11 @@ def render(
 
     html = _OG_LOCALE_RE.sub(
         lambda m: m.group(1) + OG_LOCALE[lang] + m.group(3), html, count=1
+    )
+    # og:url — тот же адрес, что и canonical: в разметке страниц он прописан
+    # для раздела (/articles, /digest), а у материала адрес свой
+    html = _OG_URL_RE.sub(
+        lambda m: m.group(1) + _attr(_canonical(url, lang)) + m.group(3), html, count=1
     )
 
     # hreflang и подсказка о языке — в конец <head>
@@ -1028,6 +1049,17 @@ def jsonld(kind: str = "landing", lang: str = DEFAULT_LANG,
             "height": 512,
         },
     })
+    # @context нужен каждому блоку отдельно: у выпуска (BlogPosting) он свой,
+    # а без него поисковик не понимает названия полей вовсе
+    for item in data:
+        if isinstance(item, dict):
+            item.setdefault("@context", "https://schema.org")
+    # Язык страницы: если у блока своего языка нет — ставим язык посетителя
+    for item in data:
+        if isinstance(item, dict) and item.get("@type") in (
+                "WebPage", "CollectionPage", "Blog", "BlogPosting",
+                "SoftwareApplication", "FAQPage", "HowTo"):
+            item.setdefault("inLanguage", HREFLANG.get(lang, lang))
     return (
         '<script type="application/ld+json">'
         + json.dumps(data, ensure_ascii=False)

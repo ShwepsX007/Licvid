@@ -468,6 +468,8 @@ def public_article(rec: dict, lang: str = "en", with_text: bool = True) -> dict:
         "status": str(rec.get("status") or "draft"),
         "sent": {k: float(v or 0) for k, v in (rec.get("sent") or {}).items()},
         "title": title,
+        "title_lang": title_lang(rec, lang),
+        "text_lang": shown_lang(rec, lang),
         "excerpt": excerpt(pick_text(rec, lang)),
         "photo": _photo_public(rec),
     }
@@ -477,6 +479,29 @@ def public_article(rec: dict, lang: str = "en", with_text: bool = True) -> dict:
         out["html"] = markdown_html(text)
         out["plain"] = markdown_plain(text)
     return out
+
+
+def shown_lang(rec: dict, lang: str = "en") -> str:
+    """На каком языке текст, который увидит посетитель.
+
+    Английской версии нет — показываем русскую. Знать это нужно странице:
+    русский абзац на английской странице помечается ``lang="ru"``, иначе
+    поисковик и скринридер считают его английским.
+    """
+    texts = texts_of(rec)
+    code = "ru" if str(lang or "").startswith("ru") else "en"
+    if code == "ru":
+        return "ru" if texts.get("ru") else ("en" if texts.get("en") else "")
+    return "en" if texts.get("en") else ("ru" if texts.get("ru") else "")
+
+
+def title_lang(rec: dict, lang: str = "en") -> str:
+    """На каком языке заголовок: он может отличаться от языка текста."""
+    titles = titles_of(rec)
+    code = "ru" if str(lang or "").startswith("ru") else "en"
+    if code == "ru":
+        return "ru" if titles.get("ru") else ("en" if titles.get("en") else shown_lang(rec, lang))
+    return "en" if titles.get("en") else ("ru" if titles.get("ru") else shown_lang(rec, lang))
 
 
 def index_row(rec: dict, lang: str = "en") -> dict:

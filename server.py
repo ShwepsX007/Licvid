@@ -481,6 +481,10 @@ async def chat_notify_loop() -> None:
         except Exception as e:  # noqa: BLE001
             log.debug("chat reminders: %s", e)
         try:
+            await support_chat_mod.scan_support_reminders()
+        except Exception as e:  # noqa: BLE001
+            log.debug("support reminders: %s", e)
+        try:
             await asyncio.to_thread(account_store.prune_private)
             await asyncio.to_thread(account_store.prune_chat)
             await asyncio.to_thread(account_store.prune_service)

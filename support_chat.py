@@ -30,7 +30,7 @@ MAX_LEN = 2000
 RATE_LIMIT = 15
 RATE_WINDOW = 300.0
 
-_CTRL_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\\x1F\\x7F]")
+_CTRL_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]")
 
 
 class Ctx:
@@ -78,8 +78,9 @@ def _current_user(request: Request):
 def _clean_text(raw: str, limit: int = MAX_LEN) -> str:
     s = str(raw or "").strip()
     s = _CTRL_RE.sub("", s)
-    s = re.sub(r"[ \\t]{3,}", "  ", s)
-    s = re.sub(r"\\n{4,}", "\\n\\n\\n", s)
+    # схлопываем длинные пробелы/переносы, но оставляем одиночные пробелы и переносы
+    s = re.sub(r"[ \t]{3,}", "  ", s)
+    s = re.sub(r"\n{4,}", "\n\n\n", s)
     if len(s) > limit:
         s = s[:limit].rstrip()
     return s
@@ -221,6 +222,81 @@ async def _broadcast_support(msg_public: dict, target_user_id=None, target_guest
             ))
         except Exception as e:
             log.debug("support broadcast fallback: %s", e)
+
+
+async def scan_support_reminders() -> int:
+    """Напоминания админам о безответных обращениях в поддержку.
+
+    Логика как у личных чатов: если пользователь/гость написал, а админ не прочитал
+    и не ответил за delay минут (настройка chat_dm_tg_delay_min), шлём напоминание
+    в Telegram админам один раз на сообщение.
+    """
+    store = ctx.store
+    bot = ctx.bot
+    if store is None or bot is None:
+        return 0
+    try:
+        # задержка из настроек, 0 = выкл
+        raw = str(store.get_setting("chat_dm_tg_delay_min", "10") or "10")
+        dmin = float(raw.strip() or 10)
+    except Exception:
+        dmin = 10.0
+    dmin = max(0.0, min(dmin, 24 * 60.0))
+    if dmin <= 0 or not getattr(bot, "running", False):
+        return 0
+    edge = _now() - dmin * 60.0
+    try:
+        import asyncio
+        due = await asyncio.to_thread(store.support_rooms_due, edge)
+    except Exception as e:
+        log.debug("support reminders due: %s", e)
+        return 0
+    if not due:
+        return 0
+    try:
+        admin_ids = store.admin_tg_ids() if hasattr(store, "admin_tg_ids") else []
+    except Exception:
+        admin_ids = []
+    if not admin_ids:
+        return 0
+    # check if any admin is online in chat — если админ онлайн, не спамим, как в ЛС
+    try:
+        from terminal_chat import chat_presence_online
+        # если хоть один админ онлайн — пропускаем напоминание (бейдж и так горит)
+        for aid in admin_ids:
+            # admin_ids are tg_id, not user_id; we need user ids of admins
+            pass
+        # попробуем по user_id админов
+        with store._lock:
+            admin_user_ids = [int(r["id"]) for r in store._db.execute("SELECT id FROM users WHERE is_admin=1 AND is_banned=0").fetchall()]
+        if any(chat_presence_online(int(uid)) for uid in admin_user_ids):
+            # админ на сайте — не шлём TG, только WS бейдж
+            return 0
+    except Exception:
+        pass
+
+    sent = 0
+    for row in due:
+        tkey = row.get("thread_key") or ""
+        display_name = row.get("display_name") or "Гость" if row.get("guest_token") else f"id{row.get('user_id')}"
+        is_guest = bool(row.get("guest_token"))
+        preview = str(row.get("text") or "")[:300]
+        who = f"👤 {display_name}" + (" (гость)" if is_guest else "")
+        body = f"⏰ <b>Поддержка без ответа</b>\n{who}\nТред: <code>{tkey}</code>\n\n{preview}\n\n<i>Админ не ответил {int(dmin)} мин — напоминание</i>"
+        for tg_id in admin_ids:
+            try:
+                await bot.send(int(tg_id), body, raw=True)
+            except Exception as e:
+                log.debug("support reminder %s: %s", tg_id, e)
+                continue
+        # помечаем как напомнили
+        try:
+            import asyncio
+            await asyncio.to_thread(store.support_reminder_mark, tkey, int(row.get("message_id") or 0))
+        except Exception:
+            pass
+        sent += 1
+    return sent
 
 
 def register_support_chat_routes(app, hub=None) -> None:

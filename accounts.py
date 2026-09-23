@@ -633,6 +633,8 @@ class Store:
                     guest_token TEXT NOT NULL DEFAULT '',
                     user_last_read_id INTEGER NOT NULL DEFAULT 0,
                     admin_last_read_id INTEGER NOT NULL DEFAULT 0,
+                    reminded_id INTEGER NOT NULL DEFAULT 0,
+                    reminded_at REAL NOT NULL DEFAULT 0,
                     updated_at REAL NOT NULL DEFAULT 0
                 );
                 """
@@ -661,6 +663,7 @@ class Store:
         self._migrate_digest_photos()
         self._migrate_visits()
         self._migrate_ads()
+        self._migrate_support_reads()
         self._seed_digest()
         self._digest_service_live()
 
@@ -774,6 +777,22 @@ class Store:
                 self._db.commit()
         except Exception as e:                                  # noqa: BLE001
             log.debug("реклама: колонки link/html не добавлены: %s", e)
+
+    def _migrate_support_reads(self) -> None:
+        try:
+            with self._lock:
+                cols = {r["name"] for r in self._db.execute("PRAGMA table_info(support_reads)")}
+                if cols:
+                    if "reminded_id" not in cols:
+                        self._db.execute("ALTER TABLE support_reads ADD COLUMN reminded_id INTEGER NOT NULL DEFAULT 0")
+                    if "reminded_at" not in cols:
+                        self._db.execute("ALTER TABLE support_reads ADD COLUMN reminded_at REAL NOT NULL DEFAULT 0")
+                    # ensure updated_at exists
+                    if "updated_at" not in cols:
+                        self._db.execute("ALTER TABLE support_reads ADD COLUMN updated_at REAL NOT NULL DEFAULT 0")
+                self._db.commit()
+        except Exception as e:
+            log.debug("support_reads migration: %s", e)
 
     def _migrate_users(self) -> None:
         """Догоняем старые базы: почта/пароль и tg_id без NOT NULL.
@@ -4254,6 +4273,97 @@ class Store:
                 if not th["last_admin"]:
                     unread += 1
         return {"threads": unread}
+
+    def support_reminder_mark(self, thread_key: str, msg_id: int) -> None:
+        tk = str(thread_key).strip()
+        if not tk:
+            return
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO support_reads(thread_key,reminded_id,reminded_at,updated_at) VALUES(?,?,?,?)"
+                " ON CONFLICT(thread_key) DO UPDATE SET reminded_id=MAX(reminded_id, excluded.reminded_id), reminded_at=excluded.reminded_at, updated_at=excluded.updated_at",
+                (tk, int(msg_id), _now(), _now()),
+            )
+            self._db.commit()
+
+    def support_rooms_due(self, before_ts: float) -> List[Dict[str, Any]]:
+        """Треды поддержки с безответными сообщениями пользователя старше before_ts (для TG-напоминаний).
+
+        Для каждого треда отдаём самое свежее непрочитанное админом сообщение от пользователя:
+        "прочитал или ответил" = сигнал не слать. Работает как private_rooms_due, но для поддержки.
+        """
+        edge = _now() - self.SUPPORT_KEEP_SEC
+        with self._lock:
+            # все треды из support_reads
+            db_rows = self._db.execute(
+                "SELECT thread_key, user_id, guest_token, COALESCE(admin_last_read_id,0) as admin_last, COALESCE(reminded_id,0) as reminded FROM support_reads"
+            ).fetchall()
+            # нормализуем в список dict
+            rows: List[Dict[str, Any]] = []
+            known = set()
+            for r in db_rows:
+                try:
+                    tk = str(r["thread_key"] or "")
+                except Exception:
+                    tk = str(r.get("thread_key") or "")
+                if not tk:
+                    continue
+                rows.append({
+                    "thread_key": tk,
+                    "admin_last": int(r["admin_last"] if "admin_last" in r.keys() else 0),
+                    "reminded": int(r["reminded"] if "reminded" in r.keys() else 0),
+                })
+                known.add(tk)
+            # также треды без записи в support_reads, но с сообщениями
+            extra = self._db.execute(
+                "SELECT CASE WHEN user_id IS NOT NULL THEN 'u:'||user_id ELSE 'g:'||guest_token END as thread_key FROM support_chat WHERE created_at>=? GROUP BY thread_key",
+                (edge,),
+            ).fetchall()
+            for er in extra:
+                tk = str(er["thread_key"] or "")
+                if not tk or tk in known:
+                    continue
+                rows.append({"thread_key": tk, "admin_last": 0, "reminded": 0})
+                known.add(tk)
+
+            due: List[Dict[str, Any]] = []
+            for r in rows:
+                tk = str(r.get("thread_key") or "").strip()
+                if not tk:
+                    continue
+                admin_last = int(r.get("admin_last") or 0)
+                reminded = int(r.get("reminded") or 0)
+                if tk.startswith("u:"):
+                    try:
+                        uid = int(tk[2:])
+                    except Exception:
+                        continue
+                    pending = self._db.execute(
+                        "SELECT id, user_id, guest_token, display_name, text, created_at FROM support_chat WHERE user_id=? AND is_admin=0 AND id>? AND created_at>=? AND created_at<? ORDER BY id DESC LIMIT 1",
+                        (uid, admin_last, edge, float(before_ts)),
+                    ).fetchone()
+                else:
+                    gt = tk[2:]
+                    if not gt:
+                        continue
+                    pending = self._db.execute(
+                        "SELECT id, user_id, guest_token, display_name, text, created_at FROM support_chat WHERE guest_token=? AND is_admin=0 AND id>? AND created_at>=? AND created_at<? ORDER BY id DESC LIMIT 1",
+                        (gt, admin_last, edge, float(before_ts)),
+                    ).fetchone()
+                if not pending:
+                    continue
+                if int(pending["id"]) <= reminded:
+                    continue
+                due.append({
+                    "thread_key": tk,
+                    "user_id": pending["user_id"],
+                    "guest_token": pending["guest_token"] or "",
+                    "display_name": pending["display_name"] or "",
+                    "message_id": int(pending["id"]),
+                    "text": pending["text"],
+                    "created_at": float(pending["created_at"]),
+                })
+        return due
 
     def delete_support_message(self, msg_id: int) -> bool:
         with self._lock:

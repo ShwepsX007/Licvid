@@ -1,12 +1,10 @@
-/* 💬 Чат LiqScope v8 — per-user архитектура
+/* 💬 Чат LiqScope v9 — per-user + collapsible support threads + TG reminders
  *
  *  • «Общий» — 3 дня, пишут зарегистрированные
- *  • «Личные» — приватный диалог, 30 дней, можно удалить (DELETE /api/chat/dm/{id})
- *  • «Сервисы» — ТОЛЬКО личные сигналы по настройкам пользователя (book/pump/alerts/corr)
- *    пишет только сервер персонально, читает только владелец, гостям недоступно
+ *  • «Личные» — 30 дней, можно удалить, TG-напоминание через chat_dm_tg_delay_min
+ *  • «Сервисы» — личные сигналы по настройкам (book/pump/alerts/corr), 30 дней
  *  • «Поддержка» — персональный тред per-user, гость с временным ником (guest_token+name)
- *    админ видит все треды через /threads и отвечает по thread_key, бот уведомляет админа
- *    история 30 дней, только поддержка доступна гостям
+ *    админ видит все треды, треды сворачиваются, TG-напоминание админам через тот же delay
  */
 
 (function () {
@@ -27,6 +25,7 @@
   const LS_MUTE_PFX = "liqscope.tchat.mute.";
   const LS_SUP_NAME = "liqscope.tchat.supName";
   const LS_SUP_GUEST = "liqscope.tchat.supGuest";
+  const LS_SUP_THREADS_COLLAPSED = "liqscope.tchat.supThreadsCollapsed";
   const MIN_W = 280, MIN_H = 260;
 
   const $ = (s, r) => (r || document).querySelector(s);
@@ -323,6 +322,8 @@
     let dmCounters = { unread: 0, invites: 0 };
     let supThreads = [];
     let supCurrentThreadKey = "";
+    let supThreadsCollapsed = false;
+    try { supThreadsCollapsed = localStorage.getItem(LS_SUP_THREADS_COLLAPSED) === "1"; } catch {}
     let supGuestToken = getGuestToken();
 
     function dmlistEl() { return $("#tchat-dm-list"); }
@@ -381,7 +382,6 @@
       tabs.forEach((b) => {
         const tab = b.getAttribute("data-tab");
         if (!me) {
-          // гость: только поддержка
           if (tab !== "support") b.classList.add("hidden");
           else b.classList.remove("hidden");
         } else {
@@ -394,7 +394,6 @@
     }
 
     function setView(v, arg) {
-      // гостям только support
       if (!me && v !== "support") v = "support";
       view = v;
       const list = listEl, dm = dmViewEl(), chat = dmChatEl(), svc = svcListEl, sup = supWrap;
@@ -636,10 +635,10 @@
           if (supNameWrap) supNameWrap.classList.add("hidden");
           if (me.is_admin && supCurrentThreadKey) {
             input.placeholder = `Ответ в тред ${supCurrentThreadKey}… (Enter)`;
-            setHint(`Вы админ • отвечаете в ${supCurrentThreadKey}`, false);
+            setHint(`Вы админ • отвечаете в ${supCurrentThreadKey} • клик по треду снова — свернуть`, false);
           } else if (me.is_admin) {
             input.placeholder = "Выберите тред выше или ждите сообщений…";
-            setHint("Вы админ • выберите тред для ответа, новые сообщения приходят в бот", false);
+            setHint("Вы админ • выберите тред для ответа, новые сообщения приходят в бот и с задержкой", false);
           } else {
             input.placeholder = "Написать в поддержку… (Enter)";
             setHint(`Вы: ${me.name || "id" + me.id} • личный чат поддержки 30 дней`, false);
@@ -806,34 +805,56 @@
       if (!supThreadsEl) return;
       if (!me || !me.is_admin) { supThreadsEl.innerHTML = ""; supThreadsEl.classList.add("hidden"); return; }
       supThreadsEl.classList.remove("hidden");
+      const collapsed = !!supThreadsCollapsed;
+      const cur = supCurrentThreadKey;
+      const header = `<div class="tchat-threads-head" id="tchat-sup-threads-toggle" style="display:flex;align-items:center;justify-content:space-between;padding:6px 8px;border-bottom:1px solid #1e2e55;background:#0e182d;cursor:pointer"><span>💬 Треды поддержки (${supThreads.length})${cur ? ` · <code style="font-size:11px">${esc(cur)}</code>` : ""}</span><button type="button" class="tchat-mini">${collapsed ? "▼ Развернуть" : "▲ Свернуть"}</button></div>`;
       if (!supThreads.length) {
-        supThreadsEl.innerHTML = '<div class="tchat-empty muted" style="padding:8px">Нет обращений в поддержку пока</div>';
+        supThreadsEl.innerHTML = header + '<div class="tchat-empty muted" style="padding:8px">Нет обращений в поддержку пока</div>';
+        const h = supThreadsEl.querySelector("#tchat-sup-threads-toggle");
+        if (h) h.addEventListener("click", () => { supThreadsCollapsed = !supThreadsCollapsed; try { localStorage.setItem(LS_SUP_THREADS_COLLAPSED, supThreadsCollapsed ? "1" : "0"); } catch {}; renderSupThreads(); });
         return;
       }
-      const cur = supCurrentThreadKey;
-      supThreadsEl.innerHTML = supThreads.map((t) => {
-        const tk = esc(t.thread_key || "");
-        const last = esc((t.last_text || "").slice(0, 60));
-        const name = esc(t.display_name || (t.user_id ? "id" + t.user_id : "гость"));
-        const total = t.total || 0;
-        const isCur = tk === cur;
-        return `<div class="tchat-dm-item${isCur ? " active" : ""}" data-tkey="${tk}" style="cursor:pointer">
-          <div class="tchat-peer">${name} <span class="tchat-time" style="margin-left:6px">${fmtTime(t.last_ts || 0)}</span></div>
-          <div class="tchat-last">${last || "—"}</div>
-          <div class="tchat-dm-meta"><span class="tchat-time">${tk}</span><span class="tchat-dm-unread">${total}</span></div>
-        </div>`;
-      }).join("");
-      supThreadsEl.querySelectorAll("[data-tkey]").forEach((el) => {
-        el.addEventListener("click", async () => {
-          const tk = el.getAttribute("data-tkey") || "";
-          supCurrentThreadKey = tk;
-          lastSupId = 0;
-          if (supListEl) supListEl.innerHTML = '<div class="tchat-empty">загружаем…</div>';
-          await refreshSupport(true);
-          updateAuthUI();
-          renderSupThreads();
+      let body = "";
+      if (!collapsed) {
+        body = supThreads.map((t) => {
+          const tk = esc(t.thread_key || "");
+          const last = esc((t.last_text || "").slice(0, 60));
+          const name = esc(t.display_name || (t.user_id ? "id" + t.user_id : "гость"));
+          const total = t.total || 0;
+          const isCur = tk === cur;
+          return `<div class="tchat-dm-item${isCur ? " active" : ""}" data-tkey="${tk}" style="cursor:pointer">
+            <div class="tchat-peer">${name} <span class="tchat-time" style="margin-left:6px">${fmtTime(t.last_at || 0)}</span></div>
+            <div class="tchat-last">${last || "—"}</div>
+            <div class="tchat-dm-meta"><span class="tchat-time">${tk}</span><span class="tchat-dm-unread">${total}</span></div>
+          </div>`;
+        }).join("");
+      }
+      supThreadsEl.innerHTML = header + body;
+      const h = supThreadsEl.querySelector("#tchat-sup-threads-toggle");
+      if (h) h.addEventListener("click", () => { supThreadsCollapsed = !supThreadsCollapsed; try { localStorage.setItem(LS_SUP_THREADS_COLLAPSED, supThreadsCollapsed ? "1" : "0"); } catch {}; renderSupThreads(); });
+      if (!collapsed) {
+        supThreadsEl.querySelectorAll("[data-tkey]").forEach((el) => {
+          el.addEventListener("click", async (ev) => {
+            ev.stopPropagation();
+            const tk = el.getAttribute("data-tkey") || "";
+            if (supCurrentThreadKey === tk) {
+              // сворачиваем — повторный клик по активному треду
+              supCurrentThreadKey = "";
+              lastSupId = 0;
+              if (supListEl) supListEl.innerHTML = '<div class="tchat-empty">Выберите тред выше для просмотра — тред свернут</div>';
+              updateAuthUI();
+              renderSupThreads();
+              return;
+            }
+            supCurrentThreadKey = tk;
+            lastSupId = 0;
+            if (supListEl) supListEl.innerHTML = '<div class="tchat-empty">загружаем…</div>';
+            await refreshSupport(true);
+            updateAuthUI();
+            renderSupThreads();
+          });
         });
-      });
+      }
     }
 
     async function refreshRooms() {
@@ -1092,25 +1113,19 @@
         } else if (data.type === "support_chat" && data.message) {
           const m = data.message;
           const tk = data.thread_key || m.thread_key || "";
-          // filter for current user/guest/thread
           if (!me) {
             if (m.guest_token && m.guest_token !== supGuestToken) return;
           } else if (!me.is_admin) {
             if (m.user_id && m.user_id !== me.id && !m.admin) {
-              // not ours, but could be admin reply to us (thread_key u:me.id)
               if (tk !== `u:${me.id}`) return;
             }
             if (tk && tk !== `u:${me.id}` && !tk.startsWith(`u:${me.id}`)) {
-              // if admin reply, thread_key should be u:me.id, allow
               if (tk !== `u:${me.id}`) {
-                // check if message is for this user via user_id
                 if (m.user_id !== me.id && !m.admin) return;
               }
             }
           } else {
-            // admin: if viewing specific thread, only that thread
             if (supCurrentThreadKey && tk && tk !== supCurrentThreadKey) {
-              // still notify
               supUnread++; playSound("support"); setBadge(); refreshSupThreads();
               return;
             }

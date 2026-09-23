@@ -500,8 +500,12 @@ body .tchat-header-btn.tchat-notify,
 }
 
 /* v8 per-user: support threads list */
-#tchat-support-threads { max-height: 180px; overflow-y:auto; border-bottom:1px solid #1e2e55; background:#0a1226; }
+#tchat-support-threads { max-height: 220px; overflow-y:auto; border-bottom:1px solid #1e2e55; background:#0a1226; display:flex; flex-direction:column; }
 #tchat-support-threads.hidden { display:none !important; }
 .tchat-dm-item.active { border-color:#35508a; background:#162040; }
 .tchat-msg.guest { border-color:#2a3a5a; background:#0f1a2e; }
 .tchat-tab.hidden { display:none !important; }
+/* v9 collapsible threads header */
+.tchat-threads-head { user-select:none; }
+.tchat-threads-head:hover { background:#132040 !important; }
+.tchat-threads-head code { color:#8aa0c8; }

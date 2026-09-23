@@ -499,6 +499,32 @@
         </div>
     </div>
 
+    <div class="card" id="archive-admin" style="margin-top:14px"
+         data-hint="старые выпуски: убрать со сайта и из Telegram"
+         data-i18n-skip>
+        <h3>🗂 Архив — удаление старых выпусков</h3>
+        <p class="lead">Здесь снимают уже вышедшее: <b>выпуск дня</b> уходит со страницы
+            <code>/digest</code>, <b>сводки по часам</b> — со <code>/hourly</code>. Если галочка
+            «и из Telegram» стоит, тем же действием удаляются и посты в каналах: id сообщений бот
+            запоминает при публикации. У выпусков, вышедших до этой версии, id не сохранялись —
+            такие посты в Telegram придётся убрать вручную.</p>
+        <div class="row-actions" style="margin-top:12px">
+            <label class="meta"><input type="checkbox" id="arc-tg" checked> 🗑 Удалять и вышедшие посты в Telegram</label>
+            <button class="btn" id="arc-reload" type="button">🔄 Обновить архив</button>
+            <span class="meta" id="arc-status"></span>
+        </div>
+        <div class="grid grid-2" style="margin-top:12px">
+            <div>
+                <h4>📰 Дайджесты за сутки</h4>
+                <div id="arc-digests"><p class="meta">загружаю выпуски…</p></div>
+            </div>
+            <div>
+                <h4>🕘 Сводки по часам</h4>
+                <div id="arc-hourly"><p class="meta">загружаю сводки…</p></div>
+            </div>
+        </div>
+    </div>
+
     <div class="card" id="fb-admin" style="margin-top:14px" data-hint="диалоги из кабинета — можно ответить">
         <h3>💬 Обратная связь<span class="fb-dot hidden" id="fb-admin-badge"></span></h3>
         <p class="lead">Всё, что пользователи написали в кабинете кнопкой «По всем вопросам». Отвечайте
@@ -552,6 +578,7 @@
 <script src="/static/presence.js?v=geo2"></script>
 <script src="/static/account.js?v=admin14"></script>
 <script src="/static/articles_admin.js?v=art1"></script>
+<script src="/static/archive_admin.js?v=arc1"></script>
 <script src="/static/consent.js?v=consent1"></script>
 </body>
 </html>

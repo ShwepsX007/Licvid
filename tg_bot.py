@@ -140,6 +140,10 @@ class TelegramBot:
         # править меню, которое уже уехало вверх: id сообщений в чате растут,
         # и по этой паре видно, ушло ли после меню что-то ещё (алерты, отчёты).
         self._last_msg: Dict[int, int] = {}
+        # Что ушло в каналы последней публикацией: ``{язык: {chat, message_id,
+        # extra}}``. По этим id админка удаляет уже вышедшие выпуски из
+        # Telegram — своих id у архива сайта нет.
+        self.channel_sent: Dict[str, Dict[str, Any]] = {}
         self.alerts_market_fn: Optional[Callable[[], Any]] = None
         # Корреляции валют: (окно, метрика) → готовая картина по истории
         self.correlations_fn: Optional[Callable[[str, str], Any]] = None
@@ -1643,6 +1647,7 @@ class TelegramBot:
         photos = [x for x in (images if images is not None else
                               ([img] if img else [])) if x and os.path.isfile(x)]
         ok = False
+        mid = 0
         if photos:
             # фото важнее хвоста цифр: если подпись не влезает, подрезаем её
             # (по целым строкам, подпись бренда оставляем) и всё равно шлём
@@ -1653,14 +1658,41 @@ class TelegramBot:
             if fit != caption:
                 log.warning("подпись %s знаков > лимита %s — хвост обрезан, "
                             "фото уходит", caption_len(caption), CAPTION_LIMIT)
-            ok = bool(await self.send_photo(cid, photos[0], fit, markup))
+            mid = int(await self.send_photo(cid, photos[0], fit, markup) or 0)
+            ok = bool(mid)
         if not ok:
-            ok = bool(await self.send(cid, caption, markup))
+            mid = int(await self.send(cid, caption, markup) or 0)
+            ok = bool(mid)
+        extra: List[int] = []
         if ok and top:
             sent = await self.send(cid, top)
-            if not sent:
+            if sent:
+                extra.append(int(sent))
+            else:
                 log.warning("топ-7 не ушёл в канал %s", cid)
+        if ok:
+            self.note_channel_post(cid, mid, extra, lang)
         return ok
+
+    def note_channel_post(self, chat_id: Any, message_id: Any, extra=None,
+                          lang: str = "ru") -> None:
+        """Запомнить, каким сообщением пост лёг в канал.
+
+        Нужно не для отправки, а для уборки: админка удаляет старые выпуски —
+        и на сайте, и в Telegram, а id сообщения знает только отправитель.
+        """
+        try:
+            mid = int(message_id)
+        except (TypeError, ValueError):
+            return
+        if mid <= 0:
+            return
+        key = "en" if str(lang or "").startswith("en") else "ru"
+        self.channel_sent[key] = {
+            "chat": str(chat_id), "message_id": mid,
+            "extra": [int(x) for x in (extra or []) if str(x).isdigit()],
+            "at": time.time(),
+        }
 
     @staticmethod
     def _caption_note(posts) -> str:
@@ -1786,6 +1818,17 @@ class TelegramBot:
                 "sent": sent or {x: True for x in texts},
                 "n": int(n or 0),
             }
+            # Где этот пост лежит в Telegram: по id админка удалит его из
+            # канала вместе с записью архива (своих id у сайта нет).
+            tg_ids: Dict[str, Any] = {}
+            for lang in texts:
+                info = (getattr(self, "channel_sent", None) or {}).get(lang) or {}
+                if int(info.get("message_id") or 0) > 0:
+                    tg_ids[lang] = {"chat": str(info.get("chat") or ""),
+                                    "message_id": int(info["message_id"]),
+                                    "extra": list(info.get("extra") or [])}
+            if tg_ids:
+                rec["tg"] = tg_ids
             if img and os.path.isfile(str(img)):
                 rec["photo"] = cover_info(str(img), self.store)
             store.add(rec)

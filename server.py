@@ -2602,6 +2602,10 @@ digest_ctx.candles_fn = get_candles
 digest_ctx.oi_fn = oi_payload
 digest_ctx.ai_fn = digest_ai
 digest_ctx.publish_fn = tg_bot.publish_daily_digest
+# Удаление старых выпусков: админка снимает их с сайта и из каналов, а id
+# сообщений знает только бот — он помнит их после каждой публикации.
+digest_ctx.bot = tg_bot
+digest_ctx.sent_ids_fn = lambda: dict(getattr(tg_bot, "channel_sent", {}) or {})
 digest_ctx.public_url = PUBLIC_URL
 # Обложку выпуска выбираем при сборке дайджеста: то же фото уходит в канал и
 # показывается на странице /digest (фото рубрик живут в базе аккаунтов).
@@ -2671,6 +2675,7 @@ async def collect_hourly_post() -> dict:
 
 
 hourly_ctx.store = HourlyStore(HOURLY_FILE, keep=HOURLY_KEEP)
+hourly_ctx.bot = tg_bot
 hourly_ctx.collect_fn = collect_hourly_post
 hourly_ctx.public_url = PUBLIC_URL
 # Посты раздела выходят в английском канале — на странице ссылка на него

@@ -1708,6 +1708,49 @@ def _total_line(snap: dict, lang: str = "ru") -> str:
     return line
 
 
+async def drop_channel_posts(sent: Optional[dict], delete_fn) -> Dict[str, Any]:
+    """Убрать из каналов то, что уже вышло: ``{язык: {chat, message_id, extra}}``.
+
+    ``delete_fn`` — ``async (chat, message_id) -> True/False`` (Telegram-бот).
+    Хвостовые сообщения (у сводки их два: подпись и топ-7) удаляем следом.
+    Возвращаем по языку: сколько сообщений ушло, что ответил Telegram.
+    """
+    out: Dict[str, Any] = {}
+    for lang, info in (sent or {}).items():
+        if not isinstance(info, dict):
+            continue
+        chat = info.get("chat")
+        ids = []
+        try:
+            if int(info.get("message_id") or 0) > 0:
+                ids.append(int(info["message_id"]))
+        except (TypeError, ValueError):
+            pass
+        for x in info.get("extra") or []:
+            try:
+                if int(x) > 0:
+                    ids.append(int(x))
+            except (TypeError, ValueError):
+                continue
+        row: Dict[str, Any] = {"ok": False, "deleted": 0, "ids": ids, "err": ""}
+        if not chat or not ids or delete_fn is None:
+            row["err"] = "нет id сообщения — выпуск ушёл до этой возможности" \
+                if not ids else "бот выключен"
+            out[str(lang)] = row
+            continue
+        for mid in ids:
+            try:
+                if await delete_fn(chat, mid):
+                    row["deleted"] += 1
+                else:
+                    row["err"] = row["err"] or "Telegram не подтвердил удаление"
+            except Exception as e:                       # noqa: BLE001
+                row["err"] = f"{type(e).__name__}: {e}"
+        row["ok"] = row["deleted"] > 0
+        out[str(lang)] = row
+    return out
+
+
 def list_images() -> List[str]:
     if not os.path.isdir(IMAGES_DIR):
         return []

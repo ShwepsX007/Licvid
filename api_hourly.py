@@ -37,6 +37,8 @@ class Ctx:
         self.store: PostStore = PostStore("")
         #: async () -> запись архива: собрать сводку сейчас без Telegram
         self.collect_fn = None
+        #: tg_bot: удаление уже вышедших постов из Telegram
+        self.bot = None
         #: () -> адрес английского канала (там выходят эти сводки)
         self.channel_url_fn = None
         self.page_ok = True
@@ -53,6 +55,70 @@ def _limit(value: Any, hi: int = 60, default: int = 12) -> int:
     except (TypeError, ValueError):
         n = default
     return max(1, min(hi, n))
+
+
+def bot_running() -> bool:
+    """Работает ли Telegram-бот: без него удалять посты в канале нечем."""
+    bot = ctx.bot
+    if bot is None:
+        return False
+    running = getattr(bot, "running", False)
+    try:
+        return bool(running() if callable(running) else running)
+    except Exception:                                    # noqa: BLE001
+        return False
+
+
+def sent_ids(rec: dict) -> Dict[str, dict]:
+    """Где пост лежит в Telegram: ``{язык: {chat, message_id, extra}}``."""
+    out: Dict[str, dict] = {}
+    for lang, info in ((rec or {}).get("tg") or {}).items():
+        if not isinstance(info, dict):
+            continue
+        try:
+            mid = int(info.get("message_id") or 0)
+        except (TypeError, ValueError):
+            mid = 0
+        if mid > 0:
+            out[str(lang)] = {"chat": str(info.get("chat") or ""), "message_id": mid,
+                              "extra": list(info.get("extra") or [])}
+    return out
+
+
+def archive_row(rec: dict) -> dict:
+    """Строка архива для админки: когда вышел, что внутри, где в Telegram."""
+    rec = rec or {}
+    rid = str(rec.get("id") or "")
+    day = str(rec.get("day") or "")
+    sent = sent_ids(rec)
+    return {
+        "id": rid,
+        "day": day,
+        "ts": float(rec.get("ts") or 0),
+        "window_h": int(rec.get("window_h") or rec.get("interval_h") or 0),
+        "n": int(rec.get("n") or 0),
+        "total_usd": float(rec.get("total_usd") or 0),
+        "liq_count": int(rec.get("liq_count") or 0),
+        "langs": sorted((rec.get("texts") or {}).keys()),
+        "tg": sorted(sent),
+        "tg_ready": bool(sent),
+        "cover": bool(((rec.get("photo") or {}).get("path"))),
+        "url": f"/hourly?post={rid}" if rid else "/hourly",
+    }
+
+
+def delete_fn():
+    """Функция удаления сообщения у бота (None — бота нет)."""
+    bot = ctx.bot
+    return getattr(bot, "delete_message", None) if bot is not None else None
+
+
+def _bot_off() -> JSONResponse:
+    return JSONResponse(
+        {"ok": False, "error": "bot_off",
+         "message": "Telegram-бот выключен — посты в канале не удалены. "
+                    "Включите бота или снимите галочку «и из Telegram»."},
+        status_code=409)
 
 
 def _photo_response(path: str) -> Any:
@@ -206,6 +272,86 @@ def register_hourly_routes(app) -> None:
             return JSONResponse({"ok": False, "error": "empty"}, status_code=409)
         ctx.last = {"at": time.time(), "id": rec.get("id"), "by": user.get("id")}
         return {"ok": True, "item": public_post(rec, "ru"), "stats": ctx.store.stats()}
+
+    # --- архив для админки: старые сводки можно снять ----------------------
+    @router.get("/api/admin/hourly/archive")
+    async def api_admin_archive(request: Request, limit: int = 60):
+        """Архив сводок: дни с количеством постов и сами посты для удаления."""
+        user, err = _admin(request)
+        if err:
+            return err
+        try:
+            lim = max(1, min(500, int(limit)))
+        except (TypeError, ValueError):
+            lim = 60
+        items = ctx.store.list()
+        return {"ok": True, "items": [archive_row(r) for r in items[:lim]],
+                "days": ctx.store.days(), "count": len(items),
+                "keep": ctx.store.keep, "stats": ctx.store.stats(),
+                "store_error": ctx.store.error, "bot": bot_running(),
+                "tz_hours": round(tz_offset() / 3600.0, 2)}
+
+    @router.post("/api/admin/hourly/{pid}/delete")
+    async def api_admin_delete_post(request: Request, pid: str,
+                                    body: Optional[dict] = Body(default=None)):
+        """Удалить одну сводку: из архива сайта и, если просили, из Telegram."""
+        user, err = _admin(request)
+        if err:
+            return err
+        body = body or {}
+        rec = ctx.store.get(pid)
+        if rec is None:
+            return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
+        want_tg = bool(body.get("tg"))
+        sent = sent_ids(rec)
+        result: Dict[str, Any] = {}
+        if want_tg and sent:
+            if not bot_running():
+                return _bot_off()
+            from channel_digest import drop_channel_posts
+            result = await drop_channel_posts(sent, delete_fn())
+        ctx.store.remove(str(rec.get("id") or pid))
+        log.info("сводка %s удалена админом %s (tg=%s)", pid, user.get("id"), want_tg)
+        return {"ok": True, "removed": archive_row(rec), "tg": result,
+                "count": len(ctx.store.list())}
+
+    @router.post("/api/admin/hourly/day/{day}/delete")
+    async def api_admin_delete_day(request: Request, day: str,
+                                   body: Optional[dict] = Body(default=None)):
+        """Удалить все сводки дня: так чистят старый архив пачкой."""
+        user, err = _admin(request)
+        if err:
+            return err
+        body = body or {}
+        posts = ctx.store.by_day(day)
+        if not posts:
+            return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
+        want_tg = bool(body.get("tg"))
+        # За день в канал ушло несколько сводок: собираем id всех, иначе в
+        # канале останутся прошлые посты дня, а на сайте их уже нет.
+        sent: Dict[str, dict] = {}
+        for rec in posts:
+            for lang, info in sent_ids(rec).items():
+                row = sent.get(lang)
+                ids = [int(info["message_id"])] + [int(x) for x in info.get("extra") or []]
+                if row is None:
+                    sent[lang] = {"chat": info.get("chat"), "message_id": ids[0],
+                                  "extra": ids[1:]}
+                else:
+                    if not row.get("chat"):
+                        row["chat"] = info.get("chat")
+                    row["extra"] = list(row.get("extra") or []) + ids
+        result: Dict[str, Any] = {}
+        if want_tg and sent:
+            if not bot_running():
+                return _bot_off()
+            from channel_digest import drop_channel_posts
+            result = await drop_channel_posts(sent, delete_fn())
+        gone = ctx.store.remove_day(day)
+        log.info("сводки за %s удалены админом %s: %d постов (tg=%s)",
+                 day, user.get("id"), len(gone), want_tg)
+        return {"ok": True, "day": day, "deleted": len(gone), "tg": result,
+                "count": len(ctx.store.list())}
 
     app.include_router(router)
 

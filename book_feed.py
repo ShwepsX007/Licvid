@@ -294,6 +294,28 @@ def format_wall_html(wall, lang="ru"):
     return f"{head}\n{body}"
 
 
+def chat_text(wall) -> str:
+    """Короткая строка про стену для чата на сайте (без разметки Telegram)."""
+    side = "Bid" if wall.get("side") == "bid" else "Ask"
+    money = _fmt_usd(wall.get("usdt") or wall.get("peak") or 0)
+    exchs = ", ".join(wall.get("exchs") or []) or "—"
+    return (f"📖 Стена на {wall.get('sym')} — {side} {money}\n"
+            f"Цены {wall.get('lo'):g}–{wall.get('hi'):g}\n"
+            f"Видна на: {exchs}")
+
+
+def chat_meta(wall) -> dict:
+    """Части стены — для перевода в кабинете (см. alerts.chat_meta)."""
+    return {
+        "sym": str(wall.get("sym") or ""),
+        "side": "bid" if wall.get("side") == "bid" else "ask",
+        "lo": float(wall.get("lo") or 0),
+        "hi": float(wall.get("hi") or 0),
+        "usdt": float(wall.get("usdt") or wall.get("peak") or 0),
+        "exchs": [str(x) for x in (wall.get("exchs") or [])][:8],
+    }
+
+
 def _fmt_usd(v):
     v = abs(float(v or 0))
     if v >= 1e9:

@@ -57,6 +57,7 @@ from fastapi.staticfiles import StaticFiles
 
 from market_feed import GATE_REST, MarketFeed, TF_MINUTES, base_of, canon, _get_json
 from timeframes import parse_tf
+from book_feed import (chat_text as book_chat_text, chat_meta as book_chat_meta)
 from book_feed import (BookFeed, format_wall_html, normalize_book_cfg,
                        register_book_routes)
 from oi_feed import map_candles_to_oi
@@ -66,6 +67,7 @@ from flow_feed import FlowFeed
 from history import HistoryStore, MONTH_HOURS
 from pump_scan import PumpScanner, filter_new as pump_filter_new
 from pump_scan import format_signal_html as pump_signal_html
+from pump_scan import chat_text as pump_chat_text, chat_meta as pump_chat_meta
 from refs import gate_url
 from mailer import build_mailer
 import ai_text
@@ -92,6 +94,8 @@ import private_chat as private_chat_mod
 from private_chat import register_private_chat_routes
 import support_chat as support_chat_mod
 from support_chat import register_support_chat_routes
+import service_chat as service_chat_mod
+from service_chat import register_service_chat_routes
 import content_comments as content_comments_mod
 from content_comments import register_comment_routes as register_content_comment_routes
 
@@ -1139,17 +1143,24 @@ async def book_alert_loop():
                                 for sym, store in book.walls.items()}
                         seen[uid] = last
                         continue
-                    if not cfg["notify"]:
-                        continue
-                    tg_id = int(sub.get("tg_id") or 0)
-                    if not tg_id or not tg_bot.running:
-                        continue
+                    # Telegram — отдельный тумблер («TELEGRAM ВКЛ/ВЫКЛ»), а лента
+                    # кабинета живёт по подписке: раньше сигнал уходил только
+                    # тем, у кого привязан бот, и во вкладке «Сервисы» стены не
+                    # появлялись вовсе
+                    tg_id = int(sub.get("tg_id") or 0) if cfg["notify"] else 0
+                    if not tg_bot.running:
+                        tg_id = 0
                     lang = str(sub.get("language") or "ru")[:2]
                     for w in book.new_open_walls(cfg["symbols"], cfg["min_usd"],
                                                  cfg["side"], now - 600):
                         if w["id"] <= last.get(w["sym"], 0):
                             continue
                         last[w["sym"]] = w["id"]
+                        await push_service_message(
+                            uid, "book", book_chat_text(w),
+                            {"symbol": w["sym"], "parts": book_chat_meta(w)})
+                        if not tg_id:
+                            continue
                         try:
                             await tg_bot.send(
                                 tg_id, format_wall_html(w, lang),
@@ -1479,6 +1490,12 @@ async def pump_notify():
         fresh = by_user.get(int(w["user_id"]))
         if not fresh:
             continue
+        # лента кабинета: те же сигналы, что уходят в Telegram
+        for hit in fresh[:3]:
+            await push_service_message(
+                int(w["user_id"]), "pump", pump_chat_text(hit),
+                {"symbol": str(hit.get("symbol") or ""),
+                 "parts": pump_chat_meta(hit)})
         tg_id = int(w.get("tg_id") or 0)
         if not tg_id or not tg_bot.running:
             continue
@@ -1535,6 +1552,7 @@ def alerts_due(cfg: dict, market: dict, last_fire, now: float) -> List[dict]:
 
 async def alert_loop():
     """Раз в несколько секунд проверяет пороги и шлёт в Telegram."""
+    import alerts
     from alerts import format_alert_html, normalize_config
     try:
         await asyncio.sleep(20)
@@ -1566,6 +1584,12 @@ async def alert_loop():
 
                 for hit in alerts_due(cfg, market, last_fire, now):
                     account_store.add_alert_event(uid, hit)
+                    # тот же сигнал — в личную ленту кабинета (вкладка «Сервисы»)
+                    await push_service_message(
+                        uid, "alert", alerts.chat_text(hit),
+                        {"symbol": str(hit.get("symbol") or ""),
+                         "metric": str(hit.get("metric") or ""),
+                         "parts": alerts.chat_meta(hit)})
                     tg_id = int(sub.get("tg_id") or 0)
                     if tg_id and tg_bot.running:
                         await tg_bot.send(
@@ -1636,6 +1660,7 @@ async def corr_alert_loop():
     «коэффициент 0.5 и выше»). Повтор по той же паре молчит четверть окна,
     иначе одна и та же связь уходила бы сообщением каждые восемь секунд.
     """
+    import correlations
     from correlations import format_alert_html, normalize_alerts
     try:
         await asyncio.sleep(30)
@@ -1663,6 +1688,12 @@ async def corr_alert_loop():
                     anchor_metric = f"corr_{metric}"
                     account_store.add_alert_event(uid, dict(hit, metric=anchor_metric))
                     CORR_SIGNALS.append(dict(hit, ts=now, user_id=uid))
+                    # и в ленту кабинета: в Telegram письмо, на сайте — строка
+                    await push_service_message(
+                        uid, "corr", correlations.chat_text(hit),
+                        {"symbol": str(hit.get("symbol") or ""),
+                         "metric": metric,
+                         "parts": correlations.chat_meta(hit)})
                     tg_id = int(sub.get("tg_id") or 0)
                     if tg_id and tg_bot.running:
                         await tg_bot.send(
@@ -2690,6 +2721,30 @@ support_chat_mod.ctx.bot = tg_bot
 support_chat_mod.ctx.hub = hub
 support_chat_mod.ctx.public_url = PUBLIC_URL
 register_support_chat_routes(app, hub=hub)
+
+# 🔔 Сервисы: личная лента сигналов в чате кабинета (алерты, корреляции,
+# сторож монет, стены стакана). Модуль тоже был написан, но не подключён:
+# /api/chat/services отвечал 404, поэтому вкладка «Сервисы» была пустой даже
+# тогда, когда сигнал приходил в Telegram.
+service_chat_mod.ctx.store = account_store
+service_chat_mod.ctx.hub = hub
+register_service_chat_routes(app, hub=hub)
+
+
+async def push_service_message(user_id: int, kind: str, text: str,
+                               meta: Optional[dict] = None) -> None:
+    """Сигнал сервиса — в личную вкладку «Сервисы» чата на сайте.
+
+    Копия того же сигнала, что уходит в Telegram: в боте он одним письмом,
+    здесь — строкой в ленте (30 дней). Ошибка доставки не должна валить
+    рассылку — сигнал уже отправлен в Telegram.
+    """
+    try:
+        await service_chat_mod.broadcast_service_user(int(user_id), kind, text,
+                                                      meta or {})
+    except Exception as e:  # noqa: BLE001
+        log.debug("service chat %s/%s: %s", kind, user_id, e)
+
 
 # 💬 Комментарии к дайджесту и сводке по часам: читают все, пишут зарегистрированные
 content_comments_mod.ctx.store = account_store

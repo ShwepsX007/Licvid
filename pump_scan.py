@@ -287,6 +287,40 @@ def price_str(p) -> str:
     return f"${v:,.{digits}f}"
 
 
+def chat_text(hit: dict) -> str:
+    """Короткая строка сигнала сторожа для чата на сайте (без разметки)."""
+    coin = str(hit.get("symbol") or "").replace("_USDT", "")
+    is_pump = str(hit.get("kind")) == "pump"
+    pct = _num(hit.get("change_pct"))
+    arrow = "🚀" if is_pump else "🩸"
+    span = int(hit.get("span_min") or 0)
+    candles = int(hit.get("candles") or 1)
+    period = hit.get("period") or DEFAULT_PERIOD
+    lines = [
+        f"{arrow} {'Памп' if is_pump else 'Дамп'} · {coin}",
+        f"{pct:+.2f}% за {span} мин · {candles} × {period}",
+        f"цена {price_str(hit.get('price'))} {'→' if is_pump else '←'} "
+        f"{price_str(hit.get('price_from'))}",
+        f"оборот 24ч {money(hit.get('volume24h'))}",
+    ]
+    return "\n".join(lines)
+
+
+def chat_meta(hit: dict) -> dict:
+    """Части сигнала сторожа — для перевода в кабинете (см. alerts.chat_meta)."""
+    return {
+        "direction": "pump" if str(hit.get("kind")) == "pump" else "dump",
+        "symbol": str(hit.get("symbol") or ""),
+        "change_pct": _num(hit.get("change_pct")),
+        "span_min": int(hit.get("span_min") or 0),
+        "candles": int(hit.get("candles") or 1),
+        "period": str(hit.get("period") or DEFAULT_PERIOD),
+        "price": _num(hit.get("price")),
+        "price_from": _num(hit.get("price_from")),
+        "volume24h": _num(hit.get("volume24h")),
+    }
+
+
 def format_signal_html(hit: dict, lang: str = "ru",
                        site_url: str = "https://liqscope.online") -> str:
     """Сигнал пампа или дампа.

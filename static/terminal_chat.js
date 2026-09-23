@@ -49,6 +49,181 @@
   }
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
+  /* =====================================================================
+   * Языки сайта
+   *
+   * Все подписи чата живут в словарях сайта ключами ``chat.*`` (пять языков:
+   * ru, en, zh, hi, es) — чат едет за переключателем в шапке, как кабинет и
+   * терминал. Второй аргумент ``T()`` — русский текст: он нужен, если движок
+   * словарей не подключён, и заодно виден в коде рядом с ключом.
+   * ===================================================================== */
+  function T(key, ru, vars) {
+    let s = "";
+    try {
+      const I = window.LiqScopeI18n;
+      if (I && I.t) { const v = I.t(key, vars); if (v && v !== key) s = v; }
+    } catch (e) { /* без словаря — русский */ }
+    if (!s && ru) {
+      s = ru;
+      if (vars) for (const k in vars) {
+        if (Object.prototype.hasOwnProperty.call(vars, k)) s = s.split("{" + k + "}").join(String(vars[k]));
+      }
+    }
+    return s || key;
+  }
+
+  /** Дата и время в поясе языка сайта — как в кабинете. */
+  function num(v, digits) {
+    const n = Number(v) || 0;
+    try {
+      const I = window.LiqScopeI18n;
+      if (I && I.number) return I.number(digits == null ? n : +n.toFixed(digits));
+    } catch (e) { /* ignore */ }
+    return digits == null ? String(Math.round(n)) : n.toFixed(digits);
+  }
+
+  /** Деньги как в сигналах: $1.20M — одинаково во всех языках. */
+  function money(v) {
+    const n = Math.abs(Number(v) || 0);
+    const sign = Number(v) < 0 ? "−" : "";
+    if (n >= 1e9) return sign + "$" + (n / 1e9).toFixed(2) + "B";
+    if (n >= 1e6) return sign + "$" + (n / 1e6).toFixed(2) + "M";
+    if (n >= 1e3) return sign + "$" + (n / 1e3).toFixed(1) + "K";
+    return sign + "$" + n.toFixed(0);
+  }
+  function pct(v) {
+    const n = Number(v) || 0;
+    return (n > 0 ? "+" : n < 0 ? "−" : "") + Math.abs(n).toFixed(2) + "%";
+  }
+  function coin(sym) {
+    const s = String(sym || "");
+    if (!s || s.toUpperCase() === "ALL") return T("chat.coin.all", "все монеты");
+    return (s.split("_")[0] || s).toUpperCase();
+  }
+  /** Окно сигнала: 5м / 2ч / 1д — единицы берём из словаря. */
+  function winLabel(minutes) {
+    const m = Math.max(0, parseInt(minutes, 10) || 0);
+    if (m >= 1440 && m % 1440 === 0) return T("chat.win.d", "{n}д", { n: m / 1440 });
+    if (m >= 60 && m % 60 === 0) return T("chat.win.h", "{n}ч", { n: m / 60 });
+    return T("chat.win.m", "{n}м", { n: m });
+  }
+  /** Окно корреляций приходит ключом («4h», «24h») — переводим в минуты. */
+  function winLabelKey(key) {
+    const m = /^(\d+)([mhd])$/.exec(String(key || ""));
+    if (!m) return String(key || "");
+    const mult = m[2] === "m" ? 1 : m[2] === "h" ? 60 : 1440;
+    return winLabel(parseInt(m[1], 10) * mult);
+  }
+  function priceStr(p) {
+    const v = Number(p) || 0;
+    if (v <= 0) return "—";
+    const digits = v < 0.01 ? 6 : v < 1 ? 4 : 2;
+    return "$" + num(v, digits);
+  }
+  function kindLabel(kind) {
+    const k = String(kind || "alert");
+    const known = {
+      book: ["chat.kind.book", "📖 СТАКАН"],
+      pump: ["chat.kind.pump", "💥 ПАМП"],
+      alert: ["chat.kind.alert", "🔔 АЛЕРТ"],
+      corr: ["chat.kind.corr", "🔗 КОРР"],
+    };
+    const one = known[k];
+    return one ? T(one[0], one[1]) : esc(k.toUpperCase());
+  }
+
+  /** Текст сигнала сервиса на языке посетителя.
+   *
+   * В базе сообщение лежит одним русским текстом, а рядом — ``meta.parts``
+   * с числами и ключами (см. ``chat_meta`` в alerts/correlations/pump_scan/
+   * book_feed). Кабинет собирает строку из частей сам, поэтому сигнал в
+   * Telegram, в ленте кабинета и на английском сайте читается одинаково.
+   */
+  function svcText(m) {
+    const meta = (m && m.meta) || {};
+    const parts = meta.parts;
+    if (!parts) return esc((m && m.text) || "");
+    const k = String((m && m.kind) || "alert");
+    try {
+      if (k === "alert") return svcAlert(parts);
+      if (k === "corr") return svcCorr(parts);
+      if (k === "pump") return svcPump(parts);
+      if (k === "book") return svcBook(parts);
+    } catch (e) { /* части битые — показываем текст из базы */ }
+    return esc((m && m.text) || "");
+  }
+  function svcAlert(p) {
+    const metric = T("chat.metric." + String(p.metric || "liq"),
+                     String(p.metric || ""));
+    const win = parseInt(p.window_min, 10) || 5;
+    const span = parseInt(p.span_min, 10) || win;
+    const tail = span < win
+      ? T("chat.sig.period_span", "за {s} · окно {w}", { s: winLabel(span), w: winLabel(win) })
+      : T("chat.sig.period", "за {w}", { w: winLabel(win) });
+    const lines = [
+      T("chat.sig.alert", "🔔 {metric}: {symbol} {value} {period}",
+        { metric, symbol: coin(p.symbol), value: money(p.value), period: tail }),
+      T("chat.sig.threshold", "порог {t}", { t: money(p.threshold) }),
+    ];
+    if (String(p.metric) === "liq") {
+      lines.push(T("chat.sig.hits", "{n} ударов · 🔴 {l}  🟢 {sh}",
+        { n: num(p.count), l: money(p.longs), sh: money(p.shorts) }));
+    } else if (String(p.metric) === "cvd") {
+      lines.push(Number(p.value) >= 0 ? T("chat.sig.buys", "покупки") : T("chat.sig.sells", "продажи"));
+    } else if (String(p.metric) === "oi") {
+      const arrow = Number(p.value) >= 0 ? "↑" : "↓";
+      const extra = p.pct ? " (" + pct(p.pct) + ")" : "";
+      lines.push(T("chat.sig.oi", "изменение OI {arrow}{pct}", { arrow, pct: extra }));
+    }
+    const peers = (p.peers || []).map((x) => coin(x.symbol) + " " + money(x.value)).join(", ");
+    if (peers) lines.push(T("chat.sig.peers", "ещё в волне: {list}", { list: peers }));
+    return esc(lines.join("\n"));
+  }
+  function svcCorr(p) {
+    const metric = T("chat.metric." + String(p.metric || ""), String(p.metric || ""));
+    const opp = String(p.kind) === "opp";
+    const win = winLabelKey(p.window);
+    const lines = [
+      T("chat.sig.corr_head", "🔗 корреляции · {metric}", { metric }),
+      T("chat.sig.corr_pair", "{a} ↔ {b}  r = {r}", { a: coin(p.a), b: coin(p.b), r: (Number(p.r) || 0).toFixed(2) }),
+      opp ? T("chat.sig.corr_opp", "в противофазе · порог {t} · окно {w}",
+              { t: (Number(p.threshold) || 0).toFixed(2), w: win })
+          : T("chat.sig.corr_same", "в одну сторону · порог {t} · окно {w}",
+              { t: (Number(p.threshold) || 0).toFixed(2), w: win }),
+    ];
+    const peers = (p.peers || []).map((x) => coin(x.a) + " ↔ " + coin(x.b) + " " + (Number(x.r) || 0).toFixed(2)).join(", ");
+    if (peers) {
+      lines.push(opp ? T("chat.sig.corr_peers_opp", "ещё в противофазе: {list}", { list: peers })
+                     : T("chat.sig.corr_peers_same", "ещё в одну сторону: {list}", { list: peers }));
+    }
+    return esc(lines.join("\n"));
+  }
+  function svcPump(p) {
+    const up = String(p.direction) === "pump";
+    const lines = [
+      up ? T("chat.sig.pump_head", "🚀 Памп · {coin}", { coin: coin(p.symbol) })
+         : T("chat.sig.dump_head", "🩸 Дамп · {coin}", { coin: coin(p.symbol) }),
+      T("chat.sig.pump_move", "{pct} за {span} · {candles} × {period}",
+        { pct: pct(p.change_pct), span: winLabel(p.span_min), candles: num(p.candles), period: p.period }),
+      up ? T("chat.sig.pump_price_up", "цена {now} → {from}", { now: priceStr(p.price), from: priceStr(p.price_from) })
+         : T("chat.sig.pump_price_down", "цена {now} ← {from}", { now: priceStr(p.price), from: priceStr(p.price_from) }),
+      T("chat.sig.pump_volume", "оборот 24ч {v}", { v: money(p.volume24h) }),
+    ];
+    return esc(lines.join("\n"));
+  }
+  function svcBook(p) {
+    const side = String(p.side) === "bid" ? "Bid" : "Ask";
+    const lines = [
+      T("chat.sig.book_head", "📖 Стена на {sym} — {side} {money}",
+        { sym: p.sym, side, money: money(p.usdt) }),
+      T("chat.sig.book_prices", "Цены {lo}–{hi}", { lo: num(p.lo), hi: num(p.hi) }),
+    ];
+    if ((p.exchs || []).length) {
+      lines.push(T("chat.sig.book_exchs", "Видна на: {list}", { list: p.exchs.join(", ") }));
+    }
+    return esc(lines.join("\n"));
+  }
+
   // «Перемотка к последним записям». Контейнер, который только что открыли или
   // впервые наполнили, всегда прыгает вниз: раньше при входе в чат человек
   // листал всю историю руками. Если он сам ушёл вверх читать — не дёргаем.
@@ -146,9 +321,11 @@
   function renderMsgs(list, container, me, opts) {
     if (!container) return;
     const o = opts || {};
+    container.__tchatLast = { render: "msgs", list, me, opts: o };   // перерисовка при смене языка
     if (!list.length && !container.children.length) {
       container.innerHTML = '<div class="tchat-empty">' + (o.emptyHtml ||
-        'Пока тихо — напишите первым! 💬<br><small>История хранится 3 дня</small>') + '</div>';
+        T("chat.empty.public", "Пока тихо — напишите первым! 💬") + '<br><small>' +
+        T("chat.empty.public_note", "История хранится 3 дня") + '</small>') + '</div>';
       return;
     }
     const empty = container.querySelector(".tchat-empty");
@@ -164,8 +341,8 @@
       const text = esc(m.text);
       const canDel = me && me.is_admin && !o.bubbles;
       const nameHtml = (o.bubbles && mine) ? "" :
-        `<button class="tchat-name tchat-namelink" type="button" data-uid="${m.user_id || 0}" data-uname="${esc(m.name || "")}">${name}${m.admin ? " 👑" : ""}</button>`;
-      div.innerHTML = `<div class="tchat-meta">${nameHtml}<span class="tchat-time">${time}</span>${canDel ? `<button data-del="${m.id}" title="Удалить" style="margin-left:auto;background:transparent;border:0;color:#6b7da0;cursor:pointer">✕</button>` : ""}</div><div class="tchat-text">${text}</div>`;
+        `<button class="tchat-name tchat-namelink" type="button" data-i18n-skip data-uid="${m.user_id || 0}" data-uname="${esc(m.name || "")}">${name}${m.admin ? " 👑" : ""}</button>`;
+      div.innerHTML = `<div class="tchat-meta">${nameHtml}<span class="tchat-time">${time}</span>${canDel ? `<button data-del="${m.id}" title="${esc(T("chat.btn.delete", "Удалить"))}" style="margin-left:auto;background:transparent;border:0;color:#6b7da0;cursor:pointer">✕</button>` : ""}</div><div class="tchat-text" data-i18n-skip>${text}</div>`;
       container.appendChild(div);
     }
     stickToBottom(container);
@@ -173,8 +350,13 @@
 
   function renderSvcMsgs(list, container) {
     if (!container) return;
+    container.__tchatLast = { render: "svc", list };
     if (!list.length && !container.children.length) {
-      container.innerHTML = '<div class="tchat-empty">Пока нет личных сигналов.<br><small>Сюда приходят только ваши сигналы по настройкам кабинета: стакан, пампы, алерты, корреляции. 30 дней истории.</small></div>';
+      container.innerHTML = '<div class="tchat-empty">' +
+        T("chat.empty.services", "Пока нет личных сигналов.") + '<br><small>' +
+        T("chat.empty.services_note",
+          "Сюда приходят только ваши сигналы по настройкам кабинета: стакан, пампы, алерты, корреляции. 30 дней истории.") +
+        '</small></div>';
       return;
     }
     const empty = container.querySelector(".tchat-empty");
@@ -186,11 +368,11 @@
       div.className = "tchat-msg svc " + esc(kind);
       div.dataset.mid = m.id;
       const time = fmtTime(m.ts);
-      const text = esc(m.text);
+      const text = svcText(m);                       // сигнал на языке посетителя
       const meta = m.meta || {};
-      const sym = meta.symbol ? esc(meta.symbol) : "";
-      const kindLabel = { book: "📖 СТАКАН", pump: "💥 ПАМП", alert: "🔔 АЛЕРТ", corr: "🔗 КОРР" }[kind] || esc(kind.toUpperCase());
-      div.innerHTML = `<div class="tchat-meta"><span class="tchat-svc-kind">${kindLabel}${sym ? " · " + sym : ""}</span><span class="tchat-time">${time}</span></div><div class="tchat-text">${text}</div>`;
+      const sym = meta.symbol ? esc(coin(meta.symbol)) : "";
+      const label = kindLabel(kind);
+      div.innerHTML = `<div class="tchat-meta"><span class="tchat-svc-kind">${label}${sym ? " · " + sym : ""}</span><span class="tchat-time">${time}</span></div><div class="tchat-text" data-i18n-skip>${text}</div>`;
       container.appendChild(div);
     }
     stickToBottom(container);
@@ -200,11 +382,15 @@
     if (!container) return;
     if (!list.length && !container.children.length) {
       const isGuest = !me;
+      container.__tchatLast = { render: "sup", list, me, opts: {} };
       container.innerHTML = '<div class="tchat-empty">' + (isGuest ?
-        'Напишите нам — отвечаем быстро 🆘<br><small>Вы как гость, введите временный ник ниже. Админ ответит в этот же тред. 30 дней истории.</small>' :
-        'Напишите в поддержку — отвечаем быстро 🆘<br><small>Ваш личный чат с поддержкой, 30 дней истории</small>') + '</div>';
+        T("chat.empty.support_guest", "Напишите нам — отвечаем быстро 🆘") + '<br><small>' +
+        T("chat.empty.support_guest_note", "Вы как гость, введите временный ник ниже. Админ ответит в этот же тред. 30 дней истории.") + '</small>' :
+        T("chat.empty.support_user", "Напишите в поддержку — отвечаем быстро 🆘") + '<br><small>' +
+        T("chat.empty.support_user_note", "Ваш личный чат с поддержкой, 30 дней истории") + '</small>') + '</div>';
       return;
     }
+    container.__tchatLast = { render: "msgs", list, me, opts: {} };
     const empty = container.querySelector(".tchat-empty");
     if (empty && list.length) empty.remove();
     for (const m of list) {
@@ -214,13 +400,14 @@
       const isAdminMsg = !!m.admin;
       div.className = "tchat-msg" + (isAdminMsg ? " admin" : "") + (mine ? " mine" : "") + (m.guest ? " guest" : "");
       div.dataset.mid = m.id;
-      const name = esc(m.name || (m.guest ? "Гость" : "anon"));
+      const name = esc(m.name || (m.guest ? T("chat.label.guest_name", "Гость") : "anon"));
       const time = fmtTime(m.ts);
       const text = esc(m.text);
       const canDel = me && me.is_admin;
-      const adminBadge = m.admin ? " 👑 админ" : (m.guest ? " · гость" : "");
-      const nameHtml = `<span class="tchat-name">${name}${adminBadge}</span>`;
-      div.innerHTML = `<div class="tchat-meta">${nameHtml}<span class="tchat-time">${time}</span>${canDel ? `<button data-del-sup="${m.id}" title="Удалить" style="margin-left:auto;background:transparent;border:0;color:#6b7da0;cursor:pointer">✕</button>` : ""}</div><div class="tchat-text">${text}</div>`;
+      const adminBadge = m.admin ? " 👑 " + T("chat.label.admin", "админ")
+        : (m.guest ? " · " + T("chat.label.guest", "гость") : "");
+      const nameHtml = `<span class="tchat-name" data-i18n-skip>${name}${adminBadge}</span>`;
+      div.innerHTML = `<div class="tchat-meta">${nameHtml}<span class="tchat-time">${time}</span>${canDel ? `<button data-del-sup="${m.id}" title="${esc(T("chat.btn.delete", "Удалить"))}" style="margin-left:auto;background:transparent;border:0;color:#6b7da0;cursor:pointer">✕</button>` : ""}</div><div class="tchat-text" data-i18n-skip>${text}</div>`;
       container.appendChild(div);
     }
     stickToBottom(container);
@@ -273,8 +460,11 @@
         const nav = document.querySelector(".site-nav, .header-controls, .top-nav, header");
         if (!nav) return;
         const btn = document.createElement("button");
-        btn.id = "tchat-header-btn"; btn.className = "tchat-header-btn"; btn.type = "button"; btn.title = "Чат";
-        btn.innerHTML = '💬 Чат <span id="tchat-online" class="tchat-online" title="онлайн в чате">0</span> <span id="tchat-unread-hdr" class="tchat-unread hidden">0</span>';
+        btn.id = "tchat-header-btn"; btn.className = "tchat-header-btn"; btn.type = "button";
+        btn.title = T("chat.toggle", "💬 Чат");
+        btn.innerHTML = esc(T("chat.toggle", "💬 Чат")) +
+          ' <span id="tchat-online" class="tchat-online" title="' + esc(T("chat.online_title", "онлайн в чате")) +
+          '">0</span> <span id="tchat-unread-hdr" class="tchat-unread hidden">0</span>';
         nav.appendChild(btn);
       } catch {}
     })();
@@ -345,6 +535,35 @@
     function dmMsgsEl() { return $("#tchat-dm-msgs"); }
     function dmHeadEl() { return $("#tchat-dm-head"); }
 
+    /** Перерисовать ленту на новом языке: рендеры помнят, что показывают
+     *  (``__tchatLast``), поэтому смена языка не требует новых запросов.
+     *  Живые подсказки (что висит под полем ввода) обновляет ``updateAuthUI``;
+     *  короткие сообщения вроде «Отправка…» остаются как были — их сменяет
+     *  следующее же действие. */
+    function relabelLists() {
+      const boxes = [listEl, svcListEl, supListEl, dmMsgsEl()];
+      for (const el of boxes) {
+        const last = el && el.__tchatLast;
+        if (!last) continue;
+        jumpToLast(el);                       // после перерисовки — снова к последним
+        el.innerHTML = "";
+        if (last.render === "svc") renderSvcMsgs(last.list, el);
+        else if (last.render === "sup") renderSupMsgs(last.list, el, last.me);
+        else renderMsgs(last.list, el, last.me, last.opts);
+      }
+    }
+    function relabelAll() {
+      relabelLists();
+      updateMuteBtn(); updateAuthUI(); setBadge();
+      renderSupThreads();
+      renderRooms();
+    }
+    try {
+      if (window.LiqScopeI18n && window.LiqScopeI18n.onChange) {
+        window.LiqScopeI18n.onChange(relabelAll);
+      }
+    } catch (e) { /* без движка словарей чат остаётся на русском */ }
+
     function setBadge() {
       const total = publicUnread + dmCounters.unread + (dmCounters.invites || 0) + svcUnread + supUnread;
       const notify = total > 0;
@@ -379,7 +598,9 @@
       const n = Math.max(0, Number(count) || 0);
       onlineEl.textContent = String(n);
       onlineEl.classList.toggle("on", n > 0);
-      onlineEl.title = n > 0 ? n + " онлайн в чате" : "никто не онлайн";
+      onlineEl.title = n > 0
+        ? T("chat.online.some", "{n} онлайн в чате", { n: num(n) })
+        : T("chat.online.none", "никто не онлайн");
     }
     function updateMuteBtn() {
       if (!muteBtn) return;
@@ -387,7 +608,8 @@
       const muted = !!muteMap[tab];
       muteBtn.textContent = muted ? "🔇" : "🔊";
       muteBtn.classList.toggle("muted", muted);
-      muteBtn.title = muted ? "Звук выкл — нажать чтобы включить" : "Звук вкл — нажать чтобы выключить";
+      muteBtn.title = muted ? T("chat.mute.off_title", "Звук выкл — нажать чтобы включить")
+                            : T("chat.mute.on_title", "Звук вкл — нажать чтобы выключить");
     }
 
     function updateTabsForAuth() {
@@ -430,7 +652,7 @@
       if (v === "room") jumpToLast(dmMsgsEl());
       if (v === "room" && arg) {
         roomId = arg; roomInfo = null; roomLastId = 0;
-        if (dmMsgsEl()) dmMsgsEl().innerHTML = '<div class="tchat-empty">загружаем…</div>';
+        if (dmMsgsEl()) dmMsgsEl().innerHTML = '<div class="tchat-empty">' + T("chat.empty.loading", "загружаем…") + '</div>';
         paintRoomHead(); refreshRoom(true);
       }
       if (v === "rooms") refreshRooms();
@@ -575,9 +797,9 @@
       closeMenu();
       menuEl = document.createElement("div"); menuEl.className = "tchat-usermenu";
       const self = me && me.id === uid;
-      menuEl.innerHTML = `<div class="tchat-usermenu-name">${esc(uname || "user")}</div>` +
-        `<button type="button" data-act="reply">↩ Ответить</button>` +
-        (self ? "" : `<button type="button" data-act="dm">✉ Написать лично</button>`);
+      menuEl.innerHTML = `<div class="tchat-usermenu-name" data-i18n-skip>${esc(uname || "user")}</div>` +
+        `<button type="button" data-act="reply">${esc(T("chat.btn.reply", "↩ Ответить"))}</button>` +
+        (self ? "" : `<button type="button" data-act="dm">${esc(T("chat.btn.dm", "✉ Написать лично"))}</button>`);
       document.body.appendChild(menuEl);
       const vw = window.innerWidth; const rect = menuEl.getBoundingClientRect();
       menuEl.style.left = Math.min(x, vw - (rect.width || 180) - 10) + "px";
@@ -611,7 +833,7 @@
     }
 
     async function openDmWith(peerId, peerName) {
-      if (!me) { setHint("Войдите чтобы писать личные", true); return; }
+      if (!me) { setHint(T("chat.hint.dm_need_login", "Войдите чтобы писать личные"), true); return; }
       try {
         const j = await jget(DM_API + "/invite", {
           method: "POST", credentials: "same-origin",
@@ -619,10 +841,13 @@
           body: JSON.stringify({ peer_id: peerId }),
         });
         if (j && j.room) {
-          setHint("✉ Личный диалог с " + (peerName || j.room.peer.name) + (j.room.status === "pending" ? " — приглашение отправлено" : ""), false);
+          setHint(T("chat.hint.dm_opened", "✉ Личный диалог с {name}", { name: peerName || j.room.peer.name }) +
+            (j.room.status === "pending" ? T("chat.hint.dm_invited", " — приглашение отправлено") : ""), false);
           setView("room", j.room.id);
         }
-      } catch (e) { setHint(e.message === "error" ? "Не удалось открыть диалог" : (e.message || "Ошибка"), true); }
+      } catch (e) { setHint(e.message === "error"
+        ? T("chat.hint.dm_open_fail", "Не удалось открыть диалог")
+        : (e.message || T("chat.hint.error", "Ошибка")), true); }
     }
 
     function setHint(t, err) {
@@ -632,9 +857,10 @@
     function updateAuthUI() {
       if (!input || !sendBtn) return;
       if (view === "services") {
-        if (!me) { input.disabled = true; sendBtn.disabled = true; setHint("🔔 Только для зарегистрированных — войдите чтобы видеть личные сигналы", true); return; }
+        if (!me) { input.disabled = true; sendBtn.disabled = true;
+          setHint(T("chat.hint.services_guest", "🔔 Только для зарегистрированных — войдите чтобы видеть личные сигналы"), true); return; }
         input.disabled = true; sendBtn.disabled = true;
-        setHint("🔔 Только чтение — ваши личные сигналы по настройкам кабинета (30 дней)", false);
+        setHint(T("chat.hint.services_readonly", "🔔 Только чтение — ваши личные сигналы по настройкам кабинета (30 дней)"), false);
         if (supNameWrap) supNameWrap.classList.add("hidden");
         return;
       }
@@ -647,48 +873,62 @@
             if (saved && supNameInput && !supNameInput.value) supNameInput.value = saved;
           } catch {}
           const hasName = !!(supNameInput && supNameInput.value.trim()) || !!getGuestName();
-          input.placeholder = hasName ? "Сообщение в поддержку… (Enter)" : "Сначала введите временный ник ниже…";
-          setHint(hasName ? "🆘 Поддержка — ваш личный тред (гость, 30 дней)" : "🆘 Введите временный ник чтобы писать — вас найдут по нему", false);
+          input.placeholder = hasName
+            ? T("chat.ph.support", "Сообщение в поддержку… (Enter)")
+            : T("chat.ph.support_name", "Сначала введите временный ник ниже…");
+          setHint(hasName
+            ? T("chat.hint.support_guest", "🆘 Поддержка — ваш личный тред (гость, 30 дней)")
+            : T("chat.hint.support_need_name", "🆘 Введите временный ник чтобы писать — вас найдут по нему"), false);
         } else {
           if (supNameWrap) supNameWrap.classList.add("hidden");
           if (me.is_admin && supCurrentThreadKey) {
-            input.placeholder = `Ответ в тред ${supCurrentThreadKey}… (Enter)`;
-            setHint(`Вы админ • отвечаете в ${supCurrentThreadKey} • клик по треду снова — свернуть`, false);
+            input.placeholder = T("chat.ph.support_thread", "Ответ в тред {tk}… (Enter)", { tk: supCurrentThreadKey });
+            setHint(T("chat.hint.support_admin_thread",
+              "Вы админ • отвечаете в {tk} • клик по треду снова — свернуть", { tk: supCurrentThreadKey }), false);
           } else if (me.is_admin) {
-            input.placeholder = "Выберите тред выше или ждите сообщений…";
-            setHint("Вы админ • выберите тред для ответа, новые сообщения приходят в бот и с задержкой", false);
+            input.placeholder = T("chat.ph.support_pick", "Выберите тред выше или ждите сообщений…");
+            setHint(T("chat.hint.support_admin_pick",
+              "Вы админ • выберите тред для ответа, новые сообщения приходят в бот и с задержкой"), false);
           } else {
-            input.placeholder = "Написать в поддержку… (Enter)";
-            setHint(`Вы: ${me.name || "id" + me.id} • личный чат поддержки 30 дней`, false);
+            input.placeholder = T("chat.ph.support_write", "Написать в поддержку… (Enter)");
+            setHint(T("chat.hint.support_personal", "Вы: {name} • личный чат поддержки 30 дней",
+              { name: me.name || "id" + me.id }), false);
           }
         }
         return;
       }
       if (view === "rooms") {
         input.disabled = true; sendBtn.disabled = true;
-        setHint("Выберите диалог слева или пригласите пользователя", false);
+        setHint(T("chat.hint.pick_room", "Выберите диалог слева или пригласите пользователя"), false);
         if (supNameWrap) supNameWrap.classList.add("hidden");
         return;
       }
       if (view === "room" && roomInfo && roomInfo.status === "pending") {
-        input.placeholder = "Ответ = принять приглашение… (Enter)";
+        input.placeholder = T("chat.ph.accept", "Ответ = принять приглашение… (Enter)");
       } else if (view === "room") {
-        input.placeholder = "Личное сообщение… (Enter) — 30 дней";
+        input.placeholder = T("chat.ph.dm", "Личное сообщение… (Enter) — 30 дней");
       } else {
-        input.placeholder = "Сообщение… (Enter)";
+        input.placeholder = T("chat.ph.public", "Сообщение… (Enter)");
       }
       if (supNameWrap) supNameWrap.classList.add("hidden");
       if (!me) {
-        input.placeholder = "Только поддержка доступна гостям — войдите для остальных чатов";
+        input.placeholder = T("chat.ph.guest", "Только поддержка доступна гостям — войдите для остальных чатов");
         input.disabled = true; sendBtn.disabled = true;
-        hint.innerHTML = 'Гостям только поддержка — <a href="/login?next=' + encodeURIComponent(location.pathname) + '" style="color:#8ab4ff">войти</a> для общего и личных';
+        hint.innerHTML = esc(T("chat.hint.guests_only_support", "Гостям только поддержка —")) +
+          ' <a href="/login?next=' + encodeURIComponent(location.pathname) + '" style="color:#8ab4ff">' +
+          esc(T("chat.hint.sign_in", "войти")) + '</a> ' +
+          esc(T("chat.hint.for_public_and_dm", "для общего и личных"));
         return;
       }
       input.disabled = false; sendBtn.disabled = false;
-      if (view === "public") setHint(`Вы: ${me.name || "id" + me.id} • 3 дня истории`, false);
+      if (view === "public") setHint(T("chat.hint.public_history", "Вы: {name} • 3 дня истории",
+        { name: me.name || "id" + me.id }), false);
       else if (roomInfo) {
         const incomingPending = roomInfo.status === "pending" && roomInfo.invited_by !== me.id;
-        setHint(incomingPending ? "💌 Входящее приглашение — ответ = принять диалог" : `🔒 Личный диалог с ${roomInfo.peer.name} • 30 дней • можно удалить`, false);
+        setHint(incomingPending
+          ? T("chat.hint.dm_incoming", "💌 Входящее приглашение — ответ = принять диалог")
+          : T("chat.hint.dm_room", "🔒 Личный диалог с {name} • 30 дней • можно удалить",
+              { name: roomInfo.peer.name }), false);
       }
     }
 
@@ -715,7 +955,9 @@
         if (listEl) { listEl.innerHTML = ""; renderMsgs(msgs, listEl, me, {}); }
         refreshServices(true).catch(() => {});
       } else {
-        if (listEl) listEl.innerHTML = '<div class="tchat-empty">Гостям доступен только таб «Поддержка» — войдите чтобы видеть общий чат.<br><small>Поддержка 30 дней, личный тред</small></div>';
+        if (listEl) listEl.innerHTML = '<div class="tchat-empty">' +
+          T("chat.empty.guest_public", "Гостям доступен только таб «Поддержка» — войдите чтобы видеть общий чат.") +
+          '<br><small>' + T("chat.empty.guest_public_note", "Поддержка 30 дней, личный тред") + '</small></div>';
       }
       refreshSupport(true).catch(() => {});
       if (me && me.is_admin) refreshSupThreads().catch(() => {});
@@ -825,9 +1067,10 @@
       supThreadsEl.classList.remove("hidden");
       const collapsed = !!supThreadsCollapsed;
       const cur = supCurrentThreadKey;
-      const header = `<div class="tchat-threads-head" id="tchat-sup-threads-toggle" style="display:flex;align-items:center;justify-content:space-between;padding:6px 8px;border-bottom:1px solid #1e2e55;background:#0e182d;cursor:pointer"><span>💬 Треды поддержки (${supThreads.length})${cur ? ` · <code style="font-size:11px">${esc(cur)}</code>` : ""}</span><button type="button" class="tchat-mini">${collapsed ? "▼ Развернуть" : "▲ Свернуть"}</button></div>`;
+      const header = `<div class="tchat-threads-head" id="tchat-sup-threads-toggle" style="display:flex;align-items:center;justify-content:space-between;padding:6px 8px;border-bottom:1px solid #1e2e55;background:#0e182d;cursor:pointer"><span>${esc(T("chat.threads", "💬 Треды поддержки ({n})", { n: num(supThreads.length) }))}${cur ? ` · <code style="font-size:11px">${esc(cur)}</code>` : ""}</span><button type="button" class="tchat-mini">${collapsed ? esc(T("chat.btn.expand", "▼ Развернуть")) : esc(T("chat.btn.collapse", "▲ Свернуть"))}</button></div>`;
       if (!supThreads.length) {
-        supThreadsEl.innerHTML = header + '<div class="tchat-empty muted" style="padding:8px">Нет обращений в поддержку пока</div>';
+        supThreadsEl.innerHTML = header + '<div class="tchat-empty muted" style="padding:8px">' +
+          T("chat.empty.no_threads", "Нет обращений в поддержку пока") + '</div>';
         const h = supThreadsEl.querySelector("#tchat-sup-threads-toggle");
         if (h) h.addEventListener("click", () => { supThreadsCollapsed = !supThreadsCollapsed; try { localStorage.setItem(LS_SUP_THREADS_COLLAPSED, supThreadsCollapsed ? "1" : "0"); } catch {}; renderSupThreads(); });
         return;
@@ -837,12 +1080,12 @@
         body = supThreads.map((t) => {
           const tk = esc(t.thread_key || "");
           const last = esc((t.last_text || "").slice(0, 60));
-          const name = esc(t.display_name || (t.user_id ? "id" + t.user_id : "гость"));
+          const name = esc(t.display_name || (t.user_id ? "id" + t.user_id : T("chat.label.guest", "гость")));
           const total = t.total || 0;
           const isCur = tk === cur;
           return `<div class="tchat-dm-item${isCur ? " active" : ""}" data-tkey="${tk}" style="cursor:pointer">
-            <div class="tchat-peer">${name} <span class="tchat-time" style="margin-left:6px">${fmtTime(t.last_at || 0)}</span><button type="button" class="tchat-mini" data-del-thread="${tk}" style="margin-left:auto" title="Удалить весь тред">🗑</button></div>
-            <div class="tchat-last">${last || "—"}</div>
+            <div class="tchat-peer"><span data-i18n-skip>${name}</span> <span class="tchat-time" style="margin-left:6px">${fmtTime(t.last_at || 0)}</span><button type="button" class="tchat-mini" data-del-thread="${tk}" style="margin-left:auto" title="${esc(T("chat.btn.delete_thread_title", "Удалить весь тред"))}">🗑</button></div>
+            <div class="tchat-last" data-i18n-skip>${last || "—"}</div>
             <div class="tchat-dm-meta"><span class="tchat-time">${tk}</span><span class="tchat-dm-unread">${total}</span></div>
           </div>`;
         }).join("");
@@ -856,19 +1099,19 @@
             ev.stopPropagation();
             const tk = btn.getAttribute("data-del-thread") || "";
             if (!tk) return;
-            if (!confirm("Удалить весь тред поддержки " + tk + "? Все сообщения удалятся.")) return;
+            if (!confirm(T("chat.confirm.delete_thread", "Удалить весь тред поддержки {tk}? Все сообщения удалятся.", { tk }))) return;
             try {
               await jget(SUP_API + "/thread/" + encodeURIComponent(tk), { method: "DELETE", credentials: "same-origin" });
               if (supCurrentThreadKey === tk) {
                 supCurrentThreadKey = "";
                 lastSupId = 0;
-                if (supListEl) supListEl.innerHTML = '<div class="tchat-empty">Тред удалён</div>';
+                if (supListEl) supListEl.innerHTML = '<div class="tchat-empty">' + T("chat.empty.thread_deleted", "Тред удалён") + '</div>';
               }
               refreshSupThreads();
               updateAuthUI();
-              setHint("🗑 Тред " + tk + " удалён", false);
+              setHint(T("chat.hint.thread_deleted", "🗑 Тред {tk} удалён", { tk }), false);
             } catch (e) {
-              setHint(e.message || "Не удалось удалить тред", true);
+              setHint(e.message || T("chat.hint.thread_delete_fail", "Не удалось удалить тред"), true);
             }
           });
         });
@@ -881,14 +1124,15 @@
               // сворачиваем — повторный клик по активному треду
               supCurrentThreadKey = "";
               lastSupId = 0;
-              if (supListEl) supListEl.innerHTML = '<div class="tchat-empty">Выберите тред выше для просмотра — тред свернут</div>';
+              if (supListEl) supListEl.innerHTML = '<div class="tchat-empty">' +
+                T("chat.empty.thread_closed", "Выберите тред выше для просмотра — тред свернут") + '</div>';
               updateAuthUI();
               renderSupThreads();
               return;
             }
             supCurrentThreadKey = tk;
             lastSupId = 0;
-            if (supListEl) supListEl.innerHTML = '<div class="tchat-empty">загружаем…</div>';
+            if (supListEl) supListEl.innerHTML = '<div class="tchat-empty">' + T("chat.empty.loading", "загружаем…") + '</div>';
             jumpToLast(supListEl);          // открыли тред — сразу к последним сообщениям
             await refreshSupport(true);
             updateAuthUI();
@@ -908,20 +1152,28 @@
     }
     function renderRooms() {
       const box = dmlistEl(); if (!box) return;
-      const top = '<div class="tchat-dm-top"><button type="button" class="tchat-mini" id="tchat-invite-btn">＋ Пригласить</button><div class="tchat-invite-form hidden" id="tchat-invite-form"><input id="tchat-invite-q" maxlength="64" placeholder="ник или @username"><button type="button" class="tchat-mini" id="tchat-invite-go">Найти</button></div></div>';
+      const top = '<div class="tchat-dm-top"><button type="button" class="tchat-mini" id="tchat-invite-btn">' +
+        esc(T("chat.btn.invite", "＋ Пригласить")) + '</button><div class="tchat-invite-form hidden" id="tchat-invite-form">' +
+        '<input id="tchat-invite-q" maxlength="64" placeholder="' + esc(T("chat.invite_ph", "ник или @username")) + '">' +
+        '<button type="button" class="tchat-mini" id="tchat-invite-go">' + esc(T("chat.btn.find", "Найти")) + '</button></div></div>';
       if (!rooms.length) {
-        box.innerHTML = top + '<div class="tchat-empty">Личных диалогов пока нет.<br><small>Нажмите на ник в общем чате → «✉ Написать лично», либо «＋ Пригласить». 30 дней истории, можно удалить.</small></div>';
+        box.innerHTML = top + '<div class="tchat-empty">' +
+          T("chat.empty.no_dm", "Личных диалогов пока нет.") + '<br><small>' +
+          T("chat.empty.no_dm_note", "Нажмите на ник в общем чате → «✉ Написать лично», либо «＋ Пригласить». 30 дней истории, можно удалить.") +
+          '</small></div>';
         bindInviteUi(box); return;
       }
       const online = new Set(lastOnlineIds);
       const items = rooms.map((r) => {
         const incoming = r.status === "pending" && r.invited_by !== (me && me.id);
         const outgoing = r.status === "pending" && r.invited_by === (me && me.id);
-        const last = r.last ? `<div class="tchat-last">${(r.last.user_id === (me && me.id) ? "Вы: " : "")}${esc((r.last.text || "").slice(0, 60))}</div>` : '<div class="tchat-last muted">— диалог начнётся с первого сообщения —</div>';
-        const state = incoming ? '<span class="tchat-dm-flag inv">приглашение</span>' : outgoing ? '<span class="tchat-dm-flag">ждём ответа</span>' : "";
-        const act = incoming ? `<div class="tchat-dm-actions"><button type="button" class="tchat-mini ok" data-accept="${r.id}">✓ Принять</button><button type="button" class="tchat-mini no" data-decline="${r.id}">✕ Отклонить</button></div>` : "";
+        const last = r.last ? `<div class="tchat-last" data-i18n-skip>${(r.last.user_id === (me && me.id) ? esc(T("chat.label.you", "Вы: ")) : "")}${esc((r.last.text || "").slice(0, 60))}</div>` : '<div class="tchat-last muted">' + T("chat.empty.dm_start", "— диалог начнётся с первого сообщения —") + '</div>';
+        const state = incoming
+          ? '<span class="tchat-dm-flag inv">' + esc(T("chat.flag.invite", "приглашение")) + '</span>'
+          : outgoing ? '<span class="tchat-dm-flag">' + esc(T("chat.flag.waiting", "ждём ответа")) + '</span>' : "";
+        const act = incoming ? `<div class="tchat-dm-actions"><button type="button" class="tchat-mini ok" data-accept="${r.id}">${esc(T("chat.btn.accept", "✓ Принять"))}</button><button type="button" class="tchat-mini no" data-decline="${r.id}">${esc(T("chat.btn.decline", "✕ Отклонить"))}</button></div>` : "";
         return `<div class="tchat-dm-item${r.unread ? " unread" : ""}" data-room="${r.id}">
-          <div class="tchat-peer"><span class="tchat-peer-dot ${online.has(r.peer.id) ? "on" : ""}"></span>${esc(r.peer.name)} ${state}<button type="button" class="tchat-mini" data-del-room="${r.id}" style="margin-left:auto" title="Удалить чат">🗑</button></div>
+          <div class="tchat-peer"><span class="tchat-peer-dot ${online.has(r.peer.id) ? "on" : ""}"></span><span data-i18n-skip>${esc(r.peer.name)}</span> ${state}<button type="button" class="tchat-mini" data-del-room="${r.id}" style="margin-left:auto" title="${esc(T("chat.btn.delete_room_title", "Удалить чат"))}">🗑</button></div>
           ${last}
           <div class="tchat-dm-meta"><span class="tchat-time">${fmtTime(r.updated_at)}</span>${r.unread ? `<span class="tchat-dm-unread">${r.unread}</span>` : ""}</div>
           ${act}
@@ -942,7 +1194,7 @@
           const accept = b.hasAttribute("data-accept");
           try {
             await jget(DM_API + "/" + id + "/accept", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ accept }), });
-          } catch (e) { setHint(e.message || "Ошибка", true); }
+          } catch (e) { setHint(e.message || T("chat.hint.error", "Ошибка"), true); }
           refreshRooms(); pollBadges();
         });
       });
@@ -951,13 +1203,13 @@
           ev.stopPropagation();
           const id = parseInt(b.getAttribute("data-del-room"), 10);
           if (!id) return;
-          if (!confirm("Удалить личный чат #" + id + "? История удалится у обоих.")) return;
+          if (!confirm(T("chat.confirm.delete_room", "Удалить личный чат #{n}? История удалится у обоих.", { n: id }))) return;
           try {
             await jget(DM_API + "/" + id, { method: "DELETE", credentials: "same-origin" });
             if (roomId === id) { setView("rooms"); }
             refreshRooms(); pollBadges();
-            setHint("🗑 Чат удалён", false);
-          } catch (e) { setHint(e.message || "Не удалось удалить", true); }
+            setHint(T("chat.hint.room_deleted", "🗑 Чат удалён"), false);
+          } catch (e) { setHint(e.message || T("chat.hint.delete_fail", "Не удалось удалить"), true); }
         });
       });
     }
@@ -983,9 +1235,10 @@
     function renderInviteResults(box, users) {
       let res = box.querySelector(".tchat-invite-results");
       if (!res) { res = document.createElement("div"); res.className = "tchat-invite-results"; box.appendChild(res); }
-      if (!users.length) { res.innerHTML = '<div class="tchat-empty muted">Никого не нашли — пользователь должен быть зарегистрирован.</div>'; return; }
+      if (!users.length) { res.innerHTML = '<div class="tchat-empty muted">' +
+        T("chat.empty.user_not_found", "Никого не нашли — пользователь должен быть зарегистрирован.") + '</div>'; return; }
       const online = new Set(lastOnlineIds);
-      res.innerHTML = users.map((u) => `<div class="tchat-inv-item" data-uid="${u.id}" data-uname="${esc(u.name)}"><span class="tchat-peer-dot ${online.has(u.id) ? "on" : ""}"></span><span class="tchat-inv-name">${esc(u.name)}${u.admin ? " 👑" : ""}</span><button type="button" class="tchat-mini">✉ Пригласить</button></div>`).join("");
+      res.innerHTML = users.map((u) => `<div class="tchat-inv-item" data-uid="${u.id}" data-uname="${esc(u.name)}"><span class="tchat-peer-dot ${online.has(u.id) ? "on" : ""}"></span><span class="tchat-inv-name" data-i18n-skip>${esc(u.name)}${u.admin ? " 👑" : ""}</span><button type="button" class="tchat-mini">${esc(T("chat.btn.invite_user", "✉ Пригласить"))}</button></div>`).join("");
       res.querySelectorAll(".tchat-inv-item").forEach((el) => {
         el.addEventListener("click", async () => {
           const uid = parseInt(el.getAttribute("data-uid"), 10); const uname = el.getAttribute("data-uname") || "";
@@ -1003,29 +1256,36 @@
         const box = dmMsgsEl();
         if (box) {
           if (first) box.innerHTML = "";
-          renderMsgs(msgs, box, me, { bubbles: true, emptyHtml: "Диалог пуст — напишите первым 🔒<br><small>Приватно • 30 дней • можно удалить</small>" });
+          renderMsgs(msgs, box, me, { bubbles: true, emptyHtml:
+            T("chat.empty.dm_private", "Диалог пуст — напишите первым 🔒") + '<br><small>' +
+            T("chat.empty.dm_private_note", "Приватно • 30 дней • можно удалить") + '</small>' });
         }
         paintRoomHead(); updateAuthUI(); pollBadges();
       } catch (e) {
         if (e.status === 403 && e.body && e.body.error === "declined") {
-          if (dmMsgsEl()) dmMsgsEl().innerHTML = '<div class="tchat-empty">Приглашение отклонено.</div>';
+          if (dmMsgsEl()) dmMsgsEl().innerHTML = '<div class="tchat-empty">' + T("chat.empty.dm_declined", "Приглашение отклонено.") + '</div>';
         }
       }
     }
     function paintRoomHead() {
       const head = dmHeadEl(); if (!head) return;
-      if (!roomInfo) { head.innerHTML = '<button type="button" class="tchat-mini" id="tchat-room-back">← Диалоги</button>'; return; }
+      if (!roomInfo) { head.innerHTML = '<button type="button" class="tchat-mini" id="tchat-room-back">' +
+        esc(T("chat.btn.back", "← Диалоги")) + '</button>'; return; }
       const online = new Set(lastOnlineIds);
-      const st = roomInfo.status === "pending" ? (roomInfo.invited_by === (me && me.id) ? '<span class="tchat-dm-flag">приглашение ждёт ответа</span>' : '<span class="tchat-dm-flag inv">вы можете принять или ответить</span>') : "";
-      head.innerHTML = `<button type="button" class="tchat-mini" id="tchat-room-back">←</button><span class="tchat-peer tchat-peer-head"><span class="tchat-peer-dot ${online.has(roomInfo.peer.id) ? "on" : ""}"></span>${esc(roomInfo.peer.name)}</span>${st}<button type="button" class="tchat-mini" id="tchat-room-del" data-del-room="${roomInfo.id}" style="margin-left:auto" title="Удалить чат">🗑 Удалить</button>`;
+      const st = roomInfo.status === "pending"
+        ? (roomInfo.invited_by === (me && me.id)
+            ? '<span class="tchat-dm-flag">' + esc(T("chat.flag.pending_mine", "приглашение ждёт ответа")) + '</span>'
+            : '<span class="tchat-dm-flag inv">' + esc(T("chat.flag.pending_other", "вы можете принять или ответить")) + '</span>')
+        : "";
+      head.innerHTML = `<button type="button" class="tchat-mini" id="tchat-room-back">←</button><span class="tchat-peer tchat-peer-head" data-i18n-skip><span class="tchat-peer-dot ${online.has(roomInfo.peer.id) ? "on" : ""}"></span>${esc(roomInfo.peer.name)}</span>${st}<button type="button" class="tchat-mini" id="tchat-room-del" data-del-room="${roomInfo.id}" style="margin-left:auto" title="${esc(T("chat.btn.delete_room_title", "Удалить чат"))}">${esc(T("chat.btn.delete_room", "🗑 Удалить"))}</button>`;
       const back = head.querySelector("#tchat-room-back");
       if (back) back.addEventListener("click", () => setView("rooms"));
       const del = head.querySelector("#tchat-room-del");
       if (del) del.addEventListener("click", async () => {
         const id = parseInt(del.getAttribute("data-del-room"), 10);
         if (!id) return;
-        if (!confirm("Удалить личный чат?")) return;
-        try { await jget(DM_API + "/" + id, { method: "DELETE", credentials: "same-origin" }); setView("rooms"); refreshRooms(); } catch (e) { setHint(e.message || "Ошибка", true); }
+        if (!confirm(T("chat.confirm.delete_room_short", "Удалить личный чат?"))) return;
+        try { await jget(DM_API + "/" + id, { method: "DELETE", credentials: "same-origin" }); setView("rooms"); refreshRooms(); } catch (e) { setHint(e.message || T("chat.hint.error", "Ошибка"), true); }
       });
     }
 
@@ -1050,13 +1310,13 @@
       const txt = (input.value || "").trim(); if (!txt) return;
       const isSup = view === "support";
       const limit = isSup ? 2000 : 500;
-      if (txt.length > limit) { setHint(`Слишком длинно — до ${limit} символов`, true); return; }
+      if (txt.length > limit) { setHint(T("chat.hint.too_long", "Слишком длинно — до {n} символов", { n: num(limit) }), true); return; }
       if (!isSup && !me) { location.href = "/login?next=" + encodeURIComponent(location.pathname); return; }
       if (isSup && !me) {
         const name = (supNameInput ? supNameInput.value.trim() : "") || getGuestName();
-        if (!name) { setHint("Введите временный ник для поддержки", true); if (supNameInput) supNameInput.focus(); return; }
+        if (!name) { setHint(T("chat.hint.need_name", "Введите временный ник для поддержки"), true); if (supNameInput) supNameInput.focus(); return; }
       }
-      input.disabled = true; sendBtn.disabled = true; setHint("Отправка…", false);
+      input.disabled = true; sendBtn.disabled = true; setHint(T("chat.hint.sending", "Отправка…"), false);
       try {
         if (view === "support") {
           supGuestToken = getGuestToken();
@@ -1071,14 +1331,16 @@
           input.value = "";
           const msg = j && j.message;
           if (msg && msg.id) { lastSupId = Math.max(lastSupId, msg.id); renderSupMsgs([msg], supListEl, me); if (j.guest_token) { supGuestToken = j.guest_token; try { localStorage.setItem(LS_SUP_GUEST, supGuestToken); } catch {} } }
-          setHint(me && me.is_admin ? "🆘 ответ в поддержку отправлен" : "🆘 поддержка • отправили (30 дней)", false);
+          setHint(me && me.is_admin
+            ? T("chat.hint.sent_support_admin", "🆘 ответ в поддержку отправлен")
+            : T("chat.hint.sent_support", "🆘 поддержка • отправили (30 дней)"), false);
           if (me && me.is_admin) refreshSupThreads();
         } else if (view === "room" && roomId) {
           const j = await jget(DM_API + "/" + roomId + "/messages", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: txt }), });
           input.value = "";
           const msg = j && j.message;
           if (msg && msg.id) { roomLastId = Math.max(roomLastId, msg.id); renderMsgs([msg], dmMsgsEl(), me, { bubbles: true }); }
-          setHint("🔒 приватно • 30 дней", false);
+          setHint(T("chat.hint.sent_dm", "🔒 приватно • 30 дней"), false);
         } else {
           const r = await fetch(API, { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: txt }), });
           const j = await r.json().catch(() => ({}));
@@ -1086,9 +1348,10 @@
           input.value = "";
           const msg = j && j.message;
           if (msg && msg.id) { lastId = Math.max(lastId, msg.id); try { localStorage.setItem(LS_LAST_ID, String(lastId)); } catch {} renderMsgs([msg], listEl, me, {}); }
-          setHint(`Вы: ${me.name || "id" + me.id} • 3 дня истории`, false);
+          setHint(T("chat.hint.public_history", "Вы: {name} • 3 дня истории",
+            { name: me.name || "id" + me.id }), false);
         }
-      } catch (e) { setHint(e.message || "Ошибка", true); } finally { input.disabled = false; sendBtn.disabled = false; input.focus(); }
+      } catch (e) { setHint(e.message || T("chat.hint.error", "Ошибка"), true); } finally { input.disabled = false; sendBtn.disabled = false; input.focus(); }
     }
 
     function toggleOpen() { setOpen(!isOpen); }
@@ -1109,7 +1372,9 @@
       muteBtn.addEventListener("click", () => {
         const tab = view === "rooms" || view === "room" ? "dm" : view;
         muteMap[tab] = !muteMap[tab]; saveMute(tab); updateMuteBtn();
-        setHint(muteMap[tab] ? `🔇 Звук выкл для «${tab}»` : `🔊 Звук вкл для «${tab}»`, false);
+        setHint(muteMap[tab]
+          ? T("chat.hint.mute_off", "🔇 Звук выкл для «{tab}»", { tab })
+          : T("chat.hint.mute_on", "🔊 Звук вкл для «{tab}»", { tab }), false);
         if (!muteMap[tab]) playSound(tab);
       });
     }
@@ -1125,13 +1390,13 @@
     if (listEl) listEl.addEventListener("click", async (ev) => {
       const btn = ev.target.closest("[data-del]"); if (!btn) return;
       const id = parseInt(btn.getAttribute("data-del"), 10); if (!id) return;
-      if (!confirm("Удалить сообщение #" + id + "?")) return;
+      if (!confirm(T("chat.confirm.delete_msg", "Удалить сообщение #{n}?", { n: id }))) return;
       try { const r = await fetch(API + "/" + id, { method: "DELETE", credentials: "same-origin" }); if (r.ok) { const el = listEl.querySelector(`[data-mid="${id}"]`); if (el) el.remove(); } } catch {}
     });
     if (supListEl) supListEl.addEventListener("click", async (ev) => {
       const btn = ev.target.closest("[data-del-sup]"); if (!btn) return;
       const id = parseInt(btn.getAttribute("data-del-sup"), 10); if (!id) return;
-      if (!confirm("Удалить сообщение поддержки #" + id + "?")) return;
+      if (!confirm(T("chat.confirm.delete_sup_msg", "Удалить сообщение поддержки #{n}?", { n: id }))) return;
       try { const r = await fetch(SUP_API + "/" + id, { method: "DELETE", credentials: "same-origin" }); if (r.ok) { const el = supListEl.querySelector(`[data-mid="${id}"]`); if (el) el.remove(); } } catch {}
     });
 
@@ -1180,7 +1445,8 @@
           if (supCurrentThreadKey === data.thread_key) {
             supCurrentThreadKey = "";
             lastSupId = 0;
-            if (supListEl) supListEl.innerHTML = '<div class="tchat-empty">Тред удалён админом</div>';
+            if (supListEl) supListEl.innerHTML = '<div class="tchat-empty">' +
+              T("chat.empty.thread_deleted_admin", "Тред удалён админом") + '</div>';
           }
           refreshSupThreads();
         } else if (data.type === "chat_dm" && data.message) {
@@ -1194,8 +1460,8 @@
           }
         } else if (data.type === "chat_dm_room") {
           if (!me) return;
-          if (data.event === "invite") { setHint("💌 Вам пришли в личные сообщения — вкладка «Личные»", false); playSound("dm"); }
-          else if (data.event === "accepted") setHint("✉ Приглашение принято — можно писать", false);
+          if (data.event === "invite") { setHint(T("chat.hint.dm_invite_notice", "💌 Вам пришли в личные сообщения — вкладка «Личные»"), false); playSound("dm"); }
+          else if (data.event === "accepted") setHint(T("chat.hint.dm_accepted", "✉ Приглашение принято — можно писать"), false);
           else if (data.event === "deleted") { if (roomId === data.room_id) setView("rooms"); }
           refreshRooms(); pollBadges();
         }

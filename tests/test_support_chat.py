@@ -267,6 +267,14 @@ class WiringTest(unittest.TestCase):
             raise unittest.SkipTest(f"приложение не поднимается: {exc}")
         cls.server = server
         cls.app = server.app
+        # SupportChatTest работает на своём сторе и в tearDown сбрасывает
+        # общую привязку — повторяем проводку, которую делает server.py при
+        # импорте: иначе проверка зависит от того, кто импортировал сервер
+        # первым (при полном прогоне тестов это уже не сам этот файл)
+        sc.ctx.store = server.account_store
+        sc.ctx.bot = server.tg_bot
+        sc.ctx.hub = server.hub
+        sc.ctx.public_url = server.PUBLIC_URL
 
     @staticmethod
     def _paths(routes, out=None):

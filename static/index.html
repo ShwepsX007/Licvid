@@ -47,15 +47,15 @@
 <body class="dark-theme">
     <!-- 💬 Чат: общий + личные диалоги. Панель двигается и тянется за края. -->
     <div id="terminal-chat" class="tchat">
-      <button id="tchat-toggle" class="tchat-toggle hidden" type="button" aria-hidden="true" tabindex="-1">💬 Чат <span id="tchat-unread" class="tchat-unread hidden" aria-hidden="true">0</span></button>
+      <button id="tchat-toggle" class="tchat-toggle hidden" type="button" aria-hidden="true" tabindex="-1" data-i18n="chat.toggle">💬 Чат <span id="tchat-unread" class="tchat-unread hidden" aria-hidden="true">0</span></button>
       <div id="tchat-panel" class="tchat-panel hidden">
-        <div class="tchat-head"><span>💬 Чат LiqScope</span><button id="tchat-close" class="tchat-close" type="button">✕</button></div>
+        <div class="tchat-head"><span data-i18n="chat.title">💬 Чат LiqScope</span><button id="tchat-close" class="tchat-close" type="button" data-i18n-title="chat.close" title="Закрыть чат">✕</button></div>
         <div class="tchat-tabs" id="tchat-tabs">
-          <button type="button" class="tchat-tab active" data-tab="public">Общий</button>
-          <button type="button" class="tchat-tab" data-tab="dm">🔒 Личные <span id="tchat-tab-dm-badge" class="tchat-tab-badge hidden">0</span></button>
-          <button type="button" class="tchat-tab" data-tab="services">🔔 Сервисы <span id="tchat-tab-svc-badge" class="tchat-tab-badge hidden">0</span></button>
-          <button type="button" class="tchat-tab" data-tab="support">🆘 Поддержка <span id="tchat-tab-sup-badge" class="tchat-tab-badge hidden">0</span></button>
-          <button type="button" class="tchat-mute" id="tchat-mute" title="Вкл/выкл звук этой вкладки">🔊</button>
+          <button type="button" class="tchat-tab active" data-tab="public" data-i18n="chat.tab_public">Общий</button>
+          <button type="button" class="tchat-tab" data-tab="dm" data-i18n="chat.tab_dm">🔒 Личные <span id="tchat-tab-dm-badge" class="tchat-tab-badge hidden">0</span></button>
+          <button type="button" class="tchat-tab" data-tab="services" data-i18n="chat.tab_services">🔔 Сервисы <span id="tchat-tab-svc-badge" class="tchat-tab-badge hidden">0</span></button>
+          <button type="button" class="tchat-tab" data-tab="support" data-i18n="chat.tab_support">🆘 Поддержка <span id="tchat-tab-sup-badge" class="tchat-tab-badge hidden">0</span></button>
+          <button type="button" class="tchat-mute" id="tchat-mute" data-i18n-title="chat.mute_switch" title="Вкл/выкл звук этой вкладки">🔊</button>
         </div>
         <div id="tchat-list" class="tchat-list"></div>
         <div id="tchat-dm" class="tchat-dm hidden"><div id="tchat-dm-list" class="tchat-dm-list"></div></div>
@@ -66,9 +66,9 @@
         <div id="tchat-services" class="tchat-list hidden"></div>
         <div id="tchat-support" class="tchat-support hidden">
           <div id="tchat-support-list" class="tchat-list"></div>
-          <div class="tchat-support-name hidden" id="tchat-support-name-wrap"><input id="tchat-support-name" maxlength="40" placeholder="Ваше имя (необязательно)"></div>
+          <div class="tchat-support-name hidden" id="tchat-support-name-wrap"><input id="tchat-support-name" maxlength="40" data-i18n-placeholder="chat.name_ph_optional" placeholder="Ваше имя (необязательно)"></div>
         </div>
-        <div class="tchat-foot"><input id="tchat-input" maxlength="2000" placeholder="Сообщение… (Enter)"><button id="tchat-send" type="button">➤</button><div id="tchat-hint" class="tchat-hint"></div></div>
+        <div class="tchat-foot"><input id="tchat-input" maxlength="2000" data-i18n-placeholder="chat.input_ph" placeholder="Сообщение… (Enter)"><button id="tchat-send" type="button">➤</button><div id="tchat-hint" class="tchat-hint"></div></div>
       </div>
     </div>
     <!-- Top Header -->

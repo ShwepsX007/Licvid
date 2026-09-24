@@ -507,10 +507,14 @@ class HistoryStore:
         except OSError:
             return 0
         for name in names:
-            if not name.startswith(self.stem + "_"):
+            day = ""
+            if name.startswith(self.stem + "_"):
+                day = name[len(self.stem) + 1:].split(".")[0]
+            elif name.startswith("hours_") and name.endswith(".json"):
+                # часовые свёртки лежат рядом и раньше не попадали под TTL
+                day = name[len("hours_"):-len(".json")]
+            else:
                 continue
-            rest = name[len(self.stem) + 1:]
-            day = rest.split(".")[0]
             if len(day) != 10 or day >= keep_from:
                 continue
             try:

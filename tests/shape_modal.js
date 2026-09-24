@@ -1,3 +1,4 @@
+require("./_dom_env");
 /** Окно фигуры CVD/OI: наведение показывает, клик закрепляет.
  *
  *  Наведению на треугольник/шарик открывает тот же попап, что у ликвидаций
@@ -122,6 +123,7 @@ async function main() {
     beforeParse(win) {
       try {
         Object.defineProperty(win.navigator, "language", { value: "ru-RU", configurable: true });
+        Object.defineProperty(win.navigator, "languages", { value: ["ru-RU", "ru"], configurable: true });
       } catch (e) { /* ignore */ }
       try {
         win.localStorage.setItem("liqscope.devLayers", "1");

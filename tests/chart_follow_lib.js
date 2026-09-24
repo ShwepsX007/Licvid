@@ -1,3 +1,4 @@
+require("./_dom_env");
 /** Автоследование на НАСТОЯЩЕЙ библиотеке графика (static/lightweight-charts.js).
  *
  *  tests/chart_follow.js гоняет страницу с записывающей заглушкой шкал: там

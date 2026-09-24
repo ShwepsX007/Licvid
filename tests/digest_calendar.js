@@ -1,3 +1,4 @@
+require("./_dom_env");
 /**
  * Страница «Дневной дайджест»: переходы и выбор старого выпуска по дате.
  *
@@ -108,7 +109,9 @@ async function openPage(path, opts) {
     virtualConsole: vc,
     beforeParse(win) {
       try { Object.defineProperty(win.navigator, "language",
-        { value: "ru-RU", configurable: true }); } catch (e) { /* ignore */ }
+        { value: "ru-RU", configurable: true });
+        Object.defineProperty(win.navigator, "languages",
+          { value: ["ru-RU", "ru"], configurable: true }); } catch (e) { /* ignore */ }
       win.matchMedia = () => ({ matches: false, media: "", onchange: null,
         addListener() {}, removeListener() {}, addEventListener() {},
         removeEventListener() {}, dispatchEvent() { return false; } });

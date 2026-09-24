@@ -4390,8 +4390,8 @@
             '<td class="td-coin"><button class="coin-link" type="button" data-symbol="' +
             encodeURIComponent(item.symbol) + '" title="' + openTitleHtml +
             '" aria-label="' + openTitleHtml + '">' +
-            "<strong>" + pretty(item.symbol) + "</strong><span class=\"coin-link-icon\">📈</span></button></td>" +
-            '<td><span class="exch-badge ' + item.exchange + '">' + item.exchange +
+            "<strong>" + escapeHtml(pretty(item.symbol)) + "</strong><span class=\"coin-link-icon\">📈</span></button></td>" +
+            '<td><span class="exch-badge ' + escapeHtml(item.exchange) + '">' + escapeHtml(item.exchange) +
             "</span></td>" +
             '<td><span class="badge-side ' + (isLong ? "long" : "short") + '">' +
             (isLong ? "LONG LIQ" : "SHORT LIQ") + "</span></td>" +
@@ -4587,7 +4587,7 @@
                 '<td class="td-coin"><button class="coin-link" type="button" data-symbol="' +
                 encodeURIComponent(item.symbol) + '" title="' + openTitleHtml +
                 '" aria-label="' + openTitleHtml + '">' +
-                "<strong>" + pretty(item.symbol) + "</strong><span class=\"coin-link-icon\">📈</span></button></td>" +
+                "<strong>" + escapeHtml(pretty(item.symbol)) + "</strong><span class=\"coin-link-icon\">📈</span></button></td>" +
                 "<td></td>" +
                 '<td><span class="' + t.typeClass + '">' + t.typeLabel + "</span></td>" +
                 '<td class="td-usd-amount ' + t.valClass + '">' + t.sign + "$" + fmtUsdFull(item.usd) + "</td>" +
@@ -4783,7 +4783,7 @@
             '<td class="td-coin"><button class="coin-link" type="button" data-symbol="' +
             encodeURIComponent(item.symbol) + '" title="' + openTitleHtml +
             '" aria-label="' + openTitleHtml + '">' +
-            "<strong>" + pretty(item.symbol) + '</strong><span class="coin-link-icon">📈</span></button></td>' +
+            "<strong>" + escapeHtml(pretty(item.symbol)) + '</strong><span class="coin-link-icon">📈</span></button></td>' +
             "<td>" + exch + "</td>" +
             '<td><span class="badge-book-' + (item.side === "bid" ? "bid" : "ask") + '">' +
             (item.side === "bid" ? "BID" : "ASK") + "</span> " +
@@ -5991,10 +5991,10 @@
         row.innerHTML =
             '<span class="sym-opt-left">' +
                 (o.onChart ? '<i class="sym-chart">📈</i>' : "") +
-                "<span>" + o.label + "</span>" +
+                "<span>" + escapeHtml(o.label) + "</span>" +
                 (o.isCustom ? '<i class="sym-star">★</i>' : "") +
             "</span>" +
-            (o.liq ? '<i class="sym-liq">' + o.liq + "</i>" : "");
+            (o.liq ? '<i class="sym-liq">' + escapeHtml(o.liq) + "</i>" : "");
         return row;
     }
 
@@ -6468,13 +6468,13 @@
     function topCoinGroup(title, coins, valueOf) {
         if (!coins || !coins.length) return "";
         return '<div class="top-coins-group">' +
-            '<div class="top-coins-group-title">' + title + "</div>" +
+            '<div class="top-coins-group-title">' + escapeHtml(title) + "</div>" +
             coins.map((c) =>
-                '<div class="top-coin-card" data-symbol="' + c.symbol + '"' +
-                ' title="' + pretty(c.symbol) + " · $" + fmtUsdShort(c.usd) + " · " +
-                I18n.t("top.count", { n: I18n.number(c.count || 0) }) + '">' +
-                '<div class="top-coin-name">' + pretty(c.symbol) + "</div>" +
-                '<div class="top-coin-val">' + valueOf(c) + "</div></div>").join("") +
+                '<div class="top-coin-card" data-symbol="' + escapeHtml(c.symbol) + '"' +
+                ' title="' + escapeHtml(pretty(c.symbol) + " · $" + fmtUsdShort(c.usd) + " · " +
+                I18n.t("top.count", { n: I18n.number(c.count || 0) })) + '">' +
+                '<div class="top-coin-name">' + escapeHtml(pretty(c.symbol)) + "</div>" +
+                '<div class="top-coin-val">' + escapeHtml(valueOf(c)) + "</div></div>").join("") +
             "</div>";
     }
 

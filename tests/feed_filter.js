@@ -1,3 +1,4 @@
+require("./_dom_env");
 /** Клик по паре в ленте — фильтр ленты по этой монете, а не только график.
  *
  *  В терминале три ленты: ликвидации, CVD и OI. Клик по монете в любой из
@@ -68,6 +69,7 @@ async function main() {
     beforeParse(win) {
       try {
         Object.defineProperty(win.navigator, "language", { value: "ru-RU", configurable: true });
+        Object.defineProperty(win.navigator, "languages", { value: ["ru-RU", "ru"], configurable: true });
       } catch (e) { /* ignore */ }
       try {
         win.localStorage.setItem("liqscope.chartSymbol", "BTC_USDT");

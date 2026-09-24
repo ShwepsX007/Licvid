@@ -85,6 +85,7 @@
     var picked = {};                // id поста → язык, выбранный вручную
     var month = null;
     var jumpTo = "";
+    var highlightId = "";          // ?post= — класс hit переживает перерисовку языка
     var tzHours = 3;
     var freshShown = FRESH;
 
@@ -165,7 +166,7 @@
             if (it.total_usd) foot.push(money(it.total_usd));
             if (it.liq_count) foot.push(t("hour.events", { n: it.liq_count }));
             if (it.window_h) foot.push(t("hour.window", { h: it.window_h }));
-            return '<article class="tg-card' + (jumpTo === it.id ? " hit" : "") +
+            return '<article class="tg-card' + (highlightId === it.id ? " hit" : "") +
                 '" id="post-' + esc(it.id) + '">' +
                 '<div class="tg-head"><span class="tg-time">🕘 ' + esc(timeLabel(it.ts)) +
                 '</span><span class="tg-day">' + esc(dayLabel(it.day)) + "</span>" + toggle + "</div>" +
@@ -347,8 +348,15 @@
     }
 
     function open(day, push) {
-        selected = day || "";
-        if (!selected) selected = (days[0] && days[0].day) || "";
+        var next = day || "";
+        if (!next) next = (days[0] && days[0].day) || "";
+        // Гость ушёл на другой день — подсветка ссылки ?post= больше не нужна.
+        // Перерисовка языка зовёт open(selected, false) и подсветку сохраняет.
+        if (highlightId && push !== false && next && next !== selected) {
+            highlightId = "";
+            jumpTo = "";
+        }
+        selected = next;
         try { window._hour_selected = selected; } catch(e) {}
         if (dayMap[selected]) month = clampMonth(monthOfDay(selected));
         paintCalendar();
@@ -361,7 +369,7 @@
                 paintFresh();
                 paintPosts(res);
                 paintChips();
-                if (push !== false) setUrl(selected, jumpTo);
+                if (push !== false) setUrl(selected, highlightId);
                 if (jumpTo) {
                     var card = el("post-" + jumpTo);
                     if (card && card.scrollIntoView) {
@@ -395,6 +403,10 @@
             // Какой день открыть: из ссылки (?post= или ?day=) или самый свежий
             var wanted = "";
             if (post) {
+                // Подсветка не зависит от того, попал ли пост в короткую ленту
+                // свежих: id вида 2026-09-17-1700 сам называет день.
+                highlightId = String(post);
+                jumpTo = highlightId;
                 var hit = null;
                 freshItems.some(function (it) {
                     if (String(it.id) === String(post)) { hit = it; return true; }
@@ -402,7 +414,6 @@
                 });
                 if (hit) {
                     wanted = hit.day;
-                    jumpTo = hit.id;
                     month = clampMonth(monthOfDay(wanted));
                 } else {
                     wanted = String(post).slice(0, 10);
@@ -414,7 +425,7 @@
             }
             selected = wanted;
             if (!month) month = clampMonth(monthOfDay(wanted));
-            return open(wanted, false).then(function () { setUrl(wanted, jumpTo); });
+            return open(wanted, false).then(function () { setUrl(wanted, highlightId); });
         }).catch(function () {
             days = [];
             freshItems = [];

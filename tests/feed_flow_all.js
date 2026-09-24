@@ -1,3 +1,4 @@
+require("./_dom_env");
 /** Лента CVD/OI в режиме «ВСЕ»: поток по всем монетам, а не по монете графика.
  *
  *  Раньше строки строились только по свечам открытого графика: переключил
@@ -95,6 +96,7 @@ async function main() {
     beforeParse(win) {
       try {
         Object.defineProperty(win.navigator, "language", { value: "ru-RU", configurable: true });
+        Object.defineProperty(win.navigator, "languages", { value: ["ru-RU", "ru"], configurable: true });
       } catch (e) { /* ignore */ }
       try { win.localStorage.setItem("liqscope.chartSymbol", "BTC_USDT"); } catch (e) { /* ignore */ }
       win.matchMedia = () => ({ matches: false, media: "", onchange: null,

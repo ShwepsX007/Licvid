@@ -1471,7 +1471,7 @@
         if (!list.some(function (v) { return String(v) === cur; })) list.unshift(cur);
         return list.map(function (v) {
             return alChip(String(v) === cur,
-                'data-coinval="' + v + '" data-coinmetric="' + key + '"', alCoinLabel(v));
+                'data-coinval="' + esc(v) + '" data-coinmetric="' + key + '"', esc(alCoinLabel(v)));
         }).join("");
     }
     function alChip(on, attrs, label) {
@@ -1638,7 +1638,7 @@
                 alSparkSvg(alSparkBuf[key]) +
                 '<div class="al-meter' + (hot ? " hot" : "") + '" data-metric="' + key + '">' +
                 '<div class="v ' + cls + '">' + alMoney(val) + '</div>' +
-                '<div class="s">' + extra + " / порог " + alMoney(thr) +
+                '<div class="s">' + esc(extra) + " / порог " + alMoney(thr) +
                 '</div><div class="al-bar"><i style="width:' + pct + '%"></i></div></div>' +
                 "</div>" +
                 '<div class="al-feed-col al-col-set">' +
@@ -1659,7 +1659,7 @@
                 alCoinChips(key, p.coins || []) + "</div>" +
                 '<div class="al-row"><input data-coinin="' + key +
                 '" type="text" list="al-sym-list" placeholder="BTC_USDT или тикер" value="' +
-                (alCoinOf(key) === "ALL" ? "" : alCoinOf(key)) + '"></div>' +
+                esc(alCoinOf(key) === "ALL" ? "" : alCoinOf(key)) + '"></div>' +
                 "</div>" +
                 '<div class="al-feed-col al-col-tape">' +
                 '<div class="al-label">Лента · <span data-flowmeta="' + key + '">' +
@@ -1674,7 +1674,7 @@
             '<label class="al-switch' + (alCfg.enabled ? " on" : "") + '" id="al-sw">' +
             "<i></i><span>" + (alCfg.enabled ? "СИГНАЛ ВКЛ" : "СИГНАЛ ВЫКЛ") + "</span></label></div>" +
             '<datalist id="al-sym-list">' +
-            (symbols || []).map(function (s) { return "<option value=\"" + s + "\">"; }).join("") +
+            (symbols || []).map(function (s) { return "<option value=\"" + esc(s) + "\">"; }).join("") +
             "</datalist>" +
             '<div class="al-feeds">' +
             feed("liq", "LIQ") + feed("cvd", "CVD") + feed("oi", "OI") +
@@ -1688,9 +1688,9 @@
                     '</div><div class="al-row" style="margin-top:6px"><input data-minin="' + m +
                     '" type="number" min="0" step="1000" value="' + Math.round(cur || 0) + '"></div>';
             }).join("") +
-            '<div class="al-status" id="al-status">монеты: LIQ ' + alCoinLabel(alCoinOf("liq")) +
-            " · CVD " + alCoinLabel(alCoinOf("cvd")) +
-            " · OI " + alCoinLabel(alCoinOf("oi")) +
+            '<div class="al-status" id="al-status">монеты: LIQ ' + esc(alCoinLabel(alCoinOf("liq"))) +
+            " · CVD " + esc(alCoinLabel(alCoinOf("cvd"))) +
+            " · OI " + esc(alCoinLabel(alCoinOf("oi"))) +
             " · окна: LIQ " + alWin(alWinOf("liq")) +
             " · CVD " + alWin(alWinOf("cvd")) +
             " · OI " + alWin(alWinOf("oi")) + "</div>";
@@ -1760,7 +1760,7 @@
             return '<div class="row' + (hot ? " hot" : "") + '" style="--p:' + pct + '%">' +
                 '<span class="t">' + tm + "</span>" +
                 '<span class="m">' + icon + "</span>" +
-                '<span class="sym">' + (sym === "ALL" ? "все" : sym) + "</span>" +
+                '<span class="sym">' + esc(sym === "ALL" ? "все" : sym) + "</span>" +
                 '<span class="val ' + cls + '">' + alMoney(val) + "</span>" +
                 '<span class="thr">/ ' + alMoney(thr) + " · " + alWin(h.window_min) +
                 (h.detail && h.detail.span_min ? " · новых " + alWin(h.detail.span_min) : "") +

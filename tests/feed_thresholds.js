@@ -1,3 +1,4 @@
+require("./_dom_env");
 /** Пороги объёма в терминале: ликвидации, CVD и OI Δ.
  *
  *  В панели «Мин. объем» над лентой три порога — по одному на каждую серию:
@@ -105,6 +106,7 @@ async function main() {
     beforeParse(win) {
       try {
         Object.defineProperty(win.navigator, "language", { value: "ru-RU", configurable: true });
+        Object.defineProperty(win.navigator, "languages", { value: ["ru-RU", "ru"], configurable: true });
       } catch (e) { /* ignore */ }
       win.matchMedia = () => ({ matches: false, media: "", onchange: null,
         addListener() {}, removeListener() {}, addEventListener() {},

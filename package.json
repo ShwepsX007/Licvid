@@ -4,11 +4,11 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "bash tools/run_tests.sh --python"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ShwepsX007/LiqScope.git"
+    "url": "git+https://github.com/ShwepsX007/Licvid.git"
   },
   "keywords": [],
   "author": "",
@@ -16,7 +16,7 @@
   "bugs": {
     "url": "https://github.com/ShwepsX007/LiqScope/issues"
   },
-  "homepage": "https://github.com/ShwepsX007/LiqScope#readme",
+  "homepage": "https://github.com/ShwepsX007/Licvid#readme",
   "dependencies": {
     "lightweight-charts": "^5.2.1"
   }

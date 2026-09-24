@@ -183,9 +183,12 @@ class TestPersistence(StoreCase):
         self.store.add(ev(ts=old_ts, n=1))
         self.store.add(ev(ts=NOW, n=2))
         self.assertTrue(os.path.exists(self.store.shard_path(day_key(old_ts))))
+        self.store.flush(True)
+        self.assertTrue(os.path.exists(self.store.hours_path(day_key(old_ts))))
         removed = self.store.cleanup(NOW)
         self.assertGreaterEqual(removed, 1)
         self.assertFalse(os.path.exists(self.store.shard_path(day_key(old_ts))))
+        self.assertFalse(os.path.exists(self.store.hours_path(day_key(old_ts))))
         self.assertTrue(os.path.exists(self.store.shard_path(day_key(NOW))))
 
     def test_month_kept(self):

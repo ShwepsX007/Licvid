@@ -1,3 +1,4 @@
+require("./_dom_env");
 /** Окно кластера ликвидаций: наведение показывает + подсвечивает ленту, клик закрепляет.
  *
  *  Наведение на прямоугольник открывает попап с разбором кластера (свеча,
@@ -122,6 +123,7 @@ async function main() {
     beforeParse(win) {
       try {
         Object.defineProperty(win.navigator, "language", { value: "ru-RU", configurable: true });
+        Object.defineProperty(win.navigator, "languages", { value: ["ru-RU", "ru"], configurable: true });
       } catch (e) { /* ignore */ }
       try {
         win.localStorage.setItem("liqscope.chartSymbol", "BTC_USDT");

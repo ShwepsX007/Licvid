@@ -1,3 +1,4 @@
+require("./_dom_env");
 /**
  * Языки страниц в браузере (jsdom): вход, лендинг и кабинет.
  *
@@ -58,7 +59,8 @@ async function openPage(path) {
       stubCanvas(win);
       // браузер русский: страница обязана показать то, что выбрал сервер
       // (?lang=), а не язык системы
-      try { Object.defineProperty(win.navigator, "language", { value: "ru-RU", configurable: true }); } catch (e) {}
+      try { Object.defineProperty(win.navigator, "language", { value: "ru-RU", configurable: true });
+        Object.defineProperty(win.navigator, "languages", { value: ["ru-RU", "ru"], configurable: true }); } catch (e) {}
       win.matchMedia = () => ({ matches: false, media: "", onchange: null,
         addListener() {}, removeListener() {},
         addEventListener() {}, removeEventListener() {}, dispatchEvent() { return false; } });

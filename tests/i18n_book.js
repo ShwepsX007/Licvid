@@ -1,3 +1,4 @@
+require("./_dom_env");
 // Локали стакана/ленты/индикаторов: все 5 языков, без утечек русского и сырых ключей.
 // Запуск: NODE_PATH=/tmp/smoke/node_modules node tests/i18n_book.js http://127.0.0.1:8011
 

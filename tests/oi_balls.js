@@ -1,3 +1,4 @@
+require("./_dom_env");
 /** OI-шарики и CVD-треугольники: формы, тиры, цвета.
  *
  *  OI-шарики: мини (<$1M, r=9, без подписи), тиры 1/2/3 (r=13.5/14.85/16.2,
@@ -126,6 +127,7 @@ async function runCase(candles) {
     beforeParse(win) {
       try {
         Object.defineProperty(win.navigator, "language", { value: "ru-RU", configurable: true });
+        Object.defineProperty(win.navigator, "languages", { value: ["ru-RU", "ru"], configurable: true });
       } catch (e) { /* ignore */ }
       win.matchMedia = () => ({ matches: false, media: "", onchange: null,
         addListener() {}, removeListener() {}, addEventListener() {},

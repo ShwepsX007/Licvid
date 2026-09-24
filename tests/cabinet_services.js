@@ -1,3 +1,4 @@
+require("./_dom_env");
 /**
  * Кабинет сайта: доски сервисов «Корреляции валют» и «Сторож монет».
  *
@@ -87,6 +88,7 @@ async function main() {
     beforeParse(win) {
       try {
         Object.defineProperty(win.navigator, "language", { value: "ru-RU", configurable: true });
+        Object.defineProperty(win.navigator, "languages", { value: ["ru-RU", "ru"], configurable: true });
       } catch (e) { /* ignore */ }
       try {
         // кабинет открывает доску раскрытой гармошки сервиса

@@ -1,3 +1,4 @@
+require("./_dom_env");
 /**
  * 💬 Чат на языках сайта: ru, en, zh, hi, es.
  *
@@ -105,7 +106,8 @@ async function openCabinet(lang) {
   const dom = await JSDOM.fromURL(URL_BASE + "/cabinet?lang=" + lang, {
     runScripts: "dangerously", resources: "usable", pretendToBeVisual: true, virtualConsole: vc,
     beforeParse(win) {
-      try { Object.defineProperty(win.navigator, "language", { value: lang === "ru" ? "ru-RU" : lang, configurable: true }); } catch (e) {}
+      try { Object.defineProperty(win.navigator, "language", { value: lang === "ru" ? "ru-RU" : lang, configurable: true });
+      Object.defineProperty(win.navigator, "languages", { value: lang === "ru" ? ["ru-RU", "ru"] : [lang, String(lang).split("-")[0]], configurable: true }); } catch (e) {}
       win.matchMedia = () => ({ matches: false, media: "", onchange: null,
         addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {},
         dispatchEvent() { return false; } });

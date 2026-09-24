@@ -1,3 +1,4 @@
+require("./_dom_env");
 /**
  * Кабинет на других языках: сервисы целиком — заголовок и описание внутри.
  *
@@ -107,7 +108,8 @@ async function openCabinet(lang, cookie, path) {
     pretendToBeVisual: true,
     virtualConsole: vc,
     beforeParse(win) {
-      try { Object.defineProperty(win.navigator, "language", { value: "ru-RU", configurable: true }); } catch (e) {}
+      try { Object.defineProperty(win.navigator, "language", { value: "ru-RU", configurable: true });
+        Object.defineProperty(win.navigator, "languages", { value: ["ru-RU", "ru"], configurable: true }); } catch (e) {}
       win.matchMedia = () => ({ matches: false, media: "", onchange: null,
         addListener() {}, removeListener() {}, addEventListener() {},
         removeEventListener() {}, dispatchEvent() { return false; } });

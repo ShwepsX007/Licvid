@@ -317,7 +317,24 @@ class Store:
 
     def close(self) -> None:
         with self._lock:
+            try:
+                self._db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except sqlite3.Error:
+                pass
             self._db.close()
+
+    def wal_checkpoint(self, mode: str = "TRUNCATE") -> None:
+        """Сбросить WAL, чтобы файл не рос, пока читатели держат снимок.
+
+        TRUNCATE отдаёт место на диске. Ошибка чекпойнта не должна ронять
+        сервис: следующая попытка будет через полчаса.
+        """
+        mode = mode if mode in ("PASSIVE", "FULL", "RESTART", "TRUNCATE") else "TRUNCATE"
+        with self._lock:
+            try:
+                self._db.execute(f"PRAGMA wal_checkpoint({mode})")
+            except sqlite3.Error:
+                pass
 
     def _init_schema(self) -> None:
         with self._lock:

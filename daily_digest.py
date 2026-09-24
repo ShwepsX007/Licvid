@@ -970,15 +970,53 @@ class DigestStore:
         return list(self.items)
 
     def mark_published(self, rid: str, lang: str, chat: Any = None,
-                       ok: bool = True) -> Optional[dict]:
+                       ok: bool = True, message_id: Any = 0,
+                       extra: Optional[list] = None) -> Optional[dict]:
+        """Отметить, что выпуск ушёл в канал: язык, время и id сообщения.
+
+        ``message_id`` нужен админке: по нему уже вышедший выпуск убирают из
+        Telegram, когда его удаляют из архива сайта.
+        """
         rec = self.get(rid)
         if rec is None:
             return None
         pub = dict(rec.get("published") or {})
-        pub["en" if is_en(lang) else "ru"] = {
-            "ok": bool(ok), "at": time.time(),
-            "chat": str(chat or ""),
-        }
+        key = "en" if is_en(lang) else "ru"
+        prev = pub.get(key) or {}
+        row: Dict[str, Any] = {"ok": bool(ok), "at": time.time(),
+                               "chat": str(chat or "")}
+        try:
+            mid = int(message_id or 0)
+        except (TypeError, ValueError):
+            mid = 0
+        if mid <= 0 and not ok:
+            # Неудачная попытка не стирает id прошлой удачной публикации:
+            # иначе вышедший пост уже нельзя было бы убрать из канала.
+            try:
+                mid = int(prev.get("message_id") or 0)
+            except (TypeError, ValueError):
+                mid = 0
+            if mid > 0:
+                row["chat"] = str(prev.get("chat") or "")
+                row["extra"] = list(prev.get("extra") or [])
+        if mid > 0:
+            row["message_id"] = mid
+            row.setdefault("extra", [int(x) for x in (extra or []) if str(x).isdigit()])
+        pub[key] = row
         rec["published"] = pub
+        self._flush()
+        return rec
+
+    def remove(self, rid: str) -> Optional[dict]:
+        """Убрать выпуск из архива. Возвращает снятую запись (None — не было).
+
+        Файл обложки не трогаем: это картинка из библиотеки админки, она
+        нужна и другим выпускам, и постам канала.
+        """
+        rid = str(rid or "")
+        rec = self.get(rid)
+        if rec is None:
+            return None
+        self.items = [x for x in self.items if str(x.get("id")) != rid]
         self._flush()
         return rec

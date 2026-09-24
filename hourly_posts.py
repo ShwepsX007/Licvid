@@ -190,6 +190,26 @@ class PostStore:
     def list(self) -> List[dict]:
         return list(self.items)
 
+    def remove(self, rid: str) -> Optional[dict]:
+        """Убрать один пост из архива сайта (файл фото не трогаем)."""
+        rid = str(rid or "")
+        rec = self.get(rid)
+        if rec is None:
+            return None
+        self.items = [x for x in self.items if str(x.get("id")) != rid]
+        self._flush()
+        return rec
+
+    def remove_day(self, day: str) -> List[dict]:
+        """Убрать все посты дня: так чистят старые сводки пачкой."""
+        want = str(day or "")
+        gone = [x for x in self.items if str(x.get("day")) == want]
+        if not gone:
+            return []
+        self.items = [x for x in self.items if str(x.get("day")) != want]
+        self._flush()
+        return gone
+
     def by_day(self, day: str) -> List[dict]:
         want = str(day or "")
         return [x for x in self.items if str(x.get("day")) == want]

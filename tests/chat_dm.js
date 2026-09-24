@@ -181,8 +181,12 @@ async function openPage() {
   const panel = doc.getElementById("tchat-panel");
   check("виджет на месте", !!root && !!panel);
   const tabs = doc.querySelectorAll("#tchat-tabs .tchat-tab");
-  check("две вкладки: Общий и Личные", tabs.length === 2, tabs.length);
-  check("вкладка «Личные» есть", !!doc.querySelector('[data-tab="dm"]'));
+  // Вкладок стало четыре: Общий, Личные, Сервисы, Поддержка (проверка ждала две)
+  check("четыре вкладки: Общий, Личные, Сервисы, Поддержка", tabs.length === 4, tabs.length);
+  check("вкладки на месте",
+        !!doc.querySelector('[data-tab="dm"]') &&
+        !!doc.querySelector('[data-tab="services"]') &&
+        !!doc.querySelector('[data-tab="support"]'));
   check("бейдж онлайна на кнопке чата", !!doc.getElementById("tchat-online"));
 
   // открыть панель

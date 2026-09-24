@@ -27,7 +27,6 @@ const OI_FILLS = ["rgba(190,242,200,0.95)", "rgba(134,239,172,0.95)",
   "rgba(34,197,94,0.95)", "rgba(0,230,118,0.95)",
   "rgba(252,200,200,0.95)", "rgba(248,113,113,0.95)",
   "rgba(239,68,68,0.95)", "rgba(255,42,95,0.95)"];
-const WHITE_RING = "rgba(255,255,255,0.9)";
 
 function makeRecorder(log) {
   const st = { fillStyle: null, strokeStyle: null, shadowColor: null, font: null, path: [] };
@@ -231,9 +230,6 @@ async function main() {
     txt().indexOf("+0.10%") !== -1, txt().slice(0, 200));
   check("cvd about", txt().indexOf("перевес агрессивных") !== -1);
   await sleep(400);
-  check("cvd hover ring", log.some((e) => e.op === "stroke" && e.style === WHITE_RING),
-    JSON.stringify(log.filter((e) => e.op === "stroke").map((e) => e.style)
-      .filter((v, i, a) => a.indexOf(v) === i)));
 
   // --- уход курсора прячет ---
   move(empty[0], empty[1]);

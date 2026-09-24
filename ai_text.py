@@ -95,6 +95,32 @@ SYSTEM_PROMPT_EN = (
 )
 
 BODY_MIN_LEN = 320
+#: Перевод статьи на английский. Промт у статьи один: источник всегда русский,
+#: цель — английский (второй канал и англоязычная версия страницы).
+TRANSLATE_SYSTEM_PROMPT = (
+    "Ты — переводчик аналитического сайта о криптофьючерсах LiqScope. "
+    "Переводишь статью с русского на английский.\n"
+    "Смысл, числа, тикеры, названия монет и бирж — дословно: ничего не "
+    "добавляй, не сокращай и не объясняй своими словами. Язык — живой "
+    "деловой английский, без канцелярита и кальки с русского.\n"
+    "Разметку исходника сохраняй как есть: пустые строки, «##» заголовки, "
+    "«- » и «1. » списки, «> » цитаты, «---», «**жирный**», «*курсив*», "
+    "«`код`», ссылки «[текст](https://…)» — адреса ссылок не меняй. "
+    "Ничего не дописывай от себя, заголовков и подписей не добавляй.\n"
+    "В ответе — только перевод, без пояснений и без пометок о языке."
+)
+TRANSLATE_SYSTEM_PROMPT_EN = (
+    "You translate articles from Russian into English for LiqScope, a crypto "
+    "futures analytics site. Keep the meaning, numbers, tickers and exchange "
+    "names exact: add nothing, cut nothing, do not explain. Use natural "
+    "business English without bureaucratic phrasing.\n"
+    "Keep the source markup exactly as it is: blank lines, «##» headings, "
+    "«- » and «1. » lists, «> » quotes, «---», «**bold**», «*italic*», "
+    "«`code`» and links «[text](https://…)» with their URLs unchanged. Do not "
+    "add headings, signatures or notes.\n"
+    "Return the translation only, with no commentary."
+)
+
 BODY_MAX_LEN = 2600
 
 # Рассказ для дневного дайджеста: живой язык, но без выдумок и воды.
@@ -149,7 +175,8 @@ def set_prompt_source(fn) -> None:
 
 def prompt_setting(kind: str, lang: str = "ru") -> str:
     """Имя настройки промта: ai_prompt_head_ru, ai_prompt_digest_en."""
-    kind = "digest" if str(kind or "").strip().lower() == "digest" else "head"
+    code = str(kind or "").strip().lower()
+    kind = code if code in ("head", "digest", "translate") else "head"
     code = "en" if str(lang or "").startswith("en") else "ru"
     return f"ai_prompt_{kind}_{code}"
 
@@ -157,8 +184,11 @@ def prompt_setting(kind: str, lang: str = "ru") -> str:
 def default_prompt(kind: str, lang: str = "ru") -> str:
     """Встроенный промт: он же показывается в админке как шаблон."""
     en = str(lang or "").startswith("en")
-    if str(kind or "").strip().lower() == "digest":
+    code = str(kind or "").strip().lower()
+    if code == "digest":
         return BODY_SYSTEM_PROMPT_EN if en else BODY_SYSTEM_PROMPT
+    if code == "translate":
+        return TRANSLATE_SYSTEM_PROMPT_EN if en else TRANSLATE_SYSTEM_PROMPT
     return SYSTEM_PROMPT_EN if en else SYSTEM_PROMPT
 
 
@@ -855,6 +885,88 @@ def fit_head(text: str) -> str:
 # ---------------------------------------------------------------------------
 #  Основной класс
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+#  Перевод статьи: подготовка и проверка ответа модели
+# ---------------------------------------------------------------------------
+TRANSLATE_CHUNK = 2500      # знаков на один запрос: длинную статью режем
+
+#: Модель любит представиться: «Вот перевод:», «Here is the translation:».
+_LABEL_RE = re.compile(
+    r"^(?:вот\s+)?(?:перевод|translation|here\s+is\s+the\s+translation)"
+    r"[^:\n]{0,40}:\s*", re.I)
+
+
+def split_for_translation(text: str, limit: int = TRANSLATE_CHUNK) -> List[str]:
+    """Режем статью по абзацам так, чтобы кусок влезал в один запрос.
+
+    Абзац — естественная граница перевода: модель видит цельный кусок и не
+    теряет контекст. Слишком длинный абзац (например, сплошная простыня)
+    режем дополнительно по строкам, а если и строки длинные — по символам.
+    """
+    body = str(text or "").strip()
+    if len(body) <= limit:
+        return [body] if body else []
+    out: List[str] = []
+    buf: List[str] = []
+
+    def flush() -> None:
+        if buf:
+            out.append("\n\n".join(buf).strip())
+            buf.clear()
+
+    for block in body.split("\n\n"):
+        block = block.strip()
+        if not block:
+            continue
+        if len(block) > limit:
+            flush()
+            line_buf: List[str] = []
+            size = 0
+            for line in block.split("\n"):
+                if size + len(line) + 1 > limit and line_buf:
+                    out.append("\n".join(line_buf).strip())
+                    line_buf, size = [], 0
+                while len(line) > limit:          # строка длиннее лимита
+                    out.append(line[:limit])
+                    line = line[limit:]
+                line_buf.append(line)
+                size += len(line) + 1
+            if line_buf:
+                out.append("\n".join(line_buf).strip())
+            continue
+        if sum(len(x) + 2 for x in buf) + len(block) > limit:
+            flush()
+        buf.append(block)
+    flush()
+    return [x for x in out if x]
+
+
+def clean_translation(raw: str) -> str:
+    """Ответ модели → чистый перевод: без ```, «Вот перевод:» и лишних строк."""
+    text = str(raw or "").strip()
+    text = re.sub(r"```[a-z]*\n?", "", text)
+    text = text.replace("```", "").strip()
+    lines = text.split("\n")
+    while lines and _LABEL_RE.match(lines[0].strip()):
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    text = "\n".join(lines).strip()
+    if len(text) >= 2 and text[0] in "«\"'" and text[-1] == text[0]:
+        text = text[1:-1].strip()
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text
+
+
+def cyrillic_ratio(text: str) -> float:
+    """Доля кириллицы среди букв: 0 — чистый английский, 1 — сплошной русский."""
+    letters = [ch for ch in str(text or "") if ch.isalpha()]
+    if not letters:
+        return 0.0
+    cyr = sum(1 for ch in letters if "\u0400" <= ch <= "\u04ff")
+    return cyr / float(len(letters))
+
+
 class AiWriter:
     """Пишет шапку поста, перебирая сервисы по порядку."""
 
@@ -1155,6 +1267,121 @@ class AiWriter:
                         variant: int = 0) -> Optional[str]:
         """То же, но без блокировки event loop."""
         return await asyncio.to_thread(self.narrative_sync, facts, lang, variant)
+
+
+    # --- перевод статьи на английский -----------------------------------
+    def translate_sync(self, text: str, target: str = "en",
+                       src: str = "ru") -> Optional[str]:
+        """Перевод статьи целиком. None — перевести не удалось.
+
+        Статья длиннее лимита одного запроса, поэтому режем её по абзацам:
+        каждый кусок переводится отдельно и на своём месте склеивается. Если
+        хоть один кусок не перевёлся, возвращаем None: половина статьи на
+        английском хуже, чем её отсутствие, — админка в этом случае скажет
+        «ИИ недоступен» и попросит вписать перевод руками (публикация
+        подождёт).
+        """
+        body = str(text or "").strip()
+        if not body or not self.providers:
+            return None
+        chunks = split_for_translation(body)
+        out: List[str] = []
+        for i, chunk in enumerate(chunks):
+            part = self._translate_chunk(chunk, target=target, src=src)
+            if not part:
+                log.warning("ИИ-перевод: кусок %d из %d не перевёлся",
+                            i + 1, len(chunks))
+                return None
+            out.append(part)
+        full = "\n\n".join(out).strip()
+        if not full:
+            return None
+        if cyrillic_ratio(full) > 0.01:
+            # Модель «перевела» не всё: английская версия с русскими абзацами
+            # на сайте выглядела бы сломанной — лучше честно попросить руками
+            log.warning("ИИ-перевод: в ответе остался русский текст")
+            return None
+        return full
+
+    def _translate_chunk(self, chunk: str, target: str = "en",
+                         src: str = "ru") -> Optional[str]:
+        """Один запрос на кусок статьи — с тем же перебором сервисов и ключей."""
+        if not self.providers:
+            return None
+        system = active_prompt("translate", target)
+        prompt = (
+            f"Переведи на английский ({'English' if target == 'en' else target}) "
+            "статью целиком, целиком сохраняя разметку и структуру абзацев:\n\n"
+            + chunk
+        )
+        tokens = max(1200, min(8000, len(chunk) * 2))
+        for p in self.providers:
+            st = self.state[p.name]
+            if st.get("dead"):
+                continue
+            started = time.time()
+            tried: set = set()
+            tried_keys: set = set()
+            try:
+                while True:
+                    try:
+                        raw = self._attempt(p, prompt, target, tokens=tokens,
+                                            system=system)
+                        text = clean_translation(raw)
+                        if not text:
+                            raise RuntimeError("ответ не годится: пусто после чистки")
+                        if cyrillic_ratio(text) > 0.05:
+                            raise RuntimeError("ответ не годится: остался русский текст")
+                        break
+                    except Exception as e:
+                        if model_error(str(e)):
+                            hint = suggested_model(str(e), p.model)
+                            if hint and hint not in tried:
+                                tried.add(p.model)
+                                p.model = hint
+                                st["model"] = hint
+                                self.resolved[p.name] = hint
+                                continue
+                            nxt = self._switch_model(p, tried)
+                            if nxt:
+                                tried.add(nxt)
+                                continue
+                            st["dead"] = True
+                            raise
+                        if "пустой текст" in str(e) and tokens < 8000:
+                            tokens = min(8000, int(tokens * 2))
+                            log.info("ИИ-перевод (%s): пустой ответ — повтор с лимитом %s",
+                                     p.name, tokens)
+                            continue
+                        if quota_error(str(e)) and self._switch_key(p, tried_keys):
+                            continue
+                        raise
+                st.update({"ok": True, "reason": "",
+                           "ms": int((time.time() - started) * 1000)})
+                self.calls += 1
+                self.last = {"provider": p.name, "ok": True, "reason": "",
+                             "ms": st["ms"], "ts": time.time()}
+                log.info("ИИ-перевод: %s (%s), %d знаков за %s мс",
+                         p.name, p.model, len(text), st["ms"])
+                return text
+            except Exception as e:
+                hint = ai_error_hint(str(e))
+                reason = str(e)[:160] + (f" — {hint}" if hint else "")
+                st.update({"ok": False, "reason": reason[:220],
+                           "ms": int((time.time() - started) * 1000)})
+                if auth_error(str(e)):
+                    st["dead"] = True
+                self.fails += 1
+                self.last = {"provider": p.name, "ok": False, "reason": reason[:220],
+                             "ms": st["ms"], "ts": time.time()}
+                log.warning("ИИ-перевод: %s не ответил: %s%s", p.name, e,
+                            f" ({hint})" if hint else "")
+        return None
+
+    async def translate(self, text: str, target: str = "en",
+                        src: str = "ru") -> Optional[str]:
+        """То же, но без блокировки event loop."""
+        return await asyncio.to_thread(self.translate_sync, text, target, src)
 
 
 def build_ai() -> Optional[AiWriter]:

@@ -263,7 +263,8 @@ def text_problem(text: str, has_photo: bool, has_html: bool = False) -> str:
 #  Получатели
 # ---------------------------------------------------------------------------
 def clean_targets(raw: Any) -> Dict[str, Any]:
-    """Что выбрал админ: бот, каналы и/или страницы сайта (главная, терминал, дайджест, сводка)."""
+    """Что выбрал админ: бот, каналы и/или страницы сайта (главная, терминал,
+    дайджест, сводка по часам, статьи)."""
     raw = raw if isinstance(raw, dict) else {}
     channels: List[str] = []
     for item in (raw.get("channels") or []):
@@ -275,6 +276,7 @@ def clean_targets(raw: Any) -> Dict[str, Any]:
             "terminal": bool(raw.get("terminal")),
             "digest": bool(raw.get("digest")),
             "hourly": bool(raw.get("hourly")),
+            "articles": bool(raw.get("articles")),
             "channels": channels[:20]}
 
 
@@ -295,6 +297,8 @@ def targets_text(targets: Dict[str, Any], channels: Optional[List[dict]] = None)
         parts.append("дайджест")
     if (targets or {}).get("hourly"):
         parts.append("сводка по часам")
+    if (targets or {}).get("articles"):
+        parts.append("статьи")
     return ", ".join(parts) or "никуда"
 
 
@@ -447,7 +451,8 @@ class AdService:
                 except Exception as e:                  # noqa: BLE001
                     results["bot"] = {"ok": False, "total": 0, "ok_count": 0,
                                       "fail": 0, "err": f"{type(e).__name__}: {e}"[:120]}
-        # --- сайт: баннеры на всех страницах (главная, терминал, дайджест, сводка) ---
+        # --- сайт: баннеры на всех страницах (главная, терминал, дайджест, сводка,
+        # статьи) ---
         if targets["site"]:
             results["site"] = {"ok": True, "err": ""}
         if targets["terminal"]:
@@ -456,6 +461,8 @@ class AdService:
             results["digest"] = {"ok": True, "err": ""}
         if targets["hourly"]:
             results["hourly"] = {"ok": True, "err": ""}
+        if targets["articles"]:
+            results["articles"] = {"ok": True, "err": ""}
         ok_any = any(bool((v or {}).get("ok")) for v in results.values())
         status = "sent" if ok_any else "failed"
         store.update_ad(ad_id, status=status, sent_at=time.time(), results=results,
@@ -539,6 +546,8 @@ class AdService:
                 bits.append("дайджест: баннер" + ("" if val.get("ok") else " не встал"))
             elif key == "hourly":
                 bits.append("сводка: баннер" + ("" if val.get("ok") else " не встал"))
+            elif key == "articles":
+                bits.append("статьи: баннер" + ("" if val.get("ok") else " не встал"))
             elif key == "bot":
                 if val.get("total"):
                     bits.append(f"бот: {val.get('ok_count', 0)}/{val.get('total')}")
@@ -609,14 +618,14 @@ def register_ad_routes(app, svc: AdService) -> None:
 
         ``?place=landing`` — главная, ``?place=terminal`` — терминал под
         графиком, ``?place=digest`` — дайджест, ``?place=hourly`` — сводка по
-        часам. Вместе со списком отдаём ``banner`` — настройку смены:
+        часам, ``?place=articles`` — раздел статей. Вместе со списком отдаём ``banner`` — настройку смены:
         интервал, плавность, режим и как вписать фотографию. Страница не
         хранит эти числа у себя, поэтому админ меняет их и видит результат
         на следующем показе, без перезапуска сервера.
         """
         store = svc.store
         place = str(request.query_params.get("place") or "landing").strip().lower()
-        if place not in ("landing", "terminal", "digest", "hourly"):
+        if place not in ("landing", "terminal", "digest", "hourly", "articles"):
             place = "landing"
         cfg = banner_settings(store)
         if store is None:
@@ -723,7 +732,8 @@ def register_ad_routes(app, svc: AdService) -> None:
         when = parse_when(body.get("send_at"), now)
         if not draft and not (targets["bot"] or targets["site"]
                               or targets["terminal"] or targets["digest"]
-                              or targets["hourly"] or targets["channels"]):
+                              or targets["hourly"] or targets["articles"]
+                              or targets["channels"]):
             return JSONResponse({"ok": False, "error": "no_targets",
                                  "hint": "Выберите хотя бы один источник: бот, канал или главную."},
                                 status_code=400)

@@ -17,6 +17,8 @@
 """
 from __future__ import annotations
 
+import re
+
 import html
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -533,6 +535,42 @@ def format_alert_html(hit: dict, site_url: str = "https://liqscope.online") -> s
     lines.append(f'<a href="{href}">тепловая карта</a>')
     lines.append(footer_html(site))
     return "\n".join(lines)
+
+
+def chat_text(hit: dict) -> str:
+    """Короткая строка сигнала корреляции для чата на сайте (без разметки)."""
+    kind = "opp" if str(hit.get("kind")) == "opp" else "same"
+    word = "в противофазе" if kind == "opp" else "в одну сторону"
+    a, b = _coin_list([hit.get("a")]), _coin_list([hit.get("b")])
+    r = _num(hit.get("r"))
+    thr = _num(hit.get("threshold"))
+    lines = [
+        f"🔗 корреляции · {metric_title(str(hit.get('metric') or ''))}",
+        f"{a} ↔ {b}  r = {r:+.2f}",
+        f"{word} · порог {thr:+.2f} · окно {window_label(str(hit.get('window') or DEFAULT_WINDOW))}",
+    ]
+    left = peer_line(hit.get("peers") or [], kind)
+    if left:
+        # peer_line отдаёт Telegram-разметку (<code>): в чате на сайте текст
+        # экранируется, поэтому теги убираем
+        lines.append(re.sub(r"</?code>", "", left))
+    return "\n".join(lines)
+
+
+def chat_meta(hit: dict) -> dict:
+    """Части сигнала корреляции — для перевода в кабинете (см. alerts.chat_meta)."""
+    kind = "opp" if str(hit.get("kind")) == "opp" else "same"
+    return {
+        "metric": str(hit.get("metric") or ""),
+        "kind": kind,
+        "a": str(hit.get("a") or ""),
+        "b": str(hit.get("b") or ""),
+        "r": _num(hit.get("r")),
+        "threshold": _num(hit.get("threshold")),
+        "window": str(hit.get("window") or DEFAULT_WINDOW),
+        "peers": [{"a": p.get("a"), "b": p.get("b"), "r": _num(p.get("r"))}
+                  for p in list(hit.get("peers") or [])[:3]],
+    }
 
 
 def alerts_line(alerts_cfg: Dict[str, dict]) -> str:

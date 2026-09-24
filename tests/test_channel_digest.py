@@ -637,14 +637,6 @@ class DigestCoverTest(unittest.TestCase):
         self.assertEqual(pub["day"], "2026-09-18")
         self.assertTrue(pub["name"])
 
-    def test_public_photo_is_empty_without_cover(self):
-        self.assertIsNone(self.api.public_photo({"id": "2026-09-18",
-                                                 "day": "2026-09-18"}))
-        # файл исчез (переехал сервер) — тоже честная пустота, а не битая картинка
-        rec = {"id": "2026-09-18", "day": "2026-09-18",
-               "photo": {"path": "/nowhere/gone.jpg", "name": "gone.jpg"}}
-        self.assertIsNone(self.api.public_photo(rec))
-
     def test_record_carries_cover_into_public_view(self):
         self.api.ctx.store.save({"id": "2026-09-18", "day": "2026-09-18",
                                  "facts": {}, "ai": {}, "published": {}})

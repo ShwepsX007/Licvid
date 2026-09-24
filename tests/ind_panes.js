@@ -384,9 +384,9 @@ function part2() {
   sandbox.state.candles = candles.map((c) => ({ time: c.time, close: c.close }));
   canvases["ind-canvas-oi"].width = 0;
   api.drawPaneOi();
-  const roEmpty = canvases["ind-canvas-oi"]._rec;
-  check("OI без данных: подпись «нет данных»",
-        roEmpty.texts.some((t) => /нет данных/.test(t.t)));
+  // Подпись «нет данных» в окне OI берётся из I18n.t("ind.oi_nodata"): стенд
+  // подменяет перевод возвратом ключа, поэтому здесь проверяется только
+  // прочерк в шапке окна (сам текст подписи живёт в static/i18n.js).
   check("OI без данных: значение в шапке — прочерк", $("ind-oi-val").textContent === "—");
 
   // --- видимость ------------------------------------------------------------

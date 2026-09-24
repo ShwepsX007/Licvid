@@ -40,7 +40,10 @@ SOURCES = (
     "static/cabinet.html",
     "static/reset.html",
     "static/admin.html",
+    "static/articles_admin.js",
     "static/digest.html",
+    "static/articles.html",
+    "static/article.html",
     "static/index.html",
     "static/landing.html",
     "static/app.js",
@@ -111,7 +114,11 @@ def load_pages() -> dict:
     if not path.exists():
         return {}
     src = path.read_text(encoding="utf-8")
-    body = src[src.index("=") + 1: src.rindex(";")]
+    # «=» встречается и в шапке файла («Разметка: window.LIQSCOPE_I18N_PAGES = …»),
+    # поэтому берём присваивание именно словаря, а не первое в файле
+    at = src.rindex("window.LIQSCOPE_I18N_PAGES")
+    body = src[at + len("window.LIQSCOPE_I18N_PAGES"):]
+    body = body[body.index("=") + 1: body.rindex(";")]
     return json.loads(body)
 
 

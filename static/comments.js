@@ -1,4 +1,5 @@
-/* 💬 Комментарии к дайджесту и сводке по часам — читают все, пишут только зарегистрированные */
+/* 💬 Комментарии к дайджесту, сводке по часам и статьям: читают все, пишут
+   только зарегистрированные */
 (function () {
   "use strict";
 
@@ -106,7 +107,9 @@
           if (cnt && !titleEl.contains(cnt)) titleEl.appendChild(cnt);
         }
         if (subEl) {
-          subEl.textContent = t(kind === "digest" ? "cc.sub_digest" : "cc.sub_hourly");
+          const subKey = kind === "digest" ? "cc.sub_digest"
+            : (kind === "article" ? "cc.sub_article" : "cc.sub_hourly");
+          subEl.textContent = t(subKey);
         }
         if (sendBtn) sendBtn.textContent = t("cc.send");
         if (input) {
@@ -266,6 +269,16 @@
           if (urlDay) return urlDay;
         } catch {}
         if (window._dig_selected) return window._dig_selected;
+        return "";
+      });
+    } else if (path.indexOf("/articles/") === 0) {
+      // Статья: обсуждение привязано к адресу статьи (slug), он не меняется
+      // при правках текста — комментарии переживают редактирование.
+      initForPage("article", () => {
+        try {
+          const parts = path.split("/").filter(Boolean);
+          if (parts.length > 1) return decodeURIComponent(parts[parts.length - 1]);
+        } catch {}
         return "";
       });
     } else if (path.indexOf("/hourly") === 0) {

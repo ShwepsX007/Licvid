@@ -892,6 +892,62 @@ def format_alert_html(hit: dict, site_url: str = "https://liqscope.online") -> s
     return "\n".join(lines)
 
 
+def chat_text(hit: dict) -> str:
+    """Короткая строка сигнала для чата на сайте (без разметки Telegram).
+
+    В чат сообщение уходит обычным текстом — HTML там экранируется, поэтому
+    ``<b>``/``<code>`` из письма бота не подходят. Числа и монеты те же, что
+    в Telegram: сигнал в боте и в кабинете должен читаться одинаково.
+    """
+    metric = str(hit.get("metric") or "liq")
+    title = METRIC_TITLE.get(metric, metric)
+    sym = coin_name(str(hit.get("symbol") or ""))
+    win = int(hit.get("window_min") or 5)
+    span = int(hit.get("span_min") or win)
+    tail = (f"за {window_label(span)} · окно {window_label(win)}"
+            if span < win else f"за {window_label(win)}")
+    head = f"{METRIC_ICON.get(metric, '🔔')} {title}: {sym} {money(hit.get('value'))} {tail}"
+    lines = [head, f"порог {money(hit.get('threshold'))}"]
+    if metric == "liq":
+        lines.append(f"{int(hit.get('count') or 0)} ударов · "
+                     f"🔴 {money(hit.get('longs'))}  🟢 {money(hit.get('shorts'))}")
+    elif metric == "cvd":
+        lines.append("покупки" if _num(hit.get("value")) >= 0 else "продажи")
+    elif metric == "oi":
+        pct = hit.get("pct")
+        extra = f" ({pct:+.2f}%)" if isinstance(pct, (int, float)) and pct else ""
+        arrow = "↑" if _num(hit.get("value")) >= 0 else "↓"
+        lines.append(f"изменение OI {arrow}{extra}")
+    if hit.get("peers"):
+        lines.append("ещё в волне: " + ", ".join(
+            f"{coin_name(p.get('symbol') or '')} {money(p.get('value'))}"
+            for p in list(hit["peers"])[:2]))
+    return "\n".join(lines)
+
+
+def chat_meta(hit: dict) -> dict:
+    """Разбор сигнала по частям — чтобы чат на сайте собрал его на своём языке.
+
+    Текст в базе один (русский), а части — числа и ключи: кабинет рисует из
+    них ту же строку на языке посетителя (см. renderSvcMsgs в
+    ``static/terminal_chat.js``).
+    """
+    return {
+        "metric": str(hit.get("metric") or "liq"),
+        "symbol": str(hit.get("symbol") or ""),
+        "value": _num(hit.get("value")),
+        "threshold": _num(hit.get("threshold")),
+        "window_min": int(hit.get("window_min") or 5),
+        "span_min": int(hit.get("span_min") or hit.get("window_min") or 5),
+        "count": int(hit.get("count") or 0),
+        "longs": _num(hit.get("longs")),
+        "shorts": _num(hit.get("shorts")),
+        "pct": _num(hit.get("pct")) if hit.get("pct") is not None else None,
+        "peers": [{"symbol": str(p.get("symbol") or ""), "value": _num(p.get("value"))}
+                  for p in list(hit.get("peers") or [])[:3]],
+    }
+
+
 def format_config_text(cfg: Dict[str, Any]) -> str:
     cfg = normalize_config(cfg)
     on = "включён" if cfg["enabled"] else "выключен"

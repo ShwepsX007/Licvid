@@ -1,5 +1,6 @@
 /**
- * LiqScope — 📣 рекламный баннер: главная, терминал, дайджест, сводка по часам.
+ * LiqScope — 📣 рекламный баннер: главная, терминал, дайджест, сводка по часам,
+ * статьи.
  *
  * Баннер собирается из активных объявлений (/api/ads?place=) и живёт в блоке
  * ``#ad-host``: на главной — под кнопками героя, в терминале — под графиком,
@@ -22,7 +23,7 @@
  *     страницах (landing, digest, hourly) виден всем.
  *
  * Стили — в ``static/ads.css``; странице нужен только контейнер ``#ad-host``
- * с ``data-ad-place`` (landing | terminal | digest | hourly).
+ * с ``data-ad-place`` (landing | terminal | digest | hourly | articles).
  */
 (function () {
     "use strict";
@@ -74,7 +75,8 @@
         var box = host();
         var val = box ? (box.getAttribute("data-ad-place") || "") : "";
         val = String(val || "").trim().toLowerCase();
-        if (val === "terminal" || val === "digest" || val === "hourly" || val === "landing") return val;
+        if (val === "terminal" || val === "digest" || val === "hourly"
+                || val === "landing" || val === "articles") return val;
         return "landing";
     }
 

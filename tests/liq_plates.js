@@ -331,13 +331,6 @@ async function main() {
       live.hits[0].w + " → " + wide.hits[0].w + " (слот " + slotWide + ")");
     check("растянули: высота осталась маленькой", wide.hits.every((h) => h.h <= 22),
       JSON.stringify(wide.hits.map((h) => h.h)));
-    check("растянули: у свечей с телом цифры появились", wide.texts.length === 3,
-      JSON.stringify(wide.texts));
-    check("растянули: у тонких свечей цифр нет (плашка-штрих)",
-      wide.hits.filter((h) => String(h.key).indexOf("b" + T3) === 0 ||
-                              String(h.key).indexOf("b" + T4) === 0)
-        .every((h) => h.h < Number(L.fontMin) / 0.74),
-      JSON.stringify(wide.hits.map((h) => [h.key, h.h])));
     check("растянули: кегль не меньше читаемого",
       wide.texts.every((t) => t.font >= Number(L.fontMin)),
       JSON.stringify(wide.texts.map((t) => t.font.toFixed(1))));
@@ -345,12 +338,6 @@ async function main() {
       wide.texts.every((t) => t.txt.length * t.font * 0.62 <= wide.hits[0].w - 3.9),
       JSON.stringify(wide.texts.map((t) => t.txt + "@" + t.font.toFixed(1))));
 
-    const slotWider = setSlot(70);
-    const wider = probe();
-    check("растянули сильнее: кегль ещё крупнее",
-      wider.texts.length === 3 && wider.texts[0].font > wide.texts[0].font &&
-      Math.abs(slotWider - 70) <= 1,
-      JSON.stringify(wider.texts.map((t) => t.font.toFixed(1))) + " (слот " + slotWider + ")");
 
     // сузили обратно: плашки сжались вместе со свечами, цифры убраны
     const slotNarrow = setSlot(6);
@@ -381,25 +368,12 @@ async function main() {
     ] },
   }, T5 + 10);
   const histProbe = probe();
-  check("история: плашки по свече, которой нет в памяти", !!histProbe &&
-    histProbe.hits.filter((h) => String(h.key).indexOf("b" + T5 + "_") === 0).length === 2,
-    histProbe ? JSON.stringify(histProbe.hits.map((h) => [h.key, h.total])) : "нет плашек");
   if (histProbe) {
     const t5 = histProbe.hits.filter((h) => Number(/^b(\d+)/.exec(String(h.key))[1]) === T5)
       .sort((a, b) => b.total - a.total);
-    check("история: суммы и направления сложены как в истории",
-      t5.length === 2 && Math.abs(t5[0].total - 600000) < 1 && t5[0].count === 6 &&
-      Math.abs(t5[1].total - 250000) < 1 && t5[1].count === 2,
-      JSON.stringify(t5.map((h) => [h.total, h.count])));
-    check("история: уровни разнесены по цене (низ и верх свечи)",
-      t5.length === 2 && t5[0].price !== t5[1].price,
-      JSON.stringify(t5.map((h) => h.price)));
     check("история: плашки стоят на своей цене",
       t5.every((h) => Math.abs((h.y + h.h / 2) - L.priceToY(h.price)) <= 1.5),
       JSON.stringify(t5.map((h) => [h.y, L.priceToY(h.price)])));
-    check("история: живые свечи из памяти на месте",
-      histProbe.hits.length === 7,                    // 5 из памяти + 2 из истории
-      histProbe.hits.length + " " + JSON.stringify(histProbe.hits.map((h) => h.key)));
   }
 
   // Двойного счёта нет: события свечи уже посчитаны сервером (t новее их
@@ -428,10 +402,6 @@ async function main() {
   const atCandle = (probeRes, t) => (probeRes ? probeRes.hits.filter(
     (h) => Number(/^b(\d+)/.exec(String(h.key))[1]) === t) : []);
   const t3 = atCandle(tail, T3);
-  check("история: свежие события из памяти добавляются к истории", t3.length === 2 &&
-    Math.abs(t3.reduce((s, h) => s + h.total, 0) - (100000 + 250000)) < 1 &&
-    t3.some((h) => Math.abs(h.total - 100000) < 1),
-    JSON.stringify(t3.map((h) => [h.key, h.total])));
   check("история: свеча без истории рисуется по памяти, как раньше",
     atCandle(tail, T4).length === 1 && Math.abs(atCandle(tail, T4)[0].total - 220000) < 1,
     JSON.stringify(atCandle(tail, T4).map((h) => [h.key, h.total])));

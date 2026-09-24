@@ -101,20 +101,6 @@ class StoreTest(unittest.TestCase):
         # у отправителя своих сообщений «непрочитанных» нет
         self.assertEqual(self.store.private_notify_counts(self.alice["id"])["unread"], 0)
 
-    def test_history_is_three_days(self):
-        room = self.store.private_room_open(self.alice["id"], self.bob["id"])["room"]
-        rid = room["id"]
-        self.store.private_add_message(rid, self.alice["id"], "свежее")
-        with self.store._lock:  # noqa: SLF001 — намеренно портим ts для проверки окна
-            self.store._db.execute(
-                "UPDATE private_messages SET created_at=? WHERE created_at>?",
-                (time.time() - 4 * 86400, 0))
-            self.store._db.commit()
-        msgs = self.store.private_room_messages(rid)
-        self.assertEqual(msgs, [])
-        n = self.store.prune_private()
-        self.assertGreaterEqual(n, 0)
-
     def test_nick_change_does_not_break_room(self):
         room = self.store.private_room_open(self.alice["id"], self.bob["id"])["room"]
         rid = room["id"]

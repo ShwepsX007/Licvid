@@ -48,6 +48,10 @@ class Ctx:
         self.oi_fn = None            # async (монета) -> payload OI
         self.ai_fn = None            # async (facts, lang) -> текст рассказа
         self.publish_fn = None       # async (rec, langs, force) -> {lang: [ok, err]}
+        #: tg_bot: удаление сообщений уже вышедшего выпуска из каналов
+        self.bot = None
+        #: () -> {язык: {chat, message_id, extra}} — id последней публикации
+        self.sent_ids_fn = None
         self.page_ok = True          # отдавать ли страницу /digest
         self.public_url = ""
         self.window_sec = DAY_SEC
@@ -671,6 +675,85 @@ def empty_day_reason(facts: Optional[dict]) -> str:
             "liquidations_in_memory); выпуск не отправлен")
 
 
+def bot_running() -> bool:
+    """Работает ли Telegram-бот: без него удалять в канале нечем."""
+    bot = ctx.bot
+    if bot is None:
+        return False
+    running = getattr(bot, "running", False)
+    try:
+        return bool(running() if callable(running) else running)
+    except Exception:                                    # noqa: BLE001
+        return False
+
+
+def sent_map(rec: dict) -> Dict[str, dict]:
+    """Где выпуск лежит в Telegram: ``{язык: {chat, message_id, extra}}``.
+
+    Берём из записи архива, а для только что опубликованного выпуска — ещё и
+    из памяти бота: ``mark_published`` идёт после публикации, и до него id
+    сообщения есть только у отправителя.
+    """
+    out: Dict[str, dict] = {}
+    for lang, row in ((rec or {}).get("published") or {}).items():
+        if not isinstance(row, dict):
+            continue
+        try:
+            mid = int(row.get("message_id") or 0)
+        except (TypeError, ValueError):
+            mid = 0
+        if mid > 0:
+            out[str(lang)] = {"chat": str(row.get("chat") or ""), "message_id": mid,
+                              "extra": list(row.get("extra") or [])}
+    fresh: Dict[str, Any] = {}
+    if ctx.sent_ids_fn is not None:
+        try:
+            fresh = dict(ctx.sent_ids_fn() or {})
+        except Exception as e:                           # noqa: BLE001
+            log.debug("дайджест: id публикации не прочитались: %s", e)
+    for lang, info in fresh.items():
+        key = "en" if str(lang).startswith("en") else "ru"
+        if key in out or not isinstance(info, dict):
+            continue
+        try:
+            mid = int(info.get("message_id") or 0)
+        except (TypeError, ValueError):
+            mid = 0
+        if mid > 0:
+            out[key] = {"chat": str(info.get("chat") or ""), "message_id": mid,
+                        "extra": list(info.get("extra") or [])}
+    return out
+
+
+def archive_row(rec: dict) -> dict:
+    """Строка архива для админки: день, языки, id в канале, обложка."""
+    rec = rec or {}
+    day = str(rec.get("day") or rec.get("id") or "")
+    facts = rec.get("facts") or {}
+    tg = sent_map(rec)
+    return {
+        "id": str(rec.get("id") or day),
+        "day": day,
+        "label": day_label(day, "ru") if day else "",
+        "url": f"/digest?day={day}" if day else "/digest",
+        "langs": sorted(k for k, v in (rec.get("published") or {}).items()
+                        if isinstance(v, dict) and v.get("ok")),
+        "tg": sorted(tg),
+        "tg_ready": bool(tg),
+        "cover": bool(((rec.get("photo") or {}).get("path"))),
+        "total_usd": float(facts.get("liq_total_usd") or 0),
+        "liq_count": int(facts.get("liq_count") or 0),
+        "created": float(rec.get("created") or 0),
+        "updated": float(rec.get("updated") or 0),
+    }
+
+
+def delete_fn():
+    """Функция удаления сообщения у бота (None — бота нет)."""
+    bot = ctx.bot
+    return getattr(bot, "delete_message", None) if bot is not None else None
+
+
 async def publish_digest(now: Optional[float] = None, langs=("ru", "en"),
                          force: bool = False, reason: str = "manual",
                          window: Optional[int] = None,
@@ -690,9 +773,15 @@ async def publish_digest(now: Optional[float] = None, langs=("ru", "en"),
     if publish and ctx.publish_fn is not None:
         try:
             result = await ctx.publish_fn(rec, list(langs), bool(force))
+            ids = sent_map(rec)
             for lang, res in (result or {}).items():
                 ok = bool(res[0]) if isinstance(res, (list, tuple)) else bool(res)
-                ctx.store.mark_published(rec.get("id"), lang, ok=ok)
+                info = ids.get("en" if str(lang).startswith("en") else "ru") or {}
+                ctx.store.mark_published(
+                    rec.get("id"), lang, ok=ok,
+                    chat=(info.get("chat") if ok else ""),
+                    message_id=(info.get("message_id") if ok else 0),
+                    extra=(info.get("extra") if ok else None))
             log.info("Дайджест %s опубликован: %s", rec.get("day"), result)
         except Exception as e:
             log.warning("Дайджест: публикация не удалась: %s", e)
@@ -902,5 +991,57 @@ def register_digest_routes(app) -> None:
         return {"ok": True, "item": public_record(rec, "ru", with_article=True),
                 "published": rec.get("published") or {},
                 "en_preview": render_post(rec, "en", ctx.public_url)}
+
+    # --- архив для админки: что лежит на сайте и в Telegram ----------------
+    @router.get("/api/admin/digest/archive")
+    async def api_admin_archive(request: Request, limit: int = 40):
+        """Архив выпусков: старые можно снять с сайта и из каналов."""
+        user, err = _admin(request)
+        if err:
+            return err
+        try:
+            lim = max(1, min(400, int(limit)))
+        except (TypeError, ValueError):
+            lim = 40
+        items = ctx.store.list()
+        days = sorted({str(r.get("day") or "") for r in items if r.get("day")},
+                      reverse=True)
+        return {"ok": True, "items": [archive_row(r) for r in items[:lim]],
+                "count": len(items), "days": days, "keep": ctx.store.keep,
+                "last_day": days[0] if days else "",
+                "store_error": ctx.store.error, "bot": bot_running(),
+                "tz_hours": round(tz_offset() / 3600.0, 2)}
+
+    @router.post("/api/admin/digest/{day}/delete")
+    async def api_admin_delete(request: Request, day: str,
+                               body: Optional[dict] = Body(default=None)):
+        """Удалить выпуск: из архива сайта и, если просили, из Telegram.
+
+        Файл обложки не трогаем — это картинка из библиотеки админки.
+        """
+        user, err = _admin(request)
+        if err:
+            return err
+        body = body or {}
+        rec = ctx.store.get(day)
+        if rec is None:
+            return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
+        want_tg = bool(body.get("tg"))
+        sent = sent_map(rec)
+        result: Dict[str, Any] = {}
+        if want_tg and sent:
+            if not bot_running():
+                return JSONResponse(
+                    {"ok": False, "error": "bot_off",
+                     "message": "Telegram-бот выключен — выпуск не удалён. "
+                                "Включите бота или снимите галочку «и из Telegram»."},
+                    status_code=409)
+            from channel_digest import drop_channel_posts
+            result = await drop_channel_posts(sent, delete_fn())
+        ctx.store.remove(str(rec.get("id") or day))
+        log.info("дайджест %s удалён админом %s (tg=%s: %s)", day, user.get("id"),
+                 want_tg, {k: v.get("deleted") for k, v in result.items()})
+        return {"ok": True, "removed": archive_row(rec), "tg": result,
+                "count": len(ctx.store.list())}
 
     app.include_router(router)

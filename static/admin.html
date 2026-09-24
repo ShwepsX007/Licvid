@@ -10,12 +10,18 @@
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="LiqScope">
 <meta property="og:url" content="https://liqscope.online/admin">
-<meta property="og:title" content="Админка — LiqScope">
-<meta property="og:description" content="Панель управления LiqScope">
+<meta property="og:title" data-i18n-meta="seo.admin.title" content="Админка — LiqScope">
+<meta property="og:description" data-i18n-meta="seo.admin.desc" content="Панель управления LiqScope: пользователи, визиты, сервисы, каналы Telegram, шаблоны постов и проверка ИИ.">
 <meta property="og:image" content="https://liqscope.online/static/og-cover.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="LiqScope">
+<meta property="og:image:alt" data-i18n-meta="seo.admin.title" content="Админка — LiqScope">
+<meta property="og:locale" content="ru_RU">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" data-i18n-meta="seo.admin.title" content="Админка — LiqScope">
+<meta name="twitter:description" data-i18n-meta="seo.admin.desc" content="Панель управления LiqScope: пользователи, визиты, сервисы, каналы Telegram, шаблоны постов и проверка ИИ.">
+<meta name="twitter:image" content="https://liqscope.online/static/og-cover.png">
+<meta name="twitter:image:alt" data-i18n-meta="seo.admin.title" content="Админка — LiqScope">
 <meta name="theme-color" content="#060a12">
 <link rel="icon" href="/static/favicon.ico" sizes="any">
 <link rel="icon" type="image/png" sizes="48x48" href="/static/icon-48.png">
@@ -25,7 +31,7 @@
 <link rel="icon" type="image/png" sizes="512x512" href="/static/icon-512.png">
 <link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
 <link rel="manifest" href="/manifest.webmanifest">
-<link rel="stylesheet" href="/static/account.css?v=geo2">
+<link rel="stylesheet" href="/static/account.css?v=nav2">
 </head>
 <body data-page="admin">
 <header class="site-header">
@@ -135,12 +141,15 @@
             <textarea id="bot-welcome" data-i18n-skip></textarea>
             <label>Объявление в кабинете</label>
             <textarea id="site-notice-in" data-i18n-skip></textarea>
-            <!-- 🔒 чат: через сколько минут бот напоминает в Telegram о безответном
-                 личном сообщении, если человек не ответил на сайте. 0 — выключено. -->
-            <label>💬 ЛС: напоминание в Telegram через N минут (0 — выкл)</label>
+            <!-- 💬 чат: через сколько минут бот напоминает в Telegram о безответном
+                 сообщении — в личке получателю, в поддержке админам. Письмо уходит
+                 только по этой задержке: если ответили, прочитали или админ на сайте —
+                 в Telegram ничего не отправляется. 0 — выключено. -->
+            <label>💬 Чат: напоминание в Telegram через N минут (0 — выкл)</label>
             <input class="input" type="number" id="chat-dm-delay-min" min="0" max="1440" step="1"
                    style="width:120px" data-i18n-skip>
-            <span class="meta">получателю, который привязал бота и не ответил на сайте</span>
+            <span class="meta">ЛС — получателю; поддержка — админам. Только если не ответили,
+                не прочитали и никого нет на сайте</span>
             <div class="row-actions">
                 <button class="btn btn-primary" id="settings-save" type="button">Сохранить</button>
                 <span class="meta" id="settings-status"></span>
@@ -490,6 +499,32 @@
         </div>
     </div>
 
+    <div class="card" id="archive-admin" style="margin-top:14px"
+         data-hint="старые выпуски: убрать со сайта и из Telegram"
+         data-i18n-skip>
+        <h3>🗂 Архив — удаление старых выпусков</h3>
+        <p class="lead">Здесь снимают уже вышедшее: <b>выпуск дня</b> уходит со страницы
+            <code>/digest</code>, <b>сводки по часам</b> — со <code>/hourly</code>. Если галочка
+            «и из Telegram» стоит, тем же действием удаляются и посты в каналах: id сообщений бот
+            запоминает при публикации. У выпусков, вышедших до этой версии, id не сохранялись —
+            такие посты в Telegram придётся убрать вручную.</p>
+        <div class="row-actions" style="margin-top:12px">
+            <label class="meta"><input type="checkbox" id="arc-tg" checked> 🗑 Удалять и вышедшие посты в Telegram</label>
+            <button class="btn" id="arc-reload" type="button">🔄 Обновить архив</button>
+            <span class="meta" id="arc-status"></span>
+        </div>
+        <div class="grid grid-2" style="margin-top:12px">
+            <div>
+                <h4>📰 Дайджесты за сутки</h4>
+                <div id="arc-digests"><p class="meta">загружаю выпуски…</p></div>
+            </div>
+            <div>
+                <h4>🕘 Сводки по часам</h4>
+                <div id="arc-hourly"><p class="meta">загружаю сводки…</p></div>
+            </div>
+        </div>
+    </div>
+
     <div class="card" id="fb-admin" style="margin-top:14px" data-hint="диалоги из кабинета — можно ответить">
         <h3>💬 Обратная связь<span class="fb-dot hidden" id="fb-admin-badge"></span></h3>
         <p class="lead">Всё, что пользователи написали в кабинете кнопкой «По всем вопросам». Отвечайте
@@ -509,6 +544,27 @@
         </div>
     </div>
 
+    <div class="card" id="articles-admin" style="margin-top:14px"
+         data-hint="статьи раздела «Статьи»: тексты, фото, расписание, каналы">
+        <h3>📰 Статьи</h3>
+        <p class="lead">Материалы для раздела <b>«Статьи»</b> на сайте. Русский текст — источник,
+            английский даёт перевод ИИ (кнопка «Перевести ИИ»); если ИИ недоступен, статья
+            <b>не публикуется</b>, пока английскую версию не впишут вручную. Обложка одна на обе
+            версии. На сайте статья появляется сразу после публикации или по выбранной дате, а в
+            Telegram каналы уходит <b>только по кнопке</b>: русская версия — в русский канал,
+            английская — в английский.</p>
+        <div class="row-actions" style="margin-top:12px">
+            <button class="btn btn-primary" id="art-new" type="button">✏️ Новая статья</button>
+            <button class="btn" id="art-reload" type="button">🔄 Обновить список</button>
+            <span class="meta" id="art-state"></span>
+        </div>
+        <div class="grid grid-2" style="margin-top:12px">
+            <div id="art-list"><p class="meta">загружаю статьи…</p></div>
+            <div id="art-editor"></div>
+        </div>
+        <p class="meta" id="art-hint" style="margin-top:10px"></p>
+    </div>
+
     <div class="card" id="ai-prompts" style="margin-top:14px" data-hint="шапка поста и рассказ дайджеста">
         <h3>🤖 Промты для ИИ</h3>
         <p class="lead">Инструкции, по которым ИИ пишет <b>шапку поста</b> в канал и <b>текст дневного дайджеста</b>. В поле уже стоит стандартный промт — правьте прямо в нём; «Вернуть шаблон» очищает поле и снова включает встроенный текст. Пустое поле = стандарт, свои цифры и факты ИИ по-прежнему берёт из сводки.</p>
@@ -520,7 +576,9 @@
 <script src="/static/world-map.js?v=geo1"></script>
 <script src="/static/geo_map.js?v=geo2"></script>
 <script src="/static/presence.js?v=geo2"></script>
-<script src="/static/account.js?v=admin14"></script>
+<script src="/static/account.js?v=nav2"></script>
+<script src="/static/articles_admin.js?v=art1"></script>
+<script src="/static/archive_admin.js?v=arc1"></script>
 <script src="/static/consent.js?v=consent1"></script>
 </body>
 </html>

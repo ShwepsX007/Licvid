@@ -327,44 +327,94 @@
         return String(n).slice(0, 1).toUpperCase();
     }
 
+    /* ---------- шапка: из любого раздела — в любой другой ---------------- */
+
+    /*: разделы сайта. Порядок и подписи те же, что в разметке страниц:
+        подпись берётся из словаря страниц, поэтому кнопка говорит на языке
+        гостя и на всех пяти языках сайта. */
+    var SECTIONS = [
+        { href: "/terminal", icon: "⚡", key: "hour.to_terminal" },
+        { href: "/digest", icon: "📰", key: "hour.digest" },
+        { href: "/hourly", icon: "🕘", key: "hour.title" },
+        { href: "/articles", icon: "📄", key: "art.title" }
+    ];
+
+    /** Раздел, в котором стоит гость: на саму себя страница не ссылается. */
+    function ownSection(path) {
+        for (var i = 0; i < SECTIONS.length; i++) {
+            var href = SECTIONS[i].href;
+            if (path === href || path.indexOf(href + "/") === 0) return href;
+        }
+        return "";
+    }
+
+    /** Как раздел уже показан в разметке страницы (вне нашей шапки).
+
+     *  ``"here"`` — ссылка есть и видна на любой ширине: второй раз её рисовать
+     *  нельзя (дубль в шапке). ``"desk"`` — ссылка есть, но помечена классом
+     *  ``nav-desk``: CSS прячет такие на телефоне (``.nav-desk``), поэтому там
+     *  нужна наша кнопка — иначе раздел из шапки исчезает совсем (так пропадали
+     *  «Сводки», «Дайджест» и «Статьи» на главной). На широком экране наоборот:
+     *  ссылку показывает страница, а нашу кнопку прячет ``.nav-mob``.
+     *  ``""`` — ссылки нет вовсе, кнопка нужна всегда.
+     */
+    function markupLink(nav, box, href) {
+        if (!nav || !nav.querySelectorAll) return "";
+        var links = nav.querySelectorAll('a[href="' + href + '"]');
+        var desk = false;
+        for (var i = 0; i < links.length; i++) {
+            var link = links[i];
+            if (box.contains(link)) continue;             // это наша же кнопка
+            if (/\bnav-desk\b/.test(link.className || "")) { desk = true; continue; }
+            return "here";
+        }
+        return desk ? "desk" : "";
+    }
+
+    /** Кнопки разделов, которых ещё нет в шапке страницы.
+
+     *  На публичных страницах ссылки стоят прямо в HTML — их видит и гость без
+     *  скриптов, и поисковик, поэтому второй раз их не рисуем. На страницах со
+     *  шапкой кабинета (терминал, вход, сброс, кабинет, админка, 404) в разметке
+     *  только язык и логотип — разделы рисует эта функция, иначе из этих
+     *  разделов нельзя было бы уйти никуда, кроме терминала.
+     */
+    function sectionLinks(nav, box, path) {
+        var own = ownSection(path), html = "";
+        SECTIONS.forEach(function (s) {
+            if (s.href === own) return;                       // страница сама себе
+            var state = markupLink(nav, box, s.href);
+            if (state === "here") return;                     // ссылка уже в HTML
+            // ссылка страницы видна только на широком экране — наша кнопка
+            // работает на телефоне и прячется рядом с ней (класс nav-mob)
+            var cls = state === "desk" ? " nav-mob" : "";
+            html += '<a class="btn btn-ghost btn-compact' + cls + '" href="' + s.href + '">' +
+                s.icon + " " + t(s.key) + "</a>";
+        });
+        return html;
+    }
+
     function paintNav(user) {
         var box = $("nav-account");
         if (!box) return;
+        var nav = (box.closest && box.closest("nav")) || box.parentNode || document;
         var path = location.pathname || "";
+        var html = sectionLinks(nav, box, path);
         if (!user) {
-            if (path === "/login") { box.innerHTML = ""; return; }
-            var html = "";
-            // Дайджест и сводки — публичные разделы, доступны гостям без регистрации
-            if (path !== "/digest") {
-                html += '<a class="btn btn-ghost btn-compact" href="/digest">📰 ' + t("digest") + "</a>";
+            // Гость: «Войти» есть везде, кроме самой страницы входа —
+            // разделы ему нужны так же, как вошедшему
+            if (path !== "/login") {
+                html += '<a class="btn btn-primary btn-compact" href="/login">' + t("login") + "</a>";
             }
-            if (path !== "/hourly") {
-                html += '<a class="btn btn-ghost btn-compact" href="/hourly">🕘 ' + t("hourly") + "</a>";
+        } else {
+            if (path !== "/cabinet") {
+                html += '<a class="btn btn-ghost btn-compact" href="/cabinet">' + t("cabinet") + "</a>";
             }
-            html += '<a class="btn btn-primary btn-compact" href="/login">' + t("login") + "</a>";
-            box.innerHTML = html;
-            return;
+            if (user.is_admin && path !== "/admin") {
+                html += '<a class="btn btn-ghost btn-compact" href="/admin">' + t("admin") + "</a>";
+            }
+            html += '<button type="button" class="btn btn-ghost btn-compact" id="acc-logout">' + t("logout") + "</button>";
         }
-        var html = "";
-        // Дайджест — из любой страницы в шапке: раньше в него можно было
-        // попасть только кнопкой внутри сервиса или через логотип и главную
-        if (path !== "/digest") {
-            html += '<a class="btn btn-ghost btn-compact" href="/digest">📰 ' +
-                t("digest") + "</a>";
-        }
-        // Сводки по часам — посты канала на сайте: та же ссылка из любой
-        // страницы кабинета, админки и входа
-        if (path !== "/hourly") {
-            html += '<a class="btn btn-ghost btn-compact" href="/hourly">🕘 ' +
-                t("hourly") + "</a>";
-        }
-        if (path !== "/cabinet") {
-            html += '<a class="btn btn-ghost btn-compact" href="/cabinet">' + t("cabinet") + "</a>";
-        }
-        if (user.is_admin && path !== "/admin") {
-            html += '<a class="btn btn-ghost btn-compact" href="/admin">' + t("admin") + "</a>";
-        }
-        html += '<button type="button" class="btn btn-ghost btn-compact" id="acc-logout">' + t("logout") + "</button>";
         box.innerHTML = html;
         var lo = $("acc-logout");
         if (lo) lo.addEventListener("click", function (e) {
@@ -1010,7 +1060,11 @@
                 var extra = "";
                 if (v.backoff_s) extra = " ⏳" + v.backoff_s + "с";
                 else if (v.age_s!=null) extra = " " + v.age_s + "с";
-                return k + (v.ok ? " ✓" : " ✕") + extra;
+                // почему ✕: причина отказа в самой подписи — иначе не отличить
+                // бан (429/403) от пустого ответа или смены формата биржи
+                var why = (!v.ok && v.error)
+                    ? " (" + String(v.error).replace(/\s+/g, " ").slice(0, 70) + ")" : "";
+                return k + (v.ok ? " ✓" : " ✕") + extra + why;
             }).join(" · ");
             var eff = Number(st.poll_sec) || Number(d.poll_sec) || 4;
             var base = Number(st.base_poll_sec) || eff;
@@ -1018,6 +1072,7 @@
             note.textContent = "плавающий опрос " + eff + "с (база " + base + "с, +" + (st.per_symbol_sec||0.4) + "с/монету) · монет " + wanted + "/" + (st.max_symbols||100) + " · " + ex +
                 (st.mode === "demo" ? " · демо-данные" : "") +
                 (st.persist_ok===false ? " · ⚠️ история не пишется" : "");
+            note.title = note.textContent;    // подпись узкая — подсказка целиком
         }
     }
 
@@ -3739,7 +3794,9 @@
             + adTargetRow("digest", "📰 Дайджест",
                           "— баннер над списком выпусков на /digest")
             + adTargetRow("hourly", "🕘 Сводка по часам",
-                          "— баннер над списком на /hourly");
+                          "— баннер над списком на /hourly")
+            + adTargetRow("articles", "📄 Статьи",
+                          "— баннер в разделе статей: на списке и под статьёй");
         (d.channels || []).forEach(function (c) {
             html += adTargetRow("ch:" + c.id, esc(c.label || "📣 Канал"),
                                 "— id " + esc(c.id));
@@ -3887,7 +3944,8 @@
     }
 
     function adCollect(draft) {
-        var targets = { bot: false, site: false, terminal: false, digest: false, hourly: false, channels: [] };
+        var targets = { bot: false, site: false, terminal: false, digest: false,
+                        hourly: false, articles: false, channels: [] };
         adCheckboxes().forEach(function (inp) {
             if (!inp.checked) return;
             var key = inp.getAttribute("data-ad-target");
@@ -3896,6 +3954,7 @@
             else if (key === "terminal") targets.terminal = true;
             else if (key === "digest") targets.digest = true;
             else if (key === "hourly") targets.hourly = true;
+            else if (key === "articles") targets.articles = true;
             else if (key.indexOf("ch:") === 0) targets.channels.push(key.slice(3));
         });
         ((($("ad-extra") || {}).value) || "").split(/[\s,;]+/).forEach(function (x) {
@@ -5133,14 +5192,17 @@
     }
 
     function boot() {
+        // Шапку рисуем сразу и для гостя: разделы и «Войти» не должны ждать
+        // ответа про пользователя. Иначе при обрыве сети на страницах без
+        // ссылок в разметке (терминал, вход, кабинет, админка) меню осталось
+        // бы пустой полоской, и уйти из раздела было бы некуда.
+        paintNav(null);
         var page = (document.body && document.body.getAttribute("data-page")) || "";
         if (page === "login") bootLogin();
         else if (page === "reset") bootReset();
         else if (page === "cabinet") bootCabinet();
         else if (page === "admin") bootAdmin();
-        else {
-            api("/api/auth/me").then(function (me) { paintNav(me.user); });
-        }
+        else api("/api/auth/me").then(function (me) { paintNav(me.user); });
     }
 
     global.LiqScopeAccount = { boot: boot, api: api, t: t, paintNav: paintNav };

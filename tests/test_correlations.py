@@ -341,7 +341,6 @@ class TestCorrDelivery(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         os.environ["LIQSCOPE_ACCOUNTS_DB"] = ""
-        os.environ["LIQSCOPE_PUMPS"] = "off"
         import server
         cls.srv = server
 

@@ -57,6 +57,7 @@ from fastapi.staticfiles import StaticFiles
 
 from market_feed import GATE_REST, MarketFeed, TF_MINUTES, base_of, canon, _get_json
 from timeframes import parse_tf
+from book_feed import (chat_text as book_chat_text, chat_meta as book_chat_meta)
 from book_feed import (BookFeed, format_wall_html, normalize_book_cfg,
                        register_book_routes)
 from oi_feed import map_candles_to_oi
@@ -66,14 +67,18 @@ from flow_feed import FlowFeed
 from history import HistoryStore, MONTH_HOURS
 from pump_scan import PumpScanner, filter_new as pump_filter_new
 from pump_scan import format_signal_html as pump_signal_html
+from pump_scan import chat_text as pump_chat_text, chat_meta as pump_chat_meta
 from refs import gate_url
 from mailer import build_mailer
 import ai_text
 from ai_text import build_ai, prompt_setting
 import api_digest
+import api_articles
 from api_digest import DigestScheduler, ctx as digest_ctx, register_digest_routes
 from api_hourly import ctx as hourly_ctx, register_hourly_routes
+from api_articles import ctx as articles_ctx, register_article_routes
 from hourly_posts import PostStore as HourlyStore, post_id as hourly_id
+from articles import ArticleStore
 from daily_digest import DigestStore
 from tg_bot import TelegramBot, normalize_public_url
 from web_account import ctx as account_ctx, register_account_routes
@@ -90,6 +95,10 @@ import terminal_chat as terminal_chat_mod
 from terminal_chat import register_chat_routes as register_terminal_chat_routes
 import private_chat as private_chat_mod
 from private_chat import register_private_chat_routes
+import support_chat as support_chat_mod
+from support_chat import register_support_chat_routes
+import service_chat as service_chat_mod
+from service_chat import register_service_chat_routes
 import content_comments as content_comments_mod
 from content_comments import register_comment_routes as register_content_comment_routes
 
@@ -178,6 +187,18 @@ try:
     HOURLY_KEEP = max(50, int(os.getenv("LIQSCOPE_HOURLY_KEEP", "1200") or 1200))
 except ValueError:
     HOURLY_KEEP = 1200
+# 📰 Статьи: материалы, которые админ пишет сам (заголовок, текст, обложка).
+# LIQSCOPE_ARTICLES_FILE="" — не хранить архив (раздел будет пустым).
+ARTICLES_FILE = os.getenv("LIQSCOPE_ARTICLES_FILE",
+                          os.path.join(HERE, "data", "articles.json")).strip()
+if ARTICLES_FILE.lower() in ("0", "none", "off", "false"):
+    ARTICLES_FILE = ""
+ARTICLES_DIR = os.getenv("LIQSCOPE_ARTICLES_DIR",
+                         os.path.join(HERE, "data", "articles")).strip()
+try:
+    ARTICLES_KEEP = max(20, int(os.getenv("LIQSCOPE_ARTICLES_KEEP", "500") or 500))
+except ValueError:
+    ARTICLES_KEEP = 500
 DIGEST_HOUR = int(os.getenv("LIQSCOPE_DIGEST_HOUR", "22") or 22)
 DIGEST_MINUTE = int(os.getenv("LIQSCOPE_DIGEST_MIN", "0") or 0)
 DIGEST_JITTER_MIN = int(os.getenv("LIQSCOPE_DIGEST_JITTER_MIN", "10") or 10)
@@ -465,7 +486,10 @@ async def chat_notify_loop() -> None:
 
     Раз в минуту: если получатель личного сообщения не читает и не отвечает
     (задержка настраивается в админке), а Telegram привязан — бот стукнет
-    один раз. Заодно срезаем всё, что старше 3 дней (и ЛС, и общий чат).
+    один раз. Для поддержки правило то же: сообщение в Telegram уходит не
+    сразу, а через ``chat_dm_tg_delay_min`` минут, если админ так и не ответил
+    и его нет на сайте. Заодно срезаем всё, что старше 3 дней (и ЛС, и общий
+    чат).
     """
     while True:
         try:
@@ -476,6 +500,10 @@ async def chat_notify_loop() -> None:
             await private_chat_mod.scan_reminders()
         except Exception as e:  # noqa: BLE001
             log.debug("chat reminders: %s", e)
+        try:
+            await support_chat_mod.scan_support_reminders()
+        except Exception as e:  # noqa: BLE001
+            log.debug("support reminders: %s", e)
         try:
             await asyncio.to_thread(account_store.prune_private)
             await asyncio.to_thread(account_store.prune_chat)
@@ -1130,17 +1158,24 @@ async def book_alert_loop():
                                 for sym, store in book.walls.items()}
                         seen[uid] = last
                         continue
-                    if not cfg["notify"]:
-                        continue
-                    tg_id = int(sub.get("tg_id") or 0)
-                    if not tg_id or not tg_bot.running:
-                        continue
+                    # Telegram — отдельный тумблер («TELEGRAM ВКЛ/ВЫКЛ»), а лента
+                    # кабинета живёт по подписке: раньше сигнал уходил только
+                    # тем, у кого привязан бот, и во вкладке «Сервисы» стены не
+                    # появлялись вовсе
+                    tg_id = int(sub.get("tg_id") or 0) if cfg["notify"] else 0
+                    if not tg_bot.running:
+                        tg_id = 0
                     lang = str(sub.get("language") or "ru")[:2]
                     for w in book.new_open_walls(cfg["symbols"], cfg["min_usd"],
                                                  cfg["side"], now - 600):
                         if w["id"] <= last.get(w["sym"], 0):
                             continue
                         last[w["sym"]] = w["id"]
+                        await push_service_message(
+                            uid, "book", book_chat_text(w),
+                            {"symbol": w["sym"], "parts": book_chat_meta(w)})
+                        if not tg_id:
+                            continue
                         try:
                             await tg_bot.send(
                                 tg_id, format_wall_html(w, lang),
@@ -1470,6 +1505,12 @@ async def pump_notify():
         fresh = by_user.get(int(w["user_id"]))
         if not fresh:
             continue
+        # лента кабинета: те же сигналы, что уходят в Telegram
+        for hit in fresh[:3]:
+            await push_service_message(
+                int(w["user_id"]), "pump", pump_chat_text(hit),
+                {"symbol": str(hit.get("symbol") or ""),
+                 "parts": pump_chat_meta(hit)})
         tg_id = int(w.get("tg_id") or 0)
         if not tg_id or not tg_bot.running:
             continue
@@ -1526,6 +1567,7 @@ def alerts_due(cfg: dict, market: dict, last_fire, now: float) -> List[dict]:
 
 async def alert_loop():
     """Раз в несколько секунд проверяет пороги и шлёт в Telegram."""
+    import alerts
     from alerts import format_alert_html, normalize_config
     try:
         await asyncio.sleep(20)
@@ -1557,6 +1599,12 @@ async def alert_loop():
 
                 for hit in alerts_due(cfg, market, last_fire, now):
                     account_store.add_alert_event(uid, hit)
+                    # тот же сигнал — в личную ленту кабинета (вкладка «Сервисы»)
+                    await push_service_message(
+                        uid, "alert", alerts.chat_text(hit),
+                        {"symbol": str(hit.get("symbol") or ""),
+                         "metric": str(hit.get("metric") or ""),
+                         "parts": alerts.chat_meta(hit)})
                     tg_id = int(sub.get("tg_id") or 0)
                     if tg_id and tg_bot.running:
                         await tg_bot.send(
@@ -1627,6 +1675,7 @@ async def corr_alert_loop():
     «коэффициент 0.5 и выше»). Повтор по той же паре молчит четверть окна,
     иначе одна и та же связь уходила бы сообщением каждые восемь секунд.
     """
+    import correlations
     from correlations import format_alert_html, normalize_alerts
     try:
         await asyncio.sleep(30)
@@ -1654,6 +1703,12 @@ async def corr_alert_loop():
                     anchor_metric = f"corr_{metric}"
                     account_store.add_alert_event(uid, dict(hit, metric=anchor_metric))
                     CORR_SIGNALS.append(dict(hit, ts=now, user_id=uid))
+                    # и в ленту кабинета: в Telegram письмо, на сайте — строка
+                    await push_service_message(
+                        uid, "corr", correlations.chat_text(hit),
+                        {"symbol": str(hit.get("symbol") or ""),
+                         "metric": metric,
+                         "parts": correlations.chat_meta(hit)})
                     tg_id = int(sub.get("tg_id") or 0)
                     if tg_id and tg_bot.running:
                         await tg_bot.send(
@@ -2414,6 +2469,9 @@ async def lifespan(app: FastAPI):
     app.state.digest_scheduler = digest_sched
     tasks.append(asyncio.create_task(api_digest.scheduler_loop(digest_sched),
                                      name="digest"))
+    # 📰 Статьи: публикация на сайте по расписанию админа (в каналы — кнопкой)
+    tasks.append(asyncio.create_task(api_articles.scheduler_loop(),
+                                     name="articles"))
     # 📣 Реклама: отправка по выбранному времени и автоудаление по сроку
     tasks.append(asyncio.create_task(ads_mod.scheduler_loop(ad_service),
                                      name="ads"))    # 🔒 чат: TG-напоминания о безответных личных + чистка истории
@@ -2544,6 +2602,10 @@ digest_ctx.candles_fn = get_candles
 digest_ctx.oi_fn = oi_payload
 digest_ctx.ai_fn = digest_ai
 digest_ctx.publish_fn = tg_bot.publish_daily_digest
+# Удаление старых выпусков: админка снимает их с сайта и из каналов, а id
+# сообщений знает только бот — он помнит их после каждой публикации.
+digest_ctx.bot = tg_bot
+digest_ctx.sent_ids_fn = lambda: dict(getattr(tg_bot, "channel_sent", {}) or {})
 digest_ctx.public_url = PUBLIC_URL
 # Обложку выпуска выбираем при сборке дайджеста: то же фото уходит в канал и
 # показывается на странице /digest (фото рубрик живут в базе аккаунтов).
@@ -2613,6 +2675,7 @@ async def collect_hourly_post() -> dict:
 
 
 hourly_ctx.store = HourlyStore(HOURLY_FILE, keep=HOURLY_KEEP)
+hourly_ctx.bot = tg_bot
 hourly_ctx.collect_fn = collect_hourly_post
 hourly_ctx.public_url = PUBLIC_URL
 # Посты раздела выходят в английском канале — на странице ссылка на него
@@ -2620,6 +2683,28 @@ hourly_ctx.channel_url_fn = tg_bot.channel_url_en
 register_hourly_routes(app)
 # Бот складывает в этот же архив каждый пост, который реально ушёл в канал
 tg_bot.hourly_store = hourly_ctx.store
+
+# 📰 Статьи: раздел сайта, который наполняет админ. Английскую версию делает
+# ИИ (перевод), а в каналы версии уходят по кнопке — русская в русский
+# канал, английская в английский.
+articles_ctx.store = ArticleStore(ARTICLES_FILE, keep=ARTICLES_KEEP)
+articles_ctx.photo_dir = ARTICLES_DIR
+articles_ctx.public_url = PUBLIC_URL
+articles_ctx.bot = tg_bot
+# ИИ для статей — тот же писатель, что делает шапки и дайджест: у него уже
+# есть перебор сервисов, ключей и моделей, поэтому перевод просто идёт по той
+# же цепи. Ключей нет — перевода нет, и статья ждёт ручной английской версии.
+_articles_ai = getattr(tg_bot, "ai", None)
+articles_ctx.ai_status_fn = (
+    (lambda: _articles_ai.status()) if _articles_ai else
+    (lambda: {"enabled": False, "providers": [], "last": {},
+              "hint": "Ключей ИИ нет: переведите статью вручную."}))
+if _articles_ai is not None:
+    async def translate_article(text: str):
+        """Перевод статьи RU → EN встроенным ИИ (None — ИИ не ответил)."""
+        return await _articles_ai.translate(text, target="en", src="ru")
+    articles_ctx.ai_fn = translate_article
+register_article_routes(app)
 
 # Админка бота на сайте: каналы, публикация постов, контроль, здоровье бирж
 web_bot_admin.ctx.bot = tg_bot
@@ -2672,6 +2757,39 @@ private_chat_mod.ctx.bot = tg_bot
 private_chat_mod.ctx.hub = hub
 private_chat_mod.ctx.public_url = PUBLIC_URL
 register_private_chat_routes(app)
+
+# 🆘 Поддержка: персональный тред у каждого (и у гостя по временному нику).
+# Модуль был написан, но не подключён: /api/chat/support отвечал 404, вкладка
+# «Поддержка» в чате не работала и напоминания в Telegram не уходили.
+support_chat_mod.ctx.store = account_store
+support_chat_mod.ctx.bot = tg_bot
+support_chat_mod.ctx.hub = hub
+support_chat_mod.ctx.public_url = PUBLIC_URL
+register_support_chat_routes(app, hub=hub)
+
+# 🔔 Сервисы: личная лента сигналов в чате кабинета (алерты, корреляции,
+# сторож монет, стены стакана). Модуль тоже был написан, но не подключён:
+# /api/chat/services отвечал 404, поэтому вкладка «Сервисы» была пустой даже
+# тогда, когда сигнал приходил в Telegram.
+service_chat_mod.ctx.store = account_store
+service_chat_mod.ctx.hub = hub
+register_service_chat_routes(app, hub=hub)
+
+
+async def push_service_message(user_id: int, kind: str, text: str,
+                               meta: Optional[dict] = None) -> None:
+    """Сигнал сервиса — в личную вкладку «Сервисы» чата на сайте.
+
+    Копия того же сигнала, что уходит в Telegram: в боте он одним письмом,
+    здесь — строкой в ленте (30 дней). Ошибка доставки не должна валить
+    рассылку — сигнал уже отправлен в Telegram.
+    """
+    try:
+        await service_chat_mod.broadcast_service_user(int(user_id), kind, text,
+                                                      meta or {})
+    except Exception as e:  # noqa: BLE001
+        log.debug("service chat %s/%s: %s", kind, user_id, e)
+
 
 # 💬 Комментарии к дайджесту и сводке по часам: читают все, пишут зарегистрированные
 content_comments_mod.ctx.store = account_store
@@ -3226,11 +3344,13 @@ async def sitemap_xml():
     """Карта сайта: основные страницы во всех языках (hreflang-альтернативы) + архив."""
     digest_items = []
     hourly_items = []
+    article_items = []
     try:
         # digest_ctx и hourly_ctx живут в модулях api_digest / api_hourly —
         # берём их напрямую, чтобы не тянуть app.state
         from api_digest import ctx as dctx
         from api_hourly import ctx as hctx
+        from api_articles import ctx as actx
         try:
             digest_items = list((getattr(dctx, "store", None) or {}).list() if hasattr(getattr(dctx, "store", None), "list") else [])
         except Exception:
@@ -3239,9 +3359,16 @@ async def sitemap_xml():
             hourly_items = list((getattr(hctx, "store", None) or {}).list() if hasattr(getattr(hctx, "store", None), "list") else [])
         except Exception:
             hourly_items = []
+        try:
+            # в карту сайта идут только опубликованные статьи
+            store = getattr(actx, "store", None)
+            article_items = list(store.published() if store is not None else [])
+        except Exception:
+            article_items = []
     except Exception:
         pass
-    return seo_pages.sitemap_xml(digest_items=digest_items, hourly_items=hourly_items)
+    return seo_pages.sitemap_xml(digest_items=digest_items, hourly_items=hourly_items,
+                                 article_items=article_items)
 
 
 @app.get("/manifest.webmanifest")

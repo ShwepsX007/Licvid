@@ -227,17 +227,17 @@
             '">' + esc(label) + "</a>";
     }
 
-    function paintNav(user) {
-        var box = el("nav-account");
+    /** Переходы внутри раздела: кабинет, админка, терминал.
+
+     *  Шапку страницы здесь не трогаем: её рисует общий код (`static/account.js`),
+     *  который знает и про разделы, и про кнопки входа. Раньше раздел рисовал
+     *  шапку сам — и затирал общую, причём проверял у `/api/auth/me` поле `ok`,
+     *  которого в ответе нет: вошедший видел «Войти» вместо кабинета.
+     */
+    function paintJump(user) {
         var jump = el("dig-jump");
         var admin = !!(user && user.is_admin);
         var name = user ? (user.display_name || user.username || t("dig.cabinet")) : "";
-        if (box) {
-            box.innerHTML = user
-                ? navBtn("/cabinet", "👤 " + name) +
-                  (admin ? navBtn("/admin", "🛠 " + t("dig.admin")) : "")
-                : navBtn("/login", "🔑 " + t("dig.login"));
-        }
         if (!jump) return;
         var rows = [];
         rows.push(user ? navBtn("/cabinet", "👤 " + t("dig.cabinet"))
@@ -318,10 +318,11 @@
         var day = params.get("day") || "";
         if (params.get("lang") && I18n && I18n.set) I18n.set(params.get("lang"));
         if (I18n && I18n.onChange) I18n.onChange(function () { loadArchive(selected); });
-        // кто вошёл — тому ссылки в кабинет и (если админ) в админку
+        // кто вошёл — тому ссылки в кабинет и (если админ) в админку.
+        // Про шапку знает account.js: он спрашивает то же самое сам.
         api("/api/auth/me").then(function (res) {
-            paintNav(res && res.ok ? res.user : null);
-        }).catch(function () { paintNav(null); });
+            paintJump((res && res.user) || null);
+        }).catch(function () { paintJump(null); });
         loadArchive(day);
     }
 

@@ -280,6 +280,28 @@ class AccountsTest(unittest.TestCase):
         hist = self.store.list_alert_events(u["id"])
         self.assertEqual(hist[0]["metric"], "liq")
 
+    def test_levels_service_is_live_and_board_is_wired(self):
+        """Сервис «Уровни ликвидаций» — рабочий, а доска в кабинете подключена.
+
+        Проверяем не только каталог: доска уровней живёт в account.js, и если
+        её хук пропадёт, сервис останется пустой гармошкой. Поэтому смотрим и
+        разметку доски, и метку «оценка» (без неё расчёт выглядел бы фактом).
+        """
+        slugs = {s["slug"]: s for s in self.store.list_services()}
+        self.assertIn("levels", slugs)
+        self.assertFalse(slugs["levels"]["coming_soon"])
+        self.assertEqual(slugs["levels"]["icon"], "🎯")
+        u = self.store.upsert_telegram_user({"id": 78, "first_name": "L"})
+        r = self.store.set_user_service_config(u["id"], "levels",
+                                               {"symbol": "btc", "enabled": True},
+                                               enabled=True)
+        self.assertTrue(r["ok"])
+        self.assertTrue(self.store.get_user_service(u["id"], "levels")["enabled"])
+        js = open(os.path.join(HERE, "static", "account.js"), encoding="utf-8").read()
+        for needle in ("levels-board", "function bootLevels", "function loadLevels",
+                       "/api/liq_levels", "lv-badge", "оценка"):
+            self.assertIn(needle, js)
+
     # ----- капча ----------------------------------------------------------
     def test_captcha_solves_once_and_expires(self):
         tok = self.store.new_captcha(12)

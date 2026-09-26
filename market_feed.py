@@ -1418,6 +1418,12 @@ class MarketFeed:
         log.info("MarketFeed запущен: биржи=%s, монет=%d",
                  ",".join(sorted(self.enabled_exchanges)), len(self.symbols))
 
+    @property
+    def session(self):
+        """aiohttp-сессия фида: ею пользуются и другие модули (ликвидации,
+        риск-лимиты, перевес сторон), чтобы не плодить соединения."""
+        return self._session
+
     async def stop(self):
         self._stop.set()
         for t in self._tasks:
@@ -3771,7 +3777,8 @@ class MarketFeed:
         История подтягивается лениво (TTL 10 мин), опрос — раз в 30 c;
         символы опрашиваем по очереди, биржи внутри символа — параллельно.
         """
-        from oi_feed import SAMPLE_INTERVAL
+        from oi_feed import (LEVELS_PER_CYCLE, LEVELS_SAMPLE_SEC, LEVELS_VENUES,
+                             SAMPLE_INTERVAL)
         await asyncio.sleep(5)   # дать ценам и инструментам подтянуться
         while not self._stop.is_set():
             try:
@@ -3787,6 +3794,20 @@ class MarketFeed:
                         raise
                     except Exception as e:
                         log.debug("oi engine %s: %s", sym, e)
+                # Ярус уровней ликвидаций: монеты, открытые в терминале, но не
+                # на графике, срезаются редко (раз в LEVELS_SAMPLE_SEC) и по
+                # четырём биржам — их ряд нужен расчёту уровней, а не тикам.
+                for sym in self.oi.levels_due(limit=LEVELS_PER_CYCLE):
+                    if self._stop.is_set():
+                        break
+                    try:
+                        await self.oi.backfill_symbol(sym)
+                        await self.oi.sample_symbol(sym, venues=LEVELS_VENUES)
+                        self.oi.levels_mark(sym)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        log.debug("oi levels %s: %s", sym, e)
             except asyncio.CancelledError:
                 break
             except Exception as e:

@@ -16,13 +16,20 @@ from __future__ import annotations
 import html
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-METRICS = ("liq", "cvd", "oi")
+METRICS = ("liq", "cvd", "oi", "level")
 METRIC_TITLE = {
     "liq": "ликвидации",
     "cvd": "CVD",
     "oi": "OI",
+    "level": "уровни ликвидаций",
 }
-METRIC_ICON = {"liq": "💥", "cvd": "🌊", "oi": "📊"}
+METRIC_ICON = {"liq": "💥", "cvd": "🌊", "oi": "📊", "level": "🎯"}
+#: Порог метрики «уровни» — это масса уровня, а не объём за окно: сравнивать
+#: его с порогами ликвидаций нельзя, поэтому у метрики свои пресеты.
+THRESHOLD_PRESETS_LEVEL = (100_000, 500_000, 1_000_000, 5_000_000, 20_000_000)
+#: Насколько близко цена должна подойти к уровню, чтобы это был «подход».
+#: Полпроцента: ближе — уже событие, дальше — просто соседняя цена.
+LEVEL_APPROACH_REL = 0.005
 
 # Окна агрегации: ровно пять кнопок — и в боте, и в кабинете (в кабинете
 # они в одну строку, шестая кнопка ломала раскладку). Пятёрка больше не
@@ -43,7 +50,9 @@ OI_WIN_BY_MIN = (
 #: окно по умолчанию, минуты
 DEFAULT_WINDOW_MIN = 5
 #: окна по метрикам: у ликвидаций минуты, у CVD и OI — крупнее
-DEFAULT_WINDOWS: Dict[str, int] = {"liq": 5, "cvd": 15, "oi": 60}
+#: У «уровней» окно — это пауза между сообщениями по одной монете: событие
+#: не агрегируется, как объём, а случается (цена подошла к уровню).
+DEFAULT_WINDOWS: Dict[str, int] = {"liq": 5, "cvd": 15, "oi": 60, "level": 60}
 #: монета по умолчанию — у каждой метрики своя: можно слушать ликвидации
 #: BTC, CVD эфира и OI сола сразу, и сигналы придут независимо
 DEFAULT_COINS: Dict[str, str] = {m: "ALL" for m in METRICS}
@@ -59,8 +68,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "window_min": 5,                       # для старых настроек и клиентов
     "windows": dict(DEFAULT_WINDOWS),
     "coins": dict(DEFAULT_COINS),          # монета каждой метрики
-    "threshold": {"liq": 500_000, "cvd": 1_000_000, "oi": 1_000_000},
-    "min_event": {"liq": 0, "cvd": 0, "oi": 0},
+    "threshold": {"liq": 500_000, "cvd": 1_000_000, "oi": 1_000_000,
+                  "level": 1_000_000},
+    "min_event": {"liq": 0, "cvd": 0, "oi": 0, "level": 0},
 }
 
 
@@ -263,9 +273,109 @@ def span_minutes(now: float, window_sec: float, since_ts: Optional[float]) -> in
 
 
 def threshold_presets(metric: str) -> List[int]:
-    if str(metric or "").lower() in ("cvd", "oi"):
+    m = str(metric or "").lower()
+    if m == "level":
+        return list(THRESHOLD_PRESETS_LEVEL)
+    if m in ("cvd", "oi"):
         return list(THRESHOLD_PRESETS_FLOW)
     return list(THRESHOLD_PRESETS_LIQ)
+
+
+#: Полоса живого потока уровней: показываем магниты в пределах 3 % от цены —
+#: это «что рядом», тогда как сигнал срабатывает на 0.5 % (LEVEL_APPROACH_REL).
+LEVEL_FLOW_BAND_REL = 0.03
+
+
+def magnets_of(row: Any) -> List[dict]:
+    """Магниты монеты списком — в каком бы виде их ни положили в снимок.
+
+    Движок уровней отдаёт ``magnets`` словарём (``up``/``down``/``top_up``/
+    ``top_down``), а сервер кладёт в слепок список. Оба вида должны читаться
+    одинаково: раньше цикл по словарю брал ключи-строки и ронял ленту
+    метрики на первом же запросе кабинета.
+    """
+    mags = row.get("magnets") if isinstance(row, dict) else row
+    if isinstance(mags, dict):
+        out: List[dict] = []
+        seen = set()
+        for key in ("up", "down", "top_up", "top_down"):
+            m = mags.get(key)
+            if not isinstance(m, dict):
+                continue
+            mark = (_num(m.get("price")), _num(m.get("usd")))
+            if mark in seen:
+                continue
+            seen.add(mark)
+            out.append(m)
+        return out
+    if isinstance(mags, (list, tuple)):
+        return [m for m in mags if isinstance(m, dict)]
+    return []
+
+
+def level_flow_rows(market: Dict[str, Any], cfg: Dict[str, Any], now: float,
+                    limit: int = 12, band_rel: float = LEVEL_FLOW_BAND_REL) -> List[dict]:
+    """Ближайшие крупные магниты вокруг цены — поток метрики «уровни».
+
+    Сигнал редкий (цена должна подойти), а лента сервиса не должна пустовать:
+    показываем уровни в полосе ``band_rel`` и сортируем от ближнего к дальнему.
+    """
+    cfg = normalize_config(cfg)
+    coin = canon_symbol(symbol_of(cfg, "level"))
+    min_usd = _num(cfg["min_event"].get("level"))
+    rows: List[dict] = []
+    for sym, data in (market.get("levels") or {}).items():
+        if not isinstance(data, dict):
+            continue
+        csym = canon_symbol(sym)
+        if coin not in ("ALL", "") and csym != coin:
+            continue
+        price = _num(data.get("price"))
+        if not price:
+            continue
+        for mag in magnets_of(data):
+            usd = _num(mag.get("usd"))
+            level_price = _num(mag.get("price"))
+            if not usd or usd <= 0 or not level_price:
+                continue
+            dist = (level_price - price) / price
+            if abs(dist) > float(band_rel):
+                continue
+            side = str(mag.get("side") or ("long" if dist < 0 else "short"))
+            rows.append({
+                "ts": _num(data.get("ts"), now),
+                "symbol": csym,
+                "value": round(usd, 2),
+                "count": int(mag.get("levels") or 0),
+                "side": "LONG" if side == "long" else "SHORT",
+                "distance_pct": round(dist * 100.0, 3),
+                "level_price": level_price,
+                "lev": _num(mag.get("lev")),
+            })
+    rows.sort(key=lambda r: abs(_num(r.get("distance_pct"))))
+    return rows[:max(1, int(limit))]
+
+
+def level_pressure(rows: Iterable[dict], n: int = 24) -> List[float]:
+    """Кривая давления уровней: сколько массы набирается по мере приближения.
+
+    Магниты сортируются от ближнего к дальнему, масса накапливается — линия
+    показывает, что ждёт цену на подходе. Пустой рынок — пустой список.
+    """
+    n = max(2, int(n or 24))
+    ordered = sorted((r for r in rows or [] if _num(r.get("value"))),
+                     key=lambda r: abs(_num(r.get("distance_pct"))))
+    if not ordered:
+        return []
+    acc = 0.0
+    out: List[float] = []
+    for r in ordered:
+        acc += _num(r.get("value"))
+        out.append(round(acc, 2))
+    if len(out) > n:
+        step = max(1, len(out) // n)
+        out = out[::step][:n]
+    return out
 
 
 def flow_rows(metric: str, market: Dict[str, Any], cfg: Dict[str, Any],
@@ -303,6 +413,8 @@ def flow_rows(metric: str, market: Dict[str, Any], cfg: Dict[str, Any],
             rows.append({"ts": ts, "symbol": sym, "value": round(usd, 2),
                          "count": 1, "side": str(x.get("side") or ""),
                          "exchange": str(x.get("exchange") or "")})
+    elif metric == "level":
+        rows = level_flow_rows(market, cfg, now, limit=limit)
     elif metric == "cvd":
         min_bucket = _num(cfg["min_event"].get("cvd"))
         buckets: Dict[float, Dict[str, float]] = {}
@@ -445,6 +557,7 @@ def presets() -> Dict[str, Any]:
         "thresholds": list(THRESHOLD_PRESETS),
         "thresholds_liq": list(THRESHOLD_PRESETS_LIQ),
         "thresholds_flow": list(THRESHOLD_PRESETS_FLOW),
+        "thresholds_level": list(THRESHOLD_PRESETS_LEVEL),
         "min_event": list(MIN_PRESETS),
         "coins": list(COIN_PRESETS),
     }
@@ -669,6 +782,30 @@ def live_snapshot(cfg: Dict[str, Any], market: Dict[str, Any],
     out["cvd"] = pack(cvd, signed=True)
     out["oi"] = pack(oi, signed=True)
 
+    # Уровни: лидер — самый крупный магнит в полосе подхода, «поток» — все
+    # магниты рядом, а микрографик — накопление массы по мере приближения.
+    w_level = window_of(cfg, "level")
+    lvl_rows = level_flow_rows(market, cfg, now, limit=12)
+    lead_lvl = max(lvl_rows, key=lambda r: _num(r.get("value")),
+                   default=None) or (lvl_rows[0] if lvl_rows else None)
+    out["level"] = {
+        "value": _num((lead_lvl or {}).get("value")),
+        "abs": abs(_num((lead_lvl or {}).get("value"))),
+        "symbol": (lead_lvl or {}).get("symbol") or syms["level"],
+        "count": int((lead_lvl or {}).get("count") or 0),
+        "pct": _num((lead_lvl or {}).get("distance_pct")),
+        "total": sum(_num(r.get("value")) for r in lvl_rows),
+        "top": [{"symbol": r.get("symbol"), "usd": _num(r.get("value")),
+                 "count": int(r.get("count") or 0),
+                 "distance_pct": _num(r.get("distance_pct"))} for r in lvl_rows[:5]],
+        "levels": [{"symbol": r.get("symbol"), "price": _num(r.get("level_price")),
+                    "usd": _num(r.get("value")), "side": str(r.get("side") or ""),
+                    "distance_pct": _num(r.get("distance_pct")),
+                    "lev": _num(r.get("lev"))} for r in lvl_rows[:5]],
+        "spark": level_pressure(lvl_rows),
+        "estimate": True,
+    }
+
     liq_pts: Dict[Any, float] = {}
     want = canon_symbol(sym)
     liq_start = window_start(now, w_liq * 60, since_of(since, "liq", sym))
@@ -722,7 +859,7 @@ def live_snapshot(cfg: Dict[str, Any], market: Dict[str, Any],
     for m in METRICS:
         out[m]["flow"] = flow_rows(m, market, cfg, now)
     for m, win, lr in (("liq", w_liq, liq), ("cvd", w_cvd, cvd),
-                       ("oi", w_oi, oi)):
+                       ("oi", w_oi, oi), ("level", w_level, None)):
         out[m]["window_min"] = win
         out[m]["span_min"] = span_minutes(now, win * 60,
                                           since_of(since, m, syms[m]))
@@ -732,6 +869,64 @@ def live_snapshot(cfg: Dict[str, Any], market: Dict[str, Any],
     out["symbol"] = cfg["symbol"]
     out["coins"] = dict(syms)
     return out
+
+
+def level_hits(market: Dict[str, Any], threshold: float, coin: str = "ALL",
+               limit: int = 3, approach_rel: float = LEVEL_APPROACH_REL,
+               now: Optional[float] = None,
+               window_min: Optional[int] = None) -> List[dict]:
+    """Подход цены к крупному расчётному уровню — карточки сигналов.
+
+    ``market["levels"]`` — снимок уровней по монетам, который кладёт сервер
+    (``{"BTC_USDT": {"price": ..., "magnets": [...]}}``). Событие — цена в
+    пределах ``approach_rel`` от магнита, масса которого не меньше порога.
+    Уровни — оценка (см. ``liq_levels``), и в тексте сигнала это сказано.
+
+    Окно у метрики — пауза между сообщениями; в карточку кладём
+    ``cooldown_min``, чтобы сервер не повторял сигнал по тому же уровню.
+    """
+    out: List[dict] = []
+    want = canon_symbol(coin)
+    for sym, row in (market.get("levels") or {}).items():
+        if not isinstance(row, dict):
+            continue
+        if want not in ("ALL", "") and canon_symbol(sym) != want:
+            continue
+        price = _num(row.get("price"))
+        if not price:
+            continue
+        for mag in magnets_of(row):
+            usd = _num(mag.get("usd"))
+            level_price = _num(mag.get("price"))
+            if not usd or usd < float(threshold or 0) or not level_price:
+                continue
+            dist = (level_price - price) / price
+            if abs(dist) > float(approach_rel):
+                continue
+            side = str(mag.get("side") or ("long" if dist < 0 else "short"))
+            out.append({
+                "metric": "level",
+                "symbol": canon_symbol(sym),
+                "value": usd,
+                "abs": usd,
+                "threshold": float(threshold or 0),
+                "window_min": window_minutes(
+                    window_min if window_min is not None
+                    else DEFAULT_WINDOWS["level"]),
+                "span_min": 1,
+                "count": int(mag.get("levels") or 0),
+                "longs": usd if side == "long" else None,
+                "shorts": usd if side == "short" else None,
+                "pct": round(dist * 100.0, 3),
+                "level_price": level_price,
+                "level_side": side,
+                "level_lev": _num(mag.get("lev")),
+                "level_share": _num(mag.get("share")),
+                "price": price,
+                "estimate": True,
+            })
+    out.sort(key=lambda h: -abs(_num(h.get("value"))))
+    return out[:max(1, int(limit))]
 
 
 def evaluate(cfg: Dict[str, Any], market: Dict[str, Any],
@@ -754,6 +949,12 @@ def evaluate(cfg: Dict[str, Any], market: Dict[str, Any],
         # одновременно и сигналят независимо друг от друга
         coin = symbol_of(cfg, metric)
         start = since_of(since, metric, coin)
+        if metric == "level":
+            # Событие, а не окно: цена подошла к уровню. Пауза — окно метрики.
+            for hit in level_hits(market, thr, coin, limit, now=now, window_min=win):
+                hit["cooldown_min"] = win
+                hits.append(hit)
+            continue
         if metric == "liq":
             rows = liq_by_symbol(market.get("events") or [], win * 60,
                                  cfg["min_event"]["liq"], now, coin, start)
@@ -855,8 +1056,11 @@ def format_alert_html(hit: dict, site_url: str = "https://liqscope.online") -> s
     val = money(hit.get("value"))
     thr = money(hit.get("threshold"))
     # «за 1м из 5м» вместо «за 5м» — сразу видно, что окно после сигнала
-    # начато заново и в сообщении только новые данные.
-    if span < win:
+    # начато заново и в сообщении только новые данные. У подхода к уровню
+    # окна нет: событие одно, а число — пауза между сообщениями.
+    if metric == "level":
+        tail = f"пауза {window_label(win)}"
+    elif span < win:
         tail = (f"за {window_label(span)}"
                 f" · окно {window_label(win)}")
     else:
@@ -880,10 +1084,25 @@ def format_alert_html(hit: dict, site_url: str = "https://liqscope.online") -> s
         extra = f" ({pct:+.2f}%)" if isinstance(pct, (int, float)) and pct else ""
         arrow = "↑" if _num(hit.get("value")) >= 0 else "↓"
         lines.append(f"изменение OI {arrow}{extra}")
+    elif metric == "level":
+        lp = _num(hit.get("level_price"))
+        dist = _num(hit.get("pct"))
+        side = "лонги" if str(hit.get("level_side")) == "long" else "шорты"
+        lev = _num(hit.get("level_lev"))
+        lines.append(
+            f"цена подходит к уровню <code>{html.escape(money(lp))}</code>"
+            f" · масса уровня <code>{html.escape(money(hit.get('value')))}</code>")
+        bits = [side]
+        if dist is not None:
+            bits.append(f"{dist:+.2f}% к цене")
+        if lev:
+            bits.append(f"плечо ~{lev:.0f}x")
+        lines.append(" · ".join(html.escape(b) for b in bits))
+        lines.append("<i>уровень расчётный (оценка), не заявка биржи</i>")
     extra_peers = peers_line(hit.get("peers") or [])
     if extra_peers:
         lines.append(f"ещё в волне: {extra_peers}")
-    if span < win:
+    if span < win and metric != "level":
         lines.append("<i>окно после сигнала начато заново</i>")
     site = (site_url or "https://liqscope.online").rstrip("/")
     href = html.escape(f"{site}/terminal", quote=True)
@@ -904,8 +1123,12 @@ def chat_text(hit: dict) -> str:
     sym = coin_name(str(hit.get("symbol") or ""))
     win = int(hit.get("window_min") or 5)
     span = int(hit.get("span_min") or win)
-    tail = (f"за {window_label(span)} · окно {window_label(win)}"
-            if span < win else f"за {window_label(win)}")
+    if metric == "level":
+        tail = f"пауза {window_label(win)}"
+    elif span < win:
+        tail = f"за {window_label(span)} · окно {window_label(win)}"
+    else:
+        tail = f"за {window_label(win)}"
     head = f"{METRIC_ICON.get(metric, '🔔')} {title}: {sym} {money(hit.get('value'))} {tail}"
     lines = [head, f"порог {money(hit.get('threshold'))}"]
     if metric == "liq":
@@ -918,6 +1141,18 @@ def chat_text(hit: dict) -> str:
         extra = f" ({pct:+.2f}%)" if isinstance(pct, (int, float)) and pct else ""
         arrow = "↑" if _num(hit.get("value")) >= 0 else "↓"
         lines.append(f"изменение OI {arrow}{extra}")
+    elif metric == "level":
+        lp, dist = _num(hit.get("level_price")), _num(hit.get("pct"))
+        side = "лонги" if str(hit.get("level_side")) == "long" else "шорты"
+        lev = _num(hit.get("level_lev"))
+        bits = [side]
+        if dist is not None:
+            bits.append(f"{dist:+.2f}% к цене")
+        if lev:
+            bits.append(f"плечо ~{lev:.0f}x")
+        lines.append(f"уровень {money(lp)} · масса {money(hit.get('value'))} · "
+                     + " · ".join(bits))
+        lines.append("уровень расчётный (оценка), не заявка биржи")
     if hit.get("peers"):
         lines.append("ещё в волне: " + ", ".join(
             f"{coin_name(p.get('symbol') or '')} {money(p.get('value'))}"
@@ -943,6 +1178,10 @@ def chat_meta(hit: dict) -> dict:
         "longs": _num(hit.get("longs")),
         "shorts": _num(hit.get("shorts")),
         "pct": _num(hit.get("pct")) if hit.get("pct") is not None else None,
+        "level_price": _num(hit.get("level_price")),
+        "level_side": (str(hit.get("level_side")) if hit.get("level_side") else None),
+        "level_lev": _num(hit.get("level_lev")),
+        "cooldown_min": int(hit.get("cooldown_min") or 0) or None,
         "peers": [{"symbol": str(p.get("symbol") or ""), "value": _num(p.get("value"))}
                   for p in list(hit.get("peers") or [])[:3]],
     }

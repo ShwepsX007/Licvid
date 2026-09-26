@@ -45,15 +45,71 @@ def load(lang: str) -> dict:
         return json.load(fh)
 
 
-def builtin_keys() -> set:
-    """Ключи, которые живут в static/i18n.js (терминал и лендинг)."""
+def builtin_block(lang: str = "RU") -> str:
+    """Тело словаря одного языка из static/i18n.js."""
     with open(os.path.join(STATIC, "i18n.js"), encoding="utf-8") as fh:
         src = fh.read()
-    start = src.find("var RU = {")
-    end = src.find("\n    };", start)
+    start = src.find(f"var {lang} = {{")
+    # словари закрываются по-разному: где-то с отступом, где-то в начале строки
+    ends = [i for i in (src.find("\n    };", start), src.find("\n};", start))
+            if i > start]
+    end = min(ends) if ends else -1
     block = src[start:end] if start >= 0 and end > start else ""
-    block = re.sub(r"//.*", "", block)
-    return set(re.findall(r'"([A-Za-z][A-Za-z0-9_.]*)"\s*:', block))
+    return re.sub(r"//.*", "", block)
+
+
+def builtin_keys(lang: str = "RU") -> set:
+    """Ключи, которые живут в static/i18n.js (терминал и лендинг)."""
+    return set(re.findall(r'"([A-Za-z][A-Za-z0-9_.]*)"\s*:',
+                          builtin_block(lang)))
+
+
+def builtin_map(lang: str = "RU") -> dict:
+    """Ключ → строка одного языка (для сверки переводов между языками)."""
+    return dict(re.findall(r'"([A-Za-z][A-Za-z0-9_.]*)"\s*:\s*"([^"]*)"',
+                           builtin_block(lang)))
+
+
+class LevelsBoardLanguageTest(unittest.TestCase):
+    """Доска уровней ликвидаций: ключи слоя и панели есть на всех языках.
+
+    Панель кабинета и слой графика подписаны ключами ``lv.*`` /
+    ``chart.levels*``. Пропущенный ключ выглядит не поломкой, а русской
+    строкой посреди перевода — поэтому сверяем состав и сами значения.
+    """
+
+    LANGS = ("RU", "EN", "ZH", "HI", "ES")
+    PREFIXES = ("lv.", "chart.levels")
+
+    def setUp(self) -> None:
+        self.maps = {lang: builtin_map(lang) for lang in self.LANGS}
+
+    def _keys(self, lang: str) -> set:
+        return {k for k in self.maps[lang]
+                if k.startswith(self.PREFIXES)}
+
+    def test_keys_exist_in_every_language(self) -> None:
+        source = self._keys("RU")
+        self.assertGreaterEqual(len(source), 30, "не разобрали ключи доски уровней")
+        for lang in self.LANGS:
+            self.assertEqual(
+                source, self._keys(lang),
+                f"{lang}: нет {sorted(source - self._keys(lang))[:6]}, "
+                f"лишние {sorted(self._keys(lang) - source)[:6]}",
+            )
+
+    def test_other_languages_are_translated(self) -> None:
+        cyr = re.compile("[А-Яа-яЁё]")
+        source = self._keys("RU")
+        for lang in self.LANGS:
+            if lang == "RU":
+                continue
+            same = [k for k in sorted(source)
+                    if self.maps[lang].get(k) == self.maps["RU"].get(k)]
+            self.assertFalse(same, f"{lang}: строка не переведена — {same[:6]}")
+            ru_only = [k for k in sorted(source)
+                       if cyr.search(self.maps[lang].get(k, ""))]
+            self.assertFalse(ru_only, f"{lang}: остался русский — {ru_only[:6]}")
 
 
 class DictionariesTest(unittest.TestCase):

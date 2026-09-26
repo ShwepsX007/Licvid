@@ -701,6 +701,21 @@ RU_EN.update({
     # переводим и пару «иконка + название»: короткое «🔔 Алерты» перехватило бы
     # начало длинного названия и оставило «по объёму» необработанным.
     "🔔 Алерты по объёму": "🔔 Volume alerts",
+    # --- алерты подхода к уровню ликвидаций (🎯) ---------------------------
+    "уровни ликвидаций": "liquidation levels",
+    "цена подходит к уровню <code>": "price approaching level <code>",
+    "</code> · масса уровня <code>": "</code> · level mass <code>",
+    "<i>уровень расчётный (оценка), не заявка биржи</i>":
+        "<i>the level is calculated (an estimate), not an exchange order</i>",
+    "уровень расчётный (оценка), не заявка биржи":
+        "the level is calculated (an estimate), not an exchange order",
+    " · масса ": " · mass ",
+    "% к цене": "% to price",
+    "плечо ~": "leverage ~",
+    "уровень ": "level ",
+    "пауза ": "pause ",
+    "лонги": "longs",
+    "шорты": "shorts",
     "🔗 Корреляции валют": "🔗 Coin correlations",
     "👁 Сторож монет": "👁 Coin watcher",
     "📰 Дневной дайджест": "📰 Daily digest",

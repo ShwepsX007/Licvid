@@ -65,6 +65,10 @@ from oi_feed import map_candles_to_oi
 from hour_board import BOARD, OI, SLOTS, build_snapshot, HOUR, SLOT_SEC
 from accounts import COOKIE_SID, Store
 from flow_feed import FlowFeed
+from volume_profile import VolumeProfile
+from risk_limit import RiskLimits
+from side_feed import SideFeed
+from liq_levels import LevelsEngine
 from history import HistoryStore, MONTH_HOURS
 from pump_scan import PumpScanner, filter_new as pump_filter_new
 from pump_scan import format_signal_html as pump_signal_html
@@ -93,6 +97,7 @@ from feedback import register_feedback_routes
 import geoip
 import web_geo
 import web_layers
+from web_liq_levels import register_liq_level_routes
 import terminal_chat as terminal_chat_mod
 from terminal_chat import register_chat_routes as register_terminal_chat_routes
 import private_chat as private_chat_mod
@@ -337,6 +342,24 @@ FLOW_WINDOW_MIN = max(1, int(os.getenv("LIQSCOPE_FLOW_WINDOW_MIN", "5") or 5))
 FLOW_WS_SEC = max(1.0, float(os.getenv("LIQSCOPE_FLOW_WS_SEC", "3") or 3))
 # Как часто обновлять OI монет потока (секунды, одна биржа — Binance)
 FLOW_OI_SEC = max(10.0, float(os.getenv("LIQSCOPE_FLOW_OI_SEC", "30") or 30))
+# Объём и VWAP по ценам: слои ликвидаций берут отсюда цену входа позиций
+# (свеча — приблизительно, тик — точно), а панель показывает, где объём.
+VP = VolumeProfile()
+# Плечи и поддерживающая маржа бирж: без них цена ликвидации врёт в разы.
+RISK = RiskLimits()
+# Перевес покупателей/продавцов (тейкер, тики, фандинг) — сторона лестницы.
+SIDE = SideFeed()
+# 🎯 Расчётные уровни ликвидаций: OI × плечи × цена входа, минус отработавшее.
+# Движок только читает данные (сеть трогают фиды), поэтому его можно звать из
+# запроса; ответ кэшируется на 20 секунд.
+LEVELS = LevelsEngine(oi=OI, profile=VP, side=SIDE, risk=RISK, hist=HIST)
+# Снимок уровней для алертов: {"BTC_USDT": {"price", "ts", "magnets"}}.
+# Его наполняет level_alert_loop, читает alerts_market_snapshot.
+LEVELS_SNAP: Dict[str, dict] = {}
+LEVELS_SNAP_SEC = max(10.0, float(os.getenv("LIQSCOPE_LEVELS_SNAP_SEC", "20") or 20))
+LEVELS_SNAP_MAX = max(1, int(os.getenv("LIQSCOPE_LEVELS_SNAP_MAX", "8") or 8))
+LEVEL_WARM_SEC = max(10.0, float(os.getenv("LIQSCOPE_LEVELS_WARM_SEC", "30") or 30))
+LEVELS_WARM_MAX = max(1, int(os.getenv("LIQSCOPE_LEVELS_WARM_MAX", "40") or 40))
 # Живая CVD: "SYM|tf" -> {время_начала_свечи: дельта USDT (покупки-продажи)}.
 # Считается из ленты сделок (тейкер-сторона) и дополняет исторические свечи.
 CVD_ACC: Dict[str, Dict[int, float]] = {}
@@ -590,6 +613,8 @@ async def history_task() -> None:
         try:
             saved = await asyncio.to_thread(HIST.flush)
             removed = await asyncio.to_thread(HIST.cleanup)
+            await asyncio.to_thread(VP.trim)
+            await asyncio.to_thread(VP.save)
             if removed:
                 log.info("История: удалено старых файлов — %d (TTL %.0f ч)",
                          removed, HISTORY_TTL_HOURS)
@@ -668,6 +693,107 @@ async def oi_history_task() -> None:
         await asyncio.sleep(OI_SNAP_SEC)
 
 
+def level_alert_symbols() -> List[str]:
+    """Кого считать для алертов подхода к уровню.
+
+    Сначала монеты подписок с метрикой «уровни» (их ждут в боте), потом
+    открытые графики: панель и слой берут готовый расчёт из кэша движка.
+    """
+    from alerts import normalize_config, symbol_of
+    out: List[str] = []
+    seen: Set[str] = set()
+
+    def add(sym: str) -> None:
+        s = str(sym or "").upper()
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+
+    try:
+        subs = account_store.list_alert_subscribers()
+    except Exception:                       # noqa: BLE001
+        subs = []
+    for sub in subs:
+        try:
+            cfg = normalize_config(sub.get("config"))
+        except Exception:                   # noqa: BLE001
+            continue
+        if not cfg.get("enabled") or "level" not in (cfg.get("watch") or []):
+            continue
+        coin = symbol_of(cfg, "level")
+        if coin and coin != "ALL":
+            add(coin)
+        else:
+            for sym in list(feed.symbols if feed else [])[:LEVELS_SNAP_MAX]:
+                add(sym)
+    for c in hub.clients:
+        add(c.chart_symbol)
+    if not out:
+        # никто ещё не включил метрику — держим тёплым первый экран терминала
+        for sym in list(feed.symbols if feed else [])[:LEVELS_SNAP_MAX]:
+            add(sym)
+    return out[:LEVELS_WARM_MAX]
+
+
+async def liq_levels_task() -> None:
+    """Фон: греет данные уровней и обновляет снимок для алертов.
+
+    Сеть здесь только на прогреве (перевес сторон и риск-лимиты) — сам расчёт
+    читает то, что уже лежит в памяти и на диске. Идём по списку монет по
+    кругу: за проход успеваем прогреть немногих, зато ни одна монета не
+    остаётся без внимания и на биржи не летит залп. Снимок нужен движку
+    алертов: он не должен считать лестницы в своём проходе.
+    """
+    await asyncio.sleep(20)             # пусть подтянутся символы и сессии
+    asked: List[str] = []
+    snap_at = 0.0
+    while True:
+        try:
+            session = getattr(feed, "session", None) if feed else None
+            want = level_alert_symbols()
+            if session and LEVELS.enabled and want:
+                # круг по списку: каждый проход — следующая четвёрка монет
+                todo = [s for s in want if s not in asked] or want
+                if not [s for s in want if s not in asked]:
+                    asked = []
+                batch = todo[:4]
+                asked.extend(batch)
+                await LEVELS.warm(session, batch, limit=len(batch))
+                # считаем те монеты, которых ждут алерты и графики: их ответ
+                # кэшируется движком, а снимок для алертов обновляем не чаще
+                # LEVELS_SNAP_SEC — иначе лестницы считались бы зря
+                if time.time() - snap_at >= LEVELS_SNAP_SEC:
+                    snap_at = time.time()
+                    for sym in batch:
+                        price = float((feed.prices or {}).get(sym) or 0.0)
+                        try:
+                            data = await LEVELS.payload(sym, session=session,
+                                                        price=(price or None))
+                        except Exception as e:    # noqa: BLE001
+                            log.debug("уровни %s: %s", sym, e)
+                            continue
+                        if not data.get("enabled") or not data.get("magnets"):
+                            continue
+                        LEVELS_SNAP[sym] = {
+                            "symbol": sym, "price": data.get("price"),
+                            "ts": data.get("ts"),
+                            # список, а не словарь up/down: движок алертов и
+                            # лента метрики ходят по магнитам циклом
+                            "magnets": data.get("magnets_list") or [],
+                            "totals": data.get("totals") or {},
+                            "calibration": data.get("calibration") or {},
+                            "estimate": True,
+                        }
+                    for gone in [s for s in LEVELS_SNAP if s not in want]:
+                        LEVELS_SNAP.pop(gone, None)
+            await asyncio.to_thread(LEVELS.save)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:          # noqa: BLE001
+            log.debug("фон уровней ликвидаций: %s", e)
+        await asyncio.sleep(LEVEL_WARM_SEC)
+
+
 async def liq_event_worker():
     """Один обработчик очереди ликвидаций: диск + рассылка.
 
@@ -726,6 +852,7 @@ async def on_trade(symbol: str, price: float, qty: float, ts: float,
             SLOTS.add_cvd(symbol, tick_ts, signed)
             FLOWS.add_trade(symbol, tick_ts, signed)
             HIST.add_flow(symbol, tick_ts, cvd=signed)
+            VP.add_trade(symbol, tick_ts, price, abs(signed), side)
     except (TypeError, ValueError):
         pass
 
@@ -857,6 +984,12 @@ async def on_price(symbol: str, price: float, candle1m: Optional[dict]):
         if delta:
             FLOWS.add_volume(symbol, minute, delta)
             HIST.add_flow(symbol, minute, vol=delta)
+        # Свеча — весь рынок (не только тейкерские сделки): даёт VWAP и объём
+        # и по тем монетам, где тиков не было вовсе. Кладём ПРИРОСТ минуты:
+        # кадры свечи приходят несколько раз в минуту, и накопленный объём
+        # умножил бы профиль на число кадров.
+        VP.add_candle(symbol, minute, candle1m.get("high"), candle1m.get("low"),
+                      candle1m.get("close"), delta)
         if len(vols) > 400:
             for old in sorted(vols)[:200]:
                 vols.pop(old, None)
@@ -1279,6 +1412,14 @@ def sync_hot_symbols():
     if want_flow:
         flow = [s for s in (feed.symbols or []) if s not in hot][:FLOW_SYMBOLS_MAX]
     feed.set_flow_symbols(flow)
+    # Монеты терминала — в ярус уровней ликвидаций: OI по ним снимается редко,
+    # но по всему списку, иначе расчёт уровней видит одни открытые графики.
+    tracker = getattr(feed, "oi", None)
+    if tracker is not None:
+        try:
+            tracker.watch_levels(feed.symbols or [])
+        except Exception as e:  # noqa: BLE001
+            log.debug("ярус уровней OI: %s", e)
 
 
 # Снимки для кабинета (корреляции, сторож) собираются по истории и опросам.
@@ -1411,7 +1552,10 @@ def alerts_market_snapshot() -> dict:
                              "changes": payload["changes"],
                              "_series": payload["_series"]}
         oi = demo
-    return {"now": now, "events": events, "cvd": cvd, "oi": oi}
+    # Уровни ликвидаций для алертов: считает фон, здесь только снимок
+    # (расчёт на 40 монет в каждом проходе движка алертов — это залп).
+    return {"now": now, "events": events, "cvd": cvd, "oi": oi,
+            "levels": dict(LEVELS_SNAP)}
 
 
 def pump_watchers() -> List[dict]:
@@ -1626,7 +1770,10 @@ def alerts_due(cfg: dict, market: dict, last_fire, now: float) -> List[dict]:
     out: List[dict] = []
     for hit in top_per_metric(evaluate(cfg, market, since=last_fire)):
         last = last_fire(hit["metric"], hit["symbol"])
-        if not should_fire(last, now, MIN_GAP_SEC / 60.0):
+        # у подхода к уровню своя пауза (окно метрики): уровень стоит на месте,
+        # и сигнал по нему не должен повторяться каждую минуту
+        gap = float(hit.get("cooldown_min") or (MIN_GAP_SEC / 60.0))
+        if not should_fire(last, now, gap):
             continue
         out.append(hit)
         if len(out) >= 3:
@@ -2498,6 +2645,15 @@ async def lifespan(app: FastAPI):
     OI.keep = OI_KEEP_MIN * 60
     BOARD.keep_hours = max(BOARD.keep_hours, int(HISTORY_TTL_HOURS))
 
+    # Профиль «объём по ценам» — та же месячная глубина, что и у остальной
+    # истории: он нужен слою ликвидаций, чтобы понять, где стояли входы.
+    try:
+        loaded_vp = await asyncio.to_thread(VP.load)
+        if loaded_vp:
+            log.info("Профиль объёма восстановлен: монет %d", loaded_vp)
+    except Exception as e:  # noqa: BLE001
+        log.debug("профиль объёма не загрузился: %s", e)
+
     global feed
     feed = MarketFeed(on_liquidation=on_liquidation,
                       on_price=on_price,
@@ -2507,6 +2663,9 @@ async def lifespan(app: FastAPI):
                       tick_sources=TICK_SOURCES)
     await feed.start()
     sync_hot_symbols()      # чтобы тики пошли сразу, не дожидаясь клиента
+    # Свечи как запасная цена входа: если профиля объёма по монете ещё нет,
+    # уровни считаются по типичной цене свечей, а не остаются без входа.
+    LEVELS.klines = feed.fetch_klines
 
     # 📖 Стакан: L2-опрос только для монет, на которые смотрят график или
     # которые включены в подписке кабинета. В демо walls рисуются синтетикой.
@@ -2528,6 +2687,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(stats_broadcaster(), name="stats-broadcast"),
         asyncio.create_task(kline_refresher(), name="kline-refresh"),
         asyncio.create_task(hot_symbols_watcher(), name="hot-symbols"),
+        asyncio.create_task(liq_levels_task(), name="liq-levels"),
         asyncio.create_task(alert_loop(), name="alerts"),
         asyncio.create_task(corr_alert_loop(), name="corr-alerts"),
     ]
@@ -3008,6 +3168,12 @@ web_layers.ctx.store = account_store
 web_layers.ctx.secret = SECRET
 web_layers.ctx.public_url = PUBLIC_URL
 web_layers.register_layer_routes(app)
+
+# 🎯 Уровни ликвидаций: API, настройки и разбор в админке. Данные движка —
+# те же, что у слоёв: OI, профиль объёма, перевес сторон, риск-лимиты.
+register_liq_level_routes(app, get_engine=lambda: LEVELS,
+                          get_feed=lambda: feed, store=account_store,
+                          snapshot=lambda: LEVELS_SNAP)
 
 # 💬 Мини-чат терминала: 3 дня истории, пишет любой зарегистрированный
 terminal_chat_mod.ctx.store = account_store

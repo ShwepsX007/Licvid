@@ -19,7 +19,7 @@ const { JSDOM, VirtualConsole } = require("jsdom");
 const URL_BASE = process.argv[2] || "http://127.0.0.1:8011";
 const EMAIL = process.env.LIQSCOPE_TEST_EMAIL || "live@liqscope.online";
 const PASSWORD = process.env.LIQSCOPE_TEST_PASSWORD || "licvid-demo-2026";
-const DEFAULTS = { liq: 5, cvd: 15, oi: 60 };
+const DEFAULTS = { liq: 5, cvd: 15, oi: 60, level: 60 };
 
 let ok = 0, fail = 0;
 const errors = [];
@@ -100,9 +100,10 @@ async function main() {
         got.live && got.live.liq && got.live.liq.window_min === 5 &&
         got.live.cvd && got.live.cvd.window_min === 15 &&
         got.live.oi && got.live.oi.window_min === 60 &&
+        got.live.level && got.live.level.window_min === 60 &&
         typeof got.live.liq.span_min === "number",
         got.live ? [got.live.liq.window_min, got.live.cvd.window_min, got.live.oi.window_min,
-                    got.live.liq.span_min].join("/") : "нет live");
+                    got.live.level.window_min, got.live.liq.span_min].join("/") : "нет live");
 
   const per = await api(cookie, { windows: { liq: 1, cvd: 30, oi: 240 }, enabled: true });
   check("окна сохраняются по отдельности",
@@ -175,59 +176,61 @@ async function main() {
         apiCalls.map((c) => c.url).filter((u) => u.indexOf("alerts") === 0).join(" "));
 
   const groups = { liq: '[data-winbox="liq"] [data-win]', cvd: '[data-winbox="cvd"] [data-win]',
-                   oi: '[data-winbox="oi"] [data-win]' };
+                   oi: '[data-winbox="oi"] [data-win]',
+                   level: '[data-winbox="level"] [data-win]' };
   const counts = Object.keys(groups).map((k) => qa(groups[k]).length);
   check("у каждой метрики свои чипсы окон",
         counts.every((n) => n >= 5), counts.join("/"));
   const inputs = qa("[data-winin]").map((i) => i.getAttribute("data-winin")).sort();
   check("у каждой метрики своё поле «минуты»",
-        JSON.stringify(inputs) === JSON.stringify(["cvd", "liq", "oi"]), inputs.join("/"));
+        JSON.stringify(inputs) === JSON.stringify(["cvd", "level", "liq", "oi"]),
+        inputs.join("/"));
   check("общего блока «окно агрегации» больше нет (окно живёт в карточке метрики)",
         !$("al-win-in") && !$("al-wins"));
-  const marked = ["liq", "cvd", "oi"].map((m) =>
+  const marked = ["liq", "cvd", "oi", "level"].map((m) =>
     (qa(groups[m]).filter((b) => b.classList.contains("on"))[0] || {}).textContent);
   check("подсвечены текущие окна метрик: 5м / 15м / 1ч",
-        JSON.stringify(marked) === JSON.stringify(["5м", "15м", "1ч"]), marked.join("/"));
-  const lit = ["liq", "cvd", "oi"].map((m) =>
+        JSON.stringify(marked) === JSON.stringify(["5м", "15м", "1ч", "1ч"]), marked.join("/"));
+  const lit = ["liq", "cvd", "oi", "level"].map((m) =>
     qa(groups[m]).filter((b) => b.classList.contains("on")).length);
   check("подсвечен ровно один чип в каждой метрике",
         lit.every((n) => n === 1), lit.join("/"));
-  const labels = ["liq", "cvd", "oi"].map((m) =>
+  const labels = ["liq", "cvd", "oi", "level"].map((m) =>
     (q('[data-winlabel="' + m + '"]') || {}).textContent);
   check("в карточках подписаны текущие окна метрик",
-        JSON.stringify(labels) === JSON.stringify(["Окно · 5м", "Окно · 15м", "Окно · 1ч"]),
+        JSON.stringify(labels) === JSON.stringify(["Окно · 5м", "Окно · 15м", "Окно · 1ч", "Окно · 1ч"]),
         labels.join(" | "));
 
   /* --- вид доски: каждая метрика — горизонтальная строка ------------------ */
   const css2 = (el, prop) => win.getComputedStyle(el)[prop];
   const feeds = qa("#alerts-board .al-feed");
-  check("метрик ровно три строки", feeds.length === 3, feeds.length + " строк");
+  check("метрик ровно четыре строки", feeds.length === 4, feeds.length + " строк");
   const feedsBox = q("#alerts-board .al-feeds");
   check("строки метрик идут друг под другом (одна колонка у доски)",
         !!feedsBox && css2(feedsBox, "gridTemplateColumns") === "1fr",
         feedsBox ? css2(feedsBox, "gridTemplateColumns") : "нет сетки");
   const rowGrids = qa("#alerts-board .al-feed > .al-feed-grid");
   check("внутри строки — горизонтальная раскладка в несколько колонок",
-        rowGrids.length === 3 && rowGrids.every((g) =>
+        rowGrids.length === 4 && rowGrids.every((g) =>
           (css2(g, "gridTemplateColumns").match(/minmax/g) || []).length >= 3),
         rowGrids.length + " строк: " +
         (rowGrids[0] ? css2(rowGrids[0], "gridTemplateColumns") : "нет"));
   check("значение, настройки и лента стоят в одной строке, а не столбиком",
-        rowGrids.length === 3 && rowGrids.every((g) =>
+        rowGrids.length === 4 && rowGrids.every((g) =>
           !!g.querySelector(":scope > .al-col-now [data-metric]") &&
           !!g.querySelector(":scope > .al-col-set [data-winbox]") &&
           !!g.querySelector(":scope > .al-col-tape .al-tape")),
         rowGrids.length + " строк");
   const metas = qa("#alerts-board [data-feedmeta]");
   check("в заголовке строки — сводка метрики (значение, порог, окно, монета)",
-        metas.length === 3 && metas.every((m) =>
-          /^(LIQ|CVD|OI) /.test(m.textContent) && /порог /.test(m.textContent) &&
+        metas.length === 4 && metas.every((m) =>
+          /^(LIQ|CVD|OI|LVL) /.test(m.textContent) && /порог /.test(m.textContent) &&
           /окно /.test(m.textContent) && /монета /.test(m.textContent)),
         metas.length + " сводок: " + (metas[0] ? metas[0].textContent : "нет"));
 
   /* --- ленты живые: сигналы отдельно, поток окна отдельно ---------------- */
   const tapes = qa("#alerts-board .al-tape");
-  check("у каждой метрики своя лента", tapes.length === 3, tapes.length + " лент");
+  check("у каждой метрики своя лента", tapes.length === 4, tapes.length + " лент");
   const flowRows = qa("#alerts-board .al-tape .row.flow");
   check("в лентах видно поток окна, а не только сигналы",
         flowRows.length >= 3,
@@ -239,18 +242,18 @@ async function main() {
         flowMarks.map((m) => m.textContent).slice(0, 3).join(" | "));
   const flowMeta = qa("#alerts-board [data-flowmeta]");
   check("в подписи ленты — сколько событий в окне",
-        flowMeta.length === 3 && flowMeta.every((m) => /поток окна/.test(m.textContent)),
+        flowMeta.length === 4 && flowMeta.every((m) => /поток окна/.test(m.textContent)),
         flowMeta.map((m) => m.textContent).join(" | "));
   const sparks = qa("#alerts-board .al-spark");
-  check("микрографик есть у каждой метрики (включая OI)",
-        sparks.length === 3, sparks.length + " графиков");
+  check("микрографик есть у каждой метрики (включая OI и уровни)",
+        sparks.length === 4, sparks.length + " графиков");
   const oiPts = qa('#alerts-board [data-feed="oi"] .al-spark polyline');
   const cvdPts = qa('#alerts-board [data-feed="cvd"] .al-spark polyline');
   check("у OI и CVD микрографик нарисован ломаной, а не пустой сеткой",
         oiPts.length === 1 && cvdPts.length === 1,
         "oi: " + oiPts.length + ", cvd: " + cvdPts.length);
-  check("в статусе доски перечислены окна всех трёх метрик",
-        /окна: LIQ 5м · CVD 15м · OI 1ч/.test($("al-status") ? $("al-status").textContent : ""),
+  check("в статусе доски перечислены окна всех метрик",
+        /окна: LIQ 5м · CVD 15м · OI 1ч · LVL 1ч/.test($("al-status") ? $("al-status").textContent : ""),
         $("al-status") && $("al-status").textContent);
   check("под заголовком объяснено, что после сигнала окно начинается заново",
         /окно начинается заново/.test(board.textContent),
@@ -270,7 +273,8 @@ async function main() {
     check("клик по чипсу сохранил окно CVD = 30",
           body.windows && body.windows.cvd === 30, JSON.stringify(body.windows || null));
     check("окна других метрик не тронуты",
-          body.windows && body.windows.liq === 5 && body.windows.oi === 60,
+          body.windows && body.windows.liq === 5 && body.windows.oi === 60 &&
+          body.windows.level === 60,
           JSON.stringify(body.windows || null));
     check("чип сразу подсветился", cvdChip.classList.contains("on"), cvdChip.className);
     const cvdLabel = q('[data-winlabel="cvd"]') || {};
@@ -300,9 +304,9 @@ async function main() {
   // Монета — своя у каждой метрики: ликвидации могут смотреть BTC, а CVD — ETH,
   // и сигналы идут независимо. Общий чип «монета на всё» из доски убран.
   const coinBoxes = qa("[data-coinbox]");
-  check("монета настраивается у каждой метрики (LIQ/CVD/OI)",
-        coinBoxes.length === 3 &&
-        ["liq", "cvd", "oi"].every((m) => !!q('[data-coinbox="' + m + '"]')),
+  check("монета настраивается у каждой метрики (LIQ/CVD/OI/LVL)",
+        coinBoxes.length === 4 &&
+        ["liq", "cvd", "oi", "level"].every((m) => !!q('[data-coinbox="' + m + '"]')),
         coinBoxes.length + " блоков");
   check("общего блока «монета на все метрики» больше нет",
         !q("[data-coin]") && !$("al-coin-in"), "старый блок остался");

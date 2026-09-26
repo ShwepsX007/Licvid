@@ -1235,6 +1235,20 @@
     "Разметка та же, что в русской версии: кнопки над окном, ссылка — «Ссылка» (можно выделить слово и нажать).": "El marcado es el mismo que en la versión rusa: los botones están sobre el cuadro y “Enlace” inserta un enlace (puedes seleccionar una palabra antes).",
     "английская появится после перевода": "la versión en inglés aparecerá tras la traducción",
     "английской версии ещё нет": "todavía no hay versión en inglés",
-    "текст": "texto"
+    "текст": "texto",
+    "оценка, а не факт: позиции приватны, модель разлагает OI": "es una estimación, no un hecho: las posiciones son privadas y el modelo descompone el interés abierto",
+    "уровней нет: по монете мало данных за окно": "sin niveles: pocos datos de esta moneda en la ventana",
+    "часть приростов OI без цены входа": "parte de los incrementos de OI no tienen precio de entrada",
+    "уровни по ним не считаны": "sus niveles no se calcularon",
+    "истории OI мало (меньше часа) — картинка ещё не набралась": "hay poca historia de OI (menos de una hora): la imagen aún se está formando",
+    "фактических ликвидаций за окно нет: уровни не выверены": "no hubo liquidaciones reales en la ventana: los niveles no están verificados",
+    "поддерживающая маржа взята по умолчанию: биржа не отдала ступени — точность ниже": "el margen de mantenimiento es el de por defecto: el exchange no dio escalones — menor precisión",
+    "сторона позиций взята из фандинга (грубо) или неизвестна": "el lado de las posiciones viene del funding (aproximado) o es desconocido",
+    "калибровка по факту не применена": "la calibración con liquidaciones reales no está aplicada",
+    "калибровка выключена": "la calibración está desactivada",
+    "ещё не считалась": "aún no se calculó",
+    "совпадение слабое": "la coincidencia es débil",
+    "мало факта": "pocos datos reales",
+    "факт без цен": "liquidaciones reales sin precios"
   }
 }

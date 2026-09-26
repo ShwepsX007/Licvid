@@ -3837,7 +3837,7 @@ class TelegramBot:
                 live = live_snapshot(cfg, market)
                 bits = []
                 for m, icon, title in (("liq", "💥", "LIQ"), ("cvd", "🌊", "CVD"),
-                                       ("oi", "📊", "OI")):
+                                       ("oi", "📊", "OI"), ("level", "🎯", "LVL")):
                     row = live.get(m) or {}
                     bits.append(f"{icon} {title} <code>{money(row.get('value'))}</code>")
                 lines.append("сейчас: " + " · ".join(bits))
@@ -3854,8 +3854,9 @@ class TelegramBot:
         on = "🔔 Сигнал ВКЛ" if cfg.get("enabled") else "🔕 Сигнал выкл"
         return {"inline_keyboard": [
             [{"text": mark("liq", "💥 LIQ"), "callback_data": "al:m:liq"},
-             {"text": mark("cvd", "🌊 CVD"), "callback_data": "al:m:cvd"},
-             {"text": mark("oi", "📊 OI"), "callback_data": "al:m:oi"}],
+             {"text": mark("cvd", "🌊 CVD"), "callback_data": "al:m:cvd"}],
+            [{"text": mark("oi", "📊 OI"), "callback_data": "al:m:oi"},
+             {"text": mark("level", "🎯 LVL"), "callback_data": "al:m:level"}],
             [{"text": "Монета", "callback_data": "al:c"},
              {"text": "Окно", "callback_data": "al:w"}],
             [{"text": "Порог", "callback_data": "al:t"},

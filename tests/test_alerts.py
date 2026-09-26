@@ -10,9 +10,10 @@ sys.path.insert(0, HERE)
 
 from alerts import (  # noqa: E402
     THRESHOLD_PRESETS_FLOW, canon_symbol, cooldown_sec, cvd_by_symbol, evaluate,
-    flow_rows, format_alert_html, liq_by_symbol, live_snapshot, money,
-    normalize_config, oi_by_symbol, oi_points, oi_window_key, presets,
-    should_fire, sparkline, symbol_of, threshold_presets, window_label,
+    flow_rows, format_alert_html, level_flow_rows, level_hits, liq_by_symbol,
+    live_snapshot, magnets_of, money, normalize_config, oi_by_symbol, oi_points,
+    oi_window_key, presets, should_fire, sparkline, symbol_of,
+    threshold_presets, window_label,
 )
 
 
@@ -183,25 +184,25 @@ class PerMetricWindowTest(unittest.TestCase):
     def test_defaults_are_per_metric(self):
         from alerts import DEFAULT_WINDOWS
         c = normalize_config({})
-        self.assertEqual(c["windows"], {"liq": 5, "cvd": 15, "oi": 60})
+        self.assertEqual(c["windows"], {"liq": 5, "cvd": 15, "oi": 60, "level": 60})
         self.assertEqual(c["windows"], dict(DEFAULT_WINDOWS))
 
     def test_legacy_single_window_spreads_over_metrics(self):
         """Старая настройка с одним числом по-прежнему читается."""
         c = normalize_config({"window_min": 30, "watch": ["liq", "cvd"]})
-        self.assertEqual(c["windows"], {"liq": 30, "cvd": 30, "oi": 30})
+        self.assertEqual(c["windows"], {"liq": 30, "cvd": 30, "oi": 30, "level": 30})
         self.assertEqual(c["window_min"], 30)
         c2 = normalize_config({"window": 15})
         self.assertEqual(c2["windows"]["cvd"], 15)
 
     def test_partial_windows_keep_other_defaults(self):
         c = normalize_config({"windows": {"cvd": 240}})
-        self.assertEqual(c["windows"], {"liq": 5, "cvd": 240, "oi": 60})
+        self.assertEqual(c["windows"], {"liq": 5, "cvd": 240, "oi": 60, "level": 60})
 
     def test_windows_are_clamped(self):
         from alerts import window_minutes, window_of
         c = normalize_config({"windows": {"liq": 0, "cvd": 99999, "oi": 7}})
-        self.assertEqual(c["windows"], {"liq": 1, "cvd": 1440, "oi": 7})
+        self.assertEqual(c["windows"], {"liq": 1, "cvd": 1440, "oi": 7, "level": 60})
         self.assertEqual(window_of({"windows": {"oi": 90}}, "oi"), 90)
         self.assertEqual(window_of({"window_min": 12}, "oi"), 12)
         self.assertEqual(window_minutes("30"), 30)
@@ -532,6 +533,12 @@ class LiveFlowTest(unittest.TestCase):
                     int(self.now) - 300: 401_000_000.0,
                     int(self.now): 400_200_000.0},
                 "changes": {"h1": {"usd": 200_000.0, "pct": 0.05}}}},
+            "levels": {"BTC_USDT": {
+                "price": 60_000.0, "ts": self.now,
+                "magnets": [{"price": 60_240.0, "usd": 4_000_000.0, "side": "short",
+                             "lev": 20, "levels": 6},
+                            {"price": 59_700.0, "usd": 900_000.0, "side": "long",
+                             "lev": 10, "levels": 3}]}},
         }
 
     def cfg(self, **over):
@@ -542,7 +549,7 @@ class LiveFlowTest(unittest.TestCase):
 
     def test_flow_has_rows_for_every_metric(self):
         live = live_snapshot(self.cfg(), self.market)
-        for metric in ("liq", "cvd", "oi"):
+        for metric in ("liq", "cvd", "oi", "level"):
             rows = live[metric]["flow"]
             self.assertTrue(rows, metric)
             self.assertTrue(all("ts" in r and "value" in r for r in rows), metric)
@@ -656,6 +663,30 @@ class LiveFlowTest(unittest.TestCase):
             spark = live[metric]["spark"]
             self.assertEqual(len(spark), 24, metric)
             self.assertTrue(any(spark), metric)
+
+    def test_dict_magnets_do_not_break_the_level_metric(self):
+        """Слепок сервера отдаёт магниты словарём up/down — читать надо и так.
+
+        На реальных данных лента метрики падала на первом же запросе кабинета:
+        цикл по словарю брал ключи-строки, и ``mag.get`` не существовал.
+        """
+        market = {"now": self.now, "levels": {"BTC_USDT": {
+            "price": 60_000.0, "ts": self.now, "magnets": {
+                "up": {"price": 60_240.0, "usd": 4_000_000.0, "side": "short",
+                       "lev": 20},
+                "down": {"price": 59_700.0, "usd": 900_000.0, "side": "long",
+                         "lev": 10},
+                "top_up": {"price": 60_240.0, "usd": 4_000_000.0, "side": "short",
+                           "lev": 20},
+                "top_down": None}}}}
+        rows = level_flow_rows(market, self.cfg(), self.now)
+        self.assertEqual([r["level_price"] for r in rows], [60_240.0, 59_700.0])
+        hits = level_hits(market, 1_000_000, now=self.now)
+        self.assertEqual([h["level_price"] for h in hits], [60_240.0])
+        # одинаковые up и top_up — это один уровень, а не два
+        self.assertEqual(len(magnets_of(market["levels"]["BTC_USDT"])), 2)
+        live = live_snapshot(self.cfg(), market)
+        self.assertTrue(live["level"]["flow"])
 
 
 if __name__ == "__main__":

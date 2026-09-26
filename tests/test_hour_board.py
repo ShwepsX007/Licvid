@@ -122,6 +122,20 @@ class HourBoardTest(unittest.TestCase):
         self.assertEqual(slices[3]["value"], 1400)
         self.assertAlmostEqual(slices[3]["pct"], (1400 - 1300) / 1300 * 100)
 
+    def test_empty_oi_does_not_wipe_the_file(self):
+        """Пустая память не затирает ряд: иначе сервер без бирж стирает историю."""
+        path = os.path.join(tempfile.mkdtemp(), "oi.json")
+        oi = OiHistory(tz=MSK)
+        oi.add("BTC_USDT", 2_000_000, self.now)
+        self.assertTrue(oi.save(path))
+        with open(path, encoding="utf-8") as f:
+            before = f.read()
+        empty = OiHistory(tz=MSK)
+        self.assertFalse(empty.save(path))
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), before)
+        self.assertEqual(OiHistory(tz=MSK).load(path), 1)
+
     def test_oi_history_survives_restart(self):
         path = os.path.join(tempfile.mkdtemp(), "oi.json")
         oi = OiHistory(tz=MSK)

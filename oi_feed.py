@@ -22,7 +22,8 @@ import logging
 import os
 import time
 from collections import deque
-from typing import Awaitable, Callable, Deque, Dict, List, Optional, Tuple
+from typing import (Awaitable, Callable, Deque, Dict, Iterable, List,
+                    Optional, Tuple)
 
 import aiohttp
 
@@ -39,7 +40,19 @@ SERIES_KEEP_SEC = 30 * 3600         # окно серии: хватает на h
 SAMPLE_INTERVAL = 30.0              # живой опрос, секунд
 BACKFILL_TTL = 600.0                # историю обновляем раз в 10 минут
 STALE_LEG_SEC = 300.0               # нога старше — не входит в текущий тотал
-MAX_WATCHED = 12                    # столько символов держим тёплыми
+MAX_WATCHED = max(4, int(os.getenv("LIQSCOPE_OI_WATCHED", "12") or 12))
+#: Второй ярус наблюдения — монеты под расчёт уровней ликвидаций: их держим
+#: не «тёплыми» (опрос раз в 30 с по всем биржам), а редкими срезами раз в
+#: 5 минут и по трём биржам с публичной историей. Иначе сорок монет × десять
+#: бирж раз в полминуты — это бан по весу запросов, а не данные.
+LEVELS_WATCH_MAX = max(0, int(os.getenv("LIQSCOPE_OI_LEVELS_MAX", "40") or 40))
+LEVELS_SAMPLE_SEC = max(60.0, float(os.getenv("LIQSCOPE_OI_LEVELS_SEC", "300") or 300))
+#: Биржи «яруса уровней»: те же, у кого есть 5-минутная история (binance,
+#: bybit, gate) плюс OKX: по ним и открытый интерес, и ступени риск-лимитов.
+LEVELS_VENUES = ("binance", "bybit", "gate", "okx")
+#: Сколько монет яруса успеваем срезать за один проход движка OI (30 с):
+#: 3 монеты × 4 биржи ≈ 12 запросов за проход, сорок монет снимаются за ~7 мин.
+LEVELS_PER_CYCLE = max(1, int(os.getenv("LIQSCOPE_OI_LEVELS_PER_CYCLE", "3") or 3))
 
 EXCHANGES = ("binance", "bybit", "okx", "gate", "bitget", "htx",
              "dydx", "kraken", "bitfinex", "hyperliquid")
@@ -383,6 +396,8 @@ class OpenInterestTracker:
         # symbol -> [(ts, {exchange: usd}), ...] — кольцо опросов для m1
         self._live_hist: Dict[str, Deque[Tuple[float, Dict[str, float]]]] = {}
         self._watched: Dict[str, float] = {}          # symbol -> last access
+        # монеты яруса уровней: symbol -> время последнего среза
+        self._levels: Dict[str, float] = {}
         self._backfilled_at: Dict[str, float] = {}
         self._dydx_markets_cache: dict = {}
         self._kraken_meta: Optional[dict] = None
@@ -405,10 +420,72 @@ class OpenInterestTracker:
         now = time.time()
         self._watched[symbol] = now
         if len(self._watched) > MAX_WATCHED:
-            for old in sorted(self._watched, key=self._watched.get)[:-MAX_WATCHED]:
-                self._watched.pop(old, None)
-                self._series.pop(old, None)
-                self._live.pop(old, None)
+            self._evict(len(self._watched) - MAX_WATCHED)
+
+    def _evict(self, room: int) -> List[str]:
+        """Освободить ``room`` слотов в тёплом списке.
+
+        Порядок вытеснения: сначала давно не виденные «горячие» (графики,
+        лента), и только потом монеты яруса уровней — и не больше половины
+        тёплых слотов: их ряд кормит расчёт уровней, но и графики без OI
+        оставлять нельзя. У монет яруса уровней ряд не выбрасываем: бакеты
+        живут своим TTL (``SERIES_KEEP_SEC``), они и есть продукт.
+        """
+        if room <= 0:
+            return []
+        lvl_cap = min(len(self._levels), max(1, MAX_WATCHED // 2))
+        hot = sorted((s for s in self._watched if s not in self._levels),
+                     key=lambda s: self._watched.get(s, 0.0))
+        lvl = sorted((s for s in self._watched if s in self._levels),
+                     key=lambda s: self._watched.get(s, 0.0))
+        over_levels = max(0, len(lvl) - lvl_cap)
+        doomed = hot[:max(0, room - over_levels)] + lvl[:over_levels]
+        for sym in hot + lvl:
+            if len(doomed) >= room:
+                break
+            if sym not in doomed:
+                doomed.append(sym)
+        for sym in doomed[:room]:
+            self._watched.pop(sym, None)
+            self._live.pop(sym, None)
+            if sym not in self._levels:
+                self._series.pop(sym, None)
+        return doomed[:room]
+
+    # -- ярус уровней -------------------------------------------------------
+    def watch_levels(self, symbols: Iterable[str]) -> List[str]:
+        """Список монет под расчёт уровней (редкие срезы по четырём биржам).
+
+        Возвращает то, что реально принято: список режется потолком
+        ``LEVELS_WATCH_MAX``, чтобы настройка не превратилась в тысячи
+        запросов к биржам.
+        """
+        clean = []
+        for sym in symbols or []:
+            s = str(sym or "").upper()
+            if s and s not in clean:
+                clean.append(s)
+        clean = clean[:LEVELS_WATCH_MAX]
+        keep = {s for s in clean if s in self._levels}
+        self._levels = {s: self._levels.get(s, 0.0) for s in clean}
+        for gone in keep - set(clean):
+            self._levels.pop(gone, None)
+        return clean
+
+    def levels_symbols(self) -> List[str]:
+        return list(self._levels)
+
+    def levels_due(self, now: Optional[float] = None,
+                   limit: int = 1) -> List[str]:
+        """Кого пора опросить (и кого давно не видели — вперёд)."""
+        now = float(now if now is not None else time.time())
+        rows = sorted(self._levels, key=lambda s: self._levels.get(s, 0.0))
+        out = [s for s in rows if now - self._levels.get(s, 0.0) >= LEVELS_SAMPLE_SEC]
+        return out[:max(1, int(limit))]
+
+    def levels_mark(self, symbol: str, ts: Optional[float] = None) -> None:
+        if symbol in self._levels:
+            self._levels[symbol] = float(ts if ts is not None else time.time())
 
     # -- точечные опросы бирж (возвращают USD или None) -------------------
     async def _fetch_binance(self, symbol: str) -> Optional[float]:
@@ -608,21 +685,28 @@ class OpenInterestTracker:
         self._backfilled_at[symbol] = now
         return counts
 
-    async def sample_symbol(self, symbol: str) -> Dict[str, float]:
-        """Живой опрос всех бирж → текущий бакет. Возвращает ноги в USD."""
+    async def sample_symbol(self, symbol: str,
+                            venues: Optional[Iterable[str]] = None) -> Dict[str, float]:
+        """Живой опрос бирж → текущий бакет. Возвращает ноги в USD.
+
+        ``venues`` — подмножество бирж (ярус уровней опрашивает четыре из
+        десяти): у остальных монет остаётся полный набор, как раньше.
+        """
         if self._session is None:
             return {}
         self.watch(symbol)
-        jobs = {"binance": self._fetch_binance(symbol),
-                "bybit": self._fetch_bybit(symbol),
-                "okx": self._fetch_okx(symbol),
-                "gate": self._fetch_gate(symbol),
-                "bitget": self._fetch_bitget(symbol),
-                "htx": self._fetch_htx(symbol),
-                "dydx": self._fetch_dydx(symbol),
-                "kraken": self._fetch_kraken(symbol),
-                "bitfinex": self._fetch_bitfinex(symbol),
-                "hyperliquid": self._fetch_hyperliquid(symbol)}
+        loaders = {"binance": self._fetch_binance,
+                   "bybit": self._fetch_bybit,
+                   "okx": self._fetch_okx,
+                   "gate": self._fetch_gate,
+                   "bitget": self._fetch_bitget,
+                   "htx": self._fetch_htx,
+                   "dydx": self._fetch_dydx,
+                   "kraken": self._fetch_kraken,
+                   "bitfinex": self._fetch_bitfinex,
+                   "hyperliquid": self._fetch_hyperliquid}
+        want = [v for v in (venues or list(loaders)) if v in loaders] or list(loaders)
+        jobs = {v: loaders[v](symbol) for v in want}
         results = await asyncio.gather(*jobs.values(), return_exceptions=True)
         legs: Dict[str, float] = {}
         now = time.time()

@@ -644,3 +644,24 @@ def aggregate_hours(cells: Iterable[Tuple[int, dict]],
         "by_symbol": dict(sorted(by_symbol.items(), key=lambda kv: kv[1], reverse=True)),
         "by_exchange": dict(sorted(by_exchange.items(), key=lambda kv: kv[1], reverse=True)),
     }
+
+
+def disk_has_series(path: str) -> bool:
+    """Есть ли в файле истории непустой ``series`` (без разбора всего файла).
+
+    Нужна перед записью пустого состояния: пустой снимок не должен затирать
+    накопленную историю. Иначе сервер, поднятый до засева данных или без
+    потока сделок, стирал бы месяц OI и профиля объёма — а по ним считаются
+    уровни ликвидаций. Читаем начало файла: ключ ``series`` идёт первым, а
+    миллион байт покрывает пустой снимок целиком.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            head = f.read(1 << 20)
+    except OSError:
+        return False
+    at = head.find('"series":')
+    if at < 0:
+        return True            # чужой формат: не наше дело, но и не затираем
+    rest = head[at + len('"series":'):].lstrip()
+    return not rest.startswith("{}")

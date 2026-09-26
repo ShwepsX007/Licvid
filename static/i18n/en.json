@@ -1234,6 +1234,20 @@
     "Разметка та же, что в русской версии: кнопки над окном, ссылка — «Ссылка» (можно выделить слово и нажать).": "The markup is the same as in the Russian version: the buttons are above the box, and “Link” inserts a link (you can select a word first).",
     "английская появится после перевода": "the English version will appear after translation",
     "английской версии ещё нет": "no English version yet",
-    "текст": "text"
+    "текст": "text",
+    "оценка, а не факт: позиции приватны, модель разлагает OI": "an estimate, not a fact: positions are private, the model splits open interest",
+    "уровней нет: по монете мало данных за окно": "no levels: not enough data for this coin in the window",
+    "часть приростов OI без цены входа": "some open-interest increases have no entry price",
+    "уровни по ним не считаны": "levels for them are not calculated",
+    "истории OI мало (меньше часа) — картинка ещё не набралась": "there is little open-interest history (under an hour) — the picture is still filling up",
+    "фактических ликвидаций за окно нет: уровни не выверены": "no actual liquidations in the window: the levels are not verified",
+    "поддерживающая маржа взята по умолчанию: биржа не отдала ступени — точность ниже": "maintenance margin is taken by default: the exchange gave no tiers — accuracy is lower",
+    "сторона позиций взята из фандинга (грубо) или неизвестна": "the side of positions comes from funding (rough) or is unknown",
+    "калибровка по факту не применена": "calibration against actual liquidations is not applied",
+    "калибровка выключена": "calibration is off",
+    "ещё не считалась": "not calculated yet",
+    "совпадение слабое": "the match is weak",
+    "мало факта": "not enough actual data",
+    "факт без цен": "actual liquidations without prices"
   }
 }

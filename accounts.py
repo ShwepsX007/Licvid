@@ -151,6 +151,17 @@ DEFAULT_SERVICES = (
         "sort": 35,
     },
     {
+        "slug": "levels",
+        "title": "Уровни ликвидаций",
+        "title_en": "Liquidation levels",
+        "description": ("Расчётные уровни чужих вынужденных выходов: масса, плечо и "
+                        "расстояние до цены. Оценка модели + сигнал в Telegram на подходе."),
+        "icon": "🎯",
+        "enabled": 1,
+        "coming_soon": 0,
+        "sort": 36,
+    },
+    {
         "slug": "digest",
         "title": "Дневной дайджест",
         "title_en": "Daily digest",
@@ -667,7 +678,7 @@ class Store:
                          s["icon"], s["enabled"], s["coming_soon"], s["sort"]),
                     )
             # работающие сервисы — снимаем «скоро» даже на старых базах
-            for slug in ("alerts", "correlations", "watchlist"):
+            for slug in ("alerts", "correlations", "watchlist", "levels"):
                 live = next((s for s in DEFAULT_SERVICES if s["slug"] == slug), None)
                 if live:
                     self._db.execute(

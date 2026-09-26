@@ -602,6 +602,8 @@
                         ? '<div class="svc-board" id="pump-board"></div>'
                         : s.slug === "book"
                             ? '<div class="svc-board" id="book-board"></div>'
+                            : s.slug === "levels"
+                                ? '<div class="svc-board" id="levels-board"></div>'
                             : "<p>" + (s.description || "") + "</p>" + soon +
                     '<div class="row-actions">' +
                     // у дайджеста есть своя страница: сразу ведём читать выпуски
@@ -631,6 +633,7 @@
                 if (!was && slug === "correlations") bootCorrelations();
                 if (!was && slug === "watchlist") bootPumps();
                 if (!was && slug === "book") bootBook();
+                if (!was && slug === "levels") bootLevels();
             });
         });
         box.querySelectorAll("button[data-slug]").forEach(function (btn) {
@@ -660,6 +663,7 @@
         if (open === "correlations") bootCorrelations();
         if (open === "watchlist") bootPumps();
         if (open === "book") bootBook();
+        if (open === "levels") bootLevels();
     }
 
     var tgLinkTimer = null;
@@ -683,6 +687,7 @@
         if (slug === "correlations") bootCorrelations();
         else if (slug === "watchlist") bootPumps();
         else if (slug === "book") bootBook();
+        else if (slug === "levels") bootLevels();
         else if (slug === "alerts") bootAlerts();
     }
 
@@ -893,6 +898,277 @@
         if (pollInfo) {
             // будет заполнено в paintBookRows из status, но покажем подсказку
             if (!pollInfo.textContent) pollInfo.textContent = "плавающий интервал";
+        }
+    }
+
+    /* ---------- 🎯 Уровни ликвидаций: доска кабинета ---------------------------
+       Тот же расчёт, что у слоя на графике (/api/liq_levels): где стоят чужие
+       вынужденные выходы. Показываем таблицу уровней от цены, магниты сверху и
+       снизу и честное покрытие: из чего картинка собрана и чего в ней не хватает.
+       Это ОЦЕНКА (биржи не публикуют позиции клиентов) — метка стоит в шапке. */
+    var LV_LS_KEY = "liqscope.levels.board";
+    var LV_THRS = [[0, "lv.all"], [100000, "100K$"], [500000, "500K$"],
+                   [1000000, "1M$"], [5000000, "5M$"]];
+    var LV_WINS = [[24, "lv.win_day"], [168, "lv.win_week"], [720, "lv.win_month"]];
+    var lvCfg = { symbol: "", min_usd: 500000, window_hours: 720 };
+    var lvTimer = null, lvBusy = false, lvBuilt = false, lvSyms = [], lvData = null;
+    (function lvLoadCfg() {
+        try {
+            var raw = JSON.parse(localStorage.getItem(LV_LS_KEY) || "{}") || {};
+            if (raw.symbol) lvCfg.symbol = String(raw.symbol).toUpperCase();
+            if (raw.min_usd !== undefined) lvCfg.min_usd = Number(raw.min_usd) || 0;
+            if (raw.window_hours) lvCfg.window_hours = Number(raw.window_hours) || 720;
+        } catch (e) { /* нет настройки — берём умолчания */ }
+    })();
+
+    function lvSave() {
+        try { localStorage.setItem(LV_LS_KEY, JSON.stringify(lvCfg)); } catch (e) { /* ignore */ }
+    }
+
+    function bootLevels() {
+        if (!$("levels-board")) return;
+        lvBuilt = false;
+        loadLevels(true);
+        if (lvTimer) clearInterval(lvTimer);
+        lvTimer = setInterval(function () {
+            if (!document.hidden && $("levels-board") &&
+                    $("levels-board").offsetParent !== null) loadLevels(false);
+        }, 30000);
+    }
+
+    function loadLevels() {
+        if (lvBusy) return;
+        lvBusy = true;
+        var jobs = [];
+        if (!lvSyms.length) {
+            jobs.push(fetch("/api/symbols", { credentials: "same-origin" })
+                .then(function (r) { return r.json(); })
+                .then(function (d) {
+                    lvSyms = (d && (d.symbols || [])) .map(function (x) {
+                        return typeof x === "string" ? x : (x && x.symbol);
+                    }).filter(Boolean);
+                    if (!lvCfg.symbol && lvSyms.length) lvCfg.symbol = String(lvSyms[0]).toUpperCase();
+                }).catch(function () { lvSyms = []; }));
+        }
+        if (!lvCfg.symbol && lvSyms.length) lvCfg.symbol = String(lvSyms[0]).toUpperCase();
+        Promise.all(jobs).then(function () {
+            if (!lvCfg.symbol) { lvBusy = false; return; }
+            var q = "/api/liq_levels?symbol=" + encodeURIComponent(lvCfg.symbol) +
+                (lvCfg.min_usd ? "&min_usd=" + encodeURIComponent(lvCfg.min_usd) : "") +
+                (lvCfg.window_hours ? "&window_hours=" + encodeURIComponent(lvCfg.window_hours) : "");
+            return fetch(q, { credentials: "same-origin" })
+                .then(function (r) { return r.json(); })
+                .then(function (d) {
+                    lvData = d;
+                    paintLevels(d);
+                });
+        }).catch(function () { /* сеть подвела — на доске остаётся прошлый расчёт */ })
+          .then(function () { lvBusy = false; });
+    }
+
+    function lvPrice(v) {
+        var n = Number(v);
+        if (!isFinite(n) || n <= 0) return "—";
+        return alPrice(n);
+    }
+
+    /* Подпись чипса: ключ словаря или строка как есть ("100K$" и т.п.). */
+    function lvLabel(x) {
+        return x.indexOf("lv.") === 0 ? t(x) : x;
+    }
+
+    /* Оговорки сервера — живые строки, а не ключи разметки: переводим их
+       подстановкой фраз (i18n.js), чтобы на других языках не оставался
+       русский текст. Ключа нет — строка вернётся как есть. */
+    function lvPhrase(s) {
+        if (!s || !window.LiqScopeI18n || !LiqScopeI18n.phrase) return s;
+        try { return LiqScopeI18n.phrase(s); } catch (e) { return s; }
+    }
+
+    function lvMagnet(head, m) {
+        if (!m) {
+            return '<div class="lv-mag"><b>' + head + '</b><span class="lv-muted">' +
+                esc(t("lv.mag_none")) + "</span></div>";
+        }
+        var side = String(m.side || "").toLowerCase();
+        return '<div class="lv-mag ' + (side === "long" ? "long" : "short") + '">' +
+            "<b>" + head + "</b>" +
+            '<span class="lv-mag-p">$' + alNum2(m.price) + "</span>" +
+            '<span class="lv-mag-s">' + esc(alMoney(m.usd)) +
+            (m.lev ? " · ~" + Math.round(Number(m.lev)) + "x" : "") +
+            (m.share ? " · " + alNum2(m.share) + "%" : "") + "</span>" +
+            '<span class="lv-muted">' +
+            (m.distance_pct !== undefined && m.distance_pct !== null
+                ? t("lv.from_price", { pct: (Number(m.distance_pct) > 0 ? "+" : "") +
+                                            alNum2(m.distance_pct) })
+                : "") + "</span></div>";
+    }
+
+    function alNum2(v) {
+        var n = Number(v);
+        if (!isFinite(n)) return "0";
+        if (Math.abs(n) >= 1000) return n.toLocaleString("en-US", { maximumFractionDigits: 2 });
+        return n.toFixed(2);
+    }
+
+    function paintLevels(d) {
+        var board = $("levels-board");
+        if (!board) return;
+        d = d || {};
+        var price = Number(d.price) || 0;
+        if (!lvBuilt) {
+            var thr = LV_THRS.map(function (x) {
+                return bookChipHtml(Math.abs((Number(lvCfg.min_usd) || 0) - x[0]) < 1,
+                                    'data-lv-thr="' + x[0] + '"', lvLabel(x[1]));
+            }).join("");
+            var win = LV_WINS.map(function (x) {
+                return bookChipHtml(Math.abs((Number(lvCfg.window_hours) || 720) - x[0]) < 1,
+                                    'data-lv-win="' + x[0] + '"', lvLabel(x[1]));
+            }).join("");
+            board.innerHTML =
+                '<div class="bk-head"><span class="lv-title">' +
+                esc(t("lv.title")) + "</span>" +
+                '<span class="lv-badge" title="' + esc(t("lv.badge_title")) + '">' +
+                esc(t("lv.badge")) + "</span>" +
+                '<span class="bk-status" id="lv-status"></span></div>' +
+                '<div class="lv-sub">' + esc(t("lv.about")) + "</div>" +
+                '<div class="al-label">' + esc(t("lv.coin")) + "</div>" +
+                '<div class="lv-symrow"><select id="lv-sym" class="lv-select"></select></div>' +
+                '<div class="al-label">' + esc(t("lv.cut")) + '</div><div class="al-chips" id="lv-thr">' + thr + "</div>" +
+                '<div class="al-label">' + esc(t("lv.window")) + '</div><div class="al-chips" id="lv-win">' + win + "</div>" +
+                '<div class="lv-cards" id="lv-cards"></div>' +
+                '<div class="lv-mags" id="lv-mags"></div>' +
+                '<div class="lv-table-wrap" id="lv-table"></div>' +
+                '<div class="lv-notes" id="lv-notes"></div>';
+            var sel = $("lv-sym");
+            if (sel) {
+                sel.addEventListener("change", function () {
+                    lvCfg.symbol = String(sel.value || "").toUpperCase();
+                    lvSave();
+                    loadLevels(true);
+                });
+            }
+            board.querySelectorAll("#lv-thr .al-chip").forEach(function (b) {
+                b.onclick = function () {
+                    lvCfg.min_usd = Number(b.getAttribute("data-lv-thr")) || 0;
+                    lvSave();
+                    board.querySelectorAll("#lv-thr .al-chip").forEach(function (x) {
+                        x.classList.toggle("on", x === b);
+                    });
+                    loadLevels(true);
+                };
+            });
+            board.querySelectorAll("#lv-win .al-chip").forEach(function (b) {
+                b.onclick = function () {
+                    lvCfg.window_hours = Number(b.getAttribute("data-lv-win")) || 720;
+                    lvSave();
+                    board.querySelectorAll("#lv-win .al-chip").forEach(function (x) {
+                        x.classList.toggle("on", x === b);
+                    });
+                    loadLevels(true);
+                };
+            });
+            lvBuilt = true;
+        }
+        var sel2 = $("lv-sym");
+        if (sel2) {
+            var list = lvSyms.slice();
+            if (lvCfg.symbol && list.indexOf(lvCfg.symbol) < 0) list.unshift(lvCfg.symbol);
+            sel2.innerHTML = list.slice(0, 200).map(function (s) {
+                return '<option value="' + esc(s) + '"' +
+                    (String(s) === lvCfg.symbol ? " selected" : "") + ">" + esc(s) + "</option>";
+            }).join("");
+        }
+        var st = $("lv-status");
+        var notes = d.notes || [];
+        if (st) {
+            st.textContent = price
+                ? t("lv.status_price", { price: alNum2(price),
+                                         n: (d.levels || []).length }) +
+                  (d.applied && d.applied.events
+                      ? t("lv.status_removed", { n: d.applied.events }) : "")
+                : (d.error ? String(d.error) : t("lv.no_data"));
+        }
+        var cards = $("lv-cards");
+        if (cards) {
+            var cov = d.coverage || {};
+            var cal = d.calibration || {};
+            cards.innerHTML = [
+                [t("lv.card_usd"), price ? alMoney(d.total_usd || 0) : "—"],
+                [t("lv.card_long"), price ? alMoney(d.long_usd || 0) : "—"],
+                [t("lv.card_short"), price ? alMoney(d.short_usd || 0) : "—"],
+                [t("lv.card_calib"), cal.applied
+                    ? t("lv.calib_on", { lev: alNum2(cal.lev_scale),
+                                         score: alNum2((Number(cal.score) || 0) * 100) })
+                    : t("lv.calib_off")],
+                [t("lv.card_data"), t("lv.card_oi", { n: cov.oi_points || 0,
+                                                      m: cov.events || 0 })],
+            ].map(function (x) {
+                return '<div class="lv-card"><span class="lv-muted">' + esc(x[0]) +
+                    '</span><b>' + esc(String(x[1])) + "</b></div>";
+            }).join("");
+        }
+        var mags = $("lv-mags");
+        if (mags) {
+            var m = d.magnets || {};
+            mags.innerHTML = lvMagnet(t("lv.mag_up"), m.up) +
+                lvMagnet(t("lv.mag_down"), m.down);
+        }
+        var table = $("lv-table");
+        if (table) {
+            var rows = (d.levels || []).slice();
+            if (!rows.length) {
+                table.innerHTML = '<div class="cor-flow-empty">' +
+                    esc(d.enabled === false ? t("lv.off") : t("lv.empty")) + "</div>";
+            } else if (price) {
+                rows.sort(function (a, b) {
+                    return Math.abs(Number(a.price) - price) - Math.abs(Number(b.price) - price);
+                });
+                rows = rows.slice(0, 24);
+                var maxCum = 1;
+                rows.forEach(function (r) { maxCum = Math.max(maxCum, Number(r.cum_usd) || 0); });
+                var head = '<div class="lv-row lv-head">' +
+                    ["lv.h_price", "lv.h_usd", "lv.h_share", "lv.h_lev",
+                     "lv.h_dist", "lv.h_cum"].map(function (k) {
+                        return "<span>" + esc(T(k)) + "</span>";
+                    }).join("") + "</div>";
+                table.innerHTML = head + rows.map(function (r) {
+                    var lp = Number(r.price);
+                    var dist = Number(r.distance_pct) || 0;
+                    var side = String(r.side || "");
+                    var cls = side === "short" ? "short" : side === "long" ? "long" : "both";
+                    var cum = Math.max(0, Math.min(100, Math.round(
+                        (Number(r.cum_usd) || 0) / maxCum * 100)));
+                    return '<div class="lv-row ' + cls + '">' +
+                        '<span class="lv-p">' + lvPrice(lp) + "</span>" +
+                        '<span class="lv-u">' + esc(alMoney(r.usd || 0)) + "</span>" +
+                        '<span class="lv-s">' + alNum2(r.share || 0) + "%</span>" +
+                        '<span class="lv-l">' + (r.lev ? "~" + Math.round(Number(r.lev)) + "x" : "—") + "</span>" +
+                        '<span class="lv-d">' + (dist > 0 ? "+" : "") + alNum2(dist) + "%</span>" +
+                        '<span class="lv-c"><i style="width:' + cum + '%"></i></span></div>';
+                }).join("");
+            }
+        }
+        var notesEl = $("lv-notes");
+        if (notesEl) {
+            var cov2 = d.coverage || {};
+            var srcs = cov2.side_sources || {};
+            var parts = [];
+            if (d.enabled === false) parts.push(t("lv.off"));
+            // оговорки приходят с сервера по-русски: прогоняем их через
+            // словарь фраз — так они читаются и на других языках
+            (notes || []).forEach(function (n) { parts.push(lvPhrase(String(n))); });
+            if (cov2.oi_points) {
+                parts.push(t("lv.cov", {
+                    n: cov2.oi_points, m: (cov2.rows || 0),
+                    k: (cov2.rows_missing_entry || 0),
+                    sources: Object.keys(srcs).map(function (k) {
+                        return k + " " + srcs[k];
+                    }).join(", ")}));
+            }
+            notesEl.innerHTML = parts.length
+                ? parts.map(function (x) { return '<div class="lv-note">• ' + esc(x) + "</div>"; }).join("")
+                : "";
         }
     }
 
@@ -1419,7 +1695,7 @@
     var alTimer = null;
     var alSaveT = null;
     var alBusy = false;
-    var alSparkBuf = { liq: [], cvd: [], oi: [] };
+    var alSparkBuf = { liq: [], cvd: [], oi: [], level: [] };
     var alHist = [];            // сигналы метрик: их присылает сервер
 
     function alMoney(v) {
@@ -1430,6 +1706,25 @@
         if (v >= 1e6) return sign + "$" + (v / 1e6).toFixed(2) + "M";
         if (v >= 1e3) return sign + "$" + (v / 1e3).toFixed(1) + "K";
         return sign + "$" + Math.round(v);
+    }
+    /* Строка уровня в колонке: монета · сторона · плечо · сколько до цены.
+       Уровень — оценка, поэтому и подпись без «точности биржи». */
+    function alLevelExtra(row) {
+        var mag = ((row && row.levels) || [])[0] || {};
+        var sym = String((mag.symbol || (row && row.symbol) || "")).split("_")[0];
+        var side = String(mag.side || "").toLowerCase();
+        var what = side === "long" ? t("lv.card_long")
+            : side === "short" ? t("lv.card_short") : "";
+        var lev = Number(mag.lev);
+        var dist = Number(mag.distance_pct !== undefined ? mag.distance_pct : (row && row.pct));
+        var out = [sym, what];
+        if (isFinite(lev) && lev > 0) out.push("~" + Math.round(lev) + "x");
+        if (isFinite(dist)) out.push(t("lv.to_price", { pct: alNum(dist, 2) }));
+        return out.filter(Boolean).join(" · ");
+    }
+    function alNum(v, d) {
+        var n = Number(v) || 0;
+        return n.toFixed(d === undefined ? 2 : d);
     }
     function alWin(m) {
         m = Number(m) || 0;
@@ -1516,7 +1811,8 @@
                 st.className = "al-status " + (d.ok ? "ok" : "");
                 st.textContent = d.ok ? ("сохранено · монеты: " +
                     alCoinLabel(alCoinOf("liq")) + " / " + alCoinLabel(alCoinOf("cvd")) +
-                    " / " + alCoinLabel(alCoinOf("oi"))) : (d.error || "ошибка");
+                    " / " + alCoinLabel(alCoinOf("oi")) + " / " +
+                    alCoinLabel(alCoinOf("level"))) : (d.error || "ошибка");
             }
             if (d.live) paintAlertsLive({ live: d.live, history: alHist, config: alCfg });
         }).catch(function () { alBusy = false; });
@@ -1529,6 +1825,7 @@
 
     function alThrList(m) {
         var p = alPresets || {};
+        if (m === "level") return p.thresholds_level || [100000, 250000, 500000, 1e6, 5e6, 1e7];
         if (m === "cvd" || m === "oi") return p.thresholds_flow || [10000, 100000, 1e6, 1e7, 1e8];
         return p.thresholds_liq || p.thresholds || [50000, 100000, 250000, 500000, 1e6, 5e6];
     }
@@ -1621,9 +1918,10 @@
             var thr = (alCfg.threshold || {})[key] || 1;
             var pct = Math.max(4, Math.min(100, Math.round(100 * Math.abs(val) / thr)));
             var hot = on && Math.abs(val) >= thr;
-            var cls = key === "liq" ? "gold" : (val >= 0 ? "pos" : "neg");
+            var cls = (key === "liq" || key === "level") ? "gold" : (val >= 0 ? "pos" : "neg");
             var extra = "";
             if (key === "liq" && row.market) extra = "рынок " + alMoney(row.market.usd);
+            else if (key === "level") extra = alLevelExtra(row);
             else extra = (row.symbol && row.symbol !== "ALL" ? String(row.symbol).split("_")[0] : "") +
                 (row.count ? " · " + row.count + " шт." : "");
             return '<section class="al-feed' + (on ? " on" : "") + (hot ? " hot" : "") +
@@ -1678,9 +1976,10 @@
             "</datalist>" +
             '<div class="al-feeds">' +
             feed("liq", "LIQ") + feed("cvd", "CVD") + feed("oi", "OI") +
+            feed("level", "🎯 LVL") +
             "</div>" +
             '<div class="al-label">Мин. удар в окне</div>' +
-            ["liq", "cvd", "oi"].map(function (m) {
+            ["liq", "cvd", "oi", "level"].map(function (m) {
                 var cur = (alCfg.min_event || {})[m];
                 return '<div class="al-label" style="margin-top:8px">' + m.toUpperCase() + "</div>" +
                     '<div class="al-chips" data-min="' + m + '">' +
@@ -1691,15 +1990,18 @@
             '<div class="al-status" id="al-status">монеты: LIQ ' + esc(alCoinLabel(alCoinOf("liq"))) +
             " · CVD " + esc(alCoinLabel(alCoinOf("cvd"))) +
             " · OI " + esc(alCoinLabel(alCoinOf("oi"))) +
+            " · LVL " + esc(alCoinLabel(alCoinOf("level"))) +
             " · окна: LIQ " + alWin(alWinOf("liq")) +
             " · CVD " + alWin(alWinOf("cvd")) +
-            " · OI " + alWin(alWinOf("oi")) + "</div>";
+            " · OI " + alWin(alWinOf("oi")) +
+            " · LVL " + alWin(alWinOf("level")) + "</div>";
         if (bind) bindAlerts();
     }
 
     /* Сводка строки в заголовке: значение метрики, её порог, окно и монета. */
     function alFeedMeta(key, row, extra, thr) {
-        var title = key.toUpperCase();
+        /* «LVL» — то же сокращение, что в строке статуса и в кнопке бота */
+        var title = key === "level" ? "LVL" : key.toUpperCase();
         var val = alMoney((row && row.value) || 0);
         return title + " " + val +
             (extra ? " · " + extra : "") +
@@ -1755,14 +2057,19 @@
             var pct = thr > 0 ? Math.min(100, Math.round(100 * Math.abs(val) / thr)) : 100;
             var hot = thr > 0 && Math.abs(val) >= thr;
             var m = String(h.metric || "liq");
-            var cls = m === "liq" ? "gold" : (val >= 0 ? "pos" : "neg");
-            var icon = m === "cvd" ? "🌊" : m === "oi" ? "📊" : "💥";
+            var cls = (m === "liq" || m === "level") ? "gold" : (val >= 0 ? "pos" : "neg");
+            var icon = m === "level" ? "🎯" : m === "cvd" ? "🌊" : m === "oi" ? "📊" : "💥";
             return '<div class="row' + (hot ? " hot" : "") + '" style="--p:' + pct + '%">' +
                 '<span class="t">' + tm + "</span>" +
                 '<span class="m">' + icon + "</span>" +
                 '<span class="sym">' + esc(sym === "ALL" ? "все" : sym) + "</span>" +
                 '<span class="val ' + cls + '">' + alMoney(val) + "</span>" +
-                '<span class="thr">/ ' + alMoney(thr) + " · " + alWin(h.window_min) +
+                '<span class="thr">/ ' + alMoney(thr) +
+                (m === "level" && h.level_price
+                    ? " · $" + alNum(h.level_price, 2) + " " +
+                      (h.level_side === "long" ? t("lv.card_long") : t("lv.card_short"))
+                    : "") +
+                " · " + alWin(h.window_min) +
                 (h.detail && h.detail.span_min ? " · новых " + alWin(h.detail.span_min) : "") +
                 "</span>" +
                 '<i class="tape-bar"></i></div>';
@@ -1777,7 +2084,7 @@
 
     function paintAlertsLive(d) {
         var live = d.live || {};
-        ["liq", "cvd", "oi"].forEach(function (key) {
+        ["liq", "cvd", "oi", "level"].forEach(function (key) {
             var feed = document.querySelector('.al-feed[data-feed="' + key + '"]');
             var el = document.querySelector('.al-meter[data-metric="' + key + '"]');
             var row = live[key] || {};
@@ -1788,6 +2095,7 @@
             var hot = alHas(key) && Math.abs(val) >= thr;
             var extra = "";
             if (key === "liq" && row.market) extra = "рынок " + alMoney(row.market.usd);
+            else if (key === "level") extra = alLevelExtra(row);
             else extra = (row.symbol && row.symbol !== "ALL"
                 ? String(row.symbol).split("_")[0] : "") +
                 (row.count ? " · " + row.count + " шт." : "");
@@ -1810,7 +2118,7 @@
                 var v = el.querySelector(".v");
                 if (v) {
                     v.textContent = alMoney(val);
-                    v.className = "v " + (key === "liq" ? "gold" : (val >= 0 ? "pos" : "neg"));
+                    v.className = "v " + ((key === "liq" || key === "level") ? "gold" : (val >= 0 ? "pos" : "neg"));
                 }
                 var s2 = el.querySelector(".s");
                 if (s2) s2.textContent = extra + " / порог " + alMoney(thr);
@@ -1844,7 +2152,7 @@
                 el.classList.toggle("on", alHas(m));
                 var sp = el.querySelector("span");
                 if (sp) {
-                    var title = m === "liq" ? "LIQ" : m.toUpperCase();
+                    var title = m === "liq" ? "LIQ" : (m === "level" ? "🎯 LVL" : m.toUpperCase());
                     sp.textContent = title + (alHas(m) ? " · ON" : " · выкл");
                 }
                 var feed = document.querySelector('.al-feed[data-feed="' + m + '"]');
@@ -1868,9 +2176,11 @@
                     st.textContent = "монеты: LIQ " + alCoinLabel(alCoinOf("liq")) +
                         " · CVD " + alCoinLabel(alCoinOf("cvd")) +
                         " · OI " + alCoinLabel(alCoinOf("oi")) +
+                        " · LVL " + alCoinLabel(alCoinOf("level")) +
                         " · окна: LIQ " + alWin(alWinOf("liq")) +
                         " · CVD " + alWin(alWinOf("cvd")) +
-                        " · OI " + alWin(alWinOf("oi"));
+                        " · OI " + alWin(alWinOf("oi")) +
+                        " · LVL " + alWin(alWinOf("level"));
                 }
                 alDebounce();
             });
@@ -1902,7 +2212,7 @@
             if (inp) inp.value = n;
             var lab = document.querySelector('[data-winlabel="' + m + '"]');
             if (lab) {
-                var titles = { liq: "LIQ", cvd: "CVD", oi: "OI" };
+                var titles = { liq: "LIQ", cvd: "CVD", oi: "OI", level: "🎯 LVL" };
                 lab.textContent = "Окно " + (titles[m] || m) + " · " + alWin(n);
             }
             alDebounce();

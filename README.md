@@ -93,11 +93,11 @@ http://<сервер>:8000/articles  — статьи: разборы рынка
 ## Быстрый деплой на сервер
 
 ```bash
-cd /root/LiqScope
+cd /root/Licvid
 git pull                                  # забрать обновление
 pip install -r requirements.txt           # fastapi, uvicorn, aiohttp
-sudo systemctl restart liqscope
-sudo journalctl -u liqscope -f              # смотреть логи
+sudo systemctl restart licvid
+sudo journalctl -u licvid -f              # смотреть логи
 ```
 
 Проверка, что данные реально идут:
@@ -112,18 +112,22 @@ curl -s "localhost:8000/api/liquidations?limit=5" | python3 -m json.tool
 
 ### systemd-юнит (пример)
 
-Готовый файл: [`deploy/liqscope.service`](deploy/liqscope.service)
+Готовый файл: [`deploy/licvid.service`](deploy/licvid.service)
+(`deploy/liqscope.service` устарел: он слушал `0.0.0.0:8000` мимо nginx).
 
 ```ini
 [Unit]
-Description=LiqScope Liquidation Terminal
+Description=Licvid Liquidation Terminal
 After=network-online.target
 
 [Service]
-WorkingDirectory=/root/LiqScope
+WorkingDirectory=/root/Licvid
 Environment=LIQSCOPE_SYMBOLS_LIMIT=40
-Environment=LIQSCOPE_EXCHANGES=binance,bybit,okx,gate,bitget,htx,hyperliquid,dydx,kraken,bitfinex
-ExecStart=/usr/bin/python3 -m uvicorn server:app --host 0.0.0.0 --port 8000
+Environment=LIQSCOPE_PUBLIC_URL=https://liqscope.online
+Environment=LIQSCOPE_COOKIE_SECURE=1
+Environment=LIQSCOPE_REQUIRE_SECRET=1
+# Environment=LIQSCOPE_SECRET=   # openssl rand -hex 32, в drop-in, не в git
+ExecStart=/root/Licvid/venv/bin/python3 -m uvicorn server:app --host 127.0.0.1 --port 8000
 Restart=always
 RestartSec=5
 
@@ -134,9 +138,13 @@ WantedBy=multi-user.target
 Установка:
 
 ```bash
-sudo cp deploy/liqscope.service /etc/systemd/system/liqscope.service
+sudo cp deploy/licvid.service /etc/systemd/system/licvid.service
+# секрет — отдельно, иначе сервис не стартует (дефолт liqscope-change-me запрещён):
+sudo systemctl edit licvid
+#   [Service]
+#   Environment=LIQSCOPE_SECRET=<openssl rand -hex 32>
 sudo systemctl daemon-reload
-sudo systemctl enable --now liqscope
+sudo systemctl enable --now licvid
 ```
 
 ---
@@ -380,8 +388,10 @@ sudo systemctl enable --now liqscope
 своей историей снимков. В памяти держится только свежий хвост, всё
 остальное читается с диска: страницы и сервисы могут смотреть месяц, а не
 сутки. Старые дни удаляются сами (`LIQSCOPE_HISTORY_TTL_HOURS`, по
-умолчанию 31 сутки). Прежний одиночный файл `liq_history.jsonl` при первом
-запуске переносится в дневные шарды и убирается.
+умолчанию 31 сутки) — и события, и `hours_*.json`. Прежний одиночный файл `liq_history.jsonl` при первом
+запуске переносится в дневные шарды и убирается. Каталог `data/` в git не
+входит: ежедневный снимок и восстановление — [`tools/backup_data.sh`](tools/backup_data.sh)
+и [`deploy/BACKUP.md`](deploy/BACKUP.md).
 
 Событие ликвидации в истории, `WS /ws` и `GET /api/liquidations` несёт
 дополнительно `kind`: `"tape"` — событие вывел из ленты сделок терминал
@@ -437,13 +447,12 @@ sudo systemctl enable --now liqscope
 
 **Куда вписывать ключи.** Ключи берутся только из переменных окружения —
 файла с секретами в проекте нет. В systemd это строка `Environment=` в секции
-`[Service]` юнита; в готовых [`deploy/licvid.service`](deploy/licvid.service)
-и [`deploy/liqscope.service`](deploy/liqscope.service) она уже есть,
-закомментированная.
+`[Service]` юнита; в [`deploy/licvid.service`](deploy/licvid.service) строка
+есть, закомментированная. `deploy/liqscope.service` не устанавливать.
 
-В репозитории два юнита с разными именами и рабочими каталогами
-(`licvid` → `/root/Licvid`, `liqscope` → `/root/LiqScope`), поэтому сначала
-узнайте, какой реально стоит на сервере:
+Рабочий юнит — `licvid` (`/root/Licvid`, слушает `127.0.0.1:8000` за nginx).
+`deploy/liqscope.service` устарел и оставлен только как пометка: не
+копируйте его в systemd. Сначала узнайте, какой юнит реально стоит:
 
 ```bash
 systemctl list-units --type=service | grep -iE "licvid|liqscope"
@@ -1617,7 +1626,8 @@ tests/cookie_consent.js плашка о cookie: показ новому гост
 tests/cabinet_services.js кабинет: карты корреляций по переменным (строка на переменную,
                         горизонтальная раскладка внутри строки), алерты, сторож монет
 tools/bot_i18n_check.py сторож перевода бота: литерал без английского = ошибка
-deploy/liqscope.service пример systemd-юнита
+deploy/licvid.service   рабочий systemd-юнит (127.0.0.1:8000)
+deploy/liqscope.service устаревший юнит, не устанавливать
 ```
 
 Сигнальный бот (`main.py`) и его модули `orderflow.py`, `chainlink_price.py`

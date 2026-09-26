@@ -42,6 +42,7 @@ import logging
 import math
 import os
 import random
+import secrets
 import threading
 import time
 from collections import deque
@@ -81,7 +82,8 @@ from hourly_posts import PostStore as HourlyStore, post_id as hourly_id
 from articles import ArticleStore
 from daily_digest import DigestStore
 from tg_bot import TelegramBot, normalize_public_url
-from web_account import ctx as account_ctx, register_account_routes
+from web_account import (ctx as account_ctx, register_account_routes,
+                         current_user, RateLimiter)
 import web_bot_admin
 from web_bot_admin import register_bot_admin_routes
 import ads as ads_mod
@@ -156,7 +158,64 @@ BOT_TOKEN = os.getenv("LIQSCOPE_BOT_TOKEN", "").strip()
 PUBLIC_URL = normalize_public_url(os.getenv("LIQSCOPE_PUBLIC_URL", ""))
 CHANNEL_URL = os.getenv("LIQSCOPE_CHANNEL_URL", "https://t.me/+4S1LsZtH1Pc5YWZi").strip()
 CHANNEL_ID = os.getenv("LIQSCOPE_CHANNEL_ID", "").strip()
-SECRET = os.getenv("LIQSCOPE_SECRET", "").strip() or "liqscope-change-me"
+# Публично известная соль. На ней считались HMAC IP — полный перебор IPv4
+# снимает «анонимность» статистики. Такое значение больше не принимаем.
+_KNOWN_BAD_SECRETS = frozenset({
+    "liqscope-change-me", "liqscope", "change-me", "changeme", "secret",
+})
+
+
+def _resolve_secret() -> str:
+    """Секрет процесса: из окружения, иначе свой файл в data/, но не дефолт.
+
+    LIQSCOPE_REQUIRE_SECRET=1 (стоит в deploy/licvid.service) — без переменной
+    процесс не стартует. В разработке и тестах секрет генерируется один раз
+    и лежит в data/secret, чтобы хеши IP не прыгали между рестартами.
+    """
+    env = os.getenv("LIQSCOPE_SECRET", "").strip()
+    require = os.getenv("LIQSCOPE_REQUIRE_SECRET", "").strip().lower() in (
+        "1", "true", "yes")
+    if env and env not in _KNOWN_BAD_SECRETS and len(env) >= 16:
+        return env
+    if env:
+        log.warning("LIQSCOPE_SECRET — опубликованный дефолт или короче 16 "
+                    "знаков, игнорируем")
+    if require:
+        log.error("LIQSCOPE_SECRET обязателен (LIQSCOPE_REQUIRE_SECRET=1), "
+                  "но не задан. Сгенерируйте: openssl rand -hex 32")
+        raise SystemExit(2)
+    path = os.getenv("LIQSCOPE_SECRET_FILE",
+                     os.path.join(HERE, "data", "secret")).strip()
+    try:
+        if path and os.path.isfile(path):
+            saved = open(path, encoding="utf-8").read().strip()
+            if saved and saved not in _KNOWN_BAD_SECRETS and len(saved) >= 24:
+                log.warning("LIQSCOPE_SECRET не задан — берём сохранённый %s", path)
+                return saved
+    except OSError:
+        pass
+    generated = secrets.token_urlsafe(32)
+    if path:
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.write(generated + "\n")
+            os.replace(tmp, path)
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+            log.warning("LIQSCOPE_SECRET не задан — сгенерирован и записан в %s. "
+                        "На проде задайте переменную в systemd.", path)
+            return generated
+        except OSError as exc:
+            log.error("не удалось сохранить секрет (%s) — держим его только "
+                      "в памяти этого процесса", exc)
+    return generated
+
+
+SECRET = _resolve_secret()
 ADMIN_IDS = []
 for _x in os.getenv("LIQSCOPE_ADMIN_IDS", "").replace(";", ",").split(","):
     _x = _x.strip()
@@ -385,15 +444,25 @@ class Client:
     SEND_TIMEOUT = 5.0
 
 
+# Потолок живых WS: каждый клиент получает широковещание, флуд соединениями
+# — это DoS. nginx может резать раньше (limit_conn), это запасной кап процесса.
+WS_MAX_CLIENTS = max(8, int(os.getenv("LIQSCOPE_WS_MAX_CLIENTS", "400")))
+
+
 class Hub:
     def __init__(self):
         self.clients: Set[Client] = set()
         self._lock = asyncio.Lock()
 
-    async def add(self, c: Client):
+    async def add(self, c: Client) -> bool:
         async with self._lock:
+            if len(self.clients) >= WS_MAX_CLIENTS:
+                log.warning("WS отклонён: уже %d клиентов (кап %d)",
+                            len(self.clients), WS_MAX_CLIENTS)
+                return False
             self.clients.add(c)
         log.info("Клиент подключился. Всего: %d", len(self.clients))
+        return True
 
     async def remove(self, c: Client):
         async with self._lock:
@@ -2494,6 +2563,17 @@ async def lifespan(app: FastAPI):
                 pass
     tasks.append(asyncio.create_task(warmup(), name="warmup"))
 
+    async def wal_checkpoint_loop():
+        # Долгий читатель может держать WAL и растить accounts.db-wal без
+        # предела. Периодический TRUNCATE отдаёт место, не блокируя запись.
+        while True:
+            await asyncio.sleep(30 * 60)
+            try:
+                await asyncio.to_thread(account_store.wal_checkpoint)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("wal checkpoint: %s", exc)
+    tasks.append(asyncio.create_task(wal_checkpoint_loop(), name="wal-checkpoint"))
+
     tg_bot.health_fn = health_summary
     tg_bot.stats_fn = compute_stats
     # Лента бота: как можно больше событий — текст сам упрётся в лимит Telegram
@@ -2515,20 +2595,203 @@ async def lifespan(app: FastAPI):
             await asyncio.to_thread(HIST.flush, True)
         except Exception:  # noqa: BLE001
             pass
+        try:
+            await asyncio.to_thread(account_store.wal_checkpoint)
+        except Exception:  # noqa: BLE001
+            pass
         await tg_bot.stop()
         await feed.stop()
+
+
+def _cors_origins() -> List[str]:
+    """Свои origin. Звёздочка вместе с credentials отражает любой сайт."""
+    port = (os.getenv("PORT", "8000") or "8000").strip() or "8000"
+    raw = [
+        PUBLIC_URL,
+        seo_pages.SITE_URL,
+        "https://liqscope.online",
+        "https://www.liqscope.online",
+        f"http://127.0.0.1:{port}",
+        f"http://localhost:{port}",
+    ]
+    extra = os.getenv("LIQSCOPE_CORS_ORIGINS", "")
+    raw.extend(x.strip() for x in extra.replace(";", ",").split(","))
+    out: List[str] = []
+    for item in raw:
+        origin = (item or "").strip().rstrip("/")
+        if not origin or origin == "*" or origin in out:
+            continue
+        out.append(origin)
+    return out
+
+
+CORS_ORIGINS = _cors_origins()
+# Тело запроса, которое процесс согласен прочитать целиком. nginx режет 16m,
+# прямой uvicorn без этого лимита читал бы тело до проверок без потолка.
+MAX_BODY_BYTES = max(64 * 1024, int(os.getenv(
+    "LIQSCOPE_MAX_BODY_BYTES", str(16 * 1024 * 1024))))
+
+
+def _want_hsts(scope) -> bool:
+    if os.getenv("LIQSCOPE_HSTS", "").strip().lower() in ("0", "false", "no"):
+        return False
+    if os.getenv("LIQSCOPE_COOKIE_SECURE", "").strip().lower() in (
+            "1", "true", "yes"):
+        return True
+    headers = {}
+    for key, val in scope.get("headers") or []:
+        try:
+            headers[key.decode("latin1").lower()] = val.decode("latin1").lower()
+        except Exception:  # noqa: BLE001
+            continue
+    return scope.get("scheme") == "https" or headers.get("x-forwarded-proto") == "https"
+
+
+_SECURITY_HEADERS = (
+    (b"x-content-type-options", b"nosniff"),
+    (b"referrer-policy", b"strict-origin-when-cross-origin"),
+    (b"x-frame-options", b"SAMEORIGIN"),
+    (b"content-security-policy", b"frame-ancestors 'self'"),
+    (b"permissions-policy", b"camera=(), microphone=(), geolocation=()"),
+)
+
+
+class SecurityHeadersMiddleware:
+    """nosniff, frame-ancestors, Referrer-Policy. Полный CSP — отдельно:
+    страницы живут на инлайновых скриптах, nonce ещё не разведён.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        hsts = _want_hsts(scope)
+
+        async def send_wrap(message):
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers") or [])
+                have = {k.lower() for k, _ in headers}
+                extra = list(_SECURITY_HEADERS)
+                if hsts and b"strict-transport-security" not in have:
+                    extra.append((b"strict-transport-security",
+                                  b"max-age=31536000; includeSubDomains"))
+                for key, val in extra:
+                    if key not in have:
+                        headers.append((key, val))
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, send_wrap)
+
+
+class MaxBodyMiddleware:
+    """Не отдаём приложению тело больше MAX_BODY_BYTES.
+
+    Content-Length выше потолка отсекается сразу. Чанки без длины читаются
+    только до потолка, дальше — 413, а не неограниченный request.body().
+    """
+
+    def __init__(self, app, max_bytes: int = MAX_BODY_BYTES):
+        self.app = app
+        self.max_bytes = max(1024, int(max_bytes))
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope.get("method") in ("GET", "HEAD", "OPTIONS"):
+            await self.app(scope, receive, send)
+            return
+        headers = {}
+        for key, val in scope.get("headers") or []:
+            try:
+                headers[key.decode("latin1").lower()] = val.decode("latin1")
+            except Exception:  # noqa: BLE001
+                continue
+        claimed = headers.get("content-length") or ""
+        if claimed.isdigit() and int(claimed) > self.max_bytes:
+            await _reject_too_large(send)
+            return
+        buffered = []
+        total = 0
+        while True:
+            message = await receive()
+            if message["type"] != "http.request":
+                buffered.append(message)
+                break
+            chunk = message.get("body") or b""
+            total += len(chunk)
+            if total > self.max_bytes:
+                await _reject_too_large(send)
+                return
+            buffered.append(message)
+            if not message.get("more_body"):
+                break
+
+        async def replay():
+            if buffered:
+                return buffered.pop(0)
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        await self.app(scope, replay, send)
+
+
+async def _reject_too_large(send) -> None:
+    body = b'{"ok":false,"error":"too_large"}'
+    await send({
+        "type": "http.response.start",
+        "status": 413,
+        "headers": [
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode()),
+        ],
+    })
+    await send({"type": "http.response.body", "body": body})
+
+
+class CachedStaticFiles(StaticFiles):
+    """Версионированные `?v=` можно держать год, остальное — час.
+
+    Раньше статика отдавалась только с ETag: браузер ревалидировал каждый
+    файл на каждой странице. Неизменённые картинки без `?v=` не помечаем
+    immutable, иначе правка логотипа не доедет до гостя.
+    """
+
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        if getattr(response, "status_code", 0) != 200:
+            return response
+        query = (scope.get("query_string") or b"").decode("latin1", "replace")
+        if re_v(query):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            response.headers.setdefault("Cache-Control", "public, max-age=3600")
+        return response
+
+
+def re_v(query: str) -> bool:
+    return any(part.startswith("v=") and len(part) > 2 for part in query.split("&"))
 
 
 app = FastAPI(title="LiqScope — Live Crypto Liquidation Terminal",
               version="4.1.0", lifespan=lifespan)
 
+# Последний add_middleware — внешний. Сначала режем тело, потом жмём ответ,
+# потом заголовки, и только потом CORS (ему нужен Origin запроса).
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(SecurityHeadersMiddleware)
+try:
+    from starlette.middleware.gzip import GZipMiddleware
+    app.add_middleware(GZipMiddleware, minimum_size=500)
+except Exception:  # noqa: BLE001 — сжатие не должно ронять процесс
+    log.warning("GZipMiddleware недоступен — ответы уйдут без сжатия")
+app.add_middleware(MaxBodyMiddleware)
 
 account_ctx.store = account_store
 account_ctx.bot = tg_bot
@@ -2864,13 +3127,45 @@ async def api_symbol_search(q: str = Query("", max_length=40),
     return res
 
 
+def _request_ip(request: Request) -> str:
+    xff = request.headers.get("x-forwarded-for") or ""
+    if xff:
+        return xff.split(",")[0].strip() or "0"
+    return request.client.host if request.client else "0"
+
+
+# Добавление монеты — единственный публичный мутирующий роут. 20 попыток
+# на IP за 10 минут: человеку хватает, флуду списка — нет.
+_SYMBOL_ADD_RATE = RateLimiter(20, 10 * 60)
+
+
 @app.post("/api/symbols/add")
-async def api_symbol_add(symbol: str = Query(..., max_length=40),
+async def api_symbol_add(request: Request,
+                         symbol: str = Query(..., max_length=40),
                          force: bool = Query(False)):
+    if not _SYMBOL_ADD_RATE.allow("add:" + _request_ip(request)):
+        return JSONResponse({"added": False, "found": False, "error": "rate",
+                             "symbol": "", "message": "слишком часто"},
+                            status_code=429)
     if not feed:
         return JSONResponse({"added": False, "found": False,
                              "error": "сервер ещё не готов"}, status_code=503)
+    # force обходит каталог бирж и кладёт фиктивную пару в общий список.
+    # Это только для админа: иначе аноним подсовывает любое имя всем клиентам.
+    if force:
+        user = current_user(request)
+        if not user or not user.get("is_admin"):
+            return JSONResponse(
+                {"added": False, "found": False, "error": "admin",
+                 "symbol": "", "message": "force только для админа"},
+                status_code=403)
     res = await feed.add_symbol(symbol, force=force)
+    if res.get("error") == "invalid":
+        return JSONResponse(res, status_code=400)
+    if res.get("error") == "full":
+        return JSONResponse(res, status_code=409)
+    if res.get("error") == "rate":
+        return JSONResponse(res, status_code=429)
     if not res.get("found") and not res.get("added"):
         return JSONResponse(res, status_code=404)
     res["details"] = (_enrich_symbol_rows([res.get("details") or {}])[0]
@@ -3221,6 +3516,9 @@ async def api_health():
 async def ws_endpoint(websocket: WebSocket):
     await websocket.accept()
     client = Client(websocket)
+    if not await hub.add(client):
+        await websocket.close(code=1013)
+        return
     # кто это: та же сессия COOKIE_SID, что у кабинета и чата. Без куки
     # клиент остаётся «гостем» — адресные чат-события ему не придут
     try:
@@ -3232,7 +3530,6 @@ async def ws_endpoint(websocket: WebSocket):
                 terminal_chat_mod.chat_presence_touch(client.user_id)
     except Exception as e:  # noqa: BLE001
         log.debug("ws user resolve: %s", e)
-    await hub.add(client)
     try:
         sym_data = await api_symbols() if feed else {"details": [], "custom_symbols": []}
         await client.send({
@@ -3305,7 +3602,7 @@ async def ws_endpoint(websocket: WebSocket):
         sync_hot_symbols()
 
 
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+app.mount("/static", CachedStaticFiles(directory=STATIC_DIR), name="static")
 
 
 @app.get("/")

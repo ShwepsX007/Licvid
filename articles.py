@@ -102,8 +102,10 @@ def _esc(text: Any) -> str:
     return html_mod.escape(str(text if text is not None else ""), quote=False)
 
 
-_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
-_IMG_RE = re.compile(r"!\[([^\]]*)\]\((https?://[^\s)]+)\)")
+# https — внешние, один слэш — страницы сайта. //evil и javascript: не берём.
+_HREF = r"(?:https?://[^\s)]+|/(?!/)[^\s)]*)"
+_LINK_RE = re.compile(rf"\[([^\]]+)\]\(({_HREF})\)")
+_IMG_RE = re.compile(rf"!\[([^\]]*)\]\(({_HREF})\)")
 _BOLD_RE = re.compile(r"\*\*([^*\n]+)\*\*")
 _ITALIC_RE = re.compile(r"(?<!\*)\*([^*\n]+)\*(?!\*)")
 _CODE_RE = re.compile(r"`([^`\n]+)`")
@@ -114,15 +116,29 @@ _QUOTE_RE = re.compile(r"^\s*>\s?(.*)$")
 _HR_RE = re.compile(r"^\s*(?:-{3,}|\*{3,})\s*$")
 
 
+def _q(text: str) -> str:
+    """Кавычки в атрибуте. Текст уже прошёл ``_esc`` (``&<>``), кавычки — нет.
+
+    Без этого ``[x](https://a.com/"onmouseover="alert(1))`` вырывается из href,
+    а ``![x" onerror="alert(1)](url)`` — из alt.
+    """
+    return str(text or "").replace('"', "&quot;").replace("'", "&#39;")
+
+
 def inline_html(text: str) -> str:
     """Строчная разметка → HTML. Текст уже экранирован вызывающим."""
-    out = _IMG_RE.sub(
-        lambda m: f'<img src="{m.group(2)}" alt="{m.group(1)}" loading="lazy">',
-        text)
-    out = _LINK_RE.sub(
-        lambda m: f'<a href="{m.group(2)}" target="_blank" rel="noopener nofollow">'
-                  f"{m.group(1)}</a>",
-        out)
+    def img(m) -> str:
+        return (f'<img src="{_q(m.group(2))}" alt="{_q(m.group(1))}" '
+                f'loading="lazy">')
+
+    def link(m) -> str:
+        url = m.group(2)
+        extra = (' target="_blank" rel="noopener nofollow"'
+                 if url.startswith("http") else "")
+        return f'<a href="{_q(url)}"{extra}>{m.group(1)}</a>'
+
+    out = _IMG_RE.sub(img, text)
+    out = _LINK_RE.sub(link, out)
     out = _BOLD_RE.sub(lambda m: f"<strong>{m.group(1)}</strong>", out)
     out = _ITALIC_RE.sub(lambda m: f"<em>{m.group(1)}</em>", out)
     out = _CODE_RE.sub(lambda m: f"<code>{m.group(1)}</code>", out)

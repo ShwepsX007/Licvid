@@ -245,6 +245,21 @@ def canon(symbol: str) -> str:
     return s
 
 
+# Пара, которую можно показать в интерфейсе и разослать всем клиентам.
+# Только латиница и цифры: никакого HTML, кавычек и пробелов. База до 32
+# знаков (мемы вроде 1000000MOG), котировка 2–10 (USD / USDT / USDC).
+SYM_RE = re.compile(r"^[A-Z0-9]{1,32}_[A-Z0-9]{2,10}$")
+_BASE_RE = re.compile(r"^[A-Z0-9]{1,32}$")
+# Жёсткий потолок общего списка. LIQSCOPE_SYMBOLS_LIMIT — размер топа,
+# а кап не даёт анонимным POST раздувать память процесса и подписки.
+SYMBOLS_CAP = max(8, int(os.getenv("LIQSCOPE_SYMBOLS_CAP", "120")))
+
+
+def is_safe_symbol(symbol: str) -> bool:
+    """True, если пара безопасна для списка, WS и innerHTML."""
+    return bool(SYM_RE.match(str(symbol or "")))
+
+
 def canon_xbt(symbol: str) -> str:
     """PF_XBTUSD / XBTUSD / ETHUSD -> BTC_USDT / ETH_USDT (продукты Kraken).
 
@@ -1634,6 +1649,7 @@ class MarketFeed:
             rows = sorted(self.symbol_index.values(),
                           key=lambda r: float(r.get("volume24h") or 0),
                           reverse=True)
+            rows = [r for r in rows if is_safe_symbol(r.get("symbol"))]
             top = rows[:self.symbols_limit]
             self.symbols = [r["symbol"] for r in top]
             self.symbol_meta = {r["symbol"]: dict(r) for r in top}
@@ -1655,6 +1671,7 @@ class MarketFeed:
                 rows = await loader()
                 if rows and len(rows) >= 10:
                     rows.sort(key=lambda r: r["volume24h"], reverse=True)
+                    rows = [r for r in rows if is_safe_symbol(r.get("symbol"))]
                     rows = rows[:self.symbols_limit]
                     self.symbols = [r["symbol"] for r in rows]
                     self.symbol_meta = {r["symbol"]: r for r in rows}
@@ -1673,7 +1690,15 @@ class MarketFeed:
     def _merge_custom_symbols(self):
         """Добавляет пользовательские монеты к дефолтному топу."""
         for c in list(self.custom_symbols):
+            if not is_safe_symbol(c):
+                try:
+                    self.custom_symbols.remove(c)
+                except ValueError:
+                    pass
+                continue
             if c not in self.symbols:
+                if len(self.symbols) >= SYMBOLS_CAP:
+                    continue
                 self.symbols.append(c)
             entry = self.symbol_index.get(c)
             if entry and c not in self.symbol_meta:
@@ -1734,6 +1759,8 @@ class MarketFeed:
                     entry["volume24h"] = row_vol
                 entry["exchanges"].sort()
         if loaded:
+            # каталог биржи не фильтр: имя с < или кавычкой не попадает в поиск
+            index = {k: v for k, v in index.items() if is_safe_symbol(k)}
             self.symbol_index = index
             self.symbol_index_source = "+".join(loaded)
             log.info("[index] каталог для поиска: %d пар с бирж %s",
@@ -1771,11 +1798,19 @@ class MarketFeed:
         собран из ближайших источников, а лента начнёт принимать события).
         """
         sym = canon(symbol)
-        if not sym or "_" not in sym:
-            sym = f"{sym}_USDT" if sym else ""
         if not sym:
-            return {"added": False, "found": False, "symbol": str(symbol or ""),
-                    "message": "не указана пара"}
+            return {"added": False, "found": False, "symbol": "",
+                    "error": "invalid", "message": "не указана пара"}
+        if "_" not in sym:
+            # «GRAM» без котировки — только если база сама по себе чистая.
+            if not _BASE_RE.match(sym):
+                return {"added": False, "found": False, "symbol": "",
+                        "error": "invalid", "message": "недопустимая пара"}
+            sym = f"{sym}_USDT"
+        if not is_safe_symbol(sym):
+            # Сырое имя наружу не возвращаем: в нём может быть HTML.
+            return {"added": False, "found": False, "symbol": "",
+                    "error": "invalid", "message": "недопустимая пара"}
         if not self.symbol_index:
             await self._load_symbol_index()
         entry = self.symbol_index.get(sym)
@@ -1788,6 +1823,9 @@ class MarketFeed:
             if cands:
                 entry = cands[0]
                 sym = entry["symbol"]
+        if not is_safe_symbol(sym):
+            return {"added": False, "found": False, "symbol": "",
+                    "error": "invalid", "message": "недопустимая пара"}
         if entry is None and not force:
             return {"added": False, "found": False, "symbol": sym,
                     "message": f"пара {pretty_symbol(sym)} не найдена ни на одной бирже "
@@ -1795,6 +1833,10 @@ class MarketFeed:
         if entry is None:
             entry = {"symbol": sym, "base": base_of(sym), "price": 0.0,
                      "volume24h": 0.0, "change24h": 0.0, "exchanges": []}
+        if sym not in self.symbols and len(self.symbols) >= SYMBOLS_CAP:
+            return {"added": False, "found": bool(entry.get("exchanges")),
+                    "symbol": sym, "error": "full",
+                    "message": "список заполнен"}
         if sym not in self.symbols:
             self.symbols.append(sym)
         if sym not in self.custom_symbols:

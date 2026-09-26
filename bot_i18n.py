@@ -881,6 +881,7 @@ RU_EN.update({
     "Монета метрики ": "Coin of metric ",
     # correlations.py: сигналы и настройки алертов по корреляции
     "🔗 <b>Алерт · корреляции · ": "🔗 <b>Alert · correlations · ",
+    "🔗 корреляции · ": "🔗 correlations · ",
     "🔔 <b>Алерты по корреляции</b>": "🔔 <b>Correlation alerts</b>",
     "в противофазе: порог <code>": "in opposite phase: threshold <code>",
     "в одну сторону: порог <code>": "same direction: threshold <code>",
@@ -923,6 +924,12 @@ RU_EN.update({
     "влезает в подпись под фото": "fits into the caption under the photo",
     "Полный разбор дня — на сайте: ": "Full breakdown of the day — on the site: ",
     "📖 Полный разбор дня": "📖 Full day breakdown",
+    "📖 Сводка целиком на сайте": "📖 Full recap on the site",
+    "отправка дайджеста выключена в админке":
+        "digest sending is turned off in the admin panel",
+    # куски f-строки «дайджест за {день} уже отправлен»
+    "дайджест за ": "digest for ",
+    " уже отправлен": " already sent",
     # фото уходит всегда: длинная подпись подрезается по целым строкам
     "длиннее лимита подписи (1024) — хвост поста обрежется, но фото уйдёт":
         "is longer than the caption limit (1024) — the tail will be cut off, "

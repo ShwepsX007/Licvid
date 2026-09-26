@@ -384,7 +384,19 @@
     "chat.sig.book_prices": "Precios {lo}–{hi}",
     "chat.sig.book_exchs": "Visto en: {list}",
     "chat.hint.dm_invite_notice": "💌 Tienes una invitación de privados — pestaña «Privados»",
-    "chat.hint.dm_accepted": "✉ Invitación aceptada — ya puedes escribir"
+    "chat.hint.dm_accepted": "✉ Invitación aceptada — ya puedes escribir",
+    "adm.levels_title": "🎯 Niveles de liquidación — cálculo",
+    "adm.levels_lead": "La herramienta descompone el interés abierto en posiciones (entrada × apalancamiento × margen de mantenimiento) y muestra dónde están las salidas forzadas de otros. Es una estimación: los exchanges no publican las posiciones de los clientes. Aquí también vive la calibración con liquidaciones reales.",
+    "adm.levels_save": "Guardar",
+    "adm.levels_recal": "↻ Recalcular calibración",
+    "adm.levels_syms_ph": "Monedas separadas por comas: BTC_USDT, ETH_USDT",
+    "adm.levels_saved": "Guardado: el cálculo toma los nuevos valores de inmediato.",
+    "adm.levels_fail": "No se guardó — inténtalo de nuevo.",
+    "adm.levels_recal_done": "Calibración recalculada: {list}",
+    "adm.levels_recal_none": "Faltan monedas: indica los pares separados por comas.",
+    "adm.levels_note": "Ahora: cálculos {calls} · caché {cache} · ventana {win} h · calibración: {calib}",
+    "adm.levels_calib_off": "sin calcular",
+    "adm.levels_calib_on": "aplicada"
   },
   "phrases": {
     "В поле уже стоит стандартный промт — правьте прямо в нём; «Вернуть шаблон» очищает поле и снова включает встроенный текст.": "El campo ya trae el prompt estándar: edítalo ahí mismo; “Restaurar plantilla” limpia el campo y reactiva el texto integrado.",
@@ -1235,6 +1247,20 @@
     "Разметка та же, что в русской версии: кнопки над окном, ссылка — «Ссылка» (можно выделить слово и нажать).": "El marcado es el mismo que en la versión rusa: los botones están sobre el cuadro y “Enlace” inserta un enlace (puedes seleccionar una palabra antes).",
     "английская появится после перевода": "la versión en inglés aparecerá tras la traducción",
     "английской версии ещё нет": "todavía no hay versión en inglés",
-    "текст": "texto"
+    "текст": "texto",
+    "оценка, а не факт: позиции приватны, модель разлагает OI": "es una estimación, no un hecho: las posiciones son privadas y el modelo descompone el interés abierto",
+    "уровней нет: по монете мало данных за окно": "sin niveles: pocos datos de esta moneda en la ventana",
+    "часть приростов OI без цены входа": "parte de los incrementos de OI no tienen precio de entrada",
+    "уровни по ним не считаны": "sus niveles no se calcularon",
+    "истории OI мало (меньше часа) — картинка ещё не набралась": "hay poca historia de OI (menos de una hora): la imagen aún se está formando",
+    "фактических ликвидаций за окно нет: уровни не выверены": "no hubo liquidaciones reales en la ventana: los niveles no están verificados",
+    "поддерживающая маржа взята по умолчанию: биржа не отдала ступени — точность ниже": "el margen de mantenimiento es el de por defecto: el exchange no dio escalones — menor precisión",
+    "сторона позиций взята из фандинга (грубо) или неизвестна": "el lado de las posiciones viene del funding (aproximado) o es desconocido",
+    "калибровка по факту не применена": "la calibración con liquidaciones reales no está aplicada",
+    "калибровка выключена": "la calibración está desactivada",
+    "ещё не считалась": "aún no se calculó",
+    "совпадение слабое": "la coincidencia es débil",
+    "мало факта": "pocos datos reales",
+    "факт без цен": "liquidaciones reales sin precios"
   }
 }

@@ -1984,12 +1984,98 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
 .cluster-dot.liq-whale { background: linear-gradient(135deg, #ffce00 5%, #ff9d00 40%, #ff4d00 70%, #ff1030 100%); box-shadow: 0 0 8px rgba(255,115,0,0.9); }
 .cluster-dot.cvd-buy  { background: #8b5cf6; box-shadow: 0 0 6px rgba(139,92,246,0.85); }
 .cluster-dot.cvd-sell { background: #ff9100; box-shadow: 0 0 6px rgba(255,145,0,0.85); }
+/* Уровни ликвидаций — расчётные: полый ромб намекает на «оценку» */
+.cluster-dot.levels-dot { background: #ffd166; box-shadow: 0 0 6px rgba(255,209,102,0.8); border-radius: 2px; }
 
 /* Монета, которая сейчас на графике */
 .btn-symbol.on-chart {
     border-color: rgba(61, 112, 255, 0.75);
     box-shadow: inset 0 0 0 1px rgba(61, 112, 255, 0.35);
 }
+
+/* ============================================================
+   🎯 Уровни ликвидаций: доска кабинета
+   ============================================================ */
+.lv-title { font-weight: 800; color: var(--text-primary); margin-right: 8px; }
+.lv-badge {
+    display: inline-block;
+    font-size: 0.62rem;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #04070d;
+    background: #ffd166;
+    border-radius: 6px;
+    padding: 2px 7px;
+}
+.lv-sub { color: var(--text-muted); font-size: 0.72rem; margin: 6px 0 10px; line-height: 1.45; }
+.lv-symrow { margin: 4px 0 10px; }
+.lv-select {
+    width: 100%;
+    max-width: 320px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    border-radius: 7px;
+    padding: 6px 8px;
+    font-size: 0.78rem;
+    font-weight: 600;
+}
+.lv-cards { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.lv-card {
+    flex: 1 1 150px;
+    min-width: 130px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 8px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+.lv-card b { color: var(--text-primary); font-size: 0.82rem; font-variant-numeric: tabular-nums; }
+.lv-muted { color: var(--text-muted); font-size: 0.68rem; }
+.lv-mags { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
+.lv-mag {
+    flex: 1 1 210px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 8px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    background: var(--bg-card);
+}
+.lv-mag.long { border-color: rgba(255, 45, 149, 0.5); }
+.lv-mag.short { border-color: rgba(0, 214, 255, 0.5); }
+.lv-mag-p { font-weight: 800; color: #ffd166; font-variant-numeric: tabular-nums; }
+.lv-mag-s { font-size: 0.76rem; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.lv-table-wrap { overflow-x: auto; }
+.lv-row {
+    display: grid;
+    grid-template-columns: 96px 92px 64px 64px 78px 1fr;
+    gap: 8px;
+    align-items: center;
+    padding: 5px 6px;
+    border-bottom: 1px solid rgba(132, 147, 168, 0.14);
+    font-size: 0.76rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-secondary);
+}
+.lv-row.lv-head {
+    color: var(--text-muted);
+    font-size: 0.64rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    border-bottom-color: rgba(132, 147, 168, 0.3);
+}
+.lv-row.long .lv-p { color: #ff2d95; }
+.lv-row.short .lv-p { color: #00d6ff; }
+.lv-row .lv-u { color: var(--text-primary); font-weight: 700; }
+.lv-c { position: relative; height: 8px; background: rgba(132, 147, 168, 0.14); border-radius: 4px; }
+.lv-c i { position: absolute; inset: 0 auto 0 0; background: #ffd166; border-radius: 4px; }
+.lv-notes { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; }
+.lv-note { color: var(--text-muted); font-size: 0.68rem; line-height: 1.4; }
 
 /* ============================================================
    Переключатель индикатора «Профиль ликвидаций» на графике
@@ -2065,6 +2151,12 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
     color: #a78bfa;
     background: rgba(167, 139, 250, 0.08);
     box-shadow: 0 0 8px rgba(167, 139, 250, 0.2);
+}
+.profile-toggle.levels-toggle.active {
+    border-color: rgba(255, 209, 102, 0.65);
+    color: #ffd166;
+    background: rgba(255, 209, 102, 0.08);
+    box-shadow: 0 0 8px rgba(255, 209, 102, 0.18);
 }
 .profile-toggle.oi-toggle.active {
     border-color: rgba(74, 222, 128, 0.65);
@@ -2571,3 +2663,42 @@ body.chart-fullscreen { overflow: hidden; }
     .live-price { font-size: 0.98rem; }
     .price-change { font-size: 0.76rem; }
 }
+
+/* --- Подсказка слоя «Уровни ликвидаций» над графиком ---------------------
+   Плашка у левого верхнего угла холста: появляется, только когда слой включён,
+   а рисовать нечего — нет данных или сервер не отдал расчёт. Клики сквозь неё
+   проходят: она не мешает работать с графиком. */
+.chart-note {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    z-index: 6;
+    max-width: min(420px, calc(100% - 16px));
+    padding: 6px 10px;
+    border-radius: 8px;
+    background: rgba(18, 24, 33, 0.92);
+    border: 1px solid rgba(255, 209, 102, 0.45);
+    color: #ffd166;
+    font-size: 0.7rem;
+    font-weight: 600;
+    line-height: 1.35;
+    pointer-events: none;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+}
+.chart-note.hidden { display: none; }
+
+/* --- Админка: поля настроек расчёта уровней ------------------------------ */
+.levels-fields {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 10px 14px;
+    margin: 10px 0 4px;
+}
+.levels-field { display: flex; flex-direction: column; gap: 4px; }
+.levels-field span { color: var(--text-muted); font-size: 0.72rem; }
+.levels-field input[type="number"], .levels-field input[type="text"] {
+    background: var(--bg-card); border: 1px solid var(--border-color);
+    color: var(--text-primary); border-radius: 7px; padding: 4px 8px;
+    font-size: 0.78rem; font-variant-numeric: tabular-nums;
+}
+.levels-field input[type="checkbox"] { align-self: flex-start; }

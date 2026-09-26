@@ -34,6 +34,10 @@
         customSymbols: [],
         soundEnabled: false,
         profileEnabled: false,  // профиль ликвидаций по ценам (полосы на графике)
+        levelsEnabled: false,   // 🎯 расчётные уровни ликвидаций (оценка модели)
+        levelsData: null,       // ответ /api/liq_levels по монете графика
+        levelsAt: 0,            // когда он получен (свой TTL поверх серверного)
+        levelsError: "",        // почему расчёта нет: "HTTP 404" / "нет связи"
         liqEnabled: false,      // шарики ликвидаций на графике
         cvdEnabled: false,      // CVD-стрелки: перевес тейкер-покупок/продаж в свече
         cvdBars: 0,
@@ -686,6 +690,216 @@
             bookHistAt = 0;        // кто вернётся — тот сразу получит и историю
             queueRedraw();
         }
+    }
+
+    // --- 🎯 Уровни ликвидаций (оценка) ------------------------------------------
+    // Где стоят чужие вынужденные выходы. Сервер разлагает открытый интерес на
+    // позиции (вход × плечо × поддерживающая маржа биржи) и вычитает уже
+    // отработавшее. Биржа позиций клиентов не публикует, поэтому это ОЦЕНКА —
+    // и метка об этом стоит и в легенде слоя, и в подписях уровней.
+    const LEVELS_TTL_MS = 45000;    // сервер держит расчёт 20 с, чаще не просим
+    const LEVELS_POLL_MS = 30000;   // пока слой включён — обновляем снапшот
+    const LEVELS_MAX_ROWS = 90;     // рисуем не больше: тяжёлые уровни первыми
+    let levelsTimer = null, levelsPending = false, levelsReqSym = "";
+
+    function levelsWantPoll() { return !!state.levelsEnabled; }
+
+    // Цена отсечения расстояний: живая цена монеты, иначе последняя свеча.
+    function levelsRefPrice() {
+        const live = Number(state.prices[chartSymbol()]);
+        if (isFinite(live) && live > 0) return live;
+        const last = state.candles[state.candles.length - 1];
+        const close = last ? Number(last.close) : NaN;
+        return isFinite(close) && close > 0 ? close : 0;
+    }
+
+    // Подсказка над графиком: слой включён, но рисовать нечего. Без неё клик
+    // по кнопке выглядел «не отвечающим» — слой включался молча, а на графике
+    // не появлялось ничего: сервер не перезапущен после обновления (нет
+    // маршрута) или данные ещё копятся (пустые OI и профиль объёма).
+    function paintLevelsNote() {
+        const note = $("levels-note");
+        if (!note) return;
+        let text = "";
+        if (state.levelsEnabled) {
+            const d = state.levelsData;
+            if (state.levelsError) {
+                text = I18n.t("chart.levels_note_err", { code: state.levelsError });
+            } else if (d && d.enabled === false) {
+                text = I18n.t("chart.levels_note_off");
+            } else if (d && !((d.levels || []).some((r) => Number(r.usd) > 0))) {
+                text = I18n.t("chart.levels_note_nodata");
+            }
+        }
+        note.textContent = text;
+        note.classList.toggle("hidden", !text);
+    }
+
+    async function levelsSnapshot(force) {
+        if (!levelsWantPoll()) return;
+        const sym = chartSymbol();
+        if (!sym || sym === "ALL") return;
+        const fresh = state.levelsData && state.levelsData.symbol === sym &&
+            Date.now() - state.levelsAt < LEVELS_TTL_MS;
+        if (!force && fresh) return;
+        if (levelsPending) return;
+        levelsPending = true;
+        levelsReqSym = sym;
+        try {
+            const price = levelsRefPrice();
+            const q = "/api/liq_levels?symbol=" + encodeURIComponent(sym) +
+                (price ? "&price=" + encodeURIComponent(price) : "");
+            const r = await fetch(q, { credentials: "same-origin" });
+            const d = await r.json().catch(() => null);
+            // ответ мог прийти уже по другой монете — он больше не нужен
+            if (d && d.ok && levelsReqSym === sym && chartSymbol() === sym) {
+                state.levelsData = d;
+                state.levelsAt = Date.now();
+                state.levelsError = "";
+                queueRedraw();
+            } else if (levelsReqSym === sym && chartSymbol() === sym) {
+                // пусто или ошибка: причину показываем в подсказке над графиком
+                state.levelsError = r.ok ? "" : ("HTTP " + r.status);
+                if (r.ok) state.levelsData = d || null;
+            }
+        } catch (e) {
+            // нет сети — рисуем по прошлому расчёту, но говорим, почему пусто
+            if (levelsReqSym === sym) state.levelsError = "нет связи";
+        }
+        levelsPending = false;
+        paintLevelsNote();
+    }
+
+    // Единая точка включения поллера, как у стакана: слой выключен — ни одного
+    // запроса, и сервер перестаёт считать лестницы для этой монеты.
+    function levelsPollSync() {
+        if (levelsWantPoll()) {
+            if (!state.levelsData) state.levelsError = "";
+            paintLevelsNote();
+            levelsSnapshot(false);
+            if (!levelsTimer) {
+                levelsTimer = setInterval(() => levelsSnapshot(false), LEVELS_POLL_MS);
+            }
+            return;
+        }
+        if (levelsTimer) clearInterval(levelsTimer);
+        levelsTimer = null;
+        state.levelsData = null;
+        state.levelsAt = 0;
+        state.levelsError = "";
+        paintLevelsNote();
+        queueRedraw();
+    }
+
+    // Монета сменилась: расчёт старой пары к новой не относится.
+    function levelsSymbolChanged() {
+        state.levelsData = null;
+        state.levelsAt = 0;
+        state.levelsError = "";
+        paintLevelsNote();
+        if (levelsWantPoll()) levelsSnapshot(true);
+    }
+
+    // Цену уровня — в координату холста (тот же способ, что у профиля и стен).
+    function levelsY(price) {
+        try {
+            const y = candleSeries.priceToCoordinate(Number(price));
+            if (y === null || y === undefined || !isFinite(y)) return null;
+            return y;
+        } catch (e) { return null; }
+    }
+
+    // Полоса кумулятива справа + подпись у магнитов. Полосы — накопленная масса
+    // чужих выходов «по дороге» к цене: чем шире, тем больше снесёт.
+    function drawLiqLevels(ctx) {
+        const data = state.levelsData;
+        if (!state.levelsEnabled || !data || data.enabled === false) return;
+        if (!chart || !candleSeries || !clusterCanvas) return;
+        const rows = (data.levels || []).filter((r) => Number(r.usd) > 0);
+        if (!rows.length) return;
+
+        const chosen = rows.slice()
+            .sort((a, b) => Number(b.usd) - Number(a.usd))
+            .slice(0, LEVELS_MAX_ROWS)
+            .sort((a, b) => Number(a.price) - Number(b.price));
+        let maxCum = 0;
+        chosen.forEach((r) => {
+            const cum = Number(r.cum_usd) || 0;
+            if (cum > maxCum) maxCum = cum;
+        });
+        if (!(maxCum > 0)) return;
+
+        const magnets = new Map();
+        ((data.magnets_list || [])).forEach((m) => {
+            if (m && m.price) magnets.set(Number(m.price), m);
+        });
+        const W = clusterCanvas.width, H = clusterCanvas.height;
+        const maxBar = Math.max(W * 0.2, 44);
+        let labelled = 0;
+
+        ctx.save();
+        ctx.textBaseline = "middle";
+        chosen.forEach((row) => {
+            const y = levelsY(row.price);
+            if (y === null || y < -6 || y > H + 6) return;
+            const long = Number(row.long_usd) || 0;
+            const short = Number(row.short_usd) || 0;
+            // сторона уровня: у лонгов масса ниже цены, у шортов — выше
+            const isLong = long >= short;
+            const col = isLong ? LIQ_COLORS.long : LIQ_COLORS.short;
+            const magnet = magnets.get(Number(row.price)) || null;
+            const w = Math.max(3, Math.min(maxBar, (Number(row.cum_usd) || 0) / maxCum * maxBar));
+            const x0 = Math.round(W - w);
+
+            // полоса кумулятива: справа, чтобы не спорить с профилем слева
+            ctx.globalAlpha = magnet ? 0.42 : 0.2;
+            ctx.fillStyle = col.fill;
+            ctx.fillRect(x0, y - 2, Math.round(w), 4);
+            // сама линия уровня: от полосы до правого края + пунктир на магнитах
+            ctx.globalAlpha = magnet ? 0.85 : 0.4;
+            ctx.strokeStyle = col.ring;
+            ctx.lineWidth = magnet ? 1.2 : 1;
+            if (magnet) ctx.setLineDash([5, 3]);
+            ctx.beginPath();
+            ctx.moveTo(x0 - 6, y + 0.5);
+            ctx.lineTo(W - 1, y + 0.5);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // подпись: у магнитов всегда, у обычных уровней — только пока места
+            // хватает (не больше пяти подписей на кадр, иначе холст пестрит)
+            const strong = !!magnet || (w > maxBar * 0.55 && labelled < 5);
+            if (strong) {
+                labelled += 1;
+                const usd = fmtCompact(Number(row.usd) || 0);
+                const lev = Number(row.lev);
+                let label = usd + (isFinite(lev) && lev > 0 ? " \u00b7 " + Math.round(lev) + "x" : "");
+                if (magnet) {
+                    const share = Number(magnet.share);
+                    if (isFinite(share) && share > 0) label += " \u00b7 " + share.toFixed(1) + "%";
+                }
+                ctx.globalAlpha = 0.95;
+                ctx.font = "bold 9px 'JetBrains Mono', monospace";
+                ctx.textAlign = "right";
+                ctx.fillStyle = "rgba(232,240,255,0.92)";
+                const tw = ctx.measureText ? ctx.measureText(label).width : 0;
+                ctx.globalAlpha = 0.5;
+                ctx.fillStyle = col.fill;
+                ctx.fillRect(W - 4 - tw - 4, y - 6.5, tw + 8, 13);
+                ctx.globalAlpha = 1;
+                ctx.fillStyle = "#04070d";
+                ctx.fillText(label, W - 8, y + 0.5);
+            }
+        });
+
+        // Обязательная маркировка: это расчёт, а не заявка биржи.
+        ctx.globalAlpha = 0.9;
+        ctx.font = "bold 9px 'JetBrains Mono', monospace";
+        ctx.textAlign = "right";
+        ctx.fillStyle = "rgba(232,240,255,0.75)";
+        const note = I18n.t("chart.levels_est");
+        ctx.fillText(note, W - 8, 10);
+        ctx.restore();
     }
 
     async function loadHistoryFor(sym, force) {
@@ -1505,6 +1719,7 @@
         if (state.oiEnabled) drawOiBalls(ctx);
         if (state.cvdEnabled) drawCvdTriangles(ctx);
         if (state.liqEnabled) drawLiqRects(ctx);
+        if (state.levelsEnabled) drawLiqLevels(ctx);   // 🎯 уровни (оценка)
         drawFigures();   // фигуры теханализа — свой canvas поверх
         drawIndicatorPanes();   // окна LIQ/CVD/OI под графиком
     }
@@ -5167,7 +5382,7 @@
     // По умолчанию при входе на график все слои выключены, а сами переключатели
     // видны только зарегистрированным пользователям (авторизация сайта).
     const LAYER_KEYS = ["profileEnabled", "liqEnabled", "cvdEnabled", "oiEnabled",
-                        "bookEnabled", "paneLiq", "paneCvd", "paneOi"];
+                        "bookEnabled", "levelsEnabled", "paneLiq", "paneCvd", "paneOi"];
     //: ключ слоя → кнопка-переключатель (заполняется в setupLayerToggles)
     const LAYER_DEFS = {};
 
@@ -5416,6 +5631,9 @@
               on: "chart.oi_on", off: "chart.oi_off" },
             { el: $("book-toggle"), skey: "bookEnabled", store: "liqscope.bookEnabled",
               on: "chart.book_on", off: "chart.book_off" },
+            { el: $("levels-toggle"), skey: "levelsEnabled",
+              store: "liqscope.levelsEnabled",
+              on: "chart.levels_on", off: "chart.levels_off" },
             // индикаторные окна под графиком — те же данные, что в кабинете
             { el: $("pane-liq-toggle"), skey: "paneLiq", store: "liqscope.paneLiq",
               on: "chart.pane_liq_on", off: "chart.pane_liq_off", pane: "liq" },
@@ -5464,6 +5682,11 @@
                     unpinShape();
                     hideShapeModal();
                 }
+                if (d.skey === "levelsEnabled") {
+                    // уровни: включили — сразу просим расчёт, выключили — гасим
+                    // поллер и чистим данные (levelsPollSync)
+                    levelsPollSync();
+                }
                 if (d.skey === "bookEnabled") {
                     // стакан: слой отвечает только за рисовку; опрос живёт, пока
                     // слой включён ИЛИ открыта лента заявок (bookPollSync)
@@ -5476,8 +5699,10 @@
                 queueRedraw();
             });
             I18n.onChange(paint);
+            if (d.skey === "levelsEnabled") I18n.onChange(paintLevelsNote);
             paint();
             if (d.skey === "bookEnabled") bookPollSync();
+            if (d.skey === "levelsEnabled") levelsPollSync();
             // лента заявок могла быть открыта с прошлой сессии без слоя —
             // стартовый поллер ставим один раз после восстановления тумблеров
             if (state.feedTab === "book") bookPollSync();
@@ -6044,6 +6269,7 @@
         rebuildFeed();
         fetchStats();
         loadHistoryFor(s);                      // подтянуть историю новой пары
+        levelsSymbolChanged();                  // уровни считаются по монете
     }
 
     function selectChartSymbol(s) {
@@ -6062,6 +6288,7 @@
         sendConfig();
         loadCandles();
         loadHistoryFor(s);   // пузырьки новой пары сразу с полной историей
+        levelsSymbolChanged();
     }
 
     if (feedFilterEl) {

@@ -22,6 +22,8 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
+from history import disk_has_series
+
 HOUR = 3600
 KEEP_HOURS = 12          # держим с запасом: нужны ещё и предыдущие 4ч для сравнения
 TOP_N = 7                # «топ 7 крупных ликвидаций по каждому часу»
@@ -265,6 +267,20 @@ class OiHistory:
         series = self._series.get(str(symbol)) or []
         return series[-1] if series else None
 
+    def points(self, symbol: str, since: Optional[float] = None,
+               until: Optional[float] = None) -> List[tuple]:
+        """Ряд (момент, OI в USD) — весь, а не одна точка.
+
+        Нужен моделям, которые считают по истории: уровни ликвидаций берут
+        дельты OI за окно, и им нужен именно ряд, а не уровень на момент.
+        """
+        series = self._series.get(str(symbol)) or []
+        if since is None and until is None:
+            return list(series)
+        start = float(since) if since is not None else 0.0
+        end = float(until) if until is not None else float("inf")
+        return [(t, v) for t, v in series if start <= t <= end]
+
     def change(self, symbol: str, hours: float = 4.0,
                now: Optional[float] = None) -> Optional[dict]:
         """Изменился ли OI за окно: {from, to, pct, span_sec} или None."""
@@ -321,6 +337,13 @@ class OiHistory:
 
     # ----- диск -----------------------------------------------------------
     def save(self, path: str) -> bool:
+        """Сброс на диск. Пустой ряд не затирает готовый файл.
+
+        Сервер, поднятый до засева истории или без доступа к биржам, держит
+        пустую память — сохранять её поверх накопленного ряда нельзя.
+        """
+        if not self._series and disk_has_series(path):
+            return False
         data = {"tz": self.tz, "step": self.step,
                 "series": {k: v for k, v in self._series.items()}}
         try:

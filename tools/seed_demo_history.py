@@ -6,6 +6,11 @@
 (часовые свёртки: ликвидации по монетам и биржам, CVD, объём) — и ряд OI в
 ``data/oi_history.json``. Сырых событий не пишем: их даёт живой поток.
 
+Флаг ``--profile`` дополнительно наполняет профиль объёма
+(``data/volume_profile.json``): по нему считаются уровни ликвидаций — без
+цены входа прирост OI ничего не значит, а профиль даёт VWAP пятиминутки и
+перевес сторон.
+
 Запуск: /tmp/venv/bin/python tools/seed_demo_history.py [--days 31] [--dir data]
 """
 from __future__ import annotations
@@ -94,19 +99,51 @@ def make_hours(day: str, now: float, rnd: random.Random) -> dict:
 
 
 def make_oi(days: int, now: float, step_min: int = 30) -> dict:
-    """Ряд OI: разреженные срезы по монетам (тот же формат, что OiHistory.save)."""
+    """Ряд OI: срезы по монетам с возвратом к своему уровню.
+
+    Открытый интерес не растёт экспоненциально: он колеблется вокруг уровня
+    (позиции набирают и закрывают). Поэтому это не «случайное блуждание
+    вверх», а отклонение, которое тянется назад, — иначе в уровнях
+    ликвидаций вся масса собиралась бы в последних часах окна.
+    """
     series = {}
     points = int(days * 24 * 60 / step_min)
-    for i, (sym, (price, base_vol)) in enumerate(COINS.items()):
-        level = base_vol * rnd_uniform(6.0, 14.0)
+    for sym, (_price, base_vol) in COINS.items():
+        base = base_vol * rnd_uniform(6.0, 14.0)
+        drift = 0.0
         row = []
         for k in range(points):
             ts = now - (points - k) * step_min * 60
-            level = max(level * (1 + random.gauss(0.0, 0.012)), 1e5)
+            drift = drift * 0.995 + random.gauss(0.0, 0.004)   # возврат к уровню
+            level = max(base * (1.0 + drift), 1e5)
             row.append([int(ts), round(level, 2)])
         series[sym] = row
-        del price, i
     return {"series": series, "saved": now}
+
+
+def make_profile(days: int, now: float, coins: int = 6, path: str = "") -> dict:
+    """Профиль объёма: пятиминутные слоты с ценой и сторонами.
+
+    Пишем через сам ``VolumeProfile`` — формат файла не нужно знать наизусть,
+    а уровни потом читают те же ``bucket_vwap``/``side_ratio``, что и в бою.
+    """
+    from volume_profile import VolumeProfile
+
+    vp = VolumeProfile(path=path)
+    syms = list(COINS.items())[:max(1, coins)]
+    step = 300
+    points = int(days * 24 * 60 * 60 / step)
+    for sym, (base, _vol) in syms:
+        price = base
+        for k in range(points):
+            ts = now - (points - k) * step
+            price = max(price * (1 + random.gauss(0.0, 0.0025)), base * 0.5)
+            usd = base * rnd_uniform(200.0, 800.0)
+            buy = usd * rnd_uniform(0.35, 0.65)
+            vp.add_candle(sym, ts, price * 1.001, price * 0.999, price,
+                          usd, buy, usd - buy)
+    vp.save(force=True)
+    return {"symbols": len(syms), "buckets": sum(len(v) for v in vp._series.values())}
 
 
 def rnd_uniform(a: float, b: float) -> float:
@@ -119,6 +156,10 @@ def main() -> int:
     ap.add_argument("--dir", default=os.path.join(HERE, "data"))
     ap.add_argument("--seed", type=int, default=20260917)
     ap.add_argument("--oi", action="store_true", help="перезаписать и ряд OI")
+    ap.add_argument("--profile", action="store_true",
+                    help="наполнить профиль объёма (нужен уровням ликвидаций)")
+    ap.add_argument("--profile-coins", type=int, default=6,
+                    help="сколько монет писать в профиль (по умолчанию 6)")
     args = ap.parse_args()
 
     rnd = random.Random(args.seed)
@@ -145,6 +186,14 @@ def main() -> int:
             json.dump(make_oi(args.days, now), f, ensure_ascii=False,
                       separators=(",", ":"))
         print(f"ряд OI: {path}")
+
+    if args.profile:
+        from volume_profile import VolumeProfile  # noqa: F401  (проверка импорта)
+
+        path = os.path.join(args.dir, "volume_profile.json")
+        profile = make_profile(args.days, now, args.profile_coins, path)
+        print(f"профиль объёма: {profile['symbols']} монет, "
+              f"{profile['buckets']} слотов → {path}")
     return 0
 
 

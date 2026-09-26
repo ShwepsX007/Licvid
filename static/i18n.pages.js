@@ -397,7 +397,19 @@ window.LIQSCOPE_I18N_PAGES =
       "chat.sig.book_prices": "Цены {lo}–{hi}",
       "chat.sig.book_exchs": "Видна на: {list}",
       "chat.hint.dm_invite_notice": "💌 Вам пришли в личные сообщения — вкладка «Личные»",
-      "chat.hint.dm_accepted": "✉ Приглашение принято — можно писать"
+      "chat.hint.dm_accepted": "✉ Приглашение принято — можно писать",
+      "adm.levels_title": "🎯 Уровни ликвидаций — расчёт",
+      "adm.levels_lead": "Инструмент раскладывает открытый интерес на позиции (вход × плечо × поддерживающая маржа) и показывает, где стоят чужие вынужденные выходы. Это оценка: биржи не публикуют позиции клиентов. Здесь же — калибровка по фактическим ликвидациям.",
+      "adm.levels_save": "Сохранить",
+      "adm.levels_recal": "↻ Пересчитать калибровку",
+      "adm.levels_syms_ph": "Монеты через запятую: BTC_USDT, ETH_USDT",
+      "adm.levels_saved": "Сохранено: расчёт берёт новые значения сразу.",
+      "adm.levels_fail": "Не сохранилось — попробуйте ещё раз.",
+      "adm.levels_recal_done": "Калибровка пересчитана: {list}",
+      "adm.levels_recal_none": "Нужны монеты: укажите пары через запятую.",
+      "adm.levels_note": "Сейчас: вызовов расчёта {calls} · в кэше {cache} · окно {win} ч · калибровка: {calib}",
+      "adm.levels_calib_off": "не считалась",
+      "adm.levels_calib_on": "применена"
     },
     "phrases": {
       "🗑 Стереть статистику": "🗑 Стереть статистику",
@@ -929,7 +941,19 @@ window.LIQSCOPE_I18N_PAGES =
       "chat.sig.book_prices": "Prices {lo}–{hi}",
       "chat.sig.book_exchs": "Seen on: {list}",
       "chat.hint.dm_invite_notice": "💌 You got a direct message invite — see the “Direct” tab",
-      "chat.hint.dm_accepted": "✉ Invite accepted — you can write now"
+      "chat.hint.dm_accepted": "✉ Invite accepted — you can write now",
+      "adm.levels_title": "🎯 Liquidation levels — calculation",
+      "adm.levels_lead": "The tool splits open interest into positions (entry × leverage × maintenance margin) and shows where other traders' forced exits sit. This is an estimate: exchanges do not publish client positions. Calibration against actual liquidations lives here too.",
+      "adm.levels_save": "Save",
+      "adm.levels_recal": "↻ Recalculate calibration",
+      "adm.levels_syms_ph": "Coins separated by commas: BTC_USDT, ETH_USDT",
+      "adm.levels_saved": "Saved: the calculation picks the new values up at once.",
+      "adm.levels_fail": "Could not save — please try again.",
+      "adm.levels_recal_done": "Calibration recalculated: {list}",
+      "adm.levels_recal_none": "Coins are needed: list the pairs separated by commas.",
+      "adm.levels_note": "Now: builds {calls} · cache {cache} · window {win} h · calibration: {calib}",
+      "adm.levels_calib_off": "not calculated",
+      "adm.levels_calib_on": "applied"
     },
     "phrases": {
       "В поле уже стоит стандартный промт — правьте прямо в нём; «Вернуть шаблон» очищает поле и снова включает встроенный текст.": "The field already holds the default prompt — edit it right there; “Restore template” clears the field and turns the built-in text back on.",
@@ -1779,7 +1803,21 @@ window.LIQSCOPE_I18N_PAGES =
       "Разметка та же, что в русской версии: кнопки над окном, ссылка — «Ссылка» (можно выделить слово и нажать).": "The markup is the same as in the Russian version: the buttons are above the box, and “Link” inserts a link (you can select a word first).",
       "английская появится после перевода": "the English version will appear after translation",
       "английской версии ещё нет": "no English version yet",
-      "текст": "text"
+      "текст": "text",
+      "оценка, а не факт: позиции приватны, модель разлагает OI": "an estimate, not a fact: positions are private, the model splits open interest",
+      "уровней нет: по монете мало данных за окно": "no levels: not enough data for this coin in the window",
+      "часть приростов OI без цены входа": "some open-interest increases have no entry price",
+      "уровни по ним не считаны": "levels for them are not calculated",
+      "истории OI мало (меньше часа) — картинка ещё не набралась": "there is little open-interest history (under an hour) — the picture is still filling up",
+      "фактических ликвидаций за окно нет: уровни не выверены": "no actual liquidations in the window: the levels are not verified",
+      "поддерживающая маржа взята по умолчанию: биржа не отдала ступени — точность ниже": "maintenance margin is taken by default: the exchange gave no tiers — accuracy is lower",
+      "сторона позиций взята из фандинга (грубо) или неизвестна": "the side of positions comes from funding (rough) or is unknown",
+      "калибровка по факту не применена": "calibration against actual liquidations is not applied",
+      "калибровка выключена": "calibration is off",
+      "ещё не считалась": "not calculated yet",
+      "совпадение слабое": "the match is weak",
+      "мало факта": "not enough actual data",
+      "факт без цен": "actual liquidations without prices"
     }
   },
   "zh": {
@@ -2168,7 +2206,19 @@ window.LIQSCOPE_I18N_PAGES =
       "chat.sig.book_prices": "价格 {lo}–{hi}",
       "chat.sig.book_exchs": "出现于：{list}",
       "chat.hint.dm_invite_notice": "💌 您收到私信邀请 — 见「私聊」标签",
-      "chat.hint.dm_accepted": "✉ 邀请已接受 — 可以发消息了"
+      "chat.hint.dm_accepted": "✉ 邀请已接受 — 可以发消息了",
+      "adm.levels_title": "🎯 爆仓价位 — 计算",
+      "adm.levels_lead": "该工具把未平仓合约量拆解为持仓（入价 × 杠杆 × 维持保证金），显示他人的强制平仓价位。这是估算：交易所不会公开客户持仓。这里也可以按实际爆仓进行校准。",
+      "adm.levels_save": "保存",
+      "adm.levels_recal": "↻ 重新校准",
+      "adm.levels_syms_ph": "用逗号分隔币种：BTC_USDT, ETH_USDT",
+      "adm.levels_saved": "已保存：计算会立即采用新值。",
+      "adm.levels_fail": "未能保存 — 请重试。",
+      "adm.levels_recal_done": "校准已重算：{list}",
+      "adm.levels_recal_none": "需要币种：请用逗号列出交易对。",
+      "adm.levels_note": "当前：计算 {calls} 次 · 缓存 {cache} · 窗口 {win} 小时 · 校准：{calib}",
+      "adm.levels_calib_off": "未计算",
+      "adm.levels_calib_on": "已应用"
     },
     "phrases": {
       "В поле уже стоит стандартный промт — правьте прямо в нём; «Вернуть шаблон» очищает поле и снова включает встроенный текст.": "输入框里已是默认提示词 — 直接修改；«恢复模板» 会清空并重新启用内置文本。",
@@ -3019,7 +3069,21 @@ window.LIQSCOPE_I18N_PAGES =
       "Разметка та же, что в русской версии: кнопки над окном, ссылка — «Ссылка» (можно выделить слово и нажать).": "标记方式与俄文版相同：按钮在框上方，“链接”可插入链接（可先选中单词）。",
       "английская появится после перевода": "英文版会在译文后出现",
       "английской версии ещё нет": "还没有英文版",
-      "текст": "文本"
+      "текст": "文本",
+      "оценка, а не факт: позиции приватны, модель разлагает OI": "这是估算而非事实：持仓不公开，模型拆解未平仓合约量",
+      "уровней нет: по монете мало данных за окно": "没有价位：该币种在窗口内数据不足",
+      "часть приростов OI без цены входа": "部分未平仓增量没有入场价",
+      "уровни по ним не считаны": "这些增量未计算价位",
+      "истории OI мало (меньше часа) — картинка ещё не набралась": "未平仓历史太少（不足一小时）——画面尚未成形",
+      "фактических ликвидаций за окно нет: уровни не выверены": "窗口内没有实际爆仓：价位未经校验",
+      "поддерживающая маржа взята по умолчанию: биржа не отдала ступени — точность ниже": "维持保证金取默认值：交易所未提供阶梯——精度更低",
+      "сторона позиций взята из фандинга (грубо) или неизвестна": "持仓方向来自资金费率（粗略）或未知",
+      "калибровка по факту не применена": "未按实际爆仓校准",
+      "калибровка выключена": "校准已关闭",
+      "ещё не считалась": "尚未计算",
+      "совпадение слабое": "吻合度偏低",
+      "мало факта": "实际数据不足",
+      "факт без цен": "实际爆仓没有价格"
     }
   },
   "hi": {
@@ -3408,7 +3472,19 @@ window.LIQSCOPE_I18N_PAGES =
       "chat.sig.book_prices": "कीमतें {lo}–{hi}",
       "chat.sig.book_exchs": "दिखा: {list}",
       "chat.hint.dm_invite_notice": "💌 आपको निजी संदेश का निमंत्रण मिला — 「निजी」 टैब देखें",
-      "chat.hint.dm_accepted": "✉ निमंत्रण स्वीकार — अब लिख सकते हैं"
+      "chat.hint.dm_accepted": "✉ निमंत्रण स्वीकार — अब लिख सकते हैं",
+      "adm.levels_title": "🎯 लिक्विडेशन स्तर — गणना",
+      "adm.levels_lead": "यह टूल ओपन इंटरेस्ट को पोज़िशन में बाँटता है (एंट्री × लीवरेज × मेंटेनेंस मार्जिन) और दिखाता है कि दूसरों के फोर्स्ड एग्ज़िट कहाँ हैं। यह अनुमान है: एक्सचेंज क्लाइंट पोज़िशन सार्वजनिक नहीं करते। यहीं असली लिक्विडेशन पर कैलिब्रेशन भी है।",
+      "adm.levels_save": "सेव करें",
+      "adm.levels_recal": "↻ कैलिब्रेशन दोबारा",
+      "adm.levels_syms_ph": "कॉइन कॉमा से: BTC_USDT, ETH_USDT",
+      "adm.levels_saved": "सेव हो गया: गणना नई वैल्यू तुरंत लेती है।",
+      "adm.levels_fail": "सेव नहीं हुआ — दोबारा कोशिश करें।",
+      "adm.levels_recal_done": "कैलिब्रेशन दोबारा गिना गया: {list}",
+      "adm.levels_recal_none": "कॉइन चाहिए: जोड़े कॉमा से लिखें।",
+      "adm.levels_note": "अभी: गणना {calls} · कैश {cache} · विंडो {win} घं · कैलिब्रेशन: {calib}",
+      "adm.levels_calib_off": "गिनी नहीं गई",
+      "adm.levels_calib_on": "लागू"
     },
     "phrases": {
       "В поле уже стоит стандартный промт — правьте прямо в нём; «Вернуть шаблон» очищает поле и снова включает встроенный текст.": "फ़ील्ड में डिफ़ॉल्ट प्रॉम्ट पहले से है — उसी में बदलें; «टेम्पलेट वापस» फ़ील्ड साफ़ करके बिल्ट-इन टेक्स्ट फिर चालू कर देता है।",
@@ -4260,7 +4336,21 @@ window.LIQSCOPE_I18N_PAGES =
       "Разметка та же, что в русской версии: кнопки над окном, ссылка — «Ссылка» (можно выделить слово и нажать).": "मार्कअप रूसी संस्करण जैसा ही है: बटन बॉक्स के ऊपर, और “Link” लिंक डालता है (पहले शब्द चुन सकते हैं)।",
       "английская появится после перевода": "अंग्रेज़ी संस्करण अनुवाद के बाद दिखेगा",
       "английской версии ещё нет": "अंग्रेज़ी संस्करण अभी नहीं",
-      "текст": "टेक्स्ट"
+      "текст": "टेक्स्ट",
+      "оценка, а не факт: позиции приватны, модель разлагает OI": "यह अनुमान है, तथ्य नहीं: पोज़िशन निजी हैं, मॉडल ओपन इंटरेस्ट को बाँटता है",
+      "уровней нет: по монете мало данных за окно": "कोई स्तर नहीं: विंडो में इस कॉइन का डेटा कम है",
+      "часть приростов OI без цены входа": "कुछ ओपन-इंटरेस्ट वृद्धि में एंट्री प्राइस नहीं है",
+      "уровни по ним не считаны": "इनके स्तर नहीं निकाले गए",
+      "истории OI мало (меньше часа) — картинка ещё не набралась": "ओपन-इंटरेस्ट इतिहास कम है (एक घंटे से कम) — तस्वीर अभी बन रही है",
+      "фактических ликвидаций за окно нет: уровни не выверены": "विंडो में असली लिक्विडेशन नहीं: स्तर जाँचे नहीं गए",
+      "поддерживающая маржа взята по умолчанию: биржа не отдала ступени — точность ниже": "मेंटेनेंस मार्जिन डिफ़ॉल्ट है: एक्सचेंज ने स्तर नहीं दिए — सटीकता कम",
+      "сторона позиций взята из фандинга (грубо) или неизвестна": "पोज़िशन की दिशा फंडिंग से (मोटे तौर पर) या अज्ञात है",
+      "калибровка по факту не применена": "असली लिक्विडेशन से कैलिब्रेशन लागू नहीं",
+      "калибровка выключена": "कैलिब्रेशन बंद है",
+      "ещё не считалась": "अभी गणना नहीं हुई",
+      "совпадение слабое": "मेल कमज़ोर है",
+      "мало факта": "असली डेटा कम है",
+      "факт без цен": "असली लिक्विडेशन बिना कीमत"
     }
   },
   "es": {
@@ -4649,7 +4739,19 @@ window.LIQSCOPE_I18N_PAGES =
       "chat.sig.book_prices": "Precios {lo}–{hi}",
       "chat.sig.book_exchs": "Visto en: {list}",
       "chat.hint.dm_invite_notice": "💌 Tienes una invitación de privados — pestaña «Privados»",
-      "chat.hint.dm_accepted": "✉ Invitación aceptada — ya puedes escribir"
+      "chat.hint.dm_accepted": "✉ Invitación aceptada — ya puedes escribir",
+      "adm.levels_title": "🎯 Niveles de liquidación — cálculo",
+      "adm.levels_lead": "La herramienta descompone el interés abierto en posiciones (entrada × apalancamiento × margen de mantenimiento) y muestra dónde están las salidas forzadas de otros. Es una estimación: los exchanges no publican las posiciones de los clientes. Aquí también vive la calibración con liquidaciones reales.",
+      "adm.levels_save": "Guardar",
+      "adm.levels_recal": "↻ Recalcular calibración",
+      "adm.levels_syms_ph": "Monedas separadas por comas: BTC_USDT, ETH_USDT",
+      "adm.levels_saved": "Guardado: el cálculo toma los nuevos valores de inmediato.",
+      "adm.levels_fail": "No se guardó — inténtalo de nuevo.",
+      "adm.levels_recal_done": "Calibración recalculada: {list}",
+      "adm.levels_recal_none": "Faltan monedas: indica los pares separados por comas.",
+      "adm.levels_note": "Ahora: cálculos {calls} · caché {cache} · ventana {win} h · calibración: {calib}",
+      "adm.levels_calib_off": "sin calcular",
+      "adm.levels_calib_on": "aplicada"
     },
     "phrases": {
       "В поле уже стоит стандартный промт — правьте прямо в нём; «Вернуть шаблон» очищает поле и снова включает встроенный текст.": "El campo ya trae el prompt estándar: edítalo ahí mismo; “Restaurar plantilla” limpia el campo y reactiva el texto integrado.",
@@ -5500,7 +5602,21 @@ window.LIQSCOPE_I18N_PAGES =
       "Разметка та же, что в русской версии: кнопки над окном, ссылка — «Ссылка» (можно выделить слово и нажать).": "El marcado es el mismo que en la versión rusa: los botones están sobre el cuadro y “Enlace” inserta un enlace (puedes seleccionar una palabra antes).",
       "английская появится после перевода": "la versión en inglés aparecerá tras la traducción",
       "английской версии ещё нет": "todavía no hay versión en inglés",
-      "текст": "texto"
+      "текст": "texto",
+      "оценка, а не факт: позиции приватны, модель разлагает OI": "es una estimación, no un hecho: las posiciones son privadas y el modelo descompone el interés abierto",
+      "уровней нет: по монете мало данных за окно": "sin niveles: pocos datos de esta moneda en la ventana",
+      "часть приростов OI без цены входа": "parte de los incrementos de OI no tienen precio de entrada",
+      "уровни по ним не считаны": "sus niveles no se calcularon",
+      "истории OI мало (меньше часа) — картинка ещё не набралась": "hay poca historia de OI (menos de una hora): la imagen aún se está formando",
+      "фактических ликвидаций за окно нет: уровни не выверены": "no hubo liquidaciones reales en la ventana: los niveles no están verificados",
+      "поддерживающая маржа взята по умолчанию: биржа не отдала ступени — точность ниже": "el margen de mantenimiento es el de por defecto: el exchange no dio escalones — menor precisión",
+      "сторона позиций взята из фандинга (грубо) или неизвестна": "el lado de las posiciones viene del funding (aproximado) o es desconocido",
+      "калибровка по факту не применена": "la calibración con liquidaciones reales no está aplicada",
+      "калибровка выключена": "la calibración está desactivada",
+      "ещё не считалась": "aún no se calculó",
+      "совпадение слабое": "la coincidencia es débil",
+      "мало факта": "pocos datos reales",
+      "факт без цен": "liquidaciones reales sin precios"
     }
   }
 };

@@ -40,13 +40,13 @@
 <link rel="icon" type="image/png" sizes="512x512" href="/static/icon-512.png">
 <link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
 <link rel="manifest" href="/manifest.webmanifest">
-<link rel="stylesheet" href="/static/ads.css?v=banner3">
+<link rel="stylesheet" href="/static/ads.css?v=banner5">
 <script src="/static/i18n.pages.js?v=book8"></script>
 <script src="/static/i18n.js?v=book8"></script>
 <script src="/static/account.js?v=nav2"></script>
 <script src="/static/presence.js?v=geo2"></script>
 <script src="/static/consent.js?v=consent1"></script>
-<script src="/static/ads.js?v=banner4"></script>
+<script src="/static/ads.js?v=banner5"></script>
 <style>
 :root {
     --bg: #0b1020;
@@ -352,7 +352,8 @@ a.chip:hover { border-color: rgba(0, 214, 255, 0.55); color: var(--text); }
 .btn-terminal .cta-short { display: none; }
 .btn-compact { padding: 7px 12px; font-size: 0.78rem; white-space: nowrap; }
 
-/* Баннер стоит под героем, на всю ширину колонки, и не участвует в сетке карточки. */
+/* Баннер — отдельной полосой под героем, не внутри карточки эфира.
+   Смена слайдов общая (ads.css / ads.js): здесь только посадка. */
 .hero > .ad-host {
     grid-column: 1 / -1;
     width: 100%;
@@ -361,22 +362,6 @@ a.chip:hover { border-color: rgba(0, 214, 255, 0.55); color: var(--text); }
     padding: 0;
     text-align: left;
     clear: both;
-}
-.hero > .ad-host .ad-pager { display: none; }
-.hero > .ad-host .ad-stage {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    overflow: visible;
-}
-.hero > .ad-host .ad-slide {
-    position: relative;
-    grid-area: auto;
-    opacity: 1;
-    visibility: visible;
-    pointer-events: auto;
-    height: auto;
-    width: 100%;
 }
 
 @media (max-width: 760px) {
@@ -520,7 +505,7 @@ a.chip:hover { border-color: rgba(0, 214, 255, 0.55); color: var(--text); }
     </div>
 
     <!-- Баннер — отдельной полосой под героем, не внутри карточки эфира.
-         На главной без карусели: все объявления видны сразу, ничего не крутится. -->
+         Крутится так же, как на остальных страницах; кнопок прокрутки нет. -->
     <div class="ad-host" id="ad-host" data-ad-place="landing" hidden></div>
 
     <div class="cvd-head">

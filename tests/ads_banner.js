@@ -327,14 +327,26 @@ async function main() {
   const manyHost = many.doc.querySelector("#ad-host");
   const slides = manyHost.querySelectorAll(".ad-slide");
   const dots = manyHost.querySelectorAll(".ad-dot");
-  check("на главной карусели нет: ни точек, ни стрелок",
-        dots.length === 0 && !manyHost.querySelector(".ad-nav"), dots.length);
-  check("оба объявления видны сразу, без прокрутки",
-        slides.length === 2 && manyHost.querySelectorAll(".ad-slide.on").length === 2);
-  await wait(2200);
-  check("слайды на главной не сменяются по таймеру",
-        manyHost.querySelectorAll(".ad-slide.on").length === 2 &&
-        !manyHost.querySelector(".ad-nav"));
+  check("кнопок прокрутки не видно ни на одной странице",
+        /\.ad-pager\s*\{[^}]*display:\s*none/.test(AD_CSS));
+  check("из двух слайдов показан один", manyHost.querySelectorAll(".ad-slide.on").length === 1);
+  dots[1].dispatchEvent(new many.win.MouseEvent("click", { bubbles: true }));
+  await wait(80);
+  check("клик по точке включает вторую акцию",
+        slides[1].classList.contains("on") && !slides[0].classList.contains("on"));
+  const next = manyHost.querySelector('.ad-nav[data-ad-nav="1"]');
+  check("стрелки на месте, но спрятаны стилем, а не вырезаны из логики",
+        !!next && !!next.getAttribute("aria-label") && dots.length === 2);
+  if (next) {
+    next.dispatchEvent(new many.win.MouseEvent("click", { bubbles: true }));
+    await wait(60);
+    check("стрелка вперёд на последнем слайде возвращается к первой",
+          slides[0].classList.contains("on"));
+  }
+  const rotated = await until("смена слайда по таймеру",
+                              () => slides[1].classList.contains("on"), 6000);
+  check("слайды меняются сами, по таймеру из настройки", rotated,
+        Array.prototype.map.call(slides, (n) => n.className).join("|"));
   check("пока баннер просто висит, посетителю ничего не сохраняют",
         many.win.localStorage.length === 0, many.win.localStorage.length);
 

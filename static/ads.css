@@ -203,8 +203,10 @@
 .ad-host[data-ad-layout="grid"] .ad-media img { max-height: none; height: auto; }
 
 /* --- переключение ---------------------------------------------------- */
+/* Кнопки (стрелки и точки) не показываем ни на одной странице.
+   Смена по таймеру и свайп остаются — прячем только сами кнопки. */
 .ad-pager {
-    display: flex;
+    display: none;
     align-items: center;
     justify-content: center;
     gap: 10px;

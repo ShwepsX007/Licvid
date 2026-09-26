@@ -374,6 +374,12 @@
                  Двойной клик по разделителю возвращает исходные высоты. -->
             <div class="chart-stack" id="chart-stack">
                 <div class="chart-wrapper" id="chart-wrapper">
+                    <!-- Подсказка слоя «Уровни ликвидаций»: слой включён, но
+                         рисовать нечего (нет данных / сервер не отдал расчёт).
+                         Без неё кнопка выглядела «не отвечающей»: слой включался
+                         молча, а на графике не появлялось ничего. -->
+                    <div class="chart-note hidden" id="levels-note" role="status"
+                         aria-live="polite"></div>
                     <!-- Lightweight Charts Container -->
                     <div id="tv-chart-container"></div>
                     <!-- Cluster Canvas Overlay: ликвидации + профиль по ценам -->

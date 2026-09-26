@@ -37,6 +37,7 @@
         levelsEnabled: false,   // 🎯 расчётные уровни ликвидаций (оценка модели)
         levelsData: null,       // ответ /api/liq_levels по монете графика
         levelsAt: 0,            // когда он получен (свой TTL поверх серверного)
+        levelsError: "",        // почему расчёта нет: "HTTP 404" / "нет связи"
         liqEnabled: false,      // шарики ликвидаций на графике
         cvdEnabled: false,      // CVD-стрелки: перевес тейкер-покупок/продаж в свече
         cvdBars: 0,
@@ -712,6 +713,28 @@
         return isFinite(close) && close > 0 ? close : 0;
     }
 
+    // Подсказка над графиком: слой включён, но рисовать нечего. Без неё клик
+    // по кнопке выглядел «не отвечающим» — слой включался молча, а на графике
+    // не появлялось ничего: сервер не перезапущен после обновления (нет
+    // маршрута) или данные ещё копятся (пустые OI и профиль объёма).
+    function paintLevelsNote() {
+        const note = $("levels-note");
+        if (!note) return;
+        let text = "";
+        if (state.levelsEnabled) {
+            const d = state.levelsData;
+            if (state.levelsError) {
+                text = I18n.t("chart.levels_note_err", { code: state.levelsError });
+            } else if (d && d.enabled === false) {
+                text = I18n.t("chart.levels_note_off");
+            } else if (d && !((d.levels || []).some((r) => Number(r.usd) > 0))) {
+                text = I18n.t("chart.levels_note_nodata");
+            }
+        }
+        note.textContent = text;
+        note.classList.toggle("hidden", !text);
+    }
+
     async function levelsSnapshot(force) {
         if (!levelsWantPoll()) return;
         const sym = chartSymbol();
@@ -727,21 +750,32 @@
             const q = "/api/liq_levels?symbol=" + encodeURIComponent(sym) +
                 (price ? "&price=" + encodeURIComponent(price) : "");
             const r = await fetch(q, { credentials: "same-origin" });
-            const d = await r.json();
+            const d = await r.json().catch(() => null);
             // ответ мог прийти уже по другой монете — он больше не нужен
             if (d && d.ok && levelsReqSym === sym && chartSymbol() === sym) {
                 state.levelsData = d;
                 state.levelsAt = Date.now();
+                state.levelsError = "";
                 queueRedraw();
+            } else if (levelsReqSym === sym && chartSymbol() === sym) {
+                // пусто или ошибка: причину показываем в подсказке над графиком
+                state.levelsError = r.ok ? "" : ("HTTP " + r.status);
+                if (r.ok) state.levelsData = d || null;
             }
-        } catch (e) { /* нет сети — рисуем по прошлому расчёту */ }
+        } catch (e) {
+            // нет сети — рисуем по прошлому расчёту, но говорим, почему пусто
+            if (levelsReqSym === sym) state.levelsError = "нет связи";
+        }
         levelsPending = false;
+        paintLevelsNote();
     }
 
     // Единая точка включения поллера, как у стакана: слой выключен — ни одного
     // запроса, и сервер перестаёт считать лестницы для этой монеты.
     function levelsPollSync() {
         if (levelsWantPoll()) {
+            if (!state.levelsData) state.levelsError = "";
+            paintLevelsNote();
             levelsSnapshot(false);
             if (!levelsTimer) {
                 levelsTimer = setInterval(() => levelsSnapshot(false), LEVELS_POLL_MS);
@@ -752,6 +786,8 @@
         levelsTimer = null;
         state.levelsData = null;
         state.levelsAt = 0;
+        state.levelsError = "";
+        paintLevelsNote();
         queueRedraw();
     }
 
@@ -759,6 +795,8 @@
     function levelsSymbolChanged() {
         state.levelsData = null;
         state.levelsAt = 0;
+        state.levelsError = "";
+        paintLevelsNote();
         if (levelsWantPoll()) levelsSnapshot(true);
     }
 
@@ -5661,6 +5699,7 @@
                 queueRedraw();
             });
             I18n.onChange(paint);
+            if (d.skey === "levelsEnabled") I18n.onChange(paintLevelsNote);
             paint();
             if (d.skey === "bookEnabled") bookPollSync();
             if (d.skey === "levelsEnabled") levelsPollSync();

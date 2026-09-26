@@ -187,6 +187,25 @@
         <p class="meta" id="layers-enabled-note" style="font-style:italic"></p>
     </div>
 
+<!-- 🎯 Уровни ликвидаций (liq_levels): те же настройки, что отдаёт
+     /api/admin/liq_levels/settings. Поля строятся из ответа сервера (fields),
+     поэтому новая настройка движка появляется здесь сама, без правок разметки.
+     Рядом — пересчёт калибровки по фактическим ликвидациям. -->
+    <div class="card" id="levels-card" style="margin-top:14px" data-hint="расчёт уровней ликвидаций и калибровка">
+        <h3 data-i18n="adm.levels_title">🎯 Уровни ликвидаций — расчёт</h3>
+        <p class="lead" data-i18n="adm.levels_lead">Инструмент раскладывает открытый интерес на позиции (вход × плечо × поддерживающая маржа) и показывает, где стоят чужие вынужденные выходы. Это оценка: биржи не публикуют позиции клиентов.</p>
+        <div id="levels-fields" class="levels-fields"></div>
+        <div class="row-actions" style="flex-wrap:wrap;gap:12px">
+            <button class="btn btn-primary" id="levels-save" type="button" data-i18n="adm.levels_save">Сохранить</button>
+            <input class="search" id="levels-syms" autocomplete="off" style="max-width:320px"
+                   data-i18n-placeholder="adm.levels_syms_ph"
+                   placeholder="Монеты через запятую: BTC_USDT, ETH_USDT">
+            <button class="btn" id="levels-recal" type="button" data-i18n="adm.levels_recal">↻ Пересчитать калибровку</button>
+            <span class="meta" id="levels-status" role="status"></span>
+        </div>
+        <p class="meta" id="levels-note"></p>
+    </div>
+
 <div class="card" id="ads-panel" style="margin-top:14px" data-hint="текст, фото, куда и когда отправить">
         <h3>📣 Рекламные посты</h3>
         <p class="lead">Свой текст и фотография, а дальше — куда и когда отправить: в бота, в каналы

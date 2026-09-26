@@ -384,7 +384,19 @@
     "chat.sig.book_prices": "Precios {lo}–{hi}",
     "chat.sig.book_exchs": "Visto en: {list}",
     "chat.hint.dm_invite_notice": "💌 Tienes una invitación de privados — pestaña «Privados»",
-    "chat.hint.dm_accepted": "✉ Invitación aceptada — ya puedes escribir"
+    "chat.hint.dm_accepted": "✉ Invitación aceptada — ya puedes escribir",
+    "adm.levels_title": "🎯 Niveles de liquidación — cálculo",
+    "adm.levels_lead": "La herramienta descompone el interés abierto en posiciones (entrada × apalancamiento × margen de mantenimiento) y muestra dónde están las salidas forzadas de otros. Es una estimación: los exchanges no publican las posiciones de los clientes. Aquí también vive la calibración con liquidaciones reales.",
+    "adm.levels_save": "Guardar",
+    "adm.levels_recal": "↻ Recalcular calibración",
+    "adm.levels_syms_ph": "Monedas separadas por comas: BTC_USDT, ETH_USDT",
+    "adm.levels_saved": "Guardado: el cálculo toma los nuevos valores de inmediato.",
+    "adm.levels_fail": "No se guardó — inténtalo de nuevo.",
+    "adm.levels_recal_done": "Calibración recalculada: {list}",
+    "adm.levels_recal_none": "Faltan monedas: indica los pares separados por comas.",
+    "adm.levels_note": "Ahora: cálculos {calls} · caché {cache} · ventana {win} h · calibración: {calib}",
+    "adm.levels_calib_off": "sin calcular",
+    "adm.levels_calib_on": "aplicada"
   },
   "phrases": {
     "В поле уже стоит стандартный промт — правьте прямо в нём; «Вернуть шаблон» очищает поле и снова включает встроенный текст.": "El campo ya trae el prompt estándar: edítalo ahí mismo; “Restaurar plantilla” limpia el campo y reactiva el texto integrado.",

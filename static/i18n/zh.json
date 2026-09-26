@@ -384,7 +384,19 @@
     "chat.sig.book_prices": "价格 {lo}–{hi}",
     "chat.sig.book_exchs": "出现于：{list}",
     "chat.hint.dm_invite_notice": "💌 您收到私信邀请 — 见「私聊」标签",
-    "chat.hint.dm_accepted": "✉ 邀请已接受 — 可以发消息了"
+    "chat.hint.dm_accepted": "✉ 邀请已接受 — 可以发消息了",
+    "adm.levels_title": "🎯 爆仓价位 — 计算",
+    "adm.levels_lead": "该工具把未平仓合约量拆解为持仓（入价 × 杠杆 × 维持保证金），显示他人的强制平仓价位。这是估算：交易所不会公开客户持仓。这里也可以按实际爆仓进行校准。",
+    "adm.levels_save": "保存",
+    "adm.levels_recal": "↻ 重新校准",
+    "adm.levels_syms_ph": "用逗号分隔币种：BTC_USDT, ETH_USDT",
+    "adm.levels_saved": "已保存：计算会立即采用新值。",
+    "adm.levels_fail": "未能保存 — 请重试。",
+    "adm.levels_recal_done": "校准已重算：{list}",
+    "adm.levels_recal_none": "需要币种：请用逗号列出交易对。",
+    "adm.levels_note": "当前：计算 {calls} 次 · 缓存 {cache} · 窗口 {win} 小时 · 校准：{calib}",
+    "adm.levels_calib_off": "未计算",
+    "adm.levels_calib_on": "已应用"
   },
   "phrases": {
     "В поле уже стоит стандартный промт — правьте прямо в нём; «Вернуть шаблон» очищает поле и снова включает встроенный текст.": "输入框里已是默认提示词 — 直接修改；«恢复模板» 会清空并重新启用内置文本。",

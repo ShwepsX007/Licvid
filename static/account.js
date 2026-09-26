@@ -588,6 +588,14 @@
             list = [{ slug: "alerts", title: "Алерты по объёму", icon: "🔔",
                 description: "Ликвидации, CVD и OI", coming_soon: false, subscribed: true }].concat(list);
         }
+        // «Уровни ликвидаций» заводит миграция базы при старте сервера: сервер,
+        // поднятый до обновления (или своя база без строки levels), отдаёт
+        // список без неё — тогда в кабинете не было ни карточки, ни доски.
+        // Карточку добавляем на месте, а доска сама объяснит, что расчёта нет.
+        if (!list.some(function (s) { return s.slug === "levels"; })) {
+            list = list.concat([{ slug: "levels", title: t("lv.title"), icon: "🎯",
+                description: t("lv.svc_desc"), coming_soon: false, subscribed: true }]);
+        }
         box.innerHTML = list.map(function (s) {
             var isOpen = open === s.slug;
             var soon = s.coming_soon ? '<div class="soon">⏳ ' + t("soon") + "</div>" : "";
@@ -952,18 +960,33 @@
         }
         if (!lvCfg.symbol && lvSyms.length) lvCfg.symbol = String(lvSyms[0]).toUpperCase();
         Promise.all(jobs).then(function () {
-            if (!lvCfg.symbol) { lvBusy = false; return; }
+            if (!lvCfg.symbol) {
+                // список монет не пришёл — доска должна сказать об этом словами,
+                // а не остаться пустой рамкой
+                paintLevels({ error: t("lv.nodata_hint") });
+                lvBusy = false;
+                return;
+            }
             var q = "/api/liq_levels?symbol=" + encodeURIComponent(lvCfg.symbol) +
                 (lvCfg.min_usd ? "&min_usd=" + encodeURIComponent(lvCfg.min_usd) : "") +
                 (lvCfg.window_hours ? "&window_hours=" + encodeURIComponent(lvCfg.window_hours) : "");
             return fetch(q, { credentials: "same-origin" })
-                .then(function (r) { return r.json(); })
+                .then(function (r) {
+                    if (!r.ok) throw new Error("HTTP " + r.status);
+                    return r.json();
+                })
                 .then(function (d) {
                     lvData = d;
                     paintLevels(d);
                 });
-        }).catch(function () { /* сеть подвела — на доске остаётся прошлый расчёт */ })
-          .then(function () { lvBusy = false; });
+        }).catch(function (err) {
+            // сервер не отдал расчёт: чаще всего он не перезапущен после
+            // обновления — показываем это на доске, прошлый расчёт не трогаем
+            var code = String((err && err.message) || err || "");
+            if (!lvBuilt || !lvData) {
+                paintLevels({ error: t("lv.err_api", { code: code || "?" }) });
+            }
+        }).then(function () { lvBusy = false; });
     }
 
     function lvPrice(v) {
@@ -1130,7 +1153,9 @@
                 var head = '<div class="lv-row lv-head">' +
                     ["lv.h_price", "lv.h_usd", "lv.h_share", "lv.h_lev",
                      "lv.h_dist", "lv.h_cum"].map(function (k) {
-                        return "<span>" + esc(T(k)) + "</span>";
+                        // t(), а не T(): T здесь — словарь, вызов ломал рендер
+                        // таблицы (шапка падала, список уровней не появлялся)
+                        return "<span>" + esc(t(k)) + "</span>";
                     }).join("") + "</div>";
                 table.innerHTML = head + rows.map(function (r) {
                     var lp = Number(r.price);
@@ -1155,6 +1180,11 @@
             var srcs = cov2.side_sources || {};
             var parts = [];
             if (d.enabled === false) parts.push(t("lv.off"));
+            // цена есть, а рядов нет — значит истории ещё нет: говорим прямо,
+            // иначе доска выглядит сломанной
+            if (!Number(d.price) || !(d.coverage && d.coverage.rows)) {
+                parts.push(t("lv.nodata_hint"));
+            }
             // оговорки приходят с сервера по-русски: прогоняем их через
             // словарь фраз — так они читаются и на других языках
             (notes || []).forEach(function (n) { parts.push(lvPhrase(String(n))); });
@@ -3560,6 +3590,139 @@
         });
     }
 
+    /* ---------- 🎯 Админка: расчёт уровней ликвидаций ------------------------
+       Поля строятся из ответа сервера (fields): заголовок, тип, границы. Так
+       новая настройка движка появляется в форме сама. Рядом — пересчёт
+       калибровки по факту: он идёт по названным монетам (не больше восьми). */
+    var lvAdmFields = null;
+
+    function lvAdmInput(f, val) {
+        var dflt = f.default_ !== undefined ? f.default_ : f.default;
+        var v = val === undefined || val === null ? (dflt !== undefined ? dflt : "") : val;
+        if (f.type === "bool") {
+            return '<label class="levels-field"><span>' + esc(String(f.title || f.key)) + '</span>' +
+                '<input type="checkbox" data-lv-f="' + esc(f.key) + '"' + (v ? " checked" : "") + '></label>';
+        }
+        if (!f.type || f.type === "num") {
+            var attrs = (f.min !== undefined ? ' min="' + f.min + '"' : "") +
+                (f.max !== undefined ? ' max="' + f.max + '"' : "");
+            return '<label class="levels-field"><span>' + esc(String(f.title || f.key)) + '</span>' +
+                '<input type="number" step="any"' + attrs + ' data-lv-f="' + esc(f.key) +
+                '" value="' + esc(String(v)) + '"></label>';
+        }
+        // распределение плеч и прочие сложные значения — строкой JSON
+        return '<label class="levels-field"><span>' + esc(String(f.title || f.key)) + '</span>' +
+            '<input type="text" data-lv-f="' + esc(f.key) + '" value="' +
+            esc(typeof v === "string" ? v : JSON.stringify(v)) + '"></label>';
+    }
+
+    function paintLevelsAdmin(d) {
+        var box = $("levels-fields");
+        if (!box) return;
+        var fields = (d && d.fields) || lvAdmFields || [];
+        lvAdmFields = fields;
+        var cur = (d && d.settings) || {};
+        if (!box.childElementCount) {
+            box.innerHTML = fields.map(function (f) { return lvAdmInput(f, cur[f.key]); }).join("");
+        } else {
+            fields.forEach(function (f) {
+                var el = box.querySelector('[data-lv-f="' + f.key + '"]');
+                if (!el) return;
+                if (f.type === "bool") el.checked = !!cur[f.key];
+                else if (cur[f.key] !== undefined) {
+                    el.value = typeof cur[f.key] === "string" ? cur[f.key]
+                                                             : JSON.stringify(cur[f.key]);
+                }
+            });
+        }
+        var note = $("levels-note");
+        if (note) {
+            var st = (d && d.status) || {};
+            var eng = st.engine || st;
+            var calib = (st.calibration || eng.calibration || {});
+            var anyCalib = Object.keys(calib).filter(function (k) {
+                return calib[k] && calib[k].applied;
+            }).length;
+            note.textContent = t("adm.levels_note", {
+                calls: eng.builds || 0,
+                cache: eng.cache || 0,
+                win: (eng.settings && eng.settings.window_hours) || 0,
+                calib: anyCalib
+                    ? (t("adm.levels_calib_on") + " (" + anyCalib + ")")
+                    : t("adm.levels_calib_off"),
+            });
+        }
+    }
+
+    function loadLevelsAdmin() {
+        if (!$("levels-card")) return Promise.resolve();
+        return api("/api/admin/liq_levels/settings").then(function (d) {
+            if (d && d.ok) paintLevelsAdmin(d);
+        });
+    }
+
+    function saveLevelsAdmin() {
+        var box = $("levels-fields"), st = $("levels-status");
+        if (!box) return;
+        var patch = {};
+        box.querySelectorAll("[data-lv-f]").forEach(function (el) {
+            var key = el.getAttribute("data-lv-f");
+            var f = (lvAdmFields || []).filter(function (x) { return x.key === key; })[0] || {};
+            if (f.type === "bool") { patch[key] = !!el.checked; return; }
+            if (!f.type || f.type === "num") {
+                var n = Number(el.value);
+                if (isFinite(n)) patch[key] = n;
+                return;
+            }
+            var raw = String(el.value || "").trim();
+            try { patch[key] = raw ? JSON.parse(raw) : []; } catch (e) { /* не JSON — пропускаем */ }
+        });
+        if (st) st.textContent = t("cab.loading");
+        api("/api/admin/liq_levels/settings", {
+            method: "POST", body: JSON.stringify(patch),
+        }).then(function (d) {
+            if (!d || !d.ok) {
+                if (st) st.textContent = t("adm.levels_fail");
+                return;
+            }
+            paintLevelsAdmin({ settings: d.settings, fields: d.fields, status: d.status });
+            if (st) st.textContent = t("adm.levels_saved");
+        }).catch(function () { if (st) st.textContent = t("adm.levels_fail"); });
+    }
+
+    function recalLevelsAdmin() {
+        var st = $("levels-status"), inp = $("levels-syms");
+        var raw = inp ? String(inp.value || "").trim() : "";
+        if (!raw) {
+            if (st) st.textContent = t("adm.levels_recal_none");
+            return;
+        }
+        if (st) st.textContent = t("cab.loading");
+        api("/api/admin/liq_levels/recalibrate", {
+            method: "POST", body: JSON.stringify({ symbols: raw }),
+        }).then(function (d) {
+            if (!d || !d.ok) {
+                if (st) st.textContent = d && d.error === "no_symbols"
+                    ? t("adm.levels_recal_none") : t("adm.levels_fail");
+                return;
+            }
+            var list = Object.keys(d.calibration || {}).map(function (sym) {
+                var c = (d.calibration || {})[sym] || {};
+                return sym + (c.applied ? " ✓" : " —");
+            });
+            if (st) st.textContent = t("adm.levels_recal_done", { list: list.join(", ") || "—" });
+            loadLevelsAdmin();
+        }).catch(function () { if (st) st.textContent = t("adm.levels_fail"); });
+    }
+
+    function bootLevelsAdmin() {
+        if (!$("levels-card")) return;
+        var save = $("levels-save"), recal = $("levels-recal");
+        if (save) save.addEventListener("click", saveLevelsAdmin);
+        if (recal) recal.addEventListener("click", recalLevelsAdmin);
+        loadLevelsAdmin();
+    }
+
     function bootLayers() {
         if (!$("layers-card")) return;
         var save = $("layers-save"), reset = $("layers-reset");
@@ -3740,6 +3903,7 @@
             });
         });
         bootLayers();           // лимит пробного доступа к слоям (web_layers)
+        bootLevelsAdmin();      // расчёт уровней ликвидаций: настройки и калибровка
         bootFolds();            // разделы сворачиваются — до остальных панелей, им нужны id
         bootDigestTpl();
         bootBotAdmin();

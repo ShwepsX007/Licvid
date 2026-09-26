@@ -2663,3 +2663,42 @@ body.chart-fullscreen { overflow: hidden; }
     .live-price { font-size: 0.98rem; }
     .price-change { font-size: 0.76rem; }
 }
+
+/* --- Подсказка слоя «Уровни ликвидаций» над графиком ---------------------
+   Плашка у левого верхнего угла холста: появляется, только когда слой включён,
+   а рисовать нечего — нет данных или сервер не отдал расчёт. Клики сквозь неё
+   проходят: она не мешает работать с графиком. */
+.chart-note {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    z-index: 6;
+    max-width: min(420px, calc(100% - 16px));
+    padding: 6px 10px;
+    border-radius: 8px;
+    background: rgba(18, 24, 33, 0.92);
+    border: 1px solid rgba(255, 209, 102, 0.45);
+    color: #ffd166;
+    font-size: 0.7rem;
+    font-weight: 600;
+    line-height: 1.35;
+    pointer-events: none;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+}
+.chart-note.hidden { display: none; }
+
+/* --- Админка: поля настроек расчёта уровней ------------------------------ */
+.levels-fields {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 10px 14px;
+    margin: 10px 0 4px;
+}
+.levels-field { display: flex; flex-direction: column; gap: 4px; }
+.levels-field span { color: var(--text-muted); font-size: 0.72rem; }
+.levels-field input[type="number"], .levels-field input[type="text"] {
+    background: var(--bg-card); border: 1px solid var(--border-color);
+    color: var(--text-primary); border-radius: 7px; padding: 4px 8px;
+    font-size: 0.78rem; font-variant-numeric: tabular-nums;
+}
+.levels-field input[type="checkbox"] { align-self: flex-start; }

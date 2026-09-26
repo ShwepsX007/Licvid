@@ -1,3 +1,4 @@
+require("./_dom_env");
 /** «Очистить» и «Возобновить историю» в терминале.
  *
  *  Раньше «🧹 Очистить» стирало ленту и метки без пути назад: промахнулся —
@@ -70,6 +71,7 @@ async function main() {
     beforeParse(win) {
       try {
         Object.defineProperty(win.navigator, "language", { value: "ru-RU", configurable: true });
+        Object.defineProperty(win.navigator, "languages", { value: ["ru-RU", "ru"], configurable: true });
       } catch (e) { /* ignore */ }
       try {
         win.localStorage.setItem("liqscope.chartSymbol", "BTC_USDT");

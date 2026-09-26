@@ -75,6 +75,7 @@ echo
 echo "в systemd-юнит добавьте и перезапустите сервис:"
 echo "  Environment=LIQSCOPE_PUBLIC_URL=https://${DOMAIN}"
 echo "  Environment=LIQSCOPE_COOKIE_SECURE=1"
+echo "  Environment=LIQSCOPE_SECRET=\$(openssl rand -hex 32)   # в drop-in, не в git"
 echo "  ExecStart=... --host 127.0.0.1 --port 8000"
 echo
 echo "порт 80 и 443 должны быть открыты (ufw allow 80,443/tcp)."

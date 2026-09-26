@@ -1,3 +1,4 @@
+require("./_dom_env");
 /**
  * Смоук-тест интерфейса без браузера: поднимает страницу терминала в jsdom,
  * подключается к работающему серверу и проверяет, что всё отрисовалось —
@@ -66,6 +67,7 @@ async function main() {
       // jsdom всегда отдаёт en-US; принудительно ru, как у большинства наших юзеров
       try {
         Object.defineProperty(win.navigator, "language", { value: "ru-RU", configurable: true });
+        Object.defineProperty(win.navigator, "languages", { value: ["ru-RU", "ru"], configurable: true });
       } catch (e) { /* ignore */ }
       win.matchMedia = () => ({
         matches: false, media: "", onchange: null,

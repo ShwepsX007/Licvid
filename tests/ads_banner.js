@@ -1,3 +1,4 @@
+require("./_dom_env");
 /**
  * 📣 Реклама: баннер на главной и панель управления в админке.
  *
@@ -99,7 +100,8 @@ async function openLanding({ items = [AD], banner = BANNER, stored = null,
     pretendToBeVisual: true,
     virtualConsole: vc,
     beforeParse(win) {
-      try { Object.defineProperty(win.navigator, "language", { value: "ru-RU", configurable: true }); } catch (e) {}
+      try { Object.defineProperty(win.navigator, "language", { value: "ru-RU", configurable: true });
+        Object.defineProperty(win.navigator, "languages", { value: ["ru-RU", "ru"], configurable: true }); } catch (e) {}
       win.matchMedia = () => ({ matches: false, media: "", onchange: null,
         addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {},
         dispatchEvent() { return false; } });
@@ -151,7 +153,8 @@ async function openAdmin(ads) {
     pretendToBeVisual: true,
     virtualConsole: vc,
     beforeParse(win) {
-      try { Object.defineProperty(win.navigator, "language", { value: "ru-RU", configurable: true }); } catch (e) {}
+      try { Object.defineProperty(win.navigator, "language", { value: "ru-RU", configurable: true });
+        Object.defineProperty(win.navigator, "languages", { value: ["ru-RU", "ru"], configurable: true }); } catch (e) {}
       win.matchMedia = () => ({ matches: false, media: "", onchange: null,
         addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {},
         dispatchEvent() { return false; } });
@@ -324,14 +327,16 @@ async function main() {
   const manyHost = many.doc.querySelector("#ad-host");
   const slides = manyHost.querySelectorAll(".ad-slide");
   const dots = manyHost.querySelectorAll(".ad-dot");
-  check("несколько объявлений: есть переключатель", dots.length === 2, dots.length);
+  check("кнопок прокрутки не видно ни на одной странице",
+        /\.ad-pager\s*\{[^}]*display:\s*none/.test(AD_CSS));
   check("из двух слайдов показан один", manyHost.querySelectorAll(".ad-slide.on").length === 1);
   dots[1].dispatchEvent(new many.win.MouseEvent("click", { bubbles: true }));
   await wait(80);
   check("клик по точке включает вторую акцию",
         slides[1].classList.contains("on") && !slides[0].classList.contains("on"));
   const next = manyHost.querySelector('.ad-nav[data-ad-nav="1"]');
-  check("стрелки есть и они подписаны", !!next && !!next.getAttribute("aria-label"));
+  check("стрелки на месте, но спрятаны стилем, а не вырезаны из логики",
+        !!next && !!next.getAttribute("aria-label") && dots.length === 2);
   if (next) {
     next.dispatchEvent(new many.win.MouseEvent("click", { bubbles: true }));
     await wait(60);

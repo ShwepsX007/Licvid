@@ -1,3 +1,4 @@
+require("./_dom_env");
 /** Масштаб «крупности» от оборота монеты (volScale).
  *
  *  GRAM с оборотом 1/1000 от BTC: k=0.001. Проверяем, что пороги кита,
@@ -128,6 +129,7 @@ async function main() {
     beforeParse(win) {
       try {
         Object.defineProperty(win.navigator, "language", { value: "ru-RU", configurable: true });
+        Object.defineProperty(win.navigator, "languages", { value: ["ru-RU", "ru"], configurable: true });
       } catch (e) { /* ignore */ }
       try {
         win.localStorage.setItem("liqscope.chartSymbol", "GRAM_USDT");

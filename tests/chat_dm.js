@@ -1,3 +1,4 @@
+require("./_dom_env");
 /**
  * 🔒 Чат v3: вкладки «Общий/Личные», приватные диалоги, растягивание панели,
  * меню по клику на ник, бейджи unread/онлайн, подсветка уведомлений.
@@ -91,7 +92,8 @@ async function openPage() {
     pretendToBeVisual: true,
     virtualConsole: vc,
     beforeParse(win) {
-      try { Object.defineProperty(win.navigator, "language", { value: "ru-RU", configurable: true }); } catch (e) {}
+      try { Object.defineProperty(win.navigator, "language", { value: "ru-RU", configurable: true });
+        Object.defineProperty(win.navigator, "languages", { value: ["ru-RU", "ru"], configurable: true }); } catch (e) {}
       win.matchMedia = () => ({ matches: false, media: "", onchange: null,
         addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {},
         dispatchEvent() { return false; } });

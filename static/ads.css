@@ -8,13 +8,15 @@
    с запасным значением: баннер не должен остаться белым квадратом.
 
    Что здесь важно:
-     * фото вписывается целиком (object-fit: contain) — картинка акции не
-       обрезается по краям, блок подстраивается под неё;
+     * фото не обрезается: ширина — 100% контейнера, высота следует из
+       пропорций (height: auto). Потолок max-height + object-fit: contain
+       оставлял пустые полосы по бокам — этого больше нет;
      * подпись — ПОД фотографией (data-ad-caption="side" возвращает боковую
        раскладку, если админ захочет её обратно);
-     * слайды лежат в одной ячейке grid: высота блока равна самому высокому
-       слайду, поэтому при смене ничего не подпрыгивает, а плавность задаёт
-       только прозрачность (--ad-fade из настроек админки);
+     * слайды лежат в одной ячейке grid (grid-area: 1 / 1), но высоту
+       задаёт только активный: неактивные вынуты из потока, иначе короткий
+       кадр «плавает» в коробке самого высокого. Плавность — прозрачность
+       (--ad-fade из настроек админки);
      * неактивный слайд visibility:hidden — его не видят ни зрение, ни
        клавиатура, ни читалка экрана;
      * крестика нет: закрыть баннер может только админ, сняв объявление;
@@ -38,23 +40,33 @@
 .ad-host[hidden] { display: none; }
 
 .ad-banner {
-    border: 1px solid var(--ad-border);
+    border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 16px;
-    background: linear-gradient(180deg, rgba(61, 112, 255, 0.08), transparent 60%),
-                var(--ad-card);
-    padding: 10px 10px 6px;
+    background: #141b2e;
+    /* без внутренней рамки вокруг фото: отступ был щелью между картинкой и карточкой */
+    padding: 0;
+    overflow: hidden;
+    max-width: 100%;
 }
 
-/* Слайды в одной ячейке: карусель без абсолюта и без скачков высоты */
+/* Слайды в одной ячейке. Высоту держит только .on — иначе контейнер
+   равен самому высокому кадру и короткое фото оставляет пустоту. */
 .ad-stage {
     display: grid;
+    position: relative;
+    width: 100%;
+    max-width: 100%;
+    line-height: 0;
 }
 .ad-slide {
     grid-area: 1 / 1;
     display: flex;
     flex-direction: column;
+    align-items: stretch;
     min-width: 0;
-    border-radius: 12px;
+    width: 100%;
+    max-width: 100%;
+    border-radius: 0;
     opacity: 0;
     visibility: hidden;
     pointer-events: none;
@@ -62,23 +74,46 @@
                 visibility 0s linear var(--ad-fade);
 }
 .ad-slide.on {
+    position: relative;
     opacity: 1;
     visibility: visible;
     pointer-events: auto;
     transition: opacity var(--ad-fade) ease;
 }
+.ad-host:not([data-ad-layout="grid"]) .ad-slide:not(.on) {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: auto;
+    bottom: auto;
+    width: 100%;
+    height: auto;
+    align-self: start;
+    justify-self: start;
+}
+.ad-host:not([data-ad-layout="grid"]) .ad-stage { overflow: hidden; }
 
 /* --- фото ------------------------------------------------------------- */
-.ad-hit { display: block; color: inherit; text-decoration: none; border-radius: 12px; }
+.ad-hit {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    color: inherit;
+    text-decoration: none;
+    border-radius: 0;
+    line-height: 0;
+}
 .ad-media {
     position: relative;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: var(--ad-bg);
-    border-radius: 12px;
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    background: transparent;
+    border-radius: 0;
     overflow: hidden;
-    min-height: 96px;
+    min-height: 0;
+    line-height: 0;
+    font-size: 0;
 }
 /* «Реклама» в углу картинки — метка остаётся, даже когда подписи нет */
 .ad-flag {
@@ -92,9 +127,11 @@
 .ad-media img {
     display: block;
     width: 100%;
+    max-width: 100%;
     height: auto;
-    max-height: var(--ad-img-max);
-    object-fit: contain;            /* видно всё фото целиком */
+    max-height: none;               /* потолок + contain давал боковые щели */
+    object-fit: contain;            /* видно всё фото целиком, без обрезки */
+    vertical-align: top;
 }
 .ad-host[data-ad-fit="cover"] .ad-media img {
     height: var(--ad-img-max);
@@ -112,6 +149,8 @@
     gap: 6px;
     padding: 12px 14px 14px;
     min-width: 0;
+    line-height: normal;
+    font-size: 1rem;
 }
 .ad-hit-cap { color: inherit; }
 .ad-hit-cap .ad-cap { padding-top: 8px; }
@@ -139,7 +178,7 @@
 
 /* --- боковая раскладка (если админ её включил) ------------------------- */
 @media (min-width: 760px) {
-    .ad-host[data-ad-caption="side"] .ad-slide { flex-direction: row; align-items: stretch; }
+    .ad-host[data-ad-caption="side"] .ad-slide { flex-direction: row; align-items: flex-start; }
     .ad-host[data-ad-caption="side"] .ad-media { flex: 0 0 46%; }
     .ad-host[data-ad-caption="side"] .ad-hit { display: flex; flex: 0 0 46%; }
     .ad-host[data-ad-caption="side"] .ad-hit .ad-media { flex: 1; }
@@ -159,15 +198,21 @@
     border: 1px solid var(--ad-border);
     background: rgba(7, 10, 16, 0.45);
 }
-.ad-host[data-ad-layout="grid"] .ad-media img { max-height: min(38vh, 300px); }
+.ad-host[data-ad-layout="grid"] .ad-stage { align-items: start; overflow: visible; }
+.ad-host[data-ad-layout="grid"] .ad-slide { position: relative; height: auto; }
+.ad-host[data-ad-layout="grid"] .ad-media img { max-height: none; height: auto; }
 
 /* --- переключение ---------------------------------------------------- */
+/* Кнопки (стрелки и точки) не показываем ни на одной странице.
+   Смена по таймеру и свайп остаются — прячем только сами кнопки. */
 .ad-pager {
-    display: flex;
+    display: none;
     align-items: center;
     justify-content: center;
     gap: 10px;
     padding: 8px 4px 6px;
+    line-height: normal;
+    font-size: 1rem;
 }
 .ad-dots { display: flex; gap: 6px; }
 .ad-dot {
@@ -182,17 +227,30 @@
 }
 .ad-dot.on { background: var(--ad-accent); transform: scale(1.25); }
 .ad-nav {
-    border: 1px solid var(--ad-border);
-    background: rgba(7, 10, 16, 0.6);
-    color: var(--ad-text);
-    width: 24px;
-    height: 24px;
+    border: 1px solid transparent;
+    background: rgba(7, 10, 16, 0.28);
+    color: rgba(232, 237, 246, 0.7);
+    width: 36px;
+    height: 36px;
+    min-width: 36px;
+    min-height: 36px;
     border-radius: 8px;
     cursor: pointer;
     line-height: 1;
-    font-size: 1rem;
+    font-size: 1.05rem;
+    opacity: 0.42;
+    transition: opacity 0.15s ease, background 0.15s ease, border-color 0.15s ease;
 }
-.ad-nav:hover { border-color: var(--ad-accent); }
+.ad-nav:hover,
+.ad-nav:focus-visible {
+    opacity: 0.92;
+    background: rgba(7, 10, 16, 0.55);
+    border-color: var(--ad-accent);
+}
+.ad-nav:active {
+    opacity: 1;
+    background: rgba(7, 10, 16, 0.72);
+}
 .ad-host[data-ad-layout="grid"] .ad-pager { display: none; }
 
 /* --- HTML-баннер: произвольный код админа в том же слоте ---------------- */
@@ -213,12 +271,17 @@
     overflow: hidden;
 }
 
-/* --- телефон: подпись под фото всегда, фото пониже -------------------- */
+/* --- телефон: фото на всю ширину, высота по пропорциям, без щелей ---- */
 @media (max-width: 640px) {
-    .ad-host { padding: 0 14px; }
-    .ad-banner { padding: 8px 8px 4px; border-radius: 14px; }
-    .ad-media img { max-height: min(38vh, 300px); }
-    .ad-cap { padding: 10px 10px 12px; }
+    .ad-host { padding: 0; max-width: 100%; }
+    .ad-banner {
+        padding: 0;
+        border-radius: 0;
+        border-left: 0;
+        border-right: 0;
+    }
+    .ad-media img { max-height: none; height: auto; }
+    .ad-cap { padding: 10px 12px 12px; }
 }
 
 /* --- терминал: баннер под графиком, места просим поменьше ------------ */
@@ -228,11 +291,24 @@
     margin: 0;
     padding: 6px 8px 8px;
 }
-.ad-host[data-ad-place="terminal"] .ad-banner { padding: 6px 6px 2px; border-radius: 12px; }
+.ad-host[data-ad-place="terminal"] .ad-banner {
+    width: fit-content;
+    max-width: 100%;
+    margin-inline: auto;
+    padding: 0;
+    border-radius: 12px;
+}
+.ad-host[data-ad-place="terminal"] .ad-media { width: auto; max-width: 100%; }
+.ad-host[data-ad-place="terminal"] .ad-media img {
+    width: auto;
+    max-width: 100%;
+    height: auto;
+    max-height: var(--ad-img-max);
+}
 .ad-host[data-ad-place="terminal"] .ad-cap { padding: 8px 10px 10px; gap: 4px; }
 .ad-host[data-ad-place="terminal"] .ad-text { font-size: 0.84rem; line-height: 1.4; }
 @media (max-width: 640px) {
-    .ad-host[data-ad-place="terminal"] { --ad-img-max: min(26vh, 190px); padding: 4px 6px 6px; }
+    .ad-host[data-ad-place="terminal"] { --ad-img-max: min(26vh, 190px); padding: 4px 0 6px; }
 }
 
 /* --- дайджест и сводка по часам: как на главной, но с отступом сверху ---- */
@@ -250,7 +326,7 @@
     .ad-host[data-ad-place="hourly"] {
         --ad-img-max: min(30vh, 260px);
         margin: 10px auto 0;
-        padding: 0 14px;
+        padding: 0;
     }
 }
 /* Поведение внутри колонки графика: баннер занимает ровно свою высоту (остальное

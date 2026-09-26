@@ -1,3 +1,4 @@
+require("./_dom_env");
 /**
  * Кабинет сайта: доска «Алерты по объёму» и её окна по метрикам.
  *
@@ -134,6 +135,7 @@ async function main() {
       try { win.localStorage.setItem("liqscope.svc.open", "alerts"); } catch (e) { /* ignore */ }
       try {
         Object.defineProperty(win.navigator, "language", { value: "ru-RU", configurable: true });
+        Object.defineProperty(win.navigator, "languages", { value: ["ru-RU", "ru"], configurable: true });
       } catch (e) { /* ignore */ }
       win.matchMedia = () => ({ matches: false, media: "", onchange: null,
         addListener() {}, removeListener() {}, addEventListener() {},

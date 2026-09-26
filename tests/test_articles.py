@@ -710,6 +710,30 @@ class StoreAndMarkdownTest(unittest.TestCase):
         self.assertIn("&lt;script&gt;", html)
         self.assertNotIn("<script>", html)
 
+    def test_markdown_quotes_cannot_break_attributes(self):
+        """Кавычка в URL или alt не должна вырываться из атрибута."""
+        link = articles.markdown_html(
+            '[клик](https://a.com/"onmouseover="alert(1))')
+        self.assertNotIn('href="https://a.com/"onmouseover', link)
+        # скобка в payload режет markdown-URL раньше кавычки; кавычка не выходит из href
+        self.assertIn('href="https://a.com/&quot;onmouseover=&quot;alert(1"', link)
+        self.assertNotIn('onmouseover="alert', link)
+        img = articles.markdown_html(
+            '![x" onerror="alert(1)](https://a.com/i.png)')
+        self.assertNotIn('onerror="alert(1)"', img)
+        self.assertIn("alt=\"x&quot; onerror=&quot;alert(1)\"", img)
+        self.assertIn('src="https://a.com/i.png"', img)
+
+    def test_markdown_relative_links(self):
+        html = articles.markdown_html("[терминал](/terminal)")
+        self.assertIn('href="/terminal"', html)
+        self.assertNotIn("target=", html)
+        # protocol-relative и javascript: ссылками не становятся
+        bad = articles.markdown_html("[x](//evil.example)\n\n[y](javascript:alert(1))")
+        self.assertNotIn('href="//', bad)
+        self.assertNotIn('href="javascript:', bad)
+        self.assertNotIn("<a ", bad)
+
     def test_markdown_keeps_plain_text_readable(self):
         plain = articles.markdown_plain("## Т\n\n**жирный** текст и [ссылка](https://x.io)")
         self.assertNotIn("**", plain)

@@ -1,5 +1,9 @@
+# УСТАРЕЛ. Не ставьте этот юнит.
+# Рабочий — deploy/licvid.service (127.0.0.1:8000 за nginx).
+# Этот файл оставлен, чтобы старые ссылки не вели в пустоту: он больше
+# не слушает 0.0.0.0 и не является инструкцией по установке.
 [Unit]
-Description=LiqScope Liquidation Terminal
+Description=LiqScope Liquidation Terminal (OBSOLETE — use licvid.service)
 After=network-online.target
 Wants=network-online.target
 

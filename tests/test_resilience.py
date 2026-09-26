@@ -405,7 +405,7 @@ async def scenario_gate_needs_contract_specs():
     import inspect
     src = inspect.getsource(MarketFeed._gate_liquidations)
     check("спецификации контрактов грузятся с повторами",
-          "for attempt in range(3)" in src and "_gate_load_specs()" in src)
+          "for attempt in range(3)" in src and "_gate_load_specs(" in src)
     check("пустая карта спецификаций — ошибка, а не тихая тишина",
           "не загрузились спецификации контрактов Gate" in src)
     check("подписка на ноль контрактов не оставляем",

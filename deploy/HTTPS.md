@@ -49,13 +49,18 @@ sudo bash deploy/setup-https.sh liqscope.online ваш@email.com
 sudo systemctl edit --full licvid    # или nano /etc/systemd/system/licvid.service
 ```
 
-В `[Service]`:
+В `[Service]` (рабочий юнит — `deploy/licvid.service`, не устаревший `liqscope.service`):
 
 ```ini
 Environment=LIQSCOPE_PUBLIC_URL=https://liqscope.online
 Environment=LIQSCOPE_COOKIE_SECURE=1
+Environment=LIQSCOPE_REQUIRE_SECRET=1
+# openssl rand -hex 32 — в drop-in, не в git. Дефолт liqscope-change-me не принимается.
+Environment=LIQSCOPE_SECRET=<случайная-строка>
 ExecStart=/root/Licvid/venv/bin/python3 -m uvicorn server:app --host 127.0.0.1 --port 8000
 ```
+
+Без `LIQSCOPE_SECRET` сервис не поднимется: на опубликованной соли обратимы хеши IP.
 
 `--host 127.0.0.1` прячет :8000 снаружи. Если venv в другом месте — оставьте свой путь, смените только host.
 

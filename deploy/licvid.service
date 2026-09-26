@@ -47,6 +47,11 @@ Environment=LIQSCOPE_COOKIE_SECURE=1
 # Environment=LIQSCOPE_BOT_TOKEN=
 # Environment=LIQSCOPE_ADMIN_IDS=          # telegram id админов
 # Environment=LIQSCOPE_ADMIN_EMAILS=       # админы, зарегистрированные по почте
+# Секрет обязателен. Известный дефолт liqscope-change-me больше не принимается:
+# на нём обратимы HMAC IP. Сгенерируйте `openssl rand -hex 32` и впишите
+# значение в drop-in (`systemctl edit licvid`), не в этот файл в git.
+# Пока LIQSCOPE_SECRET пуст, процесс не стартует.
+Environment=LIQSCOPE_REQUIRE_SECRET=1
 # Environment=LIQSCOPE_SECRET=
 # Почта — основной вход (подтверждение адреса, вход по ссылке, сброс пароля).
 # Без SMTP регистрация работает, но письма не уходят: в логе будет

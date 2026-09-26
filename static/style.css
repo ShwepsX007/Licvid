@@ -1,17 +1,17 @@
 /* LiqScope Terminal Clean Dark Theme */
 :root {
-    --bg-dark: #090c10;
-    --bg-card: #121721;
-    --bg-hover: #1b2230;
-    --border-color: #212938;
-    --text-primary: #f0f4f8;
-    --text-muted: #8493a8;
-    --color-green: #00e676;
-    --color-red: #ff2a5f;
-    --color-gold: #ffc107;
-    --color-blue: #3d70ff;
-    --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+    --bg-dark: #0b1020;
+    --bg-card: #141b2e;
+    --bg-hover: #1c253c;
+    --border-color: #2a3348;
+    --text-primary: #f4f7fb;
+    --text-muted: #8b97ad;
+    --color-green: #34d399;
+    --color-red: #fb7185;
+    --color-gold: #f5c542;
+    --color-blue: #3b82f6;
+    --font-sans: "Manrope", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --font-mono: "Manrope", "Inter", ui-monospace, monospace;
 }
 
 * {
@@ -41,8 +41,8 @@ body.dark-theme {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    background: var(--bg-card);
-    border-bottom: 1px solid var(--border-color);
+    background: rgba(14, 20, 36, 0.96);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
     padding: 8px 16px;
     min-height: 52px;   /* не height: боксы статистики выше 52px и должны помещаться */
     flex-shrink: 0;
@@ -628,7 +628,7 @@ body.dark-theme {
     border: 1px solid var(--border-color);
     color: var(--text-primary);
     padding: 4px 10px;
-    border-radius: 4px;
+    border-radius: 8px;
     cursor: pointer;
     font-size: 0.78rem;
     transition: all 0.2s;
@@ -1335,8 +1335,8 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
 .modal.hidden { display: none; }
 .modal-content {
     background: var(--bg-card);
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 16px;
     padding: 18px;
     width: 360px;
     position: relative;

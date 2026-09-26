@@ -40,10 +40,9 @@
 .ad-host[hidden] { display: none; }
 
 .ad-banner {
-    border: 1px solid var(--ad-border);
+    border: 1px solid rgba(255, 255, 255, 0.08);
     border-radius: 16px;
-    background: linear-gradient(180deg, rgba(61, 112, 255, 0.08), transparent 60%),
-                var(--ad-card);
+    background: #141b2e;
     /* без внутренней рамки вокруг фото: отступ был щелью между картинкой и карточкой */
     padding: 0;
     overflow: hidden;

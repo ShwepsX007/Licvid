@@ -46,7 +46,7 @@
 <script src="/static/account.js?v=nav2"></script>
 <script src="/static/presence.js?v=geo2"></script>
 <script src="/static/consent.js?v=consent1"></script>
-<script src="/static/ads.js?v=banner2"></script>
+<script src="/static/ads.js?v=banner4"></script>
 <style>
 :root {
     --bg: #0b1020;
@@ -352,17 +352,35 @@ a.chip:hover { border-color: rgba(0, 214, 255, 0.55); color: var(--text); }
 .btn-terminal .cta-short { display: none; }
 .btn-compact { padding: 7px 12px; font-size: 0.78rem; white-space: nowrap; }
 
-/* ---------- 📣 Рекламный баннер под кнопками героя ----------
-   Разметка, стили слайдов, карусель и сетка — в static/ads.css (он же нужен
-   терминалу). Здесь только посадка в колонке героя: ширина по контенту,
-   отступ от кнопок и выравнивание, которое наследуется от лендинга. */
-.ad-host {
-    max-width: 1080px; margin: 26px auto 0; padding: 0 28px;
+/* Баннер стоит под героем, на всю ширину колонки, и не участвует в сетке карточки. */
+.hero > .ad-host {
+    grid-column: 1 / -1;
+    width: 100%;
+    max-width: none;
+    margin: 28px 0 8px;
+    padding: 0;
     text-align: left;
+    clear: both;
+}
+.hero > .ad-host .ad-pager { display: none; }
+.hero > .ad-host .ad-stage {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    overflow: visible;
+}
+.hero > .ad-host .ad-slide {
+    position: relative;
+    grid-area: auto;
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+    height: auto;
+    width: 100%;
 }
 
 @media (max-width: 760px) {
-    .ad-host { padding: 0; margin-top: 20px; max-width: 100%; }
+    .hero > .ad-host { padding: 0; margin: 18px 0 8px; max-width: 100%; }
 }
 
 /* ---------- Mobile ---------- */
@@ -492,22 +510,18 @@ a.chip:hover { border-color: rgba(0, 214, 255, 0.55); color: var(--text); }
             <span class="online-pill"><span class="pulse"></span> online</span>
         </div>
         <div class="hero-stats">
-
-    <!-- 📣 Рекламный баннер: всплывает под кнопками, если в админке есть
-         активный пост для главной. Фото, ссылка, текст и срок приходят из
-         /api/ads; как их крутить — там же в banner. Срока нет или он истёк —
-         баннер исчезает сам, закрыть его посетителю некуда. -->
-    <div class="ad-host" id="ad-host" data-ad-place="landing" hidden></div>
-
-    <div class="hero-stats">
         <div class="stat-card"><span class="stat-value" id="stat-24h">—</span><span class="stat-label" data-i18n="land.stat.24h">Ликвидаций за 24ч</span></div>
         <div class="stat-card"><span class="stat-value" id="stat-1h">—</span><span class="stat-label" data-i18n="land.stat.1h">За последний час</span></div>
         <div class="stat-card"><span class="stat-value" id="stat-live">—</span><span class="stat-label" data-i18n="land.stat.exch">Бирж в эфире</span></div>
         <div class="stat-card"><span class="stat-value" id="stat-ratio">—</span><span class="stat-label" data-i18n="land.stat.ratio">Лонги × шорты (24ч)</span></div>
-    </div>
+        </div>
         <a class="btn btn-primary btn-block" href="/terminal" data-i18n="land.cta.open">Открыть терминал</a>
     </aside>
     </div>
+
+    <!-- Баннер — отдельной полосой под героем, не внутри карточки эфира.
+         На главной без карусели: все объявления видны сразу, ничего не крутится. -->
+    <div class="ad-host" id="ad-host" data-ad-place="landing" hidden></div>
 
     <div class="cvd-head">
         <span class="live-dot"></span>

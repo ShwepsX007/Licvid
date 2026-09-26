@@ -198,8 +198,13 @@
             media + cap + "</div>";
     }
 
+    /** На главной карусель не крутим: она залезала в карточку и сдвигала блоки. */
+    function quietLanding() {
+        return place() === "landing" && cfg.layout !== "grid";
+    }
+
     function pagerHtml() {
-        if (cfg.layout === "grid" || items.length < 2) return "";
+        if (cfg.layout === "grid" || quietLanding() || items.length < 2) return "";
         var dots = items.map(function (a, i) {
             return '<button type="button" class="ad-dot" data-ad-dot="' + i +
                 '" aria-label="' + esc(t("ad.tag", "Реклама") + " " + (i + 1) + "/" + items.length) +
@@ -228,7 +233,7 @@
     function mark() {
         var box = host();
         if (!box) return;
-        var grid = cfg.layout === "grid";
+        var grid = cfg.layout === "grid" || quietLanding();
         Array.prototype.forEach.call(box.querySelectorAll(".ad-slide"), function (el) {
             if (grid) { el.classList.add("on"); return; }
             el.classList.toggle("on", Number(el.getAttribute("data-ad-index")) === index);
@@ -258,7 +263,7 @@
             });
         });
         var stage = box.querySelector(".ad-stage");
-        if (!stage) return;
+        if (!stage || quietLanding()) return;
         ["mouseenter", "focusin", "touchstart"].forEach(function (ev) {
             stage.addEventListener(ev, function () { paused = true; });
         });
@@ -282,13 +287,13 @@
     }
 
     function step() {
-        if (cfg.layout === "grid" || paused || items.length < 2) return;
+        if (cfg.layout === "grid" || quietLanding() || paused || items.length < 2) return;
         show(index + 1);
     }
 
     function arm() {
         if (timer) { clearInterval(timer); timer = 0; }
-        if (cfg.layout === "grid" || items.length < 2) return;
+        if (cfg.layout === "grid" || quietLanding() || items.length < 2) return;
         timer = setInterval(step, Math.max(2, cfg.rotate_sec) * 1000);
     }
 

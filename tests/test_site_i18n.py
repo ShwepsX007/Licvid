@@ -26,8 +26,12 @@ import unittest
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
 
+# Секрет для тестов — до импорта server (иначе fail-fast в PROD без секрета)
+os.environ.setdefault("LIQSCOPE_SECRET", "test-secret-not-the-published-default")
+os.environ.setdefault("LIQSCOPE_DEMO", "1")
+
 import seo_pages  # noqa: E402
-from tools.build_i18n_pages import build as build_pages  # noqa: E402
+from tools.build_i18n_pages import build as build_pages, build_per_lang  # noqa: E402
 
 LANGS = ("ru", "en", "zh", "hi", "es")
 I18N_DIR = os.path.join(HERE, "static", "i18n")
@@ -177,6 +181,16 @@ class PagesBundleTest(unittest.TestCase):
             on_disk, build_pages(),
             "static/i18n.pages.js устарел: запустите python3 tools/build_i18n_pages.py",
         )
+        # Проверяем и per-lang файлы
+        per = build_per_lang()
+        for lang, expected in per.items():
+            path = os.path.join(HERE, "static", f"i18n.pages.{lang}.js")
+            with open(path, encoding="utf-8") as fh:
+                on_disk_lang = fh.read()
+            self.assertEqual(
+                on_disk_lang, expected,
+                f"static/i18n.pages.{lang}.js устарел: запустите python3 tools/build_i18n_pages.py",
+            )
 
     def test_bundle_carries_all_languages(self) -> None:
         with open(PAGES_JS, encoding="utf-8") as fh:
@@ -189,6 +203,24 @@ class PagesBundleTest(unittest.TestCase):
         for lang in LANGS:
             self.assertIn("keys", data[lang])
             self.assertIn("phrases", data[lang])
+
+    def test_per_lang_bundles_carry_only_one_language(self) -> None:
+        """Каждый per-lang файл содержит только свой язык и экономит место."""
+        per = build_per_lang()
+        for lang in LANGS:
+            path = os.path.join(HERE, "static", f"i18n.pages.{lang}.js")
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+            cut = text.rindex("window.LIQSCOPE_I18N_PAGES")
+            payload = text[text.index("=", cut) + 1:].strip().rstrip(";")
+            data = json.loads(payload)
+            self.assertEqual(sorted(data), [lang], f"{lang} bundle should have only itself")
+            # Размер per-lang должен быть существенно меньше общего
+            self.assertLess(len(text), 150000, f"{lang} bundle still too large")
+        # Общий файл примерно в 5 раз больше среднего per-lang
+        with open(PAGES_JS, encoding="utf-8") as fh:
+            combined = fh.read()
+        self.assertGreater(len(combined), 300000)
 
 
 class MarkupKeysTest(unittest.TestCase):

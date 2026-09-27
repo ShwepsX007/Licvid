@@ -6512,8 +6512,11 @@
     function setupChartExpand() {
         const btn = $("chart-expand");
         if (!btn || !chartSection) return;
+        const dock = () => window.LiqScopeDock;
         const paint = () => {
-            const fs = chartSection.classList.contains("fullscreen");
+            let dockFs = false;
+            try { dockFs = !!(dock() && dock().isSlotFullscreen && dock().isSlotFullscreen("native")); } catch (e) {}
+            const fs = chartSection.classList.contains("fullscreen") || dockFs;
             btn.classList.toggle("active", fs);
             btn.title = I18n.t(fs ? "chart.collapse_title" : "chart.expand_title");
         };
@@ -6528,10 +6531,24 @@
             }, 60);
         };
         btn.addEventListener("click", () => {
+            // Несколько графиков: ⛶ разворачивает только этот, не всю сетку.
+            try {
+                if (dock() && dock().interceptFullscreen && dock().interceptFullscreen("native")) {
+                    paint();
+                    return;
+                }
+            } catch (e) {}
             setFs(!chartSection.classList.contains("fullscreen"));
         });
         document.addEventListener("keydown", (e) => {
-            if (e.key === "Escape" && chartSection.classList.contains("fullscreen")) setFs(false);
+            if (e.key !== "Escape") return;
+            try {
+                if (dock() && dock().exitSlotFullscreen && dock().exitSlotFullscreen()) {
+                    paint();
+                    return;
+                }
+            } catch (err) {}
+            if (chartSection.classList.contains("fullscreen")) setFs(false);
         });
         I18n.onChange(paint);
         paint();

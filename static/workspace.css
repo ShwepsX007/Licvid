@@ -397,11 +397,95 @@ body.workspace-single-mode .ad-host {
 }
 .chart-dock-tools {
   display: flex;
-  align-items: center;
-  gap: 6px;
+  align-items: flex-end;
+  gap: 8px;
   padding: 6px 8px 0;
   flex-shrink: 0;
+  min-width: 0;
 }
+.chart-dock-modes,
+.chart-dock-gridctl {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.chart-dock-wrap.view-tabs .chart-dock-gridctl { display: none; }
+.chart-dock-tabs {
+  display: none;
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 4px;
+  overflow-x: auto;
+  align-items: flex-end;
+}
+.chart-dock-wrap.view-tabs .chart-dock-tabs { display: flex; }
+.chart-dock-tools .chart-dock-tab,
+.chart-dock-tools .chart-dock-tab-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 240px;
+  background: #121a28;
+  border: 1px solid #233044;
+  color: #9fb0c4;
+  border-radius: 6px 6px 0 0;
+  padding: 5px 8px;
+  font-size: 12px;
+  line-height: 1.2;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.chart-dock-tools .chart-dock-tab.is-on,
+.chart-dock-tools .chart-dock-tab.is-on:hover {
+  background: #1a2740;
+  color: #fff;
+  border-color: #3d70ff;
+}
+.chart-dock-tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chart-dock-tab-x {
+  color: #8ea3bb;
+  font-size: 11px;
+  padding: 0 2px;
+}
+.chart-dock-tab-x:hover { color: #fff; }
+.chart-dock-tab-add {
+  padding: 5px 10px;
+  color: #d5e4f5;
+}
+.chart-dock-wrap.view-tabs .chart-slot-bar { display: none; }
+.chart-dock-wrap.view-tabs .chart-dock {
+  display: block;
+  padding: 0;
+  gap: 0;
+}
+.chart-dock-wrap.view-tabs .chart-slot {
+  display: none;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+}
+.chart-dock-wrap.view-tabs .chart-slot.is-tab-on { display: flex; }
+.chart-slot.is-slot-fs {
+  position: fixed;
+  left: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  z-index: 500;
+  border: 0;
+  border-radius: 0;
+  max-width: none;
+  max-height: none;
+}
+.chart-dock-wrap.view-tabs .chart-slot.is-slot-fs { display: flex !important; }
+body.chart-slot-fs { overflow: hidden; }
 .chart-dock-tools span {
   font-size: 11px;
   color: #8ea3bb;
@@ -575,6 +659,15 @@ body.chart-embed #chart-tear-back,
 body.chart-embed .controls-bar {
   display: none !important;
 }
+/* Во вкладках встроенный график показывает свою панель таймфрейма,
+   как обычный одиночный терминал. В сетке она спрятана — там есть свой выбор. */
+body.chart-embed.chart-embed-full .controls-bar {
+  display: flex !important;
+}
+body.chart-tab-embed #tf-buttons {
+  opacity: 0.4;
+  pointer-events: none;
+}
 .chart-slot-tf {
   margin-left: auto;
   background: #121d2f;
@@ -592,7 +685,8 @@ body.chart-embed {
   overflow: hidden !important;
 }
 body.chart-embed .main-layout {
-  height: 100% !important;
+  flex: 1 1 auto !important;
+  height: auto !important;
   min-height: 0 !important;
   overflow: hidden !important;
   flex-direction: row !important;

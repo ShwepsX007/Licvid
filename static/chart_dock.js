@@ -2,9 +2,10 @@
  * Несколько обычных сингл-графиков в сетке терминала.
  *
  * Первый график — тот, что уже на странице (все слои, следование, рисование).
- * «＋ График» добавляет рядом такой же сингл-чарт. ×1–×4 задают сетку.
- * ‹ › и перетаскивание плашки меняют графики местами. ⧉ открывает
- * отдельное окно, которое можно унести за пределы браузера.
+ * «＋ График» добавляет рядом такой же сингл-чарт.
+ * Мультиэкран — сетка ×1–×4. Вкладки — один график на весь терминал,
+ * остальные переключаются вкладками. ⛶ разворачивает только этот график.
+ * ‹ › меняют местами, ⧉ открывает окно за пределами браузера.
  */
 (function () {
   const MAX = 6;
@@ -48,6 +49,9 @@
       this.wrap = null;
       this.placeholder = null;
       this.cols = 2;
+      this.view = "grid";
+      this._fsId = null;
+      this._embedFs = false;
       this._pops = new Map();
       this.activeId = "native";
       this._drag = null;
@@ -80,6 +84,21 @@
         if (sec && window.ResizeObserver) new ResizeObserver(kick).observe(sec);
       } catch (e) {}
       const q = new URLSearchParams(location.search);
+      window.addEventListener("message", (e) => {
+        if (e.origin !== location.origin) return;
+        const data = e.data;
+        if (!data || data.source !== "liqscope-dock" || data.type !== "fullscreen-state") return;
+        this._embedFs = !!data.on;
+        const expand = document.getElementById("chart-expand");
+        if (expand) expand.classList.toggle("active", this._embedFs);
+      });
+      window.addEventListener("message", (e) => {
+        if (e.origin !== location.origin) return;
+        const data = e.data;
+        if (!data || data.source !== "liqscope-dock" || data.type !== "chrome") return;
+        document.body.classList.toggle("chart-embed-full", !!data.full);
+        try { window.dispatchEvent(new Event("resize")); } catch (err) {}
+      });
       if (q.get("pop") !== "1" || !window.opener) return;
       document.body.classList.add("chart-embed-pop");
       const btn = document.createElement("button");
@@ -98,9 +117,126 @@
     _onMessage(e) {
       if (e.origin !== location.origin) return;
       const data = e.data;
-      if (!data || data.source !== "liqscope-dock" || data.type !== "dock") return;
-      if (!validId(data.slot)) return;
-      this.dockBack(data.slot);
+      if (!data || data.source !== "liqscope-dock") return;
+      if (data.type === "dock") {
+        if (!validId(data.slot)) return;
+        this.dockBack(data.slot);
+        return;
+      }
+      if (data.type === "fullscreen" && validId(data.slot)) {
+        this.toggleSlotFullscreen(data.slot);
+        return;
+      }
+      if (data.type === "fullscreen-exit" && this._fsId && (!data.slot || data.slot === this._fsId)) {
+        this.exitSlotFullscreen();
+      }
+    }
+
+    _isEmbedChild() {
+      return document.body.classList.contains("chart-embed") && window.parent && window.parent !== window;
+    }
+
+    interceptFullscreen(id) {
+      if (this._isEmbedChild()) {
+        const q = new URLSearchParams(location.search);
+        if (q.get("pop") === "1") return false;
+        try {
+          window.parent.postMessage({
+            source: "liqscope-dock",
+            type: "fullscreen",
+            slot: q.get("slot") || id || "",
+          }, location.origin);
+        } catch (e) {}
+        return true;
+      }
+      if (this.order.length < 2) return false;
+      this.toggleSlotFullscreen(id || "native");
+      return true;
+    }
+
+    isSlotFullscreen(id) {
+      if (this._isEmbedChild()) return !!this._embedFs;
+      return this._fsId === (id || "native");
+    }
+
+    toggleSlotFullscreen(id) {
+      if (!validId(id) || !this.meta[id]) return;
+      if (this._fsId === id) this.exitSlotFullscreen();
+      else this._enterSlotFullscreen(id);
+    }
+
+    exitSlotFullscreen() {
+      if (this._isEmbedChild()) {
+        const q = new URLSearchParams(location.search);
+        if (q.get("pop") === "1" || !this._embedFs) return false;
+        this._embedFs = false;
+        const expand = document.getElementById("chart-expand");
+        if (expand) expand.classList.remove("active");
+        try {
+          window.parent.postMessage({
+            source: "liqscope-dock",
+            type: "fullscreen-exit",
+            slot: q.get("slot") || "",
+          }, location.origin);
+        } catch (e) {}
+        return true;
+      }
+      if (!this._fsId) return false;
+      const id = this._fsId;
+      this._fsId = null;
+      const el = this.els.get(id);
+      if (el) el.classList.remove("is-slot-fs");
+      document.body.classList.remove("chart-slot-fs");
+      this._restoreSlotHome(el, id);
+      this._notifyFs(id, false);
+      this._nudge();
+      return true;
+    }
+
+    _enterSlotFullscreen(id) {
+      if (this._fsId && this._fsId !== id) this.exitSlotFullscreen();
+      this.setActive(id);
+      this._fsId = id;
+      const el = this.els.get(id);
+      if (el) {
+        el.classList.add("is-slot-fs");
+        if (el.parentNode !== document.body) document.body.appendChild(el);
+      }
+      document.body.classList.add("chart-slot-fs");
+      this._notifyFs(id, true);
+      this._nudge();
+    }
+
+    _restoreSlotHome(el, id) {
+      if (!el || !this.dock) return;
+      const rec = this.meta[id];
+      if (rec && rec.floating) return;
+      let before = null;
+      const idx = this.order.indexOf(id);
+      for (let i = idx + 1; i < this.order.length; i++) {
+        const sib = this.els.get(this.order[i]);
+        if (sib && sib.parentNode === this.dock && !sib.classList.contains("is-slot-fs")) {
+          before = sib;
+          break;
+        }
+      }
+      if (before) this.dock.insertBefore(el, before);
+      else if (el.parentNode !== this.dock) this.dock.appendChild(el);
+    }
+
+    _notifyFs(id, on) {
+      if (id === "native") {
+        const btn = document.getElementById("chart-expand");
+        if (btn) btn.classList.toggle("active", !!on);
+        return;
+      }
+      const el = this.els.get(id);
+      const frame = el && el.querySelector("iframe");
+      try {
+        if (frame && frame.contentWindow) {
+          frame.contentWindow.postMessage({ source: "liqscope-dock", type: "fullscreen-state", on: !!on }, location.origin);
+        }
+      } catch (e) {}
     }
 
     _needsLayout() {
@@ -154,6 +290,7 @@
 
     closeChart(id) {
       if (id === "native" || !this.meta[id]) return;
+      if (this._fsId === id) this.exitSlotFullscreen();
       const el = this.els.get(id);
       if (el) {
         const frame = el.querySelector("iframe");
@@ -194,10 +331,20 @@
 
     setActive(id) {
       if (!this.meta[id]) return;
+      const changed = this.activeId !== id;
       this.activeId = id;
-      this.els.forEach((el, pid) => el.classList.toggle("is-active", pid === id));
+      this.els.forEach((el, pid) => {
+        el.classList.toggle("is-active", pid === id);
+        el.classList.toggle("is-tab-on", pid === id);
+      });
       const el = this.els.get(id);
       if (el && el.classList.contains("chart-floating")) el.style.zIndex = "78";
+      this._paintTabs();
+      this._paintTabChrome();
+      if (changed) {
+        this._save();
+        this._nudge();
+      }
     }
 
     layout() {
@@ -216,6 +363,7 @@
         this._paintPopped(id);
       });
       this._paintActive();
+      this._applyView();
       this._syncPlaceholder();
       this._paintNativeBack();
       this._nudge();
@@ -227,9 +375,23 @@
       this.wrap.className = "chart-dock-wrap";
       const tools = document.createElement("div");
       tools.className = "chart-dock-tools";
+      const modes = document.createElement("div");
+      modes.className = "chart-dock-modes";
+      [["tabs", "Вкладки", "Один график на весь терминал. Остальные — вкладками, переключение по клику."],
+        ["grid", "Мультиэкран", "Несколько графиков сразу, сеткой."]].forEach((pair) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.dataset.view = pair[0];
+        b.textContent = pair[1];
+        b.title = pair[2];
+        b.addEventListener("click", () => this.setView(pair[0]));
+        modes.appendChild(b);
+      });
+      const gridctl = document.createElement("div");
+      gridctl.className = "chart-dock-gridctl";
       const label = document.createElement("span");
       label.textContent = "Сетка";
-      tools.appendChild(label);
+      gridctl.appendChild(label);
       [1, 2, 3, 4].forEach((n) => {
         const b = document.createElement("button");
         b.type = "button";
@@ -237,8 +399,13 @@
         b.textContent = "×" + n;
         b.title = n === 1 ? "Столбиком" : n === 2 ? "В ряд по два" : n === 3 ? "Два сверху, один снизу" : "Сетка 2×2";
         b.addEventListener("click", () => this.setCols(n));
-        tools.appendChild(b);
+        gridctl.appendChild(b);
       });
+      this.tabs = document.createElement("div");
+      this.tabs.className = "chart-dock-tabs";
+      tools.appendChild(modes);
+      tools.appendChild(gridctl);
+      tools.appendChild(this.tabs);
       this.tools = tools;
       this.dock = document.createElement("div");
       this.dock.id = "chart-dock";
@@ -265,9 +432,114 @@
 
     _paintCols() {
       if (!this.tools) return;
-      this.tools.querySelectorAll("button").forEach((b) => {
+      this.tools.querySelectorAll("button[data-cols]").forEach((b) => {
         b.classList.toggle("active", Number(b.dataset.cols) === this.cols);
       });
+    }
+
+    setView(view) {
+      this.view = view === "tabs" ? "tabs" : "grid";
+      if (this._fsId) this.exitSlotFullscreen();
+      this._applyView();
+      this._save();
+      this._nudge();
+    }
+
+    _applyView() {
+      if (this.wrap) {
+        this.wrap.classList.toggle("view-tabs", this.view === "tabs");
+        this.wrap.classList.toggle("view-grid", this.view !== "tabs");
+      }
+      this._paintModes();
+      this._paintTabs();
+      this._paintTabChrome();
+    }
+
+    _paintTabChrome() {
+      const embedTab = this.view === "tabs" && this.activeId && this.activeId !== "native";
+      document.body.classList.toggle("chart-tab-embed", !!embedTab);
+      const tf = document.getElementById("tf-buttons");
+      if (tf) tf.title = embedTab ? "Таймфрейм этого графика переключается на его собственной панели" : "";
+      this._syncEmbedChrome();
+    }
+
+    _syncEmbedChrome(onlyId) {
+      const full = this.view === "tabs";
+      this.order.forEach((id) => {
+        if (id === "native") return;
+        if (onlyId && id !== onlyId) return;
+        const el = this.els.get(id);
+        const frame = el && el.querySelector("iframe");
+        try {
+          if (frame && frame.contentWindow) {
+            frame.contentWindow.postMessage({ source: "liqscope-dock", type: "chrome", full: full }, location.origin);
+          }
+        } catch (e) {}
+      });
+    }
+
+    _paintModes() {
+      if (!this.tools) return;
+      this.tools.querySelectorAll("button[data-view]").forEach((b) => {
+        b.classList.toggle("active", b.dataset.view === this.view);
+      });
+    }
+
+    _labelOf(id) {
+      if (id === "native") {
+        const sym = validSymbol(window.state && window.state.chartSymbol) || "BTC_USDT";
+        return pretty(sym) + " · " + this._tfLabel(this._nativeTf());
+      }
+      const rec = this.meta[id];
+      if (!rec) return id;
+      return pretty(rec.symbol) + " · " + this._tfLabel(rec.tf);
+    }
+
+    _paintTabs() {
+      if (!this.tabs) return;
+      const existing = Array.from(this.tabs.querySelectorAll(".chart-dock-tab"));
+      const same = existing.length === this.order.length && existing.every((el, i) => el.dataset.id === this.order[i]);
+      if (same) {
+        existing.forEach((el) => {
+          const label = el.querySelector(".chart-dock-tab-label");
+          if (label) label.textContent = this._labelOf(el.dataset.id);
+          el.classList.toggle("is-on", el.dataset.id === this.activeId);
+        });
+        return;
+      }
+      this.tabs.textContent = "";
+      this.order.forEach((id) => {
+        const tab = document.createElement("button");
+        tab.type = "button";
+        tab.className = "chart-dock-tab" + (id === this.activeId ? " is-on" : "");
+        tab.dataset.id = id;
+        tab.title = "Показать " + this._labelOf(id);
+        const label = document.createElement("span");
+        label.className = "chart-dock-tab-label";
+        label.textContent = this._labelOf(id);
+        tab.appendChild(label);
+        if (id !== "native") {
+          const x = document.createElement("span");
+          x.className = "chart-dock-tab-x";
+          x.textContent = "✕";
+          x.title = "Закрыть этот график";
+          x.addEventListener("click", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            this.closeChart(id);
+          });
+          tab.appendChild(x);
+        }
+        tab.addEventListener("click", () => this.setActive(id));
+        this.tabs.appendChild(tab);
+      });
+      const add = document.createElement("button");
+      add.type = "button";
+      add.className = "chart-dock-tab-add";
+      add.textContent = "＋";
+      add.title = "Добавить график";
+      add.addEventListener("click", () => this.addChart());
+      this.tabs.appendChild(add);
     }
 
     _ensureSlot(id) {
@@ -352,6 +624,7 @@
           title.textContent = "График не открылся в окне";
         }
         this._hookFrame(id, frame);
+        this._syncEmbedChrome(id);
       });
       this.els.set(id, el);
       return el;
@@ -445,6 +718,11 @@
     }
 
     _placeDock(el, rec) {
+      if (el.classList.contains("is-slot-fs")) {
+        if (el.parentNode !== document.body) document.body.appendChild(el);
+        rec.floating = false;
+        return;
+      }
       el.classList.remove("chart-floating");
       el.style.left = "";
       el.style.top = "";
@@ -490,7 +768,11 @@
       this.wrap = null;
       this.dock = null;
       this.tools = null;
+      this.tabs = null;
       this.placeholder = null;
+      this._fsId = null;
+      document.body.classList.remove("chart-slot-fs");
+      document.body.classList.remove("chart-tab-embed");
       this.section.classList.remove("has-chart-dock");
       this._paintNativeBack();
       this._nudge();
@@ -534,6 +816,7 @@
     popOut(id) {
       const rec = this.meta[id];
       if (!rec) return;
+      if (this._fsId === id) this.exitSlotFullscreen();
       const existing = this._pops.get(id);
       if (existing && !existing.closed) {
         try { existing.focus(); } catch (e) {}
@@ -614,7 +897,11 @@
     }
 
     _paintActive() {
-      this.els.forEach((el, id) => el.classList.toggle("is-active", id === this.activeId));
+      this.els.forEach((el, id) => {
+        el.classList.toggle("is-active", id === this.activeId);
+        el.classList.toggle("is-tab-on", id === this.activeId);
+      });
+      this._paintTabs();
     }
 
     _onGrip(id, grip, e) {
@@ -782,6 +1069,7 @@
         const tfSel = el.querySelector(".chart-slot-tf");
         if (tfSel && document.activeElement !== tfSel) tfSel.value = String(rec.tf || 5);
       });
+      this._paintTabs();
     }
 
     _embedUrl(rec, id) {
@@ -876,7 +1164,7 @@
               h: Math.round(rec.h || 540),
             };
           }).filter(Boolean);
-          localStorage.setItem(KEY, JSON.stringify({ v: 2, cols: this.cols, activeId: this.activeId, charts: charts }));
+          localStorage.setItem(KEY, JSON.stringify({ v: 3, cols: this.cols, view: this.view, activeId: this.activeId, charts: charts }));
         } catch (e) {}
       }, 180);
     }
@@ -886,6 +1174,7 @@
       try { raw = JSON.parse(localStorage.getItem(KEY) || "null"); } catch (e) { raw = null; }
       if (!raw || !Array.isArray(raw.charts)) return;
       if ([1, 2, 3, 4].indexOf(Number(raw.cols)) !== -1) this.cols = Number(raw.cols);
+      if (raw.view === "tabs" || raw.view === "grid") this.view = raw.view;
       const order = [];
       const meta = {};
       raw.charts.slice(0, MAX).forEach((c) => {

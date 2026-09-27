@@ -1,5 +1,33 @@
 # PERF NOTES — Licvid / LiqScope
 
+Дата: 2026-09-27, main = 5cc6f5a + workspace fixes до 162cdc0
+Стенд: LIQSCOPE_DEMO=1 на 127.0.0.1:8000, без внешней сети (биржи недоступны, но статика и HTML отдаются как в проде)
+
+## Workspace Perf
+
+### Что измеряли для workspace
+- Вес новых файлов: `chart_panel.js` 33KB, `workspace.js` 31KB, `workspace.css` 6KB raw → gz ~10KB total
+- Кол-во WS: один на окно (main + detached) — проверено `WorkspaceManager._hookWs` + `BroadcastChannel`
+- Max panels 6 с alert — предотвращает DoS
+- Debounced save 600ms — `localStorage` не спамится
+- Resize: `ResizeObserver` + `requestAnimationFrame` + `getBoundingClientRect` — нет polling
+- Init: `_initChartWithRetry` 30 ретраев 200ms, затем 100/500/1500ms resize — chart не создается с 0 размером
+- Layers: `loadLevels` с `cache:no-store` + retry 500/1500ms, периодический refresh 30s, priceLines fallback (до 20) — не блокирует main thread
+- Flex layout resizable both — CSS only, no JS layout thrashing
+
+### Замеры
+- `/terminal` с workspace: HTML 47KB + статика 1.43MB raw → gz 373KB + workspace 10KB gz → **~383KB** на проводе (было 373KB без workspace, +2.6%)
+- TTFB `/terminal` 2.5ms, `/api/klines?symbol=BTC_USDT&timeframe=5` 5-10ms (demo 122 свечи)
+- `localStorage` workspace: ~1.2KB для 2 панелей, <2KB для 6 панелей
+- WS messages: routing по symbol, без N× нагрузки, один WS на окно
+- e2e `workspace_e2e.js` 22 ok за 8-9s (jsdom + lightweight-charts setTransform mock errors игнорируются)
+
+### Что осталось
+- `lightweight-charts` vendored 197KB raw / 62KB gz, npm ^5.2.1 не используется — можно удалить из package.json
+- Canvas `clusterCanvas` 400×360px per panel, 6 панелей → 6×~0.5MB bitmap memory, OK для десктопа, на мобиле 1 панель 100% width
+
+## Предыдущий аудит
+
 Дата: 2026-09-27
 Стенд: LIQSCOPE_DEMO=1 на 127.0.0.1:8001, без внешней сети (биржи недоступны, но статика и HTML отдаются как в проде)
 

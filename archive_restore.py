@@ -235,7 +235,9 @@ def digest_records_from_cells(cells: Iterable[Cell],
         if day in have:
             continue
         facts = facts_from_cells(chunk, window_sec=86400)
-        if not facts.get("liq_count") and not facts.get("liq_total_usd") and not facts.get("vol_usd"):
+        # Оборот без ликвидаций — не выпуск дня. Иначе после перезагрузки
+        # на /digest появляется пустой «черновик», который в канал не уходил.
+        if int(facts.get("liq_count") or 0) <= 0 and _num(facts.get("liq_total_usd")) <= 0:
             continue
         last_h = max(h for h, _c in chunk)
         records.append({
@@ -267,10 +269,11 @@ def hourly_posts_from_cells(cells: Iterable[Cell]) -> List[dict]:
     for h, cell in cells or []:
         usd = _num((cell or {}).get("liq_usd"))
         count = int(_num((cell or {}).get("liq_count")))
-        vol = _num((cell or {}).get("vol"))
-        cvd = _num((cell or {}).get("cvd"))
-        if usd <= 0 and count <= 0 and vol <= 0 and not cvd:
+        # Час только с оборотом не показываем как сводку: на странице это
+        # пустой черновик, хотя в Telegram ничего не отправлялось.
+        if usd <= 0 and count <= 0:
             continue
+        cvd = _num((cell or {}).get("cvd"))
         longs = _num((cell or {}).get("liq_long"))
         shorts = _num((cell or {}).get("liq_short"))
         label = hour_hhmm(float(h), tz)

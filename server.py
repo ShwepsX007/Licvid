@@ -53,6 +53,7 @@ from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
+import archive_hide
 import archive_restore
 import seo_pages
 from fastapi.staticfiles import StaticFiles
@@ -3152,6 +3153,9 @@ digest_ctx.set_setting_fn = (
 
 # Дневной дайджест: архив выпусков, данные с сервера и публикация через бота
 digest_ctx.store = DigestStore(DIGEST_FILE)
+_archive_hide = archive_hide.ArchiveHide(
+    os.path.join(HERE, "data", "archive_hidden.json"))
+digest_ctx.hide = _archive_hide
 digest_ctx.liqs_fn = lambda: list(LIQUIDATIONS)
 digest_ctx.symbols_fn = lambda: list(feed.symbols if feed else [])
 digest_ctx.candles_fn = get_candles
@@ -3236,6 +3240,7 @@ async def collect_hourly_post() -> dict:
 
 
 hourly_ctx.store = HourlyStore(HOURLY_FILE, keep=HOURLY_KEEP)
+hourly_ctx.hide = _archive_hide
 hourly_ctx.bot = tg_bot
 hourly_ctx.collect_fn = collect_hourly_post
 hourly_ctx.archive_fn = lambda: archive_restore.hourly_posts_from_cells(month_cells())

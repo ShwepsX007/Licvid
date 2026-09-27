@@ -305,6 +305,7 @@ def public_post(rec: dict, lang: str = "en", with_text: bool = True) -> dict:
         "liq_count": rec.get("liq_count"),
         "langs": [k for k in ("ru", "en") if texts.get(k)],
         "sent": {k: bool(v) for k, v in (rec.get("sent") or {}).items()},
+        "restored": str(rec.get("source") or "") == "archive",
     }
     has_file = path and os.path.isfile(path)
     if has_file:

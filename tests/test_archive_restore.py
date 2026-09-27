@@ -57,6 +57,11 @@ class FactsTest(unittest.TestCase):
         kept = digest_records_from_cells(day_cells, have_days=list(days)[:1])
         self.assertEqual(len(kept), len(days) - 1)
 
+    def test_volume_only_cells_are_not_empty_drafts(self):
+        bare = cell(usd=0, n=0, long=0, short=0, cvd=50, vol=5000)
+        self.assertEqual(digest_records_from_cells([(NOW, bare)]), [])
+        self.assertEqual(hourly_posts_from_cells([(NOW, bare)]), [])
+
     def test_hourly_posts_and_slot_flows(self):
         posts = hourly_posts_from_cells([(NOW, cell())])
         self.assertEqual(len(posts), 1)

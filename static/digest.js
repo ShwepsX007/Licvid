@@ -49,6 +49,8 @@
     var total = 0;                  // сколько выпусков в архиве
     var selected = "";
     var month = null;               // {y, m} — открытый месяц календаря
+    var isAdmin = false;
+    var shown = null;               // открытый выпуск: кнопка удаления рисуется заново
 
     /* ---------- свежие выпуски ---------- */
 
@@ -63,7 +65,8 @@
         }
         box.innerHTML = items.slice(0, FRESH).map(function (it) {
             var tags = "";
-            if (it.published) tags += '<span class="tag ok">' + esc(t("dig.published")) + "</span>";
+            if (it.restored) tags += '<span class="tag">' + esc(t("dig.archive_tag")) + "</span>";
+            else if (it.published) tags += '<span class="tag ok">' + esc(t("dig.published")) + "</span>";
             if (it.mood) tags += '<span class="tag">' + esc(it.mood) + "</span>";
             // миниатюра обложки: у выпуска есть фото дня — оно и в списке
             var thumb = it.photo && it.photo.url
@@ -106,7 +109,8 @@
             return;
         }
         var tags = "";
-        if (item.published) tags += '<span class="tag ok">' + esc(t("dig.published")) + "</span>";
+        if (item.restored) tags += '<span class="tag">' + esc(t("dig.archive_tag")) + "</span>";
+        else if (item.published) tags += '<span class="tag ok">' + esc(t("dig.published")) + "</span>";
         else tags += '<span class="tag">' + esc(t("dig.draft")) + "</span>";
         var post = item.post
             ? '<details class="dig-post"><summary>Telegram · ' + esc(item.day_label || item.day) +
@@ -118,10 +122,53 @@
             ? '<figure class="dig-cover"><img src="' + esc(item.photo.url) +
               '" alt="' + esc(t("dig.cover_alt")) + '" loading="lazy"></figure>'
             : "";
+        var del = "";
+        if (isAdmin && item.day) {
+            del = '<div class="admin-del"><button type="button" class="btn btn-danger btn-small" id="dig-del">' +
+                esc(t("dig.delete")) + "</button>" +
+                '<span class="meta" id="dig-del-status"></span></div>';
+        }
         box.innerHTML =
             "<h2>" + esc(item.day_label || item.day) + "</h2>" +
             '<div class="art-meta">' + esc(item.brief || "") + " " + tags + "</div>" +
-            cover + (item.article || "") + post;
+            del + cover + (item.article || "") + post;
+        var btn = el("dig-del");
+        if (btn) btn.addEventListener("click", function () { removeDay(item.day); });
+    }
+
+    function postJson(url, body) {
+        return fetch(url, {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body || {}),
+        }).then(function (r) {
+            return r.json().catch(function () { return {}; }).then(function (data) {
+                data = data || {};
+                data.ok = !!data.ok && r.ok;
+                if (!data.message) data.message = data.error || ("HTTP " + r.status);
+                return data;
+            });
+        });
+    }
+
+    function removeDay(day) {
+        if (!isAdmin || !day) return;
+        if (!window.confirm(t("dig.delete_ask", { day: day }))) return;
+        var status = el("dig-del-status");
+        if (status) status.textContent = "…";
+        postJson("/api/admin/digest/" + encodeURIComponent(day) + "/delete", { tg: false })
+            .then(function (res) {
+                if (!res.ok) {
+                    if (status) status.textContent = t("dig.delete_fail", { msg: res.message || res.error });
+                    return;
+                }
+                shown = null;
+                loadArchive("");
+            })
+            .catch(function (e) {
+                if (status) status.textContent = t("dig.delete_fail", { msg: e.message });
+            });
     }
 
     /* ---------- календарь по датам ---------- */
@@ -267,6 +314,7 @@
         return api("/api/digest/" + encodeURIComponent(day) + "?lang=" + articleLang())
             .then(function (res) {
                 if (!res || !res.ok || !res.item) { paintArticle(null); return; }
+                shown = res.item;
                 paintArticle(res.item);
                 paintChips(res.item);
                 if (push !== false) setUrl(day);
@@ -321,7 +369,10 @@
         // кто вошёл — тому ссылки в кабинет и (если админ) в админку.
         // Про шапку знает account.js: он спрашивает то же самое сам.
         api("/api/auth/me").then(function (res) {
-            paintJump((res && res.user) || null);
+            var user = (res && res.user) || null;
+            isAdmin = !!(user && user.is_admin);
+            paintJump(user);
+            if (shown) paintArticle(shown);
         }).catch(function () { paintJump(null); });
         loadArchive(day);
     }

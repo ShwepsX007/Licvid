@@ -88,6 +88,7 @@
     var highlightId = "";          // ?post= — класс hit переживает перерисовку языка
     var tzHours = 3;
     var freshShown = FRESH;
+    var isAdmin = false;
 
     /* ---------- свежие сводки ---------- */
 
@@ -103,6 +104,7 @@
         }
         box.innerHTML = list.slice(0, freshShown).map(function (it) {
             var sum = [];
+            if (it.restored) sum.push(t("hour.archive_tag"));
             if (it.total_usd) sum.push(money(it.total_usd));
             if (it.liq_count) sum.push(t("hour.events", { n: it.liq_count }));
             return '<button type="button" class="hour-card' +
@@ -145,7 +147,12 @@
             return;
         }
         var head = '<div class="hour-day-head"><h2>' + esc(dayLabel(selected)) + "</h2>" +
-            '<span class="hd-n">' + esc(t("hour.n_posts", { n: items.length })) + "</span></div>";
+            '<span class="hd-n">' + esc(t("hour.n_posts", { n: items.length })) + "</span>" +
+            (isAdmin && selected
+                ? '<button type="button" class="btn btn-danger btn-small" id="hour-del-day">' +
+                  esc(t("hour.delete_day")) + "</button>"
+                : "") +
+            '<span class="meta" id="hour-del-status"></span></div>';
         box.innerHTML = head + items.map(function (it) {
             var langs = it.langs || [];
             var cur = picked[it.id] || postLang();
@@ -166,6 +173,7 @@
             if (it.total_usd) foot.push(money(it.total_usd));
             if (it.liq_count) foot.push(t("hour.events", { n: it.liq_count }));
             if (it.window_h) foot.push(t("hour.window", { h: it.window_h }));
+            if (it.restored) foot.push(t("hour.archive_tag"));
             return '<article class="tg-card' + (highlightId === it.id ? " hit" : "") +
                 '" id="post-' + esc(it.id) + '">' +
                 '<div class="tg-head"><span class="tg-time">🕘 ' + esc(timeLabel(it.ts)) +
@@ -174,6 +182,10 @@
                 (foot.length ? '<div class="tg-foot">' + esc(foot.join(" · ")) +
                     '<span class="sep">·</span><a href="/hourly?post=' + esc(it.id) +
                     '">' + esc(t("hour.link")) + "</a></div>" : "") +
+                (isAdmin
+                    ? '<div class="admin-del"><button type="button" class="btn btn-danger btn-small hour-del" data-id="' +
+                      esc(it.id) + '">' + esc(t("hour.delete")) + "</button></div>"
+                    : "") +
                 "</article>";
         }).join("");
         Array.prototype.forEach.call(box.querySelectorAll(".tg-langs button"), function (btn) {
@@ -182,6 +194,56 @@
                 paintPosts({ items: items });
             });
         });
+        Array.prototype.forEach.call(box.querySelectorAll(".hour-del"), function (btn) {
+            btn.addEventListener("click", function () { removePost(btn.getAttribute("data-id")); });
+        });
+        var dayBtn = el("hour-del-day");
+        if (dayBtn) dayBtn.addEventListener("click", function () { removeDay(selected); });
+    }
+
+    function postJson(url, body) {
+        return fetch(url, {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body || {}),
+        }).then(function (r) {
+            return r.json().catch(function () { return {}; }).then(function (data) {
+                data = data || {};
+                data.ok = !!data.ok && r.ok;
+                if (!data.message) data.message = data.error || ("HTTP " + r.status);
+                return data;
+            });
+        });
+    }
+
+    function sayDel(text) {
+        var box = el("hour-del-status");
+        if (box) box.textContent = text || "";
+    }
+
+    function removePost(id) {
+        if (!isAdmin || !id) return;
+        if (!window.confirm(t("hour.delete_ask"))) return;
+        sayDel("…");
+        postJson("/api/admin/hourly/" + encodeURIComponent(id) + "/delete", { tg: false })
+            .then(function (res) {
+                if (!res.ok) { sayDel(t("hour.delete_fail", { msg: res.message || res.error })); return; }
+                loadArchive(selected);
+            })
+            .catch(function (e) { sayDel(t("hour.delete_fail", { msg: e.message })); });
+    }
+
+    function removeDay(day) {
+        if (!isAdmin || !day) return;
+        if (!window.confirm(t("hour.delete_day_ask", { day: day }))) return;
+        sayDel("…");
+        postJson("/api/admin/hourly/day/" + encodeURIComponent(day) + "/delete", { tg: false })
+            .then(function (res) {
+                if (!res.ok) { sayDel(t("hour.delete_fail", { msg: res.message || res.error })); return; }
+                loadArchive("");
+            })
+            .catch(function (e) { sayDel(t("hour.delete_fail", { msg: e.message })); });
     }
 
     /* ---------- календарь по дням ---------- */
@@ -323,6 +385,7 @@
     function paintJump(user) {
         var jump = el("hour-jump");
         var admin = !!(user && user.is_admin);
+        isAdmin = admin;
         var name = user ? (user.display_name || user.username || t("hour.cabinet")) : "";
         if (!jump) return;
         var rows = [];
@@ -465,6 +528,7 @@
         // Про шапку знает account.js: он спрашивает то же самое сам
         api("/api/auth/me").then(function (res) {
             paintJump((res && res.user) || null);
+            if (items.length) paintPosts({ items: items });
         }).catch(function () { paintJump(null); });
         loadArchive(day, post);
     }

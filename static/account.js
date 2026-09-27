@@ -919,6 +919,7 @@
                    [1000000, "1M$"], [5000000, "5M$"]];
     var LV_WINS = [[24, "lv.win_day"], [168, "lv.win_week"], [720, "lv.win_month"]];
     var lvCfg = { symbol: "", min_usd: 500000, window_hours: 720 };
+    var lvView = { mode: "mass", side: "all", focus: "", scrollSym: "" };
     var lvTimer = null, lvBusy = false, lvBuilt = false, lvSyms = [], lvData = null;
     (function lvLoadCfg() {
         try {
@@ -926,22 +927,222 @@
             if (raw.symbol) lvCfg.symbol = String(raw.symbol).toUpperCase();
             if (raw.min_usd !== undefined) lvCfg.min_usd = Number(raw.min_usd) || 0;
             if (raw.window_hours) lvCfg.window_hours = Number(raw.window_hours) || 720;
+            if (raw.mode === "cum" || raw.mode === "mass") lvView.mode = raw.mode;
+            if (raw.side === "long" || raw.side === "short" || raw.side === "all") lvView.side = raw.side;
         } catch (e) { /* нет настройки — берём умолчания */ }
     })();
 
     function lvSave() {
-        try { localStorage.setItem(LV_LS_KEY, JSON.stringify(lvCfg)); } catch (e) { /* ignore */ }
+        try {
+            localStorage.setItem(LV_LS_KEY, JSON.stringify({
+                symbol: lvCfg.symbol,
+                min_usd: lvCfg.min_usd,
+                window_hours: lvCfg.window_hours,
+                mode: lvView.mode,
+                side: lvView.side,
+            }));
+        } catch (e) { /* ignore */ }
+    }
+
+    var lvSig = null;
+    var lvSigSaveT = null;
+    var LV_SIG_MASS = [100000, 500000, 1000000, 5000000, 20000000];
+    var LV_SIG_DIST = [0.3, 0.5, 1, 2];
+    var LV_SIG_PAUSE = [15, 30, 60, 240];
+
+    function lvSigDefaults() {
+        return { notify: false, min_usd: 1000000, approach_pct: 0.5,
+                 side: "both", symbols: [], cooldown_min: 60 };
+    }
+
+    function lvSigCfg() {
+        return Object.assign(lvSigDefaults(), lvSig || {});
+    }
+
+    function loadLevelSignal() {
+        return api("/api/account/levels/signal").then(function (d) {
+            if (d && d.config) lvSig = d.config;
+            applyLevelSignalState();
+        }).catch(function () { applyLevelSignalState(); });
+    }
+
+    function lvSigSet(patch) {
+        lvSig = Object.assign(lvSigDefaults(), lvSig || {}, patch || {});
+        applyLevelSignalState();
+        if (lvSigSaveT) clearTimeout(lvSigSaveT);
+        lvSigSaveT = setTimeout(function () {
+            lvSigSaveT = null;
+            api("/api/account/levels/signal", {
+                method: "POST",
+                body: JSON.stringify(lvSig),
+            }).then(function (d) {
+                var st = $("lv-sig-status");
+                if (st) st.textContent = d && d.ok ? t("lv.sig_saved") : t("lv.sig_fail");
+                if (d && d.config) lvSig = d.config;
+                applyLevelSignalState();
+            }).catch(function () {
+                var st = $("lv-sig-status");
+                if (st) st.textContent = t("lv.sig_fail");
+            });
+        }, 250);
+    }
+
+    function lvSigCoinsHtml(cfg) {
+        var picked = cfg.symbols || [];
+        var allOn = !picked.length;
+        var html = bookChipHtml(allOn, 'data-lv-sig-all="1"', esc(t("lv.all")));
+        (lvSyms || []).slice(0, 12).forEach(function (s) {
+            var on = picked.indexOf(s) >= 0;
+            html += bookChipHtml(on, 'data-lv-sig-sym="' + esc(s) + '"',
+                                 esc(String(s).replace("_USDT", "")));
+        });
+        return html;
+    }
+
+    function bindLevelSignal(board) {
+        var sw = $("lv-tg");
+        if (sw && !sw._lvBound) {
+            sw._lvBound = true;
+            sw.onclick = function (e) {
+                e.preventDefault();
+                lvSigSet({ notify: !lvSigCfg().notify });
+            };
+        }
+        board.querySelectorAll("[data-lv-sig-mass]").forEach(function (b) {
+            b.onclick = function () {
+                lvSigSet({ min_usd: Number(b.getAttribute("data-lv-sig-mass")) || 0 });
+            };
+        });
+        board.querySelectorAll("[data-lv-sig-dist]").forEach(function (b) {
+            b.onclick = function () {
+                lvSigSet({ approach_pct: Number(b.getAttribute("data-lv-sig-dist")) || 0.5 });
+            };
+        });
+        board.querySelectorAll("[data-lv-sig-side]").forEach(function (b) {
+            b.onclick = function () {
+                lvSigSet({ side: b.getAttribute("data-lv-sig-side") || "both" });
+            };
+        });
+        board.querySelectorAll("[data-lv-sig-pause]").forEach(function (b) {
+            b.onclick = function () {
+                lvSigSet({ cooldown_min: Number(b.getAttribute("data-lv-sig-pause")) || 60 });
+            };
+        });
+        board.querySelectorAll("[data-lv-sig-all]").forEach(function (b) {
+            b.onclick = function () { lvSigSet({ symbols: [] }); };
+        });
+        board.querySelectorAll("[data-lv-sig-sym]").forEach(function (b) {
+            b.onclick = function () {
+                var s = b.getAttribute("data-lv-sig-sym");
+                var cur = (lvSigCfg().symbols || []).slice();
+                var i = cur.indexOf(s);
+                if (i >= 0) cur.splice(i, 1);
+                else {
+                    if (cur.length >= 8) {
+                        var st = $("lv-sig-status");
+                        if (st) st.textContent = t("lv.sig_limit");
+                        return;
+                    }
+                    cur.push(s);
+                }
+                lvSigSet({ symbols: cur });
+            };
+        });
+    }
+
+    function applyLevelSignalState() {
+        var board = $("levels-board");
+        if (!board) return;
+        var cfg = lvSigCfg();
+        var sw = $("lv-tg");
+        if (sw) {
+            sw.classList.toggle("on", !!cfg.notify);
+            var span = sw.querySelector("span");
+            if (span) span.textContent = cfg.notify ? t("lv.tg_on") : t("lv.tg_off");
+        }
+        var note = $("lv-sig-note");
+        if (note) note.textContent = t("lv.sig_note");
+        var title = $("lv-sig-title");
+        if (title) title.textContent = t("lv.sig_title");
+        ["mass", "dist", "side", "pause"].forEach(function (name) {
+            var lab = $("lv-sig-" + name + "-lab");
+            if (!lab) return;
+            lab.textContent = t(name === "mass" ? "lv.sig_mass"
+                : name === "dist" ? "lv.sig_dist"
+                : name === "side" ? "lv.sig_side" : "lv.sig_pause");
+        });
+        var coinsLab = $("lv-sig-coins-lab");
+        if (coinsLab) coinsLab.textContent = t("lv.sig_coins");
+        board.querySelectorAll("[data-lv-sig-mass]").forEach(function (b) {
+            b.classList.toggle("on", Math.abs((Number(cfg.min_usd) || 0) -
+                Number(b.getAttribute("data-lv-sig-mass"))) < 1);
+        });
+        board.querySelectorAll("[data-lv-sig-dist]").forEach(function (b) {
+            b.classList.toggle("on", Math.abs((Number(cfg.approach_pct) || 0) -
+                Number(b.getAttribute("data-lv-sig-dist"))) < 0.05);
+        });
+        board.querySelectorAll("[data-lv-sig-side]").forEach(function (b) {
+            b.classList.toggle("on", (cfg.side || "both") === b.getAttribute("data-lv-sig-side"));
+        });
+        board.querySelectorAll("[data-lv-sig-pause]").forEach(function (b) {
+            b.classList.toggle("on", Number(cfg.cooldown_min) ===
+                Number(b.getAttribute("data-lv-sig-pause")));
+        });
+        var coins = $("lv-sig-coins");
+        if (coins) coins.innerHTML = lvSigCoinsHtml(cfg);
+        bindLevelSignal(board);
+    }
+
+    function lvSignalHtml() {
+        var cfg = lvSigCfg();
+        function chips(list, attr, fmt) {
+            return list.map(function (v) {
+                return bookChipHtml(false, attr + '="' + v + '"', fmt(v));
+            }).join("");
+        }
+        return '<div class="lv-signal" id="lv-signal">' +
+            '<div class="bk-head">' +
+            '<span class="lv-cap" id="lv-sig-title">' + esc(t("lv.sig_title")) + "</span>" +
+            '<label class="al-switch' + (cfg.notify ? " on" : "") + '" id="lv-tg">' +
+            "<i></i><span>" + esc(cfg.notify ? t("lv.tg_on") : t("lv.tg_off")) + "</span></label>" +
+            '<span class="bk-status" id="lv-sig-status"></span></div>' +
+            '<div class="lv-sub" id="lv-sig-note">' + esc(t("lv.sig_note")) + "</div>" +
+            '<div class="al-label" id="lv-sig-mass-lab">' + esc(t("lv.sig_mass")) + "</div>" +
+            '<div class="al-chips" id="lv-sig-mass">' +
+            chips(LV_SIG_MASS, "data-lv-sig-mass", alMoney) + "</div>" +
+            '<div class="al-label" id="lv-sig-dist-lab">' + esc(t("lv.sig_dist")) + "</div>" +
+            '<div class="al-chips" id="lv-sig-dist">' +
+            chips(LV_SIG_DIST, "data-lv-sig-dist", function (v) { return v + "%"; }) + "</div>" +
+            '<div class="al-label" id="lv-sig-side-lab">' + esc(t("lv.sig_side")) + "</div>" +
+            '<div class="al-chips" id="lv-sig-side">' +
+            bookChipHtml(false, 'data-lv-sig-side="both"', esc(t("lv.side_both"))) +
+            bookChipHtml(false, 'data-lv-sig-side="long"', esc(t("lv.card_long"))) +
+            bookChipHtml(false, 'data-lv-sig-side="short"', esc(t("lv.card_short"))) +
+            "</div>" +
+            '<div class="al-label" id="lv-sig-pause-lab">' + esc(t("lv.sig_pause")) + "</div>" +
+            '<div class="al-chips" id="lv-sig-pause">' +
+            chips(LV_SIG_PAUSE, "data-lv-sig-pause", alWin) + "</div>" +
+            '<div class="al-label" id="lv-sig-coins-lab">' + esc(t("lv.sig_coins")) + "</div>" +
+            '<div class="al-chips" id="lv-sig-coins">' + lvSigCoinsHtml(cfg) + "</div></div>";
     }
 
     function bootLevels() {
         if (!$("levels-board")) return;
         lvBuilt = false;
+        loadLevelSignal();
         loadLevels(true);
         if (lvTimer) clearInterval(lvTimer);
         lvTimer = setInterval(function () {
             if (!document.hidden && $("levels-board") &&
                     $("levels-board").offsetParent !== null) loadLevels(false);
         }, 30000);
+        if (window.LiqScopeI18n && LiqScopeI18n.onChange && !window._lvLangHook) {
+            window._lvLangHook = true;
+            LiqScopeI18n.onChange(function () {
+                lvBuilt = false;
+                if ($("levels-board") && lvData) paintLevels(lvData);
+            });
+        }
     }
 
     function loadLevels() {
@@ -1027,6 +1228,245 @@
                 : "") + "</span></div>";
     }
 
+    function lvPriceKey(p) {
+        var n = Number(p);
+        if (!isFinite(n)) return "";
+        return String(Math.round(n * 1e8) / 1e8);
+    }
+
+    function lvSideOf(r) {
+        var side = String((r && r.side) || "");
+        if (side === "short" || side === "long") return side;
+        return Number(r && r.long_usd) >= Number(r && r.short_usd) ? "long" : "short";
+    }
+
+    function lvVisibleRows(d) {
+        var rows = ((d && d.levels) || []).filter(function (r) { return Number(r.usd) > 0; });
+        if (lvView.side === "long" || lvView.side === "short") {
+            rows = rows.filter(function (r) { return lvSideOf(r) === lvView.side; });
+        }
+        return rows;
+    }
+
+    function lvMagnetKeys(d) {
+        var out = {};
+        var m = (d && d.magnets) || {};
+        ["up", "down", "top_up", "top_down"].forEach(function (k) {
+            if (m[k] && m[k].price) out[lvPriceKey(m[k].price)] = true;
+        });
+        return out;
+    }
+
+    function lvBindBoard(board) {
+        if (!board || board._lvBound) return;
+        board._lvBound = true;
+        board.addEventListener("click", function (e) {
+            var tEl = e.target && e.target.closest ? e.target : null;
+            if (!tEl || !tEl.closest) return;
+            var open = tEl.closest("#lv-open");
+            if (open && board.contains(open)) {
+                try {
+                    if (lvCfg.symbol) localStorage.setItem("liqscope.chartSymbol", lvCfg.symbol);
+                    localStorage.setItem("liqscope.levelsEnabled", "1");
+                } catch (err) { /* график откроется на прошлой монете */ }
+                return;
+            }
+            var modeBtn = tEl.closest("[data-lv-mode]");
+            if (modeBtn && board.contains(modeBtn)) {
+                lvView.mode = modeBtn.getAttribute("data-lv-mode") === "cum" ? "cum" : "mass";
+                lvSave();
+                if (lvData) paintLevels(lvData);
+                return;
+            }
+            var sideBtn = tEl.closest("[data-lv-side]");
+            if (sideBtn && board.contains(sideBtn)) {
+                var side = sideBtn.getAttribute("data-lv-side") || "all";
+                lvView.side = side === "long" || side === "short" ? side : "all";
+                lvSave();
+                if (lvData) paintLevels(lvData);
+                return;
+            }
+            var step = tEl.closest(".lv-step");
+            if (step && board.contains(step)) {
+                var key = step.getAttribute("data-lv-price") || "";
+                lvView.focus = lvView.focus === key ? "" : key;
+                if (lvData) paintLevels(lvData);
+                return;
+            }
+            var row = tEl.closest(".lv-row");
+            if (row && board.contains(row) && !row.classList.contains("lv-head")) {
+                var rk = row.getAttribute("data-lv-price") || "";
+                lvView.focus = lvView.focus === rk ? "" : rk;
+                if (lvData) paintLevels(lvData);
+            }
+        });
+    }
+
+    function lvBalanceHtml(d) {
+        var L = Number(d.long_usd) || 0, S = Number(d.short_usd) || 0, tot = L + S;
+        if (!(tot > 0)) return "";
+        var lp = Math.max(4, Math.min(96, Math.round(L / tot * 100)));
+        var sp = 100 - lp;
+        return '<div class="lv-bal">' +
+            '<div class="lv-bal-bar" title="' + esc(t("lv.card_long")) + " " + esc(alMoney(L)) +
+                " · " + esc(t("lv.card_short")) + " " + esc(alMoney(S)) + '">' +
+              '<span class="l" style="width:' + lp + '%">' +
+                (lp >= 16 ? esc(t("lv.card_long")) + " " + lp + "%" : "") + "</span>" +
+              '<span class="s" style="width:' + sp + '%">' +
+                (sp >= 16 ? esc(t("lv.card_short")) + " " + sp + "%" : "") + "</span>" +
+            "</div>" +
+            '<div class="lv-bal-meta"><span>' + esc(t("lv.balance")) + "</span>" +
+            "<span>" + esc(alMoney(L)) + " / " + esc(alMoney(S)) + "</span></div></div>";
+    }
+
+    function lvLadderHtml(rows, price, d) {
+        if (!rows.length || !(price > 0)) {
+            return '<div class="lv-empty">' + esc(t("lv.empty")) + "</div>";
+        }
+        var above = [], below = [];
+        rows.forEach(function (r) {
+            if (Number(r.price) >= price) above.push(r);
+            else below.push(r);
+        });
+        above.sort(function (a, b) { return Number(a.price) - Number(b.price); });
+        below.sort(function (a, b) { return Number(b.price) - Number(a.price); });
+        var keep = {};
+        above.slice(0, 18).concat(below.slice(0, 18)).forEach(function (r) {
+            keep[lvPriceKey(r.price)] = r;
+        });
+        var mags = lvMagnetKeys(d);
+        rows.forEach(function (r) {
+            var key = lvPriceKey(r.price);
+            if (mags[key] || key === lvView.focus) keep[key] = r;
+        });
+        var list = Object.keys(keep).map(function (k) { return keep[k]; });
+        list.sort(function (a, b) { return Number(b.price) - Number(a.price); });
+        var maxV = 1;
+        list.forEach(function (r) {
+            var v = lvView.mode === "cum" ? (Number(r.cum_usd) || 0) : (Number(r.usd) || 0);
+            if (v > maxV) maxV = v;
+        });
+        var html = "";
+        var passed = false;
+        list.forEach(function (r) {
+            if (!passed && Number(r.price) < price) {
+                html += '<div class="lv-nowline"><i></i><span>' + esc(t("lv.now")) + " " +
+                    lvPrice(price) + "</span><i></i></div>";
+                passed = true;
+            }
+            html += lvStepHtml(r, maxV, mags);
+        });
+        if (!passed) {
+            html += '<div class="lv-nowline"><i></i><span>' + esc(t("lv.now")) + " " +
+                lvPrice(price) + "</span><i></i></div>";
+        }
+        return html;
+    }
+
+    function lvStepHtml(r, maxV, mags) {
+        var lp = Number(r.price);
+        var side = lvSideOf(r);
+        var val = lvView.mode === "cum" ? (Number(r.cum_usd) || 0) : (Number(r.usd) || 0);
+        var pct = Math.max(3, Math.min(100, Math.round(val / maxV * 100)));
+        var key = lvPriceKey(lp);
+        var dist = Number(r.distance_pct) || 0;
+        var tip = lvPrice(lp) + " · " + t("lv.h_usd") + " " + alMoney(r.usd || 0) +
+            " · " + t("lv.h_cum") + " " + alMoney(r.cum_usd || 0) +
+            (r.lev ? " · ~" + Math.round(Number(r.lev)) + "x" : "") +
+            " · " + (dist > 0 ? "+" : "") + alNum2(dist) + "%";
+        return '<button type="button" class="lv-step ' + side +
+            (lvView.focus === key ? " on" : "") + (mags[key] ? " magnet" : "") +
+            '" data-lv-price="' + esc(key) + '" title="' + esc(tip) + '">' +
+            '<span class="lv-step-p">' + lvPrice(lp) + "</span>" +
+            '<span class="lv-track"><i style="width:' + pct + '%"></i></span>' +
+            '<span class="lv-step-u">' + esc(alMoney(val)) + "</span></button>";
+    }
+
+    function lvLevHtml(rows) {
+        var buckets = {};
+        rows.forEach(function (r) {
+            var lev = Math.round(Number(r.lev) || 0);
+            if (!(lev > 1)) return;
+            buckets[lev] = (buckets[lev] || 0) + (Number(r.usd) || 0);
+        });
+        var keys = Object.keys(buckets).map(Number).sort(function (a, b) { return a - b; });
+        if (!keys.length) return '<div class="lv-muted">' + esc(t("lv.mag_none")) + "</div>";
+        var max = 1;
+        keys.forEach(function (k) { if (buckets[k] > max) max = buckets[k]; });
+        return '<div class="lv-levbars">' + keys.map(function (k) {
+            var pct = Math.max(4, Math.round(buckets[k] / max * 100));
+            return '<div class="lv-lev" title="' + k + "x · " + esc(alMoney(buckets[k])) + '">' +
+                "<span>" + k + "x</span>" +
+                '<b><i style="width:' + pct + '%"></i></b>' +
+                "<em>" + esc(alMoney(buckets[k])) + "</em></div>";
+        }).join("") + "</div>";
+    }
+
+    function lvFocusHtml(rows) {
+        if (!lvView.focus) return "";
+        var r = null;
+        for (var i = 0; i < rows.length; i++) {
+            if (lvPriceKey(rows[i].price) === lvView.focus) { r = rows[i]; break; }
+        }
+        if (!r) return "";
+        var dist = Number(r.distance_pct) || 0;
+        var side = lvSideOf(r);
+        return '<div class="lv-focus-card ' + side + '">' +
+            "<b>" + lvPrice(r.price) + "</b>" +
+            "<span>" + esc(side === "short" ? t("lv.card_short") : t("lv.card_long")) +
+            (r.lev ? " · ~" + Math.round(Number(r.lev)) + "x" : "") +
+            " · " + (dist > 0 ? "+" : "") + alNum2(dist) + "%</span>" +
+            "<span>" + esc(t("lv.h_usd")) + " " + esc(alMoney(r.usd || 0)) +
+            " · " + esc(t("lv.h_share")) + " " + alNum2(r.share || 0) + "%</span>" +
+            "<span>" + esc(t("lv.h_cum")) + " " + esc(alMoney(r.cum_usd || 0)) + "</span></div>";
+    }
+
+    function lvPaintViz(d) {
+        var board = $("levels-board");
+        if (!board) return;
+        var price = Number(d.price) || 0;
+        var rows = lvVisibleRows(d);
+        board.querySelectorAll("[data-lv-mode]").forEach(function (b) {
+            b.classList.toggle("on", b.getAttribute("data-lv-mode") === lvView.mode);
+        });
+        board.querySelectorAll("[data-lv-side]").forEach(function (b) {
+            b.classList.toggle("on", b.getAttribute("data-lv-side") === lvView.side);
+        });
+        var title = $("lv-ladder-title");
+        if (title) title.textContent = t("lv.ladder");
+        var hint = $("lv-mode-hint");
+        if (hint) hint.textContent = t(lvView.mode === "cum" ? "lv.mode_cum_hint" : "lv.mode_mass_hint");
+        var levTitle = $("lv-lev-title");
+        if (levTitle) levTitle.textContent = t("lv.lev_hist");
+        var open = $("lv-open");
+        if (open) open.textContent = t("lv.open_chart");
+        var bal = $("lv-balance");
+        if (bal) bal.innerHTML = lvBalanceHtml(d);
+        var ladder = $("lv-ladder");
+        if (ladder) {
+            var keepScroll = lvView.scrollSym === lvCfg.symbol ? ladder.scrollTop : -1;
+            ladder.innerHTML = price ? lvLadderHtml(rows, price, d) : "";
+            if (keepScroll >= 0) {
+                ladder.scrollTop = keepScroll;
+            } else if (price) {
+                var now = ladder.querySelector(".lv-nowline");
+                if (now) {
+                    ladder.scrollTop = Math.max(0, now.offsetTop - ladder.clientHeight / 2);
+                }
+                lvView.scrollSym = lvCfg.symbol;
+            }
+        }
+        var focus = $("lv-focus");
+        if (focus) focus.innerHTML = lvFocusHtml(rows);
+        var lev = $("lv-levhist");
+        if (lev) lev.innerHTML = rows.length ? lvLevHtml(rows) : "";
+        var how = $("lv-how");
+        if (how) {
+            how.innerHTML = '<div class="lv-how-title">' + esc(t("lv.chart_how_title")) + "</div>" +
+                "<p>" + esc(t("lv.chart_how")) + "</p>";
+        }
+    }
+
     function alNum2(v) {
         var n = Number(v);
         if (!isFinite(n)) return "0";
@@ -1055,14 +1495,38 @@
                 esc(t("lv.badge")) + "</span>" +
                 '<span class="bk-status" id="lv-status"></span></div>' +
                 '<div class="lv-sub">' + esc(t("lv.about")) + "</div>" +
+                lvSignalHtml() +
                 '<div class="al-label">' + esc(t("lv.coin")) + "</div>" +
                 '<div class="lv-symrow"><select id="lv-sym" class="lv-select"></select></div>' +
                 '<div class="al-label">' + esc(t("lv.cut")) + '</div><div class="al-chips" id="lv-thr">' + thr + "</div>" +
                 '<div class="al-label">' + esc(t("lv.window")) + '</div><div class="al-chips" id="lv-win">' + win + "</div>" +
                 '<div class="lv-cards" id="lv-cards"></div>' +
                 '<div class="lv-mags" id="lv-mags"></div>' +
-                '<div class="lv-table-wrap" id="lv-table"></div>' +
+                '<div class="lv-balance" id="lv-balance"></div>' +
+                '<div class="lv-vizhead">' +
+                    '<span class="lv-cap" id="lv-ladder-title"></span>' +
+                    '<div class="lv-modes" id="lv-modes">' +
+                        bookChipHtml(lvView.mode === "mass", 'data-lv-mode="mass"', esc(t("lv.h_usd"))) +
+                        bookChipHtml(lvView.mode === "cum", 'data-lv-mode="cum"', esc(t("lv.h_cum"))) +
+                        '<span class="lv-modes-gap"></span>' +
+                        bookChipHtml(lvView.side === "all", 'data-lv-side="all"', esc(t("lv.all"))) +
+                        bookChipHtml(lvView.side === "long", 'data-lv-side="long"', esc(t("lv.card_long"))) +
+                        bookChipHtml(lvView.side === "short", 'data-lv-side="short"', esc(t("lv.card_short"))) +
+                    "</div></div>" +
+                '<div class="lv-mode-hint" id="lv-mode-hint"></div>' +
+                '<div class="lv-ladder" id="lv-ladder"></div>' +
+                '<div class="lv-focus" id="lv-focus"></div>' +
+                '<div class="lv-split">' +
+                    '<div><div class="lv-vizhead"><span class="lv-cap" id="lv-lev-title"></span></div>' +
+                    '<div class="lv-levhist" id="lv-levhist"></div></div>' +
+                    '<div class="lv-table-wrap" id="lv-table"></div>' +
+                "</div>" +
+                '<div class="lv-vizhead"><a class="lv-open" id="lv-open" href="/terminal"></a></div>' +
+                '<div class="lv-how" id="lv-how"></div>' +
                 '<div class="lv-notes" id="lv-notes"></div>';
+            lvBindBoard(board);
+            bindLevelSignal(board);
+            applyLevelSignalState();
             var sel = $("lv-sym");
             if (sel) {
                 sel.addEventListener("change", function () {
@@ -1139,7 +1603,7 @@
         }
         var table = $("lv-table");
         if (table) {
-            var rows = (d.levels || []).slice();
+            var rows = lvVisibleRows(d);
             if (!rows.length) {
                 table.innerHTML = '<div class="cor-flow-empty">' +
                     esc(d.enabled === false ? t("lv.off") : t("lv.empty")) + "</div>";
@@ -1148,8 +1612,11 @@
                     return Math.abs(Number(a.price) - price) - Math.abs(Number(b.price) - price);
                 });
                 rows = rows.slice(0, 24);
-                var maxCum = 1;
-                rows.forEach(function (r) { maxCum = Math.max(maxCum, Number(r.cum_usd) || 0); });
+                var maxCum = 1, maxUsd = 1;
+                rows.forEach(function (r) {
+                    maxCum = Math.max(maxCum, Number(r.cum_usd) || 0);
+                    maxUsd = Math.max(maxUsd, Number(r.usd) || 0);
+                });
                 var head = '<div class="lv-row lv-head">' +
                     ["lv.h_price", "lv.h_usd", "lv.h_share", "lv.h_lev",
                      "lv.h_dist", "lv.h_cum"].map(function (k) {
@@ -1160,13 +1627,18 @@
                 table.innerHTML = head + rows.map(function (r) {
                     var lp = Number(r.price);
                     var dist = Number(r.distance_pct) || 0;
-                    var side = String(r.side || "");
-                    var cls = side === "short" ? "short" : side === "long" ? "long" : "both";
+                    var side = lvSideOf(r);
+                    var cls = side === "short" ? "short" : "long";
+                    var key = lvPriceKey(lp);
                     var cum = Math.max(0, Math.min(100, Math.round(
                         (Number(r.cum_usd) || 0) / maxCum * 100)));
-                    return '<div class="lv-row ' + cls + '">' +
+                    var mass = Math.max(4, Math.min(100, Math.round(
+                        (Number(r.usd) || 0) / maxUsd * 100)));
+                    return '<div class="lv-row ' + cls + (lvView.focus === key ? " on" : "") +
+                        '" data-lv-price="' + esc(key) + '">' +
                         '<span class="lv-p">' + lvPrice(lp) + "</span>" +
-                        '<span class="lv-u">' + esc(alMoney(r.usd || 0)) + "</span>" +
+                        '<span class="lv-u">' + esc(alMoney(r.usd || 0)) +
+                            '<i class="lv-mini" style="width:' + mass + '%"></i></span>' +
                         '<span class="lv-s">' + alNum2(r.share || 0) + "%</span>" +
                         '<span class="lv-l">' + (r.lev ? "~" + Math.round(Number(r.lev)) + "x" : "—") + "</span>" +
                         '<span class="lv-d">' + (dist > 0 ? "+" : "") + alNum2(dist) + "%</span>" +
@@ -1174,6 +1646,7 @@
                 }).join("");
             }
         }
+        lvPaintViz(d);
         var notesEl = $("lv-notes");
         if (notesEl) {
             var cov2 = d.coverage || {};

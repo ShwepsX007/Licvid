@@ -30,6 +30,21 @@ THRESHOLD_PRESETS_LEVEL = (100_000, 500_000, 1_000_000, 5_000_000, 20_000_000)
 #: Насколько близко цена должна подойти к уровню, чтобы это был «подход».
 #: Полпроцента: ближе — уже событие, дальше — просто соседняя цена.
 LEVEL_APPROACH_REL = 0.005
+#: Сигнал сервиса «Уровни ликвидаций» в кабинете. Это не метрика алертов по
+#: объёму: свой тумблер Telegram и свои фильтры, чтобы их не искать в другом
+#: сервисе. approach_pct — проценты (0.5 = полпроцента), не доля.
+LEVEL_SIGNAL_MASS = (100_000, 500_000, 1_000_000, 5_000_000, 20_000_000)
+LEVEL_SIGNAL_APPROACH = (0.3, 0.5, 1.0, 2.0)
+LEVEL_SIGNAL_COOLDOWN = (15, 30, 60, 240)
+LEVEL_SIGNAL_SIDES = ("both", "long", "short")
+DEFAULT_LEVEL_SIGNAL: Dict[str, Any] = {
+    "notify": False,
+    "min_usd": 1_000_000,
+    "approach_pct": 0.5,
+    "side": "both",
+    "symbols": [],
+    "cooldown_min": 60,
+}
 
 # Окна агрегации: ровно пять кнопок — и в боте, и в кабинете (в кабинете
 # они в одну строку, шестая кнопка ломала раскладку). Пятёрка больше не
@@ -869,6 +884,89 @@ def live_snapshot(cfg: Dict[str, Any], market: Dict[str, Any],
     out["symbol"] = cfg["symbol"]
     out["coins"] = dict(syms)
     return out
+
+
+def normalize_level_signal(raw: Any) -> Dict[str, Any]:
+    """Настройки сигнала расчётных уровней: Telegram и фильтры кабинета.
+
+    Пустой список монет — все, которые сервер уже посчитал. Чужие ключи
+    отбрасываем: в конфиг сервиса их кладёт сайт.
+    """
+    src = raw if isinstance(raw, dict) else {}
+    notify = src.get("notify")
+    if notify is None:
+        notify = False
+    try:
+        mass = float(src.get("min_usd") if src.get("min_usd") is not None
+                     else DEFAULT_LEVEL_SIGNAL["min_usd"])
+    except (TypeError, ValueError):
+        mass = float(DEFAULT_LEVEL_SIGNAL["min_usd"])
+    mass = max(0.0, mass)
+    try:
+        approach = float(src.get("approach_pct")
+                         if src.get("approach_pct") is not None
+                         else DEFAULT_LEVEL_SIGNAL["approach_pct"])
+    except (TypeError, ValueError):
+        approach = float(DEFAULT_LEVEL_SIGNAL["approach_pct"])
+    approach = max(0.1, min(approach, 5.0))
+    side = str(src.get("side") or "both").lower()
+    if side not in LEVEL_SIGNAL_SIDES:
+        side = "both"
+    symbols: List[str] = []
+    given = src.get("symbols") or []
+    if isinstance(given, str):
+        given = [given]
+    if isinstance(given, (list, tuple)):
+        for item in list(given)[:8]:
+            sym = canon_symbol(str(item or ""))
+            if sym and "_" not in sym and sym != "ALL":
+                sym = sym + "_USDT"
+            if sym and sym != "ALL" and sym not in symbols:
+                symbols.append(sym)
+    cool = window_minutes(src.get("cooldown_min")
+                          if src.get("cooldown_min") is not None
+                          else DEFAULT_LEVEL_SIGNAL["cooldown_min"])
+    return {
+        "notify": bool(notify),
+        "min_usd": mass,
+        "approach_pct": approach,
+        "side": side,
+        "symbols": symbols,
+        "cooldown_min": cool,
+    }
+
+
+def level_signal_presets() -> Dict[str, Any]:
+    return {
+        "mass": list(LEVEL_SIGNAL_MASS),
+        "approach_pct": list(LEVEL_SIGNAL_APPROACH),
+        "cooldown_min": list(LEVEL_SIGNAL_COOLDOWN),
+        "sides": list(LEVEL_SIGNAL_SIDES),
+    }
+
+
+def level_signal_hits(market: Dict[str, Any], cfg: Dict[str, Any],
+                      limit: int = 3) -> List[dict]:
+    """Подход цены к магниту по фильтрам сервиса, не по алертам объёма."""
+    cfg = normalize_level_signal(cfg)
+    rel = float(cfg["approach_pct"]) / 100.0
+    coins = cfg["symbols"] or ["ALL"]
+    hits: List[dict] = []
+    seen = set()
+    for coin in coins:
+        for hit in level_hits(market, cfg["min_usd"], coin, limit=limit,
+                              approach_rel=rel, window_min=cfg["cooldown_min"]):
+            if cfg["side"] in ("long", "short") and hit.get("level_side") != cfg["side"]:
+                continue
+            mark = (hit.get("symbol"), round(_num(hit.get("level_price")), 8))
+            if mark in seen:
+                continue
+            seen.add(mark)
+            hit = dict(hit)
+            hit["cooldown_min"] = cfg["cooldown_min"]
+            hits.append(hit)
+    hits.sort(key=lambda h: -abs(_num(h.get("value"))))
+    return hits[:max(1, int(limit))]
 
 
 def level_hits(market: Dict[str, Any], threshold: float, coin: str = "ALL",

@@ -50,6 +50,7 @@
 <main class="wrap">
     <h1 class="page-title" data-i18n="seo.admin.h1">Панель управления</h1>
     <p class="lead">Сайт, бот и пользователи. Те же цифры доступны командами /admin в Telegram.</p>
+    <p class="lead"><a class="btn btn-small" href="#archive-admin">Удалить плохой дайджест или сводку</a></p>
 
     <div class="grid grid-4" style="margin-top:22px">
         <div class="card"><span class="stat-value" id="st-users">—</span><span class="stat-label">Пользователей</span></div>
@@ -522,11 +523,14 @@
          data-hint="старые выпуски: убрать со сайта и из Telegram"
          data-i18n-skip>
         <h3>🗂 Архив — удаление старых выпусков</h3>
-        <p class="lead">Здесь снимают уже вышедшее: <b>выпуск дня</b> уходит со страницы
-            <code>/digest</code>, <b>сводки по часам</b> — со <code>/hourly</code>. Если галочка
-            «и из Telegram» стоит, тем же действием удаляются и посты в каналах: id сообщений бот
-            запоминает при публикации. У выпусков, вышедших до этой версии, id не сохранялись —
-            такие посты в Telegram придётся убрать вручную.</p>
+        <p class="lead">Здесь снимают уже вышедшее и пустые черновики: <b>выпуск дня</b> уходит со страницы
+            <code>/digest</code>, <b>сводки по часам</b> — со <code>/hourly</code>. Черновик после
+            перезагрузки — это не пост в Telegram: сайт собрал сутки из архива и пометил их так,
+            потому что в канал они не уходили. Удаление снимает и такие записи — они не вернутся.
+            Если галочка «и из Telegram» стоит, тем же действием удаляются и посты в каналах: id
+            сообщений бот запоминает при публикации. У выпусков, вышедших до этой версии, id не
+            сохранялись — такие посты в Telegram придётся убрать вручную. Те же кнопки есть на
+            самих страницах <code>/digest</code> и <code>/hourly</code>, если вы вошли как админ.</p>
         <div class="row-actions" style="margin-top:12px">
             <label class="meta"><input type="checkbox" id="arc-tg" checked> 🗑 Удалять и вышедшие посты в Telegram</label>
             <button class="btn" id="arc-reload" type="button">🔄 Обновить архив</button>
@@ -597,7 +601,7 @@
 <script src="/static/presence.js?v=geo2"></script>
 <script src="/static/account.js?v=nav2"></script>
 <script src="/static/articles_admin.js?v=art1"></script>
-<script src="/static/archive_admin.js?v=arc1"></script>
+<script src="/static/archive_admin.js?v=arcdel1"></script>
 <script src="/static/consent.js?v=consent1"></script>
 <link rel="stylesheet" href="/static/brand.css?v=rebrand1">
 </body>

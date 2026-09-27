@@ -221,6 +221,8 @@
 
     // Хит-тест прямоугольников: координаты и ids событий из последнего drawClusters()
     let clusterHits = [];         // [{kind:"liq", x, y, w, h, key, ids:[...]}]
+    let levelHits = [];           // шкала расчётных уровней: хиты только в своей колонке
+    let levelColL = Infinity, levelColR = -1;
     let hoverHitKey = null;       // прямоугольник под курсором (наведение)
     let pinHitKey = null;         // прямоугольник, закреплённый кликом/тапом
     // Хит-тест фигур CVD/OI: круги из последнего drawClusters()
@@ -809,9 +811,112 @@
         } catch (e) { return null; }
     }
 
-    // Полоса кумулятива справа + подпись у магнитов. Полосы — накопленная масса
-    // чужих выходов «по дороге» к цене: чем шире, тем больше снесёт.
+    // Ширина правой шкалы цены в пикселях холста. Берём большее из API и ячейки
+    // DOM и округляем вверх: лучше зазор в пиксель, чем полоса поверх цифр цены.
+    function priceAxisWidthPx() {
+        const W = clusterCanvas ? (clusterCanvas.width || 0) : 0;
+        const cssW = clusterCanvas ? (clusterCanvas.clientWidth || W) : W;
+        let api = 0, dom = 0;
+        try {
+            const sc = chart && chart.priceScale ? chart.priceScale("right") : null;
+            if (sc && typeof sc.width === "function") api = Number(sc.width()) || 0;
+        } catch (e) { api = 0; }
+        const host = $("tv-chart-container");
+        if (host) {
+            const row = host.querySelector("table tr");
+            if (row && row.children && row.children.length >= 2) {
+                const cell = row.children[row.children.length - 1];
+                const rw = cell.getBoundingClientRect ? cell.getBoundingClientRect().width : 0;
+                if (rw > 8) dom = rw;
+            }
+        }
+        let w = Math.max(api, dom);
+        if (!(w > 12) || (cssW > 0 && w > cssW * 0.45)) w = 68;
+        const kx = cssW > 0 ? W / cssW : 1;
+        return Math.min(Math.ceil(w * (kx > 0 ? kx : 1)), Math.max(48, W * 0.5));
+    }
+
+    function timeAxisHeightPx() {
+        const H = clusterCanvas ? (clusterCanvas.height || 0) : 0;
+        const cssH = clusterCanvas ? (clusterCanvas.clientHeight || H) : H;
+        let h = 0;
+        try {
+            const ts = chart && chart.timeScale ? chart.timeScale() : null;
+            if (ts && typeof ts.height === "function") h = Number(ts.height()) || 0;
+        } catch (e) { h = 0; }
+        if (!(h > 8)) {
+            const host = $("tv-chart-container");
+            if (host) {
+                const rows = host.querySelectorAll("table tr");
+                if (rows.length >= 2) {
+                    const rh = rows[rows.length - 1].getBoundingClientRect().height;
+                    if (rh > 8) h = rh;
+                }
+            }
+        }
+        if (!(h > 8)) h = 26;
+        const ky = cssH > 0 ? H / cssH : 1;
+        return Math.min(Math.ceil(h * (ky > 0 ? ky : 1)), Math.max(20, H * 0.45));
+    }
+
+    // Колонка расчётных уровней: правый край вплотную к шкале цены, левый —
+    // внутри поля свечей. Ничего из колонки не рисуется поверх цифр цены.
+    function levelsPlotBox() {
+        const W = clusterCanvas.width, H = clusterCanvas.height;
+        const axis = priceAxisWidthPx();
+        const timeH = timeAxisHeightPx();
+        const plotRight = Math.max(48, W - axis);
+        const plotBottom = Math.max(40, H - timeH);
+        let colW = Math.round(Math.max(68, Math.min(116, plotRight * 0.15)));
+        if (colW > plotRight * 0.42) colW = Math.round(plotRight * 0.42);
+        return { plotRight: plotRight, plotBottom: plotBottom, colW: colW, xL: plotRight - colW };
+    }
+
+    function levelsCaption() {
+        return String(I18n.t("chart.levels_est") || "")
+            .replace(/🎯\s*/g, "").trim();
+    }
+
+    // Ещё не сработавший лонг стоит только ниже живой цены, шорт — только выше.
+    // Сторону берём по положению и по row.side, а не по тому, какой массы больше:
+    // размазанный вход иначе рисует лонг над шортом и шорт под ценой.
+    function pendingLevelSide(row, live) {
+        const px = Number(row && row.price);
+        let long = Number(row && row.long_usd) || 0;
+        let short = Number(row && row.short_usd) || 0;
+        const side = String((row && row.side) || "").toLowerCase();
+        if (!(long > 0) && !(short > 0)) {
+            const usd = Number(row && row.usd) || 0;
+            if (side === "long" || side === "sell") long = usd;
+            else if (side === "short" || side === "buy") short = usd;
+            else if (live && px < live) long = usd;
+            else if (live && px > live) short = usd;
+        }
+        if (live && isFinite(px)) {
+            if (px >= live) long = 0;
+            if (px <= live) short = 0;
+        }
+        if ((side === "long" || side === "sell") && live && px >= live) return null;
+        if ((side === "short" || side === "buy") && live && px <= live) return null;
+        if (!(long > 0) && !(short > 0)) return null;
+        let isLong;
+        if (live && px > live) isLong = false;
+        else if (live && px < live) isLong = true;
+        else if (side === "short" || side === "buy") isLong = false;
+        else if (side === "long" || side === "sell") isLong = true;
+        else isLong = long > 0 && !(short > 0);
+        const usd = isLong ? long : short;
+        if (!(usd > 0)) return null;
+        return { long: isLong ? long : 0, short: isLong ? 0 : short, usd: usd, isLong: isLong };
+    }
+
+    // Шкала массы справа от свечей, встык со шкалой цены. Фона под полосами нет:
+    // колонка закрывала свечи. Длина полосы — ещё не сработавшая масса НА этой
+    // цене, ноль прижат к шкале цены.
     function drawLiqLevels(ctx) {
+        levelHits = [];
+        levelColL = Infinity;
+        levelColR = -1;
         const data = state.levelsData;
         if (!state.levelsEnabled || !data || data.enabled === false) return;
         if (!chart || !candleSeries || !clusterCanvas) return;
@@ -822,105 +927,161 @@
             .sort((a, b) => Number(b.usd) - Number(a.usd))
             .slice(0, LEVELS_MAX_ROWS)
             .sort((a, b) => Number(a.price) - Number(b.price));
-        let maxCum = 0;
-        chosen.forEach((r) => {
-            const cum = Number(r.cum_usd) || 0;
-            if (cum > maxCum) maxCum = cum;
-        });
-        if (!(maxCum > 0)) return;
-
         const magnets = new Map();
         ((data.magnets_list || [])).forEach((m) => {
             if (m && m.price) magnets.set(Number(m.price), m);
         });
-        const W = clusterCanvas.width, H = clusterCanvas.height;
-        const maxBar = Math.max(W * 0.2, 44);
-        let labelled = 0;
 
-        ctx.save();
-        ctx.textBaseline = "middle";
+        const box = levelsPlotBox();
+        const plotRight = box.plotRight, plotBottom = box.plotBottom;
+        const colW = box.colW, xL = box.xL;
+        const padTop = 30;
+        if (plotRight - xL < 24 || plotBottom < padTop + 8) return;
+
+        const live = Number(data.price) || levelsRefPrice();
+        const visible = [];
         chosen.forEach((row) => {
             const y = levelsY(row.price);
-            if (y === null || y < -6 || y > H + 6) return;
-            const long = Number(row.long_usd) || 0;
-            const short = Number(row.short_usd) || 0;
-            // сторона уровня: у лонгов масса ниже цены, у шортов — выше
-            const isLong = long >= short;
+            if (y === null || y < padTop || y > plotBottom - 2) return;
+            const pending = pendingLevelSide(row, live);
+            if (!pending) return;
+            visible.push({ row: row, y: y, pending: pending });
+        });
+        if (!visible.length) return;
+        let maxUsd = 0;
+        visible.forEach((v) => {
+            const usd = Number(v.pending.usd) || 0;
+            if (usd > maxUsd) maxUsd = usd;
+        });
+        if (!(maxUsd > 0)) return;
+
+        const gaps = [];
+        const byY = visible.slice().sort((a, b) => a.y - b.y);
+        for (let i = 1; i < byY.length; i++) gaps.push(Math.abs(byY[i].y - byY[i - 1].y));
+        gaps.sort((a, b) => a - b);
+        const med = gaps.length ? gaps[Math.floor(gaps.length / 2)] : 8;
+        const barH = Math.max(2, Math.min(7, med * 0.72));
+        const maxBar = Math.max(20, colW - 8);
+
+
+        ctx.save();
+        // клип по полю свечей: шкала цены и ось времени остаются нетронутыми
+        ctx.beginPath();
+        ctx.rect(0, 0, plotRight, plotBottom);
+        ctx.clip();
+        ctx.textBaseline = "middle";
+
+        let labelled = 0;
+        visible.forEach((v) => {
+            const row = v.row, y = v.y, pending = v.pending;
+            const long = pending.long;
+            const short = pending.short;
+            const isLong = pending.isLong;
             const col = isLong ? LIQ_COLORS.long : LIQ_COLORS.short;
             const magnet = magnets.get(Number(row.price)) || null;
-            const w = Math.max(3, Math.min(maxBar, (Number(row.cum_usd) || 0) / maxCum * maxBar));
-            const x0 = Math.round(W - w);
+            const usd = pending.usd;
+            const w = Math.max(2, Math.min(maxBar, usd / maxUsd * maxBar));
+            const x0 = Math.round(plotRight - w);
+            const active = shapeIsActive("level", "lvl_" + row.price);
 
-            // полоса кумулятива: справа, чтобы не спорить с профилем слева
-            ctx.globalAlpha = magnet ? 0.42 : 0.2;
+            if (magnet) {
+                ctx.save();
+                ctx.globalAlpha = 0.8;
+                ctx.strokeStyle = col.ring;
+                ctx.lineWidth = 1;
+                ctx.setLineDash([5, 3]);
+                ctx.beginPath();
+                ctx.moveTo(6, y + 0.5);
+                ctx.lineTo(xL, y + 0.5);
+                ctx.stroke();
+                ctx.setLineDash([]);
+                ctx.restore();
+            }
+
+            ctx.globalAlpha = magnet || active ? 0.96 : 0.8;
             ctx.fillStyle = col.fill;
-            ctx.fillRect(x0, y - 2, Math.round(w), 4);
-            // сама линия уровня: от полосы до правого края + пунктир на магнитах
-            ctx.globalAlpha = magnet ? 0.85 : 0.4;
-            ctx.strokeStyle = col.ring;
-            ctx.lineWidth = magnet ? 1.2 : 1;
-            if (magnet) ctx.setLineDash([5, 3]);
-            ctx.beginPath();
-            ctx.moveTo(x0 - 6, y + 0.5);
-            ctx.lineTo(W - 1, y + 0.5);
-            ctx.stroke();
-            ctx.setLineDash([]);
+            ctx.fillRect(x0, y - barH / 2, Math.round(w), barH);
+            if (active) {
+                ctx.globalAlpha = 1;
+                ctx.strokeStyle = "#ffffff";
+                ctx.lineWidth = 1;
+                ctx.strokeRect(x0 + 0.5, y - barH / 2 + 0.5, Math.max(1, Math.round(w) - 1), Math.max(1, barH - 1));
+            }
 
-            // подпись: у магнитов всегда, у обычных уровней — только пока места
-            // хватает (не больше пяти подписей на кадр, иначе холст пестрит)
-            const strong = !!magnet || (w > maxBar * 0.55 && labelled < 5);
-            if (strong) {
+            const strong = !!magnet || (usd >= maxUsd * 0.55 && labelled < 4);
+            if (strong && labelled < 6) {
                 labelled += 1;
-                const usd = fmtCompact(Number(row.usd) || 0);
                 const lev = Number(row.lev);
-                let label = usd + (isFinite(lev) && lev > 0 ? " \u00b7 " + Math.round(lev) + "x" : "");
-                if (magnet) {
-                    const share = Number(magnet.share);
-                    if (isFinite(share) && share > 0) label += " \u00b7 " + share.toFixed(1) + "%";
-                }
-                ctx.globalAlpha = 0.95;
+                let label = fmtCompact(usd) + (isFinite(lev) && lev > 0 ? " \u00b7 " + Math.round(lev) + "x" : "");
+                if (magnet) label += " \u00b7 " + I18n.t("chart.levels_magnet");
                 ctx.font = "bold 9px 'JetBrains Mono', monospace";
                 ctx.textAlign = "right";
-                ctx.fillStyle = "rgba(232,240,255,0.92)";
-                const tw = ctx.measureText ? ctx.measureText(label).width : 0;
-                ctx.globalAlpha = 0.5;
-                ctx.fillStyle = col.fill;
-                ctx.fillRect(W - 4 - tw - 4, y - 6.5, tw + 8, 13);
-                ctx.globalAlpha = 1;
-                ctx.fillStyle = "#04070d";
-                ctx.fillText(label, W - 8, y + 0.5);
+                const tw = ctx.measureText ? ctx.measureText(label).width : 48;
+                const lx = xL - 6;
+                if (lx - tw > 2) {
+                    ctx.globalAlpha = 0.82;
+                    ctx.fillStyle = "rgba(4,7,13,0.88)";
+                    ctx.fillRect(lx - tw - 4, y - 6.5, tw + 8, 13);
+                    ctx.globalAlpha = 1;
+                    ctx.fillStyle = magnet ? "#ffd166" : "#e8f0ff";
+                    ctx.fillText(label, lx, y + 0.5);
+                }
             }
-        });
 
-        // Обязательная маркировка: это расчёт, а не заявка биржи.
-        ctx.globalAlpha = 0.9;
-        ctx.font = "bold 9px 'JetBrains Mono', monospace";
-        ctx.textAlign = "right";
-        ctx.fillStyle = "rgba(232,240,255,0.75)";
-        const note = I18n.t("chart.levels_est");
-        ctx.fillText(note, W - 8, 10);
+            const hh = Math.max(8, barH + 3);
+            const bw = Math.max(6, Math.round(w));
+            levelColL = Math.min(levelColL, x0);
+            levelColR = Math.max(levelColR, x0 + bw);
+            levelHits.push({
+                kind: "level",
+                key: "lvl_" + row.price,
+                x: x0, y: y - hh / 2, w: bw, h: hh,
+                price: Number(row.price),
+                usd: usd,
+                cum: Number(row.cum_usd) || 0,
+                longUsd: long,
+                shortUsd: short,
+                side: isLong ? "long" : "short",
+                lev: Number(row.lev) || 0,
+                share: Number(row.share) || 0,
+                dist: Number(row.distance_pct) || 0,
+                magnet: !!magnet,
+            });
+        });
         ctx.restore();
     }
 
+    const ARCHIVE_HOURS = 31 * 24;
+
     async function loadHistoryFor(sym, force) {
-        if (!sym || sym === "ALL") return;
+        // ALL тоже из архива: лента «все монеты» после F5 не должна обнуляться.
+        if (!sym) sym = "ALL";
         if (!force && historyLoaded.has(sym)) return;
         historyLoaded.add(sym);
         try {
             // порог и биржи НЕ пробрасываем в REST: пусть клиент фильтрует сам,
             // чтобы при смене фильтра на более мягкий история не «терялась»
-            const q = "/api/liquidations?symbol=" + encodeURIComponent(sym) +
-                    "&limit=" + HISTORY_REST_LIMIT;
-            const [rest, cached] = await Promise.all([
+            const symParam = sym === "ALL" ? "" : ("&symbol=" + encodeURIComponent(sym));
+            const q = "/api/liquidations?limit=" + HISTORY_REST_LIMIT + symParam;
+            // Месяц читаем из шардов (/api/history), а не увеличением лимита RAM.
+            const qArch = "/api/history?bucket=raw&hours=" + ARCHIVE_HOURS +
+                    "&limit=" + MAX_HISTORY + symParam;
+            const qHours = "/api/history?bucket=hour&hours=" + ARCHIVE_HOURS + symParam;
+            const [rest, cached, arch, hours] = await Promise.all([
                 fetch(q).then((r) => r.json()).then((d) => d.liquidations || []).catch(() => []),
-                loadCachedLiquidations(sym, MAX_HISTORY),
+                sym === "ALL" ? Promise.resolve([]) : loadCachedLiquidations(sym, MAX_HISTORY),
+                fetch(qArch).then((r) => r.json()).then((d) => d.liquidations || []).catch(() => []),
+                fetch(qHours).then((r) => r.json()).then((d) => d.hours || []).catch(() => []),
             ]);
+            if (sym === "ALL" || sym === chartSymbol()) state.archiveHours = hours;
             mergeLiquidations(cached);   // сначала локальное, оно может быть старше
-            mergeLiquidations(rest);     // затем сервер — он источник правды
+            mergeLiquidations(arch);     // месяц с диска — переживает перезагрузку
+            mergeLiquidations(rest);     // затем живая память сервера
             if (rest.length) cacheLiquidations(rest);
             rebuildFeed();
             updateMarkers();
             updateLiveStats();
+            if (typeof paintStatBox === "function") paintStatBox("cvd");
             queueRedraw();
         } catch (e) { /* сеть недоступна — живём на том, что уже пришло */ }
     }
@@ -1719,7 +1880,10 @@
         if (state.oiEnabled) drawOiBalls(ctx);
         if (state.cvdEnabled) drawCvdTriangles(ctx);
         if (state.liqEnabled) drawLiqRects(ctx);
-        if (state.levelsEnabled) drawLiqLevels(ctx);   // 🎯 уровни (оценка)
+        levelHits = [];
+        levelColL = Infinity;
+        levelColR = -1;
+        if (state.levelsEnabled) drawLiqLevels(ctx);   // шкала уровней — колонка у шкалы цены
         drawFigures();   // фигуры теханализа — свой canvas поверх
         drawIndicatorPanes();   // окна LIQ/CVD/OI под графиком
     }
@@ -2702,19 +2866,41 @@
                  longs: Number(d["longs_usd_" + key]) || 0,
                  shorts: Number(d["shorts_usd_" + key]) || 0 };
     }
-    function statCvdVal(key) {
-        if (!state.candles.length) return null;
-        const since = Date.now() / 1000 - statWinSec(key);
+    function statCvdFromHours(since) {
+        const hours = state.archiveHours || [];
         let buy = 0, sell = 0, ok = false;
+        for (let i = 0; i < hours.length; i++) {
+            const row = hours[i];
+            const t = Number(row.h) || 0;
+            if (t + 3600 <= since) continue;
+            const d = Number(row.cvd);
+            if (!isFinite(d)) continue;
+            if (!d && !Number(row.vol)) continue;
+            ok = true;
+            if (d >= 0) buy += d; else sell -= d;
+        }
+        return ok ? { net: buy - sell, buy: buy, sell: sell } : null;
+    }
+    function statCvdVal(key) {
+        const since = Date.now() / 1000 - statWinSec(key);
+        let buy = 0, sell = 0, ok = false, oldest = Infinity;
         for (let i = 0; i < state.candles.length; i++) {
             const c = state.candles[i];
-            if ((Number(c.time) || 0) < since) continue;
+            const t = Number(c.time) || 0;
+            if (t && t < oldest) oldest = t;
+            if (t < since) continue;
             const d = Number(c.cvd);
             if (!isFinite(d)) continue;
             ok = true;
             if (d >= 0) buy += d; else sell -= d;
         }
-        return ok ? { net: buy - sell, buy: buy, sell: sell } : null;
+        // Свечи после F5 — это последние бары биржи, не месяц. Окно, до которого
+        // они не дотягиваются, берём из часовых свёрток архива.
+        if (statWinSec(key) >= 3600 && !(ok && oldest <= since + 90)) {
+            const arch = statCvdFromHours(since);
+            if (arch) return arch;
+        }
+        return ok ? { net: buy - sell, buy: buy, sell: sell } : statCvdFromHours(since);
     }
     function statOiVal(key) {
         const ch = (state.lastOI && state.lastOI.changes) || {};
@@ -3108,6 +3294,21 @@
     // Порядок проверки — обратный отрисовке: кластеры поверх треугольников
     // поверх шаров OI. У фигур хит-тест кругом с допуском 4px.
     function hitAt(px, py) {
+        // Полосы уровней без колонки: попадание только в саму полосу.
+        // Мимо — кластеры и остальные фигуры под ней остаются кликабельными.
+        if (levelHits.length) {
+            let best = null, bestDy = 12;
+            for (let i = 0; i < levelHits.length; i++) {
+                const b = levelHits[i];
+                const cy = b.y + b.h / 2;
+                const dy = Math.abs(py - cy);
+                if (dy < bestDy && px >= b.x - 2 && px <= b.x + b.w + 2) {
+                    best = b;
+                    bestDy = dy;
+                }
+            }
+            if (best) return best;
+        }
         for (let i = clusterHits.length - 1; i >= 0; i--) {
             const b = clusterHits[i];
             if (px >= b.x - 4 && px <= b.x + b.w + 4 &&
@@ -5199,8 +5400,45 @@
     // наведение не должно перекрывать график, иначе фигуру не «отпустить».
     // Закреплённое кликом окно затемняется, но клики всё равно проходят
     // сквозь фон — снять закреп можно кликом мимо фигуры или по крестику.
+    function openLevelModal(hit) {
+        const sym = pretty(chartSymbol());
+        const isLong = hit.side === "long" ||
+            (hit.side !== "short" && Number(hit.longUsd) >= Number(hit.shortUsd));
+        const dist = Number(hit.dist);
+        const distTxt = isFinite(dist) ? (dist > 0 ? "+" : "") + dist.toFixed(2) + "%" : "—";
+        const lev = Number(hit.lev);
+        modalTitle.textContent = I18n.t("chart.levels_legend") + " · " + sym;
+        modalBody.innerHTML =
+            "<p><strong>" + I18n.t("modal.price") + "</strong> " + fmtPrice(hit.price) +
+            " · " + distTxt + "</p>" +
+            "<p><strong>" + I18n.t("modal.direction") + "</strong> " +
+            (isLong
+                ? '<span class="badge-side long">' + I18n.t("modal.long_desc") + "</span>"
+                : '<span class="badge-side short">' + I18n.t("modal.short_desc") + "</span>") +
+            (hit.magnet ? " · " + I18n.t("chart.levels_magnet") : "") +
+            "</p>" +
+            "<p><strong>" + I18n.t("lv.h_usd") + "</strong> " +
+            '<span style="font-size:1.1rem;font-weight:800;color:var(--color-gold)">' +
+            fmtCompact(hit.usd) + "</span>" +
+            (isFinite(Number(hit.share)) && Number(hit.share) > 0
+                ? " · " + Number(hit.share).toFixed(1) + "%" : "") +
+            "</p>" +
+            "<p><strong>" + I18n.t("lv.h_cum") + "</strong> " + fmtCompact(hit.cum) + "</p>" +
+            "<p><strong>" + I18n.t("lv.h_lev") + "</strong> " +
+            (isFinite(lev) && lev > 0 ? "~" + Math.round(lev) + "x" : "—") + "</p>" +
+            '<p class="modal-about">' + I18n.t("chart.levels_read") + "</p>";
+        detailModal.classList.remove("hidden");
+        const pinned = !!shapePin;
+        detailModal.classList.toggle("peek", !pinned);
+        detailModal.classList.toggle("peek-pinned", pinned);
+    }
+
     function openShapeModal(kind, hit) {
         state.modalItem = null;
+        if (kind === "level") {
+            openLevelModal(hit);
+            return;
+        }
         const sym = pretty(chartSymbol());
         const tfSec = state.timeframe * 60;
         const range = I18n.time(hit.time) + "–" + I18n.time(Number(hit.time) + tfSec);
@@ -5685,6 +5923,13 @@
                 if (d.skey === "levelsEnabled") {
                     // уровни: включили — сразу просим расчёт, выключили — гасим
                     // поллер и чистим данные (levelsPollSync)
+                    if (!state.levelsEnabled && (
+                        (shapePin && shapePin.kind === "level") ||
+                        (shapeHover && shapeHover.kind === "level")
+                    )) {
+                        unpinShape();
+                        hideShapeModal();
+                    }
                     levelsPollSync();
                 }
                 if (d.skey === "bookEnabled") {
@@ -7197,6 +7442,9 @@
         setupSymbolDropdown();       // выпадающий список монет
         setupStatBoxes();            // боксы статистики: меню выбора периода
         loadCandles();
+        // Лента и боксы не ждут сокет: месяц уже лежит в архиве.
+        loadHistoryFor(chartSymbol(), true);
+        if ((state.symbol || "ALL") !== chartSymbol()) loadHistoryFor(state.symbol || "ALL", true);
         connectWs();
         setInterval(fetchStats, 15000);
         fetchStats();   // бокс ликвидаций — сразу, не ждём WS/первый тик

@@ -41,7 +41,7 @@
     <link rel="stylesheet" href="/static/terminal_chat.css?v=8">
     <script src="/static/lightweight-charts.js"></script>
     <script src="/static/i18n.pages.js?v=book8"></script>
-    <script src="/static/i18n.js?v=book8"></script>
+    <script src="/static/i18n.js?v=levels4"></script>
     <script src="/static/account.js?v=nav2"></script>
 </head>
 <body class="dark-theme">
@@ -327,7 +327,7 @@
                         <span class="legend-item" data-i18n-title="chart.whale_title" title="Шкала китов: $100K — жёлтый … $1M+ — ярко-красный"><span class="cluster-dot liq-whale"></span> <span data-i18n="chart.whale">Кит ($100k+)</span></span>
                         <span class="legend-item"><span class="cluster-dot cvd-buy"></span> <span data-i18n="chart.cvd_buy">CVD ▲</span></span>
                         <span class="legend-item"><span class="cluster-dot cvd-sell"></span> <span data-i18n="chart.cvd_sell">CVD ▼</span></span>
-                        <span class="legend-item" data-i18n-title="chart.levels_est_title" title="Уровни расчётные: биржа не публикует позиции клиентов — это оценка модели по OI, плечам и марже"><span class="cluster-dot levels-dot"></span> <span data-i18n="chart.levels_legend">Уровни — оценка</span></span>
+                        <span class="legend-item" data-i18n-title="chart.levels_est_title" title="Уровни расчётные. Шкала вплотную слева от шкалы цены: длина полосы — масса на этой цене, ноль у шкалы цены. Ниже цены — лонги, выше — шорты."><span class="cluster-dot levels-dot"></span> <span data-i18n="chart.levels_legend">Уровни — оценка</span></span>
                     </div>
                     <button class="profile-toggle liq-toggle" id="liq-toggle" type="button"
                             data-i18n-title="chart.liq_on" data-i18n="chart.liq"
@@ -348,7 +348,7 @@
                          «оценка» стоит и в кнопке, и в легенде, и в подписи. -->
                     <button class="profile-toggle levels-toggle" id="levels-toggle" type="button"
                             data-i18n-title="chart.levels_on" data-i18n="chart.levels"
-                            title="Скрыть расчётные уровни ликвидаций (оценка)">🎯 Ликвидации (оценка)</button>
+                            title="Скрыть расчётные уровни ликвидаций (оценка)">Ликвидации (оценка)</button>
                     <span class="layer-pop-sep" aria-hidden="true"></span>
                     <button class="profile-toggle pane-toggle" id="pane-liq-toggle" type="button"
                             data-i18n-title="chart.pane_liq_on" data-i18n="chart.pane_liq"
@@ -570,7 +570,7 @@
         </div>
     </div>
 
-    <script src="/static/app.js?v=book8"></script>
+    <script src="/static/app.js?v=levels4"></script>
     <script src="/static/ads.js?v=banner5"></script>
     <script src="/static/terminal_chat.js?v=8"></script>
     <script src="/static/presence.js?v=geo2"></script>

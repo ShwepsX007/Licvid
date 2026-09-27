@@ -986,7 +986,7 @@
 
             if (magnet) {
                 ctx.save();
-                ctx.globalAlpha = 0.8;
+                ctx.globalAlpha = 0.55;
                 ctx.strokeStyle = col.ring;
                 ctx.lineWidth = 1;
                 ctx.setLineDash([5, 3]);
@@ -998,11 +998,15 @@
                 ctx.restore();
             }
 
-            ctx.globalAlpha = magnet || active ? 0.96 : 0.8;
+            ctx.globalAlpha = magnet || active ? 0.18 : 0.12;
             ctx.fillStyle = col.fill;
             ctx.fillRect(x0, y - barH / 2, Math.round(w), barH);
+            ctx.globalAlpha = magnet || active ? 0.35 : 0.22;
+            ctx.strokeStyle = col.fill;
+            ctx.lineWidth = 1;
+            ctx.strokeRect(x0 + 0.5, y - barH / 2 + 0.5, Math.max(1, Math.round(w) - 1), Math.max(1, barH - 1));
             if (active) {
-                ctx.globalAlpha = 1;
+                ctx.globalAlpha = 0.9;
                 ctx.strokeStyle = "#ffffff";
                 ctx.lineWidth = 1;
                 ctx.strokeRect(x0 + 0.5, y - barH / 2 + 0.5, Math.max(1, Math.round(w) - 1), Math.max(1, barH - 1));
@@ -1051,7 +1055,7 @@
         ctx.restore();
     }
 
-    const ARCHIVE_HOURS = 7 * 24; // было 31*24 — грузило 31 день на каждый коннект, теперь 7 дней для быстрого старта, полный месяц по запросу
+    const ARCHIVE_HOURS = 31 * 24;
 
     async function loadHistoryFor(sym, force) {
         // ALL тоже из архива: лента «все монеты» после F5 не должна обнуляться.

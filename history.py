@@ -351,23 +351,39 @@ class HistoryStore:
     def query(self, since: float, until: Optional[float] = None,
               symbol: Optional[str] = None, min_usd: float = 0.0,
               limit: int = 2000, newest_first: bool = True) -> List[dict]:
-        """События ликвидаций за промежуток: читаем дневные файлы в диапазоне."""
+        """События ликвидаций за промежуток: читаем дневные файлы в диапазоне.
+
+        Оптимизация: при newest_first читаем с конца (свежие дни первыми) и
+        останавливаемся, когда набрали достаточно для лимита — не нужно
+        перебирать 31 день, если свежих 2 дней хватает на 4000 событий.
+        """
         if not self.base_path:
             return []
         now = time.time()
         until = float(until if until is not None else now)
         since = float(since)
         rows: List[dict] = []
+        # Собираем список дней в диапазоне
+        days = []
         day = day_key(since)
         last_day = day_key(until)
         guard = 0
         while day <= last_day and guard < 400:
             guard += 1
-            self._read_shard(self.shard_path(day), since, until, symbol, min_usd, rows)
+            days.append(day)
             day = next_day(day)
+        # При newest_first идём с конца, иначе с начала
+        iter_days = reversed(days) if newest_first else days
+        limit_int = max(1, int(limit))
+        # Берём с запасом x2 для дедупликации и фильтрации, но не весь месяц
+        # если уже набрали достаточно
+        for d in iter_days:
+            self._read_shard(self.shard_path(d), since, until, symbol, min_usd, rows)
+            if newest_first and len(rows) >= limit_int * 2:
+                # Достаточно для лимита — дальше старые дни не нужны
+                break
         rows.sort(key=lambda e: _num(e.get("timestamp"), 0.0), reverse=newest_first)
         if len(rows) > 1:
-            # страховка от повторов (например, миграция унаследованного файла)
             seen = set()
             uniq = []
             for ev in rows:
@@ -376,8 +392,14 @@ class HistoryStore:
                     continue
                 seen.add(key)
                 uniq.append(ev)
+                if len(uniq) >= limit_int and newest_first:
+                    # При newest_first после сортировки первые limit уже самые свежие
+                    # Можно прервать дедуп, если набрали лимит
+                    # Но продолжаем только если нужно ещё для точности? Прерываем для скорости
+                    if len(rows) > limit_int * 3:
+                        break
             rows = uniq
-        return rows[: max(1, int(limit))]
+        return rows[:limit_int]
 
     def _read_shard(self, path: str, since: float, until: float,
                     symbol: Optional[str], min_usd: float, out: List[dict]) -> None:

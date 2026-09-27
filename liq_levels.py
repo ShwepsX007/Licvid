@@ -1088,6 +1088,9 @@ class LevelsEngine:
                       window_hours: Optional[float] = None,
                       force: bool = False, recalibrate: Optional[bool] = None) -> dict:
         """Лестница уровней по монете — готовый ответ для API и слоя графика."""
+        import os as _os, time as _time
+        _perf = _os.getenv("LIQSCOPE_PERF_LOG", "").lower() in ("1","true","yes")
+        _t0 = _time.monotonic() if _perf else 0.0
         sym = str(symbol or "").upper()
         ts = float(now if now is not None else time.time())
         settings = self.settings(sym)
@@ -1100,8 +1103,16 @@ class LevelsEngine:
                 return cached[1]
         if not settings.get("enabled", True):
             return self._empty(sym, ts, win, settings, "инструмент выключен")
+        since = ts - win * HOUR
+        points = self._oi_points(sym, since)
+        # Быстрый путь: без OI точек считать нечего — не дергаем сеть вообще
+        if not points:
+            if _perf:
+                import logging as _logging
+                _logging.getLogger("liqscore.levels").info("[perf] levels %s no OI points -> empty in %.1fms", sym, (_time.monotonic()-_t0)*1000 if _t0 else 0)
+            return self._empty(sym, ts, win, settings, "нет OI за окно")
         if session is not None:
-            # сеть — только здесь и только по необходимости
+            # сеть — только здесь и только по необходимости, после проверки OI
             if self.side is not None:
                 try:
                     await self.side.ensure(session, sym)
@@ -1112,10 +1123,24 @@ class LevelsEngine:
                     await self.risk.ensure(session, sym)
                 except Exception as e:      # noqa: BLE001
                     log.debug("риск-лимиты %s: %s", sym, e)
-        since = ts - win * HOUR
-        points = self._oi_points(sym, since)
-        candles = await self._candles_for(sym, session)
-        lookup = self._price_lookup(sym, candles)
+        # Если цена уже дана клиентом, свечи нужны только для VWAP fallback,
+        # а не для определения текущей цены — можно пропустить сетевой запрос
+        # если есть профиль объёма
+        if price and self.profile is not None:
+            try:
+                # пробуем VWAP из профиля без свечей
+                has_profile = bool(self.profile.coverage(sym))
+            except Exception:
+                has_profile = False
+            if has_profile:
+                candles = []
+                lookup = self._price_lookup(sym, candles)
+            else:
+                candles = await self._candles_for(sym, session)
+                lookup = self._price_lookup(sym, candles)
+        else:
+            candles = await self._candles_for(sym, session)
+            lookup = self._price_lookup(sym, candles)
         weights = self._venue_weights(sym)
         mmr_fn, mmr_estimated = self._mmr(sym, weights)
         rows = build_rows(points, lookup, self._side_fn(sym), mmr_fn,
@@ -1132,10 +1157,18 @@ class LevelsEngine:
             eff["spread_scale"] = _fnum(calib.get("spread_scale"),
                                         eff.get("spread_scale", 1.0))
         step = grid_step(cur, eff.get("step_rel"))
-        ladder = build_ladder(rows, eff, cur)
+        # Тяжёлые CPU-расчёты — в threadpool, чтобы не блокировать event loop
+        # (иначе WS и REST висят по 1-2 сек на каждом запросе уровней)
+        try:
+            ladder = await asyncio.to_thread(build_ladder, rows, eff, cur)
+        except Exception:
+            ladder = build_ladder(rows, eff, cur)
         applied = {"usd": 0.0, "events": 0, "skipped": 0}
         if eff.get("subtract_executed", True):
-            applied = apply_executed(ladder, events, step)
+            try:
+                applied = await asyncio.to_thread(apply_executed, ladder, events, step)
+            except Exception:
+                applied = apply_executed(ladder, events, step)
         with self._lock:
             self.builds += 1
         shown = filter_ladder(ladder, min_usd, side)

@@ -1051,7 +1051,7 @@
         ctx.restore();
     }
 
-    const ARCHIVE_HOURS = 31 * 24;
+    const ARCHIVE_HOURS = 7 * 24; // было 31*24 — грузило 31 день на каждый коннект, теперь 7 дней для быстрого старта, полный месяц по запросу
 
     async function loadHistoryFor(sym, force) {
         // ALL тоже из архива: лента «все монеты» после F5 не должна обнуляться.

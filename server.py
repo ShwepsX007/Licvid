@@ -165,6 +165,7 @@ def _is_trusted_proxy(ip: str) -> bool:
     except Exception:
         return False
 HISTORY_MAX = int(os.getenv("LIQSCOPE_HISTORY_MAX", "60000"))
+PERF_LOG = os.getenv("LIQSCOPE_PERF_LOG", "").strip().lower() in ("1", "true", "yes")
 # Дисковое сохранение истории ликвидаций (переживает рестарт сервера).
 # Путь — каталог дневных файлов ("" / "0" / "off" — не хранить вовсе),
 # TTL — сколько часов держать историю.
@@ -359,6 +360,11 @@ STATS_INTERVAL = float(os.getenv("LIQSCOPE_STATS_INTERVAL_MS", "2000")) / 1000.0
 #  Состояние
 # =============================================================================
 LIQUIDATIONS: Deque[dict] = deque(maxlen=HISTORY_MAX)
+# Кэш для WS init: символы и статистика считаются раз в 1-2 сек, а не на каждый коннект
+_SYMBOLS_CACHE: Dict[str, Any] = {"at": 0.0, "data": None}
+_STATS_CACHE: Dict[str, Any] = {}
+_STATS_CACHE_TTL = 5.0  # секунды
+_SYMBOLS_CACHE_TTL = 5.0
 # Месячная история: сырые события по дням + часовые свёртки (ликвидации,
 # CVD, объём). В памяти — только свежий хвост, всё остальное на диске.
 HIST = HistoryStore(HISTORY_FILE, ttl_hours=HISTORY_TTL_HOURS,
@@ -2126,14 +2132,20 @@ def month_cells(now: Optional[float] = None) -> list:
     now = float(now if now is not None else time.time())
     cached = _ARCHIVE_CELLS.get("cells")
     if cached is not None and now - float(_ARCHIVE_CELLS.get("at") or 0) < 90:
+        if PERF_LOG:
+            log.info("[perf] month_cells cache hit age=%.1fs len=%d", now - float(_ARCHIVE_CELLS.get("at") or 0), len(cached))
         return cached
     if not HISTORY_FILE:
         return []
+    t0 = time.monotonic() if PERF_LOG else 0.0
     try:
         cells = HIST.hours_range(now - HISTORY_TTL_HOURS * 3600, now, now)
     except Exception as e:                           # noqa: BLE001
         log.debug("архив часов: %s", e)
         return []
+    if PERF_LOG:
+        dt = (time.monotonic() - t0) * 1000 if t0 else 0
+        log.info("[perf] month_cells miss read %d cells in %.1fms", len(cells), dt)
     _ARCHIVE_CELLS["at"] = now
     _ARCHIVE_CELLS["cells"] = cells
     return cells
@@ -2145,34 +2157,82 @@ def restore_boards_from_archive() -> int:
 
 
 def compute_stats(symbol: Optional[str] = None, exchange: Optional[str] = None) -> dict:
+    _perf_t0 = time.monotonic() if PERF_LOG else 0.0
     now = time.time()
-    items = list(LIQUIDATIONS)
-    if symbol and symbol != "ALL":
-        items = [x for x in items if x["symbol"] == symbol]
-    if exchange and exchange != "ALL":
-        items = [x for x in items if x["exchange"] == exchange]
+    cache_key = f"{symbol or 'ALL'}|{exchange or 'ALL'}"
+    cached = _STATS_CACHE.get(cache_key)
+    if cached and now - cached.get("_at", 0) < _STATS_CACHE_TTL:
+        return cached["data"]
 
-    def split(rows):
-        longs = sum(x["usd"] for x in rows if x["side"] == "SELL")
-        shorts = sum(x["usd"] for x in rows if x["side"] == "BUY")
-        return longs, shorts
+    # Оптимизация: один проход по LIQUIDATIONS вместо 5-7 копий и фильтров
+    # Раньше делалось list(LIQUIDATIONS) + фильтрация по symbol/exchange + ещё
+    # отдельный pool = list(LIQUIDATIONS) — всё это 60k*2 копий и сканов.
+    # Теперь — один проход, считаем всё сразу.
+    cutoff_24h = now - 86400
+    # Для окон STAT_WINDOWS заранее считаем cutoff'ы
+    window_cutoffs = [(suffix, now - sec) for suffix, sec in STAT_WINDOWS]
+    # wins accumulators: suffix -> {longs, shorts}
+    win_acc = {suffix: {"longs": 0.0, "shorts": 0.0} for suffix, _ in STAT_WINDOWS}
 
-    d24 = [x for x in items if now - x["timestamp"] <= 86400]
+    items = []  # только если нужен фильтр по symbol/exchange для total_count/biggest
+    # Для лидеров — всегда по всем монетам, но с фильтром биржи
+    pool24 = []
+    # Для d24 и biggest
+    d24 = []
+
+    # Флаги фильтров
+    need_symbol_filter = bool(symbol and symbol != "ALL")
+    need_exch_filter = bool(exchange and exchange != "ALL")
+    sym_filter = symbol if need_symbol_filter else None
+    exch_filter = exchange if need_exch_filter else None
+
+    # Один проход по кольцу
+    for ev in LIQUIDATIONS:
+        # Фильтр для items (учитывает symbol и exchange)
+        if need_symbol_filter and ev["symbol"] != sym_filter:
+            # для pool24 символ не фильтруем, только биржу — проверяем отдельно ниже
+            pass
+        else:
+            if need_exch_filter and ev["exchange"] != exch_filter:
+                pass
+            else:
+                items.append(ev)
+                # d24 — часть items в последние 24ч
+                if ev["timestamp"] >= cutoff_24h:
+                    d24.append(ev)
+
+        # pool24 — всегда по всем монетам, но с фильтром биржи (для лидеров)
+        if need_exch_filter and ev["exchange"] != exch_filter:
+            pass
+        else:
+            if ev["timestamp"] >= cutoff_24h:
+                pool24.append(ev)
+
+        # Для окон — только если событие в items (с учётом фильтров)
+        # Проверяем, входит ли в items по тем же фильтрам
+        if need_symbol_filter and ev["symbol"] != sym_filter:
+            continue
+        if need_exch_filter and ev["exchange"] != exch_filter:
+            continue
+        # Теперь ev точно в items, проверяем окна
+        ts = ev["timestamp"]
+        is_long = ev["side"] == "SELL"
+        usd = ev["usd"]
+        for suffix, cutoff in window_cutoffs:
+            if ts >= cutoff:
+                if is_long:
+                    win_acc[suffix]["longs"] += usd
+                else:
+                    win_acc[suffix]["shorts"] += usd
+
     wins = {}
-    for suffix, sec in STAT_WINDOWS:
-        rows = d24 if sec == 86400 else [x for x in items if now - x["timestamp"] <= sec]
-        longs, shorts = split(rows)
+    for suffix, _ in STAT_WINDOWS:
+        longs = win_acc[suffix]["longs"]
+        shorts = win_acc[suffix]["shorts"]
         wins[f"total_usd_{suffix}"] = longs + shorts
         wins[f"longs_usd_{suffix}"] = longs
         wins[f"shorts_usd_{suffix}"] = shorts
 
-    # Лидеры — всегда по ВСЕМ монетам (фильтр монеты их не схлопывает):
-    # иначе при выборе монеты в блоке оставалась бы только она одна.
-    # Фильтр биржи уважаем: лидеры внутри выбранной биржи осмысленны.
-    pool = list(LIQUIDATIONS)
-    if exchange and exchange != "ALL":
-        pool = [x for x in pool if x["exchange"] == exchange]
-    pool24 = [x for x in pool if now - x["timestamp"] <= 86400]
     coin_totals: Dict[str, dict] = {}
     for x in pool24:
         c = coin_totals.setdefault(x["symbol"], {"symbol": x["symbol"], "usd": 0.0,
@@ -2193,7 +2253,10 @@ def compute_stats(symbol: Optional[str] = None, exchange: Optional[str] = None) 
 
     # Сутки из часовых свёрток, если буфер событий их не покрывает (рестарт,
     # кольцо на 60 тысяч). Короткие окна остаются по событиям: у них точные секунды.
-    if not exchange or exchange == "ALL":
+    # Оптимизация: архив читаем только если в памяти мало данных (после рестарта),
+    # иначе это лишние 5-100ms на каждый WS connect и stats_broadcaster.
+    _need_archive = (len(items) < 5000 or len(d24) < 50 or len(pool24) < 20)
+    if _need_archive and (not exchange or exchange == "ALL"):
         try:
             from archive_restore import leaders_from_cells
             from history import aggregate_hours
@@ -2233,6 +2296,17 @@ def compute_stats(symbol: Optional[str] = None, exchange: Optional[str] = None) 
         "biggest_24h": biggest,
         "demo": DEMO_MODE,
     })
+    # Сохраняем в кэш
+    _STATS_CACHE[cache_key] = {"_at": now, "data": out}
+    # Чистим старые ключи, чтобы не разрасталось
+    if len(_STATS_CACHE) > 32:
+        oldest = sorted(_STATS_CACHE.items(), key=lambda kv: kv[1].get("_at", 0))[:8]
+        for k, _ in oldest:
+            _STATS_CACHE.pop(k, None)
+    if PERF_LOG:
+        _perf_dt = (time.monotonic() - _perf_t0) * 1000 if _perf_t0 else 0
+        log.info("[perf] compute_stats symbol=%s exchange=%s items=%d d24=%d pool24=%d total=%.1fms",
+                 symbol, exchange, len(items), len(d24), len(pool24), _perf_dt)
     return out
 
 
@@ -3514,14 +3588,20 @@ register_content_comment_routes(app)
 
 @app.get("/api/symbols")
 async def api_symbols():
+    # Кэш на 1.5 сек: WS init не должен сканировать 60k событий на каждый коннект
+    now = time.time()
+    cached = _SYMBOLS_CACHE.get("data")
+    if cached and now - _SYMBOLS_CACHE.get("at", 0) < _SYMBOLS_CACHE_TTL:
+        return cached
     symbols = feed.symbols if feed else []
     prices = feed.prices if feed else {}
     meta = feed.symbol_meta if feed else {}
 
     liq24: Dict[str, float] = {}
-    now = time.time()
+    # Оптимизация: один проход по LIQUIDATIONS, только 24ч окно
+    cutoff = now - 86400
     for x in LIQUIDATIONS:
-        if now - x["timestamp"] <= 86400:
+        if x["timestamp"] >= cutoff:
             liq24[x["symbol"]] = liq24.get(x["symbol"], 0.0) + x["usd"]
 
     rows = []
@@ -3539,7 +3619,7 @@ async def api_symbols():
             "custom": s in custom,
             "exchanges": m.get("exchanges", []),
         })
-    return {
+    data = {
         "symbols": symbols,
         "details": rows,
         "prices": prices,
@@ -3551,6 +3631,9 @@ async def api_symbols():
         "demo": DEMO_MODE,
         "source": feed.symbols_source if feed else "none",
     }
+    _SYMBOLS_CACHE["at"] = now
+    _SYMBOLS_CACHE["data"] = data
+    return data
 
 
 def _enrich_symbol_rows(rows: List[dict]) -> List[dict]:
@@ -3998,7 +4081,9 @@ async def api_health():
 
 @app.websocket("/ws")
 async def ws_endpoint(websocket: WebSocket):
+    t_ws0 = time.monotonic() if PERF_LOG else 0.0
     await websocket.accept()
+    t_accept = time.monotonic() if PERF_LOG else 0.0
     client = Client(websocket)
     if not await hub.add(client):
         await websocket.close(code=1013)
@@ -4015,8 +4100,21 @@ async def ws_endpoint(websocket: WebSocket):
     except Exception as e:  # noqa: BLE001
         log.debug("ws user resolve: %s", e)
     try:
+        t_stage = time.monotonic() if PERF_LOG else 0.0
         sym_data = await api_symbols() if feed else {"details": [], "custom_symbols": []}
-        await client.send({
+        t_sym = time.monotonic() if PERF_LOG else 0.0
+        health = health_summary()
+        t_health = time.monotonic() if PERF_LOG else 0.0
+        # Лимит init: раньше 200, теперь 100 — достаточно для ленты, остальное догружается REST
+        # Защита от деградации: даже если LIQUIDATIONS 60k, init не разрастается
+        _recent_limit = max(20, min(200, int(__import__("os").getenv("LIQSCOPE_WS_INIT_LIQ", "100"))))
+        recent = list(LIQUIDATIONS)[-_recent_limit:]
+        t_recent = time.monotonic() if PERF_LOG else 0.0
+        stats = compute_stats()
+        t_stats = time.monotonic() if PERF_LOG else 0.0
+        flow = flow_snapshot()
+        t_flow = time.monotonic() if PERF_LOG else 0.0
+        init_payload = {
             "type": "init",
             "symbols": feed.symbols if feed else [],
             "details": sym_data["details"],
@@ -4025,14 +4123,31 @@ async def ws_endpoint(websocket: WebSocket):
             "custom_symbols": sym_data.get("custom_symbols", []),
             "timeframes": TF_MINUTES,
             "demo": DEMO_MODE,
-            "health": health_summary(),
-            "recent_liquidations": list(LIQUIDATIONS)[-200:],
-            "stats": compute_stats(),
+            "health": health,
+            "recent_liquidations": recent,
+            "stats": stats,
             # Лента «ВСЕ» в CVD/OI строится не по свечам графика, а по
             # минутным потокам всех монет — отдаём их сразу, чтобы не ждать
             # первой рассылки.
-            "flow": flow_snapshot(),
-        })
+            "flow": flow,
+        }
+        t_build = time.monotonic() if PERF_LOG else 0.0
+        await client.send(init_payload)
+        t_send = time.monotonic() if PERF_LOG else 0.0
+        if PERF_LOG:
+            import json as _json
+            size = len(_json.dumps(init_payload, ensure_ascii=False))
+            log.info("[perf] /ws accept=%.1fms symbols=%.1fms health=%.1fms recent=%.1fms stats=%.1fms flow=%.1fms build=%.1fms send=%.1fms total=%.1fms size=%d clients=%d",
+                     (t_accept - t_ws0)*1000 if t_ws0 else 0,
+                     (t_sym - t_stage)*1000 if t_stage else 0,
+                     (t_health - t_sym)*1000 if t_sym else 0,
+                     (t_recent - t_health)*1000 if t_health else 0,
+                     (t_stats - t_recent)*1000 if t_recent else 0,
+                     (t_flow - t_stats)*1000 if t_stats else 0,
+                     (t_build - t_flow)*1000 if t_flow else 0,
+                     (t_send - t_build)*1000 if t_build else 0,
+                     (t_send - t_ws0)*1000 if t_ws0 else 0,
+                     size, len(hub.clients))
         while True:
             raw = await websocket.receive_json()
             action = raw.get("action") or raw.get("type")
@@ -4107,11 +4222,20 @@ async def root(request: Request):
 @app.get("/terminal")
 async def terminal(request: Request):
     """Сам терминал (страница приложения)."""
+    t0 = time.monotonic() if PERF_LOG else 0.0
     lang, auto = seo_pages.lang_of(request)
-    return seo_pages.render(
+    t1 = time.monotonic() if PERF_LOG else 0.0
+    resp = seo_pages.render(
         "index.html", lang, "/terminal", extra_head=seo_pages.jsonld("terminal", lang),
         auto=auto,
     )
+    if PERF_LOG:
+        dt_total = (time.monotonic() - t0) * 1000
+        dt_lang = (t1 - t0) * 1000 if t0 else 0
+        dt_render = (time.monotonic() - t1) * 1000 if t1 else 0
+        log.info("[perf] /terminal lang=%s auto=%s lang_detect=%.1fms render=%.1fms total=%.1fms size=%d",
+                 lang, auto, dt_lang, dt_render, dt_total, len(resp.body) if hasattr(resp, 'body') else 0)
+    return resp
 
 
 @app.get("/robots.txt")

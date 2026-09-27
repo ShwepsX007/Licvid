@@ -1,0 +1,14 @@
+[Unit]
+Description=Licvid daily backup of data/ (accounts.db, articles, digests)
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/Licvid
+ExecStart=/bin/bash /root/Licvid/tools/backup_data.sh /var/backups/liqscope
+User=root
+Group=root
+
+# Безопасность: бэкап читает data/, пишет в /var/backups
+# Если data/ на другом пути — задайте LIQSCOPE_DATA_DIR в Environment
+# Environment=LIQSCOPE_DATA_DIR=/root/Licvid/data

@@ -1,0 +1,291 @@
+/* Multi-chart workspace — LiqScope Terminal */
+.workspace-root {
+  display: none;
+  flex-direction: column;
+  gap: 8px;
+  padding: 6px 0 8px;
+}
+.workspace-root.active {
+  display: flex;
+}
+.workspace-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: rgba(12,18,28,0.9);
+  border: 1px solid #1c2533;
+  border-radius: 8px;
+  flex-wrap: wrap;
+}
+.workspace-toolbar .ws-title {
+  font-weight: 600;
+  font-size: 13px;
+  color: #c9d6e8;
+  margin-right: 8px;
+}
+.workspace-toolbar .ws-btn {
+  background: #151d2b;
+  border: 1px solid #233044;
+  color: #a8bdd6;
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.workspace-toolbar .ws-btn:hover {
+  background: #1d2a3d;
+  color: #d6e6f5;
+}
+.workspace-toolbar .ws-btn.primary {
+  background: #1e3a5f;
+  border-color: #2a5a9a;
+  color: #cfe3ff;
+}
+.workspace-toolbar .ws-hint {
+  font-size: 11px;
+  color: #6a7a8e;
+  margin-left: auto;
+}
+.workspace-tabs {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  padding: 4px 2px;
+  scrollbar-width: thin;
+}
+.workspace-tabs .ws-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: #121a27;
+  border: 1px solid #1e2a3c;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+  color: #8fa2b8;
+  cursor: grab;
+  white-space: nowrap;
+  user-select: none;
+}
+.workspace-tabs .ws-tab.active {
+  background: #1a2740;
+  border-color: #2a4a7a;
+  color: #d0e2f5;
+}
+.workspace-tabs .ws-tab.dragging {
+  opacity: 0.5;
+}
+.workspace-tabs .ws-tab .ws-tab-close {
+  background: none;
+  border: none;
+  color: #6a7a8e;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 2px;
+}
+.workspace-tabs .ws-tab .ws-tab-close:hover {
+  color: #ff5a7a;
+}
+
+.workspace-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+  gap: 8px;
+  min-height: 300px;
+}
+.workspace-grid.cols-1 { grid-template-columns: 1fr; }
+.workspace-grid.cols-2 { grid-template-columns: repeat(2, 1fr); }
+.workspace-grid.cols-3 { grid-template-columns: repeat(3, 1fr); }
+.workspace-grid.cols-4 { grid-template-columns: repeat(2, 1fr); }
+
+@media (max-width: 900px) {
+  .workspace-grid {
+    grid-template-columns: 1fr !important;
+  }
+  .workspace-toolbar .ws-hint { display: none; }
+}
+
+body.workspace-active .chart-stack {
+  display: none;
+}
+body.workspace-active #workspace-host .workspace-root {
+  display: flex;
+}
+
+/* Chart panel */
+.chart-panel {
+  display: flex;
+  flex-direction: column;
+  background: #0a0f19;
+  border: 1px solid #1c2533;
+  border-radius: 8px;
+  overflow: hidden;
+  min-height: 320px;
+  position: relative;
+}
+.chart-panel.detached {
+  opacity: 0.6;
+  border-style: dashed;
+}
+.chart-panel.active-panel {
+  border-color: #2a5a9a;
+  box-shadow: 0 0 0 1px rgba(42,90,154,0.3);
+}
+.panel-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: #0f1725;
+  border-bottom: 1px solid #1c2533;
+  flex-wrap: wrap;
+}
+.panel-header .panel-drag {
+  cursor: grab;
+  color: #4a5a70;
+  font-size: 14px;
+  padding: 2px 4px;
+}
+.panel-header .panel-symbol {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.panel-header .panel-symbol select,
+.panel-header .panel-timeframe select {
+  background: #121d2f;
+  border: 1px solid #22314a;
+  color: #b8cce4;
+  border-radius: 5px;
+  padding: 3px 6px;
+  font-size: 12px;
+  min-width: 90px;
+}
+.panel-header .panel-price {
+  font-size: 12px;
+  font-weight: 600;
+  color: #d0e2f5;
+  margin-left: 6px;
+}
+.panel-header .panel-change {
+  font-size: 11px;
+}
+.panel-header .panel-change.positive { color: #00e676; }
+.panel-header .panel-change.negative { color: #ff2a5f; }
+.panel-header .panel-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+.panel-header .panel-btn {
+  background: #151d2b;
+  border: 1px solid #233044;
+  color: #8fa2b8;
+  border-radius: 5px;
+  padding: 3px 7px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.panel-header .panel-btn:hover {
+  background: #1d2a3d;
+  color: #cfe3ff;
+}
+.panel-header .panel-btn.active {
+  background: #1e3a5f;
+  border-color: #2a5a9a;
+  color: #cfe3ff;
+}
+.panel-header .panel-btn.close:hover {
+  background: #3a1a25;
+  border-color: #7a2a3a;
+  color: #ffb3c0;
+}
+.panel-chart-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 260px;
+  background: #090c10;
+}
+.panel-chart {
+  width: 100%;
+  height: 100%;
+  min-height: 260px;
+}
+.panel-canvas {
+  position: absolute;
+  left: 0; top: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.panel-layers-pop {
+  position: absolute;
+  top: 36px;
+  right: 6px;
+  z-index: 20;
+  background: rgba(12,18,28,0.96);
+  border: 1px solid #1e2a3c;
+  border-radius: 8px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 160px;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+}
+.panel-layers-pop.hidden { display: none; }
+.panel-layers-pop .panel-layer-btn {
+  background: #151d2b;
+  border: 1px solid #233044;
+  color: #8fa2b8;
+  border-radius: 5px;
+  padding: 4px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  text-align: left;
+}
+.panel-layers-pop .panel-layer-btn.active {
+  background: #1e3a5f;
+  border-color: #2a5a9a;
+  color: #cfe3ff;
+}
+
+/* Panel mode (detached window) */
+body.panel-mode .top-nav,
+body.panel-mode .filters,
+body.panel-mode .feed-section,
+body.panel-mode .splitter,
+body.panel-mode .ad-host,
+body.panel-mode .chart-section > .chart-header,
+body.panel-mode .chart-section > .chart-stack,
+body.panel-mode .workspace-toolbar,
+body.panel-mode .workspace-tabs {
+  display: none !important;
+}
+body.panel-mode .main-layout {
+  display: block;
+  height: 100vh;
+}
+body.panel-mode .chart-section {
+  height: 100vh;
+  width: 100vw;
+}
+body.panel-mode .workspace-root {
+  display: flex !important;
+  height: 100vh;
+  padding: 0;
+}
+body.panel-mode .workspace-grid {
+  display: block;
+  height: 100vh;
+}
+body.panel-mode .chart-panel {
+  height: 100vh;
+  border: none;
+  border-radius: 0;
+}
+body.panel-mode .panel-chart-wrap {
+  height: calc(100vh - 36px);
+}

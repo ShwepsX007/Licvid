@@ -1,25 +1,28 @@
-/* Multi-chart workspace — LiqScope Terminal — resizable */
+/* Multi-chart workspace — LiqScope Terminal */
 #workspace-host {
-  width: 100%;
+  display: none;
   flex: 1 1 auto;
   min-height: 0;
-  display: flex;
   flex-direction: column;
   overflow: hidden;
+  width: 100%;
+}
+
+body.workspace-active #workspace-host {
+  display: flex;
 }
 
 .workspace-root {
-  display: none;
+  display: flex;
   flex-direction: column;
   gap: 8px;
   padding: 6px 0 8px;
   flex: 1 1 auto;
   min-height: 0;
   overflow: hidden;
+  width: 100%;
 }
-.workspace-root.active {
-  display: flex;
-}
+
 .workspace-toolbar {
   display: flex;
   align-items: center;
@@ -98,7 +101,6 @@
 }
 .workspace-tabs .ws-tab .ws-tab-close:hover { color: #ff5a7a; }
 
-/* Grid now flex for resizable panels */
 .workspace-grid {
   display: flex;
   flex-wrap: wrap;
@@ -107,9 +109,16 @@
   min-height: 0;
   overflow: auto;
   align-items: stretch;
-  align-content: stretch;
+  align-content: flex-start;
 }
-.workspace-grid.cols-1 { /* 1 column = single */
+
+.workspace-grid .chart-panel {
+  flex: 1 1 calc(50% - 8px);
+  min-width: 320px;
+}
+
+.workspace-grid.cols-1 .chart-panel {
+  flex: 1 1 100%;
 }
 .workspace-grid.cols-2 .chart-panel {
   flex: 1 1 calc(50% - 8px);
@@ -124,7 +133,6 @@
   height: 100%;
   min-height: 0;
   overflow: hidden;
-  display: flex;
   flex-wrap: nowrap;
 }
 .workspace-grid.single-mode .chart-panel {
@@ -136,92 +144,44 @@
   resize: none !important;
 }
 
-@media (max-width: 900px) {
-  .workspace-grid {
-    flex-direction: column;
-    flex-wrap: nowrap;
-    overflow: auto;
-  }
-  .workspace-grid .chart-panel {
-    flex: 1 1 100% !important;
-    min-width: 0 !important;
-    width: 100% !important;
-    resize: none !important;
-    min-height: 380px;
-  }
-  .workspace-toolbar .ws-hint { display: none; }
-  #workspace-host {
-    overflow: auto !important;
-  }
-  body:not(.workspace-active) #workspace-host {
-    display: none !important;
-  }
-  body:not(.workspace-active) .chart-stack {
-    flex: 1 1 auto !important;
-    min-height: 50vh !important;
-  }
-  body.workspace-active .chart-section {
-    height: auto !important;
-    min-height: 60vh !important;
-    flex: 1 1 auto !important;
-  }
-  body.workspace-active #workspace-host {
-    min-height: 60vh !important;
-  }
-}
-
+/* Hide single-chart UI when workspace active */
 body.workspace-active .chart-stack {
   display: none !important;
 }
-body.workspace-active #workspace-host {
-  display: flex !important;
-  flex: 1 1 auto !important;
-  min-height: 0 !important;
-}
-body.workspace-active #workspace-host .workspace-root {
-  display: flex !important;
-  flex: 1 1 auto !important;
-}
-body:not(.workspace-active) #workspace-host {
+body.workspace-active .chart-section > .chart-header {
   display: none !important;
-  flex: 0 0 0 !important;
-  height: 0 !important;
-  min-height: 0 !important;
-  overflow: hidden !important;
-  padding: 0 !important;
-  margin: 0 !important;
-}
-body:not(.workspace-active) #workspace-host .workspace-root {
-  display: none !important;
-}
-body:not(.workspace-active) .chart-stack {
-  display: flex !important;
-  flex: 1 1 auto !important;
-  min-height: 0 !important;
-  height: 100% !important;
 }
 body.workspace-active .ad-host {
-  flex-shrink: 0;
+  display: none !important;
 }
 body.workspace-single-mode .ad-host {
   display: none !important;
 }
-body.workspace-single-mode .workspace-grid {
-  height: 100%;
+.ws-global-toggle {
+  position: absolute;
+  top: 6px;
+  right: 80px;
+  z-index: 100;
+  background: #151d2b;
+  border: 1px solid #233044;
+  color: #a8bdd6;
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 11px;
+  cursor: pointer;
+  pointer-events: auto;
 }
-body.workspace-active .chart-section {
-  display: flex !important;
-  flex-direction: column !important;
-  flex: 1 1 auto !important;
-  min-height: 0 !important;
-  overflow: hidden !important;
+.ws-global-toggle:hover {
+  background: #1d2a3d;
+  color: #d6e6f5;
 }
-body.workspace-active #workspace-host .workspace-grid {
-  flex: 1 1 auto !important;
-  min-height: 0 !important;
+body.workspace-active .ws-global-toggle {
+  background: #1e3a5f;
+  border-color: #2a5a9a;
+  color: #cfe3ff;
 }
 
-/* Chart panel — resizable both directions */
+/* Chart panel — resizable */
 .chart-panel {
   display: flex;
   flex-direction: column;
@@ -234,11 +194,6 @@ body.workspace-active #workspace-host .workspace-grid {
   flex: 1 1 45%;
   position: relative;
   resize: both;
-  /* resize handle visible */
-  scrollbar-width: thin;
-}
-.chart-panel::-webkit-resizer {
-  background: #1c2533;
 }
 .chart-panel.detached {
   opacity: 0.6;
@@ -257,7 +212,6 @@ body.workspace-active #workspace-host .workspace-grid {
   border-bottom: 1px solid #1c2533;
   flex-wrap: wrap;
   flex-shrink: 0;
-  cursor: move;
 }
 .panel-header .panel-drag {
   cursor: grab;
@@ -386,6 +340,22 @@ body.workspace-active #workspace-host .workspace-grid {
   background: #1e3a5f;
   border-color: #2a5a9a;
   color: #cfe3ff;
+}
+
+/* Mobile */
+@media (max-width: 900px) {
+  .workspace-grid {
+    flex-direction: column;
+    flex-wrap: nowrap;
+  }
+  .workspace-grid .chart-panel {
+    flex: 1 1 100% !important;
+    min-width: 0 !important;
+    width: 100% !important;
+    resize: none !important;
+    min-height: 380px;
+  }
+  .workspace-toolbar .ws-hint { display: none; }
 }
 
 /* Panel mode (detached window) */

@@ -176,8 +176,69 @@ class WorkspaceManager {
     };
   }
 
+  _ensurePersistentToggle() {
+    try {
+      const chartSection = document.querySelector('.chart-section');
+      if (!chartSection) return;
+      let btn = document.getElementById('workspace-global-toggle');
+      if (!btn) {
+        btn = document.createElement('button');
+        btn.id = 'workspace-global-toggle';
+        btn.className = 'ws-global-toggle';
+        btn.title = 'Toggle Multi-chart workspace';
+        btn.style.cssText = 'position:absolute;top:6px;right:80px;z-index:50;background:#151d2b;border:1px solid #233044;color:#a8bdd6;border-radius:6px;padding:4px 8px;font-size:11px;cursor:pointer;';
+        chartSection.appendChild(btn);
+        btn.addEventListener('click', () => {
+          const isNowMulti = !document.body.classList.contains('workspace-active');
+          document.body.classList.toggle('workspace-active', isNowMulti);
+          try { localStorage.setItem('liqscope_workspace_active', isNowMulti ? '1' : '0'); } catch {}
+          try {
+            const cs = document.querySelector('.chart-section');
+            if (!isNowMulti && cs) {
+              cs.classList.remove('collapsed');
+              try { localStorage.setItem('liqscope.chartCollapsed', '0'); } catch {}
+            }
+          } catch {}
+          setTimeout(() => {
+            try { window.dispatchEvent(new Event('resize')); } catch {}
+            this.panels.forEach(p => p.resize());
+          }, 100);
+          setTimeout(() => {
+            try { window.dispatchEvent(new Event('resize')); } catch {}
+            this.panels.forEach(p => p.resize());
+          }, 400);
+          this._updateGlobalToggle();
+        });
+      }
+      this._updateGlobalToggle();
+    } catch {}
+  }
+
+  _updateGlobalToggle() {
+    try {
+      const btn = document.getElementById('workspace-global-toggle');
+      if (!btn) return;
+      const isMulti = document.body.classList.contains('workspace-active');
+      btn.textContent = isMulti ? 'Single chart' : 'Multi chart';
+      btn.style.background = isMulti ? '#1e3a5f' : '#151d2b';
+      btn.style.borderColor = isMulti ? '#2a5a9a' : '#233044';
+      btn.style.color = isMulti ? '#cfe3ff' : '#a8bdd6';
+      // When entering multi, ensure chart-section not collapsed to avoid small height
+      if (isMulti) {
+        try {
+          const cs = document.querySelector('.chart-section');
+          if (cs && cs.classList.contains('collapsed')) {
+            cs.classList.remove('collapsed');
+            try { localStorage.setItem('liqscope.chartCollapsed', '0'); } catch {}
+          }
+        } catch {}
+      }
+    } catch {}
+  }
+
   _ensureDom() {
     if (!this.container) return null;
+    this._ensurePersistentToggle();
     let root = this.container.querySelector('.workspace-root');
     if (!root) {
       root = document.createElement('div');
@@ -209,13 +270,32 @@ class WorkspaceManager {
       toolbar.querySelector('[data-action="layout-2"]').addEventListener('click', () => this.setLayout(2));
       toolbar.querySelector('[data-action="layout-4"]').addEventListener('click', () => this.setLayout(4));
       toolbar.querySelector('[data-action="toggle-single-chart"]').addEventListener('click', () => {
-        document.body.classList.toggle('workspace-active');
+        const isNowMulti = !document.body.classList.contains('workspace-active');
+        document.body.classList.toggle('workspace-active', isNowMulti);
         const btn = toolbar.querySelector('[data-action="toggle-single-chart"]');
-        const isMulti = document.body.classList.contains('workspace-active');
-        btn.textContent = isMulti ? 'Single chart' : 'Multi chart';
-        try { localStorage.setItem('liqscope_workspace_active', isMulti ? '1' : '0'); } catch {}
-        // resize all panels when toggling
-        setTimeout(() => this.panels.forEach(p => p.resize()), 200);
+        btn.textContent = isNowMulti ? 'Single chart' : 'Multi chart';
+        try { localStorage.setItem('liqscope_workspace_active', isNowMulti ? '1' : '0'); } catch {}
+        // Ensure main chart not collapsed when switching back to single
+        try {
+          const chartSection = document.querySelector('.chart-section');
+          if (!isNowMulti && chartSection) {
+            chartSection.classList.remove('collapsed');
+            try { localStorage.setItem('liqscope.chartCollapsed', '0'); } catch {}
+          }
+        } catch {}
+        // Trigger resize for both modes
+        setTimeout(() => {
+          try { window.dispatchEvent(new Event('resize')); } catch {}
+          this.panels.forEach(p => p.resize());
+          // Also try to resize main chart if exists
+          try {
+            if (window.LiqScopeApp && window.LiqScopeApp.resize) window.LiqScopeApp.resize();
+          } catch {}
+        }, 100);
+        setTimeout(() => {
+          try { window.dispatchEvent(new Event('resize')); } catch {}
+          this.panels.forEach(p => p.resize());
+        }, 400);
       });
 
       tabs.addEventListener('dragover', (e) => {

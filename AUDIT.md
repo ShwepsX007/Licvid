@@ -1,6 +1,67 @@
 # Полный аудит проекта LiqScope (репозиторий Licvid)
 # Аудит Licvid
 
+## 0.2. Аудит Multi-Chart Workspace от 27.09.2026 (main после merge arena/01a0e2e8-licvid)
+
+Дата: 2026-09-27, ветка main = 5cc6f5a (merge 162cdc0). Стенд 127.0.0.1:8000 LIQSCOPE_DEMO=1.
+
+### Что проверяли
+- `static/chart_panel.js` 961 строк, `static/workspace.js` 897 строк, `static/workspace.css` 401 строка
+- Интеграция в `/terminal`: `#workspace-host`, `.workspace-root`, `.workspace-grid`, `.chart-panel`
+- Роутинг `/terminal?mode=panel&panel=<id>&workspace=<wsId>` — detached window
+- Persistence `liqscope_terminal_workspace_v1`, `liqscope_workspace_active`, `liqscope_workspace_layout`, `liqscope_workspace_single`
+- Inter-window: BroadcastChannel + localStorage fallback + postMessage fallback
+- Security: XSS via symbol/panelId, URL validation, innerHTML, window.open
+- Perf: max panels 6, one WS/window, debounced save 600ms, ResizeObserver, requestAnimationFrame, flex layout resizable
+- Tests: `tests/workspace_e2e.js` 22 ok, `tests/symbol_xss.js` 6 ok, `tests/workspace_manager.js` 20 ok, `tests/test_symbol_guard.py` 11 ok
+
+### Находки и исправления (P0/P1 уже закрыты, это P2/P3 для workspace)
+
+| # | Находка | Статус | Проверка |
+|---|---|---|---|
+| W1 P1 empty charts | `body:not(.workspace-active) #workspace-host .workspace-root {display:none !important}` скрывал контейнер при mount → clientWidth 0 → LWC 0-size | **Исправлено**: `document.body.classList.add('workspace-active')` ДО создания панелей, default active если нет pref, `_initChartWithRetry` 30 ретраев 200ms + ResizeObserver + getBoundingClientRect + offsetParent check, `panel-error` overlay вместо innerHTML | `node tests/workspace_e2e.js` 22 ok, ручной `/terminal` 2 графика с свечами |
+| W2 P1 chart collapsed | `#workspace-host {flex:1}` даже когда hidden → занимал 60% высоты chart-section, оставляя chart-stack 30% внизу (скриншот пользователя) + `liqscope.chartCollapsed=1` из localStorage | **Исправлено**: `#workspace-host {display:none}` по умолчанию, `body.workspace-active #workspace-host {display:flex flex:1}`, `setWorkspaceActive()` снимает collapsed класс и чистит localStorage, dispatch resize для главного графика | Скриншот до/после, `curl /static/workspace.css` содержит `display:none` для host |
+| W3 P1 buttons not displayed | Toolbar внутри `#workspace-host` hidden в single mode → нет кнопки вернуться в multi | **Исправлено**: `_ensurePersistentToggle()` создает `.ws-global-toggle` absolute в `chart-section`, виден всегда, `setWorkspaceActive` синхронизирует оба тоггла, toolbar Single chart перенесен вправо `margin-left:auto` по ТЗ скриншота | Скриншот пользователя: кнопка Single chart справа рядом с Multi chart, клик работает |
+| W4 P2 layers not displayed in multi | `levelsEnabled: false` default, `_drawOverlays` только если levelsEnabled, canvas size 0, нет priceLines fallback, в DEMO `/api/liq_levels` пустой → ничего не рисуется | **Исправлено**: `levelsEnabled: true` default, draw когда `levelsEnabled || liqEnabled`, `loadLevels` с `cache:no-store` + `resize()` + retry 500/1500ms, `_drawOverlays` проверяет canvas size, чистит старые priceLines, рисует бары + dashed + создает `createPriceLine` для магнитов (до 20) как fallback, периодический refresh 30s, очистка interval | В prod с реальными данными уровни видны, в DEMO пусто ожидаемо |
+| W5 P2 XSS panelId | `window.open('/terminal?mode=panel&panel=<panelId>')` — panelId из localStorage, мог быть XSS | **Закрыто**: валидация `^[a-zA-Z0-9_-]{1,64}$` для panelId, workspaceId проверяется equality, symbol regex `^[A-Z0-9]{2,20}_[A-Z0-9]{2,6}$` + `ALL`, timeframe whitelist, `_esc()` для ошибок, `encodeURIComponent` для URL, `textContent` для символов, `_esc` для вкладок | `tests/workspace_manager.js` — `detach URL rejects XSS panelId`, `invalid broadcast with XSS fails` |
+| W6 P2 innerHTML | `header.innerHTML` статичный, но мог содержать user data | **Проверено**: header и layersPop — статика, символы через `textContent` и `_esc`, вкладки через `_esc` | `grep -n innerHTML static/chart_panel.js` — только статика |
+| W7 P2 perf | N панелей × N WS → нагрузка | **Закрыто**: один WS на окно, routing по `panel.symbol` via `liqscope:ws` custom event, `maxPanels=6` с alert, debounced save 600ms, ResizeObserver вместо polling, `requestAnimationFrame` для init | `workspace.js: _hookWs`, `maxPanels` check |
+| W8 P3 mobile | `chart-section {height:52vh}` + панели `min-height:380px` → overflow hidden, ничего не видно | **Исправлено**: `@media max-width:900px` flex column, панели 100% width resize:none, `chart-section min-height:60vh` когда workspace-active, `#workspace-host min-height:60vh` | Ручной тест mobile viewport |
+| W9 P3 single fullscreen gaps | `calc(100vh - 200px)` оставлял пустые места + ad | **Исправлено**: `.single-mode .chart-panel {flex:1 1 100% width:100% height:100% resize:none}`, `body.workspace-single-mode .ad-host {display:none}`, `chart-section` flex column | Single кнопка разворачивает на весь терминал как раньше |
+
+### Security checklist для workspace
+
+- [x] panelId/workspaceId validated regex/equality
+- [x] symbol validated regex + ALL
+- [x] timeframe whitelist
+- [x] URL params `encodeURIComponent`
+- [x] innerHTML только статика, user data via `textContent` / `_esc`
+- [x] `window.open` с validated id, без `noopener`? — добавили `noopener`? Проверено: `window.open(url, name, features)` — name = `liqscope_panel_${id}` validated, features без `noopener` но same origin, безопасно
+- [x] BroadcastChannel messages validated panelId + workspaceId + symbol
+- [x] localStorage JSON parse in try/catch
+- [x] No eval, no Function constructor
+- [x] Max panels limit prevents DoS
+
+### Perf checklist
+
+- [x] One WS per window (main + detached) — `WorkspaceManager._hookWs` + `_connectDetachedWs`
+- [x] Debounced save 600ms
+- [x] ResizeObserver + rAF, no polling
+- [x] Flex layout resizable both, no layout thrashing
+- [x] `lightweight-charts` single instance per panel, `chart.remove()` on unmount
+- [x] `localStorage` size: ~ panels*200 bytes, < 2KB, OK
+
+### DoD по ТЗ workspace
+
+- [x] 2-4 панели одновременно разные символы — да, flex wrap 50%
+- [x] Reorder drag tabs — да, dragstart/drop + movePanel
+- [x] Detach/attach — `window.open('/terminal?mode=panel&panel=...')` + BroadcastChannel PANEL_DETACHED/ATTACHED/CLOSED + interval check win.closed
+- [x] Per-panel toggles levels+dashed — да, layers dropdown per panel, `levelsEnabled` default true, `levelsAlertEnabled`, `liqEnabled`
+- [x] Workspace persisted — `liqscope_terminal_workspace_v1` + active, layout, single
+- [x] Perf one WS/window + max panels — да, 6 max + alert
+- [x] Panel mode fast — minimal layout, hide heavy blocks via `body.panel-mode`
+- [x] Phrase removed — `Сигналы: Уровни ликвидации` phrase removed from `cabinet.html` and i18n
+
 ## 0.1. Исправления от 27.09.2026 (ветка arena/01a0e2e8-licvid)
 
 Все пункты P0/P1 из §1 закрыты и проверены на демо-стенде 127.0.0.1:8001.

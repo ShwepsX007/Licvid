@@ -1,5 +1,35 @@
 # Security notes — Licvid / LiqScope
 
+Дата: 2026-09-27, ветка main = 5cc6f5a (merge workspace)
+
+## Workspace Multi-Chart Security (новый)
+
+### Модель угроз workspace
+- Пользователь может подделать localStorage `liqscope_terminal_workspace_v1` с XSS payload в panelId/symbol
+- Detached window URL `/terminal?mode=panel&panel=<id>` — id из URL может содержать XSS
+- BroadcastChannel сообщения между окнами — злоумышленник с same origin может слать поддельные PANEL_STATE_UPDATE
+- window.open — name и URL должны быть валидированы
+
+### Что закрыто для workspace
+
+- **panelId**: regex `^[a-zA-Z0-9_-]{1,64}$` в `_broadcast` и `_onBroadcastMessage`, в `detachPanel` URL `encodeURIComponent(id)` + name `liqscope_panel_${id}` validated
+- **workspaceId**: проверка equality `msg.workspaceId !== this.workspaceId` → ignore, генерируется `ws_` + random
+- **symbol**: `_validateSymbol` — `ALL` или regex `^[A-Z0-9]{2,20}_[A-Z0-9]{2,6}$`, trim upper, в `_populateSymbolSelect` via `textContent`
+- **timeframe**: `_validateTf` — whitelist `[1,3,5,15,60,240,1440]` или 1-1440
+- **innerHTML**: только статика (header, layersPop, toolbar), user data через `textContent` или `_esc()` (escape &, <, >, ")
+- **URL**: все params через `encodeURIComponent`, detached URL формируется как `/terminal?mode=panel&panel=${encodeURIComponent(id)}&workspace=${encodeURIComponent(wsId)}&symbol=${encodeURIComponent(sym)}&tf=${encodeURIComponent(tf)}`
+- **Broadcast**: `_broadcast` валидирует panelId regex перед postMessage, `_onBroadcastMessage` валидирует workspaceId equality + panelId regex + symbol via `setSymbol` (который валидирует)
+- **localStorage**: `loadWorkspaceRaw` try/catch JSON.parse, `saveWorkspace` debounced, size < 2KB
+- **No eval**: нет `eval`, `Function`, `setTimeout(string)`
+- **Max panels**: 6 с alert, prevents DoS via many charts
+- **Tests**: `tests/workspace_manager.js` — `detach URL rejects XSS panelId`, `invalid broadcast with XSS fails`, `invalid symbol in broadcast fails`, `max panels limit enforced`
+
+### Остатки
+- `window.open` без `noopener` — same origin, не критично, но можно добавить `noopener` в features (сейчас `width=900,height=600,menubar=no...` без `noopener` — не уязвимость, т.к. same origin и name validated)
+- BroadcastChannel без origin check — same origin по spec, OK
+
+## Предыдущий аудит
+
 Дата: 2026-09-27, ветка arena/01a0e2e8-licvid
 
 ## Модель угроз (коротко)

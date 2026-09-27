@@ -144,14 +144,13 @@ body.workspace-active #workspace-host {
   resize: none !important;
 }
 
-/* Hide single-chart UI when workspace active */
-body.workspace-active .chart-stack {
-  display: none !important;
-}
+/* Режим, который прятал сингл-график под мультичартом, выключен.
+   Даже если класс остался от старой сессии — график на месте. */
+body.workspace-active .chart-stack,
 body.workspace-active .chart-section > .chart-header {
-  display: none !important;
+  display: flex !important;
 }
-body.workspace-active .ad-host {
+body.workspace-active #workspace-host {
   display: none !important;
 }
 body.workspace-single-mode .ad-host {
@@ -338,6 +337,189 @@ body.workspace-single-mode .ad-host {
     min-height: 380px;
   }
   .workspace-toolbar .ws-hint { display: none; }
+}
+
+/* Несколько сингл-графиков в сетке терминала */
+.chart-tear,
+.chart-slot-grip {
+  flex: 0 0 auto;
+  align-self: center;
+  cursor: grab;
+  color: #9fb2c8;
+  background: #121b2b;
+  border: 1px dashed #31465f;
+  border-radius: 5px;
+  padding: 2px 6px;
+  font-size: 13px;
+  line-height: 1.2;
+  user-select: none;
+  touch-action: none;
+}
+.chart-tear:hover,
+.chart-slot-grip:hover { color: #e7f0fa; border-color: #3d70ff; }
+.chart-tear:active,
+.chart-slot-grip:active { cursor: grabbing; }
+.chart-tear-back,
+.chart-slot-dock,
+.chart-slot-float,
+.chart-slot-close {
+  flex: 0 0 auto;
+  background: #151d2b;
+  border: 1px solid #233044;
+  color: #c5d6ea;
+  border-radius: 5px;
+  padding: 2px 8px;
+  font-size: 11px;
+  line-height: 1.3;
+  cursor: pointer;
+}
+.chart-tear-back:hover,
+.chart-slot-dock:hover,
+.chart-slot-float:hover { border-color: #3d70ff; color: #fff; }
+.chart-slot-close:hover { border-color: #7a2a3a; color: #ffb3c0; }
+.chart-tear-back[hidden],
+.chart-slot-dock[hidden],
+.chart-slot-float[hidden] { display: none !important; }
+
+.chart-section.has-chart-dock {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.chart-section.has-chart-dock > #workspace-host { display: none !important; }
+.chart-dock {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px;
+  overflow: auto;
+  align-content: stretch;
+}
+.chart-dock.is-drop {
+  outline: 1px dashed #3d70ff;
+  outline-offset: -4px;
+  background: rgba(61, 112, 255, 0.06);
+}
+.chart-slot {
+  flex: 1 1 460px;
+  min-width: min(100%, 320px);
+  min-height: 340px;
+  display: flex;
+  flex-direction: column;
+  background: #0a0f19;
+  border: 1px solid #1c2533;
+  border-radius: 8px;
+  overflow: hidden;
+  position: relative;
+}
+.chart-slot.is-active {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.45);
+}
+.chart-slot.is-drop-target {
+  outline: 2px solid #3d70ff;
+  outline-offset: -3px;
+}
+.chart-slot-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: #0f1725;
+  border-bottom: 1px solid #1c2533;
+  flex-shrink: 0;
+}
+.chart-slot-title {
+  font-size: 12px;
+  color: #d5e4f5;
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chart-slot-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.chart-slot-body > .chart-header { flex: 0 0 auto; }
+.chart-slot-body > .chart-stack { flex: 1 1 auto; min-height: 0; }
+.chart-slot-frame {
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
+  border: 0;
+  background: #090c10;
+}
+.chart-slot.chart-floating {
+  position: fixed;
+  z-index: 70;
+  width: 760px;
+  height: 540px;
+  min-width: 380px;
+  min-height: 280px;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  box-shadow: 0 22px 60px rgba(0, 0, 0, 0.55);
+  resize: both;
+}
+.chart-dock-placeholder {
+  flex: 1 1 100%;
+  min-height: 180px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 10px;
+  padding: 18px;
+  color: #9fb0c4;
+  font-size: 13px;
+}
+body.chart-dock-dragging { user-select: none; cursor: grabbing; }
+body.chart-dock-dragging iframe { pointer-events: none; }
+
+body.chart-embed .top-nav,
+body.chart-embed .feed-section,
+body.chart-embed .splitter,
+body.chart-embed .ad-host,
+body.chart-embed #terminal-chat,
+body.chart-embed #workspace-host,
+body.chart-embed #add-chart-btn,
+body.chart-embed #chart-tear,
+body.chart-embed #chart-tear-back,
+body.chart-embed .controls-bar {
+  display: none !important;
+}
+.chart-slot-tf {
+  margin-left: auto;
+  background: #121d2f;
+  border: 1px solid #22314a;
+  color: #d5e4f5;
+  border-radius: 5px;
+  padding: 2px 4px;
+  font-size: 11px;
+}
+body.chart-embed .main-layout {
+  height: 100vh;
+  height: 100dvh;
+  min-height: 0;
+}
+body.chart-embed .chart-section {
+  height: 100%;
+  min-height: 0;
+}
+body.chart-embed { overflow: hidden; }
+
+@media (max-width: 900px) {
+  .chart-slot { flex-basis: 100%; min-width: 0; }
+  .chart-slot.chart-floating {
+    width: calc(100vw - 12px);
+    height: 70vh;
+  }
 }
 
 /* Panel mode (detached window) */

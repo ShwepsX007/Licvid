@@ -39,7 +39,7 @@
     <!-- Local Lightweight Charts v5 -->
     <link rel="stylesheet" href="/static/ads.css?v=banner5">
     <link rel="stylesheet" href="/static/terminal_chat.css?v=8">
-    <link rel="stylesheet" href="/static/workspace.css?v=mode-flow1">
+    <link rel="stylesheet" href="/static/workspace.css?v=dock1">
     <script src="/static/lightweight-charts.js"></script>
     <script src="/static/i18n.pages.js?v=book8"></script>
     <script src="/static/i18n.js?v=levels4"></script>
@@ -260,6 +260,10 @@
         <section class="chart-section">
             <div class="chart-header flex-between">
                 <div class="symbol-price-display">
+                    <button class="chart-tear" id="chart-tear" type="button"
+                            title="Потяни наружу, чтобы оторвать график. Отпусти над сеткой — вернуть на место.">⋮⋮</button>
+                    <button class="chart-tear-back" id="chart-tear-back" type="button" hidden
+                            title="Вставить график обратно в терминал">Вернуть</button>
                     <!-- Выбор монеты — прямо в названии пары над графиком (как на
                          биржах). Панель со списком и поиском открывается по клику;
                          id элементов прежние, логика в app.js не менялась. -->
@@ -316,8 +320,8 @@
                     <button class="chart-toggle chart-expand" id="chart-expand" type="button"
                             data-i18n-title="chart.expand_title"
                             title="Развернуть график на весь экран">⛶</button>
-                    <button class="ws-mode-toggle" id="ws-mode-toggle" type="button"
-                            title="Переключить мульти-график">Multi chart</button>
+                    <button class="ws-mode-toggle" id="add-chart-btn" type="button"
+                            title="Добавить такой же график рядом">＋ График</button>
                 </div>
                 <div class="layer-pop hidden" id="layer-pop">
                     <!-- Подсказка «что значит цвет» переехала из шапки графика сюда:
@@ -577,9 +581,9 @@
         </div>
     </div>
 
-    <script src="/static/chart_panel.js?v=follow1"></script>
-    <script src="/static/workspace.js?v=follow1"></script>
-    <script src="/static/app.js?v=layers5"></script>
+    <script src="/static/workspace.js?v=dock1"></script>
+    <script src="/static/app.js?v=dock1"></script>
+    <script src="/static/chart_dock.js?v=dock1"></script>
     <script src="/static/ads.js?v=banner5"></script>
     <script src="/static/terminal_chat.js?v=8"></script>
     <script src="/static/presence.js?v=geo2"></script>

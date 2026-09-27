@@ -3169,8 +3169,10 @@ def _want_hsts(scope) -> bool:
 _SECURITY_HEADERS = (
     (b"x-content-type-options", b"nosniff"),
     (b"referrer-policy", b"strict-origin-when-cross-origin"),
-    (b"x-frame-options", b"DENY"),
-    (b"content-security-policy", b"frame-ancestors 'none'"),
+    # SAMEORIGIN / 'self': чужой сайт встроить терминал не может, а свои
+    # дополнительные сингл-графики открываются рядом через iframe того же origin.
+    (b"x-frame-options", b"SAMEORIGIN"),
+    (b"content-security-policy", b"frame-ancestors 'self'"),
     (b"permissions-policy", b"camera=(), microphone=(), geolocation=()"),
 )
 

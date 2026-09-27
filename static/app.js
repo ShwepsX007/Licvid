@@ -86,6 +86,21 @@
         followMoved: 0,         // сколько раз окно подвинулось (для тестов/диагностики)
     };
 
+    // Встроенный сингл-чарт (iframe «добавить график» и старое окно panel):
+    // пара и таймфрейм из адреса, до загрузки свечей. Обычный терминал не трогаем.
+    try {
+        const embedQ = new URLSearchParams(location.search);
+        if (embedQ.get("embed") === "1" || embedQ.get("mode") === "panel") {
+            const embedSym = String(embedQ.get("symbol") || "").trim().toUpperCase();
+            if (/^[A-Z0-9]{2,20}_[A-Z0-9]{2,6}$/.test(embedSym)) state.chartSymbol = embedSym;
+            const embedTf = Number(embedQ.get("tf"));
+            if ([1, 3, 5, 15, 60, 240, 1440].indexOf(embedTf) !== -1) state.timeframe = embedTf;
+            document.querySelectorAll(".btn-tf").forEach((b) => {
+                b.classList.toggle("active", Number(b.dataset.tf) === state.timeframe);
+            });
+        }
+    } catch (e) { /* адрес без параметров — обычный запуск */ }
+
     let connState = { status: "pulse yellow", key: "conn.connecting" };
 
     const MAX_HISTORY = 4000;

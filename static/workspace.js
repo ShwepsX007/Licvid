@@ -905,39 +905,23 @@ class WorkspaceManager {
 
 window.WorkspaceManager = WorkspaceManager;
 
+/* Мультичарт как отдельный режим больше не стартует: несколько графиков
+   собирает chart_dock.js из обычных сингл-чартов. Класс оставлен, чтобы
+   старые вызовы не падали, но сам он терминал не перехватывает. */
 (function(){
-  function initWorkspace() {
+  function retireMultiChart() {
     try {
-      const host = document.getElementById('workspace-host');
-      if (!host) return;
-      if (!window.location.pathname.includes('/terminal')) return;
-
-      if (!window.LiqScopeApp) window.LiqScopeApp = {};
-      window.LiqScopeApp.getSymbols = function() {
-        try {
-          if (window.state && Array.isArray(window.state.symbols)) return window.state.symbols;
-        } catch {}
-        return [];
-      };
-
-      const wm = new WorkspaceManager({ container: host, maxPanels: 6 });
-      window.LiqScopeWorkspace = wm;
-      wm._ensurePersistentToggle();
-      setTimeout(() => wm.mount(), 800);
-
+      document.body.classList.remove('workspace-active');
+      document.body.classList.remove('workspace-single-mode');
       const params = new URLSearchParams(window.location.search);
-      if (params.get('mode')==='panel') {
-        document.body.classList.add('panel-mode');
-        wm.mount();
+      if (params.get('embed') === '1' || params.get('mode') === 'panel') {
+        document.body.classList.add('chart-embed');
       }
-    } catch(e) {
-      console.warn('workspace init failed', e);
-    }
+    } catch (e) {}
   }
-
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initWorkspace);
+    document.addEventListener('DOMContentLoaded', retireMultiChart);
   } else {
-    initWorkspace();
+    retireMultiChart();
   }
 })();

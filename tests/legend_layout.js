@@ -242,13 +242,17 @@ async function main() {
   // автоследование убрано из шапки — оно живёт в плашке слоёв
   check("right cluster order",
     kidIds.slice(-5).join(",") ===
-      "layer-call,draw-toggle,chart-toggle,chart-expand,ws-mode-toggle",
+      "layer-call,draw-toggle,chart-toggle,chart-expand,add-chart-btn",
     kidIds.slice(-5).join(","));
   check("toggles last in legend",
     legendKids.length >= 3 &&
     legendKids[legendKids.length - 3].id === "chart-toggle" &&
     legendKids[legendKids.length - 2].id === "chart-expand" &&
-    legendKids[legendKids.length - 1].id === "ws-mode-toggle");
+    legendKids[legendKids.length - 1].id === "add-chart-btn");
+  check("add chart instead of multi mode",
+    !doc.getElementById("ws-mode-toggle") &&
+    doc.getElementById("add-chart-btn") &&
+    doc.getElementById("chart-tear"));
   check("mode toggle is in flow",
     css.indexOf(".ws-mode-toggle") !== -1 &&
     cssBlock(".ws-mode-toggle").indexOf("position: static") !== -1 &&

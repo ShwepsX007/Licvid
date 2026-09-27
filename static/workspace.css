@@ -137,26 +137,70 @@
 }
 
 @media (max-width: 900px) {
+  .workspace-grid {
+    flex-direction: column;
+    flex-wrap: nowrap;
+    overflow: auto;
+  }
   .workspace-grid .chart-panel {
     flex: 1 1 100% !important;
+    min-width: 0 !important;
+    width: 100% !important;
+    resize: none !important;
+    min-height: 380px;
   }
   .workspace-toolbar .ws-hint { display: none; }
+  #workspace-host {
+    overflow: auto !important;
+  }
+  body:not(.workspace-active) #workspace-host {
+    display: none !important;
+  }
+  body:not(.workspace-active) .chart-stack {
+    flex: 1 1 auto !important;
+    min-height: 50vh !important;
+  }
+  body.workspace-active .chart-section {
+    height: auto !important;
+    min-height: 60vh !important;
+    flex: 1 1 auto !important;
+  }
+  body.workspace-active #workspace-host {
+    min-height: 60vh !important;
+  }
 }
 
 body.workspace-active .chart-stack {
   display: none !important;
 }
+body.workspace-active #workspace-host {
+  display: flex !important;
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+}
 body.workspace-active #workspace-host .workspace-root {
   display: flex !important;
+  flex: 1 1 auto !important;
+}
+body:not(.workspace-active) #workspace-host {
+  display: none !important;
+  flex: 0 0 0 !important;
+  height: 0 !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+  padding: 0 !important;
+  margin: 0 !important;
 }
 body:not(.workspace-active) #workspace-host .workspace-root {
   display: none !important;
 }
 body:not(.workspace-active) .chart-stack {
   display: flex !important;
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+  height: 100% !important;
 }
 body.workspace-active .ad-host {
-  /* keep ad below workspace, not overlapping */
   flex-shrink: 0;
 }
 body.workspace-single-mode .ad-host {
@@ -164,6 +208,17 @@ body.workspace-single-mode .ad-host {
 }
 body.workspace-single-mode .workspace-grid {
   height: 100%;
+}
+body.workspace-active .chart-section {
+  display: flex !important;
+  flex-direction: column !important;
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+}
+body.workspace-active #workspace-host .workspace-grid {
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
 }
 
 /* Chart panel — resizable both directions */

@@ -14,7 +14,7 @@ class ChartPanel {
     this.symbol = this._validateSymbol(def.symbol) || 'BTC_USDT';
     this.timeframe = this._validateTf(def.timeframe) || 5;
     this.layers = Object.assign({
-      levelsEnabled: false,
+      levelsEnabled: true,
       levelsAlertEnabled: true,
       liqEnabled: true,
       cvdEnabled: false,
@@ -561,7 +561,7 @@ class ChartPanel {
   }
 
   async loadLevels() {
-    if (!this.layers.levelsEnabled) return;
+    if (!this.layers.levelsEnabled && !this.layers.liqEnabled) return;
     if (this.symbol === 'ALL') return;
     const sym = this.symbol;
     try {
@@ -611,7 +611,7 @@ class ChartPanel {
     if (!ctx) return;
     const W = canvas.width, H = canvas.height;
     ctx.clearRect(0,0,W,H);
-    if (!this.layers.levelsEnabled || !this.levelsData) return;
+    if ((!this.layers.levelsEnabled && !this.layers.liqEnabled) || !this.levelsData) return;
     const data = this.levelsData;
     const rows = (data.levels || []).filter(r => Number(r.usd)>0);
     if (!rows.length) return;
@@ -725,7 +725,7 @@ class ChartPanel {
   }
 
   _checkDashedTriggers(price) {
-    if (!this.layers.levelsEnabled || !this.layers.levelsAlertEnabled) return;
+    if ((!this.layers.levelsEnabled && !this.layers.liqEnabled) || !this.layers.levelsAlertEnabled) return;
     const data = this.levelsData;
     if (!data) return;
     const magnets = data.magnets_list || [];

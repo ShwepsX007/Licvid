@@ -215,6 +215,13 @@ class ChartPanel {
       this._ro.observe(root);
       this._ro.observe(wrap);
     }
+
+    // Periodic refresh of levels (like main chart)
+    this._levelsTimer = setInterval(() => {
+      if ((this.layers.levelsEnabled || this.layers.liqEnabled) && this.symbol !== 'ALL') {
+        this.loadLevels();
+      }
+    }, 30000);
   }
 
   _populateSymbolSelect() {
@@ -567,14 +574,25 @@ class ChartPanel {
     try {
       const price = this.price || (this.candles.length ? this.candles[this.candles.length-1].close : 0);
       const url = `/api/liq_levels?symbol=${encodeURIComponent(sym)}${price?`&price=${price}`:''}`;
-      const r = await fetch(url);
-      if (!r.ok) throw new Error('levels fetch failed');
+      const r = await fetch(url, { cache: 'no-store' });
+      if (!r.ok) throw new Error('levels fetch failed ' + r.status);
       const data = await r.json();
+      if (!data || data.ok === false) {
+        // empty or off
+        this.levelsData = data;
+        this._drawOverlays();
+        return;
+      }
       this.levelsData = data;
       this.levelsAt = Date.now();
+      // Ensure canvas size before drawing
+      this.resize();
       this._drawOverlays();
+      // Retry drawing after a bit in case priceToCoordinate not ready
+      setTimeout(() => this._drawOverlays(), 500);
+      setTimeout(() => this._drawOverlays(), 1500);
     } catch (e) {
-      // ignore
+      console.debug('panel loadLevels failed', sym, e);
     }
   }
 
@@ -607,11 +625,30 @@ class ChartPanel {
   _drawOverlays() {
     if (!this.clusterCanvas || !this.chart || !this.candleSeries) return;
     const canvas = this.clusterCanvas;
+    // Ensure canvas has size
+    const rect = this.chartEl ? this.chartEl.getBoundingClientRect() : null;
+    let W = canvas.width, H = canvas.height;
+    if (!W || !H || W < 10 || H < 10) {
+      if (rect && rect.width > 10 && rect.height > 10) {
+        this.resize();
+        W = canvas.width; H = canvas.height;
+      } else {
+        return;
+      }
+    }
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
-    const W = canvas.width, H = canvas.height;
     ctx.clearRect(0,0,W,H);
     if ((!this.layers.levelsEnabled && !this.layers.liqEnabled) || !this.levelsData) return;
+    // Also clear old price lines
+    try {
+      if (this._priceLines) {
+        this._priceLines.forEach(pl => {
+          try { this.candleSeries.removePriceLine(pl); } catch {}
+        });
+      }
+      this._priceLines = [];
+    } catch {}
     const data = this.levelsData;
     const rows = (data.levels || []).filter(r => Number(r.usd)>0);
     if (!rows.length) return;
@@ -722,6 +759,34 @@ class ChartPanel {
     });
 
     ctx.restore();
+
+    // Also draw price lines for magnets as fallback (visible even if canvas clipped)
+    try {
+      const magnets = data.magnets_list || [];
+      const maxLines = 20;
+      let drawn = 0;
+      for (const m of magnets) {
+        if (drawn >= maxLines) break;
+        const lv = Number(m && m.price);
+        if (!(lv>0)) continue;
+        // Check if already visible in canvas (we already have visible check)
+        // Create price line
+        try {
+          const isLong = (m.side === 'long' || (m.distance_pct!=null && m.distance_pct<0));
+          const color = isLong ? "#ff2d95" : "#00d6ff";
+          const line = this.candleSeries.createPriceLine({
+            price: lv,
+            color: color,
+            lineWidth: 1,
+            lineStyle: 2, // dashed
+            axisLabelVisible: true,
+            title: '',
+          });
+          this._priceLines.push(line);
+          drawn++;
+        } catch {}
+      }
+    } catch {}
   }
 
   _checkDashedTriggers(price) {
@@ -792,6 +857,14 @@ class ChartPanel {
     this.candles = [];
     this.levelsData = null;
     this._levelHighlights = {};
+    try {
+      if (this._priceLines) {
+        this._priceLines.forEach(pl => {
+          try { this.candleSeries.removePriceLine(pl); } catch {}
+        });
+        this._priceLines = [];
+      }
+    } catch {}
     if (v!=='ALL') {
       this.loadCandles();
       if (this.layers.levelsEnabled) this.loadLevels();
@@ -831,12 +904,20 @@ class ChartPanel {
     }
     if (changed) {
       this._paintLayers();
-      if (patch.levelsEnabled && !this.levelsData) this.loadLevels();
-      if (!this.layers.levelsEnabled) {
+      if ((patch.levelsEnabled || patch.liqEnabled) && !this.levelsData) this.loadLevels();
+      if (!this.layers.levelsEnabled && !this.layers.liqEnabled) {
         if (this.clusterCanvas) {
           const ctx = this.clusterCanvas.getContext('2d');
           if (ctx) ctx.clearRect(0,0,this.clusterCanvas.width,this.clusterCanvas.height);
         }
+        try {
+          if (this._priceLines) {
+            this._priceLines.forEach(pl => {
+              try { this.candleSeries.removePriceLine(pl); } catch {}
+            });
+            this._priceLines = [];
+          }
+        } catch {}
       } else {
         this._drawOverlays();
       }
@@ -913,6 +994,7 @@ class ChartPanel {
   unmount() {
     this._destroyed = true;
     if (this._ro) { try { this._ro.disconnect(); } catch {} }
+    if (this._levelsTimer) { try { clearInterval(this._levelsTimer); } catch {} }
     window.removeEventListener('resize', this._boundResize);
     if (this.chart) {
       try { this.chart.remove(); } catch {}

@@ -176,6 +176,48 @@ class WorkspaceManager {
     };
   }
 
+  setWorkspaceActive(isMulti) {
+    try {
+      document.body.classList.toggle('workspace-active', !!isMulti);
+      try { localStorage.setItem('liqscope_workspace_active', isMulti ? '1' : '0'); } catch {}
+      // Ensure main chart not collapsed when switching modes
+      try {
+        const cs = document.querySelector('.chart-section');
+        if (cs && cs.classList.contains('collapsed')) {
+          cs.classList.remove('collapsed');
+          try { localStorage.setItem('liqscope.chartCollapsed', '0'); } catch {}
+        }
+      } catch {}
+      // Update all toggle buttons
+      this._updateAllToggles(isMulti);
+      setTimeout(() => {
+        try { window.dispatchEvent(new Event('resize')); } catch {}
+        this.panels.forEach(p => p.resize());
+      }, 100);
+      setTimeout(() => {
+        try { window.dispatchEvent(new Event('resize')); } catch {}
+        this.panels.forEach(p => p.resize());
+      }, 400);
+    } catch {}
+  }
+
+  _updateAllToggles(isMulti) {
+    const multi = typeof isMulti === 'boolean' ? isMulti : document.body.classList.contains('workspace-active');
+    try {
+      const toolbarBtn = document.querySelector('[data-action="toggle-single-chart"]');
+      if (toolbarBtn) toolbarBtn.textContent = multi ? 'Single chart' : 'Multi chart';
+    } catch {}
+    try {
+      const globalBtn = document.getElementById('workspace-global-toggle');
+      if (globalBtn) {
+        globalBtn.textContent = multi ? 'Single chart' : 'Multi chart';
+        globalBtn.style.background = multi ? '#1e3a5f' : '#151d2b';
+        globalBtn.style.borderColor = multi ? '#2a5a9a' : '#233044';
+        globalBtn.style.color = multi ? '#cfe3ff' : '#a8bdd6';
+      }
+    } catch {}
+  }
+
   _ensurePersistentToggle() {
     try {
       const chartSection = document.querySelector('.chart-section');
@@ -186,53 +228,15 @@ class WorkspaceManager {
         btn.id = 'workspace-global-toggle';
         btn.className = 'ws-global-toggle';
         btn.title = 'Toggle Multi-chart workspace';
+        // Place near chart header, visible in single mode to go back to multi
         btn.style.cssText = 'position:absolute;top:6px;right:80px;z-index:50;background:#151d2b;border:1px solid #233044;color:#a8bdd6;border-radius:6px;padding:4px 8px;font-size:11px;cursor:pointer;';
         chartSection.appendChild(btn);
         btn.addEventListener('click', () => {
           const isNowMulti = !document.body.classList.contains('workspace-active');
-          document.body.classList.toggle('workspace-active', isNowMulti);
-          try { localStorage.setItem('liqscope_workspace_active', isNowMulti ? '1' : '0'); } catch {}
-          try {
-            const cs = document.querySelector('.chart-section');
-            if (!isNowMulti && cs) {
-              cs.classList.remove('collapsed');
-              try { localStorage.setItem('liqscope.chartCollapsed', '0'); } catch {}
-            }
-          } catch {}
-          setTimeout(() => {
-            try { window.dispatchEvent(new Event('resize')); } catch {}
-            this.panels.forEach(p => p.resize());
-          }, 100);
-          setTimeout(() => {
-            try { window.dispatchEvent(new Event('resize')); } catch {}
-            this.panels.forEach(p => p.resize());
-          }, 400);
-          this._updateGlobalToggle();
+          this.setWorkspaceActive(isNowMulti);
         });
       }
-      this._updateGlobalToggle();
-    } catch {}
-  }
-
-  _updateGlobalToggle() {
-    try {
-      const btn = document.getElementById('workspace-global-toggle');
-      if (!btn) return;
-      const isMulti = document.body.classList.contains('workspace-active');
-      btn.textContent = isMulti ? 'Single chart' : 'Multi chart';
-      btn.style.background = isMulti ? '#1e3a5f' : '#151d2b';
-      btn.style.borderColor = isMulti ? '#2a5a9a' : '#233044';
-      btn.style.color = isMulti ? '#cfe3ff' : '#a8bdd6';
-      // When entering multi, ensure chart-section not collapsed to avoid small height
-      if (isMulti) {
-        try {
-          const cs = document.querySelector('.chart-section');
-          if (cs && cs.classList.contains('collapsed')) {
-            cs.classList.remove('collapsed');
-            try { localStorage.setItem('liqscope.chartCollapsed', '0'); } catch {}
-          }
-        } catch {}
-      }
+      this._updateAllToggles();
     } catch {}
   }
 
@@ -252,8 +256,8 @@ class WorkspaceManager {
         <button class="ws-btn" data-action="layout-1">1x</button>
         <button class="ws-btn" data-action="layout-2">2x</button>
         <button class="ws-btn" data-action="layout-4">2x2</button>
-        <button class="ws-btn" data-action="toggle-single-chart" title="Show/hide original single chart">Single chart</button>
         <span class="ws-hint">Click chart → feed • Drag tabs • Detach • Per-panel layers</span>
+        <button class="ws-btn" data-action="toggle-single-chart" title="Show/hide original single chart" style="margin-left:auto">Single chart</button>
       `;
       root.appendChild(toolbar);
       const tabs = document.createElement('div');
@@ -271,31 +275,7 @@ class WorkspaceManager {
       toolbar.querySelector('[data-action="layout-4"]').addEventListener('click', () => this.setLayout(4));
       toolbar.querySelector('[data-action="toggle-single-chart"]').addEventListener('click', () => {
         const isNowMulti = !document.body.classList.contains('workspace-active');
-        document.body.classList.toggle('workspace-active', isNowMulti);
-        const btn = toolbar.querySelector('[data-action="toggle-single-chart"]');
-        btn.textContent = isNowMulti ? 'Single chart' : 'Multi chart';
-        try { localStorage.setItem('liqscope_workspace_active', isNowMulti ? '1' : '0'); } catch {}
-        // Ensure main chart not collapsed when switching back to single
-        try {
-          const chartSection = document.querySelector('.chart-section');
-          if (!isNowMulti && chartSection) {
-            chartSection.classList.remove('collapsed');
-            try { localStorage.setItem('liqscope.chartCollapsed', '0'); } catch {}
-          }
-        } catch {}
-        // Trigger resize for both modes
-        setTimeout(() => {
-          try { window.dispatchEvent(new Event('resize')); } catch {}
-          this.panels.forEach(p => p.resize());
-          // Also try to resize main chart if exists
-          try {
-            if (window.LiqScopeApp && window.LiqScopeApp.resize) window.LiqScopeApp.resize();
-          } catch {}
-        }, 100);
-        setTimeout(() => {
-          try { window.dispatchEvent(new Event('resize')); } catch {}
-          this.panels.forEach(p => p.resize());
-        }, 400);
+        this.setWorkspaceActive(isNowMulti);
       });
 
       tabs.addEventListener('dragover', (e) => {

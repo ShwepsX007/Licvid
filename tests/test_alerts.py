@@ -689,5 +689,62 @@ class LiveFlowTest(unittest.TestCase):
         self.assertTrue(live["level"]["flow"])
 
 
+class LevelSignalConfigTest(unittest.TestCase):
+    """Сигнал сервиса уровней: свои фильтры, не настройки алертов по объёму."""
+
+    def test_defaults_keep_telegram_off(self):
+        from alerts import normalize_level_signal
+        cfg = normalize_level_signal({})
+        self.assertFalse(cfg["notify"])
+        self.assertEqual(cfg["min_usd"], 1_000_000)
+        self.assertEqual(cfg["approach_pct"], 0.5)
+        self.assertEqual(cfg["side"], "both")
+        self.assertEqual(cfg["symbols"], [])
+        self.assertEqual(cfg["cooldown_min"], 60)
+
+    def test_filters_are_clamped(self):
+        from alerts import normalize_level_signal
+        cfg = normalize_level_signal({
+            "notify": 1, "min_usd": -5, "approach_pct": 90, "side": "nope",
+            "symbols": ["btc", "BTC_USDT", "eth-usdt", ""],
+            "cooldown_min": 0,
+        })
+        self.assertTrue(cfg["notify"])
+        self.assertEqual(cfg["min_usd"], 0)
+        self.assertEqual(cfg["approach_pct"], 5.0)
+        self.assertEqual(cfg["side"], "both")
+        self.assertEqual(cfg["symbols"], ["BTC_USDT", "ETH_USDT"])
+        self.assertEqual(cfg["cooldown_min"], 1)
+
+    def test_hits_follow_side_distance_and_coins(self):
+        from alerts import level_signal_hits
+        market = {"now": 1_800_000_000, "levels": {
+            "BTC_USDT": {"price": 60_000.0, "magnets": [
+                {"price": 60_200.0, "usd": 2_000_000.0, "side": "short", "lev": 20},
+                {"price": 59_800.0, "usd": 3_000_000.0, "side": "long", "lev": 10},
+            ]},
+            "ETH_USDT": {"price": 3_000.0, "magnets": [
+                {"price": 3_010.0, "usd": 4_000_000.0, "side": "short", "lev": 15},
+            ]},
+        }}
+        both = level_signal_hits(market, {
+            "min_usd": 1_000_000, "approach_pct": 0.5, "side": "both",
+            "symbols": ["BTC_USDT"],
+        })
+        self.assertEqual([h["symbol"] for h in both], ["BTC_USDT", "BTC_USDT"])
+        longs = level_signal_hits(market, {
+            "min_usd": 1_000_000, "approach_pct": 0.5, "side": "long",
+        })
+        self.assertEqual([h["level_side"] for h in longs], ["long"])
+        far = level_signal_hits(market, {
+            "min_usd": 1_000_000, "approach_pct": 0.1, "side": "both",
+        })
+        self.assertEqual(far, [])
+        eth = level_signal_hits(market, {
+            "min_usd": 1_000_000, "approach_pct": 0.5, "symbols": ["ETH_USDT"],
+        })
+        self.assertEqual([h["symbol"] for h in eth], ["ETH_USDT"])
+
+
 if __name__ == "__main__":
     unittest.main()

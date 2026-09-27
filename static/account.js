@@ -944,9 +944,192 @@
         } catch (e) { /* ignore */ }
     }
 
+    var lvSig = null;
+    var lvSigSaveT = null;
+    var LV_SIG_MASS = [100000, 500000, 1000000, 5000000, 20000000];
+    var LV_SIG_DIST = [0.3, 0.5, 1, 2];
+    var LV_SIG_PAUSE = [15, 30, 60, 240];
+
+    function lvSigDefaults() {
+        return { notify: false, min_usd: 1000000, approach_pct: 0.5,
+                 side: "both", symbols: [], cooldown_min: 60 };
+    }
+
+    function lvSigCfg() {
+        return Object.assign(lvSigDefaults(), lvSig || {});
+    }
+
+    function loadLevelSignal() {
+        return api("/api/account/levels/signal").then(function (d) {
+            if (d && d.config) lvSig = d.config;
+            applyLevelSignalState();
+        }).catch(function () { applyLevelSignalState(); });
+    }
+
+    function lvSigSet(patch) {
+        lvSig = Object.assign(lvSigDefaults(), lvSig || {}, patch || {});
+        applyLevelSignalState();
+        if (lvSigSaveT) clearTimeout(lvSigSaveT);
+        lvSigSaveT = setTimeout(function () {
+            lvSigSaveT = null;
+            api("/api/account/levels/signal", {
+                method: "POST",
+                body: JSON.stringify(lvSig),
+            }).then(function (d) {
+                var st = $("lv-sig-status");
+                if (st) st.textContent = d && d.ok ? t("lv.sig_saved") : t("lv.sig_fail");
+                if (d && d.config) lvSig = d.config;
+                applyLevelSignalState();
+            }).catch(function () {
+                var st = $("lv-sig-status");
+                if (st) st.textContent = t("lv.sig_fail");
+            });
+        }, 250);
+    }
+
+    function lvSigCoinsHtml(cfg) {
+        var picked = cfg.symbols || [];
+        var allOn = !picked.length;
+        var html = bookChipHtml(allOn, 'data-lv-sig-all="1"', esc(t("lv.all")));
+        (lvSyms || []).slice(0, 12).forEach(function (s) {
+            var on = picked.indexOf(s) >= 0;
+            html += bookChipHtml(on, 'data-lv-sig-sym="' + esc(s) + '"',
+                                 esc(String(s).replace("_USDT", "")));
+        });
+        return html;
+    }
+
+    function bindLevelSignal(board) {
+        var sw = $("lv-tg");
+        if (sw && !sw._lvBound) {
+            sw._lvBound = true;
+            sw.onclick = function (e) {
+                e.preventDefault();
+                lvSigSet({ notify: !lvSigCfg().notify });
+            };
+        }
+        board.querySelectorAll("[data-lv-sig-mass]").forEach(function (b) {
+            b.onclick = function () {
+                lvSigSet({ min_usd: Number(b.getAttribute("data-lv-sig-mass")) || 0 });
+            };
+        });
+        board.querySelectorAll("[data-lv-sig-dist]").forEach(function (b) {
+            b.onclick = function () {
+                lvSigSet({ approach_pct: Number(b.getAttribute("data-lv-sig-dist")) || 0.5 });
+            };
+        });
+        board.querySelectorAll("[data-lv-sig-side]").forEach(function (b) {
+            b.onclick = function () {
+                lvSigSet({ side: b.getAttribute("data-lv-sig-side") || "both" });
+            };
+        });
+        board.querySelectorAll("[data-lv-sig-pause]").forEach(function (b) {
+            b.onclick = function () {
+                lvSigSet({ cooldown_min: Number(b.getAttribute("data-lv-sig-pause")) || 60 });
+            };
+        });
+        board.querySelectorAll("[data-lv-sig-all]").forEach(function (b) {
+            b.onclick = function () { lvSigSet({ symbols: [] }); };
+        });
+        board.querySelectorAll("[data-lv-sig-sym]").forEach(function (b) {
+            b.onclick = function () {
+                var s = b.getAttribute("data-lv-sig-sym");
+                var cur = (lvSigCfg().symbols || []).slice();
+                var i = cur.indexOf(s);
+                if (i >= 0) cur.splice(i, 1);
+                else {
+                    if (cur.length >= 8) {
+                        var st = $("lv-sig-status");
+                        if (st) st.textContent = t("lv.sig_limit");
+                        return;
+                    }
+                    cur.push(s);
+                }
+                lvSigSet({ symbols: cur });
+            };
+        });
+    }
+
+    function applyLevelSignalState() {
+        var board = $("levels-board");
+        if (!board) return;
+        var cfg = lvSigCfg();
+        var sw = $("lv-tg");
+        if (sw) {
+            sw.classList.toggle("on", !!cfg.notify);
+            var span = sw.querySelector("span");
+            if (span) span.textContent = cfg.notify ? t("lv.tg_on") : t("lv.tg_off");
+        }
+        var note = $("lv-sig-note");
+        if (note) note.textContent = t("lv.sig_note");
+        var title = $("lv-sig-title");
+        if (title) title.textContent = t("lv.sig_title");
+        ["mass", "dist", "side", "pause"].forEach(function (name) {
+            var lab = $("lv-sig-" + name + "-lab");
+            if (!lab) return;
+            lab.textContent = t(name === "mass" ? "lv.sig_mass"
+                : name === "dist" ? "lv.sig_dist"
+                : name === "side" ? "lv.sig_side" : "lv.sig_pause");
+        });
+        var coinsLab = $("lv-sig-coins-lab");
+        if (coinsLab) coinsLab.textContent = t("lv.sig_coins");
+        board.querySelectorAll("[data-lv-sig-mass]").forEach(function (b) {
+            b.classList.toggle("on", Math.abs((Number(cfg.min_usd) || 0) -
+                Number(b.getAttribute("data-lv-sig-mass"))) < 1);
+        });
+        board.querySelectorAll("[data-lv-sig-dist]").forEach(function (b) {
+            b.classList.toggle("on", Math.abs((Number(cfg.approach_pct) || 0) -
+                Number(b.getAttribute("data-lv-sig-dist"))) < 0.05);
+        });
+        board.querySelectorAll("[data-lv-sig-side]").forEach(function (b) {
+            b.classList.toggle("on", (cfg.side || "both") === b.getAttribute("data-lv-sig-side"));
+        });
+        board.querySelectorAll("[data-lv-sig-pause]").forEach(function (b) {
+            b.classList.toggle("on", Number(cfg.cooldown_min) ===
+                Number(b.getAttribute("data-lv-sig-pause")));
+        });
+        var coins = $("lv-sig-coins");
+        if (coins) coins.innerHTML = lvSigCoinsHtml(cfg);
+        bindLevelSignal(board);
+    }
+
+    function lvSignalHtml() {
+        var cfg = lvSigCfg();
+        function chips(list, attr, fmt) {
+            return list.map(function (v) {
+                return bookChipHtml(false, attr + '="' + v + '"', fmt(v));
+            }).join("");
+        }
+        return '<div class="lv-signal" id="lv-signal">' +
+            '<div class="bk-head">' +
+            '<span class="lv-cap" id="lv-sig-title">' + esc(t("lv.sig_title")) + "</span>" +
+            '<label class="al-switch' + (cfg.notify ? " on" : "") + '" id="lv-tg">' +
+            "<i></i><span>" + esc(cfg.notify ? t("lv.tg_on") : t("lv.tg_off")) + "</span></label>" +
+            '<span class="bk-status" id="lv-sig-status"></span></div>' +
+            '<div class="lv-sub" id="lv-sig-note">' + esc(t("lv.sig_note")) + "</div>" +
+            '<div class="al-label" id="lv-sig-mass-lab">' + esc(t("lv.sig_mass")) + "</div>" +
+            '<div class="al-chips" id="lv-sig-mass">' +
+            chips(LV_SIG_MASS, "data-lv-sig-mass", alMoney) + "</div>" +
+            '<div class="al-label" id="lv-sig-dist-lab">' + esc(t("lv.sig_dist")) + "</div>" +
+            '<div class="al-chips" id="lv-sig-dist">' +
+            chips(LV_SIG_DIST, "data-lv-sig-dist", function (v) { return v + "%"; }) + "</div>" +
+            '<div class="al-label" id="lv-sig-side-lab">' + esc(t("lv.sig_side")) + "</div>" +
+            '<div class="al-chips" id="lv-sig-side">' +
+            bookChipHtml(false, 'data-lv-sig-side="both"', esc(t("lv.side_both"))) +
+            bookChipHtml(false, 'data-lv-sig-side="long"', esc(t("lv.card_long"))) +
+            bookChipHtml(false, 'data-lv-sig-side="short"', esc(t("lv.card_short"))) +
+            "</div>" +
+            '<div class="al-label" id="lv-sig-pause-lab">' + esc(t("lv.sig_pause")) + "</div>" +
+            '<div class="al-chips" id="lv-sig-pause">' +
+            chips(LV_SIG_PAUSE, "data-lv-sig-pause", alWin) + "</div>" +
+            '<div class="al-label" id="lv-sig-coins-lab">' + esc(t("lv.sig_coins")) + "</div>" +
+            '<div class="al-chips" id="lv-sig-coins">' + lvSigCoinsHtml(cfg) + "</div></div>";
+    }
+
     function bootLevels() {
         if (!$("levels-board")) return;
         lvBuilt = false;
+        loadLevelSignal();
         loadLevels(true);
         if (lvTimer) clearInterval(lvTimer);
         lvTimer = setInterval(function () {
@@ -1312,6 +1495,7 @@
                 esc(t("lv.badge")) + "</span>" +
                 '<span class="bk-status" id="lv-status"></span></div>' +
                 '<div class="lv-sub">' + esc(t("lv.about")) + "</div>" +
+                lvSignalHtml() +
                 '<div class="al-label">' + esc(t("lv.coin")) + "</div>" +
                 '<div class="lv-symrow"><select id="lv-sym" class="lv-select"></select></div>' +
                 '<div class="al-label">' + esc(t("lv.cut")) + '</div><div class="al-chips" id="lv-thr">' + thr + "</div>" +
@@ -1341,6 +1525,8 @@
                 '<div class="lv-how" id="lv-how"></div>' +
                 '<div class="lv-notes" id="lv-notes"></div>';
             lvBindBoard(board);
+            bindLevelSignal(board);
+            applyLevelSignalState();
             var sel = $("lv-sym");
             if (sel) {
                 sel.addEventListener("change", function () {

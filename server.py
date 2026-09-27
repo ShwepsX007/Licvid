@@ -715,6 +715,24 @@ def level_alert_symbols() -> List[str]:
         subs = account_store.list_alert_subscribers()
     except Exception:                       # noqa: BLE001
         subs = []
+    try:
+        level_subs = account_store.list_service_subscribers("levels")
+    except Exception:                       # noqa: BLE001
+        level_subs = []
+    from alerts import normalize_level_signal
+    for sub in level_subs:
+        try:
+            sig = normalize_level_signal(sub.get("config"))
+        except Exception:                   # noqa: BLE001
+            continue
+        if not sig.get("notify"):
+            continue
+        if sig.get("symbols"):
+            for sym in sig["symbols"]:
+                add(sym)
+        else:
+            for sym in list(feed.symbols if feed else [])[:LEVELS_SNAP_MAX]:
+                add(sym)
     for sub in subs:
         try:
             cfg = normalize_config(sub.get("config"))
@@ -1783,6 +1801,75 @@ def alerts_due(cfg: dict, market: dict, last_fire, now: float) -> List[dict]:
     return out
 
 
+async def levels_signal_loop():
+    """Сигнал сервиса «Уровни ликвидаций»: цена подошла к расчётному магниту.
+
+    Тумблер и фильтры живут в кабинете этого сервиса, не в алертах по объёму.
+    Пока Telegram выключен, в бот ничего не уходит. Пауза — на монету, чтобы
+    один и тот же магнит не писал каждые полминуты.
+    """
+    from alerts import (format_alert_html, level_signal_hits,
+                        normalize_level_signal, should_fire)
+    try:
+        await asyncio.sleep(28)
+    except asyncio.CancelledError:
+        return
+    while True:
+        try:
+            market = alerts_market_snapshot()
+            now = float(market.get("now") or time.time())
+            subs = account_store.list_service_subscribers("levels")
+            tg_bot.warm_langs(subs)
+            for sub in subs:
+                cfg = normalize_level_signal(sub.get("config"))
+                if not cfg.get("notify"):
+                    continue
+                uid = int(sub["user_id"])
+
+                def last_fire(symbol, _uid=uid):
+                    if not symbol or str(symbol).upper() in ("ALL", ""):
+                        return account_store.last_alert_any(_uid, "level")
+                    return account_store.last_alert_ts(_uid, "level", symbol)
+
+                sent = 0
+                for hit in level_signal_hits(market, cfg, limit=3):
+                    if not should_fire(last_fire(hit.get("symbol")), now,
+                                       cfg["cooldown_min"]):
+                        continue
+                    account_store.add_alert_event(uid, hit)
+                    await push_service_message(
+                        uid, "levels", alerts_chat_text(hit),
+                        {"symbol": str(hit.get("symbol") or ""),
+                         "metric": "level",
+                         "parts": alerts_chat_meta(hit)})
+                    tg_id = int(sub.get("tg_id") or 0)
+                    if tg_id and tg_bot.running:
+                        await tg_bot.send(
+                            tg_id, format_alert_html(hit, tg_bot.site_url()),
+                            markup=tg_bot.site_link_kb("посмотреть в терминале"))
+                    sent += 1
+                    if sent >= 3:
+                        break
+        except asyncio.CancelledError:
+            break
+        except Exception as e:              # noqa: BLE001
+            log.warning("сигнал уровней: %s", e)
+        try:
+            await asyncio.sleep(20)
+        except asyncio.CancelledError:
+            break
+
+
+def alerts_chat_text(hit: dict) -> str:
+    from alerts import chat_text
+    return chat_text(hit)
+
+
+def alerts_chat_meta(hit: dict) -> list:
+    from alerts import chat_meta
+    return chat_meta(hit)
+
+
 async def alert_loop():
     """Раз в несколько секунд проверяет пороги и шлёт в Telegram."""
     import alerts
@@ -2823,6 +2910,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(hot_symbols_watcher(), name="hot-symbols"),
         asyncio.create_task(liq_levels_task(), name="liq-levels"),
         asyncio.create_task(alert_loop(), name="alerts"),
+        asyncio.create_task(levels_signal_loop(), name="levels-signal"),
         asyncio.create_task(corr_alert_loop(), name="corr-alerts"),
     ]
     # Дневной дайджест: вечерний выпуск в оба канала и в архив на сайте

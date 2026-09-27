@@ -1228,6 +1228,54 @@ def register_account_routes(app) -> None:
         return {"ok": True, "config": cfg, "subscribed": True,
                 "walls_by_symbol": data.get("walls_by_symbol") or []}
 
+    # ----- 🎯 уровни ликвидаций: сигнал в Telegram ------------------------------
+
+    @router.get("/api/account/levels/signal")
+    async def api_levels_signal_get(request: Request):
+        """Тумблер Telegram и фильтры сигнала расчётных уровней."""
+        from alerts import (level_signal_hits, level_signal_presets,
+                            normalize_level_signal)
+        user = current_user(request)
+        if not user:
+            return _need_auth()
+        if not _verify_allowed(user):
+            return _need_verified()
+        row = ctx.store.get_user_service(user["id"], "levels")
+        cfg = normalize_level_signal((row or {}).get("config") or {})
+        market = {}
+        try:
+            market = ctx.alerts_market_fn() or {}
+        except Exception as e:                            # noqa: BLE001
+            log.debug("levels signal market: %s", e)
+        near = []
+        try:
+            near = level_signal_hits(market, cfg, limit=3)
+        except Exception:                                 # noqa: BLE001
+            near = []
+        return {"ok": True, "config": cfg, "presets": level_signal_presets(),
+                "subscribed": bool(row and row.get("enabled")),
+                "near": near}
+
+    @router.post("/api/account/levels/signal")
+    async def api_levels_signal_save(request: Request):
+        from alerts import normalize_level_signal
+        user = current_user(request)
+        if not user:
+            return _need_auth()
+        if not _verify_allowed(user):
+            return _need_verified()
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        cfg = normalize_level_signal(body or {})
+        # Сигнал не должен выключать сам сервис: доска живёт и без Telegram.
+        r = ctx.store.set_user_service_config(
+            user["id"], "levels", cfg, enabled=True)
+        if not r.get("ok"):
+            return JSONResponse(r, status_code=400)
+        return {"ok": True, "config": cfg, "subscribed": True}
+
     @router.post("/api/account/name")
     async def api_account_name(request: Request):
         """Смена имени в кабинете: то, что показывается на сайте."""

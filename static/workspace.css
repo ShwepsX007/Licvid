@@ -385,27 +385,69 @@ body.workspace-single-mode .ad-host {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  height: 100%;
 }
 .chart-section.has-chart-dock > #workspace-host { display: none !important; }
-.chart-dock {
+.chart-dock-wrap {
   flex: 1 1 auto;
   min-height: 0;
+  height: 100%;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+.chart-dock-tools {
   display: flex;
-  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px 0;
+  flex-shrink: 0;
+}
+.chart-dock-tools span {
+  font-size: 11px;
+  color: #8ea3bb;
+  margin-right: 4px;
+}
+.chart-dock-tools button {
+  background: #151d2b;
+  border: 1px solid #233044;
+  color: #c5d6ea;
+  border-radius: 5px;
+  padding: 3px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.chart-dock-tools button.active,
+.chart-dock-tools button:hover {
+  border-color: #3d70ff;
+  color: #fff;
+}
+.chart-dock {
+  min-height: 0;
+  height: 100%;
+  display: grid;
   gap: 8px;
   padding: 8px;
-  overflow: auto;
+  overflow: hidden;
   align-content: stretch;
 }
+.chart-dock.cols-1 { grid-template-columns: 1fr; grid-auto-rows: minmax(0, 1fr); }
+.chart-dock.cols-2 { grid-template-columns: 1fr 1fr; grid-auto-rows: minmax(0, 1fr); }
+.chart-dock.cols-4 { grid-template-columns: 1fr 1fr; grid-auto-rows: minmax(0, 1fr); }
+.chart-dock.cols-3 { grid-template-columns: 1fr 1fr; grid-auto-rows: minmax(0, 1fr); }
+/* ×3: два сверху, последний на всю ширину снизу */
+.chart-dock.cols-3 > .chart-slot:last-child:nth-child(3) { grid-column: 1 / -1; }
+.chart-dock > .chart-slot:only-child { grid-column: 1 / -1; }
+body.chart-dock-pop-ready,
+body.chart-dock-pop-ready * { cursor: alias; }
 .chart-dock.is-drop {
   outline: 1px dashed #3d70ff;
   outline-offset: -4px;
   background: rgba(61, 112, 255, 0.06);
 }
 .chart-slot {
-  flex: 1 1 460px;
-  min-width: min(100%, 320px);
-  min-height: 340px;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
   display: flex;
   flex-direction: column;
   background: #0a0f19;
@@ -445,16 +487,55 @@ body.workspace-single-mode .ad-host {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 .chart-slot-body > .chart-header { flex: 0 0 auto; }
-.chart-slot-body > .chart-stack { flex: 1 1 auto; min-height: 0; }
-.chart-slot-frame {
+.chart-slot-body > .chart-stack,
+.chart-slot-body > .chart-stack > .chart-wrapper {
   flex: 1 1 auto;
-  width: 100%;
+  height: 100%;
   min-height: 0;
+}
+.chart-slot-frame-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+}
+.chart-slot-frame {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
   border: 0;
+  display: block;
   background: #090c10;
 }
+.chart-slot-move {
+  flex: 0 0 auto;
+  background: #151d2b;
+  border: 1px solid #233044;
+  color: #c5d6ea;
+  border-radius: 5px;
+  padding: 2px 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.chart-slot-move:hover { border-color: #3d70ff; color: #fff; }
+.chart-slot-popnote {
+  position: absolute;
+  inset: 36px 10px 10px;
+  display: none;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 10px;
+  color: #c5d6ea;
+  font-size: 13px;
+  z-index: 3;
+}
+.chart-slot.is-popped .chart-slot-popnote { display: flex; }
+.chart-slot.is-popped .chart-slot-frame-wrap,
+.chart-slot.is-popped .chart-slot-body { visibility: hidden; }
 .chart-slot.chart-floating {
   position: fixed;
   z-index: 70;
@@ -503,19 +584,43 @@ body.chart-embed .controls-bar {
   padding: 2px 4px;
   font-size: 11px;
 }
+/* Встроенный сингл-чарт заполняет iframe целиком. Узкое окно иначе
+   попадает под мобильные 58vh, и снизу остаётся пустое поле. */
+html:has(body.chart-embed),
+body.chart-embed {
+  height: 100% !important;
+  overflow: hidden !important;
+}
 body.chart-embed .main-layout {
-  height: 100vh;
-  height: 100dvh;
-  min-height: 0;
+  height: 100% !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+  flex-direction: row !important;
 }
 body.chart-embed .chart-section {
-  height: 100%;
-  min-height: 0;
+  height: 100% !important;
+  min-height: 0 !important;
+  flex: 1 1 auto !important;
 }
-body.chart-embed { overflow: hidden; }
+body.chart-embed .chart-stack,
+body.chart-embed .chart-stack > .chart-wrapper,
+body.chart-embed #tv-chart-container {
+  flex: 1 1 auto !important;
+  height: 100% !important;
+  min-height: 0 !important;
+}
+body.chart-embed-pop .chart-pop-back {
+  position: fixed;
+  top: 8px;
+  right: 8px;
+  z-index: 400;
+}
 
 @media (max-width: 900px) {
-  .chart-slot { flex-basis: 100%; min-width: 0; }
+  .chart-dock.cols-2,
+  .chart-dock.cols-3,
+  .chart-dock.cols-4 { grid-template-columns: 1fr; }
+  .chart-dock.cols-3 > .chart-slot:last-child:nth-child(3) { grid-column: auto; }
   .chart-slot.chart-floating {
     width: calc(100vw - 12px);
     height: 70vh;

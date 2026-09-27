@@ -2,9 +2,9 @@
  * Несколько обычных сингл-графиков в сетке терминала.
  *
  * Первый график — тот, что уже на странице (все слои, следование, рисование).
- * «＋ График» добавляет рядом такой же сингл-чарт. Плашка ⋮⋮ переставляет
- * окна внутри сетки и отрывает их от терминала: отпущенное снаружи окно висит
- * поверх страницы, отпущенное над сеткой — встаёт обратно.
+ * «＋ График» добавляет рядом такой же сингл-чарт. ×1–×4 задают сетку.
+ * ‹ › и перетаскивание плашки меняют графики местами. ⧉ открывает
+ * отдельное окно, которое можно унести за пределы браузера.
  */
 (function () {
   const MAX = 6;
@@ -45,7 +45,10 @@
       this.stack = document.getElementById("chart-stack");
       this.host = document.getElementById("workspace-host");
       this.dock = null;
+      this.wrap = null;
       this.placeholder = null;
+      this.cols = 2;
+      this._pops = new Map();
       this.activeId = "native";
       this._drag = null;
       this._saveTimer = null;
@@ -53,18 +56,57 @@
     }
 
     start() {
+      if (document.body.classList.contains("chart-embed")) {
+        this._bootEmbed();
+        return;
+      }
       if (!this.section || !this.header || !this.stack) return;
-      if (document.body.classList.contains("chart-embed")) return;
       this._bindNativeChrome();
       this._restore();
+      window.addEventListener("message", (e) => this._onMessage(e));
       if (this._needsLayout()) this.layout();
       this._syncTimer = setInterval(() => this._syncEmbedLabels(), 1500);
+    }
+
+    _bootEmbed() {
+      document.documentElement.style.height = "100%";
+      document.documentElement.style.overflow = "hidden";
+      const kick = () => { try { window.dispatchEvent(new Event("resize")); } catch (e) {} };
+      setTimeout(kick, 60);
+      setTimeout(kick, 400);
+      setTimeout(kick, 1200);
+      try {
+        const sec = document.querySelector(".chart-section");
+        if (sec && window.ResizeObserver) new ResizeObserver(kick).observe(sec);
+      } catch (e) {}
+      const q = new URLSearchParams(location.search);
+      if (q.get("pop") !== "1" || !window.opener) return;
+      document.body.classList.add("chart-embed-pop");
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "chart-tear-back chart-pop-back";
+      btn.textContent = "Вернуть в терминал";
+      btn.addEventListener("click", () => {
+        try {
+          window.opener.postMessage({ source: "liqscope-dock", type: "dock", slot: q.get("slot") || "" }, location.origin);
+        } catch (e) {}
+        window.close();
+      });
+      document.body.appendChild(btn);
+    }
+
+    _onMessage(e) {
+      if (e.origin !== location.origin) return;
+      const data = e.data;
+      if (!data || data.source !== "liqscope-dock" || data.type !== "dock") return;
+      if (!validId(data.slot)) return;
+      this.dockBack(data.slot);
     }
 
     _needsLayout() {
       if (this.order.length > 1) return true;
       const n = this.meta.native;
-      return !!(n && n.floating);
+      return !!(n && (n.floating || n.popped));
     }
 
     _bindNativeChrome() {
@@ -81,7 +123,7 @@
       const back = document.getElementById("chart-tear-back");
       if (back && !back._dockBound) {
         back._dockBound = true;
-        back.addEventListener("click", () => this.dockChart("native"));
+        back.addEventListener("click", () => this.dockBack("native"));
       }
     }
 
@@ -118,6 +160,7 @@
         if (frame) frame.src = "about:blank";
         el.remove();
       }
+      this._closePop(id);
       this.els.delete(id);
       delete this.meta[id];
       this.order = this.order.filter((x) => x !== id);
@@ -170,6 +213,7 @@
         if (!rec || !el) return;
         if (rec.floating) this._placeFloat(el, rec);
         else this._placeDock(el, rec);
+        this._paintPopped(id);
       });
       this._paintActive();
       this._syncPlaceholder();
@@ -179,11 +223,51 @@
 
     _ensureDock() {
       if (this.dock) return;
+      this.wrap = document.createElement("div");
+      this.wrap.className = "chart-dock-wrap";
+      const tools = document.createElement("div");
+      tools.className = "chart-dock-tools";
+      const label = document.createElement("span");
+      label.textContent = "Сетка";
+      tools.appendChild(label);
+      [1, 2, 3, 4].forEach((n) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.dataset.cols = String(n);
+        b.textContent = "×" + n;
+        b.title = n === 1 ? "Столбиком" : n === 2 ? "В ряд по два" : n === 3 ? "Два сверху, один снизу" : "Сетка 2×2";
+        b.addEventListener("click", () => this.setCols(n));
+        tools.appendChild(b);
+      });
+      this.tools = tools;
       this.dock = document.createElement("div");
       this.dock.id = "chart-dock";
-      this.dock.className = "chart-dock";
+      this.dock.className = "chart-dock cols-" + this.cols;
+      this.wrap.appendChild(tools);
+      this.wrap.appendChild(this.dock);
       this.section.classList.add("has-chart-dock");
-      this.section.insertBefore(this.dock, this.section.firstChild);
+      this.section.insertBefore(this.wrap, this.section.firstChild);
+      this._paintCols();
+    }
+
+    setCols(n) {
+      n = Number(n);
+      if ([1, 2, 3, 4].indexOf(n) === -1) n = 2;
+      this.cols = n;
+      if (this.dock) {
+        this.dock.classList.remove("cols-1", "cols-2", "cols-3", "cols-4");
+        this.dock.classList.add("cols-" + n);
+      }
+      this._paintCols();
+      this._save();
+      this._nudge();
+    }
+
+    _paintCols() {
+      if (!this.tools) return;
+      this.tools.querySelectorAll("button").forEach((b) => {
+        b.classList.toggle("active", Number(b.dataset.cols) === this.cols);
+      });
     }
 
     _ensureSlot(id) {
@@ -200,7 +284,7 @@
       grip.type = "button";
       grip.className = "chart-slot-grip";
       grip.textContent = "⋮⋮";
-      grip.title = "Потяни наружу, чтобы оторвать. Отпусти над сеткой — вернуть.";
+      grip.title = "Потяни на другой график, чтобы поменять местами. За край терминала — вынести в отдельное окно.";
       const title = document.createElement("span");
       title.className = "chart-slot-title";
       title.textContent = pretty(rec.symbol);
@@ -218,7 +302,7 @@
       floatBtn.type = "button";
       floatBtn.className = "chart-slot-float";
       floatBtn.textContent = "⧉";
-      floatBtn.title = "Оторвать от терминала";
+      floatBtn.title = "Вынести в отдельное окно — его можно унести за пределы браузера";
       const dockBtn = document.createElement("button");
       dockBtn.type = "button";
       dockBtn.className = "chart-slot-dock";
@@ -230,22 +314,35 @@
       closeBtn.className = "chart-slot-close";
       closeBtn.textContent = "✕";
       closeBtn.title = "Закрыть этот график";
+      const prev = this._moveBtn(id, -1);
+      const next = this._moveBtn(id, 1);
       bar.appendChild(grip);
+      bar.appendChild(prev);
       bar.appendChild(title);
       bar.appendChild(tfSel);
+      bar.appendChild(next);
       bar.appendChild(floatBtn);
       bar.appendChild(dockBtn);
       bar.appendChild(closeBtn);
+      const wrap = document.createElement("div");
+      wrap.className = "chart-slot-frame-wrap";
       const frame = document.createElement("iframe");
       frame.className = "chart-slot-frame";
       frame.title = "График " + pretty(rec.symbol);
       frame.src = this._embedUrl(rec, id);
+      wrap.appendChild(frame);
+      const note = this._popNote(id);
       el.appendChild(bar);
-      el.appendChild(frame);
+      el.appendChild(wrap);
+      el.appendChild(note);
       grip.addEventListener("pointerdown", (e) => this._onGrip(id, grip, e));
+      bar.addEventListener("pointerdown", (e) => {
+        if (e.target.closest("select, button")) return;
+        this._onGrip(id, bar, e);
+      });
       tfSel.addEventListener("change", () => this._setEmbedTf(id, tfSel.value));
-      floatBtn.addEventListener("click", () => this.floatChart(id));
-      dockBtn.addEventListener("click", () => this.dockChart(id));
+      floatBtn.addEventListener("click", () => this.popOut(id));
+      dockBtn.addEventListener("click", () => this.dockBack(id));
       closeBtn.addEventListener("click", () => this.closeChart(id));
       bar.addEventListener("pointerdown", () => this.setActive(id));
       frame.addEventListener("load", () => {
@@ -260,17 +357,88 @@
       return el;
     }
 
+    _moveBtn(id, dir) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "chart-slot-move";
+      b.textContent = dir < 0 ? "‹" : "›";
+      b.title = dir < 0 ? "Сдвинуть левее / выше" : "Сдвинуть правее / ниже";
+      b.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this.moveChart(id, dir);
+      });
+      return b;
+    }
+
+    _popNote(id) {
+      const note = document.createElement("div");
+      note.className = "chart-slot-popnote";
+      const text = document.createElement("div");
+      text.textContent = "График открыт в отдельном окне. Его можно перетащить за пределы браузера.";
+      const back = document.createElement("button");
+      back.type = "button";
+      back.className = "chart-tear-back";
+      back.textContent = "Вернуть в терминал";
+      back.addEventListener("click", () => this.dockBack(id));
+      note.appendChild(text);
+      note.appendChild(back);
+      return note;
+    }
+
+    moveChart(id, dir) {
+      if (!validId(id)) return;
+      const i = this.order.indexOf(id);
+      const j = i + dir;
+      if (i < 0 || j < 0 || j >= this.order.length) return;
+      const tmp = this.order[i];
+      this.order[i] = this.order[j];
+      this.order[j] = tmp;
+      this.layout();
+      this._save();
+    }
+
     _wrapNative() {
       let el = this.els.get("native");
       if (el) return el;
       el = document.createElement("div");
       el.className = "chart-slot chart-slot-native";
       el.dataset.id = "native";
+      const bar = document.createElement("div");
+      bar.className = "chart-slot-bar";
+      const grip = document.createElement("button");
+      grip.type = "button";
+      grip.className = "chart-slot-grip";
+      grip.textContent = "⋮⋮";
+      grip.title = "Потяни на другой график, чтобы поменять местами";
+      const title = document.createElement("span");
+      title.className = "chart-slot-title";
+      title.textContent = "Основной";
+      const floatBtn = document.createElement("button");
+      floatBtn.type = "button";
+      floatBtn.className = "chart-slot-float";
+      floatBtn.textContent = "⧉";
+      floatBtn.title = "Вынести в отдельное окно";
+      const dockBtn = document.createElement("button");
+      dockBtn.type = "button";
+      dockBtn.className = "chart-slot-dock";
+      dockBtn.textContent = "Вернуть";
+      dockBtn.hidden = true;
+      bar.appendChild(grip);
+      bar.appendChild(this._moveBtn("native", -1));
+      bar.appendChild(title);
+      bar.appendChild(this._moveBtn("native", 1));
+      bar.appendChild(floatBtn);
+      bar.appendChild(dockBtn);
       const body = document.createElement("div");
       body.className = "chart-slot-body";
+      el.appendChild(bar);
       el.appendChild(body);
+      el.appendChild(this._popNote("native"));
       body.appendChild(this.header);
       body.appendChild(this.stack);
+      grip.addEventListener("pointerdown", (e) => this._onGrip("native", grip, e));
+      floatBtn.addEventListener("click", () => this.popOut("native"));
+      dockBtn.addEventListener("click", () => this.dockBack("native"));
       this.els.set("native", el);
       el.addEventListener("pointerdown", () => this.setActive("native"));
       return el;
@@ -283,7 +451,7 @@
       el.style.width = "";
       el.style.height = "";
       el.style.zIndex = "";
-      if (el.parentNode !== this.dock) this.dock.appendChild(el);
+      this.dock.appendChild(el);
       const floatBtn = el.querySelector(".chart-slot-float");
       const dockBtn = el.querySelector(".chart-slot-dock");
       if (floatBtn) floatBtn.hidden = false;
@@ -317,8 +485,11 @@
         else this.section.appendChild(this.stack);
       }
       this.els.delete("native");
-      if (this.dock && this.dock.parentNode) this.dock.parentNode.removeChild(this.dock);
+      const shell = this.wrap || this.dock;
+      if (shell && shell.parentNode) shell.parentNode.removeChild(shell);
+      this.wrap = null;
       this.dock = null;
+      this.tools = null;
       this.placeholder = null;
       this.section.classList.remove("has-chart-dock");
       this._paintNativeBack();
@@ -356,8 +527,90 @@
     _paintNativeBack() {
       const back = document.getElementById("chart-tear-back");
       if (!back) return;
-      const floating = !!(this.meta.native && this.meta.native.floating);
-      back.hidden = !floating;
+      const n = this.meta.native;
+      back.hidden = !(n && (n.floating || n.popped));
+    }
+
+    popOut(id) {
+      const rec = this.meta[id];
+      if (!rec) return;
+      const existing = this._pops.get(id);
+      if (existing && !existing.closed) {
+        try { existing.focus(); } catch (e) {}
+        return;
+      }
+      const win = window.open(this._popUrl(id), "liqscope_pop_" + id, "popup=yes,width=1100,height=760,left=80,top=40");
+      if (!win) {
+        window.alert("Браузер не дал открыть окно. Разрешите всплывающие окна, чтобы вынести график за пределы браузера.");
+        return;
+      }
+      rec.popped = true;
+      rec.floating = false;
+      this._pops.set(id, win);
+      this.layout();
+      this._save();
+      const timer = setInterval(() => {
+        if (!win.closed) return;
+        clearInterval(timer);
+        this._pops.delete(id);
+        if (!this.meta[id] || !this.meta[id].popped) return;
+        this.meta[id].popped = false;
+        this.layout();
+        this._save();
+      }, 700);
+    }
+
+    dockBack(id) {
+      const rec = this.meta[id];
+      if (!rec) return;
+      this._closePop(id);
+      rec.popped = false;
+      rec.floating = false;
+      this.activeId = id;
+      this.layout();
+      this._save();
+      this._nudge();
+    }
+
+    _closePop(id) {
+      const win = this._pops.get(id);
+      this._pops.delete(id);
+      if (win && !win.closed) {
+        try { win.close(); } catch (e) {}
+      }
+    }
+
+    _popUrl(id) {
+      const rec = this.meta[id] || {};
+      const symbol = id === "native"
+        ? (validSymbol(window.state && window.state.chartSymbol) || "BTC_USDT")
+        : (rec.symbol || "BTC_USDT");
+      const tf = id === "native" ? this._nativeTf() : (rec.tf || 5);
+      const u = new URL("/terminal", window.location.origin);
+      u.searchParams.set("embed", "1");
+      u.searchParams.set("pop", "1");
+      u.searchParams.set("slot", id);
+      u.searchParams.set("symbol", symbol);
+      u.searchParams.set("tf", String(tf || 5));
+      return u.pathname + u.search;
+    }
+
+    _paintPopped(id) {
+      const el = this.els.get(id);
+      const rec = this.meta[id];
+      if (!el || !rec) return;
+      el.classList.toggle("is-popped", !!rec.popped);
+      if (id === "native") return;
+      const frame = el.querySelector("iframe");
+      if (!frame) return;
+      if (rec.popped) {
+        if (frame.getAttribute("src") && frame.getAttribute("src").indexOf("embed=1") !== -1) {
+          frame.dataset.dockSrc = frame.getAttribute("src");
+        }
+        if (frame.getAttribute("src") !== "about:blank") frame.src = "about:blank";
+      } else if (frame.dataset.dockSrc && String(frame.getAttribute("src") || "").indexOf("embed=1") === -1) {
+        frame.src = frame.dataset.dockSrc;
+      }
     }
 
     _paintActive() {
@@ -422,30 +675,10 @@
       if (!d) return;
       if (!d.moved && Math.hypot(e.clientX - d.sx, e.clientY - d.sy) < 6) return;
       d.moved = true;
-      const outside = this._outsideDock(e.clientX, e.clientY);
-      const rec = this.meta[d.id];
-      if (!rec) return;
-      if (outside) {
-        if (!rec.floating) {
-          rec.floating = true;
-          rec.x = e.clientX - d.offX;
-          rec.y = e.clientY - d.offY;
-          this.layout();
-        } else {
-          rec.x = e.clientX - d.offX;
-          rec.y = e.clientY - d.offY;
-          this._clampFloat(rec);
-          const el = this.els.get(d.id);
-          if (el) {
-            el.style.left = rec.x + "px";
-            el.style.top = rec.y + "px";
-          }
-        }
-        if (this.dock) this.dock.classList.add("is-drop");
-      } else if (this.dock) {
-        this.dock.classList.add("is-drop");
-        this._markDrop(d.id, e.clientX, e.clientY);
-      }
+      const outside = this._outsideSection(e.clientX, e.clientY);
+      if (this.dock) this.dock.classList.toggle("is-drop", !outside);
+      document.body.classList.toggle("chart-dock-pop-ready", outside);
+      if (!outside) this._markDrop(d.id, e.clientX, e.clientY);
     }
 
     _markDrop(id, x, y) {
@@ -466,6 +699,7 @@
       const d = this._drag;
       this._drag = null;
       document.body.classList.remove("chart-dock-dragging");
+      document.body.classList.remove("chart-dock-pop-ready");
       if (this.dock) {
         this.dock.classList.remove("is-drop");
         this.dock.querySelectorAll(".chart-slot").forEach((s) => s.classList.remove("is-drop-target"));
@@ -473,25 +707,20 @@
       if (!d || !d.moved) return;
       const rec = this.meta[d.id];
       if (!rec) return;
-      const outside = this._outsideDock(e.clientX, e.clientY);
-      if (outside) {
-        rec.floating = true;
-        rec.x = e.clientX - d.offX;
-        rec.y = e.clientY - d.offY;
-        this._readFloatSize(d.id);
-        this.layout();
-      } else {
-        rec.floating = false;
-        this._reorderAt(d.id, e.clientX, e.clientY);
-        this.layout();
+      if (this._outsideSection(e.clientX, e.clientY)) {
+        this.popOut(d.id);
+        return;
       }
+      rec.floating = false;
+      this._reorderAt(d.id, e.clientX, e.clientY);
+      this.layout();
       this._save();
       this._nudge();
     }
 
-    _outsideDock(x, y) {
-      const box = (this.dock || this.section).getBoundingClientRect();
-      return x < box.left + 8 || x > box.right - 8 || y < box.top + 8 || y > box.bottom - 8;
+    _outsideSection(x, y) {
+      const box = this.section.getBoundingClientRect();
+      return x < box.left - 16 || x > box.right + 16 || y < box.top - 16 || y > box.bottom + 16;
     }
 
     _reorderAt(id, x, y) {
@@ -613,8 +842,18 @@
     }
 
     _nudge() {
-      setTimeout(() => { try { window.dispatchEvent(new Event("resize")); } catch (e) {} }, 40);
-      setTimeout(() => { try { window.dispatchEvent(new Event("resize")); } catch (e) {} }, 240);
+      const kick = () => {
+        try { window.dispatchEvent(new Event("resize")); } catch (e) {}
+        this.order.forEach((id) => {
+          const el = this.els.get(id);
+          const frame = el && el.querySelector("iframe");
+          try {
+            if (frame && frame.contentWindow) frame.contentWindow.dispatchEvent(new Event("resize"));
+          } catch (err) {}
+        });
+      };
+      setTimeout(kick, 40);
+      setTimeout(kick, 280);
     }
 
     _save() {
@@ -637,7 +876,7 @@
               h: Math.round(rec.h || 540),
             };
           }).filter(Boolean);
-          localStorage.setItem(KEY, JSON.stringify({ v: 1, activeId: this.activeId, charts: charts }));
+          localStorage.setItem(KEY, JSON.stringify({ v: 2, cols: this.cols, activeId: this.activeId, charts: charts }));
         } catch (e) {}
       }, 180);
     }
@@ -646,13 +885,14 @@
       let raw = null;
       try { raw = JSON.parse(localStorage.getItem(KEY) || "null"); } catch (e) { raw = null; }
       if (!raw || !Array.isArray(raw.charts)) return;
+      if ([1, 2, 3, 4].indexOf(Number(raw.cols)) !== -1) this.cols = Number(raw.cols);
       const order = [];
       const meta = {};
       raw.charts.slice(0, MAX).forEach((c) => {
         if (!c || !validId(c.id) || meta[c.id]) return;
         if (c.id === "native") {
           meta.native = {
-            id: "native", kind: "native", floating: !!c.floating,
+            id: "native", kind: "native", floating: false,
             x: Number(c.x) || 48, y: Number(c.y) || 64,
             w: Number(c.w) || 760, h: Number(c.h) || 540,
           };
@@ -663,7 +903,7 @@
         const tf = validTf(c.tf) || 5;
         if (!sym || c.kind !== "embed") return;
         meta[c.id] = {
-          id: c.id, kind: "embed", symbol: sym, tf: tf, floating: !!c.floating,
+          id: c.id, kind: "embed", symbol: sym, tf: tf, floating: false,
           x: Number(c.x) || 72, y: Number(c.y) || 72,
           w: Number(c.w) || 760, h: Number(c.h) || 540,
         };

@@ -157,28 +157,10 @@ body.workspace-active .ad-host {
 body.workspace-single-mode .ad-host {
   display: none !important;
 }
+/* Старая плавающая кнопка больше не используется: она перекрывала шапку.
+   Если осталась в DOM от прошлой сессии — не показываем. */
 .ws-global-toggle {
-  position: absolute;
-  top: 6px;
-  right: 80px;
-  z-index: 100;
-  background: #151d2b;
-  border: 1px solid #233044;
-  color: #a8bdd6;
-  border-radius: 6px;
-  padding: 4px 10px;
-  font-size: 11px;
-  cursor: pointer;
-  pointer-events: auto;
-}
-.ws-global-toggle:hover {
-  background: #1d2a3d;
-  color: #d6e6f5;
-}
-body.workspace-active .ws-global-toggle {
-  background: #1e3a5f;
-  border-color: #2a5a9a;
-  color: #cfe3ff;
+  display: none !important;
 }
 
 /* Chart panel — resizable */

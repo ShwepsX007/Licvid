@@ -26,6 +26,12 @@ class ChartPanel {
     }, def.layers || {});
     this.detached = !!def.detached;
     this.position = def.position || 0;
+    this.follow = def.follow != null ? !!def.follow : this._defaultFollow();
+    this._followHold = false;
+    this._followTimer = null;
+    this._followRelease = null;
+    this._followBound = false;
+    this._markersApi = null;
 
     this.chart = null;
     this.candleSeries = null;
@@ -113,7 +119,9 @@ class ChartPanel {
       <span class="panel-change"></span>
       <span class="panel-actions">
         <button class="panel-btn panel-layers-btn" title="Layers">☰</button>
-        <button class="panel-btn panel-expand-btn" title="Expand to fullscreen">⛶</button>
+        <button class="panel-btn panel-follow-btn" type="button" title="Следить за ценой">🎯</button>
+        <button class="panel-btn panel-collapse-btn" type="button" title="Свернуть в сетку">▾</button>
+        <button class="panel-btn panel-expand-btn" title="Развернуть график">⛶</button>
         <button class="panel-btn panel-detach-btn" title="Detach to new window">⧉</button>
         <button class="panel-btn close panel-close-btn" title="Close">✕</button>
       </span>
@@ -197,6 +205,13 @@ class ChartPanel {
     header.querySelector('.panel-expand-btn').addEventListener('click', () => {
       this._emit('expandRequested', { id: this.id });
     });
+    header.querySelector('.panel-collapse-btn').addEventListener('click', () => {
+      this._emit('collapseRequested', { id: this.id });
+    });
+    header.querySelector('.panel-follow-btn').addEventListener('click', () => {
+      this.setFollow(!this.follow);
+    });
+    this._paintFollow();
 
     const dragHandle = header.querySelector('.panel-drag');
     dragHandle.addEventListener('dragstart', (e) => {
@@ -446,13 +461,16 @@ class ChartPanel {
     if (this.candles && this.candles.length && this.candleSeries) {
       try {
         this.candleSeries.setData(this.candles);
-        try { this.chart.timeScale().fitContent(); } catch {}
+        if (this.follow) this._applyFollowMode();
+        else { try { this.chart.timeScale().fitContent(); } catch {} }
         this._clearError();
       } catch {}
     }
 
     this._clearError();
+    this._markersApi = null;
     this.resize();
+    this._startFollow();
   }
 
   resize() {
@@ -547,7 +565,8 @@ class ChartPanel {
       try {
         this.candleSeries.setData(bars);
         if (this.chart && this.chart.timeScale) {
-          try { this.chart.timeScale().fitContent(); } catch {}
+          if (this.follow) this._applyFollowMode();
+          else { try { this.chart.timeScale().fitContent(); } catch {} }
         }
         this._clearError();
       } catch (e) {
@@ -572,6 +591,7 @@ class ChartPanel {
       this._updatePriceDisplay(last.close);
     }
     this._syncLayerFeeds();
+    if (this.follow) this._anchorFollow();
   }
 
   async loadLevels() {
@@ -658,6 +678,106 @@ class ChartPanel {
     if (n >= 1e6) return sign + '$' + trim((n / 1e6).toFixed(n >= 1e7 ? 0 : 1)) + 'M';
     if (n >= 1e3) return sign + '$' + trim((n / 1e3).toFixed(n >= 1e4 ? 0 : 1)) + 'K';
     return sign + '$' + Math.round(n);
+  }
+
+  _volScale() {
+    try {
+      const s = window.state;
+      if (!s || !s.details) return 1;
+      const volOf = (d) => Number(d && (d.volAvg7d || d.volume24h)) || 0;
+      const anchor = volOf(s.details.BTC_USDT) || 0;
+      const v = volOf(s.details[this.symbol]) || 0;
+      if (!(anchor > 0) || !(v > 0)) return 1;
+      return Math.min(2, Math.max(0.001, v / anchor));
+    } catch { return 1; }
+  }
+
+  _heatRGB(usd, k) {
+    const stops = [[1e5,255,206,0],[3e5,255,168,0],[5e5,255,128,0],[1e6,255,72,0],[2e6,255,30,8],[5e6,255,16,48]];
+    k = k || 1;
+    const u = Number(usd);
+    if (!(u > stops[0][0] * k)) return stops[0].slice(1);
+    for (let i = 1; i < stops.length; i++) {
+      if (u <= stops[i][0] * k) {
+        const a = stops[i - 1], b = stops[i];
+        const t = (u - a[0] * k) / ((b[0] - a[0]) * k);
+        return [0, 1, 2].map(j => Math.round(a[j + 1] + (b[j + 1] - a[j + 1]) * t));
+      }
+    }
+    return stops[stops.length - 1].slice(1);
+  }
+
+  _heatTheme(usd, k) {
+    const c = this._heatRGB(usd, k);
+    const lum = (0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]) / 255;
+    const mx = (v) => Math.round(v + (255 - v) * 0.55);
+    return {
+      fill: 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',0.95)',
+      ring: 'rgb(' + mx(c[0]) + ',' + mx(c[1]) + ',' + mx(c[2]) + ')',
+      text: lum > 0.5 ? '#1a1200' : '#ffffff',
+    };
+  }
+
+  _syncWhaleMarkers(rows) {
+    if (!this.candleSeries || !window.LightweightCharts || !window.LightweightCharts.createSeriesMarkers) return;
+    const k = this._volScale();
+    const byTime = new Map();
+    (rows || []).forEach(r => {
+      [[r.longUsd, 'SELL'], [r.shortUsd, 'BUY']].forEach(([usd, side]) => {
+        if (!(usd >= 100000 * k)) return;
+        const key = r.time + '_' + side;
+        const cur = byTime.get(key) || { time: r.time, side, usd: 0 };
+        cur.usd += usd;
+        byTime.set(key, cur);
+      });
+    });
+    const markers = Array.from(byTime.values())
+      .sort((a, b) => a.usd - b.usd)
+      .slice(-24)
+      .map(m => {
+        const c = this._heatRGB(m.usd, k);
+        return {
+          time: m.time,
+          position: m.side === 'SELL' ? 'aboveBar' : 'belowBar',
+          color: 'rgb(' + c[0] + ',' + c[1] + ',' + c[2] + ')',
+          shape: 'circle',
+          text: '🔥 ' + this._fmtCompact(m.usd),
+        };
+      })
+      .sort((a, b) => a.time - b.time);
+    try {
+      if (!this._markersApi) this._markersApi = window.LightweightCharts.createSeriesMarkers(this.candleSeries, markers);
+      else this._markersApi.setMarkers(markers);
+    } catch {}
+  }
+
+  _paintFittedLabel(ctx, text, x, y, bw, bh, color) {
+    const sizes = [9, 8, 7];
+    const alts = [text];
+    if (text && text.charAt(0) === '$') alts.push(text.slice(1));
+    let shown = '', font = 0;
+    for (let i = 0; i < alts.length && !font; i++) {
+      for (let s = 0; s < sizes.length; s++) {
+        ctx.font = "bold " + sizes[s] + "px 'JetBrains Mono', monospace";
+        const tw = ctx.measureText ? ctx.measureText(alts[i]).width : 999;
+        if (tw <= bw - 4 && sizes[s] + 2 <= bh) { font = sizes[s]; shown = alts[i]; break; }
+      }
+    }
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    if (font) {
+      ctx.font = "bold " + font + "px 'JetBrains Mono', monospace";
+      ctx.fillStyle = color;
+      ctx.fillText(shown, x, y + 0.5);
+      return;
+    }
+    ctx.font = "bold 8px 'JetBrains Mono', monospace";
+    const tw = ctx.measureText ? ctx.measureText(text).width : 24;
+    const ly = y - bh / 2 - 14;
+    ctx.fillStyle = 'rgba(5,8,14,0.88)';
+    ctx.fillRect(x - tw / 2 - 2, ly, tw + 4, 11);
+    ctx.fillStyle = '#f4f7fb';
+    ctx.fillText(text, x, y - bh / 2 - 8);
   }
 
   _slotPx(W) {
@@ -879,6 +999,7 @@ class ChartPanel {
       if (this.layers.oiEnabled) draw(this._drawOi);
       if (this.layers.cvdEnabled) draw(this._drawCvd);
       if (this.layers.liqEnabled) draw(this._drawLiqPlates);
+      else this._syncWhaleMarkers([]);
       if (this.layers.levelsEnabled) draw(this._drawLevels);
     } finally {
       this._drawing = false;
@@ -926,6 +1047,14 @@ class ChartPanel {
       ctx.globalAlpha = 0.42;
       if (longW > 0) { ctx.fillStyle = 'rgba(255,45,149,0.92)'; ctx.fillRect(2, top, longW, barH); }
       if (shortW > 0) { ctx.fillStyle = 'rgba(0,214,255,0.92)'; ctx.fillRect(2 + longW, top, shortW, barH); }
+      if (b.total >= maxTotal * 0.55 && rowW >= 48) {
+        ctx.globalAlpha = 0.95;
+        ctx.fillStyle = '#d7e6f5';
+        ctx.font = "bold 8px 'JetBrains Mono', monospace";
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(this._fmtCompact(b.total), 6 + rowW, y);
+      }
     });
     ctx.restore();
   }
@@ -968,6 +1097,14 @@ class ChartPanel {
       ctx.strokeStyle = bid ? '#22d3ee' : '#8b5cf6';
       ctx.lineWidth = 1;
       ctx.strokeRect(Math.round(x - bw / 2) + 0.5, Math.round(top) + 0.5, Math.max(1, bw - 1), Math.max(5, Math.round(bot - top) - 1));
+      if (w.live && (bot - top) >= 14 && bw >= 22) {
+        ctx.globalAlpha = 0.95;
+        ctx.fillStyle = '#041018';
+        ctx.font = "bold 8px 'JetBrains Mono', monospace";
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(this._fmtCompact(Math.max(Number(w.usdt) || 0, Number(w.peak) || 0)), x, (top + bot) / 2);
+      }
     });
     ctx.restore();
   }
@@ -1004,13 +1141,34 @@ class ChartPanel {
         y = this.candleSeries.priceToCoordinate(ref);
       } catch { continue; }
       if (x == null || y == null) continue;
-      const r = 7 + 8 * Math.min(Math.abs(item.d) / p90, 1.2);
+      const abs = Math.abs(item.d);
+      const kvol = this._volScale();
+      const tier = abs >= 2e7 * kvol ? 3 : abs >= 5e6 * kvol ? 2 : abs >= 1e6 * kvol ? 1 : 0;
+      const shades = up
+        ? [[190,242,200],[134,239,172],[34,197,94],[0,230,118]]
+        : [[252,200,200],[248,113,113],[239,68,68],[255,42,95]];
+      const col = shades[tier];
+      let r = (7 + 8 * Math.min(abs / p90, 1.2)) * (tier > 0 ? 1.15 : 1);
+      if (tier > 0) r = Math.max(r, 12);
       const cy = up ? y - r - 2 : y + r + 2;
       if (x < -r || x > W + r || cy < -r || cy > H + r) continue;
       ctx.beginPath();
-      ctx.fillStyle = up ? 'rgba(34,197,94,0.95)' : 'rgba(255,42,95,0.95)';
+      ctx.fillStyle = 'rgba(' + col[0] + ',' + col[1] + ',' + col[2] + ',0.95)';
       ctx.arc(x, cy, r, 0, Math.PI * 2);
       ctx.fill();
+      ctx.lineWidth = 1.2;
+      ctx.strokeStyle = up ? '#d8ffe6' : '#ffe3e6';
+      ctx.stroke();
+      if (tier > 0) {
+        const val = this._fmtCompact(abs);
+        ctx.font = "bold 8px 'JetBrains Mono', monospace";
+        if (!ctx.measureText || ctx.measureText(val).width <= r * 1.7) {
+          ctx.fillStyle = up ? '#04160b' : '#1c060d';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(val, x, cy);
+        }
+      }
       drawn++;
     }
     ctx.restore();
@@ -1075,6 +1233,22 @@ class ChartPanel {
       ctx.closePath();
       ctx.fillStyle = buy ? 'rgba(139,92,246,0.96)' : 'rgba(255,145,0,0.96)';
       ctx.fill();
+      ctx.lineWidth = 1.2;
+      ctx.strokeStyle = buy ? '#e6d9ff' : '#ffe3b8';
+      ctx.stroke();
+      const val = this._fmtCompact(Math.abs(item.d));
+      const cy = buy ? apexY + h * 0.68 : apexY - h * 0.68;
+      let vFont = 0;
+      for (const fs of [8, 7, 6.5]) {
+        ctx.font = "bold " + fs + "px 'JetBrains Mono', monospace";
+        if (ctx.measureText(val).width <= halfW * 1.3) { vFont = fs; break; }
+      }
+      if (vFont) {
+        ctx.fillStyle = buy ? '#0d0618' : '#1c0d00';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(val, x, cy + 0.5);
+      }
       drawn++;
     }
     ctx.restore();
@@ -1082,9 +1256,11 @@ class ChartPanel {
 
   _drawLiqPlates(ctx, W, H) {
     const rows = this._liqRows();
+    this._syncWhaleMarkers(rows);
     if (!rows.length) return;
     const ts = this.chart.timeScale();
-    const bw = Math.max(3, Math.min(36, Math.round(this._slotPx(W) * 0.86)));
+    const slot = Math.max(3, Math.min(36, Math.round(this._slotPx(W) * 0.86)));
+    const kvol = this._volScale();
     const drawn = [];
     ctx.save();
     ctx.textAlign = 'center';
@@ -1099,10 +1275,21 @@ class ChartPanel {
       } catch { return; }
       if (x == null || y == null || !isFinite(x) || !isFinite(y)) return;
       if (x < -40 || x > W + 40 || y < -20 || y > H + 20) return;
-      const whale = c.total >= 100000;
+      const whale = c.total >= 100000 * kvol;
       const isLong = c.longUsd >= c.shortUsd;
-      const fill = whale ? 'rgba(255,209,102,0.95)' : (isLong ? 'rgba(255,45,149,0.92)' : 'rgba(0,214,255,0.92)');
-      const h = whale ? 16 : 12;
+      const theme = whale
+        ? this._heatTheme(c.total, kvol)
+        : (isLong
+          ? { fill: 'rgba(255,45,149,0.92)', ring: '#ffd7ec', text: '#04070d' }
+          : { fill: 'rgba(0,214,255,0.92)', ring: '#ccf6ff', text: '#04070d' });
+      const wantLabel = whale || c.total >= 2000 * kvol;
+      const h = wantLabel ? (whale ? 18 : 15) : 11;
+      let bw = slot;
+      if (wantLabel) {
+        ctx.font = "bold 8px 'JetBrains Mono', monospace";
+        const tw = ctx.measureText(this._fmtCompact(c.total)).width + 8;
+        bw = Math.max(slot, Math.min(52, Math.ceil(tw)));
+      }
       const bx = Math.round(x - bw / 2);
       const by = Math.round(y - h / 2);
       for (let j = 0; j < drawn.length; j++) {
@@ -1113,13 +1300,15 @@ class ChartPanel {
       ctx.globalAlpha = 1;
       ctx.fillStyle = 'rgba(5,8,14,0.85)';
       ctx.fillRect(bx - 1, by - 1, bw + 2, h + 2);
-      ctx.fillStyle = fill;
+      ctx.shadowColor = theme.fill;
+      ctx.shadowBlur = whale ? 8 : 0;
+      ctx.fillStyle = theme.fill;
       ctx.fillRect(bx, by, bw, h);
-      if (bw >= 26 && c.total >= 2000) {
-        ctx.fillStyle = '#041018';
-        ctx.font = "bold 8px 'JetBrains Mono', monospace";
-        ctx.fillText(this._fmtCompact(c.total), x, y + 0.5);
-      }
+      ctx.shadowBlur = 0;
+      ctx.strokeStyle = theme.ring;
+      ctx.lineWidth = whale ? 1.4 : 1;
+      ctx.strokeRect(bx + 0.5, by + 0.5, Math.max(1, bw - 1), Math.max(1, h - 1));
+      if (wantLabel) this._paintFittedLabel(ctx, this._fmtCompact(c.total), x, y, bw, h, theme.text);
     });
     ctx.restore();
   }
@@ -1421,9 +1610,284 @@ class ChartPanel {
       symbol: this.symbol,
       timeframe: this.timeframe,
       layers: Object.assign({}, this.layers),
+      follow: !!this.follow,
       detached: !!this.detached,
       position: this.position || 0,
     };
+  }
+
+  setChrome(singleMode) {
+    if (!this.root) return;
+    const col = this.root.querySelector('.panel-collapse-btn');
+    const exp = this.root.querySelector('.panel-expand-btn');
+    if (col) col.classList.toggle('active', !!singleMode);
+    if (exp) {
+      exp.classList.toggle('active', !!singleMode);
+      exp.title = singleMode ? 'График развёрнут' : 'Развернуть график';
+    }
+  }
+
+  _defaultFollow() {
+    try {
+      const v = localStorage.getItem('liqscope.chartFollow');
+      if (v === '0') return false;
+      if (v === '1') return true;
+    } catch {}
+    try {
+      if (window.state && typeof window.state.chartFollow === 'boolean') return window.state.chartFollow;
+    } catch {}
+    return true;
+  }
+
+  _paintFollow() {
+    const btn = this.root && this.root.querySelector('.panel-follow-btn');
+    if (!btn) return;
+    btn.classList.toggle('active', !!this.follow);
+    btn.title = this.follow ? 'Слежение за ценой включено' : 'Следить за ценой';
+    btn.setAttribute('aria-pressed', this.follow ? 'true' : 'false');
+  }
+
+  setFollow(on) {
+    this.follow = !!on;
+    this._paintFollow();
+    this._applyFollowMode();
+    this._setFollowTicker();
+    if (this.follow) this._anchorFollow();
+    this._emit('stateChanged', this.serialize());
+  }
+
+  _followConsts() {
+    const api = window.LiQScopeFollow || null;
+    return {
+      margin: api && api.margin != null ? api.margin : 0.15,
+      edge: api && api.edgePct != null ? api.edgePct : 0.03,
+      drift: api && api.driftPct != null ? api.driftPct : 0.005,
+      hyst: api && api.hyst != null ? api.hyst : 0.01,
+    };
+  }
+
+  _rightScale() {
+    try {
+      if (this.candleSeries && this.candleSeries.priceScale) {
+        const s = this.candleSeries.priceScale();
+        if (s && s.applyOptions) return s;
+      }
+    } catch {}
+    try {
+      const s = this.chart && this.chart.priceScale ? this.chart.priceScale('right') : null;
+      if (s && s.applyOptions) return s;
+    } catch {}
+    return null;
+  }
+
+  _applyFollowMode() {
+    if (!this.chart) return;
+    const on = !!this.follow;
+    const api = window.LiQScopeFollow || null;
+    const opts = api && api.priceOptions
+      ? api.priceOptions(on)
+      : (on
+        ? { autoScale: false, scaleMargins: { top: 0.15, bottom: 0.15 } }
+        : { autoScale: true, scaleMargins: { top: 0.06, bottom: 0.24 } });
+    const scale = this._rightScale();
+    if (scale && scale.applyOptions) {
+      try { scale.applyOptions(opts); } catch {}
+    }
+    try {
+      this.chart.timeScale().applyOptions({
+        rightOffset: on ? 0 : 6,
+        shiftVisibleRangeOnNewBar: false,
+      });
+    } catch {}
+  }
+
+  _followRange(lr, last) {
+    const c = this._followConsts();
+    const api = window.LiQScopeFollow || null;
+    if (api && api.range) return api.range(lr, last, c.edge, c.drift);
+    if (!lr || !isFinite(lr.from) || !isFinite(lr.to) || last < 0) return null;
+    const span = Number(lr.to) - Number(lr.from);
+    if (!(span > 0)) return null;
+    const keepN = Math.round(span * c.edge);
+    const keep = keepN > 1 ? keepN : 1;
+    const drift = Math.max(0, span * c.drift);
+    const edge = Number(lr.to) - Number(last);
+    if (edge <= keep + 0.05 && edge >= drift) return null;
+    const to = Number(last) + keep;
+    return { from: to - span, to };
+  }
+
+  _followPriceShift(cur, price, hyst) {
+    const c = this._followConsts();
+    if (!cur) return null;
+    const from = Number(cur.from), to = Number(cur.to), p = Number(price);
+    if (!isFinite(from) || !isFinite(to) || !isFinite(p) || !(to > from)) return null;
+    const span = to - from;
+    let m = Number(c.margin);
+    if (!isFinite(m) || m < 0) m = 0;
+    m = Math.min(m, 0.4);
+    const pad = span * m;
+    let hy = Number(hyst);
+    if (!isFinite(hy) || hy < 0) hy = 0;
+    const eps = span * hy;
+    if (p > to - pad + eps) {
+      const nTo = p + pad;
+      return { from: nTo - span, to: nTo };
+    }
+    if (p < from + pad - eps) {
+      const nFrom = p - pad;
+      return { from: nFrom, to: nFrom + span };
+    }
+    return null;
+  }
+
+  _followPriceFit(band, price) {
+    const c = this._followConsts();
+    const p = Number(price);
+    const hasPrice = price !== null && price !== undefined && isFinite(p);
+    if (!band && !hasPrice) return null;
+    let low = band ? Number(band.low) : p;
+    let high = band ? Number(band.high) : p;
+    if (hasPrice) { low = Math.min(low, p); high = Math.max(high, p); }
+    if (!isFinite(low) || !isFinite(high)) return null;
+    if (high <= low) {
+      const pad0 = Math.max(Math.abs(high) * 1e-4, 1e-9);
+      low -= pad0; high += pad0;
+    }
+    let m = Number(c.margin);
+    if (!isFinite(m) || m < 0) m = 0;
+    m = Math.min(m, 0.4);
+    const need = (high - low) / (1 - 2 * m);
+    const mid = (low + high) / 2;
+    return { from: mid - need / 2, to: mid + need / 2 };
+  }
+
+  _visibleBand() {
+    const candles = this.candles || [];
+    if (!candles.length || !this.chart) return null;
+    let from = 0, to = candles.length - 1;
+    try {
+      const lr = this.chart.timeScale().getVisibleLogicalRange();
+      if (lr && isFinite(lr.from) && isFinite(lr.to)) {
+        from = Math.max(0, Math.floor(lr.from));
+        to = Math.min(candles.length - 1, Math.ceil(lr.to));
+      }
+    } catch {}
+    if (to < from) return null;
+    let low = Infinity, high = -Infinity;
+    for (let i = from; i <= to; i++) {
+      const bar = candles[i];
+      if (!bar) continue;
+      const lo = Number(bar.low), hi = Number(bar.high);
+      if (isFinite(lo) && lo < low) low = lo;
+      if (isFinite(hi) && hi > high) high = hi;
+    }
+    if (!isFinite(low) || !isFinite(high)) return null;
+    return { low, high };
+  }
+
+  _lastPrice() {
+    if (this.price != null && isFinite(Number(this.price))) return Number(this.price);
+    const last = this.candles && this.candles[this.candles.length - 1];
+    const p = last ? Number(last.close) : NaN;
+    return isFinite(p) ? p : null;
+  }
+
+  _followPrice(hyst) {
+    if (!this.follow || !this.chart) return false;
+    const scale = this._rightScale();
+    if (!scale || !scale.setVisibleRange) return false;
+    const price = this._lastPrice();
+    if (price === null) return false;
+    let cur = null;
+    try { cur = scale.getVisibleRange ? scale.getVisibleRange() : null; } catch { cur = null; }
+    const ok = !!cur && isFinite(cur.from) && isFinite(cur.to) && Number(cur.to) > Number(cur.from);
+    let next = null;
+    if (ok) {
+      const span = Number(cur.to) - Number(cur.from);
+      const far = price < Number(cur.from) - span || price > Number(cur.to) + span;
+      next = far ? this._followPriceFit(this._visibleBand(), price) : this._followPriceShift(cur, price, hyst);
+    } else {
+      next = this._followPriceFit(this._visibleBand(), price);
+    }
+    if (!next) return false;
+    try { scale.setVisibleRange(next); } catch { return false; }
+    return true;
+  }
+
+  _followStep() {
+    if (!this.follow || this._followHold || !this.chart || !this.candles.length) return false;
+    let lr = null;
+    try { lr = this.chart.timeScale().getVisibleLogicalRange(); } catch { return false; }
+    const next = this._followRange(lr, this.candles.length - 1);
+    let moved = false;
+    if (next) {
+      try { this.chart.timeScale().setVisibleLogicalRange(next); moved = true; } catch {}
+    }
+    return this._followPrice(this._followConsts().hyst) || moved;
+  }
+
+  _anchorFollow() {
+    if (!this.follow || !this.chart || !this.candles.length) return false;
+    let lr = null;
+    try { lr = this.chart.timeScale().getVisibleLogicalRange(); } catch { lr = null; }
+    const span = lr && lr.to > lr.from ? (lr.to - lr.from) : 80;
+    const c = this._followConsts();
+    const keepN = Math.round(span * c.edge);
+    const keep = keepN > 1 ? keepN : 1;
+    const to = this.candles.length - 1 + keep;
+    let moved = false;
+    try { this.chart.timeScale().setVisibleLogicalRange({ from: to - span, to }); moved = true; } catch {}
+    return this._followPrice(0) || moved;
+  }
+
+  _setFollowTicker() {
+    if (this._followTimer) { clearInterval(this._followTimer); this._followTimer = null; }
+    if (this.follow && !this._destroyed) {
+      this._followTimer = setInterval(() => {
+        if (this.follow && !this._followHold && !this._destroyed) this._followStep();
+      }, 500);
+    }
+  }
+
+  _bindFollowGestures() {
+    if (this._followBound || !this.chartEl) return;
+    this._followBound = true;
+    const el = this.chartEl;
+    this._onFollowHold = () => {
+      this._followHold = true;
+      if (this._followRelease) { clearTimeout(this._followRelease); this._followRelease = null; }
+    };
+    this._onFollowRelease = () => {
+      if (!this._followHold) return;
+      this._followHold = false;
+      if (this._followRelease) clearTimeout(this._followRelease);
+      if (!this.follow) return;
+      this._followRelease = setTimeout(() => {
+        this._followRelease = null;
+        this._anchorFollow();
+      }, 350);
+    };
+    this._onFollowWheel = () => {
+      this._followHold = true;
+      if (this._followRelease) clearTimeout(this._followRelease);
+      this._followRelease = setTimeout(() => {
+        this._followRelease = null;
+        this._followHold = false;
+        if (this.follow) this._anchorFollow();
+      }, 350);
+    };
+    el.addEventListener('pointerdown', this._onFollowHold, true);
+    el.addEventListener('wheel', this._onFollowWheel, { passive: true, capture: true });
+    window.addEventListener('pointerup', this._onFollowRelease);
+    window.addEventListener('pointercancel', this._onFollowRelease);
+  }
+
+  _startFollow() {
+    this._paintFollow();
+    this._bindFollowGestures();
+    this._applyFollowMode();
+    this._setFollowTicker();
   }
 
   setDetached(detached) {
@@ -1450,6 +1914,7 @@ class ChartPanel {
         }
       }
     }
+    if (this.follow && !this._followHold) this._followStep();
   }
 
   onCandleUpdate(symbol, tf, candle) {
@@ -1474,6 +1939,7 @@ class ChartPanel {
       try { this.candleSeries.setData(this.candles); } catch {}
     }
     this._updatePriceDisplay(bar.close);
+    if (this.follow && !this._followHold) this._followStep();
     if (this.layers.cvdEnabled || this.layers.oiEnabled || this.layers.liqEnabled || this.layers.profileEnabled) {
       this._drawOverlays();
     }
@@ -1489,6 +1955,14 @@ class ChartPanel {
 
   unmount() {
     this._destroyed = true;
+    if (this._followTimer) { try { clearInterval(this._followTimer); } catch {} this._followTimer = null; }
+    if (this._followRelease) { try { clearTimeout(this._followRelease); } catch {} this._followRelease = null; }
+    if (this._followBound) {
+      try { this.chartEl && this.chartEl.removeEventListener('pointerdown', this._onFollowHold, true); } catch {}
+      try { this.chartEl && this.chartEl.removeEventListener('wheel', this._onFollowWheel, true); } catch {}
+      try { window.removeEventListener('pointerup', this._onFollowRelease); } catch {}
+      try { window.removeEventListener('pointercancel', this._onFollowRelease); } catch {}
+    }
     if (this._ro) { try { this._ro.disconnect(); } catch {} }
     if (this._levelsTimer) { try { clearInterval(this._levelsTimer); } catch {} }
     this._stopBookPoll();

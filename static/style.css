@@ -717,6 +717,8 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
     display: flex;
     align-items: center;
     justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
     flex-shrink: 0;
 }
 
@@ -2395,6 +2397,27 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
 /* Правый угол легенды: «☰ Слои», рисование, свернуть/развернуть —
    прибиты к краю (margin-left: auto у первой) и не бегают за цифрами слоёв. */
 #layer-call { margin-left: auto; }
+/* Переключатель Single/Multi в потоке шапки, не поверх соседних кнопок */
+.ws-mode-toggle {
+    position: static;
+    flex: 0 0 auto;
+    align-self: center;
+    margin-left: 0;
+    background: #151d2b;
+    border: 1px solid #233044;
+    color: #a8bdd6;
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 11px;
+    line-height: 1.2;
+    cursor: pointer;
+    white-space: nowrap;
+    z-index: auto;
+}
+.ws-mode-toggle:hover {
+    background: #1d2a3d;
+    color: #d6e6f5;
+}
 .chart-toggle {
     display: inline-flex;
     align-items: center;

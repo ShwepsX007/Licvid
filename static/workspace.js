@@ -208,29 +208,23 @@ class WorkspaceManager {
       if (toolbarBtn) toolbarBtn.textContent = multi ? 'Single chart' : 'Multi chart';
     } catch {}
     try {
-      const globalBtn = document.getElementById('workspace-global-toggle');
-      if (globalBtn) {
-        globalBtn.textContent = multi ? 'Single chart' : 'Multi chart';
-        globalBtn.style.background = multi ? '#1e3a5f' : '#151d2b';
-        globalBtn.style.borderColor = multi ? '#2a5a9a' : '#233044';
-        globalBtn.style.color = multi ? '#cfe3ff' : '#a8bdd6';
+      const headerBtn = document.getElementById('ws-mode-toggle');
+      if (headerBtn) {
+        headerBtn.textContent = multi ? 'Single chart' : 'Multi chart';
+        headerBtn.classList.toggle('active', !!multi);
       }
     } catch {}
   }
 
   _ensurePersistentToggle() {
     try {
-      const chartSection = document.querySelector('.chart-section');
-      if (!chartSection) return;
-      let btn = document.getElementById('workspace-global-toggle');
-      if (!btn) {
-        btn = document.createElement('button');
-        btn.id = 'workspace-global-toggle';
-        btn.className = 'ws-global-toggle';
-        btn.title = 'Toggle Multi-chart workspace';
-        // Place near chart header, visible in single mode to go back to multi
-        btn.style.cssText = 'position:absolute;top:6px;right:80px;z-index:50;background:#151d2b;border:1px solid #233044;color:#a8bdd6;border-radius:6px;padding:4px 8px;font-size:11px;cursor:pointer;';
-        chartSection.appendChild(btn);
+      const old = document.getElementById('workspace-global-toggle');
+      if (old && old.parentNode) old.parentNode.removeChild(old);
+    } catch {}
+    try {
+      const btn = document.getElementById('ws-mode-toggle');
+      if (btn && !btn._wsBound) {
+        btn._wsBound = true;
         btn.addEventListener('click', () => {
           const isNowMulti = !document.body.classList.contains('workspace-active');
           this.setWorkspaceActive(isNowMulti);
@@ -331,6 +325,7 @@ class WorkspaceManager {
       }
     }
     this._applySingleModeVisibility();
+    this._syncPanelChrome();
     try { localStorage.setItem('liqscope_workspace_single', this._singleMode ? '1' : '0'); } catch {}
     this.saveWorkspace();
     const btn = root ? root.querySelector('[data-action="single"]') : null;
@@ -379,6 +374,12 @@ class WorkspaceManager {
       setTimeout(() => this.panels.forEach(p => p.resize()), 150);
       setTimeout(() => this.panels.forEach(p => p.resize()), 500);
     }
+  }
+
+  _syncPanelChrome() {
+    this.panels.forEach(p => {
+      if (p && p.setChrome) p.setChrome(!!this._singleMode);
+    });
   }
 
   _renderTabs() {
@@ -453,6 +454,7 @@ class WorkspaceManager {
     } catch {
       document.body.classList.add('workspace-active');
     }
+    this._updateAllToggles();
 
     const raw = this.loadWorkspace();
     let panels = raw.panels || [];
@@ -497,6 +499,7 @@ class WorkspaceManager {
     this._renderTabs();
     this._updateActiveStates();
     this._applySingleModeVisibility();
+    this._syncPanelChrome();
 
     try {
       const layout = localStorage.getItem('liqscope_workspace_layout');
@@ -596,6 +599,10 @@ class WorkspaceManager {
         this.setActivePanel(panelId);
         if (!this._singleMode) this.toggleSingleMode();
         else this._applySingleModeVisibility();
+        break;
+      case 'collapseRequested':
+        this.setActivePanel(panelId);
+        if (this._singleMode) this.toggleSingleMode();
         break;
       case 'activated':
         this.setActivePanel(panelId);
@@ -704,6 +711,7 @@ class WorkspaceManager {
     this.setActivePanel(id);
     this._renderTabs();
     this._applySingleModeVisibility();
+    this._syncPanelChrome();
     this.saveWorkspace();
     this._broadcast({ type: 'PANEL_STATE_UPDATE', panelId: id, panel: state });
     return panel;
@@ -914,6 +922,7 @@ window.WorkspaceManager = WorkspaceManager;
 
       const wm = new WorkspaceManager({ container: host, maxPanels: 6 });
       window.LiqScopeWorkspace = wm;
+      wm._ensurePersistentToggle();
       setTimeout(() => wm.mount(), 800);
 
       const params = new URLSearchParams(window.location.search);

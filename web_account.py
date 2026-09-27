@@ -62,11 +62,52 @@ class Ctx:
 ctx = Ctx()
 
 
+# Доверенные прокси — те же, что и в server.py, но читаем здесь отдельно,
+# чтобы модуль оставался самодостаточным в тестах.
+_TRUSTED_PROXIES_RAW = os.getenv("LIQSCOPE_TRUSTED_PROXIES", "127.0.0.1,::1").strip()
+_TRUSTED_PROXY_SET = {x.strip() for x in _TRUSTED_PROXIES_RAW.replace(";", ",").split(",") if x.strip()}
+_TRUSTED_PROXY_NETS = []
+try:
+    import ipaddress
+    for item in list(_TRUSTED_PROXY_SET):
+        if "/" in item:
+            try:
+                _TRUSTED_PROXY_NETS.append(ipaddress.ip_network(item, strict=False))
+                _TRUSTED_PROXY_SET.discard(item)
+            except ValueError:
+                pass
+except Exception:
+    _TRUSTED_PROXY_NETS = []
+
+
+def _is_trusted_proxy(ip: str) -> bool:
+    ip = (ip or "").strip()
+    if not ip:
+        return False
+    if ip in _TRUSTED_PROXY_SET:
+        return True
+    if not _TRUSTED_PROXY_NETS:
+        return False
+    try:
+        import ipaddress
+        addr = ipaddress.ip_address(ip)
+        return any(addr in net for net in _TRUSTED_PROXY_NETS)
+    except Exception:
+        return False
+
+
 def _client_ip(request: Request) -> str:
-    xff = request.headers.get("x-forwarded-for") or ""
-    if xff:
-        return xff.split(",")[0].strip()
-    return request.client.host if request.client else ""
+    client_host = request.client.host if request.client else ""
+    if client_host and _is_trusted_proxy(client_host):
+        xff = request.headers.get("x-forwarded-for") or ""
+        if xff:
+            first = xff.split(",")[0].strip()
+            if first:
+                return first
+        xri = request.headers.get("x-real-ip") or ""
+        if xri:
+            return xri.strip() or client_host
+    return client_host or ""
 
 
 def _set_sid(response: Response, token: str) -> None:

@@ -130,6 +130,40 @@ TICK_SOURCES = [x.strip().lower() for x in
                 if x.strip()]
 DEMO_MODE = os.getenv("LIQSCOPE_DEMO", "0").strip() in ("1", "true", "yes", "on")
 DEMO_PUMP_VOL: Dict[str, float] = {}   # демо-оборот 24ч по монетам для сторожа
+
+# Доверенные прокси для X-Forwarded-For. По умолчанию — только локальный nginx.
+# Если запрос пришёл не от доверенного прокси, заголовки XFF игнорируются,
+# чтобы rate limit нельзя было обойти подменой первого IP.
+_TRUSTED_PROXIES_RAW = os.getenv("LIQSCOPE_TRUSTED_PROXIES", "127.0.0.1,::1").strip()
+_TRUSTED_PROXY_SET = {x.strip() for x in _TRUSTED_PROXIES_RAW.replace(";", ",").split(",") if x.strip()}
+_TRUSTED_PROXY_NETS = []
+try:
+    import ipaddress
+    for item in list(_TRUSTED_PROXY_SET):
+        if "/" in item:
+            try:
+                _TRUSTED_PROXY_NETS.append(ipaddress.ip_network(item, strict=False))
+                _TRUSTED_PROXY_SET.discard(item)
+            except ValueError:
+                pass
+except Exception:
+    _TRUSTED_PROXY_NETS = []
+
+
+def _is_trusted_proxy(ip: str) -> bool:
+    ip = (ip or "").strip()
+    if not ip:
+        return False
+    if ip in _TRUSTED_PROXY_SET:
+        return True
+    if not _TRUSTED_PROXY_NETS:
+        return False
+    try:
+        import ipaddress
+        addr = ipaddress.ip_address(ip)
+        return any(addr in net for net in _TRUSTED_PROXY_NETS)
+    except Exception:
+        return False
 HISTORY_MAX = int(os.getenv("LIQSCOPE_HISTORY_MAX", "60000"))
 # Дисковое сохранение истории ликвидаций (переживает рестарт сервера).
 # Путь — каталог дневных файлов ("" / "0" / "off" — не хранить вовсе),
@@ -178,6 +212,9 @@ def _resolve_secret() -> str:
     LIQSCOPE_REQUIRE_SECRET=1 (стоит в deploy/licvid.service) — без переменной
     процесс не стартует. В разработке и тестах секрет генерируется один раз
     и лежит в data/secret, чтобы хеши IP не прыгали между рестартами.
+
+    В PROD отсутствие секрета или дефолтный — fail-fast. В DEMO
+    (LIQSCOPE_DEMO=1) можно работать с сгенерированным, но с предупреждением.
     """
     env = os.getenv("LIQSCOPE_SECRET", "").strip()
     require = os.getenv("LIQSCOPE_REQUIRE_SECRET", "").strip().lower() in (
@@ -187,20 +224,37 @@ def _resolve_secret() -> str:
     if env:
         log.warning("LIQSCOPE_SECRET — опубликованный дефолт или короче 16 "
                     "знаков, игнорируем")
-    if require:
-        log.error("LIQSCOPE_SECRET обязателен (LIQSCOPE_REQUIRE_SECRET=1), "
-                  "но не задан. Сгенерируйте: openssl rand -hex 32")
-        raise SystemExit(2)
+    if require and not env:
+        if DEMO_MODE:
+            log.warning("LIQSCOPE_SECRET обязателен (LIQSCOPE_REQUIRE_SECRET=1), "
+                        "но не задан — DEMO режим, использую авто-секрет. "
+                        "На проде это должно падать.")
+        else:
+            log.error("LIQSCOPE_SECRET обязателен (LIQSCOPE_REQUIRE_SECRET=1) "
+                      "и не задан. Сгенерируйте: openssl rand -hex 32 и "
+                      "задайте в systemd drop-in.")
+            raise SystemExit(2)
     path = os.getenv("LIQSCOPE_SECRET_FILE",
                      os.path.join(HERE, "data", "secret")).strip()
     try:
         if path and os.path.isfile(path):
             saved = open(path, encoding="utf-8").read().strip()
             if saved and saved not in _KNOWN_BAD_SECRETS and len(saved) >= 24:
-                log.warning("LIQSCOPE_SECRET не задан — берём сохранённый %s", path)
+                if require:
+                    log.warning("LIQSCOPE_SECRET не задан, но есть %s — "
+                                "использую его, хотя в проде нужен env", path)
+                else:
+                    log.warning("LIQSCOPE_SECRET не задан — берём сохранённый %s", path)
                 return saved
+            if saved:
+                log.warning("Сохранённый секрет в %s — дефолт или короткий, игнорируем", path)
     except OSError:
         pass
+    if not DEMO_MODE:
+        log.error("LIQSCOPE_SECRET обязателен в PROD (отсутствует или дефолт). "
+                  "Сгенерируйте: openssl rand -hex 32 и задайте в systemd. "
+                  "В DEMO (LIQSCOPE_DEMO=1) можно работать с авто-секретом.")
+        raise SystemExit(2)
     generated = secrets.token_urlsafe(32)
     if path:
         try:
@@ -3032,8 +3086,8 @@ def _want_hsts(scope) -> bool:
 _SECURITY_HEADERS = (
     (b"x-content-type-options", b"nosniff"),
     (b"referrer-policy", b"strict-origin-when-cross-origin"),
-    (b"x-frame-options", b"SAMEORIGIN"),
-    (b"content-security-policy", b"frame-ancestors 'self'"),
+    (b"x-frame-options", b"DENY"),
+    (b"content-security-policy", b"frame-ancestors 'none'"),
     (b"permissions-policy", b"camera=(), microphone=(), geolocation=()"),
 )
 
@@ -3526,10 +3580,20 @@ async def api_symbol_search(q: str = Query("", max_length=40),
 
 
 def _request_ip(request: Request) -> str:
-    xff = request.headers.get("x-forwarded-for") or ""
-    if xff:
-        return xff.split(",")[0].strip() or "0"
-    return request.client.host if request.client else "0"
+    client_host = request.client.host if request.client else ""
+    # Доверяем XFF только если запрос пришёл от доверенного прокси (обычно локальный nginx)
+    if client_host and _is_trusted_proxy(client_host):
+        xff = request.headers.get("x-forwarded-for") or ""
+        if xff:
+            # Берём первый IP из цепочки — это оригинальный клиент, но только если прокси доверенный
+            first = xff.split(",")[0].strip()
+            if first:
+                return first
+        # Также поддерживаем X-Real-IP от nginx
+        xri = request.headers.get("x-real-ip") or ""
+        if xri:
+            return xri.strip() or client_host
+    return client_host or "0"
 
 
 # Добавление монеты — единственный публичный мутирующий роут. 20 попыток

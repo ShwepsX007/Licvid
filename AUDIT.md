@@ -1,514 +1,84 @@
-# Полный аудит проекта LiqScope (репозиторий Licvid)
-# Аудит Licvid
+# Аудит LiqScope — 28.09.2026
 
-## 0.2. Аудит Multi-Chart Workspace от 27.09.2026 (main после merge arena/01a0e2e8-licvid)
+Дата: 2026-09-28. Объект: репозиторий Licvid, рабочее дерево терминала после замены мультичарта на дополнительные сингл-графики (`static/chart_dock.js`). Предыдущий текст аудита от 27.09.2026 остаётся в git-истории `AUDIT.md` на `39da780`; здесь — текущее состояние, а не повтор того отчёта.
 
-Дата: 2026-09-27, ветка main = 5cc6f5a (merge 162cdc0). Стенд 127.0.0.1:8000 LIQSCOPE_DEMO=1.
+Метод: чтение кода терминала, заголовков, проверки символов и точек входа. Живой прод и полный прогон Python-тестов в этой среде не поднимались (`aiohttp` для `tests/test_symbol_guard.py` здесь не установлен). Утверждения ниже — по коду, который реально подключается со страницы.
 
-### Что проверяли
-- `static/chart_panel.js` 961 строк, `static/workspace.js` 897 строк, `static/workspace.css` 401 строка
-- Интеграция в `/terminal`: `#workspace-host`, `.workspace-root`, `.workspace-grid`, `.chart-panel`
-- Роутинг `/terminal?mode=panel&panel=<id>&workspace=<wsId>` — detached window
-- Persistence `liqscope_terminal_workspace_v1`, `liqscope_workspace_active`, `liqscope_workspace_layout`, `liqscope_workspace_single`
-- Inter-window: BroadcastChannel + localStorage fallback + postMessage fallback
-- Security: XSS via symbol/panelId, URL validation, innerHTML, window.open
-- Perf: max panels 6, one WS/window, debounced save 600ms, ResizeObserver, requestAnimationFrame, flex layout resizable
-- Tests: `tests/workspace_e2e.js` 22 ok, `tests/symbol_xss.js` 6 ok, `tests/workspace_manager.js` 20 ok, `tests/test_symbol_guard.py` 11 ok
+## Как устроен терминал сейчас
 
-### Находки и исправления (P0/P1 уже закрыты, это P2/P3 для workspace)
+Один график страницы не переписывался. «＋ График» добавляет рядом тот же сингл-чарт во iframe `/terminal?embed=1&slot=&symbol=&tf=`.
 
-| # | Находка | Статус | Проверка |
-|---|---|---|---|
-| W1 P1 empty charts | `body:not(.workspace-active) #workspace-host .workspace-root {display:none !important}` скрывал контейнер при mount → clientWidth 0 → LWC 0-size | **Исправлено**: `document.body.classList.add('workspace-active')` ДО создания панелей, default active если нет pref, `_initChartWithRetry` 30 ретраев 200ms + ResizeObserver + getBoundingClientRect + offsetParent check, `panel-error` overlay вместо innerHTML | `node tests/workspace_e2e.js` 22 ok, ручной `/terminal` 2 графика с свечами |
-| W2 P1 chart collapsed | `#workspace-host {flex:1}` даже когда hidden → занимал 60% высоты chart-section, оставляя chart-stack 30% внизу (скриншот пользователя) + `liqscope.chartCollapsed=1` из localStorage | **Исправлено**: `#workspace-host {display:none}` по умолчанию, `body.workspace-active #workspace-host {display:flex flex:1}`, `setWorkspaceActive()` снимает collapsed класс и чистит localStorage, dispatch resize для главного графика | Скриншот до/после, `curl /static/workspace.css` содержит `display:none` для host |
-| W3 P1 buttons not displayed | Toolbar внутри `#workspace-host` hidden в single mode → нет кнопки вернуться в multi | **Исправлено**: `_ensurePersistentToggle()` создает `.ws-global-toggle` absolute в `chart-section`, виден всегда, `setWorkspaceActive` синхронизирует оба тоггла, toolbar Single chart перенесен вправо `margin-left:auto` по ТЗ скриншота | Скриншот пользователя: кнопка Single chart справа рядом с Multi chart, клик работает |
-| W4 P2 layers not displayed in multi | `levelsEnabled: false` default, `_drawOverlays` только если levelsEnabled, canvas size 0, нет priceLines fallback, в DEMO `/api/liq_levels` пустой → ничего не рисуется | **Исправлено**: `levelsEnabled: true` default, draw когда `levelsEnabled || liqEnabled`, `loadLevels` с `cache:no-store` + `resize()` + retry 500/1500ms, `_drawOverlays` проверяет canvas size, чистит старые priceLines, рисует бары + dashed + создает `createPriceLine` для магнитов (до 20) как fallback, периодический refresh 30s, очистка interval | В prod с реальными данными уровни видны, в DEMO пусто ожидаемо |
-| W5 P2 XSS panelId | `window.open('/terminal?mode=panel&panel=<panelId>')` — panelId из localStorage, мог быть XSS | **Закрыто**: валидация `^[a-zA-Z0-9_-]{1,64}$` для panelId, workspaceId проверяется equality, symbol regex `^[A-Z0-9]{2,20}_[A-Z0-9]{2,6}$` + `ALL`, timeframe whitelist, `_esc()` для ошибок, `encodeURIComponent` для URL, `textContent` для символов, `_esc` для вкладок | `tests/workspace_manager.js` — `detach URL rejects XSS panelId`, `invalid broadcast with XSS fails` |
-| W6 P2 innerHTML | `header.innerHTML` статичный, но мог содержать user data | **Проверено**: header и layersPop — статика, символы через `textContent` и `_esc`, вкладки через `_esc` | `grep -n innerHTML static/chart_panel.js` — только статика |
-| W7 P2 perf | N панелей × N WS → нагрузка | **Закрыто**: один WS на окно, routing по `panel.symbol` via `liqscope:ws` custom event, `maxPanels=6` с alert, debounced save 600ms, ResizeObserver вместо polling, `requestAnimationFrame` для init | `workspace.js: _hookWs`, `maxPanels` check |
-| W8 P3 mobile | `chart-section {height:52vh}` + панели `min-height:380px` → overflow hidden, ничего не видно | **Исправлено**: `@media max-width:900px` flex column, панели 100% width resize:none, `chart-section min-height:60vh` когда workspace-active, `#workspace-host min-height:60vh` | Ручной тест mobile viewport |
-| W9 P3 single fullscreen gaps | `calc(100vh - 200px)` оставлял пустые места + ad | **Исправлено**: `.single-mode .chart-panel {flex:1 1 100% width:100% height:100% resize:none}`, `body.workspace-single-mode .ad-host {display:none}`, `chart-section` flex column | Single кнопка разворачивает на весь терминал как раньше |
+- Режимы: **Вкладки** (один график на терминал, остальные вкладками) и **Мультиэкран** (сетка ×1–×4). Края сетки тянутся и сжимают соседа.
+- ⛶ разворачивает только тот график, на котором нажали, не всю сетку.
+- ⧉ отрывает окно и даёт таскать его по терминалу. Отдельная вкладка браузера больше не открывается: `popOut` в `chart_dock.js` только вызывает `floatChart`.
+- Кнопка добавления стоит у переключателя сетки, после ×4, а не внутри первого графика.
+- Старый `WorkspaceManager` при загрузке не монтируется. `static/workspace.js` вызывает `retireMultiChart()` и снимает классы `workspace-active` / `workspace-single-mode`. `static/index.html` больше не подключает `chart_panel.js`.
 
-### Security checklist для workspace
+Лимит дополнительных графиков — 6 (`MAX` в `chart_dock.js`). Символ, таймфрейм и id слота перед сохранением и восстановлением из `localStorage` (`liqscope_chart_dock_v1`) проходят whitelist.
 
-- [x] panelId/workspaceId validated regex/equality
-- [x] symbol validated regex + ALL
-- [x] timeframe whitelist
-- [x] URL params `encodeURIComponent`
-- [x] innerHTML только статика, user data via `textContent` / `_esc`
-- [x] `window.open` с validated id, без `noopener`? — добавили `noopener`? Проверено: `window.open(url, name, features)` — name = `liqscope_panel_${id}` validated, features без `noopener` но same origin, безопасно
-- [x] BroadcastChannel messages validated panelId + workspaceId + symbol
-- [x] localStorage JSON parse in try/catch
-- [x] No eval, no Function constructor
-- [x] Max panels limit prevents DoS
+## Что в порядке
 
-### Perf checklist
-
-- [x] One WS per window (main + detached) — `WorkspaceManager._hookWs` + `_connectDetachedWs`
-- [x] Debounced save 600ms
-- [x] ResizeObserver + rAF, no polling
-- [x] Flex layout resizable both, no layout thrashing
-- [x] `lightweight-charts` single instance per panel, `chart.remove()` on unmount
-- [x] `localStorage` size: ~ panels*200 bytes, < 2KB, OK
-
-### DoD по ТЗ workspace
-
-- [x] 2-4 панели одновременно разные символы — да, flex wrap 50%
-- [x] Reorder drag tabs — да, dragstart/drop + movePanel
-- [x] Detach/attach — `window.open('/terminal?mode=panel&panel=...')` + BroadcastChannel PANEL_DETACHED/ATTACHED/CLOSED + interval check win.closed
-- [x] Per-panel toggles levels+dashed — да, layers dropdown per panel, `levelsEnabled` default true, `levelsAlertEnabled`, `liqEnabled`
-- [x] Workspace persisted — `liqscope_terminal_workspace_v1` + active, layout, single
-- [x] Perf one WS/window + max panels — да, 6 max + alert
-- [x] Panel mode fast — minimal layout, hide heavy blocks via `body.panel-mode`
-- [x] Phrase removed — `Сигналы: Уровни ликвидации` phrase removed from `cabinet.html` and i18n
-
-## 0.1. Исправления от 27.09.2026 (ветка arena/01a0e2e8-licvid)
-
-Все пункты P0/P1 из §1 закрыты и проверены на демо-стенде 127.0.0.1:8001.
-
-| # из §1 | Что было | Что сделано | Проверка |
-|---|---|---|---|
-| 1 P0 XSS symbols/add | anon POST → HTML в список монет, innerHTML → выполнение | `market_feed.is_safe_symbol` regex `^[A-Z0-9]{1,10}_[A-Z0-9]{1,10}$`, макс длина 20, кап 120 custom + 200 total, `force` только админ (`require_admin` в `server.py:api_symbol_add`), фронтенд `escapeHtml` + `textContent` в `app.js` (symbolOptionEl, выпадающий список), rate limit 20/10м + 2r/s nginx | `curl POST <img>` → `invalid`, `force=true` anon → `admin`, jsdom `tests/symbol_xss.js` — нет реального `<img>`/`<svg>` в DOM |
-| 2 P0 рост | неограниченный рост custom_symbols | кап + проверка `len(custom_symbols) >=120` и `len(symbols)>=200`, отклоняет с сообщением | тест `test_symbol_guard` капает |
-| 3 P1 markdown XSS | кавычки вырывались из href/src | `articles.py:_q` теперь `html.escape(..., quote=True)`, фильтр `javascript:` сохранён, alt тоже экранируется | `test_articles.py` + ручной `![x" onerror]` → `alt="x&quot;...` безопасно |
-| 4 P1 CORS * + creds | `allow_origins=["*"]` + `allow_credentials=True` | убрали `*`, `CORS_ORIGINS` = `SITE_URL`, `PUBLIC_URL`, `LIQSCOPE_CORS_ORIGINS` (csv), `allow_credentials=True` только для своих origin. Evil origin не получает `allow-origin` | `curl -H Origin: evil` → нет заголовка, `liqscope.online` → есть |
-| 5 P1 default secret | дефолт `liqscope-change-me` принимался | `_KNOWN_BAD_SECRETS`, fail-fast в PROD если нет/дефолт (`SystemExit 2`), в DEMO — warning + генерация + файл `data/secret`. `deploy/licvid.service` требует `LIQSCOPE_REQUIRE_SECRET=1` и `LIQSCOPE_SECRET` в drop-in, чек-лист в README | `LIQSCOPE_SECRET=` → PROD падает, DEMO warning; `test_symbol_guard.test_secret_is_not_the_published_default` |
-| 6 P2 headers | нет security заголовков | `SecurityHeadersMiddleware` + nginx: `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`, `Permissions-Policy: camera=(), microphone=(), geolocation=()`, `X-Frame-Options: DENY`, `CSP: frame-ancestors 'none'`, HSTS в nginx https conf. Обновили `deploy/nginx-liqscope.conf` и `http.conf` | `curl -D` показывает DENY/'none'/nosniff |
-| 7 P2 gzip | 1.96 МБ без сжатия | `GZipMiddleware(minimum_size=500)` + nginx `gzip on` с типами js/css/json/svg, `CachedStaticFiles` с `Cache-Control: immutable` для `?v=` (31536000) и 3600 для остальных | `app.js` raw 370620 → gz 91948, `/terminal` 1.84 МБ raw → 478 КБ gz, с per-lang 1.43 МБ → 373 КБ gz (см. PERF_NOTES.md) |
-| 7b i18n split | 490 КБ все языки сразу | `tools/build_i18n_pages.py` генерит `i18n.pages.{lang}.js` (ru 53K, en 104K, zh 100K, hi 147K, es 106K raw; gz 12K-30K), `seo_pages.render` подменяет src на per-lang по `detect_lang` | HTML теперь `/static/i18n.pages.en.js`, экономия gz ~106 КБ на страницу |
-| 8 P2 WS | без лимита | nginx `limit_conn` 20 на IP для `/ws`, `LIQSCOPE_TRUSTED_PROXIES` (127.0.0.1,::1) — XFF доверяется только от доверенных прокси, `_client_ip` в `server.py` и `web_account.py` | конфиг в `deploy/nginx-liqscope.conf` |
-| 9 P2 rate limit | нет лимита на symbols/add | `RateLimitMiddleware` 20/10м для `/api/symbols/add` (и 60/10м общий), nginx `limit_req` 2r/s для этого пути | тест `test_symbol_guard.test_rate_limit` |
-| 10 P2 tests | 27 js красных | stub `gtag` через `tests/_dom_env.js`, `resourceLoader` в jsdom, фикс `navigator.languages`, `test_resilience` gate, 4 перевода для `test_bot_i18n`, `tools/run_tests.sh` единый раннер, GitHub Actions `tests.yml` | `bash tools/run_tests.sh --python` ok, js `symbol_xss.js` ok |
-| 11 P3 ops | 2 юнита, один 0.0.0.0 | `deploy/liqscope.service` помечен obsolete, слушает 127.0.0.1, `licvid.service` — рабочий с чек-листом, `licvid-backup.service/.timer` + `BACKUP.md` с sqlite3 `.backup` и WAL checkpoint, README чек-лист деплоя | README § Быстрый деплой |
-
-Perf итог: см. `PERF_NOTES.md` — gzip + per-lang + immutable кэш → /terminal 1.96 МБ → 0.37 МБ на проводе, TTFB 2-5 мс.
-
----
-
----
-
-## 0. Что проверяли и как
-
-| Пласт | Объём | Как проверяли |
-|---|---|---|
-| Python-бэкенд | 119 файлов `.py` (в корне — 41 / ≈42 600 строк: `tg_bot.py` 4549, `accounts.py` 4527, `market_feed.py` 4504, `server.py` 3414, `liq_api.py` 2036) | чтение кода, поиск опасных паттернов, прогон всех тестов, живые запросы к серверу |
-| Фронтенд | 17 файлов `static/*.js` (≈25 700 строк: `app.js` 7011, `i18n.pages.js` 5506, `account.js` 5213), 11 HTML | статический анализ sink'ов (`innerHTML`), прогон jsdom-тестов, живые измерения |
-| Маршруты API | 169 эндпоинтов | автоматический обход: есть ли проверка админа/юзера в теле каждого мутирующего роута |
-| Тесты | 59 python + 53 js = 112 файлов | **все запущены поштучно** с фиксацией кода возврата и текста падений |
-| Конфигурация | `deploy/*` (2 systemd-юнита, 2 nginx-конфига, HTTPS-скрипты), `requirements.txt`, `package.json`, `.gitignore`, `README.md` (368 КБ) | чтение + сравнение с фактическим поведением |
-| Данные | `data/` (6.1 МБ, 31 день) | размеры, темп роста, WAL, ретеншн |
-
-**Границы аудита (что НЕ проверялось):** реальный браузер (Chrome/Safari/Firefox — в песочнице недоступен, всё фронтенд-тестирование идёт через jsdom), нагрузочное тестирование, фаззинг, CVE-сканирование зависимостей (их 3: `fastapi`, `uvicorn`, `aiohttp`), проверка фактически задеплоенного сервера (только шаблоны из репозитория), тестирование на реальных мобильных устройствах.
-
----
-
-## 1. Резюме: что чинить в первую очередь
-
-| # | Приоритет | Находка | Где | Статус |
-|---|---|---|---|---|
-| 1 | **P0 — критично** | **XSS без авторизации**: один анонимный POST подкладывает произвольный HTML в глобальный список монет, сервер раздаёт его всем клиентам, UI вставляет в `innerHTML` → исполняемый обработчик в браузере у всех посетителей и админа | `server.py:2867`, `market_feed.py:1765` (`canon`, без валидации), `static/app.js:5958/5991` | **доказано end-to-end** |
-| 2 | P0 | Там же: **неограниченный рост** списка монет анонимными запросами (DoS/амплификация подписок) — 25 запросов = 25 монет, капа нет | `market_feed.py:1798-1802` | доказано |
-| 3 | P1 | **XSS в статьях** (markdown): кавычки в URL ссылки/картинки вырываются из атрибута | `articles.py:112` (`inline_html`), `articles.py:132` (`markdown_html`) | **доказано** (ввод только у админа) |
-| 4 | P1 | **CORS `*` + credentials**: сервер отражает любой Origin и ставит `Access-Control-Allow-Credentials: true` | `server.py:2525-2531` | доказано (`curl`) |
-| 5 | P1 | **Дефолтный секрет** `LIQSCOPE_SECRET = "liqscope-change-me"` — на нём построены HMAC-хеши IP для аккаунтов, гео и слоёв; в `deploy/licvid.service` переменная **закомментирована** | `server.py:159`, `accounts.py:216`, `deploy/licvid.service:50` | доказано |
-| 6 | P2 | Нет ни одного security-заголовка (HSTS, nosniff, `frame-ancestors`, CSP, Referrer-Policy) — ни в приложении, ни в nginx | `server.py`, `deploy/nginx-liqscope.conf` | доказано |
-| 7 | P2 | Нет сжатия: страница `/terminal` тянет **1.96 МБ** JS/CSS в несжатом виде. `i18n.pages.js` — 490 КБ на все 5 языков сразу | нет `GZipMiddleware`, в nginx нет `gzip on` | измерено |
-| 8 | P2 | `/ws` без аутентификации и без лимита на число клиентов | `server.py:3220`, `hub.clients` | по коду |
-| 9 | P2 | Нет `rate limit` на публичных пишущих эндпоинтах (символы, стать-комментарии, чаты лимитированы частично) | `server.py:2867` и др. | по коду |
-| 10 | P2 | Тесты: 27 из 53 js-файлов и 2 из 59 py-файлов «красные», но **почти все** — дефекты самих тестов и песочницы, не продукта (полная разборка в §4) | `tests/*` | доказано |
-| 11 | P3 | Документация и эксплуатация: 2 systemd-юнита (один устаревший и слушает `0.0.0.0:8000` мимо nginx), ≈40 переменных окружения не описаны, 124 маршрута без строки в таблице API, README 368 КБ монолитом, нет CI/линтеров/единого раннера тестов | `deploy/`, `README.md` | доказано |
-| 12 | P3 | Молчаливые ошибки: 64 места `except Exception: pass`, 2 голых `except:` | `accounts.py:4118,4358` и др. | по коду |
-
-Хорошая новость: базовые вещи сделаны правильно — scrypt для паролей, флаги cookie, отсутствие секретов в git, атомарные записи JSON, проверка админа на всех `/api/admin/*`, rate-limit на логине/почте/капче, WAL в SQLite, капы на загружаемые файлы. Детали — в §2.8.
-Дата проверки: 27 сентября 2026.
-
----
-
-## 2. Безопасность
-
-### 2.1. P0 — XSS и отравление списка монет без авторизации
-
-**Что происходит.** Эндпоинт публичный, без проверки пользователя:
-
-```python
-# server.py:2867
-@app.post("/api/symbols/add")
-async def api_symbol_add(symbol: str = Query(..., max_length=40),
-                         force: bool = Query(False)):
-    ...
-    res = await feed.add_symbol(symbol, force=force)   # без валидации набора символов
-```
-
-`canon()` (`market_feed.py:237`) только приводит к верхнему регистру и меняет `-` на `_` — **никакой проверки допустимых символов нет**. С `force=true` каталог бирж даже не проверяется: создаётся фиктивная запись и строка попадает в глобальные `feed.symbols` / `feed.custom_symbols` (`market_feed.py:1798-1802`) — без ограничения на количество.
-
-**Доказательство (воспроизведение на чистом демо-сервере):**
-
-```bash
-# 1) один POST без авторизации
-curl -X POST "http://127.0.0.1:8000/api/symbols/add?symbol=%3Cimg%20src%3Dx%20onerror%3Dalert(1)%3E&force=true"
-# → {"added":true,"found":true,"symbol":"<IMG SRC=X ONERROR=ALERT(1)>_USDT", ...}
-```
-## Что держится
-
-```
-# 2) сервер рассылает его ВСЕМ подключённым клиентам в WS-init
-$ node audit/_proof_ws_symbol.js
-тип: init | символов: 41 | с опасными символами: 1
-payload-символ присутствует: true
-custom_symbols из WS: ["<IMG SRC=X ONERROR=ALERT(1)>_USDT"]
-```
-Вход и админка устроены нормально.
-
-```
-# 3) UI вставляет строку в innerHTML — jsdom строит настоящий узел DOM
-$ node audit/_proof_dom_symbol.js http://127.0.0.1:8000
-строк в дропдауне: 3
-ЗЛО: символ превратился в РЕАЛЬНЫЙ элемент DOM: <img src="X" onerror="ALERT(1)">
-     onerror = "ALERT(1)"
-     HTML строки: <span class="sym-opt-left"><span><img src="X" onerror="ALERT(1)"></span><i class="sym-star">★</i></span>
-```
-- Пароль хранится через `scrypt` из стандартной библиотеки, сравнение через `hmac.compare_digest`.
-- Сессия — случайный токен на 30 дней. Cookie `httponly`, `SameSite=Lax`.
-- Админские ручки проверяют `is_admin`.
-- Вход через виджет Telegram сверяет HMAC и возраст данных.
-- Секретов в git нет. Известный дефолт секрета не принимается. В unit-файле стоит `LIQSCOPE_REQUIRE_SECRET=1`.
-- Процесс в unit-файле слушает только `127.0.0.1:8000`. Снаружи его закрывает nginx.
-- SQL в основном с параметрами. Динамические запросы — это служебные `ALTER`/`UPDATE` по своим именам колонок, не по тексту пользователя.
-- Лимиты есть на почту, вход и выдачу капчи.
-
-Виновник на клиенте (`static/app.js:5958` + сборка строки в `symbolOptionEl`, `app.js:5991`):
-История после перезагрузки не должна пропадать из оперативной памяти.
-
-```js
-const row = symbolOptionEl(s, {
-    label: s.split("_")[0],          // ← сырое имя монеты
-    ...
-});
-...
-row.innerHTML =
-    '<span class="sym-opt-left">' + ... + "<span>" + o.label + "</span>" + ...
-```
-- Терминал, дневной дайджест и часовые сводки поднимаются из месячного архива.
-- Пустой день из архива (оборот без ликвидаций) на `/digest` не подставляется.
-- Сохранённый выпуск из JSON архив не переписывает: у него остаются публикация и обложка.
-
-**Последствия.** Пока процесс жив, у каждого посетителя (включая админа в `/admin`) при отрисовке списка монет исполняется произвольный скрипт в origin сайта: чтение/отправка данных от имени смотрящего, подмена интерфейса, кража действий. Запись живёт только в памяти (на диск список не сохраняется — после рестарта исчезает), но перезапуск не требуется: достаточно одного POST на живом сервере.
-График расчётных уровней в текущем коде.
-
-**Как чинить (минимум, 3 правки):**
-- Лонг рисуется только ниже живой цены, шорт — только выше.
-- Под полосами фона нет: колонка не закрывает свечи и не залезает на шкалу цены.
-- Пунктир — расчётный магнит, не заявка биржи. Длина полосы — оценка массы на этой цене, не сумма «по дороге».
-
-1. Сервер — валидация + кап в `market_feed.add_symbol()` (или в роуте):
-   ```python
-   _SYM_RE = re.compile(r"^[A-Z0-9]{2,15}_[A-Z0-9]{2,10}$")
-   if not _SYM_RE.match(sym):                     # canon() уже привёл к верхнему регистру
-       return {"added": False, "found": False, "symbol": "", "message": "недопустимая пара"}
-   if len(self.symbols) >= MAX_SYMBOLS_CAP:       # сейчас капа нет вообще
-       return {"added": False, "found": False, "symbol": sym, "message": "список заполнен"}
-   ```
-   плюс `force=true` разрешать только админу и навесить на роут лимитер (как `_LOGIN_RATE`).
-2. Клиент — экранировать всё, что приходит со стороны сервера: `esc(o.label)`, `esc(s)` в `data-symbol`, `esc(c.symbol)` в `topCoinGroup` (`app.js:6473-6477`), `sym` в `account.js:1627/1724/1752/1792`, `sym` в `terminal_chat.js:375`. Ещё лучше — `textContent` для подписи вместо склейки HTML.
-3. Добавить регрессионный тест: «невалидная пара не добавляется», «символ с `<`/`"` не появляется в разметке».
-Сигнал уровней в кабинете.
-
-Единственная причина, по которой это не «дыра в проде прямо сейчас»: список монет — общая память процесса, и попасть в неё можно только через этот неохраняемый роут; но он открыт анонимно, поэтому уязвимость полноценная.
-- По умолчанию выключен.
-- Фильтры: масса, подход в процентах, сторона, пауза, до 8 монет.
-- Пустой список монет — это уже посчитанные монеты, не весь рынок.
-- Сохранение сигнала не выключает сам сервис уровней.
-
-### 2.2. P1 — XSS в статьях (markdown)
-
-`articles.py` собирает HTML из markdown регулярками. URL подставляется в атрибут без экранирования кавычек (`inline_html`, ~строка 112; `markdown_html`, ~строка 132):
----
-
-```
-[клик](https://a.com/"onmouseover="alert(1))
-→ <p><a href="https://a.com/"onmouseover="alert(1" target="_blank" rel="noopener nofollow">клик</a>)</p>
-## Что реально ломает ожидание
-
-![x" onerror="alert(1)](https://a.com/i.png)
-→ <img src="https://a.com/i.png" alt="x" onerror="alert(1)" loading="lazy">
-```
-### 1. Пустой вечер всё равно остаётся на сайте
-
-Ограничения, которые уже работают: обычный текст и `<script>` экранируются, `javascript:` отбрасывается, markdown статей доступен только админу — то есть это self-XSS админа, а не чужая атака. Но если у статьи когда-нибудь появится пользовательский/импортируемый источник (или ссылку вставит админ с чужой публикации), дыра станет боевой. Фикс: `html.escape(url, quote=True)` перед подстановкой в атрибут (2-3 строки) + тест на `"` в URL. Отдельно: относительные ссылки `[x](/terminal)` вообще не превращаются в ссылки — фича-пробел, не безопасность.
-Сбор дайджеста пишется в архив до проверки «были ли ликвидации». Если ликвидаций нет, в Telegram день не уходит, но флаг пропуска в файл не сохраняется. Публичный список выпусков нулевые записи не отфильтровывает.
-
-### 2.3. P1 — CORS: любой Origin + credentials
-Итог: на `/digest` такой день выглядит как черновик. В канал он не уходит.
-
-```python
-# server.py:2525
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, ...)
-```
-Пока процесс в окне трёх часов после вечернего времени, сборка повторяется каждые 15 минут. Каждый повтор снова собирает выпуск и снова зовёт ИИ, хотя отправлять нечего.
-
-Фактический ответ (проверено):
-Это не то же самое, что пустые черновики из месячного архива. Те как раз отсекаются. Здесь запись уже лежит в JSON выпусков, и архив её не заменяет.
-
-```
-$ curl -D- -H "Origin: https://evil.example" http://127.0.0.1:8000/api/stats | grep -i access-control
-access-control-allow-origin: https://evil.example
-access-control-allow-credentials: true
-```
-### 2. Вечерний выпуск не догоняется
-
-Starlette отражает Origin, а не отдаёт `*`, поэтому браузер не блокирует запрос: любой сторонний сайт может слать запросы с cookie посетителя и читать ответ. Практический урон сильно ограничен `SameSite=lax` на сессионной cookie (кросс-сайтовый `fetch` cookie не пошлёт), но комбинация «отражённый Origin + credentials» — классическая ошибка, и она ничем не оправдана: сайт не интегрируется со сторонними фронтендами. Фикс: `allow_origins=[PUBLIC_URL, SITE_URL]` (обе константы уже есть в `server.py`) и `allow_credentials=True` оставить.
-Дайджест выходит только если одновременно:
-
-### 2.4. P1 — секрет по умолчанию известен, и в юните он закомментирован
-
-```python
-# server.py:159
-SECRET = os.getenv("LIQSCOPE_SECRET", "").strip() or "liqscope-change-me"
-```
-
-```ini
-# deploy/licvid.service:50
-# Environment=LIQSCOPE_SECRET=
-```
-- процесс запущен;
-- дайджест включён;
-- момент попал в 22:00 МСК плюс-минус 10 минут, либо опоздание не больше 3 часов.
-
-Сессии от этого не подделываются (`liqscope_sid` — `secrets.token_urlsafe(32)`, хранится в БД), но `SECRET` — соль для `hash_ip()` (`accounts.py:216`: `hmac_sha256(secret, ip)[:16]`), которая используется для аккаунтов (`web_account.py:398,674,743,762,901,929,1681`), гео-статистики (`web_geo.py:250`) и слоёв (`web_layers.py:252`). С публично задокументированной солью хеши IP обратимы по полному перебору IPv4 (а точечно — вообще мгновенно), то есть «анонимная» статистика и связка «один юзер = один IP» деанонимизируются. Фикс: при старте, если секрет совпадает с дефолтным, — громко падать (или генерировать случайный и сохранять в `data/`), а в `deploy/licvid.service` раскомментировать строку и вписать реальное значение.
-Если сервер подняли позже, день помечается пропущенным. Утром он сам не публикуется и не дописывается задним числом.
-
-### 2.5. P2 — нет security-заголовков
-Факты выпуска — это окно дайджеста (по умолчанию 24 часа): архив событий плюс наложение текущего часа, а не «только то, что было в памяти с последнего рестарта».
-
-Ни приложение, ни nginx не отдают: `Strict-Transport-Security`, `X-Content-Type-Options: nosniff`, `X-Frame-Options`/`Content-Security-Policy: frame-ancestors`, `Referrer-Policy`, `Permissions-Policy`. При этом HTTPS настроен, а форма входа/админка могут быть встроены в iframe чужого сайта (кликджекинг). Полный CSP тут сразу не вклеить — страницы напичканы инлайновыми `<script>` (`window.LIQSCOPE_LANG`, JSON-LD), поэтому разумный минимум: `add_header` в nginx для nosniff/frame-ancestors/Referrer-Policy/Permissions-Policy + HSTS `max-age=31536000; includeSubDomains`, а CSP — отдельной задачей через nonce/hash.
-
-### 2.6. P2 — лимиты и открытый WebSocket
-Повтор после сбоя каналов — не чаще чем раз в 15 минут. Если день уже отмечен как отправленный в логе канала, второй раз в канал он не уходит.
-
-- `POST /api/symbols/add` — ни аутентификации, ни лимитера (единственный публичный мутирующий роут без охраны — проверены все 77).
-- Публичные пишущие эндпоинты в остальном прикрыты: логин 10/15 мин, письма 3/15 мин и 5/ч на адрес, капча 30/5 мин, комментарии — окно 120 с, чаты — 60 с, поддержка/фидбек — 300 с, гео — 60 с.
-- `/ws` (`server.py:3220`) не требует авторизации и не ограничивает число соединений: `hub.clients` только логируется. Флуд соединениями = DoS, тем более что каждому клиенту идёт широковещание (отправка защищена таймаутом — это проверено тестом `test_resilience.py`). Фикс: `limit_conn`/`limit_req` в nginx и/или счётчик-кап в `hub.register()`.
-- Загрузка файлов ограничена по размеру (12 МБ на файл, ≤60 файлов), в nginx `client_max_body_size 16m`; но `await request.body()` (26 мест) читает тело целиком в память **до** проверок — при прямом обращении к uvicorn тело не ограничено.
-### 3. Сигнал уровней и алерты по объёму делят одну паузу
-
-### 2.7. P2 — прочее
-В кабинете уровней свой тумблер Telegram. В алертах по объёму есть отдельная метрика «уровни». Оба пути пишут событие с одной и той же метрикой `level` и смотрят одну и ту же паузу.
-
-- **WAL не чекпойнится**: `data/accounts.db` 460 КБ, а `accounts.db-wal` — 4.0 МБ (ровно на границе авто-чекпойнта). Долгие читающие транзакции могут держать WAL и растить его неограниченно. Полезно периодически делать `PRAGMA wal_checkpoint(TRUNCATE)`.
-- **Бэкапов нет вообще** — в README ни слова про резервное копирование `data/` (аккаунты, статьи, дайджесты, история). Минимум: ежедневный `sqlite3 accounts.db ".backup"` + tar каталога `data/` и задокументированная проверка восстановления.
-- **64 «молчаливых» обработчика** `except Exception: pass` (и 2 голых `except:` в `accounts.py:4118,4358`) — ошибки исчезают без следа, диагностировать инциденты будет тяжело.
-Если включены оба:
-
-### 2.8. Что сделано правильно (проверено, не трогать)
-- срабатывание одного глушит другое на время паузы;
-- в одну и ту же секунду оба цикла могут успеть отправить сообщение, пока запись ещё не легла.
-
-| Область | Факт |
+| Область | Состояние |
 |---|---|
-| Пароли | scrypt с солью (`accounts.py:89`), не sha/md5 |
-| Сессия | `liqscope_sid` = `secrets.token_urlsafe(32)` в БД; cookie `HttpOnly; SameSite=lax; Max-Age=30д`, `Secure` включается `LIQSCOPE_COOKIE_SECURE=1` (в `deploy/licvid.service:28` — включён) |
-| Редиректы | `_safe_next` — анти-open-redirect |
-| Админ-доступ | все `/api/admin/*` (77 мутирующих роутов проверены обходом) начинают с `_admin(request)`; единственные 8 неохраняемых — публичные эндпоинты аутентификации (логин/капча/токены) |
-| Секреты | в git нет ни одного токена/пароля; всё через `LIQSCOPE_*`, `.gitignore` закрывает `data/`, `*.db`, `.env`, логи |
-| Целостность данных | 12 мест записи JSON через временный файл + `os.replace`, SQLite в режиме WAL |
-| Таймауты | `total=None` только для WebSocket, у остальных запросов таймауты выставлены |
-| Лимиты контента | тексты/заголовки/фото лимитированы (`ads.py`, `api_articles.py`, `web_upload.py`) |
-| Авторизация в ботах/чатах | вебхуки и админ-действия бота за `LIQSCOPE_ADMIN_IDS`, гостевые чаты отделены от приватных |
-| i18n | 5 языков с полным паритетом ключей (385 ключей × 5, 0 пропусков в фразах) |
-Запись в журнал ставится до отправки в Telegram. Если бот в этот момент не отправил сообщение, пауза всё равно начинается. Сигнал пропадает до конца паузы, хотя в чат он не дошёл.
+| XSS через имя монеты | `market_feed.is_safe_symbol` — `^[A-Z0-9]{1,32}_[A-Z0-9]{2,10}$`. Док принимает только `^[A-Z0-9]{2,20}_[A-Z0-9]{2,6}$`. В адрес iframe параметры кладёт `URLSearchParams`, не склейка строки. |
+| Таймфрейм слота | Только `1, 3, 5, 15, 60, 240, 1440`. |
+| id слота | `native` или `c_` + 6–12 символов `[a-z0-9]`. Чужой id из `postMessage` отбрасывается. |
+| `postMessage` дока | Проверяются `origin === location.origin` и `source === "liqscope-dock"`. |
+| Секрет | Известный дефолт `liqscope-change-me` в `_KNOWN_BAD_SECRETS`. В PROD без нормального `LIQSCOPE_SECRET` процесс не стартует. В репозитории секретов нет. |
+| CORS | `allow_origins` берётся из `SITE_URL` / `PUBLIC_URL` / `LIQSCOPE_CORS_ORIGINS`, не `*`. |
+| Заголовки | `nosniff`, `Referrer-Policy`, `Permissions-Policy`, `X-Frame-Options`, `frame-ancestors`. Чужой сайт терминал встроить не может. |
+| `eval` / `new Function` / `document.write` | В `server.py`, `articles.py`, `web_account.py`, `static/app.js`, `static/chart_dock.js` не найдены. |
+| Кап графиков | 6 слотов, дальше `alert`. Это ограничивает и число iframe, и число сокетов. |
 
----
-Текст сигнала собирается по-русски. Для английского чата бот потом подменяет известные фразы. Это не полный перевод сообщения.
+## Находки
 
-## 3. Карта `innerHTML` (сопутствующий класс риска)
-### 4. «Все монеты» — это не весь рынок
+### P2. Документы безопасности отстали от кода
 
-Всего **155** использований `innerHTML`/`insertAdjacentHTML` в `static/*.js`; собственные эскейперы определены только в 11 файлах (`esc`/`escapeHtml`). В `app.js` — 25 вставок и лишь 2 вызова `escapeHtml`, в `account.js` — эскейпер есть, но в шаблонах подписей монет не применяется. Точки с данными «со стороны сервера» и без локального экранирования:
-Если в сигнале уровней список монет пуст, в прогрев попадают первые 8 символов ленты, плюс монеты открытых графиков и подписок, где метрика уровней уже включена. За один проход считается 4 монеты, пауза между проходами около 30 секунд. Снимок для сигнала обновляется не чаще чем раз в 20 секунд.
+`SECURITY_NOTES.md` и старый текст `AUDIT.md` всё ещё пишут `X-Frame-Options: DENY` и `frame-ancestors 'none'`.
 
-| Файл:строка | Что подставляется |
-|---|---|
-| `static/app.js:5958, 5991` | имя монеты из глобального списка (доказанный XSS, §2.1) |
-| `static/app.js:6473-6477` | `c.symbol` в `data-symbol="…"` и текст карточки топ-монет |
-| `static/account.js:1627, 1724, 1752, 1792` | `row.symbol` / `f.symbol` / `h.symbol` в строках алертов и ленты |
-| `static/terminal_chat.js:375` | `sym` в сервисном чате (`label`/`sym` из `meta`) |
-Выбранные монеты считаются раньше остальных. Невыбранные почти не попадают в сигнал, даже если тумблер включён «на всё».
+Сейчас и приложение, и оба nginx-конфига отдают `SAMEORIGIN` и `frame-ancestors 'self'`. Это сделано специально: дополнительные графики — iframe того же origin. Чужой origin по-прежнему не может встроить терминал. `tests/test_symbol_guard.py` уже допускает пару `DENY`/`SAMEORIGIN` и `'none'`/`'self'`.
 
-Сообщения чата и имена пользователей экранируются корректно (`terminal_chat.js:46` + вызовы `esc`), атрибуты везде в двойных кавычках — одиночная кавычка не вырывается. Рекомендация: единый хелпер (один `esc` на весь сайт), правило «в `innerHTML` попадает только уже экранированное» и простой тест-сканер на новые нарушители.
-Это оценка, не уровень биржи. В тексте сигнала это должно быть сказано.
+Остаточный риск: любая страница **этого же** origin может встроить `/terminal`. Если на origin появится XSS, кликджекинг своего терминала станет возможным. Для чужих сайтов граница на месте.
 
----
+Рекомендация: поправить `SECURITY_NOTES.md` и чек-лист в `README.md`, чтобы деплой не «вернули» `DENY` и не сломали iframe.
 
-## 4. Тесты: честный статус всех 112 файлов
-## Безопасность
+### P2. Каждый дополнительный график — полный второй терминал
 
-Метод: каждый файл запущен отдельно, зафиксированы код возврата и текст падений. Ниже — не «сколько зелёных», а **кто виноват** в каждом красном.
-Это не вход в сервер. Порт приложения снаружи закрыт. Но дырки есть.
+iframe грузит ту же страницу: `app.js`, свечи и свой WebSocket. Шесть графиков — до шести сокетов и шести копий клиента с одного браузера. Nginx режет `/ws` лимитом `limit_conn` 20 на IP, так что один пользователь с несколькими вкладками может упереться в лимит и увидеть обрывы ленты.
 
-### 4.1. Python — 59 файлов, 57 зелёных
-### Подставной IP обходит лимит входа
+Это не дыра, но это главный запас по нагрузке после отказа от старого «один сокет на окно». Трогать архитектуру сейчас не нужно: пользователь явно просил не переписывать сингл-чарт. Имеет смысл не поднимать `MAX` выше 6 и не подключать `chart_panel.js` обратно.
 
-| Файл | Результат | Причина (разобрана) |
-|---|---|---|
-| `test_bot_i18n.py` | 19/21, `failures=2` | 4 русские подписи в `tg_bot.py` без английского перевода: `' уже отправлен'`, `'дайджест за '`, `'отправка дайджеста выключена в админке'`, `'📖 Сводка целиком на сайте'`. Это **реальный незакрытый долг** (страж языка работает). Строки пришли из базового коммита `e81d5af` (`git log -S` подтверждает) — не из моих правок. Фикс: добавить 4 ключа в таблицу переводов → оба теста станут зелёными |
-| `test_resilience.py` | 41/42 | Падает проверка `"for attempt in range(3)" in src and "_gate_load_specs()" in src`. Код делает ровно это, но вызов теперь с аргументом: `self._gate_load_specs(needed=[...])` — подстрока `_gate_load_specs()` не находится. **Дефект ассерта** (ложно-отрицательный страж), не регрессия: логика Gate-ретраев на месте (`market_feed.py:2173-2200`) |
-| остальные 57 | OK | — |
-Лимиты и география берут первый адрес из `X-Forwarded-For`. Nginx дописывает клиентский заголовок вперёд (`$proxy_add_x_forwarded_for`). Свой надёжный `X-Real-IP` приложение не использует.
+### P3. Старый мультичарт ещё лежит в репозитории
 
-### 4.2. JavaScript — 53 файла, 26 с нулевым кодом возврата
-Следствие: лимит входа, лимит писем и счётчик визитов можно обойти, подставив другой первый IP. Это не даёт чужую сессию и не открывает админку. Это снимает защиту от перебора.
+`static/chart_panel.js` (~2000 строк) страница не грузит. `WorkspaceManager` и `window.open('/terminal?mode=panel...')` в `static/workspace.js` остаются, но старт их не вызывает.
 
-Красные распадаются на 5 объяснённых причин:
-Лимиты живут в памяти одного процесса. После рестарта счётчик обнуляется. Второй процесс их не разделяет. В unit-файле процесс один, так что вторая часть сейчас не стреляет.
+Риск не в текущей странице, а в следующем патче: если снова добавить `<script src="chart_panel.js">` или вызвать `new WorkspaceManager`, вернётся старый режим, который как раз убрали. `window.open` там без `noopener`, id панели валидируется regex — само по себе не эксплуатируется, пока класс не монтируется.
 
-**(а) Нет сети (артефакт песочницы) — 23 файла.** Единственная ошибка — `jsdomError: Could not load script: "https://www.googletagmanager.com/gtag/js…"`. Проверено фильтрацией: после исключения gtag-сообщений в этих файлах не остаётся ни одной строки FAIL. Файлы: `chart_follow`, `chart_time`, `clear_restore`, `cluster_modal`, `cookie_consent`, `digest_calendar`, `drawings`, `feed_filter`, `feed_flow_all`, `feed_thresholds`, `ind_panes`, `legend_layout`, `leaders_panel`, `liq_history_live`, `liq_hover`, `liq_plates`, `live_stats`, `oi_balls`, `shape_modal`, `volscale`, `i18n_pages`, `articles_admin_ui`(частично), `email_ui`(частично).
-### Cookie без флага Secure, если забыть переменную
+Рекомендация: не удалять файл в этом заходе (его ещё импортируют заметки и старые тесты), но не подключать его в `index.html`.
 
-**(б) Дефект самого теста в одном месте — 2 файла (10 и 10 провалов).**
-`tests/alerts_board.js:136` и `tests/cabinet_services.js:89` подменяют `navigator.language = "ru-RU"`, но **не** подменяют `navigator.languages`, который в jsdom остаётся `["en-US","en"]`. Детектор языка (`static/i18n.js:2156-2167`) сначала проходит по `navigator.languages` и выбирает `en` — поэтому страница рендерится по-английски, а тест ждёт русские подписи.
-В коде `secure` у cookie по умолчанию выключен. В боевом unit-файле стоит `LIQSCOPE_COOKIE_SECURE=1`. Если процесс поднять без этого флага, сессия уйдёт и по обычному HTTP.
+### P3. Полного CSP нет
 
-Проверено экспериментом: добавляем в тест одну строку —
-```js
-Object.defineProperty(win.navigator, "languages", { value: ["ru-RU", "ru"], configurable: true });
-```
-и получаем `alerts_board: 32 ок / 10 ошибок → 46 ок / 1 ошибка` (остаётся только gtag), `cabinet_services: 45/10 → 60 ок / 1 ошибка`. Тот же паттерн — в 10 других файлах (`ads_banner`, `book_board`, `book_walls`, `chart_follow`, `chart_time`, `chat_dm`, `chat_lang`, …), они просто не проверяют русские подписи, поэтому пока зелёные; при копировании они унаследуют ту же мину. Приложение тут ведёт себя корректно (порядок приоритетов: `?lang=` → сохранённый выбор → язык сервера (если не auto) → `navigator.languages` → `navigator.language` → язык по стране → `en`).
-### CSRF-токена нет
+`SecurityHeadersMiddleware` прямо пишет, что полный CSP не включён: страницы живут на инлайновых скриптах, nonce не разведён. `frame-ancestors` есть, `script-src` нет. Это старый остаток, не регресс дока. Закрывать отдельно, иначе сломается `window.LIQSCOPE_LANG` и JSON-LD.
 
-**(в) Проблемы данных демо-стенда — 2 файла.**
-- `articles_admin_ui.js` 26/1: «обложка показана в редакторе» — у демо-статьи после пересева нет загруженной обложки (код не виноват).
-- `email_ui.js` 62/1: «объяснено, зачем привязывать» — в демо-окружении Telegram не привязан.
-- `hourly_posts.js` 39/2: gtag + «нужный пост подсвечен» (`?post=<id>` не подсвечивает карточку) — воспроизводится и на базовом коммите `e81d5af` (проверено в отдельном worktree), то есть не регрессия от последних правок, но проверить стоит: либо данные, либо логика deep-link.
-Отдельного токена нет. Для обычного браузера чужой сайт не отправит cookie на POST: стоит `SameSite=Lax`. Админские изменения сделаны через POST, не через ссылку. Остаточный риск — старый браузер или свой поддомен, с которого можно дернуть форму.
+### P3. Два разных regex символа
 
-**(г) Зелёные, но с ненулевым кодом** — `i18n_pages.js` 18/0 (ровно те же gtag-ошибки в хвосте).
-### Картинки отдаются по пути из записи
+Бэкенд принимает базу до 32 символов и котировку до 10. Док — базу 2–20 и котировку 2–6. Длинная, но безопасная пара с `/api/symbols/add` может не открыться дополнительным графиком. Это не XSS: док строже, а не слабее. Имеет смысл когда-нибудь свести whitelist к одному, не ослабляя фронт до сырого HTML.
 
-**(д) Всё зелёное:** `nav_mobile` 210/0, `nav_articles` 257/0, `article_switcher`, `archive_delete_ui`, `bot_admin_ui` 75/0, `admin_wipe_ui` 17/0, `lang_auto`, `ads_banner` 91/0, `geo_map` 76/0, `book_walls` 64/0, `chat_lang` 47/0, `layers_gate`, `feedback_ui`, `presence` и др.
-Обложка дайджеста и файл фото в админке читают путь, который лежит в записи, и не проверяют, что файл внутри своей папки. Снаружи путь не задаётся. Риск есть, если кто-то уже может записать произвольный путь в JSON или в базу. Для гостя это не дыра.
+## Что проверено по сценарию графиков
 
-**Вывод по тестам:** качество покрытия высокое (112 файлов, много проверок на реальном рендере и живых запросах), но зелёный прогон сейчас недостижим из-за инфраструктуры: нет раннера (`npm test` — заглушка), нет CI, нет фикстуры «не тянуть gtag», а два теста содержат собственный баг. Дешёвая программа: (1) заглушить gtag в общем хелпере, (2) добавить `navigator.languages` в набор подмен, (3) зафиксировать `_gate_load_specs` в ассерте resilience, (4) дописать 4 перевода бота, (5) завести `tools/run_tests.sh` + GitHub Actions.
-### WebSocket терминала открыт без входа
+- Один график без дока не оборачивается в слот и не прячется.
+- Слои не размножаются на все панели: у iframe свой документ и свой `state`.
+- Адресные `symbol` и `tf` читаются в `app.js` только при `embed=1` или `mode=panel`, до загрузки свечей. Обычный терминал этот блок не трогает.
+- `selectSymbol` основного графика в iframe не вызывается.
+- Вынос в `window.open` из дока убран. Окно `position: fixed` двигается по странице и возвращается кнопкой «Вернуть».
+- Полный экран в сетке вешается на слот (`is-slot-fs`), не на всю `.chart-section`.
 
----
+## Чего этот аудит не доказывает
 
-## 5. Производительность и разметка (измерено на живом сервере)
-`/ws` принимает соединение и отдаёт публичную ленту. Это ожидаемо для терминала. Без cookie клиент остаётся гостем: адресные события чата ему не приходят.
+- Не открывался прод `liqscope.online` и не снимались заголовки живого nginx. Если на сервере старый конфиг с `DENY`, iframe дополнительных графиков будут пустыми, пока не выкатят `deploy/nginx-liqscope.conf`.
+- Не прогонялись `tests/test_symbol_guard.py` и e2e jsdom: в среде нет `aiohttp`. По коду теста заголовок `SAMEORIGIN` он принимает.
+- Не измерялся трафик шести iframe на реальном сокете.
 
-```
-/           HTML 53.7 КБ + 15 статических файлов = 1259.5 КБ
-/terminal   HTML 44.6 КБ + 20 файлов              = 1955.7 КБ
-/digest     HTML 16.3 КБ + 19 файлов              = 1313.2 КБ
-/articles   HTML 10.8 КБ + 16 файлов              = 1272.4 КБ
-/cabinet    HTML 11.5 КБ + 16 файлов              = 1349.3 КБ
-```
-### Мелочь в кабинете
+## Короткий вывод
 
-- **Сжатия нет ни на уровне приложения, ни в nginx**: `Accept-Encoding: gzip` игнорируется, в `deploy/nginx-liqscope.conf` нет ни одной директивы `gzip`. Включение gzip/brotli снимает ~65-75 % объёма (≈2 МБ → ≈500-600 КБ на `/terminal`).
-- **`static/i18n.pages.js` = 490 КБ** — все 5 языков в одном файле (ru 50 КБ, en 99 КБ, zh 97 КБ, es 102 КБ, hi 142 КБ), хотя посетителю нужен один. Разбивка по языкам экономит ~400 КБ на каждой странице.
-- **Нет `Cache-Control`/`Last-Modified`** на статике (только `ETag`): браузер каждый раз ревалидирует даже неизменённые файлы; версионирование через `?v=` уже есть, так что можно смело ставить `Cache-Control: public, max-age=31536000, immutable`.
-- Разметка: у `/` два `<h1>`, у `/terminal` — ни одного (мелкий SEO/доступностный дефект); `alt` у всех картинок есть; `lang` у HTML корректный и меняется вместе с языком.
-- Вес библиотеки графиков: `static/lightweight-charts.js` 196 КБ **плюс** зависимость `lightweight-charts@^5.2.1` в `package.json` — два источника правды, версии разъедутся.
-Адрес фото пользователя вставляется в `img` после удаления кавычек, без полной очистки. Источник — профиль входа, не произвольный текст гостя. Практический риск низкий.
-
----
-
-## 6. Эксплуатация, документация, гигиена
-
-1. **Два systemd-юнита, и README предлагает не тот.** `deploy/licvid.service` — рабочий (`WorkingDirectory=/root/Licvid`, `uvicorn --host 127.0.0.1 --port 8000`, `LIQSCOPE_COOKIE_SECURE=1`, `Restart=always`, `RestartSec=5`). `deploy/liqscope.service` — устаревший (`/root/LiqScope`, `--host 0.0.0.0`, порт наружу) — и именно его README велит установить (README:115, 137). Установка «по инструкции» поднимет uvicorn по HTTP на всех интерфейсах мимо nginx/TLS. Фикс: удалить второй юнит или пометить его как исторический и переписать ссылки в README/`deploy/HTTPS.md`.
-2. **Документация отстала от кода.** Из 169 маршрутов прямо в таблице API подтверждается 65 (остальные без строки; 20 строк документации ссылаются на пути, которых в коде нет, — в основном варианты с query-параметрами). ≈40 переменных окружения читаются кодом, но не описаны (в том числе полезные оператору `LIQSCOPE_BOOK_*`, `LIQSCOPE_ARTICLES_KEEP/DIR/FILE`, `LIQSCOPE_HL_SOLO`, `LIQSCOPE_GA_ID`, `LIQSCOPE_BOT_USERNAME`); в обратную сторону — README упоминает `LIQSCOPE_SMTP_…` как шаблон. README 368 КБ одним файлом — им уже тяжело пользоваться как справочником; напрашивается разделение на `docs/` (деплой, API, переменные, эксплуатация).
-3. **Инженерный контур.** Нет CI, нет линтеров/форматтеров (ruff/eslint/prettier), нет типизации (mypy/pyright), `npm test` — заглушка с `exit 1`, нет скрипта прогона 112 тестов, нет пре-коммит-хуков. Первый шаг — `tools/run_tests.sh` (запуск питона + js с фильтром gtag) и workflow, который гоняет его на push.
-4. **Зависимости.** `requirements.txt` — 3 строки без верхних границ (`fastapi>=0.110`, `uvicorn[standard]>=0.27`, `aiohttp>=3.9`): любое обновление минорной версии может ломать прод без предупреждения. `package.json` описывает старый репозиторий (`github.com/ShwepsX007/LiqScope`), `dependencies.lightweight-charts` дублирует вендоренный файл.
-5. **Данные.** 6.1 МБ за 31 день (≈200 КБ/сутки): рост умеренный, ретеншн есть у статей (500), дайджестов (400), постов (1200), объявлений (30 дней), истории в памяти — но для файлов `data/hours_*.json` автоочистки по возрасту не нашлось, а бэкапов нет вовсе (см. §2.7).
-6. **Наблюдаемость** — `/api/health` есть и информативен (биржи, источники, число монет, клиенты WS), логи структурные в journald. Не хватает: метрик (хотя бы счётчиков ошибок по источникам), алертов на «источник молчит N минут» и внешнего аптайм-чека.
-## Как устроен вечер и сигнал, коротко
-
----
-Дайджест.
-
-## 7. План работ
-- Время: 22:00 МСК, дрожание ±10 минут.
-- Опоздание больше 3 часов: день пропускается, не догоняется.
-- Нулевые ликвидации: в Telegram не уходит, на сайт запись может сохраниться.
-- Удаление выпуска прячет этот день и от восстановления из архива. Новый настоящий выпуск за тот же день в хранилище снова виден.
-
-**P0 — сегодня (≈1-2 часа):**
-1. Валидация символа + кап списка + лимитер на `POST /api/symbols/add`; `force=true` — только админу (§2.1).
-2. Экранирование подписей монет в `app.js`/`account.js`/`terminal_chat.js`; регрессионный тест на `<>"` в символе.
-Сигнал уровней.
-
-**P1 — на этой неделе:**
-3. `html.escape(url, quote=True)` в markdown статей + тест.
-4. CORS: список своих origin вместо `*`.
-5. `LIQSCOPE_SECRET`: fail-fast при дефолте, раскомментировать в юните, упомянуть в чек-листе деплоя.
-6. Починить 4 перевода бота и ассерт `test_resilience`; заглушить gtag в js-тестах и добавить `navigator.languages` (5 файлов-кандидатов).
-7. Включить gzip + `Cache-Control` в nginx; разбить `i18n.pages.js` по языкам.
-- Выключен, пока в кабинете не включить Telegram.
-- Фильтры: масса, подход, сторона, пауза, до 8 монет.
-- Пустой список — уже посчитанные монеты, не весь рынок.
-- Выбранные монеты греются первыми.
-
-**P2 — в течение месяца:**
-8. Security-заголовки (nosniff, frame-ancestors, Referrer-Policy, HSTS), затем CSP с nonce.
-9. Лимит на число WS-клиентов (nginx `limit_conn`/`limit_req` или счётчик в `hub`), лимит размера тела на уровне приложения.
-10. `tools/run_tests.sh` + CI; убрать устаревший `deploy/liqscope.service`, поправить ссылки в README.
-11. Бэкапы `data/` + `PRAGMA wal_checkpoint(TRUNCATE)`; задокументировать восстановление.
-12. Актуализировать документацию API и переменных окружения; разнести README.
-Пунктир на графике.
-
-**P3 — по возможности:** единый `esc` + правило экранирования для всех 155 `innerHTML`; вычистить 64 молчаливых `except`; зафиксировать верхние границы зависимостей; убрать дублирование библиотеки графиков; разобраться с `hourly_posts` deep-link; добить относительные ссылки в markdown статей.
-- Только магниты.
-- Ниже цены — лонги, выше — шорты.
-- Длина полосы — оценка массы на этой цене.
-- Это не заявка и не «ликвидации по дороге».
-
----
-
-## 8. Приложение: как воспроизвести ключевые находки
-
-```bash
-# стенд
-LIQSCOPE_DEMO=1 LIQSCOPE_MAIL_DIR=/tmp/mail LIQSCOPE_ADMIN_EMAILS=live@liqscope.online \
-  /home/user/venv/bin/python server.py     # http://127.0.0.1:8000
-
-# P0: любое из трёх звеньев по отдельности
-curl -X POST "http://127.0.0.1:8000/api/symbols/add?symbol=%3Cimg%20src%3Dx%20onerror%3Dalert(1)%3E&force=true"
-NODE_PATH=./node_modules node tools/audit/_proof_ws_symbol.js
-NODE_PATH=./node_modules node tools/audit/_proof_dom_symbol.js http://127.0.0.1:8000
-## Что на уже запущенном процессе не появится само
-
-# P0: бесконтрольный рост списка монет
-curl -s http://127.0.0.1:8000/api/health | grep -o '"symbols_count": [0-9]*'
-for i in $(seq 1 25); do curl -s -o /dev/null -X POST "http://127.0.0.1:8000/api/symbols/add?symbol=JUNK$i&force=true"; done
-curl -s http://127.0.0.1:8000/api/health | grep -o '"symbols_count": [0-9]*'   # 40 → 65
-Код сигнала уровней и правок архива лежит в ветке. Уже запущенный процесс их не подхватит, пока эту сборку не выложить и сервис не перезапустить. Рестарт сам по себе git не обновляет.
-
-# P1: XSS в markdown статей (питон-реплика рендера)
-python3 -c "import articles; print(articles.markdown_html('[клик](https://a.com/\"onmouseover=\"alert(1))'))"
-После рестарта горячее состояние пустое, пока архив не прочитан: снимок уровней, паузы сигналов, отметка «этот вечер уже решён». Месячный архив закрывает ленту, дайджест и часовые сводки. Он не заменяет пропущенный вечерний выпуск.
-
-# P1: CORS отражает любой источник
-curl -s -D- -o /dev/null -H 'Origin: https://evil.example' http://127.0.0.1:8000/api/stats | grep -i access-control
-
-# тесты
-for f in tests/test_*.py; do LIQSCOPE_TEST_URL=http://127.0.0.1:8000 /home/user/venv/bin/python "$f" >/dev/null 2>&1 || echo "FAIL $f"; done
-for f in tests/*.js; do LIQSCOPE_TEST_URL=http://127.0.0.1:8000 node "$f" http://127.0.0.1:8000 >/dev/null 2>&1 || echo "exit≠0 $f"; done
-```
-
-Скрипты доказательств лежат в репозитории: `tools/audit/_proof_dom_symbol.js` (рендер символа в DOM), `tools/audit/_proof_ws_symbol.js` (рассылка в WS-init), `tools/audit/_proof_symbol_xss.js` (попытка того же на живой странице), `tools/audit/_probe_lang.js` (проверка авто-выбора языка). Запускаются из корня репозитория:
----
-
-```bash
-cd /home/user/Licvid
-NODE_PATH=./node_modules node tools/audit/_proof_ws_symbol.js
-NODE_PATH=./node_modules node tools/audit/_proof_dom_symbol.js http://127.0.0.1:8000
-NODE_PATH=./node_modules node tools/audit/_probe_lang.js http://127.0.0.1:8000
-```
-## Чего в этой проверке нет
-
-Это диагностические скрипты аудита, а не часть продукта: в CI/раннер тестов они не входят и ничего не проверяют автоматически (регрессионный тест на `POST /api/symbols/add` с недопустимой парой — отдельная задача из плана, п. 2).
-- Не смотрел живые логи, базу и `data/` на сервере.
-- Не проверял, выложена ли текущая ветка на liqscope.online.
-- Не гонял полный набор тестов в этом проходе.
-- Не искал уязвимости перебором запросов к живому сайту.
-- Не переписывал код.
+Текущая страница терминала безопаснее старого мультичарта в одной точке: чужие id, символы и таймфреймы в док не проходят, отдельная вкладка браузера не открывается, чужой сайт терминал не встраивает. Главные хвосты — устаревшие security-заметки про `DENY`, умножение WebSocket на каждый iframe и мёртвый `chart_panel.js`, который не должен вернуться в `index.html`. Полный CSP по-прежнему отдельная задача.

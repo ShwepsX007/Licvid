@@ -37,6 +37,8 @@ class Ctx:
         self.store: PostStore = PostStore("")
         #: async () -> запись архива: собрать сводку сейчас без Telegram
         self.collect_fn = None
+        #: () -> посты из месячных свёрток, если JSON после перезагрузки пуст
+        self.archive_fn = None
         #: tg_bot: удаление уже вышедших постов из Telegram
         self.bot = None
         #: () -> адрес английского канала (там выходят эти сводки)
@@ -130,6 +132,54 @@ def _photo_response(path: str) -> Any:
                         headers={"Cache-Control": "public, max-age=86400"})
 
 
+def hourly_records() -> List[dict]:
+    """Посты JSON плюс часы месячного архива с тем же id не дублируем."""
+    items = ctx.store.list() if isinstance(ctx.store, PostStore) else []
+    fn = getattr(ctx, "archive_fn", None)
+    if fn is None:
+        return items
+    try:
+        extra = fn() or []
+    except Exception as e:                           # noqa: BLE001
+        log.debug("сводки: архив часов не собрался: %s", e)
+        return items
+    have = {str(x.get("id") or "") for x in items}
+    merged = list(items)
+    for rec in extra:
+        rid = str((rec or {}).get("id") or "")
+        if rid and rid not in have:
+            merged.append(rec)
+            have.add(rid)
+    merged.sort(key=lambda x: float(x.get("ts") or 0), reverse=True)
+    return merged
+
+
+def hourly_days(items: List[dict]) -> List[dict]:
+    """Индекс дней в той же форме, что PostStore.days()."""
+    out: Dict[str, dict] = {}
+    for rec in items:
+        day = str(rec.get("day") or "")
+        if not day:
+            continue
+        row = out.get(day)
+        if row is None:
+            row = out[day] = {"day": day, "n": 0, "first": 0.0, "last": 0.0,
+                              "window_h": rec.get("window_h") or 1,
+                              "total_usd": 0.0, "liq_count": 0}
+        ts = float(rec.get("ts") or 0)
+        row["n"] += 1
+        if not row["last"] or ts > row["last"]:
+            row["last"] = ts
+        if not row["first"] or ts < row["first"]:
+            row["first"] = ts
+        try:
+            row["total_usd"] += float(rec.get("total_usd") or 0)
+            row["liq_count"] += int(rec.get("liq_count") or 0)
+        except (TypeError, ValueError):
+            pass
+    return sorted(out.values(), key=lambda x: x["day"], reverse=True)
+
+
 def register_hourly_routes(app) -> None:
     router = APIRouter()
 
@@ -195,12 +245,18 @@ def register_hourly_routes(app) -> None:
         ``days`` — лёгкий индекс для календаря: по нему видно, за какие дни
         посты есть и сколько их было, чтобы страница не тянула всё сразу.
         """
-        items = ctx.store.list()
-        days = ctx.store.days()
-        if day:
-            posts = ctx.store.by_day(day)
+        stored = ctx.store.list()
+        if getattr(ctx, "archive_fn", None) is None:
+            items = stored
+            days = ctx.store.days()
+            posts = ctx.store.by_day(day) if day else ctx.store.recent(_limit(limit))
         else:
-            posts = ctx.store.recent(_limit(limit))
+            items = hourly_records()
+            days = hourly_days(items)
+            if day:
+                posts = [r for r in items if str(r.get("day") or "") == str(day)]
+            else:
+                posts = items[:_limit(limit)]
         return {
             "ok": True,
             "items": [public_post(r, lang) for r in posts],

@@ -45,6 +45,9 @@ class Ctx:
         self.liqs_fn = None          # () -> список событий ликвидаций
         self.symbols_fn = None       # () -> [монета] (по обороту, свежие первыми)
         self.candles_fn = None       # async (монета, таймфрейм) -> {"candles": [...]}
+        self.hours_fn = None         # (since, until) -> [(час, ячейка архива)]
+        self.events_fn = None        # (since, until) -> события месяца, не только RAM
+        self.archive_days_fn = None  # (have_days) -> выпуски из месячных свёрток
         self.oi_fn = None            # async (монета) -> payload OI
         self.ai_fn = None            # async (facts, lang) -> текст рассказа
         self.publish_fn = None       # async (rec, langs, force) -> {lang: [ok, err]}
@@ -148,13 +151,46 @@ def price_row(rows: List[dict], now: float, hours: int) -> Optional[dict]:
     return {"price": last_close, "pct": pct, "vol_usd": vol}
 
 
+def _merge_flow(dst: dict, src: dict) -> None:
+    """Дописать поток свечи, не затирая CVD, который уже пришёл из архива."""
+    if not src:
+        return
+    try:
+        vol = float(src.get("vol") or 0)
+    except (TypeError, ValueError):
+        vol = 0.0
+    if vol and float(dst.get("vol") or 0) <= 0:
+        dst["vol"] = vol
+    if src.get("has_cvd") and not dst.get("has_cvd"):
+        try:
+            dst["cvd"] = float(src.get("cvd") or 0)
+        except (TypeError, ValueError):
+            dst["cvd"] = 0.0
+        dst["has_cvd"] = True
+
+
 async def market_day(symbols: List[str], hours: int = 24,
                      now: Optional[float] = None) -> Dict[str, dict]:
-    """{потоки по часам, цены} по списку монет — свечи тянем параллельно."""
+    """{потоки по часам, цены} по списку монет.
+
+    Сначала месячные часовые свёртки: CVD и оборот переживают перезагрузку.
+    Свечи нужны для цены и процента. Их поле cvd архив не подменяет.
+    """
     now = float(now if now is not None else time.time())
     flows: Dict[str, dict] = {}
     prices: Dict[str, dict] = {}
-    if not symbols or ctx.candles_fn is None:
+    if not symbols:
+        return {"flows": flows, "prices": prices}
+    start = now - max(1, int(hours)) * 3600
+    if ctx.hours_fn is not None:
+        try:
+            cells = ctx.hours_fn(start, now) or []
+        except Exception as e:                       # noqa: BLE001
+            log.debug("дайджест: часовые свёртки не прочитались: %s", e)
+            cells = []
+        from archive_restore import flows_from_cells
+        flows = flows_from_cells(cells, symbols)
+    if ctx.candles_fn is None:
         return {"flows": flows, "prices": prices}
     sem = asyncio.Semaphore(5)
 
@@ -171,11 +207,22 @@ async def market_day(symbols: List[str], hours: int = 24,
         rows = _rows(entry)
         if not rows:
             continue
-        cells = hour_cell(rows, now, hours)
-        if cells:
-            flows[sym] = cells
+        candle_flows = hour_cell(rows, now, hours)
+        if candle_flows:
+            dst = flows.setdefault(sym, {})
+            for h, cell in candle_flows.items():
+                slot = dst.setdefault(h, {"vol": 0.0, "cvd": 0.0, "has_cvd": False})
+                _merge_flow(slot, cell)
         row = price_row(rows, now, hours)
         if row:
+            archived_vol = 0.0
+            for cell in (flows.get(sym) or {}).values():
+                try:
+                    archived_vol += float(cell.get("vol") or 0)
+                except (TypeError, ValueError):
+                    pass
+            if archived_vol > float(row.get("vol_usd") or 0):
+                row["vol_usd"] = archived_vol
             prices[sym] = row
     return {"flows": flows, "prices": prices}
 
@@ -202,6 +249,15 @@ async def build_facts(now: Optional[float] = None,
     now = float(now if now is not None else time.time())
     window = int(window or ctx.window_sec)
     events = list(ctx.liqs_fn() or []) if ctx.liqs_fn else []
+    if ctx.events_fn is not None:
+        try:
+            archived = list(ctx.events_fn(now - window, now) or [])
+        except Exception as e:                       # noqa: BLE001
+            log.debug("дайджест: события архива не прочитались: %s", e)
+            archived = []
+        if archived:
+            from archive_restore import merge_events
+            events = merge_events(events, archived, now - window, now)
     symbols: List[str] = []
     if ctx.symbols_fn:
         try:
@@ -224,6 +280,15 @@ async def build_facts(now: Optional[float] = None,
     facts = collect_day(events, now=now, window_sec=window, oi=oi,
                         prices=market["prices"], flows=market["flows"],
                         oi_top=ctx.oi_top, price_top=ctx.price_top)
+    if ctx.hours_fn is not None:
+        try:
+            cells = ctx.hours_fn(now - window, now) or []
+        except Exception as e:                       # noqa: BLE001
+            log.debug("дайджест: сверка с архивом не удалась: %s", e)
+            cells = []
+        if cells:
+            from archive_restore import overlay_archive_facts
+            facts = overlay_archive_facts(facts, cells, window_sec=window)
     facts["symbols"] = symbols
     return facts
 
@@ -538,6 +603,43 @@ class DigestScheduler:
 RETRY_SEC = 900.0        # повтор после сбоя: не чаще, чем раз в 15 минут
 
 
+def digest_records() -> List[dict]:
+    """Выпуски JSON плюс сутки из месячного архива, которых в JSON ещё нет.
+
+    Сохранённый выпуск не переписываем: у него публикация и обложка. Архив
+    только заполняет дни, которые после перезагрузки иначе пропали бы.
+    """
+    recs = ctx.store.list() if isinstance(ctx.store, DigestStore) else []
+    fn = getattr(ctx, "archive_days_fn", None)
+    if fn is None:
+        return recs
+    try:
+        extra = fn([str(r.get("day") or r.get("id") or "") for r in recs]) or []
+    except Exception as e:                           # noqa: BLE001
+        log.debug("дайджест: архив суток не собрался: %s", e)
+        return recs
+    have = {str(r.get("day") or r.get("id") or "") for r in recs}
+    merged = list(recs)
+    for rec in extra:
+        day = str((rec or {}).get("day") or (rec or {}).get("id") or "")
+        if day and day not in have:
+            merged.append(rec)
+            have.add(day)
+    merged.sort(key=lambda r: str(r.get("day") or r.get("id") or ""), reverse=True)
+    return merged
+
+
+def archive_day(day: str) -> Optional[dict]:
+    """Один день из архива, если в JSON его нет."""
+    day = str(day or "")
+    if not day:
+        return None
+    for rec in digest_records():
+        if str(rec.get("day") or rec.get("id") or "") == day:
+            return rec
+    return None
+
+
 def day_index(rec: dict, lang: str = seo_pages.DEFAULT_LANG) -> dict:
     """Строка календаря выпусков: дата, подпись, статус.
 
@@ -845,7 +947,7 @@ def register_digest_routes(app) -> None:
         календарь: по нему видно, за какие даты выпуск есть, и можно открыть
         любой старый, не заваливая страницу списком.
         """
-        all_recs = ctx.store.list()
+        all_recs = digest_records()
         items = [public_record(r, lang) for r in all_recs[:max(1, limit)]]
         return {
             "ok": True,
@@ -861,7 +963,7 @@ def register_digest_routes(app) -> None:
 
     @router.get("/api/digest/today")
     async def api_today(lang: str = seo_pages.DEFAULT_LANG):
-        items = ctx.store.list()
+        items = digest_records()
         if not items:
             return {"ok": True, "item": None}
         return {"ok": True, "item": public_record(items[0], lang, with_article=True)}
@@ -899,7 +1001,9 @@ def register_digest_routes(app) -> None:
 
     @router.get("/api/digest/{day}")
     async def api_day(day: str, lang: str = seo_pages.DEFAULT_LANG):
-        rec = ctx.store.get(day)
+        rec = ctx.store.get(day) if isinstance(ctx.store, DigestStore) else None
+        if rec is None:
+            rec = archive_day(day)
         if rec is None:
             return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
         return {"ok": True, "item": public_record(rec, lang, with_article=True)}

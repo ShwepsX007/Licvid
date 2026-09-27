@@ -53,6 +53,7 @@ from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
+import archive_restore
 import seo_pages
 from fastapi.staticfiles import StaticFiles
 
@@ -1975,6 +1976,32 @@ STAT_WINDOWS = (("1m", 60), ("5m", 300), ("15m", 900), ("30m", 1800),
                 ("1h", 3600), ("4h", 14400), ("24h", 86400))
 
 
+_ARCHIVE_CELLS = {"at": 0.0, "cells": None}
+
+
+def month_cells(now: Optional[float] = None) -> list:
+    """Часовые свёртки за месяц. Кэш на полторы минуты: страница не читает диск на каждый пиксель."""
+    now = float(now if now is not None else time.time())
+    cached = _ARCHIVE_CELLS.get("cells")
+    if cached is not None and now - float(_ARCHIVE_CELLS.get("at") or 0) < 90:
+        return cached
+    if not HISTORY_FILE:
+        return []
+    try:
+        cells = HIST.hours_range(now - HISTORY_TTL_HOURS * 3600, now, now)
+    except Exception as e:                           # noqa: BLE001
+        log.debug("архив часов: %s", e)
+        return []
+    _ARCHIVE_CELLS["at"] = now
+    _ARCHIVE_CELLS["cells"] = cells
+    return cells
+
+
+def restore_boards_from_archive() -> int:
+    """Часы, которых нет в урезанном реплее событий, взять из свёрток месяца."""
+    return archive_restore.fill_boards_from_cells(BOARD, SLOTS, month_cells())
+
+
 def compute_stats(symbol: Optional[str] = None, exchange: Optional[str] = None) -> dict:
     now = time.time()
     items = list(LIQUIDATIONS)
@@ -2022,6 +2049,40 @@ def compute_stats(symbol: Optional[str] = None, exchange: Optional[str] = None) 
 
     biggest = max(d24, key=lambda x: x["usd"], default=None)
 
+    # Сутки из часовых свёрток, если буфер событий их не покрывает (рестарт,
+    # кольцо на 60 тысяч). Короткие окна остаются по событиям: у них точные секунды.
+    if not exchange or exchange == "ALL":
+        try:
+            from archive_restore import leaders_from_cells
+            from history import aggregate_hours
+            sym = symbol if symbol and symbol != "ALL" else None
+            cells = [c for c in month_cells(now) if c[0] + 3600 > now - 86400 and c[0] <= now]
+            agg = aggregate_hours(cells, symbol=sym)
+            arch_usd = float(agg.get("usd") or 0)
+            arch_n = int(agg.get("count") or 0)
+            if arch_n > len(d24) + 2 and arch_usd > float(wins.get("total_usd_24h") or 0) * 1.02 + 1:
+                wins["total_usd_24h"] = arch_usd
+                wins["longs_usd_24h"] = float(agg.get("long_usd") or 0)
+                wins["shorts_usd_24h"] = float(agg.get("short_usd") or 0)
+                leaders = leaders_from_cells(cells)
+                if leaders:
+                    top_coins = leaders
+                if agg.get("by_exchange"):
+                    exch_totals = dict(agg["by_exchange"])
+                mx = None
+                for h, cell in cells:
+                    try:
+                        usd = float(cell.get("max_usd") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if usd > 0 and (mx is None or usd > float(mx.get("usd") or 0)):
+                        mx = {"symbol": cell.get("max_symbol") or "", "usd": usd,
+                              "exchange": "", "side": "", "timestamp": h}
+                if mx and (biggest is None or float(mx.get("usd") or 0) > float(biggest.get("usd") or 0)):
+                    biggest = mx
+        except Exception as e:                       # noqa: BLE001
+            log.debug("статистика из архива: %s", e)
+
     out = dict(wins)
     out.update({
         "top_coins": top_coins[:12],
@@ -2034,17 +2095,39 @@ def compute_stats(symbol: Optional[str] = None, exchange: Optional[str] = None) 
 
 
 def _cvd_window(symbol: str, sec: float = 14400.0) -> Optional[float]:
-    """Сумма тейкер-дельты по монете за окно. None — нет тиков."""
+    """Сумма тейкер-дельты по монете за окно. None — нет ни тиков, ни архива.
+
+    Живой аккумулятор точнее, но после перезагрузки он пуст. Тогда дельту
+    берём из часовых свёрток месяца, а не из одной свечи.
+    """
     now = time.time()
+    live = None
     for tf in (5, 15, 60, 240):
         acc = CVD_ACC.get(f"{symbol}|{tf}") or {}
         if not acc:
             continue
         try:
-            return round(sum(float(v) for b, v in acc.items()
-                             if now - float(b) <= sec), 2)
+            pts = [(float(b), float(v)) for b, v in acc.items() if now - float(b) <= sec]
         except (TypeError, ValueError):
             continue
+        if not pts:
+            continue
+        oldest = min(b for b, _v in pts)
+        live = round(sum(v for _b, v in pts), 2)
+        if now - oldest <= max(sec * 0.25, 3600):
+            return live
+        break
+    try:
+        from archive_restore import cvd_from_cells
+        cells = [c for c in month_cells(now) if c[0] + 3600 > now - sec and c[0] <= now]
+        arch = cvd_from_cells(cells, symbol)
+    except Exception as e:                           # noqa: BLE001
+        log.debug("cvd архива %s: %s", symbol, e)
+        arch = None
+    if arch is not None:
+        return arch
+    if live is not None:
+        return live
     entry = CANDLES.get(f"{symbol}|240") or {}
     series = entry.get("candles") or []
     if not series:
@@ -2078,6 +2161,20 @@ async def slot_flows(need_slots: int = 40) -> Dict[str, dict]:
     except Exception as e:                       # noqa: BLE001
         log.debug("потоки постов: минутки не собрались: %s", e)
         out = {}
+    # Минутки после рестарта пустые. Часовые свёртки закрывают дыры, не
+    # затирая слот, который уже посчитан по живым тикам.
+    try:
+        from archive_restore import slot_flows_from_cells
+        span = max(4, int(need_slots)) * SLOT_SEC
+        now = time.time()
+        cells = [c for c in month_cells(now) if c[0] + 3600 > now - span and c[0] <= now]
+        for sym, by_slot in slot_flows_from_cells(cells).items():
+            dst = out.setdefault(sym, {})
+            for slot, cell in by_slot.items():
+                if slot not in dst:
+                    dst[slot] = cell
+    except Exception as e:                       # noqa: BLE001
+        log.debug("потоки постов: архив не подставился: %s", e)
     # Монеты, по которым минут нет вовсе — тем нужны свечи
     cells = []
     try:
@@ -2257,6 +2354,24 @@ async def build_channel_digest() -> dict:
         exchanges = _window_exchanges(now, window_sec)
         if exchanges:
             snap["exchanges"] = exchanges
+        # Стенд после рестарта может не покрыть окно, если реплей упёрся в
+        # лимит событий. Свёртки месяца полные — ими и закрываем кассу.
+        from archive_restore import window_facts_from_cells
+        cells = [c for c in month_cells(now)
+                 if c[0] + 3600 > now - window_sec and c[0] <= now]
+        arch = window_facts_from_cells(cells)
+        if float(arch.get("total_usd") or 0) > float(snap.get("total_usd") or 0):
+            snap["total_usd"] = arch["total_usd"]
+            snap["longs_usd"] = arch["longs_usd"]
+            snap["shorts_usd"] = arch["shorts_usd"]
+            snap["count"] = arch["count"]
+            if arch.get("top_coins"):
+                snap["top_coins"] = arch["top_coins"]
+            if arch.get("biggest"):
+                snap["biggest"] = arch["biggest"]
+            snap["totals_source"] = "archive"
+        if arch.get("exchanges") and not snap.get("exchanges"):
+            snap["exchanges"] = arch["exchanges"]
     except Exception as e:
         log.warning("стенд для поста не собрался: %s", e)
     return snap
@@ -2625,9 +2740,24 @@ async def lifespan(app: FastAPI):
             if moved:
                 log.info("История: перенесено в дневные файлы — %d событий", moved)
             await asyncio.to_thread(HIST.cleanup)
+            # Стенд режет часы в момент вставки. Лимит месяца ставим ДО реплея,
+            # иначе add_liq оставит 12 часов и дайджест после рестарта опустеет.
+            OI.keep = OI_KEEP_MIN * 60
+            BOARD.keep_hours = max(BOARD.keep_hours, int(HISTORY_TTL_HOURS))
+            SLOTS.keep_hours = max(
+                SLOTS.keep_hours,
+                int(HISTORY_TTL_HOURS * HOUR / SLOT_SEC) + 8)
             for ev in loaded:
                 LIQUIDATIONS.append(ev)
                 BOARD.add_liq(ev)
+                SLOTS.add_liq(ev)
+                FLOWS.add_liq(ev)
+            try:
+                filled = await asyncio.to_thread(restore_boards_from_archive)
+                if filled:
+                    log.info("Стенд дополнен часовыми свёртками архива: %d", filled)
+            except Exception as e:               # noqa: BLE001
+                log.debug("стенд из архива: %s", e)
             HISTORY_RESTORE.update({"events": len(loaded), "error": "",
                                     "at": time.time()})
             if loaded:
@@ -2642,8 +2772,11 @@ async def lifespan(app: FastAPI):
 
     # Хранить историю надо за месяц — и OI-снимки, и часовые ячейки стенда
     # (стенд кормит посты и дайджест, ему нужен весь день, а не 12 часов).
+    # Если диска не было, реплей выше не выполнился — лимит всё равно месяц,
+    # чтобы живые события не обрезались через 12 часов.
     OI.keep = OI_KEEP_MIN * 60
     BOARD.keep_hours = max(BOARD.keep_hours, int(HISTORY_TTL_HOURS))
+    SLOTS.keep_hours = max(SLOTS.keep_hours, int(HISTORY_TTL_HOURS * HOUR / SLOT_SEC) + 8)
 
     # Профиль «объём по ценам» — та же месячная глубина, что и у остальной
     # истории: он нужен слою ликвидаций, чтобы понять, где стояли входы.
@@ -3022,6 +3155,11 @@ digest_ctx.store = DigestStore(DIGEST_FILE)
 digest_ctx.liqs_fn = lambda: list(LIQUIDATIONS)
 digest_ctx.symbols_fn = lambda: list(feed.symbols if feed else [])
 digest_ctx.candles_fn = get_candles
+digest_ctx.hours_fn = lambda since, until: HIST.hours_range(since, until)
+digest_ctx.events_fn = lambda since, until: HIST.query(
+    since, until, None, 0.0, 20000, False)
+digest_ctx.archive_days_fn = lambda have: archive_restore.digest_records_from_cells(
+    month_cells(), have)
 digest_ctx.oi_fn = oi_payload
 digest_ctx.ai_fn = digest_ai
 digest_ctx.publish_fn = tg_bot.publish_daily_digest
@@ -3100,6 +3238,7 @@ async def collect_hourly_post() -> dict:
 hourly_ctx.store = HourlyStore(HOURLY_FILE, keep=HOURLY_KEEP)
 hourly_ctx.bot = tg_bot
 hourly_ctx.collect_fn = collect_hourly_post
+hourly_ctx.archive_fn = lambda: archive_restore.hourly_posts_from_cells(month_cells())
 hourly_ctx.public_url = PUBLIC_URL
 # Посты раздела выходят в английском канале — на странице ссылка на него
 hourly_ctx.channel_url_fn = tg_bot.channel_url_en
@@ -3564,15 +3703,37 @@ async def api_liquidations(symbol: Optional[str] = None,
                            exchange: Optional[str] = None,
                            min_usd: float = 0.0,
                            limit: int = 300):
+    cap = min(max(1, int(limit or 1)), 2000)
     res = list(LIQUIDATIONS)
-    if symbol and symbol != "ALL":
-        sym = canon(symbol)
+    sym = canon(symbol) if symbol and symbol != "ALL" else None
+    if sym:
         res = [x for x in res if x["symbol"] == sym]
     if exchange and exchange != "ALL":
         res = [x for x in res if x["exchange"] == exchange.lower()]
     if min_usd > 0:
         res = [x for x in res if x["usd"] >= min_usd]
-    return {"liquidations": res[-min(limit, 2000):], "total": len(res)}
+    # Память после рестарта короче месяца. Лента добирает хвост из шардов,
+    # не поднимая потолок живого запроса.
+    if HISTORY_FILE and len(res) < cap:
+        try:
+            now = time.time()
+            archived = await asyncio.to_thread(
+                HIST.query, now - HISTORY_TTL_HOURS * 3600, now, sym,
+                float(min_usd or 0), cap, True)
+        except Exception as e:                       # noqa: BLE001
+            log.debug("лента из архива: %s", e)
+            archived = []
+        if archived:
+            by_id = {x.get("id"): x for x in res if x.get("id") is not None}
+            for ev in archived:
+                if exchange and exchange != "ALL" and str(ev.get("exchange") or "").lower() != exchange.lower():
+                    continue
+                key = ev.get("id")
+                if key is not None and key not in by_id:
+                    by_id[key] = ev
+                    res.append(ev)
+            res.sort(key=lambda e: float(e.get("timestamp") or 0))
+    return {"liquidations": res[-cap:], "total": len(res)}
 
 
 @app.get("/api/history")

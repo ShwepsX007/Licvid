@@ -877,10 +877,42 @@
             .replace(/🎯\s*/g, "").trim();
     }
 
-    // Шкала массы справа от свечей, встык со шкалой цены.
-    // Длина полосы — масса НА этой цене (не «по дороге»): ноль прижат к шкале
-    // цены, максимум — у левого края колонки. Так читается, где стоят уровни,
-    // а не клин накопления, который рос просто потому, что цена ушла дальше.
+    // Ещё не сработавший лонг стоит только ниже живой цены, шорт — только выше.
+    // Сторону берём по положению и по row.side, а не по тому, какой массы больше:
+    // размазанный вход иначе рисует лонг над шортом и шорт под ценой.
+    function pendingLevelSide(row, live) {
+        const px = Number(row && row.price);
+        let long = Number(row && row.long_usd) || 0;
+        let short = Number(row && row.short_usd) || 0;
+        const side = String((row && row.side) || "").toLowerCase();
+        if (!(long > 0) && !(short > 0)) {
+            const usd = Number(row && row.usd) || 0;
+            if (side === "long" || side === "sell") long = usd;
+            else if (side === "short" || side === "buy") short = usd;
+            else if (live && px < live) long = usd;
+            else if (live && px > live) short = usd;
+        }
+        if (live && isFinite(px)) {
+            if (px >= live) long = 0;
+            if (px <= live) short = 0;
+        }
+        if ((side === "long" || side === "sell") && live && px >= live) return null;
+        if ((side === "short" || side === "buy") && live && px <= live) return null;
+        if (!(long > 0) && !(short > 0)) return null;
+        let isLong;
+        if (live && px > live) isLong = false;
+        else if (live && px < live) isLong = true;
+        else if (side === "short" || side === "buy") isLong = false;
+        else if (side === "long" || side === "sell") isLong = true;
+        else isLong = long > 0 && !(short > 0);
+        const usd = isLong ? long : short;
+        if (!(usd > 0)) return null;
+        return { long: isLong ? long : 0, short: isLong ? 0 : short, usd: usd, isLong: isLong };
+    }
+
+    // Шкала массы справа от свечей, встык со шкалой цены. Фона под полосами нет:
+    // колонка закрывала свечи. Длина полосы — ещё не сработавшая масса НА этой
+    // цене, ноль прижат к шкале цены.
     function drawLiqLevels(ctx) {
         levelHits = [];
         levelColL = Infinity;
@@ -906,16 +938,19 @@
         const padTop = 30;
         if (plotRight - xL < 24 || plotBottom < padTop + 8) return;
 
+        const live = Number(data.price) || levelsRefPrice();
         const visible = [];
         chosen.forEach((row) => {
             const y = levelsY(row.price);
             if (y === null || y < padTop || y > plotBottom - 2) return;
-            visible.push({ row: row, y: y });
+            const pending = pendingLevelSide(row, live);
+            if (!pending) return;
+            visible.push({ row: row, y: y, pending: pending });
         });
         if (!visible.length) return;
         let maxUsd = 0;
         visible.forEach((v) => {
-            const usd = Number(v.row.usd) || 0;
+            const usd = Number(v.pending.usd) || 0;
             if (usd > maxUsd) maxUsd = usd;
         });
         if (!(maxUsd > 0)) return;
@@ -927,8 +962,7 @@
         const med = gaps.length ? gaps[Math.floor(gaps.length / 2)] : 8;
         const barH = Math.max(2, Math.min(7, med * 0.72));
         const maxBar = Math.max(20, colW - 8);
-        levelColL = xL;
-        levelColR = plotRight;
+
 
         ctx.save();
         // клип по полю свечей: шкала цены и ось времени остаются нетронутыми
@@ -937,80 +971,15 @@
         ctx.clip();
         ctx.textBaseline = "middle";
 
-        ctx.fillStyle = "rgba(9,12,16,0.9)";
-        ctx.fillRect(xL, 0, colW, plotBottom);
-        ctx.strokeStyle = "#212938";
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(plotRight - 0.5, 0);
-        ctx.lineTo(plotRight - 0.5, plotBottom);
-        ctx.stroke();
-
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(xL, 0, colW, 28);
-        ctx.clip();
-        ctx.font = "bold 8px 'JetBrains Mono', monospace";
-        ctx.textAlign = "left";
-        ctx.fillStyle = "rgba(255,209,102,0.95)";
-        ctx.fillText(levelsCaption(), xL + 5, 9);
-
-        ctx.font = "8px 'JetBrains Mono', monospace";
-        ctx.fillStyle = "rgba(168,180,198,0.92)";
-        ctx.textAlign = "left";
-        ctx.fillText(fmtCompact(maxUsd), xL + 4, 20);
-        ctx.textAlign = "right";
-        ctx.fillText("$0", plotRight - 4, 20);
-        if (colW >= 96) {
-            ctx.textAlign = "center";
-            ctx.fillText(fmtCompact(maxUsd / 2), xL + colW / 2, 20);
-        }
-        ctx.restore();
-        ctx.strokeStyle = "rgba(132,147,168,0.4)";
-        ctx.beginPath();
-        ctx.moveTo(xL + 4, 26.5);
-        ctx.lineTo(plotRight - 3, 26.5);
-        ctx.moveTo(plotRight - 3.5, 24);
-        ctx.lineTo(plotRight - 3.5, 28);
-        ctx.moveTo(xL + 4.5, 24);
-        ctx.lineTo(xL + 4.5, 28);
-        ctx.stroke();
-
-        const ref = Number(data.price) || levelsRefPrice();
-        const py = ref ? levelsY(ref) : null;
-        if (py !== null && py >= padTop && py <= plotBottom - 2) {
-            ctx.save();
-            ctx.strokeStyle = "rgba(255,209,102,0.9)";
-            ctx.setLineDash([2, 2]);
-            ctx.beginPath();
-            ctx.moveTo(xL + 1, py + 0.5);
-            ctx.lineTo(plotRight - 2, py + 0.5);
-            ctx.stroke();
-            ctx.setLineDash([]);
-            ctx.fillStyle = "#ffd166";
-            ctx.beginPath();
-            ctx.moveTo(plotRight - 1, py);
-            ctx.lineTo(plotRight - 7, py - 3.5);
-            ctx.lineTo(plotRight - 7, py + 3.5);
-            ctx.closePath();
-            ctx.fill();
-            if (py > 36) {
-                ctx.font = "8px 'JetBrains Mono', monospace";
-                ctx.textAlign = "left";
-                ctx.fillText(I18n.t("lv.now"), xL + 5, py - 7);
-            }
-            ctx.restore();
-        }
-
         let labelled = 0;
         visible.forEach((v) => {
-            const row = v.row, y = v.y;
-            const long = Number(row.long_usd) || 0;
-            const short = Number(row.short_usd) || 0;
-            const isLong = long >= short;
+            const row = v.row, y = v.y, pending = v.pending;
+            const long = pending.long;
+            const short = pending.short;
+            const isLong = pending.isLong;
             const col = isLong ? LIQ_COLORS.long : LIQ_COLORS.short;
             const magnet = magnets.get(Number(row.price)) || null;
-            const usd = Number(row.usd) || 0;
+            const usd = pending.usd;
             const w = Math.max(2, Math.min(maxBar, usd / maxUsd * maxBar));
             const x0 = Math.round(plotRight - w);
             const active = shapeIsActive("level", "lvl_" + row.price);
@@ -1060,10 +1029,13 @@
             }
 
             const hh = Math.max(8, barH + 3);
+            const bw = Math.max(6, Math.round(w));
+            levelColL = Math.min(levelColL, x0);
+            levelColR = Math.max(levelColR, x0 + bw);
             levelHits.push({
                 kind: "level",
                 key: "lvl_" + row.price,
-                x: xL, y: y - hh / 2, w: colW, h: hh,
+                x: x0, y: y - hh / 2, w: bw, h: hh,
                 price: Number(row.price),
                 usd: usd,
                 cum: Number(row.cum_usd) || 0,
@@ -1079,25 +1051,37 @@
         ctx.restore();
     }
 
+    const ARCHIVE_HOURS = 31 * 24;
+
     async function loadHistoryFor(sym, force) {
-        if (!sym || sym === "ALL") return;
+        // ALL тоже из архива: лента «все монеты» после F5 не должна обнуляться.
+        if (!sym) sym = "ALL";
         if (!force && historyLoaded.has(sym)) return;
         historyLoaded.add(sym);
         try {
             // порог и биржи НЕ пробрасываем в REST: пусть клиент фильтрует сам,
             // чтобы при смене фильтра на более мягкий история не «терялась»
-            const q = "/api/liquidations?symbol=" + encodeURIComponent(sym) +
-                    "&limit=" + HISTORY_REST_LIMIT;
-            const [rest, cached] = await Promise.all([
+            const symParam = sym === "ALL" ? "" : ("&symbol=" + encodeURIComponent(sym));
+            const q = "/api/liquidations?limit=" + HISTORY_REST_LIMIT + symParam;
+            // Месяц читаем из шардов (/api/history), а не увеличением лимита RAM.
+            const qArch = "/api/history?bucket=raw&hours=" + ARCHIVE_HOURS +
+                    "&limit=" + MAX_HISTORY + symParam;
+            const qHours = "/api/history?bucket=hour&hours=" + ARCHIVE_HOURS + symParam;
+            const [rest, cached, arch, hours] = await Promise.all([
                 fetch(q).then((r) => r.json()).then((d) => d.liquidations || []).catch(() => []),
-                loadCachedLiquidations(sym, MAX_HISTORY),
+                sym === "ALL" ? Promise.resolve([]) : loadCachedLiquidations(sym, MAX_HISTORY),
+                fetch(qArch).then((r) => r.json()).then((d) => d.liquidations || []).catch(() => []),
+                fetch(qHours).then((r) => r.json()).then((d) => d.hours || []).catch(() => []),
             ]);
+            if (sym === "ALL" || sym === chartSymbol()) state.archiveHours = hours;
             mergeLiquidations(cached);   // сначала локальное, оно может быть старше
-            mergeLiquidations(rest);     // затем сервер — он источник правды
+            mergeLiquidations(arch);     // месяц с диска — переживает перезагрузку
+            mergeLiquidations(rest);     // затем живая память сервера
             if (rest.length) cacheLiquidations(rest);
             rebuildFeed();
             updateMarkers();
             updateLiveStats();
+            if (typeof paintStatBox === "function") paintStatBox("cvd");
             queueRedraw();
         } catch (e) { /* сеть недоступна — живём на том, что уже пришло */ }
     }
@@ -2882,19 +2866,41 @@
                  longs: Number(d["longs_usd_" + key]) || 0,
                  shorts: Number(d["shorts_usd_" + key]) || 0 };
     }
-    function statCvdVal(key) {
-        if (!state.candles.length) return null;
-        const since = Date.now() / 1000 - statWinSec(key);
+    function statCvdFromHours(since) {
+        const hours = state.archiveHours || [];
         let buy = 0, sell = 0, ok = false;
+        for (let i = 0; i < hours.length; i++) {
+            const row = hours[i];
+            const t = Number(row.h) || 0;
+            if (t + 3600 <= since) continue;
+            const d = Number(row.cvd);
+            if (!isFinite(d)) continue;
+            if (!d && !Number(row.vol)) continue;
+            ok = true;
+            if (d >= 0) buy += d; else sell -= d;
+        }
+        return ok ? { net: buy - sell, buy: buy, sell: sell } : null;
+    }
+    function statCvdVal(key) {
+        const since = Date.now() / 1000 - statWinSec(key);
+        let buy = 0, sell = 0, ok = false, oldest = Infinity;
         for (let i = 0; i < state.candles.length; i++) {
             const c = state.candles[i];
-            if ((Number(c.time) || 0) < since) continue;
+            const t = Number(c.time) || 0;
+            if (t && t < oldest) oldest = t;
+            if (t < since) continue;
             const d = Number(c.cvd);
             if (!isFinite(d)) continue;
             ok = true;
             if (d >= 0) buy += d; else sell -= d;
         }
-        return ok ? { net: buy - sell, buy: buy, sell: sell } : null;
+        // Свечи после F5 — это последние бары биржи, не месяц. Окно, до которого
+        // они не дотягиваются, берём из часовых свёрток архива.
+        if (statWinSec(key) >= 3600 && !(ok && oldest <= since + 90)) {
+            const arch = statCvdFromHours(since);
+            if (arch) return arch;
+        }
+        return ok ? { net: buy - sell, buy: buy, sell: sell } : statCvdFromHours(since);
     }
     function statOiVal(key) {
         const ch = (state.lastOI && state.lastOI.changes) || {};
@@ -3288,9 +3294,9 @@
     // Порядок проверки — обратный отрисовке: кластеры поверх треугольников
     // поверх шаров OI. У фигур хит-тест кругом с допуском 4px.
     function hitAt(px, py) {
-        // Колонка шкалы уровней закрывает правый край поля: плашки под ней
-        // не кликаются, иначе всплывало бы окно невидимого кластера.
-        if (levelHits.length && px >= levelColL && px <= levelColR) {
+        // Полосы уровней без колонки: попадание только в саму полосу.
+        // Мимо — кластеры и остальные фигуры под ней остаются кликабельными.
+        if (levelHits.length) {
             let best = null, bestDy = 12;
             for (let i = 0; i < levelHits.length; i++) {
                 const b = levelHits[i];
@@ -3301,7 +3307,7 @@
                     bestDy = dy;
                 }
             }
-            return best;
+            if (best) return best;
         }
         for (let i = clusterHits.length - 1; i >= 0; i--) {
             const b = clusterHits[i];
@@ -7436,6 +7442,9 @@
         setupSymbolDropdown();       // выпадающий список монет
         setupStatBoxes();            // боксы статистики: меню выбора периода
         loadCandles();
+        // Лента и боксы не ждут сокет: месяц уже лежит в архиве.
+        loadHistoryFor(chartSymbol(), true);
+        if ((state.symbol || "ALL") !== chartSymbol()) loadHistoryFor(state.symbol || "ALL", true);
         connectWs();
         setInterval(fetchStats, 15000);
         fetchStats();   // бокс ликвидаций — сразу, не ждём WS/первый тик

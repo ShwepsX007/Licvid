@@ -29,3 +29,7 @@ class LiqLevelsUiSourceTest(unittest.TestCase):
         self.assertNotIn("W - w", fn)
         self.assertIn("plotRight - w", fn)
         self.assertIn("priceScale", src.split("function priceAxisWidthPx", 1)[1][:800])
+        # колонка с фоном закрывала цену — полосы рисуются сами по себе
+        self.assertNotIn("rgba(9,12,16,0.9)", fn)
+        self.assertNotIn("long >= short", fn)
+        self.assertIn("pendingLevelSide", fn)

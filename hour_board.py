@@ -191,6 +191,97 @@ class HourBoard:
             self._hours.clear()
 
 
+def _archive_usd(cell: dict) -> float:
+    try:
+        return float((cell or {}).get("liq_usd") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def cell_from_archive(h: int, cell: dict, top_n: int = TOP_N) -> dict:
+    """Часовая свёртка диска → ячейка стенда (суммы, монеты, крупнейший удар)."""
+    coins: Dict[str, float] = {}
+    cnt: Dict[str, int] = {}
+    cvd: Dict[str, float] = {}
+    for sym, val in ((cell or {}).get("sym") or {}).items():
+        if not isinstance(val, dict):
+            continue
+        try:
+            usd = float(val.get("usd") or 0)
+        except (TypeError, ValueError):
+            usd = 0.0
+        coins[str(sym)] = usd
+        try:
+            cnt[str(sym)] = int(float(val.get("n") or 0))
+        except (TypeError, ValueError):
+            cnt[str(sym)] = 0
+        try:
+            signed = float(val.get("cvd") or 0)
+        except (TypeError, ValueError):
+            signed = 0.0
+        if signed:
+            cvd[str(sym)] = signed
+    top: List[dict] = []
+    try:
+        max_usd = float((cell or {}).get("max_usd") or 0)
+    except (TypeError, ValueError):
+        max_usd = 0.0
+    if max_usd > 0:
+        top.append({"symbol": str((cell or {}).get("max_symbol") or ""),
+                    "exchange": "", "usd": max_usd, "side": "", "ts": float(h)})
+    top = top[:max(1, int(top_n))]
+    try:
+        count = int(float((cell or {}).get("liq_count") or 0))
+    except (TypeError, ValueError):
+        count = 0
+    try:
+        longs = float((cell or {}).get("liq_long") or 0)
+        shorts = float((cell or {}).get("liq_short") or 0)
+    except (TypeError, ValueError):
+        longs = shorts = 0.0
+    return {"h": int(h), "total": _archive_usd(cell), "longs": longs,
+            "shorts": shorts, "count": count, "coins": coins, "cnt": cnt,
+            "cvd": cvd, "top": top}
+
+
+def apply_archive_span(board: "HourBoard", h: int, cell: dict,
+                       span: int = HOUR) -> bool:
+    """Вписать час архива, если доска его не знает или он беднее свёртки.
+
+    Час может лежать в нескольких слотах (сетка постов — 15 минут). Если
+    реплей уже собрал этот час не хуже архива, слоты не трогаем: у них есть
+    топ ударов. Если архив полнее, слоты часа заменяем одной ячейкой, чтобы
+    не сложить реплей и свёртку дважды.
+    """
+    start = int(h)
+    span = max(int(getattr(board, "slot_sec", HOUR) or HOUR), int(span))
+    step = max(60, int(board.slot_sec))
+    arch = _archive_usd(cell)
+    with board._lock:
+        total = 0.0
+        found = False
+        t = start
+        while t < start + span:
+            existing = board._hours.get(t)
+            if existing is not None:
+                found = True
+                total += float(existing.get("total") or 0)
+            t += step
+        if found and total + 1.0 >= arch * 0.98:
+            return False
+        if arch <= 0 and not (cell or {}).get("cvd") and not (cell or {}).get("vol"):
+            return False
+        t = start
+        while t < start + span:
+            board._hours.pop(t, None)
+            t += step
+        board._hours[start] = cell_from_archive(start, cell, board.top_n)
+        if len(board._hours) > board.keep_hours:
+            for old in sorted(board._hours)[:-board.keep_hours]:
+                board._hours.pop(old, None)
+        return True
+
+
 class OiHistory:
     """Срезы открытого интереса по монетам: шаг во времени — минуты, не часы.
 

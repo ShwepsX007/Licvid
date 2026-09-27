@@ -241,7 +241,10 @@ class WorkspaceManager {
     const grid = root.querySelector('.workspace-grid');
     if (!grid) return;
     if (!this._singleMode) {
+      // keep cols class for styling, but flex layout handles actual sizing
       grid.className = 'workspace-grid cols-' + cols;
+      // trigger resize for all panels
+      setTimeout(() => this.panels.forEach(p => p.resize()), 150);
     }
     try { localStorage.setItem('liqscope_workspace_layout', String(cols)); } catch {}
   }
@@ -255,11 +258,14 @@ class WorkspaceManager {
       if (grid) {
         if (this._singleMode) {
           grid.classList.add('single-mode');
+          // hide ad in single mode to have full terminal like before
+          document.body.classList.add('workspace-single-mode');
         } else {
           grid.classList.remove('single-mode');
+          document.body.classList.remove('workspace-single-mode');
           try {
             const layout = localStorage.getItem('liqscope_workspace_layout') || '2';
-            grid.className = 'workspace-grid cols-' + layout + (this._singleMode ? ' single-mode' : '');
+            grid.className = 'workspace-grid cols-' + layout;
           } catch {}
         }
       }
@@ -269,10 +275,13 @@ class WorkspaceManager {
     this.saveWorkspace();
     const btn = root ? root.querySelector('[data-action="single"]') : null;
     if (btn) btn.textContent = this._singleMode ? '⊞ Grid' : '⛶ Single';
+    // Resize after layout change — important for filling without gaps
     setTimeout(() => {
+      this.panels.forEach(p => p.resize());
       const active = this.panels.get(this.activePanelId);
       if (active) active.resize();
     }, 100);
+    setTimeout(() => this.panels.forEach(p => p.resize()), 400);
   }
 
   _applySingleModeVisibility() {
@@ -282,23 +291,33 @@ class WorkspaceManager {
       this.panels.forEach((p, id) => {
         if (p.root) {
           p.root.style.display = (id === this.activePanelId) ? 'flex' : 'none';
+          if (id === this.activePanelId) {
+            p.root.style.flex = '1 1 100%';
+            p.root.style.width = '100%';
+            p.root.style.height = '100%';
+            p.root.style.minHeight = '0';
+            p.root.style.resize = 'none';
+          }
         }
       });
       const active = this.panels.get(this.activePanelId);
       if (active && active.root) {
-        active.root.style.height = 'calc(100vh - 180px)';
-        active.root.style.minHeight = '500px';
-        setTimeout(() => active.resize(), 150);
+        setTimeout(() => active.resize(), 100);
+        setTimeout(() => active.resize(), 400);
       }
     } else {
       this.panels.forEach(p => {
         if (p.root) {
           p.root.style.display = 'flex';
+          p.root.style.flex = '';
+          p.root.style.width = '';
           p.root.style.height = '';
           p.root.style.minHeight = '';
+          p.root.style.resize = '';
         }
       });
       setTimeout(() => this.panels.forEach(p => p.resize()), 150);
+      setTimeout(() => this.panels.forEach(p => p.resize()), 500);
     }
   }
 

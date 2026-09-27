@@ -1,10 +1,11 @@
-/* Multi-chart workspace — LiqScope Terminal */
+/* Multi-chart workspace — LiqScope Terminal — resizable */
 #workspace-host {
   width: 100%;
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .workspace-root {
@@ -14,7 +15,7 @@
   padding: 6px 0 8px;
   flex: 1 1 auto;
   min-height: 0;
-  overflow: auto;
+  overflow: hidden;
 }
 .workspace-root.active {
   display: flex;
@@ -28,6 +29,7 @@
   border: 1px solid #1c2533;
   border-radius: 8px;
   flex-wrap: wrap;
+  flex-shrink: 0;
 }
 .workspace-toolbar .ws-title {
   font-weight: 600;
@@ -64,6 +66,7 @@
   overflow-x: auto;
   padding: 4px 2px;
   scrollbar-width: thin;
+  flex-shrink: 0;
 }
 .workspace-tabs .ws-tab {
   display: flex;
@@ -84,9 +87,7 @@
   border-color: #2a4a7a;
   color: #d0e2f5;
 }
-.workspace-tabs .ws-tab.dragging {
-  opacity: 0.5;
-}
+.workspace-tabs .ws-tab.dragging { opacity: 0.5; }
 .workspace-tabs .ws-tab .ws-tab-close {
   background: none;
   border: none;
@@ -95,32 +96,49 @@
   font-size: 12px;
   padding: 0 2px;
 }
-.workspace-tabs .ws-tab .ws-tab-close:hover {
-  color: #ff5a7a;
+.workspace-tabs .ws-tab .ws-tab-close:hover { color: #ff5a7a; }
+
+/* Grid now flex for resizable panels */
+.workspace-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  align-items: stretch;
+  align-content: stretch;
+}
+.workspace-grid.cols-1 { /* 1 column = single */
+}
+.workspace-grid.cols-2 .chart-panel {
+  flex: 1 1 calc(50% - 8px);
+}
+.workspace-grid.cols-3 .chart-panel,
+.workspace-grid.cols-4 .chart-panel {
+  flex: 1 1 calc(50% - 8px);
 }
 
-.workspace-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
-  gap: 8px;
-  min-height: 300px;
-  grid-auto-rows: minmax(360px, auto);
-  align-items: stretch;
-}
-.workspace-grid.cols-1 { grid-template-columns: 1fr; }
-.workspace-grid.cols-2 { grid-template-columns: repeat(2, 1fr); }
-.workspace-grid.cols-3 { grid-template-columns: repeat(3, 1fr); }
-.workspace-grid.cols-4 { grid-template-columns: repeat(2, 1fr); }
 .workspace-grid.single-mode {
-  grid-template-columns: 1fr !important;
-  grid-auto-rows: 1fr;
-  height: calc(100vh - 200px);
-  min-height: 520px;
+  flex: 1 1 auto;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-wrap: nowrap;
+}
+.workspace-grid.single-mode .chart-panel {
+  flex: 1 1 100% !important;
+  width: 100% !important;
+  height: 100% !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  resize: none !important;
 }
 
 @media (max-width: 900px) {
-  .workspace-grid {
-    grid-template-columns: 1fr !important;
+  .workspace-grid .chart-panel {
+    flex: 1 1 100% !important;
   }
   .workspace-toolbar .ws-hint { display: none; }
 }
@@ -137,12 +155,18 @@ body:not(.workspace-active) #workspace-host .workspace-root {
 body:not(.workspace-active) .chart-stack {
   display: flex !important;
 }
-
+body.workspace-active .ad-host {
+  /* keep ad below workspace, not overlapping */
+  flex-shrink: 0;
+}
+body.workspace-single-mode .ad-host {
+  display: none !important;
+}
 body.workspace-single-mode .workspace-grid {
-  grid-template-columns: 1fr !important;
+  height: 100%;
 }
 
-/* Chart panel */
+/* Chart panel — resizable both directions */
 .chart-panel {
   display: flex;
   flex-direction: column;
@@ -151,7 +175,15 @@ body.workspace-single-mode .workspace-grid {
   border-radius: 8px;
   overflow: hidden;
   min-height: 360px;
+  min-width: 320px;
+  flex: 1 1 45%;
   position: relative;
+  resize: both;
+  /* resize handle visible */
+  scrollbar-width: thin;
+}
+.chart-panel::-webkit-resizer {
+  background: #1c2533;
 }
 .chart-panel.detached {
   opacity: 0.6;
@@ -170,6 +202,7 @@ body.workspace-single-mode .workspace-grid {
   border-bottom: 1px solid #1c2533;
   flex-wrap: wrap;
   flex-shrink: 0;
+  cursor: move;
 }
 .panel-header .panel-drag {
   cursor: grab;
@@ -197,9 +230,7 @@ body.workspace-single-mode .workspace-grid {
   color: #d0e2f5;
   margin-left: 6px;
 }
-.panel-header .panel-change {
-  font-size: 11px;
-}
+.panel-header .panel-change { font-size: 11px; }
 .panel-header .panel-change.positive { color: #00e676; }
 .panel-header .panel-change.negative { color: #ff2a5f; }
 .panel-header .panel-actions {
@@ -233,18 +264,16 @@ body.workspace-single-mode .workspace-grid {
 }
 .panel-chart-wrap {
   position: relative;
-  flex: 1;
-  min-height: 300px;
-  height: 360px;
+  flex: 1 1 auto;
+  min-height: 0;
   background: #090c10;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 .panel-chart {
   position: absolute;
-  left: 0;
-  top: 0;
-  right: 0;
-  bottom: 0;
+  left: 0; top: 0; right: 0; bottom: 0;
   width: 100%;
   height: 100%;
   z-index: 1;
@@ -263,18 +292,20 @@ body.workspace-single-mode .workspace-grid {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #6a7a8e;
+  color: #8fa2b8;
   font-size: 12px;
-  z-index: 10;
-  background: rgba(9,12,16,0.85);
+  z-index: 20;
+  background: rgba(9,12,16,0.92);
   text-align: center;
-  padding: 8px;
+  padding: 12px;
+  flex-direction: column;
+  gap: 8px;
 }
 .panel-layers-pop {
   position: absolute;
   top: 36px;
   right: 6px;
-  z-index: 20;
+  z-index: 30;
   background: rgba(12,18,28,0.96);
   border: 1px solid #1e2a3c;
   border-radius: 8px;
@@ -328,14 +359,18 @@ body.panel-mode .workspace-root {
   padding: 0;
 }
 body.panel-mode .workspace-grid {
-  display: block;
+  display: flex;
   height: 100vh;
+  flex: 1;
 }
 body.panel-mode .chart-panel {
   height: 100vh;
+  flex: 1;
   border: none;
   border-radius: 0;
+  resize: none;
 }
 body.panel-mode .panel-chart-wrap {
-  height: calc(100vh - 36px);
+  flex: 1;
+  height: auto;
 }

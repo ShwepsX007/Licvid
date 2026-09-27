@@ -1,6 +1,6 @@
 /**
  * ChartPanel — isolated chart instance for multi-chart workspace.
- * Each panel is like a separate terminal.
+ * Robust init: waits for visible size, retries, shows errors.
  */
 
 class ChartPanel {
@@ -25,26 +25,21 @@ class ChartPanel {
     this.detached = !!def.detached;
     this.position = def.position || 0;
 
-    // runtime
     this.chart = null;
     this.candleSeries = null;
     this.volumeSeries = null;
     this.clusterCanvas = null;
     this.drawCanvas = null;
     this.candles = [];
-    this.prices = {};
     this.levelsData = null;
     this.levelsAt = 0;
-    this.levelsError = '';
     this.price = null;
-    this.changePct = null;
     this._levelHighlights = {};
-    this._raf = null;
     this._destroyed = false;
     this._boundResize = () => this.resize();
     this._resizeAttempts = 0;
+    this._initAttempts = 0;
 
-    // DOM refs
     this.root = null;
     this.chartEl = null;
     this.headerEl = null;
@@ -63,7 +58,6 @@ class ChartPanel {
     if (!/^[A-Z0-9]{2,20}_[A-Z0-9]{2,6}$/.test(sym)) return null;
     return sym;
   }
-
   _validateTf(tf) {
     const n = Number(tf);
     if (!isFinite(n)) return null;
@@ -72,9 +66,11 @@ class ChartPanel {
     if (n >= 1 && n <= 1440) return n;
     return null;
   }
-
   _emit(type, data) {
     try { this.onEvent({ type, panelId: this.id, data }); } catch {}
+  }
+  _esc(s) {
+    return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
 
   mount() {
@@ -104,7 +100,7 @@ class ChartPanel {
       <span class="panel-change"></span>
       <span class="panel-actions">
         <button class="panel-btn panel-layers-btn" title="Layers">☰</button>
-        <button class="panel-btn panel-expand-btn" title="Expand to single view">⛶</button>
+        <button class="panel-btn panel-expand-btn" title="Expand to fullscreen">⛶</button>
         <button class="panel-btn panel-detach-btn" title="Detach to new window">⧉</button>
         <button class="panel-btn close panel-close-btn" title="Close">✕</button>
       </span>
@@ -135,7 +131,6 @@ class ChartPanel {
       <button class="panel-layer-btn" data-layer="bookEnabled">📖 Стакан</button>
     `;
     wrap.appendChild(layersPop);
-
     root.appendChild(wrap);
     this.container.appendChild(root);
 
@@ -154,7 +149,6 @@ class ChartPanel {
     this.symbolSelect.value = this.symbol;
     this.tfSelect.value = String(this.timeframe);
 
-    // events
     this.symbolSelect.addEventListener('change', () => {
       const v = this._validateSymbol(this.symbolSelect.value);
       if (v) this.setSymbol(v);
@@ -201,25 +195,26 @@ class ChartPanel {
     });
 
     this._paintLayers();
-    this._initChart();
 
-    // retry init if container was 0 width
-    setTimeout(() => this._ensureChartSize(), 200);
-    setTimeout(() => this._ensureChartSize(), 800);
-    setTimeout(() => this._ensureChartSize(), 2000);
-
-    this.loadCandles();
-    if (this.layers.levelsEnabled) this.loadLevels();
+    // Defer chart init to next frame to ensure layout computed
+    requestAnimationFrame(() => {
+      this._initChartWithRetry();
+    });
 
     window.addEventListener('resize', this._boundResize);
-    // click to activate and set feed
     root.addEventListener('mousedown', () => {
       this._emit('activated', { id: this.id });
     });
     root.addEventListener('click', () => {
-      // clicking panel sets feed to its symbol, unless ALL
       this._emit('feedRequested', { symbol: this.symbol });
     });
+
+    // If panel is resized via CSS resize handle, trigger chart resize
+    if (window.ResizeObserver) {
+      this._ro = new ResizeObserver(() => this.resize());
+      this._ro.observe(root);
+      this._ro.observe(wrap);
+    }
   }
 
   _populateSymbolSelect() {
@@ -234,16 +229,14 @@ class ChartPanel {
       }
     } catch {}
     if (!symbols.length) {
-      symbols = ['BTC_USDT','ETH_USDT','SOL_USDT','XRP_USDT','DOGE_USDT','ADA_USDT','AVAX_USDT','LINK_USDT','LTC_USDT','BCH_USDT'];
+      symbols = ['BTC_USDT','ETH_USDT','SOL_USDT','XRP_USDT','DOGE_USDT','ADA_USDT','AVAX_USDT','LINK_USDT','LTC_USDT','BCH_USDT','ZEC_USDT','ENA_USDT','WLD_USDT'];
     }
-    // add ALL option for feed
     const allOpt = document.createElement('option');
     allOpt.value = 'ALL';
     allOpt.textContent = 'ALL';
     sel.appendChild(allOpt);
-
     if (!symbols.includes(this.symbol) && this.symbol !== 'ALL') symbols.unshift(this.symbol);
-    symbols.slice(0, 150).forEach(sym => {
+    symbols.slice(0, 200).forEach(sym => {
       if (sym === 'ALL') return;
       const opt = document.createElement('option');
       opt.value = sym;
@@ -252,52 +245,99 @@ class ChartPanel {
     });
   }
 
-  _ensureChartSize() {
+  _initChartWithRetry() {
+    if (this._destroyed) return;
     if (!this.chartEl) return;
-    const w = this.chartEl.clientWidth;
-    const h = this.chartEl.clientHeight;
-    if (w < 50 || h < 50) {
-      if (this._resizeAttempts < 10) {
-        this._resizeAttempts++;
-        setTimeout(() => this._ensureChartSize(), 300);
+    const rect = this.chartEl.getBoundingClientRect();
+    const w = rect.width || this.chartEl.clientWidth;
+    const h = rect.height || this.chartEl.clientHeight;
+    // If not visible yet (0 size or hidden), retry
+    if (w < 50 || h < 50 || !this.chartEl.offsetParent) {
+      this._initAttempts++;
+      if (this._initAttempts < 30) {
+        setTimeout(() => this._initChartWithRetry(), 200);
+      } else {
+        this._showError(`Chart container no size (${Math.round(w)}x${Math.round(h)}) - check CSS`);
       }
       return;
     }
-    if (!this.chart) {
-      this._initChart();
-    } else {
-      this.resize();
+    this._initChart();
+    // After init, ensure resize after a bit
+    setTimeout(() => this.resize(), 100);
+    setTimeout(() => this.resize(), 500);
+    setTimeout(() => this.resize(), 1500);
+    // Load data after chart ready
+    this.loadCandles();
+    if (this.layers.levelsEnabled) this.loadLevels();
+  }
+
+  _showError(msg) {
+    if (!this.chartEl) return;
+    let errEl = this.chartEl.querySelector('.panel-error');
+    if (!errEl) {
+      errEl = document.createElement('div');
+      errEl.className = 'panel-error';
+      this.chartEl.appendChild(errEl);
     }
+    errEl.innerHTML = `<div>${this._esc(msg)}<br><button class="panel-retry-btn" style="margin-top:8px;padding:4px 8px;background:#1e3a5f;border:1px solid #2a5a9a;color:#cfe3ff;border-radius:4px;cursor:pointer">Retry</button></div>`;
+    const btn = errEl.querySelector('.panel-retry-btn');
+    if (btn) btn.addEventListener('click', () => {
+      errEl.remove();
+      this._initAttempts = 0;
+      this._initChartWithRetry();
+    });
+  }
+  _clearError() {
+    if (!this.chartEl) return;
+    const err = this.chartEl.querySelector('.panel-error');
+    if (err) err.remove();
   }
 
   _initChart() {
     if (this._destroyed) return;
     const container = this.chartEl;
     if (!container) return;
-    // if already has chart, remove
     if (this.chart) {
       try { this.chart.remove(); } catch {}
       this.chart = null;
+      this.candleSeries = null;
     }
-    // keep error overlay if exists
     const existingError = container.querySelector('.panel-error');
-    container.innerHTML = '';
-    if (existingError) container.appendChild(existingError);
+    // Don't clear error if we are retrying? Keep but remove chart canvases
+    const canvases = container.querySelectorAll('canvas');
+    canvases.forEach(c => c.remove());
+    // If error exists, keep it but ensure container has size
+    if (existingError) {
+      // keep error, but ensure we still create chart behind
+    } else {
+      // clear any leftover text
+      // container.innerHTML = ''; // avoid destroying error
+      // Instead, remove only non-error children
+      Array.from(container.childNodes).forEach(n => {
+        if (n.nodeType === 3 || (n.classList && !n.classList.contains('panel-error'))) {
+          // text or non-error div
+          if (n !== existingError) {
+            try { n.remove(); } catch {}
+          }
+        }
+      });
+    }
 
     if (typeof window.LightweightCharts === 'undefined') {
-      container.innerHTML = '<div style="padding:20px;color:#6a7a8e">Chart lib not loaded</div>';
+      this._showError('Chart lib not loaded');
       return;
     }
-    const width = container.clientWidth || 400;
-    const height = container.clientHeight || 320;
+    const width = container.clientWidth || container.getBoundingClientRect().width || 400;
+    const height = container.clientHeight || container.getBoundingClientRect().height || 360;
     if (width < 10 || height < 10) {
-      setTimeout(() => this._ensureChartSize(), 300);
+      setTimeout(() => this._initChartWithRetry(), 300);
       return;
     }
 
     let chart;
     try {
-      chart = window.LightweightCharts.createChart(container, {
+      const LWC = window.LightweightCharts;
+      chart = LWC.createChart(container, {
         width, height,
         autoSize: false,
         layout: {
@@ -311,7 +351,7 @@ class ChartPanel {
           vertLines: { color: "#18202c" },
           horzLines: { color: "#18202c" },
         },
-        crosshair: { mode: window.LightweightCharts.CrosshairMode ? window.LightweightCharts.CrosshairMode.Normal : 0 },
+        crosshair: { mode: LWC.CrosshairMode ? LWC.CrosshairMode.Normal : 0 },
         rightPriceScale: { borderColor: "#212938", scaleMargins: { top: 0.06, bottom: 0.24 } },
         timeScale: {
           borderColor: "#212938",
@@ -322,24 +362,25 @@ class ChartPanel {
       });
     } catch (e) {
       console.warn('panel createChart failed', this.id, e);
-      container.innerHTML = `<div style="padding:12px;color:#ff6a7a;font-size:11px">Chart init failed: ${this._esc(e.message||e)}</div>`;
+      this._showError(`Chart init failed: ${this._esc(e.message||e)}`);
       return;
     }
     this.chart = chart;
 
     let candleSeries = null;
     try {
-      const helper = window.LiqScopeApp && window.LiqScopeApp.createCandleSeries;
-      if (helper) {
-        candleSeries = helper(chart, {
+      const LWC = window.LightweightCharts;
+      // Try helper from main app first
+      if (window.LiqScopeApp && window.LiqScopeApp.createCandleSeries) {
+        candleSeries = window.LiqScopeApp.createCandleSeries(chart, {
           upColor: "#00e676",
           downColor: "#ff2a5f",
           borderVisible: false,
           wickUpColor: "#00e676",
           wickDownColor: "#ff2a5f",
         });
-      } else if (window.LightweightCharts && window.LightweightCharts.CandlestickSeries && chart.addSeries) {
-        candleSeries = chart.addSeries(window.LightweightCharts.CandlestickSeries, {
+      } else if (LWC && LWC.CandlestickSeries && chart.addSeries) {
+        candleSeries = chart.addSeries(LWC.CandlestickSeries, {
           upColor: "#00e676",
           downColor: "#ff2a5f",
           borderVisible: false,
@@ -357,13 +398,13 @@ class ChartPanel {
       }
     } catch (e) {
       console.warn('candle series failed', e);
+      this._showError(`Candle series failed: ${this._esc(e.message||e)}`);
     }
     this.candleSeries = candleSeries;
 
     try {
-      const vHelper = window.LiqScopeApp && window.LiqScopeApp.createVolumeSeries;
-      if (vHelper && candleSeries) {
-        this.volumeSeries = vHelper(chart, {
+      if (window.LiqScopeApp && window.LiqScopeApp.createVolumeSeries && candleSeries) {
+        this.volumeSeries = window.LiqScopeApp.createVolumeSeries(chart, {
           priceFormat: { type: "volume" },
           priceScaleId: "volume",
           color: "#26a69a",
@@ -377,23 +418,24 @@ class ChartPanel {
       }
     } catch {}
 
-    if (window.ResizeObserver) {
-      this._ro = new ResizeObserver(() => this.resize());
-      this._ro.observe(container);
-    }
-
     if (this.candles && this.candles.length && this.candleSeries) {
-      try { this.candleSeries.setData(this.candles); } catch {}
+      try {
+        this.candleSeries.setData(this.candles);
+        try { this.chart.timeScale().fitContent(); } catch {}
+        this._clearError();
+      } catch {}
     }
 
-    setTimeout(() => this.resize(), 100);
+    this._clearError();
+    this.resize();
   }
 
   resize() {
     if (!this.chart || !this.chartEl) return;
     try {
-      const w = this.chartEl.clientWidth || 400;
-      const h = this.chartEl.clientHeight || 320;
+      const rect = this.chartEl.getBoundingClientRect();
+      const w = Math.round(rect.width) || this.chartEl.clientWidth || 400;
+      const h = Math.round(rect.height) || this.chartEl.clientHeight || 360;
       if (w < 10 || h < 10) return;
       this.chart.applyOptions({ width: w, height: h });
       if (this.clusterCanvas) {
@@ -418,15 +460,15 @@ class ChartPanel {
     if (sym === 'ALL') return;
     const tf = this.timeframe;
     try {
-      const r = await fetch(`/api/klines?symbol=${encodeURIComponent(sym)}&timeframe=${tf}`);
-      if (!r.ok) throw new Error('klines fetch failed ' + r.status);
+      const r = await fetch(`/api/klines?symbol=${encodeURIComponent(sym)}&timeframe=${tf}`, { cache: 'no-store' });
+      if (!r.ok) throw new Error('klines ' + r.status);
       const data = await r.json();
       let candles = data.candles || data || [];
       if (!Array.isArray(candles)) {
         if (data.candles && typeof data.candles === 'object') {
           candles = Object.values(data.candles);
         } else {
-          return;
+          throw new Error('bad candles format');
         }
       }
       const bars = candles.map(c => {
@@ -442,41 +484,80 @@ class ChartPanel {
         };
       }).filter(b => b.time && isFinite(b.open) && isFinite(b.close)).sort((a,b)=>a.time-b.time);
 
-      this.candles = bars;
-      if (this.candleSeries && bars.length) {
-        try {
-          this.candleSeries.setData(bars);
-          if (this.chart && this.chart.timeScale) {
-            try { this.chart.timeScale().fitContent(); } catch {}
-          }
-        } catch (e) {
-          console.debug('setData failed', e);
+      if (!bars.length) {
+        // Try fallback from main state if same symbol
+        const fallback = this._getFallbackCandles(sym, tf);
+        if (fallback && fallback.length) {
+          this._applyCandles(fallback);
+          return;
         }
+        throw new Error('no candles');
       }
-      if (bars.length) {
-        const last = bars[bars.length-1];
-        this._updatePriceDisplay(last.close);
-      }
-      this._drawOverlays();
-      // clear error
-      if (this.chartEl) {
-        const err = this.chartEl.querySelector('.panel-error');
-        if (err) err.remove();
-      }
+
+      this._applyCandles(bars);
     } catch (e) {
       console.debug('panel loadCandles failed', sym, e);
+      // fallback
+      const fallback = this._getFallbackCandles(sym, tf);
+      if (fallback && fallback.length) {
+        this._applyCandles(fallback);
+        return;
+      }
       if (this.chartEl && !this.candles.length) {
-        let errEl = this.chartEl.querySelector('.panel-error');
-        if (!errEl) {
-          errEl = document.createElement('div');
-          errEl.className = 'panel-error';
-          errEl.style.cssText = 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#6a7a8e;font-size:12px;z-index:10;background:rgba(9,12,16,0.8)';
-          this.chartEl.appendChild(errEl);
-        }
-        errEl.textContent = `Failed to load ${sym}: ${String(e.message||e)}`;
-        setTimeout(() => this._initChart(), 2000);
+        this._showError(`Failed to load ${sym}: ${this._esc(e.message||e)}`);
+        setTimeout(() => this.loadCandles(), 3000);
       }
     }
+  }
+
+  _getFallbackCandles(sym, tf) {
+    try {
+      // If main app has candles for this symbol and timeframe, use them
+      if (window.state && window.state.candles && Array.isArray(window.state.candles)) {
+        const s = window.state;
+        // state.candles is for current chartSymbol, check if matches
+        if (s.chartSymbol === sym || s.symbol === sym) {
+          // s.candles may be already formatted
+          if (s.candles.length && s.candles[0].time) {
+            return s.candles;
+          }
+        }
+      }
+    } catch {}
+    return null;
+  }
+
+  _applyCandles(bars) {
+    this.candles = bars;
+    if (this.candleSeries && bars.length) {
+      try {
+        this.candleSeries.setData(bars);
+        if (this.chart && this.chart.timeScale) {
+          try { this.chart.timeScale().fitContent(); } catch {}
+        }
+        this._clearError();
+      } catch (e) {
+        console.debug('setData failed', e);
+        this._showError(`setData failed: ${this._esc(e.message||e)}`);
+        // Try to re-init chart
+        setTimeout(() => this._initChartWithRetry(), 500);
+        return;
+      }
+    } else if (!this.candleSeries) {
+      // chart not ready, retry init
+      this._initChartWithRetry();
+      // keep bars for later
+      setTimeout(() => {
+        if (this.candleSeries) {
+          try { this.candleSeries.setData(bars); this._clearError(); } catch {}
+        }
+      }, 500);
+    }
+    if (bars.length) {
+      const last = bars[bars.length-1];
+      this._updatePriceDisplay(last.close);
+    }
+    this._drawOverlays();
   }
 
   async loadLevels() {
@@ -493,12 +574,8 @@ class ChartPanel {
       this.levelsAt = Date.now();
       this._drawOverlays();
     } catch (e) {
-      this.levelsError = String(e);
+      // ignore
     }
-  }
-
-  _esc(s) {
-    return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
 
   _updatePriceDisplay(price) {
@@ -719,14 +796,11 @@ class ChartPanel {
       this.loadCandles();
       if (this.layers.levelsEnabled) this.loadLevels();
     } else {
-      // keep previous candles but show ALL in price
       if (this.priceEl) this.priceEl.textContent = 'ALL';
-      // clear overlays
       if (this.clusterCanvas) {
         const ctx = this.clusterCanvas.getContext('2d');
         if (ctx) ctx.clearRect(0,0,this.clusterCanvas.width,this.clusterCanvas.height);
       }
-      // restore candles from previous? keep empty for now, but not destroy chart
     }
     this._emit('symbolChanged', { symbol: v, prev });
     this._emit('stateChanged', this.serialize());

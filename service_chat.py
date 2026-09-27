@@ -22,6 +22,8 @@ from fastapi.responses import JSONResponse
 
 log = logging.getLogger("liqscope.service_chat")
 
+MAX_SVC_HISTORY = 50
+
 
 class Ctx:
     store = None
@@ -67,17 +69,21 @@ def register_service_chat_routes(app, hub=None) -> None:
         ctx.hub = hub
     router = APIRouter()
 
+    MAX_SVC_HISTORY = 50
+
     @router.get("/api/chat/services")
-    async def api_list(request: Request, limit: int = 200, after_id: int = 0):
+    async def api_list(request: Request, limit: int = 50, after_id: int = 0):
         if not ctx.store:
             return JSONResponse({"ok": False, "error": "no_store"}, status_code=503)
         u = _current_user(request)
         if not u:
             return _need_auth()
         try:
-            lim = max(1, min(int(limit), 500))
+            lim = max(1, min(int(limit), 100))
         except Exception:
-            lim = 200
+            lim = MAX_SVC_HISTORY
+        if lim > MAX_SVC_HISTORY and int(after_id) == 0:
+            lim = MAX_SVC_HISTORY
         try:
             aft = max(0, int(after_id))
         except Exception:
@@ -87,7 +93,11 @@ def register_service_chat_routes(app, hub=None) -> None:
         except AttributeError:
             # fallback legacy global
             rows = ctx.store.list_service_messages(limit=lim, after_id=aft)
-        return {"ok": True, "messages": [_msg_public(r) for r in rows], "now": _now(), "user_id": int(u["id"])}
+        # если after_id==0 — только последние lim как контекст
+        if aft == 0 and len(rows) > lim:
+            rows = rows[-lim:]
+        return {"ok": True, "messages": [_msg_public(r) for r in rows], "now": _now(),
+                "user_id": int(u["id"]), "limit": lim}
 
     @router.get("/api/chat/services/me")
     async def api_me(request: Request):

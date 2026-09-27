@@ -1,0 +1,86 @@
+/* 🖥️ Desktop compact ~-10% — Part B
+ * Centralized scale: --ui-scale 1 default, 0.9 on desktop >=1024px.
+ * Mobile <=768px unchanged (media query below overrides).
+ * Approach: root font-size 16px → 14.4px on desktop, plus calc() paddings for key containers.
+ * Graphs/canvases keep size — they are sized by container, not font.
+ */
+:root { --ui-scale: 1; }
+html { font-size: 16px; }
+
+/* Desktop compact */
+@media (min-width: 1024px) {
+  :root { --ui-scale: 0.9; }
+  html { font-size: 14.4px; } /* 16 * 0.9 */
+
+  /* General: reduce base paddings/margins that were in px */
+  body {
+    /* keep body 13px base but scaled via var */
+    font-size: calc(13px * var(--ui-scale));
+  }
+
+  /* Header / top nav */
+  .site-header {
+    padding: calc(16px * var(--ui-scale)) calc(28px * var(--ui-scale));
+  }
+  .top-nav {
+    padding: calc(8px * var(--ui-scale)) calc(16px * var(--ui-scale));
+    min-height: calc(52px * var(--ui-scale));
+  }
+
+  /* Wraps / cards */
+  .wrap {
+    padding: calc(36px * var(--ui-scale)) calc(28px * var(--ui-scale)) calc(60px * var(--ui-scale));
+  }
+  .card, .panel {
+    border-radius: calc(12px * var(--ui-scale));
+    padding: calc(14px * var(--ui-scale));
+  }
+
+  /* Buttons / inputs */
+  .btn, .btn-primary, .btn-ghost, .btn-tg, .btn-compact, .btn-small,
+  button, .tchat-mini, .tchat-tab {
+    padding-top: calc(0.6em * var(--ui-scale));
+    padding-bottom: calc(0.6em * var(--ui-scale));
+    font-size: calc(0.88em * var(--ui-scale));
+  }
+  input, select, textarea {
+    padding: calc(8px * var(--ui-scale)) calc(12px * var(--ui-scale));
+    font-size: calc(0.9em * var(--ui-scale));
+  }
+
+  /* Tables */
+  table th, table td {
+    padding: calc(8px * var(--ui-scale)) calc(10px * var(--ui-scale));
+    font-size: calc(0.85em * var(--ui-scale));
+  }
+
+  /* Chat widget */
+  #terminal-chat .tchat-panel {
+    /* width already responsive, just scale a bit */
+    font-size: calc(13px * var(--ui-scale));
+  }
+  .tchat-msg {
+    padding: calc(8px * var(--ui-scale));
+    margin: calc(6px * var(--ui-scale)) 0;
+    font-size: calc(0.92em * var(--ui-scale));
+  }
+
+  /* Modals / dialogs — keep centered but slightly smaller */
+  .modal, .dialog, .site-modal {
+    font-size: calc(1em * var(--ui-scale));
+  }
+  .modal .btn, .dialog .btn {
+    padding: calc(8px * var(--ui-scale)) calc(14px * var(--ui-scale));
+  }
+
+  /* Canvas / chart containers keep their pixel size, only surrounding UI shrinks */
+  #tv-chart-container, .chart-wrap, .tv-wrap {
+    /* no scale transform to avoid blurry canvas */
+  }
+}
+
+/* Mobile — explicitly reset to 1 to avoid inheritance */
+@media (max-width: 768px) {
+  :root { --ui-scale: 1; }
+  html { font-size: 16px; }
+}

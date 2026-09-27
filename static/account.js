@@ -419,6 +419,18 @@
         var lo = $("acc-logout");
         if (lo) lo.addEventListener("click", function (e) {
             e.preventDefault();
+            try {
+              // A1: clear per-user chat caches on logout
+              var uid = 0;
+              try { uid = parseInt(localStorage.getItem("liqscope.tchat.curUid")||"0",10)||0; } catch(_){}
+              if (uid) {
+                ["liqscope.tchat.lastId."+uid,"liqscope.tchat.svcLastId."+uid,"liqscope.tchat.supLastId."+uid,"liqscope.tchat.open."+uid].forEach(function(k){ try{ localStorage.removeItem(k);}catch(_){} });
+                localStorage.removeItem("liqscope.tchat.curUid");
+                // sweep chat:/dm:
+                for (var i=localStorage.length-1;i>=0;i--){ var kk=localStorage.key(i); if(!kk) continue; if(kk.indexOf("tchat")!==-1 && kk.endsWith("."+uid)) { try{ localStorage.removeItem(kk);}catch(_){} } if(kk.indexOf("chat:")===0||kk.indexOf("dm:")===0) { try{ localStorage.removeItem(kk);}catch(_){} } }
+              }
+              try { window.dispatchEvent(new CustomEvent("liqscope:logout")); } catch(_){}
+            } catch(_){}
             api("/api/auth/logout", { method: "POST" }).then(function () {
                 location.href = "/";
             });
@@ -2185,6 +2197,16 @@
             }
             var cabLo = $("cab-logout");
             if (cabLo) cabLo.addEventListener("click", function () {
+                try {
+                  var uid = 0;
+                  try { uid = parseInt(localStorage.getItem("liqscope.tchat.curUid")||"0",10)||0; } catch(_){}
+                  if (uid) {
+                    ["liqscope.tchat.lastId."+uid,"liqscope.tchat.svcLastId."+uid,"liqscope.tchat.supLastId."+uid,"liqscope.tchat.open."+uid].forEach(function(k){ try{ localStorage.removeItem(k);}catch(_){} });
+                    localStorage.removeItem("liqscope.tchat.curUid");
+                    for (var i=localStorage.length-1;i>=0;i--){ var kk=localStorage.key(i); if(!kk) continue; if(kk.indexOf("chat:")===0||kk.indexOf("dm:")===0) { try{ localStorage.removeItem(kk);}catch(_){} } }
+                  }
+                  try { window.dispatchEvent(new CustomEvent("liqscope:logout")); } catch(_){}
+                } catch(_){}
                 api("/api/auth/logout", { method: "POST" }).then(function () {
                     location.href = "/";
                 });

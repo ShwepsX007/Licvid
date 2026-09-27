@@ -411,6 +411,11 @@ def register_private_chat_routes(app) -> None:
         last_id = int(max((m["id"] for m in msgs), default=after_id or 0))
         if last_id:
             store.private_mark_read(room_id, u["id"], last_id)
+            try:
+                store.chat_mark_read(int(u["id"]), f"dm:{room_id}", last_id=last_id, last_ts=_now())
+                store.chat_mark_read(int(u["id"]), "dm", last_id=0, last_ts=_now())
+            except Exception:
+                pass
         summary = _room_json(store, store.private_room_get(room_id) or room, u["id"])
         return {"ok": True, "messages": msgs, "room": summary, "now": _now()}
 

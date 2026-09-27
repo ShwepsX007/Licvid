@@ -293,6 +293,8 @@ _OG_IMG_RE = re.compile(
 _OG_DIM_RE = re.compile(
     r'\s*<meta\b[^>]*\bproperty="og:image:(?:width|height)"[^>]*>', re.I)
 _CANON_RE = re.compile(r"(<link\b[^>]*\brel=\"canonical\"[^>]*\bhref=\")([^\"]*)(\")", re.I)
+# Разбивка i18n.pages.js по языкам: грузим только один язык
+_I18N_PAGES_RE = re.compile(r'/static/i18n\.pages\.js(?:\?[^"\']*)?')
 
 
 def _language_block(path: str, lang: str = DEFAULT_LANG) -> str:
@@ -409,6 +411,9 @@ def render(
         html = _OG_IMG_RE.sub(
             lambda m: m.group(1) + _attr(og_image) + m.group(3), html)
         html = _OG_DIM_RE.sub("", html)
+
+    # Разбивка i18n.pages.js по языкам: грузим только нужный язык, экономим ~400KB
+    html = _I18N_PAGES_RE.sub(f"/static/i18n.pages.{lang}.js", html)
 
     # <html lang="…"> и выбранный язык для клиента: разметка сразу совпадает
     html = _HTML_RE.sub(

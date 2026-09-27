@@ -3,9 +3,9 @@
  *
  * Первый график — тот, что уже на странице (все слои, следование, рисование).
  * «＋ График» добавляет рядом такой же сингл-чарт.
- * Мультиэкран — сетка ×1–×4. Вкладки — один график на весь терминал,
- * остальные переключаются вкладками. ⛶ разворачивает только этот график.
- * ‹ › меняют местами, ⧉ открывает окно за пределами браузера.
+ * Мультиэкран — сетка ×1–×4, края между графиками тянутся.
+ * Вкладки — один график на весь терминал. ⧉ отрывает окно и его
+ * можно таскать по терминалу. Отдельная вкладка браузера не открывается.
  */
 (function () {
   const MAX = 6;
@@ -279,6 +279,8 @@
         y: 72 + this.order.length * 18,
         w: 760,
         h: 540,
+        shareW: 1,
+        shareH: 1,
       };
       this.meta[id] = rec;
       this.order.push(id);
@@ -319,6 +321,8 @@
     floatChart(id, x, y) {
       const rec = this.meta[id];
       if (!rec) return;
+      if (this._fsId === id) this.exitSlotFullscreen();
+      rec.popped = false;
       rec.floating = true;
       if (isFinite(x)) rec.x = x;
       if (isFinite(y)) rec.y = y;
@@ -354,18 +358,188 @@
       }
       this._ensureDock();
       this.order.forEach((id) => this._ensureSlot(id));
-      this.order.forEach((id) => {
-        const rec = this.meta[id];
-        const el = this.els.get(id);
-        if (!rec || !el) return;
-        if (rec.floating) this._placeFloat(el, rec);
-        else this._placeDock(el, rec);
-        this._paintPopped(id);
-      });
+      this._clearSplitChrome();
+      const split = this.view !== "tabs" && this._dockedIds().length > 1;
+      if (split) this._layoutSplit();
+      else {
+        this.order.forEach((id) => {
+          const rec = this.meta[id];
+          const el = this.els.get(id);
+          if (!rec || !el) return;
+          if (rec.floating) this._placeFloat(el, rec);
+          else this._placeDock(el, rec);
+          this._paintPopped(id);
+        });
+      }
       this._paintActive();
       this._applyView();
       this._syncPlaceholder();
       this._paintNativeBack();
+      this._nudge();
+    }
+
+    _dockedIds() {
+      return this.order.filter((id) => this.meta[id] && !this.meta[id].floating);
+    }
+
+    _share(rec, key) {
+      const n = Number(rec && rec[key]);
+      return n > 0 ? n : 1;
+    }
+
+    _splitRows() {
+      const ids = this._dockedIds();
+      if (this.cols === 3 && ids.length === 3) return [[ids[0], ids[1]], [ids[2]]];
+      const cols = this.cols === 1 ? 1 : 2;
+      const rows = [];
+      for (let i = 0; i < ids.length; i += cols) rows.push(ids.slice(i, i + cols));
+      return rows;
+    }
+
+    _clearSplitChrome() {
+      if (!this.dock) return;
+      Array.from(this.dock.querySelectorAll(".chart-slot")).forEach((s) => {
+        if (s.parentNode !== this.dock) this.dock.appendChild(s);
+      });
+      Array.from(this.dock.children).forEach((ch) => {
+        if (!ch.classList.contains("chart-slot")) ch.remove();
+      });
+      this.dock.classList.remove("is-split");
+      this.placeholder = null;
+    }
+
+    _layoutSplit() {
+      const rows = this._splitRows();
+      this.order.forEach((id) => {
+        const rec = this.meta[id];
+        const el = this.els.get(id);
+        if (!rec || !el || !rec.floating) return;
+        this._placeFloat(el, rec);
+        this._paintPopped(id);
+      });
+      rows.forEach((row, ri) => {
+        if (ri > 0) {
+          const bar = document.createElement("div");
+          bar.className = "chart-split-h";
+          bar.title = "Потяни край, чтобы сжать или растянуть графики сверху и снизу";
+          bar.addEventListener("pointerdown", (e) => this._onSplitDown(e, "h", ri));
+          this.dock.appendChild(bar);
+        }
+        const rowEl = document.createElement("div");
+        rowEl.className = "chart-split-row";
+        rowEl.dataset.row = String(ri);
+        const h = row.reduce((m, id) => Math.max(m, this._share(this.meta[id], "shareH")), 1);
+        rowEl.style.flexGrow = String(h);
+        rowEl.style.flexBasis = "0px";
+        row.forEach((id, ci) => {
+          if (ci > 0) {
+            const bar = document.createElement("div");
+            bar.className = "chart-split-v";
+            bar.title = "Потяни край, чтобы сжать или растянуть соседние графики";
+            bar.addEventListener("pointerdown", (e) => this._onSplitDown(e, "v", row[ci - 1], id));
+            rowEl.appendChild(bar);
+          }
+          const cell = document.createElement("div");
+          cell.className = "chart-split-cell";
+          cell.dataset.id = id;
+          cell.style.flexGrow = String(this._share(this.meta[id], "shareW"));
+          cell.style.flexBasis = "0px";
+          const el = this.els.get(id);
+          this._placeDock(el, this.meta[id], cell);
+          this._paintPopped(id);
+          rowEl.appendChild(cell);
+        });
+        this.dock.appendChild(rowEl);
+      });
+      this.dock.classList.add("is-split");
+    }
+
+    _onSplitDown(e, kind, a, b) {
+      if (e.button != null && e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      let start = null;
+      if (kind === "v") {
+        const left = this.dock.querySelector('.chart-split-cell[data-id="' + a + '"]');
+        const right = this.dock.querySelector('.chart-split-cell[data-id="' + b + '"]');
+        if (!left || !right) return;
+        start = {
+          kind: "v", a: a, b: b, left: left, right: right,
+          sx: e.clientX,
+          aw: left.getBoundingClientRect().width,
+          bw: right.getBoundingClientRect().width,
+        };
+      } else {
+        const rows = Array.from(this.dock.querySelectorAll(".chart-split-row"));
+        const top = rows[a - 1];
+        const bot = rows[a];
+        if (!top || !bot) return;
+        start = {
+          kind: "h", row: a - 1, top: top, bot: bot,
+          sy: e.clientY,
+          ah: top.getBoundingClientRect().height,
+          bh: bot.getBoundingClientRect().height,
+        };
+      }
+      this._split = start;
+      document.body.classList.add("chart-dock-dragging");
+      const move = (ev) => this._onSplitMove(ev);
+      const up = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        window.removeEventListener("pointercancel", up);
+        this._onSplitEnd();
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+      window.addEventListener("pointercancel", up);
+    }
+
+    _onSplitMove(e) {
+      const s = this._split;
+      if (!s) return;
+      const min = 120;
+      if (s.kind === "v") {
+        let aw = s.aw + (e.clientX - s.sx);
+        let bw = s.bw - (e.clientX - s.sx);
+        if (aw < min) { bw -= min - aw; aw = min; }
+        if (bw < min) { aw -= min - bw; bw = min; }
+        if (aw < min || bw < min) return;
+        s.left.style.flexGrow = String(aw);
+        s.right.style.flexGrow = String(bw);
+        s.awNow = aw;
+        s.bwNow = bw;
+      } else {
+        let ah = s.ah + (e.clientY - s.sy);
+        let bh = s.bh - (e.clientY - s.sy);
+        if (ah < min) { bh -= min - ah; ah = min; }
+        if (bh < min) { ah -= min - bh; bh = min; }
+        if (ah < min || bh < min) return;
+        s.top.style.flexGrow = String(ah);
+        s.bot.style.flexGrow = String(bh);
+        s.ahNow = ah;
+        s.bhNow = bh;
+      }
+      if (!s.nudged || Date.now() - s.nudged > 90) {
+        s.nudged = Date.now();
+        this._nudge();
+      }
+    }
+
+    _onSplitEnd() {
+      const s = this._split;
+      this._split = null;
+      document.body.classList.remove("chart-dock-dragging");
+      if (!s) return;
+      if (s.kind === "v" && s.awNow) {
+        if (this.meta[s.a]) this.meta[s.a].shareW = s.awNow;
+        if (this.meta[s.b]) this.meta[s.b].shareW = s.bwNow;
+      } else if (s.kind === "h" && s.ahNow) {
+        const rows = this._splitRows();
+        (rows[s.row] || []).forEach((id) => { if (this.meta[id]) this.meta[id].shareH = s.ahNow; });
+        (rows[s.row + 1] || []).forEach((id) => { if (this.meta[id]) this.meta[id].shareH = s.bhNow; });
+      }
+      this._save();
       this._nudge();
     }
 
@@ -401,10 +575,17 @@
         b.addEventListener("click", () => this.setCols(n));
         gridctl.appendChild(b);
       });
+      const addBtn = document.createElement("button");
+      addBtn.type = "button";
+      addBtn.className = "chart-dock-add";
+      addBtn.textContent = "＋ График";
+      addBtn.title = "Добавить такой же график";
+      addBtn.addEventListener("click", () => this.addChart());
       this.tabs = document.createElement("div");
       this.tabs.className = "chart-dock-tabs";
       tools.appendChild(modes);
       tools.appendChild(gridctl);
+      tools.appendChild(addBtn);
       tools.appendChild(this.tabs);
       this.tools = tools;
       this.dock = document.createElement("div");
@@ -426,8 +607,8 @@
         this.dock.classList.add("cols-" + n);
       }
       this._paintCols();
+      if (this.dock) this.layout();
       this._save();
-      this._nudge();
     }
 
     _paintCols() {
@@ -440,9 +621,9 @@
     setView(view) {
       this.view = view === "tabs" ? "tabs" : "grid";
       if (this._fsId) this.exitSlotFullscreen();
-      this._applyView();
+      if (this.dock) this.layout();
+      else this._applyView();
       this._save();
-      this._nudge();
     }
 
     _applyView() {
@@ -556,7 +737,7 @@
       grip.type = "button";
       grip.className = "chart-slot-grip";
       grip.textContent = "⋮⋮";
-      grip.title = "Потяни на другой график, чтобы поменять местами. За край терминала — вынести в отдельное окно.";
+      grip.title = "Потяни, чтобы таскать окно по терминалу. Отпусти над сеткой — вернуть.";
       const title = document.createElement("span");
       title.className = "chart-slot-title";
       title.textContent = pretty(rec.symbol);
@@ -574,7 +755,7 @@
       floatBtn.type = "button";
       floatBtn.className = "chart-slot-float";
       floatBtn.textContent = "⧉";
-      floatBtn.title = "Вынести в отдельное окно — его можно унести за пределы браузера";
+      floatBtn.title = "Оторвать и двигать по терминалу";
       const dockBtn = document.createElement("button");
       dockBtn.type = "button";
       dockBtn.className = "chart-slot-dock";
@@ -613,7 +794,7 @@
         this._onGrip(id, bar, e);
       });
       tfSel.addEventListener("change", () => this._setEmbedTf(id, tfSel.value));
-      floatBtn.addEventListener("click", () => this.popOut(id));
+      floatBtn.addEventListener("click", () => this.floatChart(id));
       dockBtn.addEventListener("click", () => this.dockBack(id));
       closeBtn.addEventListener("click", () => this.closeChart(id));
       bar.addEventListener("pointerdown", () => this.setActive(id));
@@ -682,7 +863,7 @@
       grip.type = "button";
       grip.className = "chart-slot-grip";
       grip.textContent = "⋮⋮";
-      grip.title = "Потяни на другой график, чтобы поменять местами";
+      grip.title = "Потяни, чтобы таскать окно по терминалу. Отпусти над сеткой — вернуть.";
       const title = document.createElement("span");
       title.className = "chart-slot-title";
       title.textContent = "Основной";
@@ -690,7 +871,7 @@
       floatBtn.type = "button";
       floatBtn.className = "chart-slot-float";
       floatBtn.textContent = "⧉";
-      floatBtn.title = "Вынести в отдельное окно";
+      floatBtn.title = "Оторвать и двигать по терминалу";
       const dockBtn = document.createElement("button");
       dockBtn.type = "button";
       dockBtn.className = "chart-slot-dock";
@@ -710,14 +891,14 @@
       body.appendChild(this.header);
       body.appendChild(this.stack);
       grip.addEventListener("pointerdown", (e) => this._onGrip("native", grip, e));
-      floatBtn.addEventListener("click", () => this.popOut("native"));
+      floatBtn.addEventListener("click", () => this.floatChart("native"));
       dockBtn.addEventListener("click", () => this.dockBack("native"));
       this.els.set("native", el);
       el.addEventListener("pointerdown", () => this.setActive("native"));
       return el;
     }
 
-    _placeDock(el, rec) {
+    _placeDock(el, rec, parent) {
       if (el.classList.contains("is-slot-fs")) {
         if (el.parentNode !== document.body) document.body.appendChild(el);
         rec.floating = false;
@@ -729,7 +910,7 @@
       el.style.width = "";
       el.style.height = "";
       el.style.zIndex = "";
-      this.dock.appendChild(el);
+      (parent || this.dock).appendChild(el);
       const floatBtn = el.querySelector(".chart-slot-float");
       const dockBtn = el.querySelector(".chart-slot-dock");
       if (floatBtn) floatBtn.hidden = false;
@@ -814,33 +995,11 @@
     }
 
     popOut(id) {
+      // Отдельная вкладка браузера больше не открывается: окно едет по терминалу.
+      this._closePop(id);
       const rec = this.meta[id];
-      if (!rec) return;
-      if (this._fsId === id) this.exitSlotFullscreen();
-      const existing = this._pops.get(id);
-      if (existing && !existing.closed) {
-        try { existing.focus(); } catch (e) {}
-        return;
-      }
-      const win = window.open(this._popUrl(id), "liqscope_pop_" + id, "popup=yes,width=1100,height=760,left=80,top=40");
-      if (!win) {
-        window.alert("Браузер не дал открыть окно. Разрешите всплывающие окна, чтобы вынести график за пределы браузера.");
-        return;
-      }
-      rec.popped = true;
-      rec.floating = false;
-      this._pops.set(id, win);
-      this.layout();
-      this._save();
-      const timer = setInterval(() => {
-        if (!win.closed) return;
-        clearInterval(timer);
-        this._pops.delete(id);
-        if (!this.meta[id] || !this.meta[id].popped) return;
-        this.meta[id].popped = false;
-        this.layout();
-        this._save();
-      }, 700);
+      if (rec) rec.popped = false;
+      this.floatChart(id);
     }
 
     dockBack(id) {
@@ -917,6 +1076,7 @@
         sx: e.clientX,
         sy: e.clientY,
         moved: false,
+        startedFloating: !!rec.floating,
         offX: 28,
         offY: 16,
       };
@@ -962,10 +1122,37 @@
       if (!d) return;
       if (!d.moved && Math.hypot(e.clientX - d.sx, e.clientY - d.sy) < 6) return;
       d.moved = true;
-      const outside = this._outsideSection(e.clientX, e.clientY);
-      if (this.dock) this.dock.classList.toggle("is-drop", !outside);
-      document.body.classList.toggle("chart-dock-pop-ready", outside);
-      if (!outside) this._markDrop(d.id, e.clientX, e.clientY);
+      const rec = this.meta[d.id];
+      if (!rec) return;
+      const outside = this._outsideDock(e.clientX, e.clientY);
+      if (d.startedFloating || outside) {
+        if (!rec.floating) {
+          rec.floating = true;
+          rec.popped = false;
+          rec.x = e.clientX - d.offX;
+          rec.y = e.clientY - d.offY;
+          this.layout();
+        } else {
+          rec.x = e.clientX - d.offX;
+          rec.y = e.clientY - d.offY;
+          this._clampFloat(rec);
+          const el = this.els.get(d.id);
+          if (el) {
+            el.style.left = rec.x + "px";
+            el.style.top = rec.y + "px";
+          }
+        }
+        if (this.dock) this.dock.classList.toggle("is-drop", outside && !d.startedFloating);
+      } else {
+        if (rec.floating) {
+          rec.floating = false;
+          this.layout();
+        }
+        if (this.dock) {
+          this.dock.classList.add("is-drop");
+          this._markDrop(d.id, e.clientX, e.clientY);
+        }
+      }
     }
 
     _markDrop(id, x, y) {
@@ -994,20 +1181,30 @@
       if (!d || !d.moved) return;
       const rec = this.meta[d.id];
       if (!rec) return;
-      if (this._outsideSection(e.clientX, e.clientY)) {
-        this.popOut(d.id);
-        return;
+      if (d.startedFloating) {
+        rec.floating = true;
+        rec.popped = false;
+        rec.x = e.clientX - d.offX;
+        rec.y = e.clientY - d.offY;
+        this._readFloatSize(d.id);
+      } else if (this._outsideDock(e.clientX, e.clientY)) {
+        rec.floating = true;
+        rec.popped = false;
+        rec.x = e.clientX - d.offX;
+        rec.y = e.clientY - d.offY;
+        this._readFloatSize(d.id);
+      } else {
+        rec.floating = false;
+        this._reorderAt(d.id, e.clientX, e.clientY);
       }
-      rec.floating = false;
-      this._reorderAt(d.id, e.clientX, e.clientY);
       this.layout();
       this._save();
       this._nudge();
     }
 
-    _outsideSection(x, y) {
+    _outsideDock(x, y) {
       const box = this.section.getBoundingClientRect();
-      return x < box.left - 16 || x > box.right + 16 || y < box.top - 16 || y > box.bottom + 16;
+      return x < box.left - 12 || x > box.right + 12 || y < box.top - 12 || y > box.bottom + 12;
     }
 
     _reorderAt(id, x, y) {
@@ -1162,6 +1359,8 @@
               y: Math.round(rec.y || 0),
               w: Math.round(rec.w || 760),
               h: Math.round(rec.h || 540),
+              shareW: this._share(rec, "shareW"),
+              shareH: this._share(rec, "shareH"),
             };
           }).filter(Boolean);
           localStorage.setItem(KEY, JSON.stringify({ v: 3, cols: this.cols, view: this.view, activeId: this.activeId, charts: charts }));
@@ -1184,6 +1383,8 @@
             id: "native", kind: "native", floating: false,
             x: Number(c.x) || 48, y: Number(c.y) || 64,
             w: Number(c.w) || 760, h: Number(c.h) || 540,
+            shareW: Number(c.shareW) > 0 ? Number(c.shareW) : 1,
+            shareH: Number(c.shareH) > 0 ? Number(c.shareH) : 1,
           };
           order.push("native");
           return;
@@ -1195,6 +1396,8 @@
           id: c.id, kind: "embed", symbol: sym, tf: tf, floating: false,
           x: Number(c.x) || 72, y: Number(c.y) || 72,
           w: Number(c.w) || 760, h: Number(c.h) || 540,
+          shareW: Number(c.shareW) > 0 ? Number(c.shareW) : 1,
+          shareH: Number(c.shareH) > 0 ? Number(c.shareH) : 1,
         };
         order.push(c.id);
       });

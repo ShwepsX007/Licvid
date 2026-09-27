@@ -7638,6 +7638,18 @@
         }, 60000);
     }
 
+    // Expose for workspace multi-chart
+    try {
+        window.LiqScopeApp = window.LiqScopeApp || {};
+        window.LiqScopeApp.selectSymbol = selectSymbol;
+        window.LiqScopeApp.createCandleSeries = createCandleSeries;
+        window.LiqScopeApp.createVolumeSeries = createVolumeSeries;
+        window.LiqScopeApp.getSymbols = function() {
+            try { return (state && state.symbols) ? state.symbols : []; } catch { return []; }
+        };
+        window.state = state;
+    } catch {}
+
     if (document.readyState === "loading") {
         document.addEventListener("DOMContentLoaded", boot);
     } else {

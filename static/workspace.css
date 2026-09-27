@@ -1,9 +1,20 @@
 /* Multi-chart workspace — LiqScope Terminal */
+#workspace-host {
+  width: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 .workspace-root {
   display: none;
   flex-direction: column;
   gap: 8px;
   padding: 6px 0 8px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
 }
 .workspace-root.active {
   display: flex;
@@ -64,7 +75,7 @@
   padding: 4px 8px;
   font-size: 12px;
   color: #8fa2b8;
-  cursor: grab;
+  cursor: pointer;
   white-space: nowrap;
   user-select: none;
 }
@@ -93,11 +104,19 @@
   grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
   gap: 8px;
   min-height: 300px;
+  grid-auto-rows: minmax(360px, auto);
+  align-items: stretch;
 }
 .workspace-grid.cols-1 { grid-template-columns: 1fr; }
 .workspace-grid.cols-2 { grid-template-columns: repeat(2, 1fr); }
 .workspace-grid.cols-3 { grid-template-columns: repeat(3, 1fr); }
 .workspace-grid.cols-4 { grid-template-columns: repeat(2, 1fr); }
+.workspace-grid.single-mode {
+  grid-template-columns: 1fr !important;
+  grid-auto-rows: 1fr;
+  height: calc(100vh - 200px);
+  min-height: 520px;
+}
 
 @media (max-width: 900px) {
   .workspace-grid {
@@ -107,10 +126,20 @@
 }
 
 body.workspace-active .chart-stack {
-  display: none;
+  display: none !important;
 }
 body.workspace-active #workspace-host .workspace-root {
-  display: flex;
+  display: flex !important;
+}
+body:not(.workspace-active) #workspace-host .workspace-root {
+  display: none !important;
+}
+body:not(.workspace-active) .chart-stack {
+  display: flex !important;
+}
+
+body.workspace-single-mode .workspace-grid {
+  grid-template-columns: 1fr !important;
 }
 
 /* Chart panel */
@@ -121,7 +150,7 @@ body.workspace-active #workspace-host .workspace-root {
   border: 1px solid #1c2533;
   border-radius: 8px;
   overflow: hidden;
-  min-height: 320px;
+  min-height: 360px;
   position: relative;
 }
 .chart-panel.detached {
@@ -140,6 +169,7 @@ body.workspace-active #workspace-host .workspace-root {
   background: #0f1725;
   border-bottom: 1px solid #1c2533;
   flex-wrap: wrap;
+  flex-shrink: 0;
 }
 .panel-header .panel-drag {
   cursor: grab;
@@ -152,8 +182,7 @@ body.workspace-active #workspace-host .workspace-root {
   align-items: center;
   gap: 4px;
 }
-.panel-header .panel-symbol select,
-.panel-header .panel-timeframe select {
+.panel-header .panel-symbol select {
   background: #121d2f;
   border: 1px solid #22314a;
   color: #b8cce4;
@@ -205,13 +234,20 @@ body.workspace-active #workspace-host .workspace-root {
 .panel-chart-wrap {
   position: relative;
   flex: 1;
-  min-height: 260px;
+  min-height: 300px;
+  height: 360px;
   background: #090c10;
+  overflow: hidden;
 }
 .panel-chart {
+  position: absolute;
+  left: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
   width: 100%;
   height: 100%;
-  min-height: 260px;
+  z-index: 1;
 }
 .panel-canvas {
   position: absolute;
@@ -219,6 +255,20 @@ body.workspace-active #workspace-host .workspace-root {
   width: 100%;
   height: 100%;
   pointer-events: none;
+  z-index: 2;
+}
+.panel-error {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #6a7a8e;
+  font-size: 12px;
+  z-index: 10;
+  background: rgba(9,12,16,0.85);
+  text-align: center;
+  padding: 8px;
 }
 .panel-layers-pop {
   position: absolute;

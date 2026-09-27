@@ -5724,7 +5724,7 @@
         detailModal.classList.toggle("peek-pinned", pinned);
     }
 
-    // --- Панель кнопок слоёв: выезжает сверху по кнопке «☰ Слои» -------------
+    // --- Панель кнопок слоёв: выезжает списком по кнопке ☰ --------------------
     // Кнопки Ликвидации/CVD/OI живут в попапе, а их цифры — в верхней плашке
     // с текстовыми подписями. Закрытие: повторный клик, клик мимо, Esc.
     function setupLayerPop() {
@@ -7436,6 +7436,12 @@
             default:
                 break;
         }
+        try {
+            if (msg && (msg.type === "prices" || msg.type === "tick" || msg.type === "candle" ||
+                    msg.type === "candles" || msg.type === "liqs")) {
+                document.dispatchEvent(new CustomEvent("liqscope:ws", { detail: msg }));
+            }
+        } catch (e) { /* панели мульти-графика живут на этом же сокете */ }
     }
 
     // --- Язык интерфейса -----------------------------------------------------

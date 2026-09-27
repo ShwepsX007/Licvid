@@ -457,9 +457,11 @@ class WorkspaceManager {
     const raw = this.loadWorkspace();
     let panels = raw.panels || [];
     if (!panels.length) {
+      const seedA = this._freshLayers();
+      const seedB = this._freshLayers();
       panels = [
-        { id: this._generatePanelId(), symbol: 'BTC_USDT', timeframe: 5, layers: { levelsEnabled: false, levelsAlertEnabled: true, liqEnabled: true }, position: 0 },
-        { id: this._generatePanelId(), symbol: 'ETH_USDT', timeframe: 5, layers: { levelsEnabled: false, levelsAlertEnabled: true, liqEnabled: true }, position: 1 },
+        { id: this._generatePanelId(), symbol: 'BTC_USDT', timeframe: 5, layers: seedA, position: 0 },
+        { id: this._generatePanelId(), symbol: 'ETH_USDT', timeframe: 5, layers: seedB, position: 1 },
       ];
       this.workspaceId = raw.workspaceId || this._generateWorkspaceId();
     }
@@ -624,6 +626,52 @@ class WorkspaceManager {
     }
   }
 
+  _layersFromMain() {
+    const keys = ['levelsEnabled', 'levelsAlertEnabled', 'liqEnabled', 'cvdEnabled', 'oiEnabled', 'bookEnabled', 'profileEnabled'];
+    const stores = {
+      levelsEnabled: 'liqscope.levelsEnabled',
+      levelsAlertEnabled: 'liqscope.levelsAlert',
+      liqEnabled: 'liqscope.liqEnabled',
+      cvdEnabled: 'liqscope.cvdEnabled',
+      oiEnabled: 'liqscope.oiEnabled',
+      bookEnabled: 'liqscope.bookEnabled',
+      profileEnabled: 'liqscope.profileEnabled',
+    };
+    const out = {};
+    let fromState = false;
+    try {
+      const s = window.state;
+      if (s) {
+        keys.forEach(k => {
+          if (typeof s[k] === 'boolean') { out[k] = !!s[k]; fromState = true; }
+        });
+      }
+    } catch {}
+    if (fromState) return out;
+    let any = false;
+    try {
+      keys.forEach(k => {
+        const v = localStorage.getItem(stores[k]);
+        if (v === '1' || v === '0') { out[k] = v === '1'; any = true; }
+      });
+    } catch {}
+    if (!any) return null;
+    if (typeof out.levelsAlertEnabled !== 'boolean') out.levelsAlertEnabled = true;
+    return out;
+  }
+
+  _freshLayers() {
+    return this._layersFromMain() || {
+      levelsEnabled: false,
+      levelsAlertEnabled: true,
+      liqEnabled: false,
+      cvdEnabled: false,
+      oiEnabled: false,
+      bookEnabled: false,
+      profileEnabled: false,
+    };
+  }
+
   addPanel(initialState) {
     if (this.panels.size >= this.maxPanels) {
       alert(`Max ${this.maxPanels} panels. Close one to add more.`);
@@ -634,13 +682,15 @@ class WorkspaceManager {
     if (!grid) return null;
 
     const id = (initialState && initialState.id) || this._generatePanelId();
+    const passedLayers = initialState && initialState.layers;
+    const layers = passedLayers || this._freshLayers();
     const state = Object.assign({
       id,
       symbol: 'BTC_USDT',
       timeframe: 5,
-      layers: { levelsEnabled: false, levelsAlertEnabled: true, liqEnabled: true },
+      layers,
       position: this.order.length,
-    }, initialState || {}, { id });
+    }, initialState || {}, { id, layers });
 
     const panel = new ChartPanel({
       id,
@@ -813,22 +863,30 @@ class WorkspaceManager {
           this.panels.forEach(p => p.onCandleUpdate(msg.symbol, msg.tf, msg.candle));
         }
         break;
+      case 'liqs':
+        (msg.data || []).forEach(item => {
+          this.panels.forEach(p => { if (p.onLiquidation) p.onLiquidation(item); });
+        });
+        break;
       case 'candles':
         if (msg.symbol && msg.candles) {
           this.panels.forEach(p => {
             if (p.symbol===msg.symbol && Number(p.timeframe)===Number(msg.tf || msg.timeframe)) {
-              const candles = msg.candles.map(c => ({
-                time: Number(c.time || c.t || 0) > 1e12 ? Math.floor(Number(c.time)/1000) : Number(c.time||c.t||0),
-                open: Number(c.open||c.o),
-                high: Number(c.high||c.h),
-                low: Number(c.low||c.l),
-                close: Number(c.close||c.c),
-              })).filter(b=>b.time && isFinite(b.open)).sort((a,b)=>a.time-b.time);
+              const candles = msg.candles.map(c => (
+                p._normalizeBar ? p._normalizeBar(c) : {
+                  time: Number(c.time || c.t || 0) > 1e12 ? Math.floor(Number(c.time)/1000) : Number(c.time||c.t||0),
+                  open: Number(c.open||c.o),
+                  high: Number(c.high||c.h),
+                  low: Number(c.low||c.l),
+                  close: Number(c.close||c.c),
+                }
+              )).filter(b=>b && b.time && isFinite(b.open)).sort((a,b)=>a.time-b.time);
               p.candles = candles;
               if (p.candleSeries) {
                 try { p.candleSeries.setData(candles); } catch {}
               }
               if (candles.length) p._updatePriceDisplay(candles[candles.length-1].close);
+              if (p._drawOverlays) p._drawOverlays();
             }
           });
         }

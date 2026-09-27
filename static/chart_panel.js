@@ -1,6 +1,8 @@
 /**
  * ChartPanel — isolated chart instance for multi-chart workspace.
  * Robust init: waits for visible size, retries, shows errors.
+ * Слои (ликвидации, CVD, OI, стакан, профиль, уровни) живут на этом
+ * инстансе и не завязаны на единственный chart из app.js.
  */
 
 class ChartPanel {
@@ -33,6 +35,17 @@ class ChartPanel {
     this.candles = [];
     this.levelsData = null;
     this.levelsAt = 0;
+    this.liqHist = {};
+    this.liqHistAt = 0;
+    this._liqHistKey = '';
+    this._liveLiqs = [];
+    this.bookData = null;
+    this.bookHist = [];
+    this._bookTimer = null;
+    this._bookHistSym = '';
+    this._bookHistAt = 0;
+    this._flowReload = false;
+    this._drawing = false;
     this.price = null;
     this._levelHighlights = {};
     this._destroyed = false;
@@ -123,12 +136,13 @@ class ChartPanel {
     const layersPop = document.createElement('div');
     layersPop.className = 'panel-layers-pop hidden';
     layersPop.innerHTML = `
-      <button class="panel-layer-btn" data-layer="levelsEnabled">🎯 Уровни (оценка)</button>
-      <button class="panel-layer-btn" data-layer="levelsAlertEnabled">🔔 Сигнал уровней</button>
       <button class="panel-layer-btn" data-layer="liqEnabled">⚡ Ликвидации</button>
+      <button class="panel-layer-btn" data-layer="profileEnabled">📊 Профиль</button>
       <button class="panel-layer-btn" data-layer="cvdEnabled">🎯 CVD</button>
       <button class="panel-layer-btn" data-layer="oiEnabled">● OI</button>
       <button class="panel-layer-btn" data-layer="bookEnabled">📖 Стакан</button>
+      <button class="panel-layer-btn" data-layer="levelsEnabled">🎯 Уровни (оценка)</button>
+      <button class="panel-layer-btn" data-layer="levelsAlertEnabled">🔔 Сигнал уровней</button>
     `;
     wrap.appendChild(layersPop);
     root.appendChild(wrap);
@@ -218,9 +232,9 @@ class ChartPanel {
 
     // Periodic refresh of levels (like main chart)
     this._levelsTimer = setInterval(() => {
-      if ((this.layers.levelsEnabled || this.layers.liqEnabled) && this.symbol !== 'ALL') {
-        this.loadLevels();
-      }
+      if (this._destroyed || this.symbol === 'ALL') return;
+      if (this.layers.levelsEnabled) this.loadLevels();
+      if (this.layers.liqEnabled || this.layers.profileEnabled) this.loadLiqClusters(true);
     }, 30000);
   }
 
@@ -275,7 +289,7 @@ class ChartPanel {
     setTimeout(() => this.resize(), 1500);
     // Load data after chart ready
     this.loadCandles();
-    if (this.layers.levelsEnabled) this.loadLevels();
+    this._syncLayerFeeds();
   }
 
   _showError(msg) {
@@ -373,6 +387,10 @@ class ChartPanel {
       return;
     }
     this.chart = chart;
+    try {
+      if (!this._onRange) this._onRange = () => this._drawOverlays();
+      chart.timeScale().subscribeVisibleLogicalRangeChange(this._onRange);
+    } catch {}
 
     let candleSeries = null;
     try {
@@ -478,18 +496,7 @@ class ChartPanel {
           throw new Error('bad candles format');
         }
       }
-      const bars = candles.map(c => {
-        let t = Number(c.time || c.t || c.timestamp || 0);
-        if (t > 1e12) t = Math.floor(t/1000);
-        return {
-          time: t,
-          open: Number(c.open || c.o),
-          high: Number(c.high || c.h),
-          low: Number(c.low || c.l),
-          close: Number(c.close || c.c),
-          volume: Number(c.volume || c.v || 0),
-        };
-      }).filter(b => b.time && isFinite(b.open) && isFinite(b.close)).sort((a,b)=>a.time-b.time);
+      const bars = candles.map(c => this._normalizeBar(c)).filter(b => b && b.time && isFinite(b.open) && isFinite(b.close)).sort((a,b)=>a.time-b.time);
 
       if (!bars.length) {
         // Try fallback from main state if same symbol
@@ -564,11 +571,11 @@ class ChartPanel {
       const last = bars[bars.length-1];
       this._updatePriceDisplay(last.close);
     }
-    this._drawOverlays();
+    this._syncLayerFeeds();
   }
 
   async loadLevels() {
-    if (!this.layers.levelsEnabled && !this.layers.liqEnabled) return;
+    if (!this.layers.levelsEnabled) return;
     if (this.symbol === 'ALL') return;
     const sym = this.symbol;
     try {
@@ -577,6 +584,7 @@ class ChartPanel {
       const r = await fetch(url, { cache: 'no-store' });
       if (!r.ok) throw new Error('levels fetch failed ' + r.status);
       const data = await r.json();
+      if (this.symbol !== sym || !this.layers.levelsEnabled) return;
       if (!data || data.ok === false) {
         // empty or off
         this.levelsData = data;
@@ -622,24 +630,502 @@ class ChartPanel {
     return n.toFixed(8);
   }
 
-  _drawOverlays() {
-    if (!this.clusterCanvas || !this.chart || !this.candleSeries) return;
-    const canvas = this.clusterCanvas;
-    // Ensure canvas has size
-    const rect = this.chartEl ? this.chartEl.getBoundingClientRect() : null;
-    let W = canvas.width, H = canvas.height;
-    if (!W || !H || W < 10 || H < 10) {
-      if (rect && rect.width > 10 && rect.height > 10) {
-        this.resize();
-        W = canvas.width; H = canvas.height;
-      } else {
-        return;
+  _normalizeBar(c, prev) {
+    if (!c) return null;
+    let t = Number(c.time || c.t || c.timestamp || 0);
+    if (t > 1e12) t = Math.floor(t / 1000);
+    const bar = {
+      time: t,
+      open: Number(c.open || c.o),
+      high: Number(c.high || c.h),
+      low: Number(c.low || c.l),
+      close: Number(c.close || c.c),
+      volume: Number(c.volume || c.v || 0),
+    };
+    if (c.cvd != null && c.cvd !== '') bar.cvd = Number(c.cvd);
+    else if (prev && prev.cvd != null) bar.cvd = prev.cvd;
+    if (c.oiChg != null && c.oiChg !== '') bar.oiChg = Number(c.oiChg);
+    else if (c.oi_chg != null && c.oi_chg !== '') bar.oiChg = Number(c.oi_chg);
+    else if (prev && prev.oiChg != null) bar.oiChg = prev.oiChg;
+    return bar;
+  }
+
+  _fmtCompact(v) {
+    const n = Math.abs(Number(v) || 0);
+    const sign = Number(v) < 0 ? '-' : '';
+    const trim = (x) => String(x).replace(/\.0$/, '');
+    if (n >= 1e9) return sign + '$' + trim((n / 1e9).toFixed(n >= 1e10 ? 0 : 1)) + 'B';
+    if (n >= 1e6) return sign + '$' + trim((n / 1e6).toFixed(n >= 1e7 ? 0 : 1)) + 'M';
+    if (n >= 1e3) return sign + '$' + trim((n / 1e3).toFixed(n >= 1e4 ? 0 : 1)) + 'K';
+    return sign + '$' + Math.round(n);
+  }
+
+  _slotPx(W) {
+    let visible = 0;
+    try {
+      const r = this.chart && this.chart.timeScale && this.chart.timeScale().getVisibleLogicalRange();
+      if (r && isFinite(r.from) && isFinite(r.to)) visible = Math.ceil(r.to - r.from);
+    } catch {}
+    if (!visible) visible = Math.min((this.candles && this.candles.length) || 80, 80) || 80;
+    return W > 0 ? W / visible : 8;
+  }
+
+  _clearPriceLines() {
+    try {
+      if (this._priceLines && this.candleSeries) {
+        this._priceLines.forEach(pl => {
+          try { this.candleSeries.removePriceLine(pl); } catch {}
+        });
+      }
+      this._priceLines = [];
+    } catch {}
+  }
+
+  _overlayOn() {
+    const L = this.layers || {};
+    return !!(L.levelsEnabled || L.liqEnabled || L.cvdEnabled || L.oiEnabled || L.bookEnabled || L.profileEnabled);
+  }
+
+  _syncLayerFeeds() {
+    if (this._destroyed) return;
+    if (this.symbol === 'ALL') {
+      this._stopBookPoll();
+      this._drawOverlays();
+      return;
+    }
+    if (this.layers.levelsEnabled) {
+      if (!this.levelsData || Date.now() - this.levelsAt > 45000) this.loadLevels();
+    } else {
+      this._clearPriceLines();
+    }
+    if (this.layers.liqEnabled || this.layers.profileEnabled) {
+      const key = this.symbol + '|' + this.timeframe;
+      if (this._liqHistKey !== key || !this.liqHistAt || Date.now() - this.liqHistAt > 60000) {
+        this.loadLiqClusters();
       }
     }
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    ctx.clearRect(0,0,W,H);
-    if ((!this.layers.levelsEnabled && !this.layers.liqEnabled) || !this.levelsData) return;
+    if (this.layers.bookEnabled) this._startBookPoll();
+    else this._stopBookPoll();
+    if ((this.layers.cvdEnabled || this.layers.oiEnabled) && this.candles.length && !this._flowReload) {
+      const missing = this.candles.every(c => c.cvd == null && c.oiChg == null);
+      if (missing) {
+        this._flowReload = true;
+        this.loadCandles();
+      }
+    }
+    this._drawOverlays();
+  }
+
+  _startBookPoll() {
+    this._loadBook();
+    if (this._bookTimer) return;
+    this._bookTimer = setInterval(() => this._loadBook(), 4000);
+  }
+
+  _stopBookPoll() {
+    if (this._bookTimer) {
+      try { clearInterval(this._bookTimer); } catch {}
+      this._bookTimer = null;
+    }
+    this.bookData = null;
+    this.bookHist = [];
+    this._bookHistAt = 0;
+  }
+
+  async _loadBook() {
+    if (this._destroyed || !this.layers.bookEnabled || this.symbol === 'ALL') return;
+    const sym = this.symbol;
+    try {
+      const r = await fetch('/api/book/snapshot?symbol=' + encodeURIComponent(sym), { credentials: 'same-origin', cache: 'no-store' });
+      const d = await r.json();
+      if (d && d.ok && this.symbol === sym) {
+        this.bookData = d;
+        this._drawOverlays();
+      }
+    } catch {}
+    if (this._bookHistSym !== sym || Date.now() - (this._bookHistAt || 0) > 60000) {
+      this._bookHistSym = sym;
+      this._bookHistAt = Date.now();
+      try {
+        const r = await fetch('/api/book/walls?symbol=' + encodeURIComponent(sym) + '&hours=48', { credentials: 'same-origin', cache: 'no-store' });
+        const d = await r.json();
+        if (d && d.ok && this.symbol === sym) {
+          this.bookHist = d.walls || [];
+          this._drawOverlays();
+        }
+      } catch {}
+    }
+  }
+
+  async loadLiqClusters(force) {
+    if (this._destroyed) return;
+    if (!this.layers.liqEnabled && !this.layers.profileEnabled) return;
+    if (this.symbol === 'ALL') return;
+    const sym = this.symbol;
+    const tf = this.timeframe;
+    const key = sym + '|' + tf;
+    if (!force && this._liqHistKey === key && Date.now() - this.liqHistAt < 60000) return;
+    if (this._liqPending === key) return;
+    this._liqPending = key;
+    try {
+      const url = '/api/liq_clusters?symbol=' + encodeURIComponent(sym) +
+        '&timeframe=' + tf + '&min_usd=0&exchanges=';
+      const r = await fetch(url, { cache: 'no-store' });
+      if (!r.ok) return;
+      const data = await r.json();
+      if (this.symbol !== sym || Number(this.timeframe) !== Number(tf)) return;
+      this.liqHist = (data && data.candles) || {};
+      this.liqCut = Number(data && data.cut) || 0;
+      this._liqHistKey = key;
+      this.liqHistAt = Date.now();
+      this._drawOverlays();
+    } catch (e) {
+      console.debug('panel liq clusters', sym, e);
+    } finally {
+      if (this._liqPending === key) this._liqPending = null;
+    }
+  }
+
+  _histAt(t) {
+    const h = this.liqHist || {};
+    return h[t] || h[String(t)] || null;
+  }
+
+  _liqRows() {
+    const tfSec = Number(this.timeframe) * 60 || 300;
+    const rows = new Map();
+    const rowOf = (t, bar, lo, hi, level) => {
+      const key = 'b' + t + '_' + level;
+      let r = rows.get(key);
+      if (!r) {
+        r = { key, time: t, bar, lo, hi, level, longUsd: 0, shortUsd: 0, total: 0, count: 0, pxSum: 0 };
+        rows.set(key, r);
+      }
+      return r;
+    };
+    const addHistory = (r, row) => {
+      const longUsd = Number(row[1]) || 0;
+      const shortUsd = Number(row[2]) || 0;
+      const usd = longUsd + shortUsd;
+      if (usd <= 0) return;
+      r.longUsd += longUsd;
+      r.shortUsd += shortUsd;
+      r.total += usd;
+      r.count += (Number(row[3]) || 0) + (Number(row[4]) || 0);
+      r.pxSum += (Number(row[5]) || 0) * usd;
+    };
+    const live = new Map();
+    (this._liveLiqs || []).forEach(item => {
+      const ts = Number(item.timestamp);
+      if (!(ts > 0)) return;
+      const t = Math.floor(ts / tfSec) * tfSec;
+      const served = this._histAt(t);
+      if (served && served.t != null && ts <= Number(served.t)) return;
+      const arr = live.get(t);
+      if (arr) arr.push(item); else live.set(t, [item]);
+    });
+    (this.candles || []).forEach(bar => {
+      const t = Number(bar.time);
+      const lo = Math.min(Number(bar.low), Number(bar.high));
+      const hi = Math.max(Number(bar.low), Number(bar.high));
+      const served = this._histAt(t);
+      if (served && served.l && served.l.length) {
+        served.l.forEach(row => addHistory(rowOf(t, bar, lo, hi, Number(row[0]) || 0), row));
+      }
+      const items = live.get(t);
+      if (!items) return;
+      items.forEach(item => {
+        let price = Number(item.price);
+        if (!isFinite(price)) price = Number(bar.close);
+        if (hi >= lo) price = Math.min(Math.max(price, lo), hi);
+        const span = hi - lo;
+        const level = span > 0 ? Math.round(((price - lo) / span) * 5) : 0;
+        const r = rowOf(t, bar, lo, hi, level);
+        const usd = Number(item.usd) || 0;
+        if (!(usd > 0)) return;
+        if (item.side === 'SELL') r.longUsd += usd; else r.shortUsd += usd;
+        r.total += usd;
+        r.count += 1;
+        r.pxSum += price * usd;
+      });
+    });
+    return Array.from(rows.values());
+  }
+
+  _drawOverlays() {
+    if (this._drawing) return;
+    this._drawing = true;
+    try {
+      if (!this.clusterCanvas || !this.chart || !this.candleSeries) return;
+      const canvas = this.clusterCanvas;
+      const rect = this.chartEl ? this.chartEl.getBoundingClientRect() : null;
+      let W = canvas.width, H = canvas.height;
+      if (!W || !H || W < 10 || H < 10) {
+        if (rect && rect.width > 10 && rect.height > 10) {
+          canvas.width = Math.round(rect.width);
+          canvas.height = Math.round(rect.height);
+          W = canvas.width; H = canvas.height;
+        } else {
+          return;
+        }
+      }
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      ctx.clearRect(0, 0, W, H);
+      if (!this.layers.levelsEnabled) this._clearPriceLines();
+      const draw = (fn) => { try { fn.call(this, ctx, W, H); } catch (e) { console.debug('panel overlay', e); } };
+      if (this.layers.profileEnabled) draw(this._drawProfile);
+      if (this.layers.bookEnabled) draw(this._drawBook);
+      if (this.layers.oiEnabled) draw(this._drawOi);
+      if (this.layers.cvdEnabled) draw(this._drawCvd);
+      if (this.layers.liqEnabled) draw(this._drawLiqPlates);
+      if (this.layers.levelsEnabled) draw(this._drawLevels);
+    } finally {
+      this._drawing = false;
+    }
+  }
+
+  _drawProfile(ctx, W, H) {
+    const rows = this._liqRows();
+    if (!rows.length || !this.candles.length) return;
+    let minP = Infinity, maxP = -Infinity;
+    this.candles.forEach(c => {
+      minP = Math.min(minP, Number(c.low), Number(c.high));
+      maxP = Math.max(maxP, Number(c.low), Number(c.high));
+    });
+    if (!(maxP > minP)) return;
+    const BINS = 34;
+    const bins = [];
+    for (let i = 0; i < BINS; i++) bins.push({ long: 0, short: 0, total: 0 });
+    const step = (maxP - minP) / BINS;
+    rows.forEach(r => {
+      const price = r.total > 0 ? r.pxSum / r.total : Number(r.bar && r.bar.close);
+      if (!isFinite(price)) return;
+      let idx = Math.floor((price - minP) / step);
+      if (idx < 0 || idx >= BINS) return;
+      bins[idx].long += r.longUsd;
+      bins[idx].short += r.shortUsd;
+      bins[idx].total += r.total;
+    });
+    let maxTotal = 0;
+    bins.forEach(b => { if (b.total > maxTotal) maxTotal = b.total; });
+    if (!(maxTotal > 0)) return;
+    const maxBar = Math.max(W * 0.34, 60);
+    ctx.save();
+    bins.forEach((b, i) => {
+      if (!b.total) return;
+      const price = maxP - (i + 0.5) * step;
+      let y = null;
+      try { y = this.candleSeries.priceToCoordinate(price); } catch {}
+      if (y == null || y < -20 || y > H + 20) return;
+      const rowW = Math.max((b.total / maxTotal) * maxBar, 4);
+      const longW = b.total > 0 ? rowW * (b.long / b.total) : 0;
+      const shortW = rowW - longW;
+      const barH = 6;
+      const top = y - barH / 2;
+      ctx.globalAlpha = 0.42;
+      if (longW > 0) { ctx.fillStyle = 'rgba(255,45,149,0.92)'; ctx.fillRect(2, top, longW, barH); }
+      if (shortW > 0) { ctx.fillStyle = 'rgba(0,214,255,0.92)'; ctx.fillRect(2 + longW, top, shortW, barH); }
+    });
+    ctx.restore();
+  }
+
+  _bookWalls() {
+    const byId = new Map();
+    (this.bookHist || []).forEach(w => { if (w && w.id != null) byId.set(w.id, w); });
+    ((this.bookData && this.bookData.walls) || []).forEach(w => {
+      if (w && w.id != null) byId.set(w.id, w);
+    });
+    return Array.from(byId.values()).filter(w => Math.max(Number(w.usdt) || 0, Number(w.peak) || 0) > 0);
+  }
+
+  _drawBook(ctx, W, H) {
+    const walls = this._bookWalls();
+    if (!walls.length) return;
+    const tfSec = Number(this.timeframe) * 60 || 300;
+    const ts = this.chart.timeScale();
+    const bw = Math.max(3, Math.min(96, Math.round(this._slotPx(W) * 0.86)));
+    ctx.save();
+    walls.forEach(w => {
+      const t0 = Math.floor(Number(w.opened) / tfSec) * tfSec;
+      if (!isFinite(t0)) return;
+      let x = null, y1 = null, y2 = null;
+      try {
+        x = ts.timeToCoordinate(t0);
+        y1 = this.candleSeries.priceToCoordinate(Number(w.hi));
+        y2 = this.candleSeries.priceToCoordinate(Number(w.lo));
+      } catch { return; }
+      if (x == null || y1 == null || y2 == null || !isFinite(x)) return;
+      if (x < -bw || x > W + bw) return;
+      let top = Math.min(y1, y2), bot = Math.max(y1, y2);
+      if (bot - top < 6) { const cy = (top + bot) / 2; top = cy - 3; bot = cy + 3; }
+      if (bot < -20 || top > H + 20) return;
+      const bid = w.side === 'bid';
+      ctx.globalAlpha = w.live ? 0.45 : 0.16;
+      ctx.fillStyle = bid ? '#67e8f9' : '#a78bfa';
+      ctx.fillRect(Math.round(x - bw / 2), Math.round(top), bw, Math.max(6, Math.round(bot - top)));
+      ctx.globalAlpha = w.live ? 0.85 : 0.35;
+      ctx.strokeStyle = bid ? '#22d3ee' : '#8b5cf6';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(Math.round(x - bw / 2) + 0.5, Math.round(top) + 0.5, Math.max(1, bw - 1), Math.max(5, Math.round(bot - top) - 1));
+    });
+    ctx.restore();
+  }
+
+  _drawOi(ctx, W, H) {
+    const candles = this.candles || [];
+    const absVals = [];
+    candles.forEach(c => {
+      const d = Math.abs(Number(c.oiChg));
+      if (isFinite(d) && d > 0) absVals.push(d);
+    });
+    if (!absVals.length) return;
+    absVals.sort((a, b) => a - b);
+    const p90 = absVals[Math.floor(0.9 * (absVals.length - 1))] || absVals[absVals.length - 1];
+    if (!(p90 > 0)) return;
+    const thr = Math.max(1000, p90 * 0.05);
+    const cand = [];
+    candles.forEach(c => {
+      const d = Number(c.oiChg);
+      if (isFinite(d) && Math.abs(d) >= thr) cand.push({ c, d });
+    });
+    cand.sort((a, b) => Math.abs(b.d) - Math.abs(a.d));
+    const ts = this.chart.timeScale();
+    let drawn = 0;
+    ctx.save();
+    for (let i = 0; i < cand.length && drawn < 60; i++) {
+      const item = cand[i];
+      const up = item.d > 0;
+      const ref = up ? Number(item.c.high) : Number(item.c.low);
+      if (!isFinite(ref)) continue;
+      let x = null, y = null;
+      try {
+        x = ts.timeToCoordinate(item.c.time);
+        y = this.candleSeries.priceToCoordinate(ref);
+      } catch { continue; }
+      if (x == null || y == null) continue;
+      const r = 7 + 8 * Math.min(Math.abs(item.d) / p90, 1.2);
+      const cy = up ? y - r - 2 : y + r + 2;
+      if (x < -r || x > W + r || cy < -r || cy > H + r) continue;
+      ctx.beginPath();
+      ctx.fillStyle = up ? 'rgba(34,197,94,0.95)' : 'rgba(255,42,95,0.95)';
+      ctx.arc(x, cy, r, 0, Math.PI * 2);
+      ctx.fill();
+      drawn++;
+    }
+    ctx.restore();
+  }
+
+  _drawCvd(ctx, W, H) {
+    const candles = this.candles || [];
+    if (!candles.length) return;
+    const absVals = [];
+    candles.forEach(c => {
+      const d = Math.abs(Number(c.cvd));
+      if (isFinite(d) && d > 0) absVals.push(d);
+    });
+    if (!absVals.length) return;
+    absVals.sort((a, b) => a - b);
+    const p90 = absVals[Math.floor(0.9 * (absVals.length - 1))] || absVals[absVals.length - 1];
+    if (!(p90 > 0)) return;
+    const thr = Math.max(1000, p90 * 0.05);
+    const cand = [];
+    candles.forEach((c, i) => {
+      const d = Number(c.cvd);
+      if (isFinite(d) && Math.abs(d) >= thr) cand.push({ c, d, live: i === candles.length - 1 });
+    });
+    cand.sort((a, b) => Math.abs(b.d) - Math.abs(a.d));
+    const ts = this.chart.timeScale();
+    const placed = [];
+    let drawn = 0;
+    ctx.save();
+    for (let i = 0; i < cand.length && drawn < 40; i++) {
+      const item = cand[i];
+      const mid = (Number(item.c.open) + Number(item.c.close)) / 2;
+      let x = null, y = null;
+      try {
+        x = ts.timeToCoordinate(item.c.time);
+        y = this.candleSeries.priceToCoordinate(mid);
+      } catch { continue; }
+      if (x == null || y == null || !isFinite(x) || !isFinite(y)) continue;
+      const kk = Math.min(Math.sqrt(Math.abs(item.d) / p90), 1.2);
+      const halfW = 9 + 12 * kk;
+      const h = halfW * 1.5;
+      if (x < -halfW - 8 || x > W + halfW + 8 || y < -h || y > H + h) continue;
+      let clash = false;
+      for (let j = 0; j < placed.length; j++) {
+        const q = placed[j];
+        const dx = x - q.x, dy = y - q.y;
+        if (dx * dx + dy * dy <= (halfW + q.r) * (halfW + q.r)) { clash = true; break; }
+      }
+      if (clash) continue;
+      placed.push({ x, y, r: halfW });
+      const buy = item.d > 0;
+      const apexY = buy ? y - h / 2 : y + h / 2;
+      ctx.beginPath();
+      if (buy) {
+        ctx.moveTo(x, apexY);
+        ctx.lineTo(x + halfW, apexY + h);
+        ctx.lineTo(x - halfW, apexY + h);
+      } else {
+        ctx.moveTo(x, apexY);
+        ctx.lineTo(x + halfW, apexY - h);
+        ctx.lineTo(x - halfW, apexY - h);
+      }
+      ctx.closePath();
+      ctx.fillStyle = buy ? 'rgba(139,92,246,0.96)' : 'rgba(255,145,0,0.96)';
+      ctx.fill();
+      drawn++;
+    }
+    ctx.restore();
+  }
+
+  _drawLiqPlates(ctx, W, H) {
+    const rows = this._liqRows();
+    if (!rows.length) return;
+    const ts = this.chart.timeScale();
+    const bw = Math.max(3, Math.min(36, Math.round(this._slotPx(W) * 0.86)));
+    const drawn = [];
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    rows.sort((a, b) => a.total - b.total);
+    rows.forEach(c => {
+      const price = c.total > 0 ? c.pxSum / c.total : Number(c.bar && c.bar.close);
+      let x = null, y = null;
+      try {
+        x = ts.timeToCoordinate(c.time);
+        y = this.candleSeries.priceToCoordinate(price);
+      } catch { return; }
+      if (x == null || y == null || !isFinite(x) || !isFinite(y)) return;
+      if (x < -40 || x > W + 40 || y < -20 || y > H + 20) return;
+      const whale = c.total >= 100000;
+      const isLong = c.longUsd >= c.shortUsd;
+      const fill = whale ? 'rgba(255,209,102,0.95)' : (isLong ? 'rgba(255,45,149,0.92)' : 'rgba(0,214,255,0.92)');
+      const h = whale ? 16 : 12;
+      const bx = Math.round(x - bw / 2);
+      const by = Math.round(y - h / 2);
+      for (let j = 0; j < drawn.length; j++) {
+        const d = drawn[j];
+        if (bx < d.x + d.w && bx + bw > d.x && by < d.y + d.h && by + h > d.y) return;
+      }
+      drawn.push({ x: bx, y: by, w: bw, h });
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = 'rgba(5,8,14,0.85)';
+      ctx.fillRect(bx - 1, by - 1, bw + 2, h + 2);
+      ctx.fillStyle = fill;
+      ctx.fillRect(bx, by, bw, h);
+      if (bw >= 26 && c.total >= 2000) {
+        ctx.fillStyle = '#041018';
+        ctx.font = "bold 8px 'JetBrains Mono', monospace";
+        ctx.fillText(this._fmtCompact(c.total), x, y + 0.5);
+      }
+    });
+    ctx.restore();
+  }
+
+  _drawLevels(ctx, W, H) {
+    if (!this.layers.levelsEnabled || !this.levelsData) return;
     // Also clear old price lines
     try {
       if (this._priceLines) {
@@ -790,7 +1276,7 @@ class ChartPanel {
   }
 
   _checkDashedTriggers(price) {
-    if ((!this.layers.levelsEnabled && !this.layers.liqEnabled) || !this.layers.levelsAlertEnabled) return;
+    if (!this.layers.levelsEnabled || !this.layers.levelsAlertEnabled) return;
     const data = this.levelsData;
     if (!data) return;
     const magnets = data.magnets_list || [];
@@ -856,24 +1342,24 @@ class ChartPanel {
     if (this.symbolSelect) this.symbolSelect.value = v;
     this.candles = [];
     this.levelsData = null;
+    this.levelsAt = 0;
+    this.liqHist = {};
+    this.liqHistAt = 0;
+    this._liqHistKey = '';
+    this._liqPending = null;
+    this._liveLiqs = [];
+    this._flowReload = false;
+    this._bookHistSym = '';
+    this.bookData = null;
+    this.bookHist = [];
     this._levelHighlights = {};
-    try {
-      if (this._priceLines) {
-        this._priceLines.forEach(pl => {
-          try { this.candleSeries.removePriceLine(pl); } catch {}
-        });
-        this._priceLines = [];
-      }
-    } catch {}
+    this._clearPriceLines();
     if (v!=='ALL') {
       this.loadCandles();
-      if (this.layers.levelsEnabled) this.loadLevels();
+      this._syncLayerFeeds();
     } else {
       if (this.priceEl) this.priceEl.textContent = 'ALL';
-      if (this.clusterCanvas) {
-        const ctx = this.clusterCanvas.getContext('2d');
-        if (ctx) ctx.clearRect(0,0,this.clusterCanvas.width,this.clusterCanvas.height);
-      }
+      this._syncLayerFeeds();
     }
     this._emit('symbolChanged', { symbol: v, prev });
     this._emit('stateChanged', this.serialize());
@@ -888,7 +1374,15 @@ class ChartPanel {
     this.timeframe = v;
     if (this.tfSelect) this.tfSelect.value = String(v);
     this.candles = [];
-    if (this.symbol!=='ALL') this.loadCandles();
+    this.liqHist = {};
+    this.liqHistAt = 0;
+    this._liqHistKey = '';
+    this._liqPending = null;
+    this._flowReload = false;
+    if (this.symbol!=='ALL') {
+      this.loadCandles();
+      this._syncLayerFeeds();
+    }
     this._emit('timeframeChanged', { timeframe: v });
     this._emit('stateChanged', this.serialize());
     return true;
@@ -904,23 +1398,17 @@ class ChartPanel {
     }
     if (changed) {
       this._paintLayers();
-      if ((patch.levelsEnabled || patch.liqEnabled) && !this.levelsData) this.loadLevels();
-      if (!this.layers.levelsEnabled && !this.layers.liqEnabled) {
-        if (this.clusterCanvas) {
-          const ctx = this.clusterCanvas.getContext('2d');
-          if (ctx) ctx.clearRect(0,0,this.clusterCanvas.width,this.clusterCanvas.height);
-        }
-        try {
-          if (this._priceLines) {
-            this._priceLines.forEach(pl => {
-              try { this.candleSeries.removePriceLine(pl); } catch {}
-            });
-            this._priceLines = [];
-          }
-        } catch {}
-      } else {
-        this._drawOverlays();
+      if (!this.layers.levelsEnabled) {
+        this.levelsData = null;
+        this.levelsAt = 0;
+        this._clearPriceLines();
       }
+      if (!this.layers.liqEnabled && !this.layers.profileEnabled) {
+        this.liqHist = {};
+        this.liqHistAt = 0;
+        this._liqHistKey = '';
+      }
+      this._syncLayerFeeds();
       this._emit('layersChanged', { layers: Object.assign({}, this.layers) });
       this._emit('stateChanged', this.serialize());
     }
@@ -969,16 +1457,13 @@ class ChartPanel {
     if (symbol!==this.symbol) return;
     if (Number(tf)!==Number(this.timeframe)) return;
     if (!candle) return;
-    let t = Number(candle.time || candle.t || 0);
-    if (t>1e12) t = Math.floor(t/1000);
-    const bar = {
-      time: t,
-      open: Number(candle.open || candle.o),
-      high: Number(candle.high || candle.h),
-      low: Number(candle.low || candle.l),
-      close: Number(candle.close || candle.c),
-    };
-    if (!bar.time || !isFinite(bar.open)) return;
+    const prevIdx = this.candles.findIndex(c => {
+      const raw = Number(candle.time || candle.t || 0);
+      const t = raw > 1e12 ? Math.floor(raw / 1000) : raw;
+      return c.time === t;
+    });
+    const bar = this._normalizeBar(candle, prevIdx >= 0 ? this.candles[prevIdx] : null);
+    if (!bar || !bar.time || !isFinite(bar.open)) return;
     const idx = this.candles.findIndex(c => c.time===bar.time);
     if (idx>=0) {
       this.candles[idx]=bar;
@@ -989,12 +1474,24 @@ class ChartPanel {
       try { this.candleSeries.setData(this.candles); } catch {}
     }
     this._updatePriceDisplay(bar.close);
+    if (this.layers.cvdEnabled || this.layers.oiEnabled || this.layers.liqEnabled || this.layers.profileEnabled) {
+      this._drawOverlays();
+    }
+  }
+
+  onLiquidation(item) {
+    if (!item || this.symbol === 'ALL' || item.symbol !== this.symbol) return;
+    if (!this._liveLiqs) this._liveLiqs = [];
+    this._liveLiqs.push(item);
+    if (this._liveLiqs.length > 500) this._liveLiqs.splice(0, this._liveLiqs.length - 500);
+    if (this.layers.liqEnabled || this.layers.profileEnabled) this._drawOverlays();
   }
 
   unmount() {
     this._destroyed = true;
     if (this._ro) { try { this._ro.disconnect(); } catch {} }
     if (this._levelsTimer) { try { clearInterval(this._levelsTimer); } catch {} }
+    this._stopBookPoll();
     window.removeEventListener('resize', this._boundResize);
     if (this.chart) {
       try { this.chart.remove(); } catch {}

@@ -2,8 +2,8 @@ require("./_dom_env");
 /** Раскладка легенды: ячейки кнопка/подпись+цифра, попап кнопок слоёв.
  *
  *  Структура: в плашке у всех слоёв подпись+цифра в .layer-cell,
- *  а все 4 кнопки выезжают сверху горизонтальной панелью по кнопке
- *  «☰ Слои» (закрытие: повторный клик, клик мимо, Esc). Расшифровка цветов
+ *  а все 4 кнопки выезжают списком под кнопкой ☰ (закрытие: повторный клик,
+ *  клик мимо, Esc). Расшифровка цветов
  *  («Ликв. лонгов», «Кит ($100k+)», «CVD ▼») живёт в этой же плашке —
  *  столбиком над кнопками, а не строкой в шапке графика.
  *  Кнопки: nowrap, inline-flex, line-height 1.3
@@ -212,9 +212,9 @@ async function main() {
     narrowPop = css.slice(i, i + 200);
     break;
   }
-  check("narrow screen: full-width pop",
-    narrowPop.indexOf("right: 8px") !== -1 && narrowPop.indexOf("width: auto") !== -1
-    && narrowPop.indexOf("max-width: none") !== -1, narrowPop.slice(0, 140));
+  check("narrow screen: list pop under the button",
+    narrowPop.indexOf("right: 8px") !== -1 && narrowPop.indexOf("width: max-content") !== -1
+    && narrowPop.indexOf("flex-direction: column") !== -1, narrowPop.slice(0, 180));
   click(layerCall);
   check("pop closes on reclick", !win.LiqScopeLayers.isOpen());
   click(layerCall);

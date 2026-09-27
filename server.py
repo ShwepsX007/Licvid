@@ -130,7 +130,42 @@ TICK_SOURCES = [x.strip().lower() for x in
                 if x.strip()]
 DEMO_MODE = os.getenv("LIQSCOPE_DEMO", "0").strip() in ("1", "true", "yes", "on")
 DEMO_PUMP_VOL: Dict[str, float] = {}   # демо-оборот 24ч по монетам для сторожа
+
+# Доверенные прокси для X-Forwarded-For. По умолчанию — только локальный nginx.
+# Если запрос пришёл не от доверенного прокси, заголовки XFF игнорируются,
+# чтобы rate limit нельзя было обойти подменой первого IP.
+_TRUSTED_PROXIES_RAW = os.getenv("LIQSCOPE_TRUSTED_PROXIES", "127.0.0.1,::1").strip()
+_TRUSTED_PROXY_SET = {x.strip() for x in _TRUSTED_PROXIES_RAW.replace(";", ",").split(",") if x.strip()}
+_TRUSTED_PROXY_NETS = []
+try:
+    import ipaddress
+    for item in list(_TRUSTED_PROXY_SET):
+        if "/" in item:
+            try:
+                _TRUSTED_PROXY_NETS.append(ipaddress.ip_network(item, strict=False))
+                _TRUSTED_PROXY_SET.discard(item)
+            except ValueError:
+                pass
+except Exception:
+    _TRUSTED_PROXY_NETS = []
+
+
+def _is_trusted_proxy(ip: str) -> bool:
+    ip = (ip or "").strip()
+    if not ip:
+        return False
+    if ip in _TRUSTED_PROXY_SET:
+        return True
+    if not _TRUSTED_PROXY_NETS:
+        return False
+    try:
+        import ipaddress
+        addr = ipaddress.ip_address(ip)
+        return any(addr in net for net in _TRUSTED_PROXY_NETS)
+    except Exception:
+        return False
 HISTORY_MAX = int(os.getenv("LIQSCOPE_HISTORY_MAX", "60000"))
+PERF_LOG = os.getenv("LIQSCOPE_PERF_LOG", "").strip().lower() in ("1", "true", "yes")
 # Дисковое сохранение истории ликвидаций (переживает рестарт сервера).
 # Путь — каталог дневных файлов ("" / "0" / "off" — не хранить вовсе),
 # TTL — сколько часов держать историю.
@@ -178,6 +213,9 @@ def _resolve_secret() -> str:
     LIQSCOPE_REQUIRE_SECRET=1 (стоит в deploy/licvid.service) — без переменной
     процесс не стартует. В разработке и тестах секрет генерируется один раз
     и лежит в data/secret, чтобы хеши IP не прыгали между рестартами.
+
+    В PROD отсутствие секрета или дефолтный — fail-fast. В DEMO
+    (LIQSCOPE_DEMO=1) можно работать с сгенерированным, но с предупреждением.
     """
     env = os.getenv("LIQSCOPE_SECRET", "").strip()
     require = os.getenv("LIQSCOPE_REQUIRE_SECRET", "").strip().lower() in (
@@ -187,20 +225,37 @@ def _resolve_secret() -> str:
     if env:
         log.warning("LIQSCOPE_SECRET — опубликованный дефолт или короче 16 "
                     "знаков, игнорируем")
-    if require:
-        log.error("LIQSCOPE_SECRET обязателен (LIQSCOPE_REQUIRE_SECRET=1), "
-                  "но не задан. Сгенерируйте: openssl rand -hex 32")
-        raise SystemExit(2)
+    if require and not env:
+        if DEMO_MODE:
+            log.warning("LIQSCOPE_SECRET обязателен (LIQSCOPE_REQUIRE_SECRET=1), "
+                        "но не задан — DEMO режим, использую авто-секрет. "
+                        "На проде это должно падать.")
+        else:
+            log.error("LIQSCOPE_SECRET обязателен (LIQSCOPE_REQUIRE_SECRET=1) "
+                      "и не задан. Сгенерируйте: openssl rand -hex 32 и "
+                      "задайте в systemd drop-in.")
+            raise SystemExit(2)
     path = os.getenv("LIQSCOPE_SECRET_FILE",
                      os.path.join(HERE, "data", "secret")).strip()
     try:
         if path and os.path.isfile(path):
             saved = open(path, encoding="utf-8").read().strip()
             if saved and saved not in _KNOWN_BAD_SECRETS and len(saved) >= 24:
-                log.warning("LIQSCOPE_SECRET не задан — берём сохранённый %s", path)
+                if require:
+                    log.warning("LIQSCOPE_SECRET не задан, но есть %s — "
+                                "использую его, хотя в проде нужен env", path)
+                else:
+                    log.warning("LIQSCOPE_SECRET не задан — берём сохранённый %s", path)
                 return saved
+            if saved:
+                log.warning("Сохранённый секрет в %s — дефолт или короткий, игнорируем", path)
     except OSError:
         pass
+    if not DEMO_MODE:
+        log.error("LIQSCOPE_SECRET обязателен в PROD (отсутствует или дефолт). "
+                  "Сгенерируйте: openssl rand -hex 32 и задайте в systemd. "
+                  "В DEMO (LIQSCOPE_DEMO=1) можно работать с авто-секретом.")
+        raise SystemExit(2)
     generated = secrets.token_urlsafe(32)
     if path:
         try:
@@ -238,27 +293,36 @@ REQUIRE_EMAIL_VERIFICATION = os.getenv(
 ACCOUNTS_DB = os.getenv("LIQSCOPE_ACCOUNTS_DB",
                         os.path.join(HERE, "data", "accounts.db"))
 # Дневной дайджест: архив выпусков и время вечерней публикации (МСК).
-# LIQSCOPE_DIGEST_FILE="" — не хранить историю (страница будет пустой).
-DIGEST_FILE = os.getenv("LIQSCOPE_DIGEST_FILE",
-                        os.path.join(HERE, "data", "digests.json")).strip()
-if DIGEST_FILE.lower() in ("0", "none", "off", "false"):
+# LIQSCOPE_DIGEST_FILE="0" — не хранить историю (страница будет пустой). Пустая строка → default.
+_raw_digest = os.getenv("LIQSCOPE_DIGEST_FILE", "").strip()
+if not _raw_digest:
+    DIGEST_FILE = os.path.join(HERE, "data", "digests.json")
+elif _raw_digest.lower() in ("0", "none", "off", "false"):
     DIGEST_FILE = ""
+else:
+    DIGEST_FILE = _raw_digest
 # Сводки по часам — раздел сайта: архив постов канала (то же, что ушло в
-# Telegram, плюс фото). LIQSCOPE_HOURLY_FILE="" — не хранить (раздел пустой).
-HOURLY_FILE = os.getenv("LIQSCOPE_HOURLY_FILE",
-                        os.path.join(HERE, "data", "channel_posts.json")).strip()
-if HOURLY_FILE.lower() in ("0", "none", "off", "false"):
+# Telegram, плюс фото). LIQSCOPE_HOURLY_FILE="0" — не хранить (раздел пустой). Пустая строка → default.
+_raw_hourly = os.getenv("LIQSCOPE_HOURLY_FILE", "").strip()
+if not _raw_hourly:
+    HOURLY_FILE = os.path.join(HERE, "data", "channel_posts.json")
+elif _raw_hourly.lower() in ("0", "none", "off", "false"):
     HOURLY_FILE = ""
+else:
+    HOURLY_FILE = _raw_hourly
 try:
     HOURLY_KEEP = max(50, int(os.getenv("LIQSCOPE_HOURLY_KEEP", "1200") or 1200))
 except ValueError:
     HOURLY_KEEP = 1200
 # 📰 Статьи: материалы, которые админ пишет сам (заголовок, текст, обложка).
-# LIQSCOPE_ARTICLES_FILE="" — не хранить архив (раздел будет пустым).
-ARTICLES_FILE = os.getenv("LIQSCOPE_ARTICLES_FILE",
-                          os.path.join(HERE, "data", "articles.json")).strip()
-if ARTICLES_FILE.lower() in ("0", "none", "off", "false"):
+# LIQSCOPE_ARTICLES_FILE="0" — не хранить архив (раздел будет пустым). Пустая строка → default.
+_raw_articles = os.getenv("LIQSCOPE_ARTICLES_FILE", "").strip()
+if not _raw_articles:
+    ARTICLES_FILE = os.path.join(HERE, "data", "articles.json")
+elif _raw_articles.lower() in ("0", "none", "off", "false"):
     ARTICLES_FILE = ""
+else:
+    ARTICLES_FILE = _raw_articles
 ARTICLES_DIR = os.getenv("LIQSCOPE_ARTICLES_DIR",
                          os.path.join(HERE, "data", "articles")).strip()
 try:
@@ -305,6 +369,11 @@ STATS_INTERVAL = float(os.getenv("LIQSCOPE_STATS_INTERVAL_MS", "2000")) / 1000.0
 #  Состояние
 # =============================================================================
 LIQUIDATIONS: Deque[dict] = deque(maxlen=HISTORY_MAX)
+# Кэш для WS init: символы и статистика считаются раз в 1-2 сек, а не на каждый коннект
+_SYMBOLS_CACHE: Dict[str, Any] = {"at": 0.0, "data": None}
+_STATS_CACHE: Dict[str, Any] = {}
+_STATS_CACHE_TTL = 5.0  # секунды
+_SYMBOLS_CACHE_TTL = 5.0
 # Месячная история: сырые события по дням + часовые свёртки (ликвидации,
 # CVD, объём). В памяти — только свежий хвост, всё остальное на диске.
 HIST = HistoryStore(HISTORY_FILE, ttl_hours=HISTORY_TTL_HOURS,
@@ -2072,14 +2141,20 @@ def month_cells(now: Optional[float] = None) -> list:
     now = float(now if now is not None else time.time())
     cached = _ARCHIVE_CELLS.get("cells")
     if cached is not None and now - float(_ARCHIVE_CELLS.get("at") or 0) < 90:
+        if PERF_LOG:
+            log.info("[perf] month_cells cache hit age=%.1fs len=%d", now - float(_ARCHIVE_CELLS.get("at") or 0), len(cached))
         return cached
     if not HISTORY_FILE:
         return []
+    t0 = time.monotonic() if PERF_LOG else 0.0
     try:
         cells = HIST.hours_range(now - HISTORY_TTL_HOURS * 3600, now, now)
     except Exception as e:                           # noqa: BLE001
         log.debug("архив часов: %s", e)
         return []
+    if PERF_LOG:
+        dt = (time.monotonic() - t0) * 1000 if t0 else 0
+        log.info("[perf] month_cells miss read %d cells in %.1fms", len(cells), dt)
     _ARCHIVE_CELLS["at"] = now
     _ARCHIVE_CELLS["cells"] = cells
     return cells
@@ -2091,34 +2166,82 @@ def restore_boards_from_archive() -> int:
 
 
 def compute_stats(symbol: Optional[str] = None, exchange: Optional[str] = None) -> dict:
+    _perf_t0 = time.monotonic() if PERF_LOG else 0.0
     now = time.time()
-    items = list(LIQUIDATIONS)
-    if symbol and symbol != "ALL":
-        items = [x for x in items if x["symbol"] == symbol]
-    if exchange and exchange != "ALL":
-        items = [x for x in items if x["exchange"] == exchange]
+    cache_key = f"{symbol or 'ALL'}|{exchange or 'ALL'}"
+    cached = _STATS_CACHE.get(cache_key)
+    if cached and now - cached.get("_at", 0) < _STATS_CACHE_TTL:
+        return cached["data"]
 
-    def split(rows):
-        longs = sum(x["usd"] for x in rows if x["side"] == "SELL")
-        shorts = sum(x["usd"] for x in rows if x["side"] == "BUY")
-        return longs, shorts
+    # Оптимизация: один проход по LIQUIDATIONS вместо 5-7 копий и фильтров
+    # Раньше делалось list(LIQUIDATIONS) + фильтрация по symbol/exchange + ещё
+    # отдельный pool = list(LIQUIDATIONS) — всё это 60k*2 копий и сканов.
+    # Теперь — один проход, считаем всё сразу.
+    cutoff_24h = now - 86400
+    # Для окон STAT_WINDOWS заранее считаем cutoff'ы
+    window_cutoffs = [(suffix, now - sec) for suffix, sec in STAT_WINDOWS]
+    # wins accumulators: suffix -> {longs, shorts}
+    win_acc = {suffix: {"longs": 0.0, "shorts": 0.0} for suffix, _ in STAT_WINDOWS}
 
-    d24 = [x for x in items if now - x["timestamp"] <= 86400]
+    items = []  # только если нужен фильтр по symbol/exchange для total_count/biggest
+    # Для лидеров — всегда по всем монетам, но с фильтром биржи
+    pool24 = []
+    # Для d24 и biggest
+    d24 = []
+
+    # Флаги фильтров
+    need_symbol_filter = bool(symbol and symbol != "ALL")
+    need_exch_filter = bool(exchange and exchange != "ALL")
+    sym_filter = symbol if need_symbol_filter else None
+    exch_filter = exchange if need_exch_filter else None
+
+    # Один проход по кольцу
+    for ev in LIQUIDATIONS:
+        # Фильтр для items (учитывает symbol и exchange)
+        if need_symbol_filter and ev["symbol"] != sym_filter:
+            # для pool24 символ не фильтруем, только биржу — проверяем отдельно ниже
+            pass
+        else:
+            if need_exch_filter and ev["exchange"] != exch_filter:
+                pass
+            else:
+                items.append(ev)
+                # d24 — часть items в последние 24ч
+                if ev["timestamp"] >= cutoff_24h:
+                    d24.append(ev)
+
+        # pool24 — всегда по всем монетам, но с фильтром биржи (для лидеров)
+        if need_exch_filter and ev["exchange"] != exch_filter:
+            pass
+        else:
+            if ev["timestamp"] >= cutoff_24h:
+                pool24.append(ev)
+
+        # Для окон — только если событие в items (с учётом фильтров)
+        # Проверяем, входит ли в items по тем же фильтрам
+        if need_symbol_filter and ev["symbol"] != sym_filter:
+            continue
+        if need_exch_filter and ev["exchange"] != exch_filter:
+            continue
+        # Теперь ev точно в items, проверяем окна
+        ts = ev["timestamp"]
+        is_long = ev["side"] == "SELL"
+        usd = ev["usd"]
+        for suffix, cutoff in window_cutoffs:
+            if ts >= cutoff:
+                if is_long:
+                    win_acc[suffix]["longs"] += usd
+                else:
+                    win_acc[suffix]["shorts"] += usd
+
     wins = {}
-    for suffix, sec in STAT_WINDOWS:
-        rows = d24 if sec == 86400 else [x for x in items if now - x["timestamp"] <= sec]
-        longs, shorts = split(rows)
+    for suffix, _ in STAT_WINDOWS:
+        longs = win_acc[suffix]["longs"]
+        shorts = win_acc[suffix]["shorts"]
         wins[f"total_usd_{suffix}"] = longs + shorts
         wins[f"longs_usd_{suffix}"] = longs
         wins[f"shorts_usd_{suffix}"] = shorts
 
-    # Лидеры — всегда по ВСЕМ монетам (фильтр монеты их не схлопывает):
-    # иначе при выборе монеты в блоке оставалась бы только она одна.
-    # Фильтр биржи уважаем: лидеры внутри выбранной биржи осмысленны.
-    pool = list(LIQUIDATIONS)
-    if exchange and exchange != "ALL":
-        pool = [x for x in pool if x["exchange"] == exchange]
-    pool24 = [x for x in pool if now - x["timestamp"] <= 86400]
     coin_totals: Dict[str, dict] = {}
     for x in pool24:
         c = coin_totals.setdefault(x["symbol"], {"symbol": x["symbol"], "usd": 0.0,
@@ -2139,7 +2262,10 @@ def compute_stats(symbol: Optional[str] = None, exchange: Optional[str] = None) 
 
     # Сутки из часовых свёрток, если буфер событий их не покрывает (рестарт,
     # кольцо на 60 тысяч). Короткие окна остаются по событиям: у них точные секунды.
-    if not exchange or exchange == "ALL":
+    # Оптимизация: архив читаем только если в памяти мало данных (после рестарта),
+    # иначе это лишние 5-100ms на каждый WS connect и stats_broadcaster.
+    _need_archive = (len(items) < 5000 or len(d24) < 50 or len(pool24) < 20)
+    if _need_archive and (not exchange or exchange == "ALL"):
         try:
             from archive_restore import leaders_from_cells
             from history import aggregate_hours
@@ -2179,6 +2305,17 @@ def compute_stats(symbol: Optional[str] = None, exchange: Optional[str] = None) 
         "biggest_24h": biggest,
         "demo": DEMO_MODE,
     })
+    # Сохраняем в кэш
+    _STATS_CACHE[cache_key] = {"_at": now, "data": out}
+    # Чистим старые ключи, чтобы не разрасталось
+    if len(_STATS_CACHE) > 32:
+        oldest = sorted(_STATS_CACHE.items(), key=lambda kv: kv[1].get("_at", 0))[:8]
+        for k, _ in oldest:
+            _STATS_CACHE.pop(k, None)
+    if PERF_LOG:
+        _perf_dt = (time.monotonic() - _perf_t0) * 1000 if _perf_t0 else 0
+        log.info("[perf] compute_stats symbol=%s exchange=%s items=%d d24=%d pool24=%d total=%.1fms",
+                 symbol, exchange, len(items), len(d24), len(pool24), _perf_dt)
     return out
 
 
@@ -3032,8 +3169,8 @@ def _want_hsts(scope) -> bool:
 _SECURITY_HEADERS = (
     (b"x-content-type-options", b"nosniff"),
     (b"referrer-policy", b"strict-origin-when-cross-origin"),
-    (b"x-frame-options", b"SAMEORIGIN"),
-    (b"content-security-policy", b"frame-ancestors 'self'"),
+    (b"x-frame-options", b"DENY"),
+    (b"content-security-policy", b"frame-ancestors 'none'"),
     (b"permissions-policy", b"camera=(), microphone=(), geolocation=()"),
 )
 
@@ -3322,8 +3459,51 @@ async def collect_hourly_post() -> dict:
         "n": n,
         "manual": True,
     }
+    # materialize photo for web — копия в data/hourly_photos, чтобы не потерялась при удалении исходника
+    photo_info = {}
     if img and os.path.isfile(img):
-        rec["photo"] = cover_info(img, account_store)
+        try:
+            from hourly_posts import materialize_hourly_photo
+            # id уже известен
+            pid = hourly_id(now)
+            mat = materialize_hourly_photo(img, pid)
+            # если копия удалась — используем её, иначе оригинал
+            use_path = mat or img
+            photo_info = cover_info(use_path, account_store)
+            # сохраняем и оригинал для отладки, и материализованный путь
+            if mat:
+                photo_info["materialized"] = mat
+                photo_info["original"] = img
+        except Exception as e:
+            log.debug("hourly photo materialize: %s", e)
+            photo_info = cover_info(img, account_store)
+        rec["photo"] = photo_info
+    # каноническая запись для сайта — полный контент как в TG, плюс html/preview/symbols
+    try:
+        from hourly_posts import tg_html as _tg_html, plain_text as _plain
+        html_full = {}
+        preview = {}
+        for lang_key, txt in texts.items():
+            try:
+                html_full[lang_key] = _tg_html(txt)
+            except Exception:
+                html_full[lang_key] = txt
+            try:
+                preview[lang_key] = _plain(txt)[:400]
+            except Exception:
+                preview[lang_key] = txt[:400]
+        rec["html_full"] = html_full
+        rec["preview"] = preview
+        rec["content_full"] = dict(texts)  # полный текст
+        try:
+            top_coins = [c.get("symbol") for c in (snap.get("top_coins") or []) if c.get("symbol")]
+            rec["symbols"] = top_coins[:10]
+            rec["tags"] = ["liq", "cvd", "oi"]
+        except Exception:
+            pass
+        rec["title"] = f"Сводка {rec['id']}"
+    except Exception as e:
+        log.debug("hourly canonical enrich: %s", e)
     return hourly_ctx.store.add(rec)
 
 
@@ -3460,14 +3640,20 @@ register_content_comment_routes(app)
 
 @app.get("/api/symbols")
 async def api_symbols():
+    # Кэш на 1.5 сек: WS init не должен сканировать 60k событий на каждый коннект
+    now = time.time()
+    cached = _SYMBOLS_CACHE.get("data")
+    if cached and now - _SYMBOLS_CACHE.get("at", 0) < _SYMBOLS_CACHE_TTL:
+        return cached
     symbols = feed.symbols if feed else []
     prices = feed.prices if feed else {}
     meta = feed.symbol_meta if feed else {}
 
     liq24: Dict[str, float] = {}
-    now = time.time()
+    # Оптимизация: один проход по LIQUIDATIONS, только 24ч окно
+    cutoff = now - 86400
     for x in LIQUIDATIONS:
-        if now - x["timestamp"] <= 86400:
+        if x["timestamp"] >= cutoff:
             liq24[x["symbol"]] = liq24.get(x["symbol"], 0.0) + x["usd"]
 
     rows = []
@@ -3485,7 +3671,7 @@ async def api_symbols():
             "custom": s in custom,
             "exchanges": m.get("exchanges", []),
         })
-    return {
+    data = {
         "symbols": symbols,
         "details": rows,
         "prices": prices,
@@ -3497,6 +3683,9 @@ async def api_symbols():
         "demo": DEMO_MODE,
         "source": feed.symbols_source if feed else "none",
     }
+    _SYMBOLS_CACHE["at"] = now
+    _SYMBOLS_CACHE["data"] = data
+    return data
 
 
 def _enrich_symbol_rows(rows: List[dict]) -> List[dict]:
@@ -3526,10 +3715,20 @@ async def api_symbol_search(q: str = Query("", max_length=40),
 
 
 def _request_ip(request: Request) -> str:
-    xff = request.headers.get("x-forwarded-for") or ""
-    if xff:
-        return xff.split(",")[0].strip() or "0"
-    return request.client.host if request.client else "0"
+    client_host = request.client.host if request.client else ""
+    # Доверяем XFF только если запрос пришёл от доверенного прокси (обычно локальный nginx)
+    if client_host and _is_trusted_proxy(client_host):
+        xff = request.headers.get("x-forwarded-for") or ""
+        if xff:
+            # Берём первый IP из цепочки — это оригинальный клиент, но только если прокси доверенный
+            first = xff.split(",")[0].strip()
+            if first:
+                return first
+        # Также поддерживаем X-Real-IP от nginx
+        xri = request.headers.get("x-real-ip") or ""
+        if xri:
+            return xri.strip() or client_host
+    return client_host or "0"
 
 
 # Добавление монеты — единственный публичный мутирующий роут. 20 попыток
@@ -3934,7 +4133,9 @@ async def api_health():
 
 @app.websocket("/ws")
 async def ws_endpoint(websocket: WebSocket):
+    t_ws0 = time.monotonic() if PERF_LOG else 0.0
     await websocket.accept()
+    t_accept = time.monotonic() if PERF_LOG else 0.0
     client = Client(websocket)
     if not await hub.add(client):
         await websocket.close(code=1013)
@@ -3951,8 +4152,21 @@ async def ws_endpoint(websocket: WebSocket):
     except Exception as e:  # noqa: BLE001
         log.debug("ws user resolve: %s", e)
     try:
+        t_stage = time.monotonic() if PERF_LOG else 0.0
         sym_data = await api_symbols() if feed else {"details": [], "custom_symbols": []}
-        await client.send({
+        t_sym = time.monotonic() if PERF_LOG else 0.0
+        health = health_summary()
+        t_health = time.monotonic() if PERF_LOG else 0.0
+        # Лимит init: раньше 200, теперь 100 — достаточно для ленты, остальное догружается REST
+        # Защита от деградации: даже если LIQUIDATIONS 60k, init не разрастается
+        _recent_limit = max(20, min(200, int(__import__("os").getenv("LIQSCOPE_WS_INIT_LIQ", "100"))))
+        recent = list(LIQUIDATIONS)[-_recent_limit:]
+        t_recent = time.monotonic() if PERF_LOG else 0.0
+        stats = compute_stats()
+        t_stats = time.monotonic() if PERF_LOG else 0.0
+        flow = flow_snapshot()
+        t_flow = time.monotonic() if PERF_LOG else 0.0
+        init_payload = {
             "type": "init",
             "symbols": feed.symbols if feed else [],
             "details": sym_data["details"],
@@ -3961,14 +4175,31 @@ async def ws_endpoint(websocket: WebSocket):
             "custom_symbols": sym_data.get("custom_symbols", []),
             "timeframes": TF_MINUTES,
             "demo": DEMO_MODE,
-            "health": health_summary(),
-            "recent_liquidations": list(LIQUIDATIONS)[-200:],
-            "stats": compute_stats(),
+            "health": health,
+            "recent_liquidations": recent,
+            "stats": stats,
             # Лента «ВСЕ» в CVD/OI строится не по свечам графика, а по
             # минутным потокам всех монет — отдаём их сразу, чтобы не ждать
             # первой рассылки.
-            "flow": flow_snapshot(),
-        })
+            "flow": flow,
+        }
+        t_build = time.monotonic() if PERF_LOG else 0.0
+        await client.send(init_payload)
+        t_send = time.monotonic() if PERF_LOG else 0.0
+        if PERF_LOG:
+            import json as _json
+            size = len(_json.dumps(init_payload, ensure_ascii=False))
+            log.info("[perf] /ws accept=%.1fms symbols=%.1fms health=%.1fms recent=%.1fms stats=%.1fms flow=%.1fms build=%.1fms send=%.1fms total=%.1fms size=%d clients=%d",
+                     (t_accept - t_ws0)*1000 if t_ws0 else 0,
+                     (t_sym - t_stage)*1000 if t_stage else 0,
+                     (t_health - t_sym)*1000 if t_sym else 0,
+                     (t_recent - t_health)*1000 if t_health else 0,
+                     (t_stats - t_recent)*1000 if t_recent else 0,
+                     (t_flow - t_stats)*1000 if t_stats else 0,
+                     (t_build - t_flow)*1000 if t_flow else 0,
+                     (t_send - t_build)*1000 if t_build else 0,
+                     (t_send - t_ws0)*1000 if t_ws0 else 0,
+                     size, len(hub.clients))
         while True:
             raw = await websocket.receive_json()
             action = raw.get("action") or raw.get("type")
@@ -4043,11 +4274,20 @@ async def root(request: Request):
 @app.get("/terminal")
 async def terminal(request: Request):
     """Сам терминал (страница приложения)."""
+    t0 = time.monotonic() if PERF_LOG else 0.0
     lang, auto = seo_pages.lang_of(request)
-    return seo_pages.render(
+    t1 = time.monotonic() if PERF_LOG else 0.0
+    resp = seo_pages.render(
         "index.html", lang, "/terminal", extra_head=seo_pages.jsonld("terminal", lang),
         auto=auto,
     )
+    if PERF_LOG:
+        dt_total = (time.monotonic() - t0) * 1000
+        dt_lang = (t1 - t0) * 1000 if t0 else 0
+        dt_render = (time.monotonic() - t1) * 1000 if t1 else 0
+        log.info("[perf] /terminal lang=%s auto=%s lang_detect=%.1fms render=%.1fms total=%.1fms size=%d",
+                 lang, auto, dt_lang, dt_render, dt_total, len(resp.body) if hasattr(resp, 'body') else 0)
+    return resp
 
 
 @app.get("/robots.txt")

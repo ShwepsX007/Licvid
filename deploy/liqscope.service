@@ -1,7 +1,8 @@
-# УСТАРЕЛ. Не ставьте этот юнит.
-# Рабочий — deploy/licvid.service (127.0.0.1:8000 за nginx).
-# Этот файл оставлен, чтобы старые ссылки не вели в пустоту: он больше
-# не слушает 0.0.0.0 и не является инструкцией по установке.
+# УСТАРЕЛ И НЕБЕЗОПАСЕН. Не ставьте этот юнит.
+# Рабочий — deploy/licvid.service (127.0.0.1:8000 за nginx, с секретом и лимитами).
+# Этот файл оставлен только как историческая пометка и чтобы старые ссылки
+# не вели в пустоту. Он слушал 0.0.0.0:8000 мимо nginx/TLS — это опасно.
+# Если вы нашли его в /etc/systemd/system — удалите и поставьте licvid.service.
 [Unit]
 Description=LiqScope Liquidation Terminal (OBSOLETE — use licvid.service)
 After=network-online.target
@@ -32,7 +33,8 @@ Environment=LIQSCOPE_EXCHANGES=binance,bybit,okx,gate,bitget,htx,hyperliquid
 # Environment=LIQSCOPE_ADMIN_IDS=123456789
 # Environment=LIQSCOPE_PUBLIC_URL=https://your.domain
 # Environment=LIQSCOPE_SECRET=смените-на-случайную-строку
-ExecStart=/usr/bin/python3 -m uvicorn server:app --host 0.0.0.0 --port 8000
+# DEPRECATED: не слушает 0.0.0.0, рабочий юнит — licvid.service
+ExecStart=/usr/bin/python3 -m uvicorn server:app --host 127.0.0.1 --port 8000
 Restart=always
 RestartSec=5
 KillSignal=SIGINT

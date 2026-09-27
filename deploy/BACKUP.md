@@ -20,6 +20,16 @@ sudo bash tools/backup_data.sh /var/backups/liqscope
 15 3 * * * root bash /root/Licvid/tools/backup_data.sh /var/backups/liqscope
 ```
 
+Или systemd timer (рекомендуется):
+
+```bash
+sudo cp deploy/licvid-backup.service deploy/licvid-backup.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now licvid-backup.timer
+systemctl list-timers licvid-backup.timer
+journalctl -u licvid-backup -n 20
+```
+
 ## Проверить, что копия живая
 
 ```bash

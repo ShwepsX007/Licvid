@@ -35,6 +35,7 @@
         soundEnabled: false,
         profileEnabled: false,  // профиль ликвидаций по ценам (полосы на графике)
         levelsEnabled: false,   // 🎯 расчётные уровни ликвидаций (оценка модели)
+        levelsAlertEnabled: true, // Task 2: сигнал при касании пунктирного уровня ±0.01%
         levelsData: null,       // ответ /api/liq_levels по монете графика
         levelsAt: 0,            // когда он получен (свой TTL поверх серверного)
         levelsError: "",        // почему расчёта нет: "HTTP 404" / "нет связи"
@@ -910,6 +911,90 @@
         return { long: isLong ? long : 0, short: isLong ? 0 : short, usd: usd, isLong: isLong };
     }
 
+    // --- Task 2: пунктирный уровень — триггер при касании ±0.01% + подсветка 3s ---
+    const DASHED_TRIGGER_PCT = 0.0001; // 0.01%
+    const DASHED_COOLDOWN_MS = 15000; // 15s cooldown на уровень
+    const DASHED_FADE_MS = 3000;
+    let levelHighlights = {}; // price(string) -> {highlightUntil, lastTrigger, inZone}
+    // для тестов: чистая функция shouldTrigger
+    function shouldTrigger(price, level, st, now) {
+        now = now || Date.now();
+        const p = Number(price), lv = Number(level);
+        if (!(p>0) || !(lv>0)) return false;
+        const dist = Math.abs(p - lv) / lv;
+        if (dist > DASHED_TRIGGER_PCT) {
+            if (st) st.inZone = false;
+            return false;
+        }
+        // в зоне ±0.01%
+        if (!st) st = {lastTrigger:0, inZone:false};
+        if (st.inZone) {
+            // уже внутри зоны — не триггерим повторно до выхода
+            return false;
+        }
+        if (now - (st.lastTrigger||0) < DASHED_COOLDOWN_MS) return false;
+        return true;
+    }
+    function playLevelBeep() {
+        if (!state.levelsAlertEnabled) return;
+        try {
+            if (localStorage.getItem("liqscope.levelsAlertMuted")==="1") return;
+        } catch {}
+        try {
+            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            if (audioCtx.state === "suspended") audioCtx.resume();
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain); gain.connect(audioCtx.destination);
+            osc.type = "sine";
+            osc.frequency.setValueAtTime(880, audioCtx.currentTime);
+            osc.frequency.exponentialRampToValueAtTime(440, audioCtx.currentTime + 0.25);
+            gain.gain.setValueAtTime(0.18, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.35);
+            osc.start(); osc.stop(audioCtx.currentTime + 0.38);
+        } catch {}
+        try {
+            const note = document.getElementById("levels-note");
+            if (note) {
+                note.classList.add("tchat-notify");
+                setTimeout(()=>note.classList.remove("tchat-notify"), 800);
+            }
+        } catch {}
+    }
+    function checkDashedLevelTriggers(price) {
+        if (!state.levelsEnabled || !state.levelsAlertEnabled) return;
+        const data = state.levelsData;
+        if (!data) return;
+        const magnets = data.magnets_list || [];
+        if (!magnets.length) return;
+        const now = Date.now();
+        const p = Number(price);
+        if (!(p>0)) return;
+        for (const m of magnets) {
+            const lv = Number(m && m.price);
+            if (!(lv>0)) continue;
+            const key = String(lv);
+            let st = levelHighlights[key];
+            if (!st) {
+                st = levelHighlights[key] = {lastTrigger:0, inZone:false, highlightUntil:0};
+            }
+            const dist = Math.abs(p - lv) / lv;
+            if (dist > DASHED_TRIGGER_PCT) {
+                st.inZone = false;
+                continue;
+            }
+            if (st.inZone) continue;
+            if (now - st.lastTrigger < DASHED_COOLDOWN_MS) continue;
+            st.lastTrigger = now;
+            st.inZone = true;
+            st.highlightUntil = now + DASHED_FADE_MS;
+            playLevelBeep();
+            try { console.debug("[levels] dashed trigger", lv, "price", p, "dist", dist); } catch {}
+            queueRedraw();
+        }
+    }
+    try { window.LiqScopeLevelsTrigger = {shouldTrigger, DASHED_TRIGGER_PCT, DASHED_COOLDOWN_MS, DASHED_FADE_MS}; } catch {}
+
     // Шкала массы справа от свечей, встык со шкалой цены. Фона под полосами нет:
     // колонка закрывала свечи. Длина полосы — ещё не сработавшая масса НА этой
     // цене, ноль прижат к шкале цены.
@@ -986,23 +1071,71 @@
 
             if (magnet) {
                 ctx.save();
-                ctx.globalAlpha = 0.8;
-                ctx.strokeStyle = col.ring;
-                ctx.lineWidth = 1;
-                ctx.setLineDash([5, 3]);
-                ctx.beginPath();
-                ctx.moveTo(6, y + 0.5);
-                ctx.lineTo(xL, y + 0.5);
-                ctx.stroke();
-                ctx.setLineDash([]);
+                const hl = (typeof levelHighlights !== 'undefined' && levelHighlights[row.price]) ? levelHighlights[row.price] : null;
+                const nowMs = Date.now();
+                let isHl = false, hlAlpha = 0;
+                if (hl && hl.highlightUntil && nowMs < hl.highlightUntil) {
+                    isHl = true;
+                    hlAlpha = Math.max(0, Math.min(1, (hl.highlightUntil - nowMs) / 3000));
+                }
+                if (isHl) {
+                    ctx.globalAlpha = 0.6 * hlAlpha + 0.2;
+                    ctx.strokeStyle = "#ff2a5f";
+                    ctx.lineWidth = 2;
+                    ctx.shadowColor = "rgba(255,42,95,0.8)";
+                    ctx.shadowBlur = 8 * hlAlpha;
+                    ctx.setLineDash([5, 3]);
+                    ctx.beginPath();
+                    ctx.moveTo(6, y + 0.5);
+                    ctx.lineTo(xL, y + 0.5);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                    ctx.shadowBlur = 0;
+                    ctx.shadowColor = "transparent";
+                } else {
+                    ctx.globalAlpha = 0.55;
+                    ctx.strokeStyle = col.ring;
+                    ctx.lineWidth = 1;
+                    ctx.setLineDash([5, 3]);
+                    ctx.beginPath();
+                    ctx.moveTo(6, y + 0.5);
+                    ctx.lineTo(xL, y + 0.5);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                }
                 ctx.restore();
             }
 
-            ctx.globalAlpha = magnet || active ? 0.96 : 0.8;
-            ctx.fillStyle = col.fill;
-            ctx.fillRect(x0, y - barH / 2, Math.round(w), barH);
-            if (active) {
-                ctx.globalAlpha = 1;
+            const hlBar = (typeof levelHighlights !== 'undefined' && levelHighlights[row.price]) ? levelHighlights[row.price] : null;
+            const nowBar = Date.now();
+            let hlBarActive = false, hlBarAlpha = 0;
+            if (hlBar && hlBar.highlightUntil && nowBar < hlBar.highlightUntil) {
+                hlBarActive = true;
+                hlBarAlpha = Math.max(0, Math.min(1, (hlBar.highlightUntil - nowBar) / 3000));
+            }
+            if (hlBarActive) {
+                ctx.globalAlpha = 0.35 * hlBarAlpha + 0.12;
+                ctx.fillStyle = "#ff2a5f";
+                ctx.fillRect(x0, y - barH / 2, Math.round(w), barH);
+                ctx.globalAlpha = 0.7 * hlBarAlpha + 0.2;
+                ctx.strokeStyle = "#ff2a5f";
+                ctx.lineWidth = 1;
+                ctx.shadowColor = "rgba(255,42,95,0.9)";
+                ctx.shadowBlur = 10 * hlBarAlpha;
+                ctx.strokeRect(x0 + 0.5, y - barH / 2 + 0.5, Math.max(1, Math.round(w) - 1), Math.max(1, barH - 1));
+                ctx.shadowBlur = 0;
+                ctx.shadowColor = "transparent";
+            } else {
+                ctx.globalAlpha = magnet || active ? 0.18 : 0.12;
+                ctx.fillStyle = col.fill;
+                ctx.fillRect(x0, y - barH / 2, Math.round(w), barH);
+                ctx.globalAlpha = magnet || active ? 0.35 : 0.22;
+                ctx.strokeStyle = col.fill;
+                ctx.lineWidth = 1;
+                ctx.strokeRect(x0 + 0.5, y - barH / 2 + 0.5, Math.max(1, Math.round(w) - 1), Math.max(1, barH - 1));
+            }
+            if (active && !hlBarActive) {
+                ctx.globalAlpha = 0.9;
                 ctx.strokeStyle = "#ffffff";
                 ctx.lineWidth = 1;
                 ctx.strokeRect(x0 + 0.5, y - barH / 2 + 0.5, Math.max(1, Math.round(w) - 1), Math.max(1, barH - 1));
@@ -1722,6 +1855,7 @@
             priceChangeEl.textContent = (pct >= 0 ? "+" : "") + pct.toFixed(2) + "%";
             priceChangeEl.className = "price-change " + (pct >= 0 ? "positive" : "negative");
         }
+        try { checkDashedLevelTriggers(price); } catch(e){}
     }
 
     // --- Маркеры и кластеры --------------------------------------------------
@@ -5952,6 +6086,30 @@
             // стартовый поллер ставим один раз после восстановления тумблеров
             if (state.feedTab === "book") bookPollSync();
         });
+
+        // Task 2: toggle for dashed level alert
+        try {
+            const alertEl = document.getElementById("levels-alert-toggle");
+            if (alertEl) {
+                try {
+                    const v = localStorage.getItem("liqscope.levelsAlert");
+                    if (v === "0") state.levelsAlertEnabled = false;
+                    else if (v === "1") state.levelsAlertEnabled = true;
+                } catch {}
+                const paintAlert = () => {
+                    alertEl.classList.toggle("active", !!state.levelsAlertEnabled);
+                    alertEl.title = state.levelsAlertEnabled ? "🔔 Сигнал уровней вкл — клик выкл" : "🔕 Сигнал уровней выкл — клик вкл";
+                    alertEl.textContent = state.levelsAlertEnabled ? "🔔 Уровни" : "🔕 Уровни";
+                };
+                alertEl.addEventListener("click", () => {
+                    state.levelsAlertEnabled = !state.levelsAlertEnabled;
+                    try { localStorage.setItem("liqscope.levelsAlert", state.levelsAlertEnabled ? "1" : "0"); } catch {}
+                    paintAlert();
+                });
+                paintAlert();
+            }
+        } catch {}
+
     }
 
     // --- Индикаторные окна под графиком (LIQ / CVD / OI) --------------------
@@ -7228,7 +7386,10 @@
             case "prices": {
                 Object.assign(state.prices, msg.data || {});
                 const p = state.prices[chartSymbol()];
-                if (p) updatePriceDisplay(p);
+                if (p) {
+                    updatePriceDisplay(p);
+                    try { checkDashedLevelTriggers(p); } catch(e){}
+                }
                 break;
             }
             case "tick":
@@ -7476,6 +7637,18 @@
             loadCandles();
         }, 60000);
     }
+
+    // Expose for workspace multi-chart
+    try {
+        window.LiqScopeApp = window.LiqScopeApp || {};
+        window.LiqScopeApp.selectSymbol = selectSymbol;
+        window.LiqScopeApp.createCandleSeries = createCandleSeries;
+        window.LiqScopeApp.createVolumeSeries = createVolumeSeries;
+        window.LiqScopeApp.getSymbols = function() {
+            try { return (state && state.symbols) ? state.symbols : []; } catch { return []; }
+        };
+        window.state = state;
+    } catch {}
 
     if (document.readyState === "loading") {
         document.addEventListener("DOMContentLoaded", boot);

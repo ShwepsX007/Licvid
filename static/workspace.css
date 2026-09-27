@@ -1,0 +1,401 @@
+/* Multi-chart workspace — LiqScope Terminal */
+#workspace-host {
+  display: none;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  width: 100%;
+}
+
+body.workspace-active #workspace-host {
+  display: flex;
+}
+
+.workspace-root {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 6px 0 8px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  width: 100%;
+}
+
+.workspace-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: rgba(12,18,28,0.9);
+  border: 1px solid #1c2533;
+  border-radius: 8px;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+.workspace-toolbar .ws-title {
+  font-weight: 600;
+  font-size: 13px;
+  color: #c9d6e8;
+  margin-right: 8px;
+}
+.workspace-toolbar .ws-btn {
+  background: #151d2b;
+  border: 1px solid #233044;
+  color: #a8bdd6;
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.workspace-toolbar .ws-btn:hover {
+  background: #1d2a3d;
+  color: #d6e6f5;
+}
+.workspace-toolbar .ws-btn.primary {
+  background: #1e3a5f;
+  border-color: #2a5a9a;
+  color: #cfe3ff;
+}
+.workspace-toolbar .ws-hint {
+  font-size: 11px;
+  color: #6a7a8e;
+  margin-left: auto;
+}
+.workspace-tabs {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  padding: 4px 2px;
+  scrollbar-width: thin;
+  flex-shrink: 0;
+}
+.workspace-tabs .ws-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: #121a27;
+  border: 1px solid #1e2a3c;
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+  color: #8fa2b8;
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+}
+.workspace-tabs .ws-tab.active {
+  background: #1a2740;
+  border-color: #2a4a7a;
+  color: #d0e2f5;
+}
+.workspace-tabs .ws-tab.dragging { opacity: 0.5; }
+.workspace-tabs .ws-tab .ws-tab-close {
+  background: none;
+  border: none;
+  color: #6a7a8e;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 2px;
+}
+.workspace-tabs .ws-tab .ws-tab-close:hover { color: #ff5a7a; }
+
+.workspace-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  align-items: stretch;
+  align-content: flex-start;
+}
+
+.workspace-grid .chart-panel {
+  flex: 1 1 calc(50% - 8px);
+  min-width: 320px;
+}
+
+.workspace-grid.cols-1 .chart-panel {
+  flex: 1 1 100%;
+}
+.workspace-grid.cols-2 .chart-panel {
+  flex: 1 1 calc(50% - 8px);
+}
+.workspace-grid.cols-3 .chart-panel,
+.workspace-grid.cols-4 .chart-panel {
+  flex: 1 1 calc(50% - 8px);
+}
+
+.workspace-grid.single-mode {
+  flex: 1 1 auto;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  flex-wrap: nowrap;
+}
+.workspace-grid.single-mode .chart-panel {
+  flex: 1 1 100% !important;
+  width: 100% !important;
+  height: 100% !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  resize: none !important;
+}
+
+/* Hide single-chart UI when workspace active */
+body.workspace-active .chart-stack {
+  display: none !important;
+}
+body.workspace-active .chart-section > .chart-header {
+  display: none !important;
+}
+body.workspace-active .ad-host {
+  display: none !important;
+}
+body.workspace-single-mode .ad-host {
+  display: none !important;
+}
+.ws-global-toggle {
+  position: absolute;
+  top: 6px;
+  right: 80px;
+  z-index: 100;
+  background: #151d2b;
+  border: 1px solid #233044;
+  color: #a8bdd6;
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 11px;
+  cursor: pointer;
+  pointer-events: auto;
+}
+.ws-global-toggle:hover {
+  background: #1d2a3d;
+  color: #d6e6f5;
+}
+body.workspace-active .ws-global-toggle {
+  background: #1e3a5f;
+  border-color: #2a5a9a;
+  color: #cfe3ff;
+}
+
+/* Chart panel — resizable */
+.chart-panel {
+  display: flex;
+  flex-direction: column;
+  background: #0a0f19;
+  border: 1px solid #1c2533;
+  border-radius: 8px;
+  overflow: hidden;
+  min-height: 360px;
+  min-width: 320px;
+  flex: 1 1 45%;
+  position: relative;
+  resize: both;
+}
+.chart-panel.detached {
+  opacity: 0.6;
+  border-style: dashed;
+}
+.chart-panel.active-panel {
+  border-color: #2a5a9a;
+  box-shadow: 0 0 0 1px rgba(42,90,154,0.3);
+}
+.panel-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  background: #0f1725;
+  border-bottom: 1px solid #1c2533;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+.panel-header .panel-drag {
+  cursor: grab;
+  color: #4a5a70;
+  font-size: 14px;
+  padding: 2px 4px;
+}
+.panel-header .panel-symbol {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.panel-header .panel-symbol select {
+  background: #121d2f;
+  border: 1px solid #22314a;
+  color: #b8cce4;
+  border-radius: 5px;
+  padding: 3px 6px;
+  font-size: 12px;
+  min-width: 90px;
+}
+.panel-header .panel-price {
+  font-size: 12px;
+  font-weight: 600;
+  color: #d0e2f5;
+  margin-left: 6px;
+}
+.panel-header .panel-change { font-size: 11px; }
+.panel-header .panel-change.positive { color: #00e676; }
+.panel-header .panel-change.negative { color: #ff2a5f; }
+.panel-header .panel-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+.panel-header .panel-btn {
+  background: #151d2b;
+  border: 1px solid #233044;
+  color: #8fa2b8;
+  border-radius: 5px;
+  padding: 3px 7px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.panel-header .panel-btn:hover {
+  background: #1d2a3d;
+  color: #cfe3ff;
+}
+.panel-header .panel-btn.active {
+  background: #1e3a5f;
+  border-color: #2a5a9a;
+  color: #cfe3ff;
+}
+.panel-header .panel-btn.close:hover {
+  background: #3a1a25;
+  border-color: #7a2a3a;
+  color: #ffb3c0;
+}
+.panel-chart-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  background: #090c10;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.panel-chart {
+  position: absolute;
+  left: 0; top: 0; right: 0; bottom: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 1;
+}
+.panel-canvas {
+  position: absolute;
+  left: 0; top: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 2;
+}
+.panel-error {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #8fa2b8;
+  font-size: 12px;
+  z-index: 20;
+  background: rgba(9,12,16,0.92);
+  text-align: center;
+  padding: 12px;
+  flex-direction: column;
+  gap: 8px;
+}
+.panel-layers-pop {
+  position: absolute;
+  top: 36px;
+  right: 6px;
+  z-index: 30;
+  background: rgba(12,18,28,0.96);
+  border: 1px solid #1e2a3c;
+  border-radius: 8px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 160px;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+}
+.panel-layers-pop.hidden { display: none; }
+.panel-layers-pop .panel-layer-btn {
+  background: #151d2b;
+  border: 1px solid #233044;
+  color: #8fa2b8;
+  border-radius: 5px;
+  padding: 4px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  text-align: left;
+}
+.panel-layers-pop .panel-layer-btn.active {
+  background: #1e3a5f;
+  border-color: #2a5a9a;
+  color: #cfe3ff;
+}
+
+/* Mobile */
+@media (max-width: 900px) {
+  .workspace-grid {
+    flex-direction: column;
+    flex-wrap: nowrap;
+  }
+  .workspace-grid .chart-panel {
+    flex: 1 1 100% !important;
+    min-width: 0 !important;
+    width: 100% !important;
+    resize: none !important;
+    min-height: 380px;
+  }
+  .workspace-toolbar .ws-hint { display: none; }
+}
+
+/* Panel mode (detached window) */
+body.panel-mode .top-nav,
+body.panel-mode .filters,
+body.panel-mode .feed-section,
+body.panel-mode .splitter,
+body.panel-mode .ad-host,
+body.panel-mode .chart-section > .chart-header,
+body.panel-mode .chart-section > .chart-stack,
+body.panel-mode .workspace-toolbar,
+body.panel-mode .workspace-tabs {
+  display: none !important;
+}
+body.panel-mode .main-layout {
+  display: block;
+  height: 100vh;
+}
+body.panel-mode .chart-section {
+  height: 100vh;
+  width: 100vw;
+}
+body.panel-mode .workspace-root {
+  display: flex !important;
+  height: 100vh;
+  padding: 0;
+}
+body.panel-mode .workspace-grid {
+  display: flex;
+  height: 100vh;
+  flex: 1;
+}
+body.panel-mode .chart-panel {
+  height: 100vh;
+  flex: 1;
+  border: none;
+  border-radius: 0;
+  resize: none;
+}
+body.panel-mode .panel-chart-wrap {
+  flex: 1;
+  height: auto;
+}

@@ -1,3 +1,14 @@
+:root { --ui-scale: 1; }
+html { font-size: 16px; }
+@media (min-width: 1024px) {
+  :root { --ui-scale: 0.9; }
+  html { font-size: 14.4px; }
+}
+@media (max-width: 768px) {
+  :root { --ui-scale: 1; }
+  html { font-size: 16px; }
+}
+
 /* LiqScope rebrand — спокойный тёмный продукт, как на референсе:
    глубокий navy, окна с тонкой рамкой, синяя кнопка, без неонового циана. */
 @import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap");

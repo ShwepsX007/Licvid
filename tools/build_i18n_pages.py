@@ -49,19 +49,50 @@ def build() -> str:
     return HEADER + body + ";\n"
 
 
+def build_per_lang() -> dict:
+    """Словарь lang -> текст файла только с этим языком."""
+    out = {}
+    for lang in LANGS:
+        path = SRC / f"{lang}.json"
+        if not path.exists():
+            raise SystemExit(f"нет словаря: {path}")
+        data = {lang: json.loads(path.read_text(encoding="utf-8"))}
+        body = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=False)
+        out[lang] = HEADER + body + ";\n"
+    return out
+
+
 def main() -> int:
     check = "--check" in sys.argv[1:]
     text = build()
+    per_lang = build_per_lang()
     old = OUT.read_text(encoding="utf-8") if OUT.exists() else ""
     if check:
-        if old == text:
+        ok = True
+        if old != text:
+            print("static/i18n.pages.js: УСТАРЕЛ — запустите python3 tools/build_i18n_pages.py")
+            ok = False
+        else:
             print(f"static/i18n.pages.js: синхронизирован ({len(text)} байт)")
-            return 0
-        print("static/i18n.pages.js: УСТАРЕЛ — запустите python3 tools/build_i18n_pages.py")
-        return 1
+        # Проверяем и per-lang файлы
+        for lang, content in per_lang.items():
+            p = HERE / "static" / f"i18n.pages.{lang}.js"
+            old_pl = p.read_text(encoding="utf-8") if p.exists() else ""
+            if old_pl != content:
+                print(f"static/i18n.pages.{lang}.js: УСТАРЕЛ")
+                ok = False
+            else:
+                print(f"static/i18n.pages.{lang}.js: синхронизирован ({len(content)} байт)")
+        return 0 if ok else 1
     OUT.write_text(text, encoding="utf-8")
     state = "без изменений" if old == text else "обновлён"
     print(f"static/i18n.pages.js: {state} ({len(text)} байт, {len(LANGS)} языка)")
+    for lang, content in per_lang.items():
+        p = HERE / "static" / f"i18n.pages.{lang}.js"
+        old_pl = p.read_text(encoding="utf-8") if p.exists() else ""
+        p.write_text(content, encoding="utf-8")
+        st = "без изменений" if old_pl == content else "обновлён"
+        print(f"static/i18n.pages.{lang}.js: {st} ({len(content)} байт)")
     return 0
 
 

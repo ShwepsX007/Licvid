@@ -358,6 +358,35 @@ def cover_variant(day: str) -> int:
         return 0
 
 
+def _safe_name(name: str) -> str:
+    import re
+    n = str(name or "cover.jpg").strip()
+    n = re.sub(r"[^a-zA-Z0-9._-]", "_", n)
+    return n[:80] or "cover.jpg"
+
+
+def _materialize_digest_photo(src_path: str, day: str) -> str:
+    """Скопировать фото дайджеста в безопасное место data/digest_covers/{day}_{name}."""
+    import os, shutil
+    src = str(src_path or "")
+    if not src or not os.path.isfile(src):
+        return src
+    dest_dir = os.path.join(os.path.dirname(__file__), "data", "digest_covers")
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+    except Exception:
+        return src
+    base = _safe_name(os.path.basename(src))
+    dest = os.path.join(dest_dir, f"{_safe_name(day)}_{base}")
+    try:
+        if not os.path.isfile(dest):
+            shutil.copy2(src, dest)
+        return dest
+    except Exception as e:
+        log.debug("digest photo materialize %s: %s", src, e)
+        return src
+
+
 def assign_cover(rec: dict, day: str = "") -> dict:
     """Выбрать обложку выпуска и запомнить её в записи.
 
@@ -365,14 +394,23 @@ def assign_cover(rec: dict, day: str = "") -> dict:
     ``/digest`` — сайт не остаётся без картинки, а канал не повторяет вчерашнюю.
     Фото выбирается «по кругу без повторов» (``channel_digest``), поэтому
     функция вызывается один раз на день: если обложка уже выбрана и файл на
-    месте, она не меняется.
+    месте, она не меняется. Для веба материализуем копию в data/digest_covers/.
     """
     rec = rec if isinstance(rec, dict) else {}
     day = day or str(rec.get("day") or "")
     have = rec.get("photo") or {}
     path = str(have.get("path") or "")
     if path and os.path.isfile(path):
-        return have
+        # если путь уже материализованный — оставляем, иначе копируем
+        if "digest_covers" not in path:
+            mat = _materialize_digest_photo(path, day or have.get("day") or "cover")
+            if mat and mat != path:
+                have = dict(have)
+                have["path"] = mat
+                have["materialized"] = mat
+                have["original"] = path
+                rec["photo"] = have
+        return rec.get("photo") or have
     if ctx.photo_store is None:
         return {}
     try:
@@ -382,6 +420,14 @@ def assign_cover(rec: dict, day: str = "") -> dict:
         log.debug("дайджест: обложка не выбралась: %s", e)
         return {}
     if cover:
+        # материализуем
+        src = str(cover.get("path") or "")
+        mat = _materialize_digest_photo(src, day)
+        if mat and mat != src:
+            cover = dict(cover)
+            cover["path"] = mat
+            cover["materialized"] = mat
+            cover["original"] = src
         rec["photo"] = cover
     return cover
 

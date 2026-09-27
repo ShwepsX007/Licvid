@@ -21,12 +21,72 @@
   const PING_MS = 30000;
   const LS_OPEN = "liqscope.tchat.open";
   const LS_LAST_ID = "liqscope.tchat.lastId";
+  const LS_SVC_LAST_ID = "liqscope.tchat.svcLastId";
+  const LS_SUP_LAST_ID = "liqscope.tchat.supLastId";
+  const LS_CUR_UID = "liqscope.tchat.curUid";
   const LS_POS = "liqscope.tchat.pos";
   const LS_MUTE_PFX = "liqscope.tchat.mute.";
   const LS_SUP_NAME = "liqscope.tchat.supName";
   const LS_SUP_GUEST = "liqscope.tchat.supGuest";
   const LS_SUP_THREADS_COLLAPSED = "liqscope.tchat.supThreadsCollapsed";
   const MIN_W = 280, MIN_H = 260;
+  const MAX_HISTORY = 50;
+  const READ_DEBOUNCE_MS = 1200;
+
+  // --- A1/A3: per-user LS namespace helpers ---
+  function lsKey(base, uid) { return uid ? base + "." + uid : base; }
+  function lsGet(base, uid) {
+    try {
+      if (uid) {
+        const v = localStorage.getItem(lsKey(base, uid));
+        if (v != null && v !== "") return v;
+      }
+      return localStorage.getItem(base) || "";
+    } catch { return ""; }
+  }
+  function lsSet(base, val, uid) {
+    try {
+      if (uid) localStorage.setItem(lsKey(base, uid), String(val));
+      else localStorage.setItem(base, String(val));
+    } catch {}
+  }
+  function lsGetInt(base, uid, def) {
+    const raw = lsGet(base, uid);
+    const n = parseInt(raw, 10);
+    return isNaN(n) ? (def||0) : n;
+  }
+  function clearUserChatKeys(uid) {
+    if (!uid) return;
+    const bases = [LS_LAST_ID, LS_SVC_LAST_ID, LS_SUP_LAST_ID, LS_OPEN];
+    try {
+      for (const b of bases) {
+        localStorage.removeItem(lsKey(b, uid));
+      }
+      // also sweep any chat/dm keys containing uid or legacy global chat keys
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const k = localStorage.key(i);
+        if (!k) continue;
+        if (k.indexOf("tchat") !== -1 && k.endsWith("." + uid)) {
+          // keep curUid, but remove lastId etc already handled; remove other per-user tchat keys
+          if (k !== LS_CUR_UID) {
+            // only remove if it's a chat cache, not pos/open which we already handled per uid
+            if (k.startsWith("liqscope.tchat.last") || k.startsWith("liqscope.tchat.open")) continue;
+            // otherwise remove to avoid leaking
+            // localStorage.removeItem(k);
+          }
+        }
+        if (k.startsWith("chat:") || k.startsWith("dm:") || k.startsWith("liqscope.chat")) {
+          localStorage.removeItem(k);
+        }
+      }
+    } catch {}
+  }
+  function getStoredUid() {
+    try { return parseInt(localStorage.getItem(LS_CUR_UID) || "0", 10) || 0; } catch { return 0; }
+  }
+  function setStoredUid(uid) {
+    try { localStorage.setItem(LS_CUR_UID, String(uid||0)); } catch {}
+  }
 
   const $ = (s, r) => (r || document).querySelector(s);
 
@@ -472,13 +532,92 @@
     onlineEl = $("#tchat-online") || onlineEl;
 
     let me = null;
-    let lastId = 0;
-    try { lastId = parseInt(localStorage.getItem(LS_LAST_ID) || "0", 10) || 0; } catch { }
-    let lastSvcId = 0;
-    let lastSupId = 0;
+    // A1: per-user LS namespace — при старте без me читаем глобальный, после логина перепишем на per-user
+    let lastId = lsGetInt(LS_LAST_ID, 0, 0);
+    let lastSvcId = lsGetInt(LS_SVC_LAST_ID, 0, 0);
+    let lastSupId = lsGetInt(LS_SUP_LAST_ID, 0, 0);
     let publicUnread = 0, svcUnread = 0, supUnread = 0;
     let isOpen = false;
     try { isOpen = localStorage.getItem(LS_OPEN) === "1"; } catch { }
+    // серверный last_read (после fetchReadState)
+    let serverReads = { public: { last_read_id: 0, last_read_ts: 0 }, services: { last_read_id: 0, last_read_ts: 0 }, support: { last_read_id: 0, last_read_ts: 0 } };
+    let markReadTimers = {};
+    function curUid() { return (me && me.id) ? me.id : 0; }
+    function saveLastIds() {
+      const uid = curUid();
+      if (lastId) lsSet(LS_LAST_ID, lastId, uid);
+      if (lastSvcId) lsSet(LS_SVC_LAST_ID, lastSvcId, uid);
+      if (lastSupId) lsSet(LS_SUP_LAST_ID, lastSupId, uid);
+    }
+    // A3: единый markRead с debounce 1.2s
+    function markRead(chat_id, last_id, last_ts) {
+      const uid = curUid();
+      if (!uid) return; // гостям только LS
+      const id = last_id || (chat_id === "public" ? lastId : chat_id === "services" ? lastSvcId : chat_id === "support" ? lastSupId : 0);
+      if (!id && !last_ts) return;
+      const key = chat_id || "public";
+      if (markReadTimers[key]) clearTimeout(markReadTimers[key]);
+      markReadTimers[key] = setTimeout(async () => {
+        try {
+          const ts = last_ts || (Date.now() / 1000);
+          await fetch("/api/chat/read", {
+            method: "POST", credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ chat_id: key, last_read_id: id || 0, last_read_ts: ts }),
+          });
+          // локально тоже обновляем serverReads чтобы не считать старьё новым
+          if (serverReads[key]) {
+            serverReads[key].last_read_id = Math.max(serverReads[key].last_read_id || 0, id || 0);
+            serverReads[key].last_read_ts = Math.max(serverReads[key].last_read_ts || 0, ts);
+          }
+          saveLastIds();
+        } catch {}
+      }, READ_DEBOUNCE_MS);
+    }
+    function markReadImmediate(chat_id) {
+      // для тестов и для быстрого сброса бейджа при открытии
+      const uid = curUid();
+      if (!uid) return;
+      const id = chat_id === "public" ? lastId : chat_id === "services" ? lastSvcId : chat_id === "support" ? lastSupId : 0;
+      if (!id) return;
+      markRead(chat_id, id, Date.now()/1000);
+    }
+    async function fetchReadState() {
+      try {
+        const r = await fetch("/api/chat/read_state", { credentials: "same-origin" });
+        if (!r.ok) return null;
+        const j = await r.json();
+        if (j && j.reads) {
+          serverReads.public = j.reads.public || serverReads.public;
+          serverReads.services = j.reads.services || serverReads.services;
+          serverReads.support = j.reads.support || serverReads.support;
+          // unread из сервера — более точный чем локальный счётчик
+          if (j.unread) {
+            // не перезатираем если уже есть локальные непрочитанные из WS, а берём max
+            if (typeof j.unread.public === "number") publicUnread = Math.max(publicUnread, 0);
+            // серверный unread используем для начальной установки, если локально 0
+            if (publicUnread === 0 && j.unread.public > 0) {
+              // покажем бейдж, но не будем считать все 50 как новые — только число с сервера
+              // оставим publicUnread = j.unread.public если чат закрыт
+              if (!isOpen || view !== "public") publicUnread = j.unread.public;
+            }
+            if (svcUnread === 0 && j.unread.services) {
+              if (!isOpen || view !== "services") svcUnread = j.unread.services;
+            }
+          }
+        }
+        return j;
+      } catch { return null; }
+    }
+    function isNewAfterRead(msg, chat_id) {
+      // A1: сообщение считается новым только если его id/ts > last_read
+      const sr = serverReads[chat_id] || { last_read_id: 0, last_read_ts: 0 };
+      const lastReadId = Math.max(sr.last_read_id || 0, lsGetInt(chat_id === "public" ? LS_LAST_ID : chat_id === "services" ? LS_SVC_LAST_ID : LS_SUP_LAST_ID, curUid(), 0));
+      if (msg.id && lastReadId) return msg.id > lastReadId;
+      // fallback по ts
+      if (sr.last_read_ts && msg.ts) return msg.ts > sr.last_read_ts + 0.5;
+      return true; // если нет маркера — считаем новым только при poll, не при init
+    }
 
     const muteMap = { public: false, dm: false, services: false, support: false };
     function loadMute() {
@@ -645,11 +784,11 @@
         else if (tab === "dm") b.classList.toggle("active", v === "rooms" || v === "room");
       });
       // Вход в раздел = «покажи последние записи»: метим контейнер, и первый же
-      // рендер после загрузки прыгнет вниз
-      if (v === "public") { publicUnread = 0; setBadge(); jumpToLast(listEl); }
-      if (v === "services") { svcUnread = 0; setBadge(); jumpToLast(svcListEl); }
-      if (v === "support") { supUnread = 0; setBadge(); jumpToLast(supListEl); }
-      if (v === "room") jumpToLast(dmMsgsEl());
+      // рендер после загрузки прыгнет вниз + A1 markRead debounce
+      if (v === "public") { publicUnread = 0; setBadge(); jumpToLast(listEl); markRead("public"); }
+      if (v === "services") { svcUnread = 0; setBadge(); jumpToLast(svcListEl); markRead("services"); }
+      if (v === "support") { supUnread = 0; setBadge(); jumpToLast(supListEl); markRead("support"); }
+      if (v === "room") { jumpToLast(dmMsgsEl()); }
       if (v === "room" && arg) {
         roomId = arg; roomInfo = null; roomLastId = 0;
         if (dmMsgsEl()) dmMsgsEl().innerHTML = '<div class="tchat-empty">' + T("chat.empty.loading", "загружаем…") + '</div>';
@@ -667,14 +806,18 @@
       document.body.classList.toggle("tchat-open", isOpen);
       if (headerBtn) headerBtn.classList.toggle("active", isOpen);
       if (panel) panel.classList.toggle("hidden", !isOpen);
-      try { localStorage.setItem(LS_OPEN, isOpen ? "1" : "0"); } catch {}
+      try {
+        const uid = curUid();
+        if (uid) lsSet(LS_OPEN, isOpen ? "1" : "0", uid);
+        else localStorage.setItem(LS_OPEN, isOpen ? "1" : "0");
+      } catch {}
       setBadge();
       if (isOpen) {
-        // Панель открыли — снова к последним записям
-        if (view === "public") { publicUnread = 0; setBadge(); jumpToLast(listEl); }
-        if (view === "services") { svcUnread = 0; jumpToLast(svcListEl); }
-        if (view === "support") { supUnread = 0; jumpToLast(supListEl); }
-        if (view === "room") jumpToLast(dmMsgsEl());
+        // Панель открыли — снова к последним записям + markRead
+        if (view === "public") { publicUnread = 0; setBadge(); jumpToLast(listEl); markRead("public"); }
+        if (view === "services") { svcUnread = 0; setBadge(); jumpToLast(svcListEl); markRead("services"); }
+        if (view === "support") { supUnread = 0; setBadge(); jumpToLast(supListEl); markRead("support"); }
+        if (view === "room") { jumpToLast(dmMsgsEl()); }
         if (view === "room") refreshRoom(false);
         else if (view === "rooms") refreshRooms();
         else if (view === "services") refreshServices(false);
@@ -934,7 +1077,7 @@
 
     async function fetchList(afterId, limit) {
       try {
-        let url = API + "?limit=" + (limit || 100);
+        let url = API + "?limit=" + (limit || MAX_HISTORY);
         if (afterId) url += "&after_id=" + afterId;
         const r = await fetch(url, { credentials: "same-origin" });
         if (!r.ok) return [];
@@ -943,16 +1086,51 @@
       } catch { return []; }
     }
     async function loadInitial() {
+      const prevUid = getStoredUid();
       me = await fetchMe();
+      const uid = curUid();
+      // A1: если сменился пользователь — очистить кэш старого, загрузить per-user lastId
+      if (uid && prevUid && uid !== prevUid) {
+        clearUserChatKeys(prevUid);
+      }
+      if (uid) {
+        setStoredUid(uid);
+        // перечитать per-user lastId (если был сохранён)
+        lastId = Math.max(lastId, lsGetInt(LS_LAST_ID, uid, 0));
+        lastSvcId = Math.max(lastSvcId, lsGetInt(LS_SVC_LAST_ID, uid, 0));
+        lastSupId = Math.max(lastSupId, lsGetInt(LS_SUP_LAST_ID, uid, 0));
+        // open state per-user?
+        try {
+          const openRaw = lsGet(LS_OPEN, uid);
+          if (openRaw === "1" || openRaw === "0") isOpen = openRaw === "1";
+        } catch {}
+      } else {
+        // гость — если ранее был залогинен, чистим его кэш
+        if (prevUid) {
+          clearUserChatKeys(prevUid);
+          setStoredUid(0);
+          lastId = 0; lastSvcId = 0; lastSupId = 0;
+        }
+      }
       updateTabsForAuth();
       updateAuthUI(); updateMuteBtn();
       if (me) {
-        const msgs = await fetchList(0, 100);
+        // A2: сначала read_state чтобы знать last_read и не считать старьё новым
+        await fetchReadState();
+        const msgs = await fetchList(0, MAX_HISTORY);
         if (msgs.length) {
-          lastId = Math.max(lastId, ...msgs.map(m => m.id));
-          try { localStorage.setItem(LS_LAST_ID, String(lastId)); } catch {}
+          const maxId = Math.max(...msgs.map(m => m.id));
+          lastId = Math.max(lastId, maxId);
+          saveLastIds();
         }
-        if (listEl) { listEl.innerHTML = ""; renderMsgs(msgs, listEl, me, {}); }
+        if (listEl) {
+          listEl.innerHTML = "";
+          // A4: кнопка загрузить ещё
+          addLoadMoreBtn(listEl, "public");
+          renderMsgs(msgs, listEl, me, {});
+        }
+        // если чат открыт и на вкладке public — сразу помечаем прочитанным
+        if (isOpen && view === "public") markRead("public");
         refreshServices(true).catch(() => {});
       } else {
         if (listEl) listEl.innerHTML = '<div class="tchat-empty">' +
@@ -961,28 +1139,130 @@
       }
       refreshSupport(true).catch(() => {});
       if (me && me.is_admin) refreshSupThreads().catch(() => {});
+      // scroll listeners for markRead on reach bottom
+      bindScrollMarkRead();
+    }
+    function bindScrollMarkRead() {
+      if (listEl && !listEl._tchatScrollBound) {
+        listEl._tchatScrollBound = true;
+        listEl.addEventListener("scroll", () => {
+          if (view !== "public") return;
+          const gap = listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight;
+          if (gap < 120) {
+            publicUnread = 0; setBadge();
+            markRead("public");
+          }
+        }, { passive: true });
+      }
+      if (svcListEl && !svcListEl._tchatScrollBound) {
+        svcListEl._tchatScrollBound = true;
+        svcListEl.addEventListener("scroll", () => {
+          if (view !== "services") return;
+          const gap = svcListEl.scrollHeight - svcListEl.scrollTop - svcListEl.clientHeight;
+          if (gap < 120) {
+            svcUnread = 0; setBadge();
+            markRead("services");
+          }
+        }, { passive: true });
+      }
+    }
+    function addLoadMoreBtn(container, chat_id) {
+      if (!container) return;
+      if (container.querySelector(".tchat-load-more")) return;
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "tchat-load-more tchat-mini";
+      btn.textContent = T("chat.btn.load_more", "⬆ Загрузить ещё");
+      btn.style.cssText = "display:block;margin:6px auto;padding:4px 10px;";
+      btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        btn.textContent = T("chat.btn.loading", "загружаем…");
+        try {
+          const first = container.querySelector("[data-mid]");
+          const beforeId = first ? parseInt(first.getAttribute("data-mid"), 10) : 0;
+          if (!beforeId) { btn.remove(); return; }
+          const j = await jget("/api/chat/history?chat_id=" + encodeURIComponent(chat_id) + "&before_id=" + beforeId + "&limit=" + MAX_HISTORY, { credentials: "same-origin" });
+          const older = (j && j.messages) || [];
+          if (!older.length) { btn.textContent = T("chat.btn.no_more", "больше нет"); setTimeout(()=>btn.remove(), 1500); return; }
+          // вставляем старше в начало, сохраняя порядок
+          const frag = document.createDocumentFragment();
+          for (const m of older) {
+            if (container.querySelector(`[data-mid="${m.id}"]`)) continue;
+            const div = document.createElement("div");
+            const mine = !!(me && me.id && m.user_id === me.id);
+            if (chat_id === "public") {
+              div.className = "tchat-msg" + (m.admin ? " admin" : "") + (mine ? " mine" : "");
+              div.dataset.mid = m.id;
+              const name = esc(m.name || "anon");
+              const time = fmtTime(m.ts);
+              const text = esc(m.text);
+              div.innerHTML = `<div class="tchat-meta"><span class="tchat-name">${name}${m.admin ? " 👑" : ""}</span><span class="tchat-time">${time}</span></div><div class="tchat-text">${text}</div>`;
+            } else {
+              // services
+              const kind = String(m.kind || "alert");
+              div.className = "tchat-msg svc " + esc(kind);
+              div.dataset.mid = m.id;
+              const time = fmtTime(m.ts);
+              const text = svcText(m);
+              const meta = m.meta || {};
+              const sym = meta.symbol ? esc(coin(meta.symbol)) : "";
+              const label = kindLabel(kind);
+              div.innerHTML = `<div class="tchat-meta"><span class="tchat-svc-kind">${label}${sym ? " · " + sym : ""}</span><span class="tchat-time">${time}</span></div><div class="tchat-text">${text}</div>`;
+            }
+            frag.appendChild(div);
+          }
+          const scrollHBefore = container.scrollHeight;
+          container.insertBefore(frag, container.firstChild.nextSibling); // после кнопки
+          // сохраняем позицию скролла
+          container.scrollTop = container.scrollHeight - scrollHBefore;
+          if (!j.has_more) { btn.textContent = T("chat.btn.no_more", "больше нет"); setTimeout(()=>btn.remove(), 1200); }
+          else { btn.disabled = false; btn.textContent = T("chat.btn.load_more", "⬆ Загрузить ещё"); }
+        } catch {
+          btn.disabled = false;
+          btn.textContent = T("chat.btn.load_more", "⬆ Загрузить ещё");
+        }
+      });
+      container.prepend(btn);
     }
     async function poll() {
       if (!me) return;
       try {
-        const msgs = await fetchList(lastId, 200);
+        const msgs = await fetchList(lastId, MAX_HISTORY);
         if (!msgs.length) return;
         let newOnes = 0;
-        for (const m of msgs) { if (m.id > lastId) { lastId = m.id; newOnes++; } }
+        let newestId = lastId;
+        const toRender = [];
+        for (const m of msgs) {
+          if (m.id > lastId) {
+            newestId = Math.max(newestId, m.id);
+            // A1: только если новее server last_read — считаем новым, иначе это контекст
+            if (isNewAfterRead(m, "public")) toRender.push(m);
+            newOnes++;
+          }
+        }
         if (newOnes) {
-          try { localStorage.setItem(LS_LAST_ID, String(lastId)); } catch {}
-          if (view === "public") renderMsgs(msgs, listEl, me, {});
-          else publicUnread += newOnes;
-          if (newOnes && view !== "public") playSound("public");
-          else if (newOnes && !isOpen) playSound("public");
-          setBadge();
+          lastId = newestId;
+          saveLastIds();
+          if (view === "public" && isOpen) {
+            if (toRender.length) renderMsgs(toRender, listEl, me, {});
+            markRead("public");
+          } else {
+            // если чат закрыт или не на вкладке — бейдж только для реально новых после last_read
+            const realNew = toRender.length || newOnes;
+            if (realNew) { publicUnread += realNew; playSound("public"); setBadge(); }
+          }
+          // если вкладка открыта но скролл внизу — всё равно помечаем прочитанным
+          if (view === "public" && isOpen) {
+            const gap = listEl ? (listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight) : 0;
+            if (gap < 120) { publicUnread = 0; setBadge(); markRead("public"); }
+          }
         }
       } catch {}
     }
 
     async function fetchSvc(afterId, limit) {
       try {
-        let url = SVC_API + "?limit=" + (limit || 100);
+        let url = SVC_API + "?limit=" + (limit || MAX_HISTORY);
         if (afterId) url += "&after_id=" + afterId;
         const r = await fetch(url, { credentials: "same-origin" });
         if (!r.ok) return [];
@@ -993,20 +1273,37 @@
     async function refreshServices(first) {
       if (!me) return;
       try {
-        const msgs = await fetchSvc(first ? 0 : lastSvcId, first ? 100 : 200);
+        const msgs = await fetchSvc(first ? 0 : lastSvcId, first ? MAX_HISTORY : MAX_HISTORY);
         if (!msgs.length) {
-          if (first && svcListEl && !svcListEl.children.length) renderSvcMsgs([], svcListEl);
+          if (first && svcListEl && !svcListEl.children.length) {
+            addLoadMoreBtn(svcListEl, "services");
+            renderSvcMsgs([], svcListEl);
+          }
           return;
         }
         let newOnes = 0;
-        for (const m of msgs) { if (m.id > lastSvcId) { lastSvcId = m.id; newOnes++; } }
+        let newest = lastSvcId;
+        const toRender = [];
+        for (const m of msgs) { if (m.id > lastSvcId) { newest = Math.max(newest, m.id); if (first || isNewAfterRead(m, "services")) toRender.push(m); newOnes++; } }
         if (first) {
-          if (svcListEl) { svcListEl.innerHTML = ""; renderSvcMsgs(msgs, svcListEl); }
-          if (msgs.length) lastSvcId = Math.max(...msgs.map(m => m.id));
+          if (svcListEl) {
+            svcListEl.innerHTML = "";
+            addLoadMoreBtn(svcListEl, "services");
+            renderSvcMsgs(msgs, svcListEl);
+          }
+          if (msgs.length) { lastSvcId = Math.max(...msgs.map(m => m.id)); saveLastIds(); }
+          if (isOpen && view === "services") markRead("services");
         } else {
-          if (view === "services") renderSvcMsgs(msgs, svcListEl);
-          else svcUnread += newOnes;
-          if (newOnes) { if (view !== "services") playSound("services"); setBadge(); }
+          lastSvcId = newest;
+          saveLastIds();
+          if (view === "services" && isOpen) {
+            if (toRender.length) renderSvcMsgs(toRender, svcListEl);
+            markRead("services");
+            svcUnread = 0;
+          } else {
+            if (newOnes) svcUnread += toRender.length || newOnes;
+          }
+          if (newOnes) { if (view !== "services" || !isOpen) playSound("services"); setBadge(); }
         }
       } catch {}
     }
@@ -1014,7 +1311,7 @@
 
     async function fetchSup(afterId, limit) {
       try {
-        let url = SUP_API + "?limit=" + (limit || 100);
+        let url = SUP_API + "?limit=" + (limit || MAX_HISTORY);
         if (afterId) url += "&after_id=" + afterId;
         if (!me) {
           url += "&guest_token=" + encodeURIComponent(supGuestToken);
@@ -1029,20 +1326,29 @@
     }
     async function refreshSupport(first) {
       try {
-        const msgs = await fetchSup(first ? 0 : lastSupId, first ? 100 : 200);
+        const msgs = await fetchSup(first ? 0 : lastSupId, first ? MAX_HISTORY : MAX_HISTORY);
         if (!msgs.length) {
           if (first && supListEl && !supListEl.children.length) renderSupMsgs([], supListEl, me);
           return;
         }
         let newOnes = 0;
-        for (const m of msgs) { if (m.id > lastSupId) { lastSupId = m.id; newOnes++; } }
+        let newest = lastSupId;
+        for (const m of msgs) { if (m.id > lastSupId) { newest = Math.max(newest, m.id); newOnes++; } }
         if (first) {
           if (supListEl) { supListEl.innerHTML = ""; renderSupMsgs(msgs, supListEl, me); }
-          if (msgs.length) lastSupId = Math.max(...msgs.map(m => m.id));
+          if (msgs.length) { lastSupId = Math.max(...msgs.map(m => m.id)); saveLastIds(); }
+          if (isOpen && view === "support") markRead("support");
         } else {
-          if (view === "support") renderSupMsgs(msgs, supListEl, me);
-          else supUnread += newOnes;
-          if (newOnes) { if (view !== "support") playSound("support"); setBadge(); }
+          lastSupId = newest;
+          saveLastIds();
+          if (view === "support" && isOpen) {
+            renderSupMsgs(msgs, supListEl, me);
+            supUnread = 0;
+            markRead("support");
+          } else {
+            supUnread += newOnes;
+          }
+          if (newOnes) { if (view !== "support" || !isOpen) playSound("support"); setBadge(); }
         }
       } catch {}
     }
@@ -1330,7 +1636,7 @@
           const j = await jget(SUP_API, { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), });
           input.value = "";
           const msg = j && j.message;
-          if (msg && msg.id) { lastSupId = Math.max(lastSupId, msg.id); renderSupMsgs([msg], supListEl, me); if (j.guest_token) { supGuestToken = j.guest_token; try { localStorage.setItem(LS_SUP_GUEST, supGuestToken); } catch {} } }
+          if (msg && msg.id) { lastSupId = Math.max(lastSupId, msg.id); saveLastIds(); renderSupMsgs([msg], supListEl, me); if (j.guest_token) { supGuestToken = j.guest_token; try { localStorage.setItem(LS_SUP_GUEST, supGuestToken); } catch {} } markRead("support", lastSupId); }
           setHint(me && me.is_admin
             ? T("chat.hint.sent_support_admin", "🆘 ответ в поддержку отправлен")
             : T("chat.hint.sent_support", "🆘 поддержка • отправили (30 дней)"), false);
@@ -1347,7 +1653,7 @@
           if (!r.ok) throw new Error(j.hint || j.error || "error");
           input.value = "";
           const msg = j && j.message;
-          if (msg && msg.id) { lastId = Math.max(lastId, msg.id); try { localStorage.setItem(LS_LAST_ID, String(lastId)); } catch {} renderMsgs([msg], listEl, me, {}); }
+          if (msg && msg.id) { lastId = Math.max(lastId, msg.id); saveLastIds(); renderMsgs([msg], listEl, me, {}); markRead("public", lastId); }
           setHint(T("chat.hint.public_history", "Вы: {name} • 3 дня истории",
             { name: me.name || "id" + me.id }), false);
         }
@@ -1407,15 +1713,30 @@
         if (data.type === "terminal_chat" && data.message) {
           if (!me) return;
           const m = data.message;
-          if (m.id > lastId) { lastId = m.id; try { localStorage.setItem(LS_LAST_ID, String(lastId)); } catch {} }
-          if (view === "public") renderMsgs([m], listEl, me, {}); else { publicUnread++; playSound("public"); setBadge(); }
+          if (m.id > lastId) { lastId = m.id; saveLastIds(); }
+          if (view === "public" && isOpen) {
+            renderMsgs([m], listEl, me, {});
+            // если внизу — сразу помечаем прочитанным, иначе бейдж
+            const gap = listEl ? (listEl.scrollHeight - listEl.scrollTop - listEl.clientHeight) : 999;
+            if (gap < 120) { publicUnread = 0; markRead("public"); }
+            else { if (isNewAfterRead(m, "public")) { publicUnread++; playSound("public"); setBadge(); } }
+          } else {
+            if (isNewAfterRead(m, "public")) { publicUnread++; playSound("public"); setBadge(); }
+          }
         } else if (data.type === "terminal_chat_del" && data.id) {
           const el = listEl && listEl.querySelector(`[data-mid="${data.id}"]`); if (el) el.remove();
         } else if (data.type === "service_chat" && data.message) {
           if (!me) return;
           const m = data.message;
-          if (m.id > lastSvcId) lastSvcId = m.id;
-          if (view === "services") renderSvcMsgs([m], svcListEl); else { svcUnread++; playSound("services"); setBadge(); }
+          if (m.id > lastSvcId) { lastSvcId = m.id; saveLastIds(); }
+          if (view === "services" && isOpen) {
+            renderSvcMsgs([m], svcListEl);
+            const gap = svcListEl ? (svcListEl.scrollHeight - svcListEl.scrollTop - svcListEl.clientHeight) : 999;
+            if (gap < 120) { svcUnread = 0; markRead("services"); }
+            else { if (isNewAfterRead(m, "services")) { svcUnread++; playSound("services"); setBadge(); } }
+          } else {
+            if (isNewAfterRead(m, "services")) { svcUnread++; playSound("services"); setBadge(); }
+          }
         } else if (data.type === "support_chat" && data.message) {
           const m = data.message;
           const tk = data.thread_key || m.thread_key || "";
@@ -1436,8 +1757,11 @@
               return;
             }
           }
-          if (m.id > lastSupId) lastSupId = m.id;
-          if (view === "support") renderSupMsgs([m], supListEl, me); else { supUnread++; playSound("support"); setBadge(); }
+          if (m.id > lastSupId) { lastSupId = m.id; saveLastIds(); }
+          if (view === "support" && isOpen) {
+            renderSupMsgs([m], supListEl, me);
+            supUnread = 0; markRead("support");
+          } else { supUnread++; playSound("support"); setBadge(); }
           if (me && me.is_admin) refreshSupThreads();
         } else if (data.type === "support_chat_del" && data.id) {
           const el = supListEl && supListEl.querySelector(`[data-mid="${data.id}"]`); if (el) el.remove();
@@ -1487,6 +1811,41 @@
     if (svcListEl) bindNameClicks(svcListEl);
     if (supListEl) bindNameClicks(supListEl);
     loadInitial().then(() => { if (view === "rooms") renderRooms(); });
+    // A3: focus / visibility → markRead debounce
+    try {
+      window.addEventListener("focus", () => {
+        if (!isOpen) return;
+        if (view === "public") { publicUnread = 0; setBadge(); markRead("public"); }
+        if (view === "services") { svcUnread = 0; setBadge(); markRead("services"); }
+        if (view === "support") { supUnread = 0; setBadge(); markRead("support"); }
+      });
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden) return;
+        if (!isOpen) return;
+        if (view === "public") { publicUnread = 0; setBadge(); markRead("public"); }
+        if (view === "services") { svcUnread = 0; setBadge(); markRead("services"); }
+        if (view === "support") { supUnread = 0; setBadge(); markRead("support"); }
+      });
+      // logout cleanup hook: when account.js logs out, it dispatches liqscope:logout
+      window.addEventListener("liqscope:logout", () => {
+        const uid = getStoredUid() || curUid();
+        if (uid) clearUserChatKeys(uid);
+        setStoredUid(0);
+      });
+      // also intercept fetch to /api/auth/logout to clear
+      const _origFetch = window.fetch;
+      window.fetch = function(input, init) {
+        try {
+          const url = typeof input === "string" ? input : (input && input.url) || "";
+          if (url && url.indexOf("/api/auth/logout") !== -1) {
+            const uid = getStoredUid() || curUid();
+            if (uid) clearUserChatKeys(uid);
+            setStoredUid(0);
+          }
+        } catch {}
+        return _origFetch.apply(this, arguments);
+      };
+    } catch {}
     setInterval(poll, POLL_MS);
     setInterval(pollBadges, BADGE_POLL_MS);
     setInterval(pingPresence, PING_MS);

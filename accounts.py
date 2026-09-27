@@ -665,6 +665,16 @@ class Store:
                     reminded_at REAL NOT NULL DEFAULT 0,
                     updated_at REAL NOT NULL DEFAULT 0
                 );
+                -- 📖 last_read per-user per-chat (public, services, dm, support)
+                CREATE TABLE IF NOT EXISTS chat_reads (
+                    user_id INTEGER NOT NULL,
+                    chat_id TEXT NOT NULL,
+                    last_read_id INTEGER NOT NULL DEFAULT 0,
+                    last_read_ts REAL NOT NULL DEFAULT 0,
+                    updated_at REAL NOT NULL DEFAULT 0,
+                    PRIMARY KEY (user_id, chat_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_chat_reads_user ON chat_reads(user_id);
                 """
             )
             self._db.commit()
@@ -3598,6 +3608,90 @@ class Store:
                 "SELECT last_read_id FROM private_reads WHERE room_id=? AND user_id=?",
                 (int(room_id), int(user_id))).fetchone()
         return int(row["last_read_id"]) if row else 0
+
+    # --- общий last_read per-user per-chat (public, services, support, dm) ---
+    def chat_mark_read(self, user_id: int, chat_id: str, last_id: int = 0, last_ts: float = 0.0) -> None:
+        """Пометить чат как прочитанный до last_id/ts (монотонно растёт)."""
+        chat_id = str(chat_id or "").strip()[:64] or "public"
+        uid = int(user_id)
+        now = __import__("time").time()
+        last_id = int(last_id or 0)
+        last_ts = float(last_ts or now)
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO chat_reads(user_id, chat_id, last_read_id, last_read_ts, updated_at) "
+                "VALUES(?,?,?,?,?) ON CONFLICT(user_id, chat_id) DO UPDATE SET "
+                "last_read_id=MAX(last_read_id, excluded.last_read_id), "
+                "last_read_ts=MAX(last_read_ts, excluded.last_read_ts), "
+                "updated_at=excluded.updated_at",
+                (uid, chat_id, last_id, last_ts, now),
+            )
+            self._db.commit()
+
+    def chat_last_read(self, user_id: int, chat_id: str) -> dict:
+        chat_id = str(chat_id or "").strip()[:64] or "public"
+        uid = int(user_id)
+        with self._lock:
+            row = self._db.execute(
+                "SELECT last_read_id, last_read_ts FROM chat_reads WHERE user_id=? AND chat_id=?",
+                (uid, chat_id)).fetchone()
+        if not row:
+            return {"last_read_id": 0, "last_read_ts": 0.0}
+        return {"last_read_id": int(row["last_read_id"] or 0), "last_read_ts": float(row["last_read_ts"] or 0.0)}
+
+    def chat_unread_counts(self, user_id: int) -> dict:
+        """Счётчики непрочитанных для бейджа: public, services, support, dm."""
+        uid = int(user_id)
+        now = __import__("time").time()
+        # public — считаем сообщения новее last_read_id
+        reads = {}
+        with self._lock:
+            for r in self._db.execute("SELECT chat_id, last_read_id FROM chat_reads WHERE user_id=?", (uid,)).fetchall():
+                reads[str(r["chat_id"])] = int(r["last_read_id"] or 0)
+        out = {}
+        # public
+        try:
+            last_pub = reads.get("public", 0)
+            with self._lock:
+                row = self._db.execute(
+                    "SELECT COUNT(*) AS n FROM terminal_chat WHERE id > ?", (last_pub,)).fetchone()
+            out["public"] = int(row["n"] or 0) if row else 0
+        except Exception:
+            out["public"] = 0
+        # services
+        try:
+            last_svc = reads.get("services", 0)
+            with self._lock:
+                row = self._db.execute(
+                    "SELECT COUNT(*) AS n FROM user_service_chat WHERE user_id=? AND id > ?", (uid, last_svc)).fetchone()
+            out["services"] = int(row["n"] or 0) if row else 0
+        except Exception:
+            out["services"] = 0
+        # dm — сумма по комнатам (уже есть private_unread_for)
+        try:
+            dm_map = self.private_unread_for(uid)
+            out["dm"] = sum(dm_map.values())
+        except Exception:
+            out["dm"] = 0
+        # support — для юзера: сообщения админа новее user_last_read_id
+        try:
+            # support_reads уже хранит per-thread, но для общего бейджа считаем все треды юзера
+            with self._lock:
+                rows = self._db.execute(
+                    "SELECT thread_key, user_last_read_id FROM support_reads WHERE user_id=?", (uid,)).fetchall()
+            total = 0
+            for r in rows:
+                tk = str(r["thread_key"])
+                last_id = int(r["user_last_read_id"] or 0)
+                with self._lock:
+                    cnt = self._db.execute(
+                        "SELECT COUNT(*) AS n FROM support_chat WHERE thread_key=? AND id > ? AND is_admin=1",
+                        (tk, last_id)).fetchone()
+                total += int(cnt["n"] or 0) if cnt else 0
+            out["support"] = total
+        except Exception:
+            out["support"] = 0
+        return out
 
     def private_unread_for(self, user_id: int) -> Dict[int, int]:
         """room_id -> сколько непрочитанных сообщений от собеседника."""

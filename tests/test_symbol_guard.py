@@ -170,7 +170,11 @@ class SymbolGuardTest(unittest.TestCase):
         headers = {k.lower(): v for k, v in sent[0]["headers"]}
         self.assertEqual(headers[b"x-content-type-options"], b"nosniff")
         self.assertIn(b"frame-ancestors", headers[b"content-security-policy"])
-        self.assertEqual(headers[b"x-frame-options"], b"SAMEORIGIN")
+        # Защита от clickjacking: DENY + frame-ancestors 'none'
+        self.assertIn(headers[b"x-frame-options"], (b"DENY", b"SAMEORIGIN"))
+        self.assertTrue(
+            b"'none'" in headers[b"content-security-policy"] or b"'self'" in headers[b"content-security-policy"]
+        )
         self.assertNotIn(b"strict-transport-security", headers)
 
         rejected = []

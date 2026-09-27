@@ -1,0 +1,69 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install httpx
+
+      - name: Install JS deps
+        run: |
+          npm install --no-save jsdom ws
+
+      - name: Build i18n bundles
+        run: |
+          python tools/build_i18n_pages.py
+          python tools/build_i18n_pages.py --check
+
+      - name: Run tests (one-button runner)
+        run: |
+          bash tools/run_tests.sh --python
+        env:
+          LIQSCOPE_SECRET: test-secret-not-the-published-default
+          PYTHON: python
+
+      - name: Run JS tests (if any) with dom env
+        run: |
+          # JS tests that don't need live server — they use _dom_env to stub gtag
+          export NODE_OPTIONS="--require $(pwd)/tests/_dom_env.js"
+          export NODE_PATH=$(pwd)/node_modules
+          for f in tests/*.js; do
+            base=$(basename "$f")
+            case "$base" in _*) continue;; esac
+            # skip tests that need LIQSCOPE_TEST_URL (they require live server)
+            if grep -q "process.argv\[2\]\|LIQSCOPE_TEST_URL" "$f"; then
+              echo "skip (needs live server) $f"
+              continue
+            fi
+            echo "run $f"
+            node "$f" || exit 1
+          done
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs
+          path: /tmp/liq-test.out
+          if-no-files-found: ignore

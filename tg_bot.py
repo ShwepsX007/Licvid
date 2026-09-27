@@ -1314,6 +1314,44 @@ class TelegramBot:
         mid = (res.get("result") or {}).get("message_id")
         return self._note_sent(chat_id, mid)
 
+    async def _download_tg_file(self, file_id: str, dest_path: str):
+        """Скачать файл из Telegram по file_id в dest_path (для материализации фото для сайта).
+
+        Не блокирует надолго: таймаут 30s, при сбое возвращает None и логирует, пост всё равно публикуется без фото.
+        """
+        if not self._session or not file_id or not dest_path:
+            return None
+        try:
+            res = await self._call("getFile", {"file_id": file_id})
+            if not res or not res.get("ok"):
+                import logging
+                logging.getLogger("liqscope.tg").debug("getFile %s: %s", file_id[:20], (res or {}).get("description"))
+                return None
+            fpath = ((res.get("result") or {}).get("file_path") or "").strip()
+            if not fpath:
+                return None
+            url = f"https://api.telegram.org/file/bot{self.token}/{fpath}"
+            import os, aiohttp
+            os.makedirs(os.path.dirname(dest_path) or ".", exist_ok=True)
+            try:
+                async with self._session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as r:
+                    if r.status != 200:
+                        return None
+                    data = await r.read()
+                    if len(data) > 10 * 1024 * 1024:
+                        return None
+                    with open(dest_path, "wb") as fh:
+                        fh.write(data)
+                    return dest_path
+            except Exception as e:
+                import logging
+                logging.getLogger("liqscope.tg").warning("tg download %s: %s", file_id[:20], e)
+                return None
+        except Exception as e:
+            import logging
+            logging.getLogger("liqscope.tg").warning("tg _download_tg_file %s: %s", file_id[:20], e)
+            return None
+
     async def _sleep_between_posts(self, chunk: float = 60.0) -> None:
         """Пауза до следующего поста.
 
@@ -1829,13 +1867,59 @@ class TelegramBot:
                                     "extra": list(info.get("extra") or [])}
             if tg_ids:
                 rec["tg"] = tg_ids
-            if img and os.path.isfile(str(img)):
-                rec["photo"] = cover_info(str(img), self.store)
-            store.add(rec)
+            # materialize photo for web — копия в data/hourly_photos, чтобы не потерялась
+            try:
+                from hourly_posts import materialize_hourly_photo, tg_html, plain_text
+                photo_src = str(img or "")
+                mat_path = None
+                if photo_src and os.path.isfile(photo_src):
+                    mat_path = materialize_hourly_photo(photo_src, rec["id"])
+                    use_path = mat_path or photo_src
+                    rec["photo"] = cover_info(use_path, self.store)
+                    if mat_path:
+                        rec["photo"]["materialized"] = mat_path
+                        rec["photo"]["original"] = photo_src
+                elif photo_src and not os.path.isfile(photo_src):
+                    # возможно file_id из Telegram — пробуем скачать (async, но здесь sync контекст, логируем)
+                    # для async скачивания см. _download_tg_file, здесь оставляем без фото, но не ломаем пост
+                    log.debug("hourly photo is file_id or missing: %s", photo_src[:80])
+                # канонические поля для сайта — полный контент как в TG
+                try:
+                    html_full = {}
+                    preview = {}
+                    for lk, txt in texts.items():
+                        try:
+                            html_full[lk] = tg_html(txt)
+                        except Exception:
+                            html_full[lk] = txt
+                        try:
+                            preview[lk] = plain_text(txt)[:400]
+                        except Exception:
+                            preview[lk] = txt[:400]
+                    rec["html_full"] = html_full
+                    rec["preview"] = preview
+                    rec["content_full"] = dict(texts)
+                    rec["title"] = f"Сводка {rec['id']}"
+                    rec["symbols"] = []
+                    rec["tags"] = ["liq", "cvd", "oi"]
+                except Exception as ee:
+                    log.debug("hourly canonical enrich: %s", ee)
+            except Exception as ee:
+                log.debug("hourly photo materialize enrich: %s", ee)
+                if img and os.path.isfile(str(img)):
+                    try:
+                        rec["photo"] = cover_info(str(img), self.store)
+                    except Exception:
+                        pass
+            try:
+                store.add(rec)
+            except Exception as e:
+                log.warning("сводки по часам: store.add не удалось: %s", e)
+                raise
             log.info("сводка n=%s добавлена в архив сайта: %s (%s)",
                      n, rec["id"], ", ".join(sorted(texts)))
-        except Exception as e:                      # noqa: BLE001
-            log.warning("сводки по часам: пост не попал в архив: %s", e)
+        except Exception as e:
+            log.warning("сводки по часам: пост не попал в архив: %s", e, exc_info=True)
 
     async def _send_draft(self, posts, img, n: int, note: str, meta=None) -> bool:
         """Контроль публикации: показываем пост админу, в канал не отправляем."""

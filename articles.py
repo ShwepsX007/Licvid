@@ -117,12 +117,15 @@ _HR_RE = re.compile(r"^\s*(?:-{3,}|\*{3,})\s*$")
 
 
 def _q(text: str) -> str:
-    """Кавычки в атрибуте. Текст уже прошёл ``_esc`` (``&<>``), кавычки — нет.
+    """Экранирование для атрибута href/src/alt.
 
-    Без этого ``[x](https://a.com/"onmouseover="alert(1))`` вырывается из href,
-    а ``![x" onerror="alert(1)](url)`` — из alt.
+    Используем html.escape с quote=True, чтобы кавычка не вырывалась из
+    атрибута: ``[x](https://a.com/"onmouseover="alert(1))`` и
+    ``![x" onerror="alert(1)](url)`` должны остаться безопасными.
+    Текст уже прошёл ``_esc`` (``&<>``), но повторное экранирование & не ломает,
+    а только делает ``&lt;`` → ``&amp;lt;`` — всё равно безопасно.
     """
-    return str(text or "").replace('"', "&quot;").replace("'", "&#39;")
+    return html_mod.escape(str(text or ""), quote=True)
 
 
 def inline_html(text: str) -> str:

@@ -262,6 +262,39 @@ def photo_url(rid: str) -> str:
     return f"/api/hourly/photo/{rid}"
 
 
+def _safe_name(name: str) -> str:
+    import re
+    n = str(name or "cover.jpg").strip()
+    n = re.sub(r"[^a-zA-Z0-9._-]", "_", n)
+    return n[:80] or "cover.jpg"
+
+
+def materialize_hourly_photo(src_path: str, post_id_str: str, dest_dir: str = "") -> Optional[str]:
+    """Скопировать фото поста в безопасное место для веба (не удалится с исходником).
+
+    Возвращает путь к копии или None если копирование не удалось.
+    """
+    import shutil
+    src = str(src_path or "")
+    if not src or not os.path.isfile(src):
+        return None
+    pid = _safe_name(str(post_id_str or "post"))
+    dest_dir = str(dest_dir or os.path.join(os.path.dirname(__file__), "data", "hourly_photos")).strip()
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+    except Exception:
+        return None
+    base = _safe_name(os.path.basename(src))
+    dest = os.path.join(dest_dir, f"{pid}_{base}")
+    try:
+        # если уже есть — не переписываем, чтобы не терять
+        if not os.path.isfile(dest):
+            shutil.copy2(src, dest)
+        return dest
+    except Exception:
+        return None
+
+
 def _hourly_bundle_fallback(rid: str = "") -> Optional[str]:
     """Встроенная картинка, когда файл поста удалён."""
     try:

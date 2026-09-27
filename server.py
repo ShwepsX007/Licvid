@@ -293,27 +293,36 @@ REQUIRE_EMAIL_VERIFICATION = os.getenv(
 ACCOUNTS_DB = os.getenv("LIQSCOPE_ACCOUNTS_DB",
                         os.path.join(HERE, "data", "accounts.db"))
 # Дневной дайджест: архив выпусков и время вечерней публикации (МСК).
-# LIQSCOPE_DIGEST_FILE="" — не хранить историю (страница будет пустой).
-DIGEST_FILE = os.getenv("LIQSCOPE_DIGEST_FILE",
-                        os.path.join(HERE, "data", "digests.json")).strip()
-if DIGEST_FILE.lower() in ("0", "none", "off", "false"):
+# LIQSCOPE_DIGEST_FILE="0" — не хранить историю (страница будет пустой). Пустая строка → default.
+_raw_digest = os.getenv("LIQSCOPE_DIGEST_FILE", "").strip()
+if not _raw_digest:
+    DIGEST_FILE = os.path.join(HERE, "data", "digests.json")
+elif _raw_digest.lower() in ("0", "none", "off", "false"):
     DIGEST_FILE = ""
+else:
+    DIGEST_FILE = _raw_digest
 # Сводки по часам — раздел сайта: архив постов канала (то же, что ушло в
-# Telegram, плюс фото). LIQSCOPE_HOURLY_FILE="" — не хранить (раздел пустой).
-HOURLY_FILE = os.getenv("LIQSCOPE_HOURLY_FILE",
-                        os.path.join(HERE, "data", "channel_posts.json")).strip()
-if HOURLY_FILE.lower() in ("0", "none", "off", "false"):
+# Telegram, плюс фото). LIQSCOPE_HOURLY_FILE="0" — не хранить (раздел пустой). Пустая строка → default.
+_raw_hourly = os.getenv("LIQSCOPE_HOURLY_FILE", "").strip()
+if not _raw_hourly:
+    HOURLY_FILE = os.path.join(HERE, "data", "channel_posts.json")
+elif _raw_hourly.lower() in ("0", "none", "off", "false"):
     HOURLY_FILE = ""
+else:
+    HOURLY_FILE = _raw_hourly
 try:
     HOURLY_KEEP = max(50, int(os.getenv("LIQSCOPE_HOURLY_KEEP", "1200") or 1200))
 except ValueError:
     HOURLY_KEEP = 1200
 # 📰 Статьи: материалы, которые админ пишет сам (заголовок, текст, обложка).
-# LIQSCOPE_ARTICLES_FILE="" — не хранить архив (раздел будет пустым).
-ARTICLES_FILE = os.getenv("LIQSCOPE_ARTICLES_FILE",
-                          os.path.join(HERE, "data", "articles.json")).strip()
-if ARTICLES_FILE.lower() in ("0", "none", "off", "false"):
+# LIQSCOPE_ARTICLES_FILE="0" — не хранить архив (раздел будет пустым). Пустая строка → default.
+_raw_articles = os.getenv("LIQSCOPE_ARTICLES_FILE", "").strip()
+if not _raw_articles:
+    ARTICLES_FILE = os.path.join(HERE, "data", "articles.json")
+elif _raw_articles.lower() in ("0", "none", "off", "false"):
     ARTICLES_FILE = ""
+else:
+    ARTICLES_FILE = _raw_articles
 ARTICLES_DIR = os.getenv("LIQSCOPE_ARTICLES_DIR",
                          os.path.join(HERE, "data", "articles")).strip()
 try:
@@ -3450,8 +3459,51 @@ async def collect_hourly_post() -> dict:
         "n": n,
         "manual": True,
     }
+    # materialize photo for web — копия в data/hourly_photos, чтобы не потерялась при удалении исходника
+    photo_info = {}
     if img and os.path.isfile(img):
-        rec["photo"] = cover_info(img, account_store)
+        try:
+            from hourly_posts import materialize_hourly_photo
+            # id уже известен
+            pid = hourly_id(now)
+            mat = materialize_hourly_photo(img, pid)
+            # если копия удалась — используем её, иначе оригинал
+            use_path = mat or img
+            photo_info = cover_info(use_path, account_store)
+            # сохраняем и оригинал для отладки, и материализованный путь
+            if mat:
+                photo_info["materialized"] = mat
+                photo_info["original"] = img
+        except Exception as e:
+            log.debug("hourly photo materialize: %s", e)
+            photo_info = cover_info(img, account_store)
+        rec["photo"] = photo_info
+    # каноническая запись для сайта — полный контент как в TG, плюс html/preview/symbols
+    try:
+        from hourly_posts import tg_html as _tg_html, plain_text as _plain
+        html_full = {}
+        preview = {}
+        for lang_key, txt in texts.items():
+            try:
+                html_full[lang_key] = _tg_html(txt)
+            except Exception:
+                html_full[lang_key] = txt
+            try:
+                preview[lang_key] = _plain(txt)[:400]
+            except Exception:
+                preview[lang_key] = txt[:400]
+        rec["html_full"] = html_full
+        rec["preview"] = preview
+        rec["content_full"] = dict(texts)  # полный текст
+        try:
+            top_coins = [c.get("symbol") for c in (snap.get("top_coins") or []) if c.get("symbol")]
+            rec["symbols"] = top_coins[:10]
+            rec["tags"] = ["liq", "cvd", "oi"]
+        except Exception:
+            pass
+        rec["title"] = f"Сводка {rec['id']}"
+    except Exception as e:
+        log.debug("hourly canonical enrich: %s", e)
     return hourly_ctx.store.add(rec)
 
 

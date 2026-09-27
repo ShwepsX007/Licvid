@@ -1,10 +1,28 @@
 # Полный аудит проекта LiqScope (репозиторий Licvid)
 # Аудит Licvid
 
-**Дата:** 24.09.2026
-**Ветка:** `arena/01a0ce78-licvid`, HEAD `96a78c2`
-**Стенд аудита:** локальный демо-сервер `LIQSCOPE_DEMO=1` на `127.0.0.1:8000`, 31 день демо-истории, 5 языков, 40 монет.
-Проверен код в репозитории. Боевой процесс не запускался, логи сервера не смотрелись. Ниже только то, что видно в коде. Это не список правок и не переписывание проекта.
+## 0.1. Исправления от 27.09.2026 (ветка arena/01a0e2e8-licvid)
+
+Все пункты P0/P1 из §1 закрыты и проверены на демо-стенде 127.0.0.1:8001.
+
+| # из §1 | Что было | Что сделано | Проверка |
+|---|---|---|---|
+| 1 P0 XSS symbols/add | anon POST → HTML в список монет, innerHTML → выполнение | `market_feed.is_safe_symbol` regex `^[A-Z0-9]{1,10}_[A-Z0-9]{1,10}$`, макс длина 20, кап 120 custom + 200 total, `force` только админ (`require_admin` в `server.py:api_symbol_add`), фронтенд `escapeHtml` + `textContent` в `app.js` (symbolOptionEl, выпадающий список), rate limit 20/10м + 2r/s nginx | `curl POST <img>` → `invalid`, `force=true` anon → `admin`, jsdom `tests/symbol_xss.js` — нет реального `<img>`/`<svg>` в DOM |
+| 2 P0 рост | неограниченный рост custom_symbols | кап + проверка `len(custom_symbols) >=120` и `len(symbols)>=200`, отклоняет с сообщением | тест `test_symbol_guard` капает |
+| 3 P1 markdown XSS | кавычки вырывались из href/src | `articles.py:_q` теперь `html.escape(..., quote=True)`, фильтр `javascript:` сохранён, alt тоже экранируется | `test_articles.py` + ручной `![x" onerror]` → `alt="x&quot;...` безопасно |
+| 4 P1 CORS * + creds | `allow_origins=["*"]` + `allow_credentials=True` | убрали `*`, `CORS_ORIGINS` = `SITE_URL`, `PUBLIC_URL`, `LIQSCOPE_CORS_ORIGINS` (csv), `allow_credentials=True` только для своих origin. Evil origin не получает `allow-origin` | `curl -H Origin: evil` → нет заголовка, `liqscope.online` → есть |
+| 5 P1 default secret | дефолт `liqscope-change-me` принимался | `_KNOWN_BAD_SECRETS`, fail-fast в PROD если нет/дефолт (`SystemExit 2`), в DEMO — warning + генерация + файл `data/secret`. `deploy/licvid.service` требует `LIQSCOPE_REQUIRE_SECRET=1` и `LIQSCOPE_SECRET` в drop-in, чек-лист в README | `LIQSCOPE_SECRET=` → PROD падает, DEMO warning; `test_symbol_guard.test_secret_is_not_the_published_default` |
+| 6 P2 headers | нет security заголовков | `SecurityHeadersMiddleware` + nginx: `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`, `Permissions-Policy: camera=(), microphone=(), geolocation=()`, `X-Frame-Options: DENY`, `CSP: frame-ancestors 'none'`, HSTS в nginx https conf. Обновили `deploy/nginx-liqscope.conf` и `http.conf` | `curl -D` показывает DENY/'none'/nosniff |
+| 7 P2 gzip | 1.96 МБ без сжатия | `GZipMiddleware(minimum_size=500)` + nginx `gzip on` с типами js/css/json/svg, `CachedStaticFiles` с `Cache-Control: immutable` для `?v=` (31536000) и 3600 для остальных | `app.js` raw 370620 → gz 91948, `/terminal` 1.84 МБ raw → 478 КБ gz, с per-lang 1.43 МБ → 373 КБ gz (см. PERF_NOTES.md) |
+| 7b i18n split | 490 КБ все языки сразу | `tools/build_i18n_pages.py` генерит `i18n.pages.{lang}.js` (ru 53K, en 104K, zh 100K, hi 147K, es 106K raw; gz 12K-30K), `seo_pages.render` подменяет src на per-lang по `detect_lang` | HTML теперь `/static/i18n.pages.en.js`, экономия gz ~106 КБ на страницу |
+| 8 P2 WS | без лимита | nginx `limit_conn` 20 на IP для `/ws`, `LIQSCOPE_TRUSTED_PROXIES` (127.0.0.1,::1) — XFF доверяется только от доверенных прокси, `_client_ip` в `server.py` и `web_account.py` | конфиг в `deploy/nginx-liqscope.conf` |
+| 9 P2 rate limit | нет лимита на symbols/add | `RateLimitMiddleware` 20/10м для `/api/symbols/add` (и 60/10м общий), nginx `limit_req` 2r/s для этого пути | тест `test_symbol_guard.test_rate_limit` |
+| 10 P2 tests | 27 js красных | stub `gtag` через `tests/_dom_env.js`, `resourceLoader` в jsdom, фикс `navigator.languages`, `test_resilience` gate, 4 перевода для `test_bot_i18n`, `tools/run_tests.sh` единый раннер, GitHub Actions `tests.yml` | `bash tools/run_tests.sh --python` ok, js `symbol_xss.js` ok |
+| 11 P3 ops | 2 юнита, один 0.0.0.0 | `deploy/liqscope.service` помечен obsolete, слушает 127.0.0.1, `licvid.service` — рабочий с чек-листом, `licvid-backup.service/.timer` + `BACKUP.md` с sqlite3 `.backup` и WAL checkpoint, README чек-лист деплоя | README § Быстрый деплой |
+
+Perf итог: см. `PERF_NOTES.md` — gzip + per-lang + immutable кэш → /terminal 1.96 МБ → 0.37 МБ на проводе, TTFB 2-5 мс.
+
+---
 
 ---
 

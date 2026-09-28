@@ -1811,8 +1811,31 @@
         } catch (e) { /* ignore */ }
     }
 
+    // Одна битая свеча (NaN/дубль времени) роняет setData целиком: серия
+    // остаётся пустой при живых state.candles — тёмный график с живой шапкой.
+    function sanitizeCandles(arr) {
+        if (!Array.isArray(arr)) return [];
+        const rows = [];
+        for (const c of arr) {
+            if (!c || typeof c !== "object") continue;
+            const t = Number(c.time);
+            const o = Number(c.open), h = Number(c.high);
+            const l = Number(c.low), cl = Number(c.close);
+            if (!Number.isFinite(t) || !Number.isFinite(o) || !Number.isFinite(h) ||
+                !Number.isFinite(l) || !Number.isFinite(cl)) continue;
+            rows.push(c);
+        }
+        rows.sort((a, b) => a.time - b.time);
+        const out = [];
+        for (const c of rows) {
+            if (out.length && out[out.length - 1].time === c.time) out[out.length - 1] = c;
+            else out.push(c);
+        }
+        return out;
+    }
+
     function setCandles(candles, source) {
-        state.candles = Array.isArray(candles) ? candles.slice() : [];
+        state.candles = sanitizeCandles(candles);
         state.candleSource = source || "";
         if (!candleSeries || !state.candles.length) return;
 
@@ -1821,16 +1844,14 @@
                 time: Number(c.time),
                 open: Number(c.open), high: Number(c.high),
                 low: Number(c.low), close: Number(c.close),
-            }))
-            .sort((a, b) => a.time - b.time);
+            }));
 
         const vols = state.candles
             .map((c) => ({
                 time: Number(c.time),
                 value: Number(c.volume) || 0,
                 color: Number(c.close) >= Number(c.open) ? "rgba(0,230,118,0.35)" : "rgba(255,42,95,0.35)",
-            }))
-            .sort((a, b) => a.time - b.time);
+            }));
 
         applyPricePrecision(bars[bars.length - 1].close);
         try {
@@ -1841,8 +1862,13 @@
                 });
             }
         } catch (e) { /* ignore */ }
-        candleSeries.setData(bars);
-        if (volumeSeries) volumeSeries.setData(vols);
+        try {
+            candleSeries.setData(bars);
+            if (volumeSeries) volumeSeries.setData(vols);
+        } catch (e) {
+            console.warn("[klines] setData failed, keeping previous series", e);
+            return;
+        }
 
         state.sessionOpen = bars[0].open;
         updatePriceDisplay(bars[bars.length - 1].close);

@@ -861,6 +861,9 @@
       const frame = document.createElement("iframe");
       frame.className = "chart-slot-frame";
       frame.title = "График " + pretty(rec.symbol);
+      // Нативный lazy-load: на медленной сети (26 КБ/с) невидимые вкладки
+      // не должны отъедать трафик у активного графика. Ставится ДО src.
+      frame.loading = "lazy";
       frame.src = this._embedUrl(rec, id);
       wrap.appendChild(frame);
       const note = this._popNote(id);

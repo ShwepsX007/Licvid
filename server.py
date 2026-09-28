@@ -1132,6 +1132,13 @@ def _apply_price_to_candles(symbol: str, price: float,
                             vol_delta: float = 0.0,
                             only_tfs: Optional[Set[int]] = None) -> List[tuple]:
     """Двигает последнюю свечу каждого ТФ. Возвращает [(tf, candle), ...]."""
+    try:
+        price = float(price)
+        vol_delta = float(vol_delta or 0.0)
+    except (TypeError, ValueError):
+        return []
+    if not math.isfinite(price) or not math.isfinite(vol_delta):
+        return []
     updated = []
     for tf in (only_tfs or TF_MINUTES):
         k = _key(symbol, tf)
@@ -1379,6 +1386,53 @@ def _liq_cluster_map(candles: list, tf: int, symbol: str,
     return (rows, min(cut, until)) if rows else ({}, 0.0)
 
 
+def _clean_candles(series):
+    """Выбрасывает битые свечи: нечисла, NaN/Inf, дубли и беспорядок времени.
+
+    Один битый бар роняет lightweight-charts setData() целиком — клиент
+    получает пустой график при живых state.candles (тёмное поле, живая шапка).
+    """
+    if not series:
+        return []
+    out = []
+    for c in series:
+        if not isinstance(c, dict):
+            continue
+        try:
+            t = int(c.get("time"))
+        except (TypeError, ValueError):
+            continue
+        row = dict(c)
+        row["time"] = t
+        ok = True
+        for k in ("open", "high", "low", "close"):
+            try:
+                v = float(row.get(k))
+            except (TypeError, ValueError):
+                ok = False
+                break
+            if not math.isfinite(v):
+                ok = False
+                break
+            row[k] = v
+        if not ok:
+            continue
+        try:
+            v = float(row.get("volume") or 0.0)
+        except (TypeError, ValueError):
+            v = 0.0
+        row["volume"] = v if (math.isfinite(v) and v >= 0) else 0.0
+        out.append(row)
+    out.sort(key=lambda c: c["time"])
+    dedup = []
+    for c in out:
+        if dedup and dedup[-1]["time"] == c["time"]:
+            dedup[-1] = c
+        else:
+            dedup.append(c)
+    return dedup
+
+
 async def get_candles(symbol: str, tf: int, force: bool = False) -> dict:
     symbol = canon(symbol)
     parsed = parse_tf(tf)
@@ -1387,6 +1441,8 @@ async def get_candles(symbol: str, tf: int, force: bool = False) -> dict:
     entry = CANDLES.get(k)
     fresh = entry and (time.time() - entry["ts"] < KLINE_TTL) and not force
     if fresh:
+        # кэш могли отравить живые тики — чиним на отдаче (и в самом кэше)
+        entry["candles"] = _clean_candles(entry.get("candles"))
         return entry
 
     real = None
@@ -1406,6 +1462,9 @@ async def get_candles(symbol: str, tf: int, force: bool = False) -> dict:
                         d = cvd_map.get(c["time"])
                         if d is not None:
                             c["cvd"] = d
+    # чистим ДО подшивки OI: аттач идёт по совпадению time; пустой результат
+    # честно проваливается в ветки «старый кэш» / «заготовка» ниже
+    real = _clean_candles(real)
     if real:
         # подшиваем открытый интерес: oi — уровень на конец свечи,
         # oiChg — изменение за свечу (для треугольников на графике)
@@ -1424,7 +1483,10 @@ async def get_candles(symbol: str, tf: int, force: bool = False) -> dict:
 
     if entry:
         entry["ts"] = time.time() - KLINE_TTL / 2   # отдадим старое, попробуем позже
-        return entry
+        entry["candles"] = _clean_candles(entry.get("candles"))
+        if entry["candles"]:
+            return entry
+        # кэш состоял из одних битых свечей — строим заготовку ниже
 
     # Совсем нет связи с биржами — строим заготовку от последней цены,
     # чтобы график не падал; источник помечен как "unavailable"

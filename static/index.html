@@ -39,7 +39,7 @@
     <!-- Local Lightweight Charts v5 -->
     <link rel="stylesheet" href="/static/ads.css?v=banner5">
     <link rel="stylesheet" href="/static/terminal_chat.css?v=8">
-    <link rel="stylesheet" href="/static/workspace.css?v=dock-mobile1">
+    <link rel="stylesheet" href="/static/workspace.css?v=dock-mobile2">
     <script src="/static/lightweight-charts.js"></script>
     <script src="/static/i18n.pages.js?v=book8"></script>
     <script src="/static/i18n.js?v=levels4"></script>
@@ -146,7 +146,8 @@
     </header>
 
     <!-- Controls Bar -->
-    <section class="controls-bar">
+    <!-- translate="no": Chrome Translate дублирует живые строки и корежит термины/валюты — у сайта свой i18n на 5 языков -->
+    <section class="controls-bar" translate="no">
         <!-- Звук и очистка переехали сюда из шапки: место освободил
              выбор монеты, который теперь живёт над графиком (как на биржах). -->
         <div class="control-group quick-tools">
@@ -257,7 +258,8 @@
     <!-- Main Workspace -->
     <main class="main-layout">
         <!-- Cluster Candlestick Chart -->
-        <section class="chart-section">
+        <!-- translate="no": Chrome Translate дублирует живые строки и корежит термины/валюты — у сайта свой i18n на 5 языков -->
+        <section class="chart-section" translate="no">
             <div class="chart-header flex-between">
                 <div class="symbol-price-display">
                     <button class="chart-tear" id="chart-tear" type="button"
@@ -488,7 +490,8 @@
              title="Ширина ленты: потяните за разделитель"></div>
 
         <!-- Live Feed Section -->
-        <aside class="feed-section">
+        <!-- translate="no": Chrome Translate дублирует живые строки и корежит термины/валюты — у сайта свой i18n на 5 языков -->
+        <aside class="feed-section" translate="no">
             <div class="feed-header flex-between">
                 <div class="feed-tabs" id="feed-tabs" role="tablist">
                     <button type="button" class="feed-tab feed-title active" role="tab"
@@ -583,8 +586,8 @@
     <!-- workspace.js (старый мультичарт) больше не подключается: графики
          собирает chart_dock.js, а один WebSocket на окно раздаёт данные
          встроенным окнам через postMessage. Файл оставлен для старых тестов. -->
-    <script src="/static/app.js?v=layers-lazy1"></script>
-    <script src="/static/chart_dock.js?v=dock-lazy1"></script>
+    <script src="/static/app.js?v=resize1"></script>
+    <script src="/static/chart_dock.js?v=dock-i18n1"></script>
     <script src="/static/ads.js?v=banner6"></script>
     <script src="/static/terminal_chat.js?v=9"></script>
     <script src="/static/presence.js?v=geo3"></script>

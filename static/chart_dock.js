@@ -628,38 +628,40 @@
       this.wrap.className = "chart-dock-wrap";
       const tools = document.createElement("div");
       tools.className = "chart-dock-tools";
+      // Живая панель: машинный перевод браузера дублирует и корежит кнопки
+      // («Мультиэкран» превращался в «epy!») — запрещаем, язык берём из страницы.
+      tools.setAttribute("translate", "no");
       const modes = document.createElement("div");
       modes.className = "chart-dock-modes";
-      [["tabs", "Вкладки", "Один график на весь терминал. Остальные — вкладками, переключение по клику."],
-        ["grid", "Мультиэкран", "Несколько графиков сразу, сеткой."]].forEach((pair) => {
+      this._modeBtns = {};
+      ["tabs", "grid"].forEach((view) => {
         const b = document.createElement("button");
         b.type = "button";
-        b.dataset.view = pair[0];
-        b.textContent = pair[1];
-        b.title = pair[2];
-        b.addEventListener("click", () => this.setView(pair[0]));
+        b.dataset.view = view;
+        b.addEventListener("click", () => this.setView(view));
         modes.appendChild(b);
+        this._modeBtns[view] = b;
       });
       const gridctl = document.createElement("div");
       gridctl.className = "chart-dock-gridctl";
       const label = document.createElement("span");
-      label.textContent = "Сетка";
       gridctl.appendChild(label);
+      this._gridLabel = label;
+      this._colBtns = [];
       [1, 2, 3, 4].forEach((n) => {
         const b = document.createElement("button");
         b.type = "button";
         b.dataset.cols = String(n);
         b.textContent = "×" + n;
-        b.title = n === 1 ? "Столбиком" : n === 2 ? "В ряд по два" : n === 3 ? "Два сверху, один снизу" : "Сетка 2×2";
         b.addEventListener("click", () => this.setCols(n));
         gridctl.appendChild(b);
+        this._colBtns.push(b);
       });
       const addBtn = document.createElement("button");
       addBtn.type = "button";
       addBtn.className = "chart-dock-add";
-      addBtn.textContent = "＋ График";
-      addBtn.title = "Добавить такой же график";
       addBtn.addEventListener("click", () => this.addChart());
+      this._addBtn = addBtn;
       this.tabs = document.createElement("div");
       this.tabs.className = "chart-dock-tabs";
       tools.appendChild(modes);
@@ -675,6 +677,47 @@
       this.section.classList.add("has-chart-dock");
       this.section.insertBefore(this.wrap, this.section.firstChild);
       this._paintCols();
+      this._paintToolLabels();
+      if (window.I18n && typeof window.I18n.onChange === "function") {
+        try { window.I18n.onChange(() => this._paintToolLabels()); } catch (e) {}
+      }
+    }
+
+    // Подписи панели дока на языке страницы (ru/en). Русский текст —
+    // тот же, что был зашит раньше; английский добавлен, чтобы на en-странице
+    // не торчали русские кнопки. Вызывается и при смене языка на лету.
+    _paintToolLabels() {
+      const lang = (document.documentElement && document.documentElement.lang) || "";
+      const en = lang.slice(0, 2).toLowerCase() === "en";
+      const T = en ? {
+        tabs: ["Tabs", "One chart across the terminal. The rest live in tabs."],
+        grid: ["Multiscreen", "Several charts at once, in a grid."],
+        net: "Grid",
+        cols: ["Stacked", "Two side by side", "Two on top, one below", "2x2 grid"],
+        add: ["+ Chart", "Add the same chart"],
+      } : {
+        tabs: ["Вкладки", "Один график на весь терминал. Остальные — вкладками, переключение по клику."],
+        grid: ["Мультиэкран", "Несколько графиков сразу, сеткой."],
+        net: "Сетка",
+        cols: ["Столбиком", "В ряд по два", "Два сверху, один снизу", "Сетка 2×2"],
+        add: ["＋ График", "Добавить такой же график"],
+      };
+      if (this._modeBtns) {
+        if (this._modeBtns.tabs) {
+          this._modeBtns.tabs.textContent = T.tabs[0];
+          this._modeBtns.tabs.title = T.tabs[1];
+        }
+        if (this._modeBtns.grid) {
+          this._modeBtns.grid.textContent = T.grid[0];
+          this._modeBtns.grid.title = T.grid[1];
+        }
+      }
+      if (this._gridLabel) this._gridLabel.textContent = T.net;
+      (this._colBtns || []).forEach((b, i) => { b.title = T.cols[i] || ""; });
+      if (this._addBtn) {
+        this._addBtn.textContent = T.add[0];
+        this._addBtn.title = T.add[1];
+      }
     }
 
     setCols(n) {

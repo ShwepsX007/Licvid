@@ -1426,7 +1426,10 @@
         const handleResize = () => {
             if (!chart) return;
             const w = container.clientWidth || chartWrapper.clientWidth || 900;
-            const h = container.clientHeight || chartWrapper.clientHeight || 520;
+            let h = container.clientHeight || chartWrapper.clientHeight || 520;
+            // Мобилка/переходы: схлопнувшийся контейнер (1–99px) — не размер,
+            // а артефакт; упираем график в читаемые 400px вместо чёрной полоски.
+            if (h < 100) h = 400;
             chart.applyOptions({ width: w, height: h });
             if (clusterCanvas) {
                 clusterCanvas.width = w;

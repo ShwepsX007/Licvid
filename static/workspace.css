@@ -795,6 +795,15 @@ body.chart-embed-pop .chart-pop-back {
   }
 }
 
+/* Страховка от чёрных/схлопнувшихся графиков на телефоне (кейс 28.09):
+   видимый слот вкладок и рамка iframe всегда держат высоту, даже если
+   класс вида потерялся; многоколоночная сетка сведена к одной выше.
+   Десктоп (>900px) не трогаем. */
+@media (max-width: 900px) {
+  .chart-dock-wrap .chart-slot.is-tab-on { min-height: 340px; }
+  .chart-slot-frame-wrap { min-height: 200px; }
+}
+
 /* Panel mode (detached window) */
 body.panel-mode .top-nav,
 body.panel-mode .filters,

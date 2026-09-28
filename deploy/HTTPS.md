@@ -146,12 +146,32 @@ du -sh /tmp/nginx_api_cache
 `sudo nginx -T | grep -n 'proxy_cache\|API_CACHE'` и что
 `/etc/nginx/sites-enabled/` ссылается на `nginx-liqscope.conf`, а не на старую
 копию. Если статика отдаётся 404 — смотрите `alias` в конфиге: путь должен
-совпадать с каталогом репозитория (`setup-https.sh` подставляет его сам), а
-файлы должен читать пользователь nginx:
+совпадать с каталогом репозитория (`setup-https.sh` подставляет его сам).
+
+Отдельный случай: сайт работает, но `setup-https.sh` печатает
+`ВНИМАНИЕ: www-data не читает /root/Licvid/static/app.js`. Значит nginx не
+может прочитать файлы (обычно потому, что приложение лежит в `/root`, а там
+права `700`) и отдаёт статику запасным путём через приложение — `try_files …
+@static_app`. Ничего не ломается, но каждый `.js`/`.css`/`.png` снова идёт в
+Python, а смысл микрокэша — разгрузить единственный воркер. Лечится правами:
 
 ```bash
+# вариант 1: доступ только группе www-data (/root остаётся закрытым для прочих)
+sudo chgrp www-data /root /root/Licvid          # без -R: нужен только проход
+sudo chmod g+x /root /root/Licvid
+sudo chgrp -R www-data /root/Licvid/static && sudo chmod -R g+rX /root/Licvid/static
+
+# вариант 2: проще, но читают все локальные пользователи
+sudo chmod o+x /root /root/Licvid
+sudo chmod -R o+rX /root/Licvid/static
+
 sudo -u www-data test -r /root/Licvid/static/app.js && echo ok
+sudo systemctl reload nginx
 ```
+
+Чистый способ избежать этого совсем — держать репозиторий не в `/root`
+(например `/opt/Licvid`), тогда `WorkingDirectory` и `alias` в юните и конфиге
+указывают на него, а права открывать не нужно.
 
 Приложение при этом отвечает за миллисекунды и не ходит на биржу внутри
 запроса — даже для монеты, которой нет в списке:

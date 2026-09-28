@@ -34,11 +34,19 @@ check_static_perms() {
         echo "  ok: $runner читает $STATIC_DIR — статику отдаёт nginx"
     else
         echo "  ВНИМАНИЕ: $runner не читает $probe"
-        echo "  nginx отдаст статику через приложение (@static_app). Чтобы"
-        echo "  снять нагрузку с Python, откройте каталог на чтение:"
+        echo "  Сайт при этом работает: nginx отдаст статику через приложение"
+        echo "  (@static_app), но каждый .js/.css/.png пойдёт в Python — а весь"
+        echo "  смысл микрокэша в том, чтобы разгрузить единственный воркер."
+        echo "  Откройте каталог на чтение nginx (вариант 1 — только группе,"
+        echo "  /root остаётся закрытым для всех остальных):"
+        echo "    chgrp $runner $(dirname "$APP_DIR") $APP_DIR   # без -R: только проход по каталогам"
+        echo "    chmod g+x $(dirname "$APP_DIR") $APP_DIR"
+        echo "    chgrp -R $runner $STATIC_DIR && chmod -R g+rX $STATIC_DIR"
+        echo "  вариант 2 — всем локальным пользователям (проще, но шире):"
         echo "    chmod o+x $(dirname "$APP_DIR") $APP_DIR"
         echo "    chmod -R o+rX $STATIC_DIR"
         echo "  затем: systemctl reload nginx"
+        echo "  проверка: su -s /bin/sh $runner -c \"test -r $probe\" && echo ok"
     fi
 }
 
@@ -109,15 +117,19 @@ echo "  curl -sD - -o /dev/null 'https://${DOMAIN}/static/logo.png' | grep -iE '
 echo
 echo "готово: https://${DOMAIN}/"
 echo
-echo "в systemd-юнит добавьте и перезапустите сервис:"
+echo "в systemd-юнит добавьте и перезапустите сервис (рабочий юнит — licvid,"
+echo "deploy/liqscope.service устарел):"
 echo "  Environment=LIQSCOPE_PUBLIC_URL=https://${DOMAIN}"
 echo "  Environment=LIQSCOPE_COOKIE_SECURE=1"
 echo "  Environment=LIQSCOPE_SECRET=\$(openssl rand -hex 32)   # в drop-in, не в git"
-echo "  ExecStart=... --host 127.0.0.1 --port 8000"
+echo "  ExecStart=... --host 127.0.0.1 --port 8000 --workers 1"
+echo "  systemctl daemon-reload && systemctl restart licvid"
+echo "  systemctl status licvid --no-pager | head -5"
 echo
 echo "зависимости приложения должны быть установлены в его venv (orjson —"
-echo "быстрый JSON; без него сервер работает, но медленнее):"
-echo "  /root/Licvid/venv/bin/pip install -r /root/Licvid/requirements.txt"
+echo "быстрый JSON; без него сервер работает, но медленнее и пишет warning):"
+echo "  ${APP_DIR}/venv/bin/pip install -r ${APP_DIR}/requirements.txt"
+echo "  curl -s localhost:8000/api/health | grep -o '\"fast_json\":[a-z]*'   # true"
 echo
 echo "порт 80 и 443 должны быть открыты (ufw allow 80,443/tcp)."
 echo "у BotFather: /setdomain ${DOMAIN}"

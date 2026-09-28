@@ -7144,7 +7144,14 @@
                 { method: "POST" });
             const data = await r.json();
             if (!data.added) {
-                symbolHint.textContent = I18n.t("search.added_fail", { sym: pretty(rawSymbol) });
+                // Сервер знает причину отказа точнее, чем «не нашлась пара»:
+                // гостю нужна авторизация, у аккаунта есть лимит своих монет
+                // (data.limit), а общий список имеет потолок памяти.
+                const vars = { sym: pretty(rawSymbol), n: data.limit || 0 };
+                const key = data.error === "auth" ? "search.need_auth"
+                    : data.error === "quota" ? "search.quota_full"
+                        : "search.added_fail";
+                symbolHint.textContent = I18n.t(key, vars);
                 symbolHint.className = "symbol-hint warn";
                 return;
             }

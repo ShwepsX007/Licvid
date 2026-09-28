@@ -8,6 +8,39 @@ DOMAIN="${1:-liqscope.online}"
 EMAIL="${2:-}"
 APP="127.0.0.1:8000"
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# Каталог приложения: nginx отдаёт статику с диска (location /static/), поэтому
+# путь в конфиге должен совпадать с WorkingDirectory юнита licvid.service.
+APP_DIR="$(cd "$HERE/.." && pwd)"
+STATIC_DIR="$APP_DIR/static"
+
+# Поставить конфиг в sites-available: подставляем домен и фактический путь к
+# static (в файле он записан как /root/Licvid/static/ — рабочий расклад юнита).
+install_conf() {
+    local src="$1"
+    cp "$src" /etc/nginx/sites-available/liqscope
+    sed -i "s/liqscope.online/${DOMAIN}/g" /etc/nginx/sites-available/liqscope
+    sed -i "s#alias /root/Licvid/static/#alias ${STATIC_DIR}/#g" \
+        /etc/nginx/sites-available/liqscope
+    nginx -t
+}
+
+# Рабочий nginx (www-data) должен читать static, иначе вместо файлов будет 403
+# и каждый запрос уйдёт в приложение запасным путём (@static_app).
+check_static_perms() {
+    local probe="$STATIC_DIR/app.js"
+    local runner="www-data"
+    id "$runner" >/dev/null 2>&1 || runner="nobody"
+    if su -s /bin/sh "$runner" -c "test -r '$probe'" 2>/dev/null; then
+        echo "  ok: $runner читает $STATIC_DIR — статику отдаёт nginx"
+    else
+        echo "  ВНИМАНИЕ: $runner не читает $probe"
+        echo "  nginx отдаст статику через приложение (@static_app). Чтобы"
+        echo "  снять нагрузку с Python, откройте каталог на чтение:"
+        echo "    chmod o+x $(dirname "$APP_DIR") $APP_DIR"
+        echo "    chmod -R o+rX $STATIC_DIR"
+        echo "  затем: systemctl reload nginx"
+    fi
+}
 
 if [[ "$(id -u)" -ne 0 ]]; then
     echo "нужен root: sudo bash $0 $DOMAIN [email]"
@@ -39,11 +72,9 @@ fi
 
 echo "== nginx HTTP =="
 rm -f /etc/nginx/sites-enabled/default
-cp "$HERE/nginx-liqscope.http.conf" /etc/nginx/sites-available/liqscope
 ln -sfn /etc/nginx/sites-available/liqscope /etc/nginx/sites-enabled/liqscope
-# подставить домен, если вызывали не с дефолтом
-sed -i "s/liqscope.online/${DOMAIN}/g" /etc/nginx/sites-available/liqscope
-nginx -t
+install_conf "$HERE/nginx-liqscope.http.conf"
+check_static_perms
 systemctl enable --now nginx
 systemctl reload nginx
 
@@ -64,10 +95,16 @@ fi
 certbot "${CERTBOT_EXTRA[@]}" "${DOMAINS[@]}"
 
 # итоговый конфиг с WS-таймаутами (certbot мог упростить location /)
-cp "$HERE/nginx-liqscope.conf" /etc/nginx/sites-available/liqscope
-sed -i "s/liqscope.online/${DOMAIN}/g" /etc/nginx/sites-available/liqscope
-nginx -t
+install_conf "$HERE/nginx-liqscope.conf"
+check_static_perms
 systemctl reload nginx
+
+echo
+echo "проверка микрокэша и статики (X-Cache-Status: MISS → HIT):"
+echo "  curl -sD - -o /dev/null 'https://${DOMAIN}/api/klines?symbol=BTC_USDT&timeframe=5' | grep -i x-cache"
+echo "  sleep 1"
+echo "  curl -sD - -o /dev/null 'https://${DOMAIN}/api/klines?symbol=BTC_USDT&timeframe=5' | grep -i x-cache"
+echo "  curl -sD - -o /dev/null 'https://${DOMAIN}/static/logo.png' | grep -iE 'cache-control|x-content'"
 
 echo
 echo "готово: https://${DOMAIN}/"
@@ -77,6 +114,10 @@ echo "  Environment=LIQSCOPE_PUBLIC_URL=https://${DOMAIN}"
 echo "  Environment=LIQSCOPE_COOKIE_SECURE=1"
 echo "  Environment=LIQSCOPE_SECRET=\$(openssl rand -hex 32)   # в drop-in, не в git"
 echo "  ExecStart=... --host 127.0.0.1 --port 8000"
+echo
+echo "зависимости приложения должны быть установлены в его venv (orjson —"
+echo "быстрый JSON; без него сервер работает, но медленнее):"
+echo "  /root/Licvid/venv/bin/pip install -r /root/Licvid/requirements.txt"
 echo
 echo "порт 80 и 443 должны быть открыты (ufw allow 80,443/tcp)."
 echo "у BotFather: /setdomain ${DOMAIN}"

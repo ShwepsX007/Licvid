@@ -41,6 +41,11 @@ SCRYPT_N, SCRYPT_R, SCRYPT_P = 2 ** 14, 8, 1
 #: поэтому перезагрузка страницы и чистка localStorage испытание не сбрасывают.
 LAYERS_TRIAL_SEC = 1800
 
+#: Сколько монет аккаунт может добавить себе в терминал. Аноним — ни одной
+#: (роут /api/symbols/add требует авторизацию), админ — без счёта. Счётчик
+#: лежит в базе (user_symbols), поэтому рестарт процесса квоту не обнуляет.
+USER_SYMBOLS_CAP = max(0, int(os.getenv("LIQSCOPE_USER_SYMBOL_CAP", "5")))
+
 # Сколько живут ссылки в письмах
 EMAIL_TOKEN_TTL = {
     "verify": 24 * 3600,   # подтверждение почты — сутки
@@ -688,6 +693,18 @@ class Store:
                     PRIMARY KEY (user_id, chat_id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_chat_reads_user ON chat_reads(user_id);
+                -- 🪙 Монеты, которые аккаунт добавил себе в терминал. Счётчик
+                -- живёт в базе, а не в памяти процесса: рестарт не обнуляет
+                -- квоту (иначе лимит «5 монет на аккаунт» обходился бы
+                -- перезапуском сервиса). Одна строка на пару — повторное
+                -- добавление той же монеты квоту не тратит.
+                CREATE TABLE IF NOT EXISTS user_symbols (
+                    user_id INTEGER NOT NULL,
+                    symbol TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY (user_id, symbol)
+                );
+                CREATE INDEX IF NOT EXISTS idx_user_symbols_user ON user_symbols(user_id);
                 """
             )
             self._db.commit()
@@ -1329,6 +1346,17 @@ class Store:
                 (dst_id, r["slug"], r["enabled"], r["config"], r["created_at"]),
             )
         self._db.execute("DELETE FROM user_services WHERE user_id=?", (src_id,))
+        # Добавленные монеты переезжают вместе с аккаунтом: квота человека
+        # не должна обнуляться (и не должна удваиваться) при слиянии.
+        for r in self._db.execute(
+                "SELECT symbol, created_at FROM user_symbols WHERE user_id=?",
+                (src_id,)).fetchall():
+            self._db.execute(
+                "INSERT INTO user_symbols(user_id,symbol,created_at) VALUES(?,?,?)"
+                " ON CONFLICT(user_id,symbol) DO NOTHING",
+                (dst_id, r["symbol"], r["created_at"]),
+            )
+        self._db.execute("DELETE FROM user_symbols WHERE user_id=?", (src_id,))
         for table in ("alert_events", "visits", "sessions", "email_tokens"):
             self._db.execute(f"UPDATE {table} SET user_id=? WHERE user_id=?", (dst_id, src_id))
         src = self._db.execute("SELECT * FROM users WHERE id=?", (src_id,)).fetchone()
@@ -1868,6 +1896,70 @@ class Store:
                                   "last_seen": float(r["last_seen"] or 0.0),
                                   "hits": int(r["hits"] or 0)}
         return out
+
+    # ----- пользовательские монеты терминала (квота на аккаунт) --------------
+    def user_symbols(self, user_id: int) -> List[str]:
+        """Монеты, которые аккаунт добавил себе в терминал (по порядку добавления)."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT symbol FROM user_symbols WHERE user_id=? ORDER BY created_at",
+                (int(user_id),)).fetchall()
+        return [str(r["symbol"]) for r in rows]
+
+    def user_symbol_count(self, user_id: int) -> int:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT COUNT(*) AS n FROM user_symbols WHERE user_id=?",
+                (int(user_id),)).fetchone()
+        return int((row["n"] if row else 0) or 0)
+
+    def user_symbol_quota(self, user_id: int,
+                          cap: int = USER_SYMBOLS_CAP) -> Dict[str, Any]:
+        """Сводка квоты: сколько добавлено, сколько осталось и сам список.
+
+        Отдаём её и роуту (решать, пускать ли добавление), и кабинету
+        (показать человеку его монеты и остаток).
+        """
+        cap = max(0, int(cap))
+        symbols = self.user_symbols(user_id)
+        used = len(symbols)
+        return {"cap": cap, "used": used, "left": max(0, cap - used),
+                "symbols": symbols}
+
+    def add_user_symbol(self, user_id: int, symbol: str) -> Dict[str, Any]:
+        """Записать монету за аккаунтом. Повтор той же пары счёт не удваивает."""
+        sym = str(symbol or "").strip().upper()[:40]
+        if not sym:
+            return {"added": False, "count": self.user_symbol_count(user_id)}
+        with self._lock:
+            cur = self._db.execute(
+                "INSERT INTO user_symbols(user_id,symbol,created_at) VALUES(?,?,?) "
+                "ON CONFLICT(user_id,symbol) DO NOTHING",
+                (int(user_id), sym, _now()))
+            self._db.commit()
+            added = int(cur.rowcount or 0) > 0
+            row = self._db.execute(
+                "SELECT COUNT(*) AS n FROM user_symbols WHERE user_id=?",
+                (int(user_id),)).fetchone()
+        return {"added": added, "count": int((row["n"] if row else 0) or 0)}
+
+    def remove_user_symbol(self, user_id: int, symbol: str = "") -> int:
+        """Освободить квоту: убрать одну монету или все (symbol пустой).
+
+        Нужно админке — вернуть человеку место, не меняя лимит для всех.
+        Возвращает число удалённых строк.
+        """
+        sym = str(symbol or "").strip().upper()[:40]
+        with self._lock:
+            if sym:
+                cur = self._db.execute(
+                    "DELETE FROM user_symbols WHERE user_id=? AND symbol=?",
+                    (int(user_id), sym))
+            else:
+                cur = self._db.execute(
+                    "DELETE FROM user_symbols WHERE user_id=?", (int(user_id),))
+            self._db.commit()
+            return int(cur.rowcount or 0)
 
     def visit_stats(self, days: int = 14) -> Dict[str, Any]:
         days = max(1, min(int(days), 90))

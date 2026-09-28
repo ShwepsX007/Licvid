@@ -58,11 +58,39 @@ from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
+# Быстрый JSON. orjson сериализует ответы в 3-6 раз быстрее стандартного
+# json.dumps, а на одном воркере uvicorn сериализация — это заметная доля CPU
+# (свечи, статистика, снимки ленты уходят сотням клиентов). Пакет не
+# обязателен: без него приложение работает на прежнем JSONResponse.
+try:                                   # pragma: no cover — зависит от окружения
+    import orjson as _orjson
+    from fastapi.responses import ORJSONResponse as _DEFAULT_RESPONSE_CLASS
+    FAST_JSON = True
+except ImportError:                    # pragma: no cover
+    _orjson = None
+    _DEFAULT_RESPONSE_CLASS = JSONResponse
+    FAST_JSON = False
+
+
+def json_dumps_text(obj) -> str:
+    """Компактная JSON-строка: WS-кадры клиентам (самая горячая сериализация)."""
+    if _orjson is None:
+        return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+    return _orjson.dumps(obj).decode("utf-8")
+
+
+# Явные `return JSONResponse(...)` в этом модуле (/api/health, /api/metrics,
+# отказы /api/symbols/add) должны отдавать тем же быстрым сериализатором, что
+# и остальное приложение — поэтому имя указывает на выбранный класс. Без
+# orjson это прежний starlette JSONResponse, поведение не меняется.
+JSONResponse = _DEFAULT_RESPONSE_CLASS
+
 import archive_hide
 import archive_restore
 import seo_pages
 from fastapi.staticfiles import StaticFiles
 
+import market_feed
 from market_feed import GATE_REST, MarketFeed, TF_MINUTES, base_of, canon, _get_json
 from timeframes import parse_tf
 from book_feed import (chat_text as book_chat_text, chat_meta as book_chat_meta)
@@ -528,12 +556,15 @@ class Client:
 
     async def send(self, msg: dict) -> bool:
         try:
+            # Сериализуем сами и отдаём текстом: ws.send_json внутри зовёт
+            # json.dumps, а рассылка ликвидаций/свечей/статистики — самая
+            # частая сериализация процесса (orjson быстрее в разы).
             # Медленный/зависший клиент не должен подвешивать читателей
-            # биржевых сокетов: send_json внутри ждёт drain() без лимита, а
+            # биржевых сокетов: send внутри ждёт drain() без лимита, а
             # TCP-буфер забитого клиента может не освобождаться минутами.
             # Всё, что ушло в транспорт до таймаута, остаётся валидным кадром,
             # так что отмена безопасна. Застряли — клиент мёртв, выкидываем.
-            await asyncio.wait_for(self.ws.send_json(msg),
+            await asyncio.wait_for(self.ws.send_text(json_dumps_text(msg)),
                                    timeout=self.SEND_TIMEOUT)
             _metrics_ws_send()
             return True
@@ -1433,18 +1464,14 @@ def _clean_candles(series):
     return dedup
 
 
-async def get_candles(symbol: str, tf: int, force: bool = False) -> dict:
-    symbol = canon(symbol)
-    parsed = parse_tf(tf)
-    tf = parsed if parsed is not None else 5
-    k = _key(symbol, tf)
-    entry = CANDLES.get(k)
-    fresh = entry and (time.time() - entry["ts"] < KLINE_TTL) and not force
-    if fresh:
-        # кэш могли отравить живые тики — чиним на отдаче (и в самом кэше)
-        entry["candles"] = _clean_candles(entry.get("candles"))
-        return entry
+async def _fetch_candles_exchange(symbol: str, tf: int) -> Optional[list]:
+    """Биржа + история CVD: тяжёлая часть загрузки свечей.
 
+    Зовётся ТОЛЬКО из фоновой задачи (``market_feed.schedule_candles``) или из
+    ``get_candles(force=True)`` у внутренних циклов сервера. В обработчике
+    запроса её быть не должно: синхронный поход на Binance на каждого зрителя
+    — это лаг единственного воркера и 429/418 (бан IP всего сервера) в придачу.
+    """
     real = None
     if feed:
         real = await feed.fetch_klines(symbol, tf, limit=300)
@@ -1463,34 +1490,44 @@ async def get_candles(symbol: str, tf: int, force: bool = False) -> dict:
                         if d is not None:
                             c["cvd"] = d
     # чистим ДО подшивки OI: аттач идёт по совпадению time; пустой результат
-    # честно проваливается в ветки «старый кэш» / «заготовка» ниже
-    real = _clean_candles(real)
-    if real:
-        # подшиваем открытый интерес: oi — уровень на конец свечи,
-        # oiChg — изменение за свечу (для треугольников на графике)
-        tracker = getattr(feed, "oi", None)
-        if tracker is not None:
-            try:
-                await tracker.ensure_symbol(symbol)
-                _attach_oi(real, tf, tracker.series(symbol),
-                           tracker.bucket_chg(symbol))
-            except Exception as e:
-                log.debug("oi attach %s: %s", symbol, e)
-        # сохраняем «живой» хвост, если биржа ещё не закрыла текущую свечу
-        CANDLES[k] = {"candles": real, "ts": time.time(), "source": "exchange"}
-        _cvd_seed_base(CANDLES[k], symbol, tf)
-        return CANDLES[k]
+    # честно проваливается в ветки «старый кэш» / «заготовка» у вызывающего
+    return _clean_candles(real)
 
-    if entry:
-        entry["ts"] = time.time() - KLINE_TTL / 2   # отдадим старое, попробуем позже
-        entry["candles"] = _clean_candles(entry.get("candles"))
-        if entry["candles"]:
-            return entry
-        # кэш состоял из одних битых свечей — строим заготовку ниже
 
-    # Совсем нет связи с биржами — строим заготовку от последней цены,
-    # чтобы график не падал; источник помечен как "unavailable"
-    # (в демо-режиме рисуем случайное блуждание, чтобы было что смотреть).
+async def _apply_candles(symbol: str, tf: int, real: list,
+                         source: str = "exchange") -> dict:
+    """Готовые свечи — в кэш отдач и в буфер фида. Только локальная работа.
+
+    OI берём из трекера: ``ensure_symbol`` умеет сходить на биржу, поэтому
+    зовут эту функцию тоже только из фона (загрузка истории, kline_refresher).
+    """
+    k = _key(symbol, tf)
+    tracker = getattr(feed, "oi", None)
+    if tracker is not None:
+        try:
+            await tracker.ensure_symbol(symbol)
+            _attach_oi(real, tf, tracker.series(symbol),
+                       tracker.bucket_chg(symbol))
+        except Exception as e:
+            log.debug("oi attach %s: %s", symbol, e)
+    # сохраняем «живой» хвост, если биржа ещё не закрыла текущую свечу
+    CANDLES[k] = {"candles": real, "ts": time.time(), "source": source}
+    _cvd_seed_base(CANDLES[k], symbol, tf)
+    if feed is not None:
+        # буфер фида — то, чем /api/klines отвечает, пока наш кэш пуст
+        feed.cache_candles(symbol, tf, real, source)
+    return CANDLES[k]
+
+
+def _placeholder_entry(symbol: str, tf: int, k: str) -> dict:
+    """Заготовка от последней известной цены: локально, мгновенно, без сети.
+
+    Строим, когда истории нет ни в кэше, ни в буфере фида (монету только что
+    открыли или биржи молчат): график не должен падать пустым полем. Источник
+    помечен как "unavailable" (в демо-режиме рисуем случайное блуждание, чтобы
+    было что смотреть), а ``pending`` говорит клиенту, что настоящие свечи уже
+    грузятся в фоне и придут кадром WS или следующим опросом.
+    """
     price = (feed.prices.get(symbol) if feed else None) or DEMO_SEED_PRICES.get(symbol) or 100.0
     tf_sec = tf * 60
     now_bucket = int(time.time() // tf_sec) * tf_sec
@@ -1513,9 +1550,108 @@ async def get_candles(symbol: str, tf: int, force: bool = False) -> dict:
             c["cvd"] = round((c.get("volume") or 1e4) * random.uniform(-0.35, 0.35), 2)
         _demo_oi(series)
     CANDLES[k] = {"candles": series, "ts": time.time(),
-                  "source": "demo" if DEMO_MODE else "unavailable"}
+                  "source": "demo" if DEMO_MODE else "unavailable",
+                  "pending": bool(feed is not None and feed.candles_pending(symbol, tf))}
     _cvd_seed_base(CANDLES[k], symbol, tf)
     return CANDLES[k]
+
+
+async def _candles_blocking(symbol: str, tf: int, k: str) -> dict:
+    """``force=True``: дождаться биржи. Для внутренних фоновых циклов сервера.
+
+    Прогрев старта, ``kline_refresher`` и потоки постов — не обработчики
+    запросов: здесь ожидание сети безопасно, а данные нужны настоящие.
+    """
+    real = await _fetch_candles_exchange(symbol, tf)
+    if real:
+        return await _apply_candles(symbol, tf, real)
+
+    entry = CANDLES.get(k)
+    if entry:
+        entry["ts"] = time.time() - KLINE_TTL / 2   # отдадим старое, попробуем позже
+        entry["candles"] = _clean_candles(entry.get("candles"))
+        if entry["candles"]:
+            return entry
+        # кэш состоял из одних битых свечей — строим заготовку ниже
+    return _placeholder_entry(symbol, tf, k)
+
+
+async def _on_candles_ready(symbol: str, tf: int, candles: list, source: str) -> None:
+    """Колбэк фида: фоновая загрузка истории дошла (``market_feed.on_candles``).
+
+    Кроме записи в кэш догоняем зрителей графика кадром ``candles``, если до
+    этого они смотрели на заготовку: иначе настоящие свечи доехали бы только
+    следующим опросом клиента (60 с в терминале, 15 с в embed-графике).
+    """
+    k = _key(symbol, tf)
+    prev_source = str((CANDLES.get(k) or {}).get("source") or "")
+    real = _clean_candles(candles)
+    if not real:
+        return
+    entry = await _apply_candles(symbol, tf, real, source or "exchange")
+    if prev_source != "exchange":
+        await _push_candles_to_viewers(symbol, tf, entry)
+
+
+async def _push_candles_to_viewers(symbol: str, tf: int, entry: dict) -> None:
+    """Кадр candles только тем, у кого открыт этот график и ТФ."""
+    candles = (entry or {}).get("candles") or []
+    if not candles:
+        return
+    await hub.broadcast(
+        {"type": "candles", "symbol": symbol, "tf": tf,
+         "source": entry.get("source") or "exchange", "candles": candles},
+        predicate=lambda c: c.chart_symbol == symbol and c.tf == tf)
+
+
+async def get_candles(symbol: str, tf: int, force: bool = False) -> dict:
+    """Свечи графика. Путь запроса — только чтение памяти, биржа всегда в фоне.
+
+    ``force=False`` (REST ``/api/klines``, ``/api/liq_clusters``, WS ``sub``):
+    отдаём то, что уже лежит локально — кэш отдач ``CANDLES`` → буфер фида
+    ``market_feed.get_candles_cached`` → заготовка от последней цены, — и
+    ставим загрузку истории фоновой задачей (``asyncio.create_task``). Ответ не
+    ждёт сети, поэтому 50+ зрителей одного графика не превращаются в 50+
+    походов на биржу и не вешают единственный воркер uvicorn.
+
+    ``force=True`` — прежнее поведение «сходить на биржу и дождаться»: его
+    зовут внутренние фоновые циклы (прогрев, ``kline_refresher``, потоки
+    постов), где некому ждать HTTP-ответа.
+    """
+    symbol = canon(symbol)
+    parsed = parse_tf(tf)
+    tf = parsed if parsed is not None else 5
+    k = _key(symbol, tf)
+    entry = CANDLES.get(k)
+    fresh = entry and (time.time() - entry["ts"] < KLINE_TTL) and not force
+    if fresh:
+        # кэш могли отравить живые тики — чиним на отдаче (и в самом кэше)
+        entry["candles"] = _clean_candles(entry.get("candles"))
+        return entry
+
+    if force:
+        return await _candles_blocking(symbol, tf, k)
+
+    # --- путь запроса: ни одного ожидания биржи ------------------------------
+    if feed is not None:
+        # дедупликация и зазор внутри фида: сто зрителей — один поход на биржу
+        feed.schedule_candles(symbol, tf, loader=_fetch_candles_exchange)
+    if entry:
+        entry["candles"] = _clean_candles(entry.get("candles"))
+        if entry["candles"]:
+            # отдаём то, что есть, пока фон догружает свежее
+            entry["stale"] = True
+            return entry
+        # кэш состоял из одних битых свечей — смотрим буфер фида ниже
+    cached = feed.get_candles_cached(symbol, tf) if feed is not None else None
+    if cached and cached.get("candles"):
+        CANDLES[k] = {"candles": _clean_candles(cached["candles"]),
+                      "ts": float(cached.get("ts") or 0.0),
+                      "source": cached.get("source") or "cache",
+                      "stale": True}
+        _cvd_seed_base(CANDLES[k], symbol, tf)
+        return CANDLES[k]
+    return _placeholder_entry(symbol, tf, k)
 
 
 def _demo_oi(series: list) -> None:
@@ -2594,7 +2730,11 @@ async def slot_flows(need_slots: int = 40) -> Dict[str, dict]:
         async def one(sym: str):
             async with sem:
                 try:
-                    entry = await asyncio.wait_for(get_candles(sym, 15), timeout=20)
+                    # force=True: это фоновая задача постов, а не запрос
+                    # пользователя — объёмы слотов нужны настоящие, заготовка
+                    # от последней цены дала бы пост с нулевым оборотом
+                    entry = await asyncio.wait_for(
+                        get_candles(sym, 15, force=True), timeout=20)
                 except Exception as e:           # noqa: BLE001
                     log.debug("потоки постов %s: %s", sym, e)
                     return sym, None
@@ -3119,6 +3259,13 @@ def health_summary() -> dict:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if not FAST_JSON:
+        # Без orjson приложение работает, но сериализация свечей/статистики и
+        # WS-кадров остаётся на медленном stdlib json — на одном воркере это
+        # заметная доля CPU, поэтому отсутствие говорим вслух.
+        log.warning("orjson не установлен — ответы и WS-кадры сериализует "
+                    "стандартный json (в разы медленнее): "
+                    "pip install -r requirements.txt")
     # восстанавливаем дисковую историю до старта биржевых потоков,
     # чтобы первый клиент сразу увидел вчерашние ликвидации
     if HISTORY_FILE:
@@ -3194,6 +3341,10 @@ async def lifespan(app: FastAPI):
                       symbols_limit=SYMBOLS_LIMIT,
                       exchanges=EXCHANGES,
                       tick_sources=TICK_SOURCES)
+    # Фоновая загрузка истории свечей (её ставит /api/klines, не блокируя
+    # запрос) сообщает сюда: дошиваем OI, пишем в кэш отдач и догоняем
+    # зрителей графика кадром candles, если до этого они смотрели заготовку.
+    feed.on_candles = _on_candles_ready
     await feed.start()
     sync_hot_symbols()      # чтобы тики пошли сразу, не дожидаясь клиента
     # Свечи как запасная цена входа: если профиля объёма по монете ещё нет,
@@ -3643,7 +3794,10 @@ def re_v(query: str) -> bool:
 
 
 app = FastAPI(title="LiqScope — Live Crypto Liquidation Terminal",
-              version="4.1.0", lifespan=lifespan)
+              version="4.1.0", lifespan=lifespan,
+              # orjson вместо stdlib json: на одном воркере сериализация
+              # свечей/статистики/ленты — заметная доля CPU (см. PERF_NOTES).
+              default_response_class=_DEFAULT_RESPONSE_CLASS)
 
 # Последний add_middleware — внешний. Снаружи внутрь: считаем запросы,
 # режем флуд (до чтения тела), режем тело, жмём ответ, заголовки, CORS.
@@ -3735,7 +3889,9 @@ _archive_hide = archive_hide.ArchiveHide(
 digest_ctx.hide = _archive_hide
 digest_ctx.liqs_fn = lambda: list(LIQUIDATIONS)
 digest_ctx.symbols_fn = lambda: list(feed.symbols if feed else [])
-digest_ctx.candles_fn = get_candles
+# Дайджест публикуется в канал: ему нужны настоящие свечи, а не заготовка от
+# последней цены. Это фоновая сборка (не запрос пользователя), поэтому force.
+digest_ctx.candles_fn = lambda sym, tf: get_candles(sym, tf, force=True)
 digest_ctx.hours_fn = lambda since, until: HIST.hours_range(since, until)
 digest_ctx.events_fn = lambda since, until: HIST.query(
     since, until, None, 0.0, 20000, False)
@@ -4088,10 +4244,62 @@ def _request_ip(request: Request) -> str:
 _SYMBOL_ADD_RATE = RateLimiter(20, 10 * 60)
 
 
+# Сколько монет может добавить ОДИН аккаунт (значение живёт в market_feed,
+# чтобы кап был один на фид и на роут). Аноним — ни одной новой: без сессии
+# счётчик некуда записать, а общий список, память и биржевые подписки общие.
+# Админ — без счёта.
+def _user_symbol_cap() -> int:
+    return int(getattr(market_feed, "USER_SYMBOL_CAP", 5))
+
+
+def _live_symbol_quota(user_id: int, cap: int) -> dict:
+    """Квота аккаунта, сверенная с тем, что реально лежит в терминале.
+
+    Счётчик живёт в базе и переживает рестарт — но ``custom_symbols`` фида
+    живёт в памяти процесса, поэтому после перезапуска сервиса добавленные
+    монеты исчезают, а строки в базе остаются. Без сверки человек навсегда
+    потратил бы свои 5 слотов на монеты, которых в терминале уже нет (и квота
+    превратилась бы в пожизненный лимит «5 монет на аккаунт»).
+
+    Поэтому строки, чьей пары нет в пользовательском списке фида,
+    освобождаются: квота считает только то, что прямо сейчас занимает подписки
+    WS, память процесса и биржевые лимиты. Монета, которая осталась в списке,
+    слот держит; та же пара, добавленная заново, слот не удваивает
+    (``PRIMARY KEY (user_id, symbol)``).
+    """
+    quota = account_store.user_symbol_quota(user_id, cap)
+    if feed is None or not quota.get("symbols"):
+        return quota
+    live = set(getattr(feed, "custom_symbols", ()) or ())
+    stale = [s for s in quota["symbols"] if s not in live]
+    if not stale:
+        return quota
+    for sym in stale:
+        account_store.remove_user_symbol(user_id, sym)
+    log.info("квота монет user=%s: освобождено %d (%s) — пар нет в списке терминала",
+             user_id, len(stale), ", ".join(stale[:6]))
+    return account_store.user_symbol_quota(user_id, cap)
+
+
 @app.post("/api/symbols/add")
 async def api_symbol_add(request: Request,
                          symbol: str = Query(..., max_length=40),
                          force: bool = Query(False)):
+    """Добавить монету в общий список терминала.
+
+    Лимиты (защита биржевых подписок и памяти процесса):
+
+    * аноним — новую монету добавить нельзя (``error: "auth"``, 401). Уже
+      лежащую в списке пару открыть можно: она ничего не прибавляет;
+    * аккаунт — не больше ``USER_SYMBOL_CAP`` (5) монет; счётчик лежит в базе
+      (``accounts.user_symbols``) и сверяется со списком фида: слот держит
+      только та пара, которая реально занимает подписки WS и память
+      (``_live_symbol_quota``). Поэтому квоту не обходят ни повторным
+      добавлением той же монеты, ни рестартом сервиса — после рестарта список
+      монет пуст, значит и слоты свободны, а не потрачены навсегда;
+    * админ — без ограничений;
+    * глобальный кап памяти ``MAX_CUSTOM_SYMBOLS`` (120) проверяет сам фид.
+    """
     if not _SYMBOL_ADD_RATE.allow("add:" + _request_ip(request)):
         return JSONResponse({"added": False, "found": False, "error": "rate",
                              "symbol": "", "message": "слишком часто"},
@@ -4099,24 +4307,68 @@ async def api_symbol_add(request: Request,
     if not feed:
         return JSONResponse({"added": False, "found": False,
                              "error": "сервер ещё не готов"}, status_code=503)
+    # Сессия — это чтение SQLite, поэтому в потоке: единственный воркер не
+    # должен стоять на диске, пока остальные ждут ответ.
+    user = await asyncio.to_thread(current_user, request)
+    is_admin = bool(user and user.get("is_admin"))
     # force обходит каталог бирж и кладёт фиктивную пару в общий список.
     # Это только для админа: иначе аноним подсовывает любое имя всем клиентам.
     if force:
-        user = current_user(request)
         if not user or not user.get("is_admin"):
             return JSONResponse(
                 {"added": False, "found": False, "error": "admin",
                  "symbol": "", "message": "force только для админа"},
                 status_code=403)
-    res = await feed.add_symbol(symbol, force=force)
+
+    cap = -1 if is_admin else _user_symbol_cap()     # -1 = без счёта (админ)
+    quota: Optional[dict] = None
+    if not is_admin and user is not None and cap >= 0:
+        try:
+            quota = await asyncio.to_thread(_live_symbol_quota,
+                                            int(user["id"]), cap)
+        except Exception as e:                       # noqa: BLE001
+            log.warning("квота монет user=%s: %s", user.get("id"), e)
+            quota = None
+        if quota and quota["used"] >= cap:
+            return JSONResponse(
+                {"added": False, "found": False, "error": "quota", "symbol": "",
+                 "limit": cap, "used": quota["used"], "left": 0,
+                 "symbols": quota["symbols"],
+                 "message": f"Лимит {cap} монет на аккаунт исчерпан"},
+                status_code=409)
+
+    res = await feed.add_symbol(
+        symbol, force=force, guest=user is None,
+        owner="" if user is None else ("admin" if is_admin else f"u:{int(user['id'])}"),
+        owner_cap=cap)
     if res.get("error") == "invalid":
         return JSONResponse(res, status_code=400)
+    if res.get("error") == "auth":
+        return JSONResponse(res, status_code=401)
+    if res.get("error") == "quota":
+        return JSONResponse(res, status_code=409)
     if res.get("error") == "full":
         return JSONResponse(res, status_code=409)
     if res.get("error") == "rate":
         return JSONResponse(res, status_code=429)
     if not res.get("found") and not res.get("added"):
         return JSONResponse(res, status_code=404)
+    if res.get("added") and res.get("quota_charged") and user is not None and not is_admin:
+        # Счётчик аккаунта — в базу: in-memory custom_owners переживает только
+        # до рестарта, а квота должна считаться честно и после него.
+        try:
+            saved = await asyncio.to_thread(account_store.add_user_symbol,
+                                            int(user["id"]), res.get("symbol") or "")
+            res["quota_used"] = int(saved.get("count") or 0)
+        except Exception as e:                       # noqa: BLE001
+            log.warning("счётчик монет user=%s: %s", user.get("id"), e)
+    if cap >= 0 and user is not None:
+        used = res.get("quota_used")
+        if used is None and quota is not None:
+            used = int(quota["used"]) + (1 if res.get("quota_charged") else 0)
+        if used is not None:
+            res["limit"], res["used"], res["left"] = cap, int(used), max(0, cap - int(used))
+    res.pop("quota_charged", None)
     res["details"] = (_enrich_symbol_rows([res.get("details") or {}])[0]
                       if res.get("details") else {})
     return res
@@ -4124,16 +4376,34 @@ async def api_symbol_add(request: Request,
 
 @app.get("/api/klines")
 async def api_klines(symbol: str = Query("BTC_USDT"), timeframe: int = Query(5)):
+    """Свечи графика: читатель локального буфера, а не поход на биржу.
+
+    Любую монету можно открыть на графике, даже если её нет в дефолтном
+    топ-списке. Но запрос пользователя здесь НИКОГДА не ждёт Binance/Bybit/OKX:
+    ``get_candles`` отдаёт то, что уже лежит в памяти (кэш отдач → буфер фида
+    ``market_feed.get_candles_cached`` → заготовка от последней цены), а
+    загрузку истории новых монет ставит фоновой задачей
+    (``asyncio.create_task``). Иначе каждый зритель графика — это свой
+    синхронный запрос к бирже: 50+ пользователей дают лаг единственного
+    воркера и 429/418 (бан IP всего сервера).
+
+    Клиенту видно, что данные догоняющие: ``pending``/``stale`` и ``age_sec``.
+    Настоящие свечи приходят кадром WS ``candles`` сразу, как фон их догрузил
+    (embed-графики дополнительно опрашивают ручку раз в 15 с).
+    """
     symbol = canon(symbol)
-    # Любую монету можно открыть на графике, даже если её нет в дефолтном
-    # топ-списке: свечи берутся напрямую с бирж, а не из локального списка.
     tf = parse_tf(timeframe) or 5
     entry = await get_candles(symbol, tf)
+    ts = float(entry.get("ts") or 0.0)
     return {
         "symbol": symbol,
         "timeframe": tf,
-        "source": entry["source"],
-        "candles": entry["candles"],
+        "source": entry.get("source") or "unavailable",
+        "candles": entry.get("candles") or [],
+        "stale": bool(entry.get("stale")),
+        "pending": bool(entry.get("pending"))
+        or bool(feed is not None and feed.candles_pending(symbol, tf)),
+        "age_sec": round(time.time() - ts, 1) if ts else None,
     }
 
 
@@ -4457,6 +4727,10 @@ async def api_health():
         "tg": tg_bot.poll_status(),
         "config": {
             "symbols_limit": SYMBOLS_LIMIT,
+            # лимиты добавления монет и быстрый JSON — видно в мониторинге
+            "max_custom_symbols": market_feed.MAX_CUSTOM_SYMBOLS,
+            "user_symbol_cap": _user_symbol_cap(),
+            "fast_json": FAST_JSON,
             "exchanges": EXCHANGES,
             "tick_sources": TICK_SOURCES,
             "history_max": HISTORY_MAX,
@@ -4507,6 +4781,8 @@ async def api_metrics():
     _metrics_prune()
     symbols = list(feed.symbols) if feed else []
     custom = list(feed.custom_symbols) if feed else []
+    _cstats = (feed.candles_cache_stats() if feed is not None
+               else {"series": 0, "inflight": 0, "cap": 0, "refetch_sec": 0.0})
     return JSONResponse({
         "ws_clients_total": len(hub.clients),
         "ws_max_clients": WS_MAX_CLIENTS,
@@ -4519,6 +4795,14 @@ async def api_metrics():
         "sqlite_ms": await _sqlite_ping_ms(),
         "symbols_count": len(symbols),
         "custom_symbols_count": len(custom),
+        "custom_symbols_cap": market_feed.MAX_CUSTOM_SYMBOLS,
+        "user_symbol_cap": _user_symbol_cap(),
+        # буфер истории свечей: видно, что /api/klines отвечает из памяти,
+        # а на биржу ходит только фоновая загрузка
+        "candles_cached_series": _cstats["series"],
+        "candles_loading": _cstats["inflight"],
+        "candles_cache_cap": _cstats["cap"],
+        "fast_json": FAST_JSON,
         "rss_bytes": _rss_bytes(),
         "uptime_sec": round(time.time() - _START_TS, 1),
     })

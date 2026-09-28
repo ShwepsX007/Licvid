@@ -443,11 +443,23 @@ async def scenario_gate_needs_contract_specs():
 # --- 4) таймаут отправки зависшему клиенту -----------------------------------
 
 class SlowWS:
+    """Двойник сокета клиента: send_text висит заданное время.
+
+    Client.send сериализует кадр сам (orjson — см. json_dumps_text в server.py)
+    и зовёт send_text, а не send_json: так широковещание ликвидаций не жжёт CPU
+    на стандартном json.dumps. Двойник повторяет актуальный интерфейс.
+    """
+
     def __init__(self, lag: float):
         self.lag = lag
+        self.sent: list = []
+
+    async def send_text(self, text):
+        await asyncio.sleep(self.lag)
+        self.sent.append(text)
 
     async def send_json(self, msg):
-        await asyncio.sleep(self.lag)
+        await self.send_text(str(msg))
 
 
 async def scenario_client_send_timeout():
@@ -464,9 +476,14 @@ async def scenario_client_send_timeout():
         check("не ждали lag отправщика, вернулись по таймауту",
               dt < 1.0, f"{dt:.2f}с")
         c2 = srv.Client(SlowWS(0.01))
-        sent2 = await c2.send({"t": 1})
+        sent2 = await c2.send({"t": 1, "текст": "кириллица"})
         check("живой клиент проходит как раньше",
               sent2 is True and c2.alive is True)
+        # кадр ушёл текстом и это валидный JSON (кириллица не экранируется)
+        frame = c2.ws.sent[0] if c2.ws.sent else ""
+        check("кадр — JSON-текст, а не объект",
+              isinstance(frame, str) and frame.startswith("{"), frame[:40])
+        check("кириллица в кадре не экранирована", "кириллица" in frame, frame[:60])
     finally:
         srv.Client.SEND_TIMEOUT = old
 

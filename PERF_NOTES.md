@@ -209,3 +209,233 @@ curl -D - "http://127.0.0.1:8001/static/i18n.pages.en.js?v=1" -o /dev/null | gre
 curl -D - -H "Origin: https://evil.example" http://127.0.0.1:8001/api/stats | grep -i access-control
 curl -D - -H "Origin: https://liqscope.online" http://127.0.0.1:8001/api/stats | grep -i access-control
 ```
+
+---
+
+## Лаги при 50+ зрителях и защита IP от бана биржи — 28.09.2026
+
+Стенд: uvicorn, **1 воркер**, `LIQSCOPE_DEMO=1`, биржевые WS/REST из песочницы
+недоступны (значит, любой синхронный поход на биржу в обработчике виден сразу —
+он заканчивается таймаутом, а не данными). Коммит: серия поверх `b0b4cea`.
+
+### Симптом
+
+При 50+ зрителях интерфейс замирает, `uvicorn` упирается в 100% CPU, а биржа в
+ответ на долбёжку отдаёт 429/418 и может забанить IP сервера.
+
+Сложились три причины:
+
+1. **`GET /api/klines` ходил на биржу внутри запроса.** `get_candles` звал
+   `tracker.ensure_symbol` (сеть) и `fetch_klines` (Binance → Bybit → OKX)
+   прямо в обработчике: открытие нового графика вешало единственный воркер на
+   секунды и плодило запросы к биржам **по числу зрителей** (для свежей монеты —
+   сразу пачку на все таймфреймы). Отсюда и лаги, и 429/418.
+2. **Стандартный `json` на всём.** Сериализация пачки свечей — 220 мкс,
+   broadcast кадра 50 клиентам — ~1.3 мс чистого CPU одного воркера; разбор
+   входящих WS-кадров биржи — 15.6 мкс на кадр при тысячах кадров в секунду.
+3. **nginx ничего не кэшировал** и проксировал даже `/static/`: одинаковые
+   публичные ответы собирались заново на каждый запрос.
+
+### Что сделано (воркер по-прежнему один — это сознательно)
+
+`--workers 1` в `deploy/licvid.service` не меняли: WS-мост `LiqScopeWsBridge`,
+dock-iframe и `Client.send` рассчитаны на один процесс (общая память фида и
+хаба). Второй воркер без Redis/общего состояния сломал бы подписки. Вместо
+масштабирования воркеров разгружаем тот, что есть — слоями.
+
+#### 1. nginx-микрокэш (`deploy/nginx-liqscope.conf`, `.http.conf`)
+
+```nginx
+proxy_cache_path /tmp/nginx_api_cache levels=1:2 keys_zone=API_CACHE:10m
+                 max_size=100m inactive=1m use_temp_path=off;
+```
+
+| Путь | TTL | Зачем |
+|---|---|---|
+| `/api/klines` | `proxy_cache_valid 200 3s` | 50 зрителей одной монеты = 1 поход в приложение за 3 с (свечи всё равно обновляются не чаще) |
+| `/api/stats`, `/api/digest`, `/api/digest/today`, `/api/digest/ГГГГ-ММ-ДД` | `5s` | публичные, неперсонализированные; у дайджеста свой `Cache-Control: public, max-age=60` остаётся сверху |
+| `/static/` | отдаёт nginx (`alias` + `try_files @static_app`) | статика не доходит до Python вовсе |
+| `/ws`, `/api/symbols/add`, `/api/auth/*`, `/api/admin/*`, кабинет | **не кэшируются** | сессии, личные данные, запись |
+
+Ключевые детали конфига:
+
+* `proxy_cache_lock on` + `proxy_cache_lock_timeout 5s` — при толпе на бэкенд
+  идёт **один** запрос, остальные ждут готовый ответ, а не плодят дубли;
+* `proxy_cache_use_stale error timeout updating http_500 … http_504` вместе с
+  `proxy_cache_background_update on` — если приложение задумалось или упало,
+  зрители видят прежние свечи (`STALE`), а свежее догружается в фоне;
+* `proxy_hide_header Set-Cookie` на обеих кэшируемых ветках + `proxy_ignore_headers
+  Set-Cookie` — кэш не отравляется кукой виджета (`liqscope_vid`) и не разносит
+  её зрителям (это же причина, по которой кэш не стоит на `/ws`); на
+  `stats`/`digest` добавлено `proxy_ignore_headers Cache-Control Expires`: срок
+  кэша nginx держит своим (5 с), а `Cache-Control: public, max-age=60`
+  приложения остаётся заголовком для браузера;
+* `proxy_set_header Accept-Encoding ""` — апстрим отдаёт несжатое, gzip делает
+  nginx один раз на всех;
+* `add_header X-Cache-Status $upstream_cache_status` — видно `MISS`/`HIT`/`STALE`
+  снаружи, без логов;
+* `access_log off` в `/static/` — журнал не тонет в запросах картинок;
+* `Cache-Control` для статики собирается `map`-ом по URI:
+  **год + immutable** при `?v=`, **7 суток** для картинок/шрифтов,
+  **1 час** для `.js/.css/.json/.html/webmanifest` без версии — потому что
+  `i18n.pages.{lang}.js` подставляется в HTML без `?v=`, и вечный кэш оставил бы
+  переводы у зрителей на год;
+* заголовки безопасности (`X-Content-Type-Options`, `X-Frame-Options`,
+  `Referrer-Policy`, CSP `frame-ancestors 'self'`, `Permissions-Policy`, HSTS)
+  продублированы в каждом `location` со своим `add_header`: nginx **сбрасывает**
+  унаследованные `add_header`, когда в блоке появляется свой — раньше
+  `/static/` из-за этого уходил без `nosniff`.
+
+#### 2. orjson вместо стандартного json
+
+`FastAPI(default_response_class=ORJSONResponse)`, `orjson` в
+`requirements.txt`, `json_dumps_text()` для WS-кадров
+(`ws.send_text` вместо `send_json` — сериализуем один раз на кадр, а не на
+клиента), `orjson.loads` на входящих кадрах биржи в `market_feed.py` (19 мест).
+
+Замеры на этом же стенде (кадр ленты ликвидаций 1129 Б, пачка свечей 15 657 Б):
+
+| Операция | stdlib `json` | `orjson` | Выигрыш |
+|---|---|---|---|
+| разбор кадра WS-ленты | 15.6 мкс | 6.0 мкс | **2.6×** |
+| сериализация `/api/klines` | 220.7 мкс | 22.4 мкс | **9.8×** |
+| broadcast кадра 50 клиентам | 1253.7 мкс | 152.6 мкс | **8.2×** |
+
+Пакет не обязателен: без orjson приложение поднимается на прежнем
+`JSONResponse` (поведение то же), а в логе при старте — предупреждение;
+`/api/health` → `"fast_json": true/false`. REST-ответы биржи остались на
+загрузчике aiohttp: REST зовётся раз в секунды, а двойники ответов в тестах
+повторяют базовую сигнатуру `json(content_type=…)`; выигрыш там несоизмеримо
+меньше горячего WS-пути.
+
+#### 3. `/api/klines` — читатель буфера, а не поход на биржу
+
+Обработчик больше **никогда** не ждёт биржу. Порядок чтения в `get_candles`:
+
+1. кэш отдач `CANDLES` (`KLINE_TTL` 20 с, повторный рефетч не чаще
+   `CANDLES_REFETCH_SEC`);
+2. локальный буфер фида — `market_feed.get_candles_cached(symbol, tf)`;
+3. заготовка из последней цены — `source: "stub"`, `pending: true`, `candles: []`.
+
+История новой монеты догружается **фоновой** `asyncio.create_task`
+(`schedule_candles` в `market_feed.py`, одна задача на серию + дроссель
+`_candles_fetch_at`, карта подрезается по `CANDLES_CACHE_MAX`), а готовые свечи
+приезжают зрителю по WS (`{"type":"candles"}` — пуш только на переходе
+`stub → exchange`, чтобы не спамить). `force=true` (внутренние прогрева,
+дайджест, посты в канал) по-прежнему ждёт биржу — там настоящие данные нужны в
+публикуемом тексте, поэтому `digest_ctx.candles_fn` и подсчёт объёмов в
+`slot_flows` зовут `get_candles(..., force=True)`.
+
+Замер на стенде (биржи недоступны — значит, любой синхронный поход был бы
+секундами и ошибкой):
+
+```
+GET /api/klines?symbol=BTC_USDT&timeframe=5         → 11.1 / 7.1 / 7.1 мс, 24 КБ
+GET /api/klines?symbol=BRANDNEWCOIN_USDT&timeframe=15 → 17 мс
+GET /api/stats                                      → 3.2 мс, 2.3 КБ
+GET /api/digest                                     → 3.3 мс, Cache-Control: public, max-age=60
+GET /static/app.js?v=quota1                          → 10.4 мс, 399 КБ, max-age=31536000, immutable
+GET /                                                → 3.5 мс
+```
+
+Ответ `/api/klines`: `{symbol, timeframe, source, candles, stale, pending,
+age_sec}` — `source` честно говорит, откуда данные (`cache`/`feed`/`stub`/
+`demo`/`exchange`), а `pending` — что история ещё в пути.
+
+#### 4. Лимиты на добавление монет (защита подписок, памяти и IP)
+
+| Кто | Новые монеты | Ответ при отказе |
+|---|---|---|
+| Аноним | **0** (уже лежащую в списке пару открыть можно — она ничего не прибавляет) | 401 `error:"auth"`, «Авторизуйтесь для добавления монет» |
+| Аккаунт (`liqscope_sid`) | `LIQSCOPE_USER_SYMBOL_CAP` = **5**, счётчик в `accounts.db` (`user_symbols`), сверенный со списком фида (`_live_symbol_quota`) | 409 `error:"quota"` + `limit`/`used`/`left`/`symbols` |
+| Админ | без счёта (`cap = -1`), `force=true` только ему | 403 `error:"admin"` на `force` от неадмина |
+| Все вместе | `MAX_CUSTOM_SYMBOLS` = **120** (без изменений) и `SYMBOLS_CAP` = 120 | 409 `error:"full"` |
+
+Повтор пары, которая уже в общем списке, квоту не тратит. Слот держит только та пара, которая реально лежит в `custom_symbols` фида: список живёт в памяти процесса, поэтому после рестарта сервиса слоты **освобождаются** (строки базы, чьи пары из терминала исчезли, удаляются при следующей проверке квоты), а не сгорают навсегда — иначе «5 монет» превратились бы в пожизненный лимит. Та же монета, добавленная заново, слот не удваивает (`PRIMARY KEY (user_id, symbol)`). Чтение сессии и
+счётчика — через `asyncio.to_thread`: единственный воркер не стоит на диске,
+пока остальные ждут ответ. Фронт (`static/app.js`) различает коды и показывает
+перевод (`search.need_auth`, `search.quota_full` с `{n}`) вместо общего
+«не добавлено»; версии `?v=quota1` проставлены в 12 HTML, чтобы кэш отдал
+новый `i18n.js`/`app.js`.
+
+### Что не меняли (сознательно)
+
+* `--workers 1` в `deploy/licvid.service` — до появления Redis/общего состояния;
+* WS-мост `LiqScopeWsBridge` в `static/chart_dock.js` и dock-iframe — не тронуты;
+* `MAX_CUSTOM_SYMBOLS` = 120 и `SYMBOLS_CAP` = 120;
+* `proxy_cache` не стоит на `/ws`, `/api/symbols/add` и любых личных ручках.
+
+### Проверка на бою после деплоя
+
+```bash
+cd /root/Licvid && git pull && venv/bin/pip install -r requirements.txt   # orjson!
+sudo nginx -t && sudo systemctl reload nginx && sudo systemctl restart licvid
+
+# микрокэш: первый запрос MISS, второй (в пределах 3 с) HIT
+curl -sD - -o /dev/null 'https://liqscope.online/api/klines?symbol=BTC_USDT&timeframe=5' | grep -i 'x-cache-status\|cache-control'
+curl -sD - -o /dev/null 'https://liqscope.online/api/klines?symbol=BTC_USDT&timeframe=5' | grep -i x-cache-status
+#   → X-Cache-Status: MISS
+#   → X-Cache-Status: HIT
+
+# публичные ручки (5 с)
+curl -sD - -o /dev/null https://liqscope.online/api/stats  | grep -i x-cache-status
+curl -sD - -o /dev/null https://liqscope.online/api/digest | grep -i 'x-cache-status\|cache-control'
+
+# статика: год для ?v=, час для i18n.pages.*.js без версии
+curl -sD - -o /dev/null 'https://liqscope.online/static/app.js?v=quota1' | grep -i cache-control
+curl -sD - -o /dev/null 'https://liqscope.online/static/i18n.pages.en.js' | grep -i cache-control
+
+# кэш реально лежит на диске и не разрастается
+ls /tmp/nginx_api_cache | head; du -sh /tmp/nginx_api_cache
+
+# orjson включён и /api/klines не ждёт биржу
+curl -s localhost:8000/api/health | grep -o '"fast_json":[a-z]*'
+curl -s -o /dev/null -w 'klines %{time_total}с http=%{http_code}\n' 'localhost:8000/api/klines?symbol=НОВАЯ_МОНЕТА_USDT&timeframe=5'
+
+# лимиты: аноним новую монету не добавляет
+curl -i -X POST 'https://liqscope.online/api/symbols/add?symbol=GRAM_USDT' | head -1
+```
+
+`deploy/setup-https.sh` сам подставляет домен и путь к статике в оба конфига,
+проверяет `nginx -t` перед установкой, подсказывает `chmod`, если nginx не
+читает `/static/`, и печатает эти же проверки в конце.
+
+### Чем проверено
+
+| Проверка | Результат |
+|---|---|
+| `tests/test_klines_isolation.py` | 12/12: запрос не ждёт биржу, 50 зрителей = 1 поход, `stub → exchange` по WS, `force=True` ждёт, `CANDLES_CACHE_MAX`, `get_candles_cached`, чтение буфера фида, дроссель рефетча |
+| `tests/test_symbol_quota.py` | 22/22: 401 анониму, 409 на 6-й монете, счётчик переживает пересоздание `accounts.Store`, исчезнувшие пары освобождают слот (а живые — держат), админ без лимита, изоляция квот по аккаунтам, чужая cookie = аноним, кап 120, orjson как ответчик приложения |
+| `tests/test_nginx_conf.py` | 27/27: разобрал оба конфига (парсер с учётом кавычек) — кэш только где надо, `X-Cache-Status`, `proxy_cache_lock`, статика через `alias`, заголовки в каждом `location`, `limit_req`/`limit_conn`, HSTS; синтаксис — `crossplane` (обёртка в `http{}`), без него проверка пропускается |
+| `tools/run_tests.sh --python` | падают только 5 тестов, которые падали **до** правок (`test_archive_restore`, `test_bot_i18n`, `test_channel_digest`, `test_chat_read_state`, `test_oi`) — новых падений нет |
+| живой uvicorn на :8000 | замеры выше; `/api/health` → `fast_json: true` |
+
+Nginx-двоичника в песочнице нет (собирать не из чего: закрыт доступ к
+`nginx.org`, нет `pcre`/`zlib`-заголовков), поэтому конфиг проверен
+`crossplane` — он валидирует контекст каждой директивы и число аргументов по
+таблице nginx; на сервере `setup-https.sh` дополнительно гоняет `nginx -t`.
+
+### Как воспроизвести замеры
+
+```bash
+LIQSCOPE_DEMO=1 LIQSCOPE_SECRET=test-secret-not-the-published-default \
+  /path/to/venv/bin/python -m uvicorn server:app --host 127.0.0.1 --port 8000
+
+for i in 1 2 3; do
+  curl -s -o /dev/null -w "klines %{time_total}с\n" \
+    'http://127.0.0.1:8000/api/klines?symbol=BTC_USDT&timeframe=5'; sleep 0.3
+done
+
+# orjson против stdlib json на реальных формах ответов
+python3 - <<'PY'
+import json, time, orjson
+candles = {"candles": [{"time": 1790512200 + i * 300, "open": 61000 + i,
+                        "high": 61100 + i, "low": 60900 + i, "close": 61050 + i,
+                        "volume": 100 + i * 1.7, "cvd": i * 3.5} for i in range(121)]}
+for name, fn, n in (("json.dumps", lambda: json.dumps(candles), 3000),
+                    ("orjson.dumps", lambda: orjson.dumps(candles), 3000)):
+    t0 = time.perf_counter()
+    for _ in range(n): fn()
+    print(name, "%.1f мкс" % ((time.perf_counter() - t0) / n * 1e6))
+PY
+```

@@ -50,6 +50,43 @@ from oi_feed import OpenInterestTracker
 
 log = logging.getLogger("liqscope.feed")
 
+# ----------------------------------------------------------------------------
+# Быстрый JSON
+# ----------------------------------------------------------------------------
+# Разбор потиковых кадров бирж — самая горячая точка процесса: тысячи сообщений
+# в секунду на одном воркере uvicorn. orjson разбирает их в разы быстрее
+# стандартного json (и это чистый CPU, который иначе съедает лаг интерфейса).
+# Пакет не обязателен: без него всё работает на stdlib, поэтому импорт мягкий.
+try:                                   # pragma: no cover — зависит от окружения
+    import orjson as _orjson
+except ImportError:                    # pragma: no cover
+    _orjson = None
+
+FAST_JSON = _orjson is not None
+
+
+def json_loads(data: Any) -> Any:
+    """Разбор JSON: orjson, а если он отказал — стандартный json.
+
+    Запасной путь не для красоты: orjson строже и не понимает ``NaN`` /
+    ``Infinity``, которые stdlib проглатывает. Редкий кривой кадр биржи не
+    должен теряться из-за выбора парсера — поэтому сначала пробуем быстрый.
+    """
+    if _orjson is None:
+        return json.loads(data)
+    try:
+        return _orjson.loads(data)
+    except ValueError:
+        return json.loads(data)
+
+
+def json_dumps_text(obj: Any) -> str:
+    """Компактная JSON-строка (WS-кадры клиенту, снимки в лог)."""
+    if _orjson is None:
+        return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+    return _orjson.dumps(obj).decode("utf-8")
+
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 # Часовые срезы оборота монет — для среднего за неделю (volAvg7d).
 # От него клиент масштабирует пороги «крупности» ликвидаций/CVD/OI:
@@ -253,6 +290,26 @@ _BASE_RE = re.compile(r"^[A-Z0-9]{1,32}$")
 # Жёсткий потолок общего списка. LIQSCOPE_SYMBOLS_LIMIT — размер топа,
 # а кап не даёт анонимным POST раздувать память процесса и подписки.
 SYMBOLS_CAP = max(8, int(os.getenv("LIQSCOPE_SYMBOLS_CAP", "120")))
+# Кап ПАМЯТИ на пользовательские монеты: каждая добавленная пара тянет за
+# собой подписки WS, историю свечей, ряд OI и потиковый поток. Это потолок
+# процесса, а не одного человека — сколько монет может добавить ОДИН
+# аккаунт, решает USER_SYMBOL_CAP (проверка живёт в /api/symbols/add).
+MAX_CUSTOM_SYMBOLS = max(8, int(os.getenv("LIQSCOPE_MAX_CUSTOM_SYMBOLS", "120")))
+# Сколько монет разрешено добавить одному аккаунту. Аноним — ноль (роут
+# требует авторизацию), админ — без счёта.
+USER_SYMBOL_CAP = max(0, int(os.getenv("LIQSCOPE_USER_SYMBOL_CAP", "5")))
+
+# Локальный буфер истории свечей: сколько серий (монета, ТФ) держать в памяти
+# и какой минимальный зазор между походами на биржу за одной серией. Зазор —
+# защита биржевых лимитов: 100 зрителей одного графика дают ОДИН запрос,
+# а не сто (429/418 от Binance — это бан IP всего сервера).
+CANDLES_CACHE_MAX = max(16, int(os.getenv("LIQSCOPE_CANDLES_CACHE_MAX", "240")))
+CANDLES_REFETCH_SEC = max(1.0, float(os.getenv("LIQSCOPE_CANDLES_REFETCH_SEC", "10")))
+
+
+def candle_key(symbol: str, tf_min: int) -> str:
+    """Ключ серии свечей: «BTC_USDT|5». Один вид ключа в фиде и в server.py."""
+    return f"{canon(symbol)}|{int(tf_min)}"
 
 
 def is_safe_symbol(symbol: str) -> bool:
@@ -352,6 +409,14 @@ def _search_key(text) -> str:
 # Вспомогательное
 # ----------------------------------------------------------------------------
 async def _get_json(session: aiohttp.ClientSession, url: str, timeout: float = 12.0):
+    """REST-ответ биржи как JSON.
+
+    Разбор оставляет штатному загрузчику aiohttp: REST зовётся раз в секунды
+    (каталог, OI, свечи), а настоящий горячий путь — потиковые кадры WS, там
+    стоит :func:`json_loads` (orjson). Подставлять ``loads=json_loads`` сюда
+    соблазнительно, но двойники ответов в тестах повторяют только базовую
+    сигнатуру ``json(content_type=...)``, а выигрыш на REST несоизмеримо меньше.
+    """
     async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
         if resp.status != 200:
             raise RuntimeError(f"HTTP {resp.status} for {url}")
@@ -1298,6 +1363,21 @@ class MarketFeed:
         # Пользовательские монеты, добавленные через поиск: они не выпадают
         # из списка при периодическом обновлении топа по обороту.
         self.custom_symbols: List[str] = []
+        # Кто добавил пользовательскую монету: symbol -> ключ владельца
+        # («u:<id>» у аккаунта, «admin» у админа, «» — добавлено не через роут).
+        # Нужно для капа «N монет на аккаунт»: без него один человек забивает
+        # весь общий список (кап памяти MAX_CUSTOM_SYMBOLS) и чужие подписки.
+        self.custom_owners: Dict[str, str] = {}
+        # Локальный буфер истории свечей: «SYM|tf» -> {"candles", "ts", "source"}.
+        # Пишется только фоновой загрузкой, читается ручками без ожидания сети.
+        self.candles_cache: Dict[str, dict] = {}
+        self._candles_inflight: set = set()      # ключи серий в полёте
+        self._candles_fetch_at: Dict[str, float] = {}   # ключ -> monotonic старта
+        self._candles_tasks: set = set()         # сильные ссылки на задачи
+        # Колбэк «история готова»: server.py подшивает CVD/OI, кладёт снимок в
+        # свой кэш и догоняет зрителей графика кадром candles по WS.
+        self.on_candles: Optional[Callable[[str, int, List[dict], str],
+                                           Awaitable[None]]] = None
         # Полный каталог всех USDT-перпетуалов (не только топ) для поиска пар,
         # которых нет в дефолтном списке (например, GRAM_USDT).
         self.symbol_index: Dict[str, dict] = {}
@@ -1701,6 +1781,7 @@ class MarketFeed:
                     self.custom_symbols.remove(c)
                 except ValueError:
                     pass
+                self.custom_owners.pop(c, None)
                 continue
             if c not in self.symbols:
                 if len(self.symbols) >= SYMBOLS_CAP:
@@ -1795,13 +1876,46 @@ class MarketFeed:
             "index_size": len(self.symbol_index),
         }
 
-    async def add_symbol(self, symbol: str, force: bool = False) -> dict:
+    def owner_symbol_count(self, owner: str) -> int:
+        """Сколько пользовательских монет добавил этот владелец (in-memory).
+
+        Источник истины по квоте — база аккаунтов (счётчик переживает рестарт),
+        а этот счётчик держим рядом: он страхует, если база недоступна, и
+        виден в диагностике.
+        """
+        if not owner:
+            return 0
+        owner = str(owner)[:40]
+        return sum(1 for sym, who in self.custom_owners.items()
+                   if who == owner and sym in self.custom_symbols)
+
+    async def add_symbol(self, symbol: str, force: bool = False,
+                         owner: str = "",
+                         owner_cap: Optional[int] = None,
+                         guest: bool = False) -> dict:
         """Добавляет пару (например GRAM_USDT) в список и возвращает её данные.
 
         Пара ищется в полном каталоге бирж. Если биржа подтянула её только что
         или пара существует, она попадает и в дефолтный список, и в personal.
         force — добавить даже без подтверждения от каталога (график будет
         собран из ближайших источников, а лента начнёт принимать события).
+
+        Лимиты (задача «защитить биржевые лимиты и память»):
+
+        * ``MAX_CUSTOM_SYMBOLS`` — потолок памяти процесса на пользовательские
+          монеты (120): каждая пара тянет подписки WS, историю свечей и OI;
+        * ``guest=True`` — добавляет гость без сессии. Новую монету в общий
+          список ему не кладём (счётчик некуда записать, а подписки и память
+          общие), зато уже лежащую в списке пару открыть можно: она ничего не
+          прибавляет. Отказ — ``error: "auth"``;
+        * ``owner`` / ``owner_cap`` — сколько монет добавил ОДИН аккаунт.
+          Ключ владельца даёт вызывающий (server.py знает сессию), по
+          умолчанию кап — ``USER_SYMBOL_CAP`` (5), отрицательный — «без счёта»
+          (админ). Пустой ``owner`` = служебный вызов без владельца (тесты,
+          прогрев): квота не проверяется. Отказ — ``error: "quota"``.
+          Монета, которая уже лежит в общем списке, квоту не тратит: памяти и
+          подписок она не прибавляет, просто помечается «своей», чтобы не
+          выпасть при следующем обновлении топа.
         """
         sym = canon(symbol)
         if not sym:
@@ -1839,21 +1953,49 @@ class MarketFeed:
         if entry is None:
             entry = {"symbol": sym, "base": base_of(sym), "price": 0.0,
                      "volume24h": 0.0, "change24h": 0.0, "exchanges": []}
+        # Тратит ли добавление ресурсы: новая пара = новые подписки WS, история
+        # свечей и ряд OI. Повтор уже лежащей в списке пары не стоит ничего.
+        charges = sym not in self.custom_symbols and sym not in self.symbols
         if sym not in self.symbols and len(self.symbols) >= SYMBOLS_CAP:
             return {"added": False, "found": bool(entry.get("exchanges")),
                     "symbol": sym, "error": "full",
                     "message": "список заполнен"}
+        # Кап памяти процесса на пользовательские монеты (MAX_CUSTOM_SYMBOLS).
+        # Отдельный от SYMBOLS_CAP: топ-40 биржевых пар — не пользовательские.
+        if charges and len(self.custom_symbols) >= MAX_CUSTOM_SYMBOLS:
+            return {"added": False, "found": bool(entry.get("exchanges")),
+                    "symbol": sym, "error": "full",
+                    "message": "список пользовательских монет заполнен"}
+        # Гость без сессии: новую монету не кладём, уже лежащую — открываем.
+        if guest and charges:
+            return {"added": False, "found": bool(entry.get("exchanges")),
+                    "symbol": sym, "error": "auth",
+                    "message": "Авторизуйтесь для добавления монет"}
+        # Квота одного аккаунта. Проверяем только на genuinely новой монете:
+        # повтор своей же пары и открытие монеты из общего списка бесплатны.
+        cap = USER_SYMBOL_CAP if owner_cap is None else int(owner_cap)
+        if owner and charges and cap >= 0:
+            used = self.owner_symbol_count(owner)
+            if used >= cap:
+                return {"added": False, "found": bool(entry.get("exchanges")),
+                        "symbol": sym, "error": "quota", "limit": cap, "used": used,
+                        "message": f"лимит {cap} монет на аккаунт исчерпан"}
         if sym not in self.symbols:
             self.symbols.append(sym)
         if sym not in self.custom_symbols:
             self.custom_symbols.append(sym)
+            if owner:
+                self.custom_owners[sym] = str(owner)[:40]
         self.symbol_meta[sym] = dict(entry)
         if float(entry.get("price") or 0) > 0:
             self.prices[sym] = float(entry["price"])
-        log.info("[index] добавлена монета %s (биржи: %s, объём 24ч: %.0f)",
+        log.info("[index] добавлена монета %s (биржи: %s, объём 24ч: %.0f, владелец: %s)",
                  sym, ",".join(entry.get("exchanges") or []),
-                 float(entry.get("volume24h") or 0))
-        return {"added": True, "found": True, "symbol": sym, "details": dict(entry)}
+                 float(entry.get("volume24h") or 0), owner or "—")
+        return {"added": True, "found": True, "symbol": sym, "details": dict(entry),
+                # роут по этому флагу пишет монету в счётчик аккаунта (база):
+                # открытие уже лежащей в списке пары квоту не тратит
+                "quota_charged": bool(charges and owner)}
 
     async def _symbols_binance(self) -> List[dict]:
         info = await _get_json(self._session, f"{BINANCE_REST}/fapi/v1/exchangeInfo")
@@ -2103,7 +2245,7 @@ class MarketFeed:
                         break
                     continue
                 try:
-                    payload = json.loads(msg.data)
+                    payload = json_loads(msg.data)
                 except Exception:
                     continue
                 for ev in parse_binance_msg(payload):
@@ -2151,7 +2293,7 @@ class MarketFeed:
                             break
                         continue
                     try:
-                        payload = json.loads(msg.data)
+                        payload = json_loads(msg.data)
                     except Exception:
                         continue
                     if payload.get("op") == "subscribe":
@@ -2192,7 +2334,7 @@ class MarketFeed:
                 if msg.data == "pong":
                     continue
                 try:
-                    payload = json.loads(msg.data)
+                    payload = json_loads(msg.data)
                 except Exception:
                     continue
                 if payload.get("event") == "error":
@@ -2270,7 +2412,7 @@ class MarketFeed:
                             break
                         continue
                     try:
-                        payload = json.loads(msg.data)
+                        payload = json_loads(msg.data)
                     except Exception:
                         continue
                     if payload.get("error"):
@@ -2527,7 +2669,7 @@ class MarketFeed:
                 last_frame_at = time.time()
                 st.extra["binance_silent_sec"] = 0.0
                 try:
-                    payload = json.loads(msg.data)
+                    payload = json_loads(msg.data)
                 except Exception:
                     continue
                 data = payload.get("data", payload)
@@ -2617,7 +2759,7 @@ class MarketFeed:
                 if msg.data == "pong":
                     continue
                 try:
-                    payload = json.loads(msg.data)
+                    payload = json_loads(msg.data)
                 except Exception:
                     continue
                 if payload.get("code") not in (None, 0, "0"):
@@ -2655,7 +2797,7 @@ class MarketFeed:
                 else:
                     continue
                 try:
-                    payload = json.loads(raw)
+                    payload = json_loads(raw)
                 except Exception:
                     continue
                 if payload.get("op") == "ping":
@@ -2783,7 +2925,7 @@ class MarketFeed:
                     if msg.type != aiohttp.WSMsgType.TEXT:
                         continue
                     try:
-                        payload = json.loads(msg.data)
+                        payload = json_loads(msg.data)
                     except Exception:
                         continue
                     if isinstance(payload, dict):
@@ -2900,7 +3042,7 @@ class MarketFeed:
                     if msg.type != aiohttp.WSMsgType.TEXT:
                         continue
                     try:
-                        payload = json.loads(msg.data)
+                        payload = json_loads(msg.data)
                     except Exception:
                         continue
                     if isinstance(payload, dict):
@@ -3004,7 +3146,7 @@ class MarketFeed:
                     if msg.type != aiohttp.WSMsgType.TEXT:
                         continue
                     try:
-                        payload = json.loads(msg.data)
+                        payload = json_loads(msg.data)
                     except Exception:
                         continue
                     if isinstance(payload, dict):
@@ -3286,7 +3428,7 @@ class MarketFeed:
                     # тишину, а не незнакомую форму кадра
                     stats["frames"] += 1
                     try:
-                        payload = json.loads(msg.data)
+                        payload = json_loads(msg.data)
                     except Exception:
                         stats["kinds"]["<не-json>"] = \
                             stats["kinds"].get("<не-json>", 0) + 1
@@ -3526,7 +3668,7 @@ class MarketFeed:
             async def handle_text(raw: str):
                 nonlocal seen_msgs
                 try:
-                    payload = json.loads(raw)
+                    payload = json_loads(raw)
                 except Exception:
                     return
                 if seen_msgs < 3:
@@ -3948,7 +4090,7 @@ class MarketFeed:
                 if msg.type != aiohttp.WSMsgType.TEXT:
                     continue
                 try:
-                    payload = json.loads(msg.data)
+                    payload = json_loads(msg.data)
                 except Exception:
                     continue
                 trades = self._handle_trade_payload(payload)
@@ -4013,7 +4155,7 @@ class MarketFeed:
                     if msg.type != aiohttp.WSMsgType.TEXT:
                         continue
                     try:
-                        payload = json.loads(msg.data)
+                        payload = json_loads(msg.data)
                     except Exception:
                         continue
                     trades = self._handle_trade_payload(payload)
@@ -4092,7 +4234,7 @@ class MarketFeed:
                     if msg.type != aiohttp.WSMsgType.TEXT:
                         continue
                     try:
-                        payload = json.loads(msg.data)
+                        payload = json_loads(msg.data)
                     except Exception:
                         continue
                     if not str(payload.get("topic") or "").startswith("publicTrade"):
@@ -4176,7 +4318,7 @@ class MarketFeed:
                     if msg.type != aiohttp.WSMsgType.TEXT:
                         continue
                     try:
-                        payload = json.loads(msg.data)
+                        payload = json_loads(msg.data)
                     except Exception:
                         continue
                     for sym, price, qty, ts, side in parse_dydx_trades(payload, ticker_map):
@@ -4234,7 +4376,7 @@ class MarketFeed:
                     if msg.type != aiohttp.WSMsgType.TEXT:
                         continue
                     try:
-                        payload = json.loads(msg.data)
+                        payload = json_loads(msg.data)
                     except Exception:
                         continue
                     for sym, price, qty, ts, side in parse_kraken_trades(payload, product_map):
@@ -4292,7 +4434,7 @@ class MarketFeed:
                     if msg.type != aiohttp.WSMsgType.TEXT:
                         continue
                     try:
-                        payload = json.loads(msg.data)
+                        payload = json_loads(msg.data)
                     except Exception:
                         continue
                     if isinstance(payload, dict):
@@ -4369,7 +4511,7 @@ class MarketFeed:
                     if msg.type != aiohttp.WSMsgType.TEXT:
                         continue
                     try:
-                        payload = json.loads(msg.data)
+                        payload = json_loads(msg.data)
                     except Exception:
                         continue
                     if not isinstance(payload, dict) \
@@ -4401,6 +4543,123 @@ class MarketFeed:
                 syncer.cancel()
                 self.tick_subscriptions = set()
         return "closed" if got else "nodata"
+
+    # -- Локальный буфер свечей (путь запроса никогда не идёт на биржу) -------
+    def get_candles_cached(self, symbol: str, tf_min: int) -> Optional[dict]:
+        """Свечи из памяти: ``{"candles", "ts", "source"}`` или None.
+
+        Это единственный читатель истории для REST/WS-ручек. Он не ходит на
+        биржу и ничего не ждёт: при 50+ зрителях каждый синхронный запрос к
+        Binance — это лаг единственного воркера и риск 429/418 (бан IP всего
+        сервера). Нет свечей в памяти — None, а загрузку ставит
+        :meth:`schedule_candles` в фоне.
+        """
+        entry = self.candles_cache.get(candle_key(symbol, tf_min))
+        if not entry:
+            return None
+        candles = entry.get("candles") or []
+        if not candles:
+            return None
+        return {"candles": candles, "ts": float(entry.get("ts") or 0.0),
+                "source": str(entry.get("source") or "cache"),
+                "age_sec": round(time.time() - float(entry.get("ts") or 0.0), 1)}
+
+    def cache_candles(self, symbol: str, tf_min: int, candles: List[dict],
+                      source: str = "exchange", ts: Optional[float] = None) -> None:
+        """Положить готовые свечи в буфер. Зовёт фоновая загрузка и server.py."""
+        rows = [c for c in (candles or []) if isinstance(c, dict)]
+        if not rows:
+            return
+        key = candle_key(symbol, tf_min)
+        self.candles_cache[key] = {"candles": rows,
+                                   "ts": float(ts if ts is not None else time.time()),
+                                   "source": source}
+        # Буфер ограничен: серия — это до 300 свечей, а монет люди добавляют
+        # много. Выбрасываем самые старые по времени записи.
+        overflow = len(self.candles_cache) - CANDLES_CACHE_MAX
+        if overflow > 0:
+            for old in sorted(self.candles_cache,
+                              key=lambda k: self.candles_cache[k].get("ts") or 0.0)[:overflow]:
+                self.candles_cache.pop(old, None)
+                self._candles_fetch_at.pop(old, None)
+
+    def candles_pending(self, symbol: str, tf_min: int) -> bool:
+        """Идёт ли уже фоновая загрузка этой серии."""
+        return candle_key(symbol, tf_min) in self._candles_inflight
+
+    def schedule_candles(self, symbol: str, tf_min: int,
+                         loader: Optional[Callable[[str, int],
+                                                   Awaitable[Optional[List[dict]]]]] = None,
+                         ) -> bool:
+        """Поставить фоновую загрузку истории (``asyncio.create_task``).
+
+        Возвращает True, если задача действительно поставлена сейчас. Повторно
+        не ставим, пока предыдущая в полёте или с прошлого старта не прошло
+        ``CANDLES_REFETCH_SEC``: сто зрителей одного графика — это один поход
+        на биржу, а не сто. Вызывающий ничего не ждёт, поэтому ручка отдаёт
+        ответ сразу (из буфера или заготовкой).
+        """
+        parsed = parse_tf(tf_min)
+        if parsed is None:
+            return False
+        key = candle_key(symbol, parsed)
+        if key in self._candles_inflight:
+            return False
+        now = time.monotonic()
+        if now - self._candles_fetch_at.get(key, 0.0) < CANDLES_REFETCH_SEC:
+            return False
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:                    # нет event loop — ставить некуда
+            return False
+        self._candles_fetch_at[key] = now
+        # отметки старта копятся и по сериям, которые биржа так и не отдала —
+        # подрезаем, чтобы словарь не рос вечно
+        if len(self._candles_fetch_at) > CANDLES_CACHE_MAX * 2:
+            for old in sorted(self._candles_fetch_at,
+                              key=lambda x: self._candles_fetch_at[x])[:-CANDLES_CACHE_MAX]:
+                self._candles_fetch_at.pop(old, None)
+        self._candles_inflight.add(key)
+        task = asyncio.create_task(
+            self._load_candles(canon(symbol), parsed, key, loader))
+        # Сильная ссылка: цикл держит задачу только слабой, а сборка мусора
+        # посреди await оставила бы серию «в полёте» навсегда.
+        self._candles_tasks.add(task)
+        task.add_done_callback(self._candles_tasks.discard)
+        return True
+
+    async def _load_candles(self, symbol: str, tf_min: int, key: str,
+                            loader: Optional[Callable[[str, int],
+                                                      Awaitable[Optional[List[dict]]]]],
+                            ) -> None:
+        """Фоновый поход на биржу: результат — в буфер и в колбэк server.py."""
+        try:
+            try:
+                candles = (await loader(symbol, tf_min)) if loader else \
+                    await self.fetch_klines(symbol, tf_min, limit=300)
+            except Exception as e:              # noqa: BLE001 — биржа бывает всякой
+                log.debug("фоновая история %s %s: %s", symbol, tf_min, e)
+                candles = None
+            if not candles:
+                # пусто: следующий запрос попробует снова (не раньше зазора)
+                self._candles_fetch_at[key] = time.monotonic() - CANDLES_REFETCH_SEC / 2
+                return
+            self.cache_candles(symbol, tf_min, candles, "exchange")
+            cb = self.on_candles
+            if cb is not None:
+                try:
+                    await cb(symbol, tf_min, candles, "exchange")
+                except Exception as e:          # noqa: BLE001
+                    log.debug("колбэк истории %s %s: %s", symbol, tf_min, e)
+        finally:
+            self._candles_inflight.discard(key)
+
+    def candles_cache_stats(self) -> Dict[str, Any]:
+        """Диагностика буфера: сколько серий держим и сколько в полёте."""
+        return {"series": len(self.candles_cache),
+                "inflight": len(self._candles_inflight),
+                "cap": CANDLES_CACHE_MAX,
+                "refetch_sec": CANDLES_REFETCH_SEC}
 
     # -- Исторические свечи ---------------------------------------------------
     async def fetch_klines(self, symbol: str, tf_min: int, limit: int = 300) -> Optional[List[dict]]:
@@ -4560,8 +4819,13 @@ class MarketFeed:
             "symbols_count": len(self.symbols),
             "symbols_source": self.symbols_source,
             "custom_symbols": list(self.custom_symbols),
+            "custom_symbols_cap": MAX_CUSTOM_SYMBOLS,
+            "user_symbol_cap": USER_SYMBOL_CAP,
+            "custom_owners": len(self.custom_owners),
+            "candles_cache": self.candles_cache_stats(),
             "catalog_count": len(self.symbol_index),
             "catalog_source": self.symbol_index_source,
             "cvd_source": self.cvd_source,
+            "fast_json": FAST_JSON,
             "sources": sources,
         }

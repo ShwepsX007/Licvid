@@ -538,7 +538,9 @@
         // Фильтры ленты (порог и биржи) фильтруют и исторические кластеры:
         // сервер считает свёртку с теми же условиями, поэтому перезапрашиваем
         // её — ключ запроса включает порог и список включённых бирж.
-        loadLiqClusters();
+        // Слои выключены — свёртка не нужна: сервер не дёргаем, старые ряды сбрасываем.
+        if (liqClustersWanted()) loadLiqClusters();
+        else dropLiqClusters();
     }
 
     // --- История ликвидаций: переживает F5 и рестарт сервера -----------------
@@ -652,6 +654,26 @@
         return all.filter((e) => state.exchanges.has(e)).sort().join(",");
     }
 
+    // Кластеры ликвидаций нужны только включённым слоям (⚡/профиль/окно LIQ):
+    // новым посетителям со всеми выключенными слоями запрос не отправляем —
+    // страница стартует быстрее, данные догрузятся при включении слоя.
+    function liqClustersWanted() {
+        return !!(state.liqEnabled || state.profileEnabled || state.paneLiq);
+    }
+    // Слои выключены — старые ряды чужой пары/фильтров выкидываем, чтобы
+    // цифры шапки не считали по протухшим данным.
+    function dropLiqClusters() {
+        state.liqHist = {};
+        state.liqCut = 0;
+        liqHistKey = "";
+    }
+    // Ряды ещё от текущей пары/таймфрейма? После смены свечи уже новые,
+    // а кластеры могли остаться от старых.
+    function liqHistFresh() {
+        if (!liqHistKey) return true;   // рядов нет — протухать нечему
+        const prefix = chartSymbol() + "|" + Number(state.timeframe) + "|";
+        return liqHistKey.indexOf(prefix) === 0;
+    }
     async function loadLiqClusters(force) {
         const sym = chartSymbol();
         const tf = Number(state.timeframe);
@@ -684,6 +706,10 @@
             liqHistKey = key;
             liqHistAt = Date.now();
             queueRedraw();
+            // Свежие кластеры — свежие метки-киты и цифры шапки (при ленивой
+            // загрузке слой уже включён, а данных в момент клика ещё не было)
+            updateMarkers();
+            updateLiveStats();
         } catch (e) { /* нет сети — рисуем по памяти, как раньше */ }
     }
 
@@ -1695,28 +1721,24 @@
      */
     function paintFollowButtons() {
         const on = !!state.chartFollow;
-        [$("follow-toggle"), $("follow-toggle-pop")].forEach((btn) => {
-            if (!btn) return;
-            btn.classList.toggle("active", on);
-            btn.classList.remove("paused");
-            btn.setAttribute("aria-pressed", on ? "true" : "false");
-            btn.setAttribute("data-state", on ? "on" : "off");
-            btn.title = I18n.t(on ? "chart.follow_on" : "chart.follow_off");
-        });
+        const btn = $("follow-toggle");
+        if (!btn) return;
+        btn.classList.toggle("active", on);
+        btn.classList.remove("paused");
+        btn.setAttribute("aria-pressed", on ? "true" : "false");
+        btn.setAttribute("data-state", on ? "on" : "off");
+        btn.title = I18n.t(on ? "chart.follow_on" : "chart.follow_off");
     }
 
     function setupFollowToggle() {
-        const btns = [$("follow-toggle"), $("follow-toggle-pop")];
-        if (!btns.some(Boolean)) return;
+        const btn = $("follow-toggle");
+        if (!btn) return;
         try {
             const v = localStorage.getItem("liqscope.chartFollow");
             if (v === "0") state.chartFollow = false;
             else if (v === "1") state.chartFollow = true;
         } catch (e) { /* ignore */ }
-        btns.forEach((btn) => {
-            if (!btn) return;
-            btn.addEventListener("click", () => setChartFollow(!state.chartFollow));
-        });
+        btn.addEventListener("click", () => setChartFollow(!state.chartFollow));
         I18n.onChange(() => { paintFollowButtons(); applyChartTimeOptions(); });
         paintFollowButtons();
         applyFollowMode();
@@ -1825,8 +1847,11 @@
         state.sessionOpen = bars[0].open;
         updatePriceDisplay(bars[bars.length - 1].close);
         renderTickIndicator();
-        // Кластеры за всю сохранённую историю — под текущую пару и таймфрейм
-        loadLiqClusters();
+        // Кластеры за всю сохранённую историю — под текущую пару и таймфрейм.
+        // Слои выключены — сервер на старте не дёргаем; но если пара/таймфрейм
+        // сменились, а ряды остались от старых — подтягиваем свежие одним
+        // запросом, чтобы цифры шапки не врали (это уже не старт, а клик юзера).
+        if (liqClustersWanted() || !liqHistFresh()) loadLiqClusters();
         updateMarkers();
         updateLiveStats();
         queueRedraw();
@@ -6131,6 +6156,15 @@
                     bookPollSync();
                     if (state.feedTab === "book") rebuildBookFeed();
                 }
+                if ((d.skey === "liqEnabled" || d.skey === "profileEnabled" ||
+                        d.skey === "paneLiq") && state[d.skey]) {
+                    // слой только что включили — данных может не быть (на старте
+                    // со всеми выключенными слоями сервер не дёргаем): грузим
+                    // кластеры и историю пары; повторные вызовы дёшевы — внутри
+                    // TTL-ключ и historyLoaded отсекают лишнее
+                    loadLiqClusters();
+                    loadHistoryFor(chartSymbol());
+                }
                 paint();
                 updateMarkers();
                 updateLiveStats();
@@ -6145,6 +6179,14 @@
             // стартовый поллер ставим один раз после восстановления тумблеров
             if (state.feedTab === "book") bookPollSync();
         });
+        // Вернувшийся посетитель со включёнными слоями: свечи уже легли раньше,
+        // чем прочитались префы, — кластеры забираем сразу, не ждём отложенный
+        // запрос. В embed заодно грузим историю пары (ленты там нет, стартуем
+        // налегке и догружаемся только под включённые слои).
+        if (liqClustersWanted()) {
+            loadLiqClusters();
+            if (IS_EMBED) loadHistoryFor(chartSymbol(), true);
+        }
 
         // Task 2: toggle for dashed level alert
         try {
@@ -7797,10 +7839,11 @@
         setupChartExpand();
         loadCandles();
         startEmbedBridge();
-        // embed: слои/панели/фоллоу/рисование — как в одиночном графике.
-        // Без этого кнопки мёртвые, а state.liquidations пуст и слоям
-        // liq/profile не хватает данных (метки/кластеры грузятся сами).
-        loadHistoryFor(chartSymbol(), true);
+        // embed: слои/панели/фоллоу/рисование — как в одиночном графике
+        // (иначе кнопки мёртвые). Данные слоёв грузятся лениво: кластеры и
+        // история пары — только под включённые слои (см. setupLayerToggles
+        // и обработчик тумблеров); со всеми выключенными iframe стартует
+        // налегке — одни свечи и живые тики от родителя.
         applyAuthGate().then((allowed) => {
             setupLayerToggles(allowed);
             setupLayerPop();
@@ -7836,6 +7879,11 @@
         fetchOI();
         setInterval(paintCvdBox, 15000);   // окно CVD медленно ползёт
         setInterval(renderTickIndicator, 1000);
+        // Кластеры новым посетителям (все слои выключены) — отложенно, вне
+        // стартового залпа запросов: цифры шапки подтянут историю чуть позже,
+        // а первый paint и свечи не ждут. Слои включены — запрос уже ушёл из
+        // setCandles/setupLayerToggles, повтор не нужен.
+        setTimeout(() => { if (!liqClustersWanted()) loadLiqClusters(); }, 6000);
         // Слои: если пробник выключен — свободный доступ всем, иначе — N минут гостю.
         // Сначала узнаём auth + trial, потом вешаем переключатели.
         applyAuthGate().then((allowed) => {

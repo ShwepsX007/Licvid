@@ -236,16 +236,20 @@ async function part1() {
   const click = (el) => el.dispatchEvent(
     new win.MouseEvent("click", { bubbles: true, cancelable: true, view: win }));
 
-  check("кнопки в шапке графика больше нет", !doc.getElementById("follow-toggle"));
-  check("кнопка переехала в плашку слоёв", !!doc.getElementById("follow-toggle-pop"));
+  check("кнопка автоследования — в шапке графика", !!doc.getElementById("follow-toggle"));
+  check("кнопки в плашке слоёв больше нет", !doc.getElementById("follow-toggle-pop"));
+  check("кнопка — рядом с разворотом на весь экран",
+    doc.getElementById("chart-expand").nextElementSibling.id === "follow-toggle",
+    doc.getElementById("chart-expand").nextElementSibling.id);
   check("в шапке на её месте — рисование",
     doc.getElementById("layer-call").nextElementSibling.id === "draw-toggle",
     doc.getElementById("layer-call").nextElementSibling.id);
   check("тестовый API доступен", !!F && typeof F.range === "function");
   F.setTicker(false);         // шаги по таймеру в тесте не нужны — дёргаем сами
 
-  const btn = doc.getElementById("follow-toggle-pop");
-  check("кнопка подписана", /Авто/.test(btn.textContent), btn.textContent);
+  const btn = doc.getElementById("follow-toggle");
+  check("кнопка подписана", /🎯/.test(btn.textContent) && /следован/i.test(btn.title),
+    btn.textContent + " / " + btn.title);
   check("по умолчанию автоследование включено", F.enabled() === true);
   check("включённая кнопка подсвечена",
     btn.classList.contains("active") && btn.getAttribute("data-state") === "on" &&

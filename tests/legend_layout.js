@@ -238,16 +238,17 @@ async function main() {
     cssBlock("#layer-call").indexOf("margin-left: auto") !== -1);
   const legendKids = Array.from(doc.querySelector(".chart-legend").children);
   const kidIds = legendKids.map((k) => k.id || k.className);
-  // справа: слои, рисование, свернуть/развернуть.
-  // автоследование убрано из шапки — оно живёт в плашке слоёв
+  // справа: слои, рисование, свернуть/развернуть, автоследование.
+  // автоследование — отдельная кнопка в шапке, рядом с разворотом на весь экран
   check("right cluster order",
     kidIds.slice(-5).join(",") ===
-      "layer-call,draw-toggle,chart-toggle,chart-expand,add-chart-btn",
+      "draw-toggle,chart-toggle,chart-expand,follow-toggle,add-chart-btn",
     kidIds.slice(-5).join(","));
   check("toggles last in legend",
-    legendKids.length >= 3 &&
-    legendKids[legendKids.length - 3].id === "chart-toggle" &&
-    legendKids[legendKids.length - 2].id === "chart-expand" &&
+    legendKids.length >= 4 &&
+    legendKids[legendKids.length - 4].id === "chart-toggle" &&
+    legendKids[legendKids.length - 3].id === "chart-expand" &&
+    legendKids[legendKids.length - 2].id === "follow-toggle" &&
     legendKids[legendKids.length - 1].id === "add-chart-btn");
   check("add chart instead of multi mode",
     !doc.getElementById("ws-mode-toggle") &&

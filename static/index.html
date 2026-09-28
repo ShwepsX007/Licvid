@@ -35,7 +35,7 @@
 <link rel="icon" type="image/png" sizes="512x512" href="/static/icon-512.png">
     <link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
     <link rel="manifest" href="/manifest.webmanifest">
-    <link rel="stylesheet" href="/static/style.css?v=mode-flow1">
+    <link rel="stylesheet" href="/static/style.css?v=follow-hdr1">
     <!-- Local Lightweight Charts v5 -->
     <link rel="stylesheet" href="/static/ads.css?v=banner5">
     <link rel="stylesheet" href="/static/terminal_chat.css?v=8">
@@ -308,9 +308,9 @@
                             data-i18n-title="chart.layers_title"
                             title="Показать/скрыть кнопки слоёв" aria-label="Слои">☰<span
                             class="layer-trial hidden" id="layer-trial"></span></button>
-                    <!-- Автоследование живёт только в плашке слоёв (кнопка
-                         «🎯 Автоследование за ценой»): в шапке графика она
-                         дублировалась и мешала переключателям слоёв. -->
+                    <!-- Автоследование — отдельная кнопка в шапке графика,
+                         рядом с разворотом на весь экран: из плашки слоёв её
+                         убрали, чтобы слежение переключалось в один клик. -->
                     <button class="tool-toggle" id="draw-toggle" type="button"
                             data-i18n-title="chart.draw_title"
                             title="Рисовать фигуры теханализа">✎</button>
@@ -320,6 +320,10 @@
                     <button class="chart-toggle chart-expand" id="chart-expand" type="button"
                             data-i18n-title="chart.expand_title"
                             title="Развернуть график на весь экран">⛶</button>
+                    <button class="chart-toggle follow-toggle" id="follow-toggle" type="button"
+                            data-i18n-title="chart.follow_on"
+                            title="График сам едет за ценой: свеча не уходит за край, цена — в поле зрения"
+                            aria-pressed="true">🎯</button>
                     <button class="ws-mode-toggle" id="add-chart-btn" type="button"
                             title="Добавить такой же график рядом">＋ График</button>
                 </div>
@@ -367,11 +371,6 @@
                     <button class="profile-toggle pane-toggle" id="pane-oi-toggle" type="button"
                             data-i18n-title="chart.pane_oi_on" data-i18n="chart.pane_oi"
                             title="Окно OI под графиком">📈 Окно OI</button>
-                    <span class="layer-pop-sep" aria-hidden="true"></span>
-                    <button class="profile-toggle follow-toggle" id="follow-toggle-pop" type="button"
-                            data-i18n-title="chart.follow_on" data-i18n="chart.follow_full"
-                            aria-pressed="false"
-                            title="График сам едет за ценой: свеча не уходит за край, цена — в поле зрения">🎯 Автоследование за ценой</button>
                 </div>
             </div>
 
@@ -584,7 +583,7 @@
     <!-- workspace.js (старый мультичарт) больше не подключается: графики
          собирает chart_dock.js, а один WebSocket на окно раздаёт данные
          встроенным окнам через postMessage. Файл оставлен для старых тестов. -->
-    <script src="/static/app.js?v=embed2"></script>
+    <script src="/static/app.js?v=layers-lazy1"></script>
     <script src="/static/chart_dock.js?v=embed1"></script>
     <script src="/static/ads.js?v=banner6"></script>
     <script src="/static/terminal_chat.js?v=9"></script>

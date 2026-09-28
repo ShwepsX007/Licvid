@@ -371,6 +371,14 @@ age_sec}` — `source` честно говорит, откуда данные (`
 cd /root/Licvid && git pull && venv/bin/pip install -r requirements.txt   # orjson!
 sudo nginx -t && sudo systemctl reload nginx && sudo systemctl restart licvid
 
+# ВАЖНО: uvicorn открывает порт в КОНЦЕ startup, а после рестарта воркер ещё
+# ~20 с занят прогревом (каталог трёх бирж, WS десяти источников, OI по топу,
+# восстановление истории). Замеры в это окно непоказательны: curl на
+# localhost:8000 получает connection refused (пустой вывод и «0.0006с»), а
+# nginx — 502, поэтому X-Cache-Status будет MISS за MISS. Сначала ждём:
+for i in $(seq 40); do curl -sf -o /dev/null localhost:8000/api/health && break; sleep 2; done
+sleep 20                                   # дать прогреву отпустить event loop
+
 # микрокэш: первый запрос MISS, второй (в пределах 3 с) HIT
 curl -sD - -o /dev/null 'https://liqscope.online/api/klines?symbol=BTC_USDT&timeframe=5' | grep -i 'x-cache-status\|cache-control'
 curl -sD - -o /dev/null 'https://liqscope.online/api/klines?symbol=BTC_USDT&timeframe=5' | grep -i x-cache-status
@@ -388,13 +396,39 @@ curl -sD - -o /dev/null 'https://liqscope.online/static/i18n.pages.en.js' | grep
 # кэш реально лежит на диске и не разрастается
 ls /tmp/nginx_api_cache | head; du -sh /tmp/nginx_api_cache
 
+# доля HIT: 20 подряд идущих зрителей одного графика = 1 поход в приложение
+U='https://liqscope.online/api/klines?symbol=BTC_USDT&timeframe=5'
+for i in $(seq 20); do curl -sD - -o /dev/null "$U" | grep -io 'x-cache-status: [a-z]*'; done | sort | uniq -c
+#   1 x-cache-status: MISS
+#  19 x-cache-status: HIT
+
+# установившаяся latency (НЕ сразу после рестарта): единицы миллисекунд
+for i in $(seq 10); do curl -s -o /dev/null -w '%{time_total} ' \
+  'localhost:8000/api/klines?symbol=BTC_USDT&timeframe=5'; sleep 0.3; done; echo
+
 # orjson включён и /api/klines не ждёт биржу
 curl -s localhost:8000/api/health | grep -o '"fast_json":[a-z]*'
 curl -s -o /dev/null -w 'klines %{time_total}с http=%{http_code}\n' 'localhost:8000/api/klines?symbol=НОВАЯ_МОНЕТА_USDT&timeframe=5'
 
+# статику отдаёт nginx, а не Python: no-transform и 604800 ставит map конфига
+curl -sD - -o /dev/null 'https://liqscope.online/static/logo.png' | grep -i cache-control
+journalctl -u licvid --since "-2 min" | grep -c "GET /static/"      # 0
+sudo -u www-data test -r /root/Licvid/static/app.js && echo "www-data читает static"
+
 # лимиты: аноним новую монету не добавляет
 curl -i -X POST 'https://liqscope.online/api/symbols/add?symbol=GRAM_USDT' | head -1
 ```
+
+Что видно в `/var/log/nginx/error.log` во время `systemctl restart licvid`:
+`connect() failed (111 …)` по некэшируемым ручкам (`/ws`, `/api/chat/*`,
+`/api/oi`) — приложение ещё не слушает; и те же ручки с пометкой
+`subrequest: "/api/klines"` / `"/api/stats"` — это
+`proxy_cache_background_update` догружает протухшее в фоне, пока зрителям
+уходит `STALE` из кэша. То есть микрокэш отрабатывает ровно так, как задуман:
+часть трафика переживает рестарт без ошибок. Полностью убрать окно перезапуска
+можно, только открывая порт до прогрева (вынести `feed.start()` из lifespan в
+фоновую задачу) — сознательно не делали: порядок «сначала история, потом
+биржевые потоки» важнее двадцати секунд при деплое.
 
 `deploy/setup-https.sh` сам подставляет домен и путь к статике в оба конфига,
 проверяет `nginx -t` перед установкой, подсказывает `chmod`, если nginx не

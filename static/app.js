@@ -21,6 +21,14 @@
     };
     I18n.init();
 
+    // Страховка высоты графика: схлопнутый контейнер (мобильный док,
+    // скрытая вкладка, момент вставки слота в сетку) — не размер, а
+    // артефакт раскладки. Ниже CHART_MIN_H рисуем в CHART_FALLBACK_H
+    // (initChart и handleResize), иначе первый кадр уходит в чёрную
+    // полоску, а на телефоне график «исчезает» под заголовком слота.
+    const CHART_MIN_H = 100;
+    const CHART_FALLBACK_H = 400;
+
     const state = {
         symbol: "ALL",          // фильтр ленты: конкретная монета или ALL
         chartSymbol: "",        // монета графика — живёт отдельно от фильтра
@@ -1371,7 +1379,10 @@
         }
 
         const width = container.clientWidth || chartWrapper.clientWidth || 900;
-        const height = container.clientHeight || chartWrapper.clientHeight || 520;
+        // Контейнер мог быть свёрнут в полоску (мобильный док, вставка
+        // слота): сразу рисуем в читаемую высоту, дальше поправит resize.
+        let height = container.clientHeight || chartWrapper.clientHeight || 520;
+        if (height < CHART_MIN_H) height = CHART_FALLBACK_H;
 
         chart = LightweightCharts.createChart(container, {
             width, height,
@@ -1429,7 +1440,7 @@
             let h = container.clientHeight || chartWrapper.clientHeight || 520;
             // Мобилка/переходы: схлопнувшийся контейнер (1–99px) — не размер,
             // а артефакт; упираем график в читаемые 400px вместо чёрной полоски.
-            if (h < 100) h = 400;
+            if (h < CHART_MIN_H) h = CHART_FALLBACK_H;
             chart.applyOptions({ width: w, height: h });
             if (clusterCanvas) {
                 clusterCanvas.width = w;

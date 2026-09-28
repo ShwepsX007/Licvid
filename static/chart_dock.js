@@ -628,8 +628,10 @@
       this.wrap.className = "chart-dock-wrap";
       const tools = document.createElement("div");
       tools.className = "chart-dock-tools";
-      // Живая панель: машинный перевод браузера дублирует и корежит кнопки
-      // («Мультиэкран» превращался в «epy!») — запрещаем, язык берём из страницы.
+      // Живая панель: машинный перевод браузера дублирует подписи и корежит
+      // кнопки режимов (из «Сетка» выходила абракадабра) — переводить её
+      // нечем и не надо, язык берём со страницы, поэтому панель помечена
+      // translate="no", а подписи ставит _paintToolLabels().
       tools.setAttribute("translate", "no");
       const modes = document.createElement("div");
       modes.className = "chart-dock-modes";
@@ -678,8 +680,13 @@
       this.section.insertBefore(this.wrap, this.section.firstChild);
       this._paintCols();
       this._paintToolLabels();
-      if (window.I18n && typeof window.I18n.onChange === "function") {
-        try { window.I18n.onChange(() => this._paintToolLabels()); } catch (e) {}
+      // Смена языка на лету: подписи панели перерисовать сразу. Модуль i18n
+      // публикуется как LiqScopeI18n (window.I18n на странице нет — старая
+      // подписка молча не вешалась, и кнопки оставались на прежнем языке).
+      const i18n = window.LiqScopeI18n || window.I18n;
+      if (i18n && typeof i18n.onChange === "function" && !this._langBound) {
+        this._langBound = true;
+        try { i18n.onChange(() => this._paintToolLabels()); } catch (e) {}
       }
     }
 

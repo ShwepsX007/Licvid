@@ -771,9 +771,10 @@ body.chart-embed-pop .chart-pop-back {
     height: 70vh;
   }
   /* Телефон: страница скроллится, фиксированной высоты у дока нет —
-     каждый график получает свою высоту (60vh), иначе строки 1fr от
-     неопределённой высоты схлопываются в ноль вместе с графиками
-     (iframe внутри абсолютно спозиционирован и высоты не даёт). */
+     каждый график получает свою высоту (60vh, но не меньше 400px), иначе
+     строки 1fr от неопределённой высоты схлопываются в ноль вместе с
+     графиками (iframe внутри абсолютно спозиционирован и высоты не даёт).
+     Второй график добирается прокруткой страницы вниз, а не сжатием. */
   .chart-section.has-chart-dock { height: auto; }
   .chart-dock-wrap { height: auto; }
   .chart-dock { height: auto; }
@@ -781,7 +782,7 @@ body.chart-embed-pop .chart-pop-back {
   .chart-dock > .chart-slot:not(.is-slot-fs):not(.chart-floating),
   .chart-dock-wrap.view-tabs .chart-slot:not(.is-slot-fs):not(.chart-floating) {
     height: 60vh;
-    min-height: 340px;
+    min-height: 400px;
   }
   /* Сплит: строки — друг под другом, ячейки — в столбик на всю ширину
      (бок о бок на телефоне не читаются); вертикальные разделители прячем.
@@ -791,17 +792,20 @@ body.chart-embed-pop .chart-pop-back {
   .chart-dock.is-split .chart-split-v { display: none; }
   .chart-dock.is-split .chart-split-cell {
     width: 100%;
-    min-height: max(60vh, 340px);
+    min-height: max(60vh, 400px);
   }
 }
 
 /* Страховка от чёрных/схлопнувшихся графиков на телефоне (кейс 28.09):
    видимый слот вкладок и рамка iframe всегда держат высоту, даже если
    класс вида потерялся; многоколоночная сетка сведена к одной выше.
+   Высоту держит .chart-slot-frame-wrap (flex:1 1 auto над абсолютным
+   iframe): 320px — запас на строку слота, чтобы 400px не обрезались.
    Десктоп (>900px) не трогаем. */
 @media (max-width: 900px) {
-  .chart-dock-wrap .chart-slot.is-tab-on { min-height: 340px; }
-  .chart-slot-frame-wrap { min-height: 200px; }
+  .chart-dock-wrap .chart-slot.is-tab-on { min-height: 400px; }
+  .chart-slot-frame-wrap { min-height: 320px; }
+  .chart-slot-frame { width: 100%; height: 100%; }
 }
 
 /* Panel mode (detached window) */

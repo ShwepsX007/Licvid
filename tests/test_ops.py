@@ -7,6 +7,7 @@
 * поддельный X-Forwarded-For от недоверенного клиента игнорируется;
 * /ws пускает 5 подключений в минуту и закрывает 6-е кодом 1008;
 * мониторинг (/api/health, /api/metrics) под лимит не попадает.
+* поддельный liqscope_sid не открывает льготный бакет (те же 5 WS и 60 POST).
 """
 from __future__ import annotations
 
@@ -106,6 +107,13 @@ class RateLimitTest(unittest.TestCase):
     def setUpClass(cls):
         cls.client = TestClient(server.app)
 
+    def setUp(self):
+        # бакеты глобальные на процесс — изолируем тесты друг от друга
+        server._MUT_RATE.reset("mut:ip:testclient")
+
+    def tearDown(self):
+        server._MUT_RATE.reset("mut:ip:testclient")
+
     def test_mutating_limit_and_spoof_ignored(self):
         c = self.client
         codes = []
@@ -124,6 +132,18 @@ class RateLimitTest(unittest.TestCase):
         self.assertEqual(r.json(), {"ok": False, "error": "rate"})
         self.assertEqual(r.headers.get("retry-after"), "60")
 
+    def test_fake_cookie_gets_anon_bucket(self):
+        # поддельный sid — те же 60 POST с IP и 429 на 61-м, а не 600
+        c = self.client
+        for _ in range(60):
+            r = c.post("/api/ops-probe-missing",
+                       cookies={"liqscope_sid": "fake123"})
+            self.assertEqual(r.status_code, 404)
+        r = c.post("/api/ops-probe-missing",
+                   cookies={"liqscope_sid": "fake123"})
+        self.assertEqual(r.status_code, 429)
+        self.assertEqual(r.headers.get("retry-after"), "60")
+
     def test_get_is_not_limited(self):
         c = self.client
         for _ in range(10):
@@ -131,6 +151,12 @@ class RateLimitTest(unittest.TestCase):
 
 
 class WsLimitTest(unittest.TestCase):
+    def setUp(self):
+        server._WS_RATE.reset("ws:ip:testclient")
+
+    def tearDown(self):
+        server._WS_RATE.reset("ws:ip:testclient")
+
     def test_ws_connect_rate(self):
         c = TestClient(server.app)
         ok = 0
@@ -143,6 +169,24 @@ class WsLimitTest(unittest.TestCase):
             except WebSocketDisconnect as e:
                 denied.append(e.code)
         self.assertEqual(ok, 5, "первые 5 подключений проходят")
+        self.assertEqual(denied, [1008, 1008],
+                         "6-е и 7-е закрыты лимитом (1008)")
+        self.assertEqual(len(server.hub.clients), 0,
+                         "все тестовые клиенты отключились")
+
+    def test_fake_cookie_ws_stays_anon(self):
+        c = TestClient(server.app)
+        ok = 0
+        denied = []
+        jar = {"cookie": "liqscope_sid=fake123"}
+        for _ in range(7):
+            try:
+                with c.websocket_connect("/ws", headers=jar) as ws:
+                    ws.receive_text()   # init прилетел — соединение живое
+                    ok += 1
+            except WebSocketDisconnect as e:
+                denied.append(e.code)
+        self.assertEqual(ok, 5, "фейковый sid: первые 5 проходят")
         self.assertEqual(denied, [1008, 1008],
                          "6-е и 7-е закрыты лимитом (1008)")
         self.assertEqual(len(server.hub.clients), 0,

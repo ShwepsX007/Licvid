@@ -152,7 +152,7 @@ sudo systemctl enable --now licvid
 - [ ] **LIQSCOPE_SECRET** задан и не равен дефолту (`openssl rand -hex 32`), лежит в drop-in (`systemctl edit licvid`), не в git. Без него — fail-fast в PROD, warning в DEMO.
 - [ ] **LIQSCOPE_COOKIE_SECURE=1** и сайт за HTTPS (nginx). Проверь `curl -I https://...` → `Strict-Transport-Security`.
 - [ ] **Trusted proxy**: `LIQSCOPE_TRUSTED_PROXIES=127.0.0.1,::1` (по умолчанию) — X-Forwarded-For доверяется только от локального nginx, rate limit не обходится подменой IP.
-- [ ] **nginx**: gzip on, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Content-Security-Policy: frame-ancestors 'none'`, `Permissions-Policy`, HSTS. Лимиты: `limit_conn` для `/ws` (20 на IP) и `limit_req` для `/api/symbols/add` (2r/s).
+- [ ] **nginx**: gzip on, `X-Content-Type-Options: nosniff`, `X-Frame-Options: SAMEORIGIN`, `Referrer-Policy`, `Content-Security-Policy: frame-ancestors 'self'`, `Permissions-Policy`, HSTS. SAMEORIGIN/'self' — осознанно (iframe дока того же origin), строже не ставить. Лимиты: `limit_conn` для `/ws` (20 на IP) и `limit_req` для `/api/symbols/add` (2r/s).
 - [ ] **Статика**: `Cache-Control: public, max-age=31536000, immutable` для `?v=` файлов, `max-age=3600` для остальных. Проверь `curl -D - /static/app.js?v=xxx | grep cache`.
 - [ ] **i18n**: грузится только один язык (`/static/i18n.pages.{lang}.js`), а не все 5. Проверь HTML → `i18n.pages.en.js` / `ru.js` и т.д.
 - [ ] **Бэкап**: `data/` и `accounts.db` (через `sqlite3 .backup`). Настрой `deploy/licvid-backup.timer` или cron: `15 3 * * * root bash /root/Licvid/tools/backup_data.sh /var/backups/liqscope`. См. `deploy/BACKUP.md`.

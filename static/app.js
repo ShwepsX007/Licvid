@@ -121,7 +121,6 @@
         const listeners = new Set();
         const stateListeners = new Set();
         return {
-            lastInit: null,   // последний init: отдаём вновь загруженным iframe
             currentState() {  // для свежесозданных iframe: «сокет жив/перезаход»
                 return { status: connState.status, key: connState.key };
             },
@@ -7472,7 +7471,6 @@
             // Мост встроенных графиков: родитель раздаёт кадры своего сокета
             // в iframe через postMessage (один сокет на окно, см. chart_dock.js)
             try {
-                if (msg && msg.type === "init") window.LiqScopeWsBridge.lastInit = msg;
                 window.LiqScopeWsBridge._emit(msg);
             } catch (e) { /* ignore */ }
             handleMessage(msg);

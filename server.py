@@ -3517,7 +3517,7 @@ def _scope_ip(scope) -> str:
 
 
 def _scope_sid(scope) -> str:
-    """Сессия liqscope_sid из Cookie — признак залогиненного."""
+    """Сырой liqscope_sid из Cookie. Льготу даёт только _session_valid."""
     for key, val in scope.get("headers") or []:
         try:
             if key.decode("latin1").lower() != "cookie":
@@ -3530,6 +3530,32 @@ def _scope_sid(scope) -> str:
             if name.strip() == COOKIE_SID and value.strip():
                 return value.strip()[:128]
     return ""
+
+
+_SID_VALID_CACHE = web_cache.TTLCache(ttl=30.0, maxsize=2048)
+
+
+async def _session_valid(sid: str) -> bool:
+    """Живая ли сессия liqscope_sid в account_store (не истекла, не бан).
+
+    Сам по себе непустой cookie ничего не доказывает: льготный бакет
+    лимитера выдаём только после этой проверки. Результат кэшируем
+    на 30 с — сессии меняются редко, а проверка дёргается на каждый
+    мутирующий POST и каждый WS-handshake. Ошибка стора = False:
+    падаем в строгий anon-бакет, а не в льготный.
+    """
+    if not sid:
+        return False
+    hit = _SID_VALID_CACHE.get(sid)
+    if hit is not None:
+        return bool(hit)
+    try:
+        found = await asyncio.to_thread(account_store.user_by_session, sid)
+        ok = found is not None
+    except Exception:  # noqa: BLE001
+        ok = False
+    _SID_VALID_CACHE.set(sid, ok)
+    return ok
 
 
 class RateLimitMiddleware:
@@ -3553,7 +3579,7 @@ class RateLimitMiddleware:
                 await self.app(scope, receive, send)
                 return
             sid = _scope_sid(scope)
-            if sid:
+            if sid and await _session_valid(sid):
                 ok = _WS_RATE_USER.allow("ws:user:" + sid)
                 who = "sid"
             else:
@@ -3574,7 +3600,7 @@ class RateLimitMiddleware:
             await self.app(scope, receive, send)
             return
         sid = _scope_sid(scope)
-        if sid:
+        if sid and await _session_valid(sid):
             ok = _MUT_RATE_USER.allow("mut:user:" + sid)
         else:
             ok = _MUT_RATE.allow("mut:ip:" + _scope_ip(scope))

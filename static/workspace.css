@@ -770,6 +770,29 @@ body.chart-embed-pop .chart-pop-back {
     width: calc(100vw - 12px);
     height: 70vh;
   }
+  /* Телефон: страница скроллится, фиксированной высоты у дока нет —
+     каждый график получает свою высоту (60vh), иначе строки 1fr от
+     неопределённой высоты схлопываются в ноль вместе с графиками
+     (iframe внутри абсолютно спозиционирован и высоты не даёт). */
+  .chart-section.has-chart-dock { height: auto; }
+  .chart-dock-wrap { height: auto; }
+  .chart-dock { height: auto; }
+  .chart-dock-tools { flex-wrap: wrap; row-gap: 6px; }
+  .chart-dock > .chart-slot:not(.is-slot-fs):not(.chart-floating),
+  .chart-dock-wrap.view-tabs .chart-slot:not(.is-slot-fs):not(.chart-floating) {
+    height: 60vh;
+    min-height: 340px;
+  }
+  /* Сплит: строки — друг под другом, ячейки — в столбик на всю ширину
+     (бок о бок на телефоне не читаются); вертикальные разделители прячем.
+     min-height через max(): инлайн flex-basis:0 перебивает height, а
+     min-height — нет, поэтому высота задана именно им. */
+  .chart-dock.is-split .chart-split-row { flex-direction: column; gap: 8px; }
+  .chart-dock.is-split .chart-split-v { display: none; }
+  .chart-dock.is-split .chart-split-cell {
+    width: 100%;
+    min-height: max(60vh, 340px);
+  }
 }
 
 /* Panel mode (detached window) */

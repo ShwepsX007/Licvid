@@ -156,6 +156,10 @@ class NginxConfCaseMixin:
         self.assertIn("proxy_hide_header Set-Cookie;", body)
         self.assertIn("proxy_ignore_headers", body)
         self.assertIn("Set-Cookie", body)
+        # срок кэша держим своим: заголовок приложения (например no-store из
+        # будущего middleware) не должен молча выключать микрокэш
+        self.assertRegex(body, r"proxy_ignore_headers[^;]*Cache-Control")
+        self.assertRegex(body, r"proxy_ignore_headers[^;]*Expires")
 
     def test_stats_and_digest_microcache(self):
         head, body = find_location(self.text, "/api/(stats")

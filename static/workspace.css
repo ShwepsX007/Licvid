@@ -644,9 +644,6 @@ body.chart-dock-pop-ready * { cursor: alias; }
   border: 0;
   display: block;
   background: #090c10;
-  /* свой композитный слой: мобильные браузеры иногда не перерисовывают
-     абсолютный iframe внутри flex-раскладки, оставляя пустое окно */
-  transform: translateZ(0);
 }
 .chart-slot-move {
   flex: 0 0 auto;

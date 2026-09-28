@@ -886,18 +886,7 @@
         this._hookFrame(id, frame);
         this._syncEmbedChrome(id);
       });
-      const titleEl = el.querySelector(".chart-slot-title");
-      if (titleEl) titleEl.addEventListener("click", () => {
-        if (!titleEl.dataset.dead) return;
-        delete titleEl.dataset.dead;
-        titleEl.style.cursor = "";
-        delete frame.dataset.dockWatch;
-        frame.dataset.dockFixups = "0";
-        this._reloadEmbedFrame(id);
-        this._watchEmbedFrame(id);
-      });
       this.els.set(id, el);
-      if (id !== "native") this._watchEmbedFrame(id);
       return el;
     }
 
@@ -1329,80 +1318,6 @@
         doc.addEventListener("pointerdown", () => this.setActive(id), true);
       } catch (e) {}
       this._syncEmbedLabels();
-    }
-
-    // --- Сторож встроенных графиков --------------------------------------
-    // На медленной мобильной сети iframe может недогрузиться (документ пуст,
-    // скрипты не выполнились) и остаться тёмным навсегда: внутри-то никто не
-    // чинит страницу, которая не загрузилась. Проверяем три раза: жив ли
-    // документ и доехали ли свечи; мёртвый фрейм перезагружаем (макс. 2 раза),
-    // затем помечаем заголовок «⟳» — клик по нему перезагружает вручную.
-    _embedFrameState(frame) {
-      try {
-        const doc = frame.contentDocument;
-        if (!doc || !doc.getElementById("tv-chart-container")) return "loading";
-        const win = frame.contentWindow;
-        const st = win && win.state;
-        if (!st || !Array.isArray(st.candles)) return "loading";
-        return st.candles.length > 0 ? "ok" : "nocandles";
-      } catch (e) { return "loading"; }
-    }
-
-    _reloadEmbedFrame(id) {
-      const el = this.els.get(id);
-      const frame = el && el.querySelector("iframe");
-      if (!frame || !frame.isConnected) return;
-      try {
-        if (frame.contentWindow) frame.contentWindow.location.reload();
-        else frame.src = this._embedUrl(this.meta[id], id);
-      } catch (e) {
-        try { frame.src = this._embedUrl(this.meta[id], id); } catch (e2) {}
-      }
-    }
-
-    _watchEmbedFrame(id) {
-      const el = this.els.get(id);
-      const frame = el && el.querySelector("iframe");
-      if (!frame || frame.dataset.dockWatch) return;
-      const src = String(frame.getAttribute("src") || "");
-      if (src.indexOf("embed=1") === -1 || src === "about:blank") return;
-      frame.dataset.dockWatch = "1";
-      frame.dataset.dockFixups = "0";
-      const checks = [12000, 26000, 45000];
-      const step = (i) => {
-        if (!frame.isConnected) return;
-        if (i >= checks.length) {
-          // финальный вердикт — только по полностью загруженному документу
-          // (display:none-вкладки грузятся лениво: их не трогаем)
-          let rs = "";
-          try { rs = frame.contentDocument && frame.contentDocument.readyState; } catch (e) {}
-          if (rs === "complete" && this._embedFrameState(frame) !== "ok") {
-            const title = el.querySelector(".chart-slot-title");
-            if (title && !title.dataset.dead) {
-              title.dataset.dead = "1";
-              title.textContent = title.textContent + " \u00b7 \u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445 \u27f3";
-              title.title = "Нажмите, чтобы перезагрузить график";
-              title.style.cursor = "pointer";
-            }
-          }
-          return;
-        }
-        setTimeout(() => {
-          if (!frame.isConnected) return;
-          const st = this._embedFrameState(frame);
-          if (st === "ok") return;
-          let rs = "";
-          try { rs = frame.contentDocument && frame.contentDocument.readyState; } catch (e) {}
-          const fixes = Number(frame.dataset.dockFixups || 0);
-          if (rs === "complete" && st === "loading" && fixes < 2) {
-            // документ догрузился, а терминал внутри не ожил — перезагружаем
-            frame.dataset.dockFixups = String(fixes + 1);
-            this._reloadEmbedFrame(id);
-          }
-          step(i + 1);
-        }, i === 0 ? checks[0] : checks[i] - checks[i - 1]);
-      };
-      step(0);
     }
 
     _syncEmbedLabels() {

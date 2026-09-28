@@ -1179,8 +1179,17 @@ class LevelsEngine:
             lookup = self._price_lookup(sym, candles)
         weights = self._venue_weights(sym)
         mmr_fn, mmr_estimated = self._mmr(sym, weights)
-        rows = build_rows(points, lookup, self._side_fn(sym), mmr_fn,
-                          _fnum(settings.get("min_doi_rel")))
+        # Приросты OI → строки позиций: на каждую точку окна зовётся side_at
+        # (ряды биржи), а точек за 30 дней — тысячи. Только в потоке, иначе
+        # единственный воркер стоит сотни миллисекунд: замер на бою 29.09.2026
+        # дал паузу 652 мс со стеком build_rows <- payload <- liq_levels_task.
+        try:
+            rows = await asyncio.to_thread(build_rows, points, lookup,
+                                           self._side_fn(sym), mmr_fn,
+                                           _fnum(settings.get("min_doi_rel")))
+        except Exception:                        # noqa: BLE001
+            rows = build_rows(points, lookup, self._side_fn(sym), mmr_fn,
+                              _fnum(settings.get("min_doi_rel")))
         cur = _num(price) or _current_price(rows, points)
         if cur is None or cur <= 0:
             return self._empty(sym, ts, win, settings, "нет цены для расчёта")

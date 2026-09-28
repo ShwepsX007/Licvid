@@ -4225,9 +4225,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(SecurityHeadersMiddleware)
+# Сжатие ответов. Уровень 9 (default starlette) — самый медленный, а на одном
+# воркере каждый миллисекунда сжатия умножается на RPS: замер на бою 29.09.2026
+# показал gzip.py:_compress_body преобладающим стеком в окне паузы при 100 rps
+# мимо nginx. Уровень 1 жмёт почти так же (на JSON разница единицы процентов),
+# но в разы дешевле. Основной gzip в бою всё равно делает nginx
+# (gzip_proxied any, gzip_comp_level 5), приложению остаются прямые заходы.
+GZIP_LEVEL = min(9, max(1, int(os.getenv("LIQSCOPE_GZIP_LEVEL", "1") or 1)))
+GZIP_MIN_SIZE = max(0, int(os.getenv("LIQSCOPE_GZIP_MIN_SIZE", "500") or 500))
 try:
     from starlette.middleware.gzip import GZipMiddleware
-    app.add_middleware(GZipMiddleware, minimum_size=500)
+    try:
+        app.add_middleware(GZipMiddleware, minimum_size=GZIP_MIN_SIZE,
+                           compresslevel=GZIP_LEVEL)
+    except TypeError:                            # старая starlette без compresslevel
+        app.add_middleware(GZipMiddleware, minimum_size=GZIP_MIN_SIZE)
 except Exception:  # noqa: BLE001 — сжатие не должно ронять процесс
     log.warning("GZipMiddleware недоступен — ответы уйдут без сжатия")
 app.add_middleware(MaxBodyMiddleware)

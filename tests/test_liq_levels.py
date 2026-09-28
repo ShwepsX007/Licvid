@@ -640,5 +640,70 @@ class EventsOffLoopTest(unittest.TestCase):
                          "в payload() остался прямой синхронный вызов _events")
 
 
+class SlowSide:
+    """Ряды биржи, где ``side_at`` дорогой: 30 дней окна — тысячи обращений."""
+
+    def __init__(self, delay: float = 0.0):
+        self.calls = 0
+        self._delay = delay
+
+    async def ensure(self, session, symbol, force=False):
+        return {}
+
+    def side_at(self, symbol, ts, tick_share=None):
+        self.calls += 1
+        if self._delay:
+            time.sleep(self._delay)
+        return 0.55, "taker"
+
+
+class BuildRowsOffLoopTest(unittest.TestCase):
+    """Строки позиций считаются в потоке: цикл не стоит на каждой точке OI."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="lilevels_rows_")
+        self.now = time.time()
+        from volume_profile import VolumeProfile
+        self.profile = VolumeProfile(path="")
+        pts = []
+        oi = 1000.0
+        for i in range(400):
+            ts = self.now - (399 - i) * BUCKET
+            oi *= 1.001
+            pts.append((ts, oi))
+            self.profile.add_trade("BTC_USDT", ts, 1000.0, 10_000.0, "BUY")
+        self.pts = pts
+
+    def _engine(self, side):
+        return LevelsEngine(oi=FakeOI(self.pts), profile=self.profile,
+                            side=side, risk=FakeRisk(), hist=FakeHist(),
+                            klines=None, path=os.path.join(self.tmp, "levels.json"))
+
+    def test_loop_keeps_ticking_while_rows_are_built(self):
+        side = SlowSide(delay=0.0015)      # 400 точек ≈ 0.6 с синхронной работы
+        engine = self._engine(side)
+        ticks: list = []
+
+        async def run():
+            async def ticker():
+                while len(ticks) < 40:
+                    ticks.append(time.perf_counter())
+                    await asyncio.sleep(0.02)
+
+            t = asyncio.create_task(ticker())
+            await asyncio.sleep(0.05)
+            data = await engine.payload("BTC_USDT", now=self.now)
+            await t
+            return data
+
+        data = asyncio.run(run())
+        self.assertGreater(side.calls, 100, "ряды биржи не использовались — тест пустой")
+        self.assertTrue(data.get("levels"), "лестница не построилась")
+        gaps = [b - a for a, b in zip(ticks, ticks[1:])]
+        self.assertLess(max(gaps), 0.3,
+                        f"event loop стоял {max(gaps) * 1000:.0f} мс, пока "
+                        "строились строки позиций — так и рождается p95 в секундах")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -705,5 +705,81 @@ class BuildRowsOffLoopTest(unittest.TestCase):
                         "строились строки позиций — так и рождается p95 в секундах")
 
 
+class EventsCacheMemoryCapTest(unittest.TestCase):
+    """Кэш окна калибровки ограничен по памяти, а не по числу монет.
+
+    Замер на бою 29.09.2026: пик RSS **1224 МБ**, 11 пауз воркера по 1-2.3 с и
+    стек ``gzip.py:214:_compress_body`` в окне паузы — кадр, который просто
+    аллоцировал память в момент сборки мусора. Прежний потолок «64 записи» при
+    ``MAX_EVENTS`` = 20000 событий и ~830 байт на словарь давал 64 × 20000 ×
+    830 Б ≈ **1.06 ГБ** — ровно наблюдаемый пик. На такой куче каждая сборка
+    второго поколения останавливает единственный воркер на секунды.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="lilevels_cap_")
+        self.engine = LevelsEngine(oi=FakeOI([]), profile=None, side=FakeSide(),
+                                   risk=FakeRisk(), hist=FakeHist(), klines=None,
+                                   path=os.path.join(self.tmp, "levels.json"))
+
+    @staticmethod
+    def _events(n):
+        return [{"ts": 1759000000.0 + i, "symbol": "BTC_USDT", "side": "sell",
+                 "price": 61000.0, "qty": 0.1, "usd": 6100.0, "lev": 25}
+                for i in range(n)]
+
+    def test_default_cap_keeps_cache_well_under_the_observed_gigabyte(self):
+        per_event_bytes = 830          # замер словаря ликвидации в куче
+        worst = LevelsEngine.EVENTS_CACHE_MAX_EVENTS * per_event_bytes
+        self.assertLess(worst, 256 * 1024 * 1024,
+                        f"потолок кэша снова даёт {worst / 2 ** 20:.0f} МБ кучи — "
+                        "сборки мусора вернут паузы в секундах")
+        self.assertLessEqual(LevelsEngine.EVENTS_CACHE_MAX, 16,
+                             "потолок по числу записей снова десятки монет")
+
+    def test_oversized_window_is_not_cached_at_all(self):
+        self.engine.EVENTS_CACHE_MAX_EVENTS = 100
+        self.assertFalse(self.engine._events_cache_put("BTC_USDT", 7, self._events(101)),
+                         "окно больше потолка всё-таки легло в кэш")
+        self.assertEqual(sorted(self.engine._events_cache), [])
+        self.assertEqual(self.engine._events_cache_events, 0)
+
+    def test_largest_entries_are_evicted_to_stay_under_budget(self):
+        self.engine.EVENTS_CACHE_MAX = 8
+        self.engine.EVENTS_CACHE_MAX_EVENTS = 300
+        self.engine._events_cache_put("AAA_USDT", 1, self._events(100))
+        self.engine._events_cache_put("BBB_USDT", 1, self._events(150))
+        self.assertTrue(self.engine._events_cache_put("CCC_USDT", 1, self._events(120)))
+        keys = sorted(self.engine._events_cache)
+        self.assertLessEqual(self.engine._events_cache_events, 300,
+                             "кэш превысил потолок по событиям")
+        self.assertEqual(keys, ["AAA_USDT", "CCC_USDT"],
+                         f"в кэше {keys}: выкинуть надо было самую крупную (BBB, 150)")
+        self.assertEqual(self.engine._events_cache_events, 220,
+                         "счётчик событий не сошёлся после выброса")
+
+    def test_entry_count_cap_still_applies(self):
+        self.engine.EVENTS_CACHE_MAX = 2
+        self.engine.EVENTS_CACHE_MAX_EVENTS = 10 ** 6
+        for i, sym in enumerate(("A_USDT", "B_USDT", "C_USDT")):
+            self.engine._events_cache_put(sym, 1, self._events(10))
+        self.assertLessEqual(len(self.engine._events_cache), 2)
+
+    def test_replace_same_symbol_does_not_double_count(self):
+        self.engine.EVENTS_CACHE_MAX_EVENTS = 1000
+        self.engine._events_cache_put("BTC_USDT", 1, self._events(100))
+        self.engine._events_cache_put("BTC_USDT", 2, self._events(50))
+        st = self.engine.events_cache_stats()
+        self.assertEqual(st["entries"], 1)
+        self.assertEqual(st["events"], 50, "счётчик событий не уменьшился "
+                                           "при замене записи той же монеты")
+
+    def test_stats_report_limits(self):
+        st = self.engine.events_cache_stats()
+        self.assertEqual(st["max_events"], LevelsEngine.EVENTS_CACHE_MAX_EVENTS)
+        self.assertEqual(st["max_entries"], LevelsEngine.EVENTS_CACHE_MAX)
+        self.assertEqual(st["entries"], 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

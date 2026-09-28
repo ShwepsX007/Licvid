@@ -15,6 +15,10 @@ import os
 import sys
 import tempfile
 import time
+import gc
+import inspect
+import logging
+import queue
 import unittest
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -289,6 +293,141 @@ class GzipCostTest(unittest.TestCase):
         size9 = len(gzip.compress(body, compresslevel=9))
         self.assertLess(size1, size9 * 1.25,
                         "уровень 1 даёт заметно больший ответ — трафик вырастет")
+
+
+class GcWatchTest(unittest.TestCase):
+    """Сборка мусора видна и измеряется: на большой куче это и есть p95 в секундах.
+
+    Замер на бою 29.09.2026: 11 пауз по 1-2.3 с, а трассировка называла
+    ``gzip.py:214:_compress_body`` — кадр, который просто аллоцировал память в
+    момент сборки. При этом пик RSS был 1224 МБ: кэш окна калибровки уровней
+    держал до 64 записей × 20000 событий × ~830 Б ≈ 1.06 ГБ.
+    """
+
+    def test_callback_times_collections(self):
+        server._GC_RECENT.clear()
+        before = int(server._GC_STATS["count"])
+        gc.collect()
+        self.assertGreater(int(server._GC_STATS["count"]), before,
+                           "gc.callbacks не считает сборки — паузы останутся невидимыми")
+        self.assertTrue(server._GC_RECENT, "окно последней сборки не запомнено")
+        self.assertGreaterEqual(server._GC_STATS["last_ms"], 0.0)
+
+    def test_gc_during_names_collection_inside_the_stall_window(self):
+        server._GC_RECENT.clear()
+        t0 = time.monotonic()
+        gc.collect()
+        note = server.gc_during(t0 - 0.05, time.monotonic() + 0.05)
+        self.assertIn("сборка мусора", note)
+        self.assertIn("поколения", note)
+        self.assertEqual(server.gc_during(t0 - 100.0, t0 - 50.0), "",
+                         "старая сборка попала в чужое окно паузы")
+
+    def test_freeze_takes_startup_heap_out_of_generations(self):
+        server.freeze_gc_heap()
+        try:
+            self.assertGreater(server._GC_STATS["frozen"], 0,
+                               "куча старта не заморожена — сборки будут "
+                               "перебирать гигабайт постоянных объектов")
+        finally:
+            gc.unfreeze()
+
+    def test_health_reports_gc_log_and_gzip_state(self):
+        server._HEALTH_CACHE.invalidate()
+        d = TestClient(server.app).get("/api/health").json()
+        server._HEALTH_CACHE.invalidate()
+        for key in ("gc_max_ms", "gc_collections", "gc_gen2_collections",
+                    "log_async", "log_dropped", "log_queue_size",
+                    "levels_events_cache"):
+            self.assertIn(key, d, f"в /api/health нет {key}")
+        self.assertTrue(d["log_async"], "журнал снова пишется в event loop")
+        cfg = d.get("config", {})
+        self.assertEqual(cfg.get("gzip_level"), server.GZIP_LEVEL)
+        self.assertIn("gzip_thread_min_size", cfg,
+                      "не видно, уходит ли сжатие в поток")
+
+
+class AsyncLoggingTest(unittest.TestCase):
+    """Журнал не блокирует воркер: uvicorn логирует каждый запрос и каждый accept.
+
+    Пауза 1282 мс на бою пришлась на ``logging/__init__.py:1103:emit`` под
+    ``websocket.accept()``: stdout уходит в journald, а при полном буфере трубы
+    ``write()`` блокирует единственный воркер.
+    """
+
+    def test_handlers_moved_to_queue(self):
+        self.assertIsNotNone(server._log_listener, "слушатель журнала не поднят")
+        root = logging.getLogger()
+        self.assertTrue(any(isinstance(h, server._DropQueueHandler)
+                            for h in root.handlers),
+                        "корневой логгер всё ещё пишет напрямую")
+        for name in ("uvicorn", "uvicorn.access", "uvicorn.error"):
+            lg = logging.getLogger(name)
+            self.assertTrue(lg.propagate or
+                            any(isinstance(h, server._DropQueueHandler)
+                                for h in lg.handlers),
+                            f"{name} пишет в журнал из event loop")
+
+    def test_record_reaches_handler_through_the_thread(self):
+        got: list = []
+
+        class Cap(logging.Handler):
+            def emit(self, record):
+                got.append(record.getMessage())
+
+        cap = Cap()
+        listener = server._log_listener
+        listener.handlers = tuple(listener.handlers) + (cap,)
+        try:
+            logging.getLogger("liqscope.server").info("журнал-жив-%d", 42)
+            for _ in range(300):
+                if got:
+                    break
+                time.sleep(0.01)
+        finally:
+            listener.handlers = tuple(h for h in listener.handlers if h is not cap)
+        self.assertIn("журнал-жив-42", got, "запись не дошла до хендлера")
+
+    def test_full_queue_drops_records_instead_of_blocking(self):
+        q = queue.Queue(maxsize=1)
+        h = server._DropQueueHandler(q)
+        rec = logging.LogRecord("t", logging.INFO, __file__, 1, "сообщение",
+                                None, None)
+        dropped_before = server._LOG_STATS["dropped"]
+        t0 = time.perf_counter()
+        for _ in range(200):
+            h.enqueue(rec)
+        dt = time.perf_counter() - t0
+        self.assertLess(dt, 0.5, f"переполненная очередь блокировала {dt:.2f} с")
+        self.assertGreater(server._LOG_STATS["dropped"], dropped_before,
+                           "потерянные записи не посчитаны")
+        self.assertEqual(q.qsize(), 1)
+
+    def test_install_is_idempotent(self):
+        first = server._log_listener
+        self.assertTrue(server.install_async_logging())
+        self.assertIs(server._log_listener, first,
+                      "повторный вызов поднял второго слушателя")
+
+
+class GzipThreadOffloadTest(unittest.TestCase):
+    """Сжатие уходит в поток: там zlib отпускает GIL и не держит воркер."""
+
+    def test_middleware_got_thread_threshold(self):
+        self.assertIn("thread_minimum_size", server.GZIP_APPLIED,
+                      "starlette жмёт тела в event loop до 128 КиБ")
+        self.assertLessEqual(server.GZIP_APPLIED["thread_minimum_size"],
+                             128 * 1024)
+        self.assertEqual(server.GZIP_APPLIED.get("compresslevel"),
+                         server.GZIP_LEVEL)
+
+    def test_kwargs_match_starlette_signature(self):
+        from starlette.middleware.gzip import GZipMiddleware
+        params = inspect.signature(GZipMiddleware.__init__).parameters
+        for kw in server.GZIP_APPLIED:
+            self.assertIn(kw, params,
+                          f"параметр {kw} не принимается установленной "
+                          "starlette — приложение не поднялось бы")
 
 
 if __name__ == "__main__":

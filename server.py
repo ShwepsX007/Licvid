@@ -38,9 +38,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import atexit
+import gc
+import inspect
 import logging
+import logging.handlers
 import math
 import os
+import queue
 import random
 try:
     import resource  # Unix: RSS процесса для /api/metrics
@@ -52,7 +57,7 @@ import threading
 import time
 from collections import deque
 from contextlib import asynccontextmanager
-from typing import Deque, Dict, List, Optional, Set
+from typing import Deque, Dict, List, Optional, Set, Tuple
 
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -148,6 +153,161 @@ from content_comments import register_comment_routes as register_content_comment
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 log = logging.getLogger("liqscope.server")
+
+
+# --- логирование вне event loop -------------------------------------------
+# Замер на бою 29.09.2026 (50 зрителей + 100 rps, мимо nginx) назвал паузу
+# 1282 мс со стеком logging/__init__.py:1103:emit <- ... <- 1477:info <-
+# websockets_sansio_impl.py:440:send <- websockets.py:110:accept <-
+# server.py:ws_endpoint: uvicorn пишет в журнал КАЖДОЕ принятое WS-соединение и
+# каждый HTTP-запрос (access log), а журнал — это stdout, который под systemd
+# уходит в journald. Когда journald не успевает, буфер трубы заполняется и
+# write() блокирует единственный воркер. Поэтому пишем в очередь, а держит её
+# отдельный поток: переполнение роняет запись (счётчик виден в /api/health),
+# но не цикл.
+LOG_ASYNC = os.getenv("LIQSCOPE_LOG_ASYNC", "1").strip() not in ("", "0", "false", "no")
+LOG_QUEUE_MAX = max(100, int(os.getenv("LIQSCOPE_LOG_QUEUE", "20000") or 20000))
+_LOG_QUEUE: "queue.Queue" = queue.Queue(maxsize=LOG_QUEUE_MAX)
+_LOG_STATS: Dict[str, float] = {"dropped": 0.0, "queued": 0.0}
+_log_listener: Optional[logging.handlers.QueueListener] = None
+# uvicorn вешает собственные хендлеры на свои логгеры с propagate=False, поэтому
+# одного корневого мало — обходим их явно
+_LOG_WRAPPED = ("", "uvicorn", "uvicorn.error", "uvicorn.access", "websockets")
+
+
+class _DropQueueHandler(logging.handlers.QueueHandler):
+    """Очередь вместо журнала: переполнение теряет запись, а не воркер."""
+
+    def enqueue(self, record: logging.LogRecord) -> None:  # noqa: D102
+        try:
+            self.queue.put_nowait(record)
+            _LOG_STATS["queued"] += 1
+        except Exception:                        # noqa: BLE001 — очередь полна
+            _LOG_STATS["dropped"] += 1
+
+
+def install_async_logging() -> bool:
+    """Перевести хендлеры логов в фоновый поток. Идемпотентно."""
+    global _log_listener
+    if not LOG_ASYNC or _log_listener is not None:
+        return _log_listener is not None
+    originals: List[logging.Handler] = []
+    seen: Set[int] = set()
+    for name in _LOG_WRAPPED:
+        lg = logging.getLogger(name)
+        own = [h for h in lg.handlers if not isinstance(h, _DropQueueHandler)]
+        for h in own:
+            if id(h) not in seen:
+                seen.add(id(h))
+                originals.append(h)
+            lg.removeHandler(h)
+        if own or not lg.propagate:
+            lg.addHandler(_DropQueueHandler(_LOG_QUEUE))
+    if not originals:                            # переносить нечего
+        return False
+    try:
+        _log_listener = logging.handlers.QueueListener(
+            _LOG_QUEUE, *originals, respect_handler_level=True)
+        _log_listener.start()
+    except Exception as e:                       # noqa: BLE001
+        _log_listener = None
+        for h in originals:                      # вернуть как было
+            logging.getLogger("").addHandler(h)
+        log.warning("асинхронное логирование не поднялось: %s", e)
+        return False
+    atexit.register(stop_async_logging)
+    return True
+
+
+def stop_async_logging() -> None:
+    """Допisać очередь в журнал перед выходом (иначе хвост лога потеряется)."""
+    global _log_listener
+    if _log_listener is None:
+        return
+    try:
+        _log_listener.stop()
+    except Exception:                            # noqa: BLE001
+        pass
+    _log_listener = None
+
+
+# --- сборка мусора: паузы на большой куче ---------------------------------
+# P95 в секундах при 6 мс на стороне обработчика и стек gzip в окне паузы —
+# это не сжатие: на куче в гигабайт каждая сборка второго поколения
+# останавливает процесс на 1-2 с, а сэмплер называет кадр, который в этот
+# момент аллоцировал память. Меряем сборку явно (gc.callbacks дёшевы: срабаты-
+# вают только на самой сборке) и говорим вслух, если пауза цикла совпала с ней.
+GC_LOG_MS = max(10.0, float(os.getenv("LIQSCOPE_GC_LOG_MS", "200") or 200))
+GC_FREEZE = os.getenv("LIQSCOPE_GC_FREEZE", "1").strip() not in ("", "0", "false", "no")
+_GC_STATS: Dict[str, float] = {"max_ms": 0.0, "last_ms": 0.0, "total_ms": 0.0,
+                               "count": 0.0, "gen2": 0.0, "frozen": 0.0}
+_GC_RECENT: Deque[Tuple[float, float, int]] = deque(maxlen=32)
+_gc_started = 0.0
+
+
+def _gc_callback(phase: str, info: Dict[str, object]) -> None:
+    """Сколько воркер стоял на сборке мусора и какого поколения."""
+    global _gc_started
+    try:
+        if phase == "start":
+            _gc_started = time.monotonic()
+            return
+        if phase != "stop" or not _gc_started:
+            return
+        dt_ms = (time.monotonic() - _gc_started) * 1000.0
+        _gc_started = 0.0
+        gen = int(info.get("generation", -1))
+        _GC_RECENT.append((time.monotonic(), dt_ms, gen))
+        _GC_STATS["last_ms"] = round(dt_ms, 1)
+        _GC_STATS["count"] += 1
+        _GC_STATS["total_ms"] = round(_GC_STATS["total_ms"] + dt_ms, 1)
+        if dt_ms > _GC_STATS["max_ms"]:
+            _GC_STATS["max_ms"] = round(dt_ms, 1)
+        if gen == 2:
+            _GC_STATS["gen2"] += 1
+        if dt_ms >= GC_LOG_MS:
+            log.warning("[gc] сборка %d поколения остановила воркер на %.0f мс "
+                        "(собрано %s объектов); всего таких пауз %.0f, "
+                        "максимум %.0f мс — на большой куче это и есть p95 в "
+                        "секундах при быстром обработчике",
+                        gen, dt_ms, info.get("collected"),
+                        _GC_STATS["count"], _GC_STATS["max_ms"])
+    except Exception:                            # noqa: BLE001 — замер не должен ронять
+        _gc_started = 0.0
+
+
+def gc_during(since_mono: float, until_mono: float) -> str:
+    """Была ли сборка мусора внутри окна паузы цикла (для строки сторожа)."""
+    hits = [(ms, gen) for ts, ms, gen in _GC_RECENT
+            if since_mono - 0.05 <= ts <= until_mono + 0.05]
+    if not hits:
+        return ""
+    ms, gen = max(hits)
+    return (f"во время паузы шла сборка мусора {gen} поколения "
+            f"({ms:.0f} мс) — кадр в стеке просто аллоцировал память")
+
+
+def freeze_gc_heap() -> None:
+    """Убрать кучу старта из поколений: сборщики её больше не перебирают."""
+    if not GC_FREEZE:
+        return
+    try:
+        gc.collect()
+        gc.freeze()   # возвращает None — число даёт get_freeze_count()
+        n = gc.get_freeze_count() if hasattr(gc, "get_freeze_count") else 0
+        _GC_STATS["frozen"] = float(n or 0)
+        log.info("[gc] куча старта заморожена: %d объектов вне поколений, "
+                 "сборки будут перебирать только новые (LIQSCOPE_GC_FREEZE=0 "
+                 "отключает)", n or 0)
+    except Exception as e:                       # noqa: BLE001
+        log.warning("[gc] заморозка кучи не удалась: %s", e)
+
+
+try:
+    gc.callbacks.append(_gc_callback)
+except Exception:                                # noqa: BLE001
+    pass
+install_async_logging()
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(HERE, "static")
@@ -930,6 +1090,11 @@ async def loop_lag_watchdog():
                 # в /api/health должен лежать свежий стек, а не минутной давности
                 if lag_ms >= LOOP_TRACE_MIN_SEC * 1000.0:
                     culprit = _loop_trace_explain(lag_ms / 1000.0)
+                    # сборка мусора в том же окне объясняет паузу лучше стека:
+                    # сэмплер называет кадр, который просто аллоцировал память
+                    gc_note = gc_during(t0, time.monotonic())
+                    if gc_note:
+                        culprit = f"{culprit} | {gc_note}" if culprit else gc_note
                     if culprit:
                         _LOOP_TRACE["last"] = culprit
                         _LOOP_TRACE["held_ms"] = round(lag_ms, 1)
@@ -3670,6 +3835,9 @@ def health_summary() -> dict:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # куча старта (модули, справочники, загруженная история) дальше не меняется:
+    # убираем её из поколений, чтобы сборки мусора не перебирали гигабайт
+    freeze_gc_heap()
     if not FAST_JSON:
         # Без orjson приложение работает, но сериализация свечей/статистики и
         # WS-кадров остаётся на медленном stdlib json — на одном воркере это
@@ -3850,6 +4018,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         loop_trace_stop()
+        stop_async_logging()          # дописать очередь в журнал перед выходом
         for t in tasks:
             t.cancel()
         try:
@@ -4233,15 +4402,27 @@ app.add_middleware(SecurityHeadersMiddleware)
 # (gzip_proxied any, gzip_comp_level 5), приложению остаются прямые заходы.
 GZIP_LEVEL = min(9, max(1, int(os.getenv("LIQSCOPE_GZIP_LEVEL", "1") or 1)))
 GZIP_MIN_SIZE = max(0, int(os.getenv("LIQSCOPE_GZIP_MIN_SIZE", "500") or 500))
+# starlette жмёт тело прямо в event loop, пока оно короче thread_minimum_size
+# (по умолчанию 128 КиБ) — на бою стек gzip.py:214:_compress_body <- :209:
+# apply_compression это ровно тот inline-путь. В потоке zlib отпускает GIL,
+# поэтому сжатие уходит на другие ядра и не держит воркер.
+GZIP_THREAD_MIN_SIZE = max(0, int(os.getenv("LIQSCOPE_GZIP_THREAD_MIN_SIZE",
+                                            str(32 * 1024)) or 32 * 1024))
+GZIP_APPLIED: Dict[str, object] = {}
 try:
     from starlette.middleware.gzip import GZipMiddleware
-    try:
-        app.add_middleware(GZipMiddleware, minimum_size=GZIP_MIN_SIZE,
-                           compresslevel=GZIP_LEVEL)
-    except TypeError:                            # старая starlette без compresslevel
-        app.add_middleware(GZipMiddleware, minimum_size=GZIP_MIN_SIZE)
-except Exception:  # noqa: BLE001 — сжатие не должно ронять процесс
-    log.warning("GZipMiddleware недоступен — ответы уйдут без сжатия")
+    # add_middleware не создаёт объект, поэтому TypeError за неверный параметр
+    # прилетел бы уже на старте приложения — смотрим сигнатуру заранее
+    _params = inspect.signature(GZipMiddleware.__init__).parameters
+    _kw: Dict[str, object] = {"minimum_size": GZIP_MIN_SIZE}
+    if "compresslevel" in _params:
+        _kw["compresslevel"] = GZIP_LEVEL
+    if "thread_minimum_size" in _params:
+        _kw["thread_minimum_size"] = GZIP_THREAD_MIN_SIZE
+    app.add_middleware(GZipMiddleware, **_kw)
+    GZIP_APPLIED = dict(_kw)
+except Exception as e:  # noqa: BLE001 — сжатие не должно ронять процесс
+    log.warning("GZipMiddleware недоступен — ответы уйдут без сжатия: %s", e)
 app.add_middleware(MaxBodyMiddleware)
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(MetricsMiddleware)
@@ -5161,6 +5342,23 @@ async def api_health():
         "loop_trace_held_ms": _LOOP_TRACE["held_ms"],
         "loop_trace_last": _LOOP_TRACE["last"],
         "asyncio_debug": bool(ASYNCIO_DEBUG),
+        # сборка мусора: на большой куче именно она даёт паузы в секундах при
+        # быстром обработчике, а трассировка в это время называет кадр, который
+        # просто аллоцировал память (на бою так «виновником» вышел gzip)
+        "gc_max_ms": _GC_STATS["max_ms"],
+        "gc_last_ms": _GC_STATS["last_ms"],
+        "gc_total_ms": _GC_STATS["total_ms"],
+        "gc_collections": int(_GC_STATS["count"]),
+        "gc_gen2_collections": int(_GC_STATS["gen2"]),
+        "gc_frozen_objects": int(_GC_STATS["frozen"]),
+        # журнал уходит в очередь и пишется в отдельном потоке: если journald
+        # не успевает, теряются записи (счётчик), а не паузы воркера
+        "log_async": _log_listener is not None,
+        "log_queue_size": _LOG_QUEUE.qsize(),
+        "log_queue_max": LOG_QUEUE_MAX,
+        "log_dropped": int(_LOG_STATS["dropped"]),
+        # кэш окна калибровки уровней: сколько событий держим в куче
+        "levels_events_cache": _levels_cache_stats(),
         "wal_bytes": _wal_bytes(),
         "sqlite_ms": await _sqlite_ping_ms(),
         "uptime_sec": round(time.time() - _START_TS, 1),
@@ -5173,6 +5371,12 @@ async def api_health():
             "max_custom_symbols": market_feed.MAX_CUSTOM_SYMBOLS,
             "user_symbol_cap": _user_symbol_cap(),
             "fast_json": FAST_JSON,
+            # чем и как жмём ответы: видно, что на бою работает уровень 1 и
+            # сжатие уходит в поток, а не держит event loop
+            "gzip": dict(GZIP_APPLIED) if GZIP_APPLIED else None,
+            "gzip_level": GZIP_LEVEL,
+            "gzip_min_size": GZIP_MIN_SIZE,
+            "gzip_thread_min_size": GZIP_THREAD_MIN_SIZE,
             "exchanges": EXCHANGES,
             "tick_sources": TICK_SOURCES,
             "history_max": HISTORY_MAX,
@@ -5261,8 +5465,34 @@ async def api_metrics():
         "loop_trace_held_ms": _LOOP_TRACE["held_ms"],
         "loop_trace_last": _LOOP_TRACE["last"],
         "asyncio_debug": bool(ASYNCIO_DEBUG),
+        # сборка мусора: на большой куче именно она даёт паузы в секундах при
+        # быстром обработчике, а трассировка в это время называет кадр, который
+        # просто аллоцировал память (на бою так «виновником» вышел gzip)
+        "gc_max_ms": _GC_STATS["max_ms"],
+        "gc_last_ms": _GC_STATS["last_ms"],
+        "gc_total_ms": _GC_STATS["total_ms"],
+        "gc_collections": int(_GC_STATS["count"]),
+        "gc_gen2_collections": int(_GC_STATS["gen2"]),
+        "gc_frozen_objects": int(_GC_STATS["frozen"]),
+        # журнал уходит в очередь и пишется в отдельном потоке: если journald
+        # не успевает, теряются записи (счётчик), а не паузы воркера
+        "log_async": _log_listener is not None,
+        "log_queue_size": _LOG_QUEUE.qsize(),
+        "log_queue_max": LOG_QUEUE_MAX,
+        "log_dropped": int(_LOG_STATS["dropped"]),
+        # кэш окна калибровки уровней: сколько событий держим в куче
+        "levels_events_cache": _levels_cache_stats(),
         "uptime_sec": round(time.time() - _START_TS, 1),
     })
+
+
+def _levels_cache_stats() -> Dict[str, int]:
+    """Сколько событий калибровки уровней лежит в куче (память → паузы GC)."""
+    try:
+        fn = getattr(LEVELS, "events_cache_stats", None)
+        return dict(fn()) if callable(fn) else {}
+    except Exception:                            # noqa: BLE001
+        return {}
 
 
 @app.websocket("/ws")

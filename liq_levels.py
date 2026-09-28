@@ -793,6 +793,7 @@ class LevelsEngine:
         # LEVELS_SNAP_SEC по каждой монете батча), а разбор дневных шардов —
         # это построчный json.loads десятков мегабайт
         self._events_cache: Dict[str, Tuple[int, List[dict]]] = {}
+        self._events_cache_events = 0
         self._candles: Dict[str, Tuple[float, List[Tuple[float, float]]]] = {}
         self._lock = threading.RLock()
         self.builds = 0
@@ -1045,7 +1046,19 @@ class LevelsEngine:
     # server.py:liq_levels_task, а снаружи p95 336 мс при серверных 5.5 мс).
     EVENTS_TTL_SEC = max(5.0, float(os.getenv("LIQSCOPE_LEVELS_EVENTS_TTL_SEC",
                                               "60") or 60))
-    EVENTS_CACHE_MAX = 64
+    # Прежний потолок «64 записи» оказался бомбой: запись — это разобранный
+    # список событий окна калибровки, а MAX_EVENTS = 20000 словарей по ~830
+    # байт в куче. 64 × 20000 × 830 Б ≈ 1.06 ГБ — ровно пик RSS 1224 МБ,
+    # который замер на бою 29.09.2026. На такой куче каждая сборка мусора
+    # второго поколения останавливает единственный воркер на 1-2.3 с (замер
+    # прогона по внешнему IP: 11 пауз, максимум 2322 мс), а трассировка
+    # называет кадр, который в этот момент аллоцировал память, — gzip, а не
+    # настоящую причину. Поэтому держим потолок и по числу записей, и по
+    # суммарному числу событий: память важнее количества монет.
+    EVENTS_CACHE_MAX = max(1, int(os.getenv("LIQSCOPE_LEVELS_EVENTS_CACHE_MAX",
+                                            "8") or 8))
+    EVENTS_CACHE_MAX_EVENTS = max(1000, int(os.getenv(
+        "LIQSCOPE_LEVELS_EVENTS_CACHE_EVENTS", "100000") or 100000))
 
     async def _events_cached(self, symbol: str, since: float, until: float,
                              min_usd: float) -> List[dict]:
@@ -1065,10 +1078,42 @@ class LevelsEngine:
                                              min_usd)
         except Exception:                        # noqa: BLE001
             events = self._events(sym, since, until, min_usd)
-        if len(self._events_cache) >= self.EVENTS_CACHE_MAX:
-            self._events_cache.clear()
-        self._events_cache[sym] = (bucket, events)
+        self._events_cache_put(sym, bucket, events)
         return events
+
+    def _events_cache_put(self, sym: str, bucket: int,
+                          events: List[dict]) -> bool:
+        """Положить окно в кэш, не превысив потолок по числу событий.
+
+        Возвращает False, если окно не влезает само по себе — такую монету
+        дешевле перечитывать с диска, чем держать в куче гигабайт: именно
+        большая куча даёт секундные паузы сборки мусора на одном воркере.
+        """
+        n = len(events or ())
+        if n > self.EVENTS_CACHE_MAX_EVENTS:
+            return False
+        old = self._events_cache.pop(sym, None)
+        if old is not None:
+            self._events_cache_events -= len(old[1] or ())
+        # пока не влезает — выбрасываем самые крупные записи: они же и самые
+        # дорогие для сборщика мусора
+        while (self._events_cache_events + n > self.EVENTS_CACHE_MAX_EVENTS
+               or len(self._events_cache) >= self.EVENTS_CACHE_MAX):
+            if not self._events_cache:
+                break
+            big = max(self._events_cache, key=lambda k: len(self._events_cache[k][1] or ()))
+            gone = self._events_cache.pop(big)
+            self._events_cache_events -= len(gone[1] or ())
+        self._events_cache[sym] = (bucket, events)
+        self._events_cache_events += n
+        return True
+
+    def events_cache_stats(self) -> Dict[str, int]:
+        """Сколько событий и записей держит кэш — видно в /api/health."""
+        return {"entries": len(self._events_cache),
+                "events": int(self._events_cache_events),
+                "max_entries": int(self.EVENTS_CACHE_MAX),
+                "max_events": int(self.EVENTS_CACHE_MAX_EVENTS)}
 
     def _events(self, symbol: str, since: float, until: float,
                 min_usd: float) -> List[dict]:

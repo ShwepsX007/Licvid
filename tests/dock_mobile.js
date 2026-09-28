@@ -116,18 +116,31 @@ check("JS: за шириной экрана следит matchMedia, а не т�
 const css = read("static/workspace.css");
 const mob = mobileBlocks(css);
 const desk = desktopCss(css);
+const styleCss = read("static/style.css");
 
 check("CSS: мобильный блок @media (max-width: 900px) есть", mob.length > 0);
 check("CSS: на телефоне кнопки мультиэкрана спрятаны",
   /body\.dock-mobile #add-chart-btn,\s*\n\s*body\.dock-mobile #chart-tear,\s*\n\s*body\.dock-mobile #chart-tear-back\s*\{\s*display:\s*none !important/.test(mob),
   (mob.match(/body\.dock-mobile[^{]*\{[^}]*\}/) || [""])[0]);
 // без дока секция графика ведёт себя как всегда: высоту задаёт style.css
-const styleCss = read("static/style.css");
-const styleMob = mobileBlocks(styleCss);
-check("CSS: без дока высоту секции задаёт style.css (58vh), а не workspace.css",
-  /\.chart-section\s*\{\s*height:\s*58vh/.test(styleMob) &&
-  !(mob.match(/[^{}]*\.chart-section\s*\{/) || [""])[0].replace(/has-chart-dock/g, "").includes(".chart-section"),
-  (styleMob.match(/\.chart-section\s*\{[^}]*\}/) || [""])[0]);
+const styleMob = mobileBlocks(read("static/style.css"));
+const styleDesk = desktopCss(styleCss);
+// Главная поломка телефона: секция была 52–58vh с overflow:hidden, заголовок
+// (пара + легенда слоёв) переносился на несколько строк — стек графика уезжал
+// под обрез, и вместо графика было пустое место.
+check("CSS: на телефоне высота секции отдаётся содержимому, а не 52–58vh",
+  /\.chart-section\s*\{\s*height:\s*auto/.test(mob) && /min-height:\s*58vh/.test(mob),
+  (mob.match(/[^{},]*\.chart-section\s*\{[^}]*\}/) || [""])[0]);
+check("CSS: стек графика на телефоне держит минимум 340px",
+  /\.chart-stack\s*\{\s*min-height:\s*340px/.test(mob),
+  (mob.match(/\.chart-stack\s*\{[^}]*\}/) || [""])[0]);
+check("CSS: ⛶ и сворачивание (▾) высоту секции задают сами",
+  /\.chart-section\.fullscreen\s*\{[^}]*height:\s*100dvh/.test(styleCss) &&
+  /\.chart-section\.collapsed\s*\{\s*height:\s*auto/.test(styleCss));
+check("CSS: десктопная секция графиков не тронута (100%/350px как было)",
+  /\.chart-section\s*\{[^}]*height:\s*100%/.test(styleDesk) && /min-height:\s*350px/.test(styleDesk) &&
+  /\.chart-stack\s*\{[^}]*min-height:\s*0(?:px)?\s*;/.test(styleDesk),
+  (styleDesk.match(/\.chart-section\s*\{[^}]*\}/) || [""])[0].replace(/\s+/g, " "));
 
 // сетка x2–x4 на телефоне — одна колонка, графики идут друг под другом
 check("CSS: на телефоне сетка x2–x4 сворачивается в одну колонку",

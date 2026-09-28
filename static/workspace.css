@@ -786,6 +786,15 @@ body.chart-embed-pop .chart-pop-back {
   body.dock-mobile #add-chart-btn,
   body.dock-mobile #chart-tear,
   body.dock-mobile #chart-tear-back { display: none !important; }
+  /* Телефон: заголовок графика (пара + легенда слоёв) на узком экране
+     переносится на несколько строк и съедает половину секции, а секции был
+     задан фиксированный 52–58vh с overflow:hidden — стек графика уезжал под
+     обрез, и вместо графика было пустое место (ни сетки, ни свечей).
+     Высоту отдаём содержимому: заголовок + график. График держит свои 340px
+     и забирает остаток 58vh, когда заголовок короткий; страница скроллится.
+     ⛶ (.chart-section.fullscreen) и сворачивание (▾) задают высоту сами. */
+  .chart-section { height: auto; min-height: 58vh; }
+  .chart-stack { min-height: 340px; }
   .chart-dock > .chart-slot:not(.is-slot-fs):not(.chart-floating),
   .chart-dock-wrap.view-tabs .chart-slot:not(.is-slot-fs):not(.chart-floating) {
     height: 60vh;

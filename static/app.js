@@ -1243,10 +1243,11 @@
     const ARCHIVE_HOURS = 31 * 24;
 
     async function loadHistoryFor(sym, force) {
-        // embed: лента ликвидаций живёт в родительском окне — история не нужна
-        if (IS_EMBED) return;
-        // ALL тоже из архива: лента «все монеты» после F5 не должна обнуляться.
         if (!sym) sym = "ALL";
+        // embed: лента ликвидаций живёт в родительском окне — грузим историю
+        // только своей пары графика (нужна слоям liq/profile и меткам)
+        if (IS_EMBED && sym !== chartSymbol()) return;
+        // ALL тоже из архива: лента «все монеты» после F5 не должна обнуляться.
         if (!force && historyLoaded.has(sym)) return;
         historyLoaded.add(sym);
         try {
@@ -7784,16 +7785,36 @@
 
     // --- Старт ---------------------------------------------------------------
     /** Лёгкий старт встроенного графика (iframe «＋ График», старое окно
-     *  panel): только график и свечи. Без своего WebSocket (данные приходят
-     *  от родителя через postMessage), без ленты ликвидаций, книги заявок,
-     *  чата, статистики и виджетов кабинета — они остаются в родительском
-     *  окне. Иначе каждый график тянул бы свой сокет и свой набор запросов. */
+     *  panel): график, свечи и слои (переключатели, панели CVD/OI, книга
+     *  и уровни грузятся по требованию при включении слоя). Без своего
+     *  WebSocket (живые тики приходят от родителя через postMessage),
+     *  без ленты ликвидаций, чата, статистики и виджетов кабинета —
+     *  они остаются в родительском окне. Иначе каждый график тянул бы
+     *  свой сокет и свой набор запросов. */
     function bootEmbed() {
         initChart();
         setupChartToggle();
         setupChartExpand();
         loadCandles();
         startEmbedBridge();
+        // embed: слои/панели/фоллоу/рисование — как в одиночном графике.
+        // Без этого кнопки мёртвые, а state.liquidations пуст и слоям
+        // liq/profile не хватает данных (метки/кластеры грузятся сами).
+        loadHistoryFor(chartSymbol(), true);
+        applyAuthGate().then((allowed) => {
+            setupLayerToggles(allowed);
+            setupLayerPop();
+            setupLayerGate();
+            paintLayerTrial();
+            setupFollowToggle();
+            setupIndicatorPanes();
+            updateMarkers();
+            queueRedraw();
+        });
+        setupClusterInteraction();
+        setupDrawToolbar();
+        loadDrawings();
+        setInterval(renderTickIndicator, 1000);
     }
 
     function boot() {

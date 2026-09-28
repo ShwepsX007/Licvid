@@ -1,16 +1,20 @@
 require("./_dom_env");
 /**
- * Мобильный док графиков: схлопывание, подписи кнопок и дубли текста.
+ * Мультиэкран дока: на телефоне его нет, на десктопе он как был.
  *
  * Тест без браузера и без сервера — читает сами файлы, потому что ломался
- * именно CSS/разметка, а не рантайм:
- *   1. На телефоне (≤900px) каждый слот дока держит высоту, сетка x2–x4
- *      идёт одной колонкой, iframe занимает слот целиком, а страница
- *      скроллится вниз ко второму графику. Десктоп (>900px) не тронут.
- *   2. Кнопки режимов («Вкладки»/«Сетка») подписываются по языку страницы
+ * именно CSS/разметка и условия сборки дока, а не рантайм:
+ *   1. До 900px chart_dock.js дока не строит вовсе: заголовок и стек графика
+ *      остаются в .chart-section, сохранённая сетка не разворачивается,
+ *      addChart/layout/fullscreen отключены. Кнопки «＋ График» и отрыва
+ *      окна на телефоне прячет CSS (body.dock-mobile).
+ *   2. Сузили широкое окно — страховка: слот держит высоту (60vh, но не
+ *      меньше 400px), сетка x2–x4 идёт одной колонкой, iframe занимает слот
+ *      целиком. Десктоп (>900px) не тронут.
+ *   3. Кнопки режимов («Вкладки»/«Сетка») подписываются по языку страницы
  *      через textContent, панель дока помечена translate="no" — машинный
  *      перевод браузера не дублирует и не корежит подписи.
- *   3. app.js не рисует график в свёрнутый контейнер (h < 100 → 400).
+ *   4. app.js не рисует график в свёрнутый контейнер (h < 100 → 400).
  *
  * Запуск: node tests/dock_mobile.js
  */
@@ -88,13 +92,42 @@ function bodyOf(src, marker) {
   return src.slice(start, j + 1);
 }
 
-/* ===================== 1. CSS: мобильная вёрстка ===================== */
+/* ============ 1. Телефон: мультиэкран выключен, один график =========== */
+
+const dock = read("static/chart_dock.js");
+
+check("JS: есть определение «телефон» по той же ширине, что и в CSS",
+  /_mobile\(\)\s*\{[\s\S]{0,200}max-width:\s*900px/.test(dock));
+check("JS: на телефоне start() док не собирает",
+  /this\._applyMobile\(\);\s*\n\s*if \(this\._mobile\(\)\) return;/.test(dock));
+check("JS: addChart на телефоне ничего не добавляет",
+  /addChart\(\)\s*\{\s*\n\s*if \(this\._mobile\(\)\) return null;/.test(dock));
+check("JS: layout на телефоне разбирает док в один график",
+  /layout\(\)\s*\{\s*\n\s*if \(this\._mobile\(\)\)\s*\{\s*this\._unwrap\(\); return; \}/.test(dock));
+check("JS: ⛶ на телефоне разворачивает единственный график, а не слот",
+  /interceptFullscreen\(id\)\s*\{\s*\n\s*if \(this\._mobile\(\)\) return false;/.test(dock) &&
+  /isSlotFullscreen\(id\)\s*\{\s*\n\s*if \(this\._mobile\(\)\) return false;/.test(dock));
+check("JS: переключение телефон↔десктоп разбирает и собирает док заново",
+  /_applyMobile\(\)\s*\{[\s\S]{0,400}this\._unwrap\(\)/.test(dock) &&
+  /_applyMobile\(\)\s*\{[\s\S]{0,900}this\._restore\(\);\s*\n\s*if \(this\._needsLayout\(\)\) this\.layout\(\);/.test(dock));
+check("JS: за шириной экрана следит matchMedia, а не только resize",
+  /matchMedia\("\(max-width: 900px\)"\)/.test(dock) && /addEventListener\("resize", fire\)/.test(dock));
 
 const css = read("static/workspace.css");
 const mob = mobileBlocks(css);
 const desk = desktopCss(css);
 
 check("CSS: мобильный блок @media (max-width: 900px) есть", mob.length > 0);
+check("CSS: на телефоне кнопки мультиэкрана спрятаны",
+  /body\.dock-mobile #add-chart-btn,\s*\n\s*body\.dock-mobile #chart-tear,\s*\n\s*body\.dock-mobile #chart-tear-back\s*\{\s*display:\s*none !important/.test(mob),
+  (mob.match(/body\.dock-mobile[^{]*\{[^}]*\}/) || [""])[0]);
+// без дока секция графика ведёт себя как всегда: высоту задаёт style.css
+const styleCss = read("static/style.css");
+const styleMob = mobileBlocks(styleCss);
+check("CSS: без дока высоту секции задаёт style.css (58vh), а не workspace.css",
+  /\.chart-section\s*\{\s*height:\s*58vh/.test(styleMob) &&
+  !(mob.match(/[^{}]*\.chart-section\s*\{/) || [""])[0].replace(/has-chart-dock/g, "").includes(".chart-section"),
+  (styleMob.match(/\.chart-section\s*\{[^}]*\}/) || [""])[0]);
 
 // сетка x2–x4 на телефоне — одна колонка, графики идут друг под другом
 check("CSS: на телефоне сетка x2–x4 сворачивается в одну колонку",
@@ -138,8 +171,6 @@ check("CSS: десктопный док по-прежнему занимает �
   /\.chart-dock\s*\{[^}]*height:\s*100%/.test(desk));
 
 /* ===================== 2. Подписи дока и translate="no" ============== */
-
-const dock = read("static/chart_dock.js");
 
 check("JS: в исходниках дока нет опечатки «epy»", !/epy/i.test(dock),
   (dock.match(/.{0,40}epy.{0,40}/i) || [""])[0]);

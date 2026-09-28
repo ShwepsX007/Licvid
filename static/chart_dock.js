@@ -57,6 +57,7 @@
       this._drag = null;
       this._saveTimer = null;
       this._syncTimer = null;
+      this._wasMobile = null;   // режим экрана: null — ещё не измерен
     }
 
     start() {
@@ -74,12 +75,71 @@
         return;
       }
       if (!this.section || !this.header || !this.stack) return;
+      window.addEventListener("message", (e) => this._onMessage(e));
+      this._watchViewport();
+      // Телефон: дока нет вовсе — остаётся один родной график (см. _mobile).
+      this._applyMobile();
+      if (this._mobile()) return;
       this._bindNativeChrome();
       this._restore();
-      window.addEventListener("message", (e) => this._onMessage(e));
       if (this._needsLayout()) this.layout();
       this._syncTimer = setInterval(() => this._syncEmbedLabels(), 1500);
       this._startWsBridge();
+    }
+
+    // --- Телефон: один график, без мультиэкрана ----------------------------
+    // На узком экране сетка слотов не выживает: строки 1fr от неопределённой
+    // высоты схлопываются, iframe остаётся без своей высоты, и пользователь
+    // видит пустой терминал вместо графиков. Лечить это на телефоне смысла
+    // нет — мультиэкран там не нужен. До 900px док не строится вообще:
+    // заголовок и стек графика остаются на месте в .chart-section, сохранённая
+    // сетка не разворачивается, лишние кнопки прячет CSS (body.dock-mobile).
+    // Десктоп (>900px) работает как работал.
+    _mobile() {
+      try {
+        if (window.matchMedia) return !!window.matchMedia("(max-width: 900px)").matches;
+      } catch (e) {}
+      return window.innerWidth <= 900;
+    }
+
+    /** Переключение «телефон <-> десктоп»: раскладка переезжает без перезагрузки.
+     *  Первый вызов из start() только запоминает режим — сборкой дока на
+     *  десктопе занимается сам start(), иначе она пошла бы дважды. */
+    _applyMobile() {
+      const mob = this._mobile();
+      const first = this._wasMobile === null;
+      if (!first && mob === this._wasMobile) return;
+      this._wasMobile = mob;
+      document.body.classList.toggle("dock-mobile", mob);
+      if (mob) {
+        // телефон: разобрать док обратно в родной одинарный график
+        if (!first) this._unwrap();
+        if (this._syncTimer) { clearInterval(this._syncTimer); this._syncTimer = null; }
+        if (!first) this._nudge();
+        return;
+      }
+      if (first) return;
+      // вернулись на широкий экран: собрать сохранённую раскладку заново
+      this._bindNativeChrome();
+      this._restore();
+      if (this._needsLayout()) this.layout();
+      if (!this._syncTimer) this._syncTimer = setInterval(() => this._syncEmbedLabels(), 1500);
+      this._startWsBridge();
+    }
+
+    _watchViewport() {
+      if (this._vpBound) return;
+      this._vpBound = true;
+      const fire = () => this._applyMobile();
+      try {
+        if (window.matchMedia) {
+          const mq = window.matchMedia("(max-width: 900px)");
+          if (mq.addEventListener) mq.addEventListener("change", fire);
+          else if (mq.addListener) mq.addListener(fire);
+        }
+      } catch (e) {}
+      window.addEventListener("resize", fire);
+      window.addEventListener("orientationchange", fire);
     }
 
     // --- Один WebSocket на окно ---------------------------------------------
@@ -216,6 +276,7 @@
     }
 
     interceptFullscreen(id) {
+      if (this._mobile()) return false;   // телефон: ⛶ разворачивает единственный график
       if (this._isEmbedChild()) {
         const q = new URLSearchParams(location.search);
         if (q.get("pop") === "1") return false;
@@ -234,6 +295,7 @@
     }
 
     isSlotFullscreen(id) {
+      if (this._mobile()) return false;
       if (this._isEmbedChild()) return !!this._embedFs;
       return this._fsId === (id || "native");
     }
@@ -343,6 +405,7 @@
     }
 
     addChart() {
+      if (this._mobile()) return null;   // телефон: только родной график
       if (this.order.length >= MAX) {
         window.alert("Максимум " + MAX + " графиков.");
         return null;
@@ -431,6 +494,7 @@
     }
 
     layout() {
+      if (this._mobile()) { this._unwrap(); return; }
       if (!this._needsLayout()) {
         this._unwrap();
         return;

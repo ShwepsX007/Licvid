@@ -770,15 +770,22 @@ body.chart-embed-pop .chart-pop-back {
     width: calc(100vw - 12px);
     height: 70vh;
   }
-  /* Телефон: страница скроллится, фиксированной высоты у дока нет —
-     каждый график получает свою высоту (60vh, но не меньше 400px), иначе
-     строки 1fr от неопределённой высоты схлопываются в ноль вместе с
-     графиками (iframe внутри абсолютно спозиционирован и высоты не даёт).
-     Второй график добирается прокруткой страницы вниз, а не сжатием. */
+  /* Телефон: мультиэкран выключен (см. body.dock-mobile ниже), док тут
+     появляется только если пользователь сузил широкое окно — тогда страница
+     скроллится, а каждый слот держит свою высоту (60vh, но не меньше 400px),
+     иначе строки 1fr от неопределённой высоты схлопываются в ноль вместе с
+     графиками (iframe внутри абсолютно спозиционирован и высоты не даёт). */
   .chart-section.has-chart-dock { height: auto; }
   .chart-dock-wrap { height: auto; }
   .chart-dock { height: auto; }
   .chart-dock-tools { flex-wrap: wrap; row-gap: 6px; }
+  /* Мультиэкран на телефоне выключен: chart_dock.js до 900px дока не строит
+     (слоты схлопывались, iframe оставался без высоты — графики пропадали).
+     Остаётся один родный график, поэтому кнопки «＋ График» и отрыва окна
+     на телефоне не показываем. На широком экране дока нет — правила молчат. */
+  body.dock-mobile #add-chart-btn,
+  body.dock-mobile #chart-tear,
+  body.dock-mobile #chart-tear-back { display: none !important; }
   .chart-dock > .chart-slot:not(.is-slot-fs):not(.chart-floating),
   .chart-dock-wrap.view-tabs .chart-slot:not(.is-slot-fs):not(.chart-floating) {
     height: 60vh;

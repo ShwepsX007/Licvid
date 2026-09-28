@@ -373,6 +373,154 @@ class LoopLagWatchdog(unittest.TestCase):
                          "свободный цикл посчитан залипшим")
 
 
+def _busy_work():
+    """Синхронная работа, которую сэмплер стеков обязан назвать по имени."""
+    time.sleep(0.8)
+
+
+class LoopTrace(unittest.TestCase):
+    """Сэмплер стеков: сторож говорит «занят 857 мс», трассировка — КЕМ."""
+
+    def setUp(self):
+        self._saved = dict(server._LOOP_TRACE)
+        server._LOOP_TRACE.update({"held_ms": 0.0, "stalls": 0, "last": "",
+                                   "stop": False, "thread": None})
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        server._LOOP_TRACE["stop"] = True
+        server._LOOP_TRACE.clear()
+        server._LOOP_TRACE.update(self._saved)
+
+    def test_trace_names_the_blocking_frame(self):
+        import threading
+        t = threading.Thread(target=server._loop_trace_thread,
+                             args=(threading.get_ident(),), daemon=True)
+        t.start()
+        try:
+            _busy_work()
+        finally:
+            server._LOOP_TRACE["stop"] = True
+            t.join(timeout=2.0)
+        self.assertGreaterEqual(server._LOOP_TRACE["stalls"], 1,
+                                "сэмплер не заметил синхронную блокировку")
+        self.assertIn("_busy_work", server._LOOP_TRACE["last"],
+                      f"стек не назвал виновника: {server._LOOP_TRACE['last']!r}")
+        self.assertGreaterEqual(server._LOOP_TRACE["held_ms"], 400.0)
+
+    def test_idle_loop_stack_is_not_busy(self):
+        idle = ["selectors.py:468:select", "base_events.py:1910:_run_once",
+                "runners.py:118:run"]
+        busy = ["server.py:2340:pump_loop", "base_events.py:1910:_run_once"]
+        self.assertTrue(server._stack_is_idle(idle),
+                        "ожидание epoll принято за занятость — лог утонет")
+        self.assertFalse(server._stack_is_idle(busy))
+
+    def test_real_idle_stack_under_uvicorn_is_idle(self):
+        """Боевой простой: под механикой цикла лежит обвязка uvicorn/click.
+
+        Регрессия на ложные срабатывания: правило «весь стек — asyncio»
+        считало такой стек занятостью и писало в журнал каждые 300 мс при
+        совершенно свободном воркере.
+        """
+        sig = ["selectors.py:468:select", "base_events.py:1910:_run_once",
+               "base_events.py:603:run_forever",
+               "base_events.py:631:run_until_complete", "runners.py:118:run",
+               "_compat.py:30:asyncio_run", "server.py:86:run",
+               "main.py:632:run", "main.py:448:main", "core.py:910:invoke",
+               "core.py:1552:main", "__main__.py:4:<module>",
+               "<frozen runpy>:88:_run_code"]
+        self.assertTrue(server._stack_is_idle(sig),
+                        "обвязка uvicorn под циклом принята за занятость")
+
+    def test_uvloop_idle_stack_is_idle(self):
+        """uvloop (его ставит uvicorn[standard]) прячет механику цикла в Cython.
+
+        В python-стеке простоя самый внутренний кадр — ``runners.py:run``, а не
+        ``selectors.select``: прежнее правило считало это занятостью и писало в
+        журнал каждые 150-300 мс при свободном воркере.
+        """
+        sig = ["runners.py:118:run", "_compat.py:30:asyncio_run",
+               "server.py:86:run", "main.py:632:run", "main.py:448:main",
+               "core.py:910:invoke", "core.py:1552:main",
+               "__main__.py:4:<module>", "<frozen runpy>:88:_run_code"]
+        self.assertTrue(server._stack_is_idle(sig),
+                        "простой под uvloop принят за занятость")
+        self.assertEqual(server._stack_work(sig), [])
+
+    def test_uvloop_busy_stack_names_app_frames(self):
+        sig = ["pump_scan.py:135:add_prices", "server.py:2331:pump_loop",
+               "runners.py:118:run", "_compat.py:30:asyncio_run",
+               "main.py:632:run", "core.py:910:invoke"]
+        self.assertFalse(server._stack_is_idle(sig))
+        self.assertEqual(server._stack_work(sig),
+                         ["pump_scan.py:135:add_prices", "server.py:2331:pump_loop"],
+                         "в отчет должна попасть работа, а не обвязка uvicorn")
+
+    def test_stack_without_boundary_counts_as_work(self):
+        sig = ["server.py:120:handler", "market_feed.py:40:parse"]
+        self.assertEqual(server._stack_work(sig), sig)
+        self.assertFalse(server._stack_is_idle(sig))
+
+    def test_busy_stack_under_uvicorn_is_busy(self):
+        sig = ["pump_scan.py:135:add_prices", "server.py:2331:pump_loop",
+               "base_events.py:1910:_run_once", "runners.py:118:run",
+               "main.py:632:run", "core.py:910:invoke"]
+        self.assertFalse(server._stack_is_idle(sig),
+                         "настоящая работа признана простоем — виновника не увидим")
+
+    def test_stack_signature_is_innermost_first(self):
+        def outer():
+            return inner()
+
+        def inner():
+            return server._stack_signature(sys._getframe())
+
+        sig = outer()
+        self.assertIn("inner", sig[0], "первым должен быть кадр, где застряли")
+        self.assertTrue(any("outer" in f for f in sig[1:]), "кто позвал — не видно")
+        self.assertLessEqual(len(sig), server.LOOP_TRACE_FRAMES)
+
+    def test_start_is_noop_when_disabled(self):
+        saved = server.LOOP_TRACE
+        server.LOOP_TRACE = False
+        self.addCleanup(lambda: setattr(server, "LOOP_TRACE", saved))
+        server.loop_trace_start()
+        self.assertIsNone(server._LOOP_TRACE["thread"],
+                          "трассировка запустилась без LIQSCOPE_LOOP_TRACE=1")
+        server.loop_trace_stop()          # не падает без потока
+
+
+class AsyncioDebugFlag(unittest.TestCase):
+    """PYTHONASYNCIODEBUG под uvicorn не срабатывает — включаем из приложения."""
+
+    def test_flag_enables_loop_debug_and_threshold(self):
+        saved = server.ASYNCIO_DEBUG, server.SLOW_CALLBACK_SEC
+        server.ASYNCIO_DEBUG, server.SLOW_CALLBACK_SEC = True, 0.25
+        self.addCleanup(lambda: (setattr(server, "ASYNCIO_DEBUG", saved[0]),
+                                 setattr(server, "SLOW_CALLBACK_SEC", saved[1])))
+
+        async def run():
+            server._enable_asyncio_debug()
+            loop = asyncio.get_running_loop()
+            return loop.get_debug(), loop.slow_callback_duration
+
+        dbg, dur = asyncio.run(run())
+        self.assertTrue(dbg, "debug-режим asyncio не включился")
+        self.assertEqual(dur, 0.25)
+
+    def test_disabled_by_default(self):
+        saved = server.ASYNCIO_DEBUG
+        server.ASYNCIO_DEBUG = False
+        self.addCleanup(lambda: setattr(server, "ASYNCIO_DEBUG", saved))
+
+        async def run():
+            server._enable_asyncio_debug()
+            return asyncio.get_running_loop().get_debug()
+
+        self.assertFalse(asyncio.run(run()))
+
+
 class LagExposedInMonitoring(unittest.TestCase):
     """Паузы воркера видны в /api/health и /api/metrics."""
 
@@ -392,6 +540,9 @@ class LagExposedInMonitoring(unittest.TestCase):
                                  f"{path}: нет loop_lag_max_ms")
                 self.assertEqual(d.get("loop_stalls"), 7, f"{path}: нет loop_stalls")
                 self.assertIn("loop_lag_last_ms", d, f"{path}: нет last_ms")
+                self.assertIn("loop_trace", d, f"{path}: нет флага трассировки")
+                self.assertIn("loop_trace_last", d, f"{path}: нет стека виновника")
+                self.assertIsInstance(d.get("loop_trace_last"), str)
 
 
 if __name__ == "__main__":

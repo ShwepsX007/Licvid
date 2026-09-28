@@ -907,6 +907,10 @@ _LOOP_LAG: Dict[str, float] = {"max_ms": 0.0, "at": 0.0, "stalls": 0.0,
 LOOP_LAG_TICK = 0.2
 LOOP_LAG_WARN_MS = max(50.0, float(os.getenv("LIQSCOPE_LOOP_LAG_MS", "500")))
 LOOP_LAG_LOG_GAP = 5.0
+# Диагностика «чем именно занят воркер»: debug-режим asyncio называет задачу,
+# сэмплер стеков (LIQSCOPE_LOOP_TRACE) — файл, функцию и строку.
+ASYNCIO_DEBUG = os.getenv("LIQSCOPE_ASYNCIO_DEBUG", "").strip() not in ("", "0", "false", "no")
+SLOW_CALLBACK_SEC = max(0.05, float(os.getenv("LIQSCOPE_SLOW_CALLBACK_SEC", "0.25")))
 
 
 async def loop_lag_watchdog():
@@ -936,6 +940,131 @@ async def loop_lag_watchdog():
         except Exception as e:                       # noqa: BLE001
             log.debug("сторож пауз цикла: %s", e)
             await asyncio.sleep(1)
+
+
+def _enable_asyncio_debug() -> None:
+    """Включить штатную диагностику asyncio: цикл сам назовёт медленную задачу.
+
+    ``PYTHONASYNCIODEBUG=1`` под uvicorn не срабатывает (проверено: цикл
+    поднимается с ``debug=False``), поэтому флаг включаем из приложения.
+    Дальше asyncio сам пишет ``Executing <Task … coro=<pump_loop()…>> took
+    0.857 seconds`` — то есть называет виновника по имени задачи. Платим
+    накладными расходами debug-режима, поэтому флаг диагностический.
+    """
+    if not ASYNCIO_DEBUG:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+        loop.set_debug(True)
+        loop.slow_callback_duration = SLOW_CALLBACK_SEC
+        log.warning("[loop] включён debug-режим asyncio: медленнее "
+                    "%.0f мс считается и логируется с именем задачи "
+                    "(LIQSCOPE_ASYNCIO_DEBUG=1)", SLOW_CALLBACK_SEC * 1000)
+    except Exception as e:                           # noqa: BLE001
+        log.warning("[loop] debug-режим asyncio не включился: %s", e)
+
+
+# --- трассировка стека: кто именно держал воркер ---------------------------
+# Сторож пауз говорит «воркер был занят 857 мс», но не говорит КЕМ. Поток-
+# сэмплер раз в 50 мс снимает стек главного потока (в нём живёт event loop) и
+# пишет тот, который держится дольше порога: видно файл, функцию и строку.
+# Механику самого цикла (ожидание epoll) не логируем — это свобода, а не занятость.
+LOOP_TRACE = os.getenv("LIQSCOPE_LOOP_TRACE", "").strip() not in ("", "0", "false", "no")
+LOOP_TRACE_MIN_SEC = max(0.1, float(os.getenv("LIQSCOPE_LOOP_TRACE_MS", "400")) / 1000.0)
+LOOP_TRACE_INTERVAL = 0.05
+LOOP_TRACE_FRAMES = 12
+_LOOP_TRACE: Dict[str, object] = {"held_ms": 0.0, "stalls": 0, "last": "",
+                                  "stop": False, "thread": None}
+# Граница «механики запуска цикла». С uvloop (его ставит uvicorn[standard])
+# сам цикл живёт в Cython и в python-стеке не виден: самый внутренний кадр
+# простоя — это runners.py:run / _compat.py:asyncio_run, а не selectors.select.
+# Поэтому признаком простоя считаем «внутри цикла ни одного python-кадра нет»,
+# а занятостью — кадры глубже границы: именно они называют виновника.
+_LOOP_BOUNDARY = ("base_events.py", "selectors.py", "runners.py", "events.py",
+                  "proactor_events.py", "kqueue.py", "epoll.pyx", "uvloop",
+                  "_compat.py")
+
+
+def _stack_signature(frame, limit: int = LOOP_TRACE_FRAMES) -> list:
+    """Стек изнутри наружу: где застряли → кто позвал."""
+    out = []
+    f = frame
+    while f is not None and len(out) < limit:
+        co = f.f_code
+        out.append(f"{os.path.basename(co.co_filename)}:{f.f_lineno}:{co.co_name}")
+        f = f.f_back
+    return out
+
+
+def _stack_work(sig: list) -> list:
+    """Кадры, выполнявшиеся ВНУТРИ цикла (всё, что глубже границы запуска)."""
+    for i, fr in enumerate(sig):
+        if any(b in fr for b in _LOOP_BOUNDARY):
+            return sig[:i]
+    return sig
+
+
+def _stack_is_idle(sig: list) -> bool:
+    """Свободен ли воркер: внутри цикла не выполняется ни один python-кадр.
+
+    Регрессия на uvloop: прежнее правило «весь стек — внутренности asyncio»
+    принимало любой простой за занятость (под циклом всегда лежит обвязка
+    uvicorn/click/runpy, а с uvloop не видно и selectors.select) и писало в
+    журнал каждые 300 мс при полностью свободном воркере.
+    """
+    return not _stack_work(sig)
+
+
+def _loop_trace_thread(main_tid: int) -> None:
+    prev: Optional[list] = None
+    since = time.monotonic()
+    reported = False
+    while not _LOOP_TRACE["stop"]:
+        time.sleep(LOOP_TRACE_INTERVAL)
+        frame = sys._current_frames().get(main_tid)
+        if frame is None:
+            continue
+        sig = _stack_signature(frame)
+        now = time.monotonic()
+        if sig != prev:
+            prev, since, reported = sig, now, False
+            continue
+        held = now - since
+        if reported or held < LOOP_TRACE_MIN_SEC or _stack_is_idle(sig):
+            continue
+        reported = True
+        # пишем только кадры внутри цикла — обвязка uvicorn/click/runpy одна и
+        # та же всегда, а вот «файл:строка:функция» и есть ответ на «чем занят»
+        work = _stack_work(sig)
+        text = " <- ".join(work) or sig[0]
+        _LOOP_TRACE["held_ms"] = round(held * 1000.0, 1)
+        _LOOP_TRACE["stalls"] = int(_LOOP_TRACE["stalls"]) + 1
+        _LOOP_TRACE["last"] = text
+        log.warning("[loop-trace] воркер %d мс в одном месте (всего %d): %s",
+                    round(held * 1000.0), int(_LOOP_TRACE["stalls"]), text)
+
+
+def loop_trace_start() -> None:
+    """Запустить сэмплер стеков (если включён LIQSCOPE_LOOP_TRACE)."""
+    if not LOOP_TRACE or _LOOP_TRACE["thread"] is not None:
+        return
+    import threading
+    _LOOP_TRACE["stop"] = False
+    t = threading.Thread(target=_loop_trace_thread,
+                         args=(threading.get_ident(),),
+                         name="loop-trace", daemon=True)
+    _LOOP_TRACE["thread"] = t
+    t.start()
+    log.warning("[loop-trace] сэмплер стеков включён: порог %.0f мс, шаг %.0f мс "
+                "(LIQSCOPE_LOOP_TRACE=1)", LOOP_TRACE_MIN_SEC * 1000,
+                LOOP_TRACE_INTERVAL * 1000)
+
+
+def loop_trace_stop() -> None:
+    _LOOP_TRACE["stop"] = True
+    t, _LOOP_TRACE["thread"] = _LOOP_TRACE["thread"], None
+    if t is not None:
+        t.join(timeout=1.0)
 
 
 def _rss_bytes() -> int:
@@ -3613,6 +3742,9 @@ async def lifespan(app: FastAPI):
     book_feed_inst = BookFeed(BOOK_DIR or None, demo=DEMO_MODE)
     book_feed_inst.sub_symbols_fn = book_sub_symbols
 
+    # Диагностика «чем занят воркер» — включается переменными, по умолчанию нет
+    _enable_asyncio_debug()
+    loop_trace_start()
     tasks = [
         asyncio.create_task(liq_event_worker(), name="liq-worker"),
         asyncio.create_task(book_feed_inst.run(), name="book"),
@@ -3691,6 +3823,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        loop_trace_stop()
         for t in tasks:
             t.cancel()
         try:
@@ -4983,6 +5116,13 @@ async def api_health():
         "loop_lag_max_ms": _LOOP_LAG["max_ms"],
         "loop_lag_last_ms": _LOOP_LAG["last_ms"],
         "loop_stalls": int(_LOOP_LAG["stalls"]),
+        # кто именно держал воркер (LIQSCOPE_LOOP_TRACE=1): стек «изнутри
+        # наружу» — файл:строка:функция; пусто, если трассировка выключена
+        "loop_trace": LOOP_TRACE,
+        "loop_trace_stalls": int(_LOOP_TRACE["stalls"]),
+        "loop_trace_held_ms": _LOOP_TRACE["held_ms"],
+        "loop_trace_last": _LOOP_TRACE["last"],
+        "asyncio_debug": bool(ASYNCIO_DEBUG),
         "wal_bytes": _wal_bytes(),
         "sqlite_ms": await _sqlite_ping_ms(),
         "uptime_sec": round(time.time() - _START_TS, 1),
@@ -5076,6 +5216,13 @@ async def api_metrics():
         "loop_lag_max_ms": _LOOP_LAG["max_ms"],
         "loop_lag_last_ms": _LOOP_LAG["last_ms"],
         "loop_stalls": int(_LOOP_LAG["stalls"]),
+        # кто именно держал воркер (LIQSCOPE_LOOP_TRACE=1): стек «изнутри
+        # наружу» — файл:строка:функция; пусто, если трассировка выключена
+        "loop_trace": LOOP_TRACE,
+        "loop_trace_stalls": int(_LOOP_TRACE["stalls"]),
+        "loop_trace_held_ms": _LOOP_TRACE["held_ms"],
+        "loop_trace_last": _LOOP_TRACE["last"],
+        "asyncio_debug": bool(ASYNCIO_DEBUG),
         "uptime_sec": round(time.time() - _START_TS, 1),
     })
 

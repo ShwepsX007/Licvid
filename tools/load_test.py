@@ -234,6 +234,15 @@ async def main() -> int:
                   f"а снаружи {p95:.0f} мс. Запросы СТОЯЛИ В ОЧЕРЕДИ event loop, "
                   "пока единственный воркер был занят (рассылка кадра, разбор "
                   "пачки свечей, диск). Моменты пауз — в journalctl рядом с [loop].")
+        tr = after.get("loop_trace_last")
+        if tr:
+            print(f"  -> чем был занят воркер (LIQSCOPE_LOOP_TRACE=1): {tr}")
+            print(f"     стек держался {float(after.get('loop_trace_held_ms') or 0):.0f} мс, "
+                  f"таких пауз {int(after.get('loop_trace_stalls') or 0)}")
+        elif after.get("loop_stalls"):
+            print("  -> кто именно держал воркер, не записано: включите на сервере "
+                  "LIQSCOPE_LOOP_TRACE=1 (стек) или LIQSCOPE_ASYNCIO_DEBUG=1 "
+                  "(имя задачи) в drop-in и повторите прогон")
     if slow:
         print(f"\nзалипшие запросы (> {SLOW_MS:.0f} мс): {len(slow)} шт. "
               f"из {len(lat)}")

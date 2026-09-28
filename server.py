@@ -926,15 +926,28 @@ async def loop_lag_watchdog():
                 _LOOP_LAG["at"] = time.time()
             if lag_ms >= LOOP_LAG_WARN_MS:
                 _LOOP_LAG["stalls"] += 1
+                # виновника ищем на каждой паузе (не только на залогированной):
+                # в /api/health должен лежать свежий стек, а не минутной давности
+                if lag_ms >= LOOP_TRACE_MIN_SEC * 1000.0:
+                    culprit = _loop_trace_explain(lag_ms / 1000.0)
+                    if culprit:
+                        _LOOP_TRACE["last"] = culprit
+                        _LOOP_TRACE["held_ms"] = round(lag_ms, 1)
+                        _LOOP_TRACE["stalls"] = int(_LOOP_TRACE["stalls"]) + 1
                 now = time.monotonic()
                 # не чаще раза в 5 с: на сильном лаге лог не должен тонуть
                 if now - _LOOP_LAG["logged_at"] >= LOOP_LAG_LOG_GAP:
                     _LOOP_LAG["logged_at"] = now
+                    culprit = str(_LOOP_TRACE["last"] or "")
                     log.warning("[loop] воркер был занят %.0f мс (порог %.0f мс); "
                                 "пауз таких %d, максимум %.0f мс — клиенты в это "
-                                "время стоят в очереди, а не обрабатываются",
+                                "время стоят в очереди, а не обрабатываются%s",
                                 lag_ms, LOOP_LAG_WARN_MS, int(_LOOP_LAG["stalls"]),
-                                _LOOP_LAG["max_ms"])
+                                _LOOP_LAG["max_ms"],
+                                f"; в это время он был в: {culprit}" if culprit
+                                else ("; кто именно — не записано "
+                                      "(LIQSCOPE_LOOP_TRACE=1)" if LOOP_TRACE
+                                      else " (LIQSCOPE_LOOP_TRACE=1 назовёт стек)"))
         except asyncio.CancelledError:
             break
         except Exception as e:                       # noqa: BLE001
@@ -974,7 +987,7 @@ LOOP_TRACE_MIN_SEC = max(0.1, float(os.getenv("LIQSCOPE_LOOP_TRACE_MS", "400")) 
 LOOP_TRACE_INTERVAL = 0.05
 LOOP_TRACE_FRAMES = 12
 _LOOP_TRACE: Dict[str, object] = {"held_ms": 0.0, "stalls": 0, "last": "",
-                                  "stop": False, "thread": None}
+                                  "stop": False, "thread": None, "samples": 0}
 # Граница «механики запуска цикла». С uvloop (его ставит uvicorn[standard])
 # сам цикл живёт в Cython и в python-стеке не виден: самый внутренний кадр
 # простоя — это runners.py:run / _compat.py:asyncio_run, а не selectors.select.
@@ -1015,33 +1028,46 @@ def _stack_is_idle(sig: list) -> bool:
     return not _stack_work(sig)
 
 
+# Кольцо сэмплов: (monotonic, рабочий стек). 256 × 50 мс = ~13 с окна —
+# хватает, чтобы разобрать даже пятисекундную паузу.
+_LOOP_SAMPLES: Deque[tuple] = deque(maxlen=256)
+
+
 def _loop_trace_thread(main_tid: int) -> None:
-    prev: Optional[list] = None
-    since = time.monotonic()
-    reported = False
+    """Сэмплер: пишет в кольцо текущий рабочий стек и ничего не логирует.
+
+    Признак «один и тот же стек держится N мс» сам по себе ненадёжен: короткий
+    кадр, который вызывается постоянно (``ssl.py:read`` под uvloop на десяти
+    биржевых лентах), попадает в каждый сэмпл и выглядит блокировкой — на бою
+    это дало ложные 480 мс. Паузу достоверно знает сторож: он меряет, что цикл
+    РЕАЛЬНО не крутился, и тогда берёт из кольца стек, преобладавший в окне
+    этой паузы.
+    """
     while not _LOOP_TRACE["stop"]:
+        try:
+            frame = sys._current_frames().get(main_tid)
+            if frame is not None:
+                work = tuple(_stack_work(_stack_signature(frame)))
+                _LOOP_SAMPLES.append((time.monotonic(), work))
+                _LOOP_TRACE["samples"] = int(_LOOP_TRACE["samples"]) + 1
+        except Exception as e:                       # noqa: BLE001
+            log.debug("сэмплер стеков: %s", e)
         time.sleep(LOOP_TRACE_INTERVAL)
-        frame = sys._current_frames().get(main_tid)
-        if frame is None:
-            continue
-        sig = _stack_signature(frame)
-        now = time.monotonic()
-        if sig != prev:
-            prev, since, reported = sig, now, False
-            continue
-        held = now - since
-        if reported or held < LOOP_TRACE_MIN_SEC or _stack_is_idle(sig):
-            continue
-        reported = True
-        # пишем только кадры внутри цикла — обвязка uvicorn/click/runpy одна и
-        # та же всегда, а вот «файл:строка:функция» и есть ответ на «чем занят»
-        work = _stack_work(sig)
-        text = " <- ".join(work) or sig[0]
-        _LOOP_TRACE["held_ms"] = round(held * 1000.0, 1)
-        _LOOP_TRACE["stalls"] = int(_LOOP_TRACE["stalls"]) + 1
-        _LOOP_TRACE["last"] = text
-        log.warning("[loop-trace] воркер %d мс в одном месте (всего %d): %s",
-                    round(held * 1000.0), int(_LOOP_TRACE["stalls"]), text)
+
+
+def _loop_trace_explain(window_sec: float) -> str:
+    """Стек, преобладавший в окне паузы: «чем именно был занят воркер»."""
+    if not _LOOP_SAMPLES:
+        return ""
+    cutoff = time.monotonic() - max(0.05, window_sec) - LOOP_TRACE_INTERVAL * 2
+    counts: Dict[tuple, int] = {}
+    for ts, work in list(_LOOP_SAMPLES):
+        if ts >= cutoff and work:
+            counts[work] = counts.get(work, 0) + 1
+    if not counts:
+        return ""
+    best, hits = max(counts.items(), key=lambda kv: kv[1])
+    return f"{' <- '.join(best)}  ({hits} из {sum(counts.values())} сэмплов окна)"
 
 
 def loop_trace_start() -> None:

@@ -384,29 +384,112 @@ class LoopTrace(unittest.TestCase):
     def setUp(self):
         self._saved = dict(server._LOOP_TRACE)
         server._LOOP_TRACE.update({"held_ms": 0.0, "stalls": 0, "last": "",
-                                   "stop": False, "thread": None})
+                                   "stop": False, "thread": None, "samples": 0})
+        server._LOOP_SAMPLES.clear()
         self.addCleanup(self._restore)
 
     def _restore(self):
         server._LOOP_TRACE["stop"] = True
+        server._LOOP_SAMPLES.clear()
         server._LOOP_TRACE.clear()
         server._LOOP_TRACE.update(self._saved)
 
-    def test_trace_names_the_blocking_frame(self):
+    def test_watchdog_names_the_blocking_stack(self):
+        """Сторож пауз + сэмплер вместе называют виновника по стеку."""
         import threading
+        saved_warn, saved_gap = server.LOOP_LAG_WARN_MS, server.LOOP_LAG_LOG_GAP
+        server.LOOP_LAG_WARN_MS = 200.0
+        server.LOOP_LAG_LOG_GAP = 0.0
+        server._LOOP_LAG.update({"max_ms": 0.0, "at": 0.0, "stalls": 0.0,
+                                 "last_ms": 0.0, "logged_at": 0.0})
         t = threading.Thread(target=server._loop_trace_thread,
                              args=(threading.get_ident(),), daemon=True)
         t.start()
+
+        async def run():
+            wd = asyncio.create_task(server.loop_lag_watchdog())
+            await asyncio.sleep(0.1)      # сторож и сэмплер успевают начаться
+            _busy_work()                  # 0.8 с синхронно в потоке цикла
+            await asyncio.sleep(0.4)      # сторож просыпается и разбирает окно
+            wd.cancel()
+            try:
+                await wd
+            except asyncio.CancelledError:
+                pass
+
         try:
-            _busy_work()
+            asyncio.run(run())
         finally:
             server._LOOP_TRACE["stop"] = True
             t.join(timeout=2.0)
-        self.assertGreaterEqual(server._LOOP_TRACE["stalls"], 1,
-                                "сэмплер не заметил синхронную блокировку")
-        self.assertIn("_busy_work", server._LOOP_TRACE["last"],
+            server.LOOP_LAG_WARN_MS, server.LOOP_LAG_LOG_GAP = saved_warn, saved_gap
+        self.assertGreaterEqual(server._LOOP_LAG["stalls"], 1,
+                                "сторож не увидел паузу")
+        self.assertIn("_busy_work", str(server._LOOP_TRACE["last"]),
                       f"стек не назвал виновника: {server._LOOP_TRACE['last']!r}")
-        self.assertGreaterEqual(server._LOOP_TRACE["held_ms"], 400.0)
+        self.assertGreaterEqual(server._LOOP_TRACE["held_ms"], 200.0)
+        self.assertIn("сэмплов окна", str(server._LOOP_TRACE["last"]))
+
+    def test_repeated_short_stack_is_not_a_stall(self):
+        """Регрессия на бой: ssl.py:read на десяти лентах — не блокировка.
+
+        Один и тот же короткий кадр попадает в каждый сэмпл, поэтому признак
+        «стек держится N мс» дал на бою ложные 480 мс. Паузу знает только
+        сторож: если цикл реально крутился, виновника не записываем.
+        """
+        import threading
+        saved_warn = server.LOOP_LAG_WARN_MS
+        server.LOOP_LAG_WARN_MS = 200.0
+        server._LOOP_LAG.update({"max_ms": 0.0, "at": 0.0, "stalls": 0.0,
+                                 "last_ms": 0.0, "logged_at": 0.0})
+        server._LOOP_TRACE["last"] = ""
+        t = threading.Thread(target=server._loop_trace_thread,
+                             args=(threading.get_ident(),), daemon=True)
+        t.start()
+
+        def short_work():
+            time.sleep(0.004)             # короткий, но один и тот же кадр
+
+        async def run():
+            wd = asyncio.create_task(server.loop_lag_watchdog())
+            for _ in range(150):
+                short_work()
+                await asyncio.sleep(0)    # цикл жив: паузы нет
+            await asyncio.sleep(0.3)
+            wd.cancel()
+            try:
+                await wd
+            except asyncio.CancelledError:
+                pass
+
+        try:
+            asyncio.run(run())
+        finally:
+            server._LOOP_TRACE["stop"] = True
+            t.join(timeout=2.0)
+            server.LOOP_LAG_WARN_MS = saved_warn
+        self.assertGreater(int(server._LOOP_TRACE["samples"]), 0,
+                           "сэмплер не работал — тест ничего не проверяет")
+        self.assertEqual(server._LOOP_TRACE["stalls"], 0,
+                         "повторяющийся короткий кадр принят за блокировку")
+        self.assertEqual(server._LOOP_TRACE["last"], "")
+
+    def test_explain_picks_dominant_stack_in_window(self):
+        server._LOOP_SAMPLES.clear()
+        now = time.monotonic()
+        for i in range(6):
+            server._LOOP_SAMPLES.append((now - 0.3 + i * 0.05,
+                                         ("history.py:330:iter_events",
+                                          "liq_levels.py:1057:_events")))
+        server._LOOP_SAMPLES.append((now - 0.2, ("server.py:1200:other",)))
+        server._LOOP_SAMPLES.append((now - 90.0, ("stale.py:1:old",)))
+        got = server._loop_trace_explain(0.6)
+        self.assertIn("history.py:330:iter_events", got,
+                      "выбран не преобладающий стек окна паузы")
+        self.assertIn("6 из 7", got, f"доли сэмплов не видно: {got!r}")
+        self.assertNotIn("stale.py", got, "в окно попал сэмпл минутной давности")
+        server._LOOP_SAMPLES.clear()
+        self.assertEqual(server._loop_trace_explain(1.0), "")
 
     def test_idle_loop_stack_is_not_busy(self):
         idle = ["selectors.py:468:select", "base_events.py:1910:_run_once",

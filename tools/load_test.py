@@ -244,19 +244,31 @@ async def main() -> int:
                   "LIQSCOPE_LOOP_TRACE=1 (стек) или LIQSCOPE_ASYNCIO_DEBUG=1 "
                   "(имя задачи) в drop-in и повторите прогон")
     if slow:
+        # запросы дописываются в список по мере завершения, а не по времени
+        # старта, поэтому для разбора пауз сортируем по отметке
+        slow.sort(key=lambda row: row[0])
+        clusters: dict = {}
+        for off, ms in slow:
+            clusters.setdefault(int(off), []).append(ms)
         print(f"\nзалипшие запросы (> {SLOW_MS:.0f} мс): {len(slow)} шт. "
-              f"из {len(lat)}")
-        for off, ms in slow[:12]:
-            print(f"  +{off:>6.1f} с   {ms:>8.0f} мс")
-        if len(slow) > 12:
-            print(f"  … и ещё {len(slow) - 12}")
-        offs = [o for o, _ in slow]
-        gaps = sorted(round(b - a, 1) for a, b in zip(offs, offs[1:]))
-        if len(gaps) >= 2:
-            print(f"  интервалы между залипаниями: медиана "
-                  f"{gaps[len(gaps) // 2]:.1f} с, мин {gaps[0]:.1f} с — ровная "
-                  "периодичность указывает на фоновую задачу (15 с — прогрев "
-                  "свечей kline_refresher), рваная — на очередь под нагрузкой")
+              f"из {len(lat)} в {len(clusters)} паузах воркера")
+        for sec in sorted(clusters)[:10]:
+            rows = clusters[sec]
+            print(f"  +{sec:>4} с: {len(rows):>4} запросов, максимум "
+                  f"{max(rows):>6.0f} мс")
+        if len(clusters) > 10:
+            print(f"  … и ещё {len(clusters) - 10} пауз")
+        if len(clusters) <= 3:
+            print("  одна-три паузы = воркер вставал отдельными рывками "
+                  "(фоновая задача или диск), а не «очередь под нагрузкой»: "
+                  "виновника называет loop_trace_last выше и journalctl [loop]")
+        else:
+            gaps = sorted(b - a for a, b in zip(sorted(clusters),
+                                                sorted(clusters)[1:]))
+            print(f"  интервал между паузами: медиана {gaps[len(gaps) // 2]} с — "
+                  "ровная периодичность указывает на фоновую задачу "
+                  "(15 с — kline_refresher, 20 с — снимок уровней, 25 с — "
+                  "«Сторож монет»), рваная — на очередь под нагрузкой")
 
     fails = []
     if stats["denied"]:

@@ -788,6 +788,11 @@ class LevelsEngine:
         self._settings["enabled"] = bool(enabled)
         self._calib: Dict[str, dict] = {}
         self._cache: Dict[tuple, Tuple[float, dict]] = {}
+        # события истории для калибровки/вычитания исполненного: окно
+        # «calib_days» перечитывалось с диска на каждом проходе фона (каждые
+        # LEVELS_SNAP_SEC по каждой монете батча), а разбор дневных шардов —
+        # это построчный json.loads десятков мегабайт
+        self._events_cache: Dict[str, Tuple[int, List[dict]]] = {}
         self._candles: Dict[str, Tuple[float, List[Tuple[float, float]]]] = {}
         self._lock = threading.RLock()
         self.builds = 0
@@ -1034,6 +1039,37 @@ class LevelsEngine:
 
         return lookup
 
+    # Разбор дневных шардов истории стоит сотен миллисекунд на монету, поэтому
+    # он не должен идти в event loop (замер на бою 29.09.2026: пауза 4480 мс со
+    # стеком history.py:330:iter_events <- liq_levels.py:_events <- payload <-
+    # server.py:liq_levels_task, а снаружи p95 336 мс при серверных 5.5 мс).
+    EVENTS_TTL_SEC = max(5.0, float(os.getenv("LIQSCOPE_LEVELS_EVENTS_TTL_SEC",
+                                              "60") or 60))
+    EVENTS_CACHE_MAX = 64
+
+    async def _events_cached(self, symbol: str, since: float, until: float,
+                             min_usd: float) -> List[dict]:
+        """События истории: вне цикла и с коротким кэшем на окно калибровки.
+
+        Новые ликвидации меняют семидневное окно несущественно, а перечитывать
+        шарды каждые 20 с на каждую монету — это диск и CPU единственного
+        воркера. TTL задаётся ``LIQSCOPE_LEVELS_EVENTS_TTL_SEC``.
+        """
+        sym = str(symbol or "").upper()
+        bucket = int(float(until) // self.EVENTS_TTL_SEC)
+        hit = self._events_cache.get(sym)
+        if hit is not None and hit[0] == bucket:
+            return hit[1]
+        try:
+            events = await asyncio.to_thread(self._events, sym, since, until,
+                                             min_usd)
+        except Exception:                        # noqa: BLE001
+            events = self._events(sym, since, until, min_usd)
+        if len(self._events_cache) >= self.EVENTS_CACHE_MAX:
+            self._events_cache.clear()
+        self._events_cache[sym] = (bucket, events)
+        return events
+
     def _events(self, symbol: str, since: float, until: float,
                 min_usd: float) -> List[dict]:
         hist = self.hist
@@ -1148,8 +1184,10 @@ class LevelsEngine:
         cur = _num(price) or _current_price(rows, points)
         if cur is None or cur <= 0:
             return self._empty(sym, ts, win, settings, "нет цены для расчёта")
-        events = self._events(sym, max(since, ts - _fnum(settings.get("calib_days"), 7.0) * 24 * HOUR),
-                              ts, _fnum(settings.get("min_liq_usd")))
+        # чтение дневных шардов — только вне цикла (см. _events_cached)
+        events = await self._events_cached(
+            sym, max(since, ts - _fnum(settings.get("calib_days"), 7.0) * 24 * HOUR),
+            ts, _fnum(settings.get("min_liq_usd")))
         calib = self._calibration(sym, rows, events, cur, settings, recalibrate)
         eff = dict(settings)
         if calib.get("applied"):

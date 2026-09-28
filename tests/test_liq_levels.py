@@ -528,5 +528,117 @@ class EngineTest(unittest.TestCase):
         self.assertAlmostEqual(other.settings()["lev_scale"], 1.4, places=9)
 
 
+class SlowHist(FakeHist):
+    """Двойник дневных шардов: чтение истории занимает wall-clock, как диск.
+
+    На бою разбор семидневного окна стоил воркеру 0.4-1.8 с (максимум 5.7 с) и
+    давал p95 336 мс снаружи при 5.5 мс внутри: стек паузы —
+    ``history.py:330:iter_events <- liq_levels.py:1057:_events <- payload <-
+    server.py:1388:liq_levels_task``.
+    """
+
+    def __init__(self, events=(), delay: float = 0.4):
+        super().__init__(events)
+        self.calls = 0
+        self._delay = delay
+
+    def iter_events(self, since, until=None, symbol=None):
+        self.calls += 1
+        time.sleep(self._delay)
+        return super().iter_events(since, until, symbol)
+
+
+class EventsOffLoopTest(unittest.TestCase):
+    """Чтение истории для калибровки не должно стоять в event loop."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="lilevels_ev_")
+        self.now = time.time()
+        self.ev = [{"id": "1", "symbol": "BTC_USDT", "timestamp": self.now - 3600,
+                    "usd": 5_000_000.0, "side": "long"}]
+
+    def _engine(self, hist):
+        return LevelsEngine(hist=hist, path=os.path.join(self.tmp, "levels.json"))
+
+    def test_scan_runs_in_thread_and_loop_keeps_ticking(self):
+        hist = SlowHist(self.ev, delay=0.5)
+        engine = self._engine(hist)
+        ticks: list = []
+
+        async def run():
+            async def ticker():
+                for _ in range(50):
+                    ticks.append(time.perf_counter())
+                    await asyncio.sleep(0.02)
+
+            t = asyncio.create_task(ticker())
+            await asyncio.sleep(0.05)
+            got = await engine._events_cached("BTC_USDT", self.now - 7 * 86400,
+                                              self.now, 0.0)
+            await t
+            return got
+
+        got = asyncio.run(run())
+        self.assertEqual(got, self.ev, "события не доехали до калибровки")
+        gaps = [b - a for a, b in zip(ticks, ticks[1:])]
+        self.assertLess(max(gaps), 0.25,
+                        f"event loop стоял {max(gaps) * 1000:.0f} мс, пока "
+                        "читалась история — p95 зрителей растёт именно так")
+
+    def test_second_call_within_ttl_does_not_rescan_disk(self):
+        hist = SlowHist(self.ev, delay=0.02)
+        engine = self._engine(hist)
+
+        async def run():
+            a = await engine._events_cached("BTC_USDT", self.now - 7 * 86400,
+                                            self.now, 0.0)
+            b = await engine._events_cached("BTC_USDT", self.now - 7 * 86400,
+                                            self.now, 0.0)
+            return a, b
+
+        a, b = asyncio.run(run())
+        self.assertEqual(hist.calls, 1,
+                         "окно calib_days перечитано с диска заново — фон делает "
+                         "это каждые LEVELS_SNAP_SEC на каждую монету батча")
+        self.assertIs(a, b)
+
+    def test_new_window_rescans(self):
+        hist = SlowHist(self.ev, delay=0.0)
+        engine = self._engine(hist)
+        far = self.now + engine.EVENTS_TTL_SEC * 3
+
+        async def run():
+            await engine._events_cached("BTC_USDT", self.now - 7 * 86400, self.now, 0.0)
+            await engine._events_cached("BTC_USDT", self.now - 7 * 86400, far, 0.0)
+
+        asyncio.run(run())
+        self.assertEqual(hist.calls, 2, "кэш держит устаревшее окно вечно")
+
+    def test_cache_is_bounded(self):
+        hist = SlowHist(self.ev, delay=0.0)
+        engine = self._engine(hist)
+
+        async def run():
+            for i in range(engine.EVENTS_CACHE_MAX + 10):
+                await engine._events_cached(f"SYM{i}_USDT", self.now - 86400,
+                                            self.now, 0.0)
+
+        asyncio.run(run())
+        self.assertLessEqual(len(engine._events_cache), engine.EVENTS_CACHE_MAX,
+                             "кэш событий растёт без предела")
+
+    def test_payload_uses_the_cached_reader(self):
+        """payload() больше не зовёт _events напрямую (иначе цикл снова встанет)."""
+        with open(os.path.join(HERE, "liq_levels.py"), encoding="utf-8") as fh:
+            src = fh.read()
+        body = src[src.index("async def payload"):]
+        body = body[:body.index("\n    async def ") if "\n    async def " in body[10:]
+                    else len(body)]
+        self.assertIn("await self._events_cached(", body,
+                      "payload() читает историю синхронно")
+        self.assertNotIn("events = self._events(", body,
+                         "в payload() остался прямой синхронный вызов _events")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

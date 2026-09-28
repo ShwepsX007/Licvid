@@ -415,6 +415,8 @@
     }
 
     function boot() {
+        // встроенный график (док): реклама показывается в родительском окне
+        if (document.body && document.body.classList.contains("embed-mode")) return;
         var box = host();
         if (!box) return;
         forgetOldHide();

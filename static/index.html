@@ -39,11 +39,11 @@
     <!-- Local Lightweight Charts v5 -->
     <link rel="stylesheet" href="/static/ads.css?v=banner5">
     <link rel="stylesheet" href="/static/terminal_chat.css?v=8">
-    <link rel="stylesheet" href="/static/workspace.css?v=dock4">
+    <link rel="stylesheet" href="/static/workspace.css?v=embed1">
     <script src="/static/lightweight-charts.js"></script>
     <script src="/static/i18n.pages.js?v=book8"></script>
     <script src="/static/i18n.js?v=levels4"></script>
-    <script src="/static/account.js?v=nav2"></script>
+    <script src="/static/account.js?v=nav3"></script>
 </head>
 <body class="dark-theme">
     <!-- 💬 Чат: общий + личные диалоги. Панель двигается и тянется за края. -->
@@ -581,12 +581,14 @@
         </div>
     </div>
 
-    <script src="/static/workspace.js?v=dock1"></script>
-    <script src="/static/app.js?v=dock3"></script>
-    <script src="/static/chart_dock.js?v=dock4"></script>
-    <script src="/static/ads.js?v=banner5"></script>
-    <script src="/static/terminal_chat.js?v=8"></script>
-    <script src="/static/presence.js?v=geo2"></script>
+    <!-- workspace.js (старый мультичарт) больше не подключается: графики
+         собирает chart_dock.js, а один WebSocket на окно раздаёт данные
+         встроенным окнам через postMessage. Файл оставлен для старых тестов. -->
+    <script src="/static/app.js?v=embed1"></script>
+    <script src="/static/chart_dock.js?v=embed1"></script>
+    <script src="/static/ads.js?v=banner6"></script>
+    <script src="/static/terminal_chat.js?v=9"></script>
+    <script src="/static/presence.js?v=geo3"></script>
 <script src="/static/consent.js?v=consent1"></script>
 <link rel="stylesheet" href="/static/brand.css?v=rebrand1">
 </body>

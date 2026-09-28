@@ -483,6 +483,8 @@
   }
 
   function init() {
+    // встроенный график (док): чат живёт в родительском окне, здесь не нужен
+    if (document.body && document.body.classList.contains("embed-mode")) return;
     const root = $("#terminal-chat");
     if (!root) return;
     const toggle = $("#tchat-toggle");

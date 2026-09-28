@@ -88,9 +88,16 @@
 
     // Встроенный сингл-чарт (iframe «добавить график» и старое окно panel):
     // пара и таймфрейм из адреса, до загрузки свечей. Обычный терминал не трогаем.
+    // В этом режиме график НЕ открывает свой WebSocket: один сокет на окно
+    // живёт в родительском терминале, а данные приходят через postMessage
+    // (мост в chart_dock.js). Иначе 6 графиков = 6 сокетов с одного браузера.
+    let IS_EMBED = false;
+    let EMBED_SLOT = "";
     try {
         const embedQ = new URLSearchParams(location.search);
-        if (embedQ.get("embed") === "1" || embedQ.get("mode") === "panel") {
+        IS_EMBED = embedQ.get("embed") === "1" || embedQ.get("mode") === "panel";
+        if (IS_EMBED) {
+            EMBED_SLOT = String(embedQ.get("slot") || "");
             const embedSym = String(embedQ.get("symbol") || "").trim().toUpperCase();
             if (/^[A-Z0-9]{2,20}_[A-Z0-9]{2,6}$/.test(embedSym)) state.chartSymbol = embedSym;
             const embedTf = Number(embedQ.get("tf"));
@@ -98,8 +105,42 @@
             document.querySelectorAll(".btn-tf").forEach((b) => {
                 b.classList.toggle("active", Number(b.dataset.tf) === state.timeframe);
             });
+            // Классы лёгкого режима: CSS прячет ленту, чат и виджеты кабинета.
+            // Раньше их ставил workspace.js; старый мультичарт больше не грузится.
+            if (document.body) {
+                document.body.classList.add("chart-embed");
+                document.body.classList.add("embed-mode");
+            }
         }
     } catch (e) { /* адрес без параметров — обычный запуск */ }
+
+    // Мост для встроенных графиков. Родительское окно держит единственный
+    // WebSocket и раздаёт данные своим iframe через postMessage; dock
+    // (chart_dock.js) подписывается сюда и пересылает кадры в свои фреймы.
+    window.LiqScopeWsBridge = window.LiqScopeWsBridge || (function () {
+        const listeners = new Set();
+        const stateListeners = new Set();
+        return {
+            lastInit: null,   // последний init: отдаём вновь загруженным iframe
+            currentState() {  // для свежесозданных iframe: «сокет жив/перезаход»
+                return { status: connState.status, key: connState.key };
+            },
+            listen(fn) {
+                if (typeof fn === "function") listeners.add(fn);
+                return () => listeners.delete(fn);
+            },
+            stateListen(fn) {
+                if (typeof fn === "function") stateListeners.add(fn);
+                return () => stateListeners.delete(fn);
+            },
+            _emit(msg) {
+                listeners.forEach((fn) => { try { fn(msg); } catch (e) { /* ignore */ } });
+            },
+            _emitState(status, key) {
+                stateListeners.forEach((fn) => { try { fn(status, key); } catch (e) { /* ignore */ } });
+            },
+        };
+    })();
 
     let connState = { status: "pulse yellow", key: "conn.connecting" };
 
@@ -1202,6 +1243,8 @@
     const ARCHIVE_HOURS = 31 * 24;
 
     async function loadHistoryFor(sym, force) {
+        // embed: лента ликвидаций живёт в родительском окне — история не нужна
+        if (IS_EMBED) return;
         // ALL тоже из архива: лента «все монеты» после F5 не должна обнуляться.
         if (!sym) sym = "ALL";
         if (!force && historyLoaded.has(sym)) return;
@@ -7179,6 +7222,8 @@
     }
 
     async function fetchStats() {
+        // embed: боксы статистики спрятаны, запросы не шлём
+        if (IS_EMBED) return;
         try {
             const q = state.symbol === "ALL" ? "" : "?symbol=" + encodeURIComponent(state.symbol);
             const r = await fetch("/api/stats" + q);
@@ -7302,6 +7347,9 @@
 
     // --- WebSocket -----------------------------------------------------------
     function sendConfig() {
+        // embed: своего сокета нет — только сообщаем родительскому доку,
+        // какая пара/таймфрейм теперь у этого графика (метки слотов)
+        if (IS_EMBED) { embedNotifySub(); return; }
         if (!ws || ws.readyState !== WebSocket.OPEN) return;
         ws.send(JSON.stringify({
             action: "sub",
@@ -7325,9 +7373,16 @@
         connState = { status: status, key: key, vars: vars };
         connStatusEl.innerHTML = '<span class="dot ' + status + '"></span> ' +
             I18n.t(key, vars);
+        // встроенные графики без своего сокета показывают состояние моста
+        try {
+            if (!IS_EMBED && window.LiqScopeWsBridge) {
+                window.LiqScopeWsBridge._emitState(status, key);
+            }
+        } catch (e) { /* ignore */ }
     }
 
     function connectWs() {
+        if (IS_EMBED) return;   // embed: данные приходят от родителя, сокет не нужен
         clearTimeout(wsReconnectTimer);
         const proto = location.protocol === "https:" ? "wss:" : "ws:";
         setConn("pulse yellow", "conn.connecting");
@@ -7345,6 +7400,12 @@
         ws.onmessage = (ev) => {
             let msg;
             try { msg = JSON.parse(ev.data); } catch (e) { return; }
+            // Мост встроенных графиков: родитель раздаёт кадры своего сокета
+            // в iframe через postMessage (один сокет на окно, см. chart_dock.js)
+            try {
+                if (msg && msg.type === "init") window.LiqScopeWsBridge.lastInit = msg;
+                window.LiqScopeWsBridge._emit(msg);
+            } catch (e) { /* ignore */ }
             handleMessage(msg);
         };
         ws.onclose = () => {
@@ -7352,6 +7413,93 @@
             wsReconnectTimer = setTimeout(connectWs, 2500);
         };
         ws.onerror = () => { try { ws.close(); } catch (e) {} };
+    }
+
+    // --- Мост для встроенных графиков (режим embed=1) -----------------------
+    // iframe не держит свой WebSocket: он слушает postMessage от родительского
+    // окна, где живёт единственный сокет терминала (мост строит chart_dock.js).
+    // Родитель шлёт кадры своего сокета; фильтр по символу/таймфрейму делает
+    // сам график — как и при чтении своего сокета.
+    let embedLastBeat = 0;
+    // Что реально нужно встроенному графику. Лента, статистика и чат остаются
+    // в родительском окне — их кадры сюда не пробрасываются и не обрабатываются.
+    const EMBED_ALLOW = { prices: 1, tick: 1, candle: 1, candles: 1 };
+
+    function onBridgeMessage(e) {
+        // только свой origin и только сообщения дока
+        if (e.origin !== location.origin) return;
+        const d = e.data;
+        if (!d || d.source !== "liqscope-dock" || d.type !== "ws-data") return;
+        const msg = d.payload;
+        if (!msg || typeof msg !== "object") return;
+        embedLastBeat = Date.now();
+        if (msg.type === "ws-state") {
+            // состояние родительского сокета: «подключено/переподключаемся»
+            if (msg.status && msg.key) setConn(String(msg.status), String(msg.key));
+            return;
+        }
+        if (!EMBED_ALLOW[msg.type]) return;
+        handleMessage(msg);
+    }
+
+    function embedNotifySub() {
+        // сообщить доку свою пару/таймфрейм (метки слотов, синхронизация)
+        try {
+            window.parent.postMessage({
+                source: "liqscope-dock",
+                type: "embed-sub",
+                slot: EMBED_SLOT,
+                symbol: chartSymbol(),
+                tf: state.timeframe,
+            }, location.origin);
+        } catch (e) { /* ignore */ }
+    }
+
+    function startEmbedBridge() {
+        window.addEventListener("message", onBridgeMessage);
+        setConn("pulse yellow", "conn.connecting");
+        embedNotifySub();   // родитель в ответ пришлёт снимок и состояние
+        // страховка индикатора: если мост молчит дольше 20с, показываем
+        // переподключение (обычно состояние приходит кадром ws-state)
+        setInterval(() => {
+            if (!embedLastBeat) return;   // ещё ни одного кадра — ждём первый
+            if (Date.now() - embedLastBeat > 20000) setConn("red", "conn.reconnecting");
+        }, 5000);
+        // Свечи своего символа график добирает сам по REST: родительский сокет
+        // подписан на свою пару, а тики чужих пар сервер адресует только их
+        // зрителям. Запрос дешёвый — сервер отдаёт кэш, а не идёт на биржу.
+        const poll = Number(window.LIQSCOPE_EMBED_KLINE_POLL_MS);
+        const every = poll > 0 ? poll : 15000;
+        setInterval(() => {
+            if (document.visibilityState === "visible") loadCandles();
+        }, every);
+    }
+
+    /** embed: живой поток цен общий для всех монет — двигаем последнюю свечу
+     *  сами, не дожидаясь REST-обновления (объём дотянет следующий опрос). */
+    function embedPriceToCandle(price) {
+        const p = Number(price);
+        if (!isFinite(p) || p <= 0) return;
+        const last = state.candles[state.candles.length - 1];
+        if (!last) return;
+        const tfSec = (Number(state.timeframe) || 5) * 60;
+        const bucket = Math.floor(Date.now() / 1000 / tfSec) * tfSec;
+        const t0 = Number(last.time);
+        if (t0 === bucket) {
+            updateCandle({
+                time: bucket, open: Number(last.open),
+                high: Math.max(Number(last.high), p),
+                low: Math.min(Number(last.low), p),
+                close: p, volume: Number(last.volume) || 0,
+            });
+        } else if (bucket > t0) {
+            const prevClose = Number(last.close);
+            updateCandle({
+                time: bucket, open: prevClose,
+                high: Math.max(prevClose, p), low: Math.min(prevClose, p),
+                close: p, volume: 0,
+            });
+        }
     }
 
     function handleMessage(msg) {
@@ -7421,6 +7569,8 @@
                 if (p) {
                     updatePriceDisplay(p);
                     try { checkDashedLevelTriggers(p); } catch(e){}
+                    // embed: своего сокета нет — последнюю свечу двигаем ценой
+                    if (IS_EMBED) { try { embedPriceToCandle(p); } catch (e) {} }
                 }
                 break;
             }
@@ -7633,7 +7783,21 @@
     });
 
     // --- Старт ---------------------------------------------------------------
+    /** Лёгкий старт встроенного графика (iframe «＋ График», старое окно
+     *  panel): только график и свечи. Без своего WebSocket (данные приходят
+     *  от родителя через postMessage), без ленты ликвидаций, книги заявок,
+     *  чата, статистики и виджетов кабинета — они остаются в родительском
+     *  окне. Иначе каждый график тянул бы свой сокет и свой набор запросов. */
+    function bootEmbed() {
+        initChart();
+        setupChartToggle();
+        setupChartExpand();
+        loadCandles();
+        startEmbedBridge();
+    }
+
     function boot() {
+        if (IS_EMBED) { bootEmbed(); return; }
         initChart();
         setupClusterInteraction();   // наведение/нажатие на шарик → подсветка в ленте
         initSplitters();             // регулируемая ширина ленты и высота «Лидеров»

@@ -813,3 +813,32 @@ body.panel-mode .panel-chart-wrap {
   flex: 1;
   height: auto;
 }
+
+/* --- Лёгкий встроенный график (режим embed=1, класс embed-mode) -------------
+   Один сокет на окно: встроенные окна не грузят чат, ленту ликвидаций,
+   стакан и виджеты кабинета — всё это остаётся в родительском терминале.
+   Существующие правила body.chart-embed уже прячут ленту и чат; здесь —
+   страховка по отдельным блокам и их алиасам. .controls-bar НЕ трогаем:
+   во «Вкладках» (chart-embed-full) панель таймфрейма должна быть видна. */
+body.embed-mode .chat-panel,
+body.embed-mode .liq-feed,
+body.embed-mode .tchat,
+body.embed-mode #terminal-chat,
+body.embed-mode #tchat-panel,
+body.embed-mode .tchat-panel,
+body.embed-mode .feed-section,
+body.embed-mode .book-board,
+body.embed-mode #book-panel,
+body.embed-mode #workspace-host,
+body.embed-mode .ad-host,
+body.embed-mode .top-nav,
+body.embed-mode .splitter,
+body.embed-mode #add-chart-btn,
+body.embed-mode #chart-tear,
+body.embed-mode #chart-tear-back {
+  display: none !important;
+}
+/* Скрытые блоки не должны оставлять пустые отступы и рамки. */
+body.embed-mode .main-layout {
+  gap: 0 !important;
+}

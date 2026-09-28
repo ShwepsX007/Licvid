@@ -59,6 +59,9 @@
 
     function start() {
         if (started) return;
+        // встроенный график (док): отметки присутствия шлёт родительское окно
+        if (global.document && global.document.body &&
+                global.document.body.classList.contains("embed-mode")) return;
         started = true;
         global.setTimeout(ping, FIRST);
         timer = global.setInterval(ping, GAP);

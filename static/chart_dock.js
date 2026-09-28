@@ -60,6 +60,15 @@
     }
 
     start() {
+      // Режим встроенного окна теперь ставится самим терминалом по адресу
+      // (старый workspace.js больше не грузится): дублируем класс, чтобы CSS
+      // спрятал лишнее даже если app.js ещё не успел его добавить.
+      try {
+        const q = new URLSearchParams(location.search);
+        if (q.get("embed") === "1" || q.get("mode") === "panel") {
+          document.body.classList.add("chart-embed");
+        }
+      } catch (e) {}
       if (document.body.classList.contains("chart-embed")) {
         this._bootEmbed();
         return;
@@ -70,6 +79,56 @@
       window.addEventListener("message", (e) => this._onMessage(e));
       if (this._needsLayout()) this.layout();
       this._syncTimer = setInterval(() => this._syncEmbedLabels(), 1500);
+      this._startWsBridge();
+    }
+
+    // --- Один WebSocket на окно ---------------------------------------------
+    // Дополнительные графики — iframe того же /terminal. Свой сокет они не
+    // открывают: родительское окно раздаёт кадры своего единственного сокета
+    // через postMessage. Итого: 1 сокет на окно при любом числе графиков.
+    _startWsBridge() {
+      if (this._wsBridgeOn) return;
+      const api = window.LiqScopeWsBridge;
+      if (!api || typeof api.listen !== "function") return;
+      this._wsBridgeOn = true;
+      // Только то, что нужно графикам. Лента/статистика/чат остаются в
+      // родительском окне и в iframe не пересылаются.
+      const ALLOW = { prices: 1, tick: 1, candle: 1, candles: 1 };
+      api.listen((msg) => {
+        if (msg && ALLOW[msg.type]) this._bridgeSendAll(msg);
+      });
+      if (typeof api.stateListen === "function") {
+        api.stateListen((status, key) => {
+          this._bridgeSendAll({ type: "ws-state", status: status, key: key });
+        });
+      }
+    }
+
+    _bridgeFrames(fn) {
+      this.order.forEach((id) => {
+        if (id === "native") return;
+        const el = this.els.get(id);
+        const frame = el && el.querySelector("iframe");
+        const win = frame && frame.contentWindow;
+        if (!win || win === window) return;
+        try { fn(win); } catch (e) { /* фрейм мог умереть — не критично */ }
+      });
+    }
+
+    _bridgeSendAll(payload) {
+      const msg = { source: "liqscope-dock", type: "ws-data", payload: payload };
+      this._bridgeFrames((win) => win.postMessage(msg, location.origin));
+    }
+
+    _bridgeSendTo(id, payload) {
+      const el = this.els.get(id);
+      const frame = el && el.querySelector("iframe");
+      const win = frame && frame.contentWindow;
+      if (!win || win === window) return;
+      try {
+        win.postMessage({ source: "liqscope-dock", type: "ws-data", payload: payload },
+                        location.origin);
+      } catch (e) { /* ignore */ }
     }
 
     _bootEmbed() {
@@ -129,6 +188,26 @@
       }
       if (data.type === "fullscreen-exit" && this._fsId && (!data.slot || data.slot === this._fsId)) {
         this.exitSlotFullscreen();
+      }
+      if (data.type === "embed-sub" && validId(data.slot)) {
+        // встроенный график сообщил свою пару/таймфрейм (старт или смена):
+        // обновляем метку слота и сразу отдаём состояние сокета родителя
+        const rec = this.meta[data.slot];
+        if (rec && rec.kind === "embed") {
+          const sym = validSymbol(data.symbol);
+          const tf = validTf(data.tf);
+          if (sym) rec.symbol = sym;
+          if (tf) rec.tf = tf;
+          const el = this.els.get(data.slot);
+          const label = el && el.querySelector(".chart-slot-title");
+          if (label) label.textContent = pretty(rec.symbol) + " · " + this._tfLabel(rec.tf);
+          this._save();
+        }
+        const bridge = window.LiqScopeWsBridge;
+        const st = bridge && bridge.currentState ? bridge.currentState() : null;
+        if (st && st.status && st.key) {
+          this._bridgeSendTo(data.slot, { type: "ws-state", status: st.status, key: st.key });
+        }
       }
     }
 

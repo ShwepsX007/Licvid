@@ -703,9 +703,29 @@ def _metrics_prune() -> None:
 
 
 def _rss_bytes() -> int:
+    """ТЕКУЩИЙ RSS процесса в байтах.
+
+    ``ru_maxrss`` — это пик за всё время жизни процесса: после прогрева
+    (восстановление истории, каталог бирж) метрика навсегда оставалась высокой,
+    даже когда память уже освободилась, и порог «RSS < 500 МБ» в
+    ``tools/load_test.py`` срабатывал на процессе, который по факту занимает
+    в разы меньше. Поэтому на Linux читаем ``VmRSS`` из ``/proc/self/status``,
+    а пик отдаём отдельным полем :func:`_rss_peak_bytes`.
+    """
+    try:
+        with open("/proc/self/status", encoding="ascii", errors="replace") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) * 1024
+    except Exception:  # noqa: BLE001 — нет /proc (macOS/Windows) или не прочитался
+        pass
+    return _rss_peak_bytes()
+
+
+def _rss_peak_bytes() -> int:
+    """Пиковый RSS с момента старта (``ru_maxrss``): Linux отдаёт КБ, macOS — байты."""
     try:
         rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        # Linux отдаёт килобайты, macOS — байты
         return int(rss) * (1 if sys.platform == "darwin" else 1024)
     except Exception:  # noqa: BLE001 — метрика не должна ронять ручку
         return 0
@@ -4719,6 +4739,7 @@ async def api_health():
         "clients": len(hub.clients),
         "ws_max_clients": WS_MAX_CLIENTS,
         "rss_bytes": _rss_bytes(),
+        "rss_peak_bytes": _rss_peak_bytes(),
         "wal_bytes": _wal_bytes(),
         "sqlite_ms": await _sqlite_ping_ms(),
         "uptime_sec": round(time.time() - _START_TS, 1),
@@ -4804,6 +4825,7 @@ async def api_metrics():
         "candles_cache_cap": _cstats["cap"],
         "fast_json": FAST_JSON,
         "rss_bytes": _rss_bytes(),
+        "rss_peak_bytes": _rss_peak_bytes(),
         "uptime_sec": round(time.time() - _START_TS, 1),
     })
 

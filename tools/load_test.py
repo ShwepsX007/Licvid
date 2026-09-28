@@ -13,11 +13,28 @@
 
 ВАЖНО: тест с одного IP похож на флуд, поэтому собственное ограничение
 сервера (RateLimitMiddleware: 5 WS/минуту, 60 мутирующих POST/10 минут)
-его придушит. На время прогона выключайте лимит на стенде::
+его придушит. На время прогона выключайте лимит **в окружении сервера**
+(не в команде запуска этого скрипта — он-то и есть клиент)::
 
-    LIQSCOPE_RATE_LIMIT=0  # в окружении тестируемого сервера
+    sudo systemctl edit licvid        # [Service] + Environment=LIQSCOPE_RATE_LIMIT=0
+    sudo systemctl daemon-reload && sudo systemctl restart licvid
+    # …прогон… затем убрать строку и снова restart
 
 GET /api/stats под лимит не попадает, душить будет только WS-коннекты.
+
+Ещё две вещи, которые легко принять за деградацию:
+
+* ``--url http://127.0.0.1:8000`` бьёт **мимо nginx**, то есть мимо микрокэша
+  (``/api/stats`` кэшируется на 5 с, и в бою в приложение уходит ~0.2 rps
+  вместо 100). Это замер худшего случая; картину боя даёт
+  ``--url https://ваш-домен``.
+* Прогон сразу после ``systemctl restart licvid`` меряет прогрев, а не
+  установившийся режим: ~20 с единственный воркер занят каталогом бирж,
+  подписками и восстановлением истории, поэтому p95 будет секундами.
+  Подождите 2-3 минуты (``curl -sf localhost:8000/api/health`` + пауза).
+
+RSS в ``/api/metrics`` — текущий (``VmRSS``), а пик с момента старта лежит
+в ``rss_peak_bytes``: порог 500 МБ проверяется по текущему.
 """
 from __future__ import annotations
 
@@ -138,6 +155,9 @@ async def main() -> int:
 
     print(f"стенд: {url} | WS: {args.ws} | HTTP: {args.rps} rps x "
           f"{args.seconds}с к /api/stats")
+    if "127.0.0.1" in url or "localhost" in url:
+        print("  (замер мимо nginx: микрокэш API_CACHE не участвует — это "
+              "худший случай; картина боя — --url https://ваш-домен)")
     async with aiohttp.ClientSession() as session:
         before = await fetch_metrics(session, url)
     rss0 = (before.get("rss_bytes") or 0) / 1024 / 1024
@@ -179,8 +199,9 @@ async def main() -> int:
           f"p50 {p50:.1f} мс, p95 {p95:.1f} мс, max {mx:.1f} мс")
     if errors[:8]:
         print(f"  примеры ошибок: {errors[:8]}")
-    print(f"RSS: {rss0:.1f} -> {rss1:.1f} МБ "
-          f"(метрика сервера: {after.get('rss_bytes', '?')} байт)")
+    peak1 = (after.get("rss_peak_bytes") or 0) / 1024 / 1024
+    print(f"RSS: {rss0:.1f} -> {rss1:.1f} МБ (текущий; пик с момента старта "
+          f"{peak1:.1f} МБ)")
     print(f"сервер: ws {after.get('ws_clients_total', '?')} клиентов, "
           f"{after.get('ws_messages_per_sec', '?')} сообщ/с, "
           f"{after.get('http_requests_per_sec', '?')} запр/с, "
@@ -188,8 +209,9 @@ async def main() -> int:
 
     fails = []
     if stats["denied"]:
-        fails.append(f"отклонено WS: {stats['denied']} "
-                     "(выключите LIQSCOPE_RATE_LIMIT=0 на стенде и повторите)")
+        fails.append(f"отклонено WS: {stats['denied']} — лимит включён НА СЕРВЕРЕ: "
+                     "sudo systemctl edit licvid → Environment=LIQSCOPE_RATE_LIMIT=0, "
+                     "daemon-reload + restart, затем повторить (после прогона убрать)")
     if stats["drops"] > TARGET_DROPS:
         fails.append(f"обрывы WS: {stats['drops']}")
     if p95 >= TARGET_P95_MS:

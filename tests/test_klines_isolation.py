@@ -91,7 +91,9 @@ class FakeViewer:
     def chart_symbol(self) -> str:
         return self.chart
 
-    async def send(self, msg: dict) -> bool:
+    async def send(self, msg: dict, text=None) -> bool:
+        # сигнатура как у server.Client: рассылка отдаёт готовый кадр текстом
+        # (сериализация одна на всех), а двойник проверяет сам payload
         self.sent.append(msg)
         return True
 

@@ -43,6 +43,7 @@ import asyncio
 import statistics
 import sys
 import time
+from typing import Optional
 
 try:
     import aiohttp
@@ -50,6 +51,7 @@ except ImportError:
     sys.exit("нужен aiohttp: pip install aiohttp (есть в requirements.txt)")
 
 TARGET_P95_MS = 200.0
+SLOW_MS = 500.0          # что считаем «залипшим» запросом для разбора пауз воркера
 TARGET_DROPS = 0
 TARGET_RSS_MB = 500.0
 
@@ -107,7 +109,8 @@ async def ws_client(idx: int, url: str, stop_at: float, stats: dict) -> None:
 
 
 async def http_flood(session: aiohttp.ClientSession, url: str, rps: int,
-                     stop_at: float, lat: list, errors: list) -> None:
+                     stop_at: float, lat: list, errors: list,
+                     slow: Optional[list] = None, t_start: float = 0.0) -> None:
     """Планировщик: держит заданный RPS своими задачами."""
     interval = 1.0 / max(1, rps)
     pending: set = set()
@@ -119,9 +122,16 @@ async def http_flood(session: aiohttp.ClientSession, url: str, rps: int,
                     url + "/api/stats",
                     timeout=aiohttp.ClientTimeout(total=15)) as r:
                 await r.read()
-                lat.append((time.perf_counter() - t0) * 1000.0)
+                ms = (time.perf_counter() - t0) * 1000.0
+                lat.append(ms)
                 if r.status != 200:
                     errors.append(r.status)
+                # Медленные запросы — с отметкой времени от старта прогона:
+                # если они приходят пачками раз в N секунд, воркер чем-то
+                # занят периодически (рассылка кадра, прогрев свечей, диск),
+                # а не «просто медленный».
+                if slow is not None and ms >= SLOW_MS:
+                    slow.append((round(t0 - t_start, 1), round(ms, 1)))
         except Exception as e:  # noqa: BLE001
             errors.append(type(e).__name__)
 
@@ -169,15 +179,21 @@ async def main() -> int:
              "denied": 0, "clean": 0}
     lat: list = []
     errors: list = []
+    slow: list = []          # (секунда от старта, латентность мс) — залипшие запросы
 
     ws_tasks = [asyncio.ensure_future(ws_client(i, url, stop_at, stats))
                 for i in range(args.ws)]
     # коннектам даём 10 с форы, затем — HTTP-нагрузка поверх живых сокетов
     await asyncio.sleep(min(10, args.seconds / 6))
+    t_start = time.perf_counter()
     async with aiohttp.ClientSession(
             connector=aiohttp.TCPConnector(limit=0)) as session:
-        await http_flood(session, url, args.rps, stop_at, lat, errors)
-    await asyncio.wait(ws_tasks, timeout=30)
+        await http_flood(session, url, args.rps, stop_at, lat, errors,
+                         slow=slow, t_start=t_start)
+    # --ws 0 (замер чистого HTTP-пути через nginx) — задач нет, wait() с пустым
+    # набором бросал ValueError: Set of coroutines/Futures is empty
+    if ws_tasks:
+        await asyncio.wait(ws_tasks, timeout=30)
 
     async with aiohttp.ClientSession() as session:
         after = await fetch_metrics(session, url)
@@ -206,6 +222,32 @@ async def main() -> int:
           f"{after.get('ws_messages_per_sec', '?')} сообщ/с, "
           f"{after.get('http_requests_per_sec', '?')} запр/с, "
           f"p95 {after.get('http_latency_p95_ms', '?')} мс")
+
+    lag = after.get("loop_lag_max_ms")
+    if lag is not None:
+        print(f"паузы воркера: максимум {float(lag):.0f} мс, последняя "
+              f"{float(after.get('loop_lag_last_ms') or 0):.0f} мс, всего "
+              f"{int(after.get('loop_stalls') or 0)} пауз выше порога")
+        srv_p95 = after.get("http_latency_p95_ms")
+        if p95 >= 200 and srv_p95 is not None and p95 > 5 * float(srv_p95):
+            print(f"  -> разрыв клиент/сервер: обработчик p95 {float(srv_p95):.1f} мс, "
+                  f"а снаружи {p95:.0f} мс. Запросы СТОЯЛИ В ОЧЕРЕДИ event loop, "
+                  "пока единственный воркер был занят (рассылка кадра, разбор "
+                  "пачки свечей, диск). Моменты пауз — в journalctl рядом с [loop].")
+    if slow:
+        print(f"\nзалипшие запросы (> {SLOW_MS:.0f} мс): {len(slow)} шт. "
+              f"из {len(lat)}")
+        for off, ms in slow[:12]:
+            print(f"  +{off:>6.1f} с   {ms:>8.0f} мс")
+        if len(slow) > 12:
+            print(f"  … и ещё {len(slow) - 12}")
+        offs = [o for o, _ in slow]
+        gaps = sorted(round(b - a, 1) for a, b in zip(offs, offs[1:]))
+        if len(gaps) >= 2:
+            print(f"  интервалы между залипаниями: медиана "
+                  f"{gaps[len(gaps) // 2]:.1f} с, мин {gaps[0]:.1f} с — ровная "
+                  "периодичность указывает на фоновую задачу (15 с — прогрев "
+                  "свечей kline_refresher), рваная — на очередь под нагрузкой")
 
     fails = []
     if stats["denied"]:

@@ -532,6 +532,24 @@ class Client:
         self.exchange = "ALL"
         self.feed = "liq"        # лента клиента: liq | cvd | oi
         self.alive = True
+        # Очередь исходящих кадров: рассылка кладёт готовый кадр и уходит, а
+        # в сокет его пишет отдельная задача клиента. Забитый TCP-буфер одного
+        # зрителя больше не держит event loop (а с ним и все HTTP-запросы)
+        # секундами — см. _pump().
+        self.out: Deque[str] = deque()
+        self.out_bytes = 0
+        self.dropped_frames = 0
+        self._sending = False       # кадр уже вынут из очереди и идёт в сокет
+        self._out_wake: Optional[asyncio.Event] = None
+        self._pump_task: Optional[asyncio.Task] = None
+        self._pump_loop = None
+
+    # Капля медленного зрителя: столько кадров/байт он может накопить, пока
+    # его писатель борется с сетью. Превысили — клиент безнадёжно отстал и
+    # выкидывается (фронт переподключится и пересинхронизируется), иначе
+    # очередь съела бы память воркера.
+    OUT_MAX_FRAMES = 200
+    OUT_MAX_BYTES = 512 * 1024
 
     @property
     def wants_flow(self) -> bool:
@@ -554,17 +572,25 @@ class Client:
             return False
         return True
 
-    async def send(self, msg: dict) -> bool:
+    async def send(self, msg: dict, text: Optional[str] = None) -> bool:
+        """Отдать кадр клиенту. ``text`` — уже сериализованный кадр.
+
+        Сериализуем сами и отдаём текстом: ws.send_json внутри зовёт
+        json.dumps, а рассылка ликвидаций/свечей/статистики — самая
+        частая сериализация процесса (orjson быстрее в разы). При
+        широковещании ``Hub.broadcast`` сериализует кадр ОДИН раз и передаёт
+        сюда готовый текст: 50 зрителей не должны платить 50 сериализаций
+        одной и той же пачки свечей на единственном воркере.
+
+        Медленный/зависший клиент не должен подвешивать читателей
+        биржевых сокетов: send внутри ждёт drain() без лимита, а
+        TCP-буфер забитого клиента может не освобождаться минутами.
+        Всё, что ушло в транспорт до таймаута, остаётся валидным кадром,
+        так что отмена безопасна. Застряли — клиент мёртв, выкидываем.
+        """
         try:
-            # Сериализуем сами и отдаём текстом: ws.send_json внутри зовёт
-            # json.dumps, а рассылка ликвидаций/свечей/статистики — самая
-            # частая сериализация процесса (orjson быстрее в разы).
-            # Медленный/зависший клиент не должен подвешивать читателей
-            # биржевых сокетов: send внутри ждёт drain() без лимита, а
-            # TCP-буфер забитого клиента может не освобождаться минутами.
-            # Всё, что ушло в транспорт до таймаута, остаётся валидным кадром,
-            # так что отмена безопасна. Застряли — клиент мёртв, выкидываем.
-            await asyncio.wait_for(self.ws.send_text(json_dumps_text(msg)),
+            frame = text if text is not None else json_dumps_text(msg)
+            await asyncio.wait_for(self.ws.send_text(frame),
                                    timeout=self.SEND_TIMEOUT)
             _metrics_ws_send()
             return True
@@ -574,6 +600,106 @@ class Client:
 
     # см. send(): заведомо больше любого нормального сетевого хода
     SEND_TIMEOUT = 5.0
+
+    # --- очередь исходящих кадров -------------------------------------------
+    def _wake(self) -> asyncio.Event:
+        if self._out_wake is None:
+            self._out_wake = asyncio.Event()
+        return self._out_wake
+
+    def offer(self, frame: str) -> bool:
+        """Положить готовый кадр в очередь клиента, не ожидая сокет.
+
+        Возвращает False, если клиент мёртв или безнадёжно отстал: вызывающий
+        (``Hub.broadcast``) выкинет его из хаба. Именно это убирает хвост
+        p95 в секундах: раньше рассылка стояла в ``await send_text`` на
+        каждом зрителе по очереди, и один забитый TCP-буфер держал event loop
+        до ``SEND_TIMEOUT`` — всё это время HTTP-запросы просто ждали в
+        очереди цикла.
+        """
+        if not self.alive:
+            return False
+        if len(self.out) >= self.OUT_MAX_FRAMES or \
+                self.out_bytes + len(frame) > self.OUT_MAX_BYTES:
+            self.dropped_frames += len(self.out)
+            self.out.clear()
+            self.out_bytes = 0
+            self.alive = False
+            log.warning("WS-клиент отстал: очередь исходящих переполнена "
+                        "(>%d кадров или %d КБ) — отключаем, фронт "
+                        "переподключится", self.OUT_MAX_FRAMES,
+                        self.OUT_MAX_BYTES // 1024)
+            return False
+        self.out.append(frame)
+        self.out_bytes += len(frame)
+        self._wake().set()
+        return True
+
+    async def _pump(self) -> None:
+        """Единственный писатель очереди: порядок кадров у клиента сохранён."""
+        wake = self._wake()
+        while self.alive:
+            if not self.out:
+                wake.clear()
+                if not self.out:            # кадр положили между проверкой и clear()
+                    try:
+                        await wake.wait()
+                    except asyncio.CancelledError:
+                        return
+                    continue
+            frame = self.out.popleft()
+            self.out_bytes -= len(frame)
+            self._sending = True
+            try:
+                await asyncio.wait_for(self.ws.send_text(frame),
+                                       timeout=self.SEND_TIMEOUT)
+                _metrics_ws_send()
+            except asyncio.CancelledError:
+                self.out.appendleft(frame)
+                self.out_bytes += len(frame)
+                raise
+            except Exception as e:          # noqa: BLE001
+                self.dropped_frames += len(self.out) + 1
+                self.out.clear()
+                self.out_bytes = 0
+                self.alive = False
+                log.debug("ws pump: сокет умер (%s), недоставлено %d кадров",
+                          e, self.dropped_frames)
+                return
+            finally:
+                self._sending = False
+
+    def start_pump(self) -> None:
+        """Завести писателя очереди (идемпотентно, в текущем event loop)."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:                # вне цикла (тесты-двойники) — нечего заводить
+            return
+        if self._pump_loop is not loop:
+            # Event и задача принадлежали прежнему циклу: сбрасываем оба
+            self._pump_loop = loop
+            self._out_wake = None
+            self._pump_task = None
+        if self._pump_task is None or self._pump_task.done():
+            self._pump_task = loop.create_task(self._pump(), name="ws-pump")
+
+    async def stop_pump(self) -> None:
+        t, self._pump_task = self._pump_task, None
+        if t is not None and not t.done():
+            t.cancel()
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:          # noqa: BLE001
+                log.debug("ws pump stop: %s", e)
+
+    async def flush(self, timeout: float = 2.0) -> bool:
+        """Дождаться, пока очередь уйдёт в сокет (тесты, аккуратное закрытие)."""
+        end = time.monotonic() + timeout
+        while (self.out or self._sending) and self.alive and time.monotonic() < end:
+            await asyncio.sleep(0.005)
+        return not self.out and not self._sending
 
 
 # Потолок живых WS: каждый клиент получает широковещание, флуд соединениями
@@ -593,10 +719,14 @@ class Hub:
                             len(self.clients), WS_MAX_CLIENTS)
                 return False
             self.clients.add(c)
+        start = getattr(c, "start_pump", None)
+        if callable(start):
+            start()             # писатель очереди исходящих кадров
         log.info("Клиент подключился. Всего: %d", len(self.clients))
         return True
 
     async def remove(self, c: Client):
+        await self._stop_writer(c)
         async with self._lock:
             self.clients.discard(c)
         log.info("Клиент отключился. Всего: %d", len(self.clients))
@@ -604,16 +734,56 @@ class Hub:
     async def broadcast(self, msg: dict, predicate=None):
         async with self._lock:
             targets = list(self.clients)
+        if predicate is not None:
+            targets = [c for c in targets if predicate(c)]
+        if not targets:
+            return
+        # Кадр сериализуется ОДИН раз на всех получателей: рассылка свечей и
+        # статистики — десятки килобайт, и при 50 зрителях прежняя схема
+        # (json.dumps внутри send каждого клиента) жгла 50× того же CPU на
+        # единственном воркере.
+        frame = json_dumps_text(msg)
         dead = []
         for c in targets:
-            if predicate and not predicate(c):
-                continue
-            if not await c.send(msg):
+            if not await self._deliver(c, msg, frame):
                 dead.append(c)
         if dead:
             async with self._lock:
                 for c in dead:
                     self.clients.discard(c)
+            for c in dead:
+                await self._stop_writer(c)
+
+    @staticmethod
+    async def _stop_writer(c) -> None:
+        """Остановить писателя очереди, если он у клиента есть."""
+        stop = getattr(c, "stop_pump", None)
+        if callable(stop):
+            try:
+                await stop()
+            except Exception as e:               # noqa: BLE001
+                log.debug("hub: писатель очереди не остановился: %s", e)
+
+    async def _deliver(self, c, msg: dict, frame: str) -> bool:
+        """Положить кадр клиенту: в его очередь, а не в await на весь фан-аут.
+
+        Порядок кадров у каждого зрителя сохраняет его собственный писатель
+        (``Client._pump``), поэтому рассылка не обязана ждать сокет: медленный
+        клиент копит кадры у себя и отключается по переполнению очереди, а не
+        держит воркер (и всех остальных) до таймаута отправки.
+        """
+        try:
+            offer = getattr(c, "offer", None)
+            if callable(offer):
+                c.start_pump()
+                return bool(offer(frame))
+            # двойники в тестах без очереди — прежняя адресная отправка
+            return bool(await c.send(msg, text=frame))
+        except Exception as e:                   # noqa: BLE001
+            # один сломанный сокет не должен обрывать рассылку остальным:
+            # на единственном воркере это минус свечи/ликвидации у всех
+            log.debug("broadcast: отправка клиенту упала: %s", e)
+            return False
 
     def viewed_pairs(self) -> Set[tuple]:
         return {(c.chart_symbol, c.tf) for c in self.clients}
@@ -689,6 +859,30 @@ def _latency_p95_ms() -> Optional[float]:
     return round(samples[idx] * 1000.0, 1)
 
 
+def _ws_queue_stats(clients=None) -> Dict[str, int]:
+    """Глубина очередей исходящих WS-кадров.
+
+    Если кадры копятся — зрители не успевают читать, и раньше это означало бы
+    паузы воркера на всю рассылку; теперь очередь локальна для клиента, а
+    метрика показывает, кто именно отстаёт (``ws_slow_clients`` — те, у кого в
+    очереди больше 10 кадров).
+    """
+    frames = 0
+    nbytes = 0
+    worst = 0
+    slow = 0
+    for c in list(hub.clients if clients is None else clients):
+        n = len(getattr(c, "out", ()) or ())
+        frames += n
+        nbytes += int(getattr(c, "out_bytes", 0) or 0)
+        if n > worst:
+            worst = n
+        if n > 10:
+            slow += 1
+    return {"ws_send_queue_frames": frames, "ws_send_queue_bytes": nbytes,
+            "ws_send_queue_worst_frames": worst, "ws_slow_clients": slow}
+
+
 def _metrics_prune() -> None:
     cutoff = int(time.time()) - _METRICS_KEEP_SEC
     with _METRICS_LOCK:
@@ -700,6 +894,48 @@ def _metrics_prune() -> None:
             _WS_CONN.pop(old, None)
         for old in [k for k in _WS_SEND if k < cutoff]:
             _WS_SEND.pop(old, None)
+
+
+# Паузы event loop. Единственный воркер обязан крутиться без остановок: если
+# клиент видит p95 в секундах, а серверная метрика обработчика — 6 мс, значит
+# запросы стоят в очереди цикла, пока кто-то держит его занятым (рассылка
+# кадра медленному клиенту, разбор большой пачки свечей, синхронный диск).
+# Сторож меряет фактическую задержку тика и пишет в лог всё, что заметно
+# длиннее порога, — по времени в журнале видно, рядом с чем встало.
+_LOOP_LAG: Dict[str, float] = {"max_ms": 0.0, "at": 0.0, "stalls": 0.0,
+                               "last_ms": 0.0, "logged_at": 0.0}
+LOOP_LAG_TICK = 0.2
+LOOP_LAG_WARN_MS = max(50.0, float(os.getenv("LIQSCOPE_LOOP_LAG_MS", "500")))
+LOOP_LAG_LOG_GAP = 5.0
+
+
+async def loop_lag_watchdog():
+    """Меряет паузы event loop и шумит, когда воркер надолго занят."""
+    while True:
+        try:
+            t0 = time.monotonic()
+            await asyncio.sleep(LOOP_LAG_TICK)
+            lag_ms = max(0.0, (time.monotonic() - t0 - LOOP_LAG_TICK) * 1000.0)
+            _LOOP_LAG["last_ms"] = round(lag_ms, 1)
+            if lag_ms > _LOOP_LAG["max_ms"]:
+                _LOOP_LAG["max_ms"] = round(lag_ms, 1)
+                _LOOP_LAG["at"] = time.time()
+            if lag_ms >= LOOP_LAG_WARN_MS:
+                _LOOP_LAG["stalls"] += 1
+                now = time.monotonic()
+                # не чаще раза в 5 с: на сильном лаге лог не должен тонуть
+                if now - _LOOP_LAG["logged_at"] >= LOOP_LAG_LOG_GAP:
+                    _LOOP_LAG["logged_at"] = now
+                    log.warning("[loop] воркер был занят %.0f мс (порог %.0f мс); "
+                                "пауз таких %d, максимум %.0f мс — клиенты в это "
+                                "время стоят в очереди, а не обрабатываются",
+                                lag_ms, LOOP_LAG_WARN_MS, int(_LOOP_LAG["stalls"]),
+                                _LOOP_LAG["max_ms"])
+        except asyncio.CancelledError:
+            break
+        except Exception as e:                       # noqa: BLE001
+            log.debug("сторож пауз цикла: %s", e)
+            await asyncio.sleep(1)
 
 
 def _rss_bytes() -> int:
@@ -3390,6 +3626,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(price_broadcaster(), name="price-broadcast"),
         asyncio.create_task(stats_broadcaster(), name="stats-broadcast"),
         asyncio.create_task(kline_refresher(), name="kline-refresh"),
+        asyncio.create_task(loop_lag_watchdog(), name="loop-lag"),
         asyncio.create_task(hot_symbols_watcher(), name="hot-symbols"),
         asyncio.create_task(liq_levels_task(), name="liq-levels"),
         asyncio.create_task(alert_loop(), name="alerts"),
@@ -4740,6 +4977,12 @@ async def api_health():
         "ws_max_clients": WS_MAX_CLIENTS,
         "rss_bytes": _rss_bytes(),
         "rss_peak_bytes": _rss_peak_bytes(),
+        # паузы единственного воркера: если клиентский p95 в секундах,
+        # а серверный p95 обработчика единицы мс — запросы стояли в
+        # очереди цикла, пока кто-то держал его занятым
+        "loop_lag_max_ms": _LOOP_LAG["max_ms"],
+        "loop_lag_last_ms": _LOOP_LAG["last_ms"],
+        "loop_stalls": int(_LOOP_LAG["stalls"]),
         "wal_bytes": _wal_bytes(),
         "sqlite_ms": await _sqlite_ping_ms(),
         "uptime_sec": round(time.time() - _START_TS, 1),
@@ -4809,6 +5052,7 @@ async def api_metrics():
         "ws_max_clients": WS_MAX_CLIENTS,
         "ws_connects_per_sec": _rate_last_minute(_WS_CONN),
         "ws_messages_per_sec": _rate_last_minute(_WS_SEND),
+        **_ws_queue_stats(),
         "http_requests_per_sec": _rate_last_minute(_HTTP_RPS),
         "http_requests_per_sec_by_status": _status_rps_last_minute(),
         "http_latency_p95_ms": _latency_p95_ms(),
@@ -4826,6 +5070,12 @@ async def api_metrics():
         "fast_json": FAST_JSON,
         "rss_bytes": _rss_bytes(),
         "rss_peak_bytes": _rss_peak_bytes(),
+        # паузы единственного воркера: если клиентский p95 в секундах,
+        # а серверный p95 обработчика единицы мс — запросы стояли в
+        # очереди цикла, пока кто-то держал его занятым
+        "loop_lag_max_ms": _LOOP_LAG["max_ms"],
+        "loop_lag_last_ms": _LOOP_LAG["last_ms"],
+        "loop_stalls": int(_LOOP_LAG["stalls"]),
         "uptime_sec": round(time.time() - _START_TS, 1),
     })
 

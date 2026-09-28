@@ -24,6 +24,7 @@ from fastapi import APIRouter, Body, Request
 from fastapi.responses import FileResponse, JSONResponse
 
 import seo_pages
+import web_cache
 from daily_digest import (DAY_SEC, DEFAULT_KEEP, NARRATIVE_MIN, DigestStore, brief,
                           collect_day, day_key, day_label, fallback_narrative,
                           render_article, render_post)
@@ -77,6 +78,18 @@ class Ctx:
 
 
 ctx = Ctx()
+
+# Архив читают все гости, а пишется он раз в сутки: 30 секунд памяти снимают
+# повторные чтения файла. В тестах кэш выключен (LIQSCOPE_API_CACHE=0),
+# после публикации сбрасываем вручную (см. publish_digest).
+_LIST_CACHE = web_cache.TTLCache(ttl=30.0, maxsize=32)
+_TODAY_CACHE = web_cache.TTLCache(ttl=30.0, maxsize=16)
+_PUBLIC_CACHE = {"Cache-Control": "public, max-age=60"}
+
+
+def invalidate_list_caches() -> None:
+    _LIST_CACHE.invalidate()
+    _TODAY_CACHE.invalidate()
 
 
 # ---------------------------------------------------------------------------
@@ -919,6 +932,7 @@ async def publish_digest(now: Optional[float] = None, langs=("ru", "en"),
                          publish: bool = True) -> Optional[dict]:
     """Собрать выпуск и опубликовать его в каналах (если есть чем)."""
     rec = await build_digest(now=now, window=window, save=True, ai=True)
+    invalidate_list_caches()   # свежий выпуск — сразу в ленту, без 30с задержки
     facts = rec.get("facts") or {}
     log.info("Дайджест за %s собран (%s): %s ликвидаций на %s",
              rec.get("day"), reason, facts.get("liq_count"),
@@ -1004,9 +1018,17 @@ def register_digest_routes(app) -> None:
         календарь: по нему видно, за какие даты выпуск есть, и можно открыть
         любой старый, не заваливая страницу списком.
         """
+        try:
+            lim = max(1, min(100, int(limit)))
+        except (TypeError, ValueError):
+            lim = 12
+        key = (str(lang), lim)
+        hit = _LIST_CACHE.get(key)
+        if hit is not None:
+            return JSONResponse(hit, headers=_PUBLIC_CACHE)
         all_recs = digest_records()
-        items = [public_record(r, lang) for r in all_recs[:max(1, limit)]]
-        return {
+        items = [public_record(r, lang) for r in all_recs[:lim]]
+        payload = {
             "ok": True,
             "items": items,
             "days": [day_index(r, lang) for r in all_recs],
@@ -1017,13 +1039,23 @@ def register_digest_routes(app) -> None:
             "schedule": {"hour": 22, "minute": 0, "jitter_min": 10,
                          "tz_hours": round(tz_offset() / 3600.0, 2)},
         }
+        _LIST_CACHE.set(key, payload)
+        return JSONResponse(payload, headers=_PUBLIC_CACHE)
 
     @router.get("/api/digest/today")
     async def api_today(lang: str = seo_pages.DEFAULT_LANG):
+        key = str(lang)
+        hit = _TODAY_CACHE.get(key)
+        if hit is not None:
+            return JSONResponse(hit, headers=_PUBLIC_CACHE)
         items = digest_records()
         if not items:
-            return {"ok": True, "item": None}
-        return {"ok": True, "item": public_record(items[0], lang, with_article=True)}
+            payload = {"ok": True, "item": None}
+        else:
+            payload = {"ok": True,
+                       "item": public_record(items[0], lang, with_article=True)}
+        _TODAY_CACHE.set(key, payload)
+        return JSONResponse(payload, headers=_PUBLIC_CACHE)
 
     @router.get("/api/digest/cover")
     async def api_cover(day: str = ""):
@@ -1063,7 +1095,8 @@ def register_digest_routes(app) -> None:
             rec = archive_day(day)
         if rec is None:
             return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
-        return {"ok": True, "item": public_record(rec, lang, with_article=True)}
+        return JSONResponse({"ok": True, "item": public_record(rec, lang, with_article=True)},
+                            headers=_PUBLIC_CACHE)
 
     @router.post("/api/digest/settings")
     async def api_settings(request: Request,

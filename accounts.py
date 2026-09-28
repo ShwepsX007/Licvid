@@ -324,7 +324,20 @@ class Store:
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=NORMAL")
+        # WAL не растёт бесконечно: при превышении 64 МБ SQLite сам
+        # запускает чекпойнт. Страховка поверх фонового TRUNCATE.
+        self._db.execute("PRAGMA journal_size_limit=67108864")
         self._init_schema()
+
+    def ping(self) -> float:
+        """Отклик базы в миллисекундах (-1 при ошибке). Для /api/health."""
+        t0 = time.perf_counter()
+        with self._lock:
+            try:
+                self._db.execute("SELECT 1").fetchone()
+            except sqlite3.Error:
+                return -1.0
+        return round((time.perf_counter() - t0) * 1000.0, 2)
 
     def close(self) -> None:
         with self._lock:

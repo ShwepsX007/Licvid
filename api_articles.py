@@ -745,12 +745,15 @@ def register_article_routes(app) -> None:
             lim = max(1, min(100, int(limit)))
         except (TypeError, ValueError):
             lim = 24
-        return {"ok": True,
-                "items": [index_row(r, lang) for r in items[:lim]],
-                "count": len(items),
-                "stats": ctx.store.stats(),
-                "now": _now(),
-                "tz_hours": round(tz_offset() / 3600.0, 2)}
+        # Список публичный и меняется редко: браузер держит минуту.
+        # Серверный кэш не кладём — у статей десяток точек записи.
+        return JSONResponse({"ok": True,
+                             "items": [index_row(r, lang) for r in items[:lim]],
+                             "count": len(items),
+                             "stats": ctx.store.stats(),
+                             "now": _now(),
+                             "tz_hours": round(tz_offset() / 3600.0, 2)},
+                            headers={"Cache-Control": "public, max-age=60"})
 
     @router.get("/api/articles/photo/{slug}")
     async def api_photo(slug: str, request: Request):
@@ -773,7 +776,8 @@ def register_article_routes(app) -> None:
         rec = ctx.store.get(slug)
         if rec is None or not _visible(rec, request):
             return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
-        return {"ok": True, "item": public_article(rec, lang), "now": _now()}
+        return JSONResponse({"ok": True, "item": public_article(rec, lang), "now": _now()},
+                            headers={"Cache-Control": "public, max-age=60"})
 
     # --- админка ------------------------------------------------------------
     @router.get("/api/admin/articles")

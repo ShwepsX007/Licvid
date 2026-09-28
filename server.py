@@ -42,7 +42,12 @@ import logging
 import math
 import os
 import random
+try:
+    import resource  # Unix: RSS процесса для /api/metrics
+except ImportError:  # Windows: модуля нет — метрика отдаст 0
+    resource = None  # type: ignore
 import secrets
+import sys
 import threading
 import time
 from collections import deque
@@ -102,6 +107,7 @@ import web_layers
 from web_liq_levels import register_liq_level_routes
 import terminal_chat as terminal_chat_mod
 from terminal_chat import register_chat_routes as register_terminal_chat_routes
+import web_cache
 import private_chat as private_chat_mod
 from private_chat import register_private_chat_routes
 import support_chat as support_chat_mod
@@ -529,6 +535,7 @@ class Client:
             # так что отмена безопасна. Застряли — клиент мёртв, выкидываем.
             await asyncio.wait_for(self.ws.send_json(msg),
                                    timeout=self.SEND_TIMEOUT)
+            _metrics_ws_send()
             return True
         except Exception:
             self.alive = False
@@ -582,6 +589,112 @@ class Hub:
 
 
 hub = Hub()
+
+
+# =============================================================================
+#  Метрики процесса (для /api/metrics и внешней проверки)
+# =============================================================================
+# Счётчики по секундным корзинам: O(1) на запрос, память ограничена окном
+# истории. Окно чтения — последние 60 секунд; корзины старше двух минут
+# подчищаем при чтении, чтобы словари не росли.
+_METRICS_KEEP_SEC = 120
+_METRICS_WIN_SEC = 60
+_HTTP_RPS: Dict[int, int] = {}          # секунда -> HTTP-запросов
+_HTTP_STATUS: Dict[tuple, int] = {}     # (секунда, статус) -> запросов
+_HTTP_LAT = deque(maxlen=5000)          # последние задержки HTTP (сек)
+_WS_CONN: Dict[int, int] = {}           # секунда -> новых WS-подключений
+_WS_SEND: Dict[int, int] = {}           # секунда -> сообщений клиентам
+_METRICS_LOCK = threading.Lock()
+_START_TS = time.time()
+
+
+def _metrics_bump(bucket: Dict, key, amount: int = 1) -> None:
+    with _METRICS_LOCK:
+        bucket[key] = bucket.get(key, 0) + amount
+
+
+def _metrics_http(status: int, latency_sec: float) -> None:
+    now = int(time.time())
+    with _METRICS_LOCK:
+        _HTTP_RPS[now] = _HTTP_RPS.get(now, 0) + 1
+        skey = (now, int(status))
+        _HTTP_STATUS[skey] = _HTTP_STATUS.get(skey, 0) + 1
+        _HTTP_LAT.append(max(0.0, float(latency_sec)))
+
+
+def _metrics_ws_connect() -> None:
+    _metrics_bump(_WS_CONN, int(time.time()))
+
+
+def _metrics_ws_send() -> None:
+    _metrics_bump(_WS_SEND, int(time.time()))
+
+
+def _rate_last_minute(bucket: Dict) -> float:
+    cutoff = int(time.time()) - _METRICS_WIN_SEC
+    with _METRICS_LOCK:
+        total = sum(v for k, v in bucket.items()
+                    if isinstance(k, int) and k > cutoff)
+    return round(total / _METRICS_WIN_SEC, 2)
+
+
+def _status_rps_last_minute() -> Dict[str, float]:
+    cutoff = int(time.time()) - _METRICS_WIN_SEC
+    agg: Dict[str, int] = {}
+    with _METRICS_LOCK:
+        for (sec, status), cnt in _HTTP_STATUS.items():
+            if sec > cutoff:
+                key = str(status)
+                agg[key] = agg.get(key, 0) + cnt
+    return {k: round(v / _METRICS_WIN_SEC, 2) for k, v in sorted(agg.items())}
+
+
+def _latency_p95_ms() -> Optional[float]:
+    with _METRICS_LOCK:
+        samples = sorted(_HTTP_LAT)
+    if not samples:
+        return None
+    idx = min(len(samples) - 1, int(0.95 * len(samples)))
+    return round(samples[idx] * 1000.0, 1)
+
+
+def _metrics_prune() -> None:
+    cutoff = int(time.time()) - _METRICS_KEEP_SEC
+    with _METRICS_LOCK:
+        for old in [k for k in _HTTP_RPS if k < cutoff]:
+            _HTTP_RPS.pop(old, None)
+        for old in [k for k in _HTTP_STATUS if k[0] < cutoff]:
+            _HTTP_STATUS.pop(old, None)
+        for old in [k for k in _WS_CONN if k < cutoff]:
+            _WS_CONN.pop(old, None)
+        for old in [k for k in _WS_SEND if k < cutoff]:
+            _WS_SEND.pop(old, None)
+
+
+def _rss_bytes() -> int:
+    try:
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        # Linux отдаёт килобайты, macOS — байты
+        return int(rss) * (1 if sys.platform == "darwin" else 1024)
+    except Exception:  # noqa: BLE001 — метрика не должна ронять ручку
+        return 0
+
+
+def _wal_bytes() -> int:
+    try:
+        return int(os.path.getsize(account_store.path + "-wal"))
+    except OSError:
+        return 0
+
+
+async def _sqlite_ping_ms() -> float:
+    """Отклик SQLite: SELECT 1 в пуле потоков, чтобы не стопать loop."""
+    try:
+        return await asyncio.to_thread(account_store.ping)
+    except Exception:  # noqa: BLE001
+        return -1.0
+
+
 feed: Optional[MarketFeed] = None
 # 📖 Стакан: опрос L2 и детектор стен (заполняется в lifespan; в тестах — подмена).
 book_feed_inst: Optional[BookFeed] = None
@@ -3086,7 +3199,7 @@ async def lifespan(app: FastAPI):
         # Долгий читатель может держать WAL и растить accounts.db-wal без
         # предела. Периодический TRUNCATE отдаёт место, не блокируя запись.
         while True:
-            await asyncio.sleep(30 * 60)
+            await asyncio.sleep(10 * 60)
             try:
                 await asyncio.to_thread(account_store.wal_checkpoint)
             except Exception as exc:  # noqa: BLE001
@@ -3270,6 +3383,153 @@ async def _reject_too_large(send) -> None:
     await send({"type": "http.response.body", "body": body})
 
 
+class MetricsMiddleware:
+    """Считает HTTP-запросы и задержки для /api/metrics.
+
+    Самый внешний слой: видит и 429 лимитера, и 413 резака тела.
+    Задержка — до отправки заголовков ответа (время работы приложения).
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "websocket":
+            if (scope.get("path") or "") == "/ws":
+                _metrics_ws_connect()
+            await self.app(scope, receive, send)
+            return
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        t0 = time.perf_counter()
+
+        async def send_wrap(message):
+            if message["type"] == "http.response.start":
+                try:
+                    _metrics_http(int(message.get("status", 0)),
+                                  time.perf_counter() - t0)
+                except Exception:  # noqa: BLE001 — счётчик не ломает ответ
+                    pass
+            await send(message)
+
+        await self.app(scope, receive, send_wrap)
+
+
+# Лимиты приложения поверх nginx: nginx режет флуд, но не различает гостя
+# и залогиненного. Залогиненный шлёт больше (чат, кабинет, сигналы).
+# Выключатель на всякий случай: LIQSCOPE_RATE_LIMIT=0.
+_RATE_LIMIT_ON = os.getenv("LIQSCOPE_RATE_LIMIT", "1").strip() not in (
+    "0", "false", "no", "off")
+_WS_RATE = RateLimiter(5, 60)          # /ws: 5 подключений/минуту с IP
+_WS_RATE_USER = RateLimiter(30, 60)   # ... залогиненному — 30
+_MUT_RATE = RateLimiter(60, 10 * 60)  # мутирующие POST анонима
+_MUT_RATE_USER = RateLimiter(600, 10 * 60)  # ... залогиненного
+_RATE_EXEMPT = frozenset({"/api/health", "/api/metrics"})
+
+
+def _scope_ip(scope) -> str:
+    """IP клиента из ASGI-scope. Та же логика, что _request_ip: заголовкам
+    верим, только если соединение пришло от доверенного прокси."""
+    client = scope.get("client") or ()
+    host = (client[0] if client else "") or ""
+    if host and _is_trusted_proxy(host):
+        xff = ""
+        xri = ""
+        for key, val in scope.get("headers") or []:
+            try:
+                name = key.decode("latin1").lower()
+            except Exception:  # noqa: BLE001
+                continue
+            if name == "x-forwarded-for" and not xff:
+                xff = val.decode("latin1")
+            elif name == "x-real-ip" and not xri:
+                xri = val.decode("latin1")
+        if xff:
+            first = xff.split(",")[0].strip()
+            if first:
+                return first
+        if xri.strip():
+            return xri.strip()
+    return host or "0"
+
+
+def _scope_sid(scope) -> str:
+    """Сессия liqscope_sid из Cookie — признак залогиненного."""
+    for key, val in scope.get("headers") or []:
+        try:
+            if key.decode("latin1").lower() != "cookie":
+                continue
+            raw = val.decode("latin1")
+        except Exception:  # noqa: BLE001
+            continue
+        for part in raw.split(";"):
+            name, _, value = part.partition("=")
+            if name.strip() == COOKIE_SID and value.strip():
+                return value.strip()[:128]
+    return ""
+
+
+class RateLimitMiddleware:
+    """Режет флуд на уровне приложения: /ws и мутирующие /api/*.
+
+    Стоит снаружи MaxBody: чужой флуд отбиваем до чтения его тела.
+    Мониторинг (/api/health, /api/metrics) и чтение (GET) не трогаем.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        stype = scope.get("type")
+        path = scope.get("path") or ""
+        if not _RATE_LIMIT_ON:
+            await self.app(scope, receive, send)
+            return
+        if stype == "websocket":
+            if path != "/ws":
+                await self.app(scope, receive, send)
+                return
+            sid = _scope_sid(scope)
+            if sid:
+                ok = _WS_RATE_USER.allow("ws:user:" + sid)
+                who = "sid"
+            else:
+                ok = _WS_RATE.allow("ws:ip:" + _scope_ip(scope))
+                who = "ip"
+            if not ok:
+                log.warning("WS отклонён лимитом (%s): %s", who, path)
+                await send({"type": "websocket.close", "code": 1008,
+                            "reason": "rate"})
+                return
+            await self.app(scope, receive, send)
+            return
+        if stype != "http":
+            await self.app(scope, receive, send)
+            return
+        if (scope.get("method") not in ("POST", "PUT", "PATCH", "DELETE")
+                or not path.startswith("/api/") or path in _RATE_EXEMPT):
+            await self.app(scope, receive, send)
+            return
+        sid = _scope_sid(scope)
+        if sid:
+            ok = _MUT_RATE_USER.allow("mut:user:" + sid)
+        else:
+            ok = _MUT_RATE.allow("mut:ip:" + _scope_ip(scope))
+        if not ok:
+            body = b'{"ok":false,"error":"rate"}'
+            await send({
+                "type": "http.response.start",
+                "status": 429,
+                "headers": [(b"content-type", b"application/json"),
+                            (b"content-length", str(len(body)).encode()),
+                            (b"retry-after", b"60")],
+            })
+            await send({"type": "http.response.body", "body": body})
+            return
+        await self.app(scope, receive, send)
+
+
 class CachedStaticFiles(StaticFiles):
     """Версионированные `?v=` можно держать год, остальное — час.
 
@@ -3297,8 +3557,8 @@ def re_v(query: str) -> bool:
 app = FastAPI(title="LiqScope — Live Crypto Liquidation Terminal",
               version="4.1.0", lifespan=lifespan)
 
-# Последний add_middleware — внешний. Сначала режем тело, потом жмём ответ,
-# потом заголовки, и только потом CORS (ему нужен Origin запроса).
+# Последний add_middleware — внешний. Снаружи внутрь: считаем запросы,
+# режем флуд (до чтения тела), режем тело, жмём ответ, заголовки, CORS.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -3313,6 +3573,8 @@ try:
 except Exception:  # noqa: BLE001 — сжатие не должно ронять процесс
     log.warning("GZipMiddleware недоступен — ответы уйдут без сжатия")
 app.add_middleware(MaxBodyMiddleware)
+app.add_middleware(RateLimitMiddleware)
+app.add_middleware(MetricsMiddleware)
 
 account_ctx.store = account_store
 account_ctx.bot = tg_bot
@@ -4083,12 +4345,25 @@ async def api_stats(symbol: Optional[str] = None, exchange: Optional[str] = None
     return compute_stats(symbol, exchange)
 
 
+# Здоровье дёргают и мониторинг, и шапка сайта: 5 секунд кэша снимают
+# повторные опросы. В тестах кэш выключен (LIQSCOPE_API_CACHE=0).
+_HEALTH_CACHE = web_cache.TTLCache(ttl=5.0, maxsize=4)
+
+
 @app.get("/api/health")
 async def api_health():
+    hit = _HEALTH_CACHE.get("h")
+    if hit is not None:
+        return JSONResponse(hit)
     data = {
         "status": "ok",
         "server_time": time.time(),
         "clients": len(hub.clients),
+        "ws_max_clients": WS_MAX_CLIENTS,
+        "rss_bytes": _rss_bytes(),
+        "wal_bytes": _wal_bytes(),
+        "sqlite_ms": await _sqlite_ping_ms(),
+        "uptime_sec": round(time.time() - _START_TS, 1),
         "liquidations_in_memory": len(LIQUIDATIONS),
         "demo": DEMO_MODE,
         "tg": tg_bot.poll_status(),
@@ -4130,7 +4405,35 @@ async def api_health():
     data["last_liquidation_ts"] = last_event
     data["seconds_since_last_liquidation"] = (round(time.time() - last_event, 1)
                                               if last_event else None)
+    _HEALTH_CACHE.set("h", data)
     return JSONResponse(data)
+
+
+@app.get("/api/metrics")
+async def api_metrics():
+    """Метрики процесса для мониторинга: сокеты, RPS, задержки, база.
+
+    Скорости — за последнюю минуту. Задержка — p95 времени приложения
+    (до отправки заголовков) по последним 5000 запросам.
+    """
+    _metrics_prune()
+    symbols = list(feed.symbols) if feed else []
+    custom = list(feed.custom_symbols) if feed else []
+    return JSONResponse({
+        "ws_clients_total": len(hub.clients),
+        "ws_max_clients": WS_MAX_CLIENTS,
+        "ws_connects_per_sec": _rate_last_minute(_WS_CONN),
+        "ws_messages_per_sec": _rate_last_minute(_WS_SEND),
+        "http_requests_per_sec": _rate_last_minute(_HTTP_RPS),
+        "http_requests_per_sec_by_status": _status_rps_last_minute(),
+        "http_latency_p95_ms": _latency_p95_ms(),
+        "sqlite_wal_size_bytes": _wal_bytes(),
+        "sqlite_ms": await _sqlite_ping_ms(),
+        "symbols_count": len(symbols),
+        "custom_symbols_count": len(custom),
+        "rss_bytes": _rss_bytes(),
+        "uptime_sec": round(time.time() - _START_TS, 1),
+    })
 
 
 @app.websocket("/ws")

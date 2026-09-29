@@ -210,7 +210,7 @@ class WebsocketTests(unittest.IsolatedAsyncioTestCase):
         await site.start()
         port = site._server.sockets[0].getsockname()[1]
         s = WhaleScreener("dummy", lambda p: {"ETH_USDT": 2500, "BNB_USDT": 500}.get(p),
-                          broadcast, endpoints={c: f"http://127.0.0.1:{port}/{c}" for c in TOKENS})
+                          broadcast, endpoints={c: f"http://127.0.0.1:{port}/{c}" for c in ("ETH", "BNB")})
         s.wallets[A] = "Exchange"
         task = asyncio.create_task(s.run())
         try:

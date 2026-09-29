@@ -189,6 +189,18 @@
         <p class="meta" id="layers-enabled-note" style="font-style:italic"></p>
     </div>
 
+<div class="card" id="whale-admin-card" style="margin-top:14px" data-hint="Alchemy, кошельки и месячный бюджет">
+    <h3>🐋 Ончейн-скринер — бюджет Free</h3>
+    <p class="meta">Один ключ Alchemy; режим «только известные EVM-адреса бирж». Полный охват сетей на Free недоступен: выборка всех блоков Arbitrum одна стоит более 207 млн CU за 30 дней. SOL/BTC/BCH/LTC/TRON/SUI/DOGE пока не подключены — их кошельки требуют отдельных проверенных списков и адаптеров.</p>
+    <div class="row-actions" style="flex-wrap:wrap;gap:10px">
+        <label>Режим <select id="whale-admin-mode" class="search"><option value="cex_only">Только биржи</option><option value="all" disabled>Все переводы — выше лимита Free</option></select></label>
+        <label>Опрос, минут <input type="number" class="search" id="whale-admin-interval" min="10" max="1440" value="60"></label>
+        <label>Бюджет CU/мес <input type="number" class="search" id="whale-admin-budget" min="1000" max="20000000" value="10000000"></label>
+        <button type="button" class="btn btn-primary" id="whale-admin-save">Сохранить</button>
+        <span class="meta" id="whale-admin-status" role="status"></span>
+    </div>
+</div>
+
 <!-- 🎯 Уровни ликвидаций (liq_levels): те же настройки, что отдаёт
      /api/admin/liq_levels/settings. Поля строятся из ответа сервера (fields),
      поэтому новая настройка движка появляется здесь сама, без правок разметки.
@@ -604,6 +616,7 @@
 <script src="/static/articles_admin.js?v=art1"></script>
 <script src="/static/archive_admin.js?v=arcdel1"></script>
 <script src="/static/consent.js?v=consent1"></script>
+<script src="/static/whale_admin.js?v=1"></script>
 <link rel="stylesheet" href="/static/brand.css?v=rebrand1">
 </body>
 </html>

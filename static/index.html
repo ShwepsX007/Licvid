@@ -540,12 +540,15 @@
                         </select></label>
                         <label>Сеть <select id="whale-chain">
                             <option value="ALL">All</option><option value="ETH">ETH</option><option value="BNB">BNB</option>
+                            <option value="POLYGON">Polygon</option><option value="ARBITRUM">Arbitrum</option>
+                            <option value="BASE">Base</option><option value="HYPERLIQUID">HyperEVM</option>
                         </select></label>
                         <label>Тип <select id="whale-direction">
                             <option value="ALL">All</option><option value="inflow">inflow</option>
                             <option value="outflow">outflow</option>
                         </select></label>
                     </div>
+                    <p class="meta" id="whale-scope-note">Режим Free: только известные биржевые кошельки EVM. Опрос раз в час; SOL, BTC/BCH, LTC, TRON, SUI и DOGE пока не подключены.</p>
                     <div id="whale-events" class="whale-events" aria-live="polite"></div>
                     <div id="whale-empty" class="feed-empty">Загрузка ончейн-транзакций…</div>
                 </section>

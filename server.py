@@ -65,7 +65,7 @@ from typing import Any, Deque, Dict, List, Optional, Set, Tuple
 
 from cpu_pool import run as run_cpu, shutdown as shutdown_cpu_pool
 
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect, Request
+from fastapi import FastAPI, Query, Body, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.responses import Response
@@ -118,6 +118,7 @@ from fastapi.staticfiles import StaticFiles
 import market_feed
 from market_feed import GATE_REST, MarketFeed, TF_MINUTES, base_of, canon, _get_json
 from whale_screener import WhaleScreener
+from whale_poller import WhalePoller
 from timeframes import parse_tf
 from book_feed import (chat_text as book_chat_text, chat_meta as book_chat_meta)
 from book_feed import (BookFeed, format_wall_html, normalize_book_cfg,
@@ -1452,6 +1453,7 @@ async def _sqlite_ping_ms() -> float:
 
 feed: Optional[MarketFeed] = None
 whale_screener: Optional[WhaleScreener] = None
+whale_poller: Optional[WhalePoller] = None
 # 📖 Стакан: опрос L2 и детектор стен (заполняется в lifespan; в тестах — подмена).
 book_feed_inst: Optional[BookFeed] = None
 _pending: List[dict] = []
@@ -4352,7 +4354,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(levels_signal_loop(), name="levels-signal"),
         asyncio.create_task(corr_alert_loop(), name="corr-alerts"),
     ]
-    global whale_screener
+    global whale_screener, whale_poller
     alchemy_key = os.getenv("ALCHEMY_API_KEY", "").strip()
     if alchemy_key:
         whale_screener = WhaleScreener(
@@ -4360,11 +4362,16 @@ async def lifespan(app: FastAPI):
             price_fn=lambda pair: feed.prices.get(pair) if feed else None,
             broadcast=hub.broadcast,
             min_usd=50_000,  # UI supports $50K; REST/UI default filter stays $100K
-            bnb_api_key=os.getenv("ALCHEMY_BNB_API_KEY", "").strip() or None
         )
-        tasks.append(asyncio.create_task(whale_screener.run(), name="whale-screener"))
+        whale_poller = WhalePoller(
+            alchemy_key, whale_screener,
+            interval=int(account_store.get_setting("whale_interval_min", "60")) * 60,
+            monthly_cu=int(account_store.get_setting("whale_monthly_cu", "10000000")),
+        )
+        tasks.append(asyncio.create_task(whale_poller.run(), name="whale-poller"))
     else:
         whale_screener = None
+        whale_poller = None
         log.warning("ALCHEMY_API_KEY не установлен, скринер ончейн-транзакций отключен")
 
     # Дневной дайджест: вечерний выпуск в оба канала и в архив на сайте
@@ -5603,12 +5610,48 @@ def aggregate_hour_cell(h: float, cell: dict, symbol: Optional[str] = None) -> d
     }
 
 
+@app.get("/api/admin/screener/config")
+async def api_admin_screener_config(request: Request):
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    return {"enabled": whale_poller is not None,
+            "config": whale_poller.status() if whale_poller else None,
+            "all_mode_available": False,
+            "reason": "Полный обход быстрых сетей превышает бюджет Free 30 млн CU/мес"}
+
+
+@app.post("/api/admin/screener/config")
+async def api_admin_screener_config_save(request: Request,
+                                         body: dict = Body(default_factory=dict)):
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    if not whale_poller:
+        return JSONResponse({"error": "disabled"}, status_code=503)
+    if body.get("mode", "cex_only") != "cex_only":
+        return JSONResponse({"error": "all_mode_exceeds_free_budget"}, status_code=422)
+    try:
+        minutes = int(body.get("interval_min", 60))
+        cap = int(body.get("monthly_cu", 10_000_000))
+    except (ValueError, TypeError):
+        return JSONResponse({"error": "invalid_config"}, status_code=422)
+    if not 10 <= minutes <= 1440 or not 1_000 <= cap <= 20_000_000:
+        return JSONResponse({"error": "out_of_range"}, status_code=422)
+    whale_poller.interval = minutes * 60
+    whale_poller.monthly_cu = cap
+    await asyncio.to_thread(account_store.set_setting, "whale_interval_min", str(minutes), int(user["id"]))
+    await asyncio.to_thread(account_store.set_setting, "whale_monthly_cu", str(cap), int(user["id"]))
+    return {"ok": True, "config": whale_poller.status()}
+
+
 @app.get("/api/screener/whales")
 async def api_screener_whales(min_usd: float = Query(100_000, ge=0),
-                              chain: str = Query("ALL", pattern="^(ALL|ETH|BNB)$"),
+                              chain: str = Query("ALL", pattern="^(ALL|ETH|BNB|POLYGON|ARBITRUM|BASE|HYPERLIQUID)$"),
                               limit: int = Query(50, ge=1, le=100)):
     return {"enabled": whale_screener is not None,
-            "events": whale_screener.history(min_usd, chain, limit) if whale_screener else []}
+            "events": whale_screener.history(min_usd, chain, limit) if whale_screener else [],
+            "poller": whale_poller.status() if whale_poller else None}
 
 
 @app.get("/api/liquidations")

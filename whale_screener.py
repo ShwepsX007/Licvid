@@ -36,6 +36,24 @@ TOKENS = {
         # BTCB is the established BNB Chain BTC-pegged token; not ETH WBTC.
         "0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c": ("BTCB", 18),
     },
+    "POLYGON": {
+        "0xc2132d05d31c914a87c6611c10748aeb04b58e8f": ("USDT", 6),
+        "0x3c499c542cef5e3811e1192ce70d8cc03d5c3359": ("USDC", 6),
+        "0x2791bca1f2de4661ed88a30c99a7a9449aa84174": ("USDC", 6),
+    },
+    "ARBITRUM": {
+        "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9": ("USDT", 6),
+        "0xaf88d065e77c8cc2239327c5edb3a432268e5831": ("USDC", 6),
+        "0xda10009cbd5d07dd0cecc66161fc93d7c9000da1": ("DAI", 18),
+        "0x2f2a2543b76a4166549f7aab2e75bef0aefc5b0f": ("WBTC", 8),
+    },
+    "BASE": {
+        "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913": ("USDC", 6),
+    },
+    "HYPERLIQUID": {
+        # HyperEVM USDC, not HyperCore balance/position activity.
+        "0xb88339cb7199b77e23db6e890353e22632ba630f": ("USDC", 6),
+    },
 }
 
 
@@ -300,5 +318,5 @@ class WhaleScreener:
     async def run(self) -> None:
         async with aiohttp.ClientSession() as session:
             async with asyncio.TaskGroup() as group:
-                for chain in TOKENS:
+                for chain in self.endpoints:
                     group.create_task(self._run_chain(chain, session))

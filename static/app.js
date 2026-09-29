@@ -5553,7 +5553,7 @@
     let whaleRequest = 0;
     function whaleKey(row) { return row.chain + ":" + row.hash + ":" + row.log_index; }
     function addWhale(row) {
-        if (!row || !/^(ETH|BNB)$/.test(row.chain || "") ||
+        if (!row || !/^(ETH|BNB|POLYGON|ARBITRUM|BASE|HYPERLIQUID)$/.test(row.chain || "") ||
                 !/^0x[0-9a-f]{64}$/i.test(row.hash || "")) return;
         whaleRows.set(whaleKey(row), row);
         while (whaleRows.size > 100) whaleRows.delete(whaleRows.keys().next().value);
@@ -5572,7 +5572,10 @@
         rows.forEach((row) => {
             const card = document.createElement("article");
             card.className = "whale-card";
-            const scan = row.chain === "BNB" ? "https://bscscan.com/tx/" : "https://etherscan.io/tx/";
+            const scans = {ETH: "https://etherscan.io/tx/", BNB: "https://bscscan.com/tx/",
+                POLYGON: "https://polygonscan.com/tx/", ARBITRUM: "https://arbiscan.io/tx/",
+                BASE: "https://basescan.org/tx/", HYPERLIQUID: "https://hyperevmscan.io/tx/"};
+            const scan = scans[row.chain];
             const addr = (value, label) => escapeHtml(label || String(value || "").slice(0, 10) + "…" + String(value || "").slice(-6));
             const dir = row.direction === "inflow" ? "⬇ inflow" : row.direction === "outflow" ? "⬆ outflow" : "↔ transfer";
             const cls = row.direction === "inflow" || row.direction === "outflow" ? "whale-" + row.direction : "";
@@ -5604,6 +5607,15 @@
             const data = await res.json();
             if (seq !== whaleRequest) return;
             whaleEnabled = data.enabled;
+            const scope = $("whale-scope-note");
+            if (scope && data.poller) {
+                const poll = data.poller;
+                scope.textContent = "Только известные EVM-кошельки бирж · опрос каждые " +
+                    Math.round(poll.interval_sec / 60) + " мин · бюджет " +
+                    Number(poll.reserved_cu).toLocaleString() + "/" +
+                    Number(poll.budget_cu).toLocaleString() + " CU (этот скринер). " +
+                    "SOL, BTC/BCH, LTC, TRON, SUI, DOGE пока не подключены.";
+            }
             (data.events || []).slice().reverse().forEach(addWhale);
             paintWhales();
         } catch (e) {

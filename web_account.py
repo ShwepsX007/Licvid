@@ -1559,7 +1559,10 @@ def register_account_routes(app) -> None:
         actor, err = _admin(request)
         if err:
             return err
-        return {"ok": True, "stats": ctx.stats_fn(), "health": ctx.health_fn()}
+        stats = ctx.stats_fn()
+        if inspect.isawaitable(stats):
+            stats = await stats
+        return {"ok": True, "stats": stats, "health": ctx.health_fn()}
 
     @router.get("/api/admin/digest")
     async def admin_digest_list(request: Request):

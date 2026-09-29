@@ -39,6 +39,8 @@ import threading
 import time
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from cpu_pool import run as run_cpu
+
 log = logging.getLogger("liqscore.levels")
 
 HOUR = 3600.0
@@ -351,6 +353,45 @@ def build_rows(points: Sequence[Tuple[float, float]],
         if len(rows) >= MAX_ROWS:
             break
     return rows
+
+
+def _build_rows_snapshot(points: Sequence[Tuple[float, float]],
+                         samples: Dict[float, tuple], min_doi_rel: float) -> List[dict]:
+    """Pure worker entry point: callbacks were sampled from live feeds on the parent."""
+    return build_rows(points, lambda ts: samples[ts][0],
+                      lambda ts: samples[ts][1],
+                      lambda ts: samples[ts][2], min_doi_rel)
+
+
+def _ladder_math(rows: Sequence[dict], events: Sequence[dict], price: float,
+                 settings: Dict[str, Any], calib: dict) -> tuple:
+    """Build and subtract in one IPC trip; no live objects cross it."""
+    work = rows
+    eff = dict(settings)
+    if calib.get("applied"):
+        eff["lev_scale"] = _fnum(calib.get("lev_scale"), eff.get("lev_scale", 1.0))
+        eff["spread_scale"] = _fnum(calib.get("spread_scale"), eff.get("spread_scale", 1.0))
+    step = grid_step(price, eff.get("step_rel"))
+    ladder = build_ladder(work, eff, price)
+    applied = {"usd": 0.0, "events": 0, "skipped": 0}
+    if eff.get("subtract_executed", True):
+        applied = apply_executed(ladder, events, step)
+    return eff, step, ladder, applied
+
+
+def _history_events_worker(path: str, symbol: str, since: float,
+                           until: float, min_usd: float) -> List[dict]:
+    """Read and parse daily JSONL in a child, not a GIL-holding I/O thread."""
+    from history import HistoryStore
+    hist = HistoryStore(path)
+    out: List[dict] = []
+    for ev in hist.iter_events(since, until, symbol):
+        if _fnum(ev.get("usd")) < _fnum(min_usd):
+            continue
+        out.append(LevelsEngine._slim_event(ev))
+        if len(out) >= MAX_EVENTS:
+            break
+    return out
 
 
 def _cell(ladder: Dict[float, dict], price: float) -> dict:
@@ -1345,10 +1386,17 @@ class LevelsEngine:
             return hit[2]
         self._events_cache_misses += 1
         try:
-            events = await asyncio.to_thread(self._events, sym, since, until,
-                                             min_usd)
+            from history import HistoryStore
+            if type(self.hist) is HistoryStore and self.hist.base_path:
+                events = await run_cpu(_history_events_worker,
+                                       self.hist.base_path, sym, since, until, min_usd)
+            else:
+                # Alternate in-memory/test stores cannot be recreated in a
+                # child; keep their I/O off-loop, never fall back to inline.
+                events = await asyncio.to_thread(self._events, sym, since, until,
+                                                 min_usd)
         except Exception:                        # noqa: BLE001
-            events = self._events(sym, since, until, min_usd)
+            raise  # never parse large history synchronously on the event loop
         self._events_cache_put(sym, until, events, since)
         return events
 
@@ -1485,6 +1533,8 @@ class LevelsEngine:
                 "deferred": int(self._calib_deferred),
                 "symbols": len(self._calib)}
 
+    # Compatibility for synchronous model callers/tests. Async payload uses
+    # _calibration_async exclusively; this method is never called on the loop.
     def _calibration(self, symbol: str, rows: Sequence[dict], events: Sequence[dict],
                      price: float, settings: Dict[str, Any],
                      recalibrate: Optional[bool]) -> dict:
@@ -1507,6 +1557,25 @@ class LevelsEngine:
                 return out
             got = calibrate(rows, events, price, settings)
             # даже отказ запоминаем: считать перебор на каждом запросе незачем
+            self._calib[sym] = got
+            return got
+        return cur or {"applied": False, "reason": "ещё не считалась"}
+
+    async def _calibration_async(self, symbol: str, rows: Sequence[dict],
+                                 events: Sequence[dict], price: float,
+                                 settings: Dict[str, Any], recalibrate: Optional[bool]) -> dict:
+        sym = str(symbol or "").upper()
+        cur = self._calib.get(sym)
+        fresh = bool(cur) and time.time() - _fnum(cur.get("ts")) < CALIB_TTL_SEC
+        if not settings.get("calibrate", True):
+            return cur if cur else {"applied": False, "reason": "калибровка выключена"}
+        if recalibrate is True or (not fresh and len(events) >= MIN_CALIB_EVENTS):
+            if recalibrate is not True and not self._calib_budget_take():
+                self._calib_deferred += 1
+                out = dict(cur) if cur else {"applied": False, "events": len(events)}
+                out.update(deferred=True, reason="отложена: лимит пересчётов калибровки")
+                return out
+            got = await run_cpu(calibrate, rows, events, price, settings)
             self._calib[sym] = got
             return got
         return cur or {"applied": False, "reason": "ещё не считалась"}
@@ -1575,17 +1644,45 @@ class LevelsEngine:
             lookup = self._price_lookup(sym, candles)
         weights = self._venue_weights(sym)
         mmr_fn, mmr_estimated = self._mmr(sym, weights)
-        # Приросты OI → строки позиций: на каждую точку окна зовётся side_at
-        # (ряды биржи), а точек за 30 дней — тысячи. Только в потоке, иначе
-        # единственный воркер стоит сотни миллисекунд: замер на бою 29.09.2026
-        # дал паузу 652 мс со стеком build_rows <- payload <- liq_levels_task.
-        try:
-            rows = await asyncio.to_thread(build_rows, points, lookup,
-                                           self._side_fn(sym), mmr_fn,
-                                           _fnum(settings.get("min_doi_rel")))
-        except Exception:                        # noqa: BLE001
-            rows = build_rows(points, lookup, self._side_fn(sym), mmr_fn,
-                              _fnum(settings.get("min_doi_rel")))
+        # Closures accessing live OI/profile/risk cannot be pickled. Sample only
+        # the inputs needed for growing OI points, in small cooperative slices;
+        # the full rows calculation then runs outside the web process/GIL.
+        side_fn = self._side_fn(sym)
+        floor_rel = max(_fnum(settings.get("min_doi_rel")), 0.0)
+        # Normalize first, exactly as build_rows does (last duplicate wins).
+        # This makes the sampled callbacks correspond to the rows in the worker.
+        normalized: List[Tuple[float, float]] = []
+        for i, (raw_ts, raw_oi) in enumerate(points):
+            ts0, oi0 = _num(raw_ts), _num(raw_oi)
+            if ts0 is not None and oi0 is not None and oi0 > 0:
+                if normalized and ts0 == normalized[-1][0]:
+                    normalized[-1] = (ts0, oi0)
+                elif not normalized or ts0 > normalized[-1][0]:
+                    normalized.append((ts0, oi0))
+            if i % 64 == 63:
+                await asyncio.sleep(0.01)
+        samples: Dict[float, tuple] = {}
+        for i in range(1, len(normalized)):
+            ts0, oi0 = normalized[i]
+            prev_oi = normalized[i - 1][1]
+            if oi0 > prev_oi and (not floor_rel or oi0 - prev_oi >= floor_rel * oi0):
+                # Mirror build_rows' per-callback exception defaults.
+                try:
+                    entry = lookup(ts0)
+                except Exception:
+                    entry = None
+                try:
+                    share = side_fn(ts0)
+                except Exception:
+                    share = (0.5, "none")
+                try:
+                    mmr = mmr_fn(ts0)
+                except Exception:
+                    mmr = 0.0
+                samples[ts0] = (entry, share, mmr)
+            if i % 64 == 0:
+                await asyncio.sleep(0.01)
+        rows = await run_cpu(_build_rows_snapshot, normalized, samples, floor_rel)
         cur = _num(price) or _current_price(rows, points)
         if cur is None or cur <= 0:
             return self._empty(sym, ts, win, settings, "нет цены для расчёта")
@@ -1593,38 +1690,17 @@ class LevelsEngine:
         events = await self._events_cached(
             sym, max(since, ts - _fnum(settings.get("calib_days"), 7.0) * 24 * HOUR),
             ts, _fnum(settings.get("min_liq_usd")))
-        # Строки с близкими входами складываются ДО калибровки и лестницы:
-        # оба обходят их по несколько раз (сетка калибровки — 5 масштабов,
-        # лестница — плечи × стороны × отсчёты колокола), а различных цен входа
-        # в окне на порядок меньше, чем точек OI. На бою 29.09.2026 лестница
-        # BTC_USDT стоила 966-1331 мс и держала проход фона на 2.8-3.9 с.
-        if AGG_ROWS:
-            work_rows = aggregate_rows(rows, cur, agg_step_rel(settings))
-        else:
-            work_rows = list(rows)
+        # Aggregate on the worker too. Calibration uses the same aggregated
+        # rows; neither it nor the ladder/subtraction may run on this loop.
+        work_rows = await run_cpu(aggregate_rows, rows, cur, agg_step_rel(settings)) \
+            if AGG_ROWS else rows
         with self._lock:
             self._rows_in += len(rows)
             self._rows_agg += len(work_rows)
-        calib = self._calibration(sym, work_rows, events, cur, settings,
-                                  recalibrate)
-        eff = dict(settings)
-        if calib.get("applied"):
-            eff["lev_scale"] = _fnum(calib.get("lev_scale"), eff.get("lev_scale", 1.0))
-            eff["spread_scale"] = _fnum(calib.get("spread_scale"),
-                                        eff.get("spread_scale", 1.0))
-        step = grid_step(cur, eff.get("step_rel"))
-        # Тяжёлые CPU-расчёты — в threadpool, чтобы не блокировать event loop
-        # (иначе WS и REST висят по 1-2 сек на каждом запросе уровней)
-        try:
-            ladder = await asyncio.to_thread(build_ladder, work_rows, eff, cur)
-        except Exception:
-            ladder = build_ladder(work_rows, eff, cur)
-        applied = {"usd": 0.0, "events": 0, "skipped": 0}
-        if eff.get("subtract_executed", True):
-            try:
-                applied = await asyncio.to_thread(apply_executed, ladder, events, step)
-            except Exception:
-                applied = apply_executed(ladder, events, step)
+        calib = await self._calibration_async(sym, work_rows, events, cur, settings,
+                                              recalibrate)
+        eff, step, ladder, applied = await run_cpu(
+            _ladder_math, work_rows, events, cur, settings, calib)
         with self._lock:
             self.builds += 1
         shown = filter_ladder(ladder, min_usd, side)

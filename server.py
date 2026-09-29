@@ -62,6 +62,8 @@ from itertools import islice
 from contextlib import asynccontextmanager
 from typing import Any, Deque, Dict, List, Optional, Set, Tuple
 
+from cpu_pool import run as run_cpu, shutdown as shutdown_cpu_pool
+
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -569,6 +571,7 @@ LIQUIDATIONS: Deque[dict] = deque(maxlen=HISTORY_MAX)
 # Кэш для WS init: символы и статистика считаются раз в 1-2 сек, а не на каждый коннект
 _SYMBOLS_CACHE: Dict[str, Any] = {"at": 0.0, "data": None}
 _STATS_CACHE: Dict[str, Any] = {}
+_STATS_INFLIGHT: Dict[str, asyncio.Task] = {}
 _STATS_CACHE_TTL = 5.0  # секунды
 _SYMBOLS_CACHE_TTL = 5.0
 # Месячная история: сырые события по дням + часовые свёртки (ликвидации,
@@ -637,7 +640,7 @@ LEVELS_BG: Dict[str, float] = {
     "max_payload_ms": 0.0, "payload_total_ms": 0.0, "last_at": 0.0,
     "slow_passes": 0.0, "off": 0.0 if LEVELS_BG_ON else 1.0}
 LEVELS_SNAP_MAX = max(1, int(os.getenv("LIQSCOPE_LEVELS_SNAP_MAX", "8") or 8))
-LEVEL_WARM_SEC = max(10.0, float(os.getenv("LIQSCOPE_LEVELS_WARM_SEC", "30") or 30))
+LEVEL_WARM_SEC = max(30.0, float(os.getenv("LIQSCOPE_LEVELS_WARM_SEC", "60") or 60))
 LEVELS_WARM_MAX = max(1, int(os.getenv("LIQSCOPE_LEVELS_WARM_MAX", "40") or 40))
 # Живая CVD: "SYM|tf" -> {время_начала_свечи: дельта USDT (покупки-продажи)}.
 # Считается из ленты сделок (тейкер-сторона) и дополняет исторические свечи.
@@ -1680,35 +1683,41 @@ async def levels_bg_pass(state: Dict[str, Any]) -> None:
             # LEVELS_SNAP_SEC — иначе лестницы считались бы зря
             if time.time() - float(state.get("snap_at") or 0.0) >= LEVELS_SNAP_SEC:
                 state["snap_at"] = time.time()
-                for sym in batch:
-                    price = float((feed.prices or {}).get(sym) or 0.0)
-                    t_one = time.monotonic()
+                for i, sym in enumerate(batch):
                     try:
-                        with task_span("liq-levels"):
-                            data = await LEVELS.payload(sym, session=session,
-                                                        price=(price or None))
-                    except Exception as e:        # noqa: BLE001
-                        log.debug("уровни %s: %s", sym, e)
-                        continue
-                    one_ms = (time.monotonic() - t_one) * 1000.0
-                    pass_syms.append(f"{sym}:{one_ms:.0f}мс")
-                    LEVELS_BG["last_payload_ms"] = round(one_ms, 1)
-                    LEVELS_BG["payload_total_ms"] = round(
-                        LEVELS_BG["payload_total_ms"] + one_ms, 1)
-                    if one_ms > LEVELS_BG["max_payload_ms"]:
-                        LEVELS_BG["max_payload_ms"] = round(one_ms, 1)
-                    if not data.get("enabled") or not data.get("magnets"):
-                        continue
-                    LEVELS_SNAP[sym] = {
-                        "symbol": sym, "price": data.get("price"),
-                        "ts": data.get("ts"),
-                        # список, а не словарь up/down: движок алертов и
-                        # лента метрики ходят по магнитам циклом
-                        "magnets": data.get("magnets_list") or [],
-                        "totals": data.get("totals") or {},
-                        "calibration": data.get("calibration") or {},
-                        "estimate": True,
-                    }
+                        price = float((feed.prices or {}).get(sym) or 0.0)
+                        t_one = time.monotonic()
+                        try:
+                            with task_span("liq-levels"):
+                                data = await LEVELS.payload(sym, session=session,
+                                                            price=(price or None))
+                        except Exception as e:        # noqa: BLE001
+                            log.debug("уровни %s: %s", sym, e)
+                            continue
+                        one_ms = (time.monotonic() - t_one) * 1000.0
+                        pass_syms.append(f"{sym}:{one_ms:.0f}мс")
+                        LEVELS_BG["last_payload_ms"] = round(one_ms, 1)
+                        LEVELS_BG["payload_total_ms"] = round(
+                            LEVELS_BG["payload_total_ms"] + one_ms, 1)
+                        if one_ms > LEVELS_BG["max_payload_ms"]:
+                            LEVELS_BG["max_payload_ms"] = round(one_ms, 1)
+                        if not data.get("enabled") or not data.get("magnets"):
+                            continue
+                        LEVELS_SNAP[sym] = {
+                            "symbol": sym, "price": data.get("price"),
+                            "ts": data.get("ts"),
+                            # список, а не словарь up/down: движок алертов и
+                            # лента метрики ходят по магнитам циклом
+                            "magnets": data.get("magnets_list") or [],
+                            "totals": data.get("totals") or {},
+                            "calibration": data.get("calibration") or {},
+                            "estimate": True,
+                        }
+                    finally:
+                        # Cooperative break even after a failed coin; CPU math is
+                        # already in processes, this also bounds back-to-back IPC.
+                        if (i + 1) % 5 == 0 or i == len(batch) - 1:
+                            await asyncio.sleep(0.01)
                 for gone in [s for s in LEVELS_SNAP if s not in want]:
                     LEVELS_SNAP.pop(gone, None)
         await asyncio.to_thread(LEVELS.save)
@@ -3302,15 +3311,9 @@ def restore_boards_from_archive() -> int:
     return archive_restore.fill_boards_from_cells(BOARD, SLOTS, month_cells())
 
 
-@spanned("compute-stats")
-def compute_stats(symbol: Optional[str] = None, exchange: Optional[str] = None) -> dict:
-    _perf_t0 = time.monotonic() if PERF_LOG else 0.0
-    now = time.time()
-    cache_key = f"{symbol or 'ALL'}|{exchange or 'ALL'}"
-    cached = _STATS_CACHE.get(cache_key)
-    if cached and now - cached.get("_at", 0) < _STATS_CACHE_TTL:
-        return cached["data"]
-
+def _stats_math(events: list, now: float, symbol: Optional[str],
+                exchange: Optional[str], archive_cells: list) -> dict:
+    """Pure aggregation of a point-in-time snapshot, safe in a spawned worker."""
     # Оптимизация: один проход по LIQUIDATIONS вместо 5-7 копий и фильтров
     # Раньше делалось list(LIQUIDATIONS) + фильтрация по symbol/exchange + ещё
     # отдельный pool = list(LIQUIDATIONS) — всё это 60k*2 копий и сканов.
@@ -3334,7 +3337,7 @@ def compute_stats(symbol: Optional[str] = None, exchange: Optional[str] = None) 
     exch_filter = exchange if need_exch_filter else None
 
     # Один проход по кольцу
-    for ev in LIQUIDATIONS:
+    for ev in events:
         # Фильтр для items (учитывает symbol и exchange)
         if need_symbol_filter and ev["symbol"] != sym_filter:
             # для pool24 символ не фильтруем, только биржу — проверяем отдельно ниже
@@ -3408,7 +3411,7 @@ def compute_stats(symbol: Optional[str] = None, exchange: Optional[str] = None) 
             from archive_restore import leaders_from_cells
             from history import aggregate_hours
             sym = symbol if symbol and symbol != "ALL" else None
-            cells = [c for c in month_cells(now) if c[0] + 3600 > now - 86400 and c[0] <= now]
+            cells = [c for c in archive_cells if c[0] + 3600 > now - 86400 and c[0] <= now]
             agg = aggregate_hours(cells, symbol=sym)
             arch_usd = float(agg.get("usd") or 0)
             arch_n = int(agg.get("count") or 0)
@@ -3443,18 +3446,75 @@ def compute_stats(symbol: Optional[str] = None, exchange: Optional[str] = None) 
         "biggest_24h": biggest,
         "demo": DEMO_MODE,
     })
-    # Сохраняем в кэш
-    _STATS_CACHE[cache_key] = {"_at": now, "data": out}
-    # Чистим старые ключи, чтобы не разрасталось
+    return out
+
+
+def _stats_cache_put(key: str, now: float, out: dict) -> dict:
+    _STATS_CACHE[key] = {"_at": now, "data": out}
     if len(_STATS_CACHE) > 32:
         oldest = sorted(_STATS_CACHE.items(), key=lambda kv: kv[1].get("_at", 0))[:8]
         for k, _ in oldest:
             _STATS_CACHE.pop(k, None)
-    if PERF_LOG:
-        _perf_dt = (time.monotonic() - _perf_t0) * 1000 if _perf_t0 else 0
-        log.info("[perf] compute_stats symbol=%s exchange=%s items=%d d24=%d pool24=%d total=%.1fms",
-                 symbol, exchange, len(items), len(d24), len(pool24), _perf_dt)
     return out
+
+
+def _stats_archive_needed(events: list, now: float, symbol: Optional[str],
+                          exchange: Optional[str]) -> bool:
+    if exchange and exchange != "ALL":
+        return False
+    # A filtered symbol can have few items even in a full global ring.
+    return (len(events) < 5000 or bool(symbol and symbol != "ALL") or
+            bool(events and events[-min(50, len(events))]["timestamp"]
+                 < now - 86400))
+
+
+@spanned("compute-stats")
+def compute_stats(symbol: Optional[str] = None, exchange: Optional[str] = None) -> dict:
+    """Synchronous compatibility API for callers outside the asyncio loop."""
+    now = time.time()
+    key = f"{symbol or 'ALL'}|{exchange or 'ALL'}"
+    cached = _STATS_CACHE.get(key)
+    if cached and now - cached.get("_at", 0) < _STATS_CACHE_TTL:
+        return cached["data"]
+    events = list(LIQUIDATIONS)
+    cells = month_cells(now) if _stats_archive_needed(events, now, symbol, exchange) else []
+    return _stats_cache_put(key, now, _stats_math(events, now, symbol, exchange, cells))
+
+
+async def _compute_stats_offloop(key: str, symbol: Optional[str],
+                                 exchange: Optional[str]) -> dict:
+    now = time.time()
+    cached = _STATS_CACHE.get(key)
+    try:
+        events = list(LIQUIDATIONS)
+        # The archive is disk I/O; do not open its shards on the loop either.
+        cells = await asyncio.to_thread(month_cells, now) if _stats_archive_needed(events, now, symbol, exchange) else []
+        out = await run_cpu(_stats_math, events, now, symbol, exchange, cells)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        # No synchronous full-history scan when the worker fails.
+        if cached:
+            return _stats_cache_put(key, now, cached["data"])
+        return _stats_cache_put(key, now, _stats_math([], now, symbol, exchange, []))
+    return _stats_cache_put(key, now, out)
+
+
+async def compute_stats_async(symbol: Optional[str] = None,
+                              exchange: Optional[str] = None) -> dict:
+    """One cold calculation per key, shared by concurrent WS/API requests."""
+    now = time.time()
+    key = f"{symbol or 'ALL'}|{exchange or 'ALL'}"
+    cached = _STATS_CACHE.get(key)
+    if cached and now - cached.get("_at", 0) < _STATS_CACHE_TTL:
+        return cached["data"]
+    task = _STATS_INFLIGHT.get(key)
+    if task is None:
+        task = asyncio.create_task(_compute_stats_offloop(key, symbol, exchange))
+        _STATS_INFLIGHT[key] = task
+        task.add_done_callback(lambda done: _STATS_INFLIGHT.pop(key, None)
+                               if _STATS_INFLIGHT.get(key) is done else None)
+    return await asyncio.shield(task)
 
 
 def _cvd_window(symbol: str, sec: float = 14400.0) -> Optional[float]:
@@ -3864,21 +3924,29 @@ async def price_broadcaster():
 
 
 async def stats_broadcaster():
+    last_idle_refresh = 0.0
     while True:
         try:
             await asyncio.sleep(STATS_INTERVAL)
             if not hub.clients:
+                # Keep the bot's synchronous formatter fed without doing math
+                # in its callback or refreshing at the WS broadcast frequency.
+                if time.monotonic() - last_idle_refresh >= 30.0:
+                    await compute_stats_async()
+                    last_idle_refresh = time.monotonic()
                 continue
-            global_stats = compute_stats()
+            global_stats = await compute_stats_async()
             cache = {"ALL": global_stats}
             health = health_summary()
             async with hub._lock:
                 clients = list(hub.clients)
-            for c in clients:
+            for i, c in enumerate(clients):
                 key = c.symbol
                 if key not in cache:
-                    cache[key] = compute_stats(key)
+                    cache[key] = await compute_stats_async(key)
                 await c.send({"type": "stats", "data": cache[key], "health": health})
+                if (i + 1) % 5 == 0:
+                    await asyncio.sleep(0.01)
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -4273,7 +4341,8 @@ async def lifespan(app: FastAPI):
     tasks.append(asyncio.create_task(wal_checkpoint_loop(), name="wal-checkpoint"))
 
     tg_bot.health_fn = health_summary
-    tg_bot.stats_fn = compute_stats
+    # Bot's synchronous formatter must never run a cold scan on the loop.
+    tg_bot.stats_fn = lambda: (_STATS_CACHE.get("ALL|ALL") or {}).get("data") or {}
     # Лента бота: как можно больше событий — текст сам упрётся в лимит Telegram
     tg_bot.liqs_fn = lambda: list(LIQUIDATIONS)[-400:]
     tg_bot.ws_clients_fn = lambda: len(hub.clients)
@@ -4301,6 +4370,7 @@ async def lifespan(app: FastAPI):
             pass
         await tg_bot.stop()
         await feed.stop()
+        shutdown_cpu_pool()
 
 
 def _cors_origins() -> List[str]:
@@ -4710,7 +4780,7 @@ account_ctx.mailer = mailer
 tg_bot.mailer = mailer
 account_ctx.require_email_verification = REQUIRE_EMAIL_VERIFICATION
 account_ctx.health_fn = health_summary
-account_ctx.stats_fn = compute_stats
+account_ctx.stats_fn = compute_stats_async
 account_ctx.liqs_fn = lambda: list(LIQUIDATIONS)[-8:]
 account_ctx.ws_clients_fn = lambda: len(hub.clients)
 account_ctx.alerts_market_fn = alerts_market_snapshot
@@ -5579,7 +5649,7 @@ async def api_history(since: Optional[float] = None, until: Optional[float] = No
 
 @app.get("/api/stats")
 async def api_stats(symbol: Optional[str] = None, exchange: Optional[str] = None):
-    return compute_stats(symbol, exchange)
+    return await compute_stats_async(symbol, exchange)
 
 
 # Здоровье дёргают и мониторинг, и шапка сайта: 5 секунд кэша снимают
@@ -5841,7 +5911,7 @@ async def ws_endpoint(websocket: WebSocket):
         # (server.py:5527). reversed()+islice берёт ровно нужный хвост.
         recent = list(islice(reversed(LIQUIDATIONS), _recent_limit))[::-1]
         t_recent = time.monotonic() if PERF_LOG else 0.0
-        stats = compute_stats()
+        stats = await compute_stats_async()
         t_stats = time.monotonic() if PERF_LOG else 0.0
         flow = flow_snapshot()
         t_flow = time.monotonic() if PERF_LOG else 0.0

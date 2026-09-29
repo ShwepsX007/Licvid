@@ -118,9 +118,19 @@ from fastapi.staticfiles import StaticFiles
 
 import market_feed
 from market_feed import GATE_REST, MarketFeed, TF_MINUTES, base_of, canon, _get_json
-from whale_screener import WhaleScreener
-from whale_poller import WhalePoller
-from alchemy_keys import AlchemyKeyStore, KeyStoreError
+# The liquidation terminal must still boot if the optional on-chain module or
+# one of its dependencies is absent. A missing encryption library never means
+# falling back to unencrypted API-key storage.
+try:
+    from whale_screener import WhaleScreener
+    from whale_poller import WhalePoller
+    from alchemy_keys import AlchemyKeyStore, KeyStoreError
+    WHALE_POLLER_AVAILABLE = True
+except Exception:  # noqa: BLE001 — isolate optional module import failures
+    WhaleScreener = WhalePoller = AlchemyKeyStore = None
+    class KeyStoreError(Exception):
+        pass
+    WHALE_POLLER_AVAILABLE = False
 from timeframes import parse_tf
 from book_feed import (chat_text as book_chat_text, chat_meta as book_chat_meta)
 from book_feed import (BookFeed, format_wall_html, normalize_book_cfg,
@@ -4359,26 +4369,37 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(corr_alert_loop(), name="corr-alerts"),
     ]
     global whale_screener, whale_poller, alchemy_key_store, alchemy_vault_error
-    try:
-        alchemy_key_store = AlchemyKeyStore(SECRET, env_key=os.getenv("ALCHEMY_API_KEY", ""))
-        alchemy_vault_error = ""
-    except KeyStoreError as exc:
-        alchemy_key_store = None
-        alchemy_vault_error = str(exc)
-    whale_screener = WhaleScreener(
-        "pending", price_fn=lambda pair: feed.prices.get(pair) if feed else None,
-        broadcast=hub.broadcast, min_usd=50_000)
-    whale_poller = WhalePoller(
-        "", whale_screener, key_store=alchemy_key_store,
-        interval=int(account_store.get_setting("whale_interval_min", "60")) * 60,
-        monthly_cu=int(account_store.get_setting("whale_monthly_cu", "10000000")),
-    )
+    whale_screener = whale_poller = alchemy_key_store = None
+    alchemy_vault_error = ""
+    if not WHALE_POLLER_AVAILABLE:
+        alchemy_vault_error = "Ончейн-модуль недоступен. Установите зависимости: pip install -r requirements.txt"
+    else:
+        try:
+            # No plaintext or env-key fallback when Fernet is unavailable.
+            alchemy_key_store = AlchemyKeyStore(SECRET, env_key=os.getenv("ALCHEMY_API_KEY", ""))
+            whale_screener = WhaleScreener(
+                "pending", price_fn=lambda pair: feed.prices.get(pair) if feed else None,
+                broadcast=hub.broadcast, min_usd=50_000)
+            whale_poller = WhalePoller(
+                "", whale_screener, key_store=alchemy_key_store,
+                interval=int(account_store.get_setting("whale_interval_min", "60")) * 60,
+                monthly_cu=int(account_store.get_setting("whale_monthly_cu", "10000000")),
+            )
+        except KeyStoreError as exc:
+            # Includes missing cryptography or a vault encrypted under an old
+            # LIQSCOPE_SECRET. Do not overwrite the existing ciphertext.
+            alchemy_vault_error = str(exc)
+        except Exception:  # noqa: BLE001 — optional screener cannot take down the terminal
+            alchemy_vault_error = ("Ончейн-скринер не запустился. Проверьте зависимости "
+                                   "и файл data/cex_wallets.json")
+        if whale_poller:
+            # With no keys this task waits for admin input; it performs no RPC
+            # calls until a key is added, and then wakes without a restart.
+            tasks.append(asyncio.create_task(whale_poller.run(), name="whale-poller"))
     if alchemy_vault_error:
-        # Never overwrite a vault encrypted under another LIQSCOPE_SECRET.
-        whale_poller.errors["keys"] = alchemy_vault_error
-    if alchemy_key_store is None or not alchemy_key_store.keys():
+        alchemy_key_store = whale_screener = whale_poller = None
+    elif alchemy_key_store and not alchemy_key_store.keys():
         log.warning("Ключ Alchemy пока не добавлен; скринер ожидает добавления через /admin")
-    tasks.append(asyncio.create_task(whale_poller.run(), name="whale-poller"))
 
     # Дневной дайджест: вечерний выпуск в оба канала и в архив на сайте
     digest_sched = DigestScheduler(hour=DIGEST_HOUR, minute=DIGEST_MINUTE,
@@ -5693,6 +5714,7 @@ async def api_screener_whales(min_usd: float = Query(100_000, ge=0),
                               chain: str = Query("ALL", pattern="^(ALL|ETH|BNB|POLYGON|ARBITRUM|BASE|HYPERLIQUID)$"),
                               limit: int = Query(50, ge=1, le=100)):
     return {"enabled": bool(alchemy_key_store and alchemy_key_store.keys()),
+            "unavailable_reason": alchemy_vault_error,
             "events": whale_screener.history(min_usd, chain, limit) if whale_screener else [],
             "poller": whale_poller.status() if whale_poller else None}
 

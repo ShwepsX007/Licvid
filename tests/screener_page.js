@@ -4,7 +4,7 @@ const assert = require("assert");
 const {JSDOM} = require("jsdom");
 const path = require("path");
 const html = fs.readFileSync(path.join(__dirname, "../static/screener.html"), "utf8")
-    .replace(/<script src="\/static\/screener\.js\?v=1" defer><\/script>/, "");
+    .replace(/<script src="\/static\/screener\.js\?v=2" defer><\/script>/, "");
 const script = fs.readFileSync(path.join(__dirname, "../static/screener.js"), "utf8");
 const dom = new JSDOM(html, {url: "https://liqscope.online/screener", runScripts: "outside-only"});
 const win = dom.window;
@@ -17,6 +17,10 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 (async () => {
     await sleep(40);
     assert(win.document.getElementById("screener-state").textContent.includes("Нет ключа"));
+    sample.unavailable_reason = "Пакет cryptography не установлен";
+    win.document.getElementById("whale-chain").dispatchEvent(new win.Event("change"));
+    await sleep(40);
+    assert(win.document.getElementById("screener-state").textContent.includes("cryptography"));
     sample = {enabled: true, poller: {...sample.poller, phase: "error", keys_configured: 2,
         last_attempt: {ETH: 1780000000}, last_success: {ETH: 1780000000},
         cursors: {ETH: 321}, errors: {BNB: "HTTP 403"}}, events: [{chain: "ETH",

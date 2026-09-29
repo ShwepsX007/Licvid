@@ -17,7 +17,8 @@
         const badge = $("screener-state");
         const errors = p.errors || {};
         const successes = p.last_success || {};
-        if (!data.enabled || p.phase === "no_key") state(badge, "● Нет ключа Alchemy — добавьте его в админке", "bad");
+        if (data.unavailable_reason) state(badge, "● Скринер недоступен: " + data.unavailable_reason, "bad");
+        else if (!data.enabled || p.phase === "no_key") state(badge, "● Нет ключа Alchemy — добавьте его в админке", "bad");
         else if (p.phase === "budget_exhausted") state(badge, "● Месячный бюджет опроса исчерпан", "bad");
         else if (Object.keys(errors).length) state(badge, "● Ошибка части сетей — подробности ниже", "bad");
         else if (!Object.keys(successes).length) state(badge, "◌ Первый опрос / подключение…", "warn");
@@ -67,7 +68,8 @@
         });
         const empty = $("screener-empty");
         empty.hidden = target.childElementCount > 0;
-        empty.textContent = (!data.enabled ? "Сначала добавьте ключ в админке." :
+        empty.textContent = (data.unavailable_reason ? "Скринер отключён до устранения причины выше." :
+            !data.enabled ? "Сначала добавьте ключ в админке." :
             "Событий по фильтрам пока нет. Первый запуск запоминает текущий блок; старая история не загружается.");
     }
     async function load() {

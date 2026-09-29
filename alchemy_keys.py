@@ -11,9 +11,18 @@ import hashlib
 import json
 import os
 import secrets
+import warnings
 from pathlib import Path
 
-from cryptography.fernet import Fernet, InvalidToken
+try:
+    from cryptography.fernet import Fernet, InvalidToken
+    CRYPTO_AVAILABLE = True
+except ImportError:
+    # Never fall back to plaintext credentials when the optional dependency is
+    # missing. The rest of the site can start; key management stays disabled.
+    Fernet = None
+    InvalidToken = Exception
+    CRYPTO_AVAILABLE = False
 
 from whale_screener import alchemy_key
 
@@ -24,6 +33,10 @@ class KeyStoreError(Exception):
 
 class AlchemyKeyStore:
     def __init__(self, secret: str, path: Path | None = None, env_key: str = ""):
+        if not CRYPTO_AVAILABLE:
+            message = "Пакет cryptography не установлен. Установите: pip install 'cryptography>=41.0.0'"
+            warnings.warn("[WARNING] " + message, RuntimeWarning, stacklevel=2)
+            raise KeyStoreError(message)
         if len(secret) < 16:
             raise ValueError("Stable LIQSCOPE_SECRET is required")
         self.path = path or Path(__file__).resolve().parent / "data/alchemy_keys.enc"

@@ -15,9 +15,10 @@
     async function load() {
         try {
             const data = await request("/api/admin/screener/config");
-            if (data.vault_error) {
-                keyStatus.textContent = "Зашифрованные ключи недоступны: восстановите прежний LIQSCOPE_SECRET";
-            }
+            const unavailable = Boolean(data.vault_error || !data.config);
+            el("whale-admin-key").disabled = unavailable;
+            el("whale-admin-add-key").disabled = unavailable;
+            if (data.vault_error) keyStatus.textContent = data.vault_error;
             const cfg = data.config;
             if (!cfg) { status.textContent = "Скринер не запущен"; return; }
             el("whale-admin-interval").value = String(cfg.interval_sec / 60);
@@ -72,13 +73,13 @@
     el("whale-admin-add-key").addEventListener("click", async () => {
         const input = el("whale-admin-key");
         const value = input.value.trim();
-        input.value = "";
         if (!value) { keyStatus.textContent = "Введите ключ"; return; }
         keyStatus.textContent = "Сохраняю ключ…";
         try {
             await request("/api/admin/screener/keys", {method: "POST",
                 headers: {"Content-Type": "application/json"},
                 body: JSON.stringify({key: value})});
+            input.value = "";
             keyStatus.textContent = "Ключ сохранён; проверка сетей началась. Обновление состояния через несколько секунд.";
             await load();
             setTimeout(load, 7000);

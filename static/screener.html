@@ -14,7 +14,7 @@ section{border:1px solid #2a3a51;background:#111c2c;border-radius:12px;padding:1
 </style>
 </head>
 <body>
-<header><a href="/">LIQSCOPE</a><nav><a href="/terminal">⚡ Терминал</a><a href="/admin">⚙️ Админка</a></nav></header>
+<header><a href="/">LIQSCOPE</a><nav><a href="/terminal">⚡ Терминал</a><span id="nav-account"></span></nav></header>
 <main>
 <h1>🐋 Ончейн-скринер / Whale Alert</h1>
 <p>Крупные переводы по известным EVM-кошелькам биржам. Данные не являются доказательством покупки или продажи. Обновление страницы не расходует API Alchemy: история берётся из памяти сервера.</p>
@@ -25,5 +25,5 @@ section{border:1px solid #2a3a51;background:#111c2c;border-radius:12px;padding:1
 <label>Сеть <select id="whale-chain"><option value="ALL">Все EVM</option><option value="ETH">ETH</option><option value="BNB">BNB</option><option value="POLYGON">Polygon</option><option value="ARBITRUM">Arbitrum</option><option value="BASE">Base</option><option value="HYPERLIQUID">HyperEVM</option></select></label>
 <label>Направление <select id="whale-direction"><option value="ALL">Все</option><option value="inflow">Вход</option><option value="outflow">Выход</option></select></label>
 <div id="screener-events" aria-live="polite"></div><p id="screener-empty">Загружаю историю…</p></section>
-</main><script src="/static/screener.js?v=1" defer></script>
+</main><script src="/static/account.js?v=nav2" defer></script><script src="/static/screener.js?v=2" defer></script>
 </body></html>

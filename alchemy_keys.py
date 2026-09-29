@@ -31,6 +31,14 @@ class KeyStoreError(Exception):
     pass
 
 
+def mask_key(value: str) -> str:
+    """Show a short prefix and suffix without ever returning a full short key."""
+    value = str(value or "")
+    if len(value) <= 8:
+        return "••••" + (value[-2:] if len(value) > 2 else "")
+    return value[:4] + "••••" + value[-4:]
+
+
 class AlchemyKeyStore:
     def __init__(self, secret: str, path: Path | None = None, env_key: str = ""):
         if not CRYPTO_AVAILABLE:
@@ -89,9 +97,9 @@ class AlchemyKeyStore:
 
     def public(self) -> list[dict]:
         if self._rows:
-            return [{"id": r["id"], "hint": "••••" + r["key"][-4:], "source": "admin"}
+            return [{"id": r["id"], "hint": mask_key(r["key"]), "source": "admin"}
                     for r in self._rows]
-        return [{"id": "env", "hint": "••••" + self._env[-4:], "source": "environment"}] if self._env else []
+        return [{"id": "env", "hint": mask_key(self._env), "source": "environment"}] if self._env else []
 
     def add(self, raw: str) -> dict:
         try:
@@ -109,7 +117,7 @@ class AlchemyKeyStore:
         except OSError:
             self._rows.pop()
             raise KeyStoreError("Не удалось сохранить зашифрованные ключи") from None
-        return {"id": row["id"], "hint": "••••" + key[-4:], "source": "admin"}
+        return {"id": row["id"], "hint": mask_key(key), "source": "admin"}
 
     def remove(self, identifier: str) -> bool:
         previous = self._rows

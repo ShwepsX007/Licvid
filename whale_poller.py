@@ -16,7 +16,7 @@ from pathlib import Path
 import aiohttp
 
 from whale_screener import TOKENS, TRANSFER_TOPIC, WhaleScreener, alchemy_key
-from alchemy_keys import AlchemyKeyStore
+from alchemy_keys import AlchemyKeyStore, mask_key
 
 ENDPOINTS = {
     "ETH": "eth-mainnet", "BNB": "bnb-mainnet", "POLYGON": "polygon-mainnet",
@@ -130,7 +130,7 @@ class WhalePoller:
 
     def key_status(self) -> list[dict]:
         public = (self.key_store.public() if self.key_store else
-                  [{"id": "legacy", "hint": "••••" + self._fallback_key[-4:],
+                  [{"id": "legacy", "hint": mask_key(self._fallback_key),
                     "source": "environment"}] if self._fallback_key else [])
         now = time.time()
         return [{**row,

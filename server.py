@@ -37,6 +37,8 @@ LiqScope Web Server — терминал ликвидаций в реально�
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import json
 import atexit
 import contextlib
@@ -68,7 +70,7 @@ from cpu_pool import run as run_cpu, shutdown as shutdown_cpu_pool
 
 from fastapi import FastAPI, Query, Body, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from starlette.responses import Response
 
 # Быстрый JSON. orjson сериализует ответы в 3-6 раз быстрее стандартного
@@ -121,10 +123,11 @@ from market_feed import GATE_REST, MarketFeed, TF_MINUTES, base_of, canon, _get_
 # Keep the credential-free Hyperliquid source independent of optional Alchemy
 # key management. A missing encryption library never means plaintext key storage.
 try:
-    from whale_screener import WhaleScreener
+    from whale_screener import WhaleScreener, event_exchange
     WHALE_SCREENER_AVAILABLE = True
 except Exception:  # noqa: BLE001 — the optional whale feed must not block the terminal
     WhaleScreener = None
+    event_exchange = None
     WHALE_SCREENER_AVAILABLE = False
 
 try:
@@ -381,6 +384,11 @@ install_async_logging()
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(HERE, "static")
+WHALE_HISTORY_FILE = os.getenv(
+    "LIQSCOPE_WHALE_HISTORY_FILE", os.path.join(HERE, "data", "whale_events.sqlite3")
+).strip()
+if WHALE_HISTORY_FILE.lower() in ("0", "none", "off", "false"):
+    WHALE_HISTORY_FILE = ""
 
 SYMBOLS_LIMIT = int(os.getenv("LIQSCOPE_SYMBOLS_LIMIT", "40"))
 EXCHANGES = [e.strip().lower() for e in
@@ -983,6 +991,10 @@ class Hub:
     async def broadcast(self, msg: dict, predicate=None):
         async with self._lock:
             targets = list(self.clients)
+        # Whale events are part of the members-only screener. The shared market
+        # socket remains public for terminal data, but must not leak this feed.
+        if msg.get("type") == "whale_tx":
+            targets = [c for c in targets if getattr(c, "user_id", None) is not None]
         if predicate is not None:
             targets = [c for c in targets if predicate(c)]
         if not targets:
@@ -4382,7 +4394,8 @@ async def lifespan(app: FastAPI):
         try:
             whale_screener = WhaleScreener(
                 "pending", price_fn=lambda pair: feed.prices.get(pair) if feed else None,
-                broadcast=hub.broadcast, min_usd=50_000)
+                broadcast=hub.broadcast, min_usd=50_000,
+                history_path=WHALE_HISTORY_FILE or None)
             if whale_screener.hl_enabled:
                 tasks.append(asyncio.create_task(
                     whale_screener.run_hyperliquid(), name="whale-hyperliquid"))
@@ -4483,6 +4496,8 @@ async def lifespan(app: FastAPI):
         stop_async_logging()          # дописать очередь в журнал перед выходом
         for t in tasks:
             t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         try:
             await asyncio.to_thread(HIST.flush, True)
         except Exception:  # noqa: BLE001
@@ -4493,6 +4508,11 @@ async def lifespan(app: FastAPI):
             pass
         await tg_bot.stop()
         await feed.stop()
+        if whale_screener:
+            try:
+                await asyncio.to_thread(whale_screener.close)
+            except Exception:  # noqa: BLE001 — history cleanup must not block shutdown
+                pass
         shutdown_cpu_pool()
 
 
@@ -4861,6 +4881,25 @@ app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(MaxBodyMiddleware)
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(MetricsMiddleware)
+
+
+@app.middleware("http")
+async def protect_screener_api(request: Request, call_next):
+    """Every screener data route is private to an active LiqScope session."""
+    path = request.url.path
+    private_api = path == "/api/screener" or path.startswith("/api/screener/")
+    if private_api:
+        user = await asyncio.to_thread(current_user, request)
+        if not user:
+            response = JSONResponse({"ok": False, "error": "auth"}, status_code=401)
+            response.headers["Cache-Control"] = "private, no-store"
+            return response
+        request.state.screener_user = user
+    response = await call_next(request)
+    if private_api:
+        response.headers["Cache-Control"] = "private, no-store"
+    return response
+
 
 account_ctx.store = account_store
 account_ctx.bot = tg_bot
@@ -5728,10 +5767,132 @@ async def api_admin_remove_alchemy_key(request: Request, identifier: str):
     return {"ok": deleted}
 
 
+def _alchemy_admin_keys() -> list[dict]:
+    if whale_poller:
+        return whale_poller.key_status()
+    return alchemy_key_store.public() if alchemy_key_store else []
+
+
+@app.get("/api/admin/alchemy/keys")
+async def api_admin_alchemy_keys(request: Request):
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    try:
+        keys = _alchemy_admin_keys()
+    except KeyStoreError:
+        return JSONResponse({"error": "vault_unavailable",
+                             "vault_error": alchemy_vault_error}, status_code=503)
+    return {"ok": True, "keys": keys, "vault_error": alchemy_vault_error,
+            "available": bool(alchemy_key_store and not alchemy_vault_error)}
+
+
+@app.post("/api/admin/alchemy/keys")
+async def api_admin_alchemy_add_key(request: Request,
+                                    body: dict = Body(default_factory=dict)):
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    if not alchemy_key_store or alchemy_vault_error:
+        return JSONResponse({"error": "vault_unavailable"}, status_code=503)
+    value = body.get("key")
+    if not isinstance(value, str) or len(value) > 500:
+        return JSONResponse({"error": "invalid_key"}, status_code=422)
+    try:
+        public = alchemy_key_store.add(value)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+    except KeyStoreError:
+        return JSONResponse({"error": "vault_unavailable"}, status_code=503)
+    if whale_poller:
+        whale_poller.wakeup.set()
+    return {"ok": True, "key": public}
+
+
+async def _api_admin_alchemy_remove(request: Request, identifier: str):
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    if not alchemy_key_store or not re.fullmatch(r"[0-9a-f]{16}", identifier):
+        return JSONResponse({"error": "unknown_key"}, status_code=404)
+    try:
+        deleted = alchemy_key_store.remove(identifier)
+    except KeyStoreError:
+        return JSONResponse({"error": "vault_unavailable"}, status_code=503)
+    if whale_poller:
+        whale_poller.wakeup.set()
+    if not deleted:
+        return JSONResponse({"error": "unknown_key"}, status_code=404)
+    return {"ok": True}
+
+
+@app.delete("/api/admin/alchemy/keys")
+async def api_admin_alchemy_delete_key(request: Request):
+    body = {}
+    if "application/json" in (request.headers.get("content-type") or ""):
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+    body = body if isinstance(body, dict) else {}
+    identifier = str(body.get("id") or body.get("key_id") or body.get("identifier") or
+                     request.query_params.get("id") or "").strip()
+    return await _api_admin_alchemy_remove(request, identifier)
+
+
+@app.delete("/api/admin/alchemy/keys/{identifier}")
+async def api_admin_alchemy_delete_key_by_id(request: Request, identifier: str):
+    return await _api_admin_alchemy_remove(request, identifier)
+
+
+@app.get("/api/admin/alchemy/stats")
+async def api_admin_alchemy_stats(request: Request):
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    poll = whale_poller.status() if whale_poller else {}
+    errors = poll.get("errors") or {}
+    last_success = poll.get("last_success") or {}
+    last_attempt = poll.get("last_attempt") or {}
+    keyless = not poll.get("keys_configured")
+    networks = []
+    for chain in ("ETH", "BNB", "POLYGON", "ARBITRUM", "BASE"):
+        error = str(errors.get(chain) or "")
+        success = float(last_success.get(chain) or 0)
+        setup_error = alchemy_vault_error if not whale_poller else ""
+        state = "error" if error or setup_error else "online" if success else "waiting"
+        networks.append({"chain": chain, "provider": "alchemy", "status": state,
+                         "last_success": success, "last_attempt": float(last_attempt.get(chain) or 0),
+                         "error": error or (setup_error if setup_error else
+                                            "no_key" if keyless and not success else "")})
+    native = whale_screener.native_status() if whale_screener else {
+        "network": "HYPERLIQUID", "provider": "native_api", "enabled": False,
+        "connected": False, "state": "unavailable", "error": ""}
+    networks.append({"chain": "HYPERLIQUID", "provider": "native_api",
+                     "status": "online" if native.get("connected") else
+                              "error" if native.get("error") else "waiting",
+                     "last_success": float(native.get("last_event_ts") or native.get("last_message_ts") or 0),
+                     "last_attempt": float(native.get("last_message_ts") or 0),
+                     "error": str(native.get("error") or "")})
+    used = int(poll.get("reserved_cu") or 0)
+    budget = int(poll.get("budget_cu") or 0)
+    keys = _alchemy_admin_keys()
+    key_share = max(1000, budget // len(keys)) if keys and budget else 0
+    return {"ok": True, "available": bool(alchemy_key_store and not alchemy_vault_error),
+            "vault_error": alchemy_vault_error,
+            "cu": {"month": poll.get("month") or "", "used": used,
+                   "limit": budget, "percent": round(100 * used / budget, 2) if budget else 0,
+                   "key_share": key_share,
+                   "keys_configured": len(keys), "keys": keys},
+            "networks": networks, "native": native,
+            "phase": poll.get("phase") or "unavailable"}
+
+
 @app.get("/api/screener/whales")
-async def api_screener_whales(min_usd: float = Query(100_000, ge=0),
+async def api_screener_whales(request: Request,
+                              min_usd: float = Query(0, ge=0),
                               chain: str = Query("ALL", pattern="^(ALL|ETH|BNB|POLYGON|ARBITRUM|BASE|HYPERLIQUID)$"),
-                              limit: int = Query(50, ge=1, le=100)):
+                              limit: int = Query(100, ge=1, le=100)):
     alchemy_enabled = bool(alchemy_key_store and alchemy_key_store.keys())
     native_enabled = bool(whale_screener and whale_screener.hl_enabled)
     return {"enabled": alchemy_enabled, "alchemy_enabled": alchemy_enabled,
@@ -5747,8 +5908,204 @@ async def api_screener_whales(min_usd: float = Query(100_000, ge=0),
                 "subscriptions_acked": 0, "trades_seen": 0,
                 "events": 0, "reconnects": 0,
                 "error": alchemy_vault_error or "Whale-скринер недоступен"},
-            "events": whale_screener.history(min_usd, chain, limit) if whale_screener else [],
+            "events": whale_screener.history(min_usd, chain, limit,
+                                               time.time() - 7 * 24 * 60 * 60)
+            if whale_screener else [],
             "poller": whale_poller.status() if whale_poller else None}
+
+
+_SCREENER_NETWORKS = ("ETH", "BNB", "POLYGON", "ARBITRUM", "BASE", "HYPERLIQUID")
+_EXPLORER_TX = {
+    "ETH": "https://etherscan.io/tx/", "BNB": "https://bscscan.com/tx/",
+    "POLYGON": "https://polygonscan.com/tx/", "ARBITRUM": "https://arbiscan.io/tx/",
+    "BASE": "https://basescan.org/tx/", "HYPERLIQUID": "https://hypurrscan.io/tx/",
+}
+
+
+def _screener_network_status() -> dict:
+    poll = whale_poller.status() if whale_poller else {}
+    errors = poll.get("errors") or {}
+    successes = poll.get("last_success") or {}
+    attempts = poll.get("last_attempt") or {}
+    has_keys = bool(poll.get("keys_configured"))
+    result = {}
+    for chain in ("ETH", "BNB", "POLYGON", "ARBITRUM", "BASE"):
+        error = str(errors.get(chain) or "")
+        success = float(successes.get(chain) or 0)
+        setup_error = alchemy_vault_error if not whale_poller else ""
+        state = "error" if error or setup_error else "online" if success else "waiting"
+        result[chain] = {
+            "status": state,
+            "last_success": success, "last_attempt": float(attempts.get(chain) or 0),
+            "error": error or (setup_error if setup_error else
+                                "no_key" if not has_keys and not success else ""),
+        }
+    native = whale_screener.native_status() if whale_screener else {
+        "network": "HYPERLIQUID", "enabled": False, "connected": False,
+        "state": "unavailable", "error": ""}
+    result["HYPERLIQUID"] = {
+        "status": "online" if native.get("connected") else
+                  "error" if native.get("error") else "waiting",
+        "last_success": float(native.get("last_event_ts") or native.get("last_message_ts") or 0),
+        "last_attempt": float(native.get("last_message_ts") or 0),
+        "error": str(native.get("error") or ""),
+    }
+    return result
+
+
+@app.get("/api/screener/stats")
+async def api_screener_stats(request: Request):
+    now = time.time()
+    since = now - 24 * 60 * 60
+    events = (await asyncio.to_thread(whale_screener.events_since, since, now)
+              if whale_screener else [])
+    health = _screener_network_status()
+    networks = {
+        chain: {"status": health[chain]["status"],
+                "last_success": health[chain]["last_success"],
+                "last_attempt": health[chain]["last_attempt"],
+                "error": health[chain]["error"],
+                "events": 0, "volume_usd": 0.0,
+                "inflow_usd": 0.0, "outflow_usd": 0.0,
+                "buy_usd": 0.0, "sell_usd": 0.0}
+        for chain in _SCREENER_NETWORKS
+    }
+    exchange_totals = {chain: {} for chain in ("ALL", *_SCREENER_NETWORKS)}
+    hour_now = int(now // 3600) * 3600
+    first_hour = hour_now - 23 * 3600
+    series = []
+    for i in range(24):
+        networks_by_hour = {
+            chain: {"inflow_usd": 0.0, "outflow_usd": 0.0,
+                    "buy_usd": 0.0, "sell_usd": 0.0}
+            for chain in _SCREENER_NETWORKS
+        }
+        series.append({"timestamp": first_hour + i * 3600,
+                       "networks": networks_by_hour})
+    total_usd = 0.0
+    for event in events:
+        chain = str(event.get("chain") or "").upper()
+        if chain not in networks:
+            continue
+        try:
+            value = float(event.get("usd") or 0)
+            timestamp = float(event.get("timestamp") or 0)
+        except (TypeError, ValueError):
+            continue
+        if value < 0 or not math.isfinite(value):
+            continue
+        row = networks[chain]
+        row["events"] += 1
+        row["volume_usd"] += value
+        total_usd += value
+        hour = int(timestamp // 3600) * 3600
+        if first_hour <= hour <= hour_now:
+            cell = series[int((hour - first_hour) // 3600)]["networks"][chain]
+            direction = str(event.get("direction") or "").lower()
+            if direction == "trade":
+                side = str(event.get("side") or "").upper()
+                cell["buy_usd" if side == "BUY" else "sell_usd"] += value
+                row["buy_usd" if side == "BUY" else "sell_usd"] += value
+            elif direction in ("inflow", "outflow"):
+                cell[direction + "_usd"] += value
+                row[direction + "_usd"] += value
+            elif event.get("to_label"):
+                cell["inflow_usd"] += value
+                row["inflow_usd"] += value
+            elif event.get("from_label"):
+                cell["outflow_usd"] += value
+                row["outflow_usd"] += value
+        venue = event_exchange(event) if event_exchange else ""
+        for scope in ("ALL", chain):
+            if venue:
+                venue_row = exchange_totals[scope].setdefault(
+                    venue, {"name": venue, "events": 0, "volume_usd": 0.0})
+                venue_row["events"] += 1
+                venue_row["volume_usd"] += value
+    # JSON-safe rounding and compact, pre-ranked exchange summaries.
+    for chain_data in networks.values():
+        for key in ("volume_usd", "inflow_usd", "outflow_usd", "buy_usd", "sell_usd"):
+            chain_data[key] = round(chain_data[key], 2)
+    for point in series:
+        for cell in point["networks"].values():
+            for key, value in tuple(cell.items()):
+                cell[key] = round(value, 2)
+    top_exchanges = {}
+    for scope, values in exchange_totals.items():
+        top_exchanges[scope] = sorted(values.values(),
+                                      key=lambda item: item["volume_usd"], reverse=True)[:10]
+        for item in top_exchanges[scope]:
+            item["volume_usd"] = round(item["volume_usd"], 2)
+    online = sum(1 for data in networks.values() if data["status"] == "online")
+    return {"since": since, "until": now, "total_events": len(events),
+            "total_volume_usd": round(total_usd, 2), "active_networks": online,
+            "networks": networks, "series": series,
+            "top_exchanges": top_exchanges,
+            "native": whale_screener.native_status() if whale_screener else {}}
+
+
+@app.get("/api/screener/history")
+async def api_screener_history(
+        request: Request,
+        chain: str = Query("ALL", pattern="^(ALL|ETH|BNB|POLYGON|ARBITRUM|BASE|HYPERLIQUID)$"),
+        min_usd: float = Query(0, ge=0),
+        direction: str = Query("ALL", pattern="^(ALL|inflow|outflow|trade)$"),
+        exchange: str = Query("ALL", max_length=100),
+        page: int = Query(1, ge=1),
+        page_size: int = Query(50, ge=1, le=50),
+        sort_by: str = Query("timestamp", pattern="^(timestamp|usd|chain|direction)$"),
+        sort_dir: str = Query("desc", pattern="^(asc|desc)$")):
+    now = time.time()
+    since = now - 7 * 24 * 60 * 60
+    rows, total = (await asyncio.to_thread(
+        whale_screener.query_history, since=since, until=now, chain=chain,
+        min_usd=min_usd, direction=direction, exchange=exchange,
+        page=page, page_size=page_size, sort_by=sort_by, sort_dir=sort_dir)
+        if whale_screener else ([], 0))
+    return {"since": since, "until": now, "page": page, "page_size": page_size,
+            "total": total, "pages": max(1, (total + page_size - 1) // page_size),
+            "events": rows}
+
+
+@app.get("/api/screener/history.csv")
+async def api_screener_history_csv(
+        request: Request,
+        chain: str = Query("ALL", pattern="^(ALL|ETH|BNB|POLYGON|ARBITRUM|BASE|HYPERLIQUID)$"),
+        min_usd: float = Query(0, ge=0),
+        direction: str = Query("ALL", pattern="^(ALL|inflow|outflow|trade)$"),
+        exchange: str = Query("ALL", max_length=100)):
+    now = time.time()
+    since = now - 7 * 24 * 60 * 60
+    rows, _ = (await asyncio.to_thread(
+        whale_screener.query_history, since=since, until=now, chain=chain,
+        min_usd=min_usd, direction=direction, exchange=exchange,
+        page=1, page_size=None, sort_by="timestamp", sort_dir="desc")
+        if whale_screener else ([], 0))
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow(("timestamp_utc", "network", "direction", "side", "asset",
+                     "amount", "usd", "exchange", "from", "to", "transaction_hash",
+                     "explorer_url"))
+    def safe_csv(value):
+        value = str(value or "")
+        return "'" + value if value[:1] in ("=", "+", "-", "@", "\t", "\r") else value
+    for event in rows:
+        chain_name = str(event.get("chain") or "")
+        tx_hash = str(event.get("hash") or "")
+        try:
+            timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(event.get("timestamp") or 0)))
+        except (ValueError, TypeError, OverflowError):
+            timestamp = ""
+        writer.writerow(tuple(safe_csv(value) for value in (
+            timestamp, chain_name, event.get("direction"), event.get("side"),
+            event.get("symbol"), event.get("amount"), event.get("usd"),
+            (event.get("from_label") or event.get("to_label") or ""),
+            event.get("from"), event.get("to"), tx_hash,
+            _EXPLORER_TX.get(chain_name, "") + tx_hash if tx_hash else "")))
+    return Response(content="\ufeff" + output.getvalue(),
+                    media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": "attachment; filename=whale-history-7d.csv",
+                             "Cache-Control": "private, no-store"})
 
 
 @app.get("/api/liquidations")
@@ -6191,6 +6548,22 @@ async def ws_endpoint(websocket: WebSocket):
         sync_hot_symbols()
 
 
+async def _screener_file_response(request: Request):
+    user = await asyncio.to_thread(current_user, request)
+    if not user:
+        return RedirectResponse("/login?next=/screener", status_code=303,
+                                headers={"Cache-Control": "private, no-store"})
+    return FileResponse(os.path.join(STATIC_DIR, "screener.html"),
+                        headers={"Cache-Control": "private, no-store"})
+
+
+# The HTML also exists below /static; register this exact path before the
+# StaticFiles mount so it cannot be used to bypass the members-only gate.
+@app.get("/static/screener.html", include_in_schema=False)
+async def protected_screener_asset(request: Request):
+    return await _screener_file_response(request)
+
+
 app.mount("/static", CachedStaticFiles(directory=STATIC_DIR), name="static")
 
 
@@ -6210,9 +6583,8 @@ async def root(request: Request):
 
 
 @app.get("/screener")
-async def screener_page():
-    return FileResponse(os.path.join(STATIC_DIR, "screener.html"),
-                        headers={"Cache-Control": "no-store"})
+async def screener_page(request: Request):
+    return await _screener_file_response(request)
 
 
 @app.get("/terminal")

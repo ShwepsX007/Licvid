@@ -5546,11 +5546,12 @@
         finishBookFeed(ordered.length);
     }
 
-    // One global /ws delivers whale_tx to all viewers. Keep a bounded local
+    // Members receive whale_tx on the shared market socket. Keep a bounded local
     // cache so a REST history response cannot erase events received in flight.
     const whaleRows = new Map();
     let whaleEnabled = true;
     let whaleNativeEnabled = false;
+    let whaleAuthRequired = false;
     let whaleRequest = 0;
     function whaleKey(row) { return row.chain + ":" + row.hash + ":" + row.log_index; }
     function addWhale(row) {
@@ -5563,6 +5564,17 @@
     function paintWhales() {
         const target = $("whale-events"), empty = $("whale-empty");
         if (!target || !empty) return;
+        if (whaleAuthRequired) {
+            target.replaceChildren();
+            feedCountEl.textContent = "";
+            empty.hidden = false;
+            empty.replaceChildren(document.createTextNode(I18n.t("screener.members_only") + " "));
+            const link = document.createElement("a");
+            link.href = "/login?next=/screener";
+            link.textContent = I18n.t("screener.sign_in");
+            empty.append(link);
+            return;
+        }
         const min = Number($("whale-min").value), chain = $("whale-chain").value;
         const direction = $("whale-direction").value;
         const rows = Array.from(whaleRows.values()).filter((row) =>
@@ -5599,8 +5611,8 @@
         target.replaceChildren(frag);
         feedCountEl.textContent = rows.length + " событий";
         empty.hidden = rows.length > 0;
-        empty.textContent = (whaleEnabled || whaleNativeEnabled) ? "Пока нет событий по фильтрам" :
-            "Скринер недоступен: нет подключения к Alchemy и нативному Hyperliquid API";
+        empty.textContent = (whaleEnabled || whaleNativeEnabled)
+            ? I18n.t("screener.feed_empty") : I18n.t("screener.status_waiting");
     }
     async function loadWhales() {
         const seq = ++whaleRequest;
@@ -5608,35 +5620,27 @@
         try {
             const res = await fetch("/api/screener/whales?min_usd=" + min +
                                     "&chain=" + chain + "&limit=100");
+            if (res.status === 401) {
+                whaleAuthRequired = true;
+                whaleRows.clear();
+                if (seq === whaleRequest) paintWhales();
+                return;
+            }
             if (!res.ok) throw new Error("HTTP " + res.status);
             const data = await res.json();
             if (seq !== whaleRequest) return;
+            whaleAuthRequired = false;
             whaleEnabled = data.enabled;
             whaleNativeEnabled = !!(data.native && data.native.enabled);
             const scope = $("whale-scope-note");
-            if (scope) {
-                const poll = data.poller || {};
-                const evm = data.enabled ? "EVM через Alchemy · опрос каждые " +
-                    Math.round((poll.interval_sec || 3600) / 60) + " мин · " +
-                    Number(poll.reserved_cu || 0).toLocaleString() + "/" +
-                    Number(poll.budget_cu || 0).toLocaleString() + " CU" :
-                    data.alchemy_unavailable_reason ?
-                    "EVM-скринер недоступен: " + data.alchemy_unavailable_reason :
-                    "EVM через Alchemy ожидает API-ключ";
-                const hl = data.native && data.native.connected ?
-                    "Hyperliquid Core — native WS подключён, " +
-                    Number(data.native.market_count || 0).toLocaleString() + " рынков" :
-                    "Hyperliquid Core подключается к native API";
-                scope.textContent = evm + " · " + hl +
-                    ". SOL, BTC/BCH, LTC, TRON, SUI, DOGE пока не подключены.";
-            }
+            if (scope) scope.textContent = I18n.t("screener.members_dashboard_hint");
             (data.events || []).slice().reverse().forEach(addWhale);
             paintWhales();
         } catch (e) {
             if (seq === whaleRequest) {
                 whaleEnabled = true;
                 paintWhales();
-                if (!whaleRows.size) $("whale-empty").textContent = "Нет связи с ончейн-скринером";
+                if (!whaleRows.size) $("whale-empty").textContent = I18n.t("screener.load_error");
             }
         }
     }

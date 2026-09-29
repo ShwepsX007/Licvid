@@ -33,6 +33,7 @@
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="stylesheet" href="/static/account.css?v=rebrand1">
     <link rel="stylesheet" href="/static/ui_compact.css?v=1">
+    <link rel="stylesheet" href="/static/whale_admin.css?v=dashboard1">
 </head>
 <body data-page="admin">
 <header class="site-header">
@@ -190,22 +191,38 @@
         <p class="meta" id="layers-enabled-note" style="font-style:italic"></p>
     </div>
 
-<div class="card" id="whale-admin-card" style="margin-top:14px" data-hint="Alchemy, кошельки и месячный бюджет">
-    <h3>🐋 Ончейн-скринер — бюджет Free</h3>
-    <p><a class="btn btn-primary btn-compact" href="/screener">Открыть 🐋 крипто-скринер →</a></p>
-    <p class="meta">Ключи добавляются ниже без правки systemd. Они шифруются на сервере и не возвращаются в браузер. Несколько ключей переключаются при 429/ограничении доли; общий бюджет Free НЕ увеличивается. Режим «только известные EVM-адреса бирж». Полный охват сетей на Free недоступен: выборка всех блоков Arbitrum одна стоит более 207 млн CU за 30 дней. SOL/BTC/BCH/LTC/TRON/SUI/DOGE пока не подключены — их кошельки требуют отдельных проверенных списков и адаптеров.</p>
+<div class="card" id="whale-admin-card" style="margin-top:14px" data-hint="Alchemy API management" hidden>
+    <h3 data-i18n="adm.alchemy_title">🐋 Whale Screener · Alchemy API</h3>
+    <p><a class="btn btn-primary btn-compact" href="/screener" data-i18n="adm.alchemy_open">Open Whale Screener →</a></p>
+    <p class="meta" data-i18n="adm.alchemy_lead">Manage encrypted Alchemy keys, monitor request units and network health. Secrets are never returned to the browser.</p>
+    <div class="whale-admin-overview" aria-live="polite">
+        <div class="whale-admin-stat"><span data-i18n="adm.alchemy_key_count">Configured keys</span><strong id="whale-admin-summary">—</strong></div>
+        <div class="whale-admin-stat whale-admin-cu-stat">
+            <span data-i18n="adm.alchemy_cu_title">Monthly CU usage</span>
+            <strong id="whale-admin-cu-label">—</strong>
+            <div class="whale-admin-progress"><i id="whale-admin-cu-progress"></i></div>
+            <small id="whale-admin-cu-meta" class="meta"></small>
+        </div>
+    </div>
+    <h4 class="whale-admin-subtitle" data-i18n="adm.alchemy_keys_title">Alchemy API keys</h4>
     <div class="row-actions" style="flex-wrap:wrap;gap:10px">
-        <label>Alchemy API Key или URL /v2/… <input class="search" type="password" autocomplete="new-password" id="whale-admin-key" placeholder="Вставьте новый ключ" maxlength="500"></label>
-        <button class="btn btn-primary" type="button" id="whale-admin-add-key">Добавить ключ</button>
+        <label><span data-i18n="adm.alchemy_key_label">API key or Alchemy /v2 URL</span>
+            <input class="search" type="password" autocomplete="new-password" id="whale-admin-key"
+                   data-i18n-placeholder="adm.alchemy_key_placeholder" placeholder="Paste a new key" maxlength="500"></label>
+        <button class="btn btn-primary" type="button" id="whale-admin-add-key" data-i18n="adm.alchemy_add">Add key</button>
         <span id="whale-admin-key-status" class="meta" role="status"></span>
     </div>
-    <div id="whale-admin-keys" style="padding:8px 0" aria-live="polite"></div>
-    <div id="whale-admin-chains" class="meta" aria-live="polite"></div>
-    <div class="row-actions" style="flex-wrap:wrap;gap:10px">
-        <label>Режим <select id="whale-admin-mode" class="search"><option value="cex_only">Только биржи</option><option value="all" disabled>Все переводы — выше лимита Free</option></select></label>
-        <label>Опрос, минут <input type="number" class="search" id="whale-admin-interval" min="10" max="1440" value="60"></label>
-        <label>Бюджет CU/мес <input type="number" class="search" id="whale-admin-budget" min="1000" max="20000000" value="10000000"></label>
-        <button type="button" class="btn btn-primary" id="whale-admin-save">Сохранить</button>
+    <div id="whale-admin-keys" class="whale-admin-keys" aria-live="polite"></div>
+    <h4 class="whale-admin-subtitle" data-i18n="adm.alchemy_networks_title">Network health</h4>
+    <div id="whale-admin-chains" class="whale-admin-networks" aria-live="polite"></div>
+    <div class="row-actions whale-admin-settings" style="flex-wrap:wrap;gap:10px">
+        <label><span data-i18n="adm.alchemy_mode">Mode</span>
+            <select id="whale-admin-mode" class="search"><option value="cex_only" data-i18n="adm.alchemy_cex_only">Known exchanges</option><option value="all" disabled data-i18n="adm.alchemy_all_mode">All transfers (not available)</option></select></label>
+        <label><span data-i18n="adm.alchemy_interval">Poll interval, minutes</span>
+            <input type="number" class="search" id="whale-admin-interval" min="10" max="1440" value="60"></label>
+        <label><span data-i18n="adm.alchemy_budget">Monthly budget, CU</span>
+            <input type="number" class="search" id="whale-admin-budget" min="1000" max="20000000" value="10000000"></label>
+        <button type="button" class="btn btn-primary" id="whale-admin-save" data-i18n="adm.alchemy_save">Save</button>
         <span class="meta" id="whale-admin-status" role="status"></span>
     </div>
 </div>
@@ -616,7 +633,7 @@
         <div id="ai-prompt-blocks"><p class="meta">загружаю промты…</p></div>
     </div>
 </main>
-<script src="/static/i18n.pages.js?v=book9"></script>
+<script src="/static/i18n.pages.js?v=screener1"></script>
 <script src="/static/i18n.js?v=quota2"></script>
 <script src="/static/world-map.js?v=geo1"></script>
 <script src="/static/geo_map.js?v=geo2"></script>
@@ -625,7 +642,7 @@
 <script src="/static/articles_admin.js?v=art1"></script>
 <script src="/static/archive_admin.js?v=arcdel1"></script>
 <script src="/static/consent.js?v=consent1"></script>
-<script src="/static/whale_admin.js?v=2"></script>
+<script src="/static/whale_admin.js?v=dashboard1"></script>
 <link rel="stylesheet" href="/static/brand.css?v=rebrand1">
 </body>
 </html>

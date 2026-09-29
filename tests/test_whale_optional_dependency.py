@@ -46,14 +46,15 @@ with tempfile.TemporaryDirectory() as tmp:
 assert server.WHALE_POLLER_AVAILABLE
 with TestClient(server.app) as client:
     assert client.get("/").status_code == 200
-    res = client.get("/api/screener/whales")
-    assert res.status_code == 200 and not res.json()["enabled"]
-    assert res.json()["unavailable_reason"] == ""
-    assert "cryptography" in res.json()["alchemy_unavailable_reason"]
-    assert res.json()["native"]["enabled"] is False
-    assert server.whale_screener is not None
-    assert server.whale_poller is None and server.alchemy_key_store is None
+    assert client.get("/api/screener/whales").status_code == 401
     with patch.object(server, "current_user", lambda request: {"id": 1, "is_admin": True}):
+        res = client.get("/api/screener/whales")
+        assert res.status_code == 200 and not res.json()["enabled"]
+        assert res.json()["unavailable_reason"] == ""
+        assert "cryptography" in res.json()["alchemy_unavailable_reason"]
+        assert res.json()["native"]["enabled"] is False
+        assert server.whale_screener is not None
+        assert server.whale_poller is None and server.alchemy_key_store is None
         cfg = client.get("/api/admin/screener/config")
         assert "cryptography" in cfg.json()["vault_error"]
         assert client.post("/api/admin/screener/keys", json={"key": "dummy-test-key"}).status_code == 503
@@ -74,14 +75,16 @@ async def fake_native_stream(self):
     await asyncio.Event().wait()
 with patch.object(server.WhaleScreener, "run_hyperliquid", fake_native_stream):
     with TestClient(server.app) as client:
-        result = client.get("/api/screener/whales").json()
-        assert not result["enabled"]  # no Alchemy keys configured
-        assert result["native_enabled"] and result["native"]["connected"]
-        assert result["available"]
-        assert result["native"]["provider"] == "native_api"
-        assert result["native_supported"] == ["HYPERLIQUID"]
-        assert server.alchemy_key_store is not None
-        assert server.alchemy_key_store.keys() == []
+        assert client.get("/api/screener/whales").status_code == 401
+        with patch.object(server, "current_user", lambda request: {"id": 1, "is_admin": True}):
+            result = client.get("/api/screener/whales").json()
+            assert not result["enabled"]  # no Alchemy keys configured
+            assert result["native_enabled"] and result["native"]["connected"]
+            assert result["available"]
+            assert result["native"]["provider"] == "native_api"
+            assert result["native_supported"] == ["HYPERLIQUID"]
+            assert server.alchemy_key_store is not None
+            assert server.alchemy_key_store.keys() == []
 assert started
 ''')
 
@@ -93,14 +96,17 @@ import server
 with patch.object(server, "WhaleScreener", side_effect=FileNotFoundError("missing test wallet file")):
     with TestClient(server.app) as client:
         assert client.get("/terminal").status_code == 200
-        result = client.get("/api/screener/whales").json()
-        assert not result["enabled"] and "cex_wallets.json" in result["unavailable_reason"]
+        assert client.get("/api/screener/whales").status_code == 401
+        with patch.object(server, "current_user", lambda request: {"id": 1, "is_admin": True}):
+            result = client.get("/api/screener/whales").json()
+            assert not result["enabled"] and "cex_wallets.json" in result["unavailable_reason"]
         assert server.whale_poller is None and server.alchemy_key_store is None
 ''')
 
     def test_without_whale_poller_import_site_starts(self):
         self._isolated('''
 import builtins
+from unittest.mock import patch
 real_import = builtins.__import__
 def without_whale_poller(name, *args, **kwargs):
     if name == "whale_poller":
@@ -112,13 +118,15 @@ import server
 assert not server.WHALE_POLLER_AVAILABLE
 with TestClient(server.app) as client:
     assert client.get("/terminal").status_code == 200
-    result = client.get("/api/screener/whales").json()
-    assert not result["enabled"]
-    assert result["unavailable_reason"] == ""
-    assert "Alchemy-модуль" in result["alchemy_unavailable_reason"]
-    assert result["native"]["enabled"] is False
-    assert server.whale_screener is not None
-    assert server.whale_poller is None
+    assert client.get("/api/screener/whales").status_code == 401
+    with patch.object(server, "current_user", lambda request: {"id": 1, "is_admin": True}):
+        result = client.get("/api/screener/whales").json()
+        assert not result["enabled"]
+        assert result["unavailable_reason"] == ""
+        assert "Alchemy-модуль" in result["alchemy_unavailable_reason"]
+        assert result["native"]["enabled"] is False
+        assert server.whale_screener is not None
+        assert server.whale_poller is None
 ''')
 
 

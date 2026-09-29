@@ -10,16 +10,21 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import os
 import re
 import socket
+import sqlite3
+import threading
 import time
 from collections import deque
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import aiohttp
+
+log = logging.getLogger(__name__)
 
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 ADDRESS = re.compile(r"^0x[0-9a-f]{40}$")
@@ -111,6 +116,167 @@ def load_wallets(path: Path) -> dict[str, str]:
     return wallets
 
 
+def event_exchange(event: dict) -> str:
+    """One stable venue label for filtering and exchange-volume attribution."""
+    direction = str(event.get("direction") or "").lower()
+    if direction == "inflow":
+        label = event.get("to_label") or event.get("from_label")
+    elif direction == "outflow":
+        label = event.get("from_label") or event.get("to_label")
+    else:
+        label = event.get("from_label") or event.get("to_label")
+    return str(label or "").strip()
+
+
+class WhaleHistoryStore:
+    """Seven-day durable event history, indexed for dashboards and CSV exports.
+
+    The live WS ring remains intentionally small. This sqlite store is the
+    source for historical pagination and analytics, and makes the seven-day
+    window survive a process restart without retaining an unbounded Python list.
+    """
+
+    TTL_SECONDS = 7 * 24 * 60 * 60
+    _SORT_COLUMNS = {"timestamp": "timestamp", "usd": "usd",
+                     "chain": "chain", "direction": "direction"}
+
+    def __init__(self, path: Path | str):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
+        self._db = sqlite3.connect(str(self.path), timeout=10, check_same_thread=False)
+        self._db.row_factory = sqlite3.Row
+        self._db.execute("PRAGMA journal_mode=WAL")
+        self._db.execute("PRAGMA synchronous=NORMAL")
+        self._db.executescript("""
+            CREATE TABLE IF NOT EXISTS whale_events (
+                event_id TEXT PRIMARY KEY,
+                timestamp REAL NOT NULL,
+                chain TEXT NOT NULL,
+                usd REAL NOT NULL,
+                direction TEXT NOT NULL,
+                exchange TEXT NOT NULL DEFAULT '',
+                payload TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_whale_events_time
+                ON whale_events(timestamp DESC);
+            CREATE INDEX IF NOT EXISTS idx_whale_events_chain_time
+                ON whale_events(chain, timestamp DESC);
+            CREATE INDEX IF NOT EXISTS idx_whale_events_exchange_time
+                ON whale_events(exchange, timestamp DESC);
+        """)
+        self._db.commit()
+        try:
+            self.path.chmod(0o600)
+        except OSError:
+            pass
+        self._last_prune = 0.0
+        self.prune()
+
+    @staticmethod
+    def _id(event: dict) -> str:
+        return ":".join((str(event.get("chain") or ""),
+                         str(event.get("hash") or ""),
+                         str(event.get("log_index") or "")))
+
+    def append(self, event: dict) -> bool:
+        ts = float(event.get("timestamp") or 0)
+        chain = str(event.get("chain") or "")
+        usd = float(event.get("usd") or 0)
+        direction = str(event.get("direction") or "")
+        venue = event_exchange(event)
+        payload = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+        with self._lock:
+            cur = self._db.execute(
+                "INSERT OR IGNORE INTO whale_events"
+                " (event_id,timestamp,chain,usd,direction,exchange,payload)"
+                " VALUES(?,?,?,?,?,?,?)",
+                (self._id(event), ts, chain, usd, direction, venue, payload),
+            )
+            self._db.commit()
+            inserted = cur.rowcount > 0
+            if time.time() - self._last_prune >= 900:
+                self._prune_locked(time.time())
+            return inserted
+
+    def _prune_locked(self, now: float) -> None:
+        self._db.execute("DELETE FROM whale_events WHERE timestamp < ?",
+                         (float(now) - self.TTL_SECONDS,))
+        self._db.commit()
+        self._last_prune = now
+
+    def prune(self, now: float | None = None) -> None:
+        with self._lock:
+            self._prune_locked(time.time() if now is None else now)
+
+    def _where(self, *, since: float | None = None, until: float | None = None,
+               chain: str = "ALL", min_usd: float = 0.0,
+               direction: str = "ALL", exchange: str = "ALL") -> tuple[str, list]:
+        terms, params = [], []
+        if since is not None:
+            terms.append("timestamp >= ?")
+            params.append(float(since))
+        if until is not None:
+            terms.append("timestamp <= ?")
+            params.append(float(until))
+        if chain and chain.upper() != "ALL":
+            terms.append("chain = ?")
+            params.append(chain.upper())
+        if min_usd > 0:
+            terms.append("usd >= ?")
+            params.append(float(min_usd))
+        if direction and direction.upper() != "ALL":
+            terms.append("lower(direction) = ?")
+            params.append(direction.lower())
+        if exchange and exchange.upper() != "ALL":
+            if exchange.lower() in ("unknown", "unlabeled"):
+                terms.append("exchange = ''")
+            else:
+                terms.append("exchange = ? COLLATE NOCASE")
+                params.append(exchange.strip())
+        return (" WHERE " + " AND ".join(terms) if terms else "", params)
+
+    def query(self, *, since: float | None = None, until: float | None = None,
+              chain: str = "ALL", min_usd: float = 0.0,
+              direction: str = "ALL", exchange: str = "ALL",
+              page: int = 1, page_size: int | None = 50,
+              sort_by: str = "timestamp", sort_dir: str = "desc") -> tuple[list[dict], int]:
+        where, params = self._where(since=since, until=until, chain=chain,
+                                    min_usd=min_usd, direction=direction,
+                                    exchange=exchange)
+        sort_col = self._SORT_COLUMNS.get(sort_by, "timestamp")
+        order = "ASC" if str(sort_dir).lower() == "asc" else "DESC"
+        with self._lock:
+            total = int(self._db.execute(
+                "SELECT COUNT(*) FROM whale_events" + where, params).fetchone()[0])
+            sql = ("SELECT payload FROM whale_events" + where +
+                   f" ORDER BY {sort_col} {order}, event_id {order}")
+            args = list(params)
+            if page_size is not None:
+                size = max(1, min(100_000, int(page_size)))
+                offset = max(0, (max(1, int(page)) - 1) * size)
+                sql += " LIMIT ? OFFSET ?"
+                args.extend((size, offset))
+            rows = self._db.execute(sql, args).fetchall()
+        out = []
+        for row in rows:
+            try:
+                event = json.loads(row["payload"])
+            except (TypeError, ValueError):
+                continue
+            if isinstance(event, dict):
+                out.append(event)
+        return out, total
+
+    def latest(self, limit: int = 100) -> list[dict]:
+        rows, _ = self.query(page_size=limit, sort_by="timestamp", sort_dir="desc")
+        return list(reversed(rows))
+
+    def close(self) -> None:
+        with self._lock:
+            self._db.close()
+
+
 class WhaleScreener:
     def __init__(self, api_key: str, price_fn, broadcast,
                  wallet_path: Path | None = None, min_usd: float = 100_000,
@@ -118,12 +284,16 @@ class WhaleScreener:
                  bnb_api_key: str | None = None,
                  hl_ws: str | None = None, hl_rest: str | None = None,
                  hl_enabled: bool | None = None, hl_sub_gap: float | None = None,
-                 hl_ping_sec: float | None = None, hl_fresh_sec: float | None = None):
+                 hl_ping_sec: float | None = None, hl_fresh_sec: float | None = None,
+                 history_path: Path | str | None = None):
         self.price_fn = price_fn
         self.broadcast = broadcast
         self.wallets = load_wallets(wallet_path or Path(__file__).resolve().parent / "data/cex_wallets.json")
         self.min_usd = min_usd
+        self.history_store = WhaleHistoryStore(history_path) if history_path else None
         self.events: deque[dict] = deque(maxlen=100)
+        if self.history_store:
+            self.events.extend(self.history_store.latest(100))
         self.seen: dict[str, deque[str]] = {chain: deque(maxlen=4000) for chain in TRACKED_NETWORKS}
         self.seen_set: dict[str, set[str]] = {chain: set() for chain in TRACKED_NETWORKS}
         self._pending_blocks: dict[str, dict[int, str]] = {chain: {} for chain in TOKENS}
@@ -156,9 +326,58 @@ class WhaleScreener:
             "reconnects": 0, "error": "",
         }
 
-    def history(self, min_usd: float = 100_000, chain: str = "ALL", limit: int = 50) -> list[dict]:
+    def history(self, min_usd: float = 100_000, chain: str = "ALL", limit: int = 50,
+                since: float | None = None) -> list[dict]:
         return [ev.copy() for ev in reversed(self.events)
-                if ev["usd"] >= min_usd and (chain == "ALL" or ev["chain"] == chain)][:limit]
+                if float(ev.get("usd") or 0) >= min_usd
+                and (chain == "ALL" or ev.get("chain") == chain)
+                and (since is None or float(ev.get("timestamp") or 0) >= since)][:limit]
+
+    def events_since(self, since: float, until: float | None = None) -> list[dict]:
+        if self.history_store:
+            rows, _ = self.history_store.query(since=since, until=until,
+                                               page_size=None, sort_by="timestamp",
+                                               sort_dir="asc")
+            return rows
+        now = time.time() if until is None else until
+        return [ev.copy() for ev in self.events
+                if float(ev.get("timestamp") or 0) >= since
+                and float(ev.get("timestamp") or 0) <= now]
+
+    def query_history(self, *, since: float, until: float | None = None,
+                      chain: str = "ALL", min_usd: float = 0.0,
+                      direction: str = "ALL", exchange: str = "ALL",
+                      page: int = 1, page_size: int | None = 50,
+                      sort_by: str = "timestamp", sort_dir: str = "desc") -> tuple[list[dict], int]:
+        if self.history_store:
+            return self.history_store.query(
+                since=since, until=until, chain=chain, min_usd=min_usd,
+                direction=direction, exchange=exchange, page=page,
+                page_size=page_size, sort_by=sort_by, sort_dir=sort_dir)
+        rows = [ev.copy() for ev in self.events
+                if float(ev.get("timestamp") or 0) >= since
+                and (until is None or float(ev.get("timestamp") or 0) <= until)
+                and (chain == "ALL" or ev.get("chain") == chain)
+                and float(ev.get("usd") or 0) >= min_usd
+                and (direction == "ALL" or str(ev.get("direction") or "").lower() == direction.lower())
+                and (exchange == "ALL" or
+                     ((not event_exchange(ev)) if exchange.lower() in ("unknown", "unlabeled")
+                      else event_exchange(ev).lower() == exchange.lower()))]
+        key = {"timestamp": lambda ev: float(ev.get("timestamp") or 0),
+               "usd": lambda ev: float(ev.get("usd") or 0),
+               "chain": lambda ev: str(ev.get("chain") or ""),
+               "direction": lambda ev: str(ev.get("direction") or "")}.get(
+                   sort_by, lambda ev: float(ev.get("timestamp") or 0))
+        rows.sort(key=key, reverse=str(sort_dir).lower() != "asc")
+        total = len(rows)
+        if page_size is not None:
+            offset = (max(1, int(page)) - 1) * max(1, int(page_size))
+            rows = rows[offset:offset + max(1, int(page_size))]
+        return rows, total
+
+    def close(self) -> None:
+        if self.history_store:
+            self.history_store.close()
 
     def native_status(self) -> dict:
         """Health of the credential-free Hyperliquid Core feed."""
@@ -189,6 +408,18 @@ class WhaleScreener:
         self.seen_set[chain].add(key)
         return True
 
+    async def _record_event(self, event: dict) -> bool:
+        if self.history_store:
+            try:
+                inserted = await asyncio.to_thread(self.history_store.append, event)
+            except Exception as exc:  # noqa: BLE001 — persistence must not kill the feed
+                log.warning("Whale history write failed: %s", type(exc).__name__)
+                inserted = True  # keep live monitoring even if the disk is unavailable
+            if not inserted:
+                return False
+        self.events.append(event)
+        return True
+
     async def _emit(self, chain: str, tx_hash: str, index: str, symbol: str,
                     raw_amount: int, decimals: int, sender: str, recipient: str) -> None:
         if raw_amount <= 0:
@@ -215,7 +446,8 @@ class WhaleScreener:
                  "amount": amount, "usd": round(usd, 2), "from": sender,
                  "to": recipient, "from_label": from_label, "to_label": to_label,
                  "direction": direction}
-        self.events.append(event)
+        if not await self._record_event(event):
+            return
         await self.broadcast({"type": "whale_tx", **event})
 
     async def handle_log(self, chain: str, log: dict) -> None:
@@ -352,7 +584,8 @@ class WhaleScreener:
             "to_label": self.wallets.get(seller, ""),
             "direction": "trade", "side": side, "kind": "trade",
         }
-        self.events.append(event)
+        if not await self._record_event(event):
+            return False
         self.hl_status["events"] += 1
         self.hl_status["last_event_ts"] = timestamp
         await self.broadcast({"type": "whale_tx", **event})

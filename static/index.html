@@ -41,7 +41,7 @@
     <link rel="stylesheet" href="/static/terminal_chat.css?v=8">
     <link rel="stylesheet" href="/static/workspace.css?v=dock-mobile5">
     <script src="/static/lightweight-charts.js"></script>
-    <script src="/static/i18n.pages.js?v=book9"></script>
+    <script src="/static/i18n.pages.js?v=screener1"></script>
     <script src="/static/i18n.js?v=quota2"></script>
     <script src="/static/account.js?v=nav5"></script>
 </head>
@@ -549,9 +549,9 @@
                             <option value="outflow">outflow</option><option value="trade">trade</option>
                         </select></label>
                     </div>
-                    <p class="meta" id="whale-scope-note">EVM через Alchemy; Hyperliquid Core напрямую через публичный native API. SOL, BTC/BCH, LTC, TRON, SUI и DOGE пока не подключены.</p>
+                    <p class="meta" id="whale-scope-note" data-i18n="screener.members_dashboard_hint">Крупные переводы и рыночные сделки в одном потоке.</p>
                     <div id="whale-events" class="whale-events" aria-live="polite"></div>
-                    <div id="whale-empty" class="feed-empty">Загрузка ончейн-транзакций…</div>
+                    <div id="whale-empty" class="feed-empty" hidden><span data-i18n="screener.members_only">Войдите, чтобы открыть ленту крупных криптособытий.</span> <a href="/login?next=/screener" data-i18n="screener.sign_in">Войти</a></div>
                 </section>
             </div>
 
@@ -611,7 +611,7 @@
     <!-- workspace.js (старый мультичарт) больше не подключается: графики
          собирает chart_dock.js, а один WebSocket на окно раздаёт данные
          встроенным окнам через postMessage. Файл оставлен для старых тестов. -->
-    <script src="/static/app.js?v=whale-native-hl1"></script>
+    <script src="/static/app.js?v=whale-members1"></script>
     <script src="/static/chart_dock.js?v=dock-gate1"></script>
     <script src="/static/ads.js?v=banner7"></script>
     <script src="/static/terminal_chat.js?v=10"></script>

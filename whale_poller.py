@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -15,6 +16,7 @@ from pathlib import Path
 import aiohttp
 
 from whale_screener import TOKENS, TRANSFER_TOPIC, WhaleScreener, alchemy_key
+from alchemy_keys import AlchemyKeyStore
 
 ENDPOINTS = {
     "ETH": "eth-mainnet", "BNB": "bnb-mainnet", "POLYGON": "polygon-mainnet",
@@ -35,23 +37,35 @@ class PollError(Exception):
     pass
 
 
+class NoKeys(PollError):
+    pass
+
+
 class WhalePoller:
     def __init__(self, key: str, screener: WhaleScreener, *, interval: int = 3600,
                  monthly_cu: int = 10_000_000, state_file: Path | None = None,
-                 endpoints: dict[str, str] | None = None):
+                 endpoints: dict[str, str] | None = None,
+                 key_store: AlchemyKeyStore | None = None):
         self.screener = screener
+        self.key_store = key_store
+        self._fallback_key = alchemy_key(key) if key and key_store is None else ""
+        self.wakeup = asyncio.Event()
+        self.last_attempt: dict[str, float] = {}
+        self.last_success: dict[str, float] = {}
+        self.latest_heads: dict[str, int] = {}
+        self.key_errors: dict[str, str] = {}
+        self.key_cooldown: dict[str, float] = {}
+        self.chain_cooldown: dict[tuple[str, str], float] = {}
         self.interval = max(600, interval)
         # Deliberate reserve: Alchemy Free is 30M CU for the whole app, not only
         # this collector. A custom cap can be *lower*, not greater than 30M.
         self.monthly_cu = min(30_000_000, max(1, monthly_cu))
         self.state_file = state_file or Path(__file__).resolve().parent / "data/whale_poller.json"
         self.endpoints = endpoints or {
-            c: f"https://{host}.g.alchemy.com/v2/{alchemy_key(key)}"
-            for c, host in ENDPOINTS.items()
+            c: f"https://{host}.g.alchemy.com/v2/" for c, host in ENDPOINTS.items()
         }
         self.state = self._load()
         self.errors: dict[str, str] = {}
-        self._lock = asyncio.Lock()
 
     def _load(self) -> dict:
         try:
@@ -60,7 +74,7 @@ class WhalePoller:
                 return data
         except (OSError, ValueError, TypeError):
             pass
-        return {"month": "", "cu": 0, "cursors": {}}
+        return {"month": "", "cu": 0, "cursors": {}, "key_usage": {}, "active_key": ""}
 
     def _save(self) -> None:
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
@@ -68,43 +82,127 @@ class WhalePoller:
         temp.write_text(json.dumps(self.state, separators=(",", ":")), encoding="utf-8")
         os.replace(temp, self.state_file)
 
-    def _reserve(self, method: str) -> None:
+    def _keys(self) -> list[tuple[str, str]]:
+        return self.key_store.keys() if self.key_store else (
+            [("legacy", self._fallback_key)] if self._fallback_key else [])
+
+    def _reserve(self, method: str, key_id: str = "legacy") -> None:
         month = datetime.now(timezone.utc).strftime("%Y-%m")
         if self.state["month"] != month:
-            self.state.update(month=month, cu=0)
+            self.state.update(month=month, cu=0, key_usage={})
             self._save()
         cost = METHOD_CU[method]
         if self.state["cu"] + cost > self.monthly_cu:
-            raise BudgetExhausted()
-        # Reserve *before* making a request; a process crash cannot erase usage.
+            raise BudgetExhausted("global")
+        keys = self._keys()
+        # Soft per-key slice only controls rotation. All keys share the same
+        # *global* budget, so adding keys cannot multiply the Free allowance.
+        per_key = max(1000, self.monthly_cu // max(1, len(keys)))
+        usage = self.state.setdefault("key_usage", {})
+        if usage.get(key_id, 0) + cost > per_key:
+            raise BudgetExhausted("key")
         self.state["cu"] += cost
+        usage[key_id] = usage.get(key_id, 0) + cost
+        self.state["active_key"] = key_id
         self._save()
 
+    def key_status(self) -> list[dict]:
+        public = (self.key_store.public() if self.key_store else
+                  [{"id": "legacy", "hint": "••••" + self._fallback_key[-4:],
+                    "source": "environment"}] if self._fallback_key else [])
+        now = time.time()
+        return [{**row,
+                 "reserved_cu": self.state.get("key_usage", {}).get(row["id"], 0),
+                 "state": ("cooldown" if self.key_cooldown.get(row["id"], 0) > now
+                           else "active" if row["id"] == self.state.get("active_key")
+                           else "ready"),
+                 "reason": self.key_errors.get(row["id"], "")}
+                for row in public]
+
     def status(self) -> dict:
+        keys = self._keys()
         return {"mode": "cex_only", "interval_sec": self.interval,
                 "budget_cu": self.monthly_cu, "reserved_cu": self.state["cu"],
                 "month": self.state["month"], "cursors": self.state["cursors"].copy(),
                 "errors": self.errors.copy(), "supported": list(self.endpoints),
+                "keys_configured": len(keys),
+                "active_key_id": self.state.get("active_key", ""),
+                "last_attempt": self.last_attempt.copy(),
+                "last_success": self.last_success.copy(),
+                "latest_heads": self.latest_heads.copy(),
+                "phase": ("no_key" if not keys else
+                          "budget_exhausted" if self.state["cu"] >= self.monthly_cu else
+                          "error" if self.errors else
+                          "ok" if self.last_success else "waiting"),
                 "other_networks": {c: "not_configured" for c in
                                    ("SOLANA", "BITCOIN", "BITCOINCASH", "LITECOIN",
                                     "TRON", "SUI", "DOGECOIN")}}
 
     async def _rpc(self, session: aiohttp.ClientSession, chain: str,
                    method: str, params: list) -> object:
-        self._reserve(method)
-        try:
-            async with session.post(self.endpoints[chain], json={
-                    "jsonrpc": "2.0", "id": 1, "method": method, "params": params},
-                    timeout=aiohttp.ClientTimeout(total=25)) as response:
-                if response.status != 200:
-                    raise PollError(f"HTTP {response.status}")
-                data = await response.json()
-                if not isinstance(data, dict) or data.get("error") or "result" not in data:
-                    raise PollError("RPC rejected")
-                return data["result"]
-        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
-            # Do not include exception URL: it contains the API key.
-            raise PollError(type(exc).__name__) from None
+        keys = self._keys()
+        if not keys:
+            raise NoKeys("API-ключ не задан")
+        active_id = self.state.get("active_key")
+        index = next((i for i, (kid, _) in enumerate(keys) if kid == active_id), 0)
+        now = time.time()
+        deferred = False
+        for offset in range(len(keys)):
+            key_id, key = keys[(index + offset) % len(keys)]
+            if (self.key_cooldown.get(key_id, 0) > now or
+                    self.chain_cooldown.get((chain, key_id), 0) > now):
+                deferred = True
+                continue
+            try:
+                self._reserve(method, key_id)
+            except BudgetExhausted as exc:
+                if str(exc) == "global":
+                    raise
+                deferred = True
+                self.key_errors[key_id] = "Локальная доля ключа исчерпана; переключение"
+                continue
+            # Test endpoints may be complete local URLs. Production endpoints
+            # are prefixes; do not persist or expose URLs containing keys.
+            url = self.endpoints[chain]
+            if url.startswith("https://") and url.endswith("/v2/"):
+                url += key
+            try:
+                async with session.post(url, json={
+                        "jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+                        timeout=aiohttp.ClientTimeout(total=25)) as response:
+                    if response.status in (401, 403, 429):
+                        reason = ("Неверный ключ или сеть запрещена" if response.status in (401, 403)
+                                  else "HTTP 429: ограничение Alchemy")
+                        self.key_errors[key_id] = reason
+                        if response.status == 403:
+                            self.chain_cooldown[(chain, key_id)] = now + 900
+                        else:
+                            self.key_cooldown[key_id] = now + (300 if response.status == 429 else 900)
+                        deferred = True
+                        continue
+                    if response.status != 200:
+                        raise PollError(f"HTTP {response.status}")
+                    data = await response.json()
+                    if not isinstance(data, dict):
+                        raise PollError("Некорректный ответ RPC")
+                    error = data.get("error") or {}
+                    if error:
+                        if isinstance(error, dict) and error.get("code") in (429, -32005):
+                            self.key_errors[key_id] = "Ограничение RPC; переключение"
+                            self.key_cooldown[key_id] = now + 300
+                            deferred = True
+                            continue
+                        raise PollError("RPC отклонил запрос (возможна неподдерживаемая сеть/метод)")
+                    if "result" not in data:
+                        raise PollError("Пустой ответ RPC")
+                    self.key_errors.pop(key_id, None)
+                    self.chain_cooldown.pop((chain, key_id), None)
+                    return data["result"]
+            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+                # Never include aiohttp exception URL; it contains the key.
+                raise PollError(type(exc).__name__) from None
+        raise PollError("Все ключи исчерпаны, заблокированы или на паузе" if deferred
+                        else "Нет доступного ключа")
 
     async def _logs(self, session, chain: str, start: int, end: int) -> None:
         addresses = list(TOKENS[chain])
@@ -175,6 +273,7 @@ class WhalePoller:
         if not isinstance(head, str) or not head.startswith("0x"):
             raise PollError("Malformed block number")
         latest = int(head, 16)
+        self.latest_heads[chain] = latest
         cursor = self.state["cursors"].get(chain)
         if cursor is None:
             self.state["cursors"][chain] = latest
@@ -203,8 +302,13 @@ class WhalePoller:
         async with aiohttp.ClientSession() as session:
             while True:
                 for chain in self.endpoints:
+                    if not self._keys():
+                        self.errors[chain] = "API-ключ не задан: добавьте его в админке"
+                        break
                     try:
+                        self.last_attempt[chain] = time.time()
                         await self.poll_chain(session, chain)
+                        self.last_success[chain] = time.time()
                         self.errors.pop(chain, None)
                     except asyncio.CancelledError:
                         raise
@@ -214,4 +318,8 @@ class WhalePoller:
                     except (PollError, ValueError, OSError) as exc:
                         self.errors[chain] = str(exc)[:100]
                     await asyncio.sleep(0.01)
-                await asyncio.sleep(self.interval)
+                try:
+                    await asyncio.wait_for(self.wakeup.wait(), timeout=self.interval)
+                except asyncio.TimeoutError:
+                    pass
+                self.wakeup.clear()

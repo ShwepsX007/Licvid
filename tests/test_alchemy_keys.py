@@ -1,0 +1,141 @@
+"""Offline encrypted-key storage and rotating budget tests."""
+import asyncio
+import json
+import os
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from aiohttp import ClientSession, web
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from alchemy_keys import AlchemyKeyStore, KeyStoreError
+from whale_poller import WhalePoller, BudgetExhausted
+from whale_screener import WhaleScreener
+
+SECRET = "test-secret-not-the-published-default"
+
+
+class KeyStoreTests(unittest.TestCase):
+    def test_encrypted_file_no_secret_and_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "keys.enc"
+            store = AlchemyKeyStore(SECRET, path=path)
+            a = store.add("https://eth-mainnet.g.alchemy.com/v2/fake-secret-A")
+            b = store.add("fake-secret-B")
+            self.assertEqual(len(store.public()), 2)
+            self.assertNotIn("fake-secret-A", path.read_text())
+            self.assertNotIn("fake-secret-B", path.read_text())
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+            self.assertEqual(store.keys(), AlchemyKeyStore(SECRET, path=path).keys())
+            self.assertNotIn("fake-secret", json.dumps(store.public()))
+            with self.assertRaises(KeyStoreError):
+                AlchemyKeyStore("another-secret-that-is-long-enough", path=path)
+            with self.assertRaises(ValueError):
+                store.add("fake-secret-B")
+            self.assertTrue(store.remove(a["id"]))
+            self.assertFalse(store.remove(a["id"]))
+            self.assertEqual(store.keys(), [(b["id"], "fake-secret-B")])
+
+    def test_env_is_fallback_not_persisted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "keys.enc"
+            store = AlchemyKeyStore(SECRET, path=path, env_key="env-secret")
+            self.assertEqual(store.keys(), [("env", "env-secret")])
+            store.add("admin-secret")
+            self.assertEqual(len(store.keys()), 1)
+            self.assertEqual(store.keys()[0][1], "admin-secret")
+            self.assertNotIn("env-secret", path.read_text())
+
+
+class RotationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_hot_add_wakes_idle_poller(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = AlchemyKeyStore(SECRET, path=Path(tmp) / "keys.enc")
+            calls = asyncio.Event()
+            async def handler(request):
+                calls.set()
+                return web.json_response({"result": "0x10"})
+            app = web.Application()
+            app.router.add_post("/rpc", handler)
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, "127.0.0.1", 0)
+            await site.start()
+            port = site._server.sockets[0].getsockname()[1]
+            screen = WhaleScreener("fake", lambda _: None, lambda _: None)
+            poller = WhalePoller("", screen, key_store=store,
+                                 endpoints={"ETH": f"http://127.0.0.1:{port}/rpc"},
+                                 state_file=Path(tmp)/"cursor.json")
+            task = asyncio.create_task(poller.run())
+            try:
+                await asyncio.sleep(.02)
+                self.assertFalse(calls.is_set())
+                self.assertEqual(poller.status()["phase"], "no_key")
+                store.add("fixture-valid-key")
+                poller.wakeup.set()
+                await asyncio.wait_for(calls.wait(), 2)
+                for _ in range(10):
+                    if "ETH" in poller.last_success:
+                        break
+                    await asyncio.sleep(.01)
+                self.assertIn("ETH", poller.last_success)
+                self.assertEqual(poller.state["cursors"]["ETH"], 16)
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                await runner.cleanup()
+
+    async def test_switch_429_and_soft_per_key_budget_global_cap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "keys.enc"
+            keys = AlchemyKeyStore(SECRET, path=path)
+            first = keys.add("fake-secret-A")
+            second = keys.add("fake-secret-B")
+            used = []
+            async def handler(request):
+                # Only test fixtures, never a real secret in external requests.
+                used.append(request.headers.get("X-Test-Key"))
+                # Trigger provider 429 on first local key; second succeeds.
+                if request.headers.get("X-Test-Key") == "fake-secret-A":
+                    return web.Response(status=429)
+                return web.json_response({"result": "0x10"})
+            app = web.Application()
+            app.router.add_post("/rpc", handler)
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, "127.0.0.1", 0)
+            await site.start()
+            port = site._server.sockets[0].getsockname()[1]
+            s = WhaleScreener("fake", lambda _: None, lambda _: None)
+            p = WhalePoller("", s, key_store=keys, state_file=Path(tmp)/"state.json",
+                            endpoints={"ETH": f"http://127.0.0.1:{port}/rpc"},
+                            monthly_cu=2000)
+            # Simulate HTTP authentication per key without echoing it in URLs.
+            # A minimal wrapper session tags requests for the local fake server.
+            class TaggedSession:
+                def __init__(self, real):
+                    self.real = real
+                    self.calls = 0
+                def post(self, url, **kwargs):
+                    self.calls += 1
+                    key = "fake-secret-A" if self.calls == 1 else "fake-secret-B"
+                    kwargs.setdefault("headers", {})["X-Test-Key"] = key
+                    return self.real.post(url, **kwargs)
+            try:
+                async with ClientSession() as session:
+                    value = await p._rpc(TaggedSession(session), "ETH", "eth_blockNumber", [])
+                self.assertEqual(value, "0x10")
+                self.assertEqual(used, ["fake-secret-A", "fake-secret-B"])
+                self.assertEqual(p.state["active_key"], second["id"])
+                self.assertIn("429", p.key_errors[first["id"]])
+                self.assertEqual(p.state["cu"], 20)
+                p.monthly_cu = 20
+                with self.assertRaises(BudgetExhausted):
+                    p._reserve("eth_blockNumber", second["id"])
+            finally:
+                await runner.cleanup()
+
+
+if __name__ == "__main__":
+    unittest.main()

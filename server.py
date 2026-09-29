@@ -50,6 +50,7 @@ import math
 import os
 import queue
 import random
+import re
 try:
     import resource  # Unix: RSS процесса для /api/metrics
 except ImportError:  # Windows: модуля нет — метрика отдаст 0
@@ -119,6 +120,7 @@ import market_feed
 from market_feed import GATE_REST, MarketFeed, TF_MINUTES, base_of, canon, _get_json
 from whale_screener import WhaleScreener
 from whale_poller import WhalePoller
+from alchemy_keys import AlchemyKeyStore, KeyStoreError
 from timeframes import parse_tf
 from book_feed import (chat_text as book_chat_text, chat_meta as book_chat_meta)
 from book_feed import (BookFeed, format_wall_html, normalize_book_cfg,
@@ -1454,6 +1456,8 @@ async def _sqlite_ping_ms() -> float:
 feed: Optional[MarketFeed] = None
 whale_screener: Optional[WhaleScreener] = None
 whale_poller: Optional[WhalePoller] = None
+alchemy_key_store: Optional[AlchemyKeyStore] = None
+alchemy_vault_error = ""
 # 📖 Стакан: опрос L2 и детектор стен (заполняется в lifespan; в тестах — подмена).
 book_feed_inst: Optional[BookFeed] = None
 _pending: List[dict] = []
@@ -4354,25 +4358,27 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(levels_signal_loop(), name="levels-signal"),
         asyncio.create_task(corr_alert_loop(), name="corr-alerts"),
     ]
-    global whale_screener, whale_poller
-    alchemy_key = os.getenv("ALCHEMY_API_KEY", "").strip()
-    if alchemy_key:
-        whale_screener = WhaleScreener(
-            alchemy_key,
-            price_fn=lambda pair: feed.prices.get(pair) if feed else None,
-            broadcast=hub.broadcast,
-            min_usd=50_000,  # UI supports $50K; REST/UI default filter stays $100K
-        )
-        whale_poller = WhalePoller(
-            alchemy_key, whale_screener,
-            interval=int(account_store.get_setting("whale_interval_min", "60")) * 60,
-            monthly_cu=int(account_store.get_setting("whale_monthly_cu", "10000000")),
-        )
-        tasks.append(asyncio.create_task(whale_poller.run(), name="whale-poller"))
-    else:
-        whale_screener = None
-        whale_poller = None
-        log.warning("ALCHEMY_API_KEY не установлен, скринер ончейн-транзакций отключен")
+    global whale_screener, whale_poller, alchemy_key_store, alchemy_vault_error
+    try:
+        alchemy_key_store = AlchemyKeyStore(SECRET, env_key=os.getenv("ALCHEMY_API_KEY", ""))
+        alchemy_vault_error = ""
+    except KeyStoreError as exc:
+        alchemy_key_store = None
+        alchemy_vault_error = str(exc)
+    whale_screener = WhaleScreener(
+        "pending", price_fn=lambda pair: feed.prices.get(pair) if feed else None,
+        broadcast=hub.broadcast, min_usd=50_000)
+    whale_poller = WhalePoller(
+        "", whale_screener, key_store=alchemy_key_store,
+        interval=int(account_store.get_setting("whale_interval_min", "60")) * 60,
+        monthly_cu=int(account_store.get_setting("whale_monthly_cu", "10000000")),
+    )
+    if alchemy_vault_error:
+        # Never overwrite a vault encrypted under another LIQSCOPE_SECRET.
+        whale_poller.errors["keys"] = alchemy_vault_error
+    if alchemy_key_store is None or not alchemy_key_store.keys():
+        log.warning("Ключ Alchemy пока не добавлен; скринер ожидает добавления через /admin")
+    tasks.append(asyncio.create_task(whale_poller.run(), name="whale-poller"))
 
     # Дневной дайджест: вечерний выпуск в оба канала и в архив на сайте
     digest_sched = DigestScheduler(hour=DIGEST_HOUR, minute=DIGEST_MINUTE,
@@ -5615,8 +5621,10 @@ async def api_admin_screener_config(request: Request):
     user = await asyncio.to_thread(current_user, request)
     if not user or not user.get("is_admin"):
         return JSONResponse({"error": "admin"}, status_code=403)
-    return {"enabled": whale_poller is not None,
+    return {"enabled": bool(alchemy_key_store and alchemy_key_store.keys()),
             "config": whale_poller.status() if whale_poller else None,
+            "keys": whale_poller.key_status() if whale_poller else [],
+            "vault_error": alchemy_vault_error,
             "all_mode_available": False,
             "reason": "Полный обход быстрых сетей превышает бюджет Free 30 млн CU/мес"}
 
@@ -5645,11 +5653,46 @@ async def api_admin_screener_config_save(request: Request,
     return {"ok": True, "config": whale_poller.status()}
 
 
+@app.post("/api/admin/screener/keys")
+async def api_admin_add_alchemy_key(request: Request, body: dict = Body(default_factory=dict)):
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    if not alchemy_key_store or alchemy_vault_error:
+        return JSONResponse({"error": "vault_unavailable"}, status_code=503)
+    value = body.get("key")
+    if not isinstance(value, str) or len(value) > 500:
+        return JSONResponse({"error": "invalid_key"}, status_code=422)
+    try:
+        public = alchemy_key_store.add(value)
+    except (ValueError, KeyStoreError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+    if whale_poller:
+        whale_poller.wakeup.set()  # validate/connect without a restart
+    return {"ok": True, "key": public}
+
+
+@app.delete("/api/admin/screener/keys/{identifier}")
+async def api_admin_remove_alchemy_key(request: Request, identifier: str):
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    if not alchemy_key_store or not re.fullmatch(r"[0-9a-f]{16}", identifier):
+        return JSONResponse({"error": "unknown_key"}, status_code=404)
+    try:
+        deleted = alchemy_key_store.remove(identifier)
+    except KeyStoreError:
+        return JSONResponse({"error": "vault_unavailable"}, status_code=503)
+    if whale_poller:
+        whale_poller.wakeup.set()
+    return {"ok": deleted}
+
+
 @app.get("/api/screener/whales")
 async def api_screener_whales(min_usd: float = Query(100_000, ge=0),
                               chain: str = Query("ALL", pattern="^(ALL|ETH|BNB|POLYGON|ARBITRUM|BASE|HYPERLIQUID)$"),
                               limit: int = Query(50, ge=1, le=100)):
-    return {"enabled": whale_screener is not None,
+    return {"enabled": bool(alchemy_key_store and alchemy_key_store.keys()),
             "events": whale_screener.history(min_usd, chain, limit) if whale_screener else [],
             "poller": whale_poller.status() if whale_poller else None}
 
@@ -6110,6 +6153,12 @@ async def root(request: Request):
         "landing.html", lang, "/", extra_head=seo_pages.jsonld("landing", lang),
         auto=auto,
     )
+
+
+@app.get("/screener")
+async def screener_page():
+    return FileResponse(os.path.join(STATIC_DIR, "screener.html"),
+                        headers={"Cache-Control": "no-store"})
 
 
 @app.get("/terminal")

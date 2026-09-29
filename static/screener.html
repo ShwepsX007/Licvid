@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>🐋 Крипто-скринер — LiqScope</title>
+<meta name="robots" content="noindex,follow">
+<link rel="icon" href="/static/favicon.ico">
+<style>
+:root{color-scheme:dark;font-family:system-ui,Arial,sans-serif;background:#090f19;color:#e7eefb}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top,#17243a,#090f19 55%);min-height:100vh}
+a{color:#75c7ff}header{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;padding:16px max(18px,calc((100vw - 1080px)/2));border-bottom:1px solid #27364d;background:#101a2a}
+header a{text-decoration:none;font-weight:700}nav{display:flex;gap:18px}main{max-width:1080px;padding:22px 18px 80px;margin:auto}h1{font-size:clamp(1.5rem,4vw,2.2rem);margin:10px 0}p{color:#aab9cc;line-height:1.55}.badge{display:inline-block;border-radius:15px;padding:5px 12px;background:#20354d;color:#bce1ff;font-size:.85rem;font-weight:700}.badge.ok{color:#63efb4;background:#173b34}.badge.bad{color:#ff9ca9;background:#402128}.badge.warn{color:#ffdc81;background:#483b22}
+section{border:1px solid #2a3a51;background:#111c2c;border-radius:12px;padding:17px;margin:18px 0}h2{font-size:1.1rem;margin:0 0 12px}label{display:inline-flex;align-items:center;gap:8px;color:#aab9cc;margin:4px 12px 4px 0}select,button{background:#17273d;color:#e7eefb;padding:9px;border:1px solid #40526e;border-radius:7px;font:inherit;cursor:pointer}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:9px}.chain{border:1px solid #30415d;border-radius:8px;padding:12px;background:#172437;font-size:.88rem}.chain small{display:block;color:#9cb0c8;margin-top:7px;line-height:1.45}.chain.error{border-color:#974b56}.chain.unknown{opacity:.68}.row{display:grid;grid-template-columns:135px 1fr 1fr 1fr;gap:10px;padding:12px;border-bottom:1px solid #26374d;align-items:center;font-size:.9rem}.row strong{color:#ffdd75}.row .dim{color:#98aabd;font-size:.8rem;overflow-wrap:anywhere}.row a{white-space:nowrap}.row .inflow{color:#63efb4}.row .outflow{color:#ff9ba4}@media(max-width:700px){.row{grid-template-columns:1fr 1fr}.grid{grid-template-columns:1fr 1fr}}
+</style>
+</head>
+<body>
+<header><a href="/">LIQSCOPE</a><nav><a href="/terminal">⚡ Терминал</a><a href="/admin">⚙️ Админка</a></nav></header>
+<main>
+<h1>🐋 Ончейн-скринер / Whale Alert</h1>
+<p>Крупные переводы по известным EVM-кошелькам биржам. Данные не являются доказательством покупки или продажи. Обновление страницы не расходует API Alchemy: история берётся из памяти сервера.</p>
+<div id="screener-state" class="badge warn" role="status">Проверяю подключение…</div>
+<section><h2>Подключение и покрытие сетей</h2><div id="screener-usage"></div><div id="screener-chains" class="grid"></div><p>Другие сети (SOL, BTC, BCH, LTC, TRON, SUI, DOGE) пока не подключены. Без подтверждённых адресов бирж отсутствие событий нельзя считать отсутствием переводов.</p></section>
+<section><h2>Переводы</h2>
+<label>Сумма <select id="whale-min"><option value="50000">$50K+</option><option value="100000" selected>$100K+</option><option value="500000">$500K+</option><option value="1000000">$1M+</option></select></label>
+<label>Сеть <select id="whale-chain"><option value="ALL">Все EVM</option><option value="ETH">ETH</option><option value="BNB">BNB</option><option value="POLYGON">Polygon</option><option value="ARBITRUM">Arbitrum</option><option value="BASE">Base</option><option value="HYPERLIQUID">HyperEVM</option></select></label>
+<label>Направление <select id="whale-direction"><option value="ALL">Все</option><option value="inflow">Вход</option><option value="outflow">Выход</option></select></label>
+<div id="screener-events" aria-live="polite"></div><p id="screener-empty">Загружаю историю…</p></section>
+</main><script src="/static/screener.js?v=1" defer></script>
+</body></html>

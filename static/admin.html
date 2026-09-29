@@ -45,6 +45,7 @@
         <select id="lang-select" class="lang-select" data-lang-select
                 aria-label="Language / Язык" title="Language / Язык"></select>
         <a class="btn btn-ghost btn-compact" href="/terminal">⚡ Терминал</a>
+        <a class="btn btn-ghost btn-compact" href="/screener">🐋 Скринер</a>
         <span id="nav-account"></span>
     </nav>
 </header>
@@ -191,7 +192,15 @@
 
 <div class="card" id="whale-admin-card" style="margin-top:14px" data-hint="Alchemy, кошельки и месячный бюджет">
     <h3>🐋 Ончейн-скринер — бюджет Free</h3>
-    <p class="meta">Один ключ Alchemy; режим «только известные EVM-адреса бирж». Полный охват сетей на Free недоступен: выборка всех блоков Arbitrum одна стоит более 207 млн CU за 30 дней. SOL/BTC/BCH/LTC/TRON/SUI/DOGE пока не подключены — их кошельки требуют отдельных проверенных списков и адаптеров.</p>
+    <p><a class="btn btn-primary btn-compact" href="/screener">Открыть 🐋 крипто-скринер →</a></p>
+    <p class="meta">Ключи добавляются ниже без правки systemd. Они шифруются на сервере и не возвращаются в браузер. Несколько ключей переключаются при 429/ограничении доли; общий бюджет Free НЕ увеличивается. Режим «только известные EVM-адреса бирж». Полный охват сетей на Free недоступен: выборка всех блоков Arbitrum одна стоит более 207 млн CU за 30 дней. SOL/BTC/BCH/LTC/TRON/SUI/DOGE пока не подключены — их кошельки требуют отдельных проверенных списков и адаптеров.</p>
+    <div class="row-actions" style="flex-wrap:wrap;gap:10px">
+        <label>Alchemy API Key или URL /v2/… <input class="search" type="password" autocomplete="new-password" id="whale-admin-key" placeholder="Вставьте новый ключ" maxlength="500"></label>
+        <button class="btn btn-primary" type="button" id="whale-admin-add-key">Добавить ключ</button>
+        <span id="whale-admin-key-status" class="meta" role="status"></span>
+    </div>
+    <div id="whale-admin-keys" style="padding:8px 0" aria-live="polite"></div>
+    <div id="whale-admin-chains" class="meta" aria-live="polite"></div>
     <div class="row-actions" style="flex-wrap:wrap;gap:10px">
         <label>Режим <select id="whale-admin-mode" class="search"><option value="cex_only">Только биржи</option><option value="all" disabled>Все переводы — выше лимита Free</option></select></label>
         <label>Опрос, минут <input type="number" class="search" id="whale-admin-interval" min="10" max="1440" value="60"></label>

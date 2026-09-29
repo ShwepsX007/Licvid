@@ -1,6 +1,8 @@
 fastapi>=0.110,<1
 uvicorn[standard]>=0.27,<1
 aiohttp>=3.9,<4
+# Зашифрованные ключи Alchemy в data/alchemy_keys.enc (LIQSCOPE_SECRET — ключ шифрования).
+cryptography>=42,<47
 # Быстрый JSON. orjson разбирает потиковые кадры бирж (market_feed) и
 # сериализует ответы API (FastAPI default_response_class=ORJSONResponse)
 # в разы быстрее стандартного json — на одном воркере uvicorn это заметная

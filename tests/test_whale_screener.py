@@ -13,7 +13,7 @@ import aiohttp
 from aiohttp import web
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from whale_screener import TRANSFER_TOPIC, TOKENS, WhaleScreener, load_wallets
+from whale_screener import TRANSFER_TOPIC, TOKENS, WhaleScreener, alchemy_key, load_wallets
 
 A = "0x" + "1" * 40
 B = "0x" + "2" * 40
@@ -72,6 +72,21 @@ class ParsingTests(unittest.IsolatedAsyncioTestCase):
         await self.s.handle_native("ETH", {**tx, "hash": "0x" + "d" * 64})
         await self.s.handle_log("ETH", transfer("ETH", "WBTC", 10, hash_="0x" + "f" * 64))
         self.assertEqual(len(self.sent), 1)  # no fabricated USD for ETH/BTC
+
+    async def test_one_key_from_solana_endpoint(self):
+        # A Solana URL provides a credential, not a Solana event subscription.
+        url = "https://solana-mainnet.g.alchemy.com/v2/dummy-example-key"
+        s = WhaleScreener(url, lambda _: None, self.sent.append)
+        self.assertEqual(alchemy_key(url), "dummy-example-key")
+        self.assertEqual(s.endpoints["ETH"],
+                         "wss://eth-mainnet.g.alchemy.com/v2/dummy-example-key")
+        self.assertEqual(s.endpoints["BNB"],
+                         "wss://bnb-mainnet.g.alchemy.com/v2/dummy-example-key")
+        for bad in ("https://other.example/v2/secret", "https://eth-mainnet.g.alchemy.com/v2/",
+                    "https://eth-mainnet.g.alchemy.com/v2/secret?token=evil"):
+            with self.assertRaises(ValueError) as caught:
+                alchemy_key(bad)
+            self.assertNotIn("secret", str(caught.exception))
 
     async def test_separate_bnb_key(self):
         s = WhaleScreener("eth-key", lambda _: None, self.sent.append,

@@ -13,6 +13,7 @@ import re
 import time
 from collections import deque
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import aiohttp
 
@@ -36,6 +37,30 @@ TOKENS = {
         "0x7130d2a12b9bcbfae4f2634d864a1ee1ce3ead9c": ("BTCB", 18),
     },
 }
+
+
+def alchemy_key(value: str) -> str:
+    """Accept a bare key or an Alchemy v2 URL; never embed an endpoint as a key.
+
+    The URL's network is deliberately ignored: the same credential is used
+    with each supported network's own endpoint. Do not include secrets in errors.
+    """
+    value = value.strip()
+    if "://" in value or "/" in value or "?" in value or "#" in value:
+        try:
+            url = urlsplit(value)
+            if (url.scheme not in ("https", "wss")
+                    or not re.fullmatch(r"[a-z0-9-]+\.g\.alchemy\.com", url.hostname or "")
+                    or url.username or url.password or url.port
+                    or url.query or url.fragment
+                    or not re.fullmatch(r"/v2/[A-Za-z0-9._~-]+", url.path)):
+                raise ValueError
+            value = url.path.removeprefix("/v2/")
+        except ValueError:
+            raise ValueError("Provide an Alchemy API key or an HTTPS/WSS Alchemy /v2/ URL") from None
+    if not re.fullmatch(r"[A-Za-z0-9._~-]+", value):
+        raise ValueError("Provide an Alchemy API key or an HTTPS/WSS Alchemy /v2/ URL")
+    return value
 
 
 def load_wallets(path: Path) -> dict[str, str]:
@@ -66,10 +91,15 @@ class WhaleScreener:
         self.seen_set: dict[str, set[str]] = {chain: set() for chain in TOKENS}
         self._pending_blocks: dict[str, dict[int, str]] = {chain: {} for chain in TOKENS}
         self._next_rpc_id = 10
-        self.endpoints = endpoints or {
-            "ETH": f"wss://eth-mainnet.g.alchemy.com/v2/{api_key}",
-            "BNB": f"wss://bnb-mainnet.g.alchemy.com/v2/{bnb_api_key or api_key}",
-        }
+        if endpoints is None:
+            key = alchemy_key(api_key)
+            bnb_key = alchemy_key(bnb_api_key) if bnb_api_key else key
+            self.endpoints = {
+                "ETH": f"wss://eth-mainnet.g.alchemy.com/v2/{key}",
+                "BNB": f"wss://bnb-mainnet.g.alchemy.com/v2/{bnb_key}",
+            }
+        else:
+            self.endpoints = endpoints
 
     def history(self, min_usd: float = 100_000, chain: str = "ALL", limit: int = 50) -> list[dict]:
         return [ev.copy() for ev in reversed(self.events)

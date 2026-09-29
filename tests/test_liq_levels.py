@@ -583,7 +583,13 @@ class EventsOffLoopTest(unittest.TestCase):
             return got
 
         got = asyncio.run(run())
-        self.assertEqual(got, self.ev, "события не доехали до калибровки")
+        self.assertEqual(len(got), len(self.ev), "события не доехали до калибровки")
+        # в расчёт идёт урезанное событие: цена, объём и сторона — только их
+        # читают actual_histogram и apply_executed
+        self.assertEqual(got[0]["usd"], self.ev[0]["usd"])
+        self.assertEqual(got[0]["side"], self.ev[0]["side"])
+        self.assertNotIn("id", got[0])
+        self.assertNotIn("symbol", got[0])
         gaps = [b - a for a, b in zip(ticks, ticks[1:])]
         self.assertLess(max(gaps), 0.25,
                         f"event loop стоял {max(gaps) * 1000:.0f} мс, пока "
@@ -605,6 +611,95 @@ class EventsOffLoopTest(unittest.TestCase):
                          "окно calib_days перечитано с диска заново — фон делает "
                          "это каждые LEVELS_SNAP_SEC на каждую монету батча")
         self.assertIs(a, b)
+
+    def test_window_drift_within_ttl_hits_cache(self):
+        """Конец окна уехал на несколько проходов фона — это попадание.
+
+        Прежняя схема сравнивала бакет ``int(until // TTL)``: при TTL 60 с и
+        возвращении монеты в батч раз в ~140 с попаданий не было вовсе, и каждый
+        проход перечитывал с диска до 336 МБ шардов.
+        """
+        hist = SlowHist(self.ev, delay=0.0)
+        engine = self._engine(hist)
+
+        async def run():
+            for k in range(6):                      # шесть проходов по 33 с
+                await engine._events_cached("BTC_USDT",
+                                            self.now - 7 * 86400 + k * 33.0,
+                                            self.now + k * 33.0, 0.0)
+
+        asyncio.run(run())
+        self.assertEqual(hist.calls, 1,
+                         "кэш окна промахивается на каждом проходе фона — "
+                         "диск перечитывается заново")
+
+    def test_window_drift_beyond_ttl_rescans(self):
+        hist = SlowHist(self.ev, delay=0.0)
+        engine = self._engine(hist)
+        ttl = engine.EVENTS_TTL_SEC
+
+        async def run():
+            await engine._events_cached("BTC_USDT", self.now - 7 * 86400,
+                                        self.now, 0.0)
+            await engine._events_cached("BTC_USDT", self.now - 7 * 86400 + ttl,
+                                        self.now + ttl + 1.0, 0.0)
+
+        asyncio.run(run())
+        self.assertEqual(hist.calls, 2, "окно старше TTL отдано из кэша")
+
+    def test_different_window_with_same_end_rescans(self):
+        """REST с другим window_hours не должен получить чужое окно.
+
+        `since` = ts − window_hours, а кэш сверяет оба конца: иначе запрос на
+        сутки получил бы семидневный набор фона и посчитал калибровку по чужим
+        событиям.
+        """
+        hist = SlowHist(self.ev, delay=0.0)
+        engine = self._engine(hist)
+
+        async def run():
+            await engine._events_cached("BTC_USDT", self.now - 7 * 86400,
+                                        self.now, 0.0)
+            await engine._events_cached("BTC_USDT", self.now - 24 * 3600,
+                                        self.now, 0.0)
+
+        asyncio.run(run())
+        self.assertEqual(hist.calls, 2,
+                         "окно других суток отдано из кэша семидневного")
+
+    def test_slim_event_keeps_only_what_the_model_reads(self):
+        ev = {"id": "ev9", "symbol": "BTC_USDT", "exchange": "binance",
+              "side": "SELL", "position": "LONG", "price": 61000.5,
+              "qty": 0.2, "usd": 12210.1, "timestamp": 1790000000.0}
+        slim = LevelsEngine._slim_event(ev)
+        self.assertEqual(slim, {"price": 61000.5, "usd": 12210.1,
+                                "side": "SELL", "position": "LONG"})
+        # без position — и его нет: поле не выдумывается
+        self.assertEqual(LevelsEngine._slim_event({"price": 1.0, "usd": 2.0,
+                                                   "side": "BUY"}),
+                         {"price": 1.0, "usd": 2.0, "side": "BUY"})
+
+    def test_slimmed_events_feed_model_identically(self):
+        """Урезанное событие даёт модели ровно тот же результат, что полное."""
+        full = [{"id": f"e{i}", "symbol": "BTC_USDT", "exchange": "binance",
+                 "side": side, "position": pos, "price": price, "qty": 0.5,
+                 "usd": usd, "timestamp": 1790000000.0 + i}
+                for i, (side, pos, price, usd) in enumerate([
+                    ("SELL", "LONG", 900.0, 5000.0),
+                    ("BUY", "SHORT", 1100.0, 2500.0),
+                    ("SELL", "", 950.0, 1200.0)])]
+        slim = [LevelsEngine._slim_event(ev) for ev in full]
+        self.assertEqual(actual_histogram(full, 1000.0, 1.0),
+                         actual_histogram(slim, 1000.0, 1.0))
+        rows = [{"entry": 1000.0, "long_usd": 40.0, "short_usd": 20.0,
+                 "mmr": 0.005, "ts": i} for i in range(6)]
+        settings = dict(DEFAULT_SETTINGS)
+        step = grid_step(1000.0, settings.get("step_rel"))
+        a = build_ladder(rows, settings, 1000.0)
+        b = build_ladder(rows, settings, 1000.0)
+        self.assertEqual(apply_executed(a, full, step),
+                         apply_executed(b, slim, step))
+        self.assertEqual(a, b)
 
     def test_new_window_rescans(self):
         hist = SlowHist(self.ev, delay=0.0)
@@ -733,12 +828,18 @@ class EventsCacheMemoryCapTest(unittest.TestCase):
                 for i in range(n)]
 
     def test_default_cap_keeps_cache_well_under_the_observed_gigabyte(self):
-        per_event_bytes = 830          # замер словаря ликвидации в куче
+        # замер в куче: полное событие ликвидации — 1133 Б, урезанное до
+        # цены/объёма/стороны — 554 Б. Потолок считается по урезанному.
+        per_event_bytes = 560
         worst = LevelsEngine.EVENTS_CACHE_MAX_EVENTS * per_event_bytes
         self.assertLess(worst, 256 * 1024 * 1024,
                         f"потолок кэша снова даёт {worst / 2 ** 20:.0f} МБ кучи — "
                         "сборки мусора вернут паузы в секундах")
-        self.assertLessEqual(LevelsEngine.EVENTS_CACHE_MAX, 16,
+        # куча не должна превышать прежний бюджет: 100000 полных событий —
+        # это 108 МБ, и именно столько же занимает 200000 урезанных
+        self.assertLess(worst, 128 * 1024 * 1024,
+                        f"кэш занимает {worst / 2 ** 20:.0f} МБ — больше прежних 108 МБ")
+        self.assertLessEqual(LevelsEngine.EVENTS_CACHE_MAX, 32,
                              "потолок по числу записей снова десятки монет")
 
     def test_oversized_window_is_not_cached_at_all(self):

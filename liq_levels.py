@@ -1027,8 +1027,12 @@ class LevelsEngine:
         # «calib_days» перечитывалось с диска на каждом проходе фона (каждые
         # LEVELS_SNAP_SEC по каждой монете батча), а разбор дневных шардов —
         # это построчный json.loads десятков мегабайт
-        self._events_cache: Dict[str, Tuple[int, List[dict]]] = {}
+        self._events_cache: Dict[str, Tuple[float, float, List[dict]]] = {}
         self._events_cache_events = 0
+        # попадания/промахи окна калибровки: по ним видно, действительно ли
+        # кэш перестал перечитывать шарды на каждом проходе фона
+        self._events_cache_hits = 0
+        self._events_cache_misses = 0
         self._candles: Dict[str, Tuple[float, List[Tuple[float, float]]]] = {}
         self._lock = threading.RLock()
         self.builds = 0
@@ -1279,8 +1283,23 @@ class LevelsEngine:
     # он не должен идти в event loop (замер на бою 29.09.2026: пауза 4480 мс со
     # стеком history.py:330:iter_events <- liq_levels.py:_events <- payload <-
     # server.py:liq_levels_task, а снаружи p95 336 мс при серверных 5.5 мс).
+    # Монета из круга алертов возвращается в батч раз в (число_монет /
+    # LEVELS_BATCH) проходов: при 17 монетах и пачке 4 — примерно 140 с, при 40
+    # — около 330 с. Прежние 60 с означали, что кэш окна калибровки
+    # промахивался ВСЕГДА и каждый проход перечитывал с диска до 336 МБ шардов
+    # (7 дней по 48 МБ): на бою 29.09.2026 это держало payload на ~1000 мс даже
+    # после того, как лестница подешевела в 14 раз.
+    #
+    # Замер серии из 12 проходов (17 монет, батч 4, период 33 с): при 60 с —
+    # 42 чтения диска на 48 расчётов окна (6 попаданий), при 300 с — 25, при
+    # 600 с — 17, то есть по одному чтению на монету; 900 с даёт те же 17,
+    # поэтому расти дальше некуда. Трафик на серию: 13.8 ГБ -> 5.6 ГБ.
+    #
+    # Плата за свежесть: уже отработавший уровень может остаться невычтенным до
+    # 10 минут. Для семидневного окна калибровки это несущественно, а сама
+    # лестница каждый раз строится по свежим OI и цене — у них свой кэш на 20 с.
     EVENTS_TTL_SEC = max(5.0, float(os.getenv("LIQSCOPE_LEVELS_EVENTS_TTL_SEC",
-                                              "60") or 60))
+                                              "600") or 600))
     # Прежний потолок «64 записи» оказался бомбой: запись — это разобранный
     # список событий окна калибровки, а MAX_EVENTS = 20000 словарей по ~830
     # байт в куче. 64 × 20000 × 830 Б ≈ 1.06 ГБ — ровно пик RSS 1224 МБ,
@@ -1291,9 +1310,9 @@ class LevelsEngine:
     # настоящую причину. Поэтому держим потолок и по числу записей, и по
     # суммарному числу событий: память важнее количества монет.
     EVENTS_CACHE_MAX = max(1, int(os.getenv("LIQSCOPE_LEVELS_EVENTS_CACHE_MAX",
-                                            "8") or 8))
+                                            "24") or 24))
     EVENTS_CACHE_MAX_EVENTS = max(1000, int(os.getenv(
-        "LIQSCOPE_LEVELS_EVENTS_CACHE_EVENTS", "100000") or 100000))
+        "LIQSCOPE_LEVELS_EVENTS_CACHE_EVENTS", "200000") or 200000))
 
     async def _events_cached(self, symbol: str, since: float, until: float,
                              min_usd: float) -> List[dict]:
@@ -1304,20 +1323,38 @@ class LevelsEngine:
         воркера. TTL задаётся ``LIQSCOPE_LEVELS_EVENTS_TTL_SEC``.
         """
         sym = str(symbol or "").upper()
-        bucket = int(float(until) // self.EVENTS_TTL_SEC)
         hit = self._events_cache.get(sym)
-        if hit is not None and hit[0] == bucket:
-            return hit[1]
+        # Прежняя схема сравнивала бакет int(until // TTL), то есть попадание
+        # случалось только внутри одного бакета. Монета возвращается в батч раз
+        # в (число_монет / LEVELS_BATCH) проходов: при 17 монетах и пачке 4 это
+        # ~140 с, при 40 — ~330 с, а бакет жил 60 с. Кэш окна калибровки не
+        # срабатывал НИКОГДА, и каждый проход перечитывал с диска до 336 МБ
+        # шардов (7 дней × 48 МБ) — на бою 29.09.2026 это держало payload на
+        # ~1000 мс на монету даже после того, как лестница подешевела в 14 раз.
+        # Теперь окно пригодно, пока его конец уехал не дальше TTL: при проходе
+        # раз в 33 с это попадание каждый раз, а сильно другое окно (например,
+        # другой запрос с явным window_hours) по-прежнему перечитывается.
+        # Сверяем ОБА конца окна: `since` зависит от `window_hours`, поэтому
+        # запрос с другим окном (например, REST с window_hours=24 против
+        # семидневного окна калибровки фона) не должен получить чужой набор.
+        # У проходов фона оба конца уезжают вместе, поэтому попадания не теряются.
+        if hit is not None and \
+                abs(float(until) - _fnum(hit[0])) < self.EVENTS_TTL_SEC and \
+                abs(float(since) - _fnum(hit[1])) < self.EVENTS_TTL_SEC:
+            self._events_cache_hits += 1
+            return hit[2]
+        self._events_cache_misses += 1
         try:
             events = await asyncio.to_thread(self._events, sym, since, until,
                                              min_usd)
         except Exception:                        # noqa: BLE001
             events = self._events(sym, since, until, min_usd)
-        self._events_cache_put(sym, bucket, events)
+        self._events_cache_put(sym, until, events, since)
         return events
 
-    def _events_cache_put(self, sym: str, bucket: int,
-                          events: List[dict]) -> bool:
+    def _events_cache_put(self, sym: str, until: float,
+                          events: List[dict],
+                          since: Optional[float] = None) -> bool:
         """Положить окно в кэш, не превысив потолок по числу событий.
 
         Возвращает False, если окно не влезает само по себе — такую монету
@@ -1329,17 +1366,19 @@ class LevelsEngine:
             return False
         old = self._events_cache.pop(sym, None)
         if old is not None:
-            self._events_cache_events -= len(old[1] or ())
+            self._events_cache_events -= len(old[2] or ())
         # пока не влезает — выбрасываем самые крупные записи: они же и самые
         # дорогие для сборщика мусора
         while (self._events_cache_events + n > self.EVENTS_CACHE_MAX_EVENTS
                or len(self._events_cache) >= self.EVENTS_CACHE_MAX):
             if not self._events_cache:
                 break
-            big = max(self._events_cache, key=lambda k: len(self._events_cache[k][1] or ()))
+            big = max(self._events_cache, key=lambda k: len(self._events_cache[k][2] or ()))
             gone = self._events_cache.pop(big)
-            self._events_cache_events -= len(gone[1] or ())
-        self._events_cache[sym] = (bucket, events)
+            self._events_cache_events -= len(gone[2] or ())
+        self._events_cache[sym] = (float(until),
+                                   float(since) if since is not None else 0.0,
+                                   events)
         self._events_cache_events += n
         return True
 
@@ -1356,7 +1395,31 @@ class LevelsEngine:
         return {"entries": len(self._events_cache),
                 "events": int(self._events_cache_events),
                 "max_entries": int(self.EVENTS_CACHE_MAX),
-                "max_events": int(self.EVENTS_CACHE_MAX_EVENTS)}
+                "max_events": int(self.EVENTS_CACHE_MAX_EVENTS),
+                "hits": int(self._events_cache_hits),
+                "misses": int(self._events_cache_misses),
+                "ttl_sec": float(self.EVENTS_TTL_SEC)}
+
+    @staticmethod
+    def _slim_event(ev: dict) -> dict:
+        """Событие истории без полей, которые расчёту уровней не нужны.
+
+        Калибровка (``actual_histogram``) и вычитание отработавшего
+        (``apply_executed``) читают ровно три вещи: цену, объём и сторону через
+        ``_is_long_event``. Полное событие с id, биржей, монетой, количеством и
+        отметкой времени весит ~830 Б — втрое больше урезанного, и именно этот
+        вес не давал держать в кэше окна всех монет сразу: потолок
+        100000 событий — это 5 монет по 20000, а в батче их десятки, поэтому
+        кэш промахивался и каждый проход перечитывал шарды с диска.
+        """
+        out = {"price": ev.get("price"), "usd": ev.get("usd")}
+        side = ev.get("side")
+        if side is not None:
+            out["side"] = side
+        position = ev.get("position")
+        if position is not None:
+            out["position"] = position
+        return out
 
     def _events(self, symbol: str, since: float, until: float,
                 min_usd: float) -> List[dict]:
@@ -1383,7 +1446,7 @@ class LevelsEngine:
                 continue
             if _fnum(ev.get("usd")) < _fnum(min_usd):
                 continue
-            out.append(ev)
+            out.append(self._slim_event(ev))
             if len(out) >= MAX_EVENTS:
                 break
         return out

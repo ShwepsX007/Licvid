@@ -755,6 +755,9 @@ class Client:
         self.exchange = "ALL"
         self.feed = "liq"        # лента клиента: liq | cvd | oi
         self.alive = True
+        # Пока не отправлен init, широковещательные кадры не должны обгонять
+        # приветствие (хаб уже видит клиента во время расчёта снимка).
+        self.init_pending = False
         # Очередь исходящих кадров: рассылка кладёт готовый кадр и уходит, а
         # в сокет его пишет отдельная задача клиента. Забитый TCP-буфер одного
         # зрителя больше не держит event loop (а с ним и все HTTP-запросы)
@@ -811,6 +814,8 @@ class Client:
         Всё, что ушло в транспорт до таймаута, остаётся валидным кадром,
         так что отмена безопасна. Застряли — клиент мёртв, выкидываем.
         """
+        if self.init_pending and msg.get("type") != "init":
+            return True  # снимок init уже содержит актуальные данные
         try:
             frame = text if text is not None else json_dumps_text(msg)
             await asyncio.wait_for(self.ws.send_text(frame),
@@ -840,6 +845,8 @@ class Client:
         до ``SEND_TIMEOUT`` — всё это время HTTP-запросы просто ждали в
         очереди цикла.
         """
+        if self.init_pending:
+            return True  # не отправляем фоновый кадр до init
         if not self.alive:
             return False
         if len(self.out) >= self.OUT_MAX_FRAMES or \
@@ -4629,12 +4636,12 @@ def _scope_ip(scope) -> str:
                 xff = val.decode("latin1")
             elif name == "x-real-ip" and not xri:
                 xri = val.decode("latin1")
+        if xri.strip():
+            return xri.strip()
         if xff:
             first = xff.split(",")[0].strip()
             if first:
                 return first
-        if xri.strip():
-            return xri.strip()
     return host or "0"
 
 
@@ -5193,16 +5200,16 @@ def _request_ip(request: Request) -> str:
     client_host = request.client.host if request.client else ""
     # Доверяем XFF только если запрос пришёл от доверенного прокси (обычно локальный nginx)
     if client_host and _is_trusted_proxy(client_host):
+        # nginx перезаписывает X-Real-IP фактическим адресом соединения.
+        # XFF может содержать префикс, переданный самим посетителем.
+        xri = (request.headers.get("x-real-ip") or "").strip()
+        if xri:
+            return xri
         xff = request.headers.get("x-forwarded-for") or ""
         if xff:
-            # Берём первый IP из цепочки — это оригинальный клиент, но только если прокси доверенный
             first = xff.split(",")[0].strip()
             if first:
                 return first
-        # Также поддерживаем X-Real-IP от nginx
-        xri = request.headers.get("x-real-ip") or ""
-        if xri:
-            return xri.strip() or client_host
     return client_host or "0"
 
 
@@ -5584,7 +5591,7 @@ async def api_liquidations(symbol: Optional[str] = None,
                            exchange: Optional[str] = None,
                            min_usd: float = 0.0,
                            limit: int = 300):
-    cap = min(max(1, int(limit or 1)), 1000)
+    cap = min(max(1, int(limit or 1)), 2000)
     res = list(LIQUIDATIONS)
     sym = canon(symbol) if symbol and symbol != "ALL" else None
     if sym:
@@ -5896,6 +5903,7 @@ async def ws_endpoint(websocket: WebSocket):
     await websocket.accept()
     t_accept = time.monotonic() if PERF_LOG else 0.0
     client = Client(websocket)
+    client.init_pending = True
     if not await hub.add(client):
         await websocket.close(code=1013)
         return
@@ -5947,7 +5955,9 @@ async def ws_endpoint(websocket: WebSocket):
             "flow": flow,
         }
         t_build = time.monotonic() if PERF_LOG else 0.0
-        await client.send(init_payload)
+        if not await client.send(init_payload):
+            return
+        client.init_pending = False
         t_send = time.monotonic() if PERF_LOG else 0.0
         if PERF_LOG:
             import json as _json

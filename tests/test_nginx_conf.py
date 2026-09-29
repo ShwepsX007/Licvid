@@ -139,6 +139,17 @@ class NginxConfCaseMixin:
         for _head, body in iter_blocks(self.text, "server"):
             self.assertNotIn("proxy_cache_path", body)
 
+    def test_proxy_overwrites_untrusted_forwarded_for(self):
+        # nginx — граница доверия: XFF от браузера нельзя протаскивать в ASGI,
+        # иначе первый адрес цепочки злоумышленник выбирает сам.
+        for head, body in iter_blocks(self.text, "location"):
+            if "proxy_pass" not in body:
+                continue
+            with self.subTest(location=head):
+                self.assertIn("proxy_set_header X-Real-IP $remote_addr;", body)
+                self.assertIn("proxy_set_header X-Forwarded-For $remote_addr;", body)
+                self.assertNotIn("$proxy_add_x_forwarded_for", body)
+
     def test_klines_microcache(self):
         head, body = find_location(self.text, "/api/klines")
         self.assertIn("= /api/klines", head, "ручка свечей должна быть точным location")

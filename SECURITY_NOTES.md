@@ -1,5 +1,9 @@
 # Security notes — Licvid / LiqScope
 
+> Обновление 29.09.2026: актуальный аудит — [AUDIT.md](AUDIT.md).
+> Этот файл сохраняет историю прежней конфигурации. Python `GZipMiddleware`
+> теперь удалён, ответы сжимает Nginx; не возвращайте middleware при деплое.
+
 Дата: 2026-09-27, ветка main = 5cc6f5a (merge workspace)
 
 ## Workspace Multi-Chart Security (новый)

@@ -99,14 +99,15 @@ def _is_trusted_proxy(ip: str) -> bool:
 def _client_ip(request: Request) -> str:
     client_host = request.client.host if request.client else ""
     if client_host and _is_trusted_proxy(client_host):
+        # nginx перезаписывает этот заголовок адресом реального клиента.
+        xri = (request.headers.get("x-real-ip") or "").strip()
+        if xri:
+            return xri
         xff = request.headers.get("x-forwarded-for") or ""
         if xff:
             first = xff.split(",")[0].strip()
             if first:
                 return first
-        xri = request.headers.get("x-real-ip") or ""
-        if xri:
-            return xri.strip() or client_host
     return client_host or ""
 
 

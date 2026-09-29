@@ -97,6 +97,28 @@ class BroadcastFanOut(unittest.TestCase):
         server.json_dumps_text = counting
         self.addCleanup(lambda: setattr(server, "json_dumps_text", self._real))
 
+    def test_init_is_always_first_frame_for_new_client(self):
+        async def run():
+            client = _client()
+            client.init_pending = True
+            await self.hub.add(client)
+            try:
+                # Эти события приходят, пока сервер строит init-пакет.
+                await self.hub.broadcast({"type": "prices", "data": {"BTC_USDT": 1}})
+                await client.send({"type": "stats", "data": {}})
+                self.assertEqual(client.ws.sent, [])
+                self.assertEqual(list(client.out), [])
+                self.assertTrue(await client.send({"type": "init", "exchanges": ["dydx"]}))
+                client.init_pending = False
+                await self.hub.broadcast({"type": "prices", "data": {"BTC_USDT": 2}})
+                await client.flush()
+                self.assertEqual([json.loads(f)["type"] for f in client.ws.sent],
+                                 ["init", "prices"])
+            finally:
+                await self.hub.remove(client)
+
+        asyncio.run(run())
+
     def test_frame_serialized_once_for_all_clients(self):
         n = 50
         self.hub.clients = {_client() for _ in range(n)}

@@ -62,6 +62,24 @@ class HealthTest(unittest.TestCase):
         self.assertGreaterEqual(d["uptime_sec"], 0)
 
 
+class ProxyIpTest(unittest.TestCase):
+    def test_nginx_real_ip_wins_over_injected_forwarded_chain(self):
+        from starlette.requests import Request
+        import web_account
+
+        scope = {"type": "http", "method": "GET", "path": "/api/health",
+                 "query_string": b"", "http_version": "1.1", "scheme": "http",
+                 "server": ("localhost", 8000), "client": ("127.0.0.1", 1234),
+                 "headers": [(b"x-forwarded-for", b"198.51.100.1, 203.0.113.42"),
+                             (b"x-real-ip", b"203.0.113.42")]}
+        req = Request(scope)
+        self.assertEqual(server._scope_ip(scope), "203.0.113.42")
+        self.assertEqual(server._request_ip(req), "203.0.113.42")
+        self.assertEqual(web_account._client_ip(req), "203.0.113.42")
+        scope["client"] = ("203.0.113.42", 1234)  # прямой клиент: XFF игнорируем
+        self.assertEqual(server._scope_ip(scope), "203.0.113.42")
+
+
 class MetricsTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

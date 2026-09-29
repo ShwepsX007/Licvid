@@ -139,11 +139,17 @@ class HistoryApiCase(unittest.TestCase):
             server.LIQUIDATIONS.extend(
                 ev(i + 1000, NOW - (1101 - i), "BTC_USDT")
                 for i in range(1101))
-            r = self.client.get("/api/liquidations?limit=2000")
+            # Изолируем явный лимит от архива: здесь проверяем только RAM-хвост.
+            with patch.object(server.HIST, "query", return_value=[]):
+                r = self.client.get("/api/liquidations?limit=2000")
             self.assertEqual(r.status_code, 200)
             data = r.json()
             self.assertEqual(data["total"], 1101)
-            self.assertEqual(len(data["liquidations"]), 1000)
+            self.assertEqual(len(data["liquidations"]), 1101)
+            # default 300 и явный limit=2000 не должны сливаться в max=1000.
+            default = self.client.get("/api/liquidations").json()
+            self.assertEqual(default["total"], 1101)
+            self.assertEqual(len(default["liquidations"]), 300)
             self.assertEqual(data["liquidations"][-1]["id"], "ev2100")
         finally:
             server.LIQUIDATIONS.clear()

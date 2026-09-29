@@ -21,6 +21,7 @@ Binance/Bybit/OKX: при 50+ пользователях это лаг и 100% C
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import tempfile
@@ -44,6 +45,13 @@ os.environ["LIQSCOPE_API_CACHE"] = "0"
 import market_feed  # noqa: E402
 import server  # noqa: E402
 from market_feed import MarketFeed  # noqa: E402
+
+
+async def _api_klines(symbol: str, timeframe: int) -> dict:
+    # Production route returns pre-serialized JSON to bypass jsonable_encoder;
+    # unit tests must inspect the response body, not treat Response as a dict.
+    response = await server.api_klines(symbol, timeframe)
+    return json.loads(response.body)
 
 
 def _candles(n: int = 40, tf: int = 5) -> list:
@@ -125,7 +133,7 @@ class KlinesIsolationTest(unittest.TestCase):
     # --- путь запроса -------------------------------------------------------
     def test_request_never_waits_for_exchange(self):
         async def run():
-            data = await server.api_klines("BTC_USDT", 5)
+            data = await _api_klines("BTC_USDT", 5)
             # ответ уже здесь, а биржу ещё не трогали — значит, ждали не её
             self.assertEqual(self.feed.fetch_calls, 0)
             self.assertTrue(data["candles"], "клиент обязан получить свечи")
@@ -149,7 +157,7 @@ class KlinesIsolationTest(unittest.TestCase):
         """Биржа «висит», а 50 зрителей получают ответ сразу и один поход в фон."""
         async def run():
             self.feed.gate = asyncio.Event()
-            got = await asyncio.gather(*[server.api_klines("SOL_USDT", 5)
+            got = await asyncio.gather(*[_api_klines("SOL_USDT", 5)
                                          for _ in range(50)])
             self.assertTrue(all(g["candles"] for g in got),
                             "кто-то из зрителей остался без свечей")
@@ -166,10 +174,10 @@ class KlinesIsolationTest(unittest.TestCase):
 
     def test_second_request_reads_cache(self):
         async def run():
-            await server.api_klines("ETH_USDT", 5)
+            await _api_klines("ETH_USDT", 5)
             await self._drain()
             before = self.feed.fetch_calls
-            data = await server.api_klines("ETH_USDT", 5)
+            data = await _api_klines("ETH_USDT", 5)
             self.assertEqual(self.feed.fetch_calls, before,
                              "свежий кэш не должен трогать биржу")
             self.assertEqual(data["source"], "exchange")
@@ -180,12 +188,12 @@ class KlinesIsolationTest(unittest.TestCase):
 
     def test_stale_cache_is_served_and_refetch_is_throttled(self):
         async def run():
-            await server.api_klines("DOGE_USDT", 5)
+            await _api_klines("DOGE_USDT", 5)
             await self._drain()
             self.assertEqual(self.feed.fetch_calls, 1)
             # кэш протух: отдаём старое сразу, второй поход на биржу держит зазор
             server.CANDLES["DOGE_USDT|5"]["ts"] = time.time() - server.KLINE_TTL - 1
-            data = await server.api_klines("DOGE_USDT", 5)
+            data = await _api_klines("DOGE_USDT", 5)
             self.assertEqual(self.feed.fetch_calls, 1,
                              "зазор CANDLES_REFETCH_SEC не сработал")
             self.assertTrue(data["stale"])
@@ -200,7 +208,7 @@ class KlinesIsolationTest(unittest.TestCase):
                                     ts=time.time() - 1)
             # зазор уже выдержан: фон не ставим, проверяем именно чтение буфера
             self.feed._candles_fetch_at[key] = time.monotonic()
-            data = await server.api_klines("XRP_USDT", 15)
+            data = await _api_klines("XRP_USDT", 15)
             self.assertEqual(self.feed.fetch_calls, 0)
             self.assertEqual(data["source"], "exchange")
             self.assertEqual(data["timeframe"], 15)
@@ -245,7 +253,7 @@ class KlinesIsolationTest(unittest.TestCase):
         server.hub.clients.add(other)
         try:
             async def run():
-                first = await server.api_klines("BTC_USDT", 5)
+                first = await _api_klines("BTC_USDT", 5)
                 self.assertNotEqual(first["source"], "exchange")
                 await self._drain()
 
@@ -302,7 +310,7 @@ class KlinesIsolationTest(unittest.TestCase):
     def test_kline_route_shape_is_backward_compatible(self):
         """Клиент (app.js, chart_panel.js) ждёт symbol/timeframe/source/candles."""
         async def run():
-            data = await server.api_klines("btcusdt", 5)
+            data = await _api_klines("btcusdt", 5)
             await self._drain()
             return data
 

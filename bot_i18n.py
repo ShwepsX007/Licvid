@@ -237,6 +237,7 @@ RU_EN: Dict[str, str] = {
         "Draft cancelled, nothing was sent to the channel.",
     "Черновик отменён, в каналы ничего не ушло.":
         "Draft cancelled, nothing was sent to the channels.",
+    "Сводка ": "Digest ",
     "Сводка ушла в канал.\n": "Digest sent to the channel.\n",
     "Дневной дайджест ушёл в каналы.\n": "Daily digest sent to the channels.\n",
     "<b>Не удалось отправить сводку</b>\n": "<b>Could not send the digest</b>\n",

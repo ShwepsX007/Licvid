@@ -1,6 +1,9 @@
 """Месячный архив переживает перезагрузку: стенд, факты дайджеста, лента."""
 import pathlib
+import sys
 import unittest
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from archive_restore import (cvd_from_cells, digest_records_from_cells,
                              facts_from_cells, hourly_posts_from_cells,

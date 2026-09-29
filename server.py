@@ -5585,6 +5585,11 @@ def _levels_cache_stats() -> Dict[str, object]:
         fn3 = getattr(LEVELS, "calib_stats", None)
         if callable(fn3):
             out["calib_budget"] = dict(fn3())
+        # схлопывание строк перед лестницей: ratio показывает, во сколько раз
+        # меньше строк обходит расчёт
+        fn4 = getattr(LEVELS, "agg_stats", None)
+        if callable(fn4):
+            out["rows_agg"] = dict(fn4())
     except Exception:                            # noqa: BLE001
         pass
     return out

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -975,6 +976,173 @@ class CalibBudgetTest(unittest.TestCase):
                              settings, None)
         self.assertEqual(eng._calib_tokens, before)
         self.assertEqual(eng.calib_stats()["deferred"], 0)
+
+class AggregateRowsTest(unittest.TestCase):
+    """Схлопывание строк с близкими ценами входа перед лестницей.
+
+    Окно в 30 суток даёт тысячи точек OI, а различных цен входа в пределах
+    корзины — сотни: на бою 29.09.2026 лестница BTC_USDT стоила 966-1331 мс и
+    держала проход фона на 2.8-3.9 с. Замер на профиле боевой формы (8640
+    точек): корзина в полшага сетки оставляет 535 строк из 8640 и считает
+    лестницу за 47-52 мс вместо 738 (×14), суммарная масса совпадает точно,
+    форма уезжает на 0.88 % и не более чем на 3.1 % на отдельной крупной
+    ячейке — в 8 раз уже колокола размазывания (KERNEL_RADIUS = 4 шага).
+    """
+
+    def _rows(self, n=600, entry0=1000.0, drift=0.0002):
+        out = []
+        for i in range(n):
+            out.append({"entry": round(entry0 * (1.0 + drift * (i % 3)), 6),
+                        "long_usd": 10.0 + i, "short_usd": 4.0 + 0.5 * i,
+                        "mmr": 0.005, "ts": i})
+        return out
+
+    def test_mass_is_conserved_exactly(self):
+        rows = self._rows(400)
+        agg = LL_mod.aggregate_rows(rows, 1000.0, LL_mod.agg_step_rel(
+            dict(DEFAULT_SETTINGS)))
+        self.assertAlmostEqual(sum(r["long_usd"] for r in agg),
+                               sum(r["long_usd"] for r in rows), places=6)
+        self.assertAlmostEqual(sum(r["short_usd"] for r in agg),
+                               sum(r["short_usd"] for r in rows), places=6)
+
+    def test_dense_entries_collapse(self):
+        # 600 строк из трёх цен входа: корзина в полшага сетки (0.5 от цены
+        # 1000) кладёт 1000.0 и 1000.2 вместе, а 1000.4 — за границу корзины
+        rows = self._rows(600)
+        agg = LL_mod.aggregate_rows(rows, 1000.0, LL_mod.agg_step_rel(
+            dict(DEFAULT_SETTINGS)))
+        self.assertLess(len(agg), len(rows) / 10)
+        self.assertEqual(len(agg), 2)
+        self.assertAlmostEqual(sum(r["long_usd"] for r in agg),
+                               sum(r["long_usd"] for r in rows), places=6)
+
+    def test_distant_entries_stay_separate(self):
+        rows = [{"entry": 900.0, "long_usd": 5.0, "short_usd": 0.0, "mmr": 0.0},
+                {"entry": 1100.0, "long_usd": 7.0, "short_usd": 0.0, "mmr": 0.0}]
+        agg = LL_mod.aggregate_rows(rows, 1000.0, LL_mod.agg_step_rel(
+            dict(DEFAULT_SETTINGS)))
+        self.assertEqual(len(agg), 2)
+        self.assertEqual(sorted(r["entry"] for r in agg), [900.0, 1100.0])
+
+    def test_mmr_keeps_rows_apart(self):
+        """MMR сдвигает цену ликвидации независимо от входа — не схлопываем."""
+        rows = [{"entry": 1000.0, "long_usd": 5.0, "short_usd": 1.0, "mmr": 0.004},
+                {"entry": 1000.0, "long_usd": 5.0, "short_usd": 1.0, "mmr": 0.010}]
+        agg = LL_mod.aggregate_rows(rows, 1000.0, LL_mod.agg_step_rel(
+            dict(DEFAULT_SETTINGS)))
+        self.assertEqual(len(agg), 2)
+        self.assertEqual(sorted(r["mmr"] for r in agg), [0.004, 0.010])
+
+    def test_entry_is_mass_weighted_center(self):
+        # обе цены внутри одной корзины (шаг/2 от 1000 — это 0.5)
+        rows = [{"entry": 1000.1, "long_usd": 30.0, "short_usd": 0.0, "mmr": 0.0},
+                {"entry": 1000.2, "long_usd": 10.0, "short_usd": 0.0, "mmr": 0.0}]
+        agg = LL_mod.aggregate_rows(rows, 1000.0, LL_mod.agg_step_rel(
+            dict(DEFAULT_SETTINGS)))
+        self.assertEqual(len(agg), 1)
+        # центр тяжести масс: (1000.1*30 + 1000.2*10) / 40 = 1000.125
+        self.assertAlmostEqual(agg[0]["entry"], 1000.125, places=6)
+        self.assertAlmostEqual(agg[0]["long_usd"], 40.0, places=6)
+
+    def test_degenerate_inputs_return_rows_unchanged(self):
+        rows = self._rows(5)
+        for price in (None, 0, -1, "мусор"):
+            self.assertEqual(len(LL_mod.aggregate_rows(rows, price, 0.001)), 5)
+        self.assertEqual(LL_mod.aggregate_rows([], 1000.0, 0.001), [])
+        # шаг сетки нулевой — корзина вырождается, и различные входы не
+        # смешиваются: масса по-прежнему сохраняется
+        got = LL_mod.aggregate_rows(rows, 1000.0, 0.0)
+        self.assertEqual(len({r["entry"] for r in rows}), len(got))
+        self.assertAlmostEqual(sum(r["long_usd"] for r in got),
+                               sum(r["long_usd"] for r in rows), places=6)
+
+    def test_ladder_shape_stays_within_tolerance(self):
+        """Форма лестницы уезжает в пределах неопределённости самой модели."""
+        rows = self._rows(2000, drift=0.0009)
+        settings = dict(DEFAULT_SETTINGS)
+        full = build_ladder(rows, settings, 1000.0)
+        agg = LL_mod.aggregate_rows(rows, 1000.0, LL_mod.agg_step_rel(settings))
+        fast = build_ladder(agg, settings, 1000.0)
+        total = sum(c["usd"] for c in full.values())
+        self.assertGreater(total, 0)
+        # суммарная масса сохраняется точно
+        self.assertAlmostEqual(sum(c["usd"] for c in fast.values()), total,
+                               delta=total * 1e-9)
+        dev = sum(abs((full.get(k) or {}).get("usd", 0.0)
+                      - (fast.get(k) or {}).get("usd", 0.0))
+                  for k in set(full) | set(fast))
+        self.assertLess(dev / total, 0.03, f"форма уехала на {dev/total*100:.2f} %")
+        # крупные ячейки (выше средней массы) не уехали сильнее 10 %
+        avg = total / max(len(full), 1)
+        for k, cell in full.items():
+            if cell["usd"] <= avg:
+                continue
+            other = (fast.get(k) or {}).get("usd", 0.0)
+            self.assertLess(abs(cell["usd"] - other) / cell["usd"], 0.10,
+                            f"ячейка {k}: {cell['usd']} -> {other}")
+
+    def test_bucket_wider_than_step_merges_more(self):
+        rows = self._rows(300, drift=0.0009)
+        narrow = LL_mod.aggregate_rows(rows, 1000.0, 0.0005)
+        wide = LL_mod.aggregate_rows(rows, 1000.0, 0.004)
+        self.assertLess(len(wide), len(narrow))
+        for got in (narrow, wide):
+            self.assertAlmostEqual(sum(r["long_usd"] for r in got),
+                                   sum(r["long_usd"] for r in rows), places=6)
+
+
+class AggregateRowsInPayloadTest(unittest.TestCase):
+    """Схлопывание включено в расчёт движка, а не лежит мёртвым кодом."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="lilevels_agg_")
+        self.now = time.time()
+        pts = []
+        oi = 1000.0
+        for i in range(145):
+            ts = self.now - (144 - i) * BUCKET
+            oi *= 1.002
+            pts.append((ts, oi))
+        from volume_profile import VolumeProfile
+        profile = VolumeProfile(path="")
+        for i in range(145):
+            profile.add_trade("BTC_USDT", self.now - (144 - i) * BUCKET,
+                              1000.0, 10_000.0, "BUY")
+        self.engine = LevelsEngine(
+            oi=FakeOI(pts), profile=profile, side=FakeSide(), risk=FakeRisk(),
+            hist=FakeHist(), klines=None,
+            path=os.path.join(self.tmp, "levels.json"))
+
+    def _payload(self):
+        return asyncio.run(self.engine.payload("BTC_USDT", now=self.now))
+
+    def tearDown(self):
+        LL_mod.AGG_ROWS = self._saved if hasattr(self, "_saved") else LL_mod.AGG_ROWS
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_payload_counts_aggregated_rows(self):
+        self._saved = LL_mod.AGG_ROWS
+        LL_mod.AGG_ROWS = True
+        p = self._payload()
+        self.assertTrue(p["enabled"])
+        self.assertGreater(len(p["levels"]), 0)
+        st = self.engine.agg_stats()
+        self.assertTrue(st["on"])
+        self.assertGreater(st["rows_in"], 0)
+        self.assertGreater(st["rows_out"], 0)
+        self.assertGreaterEqual(st["ratio"], 1.0)
+        # покрытие и строки в ответе считаются по ИСХОДным строкам
+        self.assertEqual(p["coverage"]["rows"], st["rows_in"])
+
+    def test_knob_off_walks_every_row(self):
+        self._saved = LL_mod.AGG_ROWS
+        LL_mod.AGG_ROWS = False
+        self._payload()
+        st = self.engine.agg_stats()
+        self.assertFalse(st["on"])
+        self.assertEqual(st["rows_in"], st["rows_out"])
+        self.assertEqual(st["ratio"], 1.0)
 
 
 if __name__ == "__main__":

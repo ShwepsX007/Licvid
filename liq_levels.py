@@ -65,6 +65,24 @@ CALIB_TTL_SEC = 86400.0
 # расчётом. Бюджет растягивает пересчёты по проходам: монета без свежей
 # калибровки работает с прежним или умолчательным масштабом и добирает пересчёт
 # следующим проходом. Явный recalibrate=True из API бюджет не расходует.
+# Схлопывание строк перед лестницей: окно 30 суток даёт тысячи точек OI, а
+# различных цен входа в пределах шага сетки — сотни. Выключение (0) возвращает
+# обход каждой строки, как было.
+AGG_ROWS = os.getenv("LIQSCOPE_LEVELS_AGG_ROWS", "1").strip() not in (
+    "0", "false", "no", "off")
+# Ширина корзины схлопывания в долях шага сетки. Замер на профиле боевой формы
+# (8640 точек OI, 30 суток): корзина в шаг сетки — 272 строки и лестница за
+# 25.8 мс вместо 738.5 (×28.6), но форма лестницы уезжает на 1.67 % массы и до
+# 6.9 % на отдельной крупной ячейке; шаг/2 — 535 строк, 52.1 мс (×14.2),
+# отклонение 0.88 % и не выше 3.1 % на ячейке; шаг/4 — ×8.3 и 0.42 %.
+# Полшага сетки взяты умолчанием: это в 8 раз уже колокола размазывания
+# (KERNEL_RADIUS = 4 шага), поэтому форма остаётся в пределах неопределённости
+# самой модели, а проход фона перестаёт быть секундным.
+try:
+    AGG_BUCKET = min(1.0, max(
+        0.05, float(os.getenv("LIQSCOPE_LEVELS_AGG_BUCKET", "0.5") or 0.5)))
+except (TypeError, ValueError):
+    AGG_BUCKET = 0.5
 CALIB_BUDGET = max(0, int(os.getenv("LIQSCOPE_LEVELS_CALIB_BUDGET", "2") or 2))
 CALIB_BUDGET_SEC = max(1.0, float(
     os.getenv("LIQSCOPE_LEVELS_CALIB_BUDGET_SEC", "30") or 30))
@@ -341,6 +359,58 @@ def _cell(ladder: Dict[float, dict], price: float) -> dict:
         cell = {"usd": 0.0, "long_usd": 0.0, "short_usd": 0.0, "lev": {}}
         ladder[price] = cell
     return cell
+
+
+def agg_step_rel(settings: Optional[Dict[str, Any]]) -> float:
+    """Шаг корзины схлопывания: шаг сетки лестницы × ``AGG_BUCKET``."""
+    return max(_fnum((settings or {}).get("step_rel"), 0.001), 1e-6) * AGG_BUCKET
+
+
+def aggregate_rows(rows: Sequence[dict], price: Any,
+                   step_rel: Any = None) -> List[dict]:
+    """Сложить строки позиций с близкими ценами входа в одну.
+
+    Лестнице важна масса на цене ликвидации, а не каждая точка OI: окно в 30
+    суток по пятиминуткам даёт тысячи строк, но цены входа в них повторяются —
+    соседние точки стоят почти на тех же уровнях. Строки с входом в пределах
+    шага сетки (0.1 % цены) складываются в одну с суммарной массой и входом в
+    центре тяжести масс; ключ включает MMR, потому что он сдвигает цену
+    ликвидации независимо от входа.
+
+    Точность не теряется по смыслу: квантование входа в один шаг сетки в
+    ``KERNEL_RADIUS`` (4) раз уже колокола размазывания, а цена ликвидации
+    линейна по входу, поэтому уход уровня ограничен тем же шагом сетки.
+    Масса сохраняется точно — это проверяет тест.
+    """
+    p0 = _num(price)
+    step = grid_step(p0, step_rel)
+    if p0 is None or p0 <= 0 or step <= 0 or not rows:
+        return list(rows or [])
+    agg: Dict[Tuple[int, float], List[float]] = {}
+    for row in rows:
+        entry = _num(row.get("entry"))
+        if not entry or entry <= 0:
+            continue
+        long_m = max(_fnum(row.get("long_usd")), 0.0)
+        short_m = max(_fnum(row.get("short_usd")), 0.0)
+        if long_m <= 0 and short_m <= 0:
+            continue
+        mmr = max(_fnum(row.get("mmr")), 0.0)
+        key = (int(math.floor(entry / step + 0.5)), mmr)
+        cur = agg.get(key)
+        if cur is None:
+            agg[key] = [entry * (long_m + short_m), long_m, short_m]
+        else:
+            cur[0] += entry * (long_m + short_m)
+            cur[1] += long_m
+            cur[2] += short_m
+    out: List[dict] = []
+    for (idx, mmr), (weighted, long_m, short_m) in agg.items():
+        total = long_m + short_m
+        entry = (weighted / total) if total > 0 else idx * step
+        out.append({"entry": entry, "long_usd": long_m, "short_usd": short_m,
+                    "mmr": mmr})
+    return out
 
 
 def build_ladder(rows: Sequence[dict], settings: Dict[str, Any],
@@ -947,6 +1017,9 @@ class LevelsEngine:
         self._calib_tokens = float(CALIB_BUDGET)
         self._calib_tokens_at = time.time()
         self._calib_deferred = 0
+        # сколько строк вошло в расчёт и сколько осталось после схлопывания
+        self._rows_in = 0
+        self._rows_agg = 0
         self._cache: Dict[tuple, Tuple[float, dict]] = {}
         self._cache_hits = 0
         self._cache_misses = 0
@@ -1334,6 +1407,14 @@ class LevelsEngine:
         self._calib_tokens -= 1.0
         return True
 
+    def agg_stats(self) -> Dict[str, Any]:
+        """Схлопывание строк: во сколько раз меньше работы на лестницу."""
+        with self._lock:
+            src, dst = int(self._rows_in), int(self._rows_agg)
+        return {"on": bool(AGG_ROWS), "bucket_of_step": round(AGG_BUCKET, 3),
+                "rows_in": src, "rows_out": dst,
+                "ratio": round(src / dst, 2) if dst else 0.0}
+
     def calib_stats(self) -> Dict[str, Any]:
         """Состояние бюджета пересчётов — видно в /api/health."""
         return {"budget": int(CALIB_BUDGET), "budget_sec": round(CALIB_BUDGET_SEC, 1),
@@ -1449,7 +1530,20 @@ class LevelsEngine:
         events = await self._events_cached(
             sym, max(since, ts - _fnum(settings.get("calib_days"), 7.0) * 24 * HOUR),
             ts, _fnum(settings.get("min_liq_usd")))
-        calib = self._calibration(sym, rows, events, cur, settings, recalibrate)
+        # Строки с близкими входами складываются ДО калибровки и лестницы:
+        # оба обходят их по несколько раз (сетка калибровки — 5 масштабов,
+        # лестница — плечи × стороны × отсчёты колокола), а различных цен входа
+        # в окне на порядок меньше, чем точек OI. На бою 29.09.2026 лестница
+        # BTC_USDT стоила 966-1331 мс и держала проход фона на 2.8-3.9 с.
+        if AGG_ROWS:
+            work_rows = aggregate_rows(rows, cur, agg_step_rel(settings))
+        else:
+            work_rows = list(rows)
+        with self._lock:
+            self._rows_in += len(rows)
+            self._rows_agg += len(work_rows)
+        calib = self._calibration(sym, work_rows, events, cur, settings,
+                                  recalibrate)
         eff = dict(settings)
         if calib.get("applied"):
             eff["lev_scale"] = _fnum(calib.get("lev_scale"), eff.get("lev_scale", 1.0))
@@ -1459,9 +1553,9 @@ class LevelsEngine:
         # Тяжёлые CPU-расчёты — в threadpool, чтобы не блокировать event loop
         # (иначе WS и REST висят по 1-2 сек на каждом запросе уровней)
         try:
-            ladder = await asyncio.to_thread(build_ladder, rows, eff, cur)
+            ladder = await asyncio.to_thread(build_ladder, work_rows, eff, cur)
         except Exception:
-            ladder = build_ladder(rows, eff, cur)
+            ladder = build_ladder(work_rows, eff, cur)
         applied = {"usd": 0.0, "events": 0, "skipped": 0}
         if eff.get("subtract_executed", True):
             try:

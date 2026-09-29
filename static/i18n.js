@@ -403,7 +403,7 @@
 
         "land.nav.digest": "Дайджест",
         "land.nav.hourly": "Сводки по часам",
-        "hour.title": "Сводки по часам",
+        "hour.title": "Часовые сводки",
         "hour.meta": "LiqScope — сводки рынка крипто-фьючерсов каждые несколько часов: ликвидации окна, лидеры часов, оборот и открытый интерес. Те же посты, что вышли в канале, с фото.",
         "hour.lead": "Публикация сводки рынка несколько раз в сутки.",
         "hour.fresh": "Свежие сводки",
@@ -898,7 +898,7 @@
 
         "land.nav.digest": "Digest",
         "land.nav.hourly": "Hourly summaries",
-        "hour.title": "Hourly market summaries",
+        "hour.title": "Hourly Summaries",
         "hour.meta": "LiqScope hourly market summaries: liquidations of the window, hour leaders, turnover and open interest. The very posts published in our channel, with photos.",
         "hour.lead": "A market summary is published several times a day.",
         "hour.fresh": "Latest summaries",

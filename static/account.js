@@ -94,7 +94,8 @@
             soon: "скоро",
             digestOpen: "Открыть дайджест",
             digest: "Дайджест",
-            hourly: "Сводки по часам",
+            hourly: "Часовые сводки",
+            articles: "Статьи",
             waitlistOn: "В листе ожидания",
             waitlistOff: "В лист ожидания",
             subscribed: "Подключено",
@@ -205,7 +206,8 @@
             soon: "soon",
             digestOpen: "Open digest",
             digest: "Digest",
-            hourly: "Hourly summaries",
+            hourly: "Hourly Summaries",
+            articles: "Articles",
             waitlistOn: "On the waitlist",
             waitlistOff: "Join waitlist",
             subscribed: "On",
@@ -225,7 +227,7 @@
         },
         zh: {
             login: "登录", cabinet: "账户", admin: "管理", logout: "退出",
-            terminal: "终端",
+            terminal: "终端", digest: "日报", hourly: "小时市场简报", articles: "文章",
             nameEdit: "修改昵称", nameSave: "保存", nameCancel: "取消",
             namePh: "怎么称呼您",
             namePh2: "昵称 — 显示在聊天和评论中",
@@ -237,7 +239,8 @@
         },
         hi: {
             login: "लॉग इन", cabinet: "कैबिनेट", admin: "एडमिन", logout: "लॉग आउट",
-            terminal: "टर्मिनल",
+            terminal: "टर्मिनल", digest: "डाइजेस्ट",
+            hourly: "हर घंटे की बाज़ार सारांश", articles: "लेख",
             nameEdit: "निक बदलें", nameSave: "सहेजें", nameCancel: "रद्द करें",
             namePh: "आपको क्या कहें",
             namePh2: "आपका निक — चैट और कमेंट में दिखेगा",
@@ -249,7 +252,8 @@
         },
         es: {
             login: "Entrar", cabinet: "Cuenta", admin: "Admin", logout: "Salir",
-            terminal: "Terminal",
+            terminal: "Terminal", digest: "Resumen",
+            hourly: "Resúmenes del mercado por horas", articles: "Artículos",
             nameEdit: "Cambiar nick", nameSave: "Guardar", nameCancel: "Cancelar",
             namePh: "Cómo te llamamos",
             namePh2: "Tu nick — se ve en chat y comentarios",
@@ -259,6 +263,17 @@
             nameLong: "Nombre demasiado largo — hasta 64 caracteres.",
             nameErr: "No se pudo guardar el nombre — inténtalo de nuevo.",
         },
+    };
+
+    // Some lightweight pages (notably the screener) load account.js without
+    // the full i18n bundles. Keep their shared section links readable there.
+    var NAV_FALLBACKS = {
+        "hour.to_terminal": "terminal",
+        "hour.digest": "digest",
+        "hour.title": "hourly",
+        "art.title": "articles",
+        "nav.cabinet": "cabinet",
+        "nav.admin": "admin",
     };
 
     function lang() {
@@ -288,7 +303,10 @@
                 var page = LiqScopeI18n.t(k, vars);
                 if (page !== k) return page;
             }
-            s = k;
+            var fallbackKey = NAV_FALLBACKS[k];
+            var fallbackDict = T[code] || T.ru;
+            s = fallbackKey && (fallbackDict[fallbackKey] || T.en[fallbackKey]);
+            if (s === undefined) s = k;
         }
         if (vars) {
             Object.keys(vars).forEach(function (name) {
@@ -411,10 +429,12 @@
             }
         } else {
             if (path !== "/cabinet") {
-                html += '<a class="btn btn-ghost btn-compact" href="/cabinet">' + t("cabinet") + "</a>";
+                html += '<a class="btn btn-ghost btn-compact" href="/cabinet">' +
+                    t("nav.cabinet") + "</a>";
             }
             if (user.is_admin && path !== "/admin") {
-                html += '<a class="btn btn-ghost btn-compact" href="/admin">' + t("admin") + "</a>";
+                html += '<a class="btn btn-ghost btn-compact" href="/admin">' +
+                    t("nav.admin") + "</a>";
             }
             html += '<button type="button" class="btn btn-ghost btn-compact" id="acc-logout">' + t("logout") + "</button>";
         }

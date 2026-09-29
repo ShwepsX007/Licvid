@@ -21,12 +21,23 @@ from alchemy_keys import AlchemyKeyStore
 ENDPOINTS = {
     "ETH": "eth-mainnet", "BNB": "bnb-mainnet", "POLYGON": "polygon-mainnet",
     "ARBITRUM": "arb-mainnet", "BASE": "base-mainnet",
-    "HYPERLIQUID": "hyperliquid-mainnet",
 }
-# The Transfers API documents these four networks. It does not promise BNB or
-# HyperEVM, so we never silently treat an unsupported query as an empty feed.
+# The Transfers API documents these four networks, but does not promise BNB;
+# token logs are still polled there. HyperEVM/Hyperliquid has no Alchemy endpoint.
 NATIVE_INDEXED = {"ETH": "ETH", "POLYGON": "POL", "ARBITRUM": "ETH", "BASE": "ETH"}
 METHOD_CU = {"eth_blockNumber": 10, "eth_getLogs": 60, "alchemy_getAssetTransfers": 120}
+
+
+def to_hex_block(val: int | str | None) -> str:
+    """Normalize a block number/tag for Alchemy JSON-RPC parameters."""
+    if isinstance(val, int):
+        return hex(val)
+    if isinstance(val, str) and not val.startswith("0x") and val != "latest":
+        try:
+            return hex(int(val))
+        except ValueError:
+            return "latest"
+    return val or "latest"
 
 
 class BudgetExhausted(Exception):
@@ -81,6 +92,11 @@ class WhalePoller:
         temp = self.state_file.with_suffix(".tmp")
         temp.write_text(json.dumps(self.state, separators=(",", ":")), encoding="utf-8")
         os.replace(temp, self.state_file)
+
+    def _reset_cursor(self, chain: str) -> None:
+        """Discard a rejected block range; the next poll seeds from its head."""
+        self.state.setdefault("cursors", {})[chain] = "latest"
+        self._save()
 
     def _keys(self) -> list[tuple[str, str]]:
         return self.key_store.keys() if self.key_store else (
@@ -170,6 +186,9 @@ class WhalePoller:
                 async with session.post(url, json={
                         "jsonrpc": "2.0", "id": 1, "method": method, "params": params},
                         timeout=aiohttp.ClientTimeout(total=25)) as response:
+                    if response.status == 400:
+                        self._reset_cursor(chain)
+                        raise PollError("HTTP 400")
                     if response.status in (401, 403, 429):
                         reason = ("Неверный ключ или сеть запрещена" if response.status in (401, 403)
                                   else "HTTP 429: ограничение Alchemy")
@@ -187,6 +206,7 @@ class WhalePoller:
                         raise PollError("Некорректный ответ RPC")
                     error = data.get("error") or {}
                     if error:
+                        self._reset_cursor(chain)
                         if isinstance(error, dict) and error.get("code") in (429, -32005):
                             self.key_errors[key_id] = "Ограничение RPC; переключение"
                             self.key_cooldown[key_id] = now + 300
@@ -213,7 +233,7 @@ class WhalePoller:
         for from_wallet in (True, False):
             topics = [TRANSFER_TOPIC, wallets] if from_wallet else [TRANSFER_TOPIC, None, wallets]
             logs = await self._rpc(session, chain, "eth_getLogs", [{
-                "fromBlock": hex(start), "toBlock": hex(end),
+                "fromBlock": to_hex_block(start), "toBlock": to_hex_block(end),
                 "address": addresses, "topics": topics}])
             if not isinstance(logs, list):
                 raise PollError("Malformed log response")
@@ -240,7 +260,8 @@ class WhalePoller:
             for side in ("fromAddress", "toAddress"):
                 page = None
                 while True:
-                    query = {side: address, "fromBlock": hex(start), "toBlock": hex(end),
+                    query = {side: address, "fromBlock": to_hex_block(start),
+                             "toBlock": to_hex_block(end),
                              "category": ["external"], "withMetadata": False,
                              "excludeZeroValue": True, "maxCount": "0x3e8"}
                     if page:
@@ -275,13 +296,17 @@ class WhalePoller:
         latest = int(head, 16)
         self.latest_heads[chain] = latest
         cursor = self.state["cursors"].get(chain)
-        if cursor is None:
+        if cursor is None or cursor == "latest":
             self.state["cursors"][chain] = latest
             self._save()
             return  # no historical replay without a user-specified starting point
         # Bound backlog per pass, including the native index query. If down
         # for weeks, subsequent hourly passes catch up without a huge request.
-        start = int(cursor) + 1
+        try:
+            start = int(cursor) + 1
+        except (TypeError, ValueError):
+            self._reset_cursor(chain)
+            return
         latest = min(latest, start + 49_999)
         # Address-indexed native query once per range (not once per log
         # chunk): otherwise Arbitrum's many small blocks exhaust Free CU.

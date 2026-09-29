@@ -172,6 +172,48 @@ class DictionariesTest(unittest.TestCase):
             self.assertFalse(dead, f"{lang}: ключи фраз без кириллицы — {dead[:6]}")
 
 
+class HeaderTranslationsTest(unittest.TestCase):
+    EXPECTED = {
+        "ru": {
+            "hour.digest": "Дайджест", "hour.title": "Часовые сводки",
+            "art.title": "Статьи", "nav.cabinet": "Кабинет", "nav.admin": "Админка",
+        },
+        "en": {
+            "hour.digest": "Digest", "hour.title": "Hourly Summaries",
+            "art.title": "Articles", "nav.cabinet": "Account", "nav.admin": "Admin",
+        },
+        "zh": {
+            "hour.digest": "日报", "hour.title": "小时市场简报",
+            "art.title": "文章", "nav.cabinet": "账户", "nav.admin": "管理",
+        },
+        "hi": {
+            "hour.digest": "डाइजेस्ट", "hour.title": "हर घंटे की बाज़ार सारांश",
+            "art.title": "लेख", "nav.cabinet": "कैबिनेट", "nav.admin": "एडमिन",
+        },
+        "es": {
+            "hour.digest": "Resumen", "hour.title": "Resúmenes del mercado por horas",
+            "art.title": "Artículos", "nav.cabinet": "Cuenta", "nav.admin": "Admin",
+        },
+    }
+
+    def test_header_labels_have_translations_in_every_language(self) -> None:
+        for lang, expected in self.EXPECTED.items():
+            with self.subTest(lang=lang):
+                self.assertEqual({key: load(lang)["keys"].get(key) for key in expected},
+                                 expected)
+
+    def test_shared_menu_uses_localized_header_keys_and_has_fallbacks(self) -> None:
+        with open(os.path.join(STATIC, "account.js"), encoding="utf-8") as fh:
+            source = fh.read()
+        for key in ("hour.digest", "hour.title", "art.title"):
+            self.assertIn(f'key: "{key}"', source)
+        self.assertIn('t("nav.cabinet")', source)
+        self.assertIn('t("nav.admin")', source)
+        self.assertIn('"hour.digest": "digest"', source)
+        self.assertIn('"hour.title": "hourly"', source)
+        self.assertIn('"art.title": "articles"', source)
+
+
 class PagesBundleTest(unittest.TestCase):
     def test_bundle_matches_json(self) -> None:
         """i18n.pages.js собирается из JSON — собранное должно совпадать."""

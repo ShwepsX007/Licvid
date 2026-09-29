@@ -2746,3 +2746,21 @@ body.chart-fullscreen { overflow: hidden; }
     font-size: 0.78rem; font-variant-numeric: tabular-nums;
 }
 .levels-field input[type="checkbox"] { align-self: flex-start; }
+
+/* Whale Alert shares the feed scroll area and the page's existing WebSocket. */
+.feed-section.whale-active #feed-table,
+.feed-section.whale-active #feed-empty { display: none !important; }
+.whale-panel[hidden] { display: none !important; }
+.whale-panel { padding: 10px; }
+.whale-controls { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.whale-controls label { color: var(--text-muted); font-size: .72rem; }
+.whale-controls select { background: #16202d; color: #e5ebf5; border: 1px solid var(--border-color); border-radius: 5px; padding: 4px; }
+.whale-events { display: grid; gap: 7px; }
+.whale-card { padding: 10px; border: 1px solid var(--border-color); border-radius: 8px; background: #121c29; font-size: .78rem; }
+.whale-card-head { display: flex; justify-content: space-between; gap: 5px; margin-bottom: 5px; }
+.whale-card .whale-usd { color: var(--color-gold, #ffd166); font-weight: 800; }
+.whale-card .whale-inflow { color: #4ade80; }
+.whale-card .whale-outflow { color: #fb7185; }
+.whale-card .whale-address { color: var(--text-muted); overflow-wrap: anywhere; line-height: 1.6; }
+.whale-card a { color: #38bdf8; }
+.whale-panel .feed-empty[hidden] { display: none !important; }

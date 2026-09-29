@@ -504,6 +504,8 @@
                             data-feed="oi" id="feed-tab-oi" aria-selected="false"
                             data-i18n="feed.tab_oi">● OI</button>
                     <button type="button" class="feed-tab" role="tab"
+                            data-feed="whale" id="feed-tab-whale" aria-selected="false">🐋 Ончейн / Whale Alert</button>
+                    <button type="button" class="feed-tab" role="tab"
                             data-feed="book" id="feed-tab-book" aria-selected="false"
                             data-i18n="feed.tab_book">📖 Заявки</button>
                 </div>
@@ -528,6 +530,25 @@
                     <tbody id="feed-tbody"></tbody>
                 </table>
                 <div class="feed-empty" id="feed-empty" data-i18n="feed.empty">Ожидание событий с бирж…</div>
+                <section id="whale-panel" class="whale-panel" aria-label="Ончейн Скринер / Whale Alert" hidden>
+                    <div class="whale-controls">
+                        <label>От <select id="whale-min">
+                            <option value="50000">$50K+</option>
+                            <option value="100000" selected>$100K+</option>
+                            <option value="500000">$500K+</option>
+                            <option value="1000000">$1M+</option>
+                        </select></label>
+                        <label>Сеть <select id="whale-chain">
+                            <option value="ALL">All</option><option value="ETH">ETH</option><option value="BNB">BNB</option>
+                        </select></label>
+                        <label>Тип <select id="whale-direction">
+                            <option value="ALL">All</option><option value="inflow">inflow</option>
+                            <option value="outflow">outflow</option>
+                        </select></label>
+                    </div>
+                    <div id="whale-events" class="whale-events" aria-live="polite"></div>
+                    <div id="whale-empty" class="feed-empty">Загрузка ончейн-транзакций…</div>
+                </section>
             </div>
 
             <!-- Горизонтальный разделитель: высота блока «Лидеры» -->

@@ -5546,6 +5546,82 @@
         finishBookFeed(ordered.length);
     }
 
+    // One global /ws delivers whale_tx to all viewers. Keep a bounded local
+    // cache so a REST history response cannot erase events received in flight.
+    const whaleRows = new Map();
+    let whaleEnabled = true;
+    let whaleRequest = 0;
+    function whaleKey(row) { return row.chain + ":" + row.hash + ":" + row.log_index; }
+    function addWhale(row) {
+        if (!row || !/^(ETH|BNB)$/.test(row.chain || "") ||
+                !/^0x[0-9a-f]{64}$/i.test(row.hash || "")) return;
+        whaleRows.set(whaleKey(row), row);
+        while (whaleRows.size > 100) whaleRows.delete(whaleRows.keys().next().value);
+        if (state.feedTab === "whale") paintWhales();
+    }
+    function paintWhales() {
+        const target = $("whale-events"), empty = $("whale-empty");
+        if (!target || !empty) return;
+        const min = Number($("whale-min").value), chain = $("whale-chain").value;
+        const direction = $("whale-direction").value;
+        const rows = Array.from(whaleRows.values()).filter((row) =>
+            Number(row.usd) >= min && (chain === "ALL" || row.chain === chain) &&
+            (direction === "ALL" || row.direction === direction))
+            .sort((a, b) => Number(b.timestamp) - Number(a.timestamp)).slice(0, 50);
+        const frag = document.createDocumentFragment();
+        rows.forEach((row) => {
+            const card = document.createElement("article");
+            card.className = "whale-card";
+            const scan = row.chain === "BNB" ? "https://bscscan.com/tx/" : "https://etherscan.io/tx/";
+            const addr = (value, label) => escapeHtml(label || String(value || "").slice(0, 10) + "…" + String(value || "").slice(-6));
+            const dir = row.direction === "inflow" ? "⬇ inflow" : row.direction === "outflow" ? "⬆ outflow" : "↔ transfer";
+            const cls = row.direction === "inflow" || row.direction === "outflow" ? "whale-" + row.direction : "";
+            const ts = new Date(Number(row.timestamp) * 1000);
+            const time = isNaN(ts.getTime()) ? "" : ts.toLocaleTimeString();
+            card.innerHTML = '<div class="whale-card-head"><span>' + escapeHtml(row.chain) +
+                ' · ' + escapeHtml(time) + ' · <span class="' + cls + '">' + dir +
+                '</span></span><a href="' + scan + row.hash + '" target="_blank" rel="noopener noreferrer">↗ Scan</a></div>' +
+                '<div><strong>' + Number(row.amount).toLocaleString(undefined, { maximumFractionDigits: 8 }) +
+                ' ' + escapeHtml(row.symbol) + '</strong> · <span class="whale-usd">$' +
+                Number(row.usd).toLocaleString(undefined, { maximumFractionDigits: 2 }) + '</span></div>' +
+                '<div class="whale-address">' + addr(row.from, row.from_label) + ' → ' +
+                addr(row.to, row.to_label) + '</div>';
+            frag.appendChild(card);
+        });
+        target.replaceChildren(frag);
+        feedCountEl.textContent = rows.length + " событий";
+        empty.hidden = rows.length > 0;
+        empty.textContent = whaleEnabled ? "Пока нет транзакций по фильтрам" :
+            "Ончейн-скринер отключён: ALCHEMY_API_KEY не установлен";
+    }
+    async function loadWhales() {
+        const seq = ++whaleRequest;
+        const min = $("whale-min").value, chain = $("whale-chain").value;
+        try {
+            const res = await fetch("/api/screener/whales?min_usd=" + min +
+                                    "&chain=" + chain + "&limit=100");
+            if (!res.ok) throw new Error("HTTP " + res.status);
+            const data = await res.json();
+            if (seq !== whaleRequest) return;
+            whaleEnabled = data.enabled;
+            (data.events || []).slice().reverse().forEach(addWhale);
+            paintWhales();
+        } catch (e) {
+            if (seq === whaleRequest) {
+                whaleEnabled = true;
+                paintWhales();
+                if (!whaleRows.size) $("whale-empty").textContent = "Нет связи с ончейн-скринером";
+            }
+        }
+    }
+    ["whale-min", "whale-chain", "whale-direction"].forEach((id) => {
+        const el = $(id);
+        if (el) el.addEventListener("change", () => {
+            if (id === "whale-direction") paintWhales();
+            else loadWhales();
+        });
+    });
+
     function rebuildFeed() {
         pinHitKey = null;
         hoverHitKey = null;
@@ -5557,6 +5633,11 @@
             }
         }
         paintFeedHeaders();
+        const whalePanel = $("whale-panel");
+        if (whalePanel) whalePanel.hidden = state.feedTab !== "whale";
+        const feedSection = document.querySelector(".feed-section");
+        if (feedSection) feedSection.classList.toggle("whale-active", state.feedTab === "whale");
+        if (state.feedTab === "whale") { paintWhales(); return; }
         if (state.feedTab === "cvd") { rebuildShapeFeed("cvd"); return; }
         if (state.feedTab === "oi") { rebuildShapeFeed("oi"); return; }
         if (state.feedTab === "book") { rebuildBookFeed(); return; }
@@ -5575,7 +5656,7 @@
     }
 
     function setFeedTab(tab) {
-        if (tab !== "liq" && tab !== "cvd" && tab !== "oi" && tab !== "book") return;
+        if (tab !== "liq" && tab !== "cvd" && tab !== "oi" && tab !== "book" && tab !== "whale") return;
         if (state.feedTab === tab) return;
         state.feedTab = tab;
         try { localStorage.setItem("liqscope.feedTab", tab); } catch (e) { /* ignore */ }
@@ -5583,13 +5664,14 @@
         // поднимаем поллер, уходим со вкладки при выключенном слое — гасим
         bookPollSync();
         rebuildFeed();
+        if (tab === "whale") loadWhales();
         sendFeedConfig();     // «ВСЕ» + CVD/OI → сервер начинает поток всех монет
     }
 
     function setupFeedTabs() {
         try {
             const v = localStorage.getItem("liqscope.feedTab");
-            if (v === "liq" || v === "cvd" || v === "oi" || v === "book") state.feedTab = v;
+            if (v === "liq" || v === "cvd" || v === "oi" || v === "book" || v === "whale") state.feedTab = v;
         } catch (e) { /* ignore */ }
         const tabs = $("feed-tabs");
         if (!tabs) return;
@@ -5603,6 +5685,7 @@
         // поллер и рисуем ленту, даже если кнопка 📖 в слоях не нажата
         bookPollSync();
         if (state.feedTab === "book") rebuildFeed();
+        if (state.feedTab === "whale") { rebuildFeed(); loadWhales(); }
     }
 
     let shapeFeedTimer = null;
@@ -7797,6 +7880,10 @@
                 // обновляет ячейки на месте, без перерисовки DOM
                 if (isFlowFeed(state.feedTab)) syncShapeFeed(state.feedTab);
                 else if (state.feedTab === "book") syncBookFeed();
+                break;
+            }
+            case "whale_tx": {
+                addWhale(msg);
                 break;
             }
             case "stats": {

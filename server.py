@@ -117,6 +117,7 @@ from fastapi.staticfiles import StaticFiles
 
 import market_feed
 from market_feed import GATE_REST, MarketFeed, TF_MINUTES, base_of, canon, _get_json
+from whale_screener import WhaleScreener
 from timeframes import parse_tf
 from book_feed import (chat_text as book_chat_text, chat_meta as book_chat_meta)
 from book_feed import (BookFeed, format_wall_html, normalize_book_cfg,
@@ -1450,6 +1451,7 @@ async def _sqlite_ping_ms() -> float:
 
 
 feed: Optional[MarketFeed] = None
+whale_screener: Optional[WhaleScreener] = None
 # 📖 Стакан: опрос L2 и детектор стен (заполняется в lifespan; в тестах — подмена).
 book_feed_inst: Optional[BookFeed] = None
 _pending: List[dict] = []
@@ -4350,6 +4352,20 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(levels_signal_loop(), name="levels-signal"),
         asyncio.create_task(corr_alert_loop(), name="corr-alerts"),
     ]
+    global whale_screener
+    alchemy_key = os.getenv("ALCHEMY_API_KEY", "").strip()
+    if alchemy_key:
+        whale_screener = WhaleScreener(
+            alchemy_key,
+            price_fn=lambda pair: feed.prices.get(pair) if feed else None,
+            broadcast=hub.broadcast,
+            min_usd=50_000,  # UI supports $50K; REST/UI default filter stays $100K
+        )
+        tasks.append(asyncio.create_task(whale_screener.run(), name="whale-screener"))
+    else:
+        whale_screener = None
+        log.warning("ALCHEMY_API_KEY не установлен, скринер ончейн-транзакций отключен")
+
     # Дневной дайджест: вечерний выпуск в оба канала и в архив на сайте
     digest_sched = DigestScheduler(hour=DIGEST_HOUR, minute=DIGEST_MINUTE,
                                    jitter_min=DIGEST_JITTER_MIN,
@@ -5584,6 +5600,14 @@ def aggregate_hour_cell(h: float, cell: dict, symbol: Optional[str] = None) -> d
         "by_symbol": cell.get("sym") or {},
         "by_exchange": cell.get("exch") or {},
     }
+
+
+@app.get("/api/screener/whales")
+async def api_screener_whales(min_usd: float = Query(100_000, ge=0),
+                              chain: str = Query("ALL", pattern="^(ALL|ETH|BNB)$"),
+                              limit: int = Query(50, ge=1, le=100)):
+    return {"enabled": whale_screener is not None,
+            "events": whale_screener.history(min_usd, chain, limit) if whale_screener else []}
 
 
 @app.get("/api/liquidations")

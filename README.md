@@ -24,9 +24,13 @@ http://<сервер>:8000/articles  — статьи: разборы рынка
 ```bash
 # Задайте переменную в окружении процесса (например, в systemd Environment=),
 # не сохраняйте рабочий ключ в git.
-ALCHEMY_API_KEY=your_alchemy_key
+ALCHEMY_API_KEY=your_ethereum_key
+# Если Alchemy выдал отдельный ключ для BNB Chain:
+ALCHEMY_BNB_API_KEY=your_bnb_key
 ```
 
+`ALCHEMY_API_KEY` обязателен для запуска скринера; если `ALCHEMY_BNB_API_KEY`
+не задан, для BNB Chain используется тот же ключ, что и для Ethereum.
 По умолчанию ключ пуст: сайт продолжит работу без ончейн-источника, REST
 вернёт `{"enabled":false,"events":[]}`. При запуске выводится предупреждение
 `ALCHEMY_API_KEY не установлен, скринер ончейн-транзакций отключен`.

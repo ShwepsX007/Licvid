@@ -55,7 +55,8 @@ def load_wallets(path: Path) -> dict[str, str]:
 class WhaleScreener:
     def __init__(self, api_key: str, price_fn, broadcast,
                  wallet_path: Path | None = None, min_usd: float = 100_000,
-                 endpoints: dict[str, str] | None = None):
+                 endpoints: dict[str, str] | None = None,
+                 bnb_api_key: str | None = None):
         self.price_fn = price_fn
         self.broadcast = broadcast
         self.wallets = load_wallets(wallet_path or Path(__file__).resolve().parent / "data/cex_wallets.json")
@@ -67,7 +68,7 @@ class WhaleScreener:
         self._next_rpc_id = 10
         self.endpoints = endpoints or {
             "ETH": f"wss://eth-mainnet.g.alchemy.com/v2/{api_key}",
-            "BNB": f"wss://bnb-mainnet.g.alchemy.com/v2/{api_key}",
+            "BNB": f"wss://bnb-mainnet.g.alchemy.com/v2/{bnb_api_key or api_key}",
         }
 
     def history(self, min_usd: float = 100_000, chain: str = "ALL", limit: int = 50) -> list[dict]:

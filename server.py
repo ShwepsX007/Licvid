@@ -4360,6 +4360,7 @@ async def lifespan(app: FastAPI):
             price_fn=lambda pair: feed.prices.get(pair) if feed else None,
             broadcast=hub.broadcast,
             min_usd=50_000,  # UI supports $50K; REST/UI default filter stays $100K
+            bnb_api_key=os.getenv("ALCHEMY_BNB_API_KEY", "").strip() or None
         )
         tasks.append(asyncio.create_task(whale_screener.run(), name="whale-screener"))
     else:

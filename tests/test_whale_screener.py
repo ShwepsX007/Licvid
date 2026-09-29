@@ -73,6 +73,14 @@ class ParsingTests(unittest.IsolatedAsyncioTestCase):
         await self.s.handle_log("ETH", transfer("ETH", "WBTC", 10, hash_="0x" + "f" * 64))
         self.assertEqual(len(self.sent), 1)  # no fabricated USD for ETH/BTC
 
+    async def test_separate_bnb_key(self):
+        s = WhaleScreener("eth-key", lambda _: None, self.sent.append,
+                          bnb_api_key="bnb-key")
+        self.assertEqual(s.endpoints["ETH"], "wss://eth-mainnet.g.alchemy.com/v2/eth-key")
+        self.assertEqual(s.endpoints["BNB"], "wss://bnb-mainnet.g.alchemy.com/v2/bnb-key")
+        common = WhaleScreener("common-key", lambda _: None, self.sent.append)
+        self.assertTrue(common.endpoints["BNB"].endswith("/common-key"))
+
     async def test_bounded_history_and_wallets(self):
         self.assertEqual(len(load_wallets(Path(__file__).resolve().parents[1] / "data/cex_wallets.json")), 8)
         async def broadcast(value):

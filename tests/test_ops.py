@@ -15,11 +15,14 @@ import os
 import sys
 import tempfile
 import time
+import asyncio
 import gc
+import json
 import inspect
 import logging
 import queue
 import unittest
+from types import SimpleNamespace
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
@@ -428,6 +431,191 @@ class GzipThreadOffloadTest(unittest.TestCase):
             self.assertIn(kw, params,
                           f"параметр {kw} не принимается установленной "
                           "starlette — приложение не поднялось бы")
+
+
+class WsInitTailTest(unittest.TestCase):
+    """Init-пакет WS берёт хвост истории, не копируя её целиком.
+
+    На бою сторож назвал в окне паузы строку ``server.py:5527`` — это
+    ``list(LIQUIDATIONS)[-100:]``: ради последних ста событий копировался весь
+    deque (до ``HISTORY_MAX`` = 60000), а на 50 подключениях разом это миллионы
+    скопированных ссылок в event loop.
+    """
+
+    def setUp(self):
+        server._WS_RATE.reset("ws:ip:testclient")
+        self._saved = list(server.LIQUIDATIONS)
+        self._maxlen = server.LIQUIDATIONS.maxlen
+        server.LIQUIDATIONS.clear()
+        for i in range(1200):
+            server.LIQUIDATIONS.append({"id": f"ev{i}", "timestamp": 1759000000 + i,
+                                        "symbol": "BTC_USDT", "side": "sell",
+                                        "usd": 1000.0 + i})
+
+    def tearDown(self):
+        server.LIQUIDATIONS.clear()
+        server.LIQUIDATIONS.extend(self._saved)
+        server._WS_RATE.reset("ws:ip:testclient")
+
+    def test_init_carries_last_events_in_order(self):
+        c = TestClient(server.app)
+        with c.websocket_connect("/ws") as ws:
+            init = json.loads(ws.receive_text())
+        recent = init.get("recent_liquidations") or []
+        self.assertTrue(recent, "init пришёл без ленты ликвидаций")
+        self.assertLessEqual(len(recent), 200, "лимит init не соблюдён")
+        ids = [e.get("id") for e in recent]
+        expected = [f"ev{i}" for i in range(1200 - len(recent), 1200)]
+        self.assertEqual(ids, expected,
+                         "хвост истории отдан не в хронологическом порядке — "
+                         "reversed() забыли развернуть обратно")
+
+    def test_source_no_longer_copies_whole_history(self):
+        src = inspect.getsource(server.ws_endpoint)
+        self.assertIn("islice(reversed(", src,
+                      "init снова копирует весь deque истории ради хвоста")
+        self.assertNotIn("list(LIQUIDATIONS)[-", src)
+
+
+class _FakeFeed:
+    """Двойник фида: /api/health зовёт health(), фон — session и prices."""
+
+    def __init__(self, prices):
+        self.session = object()
+        self.prices = prices
+        self.symbols = list(prices)
+        self.hot_symbols = set(prices)
+        self.tick_subscriptions = set()
+        self.preferred_kline_source = None
+        self.MAX_CUSTOM_SYMBOLS = 120
+        # health() читает status["ticks"].name — как у настоящего источника
+        self.status = {"ticks": SimpleNamespace(name="none")}
+
+    def health(self):
+        return {"sources": {}}
+
+
+class _FakeLevelsEngine:
+    """Двойник движка уровней: прогрев и лестница с измеримой длительностью."""
+
+    def __init__(self, payload_ms=0.0):
+        self.enabled = True
+        self.warmed = []
+        self.paid = []
+        self.saved = 0
+        self._payload_ms = payload_ms
+
+    async def warm(self, session, batch, limit=0):
+        self.warmed.append(list(batch))
+        if self._payload_ms:
+            await asyncio.sleep(self._payload_ms / 1000.0)
+
+    async def payload(self, sym, session=None, price=None):
+        self.paid.append((sym, price))
+        if self._payload_ms:
+            await asyncio.sleep(self._payload_ms / 1000.0)
+        return {"enabled": True, "price": price, "ts": time.time(),
+                "magnets": {"up": [], "down": []}, "magnets_list": [{"p": 1.0}],
+                "totals": {}, "calibration": {}}
+
+    def save(self):
+        self.saved += 1
+        return True
+
+
+class LevelsBackgroundTest(unittest.TestCase):
+    """Проход фона уровней считает себя: без этого нельзя сказать, он ли грузит воркер.
+
+    Паузы воркера в прогоне на бою ложились кластерами с периодом, близким к
+    ``LIQSCOPE_LEVELS_SNAP_SEC`` (20 с), а клиентский p95 был 883 мс при 9.6 мс
+    на стороне обработчика.
+    """
+
+    def setUp(self):
+        self._feed, self._levels = server.feed, server.LEVELS
+        self._want, self._bg = server.level_alert_symbols, dict(server.LEVELS_BG)
+        self._snap = dict(server.LEVELS_SNAP)
+        self._slow_ms, self._batch = server.LEVELS_BG_SLOW_MS, server.LEVELS_BATCH
+        self._on = server.LEVELS_BG_ON
+        server.feed = _FakeFeed({"BTC_USDT": 61000.0, "ETH_USDT": 3100.0})
+        server.level_alert_symbols = lambda: ["BTC_USDT", "ETH_USDT"]
+        for k in server.LEVELS_BG:
+            server.LEVELS_BG[k] = 0.0
+        server.LEVELS_SNAP.clear()
+        server.LEVELS_BG_SLOW_MS = 100.0
+        server.LEVELS_BATCH = 4
+        server.LEVELS_BG_ON = True
+
+    def tearDown(self):
+        server.feed, server.LEVELS = self._feed, self._levels
+        server.level_alert_symbols = self._want
+        server.LEVELS_BG.update(self._bg)
+        server.LEVELS_SNAP.clear()
+        server.LEVELS_SNAP.update(self._snap)
+        server.LEVELS_BG_SLOW_MS, server.LEVELS_BATCH = self._slow_ms, self._batch
+        server.LEVELS_BG_ON = self._on
+
+    def test_pass_records_timing_and_snapshot(self):
+        engine = _FakeLevelsEngine()
+        server.LEVELS = engine
+        state = {"asked": [], "snap_at": 0.0}
+        asyncio.run(server.levels_bg_pass(state))
+        bg = server.LEVELS_BG
+        self.assertEqual(int(bg["passes"]), 1, "проход не посчитан")
+        self.assertEqual(int(bg["symbols"]), 2, "число монет в проходе неверно")
+        self.assertGreater(bg["last_at"], 0.0)
+        self.assertEqual(engine.warmed, [["BTC_USDT", "ETH_USDT"]])
+        self.assertEqual([s for s, _ in engine.paid], ["BTC_USDT", "ETH_USDT"])
+        self.assertEqual(engine.saved, 1, "настройки не сохранены")
+        self.assertIn("BTC_USDT", server.LEVELS_SNAP,
+                      "снимок для алертов не обновлён")
+        self.assertEqual(state["asked"], ["BTC_USDT", "ETH_USDT"],
+                         "круг монет не запомнен — следующий проход возьмёт тех же")
+        self.assertGreater(state["snap_at"], 0.0)
+
+    def test_slow_pass_is_counted_and_reported(self):
+        engine = _FakeLevelsEngine(payload_ms=60.0)     # 2 монеты × 60 мс > порога
+        server.LEVELS = engine
+        with self.assertLogs("liqscope.server", level="WARNING") as cap:
+            asyncio.run(server.levels_bg_pass({"asked": [], "snap_at": 0.0}))
+        self.assertEqual(int(server.LEVELS_BG["slow_passes"]), 1,
+                         "медленный проход не посчитан")
+        self.assertGreaterEqual(server.LEVELS_BG["max_pass_ms"], 100.0)
+        text = "\n".join(cap.output)
+        self.assertIn("[levels]", text)
+        self.assertIn("BTC_USDT", text, "в предупреждении нет раскладки по монетам")
+
+    def test_disabled_background_does_no_work(self):
+        engine = _FakeLevelsEngine()
+        server.LEVELS = engine
+        server.LEVELS_BG_ON = False
+        asyncio.run(server.levels_bg_pass({"asked": [], "snap_at": 0.0}))
+        self.assertEqual(engine.warmed, [], "выключенный фон всё равно грел биржи")
+        self.assertEqual(engine.paid, [], "выключенный фон всё равно считал лестницы")
+        self.assertEqual(server.LEVELS_BG["off"], 1.0,
+                         "в /api/health не видно, что фон выключен")
+
+    def test_payload_error_does_not_kill_the_pass(self):
+        class Boom(_FakeLevelsEngine):
+            async def payload(self, sym, session=None, price=None):
+                raise RuntimeError("взрыв")
+        server.LEVELS = Boom()
+        asyncio.run(server.levels_bg_pass({"asked": [], "snap_at": 0.0}))
+        self.assertEqual(int(server.LEVELS_BG["passes"]), 1,
+                         "проход не завершился после ошибки монеты")
+
+    def test_health_exposes_levels_background(self):
+        server._HEALTH_CACHE.invalidate()
+        d = TestClient(server.app).get("/api/health").json()
+        server._HEALTH_CACHE.invalidate()
+        self.assertIn("levels_bg", d)
+        for key in ("passes", "last_pass_ms", "max_pass_ms", "slow_passes", "off"):
+            self.assertIn(key, d["levels_bg"], f"в levels_bg нет {key}")
+        self.assertIn("cpu_count", d, "не видно, сколько ядер у машины")
+        self.assertIn("load_avg", d, "не видно загрузки машины")
+        self.assertIn("payload_cache", d["levels_events_cache"],
+                      "попадания кэша лестниц не видны — не проверить, "
+                      "работает ли бакет цены")
 
 
 if __name__ == "__main__":

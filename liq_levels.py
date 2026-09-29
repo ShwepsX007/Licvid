@@ -74,6 +74,30 @@ MAGNET_MIN_SHARE = 0.02
 MAX_DISTANCE_REL = 0.5
 
 PAYLOAD_TTL = max(1.0, float(os.getenv("LIQSCOPE_LEVELS_TTL", "20") or 20))
+#: Шаг бакета цены в ключе кэша ответов, в долях цены (0.0005 = 0.05%).
+#: Цена в ключе с точностью до 8 знаков означала, что кэш НЕ СРАБАТЫВАЛ НИКОГДА:
+#: клиент передаёт цену со своего графика, а фон — текущую цену ленты, и они
+#: различаются в последнем знаке на каждом запросе. Пересчёт лестницы шёл на
+#: каждый вызов. Ответ и так может быть старше PAYLOAD_TTL (20 с), за которые
+#: цена уходит заметно дальше 0.05%, поэтому бакет ничего не ломает.
+PRICE_KEY_STEP = max(0.0, float(os.getenv("LIQSCOPE_LEVELS_PRICE_KEY_STEP",
+                                          "0.0005") or 0.0005))
+
+
+def price_key(price: Any) -> float:
+    """Ключ цены для кэша: одинаковая корзина при движении в пределах шага.
+
+    Бакет логарифмический, поэтому шаг одинаково работает и для BTC по 60000,
+    и для щиткоина по 0.00001. При ``PRICE_KEY_STEP = 0`` возвращается цена
+    как есть — прежнее поведение.
+    """
+    try:
+        p = float(price or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if p <= 0.0 or PRICE_KEY_STEP <= 0.0:
+        return round(p, 8)
+    return float(round(math.log(p) / math.log1p(PRICE_KEY_STEP)))
 PRICE_TTL = max(60.0, float(os.getenv("LIQSCOPE_LEVELS_PRICE_TTL", "300") or 300))
 #: Файл настроек: там же лежит и последняя калибровка (она дорогая).
 SETTINGS_FILE = os.getenv(
@@ -788,6 +812,8 @@ class LevelsEngine:
         self._settings["enabled"] = bool(enabled)
         self._calib: Dict[str, dict] = {}
         self._cache: Dict[tuple, Tuple[float, dict]] = {}
+        self._cache_hits = 0
+        self._cache_misses = 0
         # события истории для калибровки/вычитания исполненного: окно
         # «calib_days» перечитывалось с диска на каждом проходе фона (каждые
         # LEVELS_SNAP_SEC по каждой монете батча), а разбор дневных шардов —
@@ -1108,6 +1134,14 @@ class LevelsEngine:
         self._events_cache_events += n
         return True
 
+    def cache_stats(self) -> Dict[str, int]:
+        """Кэш готовых лестниц: попадания/промахи — видно, работает ли бакет цены."""
+        with self._lock:
+            return {"entries": len(self._cache), "hits": int(self._cache_hits),
+                    "misses": int(self._cache_misses),
+                    "ttl_sec": int(PAYLOAD_TTL),
+                    "price_key_step": PRICE_KEY_STEP}
+
     def events_cache_stats(self) -> Dict[str, int]:
         """Сколько событий и записей держит кэш — видно в /api/health."""
         return {"entries": len(self._events_cache),
@@ -1177,11 +1211,13 @@ class LevelsEngine:
         settings = self.settings(sym)
         win = float(window_hours or settings.get("window_hours") or 720.0)
         key = (sym, round(float(min_usd or 0.0), 2), str(side or "").lower(),
-               round(win, 3), round(float(price or 0.0), 8))
+               round(win, 3), price_key(price))
         with self._lock:
             cached = self._cache.get(key)
             if cached and not force and ts - cached[0] < PAYLOAD_TTL:
+                self._cache_hits += 1
                 return cached[1]
+            self._cache_misses += 1
         if not settings.get("enabled", True):
             return self._empty(sym, ts, win, settings, "инструмент выключен")
         since = ts - win * HOUR

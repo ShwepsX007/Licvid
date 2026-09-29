@@ -56,8 +56,9 @@ import sys
 import threading
 import time
 from collections import deque
+from itertools import islice
 from contextlib import asynccontextmanager
-from typing import Deque, Dict, List, Optional, Set, Tuple
+from typing import Any, Deque, Dict, List, Optional, Set, Tuple
 
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -622,6 +623,17 @@ LEVELS = LevelsEngine(oi=OI, profile=VP, side=SIDE, risk=RISK, hist=HIST)
 # Его наполняет level_alert_loop, читает alerts_market_snapshot.
 LEVELS_SNAP: Dict[str, dict] = {}
 LEVELS_SNAP_SEC = max(10.0, float(os.getenv("LIQSCOPE_LEVELS_SNAP_SEC", "20") or 20))
+# Расчёт уровней — самый тяжёлый фон на сервере: прогрев рядов биржи и
+# лестница по каждой монете. Он же главный подозреваемый в паузах воркера,
+# поэтому считает свою длительность сам и умеет выключаться для проверки.
+LEVELS_BG_ON = os.getenv("LIQSCOPE_LEVELS_BG", "1").strip() not in ("", "0", "false", "no")
+LEVELS_BATCH = max(1, int(os.getenv("LIQSCOPE_LEVELS_BATCH", "4") or 4))
+LEVELS_BG_SLOW_MS = max(100.0, float(os.getenv("LIQSCOPE_LEVELS_BG_SLOW_MS", "1000") or 1000))
+LEVELS_BG: Dict[str, float] = {
+    "passes": 0.0, "symbols": 0.0, "last_pass_ms": 0.0, "max_pass_ms": 0.0,
+    "last_warm_ms": 0.0, "max_warm_ms": 0.0, "last_payload_ms": 0.0,
+    "max_payload_ms": 0.0, "payload_total_ms": 0.0, "last_at": 0.0,
+    "slow_passes": 0.0, "off": 0.0 if LEVELS_BG_ON else 1.0}
 LEVELS_SNAP_MAX = max(1, int(os.getenv("LIQSCOPE_LEVELS_SNAP_MAX", "8") or 8))
 LEVEL_WARM_SEC = max(10.0, float(os.getenv("LIQSCOPE_LEVELS_WARM_SEC", "30") or 30))
 LEVELS_WARM_MAX = max(1, int(os.getenv("LIQSCOPE_LEVELS_WARM_MAX", "40") or 40))
@@ -1544,64 +1556,113 @@ def level_alert_symbols() -> List[str]:
     return out[:LEVELS_WARM_MAX]
 
 
-async def liq_levels_task() -> None:
-    """Фон: греет данные уровней и обновляет снимок для алертов.
+async def levels_bg_pass(state: Dict[str, Any]) -> None:
+    """Один проход фона уровней: прогрев пачки монет и снимок для алертов.
 
     Сеть здесь только на прогреве (перевес сторон и риск-лимиты) — сам расчёт
     читает то, что уже лежит в памяти и на диске. Идём по списку монет по
     кругу: за проход успеваем прогреть немногих, зато ни одна монета не
     остаётся без внимания и на биржи не летит залп. Снимок нужен движку
     алертов: он не должен считать лестницы в своём проходе.
+
+    Проход считает собственную длительность и раскладку по монетам
+    (``LEVELS_BG``, видно в ``/api/health``): это самый тяжёлый периодический
+    расчёт на сервере, и без замера нельзя сказать, он ли даёт паузы воркера.
+    Вынесено из цикла задачи, чтобы проход проверялся тестом, а не только
+    прогоном на бою. ``state`` держит ``asked`` (круг монет) и ``snap_at``.
     """
+    t_pass = time.monotonic()
+    pass_syms: List[str] = []
+    try:
+        if not LEVELS_BG_ON:
+            # режим проверки: фон не считает ничего, и по прогону нагрузки
+            # сразу видно, он ли давал паузы воркера
+            LEVELS_BG["off"] = 1.0
+            return
+        session = getattr(feed, "session", None) if feed else None
+        want = level_alert_symbols()
+        if session and LEVELS.enabled and want:
+            asked = list(state.get("asked") or [])
+            # круг по списку: каждый проход — следующая пачка монет
+            todo = [s for s in want if s not in asked] or want
+            if not [s for s in want if s not in asked]:
+                asked = []
+            batch = todo[:LEVELS_BATCH]
+            asked.extend(batch)
+            state["asked"] = asked
+            t_warm = time.monotonic()
+            await LEVELS.warm(session, batch, limit=len(batch))
+            warm_ms = (time.monotonic() - t_warm) * 1000.0
+            LEVELS_BG["last_warm_ms"] = round(warm_ms, 1)
+            if warm_ms > LEVELS_BG["max_warm_ms"]:
+                LEVELS_BG["max_warm_ms"] = round(warm_ms, 1)
+            # считаем те монеты, которых ждут алерты и графики: их ответ
+            # кэшируется движком, а снимок для алертов обновляем не чаще
+            # LEVELS_SNAP_SEC — иначе лестницы считались бы зря
+            if time.time() - float(state.get("snap_at") or 0.0) >= LEVELS_SNAP_SEC:
+                state["snap_at"] = time.time()
+                for sym in batch:
+                    price = float((feed.prices or {}).get(sym) or 0.0)
+                    t_one = time.monotonic()
+                    try:
+                        data = await LEVELS.payload(sym, session=session,
+                                                    price=(price or None))
+                    except Exception as e:        # noqa: BLE001
+                        log.debug("уровни %s: %s", sym, e)
+                        continue
+                    one_ms = (time.monotonic() - t_one) * 1000.0
+                    pass_syms.append(f"{sym}:{one_ms:.0f}мс")
+                    LEVELS_BG["last_payload_ms"] = round(one_ms, 1)
+                    LEVELS_BG["payload_total_ms"] = round(
+                        LEVELS_BG["payload_total_ms"] + one_ms, 1)
+                    if one_ms > LEVELS_BG["max_payload_ms"]:
+                        LEVELS_BG["max_payload_ms"] = round(one_ms, 1)
+                    if not data.get("enabled") or not data.get("magnets"):
+                        continue
+                    LEVELS_SNAP[sym] = {
+                        "symbol": sym, "price": data.get("price"),
+                        "ts": data.get("ts"),
+                        # список, а не словарь up/down: движок алертов и
+                        # лента метрики ходят по магнитам циклом
+                        "magnets": data.get("magnets_list") or [],
+                        "totals": data.get("totals") or {},
+                        "calibration": data.get("calibration") or {},
+                        "estimate": True,
+                    }
+                for gone in [s for s in LEVELS_SNAP if s not in want]:
+                    LEVELS_SNAP.pop(gone, None)
+        await asyncio.to_thread(LEVELS.save)
+    finally:
+        pass_ms = (time.monotonic() - t_pass) * 1000.0
+        LEVELS_BG["passes"] += 1
+        LEVELS_BG["symbols"] = float(len(pass_syms))
+        LEVELS_BG["last_pass_ms"] = round(pass_ms, 1)
+        LEVELS_BG["last_at"] = time.time()
+        if pass_ms > LEVELS_BG["max_pass_ms"]:
+            LEVELS_BG["max_pass_ms"] = round(pass_ms, 1)
+        if pass_ms >= LEVELS_BG_SLOW_MS:
+            LEVELS_BG["slow_passes"] += 1
+            log.warning("[levels] проход фона уровней занял %.0f мс (порог "
+                        "%.0f мс): прогрев %.0f мс, лестницы %s — в это время "
+                        "единственный воркер обслуживает запросы вместе с "
+                        "расчётом (LIQSCOPE_LEVELS_BG=0 выключает фон для "
+                        "проверки, LIQSCOPE_LEVELS_BATCH уменьшает пачку)",
+                        pass_ms, LEVELS_BG_SLOW_MS, LEVELS_BG["last_warm_ms"],
+                        ", ".join(pass_syms) or "—")
+
+
+async def liq_levels_task() -> None:
+    """Фон уровней: проход раз в ``LEVEL_WARM_SEC``, расчёт в :func:`levels_bg_pass`."""
     await asyncio.sleep(20)             # пусть подтянутся символы и сессии
-    asked: List[str] = []
-    snap_at = 0.0
+    state: Dict[str, Any] = {"asked": [], "snap_at": 0.0}
     while True:
         try:
-            session = getattr(feed, "session", None) if feed else None
-            want = level_alert_symbols()
-            if session and LEVELS.enabled and want:
-                # круг по списку: каждый проход — следующая четвёрка монет
-                todo = [s for s in want if s not in asked] or want
-                if not [s for s in want if s not in asked]:
-                    asked = []
-                batch = todo[:4]
-                asked.extend(batch)
-                await LEVELS.warm(session, batch, limit=len(batch))
-                # считаем те монеты, которых ждут алерты и графики: их ответ
-                # кэшируется движком, а снимок для алертов обновляем не чаще
-                # LEVELS_SNAP_SEC — иначе лестницы считались бы зря
-                if time.time() - snap_at >= LEVELS_SNAP_SEC:
-                    snap_at = time.time()
-                    for sym in batch:
-                        price = float((feed.prices or {}).get(sym) or 0.0)
-                        try:
-                            data = await LEVELS.payload(sym, session=session,
-                                                        price=(price or None))
-                        except Exception as e:    # noqa: BLE001
-                            log.debug("уровни %s: %s", sym, e)
-                            continue
-                        if not data.get("enabled") or not data.get("magnets"):
-                            continue
-                        LEVELS_SNAP[sym] = {
-                            "symbol": sym, "price": data.get("price"),
-                            "ts": data.get("ts"),
-                            # список, а не словарь up/down: движок алертов и
-                            # лента метрики ходят по магнитам циклом
-                            "magnets": data.get("magnets_list") or [],
-                            "totals": data.get("totals") or {},
-                            "calibration": data.get("calibration") or {},
-                            "estimate": True,
-                        }
-                    for gone in [s for s in LEVELS_SNAP if s not in want]:
-                        LEVELS_SNAP.pop(gone, None)
-            await asyncio.to_thread(LEVELS.save)
+            await levels_bg_pass(state)
         except asyncio.CancelledError:
             raise
         except Exception as e:          # noqa: BLE001
             log.debug("фон уровней ликвидаций: %s", e)
         await asyncio.sleep(LEVEL_WARM_SEC)
-
 
 async def liq_event_worker():
     """Один обработчик очереди ликвидаций: диск + рассылка.
@@ -5357,8 +5418,17 @@ async def api_health():
         "log_queue_size": _LOG_QUEUE.qsize(),
         "log_queue_max": LOG_QUEUE_MAX,
         "log_dropped": int(_LOG_STATS["dropped"]),
-        # кэш окна калибровки уровней: сколько событий держим в куче
+        # кэши движка уровней: сколько событий держим в куче и попадают ли
+        # готовые лестницы (промахи — это полный пересчёт на каждый запрос)
         "levels_events_cache": _levels_cache_stats(),
+        # фон уровней: самый тяжёлый периодический расчёт на сервере. Если
+        # last_pass_ms в тысячах миллисекунд, паузы воркера совпадают с ним, и
+        # проверка проста: LIQSCOPE_LEVELS_BG=0 на один прогон нагрузки
+        "levels_bg": dict(LEVELS_BG),
+        # saturation машины: паузы бывают не от кода, а от нехватки ядер
+        "cpu_count": os.cpu_count() or 0,
+        "load_avg": [round(x, 2) for x in os.getloadavg()]
+        if hasattr(os, "getloadavg") else [],
         "wal_bytes": _wal_bytes(),
         "sqlite_ms": await _sqlite_ping_ms(),
         "uptime_sec": round(time.time() - _START_TS, 1),
@@ -5480,19 +5550,39 @@ async def api_metrics():
         "log_queue_size": _LOG_QUEUE.qsize(),
         "log_queue_max": LOG_QUEUE_MAX,
         "log_dropped": int(_LOG_STATS["dropped"]),
-        # кэш окна калибровки уровней: сколько событий держим в куче
+        # кэши движка уровней: сколько событий держим в куче и попадают ли
+        # готовые лестницы (промахи — это полный пересчёт на каждый запрос)
         "levels_events_cache": _levels_cache_stats(),
+        # фон уровней: самый тяжёлый периодический расчёт на сервере. Если
+        # last_pass_ms в тысячах миллисекунд, паузы воркера совпадают с ним, и
+        # проверка проста: LIQSCOPE_LEVELS_BG=0 на один прогон нагрузки
+        "levels_bg": dict(LEVELS_BG),
+        # saturation машины: паузы бывают не от кода, а от нехватки ядер
+        "cpu_count": os.cpu_count() or 0,
+        "load_avg": [round(x, 2) for x in os.getloadavg()]
+        if hasattr(os, "getloadavg") else [],
         "uptime_sec": round(time.time() - _START_TS, 1),
     })
 
 
-def _levels_cache_stats() -> Dict[str, int]:
-    """Сколько событий калибровки уровней лежит в куче (память → паузы GC)."""
+def _levels_cache_stats() -> Dict[str, object]:
+    """Кэши движка уровней: сколько событий в куче и работают ли попадания.
+
+    ``events`` — память (на большой куче паузы даёт сборщик мусора), а
+    ``payload_hits``/``payload_misses`` — попадает ли кэш готовых лестниц:
+    пока в ключе была цена с точностью до 8 знаков, не попадал никогда.
+    """
+    out: Dict[str, object] = {}
     try:
         fn = getattr(LEVELS, "events_cache_stats", None)
-        return dict(fn()) if callable(fn) else {}
+        if callable(fn):
+            out["events_cache"] = dict(fn())
+        fn2 = getattr(LEVELS, "cache_stats", None)
+        if callable(fn2):
+            out["payload_cache"] = dict(fn2())
     except Exception:                            # noqa: BLE001
-        return {}
+        pass
+    return out
 
 
 @app.websocket("/ws")
@@ -5524,7 +5614,11 @@ async def ws_endpoint(websocket: WebSocket):
         # Лимит init: раньше 200, теперь 100 — достаточно для ленты, остальное догружается REST
         # Защита от деградации: даже если LIQUIDATIONS 60k, init не разрастается
         _recent_limit = max(20, min(200, int(__import__("os").getenv("LIQSCOPE_WS_INIT_LIQ", "100"))))
-        recent = list(LIQUIDATIONS)[-_recent_limit:]
+        # list(deque) копировал ВСЮ историю (до HISTORY_MAX = 60000 событий)
+        # ради последних ста: на 50 подключениях разом это миллионы скопированных
+        # ссылок в event loop, и сторож называл именно эту строку в окне паузы
+        # (server.py:5527). reversed()+islice берёт ровно нужный хвост.
+        recent = list(islice(reversed(LIQUIDATIONS), _recent_limit))[::-1]
         t_recent = time.monotonic() if PERF_LOG else 0.0
         stats = compute_stats()
         t_stats = time.monotonic() if PERF_LOG else 0.0

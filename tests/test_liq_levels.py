@@ -30,7 +30,8 @@ import unittest
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
 
-from liq_levels import (DEFAULT_SETTINGS, LevelsEngine, actual_histogram,  # noqa: E402
+from liq_levels import (DEFAULT_SETTINGS, PAYLOAD_TTL,  # noqa: E402
+                       LevelsEngine, actual_histogram,
                         apply_executed, build_ladder, build_rows, calibrate,
                         cumulative, grid_step, ladder_rows, liq_price,
                         normalize_dist, overlap_score, pick_magnets, snap,
@@ -779,6 +780,84 @@ class EventsCacheMemoryCapTest(unittest.TestCase):
         self.assertEqual(st["max_events"], LevelsEngine.EVENTS_CACHE_MAX_EVENTS)
         self.assertEqual(st["max_entries"], LevelsEngine.EVENTS_CACHE_MAX)
         self.assertEqual(st["entries"], 0)
+
+
+class PayloadCachePriceBucketTest(unittest.TestCase):
+    """Кэш готовых лестниц попадает при движении цены в пределах шага.
+
+    В ключе кэша была цена с точностью до 8 знаков, а цену передают оба
+    потребителя: клиент — со своего графика (``/api/liq_levels?price=…``), фон —
+    из ленты. Значит ключ менялся на каждом запросе и кэш **не срабатывал
+    никогда**: лестница пересчитывалась целиком (события истории, build_rows,
+    build_ladder, apply_executed, калибровка) на каждый вызов. Ответ и так
+    может быть старше ``PAYLOAD_TTL`` = 20 с, за которые цена уходит дальше
+    0.05%, поэтому бакет цены ничего не ломает.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="lilevels_bucket_")
+        self.now = time.time()
+        from volume_profile import VolumeProfile
+        self.profile = VolumeProfile(path="")
+        pts = []
+        oi = 1000.0
+        for i in range(145):
+            ts = self.now - (144 - i) * BUCKET
+            oi *= 1.002
+            pts.append((ts, oi))
+            self.profile.add_trade("BTC_USDT", ts, 1000.0, 10_000.0, "BUY")
+        self.engine = LevelsEngine(oi=FakeOI(pts), profile=self.profile,
+                                   side=FakeSide(), risk=FakeRisk(),
+                                   hist=FakeHist(), klines=None,
+                                   path=os.path.join(self.tmp, "levels.json"))
+
+    def _payload(self, price):
+        return asyncio.run(self.engine.payload("BTC_USDT", now=self.now,
+                                               price=price))
+
+    def test_price_key_buckets_relative_move(self):
+        from liq_levels import price_key
+        self.assertEqual(price_key(61000.0), price_key(61000.12),
+                         "копейка цены снова ломает кэш")
+        self.assertEqual(price_key(61000.0), price_key(61020.0),
+                         "0.03% движения должны попадать в один бакет")
+        self.assertNotEqual(price_key(61000.0), price_key(61500.0),
+                            "0.8% движения обязаны давать другой бакет")
+        # логарифмический бакет одинаков и для дорогих, и для дешёвых монет:
+        # 0.0000123 -> 0.000012305 это +0.04% (внутри шага), а не +0.08%
+        self.assertEqual(price_key(0.0000123), price_key(0.000012305))
+        self.assertNotEqual(price_key(0.0000123), price_key(0.0000129),
+                            "4.9% движения на дешёвой монете должны разводить бакеты")
+        self.assertEqual(price_key(0), 0.0)
+        self.assertEqual(price_key("мусор"), 0.0)
+
+    def test_second_call_within_step_is_a_cache_hit(self):
+        first = self._payload(61000.0)
+        self.assertTrue(first.get("levels") or first.get("magnets"),
+                        "первый расчёт пустой — тест ничего не проверяет")
+        misses_before = self.engine.cache_stats()["misses"]
+        second = self._payload(61010.0)          # +0.016%: тот же бакет
+        st = self.engine.cache_stats()
+        self.assertGreaterEqual(st["hits"], 1,
+                                "кэш лестниц не сработал при движении цены "
+                                "в пределах шага — расчёт идёт на каждый запрос")
+        self.assertEqual(st["misses"], misses_before,
+                         "вместо попадания случился ещё один полный пересчёт")
+        self.assertIs(second, first, "ответ собран заново вместо кэша")
+
+    def test_far_price_recalculates(self):
+        self._payload(61000.0)
+        misses = self.engine.cache_stats()["misses"]
+        self._payload(63000.0)                   # +3.3%: другой бакет
+        self.assertGreater(self.engine.cache_stats()["misses"], misses,
+                           "заметно другая цена должна пересчитывать лестницу")
+
+    def test_cache_stats_reports_knobs(self):
+        st = self.engine.cache_stats()
+        self.assertEqual(st["ttl_sec"], int(PAYLOAD_TTL))
+        self.assertGreater(st["price_key_step"], 0.0)
+        for key in ("entries", "hits", "misses"):
+            self.assertIn(key, st)
 
 
 if __name__ == "__main__":

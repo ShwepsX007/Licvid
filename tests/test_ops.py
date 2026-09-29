@@ -406,6 +406,44 @@ class AsyncLoggingTest(unittest.TestCase):
                            "потерянные записи не посчитаны")
         self.assertEqual(q.qsize(), 1)
 
+    def test_uvicorn_access_args_survive_queue_and_other_logs_skip_formatter(self):
+        from uvicorn.logging import AccessFormatter
+
+        class Capture(logging.Handler):
+            def __init__(self, formatter):
+                super().__init__()
+                self.messages = []
+                self.setFormatter(formatter)
+
+            def emit(self, record):
+                self.messages.append(self.format(record))
+
+        root = Capture(logging.Formatter("%(message)s"))
+        access = Capture(AccessFormatter(
+            fmt="%(client_addr)s %(request_line)s %(status_code)s",
+            use_colors=False))
+        access_logger = logging.getLogger("uvicorn.access")
+        original_propagate = access_logger.propagate
+        access_logger.propagate = False
+        try:
+            dispatcher = server._OriginalLogDispatch()
+            handler = server._DropQueueHandler(queue.Queue(), (access,))
+            args = ("127.0.0.1:1234", "GET", "/api/history", "1.1", 200)
+            record = logging.LogRecord("uvicorn.access", logging.INFO, __file__,
+                                       1, '%s - "%s %s HTTP/%s" %d', args, None)
+            queued = handler.prepare(record)
+            self.assertEqual(queued.args, args)
+            dispatcher.handle(queued)
+            root_queue = server._DropQueueHandler(queue.Queue(), (root,))
+            dispatcher.handle(root_queue.prepare(logging.LogRecord(
+                "liqscope.server", logging.INFO, __file__, 1,
+                "ordinary message", (), None)))
+            self.assertEqual(len(access.messages), 1)
+            self.assertIn("GET /api/history", access.messages[0])
+            self.assertEqual(root.messages, ["ordinary message"])
+        finally:
+            access_logger.propagate = original_propagate
+
     def test_install_is_idempotent(self):
         first = server._log_listener
         self.assertTrue(server.install_async_logging())

@@ -556,7 +556,7 @@
     // локальный IndexedDB-кэш на этом устройстве: если сервер перезапустили
     // с пустым файлом, у пользователя всё равно останутся его события.
     const historyLoaded = new Set();          // какие символы уже догружали
-    const HISTORY_REST_LIMIT = 2000;          // максимум из REST-истории
+    const HISTORY_REST_LIMIT = 1000;          // быстрый первый экран, хвост придёт по WS
     const HISTORY_CACHE_TTL = 24 * 3600;      // сек: сколько держим в браузере
 
     let liqDb = null;
@@ -1274,6 +1274,7 @@
     }
 
     const ARCHIVE_HOURS = 31 * 24;
+    const ARCHIVE_FETCH_LIMIT = 1000; // не качать 4000 событий на каждый график
 
     async function loadHistoryFor(sym, force) {
         if (!sym) sym = "ALL";
@@ -1290,7 +1291,7 @@
             const q = "/api/liquidations?limit=" + HISTORY_REST_LIMIT + symParam;
             // Месяц читаем из шардов (/api/history), а не увеличением лимита RAM.
             const qArch = "/api/history?bucket=raw&hours=" + ARCHIVE_HOURS +
-                    "&limit=" + MAX_HISTORY + symParam;
+                    "&limit=" + ARCHIVE_FETCH_LIMIT + symParam;
             const qHours = "/api/history?bucket=hour&hours=" + ARCHIVE_HOURS + symParam;
             const [rest, cached, arch, hours] = await Promise.all([
                 fetch(q).then((r) => r.json()).then((d) => d.liquidations || []).catch(() => []),

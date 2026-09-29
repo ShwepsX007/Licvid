@@ -40,6 +40,7 @@ import asyncio
 import json
 import atexit
 import contextlib
+import copy
 import functools
 import gc
 import inspect
@@ -67,6 +68,7 @@ from cpu_pool import run as run_cpu, shutdown as shutdown_cpu_pool
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from starlette.responses import Response
 
 # Быстрый JSON. orjson сериализует ответы в 3-6 раз быстрее стандартного
 # json.dumps, а на одном воркере uvicorn сериализация — это заметная доля CPU
@@ -94,6 +96,19 @@ def json_dumps_text(obj) -> str:
 # и остальное приложение — поэтому имя указывает на выбранный класс. Без
 # orjson это прежний starlette JSONResponse, поведение не меняется.
 JSONResponse = _DEFAULT_RESPONSE_CLASS
+
+
+def direct_json(data: Any) -> Response:
+    """Skip FastAPI's jsonable_encoder for already JSON-compatible API data.
+
+    orjson is installed on production; keep the old response when running an
+    optional-dependency development environment without it.
+    """
+    if _orjson is None:
+        return JSONResponse(data)
+    # OI series use integer timestamp keys; FastAPI previously stringified them.
+    return Response(content=_orjson.dumps(data, option=_orjson.OPT_NON_STR_KEYS),
+                    media_type="application/json")
 
 import archive_hide
 import archive_restore
@@ -181,43 +196,74 @@ _LOG_WRAPPED = ("", "uvicorn", "uvicorn.error", "uvicorn.access", "websockets")
 
 
 class _DropQueueHandler(logging.handlers.QueueHandler):
-    """Очередь вместо журнала: переполнение теряет запись, а не воркер."""
+    """Keep structured records intact; uvicorn.access needs its five args."""
+
+    def __init__(self, queue: "queue.Queue", targets: Tuple[logging.Handler, ...] = ()):
+        super().__init__(queue)
+        self.targets = targets
+
+    def prepare(self, record: logging.LogRecord) -> logging.LogRecord:
+        # QueueHandler.prepare() calls format() on the producer thread, then
+        # replaces args with None. Uvicorn's AccessFormatter UNPACKS args on
+        # the listener thread and raises on every request if they were erased.
+        # Our queue is in-process, so shallow copying is sufficient.
+        prepared = copy.copy(record)
+        prepared._log_targets = self.targets
+        if prepared.exc_info:
+            prepared.exc_text = logging.Formatter().formatException(prepared.exc_info)
+            prepared.exc_info = None    # don't retain traceback frames in queue
+        return prepared
 
     def enqueue(self, record: logging.LogRecord) -> None:  # noqa: D102
         try:
             self.queue.put_nowait(record)
             _LOG_STATS["queued"] += 1
-        except Exception:                        # noqa: BLE001 — очередь полна
+        except queue.Full:
             _LOG_STATS["dropped"] += 1
 
 
+class _OriginalLogDispatch(logging.Handler):
+    """Replay to only the handlers replaced by this specific queue handler.
+
+    A single QueueListener with *all* handlers sent ordinary application logs
+    through uvicorn's AccessFormatter too. That formatter expects access args.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        for handler in getattr(record, "_log_targets", ()):
+            if record.levelno >= handler.level:
+                handler.handle(record)
+
+
 def install_async_logging() -> bool:
-    """Перевести хендлеры логов в фоновый поток. Идемпотентно."""
+    """Translate journal writes into a routed, non-blocking listener thread."""
     global _log_listener
     if not LOG_ASYNC or _log_listener is not None:
         return _log_listener is not None
-    originals: List[logging.Handler] = []
-    seen: Set[int] = set()
+    originals: Dict[str, Tuple[logging.Handler, ...]] = {}
     for name in _LOG_WRAPPED:
         lg = logging.getLogger(name)
-        own = [h for h in lg.handlers if not isinstance(h, _DropQueueHandler)]
+        own = tuple(h for h in lg.handlers if not isinstance(h, _DropQueueHandler))
+        originals[lg.name] = own
         for h in own:
-            if id(h) not in seen:
-                seen.add(id(h))
-                originals.append(h)
             lg.removeHandler(h)
         if own or not lg.propagate:
-            lg.addHandler(_DropQueueHandler(_LOG_QUEUE))
-    if not originals:                            # переносить нечего
+            lg.addHandler(_DropQueueHandler(_LOG_QUEUE, own))
+    if not any(originals.values()):          # переносить нечего
         return False
     try:
         _log_listener = logging.handlers.QueueListener(
-            _LOG_QUEUE, *originals, respect_handler_level=True)
+            _LOG_QUEUE, _OriginalLogDispatch(), respect_handler_level=True)
         _log_listener.start()
-    except Exception as e:                       # noqa: BLE001
+    except Exception as e:                  # noqa: BLE001
         _log_listener = None
-        for h in originals:                      # вернуть как было
-            logging.getLogger("").addHandler(h)
+        for name in _LOG_WRAPPED:
+            lg = logging.getLogger(name)
+            for h in list(lg.handlers):
+                if isinstance(h, _DropQueueHandler):
+                    lg.removeHandler(h)
+            for h in originals[lg.name]:
+                lg.addHandler(h)
         log.warning("асинхронное логирование не поднялось: %s", e)
         return False
     atexit.register(stop_async_logging)
@@ -5344,7 +5390,7 @@ async def api_klines(symbol: str = Query("BTC_USDT"), timeframe: int = Query(5))
     tf = parse_tf(timeframe) or 5
     entry = await get_candles(symbol, tf)
     ts = float(entry.get("ts") or 0.0)
-    return {
+    return direct_json({
         "symbol": symbol,
         "timeframe": tf,
         "source": entry.get("source") or "unavailable",
@@ -5353,7 +5399,7 @@ async def api_klines(symbol: str = Query("BTC_USDT"), timeframe: int = Query(5))
         "pending": bool(entry.get("pending"))
         or bool(feed is not None and feed.candles_pending(symbol, tf)),
         "age_sec": round(time.time() - ts, 1) if ts else None,
-    }
+    })
 
 
 @app.get("/api/liq_clusters")
@@ -5393,11 +5439,11 @@ async def api_oi(symbol: str = Query("BTC_USDT")):
     tracker = getattr(feed, "oi", None)
     if tracker is None:
         from oi_feed import OI_WINDOWS
-        return {"symbol": symbol, "total_usd": None, "per_exchange": {},
+        return direct_json({"symbol": symbol, "total_usd": None, "per_exchange": {},
                 "live_exchanges": [], "hist_exchanges": [],
                 "changes": {k: None for k, _ in OI_WINDOWS},
                 "partial": {k: True for k, _ in OI_WINDOWS},
-                "ts": None, "stale_sec": None}
+                "ts": None, "stale_sec": None})
     try:
         await tracker.ensure_symbol(symbol)
     except Exception as e:
@@ -5406,7 +5452,7 @@ async def api_oi(symbol: str = Query("BTC_USDT")):
     if DEMO_MODE and out["total_usd"] is None:
         # демо: ряд уровней ведёт себя как настоящий — цифра и график живут
         out = _demo_oi_payload_from_series(symbol)
-    return out
+    return direct_json(out)
 
 
 # Демо-ряд OI: один на процесс и по монете. Раньше демо-OI был случайной
@@ -5566,7 +5612,7 @@ async def api_liquidations(symbol: Optional[str] = None,
                            exchange: Optional[str] = None,
                            min_usd: float = 0.0,
                            limit: int = 300):
-    cap = min(max(1, int(limit or 1)), 2000)
+    cap = min(max(1, int(limit or 1)), 1000)
     res = list(LIQUIDATIONS)
     sym = canon(symbol) if symbol and symbol != "ALL" else None
     if sym:
@@ -5596,13 +5642,13 @@ async def api_liquidations(symbol: Optional[str] = None,
                     by_id[key] = ev
                     res.append(ev)
             res.sort(key=lambda e: float(e.get("timestamp") or 0))
-    return {"liquidations": res[-cap:], "total": len(res)}
+    return direct_json({"liquidations": res[-cap:], "total": len(res)})
 
 
 @app.get("/api/history")
 async def api_history(since: Optional[float] = None, until: Optional[float] = None,
                       hours: float = 0.0, symbol: Optional[str] = None,
-                      min_usd: float = 0.0, limit: int = 2000,
+                      min_usd: float = 0.0, limit: int = 1000,
                       bucket: str = "raw", step_hours: int = 1):
     """История рынка за месяц: сырые ликвидации или часовые/дневные свёртки.
 
@@ -5629,22 +5675,22 @@ async def api_history(since: Optional[float] = None, until: Optional[float] = No
             agg = aggregate_hour_cell(h, cell, sym)
             if agg["count"] or agg["vol"] or agg["cvd"]:
                 rows.append(agg)
-        return {"bucket": "hour", "since": start, "until": until,
-                "ttl_hours": HISTORY_TTL_HOURS, "hours": rows}
+        return direct_json({"bucket": "hour", "since": start, "until": until,
+                            "ttl_hours": HISTORY_TTL_HOURS, "hours": rows})
     if bucket == "day":
         rows = await asyncio.to_thread(HIST.days, start, until, sym)
-        return {"bucket": "day", "since": start, "until": until,
-                "ttl_hours": HISTORY_TTL_HOURS, "days": rows}
+        return direct_json({"bucket": "day", "since": start, "until": until,
+                            "ttl_hours": HISTORY_TTL_HOURS, "days": rows})
     if bucket == "series":
         data = await asyncio.to_thread(HIST.series, start, until, None,
                                        int(step_hours or 1))
-        return {"bucket": "series", "since": start, "until": until,
-                "ttl_hours": HISTORY_TTL_HOURS, **data}
+        return direct_json({"bucket": "series", "since": start, "until": until,
+                            "ttl_hours": HISTORY_TTL_HOURS, **data})
     rows = await asyncio.to_thread(HIST.query, start, until, sym, float(min_usd),
-                                   int(limit))
-    return {"bucket": "raw", "since": start, "until": until,
-            "ttl_hours": HISTORY_TTL_HOURS, "total": len(rows),
-            "liquidations": rows}
+                                   min(max(1, int(limit)), 4000))
+    return direct_json({"bucket": "raw", "since": start, "until": until,
+                        "ttl_hours": HISTORY_TTL_HOURS, "total": len(rows),
+                        "liquidations": rows})
 
 
 @app.get("/api/stats")

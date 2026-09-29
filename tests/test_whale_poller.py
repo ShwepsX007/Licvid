@@ -10,11 +10,22 @@ from pathlib import Path
 from aiohttp import web, ClientSession
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from whale_poller import ENDPOINTS, WhalePoller, BudgetExhausted, PollError, to_hex_block
+from whale_poller import ENDPOINTS, NATIVE_NETWORKS, WhalePoller, BudgetExhausted, PollError, to_hex_block
 from whale_screener import WhaleScreener, TOKENS, TRANSFER_TOPIC
 
 
 class PollingTests(unittest.IsolatedAsyncioTestCase):
+    def test_hyperliquid_is_only_a_native_source(self):
+        self.assertIn("HYPERLIQUID", NATIVE_NETWORKS)
+        self.assertNotIn("HYPERLIQUID", ENDPOINTS)
+        screener = WhaleScreener("fake", lambda _: None, lambda _: None)
+        with self.assertRaisesRegex(ValueError, "native API"):
+            WhalePoller("fake", screener,
+                        endpoints={"HYPERLIQUID": "https://api.hyperliquid.xyz/v2/key"})
+        with self.assertRaisesRegex(ValueError, "native API"):
+            WhaleScreener("fake", lambda _: None, lambda _: None,
+                          endpoints={"HYPERLIQUID": "wss://api.hyperliquid.xyz/ws"})
+
     def test_block_params_are_normalized_to_hex(self):
         self.assertEqual(to_hex_block(0), "0x0")
         self.assertEqual(to_hex_block(42), "0x2a")
@@ -24,6 +35,8 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(to_hex_block("not-a-block"), "latest")
         self.assertEqual(to_hex_block(None), "latest")
         self.assertEqual(set(ENDPOINTS), {"ETH", "BNB", "POLYGON", "ARBITRUM", "BASE"})
+        self.assertEqual(set(NATIVE_NETWORKS), {"HYPERLIQUID"})
+        self.assertNotIn("HYPERLIQUID", ENDPOINTS)  # never call Alchemy for Hyperliquid
 
     async def test_cursors_dedup_and_budget_survive_restart(self):
         wallet = "0x" + "1" * 40
@@ -69,6 +82,7 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
             poller = WhalePoller("fake", screener, state_file=state,
                                  endpoints={"BASE": f"http://127.0.0.1:{port}/rpc"},
                                  monthly_cu=1000)
+            self.assertEqual(poller.status()["native_supported"], ["HYPERLIQUID"])
             async with ClientSession() as session:
                 try:
                     await poller.poll_chain(session, "BASE")

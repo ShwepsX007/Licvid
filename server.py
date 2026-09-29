@@ -118,16 +118,21 @@ from fastapi.staticfiles import StaticFiles
 
 import market_feed
 from market_feed import GATE_REST, MarketFeed, TF_MINUTES, base_of, canon, _get_json
-# The liquidation terminal must still boot if the optional on-chain module or
-# one of its dependencies is absent. A missing encryption library never means
-# falling back to unencrypted API-key storage.
+# Keep the credential-free Hyperliquid source independent of optional Alchemy
+# key management. A missing encryption library never means plaintext key storage.
 try:
     from whale_screener import WhaleScreener
+    WHALE_SCREENER_AVAILABLE = True
+except Exception:  # noqa: BLE001 — the optional whale feed must not block the terminal
+    WhaleScreener = None
+    WHALE_SCREENER_AVAILABLE = False
+
+try:
     from whale_poller import WhalePoller
     from alchemy_keys import AlchemyKeyStore, KeyStoreError
     WHALE_POLLER_AVAILABLE = True
-except Exception:  # noqa: BLE001 — isolate optional module import failures
-    WhaleScreener = WhalePoller = AlchemyKeyStore = None
+except Exception:  # noqa: BLE001 — isolate optional Alchemy imports
+    WhalePoller = AlchemyKeyStore = None
     class KeyStoreError(Exception):
         pass
     WHALE_POLLER_AVAILABLE = False
@@ -4371,15 +4376,28 @@ async def lifespan(app: FastAPI):
     global whale_screener, whale_poller, alchemy_key_store, alchemy_vault_error
     whale_screener = whale_poller = alchemy_key_store = None
     alchemy_vault_error = ""
-    if not WHALE_POLLER_AVAILABLE:
-        alchemy_vault_error = "Ончейн-модуль недоступен. Установите зависимости: pip install -r requirements.txt"
+    if not WHALE_SCREENER_AVAILABLE:
+        alchemy_vault_error = "Whale-скринер недоступен. Проверьте зависимости и data/cex_wallets.json"
     else:
         try:
-            # No plaintext or env-key fallback when Fernet is unavailable.
-            alchemy_key_store = AlchemyKeyStore(SECRET, env_key=os.getenv("ALCHEMY_API_KEY", ""))
             whale_screener = WhaleScreener(
                 "pending", price_fn=lambda pair: feed.prices.get(pair) if feed else None,
                 broadcast=hub.broadcast, min_usd=50_000)
+            if whale_screener.hl_enabled:
+                tasks.append(asyncio.create_task(
+                    whale_screener.run_hyperliquid(), name="whale-hyperliquid"))
+        except Exception:  # noqa: BLE001 — optional scanner cannot take down the terminal
+            alchemy_vault_error = ("Whale-скринер не запустился. Проверьте зависимости "
+                                   "и файл data/cex_wallets.json")
+            whale_screener = None
+
+    if whale_screener and not WHALE_POLLER_AVAILABLE:
+        alchemy_vault_error = ("Alchemy-модуль недоступен. Установите зависимости: "
+                               "pip install -r requirements.txt")
+    elif whale_screener:
+        try:
+            # No plaintext or env-key fallback when Fernet is unavailable.
+            alchemy_key_store = AlchemyKeyStore(SECRET, env_key=os.getenv("ALCHEMY_API_KEY", ""))
             whale_poller = WhalePoller(
                 "", whale_screener, key_store=alchemy_key_store,
                 interval=int(account_store.get_setting("whale_interval_min", "60")) * 60,
@@ -4387,19 +4405,20 @@ async def lifespan(app: FastAPI):
             )
         except KeyStoreError as exc:
             # Includes missing cryptography or a vault encrypted under an old
-            # LIQSCOPE_SECRET. Do not overwrite the existing ciphertext.
+            # LIQSCOPE_SECRET. Do not overwrite the existing ciphertext. The
+            # native Hyperliquid source above remains available independently.
             alchemy_vault_error = str(exc)
-        except Exception:  # noqa: BLE001 — optional screener cannot take down the terminal
-            alchemy_vault_error = ("Ончейн-скринер не запустился. Проверьте зависимости "
+        except Exception:  # noqa: BLE001 — Alchemy setup must not take down the terminal
+            alchemy_key_store = whale_poller = None
+            alchemy_vault_error = ("Alchemy-скринер не запустился. Проверьте зависимости "
                                    "и файл data/cex_wallets.json")
         if whale_poller:
             # With no keys this task waits for admin input; it performs no RPC
             # calls until a key is added, and then wakes without a restart.
             tasks.append(asyncio.create_task(whale_poller.run(), name="whale-poller"))
-    if alchemy_vault_error:
-        alchemy_key_store = whale_screener = whale_poller = None
-    elif alchemy_key_store and not alchemy_key_store.keys():
-        log.warning("Ключ Alchemy пока не добавлен; скринер ожидает добавления через /admin")
+    if alchemy_key_store and not alchemy_key_store.keys():
+        log.warning("Ключ Alchemy пока не добавлен; EVM-скринер ожидает добавления через /admin; "
+                    "нативный Hyperliquid работает отдельно")
 
     # Дневной дайджест: вечерний выпуск в оба канала и в архив на сайте
     digest_sched = DigestScheduler(hour=DIGEST_HOUR, minute=DIGEST_MINUTE,
@@ -5713,8 +5732,21 @@ async def api_admin_remove_alchemy_key(request: Request, identifier: str):
 async def api_screener_whales(min_usd: float = Query(100_000, ge=0),
                               chain: str = Query("ALL", pattern="^(ALL|ETH|BNB|POLYGON|ARBITRUM|BASE|HYPERLIQUID)$"),
                               limit: int = Query(50, ge=1, le=100)):
-    return {"enabled": bool(alchemy_key_store and alchemy_key_store.keys()),
-            "unavailable_reason": alchemy_vault_error,
+    alchemy_enabled = bool(alchemy_key_store and alchemy_key_store.keys())
+    native_enabled = bool(whale_screener and whale_screener.hl_enabled)
+    return {"enabled": alchemy_enabled, "alchemy_enabled": alchemy_enabled,
+            "native_enabled": native_enabled,
+            "available": bool(whale_screener and (alchemy_enabled or native_enabled)),
+            "unavailable_reason": alchemy_vault_error if not whale_screener else "",
+            "alchemy_unavailable_reason": alchemy_vault_error,
+            "native_supported": ["HYPERLIQUID"],
+            "native": whale_screener.native_status() if whale_screener else {
+                "network": "HYPERLIQUID", "provider": "native_api",
+                "enabled": False, "connected": False, "state": "unavailable",
+                "market_count": 0, "subscriptions_sent": 0,
+                "subscriptions_acked": 0, "trades_seen": 0,
+                "events": 0, "reconnects": 0,
+                "error": alchemy_vault_error or "Whale-скринер недоступен"},
             "events": whale_screener.history(min_usd, chain, limit) if whale_screener else [],
             "poller": whale_poller.status() if whale_poller else None}
 

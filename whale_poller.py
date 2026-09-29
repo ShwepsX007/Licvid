@@ -22,8 +22,12 @@ ENDPOINTS = {
     "ETH": "eth-mainnet", "BNB": "bnb-mainnet", "POLYGON": "polygon-mainnet",
     "ARBITRUM": "arb-mainnet", "BASE": "base-mainnet",
 }
+# Reported separately from Alchemy endpoints: Hyperliquid Core is collected by
+# WhaleScreener's public native WebSocket, never via Alchemy JSON-RPC.
+NATIVE_NETWORKS = {"HYPERLIQUID": "hyperliquid_ws"}
 # The Transfers API documents these four networks, but does not promise BNB;
-# token logs are still polled there. HyperEVM/Hyperliquid has no Alchemy endpoint.
+# token logs are still polled there. Hyperliquid Core is served by the separate
+# native WebSocket source, not by an Alchemy endpoint.
 NATIVE_INDEXED = {"ETH": "ETH", "POLYGON": "POL", "ARBITRUM": "ETH", "BASE": "ETH"}
 METHOD_CU = {"eth_blockNumber": 10, "eth_getLogs": 60, "alchemy_getAssetTransfers": 120}
 
@@ -75,6 +79,8 @@ class WhalePoller:
         self.endpoints = endpoints or {
             c: f"https://{host}.g.alchemy.com/v2/" for c, host in ENDPOINTS.items()
         }
+        if "HYPERLIQUID" in self.endpoints:
+            raise ValueError("Hyperliquid must use its native API, never an Alchemy endpoint")
         self.state = self._load()
         self.errors: dict[str, str] = {}
 
@@ -141,6 +147,7 @@ class WhalePoller:
                 "budget_cu": self.monthly_cu, "reserved_cu": self.state["cu"],
                 "month": self.state["month"], "cursors": self.state["cursors"].copy(),
                 "errors": self.errors.copy(), "supported": list(self.endpoints),
+                "native_supported": list(NATIVE_NETWORKS),
                 "keys_configured": len(keys),
                 "active_key_id": self.state.get("active_key", ""),
                 "last_attempt": self.last_attempt.copy(),

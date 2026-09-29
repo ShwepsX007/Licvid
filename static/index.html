@@ -35,7 +35,7 @@
 <link rel="icon" type="image/png" sizes="512x512" href="/static/icon-512.png">
     <link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
     <link rel="manifest" href="/manifest.webmanifest">
-    <link rel="stylesheet" href="/static/style.css?v=follow-hdr1">
+    <link rel="stylesheet" href="/static/style.css?v=whale-native-hl1">
     <!-- Local Lightweight Charts v5 -->
     <link rel="stylesheet" href="/static/ads.css?v=banner5">
     <link rel="stylesheet" href="/static/terminal_chat.css?v=8">
@@ -542,14 +542,14 @@
                         <label>Сеть <select id="whale-chain">
                             <option value="ALL">All</option><option value="ETH">ETH</option><option value="BNB">BNB</option>
                             <option value="POLYGON">Polygon</option><option value="ARBITRUM">Arbitrum</option>
-                            <option value="BASE">Base</option><option value="HYPERLIQUID">HyperEVM</option>
+                            <option value="BASE">Base</option><option value="HYPERLIQUID">Hyperliquid Core</option>
                         </select></label>
                         <label>Тип <select id="whale-direction">
                             <option value="ALL">All</option><option value="inflow">inflow</option>
-                            <option value="outflow">outflow</option>
+                            <option value="outflow">outflow</option><option value="trade">trade</option>
                         </select></label>
                     </div>
-                    <p class="meta" id="whale-scope-note">Режим Free: только известные биржевые кошельки EVM. Опрос раз в час; SOL, BTC/BCH, LTC, TRON, SUI и DOGE пока не подключены.</p>
+                    <p class="meta" id="whale-scope-note">EVM через Alchemy; Hyperliquid Core напрямую через публичный native API. SOL, BTC/BCH, LTC, TRON, SUI и DOGE пока не подключены.</p>
                     <div id="whale-events" class="whale-events" aria-live="polite"></div>
                     <div id="whale-empty" class="feed-empty">Загрузка ончейн-транзакций…</div>
                 </section>
@@ -611,7 +611,7 @@
     <!-- workspace.js (старый мультичарт) больше не подключается: графики
          собирает chart_dock.js, а один WebSocket на окно раздаёт данные
          встроенным окнам через postMessage. Файл оставлен для старых тестов. -->
-    <script src="/static/app.js?v=embed-idle1"></script>
+    <script src="/static/app.js?v=whale-native-hl1"></script>
     <script src="/static/chart_dock.js?v=dock-gate1"></script>
     <script src="/static/ads.js?v=banner7"></script>
     <script src="/static/terminal_chat.js?v=10"></script>

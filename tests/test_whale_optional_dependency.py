@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 class OptionalWhaleDependencyTests(unittest.TestCase):
     def _isolated(self, script: str) -> None:
         env = {**os.environ, "LIQSCOPE_SECRET": "test-secret-not-the-published-default",
-               "LIQSCOPE_DEMO": "1"}
+               "LIQSCOPE_DEMO": "1", "LIQSCOPE_HL_WHALE_STREAM": "0"}
         result = subprocess.run([sys.executable, "-c", script], cwd=ROOT, env=env,
                                 capture_output=True, text=True, timeout=35)
         self.assertEqual(result.returncode, 0, (result.stdout + result.stderr)[-3000:])
@@ -48,12 +48,41 @@ with TestClient(server.app) as client:
     assert client.get("/").status_code == 200
     res = client.get("/api/screener/whales")
     assert res.status_code == 200 and not res.json()["enabled"]
-    assert "cryptography" in res.json()["unavailable_reason"]
+    assert res.json()["unavailable_reason"] == ""
+    assert "cryptography" in res.json()["alchemy_unavailable_reason"]
+    assert res.json()["native"]["enabled"] is False
+    assert server.whale_screener is not None
     assert server.whale_poller is None and server.alchemy_key_store is None
     with patch.object(server, "current_user", lambda request: {"id": 1, "is_admin": True}):
         cfg = client.get("/api/admin/screener/config")
         assert "cryptography" in cfg.json()["vault_error"]
         assert client.post("/api/admin/screener/keys", json={"key": "dummy-test-key"}).status_code == 503
+''')
+
+    def test_native_hyperliquid_feed_starts_without_alchemy_key(self):
+        self._isolated('''
+import asyncio
+import os
+os.environ["LIQSCOPE_HL_WHALE_STREAM"] = "1"
+from unittest.mock import patch
+from fastapi.testclient import TestClient
+import server
+started = []
+async def fake_native_stream(self):
+    self.hl_status.update(connected=True, state="connected", market_count=2)
+    started.append(True)
+    await asyncio.Event().wait()
+with patch.object(server.WhaleScreener, "run_hyperliquid", fake_native_stream):
+    with TestClient(server.app) as client:
+        result = client.get("/api/screener/whales").json()
+        assert not result["enabled"]  # no Alchemy keys configured
+        assert result["native_enabled"] and result["native"]["connected"]
+        assert result["available"]
+        assert result["native"]["provider"] == "native_api"
+        assert result["native_supported"] == ["HYPERLIQUID"]
+        assert server.alchemy_key_store is not None
+        assert server.alchemy_key_store.keys() == []
+assert started
 ''')
 
     def test_invalid_whale_configuration_does_not_stop_terminal(self):
@@ -84,7 +113,11 @@ assert not server.WHALE_POLLER_AVAILABLE
 with TestClient(server.app) as client:
     assert client.get("/terminal").status_code == 200
     result = client.get("/api/screener/whales").json()
-    assert not result["enabled"] and "Ончейн-модуль" in result["unavailable_reason"]
+    assert not result["enabled"]
+    assert result["unavailable_reason"] == ""
+    assert "Alchemy-модуль" in result["alchemy_unavailable_reason"]
+    assert result["native"]["enabled"] is False
+    assert server.whale_screener is not None
     assert server.whale_poller is None
 ''')
 

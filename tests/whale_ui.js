@@ -89,6 +89,18 @@ async function main() {
     doc.getElementById("whale-direction").value = "inflow";
     doc.getElementById("whale-direction").dispatchEvent(new win.Event("change"));
     assert.strictEqual(doc.querySelectorAll(".whale-card").length, 0);
+    doc.getElementById("whale-direction").value = "ALL";
+    doc.getElementById("whale-direction").dispatchEvent(new win.Event("change"));
+    doc.getElementById("whale-chain").value = "ALL";
+    doc.getElementById("whale-chain").dispatchEvent(new win.Event("change"));
+    await sleep(120);
+    const hl = {...row, chain: "HYPERLIQUID", hash: "0x" + "d".repeat(64),
+                log_index: "789", symbol: "BTC", amount: 2, usd: 130000,
+                direction: "trade", side: "BUY", from_label: "", to_label: ""};
+    pending[0].onmessage({ data: JSON.stringify({ type: "whale_tx", ...hl }) });
+    assert.strictEqual(doc.querySelectorAll(".whale-card").length, 3);
+    assert(doc.querySelector(".whale-card a[href^='https://hypurrscan.io/tx/']"));
+    assert(doc.querySelector(".whale-card .whale-trade").textContent.includes("trade"));
     click("feed-tab-liq");
     assert.strictEqual(doc.getElementById("whale-panel").hidden, true);
     assert.strictEqual(pending.length, 1);

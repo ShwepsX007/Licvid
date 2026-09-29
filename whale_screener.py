@@ -1,7 +1,9 @@
-"""Shared Alchemy on-chain whale stream (one connection per network, not per viewer).
+"""Shared whale feeds: Alchemy EVM streams plus native Hyperliquid Core trades.
 
-Only confirmed top-level native transfers and Transfer logs of allowlisted contracts
-are counted. Internal calls, pending transactions and historical backfill are not.
+The EVM path counts confirmed top-level native transfers and Transfer logs of
+allowlisted contracts. Hyperliquid uses its public ``meta`` + ``trades`` API and
+emits large fills as trades (not as deposits/withdrawals). Internal EVM calls,
+pending transactions and historical backfill are not counted.
 """
 
 from __future__ import annotations
@@ -9,7 +11,9 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
 import re
+import socket
 import time
 from collections import deque
 from pathlib import Path
@@ -20,6 +24,18 @@ import aiohttp
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 ADDRESS = re.compile(r"^0x[0-9a-f]{40}$")
 HASH = re.compile(r"^0x[0-9a-f]{64}$")
+
+# Hyperliquid Core is not an EVM network and must never be routed through the
+# Alchemy endpoints below. Its public API has no credential requirement.
+HYPERLIQUID_WS = os.getenv("LIQSCOPE_HL_WS", "wss://api.hyperliquid.xyz/ws")
+HYPERLIQUID_REST = os.getenv("LIQSCOPE_HL_REST", "https://api.hyperliquid.xyz")
+HL_WHALE_ENABLED = os.getenv("LIQSCOPE_HL_WHALE_STREAM", "1").strip().lower() not in (
+    "0", "off", "no", "false")
+HL_WHALE_SUB_GAP_SEC = max(0.0, float(os.getenv("LIQSCOPE_HL_WHALE_SUB_GAP_MS", "80")) / 1000)
+HL_WHALE_PING_SEC = max(1.0, float(os.getenv("LIQSCOPE_HL_WHALE_PING_SEC", "20")))
+HL_WHALE_FRESH_SEC = max(1.0, float(os.getenv("LIQSCOPE_HL_WHALE_FRESH_SEC", "120")))
+HL_WHALE_UNIVERSE_TTL_SEC = max(60.0, float(os.getenv("LIQSCOPE_HL_WHALE_UNIVERSE_TTL_SEC", "3600")))
+HL_USER_AGENT = os.getenv("LIQSCOPE_HL_UA", "LiqScope-Terminal/4.1")
 
 # Decimals are contract-specific, NOT symbol-specific (BSC USDT is 18, ETH is 6).
 TOKENS = {
@@ -50,11 +66,11 @@ TOKENS = {
     "BASE": {
         "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913": ("USDC", 6),
     },
-    "HYPERLIQUID": {
-        # HyperEVM USDC, not HyperCore balance/position activity.
-        "0xb88339cb7199b77e23db6e890353e22632ba630f": ("USDC", 6),
-    },
 }
+
+# EVM token contracts live only in TOKENS. Hyperliquid is a native trade feed,
+# but still needs its own bounded dedup bucket alongside the EVM networks.
+TRACKED_NETWORKS = (*TOKENS, "HYPERLIQUID")
 
 
 def alchemy_key(value: str) -> str:
@@ -99,14 +115,17 @@ class WhaleScreener:
     def __init__(self, api_key: str, price_fn, broadcast,
                  wallet_path: Path | None = None, min_usd: float = 100_000,
                  endpoints: dict[str, str] | None = None,
-                 bnb_api_key: str | None = None):
+                 bnb_api_key: str | None = None,
+                 hl_ws: str | None = None, hl_rest: str | None = None,
+                 hl_enabled: bool | None = None, hl_sub_gap: float | None = None,
+                 hl_ping_sec: float | None = None, hl_fresh_sec: float | None = None):
         self.price_fn = price_fn
         self.broadcast = broadcast
         self.wallets = load_wallets(wallet_path or Path(__file__).resolve().parent / "data/cex_wallets.json")
         self.min_usd = min_usd
         self.events: deque[dict] = deque(maxlen=100)
-        self.seen: dict[str, deque[str]] = {chain: deque(maxlen=4000) for chain in TOKENS}
-        self.seen_set: dict[str, set[str]] = {chain: set() for chain in TOKENS}
+        self.seen: dict[str, deque[str]] = {chain: deque(maxlen=4000) for chain in TRACKED_NETWORKS}
+        self.seen_set: dict[str, set[str]] = {chain: set() for chain in TRACKED_NETWORKS}
         self._pending_blocks: dict[str, dict[int, str]] = {chain: {} for chain in TOKENS}
         self._next_rpc_id = 10
         if endpoints is None:
@@ -118,10 +137,32 @@ class WhaleScreener:
             }
         else:
             self.endpoints = endpoints
+        if "HYPERLIQUID" in self.endpoints:
+            raise ValueError("Hyperliquid must use its native API, never an Alchemy endpoint")
+        self.hl_ws = (hl_ws or HYPERLIQUID_WS).rstrip("/")
+        self.hl_rest = (hl_rest or HYPERLIQUID_REST).rstrip("/")
+        self.hl_enabled = HL_WHALE_ENABLED if hl_enabled is None else bool(hl_enabled)
+        self.hl_sub_gap = max(0.0, HL_WHALE_SUB_GAP_SEC if hl_sub_gap is None else hl_sub_gap)
+        self.hl_ping_sec = max(1.0, HL_WHALE_PING_SEC if hl_ping_sec is None else hl_ping_sec)
+        self.hl_fresh_sec = max(1.0, HL_WHALE_FRESH_SEC if hl_fresh_sec is None else hl_fresh_sec)
+        self.hl_status = {
+            "network": "HYPERLIQUID", "provider": "native_api",
+            "enabled": self.hl_enabled, "connected": False,
+            "state": "waiting" if self.hl_enabled else "disabled",
+            "market_count": 0, "subscriptions_sent": 0,
+            "subscriptions_acked": 0, "trades_seen": 0,
+            "events": 0, "last_message_ts": 0.0,
+            "last_trade_ts": 0.0, "last_event_ts": 0.0,
+            "reconnects": 0, "error": "",
+        }
 
     def history(self, min_usd: float = 100_000, chain: str = "ALL", limit: int = 50) -> list[dict]:
         return [ev.copy() for ev in reversed(self.events)
                 if ev["usd"] >= min_usd and (chain == "ALL" or ev["chain"] == chain)][:limit]
+
+    def native_status(self) -> dict:
+        """Health of the credential-free Hyperliquid Core feed."""
+        return self.hl_status.copy()
 
     def _price(self, symbol: str) -> float | None:
         # Stablecoin values are nominal USD if no quote is available.
@@ -178,7 +219,7 @@ class WhaleScreener:
         await self.broadcast({"type": "whale_tx", **event})
 
     async def handle_log(self, chain: str, log: dict) -> None:
-        if log.get("removed"):
+        if log.get("removed") or chain not in TOKENS:
             return
         token = TOKENS[chain].get(str(log.get("address", "")).lower())
         topics = log.get("topics") or []
@@ -219,6 +260,241 @@ class WhaleScreener:
             await self._emit(chain, tx_hash, "native", chain, int(value, 16), 18, sender, recipient)
         except (KeyError, ValueError, TypeError):
             return
+
+    @staticmethod
+    def _hl_trade_rows(payload: dict) -> list[dict]:
+        """Accept both documented WsTrade arrays and the grouped trades shape."""
+        if not isinstance(payload, dict) or payload.get("channel") != "trades":
+            return []
+        if payload.get("isSnapshot"):
+            return []
+        data = payload.get("data")
+        if isinstance(data, list):
+            return [row for row in data if isinstance(row, dict)]
+        if isinstance(data, dict):
+            coin = data.get("coin")
+            trades = data.get("trades")
+            if isinstance(trades, list):
+                return [({"coin": coin, **row} if "coin" not in row else row)
+                        for row in trades if isinstance(row, dict)]
+        return []
+
+    @staticmethod
+    def _hl_timestamp(value) -> float:
+        try:
+            ts = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        if not math.isfinite(ts):
+            return 0.0
+        # WsTrade timestamps are milliseconds; tolerate second-based test feeds.
+        return ts / 1000.0 if ts > 100_000_000_000 else ts
+
+    async def handle_hyperliquid_trade(self, row: dict, *, now: float | None = None) -> bool:
+        """Store one sufficiently large public Hyperliquid Core fill.
+
+        ``trades`` is a public native Hyperliquid stream. Unlike EVM token
+        transfers, these records are market fills rather than deposits or
+        withdrawals; ``side`` therefore uses the explicit ``trade`` category.
+        """
+        if not isinstance(row, dict):
+            return False
+        tx_hash = str(row.get("hash") or "").lower()
+        if not HASH.fullmatch(tx_hash):
+            return False
+        coin = str(row.get("coin") or "").strip()
+        side_raw = str(row.get("side") or "").upper()
+        if not coin or side_raw not in ("A", "B"):
+            return False
+        try:
+            price, amount = float(row.get("px") or 0), float(row.get("sz") or 0)
+        except (TypeError, ValueError):
+            return False
+        usd = price * amount
+        if (price <= 0 or amount <= 0 or not math.isfinite(usd)
+                or usd < self.min_usd):
+            return False
+        timestamp = self._hl_timestamp(row.get("time"))
+        now = time.time() if now is None else now
+        if (not timestamp or timestamp > now + 30 or now - timestamp > self.hl_fresh_sec):
+            return False
+
+        users = row.get("users") or []
+        if not isinstance(users, list):
+            users = []
+        buyer = str(users[0]).lower() if len(users) > 0 else ""
+        seller = str(users[1]).lower() if len(users) > 1 else ""
+        if not ADDRESS.fullmatch(buyer):
+            buyer = ""
+        if not ADDRESS.fullmatch(seller):
+            seller = ""
+        trade_id = row.get("tid")
+        if isinstance(trade_id, (str, int)) and not isinstance(trade_id, bool):
+            trade_id = coin + ":" + str(trade_id)[:100]
+        else:
+            trade_id = ""
+        dedup_id = (tx_hash + ":" + trade_id if trade_id else
+                    ":".join((tx_hash, coin, str(int(timestamp * 1000)), side_raw,
+                               str(row.get("px") or ""), str(row.get("sz") or ""),
+                               buyer, seller)))
+        if not self._remember("HYPERLIQUID", dedup_id):
+            return False
+
+        # WsTrade.side is the taker's side. users is [buyer, seller].
+        side = "BUY" if side_raw == "B" else "SELL"
+        event = {
+            "chain": "HYPERLIQUID", "hash": tx_hash,
+            "log_index": trade_id or dedup_id,
+            "timestamp": int(timestamp), "symbol": coin,
+            "amount": amount, "usd": round(usd, 2),
+            "from": buyer, "to": seller,
+            "from_label": self.wallets.get(buyer, ""),
+            "to_label": self.wallets.get(seller, ""),
+            "direction": "trade", "side": side, "kind": "trade",
+        }
+        self.events.append(event)
+        self.hl_status["events"] += 1
+        self.hl_status["last_event_ts"] = timestamp
+        await self.broadcast({"type": "whale_tx", **event})
+        return True
+
+    async def _load_hyperliquid_universe(self, session: aiohttp.ClientSession) -> list[str]:
+        timeout = aiohttp.ClientTimeout(total=20)
+        async with session.post(self.hl_rest + "/info", json={"type": "meta"},
+                                timeout=timeout) as response:
+            if response.status != 200:
+                raise RuntimeError(f"Hyperliquid /info HTTP {response.status}")
+            data = await response.json()
+        if not isinstance(data, dict) or not isinstance(data.get("universe"), list):
+            raise RuntimeError("Hyperliquid meta response has no universe")
+        coins = []
+        seen = set()
+        for item in data["universe"]:
+            if not isinstance(item, dict) or item.get("isDelisted"):
+                continue
+            # Preserve the exact API case (e.g. kPEPE); WS subscriptions are
+            # case-sensitive and an unknown name can close the socket.
+            name = str(item.get("name") or "").strip()
+            if name and name not in seen:
+                seen.add(name)
+                coins.append(name)
+        if not coins:
+            raise RuntimeError("Hyperliquid returned an empty universe")
+        return coins
+
+    async def _subscribe_hyperliquid(self, ws, coins: list[str]) -> None:
+        for coin in coins:
+            await ws.send_json({"method": "subscribe",
+                                "subscription": {"type": "trades", "coin": coin}})
+            self.hl_status["subscriptions_sent"] += 1
+            if self.hl_sub_gap:
+                await asyncio.sleep(self.hl_sub_gap)
+
+    async def _run_hyperliquid_connection(self, session: aiohttp.ClientSession,
+                                          coins: list[str]) -> None:
+        timeout = (aiohttp.ClientWSTimeout(ws_close=25)
+                   if hasattr(aiohttp, "ClientWSTimeout") else 25)
+        async with session.ws_connect(self.hl_ws, heartbeat=None, timeout=timeout,
+                                      max_msg_size=16 * 1024 * 1024) as ws:
+            self.hl_status.update(connected=True, state="subscribing", error="",
+                                  market_count=len(coins), subscriptions_sent=0,
+                                  subscriptions_acked=0)
+            sender = asyncio.create_task(self._subscribe_hyperliquid(ws, coins),
+                                         name="whale-hl-subscriptions")
+            last_ping = time.monotonic()
+            try:
+                while True:
+                    if sender.done():
+                        error = sender.exception()
+                        if error:
+                            raise RuntimeError("Hyperliquid subscription send failed") from error
+                        if self.hl_status["subscriptions_acked"] >= len(coins):
+                            self.hl_status["state"] = "connected"
+                    if time.monotonic() - last_ping >= self.hl_ping_sec:
+                        await ws.send_json({"method": "ping"})
+                        last_ping = time.monotonic()
+                    try:
+                        msg = await ws.receive(timeout=min(5.0, self.hl_ping_sec))
+                    except asyncio.TimeoutError:
+                        continue
+                    if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING,
+                                    aiohttp.WSMsgType.ERROR):
+                        raise RuntimeError("Hyperliquid WebSocket closed")
+                    if msg.type != aiohttp.WSMsgType.TEXT:
+                        continue
+                    self.hl_status["last_message_ts"] = time.time()
+                    try:
+                        payload = json.loads(msg.data)
+                    except (TypeError, ValueError):
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    if payload.get("channel") == "subscriptionResponse":
+                        data = payload.get("data") or {}
+                        if isinstance(data, dict) and data.get("error"):
+                            raise RuntimeError("Hyperliquid rejected a trades subscription")
+                        if isinstance(data, dict) and data.get("method") == "subscribe":
+                            self.hl_status["subscriptions_acked"] += 1
+                        if (sender.done() and
+                                self.hl_status["subscriptions_acked"] >= len(coins)):
+                            self.hl_status["state"] = "connected"
+                        continue
+                    rows = self._hl_trade_rows(payload)
+                    if not rows:
+                        continue
+                    now = time.time()
+                    for row in rows:
+                        timestamp = self._hl_timestamp(row.get("time"))
+                        if (not timestamp or timestamp > now + 30 or
+                                now - timestamp > self.hl_fresh_sec):
+                            continue
+                        self.hl_status["trades_seen"] += 1
+                        self.hl_status["last_trade_ts"] = timestamp
+                        await self.handle_hyperliquid_trade(row, now=now)
+                    if sender.done() and self.hl_status["subscriptions_acked"] >= len(coins):
+                        self.hl_status["state"] = "connected"
+            finally:
+                sender.cancel()
+                await asyncio.gather(sender, return_exceptions=True)
+
+    async def run_hyperliquid(self) -> None:
+        """Reconnectable public Hyperliquid trades feed; no Alchemy key/RPC."""
+        if not self.hl_enabled:
+            self.hl_status.update(state="disabled", connected=False)
+            return
+        delay = 2.0
+        coins: list[str] = []
+        universe_loaded_at = 0.0
+        family = os.getenv("LIQSCOPE_FAMILY", "").strip()
+        connector = (aiohttp.TCPConnector(
+            family=socket.AF_INET if family == "4" else socket.AF_INET6)
+            if family in ("4", "6") else None)
+        async with aiohttp.ClientSession(
+                headers={"User-Agent": HL_USER_AGENT},
+                timeout=aiohttp.ClientTimeout(total=None, sock_connect=15),
+                connector=connector) as session:
+            while True:
+                self.hl_status.update(state="connecting", connected=False)
+                try:
+                    if (not coins or time.time() - universe_loaded_at >=
+                            HL_WHALE_UNIVERSE_TTL_SEC):
+                        coins = await self._load_hyperliquid_universe(session)
+                        universe_loaded_at = time.time()
+                    self.hl_status["market_count"] = len(coins)
+                    await self._run_hyperliquid_connection(session, coins)
+                    raise RuntimeError("Hyperliquid WebSocket ended")
+                except asyncio.CancelledError:
+                    self.hl_status.update(state="stopped", connected=False)
+                    raise
+                except (aiohttp.ClientError, asyncio.TimeoutError, OSError,
+                        RuntimeError, ValueError) as exc:
+                    was_connected = self.hl_status["connected"]
+                    self.hl_status.update(state="reconnecting", connected=False,
+                                          error=str(exc)[:160])
+                    if was_connected:
+                        self.hl_status["reconnects"] += 1
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, 60.0)
 
     async def _subscribe(self, ws, chain: str) -> dict[str, str]:
         addresses = list(TOKENS[chain])

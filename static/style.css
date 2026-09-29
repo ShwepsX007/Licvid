@@ -2761,6 +2761,7 @@ body.chart-fullscreen { overflow: hidden; }
 .whale-card .whale-usd { color: var(--color-gold, #ffd166); font-weight: 800; }
 .whale-card .whale-inflow { color: #4ade80; }
 .whale-card .whale-outflow { color: #fb7185; }
+.whale-card .whale-trade { color: #93c5fd; }
 .whale-card .whale-address { color: var(--text-muted); overflow-wrap: anywhere; line-height: 1.6; }
 .whale-card a { color: #38bdf8; }
 .whale-panel .feed-empty[hidden] { display: none !important; }

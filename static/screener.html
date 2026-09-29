@@ -16,14 +16,14 @@ section{border:1px solid #2a3a51;background:#111c2c;border-radius:12px;padding:1
 <body>
 <header><a href="/">LIQSCOPE</a><nav><a href="/terminal">⚡ Терминал</a><span id="nav-account"></span></nav></header>
 <main>
-<h1>🐋 Ончейн-скринер / Whale Alert</h1>
-<p>Крупные переводы по известным EVM-кошелькам биржам. Данные не являются доказательством покупки или продажи. Обновление страницы не расходует API Alchemy: история берётся из памяти сервера.</p>
+<h1>🐋 Whale-скринер / Whale Alert</h1>
+<p>Крупные EVM-переводы и сделки Hyperliquid Core от $50K. Hyperliquid подключён напрямую к публичному API Hyperliquid — без Alchemy; его сделки не являются депозитами или выводами. История хранится в памяти сервера.</p>
 <div id="screener-state" class="badge warn" role="status">Проверяю подключение…</div>
-<section><h2>Подключение и покрытие сетей</h2><div id="screener-usage"></div><div id="screener-chains" class="grid"></div><p>Другие сети (SOL, BTC, BCH, LTC, TRON, SUI, DOGE) пока не подключены. Без подтверждённых адресов бирж отсутствие событий нельзя считать отсутствием переводов.</p></section>
-<section><h2>Переводы</h2>
+<section><h2>Подключение и покрытие сетей</h2><div id="screener-usage"></div><div id="screener-chains" class="grid"></div><p>Другие сети (SOL, BTC, BCH, LTC, TRON, SUI, DOGE) пока не подключены. Отсутствие событий не означает отсутствие переводов или сделок.</p></section>
+<section><h2>Крупные события</h2>
 <label>Сумма <select id="whale-min"><option value="50000">$50K+</option><option value="100000" selected>$100K+</option><option value="500000">$500K+</option><option value="1000000">$1M+</option></select></label>
-<label>Сеть <select id="whale-chain"><option value="ALL">Все EVM</option><option value="ETH">ETH</option><option value="BNB">BNB</option><option value="POLYGON">Polygon</option><option value="ARBITRUM">Arbitrum</option><option value="BASE">Base</option><option value="HYPERLIQUID">HyperEVM</option></select></label>
-<label>Направление <select id="whale-direction"><option value="ALL">Все</option><option value="inflow">Вход</option><option value="outflow">Выход</option></select></label>
+<label>Сеть <select id="whale-chain"><option value="ALL">Все сети</option><option value="ETH">ETH</option><option value="BNB">BNB</option><option value="POLYGON">Polygon</option><option value="ARBITRUM">Arbitrum</option><option value="BASE">Base</option><option value="HYPERLIQUID">Hyperliquid Core</option></select></label>
+<label>Тип <select id="whale-direction"><option value="ALL">Все</option><option value="inflow">Вход</option><option value="outflow">Выход</option><option value="trade">Сделка</option></select></label>
 <div id="screener-events" aria-live="polite"></div><p id="screener-empty">Загружаю историю…</p></section>
-</main><script src="/static/account.js?v=nav5" defer></script><script src="/static/screener.js?v=2" defer></script>
+</main><script src="/static/account.js?v=nav5" defer></script><script src="/static/screener.js?v=3" defer></script>
 </body></html>

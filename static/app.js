@@ -5550,6 +5550,7 @@
     // cache so a REST history response cannot erase events received in flight.
     const whaleRows = new Map();
     let whaleEnabled = true;
+    let whaleNativeEnabled = false;
     let whaleRequest = 0;
     function whaleKey(row) { return row.chain + ":" + row.hash + ":" + row.log_index; }
     function addWhale(row) {
@@ -5574,11 +5575,13 @@
             card.className = "whale-card";
             const scans = {ETH: "https://etherscan.io/tx/", BNB: "https://bscscan.com/tx/",
                 POLYGON: "https://polygonscan.com/tx/", ARBITRUM: "https://arbiscan.io/tx/",
-                BASE: "https://basescan.org/tx/", HYPERLIQUID: "https://hyperevmscan.io/tx/"};
+                BASE: "https://basescan.org/tx/", HYPERLIQUID: "https://hypurrscan.io/tx/"};
             const scan = scans[row.chain];
             const addr = (value, label) => escapeHtml(label || String(value || "").slice(0, 10) + "…" + String(value || "").slice(-6));
-            const dir = row.direction === "inflow" ? "⬇ inflow" : row.direction === "outflow" ? "⬆ outflow" : "↔ transfer";
-            const cls = row.direction === "inflow" || row.direction === "outflow" ? "whale-" + row.direction : "";
+            const dir = row.direction === "inflow" ? "⬇ inflow" : row.direction === "outflow" ? "⬆ outflow" :
+                row.direction === "trade" ? "⇄ trade · " + escapeHtml(row.side || "") : "↔ transfer";
+            const cls = row.direction === "inflow" || row.direction === "outflow" ? "whale-" + row.direction :
+                row.direction === "trade" ? "whale-trade" : "";
             const ts = new Date(Number(row.timestamp) * 1000);
             const time = isNaN(ts.getTime()) ? "" : ts.toLocaleTimeString();
             card.innerHTML = '<div class="whale-card-head"><span>' + escapeHtml(row.chain) +
@@ -5587,15 +5590,17 @@
                 '<div><strong>' + Number(row.amount).toLocaleString(undefined, { maximumFractionDigits: 8 }) +
                 ' ' + escapeHtml(row.symbol) + '</strong> · <span class="whale-usd">$' +
                 Number(row.usd).toLocaleString(undefined, { maximumFractionDigits: 2 }) + '</span></div>' +
-                '<div class="whale-address">' + addr(row.from, row.from_label) + ' → ' +
-                addr(row.to, row.to_label) + '</div>';
+                '<div class="whale-address">' + (row.direction === "trade" ?
+                    'buyer ' + addr(row.from, row.from_label) + ' ↔ seller ' +
+                    addr(row.to, row.to_label) : addr(row.from, row.from_label) + ' → ' +
+                    addr(row.to, row.to_label)) + '</div>';
             frag.appendChild(card);
         });
         target.replaceChildren(frag);
         feedCountEl.textContent = rows.length + " событий";
         empty.hidden = rows.length > 0;
-        empty.textContent = whaleEnabled ? "Пока нет транзакций по фильтрам" :
-            "Ончейн-скринер отключён: ALCHEMY_API_KEY не установлен";
+        empty.textContent = (whaleEnabled || whaleNativeEnabled) ? "Пока нет событий по фильтрам" :
+            "Скринер недоступен: нет подключения к Alchemy и нативному Hyperliquid API";
     }
     async function loadWhales() {
         const seq = ++whaleRequest;
@@ -5607,14 +5612,23 @@
             const data = await res.json();
             if (seq !== whaleRequest) return;
             whaleEnabled = data.enabled;
+            whaleNativeEnabled = !!(data.native && data.native.enabled);
             const scope = $("whale-scope-note");
-            if (scope && data.poller) {
-                const poll = data.poller;
-                scope.textContent = "Только известные EVM-кошельки бирж · опрос каждые " +
-                    Math.round(poll.interval_sec / 60) + " мин · бюджет " +
-                    Number(poll.reserved_cu).toLocaleString() + "/" +
-                    Number(poll.budget_cu).toLocaleString() + " CU (этот скринер). " +
-                    "SOL, BTC/BCH, LTC, TRON, SUI, DOGE пока не подключены.";
+            if (scope) {
+                const poll = data.poller || {};
+                const evm = data.enabled ? "EVM через Alchemy · опрос каждые " +
+                    Math.round((poll.interval_sec || 3600) / 60) + " мин · " +
+                    Number(poll.reserved_cu || 0).toLocaleString() + "/" +
+                    Number(poll.budget_cu || 0).toLocaleString() + " CU" :
+                    data.alchemy_unavailable_reason ?
+                    "EVM-скринер недоступен: " + data.alchemy_unavailable_reason :
+                    "EVM через Alchemy ожидает API-ключ";
+                const hl = data.native && data.native.connected ?
+                    "Hyperliquid Core — native WS подключён, " +
+                    Number(data.native.market_count || 0).toLocaleString() + " рынков" :
+                    "Hyperliquid Core подключается к native API";
+                scope.textContent = evm + " · " + hl +
+                    ". SOL, BTC/BCH, LTC, TRON, SUI, DOGE пока не подключены.";
             }
             (data.events || []).slice().reverse().forEach(addWhale);
             paintWhales();

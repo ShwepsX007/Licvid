@@ -50,6 +50,7 @@ import logging
 import logging.handlers
 import math
 import os
+from pathlib import Path
 import queue
 import random
 import re
@@ -120,6 +121,12 @@ from fastapi.staticfiles import StaticFiles
 
 import market_feed
 from market_feed import GATE_REST, MarketFeed, TF_MINUTES, base_of, canon, _get_json
+try:
+    from cex_wallets_updater import CEXWalletRegistry, auto_refresh_loop
+    CEX_WALLET_UPDATER_AVAILABLE = True
+except Exception:  # noqa: BLE001 — wallet refresh must not prevent site startup
+    CEXWalletRegistry = auto_refresh_loop = None
+    CEX_WALLET_UPDATER_AVAILABLE = False
 # Keep the credential-free Hyperliquid source independent of optional Alchemy
 # key management. A missing encryption library never means plaintext key storage.
 try:
@@ -131,11 +138,12 @@ except Exception:  # noqa: BLE001 — the optional whale feed must not block the
     WHALE_SCREENER_AVAILABLE = False
 
 try:
-    from whale_poller import WhalePoller
+    from whale_poller import WhalePoller, HISTORY_INTERVAL_OPTIONS
     from alchemy_keys import AlchemyKeyStore, KeyStoreError
     WHALE_POLLER_AVAILABLE = True
 except Exception:  # noqa: BLE001 — isolate optional Alchemy imports
     WhalePoller = AlchemyKeyStore = None
+    HISTORY_INTERVAL_OPTIONS = (5, 10, 15, 30, 60)
     class KeyStoreError(Exception):
         pass
     WHALE_POLLER_AVAILABLE = False
@@ -1484,7 +1492,10 @@ feed: Optional[MarketFeed] = None
 whale_screener: Optional[WhaleScreener] = None
 whale_poller: Optional[WhalePoller] = None
 alchemy_key_store: Optional[AlchemyKeyStore] = None
+trongrid_key_store: Optional[AlchemyKeyStore] = None
+cex_wallet_registry = None
 alchemy_vault_error = ""
+trongrid_vault_error = ""
 # 📖 Стакан: опрос L2 и детектор стен (заполняется в lifespan; в тестах — подмена).
 book_feed_inst: Optional[BookFeed] = None
 _pending: List[dict] = []
@@ -4386,8 +4397,11 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(corr_alert_loop(), name="corr-alerts"),
     ]
     global whale_screener, whale_poller, alchemy_key_store, alchemy_vault_error
-    whale_screener = whale_poller = alchemy_key_store = None
-    alchemy_vault_error = ""
+    global trongrid_key_store, trongrid_vault_error, cex_wallet_registry
+    whale_screener = whale_poller = alchemy_key_store = trongrid_key_store = None
+    alchemy_vault_error = trongrid_vault_error = ""
+    cex_wallet_registry = (CEXWalletRegistry(os.path.join(HERE, "data", "cex_wallets.json"))
+                           if CEX_WALLET_UPDATER_AVAILABLE else None)
     if not WHALE_SCREENER_AVAILABLE:
         alchemy_vault_error = "Whale-скринер недоступен. Проверьте зависимости и data/cex_wallets.json"
     else:
@@ -4395,6 +4409,7 @@ async def lifespan(app: FastAPI):
             whale_screener = WhaleScreener(
                 "pending", price_fn=lambda pair: feed.prices.get(pair) if feed else None,
                 broadcast=hub.broadcast, min_usd=50_000,
+                wallet_path=Path(os.path.join(HERE, "data", "cex_wallets.json")),
                 history_path=WHALE_HISTORY_FILE or None)
             if whale_screener.hl_enabled:
                 tasks.append(asyncio.create_task(
@@ -4408,30 +4423,56 @@ async def lifespan(app: FastAPI):
         alchemy_vault_error = ("Alchemy-модуль недоступен. Установите зависимости: "
                                "pip install -r requirements.txt")
     elif whale_screener:
+        mode = account_store.get_setting(
+            "whale_mode", os.getenv("LIQSCOPE_WHALE_MODE", "realtime")).strip().lower()
+        if mode not in ("realtime", "economy"):
+            mode = "realtime"
+        default_interval = "5" if mode == "realtime" else "15"
+        try:
+            interval_min = int(account_store.get_setting("whale_interval_min", default_interval))
+        except (TypeError, ValueError):
+            interval_min = int(default_interval)
+        try:
+            monthly_cu = int(account_store.get_setting("whale_monthly_cu", "10000000"))
+        except (TypeError, ValueError):
+            monthly_cu = 10_000_000
         try:
             # No plaintext or env-key fallback when Fernet is unavailable.
             alchemy_key_store = AlchemyKeyStore(SECRET, env_key=os.getenv("ALCHEMY_API_KEY", ""))
-            whale_poller = WhalePoller(
-                "", whale_screener, key_store=alchemy_key_store,
-                interval=int(account_store.get_setting("whale_interval_min", "60")) * 60,
-                monthly_cu=int(account_store.get_setting("whale_monthly_cu", "10000000")),
-            )
         except KeyStoreError as exc:
-            # Includes missing cryptography or a vault encrypted under an old
-            # LIQSCOPE_SECRET. Do not overwrite the existing ciphertext. The
-            # native Hyperliquid source above remains available independently.
             alchemy_vault_error = str(exc)
-        except Exception:  # noqa: BLE001 — Alchemy setup must not take down the terminal
-            alchemy_key_store = whale_poller = None
-            alchemy_vault_error = ("Alchemy-скринер не запустился. Проверьте зависимости "
-                                   "и файл data/cex_wallets.json")
+        try:
+            trongrid_key_store = AlchemyKeyStore(
+                SECRET, path=Path(os.path.join(HERE, "data", "trongrid_keys.enc")),
+                env_key=os.getenv("TRONGRID_API_KEY", ""))
+        except KeyStoreError as exc:
+            trongrid_vault_error = str(exc)
+        if alchemy_key_store:
+            try:
+                whale_poller = WhalePoller(
+                    "", whale_screener, key_store=alchemy_key_store,
+                    trongrid_key_store=trongrid_key_store,
+                    interval=interval_min * 60, history_interval_min=interval_min,
+                    mode=mode, monthly_cu=monthly_cu)
+            except Exception:  # noqa: BLE001 — optional collection cannot take down terminal
+                whale_poller = None
+                if not alchemy_vault_error:
+                    alchemy_vault_error = "Alchemy scanner could not start; check its configuration"
         if whale_poller:
-            # With no keys this task waits for admin input; it performs no RPC
-            # calls until a key is added, and then wakes without a restart.
             tasks.append(asyncio.create_task(whale_poller.run(), name="whale-poller"))
+            tasks.append(asyncio.create_task(whale_poller.run_streams(), name="whale-streams"))
+
+    if cex_wallet_registry and whale_screener:
+        async def _wallets_updated(_result):
+            if whale_screener:
+                whale_screener.reload_wallets()
+            if whale_poller:
+                whale_poller.wakeup.set()
+        tasks.append(asyncio.create_task(
+            auto_refresh_loop(cex_wallet_registry, _wallets_updated), name="cex-wallet-refresh"))
     if alchemy_key_store and not alchemy_key_store.keys():
-        log.warning("Ключ Alchemy пока не добавлен; EVM-скринер ожидает добавления через /admin; "
-                    "нативный Hyperliquid работает отдельно")
+        log.warning("Ключ Alchemy пока не добавлен; EVM/Solana-скринер ожидает настройки в админке; "
+                    "нативный Hyperliquid и TronGrid остаются отдельными источниками")
 
     # Дневной дайджест: вечерний выпуск в оба канала и в архив на сайте
     digest_sched = DigestScheduler(hour=DIGEST_HOUR, minute=DIGEST_MINUTE,
@@ -5716,17 +5757,24 @@ async def api_admin_screener_config_save(request: Request,
         return JSONResponse({"error": "admin"}, status_code=403)
     if not whale_poller:
         return JSONResponse({"error": "disabled"}, status_code=503)
-    if body.get("mode", "cex_only") != "cex_only":
-        return JSONResponse({"error": "all_mode_exceeds_free_budget"}, status_code=422)
+    mode = str(body.get("mode", whale_poller.mode)).strip().lower()
+    # Backward compatibility for clients that still submit the old fixed mode.
+    if mode == "cex_only":
+        mode = whale_poller.mode
+    if mode not in ("realtime", "economy"):
+        return JSONResponse({"error": "invalid_mode"}, status_code=422)
     try:
-        minutes = int(body.get("interval_min", 60))
-        cap = int(body.get("monthly_cu", 10_000_000))
+        minutes = int(body.get("interval_min", whale_poller.history_interval_min))
+        cap = int(body.get("monthly_cu", whale_poller.monthly_cu))
     except (ValueError, TypeError):
         return JSONResponse({"error": "invalid_config"}, status_code=422)
-    if not 10 <= minutes <= 1440 or not 1_000 <= cap <= 20_000_000:
+    if minutes not in HISTORY_INTERVAL_OPTIONS or not 1_000 <= cap <= 20_000_000:
         return JSONResponse({"error": "out_of_range"}, status_code=422)
-    whale_poller.interval = minutes * 60
-    whale_poller.monthly_cu = cap
+    try:
+        whale_poller.configure(mode=mode, history_interval_min=minutes, monthly_cu=cap)
+    except ValueError:
+        return JSONResponse({"error": "out_of_range"}, status_code=422)
+    await asyncio.to_thread(account_store.set_setting, "whale_mode", mode, int(user["id"]))
     await asyncio.to_thread(account_store.set_setting, "whale_interval_min", str(minutes), int(user["id"]))
     await asyncio.to_thread(account_store.set_setting, "whale_monthly_cu", str(cap), int(user["id"]))
     return {"ok": True, "config": whale_poller.status()}
@@ -5874,6 +5922,16 @@ async def api_admin_alchemy_stats(request: Request):
                      "last_success": float(native.get("last_event_ts") or native.get("last_message_ts") or 0),
                      "last_attempt": float(native.get("last_message_ts") or 0),
                      "error": str(native.get("error") or "")})
+    for chain, key, provider in (("SOLANA", "solana", "alchemy_solana"),
+                                 ("TRON", "tron", "trongrid")):
+        network = poll.get(key) or {}
+        network_state = str(network.get("state") or "waiting")
+        state = "online" if network.get("connected") else (
+            "error" if network_state in ("error", "budget_exhausted") else "waiting")
+        networks.append({"chain": chain, "provider": provider, "status": state,
+                         "last_success": float(network.get("last_success") or 0),
+                         "last_attempt": float(network.get("last_attempt") or 0),
+                         "error": str(network.get("error") or "")})
     used = int(poll.get("reserved_cu") or 0)
     budget = int(poll.get("budget_cu") or 0)
     keys = _alchemy_admin_keys()
@@ -5882,25 +5940,181 @@ async def api_admin_alchemy_stats(request: Request):
             "vault_error": alchemy_vault_error,
             "cu": {"month": poll.get("month") or "", "used": used,
                    "limit": budget, "percent": round(100 * used / budget, 2) if budget else 0,
+                   "estimated_monthly": int(poll.get("estimated_monthly_cu") or 0),
                    "key_share": key_share,
                    "keys_configured": len(keys), "keys": keys},
             "networks": networks, "native": native,
+            "trongrid": {"available": bool(trongrid_key_store and not trongrid_vault_error),
+                         "vault_error": trongrid_vault_error,
+                         "keys": (trongrid_key_store.public() if trongrid_key_store else [])},
             "phase": poll.get("phase") or "unavailable"}
+
+
+def _reload_cex_runtime() -> None:
+    if whale_screener:
+        whale_screener.reload_wallets()
+    if whale_poller:
+        whale_poller.wakeup.set()
+
+
+@app.get("/api/admin/screener/cex-wallets")
+async def api_admin_cex_wallets(request: Request,
+                               chain: str = Query("ALL", pattern="^(ALL|ETH|BNB|POLYGON|ARBITRUM|BASE|SOLANA|TRON)$"),
+                               exchange: str = Query("", max_length=100)):
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    if not cex_wallet_registry:
+        return JSONResponse({"error": "wallet_registry_unavailable"}, status_code=503)
+    return {"ok": True, "wallets": cex_wallet_registry.records(chain=chain, exchange=exchange),
+            "summary": cex_wallet_registry.summary()}
+
+
+@app.post("/api/admin/screener/cex-wallets/refresh")
+async def api_admin_refresh_cex_wallets(request: Request):
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    if not cex_wallet_registry:
+        return JSONResponse({"error": "wallet_registry_unavailable"}, status_code=503)
+    try:
+        result = await cex_wallet_registry.refresh()
+    except Exception as exc:  # noqa: BLE001 — provider detail is not exposed to clients
+        return JSONResponse({"error": "refresh_failed", "reason": type(exc).__name__},
+                            status_code=502)
+    _reload_cex_runtime()
+    return result
+
+
+@app.post("/api/admin/screener/cex-wallets")
+async def api_admin_add_cex_wallet(request: Request, body: dict = Body(default_factory=dict)):
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    if not cex_wallet_registry:
+        return JSONResponse({"error": "wallet_registry_unavailable"}, status_code=503)
+    try:
+        row = cex_wallet_registry.add_manual(
+            str(body.get("chain") or ""), str(body.get("address") or ""),
+            str(body.get("name") or body.get("exchange") or ""))
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+    except OSError:
+        return JSONResponse({"error": "wallet_save_failed"}, status_code=500)
+    _reload_cex_runtime()
+    return {"ok": True, "wallet": row, "summary": cex_wallet_registry.summary()}
+
+
+@app.put("/api/admin/screener/cex-wallets/{identifier}")
+async def api_admin_update_cex_wallet(request: Request, identifier: str,
+                                      body: dict = Body(default_factory=dict)):
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    if not cex_wallet_registry:
+        return JSONResponse({"error": "wallet_registry_unavailable"}, status_code=503)
+    try:
+        row = cex_wallet_registry.update_manual(
+            identifier, str(body.get("chain") or ""), str(body.get("address") or ""),
+            str(body.get("name") or body.get("exchange") or ""))
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+    except OSError:
+        return JSONResponse({"error": "wallet_save_failed"}, status_code=500)
+    if not row:
+        return JSONResponse({"error": "manual_wallet_not_found"}, status_code=404)
+    _reload_cex_runtime()
+    return {"ok": True, "wallet": row, "summary": cex_wallet_registry.summary()}
+
+
+@app.delete("/api/admin/screener/cex-wallets/{identifier}")
+async def api_admin_remove_cex_wallet(request: Request, identifier: str):
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    if not cex_wallet_registry:
+        return JSONResponse({"error": "wallet_registry_unavailable"}, status_code=503)
+    try:
+        removed = cex_wallet_registry.remove_manual(identifier)
+    except OSError:
+        return JSONResponse({"error": "wallet_save_failed"}, status_code=500)
+    if not removed:
+        return JSONResponse({"error": "manual_wallet_not_found"}, status_code=404)
+    _reload_cex_runtime()
+    return {"ok": True, "summary": cex_wallet_registry.summary()}
+
+
+@app.get("/api/admin/trongrid/key")
+async def api_admin_trongrid_key(request: Request):
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    try:
+        keys = trongrid_key_store.public() if trongrid_key_store else []
+    except KeyStoreError:
+        keys = []
+    return {"ok": True, "keys": keys,
+            "available": bool(trongrid_key_store and not trongrid_vault_error),
+            "vault_error": trongrid_vault_error}
+
+
+@app.post("/api/admin/trongrid/key")
+async def api_admin_set_trongrid_key(request: Request,
+                                     body: dict = Body(default_factory=dict)):
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    if not trongrid_key_store or trongrid_vault_error:
+        return JSONResponse({"error": "vault_unavailable"}, status_code=503)
+    value = body.get("key") or body.get("api_key")
+    if not isinstance(value, str) or len(value) > 500:
+        return JSONResponse({"error": "invalid_key"}, status_code=422)
+    try:
+        public = trongrid_key_store.add(value)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+    except KeyStoreError:
+        return JSONResponse({"error": "vault_unavailable"}, status_code=503)
+    if whale_poller:
+        whale_poller.wakeup.set()
+    return {"ok": True, "key": public}
+
+
+@app.delete("/api/admin/trongrid/key/{identifier}")
+async def api_admin_delete_trongrid_key(request: Request, identifier: str):
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    if not trongrid_key_store or not re.fullmatch(r"[0-9a-f]{16}", identifier):
+        return JSONResponse({"error": "unknown_key"}, status_code=404)
+    try:
+        deleted = trongrid_key_store.remove(identifier)
+    except KeyStoreError:
+        return JSONResponse({"error": "vault_unavailable"}, status_code=503)
+    if whale_poller:
+        whale_poller.wakeup.set()
+    if not deleted:
+        return JSONResponse({"error": "unknown_key"}, status_code=404)
+    return {"ok": True}
 
 
 @app.get("/api/screener/whales")
 async def api_screener_whales(request: Request,
                               min_usd: float = Query(0, ge=0),
-                              chain: str = Query("ALL", pattern="^(ALL|ETH|BNB|POLYGON|ARBITRUM|BASE|HYPERLIQUID)$"),
+                              chain: str = Query("ALL", pattern="^(ALL|GENERAL|EVM|ETH|BNB|POLYGON|ARBITRUM|BASE|SOLANA|TRON|HYPERLIQUID)$"),
                               limit: int = Query(100, ge=1, le=100)):
     alchemy_enabled = bool(alchemy_key_store and alchemy_key_store.keys())
     native_enabled = bool(whale_screener and whale_screener.hl_enabled)
+    solana_enabled = bool(whale_poller and alchemy_enabled)
+    tron_enabled = bool(whale_poller)
     return {"enabled": alchemy_enabled, "alchemy_enabled": alchemy_enabled,
-            "native_enabled": native_enabled,
-            "available": bool(whale_screener and (alchemy_enabled or native_enabled)),
+            "native_enabled": native_enabled, "solana_enabled": solana_enabled,
+            "tron_enabled": tron_enabled,
+            "available": bool(whale_screener and
+                               (alchemy_enabled or native_enabled or solana_enabled or tron_enabled)),
             "unavailable_reason": alchemy_vault_error if not whale_screener else "",
             "alchemy_unavailable_reason": alchemy_vault_error,
-            "native_supported": ["HYPERLIQUID"],
+            "native_supported": ["HYPERLIQUID", "SOLANA", "TRON"],
             "native": whale_screener.native_status() if whale_screener else {
                 "network": "HYPERLIQUID", "provider": "native_api",
                 "enabled": False, "connected": False, "state": "unavailable",
@@ -5914,11 +6128,14 @@ async def api_screener_whales(request: Request,
             "poller": whale_poller.status() if whale_poller else None}
 
 
-_SCREENER_NETWORKS = ("ETH", "BNB", "POLYGON", "ARBITRUM", "BASE", "HYPERLIQUID")
+_SCREENER_NETWORKS = ("ETH", "BNB", "POLYGON", "ARBITRUM", "BASE",
+                      "SOLANA", "TRON", "HYPERLIQUID")
 _EXPLORER_TX = {
     "ETH": "https://etherscan.io/tx/", "BNB": "https://bscscan.com/tx/",
     "POLYGON": "https://polygonscan.com/tx/", "ARBITRUM": "https://arbiscan.io/tx/",
-    "BASE": "https://basescan.org/tx/", "HYPERLIQUID": "https://hypurrscan.io/tx/",
+    "BASE": "https://basescan.org/tx/", "SOLANA": "https://solscan.io/tx/",
+    "TRON": "https://tronscan.org/#/transaction/",
+    "HYPERLIQUID": "https://hypurrscan.io/tx/",
 }
 
 
@@ -5950,6 +6167,16 @@ def _screener_network_status() -> dict:
         "last_attempt": float(native.get("last_message_ts") or 0),
         "error": str(native.get("error") or ""),
     }
+    for chain, key in (("SOLANA", "solana"), ("TRON", "tron")):
+        network = poll.get(key) or {}
+        state = str(network.get("state") or "waiting")
+        result[chain] = {
+            "status": "online" if network.get("connected") else
+                      "error" if state in ("error", "budget_exhausted") else "waiting",
+            "last_success": float(network.get("last_success") or 0),
+            "last_attempt": float(network.get("last_attempt") or 0),
+            "error": str(network.get("error") or ""),
+        }
     return result
 
 
@@ -5965,9 +6192,11 @@ async def api_screener_stats(request: Request):
                 "last_success": health[chain]["last_success"],
                 "last_attempt": health[chain]["last_attempt"],
                 "error": health[chain]["error"],
-                "events": 0, "volume_usd": 0.0,
+                "events": 0, "volume_usd": 0.0, "assets": {},
                 "inflow_usd": 0.0, "outflow_usd": 0.0,
-                "buy_usd": 0.0, "sell_usd": 0.0}
+                "buy_usd": 0.0, "sell_usd": 0.0, "transfer_usd": 0.0,
+                "inflow_assets": {}, "outflow_assets": {},
+                "buy_assets": {}, "sell_assets": {}, "transfer_assets": {}}
         for chain in _SCREENER_NETWORKS
     }
     exchange_totals = {chain: {} for chain in ("ALL", *_SCREENER_NETWORKS)}
@@ -5977,7 +6206,9 @@ async def api_screener_stats(request: Request):
     for i in range(24):
         networks_by_hour = {
             chain: {"inflow_usd": 0.0, "outflow_usd": 0.0,
-                    "buy_usd": 0.0, "sell_usd": 0.0}
+                    "buy_usd": 0.0, "sell_usd": 0.0, "transfer_usd": 0.0,
+                    "inflow_assets": {}, "outflow_assets": {},
+                    "buy_assets": {}, "sell_assets": {}, "transfer_assets": {}}
             for chain in _SCREENER_NETWORKS
         }
         series.append({"timestamp": first_hour + i * 3600,
@@ -5998,23 +6229,36 @@ async def api_screener_stats(request: Request):
         row["events"] += 1
         row["volume_usd"] += value
         total_usd += value
+        symbol = str(event.get("symbol") or "").upper()
+        try:
+            amount = float(event.get("amount") or 0)
+        except (TypeError, ValueError):
+            amount = 0.0
+        if symbol and math.isfinite(amount) and amount > 0:
+            row["assets"][symbol] = row["assets"].get(symbol, 0.0) + amount
+        direction = str(event.get("direction") or "").lower()
+        if direction == "trade":
+            side = str(event.get("side") or "").upper()
+            bucket = "buy" if side == "BUY" else "sell"
+        elif direction in ("inflow", "outflow"):
+            bucket = direction
+        elif event.get("to_label"):
+            bucket = "inflow"
+        elif event.get("from_label"):
+            bucket = "outflow"
+        else:
+            bucket = "transfer"
+        row[bucket + "_usd"] += value
+        if symbol and math.isfinite(amount) and amount > 0:
+            key = bucket + "_assets"
+            row[key][symbol] = row[key].get(symbol, 0.0) + amount
         hour = int(timestamp // 3600) * 3600
         if first_hour <= hour <= hour_now:
             cell = series[int((hour - first_hour) // 3600)]["networks"][chain]
-            direction = str(event.get("direction") or "").lower()
-            if direction == "trade":
-                side = str(event.get("side") or "").upper()
-                cell["buy_usd" if side == "BUY" else "sell_usd"] += value
-                row["buy_usd" if side == "BUY" else "sell_usd"] += value
-            elif direction in ("inflow", "outflow"):
-                cell[direction + "_usd"] += value
-                row[direction + "_usd"] += value
-            elif event.get("to_label"):
-                cell["inflow_usd"] += value
-                row["inflow_usd"] += value
-            elif event.get("from_label"):
-                cell["outflow_usd"] += value
-                row["outflow_usd"] += value
+            cell[bucket + "_usd"] += value
+            if symbol and math.isfinite(amount) and amount > 0:
+                key = bucket + "_assets"
+                cell[key][symbol] = cell[key].get(symbol, 0.0) + amount
         venue = event_exchange(event) if event_exchange else ""
         for scope in ("ALL", chain):
             if venue:
@@ -6024,12 +6268,19 @@ async def api_screener_stats(request: Request):
                 venue_row["volume_usd"] += value
     # JSON-safe rounding and compact, pre-ranked exchange summaries.
     for chain_data in networks.values():
-        for key in ("volume_usd", "inflow_usd", "outflow_usd", "buy_usd", "sell_usd"):
+        for key in ("volume_usd", "inflow_usd", "outflow_usd", "buy_usd", "sell_usd", "transfer_usd"):
             chain_data[key] = round(chain_data[key], 2)
+        for key in ("assets", "inflow_assets", "outflow_assets", "buy_assets", "sell_assets", "transfer_assets"):
+            chain_data[key] = {symbol: round(amount, 6)
+                               for symbol, amount in chain_data[key].items()}
     for point in series:
         for cell in point["networks"].values():
             for key, value in tuple(cell.items()):
-                cell[key] = round(value, 2)
+                if key.endswith("_assets"):
+                    cell[key] = {symbol: round(amount, 6)
+                                 for symbol, amount in value.items()}
+                else:
+                    cell[key] = round(value, 2)
     top_exchanges = {}
     for scope, values in exchange_totals.items():
         top_exchanges[scope] = sorted(values.values(),
@@ -6047,9 +6298,9 @@ async def api_screener_stats(request: Request):
 @app.get("/api/screener/history")
 async def api_screener_history(
         request: Request,
-        chain: str = Query("ALL", pattern="^(ALL|ETH|BNB|POLYGON|ARBITRUM|BASE|HYPERLIQUID)$"),
+        chain: str = Query("ALL", pattern="^(ALL|GENERAL|EVM|ETH|BNB|POLYGON|ARBITRUM|BASE|SOLANA|TRON|HYPERLIQUID)$"),
         min_usd: float = Query(0, ge=0),
-        direction: str = Query("ALL", pattern="^(ALL|inflow|outflow|trade)$"),
+        direction: str = Query("ALL", pattern="^(ALL|inflow|outflow|trade|transfer)$"),
         exchange: str = Query("ALL", max_length=100),
         page: int = Query(1, ge=1),
         page_size: int = Query(50, ge=1, le=50),
@@ -6070,9 +6321,9 @@ async def api_screener_history(
 @app.get("/api/screener/history.csv")
 async def api_screener_history_csv(
         request: Request,
-        chain: str = Query("ALL", pattern="^(ALL|ETH|BNB|POLYGON|ARBITRUM|BASE|HYPERLIQUID)$"),
+        chain: str = Query("ALL", pattern="^(ALL|GENERAL|EVM|ETH|BNB|POLYGON|ARBITRUM|BASE|SOLANA|TRON|HYPERLIQUID)$"),
         min_usd: float = Query(0, ge=0),
-        direction: str = Query("ALL", pattern="^(ALL|inflow|outflow|trade)$"),
+        direction: str = Query("ALL", pattern="^(ALL|inflow|outflow|trade|transfer)$"),
         exchange: str = Query("ALL", max_length=100)):
     now = time.time()
     since = now - 7 * 24 * 60 * 60

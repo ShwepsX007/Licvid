@@ -82,7 +82,7 @@ with patch.object(server.WhaleScreener, "run_hyperliquid", fake_native_stream):
             assert result["native_enabled"] and result["native"]["connected"]
             assert result["available"]
             assert result["native"]["provider"] == "native_api"
-            assert result["native_supported"] == ["HYPERLIQUID"]
+            assert result["native_supported"] == ["HYPERLIQUID", "SOLANA", "TRON"]
             assert server.alchemy_key_store is not None
             assert server.alchemy_key_store.keys() == []
 assert started

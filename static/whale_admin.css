@@ -23,6 +23,18 @@
 .whale-admin-network.status--error .whale-admin-network-status { color: #fb7185; }
 .whale-admin-network.status--waiting .whale-admin-network-status { color: #eabf67; }
 .whale-admin-settings { padding-top: 10px; border-top: 1px solid var(--border, rgba(255,255,255,.07)); }
+.whale-admin-wallet-table-scroll { width: 100%; overflow-x: auto; margin: 7px 0 4px; border: 1px solid var(--border, rgba(255,255,255,.07)); border-radius: 9px; }
+.whale-admin-wallet-table { width: 100%; min-width: 730px; border-collapse: collapse; text-align: left; }
+.whale-admin-wallet-table th, .whale-admin-wallet-table td { padding: 8px 10px; border-bottom: 1px solid var(--border, rgba(255,255,255,.06)); color: var(--muted, #8b97ad); font-size: .68rem; }
+.whale-admin-wallet-table th { color: var(--text, #f4f7fb); font-size: .65rem; }
+.whale-admin-wallet-table td code { display: block; max-width: 360px; overflow-wrap: anywhere; color: #a9c7ff; font-size: .64rem; }
+.whale-admin-wallet-table tbody tr:last-child td { border-bottom: 0; }
+.whale-admin-wallet-table td:last-child { white-space: nowrap; }
+.whale-admin-wallet-table td:last-child .btn + .btn { margin-left: 4px; }
+.whale-admin-wallet-add, .whale-admin-wallet-toolbar { align-items: flex-end; }
+.whale-admin-wallet-add label, .whale-admin-wallet-toolbar label { display: grid; gap: 5px; color: var(--muted, #8b97ad); font-size: .7rem; }
+.whale-admin-wallet-add label input { min-width: 170px; }
+.whale-admin-wallet-toolbar label input { min-width: 140px; }
 @media (max-width: 700px) {
   .whale-admin-overview { grid-template-columns: 1fr; }
   .whale-admin-key-row { grid-template-columns: 1fr auto; }

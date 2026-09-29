@@ -9,21 +9,26 @@
         {id: "POLYGON", key: "screener.network_polygon", short: "POLYGON", mark: "P"},
         {id: "ARBITRUM", key: "screener.network_arbitrum", short: "ARB", mark: "A"},
         {id: "BASE", key: "screener.network_base", short: "BASE", mark: "B"},
+        {id: "SOLANA", key: "screener.network_solana", short: "SOL", mark: "◎"},
+        {id: "TRON", key: "screener.network_tron", short: "TRON", mark: "T"},
         {id: "HYPERLIQUID", key: "screener.network_hyperliquid", short: "HYPE", mark: "H"},
     ];
     const EXPLORERS = {
         ETH: "https://etherscan.io/tx/", BNB: "https://bscscan.com/tx/",
         POLYGON: "https://polygonscan.com/tx/", ARBITRUM: "https://arbiscan.io/tx/",
-        BASE: "https://basescan.org/tx/", HYPERLIQUID: "https://hypurrscan.io/tx/",
+        BASE: "https://basescan.org/tx/", SOLANA: "https://solscan.io/tx/",
+        TRON: "https://tronscan.org/#/transaction/", HYPERLIQUID: "https://hypurrscan.io/tx/",
     };
     const SERIES_COLORS = {
         inflow_usd: "#34d399", outflow_usd: "#fb7185",
-        buy_usd: "#78a0ff", sell_usd: "#c084fc",
+        buy_usd: "#78a0ff", sell_usd: "#c084fc", transfer_usd: "#91a2bd",
     };
+    const networkOpacity = index => Math.max(.48, .96 - index * .07);
     const state = {
-        stats: null, liveRows: [], selectedChain: "ALL", historyPage: 1,
+        stats: null, liveRows: [], hlRows: [], selectedChain: "ALL", historyPage: 1,
         historyPages: 1, sortBy: "timestamp", sortDir: "desc",
-        seenLive: new Set(), initializedLive: false, historyRequest: 0,
+        seenLive: new Set(), seenHL: new Set(), initializedLive: false,
+        initializedHL: false, historyRequest: 0,
     };
 
     function t(key, vars) {
@@ -64,8 +69,12 @@
         if (node) node.textContent = value;
     }
     function explorerLink(row) {
-        return EXPLORERS[row.chain] && /^0x[0-9a-f]{64}$/i.test(row.hash || "")
-            ? EXPLORERS[row.chain] + row.hash : "";
+        const hash = String(row.hash || "");
+        const valid = ["ETH", "BNB", "POLYGON", "ARBITRUM", "BASE", "HYPERLIQUID"].includes(row.chain)
+            ? /^0x[0-9a-f]{64}$/i.test(hash)
+            : row.chain === "TRON" ? /^[0-9a-f]{64}$/i.test(hash)
+            : row.chain === "SOLANA" ? /^[1-9A-HJ-NP-Za-km-z]{64,100}$/.test(hash) : false;
+        return valid && EXPLORERS[row.chain] ? EXPLORERS[row.chain] + hash : "";
     }
     function exchangeFor(row) {
         const direction = String(row.direction || "").toLowerCase();
@@ -113,6 +122,7 @@
             const summary = networks[net.id] || {};
             const card = make("button", "network-card" + (state.selectedChain === net.id ? " is-selected" : ""));
             card.type = "button";
+            card.dataset.network = net.id;
             card.setAttribute("aria-pressed", String(state.selectedChain === net.id));
             card.setAttribute("aria-label", networkName(net.id) + ", " + localizedStatus(summary.status));
             const top = make("div", "network-card-top");
@@ -194,14 +204,38 @@
         if (text !== undefined) node.textContent = text;
         return node;
     }
-    function seriesFor(point, chain) {
-        const byNetwork = point.networks || {};
-        if (chain !== "ALL") return byNetwork[chain] || {};
-        const total = {inflow_usd: 0, outflow_usd: 0, buy_usd: 0, sell_usd: 0};
-        Object.values(byNetwork).forEach(row => Object.keys(total).forEach(key => {
-            total[key] += Number(row[key] || 0);
-        }));
-        return total;
+    function chartPoints(series) {
+        const buckets = [];
+        for (let start = 0; start < series.length; start += 2) {
+            const rows = series.slice(start, start + 2);
+            const networks = {};
+            rows.forEach(point => Object.entries(point.networks || {}).forEach(([chain, cell]) => {
+                const out = networks[chain] || (networks[chain] = {});
+                Object.entries(cell || {}).forEach(([key, value]) => {
+                    if (key.endsWith("_assets")) {
+                        const target = out[key] || (out[key] = {});
+                        Object.entries(value || {}).forEach(([symbol, amount]) => {
+                            target[symbol] = Number(target[symbol] || 0) + Number(amount || 0);
+                        });
+                    } else out[key] = Number(out[key] || 0) + Number(value || 0);
+                });
+            }));
+            buckets.push({timestamp: Number(rows[0].timestamp),
+                end: Number(rows[rows.length - 1].timestamp) + 3600, networks});
+        }
+        return buckets;
+    }
+    function compactAssets(assets) {
+        return Object.entries(assets || {}).filter(([, value]) => Number(value) > 0)
+            .sort((a, b) => Number(b[1]) - Number(a[1])).slice(0, 3)
+            .map(([symbol, value]) => fmtAmount(value) + " " + symbol).join(", ") || "—";
+    }
+    function compactAssetValue(value) {
+        const n = Number(value);
+        if (!Number.isFinite(n)) return "—";
+        if (Math.abs(n) >= 1_000_000) return (n / 1_000_000).toLocaleString(undefined, {maximumFractionDigits: 1}) + "M";
+        if (Math.abs(n) >= 1_000) return (n / 1_000).toLocaleString(undefined, {maximumFractionDigits: 1}) + "K";
+        return fmtAmount(n);
     }
     function renderChart() {
         const data = state.stats;
@@ -211,11 +245,13 @@
         const selected = state.selectedChain;
         const tradeOnly = selected === "HYPERLIQUID";
         const keys = selected === "ALL"
-            ? ["inflow_usd", "outflow_usd", "buy_usd", "sell_usd"]
-            : tradeOnly ? ["buy_usd", "sell_usd"] : ["inflow_usd", "outflow_usd"];
+            ? ["inflow_usd", "outflow_usd", "transfer_usd", "buy_usd", "sell_usd"]
+            : tradeOnly ? ["buy_usd", "sell_usd"]
+                : ["inflow_usd", "outflow_usd", "transfer_usd"];
         const labels = {
             inflow_usd: t("screener.legend_inflow"), outflow_usd: t("screener.legend_outflow"),
             buy_usd: t("screener.legend_buy"), sell_usd: t("screener.legend_sell"),
+            transfer_usd: t("screener.legend_transfer"),
         };
         const legend = $("chart-legend");
         legend.replaceChildren();
@@ -226,58 +262,105 @@
             item.append(swatch, document.createTextNode(labels[key]));
             legend.append(item);
         });
+        if (selected === "ALL") {
+            NETWORKS.forEach((net, index) => {
+                const item = make("span", "legend-item network-legend-item");
+                const swatch = make("i", "legend-swatch");
+                swatch.style.background = SERIES_COLORS.inflow_usd;
+                swatch.style.opacity = String(networkOpacity(index));
+                item.append(swatch, document.createTextNode(networkName(net.id)));
+                legend.append(item);
+            });
+        }
         setText("flow-title", t(tradeOnly ? "screener.trade_chart_title" : "screener.flow_title"));
         chart.setAttribute("aria-label", t(tradeOnly ? "screener.trade_chart_aria" : "screener.flow_chart_aria"));
 
-        const points = (data.series || []).map(point => ({
-            timestamp: Number(point.timestamp), values: seriesFor(point, selected),
-        }));
-        const values = points.flatMap(point => keys.map(key => Number(point.values[key] || 0)));
-        const maxValue = Math.max(0, ...values);
+        const points = chartPoints(data.series || []);
+        const stackChains = selected === "ALL" ? NETWORKS.map(net => net.id) : [selected];
+        const maxValue = Math.max(0, ...points.flatMap(point => keys.map(key =>
+            stackChains.reduce((sum, chain) => sum + Number((point.networks[chain] || {})[key] || 0), 0))));
         const chartEmpty = $("chart-empty");
-        const hasData = maxValue > 0;
-        chartEmpty.hidden = hasData;
+        chartEmpty.hidden = maxValue > 0;
 
-        const W = 960, H = 288, left = 54, right = 10, top = 10, bottom = 30;
+        const W = 960, H = 288, left = 58, right = 10, top = 28, bottom = 32;
         const plotW = W - left - right, plotH = H - top - bottom;
-        const scaleMax = maxValue > 0 ? maxValue * 1.18 : 1;
+        const scaleMax = maxValue > 0 ? maxValue * 1.2 : 1;
         for (let i = 0; i <= 4; i++) {
             const y = top + plotH * (i / 4);
             chart.append(svgNode("line", {x1: left, y1: y, x2: W - right, y2: y, class: "chart-grid-line"}));
             const val = scaleMax * (1 - i / 4);
             chart.append(svgNode("text", {x: left - 8, y: y + 3, "text-anchor": "end", class: "chart-axis-label"}, fmtUSD(val, true)));
         }
+        const topExchanges = ((data.top_exchanges || {})[selected === "ALL" ? "ALL" : selected] || []).slice(0, 3);
+        const topLabel = topExchanges.length ? topExchanges.map(row =>
+            row.name + " " + fmtUSD(row.volume_usd, true)).join(" · ") : t("screener.no_top_exchanges");
         const groupW = plotW / Math.max(points.length, 1);
-        const seriesCount = keys.length;
-        const usable = groupW * (seriesCount === 4 ? .76 : .58);
-        const barW = Math.max(2, usable / seriesCount);
+        const usable = groupW * (keys.length >= 5 ? .94 : .82);
+        const barW = usable / keys.length;
         points.forEach((point, i) => {
             const xStart = left + i * groupW + (groupW - usable) / 2;
             keys.forEach((key, j) => {
-                const value = Number(point.values[key] || 0);
-                const height = value > 0 ? Math.max(1, (value / scaleMax) * plotH) : 0;
-                const rect = svgNode("rect", {
-                    x: xStart + j * barW + (seriesCount === 4 ? 1 : 2),
-                    y: top + plotH - height,
-                    width: Math.max(1, barW - (seriesCount === 4 ? 2 : 4)),
-                    height,
-                    fill: SERIES_COLORS[key],
-                    class: "chart-bar",
-                    rx: 2,
+                let yBottom = top + plotH;
+                let total = 0;
+                const assetTotals = {};
+                stackChains.forEach((chain, chainIndex) => {
+                    const cell = point.networks[chain] || {};
+                    const value = Number(cell[key] || 0);
+                    if (!(value > 0)) return;
+                    total += value;
+                    const assetKey = key.replace("_usd", "_assets");
+                    Object.entries(cell[assetKey] || {}).forEach(([symbol, amount]) => {
+                        assetTotals[symbol] = Number(assetTotals[symbol] || 0) + Number(amount || 0);
+                    });
+                    const height = Math.max(1, value / scaleMax * plotH);
+                    yBottom -= height;
+                    const x = xStart + j * barW + 1;
+                    const rect = svgNode("rect", {
+                        x, y: yBottom, width: Math.max(2, barW - 2), height,
+                        fill: SERIES_COLORS[key], opacity: networkOpacity(chainIndex),
+                        stroke: "#0b1020", "stroke-width": 1, class: "chart-bar", rx: 2,
+                    });
+                    const daily = selected === "ALL" ? (data.networks || {})[chain] || {}
+                        : (data.networks || {})[selected] || {};
+                    const tooltip = [
+                        timeLabel(point.timestamp, {hour: "2-digit", minute: "2-digit"}) + "–" +
+                            timeLabel(point.end, {hour: "2-digit", minute: "2-digit"}),
+                        networkName(chain) + " · " + labels[key] + ": " + fmtUSD(value),
+                        t("screener.tooltip_tokens") + ": " + compactAssets(cell[assetKey]),
+                        t("screener.tooltip_24h") + ": " + fmtUSD(daily[key] || 0),
+                        t("screener.tooltip_top3") + ": " + topLabel,
+                    ].join("\n");
+                    rect.append(svgNode("title", {}, tooltip));
+                    chart.append(rect);
                 });
-                const title = svgNode("title", {}, timeLabel(point.timestamp, {hour: "2-digit", minute: "2-digit"}) +
-                    " · " + labels[key] + " · " + fmtUSD(value));
-                rect.append(title);
-                chart.append(rect);
+                const stackHeight = total / scaleMax * plotH;
+                const labelX = xStart + j * barW + barW / 2;
+                if (total > 0 && stackHeight >= 22 && barW >= 7) {
+                    const label = svgNode("text", {
+                        x: labelX, y: Math.max(9, yBottom - 3),
+                        "text-anchor": "middle", class: "chart-value-label",
+                    }, fmtUSD(total, true));
+                    label.append(svgNode("title", {}, compactAssets(assetTotals)));
+                    chart.append(label);
+                }
+                if (selected !== "ALL" && total > 0 && stackHeight >= 36 && barW >= 20) {
+                    const primary = Object.entries(assetTotals)
+                        .sort((a, b) => Number(b[1]) - Number(a[1]))[0];
+                    if (primary) {
+                        const assetLabel = svgNode("text", {
+                            x: labelX, y: Math.min(H - bottom - 3, yBottom + 13),
+                            "text-anchor": "middle", class: "chart-asset-label",
+                        }, compactAssetValue(primary[1]) + " " + primary[0]);
+                        assetLabel.append(svgNode("title", {}, compactAssets(assetTotals)));
+                        chart.append(assetLabel);
+                    }
+                }
             });
-            if (i % 6 === 0 || i === points.length - 1) {
-                const text = timeLabel(point.timestamp, {hour: "2-digit", minute: "2-digit"});
+            if (i % 3 === 0 || i === points.length - 1) {
                 chart.append(svgNode("text", {
-                    x: left + i * groupW + groupW / 2,
-                    y: H - 8,
-                    "text-anchor": "middle",
-                    class: "chart-axis-label",
-                }, text));
+                    x: left + i * groupW + groupW / 2, y: H - 8,
+                    "text-anchor": "middle", class: "chart-axis-label",
+                }, timeLabel(point.timestamp, {hour: "2-digit", minute: "2-digit"})));
             }
         });
     }
@@ -360,10 +443,14 @@
         const item = make("article", "event-row" + (isNew ? " is-new" : ""));
         const net = NETWORKS.find(entry => entry.id === row.chain);
         const network = make("div", "event-network");
-        network.append(make("span", "chain-mark", net ? net.mark : "•"));
+        network.append(make("span", "chain-mark chain-mark--" + String(row.chain || "unknown").toLowerCase(),
+                            net ? net.mark : "•"));
         const networkNameBlock = make("div", "event-network-copy");
         networkNameBlock.append(make("div", "event-chain-name", networkName(row.chain)));
-        networkNameBlock.append(make("div", "event-time", timeLabel(row.timestamp)));
+        const sourceMarker = row.source === "historical" ? "🕒" : "⚡";
+        const eventTime = make("div", "event-time", timeLabel(row.timestamp) + "  " + sourceMarker);
+        eventTime.title = row.source === "historical" ? t("screener.source_history") : t("screener.source_realtime");
+        networkNameBlock.append(eventTime);
         network.append(networkNameBlock);
 
         const direction = make("span", "direction-badge event-direction " + directionClass(row));
@@ -400,11 +487,24 @@
     }
     function renderLive(newKeys = new Set()) {
         const target = $("screener-events"), empty = $("feed-empty");
+        if (!target || !empty) return;
         const filtered = applyFilters(state.liveRows);
         target.replaceChildren();
         filtered.slice(0, 50).forEach(row => target.append(makeEventRow(row, newKeys.has(rowKey(row)))));
         empty.hidden = filtered.length > 0;
         setText("feed-count", t("screener.events_count", {count: fmtNumber(filtered.length)}));
+    }
+    function renderHyperliquid(newKeys = new Set()) {
+        const target = $("hl-screener-events"), empty = $("hl-feed-empty");
+        if (!target || !empty) return;
+        const min = Number($("hl-min").value || 50000);
+        const side = String($("hl-direction").value || "ALL").toUpperCase();
+        const rows = state.hlRows.filter(row => Number(row.usd || 0) >= min &&
+            (side === "ALL" || String(row.side || "").toUpperCase() === side));
+        target.replaceChildren();
+        rows.slice(0, 50).forEach(row => target.append(makeEventRow(row, newKeys.has(rowKey(row)))));
+        empty.hidden = rows.length > 0;
+        setText("hl-feed-count", t("screener.events_count", {count: fmtNumber(rows.length)}));
     }
     function rowKey(row) { return [row.chain, row.hash, row.log_index].join(":"); }
     function addQueryFilters(params) {
@@ -413,24 +513,39 @@
         return params;
     }
     async function fetchLive() {
-        const params = new URLSearchParams({chain: state.selectedChain, min_usd: "0", limit: "100"});
-        try {
-            const response = await fetch("/api/screener/whales?" + params, {credentials: "same-origin", cache: "no-store"});
-            if (response.status === 401) return goToLogin();
+        const requestRows = async chain => {
+            const params = new URLSearchParams({chain, min_usd: "0", limit: "100"});
+            const response = await fetch("/api/screener/whales?" + params,
+                {credentials: "same-origin", cache: "no-store"});
+            if (response.status === 401) throw new Error("HTTP 401");
             if (!response.ok) throw new Error("HTTP " + response.status);
-            const payload = await response.json();
-            const newKeys = new Set();
-            const rows = Array.isArray(payload.events) ? payload.events : [];
+            return response.json();
+        };
+        try {
+            const [general, hyperliquid] = await Promise.all([
+                requestRows("GENERAL"), requestRows("HYPERLIQUID"),
+            ]);
+            const rows = Array.isArray(general.events) ? general.events : [];
+            const hlRows = Array.isArray(hyperliquid.events) ? hyperliquid.events : [];
+            const newKeys = new Set(), newHLKeys = new Set();
             rows.forEach(row => {
                 const key = rowKey(row);
                 if (state.initializedLive && !state.seenLive.has(key)) newKeys.add(key);
                 state.seenLive.add(key);
             });
+            hlRows.forEach(row => {
+                const key = rowKey(row);
+                if (state.initializedHL && !state.seenHL.has(key)) newHLKeys.add(key);
+                state.seenHL.add(key);
+            });
             while (state.seenLive.size > 1200) state.seenLive.delete(state.seenLive.values().next().value);
+            while (state.seenHL.size > 1200) state.seenHL.delete(state.seenHL.values().next().value);
             state.liveRows = rows;
-            state.initializedLive = true;
+            state.hlRows = hlRows;
+            state.initializedLive = state.initializedHL = true;
             $("feed-error").hidden = true;
             renderLive(newKeys);
+            renderHyperliquid(newHLKeys);
         } catch (error) {
             if (error && error.message === "HTTP 401") return goToLogin();
             $("feed-error").hidden = false;
@@ -445,6 +560,7 @@
             state.stats = await response.json();
             renderOverview();
             renderLive();
+            renderHyperliquid();
         } catch (_) {
             setText("screener-live-label", t("screener.load_error"));
             const badge = $("screener-live-status");
@@ -457,7 +573,10 @@
     }
     function makeHistoryRow(row) {
         const tr = document.createElement("tr");
-        tr.append(makeTableCell(timeLabel(row.timestamp), "table-time"));
+        const marker = row.source === "historical" ? "🕒" : "⚡";
+        const time = makeTableCell(timeLabel(row.timestamp) + " " + marker, "table-time");
+        time.title = row.source === "historical" ? t("screener.source_history") : t("screener.source_realtime");
+        tr.append(time);
         tr.append(makeTableCell(networkName(row.chain), "table-network"));
         const directionCell = makeTableCell("");
         const dir = make("span", "direction-badge " + directionClass(row), directionLabel(row, true));
@@ -542,6 +661,7 @@
     function bind() {
         getChainOptions();
         ["whale-min", "whale-direction", "whale-exchange"].forEach(id => $(id).addEventListener("change", onFilterChanged));
+        ["hl-min", "hl-direction"].forEach(id => $(id).addEventListener("change", () => renderHyperliquid()));
         $("whale-chain").addEventListener("change", () => selectChain($("whale-chain").value));
         $("history-prev").addEventListener("click", () => {
             if (state.historyPage > 1) { state.historyPage -= 1; fetchHistory(); }
@@ -562,6 +682,7 @@
                 getChainOptions();
                 renderOverview();
                 renderLive();
+                renderHyperliquid();
                 fetchHistory();
             });
         }

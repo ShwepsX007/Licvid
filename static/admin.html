@@ -33,7 +33,7 @@
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="stylesheet" href="/static/account.css?v=rebrand1">
     <link rel="stylesheet" href="/static/ui_compact.css?v=1">
-    <link rel="stylesheet" href="/static/whale_admin.css?v=dashboard1">
+    <link rel="stylesheet" href="/static/whale_admin.css?v=multichain3">
 </head>
 <body data-page="admin">
 <header class="site-header">
@@ -191,10 +191,10 @@
         <p class="meta" id="layers-enabled-note" style="font-style:italic"></p>
     </div>
 
-<div class="card" id="whale-admin-card" style="margin-top:14px" data-hint="Alchemy API management" hidden>
-    <h3 data-i18n="adm.alchemy_title">🐋 Whale Screener · Alchemy API</h3>
+<div class="card" id="whale-admin-card" style="margin-top:14px" data-hint="Multichain whale screener management" hidden>
+    <h3 data-i18n="adm.alchemy_title">🐋 Whale Screener · Multichain</h3>
     <p><a class="btn btn-primary btn-compact" href="/screener" data-i18n="adm.alchemy_open">Open Whale Screener →</a></p>
-    <p class="meta" data-i18n="adm.alchemy_lead">Manage encrypted Alchemy keys, monitor request units and network health. Secrets are never returned to the browser.</p>
+    <p class="meta" data-i18n="adm.alchemy_lead">Manage encrypted provider keys, CU usage, wallet labels and network health. Secrets are never returned to the browser.</p>
     <div class="whale-admin-overview" aria-live="polite">
         <div class="whale-admin-stat"><span data-i18n="adm.alchemy_key_count">Configured keys</span><strong id="whale-admin-summary">—</strong></div>
         <div class="whale-admin-stat whale-admin-cu-stat">
@@ -213,17 +213,66 @@
         <span id="whale-admin-key-status" class="meta" role="status"></span>
     </div>
     <div id="whale-admin-keys" class="whale-admin-keys" aria-live="polite"></div>
+    <h4 class="whale-admin-subtitle" data-i18n="adm.trongrid_title">TronGrid API key · optional</h4>
+    <p class="meta" data-i18n="adm.trongrid_note">TRON monitoring works without a key, but a TronGrid key raises the rate limit. The value is encrypted at rest.</p>
+    <div class="row-actions" style="flex-wrap:wrap;gap:10px">
+        <label><span data-i18n="adm.trongrid_key_label">TRONGRID_API_KEY</span>
+            <input class="search" type="password" autocomplete="new-password" id="trongrid-admin-key" maxlength="500"></label>
+        <button class="btn btn-primary" type="button" id="trongrid-admin-add-key" data-i18n="adm.trongrid_add">Save TronGrid key</button>
+        <span id="trongrid-admin-key-status" class="meta" role="status"></span>
+    </div>
+    <div id="trongrid-admin-keys" class="whale-admin-keys" aria-live="polite"></div>
     <h4 class="whale-admin-subtitle" data-i18n="adm.alchemy_networks_title">Network health</h4>
     <div id="whale-admin-chains" class="whale-admin-networks" aria-live="polite"></div>
     <div class="row-actions whale-admin-settings" style="flex-wrap:wrap;gap:10px">
         <label><span data-i18n="adm.alchemy_mode">Mode</span>
-            <select id="whale-admin-mode" class="search"><option value="cex_only" data-i18n="adm.alchemy_cex_only">Known exchanges</option><option value="all" disabled data-i18n="adm.alchemy_all_mode">All transfers (not available)</option></select></label>
-        <label><span data-i18n="adm.alchemy_interval">Poll interval, minutes</span>
-            <input type="number" class="search" id="whale-admin-interval" min="10" max="1440" value="60"></label>
+            <select id="whale-admin-mode" class="search">
+                <option value="realtime" data-i18n="adm.whale_realtime">Realtime</option>
+                <option value="economy" data-i18n="adm.whale_economy">Economy</option>
+            </select></label>
+        <label><span data-i18n="adm.alchemy_interval">Historical poll interval, minutes</span>
+            <select class="search" id="whale-admin-interval">
+                <option value="5">5</option><option value="10">10</option><option value="15">15</option>
+                <option value="30">30</option><option value="60">60</option>
+            </select></label>
         <label><span data-i18n="adm.alchemy_budget">Monthly budget, CU</span>
             <input type="number" class="search" id="whale-admin-budget" min="1000" max="20000000" value="10000000"></label>
         <button type="button" class="btn btn-primary" id="whale-admin-save" data-i18n="adm.alchemy_save">Save</button>
         <span class="meta" id="whale-admin-status" role="status"></span>
+    </div>
+    <h4 class="whale-admin-subtitle" data-i18n="adm.cex_wallets_title">CEX wallet database</h4>
+    <p class="meta" data-i18n="adm.cex_wallets_note">Automatic DeFiLlama labels are refreshed daily. Manual records are retained across refreshes.</p>
+    <div class="row-actions whale-admin-wallet-toolbar" style="flex-wrap:wrap;gap:10px">
+        <span id="whale-admin-wallet-summary" class="meta">—</span>
+        <label><span data-i18n="adm.cex_wallet_chain">Network</span>
+            <select id="whale-admin-wallet-chain" class="search">
+                <option value="ALL">All</option><option value="ETH">Ethereum</option>
+                <option value="BNB">BNB</option><option value="POLYGON">Polygon</option>
+                <option value="ARBITRUM">Arbitrum</option><option value="BASE">Base</option>
+                <option value="SOLANA">Solana</option><option value="TRON">TRON</option>
+            </select></label>
+        <label><span data-i18n="adm.cex_wallet_search">Exchange filter</span>
+            <input id="whale-admin-wallet-search" class="search" maxlength="100"></label>
+        <button class="btn btn-primary" type="button" id="whale-admin-wallet-refresh" data-i18n="adm.cex_wallet_refresh">↻ Refresh from DeFiLlama</button>
+        <span id="whale-admin-wallet-status" class="meta" role="status"></span>
+    </div>
+    <div class="row-actions whale-admin-wallet-add" style="flex-wrap:wrap;gap:10px">
+        <label><span data-i18n="adm.cex_wallet_name">Exchange label</span><input id="whale-admin-wallet-name" class="search" maxlength="100"></label>
+        <label><span data-i18n="adm.cex_wallet_address">Wallet address</span><input id="whale-admin-wallet-address" class="search" maxlength="100" autocomplete="off"></label>
+        <label><span data-i18n="adm.cex_wallet_chain">Network</span>
+            <select id="whale-admin-wallet-add-chain" class="search">
+                <option value="ETH">Ethereum</option><option value="BNB">BNB</option>
+                <option value="POLYGON">Polygon</option><option value="ARBITRUM">Arbitrum</option>
+                <option value="BASE">Base</option><option value="SOLANA">Solana</option><option value="TRON">TRON</option>
+            </select></label>
+        <button class="btn btn-primary" type="button" id="whale-admin-wallet-add" data-i18n="adm.cex_wallet_add">Add manual address</button>
+        <button class="btn btn-ghost" type="button" id="whale-admin-wallet-cancel" data-i18n="adm.cex_wallet_cancel" hidden>Cancel edit</button>
+    </div>
+    <div class="whale-admin-wallet-table-scroll">
+        <table class="whale-admin-wallet-table"><thead><tr>
+            <th data-i18n="adm.cex_wallet_chain">Network</th><th data-i18n="adm.cex_wallet_name">Exchange label</th>
+            <th data-i18n="adm.cex_wallet_address">Wallet address</th><th data-i18n="adm.cex_wallet_source">Source</th><th></th>
+        </tr></thead><tbody id="whale-admin-wallet-rows"></tbody></table>
     </div>
 </div>
 
@@ -633,7 +682,7 @@
         <div id="ai-prompt-blocks"><p class="meta">загружаю промты…</p></div>
     </div>
 </main>
-<script src="/static/i18n.pages.js?v=screener1"></script>
+<script src="/static/i18n.pages.js?v=multichain3"></script>
 <script src="/static/i18n.js?v=quota2"></script>
 <script src="/static/world-map.js?v=geo1"></script>
 <script src="/static/geo_map.js?v=geo2"></script>
@@ -642,7 +691,7 @@
 <script src="/static/articles_admin.js?v=art1"></script>
 <script src="/static/archive_admin.js?v=arcdel1"></script>
 <script src="/static/consent.js?v=consent1"></script>
-<script src="/static/whale_admin.js?v=dashboard1"></script>
+<script src="/static/whale_admin.js?v=multichain3"></script>
 <link rel="stylesheet" href="/static/brand.css?v=rebrand1">
 </body>
 </html>

@@ -9,7 +9,7 @@
 <title data-i18n="screener.title">Whale Screener — LiqScope</title>
 <link rel="icon" href="/static/favicon.ico">
 <link rel="stylesheet" href="/static/brand.css?v=rebrand1">
-<link rel="stylesheet" href="/static/screener.css?v=dashboard1">
+<link rel="stylesheet" href="/static/screener.css?v=multichain3">
 </head>
 <body class="dark-theme screener-page">
 <header class="site-header">
@@ -56,7 +56,7 @@
         <article class="overview-card">
             <span class="overview-label" data-i18n="screener.active_networks">Online networks</span>
             <strong id="overview-online" class="overview-value">—</strong>
-            <span class="overview-foot" data-i18n="screener.six_networks">Six monitored networks</span>
+            <span class="overview-foot" data-i18n="screener.eight_networks">Eight monitored networks</span>
         </article>
     </section>
 
@@ -108,30 +108,63 @@
             </div>
             <span class="live-pill"><span class="live-dot" aria-hidden="true"></span><span data-i18n="screener.live">LIVE</span></span>
         </div>
-        <div class="filter-bar" aria-label="Feed filters">
-            <label><span data-i18n="screener.filter_amount">Minimum amount</span>
-                <select id="whale-min">
-                    <option value="50000">$50K+</option>
-                    <option value="100000" selected>$100K+</option>
-                    <option value="500000">$500K+</option>
-                    <option value="1000000">$1M+</option>
-                </select>
-            </label>
-            <label><span data-i18n="screener.filter_network">Network</span><select id="whale-chain"></select></label>
-            <label><span data-i18n="screener.filter_direction">Direction</span>
-                <select id="whale-direction">
-                    <option value="ALL" data-i18n="screener.direction_all">All directions</option>
-                    <option value="inflow" data-i18n="screener.direction_inflow">Exchange inflow</option>
-                    <option value="outflow" data-i18n="screener.direction_outflow">Exchange outflow</option>
-                    <option value="trade" data-i18n="screener.direction_trade">Trade</option>
-                </select>
-            </label>
-            <label><span data-i18n="screener.filter_exchange">Exchange</span><select id="whale-exchange"></select></label>
-            <span id="feed-count" class="filter-count"></span>
+        <div class="dual-feed-grid">
+            <article class="feed-column" aria-labelledby="general-feed-title">
+                <div class="feed-column-heading">
+                    <h3 id="general-feed-title" data-i18n="screener.general_feed_title">EVM · Solana · Tron</h3>
+                    <span id="feed-count" class="filter-count"></span>
+                </div>
+                <div class="filter-bar" aria-label="General feed filters">
+                    <label><span data-i18n="screener.filter_amount">Minimum amount</span>
+                        <select id="whale-min">
+                            <option value="50000">$50K+</option>
+                            <option value="100000" selected>$100K+</option>
+                            <option value="500000">$500K+</option>
+                            <option value="1000000">$1M+</option>
+                        </select>
+                    </label>
+                    <label><span data-i18n="screener.filter_network">Network</span><select id="whale-chain"></select></label>
+                    <label><span data-i18n="screener.filter_direction">Direction</span>
+                        <select id="whale-direction">
+                            <option value="ALL" data-i18n="screener.direction_all">All directions</option>
+                            <option value="inflow" data-i18n="screener.direction_inflow">Exchange inflow</option>
+                            <option value="outflow" data-i18n="screener.direction_outflow">Exchange outflow</option>
+                            <option value="trade" data-i18n="screener.direction_trade">Trade</option>
+                            <option value="transfer" data-i18n="screener.direction_transfer">Transfer</option>
+                        </select>
+                    </label>
+                    <label><span data-i18n="screener.filter_exchange">Exchange</span><select id="whale-exchange"></select></label>
+                </div>
+                <div id="screener-events" class="event-list" aria-live="polite"></div>
+                <div id="feed-empty" class="empty-state" hidden data-i18n="screener.feed_empty">No events match these filters.</div>
+                <div id="feed-error" class="inline-error" role="status" hidden></div>
+            </article>
+            <article class="feed-column feed-column--hl" aria-labelledby="hl-feed-title">
+                <div class="feed-column-heading">
+                    <h3 id="hl-feed-title" data-i18n="screener.hyperliquid_feed_title">Hyperliquid · Native API</h3>
+                    <span id="hl-feed-count" class="filter-count"></span>
+                </div>
+                <div class="filter-bar filter-bar--hl" aria-label="Hyperliquid feed filters">
+                    <label><span data-i18n="screener.filter_amount">Minimum amount</span>
+                        <select id="hl-min">
+                            <option value="50000">$50K+</option>
+                            <option value="100000" selected>$100K+</option>
+                            <option value="500000">$500K+</option>
+                            <option value="1000000">$1M+</option>
+                        </select>
+                    </label>
+                    <label><span data-i18n="screener.filter_direction">Direction</span>
+                        <select id="hl-direction">
+                            <option value="ALL" data-i18n="screener.direction_all">All directions</option>
+                            <option value="BUY" data-i18n="screener.hl_buy">Buy</option>
+                            <option value="SELL" data-i18n="screener.hl_sell">Sell</option>
+                        </select>
+                    </label>
+                </div>
+                <div id="hl-screener-events" class="event-list" aria-live="polite"></div>
+                <div id="hl-feed-empty" class="empty-state" hidden data-i18n="screener.hl_feed_empty">No Hyperliquid trades match these filters.</div>
+            </article>
         </div>
-        <div id="screener-events" class="event-list" aria-live="polite"></div>
-        <div id="feed-empty" class="empty-state" hidden data-i18n="screener.feed_empty">No events match these filters.</div>
-        <div id="feed-error" class="inline-error" role="status" hidden></div>
     </section>
 
     <section class="panel history-panel" aria-labelledby="history-title">
@@ -170,9 +203,9 @@
     </section>
 </main>
 
-<script src="/static/i18n.pages.js?v=screener1" defer></script>
+<script src="/static/i18n.pages.js?v=multichain3" defer></script>
 <script src="/static/i18n.js?v=screener1" defer></script>
 <script src="/static/account.js?v=nav5" defer></script>
-<script src="/static/screener.js?v=dashboard1" defer></script>
+<script src="/static/screener.js?v=multichain3" defer></script>
 </body>
 </html>

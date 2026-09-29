@@ -78,11 +78,13 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             state = Path(tmp) / "state.json"
             screener = WhaleScreener("fake", lambda _: None, broadcast)
+            screener.wallets_by_chain = {"BASE": {wallet: "Exchange"}}
             screener.wallets = {wallet: "Exchange"}
+            screener._registry_wallet_keys = set()
             poller = WhalePoller("fake", screener, state_file=state,
                                  endpoints={"BASE": f"http://127.0.0.1:{port}/rpc"},
                                  monthly_cu=1000)
-            self.assertEqual(poller.status()["native_supported"], ["HYPERLIQUID"])
+            self.assertEqual(poller.status()["native_supported"], ["HYPERLIQUID", "SOLANA", "TRON"])
             async with ClientSession() as session:
                 try:
                     await poller.poll_chain(session, "BASE")
@@ -100,10 +102,10 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
                         block_range = req["params"][0]
                         self.assertEqual(block_range["fromBlock"], "0x5")
                         self.assertEqual(block_range["toBlock"], "0x5")
-                    self.assertEqual(poller.state["cu"], 10+10+240+120)
+                    self.assertEqual(poller.state["cu"], 10 + 10 + 240 + 120 + 240)
                     restored = WhalePoller("fake", screener, state_file=state,
-                                           endpoints=poller.endpoints, monthly_cu=380)
-                    self.assertEqual(restored.state["cu"], 380)
+                                           endpoints=poller.endpoints, monthly_cu=620)
+                    self.assertEqual(restored.state["cu"], 620)
                     with self.assertRaises(BudgetExhausted):
                         restored._reserve("eth_blockNumber")
                     self.assertEqual(restored.state["cursors"]["BASE"], 5)
@@ -148,7 +150,9 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
                 port = site._server.sockets[0].getsockname()[1]
                 state_file = Path(tmp) / "cursor.json"
                 screener = WhaleScreener("fake", lambda _: None, lambda _: None)
+                screener.wallets_by_chain = {"BASE": {wallet: "Exchange"}}
                 screener.wallets = {wallet: "Exchange"}
+                screener._registry_wallet_keys = set()
                 poller = WhalePoller("fake", screener, state_file=state_file,
                                      endpoints={"BASE": f"http://127.0.0.1:{port}/rpc"},
                                      monthly_cu=1000)

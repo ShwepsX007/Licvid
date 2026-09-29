@@ -24,6 +24,8 @@ from urllib.parse import urlsplit
 
 import aiohttp
 
+from cex_wallets_updater import CEXWalletRegistry, EVM_CHAINS, SUPPORTED_CHAINS
+
 log = logging.getLogger(__name__)
 
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
@@ -73,9 +75,18 @@ TOKENS = {
     },
 }
 
-# EVM token contracts live only in TOKENS. Hyperliquid is a native trade feed,
-# but still needs its own bounded dedup bucket alongside the EVM networks.
-TRACKED_NETWORKS = (*TOKENS, "HYPERLIQUID")
+# Native-chain tokens are keyed by their verified mainnet mint/contract.
+SOLANA_TOKENS = {
+    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB": ("USDT", 6),
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": ("USDC", 6),
+}
+TRON_TOKENS = {
+    "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t": ("USDT", 6),
+    "TEkxiTehnzSmSe2XqrBj4w32RUN966rdz8": ("USDC", 6),
+}
+# Hyperliquid remains a native trade feed, with its existing API and dedup
+# bucket kept independent from Alchemy. SOLANA and TRON are native providers too.
+TRACKED_NETWORKS = (*TOKENS, "SOLANA", "TRON", "HYPERLIQUID")
 
 
 def alchemy_key(value: str) -> str:
@@ -103,16 +114,12 @@ def alchemy_key(value: str) -> str:
 
 
 def load_wallets(path: Path) -> dict[str, str]:
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(raw, dict):
-        raise ValueError("cex_wallets.json must be an address-to-label object")
+    """Return the legacy flattened EVM map while accepting the v2 registry."""
+    registry = CEXWalletRegistry(path)
     wallets = {}
-    for addr, label in raw.items():
-        if not isinstance(addr, str) or not ADDRESS.fullmatch(addr.lower()):
-            raise ValueError("Invalid CEX address")
-        if not isinstance(label, str) or not label.strip():
-            raise ValueError("Invalid CEX label")
-        wallets[addr.lower()] = label.strip()
+    for chain, rows in registry.runtime_wallets().items():
+        if chain in EVM_CHAINS:
+            wallets.update({address.lower(): label for address, label in rows.items()})
     return wallets
 
 
@@ -220,8 +227,15 @@ class WhaleHistoryStore:
             terms.append("timestamp <= ?")
             params.append(float(until))
         if chain and chain.upper() != "ALL":
-            terms.append("chain = ?")
-            params.append(chain.upper())
+            if chain.upper() in ("EVM", "GENERAL"):
+                chains = sorted(EVM_CHAINS if chain.upper() == "EVM"
+                                else set(SUPPORTED_CHAINS))
+                placeholders = ",".join("?" for _ in chains)
+                terms.append(f"chain IN ({placeholders})")
+                params.extend(chains)
+            else:
+                terms.append("chain = ?")
+                params.append(chain.upper())
         if min_usd > 0:
             terms.append("usd >= ?")
             params.append(float(min_usd))
@@ -288,7 +302,13 @@ class WhaleScreener:
                  history_path: Path | str | None = None):
         self.price_fn = price_fn
         self.broadcast = broadcast
-        self.wallets = load_wallets(wallet_path or Path(__file__).resolve().parent / "data/cex_wallets.json")
+        self.wallet_path = wallet_path or Path(__file__).resolve().parent / "data/cex_wallets.json"
+        self.wallet_registry = CEXWalletRegistry(self.wallet_path)
+        self.wallets_by_chain = self.wallet_registry.runtime_wallets()
+        self.wallets = {address.lower(): label
+                        for chain in EVM_CHAINS
+                        for address, label in self.wallets_by_chain.get(chain, {}).items()}
+        self._registry_wallet_keys = set(self.wallets)
         self.min_usd = min_usd
         self.history_store = WhaleHistoryStore(history_path) if history_path else None
         self.events: deque[dict] = deque(maxlen=100)
@@ -326,11 +346,49 @@ class WhaleScreener:
             "reconnects": 0, "error": "",
         }
 
+    def reload_wallets(self) -> None:
+        """Reload the shared wallet file after an admin or scheduled update."""
+        self.wallet_registry = CEXWalletRegistry(self.wallet_path)
+        self.wallets_by_chain = self.wallet_registry.runtime_wallets()
+        self.wallets = {address.lower(): label
+                        for chain in EVM_CHAINS
+                        for address, label in self.wallets_by_chain.get(chain, {}).items()}
+        self._registry_wallet_keys = set(self.wallets)
+
+    def wallet_addresses(self, chain: str) -> dict[str, str]:
+        chain = str(chain).upper()
+        rows = self.wallets_by_chain.get(chain, {})
+        result = ({address.lower(): label for address, label in rows.items()}
+                  if chain in EVM_CHAINS else dict(rows))
+        if chain in EVM_CHAINS:
+            # Keep older integrations which mutate ``wallets`` in memory
+            # working, but don't leak registry addresses across EVM chains.
+            for address, label in self.wallets.items():
+                if address not in self._registry_wallet_keys:
+                    result[address.lower()] = label
+        return result
+
+    def wallet_label(self, chain: str, address: str) -> str:
+        address = str(address or "")
+        if chain in EVM_CHAINS:
+            address = address.lower()
+        label = self.wallets_by_chain.get(str(chain).upper(), {}).get(address)
+        if label:
+            return label
+        # Compatibility for callers/tests that explicitly inject in-memory
+        # wallet labels; persisted v2 rows remain strictly chain scoped.
+        if chain in EVM_CHAINS and address not in self._registry_wallet_keys:
+            return self.wallets.get(address, "")
+        return ""
+
     def history(self, min_usd: float = 100_000, chain: str = "ALL", limit: int = 50,
                 since: float | None = None) -> list[dict]:
         return [ev.copy() for ev in reversed(self.events)
                 if float(ev.get("usd") or 0) >= min_usd
-                and (chain == "ALL" or ev.get("chain") == chain)
+                and (chain == "ALL" or
+                     (chain == "EVM" and ev.get("chain") in EVM_CHAINS) or
+                     (chain == "GENERAL" and ev.get("chain") in SUPPORTED_CHAINS) or
+                     ev.get("chain") == chain)
                 and (since is None or float(ev.get("timestamp") or 0) >= since)][:limit]
 
     def events_since(self, since: float, until: float | None = None) -> list[dict]:
@@ -357,7 +415,10 @@ class WhaleScreener:
         rows = [ev.copy() for ev in self.events
                 if float(ev.get("timestamp") or 0) >= since
                 and (until is None or float(ev.get("timestamp") or 0) <= until)
-                and (chain == "ALL" or ev.get("chain") == chain)
+                and (chain == "ALL" or
+                     (chain == "EVM" and ev.get("chain") in EVM_CHAINS) or
+                     (chain == "GENERAL" and ev.get("chain") in SUPPORTED_CHAINS) or
+                     ev.get("chain") == chain)
                 and float(ev.get("usd") or 0) >= min_usd
                 and (direction == "ALL" or str(ev.get("direction") or "").lower() == direction.lower())
                 and (exchange == "ALL" or
@@ -391,7 +452,9 @@ class WhaleScreener:
                 return 1.0
             price = self.price_fn(pair)
             return float(price) if price and math.isfinite(float(price)) and float(price) > 0 else 1.0
-        pair = ("BTC" if symbol in ("BTCB", "WBTC") else symbol) + "_USDT"
+        price_symbol = {"BTCB": "BTC", "WBTC": "BTC", "POLYGON": "POL",
+                        "MATIC": "POL"}.get(symbol, symbol)
+        pair = price_symbol + "_USDT"
         price = self.price_fn(pair)
         if price is None:
             return None
@@ -409,6 +472,9 @@ class WhaleScreener:
         return True
 
     async def _record_event(self, event: dict) -> bool:
+        # Hyperliquid's public trades are live at the source. Keep its native
+        # API logic intact while giving the UI a consistent recency marker.
+        event.setdefault("source", "realtime")
         if self.history_store:
             try:
                 inserted = await asyncio.to_thread(self.history_store.append, event)
@@ -420,8 +486,63 @@ class WhaleScreener:
         self.events.append(event)
         return True
 
+    async def record_transfer(self, chain: str, tx_hash: str, index: str, symbol: str,
+                              amount: float, usd: float, sender: str, recipient: str,
+                              *, timestamp: float | int | None = None,
+                              source: str = "historical") -> bool:
+        """Record a normalized transfer from any supported chain/provider."""
+        chain = str(chain or "").upper()
+        if chain not in TRACKED_NETWORKS or chain == "HYPERLIQUID":
+            return False
+        try:
+            amount, usd = float(amount), float(usd)
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(amount) or amount <= 0 or not math.isfinite(usd) or usd < self.min_usd:
+            return False
+        tx_hash, index = str(tx_hash or ""), str(index or "")
+        if chain in EVM_CHAINS:
+            tx_hash = tx_hash.lower()
+            sender, recipient = str(sender or "").lower(), str(recipient or "").lower()
+            if not HASH.fullmatch(tx_hash):
+                return False
+        elif chain == "TRON":
+            tx_hash = tx_hash.removeprefix("0x").lower()
+            if not re.fullmatch(r"[0-9a-f]{64}", tx_hash):
+                return False
+        elif chain == "SOLANA":
+            if not re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{64,100}", tx_hash):
+                return False
+        if not index:
+            return False
+        key = tx_hash + ":" + index
+        if not self._remember(chain, key):
+            return False
+        from_label = self.wallet_label(chain, sender)
+        to_label = self.wallet_label(chain, recipient)
+        direction = "transfer"
+        if to_label and not from_label:
+            direction = "inflow"
+        elif from_label and not to_label:
+            direction = "outflow"
+        try:
+            event_ts = int(float(timestamp)) if timestamp is not None else int(time.time())
+        except (TypeError, ValueError, OverflowError):
+            event_ts = int(time.time())
+        event = {"chain": chain, "hash": tx_hash, "log_index": index,
+                 "timestamp": event_ts, "symbol": str(symbol or "")[:24],
+                 "amount": amount, "usd": round(usd, 2), "from": str(sender or ""),
+                 "to": str(recipient or ""), "from_label": from_label,
+                 "to_label": to_label, "direction": direction,
+                 "source": source if source in ("realtime", "historical") else "historical"}
+        if not await self._record_event(event):
+            return False
+        await self.broadcast({"type": "whale_tx", **event})
+        return True
+
     async def _emit(self, chain: str, tx_hash: str, index: str, symbol: str,
-                    raw_amount: int, decimals: int, sender: str, recipient: str) -> None:
+                    raw_amount: int, decimals: int, sender: str, recipient: str,
+                    *, source: str = "historical", timestamp: float | int | None = None) -> None:
         if raw_amount <= 0:
             return
         price = self._price(symbol)
@@ -429,28 +550,10 @@ class WhaleScreener:
             return  # never guess the USD value of a volatile asset
         amount = raw_amount / (10 ** decimals)
         usd = amount * price
-        if not math.isfinite(usd) or usd < self.min_usd:
-            return
-        key = tx_hash + ":" + index
-        if not self._remember(chain, key):
-            return
-        from_label = self.wallets.get(sender, "")
-        to_label = self.wallets.get(recipient, "")
-        direction = "transfer"
-        if to_label and not from_label:
-            direction = "inflow"
-        elif from_label and not to_label:
-            direction = "outflow"
-        event = {"chain": chain, "hash": tx_hash, "log_index": index,
-                 "timestamp": int(time.time()), "symbol": symbol,
-                 "amount": amount, "usd": round(usd, 2), "from": sender,
-                 "to": recipient, "from_label": from_label, "to_label": to_label,
-                 "direction": direction}
-        if not await self._record_event(event):
-            return
-        await self.broadcast({"type": "whale_tx", **event})
+        await self.record_transfer(chain, tx_hash, index, symbol, amount, usd,
+                                   sender, recipient, timestamp=timestamp, source=source)
 
-    async def handle_log(self, chain: str, log: dict) -> None:
+    async def handle_log(self, chain: str, log: dict, *, source: str = "historical") -> None:
         if log.get("removed") or chain not in TOKENS:
             return
         token = TOKENS[chain].get(str(log.get("address", "")).lower())
@@ -470,11 +573,12 @@ class WhaleScreener:
             index = str(log["logIndex"]).lower()
             if not re.fullmatch(r"0x[0-9a-f]+", index):
                 return
-            await self._emit(chain, tx_hash, index, token[0], int(data, 16), token[1], sender, recipient)
+            await self._emit(chain, tx_hash, index, token[0], int(data, 16), token[1],
+                             sender, recipient, source=source)
         except (KeyError, TypeError, ValueError):
             return
 
-    async def handle_native(self, chain: str, tx: dict) -> None:
+    async def handle_native(self, chain: str, tx: dict, *, source: str = "historical") -> None:
         if not isinstance(tx, dict):
             return
         tx_hash = str(tx.get("hash", "")).lower()
@@ -489,7 +593,8 @@ class WhaleScreener:
             value = tx["value"]
             if not isinstance(value, str) or not re.fullmatch(r"0x[0-9a-fA-F]+", value):
                 return
-            await self._emit(chain, tx_hash, "native", chain, int(value, 16), 18, sender, recipient)
+            await self._emit(chain, tx_hash, "native", chain, int(value, 16), 18,
+                             sender, recipient, source=source)
         except (KeyError, ValueError, TypeError):
             return
 

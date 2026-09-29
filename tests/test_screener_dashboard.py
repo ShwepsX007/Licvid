@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 import server
 from alchemy_keys import AlchemyKeyStore
+from cex_wallets_updater import CEXWalletRegistry
 from whale_poller import WhalePoller
 from whale_screener import WhaleScreener
 
@@ -96,13 +97,54 @@ class ScreenerDashboardTests(unittest.TestCase):
                 payload = stats.json()
                 self.assertEqual(payload["cu"]["keys_configured"], 1)
                 self.assertEqual({row["chain"] for row in payload["networks"]},
-                                 {"ETH", "BNB", "POLYGON", "ARBITRUM", "BASE", "HYPERLIQUID"})
+                                 {"ETH", "BNB", "POLYGON", "ARBITRUM", "BASE", "HYPERLIQUID", "SOLANA", "TRON"})
                 self.assertNotIn(key, stats.text)
                 deleted = self.client.request("DELETE", "/api/admin/alchemy/keys", json={"id": identifier})
                 self.assertEqual(deleted.status_code, 200, deleted.text)
                 self.assertTrue(deleted.json()["ok"])
                 self.assertEqual(self.client.get("/api/admin/alchemy/keys").json()["keys"], [])
             screen.close()
+
+    def test_admin_cex_wallet_crud_and_encrypted_trongrid_key_access(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = CEXWalletRegistry(Path(tmp) / "cex_wallets.json")
+            trongrid_store = AlchemyKeyStore(os.environ["LIQSCOPE_SECRET"],
+                                             path=Path(tmp) / "trongrid_keys.enc")
+            with patch.object(server, "cex_wallet_registry", registry), \
+                 patch.object(server, "trongrid_key_store", trongrid_store), \
+                 patch.object(server, "trongrid_vault_error", ""), \
+                 patch.object(server, "whale_screener", None), \
+                 patch.object(server, "whale_poller", None), \
+                 patch.object(server, "current_user", lambda _request: MEMBER):
+                self.assertEqual(self.client.get("/api/admin/screener/cex-wallets").status_code, 403)
+                self.assertEqual(self.client.get("/api/admin/trongrid/key").status_code, 403)
+                self.assertEqual(self.client.post("/api/admin/trongrid/key", json={"key": "test-key"}).status_code, 403)
+            with patch.object(server, "cex_wallet_registry", registry), \
+                 patch.object(server, "trongrid_key_store", trongrid_store), \
+                 patch.object(server, "trongrid_vault_error", ""), \
+                 patch.object(server, "whale_screener", None), \
+                 patch.object(server, "whale_poller", None), \
+                 patch.object(server, "current_user", lambda _request: ADMIN):
+                added = self.client.post("/api/admin/screener/cex-wallets", json={
+                    "chain": "ETH", "address": "0x" + "1" * 40, "name": "Manual CEX"})
+                self.assertEqual(added.status_code, 200, added.text)
+                identifier = added.json()["wallet"]["id"]
+                edited = self.client.put("/api/admin/screener/cex-wallets/" + identifier, json={
+                    "chain": "SOLANA", "address": "1" * 32, "name": "Solana CEX"})
+                self.assertEqual(edited.status_code, 200, edited.text)
+                new_identifier = edited.json()["wallet"]["id"]
+                listing = self.client.get("/api/admin/screener/cex-wallets?chain=SOLANA")
+                self.assertEqual(listing.status_code, 200)
+                self.assertEqual(listing.json()["wallets"][0]["name"], "Solana CEX")
+                self.assertEqual(self.client.delete("/api/admin/screener/cex-wallets/" + new_identifier).status_code, 200)
+                key = "trongrid-api-key-test-secret"
+                key_response = self.client.post("/api/admin/trongrid/key", json={"key": key})
+                self.assertEqual(key_response.status_code, 200, key_response.text)
+                self.assertNotIn(key, key_response.text)
+                key_id = key_response.json()["key"]["id"]
+                self.assertEqual(self.client.get("/api/admin/trongrid/key").json()["keys"][0]["source"], "admin")
+                self.assertEqual(self.client.delete("/api/admin/trongrid/key/" + key_id).status_code, 200)
+                self.assertEqual(self.client.get("/api/admin/trongrid/key").json()["keys"], [])
 
     def test_seven_day_history_pagination_sorting_filtering_stats_and_csv(self):
         with tempfile.TemporaryDirectory() as tmp:

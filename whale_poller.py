@@ -1,22 +1,52 @@
-"""Budget-limited hourly Alchemy poller for *known EVM exchange addresses*.
+"""Budgeted multi-chain whale collection.
 
-Not a full-chain indexer. Cursor and conservative CU reservations survive restarts.
-The monthly cap applies only to this process, not to other use of the Alchemy app.
+EVM and Solana use Alchemy; TRON uses TronGrid; Hyperliquid remains an
+independent native feed in ``whale_screener``. Realtime mode streams known CEX
+ERC-20/SPL accounts and performs short REST catch-up; economy mode retains those
+CEX streams while scanning non-CEX supported transfers at a selectable interval.
+The CU ledger is conservative and local to this collector.
 """
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
+import logging
+import math
 import os
+import re
 import time
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from urllib.parse import quote
 
 import aiohttp
 
-from whale_screener import TOKENS, TRANSFER_TOPIC, WhaleScreener, alchemy_key
+from whale_screener import (EVM_CHAINS, SOLANA_TOKENS, TOKENS, TRANSFER_TOPIC,
+                            TRON_TOKENS, WhaleScreener, alchemy_key)
 from alchemy_keys import AlchemyKeyStore, mask_key
+from tron_address import tron_to_base58, tron_to_hex
+
+log = logging.getLogger(__name__)
+POLL_MODE = os.getenv("LIQSCOPE_WHALE_MODE", "realtime").strip().lower()
+if POLL_MODE not in ("realtime", "economy"):
+    POLL_MODE = "realtime"
+HISTORY_INTERVAL_OPTIONS = (5, 10, 15, 30, 60)
+SOLANA_WS_BASE = os.getenv("LIQSCOPE_SOLANA_WS", "wss://solana-mainnet.g.alchemy.com/v2/")
+SOLANA_HTTP_BASE = os.getenv("LIQSCOPE_SOLANA_HTTP", "https://solana-mainnet.g.alchemy.com/v2/")
+SPL_TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+TRON_API_BASE = os.getenv("LIQSCOPE_TRONGRID_URL", "https://api.trongrid.io").rstrip("/")
+TRON_EVENT_INTERVAL = 3.0
+TRON_USD_CONTRACTS = dict(TRON_TOKENS)
+SOLANA_BLOCKS_PER_SEC = {"ETH": 1 / 12, "BNB": 1 / 3, "POLYGON": 0.5,
+                         "ARBITRUM": 4.0, "BASE": 0.5}
+SOLANA_MAX_WALLETS = max(1, int(os.getenv("LIQSCOPE_SOLANA_MAX_WALLETS", "250")))
+METHOD_CU = {"eth_blockNumber": 10, "eth_getLogs": 60,
+             "alchemy_getAssetTransfers": 120,
+             "solana_getSignaturesForAddress": 40,
+             "solana_getTransaction": 40}
 
 ENDPOINTS = {
     "ETH": "eth-mainnet", "BNB": "bnb-mainnet", "POLYGON": "polygon-mainnet",
@@ -29,7 +59,9 @@ NATIVE_NETWORKS = {"HYPERLIQUID": "hyperliquid_ws"}
 # token logs are still polled there. Hyperliquid Core is served by the separate
 # native WebSocket source, not by an Alchemy endpoint.
 NATIVE_INDEXED = {"ETH": "ETH", "POLYGON": "POL", "ARBITRUM": "ETH", "BASE": "ETH"}
-METHOD_CU = {"eth_blockNumber": 10, "eth_getLogs": 60, "alchemy_getAssetTransfers": 120}
+# Alchemy's address-filtered mined-transaction stream is currently supported
+# on these EVM networks; other networks keep token-log WS + REST native history.
+MINED_TRANSACTION_CHAINS = {"ETH", "POLYGON", "ARBITRUM"}
 
 
 def to_hex_block(val: int | str | None) -> str:
@@ -42,6 +74,23 @@ def to_hex_block(val: int | str | None) -> str:
         except ValueError:
             return "latest"
     return val or "latest"
+
+
+def _base58_encode(raw: bytes) -> str:
+    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    number = int.from_bytes(raw, "big")
+    encoded = ""
+    while number:
+        number, remainder = divmod(number, 58)
+        encoded = alphabet[remainder] + encoded
+    zeroes = len(raw) - len(raw.lstrip(b"\x00"))
+    return "1" * zeroes + encoded
+
+
+def _solana_http_url(base: str, key: str) -> str:
+    if "{key}" in base:
+        return base.replace("{key}", key)
+    return base + key if base.endswith("/v2/") else base
 
 
 class BudgetExhausted(Exception):
@@ -57,12 +106,16 @@ class NoKeys(PollError):
 
 
 class WhalePoller:
-    def __init__(self, key: str, screener: WhaleScreener, *, interval: int = 3600,
+    def __init__(self, key: str, screener: WhaleScreener, *, interval: int | None = None,
                  monthly_cu: int = 10_000_000, state_file: Path | None = None,
                  endpoints: dict[str, str] | None = None,
-                 key_store: AlchemyKeyStore | None = None):
+                 key_store: AlchemyKeyStore | None = None,
+                 trongrid_key_store: AlchemyKeyStore | None = None,
+                 mode: str | None = None,
+                 history_interval_min: int | None = None):
         self.screener = screener
         self.key_store = key_store
+        self.trongrid_key_store = trongrid_key_store
         self._fallback_key = alchemy_key(key) if key and key_store is None else ""
         self.wakeup = asyncio.Event()
         self.last_attempt: dict[str, float] = {}
@@ -71,7 +124,20 @@ class WhalePoller:
         self.key_errors: dict[str, str] = {}
         self.key_cooldown: dict[str, float] = {}
         self.chain_cooldown: dict[tuple[str, str], float] = {}
-        self.interval = max(600, interval)
+        self.mode = str(mode or POLL_MODE).strip().lower()
+        if self.mode not in ("realtime", "economy"):
+            self.mode = "realtime"
+        default_interval = 5 if self.mode == "realtime" else 15
+        requested_min = history_interval_min
+        if requested_min is None:
+            try:
+                requested_min = int(os.getenv("LIQSCOPE_WHALE_HISTORY_INTERVAL_MIN", default_interval))
+            except (TypeError, ValueError):
+                requested_min = default_interval
+        self.history_interval_min = (requested_min if requested_min in HISTORY_INTERVAL_OPTIONS
+                                     else default_interval)
+        self.interval = (self.history_interval_min * 60 if interval is None
+                         else max(300, int(interval)))
         # Deliberate reserve: Alchemy Free is 30M CU for the whole app, not only
         # this collector. A custom cap can be *lower*, not greater than 30M.
         self.monthly_cu = min(30_000_000, max(1, monthly_cu))
@@ -83,15 +149,36 @@ class WhalePoller:
             raise ValueError("Hyperliquid must use its native API, never an Alchemy endpoint")
         self.state = self._load()
         self.errors: dict[str, str] = {}
+        self.solana_status = {"network": "SOLANA", "provider": "alchemy",
+                              "connected": False, "state": "waiting", "subscriptions": 0,
+                              "events": 0, "last_success": 0.0, "error": ""}
+        self.tron_status = {"network": "TRON", "provider": "trongrid",
+                            "connected": False, "state": "waiting", "events": 0,
+                            "last_success": 0.0, "last_block": 0, "error": ""}
+        self._solana_last_signature: dict[str, str] = {}
+        self._solana_balance: dict[str, int] = {}
+        self._solana_inflight: set[str] = set()
+        self._tron_seen: dict[str, float] = {}
+        self._tron_last_event_ms = int(time.time() * 1000) - 15_000
+        self.evm_streams = {chain: {"connected": False, "state": "waiting",
+                                    "subscriptions": 0, "last_success": 0.0,
+                                    "reconnects": 0, "error": ""}
+                            for chain in self.endpoints}
 
     def _load(self) -> dict:
         try:
             data = json.loads(self.state_file.read_text(encoding="utf-8"))
             if isinstance(data, dict) and isinstance(data.get("cursors"), dict):
+                data.setdefault("history_cursors", {})
+                data.setdefault("key_usage", {})
+                data.setdefault("active_key", "")
+                data.setdefault("month", "")
+                data.setdefault("cu", 0)
                 return data
         except (OSError, ValueError, TypeError):
             pass
-        return {"month": "", "cu": 0, "cursors": {}, "key_usage": {}, "active_key": ""}
+        return {"month": "", "cu": 0, "cursors": {}, "history_cursors": {},
+                "key_usage": {}, "active_key": ""}
 
     def _save(self) -> None:
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
@@ -102,11 +189,26 @@ class WhalePoller:
     def _reset_cursor(self, chain: str) -> None:
         """Discard a rejected block range; the next poll seeds from its head."""
         self.state.setdefault("cursors", {})[chain] = "latest"
+        self.state.setdefault("history_cursors", {})[chain] = "latest"
         self._save()
 
     def _keys(self) -> list[tuple[str, str]]:
         return self.key_store.keys() if self.key_store else (
             [("legacy", self._fallback_key)] if self._fallback_key else [])
+
+    def configure(self, *, mode: str, history_interval_min: int, monthly_cu: int) -> None:
+        mode = str(mode or "").strip().lower()
+        if mode not in ("realtime", "economy"):
+            raise ValueError("Invalid whale mode")
+        if history_interval_min not in HISTORY_INTERVAL_OPTIONS:
+            raise ValueError("Invalid history interval")
+        if not 1_000 <= int(monthly_cu) <= 20_000_000:
+            raise ValueError("Invalid monthly CU limit")
+        self.mode = mode
+        self.history_interval_min = int(history_interval_min)
+        self.interval = self.history_interval_min * 60
+        self.monthly_cu = int(monthly_cu)
+        self.wakeup.set()
 
     def _reserve(self, method: str, key_id: str = "legacy") -> None:
         month = datetime.now(timezone.utc).strftime("%Y-%m")
@@ -143,23 +245,45 @@ class WhalePoller:
 
     def status(self) -> dict:
         keys = self._keys()
-        return {"mode": "cex_only", "interval_sec": self.interval,
-                "budget_cu": self.monthly_cu, "reserved_cu": self.state["cu"],
-                "month": self.state["month"], "cursors": self.state["cursors"].copy(),
+        now = datetime.now(timezone.utc)
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        elapsed = max(1.0, now.timestamp() - month_start.timestamp())
+        if now.month == 12:
+            next_month = now.replace(year=now.year + 1, month=1, day=1, hour=0, minute=0,
+                                     second=0, microsecond=0)
+        else:
+            next_month = now.replace(month=now.month + 1, day=1, hour=0, minute=0,
+                                     second=0, microsecond=0)
+        month_seconds = (next_month - month_start).total_seconds()
+        used = int(self.state.get("cu", 0))
+        estimate = int(round(used * month_seconds / elapsed)) if used else 0
+        sol = self.solana_status.copy()
+        tron = self.tron_status.copy()
+        other = {c: "not_configured" for c in
+                 ("BITCOIN", "BITCOINCASH", "LITECOIN", "SUI", "DOGECOIN")}
+        other["SOLANA"] = sol["state"]
+        other["TRON"] = tron["state"]
+        return {"mode": self.mode, "interval_sec": self.interval,
+                "history_interval_min": self.history_interval_min,
+                "budget_cu": self.monthly_cu, "reserved_cu": used,
+                "estimated_monthly_cu": estimate,
+                "month": self.state.get("month", ""),
+                "cursors": self.state.get("cursors", {}).copy(),
+                "history_cursors": self.state.get("history_cursors", {}).copy(),
                 "errors": self.errors.copy(), "supported": list(self.endpoints),
-                "native_supported": list(NATIVE_NETWORKS),
+                "native_supported": [*list(NATIVE_NETWORKS), "SOLANA", "TRON"],
                 "keys_configured": len(keys),
                 "active_key_id": self.state.get("active_key", ""),
                 "last_attempt": self.last_attempt.copy(),
                 "last_success": self.last_success.copy(),
                 "latest_heads": self.latest_heads.copy(),
+                "evm_streams": {chain: row.copy() for chain, row in self.evm_streams.items()},
+                "solana": sol, "tron": tron,
                 "phase": ("no_key" if not keys else
-                          "budget_exhausted" if self.state["cu"] >= self.monthly_cu else
+                          "budget_exhausted" if used >= self.monthly_cu else
                           "error" if self.errors else
                           "ok" if self.last_success else "waiting"),
-                "other_networks": {c: "not_configured" for c in
-                                   ("SOLANA", "BITCOIN", "BITCOINCASH", "LITECOIN",
-                                    "TRON", "SUI", "DOGECOIN")}}
+                "other_networks": other}
 
     async def _rpc(self, session: aiohttp.ClientSession, chain: str,
                    method: str, params: list) -> object:
@@ -233,7 +357,10 @@ class WhalePoller:
 
     async def _logs(self, session, chain: str, start: int, end: int) -> None:
         addresses = list(TOKENS[chain])
-        wallets = ["0x" + "0" * 24 + a[2:] for a in self.screener.wallets]
+        wallet_rows = self.screener.wallet_addresses(chain)
+        wallets = ["0x" + "0" * 24 + a[2:] for a in wallet_rows]
+        if not addresses or not wallets:
+            return
         seen = set()
         # Indexed Transfer topics: incoming OR outgoing. A transfer between
         # tracked wallets appears twice; deduplicate by (hash, logIndex).
@@ -244,26 +371,27 @@ class WhalePoller:
                 "address": addresses, "topics": topics}])
             if not isinstance(logs, list):
                 raise PollError("Malformed log response")
-            for log in logs:
-                if not isinstance(log, dict):
+            for event in logs:
+                if not isinstance(event, dict):
                     continue
-                topic_rows = log.get("topics") or []
+                topic_rows = event.get("topics") or []
                 if len(topic_rows) != 3 or not any(
                         isinstance(topic, str) and len(topic) == 66 and
-                        ("0x" + topic[-40:].lower()) in self.screener.wallets
+                        ("0x" + topic[-40:].lower()) in wallet_rows
                         for topic in topic_rows[1:]):
                     continue
-                key = (log.get("transactionHash"), log.get("logIndex"))
+                key = (event.get("transactionHash"), event.get("logIndex"))
                 if key not in seen:
                     seen.add(key)
-                    await self.screener.handle_log(chain, log)
+                    await self.screener.handle_log(chain, event, source="historical")
 
     async def _native(self, session, chain: str, start: int, end: int) -> None:
         if chain not in NATIVE_INDEXED:
             return
         asset = NATIVE_INDEXED[chain]
+        wallets = self.screener.wallet_addresses(chain)
         # Full pagination; the cursor must never advance on partial responses.
-        for address in self.screener.wallets:
+        for address in wallets:
             for side in ("fromAddress", "toAddress"):
                 page = None
                 while True:
@@ -281,7 +409,7 @@ class WhalePoller:
                             continue
                         sender = str(tx.get("from") or "").lower()
                         recipient = str(tx.get("to") or "").lower()
-                        if not (sender in self.screener.wallets or recipient in self.screener.wallets):
+                        if not (sender in wallets or recipient in wallets):
                             continue
                         try:
                             amount = Decimal(str(tx["value"]))
@@ -291,10 +419,135 @@ class WhalePoller:
                         except (InvalidOperation, KeyError, ValueError, TypeError):
                             continue
                         await self.screener._emit(chain, str(tx["hash"]).lower(), "native",
-                                                  asset, wei, 18, sender, recipient)
+                                                  asset, wei, 18, sender, recipient,
+                                                  source="historical")
                     page = result.get("pageKey")
                     if not page:
                         break
+
+    @staticmethod
+    def _timestamp(value) -> int | None:
+        if isinstance(value, (int, float)):
+            return int(value / 1000 if value > 100_000_000_000 else value)
+        if isinstance(value, str):
+            try:
+                return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp())
+            except ValueError:
+                return None
+        return None
+
+    async def _wide_token_logs(self, session, chain: str, start: int, end: int) -> None:
+        """Fallback token history for BNB where Asset Transfers is not promised."""
+        logs = await self._rpc(session, chain, "eth_getLogs", [{
+            "fromBlock": to_hex_block(start), "toBlock": to_hex_block(end),
+            "address": list(TOKENS[chain]), "topics": [TRANSFER_TOPIC]}])
+        if not isinstance(logs, list):
+            raise PollError("Malformed token history response")
+        wallets = self.screener.wallet_addresses(chain)
+        for event in logs:
+            if not isinstance(event, dict):
+                continue
+            topics = event.get("topics") or []
+            if len(topics) != 3:
+                continue
+            participants = []
+            for topic in topics[1:]:
+                if isinstance(topic, str) and len(topic) == 66:
+                    participants.append("0x" + topic[-40:].lower())
+            if self.mode == "economy" and any(address in wallets for address in participants):
+                continue  # known CEX addresses are covered by their live stream
+            await self.screener.handle_log(chain, event, source="historical")
+
+    async def _asset_transfer_history(self, session, chain: str, start: int, end: int) -> None:
+        if chain not in ("ETH", "POLYGON", "ARBITRUM", "BASE"):
+            if chain == "BNB":
+                await self._wide_token_logs(session, chain, start, end)
+            return
+        wallet_rows = self.screener.wallet_addresses(chain)
+        native_symbol = NATIVE_INDEXED.get(chain)
+        queries = [("external", None), ("erc20", list(TOKENS[chain]))]
+        for category, contracts in queries:
+            page = None
+            pages = 0
+            while True:
+                query = {"fromBlock": to_hex_block(start), "toBlock": to_hex_block(end),
+                         "category": [category], "withMetadata": True,
+                         "excludeZeroValue": True, "maxCount": "0x3e8"}
+                if contracts:
+                    query["contractAddresses"] = contracts
+                if page:
+                    query["pageKey"] = page
+                result = await self._rpc(session, chain, "alchemy_getAssetTransfers", [query])
+                if not isinstance(result, dict) or not isinstance(result.get("transfers"), list):
+                    raise PollError("Malformed transfer history response")
+                for tx in result["transfers"]:
+                    if not isinstance(tx, dict) or not tx.get("hash"):
+                        continue
+                    sender = str(tx.get("from") or "").lower()
+                    recipient = str(tx.get("to") or "").lower()
+                    if self.mode == "economy" and (sender in wallet_rows or recipient in wallet_rows):
+                        continue
+                    raw_contract = tx.get("rawContract") or {}
+                    contract = str(raw_contract.get("address") or tx.get("contractAddress") or "").lower()
+                    if category == "external":
+                        symbol = str(tx.get("asset") or native_symbol or "")
+                        decimals = 18
+                        index = "native"
+                    else:
+                        token = TOKENS[chain].get(contract)
+                        if not token:
+                            continue
+                        symbol, decimals = token
+                        index = tx.get("logIndex") or raw_contract.get("logIndex")
+                        if index is None:
+                            unique = str(tx.get("uniqueId") or "")
+                            index = unique.rsplit(":", 1)[-1] if ":" in unique else unique
+                        if isinstance(index, int):
+                            index = hex(index)
+                        index = str(index or "")
+                    if not symbol or not index:
+                        continue
+                    try:
+                        amount_value = Decimal(str(tx.get("value")))
+                        if not amount_value.is_finite() or amount_value <= 0:
+                            continue
+                        amount = float(amount_value)
+                    except (InvalidOperation, ValueError, TypeError):
+                        continue
+                    price = self.screener._price(symbol)
+                    if price is None:
+                        continue
+                    timestamp = self._timestamp((tx.get("metadata") or {}).get("blockTimestamp"))
+                    await self.screener.record_transfer(
+                        chain, str(tx["hash"]).lower(), str(index), symbol, amount,
+                        amount * price, sender, recipient, timestamp=timestamp,
+                        source="historical")
+                page = result.get("pageKey")
+                if not page:
+                    break
+                pages += 1
+                if pages >= 20:
+                    raise PollError("Transfer history pagination is incomplete")
+
+    async def poll_transfer_history(self, session, chain: str, head: int) -> None:
+        cursors = self.state.setdefault("history_cursors", {})
+        cursor = cursors.get(chain)
+        if cursor is None or cursor == "latest":
+            cursors[chain] = head
+            self._save()
+            return
+        try:
+            start = int(cursor) + 1
+        except (TypeError, ValueError):
+            cursors[chain] = "latest"
+            self._save()
+            return
+        if start > head:
+            return
+        end = min(head, start + 49_999)
+        await self._asset_transfer_history(session, chain, start, end)
+        cursors[chain] = end
+        self._save()
 
     async def poll_chain(self, session: aiohttp.ClientSession, chain: str) -> None:
         head = await self._rpc(session, chain, "eth_blockNumber", [])
@@ -305,6 +558,7 @@ class WhalePoller:
         cursor = self.state["cursors"].get(chain)
         if cursor is None or cursor == "latest":
             self.state["cursors"][chain] = latest
+            self.state.setdefault("history_cursors", {}).setdefault(chain, latest)
             self._save()
             return  # no historical replay without a user-specified starting point
         # Bound backlog per pass, including the native index query. If down
@@ -328,7 +582,620 @@ class WhalePoller:
             self.state["cursors"][chain] = end
             self._save()
             start = end + 1
-        # Remaining backlog stays on disk, never silently skipped.
+        # Remaining backlog stays on disk, never silently skipped. Transfer
+        # history has an independent cursor so an asset-transfer error never
+        # skips ranges that the CEX log poller has already completed.
+        await self.poll_transfer_history(session, chain, latest)
+
+    async def _handle_mined_native(self, chain: str, envelope: dict) -> bool:
+        """Record one filtered, mined top-level native transfer notification."""
+        if chain not in MINED_TRANSACTION_CHAINS or envelope.get("removed"):
+            return False
+        tx = envelope.get("transaction")
+        if not isinstance(tx, dict):
+            return False
+        tx_hash = str(tx.get("hash") or "").lower()
+        sender = str(tx.get("from") or "").lower()
+        recipient = str(tx.get("to") or "").lower()
+        wallets = self.screener.wallet_addresses(chain)
+        if (not re.fullmatch(r"0x[0-9a-f]{64}", tx_hash) or
+                sender not in wallets and recipient not in wallets or
+                not re.fullmatch(r"0x[0-9a-f]{40}", sender) or
+                not re.fullmatch(r"0x[0-9a-f]{40}", recipient) or
+                tx.get("input", "0x") not in ("0x", "0X", "")):
+            return False
+        try:
+            value = tx.get("value")
+            raw_value = int(value, 16) if isinstance(value, str) and value.startswith("0x") else int(value)
+        except (TypeError, ValueError):
+            return False
+        if raw_value <= 0:
+            return False
+        await self.screener._emit(chain, tx_hash, "native", NATIVE_INDEXED[chain],
+                                  raw_value, 18, sender, recipient, source="realtime")
+        return True
+
+    async def _run_evm_ws_chain(self, chain: str) -> None:
+        """Subscribe to CEX-indexed token/native transfers using Alchemy WS."""
+        state = self.evm_streams[chain]
+        retry = 3.0
+        while True:
+            keys = self._keys()
+            wallets = self.screener.wallet_addresses(chain)
+            if not keys:
+                state.update(connected=False, state="waiting", subscriptions=0,
+                             error="Alchemy API key is not configured")
+                await asyncio.sleep(5)
+                continue
+            if not wallets:
+                state.update(connected=False, state="waiting", subscriptions=0,
+                             error="No CEX addresses for this network")
+                await asyncio.sleep(30)
+                continue
+            key_id, key = keys[0]
+            host = ENDPOINTS.get(chain)
+            if not host:
+                state.update(connected=False, state="error", error="Unsupported EVM network")
+                await asyncio.sleep(60)
+                continue
+            url = f"wss://{host}.g.alchemy.com/v2/{key}"
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.ws_connect(url, heartbeat=25, receive_timeout=90) as ws:
+                        sub_id = 1
+                        subscriptions = 0
+                        padded = ["0x" + "0" * 24 + address[2:]
+                                  for address in sorted(wallets)]
+                        for offset in range(0, len(padded), 64):
+                            batch = padded[offset:offset + 64]
+                            for incoming in (True, False):
+                                topics = ([TRANSFER_TOPIC, batch] if incoming else
+                                          [TRANSFER_TOPIC, None, batch])
+                                await ws.send_json({"jsonrpc": "2.0", "id": sub_id,
+                                    "method": "eth_subscribe", "params": ["logs", {
+                                        "address": list(TOKENS[chain]), "topics": topics}]})
+                                sub_id += 1
+                                subscriptions += 1
+                        if chain in MINED_TRANSACTION_CHAINS:
+                            native_addresses = sorted(wallets)[:500]
+                            filters = ([{"from": address} for address in native_addresses] +
+                                       [{"to": address} for address in native_addresses])
+                            await ws.send_json({"jsonrpc": "2.0", "id": sub_id,
+                                "method": "eth_subscribe", "params": ["alchemy_minedTransactions", {
+                                    "addresses": filters, "includeRemoved": False,
+                                    "hashesOnly": False}]})
+                            subscriptions += 1
+                        state.update(connected=True, state="online",
+                                     subscriptions=subscriptions, last_success=time.time(), error="")
+                        self.state["active_key"] = key_id
+                        retry = 3.0
+                        async for message in ws:
+                            if message.type != aiohttp.WSMsgType.TEXT:
+                                if message.type in (aiohttp.WSMsgType.CLOSED,
+                                                    aiohttp.WSMsgType.ERROR):
+                                    break
+                                continue
+                            try:
+                                payload = json.loads(message.data)
+                            except (TypeError, ValueError):
+                                continue
+                            if payload.get("error"):
+                                state["error"] = "Alchemy WebSocket subscription error"
+                                continue
+                            if payload.get("method") != "eth_subscription":
+                                continue
+                            result = (payload.get("params") or {}).get("result")
+                            if not isinstance(result, dict):
+                                continue
+                            if isinstance(result.get("transaction"), dict):
+                                await self._handle_mined_native(chain, result)
+                            else:
+                                await self.screener.handle_log(chain, result, source="realtime")
+                            state["last_success"] = time.time()
+            except asyncio.CancelledError:
+                state.update(connected=False, state="stopped")
+                raise
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError) as exc:
+                state.update(connected=False, state="error", error=type(exc).__name__)
+                state["reconnects"] = int(state.get("reconnects", 0)) + 1
+            except Exception as exc:  # noqa: BLE001 — keep one provider outage isolated
+                state.update(connected=False, state="error", error=type(exc).__name__)
+                state["reconnects"] = int(state.get("reconnects", 0)) + 1
+            await asyncio.sleep(min(60.0, retry))
+            retry = min(60.0, retry * 2)
+
+    async def _solana_rpc(self, session, method: str, params: list):
+        keys = self._keys()
+        if not keys:
+            raise NoKeys("Alchemy API key is not configured")
+        key_id, key = keys[0]
+        self._reserve("solana_" + method, key_id)
+        url = _solana_http_url(SOLANA_HTTP_BASE, key)
+        try:
+            async with session.post(url, json={"jsonrpc": "2.0", "id": 1,
+                                               "method": method, "params": params},
+                                    timeout=aiohttp.ClientTimeout(total=25)) as response:
+                if response.status in (401, 403, 429):
+                    self.key_errors[key_id] = "Alchemy Solana API rejected request"
+                    raise PollError(f"Solana RPC HTTP {response.status}")
+                if response.status != 200:
+                    raise PollError(f"Solana RPC HTTP {response.status}")
+                payload = await response.json()
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+            raise PollError(type(exc).__name__) from None
+        if not isinstance(payload, dict) or payload.get("error"):
+            raise PollError("Solana RPC returned an error")
+        self.key_errors.pop(key_id, None)
+        return payload.get("result")
+
+    @staticmethod
+    def _solana_tx_signature(tx: dict) -> str:
+        try:
+            signatures = tx.get("transaction", {}).get("signatures", [])
+            return str(signatures[0]) if signatures else ""
+        except (AttributeError, TypeError, IndexError):
+            return ""
+
+    @staticmethod
+    def _solana_instructions(tx: dict) -> list[dict]:
+        meta = tx.get("meta") or {}
+        message = (tx.get("transaction") or {}).get("message") or {}
+        rows = [item for item in message.get("instructions", []) if isinstance(item, dict)]
+        for group in meta.get("innerInstructions", []) or []:
+            rows.extend(item for item in group.get("instructions", []) if isinstance(item, dict))
+        return rows
+
+    async def _solana_process_native(self, tx: dict, owner: str) -> int:
+        if not isinstance(tx, dict) or (tx.get("meta") or {}).get("err"):
+            return 0
+        signature = self._solana_tx_signature(tx)
+        if not signature:
+            return 0
+        timestamp = tx.get("blockTime")
+        count = 0
+        for index, instruction in enumerate(self._solana_instructions(tx)):
+            parsed = instruction.get("parsed") or {}
+            info = parsed.get("info") or {}
+            if instruction.get("program") != "system" or parsed.get("type") != "transfer":
+                continue
+            sender, recipient = str(info.get("source") or ""), str(info.get("destination") or "")
+            if owner not in (sender, recipient):
+                continue
+            try:
+                lamports = int(info.get("lamports") or 0)
+            except (TypeError, ValueError):
+                continue
+            if lamports <= 0:
+                continue
+            amount = lamports / 1_000_000_000
+            price = self.screener._price("SOL")
+            if price is None:
+                continue
+            if await self.screener.record_transfer(
+                    "SOLANA", signature, f"native:{index}", "SOL", amount,
+                    amount * price, sender, recipient, timestamp=timestamp,
+                    source="realtime"):
+                count += 1
+        return count
+
+    async def _solana_process_token(self, tx: dict, owner: str, mint: str) -> int:
+        if not isinstance(tx, dict) or (tx.get("meta") or {}).get("err"):
+            return 0
+        signature = self._solana_tx_signature(tx)
+        if not signature:
+            return 0
+        meta = tx.get("meta") or {}
+        pre = meta.get("preTokenBalances") or []
+        post = meta.get("postTokenBalances") or []
+
+        def amount_map(rows):
+            total, decimals, owners = 0, None, {}
+            for row in rows:
+                if not isinstance(row, dict) or row.get("mint") != mint:
+                    continue
+                row_owner = str(row.get("owner") or "")
+                account_index = row.get("accountIndex")
+                token_amount = row.get("uiTokenAmount") or {}
+                try:
+                    raw = int(token_amount.get("amount") or 0)
+                    dec = int(token_amount.get("decimals") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if row_owner:
+                    owners[str(account_index)] = row_owner
+                if row_owner == owner:
+                    total += raw
+                    decimals = dec
+            return total, decimals, owners
+
+        before, before_decimals, before_owners = amount_map(pre)
+        after, after_decimals, after_owners = amount_map(post)
+        delta = after - before
+        if not delta:
+            return 0
+        decimals = after_decimals if after_decimals is not None else before_decimals
+        if decimals is None:
+            decimals = SOLANA_TOKENS.get(mint, ("", 6))[1]
+        symbol = SOLANA_TOKENS.get(mint, ("", decimals))[0]
+        if not symbol:
+            return 0
+
+        message = (tx.get("transaction") or {}).get("message") or {}
+        account_keys = message.get("accountKeys") or []
+        account_by_index = {}
+        for i, key in enumerate(account_keys):
+            if isinstance(key, dict):
+                account_by_index[str(i)] = str(key.get("pubkey") or "")
+            else:
+                account_by_index[str(i)] = str(key)
+        account_owners = {**before_owners, **after_owners}
+        owner_by_key = {account_by_index[idx]: value for idx, value in account_owners.items()
+                        if idx in account_by_index and account_by_index[idx]}
+        sender, recipient = ("", owner) if delta > 0 else (owner, "")
+        for instruction in self._solana_instructions(tx):
+            parsed = instruction.get("parsed") or {}
+            if parsed.get("type") not in ("transfer", "transferChecked"):
+                continue
+            info = parsed.get("info") or {}
+            source_account = str(info.get("source") or "")
+            destination_account = str(info.get("destination") or "")
+            source_owner = owner_by_key.get(source_account, "")
+            destination_owner = owner_by_key.get(destination_account, "")
+            if destination_owner == owner and delta > 0:
+                sender, recipient = source_owner or source_account, owner
+                break
+            if source_owner == owner and delta < 0:
+                sender, recipient = owner, destination_owner or destination_account
+                break
+        amount = abs(delta) / (10 ** decimals)
+        price = self.screener._price(symbol)
+        if price is None:
+            return 0
+        if await self.screener.record_transfer(
+                "SOLANA", signature, f"spl:{owner}:{mint}", symbol, amount,
+                amount * price, sender, recipient, timestamp=tx.get("blockTime"),
+                source="realtime"):
+            return 1
+        return 0
+
+    async def _solana_recent_transactions(self, session, address: str, owner: str,
+                                          mint: str | None = None) -> None:
+        lock_key = address + (":" + mint if mint else ":native")
+        if lock_key in self._solana_inflight:
+            return
+        self._solana_inflight.add(lock_key)
+        try:
+            rows = await self._solana_rpc(session, "getSignaturesForAddress", [address, {
+                "commitment": "confirmed", "limit": 20}])
+            if not isinstance(rows, list):
+                return
+            previous = self._solana_last_signature.get(lock_key)
+            selected = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                signature = str(row.get("signature") or "")
+                if not signature:
+                    continue
+                if signature == previous:
+                    break
+                if previous is None:
+                    block_time = row.get("blockTime")
+                    if block_time and float(block_time) < time.time() - 600:
+                        continue
+                if not row.get("err"):
+                    selected.append(signature)
+            for signature in reversed(selected[:10]):
+                tx = await self._solana_rpc(session, "getTransaction", [signature, {
+                    "encoding": "jsonParsed", "commitment": "confirmed",
+                    "maxSupportedTransactionVersion": 0}])
+                if not isinstance(tx, dict):
+                    continue
+                if mint:
+                    self.solana_status["events"] += await self._solana_process_token(tx, owner, mint)
+                else:
+                    self.solana_status["events"] += await self._solana_process_native(tx, owner)
+            if rows and isinstance(rows[0], dict) and rows[0].get("signature"):
+                self._solana_last_signature[lock_key] = str(rows[0]["signature"])
+            self.solana_status["last_success"] = time.time()
+            self.solana_status["error"] = ""
+        except BudgetExhausted:
+            self.solana_status["state"] = "budget_exhausted"
+            self.solana_status["error"] = "Monthly Alchemy CU budget exhausted"
+        except (PollError, ValueError, TypeError, KeyError) as exc:
+            self.solana_status["error"] = str(exc)[:100]
+        finally:
+            self._solana_inflight.discard(lock_key)
+
+    async def run_solana(self) -> None:
+        """Monitor SPL USDT/USDC token accounts and native SOL CEX accounts."""
+        retry = 3.0
+        while True:
+            keys = self._keys()
+            wallets = self.screener.wallet_addresses("SOLANA")
+            if not keys:
+                self.solana_status.update(connected=False, state="waiting",
+                                          error="Alchemy API key is not configured")
+                await asyncio.sleep(5)
+                continue
+            if not wallets:
+                self.solana_status.update(connected=False, state="waiting",
+                                          error="No indexed Solana CEX wallets")
+                await asyncio.sleep(30)
+                continue
+            key = keys[0][1]
+            url = _solana_http_url(SOLANA_WS_BASE, key)
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.ws_connect(url, heartbeat=30, receive_timeout=90) as ws:
+                        pending: dict[int, tuple[str, str, str | None]] = {}
+                        active_subscriptions: dict[int, tuple[str, str, str | None]] = {}
+                        request_id = 1
+                        submitted = 0
+                        owners = list(wallets.items())[:SOLANA_MAX_WALLETS]
+                        for owner, _name in owners:
+                            await ws.send_json({"jsonrpc": "2.0", "id": request_id,
+                                "method": "accountSubscribe", "params": [owner, {
+                                    "commitment": "confirmed", "encoding": "base64"}]})
+                            pending[request_id] = ("native", owner, None)
+                            request_id += 1
+                            submitted += 1
+                            for mint in SOLANA_TOKENS:
+                                await ws.send_json({"jsonrpc": "2.0", "id": request_id,
+                                    "method": "programSubscribe", "params": [SPL_TOKEN_PROGRAM, {
+                                        "commitment": "confirmed", "encoding": "base64",
+                                        "filters": [{"dataSize": 165},
+                                            {"memcmp": {"offset": 0, "bytes": mint}},
+                                            {"memcmp": {"offset": 32, "bytes": owner}}]}]})
+                                pending[request_id] = ("spl", owner, mint)
+                                request_id += 1
+                                submitted += 1
+                        self.solana_status.update(connected=True, state="online",
+                            subscriptions=submitted, error="")
+                        retry = 3.0
+                        async for message in ws:
+                            if message.type != aiohttp.WSMsgType.TEXT:
+                                if message.type in (aiohttp.WSMsgType.CLOSED,
+                                                    aiohttp.WSMsgType.ERROR):
+                                    break
+                                continue
+                            try:
+                                payload = json.loads(message.data)
+                            except (TypeError, ValueError):
+                                continue
+                            if "id" in payload:
+                                target = pending.get(payload.get("id"))
+                                if target and isinstance(payload.get("result"), int):
+                                    active_subscriptions[payload["result"]] = target
+                                elif target and payload.get("error"):
+                                    self.solana_status["error"] = "Alchemy Solana subscription rejected"
+                                continue
+                            if payload.get("method") not in ("accountNotification", "programNotification"):
+                                continue
+                            params = payload.get("params") or {}
+                            target = active_subscriptions.get(params.get("subscription"))
+                            if not target:
+                                continue
+                            kind, owner, mint = target
+                            result = params.get("result") or {}
+                            if kind == "native":
+                                account = result.get("value") or {}
+                                try:
+                                    balance = int(account.get("lamports") or 0)
+                                except (TypeError, ValueError):
+                                    continue
+                                old = self._solana_balance.get(owner)
+                                self._solana_balance[owner] = balance
+                                if old is not None and old != balance:
+                                    await self._solana_recent_transactions(session, owner, owner)
+                            else:
+                                account = result.get("value") or {}
+                                pubkey = str(account.get("pubkey") or "")
+                                if pubkey and mint:
+                                    await self._solana_recent_transactions(session, pubkey, owner, mint)
+                            self.solana_status["last_success"] = time.time()
+                            self.solana_status["error"] = ""
+            except asyncio.CancelledError:
+                self.solana_status.update(connected=False, state="stopped")
+                raise
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError) as exc:
+                self.solana_status.update(connected=False, state="error", error=type(exc).__name__)
+            except Exception as exc:  # noqa: BLE001 — isolate Solana provider errors
+                self.solana_status.update(connected=False, state="error", error=type(exc).__name__)
+            await asyncio.sleep(min(60.0, retry))
+            retry = min(60.0, retry * 2)
+
+    def _trongrid_key(self) -> str:
+        if not self.trongrid_key_store:
+            return ""
+        try:
+            keys = self.trongrid_key_store.keys()
+            return keys[0][1] if keys else ""
+        except Exception:  # noqa: BLE001 — an optional key must not stop TRON
+            return ""
+
+    async def _trongrid_get(self, session, url: str, params: dict | None = None):
+        headers = {}
+        api_key = self._trongrid_key()
+        if api_key:
+            headers["TRON-PRO-API-KEY"] = api_key
+        try:
+            async with session.get(url, params=params, headers=headers,
+                                   timeout=aiohttp.ClientTimeout(total=20)) as response:
+                if response.status in (401, 403, 429):
+                    raise PollError(f"TronGrid HTTP {response.status}")
+                if response.status != 200:
+                    raise PollError(f"TronGrid HTTP {response.status}")
+                payload = await response.json()
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+            raise PollError(type(exc).__name__) from None
+        if not isinstance(payload, dict):
+            raise PollError("Malformed TronGrid response")
+        return payload
+
+    async def _trongrid_post(self, session, url: str):
+        headers = {}
+        api_key = self._trongrid_key()
+        if api_key:
+            headers["TRON-PRO-API-KEY"] = api_key
+        try:
+            async with session.post(url, json={}, headers=headers,
+                                    timeout=aiohttp.ClientTimeout(total=20)) as response:
+                if response.status in (401, 403, 429):
+                    raise PollError(f"TronGrid HTTP {response.status}")
+                if response.status != 200:
+                    raise PollError(f"TronGrid HTTP {response.status}")
+                payload = await response.json()
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+            raise PollError(type(exc).__name__) from None
+        if not isinstance(payload, dict):
+            raise PollError("Malformed TronGrid response")
+        return payload
+
+    async def _process_tron_block(self, block: dict) -> None:
+        raw_block = (block.get("block_header") or {}).get("raw_data") or {}
+        self.tron_status["last_block"] = int(raw_block.get("number") or 0)
+        timestamp = raw_block.get("timestamp")
+        wallets = self.screener.wallet_addresses("TRON")
+        for tx in block.get("transactions") or []:
+            tx_hash = str(tx.get("txID") or "").lower()
+            if not re.fullmatch(r"[0-9a-f]{64}", tx_hash):
+                continue
+            for index, contract in enumerate((tx.get("raw_data") or {}).get("contract") or []):
+                if contract.get("type") != "TransferContract":
+                    continue
+                value = ((contract.get("parameter") or {}).get("value") or {})
+                try:
+                    sender = tron_to_base58(value.get("owner_address", ""))
+                    recipient = tron_to_base58(value.get("to_address", ""))
+                    sun = int(value.get("amount") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if not sun or (sender not in wallets and recipient not in wallets):
+                    continue
+                amount = sun / 1_000_000
+                price = self.screener._price("TRX")
+                if price is None:
+                    continue
+                if await self.screener.record_transfer(
+                        "TRON", tx_hash, f"native:{index}", "TRX", amount,
+                        amount * price, sender, recipient,
+                        timestamp=(float(timestamp or 0) / 1000 if timestamp else None),
+                        source="realtime"):
+                    self.tron_status["events"] += 1
+
+    async def _poll_tron_contract(self, session, contract: str, symbol: str,
+                                  decimals: int, now_ms: int) -> None:
+        state = getattr(self, "_tron_pages", {}).get(contract)
+        if state is None:
+            state = {"min_timestamp": self._tron_last_event_ms,
+                     "max_timestamp": now_ms, "fingerprint": ""}
+            if not hasattr(self, "_tron_pages"):
+                self._tron_pages = {}
+            self._tron_pages[contract] = state
+        elif not state.get("fingerprint"):
+            state.update(min_timestamp=self._tron_last_event_ms,
+                         max_timestamp=now_ms, fingerprint="")
+        wallets = self.screener.wallet_addresses("TRON")
+        pages = 0
+        while pages < 5:
+            params = {"event_name": "Transfer", "only_confirmed": "true",
+                      "limit": 200, "order_by": "block_timestamp,asc",
+                      "min_timestamp": state["min_timestamp"],
+                      "max_timestamp": state["max_timestamp"]}
+            if state.get("fingerprint"):
+                params["fingerprint"] = state["fingerprint"]
+            payload = await self._trongrid_get(
+                session, f"{TRON_API_BASE}/v1/contracts/{quote(contract, safe='')}/events", params)
+            rows = payload.get("data") or []
+            if not isinstance(rows, list):
+                raise PollError("Malformed TronGrid event page")
+            for event in rows:
+                if not isinstance(event, dict):
+                    continue
+                result = event.get("result") or {}
+                try:
+                    sender = tron_to_base58(result.get("from", ""))
+                    recipient = tron_to_base58(result.get("to", ""))
+                    raw_value = int(result.get("value") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if not raw_value or (sender not in wallets and recipient not in wallets):
+                    continue
+                tx_hash = str(event.get("transaction_id") or event.get("transactionId") or "").lower()
+                if not re.fullmatch(r"[0-9a-f]{64}", tx_hash):
+                    continue
+                event_index = str(event.get("event_index") or event.get("eventIndex") or
+                                  event.get("block_number", "0"))
+                try:
+                    timestamp = float(event.get("block_timestamp") or 0) / 1000
+                except (TypeError, ValueError):
+                    timestamp = None
+                amount = raw_value / (10 ** decimals)
+                if await self.screener.record_transfer(
+                        "TRON", tx_hash, "trc20:" + event_index, symbol, amount,
+                        amount, sender, recipient, timestamp=timestamp,
+                        source="realtime"):
+                    self.tron_status["events"] += 1
+            meta = payload.get("meta") or {}
+            fingerprint = str(meta.get("fingerprint") or payload.get("fingerprint") or "")
+            state["fingerprint"] = fingerprint
+            pages += 1
+            if not fingerprint:
+                state.update(min_timestamp=state["max_timestamp"],
+                             max_timestamp=now_ms, fingerprint="")
+                break
+        if state.get("fingerprint") and pages >= 5:
+            self.tron_status["error"] = "TronGrid backlog paginated; continuing next cycle"
+
+    async def run_tron(self) -> None:
+        """Poll TRX blocks and USDT/USDC Transfer events every three seconds."""
+        while True:
+            wallets = self.screener.wallet_addresses("TRON")
+            if not wallets:
+                self.tron_status.update(connected=False, state="waiting",
+                                        error="No indexed Tron CEX wallets")
+                await asyncio.sleep(30)
+                continue
+            try:
+                async with aiohttp.ClientSession() as session:
+                    while True:
+                        now_ms = int(time.time() * 1000)
+                        self.tron_status.update(connected=True, state="online")
+                        block = await self._trongrid_post(
+                            session, f"{TRON_API_BASE}/wallet/getnowblock")
+                        if isinstance(block.get("transactions"), list):
+                            await self._process_tron_block(block)
+                        for contract, (symbol, decimals) in TRON_USD_CONTRACTS.items():
+                            await self._poll_tron_contract(session, contract, symbol,
+                                                          decimals, now_ms)
+                        self._tron_last_event_ms = max(self._tron_last_event_ms, now_ms - 250)
+                        self.tron_status["last_success"] = time.time()
+                        self.tron_status["error"] = ""
+                        await asyncio.sleep(TRON_EVENT_INTERVAL)
+            except asyncio.CancelledError:
+                self.tron_status.update(connected=False, state="stopped")
+                raise
+            except (PollError, BudgetExhausted, ValueError, OSError) as exc:
+                self.tron_status.update(connected=False, state="error", error=str(exc)[:100])
+                await asyncio.sleep(6)
+            except Exception as exc:  # noqa: BLE001 — keep optional TronGrid isolated
+                self.tron_status.update(connected=False, state="error", error=type(exc).__name__)
+                await asyncio.sleep(6)
+
+    async def run_streams(self) -> None:
+        """Run EVM/Solana/Tron realtime streams independently of REST catch-up."""
+        tasks = [asyncio.create_task(self._run_evm_ws_chain(chain),
+                                     name=f"whale-{chain.lower()}-ws")
+                 for chain in self.endpoints]
+        tasks.extend((asyncio.create_task(self.run_solana(), name="whale-solana-ws"),
+                      asyncio.create_task(self.run_tron(), name="whale-trongrid")))
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def run(self) -> None:
         async with aiohttp.ClientSession() as session:

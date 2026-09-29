@@ -43,7 +43,7 @@ class AdminKeysTests(unittest.TestCase):
                     self.assertEqual(len(config.json()["keys"]), 1)
                     whale_response = client.get("/api/screener/whales?chain=HYPERLIQUID")
                     self.assertEqual(whale_response.json()["enabled"], True)
-                    self.assertEqual(whale_response.json()["native_supported"], ["HYPERLIQUID"])
+                    self.assertEqual(whale_response.json()["native_supported"], ["HYPERLIQUID", "SOLANA", "TRON"])
                     self.assertEqual(whale_response.json()["native"]["provider"], "native_api")
                     self.assertNotIn(key, whale_response.text)
                     duplicate = client.post("/api/admin/screener/keys", json={"key": key})

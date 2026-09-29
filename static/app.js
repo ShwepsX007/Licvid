@@ -61,7 +61,8 @@
         paneOi: false,
         userLoggedIn: false,    // для бонусов: сигналы + без рекламы
         layersAllowed: true,    // по умолчанию свободный доступ; если пробник включён — решает сервер
-        layersBlocked: false,   // true когда пробник включён и время вышло
+        layersBlocked: false,  // true когда пробник включён и время вышло
+        authGateReady: false,   // права проверены в родительском окне
         layersTrial: null,      // ответ /api/layers/trial: остаток времени гостя
         trialTimer: 0,          // таймер сверки остатка с сервером
         symbols: [],
@@ -5883,6 +5884,7 @@
     const LAYER_DEFS = {};
 
     async function fetchAuthMe() {
+        if (IS_EMBED) return null;
         try {
             const r = await fetch("/api/auth/me", { credentials: "same-origin" });
             const d = await r.json();
@@ -5900,6 +5902,7 @@
     const GATE_TICK_MS = 30000;            // как часто переспрашиваем сервер
 
     async function fetchLayersTrial() {
+        if (IS_EMBED) return null;
         try {
             const r = await fetch("/api/layers/trial", { credentials: "same-origin" });
             if (!r.ok) return null;
@@ -6007,6 +6010,7 @@
             state.layersBlocked = false;
             state.layersAllowed = true;
             if (!state.userLoggedIn && !gateDismissed()) openLayerGate();
+            if (!IS_EMBED) publishGate();
             return;
         }
         // пробный период включён — время вышло
@@ -6023,6 +6027,7 @@
         updateLiveStats();
         queueRedraw();
         if (!gateDismissed()) openLayerGate();
+        if (!IS_EMBED) publishGate();
     }
 
     function stopTrialWatch() {
@@ -6030,15 +6035,18 @@
     }
 
     async function checkLayerTrial() {
+        if (IS_EMBED) return;
         const t = await fetchLayersTrial();
         if (!t) return;
         state.layersTrial = t;
         const active = trialIsActive(t);
         if (active && t.allowed === false) { expireLayers(); return; }
         paintLayerTrial();
+        publishGate();
     }
 
     function watchLayerTrial() {
+        if (IS_EMBED) return;
         if (state.trialTimer) clearInterval(state.trialTimer);
         const active = trialIsActive(state.layersTrial);
         if (!active) { stopTrialWatch(); return; }
@@ -6078,7 +6086,101 @@
         };
     }
 
+    // Права в дополнительных графиках — снимок уже проверенного состояния
+    // родителя. iframe никогда не запускает auth/trial запросы или таймер.
+    let embedGateWaiter = null;
+    let embedTogglesReady = false;
+    let embedIndicatorsReady = false;
+    function gateSnapshot() {
+        return { ready: true, userLoggedIn: !!state.userLoggedIn,
+            layersAllowed: !!state.layersAllowed, layersBlocked: !!state.layersBlocked,
+            layersTrial: state.layersTrial };
+    }
+    function publishGate() {
+        state.authGateReady = true;
+        const dock = window.LiqScopeDock;
+        if (dock && dock._bridgeSendAll) dock._bridgeSendAll({ type: "auth-gate", ...gateSnapshot() });
+    }
+    function applyEmbedGate(gate) {
+        if (!IS_EMBED || !gate || gate.ready !== true) return false;
+        const wasBlocked = state.layersBlocked;
+        state.userLoggedIn = !!gate.userLoggedIn;
+        state.layersAllowed = !!gate.layersAllowed;
+        state.layersBlocked = !!gate.layersBlocked;
+        state.layersTrial = gate.layersTrial || null;
+        state.authGateReady = true;
+        if (state.layersBlocked) hideLayerCall();
+        else if (wasBlocked) {
+            const call = $("layer-call");
+            if (call) call.classList.remove("hidden");
+        }
+        // Сообщение может прийти ПОСЛЕ безопасного таймаута. Обновляем уже
+        // созданные тумблеры без повторной установки обработчиков и не пишем
+        // «0» в общий с родителем localStorage при блокировке слоя.
+        if (embedTogglesReady && wasBlocked !== state.layersBlocked) {
+            Object.values(LAYER_DEFS).forEach((d) => {
+                let enabled = false;
+                if (state.layersAllowed) {
+                    try { enabled = localStorage.getItem(d.store) === "1"; } catch (e) {}
+                }
+                state[d.skey] = enabled;
+                d.el.classList.toggle("active", enabled);
+                d.el.title = I18n.t(enabled ? d.on : d.off);
+                if (d.pane) syncPaneVisibility(d.pane);
+            });
+            levelsPollSync();
+            bookPollSync();
+            if (state.layersAllowed) {
+                if (!embedIndicatorsReady) {
+                    setupIndicatorPanes();
+                    embedIndicatorsReady = true;
+                }
+                if (liqClustersWanted()) {
+                    loadLiqClusters();
+                    loadHistoryFor(chartSymbol(), true);
+                }
+            }
+            updateMarkers();
+            updateLiveStats();
+            queueRedraw();
+        }
+        if (state.layersBlocked) LAYER_KEYS.forEach((k) => { state[k] = false; });
+        paintLayerTrial();
+        return true;
+    }
+    function parentGate() {
+        try {
+            const host = window.parent !== window ? window.parent : window.opener;
+            if (host && host !== window && host.location.origin === location.origin &&
+                host.state && host.state.authGateReady) {
+                const p = host.state;
+                return { ready: true, userLoggedIn: p.userLoggedIn,
+                    layersAllowed: p.layersAllowed, layersBlocked: p.layersBlocked,
+                    layersTrial: p.layersTrial };
+            }
+        } catch (e) { /* чужой origin — права не наследуем */ }
+        return null;
+    }
+
     async function applyAuthGate() {
+        if (IS_EMBED) {
+            // Обычно родитель уже готов. Если ещё нет — ждём одно сообщение
+            // от chart_dock; после таймаута закрываем доступ, но не идём в сеть.
+            let gate = parentGate();
+            if (!gate) gate = await new Promise((resolve) => {
+                const timer = setTimeout(() => {
+                    embedGateWaiter = null;
+                    resolve(null);
+                }, 1500);
+                embedGateWaiter = (msg) => { clearTimeout(timer); resolve(msg); };
+            });
+            if (!applyEmbedGate(gate)) {
+                state.layersAllowed = false;
+                state.layersBlocked = true;
+                hideLayerCall();
+            }
+            return state.layersAllowed;
+        }
         const pair = await Promise.all([fetchAuthMe(), fetchLayersTrial()]);
         const user = pair[0], trial = pair[1];
         state.userLoggedIn = !!user;
@@ -6094,6 +6196,7 @@
                     openLayerGate();
                 }
             } catch {}
+            publishGate();
             return state.layersAllowed;
         }
         // пробный период включён — оригинальная логика main
@@ -6112,6 +6215,7 @@
             hideLayerCall();
             if (!gateDismissed()) openLayerGate();
         }
+        publishGate();
         return state.layersAllowed;
     }
 
@@ -7521,6 +7625,13 @@
         if (!d || d.source !== "liqscope-dock" || d.type !== "ws-data") return;
         const msg = d.payload;
         if (!msg || typeof msg !== "object") return;
+        if (msg.type === "auth-gate") {
+            if (applyEmbedGate(msg) && embedGateWaiter) {
+                embedGateWaiter(msg);
+                embedGateWaiter = null;
+            }
+            return;
+        }
         embedLastBeat = Date.now();
         if (msg.type === "ws-state") {
             // состояние родительского сокета: «подключено/переподключаемся»
@@ -7534,7 +7645,9 @@
     function embedNotifySub() {
         // сообщить доку свою пару/таймфрейм (метки слотов, синхронизация)
         try {
-            window.parent.postMessage({
+            const host = window.parent !== window ? window.parent : window.opener;
+            if (!host) return;
+            host.postMessage({
                 source: "liqscope-dock",
                 type: "embed-sub",
                 slot: EMBED_SLOT,
@@ -7892,11 +8005,13 @@
         // налегке — одни свечи и живые тики от родителя.
         applyAuthGate().then((allowed) => {
             setupLayerToggles(allowed);
+            embedTogglesReady = true;
             setupLayerPop();
             setupLayerGate();
             paintLayerTrial();
             setupFollowToggle();
             setupIndicatorPanes();
+            embedIndicatorsReady = allowed;
             updateMarkers();
             queueRedraw();
         });

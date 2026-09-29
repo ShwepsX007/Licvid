@@ -14,6 +14,9 @@
  */
 (function (global) {
     "use strict";
+    // URL доступен до DOMContentLoaded (в отличие от body.embed-mode).
+    const q = new URLSearchParams(global.location.search);
+    if (q.get("embed") === "1" || q.get("mode") === "panel") return;
 
     // Раз в минуту. LIQSCOPE_PRESENCE_MS подменяет интервал: в тестах ждать
     // минуту не нужно, а в неспешных деплоях можно и пореже.

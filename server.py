@@ -678,7 +678,7 @@ LEVELS_SNAP_SEC = max(10.0, float(os.getenv("LIQSCOPE_LEVELS_SNAP_SEC", "20") or
 # лестница по каждой монете. Он же главный подозреваемый в паузах воркера,
 # поэтому считает свою длительность сам и умеет выключаться для проверки.
 LEVELS_BG_ON = os.getenv("LIQSCOPE_LEVELS_BG", "1").strip() not in ("", "0", "false", "no")
-LEVELS_BATCH = max(1, int(os.getenv("LIQSCOPE_LEVELS_BATCH", "4") or 4))
+LEVELS_BATCH = max(1, int(os.getenv("LIQSCOPE_LEVELS_BATCH", "2") or 2))
 LEVELS_BG_SLOW_MS = max(100.0, float(os.getenv("LIQSCOPE_LEVELS_BG_SLOW_MS", "1000") or 1000))
 LEVELS_BG: Dict[str, float] = {
     "passes": 0.0, "symbols": 0.0, "last_pass_ms": 0.0, "max_pass_ms": 0.0,
@@ -4771,7 +4771,8 @@ app = FastAPI(title="LiqScope — Live Crypto Liquidation Terminal",
               default_response_class=_DEFAULT_RESPONSE_CLASS)
 
 # Последний add_middleware — внешний. Снаружи внутрь: считаем запросы,
-# режем флуд (до чтения тела), режем тело, жмём ответ, заголовки, CORS.
+# режем флуд (до чтения тела), режем тело, заголовки, CORS.
+# Ответы НЕ сжимаем: gzip для внешних клиентов делает nginx.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -4780,35 +4781,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(SecurityHeadersMiddleware)
-# Сжатие ответов. Уровень 9 (default starlette) — самый медленный, а на одном
-# воркере каждый миллисекунда сжатия умножается на RPS: замер на бою 29.09.2026
-# показал gzip.py:_compress_body преобладающим стеком в окне паузы при 100 rps
-# мимо nginx. Уровень 1 жмёт почти так же (на JSON разница единицы процентов),
-# но в разы дешевле. Основной gzip в бою всё равно делает nginx
-# (gzip_proxied any, gzip_comp_level 5), приложению остаются прямые заходы.
-GZIP_LEVEL = min(9, max(1, int(os.getenv("LIQSCOPE_GZIP_LEVEL", "1") or 1)))
-GZIP_MIN_SIZE = max(0, int(os.getenv("LIQSCOPE_GZIP_MIN_SIZE", "500") or 500))
-# starlette жмёт тело прямо в event loop, пока оно короче thread_minimum_size
-# (по умолчанию 128 КиБ) — на бою стек gzip.py:214:_compress_body <- :209:
-# apply_compression это ровно тот inline-путь. В потоке zlib отпускает GIL,
-# поэтому сжатие уходит на другие ядра и не держит воркер.
-GZIP_THREAD_MIN_SIZE = max(0, int(os.getenv("LIQSCOPE_GZIP_THREAD_MIN_SIZE",
-                                            str(32 * 1024)) or 32 * 1024))
-GZIP_APPLIED: Dict[str, object] = {}
-try:
-    from starlette.middleware.gzip import GZipMiddleware
-    # add_middleware не создаёт объект, поэтому TypeError за неверный параметр
-    # прилетел бы уже на старте приложения — смотрим сигнатуру заранее
-    _params = inspect.signature(GZipMiddleware.__init__).parameters
-    _kw: Dict[str, object] = {"minimum_size": GZIP_MIN_SIZE}
-    if "compresslevel" in _params:
-        _kw["compresslevel"] = GZIP_LEVEL
-    if "thread_minimum_size" in _params:
-        _kw["thread_minimum_size"] = GZIP_THREAD_MIN_SIZE
-    app.add_middleware(GZipMiddleware, **_kw)
-    GZIP_APPLIED = dict(_kw)
-except Exception as e:  # noqa: BLE001 — сжатие не должно ронять процесс
-    log.warning("GZipMiddleware недоступен — ответы уйдут без сжатия: %s", e)
 app.add_middleware(MaxBodyMiddleware)
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(MetricsMiddleware)
@@ -5767,12 +5739,8 @@ async def api_health():
             "max_custom_symbols": market_feed.MAX_CUSTOM_SYMBOLS,
             "user_symbol_cap": _user_symbol_cap(),
             "fast_json": FAST_JSON,
-            # чем и как жмём ответы: видно, что на бою работает уровень 1 и
-            # сжатие уходит в поток, а не держит event loop
-            "gzip": dict(GZIP_APPLIED) if GZIP_APPLIED else None,
-            "gzip_level": GZIP_LEVEL,
-            "gzip_min_size": GZIP_MIN_SIZE,
-            "gzip_thread_min_size": GZIP_THREAD_MIN_SIZE,
+            # GZipMiddleware отключён: nginx сжимает ответы за пределами Python.
+            "gzip": None,
             "exchanges": EXCHANGES,
             "tick_sources": TICK_SOURCES,
             "history_max": HISTORY_MAX,

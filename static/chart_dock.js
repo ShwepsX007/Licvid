@@ -169,8 +169,9 @@
         if (id === "native") return;
         const el = this.els.get(id);
         const frame = el && el.querySelector("iframe");
-        const win = frame && frame.contentWindow;
-        if (!win || win === window) return;
+        const win = this.meta[id] && this.meta[id].popped
+          ? this._pops.get(id) : (frame && frame.contentWindow);
+        if (!win || win === window || win.closed) return;
         try { fn(win); } catch (e) { /* фрейм мог умереть — не критично */ }
       });
     }
@@ -183,8 +184,9 @@
     _bridgeSendTo(id, payload) {
       const el = this.els.get(id);
       const frame = el && el.querySelector("iframe");
-      const win = frame && frame.contentWindow;
-      if (!win || win === window) return;
+      const win = this.meta[id] && this.meta[id].popped
+        ? this._pops.get(id) : (frame && frame.contentWindow);
+      if (!win || win === window || win.closed) return;
       try {
         win.postMessage({ source: "liqscope-dock", type: "ws-data", payload: payload },
                         location.origin);
@@ -268,6 +270,14 @@
         if (st && st.status && st.key) {
           this._bridgeSendTo(data.slot, { type: "ws-state", status: st.status, key: st.key });
         }
+        // Снимок прав только после проверки в главном окне. Более ранние
+        // iframe получат его через publishGate() по завершении auth/trial.
+        const gate = window.state;
+        if (gate && gate.authGateReady) this._bridgeSendTo(data.slot, {
+          type: "auth-gate", ready: true, userLoggedIn: !!gate.userLoggedIn,
+          layersAllowed: !!gate.layersAllowed, layersBlocked: !!gate.layersBlocked,
+          layersTrial: gate.layersTrial,
+        });
       }
     }
 

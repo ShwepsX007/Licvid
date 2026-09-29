@@ -8,6 +8,9 @@
  */
 
 (function () {
+  // Встроенный график не запускает ни один из циклов чата.
+  const q = new URLSearchParams(location.search);
+  if (q.get("embed") === "1" || q.get("mode") === "panel") return;
   const API = "/api/terminal/chat";
   const DM_API = "/api/chat/dm";
   const SVC_API = "/api/chat/services";

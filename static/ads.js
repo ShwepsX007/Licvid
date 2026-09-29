@@ -27,6 +27,9 @@
  */
 (function () {
     "use strict";
+    // URL доступен до DOMContentLoaded (в отличие от body.embed-mode).
+    const q = new URLSearchParams(window.location.search);
+    if (q.get("embed") === "1" || q.get("mode") === "panel") return;
 
     var HOST_ID = "ad-host";
     var HIDDEN_KEY = "liqscope.ads.hidden";       // наследие крестика

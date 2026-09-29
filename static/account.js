@@ -1,5 +1,8 @@
 (function (global) {
     "use strict";
+    // URL доступен до DOMContentLoaded (в отличие от body.embed-mode).
+    const q = new URLSearchParams(global.location.search);
+    if (q.get("embed") === "1" || q.get("mode") === "panel") return;
 
     var T = {
         ru: {

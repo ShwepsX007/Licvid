@@ -246,56 +246,26 @@ class CacheTest(unittest.TestCase):
         self.assertIsNone(cache.get("b"))
 
 
-class GzipCostTest(unittest.TestCase):
-    """Сжатие ответов: дешёвый уровень, но сжатие по-прежнему работает.
+class NoPythonGzipTest(unittest.TestCase):
+    """ASGI всегда отдаёт несжатое тело: компрессия остаётся в nginx."""
 
-    Замер на бою 29.09.2026 (100 rps мимо nginx) показал в окне паузы стек
-    ``gzip.py:_compress_body <- … <- server.py:send_wrap``: starlette по
-    умолчанию жмёт на уровне 9 — самом медленном, и на одном воркере это
-    умножается на RPS. Основной gzip в бою делает nginx (``gzip_proxied any``,
-    ``gzip_comp_level 5``), приложению остаются прямые заходы.
-    """
+    def test_no_gzip_middleware(self):
+        self.assertFalse(any("GZip" in m.cls.__name__
+                             for m in server.app.user_middleware))
 
-    def test_level_is_cheap_and_configurable(self):
-        self.assertEqual(server.GZIP_LEVEL, 1,
-                         "уровень сжатия снова 9 — воркер будет жать ответы "
-                         "вместо того, чтобы обслуживать запросы")
-        self.assertGreaterEqual(server.GZIP_MIN_SIZE, 0)
+    def test_accept_encoding_does_not_compress_json(self):
+        client = TestClient(server.app)
+        for path in ("/api/health", "/api/klines?symbol=BTC_USDT&tf=5"):
+            r = client.get(path, headers={"Accept-Encoding": "gzip"})
+            self.assertEqual(r.status_code, 200)
+            self.assertNotIn("content-encoding", r.headers, path)
+            self.assertFalse(r.content.startswith(b"\x1f\x8b"), path)
 
-    def test_middleware_got_the_level(self):
-        gz = [m for m in server.app.user_middleware
-              if "GZip" in getattr(m.cls, "__name__", "")]
-        self.assertEqual(len(gz), 1, "GZipMiddleware не подключён")
-        self.assertEqual(gz[0].kwargs.get("compresslevel"), server.GZIP_LEVEL)
-        self.assertEqual(gz[0].kwargs.get("minimum_size"), server.GZIP_MIN_SIZE)
-
-    def test_responses_are_still_compressed(self):
-        c = TestClient(server.app)
-        r = c.get("/api/health", headers={"Accept-Encoding": "gzip"})
-        self.assertEqual(r.status_code, 200)
-        # TestClient сам распаковывает тело: проверяем, что ответ целый
-        body = r.json()
-        self.assertEqual(body.get("status"), "ok")
-        self.assertTrue(body.get("config", {}).get("fast_json"),
-                        "orjson в ответах пропал")
-
-    def test_level_1_is_far_cheaper_than_9(self):
-        import gzip
-        import json
-        body = json.dumps({"rows": [{"symbol": f"S{i}", "clusters": [
-            {"p": 61000 + j, "v": 100 + j} for j in range(40)]}
-            for i in range(40)]}).encode()
-        def cost(level, n=60):
-            t0 = time.perf_counter()
-            for _ in range(n):
-                gzip.compress(body, compresslevel=level)
-            return (time.perf_counter() - t0) / n * 1000
-        c1, c9 = cost(1), cost(9)
-        self.assertLess(c1, c9, f"уровень 1 ({c1:.2f} мс) не дешевле 9 ({c9:.2f} мс)")
-        size1 = len(gzip.compress(body, compresslevel=1))
-        size9 = len(gzip.compress(body, compresslevel=9))
-        self.assertLess(size1, size9 * 1.25,
-                        "уровень 1 даёт заметно больший ответ — трафик вырастет")
+    def test_health_reports_no_python_gzip(self):
+        cfg = TestClient(server.app).get("/api/health").json()["config"]
+        self.assertIsNone(cfg["gzip"])
+        self.assertNotIn("gzip_level", cfg)
+        self.assertNotIn("gzip_thread_min_size", cfg)
 
 
 class GcWatchTest(unittest.TestCase):
@@ -335,7 +305,7 @@ class GcWatchTest(unittest.TestCase):
         finally:
             gc.unfreeze()
 
-    def test_health_reports_gc_log_and_gzip_state(self):
+    def test_health_reports_gc_and_log_state(self):
         server._HEALTH_CACHE.invalidate()
         d = TestClient(server.app).get("/api/health").json()
         server._HEALTH_CACHE.invalidate()
@@ -344,10 +314,6 @@ class GcWatchTest(unittest.TestCase):
                     "levels_events_cache"):
             self.assertIn(key, d, f"в /api/health нет {key}")
         self.assertTrue(d["log_async"], "журнал снова пишется в event loop")
-        cfg = d.get("config", {})
-        self.assertEqual(cfg.get("gzip_level"), server.GZIP_LEVEL)
-        self.assertIn("gzip_thread_min_size", cfg,
-                      "не видно, уходит ли сжатие в поток")
 
 
 class AsyncLoggingTest(unittest.TestCase):
@@ -449,26 +415,6 @@ class AsyncLoggingTest(unittest.TestCase):
         self.assertTrue(server.install_async_logging())
         self.assertIs(server._log_listener, first,
                       "повторный вызов поднял второго слушателя")
-
-
-class GzipThreadOffloadTest(unittest.TestCase):
-    """Сжатие уходит в поток: там zlib отпускает GIL и не держит воркер."""
-
-    def test_middleware_got_thread_threshold(self):
-        self.assertIn("thread_minimum_size", server.GZIP_APPLIED,
-                      "starlette жмёт тела в event loop до 128 КиБ")
-        self.assertLessEqual(server.GZIP_APPLIED["thread_minimum_size"],
-                             128 * 1024)
-        self.assertEqual(server.GZIP_APPLIED.get("compresslevel"),
-                         server.GZIP_LEVEL)
-
-    def test_kwargs_match_starlette_signature(self):
-        from starlette.middleware.gzip import GZipMiddleware
-        params = inspect.signature(GZipMiddleware.__init__).parameters
-        for kw in server.GZIP_APPLIED:
-            self.assertIn(kw, params,
-                          f"параметр {kw} не принимается установленной "
-                          "starlette — приложение не поднялось бы")
 
 
 class WsInitTailTest(unittest.TestCase):

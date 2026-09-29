@@ -42,3 +42,14 @@ $RECYCLE.BIN/
 .env
 .env.*
 secrets*.json
+
+# Рабочие данные сервера: шарды истории ликвидаций, часовые сводки, кэши
+# уровней и история OI создаются на лету (в том числе тестами в корне
+# репозитория) и в git не должны — их место на сервере, а не в коммите
+liq_history*.jsonl
+hours_*.json
+levels.json
+oi_history*.json
+accounts.db
+accounts.db-*
+*.sqlite3

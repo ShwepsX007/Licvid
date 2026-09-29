@@ -5580,6 +5580,11 @@ def _levels_cache_stats() -> Dict[str, object]:
         fn2 = getattr(LEVELS, "cache_stats", None)
         if callable(fn2):
             out["payload_cache"] = dict(fn2())
+        # бюджет пересчётов калибровки: после рестарта кэш калибровок пуст, и
+        # без бюджета первый проход фона платил пересчёт по всем монетам батча
+        fn3 = getattr(LEVELS, "calib_stats", None)
+        if callable(fn3):
+            out["calib_budget"] = dict(fn3())
     except Exception:                            # noqa: BLE001
         pass
     return out

@@ -30,6 +30,7 @@ import unittest
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
 
+import liq_levels as LL_mod
 from liq_levels import (CALIB_LEV, CALIB_SPREAD, DEFAULT_SETTINGS,  # noqa: E402
                        EXEC_TOLERANCE_REL, PAYLOAD_TTL, LevelsEngine,
                         _match_cell, actual_histogram, apply_executed,
@@ -859,6 +860,121 @@ class PayloadCachePriceBucketTest(unittest.TestCase):
         self.assertGreater(st["price_key_step"], 0.0)
         for key in ("entries", "hits", "misses"):
             self.assertIn(key, st)
+
+class CalibBudgetTest(unittest.TestCase):
+    """Бюджет пересчётов калибровки: рестарт не должен вешать воркер.
+
+    Кэш калибровок живёт сутки, но после каждого рестарта он пуст, и первый
+    проход фона платил пересчёт по всем монетам батча разом — на бою это дало
+    провал на 8 с, в котором event loop был отзывчив (loop_lag_max_ms 481), а
+    запросы зрителей стояли в очереди по 5-8 с.
+    """
+
+    def setUp(self):
+        self._budget = LL_mod.CALIB_BUDGET
+        self._window = LL_mod.CALIB_BUDGET_SEC
+
+    def tearDown(self):
+        LL_mod.CALIB_BUDGET = self._budget
+        LL_mod.CALIB_BUDGET_SEC = self._window
+
+    def _eng(self):
+        return LevelsEngine(oi=None, profile=None, side=None, risk=None,
+                            hist=None, klines=None, path="")
+
+    def _events(self, n=24):
+        return [{"price": 900.0 + i, "usd": 100.0, "side": "SELL"} for i in range(n)]
+
+    def _rows(self, n=8):
+        return [{"entry": 1000.0 + i, "long_usd": 10.0, "short_usd": 5.0,
+                 "mmr": 0.0, "ts": i} for i in range(n)]
+
+    def test_budget_limits_recalculations_in_window(self):
+        LL_mod.CALIB_BUDGET, LL_mod.CALIB_BUDGET_SEC = 1, 600.0
+        eng = self._eng()
+        settings = dict(DEFAULT_SETTINGS)
+        first = eng._calibration("AAA_USDT", self._rows(), self._events(),
+                                 1000.0, settings, None)
+        self.assertNotIn("deferred", first)
+        for sym in ("BBB_USDT", "CCC_USDT"):
+            got = eng._calibration(sym, self._rows(), self._events(),
+                                   1000.0, settings, None)
+            self.assertTrue(got.get("deferred"), f"{sym}: пересчёт не отложен")
+            self.assertIn("отложена", got["reason"])
+            self.assertNotIn(sym, eng._calib)     # не запомнили — доберёт потом
+        self.assertEqual(eng.calib_stats()["deferred"], 2)
+        self.assertEqual(len(eng._calib), 1)
+
+    def test_explicit_recalibrate_bypasses_budget(self):
+        LL_mod.CALIB_BUDGET, LL_mod.CALIB_BUDGET_SEC = 1, 600.0
+        eng = self._eng()
+        settings = dict(DEFAULT_SETTINGS)
+        eng._calibration("AAA_USDT", self._rows(), self._events(), 1000.0,
+                         settings, None)            # расходует единственный токен
+        got = eng._calibration("BBB_USDT", self._rows(), self._events(), 1000.0,
+                               settings, True)      # явный запрос из API
+        self.assertNotIn("deferred", got)
+        self.assertIn("BBB_USDT", eng._calib)
+
+    def test_deferred_keeps_previous_calibration_and_stays_stale(self):
+        LL_mod.CALIB_BUDGET, LL_mod.CALIB_BUDGET_SEC = 1, 600.0
+        eng = self._eng()
+        settings = dict(DEFAULT_SETTINGS)
+        # тратим единственный токен на другой монете
+        eng._calibration("AAA_USDT", self._rows(), self._events(), 1000.0,
+                         settings, None)
+        # прежняя калибровка есть, но устарела
+        eng._calib["DDD_USDT"] = {"applied": True, "lev_scale": 1.4,
+                                  "spread_scale": 0.75, "score": 0.5,
+                                  "events": 30, "reason": "", "ts": 1.0}
+        got = eng._calibration("DDD_USDT", self._rows(), self._events(), 1000.0,
+                               settings, None)
+        self.assertTrue(got.get("deferred"))
+        self.assertEqual(got["lev_scale"], 1.4)     # работаем с прежней
+        # ts не обновлён: запись по-прежнему устаревшая и будет пересчитана
+        self.assertEqual(eng._calib["DDD_USDT"]["ts"], 1.0)
+        self.assertNotIn("deferred", eng._calib["DDD_USDT"])
+
+    def test_budget_refills_with_time(self):
+        LL_mod.CALIB_BUDGET, LL_mod.CALIB_BUDGET_SEC = 1, 1.0
+        eng = self._eng()
+        settings = dict(DEFAULT_SETTINGS)
+        eng._calibration("AAA_USDT", self._rows(), self._events(), 1000.0,
+                         settings, None)
+        got = eng._calibration("BBB_USDT", self._rows(), self._events(), 1000.0,
+                               settings, None)
+        self.assertTrue(got.get("deferred"))
+        # окно пополнения прошло — токен снова есть
+        eng._calib_tokens_at -= 5.0
+        again = eng._calibration("BBB_USDT", self._rows(), self._events(),
+                                 1000.0, settings, None)
+        self.assertNotIn("deferred", again)
+        self.assertIn("BBB_USDT", eng._calib)
+
+    def test_budget_zero_means_unlimited(self):
+        LL_mod.CALIB_BUDGET = 0
+        eng = self._eng()
+        settings = dict(DEFAULT_SETTINGS)
+        for sym in ("AAA_USDT", "BBB_USDT", "CCC_USDT"):
+            got = eng._calibration(sym, self._rows(), self._events(), 1000.0,
+                                   settings, None)
+            self.assertNotIn("deferred", got)
+        self.assertEqual(len(eng._calib), 3)
+        self.assertEqual(eng.calib_stats()["budget"], 0)
+
+    def test_fresh_calibration_is_not_recounted(self):
+        """Свежая калибровка токенов не тратит: бюджет только на пересчёты."""
+        LL_mod.CALIB_BUDGET, LL_mod.CALIB_BUDGET_SEC = 1, 600.0
+        eng = self._eng()
+        settings = dict(DEFAULT_SETTINGS)
+        eng._calibration("AAA_USDT", self._rows(), self._events(), 1000.0,
+                         settings, None)
+        before = eng._calib_tokens
+        for _ in range(5):
+            eng._calibration("AAA_USDT", self._rows(), self._events(), 1000.0,
+                             settings, None)
+        self.assertEqual(eng._calib_tokens, before)
+        self.assertEqual(eng.calib_stats()["deferred"], 0)
 
 
 if __name__ == "__main__":

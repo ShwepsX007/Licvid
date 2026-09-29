@@ -57,6 +57,17 @@ CALIB_SPREAD = (0.5, 0.75, 1.0, 1.5, 2.0)
 #: модель за размазанность колокола, крупная путает соседние ступени плеч.
 CALIB_COARSE_REL = 0.01
 CALIB_TTL_SEC = 86400.0
+# Бюджет пересчётов калибровки. Кэш калибровок живёт сутки, но после каждого
+# рестарта он ПУСТ, и первый же проход фона платил пересчёт по всем монетам
+# батча разом: на бою 29.09.2026 это дало провал на 8 с, в течение которого
+# event loop оставался отзывчивым (loop_lag_max_ms 481), обработчик отвечал за
+# 15 мс, а запросы зрителей стояли в очереди по 5-8 с — воркер делил CPU с
+# расчётом. Бюджет растягивает пересчёты по проходам: монета без свежей
+# калибровки работает с прежним или умолчательным масштабом и добирает пересчёт
+# следующим проходом. Явный recalibrate=True из API бюджет не расходует.
+CALIB_BUDGET = max(0, int(os.getenv("LIQSCOPE_LEVELS_CALIB_BUDGET", "2") or 2))
+CALIB_BUDGET_SEC = max(1.0, float(
+    os.getenv("LIQSCOPE_LEVELS_CALIB_BUDGET_SEC", "30") or 30))
 MIN_CALIB_EVENTS = 20
 MIN_CALIB_SCORE = 0.15
 
@@ -932,6 +943,10 @@ class LevelsEngine:
         self._settings: Dict[str, Any] = dict(DEFAULT_SETTINGS)
         self._settings["enabled"] = bool(enabled)
         self._calib: Dict[str, dict] = {}
+        # токены бюджета пересчётов калибровки (см. CALIB_BUDGET)
+        self._calib_tokens = float(CALIB_BUDGET)
+        self._calib_tokens_at = time.time()
+        self._calib_deferred = 0
         self._cache: Dict[tuple, Tuple[float, dict]] = {}
         self._cache_hits = 0
         self._cache_misses = 0
@@ -1301,6 +1316,31 @@ class LevelsEngine:
         return out
 
     # ----- калибровка ------------------------------------------------------
+    def _calib_budget_take(self) -> bool:
+        """Есть ли токен на очередной пересчёт калибровки (бакет с пополнением).
+
+        Бюджет 0 означает «без ограничения»: тогда пересчёт происходит всякий
+        раз, как калибровка устарела, — прежнее поведение.
+        """
+        if CALIB_BUDGET <= 0:
+            return True
+        now = time.time()
+        elapsed = max(0.0, now - self._calib_tokens_at)
+        self._calib_tokens = min(float(CALIB_BUDGET), self._calib_tokens
+                                 + elapsed * (float(CALIB_BUDGET) / CALIB_BUDGET_SEC))
+        self._calib_tokens_at = now
+        if self._calib_tokens < 1.0:
+            return False
+        self._calib_tokens -= 1.0
+        return True
+
+    def calib_stats(self) -> Dict[str, Any]:
+        """Состояние бюджета пересчётов — видно в /api/health."""
+        return {"budget": int(CALIB_BUDGET), "budget_sec": round(CALIB_BUDGET_SEC, 1),
+                "tokens": round(float(self._calib_tokens), 2),
+                "deferred": int(self._calib_deferred),
+                "symbols": len(self._calib)}
+
     def _calibration(self, symbol: str, rows: Sequence[dict], events: Sequence[dict],
                      price: float, settings: Dict[str, Any],
                      recalibrate: Optional[bool]) -> dict:
@@ -1311,6 +1351,16 @@ class LevelsEngine:
         if not settings.get("calibrate", True):
             return cur if cur else {"applied": False, "reason": "калибровка выключена"}
         if recalibrate is True or (not fresh and len(events) >= MIN_CALIB_EVENTS):
+            if recalibrate is not True and not self._calib_budget_take():
+                # пересчёт отложен: отдаём прежнее (или честный отказ), но НЕ
+                # запоминаем и не обновляем ts — иначе монета стала бы «свежей»
+                # и следующего шанса не получила бы
+                self._calib_deferred += 1
+                out = dict(cur) if cur else {"applied": False,
+                                             "events": len(events)}
+                out["deferred"] = True
+                out["reason"] = "отложена: лимит пересчётов калибровки"
+                return out
             got = calibrate(rows, events, price, settings)
             # даже отказ запоминаем: считать перебор на каждом запросе незачем
             self._calib[sym] = got

@@ -30,12 +30,13 @@ import unittest
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
 
-from liq_levels import (DEFAULT_SETTINGS, PAYLOAD_TTL,  # noqa: E402
-                       LevelsEngine, actual_histogram,
-                        apply_executed, build_ladder, build_rows, calibrate,
+from liq_levels import (CALIB_LEV, CALIB_SPREAD, DEFAULT_SETTINGS,  # noqa: E402
+                       EXEC_TOLERANCE_REL, PAYLOAD_TTL, LevelsEngine,
+                        _match_cell, actual_histogram, apply_executed,
+                        base_mass_histogram, build_ladder, build_rows, calibrate,
                         cumulative, grid_step, ladder_rows, liq_price,
                         normalize_dist, overlap_score, pick_magnets, snap,
-                        spread_kernel)
+                        spread_kernel, spread_mass)
 
 HOUR = 3600
 BUCKET = 300
@@ -862,3 +863,119 @@ class PayloadCachePriceBucketTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class CalibrationFastPathTest(unittest.TestCase):
+    """Калибровка без 25 полных лестниц: гистограмма масс и свёртка колоколом.
+
+    Перебор сетки стоил 98.9 с на 8639 строках и 20000 событиях (замер
+    29.09.2026) и вешал единственный воркер на весь прогон. Быстрый путь обязан
+    давать РОВНО тот же выбор параметров — иначе модель начнёт подбирать плечи
+    на глазок, а цена ошибки видна пользователю в слое уровней.
+    """
+
+    def _rows(self, entry=1000.0, n=40):
+        return [{"entry": entry * (1.0 + 0.001 * (i % 17)), "long_usd": 25.0 + i,
+                 "short_usd": 12.5 + 0.5 * i, "mmr": 0.005 * (i % 3), "ts": i}
+                for i in range(n)]
+
+    def test_mass_histogram_equals_ladder_mass(self):
+        """Гистограмма + свёртка = массы лестницы: свёртка линейна."""
+        settings = dict(DEFAULT_SETTINGS)
+        rows = self._rows()
+        for lev_scale in (0.5, 1.0, 2.0):
+            for spread_scale in (0.5, 1.0, 2.0):
+                probe = dict(settings, lev_scale=lev_scale,
+                             spread_scale=spread_scale)
+                ladder = build_ladder(rows, probe, 1000.0)
+                hist, step = base_mass_histogram(rows, settings, 1000.0, lev_scale)
+                step_rel = max(float(settings.get("step_rel") or 0.001), 1e-6)
+                spread_rel = max(float(settings.get("spread_rel") or 0.01), 0.0)
+                kernel = spread_kernel(spread_rel * spread_scale, step_rel)
+                ksteps = [(int(round(off / step_rel)), w) for off, w in kernel]
+                model = spread_mass(hist, step, ksteps)
+                self.assertEqual(sorted(model), sorted(ladder),
+                                 f"цены расходятся при {lev_scale}/{spread_scale}")
+                for price, cell in ladder.items():
+                    self.assertAlmostEqual(model[price], cell["usd"], places=6,
+                                           msg=f"масса {price} при "
+                                               f"{lev_scale}/{spread_scale}")
+
+    def test_calibrate_matches_bruteforce_grid(self):
+        """Быстрая калибровка выбирает то же, что честный перебор сетки."""
+        settings = dict(DEFAULT_SETTINGS)
+        rows = self._rows(n=60)
+        step = grid_step(1000.0, settings.get("step_rel"))
+        # «факт» — лестница, снятая при другом масштабе плеч: перебор обязан
+        # его найти, и быстрый путь обязан найти тот же масштаб
+        truth = build_ladder(rows, dict(settings, lev_scale=0.7,
+                                        spread_scale=1.5), 1000.0)
+        actual = [{"price": p, "usd": c["long_usd"] or c["usd"], "side": "SELL"}
+                  for p, c in sorted(truth.items()) if (c["long_usd"] or 0) > 0]
+        self.assertGreaterEqual(len(actual), 20)
+
+        hist_actual = actual_histogram(actual, 1000.0, step)
+        best = None
+        for lev_scale in CALIB_LEV:
+            for spread_scale in CALIB_SPREAD:
+                probe = dict(settings, lev_scale=lev_scale,
+                             spread_scale=spread_scale)
+                score = overlap_score(build_ladder(rows, probe, 1000.0),
+                                      hist_actual, 0.01)
+                if best is None or score > best["score"]:
+                    best = {"lev_scale": lev_scale, "spread_scale": spread_scale,
+                            "score": score}
+        res = calibrate(rows, actual, 1000.0, settings)
+        self.assertTrue(res["applied"])
+        self.assertEqual((res["lev_scale"], res["spread_scale"]),
+                         (best["lev_scale"], best["spread_scale"]))
+        self.assertAlmostEqual(res["score"], best["score"], places=5)
+        self.assertAlmostEqual(res["lev_scale"], 0.7, places=6)
+
+    def test_calibrate_reports_no_mass_in_window(self):
+        """Строки есть, но все ликвидации за окном цены — честный отказ."""
+        settings = dict(DEFAULT_SETTINGS)
+        # входы в 100 раз выше цены: ни одна ступень не попадёт в окно ±50 %
+        rows = [{"entry": 100000.0, "long_usd": 50.0, "short_usd": 50.0,
+                 "mmr": 0.0, "ts": i} for i in range(5)]
+        actual = [{"price": 900.0, "usd": 10.0, "side": "SELL"}] * 25
+        res = calibrate(rows, actual, 1000.0, settings)
+        self.assertFalse(res["applied"])
+        self.assertIn("нет массы в окне цены", res["reason"])
+
+    def test_match_cell_agrees_with_and_without_sorted_index(self):
+        """Бинарный спуск и перебор всей лестницы дают одну и ту же ячейку."""
+        settings = dict(DEFAULT_SETTINGS)
+        ladder = build_ladder(self._rows(n=25), settings, 1000.0)
+        levels = sorted(ladder)
+        step = grid_step(1000.0, settings.get("step_rel"))
+        for k in range(0, 40):
+            price = 900.0 + k * 5.37
+            for key in ("long_usd", "short_usd"):
+                slow = _match_cell(ladder, price, step, key, EXEC_TOLERANCE_REL)
+                fast = _match_cell(ladder, price, step, key, EXEC_TOLERANCE_REL,
+                                   levels)
+                self.assertEqual(slow, fast, f"расхождение на {price}/{key}")
+
+    def test_match_cell_skips_exhausted_and_honours_tolerance(self):
+        ladder = {990.0: {"usd": 5.0, "long_usd": 0.0, "short_usd": 5.0, "lev": {}},
+                  1000.0: {"usd": 0.0, "long_usd": 0.0, "short_usd": 0.0, "lev": {}},
+                  1010.0: {"usd": 7.0, "long_usd": 7.0, "short_usd": 0.0, "lev": {}}}
+        levels = sorted(ladder)
+        # ближайшая ячейка пуста по лонгам — берём следующую в пределах допуска
+        self.assertEqual(_match_cell(ladder, 1000.5, 1.0, "long_usd", 0.02, levels),
+                         1010.0)
+        # по шортам масса есть ровно в 990
+        self.assertEqual(_match_cell(ladder, 1000.5, 1.0, "short_usd", 0.02, levels),
+                         990.0)
+        # за допуском — ничего, даже если масса есть
+        self.assertIsNone(_match_cell(ladder, 1200.0, 1.0, "long_usd", 0.02, levels))
+        # нулевой допуск оставляет только точное попадание в корзину:
+        # snap(1010.4, шаг 1.0) = 1010.0 — уровень существует, быстрый путь
+        # срабатывает до всякого допуска; с шагом 0.5 цена ложится между
+        self.assertEqual(_match_cell(ladder, 1010.0, 1.0, "long_usd", 0.0, levels),
+                         1010.0)
+        self.assertEqual(_match_cell(ladder, 1010.4, 1.0, "long_usd", 0.0, levels),
+                         1010.0)
+        self.assertIsNone(_match_cell(ladder, 1010.4, 0.5, "long_usd", 0.0, levels))
+        self.assertIsNone(_match_cell({}, 1000.0, 1.0, "long_usd", 0.02, []))

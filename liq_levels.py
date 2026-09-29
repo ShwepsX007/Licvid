@@ -352,6 +352,10 @@ def build_ladder(rows: Sequence[dict], settings: Dict[str, Any],
     spread_rel = max(_fnum((settings or {}).get("spread_rel"), 0.01), 0.0) * \
         max(_fnum((settings or {}).get("spread_scale"), 1.0), 0.05)
     kernel = spread_kernel(spread_rel, step_rel)
+    # Смещения колокола в шагах сетки не зависят ни от строки, ни от плеча:
+    # считаем один раз, иначе round() звался на каждой итерации самого
+    # внутреннего цикла (строк × плеч × сторон × отсчётов колокола).
+    ksteps = [(int(round(off_rel / step_rel)), kw) for off_rel, kw in kernel]
     dist = normalize_dist((settings or {}).get("lev_dist"))
     lev_scale = max(_fnum((settings or {}).get("lev_scale"), 1.0), 0.05)
     floor = p0 * (1.0 - MAX_DISTANCE_REL)
@@ -368,6 +372,7 @@ def build_ladder(rows: Sequence[dict], settings: Dict[str, Any],
             eff = lev * lev_scale
             if eff <= 1.0:
                 continue
+            eff_key = round(eff, 1)
             for is_long, mass in ((True, long_mass * weight),
                                   (False, short_mass * weight)):
                 if mass <= 0:
@@ -375,23 +380,27 @@ def build_ladder(rows: Sequence[dict], settings: Dict[str, Any],
                 liq = liq_price(entry, is_long, eff, mmr)
                 if liq is None or liq < floor or liq > ceil:
                     continue          # абсурдные цены — не наш рынок
-                base = snap(liq, step)
-                if base is None:
+                # было snap(liq, step) и level_index(base, step) ВНУТРИ цикла по
+                # колоколу: номер корзины от смещения не зависит, а переход
+                # «цена -> корзина -> цена -> корзина» даёт тот же номер
+                idx = level_index(liq, step)
+                if idx is None:
                     continue
-                for off_rel, kweight in kernel:
-                    idx = level_index(base, step)
-                    if idx is None:
-                        continue
+                key = "long_usd" if is_long else "short_usd"
+                for k, kweight in ksteps:
                     # смещение колокола — доля цены, поэтому в шагах сетки оно
                     # то же самое, что и в абсолютной цене
-                    price_key = index_price(idx + round(off_rel / step_rel), step)
-                    cell = _cell(ladder, price_key)
+                    price_key = round((idx + k) * step, 10)
+                    cell = ladder.get(price_key)
+                    if cell is None:
+                        cell = {"usd": 0.0, "long_usd": 0.0, "short_usd": 0.0,
+                                "lev": {}}
+                        ladder[price_key] = cell
                     part = mass * kweight
-                    cell["usd"] = _fnum(cell.get("usd")) + part
-                    key = "long_usd" if is_long else "short_usd"
-                    cell[key] = _fnum(cell.get(key)) + part
-                    levs = cell.setdefault("lev", {})
-                    levs[round(eff, 1)] = _fnum(levs.get(round(eff, 1))) + part
+                    cell["usd"] += part
+                    cell[key] += part
+                    levs = cell["lev"]
+                    levs[eff_key] = levs.get(eff_key, 0.0) + part
     return ladder
 
 
@@ -415,24 +424,47 @@ def _is_long_event(ev: dict) -> bool:
 
 
 def _match_cell(ladder: Dict[float, dict], price: float, step: Optional[float],
-                key: str, tolerance_rel: float) -> Optional[float]:
-    """Ближайшая корзина к цене события — той же стороны и в пределах допуска."""
+                key: str, tolerance_rel: float,
+                levels: Optional[Sequence[float]] = None) -> Optional[float]:
+    """Ближайшая корзина к цене события — той же стороны и в пределах допуска.
+
+    ``levels`` — цены лестницы по возрастанию: с ними поиск идёт бинарным
+    спуском к точке вставки и коротким проходом в стороны, а не перебором всех
+    ячеек. Перебор стоил «событий × ячеек»: 20000 событий и 170 уровней — 3.4 млн
+    сравнений и 1.2 с на одну монету (замер 29.09.2026), при том что допуск
+    2 % покрывает от силы пару десятков корзин.
+
+    Первая же найденная по ходу корзина с массой — и есть ближайшая: стороны
+    перебираются в порядке возрастания зазора. При равном зазоре слева и справа
+    берётся нижняя цена (раньше решал порядок вставки в словарь — он не был
+    детерминирован по смыслу, зато делал поиск линейным).
+    """
     if not ladder:
         return None
     exact = snap(price, step) if step else price
     if exact is not None and exact in ladder and _fnum(ladder[exact].get(key)) > 0:
         return exact
     tol = abs(price) * max(_fnum(tolerance_rel, EXEC_TOLERANCE_REL), 0.0)
-    best, best_gap = None, None
-    for level, cell in ladder.items():
-        if _fnum(cell.get(key)) <= 0:
-            continue
-        gap = abs(level - price)
+    keys = sorted(ladder) if levels is None else levels
+    n = len(keys)
+    i = bisect.bisect_left(keys, price)
+    lo, hi = i - 1, i
+    while lo >= 0 or hi < n:
+        gap_lo = (price - keys[lo]) if lo >= 0 else None
+        gap_hi = (keys[hi] - price) if hi < n else None
+        if gap_hi is None or (gap_lo is not None and gap_lo <= gap_hi):
+            gap, k, go_left = gap_lo, keys[lo], True
+        else:
+            gap, k, go_left = gap_hi, keys[hi], False
         if gap > tol:
-            continue
-        if best_gap is None or gap < best_gap:
-            best, best_gap = level, gap
-    return best
+            break           # дальше с обеих сторон только дальше — допуска нет
+        if _fnum(ladder[k].get(key)) > 0:
+            return k
+        if go_left:
+            lo -= 1
+        else:
+            hi += 1
+    return None
 
 
 def apply_executed(ladder: Dict[float, dict], events: Iterable[dict],
@@ -449,6 +481,9 @@ def apply_executed(ladder: Dict[float, dict], events: Iterable[dict],
     далеко или сторона не та).
     """
     st = _num(step)
+    # цены лестницы не меняются внутри цикла (пустые корзины удаляются после),
+    # поэтому сортировка одна на все события, а не на каждое
+    levels = sorted(ladder) if ladder else []
     taken, used, skipped = 0.0, 0, 0
     for ev in events or []:
         if not isinstance(ev, dict):
@@ -457,7 +492,7 @@ def apply_executed(ladder: Dict[float, dict], events: Iterable[dict],
         if price is None or price <= 0 or usd <= 0:
             continue
         key = "long_usd" if _is_long_event(ev) else "short_usd"
-        level = _match_cell(ladder, price, st, key, tolerance_rel)
+        level = _match_cell(ladder, price, st, key, tolerance_rel, levels)
         if level is None:
             skipped += 1
             continue
@@ -736,6 +771,77 @@ def overlap_score(model: Any, actual: Any, step_rel: float = CALIB_COARSE_REL) -
     return round(sum(min(v, ba.get(k, 0.0)) for k, v in bm.items()), 6)
 
 
+def base_mass_histogram(rows: Sequence[dict], settings: Dict[str, Any],
+                        price: Any, lev_scale: Optional[float] = None
+                        ) -> Tuple[Dict[int, float], float]:
+    """Масса позиций по корзинам сетки ДО размазывания колоколом.
+
+    Калибровке не нужны ячейки лестницы с разбивкой по сторонам и плечам:
+    ``overlap_score`` смотрит только на массу по цене (``_hist_usd``). Поэтому
+    здесь считается лишь «корзина -> доллары», без словарей ячеек, — а колокол
+    применяется уже к гистограмме, и его можно менять, не пересчитывая строки.
+
+    Возвращает ``(гистограмма, шаг_сетки)``; пустая гистограмма — считать нечего.
+    """
+    p0 = _num(price)
+    settings = settings or {}
+    step = grid_step(p0, settings.get("step_rel"))
+    if p0 is None or p0 <= 0 or step <= 0:
+        return {}, 0.0
+    dist = normalize_dist(settings.get("lev_dist"))
+    scale = max(_fnum(lev_scale if lev_scale is not None
+                      else settings.get("lev_scale"), 1.0), 0.05)
+    floor = p0 * (1.0 - MAX_DISTANCE_REL)
+    ceil = p0 * (1.0 + MAX_DISTANCE_REL)
+    hist: Dict[int, float] = {}
+    get = hist.get
+    for row in rows or []:
+        entry = _num(row.get("entry"))
+        if not entry or entry <= 0:
+            continue
+        long_mass = max(_fnum(row.get("long_usd")), 0.0)
+        short_mass = max(_fnum(row.get("short_usd")), 0.0)
+        if long_mass <= 0 and short_mass <= 0:
+            continue
+        mmr = max(_fnum(row.get("mmr")), 0.0)
+        for lev, weight in dist:
+            eff = lev * scale
+            if eff <= 1.0:
+                continue
+            if long_mass > 0:
+                liq = liq_price(entry, True, eff, mmr)
+                if liq is not None and floor <= liq <= ceil:
+                    idx = level_index(liq, step)
+                    if idx is not None:
+                        hist[idx] = get(idx, 0.0) + long_mass * weight
+            if short_mass > 0:
+                liq = liq_price(entry, False, eff, mmr)
+                if liq is not None and floor <= liq <= ceil:
+                    idx = level_index(liq, step)
+                    if idx is not None:
+                        hist[idx] = get(idx, 0.0) + short_mass * weight
+    return hist, step
+
+
+def spread_mass(hist: Dict[int, float], step: float,
+                ksteps: Sequence[Tuple[int, float]]) -> Dict[float, float]:
+    """Размазать массу гистограммы колоколом — то же, что делает build_ladder.
+
+    Свёртка линейна, поэтому результат совпадает с лестницей, собранной по
+    строкам, но стоимость зависит от числа ЗАНЯТЫХ корзин, а не от числа строк:
+    на сетке калибровки это сотни ячеек против тысяч строк.
+    """
+    out: Dict[float, float] = {}
+    get = out.get
+    for idx, mass in (hist or {}).items():
+        if mass <= 0:
+            continue
+        for k, w in ksteps:
+            price_key = round((idx + k) * step, 10)
+            out[price_key] = get(price_key, 0.0) + mass * w
+    return out
+
+
 def calibrate(rows: Sequence[dict], actual_events: Sequence[dict], price: Any,
               settings: Optional[Dict[str, Any]] = None) -> dict:
     """Подобрать масштаб плеч и ширину колокола по фактическим ликвидациям.
@@ -759,16 +865,31 @@ def calibrate(rows: Sequence[dict], actual_events: Sequence[dict], price: Any,
     if not actual:
         return {"applied": False, "reason": "факт без цен",
                 "events": len(events), "ts": time.time()}
+    # Сетка перебора стоила 25 полных лестниц: 98.9 с на 8639 строках и
+    # 20000 событиях (замер 29.09.2026) — столько длится один проход фона
+    # уровней, и всё это время единственный воркер обслуживает запросы вместе
+    # с расчётом. Теперь строки обходятся один раз на масштаб плеч (5 вместо
+    # 25), а ширина колокола применяется уже к готовой гистограмме масс:
+    # свёртка линейна, поэтому оценка совпадает с прежней.
+    step_rel = max(_fnum(settings.get("step_rel"), 0.001), 1e-6)
+    spread_rel = max(_fnum(settings.get("spread_rel"), 0.01), 0.0)
     best: Optional[dict] = None
     for lev_scale in CALIB_LEV:
+        hist, step = base_mass_histogram(rows, settings, price, lev_scale)
+        if not hist:
+            continue
         for spread_scale in CALIB_SPREAD:
-            probe = dict(settings, lev_scale=lev_scale, spread_scale=spread_scale)
-            ladder = build_ladder(rows, probe, price)
-            score = overlap_score(ladder, actual, CALIB_COARSE_REL)
+            kernel = spread_kernel(
+                spread_rel * max(_fnum(spread_scale, 1.0), 0.05), step_rel)
+            ksteps = [(int(round(off / step_rel)), w) for off, w in kernel]
+            score = overlap_score(spread_mass(hist, step, ksteps), actual,
+                                  CALIB_COARSE_REL)
             if best is None or score > best["score"]:
                 best = {"lev_scale": lev_scale, "spread_scale": spread_scale,
                         "score": score}
-    assert best is not None
+    if best is None:
+        return {"applied": False, "reason": "нет массы в окне цены",
+                "events": len(events), "ts": time.time()}
     if best["score"] < MIN_CALIB_SCORE:
         return {"applied": False, "reason": f"совпадение слабое: {best['score']:.2f}",
                 "score": best["score"], "events": len(events), "ts": time.time()}

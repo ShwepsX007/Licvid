@@ -35,7 +35,6 @@ POLL_MODE = os.getenv("LIQSCOPE_WHALE_MODE", "realtime").strip().lower()
 if POLL_MODE not in ("realtime", "economy"):
     POLL_MODE = "realtime"
 HISTORY_INTERVAL_OPTIONS = (5, 10, 15, 30, 60)
-SOLANA_WS_BASE = os.getenv("LIQSCOPE_SOLANA_WS", "wss://solana-mainnet.g.alchemy.com/v2/")
 SOLANA_HTTP_BASE = os.getenv("LIQSCOPE_SOLANA_HTTP", "https://solana-mainnet.g.alchemy.com/v2/")
 SPL_TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 TRON_API_BASE = os.getenv("LIQSCOPE_TRONGRID_URL", "https://api.trongrid.io").rstrip("/")
@@ -44,17 +43,7 @@ SOLANA_POLL_INTERVAL_SEC = 30.0
 SOLANA_TOKEN_ACCOUNT_REFRESH_SEC = 600.0
 SOLANA_SIGNATURE_LIMIT = 10
 SOLANA_POLL_CONCURRENCY = 8
-SOLANA_FALLBACK_QUEUE_SIZE = 64
-SOLANA_FALLBACK_SEEN_LIMIT = 5000
-try:
-    SOLANA_FALLBACK_CU_LIMIT = max(0, int(os.getenv("LIQSCOPE_SOLANA_FALLBACK_CU", "1000000")))
-except (TypeError, ValueError):
-    SOLANA_FALLBACK_CU_LIMIT = 1_000_000
-try:
-    SOLANA_FALLBACK_INTERVAL_OVERRIDE = max(
-        0.0, float(os.getenv("LIQSCOPE_SOLANA_FALLBACK_INTERVAL_SEC", "0")))
-except (TypeError, ValueError):
-    SOLANA_FALLBACK_INTERVAL_OVERRIDE = 0.0
+SOLANA_PROCESSED_SIGNATURE_LIMIT = 5000
 TRON_USD_CONTRACTS = dict(TRON_TOKENS)
 SOLANA_BLOCKS_PER_SEC = {"ETH": 1 / 12, "BNB": 1 / 3, "POLYGON": 0.5,
                          "ARBITRUM": 4.0, "BASE": 0.5}
@@ -171,8 +160,6 @@ class WhalePoller:
                               "connected": False, "state": "waiting", "subscriptions": 0,
                               "submitted": 0, "active_wallets": 0, "mode": "cex_wallets",
                               "processing_state": "idle", "waiting_for_filters": False,
-                              "fallback_queue": 0, "fallback_dropped": 0,
-                              "fallback_cu": 0, "fallback_cu_limit": 0,
                               "token_accounts": 0, "poll_addresses": 0,
                               "events": 0, "last_success": 0.0, "error": ""}
         self.tron_status = {"network": "TRON", "provider": "trongrid",
@@ -182,9 +169,6 @@ class WhalePoller:
         self._solana_processed_signature_order: deque[str] = deque()
         self._solana_signature_inflight: set[str] = set()
         self._solana_token_accounts: dict[str, dict[str, set[str]]] = {}
-        self._solana_fallback_seen: set[str] = set()
-        self._solana_fallback_seen_order: deque[str] = deque()
-        self._solana_fallback_last_error_log = 0.0
         self._tron_seen: dict[str, float] = {}
         self._tron_last_event_ms = int(time.time() * 1000) - 15_000
         self.evm_streams = {chain: {"connected": False, "state": "waiting",
@@ -755,45 +739,10 @@ class WhalePoller:
     def _solana_safe_text(self, value: object) -> str:
         return self._redact_api_keys(str(value).strip())
 
-    def _solana_fallback_budget_state(self) -> tuple[int, int]:
-        month = datetime.now(timezone.utc).strftime("%Y-%m")
-        if self.state.get("solana_fallback_month") != month:
-            self.state["solana_fallback_month"] = month
-            self.state["solana_fallback_cu"] = 0
-            self._save()
-        try:
-            used = max(0, int(self.state.get("solana_fallback_cu", 0) or 0))
-        except (TypeError, ValueError):
-            used = 0
-            self.state["solana_fallback_cu"] = 0
-        limit = min(SOLANA_FALLBACK_CU_LIMIT, max(0, self.monthly_cu // 10))
-        self.solana_status.update(fallback_cu=used, fallback_cu_limit=limit)
-        return used, limit
-
-    def _solana_fallback_interval(self, limit: int) -> float:
-        if SOLANA_FALLBACK_INTERVAL_OVERRIDE > 0:
-            return SOLANA_FALLBACK_INTERVAL_OVERRIDE
-        if limit <= 0:
-            return 30.0 * 24 * 60 * 60
-        # Spread the reserved 10% of monthly CU over a 30-day month instead
-        # of letting a noisy network-wide stream consume it in a burst.
-        month_seconds = 30.0 * 24 * 60 * 60
-        return max(1.0, month_seconds * METHOD_CU["solana_getTransaction"] / limit)
-
-    def _remember_solana_fallback_signature(self, signature: str) -> bool:
-        if signature in self._solana_fallback_seen:
-            return False
-        if len(self._solana_fallback_seen_order) >= SOLANA_FALLBACK_SEEN_LIMIT:
-            expired = self._solana_fallback_seen_order.popleft()
-            self._solana_fallback_seen.discard(expired)
-        self._solana_fallback_seen_order.append(signature)
-        self._solana_fallback_seen.add(signature)
-        return True
-
     def _remember_solana_processed_signature(self, signature: str) -> None:
         if signature in self._solana_processed_signatures:
             return
-        if len(self._solana_processed_signature_order) >= SOLANA_FALLBACK_SEEN_LIMIT:
+        if len(self._solana_processed_signature_order) >= SOLANA_PROCESSED_SIGNATURE_LIMIT:
             expired = self._solana_processed_signature_order.popleft()
             self._solana_processed_signatures.discard(expired)
         self._solana_processed_signature_order.append(signature)
@@ -810,24 +759,12 @@ class WhalePoller:
             log.error("[Solana] Ошибка: %s", message,
                       exc_info=(type(safe_exc), safe_exc, exc.__traceback__))
 
-    async def _solana_rpc(self, session, method: str, params: list, *,
-                          fallback: bool = False):
+    async def _solana_rpc(self, session, method: str, params: list):
         keys = self._keys()
         if not keys:
             raise NoKeys("Alchemy API key is not configured")
         key_id, key = keys[0]
-        fallback_used = fallback_limit = 0
-        if fallback:
-            fallback_used, fallback_limit = self._solana_fallback_budget_state()
-            cost = METHOD_CU.get("solana_" + method, 0)
-            if not cost or fallback_used + cost > fallback_limit:
-                raise BudgetExhausted("solana_fallback")
         self._reserve("solana_" + method, key_id)
-        if fallback:
-            self.state["solana_fallback_cu"] = fallback_used + cost
-            self._save()
-            self.solana_status.update(fallback_cu=fallback_used + cost,
-                                      fallback_cu_limit=fallback_limit)
         url = _solana_http_url(SOLANA_HTTP_BASE, key)
         try:
             async with session.post(url, json={"jsonrpc": "2.0", "id": 1,
@@ -1341,181 +1278,29 @@ class WhalePoller:
             delay = max(0.0, SOLANA_POLL_INTERVAL_SEC - (loop.time() - poll_started))
             await asyncio.sleep(delay)
 
-    async def _solana_fallback_worker(self, session, queue: asyncio.Queue) -> None:
-        next_allowed = 0.0
-        while True:
-            signature = await queue.get()
-            limit = 0
-            try:
-                wait = next_allowed - asyncio.get_running_loop().time()
-                if wait > 0:
-                    await asyncio.sleep(wait)
-                used, limit = self._solana_fallback_budget_state()
-                cost = METHOD_CU["solana_getTransaction"]
-                if limit <= 0 or used + cost > limit:
-                    self.solana_status.update(
-                        processing_state="budget_limited",
-                        fallback_dropped=int(self.solana_status.get("fallback_dropped", 0)) + 1,
-                        error="Token Program fallback is connected; monthly CU reserve reached")
-                    continue
-                tx = await self._solana_rpc(session, "getTransaction", [signature, {
-                    "encoding": "jsonParsed", "commitment": "confirmed",
-                    "maxSupportedTransactionVersion": 0}], fallback=True)
-                if isinstance(tx, dict):
-                    self.solana_status["events"] += (
-                        await self._solana_process_network_token_tx(tx))
-                self.solana_status.update(last_success=time.time(), error="",
-                                          processing_state="waiting_for_filters")
-                next_allowed = (asyncio.get_running_loop().time() +
-                                self._solana_fallback_interval(limit))
-            except asyncio.CancelledError:
-                raise
-            except BudgetExhausted:
-                self.solana_status.update(processing_state="budget_limited",
-                    error="Token Program fallback is connected; Alchemy CU budget reached")
-            except Exception as exc:  # isolate a bad signature from the live feed
-                if limit > 0:
-                    next_allowed = (asyncio.get_running_loop().time() +
-                                    self._solana_fallback_interval(limit))
-                self.solana_status["fallback_dropped"] = int(
-                    self.solana_status.get("fallback_dropped", 0)) + 1
-                self.solana_status["error"] = self._solana_safe_text(
-                    str(exc) or type(exc).__name__)[:200]
-                now = time.time()
-                if now - self._solana_fallback_last_error_log >= 60:
-                    self._log_solana_exception(exc)
-                    self._solana_fallback_last_error_log = now
-            finally:
-                queue.task_done()
-                self.solana_status["fallback_queue"] = queue.qsize()
-
-    async def _solana_run_network_fallback(self, session) -> None:
-        """Keep the bounded Token Program fallback while the CEX registry is empty."""
-        keys = self._keys()
-        if not keys:
-            raise NoKeys("Alchemy API key is not configured")
-        _key_id, key = keys[0]
-        self.solana_status.update(connected=False, state="connecting", mode="network_fallback",
-            subscriptions=0, submitted=0, active_wallets=0,
+    async def _solana_wait_for_filters(self, session) -> None:
+        """Confirm RPC health and wait without claiming a CEX feed is active."""
+        if self.screener.wallet_addresses("SOLANA"):
+            return
+        self.solana_status.update(connected=False, state="connecting", mode="waiting_for_filters",
+            subscriptions=0, submitted=0, active_wallets=0, token_accounts=0, poll_addresses=0,
             processing_state="checking_health", waiting_for_filters=True, error="")
         health = await self._solana_rpc(session, "getHealth", [])
         if health != "ok":
             raise PollError("Alchemy Solana getHealth did not return ok")
-        self.solana_status.update(connected=True, state="online", mode="network_fallback",
+        self.solana_status.update(connected=True, state="online", mode="waiting_for_filters",
             subscriptions=0, submitted=0, active_wallets=0,
             processing_state="waiting_for_filters", waiting_for_filters=True,
             last_success=time.time(), error="")
-        if self.screener.wallet_addresses("SOLANA"):
-            return
-        url = _solana_http_url(SOLANA_WS_BASE, key)
-        queue = asyncio.Queue(maxsize=SOLANA_FALLBACK_QUEUE_SIZE)
-        worker = None
-        try:
-            async with session.ws_connect(url, heartbeat=30, receive_timeout=90) as ws:
-                await ws.send_json({"jsonrpc": "2.0", "id": 1, "method": "logsSubscribe",
-                                    "params": [{"mentions": [SPL_TOKEN_PROGRAM]},
-                                               {"commitment": "confirmed"}]})
-                subscription = None
-                while subscription is None:
-                    message = await ws.receive(timeout=20)
-                    if message.type != aiohttp.WSMsgType.TEXT:
-                        if message.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                            raise PollError(
-                                "Solana WebSocket closed before subscription acknowledgement")
-                        continue
-                    try:
-                        payload = json.loads(message.data)
-                    except (TypeError, ValueError):
-                        continue
-                    if not isinstance(payload, dict) or payload.get("id") != 1:
-                        continue
-                    result = payload.get("result")
-                    if payload.get("error") or not isinstance(result, int):
-                        error = payload.get("error") or "subscription rejected"
-                        if isinstance(error, dict):
-                            error = error.get("message") or error
-                        raise PollError(self._solana_safe_text(str(error))[:200])
-                    subscription = result
-
-                used, limit = self._solana_fallback_budget_state()
-                self.solana_status.update(connected=True, state="online", mode="network_fallback",
-                    subscriptions=1, submitted=1, active_wallets=0,
-                    processing_state="waiting_for_filters", waiting_for_filters=True,
-                    fallback_queue=queue.qsize(), fallback_cu=used,
-                    fallback_cu_limit=limit, last_success=time.time(), error="")
-                worker = asyncio.create_task(self._solana_fallback_worker(session, queue),
-                                             name="whale-solana-token-fallback")
-                while True:
-                    if self.screener.wallet_addresses("SOLANA"):
-                        return
-                    try:
-                        message = await ws.receive(timeout=30)
-                    except asyncio.TimeoutError:
-                        if self.screener.wallet_addresses("SOLANA"):
-                            return
-                        continue
-                    if message.type != aiohttp.WSMsgType.TEXT:
-                        if message.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                            detail = getattr(message, "data", "")
-                            if isinstance(detail, BaseException):
-                                detail = f"{type(detail).__name__}: {detail}"
-                            raise PollError(f"Solana WebSocket closed: {str(detail)[:160]}")
-                        continue
-                    try:
-                        payload = json.loads(message.data)
-                    except (TypeError, ValueError):
-                        continue
-                    if not isinstance(payload, dict) or payload.get("method") != "logsNotification":
-                        continue
-                    params = payload.get("params") or {}
-                    if params.get("subscription") != subscription:
-                        continue
-                    result = params.get("result") or {}
-                    value = result.get("value") or {}
-                    if value.get("err") is not None:
-                        continue
-                    logs = value.get("logs") or []
-                    if not any("Instruction: Transfer" in str(line) for line in logs):
-                        continue
-                    signature = str(value.get("signature") or "")
-                    if not re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{64,100}", signature):
-                        continue
-                    if not self._remember_solana_fallback_signature(signature):
-                        continue
-                    if queue.full():
-                        self.solana_status["fallback_dropped"] = int(
-                            self.solana_status.get("fallback_dropped", 0)) + 1
-                    else:
-                        queue.put_nowait(signature)
-                        self.solana_status.update(fallback_queue=queue.qsize(),
-                                                  last_success=time.time())
-        finally:
-            if worker:
-                worker.cancel()
-                await asyncio.gather(worker, return_exceptions=True)
-
-    def _solana_keep_waiting_for_filters(self, mode: str, exc: BaseException) -> bool:
-        if mode != "network_fallback" or not self.solana_status.get("connected"):
-            return False
-        self.solana_status.update(connected=True, state="online", mode=mode,
-            subscriptions=0, submitted=0, active_wallets=0,
-            processing_state="waiting_for_filters", waiting_for_filters=True, error="")
-        now = time.time()
-        if now - self._solana_fallback_last_error_log >= 60:
-            detail = self._solana_safe_text(str(exc) or type(exc).__name__)[:180]
-            log.warning("[Solana] Optional Token Program fallback unavailable; waiting for CEX filters: %s",
-                        detail)
-            self._solana_fallback_last_error_log = now
-        return True
 
     async def run_solana(self) -> None:
-        """Poll CEX owners over JSON-RPC; use a bounded WS fallback if none are indexed."""
+        """Poll tracked CEX owners over JSON-RPC; wait on health when no filters exist."""
         retry = 3.0
         while True:
             keys = self._keys()
             wallets = self.screener.wallet_addresses("SOLANA")
             owners = list(wallets.items())[:SOLANA_MAX_WALLETS]
-            mode = "cex_poll" if owners else "network_fallback"
+            mode = "cex_poll" if owners else "waiting_for_filters"
             if not keys:
                 self.solana_status.update(connected=False, state="waiting",
                     subscriptions=0, submitted=0, active_wallets=len(owners), mode=mode,
@@ -1530,7 +1315,9 @@ class WhalePoller:
                     if owners:
                         await self._solana_run_cex_poll(session, dict(owners))
                     else:
-                        await self._solana_run_network_fallback(session)
+                        await self._solana_wait_for_filters(session)
+                        if not self.screener.wallet_addresses("SOLANA"):
+                            await asyncio.sleep(SOLANA_POLL_INTERVAL_SEC)
                 returned_for_registry_change = True
                 retry = 3.0
             except asyncio.CancelledError:
@@ -1542,19 +1329,11 @@ class WhalePoller:
                     error=self._solana_safe_text(str(exc) or "Alchemy CU budget exhausted")[:200])
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError,
                     PollError) as exc:
-                if self._solana_keep_waiting_for_filters(mode, exc):
-                    await asyncio.sleep(min(60.0, retry))
-                    retry = min(60.0, retry * 2)
-                    continue
                 self.solana_status.update(connected=False, state="error", mode=mode,
                     waiting_for_filters=False, error=self._solana_safe_text(
                         str(exc) or type(exc).__name__)[:200])
                 self._log_solana_exception(exc)
             except Exception as exc:  # noqa: BLE001 — keep Solana provider failures isolated
-                if self._solana_keep_waiting_for_filters(mode, exc):
-                    await asyncio.sleep(min(60.0, retry))
-                    retry = min(60.0, retry * 2)
-                    continue
                 self.solana_status.update(connected=False, state="error", mode=mode,
                     waiting_for_filters=False, error=self._solana_safe_text(
                         str(exc) or type(exc).__name__)[:200])

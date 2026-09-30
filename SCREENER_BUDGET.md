@@ -42,17 +42,10 @@ Alchemy Free даёт 30 млн CU/месяц на всё приложение, 
   транзакции разбираются через `getTransaction` с `jsonParsed`. Новые подписи
   дедуплицируются, аккаунты токенов обновляются раз в 10 минут. Переводы SOL,
   USDT и USDC регистрируются при сумме **от $100 000**.
-- Если в реестре нет Solana CEX-адресов, сначала подтверждается HTTP-соединение
-  через `getHealth`; UI показывает «Online (waiting for CEX filters)», не утверждая,
-  что уже получает CEX-транзакции. Дополнительно работает ограниченный резервный
-  поток по Token Program (`logsSubscribe` с одним `mentions`); если WS недоступен,
-  состояние ожидания фильтров сохраняется, а ошибка не маскирует успешный `getHealth`.
-  `getTransaction` выполняется через очередь на 64 сигнатуры; повторы дедуплицируются,
-  один worker соблюдает pacing. Network-wide fallback резервирует не более 10%
-  локального месячного CU и не более 1 млн CU по умолчанию
-  (`LIQSCOPE_SOLANA_FALLBACK_CU`); вызовы распределяются по месяцу. Размер резерва и
-  интервал задаются `LIQSCOPE_SOLANA_FALLBACK_CU` и
-  `LIQSCOPE_SOLANA_FALLBACK_INTERVAL_SEC`.
+- Если в реестре нет Solana CEX-адресов, HTTP `getHealth` проверяется каждые
+  30 секунд. После ответа `ok` UI показывает «Online (waiting for CEX filters)»;
+  это состояние не утверждает, что CEX-транзакции уже поступают. Для Solana
+  WebSocket-подписки не используются.
 
 ## Поддерживаемый поток
 
@@ -63,7 +56,7 @@ Alchemy Free даёт 30 млн CU/месяц на всё приложение, 
 | Polygon | Alchemy WS (ERC-20 и подтверждённые нативные CEX-переводы); HTTP catch-up | USDT, два USDC, POL |
 | Arbitrum | Alchemy WS (ERC-20 и подтверждённые нативные CEX-переводы); HTTP catch-up | USDT, USDC, DAI, WBTC, ETH |
 | Base | Alchemy WS для ERC-20; HTTP catch-up | USDC, ETH через Transfers API; mined-native WS здесь не включён |
-| Solana | Alchemy HTTP JSON-RPC: `getTokenAccountsByOwner` + периодический `getSignaturesForAddress`/`getTransaction`; при пустом реестре — Token Program logs fallback | SOL, USDT, USDC от $100K; CEX адреса ограничены `LIQSCOPE_SOLANA_MAX_WALLETS` (250) |
+| Solana | Alchemy HTTP JSON-RPC: `getTokenAccountsByOwner` + периодический `getSignaturesForAddress`/`getTransaction`; при пустом реестре — `getHealth` и ожидание CEX-фильтров | SOL, USDT, USDC от $100K; CEX адреса ограничены `LIQSCOPE_SOLANA_MAX_WALLETS` (250) |
 | Tron | TronGrid: подтверждённые блоки и TRC-20 Transfer events примерно раз в 3 секунды | TRX, USDT, USDC; ключ необязателен, публичный доступ ограничен квотами |
 | Hyperliquid Core | Нативный публичный Hyperliquid API: `meta` + WS `trades` | Рыночные fills от $50K, не депозиты/выводы; прежняя Hyperliquid API-логика сохранена, Alchemy не используется |
 

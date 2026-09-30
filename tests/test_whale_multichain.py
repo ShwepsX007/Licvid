@@ -17,7 +17,7 @@ from cex_wallets_updater import (
     valid_address,
 )
 from tron_address import tron_to_base58, tron_to_hex
-from whale_poller import BudgetExhausted, MINED_TRANSACTION_CHAINS, SPL_TOKEN_PROGRAM, WhalePoller
+from whale_poller import MINED_TRANSACTION_CHAINS, SPL_TOKEN_PROGRAM, WhalePoller
 from whale_screener import SOLANA_TOKENS, TRON_TOKENS, WhaleScreener
 
 
@@ -318,22 +318,24 @@ class MultichainTransferTests(unittest.IsolatedAsyncioTestCase):
                     await asyncio.gather(task, return_exceptions=True)
             screen.close()
 
-    async def test_solana_network_fallback_subscribes_and_processes_large_spl_transfers(self):
+    async def test_solana_balance_parser_processes_large_spl_transfer(self):
         usdc = next(mint for mint, (symbol, _) in SOLANA_TOKENS.items() if symbol == "USDC")
         source_owner, destination_owner = "3" * 32, "4" * 32
         source_account, destination_account = "1" * 32, "2" * 32
         signature = "5" * 64
         raw_amount = 100_000 * 10**6
+
         def balance(index, owner, amount):
             return {"accountIndex": index, "owner": owner, "mint": usdc,
                     "uiTokenAmount": {"amount": str(amount), "decimals": 6}}
+
         tx = {"blockTime": int(time.time()),
               "transaction": {"signatures": [signature], "message": {
                   "accountKeys": ["payer", source_account, destination_account],
                   "instructions": [{"program": "spl-token", "programId": SPL_TOKEN_PROGRAM,
                       "parsed": {"type": "transferChecked", "info": {
                           "source": source_account, "destination": destination_account,
-                          "mint": usdc, "tokenAmount": {"amount": str(raw_amount),
+                          "mint": usdc, "tokenAmount": {"amount": str(150_000 * 10**6),
                                                                "decimals": 6}}}}]}},
               "meta": {"preTokenBalances": [balance(1, source_owner, raw_amount),
                                              balance(2, destination_owner, 0)],
@@ -344,101 +346,47 @@ class MultichainTransferTests(unittest.IsolatedAsyncioTestCase):
             screen.wallets_by_chain["SOLANA"] = {}
             poller = WhalePoller("test-alchemy-key-123", screen,
                                  state_file=Path(tmp) / "poller.json")
-
-            class FakeWebSocket:
-                def __init__(self):
-                    self.responses = []
-                    self.sent = []
-                async def __aenter__(self):
-                    return self
-                async def __aexit__(self, *_args):
-                    return None
-                async def send_json(self, payload):
-                    self.sent.append(payload)
-                    self.responses.append({"jsonrpc": "2.0", "id": payload["id"],
-                                           "result": 321})
-                    self.responses.append({"jsonrpc": "2.0", "method": "logsNotification",
-                        "params": {"subscription": 321, "result": {"value": {
-                            "signature": signature, "err": None,
-                            "logs": ["Program log: Instruction: TransferChecked"]}}}})
-                async def receive(self, timeout=None):
-                    if self.responses:
-                        response = self.responses.pop(0)
-                        return type("Message", (), {"type": aiohttp.WSMsgType.TEXT,
-                            "data": json.dumps(response)})()
-                    await asyncio.Future()
-
-            class FakeResponse:
-                status = 200
-                def __init__(self, result):
-                    self.result = result
-                async def __aenter__(self):
-                    return self
-                async def __aexit__(self, *_args):
-                    return None
-                async def json(self):
-                    return {"jsonrpc": "2.0", "id": 1, "result": self.result}
-            class FakeSession:
-                def __init__(self):
-                    self.ws = FakeWebSocket()
-                    self.rpc_calls = []
-                async def __aenter__(self):
-                    return self
-                async def __aexit__(self, *_args):
-                    return None
-                def ws_connect(self, *_args, **_kwargs):
-                    return self.ws
-                def post(self, url, *, json, timeout):
-                    self.rpc_calls.append((url, json, timeout))
-                    result = "ok" if json["method"] == "getHealth" else tx
-                    return FakeResponse(result)
-
-            fake_session = FakeSession()
-            with patch("whale_poller.aiohttp.ClientSession", return_value=fake_session):
-                task = asyncio.create_task(poller.run_solana())
-                try:
-                    for _ in range(100):
-                        if screen.events and poller.solana_status["connected"]:
-                            break
-                        await asyncio.sleep(.01)
-                    self.assertTrue(poller.solana_status["connected"])
-                    self.assertEqual(poller.solana_status["state"], "online")
-                    self.assertEqual(poller.solana_status["mode"], "network_fallback")
-                    self.assertTrue(poller.solana_status["waiting_for_filters"])
-                    self.assertEqual(poller.solana_status["processing_state"], "waiting_for_filters")
-                    self.assertEqual(poller.solana_status["subscriptions"], 1)
-                    request = fake_session.ws.sent[0]
-                    self.assertEqual(request["method"], "logsSubscribe")
-                    self.assertEqual(request["params"][0]["mentions"], [SPL_TOKEN_PROGRAM])
-                    self.assertEqual(request["params"][1]["commitment"], "confirmed")
-                    self.assertEqual([row[1]["method"] for row in fake_session.rpc_calls],
-                                     ["getHealth", "getTransaction"])
-                    event = screen.events[-1]
-                    self.assertEqual(event["symbol"], "USDC")
-                    self.assertEqual(event["amount"], 100_000.0)
-                    self.assertEqual(event["usd"], 100_000.0)
-                    self.assertEqual(event["from"], source_owner)
-                    self.assertEqual(event["to"], destination_owner)
-                finally:
-                    task.cancel()
-                    await asyncio.gather(task, return_exceptions=True)
+            count = await poller._solana_process_network_token_tx(tx)
+            self.assertEqual(count, 1)
+            event = screen.events[-1]
+            self.assertEqual(event["symbol"], "USDC")
+            self.assertEqual(event["amount"], 100_000.0)
+            self.assertEqual(event["usd"], 100_000.0)
+            self.assertEqual(event["from"], source_owner)
+            self.assertEqual(event["to"], destination_owner)
             screen.close()
 
-    async def test_solana_empty_registry_stays_online_waiting_if_optional_ws_fails(self):
+    async def test_solana_empty_registry_waits_after_confirmed_get_health(self):
         with tempfile.TemporaryDirectory() as tmp:
             screen = self.make_screener(tmp)
             screen.wallets_by_chain["SOLANA"] = {}
             poller = WhalePoller("test-alchemy-key-123", screen,
                                  state_file=Path(tmp) / "poller.json")
-            poller.solana_status.update(connected=True, state="online",
-                                        mode="network_fallback", waiting_for_filters=True)
-            self.assertTrue(poller._solana_keep_waiting_for_filters(
-                "network_fallback", RuntimeError("logsSubscribe is unavailable")))
+            calls = []
+
+            class FakeResponse:
+                status = 200
+                async def __aenter__(self):
+                    return self
+                async def __aexit__(self, *_args):
+                    return None
+                async def json(self):
+                    return {"jsonrpc": "2.0", "id": 1, "result": "ok"}
+
+            class FakeSession:
+                def post(self, url, *, json, timeout):
+                    calls.append((url, json, timeout))
+                    return FakeResponse()
+
+            await poller._solana_wait_for_filters(FakeSession())
             self.assertEqual(poller.solana_status["state"], "online")
+            self.assertEqual(poller.solana_status["mode"], "waiting_for_filters")
+            self.assertTrue(poller.solana_status["connected"])
             self.assertTrue(poller.solana_status["waiting_for_filters"])
+            self.assertEqual(poller.solana_status["processing_state"], "waiting_for_filters")
+            self.assertEqual(poller.solana_status["active_wallets"], 0)
+            self.assertEqual(calls[0][1]["method"], "getHealth")
             self.assertEqual(poller.solana_status["error"], "")
-            self.assertFalse(poller._solana_keep_waiting_for_filters(
-                "cex_poll", RuntimeError("CEX poll failed")))
             screen.close()
 
     async def test_solana_rpc_uses_alchemy_solana_endpoint_and_native_methods(self):
@@ -470,36 +418,6 @@ class MultichainTransferTests(unittest.IsolatedAsyncioTestCase):
                 "https://solana-mainnet.g.alchemy.com/v2/test-alchemy-key-123")
             self.assertEqual(requests[0][1]["method"], "getSignaturesForAddress")
             self.assertEqual(requests[0][1]["params"][0], "wallet")
-            screen.close()
-
-    async def test_solana_network_fallback_reserves_a_small_cu_slice(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            screen = self.make_screener(tmp)
-            poller = WhalePoller("test-alchemy-key-123", screen,
-                                 state_file=Path(tmp) / "poller.json", monthly_cu=1000)
-            calls = []
-            class FakeResponse:
-                status = 200
-                async def __aenter__(self):
-                    return self
-                async def __aexit__(self, *_args):
-                    return None
-                async def json(self):
-                    return {"jsonrpc": "2.0", "id": 1, "result": {}}
-            class FakeSession:
-                def post(self, url, *, json, timeout):
-                    calls.append(json["method"])
-                    return FakeResponse()
-            session = FakeSession()
-            params = ["5" * 64, {"encoding": "jsonParsed"}]
-            await poller._solana_rpc(session, "getTransaction", params, fallback=True)
-            await poller._solana_rpc(session, "getTransaction", params, fallback=True)
-            with self.assertRaises(BudgetExhausted):
-                await poller._solana_rpc(session, "getTransaction", params, fallback=True)
-            self.assertEqual(calls, ["getTransaction", "getTransaction"])
-            self.assertEqual(poller.state["solana_fallback_cu"], 80)
-            self.assertEqual(poller.solana_status["fallback_cu_limit"], 100)
-            self.assertEqual(poller.state["cu"], 80)
             screen.close()
 
     async def test_solana_native_lamports_and_spl_token_decimals(self):

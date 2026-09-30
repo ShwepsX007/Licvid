@@ -5,7 +5,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 import sys
@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 
 import server
 from alchemy_keys import AlchemyKeyStore
-from cex_wallets_updater import CEXWalletRegistry
+from cex_wallets_updater import CEXWalletRegistry, SourceFetchError
 from whale_poller import WhalePoller
 from whale_screener import WhaleScreener
 
@@ -74,6 +74,11 @@ class ScreenerDashboardTests(unittest.TestCase):
                                    lambda _msg: None, history_path=Path(tmp) / "history.sqlite3")
             poller = WhalePoller("", screen, key_store=key_store,
                                  state_file=Path(tmp) / "poller.json")
+            poller.network_status["ETH"].update(
+                status="rate_limited", last_success=time.time() - 60,
+                last_event=time.time(), retry_at=time.time() + 15,
+                http_status=429, error="HTTP 429: rate limit exceeded", key_active=True)
+            poller.state.setdefault("network_cu", {})["ETH"] = 120
             poller.solana_status.update(connected=True, state="online",
                                         waiting_for_filters=True, last_success=time.time())
             with patch.object(server, "alchemy_key_store", key_store), \
@@ -98,6 +103,13 @@ class ScreenerDashboardTests(unittest.TestCase):
                 self.assertEqual(stats.status_code, 200, stats.text)
                 payload = stats.json()
                 self.assertEqual(payload["cu"]["keys_configured"], 1)
+                eth = next(row for row in payload["networks"] if row["chain"] == "ETH")
+                self.assertEqual(eth["status"], "online")
+                self.assertEqual(eth["warning_status"], "rate_limited")
+                self.assertEqual(eth["http_status"], 429)
+                self.assertTrue(eth["key_active"])
+                self.assertEqual(eth["cu_used"], 120)
+                self.assertIn("rate limit exceeded", eth["error"])
                 solana = next(row for row in payload["networks"] if row["chain"] == "SOLANA")
                 self.assertEqual(solana["status"], "online")
                 self.assertTrue(solana["waiting_for_filters"])
@@ -142,6 +154,21 @@ class ScreenerDashboardTests(unittest.TestCase):
                 self.assertEqual(listing.status_code, 200)
                 self.assertEqual(listing.json()["wallets"][0]["name"], "Solana CEX")
                 self.assertEqual(self.client.delete("/api/admin/screener/cex-wallets/" + new_identifier).status_code, 200)
+                preserved = registry.add_manual("ETH", "0x" + "4" * 40, "Preserved manual")
+                before_refresh = registry.path.read_bytes()
+                source_error = SourceFetchError(
+                    "https://api.llama.fi/cexs", "HTTP error", status=404,
+                    body="Not Found: endpoint unavailable")
+                with patch("cex_wallets_updater.fetch_defillama_cex_wallets",
+                           new_callable=AsyncMock, side_effect=source_error):
+                    failed_refresh = self.client.post("/api/admin/screener/cex-wallets/refresh")
+                self.assertEqual(failed_refresh.status_code, 502)
+                self.assertIn("https://api.llama.fi/cexs", failed_refresh.json()["reason"])
+                self.assertIn("HTTP 404", failed_refresh.json()["reason"])
+                self.assertIn("Not Found", failed_refresh.json()["reason"])
+                self.assertEqual(registry.path.read_bytes(), before_refresh)
+                self.assertTrue(any(row["id"] == preserved["id"]
+                                    for row in registry.records()))
                 key = "trongrid-api-key-test-secret"
                 key_response = self.client.post("/api/admin/trongrid/key", json={"key": key})
                 self.assertEqual(key_response.status_code, 200, key_response.text)

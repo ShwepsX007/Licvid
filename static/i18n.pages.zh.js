@@ -460,6 +460,11 @@ window.LIQSCOPE_I18N_PAGES =
       "screener.status_online": "在线",
       "screener.status_error": "错误",
       "screener.status_waiting": "等待中",
+      "screener.status_rate_limited": "请求受限 (429) — 暂停 {seconds} 秒，密钥仍有效",
+      "screener.status_auth_error": "认证错误",
+      "screener.status_quota_exhausted": "配额已耗尽",
+      "screener.status_network_error": "网络错误",
+      "screener.status_paused": "已暂停",
       "screener.status_live": "仪表盘正在更新",
       "screener.status_attention": "需要关注",
       "screener.status_connecting": "正在连接数据流…",
@@ -597,7 +602,14 @@ window.LIQSCOPE_I18N_PAGES =
       "adm.cex_wallet_edit": "✎ 编辑",
       "adm.cex_wallet_cancel": "取消编辑",
       "adm.cex_wallet_save_changes": "保存更改",
-      "adm.cex_wallet_updated": "手动钱包已更新。"
+      "adm.cex_wallet_updated": "手动钱包已更新。",
+      "adm.alchemy_rate_limited": "请求受限 (429) — 暂停 {seconds} 秒，密钥仍有效",
+      "adm.alchemy_auth_error": "认证错误",
+      "adm.alchemy_quota_exhausted": "配额已耗尽",
+      "adm.alchemy_network_error": "网络错误",
+      "adm.alchemy_paused": "已暂停",
+      "adm.alchemy_network_cu": "此网络已用 {amount} CU",
+      "adm.cex_wallet_refresh_error_detail": "更新失败：{reason}"
     },
     "phrases": {
       "В поле уже стоит стандартный промт — правьте прямо в нём; «Вернуть шаблон» очищает поле и снова включает встроенный текст.": "输入框里已是默认提示词 — 直接修改；«恢复模板» 会清空并重新启用内置文本。",

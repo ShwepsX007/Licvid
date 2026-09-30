@@ -460,6 +460,11 @@ window.LIQSCOPE_I18N_PAGES =
       "screener.status_online": "En línea",
       "screener.status_error": "Error",
       "screener.status_waiting": "En espera",
+      "screener.status_rate_limited": "Límite de solicitudes (429) — pausa de {seconds}s, clave activa",
+      "screener.status_auth_error": "Error de autenticación",
+      "screener.status_quota_exhausted": "Cuota agotada",
+      "screener.status_network_error": "Error de red",
+      "screener.status_paused": "En pausa",
       "screener.status_live": "Panel actualizado",
       "screener.status_attention": "Requiere atención",
       "screener.status_connecting": "Conectando al flujo…",
@@ -597,7 +602,14 @@ window.LIQSCOPE_I18N_PAGES =
       "adm.cex_wallet_edit": "✎ Editar",
       "adm.cex_wallet_cancel": "Cancelar",
       "adm.cex_wallet_save_changes": "Guardar cambios",
-      "adm.cex_wallet_updated": "Wallet manual actualizado."
+      "adm.cex_wallet_updated": "Wallet manual actualizado.",
+      "adm.alchemy_rate_limited": "Límite de solicitudes (429) — pausa de {seconds}s, clave activa",
+      "adm.alchemy_auth_error": "Error de autenticación",
+      "adm.alchemy_quota_exhausted": "Cuota agotada",
+      "adm.alchemy_network_error": "Error de red",
+      "adm.alchemy_paused": "Pausado",
+      "adm.alchemy_network_cu": "{amount} CU en esta red",
+      "adm.cex_wallet_refresh_error_detail": "Error al actualizar: {reason}"
     },
     "phrases": {
       "В поле уже стоит стандартный промт — правьте прямо в нём; «Вернуть шаблон» очищает поле и снова включает встроенный текст.": "El campo ya trae el prompt estándar: edítalo ahí mismo; “Restaurar plantilla” limpia el campo y reactiva el texto integrado.",

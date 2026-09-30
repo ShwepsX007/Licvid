@@ -35,6 +35,7 @@ let walletRows = [
     {id: "bbbbbbbbbbbbbbbb", chain: "BASE", address: "0x" + "2".repeat(40), name: "Auto CEX", source: "defillama"},
 ];
 let tronKeys = [];
+let refreshFail = true;
 const now = Math.floor(Date.now() / 1000);
 const summary = () => ({total: walletRows.length,
     by_chain: walletRows.reduce((out, row) => (out[row.chain] = (out[row.chain] || 0) + 1, out), {}),
@@ -53,7 +54,10 @@ win.LiqScopeI18n = {t: (key, vars = {}) => {
         "adm.cex_wallet_refreshed": "Refreshed {count}", "adm.trongrid_saved": "TronGrid key saved",
         "adm.trongrid_no_key": "No TronGrid key", "adm.alchemy_settings_saved": "Settings saved",
         "adm.alchemy_monthly_estimate": "Monthly CU estimate: {amount}",
+        "adm.alchemy_online": "Online",
         "adm.alchemy_online_waiting_cex_filters": "Online (waiting for CEX filters)",
+        "adm.alchemy_rate_limited": "Rate limit (429) — pause {seconds}s, key active",
+        "adm.cex_wallet_refresh_error_detail": "Refresh failed: {reason}",
     })[key] || key;
     Object.keys(vars).forEach(name => { value = value.replaceAll("{" + name + "}", String(vars[name])); });
     return value;
@@ -74,9 +78,17 @@ win.fetch = async (url, options = {}) => {
     if (parsed.pathname === "/api/admin/alchemy/stats") return response({
         cu: {used: 2500, limit: 10000000, month: "2026-09", estimated_monthly: 7500,
             key_share: 10000000, keys: []},
-        networks: ["ETH", "SOLANA", "TRON", "HYPERLIQUID"].map(chain =>
-            ({chain, status: chain === "ETH" || chain === "SOLANA" ? "online" : "waiting",
-              waiting_for_filters: chain === "SOLANA", last_success: 0, error: ""}))});
+        networks: ["ETH", "BASE", "SOLANA", "TRON", "HYPERLIQUID"].map(chain =>
+            ({chain, status: chain === "ETH" ? "online" : chain === "BASE" ? "rate_limited"
+                : chain === "SOLANA" ? "online" : "paused",
+              warning_status: chain === "ETH" ? "rate_limited" : "",
+              retry_in_sec: chain === "ETH" || chain === "BASE" ? 15 : 0,
+              http_status: chain === "ETH" ? 429 : chain === "BASE" ? 200 : null,
+              rpc_code: chain === "BASE" ? 429 : null,
+              key_active: true,
+              waiting_for_filters: chain === "SOLANA", last_success: 0,
+              error: chain === "ETH" ? "HTTP 429: rate limit exceeded"
+                : chain === "BASE" ? "JSON-RPC code=429: Too many requests" : ""}))});
     if (parsed.pathname === "/api/admin/alchemy/keys") return response({available: true, keys: []});
     if (parsed.pathname === "/api/admin/trongrid/key" && method === "GET") {
         return response({available: true, keys: tronKeys});
@@ -100,6 +112,10 @@ win.fetch = async (url, options = {}) => {
         return response({ok: true, wallet: row, summary: summary()});
     }
     if (parsed.pathname === "/api/admin/screener/cex-wallets/refresh" && method === "POST") {
+        if (refreshFail) return {ok: false, json: async () => ({
+            error: "refresh_failed",
+            reason: "HTTP error; URL=https://api.llama.fi/cexs; HTTP 404; body=Not Found",
+        })};
         return response({ok: true, after: walletRows.length});
     }
     if (parsed.pathname.startsWith("/api/admin/screener/cex-wallets/") && method === "PUT") {
@@ -125,6 +141,10 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     const networkText = win.document.getElementById("whale-admin-chains").textContent;
     assert(networkText.includes("Solana") && networkText.includes("TRON"));
     assert(networkText.includes("Online (waiting for CEX filters)"));
+    assert(networkText.includes("Rate limit (429) — pause 15s, key active"));
+    assert(networkText.includes("HTTP 429: rate limit exceeded"));
+    assert(networkText.includes("JSON-RPC code=429: Too many requests"));
+    assert(!networkText.includes("All keys exhausted"));
     assert.equal(win.document.querySelectorAll("#whale-admin-wallet-rows tr").length, 2);
 
     const firstRow = win.document.querySelector("#whale-admin-wallet-rows tr");
@@ -146,9 +166,17 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     assert(!walletRows.some(row => row.name === "Renamed CEX"));
     assert(calls.some(call => call.method === "DELETE" && call.path.endsWith("/eeeeeeeeeeeeeeee")));
 
+    const walletStatus = win.document.getElementById("whale-admin-wallet-status");
     win.document.getElementById("whale-admin-wallet-refresh").click();
     await sleep(40);
+    assert(walletStatus.textContent.includes("https://api.llama.fi/cexs"));
+    assert(walletStatus.textContent.includes("HTTP 404"));
+    assert(walletStatus.textContent.includes("Not Found"));
     assert(calls.some(call => call.path.endsWith("/refresh") && call.method === "POST"));
+    refreshFail = false;
+    win.document.getElementById("whale-admin-wallet-refresh").click();
+    await sleep(40);
+    assert(walletStatus.textContent.includes("Refreshed"));
     win.document.getElementById("trongrid-admin-key").value = "tron-secret-value";
     win.document.getElementById("trongrid-admin-add-key").click();
     await sleep(50);

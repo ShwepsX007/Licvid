@@ -93,9 +93,16 @@
         if (text !== undefined && text !== null) el.textContent = String(text);
         return el;
     }
-    function localizedStatus(status) {
+    function localizedStatus(status, retryInSec = 0) {
         if (status === "online") return t("screener.status_online");
+        if (status === "rate_limited") {
+            return t("screener.status_rate_limited", {seconds: fmtNumber(retryInSec)});
+        }
+        if (status === "auth_error") return t("screener.status_auth_error");
+        if (status === "quota_exhausted") return t("screener.status_quota_exhausted");
         if (status === "error") return t("screener.status_error");
+        if (status === "network_error") return t("screener.status_network_error");
+        if (status === "paused") return t("screener.status_paused");
         return t("screener.status_waiting");
     }
     function getChainOptions() {
@@ -124,13 +131,31 @@
             card.type = "button";
             card.dataset.network = net.id;
             card.setAttribute("aria-pressed", String(state.selectedChain === net.id));
-            const diagnostic = String(summary.error || "").trim();
+            const warningStatus = String(summary.warning_status || "");
+            const statusLabel = localizedStatus(summary.status, summary.retry_in_sec || 0);
+            const warningLabel = warningStatus
+                ? localizedStatus(warningStatus, summary.retry_in_sec || 0) : "";
+            const diagnosticParts = [];
+            if (warningLabel) diagnosticParts.push(warningLabel);
+            else if (summary.status && summary.status !== "online") diagnosticParts.push(statusLabel);
+            if (summary.http_status && summary.http_status !== 200) {
+                diagnosticParts.push("HTTP " + summary.http_status);
+            }
+            if (summary.rpc_code !== undefined && summary.rpc_code !== null) {
+                diagnosticParts.push("JSON-RPC code=" + summary.rpc_code);
+            }
+            const errorDetail = String(summary.error || "").trim();
+            if (errorDetail) diagnosticParts.push(errorDetail);
+            const diagnostic = diagnosticParts.join(" · ");
+            const fullStatus = statusLabel +
+                (warningLabel && summary.status === "online" ? " · " + warningLabel : "");
             card.title = diagnostic;
             card.setAttribute("aria-label", networkName(net.id) + ", " +
-                localizedStatus(summary.status) + (diagnostic ? ". " + diagnostic : ""));
+                fullStatus + (diagnostic ? ". " + diagnostic : ""));
             const top = make("div", "network-card-top");
             top.append(make("span", "network-card-name", networkName(net.id)));
-            const status = make("span", "network-state status--" + (summary.status || "waiting"), localizedStatus(summary.status));
+            const status = make("span", "network-state status--" + (summary.status || "waiting"), fullStatus);
+            if (diagnostic) status.title = diagnostic;
             top.append(status);
             card.append(top);
             card.append(make("div", "network-card-count", fmtNumber(summary.events || 0)));
@@ -456,43 +481,72 @@
         network.append(make("span", "chain-mark chain-mark--" + String(row.chain || "unknown").toLowerCase(),
                             net ? net.mark : "•"));
         const networkNameBlock = make("div", "event-network-copy");
-        networkNameBlock.append(make("div", "event-chain-name", networkName(row.chain)));
+        const chainName = networkName(row.chain);
+        const chainNameNode = make("div", "event-chain-name", chainName);
+        chainNameNode.title = chainName;
+        networkNameBlock.append(chainNameNode);
         const sourceMarker = row.source === "historical" ? "🕒" : "⚡";
         const eventTime = make("div", "event-time", timeLabel(row.timestamp) + "  " + sourceMarker);
-        eventTime.title = row.source === "historical" ? t("screener.source_history") : t("screener.source_realtime");
+        eventTime.title = eventTime.textContent + " · " +
+            (row.source === "historical" ? t("screener.source_history") : t("screener.source_realtime"));
         networkNameBlock.append(eventTime);
         network.append(networkNameBlock);
 
         const direction = make("span", "direction-badge event-direction " + directionClass(row));
         const prefix = row.direction === "inflow" ? "↓ " : row.direction === "outflow" ? "↑ " : "";
         direction.textContent = prefix + directionLabel(row);
+        direction.title = direction.textContent;
 
         const assetBlock = make("div", "event-asset-block");
-        assetBlock.append(make("div", "event-asset", (row.symbol || "") + " · " + fmtAmount(row.amount)));
-        assetBlock.append(make("div", "event-amount", t("screener.asset_quantity")));
-        const value = make("div", "event-value", fmtUSD(row.usd));
+        const assetLabel = (row.symbol || "") + " · " + fmtAmount(row.amount);
+        const asset = make("div", "event-asset", assetLabel);
+        asset.title = assetLabel;
+        assetBlock.append(asset);
+        const quantity = make("div", "event-amount", t("screener.asset_quantity"));
+        quantity.title = quantity.textContent;
+        assetBlock.append(quantity);
+        const valueText = fmtUSD(row.usd);
+        const value = make("div", "event-value", valueText);
+        value.title = valueText;
         const route = make("div", "event-route");
+        const from = addressLabel(row.from, row.from_label);
+        const to = addressLabel(row.to, row.to_label);
+        route.title = row.direction === "trade"
+            ? t("screener.buyer") + " " + from + " ↔ " + t("screener.seller") + " " + to
+            : from + " → " + to;
         if (row.direction === "trade") {
             route.append(document.createTextNode(t("screener.buyer") + " "));
-            route.append(make("strong", "", addressLabel(row.from, row.from_label)));
+            const fromNode = make("strong", "", from);
+            fromNode.title = from;
+            route.append(fromNode);
             route.append(document.createTextNode("  ↔  " + t("screener.seller") + " "));
-            route.append(make("strong", "", addressLabel(row.to, row.to_label)));
+            const toNode = make("strong", "", to);
+            toNode.title = to;
+            route.append(toNode);
         } else {
-            route.append(make("strong", "", addressLabel(row.from, row.from_label)));
+            const fromNode = make("strong", "", from);
+            fromNode.title = from;
+            route.append(fromNode);
             route.append(document.createTextNode("  →  "));
-            route.append(make("strong", "", addressLabel(row.to, row.to_label)));
+            const toNode = make("strong", "", to);
+            toNode.title = to;
+            route.append(toNode);
         }
+        const details = make("div", "event-details");
+        details.append(assetBlock, route);
         const href = explorerLink(row);
         const link = make("a", "explorer-link", t("screener.open_explorer") + " ↗");
         if (href) {
             link.href = href;
+            link.title = href;
             link.target = "_blank";
             link.rel = "noopener noreferrer";
         } else {
             link.removeAttribute("href");
+            link.title = t("screener.open_explorer");
             link.setAttribute("aria-disabled", "true");
         }
-        item.append(network, direction, assetBlock, value, route, link);
+        item.append(network, direction, details, value, link);
         return item;
     }
     function renderLive(newKeys = new Set()) {

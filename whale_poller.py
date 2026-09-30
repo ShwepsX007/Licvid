@@ -15,6 +15,7 @@ import json
 import logging
 import math
 import os
+import random
 import re
 import time
 from collections import deque
@@ -39,11 +40,21 @@ SOLANA_HTTP_BASE = os.getenv("LIQSCOPE_SOLANA_HTTP", "https://solana-mainnet.g.a
 SPL_TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 TRON_API_BASE = os.getenv("LIQSCOPE_TRONGRID_URL", "https://api.trongrid.io").rstrip("/")
 TRON_EVENT_INTERVAL = 5.0
-SOLANA_POLL_INTERVAL_SEC = 30.0
-SOLANA_TOKEN_ACCOUNT_REFRESH_SEC = 600.0
+SOLANA_POLL_INTERVAL_SEC = 30.0  # compatibility alias for realtime mode
+SOLANA_POLL_INTERVAL_REALTIME_SEC = 30.0
+SOLANA_POLL_INTERVAL_ECONOMY_SEC = 60.0
+SOLANA_TOKEN_ACCOUNT_REFRESH_SEC = 6 * 60 * 60
 SOLANA_SIGNATURE_LIMIT = 10
+SOLANA_MAX_SIGNATURE_REQUESTS_PER_CYCLE = 64
+SOLANA_MAX_TRANSACTION_REQUESTS_PER_CYCLE = 16
+SOLANA_MAX_RPC_REQUESTS_PER_CYCLE = (SOLANA_MAX_SIGNATURE_REQUESTS_PER_CYCLE +
+                                     SOLANA_MAX_TRANSACTION_REQUESTS_PER_CYCLE)
 SOLANA_POLL_CONCURRENCY = 8
 SOLANA_PROCESSED_SIGNATURE_LIMIT = 5000
+RATE_LIMIT_BASE_SEC = 15.0
+RATE_LIMIT_MAX_SEC = 300.0
+RATE_LIMIT_JITTER = 0.15
+NETWORK_SUCCESS_TTL_SEC = 300.0
 TRON_USD_CONTRACTS = dict(TRON_TOKENS)
 SOLANA_BLOCKS_PER_SEC = {"ETH": 1 / 12, "BNB": 1 / 3, "POLYGON": 0.5,
                          "ARBITRUM": 4.0, "BASE": 0.5}
@@ -112,6 +123,39 @@ class NoKeys(PollError):
     pass
 
 
+class RateLimited(PollError):
+    def __init__(self, message: str, retry_after: float = RATE_LIMIT_BASE_SEC, *,
+                 http_status: int | None = 429, rpc_code=None):
+        super().__init__(message)
+        self.retry_after = max(0.0, float(retry_after))
+        self.status_code = 429
+        self.http_status = http_status
+        self.rpc_code = rpc_code
+
+
+class AuthError(PollError):
+    def __init__(self, message: str, status_code: int = 401, retry_after: float = 900.0,
+                 rpc_code=None):
+        super().__init__(message)
+        self.status_code = int(status_code)
+        self.retry_after = float(retry_after)
+        self.rpc_code = rpc_code
+
+
+class QuotaExhausted(PollError):
+    def __init__(self, message: str, status_code: int | None = None,
+                 retry_after: float = 300.0, key_active: bool = False, rpc_code=None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.retry_after = float(retry_after)
+        self.key_active = bool(key_active)
+        self.rpc_code = rpc_code
+
+
+class NetworkError(PollError):
+    pass
+
+
 class WhalePoller:
     def __init__(self, key: str, screener: WhaleScreener, *, interval: int | None = None,
                  monthly_cu: int = 10_000_000, state_file: Path | None = None,
@@ -131,6 +175,11 @@ class WhalePoller:
         self.key_errors: dict[str, str] = {}
         self.key_cooldown: dict[str, float] = {}
         self.chain_cooldown: dict[tuple[str, str], float] = {}
+        self.chain_cooldown_status: dict[tuple[str, str], str] = {}
+        self.rate_limit_attempts: dict[tuple[str, str], int] = {}
+        self._solana_address_cursor = 0
+        self._solana_token_accounts_updated_at = 0.0
+        self._solana_token_accounts_owners: tuple[tuple[str, str], ...] = ()
         self.mode = str(mode or POLL_MODE).strip().lower()
         if self.mode not in ("realtime", "economy"):
             self.mode = "realtime"
@@ -156,12 +205,23 @@ class WhalePoller:
             raise ValueError("Hyperliquid must use its native API, never an Alchemy endpoint")
         self.state = self._load()
         self.errors: dict[str, str] = {}
+        self.network_status = {
+            chain: {"status": "paused", "last_success": 0.0, "last_event": 0.0,
+                    "last_attempt": 0.0, "last_error_at": 0.0, "retry_at": 0.0,
+                    "http_status": None, "rpc_code": None, "error": "",
+                    "warning_status": "", "error_count": 0, "key_active": True}
+            for chain in (*self.endpoints, "SOLANA")
+        }
         self.solana_status = {"network": "SOLANA", "provider": "alchemy",
-                              "connected": False, "state": "waiting", "subscriptions": 0,
+                              "connected": False, "state": "paused", "subscriptions": 0,
                               "submitted": 0, "active_wallets": 0, "mode": "cex_wallets",
                               "processing_state": "idle", "waiting_for_filters": False,
                               "token_accounts": 0, "poll_addresses": 0,
-                              "events": 0, "last_success": 0.0, "error": ""}
+                              "requests_last_cycle": 0, "request_budget": SOLANA_MAX_RPC_REQUESTS_PER_CYCLE,
+                              "signature_requests_last_cycle": 0,
+                              "transaction_requests_last_cycle": 0,
+                              "events": 0, "last_attempt": 0.0,
+                              "last_success": 0.0, "error": ""}
         self.tron_status = {"network": "TRON", "provider": "trongrid",
                             "connected": False, "state": "waiting", "events": 0,
                             "wallets": 0, "last_success": 0.0, "last_block": 0, "error": ""}
@@ -182,6 +242,7 @@ class WhalePoller:
             if isinstance(data, dict) and isinstance(data.get("cursors"), dict):
                 data.setdefault("history_cursors", {})
                 data.setdefault("key_usage", {})
+                data.setdefault("network_cu", {})
                 data.setdefault("active_key", "")
                 data.setdefault("month", "")
                 data.setdefault("cu", 0)
@@ -189,7 +250,7 @@ class WhalePoller:
         except (OSError, ValueError, TypeError):
             pass
         return {"month": "", "cu": 0, "cursors": {}, "history_cursors": {},
-                "key_usage": {}, "active_key": ""}
+                "key_usage": {}, "network_cu": {}, "active_key": ""}
 
     def _save(self) -> None:
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
@@ -221,10 +282,10 @@ class WhalePoller:
         self.monthly_cu = int(monthly_cu)
         self.wakeup.set()
 
-    def _reserve(self, method: str, key_id: str = "legacy") -> None:
+    def _reserve(self, method: str, key_id: str = "legacy", chain: str = "") -> None:
         month = datetime.now(timezone.utc).strftime("%Y-%m")
         if self.state["month"] != month:
-            self.state.update(month=month, cu=0, key_usage={})
+            self.state.update(month=month, cu=0, key_usage={}, network_cu={})
             self._save()
         cost = METHOD_CU[method]
         if self.state["cu"] + cost > self.monthly_cu:
@@ -238,8 +299,181 @@ class WhalePoller:
             raise BudgetExhausted("key")
         self.state["cu"] += cost
         usage[key_id] = usage.get(key_id, 0) + cost
+        if chain:
+            network_usage = self.state.setdefault("network_cu", {})
+            network_usage[chain] = network_usage.get(chain, 0) + cost
         self.state["active_key"] = key_id
         self._save()
+
+    def _solana_poll_interval(self) -> float:
+        return (SOLANA_POLL_INTERVAL_ECONOMY_SEC if self.mode == "economy"
+                else SOLANA_POLL_INTERVAL_REALTIME_SEC)
+
+    def _solana_retry_delay(self, requested_delay: float = 0.0) -> float:
+        return min(RATE_LIMIT_MAX_SEC, max(self._solana_poll_interval(),
+                                           max(0.0, float(requested_delay or 0.0))))
+
+    def _network_row(self, chain: str) -> dict:
+        return self.network_status.setdefault(chain, {
+            "status": "paused", "last_success": 0.0, "last_event": 0.0,
+            "last_attempt": 0.0, "last_error_at": 0.0, "retry_at": 0.0,
+            "http_status": None, "rpc_code": None, "error": "",
+            "warning_status": "", "error_count": 0, "key_active": True})
+
+    def _mark_network_attempt(self, chain: str) -> float:
+        now = time.time()
+        row = self._network_row(chain)
+        row["last_attempt"] = now
+        self.last_attempt[chain] = now
+        if chain == "SOLANA":
+            self.solana_status["last_attempt"] = now
+        return now
+
+    def _mark_network_success(self, chain: str, *, key_id: str = "", clear_error: bool = True) -> None:
+        now = time.time()
+        row = self._network_row(chain)
+        previous = row.get("status")
+        row["status"] = "online"
+        row["last_success"] = now
+        row["key_active"] = True
+        if clear_error:
+            # A successful key clears only its own cooldown. Do not erase a
+            # parallel key's 429/auth/quota warning when this network is usable.
+            for cooldown_key in list(self.chain_cooldown):
+                if cooldown_key[0] == chain and key_id and cooldown_key[1] == key_id:
+                    self.chain_cooldown.pop(cooldown_key, None)
+                    self.chain_cooldown_status.pop(cooldown_key, None)
+                    self.rate_limit_attempts.pop(cooldown_key, None)
+            active_cooldowns = [
+                (self.chain_cooldown[key], self.chain_cooldown_status.get(key, ""))
+                for key in self.chain_cooldown
+                if key[0] == chain and self.chain_cooldown.get(key, 0.0) > now and
+                self.chain_cooldown_status.get(key) in
+                ("rate_limited", "auth_error", "quota_exhausted")]
+            if active_cooldowns:
+                warning = (row.get("warning_status") or
+                           previous if previous in ("rate_limited", "auth_error", "quota_exhausted")
+                           else active_cooldowns[0][1])
+                row.update(status="online", warning_status=warning,
+                           retry_at=min(expiry for expiry, _status in active_cooldowns))
+                self.errors[chain] = row.get("error", "")
+            else:
+                row.update(error="", http_status=None, rpc_code=None, retry_at=0.0,
+                           warning_status="")
+                self.errors.pop(chain, None)
+            self.last_success[chain] = now
+            if chain == "SOLANA":
+                self.solana_status.update(connected=True, state="online", last_success=now,
+                                          error=row.get("error", ""),
+                                          retry_in_sec=int(math.ceil(max(
+                                              0.0, float(row.get("retry_at") or 0) - now))),
+                                          key_active=True, http_status=row.get("http_status"),
+                                          rpc_code=row.get("rpc_code"))
+        elif previous in ("rate_limited", "auth_error", "quota_exhausted", "network_error"):
+            row["warning_status"] = previous
+
+    def _mark_network_event(self, chain: str) -> None:
+        row = self._network_row(chain)
+        row["last_event"] = time.time()
+        if row.get("status") in ("rate_limited", "auth_error", "quota_exhausted", "network_error"):
+            row["warning_status"] = row["status"]
+            row["status"] = "online"
+
+    def _mark_network_failure(self, chain: str, status: str, message: str, *,
+                              http_status: int | None = None, rpc_code=None,
+                              retry_after: float = 0.0, key_active: bool = True) -> None:
+        row = self._network_row(chain)
+        safe_message = self._redact_api_keys(message)[:400]
+        if row.get("status") != status or row.get("error") != safe_message:
+            row["error_count"] = int(row.get("error_count") or 0) + 1
+        row.update(status=status, error=safe_message, http_status=http_status,
+                   rpc_code=rpc_code, last_error_at=time.time(),
+                   retry_at=time.time() + max(0.0, retry_after),
+                   key_active=bool(key_active), warning_status="")
+        self.errors[chain] = safe_message
+        if chain == "SOLANA":
+            self.solana_status.update(state=status, connected=(status == "rate_limited" and
+                time.time() - float(row.get("last_success") or 0) <= NETWORK_SUCCESS_TTL_SEC),
+                error=safe_message, retry_in_sec=int(math.ceil(max(0.0, retry_after))),
+                http_status=http_status, rpc_code=rpc_code, key_active=bool(key_active))
+
+    def _note_rate_limit(self, chain: str, key_id: str, detail: str, *,
+                         http_status: int | None = 429, rpc_code=None) -> RateLimited:
+        now = time.time()
+        cooldown_key = (chain, key_id)
+        retry_at = self.chain_cooldown.get(cooldown_key, 0.0)
+        if retry_at <= now:
+            attempt = self.rate_limit_attempts.get(cooldown_key, 0)
+            base = min(RATE_LIMIT_MAX_SEC, RATE_LIMIT_BASE_SEC * (2 ** attempt))
+            delay = min(RATE_LIMIT_MAX_SEC,
+                        max(1.0, base * random.uniform(1.0 - RATE_LIMIT_JITTER,
+                                                      1.0 + RATE_LIMIT_JITTER)))
+            retry_at = now + delay
+            self.rate_limit_attempts[cooldown_key] = attempt + 1
+            self.chain_cooldown[cooldown_key] = retry_at
+        else:
+            delay = retry_at - now
+        self.chain_cooldown_status[cooldown_key] = "rate_limited"
+        safe_detail = self._redact_api_keys(detail)
+        message = (safe_detail if http_status == 429 and safe_detail.startswith("HTTP 429:")
+                   else f"HTTP 429: {safe_detail}" if http_status == 429 else safe_detail)
+        self._mark_network_failure(chain, "rate_limited", message,
+                                   http_status=http_status, rpc_code=rpc_code,
+                                   retry_after=delay, key_active=True)
+        return RateLimited(message, delay, http_status=http_status, rpc_code=rpc_code)
+
+    @staticmethod
+    def _provider_failure_kind(http_status: int | None, detail: str, rpc_code=None) -> str:
+        text = f"{detail} {rpc_code or ''}".lower()
+        try:
+            code = int(rpc_code)
+        except (TypeError, ValueError, OverflowError):
+            code = None
+        if http_status == 429 or code in (429, -32005) or any(
+                term in text for term in ("rate limit", "too many requests", "throttl", "request limit")):
+            return "rate_limited"
+        if http_status in (402, 4020) or code in (402, 4020) or any(
+                term in text for term in ("quota exhausted", "quota exceeded", "monthly quota",
+                                          "compute unit quota", "credits exhausted", "out of credits")):
+            return "quota_exhausted"
+        if (http_status in (401, 403) or code in (401, 403) or
+                any(term in text for term in
+                    ("unauthorized", "invalid api key", "invalid key", "authentication error",
+                     "not authorized", "forbidden"))):
+            return "auth_error"
+        return "network_error"
+
+    def _record_provider_failure(self, chain: str, key_id: str, detail: str, *,
+                                 http_status: int | None = None, rpc_code=None) -> PollError:
+        kind = self._provider_failure_kind(http_status, detail, rpc_code)
+        safe_detail = self._redact_api_keys(detail)
+        if kind == "rate_limited":
+            return self._note_rate_limit(chain, key_id, safe_detail,
+                                         http_status=http_status, rpc_code=rpc_code)
+        if kind == "auth_error":
+            retry_after = 900.0
+            cooldown_key = (chain, key_id)
+            self.chain_cooldown[cooldown_key] = time.time() + retry_after
+            self.chain_cooldown_status[cooldown_key] = kind
+            self._mark_network_failure(chain, kind, safe_detail,
+                                       http_status=http_status, rpc_code=rpc_code,
+                                       retry_after=retry_after, key_active=False)
+            return AuthError(safe_detail, status_code=http_status or 401,
+                             retry_after=retry_after, rpc_code=rpc_code)
+        if kind == "quota_exhausted":
+            retry_after = 300.0
+            cooldown_key = (chain, key_id)
+            self.chain_cooldown[cooldown_key] = time.time() + retry_after
+            self.chain_cooldown_status[cooldown_key] = kind
+            self._mark_network_failure(chain, kind, safe_detail,
+                                       http_status=http_status, rpc_code=rpc_code,
+                                       retry_after=retry_after, key_active=False)
+            return QuotaExhausted(safe_detail, status_code=http_status,
+                                  retry_after=retry_after, rpc_code=rpc_code)
+        self._mark_network_failure(chain, kind, safe_detail,
+                                   http_status=http_status, rpc_code=rpc_code,
+                                   key_active=True)
+        return NetworkError(safe_detail)
 
     def key_status(self) -> list[dict]:
         public = (self.key_store.public() if self.key_store else
@@ -270,6 +504,13 @@ class WhalePoller:
         estimate = int(round(used * month_seconds / elapsed)) if used else 0
         sol = self.solana_status.copy()
         tron = self.tron_status.copy()
+        network_status = {}
+        now_ts = time.time()
+        for chain, state in self.network_status.items():
+            row = state.copy()
+            row["retry_in_sec"] = int(math.ceil(max(0.0, float(row.get("retry_at") or 0) - now_ts)))
+            row["cu_used"] = int(self.state.get("network_cu", {}).get(chain, 0))
+            network_status[chain] = row
         other = {c: "not_configured" for c in
                  ("BITCOIN", "BITCOINCASH", "LITECOIN", "SUI", "DOGECOIN")}
         other["SOLANA"] = sol["state"]
@@ -287,6 +528,8 @@ class WhalePoller:
                 "active_key_id": self.state.get("active_key", ""),
                 "last_attempt": self.last_attempt.copy(),
                 "last_success": self.last_success.copy(),
+                "network_cu": self.state.get("network_cu", {}).copy(),
+                "network_status": network_status,
                 "latest_heads": self.latest_heads.copy(),
                 "evm_streams": {chain: row.copy() for chain, row in self.evm_streams.items()},
                 "solana": sol, "tron": tron,
@@ -311,25 +554,48 @@ class WhalePoller:
     async def _rpc(self, session: aiohttp.ClientSession, chain: str,
                    method: str, params: list) -> object:
         keys = self._keys()
+        self._mark_network_attempt(chain)
         if not keys:
-            raise NoKeys("API-ключ не задан")
+            self._mark_network_failure(chain, "paused", "Alchemy API key is not configured",
+                                       key_active=False)
+            raise NoKeys("Alchemy API key is not configured")
         active_id = self.state.get("active_key")
         index = next((i for i, (kid, _) in enumerate(keys) if kid == active_id), 0)
         now = time.time()
-        deferred = False
+        rate_limited: list[tuple[float, str]] = []
+        auth_errors: list[str] = []
+        quota_errors: list[str] = []
+        paused = False
+        allocation_exhausted = False
         for offset in range(len(keys)):
             key_id, key = keys[(index + offset) % len(keys)]
-            if (self.key_cooldown.get(key_id, 0) > now or
-                    self.chain_cooldown.get((chain, key_id), 0) > now):
-                deferred = True
+            cooldown_key = (chain, key_id)
+            if self.key_cooldown.get(key_id, 0) > now:
+                paused = True
+                continue
+            if self.chain_cooldown.get(cooldown_key, 0) > now:
+                retry_after = self.chain_cooldown[cooldown_key] - now
+                kind = self.chain_cooldown_status.get(cooldown_key, "paused")
+                if kind == "rate_limited":
+                    detail = self._network_row(chain).get("error") or "HTTP 429: provider cooldown"
+                    rate_limited.append((retry_after, str(detail)))
+                elif kind == "auth_error":
+                    auth_errors.append("Provider rejected this key for this network")
+                elif kind == "quota_exhausted":
+                    quota_errors.append("Provider quota exhausted for this network")
+                else:
+                    paused = True
                 continue
             try:
-                self._reserve(method, key_id)
+                self._reserve(method, key_id, chain=chain)
             except BudgetExhausted as exc:
                 if str(exc) == "global":
+                    self._mark_network_failure(chain, "quota_exhausted",
+                                               "Local monthly CU budget exhausted",
+                                               key_active=True)
                     raise
-                deferred = True
-                self.key_errors[key_id] = "Локальная доля ключа исчерпана; переключение"
+                allocation_exhausted = True
+                self.key_errors[key_id] = "Локальная доля CU исчерпана; ключ остаётся активен"
                 continue
             # Test endpoints may be complete local URLs. Production endpoints
             # are prefixes; do not persist or expose URLs containing keys.
@@ -340,49 +606,105 @@ class WhalePoller:
                 async with session.post(url, json={
                         "jsonrpc": "2.0", "id": 1, "method": method, "params": params},
                         timeout=aiohttp.ClientTimeout(total=25)) as response:
-                    if response.status == 400:
-                        try:
-                            detail = await response.text(errors="replace")
-                        except Exception as exc:  # preserve the RPC error even if body decoding fails
-                            detail = f"[unable to read response body: {type(exc).__name__}]"
-                        self._reset_cursor(chain)
-                        log.error("[Alchemy] HTTP 400 network=%s method=%s response=%s",
-                                  chain, method, self._redact_api_keys(detail, extra_secrets=(key,)))
-                        raise PollError("HTTP 400")
-                    if response.status in (401, 403, 429):
-                        reason = ("Неверный ключ или сеть запрещена" if response.status in (401, 403)
-                                  else "HTTP 429: ограничение Alchemy")
-                        self.key_errors[key_id] = reason
-                        if response.status == 403:
-                            self.chain_cooldown[(chain, key_id)] = now + 900
-                        else:
-                            self.key_cooldown[key_id] = now + (300 if response.status == 429 else 900)
-                        deferred = True
-                        continue
                     if response.status != 200:
-                        raise PollError(f"HTTP {response.status}")
-                    data = await response.json()
-                    if not isinstance(data, dict):
-                        raise PollError("Некорректный ответ RPC")
-                    error = data.get("error") or {}
-                    if error:
-                        self._reset_cursor(chain)
-                        if isinstance(error, dict) and error.get("code") in (429, -32005):
-                            self.key_errors[key_id] = "Ограничение RPC; переключение"
-                            self.key_cooldown[key_id] = now + 300
-                            deferred = True
+                        try:
+                            detail = (await response.text(errors="replace"))[:300]
+                        except Exception as exc:
+                            detail = f"[unable to read response body: {type(exc).__name__}]"
+                        detail = self._redact_api_keys(detail, extra_secrets=(key,))
+                        message = f"HTTP {response.status}: {detail}"
+                        if response.status == 400:
+                            self._reset_cursor(chain)
+                            log.error("[Alchemy] HTTP 400 network=%s method=%s response=%s",
+                                      chain, method, detail)
+                        failure = self._record_provider_failure(
+                            chain, key_id, message, http_status=response.status)
+                        if isinstance(failure, RateLimited):
+                            rate_limited.append((failure.retry_after, str(failure)))
                             continue
-                        raise PollError("RPC отклонил запрос (возможна неподдерживаемая сеть/метод)")
+                        if isinstance(failure, AuthError):
+                            auth_errors.append(str(failure))
+                            continue
+                        if isinstance(failure, QuotaExhausted):
+                            quota_errors.append(str(failure))
+                            continue
+                        raise failure
+                    try:
+                        data = await response.json()
+                    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+                        raise NetworkError(f"JSON-RPC decode failed: {type(exc).__name__}") from None
+                    if not isinstance(data, dict):
+                        raise NetworkError("Malformed JSON-RPC response")
+                    error = data.get("error")
+                    if error:
+                        if isinstance(error, dict):
+                            code = error.get("code")
+                            rpc_message = str(error.get("message") or "RPC error")[:300]
+                            detail = self._redact_api_keys(
+                                f"JSON-RPC code={code}: {rpc_message}", extra_secrets=(key,))
+                        else:
+                            code = None
+                            detail = self._redact_api_keys(str(error)[:300], extra_secrets=(key,))
+                        failure = self._record_provider_failure(
+                            chain, key_id, detail, http_status=response.status, rpc_code=code)
+                        if isinstance(failure, RateLimited):
+                            rate_limited.append((failure.retry_after, str(failure)))
+                            continue
+                        if isinstance(failure, AuthError):
+                            auth_errors.append(str(failure))
+                            continue
+                        if isinstance(failure, QuotaExhausted):
+                            quota_errors.append(str(failure))
+                            continue
+                        if method in ("eth_getLogs", "alchemy_getAssetTransfers"):
+                            self._reset_cursor(chain)
+                        raise failure
                     if "result" not in data:
-                        raise PollError("Пустой ответ RPC")
+                        raise NetworkError("JSON-RPC response has no result field")
                     self.key_errors.pop(key_id, None)
-                    self.chain_cooldown.pop((chain, key_id), None)
+                    self.chain_cooldown.pop(cooldown_key, None)
+                    self.chain_cooldown_status.pop(cooldown_key, None)
+                    self.rate_limit_attempts.pop(cooldown_key, None)
+                    self._mark_network_success(chain, key_id=key_id)
                     return data["result"]
-            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
-                # Never include aiohttp exception URL; it contains the key.
-                raise PollError(type(exc).__name__) from None
-        raise PollError("Все ключи исчерпаны, заблокированы или на паузе" if deferred
-                        else "Нет доступного ключа")
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                # Never include aiohttp exception URLs; production paths contain keys.
+                failure = NetworkError(type(exc).__name__)
+                self._mark_network_failure(chain, "network_error", str(failure), key_active=True)
+                raise failure from None
+        if rate_limited:
+            retry_after, message = min(rate_limited, key=lambda item: item[0])
+            row = self._network_row(chain)
+            http_status, rpc_code = row.get("http_status"), row.get("rpc_code")
+            self._mark_network_failure(chain, "rate_limited", message,
+                                       http_status=http_status, rpc_code=rpc_code,
+                                       retry_after=retry_after, key_active=True)
+            raise RateLimited(message, retry_after, http_status=http_status,
+                              rpc_code=rpc_code)
+        if auth_errors:
+            message = auth_errors[0]
+            row = self._network_row(chain)
+            retry_after = max(1.0, float(row.get("retry_at", 0) or 0) - time.time())
+            raise AuthError(message, status_code=row.get("http_status") or 401,
+                            retry_after=retry_after, rpc_code=row.get("rpc_code"))
+        if quota_errors:
+            message = quota_errors[0]
+            row = self._network_row(chain)
+            retry_after = max(1.0, float(row.get("retry_at", 0) or 0) - time.time())
+            raise QuotaExhausted(message, status_code=row.get("http_status"),
+                                 retry_after=retry_after, rpc_code=row.get("rpc_code"))
+        if allocation_exhausted:
+            message = "Local provider-key CU allocation exhausted"
+            self._mark_network_failure(chain, "quota_exhausted", message,
+                                       retry_after=300, key_active=True)
+            raise QuotaExhausted(message, retry_after=300, key_active=True)
+        if paused:
+            message = "Network paused while provider keys are cooling down or locally capped"
+            self._mark_network_failure(chain, "paused", message, key_active=True)
+            raise PollError(message)
+        message = "No available provider key"
+        self._mark_network_failure(chain, "paused", message, key_active=False)
+        raise NoKeys(message)
 
     async def _logs(self, session, chain: str, start: int, end: int) -> None:
         addresses = list(TOKENS[chain])
@@ -699,6 +1021,7 @@ class WhalePoller:
                             subscriptions += 1
                         state.update(connected=True, state="online",
                                      subscriptions=subscriptions, last_success=time.time(), error="")
+                        self._mark_network_success(chain, key_id=key_id)
                         self.state["active_key"] = key_id
                         retry = 3.0
                         async for message in ws:
@@ -724,6 +1047,7 @@ class WhalePoller:
                             else:
                                 await self.screener.handle_log(chain, result, source="realtime")
                             state["last_success"] = time.time()
+                            self._mark_network_event(chain)
             except asyncio.CancelledError:
                 state.update(connected=False, state="stopped")
                 raise
@@ -761,39 +1085,153 @@ class WhalePoller:
 
     async def _solana_rpc(self, session, method: str, params: list):
         keys = self._keys()
+        self._mark_network_attempt("SOLANA")
         if not keys:
+            self._mark_network_failure("SOLANA", "paused",
+                                       "Alchemy API key is not configured", key_active=False)
             raise NoKeys("Alchemy API key is not configured")
-        key_id, key = keys[0]
-        self._reserve("solana_" + method, key_id)
-        url = _solana_http_url(SOLANA_HTTP_BASE, key)
-        try:
-            async with session.post(url, json={"jsonrpc": "2.0", "id": 1,
-                                               "method": method, "params": params},
-                                    timeout=aiohttp.ClientTimeout(total=25)) as response:
-                if response.status != 200:
-                    detail = (await response.text())[:180]
-                    if key:
-                        detail = detail.replace(key, "[redacted]")
-                    self.key_errors[key_id] = f"Solana RPC HTTP {response.status}: {detail}"
-                    raise PollError(f"Solana RPC HTTP {response.status}: {detail}")
-                payload = await response.json()
-        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
-            detail = str(exc).replace(key, "[redacted]") if key else str(exc)
-            self.key_errors[key_id] = f"Solana RPC: {type(exc).__name__}"
-            raise PollError(f"{type(exc).__name__}: {detail[:240]}") from None
-        if not isinstance(payload, dict):
-            raise PollError("Solana RPC returned a malformed response")
-        if payload.get("error"):
-            error = payload["error"]
-            if isinstance(error, dict):
-                detail = f"code={error.get('code', '?')}: {error.get('message', 'RPC error')}"
-            else:
-                detail = str(error)
-            detail = self._solana_safe_text(detail)
-            self.key_errors[key_id] = detail[:200]
-            raise PollError(f"{method}: {detail[:240]}")
-        self.key_errors.pop(key_id, None)
-        return payload.get("result")
+        active_id = self.state.get("active_key")
+        start = next((i for i, (kid, _) in enumerate(keys) if kid == active_id), 0)
+        now = time.time()
+        rate_limited: list[tuple[float, str]] = []
+        auth_errors: list[str] = []
+        quota_errors: list[str] = []
+        paused = False
+        allocation_exhausted = False
+        for offset in range(len(keys)):
+            key_id, key = keys[(start + offset) % len(keys)]
+            cooldown_key = ("SOLANA", key_id)
+            if self.key_cooldown.get(key_id, 0) > now:
+                paused = True
+                continue
+            if self.chain_cooldown.get(cooldown_key, 0) > now:
+                retry_after = self.chain_cooldown[cooldown_key] - now
+                kind = self.chain_cooldown_status.get(cooldown_key, "paused")
+                if kind == "rate_limited":
+                    detail = self._network_row("SOLANA").get("error") or "HTTP 429: provider cooldown"
+                    rate_limited.append((retry_after, str(detail)))
+                elif kind == "auth_error":
+                    auth_errors.append("Provider rejected this key for Solana")
+                elif kind == "quota_exhausted":
+                    quota_errors.append("Provider quota exhausted for Solana")
+                else:
+                    paused = True
+                continue
+            try:
+                self._reserve("solana_" + method, key_id, chain="SOLANA")
+            except BudgetExhausted as exc:
+                if str(exc) == "global":
+                    self._mark_network_failure("SOLANA", "quota_exhausted",
+                                               "Local monthly CU budget exhausted",
+                                               key_active=True)
+                    raise
+                allocation_exhausted = True
+                self.key_errors[key_id] = "Локальная доля CU исчерпана; ключ остаётся активен"
+                continue
+            url = _solana_http_url(SOLANA_HTTP_BASE, key)
+            try:
+                async with session.post(url, json={"jsonrpc": "2.0", "id": 1,
+                                                   "method": method, "params": params},
+                                        timeout=aiohttp.ClientTimeout(total=25)) as response:
+                    if response.status != 200:
+                        try:
+                            body = (await response.text(errors="replace"))[:300]
+                        except Exception as exc:
+                            body = f"[unable to read response body: {type(exc).__name__}]"
+                        body = self._redact_api_keys(body, extra_secrets=(key,))
+                        detail = (f"HTTP 429: {body}" if response.status == 429 else
+                                  f"Solana RPC HTTP {response.status}: {body}")
+                        failure = self._record_provider_failure(
+                            "SOLANA", key_id, detail, http_status=response.status)
+                        if isinstance(failure, RateLimited):
+                            rate_limited.append((failure.retry_after, str(failure)))
+                            continue
+                        if isinstance(failure, AuthError):
+                            auth_errors.append(str(failure))
+                            continue
+                        if isinstance(failure, QuotaExhausted):
+                            quota_errors.append(str(failure))
+                            continue
+                        raise failure
+                    try:
+                        payload = await response.json()
+                    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+                        failure = NetworkError(f"Solana RPC JSON decode failed: {type(exc).__name__}")
+                        self._mark_network_failure("SOLANA", "network_error", str(failure))
+                        raise failure from None
+            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                failure = NetworkError(f"Solana RPC {type(exc).__name__}")
+                self._mark_network_failure("SOLANA", "network_error", str(failure))
+                raise failure from None
+            if not isinstance(payload, dict):
+                failure = NetworkError("Solana RPC returned a malformed response")
+                self._mark_network_failure("SOLANA", "network_error", str(failure))
+                raise failure
+            if payload.get("error"):
+                error = payload["error"]
+                if isinstance(error, dict):
+                    code = error.get("code")
+                    detail = f"{method}: JSON-RPC code={code}: {error.get('message', 'RPC error')}"
+                else:
+                    code = None
+                    detail = f"{method}: {error}"
+                detail = self._redact_api_keys(detail, extra_secrets=(key,))[:300]
+                failure = self._record_provider_failure("SOLANA", key_id, detail,
+                                                         http_status=response.status,
+                                                         rpc_code=code)
+                if isinstance(failure, RateLimited):
+                    rate_limited.append((failure.retry_after, str(failure)))
+                    continue
+                if isinstance(failure, AuthError):
+                    auth_errors.append(str(failure))
+                    continue
+                if isinstance(failure, QuotaExhausted):
+                    quota_errors.append(str(failure))
+                    continue
+                raise failure
+            if "result" not in payload:
+                failure = NetworkError("Solana RPC response has no result field")
+                self._mark_network_failure("SOLANA", "network_error", str(failure))
+                raise failure
+            self.key_errors.pop(key_id, None)
+            self.chain_cooldown.pop(cooldown_key, None)
+            self.chain_cooldown_status.pop(cooldown_key, None)
+            self.rate_limit_attempts.pop(cooldown_key, None)
+            self._mark_network_success("SOLANA", key_id=key_id)
+            return payload["result"]
+        if rate_limited:
+            retry_after, message = min(rate_limited, key=lambda item: item[0])
+            row = self._network_row("SOLANA")
+            http_status, rpc_code = row.get("http_status"), row.get("rpc_code")
+            self._mark_network_failure("SOLANA", "rate_limited", message,
+                                       http_status=http_status, rpc_code=rpc_code,
+                                       retry_after=retry_after, key_active=True)
+            raise RateLimited(message, retry_after, http_status=http_status,
+                              rpc_code=rpc_code)
+        if auth_errors:
+            message = auth_errors[0]
+            row = self._network_row("SOLANA")
+            retry_after = max(1.0, float(row.get("retry_at", 0) or 0) - time.time())
+            raise AuthError(message, status_code=row.get("http_status") or 401,
+                            retry_after=retry_after, rpc_code=row.get("rpc_code"))
+        if quota_errors:
+            message = quota_errors[0]
+            row = self._network_row("SOLANA")
+            retry_after = max(1.0, float(row.get("retry_at", 0) or 0) - time.time())
+            raise QuotaExhausted(message, status_code=row.get("http_status"),
+                                 retry_after=retry_after, rpc_code=row.get("rpc_code"))
+        if allocation_exhausted:
+            message = "Local provider-key CU allocation exhausted"
+            self._mark_network_failure("SOLANA", "quota_exhausted", message,
+                                       retry_after=300, key_active=True)
+            raise QuotaExhausted(message, retry_after=300, key_active=True)
+        if paused:
+            message = "Solana polling paused while provider keys are cooling down or locally capped"
+            self._mark_network_failure("SOLANA", "paused", message, key_active=True)
+            raise PollError(message)
+        message = "No available provider key for Solana"
+        self._mark_network_failure("SOLANA", "paused", message, key_active=False)
+        raise NoKeys(message)
 
     @staticmethod
     def _solana_tx_signature(tx: dict) -> str:
@@ -1161,7 +1599,7 @@ class WhalePoller:
     async def _solana_poll_wallets_once(
             self, session, owners: list[tuple[str, str]],
             token_accounts: dict[str, dict[str, set[str]]]) -> None:
-        """Poll CEX owners and discovered token accounts, then fetch each tx once."""
+        """Poll a bounded rotating batch of owners and transactions per cycle."""
         addresses = {owner for owner, _label in owners}
         active_owners = {owner for owner, _label in owners}
         for owner, mint_accounts in token_accounts.items():
@@ -1173,6 +1611,14 @@ class WhalePoller:
         self.solana_status.update(poll_addresses=len(address_rows),
                                   token_accounts=sum(len(rows) for mints in token_accounts.values()
                                                      for rows in mints.values()))
+        if address_rows:
+            start = self._solana_address_cursor % len(address_rows)
+            signature_addresses = [address_rows[(start + index) % len(address_rows)]
+                                   for index in range(min(len(address_rows),
+                                       SOLANA_MAX_SIGNATURE_REQUESTS_PER_CYCLE))]
+            self._solana_address_cursor = (start + len(signature_addresses)) % len(address_rows)
+        else:
+            signature_addresses = []
         semaphore = asyncio.Semaphore(SOLANA_POLL_CONCURRENCY)
 
         async def fetch_signatures(address: str):
@@ -1183,20 +1629,27 @@ class WhalePoller:
                 raise PollError("Malformed getSignaturesForAddress response")
             return address, rows
 
-        responses = await asyncio.gather(*(fetch_signatures(address) for address in address_rows),
+        responses = await asyncio.gather(*(fetch_signatures(address)
+                                            for address in signature_addresses),
                                          return_exceptions=True)
         signature_rows: dict[str, object] = {}
         first_error = ""
         successful_addresses = 0
+        cycle_rate_limit: RateLimited | None = None
+        cycle_provider_failure: PollError | None = None
         for response in responses:
             if isinstance(response, BaseException):
                 if isinstance(response, BudgetExhausted):
                     raise response
                 if isinstance(response, asyncio.CancelledError):
                     raise response
+                if isinstance(response, RateLimited):
+                    cycle_rate_limit = cycle_rate_limit or response
+                elif isinstance(response, PollError):
+                    cycle_provider_failure = cycle_provider_failure or response
                 if not first_error:
                     first_error = self._solana_safe_text(
-                        str(response) or type(response).__name__)[:180]
+                        str(response) or type(response).__name__)[:300]
                 continue
             address, rows = response
             successful_addresses += 1
@@ -1207,6 +1660,10 @@ class WhalePoller:
                 if re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{64,100}", signature):
                     signature_rows.setdefault(signature, row.get("blockTime"))
         if not successful_addresses:
+            if cycle_rate_limit:
+                raise cycle_rate_limit
+            if cycle_provider_failure:
+                raise cycle_provider_failure
             raise PollError(first_error or "No Solana signature poll succeeded")
 
         def signature_order(item):
@@ -1216,11 +1673,18 @@ class WhalePoller:
                 return 0.0
 
         tracked_owners = set(active_owners)
+        transaction_budget = min(SOLANA_MAX_TRANSACTION_REQUESTS_PER_CYCLE,
+                                 max(0, SOLANA_MAX_RPC_REQUESTS_PER_CYCLE -
+                                     len(signature_addresses)))
+        transaction_requests = 0
         for signature, _block_time in sorted(signature_rows.items(), key=signature_order):
+            if transaction_requests >= transaction_budget:
+                break
             if (signature in self._solana_processed_signatures or
                     signature in self._solana_signature_inflight):
                 continue
             self._solana_signature_inflight.add(signature)
+            transaction_requests += 1
             try:
                 tx = await self._solana_rpc(session, "getTransaction", [signature, {
                     "encoding": "jsonParsed", "commitment": "confirmed",
@@ -1232,21 +1696,43 @@ class WhalePoller:
                 self.solana_status["events"] += count
             except BudgetExhausted:
                 raise
+            except RateLimited as exc:
+                cycle_rate_limit = cycle_rate_limit or exc
+                first_error = self._solana_safe_text(str(exc))[:300]
+                break
             except Exception as exc:  # isolate one unavailable transaction from other CEX wallets
                 if not first_error:
                     first_error = self._solana_safe_text(
-                        str(exc) or type(exc).__name__)[:180]
+                        str(exc) or type(exc).__name__)[:300]
                 log.warning("[Solana] Transaction lookup failed: %s",
-                            self._solana_safe_text(str(exc) or type(exc).__name__)[:180])
+                            self._solana_safe_text(str(exc) or type(exc).__name__)[:300])
             finally:
                 self._solana_signature_inflight.discard(signature)
 
-        self.solana_status.update(connected=True, state="online", mode="cex_poll",
-                                  processing_state="polling", waiting_for_filters=False,
-                                  last_success=time.time(), error=first_error)
+        self.solana_status.update(
+            mode="cex_poll", processing_state="polling", waiting_for_filters=False,
+            requests_last_cycle=len(signature_addresses) + transaction_requests,
+            signature_requests_last_cycle=len(signature_addresses),
+            transaction_requests_last_cycle=transaction_requests,
+            request_budget=SOLANA_MAX_RPC_REQUESTS_PER_CYCLE)
+        if cycle_rate_limit:
+            self._mark_network_failure("SOLANA", "rate_limited", str(cycle_rate_limit),
+                                       http_status=cycle_rate_limit.http_status,
+                                       rpc_code=cycle_rate_limit.rpc_code,
+                                       retry_after=cycle_rate_limit.retry_after,
+                                       key_active=True)
+            self.solana_status.update(state="rate_limited", error=str(cycle_rate_limit),
+                                      retry_in_sec=int(math.ceil(cycle_rate_limit.retry_after)))
+        elif cycle_provider_failure and not first_error:
+            raise cycle_provider_failure
+        else:
+            self._mark_network_success("SOLANA", clear_error=True)
+            self.solana_status.update(connected=True, state="online", error=first_error,
+                                      last_success=time.time(), retry_in_sec=0)
 
     async def _solana_run_cex_poll(self, session, wallets: dict[str, str]) -> None:
         owners = list(wallets.items())[:SOLANA_MAX_WALLETS]
+        owners_key = tuple(owners)
         self.solana_status.update(connected=False, state="connecting", mode="cex_poll",
                                   subscriptions=0, submitted=0, active_wallets=len(owners),
                                   token_accounts=0, poll_addresses=0,
@@ -1255,16 +1741,29 @@ class WhalePoller:
         health = await self._solana_rpc(session, "getHealth", [])
         if health != "ok":
             raise PollError("Alchemy Solana getHealth did not return ok")
-        token_accounts = await self._solana_refresh_token_accounts(session, owners)
-        self._solana_token_accounts = token_accounts
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+        cache_valid = (self._solana_token_accounts_owners == owners_key and
+                       self._solana_token_accounts and
+                       now - self._solana_token_accounts_updated_at <
+                       SOLANA_TOKEN_ACCOUNT_REFRESH_SEC)
+        if cache_valid:
+            token_accounts = self._solana_token_accounts
+        else:
+            token_accounts = await self._solana_refresh_token_accounts(session, owners)
+            self._solana_token_accounts = token_accounts
+            self._solana_token_accounts_owners = owners_key
+            self._solana_token_accounts_updated_at = loop.time()
         self.solana_status.update(connected=True, state="online", mode="cex_poll",
                                   subscriptions=0, submitted=0, active_wallets=len(owners),
                                   token_accounts=sum(len(rows) for mints in token_accounts.values()
                                                      for rows in mints.values()),
+                                  token_accounts_updated_at=time.time() - max(
+                                      0.0, loop.time() - self._solana_token_accounts_updated_at),
                                   processing_state="polling", waiting_for_filters=False,
                                   last_success=time.time(), error="")
-        loop = asyncio.get_running_loop()
-        last_account_refresh = loop.time()
+        last_account_refresh = self._solana_token_accounts_updated_at
+        poll_interval = self._solana_poll_interval()
         while True:
             poll_started = loop.time()
             current = list(self.screener.wallet_addresses("SOLANA").items())[:SOLANA_MAX_WALLETS]
@@ -1273,9 +1772,11 @@ class WhalePoller:
             if loop.time() - last_account_refresh >= SOLANA_TOKEN_ACCOUNT_REFRESH_SEC:
                 token_accounts = await self._solana_refresh_token_accounts(session, owners)
                 self._solana_token_accounts = token_accounts
+                self._solana_token_accounts_owners = owners_key
                 last_account_refresh = loop.time()
+                self._solana_token_accounts_updated_at = last_account_refresh
             await self._solana_poll_wallets_once(session, owners, token_accounts)
-            delay = max(0.0, SOLANA_POLL_INTERVAL_SEC - (loop.time() - poll_started))
+            delay = max(0.0, poll_interval - (loop.time() - poll_started))
             await asyncio.sleep(delay)
 
     async def _solana_wait_for_filters(self, session) -> None:
@@ -1302,14 +1803,17 @@ class WhalePoller:
             owners = list(wallets.items())[:SOLANA_MAX_WALLETS]
             mode = "cex_poll" if owners else "waiting_for_filters"
             if not keys:
-                self.solana_status.update(connected=False, state="waiting",
+                message = "Alchemy API key is not configured"
+                self._mark_network_failure("SOLANA", "paused", message, key_active=False)
+                self.solana_status.update(connected=False, state="paused",
                     subscriptions=0, submitted=0, active_wallets=len(owners), mode=mode,
                     processing_state="waiting_for_key", waiting_for_filters=False,
-                    error="Alchemy API key is not configured")
+                    error=message)
                 await asyncio.sleep(5)
                 continue
 
             returned_for_registry_change = False
+            failure_delay = None
             try:
                 async with aiohttp.ClientSession() as session:
                     if owners:
@@ -1317,32 +1821,67 @@ class WhalePoller:
                     else:
                         await self._solana_wait_for_filters(session)
                         if not self.screener.wallet_addresses("SOLANA"):
-                            await asyncio.sleep(SOLANA_POLL_INTERVAL_SEC)
+                            await asyncio.sleep(self._solana_poll_interval())
                 returned_for_registry_change = True
                 retry = 3.0
             except asyncio.CancelledError:
                 self.solana_status.update(connected=False, state="stopped")
                 raise
-            except BudgetExhausted as exc:
-                self.solana_status.update(connected=False, state="budget_exhausted",
+            except Exception as exc:  # noqa: BLE001 — isolate all Solana provider failures
+                detail = self._solana_safe_text(str(exc) or type(exc).__name__)[:300]
+                if isinstance(exc, RateLimited):
+                    state = "rate_limited"
+                    failure_delay = max(1.0, exc.retry_after)
+                    http_status = exc.http_status
+                    key_active = True
+                elif isinstance(exc, (BudgetExhausted, QuotaExhausted)):
+                    state = "quota_exhausted"
+                    failure_delay = 300.0
+                    http_status = getattr(exc, "status_code", None)
+                    key_active = True
+                elif isinstance(exc, AuthError):
+                    state = "auth_error"
+                    failure_delay = 60.0
+                    http_status = getattr(exc, "status_code", 401)
+                    key_active = False
+                elif isinstance(exc, NoKeys):
+                    state = "paused"
+                    http_status = None
+                    key_active = False
+                else:
+                    state = "network_error"
+                    http_status = getattr(exc, "status_code", None)
+                    key_active = True
+                self._mark_network_failure("SOLANA", state, detail,
+                    http_status=http_status,
+                    rpc_code=getattr(exc, "rpc_code", None),
+                    retry_after=failure_delay or getattr(exc, "retry_after", 0.0),
+                    key_active=key_active)
+                self.solana_status.update(
                     mode=mode, waiting_for_filters=not bool(owners),
-                    error=self._solana_safe_text(str(exc) or "Alchemy CU budget exhausted")[:200])
-            except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError,
-                    PollError) as exc:
-                self.solana_status.update(connected=False, state="error", mode=mode,
-                    waiting_for_filters=False, error=self._solana_safe_text(
-                        str(exc) or type(exc).__name__)[:200])
-                self._log_solana_exception(exc)
-            except Exception as exc:  # noqa: BLE001 — keep Solana provider failures isolated
-                self.solana_status.update(connected=False, state="error", mode=mode,
-                    waiting_for_filters=False, error=self._solana_safe_text(
-                        str(exc) or type(exc).__name__)[:200])
-                self._log_solana_exception(exc)
+                    state=state, error=detail,
+                    connected=(state == "rate_limited" and
+                               time.time() - float(self.solana_status.get("last_success") or 0)
+                               <= NETWORK_SUCCESS_TTL_SEC),
+                    retry_in_sec=int(math.ceil(max(0.0, failure_delay or 0.0))))
+                if isinstance(exc, RateLimited):
+                    log.warning("[Solana] rate_limited retry_in=%ss: %s",
+                                int(math.ceil(exc.retry_after)), detail)
+                else:
+                    self._log_solana_exception(exc)
             if returned_for_registry_change:
-                await asyncio.sleep(0)
+                current = list(self.screener.wallet_addresses("SOLANA").items())[:SOLANA_MAX_WALLETS]
+                if current != owners:
+                    await asyncio.sleep(self._solana_poll_interval())
+                else:
+                    await asyncio.sleep(0)
                 continue
-            await asyncio.sleep(min(60.0, retry))
-            retry = min(60.0, retry * 2)
+            if failure_delay is not None:
+                await asyncio.sleep(self._solana_retry_delay(failure_delay))
+                retry = 3.0
+            else:
+                await asyncio.sleep(self._solana_retry_delay(retry))
+                retry = min(60.0, retry * 2)
 
     def _trongrid_key(self) -> str:
         if not self.trongrid_key_store:
@@ -1561,26 +2100,97 @@ class WhalePoller:
 
     async def run(self) -> None:
         async with aiohttp.ClientSession() as session:
+            force_poll = True
             while True:
+                now = time.time()
+                keys = self._keys()
+                global_quota_exhausted = int(self.state.get("cu", 0)) >= self.monthly_cu
+                if global_quota_exhausted:
+                    for chain in self.endpoints:
+                        self._mark_network_failure(chain, "quota_exhausted",
+                                                   "Local monthly CU budget exhausted",
+                                                   key_active=True)
+                else:
+                    for chain in self.endpoints:
+                        if not keys:
+                            message = "Alchemy API key is not configured"
+                            self._mark_network_failure(chain, "paused", message,
+                                                       key_active=False)
+                            continue
+                        row = self._network_row(chain)
+                        attempted = float(self.last_attempt.get(chain) or 0)
+                        retry_at = float(row.get("retry_at") or 0)
+                        if not force_poll and attempted:
+                            if row.get("status") in ("rate_limited", "auth_error", "quota_exhausted"):
+                                due_at = retry_at or attempted + self.interval
+                            else:
+                                due_at = attempted + self.interval
+                            if now < due_at:
+                                continue
+                        try:
+                            self._mark_network_attempt(chain)
+                            await self.poll_chain(session, chain)
+                            self.last_success[chain] = time.time()
+                            self._mark_network_success(chain)
+                        except asyncio.CancelledError:
+                            raise
+                        except BudgetExhausted as exc:
+                            if str(exc) == "global":
+                                for network in self.endpoints:
+                                    self._mark_network_failure(
+                                        network, "quota_exhausted",
+                                        "Local monthly CU budget exhausted", key_active=True)
+                                global_quota_exhausted = True
+                                break
+                            self._mark_network_failure(chain, "quota_exhausted",
+                                                       "Local provider key allocation exhausted",
+                                                       key_active=True)
+                        except Exception as exc:  # isolate failures to this chain
+                            detail = self._redact_api_keys(str(exc) or type(exc).__name__)[:400]
+                            if isinstance(exc, RateLimited):
+                                state = "rate_limited"
+                                retry_after = exc.retry_after
+                                http_status = exc.http_status
+                                key_active = True
+                            elif isinstance(exc, AuthError):
+                                state = "auth_error"
+                                retry_after = 900.0
+                                http_status = getattr(exc, "status_code", 401)
+                                key_active = False
+                            elif isinstance(exc, QuotaExhausted):
+                                state = "quota_exhausted"
+                                retry_after = getattr(exc, "retry_after", 300.0)
+                                http_status = getattr(exc, "status_code", None)
+                                key_active = getattr(exc, "key_active", False)
+                            elif isinstance(exc, NoKeys):
+                                state = "paused"
+                                retry_after = 0.0
+                                http_status = None
+                                key_active = False
+                            else:
+                                state = "network_error"
+                                retry_after = 0.0
+                                http_status = getattr(exc, "status_code", None)
+                                key_active = True
+                            self._mark_network_failure(chain, state, detail,
+                                http_status=http_status,
+                                rpc_code=getattr(exc, "rpc_code", None),
+                                retry_after=retry_after, key_active=key_active)
+                        await asyncio.sleep(0.01)
+                force_poll = False
+                now = time.time()
+                due_times = []
                 for chain in self.endpoints:
-                    if not self._keys():
-                        self.errors[chain] = "API-ключ не задан: добавьте его в админке"
-                        break
-                    try:
-                        self.last_attempt[chain] = time.time()
-                        await self.poll_chain(session, chain)
-                        self.last_success[chain] = time.time()
-                        self.errors.pop(chain, None)
-                    except asyncio.CancelledError:
-                        raise
-                    except BudgetExhausted:
-                        self.errors[chain] = "Месячный бюджет скринера исчерпан"
-                        break
-                    except (PollError, ValueError, OSError) as exc:
-                        self.errors[chain] = str(exc)[:100]
-                    await asyncio.sleep(0.01)
+                    row = self._network_row(chain)
+                    attempted = float(self.last_attempt.get(chain) or 0)
+                    if row.get("status") in ("rate_limited", "auth_error", "quota_exhausted"):
+                        due_times.append(float(row.get("retry_at") or now + self.interval))
+                    else:
+                        due_times.append((attempted or now) + self.interval)
+                timeout = max(0.1, min(due_times, default=now + self.interval) - now)
                 try:
-                    await asyncio.wait_for(self.wakeup.wait(), timeout=self.interval)
+                    await asyncio.wait_for(self.wakeup.wait(), timeout=timeout)
+                    force_poll = True
                 except asyncio.TimeoutError:
                     pass
                 self.wakeup.clear()

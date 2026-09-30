@@ -9,15 +9,17 @@ from pathlib import Path
 from unittest.mock import patch
 
 import aiohttp
+from aiohttp import ClientSession, web
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cex_wallets_updater import (
-    CEXWalletRegistry, normalize_chain, parse_defillama_cex_config,
+    CEXWalletRegistry, EVM_CHAINS, SourceFetchError, WalletSourceError, _read_json,
+    fetch_defillama_cex_wallets, normalize_chain, parse_defillama_cex_config,
     valid_address,
 )
 from tron_address import tron_to_base58, tron_to_hex
-from whale_poller import MINED_TRANSACTION_CHAINS, SPL_TOKEN_PROGRAM, WhalePoller
+from whale_poller import MINED_TRANSACTION_CHAINS, SPL_TOKEN_PROGRAM, WhalePoller, RateLimited
 from whale_screener import SOLANA_TOKENS, TRON_TOKENS, WhaleScreener
 
 
@@ -35,7 +37,9 @@ class CEXWalletRegistryTests(unittest.IsolatedAsyncioTestCase):
             tron: { owners: ['TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'] },
             bitcoin: 'binance-btc-owner'
           },
-          other: { owners: [] }
+          unverified_exchange: {
+            ethereum: { owners: ['0x9999999999999999999999999999999999999999'] }
+          }
         };
         '''
         metadata = {"cexs": [{"slug": "binance", "name": "Binance"}]}
@@ -43,15 +47,17 @@ class CEXWalletRegistryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({row["chain"] for row in rows},
                          {"ETH", "BNB", "POLYGON", "ARBITRUM", "BASE", "SOLANA", "TRON"})
         self.assertTrue(all(row["name"] == "Binance" for row in rows))
+        self.assertNotIn("0x9999999999999999999999999999999999999999",
+                         {row["address"] for row in rows})
         self.assertEqual(normalize_chain("binanceSmartChain"), "BNB")
         self.assertEqual(normalize_chain("arbitrum-one"), "ARBITRUM")
         self.assertTrue(valid_address("SOLANA", "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"))
         self.assertTrue(valid_address("TRON", "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"))
         self.assertFalse(valid_address("TRON", "T" + "1" * 33))
 
-    def test_solana_wallet_records_are_validated_and_legacy_evm_scope_survives(self):
-        # Base58/32-byte validity does not prove exchange ownership; 5tzFki... is
-        # syntactically valid but deliberately excluded from the labeled registry.
+    def test_legacy_evm_scope_is_preserved_without_non_evm_labels(self):
+        # These are format-only test candidates: Base58/32-byte validity does
+        # not prove exchange ownership, so none is asserted as a CEX fact.
         valid = [
             "5tzFkiKsc22KEChR37aTBD323ApAo28nJZ34352fgd5e",
             "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
@@ -77,10 +83,12 @@ class CEXWalletRegistryTests(unittest.IsolatedAsyncioTestCase):
         records = registry.records()
         self.assertNotIn("5tzFkiKsc22KEChR37aTBD323ApAo28nJZ34352fgd5e",
                          {row["address"] for row in records})
-        self.assertEqual(sum(row["chain"] == "SOLANA" for row in records), 5)
+        self.assertEqual(sum(row["chain"] == "SOLANA" for row in records), 0)
+        self.assertEqual(sum(row["chain"] == "TRON" for row in records), 0)
         self.assertEqual(sum(row["chain"] == "ETH" for row in records), 8)
-        self.assertTrue(all(valid_address("SOLANA", row["address"])
-                            for row in records if row["chain"] == "SOLANA"))
+        self.assertTrue(all(sum(row["chain"] == chain for row in records) == 8
+                            for chain in EVM_CHAINS),
+                        "legacy EVM labels retain their existing EVM-only scope")
 
     async def test_manual_addresses_survive_refresh_update_delete_and_backup(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -106,6 +114,134 @@ class CEXWalletRegistryTests(unittest.IsolatedAsyncioTestCase):
             restored = CEXWalletRegistry(path)
             self.assertEqual([(row["chain"], row["name"]) for row in restored.records()],
                              [("BASE", "Auto CEX"), ("ETH", "Renamed")])
+
+    async def test_http_404_and_500_failures_preserve_file_and_manual_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cex_wallets.json"
+            registry = CEXWalletRegistry(path)
+            manual = registry.add_manual("ETH", "0x" + "1" * 40, "Manual survives")
+            automatic = {"chain": "BASE", "address": "0x" + "2" * 40,
+                         "name": "Known auto", "source": "defillama"}
+            with patch("cex_wallets_updater.fetch_defillama_cex_wallets",
+                       return_value=[automatic]):
+                await registry.refresh()
+            original = path.read_bytes()
+            with patch("cex_wallets_updater.fetch_defillama_cex_wallets", return_value=[]):
+                with self.assertRaises(WalletSourceError):
+                    await registry.refresh()
+            self.assertEqual(path.read_bytes(), original)
+            self.assertTrue(any(row["id"] == manual["id"] and row["source"] == "manual"
+                                for row in registry.records()))
+            for status in (404, 500):
+                with self.subTest(status=status):
+                    error = SourceFetchError(
+                        "https://api.llama.fi/cexs", "HTTP error", status=status,
+                        body=f"provider failure {status}; diagnostic body")
+                    with patch("cex_wallets_updater.fetch_defillama_cex_wallets",
+                               side_effect=error):
+                        with self.assertRaises(SourceFetchError):
+                            await registry.refresh()
+                    self.assertEqual(path.read_bytes(), original)
+                    self.assertTrue(any(row["id"] == manual["id"] and
+                                        row["source"] == "manual" for row in registry.records()))
+                    self.assertTrue(any(row["name"] == "Known auto" for row in registry.records()))
+                    self.assertIn("https://api.llama.fi/cexs", registry.last_error)
+                    self.assertIn(f"HTTP {status}", registry.last_error)
+                    self.assertIn(f"provider failure {status}", registry.last_error)
+
+    async def test_defillama_metadata_falls_back_to_protocols_and_adapter_config(self):
+        owner = "0x" + "1" * 40
+        seen = []
+
+        async def cex_missing(request):
+            seen.append((request.path, request.headers.get("User-Agent", "")))
+            return web.Response(status=404, text="CEX endpoint unavailable")
+
+        async def protocols(request):
+            seen.append((request.path, request.headers.get("User-Agent", "")))
+            return web.json_response([
+                {"slug": "binance", "name": "Binance", "category": "CEX"},
+                {"slug": "example-defi", "name": "Not an exchange", "category": "Dexes"},
+            ])
+
+        async def adapter(request):
+            seen.append((request.path, request.headers.get("User-Agent", "")))
+            config = "const configs = { binance: { ethereum: { owners: ['" + owner + "'] } } };"
+            return web.Response(text=config)
+
+        app = web.Application()
+        app.router.add_get("/cexs", cex_missing)
+        app.router.add_get("/protocols", protocols)
+        app.router.add_get("/adapter.js", adapter)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        base = f"http://127.0.0.1:{port}"
+        try:
+            with patch("cex_wallets_updater.DEFILLAMA_CEX_API", base + "/cexs"), \
+                 patch("cex_wallets_updater.DEFILLAMA_PROTOCOLS_API", base + "/protocols"), \
+                 patch("cex_wallets_updater.DEFILLAMA_CEX_CONFIG", base + "/adapter.js"):
+                async with ClientSession() as session:
+                    rows = await fetch_defillama_cex_wallets(session)
+            self.assertEqual([(row["chain"], row["address"], row["name"]) for row in rows],
+                             [("ETH", owner, "Binance")])
+            self.assertEqual([item[0] for item in seen], ["/cexs", "/protocols", "/adapter.js"])
+            self.assertTrue(all("LiqScope-CEX-Wallets/" in item[1] for item in seen))
+        finally:
+            await runner.cleanup()
+
+    async def test_source_errors_redact_secrets_in_url_and_body(self):
+        secret = "provider-key-should-not-leak"
+        error = SourceFetchError(
+            f"https://pro-api.llama.fi/{secret}/cexs?api_key={secret}", "HTTP error",
+            status=403, body=f"api_key={secret}; response denied")
+        self.assertNotIn(secret, str(error))
+        self.assertIn("/[redacted]/cexs", str(error))
+        self.assertIn("HTTP 403", str(error))
+        self.assertIn("[redacted]", str(error))
+
+    async def test_source_errors_report_url_status_body_and_decode_reason(self):
+        requests = {"missing": 0, "server": 0, "invalid": 0}
+
+        async def missing(_request):
+            requests["missing"] += 1
+            return web.Response(status=404, text="endpoint not found")
+
+        async def server_error(_request):
+            requests["server"] += 1
+            return web.Response(status=500, text="upstream temporarily unavailable")
+
+        async def invalid_json(_request):
+            requests["invalid"] += 1
+            return web.Response(status=200, text="<html>not json</html>")
+
+        app = web.Application()
+        app.router.add_get("/missing", missing)
+        app.router.add_get("/server-error", server_error)
+        app.router.add_get("/invalid-json", invalid_json)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        try:
+            async with ClientSession() as session:
+                for path, expected in (("/missing", ("HTTP 404", "endpoint not found")),
+                                       ("/server-error", ("HTTP 500", "upstream temporarily unavailable")),
+                                       ("/invalid-json", ("JSON decode error", "not json"))):
+                    url = f"http://127.0.0.1:{port}{path}"
+                    with self.assertRaises(SourceFetchError) as caught:
+                        await _read_json(session, url)
+                    self.assertIn(url, str(caught.exception))
+                    for text in expected:
+                        self.assertIn(text, str(caught.exception))
+            self.assertEqual(requests["missing"], 1)
+            self.assertEqual(requests["server"], 3)
+            self.assertEqual(requests["invalid"], 1)
+        finally:
+            await runner.cleanup()
 
 
 class MultichainTransferTests(unittest.IsolatedAsyncioTestCase):
@@ -287,6 +423,11 @@ class MultichainTransferTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(methods.count("getTokenAccountsByOwner"), 2)
                     self.assertIn("getSignaturesForAddress", methods)
                     self.assertEqual(methods.count("getTransaction"), 1)
+                    self.assertEqual(poller.solana_status["request_budget"], 80)
+                    self.assertEqual(poller.solana_status["requests_last_cycle"], 3)
+                    self.assertLessEqual(poller.solana_status["requests_last_cycle"],
+                                         poller.solana_status["request_budget"])
+                    self.assertEqual(poller._solana_poll_interval(), 30)
                     self.assertIn(signature, poller._solana_processed_signatures)
                     self.assertEqual(set(methods), {"getHealth", "getTokenAccountsByOwner",
                                                     "getSignaturesForAddress", "getTransaction"})
@@ -387,6 +528,66 @@ class MultichainTransferTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(poller.solana_status["active_wallets"], 0)
             self.assertEqual(calls[0][1]["method"], "getHealth")
             self.assertEqual(poller.solana_status["error"], "")
+            screen.close()
+
+    async def test_solana_retry_delay_never_exceeds_mode_poll_frequency(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            screen = self.make_screener(tmp)
+            poller = WhalePoller("test-alchemy-key-123", screen,
+                                 state_file=Path(tmp) / "poller.json")
+            self.assertEqual(poller._solana_retry_delay(15), 30)
+            self.assertEqual(poller._solana_poll_interval(), 30)
+            poller.mode = "economy"
+            self.assertEqual(poller._solana_retry_delay(15), 60)
+            self.assertEqual(poller._solana_retry_delay(90), 90)
+            self.assertEqual(poller._solana_retry_delay(500), 300)
+            screen.close()
+
+    async def test_solana_429_is_rate_limited_not_a_key_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            screen = self.make_screener(tmp)
+            poller = WhalePoller("test-alchemy-key-123", screen,
+                                 state_file=Path(tmp) / "poller.json")
+            requests = []
+
+            class FakeResponse:
+                def __init__(self, status, result=None, body=""):
+                    self.status, self.result, self.body = status, result, body
+                async def __aenter__(self):
+                    return self
+                async def __aexit__(self, *_args):
+                    return None
+                async def text(self, **_kwargs):
+                    return self.body
+                async def json(self):
+                    return {"jsonrpc": "2.0", "id": 1, "result": self.result}
+
+            class FakeSession:
+                def post(self, url, *, json, timeout):
+                    requests.append((url, json, timeout))
+                    if len(requests) == 1:
+                        return FakeResponse(429, body="Too many requests; retry later")
+                    return FakeResponse(200, result="ok")
+
+            with patch("whale_poller.random.uniform", return_value=1.0):
+                with self.assertRaises(RateLimited) as limited:
+                    await poller._solana_rpc(FakeSession(), "getHealth", [])
+                self.assertEqual(limited.exception.retry_after, 15)
+                status = poller.status()
+                self.assertEqual(status["solana"]["state"], "rate_limited")
+                self.assertEqual(status["network_status"]["SOLANA"]["status"], "rate_limited")
+                self.assertIn("Too many requests", status["solana"]["error"])
+                self.assertTrue(status["network_status"]["SOLANA"]["key_active"])
+                self.assertNotIn("legacy", poller.key_errors)
+                self.assertEqual(poller.key_status()[0]["state"], "active")
+                with self.assertRaises(RateLimited):
+                    await poller._solana_rpc(FakeSession(), "getHealth", [])
+                self.assertEqual(len(requests), 1)
+                poller.chain_cooldown[("SOLANA", "legacy")] = time.time() - 1
+                self.assertEqual(await poller._solana_rpc(
+                    FakeSession(), "getHealth", []), "ok")
+                self.assertEqual(poller.status()["network_status"]["SOLANA"]["status"], "online")
+                self.assertEqual(poller.key_status()[0]["state"], "active")
             screen.close()
 
     async def test_solana_rpc_uses_alchemy_solana_endpoint_and_native_methods(self):

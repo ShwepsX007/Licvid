@@ -31,7 +31,12 @@
         const response = await fetch(path, {credentials: "same-origin", cache: "no-store", ...options});
         let body = {};
         try { body = await response.json(); } catch (_) {}
-        if (!response.ok) throw new Error(body.error || "HTTP " + response.status);
+        if (!response.ok) {
+            const error = new Error(body.reason || body.detail || body.error || "HTTP " + response.status);
+            error.code = body.error || "http_error";
+            error.status = response.status;
+            throw error;
+        }
         return body;
     }
     const when = ts => ts ? new Date(Number(ts) * 1000).toLocaleString() : t("adm.alchemy_never");
@@ -193,6 +198,13 @@
         el("whale-admin-wallet-summary").textContent = t("adm.cex_wallet_summary", {
             total: number(summary && summary.total || 0), counts, updated: refreshed,
         });
+        const walletStatus = el("whale-admin-wallet-status");
+        if (summary && summary.error) {
+            walletStatus.textContent = t("adm.cex_wallet_refresh_error_detail", {reason: summary.error});
+            walletStatus.title = summary.error;
+        } else {
+            walletStatus.title = "";
+        }
     }
     function cancelWalletEdit() {
         editingWalletId = "";
@@ -218,19 +230,51 @@
         const target = el("whale-admin-chains");
         target.replaceChildren();
         (networks || []).forEach(network => {
-            const stateName = network.status === "online" && network.waiting_for_filters
-                ? t("adm.alchemy_online_waiting_cex_filters")
-                : network.status === "online" ? t("adm.alchemy_online")
-                    : network.status === "error" ? t("adm.alchemy_error_state")
-                        : t("adm.alchemy_waiting");
-            const card = make("div", "whale-admin-network status--" + (network.status || "waiting"));
+            const status = network.status || "paused";
+            const warning = network.warning_status || "";
+            const rateLimited = status === "rate_limited" || warning === "rate_limited";
+            const rateMessage = rateLimited
+                ? t("adm.alchemy_rate_limited", {seconds: number(network.retry_in_sec || 0)}) : "";
+            let stateName;
+            if (status === "online" && network.waiting_for_filters) {
+                stateName = t("adm.alchemy_online_waiting_cex_filters");
+            } else if (status === "online") {
+                stateName = t("adm.alchemy_online");
+            } else if (rateLimited) {
+                stateName = rateMessage;
+            } else if (status === "auth_error") {
+                stateName = t("adm.alchemy_auth_error");
+            } else if (status === "quota_exhausted") {
+                stateName = t("adm.alchemy_quota_exhausted");
+            } else if (status === "error") {
+                stateName = t("adm.alchemy_error_state");
+            } else if (status === "network_error") {
+                stateName = t("adm.alchemy_network_error");
+            } else if (status === "paused") {
+                stateName = t("adm.alchemy_paused");
+            } else {
+                stateName = t("adm.alchemy_waiting");
+            }
+            const card = make("div", "whale-admin-network status--" + status);
             card.append(make("strong", "", networkLabel(network.chain)));
             card.append(make("span", "whale-admin-network-status", stateName));
-            const details = network.error && network.error !== "no_key"
-                ? network.error : network.last_success
-                    ? t("adm.alchemy_last_success", {time: when(network.last_success)})
-                    : network.error === "no_key" ? t("adm.alchemy_no_key") : t("adm.alchemy_never");
-            card.append(make("div", "", details));
+            const parts = [];
+            if (rateMessage) parts.push(rateMessage);
+            if (network.error && network.error !== "no_key") parts.push(network.error);
+            else if (network.error === "no_key") parts.push(t("adm.alchemy_no_key"));
+            else if (network.last_success) parts.push(
+                t("adm.alchemy_last_success", {time: when(network.last_success)}));
+            else if (!rateMessage) parts.push(t("adm.alchemy_never"));
+            if (network.rpc_code !== undefined && network.rpc_code !== null) {
+                parts.push("JSON-RPC code=" + network.rpc_code);
+            }
+            if (network.http_status && network.http_status !== 200 && !rateLimited) {
+                parts.push("HTTP " + network.http_status);
+            }
+            if (network.cu_used) parts.push(t("adm.alchemy_network_cu", {amount: number(network.cu_used)}));
+            const details = make("div", "whale-admin-network-details", parts.join(" · "));
+            details.title = parts.join(" · ");
+            card.append(details);
             target.append(card);
         });
     }
@@ -356,8 +400,12 @@
             const result = await request("/api/admin/screener/cex-wallets/refresh", {method: "POST"});
             target.textContent = t("adm.cex_wallet_refreshed", {count: number(result.after || 0)});
             await loadWallets();
-        } catch (_) {
-            target.textContent = t("adm.cex_wallet_refresh_error");
+        } catch (error) {
+            const reason = String(error && error.message || "");
+            target.textContent = reason
+                ? t("adm.cex_wallet_refresh_error_detail", {reason})
+                : t("adm.cex_wallet_refresh_error");
+            target.title = reason;
         } finally {
             button.disabled = false;
         }

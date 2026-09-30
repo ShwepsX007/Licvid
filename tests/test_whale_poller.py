@@ -5,12 +5,15 @@ import asyncio
 import json
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from aiohttp import web, ClientSession
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from whale_poller import ENDPOINTS, NATIVE_NETWORKS, WhalePoller, BudgetExhausted, PollError, to_hex_block
+from whale_poller import (ENDPOINTS, NATIVE_NETWORKS, WhalePoller, BudgetExhausted,
+                          PollError, QuotaExhausted, RateLimited, to_hex_block)
 from whale_screener import WhaleScreener, TOKENS, TRANSFER_TOPIC
 
 
@@ -211,6 +214,139 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 screen.close()
                 await runner.cleanup()
+
+    def test_provider_failure_classification_is_network_scoped(self):
+        classify = WhalePoller._provider_failure_kind
+        cases = (
+            (429, "too many requests", None, "rate_limited"),
+            (200, "JSON-RPC code=429: rate limit", "429", "rate_limited"),
+            (403, "forbidden", None, "auth_error"),
+            (200, "invalid API key", 401, "auth_error"),
+            (402, "quota exceeded", None, "quota_exhausted"),
+            (200, "monthly quota exhausted", None, "quota_exhausted"),
+            (503, "upstream unavailable", None, "network_error"),
+        )
+        for http_status, detail, rpc_code, expected in cases:
+            with self.subTest(http_status=http_status, rpc_code=rpc_code):
+                self.assertEqual(classify(http_status, detail, rpc_code), expected)
+
+    async def test_http_429_uses_backoff_and_keeps_key_active(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            calls = 0
+
+            async def handler(_request):
+                nonlocal calls
+                calls += 1
+                if calls < 7:
+                    return web.Response(status=429, text='{"error":"rate limit exceeded"}')
+                return web.json_response({"jsonrpc": "2.0", "id": 1, "result": "0x10"})
+
+            app = web.Application()
+            app.router.add_post("/rpc", handler)
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, "127.0.0.1", 0)
+            await site.start()
+            port = site._server.sockets[0].getsockname()[1]
+            screen = WhaleScreener("test-alchemy-key", lambda _: None, lambda _: None)
+            poller = WhalePoller("test-alchemy-key", screen,
+                state_file=Path(tmp) / "state.json",
+                endpoints={"BASE": f"http://127.0.0.1:{port}/rpc"})
+            try:
+                with patch("whale_poller.random.uniform", return_value=1.0):
+                    async with ClientSession() as session:
+                        with self.assertRaises(RateLimited) as first:
+                            await poller._rpc(session, "BASE", "eth_blockNumber", [])
+                        first_state = poller.status()["network_status"]["BASE"]
+                        self.assertEqual(first_state["status"], "rate_limited")
+                        self.assertEqual(first_state["http_status"], 429)
+                        self.assertIn("rate limit exceeded", first_state["error"])
+                        self.assertEqual(first_state["retry_in_sec"], 15)
+                        self.assertEqual(first.exception.retry_after, 15)
+                        self.assertTrue(first_state["key_active"])
+                        self.assertEqual(poller.key_status()[0]["state"], "active")
+                        self.assertNotIn("legacy", poller.key_errors)
+                        self.assertNotIn("исчерпаны", first_state["error"].lower())
+
+                        poller.chain_cooldown[("BASE", "legacy")] = time.time() - 1
+                        with self.assertRaises(RateLimited) as second:
+                            await poller._rpc(session, "BASE", "eth_blockNumber", [])
+                        self.assertEqual(second.exception.retry_after, 30)
+                        self.assertEqual(calls, 2)
+
+                        for expected_delay in (60, 120, 240, 300):
+                            poller.chain_cooldown[("BASE", "legacy")] = time.time() - 1
+                            with self.assertRaises(RateLimited) as repeated:
+                                await poller._rpc(session, "BASE", "eth_blockNumber", [])
+                            self.assertEqual(repeated.exception.retry_after, expected_delay)
+
+                        poller.chain_cooldown[("BASE", "legacy")] = time.time() - 1
+                        result = await poller._rpc(session, "BASE", "eth_blockNumber", [])
+                        self.assertEqual(result, "0x10")
+                        self.assertEqual(calls, 7)
+                        self.assertEqual(poller.status()["network_status"]["BASE"]["status"], "online")
+                        self.assertEqual(poller.key_status()[0]["state"], "active")
+                        self.assertNotIn("legacy", poller.key_errors)
+            finally:
+                screen.close()
+                await runner.cleanup()
+
+    async def test_json_rpc_429_is_rate_limited_and_key_stays_active(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            async def handler(_request):
+                return web.json_response({"jsonrpc": "2.0", "id": 1,
+                    "error": {"code": "429", "message": "Too many requests"}})
+            app = web.Application()
+            app.router.add_post("/rpc", handler)
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, "127.0.0.1", 0)
+            await site.start()
+            port = site._server.sockets[0].getsockname()[1]
+            screen = WhaleScreener("test-alchemy-key", lambda _: None, lambda _: None)
+            poller = WhalePoller("test-alchemy-key", screen,
+                state_file=Path(tmp) / "state.json",
+                endpoints={"BASE": f"http://127.0.0.1:{port}/rpc"})
+            try:
+                with patch("whale_poller.random.uniform", return_value=1.0):
+                    async with ClientSession() as session:
+                        with self.assertRaises(RateLimited):
+                            await poller._rpc(session, "BASE", "eth_blockNumber", [])
+                status = poller.status()["network_status"]["BASE"]
+                self.assertEqual(status["status"], "rate_limited")
+                self.assertEqual(status["http_status"], 200)
+                self.assertEqual(status["rpc_code"], "429")
+                self.assertIn("Too many requests", status["error"])
+                self.assertTrue(status["key_active"])
+                self.assertEqual(poller.key_status()[0]["state"], "active")
+                self.assertNotIn("legacy", poller.key_errors)
+            finally:
+                screen.close()
+                await runner.cleanup()
+
+    async def test_local_key_cu_cap_is_quota_not_dead_key_or_pause(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            screen = WhaleScreener("test-alchemy-key", lambda _: None, lambda _: None)
+            poller = WhalePoller("test-alchemy-key", screen,
+                state_file=Path(tmp) / "state.json", monthly_cu=1000,
+                endpoints={"ETH": "http://127.0.0.1:1/rpc"})
+            poller.state["month"] = time.strftime("%Y-%m", time.gmtime())
+            poller.state.setdefault("key_usage", {})["legacy"] = 1000
+
+            class NeverCalledSession:
+                def post(self, *_args, **_kwargs):
+                    raise AssertionError("CU-capped key must not make an RPC request")
+
+            try:
+                with self.assertRaises(QuotaExhausted):
+                    await poller._rpc(NeverCalledSession(), "ETH", "eth_blockNumber", [])
+                status = poller.status()["network_status"]["ETH"]
+                self.assertEqual(status["status"], "quota_exhausted")
+                self.assertTrue(status["key_active"])
+                self.assertIsNone(status["http_status"])
+                self.assertEqual(poller.key_status()[0]["state"], "ready")
+            finally:
+                screen.close()
 
     async def test_asset_transfer_history_uses_valid_combined_params(self):
         requests = []

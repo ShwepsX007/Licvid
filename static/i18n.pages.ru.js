@@ -460,6 +460,11 @@ window.LIQSCOPE_I18N_PAGES =
       "screener.status_online": "Онлайн",
       "screener.status_error": "Ошибка",
       "screener.status_waiting": "Ожидание",
+      "screener.status_rate_limited": "Rate limit (429) — пауза {seconds} с, ключ активен",
+      "screener.status_auth_error": "Ошибка авторизации",
+      "screener.status_quota_exhausted": "Квота исчерпана",
+      "screener.status_network_error": "Сетевая ошибка",
+      "screener.status_paused": "Приостановлено",
       "screener.status_live": "Дашборд обновляется",
       "screener.status_attention": "Требует внимания",
       "screener.status_connecting": "Подключаемся к ленте…",
@@ -597,7 +602,14 @@ window.LIQSCOPE_I18N_PAGES =
       "adm.cex_wallet_edit": "✎ Изменить",
       "adm.cex_wallet_cancel": "Отмена",
       "adm.cex_wallet_save_changes": "Сохранить изменения",
-      "adm.cex_wallet_updated": "Ручной адрес обновлён."
+      "adm.cex_wallet_updated": "Ручной адрес обновлён.",
+      "adm.alchemy_rate_limited": "Rate limit (429) — пауза {seconds} с, ключ активен",
+      "adm.alchemy_auth_error": "Ошибка авторизации",
+      "adm.alchemy_quota_exhausted": "Квота исчерпана",
+      "adm.alchemy_network_error": "Сетевая ошибка",
+      "adm.alchemy_paused": "Приостановлено",
+      "adm.alchemy_network_cu": "Сеть: {amount} CU",
+      "adm.cex_wallet_refresh_error_detail": "Ошибка обновления: {reason}"
     },
     "phrases": {
       "🗑 Стереть статистику": "🗑 Стереть статистику",

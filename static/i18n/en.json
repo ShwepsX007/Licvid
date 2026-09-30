@@ -447,6 +447,11 @@
     "screener.status_online": "Online",
     "screener.status_error": "Error",
     "screener.status_waiting": "Waiting",
+    "screener.status_rate_limited": "Rate limit (429) — pause {seconds}s, key active",
+    "screener.status_auth_error": "Authentication error",
+    "screener.status_quota_exhausted": "Quota exhausted",
+    "screener.status_network_error": "Network error",
+    "screener.status_paused": "Paused",
     "screener.status_live": "Dashboard is updating",
     "screener.status_attention": "Needs attention",
     "screener.status_connecting": "Connecting to the feed…",
@@ -584,7 +589,14 @@
     "adm.cex_wallet_edit": "✎ Edit",
     "adm.cex_wallet_cancel": "Cancel edit",
     "adm.cex_wallet_save_changes": "Save changes",
-    "adm.cex_wallet_updated": "Manual wallet updated."
+    "adm.cex_wallet_updated": "Manual wallet updated.",
+    "adm.alchemy_rate_limited": "Rate limit (429) — pause {seconds}s, key active",
+    "adm.alchemy_auth_error": "Authentication error",
+    "adm.alchemy_quota_exhausted": "Quota exhausted",
+    "adm.alchemy_network_error": "Network error",
+    "adm.alchemy_paused": "Paused",
+    "adm.alchemy_network_cu": "{amount} CU on this network",
+    "adm.cex_wallet_refresh_error_detail": "Refresh failed: {reason}"
   },
   "phrases": {
     "В поле уже стоит стандартный промт — правьте прямо в нём; «Вернуть шаблон» очищает поле и снова включает встроенный текст.": "The field already holds the default prompt — edit it right there; “Restore template” clears the field and turns the built-in text back on.",

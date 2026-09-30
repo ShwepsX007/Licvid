@@ -323,46 +323,6 @@
       "name": "OKX",
       "source": "manual",
       "updated_at": 1790762498
-    },
-    {
-      "id": "ee3cc1e17bb01de6",
-      "chain": "SOLANA",
-      "address": "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
-      "name": "Binance Hot Wallet 1",
-      "source": "manual",
-      "updated_at": 1790762498
-    },
-    {
-      "id": "249524ddfb5a9145",
-      "chain": "SOLANA",
-      "address": "AC5RDfQFmDS1deWZos921JfqscXdByf8BKHs5ACWjtW2",
-      "name": "Bybit wallet 1",
-      "source": "manual",
-      "updated_at": 1790762498
-    },
-    {
-      "id": "c6af4c0cd571b2fd",
-      "chain": "SOLANA",
-      "address": "42brAgAVNzMBP7aaktPvAmBSPEkehnFQejiZc53EpJFd",
-      "name": "Bybit wallet 2",
-      "source": "manual",
-      "updated_at": 1790762498
-    },
-    {
-      "id": "901fdc114d81fa7b",
-      "chain": "SOLANA",
-      "address": "2AQdpHJ2JpcEgPiATUXjQxA8QmafFegfQwSLWSprPicm",
-      "name": "Coinbase Commerce",
-      "source": "manual",
-      "updated_at": 1790762498
-    },
-    {
-      "id": "e8954a1485de14ea",
-      "chain": "SOLANA",
-      "address": "GJRs4FwHtemZ5ZE9x3FNvJ8TMwitKTh21yxdRPqn7npE",
-      "name": "Coinbase Hot Wallet 2",
-      "source": "manual",
-      "updated_at": 1790762498
     }
   ]
 }

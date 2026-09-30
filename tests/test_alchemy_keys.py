@@ -170,7 +170,14 @@ class RotationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(value, "0x10")
                 self.assertEqual(used, ["fake-secret-A", "fake-secret-B"])
                 self.assertEqual(p.state["active_key"], second["id"])
-                self.assertIn("429", p.key_errors[first["id"]])
+                self.assertNotIn(first["id"], p.key_errors)
+                network = p.status()["network_status"]["ETH"]
+                self.assertEqual(network["status"], "online")
+                self.assertEqual(network["warning_status"], "rate_limited")
+                self.assertGreater(network["retry_in_sec"], 0)
+                self.assertTrue(network["key_active"])
+                self.assertIn("HTTP 429", network["error"])
+                self.assertNotEqual(p.key_status()[0]["state"], "cooldown")
                 self.assertEqual(p.state["cu"], 20)
                 p.monthly_cu = 20
                 with self.assertRaises(BudgetExhausted):

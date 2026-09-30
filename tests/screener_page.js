@@ -14,13 +14,18 @@ const chains = ["ETH", "BNB", "POLYGON", "ARBITRUM", "BASE", "SOLANA", "TRON", "
 const networks = {};
 chains.forEach((chain, index) => {
     networks[chain] = {status: index === 0 || index === 7 ? "online" : "waiting",
+        warning_status: index === 0 ? "rate_limited" : "",
+        retry_in_sec: index === 0 ? 15 : 0,
+        http_status: index === 0 ? 429 : null,
+        rpc_code: null, key_active: true,
         events: index === 0 || index === 7 ? 1 : 0,
         volume_usd: index === 0 ? 125000 : index === 7 ? 275000 : 0,
         inflow_usd: index === 0 ? 125000 : 0, outflow_usd: 0, transfer_usd: 0,
         buy_usd: index === 7 ? 275000 : 0, sell_usd: 0,
         assets: {}, inflow_assets: index === 0 ? {USDT: 125000} : {},
         outflow_assets: {}, transfer_assets: {}, buy_assets: index === 7 ? {BTC: 2.5} : {},
-        sell_assets: {}, error: chain === "SOLANA" ? "No indexed Solana CEX wallets" : ""};
+        sell_assets: {}, error: chain === "ETH" ? "HTTP 429: provider throttled"
+            : chain === "SOLANA" ? "No indexed Solana CEX wallets" : ""};
 });
 const rows = [
     {chain: "ETH", hash: hash("a"), log_index: "0x1", timestamp: now - 60,
@@ -59,6 +64,10 @@ win.LiqScopeI18n = {lang: () => "en", t: (key, vars = {}) => {
         "screener.exchange_all": "All exchanges", "screener.exchange_unknown": "Unlabeled exchange",
         "screener.status_live": "Dashboard is updating", "screener.status_online": "Online",
         "screener.status_waiting": "Waiting", "screener.status_error": "Error",
+        "screener.status_rate_limited": "Rate limit (429) — pause {seconds}s, key active",
+        "screener.status_auth_error": "Authentication error",
+        "screener.status_quota_exhausted": "Quota exhausted",
+        "screener.status_network_error": "Network error", "screener.status_paused": "Paused",
         "screener.direction_outflow": "Exchange outflow", "screener.direction_trade": "Trade",
         "screener.direction_transfer": "Transfer", "screener.open_explorer": "View transaction",
         "screener.legend_inflow": "Inflow", "screener.legend_outflow": "Outflow",
@@ -95,8 +104,12 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     await sleep(100);
     assert.equal(win.document.querySelectorAll("#network-cards .network-card").length, 8);
     assert.equal(win.document.querySelectorAll("#network-tabs .network-tab").length, 9);
-    assert.equal(win.document.querySelector('[data-network="SOLANA"]').title,
-        "No indexed Solana CEX wallets");
+    const ethNetworkCard = win.document.querySelector('#network-cards [data-network="ETH"]');
+    assert(ethNetworkCard.querySelector(".network-state").textContent.includes(
+        "Online · Rate limit (429) — pause 15s, key active"));
+    assert(ethNetworkCard.title.includes("HTTP 429: provider throttled"));
+    assert(win.document.querySelector('[data-network="SOLANA"]').title.includes(
+        "No indexed Solana CEX wallets"));
     assert.equal(win.document.querySelectorAll("#flow-chart .chart-bar").length, 2);
     assert(parseFloat(win.document.querySelector("#flow-chart .chart-bar").getAttribute("width")) >= 30,
         "six-hour category bars have readable widths");
@@ -104,6 +117,12 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     assert(css.includes("gap: 16px"));
     assert(css.includes("height: 540px; max-height: 540px"));
     assert(css.includes("overflow-y: auto"));
+    assert(css.includes(".event-list { display: flex; flex-direction: column"));
+    assert(css.includes("height: 78px; flex: 0 0 78px"));
+    assert(css.includes("grid-template-areas: \"network direction details value link\""));
+    assert(css.includes("font-feature-settings: \"tnum\""));
+    assert(css.includes(".network-state.status--rate_limited"));
+    assert(css.includes("@media (max-width: 900px)"));
     assert(css.includes("font: 13px var(--font, system-ui)"));
     ["screener-events", "hl-screener-events"].forEach(id => {
         const feed = win.document.getElementById(id);
@@ -121,6 +140,9 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     const historicalRow = win.document.querySelector("#screener-events .event-row");
     assert(historicalRow.textContent.includes("🕒"), "historical events show the clock marker");
     assert(historicalRow.querySelector(".event-asset").textContent.includes("125,000"));
+    assert(historicalRow.querySelector(".event-details .event-route").title.includes("→"));
+    assert(historicalRow.querySelector(".event-direction").title);
+    assert(historicalRow.querySelector(".event-value").title);
     const explorer = Array.from(win.document.querySelectorAll("#screener-events a"))
         .find(link => link.href.startsWith("https://etherscan.io/tx/"));
     assert(explorer, "Etherscan transaction link is rendered");

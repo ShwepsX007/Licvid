@@ -460,6 +460,11 @@ window.LIQSCOPE_I18N_PAGES =
       "screener.status_online": "ऑनलाइन",
       "screener.status_error": "त्रुटि",
       "screener.status_waiting": "प्रतीक्षा में",
+      "screener.status_rate_limited": "दर सीमा (429) — {seconds} सेकंड विराम, कुंजी सक्रिय",
+      "screener.status_auth_error": "प्रमाणीकरण त्रुटि",
+      "screener.status_quota_exhausted": "कोटा समाप्त",
+      "screener.status_network_error": "नेटवर्क त्रुटि",
+      "screener.status_paused": "रुका हुआ",
       "screener.status_live": "डैशबोर्ड अपडेट हो रहा है",
       "screener.status_attention": "ध्यान देने की ज़रूरत",
       "screener.status_connecting": "फ़ीड से जुड़ रहा है…",
@@ -597,7 +602,14 @@ window.LIQSCOPE_I18N_PAGES =
       "adm.cex_wallet_edit": "✎ संपादित करें",
       "adm.cex_wallet_cancel": "रद्द करें",
       "adm.cex_wallet_save_changes": "परिवर्तन सहेजें",
-      "adm.cex_wallet_updated": "Manual wallet अपडेट हुआ।"
+      "adm.cex_wallet_updated": "Manual wallet अपडेट हुआ।",
+      "adm.alchemy_rate_limited": "दर सीमा (429) — {seconds} सेकंड विराम, कुंजी सक्रिय",
+      "adm.alchemy_auth_error": "प्रमाणीकरण त्रुटि",
+      "adm.alchemy_quota_exhausted": "कोटा समाप्त",
+      "adm.alchemy_network_error": "नेटवर्क त्रुटि",
+      "adm.alchemy_paused": "रुका हुआ",
+      "adm.alchemy_network_cu": "इस नेटवर्क पर {amount} CU",
+      "adm.cex_wallet_refresh_error_detail": "अपडेट विफल: {reason}"
     },
     "phrases": {
       "В поле уже стоит стандартный промт — правьте прямо в нём; «Вернуть шаблон» очищает поле и снова включает встроенный текст.": "फ़ील्ड में डिफ़ॉल्ट प्रॉम्ट पहले से है — उसी में बदलें; «टेम्पलेट वापस» फ़ील्ड साफ़ करके बिल्ट-इन टेक्स्ट फिर चालू कर देता है।",

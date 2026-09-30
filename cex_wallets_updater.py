@@ -1,10 +1,10 @@
 """Refresh, validate and persist public CEX wallet labels.
 
-DeFiLlama's ``/cexs`` endpoint publishes exchange metadata and proof-of-reserves
-links, not an ``addresses`` array. The actual public wallet owners are in the
-open-source ``cex/index.js`` adapter config, so the updater joins the API
-metadata with that config and parses its static ``owners`` lists. Unsupported
-or computed JS expressions are deliberately ignored rather than guessed.
+No wallet-address endpoint is assumed. The configurable ``/cexs`` candidate is
+treated only as metadata, with ``/protocols`` as a metadata fallback. Public
+wallet owners are parsed from the open-source ``cex/index.js`` adapter config;
+only static ``owners`` lists are accepted, and computed JavaScript expressions
+are deliberately ignored rather than guessed.
 """
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import aiohttp
 
@@ -51,6 +52,63 @@ EVM_ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
 BASE58 = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 TRON_ADDRESS = re.compile(r"^T[1-9A-HJ-NP-Za-km-z]{33}$")
 MAX_SOURCE_BYTES = 2_000_000
+SOURCE_TIMEOUT_SEC = 25
+SOURCE_MAX_RETRIES = 2
+SOURCE_RETRY_BACKOFF_SEC = 0.5
+SOURCE_ERROR_BODY_CHARS = 300
+SOURCE_USER_AGENT = "LiqScope-CEX-Wallets/1.0"
+DEFILLAMA_PROTOCOLS_API = os.getenv(
+    "LIQSCOPE_DEFILLAMA_PROTOCOLS_API", "https://api.llama.fi/protocols")
+DEFILLAMA_CEX_CONFIG_FALLBACK = (
+    "https://raw.githubusercontent.com/DefiLlama/DefiLlama-Adapters/master/cex/index.js")
+
+
+def _safe_source_url(url: str) -> str:
+    parts = urlsplit(str(url))
+    hostname = parts.hostname or ""
+    if parts.port:
+        hostname += f":{parts.port}"
+    path = parts.path
+    if (parts.hostname or "").lower() == "pro-api.llama.fi":
+        segments = path.lstrip("/").split("/")
+        if segments and segments[0]:
+            segments[0] = "[redacted]"
+            path = "/" + "/".join(segments)
+    query = [(key, "[redacted]" if re.search(r"key|token|secret|auth", key, re.I) else value)
+             for key, value in parse_qsl(parts.query, keep_blank_values=True)]
+    return urlunsplit((parts.scheme, hostname, path, urlencode(query), ""))
+
+
+def _safe_source_body(body: str) -> str:
+    text = str(body or "")[:SOURCE_ERROR_BODY_CHARS]
+    return re.sub(r"(?i)(api[-_]?key|token|secret|authorization)(\s*[=:]\s*)[^\s,;]+",
+                  r"\1\2[redacted]", text)
+
+
+class SourceFetchError(RuntimeError):
+    """A sanitized provider failure suitable for logs and the admin UI."""
+
+    def __init__(self, url: str, kind: str, *, status: int | None = None,
+                 body: str = "", detail: str = ""):
+        self.url = _safe_source_url(url)
+        self.kind = str(kind)
+        self.status = status
+        self.body = _safe_source_body(body)
+        self.detail = str(detail or "")[:240]
+        parts = [self.kind, f"URL={self.url}"]
+        if self.status is not None:
+            parts.append(f"HTTP {self.status}")
+        if self.detail:
+            parts.append(self.detail)
+        if self.body:
+            parts.append(f"body={self.body}")
+        super().__init__("; ".join(parts))
+
+
+class WalletSourceError(RuntimeError):
+    def __init__(self, errors: list[str]):
+        self.errors = [str(error)[:600] for error in errors if error]
+        super().__init__("; ".join(self.errors)[:1800] or "No supported wallet source returned data")
 
 
 def normalize_chain(value: Any) -> str:
@@ -325,12 +383,11 @@ def parse_defillama_cex_config(source: str, metadata: Any = None) -> list[dict]:
     for slug, exchange_data in configs.items():
         if not isinstance(exchange_data, dict):
             continue
+        # Do not turn an adapter slug into an asserted exchange label. Only
+        # attach owners when the API metadata confirms the exchange name.
         name = names.get(_compact_name(slug), "")
         if not name:
-            aliases = re.sub(r"[-_]+", " ", str(slug)).strip()
-            name = aliases.title() or "CEX"
-            # Common display-name corrections for DefiLlama adapter IDs.
-            name = name.replace("Bsc", "BSC").replace("Us", "US")
+            continue
         for raw_chain, chain_data in exchange_data.items():
             chain = normalize_chain(raw_chain)
             if chain not in SUPPORTED_CHAINS or not isinstance(chain_data, dict):
@@ -381,65 +438,160 @@ def parse_etherscan_labels(payload: Any, exchange_names: list[str]) -> list[dict
     return [row for row in out if row]
 
 
+async def _read_source_bytes(session: aiohttp.ClientSession, url: str, *,
+                            limit: int = MAX_SOURCE_BYTES) -> tuple[bytes, int]:
+    for attempt in range(SOURCE_MAX_RETRIES + 1):
+        try:
+            async with session.get(url,
+                    headers={"User-Agent": SOURCE_USER_AGENT},
+                    timeout=aiohttp.ClientTimeout(total=SOURCE_TIMEOUT_SEC)) as response:
+                status = int(response.status)
+                if status != 200:
+                    try:
+                        body = await response.text(errors="replace")
+                    except Exception as exc:
+                        body = f"[unable to read response body: {type(exc).__name__}]"
+                    error = SourceFetchError(url, "HTTP error", status=status, body=body)
+                    retryable = status == 429 or 500 <= status < 600
+                    if retryable and attempt < SOURCE_MAX_RETRIES:
+                        await asyncio.sleep(SOURCE_RETRY_BACKOFF_SEC * (2 ** attempt))
+                        continue
+                    raise error
+                length = response.headers.get("Content-Length")
+                if length:
+                    try:
+                        if int(length) > limit:
+                            raise SourceFetchError(url, "schema mismatch", status=status,
+                                                   detail="response exceeds size limit")
+                    except ValueError:
+                        pass
+                raw = await response.content.read(limit + 1)
+                if len(raw) > limit:
+                    raise SourceFetchError(url, "schema mismatch", status=status,
+                                           detail="response exceeds size limit")
+                return raw, status
+        except SourceFetchError:
+            raise
+        except asyncio.TimeoutError:
+            error = SourceFetchError(url, "timeout",
+                                     detail=f"request timed out after {SOURCE_TIMEOUT_SEC}s")
+            if attempt < SOURCE_MAX_RETRIES:
+                await asyncio.sleep(SOURCE_RETRY_BACKOFF_SEC * (2 ** attempt))
+                continue
+            raise error from None
+        except aiohttp.ClientError as exc:
+            error = SourceFetchError(url, "network error", detail=type(exc).__name__)
+            if attempt < SOURCE_MAX_RETRIES:
+                await asyncio.sleep(SOURCE_RETRY_BACKOFF_SEC * (2 ** attempt))
+                continue
+            raise error from None
+    raise SourceFetchError(url, "network error", detail="request retries exhausted")
+
+
 async def _read_json(session: aiohttp.ClientSession, url: str, *, limit: int = MAX_SOURCE_BYTES):
-    async with session.get(url, timeout=aiohttp.ClientTimeout(total=45)) as response:
-        response.raise_for_status()
-        length = response.headers.get("Content-Length")
-        if length and int(length) > limit:
-            raise ValueError("remote wallet source exceeds size limit")
-        raw = await response.content.read(limit + 1)
-        if len(raw) > limit:
-            raise ValueError("remote wallet source exceeds size limit")
-    return json.loads(raw.decode("utf-8"))
+    raw, status = await _read_source_bytes(session, url, limit=limit)
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        detail = (f"JSON decode error at line {exc.lineno}, column {exc.colno}: {exc.msg}"
+                  if isinstance(exc, json.JSONDecodeError) else "JSON decode error: invalid UTF-8")
+        preview = raw[:SOURCE_ERROR_BODY_CHARS].decode("utf-8", errors="replace")
+        raise SourceFetchError(url, "JSON decode error", status=status,
+                               body=preview, detail=detail) from None
 
 
 async def _read_text(session: aiohttp.ClientSession, url: str, *, limit: int = MAX_SOURCE_BYTES):
-    async with session.get(url, timeout=aiohttp.ClientTimeout(total=45)) as response:
-        response.raise_for_status()
-        length = response.headers.get("Content-Length")
-        if length and int(length) > limit:
-            raise ValueError("remote CEX config exceeds size limit")
-        raw = await response.content.read(limit + 1)
-        if len(raw) > limit:
-            raise ValueError("remote CEX config exceeds size limit")
-    return raw.decode("utf-8")
+    raw, status = await _read_source_bytes(session, url, limit=limit)
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        preview = raw[:SOURCE_ERROR_BODY_CHARS].decode("utf-8", errors="replace")
+        raise SourceFetchError(url, "text decode error", status=status,
+                               body=preview, detail="response is not valid UTF-8") from None
 
 
 async def fetch_defillama_cex_wallets(session: aiohttp.ClientSession | None = None) -> list[dict]:
-    """Fetch public CEX owner addresses from DefiLlama's API + adapter config.
+    """Fetch CEX metadata and parse the chain-scoped public adapter owners.
 
-    The return value is a list of normalized chain/address/name records. The
-    public ``/cexs`` API currently contains metadata (not address lists); the
-    companion open-source adapter config contains the chain-scoped ``owners``.
+    A configured ``/cexs`` candidate is treated as metadata, never as a wallet
+    list. ``/protocols`` is the metadata fallback, while adapter ``owners`` are
+    the address source. Failed or changed API variants are recorded verbatim
+    (with secrets redacted) and cannot replace the local registry with emptiness.
     """
     own_session = session is None
     if own_session:
-        session = aiohttp.ClientSession(headers={"User-Agent": "LiqScope-CEX-Wallets/1.0"})
+        session = aiohttp.ClientSession(headers={"User-Agent": SOURCE_USER_AGENT})
     assert session is not None
+    errors: list[str] = []
     try:
         metadata = None
+        metadata_urls = list(dict.fromkeys((DEFILLAMA_CEX_API, DEFILLAMA_PROTOCOLS_API)))
+        for url in metadata_urls:
+            try:
+                payload = await _read_json(session, url, limit=5_000_000)
+                if isinstance(payload, dict):
+                    rows = payload.get("cexs")
+                    if rows is None:
+                        rows = payload.get("protocols")
+                elif isinstance(payload, list):
+                    rows = payload
+                else:
+                    rows = None
+                if not isinstance(rows, list):
+                    preview = json.dumps(payload, ensure_ascii=False)[:SOURCE_ERROR_BODY_CHARS]
+                    raise SourceFetchError(url, "schema mismatch", status=200,
+                                           body=preview,
+                                           detail="expected a cexs or protocols array")
+                if "protocols" in url:
+                    rows = [row for row in rows if isinstance(row, dict) and
+                            str(row.get("category") or "").casefold() == "cex"]
+                rows = [row for row in rows if isinstance(row, dict)]
+                if not rows:
+                    preview = json.dumps(payload, ensure_ascii=False)[:SOURCE_ERROR_BODY_CHARS]
+                    raise SourceFetchError(url, "schema mismatch", status=200,
+                                           body=preview, detail="no CEX metadata records")
+                metadata = {"cexs": rows}
+                break
+            except SourceFetchError as exc:
+                errors.append(str(exc))
+                log.warning("[cex_wallets] metadata source failed: %s", exc)
+
+        config_urls = list(dict.fromkeys((DEFILLAMA_CEX_CONFIG,
+                                          DEFILLAMA_CEX_CONFIG_FALLBACK)))
+        for url in config_urls:
+            try:
+                config = await _read_text(session, url)
+                records = parse_defillama_cex_config(config, metadata)
+                if records:
+                    return records
+                raise SourceFetchError(url, "schema mismatch", status=200, body=config,
+                                       detail="no supported static owner addresses in adapter config")
+            except SourceFetchError as exc:
+                errors.append(str(exc))
+                log.warning("[cex_wallets] adapter source failed: %s", exc)
+            except (UnicodeError, ValueError) as exc:
+                error = SourceFetchError(url, "schema mismatch", detail=type(exc).__name__)
+                errors.append(str(error))
+                log.warning("[cex_wallets] adapter source failed: %s", error)
+
         try:
-            metadata = await _read_json(session, DEFILLAMA_CEX_API, limit=5_000_000)
-        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
-            log.warning("[cex_wallets] DeFiLlama metadata unavailable: %s", type(exc).__name__)
-        try:
-            config = await _read_text(session, DEFILLAMA_CEX_CONFIG)
-            records = parse_defillama_cex_config(config, metadata)
-            if records:
-                return records
-            raise ValueError("no supported static owner addresses in adapter config")
-        except (aiohttp.ClientError, asyncio.TimeoutError, UnicodeError, ValueError) as exc:
-            log.warning("[cex_wallets] DeFiLlama adapter source unavailable: %s", type(exc).__name__)
-        labels = await _read_json(session, ETHERSCAN_LABELS_URL, limit=50_000_000)
-        names = []
-        rows = metadata.get("cexs", []) if isinstance(metadata, dict) else []
-        for row in rows if isinstance(rows, list) else []:
-            if isinstance(row, dict) and row.get("name"):
-                names.append(str(row["name"]))
-        fallback = parse_etherscan_labels(labels, names)
-        if not fallback:
-            raise ValueError("wallet sources returned no recognized addresses")
-        return fallback
+            labels = await _read_json(session, ETHERSCAN_LABELS_URL, limit=50_000_000)
+            if not isinstance(labels, dict):
+                raise SourceFetchError(ETHERSCAN_LABELS_URL, "schema mismatch", status=200,
+                                       body=json.dumps(labels, ensure_ascii=False)[:300],
+                                       detail="expected address-to-label object")
+            rows = metadata.get("cexs", []) if isinstance(metadata, dict) else []
+            names = [str(row["name"]) for row in rows
+                     if isinstance(row, dict) and row.get("name")]
+            fallback = parse_etherscan_labels(labels, names)
+            if fallback:
+                return fallback
+            raise SourceFetchError(ETHERSCAN_LABELS_URL, "schema mismatch", status=200,
+                                   detail="no recognized exchange labels or wallet records")
+        except SourceFetchError as exc:
+            errors.append(str(exc))
+            log.warning("[cex_wallets] fallback source failed: %s", exc)
+        raise WalletSourceError(errors)
     finally:
         if own_session:
             await session.close()
@@ -474,18 +626,16 @@ class CEXWalletRegistry:
                 self.updated_at = int(payload.get("updated_at") or 0)
                 self.last_source = str(payload.get("source") or "")
                 return
-            # Legacy format is address -> label and was EVM/ETH-only.
+            # The legacy address -> label map was consumed by every supported
+            # EVM poller. Preserve that established EVM scope, but never project
+            # it onto non-EVM networks without chain-specific confirmation.
             if isinstance(payload, dict):
                 ts = int(self.path.stat().st_mtime) if self.path.exists() else int(time.time())
-                # The legacy JSON had no chain field and the old poller used
-                # each address on every supported EVM chain. Preserve that exact
-                # behaviour while making the scope explicit in the new schema.
-                self._manual = [normalize_wallet_record({"chain": chain, "address": address,
-                                                         "name": label, "source": "manual",
-                                                         "updated_at": ts})
-                                for address, label in payload.items()
-                                for chain in sorted(EVM_CHAINS)]
-                self._manual = [row for row in self._manual if row]
+                self._manual = [row for address, label in payload.items()
+                                for chain in sorted(EVM_CHAINS)
+                                if (row := normalize_wallet_record({
+                                    "chain": chain, "address": address, "name": label,
+                                    "source": "manual", "updated_at": ts}))]
                 self._automatic = []
 
     def records(self, *, chain: str = "ALL", exchange: str = "") -> list[dict]:
@@ -615,17 +765,25 @@ class CEXWalletRegistry:
                 old_by_exchange[row["name"]] = old_by_exchange.get(row["name"], 0) + 1
             try:
                 fresh = await fetch_defillama_cex_wallets(session)
-                if not fresh:
-                    raise ValueError("No public wallet records were returned")
+                automatic = [row for item in fresh
+                             if (row := normalize_wallet_record(item))
+                             and row["source"] != "manual"]
+                if not automatic:
+                    raise WalletSourceError([
+                        "schema mismatch: no supported automatic wallet records were returned; "
+                        "the existing registry was left unchanged"])
+                source = "defillama" if any(row["source"] == "defillama" for row in automatic) else "etherscan"
                 with self._lock:
-                    self._automatic = [row for item in fresh
-                                       if (row := normalize_wallet_record(item))
-                                       and row["source"] != "manual"]
-                    self.updated_at = int(time.time())
-                    self.last_source = "defillama" if any(
-                        row["source"] == "defillama" for row in fresh) else "etherscan"
-                    self.last_error = ""
-                    self._save_locked(source=self.last_source)
+                    previous = (self._automatic, self.updated_at, self.last_source, self.last_error)
+                    try:
+                        self._automatic = automatic
+                        self.updated_at = int(time.time())
+                        self.last_source = source
+                        self.last_error = ""
+                        self._save_locked(source=self.last_source)
+                    except Exception:
+                        self._automatic, self.updated_at, self.last_source, self.last_error = previous
+                        raise
                 after = self.records()
                 new_by_exchange: dict[str, int] = {}
                 for row in after:
@@ -641,8 +799,8 @@ class CEXWalletRegistry:
                         "added": max(0, len(after) - len(before)),
                         "updated_at": self.updated_at, "summary": self.summary()}
             except Exception as exc:
-                self.last_error = str(exc)[:200]
-                log.warning("[cex_wallets] refresh failed: %s", type(exc).__name__)
+                self.last_error = str(exc)[:1800]
+                log.warning("[cex_wallets] refresh failed: %s", self.last_error)
                 raise
 
 

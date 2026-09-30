@@ -5893,26 +5893,76 @@ async def api_admin_alchemy_delete_key_by_id(request: Request, identifier: str):
     return await _api_admin_alchemy_remove(request, identifier)
 
 
+def _poll_network_health(poll: dict, chain: str, *, setup_error: str = "",
+                         now: float | None = None) -> dict:
+    """Normalize independent per-network RPC state for both admin/status APIs."""
+    now = time.time() if now is None else now
+    status_rows = poll.get("network_status") or {}
+    source = status_rows.get(chain) or {}
+    successes = poll.get("last_success") or {}
+    attempts = poll.get("last_attempt") or {}
+    streams = poll.get("evm_streams") or {}
+    stream = streams.get(chain) or {}
+    solana = poll.get("solana") or {}
+    keyless = not bool(poll.get("keys_configured"))
+    last_success = max(float(source.get("last_success") or 0),
+                       float(successes.get(chain) or 0),
+                       float(stream.get("last_success") or 0))
+    last_event = float(source.get("last_event") or 0)
+    status = str(source.get("status") or "paused")
+    warning_status = str(source.get("warning_status") or "")
+    error = str(source.get("error") or (poll.get("errors") or {}).get(chain) or "")
+    if chain == "SOLANA":
+        solana_state = str(solana.get("state") or "")
+        if solana_state in ("online", "rate_limited", "auth_error", "quota_exhausted",
+                            "network_error", "paused"):
+            status = solana_state
+    retry_in_sec = int(source.get("retry_in_sec") or 0)
+    key_active = bool(source.get("key_active", True))
+
+    if setup_error:
+        status, error, warning_status = "network_error", str(setup_error), ""
+    elif keyless:
+        status, error = "paused", error or "no_key"
+        warning_status = ""
+    elif chain in ("ETH", "BNB", "POLYGON", "ARBITRUM", "BASE") and \
+            max(last_success, last_event) and now - max(last_success, last_event) <= 300:
+        # A fresh RPC result or live event proves the EVM feed is still alive;
+        # a parallel REST 429/auth error should remain a warning, not a dead key.
+        if status not in ("online", "paused"):
+            warning_status = status
+        status = "online"
+
+    return {"chain": chain, "status": status,
+            "last_success": last_success,
+            "last_attempt": max(float(source.get("last_attempt") or 0),
+                                 float(attempts.get(chain) or 0),
+                                 float(solana.get("last_attempt") or 0)
+                                 if chain == "SOLANA" else 0.0),
+            "error": error, "warning_status": warning_status,
+            "retry_in_sec": retry_in_sec,
+            "http_status": source.get("http_status"),
+            "rpc_code": source.get("rpc_code"),
+            "key_active": key_active,
+            "cu_used": int(source.get("cu_used") or
+                           (poll.get("network_cu") or {}).get(chain, 0)),
+            "last_event": last_event,
+            "waiting_for_filters": bool(solana.get("waiting_for_filters"))
+                if chain == "SOLANA" else False}
+
+
 @app.get("/api/admin/alchemy/stats")
 async def api_admin_alchemy_stats(request: Request):
     user = await asyncio.to_thread(current_user, request)
     if not user or not user.get("is_admin"):
         return JSONResponse({"error": "admin"}, status_code=403)
     poll = whale_poller.status() if whale_poller else {}
-    errors = poll.get("errors") or {}
-    last_success = poll.get("last_success") or {}
-    last_attempt = poll.get("last_attempt") or {}
-    keyless = not poll.get("keys_configured")
     networks = []
     for chain in ("ETH", "BNB", "POLYGON", "ARBITRUM", "BASE"):
-        error = str(errors.get(chain) or "")
-        success = float(last_success.get(chain) or 0)
-        setup_error = alchemy_vault_error if not whale_poller else ""
-        state = "error" if error or setup_error else "online" if success else "waiting"
-        networks.append({"chain": chain, "provider": "alchemy", "status": state,
-                         "last_success": success, "last_attempt": float(last_attempt.get(chain) or 0),
-                         "error": error or (setup_error if setup_error else
-                                            "no_key" if keyless and not success else "")})
+        network = _poll_network_health(
+            poll, chain, setup_error=alchemy_vault_error if not whale_poller else "")
+        network["provider"] = "alchemy"
+        networks.append(network)
     native = whale_screener.native_status() if whale_screener else {
         "network": "HYPERLIQUID", "provider": "native_api", "enabled": False,
         "connected": False, "state": "unavailable", "error": ""}
@@ -5922,17 +5972,24 @@ async def api_admin_alchemy_stats(request: Request):
                      "last_success": float(native.get("last_event_ts") or native.get("last_message_ts") or 0),
                      "last_attempt": float(native.get("last_message_ts") or 0),
                      "error": str(native.get("error") or "")})
-    for chain, key, provider in (("SOLANA", "solana", "alchemy_solana"),
-                                 ("TRON", "tron", "trongrid")):
-        network = poll.get(key) or {}
-        network_state = str(network.get("state") or "waiting")
-        state = "online" if network.get("connected") else (
-            "error" if network_state in ("error", "budget_exhausted") else "waiting")
-        networks.append({"chain": chain, "provider": provider, "status": state,
-                         "last_success": float(network.get("last_success") or 0),
-                         "last_attempt": float(network.get("last_attempt") or 0),
-                         "waiting_for_filters": bool(network.get("waiting_for_filters")),
-                         "error": str(network.get("error") or "")})
+    solana = _poll_network_health(
+        poll, "SOLANA", setup_error=alchemy_vault_error if not whale_poller else "")
+    solana.update(provider="alchemy_solana",
+                  waiting_for_filters=bool((poll.get("solana") or {}).get("waiting_for_filters")),
+                  error=str((poll.get("solana") or {}).get("error") or solana.get("error") or ""),
+                  retry_in_sec=int((poll.get("solana") or {}).get("retry_in_sec") or
+                                   solana.get("retry_in_sec") or 0),
+                  request_budget=int((poll.get("solana") or {}).get("request_budget") or 0),
+                  requests_last_cycle=int((poll.get("solana") or {}).get("requests_last_cycle") or 0))
+    networks.append(solana)
+    tron = poll.get("tron") or {}
+    tron_state = str(tron.get("state") or "paused")
+    networks.append({"chain": "TRON", "provider": "trongrid",
+                     "status": "online" if tron.get("connected") else
+                              "error" if tron_state in ("error", "budget_exhausted") else "waiting",
+                     "last_success": float(tron.get("last_success") or 0),
+                     "last_attempt": float(tron.get("last_attempt") or 0),
+                     "error": str(tron.get("error") or "")})
     used = int(poll.get("reserved_cu") or 0)
     budget = int(poll.get("budget_cu") or 0)
     keys = _alchemy_admin_keys()
@@ -5980,8 +6037,9 @@ async def api_admin_refresh_cex_wallets(request: Request):
         return JSONResponse({"error": "wallet_registry_unavailable"}, status_code=503)
     try:
         result = await cex_wallet_registry.refresh()
-    except Exception as exc:  # noqa: BLE001 — provider detail is not exposed to clients
-        return JSONResponse({"error": "refresh_failed", "reason": type(exc).__name__},
+    except Exception as exc:  # noqa: BLE001 — updater redacts credentials before storing detail
+        reason = str(cex_wallet_registry.last_error or exc)[:1800]
+        return JSONResponse({"error": "refresh_failed", "reason": reason},
                             status_code=502)
     _reload_cex_runtime()
     return result
@@ -6142,22 +6200,10 @@ _EXPLORER_TX = {
 
 def _screener_network_status() -> dict:
     poll = whale_poller.status() if whale_poller else {}
-    errors = poll.get("errors") or {}
-    successes = poll.get("last_success") or {}
-    attempts = poll.get("last_attempt") or {}
-    has_keys = bool(poll.get("keys_configured"))
     result = {}
     for chain in ("ETH", "BNB", "POLYGON", "ARBITRUM", "BASE"):
-        error = str(errors.get(chain) or "")
-        success = float(successes.get(chain) or 0)
-        setup_error = alchemy_vault_error if not whale_poller else ""
-        state = "error" if error or setup_error else "online" if success else "waiting"
-        result[chain] = {
-            "status": state,
-            "last_success": success, "last_attempt": float(attempts.get(chain) or 0),
-            "error": error or (setup_error if setup_error else
-                                "no_key" if not has_keys and not success else ""),
-        }
+        result[chain] = _poll_network_health(
+            poll, chain, setup_error=alchemy_vault_error if not whale_poller else "")
     native = whale_screener.native_status() if whale_screener else {
         "network": "HYPERLIQUID", "enabled": False, "connected": False,
         "state": "unavailable", "error": ""}
@@ -6168,16 +6214,22 @@ def _screener_network_status() -> dict:
         "last_attempt": float(native.get("last_message_ts") or 0),
         "error": str(native.get("error") or ""),
     }
-    for chain, key in (("SOLANA", "solana"), ("TRON", "tron")):
-        network = poll.get(key) or {}
-        state = str(network.get("state") or "waiting")
-        result[chain] = {
-            "status": "online" if network.get("connected") else
-                      "error" if state in ("error", "budget_exhausted") else "waiting",
-            "last_success": float(network.get("last_success") or 0),
-            "last_attempt": float(network.get("last_attempt") or 0),
-            "error": str(network.get("error") or ""),
-        }
+    solana = _poll_network_health(
+        poll, "SOLANA", setup_error=alchemy_vault_error if not whale_poller else "")
+    solana.update(error=str((poll.get("solana") or {}).get("error") or solana.get("error") or ""),
+                  waiting_for_filters=bool((poll.get("solana") or {}).get("waiting_for_filters")),
+                  retry_in_sec=int((poll.get("solana") or {}).get("retry_in_sec") or
+                                   solana.get("retry_in_sec") or 0))
+    result["SOLANA"] = solana
+    tron = poll.get("tron") or {}
+    tron_state = str(tron.get("state") or "paused")
+    result["TRON"] = {
+        "status": "online" if tron.get("connected") else
+                  "error" if tron_state in ("error", "budget_exhausted") else "waiting",
+        "last_success": float(tron.get("last_success") or 0),
+        "last_attempt": float(tron.get("last_attempt") or 0),
+        "error": str(tron.get("error") or ""),
+    }
     return result
 
 
@@ -6193,6 +6245,11 @@ async def api_screener_stats(request: Request):
                 "last_success": health[chain]["last_success"],
                 "last_attempt": health[chain]["last_attempt"],
                 "error": health[chain]["error"],
+                "warning_status": health[chain].get("warning_status", ""),
+                "retry_in_sec": int(health[chain].get("retry_in_sec") or 0),
+                "http_status": health[chain].get("http_status"),
+                "rpc_code": health[chain].get("rpc_code"),
+                "key_active": bool(health[chain].get("key_active", True)),
                 "events": 0, "volume_usd": 0.0, "assets": {},
                 "inflow_usd": 0.0, "outflow_usd": 0.0,
                 "buy_usd": 0.0, "sell_usd": 0.0, "transfer_usd": 0.0,

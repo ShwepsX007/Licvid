@@ -15,7 +15,7 @@ const networks = {};
 chains.forEach((chain, index) => {
     networks[chain] = {status: index === 0 || index === 7 ? "online" : "waiting",
         warning_status: index === 0 ? "rate_limited" : "",
-        retry_in_sec: index === 0 ? 15 : 0,
+        retry_in_sec: index === 0 ? 60 : 0,
         http_status: index === 0 ? 429 : null,
         rpc_code: null, key_active: true,
         events: index === 0 || index === 7 ? 1 : 0,
@@ -64,7 +64,7 @@ win.LiqScopeI18n = {lang: () => "en", t: (key, vars = {}) => {
         "screener.exchange_all": "All exchanges", "screener.exchange_unknown": "Unlabeled exchange",
         "screener.status_live": "Dashboard is updating", "screener.status_online": "Online",
         "screener.status_waiting": "Waiting", "screener.status_error": "Error",
-        "screener.status_rate_limited": "Rate limit (429) — pause {seconds}s, key active",
+        "screener.status_rate_limited": "🟡 Rate limit (429) — waiting {seconds}s",
         "screener.status_auth_error": "Authentication error",
         "screener.status_quota_exhausted": "Quota exhausted",
         "screener.status_network_error": "Network error", "screener.status_paused": "Paused",
@@ -106,7 +106,9 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     assert.equal(win.document.querySelectorAll("#network-tabs .network-tab").length, 9);
     const ethNetworkCard = win.document.querySelector('#network-cards [data-network="ETH"]');
     assert(ethNetworkCard.querySelector(".network-state").textContent.includes(
-        "Online · Rate limit (429) — pause 15s, key active"));
+        "Online · 🟡 Rate limit (429) — waiting 60s"));
+    assert(ethNetworkCard.querySelector(".network-state.status--rate_limited"),
+        "an online network with a rate-limit warning uses the yellow status style");
     assert(ethNetworkCard.title.includes("HTTP 429: provider throttled"));
     assert(win.document.querySelector('[data-network="SOLANA"]').title.includes(
         "No indexed Solana CEX wallets"));

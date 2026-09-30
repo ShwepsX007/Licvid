@@ -235,13 +235,15 @@
             const rateLimited = status === "rate_limited" || warning === "rate_limited";
             const rateMessage = rateLimited
                 ? t("adm.alchemy_rate_limited", {seconds: number(network.retry_in_sec || 0)}) : "";
+            const visualStatus = rateLimited ? "rate_limited" : status;
             let stateName;
-            if (status === "online" && network.waiting_for_filters) {
+            if (rateLimited) {
+                stateName = status === "online"
+                    ? t("adm.alchemy_online") + " · " + rateMessage : rateMessage;
+            } else if (status === "online" && network.waiting_for_filters) {
                 stateName = t("adm.alchemy_online_waiting_cex_filters");
             } else if (status === "online") {
                 stateName = t("adm.alchemy_online");
-            } else if (rateLimited) {
-                stateName = rateMessage;
             } else if (status === "auth_error") {
                 stateName = t("adm.alchemy_auth_error");
             } else if (status === "quota_exhausted") {
@@ -255,7 +257,7 @@
             } else {
                 stateName = t("adm.alchemy_waiting");
             }
-            const card = make("div", "whale-admin-network status--" + status);
+            const card = make("div", "whale-admin-network status--" + visualStatus);
             card.append(make("strong", "", networkLabel(network.chain)));
             card.append(make("span", "whale-admin-network-status", stateName));
             const parts = [];
@@ -299,7 +301,7 @@
             el("trongrid-admin-add-key").disabled = Boolean(tronData.vault_error || !tronData.available);
             if (configData.config) {
                 if (document.activeElement !== el("whale-admin-interval")) {
-                    el("whale-admin-interval").value = String(cfg.history_interval_min || cfg.interval_sec / 60 || 5);
+                    el("whale-admin-interval").value = String(cfg.poll_interval_sec || cfg.interval_sec || 60);
                 }
                 if (document.activeElement !== el("whale-admin-budget")) {
                     el("whale-admin-budget").value = String(cfg.budget_cu);
@@ -377,7 +379,7 @@
             await request("/api/admin/screener/config", {
                 method: "POST", headers: {"Content-Type": "application/json"},
                 body: JSON.stringify({mode: el("whale-admin-mode").value,
-                    interval_min: Number(el("whale-admin-interval").value),
+                    poll_interval_sec: Number(el("whale-admin-interval").value),
                     monthly_cu: Number(el("whale-admin-budget").value)}),
             });
             status.textContent = t("adm.alchemy_settings_saved");

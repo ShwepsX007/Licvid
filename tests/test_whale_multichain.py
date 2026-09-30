@@ -245,6 +245,13 @@ class CEXWalletRegistryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class MultichainTransferTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self._alchemy_rate_patch = patch("whale_poller.ALCHEMY_MIN_REQUEST_INTERVAL_SEC", 0.0)
+        self._alchemy_rate_patch.start()
+
+    def tearDown(self):
+        self._alchemy_rate_patch.stop()
+
     @staticmethod
     async def broadcast(_message):
         return None
@@ -406,7 +413,14 @@ class MultichainTransferTests(unittest.IsolatedAsyncioTestCase):
                     return FakeResponse(result)
 
             fake_session = FakeSession()
-            with patch("whale_poller.aiohttp.ClientSession", return_value=fake_session):
+
+            async def no_stagger(_chain):
+                return None
+
+            with (
+                patch("whale_poller.aiohttp.ClientSession", return_value=fake_session),
+                patch.object(poller, "_wait_for_staggered_start", new=no_stagger),
+            ):
                 task = asyncio.create_task(poller.run_solana())
                 try:
                     for _ in range(200):
@@ -572,7 +586,7 @@ class MultichainTransferTests(unittest.IsolatedAsyncioTestCase):
             with patch("whale_poller.random.uniform", return_value=1.0):
                 with self.assertRaises(RateLimited) as limited:
                     await poller._solana_rpc(FakeSession(), "getHealth", [])
-                self.assertEqual(limited.exception.retry_after, 15)
+                self.assertEqual(limited.exception.retry_after, 60)
                 status = poller.status()
                 self.assertEqual(status["solana"]["state"], "rate_limited")
                 self.assertEqual(status["network_status"]["SOLANA"]["status"], "rate_limited")

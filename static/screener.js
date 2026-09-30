@@ -149,12 +149,14 @@
             const diagnostic = diagnosticParts.join(" · ");
             const fullStatus = statusLabel +
                 (warningLabel && summary.status === "online" ? " · " + warningLabel : "");
+            const visualStatus = warningStatus === "rate_limited" && summary.status === "online"
+                ? "rate_limited" : (summary.status || "waiting");
             card.title = diagnostic;
             card.setAttribute("aria-label", networkName(net.id) + ", " +
                 fullStatus + (diagnostic ? ". " + diagnostic : ""));
             const top = make("div", "network-card-top");
             top.append(make("span", "network-card-name", networkName(net.id)));
-            const status = make("span", "network-state status--" + (summary.status || "waiting"), fullStatus);
+            const status = make("span", "network-state status--" + visualStatus, fullStatus);
             if (diagnostic) status.title = diagnostic;
             top.append(status);
             card.append(top);

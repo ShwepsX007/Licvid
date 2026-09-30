@@ -835,10 +835,19 @@ class WhaleScreener:
                     await asyncio.sleep(delay)
                     delay = min(delay * 2, 60.0)
 
+    @staticmethod
+    async def _wait_for_alchemy_slot() -> None:
+        # Runtime import avoids a module cycle: WhalePoller owns the process-wide
+        # limiter, while the legacy standalone screener may still open EVM sockets.
+        from whale_poller import _ALCHEMY_REQUEST_LIMITER
+        await _ALCHEMY_REQUEST_LIMITER.wait_for_slot()
+
     async def _subscribe(self, ws, chain: str) -> dict[str, str]:
         addresses = list(TOKENS[chain])
+        await self._wait_for_alchemy_slot()
         await ws.send_json({"jsonrpc": "2.0", "id": 1, "method": "eth_subscribe",
                             "params": ["logs", {"address": addresses, "topics": [TRANSFER_TOPIC]}]})
+        await self._wait_for_alchemy_slot()
         await ws.send_json({"jsonrpc": "2.0", "id": 2, "method": "eth_subscribe",
                             "params": ["alchemy_minedTransactions", {"hashesOnly": False}]})
         subs = {}
@@ -853,6 +862,7 @@ class WhaleScreener:
                 if "error" in msg or not msg.get("result"):
                     # BNB may not implement the Alchemy-only mined extension;
                     # standard newHeads + eth_getBlockByNumber works on both.
+                    await self._wait_for_alchemy_slot()
                     await ws.send_json({"jsonrpc": "2.0", "id": 3, "method": "eth_subscribe",
                                         "params": ["newHeads"]})
                 else:
@@ -886,6 +896,7 @@ class WhaleScreener:
             self._next_rpc_id += 1
             request_id = self._next_rpc_id
             pending[request_id] = number
+            await self._wait_for_alchemy_slot()
             await ws.send_json({"jsonrpc": "2.0", "id": request_id,
                                 "method": "eth_getBlockByNumber", "params": [number, True]})
     async def _block_reply(self, chain: str, msg: dict) -> None:
@@ -906,6 +917,7 @@ class WhaleScreener:
                 self._pending_blocks[chain].clear()
                 timeout = ({"timeout": aiohttp.ClientWSTimeout(ws_receive=90)}
                            if hasattr(aiohttp, "ClientWSTimeout") else {"receive_timeout": 90})
+                await self._wait_for_alchemy_slot()
                 async with session.ws_connect(self.endpoints[chain], heartbeat=30,
                                               max_msg_size=16 * 1024 * 1024, **timeout) as ws:
                     subs = await self._subscribe(ws, chain)

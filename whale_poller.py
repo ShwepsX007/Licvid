@@ -17,6 +17,7 @@ import math
 import os
 import random
 import re
+import threading
 import time
 from collections import deque
 from datetime import datetime, timezone
@@ -35,7 +36,9 @@ log = logging.getLogger(__name__)
 POLL_MODE = os.getenv("LIQSCOPE_WHALE_MODE", "realtime").strip().lower()
 if POLL_MODE not in ("realtime", "economy"):
     POLL_MODE = "realtime"
-HISTORY_INTERVAL_OPTIONS = (5, 10, 15, 30, 60)
+HISTORY_INTERVAL_OPTIONS = (5, 10, 15, 30, 60)  # legacy settings compatibility
+POLL_INTERVAL_OPTIONS_SEC = (30, 60, 120, 300)
+DEFAULT_POLL_INTERVAL_SEC = 60
 SOLANA_HTTP_BASE = os.getenv("LIQSCOPE_SOLANA_HTTP", "https://solana-mainnet.g.alchemy.com/v2/")
 SPL_TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 TRON_API_BASE = os.getenv("LIQSCOPE_TRONGRID_URL", "https://api.trongrid.io").rstrip("/")
@@ -51,9 +54,18 @@ SOLANA_MAX_RPC_REQUESTS_PER_CYCLE = (SOLANA_MAX_SIGNATURE_REQUESTS_PER_CYCLE +
                                      SOLANA_MAX_TRANSACTION_REQUESTS_PER_CYCLE)
 SOLANA_POLL_CONCURRENCY = 8
 SOLANA_PROCESSED_SIGNATURE_LIMIT = 5000
-RATE_LIMIT_BASE_SEC = 15.0
+MAX_BLOCK_RANGE = 5  # inclusive block count; toBlock <= fromBlock + 4
+MAX_BLOCK_RANGE_DELTA = MAX_BLOCK_RANGE - 1
+MAX_CATCHUP_LAG_BLOCKS = 30
+BLOCK_RANGE_PAUSE_SEC = 0.2
+ALCHEMY_MIN_REQUEST_INTERVAL_SEC = 0.4
+POLL_JITTER_SEC = 2.0
+EVM_POLL_STAGGER_OFFSETS_SEC = {
+    "ETH": 0.0, "BNB": 8.0, "POLYGON": 16.0, "ARBITRUM": 24.0, "BASE": 32.0,
+}
+SOLANA_POLL_STAGGER_SEC = 40.0
+RATE_LIMIT_BASE_SEC = 60.0
 RATE_LIMIT_MAX_SEC = 300.0
-RATE_LIMIT_JITTER = 0.15
 NETWORK_SUCCESS_TTL_SEC = 300.0
 TRON_USD_CONTRACTS = dict(TRON_TOKENS)
 SOLANA_BLOCKS_PER_SEC = {"ETH": 1 / 12, "BNB": 1 / 3, "POLYGON": 0.5,
@@ -92,6 +104,82 @@ def to_hex_block(val: int | str | None) -> str:
         except ValueError:
             return "latest"
     return val or "latest"
+
+
+def _block_int(value: int | str | None) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value, 16) if value.lower().startswith("0x") else int(value)
+        except ValueError:
+            return None
+    return None
+
+
+def bounded_block_range(from_block: int | str | None, latest_block: int | str,
+                        requested_to: int | str | None = None) -> tuple[int, int]:
+    """Return an inclusive EVM window capped at five blocks."""
+    latest = _block_int(latest_block)
+    if latest is None or latest < 0:
+        raise ValueError("latest_block must be a non-negative block number")
+    start = _block_int(from_block)
+    if start is None:
+        start = max(0, latest - MAX_BLOCK_RANGE_DELTA)
+    start = max(0, start)
+    end = min(latest, start + MAX_BLOCK_RANGE_DELTA)
+    requested_end = _block_int(requested_to)
+    if requested_end is not None:
+        end = min(end, requested_end)
+    return start, end
+
+
+def iter_block_ranges(from_block: int | str | None, latest_block: int | str):
+    """Yield sequential inclusive ranges, each no wider than five blocks."""
+    latest = _block_int(latest_block)
+    if latest is None or latest < 0:
+        raise ValueError("latest_block must be a non-negative block number")
+    start = _block_int(from_block)
+    if start is None:
+        start = max(0, latest - MAX_BLOCK_RANGE_DELTA)
+    start = max(0, start)
+    while start <= latest:
+        _start, end = bounded_block_range(start, latest)
+        if end < start:
+            return
+        yield start, end
+        start = end + 1
+
+
+def _env_poll_interval_sec() -> int:
+    try:
+        value = int(os.getenv("LIQSCOPE_WHALE_POLL_INTERVAL_SEC",
+                              str(DEFAULT_POLL_INTERVAL_SEC)))
+    except (TypeError, ValueError):
+        value = DEFAULT_POLL_INTERVAL_SEC
+    return value if value in POLL_INTERVAL_OPTIONS_SEC else DEFAULT_POLL_INTERVAL_SEC
+
+
+class _AlchemyRequestLimiter:
+    """Serialize Alchemy request starts process-wide, including across loops."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._next_slot = 0.0
+
+    async def wait_for_slot(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            slot = max(now, self._next_slot)
+            self._next_slot = slot + ALCHEMY_MIN_REQUEST_INTERVAL_SEC
+        delay = slot - time.monotonic()
+        if delay > 0:
+            await asyncio.sleep(delay)
+
+
+_ALCHEMY_REQUEST_LIMITER = _AlchemyRequestLimiter()
 
 
 def _base58_encode(raw: bytes) -> str:
@@ -163,7 +251,8 @@ class WhalePoller:
                  key_store: AlchemyKeyStore | None = None,
                  trongrid_key_store: AlchemyKeyStore | None = None,
                  mode: str | None = None,
-                 history_interval_min: int | None = None):
+                 history_interval_min: int | None = None,
+                 poll_interval_sec: int | None = None):
         self.screener = screener
         self.key_store = key_store
         self.trongrid_key_store = trongrid_key_store
@@ -183,17 +272,18 @@ class WhalePoller:
         self.mode = str(mode or POLL_MODE).strip().lower()
         if self.mode not in ("realtime", "economy"):
             self.mode = "realtime"
-        default_interval = 5 if self.mode == "realtime" else 15
-        requested_min = history_interval_min
-        if requested_min is None:
-            try:
-                requested_min = int(os.getenv("LIQSCOPE_WHALE_HISTORY_INTERVAL_MIN", default_interval))
-            except (TypeError, ValueError):
-                requested_min = default_interval
-        self.history_interval_min = (requested_min if requested_min in HISTORY_INTERVAL_OPTIONS
-                                     else default_interval)
-        self.interval = (self.history_interval_min * 60 if interval is None
-                         else max(300, int(interval)))
+        if poll_interval_sec is not None:
+            selected_interval = poll_interval_sec
+        elif interval is not None:
+            selected_interval = interval
+        elif history_interval_min is not None:
+            selected_interval = int(history_interval_min) * 60
+        else:
+            selected_interval = _env_poll_interval_sec()
+        self.poll_interval_sec = max(1, min(3600, int(selected_interval)))
+        # Compatibility aliases retained for existing status consumers/clients.
+        self.interval = self.poll_interval_sec
+        self.history_interval_min = max(1, math.ceil(self.poll_interval_sec / 60))
         # Deliberate reserve: Alchemy Free is 30M CU for the whole app, not only
         # this collector. A custom cap can be *lower*, not greater than 30M.
         self.monthly_cu = min(30_000_000, max(1, monthly_cu))
@@ -268,17 +358,30 @@ class WhalePoller:
         return self.key_store.keys() if self.key_store else (
             [("legacy", self._fallback_key)] if self._fallback_key else [])
 
-    def configure(self, *, mode: str, history_interval_min: int, monthly_cu: int) -> None:
+    def configure(self, *, mode: str, monthly_cu: int,
+                  poll_interval_sec: int | None = None,
+                  history_interval_min: int | None = None) -> None:
         mode = str(mode or "").strip().lower()
         if mode not in ("realtime", "economy"):
             raise ValueError("Invalid whale mode")
-        if history_interval_min not in HISTORY_INTERVAL_OPTIONS:
-            raise ValueError("Invalid history interval")
+        if poll_interval_sec is None:
+            if history_interval_min is None:
+                poll_interval_sec = self.poll_interval_sec
+            elif history_interval_min in HISTORY_INTERVAL_OPTIONS:
+                # Legacy admin clients submit minutes; map them to supported seconds.
+                poll_interval_sec = min(POLL_INTERVAL_OPTIONS_SEC[-1],
+                                        max(POLL_INTERVAL_OPTIONS_SEC[0],
+                                            int(history_interval_min) * 60))
+            else:
+                raise ValueError("Invalid poll interval")
+        if int(poll_interval_sec) not in POLL_INTERVAL_OPTIONS_SEC:
+            raise ValueError("Invalid poll interval")
         if not 1_000 <= int(monthly_cu) <= 20_000_000:
             raise ValueError("Invalid monthly CU limit")
         self.mode = mode
-        self.history_interval_min = int(history_interval_min)
-        self.interval = self.history_interval_min * 60
+        self.poll_interval_sec = int(poll_interval_sec)
+        self.interval = self.poll_interval_sec
+        self.history_interval_min = max(1, math.ceil(self.poll_interval_sec / 60))
         self.monthly_cu = int(monthly_cu)
         self.wakeup.set()
 
@@ -305,9 +408,44 @@ class WhalePoller:
         self.state["active_key"] = key_id
         self._save()
 
+    async def _wait_for_alchemy_slot(self) -> None:
+        await _ALCHEMY_REQUEST_LIMITER.wait_for_slot()
+
+    @staticmethod
+    def _stagger_delay(chain: str) -> float:
+        offset = (SOLANA_POLL_STAGGER_SEC if chain == "SOLANA" else
+                  EVM_POLL_STAGGER_OFFSETS_SEC.get(chain, 0.0))
+        return max(0.0, float(offset) + random.uniform(-POLL_JITTER_SEC, POLL_JITTER_SEC))
+
+    async def _wait_for_staggered_start(self, chain: str) -> None:
+        delay = self._stagger_delay(chain)
+        if delay > 0:
+            await asyncio.sleep(delay)
+
+    def _initial_evm_poll_schedule(self, started_at: float) -> dict[str, float]:
+        return {chain: started_at + self._stagger_delay(chain) for chain in self.endpoints}
+
+    def _next_evm_poll_due(self, due_at: float, chain: str) -> float:
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+        interval = max(1.0, float(self.interval))
+        next_due = due_at + interval
+        if now >= next_due:
+            next_due = now + interval
+        next_due = max(now, next_due + random.uniform(-POLL_JITTER_SEC, POLL_JITTER_SEC))
+        row = self._network_row(chain)
+        if row.get("status") in ("rate_limited", "auth_error", "quota_exhausted"):
+            retry_at = float(row.get("retry_at") or 0.0)
+            next_due = max(next_due, now + max(0.0, retry_at - time.time()))
+        return next_due
+
     def _solana_poll_interval(self) -> float:
         return (SOLANA_POLL_INTERVAL_ECONOMY_SEC if self.mode == "economy"
                 else SOLANA_POLL_INTERVAL_REALTIME_SEC)
+
+    def _solana_jittered_interval(self) -> float:
+        return max(0.0, self._solana_poll_interval() +
+                   random.uniform(-POLL_JITTER_SEC, POLL_JITTER_SEC))
 
     def _solana_retry_delay(self, requested_delay: float = 0.0) -> float:
         return min(RATE_LIMIT_MAX_SEC, max(self._solana_poll_interval(),
@@ -404,10 +542,7 @@ class WhalePoller:
         retry_at = self.chain_cooldown.get(cooldown_key, 0.0)
         if retry_at <= now:
             attempt = self.rate_limit_attempts.get(cooldown_key, 0)
-            base = min(RATE_LIMIT_MAX_SEC, RATE_LIMIT_BASE_SEC * (2 ** attempt))
-            delay = min(RATE_LIMIT_MAX_SEC,
-                        max(1.0, base * random.uniform(1.0 - RATE_LIMIT_JITTER,
-                                                      1.0 + RATE_LIMIT_JITTER)))
+            delay = min(RATE_LIMIT_MAX_SEC, RATE_LIMIT_BASE_SEC * (attempt + 1))
             retry_at = now + delay
             self.rate_limit_attempts[cooldown_key] = attempt + 1
             self.chain_cooldown[cooldown_key] = retry_at
@@ -515,7 +650,8 @@ class WhalePoller:
                  ("BITCOIN", "BITCOINCASH", "LITECOIN", "SUI", "DOGECOIN")}
         other["SOLANA"] = sol["state"]
         other["TRON"] = tron["state"]
-        return {"mode": self.mode, "interval_sec": self.interval,
+        return {"mode": self.mode, "interval_sec": self.poll_interval_sec,
+                "poll_interval_sec": self.poll_interval_sec,
                 "history_interval_min": self.history_interval_min,
                 "budget_cu": self.monthly_cu, "reserved_cu": used,
                 "estimated_monthly_cu": estimate,
@@ -586,23 +722,39 @@ class WhalePoller:
                 else:
                     paused = True
                 continue
-            try:
-                self._reserve(method, key_id, chain=chain)
-            except BudgetExhausted as exc:
-                if str(exc) == "global":
-                    self._mark_network_failure(chain, "quota_exhausted",
-                                               "Local monthly CU budget exhausted",
-                                               key_active=True)
-                    raise
-                allocation_exhausted = True
-                self.key_errors[key_id] = "Локальная доля CU исчерпана; ключ остаётся активен"
-                continue
             # Test endpoints may be complete local URLs. Production endpoints
             # are prefixes; do not persist or expose URLs containing keys.
             url = self.endpoints[chain]
             if url.startswith("https://") and url.endswith("/v2/"):
                 url += key
             try:
+                await self._wait_for_alchemy_slot()
+                # Cooldowns can change while this network waits behind another
+                # Alchemy request. Re-check before reserving CU or sending.
+                now = time.time()
+                if self.key_cooldown.get(key_id, 0.0) > now:
+                    paused = True
+                    continue
+                cooldown_until = self.chain_cooldown.get(cooldown_key, 0.0)
+                if cooldown_until > now:
+                    retry_after = cooldown_until - now
+                    if self.chain_cooldown_status.get(cooldown_key) == "rate_limited":
+                        detail = self._network_row(chain).get("error") or "HTTP 429: provider cooldown"
+                        rate_limited.append((retry_after, str(detail)))
+                    else:
+                        paused = True
+                    continue
+                try:
+                    self._reserve(method, key_id, chain=chain)
+                except BudgetExhausted as exc:
+                    if str(exc) == "global":
+                        self._mark_network_failure(chain, "quota_exhausted",
+                                                   "Local monthly CU budget exhausted",
+                                                   key_active=True)
+                        raise
+                    allocation_exhausted = True
+                    self.key_errors[key_id] = "Локальная доля CU исчерпана; ключ остаётся активен"
+                    continue
                 async with session.post(url, json={
                         "jsonrpc": "2.0", "id": 1, "method": method, "params": params},
                         timeout=aiohttp.ClientTimeout(total=25)) as response:
@@ -707,6 +859,12 @@ class WhalePoller:
         raise NoKeys(message)
 
     async def _logs(self, session, chain: str, start: int, end: int) -> None:
+        if end - start > MAX_BLOCK_RANGE_DELTA:
+            for range_start, range_end in iter_block_ranges(start, end):
+                await self._logs(session, chain, range_start, range_end)
+            return
+        if start > end:
+            return
         addresses = list(TOKENS[chain])
         wallet_rows = self.screener.wallet_addresses(chain)
         wallets = ["0x" + "0" * 24 + a[2:] for a in wallet_rows]
@@ -737,6 +895,12 @@ class WhalePoller:
                     await self.screener.handle_log(chain, event, source="historical")
 
     async def _native(self, session, chain: str, start: int, end: int) -> None:
+        if end - start > MAX_BLOCK_RANGE_DELTA:
+            for range_start, range_end in iter_block_ranges(start, end):
+                await self._native(session, chain, range_start, range_end)
+            return
+        if start > end:
+            return
         if chain not in NATIVE_INDEXED:
             return
         asset = NATIVE_INDEXED[chain]
@@ -789,6 +953,12 @@ class WhalePoller:
 
     async def _wide_token_logs(self, session, chain: str, start: int, end: int) -> None:
         """Fallback token history for BNB where Asset Transfers is not promised."""
+        if end - start > MAX_BLOCK_RANGE_DELTA:
+            for range_start, range_end in iter_block_ranges(start, end):
+                await self._wide_token_logs(session, chain, range_start, range_end)
+            return
+        if start > end:
+            return
         logs = await self._rpc(session, chain, "eth_getLogs", [{
             "fromBlock": to_hex_block(start), "toBlock": to_hex_block(end),
             "address": list(TOKENS[chain]), "topics": [TRANSFER_TOPIC]}])
@@ -810,6 +980,12 @@ class WhalePoller:
             await self.screener.handle_log(chain, event, source="historical")
 
     async def _asset_transfer_history(self, session, chain: str, start: int, end: int) -> None:
+        if end - start > MAX_BLOCK_RANGE_DELTA:
+            for range_start, range_end in iter_block_ranges(start, end):
+                await self._asset_transfer_history(session, chain, range_start, range_end)
+            return
+        if start > end:
+            return
         if chain not in ("ETH", "POLYGON", "ARBITRUM", "BASE"):
             if chain == "BNB":
                 await self._wide_token_logs(session, chain, start, end)
@@ -883,6 +1059,18 @@ class WhalePoller:
                 if pages >= 20:
                     raise PollError("Transfer history pagination is incomplete")
 
+    def _reset_stale_cursor(self, chain: str, cursor_name: str,
+                            latest: int, scan_start: int) -> int:
+        lag = max(0, latest - scan_start + 1)
+        if lag <= MAX_CATCHUP_LAG_BLOCKS:
+            return scan_start
+        scan_start = max(0, latest - MAX_BLOCK_RANGE_DELTA)
+        self.state.setdefault(cursor_name, {})[chain] = scan_start - 1
+        self._save()
+        log.warning("[screener/%s] Отставание > 30 блоков. "
+                    "Безопасный сброс на latest - 5.", chain.lower())
+        return scan_start
+
     async def poll_transfer_history(self, session, chain: str, head: int) -> None:
         cursors = self.state.setdefault("history_cursors", {})
         cursor = cursors.get(chain)
@@ -896,18 +1084,23 @@ class WhalePoller:
             cursors[chain] = "latest"
             self._save()
             return
-        if start > head:
-            return
-        end = min(head, start + 49_999)
-        await self._asset_transfer_history(session, chain, start, end)
-        cursors[chain] = end
-        self._save()
+        if start <= 0:
+            start = max(0, head - MAX_BLOCK_RANGE_DELTA)
+        start = self._reset_stale_cursor(chain, "history_cursors", head, start)
+        while start <= head:
+            range_start, range_end = bounded_block_range(start, head)
+            await self._asset_transfer_history(session, chain, range_start, range_end)
+            cursors[chain] = range_end
+            self._save()
+            start = range_end + 1
+            if start <= head:
+                await asyncio.sleep(BLOCK_RANGE_PAUSE_SEC)
 
     async def poll_chain(self, session: aiohttp.ClientSession, chain: str) -> None:
         head = await self._rpc(session, chain, "eth_blockNumber", [])
-        if not isinstance(head, str) or not head.startswith("0x"):
+        latest = _block_int(head)
+        if latest is None or latest < 0:
             raise PollError("Malformed block number")
-        latest = int(head, 16)
         self.latest_heads[chain] = latest
         cursor = self.state["cursors"].get(chain)
         if cursor is None or cursor == "latest":
@@ -915,30 +1108,25 @@ class WhalePoller:
             self.state.setdefault("history_cursors", {}).setdefault(chain, latest)
             self._save()
             return  # no historical replay without a user-specified starting point
-        # Bound backlog per pass, including the native index query. If down
-        # for weeks, subsequent hourly passes catch up without a huge request.
         try:
             start = int(cursor) + 1
         except (TypeError, ValueError):
             self._reset_cursor(chain)
             return
-        latest = min(latest, start + 49_999)
-        # Address-indexed native query once per range (not once per log
-        # chunk): otherwise Arbitrum's many small blocks exhaust Free CU.
-        if start <= latest:
-            await self._native(session, chain, start, latest)
-        # One hour of Arbitrum can span 14,400+ blocks; bound each log query.
-        for _ in range(100):
-            if start > latest:
-                break
-            end = min(start + 999, latest)
-            await self._logs(session, chain, start, end)
-            self.state["cursors"][chain] = end
+        if start <= 0:
+            start = max(0, latest - MAX_BLOCK_RANGE_DELTA)
+        start = self._reset_stale_cursor(chain, "cursors", latest, start)
+        while start <= latest:
+            range_start, range_end = bounded_block_range(start, latest)
+            await self._native(session, chain, range_start, range_end)
+            await self._logs(session, chain, range_start, range_end)
+            self.state["cursors"][chain] = range_end
             self._save()
-            start = end + 1
-        # Remaining backlog stays on disk, never silently skipped. Transfer
-        # history has an independent cursor so an asset-transfer error never
-        # skips ranges that the CEX log poller has already completed.
+            start = range_end + 1
+            if start <= latest:
+                await asyncio.sleep(BLOCK_RANGE_PAUSE_SEC)
+        # Broad-history and CEX-feed cursors remain independent, and each
+        # advances only after its own five-block window has succeeded.
         await self.poll_transfer_history(session, chain, latest)
 
     async def _handle_mined_native(self, chain: str, envelope: dict) -> bool:
@@ -973,7 +1161,12 @@ class WhalePoller:
         """Subscribe to CEX-indexed token/native transfers using Alchemy WS."""
         state = self.evm_streams[chain]
         retry = 3.0
+        first_connect = True
         while True:
+            if first_connect:
+                await self._wait_for_staggered_start(chain)
+                first_connect = False
+            rate_limit_delay = None
             keys = self._keys()
             wallets = self.screener.wallet_addresses(chain)
             if not keys:
@@ -995,6 +1188,7 @@ class WhalePoller:
             url = f"wss://{host}.g.alchemy.com/v2/{key}"
             try:
                 async with aiohttp.ClientSession() as session:
+                    await self._wait_for_alchemy_slot()
                     async with session.ws_connect(url, heartbeat=25, receive_timeout=90) as ws:
                         sub_id = 1
                         subscriptions = 0
@@ -1005,6 +1199,7 @@ class WhalePoller:
                             for incoming in (True, False):
                                 topics = ([TRANSFER_TOPIC, batch] if incoming else
                                           [TRANSFER_TOPIC, None, batch])
+                                await self._wait_for_alchemy_slot()
                                 await ws.send_json({"jsonrpc": "2.0", "id": sub_id,
                                     "method": "eth_subscribe", "params": ["logs", {
                                         "address": list(TOKENS[chain]), "topics": topics}]})
@@ -1014,6 +1209,7 @@ class WhalePoller:
                             native_addresses = sorted(wallets)[:500]
                             filters = ([{"from": address} for address in native_addresses] +
                                        [{"to": address} for address in native_addresses])
+                            await self._wait_for_alchemy_slot()
                             await ws.send_json({"jsonrpc": "2.0", "id": sub_id,
                                 "method": "eth_subscribe", "params": ["alchemy_minedTransactions", {
                                     "addresses": filters, "includeRemoved": False,
@@ -1035,6 +1231,27 @@ class WhalePoller:
                             except (TypeError, ValueError):
                                 continue
                             if payload.get("error"):
+                                error = payload["error"]
+                                if isinstance(error, dict):
+                                    rpc_code = error.get("code")
+                                    rpc_message = str(error.get("message") or "RPC error")[:300]
+                                    detail = self._redact_api_keys(
+                                        f"JSON-RPC code={rpc_code}: {rpc_message}",
+                                        extra_secrets=(key,))
+                                else:
+                                    rpc_code = None
+                                    detail = self._redact_api_keys(str(error)[:300],
+                                                                   extra_secrets=(key,))
+                                if self._provider_failure_kind(None, detail, rpc_code) == "rate_limited":
+                                    failure = self._record_provider_failure(
+                                        chain, key_id, detail, http_status=None,
+                                        rpc_code=rpc_code)
+                                    if isinstance(failure, RateLimited):
+                                        rate_limit_delay = failure.retry_after
+                                        state.update(connected=False, state="rate_limited",
+                                            error=str(failure), retry_in_sec=int(math.ceil(
+                                                failure.retry_after)))
+                                        break
                                 state["error"] = "Alchemy WebSocket subscription error"
                                 continue
                             if payload.get("method") != "eth_subscription":
@@ -1051,14 +1268,30 @@ class WhalePoller:
             except asyncio.CancelledError:
                 state.update(connected=False, state="stopped")
                 raise
+            except aiohttp.WSServerHandshakeError as exc:
+                state["reconnects"] = int(state.get("reconnects", 0)) + 1
+                if exc.status == 429:
+                    failure = self._note_rate_limit(
+                        chain, key_id, "HTTP 429: Alchemy WebSocket handshake rate limit",
+                        http_status=429)
+                    rate_limit_delay = failure.retry_after
+                    state.update(connected=False, state="rate_limited", error=str(failure),
+                                 retry_in_sec=int(math.ceil(failure.retry_after)))
+                else:
+                    state.update(connected=False, state="error",
+                                 error=f"WebSocket handshake HTTP {exc.status}")
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError) as exc:
                 state.update(connected=False, state="error", error=type(exc).__name__)
                 state["reconnects"] = int(state.get("reconnects", 0)) + 1
             except Exception as exc:  # noqa: BLE001 — keep one provider outage isolated
                 state.update(connected=False, state="error", error=type(exc).__name__)
                 state["reconnects"] = int(state.get("reconnects", 0)) + 1
-            await asyncio.sleep(min(60.0, retry))
-            retry = min(60.0, retry * 2)
+            if rate_limit_delay is not None:
+                await asyncio.sleep(rate_limit_delay)
+                retry = 3.0
+            else:
+                await asyncio.sleep(min(60.0, retry))
+                retry = min(60.0, retry * 2)
 
     def _solana_safe_text(self, value: object) -> str:
         return self._redact_api_keys(str(value).strip())
@@ -1117,19 +1350,33 @@ class WhalePoller:
                 else:
                     paused = True
                 continue
-            try:
-                self._reserve("solana_" + method, key_id, chain="SOLANA")
-            except BudgetExhausted as exc:
-                if str(exc) == "global":
-                    self._mark_network_failure("SOLANA", "quota_exhausted",
-                                               "Local monthly CU budget exhausted",
-                                               key_active=True)
-                    raise
-                allocation_exhausted = True
-                self.key_errors[key_id] = "Локальная доля CU исчерпана; ключ остаётся активен"
-                continue
             url = _solana_http_url(SOLANA_HTTP_BASE, key)
             try:
+                await self._wait_for_alchemy_slot()
+                now = time.time()
+                if self.key_cooldown.get(key_id, 0.0) > now:
+                    paused = True
+                    continue
+                cooldown_until = self.chain_cooldown.get(cooldown_key, 0.0)
+                if cooldown_until > now:
+                    retry_after = cooldown_until - now
+                    if self.chain_cooldown_status.get(cooldown_key) == "rate_limited":
+                        detail = self._network_row("SOLANA").get("error") or "HTTP 429: provider cooldown"
+                        rate_limited.append((retry_after, str(detail)))
+                    else:
+                        paused = True
+                    continue
+                try:
+                    self._reserve("solana_" + method, key_id, chain="SOLANA")
+                except BudgetExhausted as exc:
+                    if str(exc) == "global":
+                        self._mark_network_failure("SOLANA", "quota_exhausted",
+                                                   "Local monthly CU budget exhausted",
+                                                   key_active=True)
+                        raise
+                    allocation_exhausted = True
+                    self.key_errors[key_id] = "Локальная доля CU исчерпана; ключ остаётся активен"
+                    continue
                 async with session.post(url, json={"jsonrpc": "2.0", "id": 1,
                                                    "method": method, "params": params},
                                         timeout=aiohttp.ClientTimeout(total=25)) as response:
@@ -1763,7 +2010,6 @@ class WhalePoller:
                                   processing_state="polling", waiting_for_filters=False,
                                   last_success=time.time(), error="")
         last_account_refresh = self._solana_token_accounts_updated_at
-        poll_interval = self._solana_poll_interval()
         while True:
             poll_started = loop.time()
             current = list(self.screener.wallet_addresses("SOLANA").items())[:SOLANA_MAX_WALLETS]
@@ -1776,7 +2022,8 @@ class WhalePoller:
                 last_account_refresh = loop.time()
                 self._solana_token_accounts_updated_at = last_account_refresh
             await self._solana_poll_wallets_once(session, owners, token_accounts)
-            delay = max(0.0, poll_interval - (loop.time() - poll_started))
+            delay = max(0.0, self._solana_jittered_interval() -
+                        (loop.time() - poll_started))
             await asyncio.sleep(delay)
 
     async def _solana_wait_for_filters(self, session) -> None:
@@ -1797,7 +2044,11 @@ class WhalePoller:
     async def run_solana(self) -> None:
         """Poll tracked CEX owners over JSON-RPC; wait on health when no filters exist."""
         retry = 3.0
+        first_cycle = True
         while True:
+            if first_cycle:
+                await self._wait_for_staggered_start("SOLANA")
+                first_cycle = False
             keys = self._keys()
             wallets = self.screener.wallet_addresses("SOLANA")
             owners = list(wallets.items())[:SOLANA_MAX_WALLETS]
@@ -1821,7 +2072,7 @@ class WhalePoller:
                     else:
                         await self._solana_wait_for_filters(session)
                         if not self.screener.wallet_addresses("SOLANA"):
-                            await asyncio.sleep(self._solana_poll_interval())
+                            await asyncio.sleep(self._solana_jittered_interval())
                 returned_for_registry_change = True
                 retry = 3.0
             except asyncio.CancelledError:
@@ -1872,7 +2123,7 @@ class WhalePoller:
             if returned_for_registry_change:
                 current = list(self.screener.wallet_addresses("SOLANA").items())[:SOLANA_MAX_WALLETS]
                 if current != owners:
-                    await asyncio.sleep(self._solana_poll_interval())
+                    await asyncio.sleep(self._solana_jittered_interval())
                 else:
                     await asyncio.sleep(0)
                 continue
@@ -2099,98 +2350,95 @@ class WhalePoller:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def run(self) -> None:
+        """Poll EVM networks sequentially on staggered, jittered schedules."""
         async with aiohttp.ClientSession() as session:
-            force_poll = True
+            loop = asyncio.get_running_loop()
+            next_due = self._initial_evm_poll_schedule(loop.time())
             while True:
-                now = time.time()
+                if self.wakeup.is_set():
+                    self.wakeup.clear()
+                    next_due = self._initial_evm_poll_schedule(loop.time())
+
+                # One scheduler owns every EVM network. It awaits each poll fully
+                # before selecting the next due chain, preventing synchronized bursts.
+                chain = min(next_due, key=next_due.get)
+                due_at = next_due[chain]
+                delay = due_at - loop.time()
+                if delay > 0:
+                    try:
+                        await asyncio.wait_for(self.wakeup.wait(), timeout=delay)
+                    except asyncio.TimeoutError:
+                        pass
+                    continue
+                if self.wakeup.is_set():
+                    continue
+
                 keys = self._keys()
                 global_quota_exhausted = int(self.state.get("cu", 0)) >= self.monthly_cu
                 if global_quota_exhausted:
-                    for chain in self.endpoints:
-                        self._mark_network_failure(chain, "quota_exhausted",
-                                                   "Local monthly CU budget exhausted",
-                                                   key_active=True)
+                    for network in self.endpoints:
+                        self._mark_network_failure(
+                            network, "quota_exhausted",
+                            "Local monthly CU budget exhausted", key_active=True)
+                elif not keys:
+                    self._mark_network_failure(
+                        chain, "paused", "Alchemy API key is not configured", key_active=False)
                 else:
-                    for chain in self.endpoints:
-                        if not keys:
-                            message = "Alchemy API key is not configured"
-                            self._mark_network_failure(chain, "paused", message,
-                                                       key_active=False)
-                            continue
-                        row = self._network_row(chain)
-                        attempted = float(self.last_attempt.get(chain) or 0)
-                        retry_at = float(row.get("retry_at") or 0)
-                        if not force_poll and attempted:
-                            if row.get("status") in ("rate_limited", "auth_error", "quota_exhausted"):
-                                due_at = retry_at or attempted + self.interval
-                            else:
-                                due_at = attempted + self.interval
-                            if now < due_at:
-                                continue
-                        try:
-                            self._mark_network_attempt(chain)
-                            await self.poll_chain(session, chain)
-                            self.last_success[chain] = time.time()
-                            self._mark_network_success(chain)
-                        except asyncio.CancelledError:
-                            raise
-                        except BudgetExhausted as exc:
-                            if str(exc) == "global":
-                                for network in self.endpoints:
-                                    self._mark_network_failure(
-                                        network, "quota_exhausted",
-                                        "Local monthly CU budget exhausted", key_active=True)
-                                global_quota_exhausted = True
-                                break
-                            self._mark_network_failure(chain, "quota_exhausted",
-                                                       "Local provider key allocation exhausted",
-                                                       key_active=True)
-                        except Exception as exc:  # isolate failures to this chain
-                            detail = self._redact_api_keys(str(exc) or type(exc).__name__)[:400]
-                            if isinstance(exc, RateLimited):
-                                state = "rate_limited"
-                                retry_after = exc.retry_after
-                                http_status = exc.http_status
-                                key_active = True
-                            elif isinstance(exc, AuthError):
-                                state = "auth_error"
-                                retry_after = 900.0
-                                http_status = getattr(exc, "status_code", 401)
-                                key_active = False
-                            elif isinstance(exc, QuotaExhausted):
-                                state = "quota_exhausted"
-                                retry_after = getattr(exc, "retry_after", 300.0)
-                                http_status = getattr(exc, "status_code", None)
-                                key_active = getattr(exc, "key_active", False)
-                            elif isinstance(exc, NoKeys):
-                                state = "paused"
-                                retry_after = 0.0
-                                http_status = None
-                                key_active = False
-                            else:
-                                state = "network_error"
-                                retry_after = 0.0
-                                http_status = getattr(exc, "status_code", None)
-                                key_active = True
-                            self._mark_network_failure(chain, state, detail,
-                                http_status=http_status,
-                                rpc_code=getattr(exc, "rpc_code", None),
-                                retry_after=retry_after, key_active=key_active)
-                        await asyncio.sleep(0.01)
-                force_poll = False
-                now = time.time()
-                due_times = []
-                for chain in self.endpoints:
                     row = self._network_row(chain)
-                    attempted = float(self.last_attempt.get(chain) or 0)
-                    if row.get("status") in ("rate_limited", "auth_error", "quota_exhausted"):
-                        due_times.append(float(row.get("retry_at") or now + self.interval))
-                    else:
-                        due_times.append((attempted or now) + self.interval)
-                timeout = max(0.1, min(due_times, default=now + self.interval) - now)
-                try:
-                    await asyncio.wait_for(self.wakeup.wait(), timeout=timeout)
-                    force_poll = True
-                except asyncio.TimeoutError:
-                    pass
-                self.wakeup.clear()
+                    retry_at = float(row.get("retry_at") or 0.0)
+                    if (row.get("status") in
+                            ("rate_limited", "auth_error", "quota_exhausted") and
+                            retry_at > time.time()):
+                        next_due[chain] = max(
+                            loop.time() + 0.1, loop.time() + retry_at - time.time())
+                        continue
+                    try:
+                        self._mark_network_attempt(chain)
+                        await self.poll_chain(session, chain)
+                        self.last_success[chain] = time.time()
+                        self._mark_network_success(chain)
+                    except asyncio.CancelledError:
+                        raise
+                    except BudgetExhausted as exc:
+                        if str(exc) == "global":
+                            for network in self.endpoints:
+                                self._mark_network_failure(
+                                    network, "quota_exhausted",
+                                    "Local monthly CU budget exhausted", key_active=True)
+                        else:
+                            self._mark_network_failure(
+                                chain, "quota_exhausted",
+                                "Local provider key allocation exhausted", key_active=True)
+                    except Exception as exc:  # isolate failures to this chain
+                        detail = self._redact_api_keys(str(exc) or type(exc).__name__)[:400]
+                        if isinstance(exc, RateLimited):
+                            state = "rate_limited"
+                            retry_after = exc.retry_after
+                            http_status = exc.http_status
+                            key_active = True
+                        elif isinstance(exc, AuthError):
+                            state = "auth_error"
+                            retry_after = 900.0
+                            http_status = getattr(exc, "status_code", 401)
+                            key_active = False
+                        elif isinstance(exc, QuotaExhausted):
+                            state = "quota_exhausted"
+                            retry_after = getattr(exc, "retry_after", 300.0)
+                            http_status = getattr(exc, "status_code", None)
+                            key_active = getattr(exc, "key_active", False)
+                        elif isinstance(exc, NoKeys):
+                            state = "paused"
+                            retry_after = 0.0
+                            http_status = None
+                            key_active = False
+                        else:
+                            state = "network_error"
+                            retry_after = 0.0
+                            http_status = getattr(exc, "status_code", None)
+                            key_active = True
+                        self._mark_network_failure(
+                            chain, state, detail, http_status=http_status,
+                            rpc_code=getattr(exc, "rpc_code", None),
+                            retry_after=retry_after, key_active=key_active)
+
+                next_due[chain] = self._next_evm_poll_due(due_at, chain)

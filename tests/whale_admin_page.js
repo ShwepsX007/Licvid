@@ -15,7 +15,7 @@ const html = `<!doctype html><body>
   <span id="trongrid-admin-key-status"></span><div id="trongrid-admin-keys"></div>
   <div id="whale-admin-chains"></div>
   <select id="whale-admin-mode"><option value="realtime">Realtime</option><option value="economy">Economy</option></select>
-  <select id="whale-admin-interval"><option value="5">5</option><option value="10">10</option><option value="15">15</option><option value="30">30</option><option value="60">60</option></select>
+  <select id="whale-admin-interval"><option value="30">30 sec</option><option value="60">60 sec</option><option value="120">2 min</option><option value="300">5 min</option></select>
   <input id="whale-admin-budget"><button id="whale-admin-save"></button>
   <select id="whale-admin-wallet-chain"><option value="ALL">All</option><option value="ETH">Ethereum</option><option value="BASE">Base</option></select>
   <input id="whale-admin-wallet-search"><span id="whale-admin-wallet-summary"></span>
@@ -28,7 +28,7 @@ const html = `<!doctype html><body>
 const dom = new JSDOM(html, {url: "https://liqscope.online/admin", runScripts: "outside-only", pretendToBeVisual: true});
 const win = dom.window;
 const calls = [];
-let config = {mode: "realtime", history_interval_min: 15, interval_sec: 900,
+let config = {mode: "realtime", poll_interval_sec: 120, interval_sec: 120,
     budget_cu: 10000000, phase: "ok"};
 let walletRows = [
     {id: "aaaaaaaaaaaaaaaa", chain: "ETH", address: "0x" + "1".repeat(40), name: "Manual CEX", source: "manual"},
@@ -56,7 +56,7 @@ win.LiqScopeI18n = {t: (key, vars = {}) => {
         "adm.alchemy_monthly_estimate": "Monthly CU estimate: {amount}",
         "adm.alchemy_online": "Online",
         "adm.alchemy_online_waiting_cex_filters": "Online (waiting for CEX filters)",
-        "adm.alchemy_rate_limited": "Rate limit (429) — pause {seconds}s, key active",
+        "adm.alchemy_rate_limited": "🟡 Rate limit (429) — waiting {seconds}s",
         "adm.cex_wallet_refresh_error_detail": "Refresh failed: {reason}",
     })[key] || key;
     Object.keys(vars).forEach(name => { value = value.replaceAll("{" + name + "}", String(vars[name])); });
@@ -71,8 +71,8 @@ win.fetch = async (url, options = {}) => {
     if (parsed.pathname === "/api/auth/me") return response({user: {is_admin: true}});
     if (parsed.pathname === "/api/admin/screener/config" && method === "GET") return response({config});
     if (parsed.pathname === "/api/admin/screener/config" && method === "POST") {
-        config = {...config, mode: body.mode, history_interval_min: body.interval_min,
-            interval_sec: body.interval_min * 60, budget_cu: body.monthly_cu};
+        config = {...config, mode: body.mode, poll_interval_sec: body.poll_interval_sec,
+            interval_sec: body.poll_interval_sec, budget_cu: body.monthly_cu};
         return response({ok: true, config});
     }
     if (parsed.pathname === "/api/admin/alchemy/stats") return response({
@@ -82,7 +82,7 @@ win.fetch = async (url, options = {}) => {
             ({chain, status: chain === "ETH" ? "online" : chain === "BASE" ? "rate_limited"
                 : chain === "SOLANA" ? "online" : "paused",
               warning_status: chain === "ETH" ? "rate_limited" : "",
-              retry_in_sec: chain === "ETH" || chain === "BASE" ? 15 : 0,
+              retry_in_sec: chain === "ETH" || chain === "BASE" ? 60 : 0,
               http_status: chain === "ETH" ? 429 : chain === "BASE" ? 200 : null,
               rpc_code: chain === "BASE" ? 429 : null,
               key_active: true,
@@ -136,12 +136,14 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     await sleep(100);
     assert.equal(win.document.getElementById("whale-admin-card").hidden, false);
     assert.equal(win.document.getElementById("whale-admin-mode").value, "realtime");
-    assert.equal(win.document.getElementById("whale-admin-interval").value, "15");
+    assert.equal(win.document.getElementById("whale-admin-interval").value, "120");
     assert(/7[,\.]?500/.test(win.document.getElementById("whale-admin-cu-meta").textContent));
     const networkText = win.document.getElementById("whale-admin-chains").textContent;
     assert(networkText.includes("Solana") && networkText.includes("TRON"));
     assert(networkText.includes("Online (waiting for CEX filters)"));
-    assert(networkText.includes("Rate limit (429) — pause 15s, key active"));
+    assert(networkText.includes("🟡 Rate limit (429) — waiting 60s"));
+    assert(win.document.querySelector(".whale-admin-network.status--rate_limited"),
+        "rate-limited admin network cards use the yellow warning style");
     assert(networkText.includes("HTTP 429: rate limit exceeded"));
     assert(networkText.includes("JSON-RPC code=429: Too many requests"));
     assert(!networkText.includes("All keys exhausted"));
@@ -189,7 +191,7 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     win.document.getElementById("whale-admin-save").click();
     await sleep(60);
     assert(calls.some(call => call.path === "/api/admin/screener/config" &&
-        call.method === "POST" && call.body.mode === "economy" && call.body.interval_min === 30));
+        call.method === "POST" && call.body.mode === "economy" && call.body.poll_interval_sec === 30));
     win.close();
     console.log("Whale admin: CU/mode, Solana/TRON health, TronGrid key and CEX wallet CRUD OK");
 })().catch(err => {win.close(); console.error(err); process.exitCode = 1;});

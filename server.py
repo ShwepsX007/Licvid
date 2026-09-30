@@ -138,12 +138,14 @@ except Exception:  # noqa: BLE001 — the optional whale feed must not block the
     WHALE_SCREENER_AVAILABLE = False
 
 try:
-    from whale_poller import WhalePoller, HISTORY_INTERVAL_OPTIONS
+    from whale_poller import (WhalePoller, HISTORY_INTERVAL_OPTIONS,
+                              POLL_INTERVAL_OPTIONS_SEC)
     from alchemy_keys import AlchemyKeyStore, KeyStoreError
     WHALE_POLLER_AVAILABLE = True
 except Exception:  # noqa: BLE001 — isolate optional Alchemy imports
     WhalePoller = AlchemyKeyStore = None
     HISTORY_INTERVAL_OPTIONS = (5, 10, 15, 30, 60)
+    POLL_INTERVAL_OPTIONS_SEC = (30, 60, 120, 300)
     class KeyStoreError(Exception):
         pass
     WHALE_POLLER_AVAILABLE = False
@@ -4427,11 +4429,24 @@ async def lifespan(app: FastAPI):
             "whale_mode", os.getenv("LIQSCOPE_WHALE_MODE", "realtime")).strip().lower()
         if mode not in ("realtime", "economy"):
             mode = "realtime"
-        default_interval = "5" if mode == "realtime" else "15"
-        try:
-            interval_min = int(account_store.get_setting("whale_interval_min", default_interval))
-        except (TypeError, ValueError):
-            interval_min = int(default_interval)
+        poll_interval_raw = str(account_store.get_setting("whale_poll_interval_sec", "") or "").strip()
+        poll_interval_sec = None
+        if poll_interval_raw:
+            try:
+                poll_interval_sec = int(poll_interval_raw)
+            except (TypeError, ValueError):
+                poll_interval_sec = None
+        else:
+            # Migrate saved minute-based settings without overriding the new
+            # one-minute default on installations that have no saved setting.
+            legacy_interval_raw = str(account_store.get_setting("whale_interval_min", "") or "").strip()
+            if legacy_interval_raw:
+                try:
+                    legacy_minutes = int(legacy_interval_raw)
+                    if legacy_minutes in HISTORY_INTERVAL_OPTIONS:
+                        poll_interval_sec = min(300, max(30, legacy_minutes * 60))
+                except (TypeError, ValueError):
+                    poll_interval_sec = None
         try:
             monthly_cu = int(account_store.get_setting("whale_monthly_cu", "10000000"))
         except (TypeError, ValueError):
@@ -4452,7 +4467,7 @@ async def lifespan(app: FastAPI):
                 whale_poller = WhalePoller(
                     "", whale_screener, key_store=alchemy_key_store,
                     trongrid_key_store=trongrid_key_store,
-                    interval=interval_min * 60, history_interval_min=interval_min,
+                    poll_interval_sec=poll_interval_sec,
                     mode=mode, monthly_cu=monthly_cu)
             except Exception:  # noqa: BLE001 — optional collection cannot take down terminal
                 whale_poller = None
@@ -5764,18 +5779,26 @@ async def api_admin_screener_config_save(request: Request,
     if mode not in ("realtime", "economy"):
         return JSONResponse({"error": "invalid_mode"}, status_code=422)
     try:
-        minutes = int(body.get("interval_min", whale_poller.history_interval_min))
+        raw_interval = body.get("poll_interval_sec", body.get("interval_sec"))
+        if raw_interval is None:
+            # Backward compatibility for clients that still submit minutes.
+            minutes = int(body.get("interval_min", whale_poller.history_interval_min))
+            if minutes not in HISTORY_INTERVAL_OPTIONS:
+                return JSONResponse({"error": "out_of_range"}, status_code=422)
+            interval_sec = min(300, max(30, minutes * 60))
+        else:
+            interval_sec = int(raw_interval)
         cap = int(body.get("monthly_cu", whale_poller.monthly_cu))
     except (ValueError, TypeError):
         return JSONResponse({"error": "invalid_config"}, status_code=422)
-    if minutes not in HISTORY_INTERVAL_OPTIONS or not 1_000 <= cap <= 20_000_000:
+    if interval_sec not in POLL_INTERVAL_OPTIONS_SEC or not 1_000 <= cap <= 20_000_000:
         return JSONResponse({"error": "out_of_range"}, status_code=422)
     try:
-        whale_poller.configure(mode=mode, history_interval_min=minutes, monthly_cu=cap)
+        whale_poller.configure(mode=mode, poll_interval_sec=interval_sec, monthly_cu=cap)
     except ValueError:
         return JSONResponse({"error": "out_of_range"}, status_code=422)
     await asyncio.to_thread(account_store.set_setting, "whale_mode", mode, int(user["id"]))
-    await asyncio.to_thread(account_store.set_setting, "whale_interval_min", str(minutes), int(user["id"]))
+    await asyncio.to_thread(account_store.set_setting, "whale_poll_interval_sec", str(interval_sec), int(user["id"]))
     await asyncio.to_thread(account_store.set_setting, "whale_monthly_cu", str(cap), int(user["id"]))
     return {"ok": True, "config": whale_poller.status()}
 

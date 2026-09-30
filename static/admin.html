@@ -230,10 +230,12 @@
                 <option value="realtime" data-i18n="adm.whale_realtime">Realtime</option>
                 <option value="economy" data-i18n="adm.whale_economy">Economy</option>
             </select></label>
-        <label><span data-i18n="adm.alchemy_interval">Historical poll interval, minutes</span>
+        <label><span data-i18n="adm.alchemy_interval">EVM RPC polling interval</span>
             <select class="search" id="whale-admin-interval">
-                <option value="5">5</option><option value="10">10</option><option value="15">15</option>
-                <option value="30">30</option><option value="60">60</option>
+                <option value="30" data-i18n="adm.whale_poll_30s">30 sec</option>
+                <option value="60" data-i18n="adm.whale_poll_60s" selected>60 sec</option>
+                <option value="120" data-i18n="adm.whale_poll_2m">2 min</option>
+                <option value="300" data-i18n="adm.whale_poll_5m">5 min</option>
             </select></label>
         <label><span data-i18n="adm.alchemy_budget">Monthly budget, CU</span>
             <input type="number" class="search" id="whale-admin-budget" min="1000" max="20000000" value="10000000"></label>

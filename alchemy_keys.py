@@ -42,7 +42,7 @@ def mask_key(value: str) -> str:
 class AlchemyKeyStore:
     def __init__(self, secret: str, path: Path | None = None, env_key: str = ""):
         if not CRYPTO_AVAILABLE:
-            message = "Пакет cryptography не установлен. Установите: pip install 'cryptography>=41.0.0'"
+            message = "Пакет cryptography не установлен. Установите: pip install 'cryptography>=50.0.0'"
             warnings.warn("[WARNING] " + message, RuntimeWarning, stacklevel=2)
             raise KeyStoreError(message)
         if len(secret) < 16:

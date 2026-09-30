@@ -587,8 +587,8 @@ window.LIQSCOPE_I18N_PAGES =
       "adm.cex_wallet_chain": "Сеть",
       "adm.cex_wallet_search": "Фильтр биржи",
       "adm.cex_wallet_refresh": "↻ Обновить из DeFiLlama",
-      "adm.cex_wallet_refreshing": "Загружаю конфигурацию DeFiLlama…",
-      "adm.cex_wallet_refreshed": "Обновлено. Адресов в базе: {count}.",
+      "adm.cex_wallet_refreshing": "Получаю CEX-кошельки через API DeFiLlama…",
+      "adm.cex_wallet_refreshed": "Из API DeFiLlama получено адресов: {count}.",
       "adm.cex_wallet_refresh_error": "Не удалось обновить базу кошельков.",
       "adm.cex_wallet_name": "Метка биржи",
       "adm.cex_wallet_address": "Адрес кошелька",
@@ -613,7 +613,8 @@ window.LIQSCOPE_I18N_PAGES =
       "adm.alchemy_network_error": "Сетевая ошибка",
       "adm.alchemy_paused": "Приостановлено",
       "adm.alchemy_network_cu": "Сеть: {amount} CU",
-      "adm.cex_wallet_refresh_error_detail": "Ошибка обновления: {reason}"
+      "adm.cex_wallet_refresh_error_detail": "Ошибка обновления: {reason}",
+      "adm.cex_wallet_refreshed_etherscan": "Дополнительно получено меток Etherscan: {count}."
     },
     "phrases": {
       "🗑 Стереть статистику": "🗑 Стереть статистику",
@@ -1335,8 +1336,8 @@ window.LIQSCOPE_I18N_PAGES =
       "adm.cex_wallet_chain": "Network",
       "adm.cex_wallet_search": "Exchange filter",
       "adm.cex_wallet_refresh": "↻ Refresh from DeFiLlama",
-      "adm.cex_wallet_refreshing": "Fetching the DeFiLlama configuration…",
-      "adm.cex_wallet_refreshed": "Updated. Wallets in registry: {count}.",
+      "adm.cex_wallet_refreshing": "Fetching CEX wallets from the DeFiLlama API…",
+      "adm.cex_wallet_refreshed": "Received {count} wallet addresses from the DeFiLlama API.",
       "adm.cex_wallet_refresh_error": "Could not refresh the wallet registry.",
       "adm.cex_wallet_name": "Exchange label",
       "adm.cex_wallet_address": "Wallet address",
@@ -1361,7 +1362,8 @@ window.LIQSCOPE_I18N_PAGES =
       "adm.alchemy_network_error": "Network error",
       "adm.alchemy_paused": "Paused",
       "adm.alchemy_network_cu": "{amount} CU on this network",
-      "adm.cex_wallet_refresh_error_detail": "Refresh failed: {reason}"
+      "adm.cex_wallet_refresh_error_detail": "Refresh failed: {reason}",
+      "adm.cex_wallet_refreshed_etherscan": "Additional Etherscan labels: {count}."
     },
     "phrases": {
       "В поле уже стоит стандартный промт — правьте прямо в нём; «Вернуть шаблон» очищает поле и снова включает встроенный текст.": "The field already holds the default prompt — edit it right there; “Restore template” clears the field and turns the built-in text back on.",
@@ -2804,8 +2806,8 @@ window.LIQSCOPE_I18N_PAGES =
       "adm.cex_wallet_chain": "网络",
       "adm.cex_wallet_search": "交易所筛选",
       "adm.cex_wallet_refresh": "↻ 从 DeFiLlama 刷新",
-      "adm.cex_wallet_refreshing": "正在获取 DeFiLlama 配置…",
-      "adm.cex_wallet_refreshed": "已更新。数据库钱包数：{count}。",
+      "adm.cex_wallet_refreshing": "正在从 DeFiLlama API 获取 CEX 钱包…",
+      "adm.cex_wallet_refreshed": "从 DeFiLlama API 获取的钱包地址：{count}。",
       "adm.cex_wallet_refresh_error": "无法刷新钱包数据库。",
       "adm.cex_wallet_name": "交易所标签",
       "adm.cex_wallet_address": "钱包地址",
@@ -2830,7 +2832,8 @@ window.LIQSCOPE_I18N_PAGES =
       "adm.alchemy_network_error": "网络错误",
       "adm.alchemy_paused": "已暂停",
       "adm.alchemy_network_cu": "此网络已用 {amount} CU",
-      "adm.cex_wallet_refresh_error_detail": "更新失败：{reason}"
+      "adm.cex_wallet_refresh_error_detail": "更新失败：{reason}",
+      "adm.cex_wallet_refreshed_etherscan": "Etherscan 额外标签：{count}。"
     },
     "phrases": {
       "В поле уже стоит стандартный промт — правьте прямо в нём; «Вернуть шаблон» очищает поле и снова включает встроенный текст.": "输入框里已是默认提示词 — 直接修改；«恢复模板» 会清空并重新启用内置文本。",
@@ -4274,8 +4277,8 @@ window.LIQSCOPE_I18N_PAGES =
       "adm.cex_wallet_chain": "नेटवर्क",
       "adm.cex_wallet_search": "Exchange फ़िल्टर",
       "adm.cex_wallet_refresh": "↻ DeFiLlama से refresh",
-      "adm.cex_wallet_refreshing": "DeFiLlama config लोड हो रही है…",
-      "adm.cex_wallet_refreshed": "अपडेट हो गया। Registry में wallets: {count}.",
+      "adm.cex_wallet_refreshing": "DeFiLlama API से CEX वॉलेट प्राप्त हो रहे हैं…",
+      "adm.cex_wallet_refreshed": "DeFiLlama API से प्राप्त वॉलेट पते: {count}।",
       "adm.cex_wallet_refresh_error": "Wallet registry अपडेट नहीं हो सकी।",
       "adm.cex_wallet_name": "Exchange label",
       "adm.cex_wallet_address": "Wallet address",
@@ -4300,7 +4303,8 @@ window.LIQSCOPE_I18N_PAGES =
       "adm.alchemy_network_error": "नेटवर्क त्रुटि",
       "adm.alchemy_paused": "रुका हुआ",
       "adm.alchemy_network_cu": "इस नेटवर्क पर {amount} CU",
-      "adm.cex_wallet_refresh_error_detail": "अपडेट विफल: {reason}"
+      "adm.cex_wallet_refresh_error_detail": "अपडेट विफल: {reason}",
+      "adm.cex_wallet_refreshed_etherscan": "Etherscan से अतिरिक्त लेबल: {count}।"
     },
     "phrases": {
       "В поле уже стоит стандартный промт — правьте прямо в нём; «Вернуть шаблон» очищает поле и снова включает встроенный текст.": "फ़ील्ड में डिफ़ॉल्ट प्रॉम्ट पहले से है — उसी में बदलें; «टेम्पलेट वापस» फ़ील्ड साफ़ करके बिल्ट-इन टेक्स्ट फिर चालू कर देता है।",
@@ -5745,8 +5749,8 @@ window.LIQSCOPE_I18N_PAGES =
       "adm.cex_wallet_chain": "Red",
       "adm.cex_wallet_search": "Filtro de exchange",
       "adm.cex_wallet_refresh": "↻ Actualizar desde DeFiLlama",
-      "adm.cex_wallet_refreshing": "Cargando la configuración de DeFiLlama…",
-      "adm.cex_wallet_refreshed": "Actualizado. Direcciones registradas: {count}.",
+      "adm.cex_wallet_refreshing": "Obteniendo billeteras CEX desde la API de DeFiLlama…",
+      "adm.cex_wallet_refreshed": "Direcciones recibidas de la API de DeFiLlama: {count}.",
       "adm.cex_wallet_refresh_error": "No se pudo actualizar la base de wallets.",
       "adm.cex_wallet_name": "Etiqueta del exchange",
       "adm.cex_wallet_address": "Dirección de wallet",
@@ -5771,7 +5775,8 @@ window.LIQSCOPE_I18N_PAGES =
       "adm.alchemy_network_error": "Error de red",
       "adm.alchemy_paused": "Pausado",
       "adm.alchemy_network_cu": "{amount} CU en esta red",
-      "adm.cex_wallet_refresh_error_detail": "Error al actualizar: {reason}"
+      "adm.cex_wallet_refresh_error_detail": "Error al actualizar: {reason}",
+      "adm.cex_wallet_refreshed_etherscan": "Etiquetas adicionales de Etherscan: {count}."
     },
     "phrases": {
       "В поле уже стоит стандартный промт — правьте прямо в нём; «Вернуть шаблон» очищает поле и снова включает встроенный текст.": "El campo ya trae el prompt estándar: edítalo ahí mismo; “Restaurar plantilla” limpia el campo y reactiva el texto integrado.",

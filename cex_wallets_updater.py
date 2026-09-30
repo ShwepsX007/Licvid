@@ -1,10 +1,8 @@
-"""Refresh, validate and persist public CEX wallet labels.
+"""Fetch, validate, merge and persist public CEX wallet labels.
 
-No wallet-address endpoint is assumed. The configurable ``/cexs`` candidate is
-treated only as metadata, with ``/protocols`` as a metadata fallback. Public
-wallet owners are parsed from the open-source ``cex/index.js`` adapter config;
-only static ``owners`` lists are accepted, and computed JavaScript expressions
-are deliberately ignored rather than guessed.
+DeFiLlama's REST ``/protocols`` feed is filtered to CEX records and enriches
+addresses from explicit chain-scoped fields or ``/protocol/{slug}``. Etherscan
+labels are an optional, isolated secondary source.
 """
 from __future__ import annotations
 
@@ -20,7 +18,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 import aiohttp
 
@@ -28,11 +26,10 @@ from tron_address import tron_to_base58
 
 log = logging.getLogger(__name__)
 
-DEFILLAMA_CEX_API = os.getenv("LIQSCOPE_DEFILLAMA_CEX_API", "https://api.llama.fi/cexs")
-DEFILLAMA_CEX_CONFIG = os.getenv(
-    "LIQSCOPE_DEFILLAMA_CEX_CONFIG",
-    "https://raw.githubusercontent.com/DefiLlama/DefiLlama-Adapters/main/cex/index.js",
-)
+DEFILLAMA_PROTOCOLS_API = os.getenv(
+    "LIQSCOPE_DEFILLAMA_PROTOCOLS_API", "https://api.llama.fi/protocols")
+DEFILLAMA_PROTOCOL_API_BASE = os.getenv(
+    "LIQSCOPE_DEFILLAMA_PROTOCOL_API_BASE", "https://api.llama.fi/protocol")
 ETHERSCAN_LABELS_URL = os.getenv(
     "LIQSCOPE_ETHERSCAN_LABELS_URL",
     "https://raw.githubusercontent.com/brianleect/etherscan-labels/main/data/etherscan/combined/combinedAllLabels.json",
@@ -52,15 +49,17 @@ EVM_ADDRESS = re.compile(r"^0x[0-9a-fA-F]{40}$")
 BASE58 = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 TRON_ADDRESS = re.compile(r"^T[1-9A-HJ-NP-Za-km-z]{33}$")
 MAX_SOURCE_BYTES = 2_000_000
-SOURCE_TIMEOUT_SEC = 25
+SOURCE_TIMEOUT_SEC = 30
 SOURCE_MAX_RETRIES = 2
 SOURCE_RETRY_BACKOFF_SEC = 0.5
+SOURCE_CHUNK_SIZE = 512 * 1024
+MAX_PROTOCOLS_BYTES = 10_000_000
+MAX_PROTOCOL_DETAIL_BYTES = 5_000_000
+MAX_ETHERSCAN_LABELS_BYTES = 100_000_000
 SOURCE_ERROR_BODY_CHARS = 300
 SOURCE_USER_AGENT = "LiqScope-CEX-Wallets/1.0"
-DEFILLAMA_PROTOCOLS_API = os.getenv(
-    "LIQSCOPE_DEFILLAMA_PROTOCOLS_API", "https://api.llama.fi/protocols")
-DEFILLAMA_CEX_CONFIG_FALLBACK = (
-    "https://raw.githubusercontent.com/DefiLlama/DefiLlama-Adapters/master/cex/index.js")
+KNOWN_CEX_NAMES = ("Binance", "OKX", "Bybit", "Coinbase", "Kraken", "Bitfinex",
+                   "Gate.io", "KuCoin", "Crypto.com", "Gemini", "MEXC", "HTX")
 
 
 def _safe_source_url(url: str) -> str:
@@ -109,6 +108,17 @@ class WalletSourceError(RuntimeError):
     def __init__(self, errors: list[str]):
         self.errors = [str(error)[:600] for error in errors if error]
         super().__init__("; ".join(self.errors)[:1800] or "No supported wallet source returned data")
+
+
+class WalletFetchResult(list):
+    """List-compatible result carrying per-source counts and non-fatal warnings."""
+
+    def __init__(self, rows=(), *, source_counts=None, source_errors=None,
+                 source_status=None):
+        super().__init__(rows)
+        self.source_counts = dict(source_counts or {})
+        self.source_errors = [str(error)[:600] for error in (source_errors or []) if error]
+        self.source_status = dict(source_status or {})
 
 
 def normalize_chain(value: Any) -> str:
@@ -173,241 +183,115 @@ def normalize_wallet_record(raw: dict, source: str | None = None) -> dict | None
             "name": name, "source": src, "updated_at": updated_at}
 
 
-def _tokens(js: str) -> list[tuple[str, str]]:
-    """Tokenize enough of the JS object-literal subset used in CEX configs."""
-    out: list[tuple[str, str]] = []
-    i, n = 0, len(js)
-    while i < n:
-        ch = js[i]
-        if ch.isspace():
-            i += 1
-            continue
-        if js.startswith("//", i):
-            end = js.find("\n", i + 2)
-            i = n if end < 0 else end + 1
-            continue
-        if js.startswith("/*", i):
-            end = js.find("*/", i + 2)
-            i = n if end < 0 else end + 2
-            continue
-        if ch in "'\"`":
-            quote, i = ch, i + 1
-            value = []
-            while i < n:
-                if js[i] == "\\" and i + 1 < n:
-                    esc = js[i + 1]
-                    value.append({"n": "\n", "r": "\r", "t": "\t"}.get(esc, esc))
-                    i += 2
-                elif js[i] == quote:
-                    i += 1
-                    break
-                else:
-                    value.append(js[i])
-                    i += 1
-            out.append(("string", "".join(value)))
-            continue
-        if ch.isalpha() or ch in "_$":
-            start = i
-            i += 1
-            while i < n and (js[i].isalnum() or js[i] in "_$-"):
-                i += 1
-            out.append(("id", js[start:i]))
-            continue
-        if ch.isdigit():
-            start = i
-            i += 1
-            while i < n and (js[i].isalnum() or js[i] in ".xX"):
-                i += 1
-            out.append(("number", js[start:i]))
-            continue
-        out.append(("punct", ch))
-        i += 1
-    return out
-
-
-class _ObjectParser:
-    def __init__(self, tokens: list[tuple[str, str]]):
-        self.tokens = tokens
-        self.i = 0
-
-    def _peek(self, value: str | None = None) -> bool:
-        if self.i >= len(self.tokens):
-            return False
-        return value is None or self.tokens[self.i][1] == value
-
-    def _take(self) -> tuple[str, str]:
-        token = self.tokens[self.i]
-        self.i += 1
-        return token
-
-    def _skip_value(self, stop: set[str]) -> None:
-        depth = 0
-        while self.i < len(self.tokens):
-            value = self.tokens[self.i][1]
-            if depth == 0 and value in stop:
-                return
-            if value in ("{", "[", "("):
-                depth += 1
-            elif value in ("}", "]", ")"):
-                if depth == 0:
-                    return
-                depth -= 1
-            self.i += 1
-
-    def value(self):
-        if not self._peek():
-            return None
-        kind, value = self._take()
-        if value == "{":
-            result = {}
-            while self.i < len(self.tokens) and not self._peek("}"):
-                if self._peek(","):
-                    self.i += 1
-                    continue
-                key_kind, key = self._take()
-                if key in ("...", "["):
-                    self._skip_value({",", "}"})
-                    if self._peek(","):
-                        self.i += 1
-                    continue
-                if not self._peek(":"):
-                    self._skip_value({",", "}"})
-                    if self._peek(","):
-                        self.i += 1
-                    continue
-                self.i += 1
-                result[str(key)] = self.value()
-                if self._peek(","):
-                    self.i += 1
-            if self._peek("}"):
-                self.i += 1
-            return result
-        if value == "[":
-            result = []
-            while self.i < len(self.tokens) and not self._peek("]"):
-                if self._peek(","):
-                    self.i += 1
-                    continue
-                start = self.i
-                parsed = self.value()
-                if parsed is not None:
-                    result.append(parsed)
-                if self.i == start:
-                    self._skip_value({",", "]"})
-                if self._peek(","):
-                    self.i += 1
-            if self._peek("]"):
-                self.i += 1
-            return result
-        if kind == "string":
-            return value
-        if value in ("true", "false", "null", "undefined"):
-            return {"true": True, "false": False}.get(value)
-        if kind == "number":
-            try:
-                return float(value) if "." in value else int(value, 0)
-            except ValueError:
-                return value
-        # Only static strings/arrays are used as wallet owners. An unknown
-        # expression is skipped at its surrounding comma by object/array parse.
-        if value in ("function", "async"):
-            self._skip_value({",", "}", "]"})
-        return value
-
-
-def parse_config_object(source: str) -> dict:
-    """Extract the static ``const configs = {...}`` object from DefiLlama JS."""
-    match = re.search(r"\bconst\s+configs\s*=\s*\{", source)
-    if not match:
-        raise ValueError("DefiLlama CEX config object not found")
-    start = match.end() - 1
-    depth, quote, escaped, line_comment, block_comment = 0, "", False, False, False
-    end = None
-    i = start
-    while i < len(source):
-        ch = source[i]
-        nxt = source[i + 1] if i + 1 < len(source) else ""
-        if line_comment:
-            if ch == "\n": line_comment = False
-        elif block_comment:
-            if ch == "*" and nxt == "/": block_comment = False; i += 1
-        elif quote:
-            if escaped: escaped = False
-            elif ch == "\\": escaped = True
-            elif ch == quote: quote = ""
-        elif ch in "'\"`":
-            quote = ch
-        elif ch == "/" and nxt == "/": line_comment = True; i += 1
-        elif ch == "/" and nxt == "*": block_comment = True; i += 1
-        elif ch == "{": depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                end = i + 1
-                break
-        i += 1
-    if end is None:
-        raise ValueError("Unclosed DefiLlama CEX config object")
-    parser = _ObjectParser(_tokens(source[start:end]))
-    result = parser.value()
-    if not isinstance(result, dict):
-        raise ValueError("DefiLlama CEX config is not an object")
-    return result
-
-
 def _compact_name(value: Any) -> str:
     return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
 
 
-def _exchange_names(payload: Any) -> dict[str, str]:
-    rows = payload.get("cexs", []) if isinstance(payload, dict) else payload
-    result = {}
-    if not isinstance(rows, list):
-        return result
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        name = str(row.get("name") or "").strip()
-        if not name:
-            continue
-        for val in (row.get("slug"), row.get("name"), row.get("id")):
-            if val is not None:
-                result[_compact_name(val)] = name
-    return result
+def _flatten_addresses(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, (list, tuple, set)):
+        return [address for item in value for address in _flatten_addresses(item)]
+    if isinstance(value, dict):
+        out = []
+        for key in ("address", "addresses", "wallet", "owner"):
+            if key in value:
+                out.extend(_flatten_addresses(value[key]))
+        return out
+    return []
 
 
-def parse_defillama_cex_config(source: str, metadata: Any = None) -> list[dict]:
-    configs = parse_config_object(source)
-    names = _exchange_names(metadata)
-    records, seen = [], set()
-    for slug, exchange_data in configs.items():
-        if not isinstance(exchange_data, dict):
-            continue
-        # Do not turn an adapter slug into an asserted exchange label. Only
-        # attach owners when the API metadata confirms the exchange name.
-        name = names.get(_compact_name(slug), "")
-        if not name:
-            continue
-        for raw_chain, chain_data in exchange_data.items():
+def _chain_address_pairs(value: Any, default_chain: str = "") -> list[tuple[str, str]]:
+    """Read common chain->address and [{chain,address}] REST API shapes."""
+    pairs: list[tuple[str, str]] = []
+    if isinstance(value, dict):
+        chain_fields = ("chain", "network", "chainName")
+        explicit_chain = any(key in value and value.get(key) not in (None, "")
+                             for key in chain_fields)
+        row_chain = normalize_chain(next((value[key] for key in chain_fields
+                                          if key in value and value[key]), ""))
+        if explicit_chain:
+            if row_chain:
+                raw_addresses = next((value[key] for key in ("address", "addresses", "wallet", "owner")
+                                      if key in value), None)
+                pairs.extend((row_chain, address) for address in _flatten_addresses(raw_addresses))
+            # An explicit but unsupported/multi-chain field must not inherit a
+            # different default chain and misattribute the wallet.
+            return pairs
+        if default_chain:
+            raw_addresses = next((value[key] for key in ("address", "addresses", "wallet", "owner")
+                                  if key in value), None)
+            if raw_addresses is not None:
+                pairs.extend((default_chain, address) for address in _flatten_addresses(raw_addresses))
+        for raw_chain, raw_addresses in value.items():
             chain = normalize_chain(raw_chain)
-            if chain not in SUPPORTED_CHAINS or not isinstance(chain_data, dict):
-                continue
-            owners = chain_data.get("owners")
-            if isinstance(owners, str):
-                owners = [owners]
-            if not isinstance(owners, list):
-                continue
-            for address in owners:
-                record = normalize_wallet_record({"chain": chain, "address": address,
-                                                  "name": name, "source": "defillama"})
-                if not record:
-                    continue
-                key = (chain, address_key(chain, record["address"]))
-                if key in seen:
-                    continue
-                seen.add(key)
-                records.append(record)
-    return records
+            if chain:
+                pairs.extend((chain, address) for address in _flatten_addresses(raw_addresses))
+        return pairs
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            pairs.extend(_chain_address_pairs(item, default_chain))
+        return pairs
+    if default_chain:
+        pairs.extend((default_chain, address) for address in _flatten_addresses(value))
+    return pairs
+
+
+def _single_protocol_chain(protocol: dict) -> str:
+    for key in ("chain", "chainName", "network"):
+        chain = normalize_chain(protocol.get(key))
+        if chain:
+            return chain
+    chains = protocol.get("chains")
+    if isinstance(chains, list):
+        candidates = {normalize_chain(item) for item in chains}
+        candidates.discard("")
+        if len(candidates) == 1:
+            return next(iter(candidates))
+    return ""
+
+
+def parse_defillama_cex_protocol(protocol: Any, *, fallback_name: str = "") -> list[dict]:
+    """Parse explicit CEX wallet fields from a DeFiLlama REST protocol record.
+
+    Plain ``address`` values are accepted only when the record identifies one
+    supported chain. Multi-chain addresses must be explicitly chain-scoped.
+    """
+    if not isinstance(protocol, dict):
+        return []
+    category = protocol.get("category")
+    if category is not None and str(category).strip().casefold() != "cex":
+        return []
+    name = str(protocol.get("name") or protocol.get("displayName") or fallback_name or
+               protocol.get("slug") or "").strip()
+    if not name:
+        return []
+
+    pairs = _chain_address_pairs(protocol.get("chainAddresses"))
+    default_chain = _single_protocol_chain(protocol)
+    pairs.extend(_chain_address_pairs(protocol.get("address"), default_chain))
+
+    records: dict[tuple[str, str], dict] = {}
+    for chain, address in pairs:
+        row = normalize_wallet_record({"chain": chain, "address": address,
+                                       "name": name, "source": "defillama"})
+        if row:
+            records[(row["chain"], address_key(row["chain"], row["address"]))] = row
+    return list(records.values())
+
+
+def _dedupe_wallet_records(rows: list[dict]) -> list[dict]:
+    result = {}
+    for item in rows:
+        row = normalize_wallet_record(item)
+        if not row:
+            continue
+        key = (row["chain"], address_key(row["chain"], row["address"]))
+        previous = result.get(key)
+        if previous is None or (previous.get("source") == "etherscan" and
+                                row.get("source") == "defillama"):
+            result[key] = row
+    return list(result.values())
 
 
 def parse_etherscan_labels(payload: Any, exchange_names: list[str]) -> list[dict]:
@@ -439,16 +323,19 @@ def parse_etherscan_labels(payload: Any, exchange_names: list[str]) -> list[dict
 
 
 async def _read_source_bytes(session: aiohttp.ClientSession, url: str, *,
-                            limit: int = MAX_SOURCE_BYTES) -> tuple[bytes, int]:
+                            limit: int = MAX_SOURCE_BYTES) -> tuple[bytearray, int]:
+    """Download a bounded response in chunks and reject incomplete bodies."""
     for attempt in range(SOURCE_MAX_RETRIES + 1):
         try:
-            async with session.get(url,
-                    headers={"User-Agent": SOURCE_USER_AGENT},
+            async with session.get(
+                    url,
+                    headers={"User-Agent": SOURCE_USER_AGENT, "Accept-Encoding": "identity"},
                     timeout=aiohttp.ClientTimeout(total=SOURCE_TIMEOUT_SEC)) as response:
                 status = int(response.status)
                 if status != 200:
                     try:
-                        body = await response.text(errors="replace")
+                        error_bytes = await response.content.read(SOURCE_ERROR_BODY_CHARS + 1)
+                        body = error_bytes.decode("utf-8", errors="replace")
                     except Exception as exc:
                         body = f"[unable to read response body: {type(exc).__name__}]"
                     error = SourceFetchError(url, "HTTP error", status=status, body=body)
@@ -457,19 +344,40 @@ async def _read_source_bytes(session: aiohttp.ClientSession, url: str, *,
                         await asyncio.sleep(SOURCE_RETRY_BACKOFF_SEC * (2 ** attempt))
                         continue
                     raise error
+
+                expected_length = None
                 length = response.headers.get("Content-Length")
                 if length:
                     try:
-                        if int(length) > limit:
-                            raise SourceFetchError(url, "schema mismatch", status=status,
-                                                   detail="response exceeds size limit")
+                        expected_length = int(length)
                     except ValueError:
-                        pass
-                raw = await response.content.read(limit + 1)
-                if len(raw) > limit:
-                    raise SourceFetchError(url, "schema mismatch", status=status,
-                                           detail="response exceeds size limit")
-                return raw, status
+                        expected_length = None
+                    if expected_length is not None and expected_length > limit:
+                        raise SourceFetchError(url, "response too large", status=status,
+                                               detail=f"Content-Length exceeds {limit} bytes")
+                    if response.headers.get("Content-Encoding", "identity").lower() not in (
+                            "", "identity"):
+                        # aiohttp transparently decompresses encoded responses, so the
+                        # wire Content-Length is not comparable to decoded chunk sizes.
+                        expected_length = None
+
+                body = bytearray()
+                received = 0
+                async for chunk in response.content.iter_chunked(SOURCE_CHUNK_SIZE):
+                    received += len(chunk)
+                    if received > limit:
+                        raise SourceFetchError(url, "response too large", status=status,
+                                               detail=f"response exceeds {limit} bytes")
+                    body.extend(chunk)
+                if expected_length is not None and received != expected_length:
+                    error = SourceFetchError(
+                        url, "incomplete response", status=status,
+                        detail=f"received {received} of {expected_length} bytes")
+                    if attempt < SOURCE_MAX_RETRIES:
+                        await asyncio.sleep(SOURCE_RETRY_BACKOFF_SEC * (2 ** attempt))
+                        continue
+                    raise error
+                return body, status
         except SourceFetchError:
             raise
         except asyncio.TimeoutError:
@@ -491,7 +399,9 @@ async def _read_source_bytes(session: aiohttp.ClientSession, url: str, *,
 async def _read_json(session: aiohttp.ClientSession, url: str, *, limit: int = MAX_SOURCE_BYTES):
     raw, status = await _read_source_bytes(session, url, limit=limit)
     try:
-        return json.loads(raw.decode("utf-8"))
+        # json.loads accepts bytearray, avoiding an extra full-size UTF-8 copy
+        # for the optional large Etherscan label file.
+        return await asyncio.to_thread(json.loads, raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         detail = (f"JSON decode error at line {exc.lineno}, column {exc.colno}: {exc.msg}"
                   if isinstance(exc, json.JSONDecodeError) else "JSON decode error: invalid UTF-8")
@@ -500,98 +410,119 @@ async def _read_json(session: aiohttp.ClientSession, url: str, *, limit: int = M
                                body=preview, detail=detail) from None
 
 
-async def _read_text(session: aiohttp.ClientSession, url: str, *, limit: int = MAX_SOURCE_BYTES):
-    raw, status = await _read_source_bytes(session, url, limit=limit)
-    try:
-        return raw.decode("utf-8")
-    except UnicodeDecodeError:
-        preview = raw[:SOURCE_ERROR_BODY_CHARS].decode("utf-8", errors="replace")
-        raise SourceFetchError(url, "text decode error", status=status,
-                               body=preview, detail="response is not valid UTF-8") from None
+async def fetch_defillama_cex_wallets(session: aiohttp.ClientSession | None = None) -> WalletFetchResult:
+    """Load CEX wallet records from independent DeFiLlama and Etherscan sources.
 
-
-async def fetch_defillama_cex_wallets(session: aiohttp.ClientSession | None = None) -> list[dict]:
-    """Fetch CEX metadata and parse the chain-scoped public adapter owners.
-
-    A configured ``/cexs`` candidate is treated as metadata, never as a wallet
-    list. ``/protocols`` is the metadata fallback, while adapter ``owners`` are
-    the address source. Failed or changed API variants are recorded verbatim
-    (with secrets redacted) and cannot replace the local registry with emptiness.
+    DeFiLlama's documented ``/protocols`` REST response is filtered to CEX
+    records. Explicit ``chainAddresses``/``address`` values are used directly;
+    records without addresses are enriched from ``/protocol/{slug}``. The
+    optional Etherscan labels file is isolated and can fail without discarding
+    DeFiLlama results.
     """
     own_session = session is None
     if own_session:
         session = aiohttp.ClientSession(headers={"User-Agent": SOURCE_USER_AGENT})
     assert session is not None
     errors: list[str] = []
+    source_status = {"defillama": "error", "etherscan": "error"}
+    protocols: list[dict] = []
+    defillama_rows: list[dict] = []
+
     try:
-        metadata = None
-        metadata_urls = list(dict.fromkeys((DEFILLAMA_CEX_API, DEFILLAMA_PROTOCOLS_API)))
-        for url in metadata_urls:
-            try:
-                payload = await _read_json(session, url, limit=5_000_000)
-                if isinstance(payload, dict):
-                    rows = payload.get("cexs")
-                    if rows is None:
-                        rows = payload.get("protocols")
-                elif isinstance(payload, list):
-                    rows = payload
-                else:
-                    rows = None
-                if not isinstance(rows, list):
-                    preview = json.dumps(payload, ensure_ascii=False)[:SOURCE_ERROR_BODY_CHARS]
-                    raise SourceFetchError(url, "schema mismatch", status=200,
-                                           body=preview,
-                                           detail="expected a cexs or protocols array")
-                if "protocols" in url:
-                    rows = [row for row in rows if isinstance(row, dict) and
-                            str(row.get("category") or "").casefold() == "cex"]
-                rows = [row for row in rows if isinstance(row, dict)]
-                if not rows:
-                    preview = json.dumps(payload, ensure_ascii=False)[:SOURCE_ERROR_BODY_CHARS]
-                    raise SourceFetchError(url, "schema mismatch", status=200,
-                                           body=preview, detail="no CEX metadata records")
-                metadata = {"cexs": rows}
-                break
-            except SourceFetchError as exc:
-                errors.append(str(exc))
-                log.warning("[cex_wallets] metadata source failed: %s", exc)
-
-        config_urls = list(dict.fromkeys((DEFILLAMA_CEX_CONFIG,
-                                          DEFILLAMA_CEX_CONFIG_FALLBACK)))
-        for url in config_urls:
-            try:
-                config = await _read_text(session, url)
-                records = parse_defillama_cex_config(config, metadata)
-                if records:
-                    return records
-                raise SourceFetchError(url, "schema mismatch", status=200, body=config,
-                                       detail="no supported static owner addresses in adapter config")
-            except SourceFetchError as exc:
-                errors.append(str(exc))
-                log.warning("[cex_wallets] adapter source failed: %s", exc)
-            except (UnicodeError, ValueError) as exc:
-                error = SourceFetchError(url, "schema mismatch", detail=type(exc).__name__)
-                errors.append(str(error))
-                log.warning("[cex_wallets] adapter source failed: %s", error)
-
         try:
-            labels = await _read_json(session, ETHERSCAN_LABELS_URL, limit=50_000_000)
+            payload = await _read_json(session, DEFILLAMA_PROTOCOLS_API,
+                                       limit=MAX_PROTOCOLS_BYTES)
+            if not isinstance(payload, list):
+                raise SourceFetchError(DEFILLAMA_PROTOCOLS_API, "schema mismatch",
+                                       status=200, detail="expected a protocols array")
+            protocols = [row for row in payload
+                         if isinstance(row, dict) and
+                         str(row.get("category") or "").strip().casefold() == "cex"]
+            source_status["defillama"] = "ok"
+        except Exception as exc:  # isolate DeFiLlama API from the labels fallback
+            error = (exc if isinstance(exc, SourceFetchError) else
+                     SourceFetchError(DEFILLAMA_PROTOCOLS_API, "source error",
+                                      detail=type(exc).__name__))
+            errors.append(str(error))
+            log.warning("[cex_updater] Ошибка DeFiLlama API: %s", error)
+            protocols = []
+
+        detail_candidates = []
+        exchange_names = []
+        for protocol in protocols:
+            name = str(protocol.get("name") or protocol.get("displayName") or
+                       protocol.get("slug") or "").strip()
+            if name:
+                exchange_names.append(name)
+            try:
+                direct = parse_defillama_cex_protocol(protocol)
+            except Exception as exc:  # malformed protocol rows are isolated individually
+                error = SourceFetchError(
+                    DEFILLAMA_PROTOCOLS_API, "protocol parse error",
+                    detail=f"{type(exc).__name__}: {str(protocol.get('slug') or '')[:80]}")
+                errors.append(str(error))
+                log.warning("[cex_updater] Ошибка CEX-записи DeFiLlama: %s", error)
+                direct = []
+            defillama_rows.extend(direct)
+            if not direct and protocol.get("slug"):
+                detail_candidates.append((str(protocol["slug"]).strip(), name))
+
+        semaphore = asyncio.Semaphore(5)
+
+        async def fetch_protocol_detail(slug: str, fallback_name: str) -> list[dict]:
+            url = f"{DEFILLAMA_PROTOCOL_API_BASE.rstrip('/')}/{quote(slug, safe='')}"
+            async with semaphore:
+                try:
+                    detail = await _read_json(session, url, limit=MAX_PROTOCOL_DETAIL_BYTES)
+                    if not isinstance(detail, dict):
+                        raise SourceFetchError(url, "schema mismatch", status=200,
+                                               detail="expected a protocol object")
+                    return parse_defillama_cex_protocol(detail, fallback_name=fallback_name)
+                except Exception as exc:  # one unavailable protocol must not block peers
+                    error = (exc if isinstance(exc, SourceFetchError) else
+                             SourceFetchError(url, "source error", detail=type(exc).__name__))
+                    errors.append(str(error))
+                    log.warning("[cex_updater] Ошибка DeFiLlama API (%s): %s",
+                                fallback_name or slug, error)
+                    return []
+
+        if detail_candidates:
+            details = await asyncio.gather(*(
+                fetch_protocol_detail(slug, name) for slug, name in detail_candidates))
+            for rows in details:
+                defillama_rows.extend(rows)
+        defillama_rows = _dedupe_wallet_records(defillama_rows)
+
+        # Etherscan labels are a secondary enrichment source. Its large JSON
+        # file is streamed in chunks and decoded independently from DeFiLlama.
+        etherscan_rows: list[dict] = []
+        try:
+            labels = await _read_json(session, ETHERSCAN_LABELS_URL,
+                                      limit=MAX_ETHERSCAN_LABELS_BYTES)
             if not isinstance(labels, dict):
                 raise SourceFetchError(ETHERSCAN_LABELS_URL, "schema mismatch", status=200,
-                                       body=json.dumps(labels, ensure_ascii=False)[:300],
                                        detail="expected address-to-label object")
-            rows = metadata.get("cexs", []) if isinstance(metadata, dict) else []
-            names = [str(row["name"]) for row in rows
-                     if isinstance(row, dict) and row.get("name")]
-            fallback = parse_etherscan_labels(labels, names)
-            if fallback:
-                return fallback
-            raise SourceFetchError(ETHERSCAN_LABELS_URL, "schema mismatch", status=200,
-                                   detail="no recognized exchange labels or wallet records")
-        except SourceFetchError as exc:
-            errors.append(str(exc))
-            log.warning("[cex_wallets] fallback source failed: %s", exc)
-        raise WalletSourceError(errors)
+            names = list(dict.fromkeys([*exchange_names, *KNOWN_CEX_NAMES]))
+            etherscan_rows = await asyncio.to_thread(parse_etherscan_labels, labels, names)
+            source_status["etherscan"] = "ok"
+        except Exception as exc:  # malformed/truncated labels skip only this source
+            error = (exc if isinstance(exc, SourceFetchError) else
+                     SourceFetchError(ETHERSCAN_LABELS_URL, "source error",
+                                      detail=type(exc).__name__))
+            errors.append(str(error))
+            log.warning("[cex_updater] Ошибка Etherscan labels (пропущено): %s", error)
+
+        etherscan_rows = _dedupe_wallet_records(etherscan_rows)
+        rows = _dedupe_wallet_records([*defillama_rows, *etherscan_rows])
+        if not protocols and source_status["defillama"] != "ok" and source_status["etherscan"] != "ok":
+            raise WalletSourceError(errors)
+        return WalletFetchResult(
+            rows,
+            source_counts={"defillama": len(defillama_rows),
+                           "etherscan": len(etherscan_rows)},
+            source_errors=errors,
+            source_status=source_status,
+        )
     finally:
         if own_session:
             await session.close()
@@ -759,48 +690,82 @@ class CEXWalletRegistry:
 
     async def refresh(self, session: aiohttp.ClientSession | None = None) -> dict:
         async with self._refresh_lock:
-            before = self.records()
-            old_by_exchange: dict[str, int] = {}
-            for row in before:
-                old_by_exchange[row["name"]] = old_by_exchange.get(row["name"], 0) + 1
+            before_rows = self.records()
+            before_keys = {(row["chain"], address_key(row["chain"], row["address"]))
+                           for row in before_rows}
             try:
-                fresh = await fetch_defillama_cex_wallets(session)
-                automatic = [row for item in fresh
+                fetched = await fetch_defillama_cex_wallets(session)
+                automatic = [row for item in fetched
                              if (row := normalize_wallet_record(item))
                              and row["source"] != "manual"]
-                if not automatic:
-                    raise WalletSourceError([
-                        "schema mismatch: no supported automatic wallet records were returned; "
-                        "the existing registry was left unchanged"])
-                source = "defillama" if any(row["source"] == "defillama" for row in automatic) else "etherscan"
-                with self._lock:
-                    previous = (self._automatic, self.updated_at, self.last_source, self.last_error)
-                    try:
-                        self._automatic = automatic
-                        self.updated_at = int(time.time())
-                        self.last_source = source
-                        self.last_error = ""
-                        self._save_locked(source=self.last_source)
-                    except Exception:
-                        self._automatic, self.updated_at, self.last_source, self.last_error = previous
-                        raise
-                after = self.records()
-                new_by_exchange: dict[str, int] = {}
-                for row in after:
-                    new_by_exchange[row["name"]] = new_by_exchange.get(row["name"], 0) + 1
-                changes = []
-                for name in sorted(set(old_by_exchange) | set(new_by_exchange)):
-                    delta = new_by_exchange.get(name, 0) - old_by_exchange.get(name, 0)
-                    if delta:
-                        changes.append(f"{name} {'+' if delta > 0 else ''}{delta}")
-                log.info("[cex_wallets] обновлено: было %d адресов, стало %d адресов%s",
-                         len(before), len(after), " (" + ", ".join(changes[:12]) + ")" if changes else "")
-                return {"ok": True, "before": len(before), "after": len(after),
-                        "added": max(0, len(after) - len(before)),
-                        "updated_at": self.updated_at, "summary": self.summary()}
+                raw_counts = getattr(fetched, "source_counts", {})
+                if not isinstance(raw_counts, dict):
+                    raw_counts = {}
+                defillama_count = int(raw_counts.get(
+                    "defillama", sum(row["source"] == "defillama" for row in automatic)) or 0)
+                etherscan_count = int(raw_counts.get(
+                    "etherscan", sum(row["source"] == "etherscan" for row in automatic)) or 0)
+                warnings = list(getattr(fetched, "source_errors", []) or [])
+                source_status = dict(getattr(fetched, "source_status", {}) or {})
+
+                # Union fresh records with the current automatic registry. A
+                # transient empty response can never delete previously saved
+                # wallets; manual rows remain separate and always win on display.
+                if automatic:
+                    with self._lock:
+                        previous = (self._automatic, self.updated_at,
+                                    self.last_source, self.last_error)
+                        try:
+                            merged = {
+                                (row["chain"], address_key(row["chain"], row["address"])): row
+                                for row in self._automatic
+                            }
+                            priority = {"etherscan": 1, "defillama": 2}
+                            for row in automatic:
+                                key = (row["chain"], address_key(row["chain"], row["address"]))
+                                old = merged.get(key)
+                                if old is None or priority.get(row["source"], 0) >= priority.get(old["source"], 0):
+                                    merged[key] = row
+                            self._automatic = list(merged.values())
+                            self.updated_at = int(time.time())
+                            if defillama_count:
+                                self.last_source = "defillama"
+                            elif etherscan_count:
+                                self.last_source = "etherscan"
+                            self.last_error = ""
+                            self._save_locked(source=self.last_source)
+                        except Exception:
+                            self._automatic, self.updated_at, self.last_source, self.last_error = previous
+                            raise
+                else:
+                    # A successful empty result is a no-op, not a reason to
+                    # replace the file or surface a JSON/provider exception.
+                    self.last_error = ""
+
+                after_rows = self.records()
+                after_keys = {(row["chain"], address_key(row["chain"], row["address"]))
+                              for row in after_rows}
+                added = len(after_keys - before_keys)
+                log.info("[cex_updater] refresh merged: fetched DefiLlama=%d, Etherscan=%d, "
+                         "registry before=%d after=%d",
+                         defillama_count, etherscan_count, len(before_rows), len(after_rows))
+                return {
+                    "ok": True,
+                    "before": len(before_rows),
+                    "after": len(after_rows),
+                    "added": added,
+                    "defillama_count": defillama_count,
+                    "etherscan_count": etherscan_count,
+                    "message": (f"Успешно обновлено: получено {defillama_count} "
+                                "адресов из DeFiLlama API"),
+                    "warnings": warnings,
+                    "source_status": source_status,
+                    "updated_at": self.updated_at,
+                    "summary": self.summary(),
+                }
             except Exception as exc:
                 self.last_error = str(exc)[:1800]
-                log.warning("[cex_wallets] refresh failed: %s", self.last_error)
+                log.warning("[cex_updater] refresh failed: %s", self.last_error)
                 raise
 
 

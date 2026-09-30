@@ -400,8 +400,19 @@
         target.textContent = t("adm.cex_wallet_refreshing");
         try {
             const result = await request("/api/admin/screener/cex-wallets/refresh", {method: "POST"});
-            target.textContent = t("adm.cex_wallet_refreshed", {count: number(result.after || 0)});
+            const messages = [t("adm.cex_wallet_refreshed", {
+                count: number(result.defillama_count || 0),
+            })];
+            if (number(result.etherscan_count || 0) > 0) {
+                messages.push(t("adm.cex_wallet_refreshed_etherscan", {
+                    count: number(result.etherscan_count),
+                }));
+            }
+            const warnings = Array.isArray(result.warnings) ? result.warnings.filter(Boolean) : [];
+            target.textContent = messages.join(" ");
+            target.title = warnings.join("\n");
             await loadWallets();
+            target.title = warnings.join("\n");
         } catch (error) {
             const reason = String(error && error.message || "");
             target.textContent = reason

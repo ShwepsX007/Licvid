@@ -587,8 +587,8 @@ window.LIQSCOPE_I18N_PAGES =
       "adm.cex_wallet_chain": "Red",
       "adm.cex_wallet_search": "Filtro de exchange",
       "adm.cex_wallet_refresh": "↻ Actualizar desde DeFiLlama",
-      "adm.cex_wallet_refreshing": "Cargando la configuración de DeFiLlama…",
-      "adm.cex_wallet_refreshed": "Actualizado. Direcciones registradas: {count}.",
+      "adm.cex_wallet_refreshing": "Obteniendo billeteras CEX desde la API de DeFiLlama…",
+      "adm.cex_wallet_refreshed": "Direcciones recibidas de la API de DeFiLlama: {count}.",
       "adm.cex_wallet_refresh_error": "No se pudo actualizar la base de wallets.",
       "adm.cex_wallet_name": "Etiqueta del exchange",
       "adm.cex_wallet_address": "Dirección de wallet",
@@ -613,7 +613,8 @@ window.LIQSCOPE_I18N_PAGES =
       "adm.alchemy_network_error": "Error de red",
       "adm.alchemy_paused": "Pausado",
       "adm.alchemy_network_cu": "{amount} CU en esta red",
-      "adm.cex_wallet_refresh_error_detail": "Error al actualizar: {reason}"
+      "adm.cex_wallet_refresh_error_detail": "Error al actualizar: {reason}",
+      "adm.cex_wallet_refreshed_etherscan": "Etiquetas adicionales de Etherscan: {count}."
     },
     "phrases": {
       "В поле уже стоит стандартный промт — правьте прямо в нём; «Вернуть шаблон» очищает поле и снова включает встроенный текст.": "El campo ya trae el prompt estándar: edítalo ahí mismo; “Restaurar plantilla” limpia el campo y reactiva el texto integrado.",

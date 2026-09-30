@@ -574,8 +574,8 @@
     "adm.cex_wallet_chain": "नेटवर्क",
     "adm.cex_wallet_search": "Exchange फ़िल्टर",
     "adm.cex_wallet_refresh": "↻ DeFiLlama से refresh",
-    "adm.cex_wallet_refreshing": "DeFiLlama config लोड हो रही है…",
-    "adm.cex_wallet_refreshed": "अपडेट हो गया। Registry में wallets: {count}.",
+    "adm.cex_wallet_refreshing": "DeFiLlama API से CEX वॉलेट प्राप्त हो रहे हैं…",
+    "adm.cex_wallet_refreshed": "DeFiLlama API से प्राप्त वॉलेट पते: {count}।",
     "adm.cex_wallet_refresh_error": "Wallet registry अपडेट नहीं हो सकी।",
     "adm.cex_wallet_name": "Exchange label",
     "adm.cex_wallet_address": "Wallet address",
@@ -600,7 +600,8 @@
     "adm.alchemy_network_error": "नेटवर्क त्रुटि",
     "adm.alchemy_paused": "रुका हुआ",
     "adm.alchemy_network_cu": "इस नेटवर्क पर {amount} CU",
-    "adm.cex_wallet_refresh_error_detail": "अपडेट विफल: {reason}"
+    "adm.cex_wallet_refresh_error_detail": "अपडेट विफल: {reason}",
+    "adm.cex_wallet_refreshed_etherscan": "Etherscan से अतिरिक्त लेबल: {count}।"
   },
   "phrases": {
     "В поле уже стоит стандартный промт — правьте прямо в нём; «Вернуть шаблон» очищает поле и снова включает встроенный текст.": "फ़ील्ड में डिफ़ॉल्ट प्रॉम्ट पहले से है — उसी में बदलें; «टेम्पलेट वापस» फ़ील्ड साफ़ करके बिल्ट-इन टेक्स्ट फिर चालू कर देता है।",

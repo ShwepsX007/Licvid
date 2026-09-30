@@ -51,7 +51,9 @@ win.LiqScopeI18n = {t: (key, vars = {}) => {
         "adm.cex_wallet_add": "Add manual address", "adm.alchemy_delete": "Delete",
         "adm.cex_wallet_confirm_delete": "Delete {name}: {address}?",
         "adm.cex_wallet_updated": "Wallet updated", "adm.cex_wallet_added": "Wallet added",
-        "adm.cex_wallet_refreshed": "Refreshed {count}", "adm.trongrid_saved": "TronGrid key saved",
+        "adm.cex_wallet_refreshed": "DeFiLlama API addresses {count}",
+        "adm.cex_wallet_refreshed_etherscan": "Etherscan labels {count}",
+        "adm.trongrid_saved": "TronGrid key saved",
         "adm.trongrid_no_key": "No TronGrid key", "adm.alchemy_settings_saved": "Settings saved",
         "adm.alchemy_monthly_estimate": "Monthly CU estimate: {amount}",
         "adm.alchemy_online": "Online",
@@ -114,9 +116,11 @@ win.fetch = async (url, options = {}) => {
     if (parsed.pathname === "/api/admin/screener/cex-wallets/refresh" && method === "POST") {
         if (refreshFail) return {ok: false, json: async () => ({
             error: "refresh_failed",
-            reason: "HTTP error; URL=https://api.llama.fi/cexs; HTTP 404; body=Not Found",
+            reason: "HTTP error; URL=https://api.llama.fi/protocols; HTTP 404; body=Not Found",
         })};
-        return response({ok: true, after: walletRows.length});
+        return response({ok: true, after: walletRows.length,
+            defillama_count: 3, etherscan_count: 2,
+            warnings: ["secondary labels were skipped"]});
     }
     if (parsed.pathname.startsWith("/api/admin/screener/cex-wallets/") && method === "PUT") {
         const id = parsed.pathname.split("/").pop();
@@ -171,14 +175,16 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     const walletStatus = win.document.getElementById("whale-admin-wallet-status");
     win.document.getElementById("whale-admin-wallet-refresh").click();
     await sleep(40);
-    assert(walletStatus.textContent.includes("https://api.llama.fi/cexs"));
+    assert(walletStatus.textContent.includes("https://api.llama.fi/protocols"));
     assert(walletStatus.textContent.includes("HTTP 404"));
     assert(walletStatus.textContent.includes("Not Found"));
     assert(calls.some(call => call.path.endsWith("/refresh") && call.method === "POST"));
     refreshFail = false;
     win.document.getElementById("whale-admin-wallet-refresh").click();
     await sleep(40);
-    assert(walletStatus.textContent.includes("Refreshed"));
+    assert(walletStatus.textContent.includes("DeFiLlama API addresses 3"));
+    assert(walletStatus.textContent.includes("Etherscan labels 2"));
+    assert(walletStatus.title.includes("secondary labels were skipped"));
     win.document.getElementById("trongrid-admin-key").value = "tron-secret-value";
     win.document.getElementById("trongrid-admin-add-key").click();
     await sleep(50);

@@ -574,8 +574,8 @@
     "adm.cex_wallet_chain": "Сеть",
     "adm.cex_wallet_search": "Фильтр биржи",
     "adm.cex_wallet_refresh": "↻ Обновить из DeFiLlama",
-    "adm.cex_wallet_refreshing": "Загружаю конфигурацию DeFiLlama…",
-    "adm.cex_wallet_refreshed": "Обновлено. Адресов в базе: {count}.",
+    "adm.cex_wallet_refreshing": "Получаю CEX-кошельки через API DeFiLlama…",
+    "adm.cex_wallet_refreshed": "Из API DeFiLlama получено адресов: {count}.",
     "adm.cex_wallet_refresh_error": "Не удалось обновить базу кошельков.",
     "adm.cex_wallet_name": "Метка биржи",
     "adm.cex_wallet_address": "Адрес кошелька",
@@ -600,7 +600,8 @@
     "adm.alchemy_network_error": "Сетевая ошибка",
     "adm.alchemy_paused": "Приостановлено",
     "adm.alchemy_network_cu": "Сеть: {amount} CU",
-    "adm.cex_wallet_refresh_error_detail": "Ошибка обновления: {reason}"
+    "adm.cex_wallet_refresh_error_detail": "Ошибка обновления: {reason}",
+    "adm.cex_wallet_refreshed_etherscan": "Дополнительно получено меток Etherscan: {count}."
   },
   "phrases": {
     "🗑 Стереть статистику": "🗑 Стереть статистику",

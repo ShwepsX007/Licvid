@@ -157,13 +157,13 @@ class ScreenerDashboardTests(unittest.TestCase):
                 preserved = registry.add_manual("ETH", "0x" + "4" * 40, "Preserved manual")
                 before_refresh = registry.path.read_bytes()
                 source_error = SourceFetchError(
-                    "https://api.llama.fi/cexs", "HTTP error", status=404,
+                    "https://api.llama.fi/protocols", "HTTP error", status=404,
                     body="Not Found: endpoint unavailable")
                 with patch("cex_wallets_updater.fetch_defillama_cex_wallets",
                            new_callable=AsyncMock, side_effect=source_error):
                     failed_refresh = self.client.post("/api/admin/screener/cex-wallets/refresh")
                 self.assertEqual(failed_refresh.status_code, 502)
-                self.assertIn("https://api.llama.fi/cexs", failed_refresh.json()["reason"])
+                self.assertIn("https://api.llama.fi/protocols", failed_refresh.json()["reason"])
                 self.assertIn("HTTP 404", failed_refresh.json()["reason"])
                 self.assertIn("Not Found", failed_refresh.json()["reason"])
                 self.assertEqual(registry.path.read_bytes(), before_refresh)

@@ -14,9 +14,9 @@ from aiohttp import ClientSession, web
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cex_wallets_updater import (
-    CEXWalletRegistry, EVM_CHAINS, SourceFetchError, WalletSourceError, _read_json,
-    fetch_defillama_cex_wallets, normalize_chain, parse_defillama_cex_config,
-    valid_address,
+    CEXWalletRegistry, EVM_CHAINS, SourceFetchError, WalletFetchResult,
+    _read_json, fetch_defillama_cex_wallets, normalize_chain,
+    parse_defillama_cex_protocol, valid_address,
 )
 from tron_address import tron_to_base58, tron_to_hex
 from whale_poller import MINED_TRANSACTION_CHAINS, SPL_TOKEN_PROGRAM, WhalePoller, RateLimited
@@ -24,34 +24,49 @@ from whale_screener import SOLANA_TOKENS, TRON_TOKENS, WhaleScreener
 
 
 class CEXWalletRegistryTests(unittest.IsolatedAsyncioTestCase):
-    def test_static_defillama_config_parses_supported_chains_only(self):
-        source = '''
-        const configs = {
-          'binance': {
-            ethereum: { owners: ['0x1111111111111111111111111111111111111111'] },
-            bsc: { owners: ['0x2222222222222222222222222222222222222222'] },
-            polygon: { owners: ['0x3333333333333333333333333333333333333333'] },
-            arbitrum: { owners: ['0x4444444444444444444444444444444444444444'] },
-            base: { owners: ['0x5555555555555555555555555555555555555555'] },
-            solana: { owners: ['Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'] },
-            tron: { owners: ['TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t'] },
-            bitcoin: 'binance-btc-owner'
-          },
-          unverified_exchange: {
-            ethereum: { owners: ['0x9999999999999999999999999999999999999999'] }
-          }
-        };
-        '''
-        metadata = {"cexs": [{"slug": "binance", "name": "Binance"}]}
-        rows = parse_defillama_cex_config(source, metadata)
+    def test_defillama_protocol_parser_reads_only_chain_scoped_cex_addresses(self):
+        protocol = {
+            "name": "Binance",
+            "category": "CEX",
+            "chainAddresses": {
+                "ethereum": ["0x" + "1" * 40],
+                "BSC": {"address": "0x" + "2" * 40},
+                "Polygon": [{"address": "0x" + "3" * 40}],
+                "Arbitrum One": ["0x" + "4" * 40],
+                "Base": ["0x" + "5" * 40],
+                "Solana": ["5tzFkiKsc22KEChR37aTBD323ApAo28nJZ34352fgd5e"],
+                "Tron": ["TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"],
+            },
+        }
+        rows = parse_defillama_cex_protocol(protocol)
         self.assertEqual({row["chain"] for row in rows},
                          {"ETH", "BNB", "POLYGON", "ARBITRUM", "BASE", "SOLANA", "TRON"})
-        self.assertTrue(all(row["name"] == "Binance" for row in rows))
-        self.assertNotIn("0x9999999999999999999999999999999999999999",
-                         {row["address"] for row in rows})
+        self.assertTrue(all(row["name"] == "Binance" and row["source"] == "defillama"
+                            for row in rows))
+        self.assertEqual(parse_defillama_cex_protocol({
+            "name": "Not an exchange", "category": "Dexes",
+            "chainAddresses": {"Ethereum": ["0x" + "9" * 40]},
+        }), [])
+        self.assertEqual(parse_defillama_cex_protocol({
+            "name": "Unscoped", "category": "CEX", "chain": "Multi-Chain",
+            "address": "0x" + "8" * 40,
+        }), [], "an address without a single confirmed chain is not projected")
+        self.assertEqual(parse_defillama_cex_protocol({
+            "name": "Wrong chain", "category": "CEX", "chain": "Base",
+            "address": {"chain": "Bitcoin", "address": "0x" + "8" * 40},
+        }), [], "an unsupported explicit address chain must not inherit Base")
+        base = parse_defillama_cex_protocol({
+            "name": "Bybit", "category": "CEX", "chain": "Base",
+            "address": "0x" + "6" * 40,
+        })
+        self.assertEqual([(row["chain"], row["name"]) for row in base], [("BASE", "Bybit")])
+        detail = parse_defillama_cex_protocol({
+            "chainAddresses": [{"chain": "Polygon", "address": "0x" + "7" * 40}],
+        }, fallback_name="OKX")
+        self.assertEqual([(row["chain"], row["name"]) for row in detail], [("POLYGON", "OKX")])
         self.assertEqual(normalize_chain("binanceSmartChain"), "BNB")
         self.assertEqual(normalize_chain("arbitrum-one"), "ARBITRUM")
-        self.assertTrue(valid_address("SOLANA", "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"))
+        self.assertTrue(valid_address("SOLANA", "5tzFkiKsc22KEChR37aTBD323ApAo28nJZ34352fgd5e"))
         self.assertTrue(valid_address("TRON", "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"))
         self.assertFalse(valid_address("TRON", "T" + "1" * 33))
 
@@ -115,7 +130,7 @@ class CEXWalletRegistryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([(row["chain"], row["name"]) for row in restored.records()],
                              [("BASE", "Auto CEX"), ("ETH", "Renamed")])
 
-    async def test_http_404_and_500_failures_preserve_file_and_manual_rows(self):
+    async def test_empty_refresh_is_noop_and_http_errors_preserve_merged_registry(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "cex_wallets.json"
             registry = CEXWalletRegistry(path)
@@ -126,16 +141,21 @@ class CEXWalletRegistryTests(unittest.IsolatedAsyncioTestCase):
                        return_value=[automatic]):
                 await registry.refresh()
             original = path.read_bytes()
+
             with patch("cex_wallets_updater.fetch_defillama_cex_wallets", return_value=[]):
-                with self.assertRaises(WalletSourceError):
-                    await registry.refresh()
+                empty_result = await registry.refresh()
+            self.assertTrue(empty_result["ok"])
+            self.assertEqual(empty_result["defillama_count"], 0)
+            self.assertEqual(empty_result["after"], 2)
             self.assertEqual(path.read_bytes(), original)
             self.assertTrue(any(row["id"] == manual["id"] and row["source"] == "manual"
                                 for row in registry.records()))
+            self.assertTrue(any(row["name"] == "Known auto" for row in registry.records()))
+
             for status in (404, 500):
                 with self.subTest(status=status):
                     error = SourceFetchError(
-                        "https://api.llama.fi/cexs", "HTTP error", status=status,
+                        "https://api.llama.fi/protocols", "HTTP error", status=status,
                         body=f"provider failure {status}; diagnostic body")
                     with patch("cex_wallets_updater.fetch_defillama_cex_wallets",
                                side_effect=error):
@@ -145,60 +165,185 @@ class CEXWalletRegistryTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(any(row["id"] == manual["id"] and
                                         row["source"] == "manual" for row in registry.records()))
                     self.assertTrue(any(row["name"] == "Known auto" for row in registry.records()))
-                    self.assertIn("https://api.llama.fi/cexs", registry.last_error)
+                    self.assertIn("https://api.llama.fi/protocols", registry.last_error)
                     self.assertIn(f"HTTP {status}", registry.last_error)
                     self.assertIn(f"provider failure {status}", registry.last_error)
 
-    async def test_defillama_metadata_falls_back_to_protocols_and_adapter_config(self):
-        owner = "0x" + "1" * 40
-        seen = []
-
-        async def cex_missing(request):
-            seen.append((request.path, request.headers.get("User-Agent", "")))
-            return web.Response(status=404, text="CEX endpoint unavailable")
+    async def test_protocols_api_and_details_survive_truncated_etherscan_json(self):
+        eth = "0x" + "1" * 40
+        bnb = "0x" + "2" * 40
+        base_address = "0x" + "3" * 40
+        polygon = "0x" + "4" * 40
+        dex = "0x" + "9" * 40
+        requests = []
 
         async def protocols(request):
-            seen.append((request.path, request.headers.get("User-Agent", "")))
+            requests.append(request.path)
             return web.json_response([
-                {"slug": "binance", "name": "Binance", "category": "CEX"},
-                {"slug": "example-defi", "name": "Not an exchange", "category": "Dexes"},
+                {"slug": "binance", "name": "Binance", "category": "CEX",
+                 "chainAddresses": {"Ethereum": [eth], "BSC": {"address": bnb}}},
+                {"slug": "bybit", "name": "Bybit", "category": "CEX",
+                 "chain": "Base", "address": base_address},
+                {"slug": "okx", "name": "OKX", "category": "CEX"},
+                {"slug": "example-dex", "name": "Not an exchange", "category": "Dexes",
+                 "chainAddresses": {"Ethereum": [dex]}},
             ])
 
-        async def adapter(request):
-            seen.append((request.path, request.headers.get("User-Agent", "")))
-            config = "const configs = { binance: { ethereum: { owners: ['" + owner + "'] } } };"
-            return web.Response(text=config)
+        async def protocol_detail(request):
+            requests.append(request.path)
+            self.assertEqual(request.match_info["slug"], "okx")
+            return web.json_response({
+                "name": "OKX", "category": "CEX",
+                "chainAddresses": [{"chain": "Polygon", "address": polygon}],
+            })
+
+        async def truncated_labels(request):
+            requests.append(request.path)
+            return web.Response(text='{"0x' + "a" * 40 + '": {"labels": ["Binance',
+                               content_type="application/json")
 
         app = web.Application()
-        app.router.add_get("/cexs", cex_missing)
         app.router.add_get("/protocols", protocols)
-        app.router.add_get("/adapter.js", adapter)
+        app.router.add_get("/protocol/{slug}", protocol_detail)
+        app.router.add_get("/labels", truncated_labels)
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, "127.0.0.1", 0)
         await site.start()
         port = site._server.sockets[0].getsockname()[1]
-        base = f"http://127.0.0.1:{port}"
+        base_url = f"http://127.0.0.1:{port}"
         try:
-            with patch("cex_wallets_updater.DEFILLAMA_CEX_API", base + "/cexs"), \
-                 patch("cex_wallets_updater.DEFILLAMA_PROTOCOLS_API", base + "/protocols"), \
-                 patch("cex_wallets_updater.DEFILLAMA_CEX_CONFIG", base + "/adapter.js"):
+            with patch("cex_wallets_updater.DEFILLAMA_PROTOCOLS_API", base_url + "/protocols"), \
+                 patch("cex_wallets_updater.DEFILLAMA_PROTOCOL_API_BASE", base_url + "/protocol"), \
+                 patch("cex_wallets_updater.ETHERSCAN_LABELS_URL", base_url + "/labels"):
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / "cex_wallets.json"
+                    registry = CEXWalletRegistry(path)
+                    manual = registry.add_manual("ETH", "0x" + "5" * 40, "Manual CEX")
+                    previous_auto = {"chain": "ETH", "address": "0x" + "6" * 40,
+                                     "name": "Previously known", "source": "defillama"}
+                    with patch("cex_wallets_updater.fetch_defillama_cex_wallets",
+                               return_value=WalletFetchResult(
+                                   [previous_auto], source_counts={"defillama": 1})):
+                        await registry.refresh()
+
+                    async with ClientSession() as session:
+                        result = await registry.refresh(session)
+
+                    records = registry.records()
+                    by_key = {(row["chain"], row["address"]): row for row in records}
+                    expected = {
+                        ("ETH", eth), ("BNB", bnb), ("BASE", base_address),
+                        ("POLYGON", polygon), ("ETH", "0x" + "5" * 40),
+                        ("ETH", "0x" + "6" * 40),
+                    }
+                    self.assertTrue(expected.issubset(by_key))
+                    self.assertNotIn(("ETH", dex), by_key)
+                    self.assertEqual(by_key[("ETH", "0x" + "5" * 40)]["id"], manual["id"])
+                    self.assertEqual(result["defillama_count"], 4)
+                    self.assertEqual(result["etherscan_count"], 0)
+                    self.assertEqual(result["added"], 4)
+                    self.assertIn("Успешно обновлено: получено 4 адресов из DeFiLlama API",
+                                  result["message"])
+                    self.assertTrue(any("JSON decode error" in warning
+                                        for warning in result["warnings"]))
+                    self.assertEqual(registry.last_error, "")
+                    saved = json.loads(path.read_text(encoding="utf-8"))
+                    self.assertTrue(any(row["id"] == manual["id"] for row in saved["manual"]))
+                    self.assertTrue(any(row["address"] == "0x" + "6" * 40
+                                        for row in saved["automatic"]))
+                    self.assertEqual(requests, ["/protocols", "/protocol/okx", "/labels"])
+                    self.assertFalse(any(path.endswith(".js") for path in requests))
+        finally:
+            await runner.cleanup()
+
+    async def test_interrupted_large_labels_response_skips_only_that_source(self):
+        address = "0x" + "8" * 40
+        requests = []
+
+        async def protocols(request):
+            requests.append(request.path)
+            return web.json_response([{
+                "name": "Binance", "category": "CEX", "chain": "Ethereum",
+                "address": address,
+            }])
+
+        async def interrupted_labels(request):
+            requests.append(request.path)
+            response = web.StreamResponse(
+                status=200,
+                headers={"Content-Type": "application/json", "Content-Length": "4096"},
+            )
+            await response.prepare(request)
+            await response.write(b'{"labels":')
+            request.transport.close()
+            return response
+
+        app = web.Application()
+        app.router.add_get("/protocols", protocols)
+        app.router.add_get("/labels", interrupted_labels)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        base_url = f"http://127.0.0.1:{port}"
+        try:
+            with patch("cex_wallets_updater.DEFILLAMA_PROTOCOLS_API", base_url + "/protocols"), \
+                 patch("cex_wallets_updater.ETHERSCAN_LABELS_URL", base_url + "/labels"):
                 async with ClientSession() as session:
                     rows = await fetch_defillama_cex_wallets(session)
-            self.assertEqual([(row["chain"], row["address"], row["name"]) for row in rows],
-                             [("ETH", owner, "Binance")])
-            self.assertEqual([item[0] for item in seen], ["/cexs", "/protocols", "/adapter.js"])
-            self.assertTrue(all("LiqScope-CEX-Wallets/" in item[1] for item in seen))
+            self.assertEqual([(row["chain"], row["address"], row["source"])
+                              for row in rows], [("ETH", address, "defillama")])
+            self.assertTrue(any("network error" in warning for warning in rows.source_errors))
+            self.assertEqual(rows.source_status["defillama"], "ok")
+            self.assertEqual(rows.source_status["etherscan"], "error")
+            self.assertEqual(requests, ["/protocols", "/labels", "/labels", "/labels"])
+        finally:
+            await runner.cleanup()
+
+    async def test_etherscan_can_succeed_when_protocol_api_fails(self):
+        address = "0x" + "7" * 40
+        requests = []
+
+        async def protocols(request):
+            requests.append(request.path)
+            return web.Response(status=500, text="temporary API outage")
+
+        async def labels(request):
+            requests.append(request.path)
+            return web.json_response({address: {"labels": ["Binance hot wallet"]}})
+
+        app = web.Application()
+        app.router.add_get("/protocols", protocols)
+        app.router.add_get("/labels", labels)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        base_url = f"http://127.0.0.1:{port}"
+        try:
+            with patch("cex_wallets_updater.DEFILLAMA_PROTOCOLS_API", base_url + "/protocols"), \
+                 patch("cex_wallets_updater.ETHERSCAN_LABELS_URL", base_url + "/labels"):
+                async with ClientSession() as session:
+                    rows = await fetch_defillama_cex_wallets(session)
+            self.assertEqual([(row["chain"], row["address"], row["name"], row["source"])
+                              for row in rows], [("ETH", address, "Binance", "etherscan")])
+            self.assertEqual(rows.source_counts, {"defillama": 0, "etherscan": 1})
+            self.assertEqual(rows.source_status["etherscan"], "ok")
+            self.assertTrue(any("HTTP 500" in warning for warning in rows.source_errors))
+            self.assertEqual(requests, ["/protocols"] * 3 + ["/labels"])
         finally:
             await runner.cleanup()
 
     async def test_source_errors_redact_secrets_in_url_and_body(self):
         secret = "provider-key-should-not-leak"
         error = SourceFetchError(
-            f"https://pro-api.llama.fi/{secret}/cexs?api_key={secret}", "HTTP error",
+            f"https://pro-api.llama.fi/{secret}/protocols?api_key={secret}", "HTTP error",
             status=403, body=f"api_key={secret}; response denied")
         self.assertNotIn(secret, str(error))
-        self.assertIn("/[redacted]/cexs", str(error))
+        self.assertIn("/[redacted]/protocols", str(error))
         self.assertIn("HTTP 403", str(error))
         self.assertIn("[redacted]", str(error))
 

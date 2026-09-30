@@ -104,4 +104,4 @@ Alchemy Free даёт 30 млн CU/месяц на всё приложение, 
 Источники цен/методов: [план Alchemy](https://www.alchemy.com/docs/reference/pricing-plans),
 [стоимость методов](https://www.alchemy.com/docs/reference/compute-unit-costs),
 [Alchemy Transfers API](https://www.alchemy.com/docs/data/transfers-api/transfers-endpoints/alchemy-get-asset-transfers),
-[DeFiLlama CEX metadata](https://api.llama.fi/cexs).
+[DeFiLlama protocols API](https://api.llama.fi/protocols).

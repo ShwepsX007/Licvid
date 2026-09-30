@@ -5,6 +5,7 @@ const {JSDOM} = require("jsdom");
 const path = require("path");
 const html = fs.readFileSync(path.join(__dirname, "../static/screener.html"), "utf8");
 const script = fs.readFileSync(path.join(__dirname, "../static/screener.js"), "utf8");
+const css = fs.readFileSync(path.join(__dirname, "../static/screener.css"), "utf8");
 const dom = new JSDOM(html, {url: "https://liqscope.online/screener", runScripts: "outside-only"});
 const win = dom.window;
 const now = Math.floor(Date.now() / 1000);
@@ -19,7 +20,7 @@ chains.forEach((chain, index) => {
         buy_usd: index === 7 ? 275000 : 0, sell_usd: 0,
         assets: {}, inflow_assets: index === 0 ? {USDT: 125000} : {},
         outflow_assets: {}, transfer_assets: {}, buy_assets: index === 7 ? {BTC: 2.5} : {},
-        sell_assets: {}};
+        sell_assets: {}, error: chain === "SOLANA" ? "No indexed Solana CEX wallets" : ""};
 });
 const rows = [
     {chain: "ETH", hash: hash("a"), log_index: "0x1", timestamp: now - 60,
@@ -94,7 +95,21 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     await sleep(100);
     assert.equal(win.document.querySelectorAll("#network-cards .network-card").length, 8);
     assert.equal(win.document.querySelectorAll("#network-tabs .network-tab").length, 9);
+    assert.equal(win.document.querySelector('[data-network="SOLANA"]').title,
+        "No indexed Solana CEX wallets");
     assert.equal(win.document.querySelectorAll("#flow-chart .chart-bar").length, 2);
+    assert(parseFloat(win.document.querySelector("#flow-chart .chart-bar").getAttribute("width")) >= 30,
+        "six-hour category bars have readable widths");
+    assert(css.includes("grid-template-columns: minmax(0,1fr) minmax(0,1fr)"));
+    assert(css.includes("gap: 16px"));
+    assert(css.includes("height: 540px; max-height: 540px"));
+    assert(css.includes("overflow-y: auto"));
+    assert(css.includes("font: 13px var(--font, system-ui)"));
+    ["screener-events", "hl-screener-events"].forEach(id => {
+        const feed = win.document.getElementById(id);
+        assert.equal(feed.getAttribute("role"), "region");
+        assert.equal(feed.getAttribute("tabindex"), "0");
+    });
     assert.equal(win.document.querySelectorAll("#chart-legend .network-legend-item").length, 8);
     assert.equal(win.document.querySelectorAll("#exchange-list .exchange-row").length, 1);
     assert.equal(win.document.querySelectorAll("#screener-events .event-row").length, 1);

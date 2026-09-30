@@ -124,7 +124,10 @@
             card.type = "button";
             card.dataset.network = net.id;
             card.setAttribute("aria-pressed", String(state.selectedChain === net.id));
-            card.setAttribute("aria-label", networkName(net.id) + ", " + localizedStatus(summary.status));
+            const diagnostic = String(summary.error || "").trim();
+            card.title = diagnostic;
+            card.setAttribute("aria-label", networkName(net.id) + ", " +
+                localizedStatus(summary.status) + (diagnostic ? ". " + diagnostic : ""));
             const top = make("div", "network-card-top");
             top.append(make("span", "network-card-name", networkName(net.id)));
             const status = make("span", "network-state status--" + (summary.status || "waiting"), localizedStatus(summary.status));
@@ -206,8 +209,9 @@
     }
     function chartPoints(series) {
         const buckets = [];
-        for (let start = 0; start < series.length; start += 2) {
-            const rows = series.slice(start, start + 2);
+        const bucketHours = 6;
+        for (let start = 0; start < series.length; start += bucketHours) {
+            const rows = series.slice(start, start + bucketHours);
             const networks = {};
             rows.forEach(point => Object.entries(point.networks || {}).forEach(([chain, cell]) => {
                 const out = networks[chain] || (networks[chain] = {});
@@ -294,9 +298,15 @@
         const topExchanges = ((data.top_exchanges || {})[selected === "ALL" ? "ALL" : selected] || []).slice(0, 3);
         const topLabel = topExchanges.length ? topExchanges.map(row =>
             row.name + " " + fmtUSD(row.volume_usd, true)).join(" · ") : t("screener.no_top_exchanges");
+        const labelEvery = points.length <= 6 ? 1 : 3;
         const groupW = plotW / Math.max(points.length, 1);
-        const usable = groupW * (keys.length >= 5 ? .94 : .82);
+        // Match the familiar Chart.js bar/category proportions while the SVG
+        // keeps each six-hour bucket readable at desktop and mobile widths.
+        const categoryPercentage = 0.85;
+        const barPercentage = 0.85;
+        const usable = groupW * categoryPercentage;
         const barW = usable / keys.length;
+        const rectW = Math.max(3, barW * barPercentage);
         points.forEach((point, i) => {
             const xStart = left + i * groupW + (groupW - usable) / 2;
             keys.forEach((key, j) => {
@@ -314,9 +324,9 @@
                     });
                     const height = Math.max(1, value / scaleMax * plotH);
                     yBottom -= height;
-                    const x = xStart + j * barW + 1;
+                    const x = xStart + j * barW + (barW - rectW) / 2;
                     const rect = svgNode("rect", {
-                        x, y: yBottom, width: Math.max(2, barW - 2), height,
+                        x, y: yBottom, width: rectW, height,
                         fill: SERIES_COLORS[key], opacity: networkOpacity(chainIndex),
                         stroke: "#0b1020", "stroke-width": 1, class: "chart-bar", rx: 2,
                     });
@@ -335,7 +345,7 @@
                 });
                 const stackHeight = total / scaleMax * plotH;
                 const labelX = xStart + j * barW + barW / 2;
-                if (total > 0 && stackHeight >= 22 && barW >= 7) {
+                if (total > 0 && stackHeight >= 22 && barW >= 32) {
                     const label = svgNode("text", {
                         x: labelX, y: Math.max(9, yBottom - 3),
                         "text-anchor": "middle", class: "chart-value-label",
@@ -343,7 +353,7 @@
                     label.append(svgNode("title", {}, compactAssets(assetTotals)));
                     chart.append(label);
                 }
-                if (selected !== "ALL" && total > 0 && stackHeight >= 36 && barW >= 20) {
+                if (selected !== "ALL" && total > 0 && stackHeight >= 36 && barW >= 32) {
                     const primary = Object.entries(assetTotals)
                         .sort((a, b) => Number(b[1]) - Number(a[1]))[0];
                     if (primary) {
@@ -356,7 +366,7 @@
                     }
                 }
             });
-            if (i % 3 === 0 || i === points.length - 1) {
+            if (i % labelEvery === 0 || i === points.length - 1) {
                 chart.append(svgNode("text", {
                     x: left + i * groupW + groupW / 2, y: H - 8,
                     "text-anchor": "middle", class: "chart-axis-label",

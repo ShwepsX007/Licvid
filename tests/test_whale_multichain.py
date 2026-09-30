@@ -1,11 +1,14 @@
 """Offline coverage for multichain whale ingestion and wallet registry CRUD."""
 import asyncio
+import json
 import tempfile
 import time
 import unittest
 import sys
 from pathlib import Path
 from unittest.mock import patch
+
+import aiohttp
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -108,21 +111,175 @@ class MultichainTransferTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(screen.events[-1]["direction"], "outflow")
 
             contract, (symbol, decimals) = next(iter(TRON_TOKENS.items()))
-            async def fake_events(_session, _url, _params=None):
+            request = {}
+            async def fake_events(_session, url, params=None):
+                request.update(url=url, params=params or {})
                 return {"data": [{"event_index": 7, "block_number": 124,
                     "block_timestamp": int(time.time() * 1000),
                     "transaction_id": "b" * 64,
                     "result": {"from": recipient, "to": owner, "value": "25000001"}}],
                     "meta": {}}
             poller._trongrid_get = fake_events
+            screen.wallets_by_chain["TRON"] = {}  # event discovery is not wallet-gated
             await poller._poll_tron_contract(None, contract, symbol, decimals,
                                              int(time.time() * 1000))
+            self.assertEqual(request["url"],
+                f"https://api.trongrid.io/v1/contracts/{contract}/events")
+            self.assertEqual(request["params"]["event_name"], "Transfer")
+            self.assertEqual(request["params"]["limit"], 50)
+            self.assertEqual(request["params"]["only_confirmed"], "true")
             event = screen.events[-1]
             self.assertEqual(event["symbol"], "USDT")
             self.assertEqual(event["log_index"], "trc20:7")
             self.assertAlmostEqual(event["amount"], 25.000001)
             self.assertAlmostEqual(event["usd"], 25.0, places=2)
-            self.assertEqual(event["direction"], "inflow")
+            self.assertEqual(event["direction"], "transfer")
+            screen.close()
+
+    async def test_trongrid_api_key_header_is_optional(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            screen = self.make_screener(tmp)
+            poller = WhalePoller("unused", screen,
+                                 state_file=Path(tmp) / "poller.json")
+            requests = []
+
+            class FakeResponse:
+                status = 200
+                async def __aenter__(self):
+                    return self
+                async def __aexit__(self, *_args):
+                    return None
+                async def json(self):
+                    return {"data": []}
+
+            class FakeSession:
+                def get(self, url, *, params, headers, timeout):
+                    requests.append((url, params, headers))
+                    return FakeResponse()
+
+            poller._trongrid_key = lambda: "test-tron-key"
+            await poller._trongrid_get(FakeSession(), "https://api.trongrid.io/events")
+            poller._trongrid_key = lambda: ""
+            await poller._trongrid_get(FakeSession(), "https://api.trongrid.io/events")
+            self.assertEqual(requests[0][2], {"TRON-PRO-API-KEY": "test-tron-key"})
+            self.assertEqual(requests[1][2], {})
+            screen.close()
+
+    async def test_solana_websocket_subscriptions_are_acknowledged_in_small_batches(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            screen = self.make_screener(tmp)
+            screen.wallets_by_chain["SOLANA"] = {
+                f"wallet-{index}": "Solana CEX" for index in range(101)}
+            poller = WhalePoller("test-alchemy-key-123", screen,
+                                 state_file=Path(tmp) / "poller.json")
+
+            class FakeWebSocket:
+                def __init__(self):
+                    self.responses = []
+                    self.sent = []
+                    self.inflight = 0
+                    self.max_inflight = 0
+                async def __aenter__(self):
+                    return self
+                async def __aexit__(self, *_args):
+                    return None
+                async def send_json(self, payload):
+                    self.sent.append(payload)
+                    self.inflight += 1
+                    self.max_inflight = max(self.max_inflight, self.inflight)
+                    self.responses.append({"jsonrpc": "2.0", "id": payload["id"],
+                                           "result": 10_000 + payload["id"]})
+                async def receive(self, timeout=None):
+                    if self.responses:
+                        response = self.responses.pop(0)
+                        self.inflight -= 1
+                        return type("Message", (), {"type": aiohttp.WSMsgType.TEXT,
+                                                     "data": json.dumps(response)})()
+                    await asyncio.Future()
+
+            class FakeSession:
+                def __init__(self):
+                    self.ws = FakeWebSocket()
+                async def __aenter__(self):
+                    return self
+                async def __aexit__(self, *_args):
+                    return None
+                def ws_connect(self, *_args, **_kwargs):
+                    return self.ws_context()
+                def ws_context(self):
+                    return self.ws
+
+            fake_session = FakeSession()
+            with patch("whale_poller.aiohttp.ClientSession", return_value=fake_session):
+                task = asyncio.create_task(poller.run_solana())
+                await asyncio.sleep(0)
+                self.assertTrue(poller.solana_status["connected"])
+                self.assertEqual(len(fake_session.ws.sent), 303)
+                self.assertLessEqual(fake_session.ws.max_inflight, 100)
+                self.assertEqual(poller.solana_status["subscriptions"], 303)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+            screen.close()
+
+    async def test_solana_rpc_uses_alchemy_solana_endpoint_and_native_methods(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            screen = self.make_screener(tmp)
+            poller = WhalePoller("test-alchemy-key-123", screen,
+                                 state_file=Path(tmp) / "poller.json")
+            requests = []
+
+            class FakeResponse:
+                status = 200
+                async def __aenter__(self):
+                    return self
+                async def __aexit__(self, *_args):
+                    return None
+                async def json(self):
+                    return {"jsonrpc": "2.0", "id": 1,
+                            "result": [{"signature": "sig", "err": None}]}
+
+            class FakeSession:
+                def post(self, url, *, json, timeout):
+                    requests.append((url, json, timeout))
+                    return FakeResponse()
+
+            result = await poller._solana_rpc(
+                FakeSession(), "getSignaturesForAddress", ["wallet", {"limit": 20}])
+            self.assertEqual(result, [{"signature": "sig", "err": None}])
+            self.assertEqual(requests[0][0],
+                "https://solana-mainnet.g.alchemy.com/v2/test-alchemy-key-123")
+            self.assertEqual(requests[0][1]["method"], "getSignaturesForAddress")
+            self.assertEqual(requests[0][1]["params"][0], "wallet")
+            screen.close()
+
+    async def test_solana_signature_poll_fetches_transactions(self):
+        owner, other = "1" * 32, "2" * 32
+        signature = "5" * 64
+        with tempfile.TemporaryDirectory() as tmp:
+            screen = self.make_screener(tmp)
+            poller = WhalePoller("test-alchemy-key-123", screen,
+                                 state_file=Path(tmp) / "poller.json")
+            tx = {"blockTime": int(time.time()),
+                "transaction": {"signatures": [signature], "message": {"instructions": [
+                    {"program": "system", "parsed": {"type": "transfer", "info": {
+                        "source": owner, "destination": other, "lamports": 1_500_000_000}}}]}},
+                "meta": {}}
+            calls = []
+            async def fake_rpc(_session, method, params):
+                calls.append((method, params))
+                if method == "getSignaturesForAddress":
+                    return [{"signature": signature, "err": None,
+                             "blockTime": tx["blockTime"]}]
+                if method == "getTransaction":
+                    return tx
+                raise AssertionError(method)
+            poller._solana_rpc = fake_rpc
+            await poller._solana_recent_transactions(None, owner, owner)
+            self.assertEqual([method for method, _ in calls],
+                             ["getSignaturesForAddress", "getTransaction"])
+            self.assertEqual(calls[0][1][0], owner)
+            self.assertEqual(screen.events[-1]["amount"], 1.5)
             screen.close()
 
     async def test_solana_native_lamports_and_spl_token_decimals(self):

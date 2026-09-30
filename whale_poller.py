@@ -38,11 +38,12 @@ SOLANA_WS_BASE = os.getenv("LIQSCOPE_SOLANA_WS", "wss://solana-mainnet.g.alchemy
 SOLANA_HTTP_BASE = os.getenv("LIQSCOPE_SOLANA_HTTP", "https://solana-mainnet.g.alchemy.com/v2/")
 SPL_TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 TRON_API_BASE = os.getenv("LIQSCOPE_TRONGRID_URL", "https://api.trongrid.io").rstrip("/")
-TRON_EVENT_INTERVAL = 3.0
+TRON_EVENT_INTERVAL = 5.0
+SOLANA_WS_PENDING_BATCH = 100  # stay below Alchemy's 200 pending-request limit
 TRON_USD_CONTRACTS = dict(TRON_TOKENS)
 SOLANA_BLOCKS_PER_SEC = {"ETH": 1 / 12, "BNB": 1 / 3, "POLYGON": 0.5,
                          "ARBITRUM": 4.0, "BASE": 0.5}
-SOLANA_MAX_WALLETS = max(1, int(os.getenv("LIQSCOPE_SOLANA_MAX_WALLETS", "250")))
+SOLANA_MAX_WALLETS = min(333, max(1, int(os.getenv("LIQSCOPE_SOLANA_MAX_WALLETS", "250"))))
 METHOD_CU = {"eth_blockNumber": 10, "eth_getLogs": 60,
              "alchemy_getAssetTransfers": 120,
              "solana_getSignaturesForAddress": 40,
@@ -151,10 +152,11 @@ class WhalePoller:
         self.errors: dict[str, str] = {}
         self.solana_status = {"network": "SOLANA", "provider": "alchemy",
                               "connected": False, "state": "waiting", "subscriptions": 0,
+                              "submitted": 0, "active_wallets": 0,
                               "events": 0, "last_success": 0.0, "error": ""}
         self.tron_status = {"network": "TRON", "provider": "trongrid",
                             "connected": False, "state": "waiting", "events": 0,
-                            "last_success": 0.0, "last_block": 0, "error": ""}
+                            "wallets": 0, "last_success": 0.0, "last_block": 0, "error": ""}
         self._solana_last_signature: dict[str, str] = {}
         self._solana_balance: dict[str, int] = {}
         self._solana_inflight: set[str] = set()
@@ -704,6 +706,24 @@ class WhalePoller:
             await asyncio.sleep(min(60.0, retry))
             retry = min(60.0, retry * 2)
 
+    def _solana_safe_text(self, value: object) -> str:
+        message = str(value).strip()
+        for _identifier, secret in self._keys():
+            if secret:
+                message = message.replace(secret, "[redacted]")
+        return message
+
+    def _log_solana_exception(self, exc: BaseException) -> None:
+        """Log provider failures with a traceback, masking API keys in URLs."""
+        original = str(exc) or type(exc).__name__
+        message = self._solana_safe_text(original)
+        if message == original:
+            log.error("[Solana] Ошибка: %s", exc, exc_info=True)
+        else:
+            safe_exc = RuntimeError(f"{type(exc).__name__}: {message}")
+            log.error("[Solana] Ошибка: %s", message,
+                      exc_info=(type(safe_exc), safe_exc, exc.__traceback__))
+
     async def _solana_rpc(self, session, method: str, params: list):
         keys = self._keys()
         if not keys:
@@ -715,16 +735,28 @@ class WhalePoller:
             async with session.post(url, json={"jsonrpc": "2.0", "id": 1,
                                                "method": method, "params": params},
                                     timeout=aiohttp.ClientTimeout(total=25)) as response:
-                if response.status in (401, 403, 429):
-                    self.key_errors[key_id] = "Alchemy Solana API rejected request"
-                    raise PollError(f"Solana RPC HTTP {response.status}")
                 if response.status != 200:
-                    raise PollError(f"Solana RPC HTTP {response.status}")
+                    detail = (await response.text())[:180]
+                    if key:
+                        detail = detail.replace(key, "[redacted]")
+                    self.key_errors[key_id] = f"Solana RPC HTTP {response.status}: {detail}"
+                    raise PollError(f"Solana RPC HTTP {response.status}: {detail}")
                 payload = await response.json()
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
-            raise PollError(type(exc).__name__) from None
-        if not isinstance(payload, dict) or payload.get("error"):
-            raise PollError("Solana RPC returned an error")
+            detail = str(exc).replace(key, "[redacted]") if key else str(exc)
+            self.key_errors[key_id] = f"Solana RPC: {type(exc).__name__}"
+            raise PollError(f"{type(exc).__name__}: {detail[:240]}") from None
+        if not isinstance(payload, dict):
+            raise PollError("Solana RPC returned a malformed response")
+        if payload.get("error"):
+            error = payload["error"]
+            if isinstance(error, dict):
+                detail = f"code={error.get('code', '?')}: {error.get('message', 'RPC error')}"
+            else:
+                detail = str(error)
+            detail = self._solana_safe_text(detail)
+            self.key_errors[key_id] = detail[:200]
+            raise PollError(f"{method}: {detail[:240]}")
         self.key_errors.pop(key_id, None)
         return payload.get("result")
 
@@ -789,7 +821,7 @@ class WhalePoller:
         post = meta.get("postTokenBalances") or []
 
         def amount_map(rows):
-            total, decimals, owners = 0, None, {}
+            total, owners = 0, {}
             for row in rows:
                 if not isinstance(row, dict) or row.get("mint") != mint:
                     continue
@@ -798,25 +830,20 @@ class WhalePoller:
                 token_amount = row.get("uiTokenAmount") or {}
                 try:
                     raw = int(token_amount.get("amount") or 0)
-                    dec = int(token_amount.get("decimals") or 0)
                 except (TypeError, ValueError):
                     continue
                 if row_owner:
                     owners[str(account_index)] = row_owner
                 if row_owner == owner:
                     total += raw
-                    decimals = dec
-            return total, decimals, owners
+            return total, owners
 
-        before, before_decimals, before_owners = amount_map(pre)
-        after, after_decimals, after_owners = amount_map(post)
+        before, before_owners = amount_map(pre)
+        after, after_owners = amount_map(post)
         delta = after - before
         if not delta:
             return 0
-        decimals = after_decimals if after_decimals is not None else before_decimals
-        if decimals is None:
-            decimals = SOLANA_TOKENS.get(mint, ("", 6))[1]
-        symbol = SOLANA_TOKENS.get(mint, ("", decimals))[0]
+        symbol, decimals = SOLANA_TOKENS.get(mint, ("", 6))
         if not symbol:
             return 0
 
@@ -899,83 +926,114 @@ class WhalePoller:
                 self._solana_last_signature[lock_key] = str(rows[0]["signature"])
             self.solana_status["last_success"] = time.time()
             self.solana_status["error"] = ""
-        except BudgetExhausted:
-            self.solana_status["state"] = "budget_exhausted"
-            self.solana_status["error"] = "Monthly Alchemy CU budget exhausted"
-        except (PollError, ValueError, TypeError, KeyError) as exc:
-            self.solana_status["error"] = str(exc)[:100]
+        except BudgetExhausted as exc:
+            self.solana_status.update(state="budget_exhausted",
+                                       error=self._solana_safe_text(exc)[:200])
+            self._log_solana_exception(exc)
+        except (PollError, ValueError, TypeError, KeyError, aiohttp.ClientError,
+                asyncio.TimeoutError) as exc:
+            self.solana_status["error"] = self._solana_safe_text(
+                str(exc) or type(exc).__name__)[:200]
+            self._log_solana_exception(exc)
         finally:
             self._solana_inflight.discard(lock_key)
 
     async def run_solana(self) -> None:
-        """Monitor SPL USDT/USDC token accounts and native SOL CEX accounts."""
+        """Monitor SPL USDT/USDC token accounts and native SOL CEX accounts.
+
+        Alchemy's Solana websocket has a 200-request in-flight limit and a
+        1,000-subscription limit per connection. Subscribe in acknowledged
+        batches so a large CEX registry cannot silently stall setup.
+        """
         retry = 3.0
         while True:
             keys = self._keys()
             wallets = self.screener.wallet_addresses("SOLANA")
             if not keys:
                 self.solana_status.update(connected=False, state="waiting",
-                                          error="Alchemy API key is not configured")
+                    subscriptions=0, submitted=0, active_wallets=0,
+                    error="Alchemy API key is not configured")
                 await asyncio.sleep(5)
                 continue
             if not wallets:
                 self.solana_status.update(connected=False, state="waiting",
-                                          error="No indexed Solana CEX wallets")
+                    subscriptions=0, submitted=0, active_wallets=0,
+                    error="No indexed Solana CEX wallets")
+                log.warning("[Solana] Ожидание: в реестре нет CEX-адресов Solana")
                 await asyncio.sleep(30)
                 continue
-            key = keys[0][1]
+
+            key_id, key = keys[0]
             url = _solana_http_url(SOLANA_WS_BASE, key)
             try:
                 async with aiohttp.ClientSession() as session:
                     async with session.ws_connect(url, heartbeat=30, receive_timeout=90) as ws:
-                        pending: dict[int, tuple[str, str, str | None]] = {}
-                        active_subscriptions: dict[int, tuple[str, str, str | None]] = {}
-                        request_id = 1
-                        submitted = 0
                         owners = list(wallets.items())[:SOLANA_MAX_WALLETS]
+                        requests = []
                         for owner, _name in owners:
-                            await ws.send_json({"jsonrpc": "2.0", "id": request_id,
-                                "method": "accountSubscribe", "params": [owner, {
-                                    "commitment": "confirmed", "encoding": "base64"}]})
-                            pending[request_id] = ("native", owner, None)
-                            request_id += 1
-                            submitted += 1
+                            requests.append(("accountSubscribe", [owner, {
+                                "commitment": "confirmed", "encoding": "base64"}],
+                                ("native", owner, None)))
                             for mint in SOLANA_TOKENS:
-                                await ws.send_json({"jsonrpc": "2.0", "id": request_id,
-                                    "method": "programSubscribe", "params": [SPL_TOKEN_PROGRAM, {
-                                        "commitment": "confirmed", "encoding": "base64",
-                                        "filters": [{"dataSize": 165},
-                                            {"memcmp": {"offset": 0, "bytes": mint}},
-                                            {"memcmp": {"offset": 32, "bytes": owner}}]}]})
-                                pending[request_id] = ("spl", owner, mint)
-                                request_id += 1
-                                submitted += 1
-                        self.solana_status.update(connected=True, state="online",
-                            subscriptions=submitted, error="")
-                        retry = 3.0
-                        async for message in ws:
+                                requests.append(("programSubscribe", [SPL_TOKEN_PROGRAM, {
+                                    "commitment": "confirmed", "encoding": "base64",
+                                    "filters": [{"dataSize": 165},
+                                        {"memcmp": {"offset": 0, "bytes": mint}},
+                                        {"memcmp": {"offset": 32, "bytes": owner}}]}],
+                                    ("spl", owner, mint)))
+
+                        pending: dict[int, tuple[str, str, str | None]] = {}
+                        active: dict[int, tuple[str, str, str | None]] = {}
+                        request_id = 1
+                        accepted = 0
+                        rejected = 0
+
+                        async def handle_message(message) -> None:
+                            nonlocal accepted, rejected
                             if message.type != aiohttp.WSMsgType.TEXT:
                                 if message.type in (aiohttp.WSMsgType.CLOSED,
                                                     aiohttp.WSMsgType.ERROR):
-                                    break
-                                continue
+                                    detail = getattr(message, "data", "")
+                                    if isinstance(detail, BaseException):
+                                        detail = f"{type(detail).__name__}: {detail}"
+                                    detail = str(detail or f"close code={ws.close_code}")[:160]
+                                    raise PollError(f"Solana WebSocket closed: {detail}")
+                                return
                             try:
                                 payload = json.loads(message.data)
                             except (TypeError, ValueError):
-                                continue
+                                return
+                            if not isinstance(payload, dict):
+                                return
                             if "id" in payload:
-                                target = pending.get(payload.get("id"))
-                                if target and isinstance(payload.get("result"), int):
-                                    active_subscriptions[payload["result"]] = target
-                                elif target and payload.get("error"):
-                                    self.solana_status["error"] = "Alchemy Solana subscription rejected"
-                                continue
-                            if payload.get("method") not in ("accountNotification", "programNotification"):
-                                continue
+                                try:
+                                    response_id = int(payload.get("id"))
+                                except (TypeError, ValueError):
+                                    return
+                                target = pending.pop(response_id, None)
+                                if not target:
+                                    return
+                                result = payload.get("result")
+                                if isinstance(result, int) and not payload.get("error"):
+                                    active[result] = target
+                                    accepted += 1
+                                else:
+                                    rejected += 1
+                                    error = payload.get("error") or {}
+                                    detail = error.get("message", error) if isinstance(error, dict) else error
+                                    detail = str(detail or "subscription rejected")[:180]
+                                    detail = self._solana_safe_text(detail)[:180]
+                                    self.solana_status["error"] = detail
+                                    log.error("[Solana] subscription rejected: %s", detail)
+                                return
+
+                            method = payload.get("method")
+                            if method not in ("accountNotification", "programNotification"):
+                                return
                             params = payload.get("params") or {}
-                            target = active_subscriptions.get(params.get("subscription"))
+                            target = active.get(params.get("subscription"))
                             if not target:
-                                continue
+                                return
                             kind, owner, mint = target
                             result = params.get("result") or {}
                             if kind == "native":
@@ -983,7 +1041,7 @@ class WhalePoller:
                                 try:
                                     balance = int(account.get("lamports") or 0)
                                 except (TypeError, ValueError):
-                                    continue
+                                    return
                                 old = self._solana_balance.get(owner)
                                 self._solana_balance[owner] = balance
                                 if old is not None and old != balance:
@@ -993,15 +1051,46 @@ class WhalePoller:
                                 pubkey = str(account.get("pubkey") or "")
                                 if pubkey and mint:
                                     await self._solana_recent_transactions(session, pubkey, owner, mint)
-                            self.solana_status["last_success"] = time.time()
-                            self.solana_status["error"] = ""
+                            self.solana_status.update(last_success=time.time(), error="")
+
+                        for offset in range(0, len(requests), SOLANA_WS_PENDING_BATCH):
+                            batch = requests[offset:offset + SOLANA_WS_PENDING_BATCH]
+                            batch_ids = []
+                            for method, params, target in batch:
+                                pending[request_id] = target
+                                batch_ids.append(request_id)
+                                await ws.send_json({"jsonrpc": "2.0", "id": request_id,
+                                                    "method": method, "params": params})
+                                request_id += 1
+                            self.solana_status.update(submitted=request_id - 1,
+                                                      active_wallets=len(owners))
+                            while any(item in pending for item in batch_ids):
+                                message = await ws.receive(timeout=20)
+                                await handle_message(message)
+
+                        if accepted <= 0:
+                            detail = self.solana_status.get("error") or "All Solana subscriptions were rejected"
+                            raise PollError(f"{detail} ({rejected}/{len(requests)} rejected)")
+                        self.solana_status.update(connected=True, state="online",
+                            subscriptions=accepted, submitted=len(requests),
+                            active_wallets=len(owners), error=(
+                                f"{rejected} Solana subscription(s) rejected" if rejected else ""))
+                        retry = 3.0
+                        while True:
+                            message = await ws.receive()
+                            await handle_message(message)
             except asyncio.CancelledError:
                 self.solana_status.update(connected=False, state="stopped")
                 raise
-            except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError) as exc:
-                self.solana_status.update(connected=False, state="error", error=type(exc).__name__)
-            except Exception as exc:  # noqa: BLE001 — isolate Solana provider errors
-                self.solana_status.update(connected=False, state="error", error=type(exc).__name__)
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError,
+                    PollError) as exc:
+                self.solana_status.update(connected=False, state="error",
+                                              error=self._solana_safe_text(str(exc) or type(exc).__name__)[:200])
+                self._log_solana_exception(exc)
+            except Exception as exc:  # noqa: BLE001 — keep a Solana provider outage isolated
+                self.solana_status.update(connected=False, state="error",
+                                              error=self._solana_safe_text(str(exc) or type(exc).__name__)[:200])
+                self._log_solana_exception(exc)
             await asyncio.sleep(min(60.0, retry))
             retry = min(60.0, retry * 2)
 
@@ -1014,6 +1103,21 @@ class WhalePoller:
         except Exception:  # noqa: BLE001 — an optional key must not stop TRON
             return ""
 
+    def _trongrid_safe_text(self, value: object) -> str:
+        message = str(value).strip()
+        api_key = self._trongrid_key()
+        return message.replace(api_key, "[redacted]") if api_key else message
+
+    def _log_tron_exception(self, exc: BaseException) -> None:
+        original = str(exc) or type(exc).__name__
+        message = self._trongrid_safe_text(original)
+        if message == original:
+            log.error("[TRON] Ошибка TronGrid: %s", exc, exc_info=True)
+        else:
+            safe_exc = RuntimeError(f"{type(exc).__name__}: {message}")
+            log.error("[TRON] Ошибка TronGrid: %s", message,
+                      exc_info=(type(safe_exc), safe_exc, exc.__traceback__))
+
     async def _trongrid_get(self, session, url: str, params: dict | None = None):
         headers = {}
         api_key = self._trongrid_key()
@@ -1022,13 +1126,13 @@ class WhalePoller:
         try:
             async with session.get(url, params=params, headers=headers,
                                    timeout=aiohttp.ClientTimeout(total=20)) as response:
-                if response.status in (401, 403, 429):
-                    raise PollError(f"TronGrid HTTP {response.status}")
                 if response.status != 200:
-                    raise PollError(f"TronGrid HTTP {response.status}")
+                    detail = self._trongrid_safe_text(await response.text())[:180]
+                    raise PollError(f"TronGrid HTTP {response.status}: {detail}")
                 payload = await response.json()
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
-            raise PollError(type(exc).__name__) from None
+            detail = self._trongrid_safe_text(f"{type(exc).__name__}: {exc}")
+            raise PollError(detail[:240]) from None
         if not isinstance(payload, dict):
             raise PollError("Malformed TronGrid response")
         return payload
@@ -1041,13 +1145,13 @@ class WhalePoller:
         try:
             async with session.post(url, json={}, headers=headers,
                                     timeout=aiohttp.ClientTimeout(total=20)) as response:
-                if response.status in (401, 403, 429):
-                    raise PollError(f"TronGrid HTTP {response.status}")
                 if response.status != 200:
-                    raise PollError(f"TronGrid HTTP {response.status}")
+                    detail = self._trongrid_safe_text(await response.text())[:180]
+                    raise PollError(f"TronGrid HTTP {response.status}: {detail}")
                 payload = await response.json()
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
-            raise PollError(type(exc).__name__) from None
+            detail = self._trongrid_safe_text(f"{type(exc).__name__}: {exc}")
+            raise PollError(detail[:240]) from None
         if not isinstance(payload, dict):
             raise PollError("Malformed TronGrid response")
         return payload
@@ -1096,11 +1200,10 @@ class WhalePoller:
         elif not state.get("fingerprint"):
             state.update(min_timestamp=self._tron_last_event_ms,
                          max_timestamp=now_ms, fingerprint="")
-        wallets = self.screener.wallet_addresses("TRON")
         pages = 0
         while pages < 5:
             params = {"event_name": "Transfer", "only_confirmed": "true",
-                      "limit": 200, "order_by": "block_timestamp,asc",
+                      "limit": 50, "order_by": "block_timestamp,asc",
                       "min_timestamp": state["min_timestamp"],
                       "max_timestamp": state["max_timestamp"]}
             if state.get("fingerprint"):
@@ -1120,7 +1223,7 @@ class WhalePoller:
                     raw_value = int(result.get("value") or 0)
                 except (TypeError, ValueError):
                     continue
-                if not raw_value or (sender not in wallets and recipient not in wallets):
+                if not raw_value:
                     continue
                 tx_hash = str(event.get("transaction_id") or event.get("transactionId") or "").lower()
                 if not re.fullmatch(r"[0-9a-f]{64}", tx_hash):
@@ -1149,39 +1252,48 @@ class WhalePoller:
             self.tron_status["error"] = "TronGrid backlog paginated; continuing next cycle"
 
     async def run_tron(self) -> None:
-        """Poll TRX blocks and USDT/USDC Transfer events every three seconds."""
+        """Poll TronGrid TRX blocks and confirmed TRC-20 transfers every 5s."""
         while True:
-            wallets = self.screener.wallet_addresses("TRON")
-            if not wallets:
-                self.tron_status.update(connected=False, state="waiting",
-                                        error="No indexed Tron CEX wallets")
-                await asyncio.sleep(30)
-                continue
+            self.tron_status["wallets"] = len(self.screener.wallet_addresses("TRON"))
             try:
                 async with aiohttp.ClientSession() as session:
                     while True:
                         now_ms = int(time.time() * 1000)
-                        self.tron_status.update(connected=True, state="online")
-                        block = await self._trongrid_post(
-                            session, f"{TRON_API_BASE}/wallet/getnowblock")
-                        if isinstance(block.get("transactions"), list):
-                            await self._process_tron_block(block)
+                        # The confirmed TRC-20 contract event API is the primary
+                        # feed and must not be blocked by the optional TRX block API.
                         for contract, (symbol, decimals) in TRON_USD_CONTRACTS.items():
                             await self._poll_tron_contract(session, contract, symbol,
                                                           decimals, now_ms)
-                        self._tron_last_event_ms = max(self._tron_last_event_ms, now_ms - 250)
-                        self.tron_status["last_success"] = time.time()
-                        self.tron_status["error"] = ""
+                        block_error = ""
+                        try:
+                            block = await self._trongrid_post(
+                                session, f"{TRON_API_BASE}/wallet/getnowblock")
+                            if isinstance(block.get("transactions"), list):
+                                await self._process_tron_block(block)
+                        except Exception as exc:  # optional native TRX source
+                            block_error = self._trongrid_safe_text(
+                                str(exc) or type(exc).__name__)[:200]
+                            self._log_tron_exception(exc)
+                        self._tron_last_event_ms = max(self._tron_last_event_ms,
+                                                       now_ms - 250)
+                        self.tron_status.update(connected=True, state="online",
+                            wallets=len(self.screener.wallet_addresses("TRON")),
+                            last_success=time.time(), error=block_error)
                         await asyncio.sleep(TRON_EVENT_INTERVAL)
             except asyncio.CancelledError:
                 self.tron_status.update(connected=False, state="stopped")
                 raise
-            except (PollError, BudgetExhausted, ValueError, OSError) as exc:
-                self.tron_status.update(connected=False, state="error", error=str(exc)[:100])
-                await asyncio.sleep(6)
-            except Exception as exc:  # noqa: BLE001 — keep optional TronGrid isolated
-                self.tron_status.update(connected=False, state="error", error=type(exc).__name__)
-                await asyncio.sleep(6)
+            except (PollError, BudgetExhausted, ValueError, OSError,
+                    aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                detail = self._trongrid_safe_text(str(exc) or type(exc).__name__)[:200]
+                self.tron_status.update(connected=False, state="error", error=detail)
+                self._log_tron_exception(exc)
+                await asyncio.sleep(TRON_EVENT_INTERVAL)
+            except Exception as exc:  # noqa: BLE001 — isolate TronGrid failures
+                detail = self._trongrid_safe_text(str(exc) or type(exc).__name__)[:200]
+                self.tron_status.update(connected=False, state="error", error=detail)
+                self._log_tron_exception(exc)
+                await asyncio.sleep(TRON_EVENT_INTERVAL)
 
     async def run_streams(self) -> None:
         """Run EVM/Solana/Tron realtime streams independently of REST catch-up."""

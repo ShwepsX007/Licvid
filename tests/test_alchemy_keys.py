@@ -11,7 +11,7 @@ from aiohttp import ClientSession, web
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from alchemy_keys import AlchemyKeyStore, KeyStoreError
 from whale_poller import WhalePoller, BudgetExhausted
-from whale_screener import WhaleScreener
+from whale_screener import WhaleScreener, alchemy_key
 
 SECRET = "test-secret-not-the-published-default"
 
@@ -21,8 +21,8 @@ class KeyStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "keys.enc"
             store = AlchemyKeyStore(SECRET, path=path)
-            a = store.add("https://eth-mainnet.g.alchemy.com/v2/fake-secret-A")
-            b = store.add("fake-secret-B")
+            a = store.add("  https://eth-mainnet.g.alchemy.com/v2/fake-secret-A/  ")
+            b = store.add(" fake-secret-B ")
             self.assertEqual(len(store.public()), 2)
             self.assertNotIn("fake-secret-A", path.read_text())
             self.assertNotIn("fake-secret-B", path.read_text())
@@ -46,6 +46,21 @@ class KeyStoreTests(unittest.TestCase):
             self.assertEqual(len(store.keys()), 1)
             self.assertEqual(store.keys()[0][1], "admin-secret")
             self.assertNotIn("env-secret", path.read_text())
+
+
+    def test_alchemy_key_accepts_bare_and_trimmed_v2_urls(self):
+        self.assertEqual(alchemy_key("  fake-secret  "), "fake-secret")
+        self.assertEqual(alchemy_key(
+            "  https://eth-mainnet.g.alchemy.com/v2/key-with.dots_123/  "),
+            "key-with.dots_123")
+        self.assertEqual(alchemy_key(
+            "wss://base-mainnet.g.alchemy.com/v2/another-key"), "another-key")
+        for value in (
+                "https://evil.example/v2/fake-key",
+                "https://eth-mainnet.g.alchemy.com/v2/fake-key/extra",
+                "https://eth-mainnet.g.alchemy.com/v2/fake-key?secret=x"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                alchemy_key(value)
 
 
 class RotationTests(unittest.IsolatedAsyncioTestCase):
@@ -85,6 +100,33 @@ class RotationTests(unittest.IsolatedAsyncioTestCase):
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
                 await runner.cleanup()
+
+    async def test_production_rpc_uses_chain_host_and_clean_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            screen = WhaleScreener("unused", lambda _: None, lambda _: None)
+            poller = WhalePoller(
+                " https://eth-mainnet.g.alchemy.com/v2/clean-key-123/ ", screen,
+                endpoints={"BASE": "https://base-mainnet.g.alchemy.com/v2/"},
+                state_file=Path(tmp) / "cursor.json")
+            calls = []
+            class FakeResponse:
+                status = 200
+                async def __aenter__(self):
+                    return self
+                async def __aexit__(self, *_args):
+                    return None
+                async def json(self):
+                    return {"jsonrpc": "2.0", "id": 1, "result": "0x2a"}
+            class FakeSession:
+                def post(self, url, **kwargs):
+                    calls.append((url, kwargs["json"]))
+                    return FakeResponse()
+            result = await poller._rpc(FakeSession(), "BASE", "eth_blockNumber", [])
+            self.assertEqual(result, "0x2a")
+            self.assertEqual(calls[0][0],
+                "https://base-mainnet.g.alchemy.com/v2/clean-key-123")
+            self.assertEqual(calls[0][1]["method"], "eth_blockNumber")
+            screen.close()
 
     async def test_switch_429_and_soft_per_key_budget_global_cap(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -17,6 +17,7 @@ import math
 import os
 import re
 import time
+from collections import deque
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -40,6 +41,17 @@ SPL_TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 TRON_API_BASE = os.getenv("LIQSCOPE_TRONGRID_URL", "https://api.trongrid.io").rstrip("/")
 TRON_EVENT_INTERVAL = 5.0
 SOLANA_WS_PENDING_BATCH = 100  # stay below Alchemy's 200 pending-request limit
+SOLANA_FALLBACK_QUEUE_SIZE = 64
+SOLANA_FALLBACK_SEEN_LIMIT = 5000
+try:
+    SOLANA_FALLBACK_CU_LIMIT = max(0, int(os.getenv("LIQSCOPE_SOLANA_FALLBACK_CU", "1000000")))
+except (TypeError, ValueError):
+    SOLANA_FALLBACK_CU_LIMIT = 1_000_000
+try:
+    SOLANA_FALLBACK_INTERVAL_OVERRIDE = max(
+        0.0, float(os.getenv("LIQSCOPE_SOLANA_FALLBACK_INTERVAL_SEC", "0")))
+except (TypeError, ValueError):
+    SOLANA_FALLBACK_INTERVAL_OVERRIDE = 0.0
 TRON_USD_CONTRACTS = dict(TRON_TOKENS)
 SOLANA_BLOCKS_PER_SEC = {"ETH": 1 / 12, "BNB": 1 / 3, "POLYGON": 0.5,
                          "ARBITRUM": 4.0, "BASE": 0.5}
@@ -152,7 +164,10 @@ class WhalePoller:
         self.errors: dict[str, str] = {}
         self.solana_status = {"network": "SOLANA", "provider": "alchemy",
                               "connected": False, "state": "waiting", "subscriptions": 0,
-                              "submitted": 0, "active_wallets": 0,
+                              "submitted": 0, "active_wallets": 0, "mode": "cex_wallets",
+                              "processing_state": "idle", "fallback_queue": 0,
+                              "fallback_dropped": 0, "fallback_cu": 0,
+                              "fallback_cu_limit": 0,
                               "events": 0, "last_success": 0.0, "error": ""}
         self.tron_status = {"network": "TRON", "provider": "trongrid",
                             "connected": False, "state": "waiting", "events": 0,
@@ -160,6 +175,9 @@ class WhalePoller:
         self._solana_last_signature: dict[str, str] = {}
         self._solana_balance: dict[str, int] = {}
         self._solana_inflight: set[str] = set()
+        self._solana_fallback_seen: set[str] = set()
+        self._solana_fallback_seen_order: deque[str] = deque()
+        self._solana_fallback_last_error_log = 0.0
         self._tron_seen: dict[str, float] = {}
         self._tron_last_event_ms = int(time.time() * 1000) - 15_000
         self.evm_streams = {chain: {"connected": False, "state": "waiting",
@@ -287,6 +305,18 @@ class WhalePoller:
                           "ok" if self.last_success else "waiting"),
                 "other_networks": other}
 
+    def _redact_api_keys(self, value: object, extra_secrets=()) -> str:
+        message = str(value)
+        try:
+            keys = self._keys()
+        except Exception:  # an unavailable key vault must not break safe logging
+            keys = []
+        secrets = [secret for _identifier, secret in keys if secret]
+        secrets.extend(secret for secret in extra_secrets if secret)
+        for secret in secrets:
+            message = message.replace(secret, "[redacted]")
+        return message
+
     async def _rpc(self, session: aiohttp.ClientSession, chain: str,
                    method: str, params: list) -> object:
         keys = self._keys()
@@ -320,7 +350,13 @@ class WhalePoller:
                         "jsonrpc": "2.0", "id": 1, "method": method, "params": params},
                         timeout=aiohttp.ClientTimeout(total=25)) as response:
                     if response.status == 400:
+                        try:
+                            detail = await response.text(errors="replace")
+                        except Exception as exc:  # preserve the RPC error even if body decoding fails
+                            detail = f"[unable to read response body: {type(exc).__name__}]"
                         self._reset_cursor(chain)
+                        log.error("[Alchemy] HTTP 400 network=%s method=%s response=%s",
+                                  chain, method, self._redact_api_keys(detail, extra_secrets=(key,)))
                         raise PollError("HTTP 400")
                     if response.status in (401, 403, 429):
                         reason = ("Неверный ключ или сеть запрещена" if response.status in (401, 403)
@@ -467,13 +503,13 @@ class WhalePoller:
             return
         wallet_rows = self.screener.wallet_addresses(chain)
         native_symbol = NATIVE_INDEXED.get(chain)
-        queries = [("external", None), ("erc20", list(TOKENS[chain]))]
-        for category, contracts in queries:
+        queries = [(["external", "erc20"], list(TOKENS[chain]))]
+        for categories, contracts in queries:
             page = None
             pages = 0
             while True:
                 query = {"fromBlock": to_hex_block(start), "toBlock": to_hex_block(end),
-                         "category": [category], "withMetadata": True,
+                         "category": categories, "withMetadata": True,
                          "excludeZeroValue": True, "maxCount": "0x3e8"}
                 if contracts:
                     query["contractAddresses"] = contracts
@@ -491,7 +527,10 @@ class WhalePoller:
                         continue
                     raw_contract = tx.get("rawContract") or {}
                     contract = str(raw_contract.get("address") or tx.get("contractAddress") or "").lower()
-                    if category == "external":
+                    tx_category = str(tx.get("category") or "").lower()
+                    if tx_category not in categories:
+                        tx_category = "erc20" if contract in TOKENS[chain] else "external"
+                    if tx_category == "external":
                         symbol = str(tx.get("asset") or native_symbol or "")
                         decimals = 18
                         index = "native"
@@ -707,11 +746,42 @@ class WhalePoller:
             retry = min(60.0, retry * 2)
 
     def _solana_safe_text(self, value: object) -> str:
-        message = str(value).strip()
-        for _identifier, secret in self._keys():
-            if secret:
-                message = message.replace(secret, "[redacted]")
-        return message
+        return self._redact_api_keys(str(value).strip())
+
+    def _solana_fallback_budget_state(self) -> tuple[int, int]:
+        month = datetime.now(timezone.utc).strftime("%Y-%m")
+        if self.state.get("solana_fallback_month") != month:
+            self.state["solana_fallback_month"] = month
+            self.state["solana_fallback_cu"] = 0
+            self._save()
+        try:
+            used = max(0, int(self.state.get("solana_fallback_cu", 0) or 0))
+        except (TypeError, ValueError):
+            used = 0
+            self.state["solana_fallback_cu"] = 0
+        limit = min(SOLANA_FALLBACK_CU_LIMIT, max(0, self.monthly_cu // 10))
+        self.solana_status.update(fallback_cu=used, fallback_cu_limit=limit)
+        return used, limit
+
+    def _solana_fallback_interval(self, limit: int) -> float:
+        if SOLANA_FALLBACK_INTERVAL_OVERRIDE > 0:
+            return SOLANA_FALLBACK_INTERVAL_OVERRIDE
+        if limit <= 0:
+            return 30.0 * 24 * 60 * 60
+        # Spread the reserved 10% of monthly CU over a 30-day month instead
+        # of letting a noisy network-wide stream consume it in a burst.
+        month_seconds = 30.0 * 24 * 60 * 60
+        return max(1.0, month_seconds * METHOD_CU["solana_getTransaction"] / limit)
+
+    def _remember_solana_fallback_signature(self, signature: str) -> bool:
+        if signature in self._solana_fallback_seen:
+            return False
+        if len(self._solana_fallback_seen_order) >= SOLANA_FALLBACK_SEEN_LIMIT:
+            expired = self._solana_fallback_seen_order.popleft()
+            self._solana_fallback_seen.discard(expired)
+        self._solana_fallback_seen_order.append(signature)
+        self._solana_fallback_seen.add(signature)
+        return True
 
     def _log_solana_exception(self, exc: BaseException) -> None:
         """Log provider failures with a traceback, masking API keys in URLs."""
@@ -724,12 +794,24 @@ class WhalePoller:
             log.error("[Solana] Ошибка: %s", message,
                       exc_info=(type(safe_exc), safe_exc, exc.__traceback__))
 
-    async def _solana_rpc(self, session, method: str, params: list):
+    async def _solana_rpc(self, session, method: str, params: list, *,
+                          fallback: bool = False):
         keys = self._keys()
         if not keys:
             raise NoKeys("Alchemy API key is not configured")
         key_id, key = keys[0]
+        fallback_used = fallback_limit = 0
+        if fallback:
+            fallback_used, fallback_limit = self._solana_fallback_budget_state()
+            cost = METHOD_CU.get("solana_" + method, 0)
+            if not cost or fallback_used + cost > fallback_limit:
+                raise BudgetExhausted("solana_fallback")
         self._reserve("solana_" + method, key_id)
+        if fallback:
+            self.state["solana_fallback_cu"] = fallback_used + cost
+            self._save()
+            self.solana_status.update(fallback_cu=fallback_used + cost,
+                                      fallback_cu_limit=fallback_limit)
         url = _solana_http_url(SOLANA_HTTP_BASE, key)
         try:
             async with session.post(url, json={"jsonrpc": "2.0", "id": 1,
@@ -885,6 +967,121 @@ class WhalePoller:
             return 1
         return 0
 
+    async def _solana_process_network_token_tx(self, tx: dict) -> int:
+        """Extract individual USDT/USDC SPL transfers from a network fallback tx."""
+        if not isinstance(tx, dict) or (tx.get("meta") or {}).get("err"):
+            return 0
+        signature = self._solana_tx_signature(tx)
+        if not re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{64,100}", signature):
+            return 0
+        meta = tx.get("meta") or {}
+        pre_rows = meta.get("preTokenBalances") or []
+        post_rows = meta.get("postTokenBalances") or []
+
+        def balances_by_index(rows):
+            result = {}
+            for row in rows:
+                if not isinstance(row, dict) or row.get("mint") not in SOLANA_TOKENS:
+                    continue
+                try:
+                    index = int(row.get("accountIndex"))
+                    amount = int((row.get("uiTokenAmount") or {}).get("amount") or 0)
+                except (TypeError, ValueError):
+                    continue
+                record = result.setdefault(index, {
+                    "mint": str(row.get("mint") or ""),
+                    "owner": str(row.get("owner") or ""),
+                    "amount": 0,
+                    "decimals": SOLANA_TOKENS[row["mint"]][1],
+                })
+                record["amount"] += amount
+                if row.get("owner"):
+                    record["owner"] = str(row["owner"])
+                try:
+                    record["decimals"] = int((row.get("uiTokenAmount") or {}).get(
+                        "decimals", record["decimals"]))
+                except (TypeError, ValueError):
+                    pass
+            return result
+
+        pre = balances_by_index(pre_rows)
+        post = balances_by_index(post_rows)
+        message = (tx.get("transaction") or {}).get("message") or {}
+        account_keys = message.get("accountKeys") or []
+        pubkeys = {}
+        for index, key in enumerate(account_keys):
+            if isinstance(key, dict):
+                pubkeys[index] = str(key.get("pubkey") or "")
+            else:
+                pubkeys[index] = str(key)
+        index_by_pubkey = {pubkey: index for index, pubkey in pubkeys.items() if pubkey}
+        price_by_mint = {}
+        count = 0
+        for index, instruction in enumerate(self._solana_instructions(tx)):
+            parsed = instruction.get("parsed") or {}
+            instruction_type = str(parsed.get("type") or "").lower()
+            if instruction_type not in ("transfer", "transferchecked"):
+                continue
+            program = str(instruction.get("program") or "").lower()
+            program_id = str(instruction.get("programId") or "")
+            if ((program and program not in ("spl-token", "spl_token")) or
+                    (program_id and program_id != SPL_TOKEN_PROGRAM)):
+                continue
+            info = parsed.get("info") or {}
+            source_account = str(info.get("source") or "")
+            destination_account = str(info.get("destination") or "")
+            source_index = index_by_pubkey.get(source_account)
+            destination_index = index_by_pubkey.get(destination_account)
+            source_pre = pre.get(source_index, {})
+            source_post = post.get(source_index, {})
+            destination_pre = pre.get(destination_index, {})
+            destination_post = post.get(destination_index, {})
+            token_amount = info.get("tokenAmount") or {}
+            mint = str(info.get("mint") or source_post.get("mint") or source_pre.get("mint") or
+                       destination_post.get("mint") or destination_pre.get("mint") or "")
+            token = SOLANA_TOKENS.get(mint)
+            if not token:
+                continue
+            symbol, default_decimals = token
+            decimals = token_amount.get("decimals")
+            if decimals is None:
+                decimals = (source_post.get("decimals") or source_pre.get("decimals") or
+                            destination_post.get("decimals") or destination_pre.get("decimals") or
+                            default_decimals)
+            try:
+                decimals = int(decimals)
+                raw_amount = token_amount.get("amount")
+                if raw_amount is None:
+                    raw_amount = info.get("amount")
+                if raw_amount is None and source_index is not None:
+                    raw_amount = source_pre.get("amount", 0) - source_post.get("amount", 0)
+                if raw_amount is None and destination_index is not None:
+                    raw_amount = destination_post.get("amount", 0) - destination_pre.get("amount", 0)
+                raw_amount = int(raw_amount or 0)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if decimals < 0 or decimals > 18 or raw_amount <= 0:
+                continue
+            amount = float(Decimal(raw_amount) / (Decimal(10) ** decimals))
+            if mint not in price_by_mint:
+                price_by_mint[mint] = self.screener._price(symbol)
+            price = price_by_mint[mint]
+            if price is None:
+                continue
+            usd = amount * price
+            if not math.isfinite(usd) or usd <= 100_000 or usd < self.screener.min_usd:
+                continue
+            sender = str(source_pre.get("owner") or source_post.get("owner") or source_account)
+            recipient = str(destination_pre.get("owner") or destination_post.get("owner") or
+                            destination_account)
+            if not sender or not recipient:
+                continue
+            if await self.screener.record_transfer(
+                    "SOLANA", signature, f"spl-network:{index}:{mint}", symbol, amount,
+                    usd, sender, recipient, timestamp=tx.get("blockTime"), source="realtime"):
+                count += 1
+        return count
+
     async def _solana_recent_transactions(self, session, address: str, owner: str,
                                           mint: str | None = None) -> None:
         lock_key = address + (":" + mint if mint else ":native")
@@ -939,54 +1136,107 @@ class WhalePoller:
             self._solana_inflight.discard(lock_key)
 
     async def run_solana(self) -> None:
-        """Monitor SPL USDT/USDC token accounts and native SOL CEX accounts.
+        """Stream indexed CEX wallets, or fall back to Token Program logs.
 
-        Alchemy's Solana websocket has a 200-request in-flight limit and a
-        1,000-subscription limit per connection. Subscribe in acknowledged
-        batches so a large CEX registry cannot silently stall setup.
+        With no indexed Solana CEX owners, a single logsSubscribe mentions
+        filter covers Token Program transfers. Signature processing is queued,
+        deduplicated, rate-limited and held to a monthly CU reserve so this
+        network-wide fallback cannot starve the EVM feeds.
         """
         retry = 3.0
         while True:
             keys = self._keys()
             wallets = self.screener.wallet_addresses("SOLANA")
+            fallback = not bool(wallets)
+            mode = "network_fallback" if fallback else "cex_wallets"
             if not keys:
                 self.solana_status.update(connected=False, state="waiting",
-                    subscriptions=0, submitted=0, active_wallets=0,
+                    subscriptions=0, submitted=0, active_wallets=0, mode=mode,
+                    processing_state="waiting_for_key",
                     error="Alchemy API key is not configured")
                 await asyncio.sleep(5)
-                continue
-            if not wallets:
-                self.solana_status.update(connected=False, state="waiting",
-                    subscriptions=0, submitted=0, active_wallets=0,
-                    error="No indexed Solana CEX wallets")
-                log.warning("[Solana] Ожидание: в реестре нет CEX-адресов Solana")
-                await asyncio.sleep(30)
                 continue
 
             key_id, key = keys[0]
             url = _solana_http_url(SOLANA_WS_BASE, key)
+            fallback_worker = None
             try:
                 async with aiohttp.ClientSession() as session:
                     async with session.ws_connect(url, heartbeat=30, receive_timeout=90) as ws:
                         owners = list(wallets.items())[:SOLANA_MAX_WALLETS]
                         requests = []
-                        for owner, _name in owners:
-                            requests.append(("accountSubscribe", [owner, {
-                                "commitment": "confirmed", "encoding": "base64"}],
-                                ("native", owner, None)))
-                            for mint in SOLANA_TOKENS:
-                                requests.append(("programSubscribe", [SPL_TOKEN_PROGRAM, {
-                                    "commitment": "confirmed", "encoding": "base64",
-                                    "filters": [{"dataSize": 165},
-                                        {"memcmp": {"offset": 0, "bytes": mint}},
-                                        {"memcmp": {"offset": 32, "bytes": owner}}]}],
-                                    ("spl", owner, mint)))
+                        queue = asyncio.Queue(maxsize=SOLANA_FALLBACK_QUEUE_SIZE) if fallback else None
+                        if fallback:
+                            requests.append(("logsSubscribe", [{
+                                "mentions": [SPL_TOKEN_PROGRAM]}, {"commitment": "confirmed"}],
+                                ("fallback", SPL_TOKEN_PROGRAM, None)))
+                        else:
+                            for owner, _name in owners:
+                                requests.append(("accountSubscribe", [owner, {
+                                    "commitment": "confirmed", "encoding": "base64"}],
+                                    ("native", owner, None)))
+                                for mint in SOLANA_TOKENS:
+                                    requests.append(("programSubscribe", [SPL_TOKEN_PROGRAM, {
+                                        "commitment": "confirmed", "encoding": "base64",
+                                        "filters": [{"dataSize": 165},
+                                            {"memcmp": {"offset": 0, "bytes": mint}},
+                                            {"memcmp": {"offset": 32, "bytes": owner}}]}],
+                                        ("spl", owner, mint)))
 
                         pending: dict[int, tuple[str, str, str | None]] = {}
                         active: dict[int, tuple[str, str, str | None]] = {}
                         request_id = 1
                         accepted = 0
                         rejected = 0
+
+                        async def fallback_worker_main() -> None:
+                            next_allowed = 0.0
+                            while True:
+                                signature = await queue.get()
+                                limit = 0
+                                try:
+                                    wait = next_allowed - asyncio.get_running_loop().time()
+                                    if wait > 0:
+                                        await asyncio.sleep(wait)
+                                    used, limit = self._solana_fallback_budget_state()
+                                    cost = METHOD_CU["solana_getTransaction"]
+                                    if limit <= 0 or used + cost > limit:
+                                        self.solana_status.update(
+                                            processing_state="budget_limited",
+                                            fallback_dropped=int(self.solana_status.get(
+                                                "fallback_dropped", 0)) + 1,
+                                            error="Token Program fallback is connected; monthly CU reserve reached")
+                                        continue
+                                    tx = await self._solana_rpc(session, "getTransaction", [signature, {
+                                        "encoding": "jsonParsed", "commitment": "confirmed",
+                                        "maxSupportedTransactionVersion": 0}], fallback=True)
+                                    if isinstance(tx, dict):
+                                        self.solana_status["events"] += (
+                                            await self._solana_process_network_token_tx(tx))
+                                    self.solana_status.update(last_success=time.time(), error="",
+                                                              processing_state="active")
+                                    next_allowed = (asyncio.get_running_loop().time() +
+                                                    self._solana_fallback_interval(limit))
+                                except asyncio.CancelledError:
+                                    raise
+                                except BudgetExhausted:
+                                    self.solana_status.update(processing_state="budget_limited",
+                                        error="Token Program fallback is connected; Alchemy CU budget reached")
+                                except Exception as exc:  # isolate a bad signature from the live feed
+                                    if limit > 0:
+                                        next_allowed = (asyncio.get_running_loop().time() +
+                                                        self._solana_fallback_interval(limit))
+                                    self.solana_status["fallback_dropped"] = int(
+                                        self.solana_status.get("fallback_dropped", 0)) + 1
+                                    self.solana_status["error"] = self._solana_safe_text(
+                                        str(exc) or type(exc).__name__)[:200]
+                                    now = time.time()
+                                    if now - self._solana_fallback_last_error_log >= 60:
+                                        self._log_solana_exception(exc)
+                                        self._solana_fallback_last_error_log = now
+                                finally:
+                                    queue.task_done()
+                                    self.solana_status["fallback_queue"] = queue.qsize()
 
                         async def handle_message(message) -> None:
                             nonlocal accepted, rejected
@@ -1028,10 +1278,32 @@ class WhalePoller:
                                 return
 
                             method = payload.get("method")
+                            params = payload.get("params") or {}
+                            subscription = params.get("subscription")
+                            target = active.get(subscription)
+                            if method == "logsNotification" and fallback and target:
+                                result = params.get("result") or {}
+                                value = result.get("value") or {}
+                                if value.get("err") is not None:
+                                    return
+                                logs = value.get("logs") or []
+                                if not any("Instruction: Transfer" in str(line) for line in logs):
+                                    return
+                                signature = str(value.get("signature") or "")
+                                if not re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{64,100}", signature):
+                                    return
+                                if not self._remember_solana_fallback_signature(signature):
+                                    return
+                                if queue.full():
+                                    self.solana_status["fallback_dropped"] = int(
+                                        self.solana_status.get("fallback_dropped", 0)) + 1
+                                else:
+                                    queue.put_nowait(signature)
+                                    self.solana_status.update(fallback_queue=queue.qsize(),
+                                                              last_success=time.time())
+                                return
                             if method not in ("accountNotification", "programNotification"):
                                 return
-                            params = payload.get("params") or {}
-                            target = active.get(params.get("subscription"))
                             if not target:
                                 return
                             kind, owner, mint = target
@@ -1063,7 +1335,8 @@ class WhalePoller:
                                                     "method": method, "params": params})
                                 request_id += 1
                             self.solana_status.update(submitted=request_id - 1,
-                                                      active_wallets=len(owners))
+                                                      active_wallets=len(owners), mode=mode,
+                                                      processing_state="subscribing")
                             while any(item in pending for item in batch_ids):
                                 message = await ws.receive(timeout=20)
                                 await handle_message(message)
@@ -1071,10 +1344,18 @@ class WhalePoller:
                         if accepted <= 0:
                             detail = self.solana_status.get("error") or "All Solana subscriptions were rejected"
                             raise PollError(f"{detail} ({rejected}/{len(requests)} rejected)")
+                        fallback_used, fallback_limit = self._solana_fallback_budget_state() if fallback else (0, 0)
                         self.solana_status.update(connected=True, state="online",
                             subscriptions=accepted, submitted=len(requests),
-                            active_wallets=len(owners), error=(
+                            active_wallets=len(owners), mode=mode,
+                            processing_state="queued" if fallback else "active",
+                            fallback_queue=queue.qsize() if queue else 0,
+                            fallback_cu=fallback_used, fallback_cu_limit=fallback_limit,
+                            last_success=time.time(), error=(
                                 f"{rejected} Solana subscription(s) rejected" if rejected else ""))
+                        if fallback:
+                            fallback_worker = asyncio.create_task(
+                                fallback_worker_main(), name="whale-solana-token-fallback")
                         retry = 3.0
                         while True:
                             message = await ws.receive()
@@ -1085,12 +1366,18 @@ class WhalePoller:
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError,
                     PollError) as exc:
                 self.solana_status.update(connected=False, state="error",
-                                              error=self._solana_safe_text(str(exc) or type(exc).__name__)[:200])
+                    mode=mode, error=self._solana_safe_text(
+                        str(exc) or type(exc).__name__)[:200])
                 self._log_solana_exception(exc)
             except Exception as exc:  # noqa: BLE001 — keep a Solana provider outage isolated
-                self.solana_status.update(connected=False, state="error",
-                                              error=self._solana_safe_text(str(exc) or type(exc).__name__)[:200])
+                self.solana_status.update(connected=False, state="error", mode=mode,
+                    error=self._solana_safe_text(
+                        str(exc) or type(exc).__name__)[:200])
                 self._log_solana_exception(exc)
+            finally:
+                if fallback_worker:
+                    fallback_worker.cancel()
+                    await asyncio.gather(fallback_worker, return_exceptions=True)
             await asyncio.sleep(min(60.0, retry))
             retry = min(60.0, retry * 2)
 

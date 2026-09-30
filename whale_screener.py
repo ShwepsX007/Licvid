@@ -95,17 +95,18 @@ def alchemy_key(value: str) -> str:
     The URL's network is deliberately ignored: the same credential is used
     with each supported network's own endpoint. Do not include secrets in errors.
     """
-    value = value.strip()
+    value = str(value or "").strip()
     if "://" in value or "/" in value or "?" in value or "#" in value:
         try:
             url = urlsplit(value)
+            path = url.path[:-1] if url.path.endswith("/") else url.path
             if (url.scheme not in ("https", "wss")
                     or not re.fullmatch(r"[a-z0-9-]+\.g\.alchemy\.com", url.hostname or "")
                     or url.username or url.password or url.port
                     or url.query or url.fragment
-                    or not re.fullmatch(r"/v2/[A-Za-z0-9._~-]+", url.path)):
+                    or not re.fullmatch(r"/v2/[A-Za-z0-9._~-]+", path)):
                 raise ValueError
-            value = url.path.removeprefix("/v2/")
+            value = path.removeprefix("/v2/")
         except ValueError:
             raise ValueError("Provide an Alchemy API key or an HTTPS/WSS Alchemy /v2/ URL") from None
     if not re.fullmatch(r"[A-Za-z0-9._~-]+", value):

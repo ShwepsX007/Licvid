@@ -34,6 +34,15 @@ Alchemy Free даёт 30 млн CU/месяц на всё приложение, 
 - Глобальный обход каждого EVM-блока не включён: одна только Arbitrum при
   номинальных 250 мс и 20 CU за блок стоила бы около **207 360 000 CU за 30
   дней**, ещё без токенов, других сетей, повторов и цен.
+- Если в реестре нет Solana CEX-адресов, резервный поток подписывается на
+  Token Program (`logsSubscribe` с одним `mentions`) и запрашивает `getTransaction`
+  только для SPL Transfer/TransferChecked. В очередь попадают USDT/USDC-переводы
+  **строго выше $100 000**. Очередь ограничена 64 сигнатурами; один worker
+  обрабатывает их с pace limit, а повторные signature ограниченно дедуплицируются.
+  Fallback резервирует не более 10% локального месячного CU и не более 1 млн CU
+  по умолчанию (`LIQSCOPE_SOLANA_FALLBACK_CU`); вызовы распределяются по месяцу.
+  Размер резерва и интервал можно настроить переменными
+  `LIQSCOPE_SOLANA_FALLBACK_CU` и `LIQSCOPE_SOLANA_FALLBACK_INTERVAL_SEC`.
 
 ## Поддерживаемый поток
 
@@ -44,7 +53,7 @@ Alchemy Free даёт 30 млн CU/месяц на всё приложение, 
 | Polygon | Alchemy WS (ERC-20 и подтверждённые нативные CEX-переводы); HTTP catch-up | USDT, два USDC, POL |
 | Arbitrum | Alchemy WS (ERC-20 и подтверждённые нативные CEX-переводы); HTTP catch-up | USDT, USDC, DAI, WBTC, ETH |
 | Base | Alchemy WS для ERC-20; HTTP catch-up | USDC, ETH через Transfers API; mined-native WS здесь не включён |
-| Solana | Alchemy WS по известным CEX account/SPL token accounts, HTTP разбор новых signatures | SOL, USDT, USDC; ограничение подписок `LIQSCOPE_SOLANA_MAX_WALLETS` (по умолчанию 250) |
+| Solana | Alchemy WS по известным CEX account/SPL token accounts; если реестр пуст — Token Program logs fallback + `getTransaction` | SOL, USDT, USDC; при fallback только USDT/USDC >$100K; CEX подписки ограничены `LIQSCOPE_SOLANA_MAX_WALLETS` (250) |
 | Tron | TronGrid: подтверждённые блоки и TRC-20 Transfer events примерно раз в 3 секунды | TRX, USDT, USDC; ключ необязателен, публичный доступ ограничен квотами |
 | Hyperliquid Core | Нативный публичный Hyperliquid API: `meta` + WS `trades` | Рыночные fills от $50K, не депозиты/выводы; прежняя Hyperliquid API-логика сохранена, Alchemy не используется |
 

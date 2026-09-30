@@ -1,10 +1,368 @@
 {
-  "0x28c6c06298d514db089934071355e5743bf21d60": "Binance 14",
-  "0x21a31ee1afc51d94c2efccaa2092ad1028285549": "Binance 15",
-  "0x742d35cc6634c0532925a3b844bc454e4438f44e": "Bitfinex",
-  "0x267be1c1d684f78cb4f6a176c4911b741e4ffdc0": "Kraken 4",
-  "0xa9d1e08c7793af67e9d92fe308d5697fb81d3e43": "Coinbase 10",
-  "0x71660c4005ba85c37ccec55d0c4493e66fe775d3": "Coinbase",
-  "0x0d0707963952f2a5729429532680302636605008": "Gate.io",
-  "0x98ec059dc3adfbdd63429454aeb0c990fba4a128": "OKX"
+  "version": 2,
+  "updated_at": 1790762498,
+  "source": "manual",
+  "automatic": [],
+  "manual": [
+    {
+      "id": "54c27ef4dad0891e",
+      "chain": "ARBITRUM",
+      "address": "0x28c6c06298d514db089934071355e5743bf21d60",
+      "name": "Binance 14",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "4a2a177989df5514",
+      "chain": "ARBITRUM",
+      "address": "0x21a31ee1afc51d94c2efccaa2092ad1028285549",
+      "name": "Binance 15",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "1906f28747c22101",
+      "chain": "ARBITRUM",
+      "address": "0x742d35cc6634c0532925a3b844bc454e4438f44e",
+      "name": "Bitfinex",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "445473a0ea95f862",
+      "chain": "ARBITRUM",
+      "address": "0x71660c4005ba85c37ccec55d0c4493e66fe775d3",
+      "name": "Coinbase",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "b9717230a9d00480",
+      "chain": "ARBITRUM",
+      "address": "0xa9d1e08c7793af67e9d92fe308d5697fb81d3e43",
+      "name": "Coinbase 10",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "60677023f06558b7",
+      "chain": "ARBITRUM",
+      "address": "0x0d0707963952f2a5729429532680302636605008",
+      "name": "Gate.io",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "be56069ae0eeea52",
+      "chain": "ARBITRUM",
+      "address": "0x267be1c1d684f78cb4f6a176c4911b741e4ffdc0",
+      "name": "Kraken 4",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "8c722e5d6dbfb698",
+      "chain": "ARBITRUM",
+      "address": "0x98ec059dc3adfbdd63429454aeb0c990fba4a128",
+      "name": "OKX",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "ddcbc485b9299bb3",
+      "chain": "BASE",
+      "address": "0x28c6c06298d514db089934071355e5743bf21d60",
+      "name": "Binance 14",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "baeb91347c35cf5c",
+      "chain": "BASE",
+      "address": "0x21a31ee1afc51d94c2efccaa2092ad1028285549",
+      "name": "Binance 15",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "5c0e2fdcbfba3406",
+      "chain": "BASE",
+      "address": "0x742d35cc6634c0532925a3b844bc454e4438f44e",
+      "name": "Bitfinex",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "5650f645297781f1",
+      "chain": "BASE",
+      "address": "0x71660c4005ba85c37ccec55d0c4493e66fe775d3",
+      "name": "Coinbase",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "52123523ed39eb31",
+      "chain": "BASE",
+      "address": "0xa9d1e08c7793af67e9d92fe308d5697fb81d3e43",
+      "name": "Coinbase 10",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "10888a07c0120250",
+      "chain": "BASE",
+      "address": "0x0d0707963952f2a5729429532680302636605008",
+      "name": "Gate.io",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "525137a69bbde93e",
+      "chain": "BASE",
+      "address": "0x267be1c1d684f78cb4f6a176c4911b741e4ffdc0",
+      "name": "Kraken 4",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "d705e272b3e77261",
+      "chain": "BASE",
+      "address": "0x98ec059dc3adfbdd63429454aeb0c990fba4a128",
+      "name": "OKX",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "4069af018f7cc943",
+      "chain": "BNB",
+      "address": "0x28c6c06298d514db089934071355e5743bf21d60",
+      "name": "Binance 14",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "edd0fd2bfe485302",
+      "chain": "BNB",
+      "address": "0x21a31ee1afc51d94c2efccaa2092ad1028285549",
+      "name": "Binance 15",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "5e02eac6ae33fc77",
+      "chain": "BNB",
+      "address": "0x742d35cc6634c0532925a3b844bc454e4438f44e",
+      "name": "Bitfinex",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "780e9fa8db7469ed",
+      "chain": "BNB",
+      "address": "0x71660c4005ba85c37ccec55d0c4493e66fe775d3",
+      "name": "Coinbase",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "263d4a8637ededd9",
+      "chain": "BNB",
+      "address": "0xa9d1e08c7793af67e9d92fe308d5697fb81d3e43",
+      "name": "Coinbase 10",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "c5ed7baed26d40e1",
+      "chain": "BNB",
+      "address": "0x0d0707963952f2a5729429532680302636605008",
+      "name": "Gate.io",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "eab4e6eb55cee001",
+      "chain": "BNB",
+      "address": "0x267be1c1d684f78cb4f6a176c4911b741e4ffdc0",
+      "name": "Kraken 4",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "502fc3d9f0cc69d5",
+      "chain": "BNB",
+      "address": "0x98ec059dc3adfbdd63429454aeb0c990fba4a128",
+      "name": "OKX",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "3d742b813b9c76db",
+      "chain": "ETH",
+      "address": "0x28c6c06298d514db089934071355e5743bf21d60",
+      "name": "Binance 14",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "d8e1f4ddf98528ea",
+      "chain": "ETH",
+      "address": "0x21a31ee1afc51d94c2efccaa2092ad1028285549",
+      "name": "Binance 15",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "4ab063e6ccf63194",
+      "chain": "ETH",
+      "address": "0x742d35cc6634c0532925a3b844bc454e4438f44e",
+      "name": "Bitfinex",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "03feedac4b1cf236",
+      "chain": "ETH",
+      "address": "0x71660c4005ba85c37ccec55d0c4493e66fe775d3",
+      "name": "Coinbase",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "644b1c9b94ebf407",
+      "chain": "ETH",
+      "address": "0xa9d1e08c7793af67e9d92fe308d5697fb81d3e43",
+      "name": "Coinbase 10",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "85cf92c4e96bf0ae",
+      "chain": "ETH",
+      "address": "0x0d0707963952f2a5729429532680302636605008",
+      "name": "Gate.io",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "05772f970bc5b58c",
+      "chain": "ETH",
+      "address": "0x267be1c1d684f78cb4f6a176c4911b741e4ffdc0",
+      "name": "Kraken 4",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "2806c067b85ee5b3",
+      "chain": "ETH",
+      "address": "0x98ec059dc3adfbdd63429454aeb0c990fba4a128",
+      "name": "OKX",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "c981abdaa529eab1",
+      "chain": "POLYGON",
+      "address": "0x28c6c06298d514db089934071355e5743bf21d60",
+      "name": "Binance 14",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "375d8bfc8a947ffe",
+      "chain": "POLYGON",
+      "address": "0x21a31ee1afc51d94c2efccaa2092ad1028285549",
+      "name": "Binance 15",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "8c7e21e0c090169c",
+      "chain": "POLYGON",
+      "address": "0x742d35cc6634c0532925a3b844bc454e4438f44e",
+      "name": "Bitfinex",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "2ae340426effb016",
+      "chain": "POLYGON",
+      "address": "0x71660c4005ba85c37ccec55d0c4493e66fe775d3",
+      "name": "Coinbase",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "781bd6774be2e8c1",
+      "chain": "POLYGON",
+      "address": "0xa9d1e08c7793af67e9d92fe308d5697fb81d3e43",
+      "name": "Coinbase 10",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "11a19c7a831880d9",
+      "chain": "POLYGON",
+      "address": "0x0d0707963952f2a5729429532680302636605008",
+      "name": "Gate.io",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "8302c685282c7c2e",
+      "chain": "POLYGON",
+      "address": "0x267be1c1d684f78cb4f6a176c4911b741e4ffdc0",
+      "name": "Kraken 4",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "0a28e849dff0d36b",
+      "chain": "POLYGON",
+      "address": "0x98ec059dc3adfbdd63429454aeb0c990fba4a128",
+      "name": "OKX",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "ee3cc1e17bb01de6",
+      "chain": "SOLANA",
+      "address": "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+      "name": "Binance Hot Wallet 1",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "249524ddfb5a9145",
+      "chain": "SOLANA",
+      "address": "AC5RDfQFmDS1deWZos921JfqscXdByf8BKHs5ACWjtW2",
+      "name": "Bybit wallet 1",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "c6af4c0cd571b2fd",
+      "chain": "SOLANA",
+      "address": "42brAgAVNzMBP7aaktPvAmBSPEkehnFQejiZc53EpJFd",
+      "name": "Bybit wallet 2",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "901fdc114d81fa7b",
+      "chain": "SOLANA",
+      "address": "2AQdpHJ2JpcEgPiATUXjQxA8QmafFegfQwSLWSprPicm",
+      "name": "Coinbase Commerce",
+      "source": "manual",
+      "updated_at": 1790762498
+    },
+    {
+      "id": "e8954a1485de14ea",
+      "chain": "SOLANA",
+      "address": "GJRs4FwHtemZ5ZE9x3FNvJ8TMwitKTh21yxdRPqn7npE",
+      "name": "Coinbase Hot Wallet 2",
+      "source": "manual",
+      "updated_at": 1790762498
+    }
+  ]
 }

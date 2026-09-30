@@ -17,7 +17,7 @@ from cex_wallets_updater import (
     valid_address,
 )
 from tron_address import tron_to_base58, tron_to_hex
-from whale_poller import MINED_TRANSACTION_CHAINS, WhalePoller
+from whale_poller import BudgetExhausted, MINED_TRANSACTION_CHAINS, SPL_TOKEN_PROGRAM, WhalePoller
 from whale_screener import SOLANA_TOKENS, TRON_TOKENS, WhaleScreener
 
 
@@ -48,6 +48,39 @@ class CEXWalletRegistryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(valid_address("SOLANA", "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"))
         self.assertTrue(valid_address("TRON", "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"))
         self.assertFalse(valid_address("TRON", "T" + "1" * 33))
+
+    def test_solana_wallet_records_are_validated_and_legacy_evm_scope_survives(self):
+        # Base58/32-byte validity does not prove exchange ownership; 5tzFki... is
+        # syntactically valid but deliberately excluded from the labeled registry.
+        valid = [
+            "5tzFkiKsc22KEChR37aTBD323ApAo28nJZ34352fgd5e",
+            "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+            "2AQdpHJ2JpcEgPiATUXjQxA8QmafFegfQwSLWSprPicm",
+            "GJRs4FwHtemZ5ZE9x3FNvJ8TMwitKTh21yxdRPqn7npE",
+            "AC5RDfQFmDS1deWZos921JfqscXdByf8BKHs5ACWjtW2",
+            "42brAgAVNzMBP7aaktPvAmBSPEkehnFQejiZc53EpJFd",
+        ]
+        for address in valid:
+            self.assertTrue(valid_address("SOLANA", address), address)
+        invalid = [
+            "2OJ13z19qaA8f8T3u1L5qT3xJ7Y3P51S1v5",  # forbidden base58 O/0
+            "H8sMJSC38A243qT8up9Bv21L5tX2M3Y3P51S1v5",  # short decoded key
+            "2AQdpLPUdVe12Bk18KX1MS2bY7peE4G23M13T41L5v5",
+            "AC57B932p4A8f3T8up9Bv21L5tX2M3Y3P51S1v5",
+            "6f9U9L523M13T41L5v53T8up9Bv21L5tX2M3Y3P51S1v5",
+        ]
+        for address in invalid:
+            self.assertFalse(valid_address("SOLANA", address), address)
+
+        registry = CEXWalletRegistry(Path(__file__).resolve().parents[1] /
+                                     "data" / "cex_wallets.json")
+        records = registry.records()
+        self.assertNotIn("5tzFkiKsc22KEChR37aTBD323ApAo28nJZ34352fgd5e",
+                         {row["address"] for row in records})
+        self.assertEqual(sum(row["chain"] == "SOLANA" for row in records), 5)
+        self.assertEqual(sum(row["chain"] == "ETH" for row in records), 8)
+        self.assertTrue(all(valid_address("SOLANA", row["address"])
+                            for row in records if row["chain"] == "SOLANA"))
 
     async def test_manual_addresses_survive_refresh_update_delete_and_backup(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -222,6 +255,107 @@ class MultichainTransferTests(unittest.IsolatedAsyncioTestCase):
                     await task
             screen.close()
 
+    async def test_solana_network_fallback_subscribes_and_processes_large_spl_transfers(self):
+        usdc = next(mint for mint, (symbol, _) in SOLANA_TOKENS.items() if symbol == "USDC")
+        source_owner, destination_owner = "3" * 32, "4" * 32
+        source_account, destination_account = "1" * 32, "2" * 32
+        signature = "5" * 64
+        raw_amount = 150_000 * 10**6
+        def balance(index, owner, amount):
+            return {"accountIndex": index, "owner": owner, "mint": usdc,
+                    "uiTokenAmount": {"amount": str(amount), "decimals": 6}}
+        tx = {"blockTime": int(time.time()),
+              "transaction": {"signatures": [signature], "message": {
+                  "accountKeys": ["payer", source_account, destination_account],
+                  "instructions": [{"program": "spl-token", "programId": SPL_TOKEN_PROGRAM,
+                      "parsed": {"type": "transferChecked", "info": {
+                          "source": source_account, "destination": destination_account,
+                          "mint": usdc, "tokenAmount": {"amount": str(raw_amount),
+                                                               "decimals": 6}}}}]}},
+              "meta": {"preTokenBalances": [balance(1, source_owner, raw_amount),
+                                             balance(2, destination_owner, 0)],
+                       "postTokenBalances": [balance(1, source_owner, 0),
+                                              balance(2, destination_owner, raw_amount)]}}
+        with tempfile.TemporaryDirectory() as tmp:
+            screen = self.make_screener(tmp)
+            screen.wallets_by_chain["SOLANA"] = {}
+            poller = WhalePoller("test-alchemy-key-123", screen,
+                                 state_file=Path(tmp) / "poller.json")
+
+            class FakeWebSocket:
+                def __init__(self):
+                    self.responses = []
+                    self.sent = []
+                async def __aenter__(self):
+                    return self
+                async def __aexit__(self, *_args):
+                    return None
+                async def send_json(self, payload):
+                    self.sent.append(payload)
+                    self.responses.append({"jsonrpc": "2.0", "id": payload["id"],
+                                           "result": 321})
+                    self.responses.append({"jsonrpc": "2.0", "method": "logsNotification",
+                        "params": {"subscription": 321, "result": {"value": {
+                            "signature": signature, "err": None,
+                            "logs": ["Program log: Instruction: TransferChecked"]}}}})
+                async def receive(self, timeout=None):
+                    if self.responses:
+                        response = self.responses.pop(0)
+                        return type("Message", (), {"type": aiohttp.WSMsgType.TEXT,
+                            "data": json.dumps(response)})()
+                    await asyncio.Future()
+
+            class FakeResponse:
+                status = 200
+                async def __aenter__(self):
+                    return self
+                async def __aexit__(self, *_args):
+                    return None
+                async def json(self):
+                    return {"jsonrpc": "2.0", "id": 1, "result": tx}
+            class FakeSession:
+                def __init__(self):
+                    self.ws = FakeWebSocket()
+                    self.rpc_calls = []
+                async def __aenter__(self):
+                    return self
+                async def __aexit__(self, *_args):
+                    return None
+                def ws_connect(self, *_args, **_kwargs):
+                    return self.ws
+                def post(self, url, *, json, timeout):
+                    self.rpc_calls.append((url, json, timeout))
+                    return FakeResponse()
+
+            fake_session = FakeSession()
+            with patch("whale_poller.aiohttp.ClientSession", return_value=fake_session):
+                task = asyncio.create_task(poller.run_solana())
+                try:
+                    for _ in range(100):
+                        if screen.events and poller.solana_status["connected"]:
+                            break
+                        await asyncio.sleep(.01)
+                    self.assertTrue(poller.solana_status["connected"])
+                    self.assertEqual(poller.solana_status["state"], "online")
+                    self.assertEqual(poller.solana_status["mode"], "network_fallback")
+                    self.assertEqual(poller.solana_status["subscriptions"], 1)
+                    request = fake_session.ws.sent[0]
+                    self.assertEqual(request["method"], "logsSubscribe")
+                    self.assertEqual(request["params"][0]["mentions"], [SPL_TOKEN_PROGRAM])
+                    self.assertEqual(request["params"][1]["commitment"], "confirmed")
+                    self.assertEqual([row[1]["method"] for row in fake_session.rpc_calls],
+                                     ["getTransaction"])
+                    event = screen.events[-1]
+                    self.assertEqual(event["symbol"], "USDC")
+                    self.assertEqual(event["amount"], 150_000.0)
+                    self.assertEqual(event["usd"], 150_000.0)
+                    self.assertEqual(event["from"], source_owner)
+                    self.assertEqual(event["to"], destination_owner)
+                finally:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+            screen.close()
+
     async def test_solana_rpc_uses_alchemy_solana_endpoint_and_native_methods(self):
         with tempfile.TemporaryDirectory() as tmp:
             screen = self.make_screener(tmp)
@@ -251,6 +385,36 @@ class MultichainTransferTests(unittest.IsolatedAsyncioTestCase):
                 "https://solana-mainnet.g.alchemy.com/v2/test-alchemy-key-123")
             self.assertEqual(requests[0][1]["method"], "getSignaturesForAddress")
             self.assertEqual(requests[0][1]["params"][0], "wallet")
+            screen.close()
+
+    async def test_solana_network_fallback_reserves_a_small_cu_slice(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            screen = self.make_screener(tmp)
+            poller = WhalePoller("test-alchemy-key-123", screen,
+                                 state_file=Path(tmp) / "poller.json", monthly_cu=1000)
+            calls = []
+            class FakeResponse:
+                status = 200
+                async def __aenter__(self):
+                    return self
+                async def __aexit__(self, *_args):
+                    return None
+                async def json(self):
+                    return {"jsonrpc": "2.0", "id": 1, "result": {}}
+            class FakeSession:
+                def post(self, url, *, json, timeout):
+                    calls.append(json["method"])
+                    return FakeResponse()
+            session = FakeSession()
+            params = ["5" * 64, {"encoding": "jsonParsed"}]
+            await poller._solana_rpc(session, "getTransaction", params, fallback=True)
+            await poller._solana_rpc(session, "getTransaction", params, fallback=True)
+            with self.assertRaises(BudgetExhausted):
+                await poller._solana_rpc(session, "getTransaction", params, fallback=True)
+            self.assertEqual(calls, ["getTransaction", "getTransaction"])
+            self.assertEqual(poller.state["solana_fallback_cu"], 80)
+            self.assertEqual(poller.solana_status["fallback_cu_limit"], 100)
+            self.assertEqual(poller.state["cu"], 80)
             screen.close()
 
     async def test_solana_signature_poll_fetches_transactions(self):

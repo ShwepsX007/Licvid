@@ -102,10 +102,11 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
                         block_range = req["params"][0]
                         self.assertEqual(block_range["fromBlock"], "0x5")
                         self.assertEqual(block_range["toBlock"], "0x5")
-                    self.assertEqual(poller.state["cu"], 10 + 10 + 240 + 120 + 240)
+                    self.assertEqual(poller.state["cu"], 10 + 10 + 240 + 120 + 120)
                     restored = WhalePoller("fake", screener, state_file=state,
                                            endpoints=poller.endpoints, monthly_cu=620)
-                    self.assertEqual(restored.state["cu"], 620)
+                    self.assertEqual(restored.state["cu"], 500)
+                    restored.monthly_cu = 20
                     with self.assertRaises(BudgetExhausted):
                         restored._reserve("eth_blockNumber")
                     self.assertEqual(restored.state["cursors"]["BASE"], 5)
@@ -180,6 +181,102 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
                                             r["toBlock"].startswith("0x") for r in ranges))
                 finally:
                     await runner.cleanup()
+
+    async def test_http_400_logs_full_body_without_an_accidental_api_key(self):
+        secret = "test-alchemy-secret-400"
+        body = f"invalid params for alchemy_getAssetTransfers; echoed key={secret}; details=bad fromBlock"
+        with tempfile.TemporaryDirectory() as tmp:
+            async def handler(_request):
+                return web.Response(status=400, text=body)
+            app = web.Application()
+            app.router.add_post("/rpc", handler)
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, "127.0.0.1", 0)
+            await site.start()
+            port = site._server.sockets[0].getsockname()[1]
+            screen = WhaleScreener(secret, lambda _: None, lambda _: None)
+            poller = WhalePoller(secret, screen,
+                state_file=Path(tmp) / "state.json",
+                endpoints={"BASE": f"http://127.0.0.1:{port}/rpc"})
+            try:
+                async with ClientSession() as session:
+                    with self.assertLogs("whale_poller", level="ERROR") as captured:
+                        with self.assertRaisesRegex(PollError, "HTTP 400"):
+                            await poller._rpc(session, "BASE", "alchemy_getAssetTransfers", [{}])
+                logged = "\n".join(captured.output)
+                self.assertIn("details=bad fromBlock", logged)
+                self.assertIn("echoed key=[redacted]", logged)
+                self.assertNotIn(secret, logged)
+            finally:
+                screen.close()
+                await runner.cleanup()
+
+    async def test_asset_transfer_history_uses_valid_combined_params(self):
+        requests = []
+        async def handler(request):
+            requests.append(await request.json())
+            return web.json_response({"jsonrpc": "2.0", "id": 1,
+                                      "result": {"transfers": []}})
+        app = web.Application()
+        app.router.add_post("/rpc", handler)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            screen = WhaleScreener("fake", lambda _: None, lambda _: None)
+            poller = WhalePoller("test-api-key", screen,
+                state_file=Path(tmp) / "state.json",
+                endpoints={"BASE": f"http://127.0.0.1:{port}/rpc"})
+            try:
+                async with ClientSession() as session:
+                    await poller._asset_transfer_history(session, "BASE", 16, 42)
+                self.assertEqual(len(requests), 1)
+                query = requests[0]["params"][0]
+                self.assertEqual(requests[0]["method"], "alchemy_getAssetTransfers")
+                self.assertEqual(query["fromBlock"], "0x10")
+                self.assertEqual(query["toBlock"], "0x2a")
+                self.assertEqual(query["category"], ["external", "erc20"])
+                self.assertEqual(query["contractAddresses"], list(TOKENS["BASE"]))
+                self.assertEqual(int(query["maxCount"], 16), 1000)
+            finally:
+                screen.close()
+                await runner.cleanup()
+
+    async def test_native_transfers_remain_external_only(self):
+        requests = []
+        async def handler(request):
+            requests.append(await request.json())
+            return web.json_response({"jsonrpc": "2.0", "id": 1,
+                                      "result": {"transfers": []}})
+        app = web.Application()
+        app.router.add_post("/rpc", handler)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            screen = WhaleScreener("fake", lambda _: None, lambda _: None)
+            screen.wallets_by_chain["BASE"] = {"0x" + "1" * 40: "Exchange"}
+            poller = WhalePoller("test-api-key", screen,
+                state_file=Path(tmp) / "state.json",
+                endpoints={"BASE": f"http://127.0.0.1:{port}/rpc"})
+            try:
+                async with ClientSession() as session:
+                    await poller._native(session, "BASE", 16, 42)
+                self.assertEqual(len(requests), 2)
+                for request in requests:
+                    query = request["params"][0]
+                    self.assertEqual(request["method"], "alchemy_getAssetTransfers")
+                    self.assertEqual(query["category"], ["external"])
+                    self.assertEqual(query["fromBlock"], "0x10")
+                    self.assertEqual(query["toBlock"], "0x2a")
+            finally:
+                screen.close()
+                await runner.cleanup()
 
     async def test_no_advance_on_failed_rpc(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -512,6 +512,7 @@
     "adm.alchemy_delete_error": "कुंजी नहीं हटाई जा सकी।",
     "adm.alchemy_env_managed": "पर्यावरण से प्रबंधित",
     "adm.alchemy_online": "ऑनलाइन",
+    "adm.alchemy_online_waiting_cex_filters": "ऑनलाइन (CEX फ़िल्टर की प्रतीक्षा)",
     "adm.alchemy_error_state": "त्रुटि",
     "adm.alchemy_waiting": "प्रतीक्षा में",
     "adm.alchemy_last_success": "आख़िरी सफल पोल: {time}",

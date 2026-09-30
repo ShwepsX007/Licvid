@@ -525,6 +525,7 @@ window.LIQSCOPE_I18N_PAGES =
       "adm.alchemy_delete_error": "无法删除密钥。",
       "adm.alchemy_env_managed": "由环境变量管理",
       "adm.alchemy_online": "在线",
+      "adm.alchemy_online_waiting_cex_filters": "在线（等待 CEX 筛选条件）",
       "adm.alchemy_error_state": "错误",
       "adm.alchemy_waiting": "等待中",
       "adm.alchemy_last_success": "上次成功轮询：{time}",

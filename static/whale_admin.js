@@ -218,8 +218,11 @@
         const target = el("whale-admin-chains");
         target.replaceChildren();
         (networks || []).forEach(network => {
-            const stateName = network.status === "online" ? t("adm.alchemy_online")
-                : network.status === "error" ? t("adm.alchemy_error_state") : t("adm.alchemy_waiting");
+            const stateName = network.status === "online" && network.waiting_for_filters
+                ? t("adm.alchemy_online_waiting_cex_filters")
+                : network.status === "online" ? t("adm.alchemy_online")
+                    : network.status === "error" ? t("adm.alchemy_error_state")
+                        : t("adm.alchemy_waiting");
             const card = make("div", "whale-admin-network status--" + (network.status || "waiting"));
             card.append(make("strong", "", networkLabel(network.chain)));
             card.append(make("span", "whale-admin-network-status", stateName));

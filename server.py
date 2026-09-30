@@ -5931,6 +5931,7 @@ async def api_admin_alchemy_stats(request: Request):
         networks.append({"chain": chain, "provider": provider, "status": state,
                          "last_success": float(network.get("last_success") or 0),
                          "last_attempt": float(network.get("last_attempt") or 0),
+                         "waiting_for_filters": bool(network.get("waiting_for_filters")),
                          "error": str(network.get("error") or "")})
     used = int(poll.get("reserved_cu") or 0)
     budget = int(poll.get("budget_cu") or 0)

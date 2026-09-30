@@ -525,6 +525,7 @@ window.LIQSCOPE_I18N_PAGES =
       "adm.alchemy_delete_error": "No se pudo eliminar la clave.",
       "adm.alchemy_env_managed": "Gestionada por el entorno",
       "adm.alchemy_online": "En línea",
+      "adm.alchemy_online_waiting_cex_filters": "En línea (a la espera de filtros CEX)",
       "adm.alchemy_error_state": "Error",
       "adm.alchemy_waiting": "En espera",
       "adm.alchemy_last_success": "Última consulta correcta: {time}",

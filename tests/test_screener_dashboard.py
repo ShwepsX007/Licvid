@@ -74,6 +74,8 @@ class ScreenerDashboardTests(unittest.TestCase):
                                    lambda _msg: None, history_path=Path(tmp) / "history.sqlite3")
             poller = WhalePoller("", screen, key_store=key_store,
                                  state_file=Path(tmp) / "poller.json")
+            poller.solana_status.update(connected=True, state="online",
+                                        waiting_for_filters=True, last_success=time.time())
             with patch.object(server, "alchemy_key_store", key_store), \
                  patch.object(server, "whale_screener", screen), \
                  patch.object(server, "whale_poller", poller), \
@@ -96,6 +98,9 @@ class ScreenerDashboardTests(unittest.TestCase):
                 self.assertEqual(stats.status_code, 200, stats.text)
                 payload = stats.json()
                 self.assertEqual(payload["cu"]["keys_configured"], 1)
+                solana = next(row for row in payload["networks"] if row["chain"] == "SOLANA")
+                self.assertEqual(solana["status"], "online")
+                self.assertTrue(solana["waiting_for_filters"])
                 self.assertEqual({row["chain"] for row in payload["networks"]},
                                  {"ETH", "BNB", "POLYGON", "ARBITRUM", "BASE", "HYPERLIQUID", "SOLANA", "TRON"})
                 self.assertNotIn(key, stats.text)

@@ -525,6 +525,7 @@ window.LIQSCOPE_I18N_PAGES =
       "adm.alchemy_delete_error": "Не удалось удалить ключ.",
       "adm.alchemy_env_managed": "Управляется окружением",
       "adm.alchemy_online": "Онлайн",
+      "adm.alchemy_online_waiting_cex_filters": "Онлайн (ожидание фильтров CEX)",
       "adm.alchemy_error_state": "Ошибка",
       "adm.alchemy_waiting": "Ожидание",
       "adm.alchemy_last_success": "Последний успешный опрос: {time}",

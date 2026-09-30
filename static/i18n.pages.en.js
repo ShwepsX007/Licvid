@@ -525,6 +525,7 @@ window.LIQSCOPE_I18N_PAGES =
       "adm.alchemy_delete_error": "Could not delete key.",
       "adm.alchemy_env_managed": "Managed by environment",
       "adm.alchemy_online": "Online",
+      "adm.alchemy_online_waiting_cex_filters": "Online (waiting for CEX filters)",
       "adm.alchemy_error_state": "Error",
       "adm.alchemy_waiting": "Waiting",
       "adm.alchemy_last_success": "Last successful poll: {time}",

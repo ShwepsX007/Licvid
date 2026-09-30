@@ -53,6 +53,7 @@ win.LiqScopeI18n = {t: (key, vars = {}) => {
         "adm.cex_wallet_refreshed": "Refreshed {count}", "adm.trongrid_saved": "TronGrid key saved",
         "adm.trongrid_no_key": "No TronGrid key", "adm.alchemy_settings_saved": "Settings saved",
         "adm.alchemy_monthly_estimate": "Monthly CU estimate: {amount}",
+        "adm.alchemy_online_waiting_cex_filters": "Online (waiting for CEX filters)",
     })[key] || key;
     Object.keys(vars).forEach(name => { value = value.replaceAll("{" + name + "}", String(vars[name])); });
     return value;
@@ -74,7 +75,8 @@ win.fetch = async (url, options = {}) => {
         cu: {used: 2500, limit: 10000000, month: "2026-09", estimated_monthly: 7500,
             key_share: 10000000, keys: []},
         networks: ["ETH", "SOLANA", "TRON", "HYPERLIQUID"].map(chain =>
-            ({chain, status: chain === "ETH" ? "online" : "waiting", last_success: 0, error: ""}))});
+            ({chain, status: chain === "ETH" || chain === "SOLANA" ? "online" : "waiting",
+              waiting_for_filters: chain === "SOLANA", last_success: 0, error: ""}))});
     if (parsed.pathname === "/api/admin/alchemy/keys") return response({available: true, keys: []});
     if (parsed.pathname === "/api/admin/trongrid/key" && method === "GET") {
         return response({available: true, keys: tronKeys});
@@ -122,6 +124,7 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     assert(/7[,\.]?500/.test(win.document.getElementById("whale-admin-cu-meta").textContent));
     const networkText = win.document.getElementById("whale-admin-chains").textContent;
     assert(networkText.includes("Solana") && networkText.includes("TRON"));
+    assert(networkText.includes("Online (waiting for CEX filters)"));
     assert.equal(win.document.querySelectorAll("#whale-admin-wallet-rows tr").length, 2);
 
     const firstRow = win.document.querySelector("#whale-admin-wallet-rows tr");

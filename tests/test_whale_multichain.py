@@ -198,61 +198,124 @@ class MultichainTransferTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(requests[1][2], {})
             screen.close()
 
-    async def test_solana_websocket_subscriptions_are_acknowledged_in_small_batches(self):
+    async def test_solana_owner_polling_uses_standard_json_rpc_methods(self):
+        owner = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"
+        external_owner = "3" * 32
+        source_account, destination_account = "1" * 32, "2" * 32
+        signature = "5" * 64
+        usdc = next(mint for mint, (symbol, _) in SOLANA_TOKENS.items() if symbol == "USDC")
+        raw_amount = 150_000 * 10**6
+        instruction_hint = 200_000 * 10**6
+        token_account = destination_account
+
+        def balance(index, wallet, amount):
+            return {"accountIndex": index, "owner": wallet, "mint": usdc,
+                    "uiTokenAmount": {"amount": str(amount), "decimals": 6}}
+
+        tx = {"blockTime": int(time.time()),
+              "transaction": {"signatures": [signature], "message": {
+                  "accountKeys": [source_account, destination_account],
+                  "instructions": [{"program": "spl-token", "programId": SPL_TOKEN_PROGRAM,
+                      "parsed": {"type": "transferChecked", "info": {
+                          "source": source_account, "destination": destination_account,
+                          "mint": usdc, "tokenAmount": {"amount": str(instruction_hint),
+                                                               "decimals": 6}}}}]}},
+              "meta": {"preTokenBalances": [balance(0, external_owner, raw_amount),
+                                             balance(1, owner, 0)],
+                       "postTokenBalances": [balance(0, external_owner, 0),
+                                              balance(1, owner, raw_amount)]}}
         with tempfile.TemporaryDirectory() as tmp:
             screen = self.make_screener(tmp)
-            screen.wallets_by_chain["SOLANA"] = {
-                f"wallet-{index}": "Solana CEX" for index in range(101)}
+            screen.wallets_by_chain["SOLANA"] = {owner: "Binance"}
             poller = WhalePoller("test-alchemy-key-123", screen,
                                  state_file=Path(tmp) / "poller.json")
 
-            class FakeWebSocket:
-                def __init__(self):
-                    self.responses = []
-                    self.sent = []
-                    self.inflight = 0
-                    self.max_inflight = 0
+            class FakeResponse:
+                status = 200
+                def __init__(self, result):
+                    self.result = result
                 async def __aenter__(self):
                     return self
                 async def __aexit__(self, *_args):
                     return None
-                async def send_json(self, payload):
-                    self.sent.append(payload)
-                    self.inflight += 1
-                    self.max_inflight = max(self.max_inflight, self.inflight)
-                    self.responses.append({"jsonrpc": "2.0", "id": payload["id"],
-                                           "result": 10_000 + payload["id"]})
-                async def receive(self, timeout=None):
-                    if self.responses:
-                        response = self.responses.pop(0)
-                        self.inflight -= 1
-                        return type("Message", (), {"type": aiohttp.WSMsgType.TEXT,
-                                                     "data": json.dumps(response)})()
-                    await asyncio.Future()
+                async def json(self):
+                    return {"jsonrpc": "2.0", "id": 1, "result": self.result}
 
             class FakeSession:
                 def __init__(self):
-                    self.ws = FakeWebSocket()
+                    self.requests = []
                 async def __aenter__(self):
                     return self
                 async def __aexit__(self, *_args):
                     return None
-                def ws_connect(self, *_args, **_kwargs):
-                    return self.ws_context()
-                def ws_context(self):
-                    return self.ws
+                def post(self, url, *, json, timeout):
+                    self.requests.append((url, json, timeout))
+                    method = json["method"]
+                    params = json["params"]
+                    if method == "getHealth":
+                        result = "ok"
+                    elif method == "getTokenAccountsByOwner":
+                        mint = params[1]["mint"]
+                        result = {"value": ([{"pubkey": token_account,
+                            "account": {"data": {"parsed": {"info": {"mint": usdc}}}}}]
+                            if mint == usdc else [])}
+                    elif method == "getSignaturesForAddress":
+                        result = ([{"signature": signature, "err": None,
+                                    "blockTime": tx["blockTime"]}]
+                                   if params[0] in {owner, token_account} else [])
+                    elif method == "getTransaction":
+                        result = tx
+                    else:
+                        raise AssertionError(f"unexpected Solana RPC method: {method}")
+                    return FakeResponse(result)
 
             fake_session = FakeSession()
             with patch("whale_poller.aiohttp.ClientSession", return_value=fake_session):
                 task = asyncio.create_task(poller.run_solana())
-                await asyncio.sleep(0)
-                self.assertTrue(poller.solana_status["connected"])
-                self.assertEqual(len(fake_session.ws.sent), 303)
-                self.assertLessEqual(fake_session.ws.max_inflight, 100)
-                self.assertEqual(poller.solana_status["subscriptions"], 303)
-                task.cancel()
-                with self.assertRaises(asyncio.CancelledError):
-                    await task
+                try:
+                    for _ in range(200):
+                        if screen.events and poller.solana_status["connected"]:
+                            break
+                        await asyncio.sleep(.01)
+                    self.assertTrue(poller.solana_status["connected"])
+                    self.assertEqual(poller.solana_status["state"], "online")
+                    self.assertEqual(poller.solana_status["mode"], "cex_poll")
+                    self.assertEqual(poller.solana_status["token_accounts"], 1)
+                    requests = [payload for _url, payload, _timeout in fake_session.requests]
+                    methods = [payload["method"] for payload in requests]
+                    self.assertEqual(methods.count("getHealth"), 1)
+                    self.assertEqual(methods.count("getTokenAccountsByOwner"), 2)
+                    self.assertIn("getSignaturesForAddress", methods)
+                    self.assertEqual(methods.count("getTransaction"), 1)
+                    self.assertIn(signature, poller._solana_processed_signatures)
+                    self.assertEqual(set(methods), {"getHealth", "getTokenAccountsByOwner",
+                                                    "getSignaturesForAddress", "getTransaction"})
+                    token_queries = [payload["params"] for payload in requests
+                                     if payload["method"] == "getTokenAccountsByOwner"]
+                    self.assertEqual({params[1]["mint"] for params in token_queries},
+                                     set(SOLANA_TOKENS))
+                    self.assertTrue(all(params[2]["encoding"] == "jsonParsed"
+                                        for params in token_queries))
+                    signature_queries = [payload["params"] for payload in requests
+                                         if payload["method"] == "getSignaturesForAddress"]
+                    self.assertEqual({params[0] for params in signature_queries},
+                                     {owner, token_account})
+                    self.assertTrue(all(params[1]["limit"] == 10
+                                        for params in signature_queries))
+                    tx_query = next(payload["params"] for payload in requests
+                                    if payload["method"] == "getTransaction")
+                    self.assertEqual(tx_query[0], signature)
+                    self.assertEqual(tx_query[1]["encoding"], "jsonParsed")
+                    self.assertEqual(tx_query[1]["maxSupportedTransactionVersion"], 0)
+                    event = screen.events[-1]
+                    self.assertEqual(event["symbol"], "USDC")
+                    self.assertEqual(event["amount"], 150_000.0)
+                    self.assertEqual(event["usd"], 150_000.0)
+                    self.assertEqual(event["from"], external_owner)
+                    self.assertEqual(event["to"], owner)
+                finally:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
             screen.close()
 
     async def test_solana_network_fallback_subscribes_and_processes_large_spl_transfers(self):
@@ -260,7 +323,7 @@ class MultichainTransferTests(unittest.IsolatedAsyncioTestCase):
         source_owner, destination_owner = "3" * 32, "4" * 32
         source_account, destination_account = "1" * 32, "2" * 32
         signature = "5" * 64
-        raw_amount = 150_000 * 10**6
+        raw_amount = 100_000 * 10**6
         def balance(index, owner, amount):
             return {"accountIndex": index, "owner": owner, "mint": usdc,
                     "uiTokenAmount": {"amount": str(amount), "decimals": 6}}
@@ -307,12 +370,14 @@ class MultichainTransferTests(unittest.IsolatedAsyncioTestCase):
 
             class FakeResponse:
                 status = 200
+                def __init__(self, result):
+                    self.result = result
                 async def __aenter__(self):
                     return self
                 async def __aexit__(self, *_args):
                     return None
                 async def json(self):
-                    return {"jsonrpc": "2.0", "id": 1, "result": tx}
+                    return {"jsonrpc": "2.0", "id": 1, "result": self.result}
             class FakeSession:
                 def __init__(self):
                     self.ws = FakeWebSocket()
@@ -325,7 +390,8 @@ class MultichainTransferTests(unittest.IsolatedAsyncioTestCase):
                     return self.ws
                 def post(self, url, *, json, timeout):
                     self.rpc_calls.append((url, json, timeout))
-                    return FakeResponse()
+                    result = "ok" if json["method"] == "getHealth" else tx
+                    return FakeResponse(result)
 
             fake_session = FakeSession()
             with patch("whale_poller.aiohttp.ClientSession", return_value=fake_session):
@@ -338,22 +404,41 @@ class MultichainTransferTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(poller.solana_status["connected"])
                     self.assertEqual(poller.solana_status["state"], "online")
                     self.assertEqual(poller.solana_status["mode"], "network_fallback")
+                    self.assertTrue(poller.solana_status["waiting_for_filters"])
+                    self.assertEqual(poller.solana_status["processing_state"], "waiting_for_filters")
                     self.assertEqual(poller.solana_status["subscriptions"], 1)
                     request = fake_session.ws.sent[0]
                     self.assertEqual(request["method"], "logsSubscribe")
                     self.assertEqual(request["params"][0]["mentions"], [SPL_TOKEN_PROGRAM])
                     self.assertEqual(request["params"][1]["commitment"], "confirmed")
                     self.assertEqual([row[1]["method"] for row in fake_session.rpc_calls],
-                                     ["getTransaction"])
+                                     ["getHealth", "getTransaction"])
                     event = screen.events[-1]
                     self.assertEqual(event["symbol"], "USDC")
-                    self.assertEqual(event["amount"], 150_000.0)
-                    self.assertEqual(event["usd"], 150_000.0)
+                    self.assertEqual(event["amount"], 100_000.0)
+                    self.assertEqual(event["usd"], 100_000.0)
                     self.assertEqual(event["from"], source_owner)
                     self.assertEqual(event["to"], destination_owner)
                 finally:
                     task.cancel()
                     await asyncio.gather(task, return_exceptions=True)
+            screen.close()
+
+    async def test_solana_empty_registry_stays_online_waiting_if_optional_ws_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            screen = self.make_screener(tmp)
+            screen.wallets_by_chain["SOLANA"] = {}
+            poller = WhalePoller("test-alchemy-key-123", screen,
+                                 state_file=Path(tmp) / "poller.json")
+            poller.solana_status.update(connected=True, state="online",
+                                        mode="network_fallback", waiting_for_filters=True)
+            self.assertTrue(poller._solana_keep_waiting_for_filters(
+                "network_fallback", RuntimeError("logsSubscribe is unavailable")))
+            self.assertEqual(poller.solana_status["state"], "online")
+            self.assertTrue(poller.solana_status["waiting_for_filters"])
+            self.assertEqual(poller.solana_status["error"], "")
+            self.assertFalse(poller._solana_keep_waiting_for_filters(
+                "cex_poll", RuntimeError("CEX poll failed")))
             screen.close()
 
     async def test_solana_rpc_uses_alchemy_solana_endpoint_and_native_methods(self):
@@ -417,35 +502,6 @@ class MultichainTransferTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(poller.state["cu"], 80)
             screen.close()
 
-    async def test_solana_signature_poll_fetches_transactions(self):
-        owner, other = "1" * 32, "2" * 32
-        signature = "5" * 64
-        with tempfile.TemporaryDirectory() as tmp:
-            screen = self.make_screener(tmp)
-            poller = WhalePoller("test-alchemy-key-123", screen,
-                                 state_file=Path(tmp) / "poller.json")
-            tx = {"blockTime": int(time.time()),
-                "transaction": {"signatures": [signature], "message": {"instructions": [
-                    {"program": "system", "parsed": {"type": "transfer", "info": {
-                        "source": owner, "destination": other, "lamports": 1_500_000_000}}}]}},
-                "meta": {}}
-            calls = []
-            async def fake_rpc(_session, method, params):
-                calls.append((method, params))
-                if method == "getSignaturesForAddress":
-                    return [{"signature": signature, "err": None,
-                             "blockTime": tx["blockTime"]}]
-                if method == "getTransaction":
-                    return tx
-                raise AssertionError(method)
-            poller._solana_rpc = fake_rpc
-            await poller._solana_recent_transactions(None, owner, owner)
-            self.assertEqual([method for method, _ in calls],
-                             ["getSignaturesForAddress", "getTransaction"])
-            self.assertEqual(calls[0][1][0], owner)
-            self.assertEqual(screen.events[-1]["amount"], 1.5)
-            screen.close()
-
     async def test_solana_native_lamports_and_spl_token_decimals(self):
         owner, other = "1" * 32, "2" * 32
         token_source, token_destination = "3" * 32, "4" * 32
@@ -457,16 +513,31 @@ class MultichainTransferTests(unittest.IsolatedAsyncioTestCase):
             poller = WhalePoller("unused", screen, state_file=Path(tmp) / "poller.json")
             native_tx = {"blockTime": int(time.time()),
                 "transaction": {"signatures": [native_signature],
-                    "message": {"instructions": [{"program": "system", "parsed": {
-                        "type": "transfer", "info": {"source": owner, "destination": other,
-                                                           "lamports": 1_500_000_000}}}]}},
-                "meta": {}}
+                    "message": {"accountKeys": [owner, other], "instructions": [
+                        {"program": "system", "parsed": {"type": "transfer", "info": {
+                            "source": owner, "destination": other,
+                            "lamports": 600_000_000_000}}}]}},
+                "meta": {"preBalances": [1_000_000_000_000, 0],
+                         "postBalances": [499_999_995_000, 500_000_000_000],
+                         "fee": 5_000}}
             count = await poller._solana_process_native(native_tx, owner)
             self.assertEqual(count, 1)
             self.assertEqual(screen.events[-1]["symbol"], "SOL")
-            self.assertEqual(screen.events[-1]["amount"], 1.5)
-            self.assertEqual(screen.events[-1]["usd"], 300.0)
+            self.assertEqual(screen.events[-1]["amount"], 500.0)
+            self.assertEqual(screen.events[-1]["usd"], 100_000.0)
             self.assertEqual(screen.events[-1]["direction"], "outflow")
+
+            balance_tx = {"blockTime": int(time.time()),
+                "transaction": {"signatures": ["7" * 64], "message": {
+                    "accountKeys": [owner, other], "instructions": []}},
+                "meta": {"preBalances": [1_000_000_000_000, 0],
+                         "postBalances": [499_999_995_000, 500_000_000_000],
+                         "fee": 5_000}}
+            count = await poller._solana_process_native(balance_tx, owner)
+            self.assertEqual(count, 1)
+            self.assertEqual(screen.events[-1]["hash"], "7" * 64)
+            self.assertEqual(screen.events[-1]["amount"], 500.0)
+            self.assertEqual(screen.events[-1]["usd"], 100_000.0)
 
             def token_balance(index, address, amount):
                 return {"accountIndex": index, "owner": address, "mint": usdc,
@@ -476,17 +547,28 @@ class MultichainTransferTests(unittest.IsolatedAsyncioTestCase):
                     "accountKeys": ["payer", token_source, token_destination],
                     "instructions": [{"parsed": {"type": "transferChecked", "info": {
                         "source": token_source, "destination": token_destination}}}]}},
-                "meta": {"preTokenBalances": [token_balance(1, other, 5_000_000),
+                "meta": {"preTokenBalances": [token_balance(1, other, 100_000_000_000),
                                               token_balance(2, owner, 0)],
                          "postTokenBalances": [token_balance(1, other, 0),
-                                               token_balance(2, owner, 5_000_000)]}}
-            count = await poller._solana_process_token(token_tx, owner, usdc)
+                                               token_balance(2, owner, 100_000_000_000)]}}
+            count = await poller._solana_process_network_token_tx(token_tx, {owner})
             self.assertEqual(count, 1)
             event = screen.events[-1]
             self.assertEqual(event["symbol"], "USDC")
-            self.assertEqual(event["amount"], 5.0)
-            self.assertEqual(event["usd"], 5.0)
+            self.assertEqual(event["amount"], 100_000.0)
+            self.assertEqual(event["usd"], 100_000.0)
             self.assertEqual(event["direction"], "inflow")
+
+            balance_only_tx = {"blockTime": int(time.time()),
+                "transaction": {"signatures": ["8" * 64], "message": {
+                    "accountKeys": ["payer", token_source, token_destination],
+                    "instructions": []}},
+                "meta": token_tx["meta"]}
+            count = await poller._solana_process_network_token_tx(balance_only_tx, {owner})
+            self.assertEqual(count, 1)
+            self.assertEqual(screen.events[-1]["hash"], "8" * 64)
+            self.assertEqual(screen.events[-1]["amount"], 100_000.0)
+            self.assertEqual(screen.events[-1]["direction"], "inflow")
             screen.close()
 
     async def test_filtered_mined_evm_native_websocket_events(self):

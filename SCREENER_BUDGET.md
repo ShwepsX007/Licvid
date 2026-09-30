@@ -25,6 +25,8 @@ Alchemy Free даёт 30 млн CU/месяц на всё приложение, 
   | `eth_blockNumber` | 10 CU |
   | `eth_getLogs` | 60 CU |
   | `alchemy_getAssetTransfers` | 120 CU |
+  | Solana `getHealth` | 10 CU |
+  | Solana `getTokenAccountsByOwner` | 40 CU |
   | Solana `getSignaturesForAddress` | 40 CU |
   | Solana `getTransaction` | 40 CU |
 
@@ -34,15 +36,23 @@ Alchemy Free даёт 30 млн CU/месяц на всё приложение, 
 - Глобальный обход каждого EVM-блока не включён: одна только Arbitrum при
   номинальных 250 мс и 20 CU за блок стоила бы около **207 360 000 CU за 30
   дней**, ещё без токенов, других сетей, повторов и цен.
-- Если в реестре нет Solana CEX-адресов, резервный поток подписывается на
-  Token Program (`logsSubscribe` с одним `mentions`) и запрашивает `getTransaction`
-  только для SPL Transfer/TransferChecked. В очередь попадают USDT/USDC-переводы
-  **строго выше $100 000**. Очередь ограничена 64 сигнатурами; один worker
-  обрабатывает их с pace limit, а повторные signature ограниченно дедуплицируются.
-  Fallback резервирует не более 10% локального месячного CU и не более 1 млн CU
-  по умолчанию (`LIQSCOPE_SOLANA_FALLBACK_CU`); вызовы распределяются по месяцу.
-  Размер резерва и интервал можно настроить переменными
-  `LIQSCOPE_SOLANA_FALLBACK_CU` и `LIQSCOPE_SOLANA_FALLBACK_INTERVAL_SEC`.
+- Для Solana CEX-кошельков при старте запрашиваются USDT/USDC token accounts через
+  `getTokenAccountsByOwner`; затем main wallet и token accounts опрашиваются через
+  `getSignaturesForAddress` каждые 30 секунд (до 10 подписей на адрес), а новые
+  транзакции разбираются через `getTransaction` с `jsonParsed`. Новые подписи
+  дедуплицируются, аккаунты токенов обновляются раз в 10 минут. Переводы SOL,
+  USDT и USDC регистрируются при сумме **от $100 000**.
+- Если в реестре нет Solana CEX-адресов, сначала подтверждается HTTP-соединение
+  через `getHealth`; UI показывает «Online (waiting for CEX filters)», не утверждая,
+  что уже получает CEX-транзакции. Дополнительно работает ограниченный резервный
+  поток по Token Program (`logsSubscribe` с одним `mentions`); если WS недоступен,
+  состояние ожидания фильтров сохраняется, а ошибка не маскирует успешный `getHealth`.
+  `getTransaction` выполняется через очередь на 64 сигнатуры; повторы дедуплицируются,
+  один worker соблюдает pacing. Network-wide fallback резервирует не более 10%
+  локального месячного CU и не более 1 млн CU по умолчанию
+  (`LIQSCOPE_SOLANA_FALLBACK_CU`); вызовы распределяются по месяцу. Размер резерва и
+  интервал задаются `LIQSCOPE_SOLANA_FALLBACK_CU` и
+  `LIQSCOPE_SOLANA_FALLBACK_INTERVAL_SEC`.
 
 ## Поддерживаемый поток
 
@@ -53,7 +63,7 @@ Alchemy Free даёт 30 млн CU/месяц на всё приложение, 
 | Polygon | Alchemy WS (ERC-20 и подтверждённые нативные CEX-переводы); HTTP catch-up | USDT, два USDC, POL |
 | Arbitrum | Alchemy WS (ERC-20 и подтверждённые нативные CEX-переводы); HTTP catch-up | USDT, USDC, DAI, WBTC, ETH |
 | Base | Alchemy WS для ERC-20; HTTP catch-up | USDC, ETH через Transfers API; mined-native WS здесь не включён |
-| Solana | Alchemy WS по известным CEX account/SPL token accounts; если реестр пуст — Token Program logs fallback + `getTransaction` | SOL, USDT, USDC; при fallback только USDT/USDC >$100K; CEX подписки ограничены `LIQSCOPE_SOLANA_MAX_WALLETS` (250) |
+| Solana | Alchemy HTTP JSON-RPC: `getTokenAccountsByOwner` + периодический `getSignaturesForAddress`/`getTransaction`; при пустом реестре — Token Program logs fallback | SOL, USDT, USDC от $100K; CEX адреса ограничены `LIQSCOPE_SOLANA_MAX_WALLETS` (250) |
 | Tron | TronGrid: подтверждённые блоки и TRC-20 Transfer events примерно раз в 3 секунды | TRX, USDT, USDC; ключ необязателен, публичный доступ ограничен квотами |
 | Hyperliquid Core | Нативный публичный Hyperliquid API: `meta` + WS `trades` | Рыночные fills от $50K, не депозиты/выводы; прежняя Hyperliquid API-логика сохранена, Alchemy не используется |
 

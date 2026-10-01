@@ -127,112 +127,49 @@
          означает «не менять». Логика — в static/system_settings.js,
          ручки — /api/admin/settings[/test-smtp|/test-tg] (web_account.py). -->
     <style>
-        .sys-err { color: #ff6b6b; font-weight: 600; margin: 6px 0 0; white-space: pre-wrap; word-break: break-word; }
-        .sys-warn { color: #f5a623; margin: 6px 0 0; }
-        .sys-ok { color: #7bd88f; font-weight: 600; }
-        .sys-card label { display: block; margin-top: 8px; font-size: .92rem; }
-        .sys-card input, .sys-card select { width: 100%; max-width: 420px; }
-        .sys-card .meta { display: block; margin-top: 4px; }
-        .sys-src { font-size: .75rem; opacity: .75; margin-left: 6px; }
+        /* ⚙️ Менеджер настроек: вкладки, поля, плашки */
+        .sys-err { color: #ff6b6b; font-weight: 600; margin: 8px 0 0; padding: 8px 10px;
+                   border: 1px solid rgba(255,107,107,.4); border-radius: 8px;
+                   background: rgba(255,107,107,.08); white-space: pre-wrap; word-break: break-word; }
+        .sys-warn { color: #f5a623; margin: 8px 0 0; padding: 8px 10px;
+                    border: 1px solid rgba(245,166,35,.4); border-radius: 8px;
+                    background: rgba(245,166,35,.07); white-space: pre-wrap; }
+        .sys-ok-plate { color: #7bd88f; font-weight: 600; }
+        .sys-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; }
+        .sys-tab { padding: 7px 12px; border-radius: 9px; border: 1px solid var(--border, #1b2536);
+                   background: transparent; color: inherit; cursor: pointer; font-size: .92rem; }
+        .sys-tab.active { background: #1b2536; border-color: #3d70ff; color: #fff; }
+        .sys-panel { display: none; }
+        .sys-panel.active { display: block; }
+        .sys-field { margin: 12px 0; }
+        .sys-label { font-weight: 600; font-size: .95rem; }
+        .sys-hint { font-size: .78rem; opacity: .72; margin-top: 3px; max-width: 640px; }
+        .sys-inrow { display: flex; align-items: center; gap: 6px; margin-top: 4px; flex-wrap: wrap; }
+        .sys-inrow input, .sys-inrow select { width: 100%; max-width: 420px; }
+        .sys-eye { background: transparent; border: 1px solid var(--border, #1b2536);
+                   border-radius: 8px; padding: 6px 8px; cursor: pointer; color: inherit; }
+        .sys-src { font-size: .75rem; opacity: .7; margin-left: 6px; }
+        .sys-flag { font-size: .75rem; margin-left: 6px; opacity: .85; }
+        .sys-actions { margin-top: 16px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+        .sys-note { font-size: .8rem; opacity: .75; margin-top: 10px; }
+        .btn.busy { opacity: .6; pointer-events: none; }
     </style>
+    <!-- ⚙️ Менеджер настроек (универсальный пульт): поля рисуются из схемы,
+         которую отдаёт GET /api/admin/settings (app_settings.MANAGED_SETTINGS):
+         человекочитаемое имя + подсказка + маска секретов. Вкладки:
+         почта/рассылки, ИИ, безопасность, Telegram, тюнинг. Логика —
+         static/system_settings.js; тесты подключения — /api/admin/settings/
+         test-smtp | test-tg | test-llm | test-captcha (web_account.py). -->
     <div class="card" id="sys-settings-card" style="margin-top:14px"
-         data-hint="SMTP, Telegram, доступы и лимиты — без перезапуска">
+         data-hint="почта, ИИ, доступы, Telegram и тюнинг — без перезапуска">
         <h3>⚙️ Системные настройки</h3>
-        <p class="lead">Конфигурация сервиса: почта, Telegram-бот, доступы админов и лимиты.
-            Значения сохраняются в базу (<code>system_settings</code>) и применяются на лету —
-            переменные окружения остаются запасным вариантом. Пароли и токены показываются
-            маской <code>***</code>; пустое поле секрета при сохранении = «оставить как было».
-            Кнопки «Проверить» тестируют подключение до сохранения.</p>
-        <div class="grid grid-2" style="margin-top:12px;align-items:start">
-            <div class="card sys-card" data-hint="сервер, логин, отправитель">
-                <h4>✉️ Email (SMTP)</h4>
-                <label>Сервер (хост) <span class="sys-src" id="src-LIQSCOPE_SMTP_HOST"></span>
-                    <input class="search" id="sys-smtp-host" data-syskey="LIQSCOPE_SMTP_HOST"
-                           autocomplete="off" placeholder="smtp.yandex.ru"></label>
-                <label>Порт
-                    <input class="search" id="sys-smtp-port" data-syskey="LIQSCOPE_SMTP_PORT"
-                           type="number" min="1" max="65535" placeholder="465"></label>
-                <label>Шифрование
-                    <select class="search" id="sys-smtp-tls" data-syskey="LIQSCOPE_SMTP_TLS">
-                        <option value="ssl">SSL (обычно порт 465)</option>
-                        <option value="starttls">STARTTLS (обычно порт 587)</option>
-                        <option value="none">Без шифрования</option>
-                    </select></label>
-                <label>Пользователь (логин)
-                    <input class="search" id="sys-smtp-user" data-syskey="LIQSCOPE_SMTP_USER"
-                           autocomplete="off" placeholder="no-reply@liqscope.online"></label>
-                <label>Пароль
-                    <input class="search" id="sys-smtp-pass" data-syskey="LIQSCOPE_SMTP_PASSWORD"
-                           type="password" autocomplete="new-password"
-                           placeholder="не задан"></label>
-                <label>Email отправителя
-                    <input class="search" id="sys-smtp-from" data-syskey="LIQSCOPE_SMTP_FROM"
-                           autocomplete="off" placeholder="LiqScope &lt;no-reply@liqscope.online&gt;"></label>
-                <span class="meta">Если отправитель не задан, письмо уйдёт с адреса логина —
-                    Яндекс, Mail.ru и Gmail требуют совпадения.</span>
-                <div class="row-actions" style="margin-top:10px">
-                    <button class="btn btn-primary" id="sys-smtp-save" type="button">💾 Сохранить</button>
-                    <button class="btn" id="sys-smtp-test" type="button">🔌 Проверить подключение</button>
-                    <span class="meta" id="sys-smtp-status" role="status"></span>
-                </div>
-                <p class="sys-err" id="sys-smtp-err" hidden></p>
-            </div>
-            <div class="card sys-card" data-hint="токен бота">
-                <h4>🤖 Telegram Bot</h4>
-                <label>Токен бота
-                    <input class="search" id="sys-tg-token" data-syskey="LIQSCOPE_BOT_TOKEN"
-                           type="password" autocomplete="new-password"
-                           placeholder="не задан"></label>
-                <span class="meta">Токен выдаёт @BotFather. Проверка делает запрос
-                    <code>getMe</code> к Telegram — токен никуда больше не отправляется.</span>
-                <div class="row-actions" style="margin-top:10px">
-                    <button class="btn btn-primary" id="sys-tg-save" type="button">💾 Сохранить</button>
-                    <button class="btn" id="sys-tg-test" type="button">🔎 Проверить токен</button>
-                    <span class="meta" id="sys-tg-status" role="status"></span>
-                </div>
-                <p class="sys-err" id="sys-tg-err" hidden></p>
-                <p class="sys-warn" id="sys-tg-warn" hidden></p>
-            </div>
-            <div class="card sys-card" data-hint="кто главный в сервисе">
-                <h4>🛡️ Доступы (Admins)</h4>
-                <label>Email админов (через запятую) <span class="sys-src" id="src-LIQSCOPE_ADMIN_EMAILS"></span>
-                    <input class="search" id="sys-acc-emails" data-syskey="LIQSCOPE_ADMIN_EMAILS"
-                           autocomplete="off" placeholder="owner@liqscope.online, boss@site.ru"></label>
-                <label>Telegram ID админов (через запятую) <span class="sys-src" id="src-LIQSCOPE_ADMIN_IDS"></span>
-                    <input class="search" id="sys-acc-ids" data-syskey="LIQSCOPE_ADMIN_IDS"
-                           autocomplete="off" placeholder="123456789"></label>
-                <span class="meta">Главный администратор задаётся этими списками: его нельзя
-                    забанить или снять. Изменение применяется сразу, без перезапуска.</span>
-                <div class="row-actions" style="margin-top:10px">
-                    <button class="btn btn-primary" id="sys-acc-save" type="button">💾 Сохранить</button>
-                    <span class="meta" id="sys-acc-status" role="status"></span>
-                </div>
-                <p class="sys-err" id="sys-acc-err" hidden></p>
-            </div>
-            <div class="card sys-card" data-hint="батчи и кэш — тонкая настройка">
-                <h4>🧮 Лимиты и кэш</h4>
-                <label>Батч расчёта уровней ликвидаций <span class="sys-src" id="src-LIQSCOPE_LEVELS_BATCH"></span>
-                    <input class="search" id="sys-lim-batch" data-syskey="LIQSCOPE_LEVELS_BATCH"
-                           type="number" min="1" max="50" placeholder="2"></label>
-                <label>TTL кэша событий уровней, сек <span class="sys-src" id="src-LIQSCOPE_LEVELS_EVENTS_TTL_SEC"></span>
-                    <input class="search" id="sys-lim-evttl" data-syskey="LIQSCOPE_LEVELS_EVENTS_TTL_SEC"
-                           type="number" min="5" max="3600" placeholder="600"></label>
-                <label>Снимков рынка в кэше <span class="sys-src" id="src-LIQSCOPE_SNAP_CACHE_SEC"></span>
-                    <input class="search" id="sys-lim-snap" data-syskey="LIQSCOPE_SNAP_CACHE_SEC"
-                           type="number" min="1" max="300" placeholder="12"></label>
-                <label>Ликвидаций в первом кадре /ws <span class="sys-src" id="src-LIQSCOPE_WS_INIT_LIQ"></span>
-                    <input class="search" id="sys-lim-wsliq" data-syskey="LIQSCOPE_WS_INIT_LIQ"
-                           type="number" min="20" max="200" placeholder="100"></label>
-                <span class="meta">Пустое поле при сохранении возвращает значение из окружения.
-                    Кроме «ликвидаций в /ws» всё читается при старте процесса.</span>
-                <div class="row-actions" style="margin-top:10px">
-                    <button class="btn btn-primary" id="sys-lim-save" type="button">💾 Сохранить</button>
-                    <span class="meta" id="sys-lim-status" role="status"></span>
-                </div>
-                <p class="sys-err" id="sys-lim-err" hidden></p>
-                <p class="sys-warn" id="sys-lim-warn" hidden></p>
-            </div>
-        </div>
+        <p class="lead">Вся конфигурация сервиса: значения сохраняются в базу
+            (<code>system_settings</code>) и применяются на лету; переменные окружения
+            остаются запасным вариантом. Секреты показываются маской
+            (<code>AIz***a1b2</code>); пустое поле секрета при сохранении = «оставить
+            как было». Кнопки «Проверить» тестируют ключ до сохранения.</p>
+        <div class="sys-tabs" id="sys-tabs"><span class="meta">загружаю настройки…</span></div>
+        <div id="sys-panels"></div>
     </div>
 
     <div class="card" id="admins-card" style="margin-top:14px" data-hint="главный и назначенные админы">
@@ -808,7 +745,7 @@
 <script src="/static/articles_admin.js?v=art1"></script>
 <script src="/static/archive_admin.js?v=arcdel1"></script>
 <script src="/static/consent.js?v=consent1"></script>
-<script src="/static/system_settings.js?v=sysset1"></script>
+<script src="/static/system_settings.js?v=sysset2"></script>
 <script src="/static/whale_admin.js?v=multichain4"></script>
 <link rel="stylesheet" href="/static/brand.css?v=rebrand1">
 </body>

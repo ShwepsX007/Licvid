@@ -443,7 +443,28 @@ class Provider:
         return self.key
 
 
+def set_config_source(fn) -> None:
+    """Источник настроек из админки (Менеджер настроек).
+
+    ``fn(key)`` возвращает значение из БД или ``None``. Оно главнее
+    переменных окружения: ключи и модели ИИ меняются из админки без
+    перезапуска сервера. Ставится один раз в ``server.py``.
+    """
+    global _config_source
+    _config_source = fn
+
+
+_config_source = None
+
+
 def _env(name: str, default: str = "") -> str:
+    if _config_source is not None:
+        try:
+            v = _config_source(name)
+        except Exception:  # noqa: BLE001 — настройки не ломают генерацию
+            v = None
+        if v is not None and str(v) != "":
+            return str(v).strip()
     return (os.getenv(name) or default).strip()
 
 
@@ -493,6 +514,39 @@ def auth_error(err: str) -> bool:
                           r"unauthorized|api[_ ]?key[_ ]?not[_ ]?valid", text, re.I))
 
 
+#: Базовые адреса провайдеров (их же использует админка для проверки ключей).
+GEMINI_DEFAULT_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+OPENAI_COMPAT_URLS = {
+    "groq": "https://api.groq.com/openai/v1/chat/completions",
+    "openrouter": "https://openrouter.ai/api/v1/chat/completions",
+    "deepseek": "https://api.deepseek.com/chat/completions",
+}
+#: Модели по умолчанию у каждого сервиса.
+DEFAULT_MODELS = {
+    "gemini": "gemini-3.5-flash-lite",
+    "groq": "qwen/qwen3.8-27b",
+    "openrouter": "openrouter/free",
+    "deepseek": "deepseek-chat",
+}
+
+
+def provider_url(name: str) -> str:
+    """Эффективный URL провайдера (переопределение из настроек/окружения)."""
+    if name == "gemini":
+        return _env("LIQSCOPE_AI_GEMINI_URL", GEMINI_DEFAULT_URL)
+    if name == "custom":
+        return _env("LIQSCOPE_AI_URL")
+    return _env(f"LIQSCOPE_AI_{name.upper()}_URL", OPENAI_COMPAT_URLS.get(name, ""))
+
+
+def provider_model(name: str) -> str:
+    """Эффективная модель провайдера (настройки → окружение → дефолт)."""
+    explicit = _env(f"LIQSCOPE_AI_{name.upper()}_MODEL") or _env("LIQSCOPE_AI_MODEL")
+    if explicit:
+        return explicit
+    return DEFAULT_MODELS.get(name, "gpt-4o-mini")
+
+
 def _provider(name: str, default_model: str, key_env: str,
               model_env: str) -> Optional[Provider]:
     keys = keys_for(name, key_env)
@@ -502,19 +556,13 @@ def _provider(name: str, default_model: str, key_env: str,
     explicit = bool(_env(model_env) or _env("LIQSCOPE_AI_MODEL"))
     model = _env(model_env) or _env("LIQSCOPE_AI_MODEL") or default_model
     if name == "gemini":
-        url = _env("LIQSCOPE_AI_GEMINI_URL",
-                   "https://generativelanguage.googleapis.com/v1beta/models")
+        url = provider_url("gemini")
         return Provider(name=name, kind="gemini", key=key, url=url, model=model,
                         models_url=url, explicit_model=explicit, keys=keys)
-    urls = {
-        "groq": "https://api.groq.com/openai/v1/chat/completions",
-        "openrouter": "https://openrouter.ai/api/v1/chat/completions",
-        "deepseek": "https://api.deepseek.com/chat/completions",
-    }
     headers = {}
     if name == "openrouter":
         headers = {"HTTP-Referer": "https://liqscope.online", "X-Title": "LiqScope"}
-    url = _env(f"LIQSCOPE_AI_{name.upper()}_URL", urls.get(name, ""))
+    url = provider_url(name)
     return Provider(name=name, kind="openai", key=key, url=url, model=model,
                     models_url=url.rsplit("/chat/completions", 1)[0] + "/models",
                     headers=headers, explicit_model=explicit, keys=keys)
@@ -994,6 +1042,18 @@ class AiWriter:
         # В канал уходит короткая версия (HEAD_MAX_LEN), а на сайт — весь
         # рассказ целиком: сайт не ограничен подписью Telegram.
         self.last_full: str = ""
+        # Динамическая конфигурация: вызывается перед каждой генерацией —
+        # Менеджер настроек подставляет ключи/модели, сохранённые в админке,
+        # без перезапуска сервера (ставится в server.py).
+        self.config_sync = None
+
+    def _apply_config_sync(self) -> None:
+        if self.config_sync is None:
+            return
+        try:
+            self.config_sync()
+        except Exception as e:  # noqa: BLE001 — настройки не ломают генерацию
+            log.debug("ИИ: синхронизация настроек: %s", e)
 
     # --- состояние для админки ---
     @property
@@ -1085,6 +1145,7 @@ class AiWriter:
     def headline_sync(self, snap: dict, recent: Optional[List[str]] = None,
                       variant: int = 0, lang: str = "ru") -> Optional[str]:
         """Первый удачный ответ или None (тогда шапка будет из шаблонов)."""
+        self._apply_config_sync()   # ключи/модели из админки — перед работой
         self.last_full = ""     # полный текст прошлого поста не должен протечь
         if not self.providers:
             return None
@@ -1192,6 +1253,7 @@ class AiWriter:
     def narrative_sync(self, facts: dict, lang: str = "ru",
                        variant: int = 0) -> Optional[str]:
         """Подробный текст дайджеста (RU/EN) или None — тогда будет шаблон."""
+        self._apply_config_sync()   # ключи/модели из админки — перед работой
         if not self.providers:
             return None
         from daily_digest import day_prompt
@@ -1281,6 +1343,7 @@ class AiWriter:
         «ИИ недоступен» и попросит вписать перевод руками (публикация
         подождёт).
         """
+        self._apply_config_sync()   # ключи/модели из админки — перед работой
         body = str(text or "").strip()
         if not body or not self.providers:
             return None

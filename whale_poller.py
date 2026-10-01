@@ -154,11 +154,20 @@ def iter_block_ranges(from_block: int | str | None, latest_block: int | str):
 
 
 def _env_poll_interval_sec() -> int:
+    # Интервал читается на каждый цикл, поэтому значение из Менеджера
+    # настроек (админка → «Системные настройки») подхватывается на лету,
+    # без перезапуска; окружение остаётся запасным вариантом.
     try:
-        value = int(os.getenv("LIQSCOPE_WHALE_POLL_INTERVAL_SEC",
-                              str(DEFAULT_POLL_INTERVAL_SEC)))
-    except (TypeError, ValueError):
-        value = DEFAULT_POLL_INTERVAL_SEC
+        from app_settings import default_manager
+        raw = default_manager().get("LIQSCOPE_WHALE_POLL_INTERVAL_SEC",
+                                    str(DEFAULT_POLL_INTERVAL_SEC))
+        value = int(raw)
+    except Exception:  # noqa: BLE001 — при любой проблеме падаем на окружение
+        try:
+            value = int(os.getenv("LIQSCOPE_WHALE_POLL_INTERVAL_SEC",
+                                  str(DEFAULT_POLL_INTERVAL_SEC)))
+        except (TypeError, ValueError):
+            value = DEFAULT_POLL_INTERVAL_SEC
     return value if value in POLL_INTERVAL_OPTIONS_SEC else DEFAULT_POLL_INTERVAL_SEC
 
 

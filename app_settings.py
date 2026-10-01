@@ -1,23 +1,25 @@
-"""Менеджер системных настроек (закрытие задачи «динамическая конфигурация»).
+"""Менеджер системных настроек («Системные настройки» в админке).
 
-Вся конфигурация сервиса (SMTP, Telegram, админские доступы, лимиты) исторически
-задавалась переменными окружения в systemd. Чтобы владелец мог менять её на лету
-из админки без `systemctl edit` и перезапуска, значения читаются так:
+Вся конфигурация сервиса исторически задавалась переменными окружения в
+systemd. Чтобы владелец мог менять её на лету из админки без `systemctl edit`
+и перезапуска, значения читаются так:
 
     таблица ``system_settings`` в accounts.db  →  переменная окружения  →  дефолт
 
 Модуль самодостаточен: держит собственное SQLite-подключение (та же база,
 что у ``accounts.Store`` — WAL позволяет несколько читателей/писателей),
-кэш значений в RAM и спецификацию управляемых ключей (какие секреты
-маскировать в API, что применяется сразу, а что требует перезапуска).
+кэш значений в RAM и реестр управляемых ключей (человекочитаемое имя,
+подсказка, секретность, нужен ли рестарт).
 
-Применение на лету:
-* SMTP/почта: ``SettingsManager.apply_mailer`` пересобирает транспорт
-  перед отправкой (вызывается из ``web_account._mailer`` на каждое письмо);
-* админы: ``SettingsManager.apply_admin_access`` обновляет списки
-  ``Store.admin_ids``/``Store.admin_emails`` без рестарта;
-* токен бота и лимиты, читаемые один раз при старте, помечены
-  ``restart=True`` — админка показывает предупреждение.
+Динамическое применение без перезапуска:
+* почта: ``apply_mailer`` пересобирает транспорт перед каждой отправкой
+  (хук ``Mailer.config_sync`` и ``web_account._mailer``);
+* ИИ: ``apply_ai`` обновляет писателя перед каждой генерацией
+  (хук ``AiWriter.config_sync``; ключи/модели читаются через
+  ``ai_text._env`` → источник из БД);
+* доступы: ``apply_admin_access`` обновляет списки ``Store`` сразу;
+* ключи, читаемые один раз при старте процесса, помечены ``restart=True`` —
+  админка честно показывает предупреждение о перезапуске.
 """
 from __future__ import annotations
 
@@ -35,49 +37,330 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 #: показывается». Пустой ввод при сохранении секрета = «оставить как было».
 MASK = "***"
 
-#: Разделы для карточек админки.
-SECTION_SMTP = "smtp"
-SECTION_TELEGRAM = "telegram"
-SECTION_ACCESS = "access"
-SECTION_LIMITS = "limits"
+#: Вкладки админки (группы настроек).
+SECTION_MAIL = "mail"          # ✉️ Почта и рассылки (SMTP, HTTPS-API)
+SECTION_AI = "ai"              # 🤖 ИИ и нейросети (ключи, модели, порядок)
+SECTION_SECURITY = "security"  # 🛡️ Безопасность и доступы (админы)
+SECTION_TELEGRAM = "telegram"  # 💬 Telegram (бот и каналы)
+SECTION_TUNING = "tuning"      # ⚙️ Тюнинг и производительность
 
-#: Управляемые ключи. ``secret`` — маскировать в ответах и не писать в аудит
-#: значение; ``restart`` — изменение подхватывается только после рестарта
-#: сервиса (значение читается один раз при старте процесса).
+#: Разделы в порядке показа в админке.
+SECTION_ORDER = (SECTION_MAIL, SECTION_AI, SECTION_SECURITY,
+                 SECTION_TELEGRAM, SECTION_TUNING)
+
+#: Суффиксы секретных ключей: маскируются даже без явного флага.
+_SECRET_SUFFIXES = ("_KEY", "_KEYS", "_SECRET", "_TOKEN", "_PASSWORD")
+
+
+def _spec(section: str, label: str, hint: str = "", secret: bool = False,
+          restart: bool = False, placeholder: str = "") -> Dict[str, Any]:
+    return {"section": section, "label": label, "hint": hint,
+            "secret": secret, "restart": restart, "placeholder": placeholder}
+
+
+#: Управляемые ключи. ``secret`` — маскировать в ответах и не писать значение
+#: в аудит; ``restart`` — читается один раз при старте процесса, изменение
+#: подхватится только после перезапуска сервиса.
 MANAGED_SETTINGS: Dict[str, Dict[str, Any]] = {
-    # ✉️ Почта: транспорт и отправитель
-    "LIQSCOPE_SMTP_HOST": {"section": SECTION_SMTP},
-    "LIQSCOPE_SMTP_PORT": {"section": SECTION_SMTP},
-    "LIQSCOPE_SMTP_USER": {"section": SECTION_SMTP},
-    "LIQSCOPE_SMTP_PASSWORD": {"section": SECTION_SMTP, "secret": True},
-    "LIQSCOPE_SMTP_FROM": {"section": SECTION_SMTP},
-    "LIQSCOPE_SMTP_TLS": {"section": SECTION_SMTP},
-    "LIQSCOPE_SMTP_TIMEOUT": {"section": SECTION_SMTP},
-    "LIQSCOPE_SMTP_IPV4": {"section": SECTION_SMTP},
-    "LIQSCOPE_SMTP_SSL": {"section": SECTION_SMTP},
-    # …запасные транспорты письма (папка-стенд и HTTPS-API рассылок)
-    "LIQSCOPE_MAIL_DIR": {"section": SECTION_SMTP},
-    "LIQSCOPE_MAIL_API": {"section": SECTION_SMTP},
-    "LIQSCOPE_MAIL_API_KEY": {"section": SECTION_SMTP, "secret": True},
-    "LIQSCOPE_MAIL_API_SECRET": {"section": SECTION_SMTP, "secret": True},
-    "LIQSCOPE_MAIL_API_URL": {"section": SECTION_SMTP},
-    "LIQSCOPE_MAIL_API_FROM": {"section": SECTION_SMTP},
-    # 🤖 Telegram-бот: токен читается один раз при старте — нужен рестарт
-    "LIQSCOPE_BOT_TOKEN": {"section": SECTION_TELEGRAM, "secret": True,
-                           "restart": True},
-    # 🛡️ Доступы: списки админов применяются сразу (см. apply_admin_access)
-    "LIQSCOPE_ADMIN_EMAILS": {"section": SECTION_ACCESS},
-    "LIQSCOPE_ADMIN_IDS": {"section": SECTION_ACCESS},
-    # 🧮 Лимиты и кэш (читаются при старте — нужен рестарт)
-    "LIQSCOPE_LEVELS_BATCH": {"section": SECTION_LIMITS, "restart": True},
-    "LIQSCOPE_LEVELS_EVENTS_TTL_SEC": {"section": SECTION_LIMITS, "restart": True},
-    "LIQSCOPE_SNAP_CACHE_SEC": {"section": SECTION_LIMITS, "restart": True},
-    # исключение: читается на каждое WS-подключение, поэтому без рестарта
-    "LIQSCOPE_WS_INIT_LIQ": {"section": SECTION_LIMITS},
+    # ── ✉️ Почта и рассылки: SMTP -------------------------------------------
+    "LIQSCOPE_SMTP_HOST": _spec(
+        SECTION_MAIL, "SMTP-сервер",
+        "Адрес сервера исходящей почты. Пример: smtp.yandex.ru. "
+        "Пусто — письма не отправляются.",
+        placeholder="smtp.yandex.ru"),
+    "LIQSCOPE_SMTP_PORT": _spec(
+        SECTION_MAIL, "SMTP-порт",
+        "Обычно 465 для SSL или 587 для STARTTLS.", placeholder="465"),
+    "LIQSCOPE_SMTP_TLS": _spec(
+        SECTION_MAIL, "Шифрование",
+        "ssl — отдельный защищённый порт (465); starttls — апгрейд "
+        "обычного соединения (587); none — без шифрования (не рекомендуется)."),
+    "LIQSCOPE_SMTP_USER": _spec(
+        SECTION_MAIL, "SMTP-логин",
+        "Имя пользователя для входа на SMTP-сервер, обычно адрес почты.",
+        placeholder="no-reply@liqscope.online"),
+    "LIQSCOPE_SMTP_PASSWORD": _spec(
+        SECTION_MAIL, "SMTP-пароль",
+        "Пароль приложения (не пароль от почты!). Яндекс и Gmail выдают "
+        "его отдельно в настройках аккаунта.", secret=True),
+    "LIQSCOPE_SMTP_FROM": _spec(
+        SECTION_MAIL, "Отправитель",
+        "Формат: «Имя <адрес>». Если пусто — письмо уйдёт с адреса логина: "
+        "Яндекс, Mail.ru и Gmail требуют совпадения.",
+        placeholder="LiqScope <no-reply@liqscope.online>"),
+    "LIQSCOPE_SMTP_TIMEOUT": _spec(
+        SECTION_MAIL, "Таймаут SMTP, сек", "Сколько ждать ответа сервера. По умолчанию 15."),
+    "LIQSCOPE_SMTP_IPV4": _spec(
+        SECTION_MAIL, "Только IPv4",
+        "1 — не пробовать IPv6. Включайте, если хостинг не выпускает "
+        "письма по IPv6 («Network is unreachable»)."),
+    "LIQSCOPE_SMTP_SSL": _spec(
+        SECTION_MAIL, "Флаг «порт 465 = SSL»",
+        "1 — порт и шифрование по умолчанию берутся для SSL-подключения. "
+        "Обычно не нужен, если заданы порт и шифрование явно."),
+    # ── ✉️ Почта и рассылки: сервисы рассылок (HTTPS-API) -------------------
+    "LIQSCOPE_MAIL_API": _spec(
+        SECTION_MAIL, "Сервис рассылок (вместо SMTP)",
+        "resend, sendpulse или generic — письма через HTTPS (порт 443), "
+        "когда хостинг блокирует SMTP-порты. Пусто — используется SMTP."),
+    "LIQSCOPE_MAIL_API_KEY": _spec(
+        SECTION_MAIL, "Ключ сервиса рассылок",
+        "Для Resend это ключ вида re_…. У SendPulse — client_id.",
+        secret=True, placeholder="re_…"),
+    "LIQSCOPE_MAIL_API_SECRET": _spec(
+        SECTION_MAIL, "Секрет сервиса рассылок",
+        "Нужен только для SendPulse (client_secret).", secret=True),
+    "LIQSCOPE_MAIL_API_URL": _spec(
+        SECTION_MAIL, "URL API рассылок",
+        "Пусто — стандартный адрес выбранного сервиса. Для generic — "
+        "обязательно: сюда шлётся JSON с Bearer-ключом."),
+    "LIQSCOPE_MAIL_API_FROM": _spec(
+        SECTION_MAIL, "Отправитель сервиса рассылок",
+        "Запасной адрес отправителя для рассылок, если общий не задан."),
+    "LIQSCOPE_MAIL_DIR": _spec(
+        SECTION_MAIL, "Папка-стенд для писем",
+        "Письма складываются в файлы вместо отправки — только для стенда "
+        "и отладки. Главнее всех остальных способов отправки!"),
+    # ── 🤖 ИИ и нейросети -----------------------------------------------------
+    "LIQSCOPE_AI_GEMINI_KEY": _spec(
+        SECTION_AI, "Ключ Gemini (Google AI Studio)",
+        "Бесплатный тариф на aistudio.google.com. Основной генератор "
+        "шапок постов и дайджестов.", secret=True),
+    "LIQSCOPE_AI_GEMINI_KEYS": _spec(
+        SECTION_AI, "Ключи Gemini (несколько)",
+        "Список через запятую: когда у ключа кончился лимит, запрос "
+        "повторяется со следующим.", secret=True),
+    "LIQSCOPE_AI_GEMINI_MODEL": _spec(
+        SECTION_AI, "Модель Gemini",
+        "Пусто — берём актуальную сами. Пример: gemini-3.5-flash-lite."),
+    "LIQSCOPE_AI_GEMINI_URL": _spec(
+        SECTION_AI, "URL API Gemini",
+        "Пусто — стандартный адрес. Меняйте только для своего прокси."),
+    "LIQSCOPE_AI_GROQ_KEY": _spec(
+        SECTION_AI, "Ключ Groq",
+        "Бесплатный тариф на console.groq.com — запасной генератор.",
+        secret=True),
+    "LIQSCOPE_AI_GROQ_KEYS": _spec(
+        SECTION_AI, "Ключи Groq (несколько)",
+        "Список через запятую — перебираются при исчерпании лимита.",
+        secret=True),
+    "LIQSCOPE_AI_GROQ_MODEL": _spec(
+        SECTION_AI, "Модель Groq",
+        "Модель должна быть включена в настройках проекта Groq. "
+        "Пример: qwen/qwen3.8-27b."),
+    "LIQSCOPE_AI_GROQ_URL": _spec(
+        SECTION_AI, "URL API Groq", "Пусто — стандартный адрес."),
+    "LIQSCOPE_AI_OPENROUTER_KEY": _spec(
+        SECTION_AI, "Ключ OpenRouter",
+        "Третий запасной сервис; есть модели с суффиксом :free.",
+        secret=True),
+    "LIQSCOPE_AI_OPENROUTER_KEYS": _spec(
+        SECTION_AI, "Ключи OpenRouter (несколько)",
+        "Список через запятую — перебираются при исчерпании лимита.",
+        secret=True),
+    "LIQSCOPE_AI_OPENROUTER_MODEL": _spec(
+        SECTION_AI, "Модель OpenRouter",
+        "Пример: openrouter/free или google/gemini-2.5-flash."),
+    "LIQSCOPE_AI_OPENROUTER_URL": _spec(
+        SECTION_AI, "URL API OpenRouter", "Пусто — стандартный адрес."),
+    "LIQSCOPE_AI_DEEPSEEK_KEY": _spec(
+        SECTION_AI, "Ключ DeepSeek",
+        "Платный, но очень дешёвый запасной сервис.", secret=True),
+    "LIQSCOPE_AI_DEEPSEEK_KEYS": _spec(
+        SECTION_AI, "Ключи DeepSeek (несколько)",
+        "Список через запятую — перебираются при исчерпании лимита.",
+        secret=True),
+    "LIQSCOPE_AI_DEEPSEEK_MODEL": _spec(
+        SECTION_AI, "Модель DeepSeek", "Пусто — deepseek-chat."),
+    "LIQSCOPE_AI_DEEPSEEK_URL": _spec(
+        SECTION_AI, "URL API DeepSeek", "Пусто — стандартный адрес."),
+    "LIQSCOPE_AI_KEY": _spec(
+        SECTION_AI, "Ключ своего OpenAI-совместимого API",
+        "Любой сервис с OpenAI-совместимым интерфейсом: задайте ему URL "
+        "и модель ниже.", secret=True),
+    "LIQSCOPE_AI_KEYS": _spec(
+        SECTION_AI, "Ключи своего API (несколько)",
+        "Список через запятую — перебираются при исчерпании лимита.",
+        secret=True),
+    "LIQSCOPE_AI_URL": _spec(
+        SECTION_AI, "URL своего OpenAI-совместимого API",
+        "Пример: https://api.my-llm.example/v1/chat/completions"),
+    "LIQSCOPE_AI_MODEL": _spec(
+        SECTION_AI, "Модель своего API",
+        "Имя модели у своего сервиса. Также служит общей моделью по "
+        "умолчанию, если у сервиса своя не задана. Пример: gpt-4o-mini."),
+    "LIQSCOPE_AI_ORDER": _spec(
+        SECTION_AI, "Порядок сервисов",
+        "Кого спрашивать первым, через запятую: "
+        "gemini,groq,openrouter,deepseek,custom.",
+        placeholder="gemini,groq,openrouter,deepseek"),
+    "LIQSCOPE_AI_TIMEOUT": _spec(
+        SECTION_AI, "Таймаут запроса к ИИ, сек",
+        "Сколько ждать ответа модели. По умолчанию 12."),
+    "LIQSCOPE_AI_MAX_TOKENS": _spec(
+        SECTION_AI, "Предел ответа модели, токенов",
+        "Длина генерации: 220 хватает для шапки поста с цифрами."),
+    "LIQSCOPE_AI_TEMPERATURE": _spec(
+        SECTION_AI, "Температура генерации",
+        "0.0 — строго, 1.0 — творчески. По умолчанию 0.9."),
+    "LIQSCOPE_AI_DISABLED": _spec(
+        SECTION_AI, "Выключить ИИ совсем",
+        "1 — шапки постов и дайджесты всегда из шаблонов, запросов к "
+        "сервисам нет."),
+    # ── 🛡️ Безопасность и доступы ---------------------------------------------
+    "LIQSCOPE_ADMIN_EMAILS": _spec(
+        SECTION_SECURITY, "Email админов",
+        "Через запятую. Главный администратор задаётся этим списком: его "
+        "нельзя забанить или снять. Применяется сразу.",
+        placeholder="owner@liqscope.online"),
+    "LIQSCOPE_ADMIN_IDS": _spec(
+        SECTION_SECURITY, "Telegram ID админов",
+        "Числовые id через запятую (узнать: @userinfobot). Применяется сразу.",
+        placeholder="123456789"),
+    # ── 💬 Telegram -----------------------------------------------------------
+    "LIQSCOPE_BOT_TOKEN": _spec(
+        SECTION_TELEGRAM, "Токен бота",
+        "Выдаёт @BotFather. Опрос бота запускается при старте процесса, "
+        "поэтому новый токен подхватится после перезапуска.",
+        secret=True, restart=True),
+    "LIQSCOPE_CHANNEL_ID": _spec(
+        SECTION_TELEGRAM, "ID основного канала",
+        "Числовой id канала для сводок (обычно -100…). Меняется также из "
+        "панели бота; после смены через настройки нужен перезапуск.",
+        restart=True),
+    "LIQSCOPE_CHANNEL_URL": _spec(
+        SECTION_TELEGRAM, "Ссылка основного канала",
+        "Приглашение вида https://t.me/+…. Показывается в боте.",
+        restart=True),
+    "LIQSCOPE_CHANNEL2_ID": _spec(
+        SECTION_TELEGRAM, "ID второго (английского) канала",
+        "Куда дублируются английские сводки.", restart=True),
+    "LIQSCOPE_CHANNEL2_URL": _spec(
+        SECTION_TELEGRAM, "Ссылка второго канала",
+        "Приглашение вида https://t.me/+….", restart=True),
+    # ── ⚙️ Тюнинг: уровни ликвидаций ------------------------------------------
+    "LIQSCOPE_LEVELS_BATCH": _spec(
+        SECTION_TUNING, "Размер пачки расчёта уровней",
+        "Сколько монет считать за один проход фона. Рекомендуется 2–4: "
+        "меньше — меньше задержек сервера, больше — быстрее обновляются "
+        "уровни.", restart=True),
+    "LIQSCOPE_LEVELS_AGG_ROWS": _spec(
+        SECTION_TUNING, "Схлопывание строк лестницы",
+        "1 (по умолчанию) — соседние строки уровней сливаются перед "
+        "отрисовкой: расчёт дешевле кратно.", restart=True),
+    "LIQSCOPE_LEVELS_AGG_BUCKET": _spec(
+        SECTION_TUNING, "Шаг склейки уровней, %",
+        "Насколько близкие ценовые строки считать одной. По умолчанию 0.5.",
+        restart=True),
+    "LIQSCOPE_LEVELS_TTL": _spec(
+        SECTION_TUNING, "TTL расчёта уровней, сек",
+        "Как часто пересчитывать лестницу. По умолчанию 20.", restart=True),
+    "LIQSCOPE_LEVELS_PRICE_TTL": _spec(
+        SECTION_TUNING, "TTL кэша цен уровней, сек",
+        "По умолчанию 300.", restart=True),
+    "LIQSCOPE_LEVELS_EVENTS_TTL_SEC": _spec(
+        SECTION_TUNING, "TTL кэша событий уровней, сек",
+        "Сколько держать прочитанные дневные шарды ликвидаций. Больше — "
+        "меньше чтений диска, но старый уровень может оставаться невычтенным "
+        "до конца окна. По умолчанию 600, минимум 5.", restart=True),
+    "LIQSCOPE_LEVELS_EVENTS_CACHE_MAX": _spec(
+        SECTION_TUNING, "Монет в кэше событий уровней",
+        "Потолок памяти: прежние 64 записи давали кучу больше гигабайта. "
+        "По умолчанию 24.", restart=True),
+    "LIQSCOPE_LEVELS_EVENTS_CACHE_EVENTS": _spec(
+        SECTION_TUNING, "Событий в кэше уровней (всего)",
+        "Общий бюджет событий по всем монетам кэша. По умолчанию 100000.",
+        restart=True),
+    "LIQSCOPE_LEVELS_CALIB_BUDGET": _spec(
+        SECTION_TUNING, "Бюджет калибровки уровней",
+        "Сколько секунд CPU за проход отдавать калибровке. По умолчанию 2.",
+        restart=True),
+    "LIQSCOPE_LEVELS_CALIB_BUDGET_SEC": _spec(
+        SECTION_TUNING, "Окно бюджета калибровки, сек",
+        "По умолчанию 30.", restart=True),
+    # ── ⚙️ Тюнинг: кэш и фоновые задачи ----------------------------------------
+    "LIQSCOPE_SNAP_CACHE_SEC": _spec(
+        SECTION_TUNING, "TTL снимка рынка, сек",
+        "Кэш агрегатов для шапки и топа монет. По умолчанию 12.",
+        restart=True),
+    "LIQSCOPE_ALERTS_SNAP_TTL_SEC": _spec(
+        SECTION_TUNING, "TTL снимка алертов, сек",
+        "По умолчанию 1.", restart=True),
+    "LIQSCOPE_FLOW_SNAP_TTL_SEC": _spec(
+        SECTION_TUNING, "TTL снимка потоков (CVD/OI), сек",
+        "По умолчанию 2.", restart=True),
+    "LIQSCOPE_WS_INIT_LIQ": _spec(
+        SECTION_TUNING, "Ликвидаций в первом кадре /ws",
+        "Сколько недавних событий отдавать при подключении терминала "
+        "(20–200). Применяется без перезапуска."),
+    "LIQSCOPE_HISTORY_TTL_HOURS": _spec(
+        SECTION_TUNING, "Глубина истории ликвидаций, часов",
+        "По умолчанию месяц. Старшее — вытесняется.", restart=True),
+    "LIQSCOPE_HISTORY_MAX": _spec(
+        SECTION_TUNING, "Событий истории в памяти",
+        "Потолок ленты в оперативной памяти. По умолчанию 60000.",
+        restart=True),
+    "LIQSCOPE_POST_INTERVAL_H": _spec(
+        SECTION_TUNING, "Интервал постов в канал, часов",
+        "Частота сводок (1–24). Обычно меняется из панели бота — там "
+        "применяется сразу; здесь это стартовое значение.", restart=True),
+    "LIQSCOPE_DIGEST_HOUR": _spec(
+        SECTION_TUNING, "Час вечернего дайджеста (МСК)",
+        "По умолчанию 22.", restart=True),
+    "LIQSCOPE_DIGEST_MIN": _spec(
+        SECTION_TUNING, "Минута вечернего дайджеста", "По умолчанию 0.",
+        restart=True),
+    "LIQSCOPE_DIGEST_JITTER_MIN": _spec(
+        SECTION_TUNING, "Разброс публикации дайджеста, мин",
+        "Случайная задержка после назначенного времени. По умолчанию 10.",
+        restart=True),
+    "LIQSCOPE_DIGEST_SCHED": _spec(
+        SECTION_TUNING, "Автопубликация дайджеста",
+        "0 — выпуск не публикуется сам, только вручную.", restart=True),
+    "LIQSCOPE_OXA_POLL_SEC": _spec(
+        SECTION_TUNING, "Интервал опроса 0xArchive, сек",
+        "Ликвидации Hyperliquid через индексатор. По умолчанию 120.",
+        restart=True),
+    "LIQSCOPE_WHALE_POLL_INTERVAL_SEC": _spec(
+        SECTION_TUNING, "Интервал опроса китов, сек",
+        "Фоновый проход скринера китов (60/120/300). Применяется без "
+        "перезапуска: читается на каждый цикл."),
+    # ── ⚙️ Тюнинг: сборка мусора, журнал, сжатие --------------------------------
+    "LIQSCOPE_GC_LOG_MS": _spec(
+        SECTION_TUNING, "Порог лога сборки мусора, мс",
+        "С какой длительности писать о сборке в журнал. По умолчанию 200.",
+        restart=True),
+    "LIQSCOPE_GC_FREEZE": _spec(
+        SECTION_TUNING, "Заморозка кучи старта",
+        "1 (по умолчанию) — объекты старта не участвуют в сборках: "
+        "паузы короче.", restart=True),
+    "LIQSCOPE_LOOP_LAG_MS": _spec(
+        SECTION_TUNING, "Порог сторожа пауз, мс",
+        "Пауза event loop длиннее порога пишется в журнал. По умолчанию 500.",
+        restart=True),
+    "LIQSCOPE_LOG_ASYNC": _spec(
+        SECTION_TUNING, "Асинхронный журнал",
+        "1 (по умолчанию) — запись логов через очередь из отдельного "
+        "потока: воркер не блокируется на journald.", restart=True),
+    "LIQSCOPE_LOG_QUEUE": _spec(
+        SECTION_TUNING, "Глубина очереди журнала",
+        "Переполнение роняет запись, а не воркер. По умолчанию 20000.",
+        restart=True),
+    "LIQSCOPE_GZIP_THREAD_MIN_SIZE": _spec(
+        SECTION_TUNING, "Порог сжатия в потоке, байт",
+        "Ответы больше этого размера сжимаются в отдельном потоке (64 КБ "
+        "по умолчанию): zlib отпускает GIL и не держит воркер.",
+        restart=True),
 }
 
 #: Ключи с секретами — маскируются в ответах и формах.
-SECRET_KEYS = frozenset(k for k, m in MANAGED_SETTINGS.items() if m.get("secret"))
+SECRET_KEYS = frozenset(
+    k for k, m in MANAGED_SETTINGS.items()
+    if m.get("secret") or k.endswith(_SECRET_SUFFIXES))
+
+#: Ключи ИИ-блока: по ним считается сигнатура для динамической пересборки.
+AI_KEYS = tuple(sorted(k for k in MANAGED_SETTINGS
+                       if MANAGED_SETTINGS[k]["section"] == SECTION_AI))
 
 
 def debug_mode() -> bool:
@@ -101,8 +384,17 @@ def mask_token(token: str, keep: int = 8) -> str:
 
 
 def mask_secret(value: str) -> str:
-    """Секрет для ответа админке: задан — маска, не задан — пусто."""
-    return MASK if (value or "") else ""
+    """Секрет для ответа админке: начало и хвост узнаваемы, середина скрыта.
+
+    Длинное значение: первые 3 символа + ``***`` + последние 4
+    (например, ``AIz***a1b2``). Короткое — просто ``***``. Не задано — пусто.
+    """
+    value = value or ""
+    if not value:
+        return ""
+    if len(value) <= 10:
+        return MASK
+    return value[:3] + MASK + value[-4:]
 
 
 def _flag_value(raw: str, default: bool = False) -> bool:
@@ -122,10 +414,11 @@ class SettingsManager:
             "LIQSCOPE_ACCOUNTS_DB", os.path.join(HERE, "data", "accounts.db"))
         self._lock = threading.Lock()
         self._db: Optional[sqlite3.Connection] = None
-        # RAM-кэш значений из БД: экономит SELECT на каждое письмо/запрос.
-        # Ключ — всегда управляемая настройка, чужие ключи не кэшируем.
-        self._cache: Dict[str, str] = {}
-        self._cache_loaded = False
+        # Значения читаются точечным SELECT по первичному ключу (микросекунды,
+        # WAL-чтение не блокирует писателей). Общий кэш в памяти не держим:
+        # с одной базой могут работать несколько менеджеров (сервер,
+        # whale_poller, тесты), и чтение из БД гарантирует, что все они видят
+        # сохранённое админкой сразу.
         self._ensure_schema()
 
     # ----- подключение -----------------------------------------------------
@@ -143,13 +436,6 @@ class SettingsManager:
                 " value TEXT NOT NULL,"
                 " updated_ts REAL NOT NULL DEFAULT 0)")
 
-    def _load_cache_locked(self) -> None:
-        assert self._db is not None
-        rows = self._db.execute(f"SELECT key, value FROM {self.TABLE}").fetchall()
-        self._cache = {r["key"]: r["value"] for r in rows
-                       if r["key"] in MANAGED_SETTINGS}
-        self._cache_loaded = True
-
     def close(self) -> None:
         with self._lock:
             if self._db is not None:
@@ -158,15 +444,21 @@ class SettingsManager:
                 except Exception:  # noqa: BLE001 — закрытие не должно падать
                     pass
                 self._db = None
-                self._cache_loaded = False
 
     # ----- чтение/запись ----------------------------------------------------
     def db_value(self, key: str) -> Optional[str]:
-        """Значение из БД (``None`` — переопределения нет)."""
+        """Значение из БД (``None`` — переопределения нет).
+
+        Именно эту функцию ``server.py`` передаёт в ``ai_text`` источником
+        настроек: БД главнее окружения. Читается всегда из базы — это дёшево
+        (ключ — первичный) и гарантирует согласованность между несколькими
+        менеджерами одной базы.
+        """
         with self._lock:
-            if not self._cache_loaded:
-                self._load_cache_locked()
-            return self._cache.get(key)
+            assert self._db is not None
+            row = self._db.execute(
+                f"SELECT value FROM {self.TABLE} WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else None
 
     def get(self, key: str, default: str = "") -> str:
         """Эффективное значение: БД → переменная окружения → дефолт."""
@@ -191,7 +483,6 @@ class SettingsManager:
                 "updated_ts=excluded.updated_ts",
                 (key, value))
             self._db.commit()
-            self._cache[key] = value
         return True
 
     def delete(self, key: str) -> None:
@@ -200,14 +491,15 @@ class SettingsManager:
             assert self._db is not None
             self._db.execute(f"DELETE FROM {self.TABLE} WHERE key=?", (key,))
             self._db.commit()
-            self._cache.pop(key, None)
 
     def overrides(self) -> Dict[str, str]:
         """Все сохранённые в БД переопределения (управляемые ключи)."""
         with self._lock:
-            if not self._cache_loaded:
-                self._load_cache_locked()
-            return dict(self._cache)
+            assert self._db is not None
+            rows = self._db.execute(
+                f"SELECT key, value FROM {self.TABLE}").fetchall()
+        return {r["key"]: r["value"] for r in rows
+                if r["key"] in MANAGED_SETTINGS}
 
     # ----- спецификация ------------------------------------------------------
     @staticmethod
@@ -228,8 +520,9 @@ class SettingsManager:
     def admin_view(self) -> Dict[str, Dict[str, Any]]:
         """Срез всех настроек для ``GET /api/admin/settings``.
 
-        Секреты возвращаются строкой ``***`` (если заданы) — полный пароль или
-        токен в браузер не уходит никогда.
+        Секреты возвращаются маскированными (``AIz***a1b2``) — полное
+        значение в браузер не уходит никогда. Для каждого ключа отдаются
+        человекочитаемое имя и подсказка — фронтенд рисует формы по ним.
         """
         out: Dict[str, Dict[str, Any]] = {}
         for key, m in MANAGED_SETTINGS.items():
@@ -237,13 +530,16 @@ class SettingsManager:
             source = "db" if db_val is not None else (
                 "env" if (os.getenv(key) or "") else "")
             raw = db_val if db_val is not None else (os.getenv(key) or "")
-            secret = bool(m.get("secret"))
+            secret = bool(key in SECRET_KEYS)
             out[key] = {
                 "value": mask_secret(raw) if secret else raw,
                 "source": source,
                 "secret": secret,
                 "restart": bool(m.get("restart")),
                 "section": m.get("section", ""),
+                "label": m.get("label", key),
+                "hint": m.get("hint", ""),
+                "placeholder": m.get("placeholder", ""),
             }
         return out
 
@@ -309,7 +605,53 @@ class SettingsManager:
         })
         return cfg
 
+    def ai_signature(self) -> tuple:
+        """Отпечаток всех эффективных ИИ-настроек: по нему понятно, нужно ли
+        пересобирать писателя. Дешёвый: значения уже в RAM-кэше."""
+        return tuple(self.get(k) for k in AI_KEYS)
+
     # ----- применение на лету --------------------------------------------------
+    def apply_ai(self, writer):
+        """Подогнать ``ai_text.AiWriter`` под текущие настройки.
+
+        Возвращает писателя (тот же объект с обновлёнными провайдерами,
+        нового или ``None``, если ключей больше нет). Совпадение
+        конфигурации — сравнение сигнатуры, поэтому на горячем пути
+        (каждая генерация) это просто сравнение кортежа строк.
+        """
+        import ai_text
+        sig = self.ai_signature()
+        if writer is not None and getattr(writer, "_liq_settings_sig", None) == sig:
+            return writer
+        if writer is None:
+            new = ai_text.build_ai()
+            if new is not None:
+                new._liq_settings_sig = sig
+                log.info("ИИ: писатель собран из настроек (%d провайдеров)",
+                         len(new.providers))
+            return new
+        # обновление на месте: ссылки на объект остаются живыми
+        writer.providers = ai_text.build_providers()
+        try:
+            writer.timeout = float(ai_text._env("LIQSCOPE_AI_TIMEOUT", "12") or 12)
+            writer.max_tokens = int(ai_text._env("LIQSCOPE_AI_MAX_TOKENS", "220") or 220)
+            writer.temperature = float(ai_text._env("LIQSCOPE_AI_TEMPERATURE", "0.9") or 0.9)
+        except (TypeError, ValueError):
+            pass
+        writer.state = {
+            p.name: {"name": p.name, "model": p.model, "ok": False,
+                     "reason": "не пробовали", "dead": False, "ms": 0,
+                     "keys": len(p.keys) or 1, "key_index": p.key_index + 1,
+                     "keys_used": 0}
+            for p in writer.providers}
+        writer.resolved = {}
+        writer._models = {}
+        writer._rejected = {}
+        writer._liq_settings_sig = sig
+        log.info("ИИ: настройки применены на лету (%d провайдеров)",
+                 len(writer.providers))
+        return writer
+
     def apply_mailer(self, mailer_obj, public_url: str = "") -> bool:
         """Подогнать ``mailer.Mailer`` под текущие настройки.
 

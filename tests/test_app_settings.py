@@ -75,15 +75,23 @@ class SettingsStoreTest(unittest.TestCase):
         self.mgr.set("LIQSCOPE_SMTP_PASSWORD", "super-secret-pass")
         self.mgr.set("LIQSCOPE_SMTP_HOST", "smtp.example")
         view = self.mgr.admin_view()
-        self.assertEqual(view["LIQSCOPE_SMTP_PASSWORD"]["value"], MASK)
+        masked = view["LIQSCOPE_SMTP_PASSWORD"]["value"]
+        self.assertIn(MASK, masked)                    # середина скрыта
+        self.assertNotIn("secret", masked)             # секрет не светится
+        self.assertTrue(masked.startswith("sup"))      # префикс узнаваем
+        self.assertTrue(masked.endswith("pass"))       # хвост узнаваем
         self.assertTrue(view["LIQSCOPE_SMTP_PASSWORD"]["secret"])
         self.assertEqual(view["LIQSCOPE_SMTP_PASSWORD"]["source"], "db")
         self.assertEqual(view["LIQSCOPE_SMTP_HOST"]["value"], "smtp.example")
         self.assertFalse(view["LIQSCOPE_SMTP_HOST"]["secret"])
+        # схема для фронта: человекочитаемое имя и подсказка у каждого ключа
+        self.assertEqual(view["LIQSCOPE_SMTP_HOST"]["label"], "SMTP-сервер")
+        self.assertIn("smtp", view["LIQSCOPE_SMTP_HOST"]["hint"].lower())
 
-    def test_mask_secret_empty(self):
+    def test_mask_secret_shapes(self):
         self.assertEqual(mask_secret(""), "")
-        self.assertEqual(mask_secret("x"), MASK)
+        self.assertEqual(mask_secret("x"), MASK)               # короткое — просто маска
+        self.assertEqual(mask_secret("sk-proj-abc-xyz123"), "sk-***z123")
 
     # ----- почта: динамическая пересборка ------------------------------------
     def test_apply_mailer_rebuilds_and_is_idempotent(self):
@@ -140,6 +148,80 @@ class SettingsStoreTest(unittest.TestCase):
         self.assertTrue(self.mgr.apply_admin_access(store))
         self.assertEqual(store.admin_ids, {11, 22, 33})
         self.assertEqual(store.admin_emails, {"new@example.com"})
+
+
+class AiSettingsTest(unittest.TestCase):
+    """ИИ-ключи из БД: писатель пересобирается, нет ключа в базе — окружение."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.mgr = SettingsManager(os.path.join(self.tmp.name, "accounts.db"))
+        self._env_backup = {}
+        for key in ("LIQSCOPE_AI_GEMINI_KEY", "LIQSCOPE_AI_GEMINI_KEYS",
+                    "LIQSCOPE_AI_GEMINI_MODEL", "LIQSCOPE_AI_GROQ_KEY",
+                    "LIQSCOPE_AI_ORDER", "LIQSCOPE_AI_TIMEOUT",
+                    "LIQSCOPE_AI_DISABLED"):
+            self._env_backup[key] = os.environ.pop(key, None)
+
+    def tearDown(self):
+        import ai_text
+        ai_text.set_config_source(None)
+        self.mgr.close()
+        self.tmp.cleanup()
+        for key, val in self._env_backup.items():
+            if val is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = val
+
+    def test_env_fallback_when_db_empty(self):
+        """Нет ключа в базе — бесшовно берётся переменная окружения."""
+        import ai_text
+        ai_text.set_config_source(self.mgr.db_value)
+        os.environ["LIQSCOPE_AI_GEMINI_KEY"] = "env-key-123"
+        self.assertEqual(self.mgr.get("LIQSCOPE_AI_GEMINI_KEY"), "env-key-123")
+        providers = ai_text.build_providers()
+        self.assertEqual(len(providers), 1)
+        self.assertEqual(providers[0].name, "gemini")
+        self.assertEqual(providers[0].key, "env-key-123")
+
+    def test_db_overrides_env_for_ai(self):
+        import ai_text
+        ai_text.set_config_source(self.mgr.db_value)
+        os.environ["LIQSCOPE_AI_GEMINI_KEY"] = "env-key-123"
+        self.mgr.set("LIQSCOPE_AI_GEMINI_KEY", "db-key-999")
+        providers = ai_text.build_providers()
+        self.assertEqual(providers[0].key, "db-key-999")
+
+    def test_apply_ai_rebuilds_in_place(self):
+        import ai_text
+        ai_text.set_config_source(self.mgr.db_value)
+        self.mgr.set("LIQSCOPE_AI_GEMINI_KEY", "k1")
+        writer = self.mgr.apply_ai(None)
+        self.assertIsNotNone(writer)
+        self.assertEqual(len(writer.providers), 1)
+        # повтор без изменений — объект тот же (сигнатура совпала)
+        self.assertIs(self.mgr.apply_ai(writer), writer)
+        # добавили второй сервис — обновление на месте, объект сохранён
+        self.mgr.set("LIQSCOPE_AI_GROQ_KEY", "k2")
+        updated = self.mgr.apply_ai(writer)
+        self.assertIs(updated, writer)
+        self.assertEqual({p.name for p in writer.providers}, {"gemini", "groq"})
+        # ключи убрали — писатель «пустеет», но остаётся объектом
+        self.mgr.delete("LIQSCOPE_AI_GEMINI_KEY")
+        self.mgr.delete("LIQSCOPE_AI_GROQ_KEY")
+        self.assertIs(self.mgr.apply_ai(writer), writer)
+        self.assertEqual(writer.providers, [])
+        self.assertFalse(writer.enabled)
+
+    def test_writer_config_sync_hook_exists(self):
+        import ai_text
+        ai_text.set_config_source(self.mgr.db_value)
+        self.mgr.set("LIQSCOPE_AI_GEMINI_KEY", "k1")
+        writer = self.mgr.apply_ai(None)
+        self.assertTrue(hasattr(writer, "config_sync"))
+        # хук дёргается перед генерацией и не падает без установленного fn
+        writer._apply_config_sync()
 
 
 class TokenMaskTest(unittest.TestCase):

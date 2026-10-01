@@ -642,7 +642,27 @@ tg_bot = TelegramBot(BOT_TOKEN, account_store, PUBLIC_URL,
                      channel_url=CHANNEL_URL, channel_id=CHANNEL_ID)
 # ИИ-шапки для постов в канал: Gemini → Groq → OpenRouter (ключи из окружения).
 # Без ключей None — сводка уходит с шаблонными шапками, как раньше.
-tg_bot.ai = build_ai()
+# ИИ берёт ключи/модели из Менеджера настроек: БД главнее окружения,
+# поэтому админка меняет их без `systemctl edit`. Источник ставится ДО
+# первой сборки писателя.
+ai_text.set_config_source(settings_store.db_value)
+
+
+def ai_sync():
+    """ИИ-писатель по текущим настройкам (ключи из БД/окружения).
+
+    Обновляет существующий писателя на месте (ссылки в боте остаются
+    живыми), собирает нового, если ключи появились, и возвращает результат.
+    Вызывается после сохранения настроек из админки и перед каждой
+    генерацией (хук ``AiWriter.config_sync``).
+    """
+    tg_bot.ai = settings_store.apply_ai(tg_bot.ai)
+    if tg_bot.ai is not None and tg_bot.ai.config_sync is None:
+        tg_bot.ai.config_sync = ai_sync
+    return tg_bot.ai
+
+
+tg_bot.ai = ai_sync()
 # Промты ИИ (шапка поста и дневной дайджест) можно переписать в админке сайта:
 # они лежат настройками ai_prompt_head_ru / ai_prompt_digest_en и т.д., а
 # встроенные шаблоны остаются образцом, пока админ своего текста не сохранил.
@@ -4981,6 +5001,8 @@ account_ctx.mailer = mailer
 # Менеджер системных настроек: админка читает/пишет конфигурацию в БД,
 # почта и доступы подхватывают изменения без перезапуска.
 account_ctx.settings = settings_store
+# После смены ИИ-ключей в админке писатель пересобирается без рестарта.
+account_ctx.ai_refresh_fn = ai_sync
 # Бот подтверждает почту теми же письмами, что и сайт
 tg_bot.mailer = mailer
 account_ctx.require_email_verification = REQUIRE_EMAIL_VERIFICATION

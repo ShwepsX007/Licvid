@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -41,6 +42,8 @@ class Ctx:
     mailer = None
     #: app_settings.SettingsManager — системные настройки из БД (админка)
     settings = None
+    #: Пересборка ИИ-писателя после смены ключей/моделей в админке
+    ai_refresh_fn = staticmethod(lambda: None)
     public_url = ""
     secret = ""
     cookie_secure = False
@@ -363,6 +366,98 @@ async def _tg_getme(token: str, timeout: float = 15.0) -> dict:
                 text = (await resp.text())[:200]
                 return {"ok": False,
                         "description": f"HTTP {resp.status}: {text}"}
+
+
+#: Провайдеры, которых умеет проверять админка (см. ai_text.DEFAULT_ORDER).
+LLM_PROVIDERS = ("gemini", "groq", "openrouter", "deepseek", "custom")
+
+
+def _stored_llm_key(mgr, provider: str) -> str:
+    """Первый сохранённый ключ провайдера: БД → окружение (список и одиночный)."""
+    import ai_text
+
+    if mgr is None:
+        keys = ai_text.keys_for(provider, f"LIQSCOPE_AI_{provider.upper()}_KEY") \
+            if provider != "custom" else \
+            (ai_text._split_keys(os.getenv("LIQSCOPE_AI_KEYS", ""))
+             or ai_text._split_keys(os.getenv("LIQSCOPE_AI_KEY", "")))
+        return keys[0] if keys else ""
+    if provider == "custom":
+        keys = ai_text._split_keys(mgr.get("LIQSCOPE_AI_KEYS"))
+        if not keys:
+            keys = ai_text._split_keys(mgr.get("LIQSCOPE_AI_KEY"))
+        return keys[0] if keys else ""
+    keys = ai_text._split_keys(mgr.get(f"LIQSCOPE_AI_{provider.upper()}_KEYS"))
+    single = mgr.get(f"LIQSCOPE_AI_{provider.upper()}_KEY")
+    if single and single not in keys:
+        keys.append(single)
+    return keys[0] if keys else ""
+
+
+def _llm_error_text(status: int, data: dict) -> str:
+    """Точный текст ошибки провайдера — его увидит админ в красной плашке."""
+    err = data.get("error") if isinstance(data, dict) else None
+    if isinstance(err, dict):
+        msg = str(err.get("message") or "")
+    elif isinstance(err, str):
+        msg = err
+    else:
+        msg = str(data.get("message") or data.get("detail") or "")[:300]
+    if msg:
+        return f"HTTP {status}: {msg}" if status >= 400 else msg
+    return f"HTTP {status}"
+
+
+async def _llm_ping(provider: str, key: str, model: str = "",
+                    url: str = "", timeout: float = 20.0) -> Tuple[bool, str, str]:
+    """Минимальный запрос «ping» к провайдеру ИИ.
+
+    Возвращает ``(ок, сообщение, использованная_модель)``; сообщение при
+    ошибке — точный текст провайдера (``Invalid API Key``, ``Quota
+    Exceeded``…), его админка показывает как есть.
+    """
+    import aiohttp
+    import ai_text
+
+    provider = (provider or "").strip().lower()
+    if provider not in LLM_PROVIDERS:
+        return False, f"Неизвестный провайдер: {provider or '—'}", ""
+    if not key:
+        return False, "Ключ не задан", ""
+    model = (model or "").strip() or ai_text.provider_model(provider)
+    url = (url or "").strip() or ai_text.provider_url(provider)
+    if not url:
+        return False, "Не задан URL сервиса (для своего API укажите его)", ""
+
+    headers = {"Content-Type": "application/json"}
+    if provider == "gemini":
+        req_url = f"{url.rstrip('/')}/{model}:generateContent?key={key}"
+        payload = {"contents": [{"parts": [{"text": "ping"}]}]}
+    else:
+        req_url = url
+        headers["Authorization"] = f"Bearer {key}"
+        if provider == "openrouter":
+            headers.update({"HTTP-Referer": "https://liqscope.online",
+                            "X-Title": "LiqScope"})
+        payload = {"model": model, "max_tokens": 8,
+                   "messages": [{"role": "user", "content": "ping"}]}
+
+    client_timeout = aiohttp.ClientTimeout(total=timeout, sock_connect=10)
+    try:
+        async with aiohttp.ClientSession(timeout=client_timeout) as session:
+            async with session.post(req_url, json=payload, headers=headers) as resp:
+                try:
+                    data = await resp.json(content_type=None)
+                except Exception:  # noqa: BLE001 — не-JSON тело тоже ответ
+                    data = {"raw": (await resp.text())[:300]}
+                if resp.status < 400:
+                    return True, "Ключ принят, модель отвечает", model
+                return False, _llm_error_text(resp.status,
+                                              data if isinstance(data, dict) else {}), model
+    except asyncio.TimeoutError:
+        return False, f"Таймаут ({int(timeout)} с): сервис не ответил", model
+    except Exception as e:  # noqa: BLE001 — сеть/DNS/TLS
+        return False, f"{type(e).__name__}: {str(e)[:250]}", model
 
 
 def _email_error(lang: str, code: str) -> str:
@@ -1607,38 +1702,42 @@ def register_account_routes(app) -> None:
             ctx.store.set_setting("chat_dm_tg_delay_min", val, actor_id=actor["id"])
             saved["chat_dm_tg_delay_min"] = val
 
-        # Системные ключи (SMTP/Telegram/доступы/лимиты) — в БД настроек.
+        # Системные ключи (почта/ИИ/доступы/лимиты) — в БД настроек.
         mgr = _settings_mgr()
         sys_saved: List[str] = []
         warnings: List[str] = []
         restart_required = False
         if mgr is not None:
-            smtp_touched = access_touched = False
+            smtp_touched = access_touched = ai_touched = False
+
+            def _track(k: str):
+                nonlocal smtp_touched, access_touched, ai_touched
+                if k.startswith("LIQSCOPE_SMTP") or k.startswith("LIQSCOPE_MAIL"):
+                    smtp_touched = True
+                if k in ("LIQSCOPE_ADMIN_EMAILS", "LIQSCOPE_ADMIN_IDS"):
+                    access_touched = True
+                if k.startswith("LIQSCOPE_AI_"):
+                    ai_touched = True
+
             for k, v in body.items():
                 if k not in app_settings.MANAGED_SETTINGS or not isinstance(v, str):
                     continue
                 value = v.strip()
                 if mgr.is_secret(k):
-                    # «***» или пусто = «не менять»: секрет не перезаписывается
-                    # заполнителем из формы.
-                    if not value or value.startswith(app_settings.MASK):
+                    # пусто или значение с маской = «не менять»: секрет не
+                    # перезаписывается заполнителем из формы.
+                    if not value or app_settings.MASK in value:
                         continue
                 elif value == "":
                     # стерли значение — снимаем переопределение, снова
                     # действует переменная окружения
                     mgr.delete(k)
                     sys_saved.append(k)
-                    smtp_touched = smtp_touched or k.startswith("LIQSCOPE_SMTP") \
-                        or k.startswith("LIQSCOPE_MAIL")
-                    access_touched = access_touched or k in (
-                        "LIQSCOPE_ADMIN_EMAILS", "LIQSCOPE_ADMIN_IDS")
+                    _track(k)
                     continue
                 mgr.set(k, value)
                 sys_saved.append(k)
-                smtp_touched = smtp_touched or k.startswith("LIQSCOPE_SMTP") \
-                    or k.startswith("LIQSCOPE_MAIL")
-                access_touched = access_touched or k in (
-                    "LIQSCOPE_ADMIN_EMAILS", "LIQSCOPE_ADMIN_IDS")
+                _track(k)
                 if app_settings.MANAGED_SETTINGS[k].get("restart"):
                     restart_required = True
             if smtp_touched and ctx.mailer is not None:
@@ -1651,6 +1750,14 @@ def register_account_routes(app) -> None:
                     mgr.apply_admin_access(ctx.store)
                 except Exception as e:  # noqa: BLE001
                     log.warning("settings: доступы не обновлены: %s", e)
+            if ai_touched:
+                # Ключи/модели ИИ подхватываются без рестарта: писатель
+                # обновляется сразу, а перед каждой генерацией хук
+                # AiWriter.config_sync сверяет сигнатуру настроек.
+                try:
+                    ctx.ai_refresh_fn()
+                except Exception as e:  # noqa: BLE001
+                    log.warning("settings: ИИ не пересобран: %s", e)
             if "LIQSCOPE_BOT_TOKEN" in sys_saved:
                 running = getattr(getattr(ctx, "bot", None), "token", "") or ""
                 if mgr.get("LIQSCOPE_BOT_TOKEN") != running:
@@ -1701,7 +1808,7 @@ def register_account_routes(app) -> None:
                                 status_code=400)
         # пароль: «***»/пусто в форме — берём сохранённый
         password = str(body.get("password") or "").strip()
-        if not password or password.startswith(app_settings.MASK):
+        if not password or app_settings.MASK in password:
             password = effective("LIQSCOPE_SMTP_PASSWORD")
         user = effective("LIQSCOPE_SMTP_USER", "user")
         tls = (str(body.get("tls") or "").strip().lower()
@@ -1767,7 +1874,7 @@ def register_account_routes(app) -> None:
         body = await _json_body(request)
         mgr = _settings_mgr()
         token = str(body.get("token") or "").strip()
-        if not token or token.startswith(app_settings.MASK):
+        if not token or app_settings.MASK in token:
             token = mgr.get("LIQSCOPE_BOT_TOKEN") if mgr else \
                 (os.getenv("LIQSCOPE_BOT_TOKEN") or "").strip()
         if not token:
@@ -1788,6 +1895,81 @@ def register_account_routes(app) -> None:
         result = data.get("result") or {}
         return {"ok": True, "username": result.get("username") or "",
                 "first_name": result.get("first_name") or ""}
+
+    @router.post("/api/admin/settings/test-llm")
+    async def admin_settings_test_llm(request: Request):
+        """Live-проверка ключа ИИ: минимальный запрос «ping» к провайдеру.
+
+        Ошибка провайдера (``Invalid API Key``, ``Quota Exceeded``, …)
+        возвращается клиенту дословно с HTTP 400 — админ видит её в красной
+        плашке прямо в админке.
+        """
+        actor, err = _admin(request)
+        if err:
+            return err
+        body = await _json_body(request)
+        mgr = _settings_mgr()
+        provider = str(body.get("provider") or "").strip().lower()
+        if provider not in LLM_PROVIDERS:
+            return JSONResponse(
+                {"ok": False, "error": "Провайдер не выбран или неизвестен"},
+                status_code=400)
+        # ключ: поле формы пустое или с маской → берём сохранённый
+        # (БД → окружение, см. SettingsManager.get)
+        key = str(body.get("key") or "").strip()
+        if not key or app_settings.MASK in key:
+            key = _stored_llm_key(mgr, provider)
+        if not key:
+            return JSONResponse(
+                {"ok": False, "error": f"Ключ для «{provider}» не задан"},
+                status_code=400)
+        model = str(body.get("model") or "").strip()
+        url = str(body.get("url") or "").strip()
+        ok, message, used_model = await _llm_ping(provider, key, model, url)
+        if not ok:
+            log.info("test-llm (%s): %s", provider, message[:200])
+            return JSONResponse({"ok": False, "error": message,
+                                 "provider": provider}, status_code=400)
+        log.info("test-llm (%s): ключ принят, модель %s", provider, used_model)
+        return {"ok": True, "provider": provider, "model": used_model,
+                "message": message}
+
+    @router.post("/api/admin/settings/test-captcha")
+    async def admin_settings_test_captcha(request: Request):
+        """Проверка капчи.
+
+        Внешнего провайдера (Turnstile/reCAPTCHA) в проекте нет: капча —
+        собственная математическая задача (``accounts.Store``), ключей не
+        требует. Ручка выполняет реальный само-тест пайплайна «выдать задачу
+        → проверить ответ», чтобы админ видел состояние, а не догадывался.
+        """
+        actor, err = _admin(request)
+        if err:
+            return err
+        store = ctx.store
+        if store is None:
+            return JSONResponse({"ok": False,
+                                 "error": "Хранилище аккаунтов недоступно"},
+                                status_code=400)
+        try:
+            token = store.new_captcha(7)
+            if not token:
+                return JSONResponse({"ok": False,
+                                     "error": "Капча не создалась"},
+                                    status_code=400)
+            ok, _why = store.check_captcha(token, 7)
+            if not ok:
+                return JSONResponse({"ok": False,
+                                     "error": "Капча: верный ответ не принят"},
+                                    status_code=400)
+        except Exception as e:  # noqa: BLE001 — диагностика не должна падать
+            return JSONResponse({"ok": False,
+                                 "error": f"Капча: {str(e)[:200]}"},
+                                status_code=400)
+        return {"ok": True, "kind": "math",
+                "message": ("Встроенная математическая капча работает. "
+                            "Внешние ключи (Turnstile/reCAPTCHA) не нужны — "
+                            "в сервисе их нет.")}
 
     @router.post("/api/admin/services/{slug}")
     async def admin_service(request: Request, slug: str):

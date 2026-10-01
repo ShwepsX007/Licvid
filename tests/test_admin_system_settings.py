@@ -54,12 +54,15 @@ class AdminSettingsApiTest(unittest.TestCase):
         for lim in (web_account._MAIL_RATE, web_account._MAIL_RATE_EMAIL,
                     web_account._LOGIN_RATE, web_account._CAPTCHA_RATE):
             lim._hits.clear()
+        self.ai_calls = []
+        web_account.ctx.ai_refresh_fn = lambda: self.ai_calls.append(1)
         app = FastAPI()
         web_account.register_account_routes(app)
         self.client = TestClient(app)
 
     def tearDown(self):
         web_account.ctx.settings = None
+        web_account.ctx.ai_refresh_fn = lambda: None
         self.store.close()
         self.settings.close()
         self.tmp.cleanup()
@@ -98,7 +101,8 @@ class AdminSettingsApiTest(unittest.TestCase):
         d = r.json()
         self.assertTrue(d["ok"])
         pwd = d["settings"]["LIQSCOPE_SMTP_PASSWORD"]
-        self.assertEqual(pwd["value"], "***")
+        self.assertIn("***", pwd["value"])
+        self.assertNotEqual(pwd["value"], "hunter2-secret")
         self.assertNotIn("hunter2-secret", r.text)
         self.assertEqual(d["settings"]["LIQSCOPE_SMTP_HOST"]["value"],
                          "smtp.example")
@@ -226,6 +230,119 @@ class AdminSettingsApiTest(unittest.TestCase):
         r = self.client.post("/api/admin/settings/test-tg", json={})
         self.assertEqual(r.status_code, 400)
         self.assertIn("не задан", r.json()["error"])
+
+    # ----- ИИ-ключи ------------------------------------------------------
+    def test_post_ai_key_triggers_refresh(self):
+        self.login_boss()
+        r = self.client.post("/api/admin/settings", json={
+            "LIQSCOPE_AI_GEMINI_KEY": "AIza-test-key",
+        })
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertTrue(r.json()["ok"])
+        self.assertEqual(self.settings.get("LIQSCOPE_AI_GEMINI_KEY"),
+                         "AIza-test-key")
+        self.assertEqual(len(self.ai_calls), 1)   # писатель пересобран
+        self.assertNotIn("AIza-test-key", r.text)  # секрет не в ответе
+
+    def test_get_has_schema_labels_and_hints(self):
+        self.login_boss()
+        d = self.client.get("/api/admin/settings").json()
+        gemini = d["settings"]["LIQSCOPE_AI_GEMINI_KEY"]
+        self.assertEqual(gemini["section"], "ai")
+        self.assertTrue(gemini["secret"])
+        self.assertTrue(gemini["label"])          # человекочитаемое имя
+        self.assertTrue(gemini["hint"])           # подсказка
+        self.assertEqual(d["settings"]["LIQSCOPE_LEVELS_BATCH"]["section"],
+                         "tuning")
+        self.assertEqual(d["settings"]["LIQSCOPE_BOT_TOKEN"]["section"],
+                         "telegram")
+
+    def test_test_llm_unauthorized_shows_provider_text(self):
+        """Провайдер ответил 401 — админка получает точный текст ошибки."""
+        self.login_boss()
+
+        async def fake_ping(provider, key, model="", url="", timeout=20.0):
+            return False, "HTTP 401: Invalid API Key", model or "gemini-x"
+
+        orig = web_account._llm_ping
+        web_account._llm_ping = fake_ping
+        try:
+            r = self.client.post("/api/admin/settings/test-llm",
+                                 json={"provider": "gemini", "key": "AIza-bad"})
+        finally:
+            web_account._llm_ping = orig
+        self.assertEqual(r.status_code, 400)
+        body = r.json()
+        self.assertFalse(body["ok"])
+        self.assertIn("Invalid API Key", body["error"])
+
+    def test_test_llm_quota_error_passthrough(self):
+        self.login_boss()
+
+        async def fake_ping(provider, key, model="", url="", timeout=20.0):
+            return False, "HTTP 429: Quota Exceeded", model
+
+        orig = web_account._llm_ping
+        web_account._llm_ping = fake_ping
+        try:
+            r = self.client.post("/api/admin/settings/test-llm",
+                                 json={"provider": "groq", "key": "gsk-x"})
+        finally:
+            web_account._llm_ping = orig
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("Quota Exceeded", r.json()["error"])
+
+    def test_test_llm_ok(self):
+        self.login_boss()
+
+        async def fake_ping(provider, key, model="", url="", timeout=20.0):
+            return True, "Ключ принят, модель отвечает", "gemini-3.5-flash-lite"
+
+        orig = web_account._llm_ping
+        web_account._llm_ping = fake_ping
+        try:
+            r = self.client.post("/api/admin/settings/test-llm",
+                                 json={"provider": "gemini", "key": "AIza-good"})
+        finally:
+            web_account._llm_ping = orig
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.json()["ok"])
+
+    def test_test_llm_requires_provider(self):
+        self.login_boss()
+        r = self.client.post("/api/admin/settings/test-llm",
+                             json={"provider": "skynet"})
+        self.assertEqual(r.status_code, 400)
+
+    def test_test_llm_falls_back_to_saved_key(self):
+        """Пустое поле ключа в форме → проверяется сохранённый в базе."""
+        self.login_boss()
+        self.settings.set("LIQSCOPE_AI_GEMINI_KEY", "AIza-saved")
+        seen = {}
+
+        async def fake_ping(provider, key, model="", url="", timeout=20.0):
+            seen["key"] = key
+            return True, "ок", "m"
+
+        orig = web_account._llm_ping
+        web_account._llm_ping = fake_ping
+        try:
+            r = self.client.post("/api/admin/settings/test-llm",
+                                 json={"provider": "gemini"})
+        finally:
+            web_account._llm_ping = orig
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(seen["key"], "AIza-saved")
+
+    # ----- капча ------------------------------------------------------------
+    def test_test_captcha_selftest(self):
+        """Капча встроенная математическая: ручка делает реальный само-тест."""
+        self.login_boss()
+        r = self.client.post("/api/admin/settings/test-captcha", json={})
+        self.assertEqual(r.status_code, 200, r.text)
+        d = r.json()
+        self.assertTrue(d["ok"])
+        self.assertEqual(d["kind"], "math")
 
 
 if __name__ == "__main__":

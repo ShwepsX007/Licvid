@@ -228,13 +228,15 @@ Description=Licvid Liquidation Terminal
 After=network-online.target
 
 [Service]
-WorkingDirectory=/root/Licvid
+User=licvid
+Group=licvid
+WorkingDirectory=/opt/licvid
 Environment=LIQSCOPE_SYMBOLS_LIMIT=40
 Environment=LIQSCOPE_PUBLIC_URL=https://liqscope.online
 Environment=LIQSCOPE_COOKIE_SECURE=1
 Environment=LIQSCOPE_REQUIRE_SECRET=1
 # Environment=LIQSCOPE_SECRET=   # openssl rand -hex 32, в drop-in, не в git
-ExecStart=/root/Licvid/venv/bin/python3 -m uvicorn server:app --host 127.0.0.1 --port 8000
+ExecStart=/opt/licvid/venv/bin/python3 -m uvicorn server:app --host 127.0.0.1 --port 8000
 Restart=always
 RestartSec=5
 
@@ -254,9 +256,61 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now licvid
 ```
 
+### Запуск от пользователя `licvid` (DEPLOY-01)
+
+Юнит запускает сервис от отдельного непривилегированного пользователя
+(`User=licvid`, `Group=licvid` в `deploy/licvid.service`) — процесс больше не
+работает с правами root. На действующем сервере один раз выполните:
+
+```bash
+# 1. Системный пользователь без шелла и домашнего входа
+sudo useradd --system --user-group --home-dir /opt/licvid \
+     --shell /usr/sbin/nologin licvid
+
+# 2. Код переносится из /root (пользователь licvid туда не имеет доступа)
+sudo mkdir -p /opt/licvid
+sudo cp -a /root/Licvid/. /opt/licvid/          # или: пересобрать из git
+sudo chown -R licvid:licvid /opt/licvid
+
+# 3. Виртуальное окружение — от имени сервисного пользователя
+sudo -u licvid python3 -m venv /opt/licvid/venv
+sudo -u licvid /opt/licvid/venv/bin/pip install -r /opt/licvid/requirements.txt
+
+# 4. Записываемыми остаются только рабочие данные
+sudo chown -R licvid:licvid /opt/licvid/data
+
+# 5. Пути в юните (если копируете не из обновлённого файла в репозитории)
+sudo systemctl edit --full licvid
+#   [Service]
+#   User=licvid
+#   Group=licvid
+#   WorkingDirectory=/opt/licvid
+#   ExecStart=/opt/licvid/venv/bin/python3 -m uvicorn server:app \
+#             --host 127.0.0.1 --port 8000 --workers 1
+
+sudo systemctl daemon-reload
+sudo systemctl restart licvid
+sudo systemctl status licvid --no-pager
+```
+
+Проверка, что процесс действительно не от root:
+
+```bash
+ps -o user= -p "$(systemctl show licvid -p MainPID --value)"
+# ожидаемый вывод: licvid
+```
+
+Права: пользователю достаточно читать код и писать в `data/` (база аккаунтов,
+история, файлы). Если на сервере настроен каталог писем-стенда
+(`LIQSCOPE_MAIL_DIR`) или бэкапов вне `data/` — выдайте `licvid` права и на
+него. Статика для nginx обычно читается через `alias`; при запасном пути через
+приложение откройте каталог группе (аналогично `deploy/HTTPS.md` §6, но
+группа — `licvid`).
+
 ### Чек-лист деплоя (безопасность и эксплуатация)
 
 - [ ] **LIQSCOPE_SECRET** задан и не равен дефолту (`openssl rand -hex 32`), лежит в drop-in (`systemctl edit licvid`), не в git. Без него — fail-fast в PROD, warning в DEMO.
+- [ ] **Сервис не от root**: в юните `User=licvid`/`Group=licvid`, пользователь создан, код вынесен из `/root` (см. «Запуск от пользователя `licvid`»). Проверка: `ps -o user= -p "$(systemctl show licvid -p MainPID --value)"` → `licvid`.
 - [ ] **LIQSCOPE_COOKIE_SECURE=1** и сайт за HTTPS (nginx). Проверь `curl -I https://...` → `Strict-Transport-Security`.
 - [ ] **Trusted proxy**: `LIQSCOPE_TRUSTED_PROXIES=127.0.0.1,::1` (по умолчанию) — X-Forwarded-For доверяется только от локального nginx, rate limit не обходится подменой IP.
 - [ ] **nginx**: gzip on, `X-Content-Type-Options: nosniff`, `X-Frame-Options: SAMEORIGIN`, `Referrer-Policy`, `Content-Security-Policy: frame-ancestors 'self'`, `Permissions-Policy`, HSTS. SAMEORIGIN/'self' — осознанно (iframe дока того же origin), строже не ставить. Лимиты: `limit_conn` для `/ws` (20 на IP) и `limit_req` для `/api/symbols/add` (2r/s).

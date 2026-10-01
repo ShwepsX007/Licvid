@@ -20,6 +20,7 @@ from fastapi import APIRouter, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
 
+import app_settings
 import geoip
 import seo_pages
 from accounts import (COOKIE_SID, COOKIE_VID, hash_ip, hash_password,
@@ -38,6 +39,8 @@ class Ctx:
     store = None
     bot = None
     mailer = None
+    #: app_settings.SettingsManager — системные настройки из БД (админка)
+    settings = None
     public_url = ""
     secret = ""
     cookie_secure = False
@@ -273,7 +276,17 @@ def _lang_code(request: Request, body: Optional[dict] = None) -> str:
 
 
 def _mailer():
-    return ctx.mailer
+    m = ctx.mailer
+    # Динамическая конфигурация: перед каждой отправкой сверяем SMTP-транспорт
+    # с настройками из БД (админка → «Системные настройки»). Совпадение
+    # конфигурации — дешёвое сравнение кортежей, пересборка — только при
+    # реальных изменениях, поэтому на горячем пути накладных расходов нет.
+    if m is not None and ctx.settings is not None:
+        try:
+            ctx.settings.apply_mailer(m, ctx.public_url)
+        except Exception as e:  # noqa: BLE001 — настройки не должны ломать письмо
+            log.debug("settings: синхронизация почты: %s", e)
+    return m
 
 
 def _email_enabled() -> bool:
@@ -298,9 +311,14 @@ def _send_mail_blocking(kind: str, to: str, token: str, name: str = "",
     if not m or not getattr(m, "enabled", False):
         # Пока SMTP не настроен, регистрация не должна упираться в стену:
         # ссылку пишем в журнал сервиса, админ отдаст её человеку руками.
+        # Аудит AUTH-01: ссылка содержит bearer-токен, поэтому в журнал
+        # уходит только маскированный хвост (первые 8 символов). Полный
+        # токен попадает в лог исключительно при LIQSCOPE_DEBUG=1.
+        path = _mail_path(kind, token if app_settings.debug_mode()
+                          else app_settings.mask_token(token))
         log.warning("SMTP не настроен — письмо «%s» для %s не отправлено. "
                     "Ссылка для ручной выдачи: %s",
-                    kind, to, (m.link(_mail_path(kind, token)) if m else _mail_path(kind, token)))
+                    kind, to, (m.link(path) if m else path))
         return False
     if kind == "verify":
         return m.send_verify(to, token, name=name, lang=lang)
@@ -325,6 +343,26 @@ async def _json_body(request: Request) -> dict:
     except Exception:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+async def _tg_getme(token: str, timeout: float = 15.0) -> dict:
+    """getMe у Telegram API: проверка токена для админки настроек.
+
+    Возвращает сырой ответ ``{"ok": ..., "result"/"description": ...}``;
+    сетевые ошибки — исключениями, их перехватывает вызывающая ручка.
+    """
+    import aiohttp
+
+    url = f"https://api.telegram.org/bot{token}/getMe"
+    client_timeout = aiohttp.ClientTimeout(total=timeout, sock_connect=10)
+    async with aiohttp.ClientSession(timeout=client_timeout) as session:
+        async with session.get(url) as resp:
+            try:
+                return await resp.json(content_type=None)
+            except Exception:  # noqa: BLE001 — не-JSON ответ тоже диагноз
+                text = (await resp.text())[:200]
+                return {"ok": False,
+                        "description": f"HTTP {resp.status}: {text}"}
 
 
 def _email_error(lang: str, code: str) -> str:
@@ -1506,6 +1544,41 @@ def register_account_routes(app) -> None:
         st = await ctx.bot.broadcast(text, actor_id=actor["id"])
         return {"ok": True, **st}
 
+    # ----- системные настройки (Менеджер настроек из админки) --------------
+    # Конфигурация сервиса (SMTP, Telegram, доступы, лимиты) живёт в таблице
+    # system_settings (app_settings.SettingsManager): БД главнее переменных
+    # окружения, поэтому владелец меняет её на лету без `systemctl edit`.
+    # GET отдаёт все значения (секреты — строкой «***»), POST сохраняет.
+
+    def _settings_mgr():
+        return ctx.settings
+
+    def _restart_hint() -> str:
+        return ("⚠️ Для применения этой настройки требуется перезапуск сервера "
+                "(systemctl restart licvid)")
+
+    @router.get("/api/admin/settings")
+    async def admin_settings_get(request: Request):
+        actor, err = _admin(request)
+        if err:
+            return err
+        mgr = _settings_mgr()
+        site = {}
+        if ctx.store:
+            site = {
+                "bot_welcome": ctx.store.get_setting("bot_welcome", ""),
+                "site_notice": ctx.store.get_setting("site_notice", ""),
+                "chat_dm_tg_delay_min": ctx.store.get_setting(
+                    "chat_dm_tg_delay_min", "10") or "10",
+            }
+        if mgr is None:
+            # сервер поднялся без хранилища настроек (например, тесты):
+            # сайт-настройки отдаём, системные — пустым срезом
+            return {"ok": True, "settings": {}, "site": site,
+                    "mask": app_settings.MASK}
+        return {"ok": True, "settings": mgr.admin_view(), "site": site,
+                "mask": app_settings.MASK}
+
     @router.post("/api/admin/settings")
     async def admin_settings(request: Request):
         actor, err = _admin(request)
@@ -1533,7 +1606,188 @@ def register_account_routes(app) -> None:
             val = str(int(mins)) if mins == int(mins) else f"{mins:.1f}"
             ctx.store.set_setting("chat_dm_tg_delay_min", val, actor_id=actor["id"])
             saved["chat_dm_tg_delay_min"] = val
-        return {"ok": True, "saved": saved}
+
+        # Системные ключи (SMTP/Telegram/доступы/лимиты) — в БД настроек.
+        mgr = _settings_mgr()
+        sys_saved: List[str] = []
+        warnings: List[str] = []
+        restart_required = False
+        if mgr is not None:
+            smtp_touched = access_touched = False
+            for k, v in body.items():
+                if k not in app_settings.MANAGED_SETTINGS or not isinstance(v, str):
+                    continue
+                value = v.strip()
+                if mgr.is_secret(k):
+                    # «***» или пусто = «не менять»: секрет не перезаписывается
+                    # заполнителем из формы.
+                    if not value or value.startswith(app_settings.MASK):
+                        continue
+                elif value == "":
+                    # стерли значение — снимаем переопределение, снова
+                    # действует переменная окружения
+                    mgr.delete(k)
+                    sys_saved.append(k)
+                    smtp_touched = smtp_touched or k.startswith("LIQSCOPE_SMTP") \
+                        or k.startswith("LIQSCOPE_MAIL")
+                    access_touched = access_touched or k in (
+                        "LIQSCOPE_ADMIN_EMAILS", "LIQSCOPE_ADMIN_IDS")
+                    continue
+                mgr.set(k, value)
+                sys_saved.append(k)
+                smtp_touched = smtp_touched or k.startswith("LIQSCOPE_SMTP") \
+                    or k.startswith("LIQSCOPE_MAIL")
+                access_touched = access_touched or k in (
+                    "LIQSCOPE_ADMIN_EMAILS", "LIQSCOPE_ADMIN_IDS")
+                if app_settings.MANAGED_SETTINGS[k].get("restart"):
+                    restart_required = True
+            if smtp_touched and ctx.mailer is not None:
+                try:
+                    mgr.apply_mailer(ctx.mailer, ctx.public_url)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("settings: почта не пересобрана: %s", e)
+            if access_touched and ctx.store is not None:
+                try:
+                    mgr.apply_admin_access(ctx.store)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("settings: доступы не обновлены: %s", e)
+            if "LIQSCOPE_BOT_TOKEN" in sys_saved:
+                running = getattr(getattr(ctx, "bot", None), "token", "") or ""
+                if mgr.get("LIQSCOPE_BOT_TOKEN") != running:
+                    warnings.append(
+                        "⚠️ Для применения нового токена бота требуется "
+                        "перезапуск сервера (systemctl restart licvid)")
+            if restart_required:
+                warnings.append(_restart_hint())
+            for k in sys_saved:
+                # журнал действий: секреты — только имя ключа
+                try:
+                    detail = f"{k}=***" if mgr.is_secret(k) else \
+                        f"{k}={mgr.get(k)[:80]}"
+                    ctx.store and ctx.store.audit(actor["id"], "sys_setting", detail)
+                except Exception:  # noqa: BLE001 — аудит не критичен
+                    pass
+            saved.update({k: ("***" if mgr.is_secret(k) else mgr.get(k))
+                          for k in sys_saved})
+        return {"ok": True, "saved": saved, "warnings": warnings,
+                "restart_required": restart_required}
+
+    @router.post("/api/admin/settings/test-smtp")
+    async def admin_settings_test_smtp(request: Request):
+        """Live-проверка SMTP: логин на сервер и тестовое письмо.
+
+        Любая ошибка (сеть, авторизация, отказ сервера) возвращается клиенту
+        текстом с HTTP 400 — процесс при этом продолжает работать.
+        """
+        import smtplib
+
+        actor, err = _admin(request)
+        if err:
+            return err
+        body = await _json_body(request)
+        mgr = _settings_mgr()
+
+        def effective(key: str, body_key: str = "") -> str:
+            if body_key:
+                val = body.get(body_key)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+            return mgr.get(key) if mgr else (os.getenv(key) or "").strip()
+
+        host = effective("LIQSCOPE_SMTP_HOST", "host")
+        if not host:
+            return JSONResponse({"ok": False,
+                                 "error": "Ошибка SMTP: не задан сервер (хост)"},
+                                status_code=400)
+        # пароль: «***»/пусто в форме — берём сохранённый
+        password = str(body.get("password") or "").strip()
+        if not password or password.startswith(app_settings.MASK):
+            password = effective("LIQSCOPE_SMTP_PASSWORD")
+        user = effective("LIQSCOPE_SMTP_USER", "user")
+        tls = (str(body.get("tls") or "").strip().lower()
+               or effective("LIQSCOPE_SMTP_TLS") or "starttls")
+        ssl_flag = (effective("LIQSCOPE_SMTP_SSL") or "").strip().lower() in (
+            "1", "true", "yes", "on")
+        try:
+            port = int(str(body.get("port") or "").strip()
+                       or effective("LIQSCOPE_SMTP_PORT")
+                       or ("465" if (tls == "ssl" or ssl_flag) else "587"))
+        except (TypeError, ValueError):
+            port = 587
+        try:
+            timeout = min(30.0, max(3.0, float(body.get("timeout") or 15)))
+        except (TypeError, ValueError):
+            timeout = 15.0
+        ipv4 = (effective("LIQSCOPE_SMTP_IPV4") or "").strip().lower() in (
+            "1", "true", "yes", "on")
+        sender = effective("LIQSCOPE_SMTP_FROM", "from") or (
+            f"LiqScope <{user}>" if user and "@" in user else "LiqScope <no-reply@liqscope.online>")
+        to = str(body.get("to") or "").strip() or str(actor.get("email") or "")
+
+        def probe() -> str:
+            """Возвращает пустую строку при успехе, иначе текст ошибки."""
+            from mailer import build_message, smtp_deliver, smtp_login
+            try:
+                if to and "@" in to:
+                    msg = build_message(
+                        sender, to, "LiqScope: тестовое письмо",
+                        "<p>Это тестовое письмо — настройки SMTP в админке "
+                        "работают.</p>")
+                    smtp_deliver(host, port, user, password, tls, timeout, msg,
+                                 to, sender.split("<")[-1].rstrip(">"),
+                                 ipv4_only=ipv4)
+                    return ""
+                smtp_login(host, port, user, password, tls, timeout,
+                           ipv4_only=ipv4)
+                return ""
+            except smtplib.SMTPAuthenticationError as e:
+                return f"Authentication failed ({e.smtp_code}: {e.smtp_error})" \
+                    if getattr(e, "smtp_code", None) else f"Authentication failed: {e}"
+            except Exception as e:  # сеть, DNS, отказ сервера, таймаут
+                text = str(e) or type(e).__name__
+                return text
+
+        problem = await run_in_threadpool(probe)
+        if problem:
+            log.info("test-smtp: %s (порт %s, логин %s) — %s",
+                     host, port, user or "без логина", problem[:200])
+            return JSONResponse({"ok": False,
+                                 "error": f"Ошибка SMTP: {problem[:400]}"},
+                                status_code=400)
+        log.info("test-smtp: %s (порт %s) — подключение и отправка ок", host, port)
+        return {"ok": True, "to": to or "",
+                "hint": "" if to else "Письмо не отправлялось: только проверка входа."}
+
+    @router.post("/api/admin/settings/test-tg")
+    async def admin_settings_test_tg(request: Request):
+        """Live-проверка токена бота: вызов getMe у Telegram API."""
+        actor, err = _admin(request)
+        if err:
+            return err
+        body = await _json_body(request)
+        mgr = _settings_mgr()
+        token = str(body.get("token") or "").strip()
+        if not token or token.startswith(app_settings.MASK):
+            token = mgr.get("LIQSCOPE_BOT_TOKEN") if mgr else \
+                (os.getenv("LIQSCOPE_BOT_TOKEN") or "").strip()
+        if not token:
+            return JSONResponse({"ok": False,
+                                 "error": "Токен Telegram-бота не задан"},
+                                status_code=400)
+        try:
+            data = await _tg_getme(token)
+        except Exception as e:  # noqa: BLE001 — сеть не должна ронять ручку
+            return JSONResponse({"ok": False,
+                                 "error": f"Ошибка Telegram: {str(e)[:300]}"},
+                                status_code=400)
+        if not data.get("ok"):
+            desc = str(data.get("description") or "запрос отклонён")[:200]
+            return JSONResponse({"ok": False,
+                                 "error": f"Invalid Telegram Token ({desc})"},
+                                status_code=400)
+        result = data.get("result") or {}
+        return {"ok": True, "username": result.get("username") or "",
+                "first_name": result.get("first_name") or ""}
 
     @router.post("/api/admin/services/{slug}")
     async def admin_service(request: Request, slug: str):

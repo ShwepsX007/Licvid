@@ -29,7 +29,7 @@ jobs:
 
       - name: Install JS deps
         run: |
-          npm install --no-save jsdom ws
+          npm ci
 
       - name: Build i18n bundles
         run: |
@@ -42,6 +42,10 @@ jobs:
         env:
           LIQSCOPE_SECRET: test-secret-not-the-published-default
           PYTHON: python
+          # CI-02: тесты запускаются из корня репозитория — модули проекта
+          # должны импортироваться независимо от того, как раннер складывает
+          # sys.path (см. также вставку пути в самих тестах).
+          PYTHONPATH: .
 
       - name: Run JS tests (if any) with dom env
         run: |

@@ -7,7 +7,7 @@ venv*/
 env/
 envs/
 
-# node (тесты: npm install --no-save jsdom ws)
+# node (тесты: зависимости зафиксированы в devDependencies, ставятся `npm ci`)
 node_modules/
 npm-debug.log*
 

@@ -5,6 +5,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# DEPLOY-01 (аудит 30.09.2026): сервис работает от отдельного
+# непривилегированного пользователя, а не от root. Создание пользователя и
+# права на каталоги — в README.md, раздел «Запуск от пользователя licvid».
+# Если код всё ещё лежит в /root, сначала перенесите его (см. README),
+# иначе systemd не сможет читать рабочий каталог от имени licvid.
+User=licvid
+Group=licvid
 WorkingDirectory=/root/Licvid
 Environment=PYTHONUNBUFFERED=1
 Environment=LIQSCOPE_SYMBOLS_LIMIT=40

@@ -624,8 +624,20 @@ from channel_digest import DEFAULT_INTERVAL_H, clamp_interval  # noqa: E402
 POST_INTERVAL_H = clamp_interval(os.getenv("LIQSCOPE_POST_INTERVAL_H") or
                                  DEFAULT_INTERVAL_H)
 account_store = Store(ACCOUNTS_DB, SECRET, ADMIN_IDS, ADMIN_EMAILS)
-# Письма: SMTP из окружения; без настроек сервер работает, письма не уходят
+# Письма: стартовая сборка из окружения; дальше настройки из БД главнее —
+# Менеджер настроек (админка → «Системные настройки») пересобирает транспорт
+# динамически перед каждой отправкой (см. web_account._mailer).
 mailer = build_mailer(PUBLIC_URL)
+import app_settings  # noqa: E402  (после Store: та же база, своя таблица)
+settings_store = app_settings.SettingsManager(ACCOUNTS_DB)
+try:
+    settings_store.apply_mailer(mailer, PUBLIC_URL)
+    settings_store.apply_admin_access(account_store)
+except Exception as _e_set:  # noqa: BLE001 — настройки не должны ронять старт
+    log.warning("settings: стартовое применение настроек: %s", _e_set)
+# SMTP-данные берутся динамически перед каждой отправкой (а не один раз при
+# старте): настройки, сохранённые в админке, подхватываются без рестарта.
+mailer.config_sync = lambda: settings_store.apply_mailer(mailer, PUBLIC_URL)
 tg_bot = TelegramBot(BOT_TOKEN, account_store, PUBLIC_URL,
                      channel_url=CHANNEL_URL, channel_id=CHANNEL_ID)
 # ИИ-шапки для постов в канал: Gemini → Groq → OpenRouter (ключи из окружения).
@@ -4966,6 +4978,9 @@ account_ctx.site_hosts = tuple(x for x in (PUBLIC_URL, seo_pages.SITE_URL) if x)
 account_ctx.cookie_secure = os.getenv("LIQSCOPE_COOKIE_SECURE", "").strip() in ("1", "true", "yes")
 account_ctx.dev_login = os.getenv("LIQSCOPE_DEV_LOGIN", "").strip() in ("1", "true", "yes")
 account_ctx.mailer = mailer
+# Менеджер системных настроек: админка читает/пишет конфигурацию в БД,
+# почта и доступы подхватывают изменения без перезапуска.
+account_ctx.settings = settings_store
 # Бот подтверждает почту теми же письмами, что и сайт
 tg_bot.mailer = mailer
 account_ctx.require_email_verification = REQUIRE_EMAIL_VERIFICATION
@@ -6753,6 +6768,18 @@ def _levels_cache_stats() -> Dict[str, object]:
 
 @app.websocket("/ws")
 async def ws_endpoint(websocket: WebSocket):
+    # WS-01 (аудит 30.09.2026): проверка Origin до приёма соединения.
+    # Чужой сайт не может держать открытый сокет к терминалу: разрешены
+    # только свои origin (PUBLIC_URL / SITE_URL / LIQSCOPE_CORS_ORIGINS и
+    # локальные стенды). Заголовка нет — клиент не браузер (скрипты, боты):
+    # таких не ограничиваем, у них нет межсайтовых сценариев.
+    _origin = (websocket.headers.get("origin") or "").strip().lower()
+    if _origin:
+        _allowed = {o.rstrip("/").lower() for o in _cors_origins()}
+        if _origin.rstrip("/") not in _allowed:
+            log.warning("ws: отклонено подключение с чужим Origin: %s", _origin)
+            await websocket.close(code=4003, reason="origin not allowed")
+            return
     t_ws0 = time.monotonic() if PERF_LOG else 0.0
     await websocket.accept()
     t_accept = time.monotonic() if PERF_LOG else 0.0

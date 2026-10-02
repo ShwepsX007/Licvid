@@ -471,29 +471,47 @@ body.workspace-single-mode .ad-host {
   border-radius: 0;
 }
 .chart-dock-wrap.view-tabs .chart-slot.is-tab-on { display: flex; }
-.chart-slot.is-slot-fs {
-  position: fixed;
-  left: 0;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  width: 100vw;
-  height: 100vh;
-  height: 100dvh;
-  z-index: 500;
-  border: 0;
-  border-radius: 0;
-  max-width: none;
-  max-height: none;
+.is-fullscreen,
+.chart-slot.is-slot-fs,
+.chart-split-cell > .chart-slot.is-slot-fs,
+.chart-split-cell > .chart-slot.is-fullscreen {
+  position: fixed !important;
+  top: 0 !important;
+  left: 0 !important;
+  right: 0 !important;
+  bottom: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  height: 100dvh !important;
+  z-index: 9999 !important;
+  margin: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  max-width: none !important;
+  max-height: none !important;
 }
-.chart-dock-wrap.view-tabs .chart-slot.is-slot-fs { display: flex !important; }
+/* Убедиться, что шапка графика всегда поверх всего */
+.is-fullscreen .chart-header,
+.chart-slot.is-slot-fs .chart-header {
+  z-index: 10000 !important;
+}
+.chart-dock-wrap.view-tabs .chart-slot.is-slot-fs,
+.chart-dock-wrap.view-tabs .chart-slot.is-fullscreen { display: flex !important; }
 body.chart-slot-fs { overflow: hidden; }
-.chart-dock-tools span {
+.chart-dock-tools {
+  position: relative;
+  z-index: 50;
+}
+.chart-dock-tools > span,
+.chart-dock-gridctl > span {
   font-size: 11px;
   color: #8ea3bb;
   margin-right: 4px;
 }
-.chart-dock-tools button {
+.chart-dock-modes button,
+.chart-dock-gridctl button,
+.chart-dock-add,
+.chart-dock-tabs button {
   background: #151d2b;
   border: 1px solid #233044;
   color: #c5d6ea;
@@ -502,10 +520,23 @@ body.chart-slot-fs { overflow: hidden; }
   font-size: 12px;
   cursor: pointer;
 }
-.chart-dock-tools button.active,
-.chart-dock-tools button:hover {
+.chart-dock-modes button.active,
+.chart-dock-modes button:hover,
+.chart-dock-gridctl button.active,
+.chart-dock-gridctl button:hover,
+.chart-dock-add:hover,
+.chart-dock-tabs button:hover {
   border-color: #3d70ff;
   color: #fff;
+}
+.chart-dock-tools .controls-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  background: transparent;
+  border: 0;
+  padding: 0 4px;
+  flex-wrap: wrap;
 }
 .chart-dock {
   min-height: 0;

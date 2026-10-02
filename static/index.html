@@ -86,6 +86,21 @@
             <button id="tchat-header-btn" class="tchat-header-btn" type="button" title="Чат: общий и личные диалоги">💬 Чат <span id="tchat-online" class="tchat-online" title="онлайн в чате">0</span> <span id="tchat-unread-hdr" class="tchat-unread hidden">0</span></button>
         </div>
 
+        <nav class="header-controls header-nav">
+            <a href="/screener" class="feed-tab" style="text-decoration:none;white-space:nowrap" title="Отдельная страница ончейн-скринера">🐋 Скринер</a>
+            <span id="nav-account" class="acc-nav"></span>
+            <select id="lang-select" class="lang-select" aria-label="Language / Язык" data-i18n-title="lang.select_title" title="Language / Язык">
+                <option value="ru">🇷🇺 Русский</option>
+                <option value="en">🇬🇧 English</option>
+                <option value="zh">🇨🇳 中文</option>
+                <option value="hi">🇮🇳 हिन्दी</option>
+                <option value="es">🇪🇸 Español</option>
+            </select>
+            <div class="exch-health" id="exch-health"
+                 data-i18n-title="health.open"
+                 title="Состояние бирж — наведите или нажмите"></div>
+        </nav>
+
         <div class="header-metrics">
             <div class="stat-box" id="stat-box-liq">
                 <button class="stat-box-head" id="stat-liq-head" type="button"
@@ -129,138 +144,105 @@
                 </div>
             </div>
         </div>
-
-        <div class="header-controls">
-            <a href="/screener" class="feed-tab" style="text-decoration:none;white-space:nowrap" title="Отдельная страница ончейн-скринера">🐋 Скринер</a>
-            <span id="nav-account" class="acc-nav"></span>
-            <select id="lang-select" class="lang-select" aria-label="Language / Язык" data-i18n-title="lang.select_title" title="Language / Язык">
-                <option value="ru">🇷🇺 Русский</option>
-                <option value="en">🇬🇧 English</option>
-                <option value="zh">🇨🇳 中文</option>
-                <option value="hi">🇮🇳 हिन्दी</option>
-                <option value="es">🇪🇸 Español</option>
-            </select>
-            <div class="exch-health" id="exch-health"
-                 data-i18n-title="health.open"
-                 title="Состояние бирж — наведите или нажмите"></div>
-        </div>
     </header>
-
-    <!-- Controls Bar -->
-    <!-- translate="no": Chrome Translate дублирует живые строки и корежит термины/валюты — у сайта свой i18n на 5 языков -->
-    <section class="controls-bar" translate="no">
-        <!-- Звук и очистка переехали сюда из шапки: место освободил
-             выбор монеты, который теперь живёт над графиком (как на биржах). -->
-        <div class="control-group quick-tools">
-            <button class="btn btn-icon btn-outline" id="sound-toggle-btn" data-i18n-title="sound.title" title="Звуковой сигнал">
-                <span id="sound-icon">🔇</span>
-            </button>
-            <!-- Очистка ленты и графика. Рядом «▾»: если стёр по ошибке — в
-                 выпадающем списке есть «Возобновить историю», она вернёт всё. -->
-            <div class="clear-ctl" id="clear-ctl">
-                <button class="btn btn-outline" id="clear-clusters-btn" data-i18n-title="clear.title" title="Очистить">
-                    <span data-i18n="clear.btn">🧹 Очистить</span>
-                </button>
-                <button class="btn btn-outline clear-caret" id="clear-menu-btn" type="button"
-                        aria-haspopup="true" aria-expanded="false" aria-controls="clear-menu"
-                        data-i18n-title="clear.menu_title" title="Очистить или вернуть историю">▾</button>
-                <div class="clear-menu hidden" id="clear-menu" role="menu">
-                    <button type="button" role="menuitem" data-clear-act="clear">
-                        <span data-i18n="clear.do">🧹 Очистить график</span></button>
-                    <button type="button" role="menuitem" data-clear-act="restore" id="clear-undo-item">
-                        <span data-i18n="clear.undo">↩️ Возобновить историю</span>
-                        <span class="clear-note" id="clear-undo-note"></span></button>
-                </div>
-            </div>
-        </div>
-
-        <div class="control-group">
-            <label data-i18n="ctrl.tf">Таймфрейм:</label>
-            <div class="btn-group" id="tf-buttons">
-                <button class="btn btn-tf" data-tf="1">1м</button>
-                <button class="btn btn-tf active" data-tf="5">5м</button>
-                <button class="btn btn-tf" data-tf="15">15м</button>
-                <button class="btn btn-tf" data-tf="60">1ч</button>
-                <button class="btn btn-tf" data-tf="240">4ч</button>
-                <button class="btn btn-tf" data-tf="1440">1д</button>
-            </div>
-        </div>
-
-        <div class="control-group">
-            <label data-i18n="ctrl.minvol">Мин. объем:</label>
-            <div class="filter-dropdown" id="min-usd-dd">
-                <button class="form-select filter-btn" id="min-usd-btn" type="button"
-                        data-i18n-title="filter.thresholds_title" title="Пороги объёма: ликвидации, CVD и OI Δ">Все ($0+) ▾</button>
-                <div class="filter-panel hidden" id="min-usd-panel">
-                    <div class="filter-row">
-                        <label class="filter-th-label" for="min-usd-input"
-                               data-i18n="filter.th_liq">Ликвидации, $</label>
-                        <input type="number" id="min-usd-input" class="form-input filter-number"
-                               min="0" step="100" data-i18n-placeholder="filter.usd_placeholder"
-                               placeholder="Например 10000">
-                    </div>
-                    <div class="filter-row">
-                        <label class="filter-th-label" for="min-cvd-input"
-                               data-i18n="filter.th_cvd">CVD за свечу, $</label>
-                        <input type="number" id="min-cvd-input" class="form-input filter-number"
-                               min="0" step="1000" data-i18n-placeholder="filter.cvd_placeholder"
-                               placeholder="Например 50000">
-                    </div>
-                    <div class="filter-row">
-                        <label class="filter-th-label" for="min-oi-input"
-                               data-i18n="filter.th_oi">OI Δ за свечу, $</label>
-                        <input type="number" id="min-oi-input" class="form-input filter-number"
-                               min="0" step="1000" data-i18n-placeholder="filter.oi_placeholder"
-                               placeholder="Например 1000000">
-                    </div>
-                    <div class="filter-row">
-                        <label class="filter-th-label" for="min-book-input"
-                               data-i18n="filter.th_book">Стена стакана, $</label>
-                        <input type="number" id="min-book-input" class="form-input filter-number"
-                               min="0" step="1000" data-i18n-placeholder="filter.book_placeholder"
-                               placeholder="Например 500000">
-                    </div>
-                    <div class="filter-row filter-row-between">
-                        <span class="filter-note" data-i18n="filter.presets_for">Пресеты — для открытой вкладки ленты:</span>
-                        <button class="btn btn-sm" data-i18n="filter.ok" id="min-usd-apply" type="button">OK</button>
-                    </div>
-                    <div class="preset-chips" id="min-usd-presets">
-                        <button data-v="0" type="button" data-i18n="filter.preset_all">Все</button>
-                        <button data-v="1000" type="button">$1K</button>
-                        <button data-v="5000" type="button">$5K</button>
-                        <button data-v="25000" type="button">$25K</button>
-                        <button data-v="100000" type="button">$100K 🔥</button>
-                        <button data-v="500000" type="button">$500K 🐋</button>
-                    </div>
-                    <div class="filter-note" data-i18n="filter.th_note">Каждый порог фильтрует свою серию — ленту и метки на графике: ликвидации, CVD-треугольники и OI-шарики. Ноль = показывать всё.</div>
-                </div>
-            </div>
-        </div>
-
-        <div class="control-group">
-            <label data-i18n="ctrl.exchange">Биржа:</label>
-            <div class="filter-dropdown" id="exchange-dd">
-                <button class="form-select filter-btn" id="exchange-btn" type="button"
-                        data-i18n-title="filter.exchanges_title" title="Фильтр по биржам">Все биржи ▾</button>
-                <div class="filter-panel hidden exchange-panel" id="exchange-panel">
-                    <div class="filter-row filter-row-between">
-                        <span class="filter-note" data-i18n="filter.exch_header">Включённые биржи</span>
-                        <span>
-                            <button class="link-btn" data-i18n="filter.all" id="exch-all-check" type="button">Все</button>
-                            <button class="link-btn" data-i18n="filter.none" id="exch-none-check" type="button">Ничего</button>
-                        </span>
-                    </div>
-                    <div id="exch-list"></div>
-                </div>
-            </div>
-        </div>
-    </section>
 
     <!-- Main Workspace -->
     <main class="main-layout">
         <!-- Cluster Candlestick Chart -->
         <!-- translate="no": Chrome Translate дублирует живые строки и корежит термины/валюты — у сайта свой i18n на 5 языков -->
         <section class="chart-section" translate="no">
+            <section class="controls-bar" translate="no">
+                <!-- Звук, очистка, минимальный объём и биржи — в панели управления доком (рядом с Вкладки / Мультиэкран / Сетка). -->
+                <div class="control-group quick-tools">
+                    <button class="btn btn-icon btn-outline" id="sound-toggle-btn" data-i18n-title="sound.title" title="Звуковой сигнал">
+                        <span id="sound-icon">🔇</span>
+                    </button>
+                    <div class="clear-ctl" id="clear-ctl">
+                        <button class="btn btn-outline" id="clear-clusters-btn" data-i18n-title="clear.title" title="Очистить">
+                            <span data-i18n="clear.btn">🧹 Очистить</span>
+                        </button>
+                        <button class="btn btn-outline clear-caret" id="clear-menu-btn" type="button"
+                                aria-haspopup="true" aria-expanded="false" aria-controls="clear-menu"
+                                data-i18n-title="clear.menu_title" title="Очистить или вернуть историю">▾</button>
+                        <div class="clear-menu hidden" id="clear-menu" role="menu">
+                            <button type="button" role="menuitem" data-clear-act="clear">
+                                <span data-i18n="clear.do">🧹 Очистить график</span></button>
+                            <button type="button" role="menuitem" data-clear-act="restore" id="clear-undo-item">
+                                <span data-i18n="clear.undo">↩️ Возобновить историю</span>
+                                <span class="clear-note" id="clear-undo-note"></span></button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <label data-i18n="ctrl.minvol">Мин. объем:</label>
+                    <div class="filter-dropdown" id="min-usd-dd">
+                        <button class="form-select filter-btn" id="min-usd-btn" type="button"
+                                data-i18n-title="filter.thresholds_title" title="Пороги объёма: ликвидации, CVD и OI Δ">Все ($0+) ▾</button>
+                        <div class="filter-panel hidden" id="min-usd-panel">
+                            <div class="filter-row">
+                                <label class="filter-th-label" for="min-usd-input"
+                                       data-i18n="filter.th_liq">Ликвидации, $</label>
+                                <input type="number" id="min-usd-input" class="form-input filter-number"
+                                       min="0" step="100" data-i18n-placeholder="filter.usd_placeholder"
+                                       placeholder="Например 10000">
+                            </div>
+                            <div class="filter-row">
+                                <label class="filter-th-label" for="min-cvd-input"
+                                       data-i18n="filter.th_cvd">CVD за свечу, $</label>
+                                <input type="number" id="min-cvd-input" class="form-input filter-number"
+                                       min="0" step="1000" data-i18n-placeholder="filter.cvd_placeholder"
+                                       placeholder="Например 50000">
+                            </div>
+                            <div class="filter-row">
+                                <label class="filter-th-label" for="min-oi-input"
+                                       data-i18n="filter.th_oi">OI Δ за свечу, $</label>
+                                <input type="number" id="min-oi-input" class="form-input filter-number"
+                                       min="0" step="1000" data-i18n-placeholder="filter.oi_placeholder"
+                                       placeholder="Например 1000000">
+                            </div>
+                            <div class="filter-row">
+                                <label class="filter-th-label" for="min-book-input"
+                                       data-i18n="filter.th_book">Стена стакана, $</label>
+                                <input type="number" id="min-book-input" class="form-input filter-number"
+                                       min="0" step="1000" data-i18n-placeholder="filter.book_placeholder"
+                                       placeholder="Например 500000">
+                            </div>
+                            <div class="filter-row filter-row-between">
+                                <span class="filter-note" data-i18n="filter.presets_for">Пресеты — для открытой вкладки ленты:</span>
+                                <button class="btn btn-sm" data-i18n="filter.ok" id="min-usd-apply" type="button">OK</button>
+                            </div>
+                            <div class="preset-chips" id="min-usd-presets">
+                                <button data-v="0" type="button" data-i18n="filter.preset_all">Все</button>
+                                <button data-v="1000" type="button">$1K</button>
+                                <button data-v="5000" type="button">$5K</button>
+                                <button data-v="25000" type="button">$25K</button>
+                                <button data-v="100000" type="button">$100K 🔥</button>
+                                <button data-v="500000" type="button">$500K 🐋</button>
+                            </div>
+                            <div class="filter-note" data-i18n="filter.th_note">Каждый порог фильтрует свою серию — ленту и метки на графике: ликвидации, CVD-треугольники и OI-шарики. Ноль = показывать всё.</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <label data-i18n="ctrl.exchange">Биржа:</label>
+                    <div class="filter-dropdown" id="exchange-dd">
+                        <button class="form-select filter-btn" id="exchange-btn" type="button"
+                                data-i18n-title="filter.exchanges_title" title="Фильтр по биржам">Все биржи ▾</button>
+                        <div class="filter-panel hidden exchange-panel" id="exchange-panel">
+                            <div class="filter-row filter-row-between">
+                                <span class="filter-note" data-i18n="filter.exch_header">Включённые биржи</span>
+                                <span>
+                                    <button class="link-btn" data-i18n="filter.all" id="exch-all-check" type="button">Все</button>
+                                    <button class="link-btn" data-i18n="filter.none" id="exch-none-check" type="button">Ничего</button>
+                                </span>
+                            </div>
+                            <div id="exch-list"></div>
+                        </div>
+                    </div>
+                </div>
+            </section>
             <div class="chart-header flex-between">
                 <div class="symbol-price-display">
                     <button class="chart-tear" id="chart-tear" type="button"
@@ -325,6 +307,8 @@
                     <button class="chart-toggle" id="chart-toggle" type="button"
                             data-i18n-title="chart.toggle_title"
                             title="Свернуть/развернуть график">▾</button>
+                    <button class="chart-toggle chart-refresh" id="chart-refresh" type="button"
+                            title="Обновить график">↻</button>
                     <button class="chart-toggle chart-expand" id="chart-expand" type="button"
                             data-i18n-title="chart.expand_title"
                             title="Развернуть график на весь экран">⛶</button>

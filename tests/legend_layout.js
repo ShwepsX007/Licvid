@@ -238,15 +238,16 @@ async function main() {
     cssBlock("#layer-call").indexOf("margin-left: auto") !== -1);
   const legendKids = Array.from(doc.querySelector(".chart-legend").children);
   const kidIds = legendKids.map((k) => k.id || k.className);
-  // справа: слои, рисование, свернуть/развернуть, автоследование.
+  // справа: слои, рисование, свернуть/развернуть, обновить, полный экран, автоследование.
   // автоследование — отдельная кнопка в шапке, рядом с разворотом на весь экран
   check("right cluster order",
-    kidIds.slice(-5).join(",") ===
-      "draw-toggle,chart-toggle,chart-expand,follow-toggle,add-chart-btn",
-    kidIds.slice(-5).join(","));
+    kidIds.slice(-6).join(",") ===
+      "draw-toggle,chart-toggle,chart-refresh,chart-expand,follow-toggle,add-chart-btn",
+    kidIds.slice(-6).join(","));
   check("toggles last in legend",
-    legendKids.length >= 4 &&
-    legendKids[legendKids.length - 4].id === "chart-toggle" &&
+    legendKids.length >= 5 &&
+    legendKids[legendKids.length - 5].id === "chart-toggle" &&
+    legendKids[legendKids.length - 4].id === "chart-refresh" &&
     legendKids[legendKids.length - 3].id === "chart-expand" &&
     legendKids[legendKids.length - 2].id === "follow-toggle" &&
     legendKids[legendKids.length - 1].id === "add-chart-btn");

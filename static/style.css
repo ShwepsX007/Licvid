@@ -51,10 +51,10 @@ body.dark-theme {
 .top-nav {
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    justify-content: flex-start;
     background: rgba(14, 20, 36, 0.96);
     border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-    padding: 8px 16px;
+    padding: 6px 14px;
     min-height: 52px;   /* не height: боксы статистики выше 52px и должны помещаться */
     flex-shrink: 0;
     /* узкое окно браузера: ряд шапки переносится, а не уезжает за край.
@@ -62,7 +62,7 @@ body.dark-theme {
        себе 6px — график от этого становится чуть ниже, но кнопки видны все. */
     flex-wrap: wrap;
     row-gap: 6px;
-    column-gap: 12px;
+    column-gap: 10px;
 }
 
 .brand {
@@ -147,7 +147,8 @@ body.dark-theme {
 .header-metrics {
     display: flex;
     align-items: center;
-    gap: 24px;
+    gap: 14px;
+    margin-left: auto;
 }
 
 .metric-card {
@@ -377,13 +378,13 @@ body.dark-theme {
 .header-controls {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     flex: 0 1 auto;
     min-width: 0;
     max-width: 100%;
     flex-wrap: wrap;     /* не влезли — перенеслись; за край ничего не уходит */
-    justify-content: flex-end;
-    margin-left: auto;
+    justify-content: flex-start;
+    margin-left: 4px;
 }
 
 /* Переключатель языка */
@@ -405,7 +406,7 @@ body.dark-theme {
 .acc-nav, #nav-account {
     display: inline-flex;
     align-items: center;
-    gap: 10px;
+    gap: 6px;
     flex-shrink: 0;
 }
 .acc-nav a:not(.btn),
@@ -422,9 +423,9 @@ body.dark-theme {
 .acc-nav button, #nav-account button {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    padding: 7px 14px;
-    font-size: 0.76rem;
+    gap: 5px;
+    padding: 5px 10px;
+    font-size: 0.74rem;
     font-weight: 700;
     border-radius: 8px;
     border: 1px solid var(--border-color);
@@ -2441,16 +2442,33 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
 
 /* Разворот графика на весь экран (как на биржах): поверх всего, Esc — назад */
 .chart-section.fullscreen {
-    position: fixed;
+    position: fixed !important;
     inset: 0;
-    z-index: 90;
-    height: 100vh;
+    top: 0 !important;
+    left: 0 !important;
+    width: 100vw !important;
+    height: 100vh !important;
     height: 100dvh;
+    z-index: 9999 !important;
+    margin: 0 !important;
     min-height: 0;
     background: var(--bg-dark);
 }
+.is-fullscreen {
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+    width: 100vw !important;
+    height: 100vh !important;
+    z-index: 9999 !important;
+    margin: 0 !important;
+}
+/* Убедиться, что шапка графика всегда поверх всего */
+.is-fullscreen .chart-header,
+.chart-section.fullscreen .chart-header {
+    z-index: 10000 !important;
+}
 body.chart-fullscreen { overflow: hidden; }
-.chart-section.fullscreen #chart-toggle { display: none; }
 .chart-expand.active {
     border-color: var(--color-blue);
     color: var(--color-blue);
@@ -2545,15 +2563,23 @@ body.chart-fullscreen { overflow: hidden; }
     .header-metrics::-webkit-scrollbar { display: none; }
     .header-controls {
         width: 100%;
-        flex-wrap: wrap;
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
         justify-content: flex-start;
         gap: 6px;
         max-width: 100%;
+        margin-left: 0;
+        padding-bottom: 2px;
     }
+    .header-controls::-webkit-scrollbar { display: none; }
+    .header-controls > * { flex: 0 0 auto; }
     .header-controls #nav-account,
     .header-controls .acc-nav {
-        flex-wrap: wrap;
-        max-width: 100%;
+        flex-wrap: nowrap;
+        flex-shrink: 0;
+        max-width: none;
         gap: 6px;
     }
     .header-controls .lang-select { flex: 0 1 auto; max-width: 120px; min-width: 0; }

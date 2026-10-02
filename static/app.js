@@ -538,7 +538,36 @@
         } catch (e) { /* ignore */ }
     }
 
-    function applyFiltersFull() {
+    let currentMinVolume = 0;
+
+    function broadcastFilterUpdate() {
+        currentMinVolume = Math.max(0, Number(state.minUsd) || 0);
+        if (IS_EMBED) return;
+        const payload = {
+            source: "liqscope-dock",
+            action: "update_volume_filter",
+            minVolume: currentMinVolume,
+            minUsd: currentMinVolume,
+            minCvd: Math.max(0, Number(state.minCvd) || 0),
+            minOi: Math.max(0, Number(state.minOi) || 0),
+            minBook: Math.max(0, Number(state.minBook) || 0),
+            exchanges: state.exchanges ? Array.from(state.exchanges) : null,
+        };
+        const dock = window.LiqScopeDock;
+        if (dock && typeof dock.broadcastVolumeFilter === "function") {
+            dock.broadcastVolumeFilter(currentMinVolume, payload);
+            return;
+        }
+        document.querySelectorAll(".dock-slot iframe, .chart-slot iframe").forEach((iframe) => {
+            if (iframe.contentWindow) {
+                try { iframe.contentWindow.postMessage(payload, location.origin); } catch (e) {}
+            }
+        });
+    }
+
+    function applyFiltersAndRedraw() {
+        currentMinVolume = Math.max(0, Number(state.minUsd) || 0);
+        refreshFilterButtons();
         rebuildFeed();
         updateMarkers();
         updateLiveStats();
@@ -550,6 +579,43 @@
         if (liqClustersWanted()) loadLiqClusters();
         else dropLiqClusters();
     }
+
+    function applyFiltersFull() {
+        applyFiltersAndRedraw();
+        broadcastFilterUpdate();
+    }
+
+    window.addEventListener("message", (e) => {
+        if (e.origin !== location.origin) return;
+        if (e.data && e.data.source === "liqscope-dock" && e.data.action === "update_volume_filter") {
+            const vol = e.data.minVolume != null ? Number(e.data.minVolume) : Number(e.data.minUsd);
+            if (isFinite(vol) && vol >= 0) {
+                currentMinVolume = vol;
+                state.minUsd = vol;
+                saveThreshold("liq");
+            }
+            if (e.data.minCvd != null && isFinite(Number(e.data.minCvd))) {
+                state.minCvd = Math.max(0, Number(e.data.minCvd));
+                saveThreshold("cvd");
+            }
+            if (e.data.minOi != null && isFinite(Number(e.data.minOi))) {
+                state.minOi = Math.max(0, Number(e.data.minOi));
+                saveThreshold("oi");
+            }
+            if (e.data.minBook != null && isFinite(Number(e.data.minBook))) {
+                state.minBook = Math.max(0, Number(e.data.minBook));
+                saveThreshold("book");
+            }
+            if (e.data.exchanges === null) {
+                state.exchanges = null;
+                saveExchanges();
+            } else if (Array.isArray(e.data.exchanges)) {
+                state.exchanges = new Set(e.data.exchanges);
+                saveExchanges();
+            }
+            applyFiltersAndRedraw();
+        }
+    });
 
     // --- История ликвидаций: переживает F5 и рестарт сервера -----------------
     // Источник правды — сервер (REST /api/liquidations по паре и фильтрам
@@ -6831,15 +6897,28 @@
     function setupChartToggle() {
         if (!chartToggle || !chartSection) return;
         try {
-            if (localStorage.getItem("liqscope.chartCollapsed") === "1") {
+            if (!IS_EMBED && localStorage.getItem("liqscope.chartCollapsed") === "1") {
                 chartSection.classList.add("collapsed");
             }
         } catch (e) { /* ignore */ }
 
         chartToggle.addEventListener("click", () => {
+            const dock = window.LiqScopeDock;
+            try {
+                if (dock && dock.isSlotFullscreen && dock.isSlotFullscreen("native") && dock.exitSlotFullscreen) {
+                    dock.exitSlotFullscreen();
+                    return;
+                }
+            } catch (e) {}
+            if (chartSection.classList.contains("fullscreen") || chartSection.classList.contains("is-fullscreen")) {
+                chartSection.classList.remove("fullscreen", "is-fullscreen");
+                document.body.classList.remove("chart-fullscreen");
+                resetFullscreenStyles();
+                return;
+            }
             const collapsed = chartSection.classList.toggle("collapsed");
             try {
-                localStorage.setItem("liqscope.chartCollapsed", collapsed ? "1" : "0");
+                if (!IS_EMBED) localStorage.setItem("liqscope.chartCollapsed", collapsed ? "1" : "0");
             } catch (e) { /* ignore */ }
             if (!collapsed) {
                 // после разворачивания пересчитываем размеры графика
@@ -6851,24 +6930,57 @@
         });
     }
 
+    function resetFullscreenStyles() {
+        const container = $("tv-chart-container");
+        if (chartSection) {
+            chartSection.classList.remove("fullscreen", "is-fullscreen");
+            chartSection.style.width = "";
+            chartSection.style.height = "";
+        }
+        if (chartWrapper) {
+            chartWrapper.style.width = "";
+            chartWrapper.style.height = "";
+        }
+        if (container) {
+            container.classList.remove("is-fullscreen");
+            container.style.width = "";
+            container.style.height = "";
+            if (chart) {
+                const w = container.clientWidth || (chartWrapper && chartWrapper.clientWidth) || 900;
+                let h = container.clientHeight || (chartWrapper && chartWrapper.clientHeight) || 520;
+                if (h < CHART_MIN_H) h = CHART_FALLBACK_H;
+                if (typeof chart.resize === "function") {
+                    chart.resize(w, h);
+                } else if (typeof chart.applyOptions === "function") {
+                    chart.applyOptions({ width: w, height: h });
+                }
+            }
+        }
+    }
+    window.LiqScopeResetFs = resetFullscreenStyles;
+
     // --- Разворот графика на весь экран (как на биржах) -----------------------
     function setupChartExpand() {
         const btn = $("chart-expand");
+        const container = $("tv-chart-container");
         if (!btn || !chartSection) return;
         const dock = () => window.LiqScopeDock;
         const paint = () => {
             let dockFs = false;
             try { dockFs = !!(dock() && dock().isSlotFullscreen && dock().isSlotFullscreen("native")); } catch (e) {}
-            const fs = chartSection.classList.contains("fullscreen") || dockFs;
+            const fs = chartSection.classList.contains("fullscreen") || chartSection.classList.contains("is-fullscreen") || dockFs;
             btn.classList.toggle("active", fs);
             btn.title = I18n.t(fs ? "chart.collapse_title" : "chart.expand_title");
         };
         const setFs = (on) => {
             chartSection.classList.toggle("fullscreen", on);
+            chartSection.classList.toggle("is-fullscreen", on);
             document.body.classList.toggle("chart-fullscreen", on);
+            if (!on) resetFullscreenStyles();
             paint();
             // после смены геометрии — пересчитать размеры графика
             setTimeout(() => {
+                if (!on) resetFullscreenStyles();
                 window.dispatchEvent(new Event("resize"));
                 queueRedraw();
             }, 60);
@@ -6887,14 +6999,70 @@
             if (e.key !== "Escape") return;
             try {
                 if (dock() && dock().exitSlotFullscreen && dock().exitSlotFullscreen()) {
+                    resetFullscreenStyles();
                     paint();
                     return;
                 }
             } catch (err) {}
-            if (chartSection.classList.contains("fullscreen")) setFs(false);
+            if (chartSection.classList.contains("fullscreen") || chartSection.classList.contains("is-fullscreen")) {
+                setFs(false);
+            }
+        });
+        document.addEventListener("fullscreenchange", () => {
+            if (!document.fullscreenElement) {
+                if (container) {
+                    container.classList.remove("is-fullscreen");
+                    container.style.width = ""; // Очистка остаточных стилей
+                    container.style.height = "";
+                    if (chart && typeof chart.resize === "function") {
+                        chart.resize(container.clientWidth, container.clientHeight);
+                    }
+                }
+                try {
+                    if (dock() && dock().exitSlotFullscreen) dock().exitSlotFullscreen();
+                } catch (err) {}
+                resetFullscreenStyles();
+                document.body.classList.remove("chart-fullscreen");
+                paint();
+                queueRedraw();
+            }
         });
         I18n.onChange(paint);
         paint();
+    }
+
+    // --- Кнопка «Обновить график» (↻) ----------------------------------------
+    function refreshChart() {
+        const sym = chartSymbol();
+        state.candles = [];
+        if (candleSeries && typeof candleSeries.setData === "function") {
+            try { candleSeries.setData([]); } catch (e) { /* ignore */ }
+        }
+        if (volumeSeries && typeof volumeSeries.setData === "function") {
+            try { volumeSeries.setData([]); } catch (e) { /* ignore */ }
+        }
+        if (IS_EMBED) {
+            state.liquidations = [];
+            historyLoaded.clear();
+        } else {
+            state.liquidations = state.liquidations.filter((x) => x && x.symbol !== sym);
+            historyLoaded.delete(sym);
+        }
+        dropLiqClusters();
+        applyMarkers([]);
+        queueRedraw();
+        loadCandles();
+        loadHistoryFor(sym, true);
+        if (liqClustersWanted()) loadLiqClusters(true);
+        if (state.bookEnabled) bookSnapshot();
+        if (state.levelsEnabled) levelsSnapshot(true);
+    }
+
+    function setupChartRefresh() {
+        const btn = $("chart-refresh");
+        if (!btn || btn._refreshBound) return;
+        btn._refreshBound = true;
+        btn.addEventListener("click", () => refreshChart());
     }
 
     // --- Список монет: выпадающий список (как на биржах) ---------------------
@@ -8160,6 +8328,7 @@
         initChart();
         setupChartToggle();
         setupChartExpand();
+        setupChartRefresh();
         setupSymbolDropdown();      // выбор монеты прямо в заголовке этого графика
         loadCandles();
         startEmbedBridge();
@@ -8226,6 +8395,7 @@
         setupExchHealth(); // выпадающий список бирж в шапке
         setupChartToggle();
         setupChartExpand();
+        setupChartRefresh();
         setupDrawToolbar();   // панель рисования + тестовый API
         loadDrawings();       // фигуры текущей монеты
         // страховка: если WS молчит дольше 30с — перезапрашиваем свечи
@@ -8239,6 +8409,11 @@
     try {
         window.LiqScopeApp = window.LiqScopeApp || {};
         window.LiqScopeApp.selectSymbol = selectSymbol;
+        window.LiqScopeApp.applyTimeframe = applyTimeframe;
+        window.LiqScopeApp.refreshChart = refreshChart;
+        window.LiqScopeApp.fetchKlines = loadCandles;
+        window.LiqScopeApp.loadHistory = (sym) => loadHistoryFor(sym || chartSymbol(), true);
+        window.LiqScopeApp.applyFiltersAndRedraw = applyFiltersAndRedraw;
         window.LiqScopeApp.createCandleSeries = createCandleSeries;
         window.LiqScopeApp.createVolumeSeries = createVolumeSeries;
         window.LiqScopeApp.getSymbols = function() {

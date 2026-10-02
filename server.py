@@ -201,6 +201,8 @@ import service_chat as service_chat_mod
 from service_chat import register_service_chat_routes
 import content_comments as content_comments_mod
 from content_comments import register_comment_routes as register_content_comment_routes
+import donate as donate_mod
+from donate import register_donate_routes
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -5001,6 +5003,9 @@ account_ctx.mailer = mailer
 # Менеджер системных настроек: админка читает/пишет конфигурацию в БД,
 # почта и доступы подхватывают изменения без перезапуска.
 account_ctx.settings = settings_store
+# ❤️ Кошельки для донатов читаются из тех же настроек: смена адреса
+# в админке видна в шапке сразу, без перезапуска.
+donate_mod.ctx.settings = settings_store
 # После смены ИИ-ключей в админке писатель пересобирается без рестарта.
 account_ctx.ai_refresh_fn = ai_sync
 # Бот подтверждает почту теми же письмами, что и сайт
@@ -5016,6 +5021,9 @@ account_ctx.pump_snapshot_fn = pump_snapshot
 account_ctx.book_snapshot_fn = book_snapshot
 account_ctx.symbols_fn = lambda: list((feed.symbols if feed else [])[:40])
 register_account_routes(app)
+
+# ❤️ Донат: публичный список кошельков и сохранение из админки.
+register_donate_routes(app)
 
 # 📖 Стакан: снимок для графика, лента истории и диагностика опроса бирж.
 register_book_routes(app, lambda: book_feed_inst)

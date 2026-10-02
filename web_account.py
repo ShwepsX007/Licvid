@@ -22,6 +22,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
 
 import app_settings
+import donate
 import geoip
 import seo_pages
 from accounts import (COOKIE_SID, COOKIE_VID, hash_ip, hash_password,
@@ -2120,6 +2121,15 @@ def register_account_routes(app) -> None:
                 if k.startswith("LIQSCOPE_AI_"):
                     ai_touched = True
 
+            # Кошельки для донатов проверяем до сохранения: опечатка в адресе
+            # возвращает 400 с текстом, а не сохраняется молча. Проверка мягкая
+            # (формат сети), значение не трогаем — только обрезаем пробелы.
+            donate_in = {app_settings.canonical_key(raw_k): v
+                         for raw_k, v in body.items() if isinstance(v, str)}
+            donate_err = donate.validate_keys(donate_in)
+            if donate_err:
+                return JSONResponse({"ok": False, "error": donate_err}, status_code=400)
+
             for raw_k, v in body.items():
                 k = app_settings.canonical_key(raw_k)
                 if k not in app_settings.MANAGED_SETTINGS or not isinstance(v, str):
@@ -2142,6 +2152,10 @@ def register_account_routes(app) -> None:
                 _track(k)
                 if app_settings.MANAGED_SETTINGS[k].get("restart"):
                     restart_required = True
+            if any(k.startswith(donate.KEY_PREFIX) for k in sys_saved):
+                # публичный /api/donate/wallets кэшируется на минуту — сбрасываем,
+                # чтобы кнопка «Донат» увидела новый адрес сразу
+                donate.invalidate_cache()
             if smtp_touched and ctx.mailer is not None:
                 try:
                     mgr.apply_mailer(ctx.mailer, ctx.public_url)

@@ -32,6 +32,7 @@
         { id: "security", title: "🛡️ Безопасность и доступы" },
         { id: "telegram", title: "💬 Telegram" },
         { id: "tuning",   title: "⚙️ Тюнинг и производительность" },
+        { id: "donate",   title: "❤️ Донат" },
     ];
 
     function $(id) { return document.getElementById(id); }
@@ -207,6 +208,23 @@
                 "рассылок (Resend/SendPulse) используются, когда заполнен " +
                 "«Сервис рассылок».";
             panel.appendChild(note);
+        }
+        if (sec === "donate") {
+            // Сети и адреса рисуются из схемы сервера — здесь только рамка
+            // раздела: заголовок, пояснение и напоминание про пустое поле.
+            var dTitle = document.createElement("div");
+            dTitle.className = "sys-label";
+            dTitle.style.marginBottom = "2px";
+            dTitle.textContent = "Кошельки для донатов";
+            panel.insertBefore(dTitle, panel.firstChild);
+
+            var dLead = document.createElement("p");
+            dLead.className = "sys-note";
+            dLead.style.marginTop = "0";
+            dLead.textContent = "Адреса показываются гостям в кнопке «Донат» в шапке: " +
+                "сеть с пустым полем в этой кнопке не появляется. Адрес проверяется " +
+                "по формату сети — опечатку сохранить нельзя, текст ошибки будет ниже.";
+            panel.insertBefore(dLead, dTitle.nextSibling);
         }
         if (sec === "security") {
             var rWrap = document.createElement("div");

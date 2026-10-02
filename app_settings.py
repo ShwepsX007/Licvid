@@ -43,10 +43,11 @@ SECTION_AI = "ai"              # 🤖 ИИ и нейросети (ключи, м
 SECTION_SECURITY = "security"  # 🛡️ Безопасность и доступы (админы)
 SECTION_TELEGRAM = "telegram"  # 💬 Telegram (бот и каналы)
 SECTION_TUNING = "tuning"      # ⚙️ Тюнинг и производительность
+SECTION_DONATE = "donate"      # ❤️ Донат (адреса крипто-кошельков)
 
 #: Разделы в порядке показа в админке.
 SECTION_ORDER = (SECTION_MAIL, SECTION_AI, SECTION_SECURITY,
-                 SECTION_TELEGRAM, SECTION_TUNING)
+                 SECTION_TELEGRAM, SECTION_TUNING, SECTION_DONATE)
 
 #: Суффиксы секретных ключей: маскируются даже без явного флага.
 _SECRET_SUFFIXES = ("_KEY", "_KEYS", "_SECRET", "_TOKEN", "_PASSWORD")
@@ -361,16 +362,89 @@ MANAGED_SETTINGS: Dict[str, Dict[str, Any]] = {
         "Ответы больше этого размера сжимаются в отдельном потоке (64 КБ "
         "по умолчанию): zlib отпускает GIL и не держит воркер.",
         restart=True),
+    # ── ❤️ Донат: адреса кошельков ---------------------------------------------
+    # Платёжек нет: сайт показывает адреса и копирует их в буфер обмена.
+    # Пустое поле = сеть скрыта в кнопке «Донат». Формат проверяется мягко
+    # (`donate.validate`): опечатку видно сразу, контрольные суммы не считаем.
+    "LIQSCOPE_DONATE_WALLET_ETHEREUM": _spec(
+        SECTION_DONATE, "Ethereum (ETH)",
+        "Адрес вида 0x + 40 шестнадцатеричных знаков. "
+        "Пустое поле — сеть скрыта в кнопке «Донат».",
+        placeholder="0x…"),
+    "LIQSCOPE_DONATE_WALLET_BITCOIN": _spec(
+        SECTION_DONATE, "Bitcoin (BTC)",
+        "Адрес bc1… (или старый 1… / 3…). "
+        "Пустое поле — сеть скрыта в кнопке «Донат».",
+        placeholder="bc1…"),
+    "LIQSCOPE_DONATE_WALLET_SOLANA": _spec(
+        SECTION_DONATE, "Solana (SOL)",
+        "Адрес из 32–44 знаков base58. "
+        "Пустое поле — сеть скрыта в кнопке «Донат».",
+        placeholder="…"),
+    "LIQSCOPE_DONATE_WALLET_BNB": _spec(
+        SECTION_DONATE, "BNB Chain (BNB)",
+        "Адрес вида 0x + 40 шестнадцатеричных знаков (сеть BSC). "
+        "Пустое поле — сеть скрыта в кнопке «Донат».",
+        placeholder="0x…"),
+    "LIQSCOPE_DONATE_WALLET_BASE": _spec(
+        SECTION_DONATE, "Base (BASE)",
+        "Адрес вида 0x + 40 шестнадцатеричных знаков. "
+        "Пустое поле — сеть скрыта в кнопке «Донат».",
+        placeholder="0x…"),
+    "LIQSCOPE_DONATE_WALLET_POLYGON": _spec(
+        SECTION_DONATE, "Polygon (POL)",
+        "Адрес вида 0x + 40 шестнадцатеричных знаков. "
+        "Пустое поле — сеть скрыта в кнопке «Донат».",
+        placeholder="0x…"),
+    "LIQSCOPE_DONATE_WALLET_TRON": _spec(
+        SECTION_DONATE, "Tron (TRX)",
+        "Адрес вида T… (34 знака). "
+        "Пустое поле — сеть скрыта в кнопке «Донат».",
+        placeholder="T…"),
+    "LIQSCOPE_DONATE_WALLET_TON": _spec(
+        SECTION_DONATE, "TON (GRAM)",
+        "Адрес EQ…/UQ… (48 знаков) или workchain:hex. "
+        "Пустое поле — сеть скрыта в кнопке «Донат».",
+        placeholder="UQ…"),
 }
 
 #: Алиасы коротких имён переменных окружения и ключей настроек.
 KEY_ALIASES: Dict[str, str] = {
     "GOOGLE_CLIENT_ID": "LIQSCOPE_GOOGLE_CLIENT_ID",
     "GOOGLE_CLIENT_SECRET": "LIQSCOPE_GOOGLE_CLIENT_SECRET",
+    # Донат: короткие имена (DONATE_WALLET_ETHEREUM) — как их пишут в .env
+    "DONATE_WALLET_ETHEREUM": "LIQSCOPE_DONATE_WALLET_ETHEREUM",
+    "DONATE_WALLET_ETH": "LIQSCOPE_DONATE_WALLET_ETHEREUM",
+    "DONATE_WALLET_BITCOIN": "LIQSCOPE_DONATE_WALLET_BITCOIN",
+    "DONATE_WALLET_BTC": "LIQSCOPE_DONATE_WALLET_BITCOIN",
+    "DONATE_WALLET_SOLANA": "LIQSCOPE_DONATE_WALLET_SOLANA",
+    "DONATE_WALLET_SOL": "LIQSCOPE_DONATE_WALLET_SOLANA",
+    "DONATE_WALLET_BNB": "LIQSCOPE_DONATE_WALLET_BNB",
+    "DONATE_WALLET_BASE": "LIQSCOPE_DONATE_WALLET_BASE",
+    "DONATE_WALLET_POLYGON": "LIQSCOPE_DONATE_WALLET_POLYGON",
+    "DONATE_WALLET_MATIC": "LIQSCOPE_DONATE_WALLET_POLYGON",
+    "DONATE_WALLET_TRON": "LIQSCOPE_DONATE_WALLET_TRON",
+    "DONATE_WALLET_TRX": "LIQSCOPE_DONATE_WALLET_TRON",
+    "DONATE_WALLET_TON": "LIQSCOPE_DONATE_WALLET_TON",
 }
 _ENV_FALLBACKS: Dict[str, tuple] = {
     "LIQSCOPE_GOOGLE_CLIENT_ID": ("LIQSCOPE_GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_ID"),
     "LIQSCOPE_GOOGLE_CLIENT_SECRET": ("LIQSCOPE_GOOGLE_CLIENT_SECRET", "GOOGLE_CLIENT_SECRET"),
+    # Каждому кошельку — пара имён: с префиксом и короткое (плюс обычное
+    # сокращение монеты: ETH/BTC/SOL/MATIC/TRX).
+    "LIQSCOPE_DONATE_WALLET_ETHEREUM": ("LIQSCOPE_DONATE_WALLET_ETHEREUM",
+                                        "DONATE_WALLET_ETHEREUM", "DONATE_WALLET_ETH"),
+    "LIQSCOPE_DONATE_WALLET_BITCOIN": ("LIQSCOPE_DONATE_WALLET_BITCOIN",
+                                       "DONATE_WALLET_BITCOIN", "DONATE_WALLET_BTC"),
+    "LIQSCOPE_DONATE_WALLET_SOLANA": ("LIQSCOPE_DONATE_WALLET_SOLANA",
+                                      "DONATE_WALLET_SOLANA", "DONATE_WALLET_SOL"),
+    "LIQSCOPE_DONATE_WALLET_BNB": ("LIQSCOPE_DONATE_WALLET_BNB", "DONATE_WALLET_BNB"),
+    "LIQSCOPE_DONATE_WALLET_BASE": ("LIQSCOPE_DONATE_WALLET_BASE", "DONATE_WALLET_BASE"),
+    "LIQSCOPE_DONATE_WALLET_POLYGON": ("LIQSCOPE_DONATE_WALLET_POLYGON",
+                                       "DONATE_WALLET_POLYGON", "DONATE_WALLET_MATIC"),
+    "LIQSCOPE_DONATE_WALLET_TRON": ("LIQSCOPE_DONATE_WALLET_TRON",
+                                    "DONATE_WALLET_TRON", "DONATE_WALLET_TRX"),
+    "LIQSCOPE_DONATE_WALLET_TON": ("LIQSCOPE_DONATE_WALLET_TON", "DONATE_WALLET_TON"),
 }
 
 

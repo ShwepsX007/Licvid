@@ -6174,29 +6174,47 @@
         return raw;
     }
 
+    // Кнопка Google — обычная ссылка на /api/auth/google/login: без ключей
+    // сервер сам вернёт 503, а вход работает даже со старым/не загрузившимся
+    // скриптом. JS лишь добавляет ?next= и гасит кнопку, когда вход выключен.
+    function googleLoginOff(btn) {
+        if (!btn) return false;
+        return btn.getAttribute("aria-disabled") === "true" ||
+            btn.disabled === true;
+    }
+
     function paintGoogleLoginBtn(enabled) {
         var gBtn = $("google-login-btn");
         var gNote = $("google-note");
         if (!gBtn) return;
         if (enabled === false) {
-            gBtn.disabled = true;
+            gBtn.setAttribute("aria-disabled", "true");
+            gBtn.classList.add("is-off");
+            gBtn.removeAttribute("href");
+            if ("disabled" in gBtn) gBtn.disabled = true;
             gBtn.title = t("googleOff");
             if (gNote) gNote.classList.remove("hidden");
         } else {
-            gBtn.disabled = false;
+            gBtn.removeAttribute("aria-disabled");
+            gBtn.classList.remove("is-off");
+            if (gBtn.tagName === "A") gBtn.setAttribute("href", "/api/auth/google/login");
+            if ("disabled" in gBtn) gBtn.disabled = false;
             gBtn.title = "";
             if (gNote) gNote.classList.add("hidden");
         }
     }
 
-    function startGoogleLogin() {
+    function startGoogleLogin(ev) {
         var gBtn = $("google-login-btn");
-        if (gBtn && gBtn.disabled) {
+        if (googleLoginOff(gBtn)) {
+            if (ev && ev.preventDefault) ev.preventDefault();
             setStatus($("login-status"), t("googleOff"), "err");
             return;
         }
         var next = safeNextPath();
-        location.href = "/api/auth/google/login?next=" + encodeURIComponent(next);
+        var url = "/api/auth/google/login" + (next ? "?next=" + encodeURIComponent(next) : "");
+        if (ev && ev.preventDefault) ev.preventDefault();
+        location.href = url;
     }
 
     function bootLogin() {

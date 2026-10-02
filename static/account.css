@@ -1537,6 +1537,7 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
     border: 1px solid rgba(255, 255, 255, 0.14);
     font-size: 0.96rem;
     padding: 12px 22px;
+    text-decoration: none;
     transition: border-color 0.15s ease, background 0.15s ease;
 }
 .btn-google-wide {
@@ -1547,9 +1548,15 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
     border-color: rgba(66, 133, 244, 0.65);
     background: #172038;
 }
-.btn-google:disabled {
+/* Кнопка-ссылка: без ключей вход выключен — гасим и снимаем переход. */
+.btn-google:disabled,
+.btn-google.is-off,
+.btn-google[aria-disabled="true"] {
     opacity: 0.55;
     cursor: not-allowed;
+}
+.btn-google[aria-disabled="true"] {
+    pointer-events: none;
 }
 .btn-google .google-icon {
     width: 18px;

@@ -2655,6 +2655,24 @@
         }
     }
 
+    /** Есть ли у элемента собственный текст: нужен, чтобы не потерять
+     *  русский вариант подписи, когда ключа нет в загруженном словаре. */
+    function hasOwnText(el) {
+        return String(el.textContent || "").replace(/\s+/g, " ") !== "";
+    }
+
+    function hasOwnAttr(el, name) {
+        return String(el.getAttribute(name) || "").replace(/\s+/g, " ") !== "";
+    }
+
+    /** Атрибут по ключу словаря; без перевода оставляем исходное значение. */
+    function setAttrLabel(el, attr, keyAttr) {
+        var key = el.getAttribute(keyAttr);
+        var value = t(key);
+        if (value === key && hasOwnAttr(el, attr)) return;
+        el.setAttribute(attr, value);
+    }
+
     /** Реферальная ссылка Gate для текущего языка. */
     function gateRef() {
         return GATE_REFS[current] || GATE_REFS.en;
@@ -2679,19 +2697,29 @@
         document.documentElement.lang = localeTag();
         var nodes = root.querySelectorAll("[data-i18n]");
         for (var i = 0; i < nodes.length; i++) {
-            setLabel(nodes[i], t(nodes[i].getAttribute("data-i18n")));
+            var key = nodes[i].getAttribute("data-i18n");
+            var text = t(key);
+            // Ключа нет в загруженном словаре — не показываем гостю «auth.x»
+            // вместо подписи: оставляем русский текст из разметки (словарь
+            // мог не догрузиться, например из старого кэша).
+            if (text === key && hasOwnText(nodes[i])) continue;
+            setLabel(nodes[i], text);
         }
         nodes = root.querySelectorAll("[data-i18n-placeholder]");
         for (i = 0; i < nodes.length; i++) {
-            nodes[i].setAttribute("placeholder", t(nodes[i].getAttribute("data-i18n-placeholder")));
+            setAttrLabel(nodes[i], "placeholder", "data-i18n-placeholder");
         }
         nodes = root.querySelectorAll("[data-i18n-title]");
         for (i = 0; i < nodes.length; i++) {
-            nodes[i].setAttribute("title", t(nodes[i].getAttribute("data-i18n-title")));
+            setAttrLabel(nodes[i], "title", "data-i18n-title");
+        }
+        nodes = root.querySelectorAll("[data-i18n-aria]");
+        for (i = 0; i < nodes.length; i++) {
+            setAttrLabel(nodes[i], "aria-label", "data-i18n-aria");
         }
         nodes = root.querySelectorAll("[data-i18n-meta]");
         for (i = 0; i < nodes.length; i++) {
-            nodes[i].setAttribute("content", t(nodes[i].getAttribute("data-i18n-meta")));
+            setAttrLabel(nodes[i], "content", "data-i18n-meta");
         }
         // og:locale — под текущий язык (в разметке зашит русский по умолчанию)
         var og = root.querySelector ? root.querySelector('meta[property="og:locale"]') : null;

@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import html as html_mod
 import json
 import os
@@ -296,6 +297,64 @@ _CANON_RE = re.compile(r"(<link\b[^>]*\brel=\"canonical\"[^>]*\bhref=\")([^\"]*)
 # Разбивка i18n.pages.js по языкам: грузим только один язык
 _I18N_PAGES_RE = re.compile(r'/static/i18n\.pages\.js(?:\?[^"\']*)?')
 
+#: Ссылки на статику в разметке: src="…" / href="…" (кавычки любые).
+_ASSET_REF_RE = re.compile(r'(["\'])(/static/[^"\'?#]+)((?:\?[^"\']*)?)\1')
+
+#: Кэш версий статики: имя файла -> (mtime_ns, размер, версия).
+_ASSET_VERSION_CACHE: Dict[str, tuple] = {}
+
+
+def asset_version(name: str) -> str:
+    """Версия статики: хеш содержимого файла из ``static/``.
+
+    ``?v=`` отдаётся браузеру как ``immutable`` на год, поэтому версию надо
+    менять при каждой правке файла. Раньше её правили руками (``?v=nav5``) —
+    и забытый бамп оставлял вернувшегося гостя со старым JS: новая разметка
+    уже просит кнопку, а старый скрипт её не оживляет. Считаем версию от
+    содержимого: правка файла сама меняет адрес, обходить кэш руками не надо.
+    """
+    key = name.lstrip("/")
+    full = os.path.join(STATIC_DIR, key)
+    try:
+        st = os.stat(full)
+    except OSError:
+        return ""
+    hit = _ASSET_VERSION_CACHE.get(key)
+    if hit and hit[0] == st.st_mtime_ns and hit[1] == st.st_size:
+        return hit[2]
+    digest = hashlib.blake2b(digest_size=4)
+    try:
+        with open(full, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 16), b""):
+                digest.update(chunk)
+    except OSError:
+        return ""
+    ver = digest.hexdigest()
+    _ASSET_VERSION_CACHE[key] = (st.st_mtime_ns, st.st_size, ver)
+    return ver
+
+
+def version_static_urls(html: str) -> str:
+    """Проставляет версии всем ссылкам на ``/static/`` в готовой странице.
+
+    Чужие параметры запроса сохраняем, ``v`` заменяем на хеш содержимого.
+    Страницы (``.html``) не версионируем: у них свои правила кэша.
+    """
+
+    def sub(m: re.Match) -> str:
+        quote, url, query = m.group(1), m.group(2), m.group(3)
+        if url.endswith((".html", "/")):
+            return m.group(0)
+        ver = asset_version(url[len("/static/"):])
+        if not ver:
+            return m.group(0)
+        rest = [p for p in query.lstrip("?").split("&")
+                if p and not p.startswith("v=")]
+        rest.append("v=" + ver)
+        return f"{quote}{url}?{'&'.join(rest)}{quote}"
+
+    return _ASSET_REF_RE.sub(sub, html)
+
 
 def _language_block(path: str, lang: str = DEFAULT_LANG) -> str:
     """Ссылки hreflang + og:locale:alternate: поисковик и соцсети видят все языки."""
@@ -455,6 +514,10 @@ def render(
     if body:
         for key, value in body.items():
             html = html.replace("{{" + str(key) + "}}", str(value))
+
+    # Версии статики — последним проходом: под хеш попадают и разметка, и
+    # вставленные из body куски (карточки списка, текст статьи).
+    html = version_static_urls(html)
 
     resp = Response(content=html, media_type="text/html; charset=utf-8", status_code=status_code)
     # язык зависит и от cookie, и от Accept-Language — говорим об этом кэшам

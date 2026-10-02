@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -35,6 +36,9 @@ from fastapi.testclient import TestClient  # noqa: E402
 import app_settings  # noqa: E402
 import web_account  # noqa: E402
 from accounts import Store, hash_password  # noqa: E402
+
+#: Адрес согласия Google, куда уходит гость из /api/auth/google/login.
+GOOGLE_AUTH_HOST = "https://accounts.google.com/o/oauth2/v2/auth"
 from mailer import Mailer  # noqa: E402
 
 
@@ -452,6 +456,63 @@ class GoogleOAuthHttpFlowTest(unittest.TestCase):
         )
         self.assertEqual(r_bad.status_code, 400)
         self.assertFalse(r_bad.json()["ok"])
+
+    def test_login_page_keeps_google_as_a_plain_link(self):
+        """Кнопка входа — ссылка, а не JS-only кнопка.
+
+        Гость с закэшированным (старым) account.js обработчик не получит —
+        вход всё равно должен работать: сервер сам отдаст 503 без ключей и
+        редирект на Google с ними.
+        """
+        page = self.client.get("/login")
+        self.assertEqual(page.status_code, 200)
+        html = page.text
+        m = re.search(r'<a\b[^>]*\bid="google-login-btn"[^>]*>', html)
+        self.assertIsNotNone(m, "кнопка Google не ссылка: JS может не загрузиться")
+        self.assertIn('href="/api/auth/google/login"', m.group(0))
+        self.assertIn('data-i18n-aria="auth.google_btn"', m.group(0))
+
+        r = self.client.get("/api/auth/google/login", follow_redirects=False)
+        self.assertEqual(r.status_code, 503)
+        self.configure_google()
+        r2 = self.client.get("/api/auth/google/login", follow_redirects=False)
+        self.assertEqual(r2.status_code, 302)
+        self.assertTrue(r2.headers["location"].startswith(GOOGLE_AUTH_HOST))
+
+    def test_login_page_versions_scripts_by_content(self):
+        """Разметка и скрипты приходят парой с одним хешем содержимого.
+
+        Иначе после деплоя гость получает новую страницу со старым (год
+        immutable) account.js: кнопка есть, но не работает — ровно этот
+        случай и проверяем.
+        """
+        import seo_pages  # noqa: E402 — нужен только этому тесту
+
+        page = self.client.get("/login", headers={"Accept-Language": "ru-RU,ru;q=0.9"})
+        self.assertEqual(page.status_code, 200)
+        refs = re.findall(r'(?:src|href)="(/static/[^"]+)"', page.text)
+        self.assertTrue(refs, "в странице нет ссылок на статику")
+        checked = 0
+        for ref in refs:
+            url, _, query = ref.partition("?")
+            if url.endswith((".html", "/")):
+                continue
+            name = url[len("/static/"):]
+            ver = dict(
+                part.split("=", 1) for part in query.split("&") if "=" in part
+            ).get("v", "")
+            if not ver:
+                continue  # файла может не быть в сборке — тогда версия пустая
+            self.assertEqual(
+                ver, seo_pages.asset_version(name),
+                f"{name}: в HTML устаревшая версия {ver}",
+            )
+            checked += 1
+        self.assertGreaterEqual(checked, 5, "проверка почти ничего не увидела")
+        # словарь страницы тоже версионируется — иначе не будет ключа кнопки
+        self.assertIn("/static/i18n.pages.ru.js?v=", page.text)
+        self.assertIn("/static/account.js?v=", page.text)
+        self.assertIn("/static/account.css?v=", page.text)
 
 
 if __name__ == "__main__":

@@ -279,7 +279,8 @@ class MarkupKeysTest(unittest.TestCase):
         for name in self.FILES:
             with open(os.path.join(STATIC, name), encoding="utf-8") as fh:
                 html = fh.read()
-            used.update(re.findall(r'data-i18n(?:-placeholder|-title|-meta)?="([^"]+)"', html))
+            used.update(re.findall(
+                r'data-i18n(?:-placeholder|-title|-meta|-aria)?="([^"]+)"', html))
         self.assertTrue(used, "в разметке нет ни одного data-i18n")
         missing = sorted(used - known)
         self.assertFalse(missing, f"ключей нет в словарях: {missing}")

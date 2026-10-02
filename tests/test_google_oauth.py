@@ -445,6 +445,30 @@ class GoogleOAuthHttpFlowTest(unittest.TestCase):
         self.assertIn("***", sec_val)
         self.assertNotIn("NewSecret", sec_val)
 
+        # Тот же путь, каким ходит админка: канонические имена ключей из схемы
+        r_save2 = self.client.post(
+            "/api/admin/settings",
+            json={
+                "LIQSCOPE_GOOGLE_CLIENT_ID": "555-canon.apps.googleusercontent.com",
+                "LIQSCOPE_GOOGLE_CLIENT_SECRET": "GOCSPX-CanonSecret246810",
+            },
+        )
+        self.assertEqual(r_save2.status_code, 200)
+        self.assertNotIn("GOCSPX-CanonSecret246810", r_save2.text)
+        saved = r_save2.json()["saved"]
+        self.assertEqual(
+            saved["LIQSCOPE_GOOGLE_CLIENT_ID"],
+            "555-canon.apps.googleusercontent.com",
+        )
+        self.assertIn("***", saved["LIQSCOPE_GOOGLE_CLIENT_SECRET"])
+        # Ключи действуют сразу: вход через Google включается без перезапуска
+        self.assertTrue(self.client.get("/api/auth/providers").json()["google"])
+        self.assertEqual(
+            self.client.get("/api/admin/settings").json()["settings"][
+                "LIQSCOPE_GOOGLE_CLIENT_ID"]["source"],
+            "db",
+        )
+
         # Проверка валидного и невалидного формата Client ID
         r_ok = self.client.post("/api/admin/settings/test-google", json={})
         self.assertEqual(r_ok.status_code, 200)

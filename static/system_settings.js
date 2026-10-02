@@ -112,7 +112,9 @@
         var st = schema[key];
         var wrap = document.createElement("div");
         wrap.className = "sys-field";
-        wrap.dataset.syskey = key;
+        // data-syskey ставим только на input: на обёртке он ломал поиск поля
+        // (querySelector находил div вместо input).
+        wrap.dataset.field = key;
 
         var label = document.createElement("div");
         label.className = "sys-label";
@@ -369,17 +371,23 @@
 
     function collect(sec) {
         var payload = {};
-        keysInSection(sec).forEach(function (key) {
-            var inp = document.querySelector('[data-syskey="' + key + '"]');
-            if (!inp) return;
+        // Селектор обязан целиться в input: у обёртки поля тоже есть
+        // data-syskey, и она идёт в разметке раньше — querySelector возвращал
+        // div, у него нет value, и введённое значение уходило пустой строкой
+        // (сервер трактует пусто как «снять переопределение»), а секрет —
+        // вовсе не отправлялся.
+        var inputs = document.querySelectorAll(
+            '#sys-panel-' + sec + ' input[data-syskey]');
+        for (var i = 0; i < inputs.length; i++) {
+            var key = inputs[i].dataset.syskey;
             var st = schema[key] || {};
-            var val = inp.value == null ? "" : String(inp.value).trim();
+            var val = inputs[i].value == null ? "" : String(inputs[i].value).trim();
             if (st.secret) {
                 // пусто или маска = «не менять» — ключ не отправляем
-                if (!val || val.indexOf(maskChar) !== -1) return;
+                if (!val || val.indexOf(maskChar) !== -1) continue;
             }
             payload[key] = val;
-        });
+        }
         return payload;
     }
 
@@ -409,7 +417,9 @@
 
     /* ----- проверки подключения ------------------------------------------ */
     function sectionValue(sec, key) {
-        var inp = document.querySelector('#sys-panel-' + sec + ' [data-syskey="' + key + '"]');
+        // Именно input: у обёртки поля тоже есть data-syskey (см. collect).
+        var inp = document.querySelector(
+            '#sys-panel-' + sec + ' input[data-syskey="' + key + '"]');
         return inp ? String(inp.value || "").trim() : "";
     }
 

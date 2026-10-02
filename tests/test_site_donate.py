@@ -370,7 +370,7 @@ class DonateFrontendTest(unittest.TestCase):
     def setUp(self) -> None:
         with open(os.path.join(STATIC, "donate.js"), encoding="utf-8") as fh:
             self.js = fh.read()
-        with open(os.path.join(STATIC, "account.css"), encoding="utf-8") as fh:
+        with open(os.path.join(STATIC, "brand.css"), encoding="utf-8") as fh:
             self.css = fh.read()
 
     def test_script_is_loaded_on_every_page_with_a_header(self) -> None:
@@ -383,6 +383,31 @@ class DonateFrontendTest(unittest.TestCase):
                 self.assertIn('id="nav-account"', html)
                 self.assertIn("/static/donate.js", html,
                               f"{name}: нет кнопки донатов в шапке")
+
+    def test_styles_are_linked_on_every_page(self) -> None:
+        """Стили кнопки должны грузиться везде: у терминала нет account.css.
+
+        Кнопку рисует один скрипт, но у страниц разные таблицы стилей —
+        стили донат-кнопки обязаны лежать в файле, который подключён на
+        каждой странице с шапкой (иначе кнопка остаётся серой «по умолчанию»).
+        """
+        owners = []
+        for name in sorted(os.listdir(STATIC)):
+            if not name.endswith(".css"):
+                continue
+            with open(os.path.join(STATIC, name), encoding="utf-8") as fh:
+                if ".nav-donate-btn" in fh.read():
+                    owners.append(name)
+        self.assertTrue(owners, "стилей кнопки нет ни в одном CSS")
+        for name in sorted(os.listdir(STATIC)):
+            if not name.endswith(".html"):
+                continue
+            with open(os.path.join(STATIC, name), encoding="utf-8") as fh:
+                html = fh.read()
+            with self.subTest(page=name):
+                for sheet in owners:
+                    self.assertIn(f"/static/{sheet}", html,
+                                  f"{name}: не подключены стили кнопки ({sheet})")
 
     def test_donate_does_not_draw_the_shared_menu(self) -> None:
         # Шапку рисует только account.js — иначе кнопки входа продублируются.

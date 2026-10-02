@@ -238,7 +238,13 @@
     _onMessage(e) {
       if (e.origin !== location.origin) return;
       const data = e.data;
-      if (!data || data.source !== "liqscope-dock") return;
+      if (!data || (data.source !== "liqscope-dock" && data.source !== "liqscope-iframe")) return;
+      if (data.source === "liqscope-iframe" && data.action === "update_state") {
+        // встроенный график сообщил свою пару/таймфрейм (смена в его заголовке):
+        // метка слота, подпись вкладки и сохранённый расклад обновляются сразу
+        if (validId(data.slotId)) this._applyEmbedSub(data.slotId, data.symbol, data.tf);
+        return;
+      }
       if (data.type === "dock") {
         if (!validId(data.slot)) return;
         this.dockBack(data.slot);
@@ -254,17 +260,7 @@
       if (data.type === "embed-sub" && validId(data.slot)) {
         // встроенный график сообщил свою пару/таймфрейм (старт или смена):
         // обновляем метку слота и сразу отдаём состояние сокета родителя
-        const rec = this.meta[data.slot];
-        if (rec && rec.kind === "embed") {
-          const sym = validSymbol(data.symbol);
-          const tf = validTf(data.tf);
-          if (sym) rec.symbol = sym;
-          if (tf) rec.tf = tf;
-          const el = this.els.get(data.slot);
-          const label = el && el.querySelector(".chart-slot-title");
-          if (label) label.textContent = pretty(rec.symbol) + " · " + this._tfLabel(rec.tf);
-          this._save();
-        }
+        this._applyEmbedSub(data.slot, data.symbol, data.tf);
         const bridge = window.LiqScopeWsBridge;
         const st = bridge && bridge.currentState ? bridge.currentState() : null;
         if (st && st.status && st.key) {
@@ -860,6 +856,25 @@
           }
         } catch (e) {}
       });
+    }
+
+    /** Встроенный график сообщил свою пару/таймфрейм: метка окна, подпись
+     *  вкладки и расклад обновляются сразу, без ожидания 1.5с-синхронизации. */
+    _applyEmbedSub(slotId, symbol, tf) {
+      const rec = this.meta[slotId];
+      if (!rec || rec.kind !== "embed") return;
+      const sym = validSymbol(symbol);
+      const t = validTf(tf);
+      if (!sym && !t) return;
+      if (sym) rec.symbol = sym;
+      if (t) rec.tf = t;
+      const el = this.els.get(slotId);
+      const label = el && el.querySelector(".chart-slot-title");
+      if (label) label.textContent = pretty(rec.symbol) + " · " + this._tfLabel(rec.tf);
+      const tfSel = el && el.querySelector(".chart-slot-tf");
+      if (tfSel && document.activeElement !== tfSel) tfSel.value = String(rec.tf || 5);
+      this._paintTabs();
+      this._save();
     }
 
     _paintModes() {

@@ -39,7 +39,7 @@
     <!-- Local Lightweight Charts v5 -->
     <link rel="stylesheet" href="/static/ads.css?v=banner5">
     <link rel="stylesheet" href="/static/terminal_chat.css?v=8">
-    <link rel="stylesheet" href="/static/workspace.css?v=dock-mobile5">
+    <link rel="stylesheet" href="/static/workspace.css?v=embed-hdr1">
     <script src="/static/lightweight-charts.js"></script>
     <script src="/static/i18n.pages.js?v=screener1"></script>
     <script src="/static/i18n.js?v=quota2"></script>
@@ -291,6 +291,11 @@
                             <div class="symbol-dropdown hidden" id="symbol-dropdown" role="listbox"></div>
                         </div>
                     </div>
+                    <!-- Компактный таймфрейм в заголовке графика: в мультиэкране
+                         и вкладках каждый график переключает только свой ТФ.
+                         Опции наполняет app.js (setupHeaderTfSelect). -->
+                    <select id="chart-header-tf" class="chart-header-tf"
+                            title="Таймфрейм этого графика" aria-label="Таймфрейм графика"></select>
                     <span class="live-price" id="current-price">—</span>
                     <span class="price-change positive" id="price-change-pct">+0.00%</span>
                     <span class="data-source" id="data-source"></span>
@@ -611,8 +616,8 @@
     <!-- workspace.js (старый мультичарт) больше не подключается: графики
          собирает chart_dock.js, а один WebSocket на окно раздаёт данные
          встроенным окнам через postMessage. Файл оставлен для старых тестов. -->
-    <script src="/static/app.js?v=whale-members1"></script>
-    <script src="/static/chart_dock.js?v=dock-gate1"></script>
+    <script src="/static/app.js?v=embed-hdr1"></script>
+    <script src="/static/chart_dock.js?v=embed-hdr1"></script>
     <script src="/static/ads.js?v=banner7"></script>
     <script src="/static/terminal_chat.js?v=10"></script>
     <script src="/static/presence.js?v=geo4"></script>

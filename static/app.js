@@ -7756,7 +7756,9 @@
     }
 
     function embedNotifySub() {
-        // сообщить доку свою пару/таймфрейм (метки слотов, синхронизация)
+        // сообщить доку свою пару/таймфрейм (метки слотов, синхронизация).
+        // Дублируем двумя форматами: старый знают уже открытые вкладки дока,
+        // новый (liqscope-iframe/update_state) обновляет вкладки мгновенно.
         try {
             const host = window.parent !== window ? window.parent : window.opener;
             if (!host) return;
@@ -7767,6 +7769,13 @@
                 symbol: chartSymbol(),
                 tf: state.timeframe,
             }, location.origin);
+            host.postMessage({
+                source: "liqscope-iframe",
+                action: "update_state",
+                slotId: EMBED_SLOT,
+                symbol: chartSymbol(),
+                tf: state.timeframe,
+            }, location.origin);
         } catch (e) { /* ignore */ }
     }
 
@@ -7774,6 +7783,19 @@
         window.addEventListener("message", onBridgeMessage);
         setConn("pulse yellow", "conn.connecting");
         embedNotifySub();   // родитель в ответ пришлёт снимок и состояние
+        // У встроенного графика своего сокета нет, а список монет нужен для
+        // выпадающего меню выбора пары в его заголовке — добираем по REST.
+        fetch("/api/symbols")
+            .then((r) => (r.ok ? r.json() : null))
+            .then((data) => {
+                if (!data) return;
+                state.symbols = data.symbols || state.symbols;
+                state.customSymbols = data.custom_symbols || state.customSymbols;
+                (data.details || []).forEach((d) => { state.details[d.symbol] = d; });
+                Object.assign(state.prices, data.prices || {});
+                renderSymbolButtons();
+            })
+            .catch(() => { /* сеть недоступна — поиск пар всё равно работает */ });
         // страховка индикатора: если мост молчит дольше 20с, показываем
         // переподключение (обычно состояние приходит кадром ws-state)
         setInterval(() => {
@@ -7976,16 +7998,41 @@
     }
 
     // --- Обработчики UI ------------------------------------------------------
-    document.querySelectorAll(".btn-tf").forEach((btn) => {
-        btn.addEventListener("click", () => {
-            document.querySelectorAll(".btn-tf").forEach((b) => b.classList.remove("active"));
-            btn.classList.add("active");
-            state.timeframe = parseInt(btn.dataset.tf, 10);
-            sendConfig();
-            loadCandles();
+    const HEADER_TF_OPTIONS = [[1, "1м"], [3, "3м"], [5, "5м"], [15, "15м"], [60, "1ч"], [240, "4ч"], [1440, "1д"]];
+
+    /** Смена таймфрейма из одной точки: и глобальные кнопки, и компактный
+     *  селектор в заголовке графика (переключает только свой график). */
+    function applyTimeframe(tf) {
+        const n = parseInt(tf, 10);
+        if (HEADER_TF_OPTIONS.every((p) => p[0] !== n)) return;
+        state.timeframe = n;
+        document.querySelectorAll(".btn-tf").forEach((b) => b.classList.toggle("active", Number(b.dataset.tf) === n));
+        const sel = document.getElementById("chart-header-tf");
+        if (sel && sel.value !== String(n)) sel.value = String(n);
+        sendConfig();      // в embed это шлёт update_state родителю
+        loadCandles();
+    }
+
+    /** Компактный селектор таймфрейма прямо в заголовке графика: у каждого
+     *  встроенного окна свой ТФ, глобальная панель больше не нужна. */
+    function setupHeaderTfSelect() {
+        const sel = document.getElementById("chart-header-tf");
+        if (!sel) return;
+        HEADER_TF_OPTIONS.forEach((pair) => {
+            const opt = document.createElement("option");
+            opt.value = String(pair[0]);
+            opt.textContent = pair[1];
+            sel.appendChild(opt);
         });
+        sel.value = String(state.timeframe);
+        sel.addEventListener("change", () => applyTimeframe(sel.value));
+    }
+
+    document.querySelectorAll(".btn-tf").forEach((btn) => {
+        btn.addEventListener("click", () => applyTimeframe(btn.dataset.tf));
     });
 
+    setupHeaderTfSelect();
     setupFilterControls();
     setupSymbolSearch();
     setupLanguage();
@@ -8113,6 +8160,7 @@
         initChart();
         setupChartToggle();
         setupChartExpand();
+        setupSymbolDropdown();      // выбор монеты прямо в заголовке этого графика
         loadCandles();
         startEmbedBridge();
         // embed: слои/панели/фоллоу/рисование — как в одиночном графике

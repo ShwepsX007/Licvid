@@ -601,7 +601,12 @@
     "adm.alchemy_paused": "रुका हुआ",
     "adm.alchemy_network_cu": "इस नेटवर्क पर {amount} CU",
     "adm.cex_wallet_refresh_error_detail": "अपडेट विफल: {reason}",
-    "adm.cex_wallet_refreshed_etherscan": "Etherscan से अतिरिक्त लेबल: {count}।"
+    "adm.cex_wallet_refreshed_etherscan": "Etherscan से अतिरिक्त लेबल: {count}।",
+    "auth.google_btn": "Google से साइन इन करें",
+    "auth.google_off": "Google साइन-इन उपलब्ध नहीं है",
+    "cab.google_none": "Google लिंक नहीं है",
+    "cab.google_link": "🔗 Google लिंक करें",
+    "cab.google_unlink": "अनलिंक करें"
   },
   "phrases": {
     "В поле уже стоит стандартный промт — правьте прямо в нём; «Вернуть шаблон» очищает поле и снова включает встроенный текст.": "फ़ील्ड में डिफ़ॉल्ट प्रॉम्ट पहले से है — उसी में बदलें; «टेम्पलेट वापस» फ़ील्ड साफ़ करके बिल्ट-इन टेक्स्ट फिर चालू कर देता है।",

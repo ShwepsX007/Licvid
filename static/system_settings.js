@@ -74,6 +74,7 @@
     /* ----- состояние с сервера ------------------------------------------- */
     var schema = {};     // key -> {value, source, secret, restart, section, label, hint, placeholder}
     var maskChar = MASK;
+    var googleRedirectUri = "";
     var activeTab = (function () {
         try { return localStorage.getItem("liqscope.settings.tab") || "mail"; }
         catch (e) { return "mail"; }
@@ -88,6 +89,7 @@
                 return;
             }
             if (d.mask) maskChar = d.mask;
+            googleRedirectUri = d.google_redirect_uri || (location.origin + "/api/auth/google/callback");
             schema = d.settings || {};
             render();
         });
@@ -205,8 +207,36 @@
             panel.appendChild(note);
         }
         if (sec === "security") {
+            var rWrap = document.createElement("div");
+            rWrap.className = "sys-field";
+            var rLabel = document.createElement("div");
+            rLabel.className = "sys-label";
+            rLabel.innerHTML = 'Google OAuth Redirect URI <span class="sys-src">· только чтение</span>';
+            rWrap.appendChild(rLabel);
+            var rRow = document.createElement("div");
+            rRow.className = "sys-inrow";
+            var rInp = document.createElement("input");
+            rInp.type = "text";
+            rInp.className = "search mono";
+            rInp.readOnly = true;
+            rInp.id = "sys-google-redirect-uri";
+            rInp.value = googleRedirectUri || (location.origin + "/api/auth/google/callback");
+            rRow.appendChild(rInp);
+            rWrap.appendChild(rRow);
+            var rHint = document.createElement("div");
+            rHint.className = "sys-hint";
+            rHint.textContent = "OAuth consent screen → Web client → Authorized redirect URIs (скопируйте этот адрес в Google Cloud Console).";
+            rWrap.appendChild(rHint);
+            panel.appendChild(rWrap);
+
             var cap = document.createElement("div");
             cap.className = "sys-actions";
+            var gTestBtn = document.createElement("button");
+            gTestBtn.type = "button";
+            gTestBtn.className = "btn";
+            gTestBtn.id = "sys-google-test";
+            gTestBtn.textContent = "🔎 Проверить Google OAuth";
+            cap.appendChild(gTestBtn);
             var capBtn = document.createElement("button");
             capBtn.type = "button";
             capBtn.className = "btn";
@@ -455,6 +485,23 @@
             });
     }
 
+    function testGoogle(btn) {
+        var body = {
+            client_id: sectionValue("security", "LIQSCOPE_GOOGLE_CLIENT_ID"),
+        };
+        var sec = sectionValue("security", "LIQSCOPE_GOOGLE_CLIENT_SECRET");
+        if (sec && sec.indexOf(maskChar) === -1) body.client_secret = sec;
+        setErr("security", "");
+        setStatus("security", "");
+        busy(btn, true, "🔎 проверяю…");
+        api("/api/admin/settings/test-google", { method: "POST", body: JSON.stringify(body) })
+            .then(function (d) {
+                busy(btn, false);
+                if (d && d.ok) setStatus("security", d.message || "Google OAuth настроен ✓", "sys-ok-plate");
+                else setErr("security", (d && d.error) || "Ошибка проверки Google OAuth");
+            });
+    }
+
     /* ----- привязка обработчиков после рендера --------------------------- */
     function bindActions() {
         TABS.forEach(function (tab) {
@@ -467,6 +514,8 @@
         if (tg) tg.addEventListener("click", function () { testTg(tg); });
         var cap = $("sys-captcha-test");
         if (cap) cap.addEventListener("click", function () { testCaptcha(cap); });
+        var gTest = $("sys-google-test");
+        if (gTest) gTest.addEventListener("click", function () { testGoogle(gTest); });
         document.querySelectorAll("[data-llm-provider]").forEach(function (b) {
             b.addEventListener("click", function () {
                 testLlm(b.dataset.llmProvider, b.dataset.llmKey, b);

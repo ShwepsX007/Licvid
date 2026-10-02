@@ -614,7 +614,12 @@ window.LIQSCOPE_I18N_PAGES =
       "adm.alchemy_paused": "Pausado",
       "adm.alchemy_network_cu": "{amount} CU en esta red",
       "adm.cex_wallet_refresh_error_detail": "Error al actualizar: {reason}",
-      "adm.cex_wallet_refreshed_etherscan": "Etiquetas adicionales de Etherscan: {count}."
+      "adm.cex_wallet_refreshed_etherscan": "Etiquetas adicionales de Etherscan: {count}.",
+      "auth.google_btn": "Iniciar sesión con Google",
+      "auth.google_off": "Inicio con Google no disponible",
+      "cab.google_none": "Google no vinculado",
+      "cab.google_link": "🔗 Vincular Google",
+      "cab.google_unlink": "Desvincular"
     },
     "phrases": {
       "В поле уже стоит стандартный промт — правьте прямо в нём; «Вернуть шаблон» очищает поле и снова включает встроенный текст.": "El campo ya trae el prompt estándar: edítalo ahí mismo; “Restaurar plantilla” limpia el campo y reactiva el texto integrado.",

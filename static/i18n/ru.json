@@ -601,7 +601,12 @@
     "adm.alchemy_paused": "Приостановлено",
     "adm.alchemy_network_cu": "Сеть: {amount} CU",
     "adm.cex_wallet_refresh_error_detail": "Ошибка обновления: {reason}",
-    "adm.cex_wallet_refreshed_etherscan": "Дополнительно получено меток Etherscan: {count}."
+    "adm.cex_wallet_refreshed_etherscan": "Дополнительно получено меток Etherscan: {count}.",
+    "auth.google_btn": "Войти через Google",
+    "auth.google_off": "Google вход недоступен",
+    "cab.google_none": "Google не привязан",
+    "cab.google_link": "🔗 Привязать Google",
+    "cab.google_unlink": "Отвязать"
   },
   "phrases": {
     "🗑 Стереть статистику": "🗑 Стереть статистику",

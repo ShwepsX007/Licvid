@@ -601,7 +601,12 @@
     "adm.alchemy_paused": "已暂停",
     "adm.alchemy_network_cu": "此网络已用 {amount} CU",
     "adm.cex_wallet_refresh_error_detail": "更新失败：{reason}",
-    "adm.cex_wallet_refreshed_etherscan": "Etherscan 额外标签：{count}。"
+    "adm.cex_wallet_refreshed_etherscan": "Etherscan 额外标签：{count}。",
+    "auth.google_btn": "使用 Google 登录",
+    "auth.google_off": "Google 登录不可用",
+    "cab.google_none": "Google 未绑定",
+    "cab.google_link": "🔗 绑定 Google",
+    "cab.google_unlink": "解绑"
   },
   "phrases": {
     "В поле уже стоит стандартный промт — правьте прямо в нём; «Вернуть шаблон» очищает поле и снова включает встроенный текст.": "输入框里已是默认提示词 — 直接修改；«恢复模板» 会清空并重新启用内置文本。",

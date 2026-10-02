@@ -1526,3 +1526,34 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
 @media (max-width: 800px) {
     .lv-split { grid-template-columns: 1fr; }
 }
+
+/* Google OAuth 2.0 button */
+.google-alt {
+    margin-top: 10px;
+}
+.btn-google {
+    background: #12182a;
+    color: #f4f7fb;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    font-size: 0.96rem;
+    padding: 12px 22px;
+    transition: border-color 0.15s ease, background 0.15s ease;
+}
+.btn-google-wide {
+    width: 100%;
+    justify-content: center;
+}
+.btn-google:hover:not(:disabled) {
+    border-color: rgba(66, 133, 244, 0.65);
+    background: #172038;
+}
+.btn-google:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+.btn-google .google-icon {
+    width: 18px;
+    height: 18px;
+    flex-shrink: 0;
+}
+

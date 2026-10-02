@@ -14,8 +14,8 @@ import re
 import secrets
 import threading
 import time
-from typing import Dict, List, Optional, Tuple
-from urllib.parse import quote
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote, urlencode
 
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
@@ -591,7 +591,7 @@ def _next_after_verify() -> str:
 
 def _safe_next(value: str) -> str:
     """Только свой путь: «//evil.com» и «https://…» не принимаем."""
-    value = (value or "").strip()
+    value = (value or "").strip().strip('"')
     if not value.startswith("/") or value.startswith("//"):
         return ""
     return value
@@ -638,6 +638,172 @@ def _public_url(request: Request) -> str:
     if ctx.public_url:
         return ctx.public_url.rstrip("/")
     return str(request.base_url).rstrip("/")
+
+
+# ----- Google OAuth 2.0 ----------------------------------------------------
+COOKIE_OAUTH_STATE = "liqscope_oauth_state"
+COOKIE_OAUTH_NEXT = "liqscope_oauth_next"
+OAUTH_STATE_TTL = 600  # 10 минут
+
+GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
+
+_OAUTH_LOCK = threading.Lock()
+#: state -> (expires_at, safe_next)
+_OAUTH_STATES: Dict[str, Tuple[float, str]] = {}
+#: Погашенные state (защита от повторного использования state в рамках TTL)
+_OAUTH_CONSUMED: Dict[str, float] = {}
+
+
+def _google_redirect_uri(request: Optional[Request] = None) -> str:
+    """Строгий Redirect URI: {PUBLIC_URL or SITE_URL}/api/auth/google/callback."""
+    base = (
+        (os.getenv("LIQSCOPE_PUBLIC_URL") or "").strip()
+        or (os.getenv("PUBLIC_URL") or "").strip()
+        or (os.getenv("SITE_URL") or "").strip()
+        or (ctx.public_url or "").strip()
+        or (_public_url(request) if request is not None else "")
+        or "https://liqscope.online"
+    )
+    return base.rstrip("/") + "/api/auth/google/callback"
+
+
+def _google_oauth_config(request: Optional[Request] = None) -> Dict[str, Any]:
+    """Эффективная конфигурация Google OAuth (БД настроек → окружение)."""
+    mgr = ctx.settings
+    if mgr is not None:
+        client_id = (
+            mgr.get("LIQSCOPE_GOOGLE_CLIENT_ID")
+            or mgr.get("GOOGLE_CLIENT_ID")
+            or ""
+        ).strip()
+        client_secret = (
+            mgr.get("LIQSCOPE_GOOGLE_CLIENT_SECRET")
+            or mgr.get("GOOGLE_CLIENT_SECRET")
+            or ""
+        ).strip()
+    else:
+        client_id = (
+            os.getenv("LIQSCOPE_GOOGLE_CLIENT_ID")
+            or os.getenv("GOOGLE_CLIENT_ID")
+            or ""
+        ).strip()
+        client_secret = (
+            os.getenv("LIQSCOPE_GOOGLE_CLIENT_SECRET")
+            or os.getenv("GOOGLE_CLIENT_SECRET")
+            or ""
+        ).strip()
+    return {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": _google_redirect_uri(request),
+        "enabled": bool(client_id and client_secret),
+    }
+
+
+def _store_oauth_state(state: str, safe_next: str) -> None:
+    now = time.time()
+    with _OAUTH_LOCK:
+        for k, (exp, _) in list(_OAUTH_STATES.items()):
+            if exp < now:
+                _OAUTH_STATES.pop(k, None)
+        for k, exp in list(_OAUTH_CONSUMED.items()):
+            if exp < now:
+                _OAUTH_CONSUMED.pop(k, None)
+        _OAUTH_STATES[state] = (now + OAUTH_STATE_TTL, safe_next or "/cabinet")
+
+
+def _consume_oauth_state(state: str, cookie_state: str) -> Tuple[bool, str]:
+    """Проверить и однократно погасить OAuth state (CSRF-защита)."""
+    state = (state or "").strip()
+    cookie_state = (cookie_state or "").strip()
+    if not state or not cookie_state:
+        return False, ""
+    if not secrets.compare_digest(state, cookie_state):
+        return False, ""
+    now = time.time()
+    with _OAUTH_LOCK:
+        for k, (exp, _) in list(_OAUTH_STATES.items()):
+            if exp < now:
+                _OAUTH_STATES.pop(k, None)
+        for k, exp in list(_OAUTH_CONSUMED.items()):
+            if exp < now:
+                _OAUTH_CONSUMED.pop(k, None)
+        if state in _OAUTH_CONSUMED:
+            return False, ""
+        entry = _OAUTH_STATES.pop(state, None)
+        if entry is not None:
+            exp, stored_next = entry
+            if exp < now:
+                return False, ""
+        else:
+            stored_next = ""
+        _OAUTH_CONSUMED[state] = now + OAUTH_STATE_TTL
+    return True, stored_next
+
+
+async def _google_exchange_code(
+    code: str,
+    client_id: str,
+    client_secret: str,
+    redirect_uri: str,
+    timeout: float = 10.0,
+) -> Dict[str, Any]:
+    """Обмен authorization code на токены у Google OAuth 2.0.
+
+    Секрет и токены в журнал не пишутся никогда.
+    """
+    import aiohttp
+
+    payload = {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "code": code,
+        "grant_type": "authorization_code",
+        "redirect_uri": redirect_uri,
+    }
+    client_timeout = aiohttp.ClientTimeout(total=timeout, sock_connect=10)
+    async with aiohttp.ClientSession(timeout=client_timeout) as session:
+        async with session.post(
+            GOOGLE_TOKEN_URL,
+            data=payload,
+            headers={"Accept": "application/json"},
+        ) as resp:
+            try:
+                data = await resp.json(content_type=None)
+            except Exception:
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
+            data["_status"] = resp.status
+            return data
+
+
+async def _google_fetch_userinfo(
+    access_token: str,
+    timeout: float = 10.0,
+) -> Dict[str, Any]:
+    """Получить профиль пользователя у Google UserInfo API."""
+    import aiohttp
+
+    client_timeout = aiohttp.ClientTimeout(total=timeout, sock_connect=10)
+    async with aiohttp.ClientSession(timeout=client_timeout) as session:
+        async with session.get(
+            GOOGLE_USERINFO_URL,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Accept": "application/json",
+            },
+        ) as resp:
+            try:
+                data = await resp.json(content_type=None)
+            except Exception:
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
+            data["_status"] = resp.status
+            return data
 
 
 async def read_uploaded_photos(request: Request) -> List[Tuple[bytes, str]]:
@@ -693,6 +859,8 @@ def register_account_routes(app) -> None:
         user = current_user(request)
         bot_user = _bot_username()
         notice = ctx.store.get_setting("site_notice", "") if ctx.store else ""
+        google_cfg = _google_oauth_config(request)
+        mail_on = _email_enabled()
         return {
             "user": user,
             "bot_username": bot_user,
@@ -703,7 +871,24 @@ def register_account_routes(app) -> None:
             # кабинет спрашивает это, чтобы показать «подтвердите почту»
             "verified": bool(user) and _verify_allowed(user),
             "email_required": bool(ctx.require_email_verification),
-            "mail_enabled": _email_enabled(),
+            "mail_enabled": mail_on,
+            "google_enabled": bool(google_cfg["enabled"]),
+            "providers": {
+                "google": bool(google_cfg["enabled"]),
+                "telegram": bool(bot_user),
+                "email": bool(mail_on),
+            },
+        }
+
+    @router.get("/api/auth/providers")
+    async def api_auth_providers(request: Request):
+        google_cfg = _google_oauth_config(request)
+        bot_user = _bot_username()
+        return {
+            "ok": True,
+            "google": bool(google_cfg["enabled"]),
+            "telegram": bool(bot_user),
+            "email": bool(_email_enabled()),
         }
 
     # ----- капча -----------------------------------------------------------
@@ -1105,6 +1290,220 @@ def register_account_routes(app) -> None:
         token = ctx.store.create_session(user["id"], iph, request.headers.get("user-agent") or "")
         _set_sid(response, token)
         return {"ok": True, "user": user}
+
+    # ----- Google OAuth 2.0 ------------------------------------------------
+    @router.get("/api/auth/google/login")
+    async def api_google_login(request: Request):
+        """Старт OAuth 2.0 авторизации через Google."""
+        if not _LOGIN_RATE.allow(_rate_key(request, "google_login")):
+            return JSONResponse(
+                {"ok": False, "error": "rate",
+                 "hint": _email_error(_lang_code(request), "rate")},
+                status_code=429,
+            )
+        cfg = _google_oauth_config(request)
+        if not cfg["enabled"]:
+            return JSONResponse(
+                {"ok": False, "error": "google_oauth_not_configured"},
+                status_code=503,
+            )
+        raw_next = (
+            request.query_params.get("next")
+            or request.query_params.get("return_url")
+            or "/cabinet"
+        )
+        safe_next = _safe_next(raw_next) or "/cabinet"
+        state = secrets.token_urlsafe(32)
+        _store_oauth_state(state, safe_next)
+        params = {
+            "client_id": cfg["client_id"],
+            "redirect_uri": cfg["redirect_uri"],
+            "response_type": "code",
+            "scope": "openid email profile",
+            "state": state,
+            "access_type": "online",
+            "prompt": "select_account",
+        }
+        auth_url = f"{GOOGLE_AUTH_URL}?{urlencode(params)}"
+        resp = RedirectResponse(auth_url, status_code=302)
+        resp.set_cookie(
+            COOKIE_OAUTH_STATE,
+            state,
+            max_age=OAUTH_STATE_TTL,
+            httponly=True,
+            samesite="lax",
+            secure=ctx.cookie_secure,
+            path="/",
+        )
+        resp.set_cookie(
+            COOKIE_OAUTH_NEXT,
+            safe_next,
+            max_age=OAUTH_STATE_TTL,
+            httponly=True,
+            samesite="lax",
+            secure=ctx.cookie_secure,
+            path="/",
+        )
+        return resp
+
+    @router.get("/api/auth/google/callback")
+    async def api_google_callback(request: Request):
+        """Обработка возврата от Google OAuth 2.0."""
+        if not ctx.store:
+            return JSONResponse({"ok": False, "error": "no_store"}, status_code=503)
+        if not _LOGIN_RATE.allow(_rate_key(request, "google_cb")):
+            return JSONResponse(
+                {"ok": False, "error": "rate",
+                 "hint": _email_error(_lang_code(request), "rate")},
+                status_code=429,
+            )
+        cfg = _google_oauth_config(request)
+        if not cfg["enabled"]:
+            return JSONResponse(
+                {"ok": False, "error": "google_oauth_not_configured"},
+                status_code=503,
+            )
+        oauth_err = (request.query_params.get("error") or "").strip()
+        if oauth_err:
+            log.warning("google oauth: отказ провайдера (%s)", oauth_err[:64])
+            return JSONResponse(
+                {"ok": False, "error": "google_auth_failed", "reason": oauth_err[:64]},
+                status_code=400,
+            )
+        state = (request.query_params.get("state") or "").strip()
+        cookie_state = (request.cookies.get(COOKIE_OAUTH_STATE) or "").strip()
+        ok_state, stored_next = _consume_oauth_state(state, cookie_state)
+        if not ok_state:
+            log.warning(
+                "google oauth: неверный или истёкший state (ip_hash=%s)",
+                hash_ip(ctx.secret or "s", _client_ip(request)),
+            )
+            return JSONResponse(
+                {"ok": False, "error": "invalid_state"},
+                status_code=400,
+            )
+        code = (request.query_params.get("code") or "").strip()
+        if not code:
+            return JSONResponse(
+                {"ok": False, "error": "missing_code"},
+                status_code=400,
+            )
+        try:
+            tok_data = await _google_exchange_code(
+                code=code,
+                client_id=cfg["client_id"],
+                client_secret=cfg["client_secret"],
+                redirect_uri=cfg["redirect_uri"],
+            )
+        except Exception as e:  # noqa: BLE001 — секреты не логируем
+            log.warning(
+                "google oauth: сбой обмена кода на токен (%s)",
+                type(e).__name__,
+            )
+            return JSONResponse(
+                {"ok": False, "error": "google_token_exchange_failed"},
+                status_code=502,
+            )
+        access_token = str((tok_data or {}).get("access_token") or "").strip()
+        tok_status = int((tok_data or {}).get("_status") or 200)
+        if not access_token or tok_status >= 400 or (tok_data or {}).get("error"):
+            err_code = str((tok_data or {}).get("error") or f"http_{tok_status}")[:64]
+            log.warning("google oauth: обмен кода отклонён (%s)", err_code)
+            return JSONResponse(
+                {"ok": False, "error": "google_token_rejected"},
+                status_code=400,
+            )
+        try:
+            profile = await _google_fetch_userinfo(access_token)
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "google oauth: сбой получения профиля (%s)",
+                type(e).__name__,
+            )
+            return JSONResponse(
+                {"ok": False, "error": "google_userinfo_failed"},
+                status_code=502,
+            )
+        prof_status = int((profile or {}).get("_status") or 200)
+        if prof_status >= 400 or not isinstance(profile, dict):
+            log.warning("google oauth: userinfo статус %s", prof_status)
+            return JSONResponse(
+                {"ok": False, "error": "google_userinfo_rejected"},
+                status_code=400,
+            )
+        google_id = str(profile.get("sub") or profile.get("id") or "").strip()
+        email = normalize_email(str(profile.get("email") or ""))
+        raw_verified = profile.get("email_verified")
+        email_verified = (
+            raw_verified is True
+            or (isinstance(raw_verified, str) and raw_verified.strip().lower() == "true")
+            or raw_verified == 1
+        )
+        if not google_id or not email or not valid_email(email) or not email_verified:
+            log.warning(
+                "google oauth: отклонён профиль без подтверждённого email (verified=%s)",
+                bool(email_verified),
+            )
+            return JSONResponse(
+                {"ok": False, "error": "google_email_unverified"},
+                status_code=400,
+            )
+        name = str(profile.get("name") or profile.get("given_name") or "").strip()
+        picture = str(profile.get("picture") or "").strip()
+        lang = _lang_code(request)
+
+        # Разрешение аккаунта:
+        # 1) Пользователь с таким google_id уже есть -> входим под ним
+        # 2) Иначе если есть пользователь с таким же email -> привязываем google_id к нему
+        # 3) Иначе если пользователь уже авторизован в текущей сессии и без чужой почты -> привязываем к нему
+        # 4) Иначе создаём нового пользователя с подтверждённой почтой
+        user = ctx.store.find_user_by_google_id(google_id)
+        if user:
+            user = ctx.store.link_google_id(
+                user["id"], google_id, avatar_url=picture, name=name, email=email
+            ) or user
+        else:
+            by_email = ctx.store.find_user_by_email(email)
+            if by_email:
+                user = ctx.store.link_google_id(
+                    by_email["id"], google_id, avatar_url=picture, name=name, email=email
+                ) or by_email
+            else:
+                here = current_user(request)
+                if here and (not here.get("email") or normalize_email(here.get("email")) == email):
+                    user = ctx.store.link_google_id(
+                        here["id"], google_id, avatar_url=picture, name=name, email=email
+                    ) or here
+                else:
+                    user = ctx.store.create_user_from_google(
+                        email=email,
+                        google_id=google_id,
+                        name=name,
+                        avatar_url=picture,
+                        language=lang,
+                    )
+
+        if user.get("is_banned"):
+            return RedirectResponse("/login?banned=1", status_code=303)
+
+        cookie_next = request.cookies.get(COOKIE_OAUTH_NEXT) or ""
+        dest = _safe_next(cookie_next) or _safe_next(stored_next) or "/cabinet"
+        resp = RedirectResponse(dest, status_code=303)
+        _user_session(request, resp, user)
+        resp.delete_cookie(COOKIE_OAUTH_STATE, path="/")
+        resp.delete_cookie(COOKIE_OAUTH_NEXT, path="/")
+        return resp
+
+    @router.post("/api/auth/google/unlink")
+    async def api_google_unlink(request: Request):
+        """Отвязать Google от текущего аккаунта (если есть пароль или Telegram)."""
+        user = current_user(request)
+        if not user:
+            return _need_auth()
+        r = ctx.store.unlink_google(user["id"])
+        if not r.get("ok"):
+            return JSONResponse(r, status_code=400)
+        return {"ok": True, "user": r.get("user")}
 
     @router.post("/api/auth/dev")
     async def api_dev_login(request: Request, response: Response):
@@ -1670,9 +2069,11 @@ def register_account_routes(app) -> None:
             # сервер поднялся без хранилища настроек (например, тесты):
             # сайт-настройки отдаём, системные — пустым срезом
             return {"ok": True, "settings": {}, "site": site,
-                    "mask": app_settings.MASK}
+                    "mask": app_settings.MASK,
+                    "google_redirect_uri": _google_redirect_uri(request)}
         return {"ok": True, "settings": mgr.admin_view(), "site": site,
-                "mask": app_settings.MASK}
+                "mask": app_settings.MASK,
+                "google_redirect_uri": _google_redirect_uri(request)}
 
     @router.post("/api/admin/settings")
     async def admin_settings(request: Request):
@@ -1719,7 +2120,8 @@ def register_account_routes(app) -> None:
                 if k.startswith("LIQSCOPE_AI_"):
                     ai_touched = True
 
-            for k, v in body.items():
+            for raw_k, v in body.items():
+                k = app_settings.canonical_key(raw_k)
                 if k not in app_settings.MANAGED_SETTINGS or not isinstance(v, str):
                     continue
                 value = v.strip()
@@ -1970,6 +2372,62 @@ def register_account_routes(app) -> None:
                 "message": ("Встроенная математическая капча работает. "
                             "Внешние ключи (Turnstile/reCAPTCHA) не нужны — "
                             "в сервисе их нет.")}
+
+    @router.post("/api/admin/settings/test-google")
+    async def admin_settings_test_google(request: Request):
+        """Проверка настроек Google OAuth 2.0 (формат Client ID и наличие Secret)."""
+        actor, err = _admin(request)
+        if err:
+            return err
+        body = await _json_body(request)
+        mgr = _settings_mgr()
+        cid = str(
+            body.get("client_id")
+            or body.get("LIQSCOPE_GOOGLE_CLIENT_ID")
+            or body.get("GOOGLE_CLIENT_ID")
+            or ""
+        ).strip()
+        if not cid:
+            cid = (
+                mgr.get("LIQSCOPE_GOOGLE_CLIENT_ID")
+                if mgr
+                else (os.getenv("LIQSCOPE_GOOGLE_CLIENT_ID") or os.getenv("GOOGLE_CLIENT_ID") or "")
+            ).strip()
+        csec = str(
+            body.get("client_secret")
+            or body.get("LIQSCOPE_GOOGLE_CLIENT_SECRET")
+            or body.get("GOOGLE_CLIENT_SECRET")
+            or ""
+        ).strip()
+        if not csec or app_settings.MASK in csec:
+            csec = (
+                mgr.get("LIQSCOPE_GOOGLE_CLIENT_SECRET")
+                if mgr
+                else (os.getenv("LIQSCOPE_GOOGLE_CLIENT_SECRET") or os.getenv("GOOGLE_CLIENT_SECRET") or "")
+            ).strip()
+        if not cid:
+            return JSONResponse(
+                {"ok": False, "error": "Google Client ID не задан"},
+                status_code=400,
+            )
+        suffix = ".apps.googleusercontent.com"
+        if not cid.endswith(suffix) or len(cid) <= len(suffix):
+            return JSONResponse(
+                {"ok": False,
+                 "error": "Некорректный формат Client ID (ожидается *.apps.googleusercontent.com)"},
+                status_code=400,
+            )
+        if not csec:
+            return JSONResponse(
+                {"ok": False, "error": "Google Client Secret не задан"},
+                status_code=400,
+            )
+        r_uri = _google_redirect_uri(request)
+        return {
+            "ok": True,
+            "redirect_uri": r_uri,
+            "message": f"Google OAuth настроен корректно ✓ (Redirect URI: {r_uri})",
+        }
 
     @router.post("/api/admin/services/{slug}")
     async def admin_service(request: Request, slug: str):

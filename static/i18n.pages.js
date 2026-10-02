@@ -614,7 +614,12 @@ window.LIQSCOPE_I18N_PAGES =
       "adm.alchemy_paused": "Приостановлено",
       "adm.alchemy_network_cu": "Сеть: {amount} CU",
       "adm.cex_wallet_refresh_error_detail": "Ошибка обновления: {reason}",
-      "adm.cex_wallet_refreshed_etherscan": "Дополнительно получено меток Etherscan: {count}."
+      "adm.cex_wallet_refreshed_etherscan": "Дополнительно получено меток Etherscan: {count}.",
+      "auth.google_btn": "Войти через Google",
+      "auth.google_off": "Google вход недоступен",
+      "cab.google_none": "Google не привязан",
+      "cab.google_link": "🔗 Привязать Google",
+      "cab.google_unlink": "Отвязать"
     },
     "phrases": {
       "🗑 Стереть статистику": "🗑 Стереть статистику",
@@ -1363,7 +1368,12 @@ window.LIQSCOPE_I18N_PAGES =
       "adm.alchemy_paused": "Paused",
       "adm.alchemy_network_cu": "{amount} CU on this network",
       "adm.cex_wallet_refresh_error_detail": "Refresh failed: {reason}",
-      "adm.cex_wallet_refreshed_etherscan": "Additional Etherscan labels: {count}."
+      "adm.cex_wallet_refreshed_etherscan": "Additional Etherscan labels: {count}.",
+      "auth.google_btn": "Sign in with Google",
+      "auth.google_off": "Google sign-in unavailable",
+      "cab.google_none": "Google not linked",
+      "cab.google_link": "🔗 Link Google",
+      "cab.google_unlink": "Unlink"
     },
     "phrases": {
       "В поле уже стоит стандартный промт — правьте прямо в нём; «Вернуть шаблон» очищает поле и снова включает встроенный текст.": "The field already holds the default prompt — edit it right there; “Restore template” clears the field and turns the built-in text back on.",
@@ -2833,7 +2843,12 @@ window.LIQSCOPE_I18N_PAGES =
       "adm.alchemy_paused": "已暂停",
       "adm.alchemy_network_cu": "此网络已用 {amount} CU",
       "adm.cex_wallet_refresh_error_detail": "更新失败：{reason}",
-      "adm.cex_wallet_refreshed_etherscan": "Etherscan 额外标签：{count}。"
+      "adm.cex_wallet_refreshed_etherscan": "Etherscan 额外标签：{count}。",
+      "auth.google_btn": "使用 Google 登录",
+      "auth.google_off": "Google 登录不可用",
+      "cab.google_none": "Google 未绑定",
+      "cab.google_link": "🔗 绑定 Google",
+      "cab.google_unlink": "解绑"
     },
     "phrases": {
       "В поле уже стоит стандартный промт — правьте прямо в нём; «Вернуть шаблон» очищает поле и снова включает встроенный текст.": "输入框里已是默认提示词 — 直接修改；«恢复模板» 会清空并重新启用内置文本。",
@@ -4304,7 +4319,12 @@ window.LIQSCOPE_I18N_PAGES =
       "adm.alchemy_paused": "रुका हुआ",
       "adm.alchemy_network_cu": "इस नेटवर्क पर {amount} CU",
       "adm.cex_wallet_refresh_error_detail": "अपडेट विफल: {reason}",
-      "adm.cex_wallet_refreshed_etherscan": "Etherscan से अतिरिक्त लेबल: {count}।"
+      "adm.cex_wallet_refreshed_etherscan": "Etherscan से अतिरिक्त लेबल: {count}।",
+      "auth.google_btn": "Google से साइन इन करें",
+      "auth.google_off": "Google साइन-इन उपलब्ध नहीं है",
+      "cab.google_none": "Google लिंक नहीं है",
+      "cab.google_link": "🔗 Google लिंक करें",
+      "cab.google_unlink": "अनलिंक करें"
     },
     "phrases": {
       "В поле уже стоит стандартный промт — правьте прямо в нём; «Вернуть шаблон» очищает поле и снова включает встроенный текст.": "फ़ील्ड में डिफ़ॉल्ट प्रॉम्ट पहले से है — उसी में बदलें; «टेम्पलेट वापस» फ़ील्ड साफ़ करके बिल्ट-इन टेक्स्ट फिर चालू कर देता है।",
@@ -5776,7 +5796,12 @@ window.LIQSCOPE_I18N_PAGES =
       "adm.alchemy_paused": "Pausado",
       "adm.alchemy_network_cu": "{amount} CU en esta red",
       "adm.cex_wallet_refresh_error_detail": "Error al actualizar: {reason}",
-      "adm.cex_wallet_refreshed_etherscan": "Etiquetas adicionales de Etherscan: {count}."
+      "adm.cex_wallet_refreshed_etherscan": "Etiquetas adicionales de Etherscan: {count}.",
+      "auth.google_btn": "Iniciar sesión con Google",
+      "auth.google_off": "Inicio con Google no disponible",
+      "cab.google_none": "Google no vinculado",
+      "cab.google_link": "🔗 Vincular Google",
+      "cab.google_unlink": "Desvincular"
     },
     "phrases": {
       "В поле уже стоит стандартный промт — правьте прямо в нём; «Вернуть шаблон» очищает поле и снова включает встроенный текст.": "El campo ya trae el prompt estándar: edítalo ahí mismo; “Restaurar plantilla” limpia el campo y reactiva el texto integrado.",

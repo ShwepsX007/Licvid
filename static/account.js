@@ -57,6 +57,17 @@
             tgWhy: "сигналы алертов приходят в бота, привяжите — и они не потеряются",
             tgLink: "Привязать Telegram",
             tgUnlink: "Отвязать",
+            googleLogin: "Войти через Google",
+            googleOff: "Google вход недоступен",
+            googleErr: "Не удалось войти через Google — попробуйте ещё раз.",
+            googleUnverified: "Почта в аккаунте Google не подтверждена.",
+            googleLinked: "Google привязан",
+            googleNotLinked: "Google не привязан — привяжите для входа в один клик",
+            googleLink: "Привязать Google",
+            googleUnlink: "Отвязать",
+            googleUnlinkOk: "Google отвязан от аккаунта.",
+            googleUnlinkSure: "Отвязать Google от аккаунта?",
+            googleUnlinkLast: "Сначала задайте пароль или привяжите Telegram, чтобы не потерять доступ к аккаунту.",
             nameEdit: "Изменить ник",
             nameSave: "Сохранить",
             nameCancel: "Отмена",
@@ -169,6 +180,17 @@
             tgWhy: "alert signals arrive in the bot — link it so they are not lost",
             tgLink: "Link Telegram",
             tgUnlink: "Unlink",
+            googleLogin: "Sign in with Google",
+            googleOff: "Google sign-in unavailable",
+            googleErr: "Google sign-in failed — please try again.",
+            googleUnverified: "Your Google account email is not verified.",
+            googleLinked: "Google linked",
+            googleNotLinked: "Google not linked — link it for one-click sign-in",
+            googleLink: "Link Google",
+            googleUnlink: "Unlink",
+            googleUnlinkOk: "Google unlinked from your account.",
+            googleUnlinkSure: "Unlink Google from your account?",
+            googleUnlinkLast: "Set a password or link Telegram first so you do not lose access to your account.",
             nameEdit: "Edit nick",
             nameSave: "Save",
             nameCancel: "Cancel",
@@ -462,8 +484,9 @@
 
     function fillAvatar(el, user) {
         if (!el || !user) return;
-        if (user.photo_url) {
-            el.innerHTML = '<img alt="" src="' + user.photo_url.replace(/"/g, "") + '">';
+        var url = user.photo_url || user.avatar_url || "";
+        if (url) {
+            el.innerHTML = '<img alt="" src="' + url.replace(/"/g, "") + '">';
         } else {
             el.textContent = initials(user);
         }
@@ -592,6 +615,7 @@
             }
         }
         paintTgCard(u, payload);
+        paintGoogleCard(u, payload);
         bindNameEdit(u);
         var botLink = $("cab-bot-link");
         if (botLink) {
@@ -2026,6 +2050,33 @@
         if (off) off.classList.toggle("hidden", !u.tg_linked);
     }
 
+    function paintGoogleCard(u, payload) {
+        var box = $("google-card");
+        if (!box) return;
+        var state = $("google-state");
+        var btn = $("google-link");
+        var off = $("google-unlink");
+        var gEnabled = !!(payload && (payload.google_enabled || (payload.providers && payload.providers.google)));
+        if (state) {
+            state.textContent = u.google_linked
+                ? (t("googleLinked") + (u.email ? " (" + u.email + ")" : ""))
+                : (gEnabled ? t("googleNotLinked") : t("googleOff"));
+        }
+        if (btn) {
+            btn.classList.toggle("hidden", !!u.google_linked);
+            if (!gEnabled) {
+                btn.classList.add("disabled");
+                btn.setAttribute("aria-disabled", "true");
+                btn.title = t("googleOff");
+            } else {
+                btn.classList.remove("disabled");
+                btn.removeAttribute("aria-disabled");
+                btn.title = "";
+            }
+        }
+        if (off) off.classList.toggle("hidden", !u.google_linked);
+    }
+
 
     var _cabUser = null;
     var _nameDelegated = false;
@@ -2192,11 +2243,28 @@
         });
     }
 
+    function unlinkGoogle() {
+        if (!window.confirm(t("googleUnlinkSure"))) return;
+        api("/api/auth/google/unlink", { method: "POST" }).then(function (d) {
+            var st = $("google-state");
+            if (d.ok) {
+                if (st) st.textContent = t("googleUnlinkOk");
+                bootCabinet();
+            } else if (st) {
+                st.textContent = d.error === "last_auth_method"
+                    ? t("googleUnlinkLast")
+                    : (d.hint || d.error || "error");
+            }
+        });
+    }
+
     function bootCabinet() {
         var tgBtn = $("tg-link");
         if (tgBtn && !tgBtn._bound) { tgBtn._bound = true; tgBtn.addEventListener("click", linkTelegram); }
         var tgOff = $("tg-unlink");
         if (tgOff && !tgOff._bound) { tgOff._bound = true; tgOff.addEventListener("click", unlinkTelegram); }
+        var gOff = $("google-unlink");
+        if (gOff && !gOff._bound) { gOff._bound = true; gOff.addEventListener("click", unlinkGoogle); }
         // feedback moved to chat support tab
         Promise.all([
             api("/api/auth/me"),
@@ -6090,7 +6158,45 @@
             return;
         }
         if (q.get("banned")) { setStatus(status, t("banned"), "err"); return; }
+        var gErr = q.get("error") || q.get("google") || "";
+        if (gErr) {
+            if (gErr === "google_oauth_not_configured") setStatus(status, t("googleOff"), "err");
+            else if (gErr === "google_email_unverified") setStatus(status, t("googleUnverified"), "err");
+            else setStatus(status, t("googleErr"), "err");
+            return;
+        }
         if (me && !me.mail_enabled) setStatus(status, t("mailOff"), "err");
+    }
+
+    function safeNextPath() {
+        var raw = (new URLSearchParams(location.search).get("next") || "/cabinet").trim();
+        if (raw.charAt(0) !== "/" || raw.indexOf("//") === 0) return "/cabinet";
+        return raw;
+    }
+
+    function paintGoogleLoginBtn(enabled) {
+        var gBtn = $("google-login-btn");
+        var gNote = $("google-note");
+        if (!gBtn) return;
+        if (enabled === false) {
+            gBtn.disabled = true;
+            gBtn.title = t("googleOff");
+            if (gNote) gNote.classList.remove("hidden");
+        } else {
+            gBtn.disabled = false;
+            gBtn.title = "";
+            if (gNote) gNote.classList.add("hidden");
+        }
+    }
+
+    function startGoogleLogin() {
+        var gBtn = $("google-login-btn");
+        if (gBtn && gBtn.disabled) {
+            setStatus($("login-status"), t("googleOff"), "err");
+            return;
+        }
+        var next = safeNextPath();
+        location.href = "/api/auth/google/login?next=" + encodeURIComponent(next);
     }
 
     function bootLogin() {
@@ -6126,10 +6232,17 @@
             });
         });
 
+        api("/api/auth/providers").then(function (p) {
+            if (p && typeof p.google === "boolean") paintGoogleLoginBtn(p.google);
+        }).catch(function () {});
+
         api("/api/auth/me").then(function (me) {
             paintNav(me.user);
             if (me.user) { location.href = "/cabinet"; return; }
             statusFromQuery(me);
+            if (typeof me.google_enabled === "boolean") {
+                paintGoogleLoginBtn(me.google_enabled);
+            }
             // Telegram остаётся запасным входом: ссылка на бота или виджет
             var alt = $("tg-alt");
             if (alt && !me.bot_ready) alt.classList.add("hidden");
@@ -6146,6 +6259,8 @@
                 widget.appendChild(sc);
             }
         });
+        var gBtn = $("google-login-btn");
+        if (gBtn) gBtn.addEventListener("click", startGoogleLogin);
         var btn = $("login-btn");
         if (btn) btn.addEventListener("click", startLogin);
     }

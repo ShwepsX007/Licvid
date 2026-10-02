@@ -217,6 +217,16 @@ MANAGED_SETTINGS: Dict[str, Dict[str, Any]] = {
         SECTION_SECURITY, "Telegram ID админов",
         "Числовые id через запятую (узнать: @userinfobot). Применяется сразу.",
         placeholder="123456789"),
+    "LIQSCOPE_GOOGLE_CLIENT_ID": _spec(
+        SECTION_SECURITY, "Google OAuth Client ID",
+        "OAuth consent screen → Web client → Authorized redirect URIs. "
+        "Пример: 123456-abc.apps.googleusercontent.com. Применяется сразу.",
+        placeholder="…apps.googleusercontent.com"),
+    "LIQSCOPE_GOOGLE_CLIENT_SECRET": _spec(
+        SECTION_SECURITY, "Google OAuth Client Secret",
+        "Секретный ключ Web client из Google Cloud Console "
+        "(OAuth consent screen → Web client → Authorized redirect URIs).",
+        secret=True),
     # ── 💬 Telegram -----------------------------------------------------------
     "LIQSCOPE_BOT_TOKEN": _spec(
         SECTION_TELEGRAM, "Токен бота",
@@ -353,10 +363,37 @@ MANAGED_SETTINGS: Dict[str, Dict[str, Any]] = {
         restart=True),
 }
 
+#: Алиасы коротких имён переменных окружения и ключей настроек.
+KEY_ALIASES: Dict[str, str] = {
+    "GOOGLE_CLIENT_ID": "LIQSCOPE_GOOGLE_CLIENT_ID",
+    "GOOGLE_CLIENT_SECRET": "LIQSCOPE_GOOGLE_CLIENT_SECRET",
+}
+_ENV_FALLBACKS: Dict[str, tuple] = {
+    "LIQSCOPE_GOOGLE_CLIENT_ID": ("LIQSCOPE_GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_ID"),
+    "LIQSCOPE_GOOGLE_CLIENT_SECRET": ("LIQSCOPE_GOOGLE_CLIENT_SECRET", "GOOGLE_CLIENT_SECRET"),
+}
+
+
+def canonical_key(key: str) -> str:
+    return KEY_ALIASES.get(str(key or "").strip(), str(key or "").strip())
+
+
+def _env_for_key(key: str) -> str:
+    canon = canonical_key(key)
+    for name in _ENV_FALLBACKS.get(canon, (canon,)):
+        val = os.getenv(name)
+        if val is not None and val != "":
+            return val
+    return ""
+
+
 #: Ключи с секретами — маскируются в ответах и формах.
 SECRET_KEYS = frozenset(
-    k for k, m in MANAGED_SETTINGS.items()
-    if m.get("secret") or k.endswith(_SECRET_SUFFIXES))
+    list(k for k, m in MANAGED_SETTINGS.items()
+         if m.get("secret") or k.endswith(_SECRET_SUFFIXES))
+    + [alias for alias, canon in KEY_ALIASES.items()
+       if MANAGED_SETTINGS.get(canon, {}).get("secret") or canon.endswith(_SECRET_SUFFIXES)]
+)
 
 #: Ключи ИИ-блока: по ним считается сигнатура для динамической пересборки.
 AI_KEYS = tuple(sorted(k for k in MANAGED_SETTINGS
@@ -454,10 +491,11 @@ class SettingsManager:
         (ключ — первичный) и гарантирует согласованность между несколькими
         менеджерами одной базы.
         """
+        canon = canonical_key(key)
         with self._lock:
             assert self._db is not None
             row = self._db.execute(
-                f"SELECT value FROM {self.TABLE} WHERE key=?", (key,)).fetchone()
+                f"SELECT value FROM {self.TABLE} WHERE key=?", (canon,)).fetchone()
         return row["value"] if row else None
 
     def get(self, key: str, default: str = "") -> str:
@@ -465,14 +503,15 @@ class SettingsManager:
         val = self.db_value(key)
         if val is not None:
             return val
-        env = os.getenv(key)
-        if env is not None and env != "":
+        env = _env_for_key(key)
+        if env != "":
             return env
         return default
 
     def set(self, key: str, value: str) -> bool:
         """Сохранить переопределение в БД и обновить кэш в RAM."""
-        if key not in MANAGED_SETTINGS:
+        canon = canonical_key(key)
+        if canon not in MANAGED_SETTINGS:
             return False
         value = "" if value is None else str(value)
         with self._lock:
@@ -481,15 +520,16 @@ class SettingsManager:
                 f"INSERT INTO {self.TABLE}(key,value,updated_ts) VALUES(?,?,strftime('%s','now')) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
                 "updated_ts=excluded.updated_ts",
-                (key, value))
+                (canon, value))
             self._db.commit()
         return True
 
     def delete(self, key: str) -> None:
         """Убрать переопределение: снова действует окружение/дефолт."""
+        canon = canonical_key(key)
         with self._lock:
             assert self._db is not None
-            self._db.execute(f"DELETE FROM {self.TABLE} WHERE key=?", (key,))
+            self._db.execute(f"DELETE FROM {self.TABLE} WHERE key=?", (canon,))
             self._db.commit()
 
     def overrides(self) -> Dict[str, str]:
@@ -504,11 +544,11 @@ class SettingsManager:
     # ----- спецификация ------------------------------------------------------
     @staticmethod
     def is_secret(key: str) -> bool:
-        return key in SECRET_KEYS
+        return canonical_key(key) in SECRET_KEYS or key in SECRET_KEYS
 
     @staticmethod
     def meta(key: str) -> Dict[str, Any]:
-        return MANAGED_SETTINGS.get(key, {})
+        return MANAGED_SETTINGS.get(canonical_key(key), {})
 
     @staticmethod
     def keys(section: str = "") -> list:
@@ -527,9 +567,10 @@ class SettingsManager:
         out: Dict[str, Dict[str, Any]] = {}
         for key, m in MANAGED_SETTINGS.items():
             db_val = self.db_value(key)
+            env_val = _env_for_key(key)
             source = "db" if db_val is not None else (
-                "env" if (os.getenv(key) or "") else "")
-            raw = db_val if db_val is not None else (os.getenv(key) or "")
+                "env" if env_val else "")
+            raw = db_val if db_val is not None else env_val
             secret = bool(key in SECRET_KEYS)
             out[key] = {
                 "value": mask_secret(raw) if secret else raw,

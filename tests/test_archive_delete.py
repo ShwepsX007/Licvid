@@ -191,8 +191,6 @@ class DigestApiTest(ApiTestBase):
         api_digest.ctx.store = DigestStore("")
         api_digest.ctx.bot = None
         api_digest.ctx.sent_ids_fn = None
-        api_digest.ctx.archive_days_fn = None
-        api_digest.ctx.hide = None
         super().tearDown()
 
     def test_archive_lists_days_with_their_tg_state(self):
@@ -288,8 +286,6 @@ class HourlyApiTest(ApiTestBase):
     def tearDown(self):
         api_hourly.ctx.store = PostStore("")
         api_hourly.ctx.bot = None
-        api_hourly.ctx.archive_fn = None
-        api_hourly.ctx.hide = None
         super().tearDown()
 
     def test_archive_lists_posts_and_days(self):
@@ -469,123 +465,6 @@ class PublishStoresIdsTest(unittest.TestCase):
             api_digest.ctx.store = DigestStore("")
         finally:
             tmp.cleanup()
-
-
-class RestoredDraftDeleteTest(ApiTestBase):
-    """Черновик из месячной свёртки не лежит в JSON — удаление должно его удержать."""
-
-    def register(self, app) -> None:
-        api_digest.register_digest_routes(app)
-
-    def setUp(self):
-        super().setUp()
-        self.store = DigestStore(os.path.join(self.tmp.name, "digests.json"))
-        api_digest.ctx.store = self.store
-        api_digest.ctx.page_ok = True
-        api_digest.ctx.public_url = "https://liqscope.online"
-        api_digest.ctx.bot = self.bot
-        api_digest.ctx.sent_ids_fn = None
-        api_digest.ctx.archive_days_fn = None
-        api_digest.ctx.hide = None
-
-    def tearDown(self):
-        api_digest.ctx.store = DigestStore("")
-        api_digest.ctx.bot = None
-        api_digest.ctx.sent_ids_fn = None
-        api_digest.ctx.archive_days_fn = None
-        api_digest.ctx.hide = None
-        super().tearDown()
-
-    def test_archive_draft_is_listed_and_stays_deleted(self):
-        from archive_hide import ArchiveHide
-        day = "2026-03-01"
-        ghost = digest_rec(day)
-        ghost["source"] = "archive"
-        ghost["published"] = {}
-        api_digest.ctx.hide = ArchiveHide(os.path.join(self.tmp.name, "hide.json"))
-        api_digest.ctx.archive_days_fn = lambda have: [] if day in have else [ghost]
-        listed = self.admin_c.get("/api/admin/digest/archive").json()
-        row = next(x for x in listed["items"] if x["day"] == day)
-        self.assertEqual(row["source"], "archive")
-        self.assertTrue(row["draft"])
-        self.assertFalse(row["tg_ready"])
-        res = self.admin_c.post("/api/admin/digest/%s/delete" % day, json={"tg": False})
-        self.assertEqual(res.status_code, 200)
-        self.assertTrue(res.json()["ok"])
-        self.assertEqual(self.bot.deleted, [])
-        gone = self.guest.get("/api/digest").json()
-        self.assertNotIn(day, [x["day"] for x in gone["days"]])
-        again = ArchiveHide(os.path.join(self.tmp.name, "hide.json"))
-        self.assertTrue(again.digest_hidden(day))
-        # настоящий выпуск того же дня, собранный позже, скрытие не прячет
-        self.store.save(digest_rec(day, mid_ru=9))
-        back = self.guest.get("/api/digest").json()
-        self.assertIn(day, [x["day"] for x in back["days"]])
-
-    def test_unknown_day_is_still_404_when_hide_is_on(self):
-        from archive_hide import ArchiveHide
-        api_digest.ctx.hide = ArchiveHide(os.path.join(self.tmp.name, "hide.json"))
-        api_digest.ctx.archive_days_fn = lambda have: []
-        res = self.admin_c.post("/api/admin/digest/2020-01-01/delete", json={})
-        self.assertEqual(res.status_code, 404)
-
-
-class RestoredHourlyDeleteTest(ApiTestBase):
-    def register(self, app) -> None:
-        api_hourly.register_hourly_routes(app)
-
-    def setUp(self):
-        super().setUp()
-        self.store = PostStore(os.path.join(self.tmp.name, "posts.json"))
-        api_hourly.ctx.store = self.store
-        api_hourly.ctx.page_ok = True
-        api_hourly.ctx.public_url = "https://liqscope.online"
-        api_hourly.ctx.bot = self.bot
-        api_hourly.ctx.archive_fn = None
-        api_hourly.ctx.hide = None
-
-    def tearDown(self):
-        api_hourly.ctx.store = PostStore("")
-        api_hourly.ctx.bot = None
-        api_hourly.ctx.archive_fn = None
-        api_hourly.ctx.hide = None
-        super().tearDown()
-    def test_archive_hour_is_listed_and_stays_deleted(self):
-        from archive_hide import ArchiveHide
-        ghost = hourly_rec(NOW - 2 * 86400, "2026-01-20")
-        ghost["source"] = "archive"
-        ghost["sent"] = {}
-        ghost.pop("tg", None)
-        api_hourly.ctx.hide = ArchiveHide(os.path.join(self.tmp.name, "hide.json"))
-        api_hourly.ctx.archive_fn = lambda: [ghost]
-        listed = self.admin_c.get("/api/admin/hourly/archive").json()
-        row = next(x for x in listed["items"] if x["id"] == ghost["id"])
-        self.assertEqual(row["source"], "archive")
-        self.assertTrue(row["draft"])
-        res = self.admin_c.post("/api/admin/hourly/%s/delete" % ghost["id"], json={})
-        self.assertEqual(res.status_code, 200)
-        page = self.guest.get("/api/hourly").json()
-        self.assertNotIn(ghost["id"], [x["id"] for x in page["items"]])
-        self.assertNotIn("2026-01-20", [x["day"] for x in page["days"]])
-        again = ArchiveHide(os.path.join(self.tmp.name, "hide.json"))
-        self.assertTrue(again.hourly_hidden(ghost))
-
-    def test_delete_archive_day_hides_every_restored_hour(self):
-        from archive_hide import ArchiveHide
-        a = hourly_rec(NOW - 3 * 86400, "2026-01-19")
-        b = hourly_rec(NOW - 3 * 86400 + 3600, "2026-01-19")
-        for rec in (a, b):
-            rec["source"] = "archive"
-            rec["sent"] = {}
-            rec.pop("tg", None)
-        api_hourly.ctx.hide = ArchiveHide(os.path.join(self.tmp.name, "hide.json"))
-        api_hourly.ctx.archive_fn = lambda: [a, b]
-        res = self.admin_c.post("/api/admin/hourly/day/2026-01-19/delete", json={})
-        self.assertEqual(res.status_code, 200)
-        self.assertEqual(res.json()["deleted"], 2)
-        self.assertEqual(self.bot.deleted, [])
-        page = self.guest.get("/api/hourly?day=2026-01-19").json()
-        self.assertEqual(page["items"], [])
 
 
 if __name__ == "__main__":

@@ -447,7 +447,9 @@
             inflow += Number(point.inflow || 0);
             outflow += Number(point.outflow || 0);
         });
-        return {inflow: inflow, outflow: outflow, net: outflow - inflow};
+        // balance — то, что рисует кривая: сколько за сутки зашло минус сколько
+        // вышло. Положительный — биржа накопила (на неё пришло больше).
+        return {inflow: inflow, outflow: outflow, balance: inflow - outflow};
     }
 
     /** Один график биржи: столбцы inflow вниз / outflow вверх и линия Net Flow.
@@ -459,48 +461,151 @@
      *  потока, линия — по своему максимуму (иначе Net Flow визуально слилась
      *  бы с нулём).
      */
-    function drawVenueChart(svg, points) {
-        svg.replaceChildren();
-        const W = 320, H = 200, padX = 4, padTop = 12, padBottom = 12;
-        const plotH = H - padTop - padBottom;
-        const mid = padTop + plotH / 2;
-        const totals = venueTotals(points);
-        const maxFlow = points.reduce((max, point) => Math.max(max,
-            Number(point.inflow) || 0, Number(point.outflow) || 0), 0);
-        const maxNet = points.reduce((max, point) =>
-            Math.max(max, Math.abs(Number(point.net_flow) || 0)), 0);
-        if (!(maxFlow > 0) && !(maxNet > 0)) return false;
-        const flowScale = maxFlow > 0 ? (plotH / 2) / maxFlow : 0;
-        const netScale = maxNet > 0 ? (plotH / 2) / maxNet : 0;
-        const groupW = (W - padX * 2) / points.length;
-        const barW = Math.max(1, Math.min(7, groupW * 0.72));
-        const inflowPath = [], outflowPath = [], netPath = [];
-        points.forEach((point, index) => {
-            const x = padX + index * groupW + groupW / 2;
-            const up = Number(point.outflow) || 0;
-            const down = Number(point.inflow) || 0;
-            if (up > 0) {
-                outflowPath.push(`M${(x - barW / 2).toFixed(2)} ${mid.toFixed(2)}` +
-                    `h${barW.toFixed(2)}v${(-up * flowScale).toFixed(2)}h${(-barW).toFixed(2)}Z`);
-            }
-            if (down > 0) {
-                inflowPath.push(`M${(x - barW / 2).toFixed(2)} ${mid.toFixed(2)}` +
-                    `h${barW.toFixed(2)}v${(down * flowScale).toFixed(2)}h${(-barW).toFixed(2)}Z`);
-            }
-            const netY = mid - (Number(point.net_flow) || 0) * netScale;
-            netPath.push(`${index ? "L" : "M"}${x.toFixed(2)} ${netY.toFixed(2)}`);
+    /** Компактная сумма со знаком: «+$150K», «−$50K», «$0». */
+    function fmtSignedUSD(value) {
+        const n = Number(value) || 0;
+        if (Math.abs(n) < 0.5) return "$0";
+        return (n > 0 ? "+" : "−") + fmtUSD(Math.abs(n), true);
+    }
+
+    /** Накопленный поток биржи за сутки: сколько зашло минус сколько вышло.
+     *
+     *  Точка кривой — «сколько денег на бирже относительно начала окна»:
+     *  приток поднимает её, отток опускает. Ровно так читается пример «зашло
+     *  100K — выросло, вышло 50K — опустилось»: видна динамика движения
+     *  средств за 24 часа, а не отдельные столбцы.
+     */
+    function venueSeries(points) {
+        const rows = points || [];
+        if (!rows.length) return [];
+        const step = rows.length > 1
+            ? Math.max(1, Number(rows[1].timestamp) - Number(rows[0].timestamp)) : 600;
+        const series = [{timestamp: Number(rows[0].timestamp) - step, value: 0}];
+        let acc = 0;
+        rows.forEach(point => {
+            acc += (Number(point.inflow) || 0) - (Number(point.outflow) || 0);
+            series.push({timestamp: Number(point.timestamp), value: acc});
         });
-        svg.append(svgNode("line", {x1: padX, y1: mid.toFixed(2), x2: W - padX,
-                                    y2: mid.toFixed(2), class: "venue-zero"}));
-        if (outflowPath.length) {
-            svg.append(svgNode("path", {d: outflowPath.join(" "), class: "venue-outflow"}));
+        return series;
+    }
+
+    /** Кривая накопленного потока по участкам одного направления. */
+    function venueSegments(series, xAt, yAt) {
+        const segments = [];
+        for (let i = 1; i < series.length; i++) {
+            const delta = series[i].value - series[i - 1].value;
+            const dir = delta > 0 ? 1 : delta < 0 ? -1 : 0;
+            const previous = [xAt(i - 1), yAt(series[i - 1].value)];
+            const point = [xAt(i), yAt(series[i].value)];
+            const last = segments[segments.length - 1];
+            if (last && last.dir === dir) {
+                last.pts.push(point);
+                last.to = i;
+            } else {
+                segments.push({dir: dir, from: i - 1, to: i, pts: [previous, point]});
+            }
         }
-        if (inflowPath.length) {
-            svg.append(svgNode("path", {d: inflowPath.join(" "), class: "venue-inflow"}));
+        return segments;
+    }
+
+    /** Один график биржи — как биржевой график в терминале: сплошная кривая
+     *  накопленного потока, зелёные участки — деньги заходят на биржу,
+     *  красные — выходят (в терминале те же цвета у свечей вверх/вниз), по
+     *  бокам суммы, по низу — время. Столбцов нет: важно движение за сутки.
+     *
+     *  Рисуем вручную SVG-путями, как и остальные графики Скринера: 144 точки
+     *  превращаются в несколько путей (участки одного направления), а не в
+     *  сотни узлов. fillId — свой градиент заливки на каждую клетку (общий id
+     *  заставил бы все графики взять первую заливку). false — данных нет.
+     */
+    function drawVenueChart(svg, points, fillId) {
+        svg.replaceChildren();
+        const series = venueSeries(points);
+        if (series.length < 2) return false;
+        const W = 320, H = 200, left = 48, right = 10, top = 10, bottom = 22;
+        const plotW = W - left - right, plotH = H - top - bottom;
+        let low = 0, high = 0;
+        series.forEach(point => {
+            low = Math.min(low, point.value);
+            high = Math.max(high, point.value);
+        });
+        if (!(high > 0) && !(low < 0)) return false;      // за сутки потоков не было
+        const span = Math.max(high - low, 1);
+        const pad = span * 0.12;
+        const yMax = high + pad, yMin = low - pad;
+        const scaleY = plotH / (yMax - yMin);
+        const xAt = index => left + plotW * (index / (series.length - 1));
+        const yAt = value => top + (yMax - value) * scaleY;
+
+        if (fillId) {
+            const defs = svgNode("defs", {});
+            const gradient = svgNode("linearGradient", {id: fillId,
+                x1: "0", y1: "0", x2: "0", y2: "1"});
+            gradient.append(svgNode("stop", {offset: "0", "stop-color": "#78a0ff",
+                                             "stop-opacity": "0.26"}));
+            gradient.append(svgNode("stop", {offset: "1", "stop-color": "#78a0ff",
+                                             "stop-opacity": "0"}));
+            defs.append(gradient);
+            svg.append(defs);
         }
-        svg.append(svgNode("path", {d: netPath.join(" "), class: "venue-net-line"}));
-        svg.append(svgNode("title", {}, t("screener.net_flow") + ": " +
-            (totals.net > 0 ? "+" : "") + fmtUSD(totals.net)));
+
+        // Три линии по суммам: верх, ноль (пунктиром) и низ.
+        [yMax, 0, yMin].forEach(value => {
+            const y = yAt(value);
+            const zero = Math.abs(value) < 1e-9;
+            svg.append(svgNode("line", {x1: left, y1: y.toFixed(2), x2: W - right,
+                                        y2: y.toFixed(2), class: zero ? "venue-zero" : "venue-grid-line"}));
+            svg.append(svgNode("text", {x: left - 6, y: (y + 3.5).toFixed(2),
+                                        "text-anchor": "end", class: "venue-axis-label"},
+                               fmtSignedUSD(value)));
+        });
+
+        // Площадь под кривой — как у биржевого графика: заливка от линии вниз.
+        const area = series.map((point, index) =>
+            (index ? "L" : "M") + xAt(index).toFixed(2) + " " + yAt(point.value).toFixed(2))
+            .join(" ");
+        svg.append(svgNode("path", {
+            d: area + " L" + (W - right).toFixed(2) + " " + (H - bottom).toFixed(2) +
+               " L" + left.toFixed(2) + " " + (H - bottom).toFixed(2) + " Z",
+            class: "venue-area", fill: fillId ? "url(#" + fillId + ")" : "rgba(120,160,255,0.12)"}));
+
+        const classByDir = {"1": "is-up", "-1": "is-down", "0": "is-flat"};
+        venueSegments(series, xAt, yAt).forEach(segment => {
+            const path = svgNode("path", {
+                d: segment.pts.map((pt, index) =>
+                    (index ? "L" : "M") + pt[0].toFixed(2) + " " + pt[1].toFixed(2)).join(" "),
+                class: "venue-seg " + classByDir[String(segment.dir)]});
+            const delta = series[segment.to].value - series[segment.from].value;
+            const from = timeLabel(series[segment.from].timestamp, {hour: "2-digit", minute: "2-digit"});
+            const to = timeLabel(series[segment.to].timestamp, {hour: "2-digit", minute: "2-digit"});
+            path.append(svgNode("title", {}, from + "–" + to + " · " +
+                (delta >= 0 ? t("screener.venue_in") : t("screener.venue_out")) + " " +
+                fmtUSD(Math.abs(delta), true)));
+            svg.append(path);
+        });
+
+        // Последняя точка — как отметка текущей цены у биржевого графика.
+        const last = series[series.length - 1];
+        svg.append(svgNode("circle", {cx: xAt(series.length - 1).toFixed(2),
+                                      cy: yAt(last.value).toFixed(2), r: 2.6,
+                                      class: "venue-dot " + (last.value >= 0 ? "is-up" : "is-down")}));
+
+        // Время по низу: четыре подписи — читается и на телефоне.
+        const ticks = [0, Math.round((series.length - 1) / 3),
+                       Math.round(2 * (series.length - 1) / 3), series.length - 1];
+        ticks.forEach((index, position) => {
+            const point = series[index];
+            if (!point) return;
+            svg.append(svgNode("text", {
+                x: xAt(index).toFixed(2), y: H - 6,
+                "text-anchor": position === 0 ? "start" : position === ticks.length - 1 ? "end" : "middle",
+                class: "venue-axis-label",
+            }, timeLabel(point.timestamp, {hour: "2-digit", minute: "2-digit"})));
+        });
+        const totals = venueTotals(points);
+        svg.append(svgNode("title", {}, t("screener.venue_in") + " " +
+            fmtUSD(totals.inflow, true) + " · " + t("screener.venue_out") + " " +
+            fmtUSD(totals.outflow, true) + " · " + fmtSignedUSD(totals.balance)));
         return true;
     }
 
@@ -517,16 +622,19 @@
             head.append(make("span", "venue-name",
                 venue.name + " " + t("screener.period_24h")));
             const hasFlow = !!points && (totals.inflow > 0 || totals.outflow > 0);
-            const net = make("span", "venue-net", hasFlow
-                ? (totals.net > 0 ? "+" : "") + fmtUSD(totals.net, true) : "—");
-            if (hasFlow) net.classList.add(totals.net >= 0 ? "is-outflow" : "is-inflow");
+            const net = make("span", "venue-net",
+                hasFlow ? fmtSignedUSD(totals.balance) : "—");
+            if (hasFlow) net.classList.add(totals.balance >= 0 ? "is-inflow" : "is-outflow");
             head.append(net);
             card.append(head);
             const svg = svgNode("svg", {viewBox: "0 0 320 200", class: "venue-chart",
                 role: "img",
                 "aria-label": venue.name + " " + t("screener.net_flow")});
-            if (points && drawVenueChart(svg, points)) {
+            if (points && drawVenueChart(svg, points, "venue-fill-" + venue.id)) {
                 card.append(svg);
+                card.append(make("div", "venue-totals",
+                    t("screener.venue_in") + " " + fmtUSD(totals.inflow, true) +
+                    " · " + t("screener.venue_out") + " " + fmtUSD(totals.outflow, true)));
             } else {
                 card.append(make("p", "venue-empty", t("screener.venue_flow_empty")));
             }

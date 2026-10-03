@@ -104,7 +104,6 @@
         }
         box.innerHTML = list.slice(0, freshShown).map(function (it) {
             var sum = [];
-            if (it.restored) sum.push(t("hour.archive_tag"));
             if (it.total_usd) sum.push(money(it.total_usd));
             if (it.liq_count) sum.push(t("hour.events", { n: it.liq_count }));
             return '<button type="button" class="hour-card' +
@@ -173,7 +172,6 @@
             if (it.total_usd) foot.push(money(it.total_usd));
             if (it.liq_count) foot.push(t("hour.events", { n: it.liq_count }));
             if (it.window_h) foot.push(t("hour.window", { h: it.window_h }));
-            if (it.restored) foot.push(t("hour.archive_tag"));
             return '<article class="tg-card' + (highlightId === it.id ? " hit" : "") +
                 '" id="post-' + esc(it.id) + '">' +
                 '<div class="tg-head"><span class="tg-time">🕘 ' + esc(timeLabel(it.ts)) +

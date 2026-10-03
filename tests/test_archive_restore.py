@@ -1,14 +1,17 @@
-"""Месячный архив переживает перезагрузку: стенд, факты дайджеста, лента."""
+"""Месячный архив переживает перезагрузку: стенд, факты дайджеста, лента.
+
+Публикаций здесь нет намеренно: свёртка месяца — это цифры за час или сутки,
+а не выпуск. На /digest и /hourly попадает только то, что реально сохранил
+бот (см. tests/test_archive_delete.py и tests/test_hourly_posts.py).
+"""
 import pathlib
 import sys
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from archive_restore import (cvd_from_cells, digest_records_from_cells,
-                             facts_from_cells, hourly_posts_from_cells,
-                             merge_events, overlay_archive_facts,
-                             slot_flows_from_cells)
+from archive_restore import (cvd_from_cells, facts_from_cells, merge_events,
+                             overlay_archive_facts, slot_flows_from_cells)
 from hour_board import HOUR, HourBoard, apply_archive_span
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -51,25 +54,13 @@ class FactsTest(unittest.TestCase):
         self.assertEqual(out["totals_source"], "archive")
         self.assertAlmostEqual(out["cvd_usd"], 50.0)
 
-    def test_digest_days_skip_what_json_already_has(self):
-        day_cells = [(NOW, cell()), (NOW - 86400, cell(usd=10, n=1, sym="ETH_USDT"))]
-        rows = digest_records_from_cells(day_cells, have_days=["skip"])
-        self.assertTrue(rows)
-        # пустой have не выкидывает дни; явная дата — выкидывает, если совпала
-        days = {r["day"] for r in digest_records_from_cells(day_cells)}
-        kept = digest_records_from_cells(day_cells, have_days=list(days)[:1])
-        self.assertEqual(len(kept), len(days) - 1)
+    def test_cells_do_not_become_publications(self):
+        """Свёртка часа — не пост: страницы публикаций её не показывают."""
+        import archive_restore as mod
+        self.assertFalse(hasattr(mod, "digest_records_from_cells"))
+        self.assertFalse(hasattr(mod, "hourly_posts_from_cells"))
 
-    def test_volume_only_cells_are_not_empty_drafts(self):
-        bare = cell(usd=0, n=0, long=0, short=0, cvd=50, vol=5000)
-        self.assertEqual(digest_records_from_cells([(NOW, bare)]), [])
-        self.assertEqual(hourly_posts_from_cells([(NOW, bare)]), [])
-
-    def test_hourly_posts_and_slot_flows(self):
-        posts = hourly_posts_from_cells([(NOW, cell())])
-        self.assertEqual(len(posts), 1)
-        self.assertIn("CVD", posts[0]["texts"]["ru"])
-        self.assertAlmostEqual(posts[0]["total_usd"], 1000.0)
+    def test_slot_flows(self):
         flows = slot_flows_from_cells([(NOW, cell())])
         self.assertIn("BTC_USDT", flows)
         slot = flows["BTC_USDT"][NOW]

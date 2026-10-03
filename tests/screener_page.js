@@ -58,9 +58,11 @@ const venueFlows = {};
     venueFlows[venue] = Array.from({length: 144}, (_, i) => ({
         timestamp: Math.floor(now / 600) * 600 - (143 - i) * 600,
         hour: String(Math.floor(i / 6)).padStart(2, "0") + ":" + String((i % 6) * 10).padStart(2, "0"),
-        inflow: venue === "binance" && i === 143 ? 125000 : 0,
-        outflow: venue === "binance" && i === 142 ? 200000 : 0,
-        net_flow: venue === "binance" ? (i === 142 ? 200000 : i === 143 ? -125000 : 0) : 0,
+        inflow: venue === "binance" && (i === 141 || i === 143)
+            ? (i === 143 ? 150000 : 100000) : 0,
+        outflow: venue === "binance" && i === 142 ? 50000 : 0,
+        net_flow: venue === "binance"
+            ? (i === 141 ? -100000 : i === 142 ? 50000 : i === 143 ? -150000 : 0) : 0,
     }));
 });
 const fetches = [];
@@ -88,6 +90,7 @@ win.LiqScopeI18n = {lang: () => "en", t: (key, vars = {}) => {
         "screener.trade_chart_title": "Hyperliquid trade flow",
         "screener.period_24h": "24h", "screener.net_flow": "Net Flow",
         "screener.venue_flow_empty": "No exchange flows in this period.",
+        "screener.venue_in": "In", "screener.venue_out": "Out",
     };
     let value = labels[key] || key;
     Object.keys(vars).forEach(name => { value = value.replace("{" + name + "}", vars[name]); });
@@ -153,15 +156,38 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     assert.equal(win.document.querySelector('#venue-charts [data-venue="binance"] .venue-name').textContent,
         "Binance 24h");
     const binanceCard = win.document.querySelector('#venue-charts [data-venue="binance"]');
-    assert(binanceCard.querySelectorAll(".venue-inflow").length === 1, "inflow — красные столбцы (вниз)");
-    assert(binanceCard.querySelectorAll(".venue-outflow").length === 1, "outflow — зелёные столбцы (вверх)");
-    assert(binanceCard.querySelector(".venue-net-line"), "кривая Net Flow нарисована");
-    const inflowPath = binanceCard.querySelector(".venue-inflow").getAttribute("d");
-    const outflowPath = binanceCard.querySelector(".venue-outflow").getAttribute("d");
-    assert(!inflowPath.includes("v-"), "inflow — столбцы вниз от нулевой линии");
-    assert(outflowPath.includes("v-"), "outflow — столбцы вверх от нулевой линии");
-    assert(binanceCard.querySelector(".venue-net").classList.contains("is-outflow"),
-        "суммарный Net Flow +$75.0K подсвечен как вывод с биржи");
+    // Кривая накопленного потока: зашло 100K — вверх, вышло 50K — вниз, зашло 150K — снова вверх.
+    assert.equal(binanceCard.querySelectorAll(".venue-seg.is-up").length, 2,
+        "два участка роста: деньги заходили на биржу");
+    assert.equal(binanceCard.querySelectorAll(".venue-seg.is-down").length, 1,
+        "один участок падения: деньги уходили с биржи");
+    const rising = binanceCard.querySelector(".venue-seg.is-up").getAttribute("d");
+    const falling = binanceCard.querySelector(".venue-seg.is-down").getAttribute("d");
+    // В SVG ось Y смотрит вниз: рост значения — это уменьшение y.
+    assert(parseFloat(rising.match(/M[\d.]+ ([\d.]+)/)[1]) >
+        parseFloat(rising.match(/L[\d.]+ ([\d.]+)/)[1]),
+        "зелёный участок идёт вверх (заход на биржу)");
+    assert(parseFloat(falling.match(/M[\d.]+ ([\d.]+)/)[1]) <
+        parseFloat(falling.match(/L[\d.]+ ([\d.]+)/)[1]),
+        "красный участок идёт вниз (выход с биржи)");
+    assert(binanceCard.querySelector(".venue-area"), "под кривой заливка, как у биржевого графика");
+    assert(binanceCard.querySelector(".venue-zero"), "нулевая линия подписана и видна");
+    const axis = Array.from(binanceCard.querySelectorAll(".venue-axis-label"))
+        .map(node => node.textContent).join(" ");
+    assert(axis.includes("+$") && axis.includes("−$") && axis.includes("$0"),
+        "по оси подписи сумм со знаком — плюс, ноль и минус: " + axis);
+    assert(binanceCard.querySelectorAll(".venue-axis-label").length >= 5,
+        "подписи сумм и времени на месте");
+    assert(binanceCard.querySelector(".venue-net").textContent.includes("+$200K"),
+        "итог за сутки: на биржу зашло на $200K больше, чем ушло");
+    assert(binanceCard.querySelector(".venue-net").classList.contains("is-inflow"));
+    assert(binanceCard.querySelector(".venue-totals").textContent.includes("In $250K") &&
+        binanceCard.querySelector(".venue-totals").textContent.includes("Out $50K"),
+        "под графиком видно, сколько зашло и сколько вышло");
+    const segTitles = Array.from(binanceCard.querySelectorAll(".venue-seg title"))
+        .map(node => node.textContent).join(" | ");
+    assert(segTitles.includes("In $100K") && segTitles.includes("Out $50K"),
+        "подсказка участка объясняет направление: " + segTitles);
     const bybitCard = win.document.querySelector('#venue-charts [data-venue="bybit"]');
     assert(bybitCard.querySelector(".venue-empty"), "без меток кошельков клетка честно пустая");
     assert.equal(bybitCard.querySelectorAll(".venue-chart").length, 0);
@@ -169,7 +195,9 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
         "на десктопе три колонки");
     assert(css.includes(".venue-chart { display: block; width: 100%; height: 200px"),
         "график биржи высотой ~200px");
-    assert(css.includes(".venue-net-line { fill: none; stroke: #78a0ff"), "Net Flow — сплошная линия");
+    assert(css.includes(".venue-seg.is-up { stroke: #00e676; }") &&
+        css.includes(".venue-seg.is-down { stroke: #ff2a5f; }"),
+        "цвета участков — как у свечей терминала");
     assert(fetches.some(url => url.includes("/api/screener/stats/exchanges_24h") && url.includes("minutes=10")),
         "фронт запрашивает потоки по биржам за 24 часа");
     assert.equal(win.document.querySelectorAll("#exchange-list .exchange-row").length, 1);

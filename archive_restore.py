@@ -1,18 +1,22 @@
-"""Месячный архив как источник терминала, дайджеста и сводки по часам.
+"""Месячный архив как источник цифр: лента, стенд, боксы статистики, CVD.
 
 Сырые события и часовые свёртки уже лежат на диске (``HistoryStore``, не меньше
-месяца). После перезагрузки память процесса пустая, и лента, боксы, дневной
-выпуск и почасовая сводка смотрели только в неё — страница открывалась пустой.
-Здесь те же свёртки снова становятся фактами: без выдуманных свечей и без
-подмены уже сохранённого JSON выпуска.
+месяца). После перезагрузки память процесса пустая, и лента со стендом смотрели
+только в неё — страница открывалась пустой. Здесь те же свёртки снова
+становятся фактами.
+
+Публикации (выпуск дня и сводка по часам) сюда НЕ относятся: на сайте видно
+только то, что реально вышло. Свёртка месяца — это цифры за час или сутки, а
+не пост: показывать её как «сводку» значит выдавать за публикацию то, чего в
+канале не было.
 """
 from __future__ import annotations
 
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-from daily_digest import day_key, mood_of
-from history import HOUR, aggregate_hours
-from hour_board import HOUR as BOARD_HOUR, apply_archive_span, hour_hhmm, tz_offset
+from daily_digest import mood_of
+from history import aggregate_hours
+from hour_board import HOUR as BOARD_HOUR, apply_archive_span
 
 Cell = Tuple[int, dict]
 
@@ -216,90 +220,6 @@ def slot_flows_from_cells(cells: Iterable[Cell]) -> Dict[str, dict]:
                 slot["cvd"] += cvd
                 slot["has_cvd"] = True
     return out
-
-
-def group_cells_by_day(cells: Iterable[Cell]) -> Dict[str, List[Cell]]:
-    """Часы архива по календарным суткам сводок (МСК), не по UTC-имени файла."""
-    out: Dict[str, List[Cell]] = {}
-    for h, cell in cells or []:
-        out.setdefault(day_key(h), []).append((int(h), cell))
-    return out
-
-
-def digest_records_from_cells(cells: Iterable[Cell],
-                              have_days: Optional[Iterable[str]] = None) -> List[dict]:
-    """Выпуски, которых нет в JSON: факты суток прямо из месячных свёрток."""
-    have = {str(d) for d in (have_days or []) if d}
-    records = []
-    for day, chunk in sorted(group_cells_by_day(cells).items()):
-        if day in have:
-            continue
-        facts = facts_from_cells(chunk, window_sec=86400)
-        # Оборот без ликвидаций — не выпуск дня. Иначе после перезагрузки
-        # на /digest появляется пустой «черновик», который в канал не уходил.
-        if int(facts.get("liq_count") or 0) <= 0 and _num(facts.get("liq_total_usd")) <= 0:
-            continue
-        last_h = max(h for h, _c in chunk)
-        records.append({
-            "id": day,
-            "day": day,
-            "created": float(last_h) + HOUR,
-            "updated": float(last_h) + HOUR,
-            "window_h": 24,
-            "facts": facts,
-            "ai": {},
-            "published": {},
-            "source": "archive",
-        })
-    records.sort(key=lambda r: str(r.get("day") or ""), reverse=True)
-    return records
-
-
-def _money(v: float) -> str:
-    from channel_digest import money
-    return money(v)
-
-
-def hourly_posts_from_cells(cells: Iterable[Cell]) -> List[dict]:
-    """Почасовые сводки из архива: страница не пустеет, пока бот не писал JSON."""
-    from hourly_posts import post_id
-
-    tz = tz_offset()
-    posts = []
-    for h, cell in cells or []:
-        usd = _num((cell or {}).get("liq_usd"))
-        count = int(_num((cell or {}).get("liq_count")))
-        # Час только с оборотом не показываем как сводку: на странице это
-        # пустой черновик, хотя в Telegram ничего не отправлялось.
-        if usd <= 0 and count <= 0:
-            continue
-        cvd = _num((cell or {}).get("cvd"))
-        longs = _num((cell or {}).get("liq_long"))
-        shorts = _num((cell or {}).get("liq_short"))
-        label = hour_hhmm(float(h), tz)
-        cvd_ru = f" · CVD {_money(cvd)}" if cvd else ""
-        cvd_en = f" · CVD {_money(cvd)}" if cvd else ""
-        ru = (f"<b>{label}</b> · {_money(usd)} · {count} ликвидаций · "
-              f"лонги {_money(longs)} · шорты {_money(shorts)}{cvd_ru}")
-        en = (f"<b>{label}</b> · {_money(usd)} · {count} liquidations · "
-              f"longs {_money(longs)} · shorts {_money(shorts)}{cvd_en}")
-        ts = float(h)
-        posts.append({
-            "id": post_id(ts, tz),
-            "ts": ts,
-            "day": day_key(ts),
-            "window_h": 1,
-            "interval_h": 1,
-            "total_usd": round(usd, 2),
-            "liq_count": count,
-            "longs_usd": round(longs, 2),
-            "shorts_usd": round(shorts, 2),
-            "texts": {"ru": ru, "en": en},
-            "sent": {},
-            "source": "archive",
-        })
-    posts.sort(key=lambda r: float(r.get("ts") or 0), reverse=True)
-    return posts
 
 
 def fill_boards_from_cells(board, slots, cells: Iterable[Cell]) -> int:

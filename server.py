@@ -114,7 +114,6 @@ def direct_json(data: Any) -> Response:
     return Response(content=_orjson.dumps(data, option=_orjson.OPT_NON_STR_KEYS),
                     media_type="application/json")
 
-import archive_hide
 import archive_restore
 import seo_pages
 from fastapi.staticfiles import StaticFiles
@@ -5066,11 +5065,9 @@ digest_ctx.set_setting_fn = (
     lambda key, val, actor=None:
     account_store.set_setting(str(key), str(val), actor_id=actor))
 
-# Дневной дайджест: архив выпусков, данные с сервера и публикация через бота
+# Дневной дайджест: архив выпусков, данные с сервера и публикация через бота.
+# Выпуски берутся только из JSON-архива: на сайте видно то, что вышло.
 digest_ctx.store = DigestStore(DIGEST_FILE)
-_archive_hide = archive_hide.ArchiveHide(
-    os.path.join(HERE, "data", "archive_hidden.json"))
-digest_ctx.hide = _archive_hide
 digest_ctx.liqs_fn = lambda: list(LIQUIDATIONS)
 digest_ctx.symbols_fn = lambda: list(feed.symbols if feed else [])
 # Дайджест публикуется в канал: ему нужны настоящие свечи, а не заготовка от
@@ -5079,8 +5076,6 @@ digest_ctx.candles_fn = lambda sym, tf: get_candles(sym, tf, force=True)
 digest_ctx.hours_fn = lambda since, until: HIST.hours_range(since, until)
 digest_ctx.events_fn = lambda since, until: HIST.query(
     since, until, None, 0.0, 20000, False)
-digest_ctx.archive_days_fn = lambda have: archive_restore.digest_records_from_cells(
-    month_cells(), have)
 digest_ctx.oi_fn = oi_payload
 digest_ctx.ai_fn = digest_ai
 digest_ctx.publish_fn = tg_bot.publish_daily_digest
@@ -5200,10 +5195,8 @@ async def collect_hourly_post() -> dict:
 
 
 hourly_ctx.store = HourlyStore(HOURLY_FILE, keep=HOURLY_KEEP)
-hourly_ctx.hide = _archive_hide
 hourly_ctx.bot = tg_bot
 hourly_ctx.collect_fn = collect_hourly_post
-hourly_ctx.archive_fn = lambda: archive_restore.hourly_posts_from_cells(month_cells())
 hourly_ctx.public_url = PUBLIC_URL
 # Посты раздела выходят в английском канале — на странице ссылка на него
 hourly_ctx.channel_url_fn = tg_bot.channel_url_en

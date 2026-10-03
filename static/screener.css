@@ -181,14 +181,22 @@
 .venue-card { min-width: 0; padding: 11px 12px 8px; border: 1px solid rgba(255,255,255,.06); border-radius: 12px; background: rgba(11,16,32,.34); }
 .venue-card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
 .venue-name { color: #dce6f6; font-size: .82rem; font-weight: 800; }
-.venue-net { color: #9ba9c0; font-size: .7rem; font-weight: 700; font-variant-numeric: tabular-nums; }
-.venue-net.is-outflow { color: #34d399; }
-.venue-net.is-inflow { color: #fb7185; }
+.venue-net { color: #9ba9c0; font-size: .74rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+/* Цвета те же, что у свечей терминала: вверх — заходят деньги, вниз — выходят */
+.venue-net.is-inflow { color: #00e676; }
+.venue-net.is-outflow { color: #ff2a5f; }
 .venue-chart { display: block; width: 100%; height: 200px; overflow: visible; }
-.venue-inflow { fill: #fb7185; }
-.venue-outflow { fill: #34d399; }
-.venue-net-line { fill: none; stroke: #78a0ff; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
-.venue-zero { stroke: rgba(167,184,214,.22); stroke-width: 1; stroke-dasharray: 3 3; }
+.venue-grid-line { stroke: rgba(167,184,214,.10); stroke-width: 1; }
+.venue-zero { stroke: rgba(167,184,214,.28); stroke-width: 1; stroke-dasharray: 4 4; }
+.venue-axis-label { fill: #8a97ad; font: 11px var(--font, system-ui); font-variant-numeric: tabular-nums; }
+.venue-area { stroke: none; }
+.venue-seg { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.venue-seg.is-up { stroke: #00e676; }
+.venue-seg.is-down { stroke: #ff2a5f; }
+.venue-seg.is-flat { stroke: #5c6b85; }
+.venue-dot.is-up { fill: #00e676; }
+.venue-dot.is-down { fill: #ff2a5f; }
+.venue-totals { margin-top: 6px; color: #73819a; font-size: .64rem; font-variant-numeric: tabular-nums; }
 .venue-empty { padding: 12px 0; color: #73819a; font-size: .72rem; }
 .feed-heading { margin-bottom: 13px; }
 .dual-feed-grid { display: grid; width: 100%; min-width: 0; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 16px; align-items: start; }

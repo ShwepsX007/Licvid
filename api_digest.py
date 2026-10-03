@@ -48,8 +48,6 @@ class Ctx:
         self.candles_fn = None       # async (монета, таймфрейм) -> {"candles": [...]}
         self.hours_fn = None         # (since, until) -> [(час, ячейка архива)]
         self.events_fn = None        # (since, until) -> события месяца, не только RAM
-        self.archive_days_fn = None  # (have_days) -> выпуски из месячных свёрток
-        self.hide = None             # ArchiveHide: снятые черновики не возвращать
         self.oi_fn = None            # async (монета) -> payload OI
         self.ai_fn = None            # async (facts, lang) -> текст рассказа
         self.publish_fn = None       # async (rec, langs, force) -> {lang: [ok, err]}
@@ -517,8 +515,6 @@ def public_record(rec: dict, lang: str = seo_pages.DEFAULT_LANG,
                    or (rec.get("ai") or {}).get("ru") or "",
         "post": render_post(rec, lang, ctx.public_url),
         "photo": public_photo(rec),
-        # Свёртка месяца — не черновик, который забыли отправить в канал.
-        "restored": str(rec.get("source") or "") == "archive",
     }
     if with_article:
         out["article"] = render_article(rec, lang)
@@ -666,44 +662,14 @@ RETRY_SEC = 900.0        # повтор после сбоя: не чаще, че
 
 
 def digest_records() -> List[dict]:
-    """Выпуски JSON плюс сутки из месячного архива, которых в JSON ещё нет.
+    """Выпуски сайта: только сохранённые ботом в JSON-архив.
 
-    Сохранённый выпуск не переписываем: у него публикация и обложка. Архив
-    только заполняет дни, которые после перезагрузки иначе пропали бы.
+    Месячные свёртки сюда не подмешиваются. Они лежат на диске как цифры за
+    сутки, но публикацией не являются: в канал такой выпуск не уходил, а на
+    странице он выглядел как «дайджест не в своё время» — с пустым описанием
+    и без обложки. Источник правды для /digest — архив публикаций.
     """
-    recs = ctx.store.list() if isinstance(ctx.store, DigestStore) else []
-    fn = getattr(ctx, "archive_days_fn", None)
-    if fn is None:
-        return recs
-    try:
-        extra = fn([str(r.get("day") or r.get("id") or "") for r in recs]) or []
-    except Exception as e:                           # noqa: BLE001
-        log.debug("дайджест: архив суток не собрался: %s", e)
-        return recs
-    have = {str(r.get("day") or r.get("id") or "") for r in recs}
-    hide = getattr(ctx, "hide", None)
-    merged = list(recs)
-    for rec in extra:
-        day = str((rec or {}).get("day") or (rec or {}).get("id") or "")
-        if not day or day in have:
-            continue
-        if hide is not None and hide.digest_hidden(day):
-            continue
-        merged.append(rec)
-        have.add(day)
-    merged.sort(key=lambda r: str(r.get("day") or r.get("id") or ""), reverse=True)
-    return merged
-
-
-def archive_day(day: str) -> Optional[dict]:
-    """Один день из архива, если в JSON его нет."""
-    day = str(day or "")
-    if not day:
-        return None
-    for rec in digest_records():
-        if str(rec.get("day") or rec.get("id") or "") == day:
-            return rec
-    return None
+    return ctx.store.list() if isinstance(ctx.store, DigestStore) else []
 
 
 def day_index(rec: dict, lang: str = seo_pages.DEFAULT_LANG) -> dict:
@@ -913,7 +879,8 @@ def archive_row(rec: dict) -> dict:
         "liq_count": int(facts.get("liq_count") or 0),
         "created": float(rec.get("created") or 0),
         "updated": float(rec.get("updated") or 0),
-        "source": str(rec.get("source") or "store"),
+        # «Черновик» — собранный выпуск, который в канал ещё не ушёл
+        # (контроль публикации). Это единственный непубликационный вид записи.
         "draft": not bool(tg) and not any(
             isinstance(v, dict) and v.get("ok")
             for v in (rec.get("published") or {}).values()),
@@ -1092,8 +1059,6 @@ def register_digest_routes(app) -> None:
     async def api_day(day: str, lang: str = seo_pages.DEFAULT_LANG):
         rec = ctx.store.get(day) if isinstance(ctx.store, DigestStore) else None
         if rec is None:
-            rec = archive_day(day)
-        if rec is None:
             return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
         return JSONResponse({"ok": True, "item": public_record(rec, lang, with_article=True)},
                             headers=_PUBLIC_CACHE)
@@ -1217,12 +1182,11 @@ def register_digest_routes(app) -> None:
         if err:
             return err
         body = body or {}
-        stored = ctx.store.get(day)
-        rec = stored if stored is not None else archive_day(day)
+        rec = ctx.store.get(day)
         if rec is None:
             return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
         want_tg = bool(body.get("tg"))
-        sent = sent_map(rec) if stored is not None else {}
+        sent = sent_map(rec)
         result: Dict[str, Any] = {}
         if want_tg and sent:
             if not bot_running():
@@ -1233,13 +1197,7 @@ def register_digest_routes(app) -> None:
                     status_code=409)
             from channel_digest import drop_channel_posts
             result = await drop_channel_posts(sent, delete_fn())
-        if stored is not None:
-            ctx.store.remove(str(rec.get("id") or day))
-        # Свёртка месяца не лежит в JSON: без пометки черновик вернётся
-        # на следующем запросе. Позже собранный настоящий выпуск не прячем.
-        hide = getattr(ctx, "hide", None)
-        if hide is not None:
-            hide.hide_digest(str(rec.get("day") or day))
+        ctx.store.remove(str(rec.get("id") or day))
         log.info("дайджест %s удалён админом %s (tg=%s: %s)", day, user.get("id"),
                  want_tg, {k: v.get("deleted") for k, v in result.items()})
         return {"ok": True, "removed": archive_row(rec), "tg": result,

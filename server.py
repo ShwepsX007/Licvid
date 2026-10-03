@@ -6421,6 +6421,84 @@ async def api_screener_stats(request: Request):
             "native": whale_screener.native_status() if whale_screener else {}}
 
 
+_SCREENER_VENUES = ("binance", "bybit", "okx", "coinbase", "kraken")
+
+
+def _screener_venue(label: str) -> str:
+    """Биржа по метке кошелька: «Binance 14» → binance, «Coinbase 10» → coinbase.
+
+    Метки приходят из реестра CEX-кошельков и различаются хвостами («14»,
+    «10», «4»), поэтому сравниваем по началу строки, а не по точному имени.
+    """
+    text = str(label or "").strip().lower()
+    for venue in _SCREENER_VENUES:
+        if text.startswith(venue):
+            return venue
+    return ""
+
+
+@app.get("/api/screener/stats/exchanges_24h")
+async def api_screener_exchange_flows(request: Request,
+                                      minutes: int = Query(10, ge=1, le=60)):
+    """Потоки по биржам за сутки: столбцы inflow/outflow и кривая Net Flow.
+
+    Бакет — ``minutes`` минут: по умолчанию 10 (24 часа = 144 точки),
+    ``minutes=1`` даёт 1440 точек. ``net_flow = outflow - inflow``:
+    положительный — монеты уходят с биржи. Биржи без размеченных кошельков
+    возвращаются нулями, чтобы фронт мог показать честное «потоков нет», а не
+    выдуманный график.
+    """
+    now = time.time()
+    since = now - 24 * 60 * 60
+    bucket = int(minutes) * 60
+    points = int(round(24 * 60 / int(minutes)))
+    last_bucket = int(now // bucket) * bucket
+    first_bucket = last_bucket - (points - 1) * bucket
+    flows = {venue: [{"inflow": 0.0, "outflow": 0.0} for _ in range(points)]
+             for venue in _SCREENER_VENUES}
+    events = (await asyncio.to_thread(whale_screener.events_since, since, now)
+              if whale_screener else [])
+    for event in events:
+        venue = _screener_venue(event_exchange(event) if event_exchange else "")
+        if not venue:
+            continue
+        try:
+            value = float(event.get("usd") or 0)
+            timestamp = float(event.get("timestamp") or 0)
+        except (TypeError, ValueError):
+            continue
+        if value < 0 or not math.isfinite(value):
+            continue
+        index = int((timestamp - first_bucket) // bucket)
+        if index < 0 or index >= points:
+            continue
+        direction = str(event.get("direction") or "").lower()
+        if direction == "inflow":
+            side = "inflow"
+        elif direction == "outflow":
+            side = "outflow"
+        elif event.get("to_label"):
+            side = "inflow"
+        elif event.get("from_label"):
+            side = "outflow"
+        else:
+            continue          # сделки и переводы между кошельками — не поток биржи
+        flows[venue][index][side] += value
+    payload = {}
+    for venue in _SCREENER_VENUES:
+        rows = []
+        for index, cell in enumerate(flows[venue]):
+            timestamp = first_bucket + index * bucket
+            inflow = round(cell["inflow"], 2)
+            outflow = round(cell["outflow"], 2)
+            rows.append({"timestamp": timestamp,
+                         "hour": time.strftime("%H:%M", time.gmtime(timestamp)),
+                         "inflow": inflow, "outflow": outflow,
+                         "net_flow": round(outflow - inflow, 2)})
+        payload[venue] = rows
+    return payload
+
+
 @app.get("/api/screener/history")
 async def api_screener_history(
         request: Request,

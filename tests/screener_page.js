@@ -53,6 +53,16 @@ const series = Array.from({length: 24}, (_, i) => ({
 const stats = {total_events: 2, total_volume_usd: 400000, active_networks: 2,
     networks, series, top_exchanges: {ALL: [{name: "Binance 14", events: 1, volume_usd: 125000}],
         ETH: [{name: "Binance 14", events: 1, volume_usd: 125000}], HYPERLIQUID: []}};
+const venueFlows = {};
+["binance", "bybit", "okx", "coinbase", "kraken"].forEach(venue => {
+    venueFlows[venue] = Array.from({length: 144}, (_, i) => ({
+        timestamp: Math.floor(now / 600) * 600 - (143 - i) * 600,
+        hour: String(Math.floor(i / 6)).padStart(2, "0") + ":" + String((i % 6) * 10).padStart(2, "0"),
+        inflow: venue === "binance" && i === 143 ? 125000 : 0,
+        outflow: venue === "binance" && i === 142 ? 200000 : 0,
+        net_flow: venue === "binance" ? (i === 142 ? 200000 : i === 143 ? -125000 : 0) : 0,
+    }));
+});
 const fetches = [];
 win.LiqScopeI18n = {lang: () => "en", t: (key, vars = {}) => {
     const labels = {
@@ -76,6 +86,8 @@ win.LiqScopeI18n = {lang: () => "en", t: (key, vars = {}) => {
         "screener.tooltip_24h": "24h total", "screener.tooltip_top3": "Top 3 exchanges",
         "screener.no_top_exchanges": "No labeled exchanges", "screener.flow_title": "Transfer flow",
         "screener.trade_chart_title": "Hyperliquid trade flow",
+        "screener.period_24h": "24h", "screener.net_flow": "Net Flow",
+        "screener.venue_flow_empty": "No exchange flows in this period.",
     };
     let value = labels[key] || key;
     Object.keys(vars).forEach(name => { value = value.replace("{" + name + "}", vars[name]); });
@@ -84,6 +96,10 @@ win.LiqScopeI18n = {lang: () => "en", t: (key, vars = {}) => {
 win.fetch = async url => {
     const parsed = new URL(url, "https://liqscope.online");
     fetches.push(parsed.pathname + parsed.search);
+    if (parsed.pathname.endsWith("/exchanges_24h")) {
+        assert.equal(parsed.searchParams.get("minutes"), "10", "10-минутные бакеты по умолчанию");
+        return {ok: true, json: async () => venueFlows};
+    }
     if (parsed.pathname.endsWith("/stats")) return {ok: true, json: async () => stats};
     if (parsed.pathname.endsWith("/whales")) {
         const chain = parsed.searchParams.get("chain") || "ALL";
@@ -132,6 +148,30 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
         assert.equal(feed.getAttribute("tabindex"), "0");
     });
     assert.equal(win.document.querySelectorAll("#chart-legend .network-legend-item").length, 8);
+    const venueCards = win.document.querySelectorAll("#venue-charts .venue-card");
+    assert.equal(venueCards.length, 5, "по клетке на каждую биржу: Binance/Bybit/OKX/Coinbase/Kraken");
+    assert.equal(win.document.querySelector('#venue-charts [data-venue="binance"] .venue-name').textContent,
+        "Binance 24h");
+    const binanceCard = win.document.querySelector('#venue-charts [data-venue="binance"]');
+    assert(binanceCard.querySelectorAll(".venue-inflow").length === 1, "inflow — красные столбцы (вниз)");
+    assert(binanceCard.querySelectorAll(".venue-outflow").length === 1, "outflow — зелёные столбцы (вверх)");
+    assert(binanceCard.querySelector(".venue-net-line"), "кривая Net Flow нарисована");
+    const inflowPath = binanceCard.querySelector(".venue-inflow").getAttribute("d");
+    const outflowPath = binanceCard.querySelector(".venue-outflow").getAttribute("d");
+    assert(!inflowPath.includes("v-"), "inflow — столбцы вниз от нулевой линии");
+    assert(outflowPath.includes("v-"), "outflow — столбцы вверх от нулевой линии");
+    assert(binanceCard.querySelector(".venue-net").classList.contains("is-outflow"),
+        "суммарный Net Flow +$75.0K подсвечен как вывод с биржи");
+    const bybitCard = win.document.querySelector('#venue-charts [data-venue="bybit"]');
+    assert(bybitCard.querySelector(".venue-empty"), "без меток кошельков клетка честно пустая");
+    assert.equal(bybitCard.querySelectorAll(".venue-chart").length, 0);
+    assert(css.includes(".venue-grid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr))"),
+        "на десктопе три колонки");
+    assert(css.includes(".venue-chart { display: block; width: 100%; height: 200px"),
+        "график биржи высотой ~200px");
+    assert(css.includes(".venue-net-line { fill: none; stroke: #78a0ff"), "Net Flow — сплошная линия");
+    assert(fetches.some(url => url.includes("/api/screener/stats/exchanges_24h") && url.includes("minutes=10")),
+        "фронт запрашивает потоки по биржам за 24 часа");
     assert.equal(win.document.querySelectorAll("#exchange-list .exchange-row").length, 1);
     assert.equal(win.document.querySelectorAll("#screener-events .event-row").length, 1);
     assert.equal(win.document.querySelectorAll("#hl-screener-events .event-row").length, 1);

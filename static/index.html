@@ -385,6 +385,13 @@
                          aria-live="polite"></div>
                     <!-- Lightweight Charts Container -->
                     <div id="tv-chart-container"></div>
+                    <!-- Плашка «обновляю свечи»: на время рефреша (↻) свечи
+                         убраны с графика, поэтому поверх — спиннер. -->
+                    <div class="chart-loading hidden" id="chart-loading" role="status"
+                         aria-live="polite" aria-hidden="true">
+                        <span class="chart-spinner" aria-hidden="true"></span>
+                        <span data-i18n="chart.loading">Обновляю свечи…</span>
+                    </div>
                     <!-- Cluster Canvas Overlay: ликвидации + профиль по ценам -->
                     <canvas id="cluster-canvas"></canvas>
                     <!-- Draw Canvas Overlay: фигуры теханализа пользователя -->

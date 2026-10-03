@@ -93,6 +93,7 @@
         flowAll: null,         // лента: liq | cvd | oi
         chartFollow: true,      // автоследование: окно само едет за ценой
         followMoved: 0,         // сколько раз окно подвинулось (для тестов/диагностики)
+        refreshPending: false,  // идёт рефреш ↻: ряды пусты, шкалу сбросим после данных
     };
 
     // Встроенный сингл-чарт (iframe «добавить график» и старое окно panel):
@@ -283,6 +284,8 @@
     let markersApi = null;
     let audioCtx = null;
     let redrawQueued = false;
+    // рефреш ↻ уже идёт: второй клик не запускает вторую загрузку
+    let refreshBusy = false;
 
     // Хит-тест прямоугольников: координаты и ids событий из последнего drawClusters()
     let clusterHits = [];         // [{kind:"liq", x, y, w, h, key, ids:[...]}]
@@ -1636,6 +1639,30 @@
         return null;
     }
 
+    /** Диапазон цен свечей [from..to] — чистая функция, гоняется в тестах.
+     *
+     * Нужна там, где индексы участка известны заранее и читать видимое окно
+     * графика нельзя: после рефреша библиотека применяет новое окно времени
+     * лишь на следующем кадре, и ``getVisibleLogicalRange`` вернул бы старый
+     * участок.
+     */
+    function priceBandBetween(from, to) {
+        const candles = state.candles || [];
+        if (!candles.length) return null;
+        const first = Math.max(0, Math.floor(Number(from)));
+        const last = Math.min(candles.length - 1, Math.ceil(Number(to)));
+        let low = Infinity, high = -Infinity;
+        for (let i = first; i <= last; i++) {
+            const c = candles[i];
+            if (!c) continue;
+            const lo = Number(c.low), hi = Number(c.high);
+            if (isFinite(lo) && lo < low) low = lo;
+            if (isFinite(hi) && hi > high) high = hi;
+        }
+        if (!isFinite(low) || !isFinite(high)) return null;
+        return { low: low, high: high };
+    }
+
     /** Границы цены по видимым свечам (для вертикального слежения). */
     function visiblePriceBand() {
         const candles = state.candles || [];
@@ -1648,16 +1675,7 @@
                 to = Math.min(candles.length - 1, Math.ceil(Number(lr.to)));
             }
         } catch (e) { /* окно неизвестно — берём все свечи */ }
-        let low = Infinity, high = -Infinity;
-        for (let i = from; i <= to; i++) {
-            const c = candles[i];
-            if (!c) continue;
-            const lo = Number(c.low), hi = Number(c.high);
-            if (isFinite(lo) && lo < low) low = lo;
-            if (isFinite(hi) && hi > high) high = hi;
-        }
-        if (!isFinite(low) || !isFinite(high)) return null;
-        return { low: low, high: high };
+        return priceBandBetween(from, to);
     }
 
     /** Последняя цена на графике (закрытие живой свечи). */
@@ -1915,6 +1933,65 @@
         return out;
     }
 
+    /** Сброс масштаба после рефреша: время — по новым свечам, цена — по ним же.
+     *
+     * Зачем. В слежении шкала цены наша (``autoScale:false``, окно двигаем мы
+     * сами). После ``setData([])`` библиотека окно НЕ трогает: оно остаётся от
+     * старых свечей, и новые данные рисуются за его границами — свечи
+     * выглядели сплющенной линией, а метки разлетались.
+     *
+     * Раньше здесь был ``fitContent()`` + шаг по видимым свечам, но у
+     * библиотеки окно времени применяется на СЛЕДУЮЩЕМ кадре: к моменту
+     * шага видимым оставался старый участок, и по нему считалась шкала. Для
+     * рефреша это лишнее — новые свечи и так должны показаться целиком,
+     * поэтому диапазон времени ставим сами, по длине ряда: без ожидания
+     * кадров и без stale-чтений. ``fitContent()`` остаётся как подстраховка
+     * (например, если длина ещё не пришла).
+     */
+    function refitChartScale() {
+        if (!chart) return false;
+        const bars = state.candles.length;
+        let done = false;
+
+        // Время: показываем весь ряд. Диапазон ставим явно — библиотека
+        // применит его на следующем кадре, и никакие чтения «текущего» окна
+        // (они вернули бы старое) не нужны.
+        if (bars > 0) {
+            try {
+                chart.timeScale().setVisibleLogicalRange({ from: -0.5, to: bars - 0.5 });
+                done = true;
+            } catch (e) { /* ignore */ }
+        }
+        if (!done) {
+            try { chart.timeScale().fitContent(); done = true; } catch (e) { /* ignore */ }
+        }
+
+        let scale = null;
+        try { scale = rightPriceScale(); } catch (e) { scale = null; }
+        if (!scale || !scale.setVisibleRange) return done;
+
+        if (state.chartFollow && bars > 0) {
+            // Слежение ведём сами (autoScale выключен), а окно осталось от
+            // старых свечей. Считаем новое окно прямо по показываемым свечам:
+            // они известны (0…bars−1), поэтому читать видимое окно графика не
+            // надо — сразу после рефреша оно ещё старое.
+            const next = followPriceFit(priceBandBetween(0, bars - 1),
+                                        lastChartPrice(), FOLLOW_MARGIN);
+            if (next) {
+                try { scale.setVisibleRange(next); done = true; } catch (e) { /* ignore */ }
+            }
+            return done;
+        }
+        // Слежения нет — шкалой цены распоряжается библиотека.
+        if (scale.applyOptions) {
+            try {
+                scale.applyOptions(followPriceOptions(false));
+                done = true;
+            } catch (e) { /* ignore */ }
+        }
+        return done;
+    }
+
     function setCandles(candles, source) {
         state.candles = sanitizeCandles(candles);
         state.candleSource = source || "";
@@ -1963,11 +2040,21 @@
         updateLiveStats();
         queueRedraw();
         queueShapeFeed();
-        followChartNow();
+        if (state.refreshPending) {
+            // это ответ на ↻ — окно и шкалу ставим по новым данным, а не
+            // продолжаем старую картинку (иначе свечи сплющиваются)
+            state.refreshPending = false;
+            refitChartScale();
+        } else {
+            followChartNow();
+        }
     }
 
     function updateCandle(c) {
         if (!candleSeries || !c) return;
+        // Пока идёт рефреш, ряды пусты: тик нарисовал бы одну свечу поверх
+        // пустого графика и она конфликтовала бы с ответом /api/klines.
+        if (state.refreshPending) return;
         const bar = {
             time: Number(c.time), open: Number(c.open), high: Number(c.high),
             low: Number(c.low), close: Number(c.close),
@@ -7032,8 +7119,27 @@
     }
 
     // --- Кнопка «Обновить график» (↻) ----------------------------------------
-    function refreshChart() {
+    /** Плашка «обновляю свечи» поверх графика (пока ряды пусты). */
+    function showChartLoading(on) {
+        const box = $("chart-loading");
+        if (!box) return;
+        box.classList.toggle("hidden", !on);
+        box.setAttribute("aria-hidden", on ? "false" : "true");
+    }
+
+    /** Рефреш: полностью убираем старые ряды и метки, ждём новые данные и
+     *  заново подгоняем масштаб (``refitChartScale`` — уже по новым свечам).
+     *
+     *  Порядок важен: очистка идёт до запроса (старые данные не мешают новым),
+     *  ответ на запрос применяется в ``setCandles`` и там же сбрасывает шкалу,
+     *  а спиннер держится до конца загрузки — включая пересборку маркеров.
+     */
+    async function refreshChart() {
+        if (refreshBusy) return;         // повторный клик по ↻ ничего не ломает
+        refreshBusy = true;
         const sym = chartSymbol();
+        state.refreshPending = true;
+        showChartLoading(true);
         state.candles = [];
         if (candleSeries && typeof candleSeries.setData === "function") {
             try { candleSeries.setData([]); } catch (e) { /* ignore */ }
@@ -7051,8 +7157,16 @@
         dropLiqClusters();
         applyMarkers([]);
         queueRedraw();
-        loadCandles();
-        loadHistoryFor(sym, true);
+        try {
+            await loadCandles();
+            await loadHistoryFor(sym, true);
+        } catch (e) {
+            console.warn("[refresh] свечи не обновились:", e);
+        } finally {
+            state.refreshPending = false;
+            refreshBusy = false;
+            showChartLoading(false);
+        }
         if (liqClustersWanted()) loadLiqClusters(true);
         if (state.bookEnabled) bookSnapshot();
         if (state.levelsEnabled) levelsSnapshot(true);

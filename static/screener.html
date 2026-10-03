@@ -9,7 +9,7 @@
 <title data-i18n="screener.title">Whale Screener — LiqScope</title>
 <link rel="icon" href="/static/favicon.ico">
 <link rel="stylesheet" href="/static/brand.css?v=rebrand1">
-<link rel="stylesheet" href="/static/screener.css?v=multichain3">
+<link rel="stylesheet" href="/static/screener.css?v=venueflow1">
 </head>
 <body class="dark-theme screener-page">
 <header class="site-header">
@@ -98,6 +98,18 @@
             <div id="exchange-list" class="exchange-list" aria-live="polite"></div>
             <p id="exchange-empty" class="empty-note" hidden data-i18n="screener.exchange_empty">No labeled exchange activity in this period.</p>
         </article>
+    </section>
+
+    <section class="panel venue-flow-panel" aria-labelledby="venue-flow-title">
+        <div class="section-heading">
+            <div>
+                <div class="eyebrow" data-i18n="screener.venue_flow_eyebrow">EXCHANGE FLOWS</div>
+                <h2 id="venue-flow-title" data-i18n="screener.venue_flow_title">Flows by exchange · 24h</h2>
+            </div>
+            <span class="period-pill" data-i18n="screener.period_24h">24h</span>
+        </div>
+        <p class="venue-flow-hint muted" data-i18n="screener.net_flow_hint">Bars: down — inflow, up — outflow. Line — Net Flow: rising means coins are leaving the exchange.</p>
+        <div id="venue-charts" class="venue-grid" aria-live="polite"></div>
     </section>
 
     <section class="panel feed-panel" aria-labelledby="feed-title">
@@ -203,10 +215,10 @@
     </section>
 </main>
 
-<script src="/static/i18n.pages.js?v=multichain4" defer></script>
+<script src="/static/i18n.pages.js?v=venueflow1" defer></script>
 <script src="/static/i18n.js?v=screener1" defer></script>
 <script src="/static/account.js?v=nav5" defer></script>
 <script src="/static/donate.js?v=nav1" defer></script>
-<script src="/static/screener.js?v=multichain3" defer></script>
+<script src="/static/screener.js?v=venueflow1" defer></script>
 </body>
 </html>

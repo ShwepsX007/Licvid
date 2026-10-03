@@ -99,7 +99,11 @@ Bitcoin, Bitcoin Cash, Litecoin, Sui и Dogecoin не подключены.
 
 `GET /api/screener/whales?min_usd=100000&chain=ALL&limit=50` возвращает события
 и статус сборщика; для истории и аналитики доступны `/api/screener/history` и
-`/api/screener/stats`. `chain` принимает `ALL`, `GENERAL`, `EVM`, любую из пяти
+`/api/screener/stats`. Потоки по биржам за сутки отдаёт
+`/api/screener/stats/exchanges_24h?minutes=10` — по десятиминутным бакетам
+(144 точки; `minutes=1` даёт 1440) для `binance`, `bybit`, `okx`, `coinbase` и
+`kraken`, в каждой точке `inflow`, `outflow` и `net_flow = outflow - inflow`
+(плюс — монеты уходят с биржи). `chain` принимает `ALL`, `GENERAL`, `EVM`, любую из пяти
 EVM-сетей, `SOLANA`, `TRON` или `HYPERLIQUID`; `limit`: 1–100. Общая лента и
 Hyperliquid имеют отдельные независимые фильтры в `/screener`. Новые события
 передаются через общий `/ws` как `type: "whale_tx"`; маркеры `⚡` и `🕒`

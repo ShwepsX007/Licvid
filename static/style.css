@@ -887,6 +887,34 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
     z-index: 3;
 }
 
+/* Плашка «обновляю свечи» на время рефреша (↻): свечи убраны с графика,
+   поэтому поверх всего — спиннер и подпись. Слой выше канвы рисунков. */
+.chart-loading {
+    position: absolute;
+    left: 0; top: 0; right: 0; bottom: 0;
+    z-index: 6;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    background: rgba(9, 12, 16, 0.45);
+    pointer-events: none;
+}
+.chart-spinner {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    border: 2px solid rgba(255, 255, 255, 0.16);
+    border-top-color: var(--color-blue, #4da3ff);
+    animation: chart-spin 0.7s linear infinite;
+}
+@keyframes chart-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+    .chart-spinner { animation-duration: 2s; }
+}
+
 /* Кнопка входа в рисование (рядом со свернуть/развернуть) */
 .tool-toggle {
     display: inline-flex;
@@ -1883,6 +1911,27 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
     border-radius: 6px;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
     padding: 8px;
+}
+
+/* Телефон: панель фильтров открывается модальным окном по центру экрана.
+   Панель прижата к кнопке (absolute, min-width 230px), а панель управления
+   на узком экране переносится по строкам — окно уезжало за правый край, и
+   поля «CVD», «OI Δ» и пресеты оказывались за экраном. Фиксируем по центру:
+   помещается по ширине (90vw, но не шире 400px) и по высоте (80vh + скролл
+   внутри), поэтому видны все input. */
+@media (max-width: 768px) {
+    .filter-panel {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: 90vw;
+        max-width: 400px;
+        max-height: 80vh;
+        overflow-y: auto;
+        margin: 0;
+        z-index: 10000;
+    }
 }
 
 .filter-row { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }

@@ -279,9 +279,10 @@
         btn.addEventListener("click", togglePop);
 
         wrap.appendChild(btn);
-        // В конец шапки: рядом с «Кабинет»/«Войти», но вне блока, который
-        // перерисовывает account.js при смене входа.
-        nav.appendChild(wrap);
+        // Первой в блоке навигации: кнопка должна стоять сразу после
+        // логотипа/«Чата», левее «Скринера» и «Дайджеста». Раньше её
+        // дописывали в конец — она уезжала за переключатель языка.
+        nav.insertBefore(wrap, nav.firstChild);
 
         buildPop();
         document.addEventListener("click", onDocClick);

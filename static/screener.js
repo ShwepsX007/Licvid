@@ -23,12 +23,23 @@
         inflow_usd: "#34d399", outflow_usd: "#fb7185",
         buy_usd: "#78a0ff", sell_usd: "#c084fc", transfer_usd: "#91a2bd",
     };
+    // Биржи графиков потоков: порядок карточек фиксирован, чтобы клетки не
+    // прыгали между обновлениями, когда у какой-то биржи нет событий.
+    const VENUES = [
+        {id: "binance", name: "Binance"},
+        {id: "bybit", name: "Bybit"},
+        {id: "okx", name: "OKX"},
+        {id: "coinbase", name: "Coinbase"},
+        {id: "kraken", name: "Kraken"},
+    ];
     const networkOpacity = index => Math.max(.48, .96 - index * .07);
     const state = {
         stats: null, liveRows: [], hlRows: [], selectedChain: "ALL", historyPage: 1,
         historyPages: 1, sortBy: "timestamp", sortDir: "desc",
         seenLive: new Set(), seenHL: new Set(), initializedLive: false,
         initializedHL: false, historyRequest: 0,
+        venueFlows: null,       // {binance: [{hour, inflow, outflow, net_flow}, …], …}
+        venueRequest: 0,
     };
 
     function t(key, vars) {
@@ -429,6 +440,100 @@
         });
     }
 
+    /** Сумма потоков биржи за сутки: сколько пришло, ушло и что в остатке. */
+    function venueTotals(points) {
+        let inflow = 0, outflow = 0;
+        (points || []).forEach(point => {
+            inflow += Number(point.inflow || 0);
+            outflow += Number(point.outflow || 0);
+        });
+        return {inflow: inflow, outflow: outflow, net: outflow - inflow};
+    }
+
+    /** Один график биржи: столбцы inflow вниз / outflow вверх и линия Net Flow.
+     *
+     *  Рисуем вручную SVG-путями (как и остальные графики Скринера): у клетки
+     *  144 точки, поэтому на столбцы уходит ровно две фигуры и одна линия, а
+     *  не сотни узлов. Сетку не рисуем — только нулевую линию: она общая для
+     *  столбцов и Net Flow. Столбцы масштабированы по максимуму валового
+     *  потока, линия — по своему максимуму (иначе Net Flow визуально слилась
+     *  бы с нулём).
+     */
+    function drawVenueChart(svg, points) {
+        svg.replaceChildren();
+        const W = 320, H = 200, padX = 4, padTop = 12, padBottom = 12;
+        const plotH = H - padTop - padBottom;
+        const mid = padTop + plotH / 2;
+        const totals = venueTotals(points);
+        const maxFlow = points.reduce((max, point) => Math.max(max,
+            Number(point.inflow) || 0, Number(point.outflow) || 0), 0);
+        const maxNet = points.reduce((max, point) =>
+            Math.max(max, Math.abs(Number(point.net_flow) || 0)), 0);
+        if (!(maxFlow > 0) && !(maxNet > 0)) return false;
+        const flowScale = maxFlow > 0 ? (plotH / 2) / maxFlow : 0;
+        const netScale = maxNet > 0 ? (plotH / 2) / maxNet : 0;
+        const groupW = (W - padX * 2) / points.length;
+        const barW = Math.max(1, Math.min(7, groupW * 0.72));
+        const inflowPath = [], outflowPath = [], netPath = [];
+        points.forEach((point, index) => {
+            const x = padX + index * groupW + groupW / 2;
+            const up = Number(point.outflow) || 0;
+            const down = Number(point.inflow) || 0;
+            if (up > 0) {
+                outflowPath.push(`M${(x - barW / 2).toFixed(2)} ${mid.toFixed(2)}` +
+                    `h${barW.toFixed(2)}v${(-up * flowScale).toFixed(2)}h${(-barW).toFixed(2)}Z`);
+            }
+            if (down > 0) {
+                inflowPath.push(`M${(x - barW / 2).toFixed(2)} ${mid.toFixed(2)}` +
+                    `h${barW.toFixed(2)}v${(down * flowScale).toFixed(2)}h${(-barW).toFixed(2)}Z`);
+            }
+            const netY = mid - (Number(point.net_flow) || 0) * netScale;
+            netPath.push(`${index ? "L" : "M"}${x.toFixed(2)} ${netY.toFixed(2)}`);
+        });
+        svg.append(svgNode("line", {x1: padX, y1: mid.toFixed(2), x2: W - padX,
+                                    y2: mid.toFixed(2), class: "venue-zero"}));
+        if (outflowPath.length) {
+            svg.append(svgNode("path", {d: outflowPath.join(" "), class: "venue-outflow"}));
+        }
+        if (inflowPath.length) {
+            svg.append(svgNode("path", {d: inflowPath.join(" "), class: "venue-inflow"}));
+        }
+        svg.append(svgNode("path", {d: netPath.join(" "), class: "venue-net-line"}));
+        svg.append(svgNode("title", {}, t("screener.net_flow") + ": " +
+            (totals.net > 0 ? "+" : "") + fmtUSD(totals.net)));
+        return true;
+    }
+
+    function renderVenueFlows() {
+        const grid = $("venue-charts");
+        if (!grid) return;
+        grid.replaceChildren();
+        VENUES.forEach(venue => {
+            const points = state.venueFlows ? state.venueFlows[venue.id] : null;
+            const totals = venueTotals(points);
+            const card = make("div", "venue-card");
+            card.dataset.venue = venue.id;
+            const head = make("div", "venue-card-head");
+            head.append(make("span", "venue-name",
+                venue.name + " " + t("screener.period_24h")));
+            const hasFlow = !!points && (totals.inflow > 0 || totals.outflow > 0);
+            const net = make("span", "venue-net", hasFlow
+                ? (totals.net > 0 ? "+" : "") + fmtUSD(totals.net, true) : "—");
+            if (hasFlow) net.classList.add(totals.net >= 0 ? "is-outflow" : "is-inflow");
+            head.append(net);
+            card.append(head);
+            const svg = svgNode("svg", {viewBox: "0 0 320 200", class: "venue-chart",
+                role: "img",
+                "aria-label": venue.name + " " + t("screener.net_flow")});
+            if (points && drawVenueChart(svg, points)) {
+                card.append(svg);
+            } else {
+                card.append(make("p", "venue-empty", t("screener.venue_flow_empty")));
+            }
+            grid.append(card);
+        });
+    }
+
     function renderExchangeFilter() {
         const select = $("whale-exchange");
         if (!select) return;
@@ -618,6 +723,23 @@
             setText("feed-error", t("screener.load_error"));
         }
     }
+    async function fetchVenueFlows() {
+        const sequence = ++state.venueRequest;
+        try {
+            const response = await fetch("/api/screener/stats/exchanges_24h?minutes=10",
+                {credentials: "same-origin", cache: "no-store"});
+            if (response.status === 401) return goToLogin();
+            if (!response.ok) throw new Error("HTTP " + response.status);
+            const data = await response.json();
+            if (sequence !== state.venueRequest) return;
+            state.venueFlows = data;
+        } catch (_) {
+            if (sequence !== state.venueRequest) return;
+            state.venueFlows = null;
+        }
+        renderVenueFlows();
+    }
+
     async function fetchStats() {
         try {
             const response = await fetch("/api/screener/stats", {credentials: "same-origin", cache: "no-store"});
@@ -749,6 +871,7 @@
                 renderOverview();
                 renderLive();
                 renderHyperliquid();
+                renderVenueFlows();
                 fetchHistory();
             });
         }
@@ -763,9 +886,12 @@
         fetchStats();
         fetchLive();
         fetchHistory();
+        fetchVenueFlows();
         window.setInterval(() => { if (!document.hidden) fetchLive(); }, 9000);
         window.setInterval(() => { if (!document.hidden) fetchStats(); }, 30000);
         window.setInterval(() => { if (!document.hidden) fetchHistory(); }, 60000);
+        // Потоки по биржам меняются медленно — хватает одного раза в пять минут.
+        window.setInterval(() => { if (!document.hidden) fetchVenueFlows(); }, 300000);
     }
     document.addEventListener("DOMContentLoaded", init, {once: true});
 })();

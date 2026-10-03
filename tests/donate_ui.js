@@ -103,6 +103,10 @@ function page(opts) {
           btn && btn.textContent);
     check("кнопка стоит внутри той же шапки",
           btn && btn.closest("nav.header-nav") !== null);
+    check("кнопка — первая в меню, левее «Скринера»",
+          !!btn && btn.parentElement === btn.closest("nav").firstElementChild, 
+          btn && btn.parentElement.previousElementSibling &&
+              btn.parentElement.previousElementSibling.textContent);
     check("шапку с аккаунтом не трогаем",
           w.document.getElementById("nav-account").children.length === 0);
 

@@ -540,6 +540,8 @@ class CEXWalletRegistry:
         self.updated_at = 0
         self.last_source = ""
         self.last_error = ""
+        # Сводка последней автоочистки: когда, сколько убрали, почему не убрали.
+        self.last_prune: dict = {}
         self._load()
 
     def _load(self) -> None:
@@ -596,8 +598,12 @@ class CEXWalletRegistry:
         counts = {}
         for row in rows:
             counts[row["chain"]] = counts.get(row["chain"], 0) + 1
+        oldest = min((int(row.get("updated_at") or 0) for row in self._automatic),
+                     default=0)
         return {"total": len(rows), "by_chain": counts, "updated_at": self.updated_at,
-                "source": self.last_source, "error": self.last_error}
+                "source": self.last_source, "error": self.last_error,
+                "automatic": len(self._automatic), "manual": len(self._manual),
+                "oldest_updated_at": oldest, "last_prune": dict(self.last_prune)}
 
     def _save_locked(self, *, source: str = "") -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -687,6 +693,96 @@ class CEXWalletRegistry:
                 self._manual = previous
                 raise OSError("Could not save wallet registry") from exc
             return True
+
+    def prune_stale(self, *, cutoff: float, active_keys: set | None = None,
+                    min_keep_ratio: float = 0.5, apply: bool = True) -> dict:
+        """Убрать кошельки, которые не видно ни в источниках, ни в скринере.
+
+        Кошелёк считается мёртвым, если одновременно:
+          • ни один источник (DeFiLlama / Etherscan) не публиковал его с `cutoff`
+            — то есть сутки за сутками он не обновлялся в реестре;
+          • его адреса нет ни в одном событии Скринера за это же окно
+            (`active_keys` из history-базы).
+
+        Ручные кошельки (`source == "manual"`) не трогаем никогда: их добавил
+        админ осознанно, и решение об удалении — тоже его.
+
+        Страховка от сюрпризов провайдера: если за один проход набегает больше
+        половины автосписка, ничего не удаляем — такое бывает, когда источник
+        меняет формат или молчит, а не когда кошельки правда умерли.
+        """
+        wanted = {(str(chain).upper(), str(address or ""))
+                  for chain, address in (active_keys or set())
+                  if str(chain or "").strip()}
+        cutoff = int(cutoff)
+        with self._lock:
+            keep: list[dict] = []
+            drop: list[dict] = []
+            for row in self._automatic:
+                key = (row["chain"], address_key(row["chain"], row["address"]))
+                fresh = int(row.get("updated_at") or 0) >= cutoff
+                if fresh or key in wanted or (row["chain"], row["address"]) in wanted:
+                    keep.append(row)
+                else:
+                    drop.append(row)
+            result = {
+                "ok": True,
+                "cutoff": cutoff,
+                "before": len(self._automatic) + len(self._manual),
+                "removed": len(drop),
+                "automatic_total": len(self._automatic),
+                "manual_kept": len(self._manual),
+                "by_chain": {},
+                "applied": False,
+                "activity_source": "history" if active_keys is not None else "unavailable",
+            }
+            for row in drop:
+                result["by_chain"][row["chain"]] = result["by_chain"].get(row["chain"], 0) + 1
+            if not drop:
+                self.last_prune = {**result, "at": int(time.time())}
+                return result
+            # На маленькой базе «половина» — пара строк, и любая плановая
+            # чистка упиралась бы в лимит. Значит: до 50 за проход можно всегда,
+            # дальше — не больше (1 - min_keep_ratio) автосписка.
+            limit = max(50, int(len(self._automatic) * max(0.0, 1.0 - min_keep_ratio)))
+            if len(drop) > limit:
+                result.update(ok=False, removed=0,
+                              reason=("слишком много неактуальных за раз "
+                                      f"({len(drop)} из {len(self._automatic)}) — "
+                                      f"лимит на проход {limit}; ничего не удалено"))
+                self.last_prune = {**result, "at": int(time.time())}
+                log.warning("[cex_wallets] prune skipped: %s", result["reason"])
+                return result
+            if not apply:
+                result["reason"] = "dry run"
+                return result
+            previous = self._automatic
+            self._automatic = keep
+            try:
+                self._save_locked(source=self.last_source)
+            except OSError as exc:
+                self._automatic = previous
+                result.update(ok=False, removed=0, applied=False,
+                              reason=f"не удалось записать реестр: {type(exc).__name__}")
+                return result
+            result["after"] = len(keep) + len(self._manual)
+            result["applied"] = True
+            self.last_prune = {**result, "at": int(time.time())}
+            log.info("[cex_wallets] автоочистка: убрано %d из %d (older than %s)",
+                     len(drop), len(previous), time.strftime(
+                         "%Y-%m-%d", time.gmtime(cutoff)))
+            return result
+
+    def stale_count(self, *, cutoff: float, active_keys: set | None = None) -> int:
+        """Сколько кошельков считаются мёртвыми. Только счёт, без страховки.
+
+        Страховку «не слить половину базы» оставляет за собой самой чистке: в
+        предпросмотре админ обязан увидеть реальное число, иначе молчаливый ноль
+        выглядит как «чистить нечего».
+        """
+        preview = self.prune_stale(cutoff=cutoff, active_keys=active_keys,
+                                  min_keep_ratio=0.0, apply=False)
+        return int(preview.get("removed") or 0)
 
     async def refresh(self, session: aiohttp.ClientSession | None = None) -> dict:
         async with self._refresh_lock:

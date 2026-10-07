@@ -77,7 +77,7 @@ let venueFlows = {
     series: {binance: venueRows("binance"), gate: venueRows("gate")},
 };
 const fetches = [];
-win.LiqScopeI18n = {lang: () => "en", t: (key, vars = {}) => {
+const i18n = {lang: () => "en", t: (key, vars = {}) => {
     const labels = {
         "screener.network_all": "All networks", "screener.network_eth": "Ethereum",
         "screener.network_bnb": "BNB Chain", "screener.network_polygon": "Polygon",
@@ -107,6 +107,7 @@ win.LiqScopeI18n = {lang: () => "en", t: (key, vars = {}) => {
     Object.keys(vars).forEach(name => { value = value.replace("{" + name + "}", vars[name]); });
     return value;
 }, onChange: () => {} };
+win.LiqScopeI18n = i18n;
 win.fetch = async url => {
     const parsed = new URL(url, "https://liqscope.online");
     fetches.push(parsed.pathname + parsed.search);
@@ -130,6 +131,7 @@ win.fetch = async url => {
 };
 win.eval(script);
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+let statsDom = null;
 (async () => {
     await sleep(100);
     assert.equal(win.document.querySelectorAll("#network-cards .network-card").length, 8);
@@ -291,6 +293,78 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     assert.equal(win.document.querySelectorAll("#hl-screener-events .event-row").length, 1);
     assert(fetches.some(url => url.includes("/api/screener/history?") && url.includes("chain=HYPERLIQUID")));
     assert(win.document.getElementById("history-next").disabled === false);
+
+    // ── тумблеры сетей в `/admin`: выключенного в интерфейсе не бывает ──────
+    const fullStats = JSON.parse(JSON.stringify(stats));
+    const hiddenStats = JSON.parse(JSON.stringify(stats));
+    hiddenStats.enabled_networks = ["ETH", "TRON", "HYPERLIQUID"];
+    ["BNB", "POLYGON", "ARBITRUM", "BASE", "SOLANA"].forEach(chain => {
+        hiddenStats.networks[chain].enabled = false;
+    });
+    let statsPayload = fullStats;
+    statsDom = new JSDOM(html, {url: "https://liqscope.online/screener",
+        // скрытая вкладка намеренно пропускает опросы — для проверки реактивности
+        // документ должен быть «видим»
+        runScripts: "outside-only", pretendToBeVisual: true});
+    const statsWin = statsDom.window;
+    statsWin.LiqScopeI18n = i18n;
+    statsWin.fetch = async url => {
+        const parsed = new URL(url, "https://liqscope.online");
+        if (parsed.pathname.endsWith("/exchanges_24h")) {
+            return {ok: true, json: async () => venueFlows};
+        }
+        if (parsed.pathname.endsWith("/stats")) return {ok: true, json: async () => statsPayload};
+        if (parsed.pathname.endsWith("/whales")) {
+            const chain = parsed.searchParams.get("chain") || "ALL";
+            return {ok: true, json: async () => ({events: chain === "GENERAL"
+                ? rows.filter(row => row.chain !== "HYPERLIQUID")
+                : rows.filter(row => row.chain === chain)})};
+        }
+        if (parsed.pathname.endsWith("/history")) {
+            const chain = parsed.searchParams.get("chain") || "ALL";
+            const filtered = rows.filter(row => chain === "ALL" || row.chain === chain);
+            return {ok: true, json: async () => ({events: filtered, total: filtered.length,
+                page: 1, pages: 2})};
+        }
+        throw new Error("unexpected fetch: " + url);
+    };
+    statsWin.eval(script);
+    await sleep(120);
+    assert.equal(statsWin.document.querySelectorAll("#network-cards .network-card").length, 8,
+        "пока сервер не выключил сети — их восемь");
+    statsWin.document.querySelector('[data-network="BASE"]').click();
+    await sleep(30);
+    assert.equal(statsWin.document.getElementById("whale-chain").value, "BASE");
+
+    // админ заглушил пять сетей — они исчезают с карточек, из вкладок, из
+    // селектора и из стека графика; выбор на выключенной сети сбрасывается на «Все»
+    statsPayload = hiddenStats;
+    statsWin.document.dispatchEvent(new statsWin.Event("visibilitychange"));
+    await sleep(80);
+    const cards = statsWin.document.querySelectorAll("#network-cards .network-card");
+    assert.equal(cards.length, 3, "остались ETH, TRON и Hyperliquid");
+    assert(!statsWin.document.querySelector('[data-network="BASE"]'), "выключенной карточки нет");
+    assert(!statsWin.document.querySelector('[data-network="SOLANA"]'), "выключенной карточки нет");
+    assert.equal(Array.from(cards).map(card => card.dataset.network).join(","),
+        "ETH,TRON,HYPERLIQUID");
+    assert.equal(statsWin.document.querySelectorAll("#network-tabs .network-tab").length, 4,
+        "«Все» + три живые сети");
+    const options = Array.from(statsWin.document.querySelectorAll("#whale-chain option"))
+        .map(option => option.value);
+    assert.deepEqual(options, ["ALL", "ETH", "TRON", "HYPERLIQUID"]);
+    assert.equal(statsWin.document.getElementById("whale-chain").value, "ALL",
+        "выбор на выключенной сети сброшен");
+    assert.equal(statsWin.document.querySelectorAll("#chart-legend .network-legend-item").length, 3,
+        "столбиков графика тоже три");
+    assert(statsWin.document.getElementById("overview-online").textContent.includes("/3"),
+        statsWin.document.getElementById("overview-online").textContent);
+    statsDom.window.close();
     win.close();
-    console.log("Screener dashboard: dual feeds, eight networks, independent filters, stacked chart, history and safe text OK");
-})().catch(err => {win.close(); console.error(err); process.exitCode = 1;});
+    console.log("Screener dashboard: dual feeds, eight networks, admin switches, independent "
+    + "filters, stacked chart, history and safe text OK");
+})().catch(err => {
+    if (statsDom) statsDom.window.close();
+    win.close();
+    console.error(err);
+    process.exitCode = 1;
+});

@@ -135,13 +135,20 @@ def normalize_signal(raw: Any) -> Dict[str, Any]:
     return out
 
 
-def signal_presets() -> Dict[str, Any]:
-    """Подсказки интерфейса: список порогов, направления, сети, паузы."""
+def signal_presets(chains: Iterable[str] | None = None) -> Dict[str, Any]:
+    """Подсказки интерфейса: список порогов, направления, сети, паузы.
+
+    `chains` — что оставил включённым админ (тумблеры сетей). Сохранённая настройка
+    при этом не портится: сеть не исчезает из конфига, просто её нельзя выбрать.
+    """
+    allowed = [str(item).upper() for item in (chains or SIGNAL_NETWORKS)]
+    visible = [chain for chain in SIGNAL_NETWORKS if chain in allowed] or list(SIGNAL_NETWORKS)
     return {
         "volume_usd": list(SIGNAL_VOLUME_PRESETS),
         "directions": list(SIGNAL_DIRECTIONS),
-        "chains": list(SIGNAL_NETWORKS),
-        "network_titles": dict(SIGNAL_NETWORK_TITLES),
+        "chains": visible,
+        "network_titles": {chain: title for chain, title
+                            in SIGNAL_NETWORK_TITLES.items() if chain in visible},
         "cooldown_min": list(SIGNAL_COOLDOWN_PRESETS),
         "default": dict(DEFAULT_SIGNAL),
     }

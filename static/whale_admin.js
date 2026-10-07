@@ -70,7 +70,9 @@
             main.append(make("strong", "", key.hint || "••••"));
             const source = key.source === "environment" ? t("adm.alchemy_env_key") : t("adm.alchemy_admin_key");
             const stateText = key.state === "active" ? t("adm.alchemy_active")
-                : key.state === "cooldown" ? t("adm.alchemy_cooldown") : t("adm.alchemy_ready");
+                : key.state === "cooldown" ? t("adm.alchemy_cooldown")
+                : key.state === "exhausted" ? t("adm.alchemy_exhausted")
+                : key.state === "reserve" ? t("adm.alchemy_reserve") : t("adm.alchemy_ready");
             main.append(make("small", "", source + " · " + stateText + (key.reason ? " · " + key.reason : "")));
             const usage = make("div", "whale-admin-key-usage");
             const used = Number(key.reserved_cu || 0);
@@ -107,6 +109,30 @@
             list.append(row);
         });
     }
+    function renderKeyPool(pool) {
+        const target = el("whale-admin-key-pool");
+        if (!target) return;
+        const data = pool || {};
+        const total = Number(data.keys_configured || 0);
+        if (!total) { target.textContent = t("adm.alchemy_no_keys"); return; }
+        const reserve = Array.isArray(data.reserve) ? data.reserve.length : 0;
+        const parts = [t("adm.alchemy_pool_active", {key: data.active_hint || "—"})];
+        parts.push(reserve
+            ? t("adm.alchemy_pool_reserve", {count: reserve, keys: data.reserve.join(", ")})
+            : t("adm.alchemy_pool_alone"));
+        const exhausted = Array.isArray(data.exhausted) ? data.exhausted.length : 0;
+        if (exhausted) parts.push(t("adm.alchemy_pool_exhausted", {count: exhausted}));
+        if (Number(data.idle_sec || 0) > Number(data.idle_failover_sec || 0) && total > 1) {
+            parts.push(t("adm.alchemy_pool_idle", {seconds: number(data.idle_sec)}));
+        }
+        const switchInfo = data.switch || {};
+        if (switchInfo.at && switchInfo.reason) {
+            parts.push(t("adm.alchemy_pool_switched",
+                {reason: switchInfo.reason, time: when(switchInfo.at)}));
+        }
+        target.textContent = parts.join(" · ");
+    }
+
     function renderCu(cu) {
         const used = Number(cu.used || 0), limit = Number(cu.limit || 0);
         el("whale-admin-cu-label").textContent = number(used) + " / " + number(limit) + " CU";
@@ -147,7 +173,7 @@
             target.append(row);
         });
     }
-    function renderWallets(rows, summary) {
+    function renderWallets(rows, summary, cleanup) {
         const body = el("whale-admin-wallet-rows");
         body.replaceChildren();
         (rows || []).forEach(wallet => {
@@ -198,6 +224,7 @@
         el("whale-admin-wallet-summary").textContent = t("adm.cex_wallet_summary", {
             total: number(summary && summary.total || 0), counts, updated: refreshed,
         });
+        renderWalletCleanup(cleanup, summary);
         const walletStatus = el("whale-admin-wallet-status");
         if (summary && summary.error) {
             walletStatus.textContent = t("adm.cex_wallet_refresh_error_detail", {reason: summary.error});
@@ -221,23 +248,118 @@
         });
         try {
             const data = await request("/api/admin/screener/cex-wallets?" + params);
-            renderWallets(data.wallets || [], data.summary || {});
+            renderWallets(data.wallets || [], data.summary || {}, data.cleanup || {});
         } catch (_) {
             el("whale-admin-wallet-status").textContent = t("adm.cex_wallet_error");
         }
     }
+    function renderWalletCleanup(cleanup, summary) {
+        const target = el("whale-admin-wallet-cleanup");
+        const retentionInput = el("whale-admin-wallet-retention");
+        const data = cleanup || {};
+        const days = Number(data.retention_days || 0);
+        if (retentionInput && document.activeElement !== retentionInput) {
+            retentionInput.value = String(days);
+        }
+        if (!target) return;
+        const total = Number((summary || {}).total || 0);
+        // «когда чистили в последний раз» идёт блоком в cleanup; summary.last_prune —
+        // запасной источник для старых ответов сервера
+        const prune = data.last_prune || (summary || {}).last_prune || {};
+        if (!days) {
+            target.textContent = t("adm.cex_wallet_cleanup_off", {count: number(total)});
+            return;
+        }
+        const parts = [t("adm.cex_wallet_cleanup_on", {
+            days: number(days), stale: number(data.stale || 0),
+            interval: Math.max(1, Math.round(Number(data.interval_sec || 86400) / 3600)),
+            count: number(total),
+        })];
+        if (prune.at && Number(prune.removed || 0) > 0) {
+            parts.push(t("adm.cex_wallet_prune_last", {
+                removed: number(prune.removed), time: when(prune.at),
+            }));
+        } else if (prune.at) {
+            parts.push(t("adm.cex_wallet_prune_last_none", {time: when(prune.at)}));
+        }
+        target.textContent = parts.join(" · ");
+        if (prune.reason) target.title = String(prune.reason);
+    }
+
+    function renderNetworkSwitches(switchData, networks) {
+        const target = el("whale-admin-network-switches");
+        if (!target) return;
+        target.replaceChildren();
+        const rows = (switchData && Array.isArray(switchData.networks))
+            ? switchData.networks : [];
+        if (!rows.length) {
+            target.append(make("p", "meta", t("adm.networks_switch_empty")));
+            return;
+        }
+        const health = {};
+        (networks || []).forEach(row => { health[row.chain] = row; });
+        rows.forEach(row => {
+            const line = make("div", "whale-admin-switch-row" + (row.enabled ? "" : " is-off"));
+            const main = make("div", "whale-admin-switch-main");
+            main.append(make("strong", "", row.title || row.id));
+            const details = row.provider === "trongrid" || row.provider === "native_api"
+                ? t("adm.networks_switch_free")
+                : t("adm.networks_switch_paid");
+            const used = Number((health[row.id] || {}).cu_used || 0);
+            main.append(make("small", "", details + (used ? " · " + t("adm.alchemy_network_cu", {amount: number(used)}) : "")));
+            const label = make("label", "whale-admin-switch");
+            const input = document.createElement("input");
+            input.type = "checkbox";
+            input.checked = Boolean(row.enabled);
+            input.setAttribute("aria-label", (row.title || row.id) + " — " + t("adm.networks_switch_title"));
+            input.dataset.chain = row.id;
+            const knob = make("i");
+            const caption = make("span", "", row.enabled ? t("adm.networks_switch_on") : t("adm.networks_switch_off"));
+            input.addEventListener("change", () => setNetwork(row.id, input.checked, caption, line));
+            label.append(input, knob, caption);
+            line.append(main, label);
+            target.append(line);
+        });
+    }
+    async function setNetwork(chain, enabled, caption, line) {
+        const status = el("whale-admin-network-status");
+        caption.textContent = t("adm.networks_switch_saving");
+        try {
+            const data = await request("/api/admin/screener/networks", {
+                method: "POST", headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({chain: chain, enabled: Boolean(enabled)}),
+            });
+            const applied = (data.applied || [])[0] || {};
+            caption.textContent = enabled ? t("adm.networks_switch_on") : t("adm.networks_switch_off");
+            if (line) line.classList.toggle("is-off", !applied.enabled);
+            if (status) status.textContent = t("adm.networks_switch_saved", {
+                network: chain, state: applied.enabled ? t("adm.networks_switch_on") : t("adm.networks_switch_off"),
+            });
+            await load();
+        } catch (error) {
+            caption.textContent = t("adm.networks_switch_error");
+            caption.title = String(error && error.message || "");
+            await load();
+        }
+    }
+
     function renderNetworks(networks) {
         const target = el("whale-admin-chains");
         target.replaceChildren();
         (networks || []).forEach(network => {
             const status = network.status || "paused";
+            // сеть выключена тумблером — это важнее любой прошлой беды в статусе:
+            // иначе админ видит «429» у сети, которую сам же и заглушил
+            const disabled = network.enabled === false;
             const warning = network.warning_status || "";
-            const rateLimited = status === "rate_limited" || warning === "rate_limited";
+            const rateLimited = !disabled && (status === "rate_limited" || warning === "rate_limited");
             const rateMessage = rateLimited
                 ? t("adm.alchemy_rate_limited", {seconds: number(network.retry_in_sec || 0)}) : "";
-            const visualStatus = rateLimited ? "rate_limited" : status;
+            let visualStatus = disabled ? "disabled" : rateLimited ? "rate_limited" : status;
             let stateName;
-            if (rateLimited) {
+            if (disabled) {
+                stateName = t("adm.networks_switch_off_state");
+            } else if (rateLimited) {
                 stateName = status === "online"
                     ? t("adm.alchemy_online") + " · " + rateMessage : rateMessage;
             } else if (status === "online" && network.waiting_for_filters) {
@@ -262,7 +384,9 @@
             card.append(make("span", "whale-admin-network-status", stateName));
             const parts = [];
             if (rateMessage) parts.push(rateMessage);
-            if (network.error && network.error !== "no_key") parts.push(network.error);
+            if (disabled) {
+                parts.push(t("adm.networks_switch_off_hint"));
+            } else if (network.error && network.error !== "no_key") parts.push(network.error);
             else if (network.error === "no_key") parts.push(t("adm.alchemy_no_key"));
             else if (network.last_success) parts.push(
                 t("adm.alchemy_last_success", {time: when(network.last_success)}));
@@ -313,7 +437,9 @@
             }
             renderCu(cu);
             renderKeys(keys, cu);
+            renderKeyPool(statsData.key_pool || {});
             renderNetworks(statsData.networks || []);
+            renderNetworkSwitches(statsData.network_switch || {}, statsData.networks || []);
             renderTronKeys(tronData.keys || []);
             if (keyData.vault_error) keyStatus.textContent = keyData.vault_error;
             if (tronData.vault_error) el("trongrid-admin-key-status").textContent = tronData.vault_error;
@@ -443,6 +569,47 @@
             await loadWallets();
         } catch (_) {
             target.textContent = t("adm.cex_wallet_invalid");
+        }
+    });
+    el("whale-admin-wallet-retention-save").addEventListener("click", async () => {
+        const target = el("whale-admin-wallet-status");
+        const days = Number(el("whale-admin-wallet-retention").value);
+        if (!Number.isFinite(days) || days < 0 || days > 365) {
+            target.textContent = t("adm.cex_wallet_retention_range"); return;
+        }
+        target.textContent = t("adm.alchemy_saving");
+        try {
+            await request("/api/admin/screener/cex-wallets/retention", {
+                method: "POST", headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({days: Math.round(days)}),
+            });
+            target.textContent = t("adm.cex_wallet_retention_saved", {days: Math.round(days)});
+            await loadWallets();
+        } catch (_) {
+            target.textContent = t("adm.cex_wallet_retention_error");
+        }
+    });
+    el("whale-admin-wallet-prune").addEventListener("click", async event => {
+        const button = event.currentTarget;
+        const target = el("whale-admin-wallet-status");
+        if (!window.confirm(t("adm.cex_wallet_prune_confirm"))) return;
+        button.disabled = true;
+        target.textContent = t("adm.cex_wallet_prune_running");
+        try {
+            const result = await request("/api/admin/screener/cex-wallets/prune", {method: "POST"});
+            const removed = Number(result.removed || 0);
+            if (removed > 0) {
+                target.textContent = t("adm.cex_wallet_pruned", {count: number(removed),
+                    total: number((result.summary || {}).total || 0)});
+            } else {
+                target.textContent = String(result.reason || t("adm.cex_wallet_prune_none"));
+            }
+            await loadWallets();
+        } catch (error) {
+            target.textContent = t("adm.cex_wallet_prune_error");
+            target.title = String(error && error.message || "");
+        } finally {
+            button.disabled = false;
         }
     });
     el("whale-admin-wallet-cancel").addEventListener("click", cancelWalletEdit);

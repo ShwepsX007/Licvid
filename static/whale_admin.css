@@ -53,3 +53,24 @@
   .whale-admin-key-usage { grid-column: 1 / -1; grid-row: 2; }
   .whale-admin-networks { grid-template-columns: repeat(2,minmax(0,1fr)); }
 }
+/* Тумблеры сетей: выключенная сеть не опрашивается, CU не тратит и в скринере не показывается. */
+.whale-admin-switches { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; margin: 8px 0 4px; }
+.whale-admin-switch-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; padding: 8px 11px; border: 1px solid var(--border, rgba(255,255,255,.07)); border-radius: 9px; background: rgba(7,12,22,.18); }
+.whale-admin-switch-row.is-off { opacity: .66; }
+.whale-admin-switch-main { min-width: 0; display: grid; gap: 2px; }
+.whale-admin-switch-main strong { color: var(--text, #f4f7fb); font-size: .74rem; }
+.whale-admin-switch-main small { color: var(--muted, #8b97ad); font-size: .65rem; overflow-wrap: anywhere; }
+.whale-admin-switch { position: relative; display: inline-flex; align-items: center; gap: 7px; margin-left: auto; cursor: pointer; user-select: none; color: var(--muted, #8b97ad); font-size: .66rem; }
+.whale-admin-switch input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.whale-admin-switch i { position: relative; width: 34px; height: 19px; flex: 0 0 34px; border-radius: 99px; border: 1px solid var(--border, rgba(255,255,255,.12)); background: rgba(139,151,173,.22); transition: background .16s ease, border-color .16s ease; }
+.whale-admin-switch i::after { content: ""; position: absolute; top: 2px; left: 2px; width: 13px; height: 13px; border-radius: 50%; background: #91a2bd; transition: transform .16s ease, background .16s ease; }
+.whale-admin-switch input:checked + i { background: rgba(52,211,153,.26); border-color: rgba(52,211,153,.45); }
+.whale-admin-switch input:checked + i::after { transform: translateX(15px); background: #34d399; }
+.whale-admin-switch input:focus-visible + i { outline: 2px solid #6ea8ff; outline-offset: 2px; }
+.whale-admin-switch input:disabled + i { opacity: .5; }
+.whale-admin-network.status--disabled { border-color: rgba(139,151,173,.22); background: rgba(7,12,22,.1); }
+.whale-admin-network.status--disabled .whale-admin-network-status { color: #91a2bd; }
+.whale-admin-wallet-cleanup { align-items: flex-end; }
+.whale-admin-wallet-cleanup label { display: grid; gap: 5px; color: var(--muted, #8b97ad); font-size: .7rem; }
+.whale-admin-wallet-cleanup label input { min-width: 92px; }
+@media (max-width: 900px) { .whale-admin-switches { grid-template-columns: 1fr; } }

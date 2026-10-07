@@ -28,6 +28,30 @@
     // карточек закрепляем на клиенте (venueOrder), чтобы клетки не прыгали при
     // каждом обновлении, когда объёмы меняются местами.
     const networkOpacity = index => Math.max(.48, .96 - index * .07);
+    // Что оставил включённым админ (тумблеры сетей в `/admin`). null = сервер
+    // ничего не сказал → показываем все сети, как раньше; пустой список — это
+    // тоже ответ («все выключены»), и он легален.
+    let enabledNetworks = null;
+    const visibleNetworks = () => (enabledNetworks
+        ? NETWORKS.filter(net => enabledNetworks.includes(net.id))
+        : NETWORKS.slice());
+    function applyEnabledNetworks(list) {
+        if (!Array.isArray(list)) return;
+        enabledNetworks = list.map(item => String(item || "").toUpperCase()).filter(Boolean);
+        if (state.selectedChain !== "ALL" && !enabledNetworks.includes(state.selectedChain)) {
+            // ссылку на выключенную сеть могли принести из рассылки или закладки
+            state.selectedChain = "ALL";
+        }
+        getChainOptions();
+        renderTabs();
+        if (state.stats) {
+            // карточки, счётчик и график перестраиваются сразу: сеть, которую
+            // админ заглушил, не должна остаться столбиком в стеке до
+            // следующего опроса
+            renderOverview();
+            renderChart();
+        }
+    }
     const state = {
         stats: null, liveRows: [], hlRows: [], selectedChain: "ALL", historyPage: 1,
         historyPages: 1, sortBy: "timestamp", sortDir: "desc",
@@ -117,7 +141,7 @@
         if (!select) return;
         select.replaceChildren();
         select.add(new Option(t("screener.network_all"), "ALL"));
-        NETWORKS.forEach(net => select.add(new Option(networkName(net.id), net.id)));
+        visibleNetworks().forEach(net => select.add(new Option(networkName(net.id), net.id)));
         select.value = state.selectedChain;
     }
 
@@ -126,14 +150,16 @@
         if (!data) return;
         setText("overview-events", fmtNumber(data.total_events));
         setText("overview-volume", fmtUSD(data.total_volume_usd, true));
-        setText("overview-online", fmtNumber(data.active_networks) + "/" + NETWORKS.length);
+        const shown = visibleNetworks();
+        setText("overview-online", fmtNumber(data.active_networks) + "/" + shown.length);
         setText("screener-updated", t("screener.updated_at", {time: new Date().toLocaleTimeString()}));
 
         const networks = data.networks || {};
         const grid = $("network-cards");
         grid.replaceChildren();
-        NETWORKS.forEach(net => {
+        shown.forEach(net => {
             const summary = networks[net.id] || {};
+            if (summary.enabled === false) return;   // сеть выключена в админке
             const card = make("button", "network-card" + (state.selectedChain === net.id ? " is-selected" : ""));
             card.type = "button";
             card.dataset.network = net.id;
@@ -185,7 +211,7 @@
         if (!tabs) return;
         tabs.replaceChildren();
         const values = [{id: "ALL", label: t("screener.network_all")}].concat(
-            NETWORKS.map(net => ({id: net.id, label: networkName(net.id)})));
+            visibleNetworks().map(net => ({id: net.id, label: networkName(net.id)})));
         values.forEach(item => {
             const button = make("button", "network-tab" + (state.selectedChain === item.id ? " is-active" : ""), item.label);
             button.type = "button";
@@ -203,7 +229,8 @@
         if (state.stats) {
             const grid = $("network-cards");
             if (grid) grid.querySelectorAll(".network-card").forEach((card, index) => {
-                const active = NETWORKS[index] && NETWORKS[index].id === chain;
+                const visible = visibleNetworks();
+                const active = visible[index] && visible[index].id === chain;
                 card.classList.toggle("is-selected", !!active);
                 card.setAttribute("aria-pressed", String(!!active));
             });
@@ -301,7 +328,7 @@
             legend.append(item);
         });
         if (selected === "ALL") {
-            NETWORKS.forEach((net, index) => {
+            visibleNetworks().forEach((net, index) => {
                 const item = make("span", "legend-item network-legend-item");
                 const swatch = make("i", "legend-swatch");
                 swatch.style.background = SERIES_COLORS.inflow_usd;
@@ -314,7 +341,9 @@
         chart.setAttribute("aria-label", t(tradeOnly ? "screener.trade_chart_aria" : "screener.flow_chart_aria"));
 
         const points = chartPoints(data.series || []);
-        const stackChains = selected === "ALL" ? NETWORKS.map(net => net.id) : [selected];
+        const stackChains = selected === "ALL"
+            ? visibleNetworks().map(net => net.id)
+            : [selected];
         const maxValue = Math.max(0, ...points.flatMap(point => keys.map(key =>
             stackChains.reduce((sum, chain) => sum + Number((point.networks[chain] || {})[key] || 0), 0))));
         const chartEmpty = $("chart-empty");
@@ -905,6 +934,7 @@
             if (response.status === 401) return goToLogin();
             if (!response.ok) throw new Error("HTTP " + response.status);
             state.stats = await response.json();
+            applyEnabledNetworks(state.stats.enabled_networks);
             renderOverview();
             renderLive();
             renderHyperliquid();
@@ -1051,7 +1081,11 @@
         // Пока вкладка спрятана, интервалы пропускаются — при возвращении
         // догоняем графики бирж сразу, не дожидаясь следующего цикла.
         document.addEventListener("visibilitychange", () => {
-            if (!document.hidden) fetchVenueFlows();
+            if (document.hidden) return;
+            // вернулись во вкладку — список сетей и потоки бирж должны быть
+            // свежими, а не «до следующего получаса»
+            fetchStats();
+            fetchVenueFlows();
         });
         window.setInterval(() => { if (!document.hidden) fetchHistory(); }, 60000);
         // Потоки по биржам меняются медленно, но карточки строятся по данным:

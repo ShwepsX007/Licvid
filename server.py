@@ -126,6 +126,32 @@ try:
 except Exception:  # noqa: BLE001 — wallet refresh must not prevent site startup
     CEXWalletRegistry = auto_refresh_loop = None
     CEX_WALLET_UPDATER_AVAILABLE = False
+# Тумблеры сетей и срок хранения базы кошельков. Свой модуль на stdlib:
+# без него скринер обязан жить по-старому (все сети включены), поэтому и тут
+# импорт мягкий.
+try:
+    from screener_networks import (DEFAULT_ENABLED, NetworkSwitch,
+                                   normalize_network, retention_days)
+except Exception:  # noqa: BLE001 — опциональный тумблер не валит запуск сайта
+    NetworkSwitch = None
+
+    def normalize_network(value):
+        return str(value or "").strip().upper()
+
+    def retention_days(value, *, default=7):
+        try:
+            return max(0, min(365, int(float(str(value).strip()))))
+        except (TypeError, ValueError):
+            return int(default)
+
+    DEFAULT_ENABLED = ()
+SCREENER_NETWORKS_FILE = os.getenv(
+    "LIQSCOPE_SCREENER_NETWORKS_FILE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "screener_networks.json"))
+# Раз в сутки: убрать кошельки бирж, которые не светятся ни в источниках,
+# ни в событиях скринера. Больше не нужно — база перестаёт расти бесконечно.
+WALLET_PRUNE_INTERVAL_SEC = max(300.0, float(os.getenv("LIQSCOPE_WALLET_PRUNE_SEC", "86400")))
+WALLET_PRUNE_START_DELAY_SEC = max(30.0, float(os.getenv("LIQSCOPE_WALLET_PRUNE_DELAY", "180")))
 # Keep the credential-free Hyperliquid source independent of optional Alchemy
 # key management. A missing encryption library never means plaintext key storage.
 try:
@@ -1533,6 +1559,8 @@ whale_poller: Optional[WhalePoller] = None
 alchemy_key_store: Optional[AlchemyKeyStore] = None
 trongrid_key_store: Optional[AlchemyKeyStore] = None
 cex_wallet_registry = None
+# which networks the admin left on; None = фильтр не задан (видно всё)
+screener_networks = None
 alchemy_vault_error = ""
 trongrid_vault_error = ""
 # 📖 Стакан: опрос L2 и детектор стен (заполняется в lifespan; в тестах — подмена).
@@ -4583,8 +4611,20 @@ async def lifespan(app: FastAPI):
     ]
     global whale_screener, whale_poller, alchemy_key_store, alchemy_vault_error
     global trongrid_key_store, trongrid_vault_error, cex_wallet_registry
+    global screener_networks
     whale_screener = whale_poller = alchemy_key_store = trongrid_key_store = None
     alchemy_vault_error = trongrid_vault_error = ""
+    if NetworkSwitch is not None:
+        try:
+            screener_networks = NetworkSwitch(SCREENER_NETWORKS_FILE)
+        except Exception as exc:  # noqa: BLE001 — без тумблера скринер не бесхозный
+            screener_networks = None
+            log.warning("тумблеры сетей недоступны: %s", exc)
+        log.info("Скринер китов: сети включены %s (из %d), чистка кошельков — %s",
+                 ", ".join(screener_networks.enabled()) or "—",
+                 len(screener_networks.status()),
+                 (f"раз в сутки, неактуальнее {screener_networks.wallet_retention_days} дн."
+                  if screener_networks.wallet_retention_days else "выключена"))
     cex_wallet_registry = (CEXWalletRegistry(os.path.join(HERE, "data", "cex_wallets.json"))
                            if CEX_WALLET_UPDATER_AVAILABLE else None)
     if not WHALE_SCREENER_AVAILABLE:
@@ -4595,7 +4635,8 @@ async def lifespan(app: FastAPI):
                 "pending", price_fn=lambda pair: feed.prices.get(pair) if feed else None,
                 broadcast=hub.broadcast, min_usd=50_000,
                 wallet_path=Path(os.path.join(HERE, "data", "cex_wallets.json")),
-                history_path=WHALE_HISTORY_FILE or None)
+                history_path=WHALE_HISTORY_FILE or None,
+                networks=screener_networks)
             if whale_screener.hl_enabled:
                 tasks.append(asyncio.create_task(
                     whale_screener.run_hyperliquid(), name="whale-hyperliquid"))
@@ -4651,7 +4692,8 @@ async def lifespan(app: FastAPI):
                     "", whale_screener, key_store=alchemy_key_store,
                     trongrid_key_store=trongrid_key_store,
                     poll_interval_sec=poll_interval_sec,
-                    mode=mode, monthly_cu=monthly_cu)
+                    mode=mode, monthly_cu=monthly_cu,
+                    networks=screener_networks)
             except Exception:  # noqa: BLE001 — optional collection cannot take down terminal
                 whale_poller = None
                 if not alchemy_vault_error:
@@ -4668,6 +4710,7 @@ async def lifespan(app: FastAPI):
                 whale_poller.wakeup.set()
         tasks.append(asyncio.create_task(
             auto_refresh_loop(cex_wallet_registry, _wallets_updated), name="cex-wallet-refresh"))
+        tasks.append(asyncio.create_task(cex_wallet_prune_loop(), name="cex-wallet-prune"))
     if alchemy_key_store and not alchemy_key_store.keys():
         log.warning("Ключ Alchemy пока не добавлен; EVM/Solana-скринер ожидает настройки в админке; "
                     "нативный Hyperliquid и TronGrid остаются отдельными источниками")
@@ -5169,6 +5212,19 @@ account_ctx.correlations_fn = correlations_snapshot
 account_ctx.pump_snapshot_fn = pump_snapshot
 account_ctx.book_snapshot_fn = book_snapshot
 account_ctx.screener_signal_fn = screener_signal_snapshot
+
+
+def _screener_enabled_networks():
+    """Что кабинету показывать в списке сетей: только включённые админом."""
+    if screener_networks is None:
+        return None
+    try:
+        return list(screener_networks.enabled())
+    except Exception:  # noqa: BLE001 — тумблер не ломает кабинет
+        return None
+
+
+account_ctx.screener_networks_fn = _screener_enabled_networks
 account_ctx.symbols_fn = lambda: list((feed.symbols if feed else [])[:40])
 register_account_routes(app)
 
@@ -6171,19 +6227,20 @@ async def api_admin_alchemy_stats(request: Request):
     poll = whale_poller.status() if whale_poller else {}
     networks = []
     for chain in ("ETH", "BNB", "POLYGON", "ARBITRUM", "BASE"):
-        network = _poll_network_health(
-            poll, chain, setup_error=alchemy_vault_error if not whale_poller else "")
+        network = _mark_network_enabled(_poll_network_health(
+            poll, chain, setup_error=alchemy_vault_error if not whale_poller else ""), chain)
         network["provider"] = "alchemy"
         networks.append(network)
     native = whale_screener.native_status() if whale_screener else {
         "network": "HYPERLIQUID", "provider": "native_api", "enabled": False,
         "connected": False, "state": "unavailable", "error": ""}
-    networks.append({"chain": "HYPERLIQUID", "provider": "native_api",
-                     "status": "online" if native.get("connected") else
-                              "error" if native.get("error") else "waiting",
-                     "last_success": float(native.get("last_event_ts") or native.get("last_message_ts") or 0),
-                     "last_attempt": float(native.get("last_message_ts") or 0),
-                     "error": str(native.get("error") or "")})
+    networks.append(_mark_network_enabled({
+        "chain": "HYPERLIQUID", "provider": "native_api",
+        "status": "online" if native.get("connected") else
+                  "error" if native.get("error") else "waiting",
+        "last_success": float(native.get("last_event_ts") or native.get("last_message_ts") or 0),
+        "last_attempt": float(native.get("last_message_ts") or 0),
+        "error": str(native.get("error") or "")}, "HYPERLIQUID"))
     solana = _poll_network_health(
         poll, "SOLANA", setup_error=alchemy_vault_error if not whale_poller else "")
     solana.update(provider="alchemy_solana",
@@ -6193,15 +6250,16 @@ async def api_admin_alchemy_stats(request: Request):
                                    solana.get("retry_in_sec") or 0),
                   request_budget=int((poll.get("solana") or {}).get("request_budget") or 0),
                   requests_last_cycle=int((poll.get("solana") or {}).get("requests_last_cycle") or 0))
-    networks.append(solana)
+    networks.append(_mark_network_enabled(solana, "SOLANA"))
     tron = poll.get("tron") or {}
     tron_state = str(tron.get("state") or "paused")
-    networks.append({"chain": "TRON", "provider": "trongrid",
-                     "status": "online" if tron.get("connected") else
-                              "error" if tron_state in ("error", "budget_exhausted") else "waiting",
-                     "last_success": float(tron.get("last_success") or 0),
-                     "last_attempt": float(tron.get("last_attempt") or 0),
-                     "error": str(tron.get("error") or "")})
+    networks.append(_mark_network_enabled({
+        "chain": "TRON", "provider": "trongrid",
+        "status": "online" if tron.get("connected") else
+                  "error" if tron_state in ("error", "budget_exhausted") else "waiting",
+        "last_success": float(tron.get("last_success") or 0),
+        "last_attempt": float(tron.get("last_attempt") or 0),
+        "error": str(tron.get("error") or "")}, "TRON"))
     used = int(poll.get("reserved_cu") or 0)
     budget = int(poll.get("budget_cu") or 0)
     keys = _alchemy_admin_keys()
@@ -6217,6 +6275,9 @@ async def api_admin_alchemy_stats(request: Request):
                    "key_share": per_key,
                    "keys_configured": len(keys), "keys": keys},
             "networks": networks, "native": native,
+            # тумблеры сетей и что сейчас происходит с пулом ключей
+            "network_switch": _network_switch(),
+            "key_pool": poll.get("key_pool") or {},
             "trongrid": {"available": bool(trongrid_key_store and not trongrid_vault_error),
                          "vault_error": trongrid_vault_error,
                          "keys": (trongrid_key_store.public() if trongrid_key_store else [])},
@@ -6239,8 +6300,113 @@ async def api_admin_cex_wallets(request: Request,
         return JSONResponse({"error": "admin"}, status_code=403)
     if not cex_wallet_registry:
         return JSONResponse({"error": "wallet_registry_unavailable"}, status_code=503)
+    switch = _network_switch()
+    retention = int(switch.get("wallet_retention_days") or 0)
+    stale = 0
+    if retention:
+        # Кассу держим в процессе: подсчёт идёт по недельной истории событий,
+        # дёргать её на каждую отрисовку панели админа незачем.
+        global _WALLET_STALE_CACHE
+        now = time.time()
+        if now - float(_WALLET_STALE_CACHE.get("at") or 0) > 300:
+            try:
+                preview = await asyncio.to_thread(prune_cex_wallets, apply=False)
+                _WALLET_STALE_CACHE = {"at": now, "stale": int(preview.get("stale") or 0)}
+            except Exception as exc:  # noqa: BLE001 — предпросмотр не блокирует админку
+                log.debug("cex prune preview: %s", exc)
+        stale = int(_WALLET_STALE_CACHE.get("stale") or 0)
+    summary = cex_wallet_registry.summary()
     return {"ok": True, "wallets": cex_wallet_registry.records(chain=chain, exchange=exchange),
-            "summary": cex_wallet_registry.summary()}
+            "summary": summary,
+            "cleanup": {"retention_days": retention, "stale": stale,
+                        "interval_sec": int(WALLET_PRUNE_INTERVAL_SEC),
+                        "last_prune": summary.get("last_prune") or {}}}
+
+
+_WALLET_STALE_CACHE: dict = {"at": 0.0, "stale": 0}
+
+
+@app.post("/api/admin/screener/cex-wallets/prune")
+async def api_admin_prune_cex_wallets(request: Request, body: dict = Body(default_factory=dict)):
+    """Убрать кошельки, которые не обновляются источниками и не светятся в скринере.
+
+    `dry_run: true` — только посчитать. `days` — разово переопределить окно.
+    """
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    if not cex_wallet_registry:
+        return JSONResponse({"error": "wallet_registry_unavailable"}, status_code=503)
+    dry_run = bool(body.get("dry_run", body.get("preview")))
+    days = _requested_retention_days(body)
+    if isinstance(days, str):
+        return JSONResponse({"error": days}, status_code=422)
+    previous = None
+    if days is not None and screener_networks is not None:
+        # окно меняем только на время этого прогона: настройки админки не трогаем
+        previous = screener_networks.wallet_retention_days
+        screener_networks.set_retention(days)
+    try:
+        result = await asyncio.to_thread(prune_cex_wallets, apply=not dry_run)
+    finally:
+        if previous is not None and screener_networks is not None:
+            screener_networks.set_retention(previous)
+    _WALLET_STALE_CACHE.update(at=0.0, stale=int(result.get("stale") or 0))
+    return {"ok": bool(result.get("ok")), "dry_run": dry_run, **result}
+
+
+@app.post("/api/admin/screener/cex-wallets/retention")
+async def api_admin_cex_wallet_retention(request: Request, body: dict = Body(default_factory=dict)):
+    """Срок тишины в днях, после которого кошелёк убирают из базы (0 — выключить)."""
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    if screener_networks is None:
+        return JSONResponse({"error": "unavailable"}, status_code=503)
+    days = _requested_retention_days(body, required=True)
+    if isinstance(days, str):
+        return JSONResponse({"error": days}, status_code=422)
+    screener_networks.set_retention(days)
+    _WALLET_STALE_CACHE["at"] = 0.0     # окно изменили — предпросмотр протух
+    return {"ok": True, "wallet_retention_days": days,
+            "cleanup": {"retention_days": days,
+                        "interval_sec": int(WALLET_PRUNE_INTERVAL_SEC)}}
+
+
+@app.post("/api/admin/screener/networks")
+async def api_admin_screener_networks(request: Request, body: dict = Body(default_factory=dict)):
+    """Тумблер сети: выключенная сеть не опрашивается и не показывается нигде.
+
+    История уже собранных событий остаётся в базе — сеть возвращается вместе
+    с тумблером, ничего не теряется.
+    """
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    if screener_networks is None:
+        return JSONResponse({"error": "unavailable"}, status_code=503)
+    raw_chains = body.get("networks")
+    changes = []
+    if isinstance(raw_chains, dict):
+        changes = [(chain, flag) for chain, flag in raw_chains.items()]
+    elif isinstance(body.get("chain"), str):
+        changes = [(body["chain"], body.get("enabled", True))]
+    if not changes:
+        return JSONResponse({"error": "chain" if not changes else "invalid_networks"},
+                            status_code=422)
+    applied = []
+    for chain, flag in changes:
+        normalized = normalize_network(chain)
+        if not normalized:
+            return JSONResponse({"error": "unknown_network"}, status_code=422)
+        changed, state = screener_networks.set_enabled(normalized, flag)
+        applied.append({"chain": normalized, "enabled": bool(state), "changed": bool(changed)})
+    log.info("Скринер китов: админ %s", ", ".join(
+        f"{row['chain']} {'включил' if row['enabled'] else 'выключил'}" for row in applied))
+    if whale_poller:
+        whale_poller.wakeup.set()   # расписание пересобрать без рестарта
+    _WALLET_STALE_CACHE["at"] = 0.0
+    return {"ok": True, "applied": applied, "network_switch": _network_switch()}
 
 
 @app.post("/api/admin/screener/cex-wallets/refresh")
@@ -6372,18 +6538,138 @@ async def api_admin_delete_trongrid_key(request: Request, identifier: str):
     return {"ok": True}
 
 
+def _network_switch() -> dict:
+    """Состояние тумблеров для админки; при недоступном модуле — «всё включено»."""
+    if screener_networks is not None:
+        return screener_networks.as_dict()
+    return {"networks": [{"id": chain, "title": chain, "provider": "alchemy",
+                          "paid": chain not in ("TRON", "HYPERLIQUID"), "enabled": True}
+                         for chain in ("ETH", "BNB", "POLYGON", "ARBITRUM", "BASE",
+                                       "SOLANA", "TRON", "HYPERLIQUID")],
+            "enabled": [row["id"] for row in
+                        (({"id": "ETH"}, {"id": "TRON"}, {"id": "HYPERLIQUID"}))],
+            "wallet_retention_days": 0, "updated_at": 0.0, "error": ""}
+
+
+def _requested_retention_days(body: dict, *, required: bool = False):
+    """Дни из тела запроса: молча заменять мусор значением по умолчанию нельзя.
+
+    Возвращает int (после clamp в 0…365) либо строку-ошибку — 422 честнее, чем
+    «админ написал „сто“, а база начала чиститься по 7 дням».
+    """
+    if not isinstance(body, dict) or body.get("days") is None:
+        return "days_required" if required else None
+    raw = body.get("days")
+    if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+        return "invalid_days"
+    text = str(raw).strip()
+    if not text:
+        return "days_required" if required else None
+    try:
+        number = float(text)
+    except ValueError:
+        return "invalid_days"
+    if number != int(number) or number < 0:
+        return "invalid_days"
+    return retention_days(int(number))
+
+
+def _chain_enabled(chain: str) -> bool:
+    if screener_networks is None:
+        return True
+    try:
+        return bool(screener_networks.is_enabled(chain))
+    except Exception:  # noqa: BLE001 — тумблер не имеет права ломать выдачу
+        return True
+
+
+def _mark_network_enabled(row: dict, chain: str) -> dict:
+    """Отметка тумблера в строке сети; выключенная сеть не «ожидает», она выключена."""
+    row["enabled"] = _chain_enabled(chain)
+    if not row["enabled"]:
+        row.update(status="disabled", error="", warning_status="",
+                   retry_in_sec=0, key_active=False)
+    return row
+
+
+def prune_cex_wallets(*, apply: bool = True) -> dict:
+    """Сколько кошельков бирж уже не актуально (и, если надо, убрать их).
+
+    «Не актуален» = источник (DeFiLlama/Etherscan) не публикует его уже N дней
+    И его адрес не мелькал ни в одном событии скринера за то же окно. Ручные
+    кошельки не трогаем. Работает вне event loop — здесь и SQLite, и запись
+    файла, поэтому вызывается через asyncio.to_thread.
+    """
+    if cex_wallet_registry is None:
+        return {"ok": False, "reason": "реестр кошельков недоступен", "removed": 0}
+    days = int(screener_networks.wallet_retention_days if screener_networks is not None
+               else 0)
+    if days <= 0:
+        return {"ok": True, "retention_days": 0, "removed": 0, "stale": 0,
+                "reason": "автоочистка выключена", "applied": False,
+                "summary": cex_wallet_registry.summary()}
+    cutoff = time.time() - days * 86400
+    active = None
+    try:
+        if whale_screener and getattr(whale_screener, "history_store", None):
+            active = whale_screener.history_store.active_wallet_keys(cutoff)
+    except Exception as exc:  # noqa: BLE001 — нет истории → решаем по источникам
+        log.debug("cex prune: активность не получена: %s", exc)
+    result = cex_wallet_registry.prune_stale(cutoff=cutoff, active_keys=active, apply=apply)
+    result["retention_days"] = days
+    result["stale"] = int(result.get("removed") or 0)
+    result["summary"] = cex_wallet_registry.summary()
+    if result.get("ok") and result.get("applied") and result.get("removed"):
+        # база изменилась → скринер и коллектор обязаны перечитать реестр
+        _reload_cex_runtime()
+    return result
+
+
+async def cex_wallet_prune_loop():
+    """Одна проверка в сутки — чаще чистить базу кошельков незачем."""
+    try:
+        await asyncio.sleep(WALLET_PRUNE_START_DELAY_SEC)
+    except asyncio.CancelledError:
+        return
+    while True:
+        delay = WALLET_PRUNE_INTERVAL_SEC
+        try:
+            result = await asyncio.to_thread(prune_cex_wallets)
+            removed = int(result.get("removed") or 0)
+            if removed:
+                log.info("автоочистка кошельков: убрано %d из базы (%d дней тишины)",
+                         removed, int(result.get("retention_days") or 0))
+            elif result.get("ok") is False and result.get("reason"):
+                log.warning("автоочистка кошельков: %s", result["reason"])
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:  # noqa: BLE001 — очистка не валит сервер
+            log.warning("автоочистка кошельков: %s", exc)
+            delay = 3600.0
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            break
+
+
 @app.get("/api/screener/whales")
 async def api_screener_whales(request: Request,
                               min_usd: float = Query(0, ge=0),
                               chain: str = Query("ALL", pattern="^(ALL|GENERAL|EVM|ETH|BNB|POLYGON|ARBITRUM|BASE|SOLANA|TRON|HYPERLIQUID)$"),
                               limit: int = Query(100, ge=1, le=100)):
-    alchemy_enabled = bool(alchemy_key_store and alchemy_key_store.keys())
-    native_enabled = bool(whale_screener and whale_screener.hl_enabled)
-    solana_enabled = bool(whale_poller and alchemy_enabled)
-    tron_enabled = bool(whale_poller)
+    alchemy_enabled = bool(alchemy_key_store and alchemy_key_store.keys()) and any(
+        _chain_enabled(chain) for chain in ("ETH", "BNB", "POLYGON", "ARBITRUM", "BASE"))
+    native_enabled = bool(whale_screener and whale_screener.hl_enabled
+                          and _chain_enabled("HYPERLIQUID"))
+    solana_enabled = bool(whale_poller and alchemy_enabled and _chain_enabled("SOLANA"))
+    tron_enabled = bool(whale_poller and _chain_enabled("TRON"))
     return {"enabled": alchemy_enabled, "alchemy_enabled": alchemy_enabled,
             "native_enabled": native_enabled, "solana_enabled": solana_enabled,
             "tron_enabled": tron_enabled,
+            # что оставил включённым админ: страница скрывает сети по этому списку
+            "networks": _network_switch()["networks"],
+            "enabled_networks": [row["id"] for row in _network_switch()["networks"]
+                                 if row["enabled"]],
             "available": bool(whale_screener and
                                (alchemy_enabled or native_enabled or solana_enabled or tron_enabled)),
             "unavailable_reason": alchemy_vault_error if not whale_screener else "",
@@ -6417,34 +6703,34 @@ def _screener_network_status() -> dict:
     poll = whale_poller.status() if whale_poller else {}
     result = {}
     for chain in ("ETH", "BNB", "POLYGON", "ARBITRUM", "BASE"):
-        result[chain] = _poll_network_health(
-            poll, chain, setup_error=alchemy_vault_error if not whale_poller else "")
+        result[chain] = _mark_network_enabled(_poll_network_health(
+            poll, chain, setup_error=alchemy_vault_error if not whale_poller else ""), chain)
     native = whale_screener.native_status() if whale_screener else {
         "network": "HYPERLIQUID", "enabled": False, "connected": False,
         "state": "unavailable", "error": ""}
-    result["HYPERLIQUID"] = {
+    result["HYPERLIQUID"] = _mark_network_enabled({
         "status": "online" if native.get("connected") else
                   "error" if native.get("error") else "waiting",
         "last_success": float(native.get("last_event_ts") or native.get("last_message_ts") or 0),
         "last_attempt": float(native.get("last_message_ts") or 0),
         "error": str(native.get("error") or ""),
-    }
+    }, "HYPERLIQUID")
     solana = _poll_network_health(
         poll, "SOLANA", setup_error=alchemy_vault_error if not whale_poller else "")
     solana.update(error=str((poll.get("solana") or {}).get("error") or solana.get("error") or ""),
                   waiting_for_filters=bool((poll.get("solana") or {}).get("waiting_for_filters")),
                   retry_in_sec=int((poll.get("solana") or {}).get("retry_in_sec") or
                                    solana.get("retry_in_sec") or 0))
-    result["SOLANA"] = solana
+    result["SOLANA"] = _mark_network_enabled(solana, "SOLANA")
     tron = poll.get("tron") or {}
     tron_state = str(tron.get("state") or "paused")
-    result["TRON"] = {
+    result["TRON"] = _mark_network_enabled({
         "status": "online" if tron.get("connected") else
                   "error" if tron_state in ("error", "budget_exhausted") else "waiting",
         "last_success": float(tron.get("last_success") or 0),
         "last_attempt": float(tron.get("last_attempt") or 0),
         "error": str(tron.get("error") or ""),
-    }
+    }, "TRON")
     return result
 
 
@@ -6457,6 +6743,7 @@ async def api_screener_stats(request: Request):
     health = _screener_network_status()
     networks = {
         chain: {"status": health[chain]["status"],
+                "enabled": bool(health[chain].get("enabled", True)),
                 "last_success": health[chain]["last_success"],
                 "last_attempt": health[chain]["last_attempt"],
                 "error": health[chain]["error"],
@@ -6563,9 +6850,22 @@ async def api_screener_stats(request: Request):
     online = sum(1 for data in networks.values() if data["status"] == "online")
     return {"since": since, "until": now, "total_events": len(events),
             "total_volume_usd": round(total_usd, 2), "active_networks": online,
+            # страница строит по этому списку чипы, карточки и график: выключенных
+            # админом сетей в интерфейсе не появляется вовсе
+            "enabled_networks": [chain for chain in _SCREENER_NETWORKS
+                                 if networks[chain]["enabled"]],
             "networks": networks, "series": series,
             "top_exchanges": top_exchanges,
             "native": whale_screener.native_status() if whale_screener else {}}
+
+
+@app.get("/api/screener/networks")
+async def api_screener_networks(request: Request):
+    """Какие сети Скринера включил админ. По ним страница строит чипы и карточки."""
+    switch = _network_switch()
+    return {"ok": True, "networks": switch["networks"],
+            "enabled": switch["enabled"],
+            "wallet_retention_days": switch["wallet_retention_days"]}
 
 
 def _screener_venue(label: str) -> str:

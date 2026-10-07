@@ -66,6 +66,8 @@ class Ctx:
     book_snapshot_fn = staticmethod(lambda config=None: {})
     # 🐋 Сигналы Скринера китов: (фильтр) → биржи из реестра и последние совпадения
     screener_signal_fn = staticmethod(lambda config=None: {})
+    # какие сети Скринера оставил включёнными админ (None = все)
+    screener_networks_fn = staticmethod(lambda: None)
 
 
 ctx = Ctx()
@@ -1875,7 +1877,13 @@ def register_account_routes(app) -> None:
             snap = ctx.screener_signal_fn(cfg) or {}
         except Exception as e:                            # noqa: BLE001
             log.debug("screener signals snapshot: %s", e)
-        return {"ok": True, "config": cfg, "presets": signal_presets(),
+        # сети показывает только те, что оставил включёнными админ
+        try:
+            chains = tuple(ctx.screener_networks_fn() or ()) or None
+        except Exception:                                     # noqa: BLE001
+            chains = None
+        return {"ok": True, "config": cfg, "presets": signal_presets(chains),
+                "networks": list(chains or []),
                 "subscribed": bool(row and row.get("enabled")),
                 "exchanges": snap.get("exchanges") or [],
                 "recent": snap.get("recent") or [],

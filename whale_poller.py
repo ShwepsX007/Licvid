@@ -67,6 +67,18 @@ SOLANA_POLL_STAGGER_SEC = 40.0
 RATE_LIMIT_BASE_SEC = 60.0
 RATE_LIMIT_MAX_SEC = 300.0
 NETWORK_SUCCESS_TTL_SEC = 300.0
+# Ключи Alchemy используются ПО ОДНОМУ: работает один, остальные — резерв.
+# Переключаемся только когда текущий ключ перестал давать данные (выбит квота,
+# 429, отказ авторизации или тишина дольше паузы ниже). Админ добавляет второй
+# ключ не для того, чтобы жечь его параллельно, а чтобы было на что отойти.
+KEY_IDLE_FAILOVER_SEC = max(0.0, float(os.getenv("LIQSCOPE_KEY_IDLE_FAILOVER_SEC", "300")))
+#: как надолго убираем «молчаливый» ключ в кулдаун, чтобы select_key не
+#: вернулся на него же на следующем запросе
+KEY_IDLE_PARK_SEC = 120.0
+#: ключ, который провайдер отверг (401/403) или на котором умер стрим, отдыхает
+#: 15 минут: месячная квота Alchemy за минуту не восстанавливается, но и
+#: потерянный час на временной паузе пулу не нужен
+KEY_AUTH_PARK_SEC = max(60.0, float(os.getenv("LIQSCOPE_KEY_AUTH_PARK_SEC", "900")))
 TRON_USD_CONTRACTS = dict(TRON_TOKENS)
 SOLANA_BLOCKS_PER_SEC = {"ETH": 1 / 12, "BNB": 1 / 3, "POLYGON": 0.5,
                          "ARBITRUM": 4.0, "BASE": 0.5}
@@ -261,7 +273,14 @@ class WhalePoller:
                  trongrid_key_store: AlchemyKeyStore | None = None,
                  mode: str | None = None,
                  history_interval_min: int | None = None,
-                 poll_interval_sec: int | None = None):
+                 poll_interval_sec: int | None = None,
+                 networks=None):
+        # Тумблер сетей админки (`screener_networks.NetworkSwitch`). None =
+        # не фильтровать: коллектор работает как раньше.
+        self.networks = networks
+        self._started_at = time.time()
+        self.last_data_at = 0.0
+        self.last_key_switch_at = 0.0
         self.screener = screener
         self.key_store = key_store
         self.trongrid_key_store = trongrid_key_store
@@ -275,10 +294,6 @@ class WhalePoller:
         self.chain_cooldown: dict[tuple[str, str], float] = {}
         self.chain_cooldown_status: dict[tuple[str, str], str] = {}
         self.rate_limit_attempts: dict[tuple[str, str], int] = {}
-        # Живой стрим каждой сети держит свой сдвиг по пулу ключей: после
-        # 429/auth у одного ключа переподключение уходит к следующему, а не
-        # бьётся в тот же. Иначе второй ключ в админке ничего не менял.
-        self._ws_key_cursor: dict[str, int] = {}
         self._solana_address_cursor = 0
         self._solana_token_accounts_updated_at = 0.0
         self._solana_token_accounts_owners: tuple[tuple[str, str], ...] = ()
@@ -371,6 +386,184 @@ class WhalePoller:
         return self.key_store.keys() if self.key_store else (
             [("legacy", self._fallback_key)] if self._fallback_key else [])
 
+    # --- тумблер сетей ---------------------------------------------------
+    def network_enabled(self, chain: str) -> bool:
+        """Собирать ли сеть: решение за админкой, нас здесь нет — собираем всё."""
+        switch = getattr(self, "networks", None)
+        if switch is None:
+            return True
+        try:
+            return bool(switch.is_enabled(chain))
+        except Exception:  # noqa: BLE001 — тумблер не имеет права ронять сбор
+            return True
+
+    def enabled_chains(self) -> tuple[str, ...]:
+        return tuple(chain for chain in self.endpoints if self.network_enabled(chain))
+
+    # --- пул ключей: один рабочий, остальные в резерве ------------------
+    def _month(self) -> str:
+        return (self.state.get("month") or
+                datetime.now(timezone.utc).strftime("%Y-%m"))
+
+    def key_locally_exhausted(self, key_id: str) -> bool:
+        """Ключ выбит своей месячной CU-квотой (до перезапуска ledger'а)."""
+        if not key_id:
+            return False
+        return self.state.setdefault("key_exhausted", {}).get(key_id) == self._month()
+
+    def key_ready(self, key_id: str, *, now: float | None = None) -> bool:
+        """Можно ли брать этот ключ прямо сейчас (кулдаун + локальная квота)."""
+        if not key_id:
+            return False
+        moment = time.time() if now is None else now
+        if self.key_locally_exhausted(key_id):
+            return False
+        return moment >= float(self.key_cooldown.get(key_id, 0.0) or 0.0)
+
+    def resolve_key(self) -> tuple[int, float]:
+        """(индекс рабочего ключа, пауза) — только чтение, ничего не меняет.
+
+        Активный ключ липкий: пока он жив, другие ключи не тратятся. Следующий
+        берётся только когда текущий реально нерабочий — локальная CU-квота или
+        кулдаун после 429/отказа. Живых нет ни у кого — берём того, кто
+        освободится раньше, и честно спим до него.
+        """
+        keys = self._keys()
+        if not keys:
+            return -1, 0.0
+        ids = [key_id for key_id, _key in keys]
+        now = time.time()
+        active = str(self.state.get("active_key") or "")
+        index = ids.index(active) if active in ids else 0
+        if self.key_ready(ids[index], now=now):
+            return index, 0.0
+        for offset in range(1, len(keys)):
+            candidate = (index + offset) % len(keys)
+            if self.key_ready(ids[candidate], now=now):
+                return candidate, 0.0
+        ready = min(((float(self.key_cooldown.get(key_id, 0.0) or 0.0), position)
+                     for position, key_id in enumerate(ids)), key=lambda item: item[0])
+        return ready[1], max(0.0, ready[0] - now)
+
+    def select_key(self) -> tuple[int, float]:
+        """То же, что `resolve_key`, но переход записываем в состояние."""
+        keys = self._keys()
+        index, wait_sec = self.resolve_key()
+        if not keys or index < 0:
+            return index, wait_sec
+        ids = [key_id for key_id, _key in keys]
+        active = str(self.state.get("active_key") or "")
+        if ids[index] != active:
+            reason = ("все ключи на паузе, ждём ближайшего" if wait_sec > 0 else
+                      "первый живой ключ в пуле" if not active else
+                      f"ключ {self._hint(active)} не отвечает")
+            self.set_active_key(ids[index], reason=reason)
+        return index, wait_sec
+
+    def active_key(self) -> tuple[str, str]:
+        """(id, ключ) текущего рабочего ключа; ("", "") если ключей нет."""
+        keys = self._keys()
+        index, _wait = self.resolve_key()
+        if index < 0 or index >= len(keys):
+            return "", ""
+        return keys[index]
+
+    def _hint(self, key_id: str) -> str:
+        """Маскированная подсказка ключа для логов и админки (без секрета)."""
+        for candidate, secret in self._keys():
+            if candidate == key_id:
+                return mask_key(secret)
+        return key_id or "—"
+
+    def set_active_key(self, key_id: str, *, reason: str = "") -> None:
+        if not key_id or self.state.get("active_key") == key_id:
+            return
+        previous = str(self.state.get("active_key") or "")
+        self.state["active_key"] = key_id
+        self.state["key_switch"] = {"from": previous, "to": key_id,
+                                    "reason": (reason or "")[:200],
+                                    "at": int(time.time())}
+        try:
+            self._save()
+        except OSError:
+            pass
+        self.last_key_switch_at = time.time()
+        log.warning("[ключи] рабочий ключ переключён: %s → %s · %s",
+                    self._hint(previous) if previous else "—", self._hint(key_id),
+                    reason or "без причины")
+
+    def mark_key_exhausted(self, key_id: str, reason: str = "") -> None:
+        """Ключ выбит локальной квотой: до конца месяца его не трогаем."""
+        if not key_id:
+            return
+        ledger = self.state.setdefault("key_exhausted", {})
+        month = self._month()
+        if ledger.get(key_id) != month:
+            ledger[key_id] = month
+            try:
+                self._save()
+            except OSError:
+                pass
+        used = int(self.state.get("key_usage", {}).get(key_id, 0) or 0)
+        self.key_errors[key_id] = (reason or
+                                    "Квота CU этого ключа исчерпана; "
+                                    "ключ жив, сбор продолжается на следующем")
+        log.warning("[ключи] %s: %s (%d CU из %d), месяц %s",
+                    self._hint(key_id), reason or "исчерпана локальная квота",
+                    used, self.key_cu_allowance(), month)
+
+    def park_key(self, key_id: str, seconds: float, reason: str) -> None:
+        """Временная пенсия ключа: он не будет выбран, пока не пройдёт пауза."""
+        if not key_id:
+            return
+        until = time.time() + max(1.0, float(seconds or 0.0))
+        if until > float(self.key_cooldown.get(key_id, 0.0) or 0.0):
+            self.key_cooldown[key_id] = until
+        if reason:
+            self.key_errors[key_id] = reason[:200]
+        self.select_key()  # сразу сдвигаем активный ключ на живого
+
+    def note_key_data(self, key_id: str = "") -> None:
+        """Данные пошли — снимаем с ключа отметку «молчит»."""
+        self.last_data_at = time.time()
+        if key_id:
+            self.key_errors.pop(key_id, None)
+
+    def maybe_failover_idle(self) -> str:
+        """Если активный ключ молчит дольше паузы — переводим сбор на следующий.
+
+        Порог не меньше трёх интервалов опроса: в economy-режиме тишина в 5
+        минут — норма, а не повод сбрасывать ключ.
+        """
+        keys = self._keys()
+        if len(keys) < 2 or KEY_IDLE_FAILOVER_SEC <= 0:
+            return ""
+        threshold = max(KEY_IDLE_FAILOVER_SEC, 3.0 * self.poll_interval_sec)
+        since_data = time.time() - max(self.last_data_at, self._started_at)
+        if since_data < threshold:
+            return ""
+        if time.time() - self.last_key_switch_at < threshold / 2:
+            return ""
+        index, _wait = self.select_key()
+        if index < 0:
+            return ""
+        current = keys[index][0]
+        # кандидаты — все ключи, кроме текущего, по порядку: следующим первым
+        following = [(index + step) % len(keys) for step in range(1, len(keys))]
+        chosen = next((position for position in following
+                       if self.key_ready(keys[position][0])), None)
+        if chosen is None:
+            chosen = following[0]
+        self.park_key(current, KEY_IDLE_PARK_SEC,
+                      f"нет данных {int(since_data)} с — ключ отправлен в резерв")
+        self.set_active_key(keys[chosen][0],
+                            reason=f"ключ {self._hint(current)} не давал данных "
+                                   f"{int(since_data)} с")
+        self.last_data_at = time.time()  # следующий прыжок — не раньше нового окна
+        log.warning("[ключи] %d с без данных: %s → %s",
+                    int(since_data), self._hint(current), self._hint(keys[chosen][0]))
+        return keys[chosen][0]
+
     def configure(self, *, mode: str, monthly_cu: int,
                   poll_interval_sec: int | None = None,
                   history_interval_min: int | None = None) -> None:
@@ -420,14 +613,19 @@ class WhalePoller:
     def _reserve(self, method: str, key_id: str = "legacy", chain: str = "") -> None:
         month = datetime.now(timezone.utc).strftime("%Y-%m")
         if self.state["month"] != month:
-            self.state.update(month=month, cu=0, key_usage={}, network_cu={})
+            # Новый месяц — новый ledger: квоты заново у всех ключей, и
+            # пул снова стартует с первого ключа, а не с того, что спасал.
+            self.state.update(month=month, cu=0, key_usage={}, network_cu={},
+                              key_exhausted={}, active_key="")
             self._save()
         cost = METHOD_CU[method]
         allowance = self.key_cu_allowance()
         usage = self.state.setdefault("key_usage", {})
         if usage.get(key_id, 0) + cost > allowance:
-            # Квота этого ключа кончилась — это не стоп сбору: `_rpc` крутит
-            # запрос на следующий ключ пула, сеть продолжает работать.
+            # Квота этого ключа кончилась — это не стоп сбору: ключ уходит в
+            # резерв до конца месяца, `_rpc` в этом же запросе пробует
+            # следующий, а дальше вся нога работает на нём.
+            self.mark_key_exhausted(key_id)
             raise BudgetExhausted("key")
         if self.state["cu"] + cost > self.cu_ceiling():
             raise BudgetExhausted("global")
@@ -500,6 +698,7 @@ class WhalePoller:
 
     def _mark_network_success(self, chain: str, *, key_id: str = "", clear_error: bool = True) -> None:
         now = time.time()
+        self.last_data_at = now
         row = self._network_row(chain)
         previous = row.get("status")
         row["status"] = "online"
@@ -544,6 +743,7 @@ class WhalePoller:
     def _mark_network_event(self, chain: str) -> None:
         row = self._network_row(chain)
         row["last_event"] = time.time()
+        self.last_data_at = row["last_event"]
         if row.get("status") in ("rate_limited", "auth_error", "quota_exhausted", "network_error"):
             row["warning_status"] = row["status"]
             row["status"] = "online"
@@ -627,6 +827,11 @@ class WhalePoller:
             retry_after = 900.0
             cooldown_key = (chain, key_id)
             self.chain_cooldown[cooldown_key] = time.time() + retry_after
+            # Отказ ключа — не «одна сеть поперхнулась»: убираем его из работы
+            # целиком, иначе пять сетей продолжат долбить его же.
+            if self.key_cooldown.get(key_id, 0.0) < time.time() + retry_after:
+                self.key_cooldown[key_id] = time.time() + retry_after
+                self.select_key()
             self.chain_cooldown_status[cooldown_key] = kind
             self._mark_network_failure(chain, kind, safe_detail,
                                        http_status=http_status, rpc_code=rpc_code,
@@ -637,6 +842,9 @@ class WhalePoller:
             retry_after = 300.0
             cooldown_key = (chain, key_id)
             self.chain_cooldown[cooldown_key] = time.time() + retry_after
+            # Месячный CU-лимит провайдера: ключ бессмысленно трогать до
+            # конца периода, переводим сбор на следующий ключ пула.
+            self.mark_key_exhausted(key_id, "Провайдер сообщил об исчерпанной квоте CU")
             self.chain_cooldown_status[cooldown_key] = kind
             self._mark_network_failure(chain, kind, safe_detail,
                                        http_status=http_status, rpc_code=rpc_code,
@@ -655,16 +863,30 @@ class WhalePoller:
         now = time.time()
         allowance = self.key_cu_allowance()
         usage = self.state.get("key_usage", {})
-        return [{**row,
-                 "reserved_cu": usage.get(row["id"], 0),
-                 # квота на ключ: админка по ней рисует полоску расхода, а по
-                 # «reason» объясняет, почему ключ сейчас не работает
-                 "cu_allowance": allowance,
-                 "state": ("cooldown" if self.key_cooldown.get(row["id"], 0) > now
-                           else "active" if row["id"] == self.state.get("active_key")
-                           else "ready"),
-                 "reason": self.key_errors.get(row["id"], "")}
-                for row in public]
+        keys = self._keys()
+        active_index, _wait = self.resolve_key()
+        active_id = keys[active_index][0] if 0 <= active_index < len(keys) else ""
+        out = []
+        for row in public:
+            key_id = row["id"]
+            cooling = float(self.key_cooldown.get(key_id, 0.0) or 0.0) > now
+            exhausted = self.key_locally_exhausted(key_id)
+            # «reserve» — ключ целый и ждёт своей очереди: он НЕ расходуется,
+            # пока работает активный. Это то, чего ждёт админ, добавляя ключ.
+            state = ("exhausted" if exhausted and not cooling else
+                     "cooldown" if cooling else
+                     "active" if key_id == active_id else "reserve")
+            out.append({**row,
+                        "reserved_cu": usage.get(key_id, 0),
+                        # квота на ключ: админка по ней рисует полоску расхода,
+                        # а по «reason» объясняет, почему ключ не работает
+                        "cu_allowance": allowance,
+                        "state": state,
+                        "active": key_id == active_id,
+                        "cooldown_in_sec": int(math.ceil(max(
+                            0.0, float(self.key_cooldown.get(key_id, 0.0) or 0.0) - now))),
+                        "reason": self.key_errors.get(key_id, "")})
+        return out
 
     def status(self) -> dict:
         keys = self._keys()
@@ -688,11 +910,37 @@ class WhalePoller:
             row = state.copy()
             row["retry_in_sec"] = int(math.ceil(max(0.0, float(row.get("retry_at") or 0) - now_ts)))
             row["cu_used"] = int(self.state.get("network_cu", {}).get(chain, 0))
+            row["enabled"] = self.network_enabled(chain)
+            if not row["enabled"]:
+                # Выключенную сеть показываем выключенной, а не «ожиданием»:
+                # админ должен видеть тумблер, а не гадать по пустым карточкам.
+                row.update(status="disabled", error="", warning_status="",
+                           retry_at=0.0, retry_in_sec=0, key_active=False)
             network_status[chain] = row
         other = {c: "not_configured" for c in
                  ("BITCOIN", "BITCOINCASH", "LITECOIN", "SUI", "DOGECOIN")}
         other["SOLANA"] = sol["state"]
         other["TRON"] = tron["state"]
+        network_switch = getattr(self, "networks", None)
+        enabled = self.enabled_chains()
+        pool_keys = keys
+        active_index, active_wait = self.resolve_key()
+        active_id = (pool_keys[active_index][0]
+                     if 0 <= active_index < len(pool_keys) else "")
+        key_pool = {
+            "keys_configured": len(pool_keys),
+            "active_key_id": active_id,
+            "active_hint": self._hint(active_id) if active_id else "",
+            "wait_sec": int(math.ceil(max(0.0, active_wait))),
+            # резерв = целые ключи, которые сейчас НЕ расходуются
+            "reserve": [self._hint(key_id) for key_id, _secret in pool_keys
+                        if key_id != active_id and not self.key_locally_exhausted(key_id)],
+            "exhausted": [self._hint(key_id) for key_id, _secret in pool_keys
+                          if self.key_locally_exhausted(key_id)],
+            "idle_sec": int(max(0.0, now_ts - max(self.last_data_at, self._started_at))),
+            "idle_failover_sec": int(max(KEY_IDLE_FAILOVER_SEC, 3.0 * self.poll_interval_sec)),
+            "switch": dict(self.state.get("key_switch") or {}),
+        }
         return {"mode": self.mode, "interval_sec": self.poll_interval_sec,
                 "poll_interval_sec": self.poll_interval_sec,
                 "history_interval_min": self.history_interval_min,
@@ -706,6 +954,11 @@ class WhalePoller:
                 "cursors": self.state.get("cursors", {}).copy(),
                 "history_cursors": self.state.get("history_cursors", {}).copy(),
                 "errors": self.errors.copy(), "supported": list(self.endpoints),
+                # что оставил включённым админ: сети collect'ятся только эти
+                "enabled_networks": list(enabled),
+                "network_switch": (network_switch.status()
+                                    if hasattr(network_switch, "status") else None),
+                "key_pool": key_pool,
                 "native_supported": [*list(NATIVE_NETWORKS), "SOLANA", "TRON"],
                 "keys_configured": len(keys),
                 "active_key_id": self.state.get("active_key", ""),
@@ -714,7 +967,9 @@ class WhalePoller:
                 "network_cu": self.state.get("network_cu", {}).copy(),
                 "network_status": network_status,
                 "latest_heads": self.latest_heads.copy(),
-                "evm_streams": {chain: row.copy() for chain, row in self.evm_streams.items()},
+                "evm_streams": {chain: {**row.copy(),
+                                        "enabled": self.network_enabled(chain)}
+                                for chain, row in self.evm_streams.items()},
                 "solana": sol, "tron": tron,
                 "phase": ("no_key" if not keys else
                           "budget_exhausted" if used >= self.cu_ceiling() else
@@ -742,8 +997,11 @@ class WhalePoller:
             self._mark_network_failure(chain, "paused", "Alchemy API key is not configured",
                                        key_active=False)
             raise NoKeys("Alchemy API key is not configured")
-        active_id = self.state.get("active_key")
-        index = next((i for i, (kid, _) in enumerate(keys) if kid == active_id), 0)
+        index, _wait = self.select_key()
+        # Кандидатов максимум два: рабочий ключ и одна ротация на следующий,
+        # если текущий умер прямо во время запроса. Прогонять в одном запросе
+        # весь пул нельзя — CU начнут тратить все ключи сразу.
+        attempts = min(2, len(keys))
         now = time.time()
         rate_limited: list[tuple[float, str]] = []
         auth_errors: list[str] = []
@@ -751,7 +1009,7 @@ class WhalePoller:
         paused = False
         allocation_exhausted = False
         last_failure: PollError | None = None
-        for offset in range(len(keys)):
+        for offset in range(attempts):
             key_id, key = keys[(index + offset) % len(keys)]
             cooldown_key = (chain, key_id)
             if self.key_cooldown.get(key_id, 0) > now:
@@ -865,7 +1123,15 @@ class WhalePoller:
                             continue
                         if method in ("eth_getLogs", "alchemy_getAssetTransfers"):
                             self._reset_cursor(chain)
-                        if offset + 1 < len(keys):
+                        # Ключ умер — убираем в резерв, чтобы и остальные сети
+                        # следующей попытки шли уже по другому ключу.
+                        if isinstance(failure, AuthError):
+                            self.park_key(key_id, KEY_AUTH_PARK_SEC,
+                                          "Провайдер отверг этот ключ")
+                        elif isinstance(failure, QuotaExhausted):
+                            self.mark_key_exhausted(
+                                key_id, "Провайдер сообщил об исчерпанной квоте CU")
+                        if offset + 1 < attempts:
                             last_failure = failure
                             continue
                         raise failure
@@ -875,6 +1141,7 @@ class WhalePoller:
                     self.chain_cooldown.pop(cooldown_key, None)
                     self.chain_cooldown_status.pop(cooldown_key, None)
                     self.rate_limit_attempts.pop(cooldown_key, None)
+                    self.note_key_data(key_id)
                     self._mark_network_success(chain, key_id=key_id)
                     return data["result"]
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
@@ -1225,13 +1492,15 @@ class WhalePoller:
                    float(self.chain_cooldown.get((chain, key_id), 0.0) or 0.0))
 
     def _mark_key_paused(self, chain: str, key_id: str) -> None:
-        """Ключ в этой сети наказан — стрим следующей переподключается на нём."""
-        keys = self._keys()
-        if not keys:
+        """Ключ наказан: он уходит в резерв, а весь пул — на следующий.
+
+        Раньше это был сдвиг курсора одной сети: стримы жили на разных ключах
+        одновременно, и CU тратились со всех сразу.
+        """
+        if not key_id:
             return
-        index = next((i for i, (kid, _) in enumerate(keys) if kid == key_id), None)
-        if index is not None:
-            self._ws_key_cursor[chain] = index + 1
+        self.park_key(key_id, KEY_AUTH_PARK_SEC,
+                      f"стрим {chain} оборвался на этом ключе")
 
     def _has_ready_stream_key(self, chain: str, keys: list[tuple[str, str]],
                               except_key_id: str) -> bool:
@@ -1254,31 +1523,27 @@ class WhalePoller:
     def _stream_key(self, chain: str, keys: list[tuple[str, str]]) -> tuple[str, str, int, float]:
         """Ключ для live-стрима сети и пауза до следующей попытки.
 
-        Раньше стрим жёстко брал ``keys[0]``: когда у него заканчивался лимит,
-        воркер уходил в бесконечный reconnect на мёртвом ключе, а добавленный
-        второй ключ оставался невостребованным — данные не шли вовсе. Теперь
-        берётся первый свободный ключ, круг за кругом, а если все в кулдауне —
-        тот, что освободится раньше, и честная пауза до него.
+        Ключ один на весь пул — тот же, на котором сейчас идёт REST-опрос.
+        Раньше стрим жёстко брал ``keys[0]`` и умирал вместе с его лимитом,
+        затем (в промежуточной версии) каждая сеть крутила свой курсор и CU
+        начинали жрать все ключи сразу. Теперь выбор общий: живой активный
+        ключ, при его смерти — следующий, при всеобщем кулдауне — тот, кто
+        освободится раньше, и честная пауза до него.
 
         Возвращает ``(key_id, key, index, wait_sec)``; ``key_id`` пустой, если
         ключей нет вообще.
         """
         if not keys:
             return "", "", 0, 0.0
-        now = time.time()
-        start = self._ws_key_cursor.get(chain, 0) % len(keys)
-        for offset in range(len(keys)):
-            index = (start + offset) % len(keys)
-            key_id, key = keys[index]
-            if self._key_ready_at(chain, key_id) <= now:
-                self._ws_key_cursor[chain] = index
-                return key_id, key, index, 0.0
-        # Все ключи отдыхают: ждём ближайшего, а не трогаем первого подряд.
-        ready = min(((self._key_ready_at(chain, key_id), index)
-                     for index, (key_id, _key) in enumerate(keys)),
-                    key=lambda item: item[0])
-        self._ws_key_cursor[chain] = ready[1]
-        return keys[ready[1]][0], keys[ready[1]][1], ready[1], max(0.0, ready[0] - now)
+        index, wait_sec = self.select_key()
+        if index < 0 or index >= len(keys):
+            return "", "", 0, 0.0
+        key_id, key = keys[index]
+        # Кулдаун пары «сеть + ключ» тоже учитываем: на этом же ключе стрим
+        # этой сети пока не пускают, ждём, пока отпустит.
+        pair_wait = max(0.0, float(self.chain_cooldown.get((chain, key_id), 0.0) or 0.0)
+                        - time.time())
+        return key_id, key, index, max(wait_sec, pair_wait)
 
     async def _run_evm_ws_chain(self, chain: str) -> None:
         """Subscribe to CEX-indexed token/native transfers using Alchemy WS."""
@@ -1289,6 +1554,13 @@ class WhalePoller:
             if first_connect:
                 await self._wait_for_staggered_start(chain)
                 first_connect = False
+            if not self.network_enabled(chain):
+                # Тумблер в админке: сеть не слушаем, CU не тратим. Проверяем
+                # раз в минуту — включение должно жить без рестарта процесса.
+                state.update(connected=False, state="disabled", subscriptions=0,
+                             error="", retry_in_sec=0)
+                await asyncio.sleep(60.0)
+                continue
             rate_limit_delay = None
             keys = self._keys()
             wallets = self.screener.wallet_addresses(chain)
@@ -1474,8 +1746,9 @@ class WhalePoller:
             self._mark_network_failure("SOLANA", "paused",
                                        "Alchemy API key is not configured", key_active=False)
             raise NoKeys("Alchemy API key is not configured")
-        active_id = self.state.get("active_key")
-        start = next((i for i, (kid, _) in enumerate(keys) if kid == active_id), 0)
+        index, _wait = self.select_key()
+        start = index
+        attempts = min(2, len(keys))
         now = time.time()
         rate_limited: list[tuple[float, str]] = []
         auth_errors: list[str] = []
@@ -1483,7 +1756,7 @@ class WhalePoller:
         paused = False
         allocation_exhausted = False
         last_failure: PollError | None = None
-        for offset in range(len(keys)):
+        for offset in range(attempts):
             key_id, key = keys[(start + offset) % len(keys)]
             cooldown_key = ("SOLANA", key_id)
             if self.key_cooldown.get(key_id, 0) > now:
@@ -1553,7 +1826,13 @@ class WhalePoller:
                         if isinstance(failure, QuotaExhausted):
                             quota_errors.append(str(failure))
                             continue
-                        if offset + 1 < len(keys):
+                        if isinstance(failure, AuthError):
+                            self.park_key(key_id, KEY_AUTH_PARK_SEC,
+                                          "Провайдер отверг этот ключ (Solana)")
+                        elif isinstance(failure, QuotaExhausted):
+                            self.mark_key_exhausted(
+                                key_id, "Провайдер сообщил об исчерпанной квоте CU")
+                        if offset + 1 < attempts:
                             last_failure = failure
                             continue
                         raise failure
@@ -1592,7 +1871,13 @@ class WhalePoller:
                 if isinstance(failure, QuotaExhausted):
                     quota_errors.append(str(failure))
                     continue
-                if offset + 1 < len(keys):
+                if isinstance(failure, AuthError):
+                    self.park_key(key_id, KEY_AUTH_PARK_SEC,
+                                  "Провайдер отверг этот ключ (Solana)")
+                elif isinstance(failure, QuotaExhausted):
+                    self.mark_key_exhausted(key_id,
+                                            "Провайдер сообщил об исчерпанной квоте CU")
+                if offset + 1 < attempts:
                     last_failure = failure
                     continue
                 raise failure
@@ -1604,6 +1889,7 @@ class WhalePoller:
             self.chain_cooldown.pop(cooldown_key, None)
             self.chain_cooldown_status.pop(cooldown_key, None)
             self.rate_limit_attempts.pop(cooldown_key, None)
+            self.note_key_data(key_id)
             self._mark_network_success("SOLANA", key_id=key_id)
             return payload["result"]
         if rate_limited:
@@ -2213,6 +2499,14 @@ class WhalePoller:
             if first_cycle:
                 await self._wait_for_staggered_start("SOLANA")
                 first_cycle = False
+            if not self.network_enabled("SOLANA"):
+                self.solana_status.update(connected=False, state="disabled",
+                                          subscriptions=0, submitted=0,
+                                          processing_state="disabled",
+                                          waiting_for_filters=False, error="")
+                self._network_row("SOLANA").update(status="disabled", key_active=False)
+                await asyncio.sleep(60.0)
+                continue
             keys = self._keys()
             wallets = self.screener.wallet_addresses("SOLANA")
             owners = list(wallets.items())[:SOLANA_MAX_WALLETS]
@@ -2458,6 +2752,13 @@ class WhalePoller:
     async def run_tron(self) -> None:
         """Poll TronGrid TRX blocks and confirmed TRC-20 transfers every 5s."""
         while True:
+            if not self.network_enabled("TRON"):
+                # TronGrid бесплатный, но выключенную админом сеть не трогаем:
+                # в ленте и в кабинете TRON тогда не показывается.
+                self.tron_status.update(connected=False, state="disabled", error="")
+                self._network_row("TRON").update(status="disabled", key_active=False)
+                await asyncio.sleep(60.0)
+                continue
             self.tron_status["wallets"] = len(self.screener.wallet_addresses("TRON"))
             try:
                 async with aiohttp.ClientSession() as session:
@@ -2522,10 +2823,27 @@ class WhalePoller:
                 if self.wakeup.is_set():
                     self.wakeup.clear()
                     next_due = self._initial_evm_poll_schedule(loop.time())
+                # Молчание активного ключа — единственный штатный повод перейти
+                # на следующий: сам по себе второй ключ в работу не берём.
+                try:
+                    self.maybe_failover_idle()
+                except Exception:  # noqa: BLE001 — сторож не имеет права ронять сбор
+                    log.exception("[ключи] сторож простоя упал")
 
                 # One scheduler owns every EVM network. It awaits each poll fully
                 # before selecting the next due chain, preventing synchronized bursts.
                 chain = min(next_due, key=next_due.get)
+                if chain in next_due and not self.network_enabled(chain):
+                    # Сеть выключена тумблером: не опрашиваем, но раз в минуту
+                    # проверяем снова, чтобы включение сработало без рестарта.
+                    next_due[chain] = loop.time() + 60.0
+                    try:
+                        await asyncio.wait_for(self.wakeup.wait(), timeout=60.0)
+                    except asyncio.TimeoutError:
+                        pass
+                    if self.wakeup.is_set():
+                        next_due = self._initial_evm_poll_schedule(loop.time())
+                    continue
                 due_at = next_due[chain]
                 delay = due_at - loop.time()
                 if delay > 0:

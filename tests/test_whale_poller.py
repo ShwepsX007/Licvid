@@ -584,7 +584,12 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(status["status"], "quota_exhausted")
                 self.assertTrue(status["key_active"])
                 self.assertIsNone(status["http_status"])
-                self.assertEqual(poller.key_status()[0]["state"], "ready")
+                # Ключ с выбранной локальной квотой — не «мёртвый» и сеть он не
+                # ставит на паузу, но и трогать его до конца месяца не нужно:
+                # state=exhausted и честная причина в админке.
+                row = poller.key_status()[0]
+                self.assertEqual(row["state"], "exhausted")
+                self.assertIn("исчерпана", row["reason"])
             finally:
                 screen.close()
 

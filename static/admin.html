@@ -265,6 +265,7 @@
         <span id="whale-admin-key-status" class="meta" role="status"></span>
     </div>
     <div id="whale-admin-keys" class="whale-admin-keys" aria-live="polite"></div>
+    <p class="meta" id="whale-admin-key-pool" role="status"></p>
     <h4 class="whale-admin-subtitle" data-i18n="adm.trongrid_title">TronGrid API key · optional</h4>
     <p class="meta" data-i18n="adm.trongrid_note">TRON monitoring works without a key, but a TronGrid key raises the rate limit. The value is encrypted at rest.</p>
     <div class="row-actions" style="flex-wrap:wrap;gap:10px">
@@ -276,6 +277,10 @@
     <div id="trongrid-admin-keys" class="whale-admin-keys" aria-live="polite"></div>
     <h4 class="whale-admin-subtitle" data-i18n="adm.alchemy_networks_title">Network health</h4>
     <div id="whale-admin-chains" class="whale-admin-networks" aria-live="polite"></div>
+    <h4 class="whale-admin-subtitle" data-i18n="adm.networks_switch_title">Collected networks</h4>
+    <p class="meta" data-i18n="adm.networks_switch_note">A network switched off is not polled, spends no Alchemy CU and is hidden in the screener. Its history stays in the database.</p>
+    <div id="whale-admin-network-switches" class="whale-admin-switches" aria-live="polite"></div>
+    <p class="meta" id="whale-admin-network-status" role="status"></p>
     <div class="row-actions whale-admin-settings" style="flex-wrap:wrap;gap:10px">
         <label><span data-i18n="adm.alchemy_mode">Mode</span>
             <select id="whale-admin-mode" class="search">
@@ -309,6 +314,16 @@
             <input id="whale-admin-wallet-search" class="search" maxlength="100"></label>
         <button class="btn btn-primary" type="button" id="whale-admin-wallet-refresh" data-i18n="adm.cex_wallet_refresh">↻ Refresh from DeFiLlama</button>
         <span id="whale-admin-wallet-status" class="meta" role="status"></span>
+    </div>
+    <div class="row-actions whale-admin-wallet-cleanup" style="flex-wrap:wrap;gap:10px">
+        <span id="whale-admin-wallet-cleanup" class="meta">—</span>
+        <label><span data-i18n="adm.cex_wallet_retention">Silence window, days</span>
+            <input type="number" class="search" id="whale-admin-wallet-retention"
+                   min="0" max="365" step="1" value="7"></label>
+        <button class="btn btn-ghost" type="button" id="whale-admin-wallet-retention-save"
+                data-i18n="adm.cex_wallet_retention_save">Save retention</button>
+        <button class="btn btn-ghost" type="button" id="whale-admin-wallet-prune"
+                data-i18n="adm.cex_wallet_prune">Clean now</button>
     </div>
     <div class="row-actions whale-admin-wallet-add" style="flex-wrap:wrap;gap:10px">
         <label><span data-i18n="adm.cex_wallet_name">Exchange label</span><input id="whale-admin-wallet-name" class="search" maxlength="100"></label>

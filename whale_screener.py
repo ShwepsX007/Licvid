@@ -26,6 +26,12 @@ import aiohttp
 
 from cex_wallets_updater import CEXWalletRegistry, EVM_CHAINS, SUPPORTED_CHAINS
 
+try:  # свой модуль без сети и БД; без него скринер обязан остаться живым
+    from screener_networks import normalize_network
+except Exception:  # noqa: BLE001 — тумблер сетей не валит импорт скринера
+    def normalize_network(value):
+        return str(value or '').strip().upper()
+
 log = logging.getLogger(__name__)
 
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
@@ -276,7 +282,8 @@ class WhaleHistoryStore:
 
     def _where(self, *, since: float | None = None, until: float | None = None,
                chain: str = "ALL", min_usd: float = 0.0,
-               direction: str = "ALL", exchange: str = "ALL") -> tuple[str, list]:
+               direction: str = "ALL", exchange: str = "ALL",
+               chains: tuple[str, ...] | list[str] | None = None) -> tuple[str, list]:
         terms, params = [], []
         if since is not None:
             terms.append("timestamp >= ?")
@@ -284,6 +291,21 @@ class WhaleHistoryStore:
         if until is not None:
             terms.append("timestamp <= ?")
             params.append(float(until))
+        # Тумблер сетей в админке: видимые сети приходят отдельным списком,
+        # чтобы total и пагинация считались по реальным строкам, а не
+        # постфильтром поверх готовой страницы.
+        if chains is not None:
+            allowed = sorted({str(item).upper() for item in chains
+                              if str(item or "").strip()})
+            if not allowed:
+                return " WHERE 0", []
+            requested = str(chain or "").upper()
+            if requested in ("", "ALL", "GENERAL", "EVM"):
+                placeholders = ",".join("?" for _ in allowed)
+                terms.append(f"chain IN ({placeholders})")
+                params.extend(allowed)
+            elif requested not in allowed:
+                return " WHERE 0", []
         if chain and chain.upper() != "ALL":
             if chain.upper() in ("EVM", "GENERAL"):
                 chains = sorted(EVM_CHAINS if chain.upper() == "EVM"
@@ -311,11 +333,12 @@ class WhaleHistoryStore:
     def query(self, *, since: float | None = None, until: float | None = None,
               chain: str = "ALL", min_usd: float = 0.0,
               direction: str = "ALL", exchange: str = "ALL",
+              chains: tuple[str, ...] | list[str] | None = None,
               page: int = 1, page_size: int | None = 50,
               sort_by: str = "timestamp", sort_dir: str = "desc") -> tuple[list[dict], int]:
         where, params = self._where(since=since, until=until, chain=chain,
                                     min_usd=min_usd, direction=direction,
-                                    exchange=exchange)
+                                    exchange=exchange, chains=chains)
         sort_col = self._SORT_COLUMNS.get(sort_by, "timestamp")
         order = "ASC" if str(sort_dir).lower() == "asc" else "DESC"
         with self._lock:
@@ -340,6 +363,35 @@ class WhaleHistoryStore:
                 out.append(event)
         return out, total
 
+    def active_wallet_keys(self, since: float, *, limit: int = 200_000) -> set[tuple[str, str]]:
+        """Пары (сеть, адрес) кошельков, которые мелькали в событиях после `since`.
+
+        Ровно один обход окна history — им админская автоочистка базы кошельков
+        решает, что ещё «живо». EVM-адреса приводим к нижнему регистру, как их
+        хранит реестр.
+        """
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT chain, payload FROM whale_events WHERE timestamp >= ?"
+                " ORDER BY timestamp DESC LIMIT ?",
+                (float(since), max(1, int(limit)))).fetchall()
+        out: set[tuple[str, str]] = set()
+        for row in rows:
+            try:
+                event = json.loads(row["payload"])
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(event, dict):
+                continue
+            chain = str(event.get("chain") or row["chain"] or "").upper()
+            if not chain:
+                continue
+            for field in ("from", "to"):
+                address = str(event.get(field) or "").strip()
+                if address:
+                    out.add((chain, address.lower() if chain in EVM_CHAINS else address))
+        return out
+
     def latest(self, limit: int = 100) -> list[dict]:
         rows, _ = self.query(page_size=limit, sort_by="timestamp", sort_dir="desc")
         return list(reversed(rows))
@@ -357,7 +409,10 @@ class WhaleScreener:
                  hl_ws: str | None = None, hl_rest: str | None = None,
                  hl_enabled: bool | None = None, hl_sub_gap: float | None = None,
                  hl_ping_sec: float | None = None, hl_fresh_sec: float | None = None,
-                 history_path: Path | str | None = None):
+                 history_path: Path | str | None = None, networks=None):
+        # Тумблер сетей админки (`screener_networks.NetworkSwitch` или любой
+        # объект с is_enabled/enabled). Без него — как раньше: видно всё.
+        self.networks = networks
         self.price_fn = price_fn
         self.broadcast = broadcast
         self.wallet_path = wallet_path or Path(__file__).resolve().parent / "data/cex_wallets.json"
@@ -404,6 +459,30 @@ class WhaleScreener:
             "reconnects": 0, "error": "",
         }
 
+    def visible_chains(self) -> tuple[str, ...] | None:
+        """Сети, которые показываем; None — фильтр не задан (видно всё)."""
+        switch = getattr(self, "networks", None)
+        if switch is None:
+            return None
+        try:
+            chains = tuple(switch.enabled())
+        except Exception:  # noqa: BLE001 — тумблер не имеет права ронять выдачу
+            return None
+        return chains
+
+    def chain_visible(self, chain: object) -> bool:
+        """Видима ли сеть в выдаче (unknown/GENERAL/EVM не блокируем)."""
+        switch = getattr(self, "networks", None)
+        if switch is None:
+            return True
+        key = normalize_network(chain)
+        if not key:
+            return True
+        try:
+            return bool(switch.is_enabled(key))
+        except Exception:  # noqa: BLE001
+            return True
+
     def reload_wallets(self) -> None:
         """Reload the shared wallet file after an admin or scheduled update."""
         self.wallet_registry = CEXWalletRegistry(self.wallet_path)
@@ -442,7 +521,8 @@ class WhaleScreener:
     def history(self, min_usd: float = 100_000, chain: str = "ALL", limit: int = 50,
                 since: float | None = None) -> list[dict]:
         return [ev.copy() for ev in reversed(self.events)
-                if float(ev.get("usd") or 0) >= min_usd
+                if self.chain_visible(ev.get("chain"))
+                and float(ev.get("usd") or 0) >= min_usd
                 and (chain == "ALL" or
                      (chain == "EVM" and ev.get("chain") in EVM_CHAINS) or
                      (chain == "GENERAL" and ev.get("chain") in SUPPORTED_CHAINS) or
@@ -450,26 +530,30 @@ class WhaleScreener:
                 and (since is None or float(ev.get("timestamp") or 0) >= since)][:limit]
 
     def events_since(self, since: float, until: float | None = None) -> list[dict]:
+        chains = self.visible_chains()
         if self.history_store:
             rows, _ = self.history_store.query(since=since, until=until,
                                                page_size=None, sort_by="timestamp",
-                                               sort_dir="asc")
+                                               sort_dir="asc", chains=chains)
             return rows
         now = time.time() if until is None else until
         return [ev.copy() for ev in self.events
                 if float(ev.get("timestamp") or 0) >= since
-                and float(ev.get("timestamp") or 0) <= now]
+                and float(ev.get("timestamp") or 0) <= now
+                and (chains is None or str(ev.get("chain") or "").upper() in chains)]
 
     def query_history(self, *, since: float, until: float | None = None,
                       chain: str = "ALL", min_usd: float = 0.0,
                       direction: str = "ALL", exchange: str = "ALL",
                       page: int = 1, page_size: int | None = 50,
                       sort_by: str = "timestamp", sort_dir: str = "desc") -> tuple[list[dict], int]:
+        chains = self.visible_chains()
         if self.history_store:
             return self.history_store.query(
                 since=since, until=until, chain=chain, min_usd=min_usd,
                 direction=direction, exchange=exchange, page=page,
-                page_size=page_size, sort_by=sort_by, sort_dir=sort_dir)
+                page_size=page_size, sort_by=sort_by, sort_dir=sort_dir,
+                chains=chains)
         rows = [ev.copy() for ev in self.events
                 if float(ev.get("timestamp") or 0) >= since
                 and (until is None or float(ev.get("timestamp") or 0) <= until)
@@ -477,6 +561,8 @@ class WhaleScreener:
                      (chain == "EVM" and ev.get("chain") in EVM_CHAINS) or
                      (chain == "GENERAL" and ev.get("chain") in SUPPORTED_CHAINS) or
                      ev.get("chain") == chain)
+                and (chains is None or
+                     str(ev.get("chain") or "").upper() in chains)
                 and float(ev.get("usd") or 0) >= min_usd
                 and (direction == "ALL" or str(ev.get("direction") or "").lower() == direction.lower())
                 and (exchange == "ALL" or
@@ -499,8 +585,18 @@ class WhaleScreener:
             self.history_store.close()
 
     def native_status(self) -> dict:
-        """Health of the credential-free Hyperliquid Core feed."""
-        return self.hl_status.copy()
+        """Health of the credential-free Hyperliquid Core feed.
+
+        `state=disabled` — сеть выключена тумблером в админке: сокет закрыт,
+        в ленту события не идут, при этом `LIQSCOPE_HL_WHALE_STREAM` всё ещё
+        включён (это два независимых выключателя).
+        """
+        row = dict(self.hl_status)
+        if not self.chain_visible("HYPERLIQUID"):
+            row.update(enabled=False, state="disabled", connected=False)
+        else:
+            row["enabled"] = bool(row.get("enabled", self.hl_enabled))
+        return row
 
     def _price(self, symbol: str) -> float | None:
         # Stablecoin values are nominal USD if no quote is available.
@@ -870,6 +966,13 @@ class WhaleScreener:
                 timeout=aiohttp.ClientTimeout(total=None, sock_connect=15),
                 connector=connector) as session:
             while True:
+                if not self.chain_visible("HYPERLIQUID"):
+                    # Админ выключил сеть: сокет закрываем и ждём. Источник
+                    # бесплатный, но «не показывать» значит «не показывать».
+                    self.hl_status.update(state="disabled", connected=False,
+                                          subscriptions_sent=0, error="")
+                    await asyncio.sleep(60)
+                    continue
                 self.hl_status.update(state="connecting", connected=False)
                 try:
                     if (not coins or time.time() - universe_loaded_at >=

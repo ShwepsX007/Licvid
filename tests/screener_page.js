@@ -53,18 +53,29 @@ const series = Array.from({length: 24}, (_, i) => ({
 const stats = {total_events: 2, total_volume_usd: 400000, active_networks: 2,
     networks, series, top_exchanges: {ALL: [{name: "Binance 14", events: 1, volume_usd: 125000}],
         ETH: [{name: "Binance 14", events: 1, volume_usd: 125000}], HYPERLIQUID: []}};
-const venueFlows = {};
-["binance", "bybit", "okx", "coinbase", "kraken"].forEach(venue => {
-    venueFlows[venue] = Array.from({length: 144}, (_, i) => ({
-        timestamp: Math.floor(now / 600) * 600 - (143 - i) * 600,
-        hour: String(Math.floor(i / 6)).padStart(2, "0") + ":" + String((i % 6) * 10).padStart(2, "0"),
-        inflow: venue === "binance" && (i === 141 || i === 143)
-            ? (i === 143 ? 150000 : 100000) : 0,
-        outflow: venue === "binance" && i === 142 ? 50000 : 0,
-        net_flow: venue === "binance"
-            ? (i === 141 ? -100000 : i === 142 ? 50000 : i === 143 ? -150000 : 0) : 0,
-    }));
-});
+// Ответ /exchanges_24h: список бирж строится по данным — в нём только те
+// площадки, у которых за сутки был реальный поток (binance и gate). Bybit, OKX
+// и Kraken без событий отсутствуют целиком, а не нулевыми клетками.
+const venueRows = venue => Array.from({length: 144}, (_, i) => ({
+    timestamp: Math.floor(now / 600) * 600 - (143 - i) * 600,
+    hour: String(Math.floor(i / 6)).padStart(2, "0") + ":" + String((i % 6) * 10).padStart(2, "0"),
+    inflow: venue === "binance" && (i === 141 || i === 143)
+        ? (i === 143 ? 150000 : 100000) : venue === "gate" && i === 140 ? 40000 : 0,
+    outflow: venue === "binance" && i === 142 ? 50000 : venue === "gate" && i === 141 ? 90000 : 0,
+    net_flow: venue === "binance"
+        ? (i === 141 ? -100000 : i === 142 ? 50000 : i === 143 ? -150000 : 0)
+        : venue === "gate" ? (i === 140 ? -40000 : i === 141 ? 90000 : 0) : 0,
+}));
+let venueFlows = {
+    minutes: 10, points: 144,
+    venues: [
+        {id: "binance", name: "Binance", inflow: 250000, outflow: 50000,
+            balance: 200000, events: 3},
+        {id: "gate", name: "Gate.io", inflow: 40000, outflow: 90000,
+            balance: -50000, events: 2},
+    ],
+    series: {binance: venueRows("binance"), gate: venueRows("gate")},
+};
 const fetches = [];
 win.LiqScopeI18n = {lang: () => "en", t: (key, vars = {}) => {
     const labels = {
@@ -152,7 +163,9 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     });
     assert.equal(win.document.querySelectorAll("#chart-legend .network-legend-item").length, 8);
     const venueCards = win.document.querySelectorAll("#venue-charts .venue-card");
-    assert.equal(venueCards.length, 5, "по клетке на каждую биржу: Binance/Bybit/OKX/Coinbase/Kraken");
+    assert.equal(venueCards.length, 2, "клетки только у бирж, у которых есть поток");
+    assert(!win.document.querySelector('#venue-charts [data-venue="bybit"]'),
+        "биржи без данных не получают пустую клетку-заглушку");
     assert.equal(win.document.querySelector('#venue-charts [data-venue="binance"] .venue-name').textContent,
         "Binance 24h");
     const binanceCard = win.document.querySelector('#venue-charts [data-venue="binance"]');
@@ -188,9 +201,36 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
         .map(node => node.textContent).join(" | ");
     assert(segTitles.includes("In $100K") && segTitles.includes("Out $50K"),
         "подсказка участка объясняет направление: " + segTitles);
-    const bybitCard = win.document.querySelector('#venue-charts [data-venue="bybit"]');
-    assert(bybitCard.querySelector(".venue-empty"), "без меток кошельков клетка честно пустая");
-    assert.equal(bybitCard.querySelectorAll(".venue-chart").length, 0);
+    const gateCard = win.document.querySelector('#venue-charts [data-venue="gate"]');
+    assert(gateCard, "новая биржа из реестра появляется без правки кода");
+    assert.equal(gateCard.querySelector(".venue-name").textContent, "Gate.io 24h");
+    assert(gateCard.querySelector(".venue-net").textContent.includes("−$50K"),
+        "итог Gate.io: с биржи ушло на $50K больше, чем зашло");
+    assert(gateCard.querySelector(".venue-net").classList.contains("is-outflow"));
+    // Ни одной биржи с потоком — одно общее сообщение вместо набора заглушек.
+    venueFlows = {minutes: 10, points: 144, venues: [], series: {}};
+    // jsdom держит документ «скрытым»: показываем его, чтобы проверить догон
+    // графиков после возвращения на вкладку (в реальном браузере hidden=false).
+    Object.defineProperty(win.document, "hidden", {value: false, configurable: true});
+    const beforeRefetch = fetches.filter(url => url.includes("exchanges_24h")).length;
+    win.document.dispatchEvent(new win.Event("visibilitychange"));
+    await sleep(50);
+    assert.equal(fetches.filter(url => url.includes("exchanges_24h")).length, beforeRefetch + 1,
+        "возвращённая вкладка догоняет графики бирж, не дожидаясь интервала");
+    assert.equal(win.document.querySelectorAll("#venue-charts .venue-card").length, 0,
+        "без данных карточек нет");
+    assert.equal(win.document.querySelectorAll("#venue-charts .venue-empty").length, 1,
+        "показываем одно честное сообщение об отсутствии потоков");
+    venueFlows = {
+        minutes: 10, points: 144,
+        venues: [
+            {id: "binance", name: "Binance", inflow: 250000, outflow: 50000,
+                balance: 200000, events: 3},
+            {id: "gate", name: "Gate.io", inflow: 40000, outflow: 90000,
+                balance: -50000, events: 2},
+        ],
+        series: {binance: venueRows("binance"), gate: venueRows("gate")},
+    };
     assert(css.includes(".venue-grid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr))"),
         "на десктопе три колонки");
     assert(css.includes(".venue-chart { display: block; width: 100%; height: 200px"),

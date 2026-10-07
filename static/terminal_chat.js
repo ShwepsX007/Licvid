@@ -188,6 +188,7 @@
     const known = {
       book: ["chat.kind.book", "📖 СТАКАН"],
       pump: ["chat.kind.pump", "💥 ПАМП"],
+      screener: ["chat.kind.whale", "🐋 КИТЫ"],
       alert: ["chat.kind.alert", "🔔 АЛЕРТ"],
       corr: ["chat.kind.corr", "🔗 КОРР"],
     };
@@ -212,8 +213,24 @@
       if (k === "corr") return svcCorr(parts);
       if (k === "pump") return svcPump(parts);
       if (k === "book") return svcBook(parts);
+      if (k === "screener") return svcScreener(parts);
     } catch (e) { /* части битые — показываем текст из базы */ }
     return esc((m && m.text) || "");
+  }
+  /** 🐋 Сигнал Скринера китов: биржа, направление и сумма перевода. */
+  function svcScreener(p) {
+    const dir = String(p.direction || "");
+    const place = String(p.venue_name || p.venue || "") ||
+      T("chat.sig.whale_unlabeled", "без метки биржи");
+    const sum = money(p.usd);
+    const head = dir === "inflow"
+      ? T("chat.sig.whale_in", "🐋 {place} · приток {usd}", { place, usd: sum })
+      : dir === "outflow"
+        ? T("chat.sig.whale_out", "🐋 {place} · отток {usd}", { place, usd: sum })
+        : T("chat.sig.whale_move", "🐋 {place} · перевод {usd}", { place, usd: sum });
+    const lines = [head, coin(p.symbol) + " · " + String(p.chain || "").toUpperCase()];
+    if (p.threshold) lines.push(T("chat.sig.threshold", "порог {t}", { t: money(p.threshold) }));
+    return esc(lines.join("\n"));
   }
   function svcAlert(p) {
     const metric = T("chat.metric." + String(p.metric || "liq"),

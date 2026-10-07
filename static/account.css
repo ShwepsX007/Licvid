@@ -1259,6 +1259,16 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
 .lv-signal { margin: 8px 0 14px; padding: 10px 12px; border: 1px solid var(--border);
     border-radius: 12px; background: rgba(8, 12, 22, 0.45); }
 .lv-signal .al-label { margin-top: 8px; }
+/* 🐋 Signal Screener: последние совпадения под фильтр */
+.sc-recent { display: flex; flex-direction: column; gap: 4px; }
+.sc-recent-row {
+  font-size: 0.78rem; color: var(--text); padding: 5px 8px;
+  border-left: 2px solid var(--border); background: rgba(255, 255, 255, 0.02);
+}
+.sc-recent-row.is-in { border-left-color: #00e676; }
+.sc-recent-row.is-out { border-left-color: #ff2a5f; }
+.sc-recent-row b { font-variant-numeric: tabular-nums; }
+.sc-recent-ts { color: var(--muted); font-size: 0.72rem; }
 .lv-symrow { margin: 4px 0 10px; }
 .lv-select {
     width: 100%;

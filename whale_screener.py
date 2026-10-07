@@ -136,6 +136,63 @@ def event_exchange(event: dict) -> str:
     return str(label or "").strip()
 
 
+#: Площадки, которые стоит подписывать красиво. Реестр CEX-кошельков приходит
+#: из внешних источников и подписан по-разному («Binance 14», «Coinbase 10»,
+#: «Kraken 4»), поэтому ключ — это начало метки, а не точное имя.
+VENUE_NAMES = {
+    "binance": "Binance",
+    "bybit": "Bybit",
+    "okx": "OKX",
+    "coinbase": "Coinbase",
+    "kraken": "Kraken",
+    "bitfinex": "Bitfinex",
+    "gate": "Gate.io",
+    "kucoin": "KuCoin",
+    "mexc": "MEXC",
+    "htx": "HTX",
+    "huobi": "HTX",
+    "bitget": "Bitget",
+    "crypto": "Crypto.com",
+    "upbit": "Upbit",
+    "bithumb": "Bithumb",
+    "gemini": "Gemini",
+    "robinhood": "Robinhood",
+    "hyperliquid": "Hyperliquid",
+}
+
+
+def venue_of_label(label: str) -> str:
+    """Метка кошелька → идентификатор площадки: «Binance 14» → ``binance``.
+
+    Ищем по началу строки: хвосты меток («14», «— Hot Wallet», «x10») у одного
+    и того же биржевого кошелька различаются, а график должен быть один.
+    Неизвестная метка получает собственный идентификатор по первому слову —
+    новая биржа из реестра появляется в интерфейсе без правки кода.
+    """
+    text = str(label or "").strip().casefold()
+    if not text:
+        return ""
+    head = re.split(r"[\s\-–—_(/[:,|]+", text, maxsplit=1)[0]
+    head = re.sub(r"[^a-z0-9.]", "", head)
+    # «gate.io» остаётся «gate»: хвост «.io» — часть домена, а не имени.
+    if head.endswith(".io"):
+        head = head[:-3]
+    return head.rstrip(".")
+
+
+def venue_display_name(venue: str) -> str:
+    """Красивое имя площадки: известная — из справочника, новая — как есть."""
+    venue = str(venue or "").strip().casefold()
+    if not venue:
+        return ""
+    return VENUE_NAMES.get(venue, venue[:1].upper() + venue[1:])
+
+
+def event_venue(event: dict) -> str:
+    """Идентификатор биржи события ('' — метки кошелька нет)."""
+    return venue_of_label(event_exchange(event))
+
+
 class WhaleHistoryStore:
     """Seven-day durable event history, indexed for dashboards and CSV exports.
 

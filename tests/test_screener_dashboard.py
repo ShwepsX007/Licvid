@@ -191,8 +191,10 @@ class ScreenerDashboardTests(unittest.TestCase):
                      direction="inflow", from_label="", to_label="Binance 15"),
                 dict(event(3, timestamp=now - 300, usd=50000.0, exchange="Coinbase 10"),
                      direction="inflow", from_label="", to_label="Coinbase 10"),
-                # Не из пятёрки бирж и не перевод на биржу — в потоки не попадают.
-                event(4, timestamp=now - 60, usd=90000.0, exchange="Gate.io"),
+                # Биржа вне прежней «пятёрки» теперь в потоках: список строится
+                # по данным, а не по фиксированному перечню.
+                event(4, timestamp=now - 60, usd=90000.0, exchange="Gate.io 2"),
+                # Сделка без направления биржевого потока — не в счёт.
                 dict(event(5, timestamp=now - 60, usd=70000.0), chain="HYPERLIQUID",
                      direction="trade", side="BUY", from_label="", to_label=""),
             ]
@@ -206,9 +208,14 @@ class ScreenerDashboardTests(unittest.TestCase):
                  patch.object(server, "alchemy_key_store", None), \
                  patch.object(server, "current_user", lambda _request: MEMBER):
                 payload = self.client.get("/api/screener/stats/exchanges_24h").json()
-                self.assertEqual(set(payload),
-                                 {"binance", "bybit", "okx", "coinbase", "kraken"})
-                binance = payload["binance"]
+                self.assertEqual(payload["minutes"], 10)
+                self.assertEqual(payload["points"], 144)
+                # только биржи с реальным потоком, по убыванию валового объёма
+                self.assertEqual([row["id"] for row in payload["venues"]],
+                                 ["binance", "gate", "coinbase"])
+                self.assertEqual([row["name"] for row in payload["venues"]],
+                                 ["Binance", "Gate.io", "Coinbase"])
+                binance = payload["series"]["binance"]
                 self.assertEqual(len(binance), 144)          # 24 часа по 10 минут
                 self.assertEqual(sum(row["outflow"] for row in binance), 200000.0)
                 self.assertEqual(sum(row["inflow"] for row in binance), 125000.0)
@@ -216,17 +223,38 @@ class ScreenerDashboardTests(unittest.TestCase):
                 self.assertEqual(sum(row["net_flow"] for row in binance), 75000.0)
                 self.assertTrue(all(len(row["hour"]) == 5 and ":" in row["hour"]
                                     for row in binance))
-                self.assertEqual(sum(row["inflow"] for row in payload["coinbase"]), 50000.0)
-                self.assertEqual(sum(row["outflow"] for row in payload["coinbase"]), 0.0)
-                # Пустые клетки не выдумывают данные.
-                self.assertTrue(all(row["inflow"] == 0 and row["outflow"] == 0
-                                    and row["net_flow"] == 0 for row in payload["bybit"]))
-                self.assertTrue(all(row["net_flow"] == 0 for row in payload["okx"]))
+                self.assertEqual(sum(row["inflow"] for row in payload["series"]["coinbase"]), 50000.0)
+                self.assertEqual(sum(row["outflow"] for row in payload["series"]["coinbase"]), 0.0)
+                # Бирж без данных в ответе нет: карточка не рисуется пустой.
+                self.assertNotIn("bybit", payload["series"])
+                self.assertNotIn("okx", payload["series"])
+                binance_row = payload["venues"][0]
+                self.assertEqual(binance_row["inflow"], 125000.0)
+                self.assertEqual(binance_row["outflow"], 200000.0)
+                # balance — то, что рисует кривая: пришло минус ушло.
+                self.assertEqual(binance_row["balance"], -75000.0)
+                self.assertEqual(binance_row["events"], 2)
                 minute = self.client.get(
                     "/api/screener/stats/exchanges_24h?minutes=1").json()
-                self.assertEqual(len(minute["binance"]), 1440)   # минутная детализация
+                self.assertEqual(len(minute["series"]["binance"]), 1440)   # минута
+                self.assertEqual(minute["points"], 1440)
                 self.assertEqual(self.client.get(
                     "/api/screener/stats/exchanges_24h?minutes=0").status_code, 422)
+            screen.close()
+
+    def test_exchange_flows_are_empty_when_no_events(self):
+        """Нет событий — пустой список бирж, а не пять нулевых графиков."""
+        with tempfile.TemporaryDirectory() as tmp:
+            history_file = Path(tmp) / "history.sqlite3"
+            screen = WhaleScreener("placeholder", lambda _pair: None,
+                                   lambda _msg: None, history_path=history_file)
+            with patch.object(server, "whale_screener", screen), \
+                 patch.object(server, "whale_poller", None), \
+                 patch.object(server, "alchemy_key_store", None), \
+                 patch.object(server, "current_user", lambda _request: MEMBER):
+                payload = self.client.get("/api/screener/stats/exchanges_24h").json()
+                self.assertEqual(payload["venues"], [])
+                self.assertEqual(payload["series"], {})
             screen.close()
 
     def test_seven_day_history_pagination_sorting_filtering_stats_and_csv(self):

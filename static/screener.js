@@ -23,22 +23,18 @@
         inflow_usd: "#34d399", outflow_usd: "#fb7185",
         buy_usd: "#78a0ff", sell_usd: "#c084fc", transfer_usd: "#91a2bd",
     };
-    // Биржи графиков потоков: порядок карточек фиксирован, чтобы клетки не
-    // прыгали между обновлениями, когда у какой-то биржи нет событий.
-    const VENUES = [
-        {id: "binance", name: "Binance"},
-        {id: "bybit", name: "Bybit"},
-        {id: "okx", name: "OKX"},
-        {id: "coinbase", name: "Coinbase"},
-        {id: "kraken", name: "Kraken"},
-    ];
+    // Биржи для графиков потоков приходят с сервера вместе с данными: карточка
+    // существует только там, где за сутки был реальный inflow/outflow. Порядок
+    // карточек закрепляем на клиенте (venueOrder), чтобы клетки не прыгали при
+    // каждом обновлении, когда объёмы меняются местами.
     const networkOpacity = index => Math.max(.48, .96 - index * .07);
     const state = {
         stats: null, liveRows: [], hlRows: [], selectedChain: "ALL", historyPage: 1,
         historyPages: 1, sortBy: "timestamp", sortDir: "desc",
         seenLive: new Set(), seenHL: new Set(), initializedLive: false,
         initializedHL: false, historyRequest: 0,
-        venueFlows: null,       // {binance: [{hour, inflow, outflow, net_flow}, …], …}
+        venueFlows: null,       // {venues: [{id, name, …}], series: {id: [{…}]}}
+        venueOrder: [],         // закреплённый порядок бирж между обновлениями
         venueRequest: 0,
     };
 
@@ -609,19 +605,35 @@
         return true;
     }
 
+    /** Карточки потоков по биржам. Биржу без событий просто не рисуем, а если
+     *  за сутки их нет ни у одной площадки — показываем одно общее сообщение. */
     function renderVenueFlows() {
         const grid = $("venue-charts");
         if (!grid) return;
         grid.replaceChildren();
-        VENUES.forEach(venue => {
-            const points = state.venueFlows ? state.venueFlows[venue.id] : null;
+        const data = state.venueFlows;
+        const all = (data && Array.isArray(data.venues)) ? data.venues : [];
+        const series = (data && data.series) || {};
+        const known = state.venueOrder.length
+            ? all.filter(venue => state.venueOrder.includes(venue.id))
+                .sort((a, b) => state.venueOrder.indexOf(a.id) - state.venueOrder.indexOf(b.id))
+            : [];
+        const fresh = all.filter(venue => !state.venueOrder.includes(venue.id));
+        const venues = known.concat(fresh);
+        state.venueOrder = venues.map(venue => venue.id);
+        if (!venues.length) {
+            grid.append(make("p", "venue-empty", t("screener.venue_flow_empty")));
+            return;
+        }
+        venues.forEach(venue => {
+            const points = Array.isArray(series[venue.id]) ? series[venue.id] : null;
             const totals = venueTotals(points);
             const card = make("div", "venue-card");
             card.dataset.venue = venue.id;
             const head = make("div", "venue-card-head");
             head.append(make("span", "venue-name",
                 venue.name + " " + t("screener.period_24h")));
-            const hasFlow = !!points && (totals.inflow > 0 || totals.outflow > 0);
+            const hasFlow = totals.inflow > 0 || totals.outflow > 0;
             const net = make("span", "venue-net",
                 hasFlow ? fmtSignedUSD(totals.balance) : "—");
             if (hasFlow) net.classList.add(totals.balance >= 0 ? "is-inflow" : "is-outflow");
@@ -634,7 +646,8 @@
                 card.append(svg);
                 card.append(make("div", "venue-totals",
                     t("screener.venue_in") + " " + fmtUSD(totals.inflow, true) +
-                    " · " + t("screener.venue_out") + " " + fmtUSD(totals.outflow, true)));
+                    " · " + t("screener.venue_out") + " " + fmtUSD(totals.outflow, true) +
+                    " · " + t("screener.exchange_events", {count: fmtNumber(venue.events || 0)})));
             } else {
                 card.append(make("p", "venue-empty", t("screener.venue_flow_empty")));
             }
@@ -831,6 +844,44 @@
             setText("feed-error", t("screener.load_error"));
         }
     }
+    /** Ответ /exchanges_24h → {venues, series}. Старая форма («биржа → точки»
+     *  без обёртки) тоже разбирается: кэш браузера может отдать JS новее
+     *  сервера и наоборот, а пустой блок графиков — худший из вариантов. */
+    function normalizeVenueFlows(data) {
+        if (!data || typeof data !== "object") return null;
+        if (Array.isArray(data.venues)) {
+            const series = data.series || {};
+            const venues = data.venues
+                .filter(venue => venue && venue.id && Array.isArray(series[venue.id]))
+                .map(venue => ({
+                    id: String(venue.id),
+                    name: venue.name || String(venue.id).replace(/[_-]/g, " "),
+                    inflow: Number(venue.inflow || 0),
+                    outflow: Number(venue.outflow || 0),
+                    balance: Number(venue.balance || 0),
+                    events: Number(venue.events || 0),
+                }));
+            return {venues: venues, series: series};
+        }
+        const venues = [];
+        const series = {};
+        Object.keys(data).forEach(id => {
+            const points = data[id];
+            if (!Array.isArray(points)) return;
+            let inflow = 0, outflow = 0;
+            points.forEach(point => {
+                inflow += Number(point.inflow || 0);
+                outflow += Number(point.outflow || 0);
+            });
+            if (!(inflow > 0 || outflow > 0)) return;      // пустых клеток нет
+            series[id] = points;
+            venues.push({id: id, name: id.replace(/[_-]/g, " ").replace(/\b\w/g, c => c.toUpperCase()),
+                inflow: inflow, outflow: outflow, balance: inflow - outflow, events: points.length});
+        });
+        venues.sort((a, b) => (b.inflow + b.outflow) - (a.inflow + a.outflow));
+        return {venues: venues, series: series};
+    }
+
     async function fetchVenueFlows() {
         const sequence = ++state.venueRequest;
         try {
@@ -840,7 +891,7 @@
             if (!response.ok) throw new Error("HTTP " + response.status);
             const data = await response.json();
             if (sequence !== state.venueRequest) return;
-            state.venueFlows = data;
+            state.venueFlows = normalizeVenueFlows(data);
         } catch (_) {
             if (sequence !== state.venueRequest) return;
             state.venueFlows = null;
@@ -997,9 +1048,15 @@
         fetchVenueFlows();
         window.setInterval(() => { if (!document.hidden) fetchLive(); }, 9000);
         window.setInterval(() => { if (!document.hidden) fetchStats(); }, 30000);
+        // Пока вкладка спрятана, интервалы пропускаются — при возвращении
+        // догоняем графики бирж сразу, не дожидаясь следующего цикла.
+        document.addEventListener("visibilitychange", () => {
+            if (!document.hidden) fetchVenueFlows();
+        });
         window.setInterval(() => { if (!document.hidden) fetchHistory(); }, 60000);
-        // Потоки по биржам меняются медленно — хватает одного раза в пять минут.
-        window.setInterval(() => { if (!document.hidden) fetchVenueFlows(); }, 300000);
+        // Потоки по биржам меняются медленно, но карточки строятся по данным:
+        // раз в минуту — компромисс между живостью и одним лёгким запросом.
+        window.setInterval(() => { if (!document.hidden) fetchVenueFlows(); }, 60000);
     }
     document.addEventListener("DOMContentLoaded", init, {once: true});
 })();

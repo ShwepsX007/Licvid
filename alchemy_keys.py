@@ -91,15 +91,27 @@ class AlchemyKeyStore:
                 temp.unlink()
 
     def keys(self) -> list[tuple[str, str]]:
-        if self._rows:
-            return [(r["id"], r["key"]) for r in self._rows]
-        return [("env", self._env)] if self._env else []
+        """Все рабочие ключи: сначала добавленные админом, затем ключ из env.
+
+        Ключ окружения остаётся в пуле, когда админ добавляет следующий: раньше
+        он исчезал из списка вместе с первым добавленным ключом, и
+        «дополнительный» API становился единственным. Если новый ключ не
+        годился для какой-то сети, сбор данных останавливался целиком вместо
+        того, чтобы остаться на основном ключе. Дедупликация по значению: один
+        и тот же ключ не считается дважды.
+        """
+        rows = [(r["id"], r["key"]) for r in self._rows]
+        if self._env and self._env not in {key for _, key in rows}:
+            rows.append(("env", self._env))
+        return rows
 
     def public(self) -> list[dict]:
-        if self._rows:
-            return [{"id": r["id"], "hint": mask_key(r["key"]), "source": "admin"}
-                    for r in self._rows]
-        return [{"id": "env", "hint": mask_key(self._env), "source": "environment"}] if self._env else []
+        rows = [{"id": r["id"], "hint": mask_key(r["key"]), "source": "admin"}
+                for r in self._rows]
+        if self._env and all(r["key"] != self._env for r in self._rows):
+            rows.append({"id": "env", "hint": mask_key(self._env),
+                         "source": "environment"})
+        return rows
 
     def add(self, raw: str) -> dict:
         try:

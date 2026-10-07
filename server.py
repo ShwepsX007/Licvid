@@ -129,11 +129,15 @@ except Exception:  # noqa: BLE001 — wallet refresh must not prevent site start
 # Keep the credential-free Hyperliquid source independent of optional Alchemy
 # key management. A missing encryption library never means plaintext key storage.
 try:
-    from whale_screener import WhaleScreener, event_exchange
+    from whale_screener import (WhaleScreener, event_exchange, event_venue,
+                                venue_of_label, venue_display_name)
     WHALE_SCREENER_AVAILABLE = True
 except Exception:  # noqa: BLE001 — the optional whale feed must not block the terminal
     WhaleScreener = None
     event_exchange = None
+    event_venue = None
+    venue_of_label = None
+    venue_display_name = None
     WHALE_SCREENER_AVAILABLE = False
 
 try:
@@ -3209,6 +3213,151 @@ async def levels_signal_loop():
             break
 
 
+SCREENER_SIGNAL_LOOKBACK_SEC = 600.0
+SCREENER_SIGNAL_CYCLE_SEC = 45.0
+SCREENER_SIGNAL_MEMORY = 2000         # ключей событий держим в памяти процесса
+#: курсор окна, дедупликация и паузы по монетам — состояние одного процесса:
+#: после рестарта история не пересылается, иначе сервер «догонял» бы сутки
+#: заново и залил бы подписчика старыми сигналами
+_screener_signal_state: dict = {"cursor": 0.0, "seen": {}, "pauses": {}, "order": []}
+
+
+def _screener_signal_remember(key: str) -> bool:
+    """False — такое событие уже рассылали (окно читается с перекрытием)."""
+    if not key:
+        return True
+    state = _screener_signal_state
+    if key in state["seen"]:
+        return False
+    state["seen"][key] = time.time()
+    state["order"].append(key)
+    while len(state["order"]) > SCREENER_SIGNAL_MEMORY:
+        state["seen"].pop(state["order"].pop(0), None)
+    return True
+
+
+async def screener_signal_dispatch(subs, events: list) -> int:
+    """Один проход рассылки: совпадения подписчикам. Возвращает число отправок.
+
+    Отдельная функция — чтобы цикл можно было проверить без живого Скринера:
+    тест передаёт свои события и свой список подписчиков.
+    """
+    from screener_signals import (SIGNAL_MAX_PER_CYCLE, normalize_signal,
+                                  signal_chat_meta, signal_chat_text,
+                                  signal_hits, signal_html)
+    sent = 0
+    pauses = _screener_signal_state["pauses"]
+    for sub in subs or []:
+        cfg = normalize_signal(sub.get("config"))
+        try:
+            uid = int(sub.get("user_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not uid:
+            continue
+        per_coin = pauses.setdefault(uid, {})
+        hits = signal_hits(events, cfg, now=time.time(), last_fire=per_coin.get,
+                          limit=SIGNAL_MAX_PER_CYCLE)
+        if not hits:
+            continue
+        # Telegram — отдельный тумблер, а лента кабинета живёт по подписке:
+        # тот же порядок, что у стакана и алертов по объёму
+        tg_id = int(sub.get("tg_id") or 0) if cfg["notify"] else 0
+        if tg_id and not tg_bot.running:
+            tg_id = 0
+        for hit in hits:
+            if not _screener_signal_remember(str(hit.get("key") or "")):
+                continue
+            per_coin[str(hit.get("symbol") or "")] = time.time()
+            await push_service_message(
+                uid, "screener", signal_chat_text(hit),
+                {"symbol": str(hit.get("symbol") or ""),
+                 "metric": "whale", "parts": signal_chat_meta(hit)})
+            sent += 1
+            if not tg_id:
+                continue
+            try:
+                await tg_bot.send(tg_id, signal_html(hit, tg_bot.site_url()),
+                                  markup=tg_bot.site_link_kb("открыть скринер",
+                                                            "/screener"))
+            except Exception as e:                        # noqa: BLE001
+                log.debug("screener signal tg %s: %s", uid, e)
+    return sent
+
+
+async def screener_signal_loop():
+    """🐋 Signal Screener: крупные переводы по фильтрам личного кабинета.
+
+    Пользователь выбирает биржу, направление, сеть и порог в долларах. Источник
+    — те же события, что уже собирает Скринер китов, поэтому рассылка не делает
+    новых запросов к Alchemy и CU не тратит: читаем историю буфера окном после
+    прошлого прохода.
+    """
+    try:
+        await asyncio.sleep(30)         # дать скринеру поднять историю и подписки
+    except asyncio.CancelledError:
+        return
+    cursor = time.time() - SCREENER_SIGNAL_LOOKBACK_SEC
+    while True:
+        delay = SCREENER_SIGNAL_CYCLE_SEC
+        try:
+            if whale_screener is None:
+                # Скринер не запустился (нет ключа или реестра) — не крутимся впустую
+                delay = 300.0
+                cursor = time.time() - SCREENER_SIGNAL_LOOKBACK_SEC
+            else:
+                now = time.time()
+                # маленькое перекрытие: событие может лечь в историю чуть позже
+                # своего timestamp
+                events = await asyncio.to_thread(
+                    whale_screener.events_since, max(0.0, cursor - 5.0), now)
+                cursor = max(cursor, now)
+                subs = await asyncio.to_thread(
+                    account_store.list_service_subscribers, "screener_signals")
+                if subs:
+                    tg_bot.warm_langs(subs)
+                    await screener_signal_dispatch(subs, events or [])
+        except asyncio.CancelledError:
+            break
+        except Exception as e:                          # noqa: BLE001 — не валит сервер
+            log.warning("сигналы скринера: %s", e)
+            delay = 15.0
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            break
+
+
+def screener_signal_snapshot(cfg: dict | None = None) -> dict:
+    """Что кабинет показывает в настройке сигналов Скринера.
+
+    Список бирж — по фактическим кошелькам реестра (та же нормализация, что у
+    графиков потоков), «последние совпадения» — по буферу скринера уже с учётом
+    фильтра пользователя, чтобы тумблер настраивался не вслепую.
+    """
+    from screener_signals import match_signal, normalize_signal, signal_exchanges
+    if whale_screener is None:
+        return {"available": False, "exchanges": [], "recent": []}
+    cfg = normalize_signal(cfg or {})
+    exchanges: list[dict] = []
+    recent: list[dict] = []
+    try:
+        exchanges = signal_exchanges(whale_screener)
+    except Exception as e:                                  # noqa: BLE001
+        log.debug("screener signals venues: %s", e)
+    try:
+        rows = whale_screener.history(float(cfg["min_usd"]), cfg["chain"], 200)
+        for row in rows:
+            hit = match_signal(row, cfg)
+            if hit:
+                recent.append(hit)
+            if len(recent) >= 5:
+                break
+    except Exception as e:                                  # noqa: BLE001
+        log.debug("screener signals history: %s", e)
+    return {"available": True, "exchanges": exchanges, "recent": recent}
+
+
 def alerts_chat_text(hit: dict) -> str:
     from alerts import chat_text
     return chat_text(hit)
@@ -4429,6 +4578,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(liq_levels_task(), name="liq-levels"),
         asyncio.create_task(alert_loop(), name="alerts"),
         asyncio.create_task(levels_signal_loop(), name="levels-signal"),
+        asyncio.create_task(screener_signal_loop(), name="screener-signals"),
         asyncio.create_task(corr_alert_loop(), name="corr-alerts"),
     ]
     global whale_screener, whale_poller, alchemy_key_store, alchemy_vault_error
@@ -5018,6 +5168,7 @@ account_ctx.alerts_market_fn = alerts_market_snapshot
 account_ctx.correlations_fn = correlations_snapshot
 account_ctx.pump_snapshot_fn = pump_snapshot
 account_ctx.book_snapshot_fn = book_snapshot
+account_ctx.screener_signal_fn = screener_signal_snapshot
 account_ctx.symbols_fn = lambda: list((feed.symbols if feed else [])[:40])
 register_account_routes(app)
 
@@ -6054,13 +6205,16 @@ async def api_admin_alchemy_stats(request: Request):
     used = int(poll.get("reserved_cu") or 0)
     budget = int(poll.get("budget_cu") or 0)
     keys = _alchemy_admin_keys()
-    key_share = max(1000, budget // len(keys)) if keys and budget else 0
+    # Квота считается на каждый ключ (у ключей Alchemy разные Free-тарифы),
+    # поэтому «доля» ключа = месячный бюджет, а не budget // len(keys).
+    per_key = int(poll.get("per_key_cu") or 0) or (budget if keys else 0)
+    total = int(poll.get("budget_total_cu") or 0) or per_key * max(1, len(keys))
     return {"ok": True, "available": bool(alchemy_key_store and not alchemy_vault_error),
             "vault_error": alchemy_vault_error,
             "cu": {"month": poll.get("month") or "", "used": used,
-                   "limit": budget, "percent": round(100 * used / budget, 2) if budget else 0,
+                   "limit": total, "percent": round(100 * used / total, 2) if total else 0,
                    "estimated_monthly": int(poll.get("estimated_monthly_cu") or 0),
-                   "key_share": key_share,
+                   "key_share": per_key,
                    "keys_configured": len(keys), "keys": keys},
             "networks": networks, "native": native,
             "trongrid": {"available": bool(trongrid_key_store and not trongrid_vault_error),
@@ -6414,41 +6568,71 @@ async def api_screener_stats(request: Request):
             "native": whale_screener.native_status() if whale_screener else {}}
 
 
-_SCREENER_VENUES = ("binance", "bybit", "okx", "coinbase", "kraken")
-
-
 def _screener_venue(label: str) -> str:
-    """Биржа по метке кошелька: «Binance 14» → binance, «Coinbase 10» → coinbase.
+    """Биржа по метке кошелька: «Binance 14» → binance, «Gate.io 2» → gate.
 
-    Метки приходят из реестра CEX-кошельков и различаются хвостами («14»,
-    «10», «4»), поэтому сравниваем по началу строки, а не по точному имени.
+    Нормализация одна на весь продукт и живёт в ``whale_screener``: реестр
+    CEX-кошельков приходит из внешних источников и подписан по-разному
+    («Binance 14», «Coinbase — Hot Wallet 10», «gate.io 2»), поэтому сравнивать
+    точное имя нельзя. Списки бирж строятся по этим идентификаторам, а не по
+    фиксированному кортежу: новая биржа из реестра появляется сама.
     """
-    text = str(label or "").strip().lower()
-    for venue in _SCREENER_VENUES:
-        if text.startswith(venue):
-            return venue
-    return ""
+    if venue_of_label is None:
+        return ""
+    return venue_of_label(label)
+
+
+def _screener_venue_name(venue: str) -> str:
+    return (venue_display_name(venue) if venue_display_name
+            else str(venue or "").strip().title())
+
+
+_EXCHANGE_FLOWS_CACHE: dict = {"key": None, "at": 0.0, "payload": None}
+_EXCHANGE_FLOWS_TTL_SEC = 45.0
+_EXCHANGE_FLOWS_LOCK = asyncio.Lock()
 
 
 @app.get("/api/screener/stats/exchanges_24h")
 async def api_screener_exchange_flows(request: Request,
                                       minutes: int = Query(10, ge=1, le=60)):
-    """Потоки по биржам за сутки: столбцы inflow/outflow и кривая Net Flow.
+    """Потоки по биржам за сутки: кривая накопленного inflow/outflow.
 
     Бакет — ``minutes`` минут: по умолчанию 10 (24 часа = 144 точки),
     ``minutes=1`` даёт 1440 точек. ``net_flow = outflow - inflow``:
-    положительный — монеты уходят с биржи. Биржи без размеченных кошельков
-    возвращаются нулями, чтобы фронт мог показать честное «потоков нет», а не
-    выдуманный график.
+    положительный — монеты уходят с биржи.
+
+    Список бирж строится из самих событий: в ответ попадают только площадки,
+    у которых за окно есть ненулевой поток, отсортированные по валовому объёму.
+    Фиксированный перечень рисовал пустые клетки там, где биржа вообще не
+    размечена в реестре кошельков, — и молчал про биржи, которые в реестре
+    есть, но не были в перечне.
     """
+    now = time.time()
+    # Окно — сутки, и его читает каждый открытый «Скринер». Считаем не чаще
+    # раза в минуту на весь процесс: данные копятся десятиминутными бакетами,
+    # частые перезапросы добавили бы только нагрузку на SQLite.
+    cache_key = (int(minutes), int(now // 60))
+    cached = _EXCHANGE_FLOWS_CACHE
+    if cached["key"] == cache_key and now - float(cached["at"] or 0) < _EXCHANGE_FLOWS_TTL_SEC:
+        return cached["payload"]
+    async with _EXCHANGE_FLOWS_LOCK:
+        cached = _EXCHANGE_FLOWS_CACHE
+        if cached["key"] == cache_key and time.time() - float(cached["at"] or 0) < _EXCHANGE_FLOWS_TTL_SEC:
+            return cached["payload"]
+        payload = await _screener_exchange_flows(minutes)
+        _EXCHANGE_FLOWS_CACHE.update(key=cache_key, at=time.time(), payload=payload)
+        return payload
+
+
+async def _screener_exchange_flows(minutes: int) -> dict:
     now = time.time()
     since = now - 24 * 60 * 60
     bucket = int(minutes) * 60
     points = int(round(24 * 60 / int(minutes)))
     last_bucket = int(now // bucket) * bucket
     first_bucket = last_bucket - (points - 1) * bucket
-    flows = {venue: [{"inflow": 0.0, "outflow": 0.0} for _ in range(points)]
-             for venue in _SCREENER_VENUES}
+    flows: dict[str, dict[int, dict]] = {}
+    totals: dict[str, dict] = {}
     events = (await asyncio.to_thread(whale_screener.events_since, since, now)
               if whale_screener else [])
     for event in events:
@@ -6476,20 +6660,39 @@ async def api_screener_exchange_flows(request: Request,
             side = "outflow"
         else:
             continue          # сделки и переводы между кошельками — не поток биржи
-        flows[venue][index][side] += value
-    payload = {}
-    for venue in _SCREENER_VENUES:
+        cell = flows.setdefault(venue, {}).setdefault(
+            index, {"inflow": 0.0, "outflow": 0.0})
+        cell[side] += value
+        agg = totals.setdefault(venue, {"inflow": 0.0, "outflow": 0.0, "events": 0})
+        agg[side] += value
+        agg["events"] += 1
+    series: dict[str, list[dict]] = {}
+    venues: list[dict] = []
+    for venue, agg in totals.items():
+        cells = flows.get(venue, {})
         rows = []
-        for index, cell in enumerate(flows[venue]):
+        for index in range(points):
             timestamp = first_bucket + index * bucket
-            inflow = round(cell["inflow"], 2)
-            outflow = round(cell["outflow"], 2)
+            cell = cells.get(index)
+            inflow = float(cell["inflow"]) if cell else 0.0
+            outflow = float(cell["outflow"]) if cell else 0.0
             rows.append({"timestamp": timestamp,
                          "hour": time.strftime("%H:%M", time.gmtime(timestamp)),
-                         "inflow": inflow, "outflow": outflow,
+                         "inflow": round(inflow, 2), "outflow": round(outflow, 2),
                          "net_flow": round(outflow - inflow, 2)})
-        payload[venue] = rows
-    return payload
+        series[venue] = rows
+        inflow = round(float(agg["inflow"]), 2)
+        outflow = round(float(agg["outflow"]), 2)
+        venues.append({"id": venue, "name": _screener_venue_name(venue),
+                       "inflow": inflow, "outflow": outflow,
+                       # balance — сколько за сутки зашло минус сколько вышло:
+                       # именно эту кривую рисует карточка биржи
+                       "balance": round(inflow - outflow, 2),
+                       "events": int(agg["events"])})
+    venues.sort(key=lambda item: (item["inflow"] + item["outflow"], item["events"]),
+                reverse=True)
+    return {"minutes": int(minutes), "points": points, "since": since, "until": now,
+            "venues": venues, "series": series}
 
 
 @app.get("/api/screener/history")

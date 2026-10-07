@@ -651,6 +651,14 @@
         // поднятый до обновления (или своя база без строки levels), отдаёт
         // список без неё — тогда в кабинете не было ни карточки, ни доски.
         // Карточку добавляем на месте, а доска сама объяснит, что расчёта нет.
+        // «Сигналы Скринера китов» заводит миграция сервисов; на старой базе
+        // (сервер не перезапущен) карточку добавляем на месте, иначе фильтры
+        // было бы не где настраивать.
+        if (!list.some(function (s) { return s.slug === "screener_signals"; })) {
+            list = list.concat([{ slug: "screener_signals", title: t("sc.card_title"),
+                icon: "🐋", description: t("sc.card_desc"), coming_soon: false,
+                subscribed: true }]);
+        }
         if (!list.some(function (s) { return s.slug === "levels"; })) {
             list = list.concat([{ slug: "levels", title: t("lv.title"), icon: "🎯",
                 description: t("lv.svc_desc"), coming_soon: false, subscribed: true }]);
@@ -671,6 +679,8 @@
                             ? '<div class="svc-board" id="book-board"></div>'
                             : s.slug === "levels"
                                 ? '<div class="svc-board" id="levels-board"></div>'
+                                : s.slug === "screener_signals"
+                                    ? '<div class="svc-board" id="screener-signals-board"></div>'
                             : "<p>" + (s.description || "") + "</p>" + soon +
                     '<div class="row-actions">' +
                     // у дайджеста есть своя страница: сразу ведём читать выпуски
@@ -701,6 +711,7 @@
                 if (!was && slug === "watchlist") bootPumps();
                 if (!was && slug === "book") bootBook();
                 if (!was && slug === "levels") bootLevels();
+                if (!was && slug === "screener_signals") bootScreenerSignals();
             });
         });
         box.querySelectorAll("button[data-slug]").forEach(function (btn) {
@@ -731,6 +742,7 @@
         if (open === "watchlist") bootPumps();
         if (open === "book") bootBook();
         if (open === "levels") bootLevels();
+        if (open === "screener_signals") bootScreenerSignals();
     }
 
     var tgLinkTimer = null;
@@ -755,6 +767,7 @@
         else if (slug === "watchlist") bootPumps();
         else if (slug === "book") bootBook();
         else if (slug === "levels") bootLevels();
+        else if (slug === "screener_signals") bootScreenerSignals();
         else if (slug === "alerts") bootAlerts();
     }
 
@@ -1201,6 +1214,252 @@
                 lvBuilt = false;
                 if ($("levels-board") && lvData) paintLevels(lvData);
             });
+        }
+    }
+
+    /* ---------- 🐋 Signal Screener: свои фильтры китов + Telegram ---------- */
+    // Доска живёт в гармошке сервиса: конфиг один на пользователя, кнопки меняют
+    // его сразу (POST с дебаунсом), а разметка строится один раз — иначе фокус
+    // убегал бы из поля «свой порог» при каждом клике.
+    var scCfg = null, scMeta = null, scSaveT = null, scBuilt = false, scTimer = null;
+    var scDirty = false;          // пользователь менял фильтр, POST не закончен
+
+    function scDefaults() {
+        return { notify: false, exchange: "ALL", direction: "all", chain: "ALL",
+            min_usd: 250000, cooldown_min: 15 };
+    }
+    function scCfgGet() { return Object.assign(scDefaults(), scCfg || {}); }
+
+    function scMoney(v) {
+        v = Number(v) || 0;
+        if (v >= 1e9) return "$" + (v / 1e9).toFixed(2) + "B";
+        if (v >= 1e6) return "$" + (v / 1e6).toFixed(v >= 1e7 ? 1 : 2) + "M";
+        if (v >= 1e3) return "$" + Math.round(v / 1e3) + "K";
+        return "$" + Math.round(v);
+    }
+
+    function scChip(on, attrs, text) {
+        return '<button type="button" class="al-chip' + (on ? " on" : "") + '" ' +
+            attrs + ">" + text + "</button>";
+    }
+
+    function scStatus(text) {
+        var st = $("sc-status");
+        if (st) st.textContent = text || "";
+    }
+
+    function loadScreener(full) {
+        return api("/api/account/screener/signals").then(function (d) {
+            if (!d || !d.ok) {
+                if (!scBuilt) paintScreener({ error: true });
+                return;
+            }
+            scMeta = d;
+            // конфиг перечитываем, только пока пользователь ничего не меняет, и
+            // один раз при открытии доски
+            if ((!scCfg || full === true) && !scDirty) scCfg = Object.assign(scDefaults(), d.config || {});
+            paintScreener({});
+        }).catch(function () {
+            if (!scBuilt) paintScreener({ error: true });
+        });
+    }
+
+    function scSet(patch) {
+        scCfg = Object.assign(scDefaults(), scCfg || {}, patch || {});
+        scDirty = true;
+        paintScreener({});
+        if (scSaveT) clearTimeout(scSaveT);
+        scSaveT = setTimeout(function () {
+            scSaveT = null;
+            scStatus(t("sc.saving"));
+            api("/api/account/screener/signals", {
+                method: "POST", body: JSON.stringify(scCfg),
+            }).then(function (d) {
+                scDirty = false;
+                if (d && d.config) scCfg = Object.assign(scDefaults(), d.config);
+                scStatus(d && d.ok ? t("sc.saved") : t("sc.fail"));
+                paintScreener({});
+                // превью совпадений пересчитывают по новому фильтру
+                loadScreener(false);
+            }).catch(function () {
+                scDirty = false;
+                scStatus(t("sc.fail"));
+            });
+        }, 350);
+    }
+
+    function scRecentHtml(rows) {
+        if (!rows || !rows.length) {
+            return '<div class="lv-sub">' + esc(t("sc.no_recent")) + "</div>";
+        }
+        return '<div class="sc-recent">' + rows.map(function (row) {
+            var dir = String(row.direction || "");
+            var cls = dir === "inflow" ? " is-in" : dir === "outflow" ? " is-out" : "";
+            var place = row.venue_name || row.label || t("sc.unlabeled");
+            var when = row.ts ? new Date(Number(row.ts) * 1000).toLocaleTimeString() : "";
+            return '<div class="sc-recent-row' + cls + '"><b>' + esc(scMoney(row.usd)) +
+                "</b> " + esc(row.symbol || "") + " · " + esc(place) + " · " +
+                esc(t(dir === "inflow" ? "sc.dir_in" : dir === "outflow" ? "sc.dir_out"
+                                                    : "sc.dir_transfer")) +
+                (when ? ' <span class="sc-recent-ts">' + esc(when) + "</span>" : "") + "</div>";
+        }).join("") + "</div>";
+    }
+
+    function scChips(board, selector, attr, isOn) {
+        board.querySelectorAll(selector).forEach(function (b) {
+            b.classList.toggle("on", isOn(b.getAttribute(attr)));
+        });
+    }
+
+    /** Состояние доски: подписи ивыбранные чипсы. Отдельно от разметки — чтобы
+     *  перерисовка не трогала поле с введённой суммой. */
+    function scApply(cfg, meta) {
+        var board = $("screener-signals-board");
+        if (!board) return;
+        var sw = $("sc-tg");
+        if (sw) {
+            sw.classList.toggle("on", !!cfg.notify);
+            var span = sw.querySelector("span");
+            if (span) span.textContent = cfg.notify ? t("sc.tg_on") : t("sc.tg_off");
+        }
+        scChips(board, "[data-sc-ex]", "data-sc-ex",
+                function (v) { return (cfg.exchange || "ALL") === (v || "ALL"); });
+        scChips(board, "[data-sc-dir]", "data-sc-dir",
+                function (v) { return (cfg.direction || "all") === (v || "all"); });
+        scChips(board, "[data-sc-chain]", "data-sc-chain",
+                function (v) { return (cfg.chain || "ALL") === (v || "ALL"); });
+        scChips(board, "[data-sc-vol]", "data-sc-vol",
+                function (v) { return Math.abs((Number(cfg.min_usd) || 0) - Number(v)) < 1; });
+        scChips(board, "[data-sc-pause]", "data-sc-pause",
+                function (v) { return (Number(cfg.cooldown_min) || 0) === Number(v); });
+        var min = $("sc-min");
+        if (min && document.activeElement !== min) {
+            min.value = String(Math.round(Number(cfg.min_usd) || 0));
+        }
+        var recent = $("sc-recent");
+        if (recent) recent.innerHTML = scRecentHtml((meta || {}).recent);
+        // Telegram без привязанного бота: тумблер есть, но писать некуда
+        if (meta && meta.telegram === false && cfg.notify) scStatus(t("sc.no_telegram"));
+    }
+
+    function paintScreener(state) {
+        var board = $("screener-signals-board");
+        if (!board) return;
+        if (state && state.error) {
+            board.innerHTML = '<div class="lv-signal"><div class="lv-sub">' +
+                esc(t("sc.unavailable")) + "</div></div>";
+            scBuilt = false;
+            return;
+        }
+        var cfg = scCfgGet();
+        var meta = scMeta || {};
+        var presets = meta.presets || {};
+        var volumes = presets.volume_usd || [50000, 100000, 250000, 500000, 1000000];
+        var pauses = presets.cooldown_min || [0, 5, 15, 30, 60];
+        var chains = presets.chains || [];
+        var titles = presets.network_titles || {};
+        var exchanges = meta.exchanges || [];
+        var venues = exchanges.map(function (row) {
+            return scChip(false, 'data-sc-ex="' + esc(row.id) + '"', esc(row.name || row.id));
+        }).join("");
+        if (!scBuilt) {
+            board.innerHTML =
+                '<div class="lv-signal" id="sc-signal">' +
+                '<div class="bk-head">' +
+                '<span class="lv-cap">' + esc(t("sc.title")) + "</span>" +
+                '<label class="al-switch" id="sc-tg"><i></i><span></span></label>' +
+                '<span class="bk-status" id="sc-status"></span></div>' +
+                '<div class="lv-sub">' + esc(t("sc.note")) + "</div>" +
+                '<div class="al-label">' + esc(t("sc.exchange")) + "</div>" +
+                '<div class="al-chips" id="sc-exchanges">' +
+                scChip(false, 'data-sc-ex="ALL"', esc(t("sc.exchange_all"))) + venues +
+                (exchanges.length || meta.available === false ? "" :
+                    '<span class="lv-sub">' + esc(t("sc.no_exchanges")) + "</span>") +
+                "</div>" +
+                '<div class="al-label">' + esc(t("sc.direction")) + "</div>" +
+                '<div class="al-chips" id="sc-direction">' +
+                scChip(false, 'data-sc-dir="all"', esc(t("sc.dir_all"))) +
+                scChip(false, 'data-sc-dir="inflow"', esc(t("sc.dir_in"))) +
+                scChip(false, 'data-sc-dir="outflow"', esc(t("sc.dir_out"))) +
+                "</div>" +
+                '<div class="al-label">' + esc(t("sc.network")) + "</div>" +
+                '<div class="al-chips" id="sc-chains">' +
+                scChip(false, 'data-sc-chain="ALL"', esc(t("sc.network_all"))) +
+                chains.map(function (id) {
+                    return scChip(false, 'data-sc-chain="' + esc(id) + '"',
+                        esc(titles[id] || id));
+                }).join("") + "</div>" +
+                '<div class="al-label">' + esc(t("sc.threshold")) + "</div>" +
+                '<div class="al-chips" id="sc-volumes">' +
+                volumes.map(function (v) {
+                    return scChip(false, 'data-sc-vol="' + Number(v) + '"', esc(scMoney(v)));
+                }).join("") + "</div>" +
+                '<div class="al-row"><input id="sc-min" type="number" min="0" step="1000">' +
+                '<span class="lv-sub">' + esc(t("sc.threshold_manual")) + "</span></div>" +
+                '<div class="al-label">' + esc(t("sc.pause")) + "</div>" +
+                '<div class="al-chips" id="sc-pauses">' +
+                pauses.map(function (m) {
+                    return scChip(false, 'data-sc-pause="' + Number(m) + '"',
+                        Number(m) ? esc(t("sc.pause_min", { min: m })) : esc(t("sc.pause_off")));
+                }).join("") + "</div>" +
+                '<div class="al-label">' + esc(t("sc.recent")) + "</div>" +
+                '<div id="sc-recent"></div>' +
+                "</div>";
+            bindScreener(board);
+            scBuilt = true;
+        }
+        scApply(cfg, meta);
+    }
+
+    function bindScreener(board) {
+        var sw = $("sc-tg");
+        if (sw) {
+            sw.onclick = function (e) {
+                e.preventDefault();
+                scSet({ notify: !scCfgGet().notify });
+            };
+        }
+        board.querySelectorAll("[data-sc-ex]").forEach(function (b) {
+            b.onclick = function () { scSet({ exchange: b.getAttribute("data-sc-ex") || "ALL" }); };
+        });
+        board.querySelectorAll("[data-sc-dir]").forEach(function (b) {
+            b.onclick = function () { scSet({ direction: b.getAttribute("data-sc-dir") || "all" }); };
+        });
+        board.querySelectorAll("[data-sc-chain]").forEach(function (b) {
+            b.onclick = function () { scSet({ chain: b.getAttribute("data-sc-chain") || "ALL" }); };
+        });
+        board.querySelectorAll("[data-sc-vol]").forEach(function (b) {
+            b.onclick = function () { scSet({ min_usd: Number(b.getAttribute("data-sc-vol")) || 0 }); };
+        });
+        board.querySelectorAll("[data-sc-pause]").forEach(function (b) {
+            b.onclick = function () {
+                scSet({ cooldown_min: Number(b.getAttribute("data-sc-pause")) || 0 });
+            };
+        });
+        var min = $("sc-min");
+        if (min) {
+            min.onchange = function () {
+                var value = Number(min.value);
+                if (!isFinite(value) || value < 0) value = 0;
+                scSet({ min_usd: Math.round(value) });
+            };
+        }
+    }
+
+    function bootScreenerSignals() {
+        if (!$("screener-signals-board")) return;
+        scBuilt = false;
+        scDirty = false;
+        loadScreener(true);
+        if (scTimer) clearInterval(scTimer);
+        scTimer = setInterval(function () {
+            var board = $("screener-signals-board");
+            if (!document.hidden && !scDirty && board &&
+                    board.offsetParent !== null) loadScreener(false);
+        }, 60000);
+        if (window.LiqScopeI18n && LiqScopeI18n.onChange && !window._scSigLangHook) {
+            window._scSigLangHook = true;
+            LiqScopeI18n.onChange(function () { scBuilt = false; paintScreener({}); });
         }
     }
 

@@ -64,6 +64,8 @@ class Ctx:
     pump_snapshot_fn = staticmethod(lambda config=None: {})
     # 📖 Стакан: (настройки) → живые стены по выбранным монетам
     book_snapshot_fn = staticmethod(lambda config=None: {})
+    # 🐋 Сигналы Скринера китов: (фильтр) → биржи из реестра и последние совпадения
+    screener_signal_fn = staticmethod(lambda config=None: {})
 
 
 ctx = Ctx()
@@ -1847,6 +1849,56 @@ def register_account_routes(app) -> None:
         # Сигнал не должен выключать сам сервис: доска живёт и без Telegram.
         r = ctx.store.set_user_service_config(
             user["id"], "levels", cfg, enabled=True)
+        if not r.get("ok"):
+            return JSONResponse(r, status_code=400)
+        return {"ok": True, "config": cfg, "subscribed": True}
+
+    # ----- 🐋 Signal Screener: крупные переводы по своим фильтрам ----------------
+
+    @router.get("/api/account/screener/signals")
+    async def api_screener_signals_get(request: Request):
+        """Фильтры сервиса, биржи из реестра кошельков и последние совпадения.
+
+        Список бирж приходит из данных скринера, а не из перечня на странице:
+        фильтровать можно ровно те площадки, по которым есть кошельки.
+        """
+        from screener_signals import normalize_signal, signal_presets
+        user = current_user(request)
+        if not user:
+            return _need_auth()
+        if not _verify_allowed(user):
+            return _need_verified()
+        row = ctx.store.get_user_service(user["id"], "screener_signals")
+        cfg = normalize_signal((row or {}).get("config") or {})
+        snap: dict = {}
+        try:
+            snap = ctx.screener_signal_fn(cfg) or {}
+        except Exception as e:                            # noqa: BLE001
+            log.debug("screener signals snapshot: %s", e)
+        return {"ok": True, "config": cfg, "presets": signal_presets(),
+                "subscribed": bool(row and row.get("enabled")),
+                "exchanges": snap.get("exchanges") or [],
+                "recent": snap.get("recent") or [],
+                "available": bool(snap.get("available")),
+                "telegram": bool(user.get("tg_id"))}
+
+    @router.post("/api/account/screener/signals")
+    async def api_screener_signals_save(request: Request):
+        from screener_signals import normalize_signal
+        user = current_user(request)
+        if not user:
+            return _need_auth()
+        if not _verify_allowed(user):
+            return _need_verified()
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        cfg = normalize_signal(body or {})
+        # Настройка фильтра не отписывает от сервиса: подписка — своя кнопка,
+        # а тумблер notify отвечает только за доставку в Telegram.
+        r = ctx.store.set_user_service_config(
+            user["id"], "screener_signals", cfg, enabled=True)
         if not r.get("ok"):
             return JSONResponse(r, status_code=400)
         return {"ok": True, "config": cfg, "subscribed": True}

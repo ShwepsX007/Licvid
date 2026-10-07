@@ -42,10 +42,19 @@ class KeyStoreTests(unittest.TestCase):
             path = Path(tmp) / "keys.enc"
             store = AlchemyKeyStore(SECRET, path=path, env_key="env-secret")
             self.assertEqual(store.keys(), [("env", "env-secret")])
-            store.add("admin-secret")
-            self.assertEqual(len(store.keys()), 1)
-            self.assertEqual(store.keys()[0][1], "admin-secret")
-            self.assertNotIn("env-secret", path.read_text())
+            admin = store.add("admin-secret")
+            # Ключ из окружения остаётся в пуле: «дополнительный» ключ,
+            # добавленный в админке, не имеет права выключать основной —
+            # иначе сбор данных вставал целиком, пока новый ключ не годился.
+            self.assertEqual(store.keys(),
+                             [(admin["id"], "admin-secret"), ("env", "env-secret")])
+            self.assertEqual([row["source"] for row in store.public()],
+                             ["admin", "environment"])
+            self.assertNotIn("env-secret", path.read_text())   # секрет не на диске
+            with self.assertRaises(ValueError):
+                store.add("env-secret")     # дубликат того же ключа
+            self.assertTrue(store.remove(admin["id"]))
+            self.assertEqual(store.keys(), [("env", "env-secret")])
 
 
     def test_alchemy_key_accepts_bare_and_trimmed_v2_urls(self):
@@ -179,6 +188,28 @@ class RotationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("HTTP 429", network["error"])
                 self.assertNotEqual(p.key_status()[0]["state"], "cooldown")
                 self.assertEqual(p.state["cu"], 20)
+                # Квота считается на каждый ключ: пока у второго есть запас,
+                # исчерпанный первый не останавливает сбор целиком.
+                self.assertEqual(p.key_cu_allowance(), p.monthly_cu)
+                self.assertEqual(p.cu_ceiling(), p.monthly_cu * 2)
+                p.state["key_usage"][first["id"]] = p.monthly_cu   # ключ A исчерпан
+                with self.assertRaises(BudgetExhausted):
+                    p._reserve("eth_blockNumber", first["id"])
+                # пул не встал: запрос уходит на второй ключ, у которого запас есть
+
+                class SecondKeyOnly(TaggedSession):
+                    """Следующий запрос пула обязан уйти на второй ключ."""
+
+                    def post(self, url, **kwargs):
+                        kwargs.setdefault("headers", {})["X-Test-Key"] = "fake-secret-B"
+                        return self.real.post(url, **kwargs)
+
+                async with ClientSession() as session:
+                    again = await p._rpc(SecondKeyOnly(session), "ETH",
+                                        "eth_blockNumber", [])
+                self.assertEqual(again, "0x10")
+                self.assertEqual(used[-1], "fake-secret-B")
+                self.assertEqual(p.state["active_key"], second["id"])
                 p.monthly_cu = 20
                 with self.assertRaises(BudgetExhausted):
                     p._reserve("eth_blockNumber", second["id"])

@@ -123,6 +123,17 @@ DEFAULT_SERVICES = (
         "sort": 10,
     },
     {
+        "slug": "screener_signals",
+        "title": "Сигналы Скринера китов",
+        "title_en": "Whale screener signals",
+        "description": ("Крупные переводы на биржи и с бирж: площадка, направление, "
+                        "сеть и порог в долларах — сигнал в Telegram."),
+        "icon": "🐋",
+        "enabled": 1,
+        "coming_soon": 0,
+        "sort": 15,
+    },
+    {
         "slug": "correlations",
         "title": "Корреляции валют",
         "title_en": "Coin correlations",

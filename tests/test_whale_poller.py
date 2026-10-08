@@ -564,34 +564,39 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
                 screen.close()
                 await runner.cleanup()
 
-    async def test_local_key_cu_cap_is_quota_not_dead_key_or_pause(self):
+    async def test_local_cu_estimate_never_blocks_a_live_key(self):
         with tempfile.TemporaryDirectory() as tmp:
+            calls = []
+
+            async def handler(request):
+                payload = await request.json()
+                calls.append(payload["method"])
+                return web.json_response({"jsonrpc": "2.0", "id": 1, "result": "0x2a"})
+
+            app = web.Application()
+            app.router.add_post("/rpc", handler)
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, "127.0.0.1", 0)
+            await site.start()
+            port = site._server.sockets[0].getsockname()[1]
             screen = WhaleScreener("test-alchemy-key", lambda _: None, lambda _: None)
             poller = WhalePoller("test-alchemy-key", screen,
                 state_file=Path(tmp) / "state.json", monthly_cu=1000,
-                endpoints={"ETH": "http://127.0.0.1:1/rpc"})
+                endpoints={"ETH": f"http://127.0.0.1:{port}/rpc"})
             poller.state["month"] = time.strftime("%Y-%m", time.gmtime())
             poller.state.setdefault("key_usage", {})["legacy"] = 1000
-
-            class NeverCalledSession:
-                def post(self, *_args, **_kwargs):
-                    raise AssertionError("CU-capped key must not make an RPC request")
-
             try:
-                with self.assertRaises(QuotaExhausted):
-                    await poller._rpc(NeverCalledSession(), "ETH", "eth_blockNumber", [])
-                status = poller.status()["network_status"]["ETH"]
-                self.assertEqual(status["status"], "quota_exhausted")
-                self.assertTrue(status["key_active"])
-                self.assertIsNone(status["http_status"])
-                # Ключ с выбранной локальной квотой — не «мёртвый» и сеть он не
-                # ставит на паузу, но и трогать его до конца месяца не нужно:
-                # state=exhausted и честная причина в админке.
-                row = poller.key_status()[0]
-                self.assertEqual(row["state"], "exhausted")
-                self.assertIn("исчерпана", row["reason"])
+                async with ClientSession() as session:
+                    result = await poller._rpc(session, "ETH", "eth_blockNumber", [])
+                self.assertEqual(result, "0x2a")
+                self.assertEqual(calls, ["eth_blockNumber"])
+                self.assertEqual(poller.key_status()[0]["state"], "active")
+                self.assertFalse(poller.status()["local_budget_enforced"])
             finally:
                 screen.close()
+                await runner.cleanup()
+
 
     async def test_asset_transfer_history_uses_valid_combined_params(self):
         requests = []
@@ -697,8 +702,7 @@ class PollingTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             screen = WhaleScreener("fake", lambda _: None, lambda _: None)
             wallet = "0x" + "1" * 40
-            screen.wallets_by_chain["BASE"] = {wallet: "Exchange"}
-            poller = WhalePoller("test-api-key", screen,
+            screen.wallets_by_chain["BASE"] = {wallet: "Exchange"}            poller = WhalePoller("test-api-key", screen,
                 state_file=Path(tmp) / "state.json",
                 endpoints={"BASE": f"http://127.0.0.1:{port}/rpc"})
             poller.state["cursors"]["BASE"] = 99

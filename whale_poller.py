@@ -410,7 +410,10 @@ class WhalePoller:
         """Ключ выбит своей месячной CU-квотой (до перезапуска ledger'а)."""
         if not key_id:
             return False
-        return self.state.setdefault("key_exhausted", {}).get(key_id) == self._month()
+        # Ignore the legacy key_exhausted ledger: it mixed local estimates with
+        # actual provider quota failures and could keep a healthy key blocked.
+        # Only provider-confirmed exhaustion is persisted going forward.
+        return self.state.setdefault("provider_key_exhausted", {}).get(key_id) == self._month()
 
     def key_ready(self, key_id: str, *, now: float | None = None) -> bool:
         """Можно ли брать этот ключ прямо сейчас (кулдаун + локальная квота)."""
@@ -497,7 +500,7 @@ class WhalePoller:
         """Ключ выбит локальной квотой: до конца месяца его не трогаем."""
         if not key_id:
             return
-        ledger = self.state.setdefault("key_exhausted", {})
+        ledger = self.state.setdefault("provider_key_exhausted", {})
         month = self._month()
         if ledger.get(key_id) != month:
             ledger[key_id] = month

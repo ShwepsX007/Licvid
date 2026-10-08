@@ -71,7 +71,8 @@ NETWORK_SUCCESS_TTL_SEC = 300.0
 # Переключаемся только когда текущий ключ перестал давать данные (выбит квота,
 # 429, отказ авторизации или тишина дольше паузы ниже). Админ добавляет второй
 # ключ не для того, чтобы жечь его параллельно, а чтобы было на что отойти.
-KEY_IDLE_FAILOVER_SEC = max(0.0, float(os.getenv("LIQSCOPE_KEY_IDLE_FAILOVER_SEC", "300")))
+# Deprecated: idle silence is not evidence of quota exhaustion.
+KEY_IDLE_FAILOVER_SEC = 0.0
 #: как надолго убираем «молчаливый» ключ в кулдаун, чтобы select_key не
 #: вернулся на него же на следующем запросе
 KEY_IDLE_PARK_SEC = 120.0
@@ -530,39 +531,12 @@ class WhalePoller:
             self.key_errors.pop(key_id, None)
 
     def maybe_failover_idle(self) -> str:
-        """Если активный ключ молчит дольше паузы — переводим сбор на следующий.
+        """Compatibility hook; idle silence never rotates Alchemy keys.
 
-        Порог не меньше трёх интервалов опроса: в economy-режиме тишина в 5
-        минут — норма, а не повод сбрасывать ключ.
+        A healthy network can legitimately have no transfer events. Key
+        rotation is driven only by provider responses in _rpc.
         """
-        keys = self._keys()
-        if len(keys) < 2 or KEY_IDLE_FAILOVER_SEC <= 0:
-            return ""
-        threshold = max(KEY_IDLE_FAILOVER_SEC, 3.0 * self.poll_interval_sec)
-        since_data = time.time() - max(self.last_data_at, self._started_at)
-        if since_data < threshold:
-            return ""
-        if time.time() - self.last_key_switch_at < threshold / 2:
-            return ""
-        index, _wait = self.select_key()
-        if index < 0:
-            return ""
-        current = keys[index][0]
-        # кандидаты — все ключи, кроме текущего, по порядку: следующим первым
-        following = [(index + step) % len(keys) for step in range(1, len(keys))]
-        chosen = next((position for position in following
-                       if self.key_ready(keys[position][0])), None)
-        if chosen is None:
-            chosen = following[0]
-        self.park_key(current, KEY_IDLE_PARK_SEC,
-                      f"нет данных {int(since_data)} с — ключ отправлен в резерв")
-        self.set_active_key(keys[chosen][0],
-                            reason=f"ключ {self._hint(current)} не давал данных "
-                                   f"{int(since_data)} с")
-        self.last_data_at = time.time()  # следующий прыжок — не раньше нового окна
-        log.warning("[ключи] %d с без данных: %s → %s",
-                    int(since_data), self._hint(current), self._hint(keys[chosen][0]))
-        return keys[chosen][0]
+        return ""
 
     def configure(self, *, mode: str, monthly_cu: int,
                   poll_interval_sec: int | None = None,
@@ -592,18 +566,12 @@ class WhalePoller:
         self.wakeup.set()
 
     def key_cu_allowance(self) -> int:
-        """Месячная квота CU на один ключ: её админ и задаёт в `/admin`.
+        """Local CU reference for UI; not a key-rotation limit."""
 
-        Ключи Alchemy живут в разных проектах, и у каждого свой Free-тариф,
-        поэтому локальный ledger считаем на ключ, а не на всё приложение.
-        Раньше бюджет был общий: как только первый ключ его выбирал,
-        `_reserve` поднимал «global» и пул не успевал даже посмотреть на
-        второй ключ — данные не шли, хотя у добавленного ключа запас был.
-        """
         return max(1, int(self.monthly_cu))
 
     def cu_ceiling(self) -> int:
-        """Потолок пула: квота каждого configured ключа."""
+        """Расчётный ориентир для UI; не используется как hard stop."""
         try:
             keys = self._keys()
         except Exception:  # noqa: BLE001 — хранилище ключей не валит учёт
@@ -611,29 +579,24 @@ class WhalePoller:
         return self.key_cu_allowance() * max(1, len(keys))
 
     def _reserve(self, method: str, key_id: str = "legacy", chain: str = "") -> None:
+        """Record estimated CU usage without using it as a local stop condition.
+
+        monthly_cu is telemetry only. It must never block a request or
+        rotate a key. Alchemy provider responses are authoritative: explicit
+        quota/capacity errors are handled by _record_provider_failure.
+        """
         month = datetime.now(timezone.utc).strftime("%Y-%m")
         if self.state["month"] != month:
-            # Новый месяц — новый ledger: квоты заново у всех ключей, и
-            # пул снова стартует с первого ключа, а не с того, что спасал.
             self.state.update(month=month, cu=0, key_usage={}, network_cu={},
                               key_exhausted={}, active_key="")
             self._save()
         cost = METHOD_CU[method]
-        allowance = self.key_cu_allowance()
         usage = self.state.setdefault("key_usage", {})
-        if usage.get(key_id, 0) + cost > allowance:
-            # Квота этого ключа кончилась — это не стоп сбору: ключ уходит в
-            # резерв до конца месяца, `_rpc` в этом же запросе пробует
-            # следующий, а дальше вся нога работает на нём.
-            self.mark_key_exhausted(key_id)
-            raise BudgetExhausted("key")
-        if self.state["cu"] + cost > self.cu_ceiling():
-            raise BudgetExhausted("global")
-        self.state["cu"] += cost
-        usage[key_id] = usage.get(key_id, 0) + cost
+        self.state["cu"] = int(self.state.get("cu", 0) or 0) + cost
+        usage[key_id] = int(usage.get(key_id, 0) or 0) + cost
         if chain:
             network_usage = self.state.setdefault("network_cu", {})
-            network_usage[chain] = network_usage.get(chain, 0) + cost
+            network_usage[chain] = int(network_usage.get(chain, 0) or 0) + cost
         self.state["active_key"] = key_id
         self._save()
 
@@ -697,8 +660,7 @@ class WhalePoller:
         return now
 
     def _mark_network_success(self, chain: str, *, key_id: str = "", clear_error: bool = True) -> None:
-        now = time.time()
-        self.last_data_at = now
+        now = time.time()        self.last_data_at = now
         row = self._network_row(chain)
         previous = row.get("status")
         row["status"] = "online"
@@ -972,9 +934,10 @@ class WhalePoller:
                                 for chain, row in self.evm_streams.items()},
                 "solana": sol, "tron": tron,
                 "phase": ("no_key" if not keys else
-                          "budget_exhausted" if used >= self.cu_ceiling() else
-                          "error" if self.errors else
+                          "error" if self.errors and not self.last_success else
                           "ok" if self.last_success else "waiting"),
+                "local_budget_enforced": False,
+                "provider_quota_authoritative": True,
                 "other_networks": other}
 
     def _redact_api_keys(self, value: object, extra_secrets=()) -> str:
@@ -1397,8 +1360,7 @@ class WhalePoller:
         self.state.setdefault(cursor_name, {})[chain] = scan_start - 1
         self._save()
         log.warning("[screener/%s] Отставание > 30 блоков. "
-                    "Безопасный сброс на latest - 5.", chain.lower())
-        return scan_start
+                    "Безопасный сброс на latest - 5.", chain.lower())        return scan_start
 
     async def poll_transfer_history(self, session, chain: str, head: int) -> None:
         cursors = self.state.setdefault("history_cursors", {})
@@ -2097,8 +2059,7 @@ class WhalePoller:
             return before, after, owner
 
         instructions = []
-        for index, instruction in enumerate(self._solana_instructions(tx)):
-            parsed = instruction.get("parsed") or {}
+        for index, instruction in enumerate(self._solana_instructions(tx)):            parsed = instruction.get("parsed") or {}
             instruction_type = str(parsed.get("type") or "").lower()
             if instruction_type not in ("transfer", "transferchecked"):
                 continue
@@ -2797,8 +2758,7 @@ class WhalePoller:
             except Exception as exc:  # noqa: BLE001 — isolate TronGrid failures
                 detail = self._trongrid_safe_text(str(exc) or type(exc).__name__)[:200]
                 self.tron_status.update(connected=False, state="error", error=detail)
-                self._log_tron_exception(exc)
-                await asyncio.sleep(TRON_EVENT_INTERVAL)
+                self._log_tron_exception(exc)                await asyncio.sleep(TRON_EVENT_INTERVAL)
 
     async def run_streams(self) -> None:
         """Run EVM/Solana/Tron realtime streams independently of REST catch-up."""
@@ -2823,13 +2783,6 @@ class WhalePoller:
                 if self.wakeup.is_set():
                     self.wakeup.clear()
                     next_due = self._initial_evm_poll_schedule(loop.time())
-                # Молчание активного ключа — единственный штатный повод перейти
-                # на следующий: сам по себе второй ключ в работу не берём.
-                try:
-                    self.maybe_failover_idle()
-                except Exception:  # noqa: BLE001 — сторож не имеет права ронять сбор
-                    log.exception("[ключи] сторож простоя упал")
-
                 # One scheduler owns every EVM network. It awaits each poll fully
                 # before selecting the next due chain, preventing synchronized bursts.
                 chain = min(next_due, key=next_due.get)

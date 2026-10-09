@@ -85,6 +85,8 @@
             const details = make("div", "whale-admin-key-details");
             details.append(make("small", "", "LOCAL ESTIMATE · " +
                 number(Number(key.reserved_cu || 0)) + " CU · quota: UNKNOWN"));
+            details.append(make("small", "", "Requests today: " +
+                (key.requests_today == null ? "UNKNOWN (not tracked yet)" : number(key.requests_today))));
             if (key.last_successful_request) details.append(make("small", "",
                 "Last successful request: " + when(key.last_successful_request)));
             if (key.last_provider_error) details.append(make("small", "",

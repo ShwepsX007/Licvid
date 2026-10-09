@@ -117,6 +117,14 @@
                 <tbody id="source-diagnostics-onchain-rows"><tr><td colspan="8" class="diag-empty">Загружаю данные…</td></tr></tbody>
             </table>
         </div>
+        <h4>Circuit breaker · защита внешних API</h4>
+        <p class="meta">После серии сетевых ошибок запросы к проблемному узлу временно блокируются. По окончании паузы разрешается один пробный запрос; успех закрывает цепь, повторная ошибка продлевает паузу. Авторизация, обычные 4xx и специальные лимиты Alchemy остаются под текущей логикой обработки.</p>
+        <div class="diag-table-wrap">
+            <table class="data diag-table">
+                <thead><tr><th>Провайдер / узел</th><th>Состояние</th><th>Сбои подряд</th><th>До следующей пробы</th><th>Ошибки / успехи</th><th>Последняя причина</th></tr></thead>
+                <tbody id="source-diagnostics-circuit-rows"><tr><td colspan="6" class="diag-empty">Circuit breaker ещё не фиксировал вызовы внешних API</td></tr></tbody>
+            </table>
+        </div>
         <h4>Сервер и обработка событий</h4>
         <div class="diag-runtime" id="source-diagnostics-runtime"><div class="diag-stat"><span class="diag-stat-label">Состояние</span><strong class="diag-stat-value">Загрузка…</strong></div></div>
         <p class="meta">* Скорость событий считается в этой вкладке между обновлениями и становится доступна после второго замера. Для отдельных WebSocket-соединений пока не снимается отдельная сетевая задержка; здесь показываются возраст последнего события, ошибки, переподключения и общая HTTP p95.</p>

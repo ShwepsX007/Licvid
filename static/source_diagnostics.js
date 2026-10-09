@@ -249,7 +249,7 @@
         if (!Array.isArray(networks) || !networks.length) {
             const row = document.createElement("tr");
             cell(row, unavailableMessage || "Нет данных по on-chain сетям", "diag-empty");
-            row.firstChild.colSpan = 7;
+            row.firstChild.colSpan = 8;
             onchainRows.append(row);
             return [];
         }
@@ -260,6 +260,7 @@
             cell(row, networkProvider(network));
             const state = networkState(network);
             cell(row, pill(state.label, state.tone));
+            cell(row, ago(network.last_event, nowSec));
             cell(row, ago(network.last_success, nowSec));
             cell(row, ago(network.last_attempt, nowSec));
             cell(row, network.cu_used ? number(network.cu_used) : "—");

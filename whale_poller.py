@@ -1121,14 +1121,14 @@ class WhalePoller:
                         self.note_key_data(key_id)
                         self._mark_network_success(chain, key_id=key_id)
                         return data["result"]
-                except CircuitOpenError as exc:
+            except CircuitOpenError as exc:
                 self._mark_network_failure(
                     chain, "circuit_open", str(exc), http_status=503,
                     retry_after=exc.retry_after, key_active=True)
                 raise NetworkError(str(exc)) from None
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                # The guard records transport failures before this handler runs.
                 # Never include aiohttp exception URLs; production paths contain keys.
-                circuit.failure(type(exc).__name__)
                 failure = NetworkError(type(exc).__name__)
                 self._mark_network_failure(chain, "network_error", str(failure), key_active=True)
                 raise failure from None

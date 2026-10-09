@@ -76,6 +76,7 @@
     }
 
     function ageLabel(seconds) {
+        if (seconds === null || seconds === undefined || seconds === "") return "—";
         const n = Number(seconds);
         if (!Number.isFinite(n) || n < 0) return "—";
         if (n < 60) return Math.round(n) + " с";

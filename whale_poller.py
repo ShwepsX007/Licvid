@@ -846,7 +846,18 @@ class WhalePoller:
                         "active": key_id == active_id,
                         "cooldown_in_sec": int(math.ceil(max(
                             0.0, float(self.key_cooldown.get(key_id, 0.0) or 0.0) - now))),
-                        "reason": self.key_errors.get(key_id, "")})
+                        "reason": self.key_errors.get(key_id, ""),
+                        # Billing is not exposed by this local ledger. Keep unknowns
+                        # explicit rather than presenting estimates as provider facts.
+                        "cu_source": "LOCAL ESTIMATE",
+                        "estimated_cu": int(usage.get(key_id, 0) or 0),
+                        "requests_today": None,
+                        "last_successful_request": None,
+                        "last_provider_error": self.key_errors.get(key_id, "") or None,
+                        "last_http_status": None,
+                        "rotation_at": None,
+                        "rotation_reason": None,
+                        "quota_status": "UNKNOWN"})
         return out
 
     def status(self) -> dict:

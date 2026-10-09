@@ -24,6 +24,7 @@ from urllib.parse import urlsplit
 
 import aiohttp
 
+from circuit_breaker import protect_url
 from cex_wallets_updater import CEXWalletRegistry, EVM_CHAINS, SUPPORTED_CHAINS
 
 try:  # свой модуль без сети и БД; без него скринер обязан остаться живым
@@ -851,12 +852,13 @@ class WhaleScreener:
         return True
 
     async def _load_hyperliquid_universe(self, session: aiohttp.ClientSession) -> list[str]:
+        url = self.hl_rest + "/info"
         timeout = aiohttp.ClientTimeout(total=20)
-        async with session.post(self.hl_rest + "/info", json={"type": "meta"},
-                                timeout=timeout) as response:
-            if response.status != 200:
-                raise RuntimeError(f"Hyperliquid /info HTTP {response.status}")
-            data = await response.json()
+        async with protect_url("hyperliquid-rest", url):
+            async with session.post(url, json={"type": "meta"}, timeout=timeout) as response:
+                if response.status != 200:
+                    raise RuntimeError(f"HTTP {response.status}")
+                data = await response.json()
         if not isinstance(data, dict) or not isinstance(data.get("universe"), list):
             raise RuntimeError("Hyperliquid meta response has no universe")
         coins = []

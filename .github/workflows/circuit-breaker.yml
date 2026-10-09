@@ -17,6 +17,7 @@ on:
       - "circuit_breaker.py"
       - "whale_poller.py"
       - "market_feed.py"
+      - "oi_feed.py"
       - "liq_api.py"
       - "whale_screener.py"
       - "server.py"

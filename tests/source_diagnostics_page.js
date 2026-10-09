@@ -74,10 +74,10 @@ function setup(isAdmin) {
         available: true,
         networks: [
             {chain: "ETH", provider: "alchemy", status: "online", enabled: true,
-                last_success: now - 5, last_attempt: now - 6, cu_used: 100,
+                last_event: now - 20, last_success: now - 5, last_attempt: now - 6, cu_used: 100,
                 http_status: 200, error: ""},
             {chain: "SOLANA", provider: "alchemy_solana", status: "quota_exhausted", enabled: true,
-                last_success: now - 300, last_attempt: now - 10, cu_used: 200,
+                last_event: now - 300, last_success: now - 300, last_attempt: now - 10, cu_used: 200,
                 retry_in_sec: 3600, error: "provider quota exhausted"},
         ],
     };

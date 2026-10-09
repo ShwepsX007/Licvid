@@ -50,6 +50,7 @@
         rate_limited: ["Лимит запросов", "warn"],
         auth_error: ["Ошибка ключа", "bad"],
         quota_exhausted: ["Квота исчерпана", "bad"],
+        circuit_open: ["Circuit breaker: пауза", "bad"],
         network_error: ["Ошибка сети", "bad"],
         error: ["Ошибка", "bad"],
         unavailable: ["Недоступен", "bad"],

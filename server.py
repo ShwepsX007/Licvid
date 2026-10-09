@@ -119,6 +119,7 @@ import seo_pages
 from fastapi.staticfiles import StaticFiles
 
 import market_feed
+import circuit_breaker
 from market_feed import GATE_REST, MarketFeed, TF_MINUTES, base_of, canon, _get_json
 try:
     from cex_wallets_updater import CEXWalletRegistry, auto_refresh_loop
@@ -7257,6 +7258,7 @@ async def api_health():
     data["last_liquidation_ts"] = last_event
     data["seconds_since_last_liquidation"] = (round(time.time() - last_event, 1)
                                               if last_event else None)
+    data["circuit_breakers"] = circuit_breaker.snapshot()
     _HEALTH_CACHE.set("h", data)
     return JSONResponse(data)
 

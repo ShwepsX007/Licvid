@@ -106,6 +106,8 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     await sleep(50);
     assert(admin.win.document.getElementById("source-diagnostics-card"));
     assert.equal(admin.win.document.getElementById("source-diagnostics-card").hidden, false);
+    const refreshMessage = admin.win.document.getElementById("source-diagnostics-message").textContent;
+    assert(refreshMessage.includes("Источники проверены"), "unexpected refresh message: " + refreshMessage);
     assert.equal(admin.win.document.querySelectorAll("#source-diagnostics-market-rows tr").length, 2);
     assert.equal(admin.win.document.querySelectorAll("#source-diagnostics-onchain-rows tr").length, 2);
     assert(admin.win.document.getElementById("source-diagnostics-summary").textContent.includes("1 / 2"));

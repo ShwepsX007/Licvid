@@ -2,7 +2,12 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 import unittest
+from pathlib import Path
+
+# Direct execution sets sys.path[0] to tests/; add the repository root explicitly.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from circuit_breaker import (
     CircuitBreaker,

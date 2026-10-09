@@ -53,7 +53,7 @@
 <main class="wrap">
     <h1 class="page-title" data-i18n="seo.admin.h1">Панель управления</h1>
     <p class="lead">Сайт, бот и пользователи. Те же цифры доступны командами /admin в Telegram.</p>
-    <p class="lead"><a class="btn btn-small" href="#archive-admin">Удалить плохой дайджест или сводку</a></p>
+    <p class="lead"><a class="btn btn-small" href="#archive-admin">Удалить плохой дайджест или сводку</a> <a class="btn btn-small" href="#source-diagnostics-card">🩺 Диагностика источников</a></p>
 
     <div class="grid grid-4" style="margin-top:22px">
         <div class="card"><span class="stat-value" id="st-users">—</span><span class="stat-label">Пользователей</span></div>
@@ -65,6 +65,61 @@
         <div class="card"><span class="stat-value" id="st-exch">—</span><span class="stat-label">Бирж в эфире</span></div>
         <div class="card"><span class="stat-value" id="st-bot" style="font-size:1.05rem">—</span><span class="stat-label">Telegram-бот</span></div>
         <div class="card"><span class="stat-value" id="m-24h">—</span><span class="stat-label">Ликвидации 24ч</span></div>
+    </div>
+
+    <style>
+        #source-diagnostics-card .diag-toolbar { display:flex; align-items:center; flex-wrap:wrap; gap:10px; margin:12px 0; }
+        #source-diagnostics-card .diag-summary, #source-diagnostics-card .diag-runtime { display:grid; grid-template-columns:repeat(auto-fit,minmax(155px,1fr)); gap:8px; margin:12px 0 18px; }
+        #source-diagnostics-card .diag-stat { min-width:0; padding:11px 12px; border:1px solid var(--border,#1b2536); border-radius:10px; background:rgba(255,255,255,.02); }
+        #source-diagnostics-card .diag-stat-label { display:block; font-size:.78rem; opacity:.72; }
+        #source-diagnostics-card .diag-stat-value { display:block; margin-top:4px; font-size:1.1rem; overflow-wrap:anywhere; }
+        #source-diagnostics-card .diag-stat-value[data-tone="ok"] { color:#7bd88f; }
+        #source-diagnostics-card .diag-stat-value[data-tone="warn"] { color:#f5a623; }
+        #source-diagnostics-card .diag-stat-value[data-tone="bad"] { color:#ff6b6b; }
+        #source-diagnostics-card .diag-muted { display:block; margin-top:4px; font-size:.75rem; opacity:.68; }
+        #source-diagnostics-card .diag-table-wrap { width:100%; overflow-x:auto; margin:8px 0 18px; }
+        #source-diagnostics-card .diag-table { width:100%; min-width:790px; border-collapse:collapse; }
+        #source-diagnostics-card .diag-table th, #source-diagnostics-card .diag-table td { padding:9px 10px; border-bottom:1px solid var(--border,#1b2536); text-align:left; vertical-align:top; font-size:.84rem; }
+        #source-diagnostics-card .diag-table th { font-weight:600; white-space:nowrap; opacity:.78; }
+        #source-diagnostics-card .diag-table td.diag-detail { max-width:420px; white-space:normal; overflow-wrap:anywhere; opacity:.82; }
+        #source-diagnostics-card .diag-pill { display:inline-block; border-radius:999px; padding:3px 8px; font-size:.75rem; font-weight:600; white-space:nowrap; }
+        #source-diagnostics-card .diag-pill[data-tone="ok"] { color:#7bd88f; background:rgba(123,216,143,.1); }
+        #source-diagnostics-card .diag-pill[data-tone="warn"] { color:#f5a623; background:rgba(245,166,35,.1); }
+        #source-diagnostics-card .diag-pill[data-tone="bad"] { color:#ff6b6b; background:rgba(255,107,107,.1); }
+        #source-diagnostics-card .diag-pill[data-tone="muted"] { color:var(--muted,#9aa4b2); background:rgba(154,164,178,.1); }
+        #source-diagnostics-card #source-diagnostics-message[data-tone="bad"] { color:#ff6b6b; }
+        #source-diagnostics-card #source-diagnostics-message[data-tone="warn"] { color:#f5a623; }
+        #source-diagnostics-card #source-diagnostics-message[data-tone="ok"] { color:#7bd88f; }
+        #source-diagnostics-card .diag-empty { opacity:.75; }
+        @media(max-width:640px) { #source-diagnostics-card .diag-table th, #source-diagnostics-card .diag-table td { padding:7px; font-size:.78rem; } }
+    </style>
+    <div class="card" id="source-diagnostics-card" style="margin-top:14px" hidden>
+        <h3>🩺 Диагностика источников</h3>
+        <p class="lead">Единая сводка WebSocket-потоков, свежести рыночных данных, on-chain RPC и состояния сервера. Доступ только администраторам.</p>
+        <div class="diag-toolbar">
+            <button class="btn btn-primary btn-small" type="button" id="source-diagnostics-refresh">↻ Обновить</button>
+            <span class="meta" id="source-diagnostics-updated">Ещё не обновлялось</span>
+            <span class="meta" id="source-diagnostics-message" role="status" aria-live="polite">Проверяю доступ…</span>
+        </div>
+        <h4>Общее состояние</h4>
+        <div class="diag-summary" id="source-diagnostics-summary"><div class="diag-stat"><span class="diag-stat-label">Диагностика</span><strong class="diag-stat-value">Загрузка…</strong></div></div>
+        <h4>Рынок · WebSocket-источники</h4>
+        <div class="diag-table-wrap">
+            <table class="data diag-table">
+                <thead><tr><th>Источник</th><th>Состояние</th><th>Последнее событие</th><th>Событий/мин*</th><th>Переподключения</th><th>Последняя ошибка / детали</th></tr></thead>
+                <tbody id="source-diagnostics-market-rows"><tr><td colspan="6" class="diag-empty">Загружаю данные…</td></tr></tbody>
+            </table>
+        </div>
+        <h4>On-chain · RPC и API</h4>
+        <div class="diag-table-wrap">
+            <table class="data diag-table">
+                <thead><tr><th>Сеть</th><th>Провайдер</th><th>Состояние</th><th>Последний успех</th><th>Последний запрос</th><th>CU (оценка)</th><th>Ответ провайдера / ошибка</th></tr></thead>
+                <tbody id="source-diagnostics-onchain-rows"><tr><td colspan="7" class="diag-empty">Загружаю данные…</td></tr></tbody>
+            </table>
+        </div>
+        <h4>Сервер и обработка событий</h4>
+        <div class="diag-runtime" id="source-diagnostics-runtime"><div class="diag-stat"><span class="diag-stat-label">Состояние</span><strong class="diag-stat-value">Загрузка…</strong></div></div>
+        <p class="meta">* Скорость событий считается в этой вкладке между обновлениями и становится доступна после второго замера. Для отдельных WebSocket-соединений пока не снимается отдельная сетевая задержка; здесь показываются возраст последнего события, ошибки, переподключения и общая HTTP p95.</p>
     </div>
 
     <div class="grid grid-2">
@@ -763,6 +818,7 @@
 <script src="/static/consent.js?v=consent1"></script>
 <script src="/static/system_settings.js?v=sysset2"></script>
 <script src="/static/whale_admin.js?v=multichain4"></script>
+<script src="/static/source_diagnostics.js?v=diag1"></script>
 <link rel="stylesheet" href="/static/brand.css?v=rebrand1">
 </body>
 </html>

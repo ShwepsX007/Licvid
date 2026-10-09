@@ -28,6 +28,7 @@ jobs:
           pip install httpx httpx2
 
       - name: Install JS deps
+        id: install-js-deps
         run: |
           npm ci
 
@@ -47,7 +48,10 @@ jobs:
           # sys.path (см. также вставку пути в самих тестах).
           PYTHONPATH: .
 
+      # Run browser/DOM regression tests even when an unrelated Python test fails.
+      # This keeps frontend failures visible instead of silently skipping this step.
       - name: Run JS tests (if any) with dom env
+        if: ${{ always() && steps.install-js-deps.outcome == 'success' }}
         run: |
           # JS tests that don't need live server — they use _dom_env to stub gtag
           export NODE_OPTIONS="--require $(pwd)/tests/_dom_env.js"

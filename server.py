@@ -6161,7 +6161,7 @@ async def api_admin_alchemy_test_key(request: Request, identifier: str):
         return {"ok": False, "valid": http_status not in (401, 403), "eth_available": False,
                 "response_ms": round((time.perf_counter() - started) * 1000),
                 "http_status": http_status, "quota_status": quota,
-                "error": "HTTP error", "provider_message": message}
+                "error": "HTTP error"
     except Exception:
         return {"ok": False, "valid": False, "eth_available": False,
                 "response_ms": round((time.perf_counter() - started) * 1000),

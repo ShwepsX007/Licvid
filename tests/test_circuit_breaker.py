@@ -44,6 +44,7 @@ class CircuitBreakerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["state"], "CLOSED")
         self.assertEqual(state["consecutive_failures"], 0)
         self.assertEqual(state["total_successes"], 1)
+        self.assertEqual(state["open_count"], 0, "a recovered incident resets backoff")
         self.assertEqual(state["retry_in_sec"], 0)
 
     async def test_only_one_half_open_probe_is_allowed(self):
@@ -77,6 +78,14 @@ class CircuitBreakerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["state"], "OPEN")
         self.assertEqual(state["open_count"], 2)
         self.assertGreaterEqual(state["retry_in_sec"], 0.03)
+
+    async def test_invalid_json_is_transient(self):
+        breaker = CircuitBreaker("test:provider", failure_threshold=1, recovery_timeout=0.1)
+        with self.assertRaises(ValueError):
+            async with CircuitGuard(breaker):
+                raise __import__("json").JSONDecodeError("bad JSON", "{", 0)
+        self.assertEqual(breaker.snapshot()["state"], "OPEN")
+        self.assertEqual(breaker.snapshot()["last_error"], "JSONDecodeError")
 
     async def test_non_transient_http_errors_do_not_trip_breaker(self):
         breaker = CircuitBreaker("test:provider", failure_threshold=1, recovery_timeout=0.1)

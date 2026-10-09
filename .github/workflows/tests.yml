@@ -56,6 +56,8 @@ jobs:
           # JS tests that don't need live server — they use _dom_env to stub gtag
           export NODE_OPTIONS="--require $(pwd)/tests/_dom_env.js"
           export NODE_PATH=$(pwd)/node_modules
+          # Run the newly added diagnostics regression before unrelated legacy JS tests.
+          node tests/source_diagnostics_page.js
           for f in tests/*.js; do
             base=$(basename "$f")
             case "$base" in

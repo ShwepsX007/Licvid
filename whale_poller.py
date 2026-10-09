@@ -27,6 +27,7 @@ from urllib.parse import quote
 
 import aiohttp
 
+from circuit_breaker import CircuitOpenError, protect_url
 from whale_screener import (EVM_CHAINS, SOLANA_TOKENS, TOKENS, TRANSFER_TOPIC,
                             TRON_TOKENS, WhaleScreener, alchemy_key)
 from alchemy_keys import AlchemyKeyStore, mask_key
@@ -1011,102 +1012,123 @@ class WhalePoller:
                     else:
                         paused = True
                     continue
-                try:
-                    self._reserve(method, key_id, chain=chain)
-                except BudgetExhausted as exc:
-                    if str(exc) == "global":
-                        self._mark_network_failure(chain, "quota_exhausted",
-                                                   "Local monthly CU budget exhausted",
-                                                   key_active=True)
-                        raise
-                    allocation_exhausted = True
-                    self.key_errors[key_id] = ("Квота CU этого ключа исчерпана; "
-                                       "ключ жив, сбор продолжается на "
-                                       "следующем")
-                    continue
-                async with session.post(url, json={
-                        "jsonrpc": "2.0", "id": 1, "method": method, "params": params},
-                        timeout=aiohttp.ClientTimeout(total=25)) as response:
-                    if response.status != 200:
-                        try:
-                            detail = (await response.text(errors="replace"))[:300]
-                        except Exception as exc:
-                            detail = f"[unable to read response body: {type(exc).__name__}]"
-                        detail = self._redact_api_keys(detail, extra_secrets=(key,))
-                        message = f"HTTP {response.status}: {detail}"
-                        if response.status == 400:
-                            self._reset_cursor(chain)
-                            log.error("[Alchemy] HTTP 400 network=%s method=%s response=%s",
-                                      chain, method, detail)
-                        failure = self._record_provider_failure(
-                            chain, key_id, message, http_status=response.status)
-                        if isinstance(failure, RateLimited):
-                            rate_limited.append((failure.retry_after, str(failure)))
-                            continue
-                        if isinstance(failure, AuthError):
-                            auth_errors.append(str(failure))
-                            continue
-                        if isinstance(failure, QuotaExhausted):
-                            quota_errors.append(str(failure))
-                            continue
-                        if offset + 1 < len(keys):
-                            # Неизвестный ответ провайдера — не повод стопить
-                            # сеть: пробуем следующий ключ, а ошибку помним.
-                            last_failure = failure
-                            continue
-                        raise failure
+                async with protect_url("alchemy-rpc", url) as circuit:
                     try:
-                        data = await response.json()
-                    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
-                        raise NetworkError(f"JSON-RPC decode failed: {type(exc).__name__}") from None
-                    if not isinstance(data, dict):
-                        raise NetworkError("Malformed JSON-RPC response")
-                    error = data.get("error")
-                    if error:
-                        if isinstance(error, dict):
-                            code = error.get("code")
-                            rpc_message = str(error.get("message") or "RPC error")[:300]
-                            detail = self._redact_api_keys(
-                                f"JSON-RPC code={code}: {rpc_message}", extra_secrets=(key,))
-                        else:
-                            code = None
-                            detail = self._redact_api_keys(str(error)[:300], extra_secrets=(key,))
-                        failure = self._record_provider_failure(
-                            chain, key_id, detail, http_status=response.status, rpc_code=code)
-                        if isinstance(failure, RateLimited):
-                            rate_limited.append((failure.retry_after, str(failure)))
-                            continue
-                        if isinstance(failure, AuthError):
-                            auth_errors.append(str(failure))
-                            continue
-                        if isinstance(failure, QuotaExhausted):
-                            quota_errors.append(str(failure))
-                            continue
-                        if method in ("eth_getLogs", "alchemy_getAssetTransfers"):
-                            self._reset_cursor(chain)
-                        # Ключ умер — убираем в резерв, чтобы и остальные сети
-                        # следующей попытки шли уже по другому ключу.
-                        if isinstance(failure, AuthError):
-                            self.park_key(key_id, KEY_AUTH_PARK_SEC,
-                                          "Провайдер отверг этот ключ")
-                        elif isinstance(failure, QuotaExhausted):
-                            self.mark_key_exhausted(
-                                key_id, "Провайдер сообщил об исчерпанной квоте CU")
-                        if offset + 1 < attempts:
-                            last_failure = failure
-                            continue
-                        raise failure
-                    if "result" not in data:
-                        raise NetworkError("JSON-RPC response has no result field")
-                    self.key_errors.pop(key_id, None)
-                    self.chain_cooldown.pop(cooldown_key, None)
-                    self.chain_cooldown_status.pop(cooldown_key, None)
-                    self.rate_limit_attempts.pop(cooldown_key, None)
-                    self.note_key_data(key_id)
-                    self._mark_network_success(chain, key_id=key_id)
-                    return data["result"]
+                        self._reserve(method, key_id, chain=chain)
+                    except BudgetExhausted as exc:
+                        circuit.abandon()
+                        if str(exc) == "global":
+                            self._mark_network_failure(chain, "quota_exhausted",
+                                                       "Local monthly CU budget exhausted",
+                                                       key_active=True)
+                            raise
+                        allocation_exhausted = True
+                        self.key_errors[key_id] = ("Квота CU этого ключа исчерпана; "
+                                           "ключ жив, сбор продолжается на "
+                                           "следующем")
+                        continue
+                    async with session.post(url, json={
+                            "jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+                            timeout=aiohttp.ClientTimeout(total=25)) as response:
+                        if response.status != 200:
+                            try:
+                                detail = (await response.text(errors="replace"))[:300]
+                            except Exception as exc:
+                                detail = f"[unable to read response body: {type(exc).__name__}]"
+                            detail = self._redact_api_keys(detail, extra_secrets=(key,))
+                            message = f"HTTP {response.status}: {detail}"
+                            if response.status == 400:
+                                self._reset_cursor(chain)
+                                log.error("[Alchemy] HTTP 400 network=%s method=%s response=%s",
+                                          chain, method, detail)
+                            failure = self._record_provider_failure(
+                                chain, key_id, message, http_status=response.status)
+                            if isinstance(failure, (RateLimited, AuthError, QuotaExhausted)):
+                                circuit.neutral()
+                            elif response.status in (408, 425) or response.status >= 500:
+                                circuit.failure(f"HTTP {response.status}")
+                            else:
+                                circuit.neutral()
+                            if isinstance(failure, RateLimited):
+                                rate_limited.append((failure.retry_after, str(failure)))
+                                continue
+                            if isinstance(failure, AuthError):
+                                auth_errors.append(str(failure))
+                                continue
+                            if isinstance(failure, QuotaExhausted):
+                                quota_errors.append(str(failure))
+                                continue
+                            if offset + 1 < len(keys):
+                                # Неизвестный ответ провайдера — не повод стопить
+                                # сеть: пробуем следующий ключ, а ошибку помним.
+                                last_failure = failure
+                                continue
+                            raise failure
+                        try:
+                            data = await response.json()
+                        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+                            circuit.failure(f"JSON-RPC decode failed ({type(exc).__name__})")
+                            raise NetworkError(f"JSON-RPC decode failed: {type(exc).__name__}") from None
+                        if not isinstance(data, dict):
+                            circuit.failure("Malformed JSON-RPC response")
+                            raise NetworkError("Malformed JSON-RPC response")
+                        error = data.get("error")
+                        if error:
+                            if isinstance(error, dict):
+                                code = error.get("code")
+                                rpc_message = str(error.get("message") or "RPC error")[:300]
+                                detail = self._redact_api_keys(
+                                    f"JSON-RPC code={code}: {rpc_message}", extra_secrets=(key,))
+                            else:
+                                code = None
+                                detail = self._redact_api_keys(str(error)[:300], extra_secrets=(key,))
+                            failure = self._record_provider_failure(
+                                chain, key_id, detail, http_status=response.status, rpc_code=code)
+                            if isinstance(failure, (RateLimited, AuthError, QuotaExhausted)):
+                                circuit.neutral()
+                            else:
+                                circuit.failure("JSON-RPC upstream error")
+                            if isinstance(failure, RateLimited):
+                                rate_limited.append((failure.retry_after, str(failure)))
+                                continue
+                            if isinstance(failure, AuthError):
+                                auth_errors.append(str(failure))
+                                continue
+                            if isinstance(failure, QuotaExhausted):
+                                quota_errors.append(str(failure))
+                                continue
+                            if method in ("eth_getLogs", "alchemy_getAssetTransfers"):
+                                self._reset_cursor(chain)
+                            # Ключ умер — убираем в резерв, чтобы и остальные сети
+                            # следующей попытки шли уже по другому ключу.
+                            if isinstance(failure, AuthError):
+                                self.park_key(key_id, KEY_AUTH_PARK_SEC,
+                                              "Провайдер отверг этот ключ")
+                            elif isinstance(failure, QuotaExhausted):
+                                self.mark_key_exhausted(
+                                    key_id, "Провайдер сообщил об исчерпанной квоте CU")
+                            if offset + 1 < attempts:
+                                last_failure = failure
+                                continue
+                            raise failure
+                        if "result" not in data:
+                            circuit.failure("Malformed JSON-RPC response")
+                            raise NetworkError("JSON-RPC response has no result field")
+                        self.key_errors.pop(key_id, None)
+                        self.chain_cooldown.pop(cooldown_key, None)
+                        self.chain_cooldown_status.pop(cooldown_key, None)
+                        self.rate_limit_attempts.pop(cooldown_key, None)
+                        self.note_key_data(key_id)
+                        self._mark_network_success(chain, key_id=key_id)
+                        return data["result"]
+                except CircuitOpenError as exc:
+                self._mark_network_failure(
+                    chain, "circuit_open", str(exc), http_status=503,
+                    retry_after=exc.retry_after, key_active=True)
+                raise NetworkError(str(exc)) from None
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                 # Never include aiohttp exception URLs; production paths contain keys.
+                circuit.failure(type(exc).__name__)
                 failure = NetworkError(type(exc).__name__)
                 self._mark_network_failure(chain, "network_error", str(failure), key_active=True)
                 raise failure from None

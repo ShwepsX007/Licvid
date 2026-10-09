@@ -1834,7 +1834,7 @@ class WhalePoller:
                             failure = NetworkError(f"Solana RPC JSON decode failed: {type(exc).__name__}")
                             self._mark_network_failure("SOLANA", "network_error", str(failure))
                             raise failure from None
-                except CircuitOpenError as exc:
+            except CircuitOpenError as exc:
                 self._mark_network_failure(
                     "SOLANA", "circuit_open", str(exc), http_status=503,
                     retry_after=exc.retry_after, key_active=True)

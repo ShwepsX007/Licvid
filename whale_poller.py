@@ -1084,10 +1084,10 @@ class WhalePoller:
                                 detail = self._redact_api_keys(str(error)[:300], extra_secrets=(key,))
                             failure = self._record_provider_failure(
                                 chain, key_id, detail, http_status=response.status, rpc_code=code)
-                            if isinstance(failure, (RateLimited, AuthError, QuotaExhausted)):
-                                circuit.neutral()
-                            else:
-                                circuit.failure("JSON-RPC upstream error")
+                            # HTTP 200 means the provider answered. The existing
+                            # RPC/key classifier owns method errors; they aren't
+                            # transport failures and must not open this circuit.
+                            circuit.neutral()
                             if isinstance(failure, RateLimited):
                                 rate_limited.append((failure.retry_after, str(failure)))
                                 continue
@@ -1774,58 +1774,73 @@ class WhalePoller:
                     else:
                         paused = True
                     continue
-                try:
-                    self._reserve("solana_" + method, key_id, chain="SOLANA")
-                except BudgetExhausted as exc:
-                    if str(exc) == "global":
-                        self._mark_network_failure("SOLANA", "quota_exhausted",
-                                                   "Local monthly CU budget exhausted",
-                                                   key_active=True)
-                        raise
-                    allocation_exhausted = True
-                    self.key_errors[key_id] = ("Квота CU этого ключа исчерпана; "
-                                       "ключ жив, сбор продолжается на "
-                                       "следующем")
-                    continue
-                async with session.post(url, json={"jsonrpc": "2.0", "id": 1,
-                                                   "method": method, "params": params},
-                                        timeout=aiohttp.ClientTimeout(total=25)) as response:
-                    if response.status != 200:
-                        try:
-                            body = (await response.text(errors="replace"))[:300]
-                        except Exception as exc:
-                            body = f"[unable to read response body: {type(exc).__name__}]"
-                        body = self._redact_api_keys(body, extra_secrets=(key,))
-                        detail = (f"HTTP 429: {body}" if response.status == 429 else
-                                  f"Solana RPC HTTP {response.status}: {body}")
-                        failure = self._record_provider_failure(
-                            "SOLANA", key_id, detail, http_status=response.status)
-                        if isinstance(failure, RateLimited):
-                            rate_limited.append((failure.retry_after, str(failure)))
-                            continue
-                        if isinstance(failure, AuthError):
-                            auth_errors.append(str(failure))
-                            continue
-                        if isinstance(failure, QuotaExhausted):
-                            quota_errors.append(str(failure))
-                            continue
-                        if isinstance(failure, AuthError):
-                            self.park_key(key_id, KEY_AUTH_PARK_SEC,
-                                          "Провайдер отверг этот ключ (Solana)")
-                        elif isinstance(failure, QuotaExhausted):
-                            self.mark_key_exhausted(
-                                key_id, "Провайдер сообщил об исчерпанной квоте CU")
-                        if offset + 1 < attempts:
-                            last_failure = failure
-                            continue
-                        raise failure
+                async with protect_url("alchemy-rpc", url) as circuit:
                     try:
-                        payload = await response.json()
-                    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
-                        failure = NetworkError(f"Solana RPC JSON decode failed: {type(exc).__name__}")
-                        self._mark_network_failure("SOLANA", "network_error", str(failure))
-                        raise failure from None
+                        self._reserve("solana_" + method, key_id, chain="SOLANA")
+                    except BudgetExhausted as exc:
+                        circuit.abandon()
+                        if str(exc) == "global":
+                            self._mark_network_failure("SOLANA", "quota_exhausted",
+                                                       "Local monthly CU budget exhausted",
+                                                       key_active=True)
+                            raise
+                        allocation_exhausted = True
+                        self.key_errors[key_id] = ("Квота CU этого ключа исчерпана; "
+                                           "ключ жив, сбор продолжается на "
+                                           "следующем")
+                        continue
+                    async with session.post(url, json={"jsonrpc": "2.0", "id": 1,
+                                                       "method": method, "params": params},
+                                            timeout=aiohttp.ClientTimeout(total=25)) as response:
+                        if response.status != 200:
+                            try:
+                                body = (await response.text(errors="replace"))[:300]
+                            except Exception as exc:
+                                body = f"[unable to read response body: {type(exc).__name__}]"
+                            body = self._redact_api_keys(body, extra_secrets=(key,))
+                            detail = (f"HTTP 429: {body}" if response.status == 429 else
+                                      f"Solana RPC HTTP {response.status}: {body}")
+                            failure = self._record_provider_failure(
+                                "SOLANA", key_id, detail, http_status=response.status)
+                            if isinstance(failure, (RateLimited, AuthError, QuotaExhausted)):
+                                circuit.neutral()
+                            elif response.status in (408, 425) or response.status >= 500:
+                                circuit.failure(f"HTTP {response.status}")
+                            else:
+                                circuit.neutral()
+                            if isinstance(failure, RateLimited):
+                                rate_limited.append((failure.retry_after, str(failure)))
+                                continue
+                            if isinstance(failure, AuthError):
+                                auth_errors.append(str(failure))
+                                continue
+                            if isinstance(failure, QuotaExhausted):
+                                quota_errors.append(str(failure))
+                                continue
+                            if isinstance(failure, AuthError):
+                                self.park_key(key_id, KEY_AUTH_PARK_SEC,
+                                              "Провайдер отверг этот ключ (Solana)")
+                            elif isinstance(failure, QuotaExhausted):
+                                self.mark_key_exhausted(
+                                    key_id, "Провайдер сообщил об исчерпанной квоте CU")
+                            if offset + 1 < attempts:
+                                last_failure = failure
+                                continue
+                            raise failure
+                        try:
+                            payload = await response.json()
+                        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+                            circuit.failure(f"Solana RPC JSON decode failed ({type(exc).__name__})")
+                            failure = NetworkError(f"Solana RPC JSON decode failed: {type(exc).__name__}")
+                            self._mark_network_failure("SOLANA", "network_error", str(failure))
+                            raise failure from None
+                except CircuitOpenError as exc:
+                self._mark_network_failure(
+                    "SOLANA", "circuit_open", str(exc), http_status=503,
+                    retry_after=exc.retry_after, key_active=True)
+                raise NetworkError(str(exc)) from None
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                # The guard records transport failures before this handler runs.
                 failure = NetworkError(f"Solana RPC {type(exc).__name__}")
                 self._mark_network_failure("SOLANA", "network_error", str(failure))
                 raise failure from None
@@ -2605,12 +2620,13 @@ class WhalePoller:
         if api_key:
             headers["TRON-PRO-API-KEY"] = api_key
         try:
-            async with session.get(url, params=params, headers=headers,
-                                   timeout=aiohttp.ClientTimeout(total=20)) as response:
-                if response.status != 200:
-                    detail = self._trongrid_safe_text(await response.text())[:180]
-                    raise PollError(f"TronGrid HTTP {response.status}: {detail}")
-                payload = await response.json()
+            async with protect_url("trongrid-rest", url):
+                async with session.get(url, params=params, headers=headers,
+                                       timeout=aiohttp.ClientTimeout(total=20)) as response:
+                    if response.status != 200:
+                        detail = self._trongrid_safe_text(await response.text())[:180]
+                        raise PollError(f"TronGrid HTTP {response.status}: {detail}")
+                    payload = await response.json()
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
             detail = self._trongrid_safe_text(f"{type(exc).__name__}: {exc}")
             raise PollError(detail[:240]) from None
@@ -2624,12 +2640,13 @@ class WhalePoller:
         if api_key:
             headers["TRON-PRO-API-KEY"] = api_key
         try:
-            async with session.post(url, json={}, headers=headers,
-                                    timeout=aiohttp.ClientTimeout(total=20)) as response:
-                if response.status != 200:
-                    detail = self._trongrid_safe_text(await response.text())[:180]
-                    raise PollError(f"TronGrid HTTP {response.status}: {detail}")
-                payload = await response.json()
+            async with protect_url("trongrid-rest", url):
+                async with session.post(url, json={}, headers=headers,
+                                        timeout=aiohttp.ClientTimeout(total=20)) as response:
+                    if response.status != 200:
+                        detail = self._trongrid_safe_text(await response.text())[:180]
+                        raise PollError(f"TronGrid HTTP {response.status}: {detail}")
+                    payload = await response.json()
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
             detail = self._trongrid_safe_text(f"{type(exc).__name__}: {exc}")
             raise PollError(detail[:240]) from None

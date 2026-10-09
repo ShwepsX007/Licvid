@@ -843,6 +843,51 @@ def _fmt_id() -> str:
 # =============================================================================
 #  Клиенты WebSocket
 # =============================================================================
+# Приоритеты исходящих кадров: меньше число — важнее кадр. Когда личная
+# очередь зрителя переполняется, давление сбрасывается по этим классам:
+# сначала выбрасываются самые старые информационные кадры, затем статистика,
+# затем свечи, затем промежуточные цены — ликвидации не выбрасываются никогда.
+PRIO_CRITICAL = 0    # ликвидации (liqs) и неизвестные типы: терять нельзя
+PRIO_PRICE = 1       # prices / tick: свежий срез важнее промежуточных
+PRIO_CANDLE = 2      # candle / candles: кадры графика
+PRIO_STATS = 3       # stats / flow_all: срез замещается более новым
+PRIO_INFO = 4        # whale_tx / чат: информационное, терпит первым
+
+
+def _frame_class(msg: dict) -> Tuple[int, Optional[tuple]]:
+    """Класс кадра для очереди клиента: ``(приоритет, ключ слияния)``.
+
+    Ключ задают только «срезовые» кадры — весь кадр описывает состояние на
+    момент времени, и пока старый ещё не ушёл в сокет, новый срез того же
+    ключа замещает его (конфлейт, см. ``Client._conflate``): отставший
+    зритель догоняет сразу последним состоянием, а не очередью из ста
+    промежуточных. Уникальные события (ликвидации, чат, киты) ключа не
+    имеют — схлопывать или выбрасывать их нельзя.
+
+    Неизвестный тип — критический: что не научились классифицировать,
+    выбрасывать нельзя.
+    """
+    t = msg.get("type")
+    if t == "liqs":
+        return PRIO_CRITICAL, None
+    if t == "prices":
+        return PRIO_PRICE, ("prices",)
+    if t == "tick":
+        return PRIO_PRICE, ("tick", msg.get("symbol"), msg.get("tf"))
+    if t == "candle":
+        return PRIO_CANDLE, ("candle", msg.get("symbol"), msg.get("tf"))
+    if t == "candles":
+        return PRIO_CANDLE, ("candles", msg.get("symbol"), msg.get("tf"))
+    if t == "stats":
+        return PRIO_STATS, ("stats",)
+    if t == "flow_all":
+        return PRIO_STATS, ("flow_all",)
+    if t in ("whale_tx", "terminal_chat", "terminal_chat_del",
+             "service_chat", "chat_dm", "chat_dm_room"):
+        return PRIO_INFO, None
+    return PRIO_CRITICAL, None
+
+
 class Client:
     def __init__(self, ws: WebSocket):
         self.ws = ws
@@ -862,19 +907,27 @@ class Client:
         # Очередь исходящих кадров: рассылка кладёт готовый кадр и уходит, а
         # в сокет его пишет отдельная задача клиента. Забитый TCP-буфер одного
         # зрителя больше не держит event loop (а с ним и все HTTP-запросы)
-        # секундами — см. _pump().
-        self.out: Deque[str] = deque()
+        # секундами — см. _pump(). Каждый кадр лежит записью
+        # (приоритет, ключ слияния, текст): приоритет решает, что сбрасывать
+        # при переполнении (см. offer), ключ — какой старый кадр замещается
+        # свежим срезом.
+        self.out: Deque[Tuple[int, Optional[tuple], str]] = deque()
         self.out_bytes = 0
-        self.dropped_frames = 0
+        self.dropped_frames = 0      # потеряно при переполнении/смерти очереди
+        self.shed_frames = 0         # сняты давлением (клиент жив, кадров жалко)
+        self.conflated_frames = 0    # замещены более свежим срезом того же ключа
         self._sending = False       # кадр уже вынут из очереди и идёт в сокет
         self._out_wake: Optional[asyncio.Event] = None
         self._pump_task: Optional[asyncio.Task] = None
         self._pump_loop = None
 
     # Капля медленного зрителя: столько кадров/байт он может накопить, пока
-    # его писатель борется с сетью. Превысили — клиент безнадёжно отстал и
-    # выкидывается (фронт переподключится и пересинхронизируется), иначе
-    # очередь съела бы память воркера.
+    # его писатель борется с сетью. Превысили — работает сброс давления по
+    # приоритетам (см. offer): старые кадры наименее важных классов
+    # выбрасываются, и только когда и это не помогает (критическим кадрам
+    # места нет) клиент признаётся безнадёжно отставшим и выкидывается —
+    # фронт переподключится и пересинхронизируется, иначе очередь съела бы
+    # память воркера.
     OUT_MAX_FRAMES = 200
     OUT_MAX_BYTES = 512 * 1024
 
@@ -936,35 +989,139 @@ class Client:
             self._out_wake = asyncio.Event()
         return self._out_wake
 
-    def offer(self, frame: str) -> bool:
+    def offer(self, frame: str, prio: int = PRIO_CRITICAL,
+              key: Optional[tuple] = None) -> bool:
         """Положить готовый кадр в очередь клиента, не ожидая сокет.
 
-        Возвращает False, если клиент мёртв или безнадёжно отстал: вызывающий
-        (``Hub.broadcast``) выкинет его из хаба. Именно это убирает хвост
-        p95 в секундах: раньше рассылка стояла в ``await send_text`` на
+        Возвращает False, только если клиент мёртв или безнадёжно отстал:
+        вызывающий (``Hub.broadcast``) выкинет его из хаба. Именно это убирает
+        хвост p95 в секундах: раньше рассылка стояла в ``await send_text`` на
         каждом зрителе по очереди, и один забитый TCP-буфер держал event loop
         до ``SEND_TIMEOUT`` — всё это время HTTP-запросы просто ждали в
         очереди цикла.
+
+        Очередь ограничена (``OUT_MAX_FRAMES`` / ``OUT_MAX_BYTES``), и при
+        нехватке места работает сброс давления по приоритетам: сначала
+        выбрасываются самые старые кадры менее важных классов
+        (info → stats → candle → price), затем — свой класс. Критические
+        кадры (ликвидации) не выбрасываются никогда. Если места всё равно
+        нет:
+
+        * критический кадр — зритель отстал безнадёжно, отключаем его
+          (фронт переподключится, init-снимок вернёт последние события);
+        * любой другой — теряем сам входящий кадр, но клиент остаётся жив:
+          следующий срез статистики/цен придёт через секунду-другую, а
+          ликвидации не теряются.
+
+        ``key`` — ключ слияния срезовых кадров (см. ``_frame_class``): новый
+        срез замещает ожидающий старый, очередь медленного зрителя не
+        раздувается сотней промежуточных состояний.
         """
         if self.init_pending:
             return True  # не отправляем фоновый кадр до init
         if not self.alive:
             return False
-        if len(self.out) >= self.OUT_MAX_FRAMES or \
-                self.out_bytes + len(frame) > self.OUT_MAX_BYTES:
-            self.dropped_frames += len(self.out)
-            self.out.clear()
-            self.out_bytes = 0
-            self.alive = False
-            log.warning("WS-клиент отстал: очередь исходящих переполнена "
-                        "(>%d кадров или %d КБ) — отключаем, фронт "
-                        "переподключится", self.OUT_MAX_FRAMES,
-                        self.OUT_MAX_BYTES // 1024)
-            return False
-        self.out.append(frame)
+        if key is not None:
+            self._conflate(key)
+        if not self._fits(len(frame)):
+            if len(frame) > self.OUT_MAX_BYTES:
+                # Аномалия: кадр больше капы очереди целиком (пачки
+                # ликвидаций ограничены LIQ_WRITE_MAX, сюда попасть можно
+                # только сбитой настройкой). Теряем сам кадр — события
+                # остаются в истории и вернутся через REST/init, — но не
+                # отключаем зрителя и не сжигаем его очередь ради него.
+                self.shed_frames += 1
+                log.warning("WS-кадр %d КБ больше капы очереди (%d КБ) — "
+                            "кадр отброшен, соединение сохранено",
+                            len(frame) // 1024, self.OUT_MAX_BYTES // 1024)
+                return True
+            shed = self._shed_room(prio, len(frame))
+            if not shed and prio == PRIO_CRITICAL:
+                # Сбрасывать нечего, а кадр критический: зритель копит
+                # ликвидации быстрее, чем его сеть их забирает.
+                self.dropped_frames += len(self.out)
+                self.out.clear()
+                self.out_bytes = 0
+                self.alive = False
+                log.warning("WS-клиент отстал: очередь исходящих переполнена "
+                            "критическими кадрами (>%d кадров или %d КБ), "
+                            "сбрасывать нечего — отключаем, фронт "
+                            "переподключится", self.OUT_MAX_FRAMES,
+                            self.OUT_MAX_BYTES // 1024)
+                return False
+            if not self._fits(len(frame)):
+                # Очередь полна кадров не менее важных — жертвуем входящим:
+                # это срез (цена/статистика), следующий придёт сам, а
+                # уже поставленные в очередь кадры не трогаем
+                self.shed_frames += 1
+                return True
+        self.out.append((prio, key, frame))
         self.out_bytes += len(frame)
         self._wake().set()
         return True
+
+    def _fits(self, size: int) -> bool:
+        return (len(self.out) < self.OUT_MAX_FRAMES and
+                self.out_bytes + size <= self.OUT_MAX_BYTES)
+
+    def _conflate(self, key: tuple) -> None:
+        """Свежий срез того же ключа замещает ожидающий отправки старый.
+
+        Старая запись убирается, новая встаёт в хвост (см. offer): порядок
+        оставшихся кадров не меняется, а отставший зритель не батонит
+        промежуточные срезы — догоняет сразу последним состоянием. Инвариант:
+        в очереди не больше одной записи на ключ.
+        """
+        for rec in self.out:
+            if rec[1] == key:
+                self.out.remove(rec)
+                self.out_bytes -= len(rec[2])
+                self.conflated_frames += 1
+                return
+
+    def _shed_room(self, prio: int, size: int) -> bool:
+        """Освободить очередь под кадр класса ``prio`` размером ``size``.
+
+        Жертвы выбираются по классам, от наименее важного: сначала самый
+        старый кадр наименее важного из сбрасываемых классов (info раньше
+        stats, stats раньше candle и цен), и только когда классов хуже
+        входящего нет — свой класс: старое промежуточное состояние не стоит
+        свежего. Критические кадры не трогаем никогда. Возвращает False, если
+        сбрасывать нечего (или кадр не влезает даже в пустую очередь — тогда
+        ради него ничего не сбрасываем) — решение об отключении или потере
+        входящего кадра остаётся вызывающему (offer).
+        """
+        if size > self.OUT_MAX_BYTES:
+            return False   # не влезает даже в пустую очередь
+        while not self._fits(size):
+            victim = self._shed_victim(prio)
+            if victim is None:
+                return False
+            self.out.remove(victim)
+            self.out_bytes -= len(victim[2])
+            self.shed_frames += 1
+        return True
+
+    def _shed_victim(self, prio: int):
+        """Кандидат на сброс: старейший кадр наименее важного класса.
+
+        Ищем среди кадров строго менее важных, чем входящий (``rec.prio >
+        prio``); если таких нет и входящий не критический — свой класс.
+        None означает «сбрасывать нечего».
+        """
+        worst = -1
+        for rec in self.out:
+            p = rec[0]
+            if p > prio and p > worst:
+                worst = p
+        if worst < 0 and prio != PRIO_CRITICAL:
+            worst = prio
+        if worst < 0:
+            return None
+        for rec in self.out:
+            if rec[0] == worst:
+                return rec
+        return None
 
     async def _pump(self) -> None:
         """Единственный писатель очереди: порядок кадров у клиента сохранён."""
@@ -978,7 +1135,8 @@ class Client:
                     except asyncio.CancelledError:
                         return
                     continue
-            frame = self.out.popleft()
+            rec = self.out.popleft()
+            frame = rec[2]
             self.out_bytes -= len(frame)
             self._sending = True
             try:
@@ -986,7 +1144,7 @@ class Client:
                                        timeout=self.SEND_TIMEOUT)
                 _metrics_ws_send()
             except asyncio.CancelledError:
-                self.out.appendleft(frame)
+                self.out.appendleft(rec)
                 self.out_bytes += len(frame)
                 raise
             except Exception as e:          # noqa: BLE001
@@ -1076,11 +1234,13 @@ class Hub:
         # Кадр сериализуется ОДИН раз на всех получателей: рассылка свечей и
         # статистики — десятки килобайт, и при 50 зрителях прежняя схема
         # (json.dumps внутри send каждого клиента) жгла 50× того же CPU на
-        # единственном воркере.
+        # единственном воркере. Класс кадра (приоритет и ключ слияния) тоже
+        # определяется один раз на всю рассылку.
         frame = json_dumps_text(msg)
+        prio, key = _frame_class(msg)
         dead = []
         for c in targets:
-            if not await self._deliver(c, msg, frame):
+            if not await self._deliver(c, msg, frame, prio, key):
                 dead.append(c)
         if dead:
             async with self._lock:
@@ -1099,21 +1259,19 @@ class Hub:
             except Exception as e:               # noqa: BLE001
                 log.debug("hub: писатель очереди не остановился: %s", e)
 
-    async def _deliver(self, c, msg: dict, frame: str) -> bool:
+    async def _deliver(self, c, msg: dict, frame: str,
+                       prio: int = PRIO_CRITICAL,
+                       key: Optional[tuple] = None) -> bool:
         """Положить кадр клиенту: в его очередь, а не в await на весь фан-аут.
 
         Порядок кадров у каждого зрителя сохраняет его собственный писатель
         (``Client._pump``), поэтому рассылка не обязана ждать сокет: медленный
-        клиент копит кадры у себя и отключается по переполнению очереди, а не
-        держит воркер (и всех остальных) до таймаута отправки.
+        клиент копит кадры у себя, и очередь сбрасывает давление по
+        приоритетам (``Client.offer``), а не отключает его на первом же
+        переполнении.
         """
         try:
-            offer = getattr(c, "offer", None)
-            if callable(offer):
-                c.start_pump()
-                return bool(offer(frame))
-            # двойники в тестах без очереди — прежняя адресная отправка
-            return bool(await c.send(msg, text=frame))
+            return bool(await _offer_or_send(c, msg, frame, prio, key))
         except Exception as e:                   # noqa: BLE001
             # один сломанный сокет не должен обрывать рассылку остальным:
             # на единственном воркере это минус свечи/ликвидации у всех
@@ -1122,6 +1280,47 @@ class Hub:
 
     def viewed_pairs(self) -> Set[tuple]:
         return {(c.chart_symbol, c.tf) for c in self.clients}
+
+
+async def _offer_or_send(c, msg: Optional[dict], frame: str,
+                         prio: int = PRIO_CRITICAL,
+                         key: Optional[tuple] = None) -> bool:
+    """Положить готовый кадр клиенту через его личную очередь.
+
+    Все рассылочные пути (``Hub.broadcast``, ликвидации, stats, потоки)
+    идут через одну функцию, чтобы приоритеты и слияние срезов действовали
+    везде одинаково. Двойники клиентов из тестов без очереди получают
+    прежнюю адресную отправку. Возврат False — клиент мёртв или безнадёжно
+    отстал: вызывающий убирает его из хаба (``_drop_clients``).
+    """
+    offer = getattr(c, "offer", None)
+    if callable(offer):
+        start = getattr(c, "start_pump", None)
+        if callable(start):
+            start()
+        return bool(offer(frame, prio, key))
+    try:
+        return bool(await c.send(msg, text=frame))
+    except TypeError:
+        # двойники в тестах принимают только сообщение
+        return bool(await c.send(msg))
+
+
+async def _drop_clients(dead: list) -> None:
+    """Убрать умерших/отставших клиентов из хаба и остановить их писателей."""
+    if not dead:
+        return
+    lock = getattr(hub, "_lock", None)
+    clients = getattr(hub, "clients", None)
+    if lock is not None and clients is not None:
+        try:
+            async with lock:
+                for c in dead:
+                    clients.discard(c)
+        except Exception as e:               # noqa: BLE001 — двойники хаба
+            log.debug("hub: убрать отставших не вышло: %s", e)
+    for c in dead:
+        await Hub._stop_writer(c)
 
 
 hub = Hub()
@@ -1195,27 +1394,42 @@ def _latency_p95_ms() -> Optional[float]:
 
 
 def _ws_queue_stats(clients=None) -> Dict[str, int]:
-    """Глубина очередей исходящих WS-кадров.
+    """Глубина очередей исходящих WS-кадров и работа сброса давления.
 
     Если кадры копятся — зрители не успевают читать, и раньше это означало бы
     паузы воркера на всю рассылку; теперь очередь локальна для клиента, а
     метрика показывает, кто именно отстаёт (``ws_slow_clients`` — те, у кого в
     очереди больше 10 кадров).
+
+    ``ws_shed_frames`` — сколько кадров снято давлением (зритель жив,
+    недошли только срезы статистики/цен), ``ws_conflated_frames`` — сколько
+    срезов замещено более свежими, ``ws_dropped_frames`` — потеряно с
+    отключением безнадёжно отставших. Растут первые два при стабильном
+    ``ws_dropped_frames`` — система переживает медленных зрителей без
+    разрывов соединений.
     """
     frames = 0
     nbytes = 0
     worst = 0
     slow = 0
+    shed = 0
+    conflated = 0
+    dropped = 0
     for c in list(hub.clients if clients is None else clients):
         n = len(getattr(c, "out", ()) or ())
         frames += n
         nbytes += int(getattr(c, "out_bytes", 0) or 0)
+        shed += int(getattr(c, "shed_frames", 0) or 0)
+        conflated += int(getattr(c, "conflated_frames", 0) or 0)
+        dropped += int(getattr(c, "dropped_frames", 0) or 0)
         if n > worst:
             worst = n
         if n > 10:
             slow += 1
     return {"ws_send_queue_frames": frames, "ws_send_queue_bytes": nbytes,
-            "ws_send_queue_worst_frames": worst, "ws_slow_clients": slow}
+            "ws_send_queue_worst_frames": worst, "ws_slow_clients": slow,
+            "ws_shed_frames": shed, "ws_conflated_frames": conflated,
+            "ws_dropped_frames": dropped}
 
 
 def _metrics_prune() -> None:
@@ -2014,6 +2228,12 @@ async def send_liquidations(batch: List[dict]):
     получают один и тот же кадр: при 50 зрителях прежняя схема кодировала одну
     и ту же пачку 50 раз. Замер на всплеске 200 событий и 50 клиентах:
     10.4 мс → 3.1 мс (×3.3) и 200 кадров вместо 10000.
+
+    Кадр уходит в личную очередь каждого зрителя с наивысшим приоритетом
+    (``PRIO_CRITICAL``): рассылка не ждёт чужой сокет (раньше один медленный
+    зритель держал воркер до ``SEND_TIMEOUT`` на каждой пачке), а отставший
+    зритель не теряет ликвидации — его очередь сбрасывает давление на менее
+    важных кадрах (статистика, цены), но не на этой пачке.
     """
     if not batch:
         return
@@ -2026,6 +2246,7 @@ async def send_liquidations(batch: List[dict]):
         key = (round(float(getattr(c, "min_usd", 0.0) or 0.0), 2),
                str(getattr(c, "exchange", "ALL") or "ALL"))
         groups.setdefault(key, []).append(c)
+    dead = []
     for (min_usd, exch), members in groups.items():
         rows = [e for e in batch
                 if float(e.get("usd") or 0.0) >= min_usd
@@ -2035,11 +2256,9 @@ async def send_liquidations(batch: List[dict]):
         msg = {"type": "liqs", "data": rows}
         frame = json_dumps_text(msg)
         for c in members:
-            try:
-                await c.send(msg, frame)
-            except TypeError:
-                # двойники клиентов в тестах принимают только сообщение
-                await c.send(msg)
+            if not await _offer_or_send(c, msg, frame, PRIO_CRITICAL, None):
+                dead.append(c)
+    await _drop_clients(dead)
 
 
 def viewed_tfs(symbol: str) -> Set[int]:
@@ -4184,6 +4403,10 @@ async def flow_broadcaster():
     """Рассылка минутных потоков тем, у кого лента CVD/OI в режиме «ВСЕ».
 
     Пока таких клиентов нет, ничего не считаем: строки собираются по запросу.
+    Кадр — срез состояния (``PRIO_STATS`` + ключ слияния): он идёт в личную
+    очередь зрителя и не ждёт его сокет, а у отставшего замещает ожидающий
+    старый срез — зритель догоняет последним состоянием, а не пачкой
+    промежуточных.
     """
     while True:
         try:
@@ -4193,8 +4416,13 @@ async def flow_broadcaster():
             if not clients:
                 continue
             payload = flow_snapshot()
+            frame = json_dumps_text(payload)   # одна сериализация на всех
+            dead = []
             for c in clients:
-                await c.send(payload)
+                if not await _offer_or_send(c, payload, frame,
+                                            PRIO_STATS, ("flow_all",)):
+                    dead.append(c)
+            await _drop_clients(dead)
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -4252,13 +4480,27 @@ async def stats_broadcaster():
             health = health_summary()
             async with hub._lock:
                 clients = list(hub.clients)
+            # Кадр сериализуется раз на символ (у зрителей одного символа он
+            # одинаковый), идёт в личную очередь с приоритетом stats и ключом
+            # слияния: отставший зритель получает последний срез, а рассылка
+            # не стоит в await на его сокете.
+            payloads: Dict[str, Tuple[dict, str]] = {}
+            dead = []
             for i, c in enumerate(clients):
-                key = c.symbol
-                if key not in cache:
-                    cache[key] = await compute_stats_async(key)
-                await c.send({"type": "stats", "data": cache[key], "health": health})
+                sym = c.symbol
+                if sym not in cache:
+                    cache[sym] = await compute_stats_async(sym)
+                pair = payloads.get(sym)
+                if pair is None:
+                    m = {"type": "stats", "data": cache[sym], "health": health}
+                    pair = (m, json_dumps_text(m))
+                    payloads[sym] = pair
+                msg, frame = pair
+                if not await _offer_or_send(c, msg, frame, PRIO_STATS, ("stats",)):
+                    dead.append(c)
                 if (i + 1) % 5 == 0:
                     await asyncio.sleep(0.01)
+            await _drop_clients(dead)
         except asyncio.CancelledError:
             break
         except Exception as e:

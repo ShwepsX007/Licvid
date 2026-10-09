@@ -7,9 +7,19 @@
 * кадр уходит в **личную очередь** зрителя и пишется его же задачей: один
   забитый сокет больше не держит event loop (и все HTTP-запросы) до таймаута
   отправки — именно это давало p95 в секундах при серверном p95 в 6 мс;
-* порядок кадров у каждого клиента сохранён (свой писатель, FIFO), а отставший
-  сверх предела зритель отключается вместо того, чтобы есть память воркера;
-* глубина очередей видна в мониторинге (``_ws_queue_stats``);
+* очередь зрителя — ограниченная и **приоритетная**: при переполнении
+  сначала сбрасываются старые информационные кадры, затем статистика,
+  свечи и промежуточные цены, а ликвидации не теряются никогда; срезовые
+  кадры (prices/tick/candle/stats) сливаются — зритель догоняет последним
+  состоянием, а не очередью промежуточных;
+* рассылка ликвидаций не ждёт чужой сокет: пачка ложится в очередь с
+  наивысшим приоритетом (раньше один медленный зритель держал конвейер
+  ликвидаций до ``SEND_TIMEOUT`` на каждой пачке);
+* порядок кадров у каждого клиента сохранён (свой писатель, FIFO), а
+  отставший сверх предела зритель отключается вместо того, чтобы есть
+  память воркера;
+* глубина очередей и работа сброса давления видны в мониторинге
+  (``_ws_queue_stats``);
 * мёртвый/медленный клиент помечается и выпадает из хаба, остальные получают
   кадр;
 * сторож пауз event loop (``loop_lag_watchdog``) замечает, когда воркер
@@ -143,8 +153,10 @@ class BroadcastFanOut(unittest.TestCase):
         self.hub.clients = {_client(), _client()}
 
         async def run():
+            # уникальные события (ликвидации): срезовые кадры (tick/prices)
+            # теперь сливаются по ключу — порядок проверяем на несжимаемых
             for i in range(5):
-                await self.hub.broadcast({"type": "tick", "n": i})
+                await self.hub.broadcast({"type": "liqs", "n": i})
             await asyncio.gather(*[c.flush(2.0) for c in list(self.hub.clients)])
 
         asyncio.run(run())
@@ -258,12 +270,19 @@ class OutboundQueue(unittest.TestCase):
                                             "значит, рассылка его дожидалась")
 
     def test_overdue_client_dropped_on_queue_overflow(self):
+        """Очередь полна критическими кадрами — зритель отстал безнадёжно.
+
+        Сброс давления не выбрасывает ликвидации: когда очередь забита ими
+        целиком, а новой пачке места нет, зритель признаётся безнадёжно
+        отставшим и отключается (фронт переподключится, init вернёт хвост
+        событий).
+        """
         c = _client(slow=5.0)
         self.hub.clients = {c}
 
         async def run():
             for i in range(server.Client.OUT_MAX_FRAMES + 5):
-                await self.hub.broadcast({"type": "tick", "n": i})
+                await self.hub.broadcast({"type": "liqs", "n": i})
             return list(self.hub.clients)
 
         left = asyncio.run(run())
@@ -277,7 +296,7 @@ class OutboundQueue(unittest.TestCase):
 
         async def run():
             for i in range(3):
-                await self.hub.broadcast({"type": "tick", "n": i})
+                await self.hub.broadcast({"type": "liqs", "n": i})
             self.assertGreater(len(c.out) + len(c.ws.sent), 0)
             ok = await c.flush(3.0)
             return ok
@@ -325,6 +344,253 @@ class OutboundQueue(unittest.TestCase):
         self.assertEqual(st["ws_slow_clients"], 1,
                          "отстающий клиент не виден в мониторинге")
         self.assertGreater(st["ws_send_queue_bytes"], 0)
+        self.assertEqual(st["ws_shed_frames"], 0,
+                         "без давления ничего не сбрасывается")
+
+
+class PriorityShedding(unittest.TestCase):
+    """Сброс давления в личной очереди: что теряется первым, а что никогда.
+
+    Схема приоритетов: P0 ликвидации → P1 цены → P2 свечи → P3 статистика →
+    P4 информационное. Медленный зритель сначала теряет старые кадры
+    наименее важных классов; ликвидации не выбрасываются и не сливаются.
+    """
+
+    def setUp(self):
+        self.hub = server.Hub()
+
+    @staticmethod
+    def _queue_prcounts(c):
+        """Сколько кадров каждого класса сейчас в очереди клиента."""
+        out = {p: 0 for p in range(server.PRIO_INFO + 1)}
+        for rec in c.out:
+            out[rec[0]] = out.get(rec[0], 0) + 1
+        return out
+
+    def test_frame_class_mapping(self):
+        """Классификация кадров: приоритет и ключ слияния."""
+        fc = server._frame_class
+        self.assertEqual(fc({"type": "liqs"}), (server.PRIO_CRITICAL, None))
+        self.assertEqual(fc({"type": "unknown-type"}),
+                         (server.PRIO_CRITICAL, None),
+                         "неизвестный тип обязан быть критическим")
+        self.assertEqual(fc({"type": "prices"}),
+                         (server.PRIO_PRICE, ("prices",)))
+        self.assertEqual(fc({"type": "tick", "symbol": "A", "tf": 5}),
+                         (server.PRIO_PRICE, ("tick", "A", 5)))
+        self.assertEqual(fc({"type": "candle", "symbol": "A", "tf": 15}),
+                         (server.PRIO_CANDLE, ("candle", "A", 15)))
+        self.assertEqual(fc({"type": "candles", "symbol": "A", "tf": 15}),
+                         (server.PRIO_CANDLE, ("candles", "A", 15)))
+        self.assertEqual(fc({"type": "stats"}), (server.PRIO_STATS, ("stats",)))
+        self.assertEqual(fc({"type": "flow_all"}),
+                         (server.PRIO_STATS, ("flow_all",)))
+        self.assertEqual(fc({"type": "whale_tx", "usd": 1}),
+                         (server.PRIO_INFO, None))
+        self.assertEqual(fc({"type": "terminal_chat", "message": {}}),
+                         (server.PRIO_INFO, None))
+
+    def test_liqs_never_shed_slow_client_stays(self):
+        """Очередь полна ликвидациями: некритичный кадр теряется сам.
+
+        Раньше переполнение отключало зрителя целиком. Теперь срез статистики
+        просто не встаёт в забитую критическими кадрами очередь — зритель
+        жив, ликвидации не потеряны. Лишь когда и критическому кадру нет
+        места, зритель признаётся безнадёжно отставшим.
+        """
+        c = _client(slow=5.0)
+        self.hub.clients = {c}
+        # одна статистика в очереди + 200 пачек ликвидаций: последние пачки
+        # вытеснят статистику, но не друг друга
+        c.offer(json.dumps({"type": "stats", "n": 0}), server.PRIO_STATS,
+                ("stats",))
+        liq = json.dumps({"type": "liqs", "data": [{"usd": 1}]})
+        for i in range(server.Client.OUT_MAX_FRAMES):
+            self.assertTrue(c.offer(liq, server.PRIO_CRITICAL, None),
+                            f"пачка {i} не встала в очередь")
+        counts = self._queue_prcounts(c)
+        self.assertEqual(counts[server.PRIO_STATS], 0,
+                         "ради ликвидаций не вытеснен менее важный кадр")
+        self.assertEqual(counts[server.PRIO_CRITICAL],
+                         server.Client.OUT_MAX_FRAMES)
+        before = len(c.out)
+        self.assertTrue(c.offer(json.dumps({"type": "stats", "n": 1}),
+                                server.PRIO_STATS, ("stats",)),
+                        "срез stats не приняли за отключение клиента")
+        self.assertTrue(c.alive, "зритель убит из-за некритичного кадра")
+        self.assertEqual(len(c.out), before,
+                         "кадр втиснут в переполненную очередь")
+        self.assertGreater(c.shed_frames, 0)
+        # критический кадр в ту же тесноту — зритель отстал безнадёжно
+        self.assertFalse(c.offer(liq, server.PRIO_CRITICAL, None))
+        self.assertFalse(c.alive)
+        self.assertGreater(c.dropped_frames, 0)
+
+    def test_shed_order_info_stats_candle_price(self):
+        """Давление снимается с конца важности: info → stats → candle → price."""
+        c = _client(slow=5.0)
+        self.hub.clients = {c}
+        fill = [(server.PRIO_INFO, "terminal_chat"),
+                (server.PRIO_STATS, "stats"),
+                (server.PRIO_CANDLE, "candle"),
+                (server.PRIO_PRICE, "tick")]
+        for prio, t in fill * 50:              # 200 кадров — ровно кап
+            self.assertTrue(c.offer(json.dumps({"type": t, "n": 1}), prio, None))
+        self.assertEqual(len(c.out), server.Client.OUT_MAX_FRAMES)
+        liq = json.dumps({"type": "liqs", "data": [{"usd": 9}]})
+
+        def counts():
+            return self._queue_prcounts(c)
+
+        # одна пачка ликвидаций: место освобождает старейший info-кадр
+        self.assertTrue(c.offer(liq, server.PRIO_CRITICAL, None))
+        self.assertEqual(counts()[server.PRIO_INFO], 49)
+        self.assertEqual(counts()[server.PRIO_STATS], 50)
+        self.assertEqual(counts()[server.PRIO_CANDLE], 50)
+        self.assertEqual(counts()[server.PRIO_PRICE], 50)
+        self.assertTrue(c.alive)
+        # ещё 49: класс info кончился, очередь не трогает stats
+        for _ in range(49):
+            self.assertTrue(c.offer(liq, server.PRIO_CRITICAL, None))
+        self.assertEqual(counts()[server.PRIO_INFO], 0)
+        self.assertEqual(counts()[server.PRIO_STATS], 50,
+                         "stats обязаны держаться, пока есть info")
+        # ещё 10: пошли stats, но candle и цены не тронуты
+        for _ in range(10):
+            self.assertTrue(c.offer(liq, server.PRIO_CRITICAL, None))
+        self.assertEqual(counts()[server.PRIO_STATS], 40,
+                         "после info сброс идёт по stats, а не по candle/price")
+        self.assertEqual(counts()[server.PRIO_CANDLE], 50)
+        self.assertEqual(counts()[server.PRIO_PRICE], 50)
+        self.assertEqual(counts()[server.PRIO_CRITICAL], 60)
+        self.assertEqual(len(c.out), server.Client.OUT_MAX_FRAMES)
+        self.assertEqual(c.shed_frames, 60)
+        self.assertTrue(c.alive, "зритель с ждущими ликвидациями отключён")
+
+    def test_snapshot_frames_conflated_latest_wins(self):
+        """Сто срезов prices → очередь держит один, самый свежий."""
+        async def run():
+            c = _client()
+            self.hub.clients = {c}
+            for i in range(100):
+                await self.hub.broadcast(
+                    {"type": "prices", "data": {"BTC_USDT": i}})
+            self.assertEqual(len(c.out), 1,
+                             "промежуточные срезы не слились в один")
+            c.start_pump()
+            self.assertTrue(await c.flush(2.0))
+            return c
+
+        c = asyncio.run(run())
+        got = [json.loads(f) for f in c.ws.sent]
+        self.assertEqual([g["data"]["BTC_USDT"] for g in got], [99],
+                         "зритель получил не последнее состояние")
+
+    def test_conflation_keeps_arrival_order(self):
+        """Слияние не меняет порядок оставшихся кадров."""
+        async def run():
+            c = _client()
+            self.hub.clients = {c}
+            await self.hub.broadcast({"type": "prices", "data": {"A": 1}})
+            await self.hub.broadcast({"type": "liqs", "data": [{"usd": 1}]})
+            await self.hub.broadcast({"type": "prices", "data": {"A": 2}})
+            await self.hub.broadcast({"type": "liqs", "data": [{"usd": 2}]})
+            c.start_pump()
+            self.assertTrue(await c.flush(2.0))
+            return c
+
+        c = asyncio.run(run())
+        got = [json.loads(f) for f in c.ws.sent]
+        self.assertEqual([(g["type"], g.get("data")) for g in got],
+                         [("liqs", [{"usd": 1}]),
+                          ("prices", {"A": 2}),
+                          ("liqs", [{"usd": 2}])],
+                         "порядок кадров нарушен: свежий срез должен стоять "
+                         "по моменту своего прихода, а не на месте старого")
+
+    def test_ticks_conflated_per_chart(self):
+        """Тики одного графика сливаются, разные графики — нет."""
+        async def run():
+            c = _client()
+            self.hub.clients = {c}
+            for i in range(30):
+                await self.hub.broadcast(
+                    {"type": "tick", "symbol": "BTC_USDT", "tf": 5,
+                     "price": i, "ts": i, "candle": {"c": i}})
+            await self.hub.broadcast(
+                {"type": "tick", "symbol": "ETH_USDT", "tf": 5,
+                 "price": 7, "ts": 7, "candle": {"c": 7}})
+            c.start_pump()
+            self.assertTrue(await c.flush(2.0))
+            return c
+
+        c = asyncio.run(run())
+        got = [(json.loads(f)["symbol"], json.loads(f)["price"])
+               for f in c.ws.sent]
+        self.assertEqual(got, [("BTC_USDT", 29), ("ETH_USDT", 7)],
+                         "тики одного графика должны слиться до последнего")
+
+    def test_liq_fanout_does_not_wait_slow_sockets(self):
+        """Рассылка ликвидаций не стоит в await на каждом зрителе.
+
+        Раньше send_liquidations писал в сокет напрямую: три медленных
+        зрителя по 250 мс держали конвейер ликвидаций почти секунду на
+        каждой пачке. Теперь пачка ложится в личную очередь (P0) и рассылка
+        возвращается за доли миллисекунды.
+        """
+        stuck = _client(slow=2.0)
+        fast = _client()
+        self.hub.clients = {stuck, fast}
+        real_hub, server.hub = server.hub, self.hub
+        self.addCleanup(lambda: setattr(server, "hub", real_hub))
+        events = [{"symbol": "BTC_USDT", "exchange": "binance",
+                   "side": "LONG", "price": 1.0, "qty": 1.0,
+                   "usd": 100000.0, "timestamp": 1.0}]
+
+        async def run():
+            t0 = time.perf_counter()
+            await server.send_liquidations(events)
+            fanout = (time.perf_counter() - t0) * 1000.0
+            ok_fast = await fast.flush(1.0)
+            return fanout, ok_fast
+
+        fanout, ok_fast = asyncio.run(run())
+        self.assertLess(fanout, 200.0,
+                        f"рассылка ликвидаций ждала медленный сокет: "
+                        f"{fanout:.0f} мс")
+        self.assertTrue(ok_fast)
+        self.assertEqual(len(fast.ws.sent), 1, "быстрый зритель не получил пачку")
+        self.assertEqual(len(stuck.out), 1,
+                         "пачка не легла в очередь медленного зрителя")
+        rec = stuck.out[0]
+        self.assertEqual(rec[0], server.PRIO_CRITICAL,
+                         "ликвидации обязаны идти критическим классом")
+        self.assertEqual(stuck.ws.sent, [],
+                         "рассылка дождалась медленный сокет — а не должна")
+
+    def test_oversized_frame_dropped_without_killing_queue(self):
+        """Кадр больше капы очереди — аномалия, а не повод отключать зрителя."""
+        c = _client(slow=5.0)
+        self.hub.clients = {c}
+        for i in range(10):
+            self.assertTrue(c.offer(json.dumps({"type": "liqs", "n": i}),
+                                    server.PRIO_CRITICAL, None))
+        huge = "x" * (server.Client.OUT_MAX_BYTES + 1)
+        self.assertTrue(c.offer(huge, server.PRIO_CRITICAL, None),
+                        "аномально большой кадр отключил живого зрителя")
+        self.assertTrue(c.alive)
+        self.assertEqual(len(c.out), 10, "очередь сожжена ради одного кадра")
+        self.assertGreater(c.shed_frames, 0)
+
+    def test_shed_and_conflation_visible_in_metrics(self):
+        c = _client(slow=5.0)
+        self.hub.clients = {c}
+        c.offer(json.dumps({"type": "stats"}), server.PRIO_STATS, ("stats",))
+        c.offer(json.dumps({"type": "stats"}), server.PRIO_STATS, ("stats",))
+        st = server._ws_queue_stats(self.hub.clients)
+        self.assertEqual(st["ws_conflated_frames"], 1)
+        self.assertEqual(st["ws_shed_frames"], 0)
+        self.assertEqual(st["ws_dropped_frames"], 0)
 
 
 class LoopLagWatchdog(unittest.TestCase):

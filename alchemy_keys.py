@@ -131,6 +131,15 @@ class AlchemyKeyStore:
             raise KeyStoreError("Не удалось сохранить зашифрованные ключи") from None
         return {"id": row["id"], "hint": mask_key(key), "source": "admin"}
 
+    def get_secret(self, identifier: str) -> str | None:
+        """Return a secret only to trusted server-side code; never serialize it."""
+        if identifier == "env":
+            return self._env or None
+        for row in self._rows:
+            if row["id"] == identifier:
+                return row["key"]
+        return None
+
     def remove(self, identifier: str) -> bool:
         previous = self._rows
         self._rows = [row for row in previous if row["id"] != identifier]

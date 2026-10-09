@@ -221,7 +221,7 @@ class CircuitBreaker:
                 "total_failures": self.total_failures,
                 "rejected_calls": self.rejected_calls,
                 "open_count": self.open_count,
-                "retry_in_sec": round(max(0.0, self.open_until - now_mono), 1)
+                "retry_in_sec": round(max(0.0, self.open_until - now_mono), 2)
                 if self.state == "OPEN" else 0.0,
                 "opened_at": self.opened_at,
                 "last_failure_at": self.last_failure_at,

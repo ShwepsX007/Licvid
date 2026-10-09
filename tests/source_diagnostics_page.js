@@ -21,6 +21,7 @@ function setup(isAdmin) {
             <div id="source-diagnostics-summary"></div>
             <table><tbody id="source-diagnostics-market-rows"></tbody></table>
             <table><tbody id="source-diagnostics-onchain-rows"></tbody></table>
+            <table><tbody id="source-diagnostics-circuit-rows"></tbody></table>
             <div id="source-diagnostics-runtime"></div>
         </div>
     </body>`;
@@ -45,6 +46,14 @@ function setup(isAdmin) {
         seconds_since_last_liquidation: 20,
         silence_limit_sec: 60,
         demo: false,
+        circuit_breakers: [
+            {name: "market-rest:api.binance.com", state: "CLOSED",
+                consecutive_failures: 0, failure_threshold: 5, total_failures: 0,
+                total_successes: 3, rejected_calls: 0, retry_in_sec: 0, last_error: ""},
+            {name: "alchemy-rpc:eth-mainnet.g.alchemy.com", state: "OPEN",
+                consecutive_failures: 5, failure_threshold: 5, total_failures: 5,
+                total_successes: 10, rejected_calls: 2, retry_in_sec: 30, last_error: "HTTP 503"},
+        ],
         sources: {
             binance: {
                 enabled: true, connected: true, events: 12,
@@ -110,6 +119,9 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     assert(refreshMessage.includes("Источники проверены"), "unexpected refresh message: " + refreshMessage);
     assert.equal(admin.win.document.querySelectorAll("#source-diagnostics-market-rows tr").length, 2);
     assert.equal(admin.win.document.querySelectorAll("#source-diagnostics-onchain-rows tr").length, 2);
+    assert.equal(admin.win.document.querySelectorAll("#source-diagnostics-circuit-rows tr").length, 2);
+    assert(admin.win.document.getElementById("source-diagnostics-circuit-rows").textContent.includes("Открыт · запросы блокируются"));
+    assert(admin.win.document.getElementById("source-diagnostics-circuit-rows").textContent.includes("HTTP 503"));
     assert(admin.win.document.getElementById("source-diagnostics-summary").textContent.includes("1 / 2"));
     assert(admin.win.document.getElementById("source-diagnostics-market-rows").textContent.includes("Ошибка подключения"));
     assert(admin.win.document.getElementById("source-diagnostics-onchain-rows").textContent.includes("Квота исчерпана"));

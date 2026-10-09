@@ -7,6 +7,7 @@ ordinary client errors do not trip it; provider-specific code keeps owning those
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import threading
 import time
@@ -57,6 +58,8 @@ def is_transient_failure(exc: BaseException) -> bool:
     status = _status_code(exc)
     if status is not None:
         return status in _TRANSIENT_HTTP or status >= 500
+    if isinstance(exc, (json.JSONDecodeError, UnicodeDecodeError)):
+        return True
     if isinstance(exc, (asyncio.TimeoutError, TimeoutError, OSError, ConnectionError)):
         return True
     if aiohttp is not None and isinstance(exc, aiohttp.ClientError):
@@ -141,6 +144,7 @@ class CircuitBreaker:
 
     def success(self, probe: bool = False) -> None:
         with self._lock:
+            recovered = probe or self.state != "CLOSED"
             self.total_successes += 1
             self.consecutive_failures = 0
             self.last_success_at = time.time()
@@ -149,6 +153,10 @@ class CircuitBreaker:
             self.open_until = 0.0
             self.opened_at = 0.0
             self._probe_in_flight = False
+            if recovered:
+                # A healthy recovery closes this incident. A later, unrelated
+                # outage should start at the base cooldown again.
+                self.open_count = 0
 
     def neutral(self, probe: bool = False) -> None:
         """A non-transient response means the service replied; don't trip it."""
@@ -159,6 +167,7 @@ class CircuitBreaker:
                 self.open_until = 0.0
                 self.opened_at = 0.0
                 self._probe_in_flight = False
+                self.open_count = 0
             elif self.state == "CLOSED":
                 # A provider replied with a non-transient error (for example
                 # 401/403/400). It breaks the sequence of transport failures.

@@ -63,7 +63,7 @@
 
     function cell(row, value, className) {
         const td = element("td", className || "");
-        if (value instanceof Node) td.append(value);
+        if (value && typeof value === "object" && value.nodeType === 1) td.append(value);
         else td.textContent = value === undefined || value === null || value === "" ? "—" : String(value);
         row.append(td);
         return td;

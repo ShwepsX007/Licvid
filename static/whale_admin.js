@@ -82,7 +82,46 @@
             fill.style.width = usagePercent(used, limit) + "%";
             track.append(fill);
             usage.append(track);
-            row.append(main, usage);
+            const details = make("div", "whale-admin-key-details");
+            details.append(make("small", "", "LOCAL ESTIMATE · " +
+                number(Number(key.reserved_cu || 0)) + " CU · quota: UNKNOWN"));
+            if (key.last_successful_request) details.append(make("small", "",
+                "Last successful request: " + when(key.last_successful_request)));
+            if (key.last_provider_error) details.append(make("small", "",
+                "Last provider error: " + String(key.last_provider_error).slice(0, 160)));
+            if (key.last_http_status != null) details.append(make("small", "",
+                "Last HTTP status: " + key.last_http_status));
+            if (key.rotation_at) details.append(make("small", "",
+                "Last rotation: " + when(key.rotation_at) + (key.rotation_reason ? " · " + key.rotation_reason : "")));
+            if (Number(key.cooldown_in_sec || 0) > 0) details.append(make("small", "",
+                "Cooldown: " + number(key.cooldown_in_sec) + " s"));
+            const test = make("button", "btn btn-ghost btn-compact whale-admin-key-test", "Проверить ключ");
+            test.type = "button";
+            const testResult = make("small", "whale-admin-key-test-result", "");
+            test.addEventListener("click", async () => {
+                test.disabled = true;
+                testResult.textContent = "Проверка read-only RPC…";
+                try {
+                    const result = await request("/api/admin/alchemy/keys/" +
+                        encodeURIComponent(key.id) + "/test", {method: "POST"});
+                    const parts = [];
+                    parts.push(result.valid ? "✓ key valid" : "✗ key invalid");
+                    parts.push(result.eth_available ? "✓ ETH available" : "✗ ETH RPC unavailable");
+                    parts.push("response " + number(result.response_ms) + " ms");
+                    parts.push(result.http_status == null ? "HTTP status unknown" : "HTTP " + result.http_status);
+                    parts.push(result.quota_status === "PROVIDER-CONFIRMED EXHAUSTION"
+                        ? "PROVIDER-CONFIRMED EXHAUSTION" : "quota not reported by provider (UNKNOWN)");
+                    if (result.error) parts.push(result.error);
+                    testResult.textContent = parts.join(" · ");
+                    if (result.provider_message) testResult.title = result.provider_message;
+                } catch (error) {
+                    testResult.textContent = "Probe failed: " + String(error && error.message || "unknown error");
+                } finally {
+                    test.disabled = false;
+                }
+            });
+            details.append(test, testResult);
+            row.append(main, usage, details);
             if (key.source === "admin") {
                 const del = make("button", "btn btn-ghost btn-compact whale-admin-key-delete", t("adm.alchemy_delete"));
                 del.type = "button";

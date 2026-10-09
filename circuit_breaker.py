@@ -159,6 +159,10 @@ class CircuitBreaker:
                 self.open_until = 0.0
                 self.opened_at = 0.0
                 self._probe_in_flight = False
+            elif self.state == "CLOSED":
+                # A provider replied with a non-transient error (for example
+                # 401/403/400). It breaks the sequence of transport failures.
+                self.consecutive_failures = 0
 
     def abandon(self, probe: bool = False) -> None:
         """Release a half-open probe when a request was cancelled/not sent."""

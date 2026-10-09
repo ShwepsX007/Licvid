@@ -22,6 +22,7 @@ jobs:
           node-version: '20'
 
       - name: Install Python deps
+        id: install-python-deps
         run: |
           python -m pip install --upgrade pip setuptools
           pip install -r requirements.txt
@@ -33,11 +34,20 @@ jobs:
           npm ci
 
       - name: Build i18n bundles
+        id: build-i18n
         run: |
           python tools/build_i18n_pages.py
           python tools/build_i18n_pages.py --check
 
+      - name: Run source diagnostics UI regression test
+        if: ${{ steps.install-js-deps.outcome == 'success' && steps.build-i18n.outcome == 'success' }}
+        run: |
+          export NODE_OPTIONS="--require $(pwd)/tests/_dom_env.js"
+          export NODE_PATH=$(pwd)/node_modules
+          node tests/source_diagnostics_page.js
+
       - name: Run tests (one-button runner)
+        if: ${{ always() && steps.install-python-deps.outcome == 'success' && steps.build-i18n.outcome == 'success' }}
         run: |
           bash tools/run_tests.sh --python
         env:
@@ -56,8 +66,6 @@ jobs:
           # JS tests that don't need live server — they use _dom_env to stub gtag
           export NODE_OPTIONS="--require $(pwd)/tests/_dom_env.js"
           export NODE_PATH=$(pwd)/node_modules
-          # Run the newly added diagnostics regression before unrelated legacy JS tests.
-          node tests/source_diagnostics_page.js
           for f in tests/*.js; do
             base=$(basename "$f")
             case "$base" in

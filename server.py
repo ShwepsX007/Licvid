@@ -6104,6 +6104,71 @@ async def api_admin_alchemy_keys(request: Request):
             "available": bool(alchemy_key_store and not alchemy_vault_error)}
 
 
+@app.post("/api/admin/alchemy/keys/{identifier}/test")
+async def api_admin_alchemy_test_key(request: Request, identifier: str):
+    """One bounded, read-only RPC probe; never returns or logs the credential."""
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    if not alchemy_key_store or alchemy_vault_error:
+        return JSONResponse({"error": "vault_unavailable"}, status_code=503)
+    secret = alchemy_key_store.get_secret(identifier)
+    if not secret:
+        return JSONResponse({"error": "unknown_key"}, status_code=404)
+
+    import urllib.error
+    import urllib.request
+    payload = json.dumps({"jsonrpc": "2.0", "id": 1,
+                          "method": "eth_blockNumber", "params": []}).encode()
+    req = urllib.request.Request(
+        "https://eth-mainnet.g.alchemy.com/v2/" + secret,
+        data=payload, headers={"Content-Type": "application/json"},
+        method="POST")
+    started = time.perf_counter()
+    http_status = None
+    try:
+        def _probe():
+            with urllib.request.urlopen(req, timeout=5) as response:
+                return response.status, response.read(65536)
+        http_status, raw = await asyncio.wait_for(asyncio.to_thread(_probe), timeout=6)
+        elapsed_ms = round((time.perf_counter() - started) * 1000)
+        try:
+            result = json.loads(raw)
+        except (ValueError, TypeError):
+            result = {}
+        if isinstance(result, dict) and result.get("result") and not result.get("error"):
+            return {"ok": True, "valid": True, "eth_available": True,
+                    "response_ms": elapsed_ms, "http_status": http_status,
+                    "quota_status": "UNKNOWN",
+                    "quota_note": "Quota not reported by this RPC response"}
+        rpc_error = result.get("error") if isinstance(result, dict) else None
+        message = str((rpc_error or {}).get("message", "")) if isinstance(rpc_error, dict) else ""
+        quota = "PROVIDER-CONFIRMED EXHAUSTION" if any(
+            term in message.lower() for term in ("monthly capacity", "compute units", "quota exceeded")) else "UNKNOWN"
+        return {"ok": False, "valid": http_status in (200, 400), "eth_available": False,
+                "response_ms": elapsed_ms, "http_status": http_status,
+                "quota_status": quota, "error": "RPC error", "provider_message": message[:180]}
+    except urllib.error.HTTPError as exc:
+        http_status = exc.code
+        try:
+            raw = exc.read(65536)
+            data = json.loads(raw)
+            message = str(data.get("error", {}).get("message", ""))[:180]
+        except Exception:
+            message = ""
+        quota = "PROVIDER-CONFIRMED EXHAUSTION" if any(
+            term in message.lower() for term in ("monthly capacity", "compute units", "quota exceeded")) else "UNKNOWN"
+        return {"ok": False, "valid": http_status not in (401, 403), "eth_available": False,
+                "response_ms": round((time.perf_counter() - started) * 1000),
+                "http_status": http_status, "quota_status": quota,
+                "error": "HTTP error", "provider_message": message}
+    except Exception:
+        return {"ok": False, "valid": False, "eth_available": False,
+                "response_ms": round((time.perf_counter() - started) * 1000),
+                "http_status": http_status, "quota_status": "UNKNOWN",
+                "error": "Probe failed or timed out"}
+
+
 @app.post("/api/admin/alchemy/keys")
 async def api_admin_alchemy_add_key(request: Request,
                                     body: dict = Body(default_factory=dict)):

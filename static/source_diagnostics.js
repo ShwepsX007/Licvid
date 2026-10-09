@@ -13,6 +13,7 @@
     const runtime = $("source-diagnostics-runtime");
     const marketRows = $("source-diagnostics-market-rows");
     const onchainRows = $("source-diagnostics-onchain-rows");
+    const circuitRows = $("source-diagnostics-circuit-rows");
     const previousCounts = new Map();
     let loading = false;
     let timer = null;
@@ -272,6 +273,38 @@
         return networks.map(network => ({name: network.chain || "—", network, state: networkState(network)}));
     }
 
+    function circuitState(circuit) {
+        if (circuit.state === "OPEN") return {label: "Открыт · запросы блокируются", tone: "bad"};
+        if (circuit.state === "HALF_OPEN") return {label: "Проверочный запрос", tone: "warn"};
+        return {label: "Закрыт · запросы разрешены", tone: "ok"};
+    }
+
+    function renderCircuits(circuits) {
+        circuitRows.replaceChildren();
+        if (!Array.isArray(circuits) || !circuits.length) {
+            const row = document.createElement("tr");
+            cell(row, "Circuit breaker ещё не фиксировал вызовы внешних API", "diag-empty");
+            row.firstChild.colSpan = 6;
+            circuitRows.append(row);
+            return;
+        }
+        circuits.forEach(circuit => {
+            if (!circuit || typeof circuit !== "object") return;
+            const row = document.createElement("tr");
+            cell(row, circuit.name || "—");
+            const state = circuitState(circuit);
+            cell(row, pill(state.label, state.tone));
+            cell(row, number(circuit.consecutive_failures) + " / " + number(circuit.failure_threshold));
+            cell(row, Number(circuit.retry_in_sec) > 0
+                ? duration(circuit.retry_in_sec)
+                : circuit.state === "HALF_OPEN" ? "Проба доступна" : "—");
+            cell(row, number(circuit.total_failures) + " / " + number(circuit.total_successes));
+            const detail = cell(row, circuit.last_error || "Ошибок нет", "diag-detail");
+            if (detail.textContent.length > 180) detail.title = detail.textContent;
+            circuitRows.append(row);
+        });
+    }
+
     function metricCard(label, value, note, tone) {
         const node = element("div", "diag-stat");
         node.append(element("span", "diag-stat-label", label));
@@ -372,6 +405,7 @@
                 Number(health.server_time) || Date.now() / 1000,
                 networkError ? "Статус сетей недоступен: " + networkError : "API не вернул список сетей"
             );
+            renderCircuits(Array.isArray(health.circuit_breakers) ? health.circuit_breakers : []);
             renderRuntime(health, metrics);
             renderSummary(market, networks, health, metrics, networkError);
             const parts = [];

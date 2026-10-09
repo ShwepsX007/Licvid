@@ -20,6 +20,12 @@ market_feed.py — реальные рыночные данные для LiqScop
 а состояние каждого источника видно через .status() — оно отдаётся
 в /api/health, чтобы на сервере было сразу видно, кто именно молчит.
 
+Данные проходят через ingestion-слой (market_events.py): коннекторы бирж
+нормализуют кадры в единый MarketEvent (реестр LIQUIDATION_NORMALIZERS +
+liquidation_events) и публикуют его в шину EventBus, а потребители
+(_consume_trade / _consume_liquidation / _consume_price) уже не знают,
+откуда пришло событие. Новый источник = коннектор + запись в реестре.
+
 Направление ликвидации нормализуем к позиции, которую вынесло:
     side = "LONG"  — ликвидировали лонг  (принудительная ПРОДАЖА)
     side = "SHORT" — ликвидировали шорт  (принудительная ПОКУПКА)
@@ -47,6 +53,7 @@ from timeframes import (OKX_CVD_SEC, TF_BINANCE, TF_BYBIT, TF_MINUTES, TF_OKX,
 import aiohttp
 from aiohttp import ClientWSTimeout
 from circuit_breaker import protect_url
+from market_events import EventBus, MarketEvent
 from oi_feed import OpenInterestTracker
 
 log = logging.getLogger("liqscope.feed")
@@ -788,6 +795,52 @@ def hl_close_reason(msg_type, close_code, exc, data) -> str:
 # Тейкер A (продал) — значит вынесли LONG, как во всех наших источниках.
 # Подписка построчная по монете, поэтому список монет делится между ключами.
 # ---------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# Ingestion-слой: реестр нормализаторов ликвидаций
+# ----------------------------------------------------------------------------
+# Кадр любой биржи из этого реестра превращается в List[MarketEvent] одной
+# функцией — коннектору не нужно знать, кто и как будет потреблять события.
+# Источники с парсингом, завязанным на состояние подписок (dYdX, Kraken,
+# Bitfinex, Hyperliquid), и выведенные события (hl_infer, OXA) публикуют
+# ликвидации через MarketFeed._emit — это тот же вход в шину.
+LIQUIDATION_NORMALIZERS: Dict[str, Callable[..., List[dict]]] = {
+    "binance": parse_binance_msg,
+    "bybit": parse_bybit_msg,
+    "okx": parse_okx_msg,        # ctx: contract_values (ctVal контрактов)
+    "gate": parse_gate_msg,      # ctx: multipliers (квант размеров Gate)
+    "bitget": parse_bitget_msg,
+    "htx": parse_htx_msg,
+}
+
+
+def liquidation_events(source: str, payload: dict, **ctx) -> List[MarketEvent]:
+    """Кадр биржи → события MarketEvent(type="liquidation").
+
+    Единственная точка, где формат конкретной биржи становится внутренним:
+    коннектор вызывает ``liquidation_events("okx", payload,
+    contract_values=...)`` и публикует результат в шину. Неизвестный
+    источник или не-словарь дают пустой список — коннектор продолжает
+    слушать сокет.
+    """
+    fn = LIQUIDATION_NORMALIZERS.get(source)
+    if fn is None or not isinstance(payload, dict):
+        return []
+    rows = fn(payload, **ctx) if ctx else fn(payload)
+    out: List[MarketEvent] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        try:
+            out.append(MarketEvent(
+                source=source, symbol=row["symbol"], ts=float(row["ts"]),
+                type="liquidation", price=float(row["price"]),
+                qty=float(row["qty"]), side=str(row["side"]),
+                usd=float(row.get("usd") or 0.0)))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
 def oxa_keys() -> List[str]:
     """Ключи 0xArchive из окружения.
 
@@ -1348,6 +1401,14 @@ class MarketFeed:
         self.on_liquidation = on_liquidation
         self.on_price = on_price
         self.on_trade = on_trade
+        # --- Ingestion-слой: шина событий ----------------------------------
+        # Коннекторы бирж публикуют MarketEvent, потребители ниже подписаны
+        # на шину: живые цены, поток сделок для CVD и лента ликвидаций не
+        # знают источника, а новый источник не трогает потребителей.
+        self.bus = EventBus()
+        self.bus.subscribe("trade", self._consume_trade)
+        self.bus.subscribe("liquidation", self._consume_liquidation)
+        self.bus.subscribe("price", self._consume_price)
         self.symbols_limit = max(4, int(symbols_limit))
         self.enabled_exchanges = {e.lower() for e in
                                   (exchanges or ("binance", "bybit", "okx", "gate"))}
@@ -2166,35 +2227,87 @@ class MarketFeed:
                 log.debug("symbols refresh: %s", e)
 
     # -- нормализация и выдача события --------------------------------------
+    # -- Ingestion-слой: вход коннекторов и потребители шины ------------------
     async def _emit(self, source: str, symbol: str, side: str,
                     price: float, qty: float, ts: float, usd: Optional[float] = None,
                     kind: Optional[str] = None, details: Optional[dict] = None):
-        sym = canon(symbol)
+        """Ликвидация → шину событий (ingestion-слой).
+
+        Валидация, счётчики источника и сборка словаря ленты живут в
+        потребителе ``_consume_liquidation``; здесь коннекторы любого формата
+        (включая выведенные события hl_infer и OXA) приводят событие к
+        ``MarketEvent`` одним вызовом.
+        """
+        await self.bus.publish(MarketEvent(
+            source=source, symbol=symbol, ts=float(ts or 0.0),
+            type="liquidation", price=float(price or 0), qty=float(qty or 0),
+            side=side, usd=float(usd) if usd else 0.0,
+            kind=kind, details=details))
+
+    async def _publish_trades(self, source: str, trades) -> int:
+        """Сделки парсера (кортежи symbol, price, qty, ts, side) → шину.
+
+        Возвращает число опубликованных событий. Публикация идёт в том же
+        await-контексте, что и приём кадра: подписчики (цена + CVD)
+        вызываются напрямую, без очередей и задач — горячий путь тиков
+        не должен платить аллокациями.
+        """
+        n = 0
+        for sym, price, qty, ts, side in trades:
+            await self.bus.publish(MarketEvent(
+                source=source, symbol=sym, ts=ts, type="trade",
+                price=price, qty=qty, side=side))
+            n += 1
+        return n
+
+    async def _publish_price(self, source: str, symbol: str, price: float,
+                             candle: Optional[dict] = None) -> None:
+        """Обновление цены (1m-свеча или REST-тикер) → шину."""
+        await self.bus.publish(MarketEvent(
+            source=source, symbol=symbol, ts=time.time(), type="price",
+            price=price, qty=0.0, candle=candle))
+
+    async def _consume_trade(self, ev: MarketEvent) -> None:
+        """Потребитель сделок: живая цена монеты + поток CVD (on_trade)."""
+        self.prices[ev.symbol] = ev.price
+        if self.on_trade is not None:
+            await self.on_trade(ev.symbol, ev.price, ev.qty, ev.ts, ev.side)
+
+    async def _consume_liquidation(self, ev: MarketEvent) -> None:
+        """Потребитель ликвидаций: фильтры, счётчик источника, лента."""
+        sym = canon(ev.symbol)
         if sym not in self.symbol_set:
             return
-        if price <= 0 or qty <= 0:
+        if ev.price <= 0 or ev.qty <= 0:
             return
-        usd_value = float(usd) if usd else price * qty
+        usd_value = float(ev.usd) if ev.usd else ev.price * ev.qty
         if usd_value <= 0:
             return
-        self.status[source].hit()
+        st = self.status.get(ev.source)
+        if st is not None:
+            st.hit()
         event = {
             "symbol": sym,
-            "exchange": source,
-            "side": side,                       # LONG / SHORT — какую позицию вынесло
-            "price": price,
-            "qty": qty,
+            "exchange": ev.source,
+            "side": ev.side,               # LONG / SHORT — какую позицию вынесло
+            "price": ev.price,
+            "qty": ev.qty,
             "usd": usd_value,
-            "timestamp": ts or time.time(),
+            "timestamp": ev.ts or time.time(),
         }
-        if kind:
+        if ev.kind:
             # "tape" — событие не прислано биржей, а выведено из ленты сделок
             # и подтверждено /info (см. hl_infer.py); фронт помечает его значком
-            event["kind"] = kind
-        if details:
+            event["kind"] = ev.kind
+        if ev.details:
             # что именно подтвердило вывод: адрес жертвы, markPx, method
-            event.update(details)
+            event.update(ev.details)
         await self.on_liquidation(event)
+
+    async def _consume_price(self, ev: MarketEvent) -> None:
+        """Потребитель цен: живая цена для графика, уровней и стендов."""
+        self.prices[ev.symbol] = ev.price
+        await self.on_price(ev.symbol, ev.price, ev.candle)
 
     @property
     def symbol_set(self) -> set:
@@ -2250,12 +2363,13 @@ class MarketFeed:
                     payload = json_loads(msg.data)
                 except Exception:
                     continue
-                for ev in parse_binance_msg(payload):
+                events = liquidation_events("binance", payload)
+                if events:
                     # раз биржа отдала событие — путь живой, запоминаем его
                     # (префиксом: именно его сравниваем при переподключении)
                     self._binance_ws_pref = prefix
-                    await self._emit("binance", ev["symbol"], ev["side"],
-                                     ev["price"], ev["qty"], ev["ts"])
+                    for ev in events:
+                        await self.bus.publish(ev)
 
     # -- Bybit ---------------------------------------------------------------
     async def _bybit_liquidations(self):
@@ -2312,9 +2426,8 @@ class MarketFeed:
                         log.warning("[bybit] отказ подписки на %s: %s",
                                     sym or "?", st.last_error)
                         continue
-                    for ev in parse_bybit_msg(payload):
-                        await self._emit("bybit", ev["symbol"], ev["side"],
-                                         ev["price"], ev["qty"], ev["ts"])
+                    for ev in liquidation_events("bybit", payload):
+                        await self.bus.publish(ev)
             finally:
                 syncer.cancel()
 
@@ -2342,9 +2455,9 @@ class MarketFeed:
                 if payload.get("event") == "error":
                     st.last_error = str(payload.get("msg"))[:200]
                     continue
-                for ev in parse_okx_msg(payload, ct_val):
-                    await self._emit("okx", ev["symbol"], ev["side"],
-                                     ev["price"], ev["qty"], ev["ts"])
+                for ev in liquidation_events("okx", payload,
+                                             contract_values=ct_val):
+                    await self.bus.publish(ev)
 
     async def _okx_contract_values(self) -> Dict[str, float]:
         """ctVal — сколько базовой монеты в одном контракте OKX."""
@@ -2437,9 +2550,9 @@ class MarketFeed:
                         if status != "success":
                             log.warning("[gate] подписка не подтверждена: %s",
                                         str(payload)[:200])
-                    for ev in parse_gate_msg(payload, self.gate_multipliers):
-                        await self._emit("gate", ev["symbol"], ev["side"],
-                                         ev["price"], ev["qty"], ev["ts"])
+                    for ev in liquidation_events("gate", payload,
+                                                 multipliers=self.gate_multipliers):
+                        await self.bus.publish(ev)
             finally:
                 syncer.cancel()
 
@@ -2699,8 +2812,7 @@ class MarketFeed:
                 st.hit()
                 got += 1
                 st.extra["binance_klines"] = got
-                self.prices[sym] = candle["close"]
-                await self.on_price(sym, candle["close"], candle)
+                await self._publish_price("binance", sym, candle["close"], candle)
             # хоть один кадр-свеча — путь рабочий, запоминаем его для
             # последующих переподключений (и ликвидаций, и тиков)
             if got:
@@ -2721,13 +2833,14 @@ class MarketFeed:
                 if not rows:
                     continue
                 wanted = self.symbol_set
+                rest_source = loader.__name__.replace("_symbols_", "")
                 for r in rows:
                     if r["symbol"] in wanted and r["price"] > 0:
-                        self.prices[r["symbol"]] = r["price"]
-                        await self.on_price(r["symbol"], r["price"], None)
+                        await self._publish_price(rest_source, r["symbol"],
+                                                  r["price"])
                 got = True
                 st.hit()
-                st.name = f"prices:{loader.__name__.replace('_symbols_', '')}-rest"
+                st.name = f"prices:{rest_source}-rest"
                 break
             if not got:
                 st.down("нет доступных источников цены")
@@ -2768,9 +2881,8 @@ class MarketFeed:
                     st.last_error = str(payload.get("msg"))[:200]
                     log.warning("[bitget] ошибка подписки: %s", st.last_error)
                     continue
-                for ev in parse_bitget_msg(payload):
-                    await self._emit("bitget", ev["symbol"], ev["side"],
-                                     ev["price"], ev["qty"], ev["ts"], usd=ev.get("usd"))
+                for ev in liquidation_events("bitget", payload):
+                    await self.bus.publish(ev)
 
     # -- HTX (Huobi) -----------------------------------------------------------
     async def _htx_liquidations(self):
@@ -2809,9 +2921,8 @@ class MarketFeed:
                     st.last_error = str(payload.get("err-msg"))[:200]
                     log.warning("[htx] отказ подписки: %s", st.last_error)
                     continue
-                for ev in parse_htx_msg(payload):
-                    await self._emit("htx", ev["symbol"], ev["side"],
-                                     ev["price"], ev["qty"], ev["ts"], usd=ev.get("usd"))
+                for ev in liquidation_events("htx", payload):
+                    await self.bus.publish(ev)
 
     # -- Списки рынков: не подписываемся на то, чего у биржи нет -------------
     async def _dydx_markets(self) -> set:
@@ -4099,11 +4210,10 @@ class MarketFeed:
                 if not trades:
                     self._log_unexpected("binance-combined", payload)
                     continue
-                for sym, price, qty, ts, side in trades:
-                    got += 1
-                    st.hit()
-                    self.prices[sym] = price
-                    await self.on_trade(sym, price, qty, ts, side)
+                if trades:
+                    got += len(trades)
+                    st.hit(len(trades))
+                    await self._publish_trades("binance", trades)
         return "closed" if got else "nodata"
 
     async def _binance_trade_raw(self) -> str:
@@ -4164,11 +4274,10 @@ class MarketFeed:
                     if not trades:
                         self._log_unexpected("binance-raw", payload)
                         continue
-                    for sym, price, qty, ts, side in trades:
-                        got += 1
-                        st.hit()
-                        self.prices[sym] = price
-                        await self.on_trade(sym, price, qty, ts, side)
+                    if trades:
+                        got += len(trades)
+                        st.hit(len(trades))
+                        await self._publish_trades("binance", trades)
             finally:
                 syncer.cancel()
                 self.tick_subscriptions = set()
@@ -4253,6 +4362,7 @@ class MarketFeed:
                                             sym or "?", payload.get("ret_msg"))
                         continue
                     now = time.time()
+                    trades = []
                     for it in payload.get("data") or []:
                         try:
                             sym = canon(it.get("s") or "")
@@ -4265,10 +4375,11 @@ class MarketFeed:
                             continue
                         side = ("BUY" if str(it.get("S") or "").upper() == "BUY"
                                 else "SELL" if str(it.get("S") or "").upper() == "SELL" else "")
-                        got += 1
-                        st.hit()
-                        self.prices[sym] = price
-                        await self.on_trade(sym, price, qty, ts, side)
+                        trades.append((sym, price, qty, ts, side))
+                    if trades:
+                        got += len(trades)
+                        st.hit(len(trades))
+                        await self._publish_trades("bybit", trades)
             finally:
                 syncer.cancel()
                 self.tick_subscriptions = set()
@@ -4323,11 +4434,11 @@ class MarketFeed:
                         payload = json_loads(msg.data)
                     except Exception:
                         continue
-                    for sym, price, qty, ts, side in parse_dydx_trades(payload, ticker_map):
-                        got += 1
-                        st.hit()
-                        self.prices[sym] = price
-                        await self.on_trade(sym, price, qty, ts, side)
+                    trades = parse_dydx_trades(payload, ticker_map)
+                    if trades:
+                        got += len(trades)
+                        st.hit(len(trades))
+                        await self._publish_trades("dydx", trades)
             finally:
                 syncer.cancel()
                 self.tick_subscriptions = set()
@@ -4381,11 +4492,11 @@ class MarketFeed:
                         payload = json_loads(msg.data)
                     except Exception:
                         continue
-                    for sym, price, qty, ts, side in parse_kraken_trades(payload, product_map):
-                        got += 1
-                        st.hit()
-                        self.prices[sym] = price
-                        await self.on_trade(sym, price, qty, ts, side)
+                    trades = parse_kraken_trades(payload, product_map)
+                    if trades:
+                        got += len(trades)
+                        st.hit(len(trades))
+                        await self._publish_trades("kraken", trades)
             finally:
                 syncer.cancel()
                 self.tick_subscriptions = set()
@@ -4447,11 +4558,11 @@ class MarketFeed:
                             if sym and payload.get("chanId") is not None:
                                 chan_map[payload["chanId"]] = sym
                         continue
-                    for sym, price, qty, ts, side in parse_bitfinex_trades(payload, chan_map):
-                        got += 1
-                        st.hit()
-                        self.prices[sym] = price
-                        await self.on_trade(sym, price, qty, ts, side)
+                    trades = parse_bitfinex_trades(payload, chan_map)
+                    if trades:
+                        got += len(trades)
+                        st.hit(len(trades))
+                        await self._publish_trades("bitfinex", trades)
             finally:
                 syncer.cancel()
                 self.tick_subscriptions = set()
@@ -4525,6 +4636,7 @@ class MarketFeed:
                                    if str(c).upper() == coin), None)
                     if not symbol:
                         continue
+                    trades = []
                     for row in data.get("trades") or []:
                         if not isinstance(row, dict):
                             continue
@@ -4536,11 +4648,12 @@ class MarketFeed:
                         if price <= 0 or qty <= 0:
                             continue
                         ts = float(row.get("time") or 0) / 1000.0 or time.time()
-                        got += 1
-                        st.hit()
-                        self.prices[symbol] = price
-                        await self.on_trade(symbol, price, qty, ts,
-                                            "SELL" if row.get("side") == "A" else "BUY")
+                        trades.append((symbol, price, qty, ts,
+                                       "SELL" if row.get("side") == "A" else "BUY"))
+                    if trades:
+                        got += len(trades)
+                        st.hit(len(trades))
+                        await self._publish_trades("hyperliquid", trades)
             finally:
                 syncer.cancel()
                 self.tick_subscriptions = set()
@@ -4829,5 +4942,9 @@ class MarketFeed:
             "catalog_source": self.symbol_index_source,
             "cvd_source": self.cvd_source,
             "fast_json": FAST_JSON,
+            # ingestion-слой: живые подписчики шины по типам событий —
+            # ноль означает, что тип никто не слушает (конфигурационная ошибка)
+            "event_bus": {t: self.bus.subscriber_count(t)
+                          for t in ("trade", "liquidation", "price")},
             "sources": sources,
         }

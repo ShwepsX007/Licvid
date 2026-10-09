@@ -374,6 +374,28 @@ ps -o user= -p "$(systemctl show licvid -p MainPID --value)"
 биржа ──WS──► market_feed ──callback──► server ──WS──► браузер ──► график
 ```
 
+Внутри `market_feed` данные идут через ingestion-слой (`market_events.py`):
+коннекторы бирж нормализуют кадры в единый `MarketEvent(source, symbol, ts,
+type, price, qty, side)` и публикуют его в шину `EventBus`, а потребители
+(живые цены, поток сделок для CVD, лента ликвидаций) подписаны на шину и не
+знают источника:
+
+```
+Binance ─┐
+Bybit ───┤
+OKX ─────┤
+Gate ────┤ → Normalizer (реестр LIQUIDATION_NORMALIZERS) → Event Bus → consumers
+Bitget ──┤
+HTX ─────┘
+```
+
+Новый источник — это коннектор (транспорт биржи) плюс запись в реестре
+нормализаторов; потребители и серверный код не меняются. Шина — не очередь:
+подписчики вызываются напрямую в том же await-контексте, поэтому горячий
+путь тиков не платит аллокациями (замер — в `PERF_NOTES.md`), а исключение
+в подписчике слышит сам коннектор. Подписчики шины по типам событий видны
+в `/api/health` → `event_bus`.
+
 | Поток | Источник | Как часто | Что обновляет |
 |---|---|---|---|
 | **Тики** | Binance combined `?streams=<sym>@aggTrade` → Binance raw + SUBSCRIBE → Bybit `publicTrade` | **каждая сделка**, без буферизации | цену и свечу открытого графика — сразу, тем же тиком |
@@ -1932,7 +1954,13 @@ mailer.py            письма: SMTP (smtplib, scrypt-ссылки), файл
                      тексты писем на пяти языках сайта
 seo_pages.py         язык страницы и SEO: <html lang>, title/description, canonical, hreflang,
                      robots.txt, sitemap.xml с альтернативами, manifest, разметка Schema.org
-market_feed.py       подключение к биржам, парсеры, список монет, klines
+market_events.py     ingestion-слой: единый формат MarketEvent (source/symbol/ts/type/
+                     price/qty/side) и шина EventBus — коннекторы бирж публикуют
+                     события, потребители (цены, CVD, лента ликвидаций) подписаны
+                     на шину и не знают источника; реестр LIQUIDATION_NORMALIZERS
+                     превращает кадр любой биржи в события одной функцией
+market_feed.py       коннекторы бирж (WS, подписки, пинги), нормализация кадров,
+                     список монет, klines; всё публикуется в шину market_events
 static/landing.html  лендинг (посадочная страница)
 static/index.html    интерфейс терминала
 static/login.html    вход и регистрация: почта и Telegram («или», равнозначно)

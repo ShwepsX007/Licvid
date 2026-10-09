@@ -6257,6 +6257,7 @@ async def api_admin_alchemy_stats(request: Request):
     networks.append(_mark_network_enabled({
         "chain": "TRON", "provider": "trongrid",
         "status": "online" if tron.get("connected") else
+                  "circuit_open" if tron_state == "circuit_open" else
                   "error" if tron_state in ("error", "budget_exhausted") else "waiting",
         "last_success": float(tron.get("last_success") or 0),
         "last_attempt": float(tron.get("last_attempt") or 0),

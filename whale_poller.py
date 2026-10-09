@@ -1125,7 +1125,7 @@ class WhalePoller:
                 self._mark_network_failure(
                     chain, "circuit_open", str(exc), http_status=503,
                     retry_after=exc.retry_after, key_active=True)
-                raise NetworkError(str(exc)) from None
+                raise
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                 # The guard records transport failures before this handler runs.
                 # Never include aiohttp exception URLs; production paths contain keys.
@@ -1838,7 +1838,7 @@ class WhalePoller:
                 self._mark_network_failure(
                     "SOLANA", "circuit_open", str(exc), http_status=503,
                     retry_after=exc.retry_after, key_active=True)
-                raise NetworkError(str(exc)) from None
+                raise
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                 # The guard records transport failures before this handler runs.
                 failure = NetworkError(f"Solana RPC {type(exc).__name__}")
@@ -2536,7 +2536,12 @@ class WhalePoller:
                 raise
             except Exception as exc:  # noqa: BLE001 — isolate all Solana provider failures
                 detail = self._solana_safe_text(str(exc) or type(exc).__name__)[:300]
-                if isinstance(exc, RateLimited):
+                if isinstance(exc, CircuitOpenError):
+                    state = "circuit_open"
+                    failure_delay = max(1.0, exc.retry_after)
+                    http_status = 503
+                    key_active = True
+                elif isinstance(exc, RateLimited):
                     state = "rate_limited"
                     failure_delay = max(1.0, exc.retry_after)
                     http_status = exc.http_status
@@ -2794,6 +2799,14 @@ class WhalePoller:
                 self.tron_status.update(connected=False, state="error", error=detail)
                 self._log_tron_exception(exc)
                 await asyncio.sleep(TRON_EVENT_INTERVAL)
+            except CircuitOpenError as exc:
+                detail = self._trongrid_safe_text(str(exc))[:200]
+                self.tron_status.update(connected=False, state="circuit_open", error=detail)
+                self._network_row("TRON").update(
+                    status="circuit_open", error=detail, http_status=503,
+                    last_error_at=time.time(), retry_at=time.time() + exc.retry_after,
+                    key_active=True)
+                await asyncio.sleep(max(TRON_EVENT_INTERVAL, exc.retry_after))
             except Exception as exc:  # noqa: BLE001 — isolate TronGrid failures
                 detail = self._trongrid_safe_text(str(exc) or type(exc).__name__)[:200]
                 self.tron_status.update(connected=False, state="error", error=detail)
@@ -2866,7 +2879,7 @@ class WhalePoller:
                     row = self._network_row(chain)
                     retry_at = float(row.get("retry_at") or 0.0)
                     if (row.get("status") in
-                            ("rate_limited", "auth_error", "quota_exhausted") and
+                            ("rate_limited", "auth_error", "quota_exhausted", "circuit_open") and
                             retry_at > time.time()):
                         next_due[chain] = max(
                             loop.time() + 0.1, loop.time() + retry_at - time.time())
@@ -2890,7 +2903,12 @@ class WhalePoller:
                                 "Local provider key allocation exhausted", key_active=True)
                     except Exception as exc:  # isolate failures to this chain
                         detail = self._redact_api_keys(str(exc) or type(exc).__name__)[:400]
-                        if isinstance(exc, RateLimited):
+                        if isinstance(exc, CircuitOpenError):
+                            state = "circuit_open"
+                            retry_after = max(1.0, exc.retry_after)
+                            http_status = 503
+                            key_active = True
+                        elif isinstance(exc, RateLimited):
                             state = "rate_limited"
                             retry_after = exc.retry_after
                             http_status = exc.http_status

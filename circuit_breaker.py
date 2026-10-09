@@ -105,7 +105,7 @@ class CircuitBreaker:
     ):
         self.name = str(name)
         self.failure_threshold = max(1, int(failure_threshold))
-        self.recovery_timeout = max(0.1, float(recovery_timeout))
+        self.recovery_timeout = max(0.01, float(recovery_timeout))
         self.max_recovery_timeout = max(self.recovery_timeout, float(max_recovery_timeout))
         self._lock = threading.Lock()
         self.state = "CLOSED"

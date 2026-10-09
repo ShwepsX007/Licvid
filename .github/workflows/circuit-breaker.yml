@@ -6,6 +6,7 @@ on:
       - "circuit_breaker.py"
       - "whale_poller.py"
       - "market_feed.py"
+      - "oi_feed.py"
       - "liq_api.py"
       - "whale_screener.py"
       - "server.py"
@@ -36,7 +37,7 @@ jobs:
 
       - name: Compile changed Python modules
         run: |
-          python -m py_compile circuit_breaker.py whale_poller.py market_feed.py liq_api.py whale_screener.py server.py
+          python -m py_compile circuit_breaker.py whale_poller.py market_feed.py oi_feed.py liq_api.py whale_screener.py server.py
 
       - name: Run circuit breaker state-machine tests
         run: python tests/test_circuit_breaker.py

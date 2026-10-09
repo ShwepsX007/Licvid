@@ -726,6 +726,10 @@ class Mailer:
         self.last: Dict[str, Any] = {}
         self.sent = 0
         self.failed = 0
+        # Динамическая конфигурация: вызывается перед каждой отправкой
+        # (Менеджер настроек подставляет его в server.py). Ошибка синхронизации
+        # не отменяет отправку — шлём с тем транспортом, что есть.
+        self.config_sync: Optional[Any] = None
 
     # ----- состояние ------------------------------------------------------
     def status(self) -> Dict[str, Any]:
@@ -750,6 +754,14 @@ class Mailer:
         to = (to or "").strip()
         if not to or "@" not in to:
             return False
+        # Динамическая конфигурация: настройки могли поменять в админке после
+        # старта сервера — подхватываем их перед каждой отправкой, а не только
+        # при создании почтовика.
+        if self.config_sync is not None:
+            try:
+                self.config_sync()
+            except Exception as e:  # noqa: BLE001 — настройки не роняют письмо
+                log.debug("mailer: синхронизация настроек: %s", e)
         if not self.enabled or not self.transport:
             with self._lock:
                 self.last = {"kind": kind, "to": to, "ok": False, "reason": "smtp_disabled",

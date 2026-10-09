@@ -208,29 +208,23 @@ class WorkspaceManager {
       if (toolbarBtn) toolbarBtn.textContent = multi ? 'Single chart' : 'Multi chart';
     } catch {}
     try {
-      const globalBtn = document.getElementById('workspace-global-toggle');
-      if (globalBtn) {
-        globalBtn.textContent = multi ? 'Single chart' : 'Multi chart';
-        globalBtn.style.background = multi ? '#1e3a5f' : '#151d2b';
-        globalBtn.style.borderColor = multi ? '#2a5a9a' : '#233044';
-        globalBtn.style.color = multi ? '#cfe3ff' : '#a8bdd6';
+      const headerBtn = document.getElementById('ws-mode-toggle');
+      if (headerBtn) {
+        headerBtn.textContent = multi ? 'Single chart' : 'Multi chart';
+        headerBtn.classList.toggle('active', !!multi);
       }
     } catch {}
   }
 
   _ensurePersistentToggle() {
     try {
-      const chartSection = document.querySelector('.chart-section');
-      if (!chartSection) return;
-      let btn = document.getElementById('workspace-global-toggle');
-      if (!btn) {
-        btn = document.createElement('button');
-        btn.id = 'workspace-global-toggle';
-        btn.className = 'ws-global-toggle';
-        btn.title = 'Toggle Multi-chart workspace';
-        // Place near chart header, visible in single mode to go back to multi
-        btn.style.cssText = 'position:absolute;top:6px;right:80px;z-index:50;background:#151d2b;border:1px solid #233044;color:#a8bdd6;border-radius:6px;padding:4px 8px;font-size:11px;cursor:pointer;';
-        chartSection.appendChild(btn);
+      const old = document.getElementById('workspace-global-toggle');
+      if (old && old.parentNode) old.parentNode.removeChild(old);
+    } catch {}
+    try {
+      const btn = document.getElementById('ws-mode-toggle');
+      if (btn && !btn._wsBound) {
+        btn._wsBound = true;
         btn.addEventListener('click', () => {
           const isNowMulti = !document.body.classList.contains('workspace-active');
           this.setWorkspaceActive(isNowMulti);
@@ -331,6 +325,7 @@ class WorkspaceManager {
       }
     }
     this._applySingleModeVisibility();
+    this._syncPanelChrome();
     try { localStorage.setItem('liqscope_workspace_single', this._singleMode ? '1' : '0'); } catch {}
     this.saveWorkspace();
     const btn = root ? root.querySelector('[data-action="single"]') : null;
@@ -379,6 +374,12 @@ class WorkspaceManager {
       setTimeout(() => this.panels.forEach(p => p.resize()), 150);
       setTimeout(() => this.panels.forEach(p => p.resize()), 500);
     }
+  }
+
+  _syncPanelChrome() {
+    this.panels.forEach(p => {
+      if (p && p.setChrome) p.setChrome(!!this._singleMode);
+    });
   }
 
   _renderTabs() {
@@ -453,13 +454,16 @@ class WorkspaceManager {
     } catch {
       document.body.classList.add('workspace-active');
     }
+    this._updateAllToggles();
 
     const raw = this.loadWorkspace();
     let panels = raw.panels || [];
     if (!panels.length) {
+      const seedA = this._freshLayers();
+      const seedB = this._freshLayers();
       panels = [
-        { id: this._generatePanelId(), symbol: 'BTC_USDT', timeframe: 5, layers: { levelsEnabled: false, levelsAlertEnabled: true, liqEnabled: true }, position: 0 },
-        { id: this._generatePanelId(), symbol: 'ETH_USDT', timeframe: 5, layers: { levelsEnabled: false, levelsAlertEnabled: true, liqEnabled: true }, position: 1 },
+        { id: this._generatePanelId(), symbol: 'BTC_USDT', timeframe: 5, layers: seedA, position: 0 },
+        { id: this._generatePanelId(), symbol: 'ETH_USDT', timeframe: 5, layers: seedB, position: 1 },
       ];
       this.workspaceId = raw.workspaceId || this._generateWorkspaceId();
     }
@@ -495,6 +499,7 @@ class WorkspaceManager {
     this._renderTabs();
     this._updateActiveStates();
     this._applySingleModeVisibility();
+    this._syncPanelChrome();
 
     try {
       const layout = localStorage.getItem('liqscope_workspace_layout');
@@ -595,6 +600,10 @@ class WorkspaceManager {
         if (!this._singleMode) this.toggleSingleMode();
         else this._applySingleModeVisibility();
         break;
+      case 'collapseRequested':
+        this.setActivePanel(panelId);
+        if (this._singleMode) this.toggleSingleMode();
+        break;
       case 'activated':
         this.setActivePanel(panelId);
         break;
@@ -624,6 +633,52 @@ class WorkspaceManager {
     }
   }
 
+  _layersFromMain() {
+    const keys = ['levelsEnabled', 'levelsAlertEnabled', 'liqEnabled', 'cvdEnabled', 'oiEnabled', 'bookEnabled', 'profileEnabled'];
+    const stores = {
+      levelsEnabled: 'liqscope.levelsEnabled',
+      levelsAlertEnabled: 'liqscope.levelsAlert',
+      liqEnabled: 'liqscope.liqEnabled',
+      cvdEnabled: 'liqscope.cvdEnabled',
+      oiEnabled: 'liqscope.oiEnabled',
+      bookEnabled: 'liqscope.bookEnabled',
+      profileEnabled: 'liqscope.profileEnabled',
+    };
+    const out = {};
+    let fromState = false;
+    try {
+      const s = window.state;
+      if (s) {
+        keys.forEach(k => {
+          if (typeof s[k] === 'boolean') { out[k] = !!s[k]; fromState = true; }
+        });
+      }
+    } catch {}
+    if (fromState) return out;
+    let any = false;
+    try {
+      keys.forEach(k => {
+        const v = localStorage.getItem(stores[k]);
+        if (v === '1' || v === '0') { out[k] = v === '1'; any = true; }
+      });
+    } catch {}
+    if (!any) return null;
+    if (typeof out.levelsAlertEnabled !== 'boolean') out.levelsAlertEnabled = true;
+    return out;
+  }
+
+  _freshLayers() {
+    return this._layersFromMain() || {
+      levelsEnabled: false,
+      levelsAlertEnabled: true,
+      liqEnabled: false,
+      cvdEnabled: false,
+      oiEnabled: false,
+      bookEnabled: false,
+      profileEnabled: false,
+    };
+  }
+
   addPanel(initialState) {
     if (this.panels.size >= this.maxPanels) {
       alert(`Max ${this.maxPanels} panels. Close one to add more.`);
@@ -634,13 +689,15 @@ class WorkspaceManager {
     if (!grid) return null;
 
     const id = (initialState && initialState.id) || this._generatePanelId();
+    const passedLayers = initialState && initialState.layers;
+    const layers = passedLayers || this._freshLayers();
     const state = Object.assign({
       id,
       symbol: 'BTC_USDT',
       timeframe: 5,
-      layers: { levelsEnabled: false, levelsAlertEnabled: true, liqEnabled: true },
+      layers,
       position: this.order.length,
-    }, initialState || {}, { id });
+    }, initialState || {}, { id, layers });
 
     const panel = new ChartPanel({
       id,
@@ -654,6 +711,7 @@ class WorkspaceManager {
     this.setActivePanel(id);
     this._renderTabs();
     this._applySingleModeVisibility();
+    this._syncPanelChrome();
     this.saveWorkspace();
     this._broadcast({ type: 'PANEL_STATE_UPDATE', panelId: id, panel: state });
     return panel;
@@ -813,22 +871,30 @@ class WorkspaceManager {
           this.panels.forEach(p => p.onCandleUpdate(msg.symbol, msg.tf, msg.candle));
         }
         break;
+      case 'liqs':
+        (msg.data || []).forEach(item => {
+          this.panels.forEach(p => { if (p.onLiquidation) p.onLiquidation(item); });
+        });
+        break;
       case 'candles':
         if (msg.symbol && msg.candles) {
           this.panels.forEach(p => {
             if (p.symbol===msg.symbol && Number(p.timeframe)===Number(msg.tf || msg.timeframe)) {
-              const candles = msg.candles.map(c => ({
-                time: Number(c.time || c.t || 0) > 1e12 ? Math.floor(Number(c.time)/1000) : Number(c.time||c.t||0),
-                open: Number(c.open||c.o),
-                high: Number(c.high||c.h),
-                low: Number(c.low||c.l),
-                close: Number(c.close||c.c),
-              })).filter(b=>b.time && isFinite(b.open)).sort((a,b)=>a.time-b.time);
+              const candles = msg.candles.map(c => (
+                p._normalizeBar ? p._normalizeBar(c) : {
+                  time: Number(c.time || c.t || 0) > 1e12 ? Math.floor(Number(c.time)/1000) : Number(c.time||c.t||0),
+                  open: Number(c.open||c.o),
+                  high: Number(c.high||c.h),
+                  low: Number(c.low||c.l),
+                  close: Number(c.close||c.c),
+                }
+              )).filter(b=>b && b.time && isFinite(b.open)).sort((a,b)=>a.time-b.time);
               p.candles = candles;
               if (p.candleSeries) {
                 try { p.candleSeries.setData(candles); } catch {}
               }
               if (candles.length) p._updatePriceDisplay(candles[candles.length-1].close);
+              if (p._drawOverlays) p._drawOverlays();
             }
           });
         }
@@ -839,38 +905,23 @@ class WorkspaceManager {
 
 window.WorkspaceManager = WorkspaceManager;
 
+/* Мультичарт как отдельный режим больше не стартует: несколько графиков
+   собирает chart_dock.js из обычных сингл-чартов. Класс оставлен, чтобы
+   старые вызовы не падали, но сам он терминал не перехватывает. */
 (function(){
-  function initWorkspace() {
+  function retireMultiChart() {
     try {
-      const host = document.getElementById('workspace-host');
-      if (!host) return;
-      if (!window.location.pathname.includes('/terminal')) return;
-
-      if (!window.LiqScopeApp) window.LiqScopeApp = {};
-      window.LiqScopeApp.getSymbols = function() {
-        try {
-          if (window.state && Array.isArray(window.state.symbols)) return window.state.symbols;
-        } catch {}
-        return [];
-      };
-
-      const wm = new WorkspaceManager({ container: host, maxPanels: 6 });
-      window.LiqScopeWorkspace = wm;
-      setTimeout(() => wm.mount(), 800);
-
+      document.body.classList.remove('workspace-active');
+      document.body.classList.remove('workspace-single-mode');
       const params = new URLSearchParams(window.location.search);
-      if (params.get('mode')==='panel') {
-        document.body.classList.add('panel-mode');
-        wm.mount();
+      if (params.get('embed') === '1' || params.get('mode') === 'panel') {
+        document.body.classList.add('chart-embed');
       }
-    } catch(e) {
-      console.warn('workspace init failed', e);
-    }
+    } catch (e) {}
   }
-
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initWorkspace);
+    document.addEventListener('DOMContentLoaded', retireMultiChart);
   } else {
-    initWorkspace();
+    retireMultiChart();
   }
 })();

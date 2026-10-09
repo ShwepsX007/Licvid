@@ -9,11 +9,12 @@ OI. Здесь проверяется арифметика: окна, сорти
 """
 import os
 import sys
+import time
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from flow_feed import FlowFeed, minute_of   # noqa: E402
+from flow_feed import MINUTE, FlowFeed, minute_of   # noqa: E402
 
 
 NOW = 1_789_596_850.0          # 17.09.2026, середина минуты
@@ -195,6 +196,127 @@ class TestFlowFeed(unittest.TestCase):
         for i in range(30):
             f.add_trade(f"C{i}_USDT", NOW, 1000 + i)
         self.assertEqual(len(f.rows("cvd", 5, NOW, limit=5)), 5)
+
+
+
+
+class WindowRangeTest(unittest.TestCase):
+    """Окно агрегата обходится диапазоном минут, а не сортировкой всех ключей.
+
+    ``flow_snapshot`` зовёт ``rows()`` трижды (cvd, oi, liq) плюс ``summary`` —
+    ещё три прохода: шесть обходов на каждую монету на каждом WS-подключении и
+    каждой рассылке ленты «ВСЕ». Раньше каждый обход сортировал ВСЕ минуты
+    монеты (``keep_min`` = 120) ради пяти нужных. Ключи выровнены по минутам,
+    поэтому достаточно пройтись по диапазону — порядок тот же, суммы и
+    «последняя минута» не меняются.
+    """
+
+    def _ref_window(self, f, sym, window_min, now):
+        """Прежняя реализация: sorted() по всем минутам и отбрасывание лишних."""
+        rows = f._by_sym.get(sym) or {}
+        first = minute_of(now) - (max(1, window_min) - 1) * MINUTE
+        agg = {"liq_long": 0.0, "liq_short": 0.0, "liq_count": 0, "vol": 0.0,
+               "cvd": 0.0, "has_cvd": False, "oi": None, "oi_from": None,
+               "minutes": 0, "last": 0}
+        for m in sorted(rows):
+            if m < first:
+                continue
+            c = rows[m]
+            agg["minutes"] += 1
+            agg["last"] = m
+            agg["liq_long"] += c.get("liq_long") or 0.0
+            agg["liq_short"] += c.get("liq_short") or 0.0
+            agg["liq_count"] += int(c.get("liq_count") or 0)
+            agg["vol"] += c.get("vol") or 0.0
+            if c.get("has_cvd"):
+                agg["cvd"] += c.get("cvd") or 0.0
+                agg["has_cvd"] = True
+            if c.get("oi") is not None:
+                if agg["oi_from"] is None:
+                    agg["oi_from"] = c.get("oi_from")
+                agg["oi"] = c.get("oi")
+        if not agg["minutes"]:
+            return None
+        return agg
+
+    def _fill(self, f, nmin, base=NOW):
+        for i in range(nmin):
+            ts = base - (nmin - 1 - i) * MINUTE + 7
+            f.add_liq({"symbol": "BTC_USDT", "timestamp": ts, "side": "SELL",
+                       "usd": 1000.0 + i, "price": 100.0 + i})
+            f.add_trade("BTC_USDT", ts, 5000.0 + i)
+            f.add_trade("BTC_USDT", ts, -(4000.0 + i))
+            f.add_volume("BTC_USDT", ts, 9000.0 + i)
+            f.add_oi("BTC_USDT", ts, 900_000.0 + i * 10)
+        return f
+
+    def test_window_matches_sorted_walk(self):
+        """Диапазон даёт ровно тот же агрегат, что прежняя сортировка."""
+        f = self._fill(FlowFeed(), 120)
+        for window in (1, 2, 5, 15, 60, 120, 121, 500):
+            self.assertEqual(f._window("BTC_USDT", window, NOW),
+                             self._ref_window(f, "BTC_USDT", window, NOW),
+                             f"окно {window} мин")
+
+    def test_window_with_gaps_and_sparse_minutes(self):
+        """Дырки в минутах: отсутствующие ключи просто пропускаются."""
+        f = FlowFeed()
+        for k in (0, 3, 17, 40, 119):                    # редкие минуты
+            ts = NOW - k * MINUTE + 5
+            f.add_liq({"symbol": "ETH_USDT", "timestamp": ts, "side": "BUY",
+                       "usd": 100.0 + k, "price": 50.0})
+            f.add_oi("ETH_USDT", ts, 10_000.0 + k)
+        for window in (1, 5, 18, 60, 120):
+            self.assertEqual(f._window("ETH_USDT", window, NOW),
+                             self._ref_window(f, "ETH_USDT", window, NOW),
+                             f"окно {window} мин с дырками")
+        # oi_from — из ПЕРВОЙ минуты окна с OI, last — из последней
+        agg = f._window("ETH_USDT", 120, NOW)
+        self.assertEqual(agg["minutes"], 5)
+        self.assertEqual(agg["last"], minute_of(NOW - 0 * MINUTE + 5))
+        self.assertEqual(agg["oi_from"], 10_000.0 + 119)
+
+    def test_window_sees_minutes_ahead_of_local_clock(self):
+        """Биржевые часы впереди наших: такие минуты не теряются."""
+        f = FlowFeed()
+        self._fill(f, 10)
+        for k in (1, 2, 3):                               # будущее относительно NOW
+            ts = NOW + k * MINUTE
+            f.add_liq({"symbol": "SOL_USDT", "timestamp": ts, "side": "SELL",
+                       "usd": 10.0 * k, "price": 20.0})
+        for window in (5, 60):
+            self.assertEqual(f._window("SOL_USDT", window, NOW),
+                             self._ref_window(f, "SOL_USDT", window, NOW),
+                             f"окно {window} мин с будущими минутами")
+
+    def test_absurd_future_minute_does_not_widen_the_walk(self):
+        """Метка на годы вперёд не растягивает обход до миллиона шагов."""
+        f = FlowFeed()
+        self._fill(f, 5)
+        far = NOW + 400 * 24 * 3600
+        f.add_trade("DOGE_USDT", far, 1.0)
+        f.add_trade("DOGE_USDT", NOW, 2.0)
+        t0 = time.perf_counter()
+        for _ in range(200):
+            f._window("DOGE_USDT", 5, NOW)
+        spent = time.perf_counter() - t0
+        self.assertLess(spent, 1.0, f"200 окон обошлись в {spent*1000:.0f} мс")
+        # данные текущей минуты на месте
+        self.assertGreater(f._window("DOGE_USDT", 5, NOW)["minutes"], 0)
+
+    def test_top_minute_follows_pruning(self):
+        """Обрезка старых минут не сбивает верхнюю границу окна."""
+        f = FlowFeed(keep_min=10)
+        self._fill(f, 40)
+        self.assertLessEqual(len(f._by_sym["BTC_USDT"]), 10 + 5)
+        self.assertEqual(f._window("BTC_USDT", 5, NOW),
+                         self._ref_window(f, "BTC_USDT", 5, NOW))
+        self.assertEqual(f._top["BTC_USDT"], minute_of(NOW - 0 * MINUTE + 7))
+
+    def test_unknown_symbol_and_empty_feed(self):
+        f = FlowFeed()
+        self.assertIsNone(f._window("NOPE_USDT", 5, NOW))
+        self.assertEqual(f.rows("cvd", 5, NOW), [])
 
 
 if __name__ == "__main__":

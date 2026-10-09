@@ -1,5 +1,8 @@
 (function (global) {
     "use strict";
+    // URL доступен до DOMContentLoaded (в отличие от body.embed-mode).
+    const q = new URLSearchParams(global.location.search);
+    if (q.get("embed") === "1" || q.get("mode") === "panel") return;
 
     var T = {
         ru: {
@@ -54,6 +57,17 @@
             tgWhy: "сигналы алертов приходят в бота, привяжите — и они не потеряются",
             tgLink: "Привязать Telegram",
             tgUnlink: "Отвязать",
+            googleLogin: "Войти через Google",
+            googleOff: "Google вход недоступен",
+            googleErr: "Не удалось войти через Google — попробуйте ещё раз.",
+            googleUnverified: "Почта в аккаунте Google не подтверждена.",
+            googleLinked: "Google привязан",
+            googleNotLinked: "Google не привязан — привяжите для входа в один клик",
+            googleLink: "Привязать Google",
+            googleUnlink: "Отвязать",
+            googleUnlinkOk: "Google отвязан от аккаунта.",
+            googleUnlinkSure: "Отвязать Google от аккаунта?",
+            googleUnlinkLast: "Сначала задайте пароль или привяжите Telegram, чтобы не потерять доступ к аккаунту.",
             nameEdit: "Изменить ник",
             nameSave: "Сохранить",
             nameCancel: "Отмена",
@@ -91,7 +105,8 @@
             soon: "скоро",
             digestOpen: "Открыть дайджест",
             digest: "Дайджест",
-            hourly: "Сводки по часам",
+            hourly: "Часовые сводки",
+            articles: "Статьи",
             waitlistOn: "В листе ожидания",
             waitlistOff: "В лист ожидания",
             subscribed: "Подключено",
@@ -165,6 +180,17 @@
             tgWhy: "alert signals arrive in the bot — link it so they are not lost",
             tgLink: "Link Telegram",
             tgUnlink: "Unlink",
+            googleLogin: "Sign in with Google",
+            googleOff: "Google sign-in unavailable",
+            googleErr: "Google sign-in failed — please try again.",
+            googleUnverified: "Your Google account email is not verified.",
+            googleLinked: "Google linked",
+            googleNotLinked: "Google not linked — link it for one-click sign-in",
+            googleLink: "Link Google",
+            googleUnlink: "Unlink",
+            googleUnlinkOk: "Google unlinked from your account.",
+            googleUnlinkSure: "Unlink Google from your account?",
+            googleUnlinkLast: "Set a password or link Telegram first so you do not lose access to your account.",
             nameEdit: "Edit nick",
             nameSave: "Save",
             nameCancel: "Cancel",
@@ -202,7 +228,8 @@
             soon: "soon",
             digestOpen: "Open digest",
             digest: "Digest",
-            hourly: "Hourly summaries",
+            hourly: "Hourly Summaries",
+            articles: "Articles",
             waitlistOn: "On the waitlist",
             waitlistOff: "Join waitlist",
             subscribed: "On",
@@ -222,7 +249,7 @@
         },
         zh: {
             login: "登录", cabinet: "账户", admin: "管理", logout: "退出",
-            terminal: "终端",
+            terminal: "终端", digest: "日报", hourly: "小时市场简报", articles: "文章",
             nameEdit: "修改昵称", nameSave: "保存", nameCancel: "取消",
             namePh: "怎么称呼您",
             namePh2: "昵称 — 显示在聊天和评论中",
@@ -234,7 +261,8 @@
         },
         hi: {
             login: "लॉग इन", cabinet: "कैबिनेट", admin: "एडमिन", logout: "लॉग आउट",
-            terminal: "टर्मिनल",
+            terminal: "टर्मिनल", digest: "डाइजेस्ट",
+            hourly: "हर घंटे की बाज़ार सारांश", articles: "लेख",
             nameEdit: "निक बदलें", nameSave: "सहेजें", nameCancel: "रद्द करें",
             namePh: "आपको क्या कहें",
             namePh2: "आपका निक — चैट और कमेंट में दिखेगा",
@@ -246,7 +274,8 @@
         },
         es: {
             login: "Entrar", cabinet: "Cuenta", admin: "Admin", logout: "Salir",
-            terminal: "Terminal",
+            terminal: "Terminal", digest: "Resumen",
+            hourly: "Resúmenes del mercado por horas", articles: "Artículos",
             nameEdit: "Cambiar nick", nameSave: "Guardar", nameCancel: "Cancelar",
             namePh: "Cómo te llamamos",
             namePh2: "Tu nick — se ve en chat y comentarios",
@@ -256,6 +285,17 @@
             nameLong: "Nombre demasiado largo — hasta 64 caracteres.",
             nameErr: "No se pudo guardar el nombre — inténtalo de nuevo.",
         },
+    };
+
+    // Some lightweight pages (notably the screener) load account.js without
+    // the full i18n bundles. Keep their shared section links readable there.
+    var NAV_FALLBACKS = {
+        "hour.to_terminal": "terminal",
+        "hour.digest": "digest",
+        "hour.title": "hourly",
+        "art.title": "articles",
+        "nav.cabinet": "cabinet",
+        "nav.admin": "admin",
     };
 
     function lang() {
@@ -285,7 +325,10 @@
                 var page = LiqScopeI18n.t(k, vars);
                 if (page !== k) return page;
             }
-            s = k;
+            var fallbackKey = NAV_FALLBACKS[k];
+            var fallbackDict = T[code] || T.ru;
+            s = fallbackKey && (fallbackDict[fallbackKey] || T.en[fallbackKey]);
+            if (s === undefined) s = k;
         }
         if (vars) {
             Object.keys(vars).forEach(function (name) {
@@ -408,10 +451,12 @@
             }
         } else {
             if (path !== "/cabinet") {
-                html += '<a class="btn btn-ghost btn-compact" href="/cabinet">' + t("cabinet") + "</a>";
+                html += '<a class="btn btn-ghost btn-compact" href="/cabinet">' +
+                    t("nav.cabinet") + "</a>";
             }
             if (user.is_admin && path !== "/admin") {
-                html += '<a class="btn btn-ghost btn-compact" href="/admin">' + t("admin") + "</a>";
+                html += '<a class="btn btn-ghost btn-compact" href="/admin">' +
+                    t("nav.admin") + "</a>";
             }
             html += '<button type="button" class="btn btn-ghost btn-compact" id="acc-logout">' + t("logout") + "</button>";
         }
@@ -439,8 +484,9 @@
 
     function fillAvatar(el, user) {
         if (!el || !user) return;
-        if (user.photo_url) {
-            el.innerHTML = '<img alt="" src="' + user.photo_url.replace(/"/g, "") + '">';
+        var url = user.photo_url || user.avatar_url || "";
+        if (url) {
+            el.innerHTML = '<img alt="" src="' + url.replace(/"/g, "") + '">';
         } else {
             el.textContent = initials(user);
         }
@@ -569,6 +615,7 @@
             }
         }
         paintTgCard(u, payload);
+        paintGoogleCard(u, payload);
         bindNameEdit(u);
         var botLink = $("cab-bot-link");
         if (botLink) {
@@ -604,6 +651,14 @@
         // поднятый до обновления (или своя база без строки levels), отдаёт
         // список без неё — тогда в кабинете не было ни карточки, ни доски.
         // Карточку добавляем на месте, а доска сама объяснит, что расчёта нет.
+        // «Сигналы Скринера китов» заводит миграция сервисов; на старой базе
+        // (сервер не перезапущен) карточку добавляем на месте, иначе фильтры
+        // было бы не где настраивать.
+        if (!list.some(function (s) { return s.slug === "screener_signals"; })) {
+            list = list.concat([{ slug: "screener_signals", title: t("sc.card_title"),
+                icon: "🐋", description: t("sc.card_desc"), coming_soon: false,
+                subscribed: true }]);
+        }
         if (!list.some(function (s) { return s.slug === "levels"; })) {
             list = list.concat([{ slug: "levels", title: t("lv.title"), icon: "🎯",
                 description: t("lv.svc_desc"), coming_soon: false, subscribed: true }]);
@@ -624,6 +679,8 @@
                             ? '<div class="svc-board" id="book-board"></div>'
                             : s.slug === "levels"
                                 ? '<div class="svc-board" id="levels-board"></div>'
+                                : s.slug === "screener_signals"
+                                    ? '<div class="svc-board" id="screener-signals-board"></div>'
                             : "<p>" + (s.description || "") + "</p>" + soon +
                     '<div class="row-actions">' +
                     // у дайджеста есть своя страница: сразу ведём читать выпуски
@@ -654,6 +711,7 @@
                 if (!was && slug === "watchlist") bootPumps();
                 if (!was && slug === "book") bootBook();
                 if (!was && slug === "levels") bootLevels();
+                if (!was && slug === "screener_signals") bootScreenerSignals();
             });
         });
         box.querySelectorAll("button[data-slug]").forEach(function (btn) {
@@ -684,6 +742,7 @@
         if (open === "watchlist") bootPumps();
         if (open === "book") bootBook();
         if (open === "levels") bootLevels();
+        if (open === "screener_signals") bootScreenerSignals();
     }
 
     var tgLinkTimer = null;
@@ -708,6 +767,7 @@
         else if (slug === "watchlist") bootPumps();
         else if (slug === "book") bootBook();
         else if (slug === "levels") bootLevels();
+        else if (slug === "screener_signals") bootScreenerSignals();
         else if (slug === "alerts") bootAlerts();
     }
 
@@ -1154,6 +1214,252 @@
                 lvBuilt = false;
                 if ($("levels-board") && lvData) paintLevels(lvData);
             });
+        }
+    }
+
+    /* ---------- 🐋 Signal Screener: свои фильтры китов + Telegram ---------- */
+    // Доска живёт в гармошке сервиса: конфиг один на пользователя, кнопки меняют
+    // его сразу (POST с дебаунсом), а разметка строится один раз — иначе фокус
+    // убегал бы из поля «свой порог» при каждом клике.
+    var scCfg = null, scMeta = null, scSaveT = null, scBuilt = false, scTimer = null;
+    var scDirty = false;          // пользователь менял фильтр, POST не закончен
+
+    function scDefaults() {
+        return { notify: false, exchange: "ALL", direction: "all", chain: "ALL",
+            min_usd: 250000, cooldown_min: 15 };
+    }
+    function scCfgGet() { return Object.assign(scDefaults(), scCfg || {}); }
+
+    function scMoney(v) {
+        v = Number(v) || 0;
+        if (v >= 1e9) return "$" + (v / 1e9).toFixed(2) + "B";
+        if (v >= 1e6) return "$" + (v / 1e6).toFixed(v >= 1e7 ? 1 : 2) + "M";
+        if (v >= 1e3) return "$" + Math.round(v / 1e3) + "K";
+        return "$" + Math.round(v);
+    }
+
+    function scChip(on, attrs, text) {
+        return '<button type="button" class="al-chip' + (on ? " on" : "") + '" ' +
+            attrs + ">" + text + "</button>";
+    }
+
+    function scStatus(text) {
+        var st = $("sc-status");
+        if (st) st.textContent = text || "";
+    }
+
+    function loadScreener(full) {
+        return api("/api/account/screener/signals").then(function (d) {
+            if (!d || !d.ok) {
+                if (!scBuilt) paintScreener({ error: true });
+                return;
+            }
+            scMeta = d;
+            // конфиг перечитываем, только пока пользователь ничего не меняет, и
+            // один раз при открытии доски
+            if ((!scCfg || full === true) && !scDirty) scCfg = Object.assign(scDefaults(), d.config || {});
+            paintScreener({});
+        }).catch(function () {
+            if (!scBuilt) paintScreener({ error: true });
+        });
+    }
+
+    function scSet(patch) {
+        scCfg = Object.assign(scDefaults(), scCfg || {}, patch || {});
+        scDirty = true;
+        paintScreener({});
+        if (scSaveT) clearTimeout(scSaveT);
+        scSaveT = setTimeout(function () {
+            scSaveT = null;
+            scStatus(t("sc.saving"));
+            api("/api/account/screener/signals", {
+                method: "POST", body: JSON.stringify(scCfg),
+            }).then(function (d) {
+                scDirty = false;
+                if (d && d.config) scCfg = Object.assign(scDefaults(), d.config);
+                scStatus(d && d.ok ? t("sc.saved") : t("sc.fail"));
+                paintScreener({});
+                // превью совпадений пересчитывают по новому фильтру
+                loadScreener(false);
+            }).catch(function () {
+                scDirty = false;
+                scStatus(t("sc.fail"));
+            });
+        }, 350);
+    }
+
+    function scRecentHtml(rows) {
+        if (!rows || !rows.length) {
+            return '<div class="lv-sub">' + esc(t("sc.no_recent")) + "</div>";
+        }
+        return '<div class="sc-recent">' + rows.map(function (row) {
+            var dir = String(row.direction || "");
+            var cls = dir === "inflow" ? " is-in" : dir === "outflow" ? " is-out" : "";
+            var place = row.venue_name || row.label || t("sc.unlabeled");
+            var when = row.ts ? new Date(Number(row.ts) * 1000).toLocaleTimeString() : "";
+            return '<div class="sc-recent-row' + cls + '"><b>' + esc(scMoney(row.usd)) +
+                "</b> " + esc(row.symbol || "") + " · " + esc(place) + " · " +
+                esc(t(dir === "inflow" ? "sc.dir_in" : dir === "outflow" ? "sc.dir_out"
+                                                    : "sc.dir_transfer")) +
+                (when ? ' <span class="sc-recent-ts">' + esc(when) + "</span>" : "") + "</div>";
+        }).join("") + "</div>";
+    }
+
+    function scChips(board, selector, attr, isOn) {
+        board.querySelectorAll(selector).forEach(function (b) {
+            b.classList.toggle("on", isOn(b.getAttribute(attr)));
+        });
+    }
+
+    /** Состояние доски: подписи ивыбранные чипсы. Отдельно от разметки — чтобы
+     *  перерисовка не трогала поле с введённой суммой. */
+    function scApply(cfg, meta) {
+        var board = $("screener-signals-board");
+        if (!board) return;
+        var sw = $("sc-tg");
+        if (sw) {
+            sw.classList.toggle("on", !!cfg.notify);
+            var span = sw.querySelector("span");
+            if (span) span.textContent = cfg.notify ? t("sc.tg_on") : t("sc.tg_off");
+        }
+        scChips(board, "[data-sc-ex]", "data-sc-ex",
+                function (v) { return (cfg.exchange || "ALL") === (v || "ALL"); });
+        scChips(board, "[data-sc-dir]", "data-sc-dir",
+                function (v) { return (cfg.direction || "all") === (v || "all"); });
+        scChips(board, "[data-sc-chain]", "data-sc-chain",
+                function (v) { return (cfg.chain || "ALL") === (v || "ALL"); });
+        scChips(board, "[data-sc-vol]", "data-sc-vol",
+                function (v) { return Math.abs((Number(cfg.min_usd) || 0) - Number(v)) < 1; });
+        scChips(board, "[data-sc-pause]", "data-sc-pause",
+                function (v) { return (Number(cfg.cooldown_min) || 0) === Number(v); });
+        var min = $("sc-min");
+        if (min && document.activeElement !== min) {
+            min.value = String(Math.round(Number(cfg.min_usd) || 0));
+        }
+        var recent = $("sc-recent");
+        if (recent) recent.innerHTML = scRecentHtml((meta || {}).recent);
+        // Telegram без привязанного бота: тумблер есть, но писать некуда
+        if (meta && meta.telegram === false && cfg.notify) scStatus(t("sc.no_telegram"));
+    }
+
+    function paintScreener(state) {
+        var board = $("screener-signals-board");
+        if (!board) return;
+        if (state && state.error) {
+            board.innerHTML = '<div class="lv-signal"><div class="lv-sub">' +
+                esc(t("sc.unavailable")) + "</div></div>";
+            scBuilt = false;
+            return;
+        }
+        var cfg = scCfgGet();
+        var meta = scMeta || {};
+        var presets = meta.presets || {};
+        var volumes = presets.volume_usd || [50000, 100000, 250000, 500000, 1000000];
+        var pauses = presets.cooldown_min || [0, 5, 15, 30, 60];
+        var chains = presets.chains || [];
+        var titles = presets.network_titles || {};
+        var exchanges = meta.exchanges || [];
+        var venues = exchanges.map(function (row) {
+            return scChip(false, 'data-sc-ex="' + esc(row.id) + '"', esc(row.name || row.id));
+        }).join("");
+        if (!scBuilt) {
+            board.innerHTML =
+                '<div class="lv-signal" id="sc-signal">' +
+                '<div class="bk-head">' +
+                '<span class="lv-cap">' + esc(t("sc.title")) + "</span>" +
+                '<label class="al-switch" id="sc-tg"><i></i><span></span></label>' +
+                '<span class="bk-status" id="sc-status"></span></div>' +
+                '<div class="lv-sub">' + esc(t("sc.note")) + "</div>" +
+                '<div class="al-label">' + esc(t("sc.exchange")) + "</div>" +
+                '<div class="al-chips" id="sc-exchanges">' +
+                scChip(false, 'data-sc-ex="ALL"', esc(t("sc.exchange_all"))) + venues +
+                (exchanges.length || meta.available === false ? "" :
+                    '<span class="lv-sub">' + esc(t("sc.no_exchanges")) + "</span>") +
+                "</div>" +
+                '<div class="al-label">' + esc(t("sc.direction")) + "</div>" +
+                '<div class="al-chips" id="sc-direction">' +
+                scChip(false, 'data-sc-dir="all"', esc(t("sc.dir_all"))) +
+                scChip(false, 'data-sc-dir="inflow"', esc(t("sc.dir_in"))) +
+                scChip(false, 'data-sc-dir="outflow"', esc(t("sc.dir_out"))) +
+                "</div>" +
+                '<div class="al-label">' + esc(t("sc.network")) + "</div>" +
+                '<div class="al-chips" id="sc-chains">' +
+                scChip(false, 'data-sc-chain="ALL"', esc(t("sc.network_all"))) +
+                chains.map(function (id) {
+                    return scChip(false, 'data-sc-chain="' + esc(id) + '"',
+                        esc(titles[id] || id));
+                }).join("") + "</div>" +
+                '<div class="al-label">' + esc(t("sc.threshold")) + "</div>" +
+                '<div class="al-chips" id="sc-volumes">' +
+                volumes.map(function (v) {
+                    return scChip(false, 'data-sc-vol="' + Number(v) + '"', esc(scMoney(v)));
+                }).join("") + "</div>" +
+                '<div class="al-row"><input id="sc-min" type="number" min="0" step="1000">' +
+                '<span class="lv-sub">' + esc(t("sc.threshold_manual")) + "</span></div>" +
+                '<div class="al-label">' + esc(t("sc.pause")) + "</div>" +
+                '<div class="al-chips" id="sc-pauses">' +
+                pauses.map(function (m) {
+                    return scChip(false, 'data-sc-pause="' + Number(m) + '"',
+                        Number(m) ? esc(t("sc.pause_min", { min: m })) : esc(t("sc.pause_off")));
+                }).join("") + "</div>" +
+                '<div class="al-label">' + esc(t("sc.recent")) + "</div>" +
+                '<div id="sc-recent"></div>' +
+                "</div>";
+            bindScreener(board);
+            scBuilt = true;
+        }
+        scApply(cfg, meta);
+    }
+
+    function bindScreener(board) {
+        var sw = $("sc-tg");
+        if (sw) {
+            sw.onclick = function (e) {
+                e.preventDefault();
+                scSet({ notify: !scCfgGet().notify });
+            };
+        }
+        board.querySelectorAll("[data-sc-ex]").forEach(function (b) {
+            b.onclick = function () { scSet({ exchange: b.getAttribute("data-sc-ex") || "ALL" }); };
+        });
+        board.querySelectorAll("[data-sc-dir]").forEach(function (b) {
+            b.onclick = function () { scSet({ direction: b.getAttribute("data-sc-dir") || "all" }); };
+        });
+        board.querySelectorAll("[data-sc-chain]").forEach(function (b) {
+            b.onclick = function () { scSet({ chain: b.getAttribute("data-sc-chain") || "ALL" }); };
+        });
+        board.querySelectorAll("[data-sc-vol]").forEach(function (b) {
+            b.onclick = function () { scSet({ min_usd: Number(b.getAttribute("data-sc-vol")) || 0 }); };
+        });
+        board.querySelectorAll("[data-sc-pause]").forEach(function (b) {
+            b.onclick = function () {
+                scSet({ cooldown_min: Number(b.getAttribute("data-sc-pause")) || 0 });
+            };
+        });
+        var min = $("sc-min");
+        if (min) {
+            min.onchange = function () {
+                var value = Number(min.value);
+                if (!isFinite(value) || value < 0) value = 0;
+                scSet({ min_usd: Math.round(value) });
+            };
+        }
+    }
+
+    function bootScreenerSignals() {
+        if (!$("screener-signals-board")) return;
+        scBuilt = false;
+        scDirty = false;
+        loadScreener(true);
+        if (scTimer) clearInterval(scTimer);
+        scTimer = setInterval(function () {
+            var board = $("screener-signals-board");
+            if (!document.hidden && !scDirty && board &&
+                    board.offsetParent !== null) loadScreener(false);
+        }, 60000);
+        if (window.LiqScopeI18n && LiqScopeI18n.onChange && !window._scSigLangHook) {
+            window._scSigLangHook = true;
+            LiqScopeI18n.onChange(function () { scBuilt = false; paintScreener({}); });
         }
     }
 
@@ -2003,6 +2309,33 @@
         if (off) off.classList.toggle("hidden", !u.tg_linked);
     }
 
+    function paintGoogleCard(u, payload) {
+        var box = $("google-card");
+        if (!box) return;
+        var state = $("google-state");
+        var btn = $("google-link");
+        var off = $("google-unlink");
+        var gEnabled = !!(payload && (payload.google_enabled || (payload.providers && payload.providers.google)));
+        if (state) {
+            state.textContent = u.google_linked
+                ? (t("googleLinked") + (u.email ? " (" + u.email + ")" : ""))
+                : (gEnabled ? t("googleNotLinked") : t("googleOff"));
+        }
+        if (btn) {
+            btn.classList.toggle("hidden", !!u.google_linked);
+            if (!gEnabled) {
+                btn.classList.add("disabled");
+                btn.setAttribute("aria-disabled", "true");
+                btn.title = t("googleOff");
+            } else {
+                btn.classList.remove("disabled");
+                btn.removeAttribute("aria-disabled");
+                btn.title = "";
+            }
+        }
+        if (off) off.classList.toggle("hidden", !u.google_linked);
+    }
+
 
     var _cabUser = null;
     var _nameDelegated = false;
@@ -2169,11 +2502,28 @@
         });
     }
 
+    function unlinkGoogle() {
+        if (!window.confirm(t("googleUnlinkSure"))) return;
+        api("/api/auth/google/unlink", { method: "POST" }).then(function (d) {
+            var st = $("google-state");
+            if (d.ok) {
+                if (st) st.textContent = t("googleUnlinkOk");
+                bootCabinet();
+            } else if (st) {
+                st.textContent = d.error === "last_auth_method"
+                    ? t("googleUnlinkLast")
+                    : (d.hint || d.error || "error");
+            }
+        });
+    }
+
     function bootCabinet() {
         var tgBtn = $("tg-link");
         if (tgBtn && !tgBtn._bound) { tgBtn._bound = true; tgBtn.addEventListener("click", linkTelegram); }
         var tgOff = $("tg-unlink");
         if (tgOff && !tgOff._bound) { tgOff._bound = true; tgOff.addEventListener("click", unlinkTelegram); }
+        var gOff = $("google-unlink");
+        if (gOff && !gOff._bound) { gOff._bound = true; gOff.addEventListener("click", unlinkGoogle); }
         // feedback moved to chat support tab
         Promise.all([
             api("/api/auth/me"),
@@ -6067,7 +6417,63 @@
             return;
         }
         if (q.get("banned")) { setStatus(status, t("banned"), "err"); return; }
+        var gErr = q.get("error") || q.get("google") || "";
+        if (gErr) {
+            if (gErr === "google_oauth_not_configured") setStatus(status, t("googleOff"), "err");
+            else if (gErr === "google_email_unverified") setStatus(status, t("googleUnverified"), "err");
+            else setStatus(status, t("googleErr"), "err");
+            return;
+        }
         if (me && !me.mail_enabled) setStatus(status, t("mailOff"), "err");
+    }
+
+    function safeNextPath() {
+        var raw = (new URLSearchParams(location.search).get("next") || "/cabinet").trim();
+        if (raw.charAt(0) !== "/" || raw.indexOf("//") === 0) return "/cabinet";
+        return raw;
+    }
+
+    // Кнопка Google — обычная ссылка на /api/auth/google/login: без ключей
+    // сервер сам вернёт 503, а вход работает даже со старым/не загрузившимся
+    // скриптом. JS лишь добавляет ?next= и гасит кнопку, когда вход выключен.
+    function googleLoginOff(btn) {
+        if (!btn) return false;
+        return btn.getAttribute("aria-disabled") === "true" ||
+            btn.disabled === true;
+    }
+
+    function paintGoogleLoginBtn(enabled) {
+        var gBtn = $("google-login-btn");
+        var gNote = $("google-note");
+        if (!gBtn) return;
+        if (enabled === false) {
+            gBtn.setAttribute("aria-disabled", "true");
+            gBtn.classList.add("is-off");
+            gBtn.removeAttribute("href");
+            if ("disabled" in gBtn) gBtn.disabled = true;
+            gBtn.title = t("googleOff");
+            if (gNote) gNote.classList.remove("hidden");
+        } else {
+            gBtn.removeAttribute("aria-disabled");
+            gBtn.classList.remove("is-off");
+            if (gBtn.tagName === "A") gBtn.setAttribute("href", "/api/auth/google/login");
+            if ("disabled" in gBtn) gBtn.disabled = false;
+            gBtn.title = "";
+            if (gNote) gNote.classList.add("hidden");
+        }
+    }
+
+    function startGoogleLogin(ev) {
+        var gBtn = $("google-login-btn");
+        if (googleLoginOff(gBtn)) {
+            if (ev && ev.preventDefault) ev.preventDefault();
+            setStatus($("login-status"), t("googleOff"), "err");
+            return;
+        }
+        var next = safeNextPath();
+        var url = "/api/auth/google/login" + (next ? "?next=" + encodeURIComponent(next) : "");
+        if (ev && ev.preventDefault) ev.preventDefault();
+        location.href = url;
     }
 
     function bootLogin() {
@@ -6103,10 +6509,17 @@
             });
         });
 
+        api("/api/auth/providers").then(function (p) {
+            if (p && typeof p.google === "boolean") paintGoogleLoginBtn(p.google);
+        }).catch(function () {});
+
         api("/api/auth/me").then(function (me) {
             paintNav(me.user);
             if (me.user) { location.href = "/cabinet"; return; }
             statusFromQuery(me);
+            if (typeof me.google_enabled === "boolean") {
+                paintGoogleLoginBtn(me.google_enabled);
+            }
             // Telegram остаётся запасным входом: ссылка на бота или виджет
             var alt = $("tg-alt");
             if (alt && !me.bot_ready) alt.classList.add("hidden");
@@ -6123,6 +6536,8 @@
                 widget.appendChild(sc);
             }
         });
+        var gBtn = $("google-login-btn");
+        if (gBtn) gBtn.addEventListener("click", startGoogleLogin);
         var btn = $("login-btn");
         if (btn) btn.addEventListener("click", startLogin);
     }
@@ -6161,6 +6576,9 @@
     }
 
     function boot() {
+        // встроенный график (док): шапка и кабинет живут в родительском окне,
+        // в iframe виджет не рисуем и /api/auth/me не дёргаем
+        if (document.body && document.body.classList.contains("embed-mode")) return;
         // Шапку рисуем сразу и для гостя: разделы и «Войти» не должны ждать
         // ответа про пользователя. Иначе при обрыве сети на страницах без
         // ссылок в разметке (терминал, вход, кабинет, админка) меню осталось

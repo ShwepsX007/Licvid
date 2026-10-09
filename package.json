@@ -17,8 +17,11 @@
     "url": "https://github.com/ShwepsX007/LiqScope/issues"
   },
   "homepage": "https://github.com/ShwepsX007/Licvid#readme",
-  "dependencies": {},
   "vendored": {
     "lightweight-charts": "static/lightweight-charts.js (vendored, single source of truth)"
+  },
+  "devDependencies": {
+    "jsdom": "30.1.1",
+    "ws": "8.22.0"
   }
 }

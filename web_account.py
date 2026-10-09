@@ -7,19 +7,22 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
 import secrets
 import threading
 import time
-from typing import Dict, List, Optional, Tuple
-from urllib.parse import quote
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import quote, urlencode
 
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
 
+import app_settings
+import donate
 import geoip
 import seo_pages
 from accounts import (COOKIE_SID, COOKIE_VID, hash_ip, hash_password,
@@ -38,6 +41,10 @@ class Ctx:
     store = None
     bot = None
     mailer = None
+    #: app_settings.SettingsManager — системные настройки из БД (админка)
+    settings = None
+    #: Пересборка ИИ-писателя после смены ключей/моделей в админке
+    ai_refresh_fn = staticmethod(lambda: None)
     public_url = ""
     secret = ""
     cookie_secure = False
@@ -57,6 +64,10 @@ class Ctx:
     pump_snapshot_fn = staticmethod(lambda config=None: {})
     # 📖 Стакан: (настройки) → живые стены по выбранным монетам
     book_snapshot_fn = staticmethod(lambda config=None: {})
+    # 🐋 Сигналы Скринера китов: (фильтр) → биржи из реестра и последние совпадения
+    screener_signal_fn = staticmethod(lambda config=None: {})
+    # какие сети Скринера оставил включёнными админ (None = все)
+    screener_networks_fn = staticmethod(lambda: None)
 
 
 ctx = Ctx()
@@ -99,14 +110,15 @@ def _is_trusted_proxy(ip: str) -> bool:
 def _client_ip(request: Request) -> str:
     client_host = request.client.host if request.client else ""
     if client_host and _is_trusted_proxy(client_host):
+        # nginx перезаписывает этот заголовок адресом реального клиента.
+        xri = (request.headers.get("x-real-ip") or "").strip()
+        if xri:
+            return xri
         xff = request.headers.get("x-forwarded-for") or ""
         if xff:
             first = xff.split(",")[0].strip()
             if first:
                 return first
-        xri = request.headers.get("x-real-ip") or ""
-        if xri:
-            return xri.strip() or client_host
     return client_host or ""
 
 
@@ -272,7 +284,17 @@ def _lang_code(request: Request, body: Optional[dict] = None) -> str:
 
 
 def _mailer():
-    return ctx.mailer
+    m = ctx.mailer
+    # Динамическая конфигурация: перед каждой отправкой сверяем SMTP-транспорт
+    # с настройками из БД (админка → «Системные настройки»). Совпадение
+    # конфигурации — дешёвое сравнение кортежей, пересборка — только при
+    # реальных изменениях, поэтому на горячем пути накладных расходов нет.
+    if m is not None and ctx.settings is not None:
+        try:
+            ctx.settings.apply_mailer(m, ctx.public_url)
+        except Exception as e:  # noqa: BLE001 — настройки не должны ломать письмо
+            log.debug("settings: синхронизация почты: %s", e)
+    return m
 
 
 def _email_enabled() -> bool:
@@ -297,9 +319,14 @@ def _send_mail_blocking(kind: str, to: str, token: str, name: str = "",
     if not m or not getattr(m, "enabled", False):
         # Пока SMTP не настроен, регистрация не должна упираться в стену:
         # ссылку пишем в журнал сервиса, админ отдаст её человеку руками.
+        # Аудит AUTH-01: ссылка содержит bearer-токен, поэтому в журнал
+        # уходит только маскированный хвост (первые 8 символов). Полный
+        # токен попадает в лог исключительно при LIQSCOPE_DEBUG=1.
+        path = _mail_path(kind, token if app_settings.debug_mode()
+                          else app_settings.mask_token(token))
         log.warning("SMTP не настроен — письмо «%s» для %s не отправлено. "
                     "Ссылка для ручной выдачи: %s",
-                    kind, to, (m.link(_mail_path(kind, token)) if m else _mail_path(kind, token)))
+                    kind, to, (m.link(path) if m else path))
         return False
     if kind == "verify":
         return m.send_verify(to, token, name=name, lang=lang)
@@ -324,6 +351,118 @@ async def _json_body(request: Request) -> dict:
     except Exception:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+async def _tg_getme(token: str, timeout: float = 15.0) -> dict:
+    """getMe у Telegram API: проверка токена для админки настроек.
+
+    Возвращает сырой ответ ``{"ok": ..., "result"/"description": ...}``;
+    сетевые ошибки — исключениями, их перехватывает вызывающая ручка.
+    """
+    import aiohttp
+
+    url = f"https://api.telegram.org/bot{token}/getMe"
+    client_timeout = aiohttp.ClientTimeout(total=timeout, sock_connect=10)
+    async with aiohttp.ClientSession(timeout=client_timeout) as session:
+        async with session.get(url) as resp:
+            try:
+                return await resp.json(content_type=None)
+            except Exception:  # noqa: BLE001 — не-JSON ответ тоже диагноз
+                text = (await resp.text())[:200]
+                return {"ok": False,
+                        "description": f"HTTP {resp.status}: {text}"}
+
+
+#: Провайдеры, которых умеет проверять админка (см. ai_text.DEFAULT_ORDER).
+LLM_PROVIDERS = ("gemini", "groq", "openrouter", "deepseek", "custom")
+
+
+def _stored_llm_key(mgr, provider: str) -> str:
+    """Первый сохранённый ключ провайдера: БД → окружение (список и одиночный)."""
+    import ai_text
+
+    if mgr is None:
+        keys = ai_text.keys_for(provider, f"LIQSCOPE_AI_{provider.upper()}_KEY") \
+            if provider != "custom" else \
+            (ai_text._split_keys(os.getenv("LIQSCOPE_AI_KEYS", ""))
+             or ai_text._split_keys(os.getenv("LIQSCOPE_AI_KEY", "")))
+        return keys[0] if keys else ""
+    if provider == "custom":
+        keys = ai_text._split_keys(mgr.get("LIQSCOPE_AI_KEYS"))
+        if not keys:
+            keys = ai_text._split_keys(mgr.get("LIQSCOPE_AI_KEY"))
+        return keys[0] if keys else ""
+    keys = ai_text._split_keys(mgr.get(f"LIQSCOPE_AI_{provider.upper()}_KEYS"))
+    single = mgr.get(f"LIQSCOPE_AI_{provider.upper()}_KEY")
+    if single and single not in keys:
+        keys.append(single)
+    return keys[0] if keys else ""
+
+
+def _llm_error_text(status: int, data: dict) -> str:
+    """Точный текст ошибки провайдера — его увидит админ в красной плашке."""
+    err = data.get("error") if isinstance(data, dict) else None
+    if isinstance(err, dict):
+        msg = str(err.get("message") or "")
+    elif isinstance(err, str):
+        msg = err
+    else:
+        msg = str(data.get("message") or data.get("detail") or "")[:300]
+    if msg:
+        return f"HTTP {status}: {msg}" if status >= 400 else msg
+    return f"HTTP {status}"
+
+
+async def _llm_ping(provider: str, key: str, model: str = "",
+                    url: str = "", timeout: float = 20.0) -> Tuple[bool, str, str]:
+    """Минимальный запрос «ping» к провайдеру ИИ.
+
+    Возвращает ``(ок, сообщение, использованная_модель)``; сообщение при
+    ошибке — точный текст провайдера (``Invalid API Key``, ``Quota
+    Exceeded``…), его админка показывает как есть.
+    """
+    import aiohttp
+    import ai_text
+
+    provider = (provider or "").strip().lower()
+    if provider not in LLM_PROVIDERS:
+        return False, f"Неизвестный провайдер: {provider or '—'}", ""
+    if not key:
+        return False, "Ключ не задан", ""
+    model = (model or "").strip() or ai_text.provider_model(provider)
+    url = (url or "").strip() or ai_text.provider_url(provider)
+    if not url:
+        return False, "Не задан URL сервиса (для своего API укажите его)", ""
+
+    headers = {"Content-Type": "application/json"}
+    if provider == "gemini":
+        req_url = f"{url.rstrip('/')}/{model}:generateContent?key={key}"
+        payload = {"contents": [{"parts": [{"text": "ping"}]}]}
+    else:
+        req_url = url
+        headers["Authorization"] = f"Bearer {key}"
+        if provider == "openrouter":
+            headers.update({"HTTP-Referer": "https://liqscope.online",
+                            "X-Title": "LiqScope"})
+        payload = {"model": model, "max_tokens": 8,
+                   "messages": [{"role": "user", "content": "ping"}]}
+
+    client_timeout = aiohttp.ClientTimeout(total=timeout, sock_connect=10)
+    try:
+        async with aiohttp.ClientSession(timeout=client_timeout) as session:
+            async with session.post(req_url, json=payload, headers=headers) as resp:
+                try:
+                    data = await resp.json(content_type=None)
+                except Exception:  # noqa: BLE001 — не-JSON тело тоже ответ
+                    data = {"raw": (await resp.text())[:300]}
+                if resp.status < 400:
+                    return True, "Ключ принят, модель отвечает", model
+                return False, _llm_error_text(resp.status,
+                                              data if isinstance(data, dict) else {}), model
+    except asyncio.TimeoutError:
+        return False, f"Таймаут ({int(timeout)} с): сервис не ответил", model
+    except Exception as e:  # noqa: BLE001 — сеть/DNS/TLS
+        return False, f"{type(e).__name__}: {str(e)[:250]}", model
 
 
 def _email_error(lang: str, code: str) -> str:
@@ -457,7 +596,7 @@ def _next_after_verify() -> str:
 
 def _safe_next(value: str) -> str:
     """Только свой путь: «//evil.com» и «https://…» не принимаем."""
-    value = (value or "").strip()
+    value = (value or "").strip().strip('"')
     if not value.startswith("/") or value.startswith("//"):
         return ""
     return value
@@ -504,6 +643,172 @@ def _public_url(request: Request) -> str:
     if ctx.public_url:
         return ctx.public_url.rstrip("/")
     return str(request.base_url).rstrip("/")
+
+
+# ----- Google OAuth 2.0 ----------------------------------------------------
+COOKIE_OAUTH_STATE = "liqscope_oauth_state"
+COOKIE_OAUTH_NEXT = "liqscope_oauth_next"
+OAUTH_STATE_TTL = 600  # 10 минут
+
+GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
+
+_OAUTH_LOCK = threading.Lock()
+#: state -> (expires_at, safe_next)
+_OAUTH_STATES: Dict[str, Tuple[float, str]] = {}
+#: Погашенные state (защита от повторного использования state в рамках TTL)
+_OAUTH_CONSUMED: Dict[str, float] = {}
+
+
+def _google_redirect_uri(request: Optional[Request] = None) -> str:
+    """Строгий Redirect URI: {PUBLIC_URL or SITE_URL}/api/auth/google/callback."""
+    base = (
+        (os.getenv("LIQSCOPE_PUBLIC_URL") or "").strip()
+        or (os.getenv("PUBLIC_URL") or "").strip()
+        or (os.getenv("SITE_URL") or "").strip()
+        or (ctx.public_url or "").strip()
+        or (_public_url(request) if request is not None else "")
+        or "https://liqscope.online"
+    )
+    return base.rstrip("/") + "/api/auth/google/callback"
+
+
+def _google_oauth_config(request: Optional[Request] = None) -> Dict[str, Any]:
+    """Эффективная конфигурация Google OAuth (БД настроек → окружение)."""
+    mgr = ctx.settings
+    if mgr is not None:
+        client_id = (
+            mgr.get("LIQSCOPE_GOOGLE_CLIENT_ID")
+            or mgr.get("GOOGLE_CLIENT_ID")
+            or ""
+        ).strip()
+        client_secret = (
+            mgr.get("LIQSCOPE_GOOGLE_CLIENT_SECRET")
+            or mgr.get("GOOGLE_CLIENT_SECRET")
+            or ""
+        ).strip()
+    else:
+        client_id = (
+            os.getenv("LIQSCOPE_GOOGLE_CLIENT_ID")
+            or os.getenv("GOOGLE_CLIENT_ID")
+            or ""
+        ).strip()
+        client_secret = (
+            os.getenv("LIQSCOPE_GOOGLE_CLIENT_SECRET")
+            or os.getenv("GOOGLE_CLIENT_SECRET")
+            or ""
+        ).strip()
+    return {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": _google_redirect_uri(request),
+        "enabled": bool(client_id and client_secret),
+    }
+
+
+def _store_oauth_state(state: str, safe_next: str) -> None:
+    now = time.time()
+    with _OAUTH_LOCK:
+        for k, (exp, _) in list(_OAUTH_STATES.items()):
+            if exp < now:
+                _OAUTH_STATES.pop(k, None)
+        for k, exp in list(_OAUTH_CONSUMED.items()):
+            if exp < now:
+                _OAUTH_CONSUMED.pop(k, None)
+        _OAUTH_STATES[state] = (now + OAUTH_STATE_TTL, safe_next or "/cabinet")
+
+
+def _consume_oauth_state(state: str, cookie_state: str) -> Tuple[bool, str]:
+    """Проверить и однократно погасить OAuth state (CSRF-защита)."""
+    state = (state or "").strip()
+    cookie_state = (cookie_state or "").strip()
+    if not state or not cookie_state:
+        return False, ""
+    if not secrets.compare_digest(state, cookie_state):
+        return False, ""
+    now = time.time()
+    with _OAUTH_LOCK:
+        for k, (exp, _) in list(_OAUTH_STATES.items()):
+            if exp < now:
+                _OAUTH_STATES.pop(k, None)
+        for k, exp in list(_OAUTH_CONSUMED.items()):
+            if exp < now:
+                _OAUTH_CONSUMED.pop(k, None)
+        if state in _OAUTH_CONSUMED:
+            return False, ""
+        entry = _OAUTH_STATES.pop(state, None)
+        if entry is not None:
+            exp, stored_next = entry
+            if exp < now:
+                return False, ""
+        else:
+            stored_next = ""
+        _OAUTH_CONSUMED[state] = now + OAUTH_STATE_TTL
+    return True, stored_next
+
+
+async def _google_exchange_code(
+    code: str,
+    client_id: str,
+    client_secret: str,
+    redirect_uri: str,
+    timeout: float = 10.0,
+) -> Dict[str, Any]:
+    """Обмен authorization code на токены у Google OAuth 2.0.
+
+    Секрет и токены в журнал не пишутся никогда.
+    """
+    import aiohttp
+
+    payload = {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "code": code,
+        "grant_type": "authorization_code",
+        "redirect_uri": redirect_uri,
+    }
+    client_timeout = aiohttp.ClientTimeout(total=timeout, sock_connect=10)
+    async with aiohttp.ClientSession(timeout=client_timeout) as session:
+        async with session.post(
+            GOOGLE_TOKEN_URL,
+            data=payload,
+            headers={"Accept": "application/json"},
+        ) as resp:
+            try:
+                data = await resp.json(content_type=None)
+            except Exception:
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
+            data["_status"] = resp.status
+            return data
+
+
+async def _google_fetch_userinfo(
+    access_token: str,
+    timeout: float = 10.0,
+) -> Dict[str, Any]:
+    """Получить профиль пользователя у Google UserInfo API."""
+    import aiohttp
+
+    client_timeout = aiohttp.ClientTimeout(total=timeout, sock_connect=10)
+    async with aiohttp.ClientSession(timeout=client_timeout) as session:
+        async with session.get(
+            GOOGLE_USERINFO_URL,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Accept": "application/json",
+            },
+        ) as resp:
+            try:
+                data = await resp.json(content_type=None)
+            except Exception:
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
+            data["_status"] = resp.status
+            return data
 
 
 async def read_uploaded_photos(request: Request) -> List[Tuple[bytes, str]]:
@@ -559,6 +864,8 @@ def register_account_routes(app) -> None:
         user = current_user(request)
         bot_user = _bot_username()
         notice = ctx.store.get_setting("site_notice", "") if ctx.store else ""
+        google_cfg = _google_oauth_config(request)
+        mail_on = _email_enabled()
         return {
             "user": user,
             "bot_username": bot_user,
@@ -569,7 +876,24 @@ def register_account_routes(app) -> None:
             # кабинет спрашивает это, чтобы показать «подтвердите почту»
             "verified": bool(user) and _verify_allowed(user),
             "email_required": bool(ctx.require_email_verification),
-            "mail_enabled": _email_enabled(),
+            "mail_enabled": mail_on,
+            "google_enabled": bool(google_cfg["enabled"]),
+            "providers": {
+                "google": bool(google_cfg["enabled"]),
+                "telegram": bool(bot_user),
+                "email": bool(mail_on),
+            },
+        }
+
+    @router.get("/api/auth/providers")
+    async def api_auth_providers(request: Request):
+        google_cfg = _google_oauth_config(request)
+        bot_user = _bot_username()
+        return {
+            "ok": True,
+            "google": bool(google_cfg["enabled"]),
+            "telegram": bool(bot_user),
+            "email": bool(_email_enabled()),
         }
 
     # ----- капча -----------------------------------------------------------
@@ -972,6 +1296,220 @@ def register_account_routes(app) -> None:
         _set_sid(response, token)
         return {"ok": True, "user": user}
 
+    # ----- Google OAuth 2.0 ------------------------------------------------
+    @router.get("/api/auth/google/login")
+    async def api_google_login(request: Request):
+        """Старт OAuth 2.0 авторизации через Google."""
+        if not _LOGIN_RATE.allow(_rate_key(request, "google_login")):
+            return JSONResponse(
+                {"ok": False, "error": "rate",
+                 "hint": _email_error(_lang_code(request), "rate")},
+                status_code=429,
+            )
+        cfg = _google_oauth_config(request)
+        if not cfg["enabled"]:
+            return JSONResponse(
+                {"ok": False, "error": "google_oauth_not_configured"},
+                status_code=503,
+            )
+        raw_next = (
+            request.query_params.get("next")
+            or request.query_params.get("return_url")
+            or "/cabinet"
+        )
+        safe_next = _safe_next(raw_next) or "/cabinet"
+        state = secrets.token_urlsafe(32)
+        _store_oauth_state(state, safe_next)
+        params = {
+            "client_id": cfg["client_id"],
+            "redirect_uri": cfg["redirect_uri"],
+            "response_type": "code",
+            "scope": "openid email profile",
+            "state": state,
+            "access_type": "online",
+            "prompt": "select_account",
+        }
+        auth_url = f"{GOOGLE_AUTH_URL}?{urlencode(params)}"
+        resp = RedirectResponse(auth_url, status_code=302)
+        resp.set_cookie(
+            COOKIE_OAUTH_STATE,
+            state,
+            max_age=OAUTH_STATE_TTL,
+            httponly=True,
+            samesite="lax",
+            secure=ctx.cookie_secure,
+            path="/",
+        )
+        resp.set_cookie(
+            COOKIE_OAUTH_NEXT,
+            safe_next,
+            max_age=OAUTH_STATE_TTL,
+            httponly=True,
+            samesite="lax",
+            secure=ctx.cookie_secure,
+            path="/",
+        )
+        return resp
+
+    @router.get("/api/auth/google/callback")
+    async def api_google_callback(request: Request):
+        """Обработка возврата от Google OAuth 2.0."""
+        if not ctx.store:
+            return JSONResponse({"ok": False, "error": "no_store"}, status_code=503)
+        if not _LOGIN_RATE.allow(_rate_key(request, "google_cb")):
+            return JSONResponse(
+                {"ok": False, "error": "rate",
+                 "hint": _email_error(_lang_code(request), "rate")},
+                status_code=429,
+            )
+        cfg = _google_oauth_config(request)
+        if not cfg["enabled"]:
+            return JSONResponse(
+                {"ok": False, "error": "google_oauth_not_configured"},
+                status_code=503,
+            )
+        oauth_err = (request.query_params.get("error") or "").strip()
+        if oauth_err:
+            log.warning("google oauth: отказ провайдера (%s)", oauth_err[:64])
+            return JSONResponse(
+                {"ok": False, "error": "google_auth_failed", "reason": oauth_err[:64]},
+                status_code=400,
+            )
+        state = (request.query_params.get("state") or "").strip()
+        cookie_state = (request.cookies.get(COOKIE_OAUTH_STATE) or "").strip()
+        ok_state, stored_next = _consume_oauth_state(state, cookie_state)
+        if not ok_state:
+            log.warning(
+                "google oauth: неверный или истёкший state (ip_hash=%s)",
+                hash_ip(ctx.secret or "s", _client_ip(request)),
+            )
+            return JSONResponse(
+                {"ok": False, "error": "invalid_state"},
+                status_code=400,
+            )
+        code = (request.query_params.get("code") or "").strip()
+        if not code:
+            return JSONResponse(
+                {"ok": False, "error": "missing_code"},
+                status_code=400,
+            )
+        try:
+            tok_data = await _google_exchange_code(
+                code=code,
+                client_id=cfg["client_id"],
+                client_secret=cfg["client_secret"],
+                redirect_uri=cfg["redirect_uri"],
+            )
+        except Exception as e:  # noqa: BLE001 — секреты не логируем
+            log.warning(
+                "google oauth: сбой обмена кода на токен (%s)",
+                type(e).__name__,
+            )
+            return JSONResponse(
+                {"ok": False, "error": "google_token_exchange_failed"},
+                status_code=502,
+            )
+        access_token = str((tok_data or {}).get("access_token") or "").strip()
+        tok_status = int((tok_data or {}).get("_status") or 200)
+        if not access_token or tok_status >= 400 or (tok_data or {}).get("error"):
+            err_code = str((tok_data or {}).get("error") or f"http_{tok_status}")[:64]
+            log.warning("google oauth: обмен кода отклонён (%s)", err_code)
+            return JSONResponse(
+                {"ok": False, "error": "google_token_rejected"},
+                status_code=400,
+            )
+        try:
+            profile = await _google_fetch_userinfo(access_token)
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "google oauth: сбой получения профиля (%s)",
+                type(e).__name__,
+            )
+            return JSONResponse(
+                {"ok": False, "error": "google_userinfo_failed"},
+                status_code=502,
+            )
+        prof_status = int((profile or {}).get("_status") or 200)
+        if prof_status >= 400 or not isinstance(profile, dict):
+            log.warning("google oauth: userinfo статус %s", prof_status)
+            return JSONResponse(
+                {"ok": False, "error": "google_userinfo_rejected"},
+                status_code=400,
+            )
+        google_id = str(profile.get("sub") or profile.get("id") or "").strip()
+        email = normalize_email(str(profile.get("email") or ""))
+        raw_verified = profile.get("email_verified")
+        email_verified = (
+            raw_verified is True
+            or (isinstance(raw_verified, str) and raw_verified.strip().lower() == "true")
+            or raw_verified == 1
+        )
+        if not google_id or not email or not valid_email(email) or not email_verified:
+            log.warning(
+                "google oauth: отклонён профиль без подтверждённого email (verified=%s)",
+                bool(email_verified),
+            )
+            return JSONResponse(
+                {"ok": False, "error": "google_email_unverified"},
+                status_code=400,
+            )
+        name = str(profile.get("name") or profile.get("given_name") or "").strip()
+        picture = str(profile.get("picture") or "").strip()
+        lang = _lang_code(request)
+
+        # Разрешение аккаунта:
+        # 1) Пользователь с таким google_id уже есть -> входим под ним
+        # 2) Иначе если есть пользователь с таким же email -> привязываем google_id к нему
+        # 3) Иначе если пользователь уже авторизован в текущей сессии и без чужой почты -> привязываем к нему
+        # 4) Иначе создаём нового пользователя с подтверждённой почтой
+        user = ctx.store.find_user_by_google_id(google_id)
+        if user:
+            user = ctx.store.link_google_id(
+                user["id"], google_id, avatar_url=picture, name=name, email=email
+            ) or user
+        else:
+            by_email = ctx.store.find_user_by_email(email)
+            if by_email:
+                user = ctx.store.link_google_id(
+                    by_email["id"], google_id, avatar_url=picture, name=name, email=email
+                ) or by_email
+            else:
+                here = current_user(request)
+                if here and (not here.get("email") or normalize_email(here.get("email")) == email):
+                    user = ctx.store.link_google_id(
+                        here["id"], google_id, avatar_url=picture, name=name, email=email
+                    ) or here
+                else:
+                    user = ctx.store.create_user_from_google(
+                        email=email,
+                        google_id=google_id,
+                        name=name,
+                        avatar_url=picture,
+                        language=lang,
+                    )
+
+        if user.get("is_banned"):
+            return RedirectResponse("/login?banned=1", status_code=303)
+
+        cookie_next = request.cookies.get(COOKIE_OAUTH_NEXT) or ""
+        dest = _safe_next(cookie_next) or _safe_next(stored_next) or "/cabinet"
+        resp = RedirectResponse(dest, status_code=303)
+        _user_session(request, resp, user)
+        resp.delete_cookie(COOKIE_OAUTH_STATE, path="/")
+        resp.delete_cookie(COOKIE_OAUTH_NEXT, path="/")
+        return resp
+
+    @router.post("/api/auth/google/unlink")
+    async def api_google_unlink(request: Request):
+        """Отвязать Google от текущего аккаунта (если есть пароль или Telegram)."""
+        user = current_user(request)
+        if not user:
+            return _need_auth()
+        r = ctx.store.unlink_google(user["id"])
+        if not r.get("ok"):
+            return JSONResponse(r, status_code=400)
+        return {"ok": True, "user": r.get("user")}
+
     @router.post("/api/auth/dev")
     async def api_dev_login(request: Request, response: Response):
         """Только при LIQSCOPE_DEV_LOGIN=1 — вход без Telegram (разработка/тесты)."""
@@ -1317,6 +1855,62 @@ def register_account_routes(app) -> None:
             return JSONResponse(r, status_code=400)
         return {"ok": True, "config": cfg, "subscribed": True}
 
+    # ----- 🐋 Signal Screener: крупные переводы по своим фильтрам ----------------
+
+    @router.get("/api/account/screener/signals")
+    async def api_screener_signals_get(request: Request):
+        """Фильтры сервиса, биржи из реестра кошельков и последние совпадения.
+
+        Список бирж приходит из данных скринера, а не из перечня на странице:
+        фильтровать можно ровно те площадки, по которым есть кошельки.
+        """
+        from screener_signals import normalize_signal, signal_presets
+        user = current_user(request)
+        if not user:
+            return _need_auth()
+        if not _verify_allowed(user):
+            return _need_verified()
+        row = ctx.store.get_user_service(user["id"], "screener_signals")
+        cfg = normalize_signal((row or {}).get("config") or {})
+        snap: dict = {}
+        try:
+            snap = ctx.screener_signal_fn(cfg) or {}
+        except Exception as e:                            # noqa: BLE001
+            log.debug("screener signals snapshot: %s", e)
+        # сети показывает только те, что оставил включёнными админ
+        try:
+            chains = tuple(ctx.screener_networks_fn() or ()) or None
+        except Exception:                                     # noqa: BLE001
+            chains = None
+        return {"ok": True, "config": cfg, "presets": signal_presets(chains),
+                "networks": list(chains or []),
+                "subscribed": bool(row and row.get("enabled")),
+                "exchanges": snap.get("exchanges") or [],
+                "recent": snap.get("recent") or [],
+                "available": bool(snap.get("available")),
+                "telegram": bool(user.get("tg_id"))}
+
+    @router.post("/api/account/screener/signals")
+    async def api_screener_signals_save(request: Request):
+        from screener_signals import normalize_signal
+        user = current_user(request)
+        if not user:
+            return _need_auth()
+        if not _verify_allowed(user):
+            return _need_verified()
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        cfg = normalize_signal(body or {})
+        # Настройка фильтра не отписывает от сервиса: подписка — своя кнопка,
+        # а тумблер notify отвечает только за доставку в Telegram.
+        r = ctx.store.set_user_service_config(
+            user["id"], "screener_signals", cfg, enabled=True)
+        if not r.get("ok"):
+            return JSONResponse(r, status_code=400)
+        return {"ok": True, "config": cfg, "subscribed": True}
+
     @router.post("/api/account/name")
     async def api_account_name(request: Request):
         """Смена имени в кабинете: то, что показывается на сайте."""
@@ -1505,6 +2099,43 @@ def register_account_routes(app) -> None:
         st = await ctx.bot.broadcast(text, actor_id=actor["id"])
         return {"ok": True, **st}
 
+    # ----- системные настройки (Менеджер настроек из админки) --------------
+    # Конфигурация сервиса (SMTP, Telegram, доступы, лимиты) живёт в таблице
+    # system_settings (app_settings.SettingsManager): БД главнее переменных
+    # окружения, поэтому владелец меняет её на лету без `systemctl edit`.
+    # GET отдаёт все значения (секреты — строкой «***»), POST сохраняет.
+
+    def _settings_mgr():
+        return ctx.settings
+
+    def _restart_hint() -> str:
+        return ("⚠️ Для применения этой настройки требуется перезапуск сервера "
+                "(systemctl restart licvid)")
+
+    @router.get("/api/admin/settings")
+    async def admin_settings_get(request: Request):
+        actor, err = _admin(request)
+        if err:
+            return err
+        mgr = _settings_mgr()
+        site = {}
+        if ctx.store:
+            site = {
+                "bot_welcome": ctx.store.get_setting("bot_welcome", ""),
+                "site_notice": ctx.store.get_setting("site_notice", ""),
+                "chat_dm_tg_delay_min": ctx.store.get_setting(
+                    "chat_dm_tg_delay_min", "10") or "10",
+            }
+        if mgr is None:
+            # сервер поднялся без хранилища настроек (например, тесты):
+            # сайт-настройки отдаём, системные — пустым срезом
+            return {"ok": True, "settings": {}, "site": site,
+                    "mask": app_settings.MASK,
+                    "google_redirect_uri": _google_redirect_uri(request)}
+        return {"ok": True, "settings": mgr.admin_view(), "site": site,
+                "mask": app_settings.MASK,
+                "google_redirect_uri": _google_redirect_uri(request)}
+
     @router.post("/api/admin/settings")
     async def admin_settings(request: Request):
         actor, err = _admin(request)
@@ -1532,7 +2163,345 @@ def register_account_routes(app) -> None:
             val = str(int(mins)) if mins == int(mins) else f"{mins:.1f}"
             ctx.store.set_setting("chat_dm_tg_delay_min", val, actor_id=actor["id"])
             saved["chat_dm_tg_delay_min"] = val
-        return {"ok": True, "saved": saved}
+
+        # Системные ключи (почта/ИИ/доступы/лимиты) — в БД настроек.
+        mgr = _settings_mgr()
+        sys_saved: List[str] = []
+        warnings: List[str] = []
+        restart_required = False
+        if mgr is not None:
+            smtp_touched = access_touched = ai_touched = False
+
+            def _track(k: str):
+                nonlocal smtp_touched, access_touched, ai_touched
+                if k.startswith("LIQSCOPE_SMTP") or k.startswith("LIQSCOPE_MAIL"):
+                    smtp_touched = True
+                if k in ("LIQSCOPE_ADMIN_EMAILS", "LIQSCOPE_ADMIN_IDS"):
+                    access_touched = True
+                if k.startswith("LIQSCOPE_AI_"):
+                    ai_touched = True
+
+            # Кошельки для донатов проверяем до сохранения: опечатка в адресе
+            # возвращает 400 с текстом, а не сохраняется молча. Проверка мягкая
+            # (формат сети), значение не трогаем — только обрезаем пробелы.
+            donate_in = {app_settings.canonical_key(raw_k): v
+                         for raw_k, v in body.items() if isinstance(v, str)}
+            donate_err = donate.validate_keys(donate_in)
+            if donate_err:
+                return JSONResponse({"ok": False, "error": donate_err}, status_code=400)
+
+            for raw_k, v in body.items():
+                k = app_settings.canonical_key(raw_k)
+                if k not in app_settings.MANAGED_SETTINGS or not isinstance(v, str):
+                    continue
+                value = v.strip()
+                if mgr.is_secret(k):
+                    # пусто или значение с маской = «не менять»: секрет не
+                    # перезаписывается заполнителем из формы.
+                    if not value or app_settings.MASK in value:
+                        continue
+                elif value == "":
+                    # стерли значение — снимаем переопределение, снова
+                    # действует переменная окружения
+                    mgr.delete(k)
+                    sys_saved.append(k)
+                    _track(k)
+                    continue
+                mgr.set(k, value)
+                sys_saved.append(k)
+                _track(k)
+                if app_settings.MANAGED_SETTINGS[k].get("restart"):
+                    restart_required = True
+            if any(k.startswith(donate.KEY_PREFIX) for k in sys_saved):
+                # публичный /api/donate/wallets кэшируется на минуту — сбрасываем,
+                # чтобы кнопка «Донат» увидела новый адрес сразу
+                donate.invalidate_cache()
+            if smtp_touched and ctx.mailer is not None:
+                try:
+                    mgr.apply_mailer(ctx.mailer, ctx.public_url)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("settings: почта не пересобрана: %s", e)
+            if access_touched and ctx.store is not None:
+                try:
+                    mgr.apply_admin_access(ctx.store)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("settings: доступы не обновлены: %s", e)
+            if ai_touched:
+                # Ключи/модели ИИ подхватываются без рестарта: писатель
+                # обновляется сразу, а перед каждой генерацией хук
+                # AiWriter.config_sync сверяет сигнатуру настроек.
+                try:
+                    ctx.ai_refresh_fn()
+                except Exception as e:  # noqa: BLE001
+                    log.warning("settings: ИИ не пересобран: %s", e)
+            if "LIQSCOPE_BOT_TOKEN" in sys_saved:
+                running = getattr(getattr(ctx, "bot", None), "token", "") or ""
+                if mgr.get("LIQSCOPE_BOT_TOKEN") != running:
+                    warnings.append(
+                        "⚠️ Для применения нового токена бота требуется "
+                        "перезапуск сервера (systemctl restart licvid)")
+            if restart_required:
+                warnings.append(_restart_hint())
+            for k in sys_saved:
+                # журнал действий: секреты — только имя ключа
+                try:
+                    detail = f"{k}=***" if mgr.is_secret(k) else \
+                        f"{k}={mgr.get(k)[:80]}"
+                    ctx.store and ctx.store.audit(actor["id"], "sys_setting", detail)
+                except Exception:  # noqa: BLE001 — аудит не критичен
+                    pass
+            saved.update({k: ("***" if mgr.is_secret(k) else mgr.get(k))
+                          for k in sys_saved})
+        return {"ok": True, "saved": saved, "warnings": warnings,
+                "restart_required": restart_required}
+
+    @router.post("/api/admin/settings/test-smtp")
+    async def admin_settings_test_smtp(request: Request):
+        """Live-проверка SMTP: логин на сервер и тестовое письмо.
+
+        Любая ошибка (сеть, авторизация, отказ сервера) возвращается клиенту
+        текстом с HTTP 400 — процесс при этом продолжает работать.
+        """
+        import smtplib
+
+        actor, err = _admin(request)
+        if err:
+            return err
+        body = await _json_body(request)
+        mgr = _settings_mgr()
+
+        def effective(key: str, body_key: str = "") -> str:
+            if body_key:
+                val = body.get(body_key)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+            return mgr.get(key) if mgr else (os.getenv(key) or "").strip()
+
+        host = effective("LIQSCOPE_SMTP_HOST", "host")
+        if not host:
+            return JSONResponse({"ok": False,
+                                 "error": "Ошибка SMTP: не задан сервер (хост)"},
+                                status_code=400)
+        # пароль: «***»/пусто в форме — берём сохранённый
+        password = str(body.get("password") or "").strip()
+        if not password or app_settings.MASK in password:
+            password = effective("LIQSCOPE_SMTP_PASSWORD")
+        user = effective("LIQSCOPE_SMTP_USER", "user")
+        tls = (str(body.get("tls") or "").strip().lower()
+               or effective("LIQSCOPE_SMTP_TLS") or "starttls")
+        ssl_flag = (effective("LIQSCOPE_SMTP_SSL") or "").strip().lower() in (
+            "1", "true", "yes", "on")
+        try:
+            port = int(str(body.get("port") or "").strip()
+                       or effective("LIQSCOPE_SMTP_PORT")
+                       or ("465" if (tls == "ssl" or ssl_flag) else "587"))
+        except (TypeError, ValueError):
+            port = 587
+        try:
+            timeout = min(30.0, max(3.0, float(body.get("timeout") or 15)))
+        except (TypeError, ValueError):
+            timeout = 15.0
+        ipv4 = (effective("LIQSCOPE_SMTP_IPV4") or "").strip().lower() in (
+            "1", "true", "yes", "on")
+        sender = effective("LIQSCOPE_SMTP_FROM", "from") or (
+            f"LiqScope <{user}>" if user and "@" in user else "LiqScope <no-reply@liqscope.online>")
+        to = str(body.get("to") or "").strip() or str(actor.get("email") or "")
+
+        def probe() -> str:
+            """Возвращает пустую строку при успехе, иначе текст ошибки."""
+            from mailer import build_message, smtp_deliver, smtp_login
+            try:
+                if to and "@" in to:
+                    msg = build_message(
+                        sender, to, "LiqScope: тестовое письмо",
+                        "<p>Это тестовое письмо — настройки SMTP в админке "
+                        "работают.</p>")
+                    smtp_deliver(host, port, user, password, tls, timeout, msg,
+                                 to, sender.split("<")[-1].rstrip(">"),
+                                 ipv4_only=ipv4)
+                    return ""
+                smtp_login(host, port, user, password, tls, timeout,
+                           ipv4_only=ipv4)
+                return ""
+            except smtplib.SMTPAuthenticationError as e:
+                return f"Authentication failed ({e.smtp_code}: {e.smtp_error})" \
+                    if getattr(e, "smtp_code", None) else f"Authentication failed: {e}"
+            except Exception as e:  # сеть, DNS, отказ сервера, таймаут
+                text = str(e) or type(e).__name__
+                return text
+
+        problem = await run_in_threadpool(probe)
+        if problem:
+            log.info("test-smtp: %s (порт %s, логин %s) — %s",
+                     host, port, user or "без логина", problem[:200])
+            return JSONResponse({"ok": False,
+                                 "error": f"Ошибка SMTP: {problem[:400]}"},
+                                status_code=400)
+        log.info("test-smtp: %s (порт %s) — подключение и отправка ок", host, port)
+        return {"ok": True, "to": to or "",
+                "hint": "" if to else "Письмо не отправлялось: только проверка входа."}
+
+    @router.post("/api/admin/settings/test-tg")
+    async def admin_settings_test_tg(request: Request):
+        """Live-проверка токена бота: вызов getMe у Telegram API."""
+        actor, err = _admin(request)
+        if err:
+            return err
+        body = await _json_body(request)
+        mgr = _settings_mgr()
+        token = str(body.get("token") or "").strip()
+        if not token or app_settings.MASK in token:
+            token = mgr.get("LIQSCOPE_BOT_TOKEN") if mgr else \
+                (os.getenv("LIQSCOPE_BOT_TOKEN") or "").strip()
+        if not token:
+            return JSONResponse({"ok": False,
+                                 "error": "Токен Telegram-бота не задан"},
+                                status_code=400)
+        try:
+            data = await _tg_getme(token)
+        except Exception as e:  # noqa: BLE001 — сеть не должна ронять ручку
+            return JSONResponse({"ok": False,
+                                 "error": f"Ошибка Telegram: {str(e)[:300]}"},
+                                status_code=400)
+        if not data.get("ok"):
+            desc = str(data.get("description") or "запрос отклонён")[:200]
+            return JSONResponse({"ok": False,
+                                 "error": f"Invalid Telegram Token ({desc})"},
+                                status_code=400)
+        result = data.get("result") or {}
+        return {"ok": True, "username": result.get("username") or "",
+                "first_name": result.get("first_name") or ""}
+
+    @router.post("/api/admin/settings/test-llm")
+    async def admin_settings_test_llm(request: Request):
+        """Live-проверка ключа ИИ: минимальный запрос «ping» к провайдеру.
+
+        Ошибка провайдера (``Invalid API Key``, ``Quota Exceeded``, …)
+        возвращается клиенту дословно с HTTP 400 — админ видит её в красной
+        плашке прямо в админке.
+        """
+        actor, err = _admin(request)
+        if err:
+            return err
+        body = await _json_body(request)
+        mgr = _settings_mgr()
+        provider = str(body.get("provider") or "").strip().lower()
+        if provider not in LLM_PROVIDERS:
+            return JSONResponse(
+                {"ok": False, "error": "Провайдер не выбран или неизвестен"},
+                status_code=400)
+        # ключ: поле формы пустое или с маской → берём сохранённый
+        # (БД → окружение, см. SettingsManager.get)
+        key = str(body.get("key") or "").strip()
+        if not key or app_settings.MASK in key:
+            key = _stored_llm_key(mgr, provider)
+        if not key:
+            return JSONResponse(
+                {"ok": False, "error": f"Ключ для «{provider}» не задан"},
+                status_code=400)
+        model = str(body.get("model") or "").strip()
+        url = str(body.get("url") or "").strip()
+        ok, message, used_model = await _llm_ping(provider, key, model, url)
+        if not ok:
+            log.info("test-llm (%s): %s", provider, message[:200])
+            return JSONResponse({"ok": False, "error": message,
+                                 "provider": provider}, status_code=400)
+        log.info("test-llm (%s): ключ принят, модель %s", provider, used_model)
+        return {"ok": True, "provider": provider, "model": used_model,
+                "message": message}
+
+    @router.post("/api/admin/settings/test-captcha")
+    async def admin_settings_test_captcha(request: Request):
+        """Проверка капчи.
+
+        Внешнего провайдера (Turnstile/reCAPTCHA) в проекте нет: капча —
+        собственная математическая задача (``accounts.Store``), ключей не
+        требует. Ручка выполняет реальный само-тест пайплайна «выдать задачу
+        → проверить ответ», чтобы админ видел состояние, а не догадывался.
+        """
+        actor, err = _admin(request)
+        if err:
+            return err
+        store = ctx.store
+        if store is None:
+            return JSONResponse({"ok": False,
+                                 "error": "Хранилище аккаунтов недоступно"},
+                                status_code=400)
+        try:
+            token = store.new_captcha(7)
+            if not token:
+                return JSONResponse({"ok": False,
+                                     "error": "Капча не создалась"},
+                                    status_code=400)
+            ok, _why = store.check_captcha(token, 7)
+            if not ok:
+                return JSONResponse({"ok": False,
+                                     "error": "Капча: верный ответ не принят"},
+                                    status_code=400)
+        except Exception as e:  # noqa: BLE001 — диагностика не должна падать
+            return JSONResponse({"ok": False,
+                                 "error": f"Капча: {str(e)[:200]}"},
+                                status_code=400)
+        return {"ok": True, "kind": "math",
+                "message": ("Встроенная математическая капча работает. "
+                            "Внешние ключи (Turnstile/reCAPTCHA) не нужны — "
+                            "в сервисе их нет.")}
+
+    @router.post("/api/admin/settings/test-google")
+    async def admin_settings_test_google(request: Request):
+        """Проверка настроек Google OAuth 2.0 (формат Client ID и наличие Secret)."""
+        actor, err = _admin(request)
+        if err:
+            return err
+        body = await _json_body(request)
+        mgr = _settings_mgr()
+        cid = str(
+            body.get("client_id")
+            or body.get("LIQSCOPE_GOOGLE_CLIENT_ID")
+            or body.get("GOOGLE_CLIENT_ID")
+            or ""
+        ).strip()
+        if not cid:
+            cid = (
+                mgr.get("LIQSCOPE_GOOGLE_CLIENT_ID")
+                if mgr
+                else (os.getenv("LIQSCOPE_GOOGLE_CLIENT_ID") or os.getenv("GOOGLE_CLIENT_ID") or "")
+            ).strip()
+        csec = str(
+            body.get("client_secret")
+            or body.get("LIQSCOPE_GOOGLE_CLIENT_SECRET")
+            or body.get("GOOGLE_CLIENT_SECRET")
+            or ""
+        ).strip()
+        if not csec or app_settings.MASK in csec:
+            csec = (
+                mgr.get("LIQSCOPE_GOOGLE_CLIENT_SECRET")
+                if mgr
+                else (os.getenv("LIQSCOPE_GOOGLE_CLIENT_SECRET") or os.getenv("GOOGLE_CLIENT_SECRET") or "")
+            ).strip()
+        if not cid:
+            return JSONResponse(
+                {"ok": False, "error": "Google Client ID не задан"},
+                status_code=400,
+            )
+        suffix = ".apps.googleusercontent.com"
+        if not cid.endswith(suffix) or len(cid) <= len(suffix):
+            return JSONResponse(
+                {"ok": False,
+                 "error": "Некорректный формат Client ID (ожидается *.apps.googleusercontent.com)"},
+                status_code=400,
+            )
+        if not csec:
+            return JSONResponse(
+                {"ok": False, "error": "Google Client Secret не задан"},
+                status_code=400,
+            )
+        r_uri = _google_redirect_uri(request)
+        return {
+            "ok": True,
+            "redirect_uri": r_uri,
+            "message": f"Google OAuth настроен корректно ✓ (Redirect URI: {r_uri})",
+        }
 
     @router.post("/api/admin/services/{slug}")
     async def admin_service(request: Request, slug: str):
@@ -1559,7 +2528,10 @@ def register_account_routes(app) -> None:
         actor, err = _admin(request)
         if err:
             return err
-        return {"ok": True, "stats": ctx.stats_fn(), "health": ctx.health_fn()}
+        stats = ctx.stats_fn()
+        if inspect.isawaitable(stats):
+            stats = await stats
+        return {"ok": True, "stats": stats, "health": ctx.health_fn()}
 
     @router.get("/api/admin/digest")
     async def admin_digest_list(request: Request):

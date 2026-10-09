@@ -21,10 +21,11 @@ long/short``: сколько покупок и продаж прошло чер�
 from __future__ import annotations
 
 import asyncio
+import bisect
 import logging
 import os
 import time
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from volume_profile import bucket_of
 
@@ -178,27 +179,61 @@ def parse_funding(rows: Iterable[dict]) -> List[Tuple[int, float]]:
     return out
 
 
+def bucket_keys(rows: Dict[int, Any]) -> List[float]:
+    """Отсортированные начала слотов — опора для бинарного поиска."""
+    return sorted(float(b) for b in rows)
+
+
 def nearest_bucket(rows: Dict[int, Any], ts: Any,
-                   tol: float = TAKER_TOL_SEC) -> Optional[float]:
-    """Доля покупок ближайшего слота в пределах допуска (иначе None)."""
+                   tol: float = TAKER_TOL_SEC,
+                   keys: Optional[Sequence[float]] = None) -> Optional[float]:
+    """Доля покупок ближайшего слота в пределах допуска (иначе None).
+
+    Раньше здесь был полный перебор ``rows`` на каждый вызов, а
+    ``build_rows`` зовёт ``side_at`` на каждую точку OI: 30 дней окна по
+    5-минутным точкам — это тысячи точек на тысячи слотов, то есть O(N·M) и
+    десятки миллионов итераций. Замер на бою 29.09.2026: пауза воркера 652 мс
+    со стеком ``side_feed.py:_num <- _share_of <- nearest_bucket <-
+    taker_share_at <- side_at <- liq_levels.py:build_rows <- payload``.
+    Теперь бинарный поиск по отсортированным началам слотов и расхождение от
+    точки вставки — O(log M) на вызов.
+
+    Семантика прежняя: ближайший слот с известной долей, при равной близости —
+    более свежий (сторона позиций меняется быстро, вчерашний замер хуже
+    сегодняшнего), слоты без доли пропускаются, за пределами ``tol`` — None.
+    ``keys`` — готовый отсортированный список начал слотов: на горячем пути его
+    отдаёт ``SideFeed`` из кэша, чтобы не сортировать ряд на каждый вызов.
+    """
     if not rows:
         return None
     try:
         want = float(ts)
     except (TypeError, ValueError):
         return None
-    best, best_gap = None, None
-    for b, row in rows.items():
-        share = _share_of(row)
+    if keys is None:
+        keys = bucket_keys(rows)
+    if not keys:
+        return None
+    tol = float(tol)
+    # разрыв считался от середины 5-минутного слота: |начало + 150 - ts|
+    target = want - 150.0
+    pos = bisect.bisect_left(keys, target)
+    left, right, n = pos - 1, pos, len(keys)
+    while left >= 0 or right < n:
+        # кандидаты строго в порядке роста разрыва; при равенстве — правый
+        # (более свежий) первым
+        if right < n and (left < 0 or (keys[right] - target) <= (target - keys[left])):
+            begin, gap = keys[right], keys[right] - target
+            right += 1
+        else:
+            begin, gap = keys[left], target - keys[left]
+            left -= 1
+        if gap > tol:
+            break                       # дальше разрыв только растёт
+        share = _share_of(rows.get(begin))
         if share is None:
             continue
-        gap = abs(float(b) + 150.0 - want)      # середина 5-минутного слота
-        # при равной близости берём более свежий слот: сторона позиций меняется
-        # быстро, и вчерашний замер здесь хуже сегодняшнего
-        if best_gap is None or gap <= best_gap:
-            best, best_gap = share, gap
-    if best_gap is not None and best_gap <= float(tol):
-        return best
+        return share
     return None
 
 
@@ -241,6 +276,11 @@ class SideFeed:
         self.off = (not bool(enabled)) if enabled is not None else bool(off)
         self._taker: Dict[str, Dict[int, dict]] = {}
         self._lsr: Dict[str, Dict[int, dict]] = {}
+        # (ряд, его отсортированные начала слотов): ряд при загрузке заменяется
+        # новым словарём целиком, поэтому сверяем по идентичности и не сортируем
+        # тысячи слотов на каждый вызов nearest_bucket
+        self._taker_keys: Dict[str, Tuple[Dict[int, Any], List[float]]] = {}
+        self._lsr_keys: Dict[str, Tuple[Dict[int, Any], List[float]]] = {}
         self._funding: Dict[str, List[Tuple[int, float]]] = {}
         self._at: Dict[str, float] = {}
         self._locks: Dict[str, asyncio.Lock] = {}
@@ -391,8 +431,24 @@ class SideFeed:
         return parsed
 
     # ----- чтение ----------------------------------------------------------
+    @staticmethod
+    def _keys_of(store: Dict[str, Dict[int, Any]],
+                 cache: Dict[str, Tuple[Dict[int, Any], List[float]]],
+                 sym: str) -> Optional[List[float]]:
+        rows = store.get(sym) or {}
+        if not rows:
+            return None
+        ent = cache.get(sym)
+        if ent is not None and ent[0] is rows:
+            return ent[1]
+        keys = bucket_keys(rows)
+        cache[sym] = (rows, keys)
+        return keys
+
     def taker_share_at(self, symbol: str, ts: Any) -> Optional[float]:
-        return nearest_bucket(self._taker.get(str(symbol or "").upper()) or {}, ts)
+        sym = str(symbol or "").upper()
+        return nearest_bucket(self._taker.get(sym) or {}, ts,
+                              keys=self._keys_of(self._taker, self._taker_keys, sym))
 
     def ratio_at(self, symbol: str, ts: Any) -> Optional[float]:
         """Доля покупок тейкера на момент (краткое имя для расчёта уровней)."""
@@ -404,7 +460,9 @@ class SideFeed:
         ``_lsr`` хранит слоты как ``{"long_share": …}``: ``_share_of`` сам
         достаёт долю из такой записи.
         """
-        return nearest_bucket(self._lsr.get(str(symbol or "").upper()) or {}, ts)
+        sym = str(symbol or "").upper()
+        return nearest_bucket(self._lsr.get(sym) or {}, ts,
+                              keys=self._keys_of(self._lsr, self._lsr_keys, sym))
 
     def funding_rate_at(self, symbol: str, ts: Any) -> Optional[float]:
         return funding_at(self._funding.get(str(symbol or "").upper()) or [], ts)

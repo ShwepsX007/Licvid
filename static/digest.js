@@ -65,8 +65,7 @@
         }
         box.innerHTML = items.slice(0, FRESH).map(function (it) {
             var tags = "";
-            if (it.restored) tags += '<span class="tag">' + esc(t("dig.archive_tag")) + "</span>";
-            else if (it.published) tags += '<span class="tag ok">' + esc(t("dig.published")) + "</span>";
+            if (it.published) tags += '<span class="tag ok">' + esc(t("dig.published")) + "</span>";
             if (it.mood) tags += '<span class="tag">' + esc(it.mood) + "</span>";
             // миниатюра обложки: у выпуска есть фото дня — оно и в списке
             var thumb = it.photo && it.photo.url
@@ -109,8 +108,7 @@
             return;
         }
         var tags = "";
-        if (item.restored) tags += '<span class="tag">' + esc(t("dig.archive_tag")) + "</span>";
-        else if (item.published) tags += '<span class="tag ok">' + esc(t("dig.published")) + "</span>";
+        if (item.published) tags += '<span class="tag ok">' + esc(t("dig.published")) + "</span>";
         else tags += '<span class="tag">' + esc(t("dig.draft")) + "</span>";
         var post = item.post
             ? '<details class="dig-post"><summary>Telegram · ' + esc(item.day_label || item.day) +

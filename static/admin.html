@@ -33,6 +33,7 @@
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="stylesheet" href="/static/account.css?v=rebrand1">
     <link rel="stylesheet" href="/static/ui_compact.css?v=1">
+    <link rel="stylesheet" href="/static/whale_admin.css?v=multichain3">
 </head>
 <body data-page="admin">
 <header class="site-header">
@@ -45,13 +46,14 @@
         <select id="lang-select" class="lang-select" data-lang-select
                 aria-label="Language / Язык" title="Language / Язык"></select>
         <a class="btn btn-ghost btn-compact" href="/terminal">⚡ Терминал</a>
+        <a class="btn btn-ghost btn-compact" href="/screener">🐋 Скринер</a>
         <span id="nav-account"></span>
     </nav>
 </header>
 <main class="wrap">
     <h1 class="page-title" data-i18n="seo.admin.h1">Панель управления</h1>
     <p class="lead">Сайт, бот и пользователи. Те же цифры доступны командами /admin в Telegram.</p>
-    <p class="lead"><a class="btn btn-small" href="#archive-admin">Удалить плохой дайджест или сводку</a></p>
+    <p class="lead"><a class="btn btn-small" href="#archive-admin">Удалить плохой дайджест или сводку</a> <a class="btn btn-small" href="#source-diagnostics-card">🩺 Диагностика источников</a></p>
 
     <div class="grid grid-4" style="margin-top:22px">
         <div class="card"><span class="stat-value" id="st-users">—</span><span class="stat-label">Пользователей</span></div>
@@ -63,6 +65,69 @@
         <div class="card"><span class="stat-value" id="st-exch">—</span><span class="stat-label">Бирж в эфире</span></div>
         <div class="card"><span class="stat-value" id="st-bot" style="font-size:1.05rem">—</span><span class="stat-label">Telegram-бот</span></div>
         <div class="card"><span class="stat-value" id="m-24h">—</span><span class="stat-label">Ликвидации 24ч</span></div>
+    </div>
+
+    <style>
+        #source-diagnostics-card .diag-toolbar { display:flex; align-items:center; flex-wrap:wrap; gap:10px; margin:12px 0; }
+        #source-diagnostics-card .diag-summary, #source-diagnostics-card .diag-runtime { display:grid; grid-template-columns:repeat(auto-fit,minmax(155px,1fr)); gap:8px; margin:12px 0 18px; }
+        #source-diagnostics-card .diag-stat { min-width:0; padding:11px 12px; border:1px solid var(--border,#1b2536); border-radius:10px; background:rgba(255,255,255,.02); }
+        #source-diagnostics-card .diag-stat-label { display:block; font-size:.78rem; opacity:.72; }
+        #source-diagnostics-card .diag-stat-value { display:block; margin-top:4px; font-size:1.1rem; overflow-wrap:anywhere; }
+        #source-diagnostics-card .diag-stat-value[data-tone="ok"] { color:#7bd88f; }
+        #source-diagnostics-card .diag-stat-value[data-tone="warn"] { color:#f5a623; }
+        #source-diagnostics-card .diag-stat-value[data-tone="bad"] { color:#ff6b6b; }
+        #source-diagnostics-card .diag-muted { display:block; margin-top:4px; font-size:.75rem; opacity:.68; }
+        #source-diagnostics-card .diag-table-wrap { width:100%; overflow-x:auto; margin:8px 0 18px; }
+        #source-diagnostics-card .diag-table { width:100%; min-width:790px; border-collapse:collapse; }
+        #source-diagnostics-card .diag-table th, #source-diagnostics-card .diag-table td { padding:9px 10px; border-bottom:1px solid var(--border,#1b2536); text-align:left; vertical-align:top; font-size:.84rem; }
+        #source-diagnostics-card .diag-table th { font-weight:600; white-space:nowrap; opacity:.78; }
+        #source-diagnostics-card .diag-table td.diag-detail { max-width:420px; white-space:normal; overflow-wrap:anywhere; opacity:.82; }
+        #source-diagnostics-card .diag-pill { display:inline-block; border-radius:999px; padding:3px 8px; font-size:.75rem; font-weight:600; white-space:nowrap; }
+        #source-diagnostics-card .diag-pill[data-tone="ok"] { color:#7bd88f; background:rgba(123,216,143,.1); }
+        #source-diagnostics-card .diag-pill[data-tone="warn"] { color:#f5a623; background:rgba(245,166,35,.1); }
+        #source-diagnostics-card .diag-pill[data-tone="bad"] { color:#ff6b6b; background:rgba(255,107,107,.1); }
+        #source-diagnostics-card .diag-pill[data-tone="muted"] { color:var(--muted,#9aa4b2); background:rgba(154,164,178,.1); }
+        #source-diagnostics-card #source-diagnostics-message[data-tone="bad"] { color:#ff6b6b; }
+        #source-diagnostics-card #source-diagnostics-message[data-tone="warn"] { color:#f5a623; }
+        #source-diagnostics-card #source-diagnostics-message[data-tone="ok"] { color:#7bd88f; }
+        #source-diagnostics-card .diag-empty { opacity:.75; }
+        @media(max-width:640px) { #source-diagnostics-card .diag-table th, #source-diagnostics-card .diag-table td { padding:7px; font-size:.78rem; } }
+    </style>
+    <div class="card" id="source-diagnostics-card" style="margin-top:14px" hidden>
+        <h3>🩺 Диагностика источников</h3>
+        <p class="lead">Единая сводка WebSocket-потоков, свежести рыночных данных, on-chain RPC и состояния сервера. Доступ только администраторам.</p>
+        <div class="diag-toolbar">
+            <button class="btn btn-primary btn-small" type="button" id="source-diagnostics-refresh">↻ Обновить</button>
+            <span class="meta" id="source-diagnostics-updated">Ещё не обновлялось</span>
+            <span class="meta" id="source-diagnostics-message" role="status" aria-live="polite">Проверяю доступ…</span>
+        </div>
+        <h4>Общее состояние</h4>
+        <div class="diag-summary" id="source-diagnostics-summary"><div class="diag-stat"><span class="diag-stat-label">Диагностика</span><strong class="diag-stat-value">Загрузка…</strong></div></div>
+        <h4>Рынок · WebSocket-источники</h4>
+        <div class="diag-table-wrap">
+            <table class="data diag-table">
+                <thead><tr><th>Источник</th><th>Состояние</th><th>Последнее событие</th><th>Событий/мин*</th><th>Переподключения</th><th>Последняя ошибка / детали</th></tr></thead>
+                <tbody id="source-diagnostics-market-rows"><tr><td colspan="6" class="diag-empty">Загружаю данные…</td></tr></tbody>
+            </table>
+        </div>
+        <h4>On-chain · RPC и API</h4>
+        <div class="diag-table-wrap">
+            <table class="data diag-table">
+                <thead><tr><th>Сеть</th><th>Провайдер</th><th>Состояние</th><th>Последнее событие</th><th>Последний успех</th><th>Последний запрос</th><th>CU (оценка)</th><th>Ответ провайдера / ошибка</th></tr></thead>
+                <tbody id="source-diagnostics-onchain-rows"><tr><td colspan="8" class="diag-empty">Загружаю данные…</td></tr></tbody>
+            </table>
+        </div>
+        <h4>Circuit breaker · защита внешних API</h4>
+        <p class="meta">После серии сетевых ошибок запросы к проблемному узлу временно блокируются. По окончании паузы разрешается один пробный запрос; успех закрывает цепь, повторная ошибка продлевает паузу. Авторизация, обычные 4xx и специальные лимиты Alchemy остаются под текущей логикой обработки.</p>
+        <div class="diag-table-wrap">
+            <table class="data diag-table">
+                <thead><tr><th>Провайдер / узел</th><th>Состояние</th><th>Сбои подряд</th><th>До следующей пробы</th><th>Ошибки / успехи</th><th>Последняя причина</th></tr></thead>
+                <tbody id="source-diagnostics-circuit-rows"><tr><td colspan="6" class="diag-empty">Circuit breaker ещё не фиксировал вызовы внешних API</td></tr></tbody>
+            </table>
+        </div>
+        <h4>Сервер и обработка событий</h4>
+        <div class="diag-runtime" id="source-diagnostics-runtime"><div class="diag-stat"><span class="diag-stat-label">Состояние</span><strong class="diag-stat-value">Загрузка…</strong></div></div>
+        <p class="meta">* Скорость событий считается в этой вкладке между обновлениями и становится доступна после второго замера. Для отдельных WebSocket-соединений пока не снимается отдельная сетевая задержка; здесь показываются возраст последнего события, ошибки, переподключения и общая HTTP p95.</p>
     </div>
 
     <div class="grid grid-2">
@@ -116,6 +181,58 @@
         <div id="geo-panel" class="geo-panel">
             <p class="meta" data-i18n="cab.loading">загружаю…</p>
         </div>
+    </div>
+
+    <!-- ⚙️ Менеджер настроек (аудит 30.09.2026 → динамическая конфигурация):
+         SMTP, токен бота, админские доступы и лимиты живут в базе
+         (таблица system_settings) и меняются без `systemctl edit`.
+         Секреты отдаются маской «***», пустое поле секрета при сохранении
+         означает «не менять». Логика — в static/system_settings.js,
+         ручки — /api/admin/settings[/test-smtp|/test-tg] (web_account.py). -->
+    <style>
+        /* ⚙️ Менеджер настроек: вкладки, поля, плашки */
+        .sys-err { color: #ff6b6b; font-weight: 600; margin: 8px 0 0; padding: 8px 10px;
+                   border: 1px solid rgba(255,107,107,.4); border-radius: 8px;
+                   background: rgba(255,107,107,.08); white-space: pre-wrap; word-break: break-word; }
+        .sys-warn { color: #f5a623; margin: 8px 0 0; padding: 8px 10px;
+                    border: 1px solid rgba(245,166,35,.4); border-radius: 8px;
+                    background: rgba(245,166,35,.07); white-space: pre-wrap; }
+        .sys-ok-plate { color: #7bd88f; font-weight: 600; }
+        .sys-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; }
+        .sys-tab { padding: 7px 12px; border-radius: 9px; border: 1px solid var(--border, #1b2536);
+                   background: transparent; color: inherit; cursor: pointer; font-size: .92rem; }
+        .sys-tab.active { background: #1b2536; border-color: #3d70ff; color: #fff; }
+        .sys-panel { display: none; }
+        .sys-panel.active { display: block; }
+        .sys-field { margin: 12px 0; }
+        .sys-label { font-weight: 600; font-size: .95rem; }
+        .sys-hint { font-size: .78rem; opacity: .72; margin-top: 3px; max-width: 640px; }
+        .sys-inrow { display: flex; align-items: center; gap: 6px; margin-top: 4px; flex-wrap: wrap; }
+        .sys-inrow input, .sys-inrow select { width: 100%; max-width: 420px; }
+        .sys-eye { background: transparent; border: 1px solid var(--border, #1b2536);
+                   border-radius: 8px; padding: 6px 8px; cursor: pointer; color: inherit; }
+        .sys-src { font-size: .75rem; opacity: .7; margin-left: 6px; }
+        .sys-flag { font-size: .75rem; margin-left: 6px; opacity: .85; }
+        .sys-actions { margin-top: 16px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+        .sys-note { font-size: .8rem; opacity: .75; margin-top: 10px; }
+        .btn.busy { opacity: .6; pointer-events: none; }
+    </style>
+    <!-- ⚙️ Менеджер настроек (универсальный пульт): поля рисуются из схемы,
+         которую отдаёт GET /api/admin/settings (app_settings.MANAGED_SETTINGS):
+         человекочитаемое имя + подсказка + маска секретов. Вкладки:
+         почта/рассылки, ИИ, безопасность, Telegram, тюнинг. Логика —
+         static/system_settings.js; тесты подключения — /api/admin/settings/
+         test-smtp | test-tg | test-llm | test-captcha (web_account.py). -->
+    <div class="card" id="sys-settings-card" style="margin-top:14px"
+         data-hint="почта, ИИ, доступы, Telegram и тюнинг — без перезапуска">
+        <h3>⚙️ Системные настройки</h3>
+        <p class="lead">Вся конфигурация сервиса: значения сохраняются в базу
+            (<code>system_settings</code>) и применяются на лету; переменные окружения
+            остаются запасным вариантом. Секреты показываются маской
+            (<code>AIz***a1b2</code>); пустое поле секрета при сохранении = «оставить
+            как было». Кнопки «Проверить» тестируют ключ до сохранения.</p>
+        <div class="sys-tabs" id="sys-tabs"><span class="meta">загружаю настройки…</span></div>
+        <div id="sys-panels"></div>
     </div>
 
     <div class="card" id="admins-card" style="margin-top:14px" data-hint="главный и назначенные админы">
@@ -188,6 +305,108 @@
         <p class="meta" id="layers-note"></p>
         <p class="meta" id="layers-enabled-note" style="font-style:italic"></p>
     </div>
+
+<div class="card" id="whale-admin-card" style="margin-top:14px" data-hint="Multichain whale screener management" hidden>
+    <h3 data-i18n="adm.alchemy_title">🐋 Whale Screener · Multichain</h3>
+    <p><a class="btn btn-primary btn-compact" href="/screener" data-i18n="adm.alchemy_open">Open Whale Screener →</a></p>
+    <p class="meta" data-i18n="adm.alchemy_lead">Manage encrypted provider keys, CU usage, wallet labels and network health. Secrets are never returned to the browser.</p>
+    <div class="whale-admin-overview" aria-live="polite">
+        <div class="whale-admin-stat"><span data-i18n="adm.alchemy_key_count">Configured keys</span><strong id="whale-admin-summary">—</strong></div>
+        <div class="whale-admin-stat whale-admin-cu-stat">
+            <span data-i18n="adm.alchemy_cu_title">Monthly CU usage across all keys</span>
+            <strong id="whale-admin-cu-label">—</strong>
+            <div class="whale-admin-progress"><i id="whale-admin-cu-progress"></i></div>
+            <small id="whale-admin-cu-meta" class="meta"></small>
+        </div>
+    </div>
+    <h4 class="whale-admin-subtitle" data-i18n="adm.alchemy_keys_title">Alchemy API keys</h4>
+    <div class="row-actions" style="flex-wrap:wrap;gap:10px">
+        <label><span data-i18n="adm.alchemy_key_label">API key or Alchemy /v2 URL</span>
+            <input class="search" type="password" autocomplete="new-password" id="whale-admin-key"
+                   data-i18n-placeholder="adm.alchemy_key_placeholder" placeholder="Paste a new key" maxlength="500"></label>
+        <button class="btn btn-primary" type="button" id="whale-admin-add-key" data-i18n="adm.alchemy_add">Add key</button>
+        <span id="whale-admin-key-status" class="meta" role="status"></span>
+    </div>
+    <div id="whale-admin-keys" class="whale-admin-keys" aria-live="polite"></div>
+    <p class="meta" id="whale-admin-key-pool" role="status"></p>
+    <h4 class="whale-admin-subtitle" data-i18n="adm.trongrid_title">TronGrid API key · optional</h4>
+    <p class="meta" data-i18n="adm.trongrid_note">TRON monitoring works without a key, but a TronGrid key raises the rate limit. The value is encrypted at rest.</p>
+    <div class="row-actions" style="flex-wrap:wrap;gap:10px">
+        <label><span data-i18n="adm.trongrid_key_label">TRONGRID_API_KEY</span>
+            <input class="search" type="password" autocomplete="new-password" id="trongrid-admin-key" maxlength="500"></label>
+        <button class="btn btn-primary" type="button" id="trongrid-admin-add-key" data-i18n="adm.trongrid_add">Save TronGrid key</button>
+        <span id="trongrid-admin-key-status" class="meta" role="status"></span>
+    </div>
+    <div id="trongrid-admin-keys" class="whale-admin-keys" aria-live="polite"></div>
+    <h4 class="whale-admin-subtitle" data-i18n="adm.alchemy_networks_title">Network health</h4>
+    <div id="whale-admin-chains" class="whale-admin-networks" aria-live="polite"></div>
+    <h4 class="whale-admin-subtitle" data-i18n="adm.networks_switch_title">Collected networks</h4>
+    <p class="meta" data-i18n="adm.networks_switch_note">A network switched off is not polled, spends no Alchemy CU and is hidden in the screener. Its history stays in the database.</p>
+    <div id="whale-admin-network-switches" class="whale-admin-switches" aria-live="polite"></div>
+    <p class="meta" id="whale-admin-network-status" role="status"></p>
+    <div class="row-actions whale-admin-settings" style="flex-wrap:wrap;gap:10px">
+        <label><span data-i18n="adm.alchemy_mode">Mode</span>
+            <select id="whale-admin-mode" class="search">
+                <option value="realtime" data-i18n="adm.whale_realtime">Realtime</option>
+                <option value="economy" data-i18n="adm.whale_economy">Economy</option>
+            </select></label>
+        <label><span data-i18n="adm.alchemy_interval">EVM RPC polling interval</span>
+            <select class="search" id="whale-admin-interval">
+                <option value="30" data-i18n="adm.whale_poll_30s">30 sec</option>
+                <option value="60" data-i18n="adm.whale_poll_60s" selected>60 sec</option>
+                <option value="120" data-i18n="adm.whale_poll_2m">2 min</option>
+                <option value="300" data-i18n="adm.whale_poll_5m">5 min</option>
+            </select></label>
+        <label><span data-i18n="adm.alchemy_budget">Monthly budget per key, CU</span>
+            <input type="number" class="search" id="whale-admin-budget" min="1000" max="20000000" value="10000000"></label>
+        <button type="button" class="btn btn-primary" id="whale-admin-save" data-i18n="adm.alchemy_save">Save</button>
+        <span class="meta" id="whale-admin-status" role="status"></span>
+    </div>
+    <h4 class="whale-admin-subtitle" data-i18n="adm.cex_wallets_title">CEX wallet database</h4>
+    <p class="meta" data-i18n="adm.cex_wallets_note">Automatic DeFiLlama labels are refreshed daily. Manual records are retained across refreshes.</p>
+    <div class="row-actions whale-admin-wallet-toolbar" style="flex-wrap:wrap;gap:10px">
+        <span id="whale-admin-wallet-summary" class="meta">—</span>
+        <label><span data-i18n="adm.cex_wallet_chain">Network</span>
+            <select id="whale-admin-wallet-chain" class="search">
+                <option value="ALL">All</option><option value="ETH">Ethereum</option>
+                <option value="BNB">BNB</option><option value="POLYGON">Polygon</option>
+                <option value="ARBITRUM">Arbitrum</option><option value="BASE">Base</option>
+                <option value="SOLANA">Solana</option><option value="TRON">TRON</option>
+            </select></label>
+        <label><span data-i18n="adm.cex_wallet_search">Exchange filter</span>
+            <input id="whale-admin-wallet-search" class="search" maxlength="100"></label>
+        <button class="btn btn-primary" type="button" id="whale-admin-wallet-refresh" data-i18n="adm.cex_wallet_refresh">↻ Refresh from DeFiLlama</button>
+        <span id="whale-admin-wallet-status" class="meta" role="status"></span>
+    </div>
+    <div class="row-actions whale-admin-wallet-cleanup" style="flex-wrap:wrap;gap:10px">
+        <span id="whale-admin-wallet-cleanup" class="meta">—</span>
+        <label><span data-i18n="adm.cex_wallet_retention">Silence window, days</span>
+            <input type="number" class="search" id="whale-admin-wallet-retention"
+                   min="0" max="365" step="1" value="7"></label>
+        <button class="btn btn-ghost" type="button" id="whale-admin-wallet-retention-save"
+                data-i18n="adm.cex_wallet_retention_save">Save retention</button>
+        <button class="btn btn-ghost" type="button" id="whale-admin-wallet-prune"
+                data-i18n="adm.cex_wallet_prune">Clean now</button>
+    </div>
+    <div class="row-actions whale-admin-wallet-add" style="flex-wrap:wrap;gap:10px">
+        <label><span data-i18n="adm.cex_wallet_name">Exchange label</span><input id="whale-admin-wallet-name" class="search" maxlength="100"></label>
+        <label><span data-i18n="adm.cex_wallet_address">Wallet address</span><input id="whale-admin-wallet-address" class="search" maxlength="100" autocomplete="off"></label>
+        <label><span data-i18n="adm.cex_wallet_chain">Network</span>
+            <select id="whale-admin-wallet-add-chain" class="search">
+                <option value="ETH">Ethereum</option><option value="BNB">BNB</option>
+                <option value="POLYGON">Polygon</option><option value="ARBITRUM">Arbitrum</option>
+                <option value="BASE">Base</option><option value="SOLANA">Solana</option><option value="TRON">TRON</option>
+            </select></label>
+        <button class="btn btn-primary" type="button" id="whale-admin-wallet-add" data-i18n="adm.cex_wallet_add">Add manual address</button>
+        <button class="btn btn-ghost" type="button" id="whale-admin-wallet-cancel" data-i18n="adm.cex_wallet_cancel" hidden>Cancel edit</button>
+    </div>
+    <div class="whale-admin-wallet-table-scroll">
+        <table class="whale-admin-wallet-table"><thead><tr>
+            <th data-i18n="adm.cex_wallet_chain">Network</th><th data-i18n="adm.cex_wallet_name">Exchange label</th>
+            <th data-i18n="adm.cex_wallet_address">Wallet address</th><th data-i18n="adm.cex_wallet_source">Source</th><th></th>
+        </tr></thead><tbody id="whale-admin-wallet-rows"></tbody></table>
+    </div>
+</div>
 
 <!-- 🎯 Уровни ликвидаций (liq_levels): те же настройки, что отдаёт
      /api/admin/liq_levels/settings. Поля строятся из ответа сервера (fields),
@@ -524,14 +743,14 @@
          data-hint="старые выпуски: убрать со сайта и из Telegram"
          data-i18n-skip>
         <h3>🗂 Архив — удаление старых выпусков</h3>
-        <p class="lead">Здесь снимают уже вышедшее и пустые черновики: <b>выпуск дня</b> уходит со страницы
-            <code>/digest</code>, <b>сводки по часам</b> — со <code>/hourly</code>. Черновик после
-            перезагрузки — это не пост в Telegram: сайт собрал сутки из архива и пометил их так,
-            потому что в канал они не уходили. Удаление снимает и такие записи — они не вернутся.
-            Если галочка «и из Telegram» стоит, тем же действием удаляются и посты в каналах: id
-            сообщений бот запоминает при публикации. У выпусков, вышедших до этой версии, id не
-            сохранялись — такие посты в Telegram придётся убрать вручную. Те же кнопки есть на
-            самих страницах <code>/digest</code> и <code>/hourly</code>, если вы вошли как админ.</p>
+        <p class="lead">Здесь снимают уже вышедшее: <b>выпуск дня</b> уходит со страницы
+            <code>/digest</code>, <b>сводки по часам</b> — со <code>/hourly</code>. В списке только
+            настоящие публикации — то, что собрал и сохранил бот; «черновик» значит, что выпуск
+            собран, но в канал ещё не ушёл (контроль публикации). Если галочка «и из Telegram»
+            стоит, тем же действием удаляются и посты в каналах: id сообщений бот запоминает при
+            публикации. У выпусков, вышедших до этой версии, id не сохранялись — такие посты в
+            Telegram придётся убрать вручную. Те же кнопки есть на самих страницах
+            <code>/digest</code> и <code>/hourly</code>, если вы вошли как админ.</p>
         <div class="row-actions" style="margin-top:12px">
             <label class="meta"><input type="checkbox" id="arc-tg" checked> 🗑 Удалять и вышедшие посты в Telegram</label>
             <button class="btn" id="arc-reload" type="button">🔄 Обновить архив</button>
@@ -595,15 +814,19 @@
         <div id="ai-prompt-blocks"><p class="meta">загружаю промты…</p></div>
     </div>
 </main>
-<script src="/static/i18n.pages.js?v=book8"></script>
-<script src="/static/i18n.js?v=book8"></script>
+<script src="/static/i18n.pages.js?v=multichain4"></script>
+<script src="/static/i18n.js?v=quota2"></script>
 <script src="/static/world-map.js?v=geo1"></script>
 <script src="/static/geo_map.js?v=geo2"></script>
 <script src="/static/presence.js?v=geo2"></script>
-<script src="/static/account.js?v=nav2"></script>
+<script src="/static/account.js?v=nav5"></script>
+<script src="/static/donate.js?v=nav1" defer></script>
 <script src="/static/articles_admin.js?v=art1"></script>
 <script src="/static/archive_admin.js?v=arcdel1"></script>
 <script src="/static/consent.js?v=consent1"></script>
+<script src="/static/system_settings.js?v=sysset2"></script>
+<script src="/static/whale_admin.js?v=multichain4"></script>
+<script src="/static/source_diagnostics.js?v=diag1"></script>
 <link rel="stylesheet" href="/static/brand.css?v=rebrand1">
 </body>
 </html>

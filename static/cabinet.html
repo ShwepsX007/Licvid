@@ -124,6 +124,17 @@
                         data-i18n="cab.tg_unlink">Отвязать</button>
             </div>
         </div>
+        <!-- Google — быстрый вход в один клик -->
+        <div class="tg-card" id="google-card" style="margin-top:10px">
+            <div class="meta" id="google-state" data-i18n="cab.google_none">Google не привязан</div>
+            <div class="row-actions" style="margin-top:8px">
+                <a class="btn btn-ghost btn-small" id="google-link"
+                   href="/api/auth/google/login?next=%2Fcabinet"
+                   data-i18n="cab.google_link">🔗 Привязать Google</a>
+                <button type="button" class="btn btn-ghost btn-small hidden" id="google-unlink"
+                        data-i18n="cab.google_unlink">Отвязать</button>
+            </div>
+        </div>
     </div>
 
     <p class="partner-line">
@@ -138,9 +149,10 @@
     <div id="svc-acc"></div>
 
 </main>
-<script src="/static/i18n.pages.js?v=book8"></script>
-<script src="/static/i18n.js?v=sig1"></script>
-<script src="/static/account.js?v=sig1"></script>
+<script src="/static/i18n.pages.js?v=screener1"></script>
+<script src="/static/i18n.js?v=quota2"></script>
+<script src="/static/account.js?v=nav5"></script>
+<script src="/static/donate.js?v=nav1" defer></script>
 <script src="/static/presence.js?v=geo2"></script>
 <script src="/static/terminal_chat.js?v=8"></script>
 <script src="/static/consent.js?v=consent1"></script>

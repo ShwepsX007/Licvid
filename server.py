@@ -37,28 +37,148 @@ LiqScope Web Server — терминал ликвидаций в реально�
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import json
+import atexit
+import contextlib
+import copy
+import functools
+import gc
+import inspect
 import logging
+import logging.handlers
 import math
 import os
+from pathlib import Path
+import queue
 import random
+import re
+try:
+    import resource  # Unix: RSS процесса для /api/metrics
+except ImportError:  # Windows: модуля нет — метрика отдаст 0
+    resource = None  # type: ignore
 import secrets
+import sys
 import threading
 import time
 from collections import deque
+from itertools import islice
 from contextlib import asynccontextmanager
-from typing import Deque, Dict, List, Optional, Set
+from typing import Any, Deque, Dict, List, Optional, Set, Tuple
 
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect, Request
+from cpu_pool import run as run_cpu, shutdown as shutdown_cpu_pool
+
+from fastapi import FastAPI, Query, Body, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from starlette.responses import Response
 
-import archive_hide
+# Быстрый JSON. orjson сериализует ответы в 3-6 раз быстрее стандартного
+# json.dumps, а на одном воркере uvicorn сериализация — это заметная доля CPU
+# (свечи, статистика, снимки ленты уходят сотням клиентов). Пакет не
+# обязателен: без него приложение работает на прежнем JSONResponse.
+try:                                   # pragma: no cover — зависит от окружения
+    import orjson as _orjson
+    from fastapi.responses import ORJSONResponse as _DEFAULT_RESPONSE_CLASS
+    FAST_JSON = True
+except ImportError:                    # pragma: no cover
+    _orjson = None
+    _DEFAULT_RESPONSE_CLASS = JSONResponse
+    FAST_JSON = False
+
+
+def json_dumps_text(obj) -> str:
+    """Компактная JSON-строка: WS-кадры клиентам (самая горячая сериализация)."""
+    if _orjson is None:
+        return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+    return _orjson.dumps(obj).decode("utf-8")
+
+
+# Явные `return JSONResponse(...)` в этом модуле (/api/health, /api/metrics,
+# отказы /api/symbols/add) должны отдавать тем же быстрым сериализатором, что
+# и остальное приложение — поэтому имя указывает на выбранный класс. Без
+# orjson это прежний starlette JSONResponse, поведение не меняется.
+JSONResponse = _DEFAULT_RESPONSE_CLASS
+
+
+def direct_json(data: Any) -> Response:
+    """Skip FastAPI's jsonable_encoder for already JSON-compatible API data.
+
+    orjson is installed on production; keep the old response when running an
+    optional-dependency development environment without it.
+    """
+    if _orjson is None:
+        return JSONResponse(data)
+    # OI series use integer timestamp keys; FastAPI previously stringified them.
+    return Response(content=_orjson.dumps(data, option=_orjson.OPT_NON_STR_KEYS),
+                    media_type="application/json")
+
 import archive_restore
 import seo_pages
 from fastapi.staticfiles import StaticFiles
 
+import market_feed
+import circuit_breaker
 from market_feed import GATE_REST, MarketFeed, TF_MINUTES, base_of, canon, _get_json
+try:
+    from cex_wallets_updater import CEXWalletRegistry, auto_refresh_loop
+    CEX_WALLET_UPDATER_AVAILABLE = True
+except Exception:  # noqa: BLE001 — wallet refresh must not prevent site startup
+    CEXWalletRegistry = auto_refresh_loop = None
+    CEX_WALLET_UPDATER_AVAILABLE = False
+# Тумблеры сетей и срок хранения базы кошельков. Свой модуль на stdlib:
+# без него скринер обязан жить по-старому (все сети включены), поэтому и тут
+# импорт мягкий.
+try:
+    from screener_networks import (DEFAULT_ENABLED, NetworkSwitch,
+                                   normalize_network, retention_days)
+except Exception:  # noqa: BLE001 — опциональный тумблер не валит запуск сайта
+    NetworkSwitch = None
+
+    def normalize_network(value):
+        return str(value or "").strip().upper()
+
+    def retention_days(value, *, default=7):
+        try:
+            return max(0, min(365, int(float(str(value).strip()))))
+        except (TypeError, ValueError):
+            return int(default)
+
+    DEFAULT_ENABLED = ()
+SCREENER_NETWORKS_FILE = os.getenv(
+    "LIQSCOPE_SCREENER_NETWORKS_FILE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "screener_networks.json"))
+# Раз в сутки: убрать кошельки бирж, которые не светятся ни в источниках,
+# ни в событиях скринера. Больше не нужно — база перестаёт расти бесконечно.
+WALLET_PRUNE_INTERVAL_SEC = max(300.0, float(os.getenv("LIQSCOPE_WALLET_PRUNE_SEC", "86400")))
+WALLET_PRUNE_START_DELAY_SEC = max(30.0, float(os.getenv("LIQSCOPE_WALLET_PRUNE_DELAY", "180")))
+# Keep the credential-free Hyperliquid source independent of optional Alchemy
+# key management. A missing encryption library never means plaintext key storage.
+try:
+    from whale_screener import (WhaleScreener, event_exchange, event_venue,
+                                venue_of_label, venue_display_name)
+    WHALE_SCREENER_AVAILABLE = True
+except Exception:  # noqa: BLE001 — the optional whale feed must not block the terminal
+    WhaleScreener = None
+    event_exchange = None
+    event_venue = None
+    venue_of_label = None
+    venue_display_name = None
+    WHALE_SCREENER_AVAILABLE = False
+
+try:
+    from whale_poller import (WhalePoller, HISTORY_INTERVAL_OPTIONS,
+                              POLL_INTERVAL_OPTIONS_SEC)
+    from alchemy_keys import AlchemyKeyStore, KeyStoreError
+    WHALE_POLLER_AVAILABLE = True
+except Exception:  # noqa: BLE001 — isolate optional Alchemy imports
+    WhalePoller = AlchemyKeyStore = None
+    HISTORY_INTERVAL_OPTIONS = (5, 10, 15, 30, 60)
+    POLL_INTERVAL_OPTIONS_SEC = (30, 60, 120, 300)
+    class KeyStoreError(Exception):
+        pass
+    WHALE_POLLER_AVAILABLE = False
 from timeframes import parse_tf
 from book_feed import (chat_text as book_chat_text, chat_meta as book_chat_meta)
 from book_feed import (BookFeed, format_wall_html, normalize_book_cfg,
@@ -102,6 +222,7 @@ import web_layers
 from web_liq_levels import register_liq_level_routes
 import terminal_chat as terminal_chat_mod
 from terminal_chat import register_chat_routes as register_terminal_chat_routes
+import web_cache
 import private_chat as private_chat_mod
 from private_chat import register_private_chat_routes
 import support_chat as support_chat_mod
@@ -110,13 +231,206 @@ import service_chat as service_chat_mod
 from service_chat import register_service_chat_routes
 import content_comments as content_comments_mod
 from content_comments import register_comment_routes as register_content_comment_routes
+import donate as donate_mod
+from donate import register_donate_routes
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 log = logging.getLogger("liqscope.server")
 
+
+# --- логирование вне event loop -------------------------------------------
+# Замер на бою 29.09.2026 (50 зрителей + 100 rps, мимо nginx) назвал паузу
+# 1282 мс со стеком logging/__init__.py:1103:emit <- ... <- 1477:info <-
+# websockets_sansio_impl.py:440:send <- websockets.py:110:accept <-
+# server.py:ws_endpoint: uvicorn пишет в журнал КАЖДОЕ принятое WS-соединение и
+# каждый HTTP-запрос (access log), а журнал — это stdout, который под systemd
+# уходит в journald. Когда journald не успевает, буфер трубы заполняется и
+# write() блокирует единственный воркер. Поэтому пишем в очередь, а держит её
+# отдельный поток: переполнение роняет запись (счётчик виден в /api/health),
+# но не цикл.
+LOG_ASYNC = os.getenv("LIQSCOPE_LOG_ASYNC", "1").strip() not in ("", "0", "false", "no")
+LOG_QUEUE_MAX = max(100, int(os.getenv("LIQSCOPE_LOG_QUEUE", "20000") or 20000))
+_LOG_QUEUE: "queue.Queue" = queue.Queue(maxsize=LOG_QUEUE_MAX)
+_LOG_STATS: Dict[str, float] = {"dropped": 0.0, "queued": 0.0}
+_log_listener: Optional[logging.handlers.QueueListener] = None
+# uvicorn вешает собственные хендлеры на свои логгеры с propagate=False, поэтому
+# одного корневого мало — обходим их явно
+_LOG_WRAPPED = ("", "uvicorn", "uvicorn.error", "uvicorn.access", "websockets")
+
+
+class _DropQueueHandler(logging.handlers.QueueHandler):
+    """Keep structured records intact; uvicorn.access needs its five args."""
+
+    def __init__(self, queue: "queue.Queue", targets: Tuple[logging.Handler, ...] = ()):
+        super().__init__(queue)
+        self.targets = targets
+
+    def prepare(self, record: logging.LogRecord) -> logging.LogRecord:
+        # QueueHandler.prepare() calls format() on the producer thread, then
+        # replaces args with None. Uvicorn's AccessFormatter UNPACKS args on
+        # the listener thread and raises on every request if they were erased.
+        # Our queue is in-process, so shallow copying is sufficient.
+        prepared = copy.copy(record)
+        prepared._log_targets = self.targets
+        if prepared.exc_info:
+            prepared.exc_text = logging.Formatter().formatException(prepared.exc_info)
+            prepared.exc_info = None    # don't retain traceback frames in queue
+        return prepared
+
+    def enqueue(self, record: logging.LogRecord) -> None:  # noqa: D102
+        try:
+            self.queue.put_nowait(record)
+            _LOG_STATS["queued"] += 1
+        except queue.Full:
+            _LOG_STATS["dropped"] += 1
+
+
+class _OriginalLogDispatch(logging.Handler):
+    """Replay to only the handlers replaced by this specific queue handler.
+
+    A single QueueListener with *all* handlers sent ordinary application logs
+    through uvicorn's AccessFormatter too. That formatter expects access args.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        for handler in getattr(record, "_log_targets", ()):
+            if record.levelno >= handler.level:
+                handler.handle(record)
+
+
+def install_async_logging() -> bool:
+    """Translate journal writes into a routed, non-blocking listener thread."""
+    global _log_listener
+    if not LOG_ASYNC or _log_listener is not None:
+        return _log_listener is not None
+    originals: Dict[str, Tuple[logging.Handler, ...]] = {}
+    for name in _LOG_WRAPPED:
+        lg = logging.getLogger(name)
+        own = tuple(h for h in lg.handlers if not isinstance(h, _DropQueueHandler))
+        originals[lg.name] = own
+        for h in own:
+            lg.removeHandler(h)
+        if own or not lg.propagate:
+            lg.addHandler(_DropQueueHandler(_LOG_QUEUE, own))
+    if not any(originals.values()):          # переносить нечего
+        return False
+    try:
+        _log_listener = logging.handlers.QueueListener(
+            _LOG_QUEUE, _OriginalLogDispatch(), respect_handler_level=True)
+        _log_listener.start()
+    except Exception as e:                  # noqa: BLE001
+        _log_listener = None
+        for name in _LOG_WRAPPED:
+            lg = logging.getLogger(name)
+            for h in list(lg.handlers):
+                if isinstance(h, _DropQueueHandler):
+                    lg.removeHandler(h)
+            for h in originals[lg.name]:
+                lg.addHandler(h)
+        log.warning("асинхронное логирование не поднялось: %s", e)
+        return False
+    atexit.register(stop_async_logging)
+    return True
+
+
+def stop_async_logging() -> None:
+    """Допisać очередь в журнал перед выходом (иначе хвост лога потеряется)."""
+    global _log_listener
+    if _log_listener is None:
+        return
+    try:
+        _log_listener.stop()
+    except Exception:                            # noqa: BLE001
+        pass
+    _log_listener = None
+
+
+# --- сборка мусора: паузы на большой куче ---------------------------------
+# P95 в секундах при 6 мс на стороне обработчика и стек gzip в окне паузы —
+# это не сжатие: на куче в гигабайт каждая сборка второго поколения
+# останавливает процесс на 1-2 с, а сэмплер называет кадр, который в этот
+# момент аллоцировал память. Меряем сборку явно (gc.callbacks дёшевы: срабаты-
+# вают только на самой сборке) и говорим вслух, если пауза цикла совпала с ней.
+GC_LOG_MS = max(10.0, float(os.getenv("LIQSCOPE_GC_LOG_MS", "200") or 200))
+GC_FREEZE = os.getenv("LIQSCOPE_GC_FREEZE", "1").strip() not in ("", "0", "false", "no")
+_GC_STATS: Dict[str, float] = {"max_ms": 0.0, "last_ms": 0.0, "total_ms": 0.0,
+                               "count": 0.0, "gen2": 0.0, "frozen": 0.0}
+_GC_RECENT: Deque[Tuple[float, float, int]] = deque(maxlen=32)
+_gc_started = 0.0
+
+
+def _gc_callback(phase: str, info: Dict[str, object]) -> None:
+    """Сколько воркер стоял на сборке мусора и какого поколения."""
+    global _gc_started
+    try:
+        if phase == "start":
+            _gc_started = time.monotonic()
+            return
+        if phase != "stop" or not _gc_started:
+            return
+        dt_ms = (time.monotonic() - _gc_started) * 1000.0
+        _gc_started = 0.0
+        gen = int(info.get("generation", -1))
+        _GC_RECENT.append((time.monotonic(), dt_ms, gen))
+        _GC_STATS["last_ms"] = round(dt_ms, 1)
+        _GC_STATS["count"] += 1
+        _GC_STATS["total_ms"] = round(_GC_STATS["total_ms"] + dt_ms, 1)
+        if dt_ms > _GC_STATS["max_ms"]:
+            _GC_STATS["max_ms"] = round(dt_ms, 1)
+        if gen == 2:
+            _GC_STATS["gen2"] += 1
+        if dt_ms >= GC_LOG_MS:
+            log.warning("[gc] сборка %d поколения остановила воркер на %.0f мс "
+                        "(собрано %s объектов); всего таких пауз %.0f, "
+                        "максимум %.0f мс — на большой куче это и есть p95 в "
+                        "секундах при быстром обработчике",
+                        gen, dt_ms, info.get("collected"),
+                        _GC_STATS["count"], _GC_STATS["max_ms"])
+    except Exception:                            # noqa: BLE001 — замер не должен ронять
+        _gc_started = 0.0
+
+
+def gc_during(since_mono: float, until_mono: float) -> str:
+    """Была ли сборка мусора внутри окна паузы цикла (для строки сторожа)."""
+    hits = [(ms, gen) for ts, ms, gen in _GC_RECENT
+            if since_mono - 0.05 <= ts <= until_mono + 0.05]
+    if not hits:
+        return ""
+    ms, gen = max(hits)
+    return (f"во время паузы шла сборка мусора {gen} поколения "
+            f"({ms:.0f} мс) — кадр в стеке просто аллоцировал память")
+
+
+def freeze_gc_heap() -> None:
+    """Убрать кучу старта из поколений: сборщики её больше не перебирают."""
+    if not GC_FREEZE:
+        return
+    try:
+        gc.collect()
+        gc.freeze()   # возвращает None — число даёт get_freeze_count()
+        n = gc.get_freeze_count() if hasattr(gc, "get_freeze_count") else 0
+        _GC_STATS["frozen"] = float(n or 0)
+        log.info("[gc] куча старта заморожена: %d объектов вне поколений, "
+                 "сборки будут перебирать только новые (LIQSCOPE_GC_FREEZE=0 "
+                 "отключает)", n or 0)
+    except Exception as e:                       # noqa: BLE001
+        log.warning("[gc] заморозка кучи не удалась: %s", e)
+
+
+try:
+    gc.callbacks.append(_gc_callback)
+except Exception:                                # noqa: BLE001
+    pass
+install_async_logging()
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(HERE, "static")
+WHALE_HISTORY_FILE = os.getenv(
+    "LIQSCOPE_WHALE_HISTORY_FILE", os.path.join(HERE, "data", "whale_events.sqlite3")
+).strip()
+if WHALE_HISTORY_FILE.lower() in ("0", "none", "off", "false"):
+    WHALE_HISTORY_FILE = ""
 
 SYMBOLS_LIMIT = int(os.getenv("LIQSCOPE_SYMBOLS_LIMIT", "40"))
 EXCHANGES = [e.strip().lower() for e in
@@ -342,13 +656,45 @@ from channel_digest import DEFAULT_INTERVAL_H, clamp_interval  # noqa: E402
 POST_INTERVAL_H = clamp_interval(os.getenv("LIQSCOPE_POST_INTERVAL_H") or
                                  DEFAULT_INTERVAL_H)
 account_store = Store(ACCOUNTS_DB, SECRET, ADMIN_IDS, ADMIN_EMAILS)
-# Письма: SMTP из окружения; без настроек сервер работает, письма не уходят
+# Письма: стартовая сборка из окружения; дальше настройки из БД главнее —
+# Менеджер настроек (админка → «Системные настройки») пересобирает транспорт
+# динамически перед каждой отправкой (см. web_account._mailer).
 mailer = build_mailer(PUBLIC_URL)
+import app_settings  # noqa: E402  (после Store: та же база, своя таблица)
+settings_store = app_settings.SettingsManager(ACCOUNTS_DB)
+try:
+    settings_store.apply_mailer(mailer, PUBLIC_URL)
+    settings_store.apply_admin_access(account_store)
+except Exception as _e_set:  # noqa: BLE001 — настройки не должны ронять старт
+    log.warning("settings: стартовое применение настроек: %s", _e_set)
+# SMTP-данные берутся динамически перед каждой отправкой (а не один раз при
+# старте): настройки, сохранённые в админке, подхватываются без рестарта.
+mailer.config_sync = lambda: settings_store.apply_mailer(mailer, PUBLIC_URL)
 tg_bot = TelegramBot(BOT_TOKEN, account_store, PUBLIC_URL,
                      channel_url=CHANNEL_URL, channel_id=CHANNEL_ID)
 # ИИ-шапки для постов в канал: Gemini → Groq → OpenRouter (ключи из окружения).
 # Без ключей None — сводка уходит с шаблонными шапками, как раньше.
-tg_bot.ai = build_ai()
+# ИИ берёт ключи/модели из Менеджера настроек: БД главнее окружения,
+# поэтому админка меняет их без `systemctl edit`. Источник ставится ДО
+# первой сборки писателя.
+ai_text.set_config_source(settings_store.db_value)
+
+
+def ai_sync():
+    """ИИ-писатель по текущим настройкам (ключи из БД/окружения).
+
+    Обновляет существующий писателя на месте (ссылки в боте остаются
+    живыми), собирает нового, если ключи появились, и возвращает результат.
+    Вызывается после сохранения настроек из админки и перед каждой
+    генерацией (хук ``AiWriter.config_sync``).
+    """
+    tg_bot.ai = settings_store.apply_ai(tg_bot.ai)
+    if tg_bot.ai is not None and tg_bot.ai.config_sync is None:
+        tg_bot.ai.config_sync = ai_sync
+    return tg_bot.ai
+
+
+tg_bot.ai = ai_sync()
 # Промты ИИ (шапка поста и дневной дайджест) можно переписать в админке сайта:
 # они лежат настройками ai_prompt_head_ru / ai_prompt_digest_en и т.д., а
 # встроенные шаблоны остаются образцом, пока админ своего текста не сохранил.
@@ -372,6 +718,7 @@ LIQUIDATIONS: Deque[dict] = deque(maxlen=HISTORY_MAX)
 # Кэш для WS init: символы и статистика считаются раз в 1-2 сек, а не на каждый коннект
 _SYMBOLS_CACHE: Dict[str, Any] = {"at": 0.0, "data": None}
 _STATS_CACHE: Dict[str, Any] = {}
+_STATS_INFLIGHT: Dict[str, asyncio.Task] = {}
 _STATS_CACHE_TTL = 5.0  # секунды
 _SYMBOLS_CACHE_TTL = 5.0
 # Месячная история: сырые события по дням + часовые свёртки (ликвидации,
@@ -428,8 +775,19 @@ LEVELS = LevelsEngine(oi=OI, profile=VP, side=SIDE, risk=RISK, hist=HIST)
 # Его наполняет level_alert_loop, читает alerts_market_snapshot.
 LEVELS_SNAP: Dict[str, dict] = {}
 LEVELS_SNAP_SEC = max(10.0, float(os.getenv("LIQSCOPE_LEVELS_SNAP_SEC", "20") or 20))
+# Расчёт уровней — самый тяжёлый фон на сервере: прогрев рядов биржи и
+# лестница по каждой монете. Он же главный подозреваемый в паузах воркера,
+# поэтому считает свою длительность сам и умеет выключаться для проверки.
+LEVELS_BG_ON = os.getenv("LIQSCOPE_LEVELS_BG", "1").strip() not in ("", "0", "false", "no")
+LEVELS_BATCH = max(1, int(os.getenv("LIQSCOPE_LEVELS_BATCH", "2") or 2))
+LEVELS_BG_SLOW_MS = max(100.0, float(os.getenv("LIQSCOPE_LEVELS_BG_SLOW_MS", "1000") or 1000))
+LEVELS_BG: Dict[str, float] = {
+    "passes": 0.0, "symbols": 0.0, "last_pass_ms": 0.0, "max_pass_ms": 0.0,
+    "last_warm_ms": 0.0, "max_warm_ms": 0.0, "last_payload_ms": 0.0,
+    "max_payload_ms": 0.0, "payload_total_ms": 0.0, "last_at": 0.0,
+    "slow_passes": 0.0, "off": 0.0 if LEVELS_BG_ON else 1.0}
 LEVELS_SNAP_MAX = max(1, int(os.getenv("LIQSCOPE_LEVELS_SNAP_MAX", "8") or 8))
-LEVEL_WARM_SEC = max(10.0, float(os.getenv("LIQSCOPE_LEVELS_WARM_SEC", "30") or 30))
+LEVEL_WARM_SEC = max(30.0, float(os.getenv("LIQSCOPE_LEVELS_WARM_SEC", "60") or 60))
 LEVELS_WARM_MAX = max(1, int(os.getenv("LIQSCOPE_LEVELS_WARM_MAX", "40") or 40))
 # Живая CVD: "SYM|tf" -> {время_начала_свечи: дельта USDT (покупки-продажи)}.
 # Считается из ленты сделок (тейкер-сторона) и дополняет исторические свечи.
@@ -498,6 +856,27 @@ class Client:
         self.exchange = "ALL"
         self.feed = "liq"        # лента клиента: liq | cvd | oi
         self.alive = True
+        # Пока не отправлен init, широковещательные кадры не должны обгонять
+        # приветствие (хаб уже видит клиента во время расчёта снимка).
+        self.init_pending = False
+        # Очередь исходящих кадров: рассылка кладёт готовый кадр и уходит, а
+        # в сокет его пишет отдельная задача клиента. Забитый TCP-буфер одного
+        # зрителя больше не держит event loop (а с ним и все HTTP-запросы)
+        # секундами — см. _pump().
+        self.out: Deque[str] = deque()
+        self.out_bytes = 0
+        self.dropped_frames = 0
+        self._sending = False       # кадр уже вынут из очереди и идёт в сокет
+        self._out_wake: Optional[asyncio.Event] = None
+        self._pump_task: Optional[asyncio.Task] = None
+        self._pump_loop = None
+
+    # Капля медленного зрителя: столько кадров/байт он может накопить, пока
+    # его писатель борется с сетью. Превысили — клиент безнадёжно отстал и
+    # выкидывается (фронт переподключится и пересинхронизируется), иначе
+    # очередь съела бы память воркера.
+    OUT_MAX_FRAMES = 200
+    OUT_MAX_BYTES = 512 * 1024
 
     @property
     def wants_flow(self) -> bool:
@@ -520,15 +899,29 @@ class Client:
             return False
         return True
 
-    async def send(self, msg: dict) -> bool:
+    async def send(self, msg: dict, text: Optional[str] = None) -> bool:
+        """Отдать кадр клиенту. ``text`` — уже сериализованный кадр.
+
+        Сериализуем сами и отдаём текстом: ws.send_json внутри зовёт
+        json.dumps, а рассылка ликвидаций/свечей/статистики — самая
+        частая сериализация процесса (orjson быстрее в разы). При
+        широковещании ``Hub.broadcast`` сериализует кадр ОДИН раз и передаёт
+        сюда готовый текст: 50 зрителей не должны платить 50 сериализаций
+        одной и той же пачки свечей на единственном воркере.
+
+        Медленный/зависший клиент не должен подвешивать читателей
+        биржевых сокетов: send внутри ждёт drain() без лимита, а
+        TCP-буфер забитого клиента может не освобождаться минутами.
+        Всё, что ушло в транспорт до таймаута, остаётся валидным кадром,
+        так что отмена безопасна. Застряли — клиент мёртв, выкидываем.
+        """
+        if self.init_pending and msg.get("type") != "init":
+            return True  # снимок init уже содержит актуальные данные
         try:
-            # Медленный/зависший клиент не должен подвешивать читателей
-            # биржевых сокетов: send_json внутри ждёт drain() без лимита, а
-            # TCP-буфер забитого клиента может не освобождаться минутами.
-            # Всё, что ушло в транспорт до таймаута, остаётся валидным кадром,
-            # так что отмена безопасна. Застряли — клиент мёртв, выкидываем.
-            await asyncio.wait_for(self.ws.send_json(msg),
+            frame = text if text is not None else json_dumps_text(msg)
+            await asyncio.wait_for(self.ws.send_text(frame),
                                    timeout=self.SEND_TIMEOUT)
+            _metrics_ws_send()
             return True
         except Exception:
             self.alive = False
@@ -536,6 +929,108 @@ class Client:
 
     # см. send(): заведомо больше любого нормального сетевого хода
     SEND_TIMEOUT = 5.0
+
+    # --- очередь исходящих кадров -------------------------------------------
+    def _wake(self) -> asyncio.Event:
+        if self._out_wake is None:
+            self._out_wake = asyncio.Event()
+        return self._out_wake
+
+    def offer(self, frame: str) -> bool:
+        """Положить готовый кадр в очередь клиента, не ожидая сокет.
+
+        Возвращает False, если клиент мёртв или безнадёжно отстал: вызывающий
+        (``Hub.broadcast``) выкинет его из хаба. Именно это убирает хвост
+        p95 в секундах: раньше рассылка стояла в ``await send_text`` на
+        каждом зрителе по очереди, и один забитый TCP-буфер держал event loop
+        до ``SEND_TIMEOUT`` — всё это время HTTP-запросы просто ждали в
+        очереди цикла.
+        """
+        if self.init_pending:
+            return True  # не отправляем фоновый кадр до init
+        if not self.alive:
+            return False
+        if len(self.out) >= self.OUT_MAX_FRAMES or \
+                self.out_bytes + len(frame) > self.OUT_MAX_BYTES:
+            self.dropped_frames += len(self.out)
+            self.out.clear()
+            self.out_bytes = 0
+            self.alive = False
+            log.warning("WS-клиент отстал: очередь исходящих переполнена "
+                        "(>%d кадров или %d КБ) — отключаем, фронт "
+                        "переподключится", self.OUT_MAX_FRAMES,
+                        self.OUT_MAX_BYTES // 1024)
+            return False
+        self.out.append(frame)
+        self.out_bytes += len(frame)
+        self._wake().set()
+        return True
+
+    async def _pump(self) -> None:
+        """Единственный писатель очереди: порядок кадров у клиента сохранён."""
+        wake = self._wake()
+        while self.alive:
+            if not self.out:
+                wake.clear()
+                if not self.out:            # кадр положили между проверкой и clear()
+                    try:
+                        await wake.wait()
+                    except asyncio.CancelledError:
+                        return
+                    continue
+            frame = self.out.popleft()
+            self.out_bytes -= len(frame)
+            self._sending = True
+            try:
+                await asyncio.wait_for(self.ws.send_text(frame),
+                                       timeout=self.SEND_TIMEOUT)
+                _metrics_ws_send()
+            except asyncio.CancelledError:
+                self.out.appendleft(frame)
+                self.out_bytes += len(frame)
+                raise
+            except Exception as e:          # noqa: BLE001
+                self.dropped_frames += len(self.out) + 1
+                self.out.clear()
+                self.out_bytes = 0
+                self.alive = False
+                log.debug("ws pump: сокет умер (%s), недоставлено %d кадров",
+                          e, self.dropped_frames)
+                return
+            finally:
+                self._sending = False
+
+    def start_pump(self) -> None:
+        """Завести писателя очереди (идемпотентно, в текущем event loop)."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:                # вне цикла (тесты-двойники) — нечего заводить
+            return
+        if self._pump_loop is not loop:
+            # Event и задача принадлежали прежнему циклу: сбрасываем оба
+            self._pump_loop = loop
+            self._out_wake = None
+            self._pump_task = None
+        if self._pump_task is None or self._pump_task.done():
+            self._pump_task = loop.create_task(self._pump(), name="ws-pump")
+
+    async def stop_pump(self) -> None:
+        t, self._pump_task = self._pump_task, None
+        if t is not None and not t.done():
+            t.cancel()
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:          # noqa: BLE001
+                log.debug("ws pump stop: %s", e)
+
+    async def flush(self, timeout: float = 2.0) -> bool:
+        """Дождаться, пока очередь уйдёт в сокет (тесты, аккуратное закрытие)."""
+        end = time.monotonic() + timeout
+        while (self.out or self._sending) and self.alive and time.monotonic() < end:
+            await asyncio.sleep(0.005)
+        return not self.out and not self._sending
 
 
 # Потолок живых WS: каждый клиент получает широковещание, флуд соединениями
@@ -555,10 +1050,14 @@ class Hub:
                             len(self.clients), WS_MAX_CLIENTS)
                 return False
             self.clients.add(c)
+        start = getattr(c, "start_pump", None)
+        if callable(start):
+            start()             # писатель очереди исходящих кадров
         log.info("Клиент подключился. Всего: %d", len(self.clients))
         return True
 
     async def remove(self, c: Client):
+        await self._stop_writer(c)
         async with self._lock:
             self.clients.discard(c)
         log.info("Клиент отключился. Всего: %d", len(self.clients))
@@ -566,23 +1065,505 @@ class Hub:
     async def broadcast(self, msg: dict, predicate=None):
         async with self._lock:
             targets = list(self.clients)
+        # Whale events are part of the members-only screener. The shared market
+        # socket remains public for terminal data, but must not leak this feed.
+        if msg.get("type") == "whale_tx":
+            targets = [c for c in targets if getattr(c, "user_id", None) is not None]
+        if predicate is not None:
+            targets = [c for c in targets if predicate(c)]
+        if not targets:
+            return
+        # Кадр сериализуется ОДИН раз на всех получателей: рассылка свечей и
+        # статистики — десятки килобайт, и при 50 зрителях прежняя схема
+        # (json.dumps внутри send каждого клиента) жгла 50× того же CPU на
+        # единственном воркере.
+        frame = json_dumps_text(msg)
         dead = []
         for c in targets:
-            if predicate and not predicate(c):
-                continue
-            if not await c.send(msg):
+            if not await self._deliver(c, msg, frame):
                 dead.append(c)
         if dead:
             async with self._lock:
                 for c in dead:
                     self.clients.discard(c)
+            for c in dead:
+                await self._stop_writer(c)
+
+    @staticmethod
+    async def _stop_writer(c) -> None:
+        """Остановить писателя очереди, если он у клиента есть."""
+        stop = getattr(c, "stop_pump", None)
+        if callable(stop):
+            try:
+                await stop()
+            except Exception as e:               # noqa: BLE001
+                log.debug("hub: писатель очереди не остановился: %s", e)
+
+    async def _deliver(self, c, msg: dict, frame: str) -> bool:
+        """Положить кадр клиенту: в его очередь, а не в await на весь фан-аут.
+
+        Порядок кадров у каждого зрителя сохраняет его собственный писатель
+        (``Client._pump``), поэтому рассылка не обязана ждать сокет: медленный
+        клиент копит кадры у себя и отключается по переполнению очереди, а не
+        держит воркер (и всех остальных) до таймаута отправки.
+        """
+        try:
+            offer = getattr(c, "offer", None)
+            if callable(offer):
+                c.start_pump()
+                return bool(offer(frame))
+            # двойники в тестах без очереди — прежняя адресная отправка
+            return bool(await c.send(msg, text=frame))
+        except Exception as e:                   # noqa: BLE001
+            # один сломанный сокет не должен обрывать рассылку остальным:
+            # на единственном воркере это минус свечи/ликвидации у всех
+            log.debug("broadcast: отправка клиенту упала: %s", e)
+            return False
 
     def viewed_pairs(self) -> Set[tuple]:
         return {(c.chart_symbol, c.tf) for c in self.clients}
 
 
 hub = Hub()
+
+
+# =============================================================================
+#  Метрики процесса (для /api/metrics и внешней проверки)
+# =============================================================================
+# Счётчики по секундным корзинам: O(1) на запрос, память ограничена окном
+# истории. Окно чтения — последние 60 секунд; корзины старше двух минут
+# подчищаем при чтении, чтобы словари не росли.
+_METRICS_KEEP_SEC = 120
+_METRICS_WIN_SEC = 60
+_HTTP_RPS: Dict[int, int] = {}          # секунда -> HTTP-запросов
+_HTTP_STATUS: Dict[tuple, int] = {}     # (секунда, статус) -> запросов
+_HTTP_LAT = deque(maxlen=5000)          # последние задержки HTTP (сек)
+_WS_CONN: Dict[int, int] = {}           # секунда -> новых WS-подключений
+_WS_SEND: Dict[int, int] = {}           # секунда -> сообщений клиентам
+_METRICS_LOCK = threading.Lock()
+_START_TS = time.time()
+
+
+def _metrics_bump(bucket: Dict, key, amount: int = 1) -> None:
+    with _METRICS_LOCK:
+        bucket[key] = bucket.get(key, 0) + amount
+
+
+def _metrics_http(status: int, latency_sec: float) -> None:
+    now = int(time.time())
+    with _METRICS_LOCK:
+        _HTTP_RPS[now] = _HTTP_RPS.get(now, 0) + 1
+        skey = (now, int(status))
+        _HTTP_STATUS[skey] = _HTTP_STATUS.get(skey, 0) + 1
+        _HTTP_LAT.append(max(0.0, float(latency_sec)))
+
+
+def _metrics_ws_connect() -> None:
+    _metrics_bump(_WS_CONN, int(time.time()))
+
+
+def _metrics_ws_send() -> None:
+    _metrics_bump(_WS_SEND, int(time.time()))
+
+
+def _rate_last_minute(bucket: Dict) -> float:
+    cutoff = int(time.time()) - _METRICS_WIN_SEC
+    with _METRICS_LOCK:
+        total = sum(v for k, v in bucket.items()
+                    if isinstance(k, int) and k > cutoff)
+    return round(total / _METRICS_WIN_SEC, 2)
+
+
+def _status_rps_last_minute() -> Dict[str, float]:
+    cutoff = int(time.time()) - _METRICS_WIN_SEC
+    agg: Dict[str, int] = {}
+    with _METRICS_LOCK:
+        for (sec, status), cnt in _HTTP_STATUS.items():
+            if sec > cutoff:
+                key = str(status)
+                agg[key] = agg.get(key, 0) + cnt
+    return {k: round(v / _METRICS_WIN_SEC, 2) for k, v in sorted(agg.items())}
+
+
+def _latency_p95_ms() -> Optional[float]:
+    with _METRICS_LOCK:
+        samples = sorted(_HTTP_LAT)
+    if not samples:
+        return None
+    idx = min(len(samples) - 1, int(0.95 * len(samples)))
+    return round(samples[idx] * 1000.0, 1)
+
+
+def _ws_queue_stats(clients=None) -> Dict[str, int]:
+    """Глубина очередей исходящих WS-кадров.
+
+    Если кадры копятся — зрители не успевают читать, и раньше это означало бы
+    паузы воркера на всю рассылку; теперь очередь локальна для клиента, а
+    метрика показывает, кто именно отстаёт (``ws_slow_clients`` — те, у кого в
+    очереди больше 10 кадров).
+    """
+    frames = 0
+    nbytes = 0
+    worst = 0
+    slow = 0
+    for c in list(hub.clients if clients is None else clients):
+        n = len(getattr(c, "out", ()) or ())
+        frames += n
+        nbytes += int(getattr(c, "out_bytes", 0) or 0)
+        if n > worst:
+            worst = n
+        if n > 10:
+            slow += 1
+    return {"ws_send_queue_frames": frames, "ws_send_queue_bytes": nbytes,
+            "ws_send_queue_worst_frames": worst, "ws_slow_clients": slow}
+
+
+def _metrics_prune() -> None:
+    cutoff = int(time.time()) - _METRICS_KEEP_SEC
+    with _METRICS_LOCK:
+        for old in [k for k in _HTTP_RPS if k < cutoff]:
+            _HTTP_RPS.pop(old, None)
+        for old in [k for k in _HTTP_STATUS if k[0] < cutoff]:
+            _HTTP_STATUS.pop(old, None)
+        for old in [k for k in _WS_CONN if k < cutoff]:
+            _WS_CONN.pop(old, None)
+        for old in [k for k in _WS_SEND if k < cutoff]:
+            _WS_SEND.pop(old, None)
+
+
+# Паузы event loop. Единственный воркер обязан крутиться без остановок: если
+# клиент видит p95 в секундах, а серверная метрика обработчика — 6 мс, значит
+# запросы стоят в очереди цикла, пока кто-то держит его занятым (рассылка
+# кадра медленному клиенту, разбор большой пачки свечей, синхронный диск).
+# Сторож меряет фактическую задержку тика и пишет в лог всё, что заметно
+# длиннее порога, — по времени в журнале видно, рядом с чем встало.
+_LOOP_LAG: Dict[str, float] = {"max_ms": 0.0, "at": 0.0, "stalls": 0.0,
+                               "last_ms": 0.0, "logged_at": 0.0}
+LOOP_LAG_TICK = 0.2
+LOOP_LAG_WARN_MS = max(50.0, float(os.getenv("LIQSCOPE_LOOP_LAG_MS", "500")))
+LOOP_LAG_LOG_GAP = 5.0
+# Диагностика «чем именно занят воркер»: debug-режим asyncio называет задачу,
+# сэмплер стеков (LIQSCOPE_LOOP_TRACE) — файл, функцию и строку.
+ASYNCIO_DEBUG = os.getenv("LIQSCOPE_ASYNCIO_DEBUG", "").strip() not in ("", "0", "false", "no")
+SLOW_CALLBACK_SEC = max(0.05, float(os.getenv("LIQSCOPE_SLOW_CALLBACK_SEC", "0.25")))
+
+
+# =============================================================================
+#  Атрибуция пауз: какая фоновая задача держала воркер
+# =============================================================================
+# Стек из трассировки называет кадр, который просто аллоцировал память в момент
+# сборки мусора, а сторож умеет сказать только «стек держался N мс». Каждый
+# периодический цикл помечает свой проход именем через task_span, поэтому в
+# строке паузы появляется список задач, которые в этот момент работали:
+#
+#   [loop] воркер был занят 2140 мс ...; в это время шли: liq-levels 2100 мс
+#
+# Спан — обычный dict: вход и выход дешевле микросекунды, на горячих путях
+# (on_trade, рассылка) их нет.
+_TASK_SPANS: Dict[str, float] = {}
+_SPAN_RING: Deque[Tuple[str, float, float]] = deque(maxlen=32)
+
+
+@contextlib.contextmanager
+def task_span(name: str):
+    """Пометить участок кода именем задачи: сторож назовёт его при паузе."""
+    started = time.monotonic()
+    _TASK_SPANS[name] = started
+    try:
+        yield
+    finally:
+        _TASK_SPANS.pop(name, None)
+        _SPAN_RING.append((name, started, time.monotonic()))
+
+
+def active_spans(started_before: Optional[float] = None) -> List[Tuple[str, float]]:
+    """Задачи, работавшие к моменту паузы: [(имя, сколько мс), ...].
+
+    Берём только те, что начались до паузы: спаны, открытые позже, к ней
+    отношения не имеют. Сортировка — от самой долгой.
+    """
+    now = time.monotonic()
+    limit = now if started_before is None else float(started_before)
+    rows = [(name, (now - t0) * 1000.0) for name, t0 in _TASK_SPANS.items()
+            if t0 <= limit]
+    rows.sort(key=lambda kv: -kv[1])
+    return rows
+
+
+def spanned(name: str):
+    """Обернуть функцию в спан — и синхронную, и корутину.
+
+    Тяжёлые помощники (``compute_stats``, ``flow_snapshot``, снимок алертов,
+    ``health_summary``) зовутся и из HTTP, и из фоновых циклов; спан делает их
+    видимыми в строке паузы без правки каждого места вызова.
+    """
+    def deco(fn):
+        if asyncio.iscoroutinefunction(fn):
+            @functools.wraps(fn)
+            async def awrap(*a, **kw):
+                with task_span(name):
+                    return await fn(*a, **kw)
+            return awrap
+
+        @functools.wraps(fn)
+        def wrap(*a, **kw):
+            with task_span(name):
+                return fn(*a, **kw)
+        return wrap
+    return deco
+
+
+def spans_report(started_before: Optional[float] = None, limit: int = 4) -> str:
+    """Строка «в это время шли: имя N мс, ...» для журнала пауз."""
+    rows = active_spans(started_before)[:max(1, int(limit))]
+    if not rows:
+        return ""
+    return ", ".join(f"{name} {ms:.0f} мс" for name, ms in rows)
+
+
+async def loop_lag_watchdog():
+    """Меряет паузы event loop и шумит, когда воркер надолго занят."""
+    while True:
+        try:
+            t0 = time.monotonic()
+            await asyncio.sleep(LOOP_LAG_TICK)
+            lag_ms = max(0.0, (time.monotonic() - t0 - LOOP_LAG_TICK) * 1000.0)
+            _LOOP_LAG["last_ms"] = round(lag_ms, 1)
+            if lag_ms > _LOOP_LAG["max_ms"]:
+                _LOOP_LAG["max_ms"] = round(lag_ms, 1)
+                _LOOP_LAG["at"] = time.time()
+            if lag_ms >= LOOP_LAG_WARN_MS:
+                _LOOP_LAG["stalls"] += 1
+                # виновника ищем на каждой паузе (не только на залогированной):
+                # в /api/health должен лежать свежий стек, а не минутной давности
+                if lag_ms >= LOOP_TRACE_MIN_SEC * 1000.0:
+                    culprit = _loop_trace_explain(lag_ms / 1000.0)
+                    # сборка мусора в том же окне объясняет паузу лучше стека:
+                    # сэмплер называет кадр, который просто аллоцировал память
+                    gc_note = gc_during(t0, time.monotonic())
+                    if gc_note:
+                        culprit = f"{culprit} | {gc_note}" if culprit else gc_note
+                    if culprit:
+                        _LOOP_TRACE["last"] = culprit
+                        _LOOP_TRACE["held_ms"] = round(lag_ms, 1)
+                        _LOOP_TRACE["stalls"] = int(_LOOP_TRACE["stalls"]) + 1
+                now = time.monotonic()
+                # не чаще раза в 5 с: на сильном лаге лог не должен тонуть
+                if now - _LOOP_LAG["logged_at"] >= LOOP_LAG_LOG_GAP:
+                    _LOOP_LAG["logged_at"] = now
+                    culprit = str(_LOOP_TRACE["last"] or "")
+                    busy = spans_report(t0)
+                    if busy:
+                        culprit = (f"{culprit} | работали задачи: {busy}"
+                                   if culprit else f"работали задачи: {busy}")
+                    log.warning("[loop] воркер был занят %.0f мс (порог %.0f мс); "
+                                "пауз таких %d, максимум %.0f мс — клиенты в это "
+                                "время стоят в очереди, а не обрабатываются%s",
+                                lag_ms, LOOP_LAG_WARN_MS, int(_LOOP_LAG["stalls"]),
+                                _LOOP_LAG["max_ms"],
+                                f"; в это время он был в: {culprit}" if culprit
+                                else ("; кто именно — не записано "
+                                      "(LIQSCOPE_LOOP_TRACE=1)" if LOOP_TRACE
+                                      else " (LIQSCOPE_LOOP_TRACE=1 назовёт стек)"))
+        except asyncio.CancelledError:
+            break
+        except Exception as e:                       # noqa: BLE001
+            log.debug("сторож пауз цикла: %s", e)
+            await asyncio.sleep(1)
+
+
+def _enable_asyncio_debug() -> None:
+    """Включить штатную диагностику asyncio: цикл сам назовёт медленную задачу.
+
+    ``PYTHONASYNCIODEBUG=1`` под uvicorn не срабатывает (проверено: цикл
+    поднимается с ``debug=False``), поэтому флаг включаем из приложения.
+    Дальше asyncio сам пишет ``Executing <Task … coro=<pump_loop()…>> took
+    0.857 seconds`` — то есть называет виновника по имени задачи. Платим
+    накладными расходами debug-режима, поэтому флаг диагностический.
+    """
+    if not ASYNCIO_DEBUG:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+        loop.set_debug(True)
+        loop.slow_callback_duration = SLOW_CALLBACK_SEC
+        log.warning("[loop] включён debug-режим asyncio: медленнее "
+                    "%.0f мс считается и логируется с именем задачи "
+                    "(LIQSCOPE_ASYNCIO_DEBUG=1)", SLOW_CALLBACK_SEC * 1000)
+    except Exception as e:                           # noqa: BLE001
+        log.warning("[loop] debug-режим asyncio не включился: %s", e)
+
+
+# --- трассировка стека: кто именно держал воркер ---------------------------
+# Сторож пауз говорит «воркер был занят 857 мс», но не говорит КЕМ. Поток-
+# сэмплер раз в 50 мс снимает стек главного потока (в нём живёт event loop) и
+# пишет тот, который держится дольше порога: видно файл, функцию и строку.
+# Механику самого цикла (ожидание epoll) не логируем — это свобода, а не занятость.
+LOOP_TRACE = os.getenv("LIQSCOPE_LOOP_TRACE", "").strip() not in ("", "0", "false", "no")
+LOOP_TRACE_MIN_SEC = max(0.1, float(os.getenv("LIQSCOPE_LOOP_TRACE_MS", "400")) / 1000.0)
+LOOP_TRACE_INTERVAL = 0.05
+LOOP_TRACE_FRAMES = 12
+_LOOP_TRACE: Dict[str, object] = {"held_ms": 0.0, "stalls": 0, "last": "",
+                                  "stop": False, "thread": None, "samples": 0}
+# Граница «механики запуска цикла». С uvloop (его ставит uvicorn[standard])
+# сам цикл живёт в Cython и в python-стеке не виден: самый внутренний кадр
+# простоя — это runners.py:run / _compat.py:asyncio_run, а не selectors.select.
+# Поэтому признаком простоя считаем «внутри цикла ни одного python-кадра нет»,
+# а занятостью — кадры глубже границы: именно они называют виновника.
+_LOOP_BOUNDARY = ("base_events.py", "selectors.py", "runners.py", "events.py",
+                  "proactor_events.py", "kqueue.py", "epoll.pyx", "uvloop",
+                  "_compat.py")
+
+
+def _stack_signature(frame, limit: int = LOOP_TRACE_FRAMES) -> list:
+    """Стек изнутри наружу: где застряли → кто позвал."""
+    out = []
+    f = frame
+    while f is not None and len(out) < limit:
+        co = f.f_code
+        out.append(f"{os.path.basename(co.co_filename)}:{f.f_lineno}:{co.co_name}")
+        f = f.f_back
+    return out
+
+
+def _stack_work(sig: list) -> list:
+    """Кадры, выполнявшиеся ВНУТРИ цикла (всё, что глубже границы запуска)."""
+    for i, fr in enumerate(sig):
+        if any(b in fr for b in _LOOP_BOUNDARY):
+            return sig[:i]
+    return sig
+
+
+def _stack_is_idle(sig: list) -> bool:
+    """Свободен ли воркер: внутри цикла не выполняется ни один python-кадр.
+
+    Регрессия на uvloop: прежнее правило «весь стек — внутренности asyncio»
+    принимало любой простой за занятость (под циклом всегда лежит обвязка
+    uvicorn/click/runpy, а с uvloop не видно и selectors.select) и писало в
+    журнал каждые 300 мс при полностью свободном воркере.
+    """
+    return not _stack_work(sig)
+
+
+# Кольцо сэмплов: (monotonic, рабочий стек). 256 × 50 мс = ~13 с окна —
+# хватает, чтобы разобрать даже пятисекундную паузу.
+_LOOP_SAMPLES: Deque[tuple] = deque(maxlen=256)
+
+
+def _loop_trace_thread(main_tid: int) -> None:
+    """Сэмплер: пишет в кольцо текущий рабочий стек и ничего не логирует.
+
+    Признак «один и тот же стек держится N мс» сам по себе ненадёжен: короткий
+    кадр, который вызывается постоянно (``ssl.py:read`` под uvloop на десяти
+    биржевых лентах), попадает в каждый сэмпл и выглядит блокировкой — на бою
+    это дало ложные 480 мс. Паузу достоверно знает сторож: он меряет, что цикл
+    РЕАЛЬНО не крутился, и тогда берёт из кольца стек, преобладавший в окне
+    этой паузы.
+    """
+    while not _LOOP_TRACE["stop"]:
+        try:
+            frame = sys._current_frames().get(main_tid)
+            if frame is not None:
+                work = tuple(_stack_work(_stack_signature(frame)))
+                _LOOP_SAMPLES.append((time.monotonic(), work))
+                _LOOP_TRACE["samples"] = int(_LOOP_TRACE["samples"]) + 1
+        except Exception as e:                       # noqa: BLE001
+            log.debug("сэмплер стеков: %s", e)
+        time.sleep(LOOP_TRACE_INTERVAL)
+
+
+def _loop_trace_explain(window_sec: float) -> str:
+    """Стек, преобладавший в окне паузы: «чем именно был занят воркер»."""
+    if not _LOOP_SAMPLES:
+        return ""
+    cutoff = time.monotonic() - max(0.05, window_sec) - LOOP_TRACE_INTERVAL * 2
+    counts: Dict[tuple, int] = {}
+    for ts, work in list(_LOOP_SAMPLES):
+        if ts >= cutoff and work:
+            counts[work] = counts.get(work, 0) + 1
+    if not counts:
+        return ""
+    best, hits = max(counts.items(), key=lambda kv: kv[1])
+    return f"{' <- '.join(best)}  ({hits} из {sum(counts.values())} сэмплов окна)"
+
+
+def loop_trace_start() -> None:
+    """Запустить сэмплер стеков (если включён LIQSCOPE_LOOP_TRACE)."""
+    if not LOOP_TRACE or _LOOP_TRACE["thread"] is not None:
+        return
+    import threading
+    _LOOP_TRACE["stop"] = False
+    t = threading.Thread(target=_loop_trace_thread,
+                         args=(threading.get_ident(),),
+                         name="loop-trace", daemon=True)
+    _LOOP_TRACE["thread"] = t
+    t.start()
+    log.warning("[loop-trace] сэмплер стеков включён: порог %.0f мс, шаг %.0f мс "
+                "(LIQSCOPE_LOOP_TRACE=1)", LOOP_TRACE_MIN_SEC * 1000,
+                LOOP_TRACE_INTERVAL * 1000)
+
+
+def loop_trace_stop() -> None:
+    _LOOP_TRACE["stop"] = True
+    t, _LOOP_TRACE["thread"] = _LOOP_TRACE["thread"], None
+    if t is not None:
+        t.join(timeout=1.0)
+
+
+def _rss_bytes() -> int:
+    """ТЕКУЩИЙ RSS процесса в байтах.
+
+    ``ru_maxrss`` — это пик за всё время жизни процесса: после прогрева
+    (восстановление истории, каталог бирж) метрика навсегда оставалась высокой,
+    даже когда память уже освободилась, и порог «RSS < 500 МБ» в
+    ``tools/load_test.py`` срабатывал на процессе, который по факту занимает
+    в разы меньше. Поэтому на Linux читаем ``VmRSS`` из ``/proc/self/status``,
+    а пик отдаём отдельным полем :func:`_rss_peak_bytes`.
+    """
+    try:
+        with open("/proc/self/status", encoding="ascii", errors="replace") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) * 1024
+    except Exception:  # noqa: BLE001 — нет /proc (macOS/Windows) или не прочитался
+        pass
+    return _rss_peak_bytes()
+
+
+def _rss_peak_bytes() -> int:
+    """Пиковый RSS с момента старта (``ru_maxrss``): Linux отдаёт КБ, macOS — байты."""
+    try:
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return int(rss) * (1 if sys.platform == "darwin" else 1024)
+    except Exception:  # noqa: BLE001 — метрика не должна ронять ручку
+        return 0
+
+
+def _wal_bytes() -> int:
+    try:
+        return int(os.path.getsize(account_store.path + "-wal"))
+    except OSError:
+        return 0
+
+
+async def _sqlite_ping_ms() -> float:
+    """Отклик SQLite: SELECT 1 в пуле потоков, чтобы не стопать loop."""
+    try:
+        return await asyncio.to_thread(account_store.ping)
+    except Exception:  # noqa: BLE001
+        return -1.0
+
+
 feed: Optional[MarketFeed] = None
+whale_screener: Optional[WhaleScreener] = None
+whale_poller: Optional[WhalePoller] = None
+alchemy_key_store: Optional[AlchemyKeyStore] = None
+trongrid_key_store: Optional[AlchemyKeyStore] = None
+cex_wallet_registry = None
+# which networks the admin left on; None = фильтр не задан (видно всё)
+screener_networks = None
+alchemy_vault_error = ""
+trongrid_vault_error = ""
 # 📖 Стакан: опрос L2 и детектор стен (заполняется в lifespan; в тестах — подмена).
 book_feed_inst: Optional[BookFeed] = None
 _pending: List[dict] = []
@@ -824,43 +1805,69 @@ def level_alert_symbols() -> List[str]:
     return out[:LEVELS_WARM_MAX]
 
 
-async def liq_levels_task() -> None:
-    """Фон: греет данные уровней и обновляет снимок для алертов.
+async def levels_bg_pass(state: Dict[str, Any]) -> None:
+    """Один проход фона уровней: прогрев пачки монет и снимок для алертов.
 
     Сеть здесь только на прогреве (перевес сторон и риск-лимиты) — сам расчёт
     читает то, что уже лежит в памяти и на диске. Идём по списку монет по
     кругу: за проход успеваем прогреть немногих, зато ни одна монета не
     остаётся без внимания и на биржи не летит залп. Снимок нужен движку
     алертов: он не должен считать лестницы в своём проходе.
+
+    Проход считает собственную длительность и раскладку по монетам
+    (``LEVELS_BG``, видно в ``/api/health``): это самый тяжёлый периодический
+    расчёт на сервере, и без замера нельзя сказать, он ли даёт паузы воркера.
+    Вынесено из цикла задачи, чтобы проход проверялся тестом, а не только
+    прогоном на бою. ``state`` держит ``asked`` (круг монет) и ``snap_at``.
     """
-    await asyncio.sleep(20)             # пусть подтянутся символы и сессии
-    asked: List[str] = []
-    snap_at = 0.0
-    while True:
-        try:
-            session = getattr(feed, "session", None) if feed else None
-            want = level_alert_symbols()
-            if session and LEVELS.enabled and want:
-                # круг по списку: каждый проход — следующая четвёрка монет
-                todo = [s for s in want if s not in asked] or want
-                if not [s for s in want if s not in asked]:
-                    asked = []
-                batch = todo[:4]
-                asked.extend(batch)
-                await LEVELS.warm(session, batch, limit=len(batch))
-                # считаем те монеты, которых ждут алерты и графики: их ответ
-                # кэшируется движком, а снимок для алертов обновляем не чаще
-                # LEVELS_SNAP_SEC — иначе лестницы считались бы зря
-                if time.time() - snap_at >= LEVELS_SNAP_SEC:
-                    snap_at = time.time()
-                    for sym in batch:
+    t_pass = time.monotonic()
+    pass_syms: List[str] = []
+    try:
+        if not LEVELS_BG_ON:
+            # режим проверки: фон не считает ничего, и по прогону нагрузки
+            # сразу видно, он ли давал паузы воркера
+            LEVELS_BG["off"] = 1.0
+            return
+        session = getattr(feed, "session", None) if feed else None
+        want = level_alert_symbols()
+        if session and LEVELS.enabled and want:
+            asked = list(state.get("asked") or [])
+            # круг по списку: каждый проход — следующая пачка монет
+            todo = [s for s in want if s not in asked] or want
+            if not [s for s in want if s not in asked]:
+                asked = []
+            batch = todo[:LEVELS_BATCH]
+            asked.extend(batch)
+            state["asked"] = asked
+            t_warm = time.monotonic()
+            await LEVELS.warm(session, batch, limit=len(batch))
+            warm_ms = (time.monotonic() - t_warm) * 1000.0
+            LEVELS_BG["last_warm_ms"] = round(warm_ms, 1)
+            if warm_ms > LEVELS_BG["max_warm_ms"]:
+                LEVELS_BG["max_warm_ms"] = round(warm_ms, 1)
+            # считаем те монеты, которых ждут алерты и графики: их ответ
+            # кэшируется движком, а снимок для алертов обновляем не чаще
+            # LEVELS_SNAP_SEC — иначе лестницы считались бы зря
+            if time.time() - float(state.get("snap_at") or 0.0) >= LEVELS_SNAP_SEC:
+                state["snap_at"] = time.time()
+                for i, sym in enumerate(batch):
+                    try:
                         price = float((feed.prices or {}).get(sym) or 0.0)
+                        t_one = time.monotonic()
                         try:
-                            data = await LEVELS.payload(sym, session=session,
-                                                        price=(price or None))
-                        except Exception as e:    # noqa: BLE001
+                            with task_span("liq-levels"):
+                                data = await LEVELS.payload(sym, session=session,
+                                                            price=(price or None))
+                        except Exception as e:        # noqa: BLE001
                             log.debug("уровни %s: %s", sym, e)
                             continue
+                        one_ms = (time.monotonic() - t_one) * 1000.0
+                        pass_syms.append(f"{sym}:{one_ms:.0f}мс")
+                        LEVELS_BG["last_payload_ms"] = round(one_ms, 1)
+                        LEVELS_BG["payload_total_ms"] = round(
+                            LEVELS_BG["payload_total_ms"] + one_ms, 1)
+                        if one_ms > LEVELS_BG["max_payload_ms"]:
+                            LEVELS_BG["max_payload_ms"] = round(one_ms, 1)
                         if not data.get("enabled") or not data.get("magnets"):
                             continue
                         LEVELS_SNAP[sym] = {
@@ -873,14 +1880,81 @@ async def liq_levels_task() -> None:
                             "calibration": data.get("calibration") or {},
                             "estimate": True,
                         }
-                    for gone in [s for s in LEVELS_SNAP if s not in want]:
-                        LEVELS_SNAP.pop(gone, None)
-            await asyncio.to_thread(LEVELS.save)
+                    finally:
+                        # Cooperative break even after a failed coin; CPU math is
+                        # already in processes, this also bounds back-to-back IPC.
+                        if (i + 1) % 5 == 0 or i == len(batch) - 1:
+                            await asyncio.sleep(0.01)
+                for gone in [s for s in LEVELS_SNAP if s not in want]:
+                    LEVELS_SNAP.pop(gone, None)
+        await asyncio.to_thread(LEVELS.save)
+    finally:
+        pass_ms = (time.monotonic() - t_pass) * 1000.0
+        LEVELS_BG["passes"] += 1
+        LEVELS_BG["symbols"] = float(len(pass_syms))
+        LEVELS_BG["last_pass_ms"] = round(pass_ms, 1)
+        LEVELS_BG["last_at"] = time.time()
+        if pass_ms > LEVELS_BG["max_pass_ms"]:
+            LEVELS_BG["max_pass_ms"] = round(pass_ms, 1)
+        if pass_ms >= LEVELS_BG_SLOW_MS:
+            LEVELS_BG["slow_passes"] += 1
+            log.warning("[levels] проход фона уровней занял %.0f мс (порог "
+                        "%.0f мс): прогрев %.0f мс, лестницы %s — в это время "
+                        "единственный воркер обслуживает запросы вместе с "
+                        "расчётом (LIQSCOPE_LEVELS_BG=0 выключает фон для "
+                        "проверки, LIQSCOPE_LEVELS_BATCH уменьшает пачку)",
+                        pass_ms, LEVELS_BG_SLOW_MS, LEVELS_BG["last_warm_ms"],
+                        ", ".join(pass_syms) or "—")
+
+
+async def liq_levels_task() -> None:
+    """Фон уровней: проход раз в ``LEVEL_WARM_SEC``, расчёт в :func:`levels_bg_pass`."""
+    await asyncio.sleep(20)             # пусть подтянутся символы и сессии
+    state: Dict[str, Any] = {"asked": [], "snap_at": 0.0}
+    while True:
+        try:
+            await levels_bg_pass(state)
         except asyncio.CancelledError:
             raise
         except Exception as e:          # noqa: BLE001
             log.debug("фон уровней ликвидаций: %s", e)
         await asyncio.sleep(LEVEL_WARM_SEC)
+
+LIQ_WRITE_MS = max(0.0, float(os.getenv("LIQSCOPE_LIQ_WRITE_MS", "200") or 200)) / 1000.0
+LIQ_WRITE_MAX = max(1, int(os.getenv("LIQSCOPE_LIQ_WRITE_MAX", "200") or 200))
+
+
+def _hist_add_each(events: List[dict]) -> int:
+    """Запасной путь: у хранилища нет пакетной записи — пишем по одному."""
+    written = 0
+    for ev in events or ():
+        try:
+            if HIST.add(ev):
+                written += 1
+        except Exception as e:               # noqa: BLE001
+            log.debug("запись ликвидации: %s", e)
+    return written
+
+
+async def _liq_write(events: List[dict]) -> int:
+    """Записать пачку ликвидаций ВНЕ event loop.
+
+    ``HIST.add`` на каждое событие делает open+write+close, и всё это стояло в
+    единственном воркере: каскад ликвидаций — это сотни открытий и закрытий
+    файла подряд, а ``close()`` под давлением грязных страниц умеет ждать
+    writeback. Замер: 200 событий по одному — 30.9 мс, пакетом — 3.8 мс (×8.1).
+    """
+    if not events:
+        return 0
+    fn = getattr(HIST, "add_many", None)
+    try:
+        with task_span("liq-disk"):
+            if callable(fn):
+                return await asyncio.to_thread(fn, events)
+            return await asyncio.to_thread(_hist_add_each, events)
+    except Exception as e:                   # noqa: BLE001
+        log.warning("запись ликвидаций упала: %s", e)
+        return 0
 
 
 async def liq_event_worker():
@@ -888,31 +1962,84 @@ async def liq_event_worker():
 
     Живёт отдельной задачей (запуск в lifespan), поэтому никакие задержки
     диска или медленного клиента не блокируют читателей биржевых сокетов.
+
+    События копятся окном ``LIQSCOPE_LIQ_WRITE_MS`` (или до
+    ``LIQSCOPE_LIQ_WRITE_MAX`` штук) — так и диск, и рассылка получают пачку
+    вместо события: на каскаде это разница между сотнями открытий файла и
+    одним. ``0`` возвращает построчную обработку.
     """
     while True:
-        event = await _liq_queue.get()
+        batch: List[dict] = []
+        deadline: Optional[float] = None
+        while True:
+            try:
+                if deadline is None:
+                    event = await _liq_queue.get()
+                else:
+                    left = deadline - time.monotonic()
+                    if left <= 0:
+                        break
+                    event = await asyncio.wait_for(_liq_queue.get(), timeout=left)
+            except asyncio.TimeoutError:
+                break
+            batch.append(event)
+            if LIQ_WRITE_MS <= 0:
+                break
+            if deadline is None:
+                deadline = time.monotonic() + LIQ_WRITE_MS
+            if len(batch) >= LIQ_WRITE_MAX:
+                break
+        if not batch:
+            continue
         try:
-            HIST.add(event)          # дневной файл + часовая свёртка
+            await _liq_write(batch)          # дневной файл + часовая свёртка
             if BROADCAST_INTERVAL <= 0:
-                # без буферизации: событие уходит в сокеты в тот же момент
-                await send_liquidations([event])
+                # без буферизации: пачка уходит в сокеты сразу
+                await send_liquidations(batch)
             else:
                 async with _pending_lock:
-                    _pending.append(event)
-        except Exception as e:  # noqa: BLE001 — ошибка одного события не убивает воркер
-            log.warning("обработка ликвидации упала: %s", e)
+                    _pending.extend(batch)
+        except Exception as e:  # noqa: BLE001 — ошибка одной пачки не убивает воркер
+            log.warning("обработка ликвидаций упала: %s", e)
         finally:
-            _liq_queue.task_done()
+            for _ in batch:
+                _liq_queue.task_done()
 
 
 async def send_liquidations(batch: List[dict]):
-    """Разослать ликвидации всем клиентам с учётом их фильтров."""
+    """Разослать ликвидации всем клиентам с учётом их фильтров.
+
+    Сериализация — одна на группу фильтров, а не одна на клиента. Фильтр у
+    клиента это пара (min_usd, exchange), поэтому клиенты с одинаковым набором
+    получают один и тот же кадр: при 50 зрителях прежняя схема кодировала одну
+    и ту же пачку 50 раз. Замер на всплеске 200 событий и 50 клиентах:
+    10.4 мс → 3.1 мс (×3.3) и 200 кадров вместо 10000.
+    """
+    if not batch:
+        return
     async with hub._lock:
         clients = list(hub.clients)
+    if not clients:
+        return
+    groups: Dict[Tuple[float, str], List[Any]] = {}
     for c in clients:
-        rows = [e for e in batch if c.wants(e)]
-        if rows:
-            await c.send({"type": "liqs", "data": rows})
+        key = (round(float(getattr(c, "min_usd", 0.0) or 0.0), 2),
+               str(getattr(c, "exchange", "ALL") or "ALL"))
+        groups.setdefault(key, []).append(c)
+    for (min_usd, exch), members in groups.items():
+        rows = [e for e in batch
+                if float(e.get("usd") or 0.0) >= min_usd
+                and (exch == "ALL" or e.get("exchange") == exch)]
+        if not rows:
+            continue
+        msg = {"type": "liqs", "data": rows}
+        frame = json_dumps_text(msg)
+        for c in members:
+            try:
+                await c.send(msg, frame)
+            except TypeError:
+                # двойники клиентов в тестах принимают только сообщение
+                await c.send(msg)
 
 
 def viewed_tfs(symbol: str) -> Set[int]:
@@ -1019,6 +2146,13 @@ def _apply_price_to_candles(symbol: str, price: float,
                             vol_delta: float = 0.0,
                             only_tfs: Optional[Set[int]] = None) -> List[tuple]:
     """Двигает последнюю свечу каждого ТФ. Возвращает [(tf, candle), ...]."""
+    try:
+        price = float(price)
+        vol_delta = float(vol_delta or 0.0)
+    except (TypeError, ValueError):
+        return []
+    if not math.isfinite(price) or not math.isfinite(vol_delta):
+        return []
     updated = []
     for tf in (only_tfs or TF_MINUTES):
         k = _key(symbol, tf)
@@ -1266,16 +2400,61 @@ def _liq_cluster_map(candles: list, tf: int, symbol: str,
     return (rows, min(cut, until)) if rows else ({}, 0.0)
 
 
-async def get_candles(symbol: str, tf: int, force: bool = False) -> dict:
-    symbol = canon(symbol)
-    parsed = parse_tf(tf)
-    tf = parsed if parsed is not None else 5
-    k = _key(symbol, tf)
-    entry = CANDLES.get(k)
-    fresh = entry and (time.time() - entry["ts"] < KLINE_TTL) and not force
-    if fresh:
-        return entry
+def _clean_candles(series):
+    """Выбрасывает битые свечи: нечисла, NaN/Inf, дубли и беспорядок времени.
 
+    Один битый бар роняет lightweight-charts setData() целиком — клиент
+    получает пустой график при живых state.candles (тёмное поле, живая шапка).
+    """
+    if not series:
+        return []
+    out = []
+    for c in series:
+        if not isinstance(c, dict):
+            continue
+        try:
+            t = int(c.get("time"))
+        except (TypeError, ValueError):
+            continue
+        row = dict(c)
+        row["time"] = t
+        ok = True
+        for k in ("open", "high", "low", "close"):
+            try:
+                v = float(row.get(k))
+            except (TypeError, ValueError):
+                ok = False
+                break
+            if not math.isfinite(v):
+                ok = False
+                break
+            row[k] = v
+        if not ok:
+            continue
+        try:
+            v = float(row.get("volume") or 0.0)
+        except (TypeError, ValueError):
+            v = 0.0
+        row["volume"] = v if (math.isfinite(v) and v >= 0) else 0.0
+        out.append(row)
+    out.sort(key=lambda c: c["time"])
+    dedup = []
+    for c in out:
+        if dedup and dedup[-1]["time"] == c["time"]:
+            dedup[-1] = c
+        else:
+            dedup.append(c)
+    return dedup
+
+
+async def _fetch_candles_exchange(symbol: str, tf: int) -> Optional[list]:
+    """Биржа + история CVD: тяжёлая часть загрузки свечей.
+
+    Зовётся ТОЛЬКО из фоновой задачи (``market_feed.schedule_candles``) или из
+    ``get_candles(force=True)`` у внутренних циклов сервера. В обработчике
+    запроса её быть не должно: синхронный поход на Binance на каждого зрителя
+    — это лаг единственного воркера и 429/418 (бан IP всего сервера) в придачу.
+    """
     real = None
     if feed:
         real = await feed.fetch_klines(symbol, tf, limit=300)
@@ -1293,29 +2472,45 @@ async def get_candles(symbol: str, tf: int, force: bool = False) -> dict:
                         d = cvd_map.get(c["time"])
                         if d is not None:
                             c["cvd"] = d
-    if real:
-        # подшиваем открытый интерес: oi — уровень на конец свечи,
-        # oiChg — изменение за свечу (для треугольников на графике)
-        tracker = getattr(feed, "oi", None)
-        if tracker is not None:
-            try:
-                await tracker.ensure_symbol(symbol)
-                _attach_oi(real, tf, tracker.series(symbol),
-                           tracker.bucket_chg(symbol))
-            except Exception as e:
-                log.debug("oi attach %s: %s", symbol, e)
-        # сохраняем «живой» хвост, если биржа ещё не закрыла текущую свечу
-        CANDLES[k] = {"candles": real, "ts": time.time(), "source": "exchange"}
-        _cvd_seed_base(CANDLES[k], symbol, tf)
-        return CANDLES[k]
+    # чистим ДО подшивки OI: аттач идёт по совпадению time; пустой результат
+    # честно проваливается в ветки «старый кэш» / «заготовка» у вызывающего
+    return _clean_candles(real)
 
-    if entry:
-        entry["ts"] = time.time() - KLINE_TTL / 2   # отдадим старое, попробуем позже
-        return entry
 
-    # Совсем нет связи с биржами — строим заготовку от последней цены,
-    # чтобы график не падал; источник помечен как "unavailable"
-    # (в демо-режиме рисуем случайное блуждание, чтобы было что смотреть).
+async def _apply_candles(symbol: str, tf: int, real: list,
+                         source: str = "exchange") -> dict:
+    """Готовые свечи — в кэш отдач и в буфер фида. Только локальная работа.
+
+    OI берём из трекера: ``ensure_symbol`` умеет сходить на биржу, поэтому
+    зовут эту функцию тоже только из фона (загрузка истории, kline_refresher).
+    """
+    k = _key(symbol, tf)
+    tracker = getattr(feed, "oi", None)
+    if tracker is not None:
+        try:
+            await tracker.ensure_symbol(symbol)
+            _attach_oi(real, tf, tracker.series(symbol),
+                       tracker.bucket_chg(symbol))
+        except Exception as e:
+            log.debug("oi attach %s: %s", symbol, e)
+    # сохраняем «живой» хвост, если биржа ещё не закрыла текущую свечу
+    CANDLES[k] = {"candles": real, "ts": time.time(), "source": source}
+    _cvd_seed_base(CANDLES[k], symbol, tf)
+    if feed is not None:
+        # буфер фида — то, чем /api/klines отвечает, пока наш кэш пуст
+        feed.cache_candles(symbol, tf, real, source)
+    return CANDLES[k]
+
+
+def _placeholder_entry(symbol: str, tf: int, k: str) -> dict:
+    """Заготовка от последней известной цены: локально, мгновенно, без сети.
+
+    Строим, когда истории нет ни в кэше, ни в буфере фида (монету только что
+    открыли или биржи молчат): график не должен падать пустым полем. Источник
+    помечен как "unavailable" (в демо-режиме рисуем случайное блуждание, чтобы
+    было что смотреть), а ``pending`` говорит клиенту, что настоящие свечи уже
+    грузятся в фоне и придут кадром WS или следующим опросом.
+    """
     price = (feed.prices.get(symbol) if feed else None) or DEMO_SEED_PRICES.get(symbol) or 100.0
     tf_sec = tf * 60
     now_bucket = int(time.time() // tf_sec) * tf_sec
@@ -1338,9 +2533,108 @@ async def get_candles(symbol: str, tf: int, force: bool = False) -> dict:
             c["cvd"] = round((c.get("volume") or 1e4) * random.uniform(-0.35, 0.35), 2)
         _demo_oi(series)
     CANDLES[k] = {"candles": series, "ts": time.time(),
-                  "source": "demo" if DEMO_MODE else "unavailable"}
+                  "source": "demo" if DEMO_MODE else "unavailable",
+                  "pending": bool(feed is not None and feed.candles_pending(symbol, tf))}
     _cvd_seed_base(CANDLES[k], symbol, tf)
     return CANDLES[k]
+
+
+async def _candles_blocking(symbol: str, tf: int, k: str) -> dict:
+    """``force=True``: дождаться биржи. Для внутренних фоновых циклов сервера.
+
+    Прогрев старта, ``kline_refresher`` и потоки постов — не обработчики
+    запросов: здесь ожидание сети безопасно, а данные нужны настоящие.
+    """
+    real = await _fetch_candles_exchange(symbol, tf)
+    if real:
+        return await _apply_candles(symbol, tf, real)
+
+    entry = CANDLES.get(k)
+    if entry:
+        entry["ts"] = time.time() - KLINE_TTL / 2   # отдадим старое, попробуем позже
+        entry["candles"] = _clean_candles(entry.get("candles"))
+        if entry["candles"]:
+            return entry
+        # кэш состоял из одних битых свечей — строим заготовку ниже
+    return _placeholder_entry(symbol, tf, k)
+
+
+async def _on_candles_ready(symbol: str, tf: int, candles: list, source: str) -> None:
+    """Колбэк фида: фоновая загрузка истории дошла (``market_feed.on_candles``).
+
+    Кроме записи в кэш догоняем зрителей графика кадром ``candles``, если до
+    этого они смотрели на заготовку: иначе настоящие свечи доехали бы только
+    следующим опросом клиента (60 с в терминале, 15 с в embed-графике).
+    """
+    k = _key(symbol, tf)
+    prev_source = str((CANDLES.get(k) or {}).get("source") or "")
+    real = _clean_candles(candles)
+    if not real:
+        return
+    entry = await _apply_candles(symbol, tf, real, source or "exchange")
+    if prev_source != "exchange":
+        await _push_candles_to_viewers(symbol, tf, entry)
+
+
+async def _push_candles_to_viewers(symbol: str, tf: int, entry: dict) -> None:
+    """Кадр candles только тем, у кого открыт этот график и ТФ."""
+    candles = (entry or {}).get("candles") or []
+    if not candles:
+        return
+    await hub.broadcast(
+        {"type": "candles", "symbol": symbol, "tf": tf,
+         "source": entry.get("source") or "exchange", "candles": candles},
+        predicate=lambda c: c.chart_symbol == symbol and c.tf == tf)
+
+
+async def get_candles(symbol: str, tf: int, force: bool = False) -> dict:
+    """Свечи графика. Путь запроса — только чтение памяти, биржа всегда в фоне.
+
+    ``force=False`` (REST ``/api/klines``, ``/api/liq_clusters``, WS ``sub``):
+    отдаём то, что уже лежит локально — кэш отдач ``CANDLES`` → буфер фида
+    ``market_feed.get_candles_cached`` → заготовка от последней цены, — и
+    ставим загрузку истории фоновой задачей (``asyncio.create_task``). Ответ не
+    ждёт сети, поэтому 50+ зрителей одного графика не превращаются в 50+
+    походов на биржу и не вешают единственный воркер uvicorn.
+
+    ``force=True`` — прежнее поведение «сходить на биржу и дождаться»: его
+    зовут внутренние фоновые циклы (прогрев, ``kline_refresher``, потоки
+    постов), где некому ждать HTTP-ответа.
+    """
+    symbol = canon(symbol)
+    parsed = parse_tf(tf)
+    tf = parsed if parsed is not None else 5
+    k = _key(symbol, tf)
+    entry = CANDLES.get(k)
+    fresh = entry and (time.time() - entry["ts"] < KLINE_TTL) and not force
+    if fresh:
+        # кэш могли отравить живые тики — чиним на отдаче (и в самом кэше)
+        entry["candles"] = _clean_candles(entry.get("candles"))
+        return entry
+
+    if force:
+        return await _candles_blocking(symbol, tf, k)
+
+    # --- путь запроса: ни одного ожидания биржи ------------------------------
+    if feed is not None:
+        # дедупликация и зазор внутри фида: сто зрителей — один поход на биржу
+        feed.schedule_candles(symbol, tf, loader=_fetch_candles_exchange)
+    if entry:
+        entry["candles"] = _clean_candles(entry.get("candles"))
+        if entry["candles"]:
+            # отдаём то, что есть, пока фон догружает свежее
+            entry["stale"] = True
+            return entry
+        # кэш состоял из одних битых свечей — смотрим буфер фида ниже
+    cached = feed.get_candles_cached(symbol, tf) if feed is not None else None
+    if cached and cached.get("candles"):
+        CANDLES[k] = {"candles": _clean_candles(cached["candles"]),
+                      "ts": float(cached.get("ts") or 0.0),
+                      "source": cached.get("source") or "cache",
+                      "stale": True}
+        _cvd_seed_base(CANDLES[k], symbol, tf)
+        return CANDLES[k]
+    return _placeholder_entry(symbol, tf, k)
 
 
 def _demo_oi(series: list) -> None:
@@ -1598,8 +2892,23 @@ def _oi_row(tracker, sym: str) -> dict:
     return row
 
 
+ALERTS_SNAP_TTL = max(0.0, float(os.getenv("LIQSCOPE_ALERTS_SNAP_TTL_SEC", "1") or 1))
+_ALERTS_SNAP: Dict[str, Any] = {"ts": 0.0, "data": None}
+
+
+@spanned("alerts-snapshot")
 def alerts_market_snapshot() -> dict:
-    """Снимок для движка алертов и кабинета."""
+    """Снимок для движка алертов и кабинета.
+
+    Кэш на секунду: снимок делают три цикла (алерты каждые 8 с, сигналы
+    уровней 28 с, корреляции 30 с), а внутри — проход по ВСЕМУ кольцу
+    ликвидаций (до 60000 записей) и копия CVD. Секунда свежести для сигналов
+    несущественна, зато полный проход не повторяется трижды.
+    """
+    ttl = ALERTS_SNAP_TTL
+    if ttl > 0 and _ALERTS_SNAP["data"] is not None:
+        if time.time() - float(_ALERTS_SNAP["ts"] or 0.0) < ttl:
+            return _ALERTS_SNAP["data"]
     now = time.time()
     events = [x for x in LIQUIDATIONS
               if now - float(x.get("timestamp") or 0) <= 4 * 3600]
@@ -1643,8 +2952,12 @@ def alerts_market_snapshot() -> dict:
         oi = demo
     # Уровни ликвидаций для алертов: считает фон, здесь только снимок
     # (расчёт на 40 монет в каждом проходе движка алертов — это залп).
-    return {"now": now, "events": events, "cvd": cvd, "oi": oi,
-            "levels": dict(LEVELS_SNAP)}
+    out = {"now": now, "events": events, "cvd": cvd, "oi": oi,
+           "levels": dict(LEVELS_SNAP)}
+    if ALERTS_SNAP_TTL > 0:
+        _ALERTS_SNAP["ts"] = time.time()
+        _ALERTS_SNAP["data"] = out
+    return out
 
 
 def pump_watchers() -> List[dict]:
@@ -1929,6 +3242,151 @@ async def levels_signal_loop():
             break
 
 
+SCREENER_SIGNAL_LOOKBACK_SEC = 600.0
+SCREENER_SIGNAL_CYCLE_SEC = 45.0
+SCREENER_SIGNAL_MEMORY = 2000         # ключей событий держим в памяти процесса
+#: курсор окна, дедупликация и паузы по монетам — состояние одного процесса:
+#: после рестарта история не пересылается, иначе сервер «догонял» бы сутки
+#: заново и залил бы подписчика старыми сигналами
+_screener_signal_state: dict = {"cursor": 0.0, "seen": {}, "pauses": {}, "order": []}
+
+
+def _screener_signal_remember(key: str) -> bool:
+    """False — такое событие уже рассылали (окно читается с перекрытием)."""
+    if not key:
+        return True
+    state = _screener_signal_state
+    if key in state["seen"]:
+        return False
+    state["seen"][key] = time.time()
+    state["order"].append(key)
+    while len(state["order"]) > SCREENER_SIGNAL_MEMORY:
+        state["seen"].pop(state["order"].pop(0), None)
+    return True
+
+
+async def screener_signal_dispatch(subs, events: list) -> int:
+    """Один проход рассылки: совпадения подписчикам. Возвращает число отправок.
+
+    Отдельная функция — чтобы цикл можно было проверить без живого Скринера:
+    тест передаёт свои события и свой список подписчиков.
+    """
+    from screener_signals import (SIGNAL_MAX_PER_CYCLE, normalize_signal,
+                                  signal_chat_meta, signal_chat_text,
+                                  signal_hits, signal_html)
+    sent = 0
+    pauses = _screener_signal_state["pauses"]
+    for sub in subs or []:
+        cfg = normalize_signal(sub.get("config"))
+        try:
+            uid = int(sub.get("user_id") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not uid:
+            continue
+        per_coin = pauses.setdefault(uid, {})
+        hits = signal_hits(events, cfg, now=time.time(), last_fire=per_coin.get,
+                          limit=SIGNAL_MAX_PER_CYCLE)
+        if not hits:
+            continue
+        # Telegram — отдельный тумблер, а лента кабинета живёт по подписке:
+        # тот же порядок, что у стакана и алертов по объёму
+        tg_id = int(sub.get("tg_id") or 0) if cfg["notify"] else 0
+        if tg_id and not tg_bot.running:
+            tg_id = 0
+        for hit in hits:
+            if not _screener_signal_remember(str(hit.get("key") or "")):
+                continue
+            per_coin[str(hit.get("symbol") or "")] = time.time()
+            await push_service_message(
+                uid, "screener", signal_chat_text(hit),
+                {"symbol": str(hit.get("symbol") or ""),
+                 "metric": "whale", "parts": signal_chat_meta(hit)})
+            sent += 1
+            if not tg_id:
+                continue
+            try:
+                await tg_bot.send(tg_id, signal_html(hit, tg_bot.site_url()),
+                                  markup=tg_bot.site_link_kb("открыть скринер",
+                                                            "/screener"))
+            except Exception as e:                        # noqa: BLE001
+                log.debug("screener signal tg %s: %s", uid, e)
+    return sent
+
+
+async def screener_signal_loop():
+    """🐋 Signal Screener: крупные переводы по фильтрам личного кабинета.
+
+    Пользователь выбирает биржу, направление, сеть и порог в долларах. Источник
+    — те же события, что уже собирает Скринер китов, поэтому рассылка не делает
+    новых запросов к Alchemy и CU не тратит: читаем историю буфера окном после
+    прошлого прохода.
+    """
+    try:
+        await asyncio.sleep(30)         # дать скринеру поднять историю и подписки
+    except asyncio.CancelledError:
+        return
+    cursor = time.time() - SCREENER_SIGNAL_LOOKBACK_SEC
+    while True:
+        delay = SCREENER_SIGNAL_CYCLE_SEC
+        try:
+            if whale_screener is None:
+                # Скринер не запустился (нет ключа или реестра) — не крутимся впустую
+                delay = 300.0
+                cursor = time.time() - SCREENER_SIGNAL_LOOKBACK_SEC
+            else:
+                now = time.time()
+                # маленькое перекрытие: событие может лечь в историю чуть позже
+                # своего timestamp
+                events = await asyncio.to_thread(
+                    whale_screener.events_since, max(0.0, cursor - 5.0), now)
+                cursor = max(cursor, now)
+                subs = await asyncio.to_thread(
+                    account_store.list_service_subscribers, "screener_signals")
+                if subs:
+                    tg_bot.warm_langs(subs)
+                    await screener_signal_dispatch(subs, events or [])
+        except asyncio.CancelledError:
+            break
+        except Exception as e:                          # noqa: BLE001 — не валит сервер
+            log.warning("сигналы скринера: %s", e)
+            delay = 15.0
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            break
+
+
+def screener_signal_snapshot(cfg: dict | None = None) -> dict:
+    """Что кабинет показывает в настройке сигналов Скринера.
+
+    Список бирж — по фактическим кошелькам реестра (та же нормализация, что у
+    графиков потоков), «последние совпадения» — по буферу скринера уже с учётом
+    фильтра пользователя, чтобы тумблер настраивался не вслепую.
+    """
+    from screener_signals import match_signal, normalize_signal, signal_exchanges
+    if whale_screener is None:
+        return {"available": False, "exchanges": [], "recent": []}
+    cfg = normalize_signal(cfg or {})
+    exchanges: list[dict] = []
+    recent: list[dict] = []
+    try:
+        exchanges = signal_exchanges(whale_screener)
+    except Exception as e:                                  # noqa: BLE001
+        log.debug("screener signals venues: %s", e)
+    try:
+        rows = whale_screener.history(float(cfg["min_usd"]), cfg["chain"], 200)
+        for row in rows:
+            hit = match_signal(row, cfg)
+            if hit:
+                recent.append(hit)
+            if len(recent) >= 5:
+                break
+    except Exception as e:                                  # noqa: BLE001
+        log.debug("screener signals history: %s", e)
+    return {"available": True, "exchanges": exchanges, "recent": recent}
+
+
 def alerts_chat_text(hit: dict) -> str:
     from alerts import chat_text
     return chat_text(hit)
@@ -2165,14 +3623,9 @@ def restore_boards_from_archive() -> int:
     return archive_restore.fill_boards_from_cells(BOARD, SLOTS, month_cells())
 
 
-def compute_stats(symbol: Optional[str] = None, exchange: Optional[str] = None) -> dict:
-    _perf_t0 = time.monotonic() if PERF_LOG else 0.0
-    now = time.time()
-    cache_key = f"{symbol or 'ALL'}|{exchange or 'ALL'}"
-    cached = _STATS_CACHE.get(cache_key)
-    if cached and now - cached.get("_at", 0) < _STATS_CACHE_TTL:
-        return cached["data"]
-
+def _stats_math(events: list, now: float, symbol: Optional[str],
+                exchange: Optional[str], archive_cells: list) -> dict:
+    """Pure aggregation of a point-in-time snapshot, safe in a spawned worker."""
     # Оптимизация: один проход по LIQUIDATIONS вместо 5-7 копий и фильтров
     # Раньше делалось list(LIQUIDATIONS) + фильтрация по symbol/exchange + ещё
     # отдельный pool = list(LIQUIDATIONS) — всё это 60k*2 копий и сканов.
@@ -2196,7 +3649,7 @@ def compute_stats(symbol: Optional[str] = None, exchange: Optional[str] = None) 
     exch_filter = exchange if need_exch_filter else None
 
     # Один проход по кольцу
-    for ev in LIQUIDATIONS:
+    for ev in events:
         # Фильтр для items (учитывает symbol и exchange)
         if need_symbol_filter and ev["symbol"] != sym_filter:
             # для pool24 символ не фильтруем, только биржу — проверяем отдельно ниже
@@ -2270,7 +3723,7 @@ def compute_stats(symbol: Optional[str] = None, exchange: Optional[str] = None) 
             from archive_restore import leaders_from_cells
             from history import aggregate_hours
             sym = symbol if symbol and symbol != "ALL" else None
-            cells = [c for c in month_cells(now) if c[0] + 3600 > now - 86400 and c[0] <= now]
+            cells = [c for c in archive_cells if c[0] + 3600 > now - 86400 and c[0] <= now]
             agg = aggregate_hours(cells, symbol=sym)
             arch_usd = float(agg.get("usd") or 0)
             arch_n = int(agg.get("count") or 0)
@@ -2305,18 +3758,75 @@ def compute_stats(symbol: Optional[str] = None, exchange: Optional[str] = None) 
         "biggest_24h": biggest,
         "demo": DEMO_MODE,
     })
-    # Сохраняем в кэш
-    _STATS_CACHE[cache_key] = {"_at": now, "data": out}
-    # Чистим старые ключи, чтобы не разрасталось
+    return out
+
+
+def _stats_cache_put(key: str, now: float, out: dict) -> dict:
+    _STATS_CACHE[key] = {"_at": now, "data": out}
     if len(_STATS_CACHE) > 32:
         oldest = sorted(_STATS_CACHE.items(), key=lambda kv: kv[1].get("_at", 0))[:8]
         for k, _ in oldest:
             _STATS_CACHE.pop(k, None)
-    if PERF_LOG:
-        _perf_dt = (time.monotonic() - _perf_t0) * 1000 if _perf_t0 else 0
-        log.info("[perf] compute_stats symbol=%s exchange=%s items=%d d24=%d pool24=%d total=%.1fms",
-                 symbol, exchange, len(items), len(d24), len(pool24), _perf_dt)
     return out
+
+
+def _stats_archive_needed(events: list, now: float, symbol: Optional[str],
+                          exchange: Optional[str]) -> bool:
+    if exchange and exchange != "ALL":
+        return False
+    # A filtered symbol can have few items even in a full global ring.
+    return (len(events) < 5000 or bool(symbol and symbol != "ALL") or
+            bool(events and events[-min(50, len(events))]["timestamp"]
+                 < now - 86400))
+
+
+@spanned("compute-stats")
+def compute_stats(symbol: Optional[str] = None, exchange: Optional[str] = None) -> dict:
+    """Synchronous compatibility API for callers outside the asyncio loop."""
+    now = time.time()
+    key = f"{symbol or 'ALL'}|{exchange or 'ALL'}"
+    cached = _STATS_CACHE.get(key)
+    if cached and now - cached.get("_at", 0) < _STATS_CACHE_TTL:
+        return cached["data"]
+    events = list(LIQUIDATIONS)
+    cells = month_cells(now) if _stats_archive_needed(events, now, symbol, exchange) else []
+    return _stats_cache_put(key, now, _stats_math(events, now, symbol, exchange, cells))
+
+
+async def _compute_stats_offloop(key: str, symbol: Optional[str],
+                                 exchange: Optional[str]) -> dict:
+    now = time.time()
+    cached = _STATS_CACHE.get(key)
+    try:
+        events = list(LIQUIDATIONS)
+        # The archive is disk I/O; do not open its shards on the loop either.
+        cells = await asyncio.to_thread(month_cells, now) if _stats_archive_needed(events, now, symbol, exchange) else []
+        out = await run_cpu(_stats_math, events, now, symbol, exchange, cells)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        # No synchronous full-history scan when the worker fails.
+        if cached:
+            return _stats_cache_put(key, now, cached["data"])
+        return _stats_cache_put(key, now, _stats_math([], now, symbol, exchange, []))
+    return _stats_cache_put(key, now, out)
+
+
+async def compute_stats_async(symbol: Optional[str] = None,
+                              exchange: Optional[str] = None) -> dict:
+    """One cold calculation per key, shared by concurrent WS/API requests."""
+    now = time.time()
+    key = f"{symbol or 'ALL'}|{exchange or 'ALL'}"
+    cached = _STATS_CACHE.get(key)
+    if cached and now - cached.get("_at", 0) < _STATS_CACHE_TTL:
+        return cached["data"]
+    task = _STATS_INFLIGHT.get(key)
+    if task is None:
+        task = asyncio.create_task(_compute_stats_offloop(key, symbol, exchange))
+        _STATS_INFLIGHT[key] = task
+        task.add_done_callback(lambda done: _STATS_INFLIGHT.pop(key, None)
+                               if _STATS_INFLIGHT.get(key) is done else None)
+    return await asyncio.shield(task)
 
 
 def _cvd_window(symbol: str, sec: float = 14400.0) -> Optional[float]:
@@ -2419,7 +3929,11 @@ async def slot_flows(need_slots: int = 40) -> Dict[str, dict]:
         async def one(sym: str):
             async with sem:
                 try:
-                    entry = await asyncio.wait_for(get_candles(sym, 15), timeout=20)
+                    # force=True: это фоновая задача постов, а не запрос
+                    # пользователя — объёмы слотов нужны настоящие, заготовка
+                    # от последней цены дала бы пост с нулевым оборотом
+                    entry = await asyncio.wait_for(
+                        get_candles(sym, 15, force=True), timeout=20)
                 except Exception as e:           # noqa: BLE001
                     log.debug("потоки постов %s: %s", sym, e)
                     return sym, None
@@ -2634,10 +4148,24 @@ async def digest_ai(facts: dict, lang: str = "ru") -> Optional[str]:
 # =============================================================================
 #  Фоновые рассылки
 # =============================================================================
+FLOW_SNAP_TTL = max(0.0, float(os.getenv("LIQSCOPE_FLOW_SNAP_TTL_SEC", "2") or 2))
+_FLOW_SNAP: Dict[str, Any] = {"ts": 0.0, "data": None}
+
+
+@spanned("flow-snapshot")
 def flow_snapshot(now: Optional[float] = None, limit: int = 60) -> dict:
-    """Строки ленты «ВСЕ»: CVD, OI и ликвидации по всем монетам за окно."""
+    """Строки ленты «ВСЕ»: CVD, OI и ликвидации по всем монетам за окно.
+
+    Срез собирается шестью проходами по монетам (три окна строк плюс сводка) и
+    отдаётся КАЖДОМУ подключающемуся: при 50 одновременных WS это 50 сборок
+    одного и того же. Кэш на ``LIQSCOPE_FLOW_SNAP_TTL_SEC`` (2 с) отдаёт
+    готовый срез — замер сборки 3-6 мс на 12 монетах, больше на широком круге.
+    """
     now = float(now if now is not None else time.time())
-    return {
+    ttl = FLOW_SNAP_TTL
+    if ttl > 0 and _FLOW_SNAP["data"] is not None and (now - _FLOW_SNAP["ts"]) < ttl:
+        return _FLOW_SNAP["data"]
+    data = {
         "type": "flow_all",
         "window_min": FLOW_WINDOW_MIN,
         "ts": now,
@@ -2646,6 +4174,10 @@ def flow_snapshot(now: Optional[float] = None, limit: int = 60) -> dict:
         "liq": FLOWS.rows("liq", FLOW_WINDOW_MIN, now, limit=limit),
         "summary": FLOWS.summary(60, now),
     }
+    if ttl > 0:
+        _FLOW_SNAP["ts"] = now
+        _FLOW_SNAP["data"] = data
+    return data
 
 
 async def flow_broadcaster():
@@ -2704,21 +4236,29 @@ async def price_broadcaster():
 
 
 async def stats_broadcaster():
+    last_idle_refresh = 0.0
     while True:
         try:
             await asyncio.sleep(STATS_INTERVAL)
             if not hub.clients:
+                # Keep the bot's synchronous formatter fed without doing math
+                # in its callback or refreshing at the WS broadcast frequency.
+                if time.monotonic() - last_idle_refresh >= 30.0:
+                    await compute_stats_async()
+                    last_idle_refresh = time.monotonic()
                 continue
-            global_stats = compute_stats()
+            global_stats = await compute_stats_async()
             cache = {"ALL": global_stats}
             health = health_summary()
             async with hub._lock:
                 clients = list(hub.clients)
-            for c in clients:
+            for i, c in enumerate(clients):
                 key = c.symbol
                 if key not in cache:
-                    cache[key] = compute_stats(key)
+                    cache[key] = await compute_stats_async(key)
                 await c.send({"type": "stats", "data": cache[key], "health": health})
+                if (i + 1) % 5 == 0:
+                    await asyncio.sleep(0.01)
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -2924,6 +4464,7 @@ async def demo_price_walk():
 # =============================================================================
 #  Приложение
 # =============================================================================
+@spanned("health-summary")
 def health_summary() -> dict:
     if not feed:
         return {"ready": False, "demo": DEMO_MODE, "sources": {}}
@@ -2944,6 +4485,16 @@ def health_summary() -> dict:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # куча старта (модули, справочники, загруженная история) дальше не меняется:
+    # убираем её из поколений, чтобы сборки мусора не перебирали гигабайт
+    freeze_gc_heap()
+    if not FAST_JSON:
+        # Без orjson приложение работает, но сериализация свечей/статистики и
+        # WS-кадров остаётся на медленном stdlib json — на одном воркере это
+        # заметная доля CPU, поэтому отсутствие говорим вслух.
+        log.warning("orjson не установлен — ответы и WS-кадры сериализует "
+                    "стандартный json (в разы медленнее): "
+                    "pip install -r requirements.txt")
     # восстанавливаем дисковую историю до старта биржевых потоков,
     # чтобы первый клиент сразу увидел вчерашние ликвидации
     if HISTORY_FILE:
@@ -3019,6 +4570,10 @@ async def lifespan(app: FastAPI):
                       symbols_limit=SYMBOLS_LIMIT,
                       exchanges=EXCHANGES,
                       tick_sources=TICK_SOURCES)
+    # Фоновая загрузка истории свечей (её ставит /api/klines, не блокируя
+    # запрос) сообщает сюда: дошиваем OI, пишем в кэш отдач и догоняем
+    # зрителей графика кадром candles, если до этого они смотрели заготовку.
+    feed.on_candles = _on_candles_ready
     await feed.start()
     sync_hot_symbols()      # чтобы тики пошли сразу, не дожидаясь клиента
     # Свечи как запасная цена входа: если профиля объёма по монете ещё нет,
@@ -3031,6 +4586,9 @@ async def lifespan(app: FastAPI):
     book_feed_inst = BookFeed(BOOK_DIR or None, demo=DEMO_MODE)
     book_feed_inst.sub_symbols_fn = book_sub_symbols
 
+    # Диагностика «чем занят воркер» — включается переменными, по умолчанию нет
+    _enable_asyncio_debug()
+    loop_trace_start()
     tasks = [
         asyncio.create_task(liq_event_worker(), name="liq-worker"),
         asyncio.create_task(book_feed_inst.run(), name="book"),
@@ -3044,12 +4602,120 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(price_broadcaster(), name="price-broadcast"),
         asyncio.create_task(stats_broadcaster(), name="stats-broadcast"),
         asyncio.create_task(kline_refresher(), name="kline-refresh"),
+        asyncio.create_task(loop_lag_watchdog(), name="loop-lag"),
         asyncio.create_task(hot_symbols_watcher(), name="hot-symbols"),
         asyncio.create_task(liq_levels_task(), name="liq-levels"),
         asyncio.create_task(alert_loop(), name="alerts"),
         asyncio.create_task(levels_signal_loop(), name="levels-signal"),
+        asyncio.create_task(screener_signal_loop(), name="screener-signals"),
         asyncio.create_task(corr_alert_loop(), name="corr-alerts"),
     ]
+    global whale_screener, whale_poller, alchemy_key_store, alchemy_vault_error
+    global trongrid_key_store, trongrid_vault_error, cex_wallet_registry
+    global screener_networks
+    whale_screener = whale_poller = alchemy_key_store = trongrid_key_store = None
+    alchemy_vault_error = trongrid_vault_error = ""
+    if NetworkSwitch is not None:
+        try:
+            screener_networks = NetworkSwitch(SCREENER_NETWORKS_FILE)
+        except Exception as exc:  # noqa: BLE001 — без тумблера скринер не бесхозный
+            screener_networks = None
+            log.warning("тумблеры сетей недоступны: %s", exc)
+        log.info("Скринер китов: сети включены %s (из %d), чистка кошельков — %s",
+                 ", ".join(screener_networks.enabled()) or "—",
+                 len(screener_networks.status()),
+                 (f"раз в сутки, неактуальнее {screener_networks.wallet_retention_days} дн."
+                  if screener_networks.wallet_retention_days else "выключена"))
+    cex_wallet_registry = (CEXWalletRegistry(os.path.join(HERE, "data", "cex_wallets.json"))
+                           if CEX_WALLET_UPDATER_AVAILABLE else None)
+    if not WHALE_SCREENER_AVAILABLE:
+        alchemy_vault_error = "Whale-скринер недоступен. Проверьте зависимости и data/cex_wallets.json"
+    else:
+        try:
+            whale_screener = WhaleScreener(
+                "pending", price_fn=lambda pair: feed.prices.get(pair) if feed else None,
+                broadcast=hub.broadcast, min_usd=50_000,
+                wallet_path=Path(os.path.join(HERE, "data", "cex_wallets.json")),
+                history_path=WHALE_HISTORY_FILE or None,
+                networks=screener_networks)
+            if whale_screener.hl_enabled:
+                tasks.append(asyncio.create_task(
+                    whale_screener.run_hyperliquid(), name="whale-hyperliquid"))
+        except Exception:  # noqa: BLE001 — optional scanner cannot take down the terminal
+            alchemy_vault_error = ("Whale-скринер не запустился. Проверьте зависимости "
+                                   "и файл data/cex_wallets.json")
+            whale_screener = None
+
+    if whale_screener and not WHALE_POLLER_AVAILABLE:
+        alchemy_vault_error = ("Alchemy-модуль недоступен. Установите зависимости: "
+                               "pip install -r requirements.txt")
+    elif whale_screener:
+        mode = account_store.get_setting(
+            "whale_mode", os.getenv("LIQSCOPE_WHALE_MODE", "realtime")).strip().lower()
+        if mode not in ("realtime", "economy"):
+            mode = "realtime"
+        poll_interval_raw = str(account_store.get_setting("whale_poll_interval_sec", "") or "").strip()
+        poll_interval_sec = None
+        if poll_interval_raw:
+            try:
+                poll_interval_sec = int(poll_interval_raw)
+            except (TypeError, ValueError):
+                poll_interval_sec = None
+        else:
+            # Migrate saved minute-based settings without overriding the new
+            # one-minute default on installations that have no saved setting.
+            legacy_interval_raw = str(account_store.get_setting("whale_interval_min", "") or "").strip()
+            if legacy_interval_raw:
+                try:
+                    legacy_minutes = int(legacy_interval_raw)
+                    if legacy_minutes in HISTORY_INTERVAL_OPTIONS:
+                        poll_interval_sec = min(300, max(30, legacy_minutes * 60))
+                except (TypeError, ValueError):
+                    poll_interval_sec = None
+        try:
+            monthly_cu = int(account_store.get_setting("whale_monthly_cu", "10000000"))
+        except (TypeError, ValueError):
+            monthly_cu = 10_000_000
+        try:
+            # No plaintext or env-key fallback when Fernet is unavailable.
+            alchemy_key_store = AlchemyKeyStore(SECRET, env_key=os.getenv("ALCHEMY_API_KEY", ""))
+        except KeyStoreError as exc:
+            alchemy_vault_error = str(exc)
+        try:
+            trongrid_key_store = AlchemyKeyStore(
+                SECRET, path=Path(os.path.join(HERE, "data", "trongrid_keys.enc")),
+                env_key=os.getenv("TRONGRID_API_KEY", ""))
+        except KeyStoreError as exc:
+            trongrid_vault_error = str(exc)
+        if alchemy_key_store:
+            try:
+                whale_poller = WhalePoller(
+                    "", whale_screener, key_store=alchemy_key_store,
+                    trongrid_key_store=trongrid_key_store,
+                    poll_interval_sec=poll_interval_sec,
+                    mode=mode, monthly_cu=monthly_cu,
+                    networks=screener_networks)
+            except Exception:  # noqa: BLE001 — optional collection cannot take down terminal
+                whale_poller = None
+                if not alchemy_vault_error:
+                    alchemy_vault_error = "Alchemy scanner could not start; check its configuration"
+        if whale_poller:
+            tasks.append(asyncio.create_task(whale_poller.run(), name="whale-poller"))
+            tasks.append(asyncio.create_task(whale_poller.run_streams(), name="whale-streams"))
+
+    if cex_wallet_registry and whale_screener:
+        async def _wallets_updated(_result):
+            if whale_screener:
+                whale_screener.reload_wallets()
+            if whale_poller:
+                whale_poller.wakeup.set()
+        tasks.append(asyncio.create_task(
+            auto_refresh_loop(cex_wallet_registry, _wallets_updated), name="cex-wallet-refresh"))
+        tasks.append(asyncio.create_task(cex_wallet_prune_loop(), name="cex-wallet-prune"))
+    if alchemy_key_store and not alchemy_key_store.keys():
+        log.warning("Ключ Alchemy пока не добавлен; EVM/Solana-скринер ожидает настройки в админке; "
+                    "нативный Hyperliquid и TronGrid остаются отдельными источниками")
+
     # Дневной дайджест: вечерний выпуск в оба канала и в архив на сайте
     digest_sched = DigestScheduler(hour=DIGEST_HOUR, minute=DIGEST_MINUTE,
                                    jitter_min=DIGEST_JITTER_MIN,
@@ -3086,7 +4752,7 @@ async def lifespan(app: FastAPI):
         # Долгий читатель может держать WAL и растить accounts.db-wal без
         # предела. Периодический TRUNCATE отдаёт место, не блокируя запись.
         while True:
-            await asyncio.sleep(30 * 60)
+            await asyncio.sleep(10 * 60)
             try:
                 await asyncio.to_thread(account_store.wal_checkpoint)
             except Exception as exc:  # noqa: BLE001
@@ -3094,7 +4760,8 @@ async def lifespan(app: FastAPI):
     tasks.append(asyncio.create_task(wal_checkpoint_loop(), name="wal-checkpoint"))
 
     tg_bot.health_fn = health_summary
-    tg_bot.stats_fn = compute_stats
+    # Bot's synchronous formatter must never run a cold scan on the loop.
+    tg_bot.stats_fn = lambda: (_STATS_CACHE.get("ALL|ALL") or {}).get("data") or {}
     # Лента бота: как можно больше событий — текст сам упрётся в лимит Telegram
     tg_bot.liqs_fn = lambda: list(LIQUIDATIONS)[-400:]
     tg_bot.ws_clients_fn = lambda: len(hub.clients)
@@ -3108,8 +4775,12 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        loop_trace_stop()
+        stop_async_logging()          # дописать очередь в журнал перед выходом
         for t in tasks:
             t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         try:
             await asyncio.to_thread(HIST.flush, True)
         except Exception:  # noqa: BLE001
@@ -3120,6 +4791,12 @@ async def lifespan(app: FastAPI):
             pass
         await tg_bot.stop()
         await feed.stop()
+        if whale_screener:
+            try:
+                await asyncio.to_thread(whale_screener.close)
+            except Exception:  # noqa: BLE001 — history cleanup must not block shutdown
+                pass
+        shutdown_cpu_pool()
 
 
 def _cors_origins() -> List[str]:
@@ -3169,8 +4846,10 @@ def _want_hsts(scope) -> bool:
 _SECURITY_HEADERS = (
     (b"x-content-type-options", b"nosniff"),
     (b"referrer-policy", b"strict-origin-when-cross-origin"),
-    (b"x-frame-options", b"DENY"),
-    (b"content-security-policy", b"frame-ancestors 'none'"),
+    # SAMEORIGIN / 'self': чужой сайт встроить терминал не может, а свои
+    # дополнительные сингл-графики открываются рядом через iframe того же origin.
+    (b"x-frame-options", b"SAMEORIGIN"),
+    (b"content-security-policy", b"frame-ancestors 'self'"),
     (b"permissions-policy", b"camera=(), microphone=(), geolocation=()"),
 )
 
@@ -3268,6 +4947,179 @@ async def _reject_too_large(send) -> None:
     await send({"type": "http.response.body", "body": body})
 
 
+class MetricsMiddleware:
+    """Считает HTTP-запросы и задержки для /api/metrics.
+
+    Самый внешний слой: видит и 429 лимитера, и 413 резака тела.
+    Задержка — до отправки заголовков ответа (время работы приложения).
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "websocket":
+            if (scope.get("path") or "") == "/ws":
+                _metrics_ws_connect()
+            await self.app(scope, receive, send)
+            return
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        t0 = time.perf_counter()
+
+        async def send_wrap(message):
+            if message["type"] == "http.response.start":
+                try:
+                    _metrics_http(int(message.get("status", 0)),
+                                  time.perf_counter() - t0)
+                except Exception:  # noqa: BLE001 — счётчик не ломает ответ
+                    pass
+            await send(message)
+
+        await self.app(scope, receive, send_wrap)
+
+
+# Лимиты приложения поверх nginx: nginx режет флуд, но не различает гостя
+# и залогиненного. Залогиненный шлёт больше (чат, кабинет, сигналы).
+# Выключатель на всякий случай: LIQSCOPE_RATE_LIMIT=0.
+_RATE_LIMIT_ON = os.getenv("LIQSCOPE_RATE_LIMIT", "1").strip() not in (
+    "0", "false", "no", "off")
+_WS_RATE = RateLimiter(5, 60)          # /ws: 5 подключений/минуту с IP
+_WS_RATE_USER = RateLimiter(30, 60)   # ... залогиненному — 30
+_MUT_RATE = RateLimiter(60, 10 * 60)  # мутирующие POST анонима
+_MUT_RATE_USER = RateLimiter(600, 10 * 60)  # ... залогиненного
+_RATE_EXEMPT = frozenset({"/api/health", "/api/metrics"})
+
+
+def _scope_ip(scope) -> str:
+    """IP клиента из ASGI-scope. Та же логика, что _request_ip: заголовкам
+    верим, только если соединение пришло от доверенного прокси."""
+    client = scope.get("client") or ()
+    host = (client[0] if client else "") or ""
+    if host and _is_trusted_proxy(host):
+        xff = ""
+        xri = ""
+        for key, val in scope.get("headers") or []:
+            try:
+                name = key.decode("latin1").lower()
+            except Exception:  # noqa: BLE001
+                continue
+            if name == "x-forwarded-for" and not xff:
+                xff = val.decode("latin1")
+            elif name == "x-real-ip" and not xri:
+                xri = val.decode("latin1")
+        if xri.strip():
+            return xri.strip()
+        if xff:
+            first = xff.split(",")[0].strip()
+            if first:
+                return first
+    return host or "0"
+
+
+def _scope_sid(scope) -> str:
+    """Сырой liqscope_sid из Cookie. Льготу даёт только _session_valid."""
+    for key, val in scope.get("headers") or []:
+        try:
+            if key.decode("latin1").lower() != "cookie":
+                continue
+            raw = val.decode("latin1")
+        except Exception:  # noqa: BLE001
+            continue
+        for part in raw.split(";"):
+            name, _, value = part.partition("=")
+            if name.strip() == COOKIE_SID and value.strip():
+                return value.strip()[:128]
+    return ""
+
+
+_SID_VALID_CACHE = web_cache.TTLCache(ttl=30.0, maxsize=2048)
+
+
+async def _session_valid(sid: str) -> bool:
+    """Живая ли сессия liqscope_sid в account_store (не истекла, не бан).
+
+    Сам по себе непустой cookie ничего не доказывает: льготный бакет
+    лимитера выдаём только после этой проверки. Результат кэшируем
+    на 30 с — сессии меняются редко, а проверка дёргается на каждый
+    мутирующий POST и каждый WS-handshake. Ошибка стора = False:
+    падаем в строгий anon-бакет, а не в льготный.
+    """
+    if not sid:
+        return False
+    hit = _SID_VALID_CACHE.get(sid)
+    if hit is not None:
+        return bool(hit)
+    try:
+        found = await asyncio.to_thread(account_store.user_by_session, sid)
+        ok = found is not None
+    except Exception:  # noqa: BLE001
+        ok = False
+    _SID_VALID_CACHE.set(sid, ok)
+    return ok
+
+
+class RateLimitMiddleware:
+    """Режет флуд на уровне приложения: /ws и мутирующие /api/*.
+
+    Стоит снаружи MaxBody: чужой флуд отбиваем до чтения его тела.
+    Мониторинг (/api/health, /api/metrics) и чтение (GET) не трогаем.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        stype = scope.get("type")
+        path = scope.get("path") or ""
+        if not _RATE_LIMIT_ON:
+            await self.app(scope, receive, send)
+            return
+        if stype == "websocket":
+            if path != "/ws":
+                await self.app(scope, receive, send)
+                return
+            sid = _scope_sid(scope)
+            if sid and await _session_valid(sid):
+                ok = _WS_RATE_USER.allow("ws:user:" + sid)
+                who = "sid"
+            else:
+                ok = _WS_RATE.allow("ws:ip:" + _scope_ip(scope))
+                who = "ip"
+            if not ok:
+                log.warning("WS отклонён лимитом (%s): %s", who, path)
+                await send({"type": "websocket.close", "code": 1008,
+                            "reason": "rate"})
+                return
+            await self.app(scope, receive, send)
+            return
+        if stype != "http":
+            await self.app(scope, receive, send)
+            return
+        if (scope.get("method") not in ("POST", "PUT", "PATCH", "DELETE")
+                or not path.startswith("/api/") or path in _RATE_EXEMPT):
+            await self.app(scope, receive, send)
+            return
+        sid = _scope_sid(scope)
+        if sid and await _session_valid(sid):
+            ok = _MUT_RATE_USER.allow("mut:user:" + sid)
+        else:
+            ok = _MUT_RATE.allow("mut:ip:" + _scope_ip(scope))
+        if not ok:
+            body = b'{"ok":false,"error":"rate"}'
+            await send({
+                "type": "http.response.start",
+                "status": 429,
+                "headers": [(b"content-type", b"application/json"),
+                            (b"content-length", str(len(body)).encode()),
+                            (b"retry-after", b"60")],
+            })
+            await send({"type": "http.response.body", "body": body})
+            return
+        await self.app(scope, receive, send)
+
+
 class CachedStaticFiles(StaticFiles):
     """Версионированные `?v=` можно держать год, остальное — час.
 
@@ -3293,10 +5145,14 @@ def re_v(query: str) -> bool:
 
 
 app = FastAPI(title="LiqScope — Live Crypto Liquidation Terminal",
-              version="4.1.0", lifespan=lifespan)
+              version="4.1.0", lifespan=lifespan,
+              # orjson вместо stdlib json: на одном воркере сериализация
+              # свечей/статистики/ленты — заметная доля CPU (см. PERF_NOTES).
+              default_response_class=_DEFAULT_RESPONSE_CLASS)
 
-# Последний add_middleware — внешний. Сначала режем тело, потом жмём ответ,
-# потом заголовки, и только потом CORS (ему нужен Origin запроса).
+# Последний add_middleware — внешний. Снаружи внутрь: считаем запросы,
+# режем флуд (до чтения тела), режем тело, заголовки, CORS.
+# Ответы НЕ сжимаем: gzip для внешних клиентов делает nginx.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -3305,12 +5161,28 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.add_middleware(SecurityHeadersMiddleware)
-try:
-    from starlette.middleware.gzip import GZipMiddleware
-    app.add_middleware(GZipMiddleware, minimum_size=500)
-except Exception:  # noqa: BLE001 — сжатие не должно ронять процесс
-    log.warning("GZipMiddleware недоступен — ответы уйдут без сжатия")
 app.add_middleware(MaxBodyMiddleware)
+app.add_middleware(RateLimitMiddleware)
+app.add_middleware(MetricsMiddleware)
+
+
+@app.middleware("http")
+async def protect_screener_api(request: Request, call_next):
+    """Every screener data route is private to an active LiqScope session."""
+    path = request.url.path
+    private_api = path == "/api/screener" or path.startswith("/api/screener/")
+    if private_api:
+        user = await asyncio.to_thread(current_user, request)
+        if not user:
+            response = JSONResponse({"ok": False, "error": "auth"}, status_code=401)
+            response.headers["Cache-Control"] = "private, no-store"
+            return response
+        request.state.screener_user = user
+    response = await call_next(request)
+    if private_api:
+        response.headers["Cache-Control"] = "private, no-store"
+    return response
+
 
 account_ctx.store = account_store
 account_ctx.bot = tg_bot
@@ -3321,19 +5193,44 @@ account_ctx.site_hosts = tuple(x for x in (PUBLIC_URL, seo_pages.SITE_URL) if x)
 account_ctx.cookie_secure = os.getenv("LIQSCOPE_COOKIE_SECURE", "").strip() in ("1", "true", "yes")
 account_ctx.dev_login = os.getenv("LIQSCOPE_DEV_LOGIN", "").strip() in ("1", "true", "yes")
 account_ctx.mailer = mailer
+# Менеджер системных настроек: админка читает/пишет конфигурацию в БД,
+# почта и доступы подхватывают изменения без перезапуска.
+account_ctx.settings = settings_store
+# ❤️ Кошельки для донатов читаются из тех же настроек: смена адреса
+# в админке видна в шапке сразу, без перезапуска.
+donate_mod.ctx.settings = settings_store
+# После смены ИИ-ключей в админке писатель пересобирается без рестарта.
+account_ctx.ai_refresh_fn = ai_sync
 # Бот подтверждает почту теми же письмами, что и сайт
 tg_bot.mailer = mailer
 account_ctx.require_email_verification = REQUIRE_EMAIL_VERIFICATION
 account_ctx.health_fn = health_summary
-account_ctx.stats_fn = compute_stats
+account_ctx.stats_fn = compute_stats_async
 account_ctx.liqs_fn = lambda: list(LIQUIDATIONS)[-8:]
 account_ctx.ws_clients_fn = lambda: len(hub.clients)
 account_ctx.alerts_market_fn = alerts_market_snapshot
 account_ctx.correlations_fn = correlations_snapshot
 account_ctx.pump_snapshot_fn = pump_snapshot
 account_ctx.book_snapshot_fn = book_snapshot
+account_ctx.screener_signal_fn = screener_signal_snapshot
+
+
+def _screener_enabled_networks():
+    """Что кабинету показывать в списке сетей: только включённые админом."""
+    if screener_networks is None:
+        return None
+    try:
+        return list(screener_networks.enabled())
+    except Exception:  # noqa: BLE001 — тумблер не ломает кабинет
+        return None
+
+
+account_ctx.screener_networks_fn = _screener_enabled_networks
 account_ctx.symbols_fn = lambda: list((feed.symbols if feed else [])[:40])
 register_account_routes(app)
+
+# ❤️ Донат: публичный список кошельков и сохранение из админки.
+register_donate_routes(app)
 
 # 📖 Стакан: снимок для графика, лента истории и диагностика опроса бирж.
 register_book_routes(app, lambda: book_feed_inst)
@@ -3376,19 +5273,17 @@ digest_ctx.set_setting_fn = (
     lambda key, val, actor=None:
     account_store.set_setting(str(key), str(val), actor_id=actor))
 
-# Дневной дайджест: архив выпусков, данные с сервера и публикация через бота
+# Дневной дайджест: архив выпусков, данные с сервера и публикация через бота.
+# Выпуски берутся только из JSON-архива: на сайте видно то, что вышло.
 digest_ctx.store = DigestStore(DIGEST_FILE)
-_archive_hide = archive_hide.ArchiveHide(
-    os.path.join(HERE, "data", "archive_hidden.json"))
-digest_ctx.hide = _archive_hide
 digest_ctx.liqs_fn = lambda: list(LIQUIDATIONS)
 digest_ctx.symbols_fn = lambda: list(feed.symbols if feed else [])
-digest_ctx.candles_fn = get_candles
+# Дайджест публикуется в канал: ему нужны настоящие свечи, а не заготовка от
+# последней цены. Это фоновая сборка (не запрос пользователя), поэтому force.
+digest_ctx.candles_fn = lambda sym, tf: get_candles(sym, tf, force=True)
 digest_ctx.hours_fn = lambda since, until: HIST.hours_range(since, until)
 digest_ctx.events_fn = lambda since, until: HIST.query(
     since, until, None, 0.0, 20000, False)
-digest_ctx.archive_days_fn = lambda have: archive_restore.digest_records_from_cells(
-    month_cells(), have)
 digest_ctx.oi_fn = oi_payload
 digest_ctx.ai_fn = digest_ai
 digest_ctx.publish_fn = tg_bot.publish_daily_digest
@@ -3508,10 +5403,8 @@ async def collect_hourly_post() -> dict:
 
 
 hourly_ctx.store = HourlyStore(HOURLY_FILE, keep=HOURLY_KEEP)
-hourly_ctx.hide = _archive_hide
 hourly_ctx.bot = tg_bot
 hourly_ctx.collect_fn = collect_hourly_post
-hourly_ctx.archive_fn = lambda: archive_restore.hourly_posts_from_cells(month_cells())
 hourly_ctx.public_url = PUBLIC_URL
 # Посты раздела выходят в английском канале — на странице ссылка на него
 hourly_ctx.channel_url_fn = tg_bot.channel_url_en
@@ -3718,16 +5611,16 @@ def _request_ip(request: Request) -> str:
     client_host = request.client.host if request.client else ""
     # Доверяем XFF только если запрос пришёл от доверенного прокси (обычно локальный nginx)
     if client_host and _is_trusted_proxy(client_host):
+        # nginx перезаписывает X-Real-IP фактическим адресом соединения.
+        # XFF может содержать префикс, переданный самим посетителем.
+        xri = (request.headers.get("x-real-ip") or "").strip()
+        if xri:
+            return xri
         xff = request.headers.get("x-forwarded-for") or ""
         if xff:
-            # Берём первый IP из цепочки — это оригинальный клиент, но только если прокси доверенный
             first = xff.split(",")[0].strip()
             if first:
                 return first
-        # Также поддерживаем X-Real-IP от nginx
-        xri = request.headers.get("x-real-ip") or ""
-        if xri:
-            return xri.strip() or client_host
     return client_host or "0"
 
 
@@ -3736,10 +5629,62 @@ def _request_ip(request: Request) -> str:
 _SYMBOL_ADD_RATE = RateLimiter(20, 10 * 60)
 
 
+# Сколько монет может добавить ОДИН аккаунт (значение живёт в market_feed,
+# чтобы кап был один на фид и на роут). Аноним — ни одной новой: без сессии
+# счётчик некуда записать, а общий список, память и биржевые подписки общие.
+# Админ — без счёта.
+def _user_symbol_cap() -> int:
+    return int(getattr(market_feed, "USER_SYMBOL_CAP", 5))
+
+
+def _live_symbol_quota(user_id: int, cap: int) -> dict:
+    """Квота аккаунта, сверенная с тем, что реально лежит в терминале.
+
+    Счётчик живёт в базе и переживает рестарт — но ``custom_symbols`` фида
+    живёт в памяти процесса, поэтому после перезапуска сервиса добавленные
+    монеты исчезают, а строки в базе остаются. Без сверки человек навсегда
+    потратил бы свои 5 слотов на монеты, которых в терминале уже нет (и квота
+    превратилась бы в пожизненный лимит «5 монет на аккаунт»).
+
+    Поэтому строки, чьей пары нет в пользовательском списке фида,
+    освобождаются: квота считает только то, что прямо сейчас занимает подписки
+    WS, память процесса и биржевые лимиты. Монета, которая осталась в списке,
+    слот держит; та же пара, добавленная заново, слот не удваивает
+    (``PRIMARY KEY (user_id, symbol)``).
+    """
+    quota = account_store.user_symbol_quota(user_id, cap)
+    if feed is None or not quota.get("symbols"):
+        return quota
+    live = set(getattr(feed, "custom_symbols", ()) or ())
+    stale = [s for s in quota["symbols"] if s not in live]
+    if not stale:
+        return quota
+    for sym in stale:
+        account_store.remove_user_symbol(user_id, sym)
+    log.info("квота монет user=%s: освобождено %d (%s) — пар нет в списке терминала",
+             user_id, len(stale), ", ".join(stale[:6]))
+    return account_store.user_symbol_quota(user_id, cap)
+
+
 @app.post("/api/symbols/add")
 async def api_symbol_add(request: Request,
                          symbol: str = Query(..., max_length=40),
                          force: bool = Query(False)):
+    """Добавить монету в общий список терминала.
+
+    Лимиты (защита биржевых подписок и памяти процесса):
+
+    * аноним — новую монету добавить нельзя (``error: "auth"``, 401). Уже
+      лежащую в списке пару открыть можно: она ничего не прибавляет;
+    * аккаунт — не больше ``USER_SYMBOL_CAP`` (5) монет; счётчик лежит в базе
+      (``accounts.user_symbols``) и сверяется со списком фида: слот держит
+      только та пара, которая реально занимает подписки WS и память
+      (``_live_symbol_quota``). Поэтому квоту не обходят ни повторным
+      добавлением той же монеты, ни рестартом сервиса — после рестарта список
+      монет пуст, значит и слоты свободны, а не потрачены навсегда;
+    * админ — без ограничений;
+    * глобальный кап памяти ``MAX_CUSTOM_SYMBOLS`` (120) проверяет сам фид.
+    """
     if not _SYMBOL_ADD_RATE.allow("add:" + _request_ip(request)):
         return JSONResponse({"added": False, "found": False, "error": "rate",
                              "symbol": "", "message": "слишком часто"},
@@ -3747,24 +5692,68 @@ async def api_symbol_add(request: Request,
     if not feed:
         return JSONResponse({"added": False, "found": False,
                              "error": "сервер ещё не готов"}, status_code=503)
+    # Сессия — это чтение SQLite, поэтому в потоке: единственный воркер не
+    # должен стоять на диске, пока остальные ждут ответ.
+    user = await asyncio.to_thread(current_user, request)
+    is_admin = bool(user and user.get("is_admin"))
     # force обходит каталог бирж и кладёт фиктивную пару в общий список.
     # Это только для админа: иначе аноним подсовывает любое имя всем клиентам.
     if force:
-        user = current_user(request)
         if not user or not user.get("is_admin"):
             return JSONResponse(
                 {"added": False, "found": False, "error": "admin",
                  "symbol": "", "message": "force только для админа"},
                 status_code=403)
-    res = await feed.add_symbol(symbol, force=force)
+
+    cap = -1 if is_admin else _user_symbol_cap()     # -1 = без счёта (админ)
+    quota: Optional[dict] = None
+    if not is_admin and user is not None and cap >= 0:
+        try:
+            quota = await asyncio.to_thread(_live_symbol_quota,
+                                            int(user["id"]), cap)
+        except Exception as e:                       # noqa: BLE001
+            log.warning("квота монет user=%s: %s", user.get("id"), e)
+            quota = None
+        if quota and quota["used"] >= cap:
+            return JSONResponse(
+                {"added": False, "found": False, "error": "quota", "symbol": "",
+                 "limit": cap, "used": quota["used"], "left": 0,
+                 "symbols": quota["symbols"],
+                 "message": f"Лимит {cap} монет на аккаунт исчерпан"},
+                status_code=409)
+
+    res = await feed.add_symbol(
+        symbol, force=force, guest=user is None,
+        owner="" if user is None else ("admin" if is_admin else f"u:{int(user['id'])}"),
+        owner_cap=cap)
     if res.get("error") == "invalid":
         return JSONResponse(res, status_code=400)
+    if res.get("error") == "auth":
+        return JSONResponse(res, status_code=401)
+    if res.get("error") == "quota":
+        return JSONResponse(res, status_code=409)
     if res.get("error") == "full":
         return JSONResponse(res, status_code=409)
     if res.get("error") == "rate":
         return JSONResponse(res, status_code=429)
     if not res.get("found") and not res.get("added"):
         return JSONResponse(res, status_code=404)
+    if res.get("added") and res.get("quota_charged") and user is not None and not is_admin:
+        # Счётчик аккаунта — в базу: in-memory custom_owners переживает только
+        # до рестарта, а квота должна считаться честно и после него.
+        try:
+            saved = await asyncio.to_thread(account_store.add_user_symbol,
+                                            int(user["id"]), res.get("symbol") or "")
+            res["quota_used"] = int(saved.get("count") or 0)
+        except Exception as e:                       # noqa: BLE001
+            log.warning("счётчик монет user=%s: %s", user.get("id"), e)
+    if cap >= 0 and user is not None:
+        used = res.get("quota_used")
+        if used is None and quota is not None:
+            used = int(quota["used"]) + (1 if res.get("quota_charged") else 0)
+        if used is not None:
+            res["limit"], res["used"], res["left"] = cap, int(used), max(0, cap - int(used))
+    res.pop("quota_charged", None)
     res["details"] = (_enrich_symbol_rows([res.get("details") or {}])[0]
                       if res.get("details") else {})
     return res
@@ -3772,17 +5761,35 @@ async def api_symbol_add(request: Request,
 
 @app.get("/api/klines")
 async def api_klines(symbol: str = Query("BTC_USDT"), timeframe: int = Query(5)):
+    """Свечи графика: читатель локального буфера, а не поход на биржу.
+
+    Любую монету можно открыть на графике, даже если её нет в дефолтном
+    топ-списке. Но запрос пользователя здесь НИКОГДА не ждёт Binance/Bybit/OKX:
+    ``get_candles`` отдаёт то, что уже лежит в памяти (кэш отдач → буфер фида
+    ``market_feed.get_candles_cached`` → заготовка от последней цены), а
+    загрузку истории новых монет ставит фоновой задачей
+    (``asyncio.create_task``). Иначе каждый зритель графика — это свой
+    синхронный запрос к бирже: 50+ пользователей дают лаг единственного
+    воркера и 429/418 (бан IP всего сервера).
+
+    Клиенту видно, что данные догоняющие: ``pending``/``stale`` и ``age_sec``.
+    Настоящие свечи приходят кадром WS ``candles`` сразу, как фон их догрузил
+    (embed-графики дополнительно опрашивают ручку раз в 15 с).
+    """
     symbol = canon(symbol)
-    # Любую монету можно открыть на графике, даже если её нет в дефолтном
-    # топ-списке: свечи берутся напрямую с бирж, а не из локального списка.
     tf = parse_tf(timeframe) or 5
     entry = await get_candles(symbol, tf)
-    return {
+    ts = float(entry.get("ts") or 0.0)
+    return direct_json({
         "symbol": symbol,
         "timeframe": tf,
-        "source": entry["source"],
-        "candles": entry["candles"],
-    }
+        "source": entry.get("source") or "unavailable",
+        "candles": entry.get("candles") or [],
+        "stale": bool(entry.get("stale")),
+        "pending": bool(entry.get("pending"))
+        or bool(feed is not None and feed.candles_pending(symbol, tf)),
+        "age_sec": round(time.time() - ts, 1) if ts else None,
+    })
 
 
 @app.get("/api/liq_clusters")
@@ -3822,11 +5829,11 @@ async def api_oi(symbol: str = Query("BTC_USDT")):
     tracker = getattr(feed, "oi", None)
     if tracker is None:
         from oi_feed import OI_WINDOWS
-        return {"symbol": symbol, "total_usd": None, "per_exchange": {},
+        return direct_json({"symbol": symbol, "total_usd": None, "per_exchange": {},
                 "live_exchanges": [], "hist_exchanges": [],
                 "changes": {k: None for k, _ in OI_WINDOWS},
                 "partial": {k: True for k, _ in OI_WINDOWS},
-                "ts": None, "stale_sec": None}
+                "ts": None, "stale_sec": None})
     try:
         await tracker.ensure_symbol(symbol)
     except Exception as e:
@@ -3835,7 +5842,7 @@ async def api_oi(symbol: str = Query("BTC_USDT")):
     if DEMO_MODE and out["total_usd"] is None:
         # демо: ряд уровней ведёт себя как настоящий — цифра и график живут
         out = _demo_oi_payload_from_series(symbol)
-    return out
+    return direct_json(out)
 
 
 # Демо-ряд OI: один на процесс и по монете. Раньше демо-OI был случайной
@@ -3990,6 +5997,1070 @@ def aggregate_hour_cell(h: float, cell: dict, symbol: Optional[str] = None) -> d
     }
 
 
+@app.get("/api/admin/screener/config")
+async def api_admin_screener_config(request: Request):
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    return {"enabled": bool(alchemy_key_store and alchemy_key_store.keys()),
+            "config": whale_poller.status() if whale_poller else None,
+            "keys": whale_poller.key_status() if whale_poller else [],
+            "vault_error": alchemy_vault_error,
+            "all_mode_available": False,
+            "reason": "Полный обход быстрых сетей превышает бюджет Free 30 млн CU/мес"}
+
+
+@app.post("/api/admin/screener/config")
+async def api_admin_screener_config_save(request: Request,
+                                         body: dict = Body(default_factory=dict)):
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    if not whale_poller:
+        return JSONResponse({"error": "disabled"}, status_code=503)
+    mode = str(body.get("mode", whale_poller.mode)).strip().lower()
+    # Backward compatibility for clients that still submit the old fixed mode.
+    if mode == "cex_only":
+        mode = whale_poller.mode
+    if mode not in ("realtime", "economy"):
+        return JSONResponse({"error": "invalid_mode"}, status_code=422)
+    try:
+        raw_interval = body.get("poll_interval_sec", body.get("interval_sec"))
+        if raw_interval is None:
+            # Backward compatibility for clients that still submit minutes.
+            minutes = int(body.get("interval_min", whale_poller.history_interval_min))
+            if minutes not in HISTORY_INTERVAL_OPTIONS:
+                return JSONResponse({"error": "out_of_range"}, status_code=422)
+            interval_sec = min(300, max(30, minutes * 60))
+        else:
+            interval_sec = int(raw_interval)
+        cap = int(body.get("monthly_cu", whale_poller.monthly_cu))
+    except (ValueError, TypeError):
+        return JSONResponse({"error": "invalid_config"}, status_code=422)
+    if interval_sec not in POLL_INTERVAL_OPTIONS_SEC or not 1_000 <= cap <= 20_000_000:
+        return JSONResponse({"error": "out_of_range"}, status_code=422)
+    try:
+        whale_poller.configure(mode=mode, poll_interval_sec=interval_sec, monthly_cu=cap)
+    except ValueError:
+        return JSONResponse({"error": "out_of_range"}, status_code=422)
+    await asyncio.to_thread(account_store.set_setting, "whale_mode", mode, int(user["id"]))
+    await asyncio.to_thread(account_store.set_setting, "whale_poll_interval_sec", str(interval_sec), int(user["id"]))
+    await asyncio.to_thread(account_store.set_setting, "whale_monthly_cu", str(cap), int(user["id"]))
+    return {"ok": True, "config": whale_poller.status()}
+
+
+@app.post("/api/admin/screener/keys")
+async def api_admin_add_alchemy_key(request: Request, body: dict = Body(default_factory=dict)):
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    if not alchemy_key_store or alchemy_vault_error:
+        return JSONResponse({"error": "vault_unavailable"}, status_code=503)
+    value = body.get("key")
+    if not isinstance(value, str) or len(value) > 500:
+        return JSONResponse({"error": "invalid_key"}, status_code=422)
+    try:
+        public = alchemy_key_store.add(value)
+    except (ValueError, KeyStoreError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+    if whale_poller:
+        whale_poller.wakeup.set()  # validate/connect without a restart
+    return {"ok": True, "key": public}
+
+
+@app.delete("/api/admin/screener/keys/{identifier}")
+async def api_admin_remove_alchemy_key(request: Request, identifier: str):
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    if not alchemy_key_store or not re.fullmatch(r"[0-9a-f]{16}", identifier):
+        return JSONResponse({"error": "unknown_key"}, status_code=404)
+    try:
+        deleted = alchemy_key_store.remove(identifier)
+    except KeyStoreError:
+        return JSONResponse({"error": "vault_unavailable"}, status_code=503)
+    if whale_poller:
+        whale_poller.wakeup.set()
+    return {"ok": deleted}
+
+
+def _alchemy_admin_keys() -> list[dict]:
+    if whale_poller:
+        return whale_poller.key_status()
+    return alchemy_key_store.public() if alchemy_key_store else []
+
+
+@app.get("/api/admin/alchemy/keys")
+async def api_admin_alchemy_keys(request: Request):
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    try:
+        keys = _alchemy_admin_keys()
+    except KeyStoreError:
+        return JSONResponse({"error": "vault_unavailable",
+                             "vault_error": alchemy_vault_error}, status_code=503)
+    return {"ok": True, "keys": keys, "vault_error": alchemy_vault_error,
+            "available": bool(alchemy_key_store and not alchemy_vault_error)}
+
+
+@app.post("/api/admin/alchemy/keys")
+async def api_admin_alchemy_add_key(request: Request,
+                                    body: dict = Body(default_factory=dict)):
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    if not alchemy_key_store or alchemy_vault_error:
+        return JSONResponse({"error": "vault_unavailable"}, status_code=503)
+    value = body.get("key")
+    if not isinstance(value, str) or len(value) > 500:
+        return JSONResponse({"error": "invalid_key"}, status_code=422)
+    try:
+        public = alchemy_key_store.add(value)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+    except KeyStoreError:
+        return JSONResponse({"error": "vault_unavailable"}, status_code=503)
+    if whale_poller:
+        whale_poller.wakeup.set()
+    return {"ok": True, "key": public}
+
+
+async def _api_admin_alchemy_remove(request: Request, identifier: str):
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    if not alchemy_key_store or not re.fullmatch(r"[0-9a-f]{16}", identifier):
+        return JSONResponse({"error": "unknown_key"}, status_code=404)
+    try:
+        deleted = alchemy_key_store.remove(identifier)
+    except KeyStoreError:
+        return JSONResponse({"error": "vault_unavailable"}, status_code=503)
+    if whale_poller:
+        whale_poller.wakeup.set()
+    if not deleted:
+        return JSONResponse({"error": "unknown_key"}, status_code=404)
+    return {"ok": True}
+
+
+@app.delete("/api/admin/alchemy/keys")
+async def api_admin_alchemy_delete_key(request: Request):
+    body = {}
+    if "application/json" in (request.headers.get("content-type") or ""):
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+    body = body if isinstance(body, dict) else {}
+    identifier = str(body.get("id") or body.get("key_id") or body.get("identifier") or
+                     request.query_params.get("id") or "").strip()
+    return await _api_admin_alchemy_remove(request, identifier)
+
+
+@app.delete("/api/admin/alchemy/keys/{identifier}")
+async def api_admin_alchemy_delete_key_by_id(request: Request, identifier: str):
+    return await _api_admin_alchemy_remove(request, identifier)
+
+
+def _poll_network_health(poll: dict, chain: str, *, setup_error: str = "",
+                         now: float | None = None) -> dict:
+    """Normalize independent per-network RPC state for both admin/status APIs."""
+    now = time.time() if now is None else now
+    status_rows = poll.get("network_status") or {}
+    source = status_rows.get(chain) or {}
+    successes = poll.get("last_success") or {}
+    attempts = poll.get("last_attempt") or {}
+    streams = poll.get("evm_streams") or {}
+    stream = streams.get(chain) or {}
+    solana = poll.get("solana") or {}
+    keyless = not bool(poll.get("keys_configured"))
+    last_success = max(float(source.get("last_success") or 0),
+                       float(successes.get(chain) or 0),
+                       float(stream.get("last_success") or 0))
+    last_event = float(source.get("last_event") or 0)
+    status = str(source.get("status") or "paused")
+    warning_status = str(source.get("warning_status") or "")
+    error = str(source.get("error") or (poll.get("errors") or {}).get(chain) or "")
+    if chain == "SOLANA":
+        solana_state = str(solana.get("state") or "")
+        if solana_state in ("online", "rate_limited", "auth_error", "quota_exhausted",
+                            "network_error", "paused"):
+            status = solana_state
+    retry_in_sec = int(source.get("retry_in_sec") or 0)
+    key_active = bool(source.get("key_active", True))
+
+    if setup_error:
+        status, error, warning_status = "network_error", str(setup_error), ""
+    elif keyless:
+        status, error = "paused", error or "no_key"
+        warning_status = ""
+    elif chain in ("ETH", "BNB", "POLYGON", "ARBITRUM", "BASE") and \
+            max(last_success, last_event) and now - max(last_success, last_event) <= 300:
+        # A fresh RPC result or live event proves the EVM feed is still alive;
+        # a parallel REST 429/auth error should remain a warning, not a dead key.
+        if status not in ("online", "paused"):
+            warning_status = status
+        status = "online"
+
+    return {"chain": chain, "status": status,
+            "last_success": last_success,
+            "last_attempt": max(float(source.get("last_attempt") or 0),
+                                 float(attempts.get(chain) or 0),
+                                 float(solana.get("last_attempt") or 0)
+                                 if chain == "SOLANA" else 0.0),
+            "error": error, "warning_status": warning_status,
+            "retry_in_sec": retry_in_sec,
+            "http_status": source.get("http_status"),
+            "rpc_code": source.get("rpc_code"),
+            "key_active": key_active,
+            "cu_used": int(source.get("cu_used") or
+                           (poll.get("network_cu") or {}).get(chain, 0)),
+            "last_event": last_event,
+            "waiting_for_filters": bool(solana.get("waiting_for_filters"))
+                if chain == "SOLANA" else False}
+
+
+@app.get("/api/admin/alchemy/stats")
+async def api_admin_alchemy_stats(request: Request):
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    poll = whale_poller.status() if whale_poller else {}
+    networks = []
+    for chain in ("ETH", "BNB", "POLYGON", "ARBITRUM", "BASE"):
+        network = _mark_network_enabled(_poll_network_health(
+            poll, chain, setup_error=alchemy_vault_error if not whale_poller else ""), chain)
+        network["provider"] = "alchemy"
+        networks.append(network)
+    native = whale_screener.native_status() if whale_screener else {
+        "network": "HYPERLIQUID", "provider": "native_api", "enabled": False,
+        "connected": False, "state": "unavailable", "error": ""}
+    networks.append(_mark_network_enabled({
+        "chain": "HYPERLIQUID", "provider": "native_api",
+        "status": "online" if native.get("connected") else
+                  "error" if native.get("error") else "waiting",
+        "last_success": float(native.get("last_event_ts") or native.get("last_message_ts") or 0),
+        "last_attempt": float(native.get("last_message_ts") or 0),
+        "error": str(native.get("error") or "")}, "HYPERLIQUID"))
+    solana = _poll_network_health(
+        poll, "SOLANA", setup_error=alchemy_vault_error if not whale_poller else "")
+    solana.update(provider="alchemy_solana",
+                  waiting_for_filters=bool((poll.get("solana") or {}).get("waiting_for_filters")),
+                  error=str((poll.get("solana") or {}).get("error") or solana.get("error") or ""),
+                  retry_in_sec=int((poll.get("solana") or {}).get("retry_in_sec") or
+                                   solana.get("retry_in_sec") or 0),
+                  request_budget=int((poll.get("solana") or {}).get("request_budget") or 0),
+                  requests_last_cycle=int((poll.get("solana") or {}).get("requests_last_cycle") or 0))
+    networks.append(_mark_network_enabled(solana, "SOLANA"))
+    tron = poll.get("tron") or {}
+    tron_state = str(tron.get("state") or "paused")
+    networks.append(_mark_network_enabled({
+        "chain": "TRON", "provider": "trongrid",
+        "status": "online" if tron.get("connected") else
+                  "circuit_open" if tron_state == "circuit_open" else
+                  "error" if tron_state in ("error", "budget_exhausted") else "waiting",
+        "last_success": float(tron.get("last_success") or 0),
+        "last_attempt": float(tron.get("last_attempt") or 0),
+        "error": str(tron.get("error") or "")}, "TRON"))
+    used = int(poll.get("reserved_cu") or 0)
+    budget = int(poll.get("budget_cu") or 0)
+    keys = _alchemy_admin_keys()
+    # Квота считается на каждый ключ (у ключей Alchemy разные Free-тарифы),
+    # поэтому «доля» ключа = месячный бюджет, а не budget // len(keys).
+    per_key = int(poll.get("per_key_cu") or 0) or (budget if keys else 0)
+    total = int(poll.get("budget_total_cu") or 0) or per_key * max(1, len(keys))
+    return {"ok": True, "available": bool(alchemy_key_store and not alchemy_vault_error),
+            "vault_error": alchemy_vault_error,
+            "cu": {"month": poll.get("month") or "", "used": used,
+                   "limit": total, "percent": round(100 * used / total, 2) if total else 0,
+                   "estimated_monthly": int(poll.get("estimated_monthly_cu") or 0),
+                   "key_share": per_key,
+                   "keys_configured": len(keys), "keys": keys},
+            "networks": networks, "native": native,
+            # тумблеры сетей и что сейчас происходит с пулом ключей
+            "network_switch": _network_switch(),
+            "key_pool": poll.get("key_pool") or {},
+            "trongrid": {"available": bool(trongrid_key_store and not trongrid_vault_error),
+                         "vault_error": trongrid_vault_error,
+                         "keys": (trongrid_key_store.public() if trongrid_key_store else [])},
+            "phase": poll.get("phase") or "unavailable"}
+
+
+def _reload_cex_runtime() -> None:
+    if whale_screener:
+        whale_screener.reload_wallets()
+    if whale_poller:
+        whale_poller.wakeup.set()
+
+
+@app.get("/api/admin/screener/cex-wallets")
+async def api_admin_cex_wallets(request: Request,
+                               chain: str = Query("ALL", pattern="^(ALL|ETH|BNB|POLYGON|ARBITRUM|BASE|SOLANA|TRON)$"),
+                               exchange: str = Query("", max_length=100)):
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    if not cex_wallet_registry:
+        return JSONResponse({"error": "wallet_registry_unavailable"}, status_code=503)
+    switch = _network_switch()
+    retention = int(switch.get("wallet_retention_days") or 0)
+    stale = 0
+    if retention:
+        # Кассу держим в процессе: подсчёт идёт по недельной истории событий,
+        # дёргать её на каждую отрисовку панели админа незачем.
+        global _WALLET_STALE_CACHE
+        now = time.time()
+        if now - float(_WALLET_STALE_CACHE.get("at") or 0) > 300:
+            try:
+                preview = await asyncio.to_thread(prune_cex_wallets, apply=False)
+                _WALLET_STALE_CACHE = {"at": now, "stale": int(preview.get("stale") or 0)}
+            except Exception as exc:  # noqa: BLE001 — предпросмотр не блокирует админку
+                log.debug("cex prune preview: %s", exc)
+        stale = int(_WALLET_STALE_CACHE.get("stale") or 0)
+    summary = cex_wallet_registry.summary()
+    return {"ok": True, "wallets": cex_wallet_registry.records(chain=chain, exchange=exchange),
+            "summary": summary,
+            "cleanup": {"retention_days": retention, "stale": stale,
+                        "interval_sec": int(WALLET_PRUNE_INTERVAL_SEC),
+                        "last_prune": summary.get("last_prune") or {}}}
+
+
+_WALLET_STALE_CACHE: dict = {"at": 0.0, "stale": 0}
+
+
+@app.post("/api/admin/screener/cex-wallets/prune")
+async def api_admin_prune_cex_wallets(request: Request, body: dict = Body(default_factory=dict)):
+    """Убрать кошельки, которые не обновляются источниками и не светятся в скринере.
+
+    `dry_run: true` — только посчитать. `days` — разово переопределить окно.
+    """
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    if not cex_wallet_registry:
+        return JSONResponse({"error": "wallet_registry_unavailable"}, status_code=503)
+    dry_run = bool(body.get("dry_run", body.get("preview")))
+    days = _requested_retention_days(body)
+    if isinstance(days, str):
+        return JSONResponse({"error": days}, status_code=422)
+    previous = None
+    if days is not None and screener_networks is not None:
+        # окно меняем только на время этого прогона: настройки админки не трогаем
+        previous = screener_networks.wallet_retention_days
+        screener_networks.set_retention(days)
+    try:
+        result = await asyncio.to_thread(prune_cex_wallets, apply=not dry_run)
+    finally:
+        if previous is not None and screener_networks is not None:
+            screener_networks.set_retention(previous)
+    _WALLET_STALE_CACHE.update(at=0.0, stale=int(result.get("stale") or 0))
+    return {"ok": bool(result.get("ok")), "dry_run": dry_run, **result}
+
+
+@app.post("/api/admin/screener/cex-wallets/retention")
+async def api_admin_cex_wallet_retention(request: Request, body: dict = Body(default_factory=dict)):
+    """Срок тишины в днях, после которого кошелёк убирают из базы (0 — выключить)."""
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    if screener_networks is None:
+        return JSONResponse({"error": "unavailable"}, status_code=503)
+    days = _requested_retention_days(body, required=True)
+    if isinstance(days, str):
+        return JSONResponse({"error": days}, status_code=422)
+    screener_networks.set_retention(days)
+    _WALLET_STALE_CACHE["at"] = 0.0     # окно изменили — предпросмотр протух
+    return {"ok": True, "wallet_retention_days": days,
+            "cleanup": {"retention_days": days,
+                        "interval_sec": int(WALLET_PRUNE_INTERVAL_SEC)}}
+
+
+@app.post("/api/admin/screener/networks")
+async def api_admin_screener_networks(request: Request, body: dict = Body(default_factory=dict)):
+    """Тумблер сети: выключенная сеть не опрашивается и не показывается нигде.
+
+    История уже собранных событий остаётся в базе — сеть возвращается вместе
+    с тумблером, ничего не теряется.
+    """
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    if screener_networks is None:
+        return JSONResponse({"error": "unavailable"}, status_code=503)
+    raw_chains = body.get("networks")
+    changes = []
+    if isinstance(raw_chains, dict):
+        changes = [(chain, flag) for chain, flag in raw_chains.items()]
+    elif isinstance(body.get("chain"), str):
+        changes = [(body["chain"], body.get("enabled", True))]
+    if not changes:
+        return JSONResponse({"error": "chain" if not changes else "invalid_networks"},
+                            status_code=422)
+    applied = []
+    for chain, flag in changes:
+        normalized = normalize_network(chain)
+        if not normalized:
+            return JSONResponse({"error": "unknown_network"}, status_code=422)
+        changed, state = screener_networks.set_enabled(normalized, flag)
+        applied.append({"chain": normalized, "enabled": bool(state), "changed": bool(changed)})
+    log.info("Скринер китов: админ %s", ", ".join(
+        f"{row['chain']} {'включил' if row['enabled'] else 'выключил'}" for row in applied))
+    if whale_poller:
+        whale_poller.wakeup.set()   # расписание пересобрать без рестарта
+    _WALLET_STALE_CACHE["at"] = 0.0
+    return {"ok": True, "applied": applied, "network_switch": _network_switch()}
+
+
+@app.post("/api/admin/screener/cex-wallets/refresh")
+async def api_admin_refresh_cex_wallets(request: Request):
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    if not cex_wallet_registry:
+        return JSONResponse({"error": "wallet_registry_unavailable"}, status_code=503)
+    try:
+        result = await cex_wallet_registry.refresh()
+    except Exception as exc:  # noqa: BLE001 — updater redacts credentials before storing detail
+        reason = str(cex_wallet_registry.last_error or exc)[:1800]
+        return JSONResponse({"error": "refresh_failed", "reason": reason},
+                            status_code=502)
+    _reload_cex_runtime()
+    return result
+
+
+@app.post("/api/admin/screener/cex-wallets")
+async def api_admin_add_cex_wallet(request: Request, body: dict = Body(default_factory=dict)):
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    if not cex_wallet_registry:
+        return JSONResponse({"error": "wallet_registry_unavailable"}, status_code=503)
+    try:
+        row = cex_wallet_registry.add_manual(
+            str(body.get("chain") or ""), str(body.get("address") or ""),
+            str(body.get("name") or body.get("exchange") or ""))
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+    except OSError:
+        return JSONResponse({"error": "wallet_save_failed"}, status_code=500)
+    _reload_cex_runtime()
+    return {"ok": True, "wallet": row, "summary": cex_wallet_registry.summary()}
+
+
+@app.put("/api/admin/screener/cex-wallets/{identifier}")
+async def api_admin_update_cex_wallet(request: Request, identifier: str,
+                                      body: dict = Body(default_factory=dict)):
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    if not cex_wallet_registry:
+        return JSONResponse({"error": "wallet_registry_unavailable"}, status_code=503)
+    try:
+        row = cex_wallet_registry.update_manual(
+            identifier, str(body.get("chain") or ""), str(body.get("address") or ""),
+            str(body.get("name") or body.get("exchange") or ""))
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+    except OSError:
+        return JSONResponse({"error": "wallet_save_failed"}, status_code=500)
+    if not row:
+        return JSONResponse({"error": "manual_wallet_not_found"}, status_code=404)
+    _reload_cex_runtime()
+    return {"ok": True, "wallet": row, "summary": cex_wallet_registry.summary()}
+
+
+@app.delete("/api/admin/screener/cex-wallets/{identifier}")
+async def api_admin_remove_cex_wallet(request: Request, identifier: str):
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    if not cex_wallet_registry:
+        return JSONResponse({"error": "wallet_registry_unavailable"}, status_code=503)
+    try:
+        removed = cex_wallet_registry.remove_manual(identifier)
+    except OSError:
+        return JSONResponse({"error": "wallet_save_failed"}, status_code=500)
+    if not removed:
+        return JSONResponse({"error": "manual_wallet_not_found"}, status_code=404)
+    _reload_cex_runtime()
+    return {"ok": True, "summary": cex_wallet_registry.summary()}
+
+
+@app.get("/api/admin/trongrid/key")
+async def api_admin_trongrid_key(request: Request):
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    try:
+        keys = trongrid_key_store.public() if trongrid_key_store else []
+    except KeyStoreError:
+        keys = []
+    return {"ok": True, "keys": keys,
+            "available": bool(trongrid_key_store and not trongrid_vault_error),
+            "vault_error": trongrid_vault_error}
+
+
+@app.post("/api/admin/trongrid/key")
+async def api_admin_set_trongrid_key(request: Request,
+                                     body: dict = Body(default_factory=dict)):
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    if not trongrid_key_store or trongrid_vault_error:
+        return JSONResponse({"error": "vault_unavailable"}, status_code=503)
+    value = body.get("key") or body.get("api_key")
+    if not isinstance(value, str) or len(value) > 500:
+        return JSONResponse({"error": "invalid_key"}, status_code=422)
+    try:
+        public = trongrid_key_store.add(value)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+    except KeyStoreError:
+        return JSONResponse({"error": "vault_unavailable"}, status_code=503)
+    if whale_poller:
+        whale_poller.wakeup.set()
+    return {"ok": True, "key": public}
+
+
+@app.delete("/api/admin/trongrid/key/{identifier}")
+async def api_admin_delete_trongrid_key(request: Request, identifier: str):
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    if not trongrid_key_store or not re.fullmatch(r"[0-9a-f]{16}", identifier):
+        return JSONResponse({"error": "unknown_key"}, status_code=404)
+    try:
+        deleted = trongrid_key_store.remove(identifier)
+    except KeyStoreError:
+        return JSONResponse({"error": "vault_unavailable"}, status_code=503)
+    if whale_poller:
+        whale_poller.wakeup.set()
+    if not deleted:
+        return JSONResponse({"error": "unknown_key"}, status_code=404)
+    return {"ok": True}
+
+
+def _network_switch() -> dict:
+    """Состояние тумблеров для админки; при недоступном модуле — «всё включено»."""
+    if screener_networks is not None:
+        return screener_networks.as_dict()
+    return {"networks": [{"id": chain, "title": chain, "provider": "alchemy",
+                          "paid": chain not in ("TRON", "HYPERLIQUID"), "enabled": True}
+                         for chain in ("ETH", "BNB", "POLYGON", "ARBITRUM", "BASE",
+                                       "SOLANA", "TRON", "HYPERLIQUID")],
+            "enabled": [row["id"] for row in
+                        (({"id": "ETH"}, {"id": "TRON"}, {"id": "HYPERLIQUID"}))],
+            "wallet_retention_days": 0, "updated_at": 0.0, "error": ""}
+
+
+def _requested_retention_days(body: dict, *, required: bool = False):
+    """Дни из тела запроса: молча заменять мусор значением по умолчанию нельзя.
+
+    Возвращает int (после clamp в 0…365) либо строку-ошибку — 422 честнее, чем
+    «админ написал „сто“, а база начала чиститься по 7 дням».
+    """
+    if not isinstance(body, dict) or body.get("days") is None:
+        return "days_required" if required else None
+    raw = body.get("days")
+    if isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+        return "invalid_days"
+    text = str(raw).strip()
+    if not text:
+        return "days_required" if required else None
+    try:
+        number = float(text)
+    except ValueError:
+        return "invalid_days"
+    if number != int(number) or number < 0:
+        return "invalid_days"
+    return retention_days(int(number))
+
+
+def _chain_enabled(chain: str) -> bool:
+    if screener_networks is None:
+        return True
+    try:
+        return bool(screener_networks.is_enabled(chain))
+    except Exception:  # noqa: BLE001 — тумблер не имеет права ломать выдачу
+        return True
+
+
+def _mark_network_enabled(row: dict, chain: str) -> dict:
+    """Отметка тумблера в строке сети; выключенная сеть не «ожидает», она выключена."""
+    row["enabled"] = _chain_enabled(chain)
+    if not row["enabled"]:
+        row.update(status="disabled", error="", warning_status="",
+                   retry_in_sec=0, key_active=False)
+    return row
+
+
+def prune_cex_wallets(*, apply: bool = True) -> dict:
+    """Сколько кошельков бирж уже не актуально (и, если надо, убрать их).
+
+    «Не актуален» = источник (DeFiLlama/Etherscan) не публикует его уже N дней
+    И его адрес не мелькал ни в одном событии скринера за то же окно. Ручные
+    кошельки не трогаем. Работает вне event loop — здесь и SQLite, и запись
+    файла, поэтому вызывается через asyncio.to_thread.
+    """
+    if cex_wallet_registry is None:
+        return {"ok": False, "reason": "реестр кошельков недоступен", "removed": 0}
+    days = int(screener_networks.wallet_retention_days if screener_networks is not None
+               else 0)
+    if days <= 0:
+        return {"ok": True, "retention_days": 0, "removed": 0, "stale": 0,
+                "reason": "автоочистка выключена", "applied": False,
+                "summary": cex_wallet_registry.summary()}
+    cutoff = time.time() - days * 86400
+    active = None
+    try:
+        if whale_screener and getattr(whale_screener, "history_store", None):
+            active = whale_screener.history_store.active_wallet_keys(cutoff)
+    except Exception as exc:  # noqa: BLE001 — нет истории → решаем по источникам
+        log.debug("cex prune: активность не получена: %s", exc)
+    result = cex_wallet_registry.prune_stale(cutoff=cutoff, active_keys=active, apply=apply)
+    result["retention_days"] = days
+    result["stale"] = int(result.get("removed") or 0)
+    result["summary"] = cex_wallet_registry.summary()
+    if result.get("ok") and result.get("applied") and result.get("removed"):
+        # база изменилась → скринер и коллектор обязаны перечитать реестр
+        _reload_cex_runtime()
+    return result
+
+
+async def cex_wallet_prune_loop():
+    """Одна проверка в сутки — чаще чистить базу кошельков незачем."""
+    try:
+        await asyncio.sleep(WALLET_PRUNE_START_DELAY_SEC)
+    except asyncio.CancelledError:
+        return
+    while True:
+        delay = WALLET_PRUNE_INTERVAL_SEC
+        try:
+            result = await asyncio.to_thread(prune_cex_wallets)
+            removed = int(result.get("removed") or 0)
+            if removed:
+                log.info("автоочистка кошельков: убрано %d из базы (%d дней тишины)",
+                         removed, int(result.get("retention_days") or 0))
+            elif result.get("ok") is False and result.get("reason"):
+                log.warning("автоочистка кошельков: %s", result["reason"])
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:  # noqa: BLE001 — очистка не валит сервер
+            log.warning("автоочистка кошельков: %s", exc)
+            delay = 3600.0
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            break
+
+
+@app.get("/api/screener/whales")
+async def api_screener_whales(request: Request,
+                              min_usd: float = Query(0, ge=0),
+                              chain: str = Query("ALL", pattern="^(ALL|GENERAL|EVM|ETH|BNB|POLYGON|ARBITRUM|BASE|SOLANA|TRON|HYPERLIQUID)$"),
+                              limit: int = Query(100, ge=1, le=100)):
+    alchemy_enabled = bool(alchemy_key_store and alchemy_key_store.keys()) and any(
+        _chain_enabled(chain) for chain in ("ETH", "BNB", "POLYGON", "ARBITRUM", "BASE"))
+    native_enabled = bool(whale_screener and whale_screener.hl_enabled
+                          and _chain_enabled("HYPERLIQUID"))
+    solana_enabled = bool(whale_poller and alchemy_enabled and _chain_enabled("SOLANA"))
+    tron_enabled = bool(whale_poller and _chain_enabled("TRON"))
+    return {"enabled": alchemy_enabled, "alchemy_enabled": alchemy_enabled,
+            "native_enabled": native_enabled, "solana_enabled": solana_enabled,
+            "tron_enabled": tron_enabled,
+            # что оставил включённым админ: страница скрывает сети по этому списку
+            "networks": _network_switch()["networks"],
+            "enabled_networks": [row["id"] for row in _network_switch()["networks"]
+                                 if row["enabled"]],
+            "available": bool(whale_screener and
+                               (alchemy_enabled or native_enabled or solana_enabled or tron_enabled)),
+            "unavailable_reason": alchemy_vault_error if not whale_screener else "",
+            "alchemy_unavailable_reason": alchemy_vault_error,
+            "native_supported": ["HYPERLIQUID", "SOLANA", "TRON"],
+            "native": whale_screener.native_status() if whale_screener else {
+                "network": "HYPERLIQUID", "provider": "native_api",
+                "enabled": False, "connected": False, "state": "unavailable",
+                "market_count": 0, "subscriptions_sent": 0,
+                "subscriptions_acked": 0, "trades_seen": 0,
+                "events": 0, "reconnects": 0,
+                "error": alchemy_vault_error or "Whale-скринер недоступен"},
+            "events": whale_screener.history(min_usd, chain, limit,
+                                               time.time() - 7 * 24 * 60 * 60)
+            if whale_screener else [],
+            "poller": whale_poller.status() if whale_poller else None}
+
+
+_SCREENER_NETWORKS = ("ETH", "BNB", "POLYGON", "ARBITRUM", "BASE",
+                      "SOLANA", "TRON", "HYPERLIQUID")
+_EXPLORER_TX = {
+    "ETH": "https://etherscan.io/tx/", "BNB": "https://bscscan.com/tx/",
+    "POLYGON": "https://polygonscan.com/tx/", "ARBITRUM": "https://arbiscan.io/tx/",
+    "BASE": "https://basescan.org/tx/", "SOLANA": "https://solscan.io/tx/",
+    "TRON": "https://tronscan.org/#/transaction/",
+    "HYPERLIQUID": "https://hypurrscan.io/tx/",
+}
+
+
+def _screener_network_status() -> dict:
+    poll = whale_poller.status() if whale_poller else {}
+    result = {}
+    for chain in ("ETH", "BNB", "POLYGON", "ARBITRUM", "BASE"):
+        result[chain] = _mark_network_enabled(_poll_network_health(
+            poll, chain, setup_error=alchemy_vault_error if not whale_poller else ""), chain)
+    native = whale_screener.native_status() if whale_screener else {
+        "network": "HYPERLIQUID", "enabled": False, "connected": False,
+        "state": "unavailable", "error": ""}
+    result["HYPERLIQUID"] = _mark_network_enabled({
+        "status": "online" if native.get("connected") else
+                  "error" if native.get("error") else "waiting",
+        "last_success": float(native.get("last_event_ts") or native.get("last_message_ts") or 0),
+        "last_attempt": float(native.get("last_message_ts") or 0),
+        "error": str(native.get("error") or ""),
+    }, "HYPERLIQUID")
+    solana = _poll_network_health(
+        poll, "SOLANA", setup_error=alchemy_vault_error if not whale_poller else "")
+    solana.update(error=str((poll.get("solana") or {}).get("error") or solana.get("error") or ""),
+                  waiting_for_filters=bool((poll.get("solana") or {}).get("waiting_for_filters")),
+                  retry_in_sec=int((poll.get("solana") or {}).get("retry_in_sec") or
+                                   solana.get("retry_in_sec") or 0))
+    result["SOLANA"] = _mark_network_enabled(solana, "SOLANA")
+    tron = poll.get("tron") or {}
+    tron_state = str(tron.get("state") or "paused")
+    result["TRON"] = _mark_network_enabled({
+        "status": "online" if tron.get("connected") else
+                  "error" if tron_state in ("error", "budget_exhausted") else "waiting",
+        "last_success": float(tron.get("last_success") or 0),
+        "last_attempt": float(tron.get("last_attempt") or 0),
+        "error": str(tron.get("error") or ""),
+    }, "TRON")
+    return result
+
+
+@app.get("/api/screener/stats")
+async def api_screener_stats(request: Request):
+    now = time.time()
+    since = now - 24 * 60 * 60
+    events = (await asyncio.to_thread(whale_screener.events_since, since, now)
+              if whale_screener else [])
+    health = _screener_network_status()
+    networks = {
+        chain: {"status": health[chain]["status"],
+                "enabled": bool(health[chain].get("enabled", True)),
+                "last_success": health[chain]["last_success"],
+                "last_attempt": health[chain]["last_attempt"],
+                "error": health[chain]["error"],
+                "warning_status": health[chain].get("warning_status", ""),
+                "retry_in_sec": int(health[chain].get("retry_in_sec") or 0),
+                "http_status": health[chain].get("http_status"),
+                "rpc_code": health[chain].get("rpc_code"),
+                "key_active": bool(health[chain].get("key_active", True)),
+                "events": 0, "volume_usd": 0.0, "assets": {},
+                "inflow_usd": 0.0, "outflow_usd": 0.0,
+                "buy_usd": 0.0, "sell_usd": 0.0, "transfer_usd": 0.0,
+                "inflow_assets": {}, "outflow_assets": {},
+                "buy_assets": {}, "sell_assets": {}, "transfer_assets": {}}
+        for chain in _SCREENER_NETWORKS
+    }
+    exchange_totals = {chain: {} for chain in ("ALL", *_SCREENER_NETWORKS)}
+    hour_now = int(now // 3600) * 3600
+    first_hour = hour_now - 23 * 3600
+    series = []
+    for i in range(24):
+        networks_by_hour = {
+            chain: {"inflow_usd": 0.0, "outflow_usd": 0.0,
+                    "buy_usd": 0.0, "sell_usd": 0.0, "transfer_usd": 0.0,
+                    "inflow_assets": {}, "outflow_assets": {},
+                    "buy_assets": {}, "sell_assets": {}, "transfer_assets": {}}
+            for chain in _SCREENER_NETWORKS
+        }
+        series.append({"timestamp": first_hour + i * 3600,
+                       "networks": networks_by_hour})
+    total_usd = 0.0
+    for event in events:
+        chain = str(event.get("chain") or "").upper()
+        if chain not in networks:
+            continue
+        try:
+            value = float(event.get("usd") or 0)
+            timestamp = float(event.get("timestamp") or 0)
+        except (TypeError, ValueError):
+            continue
+        if value < 0 or not math.isfinite(value):
+            continue
+        row = networks[chain]
+        row["events"] += 1
+        row["volume_usd"] += value
+        total_usd += value
+        symbol = str(event.get("symbol") or "").upper()
+        try:
+            amount = float(event.get("amount") or 0)
+        except (TypeError, ValueError):
+            amount = 0.0
+        if symbol and math.isfinite(amount) and amount > 0:
+            row["assets"][symbol] = row["assets"].get(symbol, 0.0) + amount
+        direction = str(event.get("direction") or "").lower()
+        if direction == "trade":
+            side = str(event.get("side") or "").upper()
+            bucket = "buy" if side == "BUY" else "sell"
+        elif direction in ("inflow", "outflow"):
+            bucket = direction
+        elif event.get("to_label"):
+            bucket = "inflow"
+        elif event.get("from_label"):
+            bucket = "outflow"
+        else:
+            bucket = "transfer"
+        row[bucket + "_usd"] += value
+        if symbol and math.isfinite(amount) and amount > 0:
+            key = bucket + "_assets"
+            row[key][symbol] = row[key].get(symbol, 0.0) + amount
+        hour = int(timestamp // 3600) * 3600
+        if first_hour <= hour <= hour_now:
+            cell = series[int((hour - first_hour) // 3600)]["networks"][chain]
+            cell[bucket + "_usd"] += value
+            if symbol and math.isfinite(amount) and amount > 0:
+                key = bucket + "_assets"
+                cell[key][symbol] = cell[key].get(symbol, 0.0) + amount
+        venue = event_exchange(event) if event_exchange else ""
+        for scope in ("ALL", chain):
+            if venue:
+                venue_row = exchange_totals[scope].setdefault(
+                    venue, {"name": venue, "events": 0, "volume_usd": 0.0})
+                venue_row["events"] += 1
+                venue_row["volume_usd"] += value
+    # JSON-safe rounding and compact, pre-ranked exchange summaries.
+    for chain_data in networks.values():
+        for key in ("volume_usd", "inflow_usd", "outflow_usd", "buy_usd", "sell_usd", "transfer_usd"):
+            chain_data[key] = round(chain_data[key], 2)
+        for key in ("assets", "inflow_assets", "outflow_assets", "buy_assets", "sell_assets", "transfer_assets"):
+            chain_data[key] = {symbol: round(amount, 6)
+                               for symbol, amount in chain_data[key].items()}
+    for point in series:
+        for cell in point["networks"].values():
+            for key, value in tuple(cell.items()):
+                if key.endswith("_assets"):
+                    cell[key] = {symbol: round(amount, 6)
+                                 for symbol, amount in value.items()}
+                else:
+                    cell[key] = round(value, 2)
+    top_exchanges = {}
+    for scope, values in exchange_totals.items():
+        top_exchanges[scope] = sorted(values.values(),
+                                      key=lambda item: item["volume_usd"], reverse=True)[:10]
+        for item in top_exchanges[scope]:
+            item["volume_usd"] = round(item["volume_usd"], 2)
+    online = sum(1 for data in networks.values() if data["status"] == "online")
+    return {"since": since, "until": now, "total_events": len(events),
+            "total_volume_usd": round(total_usd, 2), "active_networks": online,
+            # страница строит по этому списку чипы, карточки и график: выключенных
+            # админом сетей в интерфейсе не появляется вовсе
+            "enabled_networks": [chain for chain in _SCREENER_NETWORKS
+                                 if networks[chain]["enabled"]],
+            "networks": networks, "series": series,
+            "top_exchanges": top_exchanges,
+            "native": whale_screener.native_status() if whale_screener else {}}
+
+
+@app.get("/api/screener/networks")
+async def api_screener_networks(request: Request):
+    """Какие сети Скринера включил админ. По ним страница строит чипы и карточки."""
+    switch = _network_switch()
+    return {"ok": True, "networks": switch["networks"],
+            "enabled": switch["enabled"],
+            "wallet_retention_days": switch["wallet_retention_days"]}
+
+
+def _screener_venue(label: str) -> str:
+    """Биржа по метке кошелька: «Binance 14» → binance, «Gate.io 2» → gate.
+
+    Нормализация одна на весь продукт и живёт в ``whale_screener``: реестр
+    CEX-кошельков приходит из внешних источников и подписан по-разному
+    («Binance 14», «Coinbase — Hot Wallet 10», «gate.io 2»), поэтому сравнивать
+    точное имя нельзя. Списки бирж строятся по этим идентификаторам, а не по
+    фиксированному кортежу: новая биржа из реестра появляется сама.
+    """
+    if venue_of_label is None:
+        return ""
+    return venue_of_label(label)
+
+
+def _screener_venue_name(venue: str) -> str:
+    return (venue_display_name(venue) if venue_display_name
+            else str(venue or "").strip().title())
+
+
+_EXCHANGE_FLOWS_CACHE: dict = {"key": None, "at": 0.0, "payload": None}
+_EXCHANGE_FLOWS_TTL_SEC = 45.0
+_EXCHANGE_FLOWS_LOCK = asyncio.Lock()
+
+
+@app.get("/api/screener/stats/exchanges_24h")
+async def api_screener_exchange_flows(request: Request,
+                                      minutes: int = Query(10, ge=1, le=60)):
+    """Потоки по биржам за сутки: кривая накопленного inflow/outflow.
+
+    Бакет — ``minutes`` минут: по умолчанию 10 (24 часа = 144 точки),
+    ``minutes=1`` даёт 1440 точек. ``net_flow = outflow - inflow``:
+    положительный — монеты уходят с биржи.
+
+    Список бирж строится из самих событий: в ответ попадают только площадки,
+    у которых за окно есть ненулевой поток, отсортированные по валовому объёму.
+    Фиксированный перечень рисовал пустые клетки там, где биржа вообще не
+    размечена в реестре кошельков, — и молчал про биржи, которые в реестре
+    есть, но не были в перечне.
+    """
+    now = time.time()
+    # Окно — сутки, и его читает каждый открытый «Скринер». Считаем не чаще
+    # раза в минуту на весь процесс: данные копятся десятиминутными бакетами,
+    # частые перезапросы добавили бы только нагрузку на SQLite.
+    cache_key = (int(minutes), int(now // 60))
+    cached = _EXCHANGE_FLOWS_CACHE
+    if cached["key"] == cache_key and now - float(cached["at"] or 0) < _EXCHANGE_FLOWS_TTL_SEC:
+        return cached["payload"]
+    async with _EXCHANGE_FLOWS_LOCK:
+        cached = _EXCHANGE_FLOWS_CACHE
+        if cached["key"] == cache_key and time.time() - float(cached["at"] or 0) < _EXCHANGE_FLOWS_TTL_SEC:
+            return cached["payload"]
+        payload = await _screener_exchange_flows(minutes)
+        _EXCHANGE_FLOWS_CACHE.update(key=cache_key, at=time.time(), payload=payload)
+        return payload
+
+
+async def _screener_exchange_flows(minutes: int) -> dict:
+    now = time.time()
+    since = now - 24 * 60 * 60
+    bucket = int(minutes) * 60
+    points = int(round(24 * 60 / int(minutes)))
+    last_bucket = int(now // bucket) * bucket
+    first_bucket = last_bucket - (points - 1) * bucket
+    flows: dict[str, dict[int, dict]] = {}
+    totals: dict[str, dict] = {}
+    events = (await asyncio.to_thread(whale_screener.events_since, since, now)
+              if whale_screener else [])
+    for event in events:
+        venue = _screener_venue(event_exchange(event) if event_exchange else "")
+        if not venue:
+            continue
+        try:
+            value = float(event.get("usd") or 0)
+            timestamp = float(event.get("timestamp") or 0)
+        except (TypeError, ValueError):
+            continue
+        if value < 0 or not math.isfinite(value):
+            continue
+        index = int((timestamp - first_bucket) // bucket)
+        if index < 0 or index >= points:
+            continue
+        direction = str(event.get("direction") or "").lower()
+        if direction == "inflow":
+            side = "inflow"
+        elif direction == "outflow":
+            side = "outflow"
+        elif event.get("to_label"):
+            side = "inflow"
+        elif event.get("from_label"):
+            side = "outflow"
+        else:
+            continue          # сделки и переводы между кошельками — не поток биржи
+        cell = flows.setdefault(venue, {}).setdefault(
+            index, {"inflow": 0.0, "outflow": 0.0})
+        cell[side] += value
+        agg = totals.setdefault(venue, {"inflow": 0.0, "outflow": 0.0, "events": 0})
+        agg[side] += value
+        agg["events"] += 1
+    series: dict[str, list[dict]] = {}
+    venues: list[dict] = []
+    for venue, agg in totals.items():
+        cells = flows.get(venue, {})
+        rows = []
+        for index in range(points):
+            timestamp = first_bucket + index * bucket
+            cell = cells.get(index)
+            inflow = float(cell["inflow"]) if cell else 0.0
+            outflow = float(cell["outflow"]) if cell else 0.0
+            rows.append({"timestamp": timestamp,
+                         "hour": time.strftime("%H:%M", time.gmtime(timestamp)),
+                         "inflow": round(inflow, 2), "outflow": round(outflow, 2),
+                         "net_flow": round(outflow - inflow, 2)})
+        series[venue] = rows
+        inflow = round(float(agg["inflow"]), 2)
+        outflow = round(float(agg["outflow"]), 2)
+        venues.append({"id": venue, "name": _screener_venue_name(venue),
+                       "inflow": inflow, "outflow": outflow,
+                       # balance — сколько за сутки зашло минус сколько вышло:
+                       # именно эту кривую рисует карточка биржи
+                       "balance": round(inflow - outflow, 2),
+                       "events": int(agg["events"])})
+    venues.sort(key=lambda item: (item["inflow"] + item["outflow"], item["events"]),
+                reverse=True)
+    return {"minutes": int(minutes), "points": points, "since": since, "until": now,
+            "venues": venues, "series": series}
+
+
+@app.get("/api/screener/history")
+async def api_screener_history(
+        request: Request,
+        chain: str = Query("ALL", pattern="^(ALL|GENERAL|EVM|ETH|BNB|POLYGON|ARBITRUM|BASE|SOLANA|TRON|HYPERLIQUID)$"),
+        min_usd: float = Query(0, ge=0),
+        direction: str = Query("ALL", pattern="^(ALL|inflow|outflow|trade|transfer)$"),
+        exchange: str = Query("ALL", max_length=100),
+        page: int = Query(1, ge=1),
+        page_size: int = Query(50, ge=1, le=50),
+        sort_by: str = Query("timestamp", pattern="^(timestamp|usd|chain|direction)$"),
+        sort_dir: str = Query("desc", pattern="^(asc|desc)$")):
+    now = time.time()
+    since = now - 7 * 24 * 60 * 60
+    rows, total = (await asyncio.to_thread(
+        whale_screener.query_history, since=since, until=now, chain=chain,
+        min_usd=min_usd, direction=direction, exchange=exchange,
+        page=page, page_size=page_size, sort_by=sort_by, sort_dir=sort_dir)
+        if whale_screener else ([], 0))
+    return {"since": since, "until": now, "page": page, "page_size": page_size,
+            "total": total, "pages": max(1, (total + page_size - 1) // page_size),
+            "events": rows}
+
+
+@app.get("/api/screener/history.csv")
+async def api_screener_history_csv(
+        request: Request,
+        chain: str = Query("ALL", pattern="^(ALL|GENERAL|EVM|ETH|BNB|POLYGON|ARBITRUM|BASE|SOLANA|TRON|HYPERLIQUID)$"),
+        min_usd: float = Query(0, ge=0),
+        direction: str = Query("ALL", pattern="^(ALL|inflow|outflow|trade|transfer)$"),
+        exchange: str = Query("ALL", max_length=100)):
+    now = time.time()
+    since = now - 7 * 24 * 60 * 60
+    rows, _ = (await asyncio.to_thread(
+        whale_screener.query_history, since=since, until=now, chain=chain,
+        min_usd=min_usd, direction=direction, exchange=exchange,
+        page=1, page_size=None, sort_by="timestamp", sort_dir="desc")
+        if whale_screener else ([], 0))
+    output = io.StringIO(newline="")
+    writer = csv.writer(output)
+    writer.writerow(("timestamp_utc", "network", "direction", "side", "asset",
+                     "amount", "usd", "exchange", "from", "to", "transaction_hash",
+                     "explorer_url"))
+    def safe_csv(value):
+        value = str(value or "")
+        return "'" + value if value[:1] in ("=", "+", "-", "@", "\t", "\r") else value
+    for event in rows:
+        chain_name = str(event.get("chain") or "")
+        tx_hash = str(event.get("hash") or "")
+        try:
+            timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(float(event.get("timestamp") or 0)))
+        except (ValueError, TypeError, OverflowError):
+            timestamp = ""
+        writer.writerow(tuple(safe_csv(value) for value in (
+            timestamp, chain_name, event.get("direction"), event.get("side"),
+            event.get("symbol"), event.get("amount"), event.get("usd"),
+            (event.get("from_label") or event.get("to_label") or ""),
+            event.get("from"), event.get("to"), tx_hash,
+            _EXPLORER_TX.get(chain_name, "") + tx_hash if tx_hash else "")))
+    return Response(content="\ufeff" + output.getvalue(),
+                    media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": "attachment; filename=whale-history-7d.csv",
+                             "Cache-Control": "private, no-store"})
+
+
 @app.get("/api/liquidations")
 async def api_liquidations(symbol: Optional[str] = None,
                            exchange: Optional[str] = None,
@@ -4025,13 +7096,13 @@ async def api_liquidations(symbol: Optional[str] = None,
                     by_id[key] = ev
                     res.append(ev)
             res.sort(key=lambda e: float(e.get("timestamp") or 0))
-    return {"liquidations": res[-cap:], "total": len(res)}
+    return direct_json({"liquidations": res[-cap:], "total": len(res)})
 
 
 @app.get("/api/history")
 async def api_history(since: Optional[float] = None, until: Optional[float] = None,
                       hours: float = 0.0, symbol: Optional[str] = None,
-                      min_usd: float = 0.0, limit: int = 2000,
+                      min_usd: float = 0.0, limit: int = 1000,
                       bucket: str = "raw", step_hours: int = 1):
     """История рынка за месяц: сырые ликвидации или часовые/дневные свёртки.
 
@@ -4058,40 +7129,100 @@ async def api_history(since: Optional[float] = None, until: Optional[float] = No
             agg = aggregate_hour_cell(h, cell, sym)
             if agg["count"] or agg["vol"] or agg["cvd"]:
                 rows.append(agg)
-        return {"bucket": "hour", "since": start, "until": until,
-                "ttl_hours": HISTORY_TTL_HOURS, "hours": rows}
+        return direct_json({"bucket": "hour", "since": start, "until": until,
+                            "ttl_hours": HISTORY_TTL_HOURS, "hours": rows})
     if bucket == "day":
         rows = await asyncio.to_thread(HIST.days, start, until, sym)
-        return {"bucket": "day", "since": start, "until": until,
-                "ttl_hours": HISTORY_TTL_HOURS, "days": rows}
+        return direct_json({"bucket": "day", "since": start, "until": until,
+                            "ttl_hours": HISTORY_TTL_HOURS, "days": rows})
     if bucket == "series":
         data = await asyncio.to_thread(HIST.series, start, until, None,
                                        int(step_hours or 1))
-        return {"bucket": "series", "since": start, "until": until,
-                "ttl_hours": HISTORY_TTL_HOURS, **data}
+        return direct_json({"bucket": "series", "since": start, "until": until,
+                            "ttl_hours": HISTORY_TTL_HOURS, **data})
     rows = await asyncio.to_thread(HIST.query, start, until, sym, float(min_usd),
-                                   int(limit))
-    return {"bucket": "raw", "since": start, "until": until,
-            "ttl_hours": HISTORY_TTL_HOURS, "total": len(rows),
-            "liquidations": rows}
+                                   min(max(1, int(limit)), 4000))
+    return direct_json({"bucket": "raw", "since": start, "until": until,
+                        "ttl_hours": HISTORY_TTL_HOURS, "total": len(rows),
+                        "liquidations": rows})
 
 
 @app.get("/api/stats")
 async def api_stats(symbol: Optional[str] = None, exchange: Optional[str] = None):
-    return compute_stats(symbol, exchange)
+    return await compute_stats_async(symbol, exchange)
+
+
+# Здоровье дёргают и мониторинг, и шапка сайта: 5 секунд кэша снимают
+# повторные опросы. В тестах кэш выключен (LIQSCOPE_API_CACHE=0).
+_HEALTH_CACHE = web_cache.TTLCache(ttl=5.0, maxsize=4)
 
 
 @app.get("/api/health")
 async def api_health():
+    hit = _HEALTH_CACHE.get("h")
+    if hit is not None:
+        return JSONResponse(hit)
     data = {
         "status": "ok",
         "server_time": time.time(),
         "clients": len(hub.clients),
+        "ws_max_clients": WS_MAX_CLIENTS,
+        "rss_bytes": _rss_bytes(),
+        "rss_peak_bytes": _rss_peak_bytes(),
+        # паузы единственного воркера: если клиентский p95 в секундах,
+        # а серверный p95 обработчика единицы мс — запросы стояли в
+        # очереди цикла, пока кто-то держал его занятым
+        "loop_lag_max_ms": _LOOP_LAG["max_ms"],
+        "loop_lag_last_ms": _LOOP_LAG["last_ms"],
+        "loop_stalls": int(_LOOP_LAG["stalls"]),
+        # кто именно держал воркер (LIQSCOPE_LOOP_TRACE=1): стек «изнутри
+        # наружу» — файл:строка:функция; пусто, если трассировка выключена
+        "loop_trace": LOOP_TRACE,
+        "loop_trace_stalls": int(_LOOP_TRACE["stalls"]),
+        "loop_trace_held_ms": _LOOP_TRACE["held_ms"],
+        "loop_trace_last": _LOOP_TRACE["last"],
+        "active_tasks": [[n, round(ms, 1)] for n, ms in active_spans()[:6]],
+        "asyncio_debug": bool(ASYNCIO_DEBUG),
+        # сборка мусора: на большой куче именно она даёт паузы в секундах при
+        # быстром обработчике, а трассировка в это время называет кадр, который
+        # просто аллоцировал память (на бою так «виновником» вышел gzip)
+        "gc_max_ms": _GC_STATS["max_ms"],
+        "gc_last_ms": _GC_STATS["last_ms"],
+        "gc_total_ms": _GC_STATS["total_ms"],
+        "gc_collections": int(_GC_STATS["count"]),
+        "gc_gen2_collections": int(_GC_STATS["gen2"]),
+        "gc_frozen_objects": int(_GC_STATS["frozen"]),
+        # журнал уходит в очередь и пишется в отдельном потоке: если journald
+        # не успевает, теряются записи (счётчик), а не паузы воркера
+        "log_async": _log_listener is not None,
+        "log_queue_size": _LOG_QUEUE.qsize(),
+        "log_queue_max": LOG_QUEUE_MAX,
+        "log_dropped": int(_LOG_STATS["dropped"]),
+        # кэши движка уровней: сколько событий держим в куче и попадают ли
+        # готовые лестницы (промахи — это полный пересчёт на каждый запрос)
+        "levels_events_cache": _levels_cache_stats(),
+        # фон уровней: самый тяжёлый периодический расчёт на сервере. Если
+        # last_pass_ms в тысячах миллисекунд, паузы воркера совпадают с ним, и
+        # проверка проста: LIQSCOPE_LEVELS_BG=0 на один прогон нагрузки
+        "levels_bg": dict(LEVELS_BG),
+        # saturation машины: паузы бывают не от кода, а от нехватки ядер
+        "cpu_count": os.cpu_count() or 0,
+        "load_avg": [round(x, 2) for x in os.getloadavg()]
+        if hasattr(os, "getloadavg") else [],
+        "wal_bytes": _wal_bytes(),
+        "sqlite_ms": await _sqlite_ping_ms(),
+        "uptime_sec": round(time.time() - _START_TS, 1),
         "liquidations_in_memory": len(LIQUIDATIONS),
         "demo": DEMO_MODE,
         "tg": tg_bot.poll_status(),
         "config": {
             "symbols_limit": SYMBOLS_LIMIT,
+            # лимиты добавления монет и быстрый JSON — видно в мониторинге
+            "max_custom_symbols": market_feed.MAX_CUSTOM_SYMBOLS,
+            "user_symbol_cap": _user_symbol_cap(),
+            "fast_json": FAST_JSON,
+            # GZipMiddleware отключён: nginx сжимает ответы за пределами Python.
+            "gzip": None,
             "exchanges": EXCHANGES,
             "tick_sources": TICK_SOURCES,
             "history_max": HISTORY_MAX,
@@ -4128,15 +7259,139 @@ async def api_health():
     data["last_liquidation_ts"] = last_event
     data["seconds_since_last_liquidation"] = (round(time.time() - last_event, 1)
                                               if last_event else None)
+    data["circuit_breakers"] = circuit_breaker.snapshot()
+    _HEALTH_CACHE.set("h", data)
     return JSONResponse(data)
+
+
+@app.get("/api/metrics")
+async def api_metrics():
+    """Метрики процесса для мониторинга: сокеты, RPS, задержки, база.
+
+    Скорости — за последнюю минуту. Задержка — p95 времени приложения
+    (до отправки заголовков) по последним 5000 запросам.
+    """
+    _metrics_prune()
+    symbols = list(feed.symbols) if feed else []
+    custom = list(feed.custom_symbols) if feed else []
+    _cstats = (feed.candles_cache_stats() if feed is not None
+               else {"series": 0, "inflight": 0, "cap": 0, "refetch_sec": 0.0})
+    return JSONResponse({
+        "ws_clients_total": len(hub.clients),
+        "ws_max_clients": WS_MAX_CLIENTS,
+        "ws_connects_per_sec": _rate_last_minute(_WS_CONN),
+        "ws_messages_per_sec": _rate_last_minute(_WS_SEND),
+        **_ws_queue_stats(),
+        "http_requests_per_sec": _rate_last_minute(_HTTP_RPS),
+        "http_requests_per_sec_by_status": _status_rps_last_minute(),
+        "http_latency_p95_ms": _latency_p95_ms(),
+        "sqlite_wal_size_bytes": _wal_bytes(),
+        "sqlite_ms": await _sqlite_ping_ms(),
+        "symbols_count": len(symbols),
+        "custom_symbols_count": len(custom),
+        "custom_symbols_cap": market_feed.MAX_CUSTOM_SYMBOLS,
+        "user_symbol_cap": _user_symbol_cap(),
+        # буфер истории свечей: видно, что /api/klines отвечает из памяти,
+        # а на биржу ходит только фоновая загрузка
+        "candles_cached_series": _cstats["series"],
+        "candles_loading": _cstats["inflight"],
+        "candles_cache_cap": _cstats["cap"],
+        "fast_json": FAST_JSON,
+        "rss_bytes": _rss_bytes(),
+        "rss_peak_bytes": _rss_peak_bytes(),
+        # паузы единственного воркера: если клиентский p95 в секундах,
+        # а серверный p95 обработчика единицы мс — запросы стояли в
+        # очереди цикла, пока кто-то держал его занятым
+        "loop_lag_max_ms": _LOOP_LAG["max_ms"],
+        "loop_lag_last_ms": _LOOP_LAG["last_ms"],
+        "loop_stalls": int(_LOOP_LAG["stalls"]),
+        # кто именно держал воркер (LIQSCOPE_LOOP_TRACE=1): стек «изнутри
+        # наружу» — файл:строка:функция; пусто, если трассировка выключена
+        "loop_trace": LOOP_TRACE,
+        "loop_trace_stalls": int(_LOOP_TRACE["stalls"]),
+        "loop_trace_held_ms": _LOOP_TRACE["held_ms"],
+        "loop_trace_last": _LOOP_TRACE["last"],
+        "active_tasks": [[n, round(ms, 1)] for n, ms in active_spans()[:6]],
+        "asyncio_debug": bool(ASYNCIO_DEBUG),
+        # сборка мусора: на большой куче именно она даёт паузы в секундах при
+        # быстром обработчике, а трассировка в это время называет кадр, который
+        # просто аллоцировал память (на бою так «виновником» вышел gzip)
+        "gc_max_ms": _GC_STATS["max_ms"],
+        "gc_last_ms": _GC_STATS["last_ms"],
+        "gc_total_ms": _GC_STATS["total_ms"],
+        "gc_collections": int(_GC_STATS["count"]),
+        "gc_gen2_collections": int(_GC_STATS["gen2"]),
+        "gc_frozen_objects": int(_GC_STATS["frozen"]),
+        # журнал уходит в очередь и пишется в отдельном потоке: если journald
+        # не успевает, теряются записи (счётчик), а не паузы воркера
+        "log_async": _log_listener is not None,
+        "log_queue_size": _LOG_QUEUE.qsize(),
+        "log_queue_max": LOG_QUEUE_MAX,
+        "log_dropped": int(_LOG_STATS["dropped"]),
+        # кэши движка уровней: сколько событий держим в куче и попадают ли
+        # готовые лестницы (промахи — это полный пересчёт на каждый запрос)
+        "levels_events_cache": _levels_cache_stats(),
+        # фон уровней: самый тяжёлый периодический расчёт на сервере. Если
+        # last_pass_ms в тысячах миллисекунд, паузы воркера совпадают с ним, и
+        # проверка проста: LIQSCOPE_LEVELS_BG=0 на один прогон нагрузки
+        "levels_bg": dict(LEVELS_BG),
+        # saturation машины: паузы бывают не от кода, а от нехватки ядер
+        "cpu_count": os.cpu_count() or 0,
+        "load_avg": [round(x, 2) for x in os.getloadavg()]
+        if hasattr(os, "getloadavg") else [],
+        "uptime_sec": round(time.time() - _START_TS, 1),
+    })
+
+
+def _levels_cache_stats() -> Dict[str, object]:
+    """Кэши движка уровней: сколько событий в куче и работают ли попадания.
+
+    ``events`` — память (на большой куче паузы даёт сборщик мусора), а
+    ``payload_hits``/``payload_misses`` — попадает ли кэш готовых лестниц:
+    пока в ключе была цена с точностью до 8 знаков, не попадал никогда.
+    """
+    out: Dict[str, object] = {}
+    try:
+        fn = getattr(LEVELS, "events_cache_stats", None)
+        if callable(fn):
+            out["events_cache"] = dict(fn())
+        fn2 = getattr(LEVELS, "cache_stats", None)
+        if callable(fn2):
+            out["payload_cache"] = dict(fn2())
+        # бюджет пересчётов калибровки: после рестарта кэш калибровок пуст, и
+        # без бюджета первый проход фона платил пересчёт по всем монетам батча
+        fn3 = getattr(LEVELS, "calib_stats", None)
+        if callable(fn3):
+            out["calib_budget"] = dict(fn3())
+        # схлопывание строк перед лестницей: ratio показывает, во сколько раз
+        # меньше строк обходит расчёт
+        fn4 = getattr(LEVELS, "agg_stats", None)
+        if callable(fn4):
+            out["rows_agg"] = dict(fn4())
+    except Exception:                            # noqa: BLE001
+        pass
+    return out
 
 
 @app.websocket("/ws")
 async def ws_endpoint(websocket: WebSocket):
+    # WS-01 (аудит 30.09.2026): проверка Origin до приёма соединения.
+    # Чужой сайт не может держать открытый сокет к терминалу: разрешены
+    # только свои origin (PUBLIC_URL / SITE_URL / LIQSCOPE_CORS_ORIGINS и
+    # локальные стенды). Заголовка нет — клиент не браузер (скрипты, боты):
+    # таких не ограничиваем, у них нет межсайтовых сценариев.
+    _origin = (websocket.headers.get("origin") or "").strip().lower()
+    if _origin:
+        _allowed = {o.rstrip("/").lower() for o in _cors_origins()}
+        if _origin.rstrip("/") not in _allowed:
+            log.warning("ws: отклонено подключение с чужим Origin: %s", _origin)
+            await websocket.close(code=4003, reason="origin not allowed")
+            return
     t_ws0 = time.monotonic() if PERF_LOG else 0.0
     await websocket.accept()
     t_accept = time.monotonic() if PERF_LOG else 0.0
     client = Client(websocket)
+    client.init_pending = True
     if not await hub.add(client):
         await websocket.close(code=1013)
         return
@@ -4160,9 +7415,13 @@ async def ws_endpoint(websocket: WebSocket):
         # Лимит init: раньше 200, теперь 100 — достаточно для ленты, остальное догружается REST
         # Защита от деградации: даже если LIQUIDATIONS 60k, init не разрастается
         _recent_limit = max(20, min(200, int(__import__("os").getenv("LIQSCOPE_WS_INIT_LIQ", "100"))))
-        recent = list(LIQUIDATIONS)[-_recent_limit:]
+        # list(deque) копировал ВСЮ историю (до HISTORY_MAX = 60000 событий)
+        # ради последних ста: на 50 подключениях разом это миллионы скопированных
+        # ссылок в event loop, и сторож называл именно эту строку в окне паузы
+        # (server.py:5527). reversed()+islice берёт ровно нужный хвост.
+        recent = list(islice(reversed(LIQUIDATIONS), _recent_limit))[::-1]
         t_recent = time.monotonic() if PERF_LOG else 0.0
-        stats = compute_stats()
+        stats = await compute_stats_async()
         t_stats = time.monotonic() if PERF_LOG else 0.0
         flow = flow_snapshot()
         t_flow = time.monotonic() if PERF_LOG else 0.0
@@ -4184,7 +7443,9 @@ async def ws_endpoint(websocket: WebSocket):
             "flow": flow,
         }
         t_build = time.monotonic() if PERF_LOG else 0.0
-        await client.send(init_payload)
+        if not await client.send(init_payload):
+            return
+        client.init_pending = False
         t_send = time.monotonic() if PERF_LOG else 0.0
         if PERF_LOG:
             import json as _json
@@ -4253,6 +7514,22 @@ async def ws_endpoint(websocket: WebSocket):
         sync_hot_symbols()
 
 
+async def _screener_file_response(request: Request):
+    user = await asyncio.to_thread(current_user, request)
+    if not user:
+        return RedirectResponse("/login?next=/screener", status_code=303,
+                                headers={"Cache-Control": "private, no-store"})
+    return FileResponse(os.path.join(STATIC_DIR, "screener.html"),
+                        headers={"Cache-Control": "private, no-store"})
+
+
+# The HTML also exists below /static; register this exact path before the
+# StaticFiles mount so it cannot be used to bypass the members-only gate.
+@app.get("/static/screener.html", include_in_schema=False)
+async def protected_screener_asset(request: Request):
+    return await _screener_file_response(request)
+
+
 app.mount("/static", CachedStaticFiles(directory=STATIC_DIR), name="static")
 
 
@@ -4269,6 +7546,11 @@ async def root(request: Request):
         "landing.html", lang, "/", extra_head=seo_pages.jsonld("landing", lang),
         auto=auto,
     )
+
+
+@app.get("/screener")
+async def screener_page(request: Request):
+    return await _screener_file_response(request)
 
 
 @app.get("/terminal")

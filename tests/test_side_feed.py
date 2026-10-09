@@ -27,8 +27,9 @@ HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
 
 import side_feed  # noqa: E402
-from side_feed import (SideFeed, funding_at, parse_funding,  # noqa: E402
-                       parse_global_lsr, parse_taker_ratio)
+from side_feed import (SideFeed, bucket_keys, funding_at,  # noqa: E402
+                       nearest_bucket, parse_funding, parse_global_lsr,
+                       parse_taker_ratio)
 
 TAKER = [
     {"buySellRatio": "1.0", "buyVol": "100", "sellVol": "100",
@@ -220,6 +221,116 @@ class EnsureTest(unittest.TestCase):
         self.assertEqual(session.calls, [])
         st = sf.status()
         self.assertFalse(st["enabled"])
+
+
+def _linear_nearest(rows, ts, tol):
+    """Прежняя реализация в лоб — эталон для проверки бинарного поиска."""
+    if not rows:
+        return None
+    try:
+        want = float(ts)
+    except (TypeError, ValueError):
+        return None
+    best, best_gap, best_key = None, None, None
+    for b, row in rows.items():
+        share = row.get("buy_share") if isinstance(row, dict) else row
+        if share is None:
+            continue
+        gap = abs(float(b) + 150.0 - want)
+        if best_gap is None or gap <= best_gap:
+            best, best_gap, best_key = share, gap, float(b)
+    if best_gap is not None and best_gap <= float(tol):
+        return best
+    return None
+
+
+class NearestBucketSearchTest(unittest.TestCase):
+    """Поиск ближайшего слота: бинарный вместо перебора, семантика та же.
+
+    ``build_rows`` зовёт ``side_at`` на каждую точку OI (30 дней окна по
+    5-минуткам — тысячи точек), а прежний ``nearest_bucket`` перебирал весь ряд
+    на каждый вызов: O(N·M) и пауза воркера 652 мс на бою.
+    """
+
+    def _rows(self, n, step=300, start=1_700_000_000, holes=()):
+        rows = {}
+        for i in range(n):
+            b = start + i * step
+            if i in holes:
+                rows[b] = {"buy_share": None}      # слот без доли — пропускается
+            else:
+                rows[b] = {"buy_share": round(0.3 + (i % 5) * 0.1, 3),
+                           "ratio": 1.0 + i}
+        return rows
+
+    def test_matches_linear_scan_on_regular_series(self):
+        rows = self._rows(200)
+        keys = bucket_keys(rows)
+        start = 1_700_000_000
+        for probe in range(start - 900, start + 200 * 300 + 900, 37):
+            with self.subTest(probe=probe):
+                self.assertEqual(nearest_bucket(rows, probe, keys=keys),
+                                 _linear_nearest(rows, probe, side_feed.TAKER_TOL_SEC))
+
+    def test_matches_linear_scan_with_holes_and_gaps(self):
+        rows = self._rows(120, holes={0, 1, 5, 6, 7, 40, 119})
+        for b in list(rows)[10:20]:
+            del rows[b]                            # дыры в середине ряда
+        keys = bucket_keys(rows)
+        start = 1_700_000_000
+        for probe in range(start, start + 120 * 300, 53):
+            self.assertEqual(nearest_bucket(rows, probe, keys=keys),
+                             _linear_nearest(rows, probe, side_feed.TAKER_TOL_SEC),
+                             f"расхождение на {probe}")
+
+    def test_outside_tolerance_is_none(self):
+        rows = self._rows(10)
+        far = 1_700_000_000 + 10 * 300 + 10 ** 6
+        self.assertIsNone(nearest_bucket(rows, far))
+        self.assertIsNone(nearest_bucket(rows, 1_600_000_000))
+
+    def test_ties_prefer_fresher_slot(self):
+        # середина между двумя слотами: разрыв равен, берём более свежий
+        rows = {1_000: {"buy_share": 0.2}, 1_300: {"buy_share": 0.9}}
+        mid = 1_000 + 150 + 150          # ровно между серединами слотов
+        self.assertEqual(nearest_bucket(rows, mid), 0.9)
+
+    def test_bad_input_is_survivable(self):
+        self.assertIsNone(nearest_bucket({}, 123))
+        self.assertIsNone(nearest_bucket({100: {"buy_share": 0.5}}, "мусор"))
+        self.assertIsNone(nearest_bucket({100: {"buy_share": None}}, 250))
+
+    def test_no_quadratic_blowup_on_big_series(self):
+        """30 дней 5-минуток: 8640 слотов × 8640 точек не должны считаться вечно."""
+        rows = self._rows(8640)
+        keys = bucket_keys(rows)
+        probes = [1_700_000_000 + i * 300 + 120 for i in range(8640)]
+        t0 = time.perf_counter()
+        got = sum(1 for p in probes
+                  if nearest_bucket(rows, p, keys=keys) is not None)
+        dt = time.perf_counter() - t0
+        self.assertEqual(got, 8640)
+        self.assertLess(dt, 2.0,
+                        f"8640 обращений к ряду считались {dt:.1f} с — "
+                        "похоже, перебор вернулся")
+
+    def test_sidefeed_caches_sorted_keys_and_invalidates(self):
+        feed = SideFeed(enabled=True)
+        rows = self._rows(50)
+        feed._taker["BTC_USDT"] = rows
+        k1 = feed._keys_of(feed._taker, feed._taker_keys, "BTC_USDT")
+        k2 = feed._keys_of(feed._taker, feed._taker_keys, "BTC_USDT")
+        self.assertIs(k1, k2, "ряд сортируется заново на каждый вызов")
+        feed._taker["BTC_USDT"] = self._rows(60)     # загрузка заменила ряд
+        k3 = feed._keys_of(feed._taker, feed._taker_keys, "BTC_USDT")
+        self.assertIsNot(k1, k3, "кэш ключей пережил замену ряда")
+        self.assertEqual(len(k3), 60)
+        self.assertEqual(feed.taker_share_at("BTC_USDT", k3[10] + 150),
+                         rows_value(feed._taker["BTC_USDT"], k3[10]))
+
+
+def rows_value(rows, begin):
+    return rows.get(int(begin), rows.get(begin, {})).get("buy_share")
 
 
 if __name__ == "__main__":

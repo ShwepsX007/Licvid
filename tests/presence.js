@@ -95,6 +95,12 @@ async function open(path) {
         if (body && typeof body.text === "function") {
           entry.blob = body;
           body.text().then((t) => { entry.text = String(t); }).catch(() => {});
+        } else if (body instanceof win.Blob && win.FileReader) {
+          // jsdom 26 Blob не реализует .text(), но FileReader читает его.
+          entry.blob = body;
+          const reader = new win.FileReader();
+          reader.onload = () => { entry.text = String(reader.result || ""); };
+          reader.readAsText(body);
         } else {
           entry.text = String(body);
         }

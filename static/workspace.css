@@ -144,41 +144,22 @@ body.workspace-active #workspace-host {
   resize: none !important;
 }
 
-/* Hide single-chart UI when workspace active */
-body.workspace-active .chart-stack {
-  display: none !important;
-}
+/* Режим, который прятал сингл-график под мультичартом, выключен.
+   Даже если класс остался от старой сессии — график на месте. */
+body.workspace-active .chart-stack,
 body.workspace-active .chart-section > .chart-header {
-  display: none !important;
+  display: flex !important;
 }
-body.workspace-active .ad-host {
+body.workspace-active #workspace-host {
   display: none !important;
 }
 body.workspace-single-mode .ad-host {
   display: none !important;
 }
+/* Старая плавающая кнопка больше не используется: она перекрывала шапку.
+   Если осталась в DOM от прошлой сессии — не показываем. */
 .ws-global-toggle {
-  position: absolute;
-  top: 6px;
-  right: 80px;
-  z-index: 100;
-  background: #151d2b;
-  border: 1px solid #233044;
-  color: #a8bdd6;
-  border-radius: 6px;
-  padding: 4px 10px;
-  font-size: 11px;
-  cursor: pointer;
-  pointer-events: auto;
-}
-.ws-global-toggle:hover {
-  background: #1d2a3d;
-  color: #d6e6f5;
-}
-body.workspace-active .ws-global-toggle {
-  background: #1e3a5f;
-  border-color: #2a5a9a;
-  color: #cfe3ff;
+  display: none !important;
 }
 
 /* Chart panel — resizable */
@@ -358,6 +339,546 @@ body.workspace-active .ws-global-toggle {
   .workspace-toolbar .ws-hint { display: none; }
 }
 
+/* Несколько сингл-графиков в сетке терминала */
+.chart-tear,
+.chart-slot-grip {
+  flex: 0 0 auto;
+  align-self: center;
+  cursor: grab;
+  color: #9fb2c8;
+  background: #121b2b;
+  border: 1px dashed #31465f;
+  border-radius: 5px;
+  padding: 2px 6px;
+  font-size: 13px;
+  line-height: 1.2;
+  user-select: none;
+  touch-action: none;
+}
+.chart-tear:hover,
+.chart-slot-grip:hover { color: #e7f0fa; border-color: #3d70ff; }
+.chart-tear:active,
+.chart-slot-grip:active { cursor: grabbing; }
+.chart-tear-back,
+.chart-slot-dock,
+.chart-slot-float,
+.chart-slot-close {
+  flex: 0 0 auto;
+  background: #151d2b;
+  border: 1px solid #233044;
+  color: #c5d6ea;
+  border-radius: 5px;
+  padding: 2px 8px;
+  font-size: 11px;
+  line-height: 1.3;
+  cursor: pointer;
+}
+.chart-tear-back:hover,
+.chart-slot-dock:hover,
+.chart-slot-float:hover { border-color: #3d70ff; color: #fff; }
+.chart-slot-close:hover { border-color: #7a2a3a; color: #ffb3c0; }
+.chart-tear-back[hidden],
+.chart-slot-dock[hidden],
+.chart-slot-float[hidden] { display: none !important; }
+
+.chart-section.has-chart-dock {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+.chart-section.has-chart-dock > #workspace-host { display: none !important; }
+.chart-section.has-chart-dock #add-chart-btn { display: none !important; }
+.chart-dock-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: 100%;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+.chart-dock-tools {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 6px 8px 0;
+  flex-shrink: 0;
+  min-width: 0;
+}
+.chart-dock-modes,
+.chart-dock-gridctl {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.chart-dock-wrap.view-tabs .chart-dock-gridctl { display: none; }
+.chart-dock-add { margin-left: 2px; }
+.chart-dock-tabs {
+  display: none;
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 4px;
+  overflow-x: auto;
+  align-items: flex-end;
+}
+.chart-dock-wrap.view-tabs .chart-dock-tabs { display: flex; }
+.chart-dock-tools .chart-dock-tab,
+.chart-dock-tools .chart-dock-tab-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 240px;
+  background: #121a28;
+  border: 1px solid #233044;
+  color: #9fb0c4;
+  border-radius: 6px 6px 0 0;
+  padding: 5px 8px;
+  font-size: 12px;
+  line-height: 1.2;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.chart-dock-tools .chart-dock-tab.is-on,
+.chart-dock-tools .chart-dock-tab.is-on:hover {
+  background: #1a2740;
+  color: #fff;
+  border-color: #3d70ff;
+}
+.chart-dock-tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chart-dock-tab-x {
+  color: #8ea3bb;
+  font-size: 11px;
+  padding: 0 2px;
+}
+.chart-dock-tab-x:hover { color: #fff; }
+.chart-dock-tab-add {
+  padding: 5px 10px;
+  color: #d5e4f5;
+}
+.chart-dock-wrap.view-tabs .chart-slot-bar { display: none; }
+.chart-dock-wrap.view-tabs .chart-dock {
+  display: block;
+  padding: 0;
+  gap: 0;
+}
+.chart-dock-wrap.view-tabs .chart-slot {
+  display: none;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+}
+.chart-dock-wrap.view-tabs .chart-slot.is-tab-on { display: flex; }
+.is-fullscreen,
+.chart-slot.is-slot-fs,
+.chart-split-cell > .chart-slot.is-slot-fs,
+.chart-split-cell > .chart-slot.is-fullscreen {
+  position: fixed !important;
+  top: 0 !important;
+  left: 0 !important;
+  right: 0 !important;
+  bottom: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  height: 100dvh !important;
+  z-index: 9999 !important;
+  margin: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  max-width: none !important;
+  max-height: none !important;
+}
+/* Убедиться, что шапка графика всегда поверх всего */
+.is-fullscreen .chart-header,
+.chart-slot.is-slot-fs .chart-header {
+  z-index: 10000 !important;
+}
+.chart-dock-wrap.view-tabs .chart-slot.is-slot-fs,
+.chart-dock-wrap.view-tabs .chart-slot.is-fullscreen { display: flex !important; }
+body.chart-slot-fs { overflow: hidden; }
+.chart-dock-tools {
+  position: relative;
+  z-index: 50;
+}
+.chart-dock-tools > span,
+.chart-dock-gridctl > span {
+  font-size: 11px;
+  color: #8ea3bb;
+  margin-right: 4px;
+}
+.chart-dock-modes button,
+.chart-dock-gridctl button,
+.chart-dock-add,
+.chart-dock-tabs button {
+  background: #151d2b;
+  border: 1px solid #233044;
+  color: #c5d6ea;
+  border-radius: 5px;
+  padding: 3px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.chart-dock-modes button.active,
+.chart-dock-modes button:hover,
+.chart-dock-gridctl button.active,
+.chart-dock-gridctl button:hover,
+.chart-dock-add:hover,
+.chart-dock-tabs button:hover {
+  border-color: #3d70ff;
+  color: #fff;
+}
+.chart-dock-tools .controls-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  background: transparent;
+  border: 0;
+  padding: 0 4px;
+  flex-wrap: wrap;
+}
+.chart-dock {
+  min-height: 0;
+  height: 100%;
+  display: grid;
+  gap: 8px;
+  padding: 8px;
+  overflow: hidden;
+  align-content: stretch;
+}
+.chart-dock.is-split {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 6px;
+}
+.chart-split-row {
+  display: flex;
+  flex-direction: row;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 0;
+}
+.chart-split-cell {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex: 1 1 0;
+}
+.chart-split-cell > .chart-slot {
+  position: absolute;
+  inset: 0;
+  width: auto;
+  height: auto;
+}
+.chart-split-v,
+.chart-split-h {
+  flex: 0 0 12px;
+  position: relative;
+  z-index: 4;
+  touch-action: none;
+  background: transparent;
+}
+.chart-split-v { cursor: col-resize; }
+.chart-split-h { cursor: row-resize; }
+.chart-split-v::after,
+.chart-split-h::after {
+  content: "";
+  position: absolute;
+  background: #31465f;
+  border-radius: 2px;
+}
+.chart-split-v::after { left: 5px; top: 8px; bottom: 8px; width: 2px; }
+.chart-split-h::after { top: 5px; left: 8px; right: 8px; height: 2px; }
+.chart-split-v:hover,
+.chart-split-h:hover { background: rgba(61, 112, 255, 0.16); }
+.chart-split-v:hover::after,
+.chart-split-h:hover::after { background: #3d70ff; }
+.chart-dock.cols-1 { grid-template-columns: 1fr; grid-auto-rows: minmax(0, 1fr); }
+.chart-dock.cols-2 { grid-template-columns: 1fr 1fr; grid-auto-rows: minmax(0, 1fr); }
+.chart-dock.cols-4 { grid-template-columns: 1fr 1fr; grid-auto-rows: minmax(0, 1fr); }
+.chart-dock.cols-3 { grid-template-columns: 1fr 1fr; grid-auto-rows: minmax(0, 1fr); }
+/* ×3: два сверху, последний на всю ширину снизу */
+.chart-dock.cols-3 > .chart-slot:last-child:nth-child(3) { grid-column: 1 / -1; }
+.chart-dock > .chart-slot:only-child { grid-column: 1 / -1; }
+body.chart-dock-pop-ready,
+body.chart-dock-pop-ready * { cursor: alias; }
+.chart-dock.is-drop {
+  outline: 1px dashed #3d70ff;
+  outline-offset: -4px;
+  background: rgba(61, 112, 255, 0.06);
+}
+.chart-slot {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: #0a0f19;
+  border: 1px solid #1c2533;
+  border-radius: 8px;
+  overflow: hidden;
+  position: relative;
+}
+.chart-slot.is-active {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.45);
+}
+.chart-slot.is-drop-target {
+  outline: 2px solid #3d70ff;
+  outline-offset: -3px;
+}
+.chart-slot-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: #0f1725;
+  border-bottom: 1px solid #1c2533;
+  flex-shrink: 0;
+}
+.chart-slot-title {
+  font-size: 12px;
+  color: #d5e4f5;
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chart-slot-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.chart-slot-body > .chart-header { flex: 0 0 auto; }
+.chart-slot-body > .chart-stack,
+.chart-slot-body > .chart-stack > .chart-wrapper {
+  flex: 1 1 auto;
+  height: 100%;
+  min-height: 0;
+}
+.chart-slot-frame-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+}
+.chart-slot-frame {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  display: block;
+  background: #090c10;
+}
+.chart-slot-move {
+  flex: 0 0 auto;
+  background: #151d2b;
+  border: 1px solid #233044;
+  color: #c5d6ea;
+  border-radius: 5px;
+  padding: 2px 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.chart-slot-move:hover { border-color: #3d70ff; color: #fff; }
+.chart-slot-popnote {
+  position: absolute;
+  inset: 36px 10px 10px;
+  display: none;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 10px;
+  color: #c5d6ea;
+  font-size: 13px;
+  z-index: 3;
+}
+.chart-slot.is-popped .chart-slot-popnote { display: flex; }
+.chart-slot.is-popped .chart-slot-frame-wrap,
+.chart-slot.is-popped .chart-slot-body { visibility: hidden; }
+.chart-slot.chart-floating {
+  position: fixed;
+  z-index: 70;
+  width: 760px;
+  height: 540px;
+  min-width: 380px;
+  min-height: 280px;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  box-shadow: 0 22px 60px rgba(0, 0, 0, 0.55);
+  resize: both;
+}
+.chart-dock-placeholder {
+  flex: 1 1 100%;
+  min-height: 180px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 10px;
+  padding: 18px;
+  color: #9fb0c4;
+  font-size: 13px;
+}
+body.chart-dock-dragging { user-select: none; cursor: grabbing; }
+body.chart-dock-dragging iframe { pointer-events: none; }
+
+body.chart-embed .top-nav,
+body.chart-embed .feed-section,
+body.chart-embed .splitter,
+body.chart-embed .ad-host,
+body.chart-embed #terminal-chat,
+body.chart-embed #workspace-host,
+body.chart-embed #add-chart-btn,
+body.chart-embed #chart-tear,
+body.chart-embed #chart-tear-back,
+body.chart-embed .controls-bar {
+  display: none !important;
+}
+/* Глобальная панель инструментов (Очистить / таймфреймы / мин.объём / биржа)
+   полностью скрыта внутри встроенных графиков во всех режимах — и в сетке,
+   и во «Вкладках» (раньше там она дублировалась через chart-embed-full).
+   Управление каждого графика живёт в его собственном заголовке: монета —
+   выпадающий список, таймфрейм — селектор #chart-header-tf. */
+body.chart-embed .controls-bar,
+body.chart-embed.chart-embed-full .controls-bar,
+body.embed-mode .controls-bar {
+  display: none !important;
+}
+body.chart-tab-embed #tf-buttons {
+  opacity: 0.4;
+  pointer-events: none;
+}
+.chart-slot-tf {
+  margin-left: auto;
+  background: #121d2f;
+  border: 1px solid #22314a;
+  color: #d5e4f5;
+  border-radius: 5px;
+  padding: 2px 4px;
+  font-size: 11px;
+}
+/* Компактный селектор таймфрейма в заголовке графика (#chart-header-tf):
+   каждый график — и нативный, и встроенный — переключает свой ТФ здесь. */
+.chart-header-tf {
+  margin-left: 8px;
+  background: #121d2f;
+  border: 1px solid #22314a;
+  color: #d5e4f5;
+  border-radius: 5px;
+  padding: 2px 6px;
+  font-size: 12px;
+  line-height: 1.2;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.chart-header-tf:hover,
+.chart-header-tf:focus-visible {
+  border-color: #2f4468;
+  outline: none;
+}
+/* Встроенный сингл-чарт заполняет iframe целиком. Узкое окно иначе
+   попадает под мобильные 58vh, и снизу остаётся пустое поле. */
+html:has(body.chart-embed),
+body.chart-embed {
+  height: 100% !important;
+  overflow: hidden !important;
+}
+body.chart-embed .main-layout {
+  flex: 1 1 auto !important;
+  height: auto !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+  flex-direction: row !important;
+}
+body.chart-embed .chart-section {
+  height: 100% !important;
+  min-height: 0 !important;
+  flex: 1 1 auto !important;
+}
+body.chart-embed .chart-stack,
+body.chart-embed .chart-stack > .chart-wrapper,
+body.chart-embed #tv-chart-container {
+  flex: 1 1 auto !important;
+  height: 100% !important;
+  min-height: 0 !important;
+}
+body.chart-embed-pop .chart-pop-back {
+  position: fixed;
+  top: 8px;
+  right: 8px;
+  z-index: 400;
+}
+
+@media (max-width: 900px) {
+  .chart-dock.cols-2,
+  .chart-dock.cols-3,
+  .chart-dock.cols-4 { grid-template-columns: 1fr; }
+  .chart-dock.cols-3 > .chart-slot:last-child:nth-child(3) { grid-column: auto; }
+  .chart-slot.chart-floating {
+    width: calc(100vw - 12px);
+    height: 70vh;
+  }
+  /* Телефон: мультиэкран выключен (см. body.dock-mobile ниже), док тут
+     появляется только если пользователь сузил широкое окно — тогда страница
+     скроллится, а каждый слот держит свою высоту (60vh, но не меньше 400px),
+     иначе строки 1fr от неопределённой высоты схлопываются в ноль вместе с
+     графиками (iframe внутри абсолютно спозиционирован и высоты не даёт). */
+  .chart-section.has-chart-dock { height: auto; }
+  .chart-dock-wrap { height: auto; }
+  .chart-dock { height: auto; }
+  .chart-dock-tools { flex-wrap: wrap; row-gap: 6px; }
+  /* Мультиэкран на телефоне выключен: chart_dock.js до 900px дока не строит
+     (слоты схлопывались, iframe оставался без высоты — графики пропадали).
+     Остаётся один родный график, поэтому кнопки «＋ График» и отрыва окна
+     на телефоне не показываем. На широком экране дока нет — правила молчат. */
+  body.dock-mobile #add-chart-btn,
+  body.dock-mobile #chart-tear,
+  body.dock-mobile #chart-tear-back { display: none !important; }
+  /* Телефон: заголовок графика (пара + легенда слоёв) на узком экране
+     переносится на несколько строк и съедает половину секции, а секции был
+     задан фиксированный 52–58vh с overflow:hidden — стек графика уезжал под
+     обрез, и вместо графика было пустое место (ни сетки, ни свечей).
+     Высоту отдаём содержимому: заголовок + график. График держит свои 340px
+     и забирает остаток 58vh, когда заголовок короткий; страница скроллится.
+     ⛶ (.chart-section.fullscreen) и сворачивание (▾) задают высоту сами. */
+  .chart-section { height: auto; min-height: 58vh; }
+  .chart-stack { min-height: 340px; }
+  .chart-dock > .chart-slot:not(.is-slot-fs):not(.chart-floating),
+  .chart-dock-wrap.view-tabs .chart-slot:not(.is-slot-fs):not(.chart-floating) {
+    height: 60vh;
+    min-height: 400px;
+  }
+  /* Сплит: строки — друг под другом, ячейки — в столбик на всю ширину
+     (бок о бок на телефоне не читаются); вертикальные разделители прячем.
+     min-height через max(): инлайн flex-basis:0 перебивает height, а
+     min-height — нет, поэтому высота задана именно им. */
+  .chart-dock.is-split .chart-split-row { flex-direction: column; gap: 8px; }
+  .chart-dock.is-split .chart-split-v { display: none; }
+  .chart-dock.is-split .chart-split-cell {
+    width: 100%;
+    min-height: max(60vh, 400px);
+  }
+}
+
+/* Страховка от чёрных/схлопнувшихся графиков на телефоне (кейс 28.09):
+   видимый слот вкладок и рамка iframe всегда держат высоту, даже если
+   класс вида потерялся; многоколоночная сетка сведена к одной выше.
+   Высоту держит .chart-slot-frame-wrap (flex:1 1 auto над абсолютным
+   iframe): 320px — запас на строку слота, чтобы 400px не обрезались.
+   Десктоп (>900px) не трогаем. */
+@media (max-width: 900px) {
+  .chart-dock-wrap .chart-slot.is-tab-on { min-height: 400px; }
+  .chart-slot-frame-wrap { min-height: 320px; }
+  .chart-slot-frame { width: 100%; height: 100%; }
+}
+
 /* Panel mode (detached window) */
 body.panel-mode .top-nav,
 body.panel-mode .filters,
@@ -398,4 +919,33 @@ body.panel-mode .chart-panel {
 body.panel-mode .panel-chart-wrap {
   flex: 1;
   height: auto;
+}
+
+/* --- Лёгкий встроенный график (режим embed=1, класс embed-mode) -------------
+   Один сокет на окно: встроенные окна не грузят чат, ленту ликвидаций,
+   стакан и виджеты кабинета — всё это остаётся в родительском терминале.
+   Существующие правила body.chart-embed уже прячут ленту и чат; здесь —
+   страховка по отдельным блокам и их алиасам. .controls-bar тоже скрыта:
+   управление графиком вынесено в его собственный заголовок. */
+body.embed-mode .chat-panel,
+body.embed-mode .liq-feed,
+body.embed-mode .tchat,
+body.embed-mode #terminal-chat,
+body.embed-mode #tchat-panel,
+body.embed-mode .tchat-panel,
+body.embed-mode .feed-section,
+body.embed-mode .book-board,
+body.embed-mode #book-panel,
+body.embed-mode #workspace-host,
+body.embed-mode .ad-host,
+body.embed-mode .top-nav,
+body.embed-mode .splitter,
+body.embed-mode #add-chart-btn,
+body.embed-mode #chart-tear,
+body.embed-mode #chart-tear-back {
+  display: none !important;
+}
+/* Скрытые блоки не должны оставлять пустые отступы и рамки. */
+body.embed-mode .main-layout {
+  gap: 0 !important;
 }

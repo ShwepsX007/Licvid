@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<meta name="theme-color" content="#0b1020">
+<meta name="description" content="Whale Screener — live large-transfer and Hyperliquid market activity dashboard.">
+<title data-i18n="screener.title">Whale Screener — LiqScope</title>
+<link rel="icon" href="/static/favicon.ico">
+<link rel="stylesheet" href="/static/brand.css?v=rebrand1">
+<link rel="stylesheet" href="/static/screener.css?v=venueflow3">
+</head>
+<body class="dark-theme screener-page">
+<header class="site-header">
+    <a class="brand" href="/" data-i18n-title="brand.home_title" title="LiqScope — главная">
+        <img class="logo" src="/static/logo.png" alt="LiqScope" width="40" height="40" loading="eager">
+        <span class="brand-title">LIQSCOPE</span>
+        <span class="brand-badge" data-i18n="screener.brand_badge">WHALE SCREENER</span>
+    </a>
+    <nav class="site-nav" aria-label="Site navigation">
+        <a href="/terminal" data-i18n="hour.to_terminal">⚡ Терминал</a>
+        <a href="/digest" data-i18n="hour.digest">📰 Дайджест</a>
+        <a href="/hourly" data-i18n="hour.title">🕘 Часовые сводки</a>
+        <a href="/articles" data-i18n="art.title">📄 Статьи</a>
+        <a href="/screener" class="active" data-i18n="screener.nav">🐋 Whale Screener</a>
+        <select id="lang-select" class="lang-select" data-lang-select aria-label="Язык" title="Язык"></select>
+        <span id="nav-account"></span>
+    </nav>
+</header>
+
+<main class="screener-wrap">
+    <section class="screener-hero" aria-labelledby="page-title">
+        <div class="hero-copy">
+            <div class="eyebrow" data-i18n="screener.eyebrow">ON-CHAIN FLOW MONITOR</div>
+            <h1 id="page-title" data-i18n="screener.heading">Whale Screener</h1>
+            <p data-i18n="screener.lead">Track major crypto transfers and Hyperliquid market activity in one place.</p>
+        </div>
+        <div id="screener-live-status" class="live-status status--waiting" role="status" aria-live="polite">
+            <span class="live-dot" aria-hidden="true"></span>
+            <span id="screener-live-label" data-i18n="screener.connecting">Connecting…</span>
+        </div>
+    </section>
+
+    <section class="overview-grid" aria-label="24-hour overview">
+        <article class="overview-card">
+            <span class="overview-label" data-i18n="screener.total_events">Events · 24h</span>
+            <strong id="overview-events" class="overview-value">—</strong>
+            <span class="overview-foot" data-i18n="screener.all_networks">Across all networks</span>
+        </article>
+        <article class="overview-card overview-card--accent">
+            <span class="overview-label" data-i18n="screener.total_volume">Volume · 24h</span>
+            <strong id="overview-volume" class="overview-value">—</strong>
+            <span class="overview-foot" data-i18n="screener.usd_notional">USD notional</span>
+        </article>
+        <article class="overview-card">
+            <span class="overview-label" data-i18n="screener.active_networks">Online networks</span>
+            <strong id="overview-online" class="overview-value">—</strong>
+            <span class="overview-foot" data-i18n="screener.eight_networks">Eight monitored networks</span>
+        </article>
+    </section>
+
+    <section class="panel network-panel" aria-labelledby="networks-title">
+        <div class="section-heading">
+            <div>
+                <div class="eyebrow" data-i18n="screener.overview">OVERVIEW</div>
+                <h2 id="networks-title" data-i18n="screener.networks_title">Network activity</h2>
+            </div>
+            <span id="screener-updated" class="muted"></span>
+        </div>
+        <div id="network-cards" class="network-grid" aria-live="polite"></div>
+        <nav id="network-tabs" class="network-tabs" aria-label="Network filter"></nav>
+    </section>
+
+    <section class="activity-grid" aria-label="Flow analytics">
+        <article class="panel chart-panel" aria-labelledby="flow-title">
+            <div class="section-heading chart-heading">
+                <div>
+                    <div class="eyebrow" data-i18n="screener.last_24_hours">LAST 24 HOURS</div>
+                    <h2 id="flow-title" data-i18n="screener.flow_title">Transfer flow</h2>
+                </div>
+                <div id="chart-legend" class="chart-legend"></div>
+            </div>
+            <div class="chart-frame">
+                <svg id="flow-chart" viewBox="0 0 960 288" role="img" aria-label="24-hour inflow and outflow chart"></svg>
+            </div>
+            <div id="chart-empty" class="chart-empty" hidden data-i18n="screener.chart_empty">No activity to chart yet.</div>
+        </article>
+
+        <article class="panel exchange-panel" aria-labelledby="exchange-title">
+            <div class="section-heading">
+                <div>
+                    <div class="eyebrow" data-i18n="screener.venues">VENUES</div>
+                    <h2 id="exchange-title" data-i18n="screener.top_exchanges">Top exchanges</h2>
+                </div>
+                <span class="period-pill" data-i18n="screener.period_24h">24h</span>
+            </div>
+            <div id="exchange-list" class="exchange-list" aria-live="polite"></div>
+            <p id="exchange-empty" class="empty-note" hidden data-i18n="screener.exchange_empty">No labeled exchange activity in this period.</p>
+        </article>
+    </section>
+
+    <section class="panel venue-flow-panel" aria-labelledby="venue-flow-title">
+        <div class="section-heading">
+            <div>
+                <div class="eyebrow" data-i18n="screener.venue_flow_eyebrow">EXCHANGE FLOWS</div>
+                <h2 id="venue-flow-title" data-i18n="screener.venue_flow_title">Flows by exchange · 24h</h2>
+            </div>
+            <span class="period-pill" data-i18n="screener.period_24h">24h</span>
+        </div>
+        <p class="venue-flow-hint muted" data-i18n="screener.net_flow_hint">The line is the cumulative flow over 24h: inflow lifts it, outflow lowers it. Green — coins arrive on the exchange, red — leave it.</p>
+        <div id="venue-charts" class="venue-grid" aria-live="polite"></div>
+    </section>
+
+    <section class="panel feed-panel" aria-labelledby="feed-title">
+        <div class="section-heading feed-heading">
+            <div>
+                <div class="eyebrow" data-i18n="screener.live_activity">LIVE ACTIVITY</div>
+                <h2 id="feed-title" data-i18n="screener.live_feed">Live whale feed</h2>
+            </div>
+            <span class="live-pill"><span class="live-dot" aria-hidden="true"></span><span data-i18n="screener.live">LIVE</span></span>
+        </div>
+        <div class="dual-feed-grid">
+            <article class="feed-column" aria-labelledby="general-feed-title">
+                <div class="feed-column-heading">
+                    <h3 id="general-feed-title" data-i18n="screener.general_feed_title">EVM · Solana · Tron</h3>
+                    <span id="feed-count" class="filter-count"></span>
+                </div>
+                <div class="filter-bar" aria-label="General feed filters">
+                    <label><span data-i18n="screener.filter_amount">Minimum amount</span>
+                        <select id="whale-min">
+                            <option value="50000">$50K+</option>
+                            <option value="100000" selected>$100K+</option>
+                            <option value="500000">$500K+</option>
+                            <option value="1000000">$1M+</option>
+                        </select>
+                    </label>
+                    <label><span data-i18n="screener.filter_network">Network</span><select id="whale-chain"></select></label>
+                    <label><span data-i18n="screener.filter_direction">Direction</span>
+                        <select id="whale-direction">
+                            <option value="ALL" data-i18n="screener.direction_all">All directions</option>
+                            <option value="inflow" data-i18n="screener.direction_inflow">Exchange inflow</option>
+                            <option value="outflow" data-i18n="screener.direction_outflow">Exchange outflow</option>
+                            <option value="trade" data-i18n="screener.direction_trade">Trade</option>
+                            <option value="transfer" data-i18n="screener.direction_transfer">Transfer</option>
+                        </select>
+                    </label>
+                    <label><span data-i18n="screener.filter_exchange">Exchange</span><select id="whale-exchange"></select></label>
+                </div>
+                <div id="screener-events" class="event-list" role="region" aria-labelledby="general-feed-title" tabindex="0" aria-live="polite"></div>
+                <div id="feed-empty" class="empty-state" hidden data-i18n="screener.feed_empty">No events match these filters.</div>
+                <div id="feed-error" class="inline-error" role="status" hidden></div>
+            </article>
+            <article class="feed-column feed-column--hl" aria-labelledby="hl-feed-title">
+                <div class="feed-column-heading">
+                    <h3 id="hl-feed-title" data-i18n="screener.hyperliquid_feed_title">Hyperliquid · Native API</h3>
+                    <span id="hl-feed-count" class="filter-count"></span>
+                </div>
+                <div class="filter-bar filter-bar--hl" aria-label="Hyperliquid feed filters">
+                    <label><span data-i18n="screener.filter_amount">Minimum amount</span>
+                        <select id="hl-min">
+                            <option value="50000">$50K+</option>
+                            <option value="100000" selected>$100K+</option>
+                            <option value="500000">$500K+</option>
+                            <option value="1000000">$1M+</option>
+                        </select>
+                    </label>
+                    <label><span data-i18n="screener.filter_direction">Direction</span>
+                        <select id="hl-direction">
+                            <option value="ALL" data-i18n="screener.direction_all">All directions</option>
+                            <option value="BUY" data-i18n="screener.hl_buy">Buy</option>
+                            <option value="SELL" data-i18n="screener.hl_sell">Sell</option>
+                        </select>
+                    </label>
+                </div>
+                <div id="hl-screener-events" class="event-list" role="region" aria-labelledby="hl-feed-title" tabindex="0" aria-live="polite"></div>
+                <div id="hl-feed-empty" class="empty-state" hidden data-i18n="screener.hl_feed_empty">No Hyperliquid trades match these filters.</div>
+            </article>
+        </div>
+    </section>
+
+    <section class="panel history-panel" aria-labelledby="history-title">
+        <div class="section-heading history-heading">
+            <div>
+                <div class="eyebrow" data-i18n="screener.history_period">SEVEN-DAY WINDOW</div>
+                <h2 id="history-title" data-i18n="screener.history_title">Event history</h2>
+            </div>
+            <button id="history-export" class="btn btn-ghost btn-compact export-button" type="button">
+                <span aria-hidden="true">↧</span> <span data-i18n="screener.export_csv">Export CSV</span>
+            </button>
+        </div>
+        <div class="history-summary">
+            <span id="history-count" class="muted"></span>
+            <span id="history-page-label" class="muted"></span>
+        </div>
+        <div class="table-scroll">
+            <table class="history-table">
+                <thead><tr>
+                    <th><button type="button" data-sort="timestamp" data-i18n="screener.col_time">Time</button></th>
+                    <th><button type="button" data-sort="chain" data-i18n="screener.col_network">Network</button></th>
+                    <th data-i18n="screener.col_direction">Direction</th>
+                    <th data-i18n="screener.col_asset">Asset</th>
+                    <th><button type="button" data-sort="usd" data-i18n="screener.col_value">USD value</button></th>
+                    <th data-i18n="screener.col_exchange">Exchange</th>
+                    <th data-i18n="screener.col_transaction">Transaction</th>
+                </tr></thead>
+                <tbody id="history-rows"></tbody>
+            </table>
+            <div id="history-empty" class="empty-state" hidden data-i18n="screener.history_empty">No history matches these filters.</div>
+        </div>
+        <div class="pagination">
+            <button id="history-prev" class="btn btn-ghost btn-compact" type="button" data-i18n="screener.previous">Previous</button>
+            <button id="history-next" class="btn btn-ghost btn-compact" type="button" data-i18n="screener.next">Next</button>
+        </div>
+    </section>
+</main>
+
+<script src="/static/i18n.pages.js?v=venueflow3" defer></script>
+<script src="/static/i18n.js?v=venueflow3" defer></script>
+<script src="/static/account.js?v=nav5" defer></script>
+<script src="/static/donate.js?v=nav1" defer></script>
+<script src="/static/screener.js?v=venueflow3" defer></script>
+</body>
+</html>

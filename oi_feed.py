@@ -27,6 +27,8 @@ from typing import (Awaitable, Callable, Deque, Dict, Iterable, List,
 
 import aiohttp
 
+from circuit_breaker import protect_url
+
 log = logging.getLogger("liqscope.oi")
 
 # Окна изменений для боксов шапки: ключ -> секунд. m1 считается по живым
@@ -280,20 +282,22 @@ def map_candles_to_oi(candle_times: List[int], tf_min: int,
 async def _get_json(session: aiohttp.ClientSession, url: str,
                     params: Optional[dict] = None,
                     timeout: float = 8.0):
-    async with session.get(url, params=params,
-                           timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
-        if resp.status != 200:
-            raise RuntimeError(f"HTTP {resp.status} for {url}")
-        return await resp.json(content_type=None)
+    async with protect_url("open-interest-rest", url):
+        async with session.get(url, params=params,
+                               timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"HTTP {resp.status} for {url}")
+            return await resp.json(content_type=None)
 
 
 async def _post_json(session: aiohttp.ClientSession, url: str, body: dict,
                      timeout: float = 8.0):
-    async with session.post(url, json=body,
-                            timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
-        if resp.status != 200:
-            raise RuntimeError(f"HTTP {resp.status} for {url}")
-        return await resp.json(content_type=None)
+    async with protect_url("open-interest-rest", url):
+        async with session.post(url, json=body,
+                                timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"HTTP {resp.status} for {url}")
+            return await resp.json(content_type=None)
 
 
 # -- dYdX / Kraken Futures / Bitfinex / Hyperliquid -------------------------

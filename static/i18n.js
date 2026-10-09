@@ -378,6 +378,8 @@
         "search.vol24": "24ч {v}",
         "search.added_ok": "✓ {sym} добавлена в список и открыта на графике",
         "search.added_fail": "⚠ Не удалось найти пару {sym}",
+        "search.need_auth": "⚠ Авторизуйтесь для добавления монет: новые пары доступны зарегистрированным",
+        "search.quota_full": "⚠ Лимит {n} монет на аккаунт исчерпан",
         "search.network_error": "⚠ Ошибка связи с сервером при поиске пары",
         "health.prices": "цены",
         "health.ticks": "тики",
@@ -401,7 +403,7 @@
 
         "land.nav.digest": "Дайджест",
         "land.nav.hourly": "Сводки по часам",
-        "hour.title": "Сводки по часам",
+        "hour.title": "Часовые сводки",
         "hour.meta": "LiqScope — сводки рынка крипто-фьючерсов каждые несколько часов: ликвидации окна, лидеры часов, оборот и открытый интерес. Те же посты, что вышли в канале, с фото.",
         "hour.lead": "Публикация сводки рынка несколько раз в сутки.",
         "hour.fresh": "Свежие сводки",
@@ -422,7 +424,6 @@
         "hour.loading": "Загружаю…",
         "hour.empty": "Сводок пока нет — первая появится после поста в канал.",
         "hour.empty_day": "За этот день сводок нет.",
-        "hour.archive_tag": "из архива",
         "hour.delete": "Удалить сводку",
         "hour.delete_ask": "Удалить эту сводку со страницы? В канал это не отправляется и оттуда не стирает.",
         "hour.delete_day": "Удалить день",
@@ -454,7 +455,6 @@
         "dig.loading": "Загружаю…",
         "dig.published": "опубликован",
         "dig.draft": "черновик",
-        "dig.archive_tag": "из архива",
         "dig.delete": "Удалить выпуск",
         "dig.delete_ask": "Удалить выпуск за {day} со страницы? В канал это не отправляется и оттуда не стирает.",
         "dig.delete_fail": "Не удалилось: {msg}",
@@ -871,6 +871,8 @@
         "search.vol24": "24h {v}",
         "search.added_ok": "✓ {sym} added to the list and opened on the chart",
         "search.added_fail": "⚠ Could not find pair {sym}",
+        "search.need_auth": "⚠ Sign in to add coins: new pairs are for registered users",
+        "search.quota_full": "⚠ Your limit of {n} coins per account is used up",
         "search.network_error": "⚠ Connection error while searching",
         "health.prices": "prices",
         "health.ticks": "ticks",
@@ -894,7 +896,7 @@
 
         "land.nav.digest": "Digest",
         "land.nav.hourly": "Hourly summaries",
-        "hour.title": "Hourly market summaries",
+        "hour.title": "Hourly Summaries",
         "hour.meta": "LiqScope hourly market summaries: liquidations of the window, hour leaders, turnover and open interest. The very posts published in our channel, with photos.",
         "hour.lead": "A market summary is published several times a day.",
         "hour.fresh": "Latest summaries",
@@ -915,7 +917,6 @@
         "hour.loading": "Loading…",
         "hour.empty": "No summaries yet — the first one arrives after the channel post.",
         "hour.empty_day": "No summaries for this day.",
-        "hour.archive_tag": "from archive",
         "hour.delete": "Delete summary",
         "hour.delete_ask": "Remove this summary from the page? This does not send anything to the channel and does not delete a channel post.",
         "hour.delete_day": "Delete day",
@@ -947,7 +948,6 @@
         "dig.loading": "Loading…",
         "dig.published": "published",
         "dig.draft": "draft",
-        "dig.archive_tag": "from archive",
         "dig.delete": "Delete issue",
         "dig.delete_ask": "Remove the {day} issue from the page? This does not send anything to the channel and does not delete a channel post.",
         "dig.delete_fail": "Could not delete: {msg}",
@@ -1364,6 +1364,8 @@
         "search.vol24": "24时 {v}",
         "search.added_ok": "✓ 已将 {sym} 加入列表并打开图表",
         "search.added_fail": "⚠ 未找到交易对 {sym}",
+        "search.need_auth": "⚠ 请登录后再添加币种：新交易对仅对注册用户开放",
+        "search.quota_full": "⚠ 每个账户 {n} 个币种的上限已用完",
         "search.network_error": "⚠ 搜索时连接服务器出错",
         "health.prices": "价格",
         "health.ticks": "tick",
@@ -1408,7 +1410,6 @@
         "hour.loading": "加载中…",
         "hour.empty": "暂无简报——频道发布后就会出现第一条。",
         "hour.empty_day": "这一天没有简报。",
-        "hour.archive_tag": "来自归档",
         "hour.delete": "删除简报",
         "hour.delete_ask": "从页面删除这条简报？这不会发到频道，也不会删除频道里的帖子。",
         "hour.delete_day": "删除这一天",
@@ -1440,7 +1441,6 @@
         "dig.loading": "加载中…",
         "dig.published": "已发布",
         "dig.draft": "草稿",
-        "dig.archive_tag": "来自归档",
         "dig.delete": "删除本期",
         "dig.delete_ask": "从页面删除 {day} 的日报？这不会发到频道，也不会删除频道里的帖子。",
         "dig.delete_fail": "未能删除：{msg}",
@@ -1857,6 +1857,8 @@
         "search.vol24": "24गं {v}",
         "search.added_ok": "✓ {sym} सूची में जोड़ा गया और चार्ट पर खोला गया",
         "search.added_fail": "⚠ पेयर {sym} नहीं मिला",
+        "search.need_auth": "⚠ सिक्के जोड़ने के लिए लॉग इन करें: नए पेयर पंजीकृत उपयोगकर्ताओं के लिए हैं",
+        "search.quota_full": "⚠ खाते पर {n} सिक्कों की सीमा पूरी हो गई है",
         "search.network_error": "⚠ खोज में सर्वर से संपर्क में त्रुटि",
         "health.prices": "कीमतें",
         "health.ticks": "टिक्स",
@@ -1901,7 +1903,6 @@
         "hour.loading": "लोड हो रहा है…",
         "hour.empty": "अभी कोई सारांश नहीं — चैनल में पोस्ट के बाद पहली आएगी।",
         "hour.empty_day": "इस दिन कोई सारांश नहीं।",
-        "hour.archive_tag": "संग्रह से",
         "hour.delete": "सारांश हटाएँ",
         "hour.delete_ask": "इस सारांश को पेज से हटाएँ? यह चैनल में नहीं जाता और वहाँ का पोस्ट नहीं मिटाता।",
         "hour.delete_day": "दिन हटाएँ",
@@ -1933,7 +1934,6 @@
         "dig.loading": "लोड हो रहा है…",
         "dig.published": "प्रकाशित",
         "dig.draft": "ड्राफ़्ट",
-        "dig.archive_tag": "संग्रह से",
         "dig.delete": "अंक हटाएँ",
         "dig.delete_ask": "{day} का अंक पेज से हटाएँ? यह चैनल में नहीं जाता और वहाँ का पोस्ट नहीं मिटाता।",
         "dig.delete_fail": "नहीं हटा: {msg}",
@@ -2350,6 +2350,8 @@
         "search.vol24": "24h {v}",
         "search.added_ok": "✓ {sym} añadido a la lista y abierto en el gráfico",
         "search.added_fail": "⚠ No se encontró el par {sym}",
+        "search.need_auth": "⚠ Inicia sesión para añadir monedas: los pares nuevos son para usuarios registrados",
+        "search.quota_full": "⚠ Alcanzaste el límite de {n} monedas por cuenta",
         "search.network_error": "⚠ Error de conexión al buscar",
         "health.prices": "precios",
         "health.ticks": "ticks",
@@ -2394,7 +2396,6 @@
         "hour.loading": "Cargando…",
         "hour.empty": "Todavía no hay resúmenes — el primero llega tras la publicación en el canal.",
         "hour.empty_day": "No hay resúmenes para este día.",
-        "hour.archive_tag": "del archivo",
         "hour.delete": "Eliminar resumen",
         "hour.delete_ask": "¿Quitar este resumen de la página? No se envía al canal ni borra un post del canal.",
         "hour.delete_day": "Eliminar el día",
@@ -2426,7 +2427,6 @@
         "dig.loading": "Cargando…",
         "dig.published": "publicado",
         "dig.draft": "borrador",
-        "dig.archive_tag": "del archivo",
         "dig.delete": "Eliminar edición",
         "dig.delete_ask": "¿Quitar la edición del {day} de la página? No se envía al canal ni borra un post del canal.",
         "dig.delete_fail": "No se pudo eliminar: {msg}",
@@ -2645,6 +2645,24 @@
         }
     }
 
+    /** Есть ли у элемента собственный текст: нужен, чтобы не потерять
+     *  русский вариант подписи, когда ключа нет в загруженном словаре. */
+    function hasOwnText(el) {
+        return String(el.textContent || "").replace(/\s+/g, " ") !== "";
+    }
+
+    function hasOwnAttr(el, name) {
+        return String(el.getAttribute(name) || "").replace(/\s+/g, " ") !== "";
+    }
+
+    /** Атрибут по ключу словаря; без перевода оставляем исходное значение. */
+    function setAttrLabel(el, attr, keyAttr) {
+        var key = el.getAttribute(keyAttr);
+        var value = t(key);
+        if (value === key && hasOwnAttr(el, attr)) return;
+        el.setAttribute(attr, value);
+    }
+
     /** Реферальная ссылка Gate для текущего языка. */
     function gateRef() {
         return GATE_REFS[current] || GATE_REFS.en;
@@ -2669,19 +2687,29 @@
         document.documentElement.lang = localeTag();
         var nodes = root.querySelectorAll("[data-i18n]");
         for (var i = 0; i < nodes.length; i++) {
-            setLabel(nodes[i], t(nodes[i].getAttribute("data-i18n")));
+            var key = nodes[i].getAttribute("data-i18n");
+            var text = t(key);
+            // Ключа нет в загруженном словаре — не показываем гостю «auth.x»
+            // вместо подписи: оставляем русский текст из разметки (словарь
+            // мог не догрузиться, например из старого кэша).
+            if (text === key && hasOwnText(nodes[i])) continue;
+            setLabel(nodes[i], text);
         }
         nodes = root.querySelectorAll("[data-i18n-placeholder]");
         for (i = 0; i < nodes.length; i++) {
-            nodes[i].setAttribute("placeholder", t(nodes[i].getAttribute("data-i18n-placeholder")));
+            setAttrLabel(nodes[i], "placeholder", "data-i18n-placeholder");
         }
         nodes = root.querySelectorAll("[data-i18n-title]");
         for (i = 0; i < nodes.length; i++) {
-            nodes[i].setAttribute("title", t(nodes[i].getAttribute("data-i18n-title")));
+            setAttrLabel(nodes[i], "title", "data-i18n-title");
+        }
+        nodes = root.querySelectorAll("[data-i18n-aria]");
+        for (i = 0; i < nodes.length; i++) {
+            setAttrLabel(nodes[i], "aria-label", "data-i18n-aria");
         }
         nodes = root.querySelectorAll("[data-i18n-meta]");
         for (i = 0; i < nodes.length; i++) {
-            nodes[i].setAttribute("content", t(nodes[i].getAttribute("data-i18n-meta")));
+            setAttrLabel(nodes[i], "content", "data-i18n-meta");
         }
         // og:locale — под текущий язык (в разметке зашит русский по умолчанию)
         var og = root.querySelector ? root.querySelector('meta[property="og:locale"]') : null;

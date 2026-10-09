@@ -37,10 +37,6 @@ class Ctx:
         self.store: PostStore = PostStore("")
         #: async () -> запись архива: собрать сводку сейчас без Telegram
         self.collect_fn = None
-        #: () -> посты из месячных свёрток, если JSON после перезагрузки пуст
-        self.archive_fn = None
-        #: ArchiveHide — снятые сводки из свёрток не возвращать на страницу
-        self.hide = None
         #: tg_bot: удаление уже вышедших постов из Telegram
         self.bot = None
         #: () -> адрес английского канала (там выходят эти сводки)
@@ -108,8 +104,6 @@ def archive_row(rec: dict) -> dict:
         "tg_ready": bool(sent),
         "cover": bool(((rec.get("photo") or {}).get("path"))),
         "url": f"/hourly?post={rid}" if rid else "/hourly",
-        "source": str(rec.get("source") or "store"),
-        "draft": str(rec.get("source") or "") == "archive" and not sent,
     }
 
 
@@ -137,29 +131,14 @@ def _photo_response(path: str) -> Any:
 
 
 def hourly_records() -> List[dict]:
-    """Посты JSON плюс часы месячного архива с тем же id не дублируем."""
-    items = ctx.store.list() if isinstance(ctx.store, PostStore) else []
-    fn = getattr(ctx, "archive_fn", None)
-    if fn is None:
-        return items
-    try:
-        extra = fn() or []
-    except Exception as e:                           # noqa: BLE001
-        log.debug("сводки: архив часов не собрался: %s", e)
-        return items
-    have = {str(x.get("id") or "") for x in items}
-    hide = getattr(ctx, "hide", None)
-    merged = list(items)
-    for rec in extra:
-        rid = str((rec or {}).get("id") or "")
-        if not rid or rid in have:
-            continue
-        if hide is not None and hide.hourly_hidden(rec):
-            continue
-        merged.append(rec)
-        have.add(rid)
-    merged.sort(key=lambda x: float(x.get("ts") or 0), reverse=True)
-    return merged
+    """Сводки сайта: только те, что реально вышли (их сохранил бот).
+
+    Часы месячного архива сюда не подмешиваются. Свёртка часа — это цифры
+    ликвидаций, а не публикация: в канале такой сводки не было, и на странице
+    она выглядела как пост без текста. Источник правды для /hourly — архив
+    публикаций.
+    """
+    return ctx.store.list() if isinstance(ctx.store, PostStore) else []
 
 
 def hourly_days(items: List[dict]) -> List[dict]:
@@ -253,18 +232,9 @@ def register_hourly_routes(app) -> None:
         ``days`` — лёгкий индекс для календаря: по нему видно, за какие дни
         посты есть и сколько их было, чтобы страница не тянула всё сразу.
         """
-        stored = ctx.store.list()
-        if getattr(ctx, "archive_fn", None) is None:
-            items = stored
-            days = ctx.store.days()
-            posts = ctx.store.by_day(day) if day else ctx.store.recent(_limit(limit))
-        else:
-            items = hourly_records()
-            days = hourly_days(items)
-            if day:
-                posts = [r for r in items if str(r.get("day") or "") == str(day)]
-            else:
-                posts = items[:_limit(limit)]
+        items = hourly_records()
+        days = ctx.store.days()
+        posts = ctx.store.by_day(day) if day else ctx.store.recent(_limit(limit))
         return {
             "ok": True,
             "items": [public_post(r, lang) for r in posts],
@@ -363,26 +333,18 @@ def register_hourly_routes(app) -> None:
         if err:
             return err
         body = body or {}
-        stored = ctx.store.get(pid)
-        rec = stored
-        if rec is None:
-            rec = next((r for r in hourly_records()
-                        if str(r.get("id") or "") == str(pid)), None)
+        rec = ctx.store.get(pid)
         if rec is None:
             return JSONResponse({"ok": False, "error": "not_found"}, status_code=404)
         want_tg = bool(body.get("tg"))
-        sent = sent_ids(rec) if stored is not None else {}
+        sent = sent_ids(rec)
         result: Dict[str, Any] = {}
         if want_tg and sent:
             if not bot_running():
                 return _bot_off()
             from channel_digest import drop_channel_posts
             result = await drop_channel_posts(sent, delete_fn())
-        if stored is not None:
-            ctx.store.remove(str(rec.get("id") or pid))
-        hide = getattr(ctx, "hide", None)
-        if hide is not None:
-            hide.hide_hourly(str(rec.get("id") or pid))
+        ctx.store.remove(str(rec.get("id") or pid))
         log.info("сводка %s удалена админом %s (tg=%s)", pid, user.get("id"), want_tg)
         return {"ok": True, "removed": archive_row(rec), "tg": result,
                 "count": len(hourly_records())}
@@ -421,9 +383,6 @@ def register_hourly_routes(app) -> None:
             from channel_digest import drop_channel_posts
             result = await drop_channel_posts(sent, delete_fn())
         gone = ctx.store.remove_day(day) if posts else []
-        hide = getattr(ctx, "hide", None)
-        if hide is not None:
-            hide.hide_hourly_day(day, [str(r.get("id") or "") for r in visible])
         removed = len(visible) or len(gone)
         log.info("сводки за %s удалены админом %s: %d постов (tg=%s)",
                  day, user.get("id"), removed, want_tg)

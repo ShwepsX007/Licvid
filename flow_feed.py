@@ -44,6 +44,9 @@ class FlowFeed:
         self.symbols_max = max(5, int(symbols_max))
         self._by_sym: Dict[str, Dict[int, dict]] = {}
         self._price: Dict[str, float] = {}
+        # последняя минута с данными по монете: окно обходится диапазоном, и
+        # верхняя граница нужна без перебора всех ключей
+        self._top: Dict[str, int] = {}
 
     # ----- наполнение ------------------------------------------------------
     def _cell(self, sym: str, ts: float) -> Optional[dict]:
@@ -59,6 +62,8 @@ class FlowFeed:
                     "vol": 0.0, "cvd": 0.0, "has_cvd": False,
                     "oi": None, "oi_from": None}
             rows[m] = cell
+            if m > self._top.get(sym, 0):
+                self._top[sym] = m
             if len(rows) > self.keep_min + 5:
                 for old in sorted(rows)[:len(rows) - self.keep_min]:
                     rows.pop(old, None)
@@ -123,14 +128,33 @@ class FlowFeed:
     # ----- чтение ----------------------------------------------------------
     def _window(self, sym: str, window_min: int, now: float) -> Optional[dict]:
         rows = self._by_sym.get(sym) or {}
-        first = minute_of(now) - (max(1, window_min) - 1) * MINUTE
+        if not rows:
+            return None
+        last = minute_of(now)
+        first = last - (max(1, window_min) - 1) * MINUTE
+        # Биржевые часы могут уйти вперёд наших: прежний обход такие минуты не
+        # отбрасывал, поэтому верхняя граница — последняя минута с данными, но
+        # не дальше keep_min вперёд (защита от абсурдной метки в событии)
+        top = self._top.get(sym, last)
+        hi = top if last < top <= last + self.keep_min * MINUTE else last
         agg = {"liq_long": 0.0, "liq_short": 0.0, "liq_count": 0, "vol": 0.0,
                "cvd": 0.0, "has_cvd": False, "oi": None, "oi_from": None,
                "minutes": 0, "last": 0}
-        for m in sorted(rows):
-            if m < first:
+        get = rows.get
+        # Ключи выровнены по минутам (minute_of), поэтому окно обходится
+        # диапазоном в window_min шагов. Раньше здесь была sorted(rows) по ВСЕМ
+        # минутам монеты (keep_min = 120) с отбрасыванием лишних через
+        # continue: flow_snapshot зовёт rows() трижды (cvd, oi, liq) плюс
+        # summary — ещё три прохода, итого шесть сортировок на каждую монету
+        # на каждом WS-подключении и каждой рассылке ленты «ВСЕ». Сторож пауз
+        # на бою называл именно этот кадр (flow_feed.py:130:_window <-
+        # server.py:5625:ws_endpoint), когда уровни уже были выключены.
+        # Порядок обхода тот же — минуты по возрастанию, поэтому суммы,
+        # «последняя минута» и oi_from (первая минута с OI) не меняются.
+        for m in range(first, hi + 1, MINUTE):
+            c = get(m)
+            if c is None:
                 continue
-            c = rows[m]
             agg["minutes"] += 1
             agg["last"] = m
             agg["liq_long"] += c.get("liq_long") or 0.0

@@ -18,6 +18,8 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
+from types import SimpleNamespace
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, HERE)
@@ -98,6 +100,74 @@ class HistoryApiCase(unittest.TestCase):
             "since": RECENT_TS - 60, "until": NOW, "bucket": "raw",
             "min_usd": 200000})
         self.assertTrue(all(e["usd"] >= 200000 for e in r.json()["liquidations"]))
+
+    def test_raw_default_limit_and_explicit_limit(self):
+        requested = []
+
+        def fake_query(since, until, symbol, min_usd, limit, newest_first=True):
+            requested.append(limit)
+            return []
+
+        with patch.object(server.HIST, "query", side_effect=fake_query):
+            self.assertEqual(self.client.get("/api/history?bucket=raw").status_code, 200)
+            self.assertEqual(self.client.get(
+                "/api/history?bucket=raw&limit=1500").status_code, 200)
+            self.assertEqual(self.client.get(
+                "/api/history?bucket=raw&limit=999999").status_code, 200)
+        self.assertEqual(requested, [1000, 1500, 4000])
+
+    def test_heavy_routes_bypass_fastapi_jsonable_encoder(self):
+        import fastapi.routing
+        if server._orjson is None:
+            self.skipTest("orjson is optional outside production")
+        with patch.object(fastapi.routing, "jsonable_encoder",
+                          side_effect=AssertionError("encoder called")):
+            for route in ("/api/history?bucket=raw", "/api/history?bucket=hour",
+                          "/api/liquidations?limit=5", "/api/klines",
+                          "/api/oi"):
+                with self.subTest(route=route):
+                    response = self.client.get(route)
+                    self.assertEqual(response.status_code, 200)
+                    self.assertTrue(response.headers["content-type"].startswith(
+                        "application/json"))
+                    self.assertIsInstance(response.json(), dict)
+
+    def test_liquidations_cap_preserves_total_and_latest_items(self):
+        saved = list(server.LIQUIDATIONS)
+        try:
+            server.LIQUIDATIONS.clear()
+            server.LIQUIDATIONS.extend(
+                ev(i + 1000, NOW - (1101 - i), "BTC_USDT")
+                for i in range(1101))
+            # Изолируем явный лимит от архива: здесь проверяем только RAM-хвост.
+            with patch.object(server.HIST, "query", return_value=[]):
+                r = self.client.get("/api/liquidations?limit=2000")
+            self.assertEqual(r.status_code, 200)
+            data = r.json()
+            self.assertEqual(data["total"], 1101)
+            self.assertEqual(len(data["liquidations"]), 1101)
+            # default 300 и явный limit=2000 не должны сливаться в max=1000.
+            default = self.client.get("/api/liquidations").json()
+            self.assertEqual(default["total"], 1101)
+            self.assertEqual(len(default["liquidations"]), 300)
+            self.assertEqual(data["liquidations"][-1]["id"], "ev2100")
+        finally:
+            server.LIQUIDATIONS.clear()
+            server.LIQUIDATIONS.extend(saved)
+
+    def test_oi_integer_bucket_keys_remain_json_compatible(self):
+        class FakeOI:
+            async def ensure_symbol(self, symbol):
+                return None
+
+            def payload(self, symbol):
+                return {"symbol": symbol, "total_usd": 100.0,
+                        "_series": {12345: {"binance": 100.0}}}
+
+        with patch.object(server, "feed", SimpleNamespace(oi=FakeOI())):
+            response = self.client.get("/api/oi?symbol=BTC_USDT")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["_series"]["12345"]["binance"], 100.0)
 
     def test_default_hours_is_a_day(self):
         r = self.client.get("/api/history", params={"bucket": "hour"})

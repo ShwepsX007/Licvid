@@ -1,0 +1,875 @@
+"""Offline coverage for multichain whale ingestion and wallet registry CRUD."""
+import asyncio
+import json
+import tempfile
+import time
+import unittest
+import sys
+from pathlib import Path
+from unittest.mock import patch
+
+import aiohttp
+from aiohttp import ClientSession, web
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from cex_wallets_updater import (
+    CEXWalletRegistry, EVM_CHAINS, SourceFetchError, WalletFetchResult,
+    _read_json, fetch_defillama_cex_wallets, normalize_chain,
+    parse_defillama_cex_protocol, valid_address,
+)
+from tron_address import tron_to_base58, tron_to_hex
+from whale_poller import MINED_TRANSACTION_CHAINS, SPL_TOKEN_PROGRAM, WhalePoller, RateLimited
+from whale_screener import SOLANA_TOKENS, TRON_TOKENS, WhaleScreener
+
+
+class CEXWalletRegistryTests(unittest.IsolatedAsyncioTestCase):
+    def test_defillama_protocol_parser_reads_only_chain_scoped_cex_addresses(self):
+        protocol = {
+            "name": "Binance",
+            "category": "CEX",
+            "chainAddresses": {
+                "ethereum": ["0x" + "1" * 40],
+                "BSC": {"address": "0x" + "2" * 40},
+                "Polygon": [{"address": "0x" + "3" * 40}],
+                "Arbitrum One": ["0x" + "4" * 40],
+                "Base": ["0x" + "5" * 40],
+                "Solana": ["5tzFkiKsc22KEChR37aTBD323ApAo28nJZ34352fgd5e"],
+                "Tron": ["TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"],
+            },
+        }
+        rows = parse_defillama_cex_protocol(protocol)
+        self.assertEqual({row["chain"] for row in rows},
+                         {"ETH", "BNB", "POLYGON", "ARBITRUM", "BASE", "SOLANA", "TRON"})
+        self.assertTrue(all(row["name"] == "Binance" and row["source"] == "defillama"
+                            for row in rows))
+        self.assertEqual(parse_defillama_cex_protocol({
+            "name": "Not an exchange", "category": "Dexes",
+            "chainAddresses": {"Ethereum": ["0x" + "9" * 40]},
+        }), [])
+        self.assertEqual(parse_defillama_cex_protocol({
+            "name": "Unscoped", "category": "CEX", "chain": "Multi-Chain",
+            "address": "0x" + "8" * 40,
+        }), [], "an address without a single confirmed chain is not projected")
+        self.assertEqual(parse_defillama_cex_protocol({
+            "name": "Wrong chain", "category": "CEX", "chain": "Base",
+            "address": {"chain": "Bitcoin", "address": "0x" + "8" * 40},
+        }), [], "an unsupported explicit address chain must not inherit Base")
+        base = parse_defillama_cex_protocol({
+            "name": "Bybit", "category": "CEX", "chain": "Base",
+            "address": "0x" + "6" * 40,
+        })
+        self.assertEqual([(row["chain"], row["name"]) for row in base], [("BASE", "Bybit")])
+        detail = parse_defillama_cex_protocol({
+            "chainAddresses": [{"chain": "Polygon", "address": "0x" + "7" * 40}],
+        }, fallback_name="OKX")
+        self.assertEqual([(row["chain"], row["name"]) for row in detail], [("POLYGON", "OKX")])
+        self.assertEqual(normalize_chain("binanceSmartChain"), "BNB")
+        self.assertEqual(normalize_chain("arbitrum-one"), "ARBITRUM")
+        self.assertTrue(valid_address("SOLANA", "5tzFkiKsc22KEChR37aTBD323ApAo28nJZ34352fgd5e"))
+        self.assertTrue(valid_address("TRON", "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"))
+        self.assertFalse(valid_address("TRON", "T" + "1" * 33))
+
+    def test_legacy_evm_scope_is_preserved_without_non_evm_labels(self):
+        # These are format-only test candidates: Base58/32-byte validity does
+        # not prove exchange ownership, so none is asserted as a CEX fact.
+        valid = [
+            "5tzFkiKsc22KEChR37aTBD323ApAo28nJZ34352fgd5e",
+            "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM",
+            "2AQdpHJ2JpcEgPiATUXjQxA8QmafFegfQwSLWSprPicm",
+            "GJRs4FwHtemZ5ZE9x3FNvJ8TMwitKTh21yxdRPqn7npE",
+            "AC5RDfQFmDS1deWZos921JfqscXdByf8BKHs5ACWjtW2",
+            "42brAgAVNzMBP7aaktPvAmBSPEkehnFQejiZc53EpJFd",
+        ]
+        for address in valid:
+            self.assertTrue(valid_address("SOLANA", address), address)
+        invalid = [
+            "2OJ13z19qaA8f8T3u1L5qT3xJ7Y3P51S1v5",  # forbidden base58 O/0
+            "H8sMJSC38A243qT8up9Bv21L5tX2M3Y3P51S1v5",  # short decoded key
+            "2AQdpLPUdVe12Bk18KX1MS2bY7peE4G23M13T41L5v5",
+            "AC57B932p4A8f3T8up9Bv21L5tX2M3Y3P51S1v5",
+            "6f9U9L523M13T41L5v53T8up9Bv21L5tX2M3Y3P51S1v5",
+        ]
+        for address in invalid:
+            self.assertFalse(valid_address("SOLANA", address), address)
+
+        registry = CEXWalletRegistry(Path(__file__).resolve().parents[1] /
+                                     "data" / "cex_wallets.json")
+        records = registry.records()
+        self.assertNotIn("5tzFkiKsc22KEChR37aTBD323ApAo28nJZ34352fgd5e",
+                         {row["address"] for row in records})
+        self.assertEqual(sum(row["chain"] == "SOLANA" for row in records), 0)
+        self.assertEqual(sum(row["chain"] == "TRON" for row in records), 0)
+        self.assertEqual(sum(row["chain"] == "ETH" for row in records), 8)
+        self.assertTrue(all(sum(row["chain"] == chain for row in records) == 8
+                            for chain in EVM_CHAINS),
+                        "legacy EVM labels retain their existing EVM-only scope")
+
+    async def test_manual_addresses_survive_refresh_update_delete_and_backup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cex_wallets.json"
+            registry = CEXWalletRegistry(path)
+            eth = registry.add_manual("ETH", "0x" + "1" * 40, "Manual exchange")
+            tron = registry.add_manual("TRON", "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t", "Manual TRON")
+            auto = {"chain": "BASE", "address": "0x" + "2" * 40,
+                    "name": "Auto CEX", "source": "defillama"}
+            with patch("cex_wallets_updater.fetch_defillama_cex_wallets",
+                       return_value=[auto]):
+                result = await registry.refresh()
+            self.assertTrue(result["ok"])
+            self.assertTrue(path.with_suffix(".json.bak").exists())
+            rows = registry.records()
+            self.assertEqual({row["source"] for row in rows}, {"manual", "defillama"})
+            self.assertTrue(any(row["id"] == eth["id"] for row in rows))
+            self.assertTrue(any(row["id"] == tron["id"] for row in rows))
+            changed = registry.update_manual(eth["id"], "ETH", "0x" + "3" * 40, "Renamed")
+            self.assertEqual(changed["name"], "Renamed")
+            self.assertNotEqual(changed["id"], eth["id"])
+            self.assertTrue(registry.remove_manual(tron["id"]))
+            restored = CEXWalletRegistry(path)
+            self.assertEqual([(row["chain"], row["name"]) for row in restored.records()],
+                             [("BASE", "Auto CEX"), ("ETH", "Renamed")])
+
+    async def test_empty_refresh_is_noop_and_http_errors_preserve_merged_registry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cex_wallets.json"
+            registry = CEXWalletRegistry(path)
+            manual = registry.add_manual("ETH", "0x" + "1" * 40, "Manual survives")
+            automatic = {"chain": "BASE", "address": "0x" + "2" * 40,
+                         "name": "Known auto", "source": "defillama"}
+            with patch("cex_wallets_updater.fetch_defillama_cex_wallets",
+                       return_value=[automatic]):
+                await registry.refresh()
+            original = path.read_bytes()
+
+            with patch("cex_wallets_updater.fetch_defillama_cex_wallets", return_value=[]):
+                empty_result = await registry.refresh()
+            self.assertTrue(empty_result["ok"])
+            self.assertEqual(empty_result["defillama_count"], 0)
+            self.assertEqual(empty_result["after"], 2)
+            self.assertEqual(path.read_bytes(), original)
+            self.assertTrue(any(row["id"] == manual["id"] and row["source"] == "manual"
+                                for row in registry.records()))
+            self.assertTrue(any(row["name"] == "Known auto" for row in registry.records()))
+
+            for status in (404, 500):
+                with self.subTest(status=status):
+                    error = SourceFetchError(
+                        "https://api.llama.fi/protocols", "HTTP error", status=status,
+                        body=f"provider failure {status}; diagnostic body")
+                    with patch("cex_wallets_updater.fetch_defillama_cex_wallets",
+                               side_effect=error):
+                        with self.assertRaises(SourceFetchError):
+                            await registry.refresh()
+                    self.assertEqual(path.read_bytes(), original)
+                    self.assertTrue(any(row["id"] == manual["id"] and
+                                        row["source"] == "manual" for row in registry.records()))
+                    self.assertTrue(any(row["name"] == "Known auto" for row in registry.records()))
+                    self.assertIn("https://api.llama.fi/protocols", registry.last_error)
+                    self.assertIn(f"HTTP {status}", registry.last_error)
+                    self.assertIn(f"provider failure {status}", registry.last_error)
+
+    async def test_protocols_api_and_details_survive_truncated_etherscan_json(self):
+        eth = "0x" + "1" * 40
+        bnb = "0x" + "2" * 40
+        base_address = "0x" + "3" * 40
+        polygon = "0x" + "4" * 40
+        dex = "0x" + "9" * 40
+        requests = []
+
+        async def protocols(request):
+            requests.append(request.path)
+            return web.json_response([
+                {"slug": "binance", "name": "Binance", "category": "CEX",
+                 "chainAddresses": {"Ethereum": [eth], "BSC": {"address": bnb}}},
+                {"slug": "bybit", "name": "Bybit", "category": "CEX",
+                 "chain": "Base", "address": base_address},
+                {"slug": "okx", "name": "OKX", "category": "CEX"},
+                {"slug": "example-dex", "name": "Not an exchange", "category": "Dexes",
+                 "chainAddresses": {"Ethereum": [dex]}},
+            ])
+
+        async def protocol_detail(request):
+            requests.append(request.path)
+            self.assertEqual(request.match_info["slug"], "okx")
+            return web.json_response({
+                "name": "OKX", "category": "CEX",
+                "chainAddresses": [{"chain": "Polygon", "address": polygon}],
+            })
+
+        async def truncated_labels(request):
+            requests.append(request.path)
+            return web.Response(text='{"0x' + "a" * 40 + '": {"labels": ["Binance',
+                               content_type="application/json")
+
+        app = web.Application()
+        app.router.add_get("/protocols", protocols)
+        app.router.add_get("/protocol/{slug}", protocol_detail)
+        app.router.add_get("/labels", truncated_labels)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        base_url = f"http://127.0.0.1:{port}"
+        try:
+            with patch("cex_wallets_updater.DEFILLAMA_PROTOCOLS_API", base_url + "/protocols"), \
+                 patch("cex_wallets_updater.DEFILLAMA_PROTOCOL_API_BASE", base_url + "/protocol"), \
+                 patch("cex_wallets_updater.ETHERSCAN_LABELS_URL", base_url + "/labels"):
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / "cex_wallets.json"
+                    registry = CEXWalletRegistry(path)
+                    manual = registry.add_manual("ETH", "0x" + "5" * 40, "Manual CEX")
+                    previous_auto = {"chain": "ETH", "address": "0x" + "6" * 40,
+                                     "name": "Previously known", "source": "defillama"}
+                    with patch("cex_wallets_updater.fetch_defillama_cex_wallets",
+                               return_value=WalletFetchResult(
+                                   [previous_auto], source_counts={"defillama": 1})):
+                        await registry.refresh()
+
+                    async with ClientSession() as session:
+                        result = await registry.refresh(session)
+
+                    records = registry.records()
+                    by_key = {(row["chain"], row["address"]): row for row in records}
+                    expected = {
+                        ("ETH", eth), ("BNB", bnb), ("BASE", base_address),
+                        ("POLYGON", polygon), ("ETH", "0x" + "5" * 40),
+                        ("ETH", "0x" + "6" * 40),
+                    }
+                    self.assertTrue(expected.issubset(by_key))
+                    self.assertNotIn(("ETH", dex), by_key)
+                    self.assertEqual(by_key[("ETH", "0x" + "5" * 40)]["id"], manual["id"])
+                    self.assertEqual(result["defillama_count"], 4)
+                    self.assertEqual(result["etherscan_count"], 0)
+                    self.assertEqual(result["added"], 4)
+                    self.assertIn("Успешно обновлено: получено 4 адресов из DeFiLlama API",
+                                  result["message"])
+                    self.assertTrue(any("JSON decode error" in warning
+                                        for warning in result["warnings"]))
+                    self.assertEqual(registry.last_error, "")
+                    saved = json.loads(path.read_text(encoding="utf-8"))
+                    self.assertTrue(any(row["id"] == manual["id"] for row in saved["manual"]))
+                    self.assertTrue(any(row["address"] == "0x" + "6" * 40
+                                        for row in saved["automatic"]))
+                    self.assertEqual(requests, ["/protocols", "/protocol/okx", "/labels"])
+                    self.assertFalse(any(path.endswith(".js") for path in requests))
+        finally:
+            await runner.cleanup()
+
+    async def test_interrupted_large_labels_response_skips_only_that_source(self):
+        address = "0x" + "8" * 40
+        requests = []
+
+        async def protocols(request):
+            requests.append(request.path)
+            return web.json_response([{
+                "name": "Binance", "category": "CEX", "chain": "Ethereum",
+                "address": address,
+            }])
+
+        async def interrupted_labels(request):
+            requests.append(request.path)
+            response = web.StreamResponse(
+                status=200,
+                headers={"Content-Type": "application/json", "Content-Length": "4096"},
+            )
+            await response.prepare(request)
+            await response.write(b'{"labels":')
+            request.transport.close()
+            return response
+
+        app = web.Application()
+        app.router.add_get("/protocols", protocols)
+        app.router.add_get("/labels", interrupted_labels)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        base_url = f"http://127.0.0.1:{port}"
+        try:
+            with patch("cex_wallets_updater.DEFILLAMA_PROTOCOLS_API", base_url + "/protocols"), \
+                 patch("cex_wallets_updater.ETHERSCAN_LABELS_URL", base_url + "/labels"):
+                async with ClientSession() as session:
+                    rows = await fetch_defillama_cex_wallets(session)
+            self.assertEqual([(row["chain"], row["address"], row["source"])
+                              for row in rows], [("ETH", address, "defillama")])
+            self.assertTrue(any("network error" in warning for warning in rows.source_errors))
+            self.assertEqual(rows.source_status["defillama"], "ok")
+            self.assertEqual(rows.source_status["etherscan"], "error")
+            self.assertEqual(requests, ["/protocols", "/labels", "/labels", "/labels"])
+        finally:
+            await runner.cleanup()
+
+    async def test_etherscan_can_succeed_when_protocol_api_fails(self):
+        address = "0x" + "7" * 40
+        requests = []
+
+        async def protocols(request):
+            requests.append(request.path)
+            return web.Response(status=500, text="temporary API outage")
+
+        async def labels(request):
+            requests.append(request.path)
+            return web.json_response({address: {"labels": ["Binance hot wallet"]}})
+
+        app = web.Application()
+        app.router.add_get("/protocols", protocols)
+        app.router.add_get("/labels", labels)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        base_url = f"http://127.0.0.1:{port}"
+        try:
+            with patch("cex_wallets_updater.DEFILLAMA_PROTOCOLS_API", base_url + "/protocols"), \
+                 patch("cex_wallets_updater.ETHERSCAN_LABELS_URL", base_url + "/labels"):
+                async with ClientSession() as session:
+                    rows = await fetch_defillama_cex_wallets(session)
+            self.assertEqual([(row["chain"], row["address"], row["name"], row["source"])
+                              for row in rows], [("ETH", address, "Binance", "etherscan")])
+            self.assertEqual(rows.source_counts, {"defillama": 0, "etherscan": 1})
+            self.assertEqual(rows.source_status["etherscan"], "ok")
+            self.assertTrue(any("HTTP 500" in warning for warning in rows.source_errors))
+            self.assertEqual(requests, ["/protocols"] * 3 + ["/labels"])
+        finally:
+            await runner.cleanup()
+
+    async def test_source_errors_redact_secrets_in_url_and_body(self):
+        secret = "provider-key-should-not-leak"
+        error = SourceFetchError(
+            f"https://pro-api.llama.fi/{secret}/protocols?api_key={secret}", "HTTP error",
+            status=403, body=f"api_key={secret}; response denied")
+        self.assertNotIn(secret, str(error))
+        self.assertIn("/[redacted]/protocols", str(error))
+        self.assertIn("HTTP 403", str(error))
+        self.assertIn("[redacted]", str(error))
+
+    async def test_source_errors_report_url_status_body_and_decode_reason(self):
+        requests = {"missing": 0, "server": 0, "invalid": 0}
+
+        async def missing(_request):
+            requests["missing"] += 1
+            return web.Response(status=404, text="endpoint not found")
+
+        async def server_error(_request):
+            requests["server"] += 1
+            return web.Response(status=500, text="upstream temporarily unavailable")
+
+        async def invalid_json(_request):
+            requests["invalid"] += 1
+            return web.Response(status=200, text="<html>not json</html>")
+
+        app = web.Application()
+        app.router.add_get("/missing", missing)
+        app.router.add_get("/server-error", server_error)
+        app.router.add_get("/invalid-json", invalid_json)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        try:
+            async with ClientSession() as session:
+                for path, expected in (("/missing", ("HTTP 404", "endpoint not found")),
+                                       ("/server-error", ("HTTP 500", "upstream temporarily unavailable")),
+                                       ("/invalid-json", ("JSON decode error", "not json"))):
+                    url = f"http://127.0.0.1:{port}{path}"
+                    with self.assertRaises(SourceFetchError) as caught:
+                        await _read_json(session, url)
+                    self.assertIn(url, str(caught.exception))
+                    for text in expected:
+                        self.assertIn(text, str(caught.exception))
+            self.assertEqual(requests["missing"], 1)
+            self.assertEqual(requests["server"], 3)
+            self.assertEqual(requests["invalid"], 1)
+        finally:
+            await runner.cleanup()
+
+
+class MultichainTransferTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self._alchemy_rate_patch = patch("whale_poller.ALCHEMY_MIN_REQUEST_INTERVAL_SEC", 0.0)
+        self._alchemy_rate_patch.start()
+
+    def tearDown(self):
+        self._alchemy_rate_patch.stop()
+
+    @staticmethod
+    async def broadcast(_message):
+        return None
+
+    def make_screener(self, tmp):
+        screen = WhaleScreener(
+            "unused", lambda pair: {"SOL_USDT": 200.0, "ETH_USDT": 2_000.0,
+                                    "TRX_USDT": 1.0}.get(pair),
+            self.broadcast, min_usd=0,
+            history_path=Path(tmp) / "whales.sqlite3")
+        return screen
+
+    async def test_tron_base58check_trx_and_trc20_decimal_amounts(self):
+        owner = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+        recipient = tron_to_base58("41" + "1" * 40)
+        self.assertEqual(tron_to_base58(tron_to_hex(owner)), owner)
+        self.assertEqual(tron_to_hex(owner), "a614f803b6fd780986a42c78ec9c7f77e6ded13c")
+        with tempfile.TemporaryDirectory() as tmp:
+            screen = self.make_screener(tmp)
+            screen.wallets_by_chain["TRON"] = {owner: "Exchange"}
+            poller = WhalePoller("unused", screen, state_file=Path(tmp) / "poller.json")
+            block = {"block_header": {"raw_data": {"number": 123,
+                      "timestamp": int(time.time() * 1000)}},
+                     "transactions": [{"txID": "a" * 64,
+                       "raw_data": {"contract": [{"type": "TransferContract",
+                         "parameter": {"value": {"owner_address": tron_to_hex(owner),
+                           "to_address": tron_to_hex(recipient), "amount": 3_250_000}}}]}}]}
+            await poller._process_tron_block(block)
+            self.assertEqual(screen.events[-1]["chain"], "TRON")
+            self.assertEqual(screen.events[-1]["symbol"], "TRX")
+            self.assertAlmostEqual(screen.events[-1]["amount"], 3.25)
+            self.assertAlmostEqual(screen.events[-1]["usd"], 3.25)
+            self.assertEqual(screen.events[-1]["direction"], "outflow")
+
+            contract, (symbol, decimals) = next(iter(TRON_TOKENS.items()))
+            request = {}
+            async def fake_events(_session, url, params=None):
+                request.update(url=url, params=params or {})
+                return {"data": [{"event_index": 7, "block_number": 124,
+                    "block_timestamp": int(time.time() * 1000),
+                    "transaction_id": "b" * 64,
+                    "result": {"from": recipient, "to": owner, "value": "25000001"}}],
+                    "meta": {}}
+            poller._trongrid_get = fake_events
+            screen.wallets_by_chain["TRON"] = {}  # event discovery is not wallet-gated
+            await poller._poll_tron_contract(None, contract, symbol, decimals,
+                                             int(time.time() * 1000))
+            self.assertEqual(request["url"],
+                f"https://api.trongrid.io/v1/contracts/{contract}/events")
+            self.assertEqual(request["params"]["event_name"], "Transfer")
+            self.assertEqual(request["params"]["limit"], 50)
+            self.assertEqual(request["params"]["only_confirmed"], "true")
+            event = screen.events[-1]
+            self.assertEqual(event["symbol"], "USDT")
+            self.assertEqual(event["log_index"], "trc20:7")
+            self.assertAlmostEqual(event["amount"], 25.000001)
+            self.assertAlmostEqual(event["usd"], 25.0, places=2)
+            self.assertEqual(event["direction"], "transfer")
+            screen.close()
+
+    async def test_trongrid_api_key_header_is_optional(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            screen = self.make_screener(tmp)
+            poller = WhalePoller("unused", screen,
+                                 state_file=Path(tmp) / "poller.json")
+            requests = []
+
+            class FakeResponse:
+                status = 200
+                async def __aenter__(self):
+                    return self
+                async def __aexit__(self, *_args):
+                    return None
+                async def json(self):
+                    return {"data": []}
+
+            class FakeSession:
+                def get(self, url, *, params, headers, timeout):
+                    requests.append((url, params, headers))
+                    return FakeResponse()
+
+            poller._trongrid_key = lambda: "test-tron-key"
+            await poller._trongrid_get(FakeSession(), "https://api.trongrid.io/events")
+            poller._trongrid_key = lambda: ""
+            await poller._trongrid_get(FakeSession(), "https://api.trongrid.io/events")
+            self.assertEqual(requests[0][2], {"TRON-PRO-API-KEY": "test-tron-key"})
+            self.assertEqual(requests[1][2], {})
+            screen.close()
+
+    async def test_solana_owner_polling_uses_standard_json_rpc_methods(self):
+        owner = "9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM"
+        external_owner = "3" * 32
+        source_account, destination_account = "1" * 32, "2" * 32
+        signature = "5" * 64
+        usdc = next(mint for mint, (symbol, _) in SOLANA_TOKENS.items() if symbol == "USDC")
+        raw_amount = 150_000 * 10**6
+        instruction_hint = 200_000 * 10**6
+        token_account = destination_account
+
+        def balance(index, wallet, amount):
+            return {"accountIndex": index, "owner": wallet, "mint": usdc,
+                    "uiTokenAmount": {"amount": str(amount), "decimals": 6}}
+
+        tx = {"blockTime": int(time.time()),
+              "transaction": {"signatures": [signature], "message": {
+                  "accountKeys": [source_account, destination_account],
+                  "instructions": [{"program": "spl-token", "programId": SPL_TOKEN_PROGRAM,
+                      "parsed": {"type": "transferChecked", "info": {
+                          "source": source_account, "destination": destination_account,
+                          "mint": usdc, "tokenAmount": {"amount": str(instruction_hint),
+                                                               "decimals": 6}}}}]}},
+              "meta": {"preTokenBalances": [balance(0, external_owner, raw_amount),
+                                             balance(1, owner, 0)],
+                       "postTokenBalances": [balance(0, external_owner, 0),
+                                              balance(1, owner, raw_amount)]}}
+        with tempfile.TemporaryDirectory() as tmp:
+            screen = self.make_screener(tmp)
+            screen.wallets_by_chain["SOLANA"] = {owner: "Binance"}
+            poller = WhalePoller("test-alchemy-key-123", screen,
+                                 state_file=Path(tmp) / "poller.json")
+
+            class FakeResponse:
+                status = 200
+                def __init__(self, result):
+                    self.result = result
+                async def __aenter__(self):
+                    return self
+                async def __aexit__(self, *_args):
+                    return None
+                async def json(self):
+                    return {"jsonrpc": "2.0", "id": 1, "result": self.result}
+
+            class FakeSession:
+                def __init__(self):
+                    self.requests = []
+                async def __aenter__(self):
+                    return self
+                async def __aexit__(self, *_args):
+                    return None
+                def post(self, url, *, json, timeout):
+                    self.requests.append((url, json, timeout))
+                    method = json["method"]
+                    params = json["params"]
+                    if method == "getHealth":
+                        result = "ok"
+                    elif method == "getTokenAccountsByOwner":
+                        mint = params[1]["mint"]
+                        result = {"value": ([{"pubkey": token_account,
+                            "account": {"data": {"parsed": {"info": {"mint": usdc}}}}}]
+                            if mint == usdc else [])}
+                    elif method == "getSignaturesForAddress":
+                        result = ([{"signature": signature, "err": None,
+                                    "blockTime": tx["blockTime"]}]
+                                   if params[0] in {owner, token_account} else [])
+                    elif method == "getTransaction":
+                        result = tx
+                    else:
+                        raise AssertionError(f"unexpected Solana RPC method: {method}")
+                    return FakeResponse(result)
+
+            fake_session = FakeSession()
+
+            async def no_stagger(_chain):
+                return None
+
+            with (
+                patch("whale_poller.aiohttp.ClientSession", return_value=fake_session),
+                patch.object(poller, "_wait_for_staggered_start", new=no_stagger),
+            ):
+                task = asyncio.create_task(poller.run_solana())
+                try:
+                    for _ in range(200):
+                        if screen.events and poller.solana_status["connected"]:
+                            break
+                        await asyncio.sleep(.01)
+                    self.assertTrue(poller.solana_status["connected"])
+                    self.assertEqual(poller.solana_status["state"], "online")
+                    self.assertEqual(poller.solana_status["mode"], "cex_poll")
+                    self.assertEqual(poller.solana_status["token_accounts"], 1)
+                    requests = [payload for _url, payload, _timeout in fake_session.requests]
+                    methods = [payload["method"] for payload in requests]
+                    self.assertEqual(methods.count("getHealth"), 1)
+                    self.assertEqual(methods.count("getTokenAccountsByOwner"), 2)
+                    self.assertIn("getSignaturesForAddress", methods)
+                    self.assertEqual(methods.count("getTransaction"), 1)
+                    self.assertEqual(poller.solana_status["request_budget"], 80)
+                    self.assertEqual(poller.solana_status["requests_last_cycle"], 3)
+                    self.assertLessEqual(poller.solana_status["requests_last_cycle"],
+                                         poller.solana_status["request_budget"])
+                    self.assertEqual(poller._solana_poll_interval(), 30)
+                    self.assertIn(signature, poller._solana_processed_signatures)
+                    self.assertEqual(set(methods), {"getHealth", "getTokenAccountsByOwner",
+                                                    "getSignaturesForAddress", "getTransaction"})
+                    token_queries = [payload["params"] for payload in requests
+                                     if payload["method"] == "getTokenAccountsByOwner"]
+                    self.assertEqual({params[1]["mint"] for params in token_queries},
+                                     set(SOLANA_TOKENS))
+                    self.assertTrue(all(params[2]["encoding"] == "jsonParsed"
+                                        for params in token_queries))
+                    signature_queries = [payload["params"] for payload in requests
+                                         if payload["method"] == "getSignaturesForAddress"]
+                    self.assertEqual({params[0] for params in signature_queries},
+                                     {owner, token_account})
+                    self.assertTrue(all(params[1]["limit"] == 10
+                                        for params in signature_queries))
+                    tx_query = next(payload["params"] for payload in requests
+                                    if payload["method"] == "getTransaction")
+                    self.assertEqual(tx_query[0], signature)
+                    self.assertEqual(tx_query[1]["encoding"], "jsonParsed")
+                    self.assertEqual(tx_query[1]["maxSupportedTransactionVersion"], 0)
+                    event = screen.events[-1]
+                    self.assertEqual(event["symbol"], "USDC")
+                    self.assertEqual(event["amount"], 150_000.0)
+                    self.assertEqual(event["usd"], 150_000.0)
+                    self.assertEqual(event["from"], external_owner)
+                    self.assertEqual(event["to"], owner)
+                finally:
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+            screen.close()
+
+    async def test_solana_balance_parser_processes_large_spl_transfer(self):
+        usdc = next(mint for mint, (symbol, _) in SOLANA_TOKENS.items() if symbol == "USDC")
+        source_owner, destination_owner = "3" * 32, "4" * 32
+        source_account, destination_account = "1" * 32, "2" * 32
+        signature = "5" * 64
+        raw_amount = 100_000 * 10**6
+
+        def balance(index, owner, amount):
+            return {"accountIndex": index, "owner": owner, "mint": usdc,
+                    "uiTokenAmount": {"amount": str(amount), "decimals": 6}}
+
+        tx = {"blockTime": int(time.time()),
+              "transaction": {"signatures": [signature], "message": {
+                  "accountKeys": ["payer", source_account, destination_account],
+                  "instructions": [{"program": "spl-token", "programId": SPL_TOKEN_PROGRAM,
+                      "parsed": {"type": "transferChecked", "info": {
+                          "source": source_account, "destination": destination_account,
+                          "mint": usdc, "tokenAmount": {"amount": str(150_000 * 10**6),
+                                                               "decimals": 6}}}}]}},
+              "meta": {"preTokenBalances": [balance(1, source_owner, raw_amount),
+                                             balance(2, destination_owner, 0)],
+                       "postTokenBalances": [balance(1, source_owner, 0),
+                                              balance(2, destination_owner, raw_amount)]}}
+        with tempfile.TemporaryDirectory() as tmp:
+            screen = self.make_screener(tmp)
+            screen.wallets_by_chain["SOLANA"] = {}
+            poller = WhalePoller("test-alchemy-key-123", screen,
+                                 state_file=Path(tmp) / "poller.json")
+            count = await poller._solana_process_network_token_tx(tx)
+            self.assertEqual(count, 1)
+            event = screen.events[-1]
+            self.assertEqual(event["symbol"], "USDC")
+            self.assertEqual(event["amount"], 100_000.0)
+            self.assertEqual(event["usd"], 100_000.0)
+            self.assertEqual(event["from"], source_owner)
+            self.assertEqual(event["to"], destination_owner)
+            screen.close()
+
+    async def test_solana_empty_registry_waits_after_confirmed_get_health(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            screen = self.make_screener(tmp)
+            screen.wallets_by_chain["SOLANA"] = {}
+            poller = WhalePoller("test-alchemy-key-123", screen,
+                                 state_file=Path(tmp) / "poller.json")
+            calls = []
+
+            class FakeResponse:
+                status = 200
+                async def __aenter__(self):
+                    return self
+                async def __aexit__(self, *_args):
+                    return None
+                async def json(self):
+                    return {"jsonrpc": "2.0", "id": 1, "result": "ok"}
+
+            class FakeSession:
+                def post(self, url, *, json, timeout):
+                    calls.append((url, json, timeout))
+                    return FakeResponse()
+
+            await poller._solana_wait_for_filters(FakeSession())
+            self.assertEqual(poller.solana_status["state"], "online")
+            self.assertEqual(poller.solana_status["mode"], "waiting_for_filters")
+            self.assertTrue(poller.solana_status["connected"])
+            self.assertTrue(poller.solana_status["waiting_for_filters"])
+            self.assertEqual(poller.solana_status["processing_state"], "waiting_for_filters")
+            self.assertEqual(poller.solana_status["active_wallets"], 0)
+            self.assertEqual(calls[0][1]["method"], "getHealth")
+            self.assertEqual(poller.solana_status["error"], "")
+            screen.close()
+
+    async def test_solana_retry_delay_never_exceeds_mode_poll_frequency(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            screen = self.make_screener(tmp)
+            poller = WhalePoller("test-alchemy-key-123", screen,
+                                 state_file=Path(tmp) / "poller.json")
+            self.assertEqual(poller._solana_retry_delay(15), 30)
+            self.assertEqual(poller._solana_poll_interval(), 30)
+            poller.mode = "economy"
+            self.assertEqual(poller._solana_retry_delay(15), 60)
+            self.assertEqual(poller._solana_retry_delay(90), 90)
+            self.assertEqual(poller._solana_retry_delay(500), 300)
+            screen.close()
+
+    async def test_solana_429_is_rate_limited_not_a_key_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            screen = self.make_screener(tmp)
+            poller = WhalePoller("test-alchemy-key-123", screen,
+                                 state_file=Path(tmp) / "poller.json")
+            requests = []
+
+            class FakeResponse:
+                def __init__(self, status, result=None, body=""):
+                    self.status, self.result, self.body = status, result, body
+                async def __aenter__(self):
+                    return self
+                async def __aexit__(self, *_args):
+                    return None
+                async def text(self, **_kwargs):
+                    return self.body
+                async def json(self):
+                    return {"jsonrpc": "2.0", "id": 1, "result": self.result}
+
+            class FakeSession:
+                def post(self, url, *, json, timeout):
+                    requests.append((url, json, timeout))
+                    if len(requests) == 1:
+                        return FakeResponse(429, body="Too many requests; retry later")
+                    return FakeResponse(200, result="ok")
+
+            with patch("whale_poller.random.uniform", return_value=1.0):
+                with self.assertRaises(RateLimited) as limited:
+                    await poller._solana_rpc(FakeSession(), "getHealth", [])
+                self.assertEqual(limited.exception.retry_after, 60)
+                status = poller.status()
+                self.assertEqual(status["solana"]["state"], "rate_limited")
+                self.assertEqual(status["network_status"]["SOLANA"]["status"], "rate_limited")
+                self.assertIn("Too many requests", status["solana"]["error"])
+                self.assertTrue(status["network_status"]["SOLANA"]["key_active"])
+                self.assertNotIn("legacy", poller.key_errors)
+                self.assertEqual(poller.key_status()[0]["state"], "active")
+                with self.assertRaises(RateLimited):
+                    await poller._solana_rpc(FakeSession(), "getHealth", [])
+                self.assertEqual(len(requests), 1)
+                poller.chain_cooldown[("SOLANA", "legacy")] = time.time() - 1
+                self.assertEqual(await poller._solana_rpc(
+                    FakeSession(), "getHealth", []), "ok")
+                self.assertEqual(poller.status()["network_status"]["SOLANA"]["status"], "online")
+                self.assertEqual(poller.key_status()[0]["state"], "active")
+            screen.close()
+
+    async def test_solana_rpc_uses_alchemy_solana_endpoint_and_native_methods(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            screen = self.make_screener(tmp)
+            poller = WhalePoller("test-alchemy-key-123", screen,
+                                 state_file=Path(tmp) / "poller.json")
+            requests = []
+
+            class FakeResponse:
+                status = 200
+                async def __aenter__(self):
+                    return self
+                async def __aexit__(self, *_args):
+                    return None
+                async def json(self):
+                    return {"jsonrpc": "2.0", "id": 1,
+                            "result": [{"signature": "sig", "err": None}]}
+
+            class FakeSession:
+                def post(self, url, *, json, timeout):
+                    requests.append((url, json, timeout))
+                    return FakeResponse()
+
+            result = await poller._solana_rpc(
+                FakeSession(), "getSignaturesForAddress", ["wallet", {"limit": 20}])
+            self.assertEqual(result, [{"signature": "sig", "err": None}])
+            self.assertEqual(requests[0][0],
+                "https://solana-mainnet.g.alchemy.com/v2/test-alchemy-key-123")
+            self.assertEqual(requests[0][1]["method"], "getSignaturesForAddress")
+            self.assertEqual(requests[0][1]["params"][0], "wallet")
+            screen.close()
+
+    async def test_solana_native_lamports_and_spl_token_decimals(self):
+        owner, other = "1" * 32, "2" * 32
+        token_source, token_destination = "3" * 32, "4" * 32
+        native_signature, token_signature = "5" * 64, "6" * 64
+        usdc = next(mint for mint, (symbol, _) in SOLANA_TOKENS.items() if symbol == "USDC")
+        with tempfile.TemporaryDirectory() as tmp:
+            screen = self.make_screener(tmp)
+            screen.wallets_by_chain["SOLANA"] = {owner: "Solana CEX"}
+            poller = WhalePoller("unused", screen, state_file=Path(tmp) / "poller.json")
+            native_tx = {"blockTime": int(time.time()),
+                "transaction": {"signatures": [native_signature],
+                    "message": {"accountKeys": [owner, other], "instructions": [
+                        {"program": "system", "parsed": {"type": "transfer", "info": {
+                            "source": owner, "destination": other,
+                            "lamports": 600_000_000_000}}}]}},
+                "meta": {"preBalances": [1_000_000_000_000, 0],
+                         "postBalances": [499_999_995_000, 500_000_000_000],
+                         "fee": 5_000}}
+            count = await poller._solana_process_native(native_tx, owner)
+            self.assertEqual(count, 1)
+            self.assertEqual(screen.events[-1]["symbol"], "SOL")
+            self.assertEqual(screen.events[-1]["amount"], 500.0)
+            self.assertEqual(screen.events[-1]["usd"], 100_000.0)
+            self.assertEqual(screen.events[-1]["direction"], "outflow")
+
+            balance_tx = {"blockTime": int(time.time()),
+                "transaction": {"signatures": ["7" * 64], "message": {
+                    "accountKeys": [owner, other], "instructions": []}},
+                "meta": {"preBalances": [1_000_000_000_000, 0],
+                         "postBalances": [499_999_995_000, 500_000_000_000],
+                         "fee": 5_000}}
+            count = await poller._solana_process_native(balance_tx, owner)
+            self.assertEqual(count, 1)
+            self.assertEqual(screen.events[-1]["hash"], "7" * 64)
+            self.assertEqual(screen.events[-1]["amount"], 500.0)
+            self.assertEqual(screen.events[-1]["usd"], 100_000.0)
+
+            def token_balance(index, address, amount):
+                return {"accountIndex": index, "owner": address, "mint": usdc,
+                        "uiTokenAmount": {"amount": str(amount), "decimals": 6}}
+            token_tx = {"blockTime": int(time.time()),
+                "transaction": {"signatures": [token_signature], "message": {
+                    "accountKeys": ["payer", token_source, token_destination],
+                    "instructions": [{"parsed": {"type": "transferChecked", "info": {
+                        "source": token_source, "destination": token_destination}}}]}},
+                "meta": {"preTokenBalances": [token_balance(1, other, 100_000_000_000),
+                                              token_balance(2, owner, 0)],
+                         "postTokenBalances": [token_balance(1, other, 0),
+                                               token_balance(2, owner, 100_000_000_000)]}}
+            count = await poller._solana_process_network_token_tx(token_tx, {owner})
+            self.assertEqual(count, 1)
+            event = screen.events[-1]
+            self.assertEqual(event["symbol"], "USDC")
+            self.assertEqual(event["amount"], 100_000.0)
+            self.assertEqual(event["usd"], 100_000.0)
+            self.assertEqual(event["direction"], "inflow")
+
+            balance_only_tx = {"blockTime": int(time.time()),
+                "transaction": {"signatures": ["8" * 64], "message": {
+                    "accountKeys": ["payer", token_source, token_destination],
+                    "instructions": []}},
+                "meta": token_tx["meta"]}
+            count = await poller._solana_process_network_token_tx(balance_only_tx, {owner})
+            self.assertEqual(count, 1)
+            self.assertEqual(screen.events[-1]["hash"], "8" * 64)
+            self.assertEqual(screen.events[-1]["amount"], 100_000.0)
+            self.assertEqual(screen.events[-1]["direction"], "inflow")
+            screen.close()
+
+    async def test_filtered_mined_evm_native_websocket_events(self):
+        self.assertIn("ETH", MINED_TRANSACTION_CHAINS)
+        owner, recipient = "0x" + "1" * 40, "0x" + "2" * 40
+        with tempfile.TemporaryDirectory() as tmp:
+            screen = self.make_screener(tmp)
+            screen.wallets_by_chain["ETH"] = {owner: "Exchange"}
+            poller = WhalePoller("unused", screen, state_file=Path(tmp) / "poller.json")
+            tx = {"hash": "0x" + "a" * 64, "from": owner, "to": recipient,
+                  "value": hex(10**18), "input": "0x"}
+            self.assertTrue(await poller._handle_mined_native(
+                "ETH", {"removed": False, "transaction": tx}))
+            self.assertEqual(screen.events[-1]["symbol"], "ETH")
+            self.assertEqual(screen.events[-1]["amount"], 1.0)
+            self.assertEqual(screen.events[-1]["usd"], 2_000.0)
+            self.assertEqual(screen.events[-1]["source"], "realtime")
+            self.assertFalse(await poller._handle_mined_native(
+                "ETH", {"removed": True, "transaction": {**tx, "hash": "0x" + "b" * 64}}))
+            self.assertFalse(await poller._handle_mined_native(
+                "ETH", {"transaction": {**tx, "hash": "0x" + "c" * 64, "input": "0xdead"}}))
+            screen.close()
+
+
+if __name__ == "__main__":
+    unittest.main()

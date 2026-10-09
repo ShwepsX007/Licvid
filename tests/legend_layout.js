@@ -2,8 +2,8 @@ require("./_dom_env");
 /** Раскладка легенды: ячейки кнопка/подпись+цифра, попап кнопок слоёв.
  *
  *  Структура: в плашке у всех слоёв подпись+цифра в .layer-cell,
- *  а все 4 кнопки выезжают сверху горизонтальной панелью по кнопке
- *  «☰ Слои» (закрытие: повторный клик, клик мимо, Esc). Расшифровка цветов
+ *  а все 4 кнопки выезжают списком под кнопкой ☰ (закрытие: повторный клик,
+ *  клик мимо, Esc). Расшифровка цветов
  *  («Ликв. лонгов», «Кит ($100k+)», «CVD ▼») живёт в этой же плашке —
  *  столбиком над кнопками, а не строкой в шапке графика.
  *  Кнопки: nowrap, inline-flex, line-height 1.3
@@ -212,9 +212,9 @@ async function main() {
     narrowPop = css.slice(i, i + 200);
     break;
   }
-  check("narrow screen: full-width pop",
-    narrowPop.indexOf("right: 8px") !== -1 && narrowPop.indexOf("width: auto") !== -1
-    && narrowPop.indexOf("max-width: none") !== -1, narrowPop.slice(0, 140));
+  check("narrow screen: list pop under the button",
+    narrowPop.indexOf("right: 8px") !== -1 && narrowPop.indexOf("width: max-content") !== -1
+    && narrowPop.indexOf("flex-direction: column") !== -1, narrowPop.slice(0, 180));
   click(layerCall);
   check("pop closes on reclick", !win.LiqScopeLayers.isOpen());
   click(layerCall);
@@ -238,16 +238,27 @@ async function main() {
     cssBlock("#layer-call").indexOf("margin-left: auto") !== -1);
   const legendKids = Array.from(doc.querySelector(".chart-legend").children);
   const kidIds = legendKids.map((k) => k.id || k.className);
-  // справа: слои, рисование, свернуть/развернуть.
-  // автоследование убрано из шапки — оно живёт в плашке слоёв
+  // справа: слои, рисование, свернуть/развернуть, обновить, полный экран, автоследование.
+  // автоследование — отдельная кнопка в шапке, рядом с разворотом на весь экран
   check("right cluster order",
-    kidIds.slice(-4).join(",") ===
-      "layer-call,draw-toggle,chart-toggle,chart-expand",
-    kidIds.slice(-4).join(","));
+    kidIds.slice(-6).join(",") ===
+      "draw-toggle,chart-toggle,chart-refresh,chart-expand,follow-toggle,add-chart-btn",
+    kidIds.slice(-6).join(","));
   check("toggles last in legend",
-    legendKids.length >= 2 &&
-    legendKids[legendKids.length - 2].id === "chart-toggle" &&
-    legendKids[legendKids.length - 1].id === "chart-expand");
+    legendKids.length >= 5 &&
+    legendKids[legendKids.length - 5].id === "chart-toggle" &&
+    legendKids[legendKids.length - 4].id === "chart-refresh" &&
+    legendKids[legendKids.length - 3].id === "chart-expand" &&
+    legendKids[legendKids.length - 2].id === "follow-toggle" &&
+    legendKids[legendKids.length - 1].id === "add-chart-btn");
+  check("add chart instead of multi mode",
+    !doc.getElementById("ws-mode-toggle") &&
+    doc.getElementById("add-chart-btn") &&
+    doc.getElementById("chart-tear"));
+  check("mode toggle is in flow",
+    css.indexOf(".ws-mode-toggle") !== -1 &&
+    cssBlock(".ws-mode-toggle").indexOf("position: static") !== -1 &&
+    cssBlock(".ws-mode-toggle").indexOf("position: absolute") === -1);
 
   // --- стабильность цифр — табличными цифрами, а не запасом ширины ---
   ["live-stat", "cvd-stat"].forEach((cls) => {

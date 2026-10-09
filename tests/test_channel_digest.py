@@ -626,8 +626,11 @@ class DigestCoverTest(unittest.TestCase):
         cover = self.api.assign_cover(rec, "2026-09-22")
         self.assertEqual(cover["source"], "admin")
         self.assertGreater(cover["id"], 0, cover)
-        self.assertTrue(cover["path"].startswith(self.store.digest_photo_dir()),
-                        cover["path"])
+        # На сайте используется материализованная копия обложки, а не путь
+        # к загрузке в базе админа (она может быть удалена независимо).
+        self.assertTrue(os.path.isfile(cover["path"]))
+        self.assertIn("digest_covers", cover["path"])
+        self.assertTrue(cover["original"].startswith(self.store.digest_photo_dir()))
 
     def test_public_photo_points_to_the_cover_route(self):
         rec = {"id": "2026-09-18", "day": "2026-09-18"}

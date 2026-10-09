@@ -20,8 +20,9 @@ function check(name, cond, extra){
   const html = await (await fetch(URL_BASE + '/terminal')).text();
   // check that our new files are included
   check('index.html contains workspace.css', html.includes('workspace.css'));
-  check('index.html contains chart_panel.js', html.includes('chart_panel.js'));
-  check('index.html contains workspace.js', html.includes('workspace.js'));
+  check('index.html contains chart_dock.js', html.includes('chart_dock.js'));
+  check('index.html contains add-chart button', html.includes('id="add-chart-btn"'));
+  check('index.html has no multi-chart toggle', !html.includes('id="ws-mode-toggle"'));
   check('index.html contains workspace-host', html.includes('workspace-host'));
 
   // Load jsdom with our scripts
@@ -72,64 +73,24 @@ function check(name, cond, extra){
   const win = dom.window;
   const doc = win.document;
 
-  // Check workspace manager exists
-  check('WorkspaceManager global exists', !!win.WorkspaceManager);
-  check('ChartPanel global exists', !!win.ChartPanel);
-  check('LiqScopeWorkspace exists', !!win.LiqScopeWorkspace);
-
-  if (win.LiqScopeWorkspace) {
-    const wm = win.LiqScopeWorkspace;
-    check('workspace has panels after mount', wm.panels && wm.panels.size>=1, `size=${wm.panels?wm.panels.size:0}`);
-    check('workspace order length >=1', wm.order && wm.order.length>=1, `order=${wm.order?wm.order.length:0}`);
-
-    // add 3rd panel
-    const before = wm.panels.size;
-    wm.addPanel({ symbol:'SOL_USDT', timeframe:15, layers:{ levelsEnabled:true } });
-    await new Promise(r => setTimeout(r, 500));
-    check('addPanel increases count', wm.panels.size===before+1, `before ${before} after ${wm.panels.size}`);
-
-    // serialize
-    const ser = wm.serialize();
-    check('serialize has workspaceId', !!ser.workspaceId);
-    check('serialize panels array', Array.isArray(ser.panels) && ser.panels.length===wm.panels.size);
-    check('serialize panels have symbol', ser.panels.every(p=>/^[A-Z0-9]+_[A-Z0-9]+$/.test(p.symbol)), JSON.stringify(ser.panels.map(p=>p.symbol)));
-    check('serialize panels have per-panel layers', ser.panels.every(p=>p.layers && typeof p.layers.levelsEnabled==='boolean'));
-
-    // save/load
-    const raw = win.localStorage.getItem('liqscope_terminal_workspace_v1');
-    check('localStorage saved workspace', !!raw);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      check('localStorage workspace has panels', parsed.panels && parsed.panels.length>=2);
-    }
-
-    // detach URL
-    const firstId = wm.order[0];
-    const firstPanel = wm.panels.get(firstId);
-    if (firstPanel) {
-      const state = firstPanel.serialize();
-      const url = `/terminal?mode=panel&panel=${encodeURIComponent(state.id)}&workspace=${encodeURIComponent(wm.workspaceId)}&symbol=${encodeURIComponent(state.symbol)}&tf=${encodeURIComponent(state.timeframe)}`;
-      check('detach URL formed correctly', url.includes('mode=panel') && url.includes('panel=') && url.includes('workspace='));
-      check('detach URL symbol validated', /^[A-Z0-9]+_[A-Z0-9]+$/.test(state.symbol));
-    }
-
-    // test movePanel (reorder)
-    if (wm.order.length>=2) {
-      const first = wm.order[0];
-      const second = wm.order[1];
-      wm.movePanel(first, 1);
-      check('movePanel reorders', wm.order[0]===second && wm.order[1]===first, `order=${wm.order.join(',')}`);
-    }
-
-    // test per-panel layers independent
-    const ids = wm.order.slice(0,2);
-    if (ids.length>=2) {
-      const p1 = wm.panels.get(ids[0]);
-      const p2 = wm.panels.get(ids[1]);
-      p1.setLayers({ levelsEnabled: true });
-      p2.setLayers({ levelsEnabled: false });
-      check('per-panel layers independent after set', p1.layers.levelsEnabled===true && p2.layers.levelsEnabled===false);
-    }
+  check('single chart is not hidden by multi mode', !doc.body.classList.contains('workspace-active'));
+  check('ChartDock exists', !!win.LiqScopeDock);
+  if (win.LiqScopeDock) {
+    const dock = win.LiqScopeDock;
+    check('dock starts with the native chart', dock.order && dock.order[0]==='native');
+    const before = dock.order.length;
+    const id = dock.addChart();
+    check('addChart adds a single-chart slot', !!id && dock.order.length===before+1, `order=${dock.order && dock.order.join(',')}`);
+    const slot = dock.els && dock.els.get(id);
+    const frame = slot && slot.querySelector('iframe');
+    const src = frame ? frame.src : '';
+    check('added chart is an embedded single chart', src.includes('embed=1') && src.includes('symbol='), src);
+    dock.floatChart(id, 40, 40);
+    check('float tears the chart off the grid', !!(dock.meta[id] && dock.meta[id].floating) && slot.classList.contains('chart-floating'));
+    dock.dockChart(id);
+    check('dock puts the chart back', dock.meta[id] && dock.meta[id].floating===false && slot.parentNode===dock.dock);
+    dock.closeChart(id);
+    check('closing the extra chart leaves the native one', dock.order.length===1 && dock.order[0]==='native');
   }
 
   // Check panel mode URL handling
@@ -170,8 +131,8 @@ function check(name, cond, extra){
   });
   await new Promise(r => setTimeout(r, 3000));
   const win2 = dom2.window;
-  check('panel mode adds body class panel-mode', win2.document.body.classList.contains('panel-mode'));
-  check('panel mode has workspace-root', !!win2.document.querySelector('.workspace-root'));
+  check('old panel url uses the real single chart', win2.document.body.classList.contains('chart-embed'));
+  check('old panel url does not mount multi-chart', !win2.document.querySelector('.workspace-root'));
 
   console.log(`\nитог: ${ok} ok, ${fail} ошибок`);
   process.exit(fail?1:0);

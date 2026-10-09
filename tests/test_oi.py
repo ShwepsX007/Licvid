@@ -296,6 +296,9 @@ finally:
     srv.LIQUIDATIONS.clear()
 
 print("statwin: liq windows")
+# Предыдущий сценарий прогрел TTL-кэш тех же ALL|ALL: окно должно считать
+# новую ленту, а не возвращать старые цифры (600) из предыдущего сценария.
+srv._STATS_CACHE.clear()
 srv.LIQUIDATIONS.clear()
 _now = time.time()
 srv.LIQUIDATIONS.extend([

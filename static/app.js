@@ -21,6 +21,14 @@
     };
     I18n.init();
 
+    // Страховка высоты графика: схлопнутый контейнер (мобильный док,
+    // скрытая вкладка, момент вставки слота в сетку) — не размер, а
+    // артефакт раскладки. Ниже CHART_MIN_H рисуем в CHART_FALLBACK_H
+    // (initChart и handleResize), иначе первый кадр уходит в чёрную
+    // полоску, а на телефоне график «исчезает» под заголовком слота.
+    const CHART_MIN_H = 100;
+    const CHART_FALLBACK_H = 400;
+
     const state = {
         symbol: "ALL",          // фильтр ленты: конкретная монета или ALL
         chartSymbol: "",        // монета графика — живёт отдельно от фильтра
@@ -53,7 +61,8 @@
         paneOi: false,
         userLoggedIn: false,    // для бонусов: сигналы + без рекламы
         layersAllowed: true,    // по умолчанию свободный доступ; если пробник включён — решает сервер
-        layersBlocked: false,   // true когда пробник включён и время вышло
+        layersBlocked: false,  // true когда пробник включён и время вышло
+        authGateReady: false,   // права проверены в родительском окне
         layersTrial: null,      // ответ /api/layers/trial: остаток времени гостя
         trialTimer: 0,          // таймер сверки остатка с сервером
         symbols: [],
@@ -84,7 +93,63 @@
         flowAll: null,         // лента: liq | cvd | oi
         chartFollow: true,      // автоследование: окно само едет за ценой
         followMoved: 0,         // сколько раз окно подвинулось (для тестов/диагностики)
+        refreshPending: false,  // идёт рефреш ↻: ряды пусты, шкалу сбросим после данных
     };
+
+    // Встроенный сингл-чарт (iframe «добавить график» и старое окно panel):
+    // пара и таймфрейм из адреса, до загрузки свечей. Обычный терминал не трогаем.
+    // В этом режиме график НЕ открывает свой WebSocket: один сокет на окно
+    // живёт в родительском терминале, а данные приходят через postMessage
+    // (мост в chart_dock.js). Иначе 6 графиков = 6 сокетов с одного браузера.
+    let IS_EMBED = false;
+    let EMBED_SLOT = "";
+    try {
+        const embedQ = new URLSearchParams(location.search);
+        IS_EMBED = embedQ.get("embed") === "1" || embedQ.get("mode") === "panel";
+        if (IS_EMBED) {
+            EMBED_SLOT = String(embedQ.get("slot") || "");
+            const embedSym = String(embedQ.get("symbol") || "").trim().toUpperCase();
+            if (/^[A-Z0-9]{2,20}_[A-Z0-9]{2,6}$/.test(embedSym)) state.chartSymbol = embedSym;
+            const embedTf = Number(embedQ.get("tf"));
+            if ([1, 3, 5, 15, 60, 240, 1440].indexOf(embedTf) !== -1) state.timeframe = embedTf;
+            document.querySelectorAll(".btn-tf").forEach((b) => {
+                b.classList.toggle("active", Number(b.dataset.tf) === state.timeframe);
+            });
+            // Классы лёгкого режима: CSS прячет ленту, чат и виджеты кабинета.
+            // Раньше их ставил workspace.js; старый мультичарт больше не грузится.
+            if (document.body) {
+                document.body.classList.add("chart-embed");
+                document.body.classList.add("embed-mode");
+            }
+        }
+    } catch (e) { /* адрес без параметров — обычный запуск */ }
+
+    // Мост для встроенных графиков. Родительское окно держит единственный
+    // WebSocket и раздаёт данные своим iframe через postMessage; dock
+    // (chart_dock.js) подписывается сюда и пересылает кадры в свои фреймы.
+    window.LiqScopeWsBridge = window.LiqScopeWsBridge || (function () {
+        const listeners = new Set();
+        const stateListeners = new Set();
+        return {
+            currentState() {  // для свежесозданных iframe: «сокет жив/перезаход»
+                return { status: connState.status, key: connState.key };
+            },
+            listen(fn) {
+                if (typeof fn === "function") listeners.add(fn);
+                return () => listeners.delete(fn);
+            },
+            stateListen(fn) {
+                if (typeof fn === "function") stateListeners.add(fn);
+                return () => stateListeners.delete(fn);
+            },
+            _emit(msg) {
+                listeners.forEach((fn) => { try { fn(msg); } catch (e) { /* ignore */ } });
+            },
+            _emitState(status, key) {
+                stateListeners.forEach((fn) => { try { fn(status, key); } catch (e) { /* ignore */ } });
+            },
+        };
+    })();
 
     let connState = { status: "pulse yellow", key: "conn.connecting" };
 
@@ -219,6 +284,8 @@
     let markersApi = null;
     let audioCtx = null;
     let redrawQueued = false;
+    // рефреш ↻ уже идёт: второй клик не запускает вторую загрузку
+    let refreshBusy = false;
 
     // Хит-тест прямоугольников: координаты и ids событий из последнего drawClusters()
     let clusterHits = [];         // [{kind:"liq", x, y, w, h, key, ids:[...]}]
@@ -474,7 +541,36 @@
         } catch (e) { /* ignore */ }
     }
 
-    function applyFiltersFull() {
+    let currentMinVolume = 0;
+
+    function broadcastFilterUpdate() {
+        currentMinVolume = Math.max(0, Number(state.minUsd) || 0);
+        if (IS_EMBED) return;
+        const payload = {
+            source: "liqscope-dock",
+            action: "update_volume_filter",
+            minVolume: currentMinVolume,
+            minUsd: currentMinVolume,
+            minCvd: Math.max(0, Number(state.minCvd) || 0),
+            minOi: Math.max(0, Number(state.minOi) || 0),
+            minBook: Math.max(0, Number(state.minBook) || 0),
+            exchanges: state.exchanges ? Array.from(state.exchanges) : null,
+        };
+        const dock = window.LiqScopeDock;
+        if (dock && typeof dock.broadcastVolumeFilter === "function") {
+            dock.broadcastVolumeFilter(currentMinVolume, payload);
+            return;
+        }
+        document.querySelectorAll(".dock-slot iframe, .chart-slot iframe").forEach((iframe) => {
+            if (iframe.contentWindow) {
+                try { iframe.contentWindow.postMessage(payload, location.origin); } catch (e) {}
+            }
+        });
+    }
+
+    function applyFiltersAndRedraw() {
+        currentMinVolume = Math.max(0, Number(state.minUsd) || 0);
+        refreshFilterButtons();
         rebuildFeed();
         updateMarkers();
         updateLiveStats();
@@ -482,8 +578,47 @@
         // Фильтры ленты (порог и биржи) фильтруют и исторические кластеры:
         // сервер считает свёртку с теми же условиями, поэтому перезапрашиваем
         // её — ключ запроса включает порог и список включённых бирж.
-        loadLiqClusters();
+        // Слои выключены — свёртка не нужна: сервер не дёргаем, старые ряды сбрасываем.
+        if (liqClustersWanted()) loadLiqClusters();
+        else dropLiqClusters();
     }
+
+    function applyFiltersFull() {
+        applyFiltersAndRedraw();
+        broadcastFilterUpdate();
+    }
+
+    window.addEventListener("message", (e) => {
+        if (e.origin !== location.origin) return;
+        if (e.data && e.data.source === "liqscope-dock" && e.data.action === "update_volume_filter") {
+            const vol = e.data.minVolume != null ? Number(e.data.minVolume) : Number(e.data.minUsd);
+            if (isFinite(vol) && vol >= 0) {
+                currentMinVolume = vol;
+                state.minUsd = vol;
+                saveThreshold("liq");
+            }
+            if (e.data.minCvd != null && isFinite(Number(e.data.minCvd))) {
+                state.minCvd = Math.max(0, Number(e.data.minCvd));
+                saveThreshold("cvd");
+            }
+            if (e.data.minOi != null && isFinite(Number(e.data.minOi))) {
+                state.minOi = Math.max(0, Number(e.data.minOi));
+                saveThreshold("oi");
+            }
+            if (e.data.minBook != null && isFinite(Number(e.data.minBook))) {
+                state.minBook = Math.max(0, Number(e.data.minBook));
+                saveThreshold("book");
+            }
+            if (e.data.exchanges === null) {
+                state.exchanges = null;
+                saveExchanges();
+            } else if (Array.isArray(e.data.exchanges)) {
+                state.exchanges = new Set(e.data.exchanges);
+                saveExchanges();
+            }
+            applyFiltersAndRedraw();
+        }
+    });
 
     // --- История ликвидаций: переживает F5 и рестарт сервера -----------------
     // Источник правды — сервер (REST /api/liquidations по паре и фильтрам
@@ -491,7 +626,7 @@
     // локальный IndexedDB-кэш на этом устройстве: если сервер перезапустили
     // с пустым файлом, у пользователя всё равно останутся его события.
     const historyLoaded = new Set();          // какие символы уже догружали
-    const HISTORY_REST_LIMIT = 2000;          // максимум из REST-истории
+    const HISTORY_REST_LIMIT = 1000;          // быстрый первый экран, хвост придёт по WS
     const HISTORY_CACHE_TTL = 24 * 3600;      // сек: сколько держим в браузере
 
     let liqDb = null;
@@ -596,6 +731,26 @@
         return all.filter((e) => state.exchanges.has(e)).sort().join(",");
     }
 
+    // Кластеры ликвидаций нужны только включённым слоям (⚡/профиль/окно LIQ):
+    // новым посетителям со всеми выключенными слоями запрос не отправляем —
+    // страница стартует быстрее, данные догрузятся при включении слоя.
+    function liqClustersWanted() {
+        return !!(state.liqEnabled || state.profileEnabled || state.paneLiq);
+    }
+    // Слои выключены — старые ряды чужой пары/фильтров выкидываем, чтобы
+    // цифры шапки не считали по протухшим данным.
+    function dropLiqClusters() {
+        state.liqHist = {};
+        state.liqCut = 0;
+        liqHistKey = "";
+    }
+    // Ряды ещё от текущей пары/таймфрейма? После смены свечи уже новые,
+    // а кластеры могли остаться от старых.
+    function liqHistFresh() {
+        if (!liqHistKey) return true;   // рядов нет — протухать нечему
+        const prefix = chartSymbol() + "|" + Number(state.timeframe) + "|";
+        return liqHistKey.indexOf(prefix) === 0;
+    }
     async function loadLiqClusters(force) {
         const sym = chartSymbol();
         const tf = Number(state.timeframe);
@@ -628,6 +783,10 @@
             liqHistKey = key;
             liqHistAt = Date.now();
             queueRedraw();
+            // Свежие кластеры — свежие метки-киты и цифры шапки (при ленивой
+            // загрузке слой уже включён, а данных в момент клика ещё не было)
+            updateMarkers();
+            updateLiveStats();
         } catch (e) { /* нет сети — рисуем по памяти, как раньше */ }
     }
 
@@ -1185,10 +1344,14 @@
     }
 
     const ARCHIVE_HOURS = 31 * 24;
+    const ARCHIVE_FETCH_LIMIT = 1000; // не качать 4000 событий на каждый график
 
     async function loadHistoryFor(sym, force) {
-        // ALL тоже из архива: лента «все монеты» после F5 не должна обнуляться.
         if (!sym) sym = "ALL";
+        // embed: лента ликвидаций живёт в родительском окне — грузим историю
+        // только своей пары графика (нужна слоям liq/profile и меткам)
+        if (IS_EMBED && sym !== chartSymbol()) return;
+        // ALL тоже из архива: лента «все монеты» после F5 не должна обнуляться.
         if (!force && historyLoaded.has(sym)) return;
         historyLoaded.add(sym);
         try {
@@ -1198,7 +1361,7 @@
             const q = "/api/liquidations?limit=" + HISTORY_REST_LIMIT + symParam;
             // Месяц читаем из шардов (/api/history), а не увеличением лимита RAM.
             const qArch = "/api/history?bucket=raw&hours=" + ARCHIVE_HOURS +
-                    "&limit=" + MAX_HISTORY + symParam;
+                    "&limit=" + ARCHIVE_FETCH_LIMIT + symParam;
             const qHours = "/api/history?bucket=hour&hours=" + ARCHIVE_HOURS + symParam;
             const [rest, cached, arch, hours] = await Promise.all([
                 fetch(q).then((r) => r.json()).then((d) => d.liquidations || []).catch(() => []),
@@ -1287,7 +1450,10 @@
         }
 
         const width = container.clientWidth || chartWrapper.clientWidth || 900;
-        const height = container.clientHeight || chartWrapper.clientHeight || 520;
+        // Контейнер мог быть свёрнут в полоску (мобильный док, вставка
+        // слота): сразу рисуем в читаемую высоту, дальше поправит resize.
+        let height = container.clientHeight || chartWrapper.clientHeight || 520;
+        if (height < CHART_MIN_H) height = CHART_FALLBACK_H;
 
         chart = LightweightCharts.createChart(container, {
             width, height,
@@ -1342,7 +1508,10 @@
         const handleResize = () => {
             if (!chart) return;
             const w = container.clientWidth || chartWrapper.clientWidth || 900;
-            const h = container.clientHeight || chartWrapper.clientHeight || 520;
+            let h = container.clientHeight || chartWrapper.clientHeight || 520;
+            // Мобилка/переходы: схлопнувшийся контейнер (1–99px) — не размер,
+            // а артефакт; упираем график в читаемые 400px вместо чёрной полоски.
+            if (h < CHART_MIN_H) h = CHART_FALLBACK_H;
             chart.applyOptions({ width: w, height: h });
             if (clusterCanvas) {
                 clusterCanvas.width = w;
@@ -1470,6 +1639,30 @@
         return null;
     }
 
+    /** Диапазон цен свечей [from..to] — чистая функция, гоняется в тестах.
+     *
+     * Нужна там, где индексы участка известны заранее и читать видимое окно
+     * графика нельзя: после рефреша библиотека применяет новое окно времени
+     * лишь на следующем кадре, и ``getVisibleLogicalRange`` вернул бы старый
+     * участок.
+     */
+    function priceBandBetween(from, to) {
+        const candles = state.candles || [];
+        if (!candles.length) return null;
+        const first = Math.max(0, Math.floor(Number(from)));
+        const last = Math.min(candles.length - 1, Math.ceil(Number(to)));
+        let low = Infinity, high = -Infinity;
+        for (let i = first; i <= last; i++) {
+            const c = candles[i];
+            if (!c) continue;
+            const lo = Number(c.low), hi = Number(c.high);
+            if (isFinite(lo) && lo < low) low = lo;
+            if (isFinite(hi) && hi > high) high = hi;
+        }
+        if (!isFinite(low) || !isFinite(high)) return null;
+        return { low: low, high: high };
+    }
+
     /** Границы цены по видимым свечам (для вертикального слежения). */
     function visiblePriceBand() {
         const candles = state.candles || [];
@@ -1482,16 +1675,7 @@
                 to = Math.min(candles.length - 1, Math.ceil(Number(lr.to)));
             }
         } catch (e) { /* окно неизвестно — берём все свечи */ }
-        let low = Infinity, high = -Infinity;
-        for (let i = from; i <= to; i++) {
-            const c = candles[i];
-            if (!c) continue;
-            const lo = Number(c.low), hi = Number(c.high);
-            if (isFinite(lo) && lo < low) low = lo;
-            if (isFinite(hi) && hi > high) high = hi;
-        }
-        if (!isFinite(low) || !isFinite(high)) return null;
-        return { low: low, high: high };
+        return priceBandBetween(from, to);
     }
 
     /** Последняя цена на графике (закрытие живой свечи). */
@@ -1636,28 +1820,24 @@
      */
     function paintFollowButtons() {
         const on = !!state.chartFollow;
-        [$("follow-toggle"), $("follow-toggle-pop")].forEach((btn) => {
-            if (!btn) return;
-            btn.classList.toggle("active", on);
-            btn.classList.remove("paused");
-            btn.setAttribute("aria-pressed", on ? "true" : "false");
-            btn.setAttribute("data-state", on ? "on" : "off");
-            btn.title = I18n.t(on ? "chart.follow_on" : "chart.follow_off");
-        });
+        const btn = $("follow-toggle");
+        if (!btn) return;
+        btn.classList.toggle("active", on);
+        btn.classList.remove("paused");
+        btn.setAttribute("aria-pressed", on ? "true" : "false");
+        btn.setAttribute("data-state", on ? "on" : "off");
+        btn.title = I18n.t(on ? "chart.follow_on" : "chart.follow_off");
     }
 
     function setupFollowToggle() {
-        const btns = [$("follow-toggle"), $("follow-toggle-pop")];
-        if (!btns.some(Boolean)) return;
+        const btn = $("follow-toggle");
+        if (!btn) return;
         try {
             const v = localStorage.getItem("liqscope.chartFollow");
             if (v === "0") state.chartFollow = false;
             else if (v === "1") state.chartFollow = true;
         } catch (e) { /* ignore */ }
-        btns.forEach((btn) => {
-            if (!btn) return;
-            btn.addEventListener("click", () => setChartFollow(!state.chartFollow));
-        });
+        btn.addEventListener("click", () => setChartFollow(!state.chartFollow));
         I18n.onChange(() => { paintFollowButtons(); applyChartTimeOptions(); });
         paintFollowButtons();
         applyFollowMode();
@@ -1730,8 +1910,90 @@
         } catch (e) { /* ignore */ }
     }
 
+    // Одна битая свеча (NaN/дубль времени) роняет setData целиком: серия
+    // остаётся пустой при живых state.candles — тёмный график с живой шапкой.
+    function sanitizeCandles(arr) {
+        if (!Array.isArray(arr)) return [];
+        const rows = [];
+        for (const c of arr) {
+            if (!c || typeof c !== "object") continue;
+            const t = Number(c.time);
+            const o = Number(c.open), h = Number(c.high);
+            const l = Number(c.low), cl = Number(c.close);
+            if (!Number.isFinite(t) || !Number.isFinite(o) || !Number.isFinite(h) ||
+                !Number.isFinite(l) || !Number.isFinite(cl)) continue;
+            rows.push(c);
+        }
+        rows.sort((a, b) => a.time - b.time);
+        const out = [];
+        for (const c of rows) {
+            if (out.length && out[out.length - 1].time === c.time) out[out.length - 1] = c;
+            else out.push(c);
+        }
+        return out;
+    }
+
+    /** Сброс масштаба после рефреша: время — по новым свечам, цена — по ним же.
+     *
+     * Зачем. В слежении шкала цены наша (``autoScale:false``, окно двигаем мы
+     * сами). После ``setData([])`` библиотека окно НЕ трогает: оно остаётся от
+     * старых свечей, и новые данные рисуются за его границами — свечи
+     * выглядели сплющенной линией, а метки разлетались.
+     *
+     * Раньше здесь был ``fitContent()`` + шаг по видимым свечам, но у
+     * библиотеки окно времени применяется на СЛЕДУЮЩЕМ кадре: к моменту
+     * шага видимым оставался старый участок, и по нему считалась шкала. Для
+     * рефреша это лишнее — новые свечи и так должны показаться целиком,
+     * поэтому диапазон времени ставим сами, по длине ряда: без ожидания
+     * кадров и без stale-чтений. ``fitContent()`` остаётся как подстраховка
+     * (например, если длина ещё не пришла).
+     */
+    function refitChartScale() {
+        if (!chart) return false;
+        const bars = state.candles.length;
+        let done = false;
+
+        // Время: показываем весь ряд. Диапазон ставим явно — библиотека
+        // применит его на следующем кадре, и никакие чтения «текущего» окна
+        // (они вернули бы старое) не нужны.
+        if (bars > 0) {
+            try {
+                chart.timeScale().setVisibleLogicalRange({ from: -0.5, to: bars - 0.5 });
+                done = true;
+            } catch (e) { /* ignore */ }
+        }
+        if (!done) {
+            try { chart.timeScale().fitContent(); done = true; } catch (e) { /* ignore */ }
+        }
+
+        let scale = null;
+        try { scale = rightPriceScale(); } catch (e) { scale = null; }
+        if (!scale || !scale.setVisibleRange) return done;
+
+        if (state.chartFollow && bars > 0) {
+            // Слежение ведём сами (autoScale выключен), а окно осталось от
+            // старых свечей. Считаем новое окно прямо по показываемым свечам:
+            // они известны (0…bars−1), поэтому читать видимое окно графика не
+            // надо — сразу после рефреша оно ещё старое.
+            const next = followPriceFit(priceBandBetween(0, bars - 1),
+                                        lastChartPrice(), FOLLOW_MARGIN);
+            if (next) {
+                try { scale.setVisibleRange(next); done = true; } catch (e) { /* ignore */ }
+            }
+            return done;
+        }
+        // Слежения нет — шкалой цены распоряжается библиотека.
+        if (scale.applyOptions) {
+            try {
+                scale.applyOptions(followPriceOptions(false));
+                done = true;
+            } catch (e) { /* ignore */ }
+        }
+        return done;
+    }
+
     function setCandles(candles, source) {
-        state.candles = Array.isArray(candles) ? candles.slice() : [];
+        state.candles = sanitizeCandles(candles);
         state.candleSource = source || "";
         if (!candleSeries || !state.candles.length) return;
 
@@ -1740,16 +2002,14 @@
                 time: Number(c.time),
                 open: Number(c.open), high: Number(c.high),
                 low: Number(c.low), close: Number(c.close),
-            }))
-            .sort((a, b) => a.time - b.time);
+            }));
 
         const vols = state.candles
             .map((c) => ({
                 time: Number(c.time),
                 value: Number(c.volume) || 0,
                 color: Number(c.close) >= Number(c.open) ? "rgba(0,230,118,0.35)" : "rgba(255,42,95,0.35)",
-            }))
-            .sort((a, b) => a.time - b.time);
+            }));
 
         applyPricePrecision(bars[bars.length - 1].close);
         try {
@@ -1760,23 +2020,41 @@
                 });
             }
         } catch (e) { /* ignore */ }
-        candleSeries.setData(bars);
-        if (volumeSeries) volumeSeries.setData(vols);
+        try {
+            candleSeries.setData(bars);
+            if (volumeSeries) volumeSeries.setData(vols);
+        } catch (e) {
+            console.warn("[klines] setData failed, keeping previous series", e);
+            return;
+        }
 
         state.sessionOpen = bars[0].open;
         updatePriceDisplay(bars[bars.length - 1].close);
         renderTickIndicator();
-        // Кластеры за всю сохранённую историю — под текущую пару и таймфрейм
-        loadLiqClusters();
+        // Кластеры за всю сохранённую историю — под текущую пару и таймфрейм.
+        // Слои выключены — сервер на старте не дёргаем; но если пара/таймфрейм
+        // сменились, а ряды остались от старых — подтягиваем свежие одним
+        // запросом, чтобы цифры шапки не врали (это уже не старт, а клик юзера).
+        if (liqClustersWanted() || !liqHistFresh()) loadLiqClusters();
         updateMarkers();
         updateLiveStats();
         queueRedraw();
         queueShapeFeed();
-        followChartNow();
+        if (state.refreshPending) {
+            // это ответ на ↻ — окно и шкалу ставим по новым данным, а не
+            // продолжаем старую картинку (иначе свечи сплющиваются)
+            state.refreshPending = false;
+            refitChartScale();
+        } else {
+            followChartNow();
+        }
     }
 
     function updateCandle(c) {
         if (!candleSeries || !c) return;
+        // Пока идёт рефреш, ряды пусты: тик нарисовал бы одну свечу поверх
+        // пустого графика и она конфликтовала бы с ответом /api/klines.
+        if (state.refreshPending) return;
         const bar = {
             time: Number(c.time), open: Number(c.open), high: Number(c.high),
             low: Number(c.low), close: Number(c.close),
@@ -5421,6 +5699,112 @@
         finishBookFeed(ordered.length);
     }
 
+    // Members receive whale_tx on the shared market socket. Keep a bounded local
+    // cache so a REST history response cannot erase events received in flight.
+    const whaleRows = new Map();
+    let whaleEnabled = true;
+    let whaleNativeEnabled = false;
+    let whaleAuthRequired = false;
+    let whaleRequest = 0;
+    function whaleKey(row) { return row.chain + ":" + row.hash + ":" + row.log_index; }
+    function addWhale(row) {
+        if (!row || !/^(ETH|BNB|POLYGON|ARBITRUM|BASE|HYPERLIQUID)$/.test(row.chain || "") ||
+                !/^0x[0-9a-f]{64}$/i.test(row.hash || "")) return;
+        whaleRows.set(whaleKey(row), row);
+        while (whaleRows.size > 100) whaleRows.delete(whaleRows.keys().next().value);
+        if (state.feedTab === "whale") paintWhales();
+    }
+    function paintWhales() {
+        const target = $("whale-events"), empty = $("whale-empty");
+        if (!target || !empty) return;
+        if (whaleAuthRequired) {
+            target.replaceChildren();
+            feedCountEl.textContent = "";
+            empty.hidden = false;
+            empty.replaceChildren(document.createTextNode(I18n.t("screener.members_only") + " "));
+            const link = document.createElement("a");
+            link.href = "/login?next=/screener";
+            link.textContent = I18n.t("screener.sign_in");
+            empty.append(link);
+            return;
+        }
+        const min = Number($("whale-min").value), chain = $("whale-chain").value;
+        const direction = $("whale-direction").value;
+        const rows = Array.from(whaleRows.values()).filter((row) =>
+            Number(row.usd) >= min && (chain === "ALL" || row.chain === chain) &&
+            (direction === "ALL" || row.direction === direction))
+            .sort((a, b) => Number(b.timestamp) - Number(a.timestamp)).slice(0, 50);
+        const frag = document.createDocumentFragment();
+        rows.forEach((row) => {
+            const card = document.createElement("article");
+            card.className = "whale-card";
+            const scans = {ETH: "https://etherscan.io/tx/", BNB: "https://bscscan.com/tx/",
+                POLYGON: "https://polygonscan.com/tx/", ARBITRUM: "https://arbiscan.io/tx/",
+                BASE: "https://basescan.org/tx/", HYPERLIQUID: "https://hypurrscan.io/tx/"};
+            const scan = scans[row.chain];
+            const addr = (value, label) => escapeHtml(label || String(value || "").slice(0, 10) + "…" + String(value || "").slice(-6));
+            const dir = row.direction === "inflow" ? "⬇ inflow" : row.direction === "outflow" ? "⬆ outflow" :
+                row.direction === "trade" ? "⇄ trade · " + escapeHtml(row.side || "") : "↔ transfer";
+            const cls = row.direction === "inflow" || row.direction === "outflow" ? "whale-" + row.direction :
+                row.direction === "trade" ? "whale-trade" : "";
+            const ts = new Date(Number(row.timestamp) * 1000);
+            const time = isNaN(ts.getTime()) ? "" : ts.toLocaleTimeString();
+            card.innerHTML = '<div class="whale-card-head"><span>' + escapeHtml(row.chain) +
+                ' · ' + escapeHtml(time) + ' · <span class="' + cls + '">' + dir +
+                '</span></span><a href="' + scan + row.hash + '" target="_blank" rel="noopener noreferrer">↗ Scan</a></div>' +
+                '<div><strong>' + Number(row.amount).toLocaleString(undefined, { maximumFractionDigits: 8 }) +
+                ' ' + escapeHtml(row.symbol) + '</strong> · <span class="whale-usd">$' +
+                Number(row.usd).toLocaleString(undefined, { maximumFractionDigits: 2 }) + '</span></div>' +
+                '<div class="whale-address">' + (row.direction === "trade" ?
+                    'buyer ' + addr(row.from, row.from_label) + ' ↔ seller ' +
+                    addr(row.to, row.to_label) : addr(row.from, row.from_label) + ' → ' +
+                    addr(row.to, row.to_label)) + '</div>';
+            frag.appendChild(card);
+        });
+        target.replaceChildren(frag);
+        feedCountEl.textContent = rows.length + " событий";
+        empty.hidden = rows.length > 0;
+        empty.textContent = (whaleEnabled || whaleNativeEnabled)
+            ? I18n.t("screener.feed_empty") : I18n.t("screener.status_waiting");
+    }
+    async function loadWhales() {
+        const seq = ++whaleRequest;
+        const min = $("whale-min").value, chain = $("whale-chain").value;
+        try {
+            const res = await fetch("/api/screener/whales?min_usd=" + min +
+                                    "&chain=" + chain + "&limit=100");
+            if (res.status === 401) {
+                whaleAuthRequired = true;
+                whaleRows.clear();
+                if (seq === whaleRequest) paintWhales();
+                return;
+            }
+            if (!res.ok) throw new Error("HTTP " + res.status);
+            const data = await res.json();
+            if (seq !== whaleRequest) return;
+            whaleAuthRequired = false;
+            whaleEnabled = data.enabled;
+            whaleNativeEnabled = !!(data.native && data.native.enabled);
+            const scope = $("whale-scope-note");
+            if (scope) scope.textContent = I18n.t("screener.members_dashboard_hint");
+            (data.events || []).slice().reverse().forEach(addWhale);
+            paintWhales();
+        } catch (e) {
+            if (seq === whaleRequest) {
+                whaleEnabled = true;
+                paintWhales();
+                if (!whaleRows.size) $("whale-empty").textContent = I18n.t("screener.load_error");
+            }
+        }
+    }
+    ["whale-min", "whale-chain", "whale-direction"].forEach((id) => {
+        const el = $(id);
+        if (el) el.addEventListener("change", () => {
+            if (id === "whale-direction") paintWhales();
+            else loadWhales();
+        });
+    });
+
     function rebuildFeed() {
         pinHitKey = null;
         hoverHitKey = null;
@@ -5432,6 +5816,11 @@
             }
         }
         paintFeedHeaders();
+        const whalePanel = $("whale-panel");
+        if (whalePanel) whalePanel.hidden = state.feedTab !== "whale";
+        const feedSection = document.querySelector(".feed-section");
+        if (feedSection) feedSection.classList.toggle("whale-active", state.feedTab === "whale");
+        if (state.feedTab === "whale") { paintWhales(); return; }
         if (state.feedTab === "cvd") { rebuildShapeFeed("cvd"); return; }
         if (state.feedTab === "oi") { rebuildShapeFeed("oi"); return; }
         if (state.feedTab === "book") { rebuildBookFeed(); return; }
@@ -5450,7 +5839,7 @@
     }
 
     function setFeedTab(tab) {
-        if (tab !== "liq" && tab !== "cvd" && tab !== "oi" && tab !== "book") return;
+        if (tab !== "liq" && tab !== "cvd" && tab !== "oi" && tab !== "book" && tab !== "whale") return;
         if (state.feedTab === tab) return;
         state.feedTab = tab;
         try { localStorage.setItem("liqscope.feedTab", tab); } catch (e) { /* ignore */ }
@@ -5458,13 +5847,14 @@
         // поднимаем поллер, уходим со вкладки при выключенном слое — гасим
         bookPollSync();
         rebuildFeed();
+        if (tab === "whale") loadWhales();
         sendFeedConfig();     // «ВСЕ» + CVD/OI → сервер начинает поток всех монет
     }
 
     function setupFeedTabs() {
         try {
             const v = localStorage.getItem("liqscope.feedTab");
-            if (v === "liq" || v === "cvd" || v === "oi" || v === "book") state.feedTab = v;
+            if (v === "liq" || v === "cvd" || v === "oi" || v === "book" || v === "whale") state.feedTab = v;
         } catch (e) { /* ignore */ }
         const tabs = $("feed-tabs");
         if (!tabs) return;
@@ -5478,6 +5868,7 @@
         // поллер и рисуем ленту, даже если кнопка 📖 в слоях не нажата
         bookPollSync();
         if (state.feedTab === "book") rebuildFeed();
+        if (state.feedTab === "whale") { rebuildFeed(); loadWhales(); }
     }
 
     let shapeFeedTimer = null;
@@ -5724,7 +6115,7 @@
         detailModal.classList.toggle("peek-pinned", pinned);
     }
 
-    // --- Панель кнопок слоёв: выезжает сверху по кнопке «☰ Слои» -------------
+    // --- Панель кнопок слоёв: выезжает списком по кнопке ☰ --------------------
     // Кнопки Ликвидации/CVD/OI живут в попапе, а их цифры — в верхней плашке
     // с текстовыми подписями. Закрытие: повторный клик, клик мимо, Esc.
     function setupLayerPop() {
@@ -5759,6 +6150,7 @@
     const LAYER_DEFS = {};
 
     async function fetchAuthMe() {
+        if (IS_EMBED) return null;
         try {
             const r = await fetch("/api/auth/me", { credentials: "same-origin" });
             const d = await r.json();
@@ -5776,6 +6168,7 @@
     const GATE_TICK_MS = 30000;            // как часто переспрашиваем сервер
 
     async function fetchLayersTrial() {
+        if (IS_EMBED) return null;
         try {
             const r = await fetch("/api/layers/trial", { credentials: "same-origin" });
             if (!r.ok) return null;
@@ -5883,6 +6276,7 @@
             state.layersBlocked = false;
             state.layersAllowed = true;
             if (!state.userLoggedIn && !gateDismissed()) openLayerGate();
+            if (!IS_EMBED) publishGate();
             return;
         }
         // пробный период включён — время вышло
@@ -5899,6 +6293,7 @@
         updateLiveStats();
         queueRedraw();
         if (!gateDismissed()) openLayerGate();
+        if (!IS_EMBED) publishGate();
     }
 
     function stopTrialWatch() {
@@ -5906,15 +6301,18 @@
     }
 
     async function checkLayerTrial() {
+        if (IS_EMBED) return;
         const t = await fetchLayersTrial();
         if (!t) return;
         state.layersTrial = t;
         const active = trialIsActive(t);
         if (active && t.allowed === false) { expireLayers(); return; }
         paintLayerTrial();
+        publishGate();
     }
 
     function watchLayerTrial() {
+        if (IS_EMBED) return;
         if (state.trialTimer) clearInterval(state.trialTimer);
         const active = trialIsActive(state.layersTrial);
         if (!active) { stopTrialWatch(); return; }
@@ -5954,7 +6352,101 @@
         };
     }
 
+    // Права в дополнительных графиках — снимок уже проверенного состояния
+    // родителя. iframe никогда не запускает auth/trial запросы или таймер.
+    let embedGateWaiter = null;
+    let embedTogglesReady = false;
+    let embedIndicatorsReady = false;
+    function gateSnapshot() {
+        return { ready: true, userLoggedIn: !!state.userLoggedIn,
+            layersAllowed: !!state.layersAllowed, layersBlocked: !!state.layersBlocked,
+            layersTrial: state.layersTrial };
+    }
+    function publishGate() {
+        state.authGateReady = true;
+        const dock = window.LiqScopeDock;
+        if (dock && dock._bridgeSendAll) dock._bridgeSendAll({ type: "auth-gate", ...gateSnapshot() });
+    }
+    function applyEmbedGate(gate) {
+        if (!IS_EMBED || !gate || gate.ready !== true) return false;
+        const wasBlocked = state.layersBlocked;
+        state.userLoggedIn = !!gate.userLoggedIn;
+        state.layersAllowed = !!gate.layersAllowed;
+        state.layersBlocked = !!gate.layersBlocked;
+        state.layersTrial = gate.layersTrial || null;
+        state.authGateReady = true;
+        if (state.layersBlocked) hideLayerCall();
+        else if (wasBlocked) {
+            const call = $("layer-call");
+            if (call) call.classList.remove("hidden");
+        }
+        // Сообщение может прийти ПОСЛЕ безопасного таймаута. Обновляем уже
+        // созданные тумблеры без повторной установки обработчиков и не пишем
+        // «0» в общий с родителем localStorage при блокировке слоя.
+        if (embedTogglesReady && wasBlocked !== state.layersBlocked) {
+            Object.values(LAYER_DEFS).forEach((d) => {
+                let enabled = false;
+                if (state.layersAllowed) {
+                    try { enabled = localStorage.getItem(d.store) === "1"; } catch (e) {}
+                }
+                state[d.skey] = enabled;
+                d.el.classList.toggle("active", enabled);
+                d.el.title = I18n.t(enabled ? d.on : d.off);
+                if (d.pane) syncPaneVisibility(d.pane);
+            });
+            levelsPollSync();
+            bookPollSync();
+            if (state.layersAllowed) {
+                if (!embedIndicatorsReady) {
+                    setupIndicatorPanes();
+                    embedIndicatorsReady = true;
+                }
+                if (liqClustersWanted()) {
+                    loadLiqClusters();
+                    loadHistoryFor(chartSymbol(), true);
+                }
+            }
+            updateMarkers();
+            updateLiveStats();
+            queueRedraw();
+        }
+        if (state.layersBlocked) LAYER_KEYS.forEach((k) => { state[k] = false; });
+        paintLayerTrial();
+        return true;
+    }
+    function parentGate() {
+        try {
+            const host = window.parent !== window ? window.parent : window.opener;
+            if (host && host !== window && host.location.origin === location.origin &&
+                host.state && host.state.authGateReady) {
+                const p = host.state;
+                return { ready: true, userLoggedIn: p.userLoggedIn,
+                    layersAllowed: p.layersAllowed, layersBlocked: p.layersBlocked,
+                    layersTrial: p.layersTrial };
+            }
+        } catch (e) { /* чужой origin — права не наследуем */ }
+        return null;
+    }
+
     async function applyAuthGate() {
+        if (IS_EMBED) {
+            // Обычно родитель уже готов. Если ещё нет — ждём одно сообщение
+            // от chart_dock; после таймаута закрываем доступ, но не идём в сеть.
+            let gate = parentGate();
+            if (!gate) gate = await new Promise((resolve) => {
+                const timer = setTimeout(() => {
+                    embedGateWaiter = null;
+                    resolve(null);
+                }, 1500);
+                embedGateWaiter = (msg) => { clearTimeout(timer); resolve(msg); };
+            });
+            if (!applyEmbedGate(gate)) {
+                state.layersAllowed = false;
+                state.layersBlocked = true;
+                hideLayerCall();
+            }
+            return state.layersAllowed;
+        }
         const pair = await Promise.all([fetchAuthMe(), fetchLayersTrial()]);
         const user = pair[0], trial = pair[1];
         state.userLoggedIn = !!user;
@@ -5970,6 +6462,7 @@
                     openLayerGate();
                 }
             } catch {}
+            publishGate();
             return state.layersAllowed;
         }
         // пробный период включён — оригинальная логика main
@@ -5988,6 +6481,7 @@
             hideLayerCall();
             if (!gateDismissed()) openLayerGate();
         }
+        publishGate();
         return state.layersAllowed;
     }
 
@@ -6072,6 +6566,15 @@
                     bookPollSync();
                     if (state.feedTab === "book") rebuildBookFeed();
                 }
+                if ((d.skey === "liqEnabled" || d.skey === "profileEnabled" ||
+                        d.skey === "paneLiq") && state[d.skey]) {
+                    // слой только что включили — данных может не быть (на старте
+                    // со всеми выключенными слоями сервер не дёргаем): грузим
+                    // кластеры и историю пары; повторные вызовы дёшевы — внутри
+                    // TTL-ключ и historyLoaded отсекают лишнее
+                    loadLiqClusters();
+                    loadHistoryFor(chartSymbol());
+                }
                 paint();
                 updateMarkers();
                 updateLiveStats();
@@ -6086,6 +6589,14 @@
             // стартовый поллер ставим один раз после восстановления тумблеров
             if (state.feedTab === "book") bookPollSync();
         });
+        // Вернувшийся посетитель со включёнными слоями: свечи уже легли раньше,
+        // чем прочитались префы, — кластеры забираем сразу, не ждём отложенный
+        // запрос. В embed заодно грузим историю пары (ленты там нет, стартуем
+        // налегке и догружаемся только под включённые слои).
+        if (liqClustersWanted()) {
+            loadLiqClusters();
+            if (IS_EMBED) loadHistoryFor(chartSymbol(), true);
+        }
 
         // Task 2: toggle for dashed level alert
         try {
@@ -6473,15 +6984,28 @@
     function setupChartToggle() {
         if (!chartToggle || !chartSection) return;
         try {
-            if (localStorage.getItem("liqscope.chartCollapsed") === "1") {
+            if (!IS_EMBED && localStorage.getItem("liqscope.chartCollapsed") === "1") {
                 chartSection.classList.add("collapsed");
             }
         } catch (e) { /* ignore */ }
 
         chartToggle.addEventListener("click", () => {
+            const dock = window.LiqScopeDock;
+            try {
+                if (dock && dock.isSlotFullscreen && dock.isSlotFullscreen("native") && dock.exitSlotFullscreen) {
+                    dock.exitSlotFullscreen();
+                    return;
+                }
+            } catch (e) {}
+            if (chartSection.classList.contains("fullscreen") || chartSection.classList.contains("is-fullscreen")) {
+                chartSection.classList.remove("fullscreen", "is-fullscreen");
+                document.body.classList.remove("chart-fullscreen");
+                resetFullscreenStyles();
+                return;
+            }
             const collapsed = chartSection.classList.toggle("collapsed");
             try {
-                localStorage.setItem("liqscope.chartCollapsed", collapsed ? "1" : "0");
+                if (!IS_EMBED) localStorage.setItem("liqscope.chartCollapsed", collapsed ? "1" : "0");
             } catch (e) { /* ignore */ }
             if (!collapsed) {
                 // после разворачивания пересчитываем размеры графика
@@ -6493,33 +7017,166 @@
         });
     }
 
+    function resetFullscreenStyles() {
+        const container = $("tv-chart-container");
+        if (chartSection) {
+            chartSection.classList.remove("fullscreen", "is-fullscreen");
+            chartSection.style.width = "";
+            chartSection.style.height = "";
+        }
+        if (chartWrapper) {
+            chartWrapper.style.width = "";
+            chartWrapper.style.height = "";
+        }
+        if (container) {
+            container.classList.remove("is-fullscreen");
+            container.style.width = "";
+            container.style.height = "";
+            if (chart) {
+                const w = container.clientWidth || (chartWrapper && chartWrapper.clientWidth) || 900;
+                let h = container.clientHeight || (chartWrapper && chartWrapper.clientHeight) || 520;
+                if (h < CHART_MIN_H) h = CHART_FALLBACK_H;
+                if (typeof chart.resize === "function") {
+                    chart.resize(w, h);
+                } else if (typeof chart.applyOptions === "function") {
+                    chart.applyOptions({ width: w, height: h });
+                }
+            }
+        }
+    }
+    window.LiqScopeResetFs = resetFullscreenStyles;
+
     // --- Разворот графика на весь экран (как на биржах) -----------------------
     function setupChartExpand() {
         const btn = $("chart-expand");
+        const container = $("tv-chart-container");
         if (!btn || !chartSection) return;
+        const dock = () => window.LiqScopeDock;
         const paint = () => {
-            const fs = chartSection.classList.contains("fullscreen");
+            let dockFs = false;
+            try { dockFs = !!(dock() && dock().isSlotFullscreen && dock().isSlotFullscreen("native")); } catch (e) {}
+            const fs = chartSection.classList.contains("fullscreen") || chartSection.classList.contains("is-fullscreen") || dockFs;
             btn.classList.toggle("active", fs);
             btn.title = I18n.t(fs ? "chart.collapse_title" : "chart.expand_title");
         };
         const setFs = (on) => {
             chartSection.classList.toggle("fullscreen", on);
+            chartSection.classList.toggle("is-fullscreen", on);
             document.body.classList.toggle("chart-fullscreen", on);
+            if (!on) resetFullscreenStyles();
             paint();
             // после смены геометрии — пересчитать размеры графика
             setTimeout(() => {
+                if (!on) resetFullscreenStyles();
                 window.dispatchEvent(new Event("resize"));
                 queueRedraw();
             }, 60);
         };
         btn.addEventListener("click", () => {
+            // Несколько графиков: ⛶ разворачивает только этот, не всю сетку.
+            try {
+                if (dock() && dock().interceptFullscreen && dock().interceptFullscreen("native")) {
+                    paint();
+                    return;
+                }
+            } catch (e) {}
             setFs(!chartSection.classList.contains("fullscreen"));
         });
         document.addEventListener("keydown", (e) => {
-            if (e.key === "Escape" && chartSection.classList.contains("fullscreen")) setFs(false);
+            if (e.key !== "Escape") return;
+            try {
+                if (dock() && dock().exitSlotFullscreen && dock().exitSlotFullscreen()) {
+                    resetFullscreenStyles();
+                    paint();
+                    return;
+                }
+            } catch (err) {}
+            if (chartSection.classList.contains("fullscreen") || chartSection.classList.contains("is-fullscreen")) {
+                setFs(false);
+            }
+        });
+        document.addEventListener("fullscreenchange", () => {
+            if (!document.fullscreenElement) {
+                if (container) {
+                    container.classList.remove("is-fullscreen");
+                    container.style.width = ""; // Очистка остаточных стилей
+                    container.style.height = "";
+                    if (chart && typeof chart.resize === "function") {
+                        chart.resize(container.clientWidth, container.clientHeight);
+                    }
+                }
+                try {
+                    if (dock() && dock().exitSlotFullscreen) dock().exitSlotFullscreen();
+                } catch (err) {}
+                resetFullscreenStyles();
+                document.body.classList.remove("chart-fullscreen");
+                paint();
+                queueRedraw();
+            }
         });
         I18n.onChange(paint);
         paint();
+    }
+
+    // --- Кнопка «Обновить график» (↻) ----------------------------------------
+    /** Плашка «обновляю свечи» поверх графика (пока ряды пусты). */
+    function showChartLoading(on) {
+        const box = $("chart-loading");
+        if (!box) return;
+        box.classList.toggle("hidden", !on);
+        box.setAttribute("aria-hidden", on ? "false" : "true");
+    }
+
+    /** Рефреш: полностью убираем старые ряды и метки, ждём новые данные и
+     *  заново подгоняем масштаб (``refitChartScale`` — уже по новым свечам).
+     *
+     *  Порядок важен: очистка идёт до запроса (старые данные не мешают новым),
+     *  ответ на запрос применяется в ``setCandles`` и там же сбрасывает шкалу,
+     *  а спиннер держится до конца загрузки — включая пересборку маркеров.
+     */
+    async function refreshChart() {
+        if (refreshBusy) return;         // повторный клик по ↻ ничего не ломает
+        refreshBusy = true;
+        const sym = chartSymbol();
+        state.refreshPending = true;
+        showChartLoading(true);
+        state.candles = [];
+        if (candleSeries && typeof candleSeries.setData === "function") {
+            try { candleSeries.setData([]); } catch (e) { /* ignore */ }
+        }
+        if (volumeSeries && typeof volumeSeries.setData === "function") {
+            try { volumeSeries.setData([]); } catch (e) { /* ignore */ }
+        }
+        if (IS_EMBED) {
+            state.liquidations = [];
+            historyLoaded.clear();
+        } else {
+            state.liquidations = state.liquidations.filter((x) => x && x.symbol !== sym);
+            historyLoaded.delete(sym);
+        }
+        dropLiqClusters();
+        applyMarkers([]);
+        queueRedraw();
+        try {
+            await loadCandles();
+            await loadHistoryFor(sym, true);
+        } catch (e) {
+            console.warn("[refresh] свечи не обновились:", e);
+        } finally {
+            state.refreshPending = false;
+            refreshBusy = false;
+            showChartLoading(false);
+        }
+        if (liqClustersWanted()) loadLiqClusters(true);
+        if (state.bookEnabled) bookSnapshot();
+        if (state.levelsEnabled) levelsSnapshot(true);
+    }
+
+    function setupChartRefresh() {
+        const btn = $("chart-refresh");
+        if (!btn || btn._refreshBound) return;
+        btn._refreshBound = true;
+        btn.addEventListener("click", () => refreshChart());
     }
 
     // --- Список монет: выпадающий список (как на биржах) ---------------------
@@ -6987,7 +7644,14 @@
                 { method: "POST" });
             const data = await r.json();
             if (!data.added) {
-                symbolHint.textContent = I18n.t("search.added_fail", { sym: pretty(rawSymbol) });
+                // Сервер знает причину отказа точнее, чем «не нашлась пара»:
+                // гостю нужна авторизация, у аккаунта есть лимит своих монет
+                // (data.limit), а общий список имеет потолок памяти.
+                const vars = { sym: pretty(rawSymbol), n: data.limit || 0 };
+                const key = data.error === "auth" ? "search.need_auth"
+                    : data.error === "quota" ? "search.quota_full"
+                        : "search.added_fail";
+                symbolHint.textContent = I18n.t(key, vars);
                 symbolHint.className = "symbol-hint warn";
                 return;
             }
@@ -7147,6 +7811,8 @@
     }
 
     async function fetchStats() {
+        // embed: боксы статистики спрятаны, запросы не шлём
+        if (IS_EMBED) return;
         try {
             const q = state.symbol === "ALL" ? "" : "?symbol=" + encodeURIComponent(state.symbol);
             const r = await fetch("/api/stats" + q);
@@ -7270,6 +7936,9 @@
 
     // --- WebSocket -----------------------------------------------------------
     function sendConfig() {
+        // embed: своего сокета нет — только сообщаем родительскому доку,
+        // какая пара/таймфрейм теперь у этого графика (метки слотов)
+        if (IS_EMBED) { embedNotifySub(); return; }
         if (!ws || ws.readyState !== WebSocket.OPEN) return;
         ws.send(JSON.stringify({
             action: "sub",
@@ -7293,9 +7962,16 @@
         connState = { status: status, key: key, vars: vars };
         connStatusEl.innerHTML = '<span class="dot ' + status + '"></span> ' +
             I18n.t(key, vars);
+        // встроенные графики без своего сокета показывают состояние моста
+        try {
+            if (!IS_EMBED && window.LiqScopeWsBridge) {
+                window.LiqScopeWsBridge._emitState(status, key);
+            }
+        } catch (e) { /* ignore */ }
     }
 
     function connectWs() {
+        if (IS_EMBED) return;   // embed: данные приходят от родителя, сокет не нужен
         clearTimeout(wsReconnectTimer);
         const proto = location.protocol === "https:" ? "wss:" : "ws:";
         setConn("pulse yellow", "conn.connecting");
@@ -7313,6 +7989,11 @@
         ws.onmessage = (ev) => {
             let msg;
             try { msg = JSON.parse(ev.data); } catch (e) { return; }
+            // Мост встроенных графиков: родитель раздаёт кадры своего сокета
+            // в iframe через postMessage (один сокет на окно, см. chart_dock.js)
+            try {
+                window.LiqScopeWsBridge._emit(msg);
+            } catch (e) { /* ignore */ }
             handleMessage(msg);
         };
         ws.onclose = () => {
@@ -7320,6 +8001,124 @@
             wsReconnectTimer = setTimeout(connectWs, 2500);
         };
         ws.onerror = () => { try { ws.close(); } catch (e) {} };
+    }
+
+    // --- Мост для встроенных графиков (режим embed=1) -----------------------
+    // iframe не держит свой WebSocket: он слушает postMessage от родительского
+    // окна, где живёт единственный сокет терминала (мост строит chart_dock.js).
+    // Родитель шлёт кадры своего сокета; фильтр по символу/таймфрейму делает
+    // сам график — как и при чтении своего сокета.
+    let embedLastBeat = 0;
+    // Что реально нужно встроенному графику. Лента, статистика и чат остаются
+    // в родительском окне — их кадры сюда не пробрасываются и не обрабатываются.
+    const EMBED_ALLOW = { prices: 1, tick: 1, candle: 1, candles: 1 };
+
+    function onBridgeMessage(e) {
+        // только свой origin и только сообщения дока
+        if (e.origin !== location.origin) return;
+        const d = e.data;
+        if (!d || d.source !== "liqscope-dock" || d.type !== "ws-data") return;
+        const msg = d.payload;
+        if (!msg || typeof msg !== "object") return;
+        if (msg.type === "auth-gate") {
+            if (applyEmbedGate(msg) && embedGateWaiter) {
+                embedGateWaiter(msg);
+                embedGateWaiter = null;
+            }
+            return;
+        }
+        embedLastBeat = Date.now();
+        if (msg.type === "ws-state") {
+            // состояние родительского сокета: «подключено/переподключаемся»
+            if (msg.status && msg.key) setConn(String(msg.status), String(msg.key));
+            return;
+        }
+        if (!EMBED_ALLOW[msg.type]) return;
+        handleMessage(msg);
+    }
+
+    function embedNotifySub() {
+        // сообщить доку свою пару/таймфрейм (метки слотов, синхронизация).
+        // Дублируем двумя форматами: старый знают уже открытые вкладки дока,
+        // новый (liqscope-iframe/update_state) обновляет вкладки мгновенно.
+        try {
+            const host = window.parent !== window ? window.parent : window.opener;
+            if (!host) return;
+            host.postMessage({
+                source: "liqscope-dock",
+                type: "embed-sub",
+                slot: EMBED_SLOT,
+                symbol: chartSymbol(),
+                tf: state.timeframe,
+            }, location.origin);
+            host.postMessage({
+                source: "liqscope-iframe",
+                action: "update_state",
+                slotId: EMBED_SLOT,
+                symbol: chartSymbol(),
+                tf: state.timeframe,
+            }, location.origin);
+        } catch (e) { /* ignore */ }
+    }
+
+    function startEmbedBridge() {
+        window.addEventListener("message", onBridgeMessage);
+        setConn("pulse yellow", "conn.connecting");
+        embedNotifySub();   // родитель в ответ пришлёт снимок и состояние
+        // У встроенного графика своего сокета нет, а список монет нужен для
+        // выпадающего меню выбора пары в его заголовке — добираем по REST.
+        fetch("/api/symbols")
+            .then((r) => (r.ok ? r.json() : null))
+            .then((data) => {
+                if (!data) return;
+                state.symbols = data.symbols || state.symbols;
+                state.customSymbols = data.custom_symbols || state.customSymbols;
+                (data.details || []).forEach((d) => { state.details[d.symbol] = d; });
+                Object.assign(state.prices, data.prices || {});
+                renderSymbolButtons();
+            })
+            .catch(() => { /* сеть недоступна — поиск пар всё равно работает */ });
+        // страховка индикатора: если мост молчит дольше 20с, показываем
+        // переподключение (обычно состояние приходит кадром ws-state)
+        setInterval(() => {
+            if (!embedLastBeat) return;   // ещё ни одного кадра — ждём первый
+            if (Date.now() - embedLastBeat > 20000) setConn("red", "conn.reconnecting");
+        }, 5000);
+        // Свечи своего символа график добирает сам по REST: родительский сокет
+        // подписан на свою пару, а тики чужих пар сервер адресует только их
+        // зрителям. Запрос дешёвый — сервер отдаёт кэш, а не идёт на биржу.
+        const poll = Number(window.LIQSCOPE_EMBED_KLINE_POLL_MS);
+        const every = poll > 0 ? poll : 15000;
+        setInterval(() => {
+            if (document.visibilityState === "visible") loadCandles();
+        }, every);
+    }
+
+    /** embed: живой поток цен общий для всех монет — двигаем последнюю свечу
+     *  сами, не дожидаясь REST-обновления (объём дотянет следующий опрос). */
+    function embedPriceToCandle(price) {
+        const p = Number(price);
+        if (!isFinite(p) || p <= 0) return;
+        const last = state.candles[state.candles.length - 1];
+        if (!last) return;
+        const tfSec = (Number(state.timeframe) || 5) * 60;
+        const bucket = Math.floor(Date.now() / 1000 / tfSec) * tfSec;
+        const t0 = Number(last.time);
+        if (t0 === bucket) {
+            updateCandle({
+                time: bucket, open: Number(last.open),
+                high: Math.max(Number(last.high), p),
+                low: Math.min(Number(last.low), p),
+                close: p, volume: Number(last.volume) || 0,
+            });
+        } else if (bucket > t0) {
+            const prevClose = Number(last.close);
+            updateCandle({
+                time: bucket, open: prevClose,
+                high: Math.max(prevClose, p), low: Math.min(prevClose, p),
+                close: p, volume: 0,
+            });
+        }
     }
 
     function handleMessage(msg) {
@@ -7389,6 +8188,8 @@
                 if (p) {
                     updatePriceDisplay(p);
                     try { checkDashedLevelTriggers(p); } catch(e){}
+                    // embed: своего сокета нет — последнюю свечу двигаем ценой
+                    if (IS_EMBED) { try { embedPriceToCandle(p); } catch (e) {} }
                 }
                 break;
             }
@@ -7415,6 +8216,10 @@
                 else if (state.feedTab === "book") syncBookFeed();
                 break;
             }
+            case "whale_tx": {
+                addWhale(msg);
+                break;
+            }
             case "stats": {
                 renderStats(msg.data);
                 renderHealth(msg.health);
@@ -7436,6 +8241,12 @@
             default:
                 break;
         }
+        try {
+            if (msg && (msg.type === "prices" || msg.type === "tick" || msg.type === "candle" ||
+                    msg.type === "candles" || msg.type === "liqs")) {
+                document.dispatchEvent(new CustomEvent("liqscope:ws", { detail: msg }));
+            }
+        } catch (e) { /* панели мульти-графика живут на этом же сокете */ }
     }
 
     // --- Язык интерфейса -----------------------------------------------------
@@ -7469,16 +8280,41 @@
     }
 
     // --- Обработчики UI ------------------------------------------------------
-    document.querySelectorAll(".btn-tf").forEach((btn) => {
-        btn.addEventListener("click", () => {
-            document.querySelectorAll(".btn-tf").forEach((b) => b.classList.remove("active"));
-            btn.classList.add("active");
-            state.timeframe = parseInt(btn.dataset.tf, 10);
-            sendConfig();
-            loadCandles();
+    const HEADER_TF_OPTIONS = [[1, "1м"], [3, "3м"], [5, "5м"], [15, "15м"], [60, "1ч"], [240, "4ч"], [1440, "1д"]];
+
+    /** Смена таймфрейма из одной точки: и глобальные кнопки, и компактный
+     *  селектор в заголовке графика (переключает только свой график). */
+    function applyTimeframe(tf) {
+        const n = parseInt(tf, 10);
+        if (HEADER_TF_OPTIONS.every((p) => p[0] !== n)) return;
+        state.timeframe = n;
+        document.querySelectorAll(".btn-tf").forEach((b) => b.classList.toggle("active", Number(b.dataset.tf) === n));
+        const sel = document.getElementById("chart-header-tf");
+        if (sel && sel.value !== String(n)) sel.value = String(n);
+        sendConfig();      // в embed это шлёт update_state родителю
+        loadCandles();
+    }
+
+    /** Компактный селектор таймфрейма прямо в заголовке графика: у каждого
+     *  встроенного окна свой ТФ, глобальная панель больше не нужна. */
+    function setupHeaderTfSelect() {
+        const sel = document.getElementById("chart-header-tf");
+        if (!sel) return;
+        HEADER_TF_OPTIONS.forEach((pair) => {
+            const opt = document.createElement("option");
+            opt.value = String(pair[0]);
+            opt.textContent = pair[1];
+            sel.appendChild(opt);
         });
+        sel.value = String(state.timeframe);
+        sel.addEventListener("change", () => applyTimeframe(sel.value));
+    }
+
+    document.querySelectorAll(".btn-tf").forEach((btn) => {
+        btn.addEventListener("click", () => applyTimeframe(btn.dataset.tf));
     });
 
+    setupHeaderTfSelect();
     setupFilterControls();
     setupSymbolSearch();
     setupLanguage();
@@ -7595,7 +8431,46 @@
     });
 
     // --- Старт ---------------------------------------------------------------
+    /** Лёгкий старт встроенного графика (iframe «＋ График», старое окно
+     *  panel): график, свечи и слои (переключатели, панели CVD/OI, книга
+     *  и уровни грузятся по требованию при включении слоя). Без своего
+     *  WebSocket (живые тики приходят от родителя через postMessage),
+     *  без ленты ликвидаций, чата, статистики и виджетов кабинета —
+     *  они остаются в родительском окне. Иначе каждый график тянул бы
+     *  свой сокет и свой набор запросов. */
+    function bootEmbed() {
+        initChart();
+        setupChartToggle();
+        setupChartExpand();
+        setupChartRefresh();
+        setupSymbolDropdown();      // выбор монеты прямо в заголовке этого графика
+        loadCandles();
+        startEmbedBridge();
+        // embed: слои/панели/фоллоу/рисование — как в одиночном графике
+        // (иначе кнопки мёртвые). Данные слоёв грузятся лениво: кластеры и
+        // история пары — только под включённые слои (см. setupLayerToggles
+        // и обработчик тумблеров); со всеми выключенными iframe стартует
+        // налегке — одни свечи и живые тики от родителя.
+        applyAuthGate().then((allowed) => {
+            setupLayerToggles(allowed);
+            embedTogglesReady = true;
+            setupLayerPop();
+            setupLayerGate();
+            paintLayerTrial();
+            setupFollowToggle();
+            setupIndicatorPanes();
+            embedIndicatorsReady = allowed;
+            updateMarkers();
+            queueRedraw();
+        });
+        setupClusterInteraction();
+        setupDrawToolbar();
+        loadDrawings();
+        setInterval(renderTickIndicator, 1000);
+    }
+
     function boot() {
+        if (IS_EMBED) { bootEmbed(); return; }
         initChart();
         setupClusterInteraction();   // наведение/нажатие на шарик → подсветка в ленте
         initSplitters();             // регулируемая ширина ленты и высота «Лидеров»
@@ -7613,6 +8488,11 @@
         fetchOI();
         setInterval(paintCvdBox, 15000);   // окно CVD медленно ползёт
         setInterval(renderTickIndicator, 1000);
+        // Кластеры новым посетителям (все слои выключены) — отложенно, вне
+        // стартового залпа запросов: цифры шапки подтянут историю чуть позже,
+        // а первый paint и свечи не ждут. Слои включены — запрос уже ушёл из
+        // setCandles/setupLayerToggles, повтор не нужен.
+        setTimeout(() => { if (!liqClustersWanted()) loadLiqClusters(); }, 6000);
         // Слои: если пробник выключен — свободный доступ всем, иначе — N минут гостю.
         // Сначала узнаём auth + trial, потом вешаем переключатели.
         applyAuthGate().then((allowed) => {
@@ -7629,6 +8509,7 @@
         setupExchHealth(); // выпадающий список бирж в шапке
         setupChartToggle();
         setupChartExpand();
+        setupChartRefresh();
         setupDrawToolbar();   // панель рисования + тестовый API
         loadDrawings();       // фигуры текущей монеты
         // страховка: если WS молчит дольше 30с — перезапрашиваем свечи
@@ -7642,6 +8523,11 @@
     try {
         window.LiqScopeApp = window.LiqScopeApp || {};
         window.LiqScopeApp.selectSymbol = selectSymbol;
+        window.LiqScopeApp.applyTimeframe = applyTimeframe;
+        window.LiqScopeApp.refreshChart = refreshChart;
+        window.LiqScopeApp.fetchKlines = loadCandles;
+        window.LiqScopeApp.loadHistory = (sym) => loadHistoryFor(sym || chartSymbol(), true);
+        window.LiqScopeApp.applyFiltersAndRedraw = applyFiltersAndRedraw;
         window.LiqScopeApp.createCandleSeries = createCandleSeries;
         window.LiqScopeApp.createVolumeSeries = createVolumeSeries;
         window.LiqScopeApp.getSymbols = function() {

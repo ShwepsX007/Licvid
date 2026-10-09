@@ -1259,6 +1259,16 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
 .lv-signal { margin: 8px 0 14px; padding: 10px 12px; border: 1px solid var(--border);
     border-radius: 12px; background: rgba(8, 12, 22, 0.45); }
 .lv-signal .al-label { margin-top: 8px; }
+/* 🐋 Signal Screener: последние совпадения под фильтр */
+.sc-recent { display: flex; flex-direction: column; gap: 4px; }
+.sc-recent-row {
+  font-size: 0.78rem; color: var(--text); padding: 5px 8px;
+  border-left: 2px solid var(--border); background: rgba(255, 255, 255, 0.02);
+}
+.sc-recent-row.is-in { border-left-color: #00e676; }
+.sc-recent-row.is-out { border-left-color: #ff2a5f; }
+.sc-recent-row b { font-variant-numeric: tabular-nums; }
+.sc-recent-ts { color: var(--muted); font-size: 0.72rem; }
 .lv-symrow { margin: 4px 0 10px; }
 .lv-select {
     width: 100%;
@@ -1525,4 +1535,41 @@ label { font-size: 0.75rem; color: var(--muted); display: block; margin: 12px 0 
 .lv-note { color: var(--muted); font-size: 0.72rem; line-height: 1.4; }
 @media (max-width: 800px) {
     .lv-split { grid-template-columns: 1fr; }
+}
+
+/* Google OAuth 2.0 button */
+.google-alt {
+    margin-top: 10px;
+}
+.btn-google {
+    background: #12182a;
+    color: #f4f7fb;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    font-size: 0.96rem;
+    padding: 12px 22px;
+    text-decoration: none;
+    transition: border-color 0.15s ease, background 0.15s ease;
+}
+.btn-google-wide {
+    width: 100%;
+    justify-content: center;
+}
+.btn-google:hover:not(:disabled) {
+    border-color: rgba(66, 133, 244, 0.65);
+    background: #172038;
+}
+/* Кнопка-ссылка: без ключей вход выключен — гасим и снимаем переход. */
+.btn-google:disabled,
+.btn-google.is-off,
+.btn-google[aria-disabled="true"] {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+.btn-google[aria-disabled="true"] {
+    pointer-events: none;
+}
+.btn-google .google-icon {
+    width: 18px;
+    height: 18px;
+    flex-shrink: 0;
 }

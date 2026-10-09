@@ -65,8 +65,8 @@ class RecordingClient:
 
 
 class FakeHub:
-    def __init__(self, client):
-        self._client = client
+    def __init__(self, *clients):
+        self._clients = list(clients)
 
     class _Lock:
         async def __aenter__(self):
@@ -79,7 +79,7 @@ class FakeHub:
 
     @property
     def clients(self):
-        return {self._client}
+        return set(self._clients)
 
 
 async def scenario_fast_producer_slow_disk():
@@ -94,8 +94,15 @@ async def scenario_fast_producer_slow_disk():
         time.sleep(0.03)
         disk_calls.append(event["id"])
 
+    def slow_append_many(events):            # тот же диск, но пачкой
+        time.sleep(0.03)
+        disk_calls.extend(e["id"] for e in events)
+        return len(events)
+
     real_append = srv.HIST.add
+    real_append_many = getattr(srv.HIST, "add_many", None)
     srv.HIST.add = slow_append
+    srv.HIST.add_many = slow_append_many
     worker = asyncio.create_task(srv.liq_event_worker())
     try:
         await asyncio.sleep(0)               # дать воркеру встать в get()
@@ -129,6 +136,13 @@ async def scenario_fast_producer_slow_disk():
         except asyncio.CancelledError:
             pass
         srv.HIST.add = real_append
+        if real_append_many is not None:
+            srv.HIST.add_many = real_append_many
+        else:
+            try:
+                del srv.HIST.add_many
+            except AttributeError:
+                pass
 
 
 async def scenario_queue_overflow_drops():
@@ -181,10 +195,110 @@ async def scenario_buffered_mode():
         srv.HIST.add = real_append
 
 
+async def scenario_disk_is_off_loop():
+    """Запись пачки идёт в потоке: цикл продолжает тикать.
+
+    Прежде ``HIST.add`` открывал, писал и закрывал файл на КАЖДОЕ событие прямо
+    в воркере: каскад ликвидаций — сотни открытий подряд, а ``close()`` под
+    давлением грязных страниц ждёт writeback. Замер: 200 событий по одному
+    30.9 мс, пачкой 3.8 мс.
+    """
+    print("4) диск ушёл в поток: во время записи цикл тикает")
+    client = RecordingClient()
+    srv.hub = FakeHub(client)
+
+    real_many = srv.HIST.add_many
+
+    def slow_append_many(events):
+        time.sleep(0.25)                     # заметная «запись»
+        return len(events)
+
+    srv.HIST.add_many = slow_append_many
+    worker = asyncio.create_task(srv.liq_event_worker())
+    ticks = []
+    try:
+        await asyncio.sleep(0)
+        for i in range(20):
+            await srv.on_liquidation(make_event(i))
+
+        async def ticker():
+            for _ in range(30):
+                ticks.append(time.perf_counter())
+                await asyncio.sleep(0.01)
+
+        t = asyncio.create_task(ticker())
+        await asyncio.sleep(0.55)
+        t.cancel()
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
+        gaps = [(b - a) * 1000 for a, b in zip(ticks, ticks[1:])]
+        worst = max(gaps) if gaps else 0.0
+        check("во время записи на диск цикл не стоял (худший тик < 60мс)",
+              worst < 60.0, f"{worst:.1f}мс")
+        check("пачка ушла на диск целиком до конца прогона",
+              len(client.rows) > 0, len(client.rows))
+    finally:
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+        srv.HIST.add_many = real_many
+        await srv._liq_queue.join() if srv._liq_queue.empty() else None
+
+
+async def scenario_fanout_encodes_once_per_group():
+    """Кадр сериализуется один раз на группу фильтров, а не на клиента."""
+    print("5) рассылка: одна сериализация на группу клиентов")
+    a, b = RecordingClient(), RecordingClient()
+    b.min_usd = 5005.0                       # свой фильтр — своя группа
+    a.rows.clear(); b.rows.clear()
+    srv.hub = FakeHub(a, b)
+    calls = {"n": 0}
+    real_dumps = srv.json_dumps_text
+
+    def counting_dumps(msg):
+        calls["n"] += 1
+        return real_dumps(msg)
+
+    srv.json_dumps_text = counting_dumps
+    try:
+        events = [make_event(i) for i in range(10)]      # usd = 5000+i
+        await srv.send_liquidations(events)
+    finally:
+        srv.json_dumps_text = real_dumps
+    check("кадров ровно по числу групп (2), а не клиентов",
+          calls["n"] == 2, calls["n"])
+    check("клиент с порогом 5005 получил только крупные",
+          all(r["usd"] >= 5005 for r in b.rows) and len(b.rows) == 5,
+          f"{len(b.rows)} строк")
+    check("клиент без фильтра получил все 10", len(a.rows) == 10, len(a.rows))
+
+
+async def scenario_spans_report_names_the_task():
+    """Сторож пауз называет задачу, а не только кадр стека."""
+    print("6) атрибуция пауз: имя задачи в отчёте")
+    srv._TASK_SPANS.clear()
+    with srv.task_span("liq-levels"):
+        time.sleep(0.05)
+        rows = srv.active_spans()
+        report = srv.spans_report()
+    check("активная задача видна по имени",
+          rows and rows[0][0] == "liq-levels", rows)
+    check("в отчёте есть имя и миллисекунды",
+          "liq-levels" in report and "мс" in report, report)
+    check("после выхода спан снят", srv.active_spans() == [], srv.active_spans())
+
+
 async def main():
     await scenario_fast_producer_slow_disk()
     await scenario_queue_overflow_drops()
     await scenario_buffered_mode()
+    await scenario_disk_is_off_loop()
+    await scenario_fanout_encodes_once_per_group()
+    await scenario_spans_report_names_the_task()
 
 
 if __name__ == "__main__":

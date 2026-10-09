@@ -1,5 +1,9 @@
 # Security notes — Licvid / LiqScope
 
+> Обновление 29.09.2026: актуальный аудит — [AUDIT.md](AUDIT.md).
+> Этот файл сохраняет историю прежней конфигурации. Python `GZipMiddleware`
+> теперь удалён, ответы сжимает Nginx; не возвращайте middleware при деплое.
+
 Дата: 2026-09-27, ветка main = 5cc6f5a (merge workspace)
 
 ## Workspace Multi-Chart Security (новый)
@@ -65,9 +69,10 @@
 
 ### P2 Security headers
 
-- App middleware `SecurityHeadersMiddleware`: `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`, `Permissions-Policy: camera=(), microphone=(), geolocation=()`, `X-Frame-Options: DENY`, `CSP: frame-ancestors 'none'`.
-- Nginx `deploy/nginx-liqscope.conf` и `http.conf`: те же заголовки + `Strict-Transport-Security` в https, `gzip on`.
-- Проверка: `curl -D /terminal` → `x-frame-options: DENY`, `content-security-policy: frame-ancestors 'none'`.
+- App middleware `SecurityHeadersMiddleware`: `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`, `Permissions-Policy: camera=(), microphone=(), geolocation=()`, `X-Frame-Options: SAMEORIGIN`, `CSP: frame-ancestors 'self'`.
+- Nginx `deploy/nginx-liqscope.conf` и `deploy/nginx-liqscope.http.conf`: те же заголовки + `Strict-Transport-Security` в https, `gzip on`.
+- Проверка: `curl -D /terminal` → `x-frame-options: SAMEORIGIN`, `content-security-policy: frame-ancestors 'self'`.
+- SAMEORIGIN и 'self' — осознанный выбор: дополнительные графики терминала работают через iframe того же origin. Чужой origin по-прежнему не может встроить терминал. Не ужесточать до полного запрета фреймов — сломается док.
 
 ### P2 Gzip + Cache-Control + i18n split
 

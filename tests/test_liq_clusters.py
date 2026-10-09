@@ -276,6 +276,16 @@ class ClusterApiTest(unittest.TestCase):
         cls._hist, cls._hist_file = server.HIST, server.HISTORY_FILE
         server.HIST = HistoryStore(os.path.join(cls.dir, "liq_history.jsonl"))
         server.HISTORY_FILE = server.HIST.base_path
+        # События этого класса лежат ТОЛЬКО на диске, а _liq_cluster_map свежий
+        # хвост (LIQ_CLUSTER_MEM_SEC, по умолчанию 300 с) берёт из памяти — и
+        # наоборот: на диск он читает только то, что СТАРШЕ now - окно. Свеча в
+        # 5 минут «ездит» относительно now, поэтому прогон в первые ~40 секунд
+        # свечи ронял два теста: событие cls.t0 + STEP + 40 (= cur - 260)
+        # попадало в памятьное окно, в памяти его нет — плашка исчезала.
+        # Фиксируем окно на минимуме (60 с): все три события старше него,
+        # читаются с диска, и результат не зависит от минуты запуска.
+        cls._mem_sec = server.LIQ_CLUSTER_MEM_SEC
+        server.LIQ_CLUSTER_MEM_SEC = 60.0
         cls.now = time.time()
         cls.t0 = int(cls.now // STEP * STEP) - 2 * STEP
         cls.sym = "CLUSTERTEST_USDT"
@@ -290,6 +300,7 @@ class ClusterApiTest(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         server.HIST, server.HISTORY_FILE = cls._hist, cls._hist_file
+        server.LIQ_CLUSTER_MEM_SEC = cls._mem_sec
         shutil.rmtree(cls.dir, ignore_errors=True)
 
     def setUp(self):

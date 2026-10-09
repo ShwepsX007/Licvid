@@ -39,6 +39,8 @@ import threading
 import time
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from cpu_pool import run as run_cpu
+
 log = logging.getLogger("liqscore.levels")
 
 HOUR = 3600.0
@@ -57,6 +59,35 @@ CALIB_SPREAD = (0.5, 0.75, 1.0, 1.5, 2.0)
 #: модель за размазанность колокола, крупная путает соседние ступени плеч.
 CALIB_COARSE_REL = 0.01
 CALIB_TTL_SEC = 86400.0
+# Бюджет пересчётов калибровки. Кэш калибровок живёт сутки, но после каждого
+# рестарта он ПУСТ, и первый же проход фона платил пересчёт по всем монетам
+# батча разом: на бою 29.09.2026 это дало провал на 8 с, в течение которого
+# event loop оставался отзывчивым (loop_lag_max_ms 481), обработчик отвечал за
+# 15 мс, а запросы зрителей стояли в очереди по 5-8 с — воркер делил CPU с
+# расчётом. Бюджет растягивает пересчёты по проходам: монета без свежей
+# калибровки работает с прежним или умолчательным масштабом и добирает пересчёт
+# следующим проходом. Явный recalibrate=True из API бюджет не расходует.
+# Схлопывание строк перед лестницей: окно 30 суток даёт тысячи точек OI, а
+# различных цен входа в пределах шага сетки — сотни. Выключение (0) возвращает
+# обход каждой строки, как было.
+AGG_ROWS = os.getenv("LIQSCOPE_LEVELS_AGG_ROWS", "1").strip() not in (
+    "0", "false", "no", "off")
+# Ширина корзины схлопывания в долях шага сетки. Замер на профиле боевой формы
+# (8640 точек OI, 30 суток): корзина в шаг сетки — 272 строки и лестница за
+# 25.8 мс вместо 738.5 (×28.6), но форма лестницы уезжает на 1.67 % массы и до
+# 6.9 % на отдельной крупной ячейке; шаг/2 — 535 строк, 52.1 мс (×14.2),
+# отклонение 0.88 % и не выше 3.1 % на ячейке; шаг/4 — ×8.3 и 0.42 %.
+# Полшага сетки взяты умолчанием: это в 8 раз уже колокола размазывания
+# (KERNEL_RADIUS = 4 шага), поэтому форма остаётся в пределах неопределённости
+# самой модели, а проход фона перестаёт быть секундным.
+try:
+    AGG_BUCKET = min(1.0, max(
+        0.05, float(os.getenv("LIQSCOPE_LEVELS_AGG_BUCKET", "0.5") or 0.5)))
+except (TypeError, ValueError):
+    AGG_BUCKET = 0.5
+CALIB_BUDGET = max(0, int(os.getenv("LIQSCOPE_LEVELS_CALIB_BUDGET", "2") or 2))
+CALIB_BUDGET_SEC = max(1.0, float(
+    os.getenv("LIQSCOPE_LEVELS_CALIB_BUDGET_SEC", "30") or 30))
 MIN_CALIB_EVENTS = 20
 MIN_CALIB_SCORE = 0.15
 
@@ -74,6 +105,30 @@ MAGNET_MIN_SHARE = 0.02
 MAX_DISTANCE_REL = 0.5
 
 PAYLOAD_TTL = max(1.0, float(os.getenv("LIQSCOPE_LEVELS_TTL", "20") or 20))
+#: Шаг бакета цены в ключе кэша ответов, в долях цены (0.0005 = 0.05%).
+#: Цена в ключе с точностью до 8 знаков означала, что кэш НЕ СРАБАТЫВАЛ НИКОГДА:
+#: клиент передаёт цену со своего графика, а фон — текущую цену ленты, и они
+#: различаются в последнем знаке на каждом запросе. Пересчёт лестницы шёл на
+#: каждый вызов. Ответ и так может быть старше PAYLOAD_TTL (20 с), за которые
+#: цена уходит заметно дальше 0.05%, поэтому бакет ничего не ломает.
+PRICE_KEY_STEP = max(0.0, float(os.getenv("LIQSCOPE_LEVELS_PRICE_KEY_STEP",
+                                          "0.0005") or 0.0005))
+
+
+def price_key(price: Any) -> float:
+    """Ключ цены для кэша: одинаковая корзина при движении в пределах шага.
+
+    Бакет логарифмический, поэтому шаг одинаково работает и для BTC по 60000,
+    и для щиткоина по 0.00001. При ``PRICE_KEY_STEP = 0`` возвращается цена
+    как есть — прежнее поведение.
+    """
+    try:
+        p = float(price or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if p <= 0.0 or PRICE_KEY_STEP <= 0.0:
+        return round(p, 8)
+    return float(round(math.log(p) / math.log1p(PRICE_KEY_STEP)))
 PRICE_TTL = max(60.0, float(os.getenv("LIQSCOPE_LEVELS_PRICE_TTL", "300") or 300))
 #: Файл настроек: там же лежит и последняя калибровка (она дорогая).
 SETTINGS_FILE = os.getenv(
@@ -300,12 +355,103 @@ def build_rows(points: Sequence[Tuple[float, float]],
     return rows
 
 
+def _build_rows_snapshot(points: Sequence[Tuple[float, float]],
+                         samples: Dict[float, tuple], min_doi_rel: float) -> List[dict]:
+    """Pure worker entry point: callbacks were sampled from live feeds on the parent."""
+    return build_rows(points, lambda ts: samples[ts][0],
+                      lambda ts: samples[ts][1],
+                      lambda ts: samples[ts][2], min_doi_rel)
+
+
+def _ladder_math(rows: Sequence[dict], events: Sequence[dict], price: float,
+                 settings: Dict[str, Any], calib: dict) -> tuple:
+    """Build and subtract in one IPC trip; no live objects cross it."""
+    work = rows
+    eff = dict(settings)
+    if calib.get("applied"):
+        eff["lev_scale"] = _fnum(calib.get("lev_scale"), eff.get("lev_scale", 1.0))
+        eff["spread_scale"] = _fnum(calib.get("spread_scale"), eff.get("spread_scale", 1.0))
+    step = grid_step(price, eff.get("step_rel"))
+    ladder = build_ladder(work, eff, price)
+    applied = {"usd": 0.0, "events": 0, "skipped": 0}
+    if eff.get("subtract_executed", True):
+        applied = apply_executed(ladder, events, step)
+    return eff, step, ladder, applied
+
+
+def _history_events_worker(path: str, symbol: str, since: float,
+                           until: float, min_usd: float) -> List[dict]:
+    """Read and parse daily JSONL in a child, not a GIL-holding I/O thread."""
+    from history import HistoryStore
+    hist = HistoryStore(path)
+    out: List[dict] = []
+    for ev in hist.iter_events(since, until, symbol):
+        if _fnum(ev.get("usd")) < _fnum(min_usd):
+            continue
+        out.append(LevelsEngine._slim_event(ev))
+        if len(out) >= MAX_EVENTS:
+            break
+    return out
+
+
 def _cell(ladder: Dict[float, dict], price: float) -> dict:
     cell = ladder.get(price)
     if cell is None:
         cell = {"usd": 0.0, "long_usd": 0.0, "short_usd": 0.0, "lev": {}}
         ladder[price] = cell
     return cell
+
+
+def agg_step_rel(settings: Optional[Dict[str, Any]]) -> float:
+    """Шаг корзины схлопывания: шаг сетки лестницы × ``AGG_BUCKET``."""
+    return max(_fnum((settings or {}).get("step_rel"), 0.001), 1e-6) * AGG_BUCKET
+
+
+def aggregate_rows(rows: Sequence[dict], price: Any,
+                   step_rel: Any = None) -> List[dict]:
+    """Сложить строки позиций с близкими ценами входа в одну.
+
+    Лестнице важна масса на цене ликвидации, а не каждая точка OI: окно в 30
+    суток по пятиминуткам даёт тысячи строк, но цены входа в них повторяются —
+    соседние точки стоят почти на тех же уровнях. Строки с входом в пределах
+    шага сетки (0.1 % цены) складываются в одну с суммарной массой и входом в
+    центре тяжести масс; ключ включает MMR, потому что он сдвигает цену
+    ликвидации независимо от входа.
+
+    Точность не теряется по смыслу: квантование входа в один шаг сетки в
+    ``KERNEL_RADIUS`` (4) раз уже колокола размазывания, а цена ликвидации
+    линейна по входу, поэтому уход уровня ограничен тем же шагом сетки.
+    Масса сохраняется точно — это проверяет тест.
+    """
+    p0 = _num(price)
+    step = grid_step(p0, step_rel)
+    if p0 is None or p0 <= 0 or step <= 0 or not rows:
+        return list(rows or [])
+    agg: Dict[Tuple[int, float], List[float]] = {}
+    for row in rows:
+        entry = _num(row.get("entry"))
+        if not entry or entry <= 0:
+            continue
+        long_m = max(_fnum(row.get("long_usd")), 0.0)
+        short_m = max(_fnum(row.get("short_usd")), 0.0)
+        if long_m <= 0 and short_m <= 0:
+            continue
+        mmr = max(_fnum(row.get("mmr")), 0.0)
+        key = (int(math.floor(entry / step + 0.5)), mmr)
+        cur = agg.get(key)
+        if cur is None:
+            agg[key] = [entry * (long_m + short_m), long_m, short_m]
+        else:
+            cur[0] += entry * (long_m + short_m)
+            cur[1] += long_m
+            cur[2] += short_m
+    out: List[dict] = []
+    for (idx, mmr), (weighted, long_m, short_m) in agg.items():
+        total = long_m + short_m
+        entry = (weighted / total) if total > 0 else idx * step
+        out.append({"entry": entry, "long_usd": long_m, "short_usd": short_m,
+                    "mmr": mmr})
+    return out
 
 
 def build_ladder(rows: Sequence[dict], settings: Dict[str, Any],
@@ -328,6 +474,10 @@ def build_ladder(rows: Sequence[dict], settings: Dict[str, Any],
     spread_rel = max(_fnum((settings or {}).get("spread_rel"), 0.01), 0.0) * \
         max(_fnum((settings or {}).get("spread_scale"), 1.0), 0.05)
     kernel = spread_kernel(spread_rel, step_rel)
+    # Смещения колокола в шагах сетки не зависят ни от строки, ни от плеча:
+    # считаем один раз, иначе round() звался на каждой итерации самого
+    # внутреннего цикла (строк × плеч × сторон × отсчётов колокола).
+    ksteps = [(int(round(off_rel / step_rel)), kw) for off_rel, kw in kernel]
     dist = normalize_dist((settings or {}).get("lev_dist"))
     lev_scale = max(_fnum((settings or {}).get("lev_scale"), 1.0), 0.05)
     floor = p0 * (1.0 - MAX_DISTANCE_REL)
@@ -344,6 +494,7 @@ def build_ladder(rows: Sequence[dict], settings: Dict[str, Any],
             eff = lev * lev_scale
             if eff <= 1.0:
                 continue
+            eff_key = round(eff, 1)
             for is_long, mass in ((True, long_mass * weight),
                                   (False, short_mass * weight)):
                 if mass <= 0:
@@ -351,23 +502,27 @@ def build_ladder(rows: Sequence[dict], settings: Dict[str, Any],
                 liq = liq_price(entry, is_long, eff, mmr)
                 if liq is None or liq < floor or liq > ceil:
                     continue          # абсурдные цены — не наш рынок
-                base = snap(liq, step)
-                if base is None:
+                # было snap(liq, step) и level_index(base, step) ВНУТРИ цикла по
+                # колоколу: номер корзины от смещения не зависит, а переход
+                # «цена -> корзина -> цена -> корзина» даёт тот же номер
+                idx = level_index(liq, step)
+                if idx is None:
                     continue
-                for off_rel, kweight in kernel:
-                    idx = level_index(base, step)
-                    if idx is None:
-                        continue
+                key = "long_usd" if is_long else "short_usd"
+                for k, kweight in ksteps:
                     # смещение колокола — доля цены, поэтому в шагах сетки оно
                     # то же самое, что и в абсолютной цене
-                    price_key = index_price(idx + round(off_rel / step_rel), step)
-                    cell = _cell(ladder, price_key)
+                    price_key = round((idx + k) * step, 10)
+                    cell = ladder.get(price_key)
+                    if cell is None:
+                        cell = {"usd": 0.0, "long_usd": 0.0, "short_usd": 0.0,
+                                "lev": {}}
+                        ladder[price_key] = cell
                     part = mass * kweight
-                    cell["usd"] = _fnum(cell.get("usd")) + part
-                    key = "long_usd" if is_long else "short_usd"
-                    cell[key] = _fnum(cell.get(key)) + part
-                    levs = cell.setdefault("lev", {})
-                    levs[round(eff, 1)] = _fnum(levs.get(round(eff, 1))) + part
+                    cell["usd"] += part
+                    cell[key] += part
+                    levs = cell["lev"]
+                    levs[eff_key] = levs.get(eff_key, 0.0) + part
     return ladder
 
 
@@ -391,24 +546,47 @@ def _is_long_event(ev: dict) -> bool:
 
 
 def _match_cell(ladder: Dict[float, dict], price: float, step: Optional[float],
-                key: str, tolerance_rel: float) -> Optional[float]:
-    """Ближайшая корзина к цене события — той же стороны и в пределах допуска."""
+                key: str, tolerance_rel: float,
+                levels: Optional[Sequence[float]] = None) -> Optional[float]:
+    """Ближайшая корзина к цене события — той же стороны и в пределах допуска.
+
+    ``levels`` — цены лестницы по возрастанию: с ними поиск идёт бинарным
+    спуском к точке вставки и коротким проходом в стороны, а не перебором всех
+    ячеек. Перебор стоил «событий × ячеек»: 20000 событий и 170 уровней — 3.4 млн
+    сравнений и 1.2 с на одну монету (замер 29.09.2026), при том что допуск
+    2 % покрывает от силы пару десятков корзин.
+
+    Первая же найденная по ходу корзина с массой — и есть ближайшая: стороны
+    перебираются в порядке возрастания зазора. При равном зазоре слева и справа
+    берётся нижняя цена (раньше решал порядок вставки в словарь — он не был
+    детерминирован по смыслу, зато делал поиск линейным).
+    """
     if not ladder:
         return None
     exact = snap(price, step) if step else price
     if exact is not None and exact in ladder and _fnum(ladder[exact].get(key)) > 0:
         return exact
     tol = abs(price) * max(_fnum(tolerance_rel, EXEC_TOLERANCE_REL), 0.0)
-    best, best_gap = None, None
-    for level, cell in ladder.items():
-        if _fnum(cell.get(key)) <= 0:
-            continue
-        gap = abs(level - price)
+    keys = sorted(ladder) if levels is None else levels
+    n = len(keys)
+    i = bisect.bisect_left(keys, price)
+    lo, hi = i - 1, i
+    while lo >= 0 or hi < n:
+        gap_lo = (price - keys[lo]) if lo >= 0 else None
+        gap_hi = (keys[hi] - price) if hi < n else None
+        if gap_hi is None or (gap_lo is not None and gap_lo <= gap_hi):
+            gap, k, go_left = gap_lo, keys[lo], True
+        else:
+            gap, k, go_left = gap_hi, keys[hi], False
         if gap > tol:
-            continue
-        if best_gap is None or gap < best_gap:
-            best, best_gap = level, gap
-    return best
+            break           # дальше с обеих сторон только дальше — допуска нет
+        if _fnum(ladder[k].get(key)) > 0:
+            return k
+        if go_left:
+            lo -= 1
+        else:
+            hi += 1
+    return None
 
 
 def apply_executed(ladder: Dict[float, dict], events: Iterable[dict],
@@ -425,6 +603,9 @@ def apply_executed(ladder: Dict[float, dict], events: Iterable[dict],
     далеко или сторона не та).
     """
     st = _num(step)
+    # цены лестницы не меняются внутри цикла (пустые корзины удаляются после),
+    # поэтому сортировка одна на все события, а не на каждое
+    levels = sorted(ladder) if ladder else []
     taken, used, skipped = 0.0, 0, 0
     for ev in events or []:
         if not isinstance(ev, dict):
@@ -433,7 +614,7 @@ def apply_executed(ladder: Dict[float, dict], events: Iterable[dict],
         if price is None or price <= 0 or usd <= 0:
             continue
         key = "long_usd" if _is_long_event(ev) else "short_usd"
-        level = _match_cell(ladder, price, st, key, tolerance_rel)
+        level = _match_cell(ladder, price, st, key, tolerance_rel, levels)
         if level is None:
             skipped += 1
             continue
@@ -712,6 +893,77 @@ def overlap_score(model: Any, actual: Any, step_rel: float = CALIB_COARSE_REL) -
     return round(sum(min(v, ba.get(k, 0.0)) for k, v in bm.items()), 6)
 
 
+def base_mass_histogram(rows: Sequence[dict], settings: Dict[str, Any],
+                        price: Any, lev_scale: Optional[float] = None
+                        ) -> Tuple[Dict[int, float], float]:
+    """Масса позиций по корзинам сетки ДО размазывания колоколом.
+
+    Калибровке не нужны ячейки лестницы с разбивкой по сторонам и плечам:
+    ``overlap_score`` смотрит только на массу по цене (``_hist_usd``). Поэтому
+    здесь считается лишь «корзина -> доллары», без словарей ячеек, — а колокол
+    применяется уже к гистограмме, и его можно менять, не пересчитывая строки.
+
+    Возвращает ``(гистограмма, шаг_сетки)``; пустая гистограмма — считать нечего.
+    """
+    p0 = _num(price)
+    settings = settings or {}
+    step = grid_step(p0, settings.get("step_rel"))
+    if p0 is None or p0 <= 0 or step <= 0:
+        return {}, 0.0
+    dist = normalize_dist(settings.get("lev_dist"))
+    scale = max(_fnum(lev_scale if lev_scale is not None
+                      else settings.get("lev_scale"), 1.0), 0.05)
+    floor = p0 * (1.0 - MAX_DISTANCE_REL)
+    ceil = p0 * (1.0 + MAX_DISTANCE_REL)
+    hist: Dict[int, float] = {}
+    get = hist.get
+    for row in rows or []:
+        entry = _num(row.get("entry"))
+        if not entry or entry <= 0:
+            continue
+        long_mass = max(_fnum(row.get("long_usd")), 0.0)
+        short_mass = max(_fnum(row.get("short_usd")), 0.0)
+        if long_mass <= 0 and short_mass <= 0:
+            continue
+        mmr = max(_fnum(row.get("mmr")), 0.0)
+        for lev, weight in dist:
+            eff = lev * scale
+            if eff <= 1.0:
+                continue
+            if long_mass > 0:
+                liq = liq_price(entry, True, eff, mmr)
+                if liq is not None and floor <= liq <= ceil:
+                    idx = level_index(liq, step)
+                    if idx is not None:
+                        hist[idx] = get(idx, 0.0) + long_mass * weight
+            if short_mass > 0:
+                liq = liq_price(entry, False, eff, mmr)
+                if liq is not None and floor <= liq <= ceil:
+                    idx = level_index(liq, step)
+                    if idx is not None:
+                        hist[idx] = get(idx, 0.0) + short_mass * weight
+    return hist, step
+
+
+def spread_mass(hist: Dict[int, float], step: float,
+                ksteps: Sequence[Tuple[int, float]]) -> Dict[float, float]:
+    """Размазать массу гистограммы колоколом — то же, что делает build_ladder.
+
+    Свёртка линейна, поэтому результат совпадает с лестницей, собранной по
+    строкам, но стоимость зависит от числа ЗАНЯТЫХ корзин, а не от числа строк:
+    на сетке калибровки это сотни ячеек против тысяч строк.
+    """
+    out: Dict[float, float] = {}
+    get = out.get
+    for idx, mass in (hist or {}).items():
+        if mass <= 0:
+            continue
+        for k, w in ksteps:
+            price_key = round((idx + k) * step, 10)
+            out[price_key] = get(price_key, 0.0) + mass * w
+    return out
+
+
 def calibrate(rows: Sequence[dict], actual_events: Sequence[dict], price: Any,
               settings: Optional[Dict[str, Any]] = None) -> dict:
     """Подобрать масштаб плеч и ширину колокола по фактическим ликвидациям.
@@ -735,16 +987,31 @@ def calibrate(rows: Sequence[dict], actual_events: Sequence[dict], price: Any,
     if not actual:
         return {"applied": False, "reason": "факт без цен",
                 "events": len(events), "ts": time.time()}
+    # Сетка перебора стоила 25 полных лестниц: 98.9 с на 8639 строках и
+    # 20000 событиях (замер 29.09.2026) — столько длится один проход фона
+    # уровней, и всё это время единственный воркер обслуживает запросы вместе
+    # с расчётом. Теперь строки обходятся один раз на масштаб плеч (5 вместо
+    # 25), а ширина колокола применяется уже к готовой гистограмме масс:
+    # свёртка линейна, поэтому оценка совпадает с прежней.
+    step_rel = max(_fnum(settings.get("step_rel"), 0.001), 1e-6)
+    spread_rel = max(_fnum(settings.get("spread_rel"), 0.01), 0.0)
     best: Optional[dict] = None
     for lev_scale in CALIB_LEV:
+        hist, step = base_mass_histogram(rows, settings, price, lev_scale)
+        if not hist:
+            continue
         for spread_scale in CALIB_SPREAD:
-            probe = dict(settings, lev_scale=lev_scale, spread_scale=spread_scale)
-            ladder = build_ladder(rows, probe, price)
-            score = overlap_score(ladder, actual, CALIB_COARSE_REL)
+            kernel = spread_kernel(
+                spread_rel * max(_fnum(spread_scale, 1.0), 0.05), step_rel)
+            ksteps = [(int(round(off / step_rel)), w) for off, w in kernel]
+            score = overlap_score(spread_mass(hist, step, ksteps), actual,
+                                  CALIB_COARSE_REL)
             if best is None or score > best["score"]:
                 best = {"lev_scale": lev_scale, "spread_scale": spread_scale,
                         "score": score}
-    assert best is not None
+    if best is None:
+        return {"applied": False, "reason": "нет массы в окне цены",
+                "events": len(events), "ts": time.time()}
     if best["score"] < MIN_CALIB_SCORE:
         return {"applied": False, "reason": f"совпадение слабое: {best['score']:.2f}",
                 "score": best["score"], "events": len(events), "ts": time.time()}
@@ -787,7 +1054,26 @@ class LevelsEngine:
         self._settings: Dict[str, Any] = dict(DEFAULT_SETTINGS)
         self._settings["enabled"] = bool(enabled)
         self._calib: Dict[str, dict] = {}
+        # токены бюджета пересчётов калибровки (см. CALIB_BUDGET)
+        self._calib_tokens = float(CALIB_BUDGET)
+        self._calib_tokens_at = time.time()
+        self._calib_deferred = 0
+        # сколько строк вошло в расчёт и сколько осталось после схлопывания
+        self._rows_in = 0
+        self._rows_agg = 0
         self._cache: Dict[tuple, Tuple[float, dict]] = {}
+        self._cache_hits = 0
+        self._cache_misses = 0
+        # события истории для калибровки/вычитания исполненного: окно
+        # «calib_days» перечитывалось с диска на каждом проходе фона (каждые
+        # LEVELS_SNAP_SEC по каждой монете батча), а разбор дневных шардов —
+        # это построчный json.loads десятков мегабайт
+        self._events_cache: Dict[str, Tuple[float, float, List[dict]]] = {}
+        self._events_cache_events = 0
+        # попадания/промахи окна калибровки: по ним видно, действительно ли
+        # кэш перестал перечитывать шарды на каждом проходе фона
+        self._events_cache_hits = 0
+        self._events_cache_misses = 0
         self._candles: Dict[str, Tuple[float, List[Tuple[float, float]]]] = {}
         self._lock = threading.RLock()
         self.builds = 0
@@ -1034,6 +1320,155 @@ class LevelsEngine:
 
         return lookup
 
+    # Разбор дневных шардов истории стоит сотен миллисекунд на монету, поэтому
+    # он не должен идти в event loop (замер на бою 29.09.2026: пауза 4480 мс со
+    # стеком history.py:330:iter_events <- liq_levels.py:_events <- payload <-
+    # server.py:liq_levels_task, а снаружи p95 336 мс при серверных 5.5 мс).
+    # Монета из круга алертов возвращается в батч раз в (число_монет /
+    # LEVELS_BATCH) проходов: при 17 монетах и пачке 4 — примерно 140 с, при 40
+    # — около 330 с. Прежние 60 с означали, что кэш окна калибровки
+    # промахивался ВСЕГДА и каждый проход перечитывал с диска до 336 МБ шардов
+    # (7 дней по 48 МБ): на бою 29.09.2026 это держало payload на ~1000 мс даже
+    # после того, как лестница подешевела в 14 раз.
+    #
+    # Замер серии из 12 проходов (17 монет, батч 4, период 33 с): при 60 с —
+    # 42 чтения диска на 48 расчётов окна (6 попаданий), при 300 с — 25, при
+    # 600 с — 17, то есть по одному чтению на монету; 900 с даёт те же 17,
+    # поэтому расти дальше некуда. Трафик на серию: 13.8 ГБ -> 5.6 ГБ.
+    #
+    # Плата за свежесть: уже отработавший уровень может остаться невычтенным до
+    # 10 минут. Для семидневного окна калибровки это несущественно, а сама
+    # лестница каждый раз строится по свежим OI и цене — у них свой кэш на 20 с.
+    EVENTS_TTL_SEC = max(5.0, float(os.getenv("LIQSCOPE_LEVELS_EVENTS_TTL_SEC",
+                                              "600") or 600))
+    # Прежний потолок «64 записи» оказался бомбой: запись — это разобранный
+    # список событий окна калибровки, а MAX_EVENTS = 20000 словарей по ~830
+    # байт в куче. 64 × 20000 × 830 Б ≈ 1.06 ГБ — ровно пик RSS 1224 МБ,
+    # который замер на бою 29.09.2026. На такой куче каждая сборка мусора
+    # второго поколения останавливает единственный воркер на 1-2.3 с (замер
+    # прогона по внешнему IP: 11 пауз, максимум 2322 мс), а трассировка
+    # называет кадр, который в этот момент аллоцировал память, — gzip, а не
+    # настоящую причину. Поэтому держим потолок и по числу записей, и по
+    # суммарному числу событий: память важнее количества монет.
+    EVENTS_CACHE_MAX = max(1, int(os.getenv("LIQSCOPE_LEVELS_EVENTS_CACHE_MAX",
+                                            "24") or 24))
+    EVENTS_CACHE_MAX_EVENTS = max(1000, int(os.getenv(
+        "LIQSCOPE_LEVELS_EVENTS_CACHE_EVENTS", "200000") or 200000))
+
+    async def _events_cached(self, symbol: str, since: float, until: float,
+                             min_usd: float) -> List[dict]:
+        """События истории: вне цикла и с коротким кэшем на окно калибровки.
+
+        Новые ликвидации меняют семидневное окно несущественно, а перечитывать
+        шарды каждые 20 с на каждую монету — это диск и CPU единственного
+        воркера. TTL задаётся ``LIQSCOPE_LEVELS_EVENTS_TTL_SEC``.
+        """
+        sym = str(symbol or "").upper()
+        hit = self._events_cache.get(sym)
+        # Прежняя схема сравнивала бакет int(until // TTL), то есть попадание
+        # случалось только внутри одного бакета. Монета возвращается в батч раз
+        # в (число_монет / LEVELS_BATCH) проходов: при 17 монетах и пачке 4 это
+        # ~140 с, при 40 — ~330 с, а бакет жил 60 с. Кэш окна калибровки не
+        # срабатывал НИКОГДА, и каждый проход перечитывал с диска до 336 МБ
+        # шардов (7 дней × 48 МБ) — на бою 29.09.2026 это держало payload на
+        # ~1000 мс на монету даже после того, как лестница подешевела в 14 раз.
+        # Теперь окно пригодно, пока его конец уехал не дальше TTL: при проходе
+        # раз в 33 с это попадание каждый раз, а сильно другое окно (например,
+        # другой запрос с явным window_hours) по-прежнему перечитывается.
+        # Сверяем ОБА конца окна: `since` зависит от `window_hours`, поэтому
+        # запрос с другим окном (например, REST с window_hours=24 против
+        # семидневного окна калибровки фона) не должен получить чужой набор.
+        # У проходов фона оба конца уезжают вместе, поэтому попадания не теряются.
+        if hit is not None and \
+                abs(float(until) - _fnum(hit[0])) < self.EVENTS_TTL_SEC and \
+                abs(float(since) - _fnum(hit[1])) < self.EVENTS_TTL_SEC:
+            self._events_cache_hits += 1
+            return hit[2]
+        self._events_cache_misses += 1
+        try:
+            from history import HistoryStore
+            if type(self.hist) is HistoryStore and self.hist.base_path:
+                events = await run_cpu(_history_events_worker,
+                                       self.hist.base_path, sym, since, until, min_usd)
+            else:
+                # Alternate in-memory/test stores cannot be recreated in a
+                # child; keep their I/O off-loop, never fall back to inline.
+                events = await asyncio.to_thread(self._events, sym, since, until,
+                                                 min_usd)
+        except Exception:                        # noqa: BLE001
+            raise  # never parse large history synchronously on the event loop
+        self._events_cache_put(sym, until, events, since)
+        return events
+
+    def _events_cache_put(self, sym: str, until: float,
+                          events: List[dict],
+                          since: Optional[float] = None) -> bool:
+        """Положить окно в кэш, не превысив потолок по числу событий.
+
+        Возвращает False, если окно не влезает само по себе — такую монету
+        дешевле перечитывать с диска, чем держать в куче гигабайт: именно
+        большая куча даёт секундные паузы сборки мусора на одном воркере.
+        """
+        n = len(events or ())
+        if n > self.EVENTS_CACHE_MAX_EVENTS:
+            return False
+        old = self._events_cache.pop(sym, None)
+        if old is not None:
+            self._events_cache_events -= len(old[2] or ())
+        # пока не влезает — выбрасываем самые крупные записи: они же и самые
+        # дорогие для сборщика мусора
+        while (self._events_cache_events + n > self.EVENTS_CACHE_MAX_EVENTS
+               or len(self._events_cache) >= self.EVENTS_CACHE_MAX):
+            if not self._events_cache:
+                break
+            big = max(self._events_cache, key=lambda k: len(self._events_cache[k][2] or ()))
+            gone = self._events_cache.pop(big)
+            self._events_cache_events -= len(gone[2] or ())
+        self._events_cache[sym] = (float(until),
+                                   float(since) if since is not None else 0.0,
+                                   events)
+        self._events_cache_events += n
+        return True
+
+    def cache_stats(self) -> Dict[str, int]:
+        """Кэш готовых лестниц: попадания/промахи — видно, работает ли бакет цены."""
+        with self._lock:
+            return {"entries": len(self._cache), "hits": int(self._cache_hits),
+                    "misses": int(self._cache_misses),
+                    "ttl_sec": int(PAYLOAD_TTL),
+                    "price_key_step": PRICE_KEY_STEP}
+
+    def events_cache_stats(self) -> Dict[str, int]:
+        """Сколько событий и записей держит кэш — видно в /api/health."""
+        return {"entries": len(self._events_cache),
+                "events": int(self._events_cache_events),
+                "max_entries": int(self.EVENTS_CACHE_MAX),
+                "max_events": int(self.EVENTS_CACHE_MAX_EVENTS),
+                "hits": int(self._events_cache_hits),
+                "misses": int(self._events_cache_misses),
+                "ttl_sec": float(self.EVENTS_TTL_SEC)}
+
+    @staticmethod
+    def _slim_event(ev: dict) -> dict:
+        """Событие истории без полей, которые расчёту уровней не нужны.
+
+        Калибровка (``actual_histogram``) и вычитание отработавшего
+        (``apply_executed``) читают ровно три вещи: цену, объём и сторону через
+        ``_is_long_event``. Полное событие с id, биржей, монетой, количеством и
+        отметкой времени весит ~830 Б — втрое больше урезанного, и именно этот
+        вес не давал держать в кэше окна всех монет сразу: потолок
+        100000 событий — это 5 монет по 20000, а в батче их десятки, поэтому
+        кэш промахивался и каждый проход перечитывал шарды с диска.
+        """
+        out = {"price": ev.get("price"), "usd": ev.get("usd")}
+        side = ev.get("side")
+        if side is not None:
+            out["side"] = side
+        position = ev.get("position")
+        if position is not None:
+            out["position"] = position
+        return out
+
     def _events(self, symbol: str, since: float, until: float,
                 min_usd: float) -> List[dict]:
         hist = self.hist
@@ -1059,12 +1494,47 @@ class LevelsEngine:
                 continue
             if _fnum(ev.get("usd")) < _fnum(min_usd):
                 continue
-            out.append(ev)
+            out.append(self._slim_event(ev))
             if len(out) >= MAX_EVENTS:
                 break
         return out
 
     # ----- калибровка ------------------------------------------------------
+    def _calib_budget_take(self) -> bool:
+        """Есть ли токен на очередной пересчёт калибровки (бакет с пополнением).
+
+        Бюджет 0 означает «без ограничения»: тогда пересчёт происходит всякий
+        раз, как калибровка устарела, — прежнее поведение.
+        """
+        if CALIB_BUDGET <= 0:
+            return True
+        now = time.time()
+        elapsed = max(0.0, now - self._calib_tokens_at)
+        self._calib_tokens = min(float(CALIB_BUDGET), self._calib_tokens
+                                 + elapsed * (float(CALIB_BUDGET) / CALIB_BUDGET_SEC))
+        self._calib_tokens_at = now
+        if self._calib_tokens < 1.0:
+            return False
+        self._calib_tokens -= 1.0
+        return True
+
+    def agg_stats(self) -> Dict[str, Any]:
+        """Схлопывание строк: во сколько раз меньше работы на лестницу."""
+        with self._lock:
+            src, dst = int(self._rows_in), int(self._rows_agg)
+        return {"on": bool(AGG_ROWS), "bucket_of_step": round(AGG_BUCKET, 3),
+                "rows_in": src, "rows_out": dst,
+                "ratio": round(src / dst, 2) if dst else 0.0}
+
+    def calib_stats(self) -> Dict[str, Any]:
+        """Состояние бюджета пересчётов — видно в /api/health."""
+        return {"budget": int(CALIB_BUDGET), "budget_sec": round(CALIB_BUDGET_SEC, 1),
+                "tokens": round(float(self._calib_tokens), 2),
+                "deferred": int(self._calib_deferred),
+                "symbols": len(self._calib)}
+
+    # Compatibility for synchronous model callers/tests. Async payload uses
+    # _calibration_async exclusively; this method is never called on the loop.
     def _calibration(self, symbol: str, rows: Sequence[dict], events: Sequence[dict],
                      price: float, settings: Dict[str, Any],
                      recalibrate: Optional[bool]) -> dict:
@@ -1075,8 +1545,37 @@ class LevelsEngine:
         if not settings.get("calibrate", True):
             return cur if cur else {"applied": False, "reason": "калибровка выключена"}
         if recalibrate is True or (not fresh and len(events) >= MIN_CALIB_EVENTS):
+            if recalibrate is not True and not self._calib_budget_take():
+                # пересчёт отложен: отдаём прежнее (или честный отказ), но НЕ
+                # запоминаем и не обновляем ts — иначе монета стала бы «свежей»
+                # и следующего шанса не получила бы
+                self._calib_deferred += 1
+                out = dict(cur) if cur else {"applied": False,
+                                             "events": len(events)}
+                out["deferred"] = True
+                out["reason"] = "отложена: лимит пересчётов калибровки"
+                return out
             got = calibrate(rows, events, price, settings)
             # даже отказ запоминаем: считать перебор на каждом запросе незачем
+            self._calib[sym] = got
+            return got
+        return cur or {"applied": False, "reason": "ещё не считалась"}
+
+    async def _calibration_async(self, symbol: str, rows: Sequence[dict],
+                                 events: Sequence[dict], price: float,
+                                 settings: Dict[str, Any], recalibrate: Optional[bool]) -> dict:
+        sym = str(symbol or "").upper()
+        cur = self._calib.get(sym)
+        fresh = bool(cur) and time.time() - _fnum(cur.get("ts")) < CALIB_TTL_SEC
+        if not settings.get("calibrate", True):
+            return cur if cur else {"applied": False, "reason": "калибровка выключена"}
+        if recalibrate is True or (not fresh and len(events) >= MIN_CALIB_EVENTS):
+            if recalibrate is not True and not self._calib_budget_take():
+                self._calib_deferred += 1
+                out = dict(cur) if cur else {"applied": False, "events": len(events)}
+                out.update(deferred=True, reason="отложена: лимит пересчётов калибровки")
+                return out
+            got = await run_cpu(calibrate, rows, events, price, settings)
             self._calib[sym] = got
             return got
         return cur or {"applied": False, "reason": "ещё не считалась"}
@@ -1096,11 +1595,13 @@ class LevelsEngine:
         settings = self.settings(sym)
         win = float(window_hours or settings.get("window_hours") or 720.0)
         key = (sym, round(float(min_usd or 0.0), 2), str(side or "").lower(),
-               round(win, 3), round(float(price or 0.0), 8))
+               round(win, 3), price_key(price))
         with self._lock:
             cached = self._cache.get(key)
             if cached and not force and ts - cached[0] < PAYLOAD_TTL:
+                self._cache_hits += 1
                 return cached[1]
+            self._cache_misses += 1
         if not settings.get("enabled", True):
             return self._empty(sym, ts, win, settings, "инструмент выключен")
         since = ts - win * HOUR
@@ -1143,32 +1644,63 @@ class LevelsEngine:
             lookup = self._price_lookup(sym, candles)
         weights = self._venue_weights(sym)
         mmr_fn, mmr_estimated = self._mmr(sym, weights)
-        rows = build_rows(points, lookup, self._side_fn(sym), mmr_fn,
-                          _fnum(settings.get("min_doi_rel")))
+        # Closures accessing live OI/profile/risk cannot be pickled. Sample only
+        # the inputs needed for growing OI points, in small cooperative slices;
+        # the full rows calculation then runs outside the web process/GIL.
+        side_fn = self._side_fn(sym)
+        floor_rel = max(_fnum(settings.get("min_doi_rel")), 0.0)
+        # Normalize first, exactly as build_rows does (last duplicate wins).
+        # This makes the sampled callbacks correspond to the rows in the worker.
+        normalized: List[Tuple[float, float]] = []
+        for i, (raw_ts, raw_oi) in enumerate(points):
+            ts0, oi0 = _num(raw_ts), _num(raw_oi)
+            if ts0 is not None and oi0 is not None and oi0 > 0:
+                if normalized and ts0 == normalized[-1][0]:
+                    normalized[-1] = (ts0, oi0)
+                elif not normalized or ts0 > normalized[-1][0]:
+                    normalized.append((ts0, oi0))
+            if i % 64 == 63:
+                await asyncio.sleep(0.01)
+        samples: Dict[float, tuple] = {}
+        for i in range(1, len(normalized)):
+            ts0, oi0 = normalized[i]
+            prev_oi = normalized[i - 1][1]
+            if oi0 > prev_oi and (not floor_rel or oi0 - prev_oi >= floor_rel * oi0):
+                # Mirror build_rows' per-callback exception defaults.
+                try:
+                    entry = lookup(ts0)
+                except Exception:
+                    entry = None
+                try:
+                    share = side_fn(ts0)
+                except Exception:
+                    share = (0.5, "none")
+                try:
+                    mmr = mmr_fn(ts0)
+                except Exception:
+                    mmr = 0.0
+                samples[ts0] = (entry, share, mmr)
+            if i % 64 == 0:
+                await asyncio.sleep(0.01)
+        rows = await run_cpu(_build_rows_snapshot, normalized, samples, floor_rel)
         cur = _num(price) or _current_price(rows, points)
         if cur is None or cur <= 0:
             return self._empty(sym, ts, win, settings, "нет цены для расчёта")
-        events = self._events(sym, max(since, ts - _fnum(settings.get("calib_days"), 7.0) * 24 * HOUR),
-                              ts, _fnum(settings.get("min_liq_usd")))
-        calib = self._calibration(sym, rows, events, cur, settings, recalibrate)
-        eff = dict(settings)
-        if calib.get("applied"):
-            eff["lev_scale"] = _fnum(calib.get("lev_scale"), eff.get("lev_scale", 1.0))
-            eff["spread_scale"] = _fnum(calib.get("spread_scale"),
-                                        eff.get("spread_scale", 1.0))
-        step = grid_step(cur, eff.get("step_rel"))
-        # Тяжёлые CPU-расчёты — в threadpool, чтобы не блокировать event loop
-        # (иначе WS и REST висят по 1-2 сек на каждом запросе уровней)
-        try:
-            ladder = await asyncio.to_thread(build_ladder, rows, eff, cur)
-        except Exception:
-            ladder = build_ladder(rows, eff, cur)
-        applied = {"usd": 0.0, "events": 0, "skipped": 0}
-        if eff.get("subtract_executed", True):
-            try:
-                applied = await asyncio.to_thread(apply_executed, ladder, events, step)
-            except Exception:
-                applied = apply_executed(ladder, events, step)
+        # чтение дневных шардов — только вне цикла (см. _events_cached)
+        events = await self._events_cached(
+            sym, max(since, ts - _fnum(settings.get("calib_days"), 7.0) * 24 * HOUR),
+            ts, _fnum(settings.get("min_liq_usd")))
+        # Aggregate on the worker too. Calibration uses the same aggregated
+        # rows; neither it nor the ladder/subtraction may run on this loop.
+        work_rows = await run_cpu(aggregate_rows, rows, cur, agg_step_rel(settings)) \
+            if AGG_ROWS else rows
+        with self._lock:
+            self._rows_in += len(rows)
+            self._rows_agg += len(work_rows)
+        calib = await self._calibration_async(sym, work_rows, events, cur, settings,
+                                              recalibrate)
+        eff, step, ladder, applied = await run_cpu(
+            _ladder_math, work_rows, events, cur, settings, calib)
         with self._lock:
             self.builds += 1
         shown = filter_ladder(ladder, min_usd, side)

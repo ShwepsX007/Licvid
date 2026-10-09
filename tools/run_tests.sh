@@ -24,6 +24,9 @@ if [[ "${1:-}" == "--python" ]]; then
 fi
 
 export LIQSCOPE_SECRET="${LIQSCOPE_SECRET:-test-secret-not-the-published-default}"
+# Тесты проверяют свежие ответы ручек: кэш API (/api/health, /api/digest)
+# выключаем, иначе publish-then-GET увидит старое. В проде кэш включён.
+export LIQSCOPE_API_CACHE=0
 export NODE_OPTIONS="${NODE_OPTIONS:-} --require $ROOT/tests/_dom_env.js"
 
 fail=0

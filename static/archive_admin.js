@@ -93,9 +93,7 @@
         var langs = (it.langs || []).map(function (x) { return x.toUpperCase(); }).join("+");
         var sub = (it.window_h || 24) + "ч · " + money(it.total_usd) + " · "
             + (it.liq_count || 0) + " ликвидаций" + (langs ? " · вышел: " + langs : " · в канал не уходил");
-        var kind = it.source === "archive"
-            ? '<span class="art-badge">из архива</span>'
-            : (it.draft ? '<span class="art-badge">черновик</span>' : "");
+        var kind = it.draft ? '<span class="art-badge">черновик</span>' : "";
         return '<div class="art-row arc-row" data-id="' + esc(it.day) + '">'
             + '<span class="ar-title">' + esc(it.label || it.day) + "</span>"
             + '<span class="art-badge pub">' + esc(it.day) + "</span>"
@@ -129,7 +127,7 @@
 
     function hourlyRow(it) {
         var tg = (it.tg || []).map(function (x) { return x.toUpperCase(); }).join("+");
-        var kind = it.source === "archive" ? '<span class="art-badge">из архива</span>' : "";
+        var kind = it.draft ? '<span class="art-badge">черновик</span>' : "";
         var sub = (it.day || "") + " · " + (it.window_h || 4) + "ч · " + money(it.total_usd)
             + " · " + (it.liq_count || 0) + " ликвидаций"
             + (it.langs && it.langs.length > 1 ? " · RU+EN" : it.langs && it.langs.length ? " · " + String(it.langs[0]).toUpperCase() : "");

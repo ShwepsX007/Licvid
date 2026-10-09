@@ -41,6 +41,11 @@ SCRYPT_N, SCRYPT_R, SCRYPT_P = 2 ** 14, 8, 1
 #: поэтому перезагрузка страницы и чистка localStorage испытание не сбрасывают.
 LAYERS_TRIAL_SEC = 1800
 
+#: Сколько монет аккаунт может добавить себе в терминал. Аноним — ни одной
+#: (роут /api/symbols/add требует авторизацию), админ — без счёта. Счётчик
+#: лежит в базе (user_symbols), поэтому рестарт процесса квоту не обнуляет.
+USER_SYMBOLS_CAP = max(0, int(os.getenv("LIQSCOPE_USER_SYMBOL_CAP", "5")))
+
 # Сколько живут ссылки в письмах
 EMAIL_TOKEN_TTL = {
     "verify": 24 * 3600,   # подтверждение почты — сутки
@@ -116,6 +121,17 @@ DEFAULT_SERVICES = (
         "enabled": 1,
         "coming_soon": 0,
         "sort": 10,
+    },
+    {
+        "slug": "screener_signals",
+        "title": "Сигналы Скринера китов",
+        "title_en": "Whale screener signals",
+        "description": ("Крупные переводы на биржи и с бирж: площадка, направление, "
+                        "сеть и порог в долларах — сигнал в Telegram."),
+        "icon": "🐋",
+        "enabled": 1,
+        "coming_soon": 0,
+        "sort": 15,
     },
     {
         "slug": "correlations",
@@ -252,17 +268,23 @@ def public_user(row: sqlite3.Row | Dict[str, Any]) -> Dict[str, Any]:
     """
     d = dict(row)
     tg_id = d.get("tg_id")
+    google_id = (d.get("google_id") or "").strip()
+    avatar_url = (d.get("avatar_url") or "").strip()
+    photo_url = (d.get("photo_url") or "").strip() or avatar_url
     return {
         "id": int(d["id"]),
         "tg_id": int(tg_id) if tg_id else None,
         "tg_linked": bool(tg_id),
+        "google_id": google_id if google_id else None,
+        "google_linked": bool(google_id),
         "email": d.get("email") or "",
         "email_verified": bool(d.get("email_verified")),
         "has_password": bool(d.get("password_hash")),
         "username": d.get("username") or "",
         "first_name": d.get("first_name") or "",
         "last_name": d.get("last_name") or "",
-        "photo_url": d.get("photo_url") or "",
+        "photo_url": photo_url,
+        "avatar_url": avatar_url or photo_url,
         # Пустая строка = человек язык не выбирал. Не подставляем сюда «ru»:
         # какой язык по умолчанию, решает бот (bot_i18n.DEFAULT_LANG) — сейчас
         # это английский, а русский остаётся тем, кто выбрал его сам или пришёл
@@ -324,7 +346,20 @@ class Store:
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA synchronous=NORMAL")
+        # WAL не растёт бесконечно: при превышении 64 МБ SQLite сам
+        # запускает чекпойнт. Страховка поверх фонового TRUNCATE.
+        self._db.execute("PRAGMA journal_size_limit=67108864")
         self._init_schema()
+
+    def ping(self) -> float:
+        """Отклик базы в миллисекундах (-1 при ошибке). Для /api/health."""
+        t0 = time.perf_counter()
+        with self._lock:
+            try:
+                self._db.execute("SELECT 1").fetchone()
+            except sqlite3.Error:
+                return -1.0
+        return round((time.perf_counter() - t0) * 1000.0, 2)
 
     def close(self) -> None:
         with self._lock:
@@ -355,6 +390,7 @@ class Store:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     -- NULL = регистрация по почте, Telegram ещё не привязан
                     tg_id INTEGER UNIQUE,
+                    google_id TEXT,
                     email TEXT,
                     password_hash TEXT,
                     email_verified INTEGER NOT NULL DEFAULT 0,
@@ -364,6 +400,7 @@ class Store:
                     first_name TEXT,
                     last_name TEXT,
                     photo_url TEXT,
+                    avatar_url TEXT,
                     language TEXT DEFAULT 'ru',
                     is_admin INTEGER NOT NULL DEFAULT 0,
                     is_banned INTEGER NOT NULL DEFAULT 0,
@@ -675,6 +712,18 @@ class Store:
                     PRIMARY KEY (user_id, chat_id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_chat_reads_user ON chat_reads(user_id);
+                -- 🪙 Монеты, которые аккаунт добавил себе в терминал. Счётчик
+                -- живёт в базе, а не в памяти процесса: рестарт не обнуляет
+                -- квоту (иначе лимит «5 монет на аккаунт» обходился бы
+                -- перезапуском сервиса). Одна строка на пару — повторное
+                -- добавление той же монеты квоту не тратит.
+                CREATE TABLE IF NOT EXISTS user_symbols (
+                    user_id INTEGER NOT NULL,
+                    symbol TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY (user_id, symbol)
+                );
+                CREATE INDEX IF NOT EXISTS idx_user_symbols_user ON user_symbols(user_id);
                 """
             )
             self._db.commit()
@@ -833,7 +882,7 @@ class Store:
             log.debug("support_reads migration: %s", e)
 
     def _migrate_users(self) -> None:
-        """Догоняем старые базы: почта/пароль и tg_id без NOT NULL.
+        """Догоняем старые базы: почта/пароль, Google OAuth и tg_id без NOT NULL.
 
         Базы прежних версий знали только Telegram (tg_id INTEGER NOT NULL),
         поэтому аккаунт по почте туда просто не влезал — колонки добавляем
@@ -850,6 +899,8 @@ class Store:
                 # язык, выбранный кнопкой «🌐 RU/ENG» в боте: его нельзя
                 # затирать языком клиента Telegram при каждом входе
                 ("lang_manual", "INTEGER NOT NULL DEFAULT 0"),
+                ("google_id", "TEXT"),
+                ("avatar_url", "TEXT"),
             ):
                 if name not in cols:
                     self._db.execute(f"ALTER TABLE users ADD COLUMN {name} {ddl}")
@@ -862,6 +913,7 @@ class Store:
                     CREATE TABLE users (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         tg_id INTEGER UNIQUE,
+                        google_id TEXT,
                         email TEXT,
                         password_hash TEXT,
                         email_verified INTEGER NOT NULL DEFAULT 0,
@@ -871,19 +923,21 @@ class Store:
                         first_name TEXT,
                         last_name TEXT,
                         photo_url TEXT,
+                        avatar_url TEXT,
                         language TEXT DEFAULT 'ru',
+                        lang_manual INTEGER NOT NULL DEFAULT 0,
                         is_admin INTEGER NOT NULL DEFAULT 0,
                         is_banned INTEGER NOT NULL DEFAULT 0,
                         created_at REAL NOT NULL,
                         last_seen REAL NOT NULL,
                         login_count INTEGER NOT NULL DEFAULT 0
                     );
-                    INSERT INTO users(id, tg_id, email, password_hash, email_verified,
+                    INSERT INTO users(id, tg_id, google_id, email, password_hash, email_verified,
                         email_verified_at, tg_linked_at, username, first_name, last_name,
-                        photo_url, language, is_admin, is_banned, created_at, last_seen,
+                        photo_url, avatar_url, language, is_admin, is_banned, created_at, last_seen,
                         login_count)
-                    SELECT id, tg_id, NULL, NULL, 0, NULL, NULL, username, first_name,
-                        last_name, photo_url, language, is_admin, is_banned, created_at,
+                    SELECT id, tg_id, NULL, NULL, NULL, 0, NULL, NULL, username, first_name,
+                        last_name, photo_url, NULL, language, is_admin, is_banned, created_at,
                         last_seen, login_count FROM users_legacy;
                     DROP TABLE users_legacy;
                     """
@@ -894,6 +948,10 @@ class Store:
             self._db.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email"
                 " ON users(email) WHERE email IS NOT NULL AND email != ''"
+            )
+            self._db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_id"
+                " ON users(google_id) WHERE google_id IS NOT NULL AND google_id != ''"
             )
             self._db.commit()
 
@@ -1082,6 +1140,198 @@ class Store:
         with self._lock:
             row = self._db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
         return self._pub(row) if row else None
+
+    def find_user_by_email(self, email: str) -> Optional[Dict[str, Any]]:
+        """Найти пользователя по email (алиас get_user_by_email)."""
+        return self.get_user_by_email(email)
+
+    def find_user_by_google_id(self, google_id: str) -> Optional[Dict[str, Any]]:
+        """Найти пользователя по его уникальному Google ID (sub)."""
+        gid = str(google_id or "").strip()
+        if not gid:
+            return None
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM users WHERE google_id=?", (gid,)
+            ).fetchone()
+        return self._pub(row) if row else None
+
+    def link_google_id(
+        self,
+        user_id: int,
+        google_id: str,
+        avatar_url: Optional[str] = None,
+        name: Optional[str] = None,
+        email: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Привязать google_id к существующему пользователю и отметить почту подтверждённой."""
+        user_id = int(user_id)
+        gid = str(google_id or "").strip()
+        if not gid:
+            return None
+        avatar = (str(avatar_url or "").strip())[:500]
+        first = (str(name or "").strip())[:64]
+        norm_email = normalize_email(email) if email else ""
+        now = _now()
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM users WHERE id=?", (user_id,)
+            ).fetchone()
+            if not row:
+                return None
+            other = self._db.execute(
+                "SELECT * FROM users WHERE google_id=?", (gid,)
+            ).fetchone()
+            if other and int(other["id"]) != user_id:
+                return None
+            eff_email = (row["email"] or "").strip() or norm_email
+            if eff_email and not (row["email"] or "").strip():
+                clash = self._db.execute(
+                    "SELECT * FROM users WHERE email=?", (eff_email,)
+                ).fetchone()
+                if clash and int(clash["id"]) != user_id:
+                    eff_email = row["email"] or ""
+            is_admin = int(row["is_admin"]) or self._admin_flag(
+                tg_id=row["tg_id"], email=eff_email
+            )
+            verified = 1 if eff_email else int(row["email_verified"] or 0)
+            verified_at = (
+                (row["email_verified_at"] or now)
+                if eff_email
+                else row["email_verified_at"]
+            )
+            new_first = (row["first_name"] or "").strip() or first
+            new_avatar = avatar or (row["avatar_url"] or "").strip()
+            new_photo = (row["photo_url"] or "").strip() or new_avatar
+            self._db.execute(
+                "UPDATE users SET google_id=?, email=?, email_verified=?,"
+                " email_verified_at=?, first_name=?, avatar_url=?, photo_url=?,"
+                " is_admin=?, last_seen=?, login_count=login_count+1 WHERE id=?",
+                (
+                    gid,
+                    eff_email or None,
+                    verified,
+                    verified_at,
+                    new_first,
+                    new_avatar or None,
+                    new_photo or None,
+                    is_admin,
+                    now,
+                    user_id,
+                ),
+            )
+            self._db.commit()
+            row = self._db.execute(
+                "SELECT * FROM users WHERE id=?", (user_id,)
+            ).fetchone()
+        self.audit(user_id, "google_link", f"google_id={gid}")
+        return self._pub(row) if row else None
+
+    def create_user_from_google(
+        self,
+        email: str,
+        google_id: str,
+        name: Optional[str] = None,
+        avatar_url: Optional[str] = None,
+        language: str = "",
+    ) -> Dict[str, Any]:
+        """Создать (или объединить по почте/google_id) пользователя из профиля Google.
+
+        Почта от Google со статусом email_verified=true считается уже
+        подтверждённой: дополнительных писем подтверждения не требуется.
+        """
+        norm_email = normalize_email(email)
+        gid = str(google_id or "").strip()
+        if not valid_email(norm_email) or not gid:
+            raise ValueError("invalid_google_profile")
+        first = (str(name or "").strip())[:64]
+        avatar = (str(avatar_url or "").strip())[:500]
+        lang = (str(language or "").strip())[:8]
+        now = _now()
+        with self._lock:
+            by_gid = self._db.execute(
+                "SELECT * FROM users WHERE google_id=?", (gid,)
+            ).fetchone()
+            if by_gid:
+                uid = int(by_gid["id"])
+            else:
+                by_mail = self._db.execute(
+                    "SELECT * FROM users WHERE email=?", (norm_email,)
+                ).fetchone()
+                uid = int(by_mail["id"]) if by_mail else 0
+            if not uid:
+                is_admin = self._admin_flag(email=norm_email)
+                cur = self._db.execute(
+                    "INSERT INTO users(google_id, email, email_verified, email_verified_at,"
+                    " first_name, last_name, photo_url, avatar_url, language, is_admin,"
+                    " is_banned, created_at, last_seen, login_count)"
+                    " VALUES(?, ?, 1, ?, ?, '', ?, ?, ?, ?, 0, ?, ?, 1)",
+                    (
+                        gid,
+                        norm_email,
+                        now,
+                        first,
+                        avatar or None,
+                        avatar or None,
+                        lang,
+                        is_admin,
+                        now,
+                        now,
+                    ),
+                )
+                uid = int(cur.lastrowid)
+                self._db.commit()
+                row = self._db.execute(
+                    "SELECT * FROM users WHERE id=?", (uid,)
+                ).fetchone()
+                created = True
+            else:
+                created = False
+        if not created:
+            linked = self.link_google_id(
+                uid, gid, avatar_url=avatar, name=first, email=norm_email
+            )
+            if linked:
+                return linked
+            with self._lock:
+                row = self._db.execute(
+                    "SELECT * FROM users WHERE id=?", (uid,)
+                ).fetchone()
+        else:
+            self.audit(uid, "google_register", norm_email)
+        return self._pub(row)
+
+    def unlink_google(self, user_id: int) -> Dict[str, Any]:
+        """Отвязать Google-аккаунт (если есть другой способ входа: пароль или Telegram)."""
+        user_id = int(user_id)
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM users WHERE id=?", (user_id,)
+            ).fetchone()
+            if not row:
+                return {"ok": False, "error": "not_found"}
+            gid = (row["google_id"] or "").strip()
+            if not gid:
+                return {"ok": True, "user": self._pub(row)}
+            has_pass = bool((row["password_hash"] or "").strip())
+            has_tg = bool(row["tg_id"])
+            if not has_pass and not has_tg:
+                return {
+                    "ok": False,
+                    "error": "last_auth_method",
+                    "hint": "Сначала задайте пароль или привяжите Telegram, чтобы не потерять доступ к аккаунту.",
+                }
+            self._db.execute(
+                "UPDATE users SET google_id=NULL WHERE id=?", (user_id,)
+            )
+            self._db.commit()
+            row = self._db.execute(
+                "SELECT * FROM users WHERE id=?", (user_id,)
+            ).fetchone()
+        self.audit(user_id, "google_unlink", f"google_id={gid}")
+        return {"ok": True, "user": self._pub(row)}
+
+    unlink_google_id = unlink_google
 
     def set_user_password(self, user_id: int, password_hash: str) -> bool:
         with self._lock:
@@ -1316,6 +1566,17 @@ class Store:
                 (dst_id, r["slug"], r["enabled"], r["config"], r["created_at"]),
             )
         self._db.execute("DELETE FROM user_services WHERE user_id=?", (src_id,))
+        # Добавленные монеты переезжают вместе с аккаунтом: квота человека
+        # не должна обнуляться (и не должна удваиваться) при слиянии.
+        for r in self._db.execute(
+                "SELECT symbol, created_at FROM user_symbols WHERE user_id=?",
+                (src_id,)).fetchall():
+            self._db.execute(
+                "INSERT INTO user_symbols(user_id,symbol,created_at) VALUES(?,?,?)"
+                " ON CONFLICT(user_id,symbol) DO NOTHING",
+                (dst_id, r["symbol"], r["created_at"]),
+            )
+        self._db.execute("DELETE FROM user_symbols WHERE user_id=?", (src_id,))
         for table in ("alert_events", "visits", "sessions", "email_tokens"):
             self._db.execute(f"UPDATE {table} SET user_id=? WHERE user_id=?", (dst_id, src_id))
         src = self._db.execute("SELECT * FROM users WHERE id=?", (src_id,)).fetchone()
@@ -1324,13 +1585,20 @@ class Store:
         if not src:
             return
         # «телеграмный» аккаунт был первой записью человека: имя/фото не теряем
+        src_gid = (src["google_id"] or "").strip() if "google_id" in src.keys() else ""
+        src_avatar = (src["avatar_url"] or "").strip() if "avatar_url" in src.keys() else ""
+        if src_gid:
+            self._db.execute("UPDATE users SET google_id=NULL WHERE id=?", (src_id,))
         self._db.execute(
             "UPDATE users SET first_name=CASE WHEN first_name IS NULL OR first_name=''"
             " THEN ? ELSE first_name END,"
             " last_name=CASE WHEN last_name IS NULL OR last_name='' THEN ? ELSE last_name END,"
             " photo_url=CASE WHEN photo_url IS NULL OR photo_url='' THEN ? ELSE photo_url END,"
+            " avatar_url=CASE WHEN avatar_url IS NULL OR avatar_url='' THEN ? ELSE avatar_url END,"
+            " google_id=CASE WHEN google_id IS NULL OR google_id='' THEN ? ELSE google_id END,"
             " created_at=MIN(created_at, ?) WHERE id=?",
             (src["first_name"] or "", src["last_name"] or "", src["photo_url"] or "",
+             src_avatar or None, src_gid or None,
              float(src["created_at"] or _now()), dst_id),
         )
         self._db.execute("DELETE FROM users WHERE id=?", (src_id,))
@@ -1855,6 +2123,70 @@ class Store:
                                   "last_seen": float(r["last_seen"] or 0.0),
                                   "hits": int(r["hits"] or 0)}
         return out
+
+    # ----- пользовательские монеты терминала (квота на аккаунт) --------------
+    def user_symbols(self, user_id: int) -> List[str]:
+        """Монеты, которые аккаунт добавил себе в терминал (по порядку добавления)."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT symbol FROM user_symbols WHERE user_id=? ORDER BY created_at",
+                (int(user_id),)).fetchall()
+        return [str(r["symbol"]) for r in rows]
+
+    def user_symbol_count(self, user_id: int) -> int:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT COUNT(*) AS n FROM user_symbols WHERE user_id=?",
+                (int(user_id),)).fetchone()
+        return int((row["n"] if row else 0) or 0)
+
+    def user_symbol_quota(self, user_id: int,
+                          cap: int = USER_SYMBOLS_CAP) -> Dict[str, Any]:
+        """Сводка квоты: сколько добавлено, сколько осталось и сам список.
+
+        Отдаём её и роуту (решать, пускать ли добавление), и кабинету
+        (показать человеку его монеты и остаток).
+        """
+        cap = max(0, int(cap))
+        symbols = self.user_symbols(user_id)
+        used = len(symbols)
+        return {"cap": cap, "used": used, "left": max(0, cap - used),
+                "symbols": symbols}
+
+    def add_user_symbol(self, user_id: int, symbol: str) -> Dict[str, Any]:
+        """Записать монету за аккаунтом. Повтор той же пары счёт не удваивает."""
+        sym = str(symbol or "").strip().upper()[:40]
+        if not sym:
+            return {"added": False, "count": self.user_symbol_count(user_id)}
+        with self._lock:
+            cur = self._db.execute(
+                "INSERT INTO user_symbols(user_id,symbol,created_at) VALUES(?,?,?) "
+                "ON CONFLICT(user_id,symbol) DO NOTHING",
+                (int(user_id), sym, _now()))
+            self._db.commit()
+            added = int(cur.rowcount or 0) > 0
+            row = self._db.execute(
+                "SELECT COUNT(*) AS n FROM user_symbols WHERE user_id=?",
+                (int(user_id),)).fetchone()
+        return {"added": added, "count": int((row["n"] if row else 0) or 0)}
+
+    def remove_user_symbol(self, user_id: int, symbol: str = "") -> int:
+        """Освободить квоту: убрать одну монету или все (symbol пустой).
+
+        Нужно админке — вернуть человеку место, не меняя лимит для всех.
+        Возвращает число удалённых строк.
+        """
+        sym = str(symbol or "").strip().upper()[:40]
+        with self._lock:
+            if sym:
+                cur = self._db.execute(
+                    "DELETE FROM user_symbols WHERE user_id=? AND symbol=?",
+                    (int(user_id), sym))
+            else:
+                cur = self._db.execute(
+                    "DELETE FROM user_symbols WHERE user_id=?", (int(user_id),))
+            self._db.commit()
+            return int(cur.rowcount or 0)
 
     def visit_stats(self, days: int = 14) -> Dict[str, Any]:
         days = max(1, min(int(days), 90))

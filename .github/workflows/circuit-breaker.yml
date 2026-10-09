@@ -1,0 +1,44 @@
+name: circuit-breaker
+
+on:
+  push:
+    paths:
+      - "circuit_breaker.py"
+      - "whale_poller.py"
+      - "market_feed.py"
+      - "oi_feed.py"
+      - "liq_api.py"
+      - "whale_screener.py"
+      - "server.py"
+      - "tests/test_circuit_breaker.py"
+      - ".github/workflows/circuit-breaker.yml"
+  pull_request:
+    paths:
+      - "circuit_breaker.py"
+      - "whale_poller.py"
+      - "market_feed.py"
+      - "oi_feed.py"
+      - "liq_api.py"
+      - "whale_screener.py"
+      - "server.py"
+      - "tests/test_circuit_breaker.py"
+      - ".github/workflows/circuit-breaker.yml"
+
+jobs:
+  breaker-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Compile changed Python modules
+        run: |
+          python -m py_compile circuit_breaker.py whale_poller.py market_feed.py oi_feed.py liq_api.py whale_screener.py server.py
+
+      - name: Run circuit breaker state-machine tests
+        run: python tests/test_circuit_breaker.py

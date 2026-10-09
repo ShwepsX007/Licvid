@@ -51,10 +51,10 @@ body.dark-theme {
 .top-nav {
     display: flex;
     align-items: center;
-    justify-content: space-between;
+    justify-content: flex-start;
     background: rgba(14, 20, 36, 0.96);
     border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-    padding: 8px 16px;
+    padding: 6px 14px;
     min-height: 52px;   /* не height: боксы статистики выше 52px и должны помещаться */
     flex-shrink: 0;
     /* узкое окно браузера: ряд шапки переносится, а не уезжает за край.
@@ -62,7 +62,7 @@ body.dark-theme {
        себе 6px — график от этого становится чуть ниже, но кнопки видны все. */
     flex-wrap: wrap;
     row-gap: 6px;
-    column-gap: 12px;
+    column-gap: 10px;
 }
 
 .brand {
@@ -147,7 +147,8 @@ body.dark-theme {
 .header-metrics {
     display: flex;
     align-items: center;
-    gap: 24px;
+    gap: 14px;
+    margin-left: auto;
 }
 
 .metric-card {
@@ -377,13 +378,13 @@ body.dark-theme {
 .header-controls {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 6px;
     flex: 0 1 auto;
     min-width: 0;
     max-width: 100%;
     flex-wrap: wrap;     /* не влезли — перенеслись; за край ничего не уходит */
-    justify-content: flex-end;
-    margin-left: auto;
+    justify-content: flex-start;
+    margin-left: 4px;
 }
 
 /* Переключатель языка */
@@ -405,7 +406,7 @@ body.dark-theme {
 .acc-nav, #nav-account {
     display: inline-flex;
     align-items: center;
-    gap: 10px;
+    gap: 6px;
     flex-shrink: 0;
 }
 .acc-nav a:not(.btn),
@@ -422,9 +423,9 @@ body.dark-theme {
 .acc-nav button, #nav-account button {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
-    padding: 7px 14px;
-    font-size: 0.76rem;
+    gap: 5px;
+    padding: 5px 10px;
+    font-size: 0.74rem;
     font-weight: 700;
     border-radius: 8px;
     border: 1px solid var(--border-color);
@@ -717,6 +718,8 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
     display: flex;
     align-items: center;
     justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
     flex-shrink: 0;
 }
 
@@ -771,18 +774,20 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
     white-space: nowrap;
 }
 
-/* Кнопка «Слои» — ширина как была, высота ближе к соседним */
+/* Кнопка слоёв — тот же компактный ☰, что у панелей мульти-графика */
 .profile-toggle.layer-call {
     border-color: rgba(0, 214, 255, 0.65);
     color: #67e8f9;
     background: rgba(0, 214, 255, 0.14);
     box-shadow: 0 0 14px rgba(0, 214, 255, 0.32);
-    padding: 3px 18px;
+    padding: 3px 8px;
     min-height: 26px;
-    min-width: 108px;
-    font-size: 0.84rem;
-    font-weight: 800;
-    letter-spacing: 0.06em;
+    min-width: 30px;
+    width: auto;
+    font-size: 0.95rem;
+    font-weight: 700;
+    letter-spacing: 0;
+    justify-content: center;
 }
 .profile-toggle.layer-call:hover {
     border-color: rgba(0, 214, 255, 0.95);
@@ -795,25 +800,32 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
     box-shadow: 0 0 18px rgba(0, 214, 255, 0.5);
 }
 
-/* Панель кнопок слоёв: выезжает сверху, кнопки — горизонтально */
+/* Панель кнопок слоёв: выезжает списком под ☰, как у мульти-графика */
 .layer-pop {
     position: absolute;
     top: calc(100% + 6px);
-    left: 12px;
+    right: 12px;
+    left: auto;
     z-index: 30;
     display: flex;
-    flex-wrap: wrap;
-    /* ширина — по содержимому, но не уже доступного места: на узком экране
-       окно растягивается почти до правого края графика, а не жмётся в комок */
+    flex-direction: column;
+    flex-wrap: nowrap;
+    align-items: stretch;
     width: max-content;
+    min-width: 196px;
     max-width: calc(100% - 24px);
-    gap: 8px;
-    padding: 8px 10px;
+    gap: 4px;
+    padding: 8px;
     background: rgba(10, 14, 24, 0.96);
     border: 1px solid var(--border-color);
     border-radius: 10px;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
     animation: layerPopDown 0.18s ease;
+}
+.layer-pop > .profile-toggle {
+    width: 100%;
+    justify-content: flex-start;
+    text-align: left;
 }
 @keyframes layerPopDown {
     from { opacity: 0; transform: translateY(-8px); }
@@ -873,6 +885,34 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
     height: 100%;
     pointer-events: none;
     z-index: 3;
+}
+
+/* Плашка «обновляю свечи» на время рефреша (↻): свечи убраны с графика,
+   поэтому поверх всего — спиннер и подпись. Слой выше канвы рисунков. */
+.chart-loading {
+    position: absolute;
+    left: 0; top: 0; right: 0; bottom: 0;
+    z-index: 6;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    background: rgba(9, 12, 16, 0.45);
+    pointer-events: none;
+}
+.chart-spinner {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    border: 2px solid rgba(255, 255, 255, 0.16);
+    border-top-color: var(--color-blue, #4da3ff);
+    animation: chart-spin 0.7s linear infinite;
+}
+@keyframes chart-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+    .chart-spinner { animation-duration: 2s; }
 }
 
 /* Кнопка входа в рисование (рядом со свернуть/развернуть) */
@@ -1873,6 +1913,27 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
     padding: 8px;
 }
 
+/* Телефон: панель фильтров открывается модальным окном по центру экрана.
+   Панель прижата к кнопке (absolute, min-width 230px), а панель управления
+   на узком экране переносится по строкам — окно уезжало за правый край, и
+   поля «CVD», «OI Δ» и пресеты оказывались за экраном. Фиксируем по центру:
+   помещается по ширине (90vw, но не шире 400px) и по высоте (80vh + скролл
+   внутри), поэтому видны все input. */
+@media (max-width: 768px) {
+    .filter-panel {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        width: 90vw;
+        max-width: 400px;
+        max-height: 80vh;
+        overflow-y: auto;
+        margin: 0;
+        z-index: 10000;
+    }
+}
+
 .filter-row { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }
 .filter-row-between { justify-content: space-between; }
 .filter-number { width: 110px; }
@@ -2202,19 +2263,19 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
    это по-прежнему «включено», поэтому кнопка остаётся горящей, но пунктиром
    и с ⏸: раньше пауза красилась янтарным и выглядела ярче самого слежения,
    из-за чего состояние читалось наоборот. */
-.profile-toggle.follow-toggle {
+.chart-toggle.follow-toggle {
     border-color: #2a3350;
     color: var(--text-secondary);
     background: var(--bg-card);
     box-shadow: none;
 }
-.profile-toggle.follow-toggle.active {
+.chart-toggle.follow-toggle.active {
     border-color: rgba(0, 214, 255, 0.85);
     color: #9beaff;
     background: rgba(0, 214, 255, 0.16);
     box-shadow: 0 0 12px rgba(0, 214, 255, 0.35);
 }
-.profile-toggle.follow-toggle.active:hover {
+.chart-toggle.follow-toggle.active:hover {
     border-color: #00d6ff;
     background: rgba(0, 214, 255, 0.24);
 }
@@ -2229,15 +2290,16 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
 }
 
 .layer-pop-sep {
-    width: 1px;
+    width: auto;
+    height: 1px;
     align-self: stretch;
     background: var(--border-color);
-    margin: 0 2px;
+    margin: 4px 0;
 }
-/* Подсказка «что значит цвет» внутри плашки слоёв: пункты идут друг под
-   другом (не в ряд), кнопки слоёв — ниже. */
+/* Подсказка «что значит цвет» — первая строка списка, пункты переносятся. */
 .layer-pop-legend {
-    flex: 1 0 100%;
+    flex: 0 0 auto;
+    width: 100%;
     display: flex;
     flex-direction: row;
     flex-wrap: wrap;
@@ -2385,6 +2447,27 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
 /* Правый угол легенды: «☰ Слои», рисование, свернуть/развернуть —
    прибиты к краю (margin-left: auto у первой) и не бегают за цифрами слоёв. */
 #layer-call { margin-left: auto; }
+/* Переключатель Single/Multi в потоке шапки, не поверх соседних кнопок */
+.ws-mode-toggle {
+    position: static;
+    flex: 0 0 auto;
+    align-self: center;
+    margin-left: 0;
+    background: #151d2b;
+    border: 1px solid #233044;
+    color: #a8bdd6;
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 11px;
+    line-height: 1.2;
+    cursor: pointer;
+    white-space: nowrap;
+    z-index: auto;
+}
+.ws-mode-toggle:hover {
+    background: #1d2a3d;
+    color: #d6e6f5;
+}
 .chart-toggle {
     display: inline-flex;
     align-items: center;
@@ -2408,16 +2491,33 @@ body.split-dragging.split-dragging-y { cursor: row-resize; }
 
 /* Разворот графика на весь экран (как на биржах): поверх всего, Esc — назад */
 .chart-section.fullscreen {
-    position: fixed;
+    position: fixed !important;
     inset: 0;
-    z-index: 90;
-    height: 100vh;
+    top: 0 !important;
+    left: 0 !important;
+    width: 100vw !important;
+    height: 100vh !important;
     height: 100dvh;
+    z-index: 9999 !important;
+    margin: 0 !important;
     min-height: 0;
     background: var(--bg-dark);
 }
+.is-fullscreen {
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+    width: 100vw !important;
+    height: 100vh !important;
+    z-index: 9999 !important;
+    margin: 0 !important;
+}
+/* Убедиться, что шапка графика всегда поверх всего */
+.is-fullscreen .chart-header,
+.chart-section.fullscreen .chart-header {
+    z-index: 10000 !important;
+}
 body.chart-fullscreen { overflow: hidden; }
-.chart-section.fullscreen #chart-toggle { display: none; }
 .chart-expand.active {
     border-color: var(--color-blue);
     color: var(--color-blue);
@@ -2512,15 +2612,23 @@ body.chart-fullscreen { overflow: hidden; }
     .header-metrics::-webkit-scrollbar { display: none; }
     .header-controls {
         width: 100%;
-        flex-wrap: wrap;
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
         justify-content: flex-start;
         gap: 6px;
         max-width: 100%;
+        margin-left: 0;
+        padding-bottom: 2px;
     }
+    .header-controls::-webkit-scrollbar { display: none; }
+    .header-controls > * { flex: 0 0 auto; }
     .header-controls #nav-account,
     .header-controls .acc-nav {
-        flex-wrap: wrap;
-        max-width: 100%;
+        flex-wrap: nowrap;
+        flex-shrink: 0;
+        max-width: none;
         gap: 6px;
     }
     .header-controls .lang-select { flex: 0 1 auto; max-width: 120px; min-width: 0; }
@@ -2547,11 +2655,11 @@ body.chart-fullscreen { overflow: hidden; }
     .coin-link { font-size: 0.72rem; }
     .coin-link-icon { opacity: 0.85; }
     .profile-toggle { padding: 2px 6px; font-size: 0.6rem; }
-    /* узкий экран: кнопки занимают всю ширину графика и текут в строки,
-       фон больше не жмётся в узкий столбик посреди плашки */
+    /* узкий экран: тот же вертикальный список, прижат к кнопке ☰ справа */
     .layer-pop {
-        left: 8px; right: 8px; width: auto; max-width: none;
-        justify-content: center; gap: 6px; padding: 6px 8px;
+        left: auto; right: 8px; width: max-content; max-width: calc(100% - 16px);
+        flex-direction: column; align-items: stretch; justify-content: flex-start;
+        gap: 4px; padding: 6px 8px;
     }
 
     .symbol-search-box { max-width: 100%; }
@@ -2713,3 +2821,22 @@ body.chart-fullscreen { overflow: hidden; }
     font-size: 0.78rem; font-variant-numeric: tabular-nums;
 }
 .levels-field input[type="checkbox"] { align-self: flex-start; }
+
+/* Whale Alert shares the feed scroll area and the page's existing WebSocket. */
+.feed-section.whale-active #feed-table,
+.feed-section.whale-active #feed-empty { display: none !important; }
+.whale-panel[hidden] { display: none !important; }
+.whale-panel { padding: 10px; }
+.whale-controls { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.whale-controls label { color: var(--text-muted); font-size: .72rem; }
+.whale-controls select { background: #16202d; color: #e5ebf5; border: 1px solid var(--border-color); border-radius: 5px; padding: 4px; }
+.whale-events { display: grid; gap: 7px; }
+.whale-card { padding: 10px; border: 1px solid var(--border-color); border-radius: 8px; background: #121c29; font-size: .78rem; }
+.whale-card-head { display: flex; justify-content: space-between; gap: 5px; margin-bottom: 5px; }
+.whale-card .whale-usd { color: var(--color-gold, #ffd166); font-weight: 800; }
+.whale-card .whale-inflow { color: #4ade80; }
+.whale-card .whale-outflow { color: #fb7185; }
+.whale-card .whale-trade { color: #93c5fd; }
+.whale-card .whale-address { color: var(--text-muted); overflow-wrap: anywhere; line-height: 1.6; }
+.whale-card a { color: #38bdf8; }
+.whale-panel .feed-empty[hidden] { display: none !important; }

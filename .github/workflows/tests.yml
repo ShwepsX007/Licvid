@@ -19,38 +19,64 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
 
       - name: Install Python deps
+        id: install-python-deps
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip setuptools
           pip install -r requirements.txt
-          pip install httpx
+          pip install httpx httpx2
 
       - name: Install JS deps
+        id: install-js-deps
         run: |
-          npm install --no-save jsdom ws
+          npm ci
 
       - name: Build i18n bundles
+        id: build-i18n
         run: |
           python tools/build_i18n_pages.py
           python tools/build_i18n_pages.py --check
 
+      - name: Run source diagnostics UI regression test
+        if: ${{ steps.install-js-deps.outcome == 'success' && steps.build-i18n.outcome == 'success' }}
+        run: |
+          export NODE_OPTIONS="--require $(pwd)/tests/_dom_env.js"
+          export NODE_PATH=$(pwd)/node_modules
+          node tests/source_diagnostics_page.js
+
       - name: Run tests (one-button runner)
+        if: ${{ always() && steps.install-python-deps.outcome == 'success' && steps.build-i18n.outcome == 'success' }}
         run: |
           bash tools/run_tests.sh --python
         env:
           LIQSCOPE_SECRET: test-secret-not-the-published-default
           PYTHON: python
+          # CI-02: тесты запускаются из корня репозитория — модули проекта
+          # должны импортироваться независимо от того, как раннер складывает
+          # sys.path (см. также вставку пути в самих тестах).
+          PYTHONPATH: .
 
+      # Run browser/DOM regression tests even when an unrelated Python test fails.
+      # This keeps frontend failures visible instead of silently skipping this step.
       - name: Run JS tests (if any) with dom env
+        if: ${{ always() && steps.install-js-deps.outcome == 'success' }}
         run: |
           # JS tests that don't need live server — they use _dom_env to stub gtag
           export NODE_OPTIONS="--require $(pwd)/tests/_dom_env.js"
           export NODE_PATH=$(pwd)/node_modules
           for f in tests/*.js; do
             base=$(basename "$f")
-            case "$base" in _*) continue;; esac
+            case "$base" in
+              _*) continue ;;
+              # This script is an interactive translation-coverage report; it
+              # intentionally returns non-zero while untranslated prose remains.
+              i18n_coverage.js)
+                echo "skip (manual coverage report) $f"
+                continue
+                ;;
+            esac
             # skip tests that need LIQSCOPE_TEST_URL (they require live server)
             if grep -q "process.argv\[2\]\|LIQSCOPE_TEST_URL" "$f"; then
               echo "skip (needs live server) $f"

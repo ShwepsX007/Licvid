@@ -1,0 +1,40 @@
+name: source-diagnostics-ui
+
+on:
+  push:
+    paths:
+      - "static/source_diagnostics.js"
+      - "static/admin.html"
+      - "tests/source_diagnostics_page.js"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/source-diagnostics.yml"
+  pull_request:
+    paths:
+      - "static/source_diagnostics.js"
+      - "static/admin.html"
+      - "tests/source_diagnostics_page.js"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/source-diagnostics.yml"
+
+jobs:
+  ui-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install JS dependencies
+        run: npm ci
+
+      - name: Run source diagnostics regression
+        run: |
+          export NODE_OPTIONS="--require $(pwd)/tests/_dom_env.js"
+          export NODE_PATH=$(pwd)/node_modules
+          node tests/source_diagnostics_page.js

@@ -200,6 +200,7 @@
             cell(row, source.reconnects === undefined ? "—" : number(source.reconnects));
             const detail = cell(row, sourceDetail(source), "diag-detail");
             if (detail.textContent.length > 180) detail.title = detail.textContent;
+            marketRows.append(row);
         });
         if (!rows.length) {
             const row = document.createElement("tr");
@@ -266,6 +267,7 @@
             cell(row, network.cu_used ? number(network.cu_used) : "—");
             const detail = cell(row, networkDetail(network), "diag-detail");
             if (detail.textContent.length > 180) detail.title = detail.textContent;
+            onchainRows.append(row);
         });
         return networks.map(network => ({name: network.chain || "—", network, state: networkState(network)}));
     }

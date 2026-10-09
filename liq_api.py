@@ -4,6 +4,8 @@ import json
 from typing import Optional
 import aiohttp
 
+from circuit_breaker import protect_url
+
 # ============== КЭШИ ==============
 _gate_contract_specs = {}
 _gate_contract_specs_ts = {}
@@ -97,14 +99,17 @@ async def fetch_json(
         url: str,
         params: dict = None) -> Optional[list | dict]:
     try:
-        async with session.get(
-                url, params=params,
-                timeout=aiohttp.ClientTimeout(total=15)
-        ) as resp:
-            if resp.status == 200:
+        async with protect_url("liquidation-rest", url):
+            async with session.get(
+                    url, params=params,
+                    timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
+                if resp.status != 200:
+                    raise RuntimeError(f"HTTP {resp.status}")
                 return await resp.json()
-            return None
     except Exception:
+        # REST helper intentionally keeps its legacy fallback contract: cache
+        # and default symbols remain usable while a provider circuit is open.
         return None
 
 

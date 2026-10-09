@@ -35,14 +35,14 @@
 <link rel="icon" type="image/png" sizes="512x512" href="/static/icon-512.png">
     <link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png">
     <link rel="manifest" href="/manifest.webmanifest">
-    <link rel="stylesheet" href="/static/style.css?v=whale-native-hl1">
+    <link rel="stylesheet" href="/static/style.css?v=liqan1">
     <!-- Local Lightweight Charts v5 -->
     <link rel="stylesheet" href="/static/ads.css?v=banner5">
     <link rel="stylesheet" href="/static/terminal_chat.css?v=8">
     <link rel="stylesheet" href="/static/workspace.css?v=embed-hdr1">
     <script src="/static/lightweight-charts.js"></script>
     <script src="/static/i18n.pages.js?v=screener1"></script>
-    <script src="/static/i18n.js?v=quota2"></script>
+    <script src="/static/i18n.js?v=liqan1"></script>
     <script src="/static/account.js?v=nav5"></script>
     <script src="/static/donate.js?v=nav1" defer></script>
 </head>
@@ -299,6 +299,10 @@
                             data-i18n-title="chart.layers_title"
                             title="Показать/скрыть кнопки слоёв" aria-label="Слои">☰<span
                             class="layer-trial hidden" id="layer-trial"></span></button>
+                    <button class="profile-toggle" id="liq-analysis-btn" type="button"
+                            data-i18n-title="chart.analysis_title"
+                            title="Анализ ликвидаций: лонги/шорты, нетто, накопление и тепловая карта"
+                            data-i18n="chart.analysis">📊 Анализ</button>
                     <!-- Автоследование — отдельная кнопка в шапке графика,
                          рядом с разворотом на весь экран: из плашки слоёв её
                          убрали, чтобы слежение переключалось в один клик. -->
@@ -354,6 +358,10 @@
                             title="Скрыть расчётные уровни ликвидаций (оценка)">Ликвидации (оценка)</button>
                     <button class="profile-toggle levels-toggle" id="levels-alert-toggle" type="button"
                             title="Сигнал при касании пунктирного уровня ±0.01% (3s подсветка)">🔔 Уровни</button>
+                    <button class="profile-toggle whale-toggle hidden" id="whale-layer-toggle" type="button"
+                            data-i18n-title="chart.whale_layer_off"
+                            title="Показать переводы китов на графике"
+                            data-i18n="chart.whale_layer">🐋 Киты on-chain</button>
                     <span class="layer-pop-sep" aria-hidden="true"></span>
                     <button class="profile-toggle pane-toggle" id="pane-liq-toggle" type="button"
                             data-i18n-title="chart.pane_liq_on" data-i18n="chart.pane_liq"
@@ -605,10 +613,66 @@
         </div>
     </div>
 
+    <!-- Анализ ликвидаций: лонги/шорты, нетто, накопление + тепловая карта
+         по часам. Данные — из WARM-свёрток истории (/api/liq/series,
+         /api/liq/heatmap): окно шире жизни сырых шардов, без нагрузки на
+         горячую базу. -->
+    <div id="liq-analysis" class="modal liq-analysis hidden" role="dialog"
+         aria-modal="true" aria-labelledby="liq-analysis-title">
+        <div class="modal-content analysis-box">
+            <button type="button" class="close-modal" id="liq-analysis-close"
+                    data-i18n-title="gate.close_title" title="Закрыть окно">×</button>
+            <h3 id="liq-analysis-title" data-i18n="chart.analysis_title">Анализ ликвидаций</h3>
+            <div class="analysis-controls">
+                <span class="analysis-symbol" id="liq-analysis-symbol">—</span>
+                <label><span data-i18n="chart.analysis_step">Шаг</span>
+                    <select id="analysis-tf">
+                        <option value="1m">1m</option>
+                        <option value="5m">5m</option>
+                        <option value="15m">15m</option>
+                        <option value="1h" selected>1h</option>
+                        <option value="4h">4h</option>
+                        <option value="1d">1d</option>
+                    </select>
+                </label>
+                <label><span data-i18n="chart.analysis_window">Окно</span>
+                    <select id="analysis-window">
+                        <option value="24">24h</option>
+                        <option value="168" selected>7d</option>
+                        <option value="720">30d</option>
+                    </select>
+                </label>
+                <div class="analysis-modes" role="group" aria-label="Mode">
+                    <button type="button" class="mode-btn active" data-mode="long"
+                            data-i18n="chart.analysis_long">Лонги</button>
+                    <button type="button" class="mode-btn" data-mode="short"
+                            data-i18n="chart.analysis_short">Шорты</button>
+                    <button type="button" class="mode-btn" data-mode="net"
+                            data-i18n="chart.analysis_net">Нетто</button>
+                    <button type="button" class="mode-btn" data-mode="cum"
+                            data-i18n="chart.analysis_cum">Накопление</button>
+                </div>
+            </div>
+            <div class="analysis-chart-frame">
+                <canvas id="analysis-chart" width="860" height="260"></canvas>
+                <div id="analysis-empty" class="analysis-empty hidden"
+                     data-i18n="chart.analysis_empty">Нет данных за это окно</div>
+            </div>
+            <div class="analysis-heat">
+                <h4 data-i18n="chart.analysis_heatmap">Тепловая карта по часам</h4>
+                <div id="analysis-heat-legend" class="analysis-heat-legend">
+                    <span class="heat-swatch heat-long"></span><span data-i18n="chart.long">Ликв. лонгов</span>
+                    <span class="heat-swatch heat-short"></span><span data-i18n="chart.short">Ликв. шортов</span>
+                </div>
+                <div id="analysis-heat-grid" class="analysis-heat-grid"></div>
+            </div>
+        </div>
+    </div>
+
     <!-- workspace.js (старый мультичарт) больше не подключается: графики
          собирает chart_dock.js, а один WebSocket на окно раздаёт данные
          встроенным окнам через postMessage. Файл оставлен для старых тестов. -->
-    <script src="/static/app.js?v=embed-hdr1"></script>
+    <script src="/static/app.js?v=liqan1"></script>
     <script src="/static/chart_dock.js?v=embed-hdr1"></script>
     <script src="/static/ads.js?v=banner7"></script>
     <script src="/static/terminal_chat.js?v=10"></script>

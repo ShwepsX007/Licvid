@@ -60,6 +60,9 @@
         venueFlows: null,       // {venues: [{id, name, …}], series: {id: [{…}]}}
         venueOrder: [],         // закреплённый порядок бирж между обновлениями
         venueRequest: 0,
+        rankings: null,         // ответ /api/screener/whales/rankings
+        rankMetrics: {wallets: "usd", tokens: "usd", networks: "usd"},
+        rankRequest: 0,
     };
 
     function t(key, vars) {
@@ -1035,6 +1038,153 @@
         renderLive();
         fetchHistory();
     }
+    // --- Рейтинги окна: топы по деньгам и по скорости ----------------------
+    const RANK_METRICS = {
+        events: ["usd"],
+        inflow: ["usd"],
+        outflow: ["usd"],
+        wallets: ["usd", "usd_per_min"],
+        tokens: ["usd", "usd_per_min", "usd_vs_vol24h"],
+        networks: ["usd", "usd_per_min"],
+    };
+
+    function rankMetricValue(row, metric) {
+        if (metric === "usd") return Number(row.usd) || 0;
+        if (metric === "usd_per_min") return Number(row.usd_per_min) || 0;
+        if (metric === "usd_vs_vol24h") return Number(row.usd_vs_vol24h) || 0;
+        return 0;
+    }
+
+    function fmtRate(value) {
+        const n = Number(value);
+        if (!Number.isFinite(n) || n <= 0) return "—";
+        if (n >= 1_000_000) return "$" + (n / 1_000_000).toFixed(1) + "M/m";
+        if (n >= 1_000) return "$" + Math.round(n / 1_000) + "K/m";
+        return "$" + n.toFixed(0) + "/m";
+    }
+
+    function renderRankSortButtons() {
+        document.querySelectorAll(".rank-sort").forEach(box => {
+            const group = box.getAttribute("data-metric-group");
+            box.replaceChildren();
+            (RANK_METRICS[group] || ["usd"]).forEach(metric => {
+                const btn = make("button", "rank-sort-btn", t("screener.rankings_sort_" +
+                    (metric === "usd" ? "usd" : metric === "usd_per_min" ? "speed" : "vol")));
+                btn.type = "button";
+                if (state.rankMetrics[group] === metric) btn.classList.add("active");
+                btn.addEventListener("click", () => {
+                    state.rankMetrics[group] = metric;
+                    renderRankings();
+                });
+                box.appendChild(btn);
+            });
+        });
+    }
+
+    function rankRow(item, group) {
+        const li = make("li", "rank-row");
+        const metric = state.rankMetrics[group] || "usd";
+        const main = make("div", "rank-main");
+        const label = make("span", "rank-label");
+        if (group === "events" || group === "inflow" || group === "outflow") {
+            label.textContent = timeLabel(item.timestamp, {month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit"});
+        } else if (group === "wallets") {
+            label.textContent = networkName(item.chain) + " · " + addressLabel(item.address);
+        } else if (group === "tokens") {
+            label.textContent = String(item.key || "—");
+        } else {
+            label.textContent = networkName(item.key);
+        }
+        main.appendChild(label);
+        const value = make("span", "rank-value", group === "events" || group === "inflow" || group === "outflow"
+            ? (item.symbol ? item.symbol + " " : "") + fmtUSD(item.usd, true)
+            : fmtUSD(item.usd, true));
+        main.appendChild(value);
+        li.appendChild(main);
+        const meta = make("div", "rank-meta");
+        if (group === "events" || group === "inflow" || group === "outflow") {
+            meta.textContent = networkName(item.chain) +
+                (exchangeFor(item) ? " · " + exchangeFor(item) : "") +
+                (item.direction ? " · " + t("screener.direction_" + item.direction) : "");
+        } else {
+            const bits = [];
+            if (metric === "usd_per_min") bits.push(fmtRate(item.usd_per_min));
+            if (metric === "usd_vs_vol24h") {
+                bits.push(Number(item.usd_vs_vol24h) > 0
+                    ? "×" + Number(item.usd_vs_vol24h).toLocaleString(undefined, {maximumFractionDigits: 2}) + " " + t("screener.rankings_sort_vol").replace(/^\$\s*\/\s*/, "")
+                    : "—");
+            }
+            const net = Number(item.net_usd) || 0;
+            bits.push((net >= 0 ? "net ↑ " : "net ↓ ") + fmtUSD(Math.abs(net), true));
+            bits.push(fmtNumber(item.n) + "×");
+            meta.textContent = bits.join(" · ");
+        }
+        li.appendChild(meta);
+        return li;
+    }
+
+    function renderRankings() {
+        renderRankSortButtons();
+        const data = state.rankings;
+        const empty = $("rankings-empty");
+        const groups = {
+            events: data ? data.events : [],
+            inflow: data ? data.inflow : [],
+            outflow: data ? data.outflow : [],
+            wallets: data ? data.wallets : [],
+            tokens: data ? data.tokens : [],
+            networks: data ? data.networks : [],
+        };
+        let total = 0;
+        Object.keys(groups).forEach(group => {
+            const list = $("rank-" + group);
+            if (!list) return;
+            const metric = state.rankMetrics[group] || "usd";
+            const sorted = groups[group].slice()
+                .sort((a, b) => rankMetricValue(b, metric) - rankMetricValue(a, metric))
+                .slice(0, 10);
+            total += sorted.length;
+            const frag = document.createDocumentFragment();
+            sorted.forEach(item => frag.appendChild(rankRow(item, group)));
+            list.replaceChildren(frag);
+        });
+        if (empty) empty.hidden = total > 0;
+    }
+
+    async function fetchRankings() {
+        const seq = ++state.rankRequest;
+        const hours = $("rank-window") ? $("rank-window").value : "24";
+        const minUsd = $("rank-min") ? $("rank-min").value : "100000";
+        try {
+            const res = await fetch("/api/screener/whales/rankings?window_hours=" +
+                encodeURIComponent(hours) + "&min_usd=" + encodeURIComponent(minUsd),
+                {credentials: "same-origin"});
+            if (res.status === 401) {
+                state.rankings = null;
+                if (seq === state.rankRequest) {
+                    const empty = $("rankings-empty");
+                    if (empty) {
+                        empty.hidden = false;
+                        empty.textContent = t("screener.members_only");
+                    }
+                    renderRankings();
+                }
+                return;
+            }
+            if (!res.ok) throw new Error("HTTP " + res.status);
+            const data = await res.json();
+            if (seq !== state.rankRequest) return;
+            state.rankings = data && data.available ? data : null;
+            const empty = $("rankings-empty");
+            if (empty) empty.textContent = t("screener.rankings_empty");
+            renderRankings();
+        } catch (_) {
+            // сеть/сервер недоступны: список оставляем как был — «нет событий»
+            // означало бы, что мы получили пустой ответ, а это не так
+            if (seq === state.rankRequest && state.rankings) renderRankings();
+        }
+    }
+
     function bind() {
         getChainOptions();
         ["whale-min", "whale-direction", "whale-exchange"].forEach(id => $(id).addEventListener("change", onFilterChanged));
@@ -1047,6 +1197,10 @@
             if (state.historyPage < state.historyPages) { state.historyPage += 1; fetchHistory(); }
         });
         $("history-export").addEventListener("click", exportCsv);
+        ["rank-min", "rank-window"].forEach(id => {
+            const el = $(id);
+            if (el) el.addEventListener("change", fetchRankings);
+        });
         document.querySelectorAll("[data-sort]").forEach(button => button.addEventListener("click", () => {
             const column = button.getAttribute("data-sort");
             if (state.sortBy === column) state.sortDir = state.sortDir === "desc" ? "asc" : "desc";
@@ -1076,6 +1230,7 @@
         fetchLive();
         fetchHistory();
         fetchVenueFlows();
+        fetchRankings();
         window.setInterval(() => { if (!document.hidden) fetchLive(); }, 9000);
         window.setInterval(() => { if (!document.hidden) fetchStats(); }, 30000);
         // Пока вкладка спрятана, интервалы пропускаются — при возвращении
@@ -1091,6 +1246,8 @@
         // Потоки по биржам меняются медленно, но карточки строятся по данным:
         // раз в минуту — компромисс между живостью и одним лёгким запросом.
         window.setInterval(() => { if (!document.hidden) fetchVenueFlows(); }, 60000);
+        // рейтинги пересобираются на сервере из окна событий — минуты достаточно
+        window.setInterval(() => { if (!document.hidden) fetchRankings(); }, 60000);
     }
     document.addEventListener("DOMContentLoaded", init, {once: true});
 })();

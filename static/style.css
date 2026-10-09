@@ -2840,3 +2840,52 @@ body.chart-fullscreen { overflow: hidden; }
 .whale-card .whale-address { color: var(--text-muted); overflow-wrap: anywhere; line-height: 1.6; }
 .whale-card a { color: #38bdf8; }
 .whale-panel .feed-empty[hidden] { display: none !important; }
+
+/* --- 📊 Модалка анализа ликвидаций --------------------------------------- */
+.liq-analysis { z-index: 130; }
+.liq-analysis .analysis-box { width: min(940px, 94vw); max-height: 92vh;
+                              overflow-y: auto; }
+.analysis-controls { display: flex; align-items: center; gap: 14px;
+                     flex-wrap: wrap; margin: 6px 0 12px; }
+.analysis-controls label { display: flex; align-items: center; gap: 6px;
+                           font-size: .72rem; color: var(--text-muted, #8ea0c8); }
+.analysis-controls select { background: #10192c; color: #e6ecff;
+                            border: 1px solid #233252; border-radius: 8px;
+                            padding: 4px 8px; font: inherit; font-size: .78rem; }
+.analysis-symbol { font-weight: 600; font-size: .9rem; }
+.analysis-modes { display: flex; gap: 6px; margin-left: auto; }
+.mode-btn { background: transparent; border: 1px solid #233252; color: #8ea0c8;
+            border-radius: 999px; padding: 4px 12px; font-size: .72rem;
+            cursor: pointer; }
+.mode-btn.active { background: rgba(79, 140, 255, .18); color: #cfe0ff;
+                   border-color: #4f8cff; }
+.analysis-chart-frame { position: relative; background: rgba(10, 16, 30, .55);
+                        border: 1px solid rgba(255,255,255,.06);
+                        border-radius: 10px; padding: 6px; }
+#analysis-chart { width: 100%; display: block; }
+.analysis-empty { position: absolute; inset: 0; display: flex; align-items: center;
+                  justify-content: center; color: #77859c; font-size: .8rem; }
+.analysis-empty.hidden { display: none; }
+.analysis-heat { margin-top: 14px; }
+.analysis-heat h4 { margin: 0 0 8px; font-size: .8rem; color: #9fb2d8; }
+.analysis-heat-legend { display: flex; gap: 8px; align-items: center;
+                        font-size: .68rem; color: var(--text-muted, #8ea0c8);
+                        margin-bottom: 8px; }
+.heat-swatch { width: 12px; height: 12px; border-radius: 3px;
+               display: inline-block; }
+.heat-swatch.heat-long { background: #ff2d95; }
+.heat-swatch.heat-short { background: #00d6ff; }
+.analysis-heat-grid { display: flex; flex-direction: column; gap: 3px;
+                      overflow-x: auto; padding-bottom: 4px; }
+.analysis-heat-grid.analysis-empty-text { color: #77859c; font-size: .78rem; }
+.heat-row { display: grid; grid-template-columns: 44px repeat(24, minmax(16px, 1fr));
+            gap: 3px; align-items: center; }
+.heat-head span { font-size: .58rem; color: #77859c; text-align: center; }
+.heat-day { font-size: .62rem; color: #8ea0c8; }
+.heat-cell { height: 15px; border-radius: 3px;
+             background: rgba(255,255,255,0.04); cursor: default; }
+.heat-cell:hover { outline: 1px solid rgba(207, 224, 255, .8); }
+
+/* 🐋 кнопка слоя китов в поповере слоёв */
+.whale-toggle.active { background: linear-gradient(135deg, rgba(255,206,0,.25), rgba(255,77,0,.25));
+                       border-color: #ffb054; color: #ffe0b0; }

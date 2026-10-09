@@ -200,6 +200,107 @@ def event_venue(event: dict) -> str:
     return venue_of_label(event_exchange(event))
 
 
+def rank_events(rows: list[dict], since: float, until: float,
+                min_usd: float = 50_000.0, top: int = 10) -> dict:
+    """Топы окна событий: кто, куда и как быстро.
+
+    Используется рейтингами скринера (``WhaleScreener.rankings``) и работает
+    одинаково по строкам из долговременного хранилища и живого кольца.
+    Каждая группа несёт сумму, число событий, нетто и скорость
+    ``usd_per_min``: сколько долларов в минуту прошло через точку между
+    первым и последним событием группы. Скорость превращает ленту в
+    аналитический инструмент: $2M за 5 минут и $2M за сутки — разные
+    события.
+    """
+    wallets: dict[tuple[str, str], dict] = {}
+    tokens: dict[str, dict] = {}
+    networks: dict[str, dict] = {}
+    totals = {"usd": 0.0, "n": 0, "inflow_usd": 0.0, "outflow_usd": 0.0}
+    first_ts = last_ts = None
+    # один порог на всё: события ниже min_usd не участвуют ни в топах,
+    # ни в группах — так живое кольцо и sqlite-хранилище считают одинаково
+    rows = [e for e in rows if float(e.get("usd") or 0.0) >= float(min_usd)]
+
+    def _bump(bucket: dict, key, usd: float, direction: str, ts: float) -> None:
+        cell = bucket.setdefault(key, {
+            "usd": 0.0, "n": 0, "inflow_usd": 0.0, "outflow_usd": 0.0,
+            "first_ts": ts, "last_ts": ts})
+        cell["usd"] += usd
+        cell["n"] += 1
+        if direction == "inflow":
+            cell["inflow_usd"] += usd
+        elif direction == "outflow":
+            cell["outflow_usd"] += usd
+        cell["first_ts"] = min(cell["first_ts"], ts)
+        cell["last_ts"] = max(cell["last_ts"], ts)
+
+    for ev in rows:
+        usd = float(ev.get("usd") or 0.0)
+        if usd < float(min_usd):
+            continue
+        ts = float(ev.get("timestamp") or 0.0)
+        direction = str(ev.get("direction") or "")
+        chain = str(ev.get("chain") or "").upper()
+        symbol = str(ev.get("symbol") or "").upper()
+        totals["usd"] += usd
+        totals["n"] += 1
+        if direction == "inflow":
+            totals["inflow_usd"] += usd
+        elif direction == "outflow":
+            totals["outflow_usd"] += usd
+        first_ts = ts if first_ts is None else min(first_ts, ts)
+        last_ts = ts if last_ts is None else max(last_ts, ts)
+        if chain:
+            _bump(networks, chain, usd, direction, ts)
+        if symbol:
+            _bump(tokens, symbol, usd, direction, ts)
+        for field in ("from", "to"):
+            address = str(ev.get(field) or "").strip()
+            if not address:
+                continue
+            key = (chain, address.lower() if chain in EVM_CHAINS else address)
+            _bump(wallets, key, usd, direction, ts)
+
+    def _top(bucket: dict, sort_key=lambda kv: kv[1]["usd"]) -> list[dict]:
+        out = []
+        for key, cell in sorted(bucket.items(), key=sort_key,
+                                reverse=True)[: max(1, int(top))]:
+            span_min = max((cell["last_ts"] - cell["first_ts"]) / 60.0, 1.0)
+            row = {
+                "usd": round(cell["usd"], 2), "n": cell["n"],
+                "inflow_usd": round(cell["inflow_usd"], 2),
+                "outflow_usd": round(cell["outflow_usd"], 2),
+                "net_usd": round(cell["inflow_usd"] - cell["outflow_usd"], 2),
+                "usd_per_min": round(cell["usd"] / span_min, 2),
+                "first_ts": cell["first_ts"], "last_ts": cell["last_ts"],
+            }
+            if isinstance(key, tuple):
+                row["chain"], row["address"] = key[0], key[1]
+            else:
+                row["key"] = key
+            out.append(row)
+        return out
+
+    if first_ts is not None and last_ts is not None:
+        totals["span_min"] = round(max(last_ts - first_ts, 60.0) / 60.0, 1)
+    top_n = max(1, int(top))
+    by_usd = lambda e: float(e.get("usd") or 0.0)  # noqa: E731
+    return {
+        "since": float(since), "until": float(until),
+        "min_usd": float(min_usd),
+        "totals": totals,
+        "events": sorted(rows, key=by_usd, reverse=True)[:top_n],
+        "inflow": sorted([e for e in rows
+                          if str(e.get("direction")) == "inflow"],
+                         key=by_usd, reverse=True)[:top_n],
+        "outflow": sorted([e for e in rows
+                           if str(e.get("direction")) == "outflow"],
+                          key=by_usd, reverse=True)[:top_n],
+        "wallets": _top(wallets), "tokens": _top(tokens),
+        "networks": _top(networks),
+    }
+
+
 class WhaleHistoryStore:
     """Seven-day durable event history, indexed for dashboards and CSV exports.
 
@@ -397,6 +498,14 @@ class WhaleHistoryStore:
         rows, _ = self.query(page_size=limit, sort_by="timestamp", sort_dir="desc")
         return list(reversed(rows))
 
+    def rankings(self, since: float, until: float | None = None,
+                 min_usd: float = 50_000.0, top: int = 10) -> dict:
+        """Аналитика окна для рейтингов скринера (см. ``rank_events``)."""
+        until = time.time() if until is None else float(until)
+        rows, _total = self.query(since=float(since), until=until,
+                                  min_usd=float(min_usd), page_size=100_000)
+        return rank_events(rows, since, until, min_usd=min_usd, top=top)
+
     def close(self) -> None:
         with self._lock:
             self._db.close()
@@ -542,6 +651,41 @@ class WhaleScreener:
                 if float(ev.get("timestamp") or 0) >= since
                 and float(ev.get("timestamp") or 0) <= now
                 and (chains is None or str(ev.get("chain") or "").upper() in chains)]
+
+    def rankings(self, since: float, until: float | None = None,
+                 min_usd: float = 50_000.0, top: int = 10) -> dict:
+        """Топы окна за видимыми сетями (см. WhaleHistoryStore.rankings).
+
+        Долговременного хранилища нет (например, тест) — считаем по
+        живому кольцу событий через тот же агрегатор.
+        """
+        chains = self.visible_chains()
+        now = time.time() if until is None else float(until)
+        if self.history_store:
+            data = self.history_store.rankings(since, now,
+                                               min_usd=min_usd, top=top)
+        else:
+            rows = [ev for ev in self.events
+                    if float(ev.get("timestamp") or 0) >= float(since)
+                    and float(ev.get("timestamp") or 0) <= now]
+            data = rank_events(rows, since, now, min_usd=min_usd, top=top)
+        if chains is None:
+            return data
+        # фильтр сетей админа: срезаем то, что он выключил
+        allowed = {str(c).upper() for c in chains}
+
+        def _keep(rows):
+            return [r for r in rows
+                    if str(r.get("chain") or "").upper() in allowed]
+
+        data["events"] = _keep(data.get("events") or [])
+        data["inflow"] = _keep(data.get("inflow") or [])
+        data["outflow"] = _keep(data.get("outflow") or [])
+        data["networks"] = [n for n in (data.get("networks") or [])
+                            if str(n.get("key") or "").upper() in allowed]
+        data["wallets"] = [w for w in (data.get("wallets") or [])
+                           if str(w.get("chain") or "").upper() in allowed]
+        return data
 
     def query_history(self, *, since: float, until: float | None = None,
                       chain: str = "ALL", min_usd: float = 0.0,

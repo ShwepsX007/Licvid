@@ -9,7 +9,7 @@
 <title data-i18n="screener.title">Whale Screener — LiqScope</title>
 <link rel="icon" href="/static/favicon.ico">
 <link rel="stylesheet" href="/static/brand.css?v=rebrand1">
-<link rel="stylesheet" href="/static/screener.css?v=venueflow3">
+<link rel="stylesheet" href="/static/screener.css?v=rankings1">
 </head>
 <body class="dark-theme screener-page">
 <header class="site-header">
@@ -70,6 +70,66 @@
         </div>
         <div id="network-cards" class="network-grid" aria-live="polite"></div>
         <nav id="network-tabs" class="network-tabs" aria-label="Network filter"></nav>
+    </section>
+
+    <section class="panel rankings-panel" aria-labelledby="rankings-title">
+        <div class="section-heading rankings-heading">
+            <div>
+                <div class="eyebrow" data-i18n="screener.rankings_eyebrow">АНАЛИТИКА ОКНА</div>
+                <h2 id="rankings-title" data-i18n="screener.rankings_title">Рейтинги китов</h2>
+            </div>
+            <div class="rankings-controls" aria-label="Rankings filters">
+                <label><span class="muted" data-i18n="screener.filter_amount">Minimum amount</span>
+                    <select id="rank-min">
+                        <option value="50000">$50K+</option>
+                        <option value="100000" selected>$100K+</option>
+                        <option value="500000">$500K+</option>
+                        <option value="1000000">$1M+</option>
+                    </select>
+                </label>
+                <label><span class="muted">Window</span>
+                    <select id="rank-window">
+                        <option value="24" selected data-i18n="screener.rankings_window_24">24 часа</option>
+                        <option value="72" data-i18n="screener.rankings_window_72">3 суток</option>
+                        <option value="168" data-i18n="screener.rankings_window_168">7 суток</option>
+                    </select>
+                </label>
+            </div>
+        </div>
+        <p class="venue-flow-hint muted" data-i18n="screener.rankings_hint">Скорость — сколько долларов в минуту прошло через точку внутри окна. ×об. — сумма относительно суточного оборота биржи.</p>
+        <div id="rankings-grid" class="rankings-grid" aria-live="polite">
+            <article class="rank-card" data-rank="events">
+                <h3 data-i18n="screener.rankings_events">TOP события</h3>
+                <div class="rank-sort" data-metric-group="events"></div>
+                <ol class="rank-list" id="rank-events"></ol>
+            </article>
+            <article class="rank-card rank-card--in" data-rank="inflow">
+                <h3 data-i18n="screener.rankings_inflow">TOP приток на биржи</h3>
+                <div class="rank-sort" data-metric-group="inflow"></div>
+                <ol class="rank-list" id="rank-inflow"></ol>
+            </article>
+            <article class="rank-card rank-card--out" data-rank="outflow">
+                <h3 data-i18n="screener.rankings_outflow">TOP вывод с бирж</h3>
+                <div class="rank-sort" data-metric-group="outflow"></div>
+                <ol class="rank-list" id="rank-outflow"></ol>
+            </article>
+            <article class="rank-card" data-rank="wallets">
+                <h3 data-i18n="screener.rankings_wallets">TOP кошельки</h3>
+                <div class="rank-sort" data-metric-group="wallets"></div>
+                <ol class="rank-list" id="rank-wallets"></ol>
+            </article>
+            <article class="rank-card" data-rank="tokens">
+                <h3 data-i18n="screener.rankings_tokens">TOP токены</h3>
+                <div class="rank-sort" data-metric-group="tokens"></div>
+                <ol class="rank-list" id="rank-tokens"></ol>
+            </article>
+            <article class="rank-card" data-rank="networks">
+                <h3 data-i18n="screener.rankings_networks">TOP сети</h3>
+                <div class="rank-sort" data-metric-group="networks"></div>
+                <ol class="rank-list" id="rank-networks"></ol>
+            </article>
+        </div>
+        <div id="rankings-empty" class="empty-state" hidden data-i18n="screener.rankings_empty">За окно нет событий с этим порогом.</div>
     </section>
 
     <section class="activity-grid" aria-label="Flow analytics">
@@ -215,10 +275,10 @@
     </section>
 </main>
 
-<script src="/static/i18n.pages.js?v=venueflow3" defer></script>
+<script src="/static/i18n.pages.js?v=rankings1" defer></script>
 <script src="/static/i18n.js?v=venueflow3" defer></script>
 <script src="/static/account.js?v=nav5" defer></script>
 <script src="/static/donate.js?v=nav1" defer></script>
-<script src="/static/screener.js?v=venueflow3" defer></script>
+<script src="/static/screener.js?v=rankings1" defer></script>
 </body>
 </html>

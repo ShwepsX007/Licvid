@@ -48,6 +48,7 @@
         levelsAt: 0,            // когда он получен (свой TTL поверх серверного)
         levelsError: "",        // почему расчёта нет: "HTTP 404" / "нет связи"
         liqEnabled: false,      // шарики ликвидаций на графике
+        whaleLayerEnabled: false, // 🐋 переводы китов on-chain на графике
         cvdEnabled: false,      // CVD-стрелки: перевес тейкер-покупок/продаж в свече
         cvdBars: 0,
         oiEnabled: false,       // OI-шарики: рост/падение открытого интереса за свечу
@@ -2234,36 +2235,41 @@
 
     function updateMarkers() {
         if (!candleSeries) return;
-        if (!state.liqEnabled) { applyMarkers([]); return; }
-        const byTime = new Map();
-
+        const markers = [];
         // Метками помечаем только крупные события — всё остальное рисуем
         // прямоугольниками прямо на свече, чтобы не засорять поле графика.
-        const kvol = chartVolScale();
-        // Киты — из тех же рядов: метки остаются на графике и за те часы, когда
-        // терминал был закрыт (как треугольники CVD и круги OI).
-        liqClusterRows().forEach((r) => {
-            [[r.longUsd, "SELL"], [r.shortUsd, "BUY"]].forEach(([usd, side]) => {
-                if (!(usd >= WHALE_USD * kvol)) return;
-                const key = r.time + "_" + (side === "SELL" ? "L" : "S");
-                const cur = byTime.get(key) || { time: r.time, side: side, usd: 0 };
-                cur.usd += usd;
-                byTime.set(key, cur);
+        if (state.liqEnabled) {
+            const byTime = new Map();
+            const kvol = chartVolScale();
+            // Киты — из тех же рядов: метки остаются на графике и за те часы, когда
+            // терминал был закрыт (как треугольники CVD и круги OI).
+            liqClusterRows().forEach((r) => {
+                [[r.longUsd, "SELL"], [r.shortUsd, "BUY"]].forEach(([usd, side]) => {
+                    if (!(usd >= WHALE_USD * kvol)) return;
+                    const key = r.time + "_" + (side === "SELL" ? "L" : "S");
+                    const cur = byTime.get(key) || { time: r.time, side: side, usd: 0 };
+                    cur.usd += usd;
+                    byTime.set(key, cur);
+                });
             });
-        });
-
-        const markers = Array.from(byTime.values())
-            .sort((a, b) => a.usd - b.usd)
-            .slice(-24)
-            .map((m) => ({
-                time: m.time,
-                position: m.side === "SELL" ? "aboveBar" : "belowBar",
-                color: heatCss(m.usd, kvol),
-                shape: "circle",
-                text: "🔥 " + fmtCompact(m.usd),
-            }))
-            .sort((a, b) => a.time - b.time);
-
+            Array.from(byTime.values())
+                .sort((a, b) => a.usd - b.usd)
+                .slice(-24)
+                .forEach((m) => markers.push({
+                    time: m.time,
+                    position: m.side === "SELL" ? "aboveBar" : "belowBar",
+                    color: heatCss(m.usd, kvol),
+                    shape: "circle",
+                    text: "🔥 " + fmtCompact(m.usd),
+                }));
+        }
+        // 🐋 Слой китов on-chain — самостоятельный: работает и при выключенных
+        // ликвидациях (события другого рода, приходят только участникам).
+        if (state.whaleLayerEnabled) {
+            whaleChartMarkers().forEach((m) => markers.push(m));
+        }
+        if (!markers.length) { applyMarkers([]); return; }
+        markers.sort((a, b) => a.time - b.time);
         applyMarkers(markers);
     }
 
@@ -5713,6 +5719,72 @@
         whaleRows.set(whaleKey(row), row);
         while (whaleRows.size > 100) whaleRows.delete(whaleRows.keys().next().value);
         if (state.feedTab === "whale") paintWhales();
+        if (state.whaleLayerEnabled) updateMarkers();
+    }
+
+    // --- 🐋 Слой китов on-chain на графике ---------------------------------
+    // События whale_tx приходят только участникам (user_id на сокете), поэтому
+    // кнопка слоя тоже видна только им. Стейблкоины не матчим: перевод USDT
+    // относится к любой паре *_USDT и ничего не говорит об этой монете.
+    const WHALE_STABLE_TOKENS = new Set(["USDT", "USDC", "DAI", "BUSD", "FDUSD", "TUSD"]);
+
+    function whaleTokenMatchesChart(token) {
+        const base = String(chartSymbol() || "").split("_")[0].toUpperCase();
+        const t = String(token || "").toUpperCase();
+        if (!base || !t || WHALE_STABLE_TOKENS.has(t)) return false;
+        if (t === "WETH") return base === "ETH";
+        return t === base;
+    }
+
+    function whaleChartMarkers() {
+        const out = [];
+        whaleRows.forEach((row) => {
+            if (!whaleTokenMatchesChart(row.symbol)) return;
+            const usd = Number(row.usd) || 0;
+            if (usd < 100000) return;              // мелочь не размечаем
+            const dir = String(row.direction || "");
+            const marker = {
+                time: Math.floor(Number(row.timestamp) || 0),
+                shape: dir === "inflow" ? "arrowUp" : dir === "outflow" ? "arrowDown" : "circle",
+                position: dir === "inflow" ? "belowBar"
+                    : dir === "outflow" ? "aboveBar"
+                    : (dir === "trade" && row.side === "BUY" ? "belowBar" : "aboveBar"),
+                color: dir === "inflow" ? "#34d399" : dir === "outflow" ? "#fb7185"
+                    : dir === "trade" ? (row.side === "BUY" ? "#34d399" : "#fb7185")
+                    : "#9aa7c7",
+                text: "🐋 " + fmtCompact(usd),
+            };
+            if (marker.time > 0) out.push(marker);
+        });
+        return out.slice(-40);
+    }
+
+    function syncWhaleLayerToggle() {
+        const btn = $("whale-layer-toggle");
+        if (!btn) return;
+        btn.classList.toggle("hidden", !state.userLoggedIn);
+        btn.classList.toggle("active", !!state.whaleLayerEnabled);
+        btn.title = I18n.t(state.whaleLayerEnabled ? "chart.whale_layer_on"
+                                                   : "chart.whale_layer_off");
+    }
+
+    function setupWhaleLayerToggle() {
+        const btn = $("whale-layer-toggle");
+        if (!btn) return;
+        btn.addEventListener("click", () => {
+            state.whaleLayerEnabled = !state.whaleLayerEnabled;
+            try {
+                localStorage.setItem("liqscope.whaleLayerEnabled",
+                                     state.whaleLayerEnabled ? "1" : "0");
+            } catch (e) { /* ignore */ }
+            syncWhaleLayerToggle();
+            updateMarkers();
+        });
+        try {
+            const v = localStorage.getItem("liqscope.whaleLayerEnabled");
+            if (v === "1") state.whaleLayerEnabled = true;
+        } catch (e) { /* ignore */ }
+        syncWhaleLayerToggle();
     }
     function paintWhales() {
         const target = $("whale-events"), empty = $("whale-empty");
@@ -6371,6 +6443,7 @@
         if (!IS_EMBED || !gate || gate.ready !== true) return false;
         const wasBlocked = state.layersBlocked;
         state.userLoggedIn = !!gate.userLoggedIn;
+        syncWhaleLayerToggle();
         state.layersAllowed = !!gate.layersAllowed;
         state.layersBlocked = !!gate.layersBlocked;
         state.layersTrial = gate.layersTrial || null;
@@ -6450,6 +6523,7 @@
         const pair = await Promise.all([fetchAuthMe(), fetchLayersTrial()]);
         const user = pair[0], trial = pair[1];
         state.userLoggedIn = !!user;
+        syncWhaleLayerToggle();
         state.layersTrial = trial;
         const active = trialIsActive(trial);
         if (!active) {
@@ -8438,6 +8512,281 @@
      *  без ленты ликвидаций, чата, статистики и виджетов кабинета —
      *  они остаются в родительском окне. Иначе каждый график тянул бы
      *  свой сокет и свой набор запросов. */
+    // --- 📊 Анализ ликвидаций: лонги/шорты/нетто/накопление + heatmap --------
+    // Данные тянутся из WARM-свёрток истории (/api/liq/series, /api/liq/heatmap),
+    // поэтому окно может быть шире жизни сырых шардов, а горячую базу запрос
+    // не трогает. Модалка — просто просмотр: состояние живёт, пока она открыта.
+    const ANALYSIS_TF_HOURS = { "1m": 1 / 60, "5m": 5 / 60, "15m": 0.25,
+                                "1h": 1, "4h": 4, "1d": 24 };
+    const analysis = { tf: "1h", hours: 168, mode: "long", symbol: "",
+                       points: [], heat: null, req: 0, drawn: "" };
+
+    function analysisFmtUsd(v) {
+        const n = Number(v) || 0;
+        const a = Math.abs(n);
+        if (a >= 1e9) return (n / 1e9).toFixed(1) + "B";
+        if (a >= 1e6) return (n / 1e6).toFixed(a >= 1e7 ? 0 : 1) + "M";
+        if (a >= 1e3) return (n / 1e3).toFixed(0) + "K";
+        return n.toFixed(0);
+    }
+
+    async function loadAnalysis(force) {
+        const sym = chartSymbol();
+        if (!force && analysis.symbol === sym && analysis.points.length) return;
+        const req = ++analysis.req;
+        analysis.symbol = sym;
+        const label = $("liq-analysis-symbol");
+        if (label) label.textContent = sym.replace("_", " / ");
+        const qs = "?tf=" + encodeURIComponent(analysis.tf) +
+                   "&hours=" + encodeURIComponent(analysis.hours) +
+                   "&symbol=" + encodeURIComponent(sym);
+        const [seriesRes, heatRes] = await Promise.all([
+            fetch("/api/liq/series" + qs).then((r) => r.json()).catch(() => null),
+            fetch("/api/liq/heatmap?days=" +
+                  encodeURIComponent(Math.min(30, Math.round(analysis.hours / 24))) +
+                  "&symbol=" + encodeURIComponent(sym)).then((r) => r.json()).catch(() => null),
+        ]);
+        if (req !== analysis.req) return;      // ушли к новым параметрам
+        analysis.points = (seriesRes && Array.isArray(seriesRes.points))
+            ? seriesRes.points : [];
+        analysis.heat = heatRes && Array.isArray(heatRes.cells) ? heatRes : null;
+        drawAnalysis();
+        renderAnalysisHeatmap();
+    }
+
+    function analysisModeValue(p, mode) {
+        const long = Number(p.long) || 0;
+        const short = Number(p.short) || 0;
+        if (mode === "long") return long;
+        if (mode === "short") return short;
+        if (mode === "net") return long - short;
+        return null;                            // cum считается поточечно
+    }
+
+    function drawAnalysis() {
+        const canvas = $("analysis-chart");
+        if (!canvas) return;
+        const empty = $("analysis-empty");
+        const points = analysis.points;
+        if (!points.length) {
+            canvas.classList.add("hidden");
+            if (empty) empty.classList.remove("hidden");
+            return;
+        }
+        canvas.classList.remove("hidden");
+        if (empty) empty.classList.add("hidden");
+
+        const mode = analysis.mode;
+        const width = canvas.clientWidth || 860;
+        const height = 260;
+        const dpr = Math.min(2, window.devicePixelRatio || 1);
+        canvas.width = Math.round(width * dpr);
+        canvas.height = Math.round(height * dpr);
+        canvas.style.height = height + "px";
+        const ctx = canvas.getContext("2d");
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, width, height);
+
+        // серия значений: cum — накопительное нетто, остальные — значение точки
+        let acc = 0;
+        const values = points.map((p) => {
+            if (mode === "cum") { acc += (Number(p.long) || 0) - (Number(p.short) || 0); return acc; }
+            return analysisModeValue(p, mode);
+        });
+        let vmax = 0;
+        values.forEach((v) => { vmax = Math.max(vmax, Math.abs(Number(v) || 0)); });
+        if (vmax <= 0) vmax = 1;
+
+        const padL = 46, padR = 10, padT = 12, padB = 22;
+        const plotW = width - padL - padR;
+        const plotH = height - padT - padB;
+        const zeroY = padT + plotH / 2;                 // net/cum могут уходить в минус
+        const zeroCentered = mode === "net" || mode === "cum";
+        const yOf = (v) => zeroCentered
+            ? zeroY - (v / vmax) * (plotH / 2)
+            : padT + plotH * (1 - Math.max(0, v) / vmax);
+        const n = values.length;
+        const xOf = (i) => padL + (n <= 1 ? plotW / 2 : (i / (n - 1)) * plotW);
+
+        // сетка + подписи Y
+        ctx.font = "10px system-ui, sans-serif";
+        ctx.fillStyle = "rgba(160,175,205,0.75)";
+        ctx.strokeStyle = "rgba(255,255,255,0.07)";
+        ctx.lineWidth = 1;
+        const ticks = 4;
+        for (let i = 0; i <= ticks; i++) {
+            const frac = i / ticks;
+            const y = zeroCentered ? padT + plotH * (1 - frac) : padT + plotH * (1 - frac);
+            ctx.beginPath();
+            ctx.moveTo(padL, y);
+            ctx.lineTo(width - padR, y);
+            ctx.stroke();
+            const v = zeroCentered ? (frac * 2 - 1) * vmax : frac * vmax;
+            ctx.textAlign = "right";
+            ctx.fillText("$" + analysisFmtUsd(v), padL - 6, y + 3);
+        }
+
+        // данные
+        if (mode === "cum") {
+            // накопительное нетто — линия с заливкой
+            ctx.beginPath();
+            points.forEach((_, i) => {
+                const x = xOf(i), y = yOf(values[i]);
+                if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            });
+            ctx.strokeStyle = "#f5b942";
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            ctx.lineTo(xOf(n - 1), zeroY);
+            ctx.lineTo(xOf(0), zeroY);
+            ctx.closePath();
+            ctx.fillStyle = "rgba(245,185,66,0.15)";
+            ctx.fill();
+        } else {
+            const bw = Math.max(1, Math.min(14, (plotW / Math.max(1, n)) - 1));
+            points.forEach((p, i) => {
+                const v = Number(values[i]) || 0;
+                if (v === 0) return;
+                const x = xOf(i);
+                const y = yOf(v);
+                let color;
+                if (mode === "long") color = "#ff2d95";
+                else if (mode === "short") color = "#00d6ff";
+                else color = v >= 0 ? "#ff2d95" : "#00d6ff";   // net
+                ctx.fillStyle = color;
+                if (zeroCentered) {
+                    ctx.fillRect(x - bw / 2, Math.min(y, zeroY), bw, Math.abs(zeroY - y));
+                } else {
+                    ctx.fillRect(x - bw / 2, y, bw, padT + plotH - y);
+                }
+            });
+        }
+
+        // подписи X — 4-5 меток времени
+        ctx.fillStyle = "rgba(160,175,205,0.75)";
+        ctx.textAlign = "center";
+        const labelCount = Math.min(5, n);
+        for (let i = 0; i < labelCount; i++) {
+            const idx = Math.round((i / Math.max(1, labelCount - 1)) * (n - 1));
+            const d = new Date((Number(points[idx].t) || 0) * 1000);
+            const txt = d.toLocaleDateString(undefined, { day: "2-digit", month: "short" }) +
+                        " " + d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+            ctx.fillText(txt, Math.max(padL + 24, Math.min(width - padR - 24, xOf(idx))),
+                         height - 6);
+        }
+    }
+
+    function analysisHeatColor(cell, maxUsd) {
+        const usd = Number(cell.usd) || 0;
+        if (!usd || !maxUsd) return "rgba(255,255,255,0.04)";
+        const intensity = Math.min(1, usd / maxUsd);
+        const alpha = 0.18 + 0.72 * intensity;
+        const net = (Number(cell.long) || 0) - (Number(cell.short) || 0);
+        return net >= 0 ? "rgba(255,45,149," + alpha.toFixed(2) + ")"
+                        : "rgba(0,214,255," + alpha.toFixed(2) + ")";
+    }
+
+    function renderAnalysisHeatmap() {
+        const grid = $("analysis-heat-grid");
+        if (!grid) return;
+        const heat = analysis.heat;
+        if (!heat || !heat.cells.length) {
+            grid.replaceChildren();
+            grid.textContent = I18n.t("chart.analysis_empty");
+            grid.classList.add("analysis-empty-text");
+            return;
+        }
+        grid.classList.remove("analysis-empty-text");
+        grid.replaceChildren();
+        const maxUsd = Number(heat.max_usd) || 0;
+        const days = heat.cells.slice().sort((a, b) => String(a.day).localeCompare(String(b.day)));
+        const frag = document.createDocumentFragment();
+        // шапка с часами
+        const head = document.createElement("div");
+        head.className = "heat-row heat-head";
+        head.appendChild(document.createElement("span"));
+        for (let h = 0; h < 24; h++) {
+            const label = document.createElement("span");
+            label.textContent = h % 3 === 0 ? String(h).padStart(2, "0") : "";
+            head.appendChild(label);
+        }
+        frag.appendChild(head);
+        days.forEach((dayCell) => {
+            const row = document.createElement("div");
+            row.className = "heat-row";
+            const day = document.createElement("span");
+            day.className = "heat-day";
+            day.textContent = String(dayCell.day).slice(5);       // MM-DD
+            row.appendChild(day);
+            const hours = dayCell.hours || {};
+            for (let h = 0; h < 24; h++) {
+                const cell = document.createElement("span");
+                cell.className = "heat-cell";
+                const data = hours[String(h)];
+                if (data) {
+                    cell.style.background = analysisHeatColor(data, maxUsd);
+                    const net = (Number(data.long) || 0) - (Number(data.short) || 0);
+                    cell.title = dayCell.day + " " + String(h).padStart(2, "0") + ":00 — " +
+                        "лонги $" + analysisFmtUsd(data.long) +
+                        ", шорты $" + analysisFmtUsd(data.short) +
+                        ", нетто $" + analysisFmtUsd(net) +
+                        " (" + (Number(data.n) || 0) + ")";
+                } else {
+                    cell.title = dayCell.day + " " + String(h).padStart(2, "0") + ":00 — 0";
+                }
+                row.appendChild(cell);
+            }
+            frag.appendChild(row);
+        });
+        grid.appendChild(frag);
+    }
+
+    function openAnalysis() {
+        const modal = $("liq-analysis");
+        if (!modal) return;
+        modal.classList.remove("hidden");
+        loadAnalysis(true);
+    }
+
+    function closeAnalysis() {
+        const modal = $("liq-analysis");
+        if (modal) modal.classList.add("hidden");
+    }
+
+    function setupLiqAnalysis() {
+        const btn = $("liq-analysis-btn");
+        const modal = $("liq-analysis");
+        if (!btn || !modal) return;
+        btn.addEventListener("click", openAnalysis);
+        const closeBtn = $("liq-analysis-close");
+        if (closeBtn) closeBtn.addEventListener("click", closeAnalysis);
+        modal.addEventListener("click", (e) => { if (e.target === modal) closeAnalysis(); });
+        document.addEventListener("keydown", (e) => {
+            if (e.key === "Escape" && !modal.classList.contains("hidden")) closeAnalysis();
+        });
+        const tfSel = $("analysis-tf");
+        if (tfSel) tfSel.addEventListener("change", () => {
+            analysis.tf = tfSel.value;
+            loadAnalysis(true);
+        });
+        const winSel = $("analysis-window");
+        if (winSel) winSel.addEventListener("change", () => {
+            analysis.hours = Number(winSel.value) || 168;
+            loadAnalysis(true);
+        });
+        modal.querySelectorAll(".mode-btn").forEach((b) => {
+            b.addEventListener("click", () => {
+                analysis.mode = b.getAttribute("data-mode") || "long";
+                modal.querySelectorAll(".mode-btn").forEach((x) =>
+                    x.classList.toggle("active", x === b));
+                drawAnalysis();
+            });
+        });
+        window.addEventListener("resize", () => {
+            if (!modal.classList.contains("hidden")) drawAnalysis();
+        });
+    }
+
     function bootEmbed() {
         initChart();
         setupChartToggle();
@@ -8460,6 +8809,8 @@
             setupFollowToggle();
             setupIndicatorPanes();
             embedIndicatorsReady = allowed;
+            setupWhaleLayerToggle();
+            setupLiqAnalysis();
             updateMarkers();
             queueRedraw();
         });
@@ -8502,6 +8853,8 @@
             paintLayerTrial();
             setupFollowToggle();     // 🎯 автоследование графика за ценой
             setupIndicatorPanes();   // окна LIQ/CVD/OI под графиком + крестики
+            setupWhaleLayerToggle(); // 🐋 слой китов — только участникам
+            setupLiqAnalysis();      // 📊 модалка анализа ликвидаций
             updateMarkers();
             queueRedraw();
         });

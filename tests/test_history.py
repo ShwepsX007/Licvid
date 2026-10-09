@@ -148,7 +148,8 @@ class TestPersistence(StoreCase):
     def test_rollups_survive_restart(self):
         self.store.add(ev(usd=12345, ts=NOW, n=1))
         self.store.add_flow("BTC_USDT", NOW, cvd=1000, vol=2000)
-        self.assertEqual(self.store.flush(), 1)
+        # два шарда: hours_*.json + min_*.json (минутные свёртки WARM-яруса)
+        self.assertEqual(self.store.flush(), 2)
         again = HistoryStore(self.path, ttl_hours=24 * 31)
         cells = again.hours_range(NOW - 60, NOW + 60)
         self.assertEqual(len(cells), 1)
@@ -179,6 +180,9 @@ class TestPersistence(StoreCase):
         self.assertEqual(cell["sym"]["ETH_USDT"]["n"], 1)
 
     def test_cleanup_removes_old_days(self):
+        # Ярусный контракт: сырой день умирает по HOT-границе (31 сутки),
+        # а его свёртки hours_/min_ живут до WARM-границы (по умолчанию 90):
+        # исторический анализ остаётся, сырая каша не копится.
         old_ts = NOW - 40 * 24 * HOUR
         self.store.add(ev(ts=old_ts, n=1))
         self.store.add(ev(ts=NOW, n=2))
@@ -188,8 +192,15 @@ class TestPersistence(StoreCase):
         removed = self.store.cleanup(NOW)
         self.assertGreaterEqual(removed, 1)
         self.assertFalse(os.path.exists(self.store.shard_path(day_key(old_ts))))
-        self.assertFalse(os.path.exists(self.store.hours_path(day_key(old_ts))))
+        # 40 суток < WARM 90 — свёртки старого дня остаются
+        self.assertTrue(os.path.exists(self.store.hours_path(day_key(old_ts))))
         self.assertTrue(os.path.exists(self.store.shard_path(day_key(NOW))))
+        # узкий WARM (35 суток при HOT 31): 40-дневные свёртки умирают тоже
+        tight = HistoryStore(self.path, ttl_hours=24 * 31, warm_days=35)
+        tight.flush(True)
+        tight.cleanup(NOW)
+        self.assertFalse(os.path.exists(tight.hours_path(day_key(old_ts))))
+        self.assertTrue(os.path.exists(tight.hours_path(day_key(NOW))))
 
     def test_month_kept(self):
         """31 сутки — тот самый «минимум месяц» из задания."""

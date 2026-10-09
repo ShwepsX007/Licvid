@@ -490,6 +490,16 @@ if HISTORY_FILE.lower() in ("0", "none", "off", "false"):
 # Сколько истории держать на диске. По умолчанию — 31 сутки: ликвидации,
 # CVD, объём и OI должны быть доступны за месяц, а не за сутки.
 HISTORY_TTL_HOURS = float(os.getenv("LIQSCOPE_HISTORY_TTL_HOURS", str(MONTH_HOURS)))
+# Ярусы хранения истории (см. HistoryStore):
+#   HOT  — сырые дневные шарды, LIQSCOPE_HOT_DAYS (по умолчанию прежний TTL);
+#   WARM — часовые и минутные свёртки, LIQSCOPE_WARM_DAYS (90): исторический
+#          анализ (1m/5m/15m/1h/4h/1d) живёт дольше сырых событий;
+#   COLD — LIQSCOPE_COLD_DAYS: сырые дни старше HOT не удаляются, а пакуются
+#          в gzip и живут до этой границы (0 — выключено).
+_HOT_DAYS_RAW = os.getenv("LIQSCOPE_HOT_DAYS", "").strip()
+HISTORY_HOT_DAYS = float(_HOT_DAYS_RAW) if _HOT_DAYS_RAW else None
+HISTORY_WARM_DAYS = max(1.0, float(os.getenv("LIQSCOPE_WARM_DAYS", "90") or 90))
+HISTORY_COLD_DAYS = max(0.0, float(os.getenv("LIQSCOPE_COLD_DAYS", "0") or 0))
 # 📖 Стакан: куда класть шейрды событий стен ("" — только память) и порог стены.
 BOOK_DIR = os.getenv("LIQSCOPE_BOOK_DIR", os.path.join(HERE, "data", "book_walls")).strip()
 if BOOK_DIR.lower() in ("0", "none", "off", "false"):
@@ -724,7 +734,9 @@ _SYMBOLS_CACHE_TTL = 5.0
 # Месячная история: сырые события по дням + часовые свёртки (ликвидации,
 # CVD, объём). В памяти — только свежий хвост, всё остальное на диске.
 HIST = HistoryStore(HISTORY_FILE, ttl_hours=HISTORY_TTL_HOURS,
-                    shard_max_mb=HISTORY_SHARD_MAX_MB)
+                    shard_max_mb=HISTORY_SHARD_MAX_MB,
+                    hot_days=HISTORY_HOT_DAYS, warm_days=HISTORY_WARM_DAYS,
+                    cold_days=HISTORY_COLD_DAYS)
 # Что получилось при восстановлении истории на старте. Нужен диагностике: если
 # после перезапуска в памяти ноль событий, дневной дайджест собирается «пустым»
 # («$0 · 0 ликвидаций»), и по этому полю сразу видно, в чём дело.
@@ -794,6 +806,10 @@ LEVELS_WARM_MAX = max(1, int(os.getenv("LIQSCOPE_LEVELS_WARM_MAX", "40") or 40))
 CVD_ACC: Dict[str, Dict[int, float]] = {}
 LAST_TICK_TS: Dict[str, float] = {}            # symbol -> время последней сделки
 LAST_TICK_PRICE: Dict[str, float] = {}         # symbol -> цена последней сделки
+# Свежесть цены и минутных свечей по монете (для монитора качества данных):
+# on_price — единая точка, через которую проходят kline-поток и REST-цены.
+LAST_PRICE_TS: Dict[str, float] = {}           # symbol -> время последней цены
+LAST_KLINE_TS: Dict[str, float] = {}           # symbol -> время последней 1m-свечи
 _last_tick_sent: Dict[str, float] = {}         # symbol -> когда последний раз слали
 _event_seq = 0
 TICKS_SEEN = 0                                 # счётчик сделок (для /api/health)
@@ -2416,6 +2432,10 @@ async def on_price(symbol: str, price: float, candle1m: Optional[dict]):
     Если по монете только что был тик (aggTrade), цену закрытия оставляем
     тиковую — она свежее, чем снимок kline (тот приходит раз в ~250 мс).
     """
+    # монитор качества данных: единая точка всех обновлений цены
+    LAST_PRICE_TS[symbol] = time.time()
+    if candle1m:
+        LAST_KLINE_TS[symbol] = time.time()
     delta = 0.0
     if candle1m:
         minute = candle1m["time"]
@@ -4725,6 +4745,175 @@ def health_summary() -> dict:
     }
 
 
+# =============================================================================
+#  Монитор качества данных (data quality)
+# =============================================================================
+# Ответ на эксплуатационный вопрос «по какой монете ЧТО именно не идёт»:
+# не «биржа отвалилась», а «у ETH цена живая, свечи живые, а OI — stale 92s».
+# Пороги свежести в секундах: (ок, предупреждение). Дольше второго порога
+# или данных нет вовсе — «недоступно».
+DQ_THRESHOLDS: Dict[str, Tuple[int, int]] = {
+    "trades": (180, 1800),          # тики: активные перпы тикают постоянно
+    "price": (120, 600),            # цена: kline-поток/REST обновляет её каждые ~3-10 с
+    "candles": (180, 1800),         # минутные свечи
+    "cvd": (600, 7200),             # копится тиками; тихая монета — норма
+    "oi": (1800, 14400),            # OI опрашивается периодически, не потоком
+    "liq": (6 * 3600, 7 * 86400),   # события спорадичны: часы без них — не авария
+}
+DQ_CHECKS = ("trades", "price", "candles", "cvd", "oi", "liq")
+_DQ_CACHE = web_cache.TTLCache(ttl=30.0, maxsize=2)
+
+
+def _dq_classify(last_ts: Optional[float], now: float,
+                 thresholds: Tuple[int, int]) -> Dict[str, Any]:
+    """Состояние одного канала монеты: ok | stale (с возрастом) | down."""
+    warn_at, down_at = thresholds
+    if not last_ts or last_ts <= 0:
+        return {"state": "down", "age_sec": None}
+    age = max(0, int(now - last_ts))
+    if age <= warn_at:
+        return {"state": "ok", "age_sec": age}
+    if age <= down_at:
+        return {"state": "stale", "age_sec": age}
+    return {"state": "down", "age_sec": age}
+
+
+def _dq_cvd_freshness() -> Dict[str, float]:
+    """Последний бакет живой CVD по монете (tf=1): пока идут сделки — свежий."""
+    out: Dict[str, float] = {}
+    for k, acc in CVD_ACC.items():
+        if not acc or "|" not in k:
+            continue
+        sym = k.rsplit("|", 1)[0]
+        ts = max(acc.keys()) if acc else 0.0
+        if ts and (sym not in out or ts > out[sym]):
+            out[sym] = ts
+    return out
+
+
+def _dq_liq_freshness() -> Dict[str, float]:
+    """Время последней ликвидации по монете (кольцо в памяти, без диска)."""
+    out: Dict[str, float] = {}
+    for ev in LIQUIDATIONS:
+        sym = str(ev.get("symbol") or "")
+        ts = float(ev.get("timestamp") or 0.0)
+        if sym and ts and (sym not in out or ts > out[sym]):
+            out[sym] = ts
+    return out
+
+
+def data_quality_snapshot(now: Optional[float] = None) -> dict:
+    """Матрица «монета × канал» со свежестью каждого потока данных.
+
+    Источники — уже существующие счётчики процесса (тик, цена, свеча, CVD,
+    OI, ликвидации), поэтому снимок собирается за миллисекунды и не ходит ни
+    на биржу, ни на диск. Кэш 30 с (``_DQ_CACHE``): страницу монитора могут
+    дёргать несколько операторов, а кольцо на 60000 событий не хочется
+    перебирать на каждый запрос.
+    """
+    if now is None:
+        now = time.time()
+    hit = _DQ_CACHE.get("dq")
+    if hit is not None:
+        return hit
+    cvd_ts = _dq_cvd_freshness()
+    liq_ts = _dq_liq_freshness()
+    oi_latest: Dict[str, float] = {}
+    try:
+        for sym in OI.symbols():
+            point = OI.latest(sym)
+            if point and point[0]:
+                oi_latest[sym] = float(point[0])
+    except Exception:                     # noqa: BLE001 — монитор не должен падать
+        pass
+    sources_state = {
+        "trades": LAST_TICK_TS,
+        "price": LAST_PRICE_TS,
+        "candles": LAST_KLINE_TS,
+        "cvd": cvd_ts,
+        "oi": oi_latest,
+        "liq": liq_ts,
+    }
+    # вселенная монет: список фида + всё, по чему есть хоть какие-то данные
+    symbols = set(feed.symbols) if feed else set()
+    for mapping in sources_state.values():
+        symbols.update(mapping.keys())
+    rows = []
+    for sym in sorted(symbols):
+        checks = {name: _dq_classify(state.get(sym), now,
+                                     DQ_THRESHOLDS[name])
+                  for name, state in sources_state.items()}
+        score = sum({"ok": 0, "stale": 1, "down": 3}[c["state"]]
+                    for c in checks.values())
+        meta = (feed.symbol_meta.get(sym) if feed else None) or {}
+        rows.append({
+            "symbol": sym,
+            "price": (feed.prices.get(sym) if feed else None),
+            "volume24h": float(meta.get("volume24h") or 0.0),
+            "score": score,
+            "checks": checks,
+        })
+    # сначала больные, среди равных — крупные по обороту
+    rows.sort(key=lambda r: (-r["score"], -r["volume24h"], r["symbol"]))
+    ok_rows = sum(1 for r in rows if r["score"] == 0)
+    warn_rows = sum(1 for r in rows
+                    if r["score"] > 0 and all(c["state"] != "down"
+                                              for c in r["checks"].values()))
+    down_rows = len(rows) - ok_rows - warn_rows
+    snap = {
+        "ts": now,
+        "demo": DEMO_MODE,
+        "thresholds": {k: {"ok_sec": v[0], "stale_sec": v[1]}
+                       for k, v in DQ_THRESHOLDS.items()},
+        "summary": {"symbols": len(rows), "ok": ok_rows,
+                    "warn": warn_rows, "down": down_rows},
+        "sources": [{"name": name, "connected": bool(s.get("connected")),
+                     "events": int(s.get("events") or 0),
+                     "error": str(s.get("error") or "")}
+                    for name, s in (health_summary().get("sources") or {}).items()],
+        "symbols": rows,
+    }
+    _DQ_CACHE.set("dq", snap)
+    return snap
+
+
+def data_quality_issues_text(snap: Optional[dict] = None) -> str:
+    """Компактная строка проблем для журнала (пусто — проблем нет)."""
+    snap = snap or data_quality_snapshot()
+    parts = []
+    for row in snap.get("symbols") or []:
+        bad = [f"{name} {'stale ' + str(c['age_sec']) + 's' if c['state'] == 'stale' else 'down'}"
+               for name, c in (row.get("checks") or {}).items()
+               if c.get("state") in ("stale", "down")]
+        if bad:
+            parts.append(f"{row['symbol']}: " + ", ".join(bad))
+    return "; ".join(parts[:12]) + (" …" if len(parts) > 12 else "")
+
+
+async def data_quality_logger():
+    """Раз в 5 минут — строка о состоянии данных в журнал (если есть проблемы).
+
+    Эксплуатация без страницы: ``journalctl -u licvid | grep data-quality``
+    показывает, какая монета и какой канал начали отставать, даже если никто
+    не смотрит монитор.
+    """
+    while True:
+        try:
+            await asyncio.sleep(DQ_LOG_SEC)
+            if not hub.clients and not feed:
+                continue
+            text = await asyncio.to_thread(data_quality_issues_text)
+            if text:
+                log.info("[data-quality] проблемы: %s", text)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            log.debug("data-quality logger: %s", e)
+
+
+DQ_LOG_SEC = max(60.0, float(os.getenv("LIQSCOPE_DQ_LOG_SEC", "300") or 300))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # куча старта (модули, справочники, загруженная история) дальше не меняется:
@@ -4851,6 +5040,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(levels_signal_loop(), name="levels-signal"),
         asyncio.create_task(screener_signal_loop(), name="screener-signals"),
         asyncio.create_task(corr_alert_loop(), name="corr-alerts"),
+        asyncio.create_task(data_quality_logger(), name="data-quality"),
     ]
     global whale_screener, whale_poller, alchemy_key_store, alchemy_vault_error
     global trongrid_key_store, trongrid_vault_error, cex_wallet_registry
@@ -6932,6 +7122,52 @@ async def api_screener_whales(request: Request,
             "poller": whale_poller.status() if whale_poller else None}
 
 
+def _whale_vol24h(token: str) -> Optional[float]:
+    """Оборот 24ч перпа для токена кита (BTC → BTC_USDT), если он торгуется."""
+    if not feed or not token:
+        return None
+    for candidate in (str(token).upper(), f"{str(token).upper()}_USDT"):
+        meta = feed.symbol_meta.get(candidate)
+        vol = float((meta or {}).get("volume24h") or 0.0)
+        if vol > 0:
+            return vol
+    return None
+
+
+@app.get("/api/screener/whales/rankings")
+async def api_screener_whale_rankings(
+        window_hours: float = Query(24, ge=1, le=168),
+        min_usd: float = Query(50000, ge=0)):
+    """Рейтинги окна для аналитики китов: топы по деньгам и по скорости.
+
+    Каждая группа (кошелёк, токен, сеть) несёт сумму, число событий, нетто
+    (inflow − outflow) и скорость ``usd_per_min`` — сколько долларов в
+    минуту прошло через точку внутри окна. Токенам, которые торгуются как
+    перпы, добавляется ``usd_vs_vol24h`` — сумма относительно оборота биржи
+    за сутки: $10M при обороте $50M ≠ $10M при обороте $5B.
+    """
+    if not whale_screener:
+        return JSONResponse({"available": False, "reason":
+                             "Whale-скринер недоступен"}, status_code=200)
+    until = time.time()
+    since = until - float(window_hours) * 3600.0
+    data = await asyncio.to_thread(
+        whale_screener.rankings, since, until,
+        max(0.0, float(min_usd)), 10)
+
+    def _enrich_token(row: dict) -> dict:
+        vol = _whale_vol24h(row.get("key"))
+        row["vol24h"] = vol
+        row["usd_vs_vol24h"] = (round(row["usd"] / vol, 4)
+                                if vol and row.get("usd") else None)
+        return row
+
+    data["tokens"] = [_enrich_token(t) for t in (data.get("tokens") or [])]
+    data["available"] = True
+    data["window_hours"] = float(window_hours)
+    return direct_json(data)
+
+
 _SCREENER_NETWORKS = ("ETH", "BNB", "POLYGON", "ARBITRUM", "BASE",
                       "SOLANA", "TRON", "HYPERLIQUID")
 _EXPLORER_TX = {
@@ -7389,6 +7625,111 @@ async def api_history(since: Optional[float] = None, until: Optional[float] = No
                         "liquidations": rows})
 
 
+# Шаги исторического анализа (панель «Анализ ликвидаций»): минуты берутся из
+# WARM-свёрток, часы — из часовых. Всё из свёрток: сырые шарды не читаются.
+LIQ_SERIES_TF = {
+    "1m": ("min", 1), "5m": ("min", 5), "15m": ("min", 15),
+    "1h": ("hour", 1), "4h": ("hour", 4), "1d": ("hour", 24),
+}
+
+
+@app.get("/api/liq/series")
+async def api_liq_series(tf: str = "1h", hours: float = 24.0,
+                         symbol: Optional[str] = None,
+                         min_usd: float = 0.0):
+    """Ряды ликвидаций для исторического анализа: tf из 1m/5m/15m/1h/4h/1d.
+
+    Читает WARM-свёртки (минутные и часовые), поэтому окно может быть шире
+    жизни сырых шардов: агрегаты полные и лёгкие. Каждый шаг — long/short
+    (в терминах выбитых позиций), сумма и число событий; клиент строит по ним
+    режимы Long / Short / Net / Cumulative.
+    """
+    step = LIQ_SERIES_TF.get((tf or "").strip().lower())
+    if step is None:
+        return JSONResponse({"error": "tf must be one of 1m, 5m, 15m, 1h, 4h, 1d"},
+                            status_code=400)
+    kind, size = step
+    now = time.time()
+    hours = min(max(1.0, float(hours or 24)), HISTORY_WARM_DAYS * 24.0)
+    start = now - hours * 3600.0
+    sym = canon(symbol) if symbol and symbol != "ALL" else None
+    wanted = [sym] if sym else None
+    min_usd = max(0.0, float(min_usd or 0.0))
+    if kind == "min":
+        data = await asyncio.to_thread(HIST.series_minutes, start, now,
+                                       wanted, size)
+        points = []
+        for p in data["points"]:
+            if sym:
+                v = (p["sym"] or {}).get(sym) or {}
+                row = {"t": p["t"], "usd": v.get("usd", 0.0),
+                       "n": v.get("n", 0), "long": v.get("long", 0.0),
+                       "short": v.get("short", 0.0)}
+            else:
+                row = {"t": p["t"], "usd": p["usd"], "n": p["n"],
+                       "long": p["long"], "short": p["short"]}
+            if row["n"]:
+                points.append(row)
+        return direct_json({"tf": tf, "since": start, "until": now,
+                            "warm_days": HIST.warm_days, "points": points})
+    data = await asyncio.to_thread(HIST.series, start, now, wanted, size)
+    points = []
+    for p in data["points"]:
+        if sym:
+            v = (p["sym"] or {}).get(sym) or {}
+            row = {"t": p["h"], "usd": v.get("usd", 0.0), "n": v.get("n", 0),
+                   "long": v.get("long", 0.0), "short": v.get("short", 0.0)}
+        else:
+            row = {"t": p["h"], "usd": p["liq_usd"], "n": p["liq_count"],
+                   "long": p["liq_long"], "short": p["liq_short"]}
+        if row["n"]:
+            points.append(row)
+    return direct_json({"tf": tf, "since": start, "until": now,
+                        "warm_days": HIST.warm_days, "points": points})
+
+
+@app.get("/api/liq/heatmap")
+async def api_liq_heatmap(days: int = 14, symbol: Optional[str] = None):
+    """Тепловая карта ликвидаций по времени: сутки × часы из WARM-свёрток.
+
+    Каждая ячейка — сумма long/short за час (в терминах выбитых позиций);
+    клиент красит зелёным/красным по нетто. Окно ограничено WARM-ярусом.
+    """
+    now = time.time()
+    days = min(max(1, int(days)), int(HIST.warm_days))
+    start = now - days * 86400.0
+    sym = canon(symbol) if symbol and symbol != "ALL" else None
+    cells = await asyncio.to_thread(HIST.hours_range, start, now, now)
+    rows: Dict[str, Dict[str, dict]] = {}
+    max_abs = 0.0
+    for h, cell in cells:
+        day = time.strftime("%Y-%m-%d", time.gmtime(h))
+        hour = int((h // 3600) % 24)
+        if sym:
+            v = (cell.get("sym") or {}).get(sym) or {}
+            usd, n = float(v.get("usd") or 0.0), int(v.get("n") or 0)
+            lng, sht = float(v.get("long") or 0.0), float(v.get("short") or 0.0)
+        else:
+            usd = float(cell.get("liq_usd") or 0.0)
+            n = int(cell.get("liq_count") or 0)
+            lng = float(cell.get("liq_long") or 0.0)
+            sht = float(cell.get("liq_short") or 0.0)
+        row = rows.setdefault(day, {str(i): {"usd": 0.0, "n": 0, "long": 0.0,
+                                             "short": 0.0, "net": 0.0}
+                                    for i in range(24)})
+        c = row[str(hour)]
+        c["usd"] += usd
+        c["n"] += n
+        c["long"] += lng
+        c["short"] += sht
+        c["net"] += lng - sht
+        max_abs = max(max_abs, abs(c["net"]), c["usd"])
+    out = [{"day": d, "hours": rows[d]} for d in sorted(rows)]
+    return direct_json({"days": days, "symbol": sym or "ALL",
+                        "max_usd": round(max_abs, 2), "cells": out})
+
+
+
 @app.get("/api/stats")
 async def api_stats(symbol: Optional[str] = None, exchange: Optional[str] = None):
     return await compute_stats_async(symbol, exchange)
@@ -7504,6 +7845,24 @@ async def api_health():
     data["circuit_breakers"] = circuit_breaker.snapshot()
     _HEALTH_CACHE.set("h", data)
     return JSONResponse(data)
+
+
+@app.get("/api/data-quality")
+async def api_data_quality():
+    """Матрица «монета × канал данных» для монитора эксплуатации.
+
+    Каждые 30 с из счётчиков процесса (кэш), без походов на биржу и диск:
+    страница монитора может опрашивать хоть каждую секунду — ей вернётся
+    тот же снимок.
+    """
+    return JSONResponse(await asyncio.to_thread(data_quality_snapshot))
+
+
+@app.get("/data-quality", include_in_schema=False)
+async def data_quality_page():
+    """Страница монитора: кто из монет и по какому каналу отстаёт."""
+    return FileResponse(os.path.join(STATIC_DIR, "data_quality.html"),
+                        headers={"Cache-Control": "public, max-age=60"})
 
 
 @app.get("/api/metrics")

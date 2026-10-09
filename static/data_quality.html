@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<meta name="theme-color" content="#0b1020">
+<meta name="description" content="Монитор качества данных LiqScope — свежесть каждого потока по каждой монете.">
+<title>Монитор качества данных — LiqScope</title>
+<link rel="icon" href="/static/favicon.ico">
+<link rel="stylesheet" href="/static/brand.css?v=rebrand1">
+<style>
+:root {
+    --bg: #0b1020;
+    --panel: #111a30;
+    --panel-2: #0d1526;
+    --line: #1d2a47;
+    --text: #e6ecff;
+    --muted: #8ea0c8;
+    --ok: #2ecc71;
+    --warn: #f5a623;
+    --down: #ff5c69;
+    --accent: #4f8cff;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+    background:
+        radial-gradient(1200px 500px at 15% -10%, rgba(79, 140, 255, 0.10), transparent 60%),
+        radial-gradient(900px 420px at 90% -15%, rgba(46, 204, 113, 0.07), transparent 55%),
+        var(--bg);
+    color: var(--text);
+    font: 14px/1.45 "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+    min-height: 100vh;
+}
+.wrap { max-width: 1180px; margin: 0 auto; padding: 20px 16px 48px; }
+a { color: var(--accent); text-decoration: none; }
+.top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px; margin-bottom: 6px; }
+h1 { font-size: 21px; margin: 0; letter-spacing: 0.2px; }
+h1 .hq { color: var(--accent); }
+.sub { color: var(--muted); font-size: 12.5px; }
+.top-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+.live { display: inline-flex; align-items: center; gap: 7px; font-size: 12px;
+        color: var(--muted); }
+.live .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok);
+             box-shadow: 0 0 8px rgba(46, 204, 113, 0.8); }
+.live.stale .dot { background: var(--warn); box-shadow: 0 0 8px rgba(245, 166, 35, 0.8); }
+.live.err .dot { background: var(--down); box-shadow: 0 0 8px rgba(255, 92, 105, 0.8); }
+.updated { font-size: 12px; color: var(--muted); }
+
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+         gap: 10px; margin: 16px 0 10px; }
+.card { background: linear-gradient(180deg, rgba(79, 140, 255, 0.05), transparent 70%), var(--panel);
+        border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
+.card .k { font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px;
+           color: var(--muted); }
+.card .v { font-size: 24px; font-weight: 700; margin-top: 2px; font-variant-numeric: tabular-nums; }
+.card.ok .v { color: var(--ok); }
+.card.warn .v { color: var(--warn); }
+.card.down .v { color: var(--down); }
+
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+         margin-top: 14px; overflow: hidden; }
+.panel-head { display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+              padding: 12px 14px; border-bottom: 1px solid var(--line); }
+.panel-head h2 { font-size: 14px; margin: 0; font-weight: 600; }
+.sources { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+.chip { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px;
+        border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px;
+        color: var(--muted); background: var(--panel-2); }
+.chip .d { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+.chip.on .d { background: var(--ok); box-shadow: 0 0 6px rgba(46, 204, 113, 0.7); }
+.chip.off .d { background: var(--down); }
+.chip.on { color: var(--text); }
+
+.controls { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 14px;
+            border-bottom: 1px solid var(--line); background: var(--panel-2); }
+.controls input[type="search"], .controls select {
+    background: var(--bg); color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 7px 10px; font: inherit; font-size: 13px; outline: none;
+}
+.controls input[type="search"]:focus, .controls select:focus { border-color: var(--accent); }
+.controls input[type="search"] { min-width: 200px; flex: 1; max-width: 320px; }
+.hint { font-size: 12px; color: var(--muted); }
+
+.table-scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { padding: 8px 10px; text-align: left; white-space: nowrap; }
+thead th { position: sticky; top: 0; background: var(--panel-2); color: var(--muted);
+           font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px;
+           border-bottom: 1px solid var(--line); cursor: pointer; user-select: none; }
+thead th.no-sort { cursor: default; }
+thead th.sorted::after { content: " ▾"; color: var(--accent); }
+thead th.sorted.asc::after { content: " ▴"; }
+tbody tr { border-bottom: 1px solid rgba(29, 42, 71, 0.55); }
+tbody tr:hover { background: rgba(79, 140, 255, 0.05); }
+.sym { font-weight: 600; }
+.sym .base { color: var(--text); }
+.sym .quote { color: var(--muted); font-weight: 400; }
+.num { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.state { display: inline-flex; align-items: center; gap: 6px; min-width: 92px;
+         font-variant-numeric: tabular-nums; font-size: 12.5px; }
+.state .b { width: 20px; height: 20px; border-radius: 6px; display: inline-flex;
+            align-items: center; justify-content: center; font-size: 12px; font-weight: 700; }
+.state.ok .b { background: rgba(46, 204, 113, 0.16); color: var(--ok); }
+.state.ok { color: var(--muted); }
+.state.stale .b { background: rgba(245, 166, 35, 0.16); color: var(--warn); }
+.state.stale { color: var(--warn); }
+.state.down .b { background: rgba(255, 92, 105, 0.16); color: var(--down); }
+.state.down { color: var(--down); }
+
+.legend { padding: 12px 14px; color: var(--muted); font-size: 12px; display: flex;
+          flex-wrap: wrap; gap: 14px; border-top: 1px solid var(--line); }
+.legend b { color: var(--text); font-weight: 600; }
+.empty { padding: 26px 14px; color: var(--muted); text-align: center; }
+footer { margin-top: 18px; color: var(--muted); font-size: 12px; display: flex;
+         flex-wrap: wrap; gap: 12px; }
+@media (max-width: 720px) {
+    .cards { grid-template-columns: repeat(2, 1fr); }
+    .top-right { margin-left: 0; }
+}
+.dq-header { display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+             padding: 10px 0 2px; font-size: 13px; }
+.dq-header a { font-weight: 600; letter-spacing: .04em; }
+.dq-header .spacer { flex: 1; }
+.dq-header select { background: var(--bg); color: var(--text);
+                    border: 1px solid var(--line); border-radius: 8px;
+                    padding: 5px 8px; font: inherit; font-size: 12.5px; }
+</style>
+</head>
+<body>
+<header class="dq-header">
+    <a href="/">LIQSCOPE</a>
+    <select id="lang-select" aria-label="Language / Язык" title="Language / Язык">
+        <option value="ru">🇷🇺 Русский</option>
+        <option value="en">🇬🇧 English</option>
+        <option value="zh">🇨🇳 中文</option>
+        <option value="hi">🇮🇳 हिन्दी</option>
+        <option value="es">🇪🇸 Español</option>
+    </select>
+    <span class="spacer"></span>
+    <a href="/terminal">⚡ Терминал</a>
+    <span id="nav-account"></span>
+</header>
+<div class="wrap">
+    <div class="top">
+        <h1>Монитор качества <span class="hq">данных</span></h1>
+        <span class="sub">свежесть каждого потока по каждой монете · LiqScope</span>
+        <span class="top-right">
+            <span class="live" id="live"><span class="dot"></span><span id="live-label">загрузка…</span></span>
+            <span class="updated" id="updated"></span>
+        </span>
+    </div>
+
+    <div class="cards">
+        <div class="card"><div class="k">Монет в матрице</div><div class="v" id="c-total">—</div></div>
+        <div class="card ok"><div class="k">Все потоки в норме</div><div class="v" id="c-ok">—</div></div>
+        <div class="card warn"><div class="k">Есть отставание</div><div class="v" id="c-warn">—</div></div>
+        <div class="card down"><div class="k">Поток недоступен</div><div class="v" id="c-down">—</div></div>
+    </div>
+
+    <section class="panel">
+        <div class="panel-head">
+            <h2>Источники биржевых данных</h2>
+            <div class="sources" id="sources"></div>
+        </div>
+    </section>
+
+    <section class="panel">
+        <div class="panel-head">
+            <h2>Матрица «монета × поток»</h2>
+            <span class="hint">клик по столбцу — сортировка · обновление каждые 30 с</span>
+        </div>
+        <div class="controls">
+            <input type="search" id="q" placeholder="Поиск монеты… (BTC, ETH)" autocomplete="off">
+            <select id="filter">
+                <option value="all">Все монеты</option>
+                <option value="warn">Только с проблемами</option>
+                <option value="down">Только недоступные потоки</option>
+            </select>
+        </div>
+        <div class="table-scroll">
+            <table id="matrix">
+                <thead><tr id="head-row">
+                    <th data-k="symbol" class="sorted">Монета</th>
+                    <th data-k="volume24h" class="no-sort">Оборот 24ч</th>
+                    <th data-k="price" class="no-sort">Цена</th>
+                    <th data-k="trades" title="Свежесть тиковых сделок">Сделки</th>
+                    <th data-k="price_fresh" title="Свежесть цены (kline/REST)">Цена ↻</th>
+                    <th data-k="candles" title="Свежесть минутных свечей">Свечи</th>
+                    <th data-k="cvd" title="Живая тейкер-дельта (CVD)">CVD</th>
+                    <th data-k="oi" title="Открытый интерес (OI)">OI</th>
+                    <th data-k="liq" title="Последнее событие ликвидации">Ликвидации</th>
+                </tr></thead>
+                <tbody id="rows"></tbody>
+            </table>
+            <div class="empty" id="empty" hidden>Нет монет по этому фильтру.</div>
+        </div>
+        <div class="legend" id="legend">…</div>
+    </section>
+
+    <footer>
+        <span>✓ — свежо</span>
+        <span>⚠ <b>Ns</b> — данные есть, но отстают на N секунд</span>
+        <span>✗ — данных нет</span>
+        <span>· Ликвидации — события спорадичны: часы без них для тихой монеты норма.</span>
+        <span><a href="/api/data-quality">/api/data-quality</a> — этот же снимок в JSON</span>
+        <span><a href="/">← терминал</a></span>
+    </footer>
+</div>
+
+<script>
+(function () {
+    "use strict";
+    var REFRESH_SEC = 30;
+    var CHECKS = ["trades", "price_fresh", "candles", "cvd", "oi", "liq"];
+    var CHECK_LABELS = {trades: "Сделки", price_fresh: "Цена", candles: "Свечи",
+                        cvd: "CVD", oi: "OI", liq: "Ликвидации"};
+    var state = { data: null, sortKey: "symbol", sortAsc: true, timer: REFRESH_SEC };
+    var $ = function (id) { return document.getElementById(id); };
+
+    function fmtUsd(v) {
+        if (!v || v <= 0) return "—";
+        if (v >= 1e9) return "$" + (v / 1e9).toFixed(1) + "B";
+        if (v >= 1e6) return "$" + (v / 1e6).toFixed(1) + "M";
+        if (v >= 1e3) return "$" + (v / 1e3).toFixed(0) + "K";
+        return "$" + v.toFixed(0);
+    }
+    function fmtPrice(p) {
+        if (p == null || !isFinite(p)) return "—";
+        if (p >= 1000) return p.toLocaleString("ru-RU", {maximumFractionDigits: 0});
+        if (p >= 1) return p.toFixed(2);
+        return p.toPrecision(4);
+    }
+    function fmtAge(sec) {
+        if (sec == null) return "";
+        if (sec < 90) return sec + "s";
+        if (sec < 5400) return Math.round(sec / 60) + "m";
+        if (sec < 172800) return Math.round(sec / 3600) + "h";
+        return Math.round(sec / 86400) + "d";
+    }
+
+    function cell(check) {
+        var s = check ? check.state : "down";
+        var mark = s === "ok" ? "✓" : (s === "stale" ? "⚠" : "✗");
+        var extra = s === "stale" ? " " + fmtAge(check.age_sec) : "";
+        var title = s === "down"
+            ? (check && check.age_sec != null ? "нет данных (последнее " + fmtAge(check.age_sec) + " назад)" : "данных нет")
+            : (s === "stale" ? "отстаёт на " + fmtAge(check.age_sec) : "свежо, " + fmtAge(check.age_sec) + " назад");
+        return '<td><span class="state ' + s + '" title="' + title + '">' +
+               '<span class="b">' + mark + "</span>" + extra + "</span></td>";
+    }
+
+    function checkOf(row, key) {
+        if (key === "price_fresh") return row.checks && row.checks.price;
+        return row.checks && row.checks[key];
+    }
+    function scoreOf(row, key) {
+        var c = checkOf(row, key);
+        return c ? (c.state === "ok" ? 0 : c.state === "stale" ? 1 : 3) : 3;
+    }
+
+    function visibleRows() {
+        var data = state.data;
+        if (!data) return [];
+        var q = $("q").value.trim().toUpperCase();
+        var mode = $("filter").value;
+        var rows = (data.symbols || []).filter(function (r) {
+            if (q && r.symbol.indexOf(q) === -1) return false;
+            if (mode === "warn") return r.score > 0;
+            if (mode === "down") {
+                return Object.keys(r.checks || {}).some(function (k) {
+                    return r.checks[k].state === "down"; });
+            }
+            return true;
+        });
+        var key = state.sortKey;
+        rows.sort(function (a, b) {
+            var av, bv, r;
+            if (key === "symbol") { av = a.symbol; bv = b.symbol; r = av < bv ? -1 : av > bv ? 1 : 0; }
+            else if (key === "volume24h") { av = a.volume24h || 0; bv = b.volume24h || 0; r = bv - av; }
+            else if (key === "price") { av = a.price || 0; bv = b.price || 0; r = bv - av; }
+            else { r = scoreOf(b, key) - scoreOf(a, key) || (b.volume24h || 0) - (a.volume24h || 0); }
+            return state.sortAsc ? -r : r;
+        });
+        return rows;
+    }
+
+    function render() {
+        var d = state.data;
+        if (!d) return;
+        var s = d.summary || {};
+        $("c-total").textContent = s.symbols != null ? s.symbols : "—";
+        $("c-ok").textContent = s.ok != null ? s.ok : "—";
+        $("c-warn").textContent = s.warn != null ? s.warn : "—";
+        $("c-down").textContent = s.down != null ? s.down : "—";
+        $("updated").textContent = "обновлено " + new Date(d.ts * 1000).toLocaleTimeString("ru-RU");
+        var live = $("live");
+        live.className = "live" + (s.down ? " err" : s.warn ? " stale" : "");
+        $("live-label").textContent = s.down ? "есть недоступные потоки"
+            : s.warn ? "есть отставание" : "все потоки в норме";
+
+        var srcHtml = "";
+        (d.sources || []).forEach(function (src) {
+            if (src.name === "prices" || src.name === "ticks") return;
+            srcHtml += '<span class="chip ' + (src.connected ? "on" : "off") + '" title="' +
+                (src.error ? String(src.error).replace(/"/g, "&quot;") : (src.connected ? "подключён" : "нет соединения")) +
+                '"><span class="d"></span>' + src.name +
+                (src.events ? " · " + src.events : "") + "</span>";
+        });
+        $("sources").innerHTML = srcHtml || '<span class="chip">нет данных об источниках</span>';
+
+        var rows = visibleRows();
+        var html = "";
+        rows.forEach(function (r) {
+            var parts = r.symbol.split("_");
+            html += "<tr><td><span class='sym'><span class='base'>" + parts[0] + "</span>" +
+                    (parts[1] ? "<span class='quote'>_" + parts[1] + "</span>" : "") +
+                    "</span></td>" +
+                    "<td class='num'>" + fmtUsd(r.volume24h) + "</td>" +
+                    "<td class='num'>" + fmtPrice(r.price) + "</td>" +
+                    CHECKS.map(function (k) { return cell(checkOf(r, k)); }).join("") +
+                    "</tr>";
+        });
+        $("rows").innerHTML = html;
+        $("empty").hidden = rows.length > 0;
+
+        var th = d.thresholds || {};
+        $("legend").innerHTML = CHECKS.map(function (k) {
+            var t = th[k === "price_fresh" ? "price" : k];
+            if (!t) return "";
+            return "<span>" + CHECK_LABELS[k] + ": ✓ ≤ " + fmtAge(t.ok_sec) +
+                   ", ⚠ ≤ " + fmtAge(t.stale_sec) + "</span>";
+        }).join("") + (d.demo ? "<span><b>ДЕМО-режим</b>: данные синтетические</span>" : "");
+    }
+
+    async function load() {
+        try {
+            var res = await fetch("/api/data-quality", { credentials: "same-origin" });
+            if (!res.ok) throw new Error("HTTP " + res.status);
+            state.data = await res.json();
+            state.timer = REFRESH_SEC;
+            render();
+        } catch (e) {
+            $("live-label").textContent = "нет связи с сервером";
+            $("live").className = "live err";
+        }
+    }
+
+    $("head-row").addEventListener("click", function (ev) {
+        var th = ev.target.closest("th");
+        if (!th || th.classList.contains("no-sort")) return;
+        var key = th.getAttribute("data-k");
+        if (state.sortKey === key) { state.sortAsc = !state.sortAsc; }
+        else { state.sortKey = key; state.sortAsc = key === "symbol"; }
+        Array.prototype.forEach.call($("head-row").children, function (el) {
+            el.classList.remove("sorted", "asc");
+            if (el.getAttribute("data-k") === state.sortKey) {
+                el.classList.add("sorted");
+                if (state.sortAsc) el.classList.add("asc");
+            }
+        });
+        render();
+    });
+    $("q").addEventListener("input", render);
+    $("filter").addEventListener("change", render);
+    document.addEventListener("visibilitychange", function () {
+        if (!document.hidden) { state.timer = 1; }
+    });
+    setInterval(function () {
+        if (document.hidden) return;
+        state.timer -= 1;
+        if (state.timer <= 0) { load(); }
+        else if (state.data) {
+            $("updated").textContent = "обновлено " +
+                new Date(state.data.ts * 1000).toLocaleTimeString("ru-RU") +
+                " · обновлю через " + state.timer + " с";
+        }
+    }, 1000);
+    load();
+})();
+</script>
+<script src="/static/i18n.pages.js?v=rankings1"></script>
+<script src="/static/i18n.js?v=liqan1"></script>
+<script src="/static/account.js?v=nav5"></script>
+<script src="/static/donate.js?v=nav1" defer></script>
+</body>
+</html>

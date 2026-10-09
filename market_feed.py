@@ -46,6 +46,7 @@ from timeframes import (OKX_CVD_SEC, TF_BINANCE, TF_BYBIT, TF_MINUTES, TF_OKX,
 
 import aiohttp
 from aiohttp import ClientWSTimeout
+from circuit_breaker import protect_url
 from oi_feed import OpenInterestTracker
 
 log = logging.getLogger("liqscope.feed")
@@ -417,10 +418,11 @@ async def _get_json(session: aiohttp.ClientSession, url: str, timeout: float = 1
     соблазнительно, но двойники ответов в тестах повторяют только базовую
     сигнатуру ``json(content_type=...)``, а выигрыш на REST несоизмеримо меньше.
     """
-    async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
-        if resp.status != 200:
-            raise RuntimeError(f"HTTP {resp.status} for {url}")
-        return await resp.json(content_type=None)
+    async with protect_url("market-rest", url):
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+            if resp.status != 200:
+                raise RuntimeError(f"HTTP {resp.status} for {url}")
+            return await resp.json(content_type=None)
 
 
 def _chunks(items: List, size: int) -> Iterable[List]:

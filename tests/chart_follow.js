@@ -241,9 +241,12 @@ async function part1() {
   check("кнопка — рядом с разворотом на весь экран",
     doc.getElementById("chart-expand").nextElementSibling.id === "follow-toggle",
     doc.getElementById("chart-expand").nextElementSibling.id);
-  check("в шапке на её месте — рисование",
-    doc.getElementById("layer-call").nextElementSibling.id === "draw-toggle",
+  check("в шапке на её месте — разбор ликвидаций",
+    doc.getElementById("layer-call").nextElementSibling.id === "liq-analysis-btn",
     doc.getElementById("layer-call").nextElementSibling.id);
+  check("в шапке на её месте — рисование",
+    doc.getElementById("liq-analysis-btn").nextElementSibling.id === "draw-toggle",
+    doc.getElementById("liq-analysis-btn").nextElementSibling.id);
   check("тестовый API доступен", !!F && typeof F.range === "function");
   F.setTicker(false);         // шаги по таймеру в тесте не нужны — дёргаем сами
 

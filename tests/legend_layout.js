@@ -127,7 +127,7 @@ async function main() {
   const legendBox = doc.getElementById("layer-legend");
   const legendItems = Array.prototype.slice.call(doc.querySelectorAll(".legend-item"));
   check("расшифровка лежит в плашке слоёв",
-    !!legendBox && legendItems.length === 5 &&
+    !!legendBox && legendItems.length === 6 &&
     legendItems.every((el) => legendBox.contains(el)),
     legendItems.length + " пунктов");
   check("расшифровка над кнопками слоёв",
@@ -137,7 +137,8 @@ async function main() {
     !!legendBox && cs(legendBox).flexDirection === "row" && cs(legendBox).flexWrap === "wrap",
     legendBox ? cs(legendBox).flexDirection + "/" + cs(legendBox).flexWrap : "нет блока");
   check("расшифровка говорит про лонгов, шортов, китов и CVD",
-    !!legendBox && ["Ликв. лонгов", "Ликв. шортов", "Кит ($100k+)", "CVD ▲", "CVD ▼"]
+    !!legendBox && ["Ликв. лонгов", "Ликв. шортов", "Кит ($100k+)", "CVD ▲", "CVD ▼",
+                    "Уровни — оценка"]
       .every((t) => legendBox.textContent.indexOf(t) !== -1),
     legendBox ? legendBox.textContent.replace(/\s+/g, " ").trim().slice(0, 90) : "нет блока");
 

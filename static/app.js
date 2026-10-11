@@ -297,6 +297,8 @@
     // Хит-тест фигур CVD/OI: круги из последнего drawClusters()
     let cvdHits = [];             // [{kind:"cvd", key, x, y, r, time, d, buy, live, p90, c}]
     let oiHits = [];              // [{kind:"oi", key, x, y, r, time, d, up, tier, live, c}]
+    // Хит-тест стрелок китов: круги с прямоугольником подписи
+    let whaleHits = [];           // [{kind:"whale", key, x, y, r, time, total, n, rows, up, c}]
     let shapeHover = null;        // {kind, key} — фигура под курсором (liq/cvd/oi)
     let shapePin = null;          // {kind, key} — фигура, закреплённая кликом/тапом
 
@@ -860,9 +862,11 @@
     // позиции (вход × плечо × поддерживающая маржа биржи) и вычитает уже
     // отработавшее. Биржа позиций клиентов не публикует, поэтому это ОЦЕНКА —
     // и метка об этом стоит и в легенде слоя, и в подписях уровней.
+    let lastLevelsRows = [];      // последний набор, отобранный drawLiqLevels
     const LEVELS_TTL_MS = 45000;    // сервер держит расчёт 20 с, чаще не просим
     const LEVELS_POLL_MS = 30000;   // пока слой включён — обновляем снапшот
     const LEVELS_MAX_ROWS = 90;     // рисуем не больше: тяжёлые уровни первыми
+    const LEVELS_NEAR_EACH = 3;    // и ещё ближайшие к цене сверху/снизу — всегда
     let levelsTimer = null, levelsPending = false, levelsReqSym = "";
 
     function levelsWantPoll() { return !!state.levelsEnabled; }
@@ -1072,21 +1076,28 @@
     }
 
     // --- Task 2: пунктирный уровень — триггер при касании ±0.01% + подсветка 3s ---
-    const DASHED_TRIGGER_PCT = 0.0001; // 0.01%
-    const DASHED_COOLDOWN_MS = 15000; // 15s cooldown на уровень
+    // «Успокоенная» версия: писк только по НАРИСОВАННЫМ пунктирам, выход из
+    // зоны — с гистерезисом (цена должна отойти на 0.05%, иначе микрошум у
+    // уровня дёргает сигнал каждые 15 с), плюс общий тихий период на все уровни.
+    const DASHED_TRIGGER_PCT = 0.0001; // 0.01% — само касание
+    const DASHED_EXIT_PCT = 0.0005;    // 0.05% — на столько нужно отойти, чтобы взводиться заново
+    const DASHED_COOLDOWN_MS = 45000;  // 45s cooldown на один уровень
+    const DASHED_GLOBAL_CD_MS = 90000; // общий тихий период: не чаще раза в 1.5 минуты
     const DASHED_FADE_MS = 3000;
     let levelHighlights = {}; // price(string) -> {highlightUntil, lastTrigger, inZone}
+    let lastLevelBeepAt = 0; // когда последний раз пищали (глобально)
     // для тестов: чистая функция shouldTrigger
     function shouldTrigger(price, level, st, now) {
         now = now || Date.now();
         const p = Number(price), lv = Number(level);
         if (!(p>0) || !(lv>0)) return false;
         const dist = Math.abs(p - lv) / lv;
-        if (dist > DASHED_TRIGGER_PCT) {
-            if (st) st.inZone = false;
+        if (dist > DASHED_EXIT_PCT) {
+            if (st) st.inZone = false;         // отошли далеко — взводим
             return false;
         }
-        // в зоне ±0.01%
+        if (dist > DASHED_TRIGGER_PCT) return false;   // гистерезис: тишина
+        // в зоне касания ±0.01%
         if (!st) st = {lastTrigger:0, inZone:false};
         if (st.inZone) {
             // уже внутри зоны — не триггерим повторно до выхода
@@ -1130,30 +1141,45 @@
         const now = Date.now();
         const p = Number(price);
         if (!(p>0)) return;
+        // сигнал только по видимым пунктирам: магнит должен быть среди
+        // нарисованных строк (топ по массе + ближние к цене). Писк про
+        // «уровень рядом», которого нет на графике, вводит в заблуждение.
+        let drawnLv = (Array.isArray(lastLevelsRows) && lastLevelsRows.length)
+            ? new Set(lastLevelsRows.map((r) => Number(r.price)))
+            : new Set((data.levels || [])
+                .filter((r) => Number(r.usd) > 0)
+                .sort((a, b) => Number(b.usd) - Number(a.usd))
+                .slice(0, LEVELS_MAX_ROWS)
+                .map((r) => Number(r.price)));
         for (const m of magnets) {
             const lv = Number(m && m.price);
-            if (!(lv>0)) continue;
+            if (!(lv>0) || !drawnLv.has(lv)) continue;
             const key = String(lv);
             let st = levelHighlights[key];
             if (!st) {
                 st = levelHighlights[key] = {lastTrigger:0, inZone:false, highlightUntil:0};
             }
             const dist = Math.abs(p - lv) / lv;
-            if (dist > DASHED_TRIGGER_PCT) {
-                st.inZone = false;
+            if (dist > DASHED_EXIT_PCT) {
+                st.inZone = false;             // отошли с запасом — взводим
                 continue;
             }
+            if (dist > DASHED_TRIGGER_PCT) continue;   // мёртвая зона гистерезиса
             if (st.inZone) continue;
             if (now - st.lastTrigger < DASHED_COOLDOWN_MS) continue;
+            if (now - lastLevelBeepAt < DASHED_GLOBAL_CD_MS) continue;
             st.lastTrigger = now;
             st.inZone = true;
             st.highlightUntil = now + DASHED_FADE_MS;
+            lastLevelBeepAt = now;
             playLevelBeep();
             try { console.debug("[levels] dashed trigger", lv, "price", p, "dist", dist); } catch {}
             queueRedraw();
         }
     }
-    try { window.LiqScopeLevelsTrigger = {shouldTrigger, DASHED_TRIGGER_PCT, DASHED_COOLDOWN_MS, DASHED_FADE_MS}; } catch {}
+    try { window.LiqScopeLevelsDraw = { rows: () => lastLevelsRows }; } catch {}
+    try { window.LiqScopeLevelsTrigger = {shouldTrigger, DASHED_TRIGGER_PCT,
+        DASHED_EXIT_PCT, DASHED_COOLDOWN_MS, DASHED_GLOBAL_CD_MS, DASHED_FADE_MS}; } catch {}
 
     // Шкала массы справа от свечей, встык со шкалой цены. Фона под полосами нет:
     // колонка закрывала свечи. Длина полосы — ещё не сработавшая масса НА этой
@@ -1168,10 +1194,28 @@
         const rows = (data.levels || []).filter((r) => Number(r.usd) > 0);
         if (!rows.length) return;
 
-        const chosen = rows.slice()
+        // Топ по массе + ближайшие к цене: на 5-минутном графике дальние
+        // тяжёлые кластеры съедают весь топ, и ближний уровень «пропадает» —
+        // хоть он и есть в расчёте. Ближайшие 3 сверху и снизу всегда в наборе.
+        const live0 = Number(data.price) || levelsRefPrice();
+        const picked = rows.slice()
             .sort((a, b) => Number(b.usd) - Number(a.usd))
-            .slice(0, LEVELS_MAX_ROWS)
-            .sort((a, b) => Number(a.price) - Number(b.price));
+            .slice(0, LEVELS_MAX_ROWS);
+        if (isFinite(live0) && live0 > 0) {
+            const seenPx = new Set(picked.map((r) => Number(r.price)));
+            const addNear = (list) => {
+                list.slice(0, LEVELS_NEAR_EACH).forEach((r) => {
+                    const px = Number(r.price);
+                    if (!seenPx.has(px)) { seenPx.add(px); picked.push(r); }
+                });
+            };
+            addNear(rows.filter((r) => Number(r.price) > live0)
+                       .sort((a, b) => Number(a.price) - Number(b.price)));
+            addNear(rows.filter((r) => Number(r.price) < live0)
+                       .sort((a, b) => Number(b.price) - Number(a.price)));
+        }
+        const chosen = picked.sort((a, b) => Number(a.price) - Number(b.price));
+        lastLevelsRows = chosen;   // тестовый доступ: что реально отобрано
         const magnets = new Map();
         ((data.magnets_list || [])).forEach((m) => {
             if (m && m.price) magnets.set(Number(m.price), m);
@@ -2263,11 +2307,9 @@
                     text: "🔥 " + fmtCompact(m.usd),
                 }));
         }
-        // 🐋 Слой китов on-chain — самостоятельный: работает и при выключенных
-        // ликвидациях (события другого рода, приходят только участникам).
-        if (state.whaleLayerEnabled) {
-            whaleChartMarkers().forEach((m) => markers.push(m));
-        }
+        // 🐋 Киты больше не метки серии (кружки с эмодзи): слой рисуется на
+        // clusterCanvas — стрелка направления + сумма с насыщенностью по
+        // объёму и окном-подсказкой при наведении (drawWhaleMarks).
         if (!markers.length) { applyMarkers([]); return; }
         markers.sort((a, b) => a.time - b.time);
         applyMarkers(markers);
@@ -2293,11 +2335,14 @@
         clusterHits = [];              // актуальные геометрии — только если слой включён
         cvdHits = [];
         oiHits = [];
+        whaleHits = [];
         // Порядок снизу вверх: шары OI → треугольники CVD → кластеры ликвидаций.
         // Крупные OI-шары больше не перекрывают прямоугольники и треугольники.
         if (state.oiEnabled) drawOiBalls(ctx);
         if (state.cvdEnabled) drawCvdTriangles(ctx);
         if (state.liqEnabled) drawLiqRects(ctx);
+        // 🐋 киты — выше кластеров: стрелки с суммами и своим окном-подсказкой
+        if (state.whaleLayerEnabled) drawWhaleMarks(ctx);
         levelHits = [];
         levelColL = Infinity;
         levelColR = -1;
@@ -3726,6 +3771,12 @@
                 }
             }
             if (best) return best;
+        }
+        // стрелки китов нарисованы поверх кластеров — и проверяются раньше
+        for (let i = whaleHits.length - 1; i >= 0; i--) {
+            const b = whaleHits[i];
+            const dx = px - b.x, dy = py - b.y, rr = b.r + 4;
+            if (dx * dx + dy * dy <= rr * rr) return b;
         }
         for (let i = clusterHits.length - 1; i >= 0; i--) {
             const b = clusterHits[i];
@@ -5719,7 +5770,7 @@
         whaleRows.set(whaleKey(row), row);
         while (whaleRows.size > 100) whaleRows.delete(whaleRows.keys().next().value);
         if (state.feedTab === "whale") paintWhales();
-        if (state.whaleLayerEnabled) updateMarkers();
+        if (state.whaleLayerEnabled) queueRedraw();
     }
 
     // --- 🐋 Слой китов on-chain на графике ---------------------------------
@@ -5727,6 +5778,7 @@
     // кнопка слоя тоже видна только им. Стейблкоины не матчим: перевод USDT
     // относится к любой паре *_USDT и ничего не говорит об этой монете.
     const WHALE_STABLE_TOKENS = new Set(["USDT", "USDC", "DAI", "BUSD", "FDUSD", "TUSD"]);
+    const WHALE_MIN_CHART_USD = 100000;   // порог события для слоя на графике
 
     function whaleTokenMatchesChart(token) {
         const base = String(chartSymbol() || "").split("_")[0].toUpperCase();
@@ -5736,27 +5788,156 @@
         return t === base;
     }
 
-    function whaleChartMarkers() {
+    function whaleChartEvents() {
         const out = [];
         whaleRows.forEach((row) => {
             if (!whaleTokenMatchesChart(row.symbol)) return;
             const usd = Number(row.usd) || 0;
-            if (usd < 100000) return;              // мелочь не размечаем
-            const dir = String(row.direction || "");
-            const marker = {
-                time: Math.floor(Number(row.timestamp) || 0),
-                shape: dir === "inflow" ? "arrowUp" : dir === "outflow" ? "arrowDown" : "circle",
-                position: dir === "inflow" ? "belowBar"
-                    : dir === "outflow" ? "aboveBar"
-                    : (dir === "trade" && row.side === "BUY" ? "belowBar" : "aboveBar"),
-                color: dir === "inflow" ? "#34d399" : dir === "outflow" ? "#fb7185"
-                    : dir === "trade" ? (row.side === "BUY" ? "#34d399" : "#fb7185")
-                    : "#9aa7c7",
-                text: "🐋 " + fmtCompact(usd),
-            };
-            if (marker.time > 0) out.push(marker);
+            if (usd < WHALE_MIN_CHART_USD) return;   // мелочь на график не идёт
+            if ((Number(row.timestamp) || 0) > 0) out.push(row);
         });
-        return out.slice(-40);
+        return out;
+    }
+
+    // Стрелка вверх (приток/покупка) или вниз (вывод/продажа); перевод между
+    // кошельками нейтрален — серая стрелка вниз, окно пояснит подробнее.
+    function whaleEventUp(row) {
+        const dir = String(row.direction || "");
+        if (dir === "inflow") return true;
+        if (dir === "outflow") return false;
+        if (dir === "trade") return String(row.side || "").toUpperCase() === "BUY";
+        return false;
+    }
+
+    function whaleArrowColor(up, dir) {
+        if (dir === "transfer") return "#9aa7c7";
+        return up ? "#34d399" : "#fb7185";
+    }
+
+    // Насыщенность цифры — от объёма: бледная у минимума, янтарная с подсветкой
+    // у крупных. Логарифм: $100K почти прозрачна, $2M+ горит.
+    function whaleNumberStyle(usd) {
+        const lo = WHALE_MIN_CHART_USD, hi = 2 * 1000 * 1000;
+        const t = Math.max(0, Math.min(1,
+            Math.log(Math.max(usd, lo) / lo) / Math.log(hi / lo)));
+        const r = Math.round(190 + (255 - 190) * t);
+        const g = Math.round(205 + (190 - 205) * t);
+        const b = Math.round(235 + (80 - 235) * t);
+        return {
+            color: "rgba(" + r + "," + g + "," + b + "," + (0.45 + 0.55 * t).toFixed(2) + ")",
+            glow: t > 0.45, t: t,
+        };
+    }
+
+    function whaleArrowPath(ctx, x, y, halfW, h, up) {
+        ctx.beginPath();
+        if (up) {
+            ctx.moveTo(x, y - h / 2);
+            ctx.lineTo(x - halfW, y + h / 2);
+            ctx.lineTo(x + halfW, y + h / 2);
+        } else {
+            ctx.moveTo(x, y + h / 2);
+            ctx.lineTo(x - halfW, y - h / 2);
+            ctx.lineTo(x + halfW, y - h / 2);
+        }
+        ctx.closePath();
+    }
+
+    function drawWhaleMarks(ctx) {
+        if (!chart || !candleSeries || !clusterCanvas) return;
+        const events = whaleChartEvents();
+        if (!events.length || !state.candles.length) return;
+        const tfSec = (state.timeframe || 5) * 60;
+        // группа = свеча × направление: стрелка одна, сумма — общая по группе
+        const groups = new Map();
+        events.forEach((row) => {
+            const t0 = Math.floor(Number(row.timestamp) / tfSec) * tfSec;
+            const up = whaleEventUp(row);
+            const k = t0 + "|" + (up ? "u" : "d");
+            const g = groups.get(k) ||
+                { time: t0, up: up, total: 0, n: 0, rows: [] };
+            g.total += Number(row.usd) || 0;
+            g.n += 1;
+            g.rows.push(row);
+            groups.set(k, g);
+        });
+        // крупные первыми: при тесноте выживают самые важные
+        const list = Array.from(groups.values())
+            .sort((a, b) => b.total - a.total).slice(0, 24);
+        const ts = chart.timeScale();
+        const W = clusterCanvas.width, H = clusterCanvas.height;
+        const candleByTime = new Map();
+        for (let i = 0; i < state.candles.length; i++) {
+            candleByTime.set(Number(state.candles[i].time), state.candles[i]);
+        }
+        const placed = [];
+        ctx.save();
+        ctx.textBaseline = "middle";
+        ctx.textAlign = "left";
+        ctx.font = "bold 10.5px system-ui, -apple-system, Segoe UI, sans-serif";
+        for (let wi = 0; wi < list.length; wi++) {
+            const g = list[wi];
+            const c = candleByTime.get(g.time);
+            if (!c) continue;
+            let x;
+            try { x = ts.timeToCoordinate(g.time); } catch (e) { continue; }
+            if (x === null || x === undefined || x < -40 || x > W + 40) continue;
+            const up = g.up;
+            let yEdge;
+            try {
+                yEdge = candleSeries.priceToCoordinate(up ? Number(c.low) : Number(c.high));
+            } catch (e) { continue; }
+            if (yEdge === null || yEdge === undefined || yEdge < -50 || yEdge > H + 50) continue;
+            const y = up ? yEdge + 16 : yEdge - 16;    // стрелка у края свечи
+            // налезание на соседнюю метку — слабую пропускаем
+            let clash = false;
+            for (let j = 0; j < placed.length; j++) {
+                if (Math.abs(x - placed[j].x) < 16 && Math.abs(y - placed[j].y) < 17) {
+                    clash = true; break;
+                }
+            }
+            if (clash) continue;
+            placed.push({ x: x, y: y });
+
+            const dir = String((g.rows[0] || {}).direction || "");
+            const col = whaleArrowColor(up, dir);
+            const key = "whale_" + g.time + "_" + (up ? "u" : "d");
+            const label = fmtCompact(g.total);
+            const tw = ctx.measureText(label).width;
+            const active = shapeIsActive("whale", key);
+            whaleHits.push({
+                kind: "whale", key: key, x: x, y: y,
+                r: Math.max(13, tw / 2 + 10),
+                time: g.time, total: g.total, n: g.n, rows: g.rows,
+                up: up, c: c, label: label,
+            });
+
+            // тёмная подложка — стрелка читается на свече любого цвета
+            whaleArrowPath(ctx, x, y, 7.9, 10.4, up);
+            ctx.fillStyle = "rgba(5,8,14,0.88)";
+            ctx.fill();
+            ctx.shadowColor = col;
+            ctx.shadowBlur = active ? 14 : 7;
+            whaleArrowPath(ctx, x, y, 6.5, 9, up);
+            ctx.fillStyle = active ? "#ffffff" : col;
+            ctx.fill();
+            ctx.shadowBlur = 0;
+            ctx.lineWidth = 1.2;
+            ctx.strokeStyle = col;
+            ctx.stroke();
+
+            // сумма: бледная → янтарная, у крупных — подсветка
+            const st = whaleNumberStyle(g.total);
+            if (st.glow || active) {
+                ctx.shadowColor = active ? "#ffd166" : "rgba(255,190,80,0.9)";
+                ctx.shadowBlur = active ? 12 : 4 + 8 * st.t;
+            }
+            ctx.fillStyle = active ? "#ffe9b0" : st.color;
+            ctx.fillText(label, x + 11, y + 0.5);
+            ctx.shadowBlur = 0;
+        }
+        ctx.restore();
+        state.whaleMarks = whaleHits.length;
     }
 
     function syncWhaleLayerToggle() {
@@ -5778,13 +5959,26 @@
                                      state.whaleLayerEnabled ? "1" : "0");
             } catch (e) { /* ignore */ }
             syncWhaleLayerToggle();
-            updateMarkers();
+            queueRedraw();          // киты рисуются на clusterCanvas
         });
         try {
             const v = localStorage.getItem("liqscope.whaleLayerEnabled");
             if (v === "1") state.whaleLayerEnabled = true;
         } catch (e) { /* ignore */ }
         syncWhaleLayerToggle();
+        try {   // тестовый API для tests/whale_canvas_layer.js
+            window.LiqScopeWhaleLayer = {
+                set: (on) => {
+                    state.whaleLayerEnabled = !!on;
+                    syncWhaleLayerToggle();
+                    queueRedraw();
+                },
+                feed: (rows) => (rows || []).forEach(addWhale),
+                count: () => whaleRows.size,
+                hits: () => whaleHits.map((h) => ({ key: h.key, x: h.x, y: h.y,
+                    total: h.total, n: h.n, up: h.up, time: h.time })),
+            };
+        } catch (e) { /* ignore */ }
     }
     function paintWhales() {
         const target = $("whale-events"), empty = $("whale-empty");
@@ -6156,6 +6350,47 @@
                             segHtml + "</p>" : "") +
                 wallRows;
             about = I18n.t("modal.book_about");
+        } else if (kind === "whale") {
+            modalTitle.textContent = I18n.t("modal.whale_title", { sym: sym });
+            const rows = hit.rows || [];
+            const dir0 = String((rows[0] || {}).direction || "");
+            const dirKey = dir0 === "inflow" ? "modal.whale_in"
+                : dir0 === "outflow" ? "modal.whale_out"
+                : dir0 === "trade" ? "modal.whale_trade" : "modal.whale_transfer";
+            const dirCol = dir0 === "transfer" ? "#9aa7c7"
+                : hit.up ? "#34d399" : "#fb7185";
+            dirHtml = '<span style="display:inline-block;padding:2px 10px;border-radius:999px;' +
+                'background:rgba(5,8,14,.7);border:1px solid ' + dirCol +
+                ';color:' + dirCol + ';font-weight:700">' +
+                escapeHtml(I18n.t(dirKey)) + "</span>";
+            // общий объём метки — сумма всех событий группы
+            valRowHtml = usdRow("$" + fmtUsdFull(hit.total) +
+                ' <span style="font-size:.72rem;color:var(--color-text-dim)">' +
+                hit.n + " " + I18n.t("modal.whale_n_events") + "</span>");
+            const scans = {ETH: "https://etherscan.io/tx/",
+                           BNB: "https://bscscan.com/tx/",
+                           POLYGON: "https://polygonscan.com/tx/",
+                           ARBITRUM: "https://arbiscan.io/tx/",
+                           BASE: "https://basescan.org/tx/",
+                           HYPERLIQUID: "https://hypurrscan.io/tx/"};
+            const addr = (v, l) => escapeHtml(l ||
+                (String(v || "").slice(0, 8) + "…" + String(v || "").slice(-5)));
+            let evRows = "";
+            rows.slice(0, 6).forEach((row) => {
+                const d = String(row.direction || "");
+                const lab = d === "trade"
+                    ? addr(row.from, row.from_label) + " ↔ " + addr(row.to, row.to_label)
+                    : addr(row.from, row.from_label) + " → " + addr(row.to, row.to_label);
+                const scan = scans[row.chain];
+                evRows += "<br>" + escapeHtml(I18n.time(Number(row.timestamp))) +
+                    " · <b>$" + fmtUsdShort(row.usd) + "</b> · " + lab +
+                    (scan ? ' · <a href="' + scan + row.hash +
+                     '" target="_blank" rel="noopener noreferrer">↗</a>' : "");
+            });
+            if (rows.length > 6) evRows += "<br>… +" + (rows.length - 6);
+            extraRows = "<p><strong>" + I18n.t("modal.whale_events") + "</strong> " +
+                escapeHtml(I18n.time(hit.time)) + evRows + "</p>";
+            about = I18n.t("modal.whale_about");
         } else {
             modalTitle.textContent = I18n.t("modal.oi_of", { sym: sym });
             dirHtml = hit.up

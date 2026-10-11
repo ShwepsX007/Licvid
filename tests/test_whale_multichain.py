@@ -19,7 +19,8 @@ from cex_wallets_updater import (
     parse_defillama_cex_protocol, valid_address,
 )
 from tron_address import tron_to_base58, tron_to_hex
-from whale_poller import MINED_TRANSACTION_CHAINS, SPL_TOKEN_PROGRAM, WhalePoller, RateLimited
+from whale_poller import (MINED_TRANSACTION_CHAINS, SPL_TOKEN_PROGRAM,
+                          TRON_CONFIRM_LAG_MS, WhalePoller, RateLimited)
 from whale_screener import SOLANA_TOKENS, TRON_TOKENS, WhaleScreener
 
 
@@ -455,6 +456,68 @@ class MultichainTransferTests(unittest.IsolatedAsyncioTestCase):
             self.assertAlmostEqual(event["amount"], 25.000001)
             self.assertAlmostEqual(event["usd"], 25.0, places=2)
             self.assertEqual(event["direction"], "transfer")
+            screen.close()
+
+    async def test_tron_window_lags_finality(self):
+        """Окно TRC-20 отстаёт от «сейчас» на финальность TRON.
+
+        «Confirmed» у TronGrid — событие в засолидифицированном блоке (~57 с):
+        запрос последних секунд с only_confirmed=true всегда пуст, и лента
+        молчит при живом TronGrid. Окно обязано спрашивать только то, что
+        уже засолидифицировалось."""
+        with tempfile.TemporaryDirectory() as tmp:
+            screen = self.make_screener(tmp)
+            poller = WhalePoller("unused", screen,
+                                 state_file=Path(tmp) / "poller.json")
+            contract, (symbol, decimals) = next(iter(TRON_TOKENS.items()))
+            requested = {}
+
+            async def fake_events(_session, url, params=None):
+                requested.update(params or {})
+                return {"data": [], "meta": {}}
+
+            poller._trongrid_get = fake_events
+            started = poller._tron_last_event_ms
+            now_ms = int(time.time() * 1000) + 60_000      # «минута работы»
+            await poller._poll_tron_contract(None, contract, symbol, decimals,
+                                             now_ms)
+            self.assertEqual(requested["max_timestamp"],
+                             now_ms - TRON_CONFIRM_LAG_MS,
+                             "верхняя граница окна — за лагом финальности")
+            self.assertEqual(requested["min_timestamp"], started)
+            self.assertEqual(requested["only_confirmed"], "true")
+            # курсор двигается к концу окна (минус перехлёст), а не к «сейчас»
+            poller._tron_advance_cursor(now_ms)
+            self.assertEqual(poller._tron_last_event_ms,
+                             now_ms - TRON_CONFIRM_LAG_MS - 250)
+            screen.close()
+
+    async def test_tron_window_waits_when_finality_not_reached(self):
+        """Пока окно финальности пусто (курсор впереди), запрос не уходит вовсе."""
+        with tempfile.TemporaryDirectory() as tmp:
+            screen = self.make_screener(tmp)
+            poller = WhalePoller("unused", screen,
+                                 state_file=Path(tmp) / "poller.json")
+            contract, (symbol, decimals) = next(iter(TRON_TOKENS.items()))
+
+            async def boom(_session, url, params=None):
+                raise AssertionError("TronGrid не должен получать пустое окно")
+
+            poller._trongrid_get = boom
+            poller._tron_last_event_ms = int(time.time() * 1000)  # «впереди»
+            await poller._poll_tron_contract(None, contract, symbol, decimals,
+                                             int(time.time() * 1000))
+            screen.close()
+
+    async def test_tron_restart_cursor_covers_lagged_history(self):
+        """Курсор старта уже за лагом финальности: рестарт не теряет минуту."""
+        with tempfile.TemporaryDirectory() as tmp:
+            screen = self.make_screener(tmp)
+            poller = WhalePoller("unused", screen,
+                                 state_file=Path(tmp) / "poller.json")
+            self.assertLessEqual(
+                poller._tron_last_event_ms,
+                int(time.time() * 1000) - TRON_CONFIRM_LAG_MS)
             screen.close()
 
     async def test_trongrid_api_key_header_is_optional(self):

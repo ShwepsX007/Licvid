@@ -44,6 +44,11 @@ SOLANA_HTTP_BASE = os.getenv("LIQSCOPE_SOLANA_HTTP", "https://solana-mainnet.g.a
 SPL_TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 TRON_API_BASE = os.getenv("LIQSCOPE_TRONGRID_URL", "https://api.trongrid.io").rstrip("/")
 TRON_EVENT_INTERVAL = 5.0
+#: финальность TRON: «confirmed» у TronGrid — событие в засолидифицированном
+#: блоке, а солидификация занимает ~57 с (19/27 SR-слотов по 3 с). Окно опроса
+#: поэтому отстаёт от «сейчас» на этот лаг + запас: запрос «последних 5 секунд»
+#: с only_confirmed=true всегда пуст, и лента молчит при живом TronGrid.
+TRON_CONFIRM_LAG_MS = 90_000
 SOLANA_POLL_INTERVAL_SEC = 30.0  # compatibility alias for realtime mode
 SOLANA_POLL_INTERVAL_REALTIME_SEC = 30.0
 SOLANA_POLL_INTERVAL_ECONOMY_SEC = 60.0
@@ -354,7 +359,10 @@ class WhalePoller:
         self._solana_signature_inflight: set[str] = set()
         self._solana_token_accounts: dict[str, dict[str, set[str]]] = {}
         self._tron_seen: dict[str, float] = {}
-        self._tron_last_event_ms = int(time.time() * 1000) - 15_000
+        # курсор окна TRC-20 стоит за лагом финальности: при старте сразу
+        # покрываем последний «уже засолидифицированный» кусок истории
+        self._tron_last_event_ms = (int(time.time() * 1000)
+                                    - TRON_CONFIRM_LAG_MS - 15_000)
         self.evm_streams = {chain: {"connected": False, "state": "waiting",
                                     "subscriptions": 0, "last_success": 0.0,
                                     "reconnects": 0, "error": ""}
@@ -2697,18 +2705,34 @@ class WhalePoller:
                         source="realtime"):
                     self.tron_status["events"] += 1
 
+    def _tron_advance_cursor(self, now_ms: int) -> None:
+        """Двинуть курсор TRC-20-окон к концу обработанного интервала.
+
+        Курсор отстаёт от «сейчас» на лаг финальности и ещё на 250 мс
+        перехлёста: событие на границе окна придёт повторно, дедуп скринера
+        (hash:event_index) его съест — зато ничего не теряется.
+        """
+        self._tron_last_event_ms = max(
+            self._tron_last_event_ms, now_ms - TRON_CONFIRM_LAG_MS - 250)
+
     async def _poll_tron_contract(self, session, contract: str, symbol: str,
                                   decimals: int, now_ms: int) -> None:
+        # окно спрашивает только то, что уже засолидифицировано: верхняя
+        # граница отстаёт от «сейчас» на ~57 с финальности TRON (+запас)
+        window_ms = now_ms - TRON_CONFIRM_LAG_MS
         state = getattr(self, "_tron_pages", {}).get(contract)
         if state is None:
-            state = {"min_timestamp": self._tron_last_event_ms,
-                     "max_timestamp": now_ms, "fingerprint": ""}
+            state = {"min_timestamp": min(self._tron_last_event_ms, window_ms),
+                     "max_timestamp": window_ms, "fingerprint": ""}
             if not hasattr(self, "_tron_pages"):
                 self._tron_pages = {}
             self._tron_pages[contract] = state
         elif not state.get("fingerprint"):
             state.update(min_timestamp=self._tron_last_event_ms,
-                         max_timestamp=now_ms, fingerprint="")
+                         max_timestamp=window_ms, fingerprint="")
+        if state["max_timestamp"] <= state["min_timestamp"]:
+            # финальность ещё не догнала момент старта процесса — окно пусто
+            return
         pages = 0
         while pages < 5:
             params = {"event_name": "Transfer", "only_confirmed": "true",
@@ -2755,7 +2779,7 @@ class WhalePoller:
             pages += 1
             if not fingerprint:
                 state.update(min_timestamp=state["max_timestamp"],
-                             max_timestamp=now_ms, fingerprint="")
+                             max_timestamp=window_ms, fingerprint="")
                 break
         if state.get("fingerprint") and pages >= 5:
             self.tron_status["error"] = "TronGrid backlog paginated; continuing next cycle"
@@ -2790,8 +2814,7 @@ class WhalePoller:
                             block_error = self._trongrid_safe_text(
                                 str(exc) or type(exc).__name__)[:200]
                             self._log_tron_exception(exc)
-                        self._tron_last_event_ms = max(self._tron_last_event_ms,
-                                                       now_ms - 250)
+                        self._tron_advance_cursor(now_ms)
                         self.tron_status.update(connected=True, state="online",
                             wallets=len(self.screener.wallet_addresses("TRON")),
                             last_success=time.time(), error=block_error)

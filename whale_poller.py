@@ -280,6 +280,10 @@ class WhalePoller:
         # Тумблер сетей админки (`screener_networks.NetworkSwitch`). None =
         # не фильтровать: коллектор работает как раньше.
         self.networks = networks
+        # Тумблер источника Alchemy в админке: выключен — ключи остаются в
+        # хранилище, но опрос (REST и стримы) замолкает и CU не тратится;
+        # EVM-данные в это время может отдавать запасной источник (Etherscan).
+        self.source_enabled = True
         self._started_at = time.time()
         self.last_data_at = 0.0
         self.last_key_switch_at = 0.0
@@ -385,6 +389,8 @@ class WhalePoller:
         self._save()
 
     def _keys(self) -> list[tuple[str, str]]:
+        if not self.source_enabled:
+            return []   # источник выключен админом: пауза без траты CU
         return self.key_store.keys() if self.key_store else (
             [("legacy", self._fallback_key)] if self._fallback_key else [])
 
@@ -2874,7 +2880,11 @@ class WhalePoller:
                             "Local monthly CU budget exhausted", key_active=True)
                 elif not keys:
                     self._mark_network_failure(
-                        chain, "paused", "Alchemy API key is not configured", key_active=False)
+                        chain, "paused",
+                        "Alchemy source disabled by admin"
+                        if not self.source_enabled
+                        else "Alchemy API key is not configured",
+                        key_active=False)
                 else:
                     row = self._network_row(chain)
                     retry_at = float(row.get("retry_at") or 0.0)

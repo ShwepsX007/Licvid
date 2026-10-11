@@ -87,6 +87,8 @@ class EtherscanAdminRoutesTest(unittest.TestCase):
     def _restore(self):
         (server.etherscan_key_store, server.etherscan_collector,
          server.etherscan_vault_error) = self._saved
+        server.alchemy_source_enabled = True
+        server.etherscan_source_enabled = True
 
     # --- доступ -------------------------------------------------------------
 
@@ -170,6 +172,73 @@ class EtherscanAdminRoutesTest(unittest.TestCase):
         self.assertIn("etherscan", cfg)
         self.assertEqual(cfg["etherscan"]["mode"], "primary")
         self.assertEqual(cfg["etherscan"]["networks"]["ETH"]["status"], "online")
+
+    def test_sources_in_config(self):
+        cfg = self.admin.get("/api/admin/screener/config").json()
+        src = cfg["sources"]
+        self.assertIn(src["active"], ("alchemy", "etherscan", "none"))
+        self.assertTrue(src["alchemy"]["enabled"])     # по умолчанию оба включены
+        self.assertTrue(src["etherscan"]["enabled"])
+        self.assertIn("keys", src["alchemy"])
+        self.assertIn("active", src["etherscan"])
+
+    def test_source_toggle_roundtrip_and_persistence(self):
+        # у Alchemy в тестовой среде своего хранилища с ключами нет — ставим
+        self._saved_alchemy = server.alchemy_key_store
+        server.alchemy_key_store = AlchemyKeyStore(
+            "test-secret-not-the-published-default",
+            path=Path(tempfile.mkdtemp(prefix="liq-alch-")) / "keys.enc")
+        server.alchemy_key_store.add("fake-alchemy-key-for-toggle-test")
+        self.addCleanup(setattr, server, "alchemy_key_store", self._saved_alchemy)
+        # и ключ Etherscan, чтобы после выключения Alchemy он стал активным
+        server.etherscan_key_store.add(KEY_B)
+        # выключить Alchemy без удаления ключей
+        got = self.admin.post("/api/admin/screener/sources",
+                              json={"source": "alchemy", "enabled": False})
+        self.assertEqual(got.status_code, 200)
+        src = got.json()["sources"]
+        self.assertFalse(src["alchemy"]["enabled"])
+        self.assertTrue(src["alchemy"]["keys"])        # ключи остались в хранилище
+        self.assertEqual(src["active"], "etherscan")   # эфиры подхватили
+        self.assertEqual(
+            server.account_store.get_setting("whale_source_alchemy", ""),
+            "0", "тумблер переживает рестарт (настройка в БД)")
+        # выключить и Etherscan — активных источников нет
+        got = self.admin.post("/api/admin/screener/sources",
+                              json={"source": "etherscan", "enabled": False})
+        src = got.json()["sources"]
+        self.assertEqual(src["active"], "none")
+        # вернуть оба
+        self.admin.post("/api/admin/screener/sources",
+                        json={"source": "alchemy", "enabled": True})
+        got = self.admin.post("/api/admin/screener/sources",
+                              json={"source": "etherscan", "enabled": True})
+        src = got.json()["sources"]
+        self.assertEqual(src["active"], "alchemy")
+        self.assertEqual(
+            server.account_store.get_setting("whale_source_alchemy", ""), "1")
+
+    def test_source_toggle_wakes_collector_and_sets_flag(self):
+        server.etherscan_collector = FakeCollector()
+        # у фейкового коллектера нет поля enabled — добавим
+        server.etherscan_collector.enabled = True
+        got = self.admin.post("/api/admin/screener/sources",
+                              json={"source": "etherscan", "enabled": False})
+        self.assertEqual(got.status_code, 200)
+        self.assertFalse(server.etherscan_collector.enabled)
+        self.assertTrue(server.etherscan_collector.wakeup_set)
+        self.assertFalse(server.etherscan_source_enabled)
+
+    def test_source_toggle_rejects_garbage(self):
+        self.assertEqual(self.admin.post("/api/admin/screener/sources",
+                                         json={"source": "coinbase", "enabled": True})
+                         .status_code, 422)
+        self.assertEqual(self.admin.post("/api/admin/screener/sources",
+                                         json={"source": "alchemy"})
+                         .status_code, 422)
+        self.assertEqual(self.plain.post("/api/admin/screener/sources",
+                                         json={"source": "alchemy", "enabled": False})
+                         .status_code, 403)
 
     def test_status_survives_missing_collector(self):
         server.etherscan_key_store = None

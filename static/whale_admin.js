@@ -173,6 +173,64 @@
             target.append(row);
         });
     }
+    function renderSources(sources) {
+        const target = el("whale-admin-sources");
+        if (!target) return;
+        target.replaceChildren();
+        if (!sources || !sources.alchemy) return;
+        const active = sources.active || "none";
+        const rows = [
+            ["alchemy", t("adm.source_alchemy"), sources.alchemy],
+            ["etherscan", t("adm.source_etherscan"), sources.etherscan],
+        ];
+        rows.forEach(([id, label, row]) => {
+            const line = make("div", "whale-admin-switch-row" + (row.enabled ? "" : " is-off"));
+            const main = make("div", "whale-admin-switch-main");
+            main.append(make("strong", "", label));
+            const keys = Number(row.keys || 0);
+            const stateText = !row.enabled ? t("adm.source_off")
+                : !keys ? t("adm.source_no_keys")
+                : row.active ? t("adm.source_active")
+                : t("adm.source_standby");
+            main.append(make("small", "", stateText));
+            const labelEl = make("label", "whale-admin-switch");
+            const input = document.createElement("input");
+            input.type = "checkbox";
+            input.checked = Boolean(row.enabled);
+            input.setAttribute("aria-label", label + " — " + t("adm.sources_title"));
+            input.dataset.source = id;
+            const knob = make("i");
+            const caption = make("span", "",
+                row.enabled ? t("adm.networks_switch_on") : t("adm.networks_switch_off"));
+            input.addEventListener("change", () => setSource(id, input.checked, caption, line));
+            labelEl.append(input, knob, caption);
+            line.append(main, labelEl);
+            target.append(line);
+        });
+        const statusEl = el("whale-admin-source-status");
+        if (statusEl) {
+            statusEl.textContent = active === "alchemy" ? t("adm.source_now_alchemy")
+                : active === "etherscan" ? t("adm.source_now_etherscan")
+                : t("adm.source_now_none");
+        }
+    }
+    async function setSource(source, enabled, caption, line) {
+        const status = el("whale-admin-source-status");
+        caption.textContent = t("adm.networks_switch_saving");
+        try {
+            await request("/api/admin/screener/sources", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({source: source, enabled: Boolean(enabled)}),
+            });
+            caption.textContent = enabled ? t("adm.networks_switch_on") : t("adm.networks_switch_off");
+            if (status) status.textContent = t("adm.source_saved");
+            await load();
+        } catch (error) {
+            caption.textContent = t("adm.networks_switch_error");
+            caption.title = String(error && error.message || "");
+            await load();
+        }
+    }
     function renderEtherscanKeys(keys, state) {
         const target = el("etherscan-admin-keys");
         if (!target) return;
@@ -477,6 +535,7 @@
                 request("/api/admin/trongrid/key").catch(() => ({keys: [], available: false})),
             ]);
             const cfg = configData.config || {};
+            renderSources(configData.sources || {});
             const cu = statsData.cu || {};
             const keys = statsData.cu && Array.isArray(statsData.cu.keys)
                 ? statsData.cu.keys : keyData.keys || [];
@@ -493,7 +552,11 @@
                     el("whale-admin-budget").value = String(cfg.budget_cu);
                 }
                 el("whale-admin-mode").value = cfg.mode === "economy" ? "economy" : "realtime";
-                status.textContent = cfg.phase === "no_key" ? t("adm.alchemy_waiting_for_key") : t("adm.alchemy_config_loaded");
+                const esMode = (configData.etherscan || {}).mode;
+                status.textContent = esMode === "primary"
+                    ? t("adm.source_now_etherscan")
+                    : cfg.phase === "no_key" ? t("adm.alchemy_waiting_for_key")
+                    : t("adm.alchemy_config_loaded");
             } else {
                 status.textContent = configData.vault_error || t("adm.alchemy_unavailable");
             }

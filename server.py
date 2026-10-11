@@ -1802,6 +1802,10 @@ trongrid_vault_error = ""
 etherscan_key_store: Optional[AlchemyKeyStore] = None
 etherscan_collector = None
 etherscan_vault_error = ""
+# Тумблеры источников EVM-данных: ключи остаются в хранилище, но выключенный
+# источник не опрашивается (и не тратит квоту) — данные отдаёт доступный.
+alchemy_source_enabled = True
+etherscan_source_enabled = True
 # 📖 Стакан: опрос L2 и детектор стен (заполняется в lifespan; в тестах — подмена).
 book_feed_inst: Optional[BookFeed] = None
 _pending: List[dict] = []
@@ -5053,11 +5057,16 @@ async def lifespan(app: FastAPI):
     global whale_screener, whale_poller, alchemy_key_store, alchemy_vault_error
     global trongrid_key_store, trongrid_vault_error, cex_wallet_registry
     global etherscan_key_store, etherscan_collector, etherscan_vault_error
+    global alchemy_source_enabled, etherscan_source_enabled
     global screener_networks
     whale_screener = whale_poller = alchemy_key_store = trongrid_key_store = None
     alchemy_vault_error = trongrid_vault_error = ""
     etherscan_key_store = etherscan_collector = None
     etherscan_vault_error = ""
+    alchemy_source_enabled = str(account_store.get_setting(
+        "whale_source_alchemy", "1")).strip() != "0"
+    etherscan_source_enabled = str(account_store.get_setting(
+        "whale_source_etherscan", "1")).strip() != "0"
     if NetworkSwitch is not None:
         try:
             screener_networks = NetworkSwitch(SCREENER_NETWORKS_FILE)
@@ -5119,6 +5128,11 @@ async def lifespan(app: FastAPI):
             monthly_cu = int(account_store.get_setting("whale_monthly_cu", "10000000"))
         except (TypeError, ValueError):
             monthly_cu = 10_000_000
+        def _alchemy_primary_active() -> bool:
+            """Alchemy — активный источник: включён тумблером и есть ключи."""
+            return alchemy_source_enabled and bool(
+                alchemy_key_store and alchemy_key_store.keys())
+
         try:
             # No plaintext or env-key fallback when Fernet is unavailable.
             alchemy_key_store = AlchemyKeyStore(SECRET, env_key=os.getenv("ALCHEMY_API_KEY", ""))
@@ -5144,8 +5158,8 @@ async def lifespan(app: FastAPI):
                 etherscan_collector = EtherscanCollector(
                     whale_screener, etherscan_key_store,
                     networks=screener_networks,
-                    is_primary_active=lambda: bool(
-                        alchemy_key_store and alchemy_key_store.keys()))
+                    is_primary_active=_alchemy_primary_active)
+                etherscan_collector.enabled = etherscan_source_enabled
             except Exception:  # noqa: BLE001 — опциональный источник не мешает сайту
                 etherscan_collector = None
         if etherscan_collector:
@@ -5159,6 +5173,7 @@ async def lifespan(app: FastAPI):
                     poll_interval_sec=poll_interval_sec,
                     mode=mode, monthly_cu=monthly_cu,
                     networks=screener_networks)
+                whale_poller.source_enabled = alchemy_source_enabled
             except Exception:  # noqa: BLE001 — optional collection cannot take down terminal
                 whale_poller = None
                 if not alchemy_vault_error:
@@ -6471,8 +6486,51 @@ async def api_admin_screener_config(request: Request):
             "keys": whale_poller.key_status() if whale_poller else [],
             "vault_error": alchemy_vault_error,
             "etherscan": _etherscan_status(),
+            "sources": _screener_sources(),
             "all_mode_available": False,
             "reason": "Полный обход быстрых сетей превышает бюджет Free 30 млн CU/мес"}
+
+
+def _screener_sources() -> dict:
+    """Состояние тумблеров источников EVM: кто включён, у кого ключи, кто активен."""
+    alchemy_keys = bool(alchemy_key_store and alchemy_key_store.keys())
+    etherscan_keys = bool(etherscan_key_store and etherscan_key_store.keys())
+    alchemy = {"enabled": alchemy_source_enabled, "keys": alchemy_keys,
+               "active": alchemy_source_enabled and alchemy_keys}
+    etherscan = {"enabled": etherscan_source_enabled, "keys": etherscan_keys,
+                 "active": etherscan_source_enabled and etherscan_keys
+                 and not alchemy["active"]}
+    return {"alchemy": alchemy, "etherscan": etherscan,
+            "active": "alchemy" if alchemy["active"]
+            else "etherscan" if etherscan["active"] else "none"}
+
+
+@app.post("/api/admin/screener/sources")
+async def api_admin_screener_sources(request: Request,
+                                     body: dict = Body(default_factory=dict)):
+    """Тумблер источника EVM-данных: ключи не трогаем, опрос включаем/выключаем."""
+    global alchemy_source_enabled, etherscan_source_enabled
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    source = str(body.get("source", "")).strip().lower()
+    enabled = body.get("enabled")
+    if source not in ("alchemy", "etherscan") or not isinstance(enabled, bool):
+        return JSONResponse({"error": "invalid_source"}, status_code=422)
+    if source == "alchemy":
+        alchemy_source_enabled = enabled
+        if whale_poller:
+            whale_poller.source_enabled = enabled
+            whale_poller.wakeup.set()
+    else:
+        etherscan_source_enabled = enabled
+        if etherscan_collector:
+            etherscan_collector.enabled = enabled
+            etherscan_collector.wakeup.set()
+    await asyncio.to_thread(
+        account_store.set_setting,
+        "whale_source_" + source, "1" if enabled else "0", int(user["id"]))
+    return {"ok": True, "sources": _screener_sources()}
 
 
 @app.post("/api/admin/screener/config")
@@ -7210,11 +7268,21 @@ async def api_screener_whales(request: Request,
                               limit: int = Query(100, ge=1, le=100)):
     alchemy_enabled = bool(alchemy_key_store and alchemy_key_store.keys()) and any(
         _chain_enabled(chain) for chain in ("ETH", "BNB", "POLYGON", "ARBITRUM", "BASE"))
+    # EVM-данные есть и от Etherscan: когда Alchemy не активен (выключен
+    # тумблером или нет ключей), лента не должна сообщать «скринер выключен»,
+    # пока запасной источник собирает события
+    etherscan_evm = (etherscan_source_enabled
+                     and bool(etherscan_key_store and etherscan_key_store.keys())
+                     and not alchemy_enabled and any(
+                         _chain_enabled(chain)
+                         for chain in ("ETH", "BNB", "POLYGON", "ARBITRUM", "BASE")))
     native_enabled = bool(whale_screener and whale_screener.hl_enabled
                           and _chain_enabled("HYPERLIQUID"))
     solana_enabled = bool(whale_poller and alchemy_enabled and _chain_enabled("SOLANA"))
     tron_enabled = bool(whale_poller and _chain_enabled("TRON"))
-    return {"enabled": alchemy_enabled, "alchemy_enabled": alchemy_enabled,
+    evm_enabled = alchemy_enabled or etherscan_evm
+    return {"enabled": evm_enabled, "alchemy_enabled": alchemy_enabled,
+            "etherscan_enabled": etherscan_evm,
             "native_enabled": native_enabled, "solana_enabled": solana_enabled,
             "tron_enabled": tron_enabled,
             # что оставил включённым админ: страница скрывает сети по этому списку

@@ -7,6 +7,7 @@ const script = fs.readFileSync(path.join(__dirname, "../static/whale_admin.js"),
 const html = `<!doctype html><body>
 <div id="whale-admin-card" hidden>
   <span id="whale-admin-status"></span><span id="whale-admin-key-status"></span>
+  <div id="whale-admin-sources"></div><p id="whale-admin-source-status"></p>
   <input id="whale-admin-key"><button id="whale-admin-add-key"></button>
   <div id="whale-admin-summary"></div><div id="whale-admin-keys"></div>
   <div id="whale-admin-cu-label"></div><div id="whale-admin-cu-meta"></div>
@@ -44,6 +45,8 @@ let walletRows = [
 ];
 let tronKeys = [];
 // как реальный /api/admin/screener/config: keys = public-поля + runtime-состояние
+let sourceState = {alchemy: {enabled: true, keys: true, active: true},
+    etherscan: {enabled: true, keys: true, active: false}, active: "alchemy"};
 let etherscanKeys = [
     {id: "eeee1111eeee1111", hint: "Ethe••••AAA1", source: "admin",
      state: "active", calls_today: 1200, cooldown_sec: 0},
@@ -100,6 +103,15 @@ win.LiqScopeI18n = {t: (key, vars = {}) => {
         "adm.etherscan_deleted": "Etherscan key deleted.",
         "adm.etherscan_error": "Could not add the Etherscan key.",
         "adm.etherscan_vault_error": "Key vault unavailable.",
+        "adm.sources_title": "EVM data sources",
+        "adm.source_alchemy": "Alchemy (streams + REST)",
+        "adm.source_etherscan": "Etherscan (REST polling)",
+        "adm.source_off": "off", "adm.source_no_keys": "on, no keys",
+        "adm.source_active": "active source", "adm.source_standby": "standby",
+        "adm.source_now_alchemy": "Alchemy is collecting EVM data now.",
+        "adm.source_now_etherscan": "Etherscan is collecting EVM data now.",
+        "adm.source_now_none": "No active source with keys.",
+        "adm.source_saved": "Source switched.",
         "adm.trongrid_no_key": "No TronGrid key", "adm.alchemy_settings_saved": "Settings saved",
         "adm.alchemy_monthly_estimate": "Monthly CU estimate: {amount}",
         "adm.alchemy_online": "Online",
@@ -146,7 +158,15 @@ win.fetch = async (url, options = {}) => {
         return response({ok: true});
     }
     if (parsed.pathname === "/api/admin/screener/config" && method === "GET")
-        return response({config, etherscan: etherscanState()});
+        return response({config, etherscan: etherscanState(), sources: sourceState});
+    if (parsed.pathname === "/api/admin/screener/sources" && method === "POST") {
+        sourceState[body.source] = {...sourceState[body.source], enabled: Boolean(body.enabled)};
+        sourceState = {...sourceState, active:
+            sourceState.alchemy.enabled && sourceState.alchemy.keys ? "alchemy"
+            : sourceState.etherscan.enabled && sourceState.etherscan.keys ? "etherscan"
+            : "none"};
+        return response({ok: true, sources: sourceState});
+    }
     if (parsed.pathname === "/api/admin/screener/config" && method === "POST") {
         config = {...config, mode: body.mode, poll_interval_sec: body.poll_interval_sec,
             interval_sec: body.poll_interval_sec, budget_cu: body.monthly_cu};
@@ -382,6 +402,27 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     await sleep(60);
     assert(calls.some(call => call.path === "/api/admin/screener/config" &&
         call.method === "POST" && call.body.mode === "economy" && call.body.poll_interval_sec === 30));
+
+    /* --- Тумблеры источников: пауза без удаления ключей ------------------- */
+    const sourceRows = win.document.querySelectorAll("#whale-admin-sources .whale-admin-switch-row");
+    assert.equal(sourceRows.length, 2, "оба источника показаны тумблерами");
+    const sourceText = win.document.getElementById("whale-admin-sources").textContent;
+    assert(sourceText.includes("Alchemy") && sourceText.includes("Etherscan"));
+    assert(sourceText.includes("active source") && sourceText.includes("standby"),
+        "активный и резервный источник подписаны: " + sourceText);
+    assert(win.document.getElementById("whale-admin-source-status").textContent
+        .includes("Alchemy is collecting"), "строка текущего источника");
+    // выключаем Alchemy — Etherscan становится активным
+    const alchemySwitch = sourceRows[0].querySelector("input");
+    alchemySwitch.checked = false;
+    alchemySwitch.dispatchEvent(new win.Event("change", {bubbles: true}));
+    await sleep(60);
+    assert(calls.some(call => call.path === "/api/admin/screener/sources" &&
+        call.method === "POST" && call.body.source === "alchemy" &&
+        call.body.enabled === false), "выключение Alchemy уходит на сервер");
+    assert(win.document.getElementById("whale-admin-source-status").textContent
+        .includes("Etherscan is collecting"),
+        "после выключения Alchemy активным назван Etherscan");
 
     /* --- Etherscan: ключи по очереди, статус ключей и источника ------------- */
     const esRows = win.document.querySelectorAll("#etherscan-admin-keys .whale-admin-key-row");

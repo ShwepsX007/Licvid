@@ -101,6 +101,8 @@ class EtherscanCollector:
         self.native_enabled = (native_enabled if native_enabled is not None
                                else os.getenv("LIQSCOPE_ETHERSCAN_NATIVE", "1") != "0")
         self.wakeup = asyncio.Event()
+        # тумблер админки: источник выключен — ключи остаются, опроса нет
+        self.enabled = True
         self._anchors: dict[str, int] = {}   # chain → блок старта (кэш прохода)
         self._call_lock = asyncio.Lock()
         self._last_call_at = 0.0
@@ -214,30 +216,30 @@ class EtherscanCollector:
             status = str(payload.get("status", ""))
             message = str(payload.get("message") or "")
             result = payload.get("result")
-            if status == "1" and isinstance(result, list):
+            # status "1": result бывает списком (account), объектом (block)
+            # или скаляром — отдаём как есть, тип разбирает вызывающий
+            if status == "1" and result is not None:
                 return result
-            # status "0" — нормальный пустой ответ ИЛИ ошибка ключа
-            lowered = message.lower()
-            if "no transactions" in lowered or "no records" in lowered \
-                    or "no matching" in lowered or "no data" in lowered:
+            # status "0" — нормальный пустой ответ ИЛИ ошибка ключа.
+            # Etherscan часто кладёт текст ошибки в result, а message = NOTOK,
+            # поэтому каждый паттерн ищем в обоих местах.
+            blob = (message + " " + (result if isinstance(result, str) else "")).lower()
+            if ("no transactions" in blob or "no records" in blob
+                    or "no matching" in blob or "no data" in blob):
                 return []
-            if "rate limit" in lowered:
+            if "rate limit" in blob and "per day" not in blob:
                 self._park(key_id, RATE_PARK_SEC)
                 continue
-            if "daily" in lowered or "day limit" in lowered or "max calls" in lowered:
+            if ("daily" in blob or "day limit" in blob or "max calls" in blob
+                    or "per day" in blob):
                 # дневная квота ключа кончилась — до конца UTC-суток
                 self._park(key_id, max(60.0, _utc_midnight_after(time.time())
                                        - time.time() + DAILY_PARK_MARGIN_SEC))
                 continue
-            if "invalid api key" in lowered or "missing api" in lowered:
+            if "invalid api key" in blob or "missing api" in blob:
                 self._park(key_id, AUTH_PARK_SEC)
                 continue
-            # Proxy-ошибки приходят в result как строка
             if isinstance(result, str) and result:
-                lowered_result = result.lower()
-                if "rate limit" in lowered_result:
-                    self._park(key_id, RATE_PARK_SEC)
-                    continue
                 raise EtherscanError(result[:200])
             return []
         raise EtherscanError("no ready key after rotation")
@@ -245,11 +247,34 @@ class EtherscanCollector:
     # ---------------- обработка строк --------------------------------------
 
     async def _anchor_block(self, session: aiohttp.ClientSession, chain: str) -> int:
-        rows = await self._api(session, chain, "block", "getblocknobytime",
-                               timestamp=int(time.time()), closest="before")
+        """Блок «сейчас» для якоря курсора. V2 отдаёт и объект, и список."""
+        payload = await self._api(session, chain, "block", "getblocknobytime",
+                                  timestamp=int(time.time()), closest="before")
+        row = payload if isinstance(payload, dict) else (
+            payload[0] if isinstance(payload, list) and payload else {})
         try:
-            return int((rows[0] if isinstance(rows, list) else {}).get("blockNumber"))
-        except (IndexError, TypeError, ValueError):
+            return int(row.get("blockNumber"))
+        except (TypeError, ValueError):
+            return 0
+
+    def _wallet_action(self, kind: str) -> tuple[str, str]:
+        return ("account", "tokentx") if kind == "token" else ("account", "txlist")
+
+    async def _newest_block(self, session: aiohttp.ClientSession, chain: str,
+                            kind: str, address: str) -> int:
+        """Фолбэк-якорь: блок последней записи кошелька (sort=desc, 1 шт.)."""
+        module, action = self._wallet_action(kind)
+        try:
+            rows = await self._api(session, chain, module, action,
+                                   address=address, startblock=0,
+                                   endblock=999999999, sort="desc",
+                                   page=1, offset=1)
+        except EtherscanError:
+            return 0
+        rows = rows if isinstance(rows, list) else []
+        try:
+            return int(rows[0].get("blockNumber", 0)) if rows else 0
+        except (TypeError, ValueError):
             return 0
 
     async def _poll_wallet(self, session: aiohttp.ClientSession, chain: str,
@@ -265,7 +290,11 @@ class EtherscanCollector:
                     self._anchors[chain] = await self._anchor_block(session, chain)
                 anchor = self._anchors[chain]
                 if anchor <= 0:
-                    return events
+                    # блок-эндпоинт не дал якоря — берём блок последней
+                    # записи самого кошелька (гарантированно бесплатный путь)
+                    anchor = await self._newest_block(session, chain, kind, address)
+                if anchor <= 0:
+                    continue   # нет ни блока, ни истории: повторим в следующий проход
                 cursor = max(0, anchor - 3)   # маленький захват назад
                 # базовый курсор пишем сразу: пустой ответ не должен
                 # заставлять якорить блок заново каждый проход
@@ -274,16 +303,12 @@ class EtherscanCollector:
             pages = 0
             while pages < MAX_PAGES_PER_WALLET:
                 pages += 1
-                if kind == "token":
-                    rows = await self._api(session, chain, "account", "tokentx",
-                                           address=address, startblock=cursor,
-                                           endblock=999999999, sort="asc",
-                                           page=1, offset=PAGE_OFFSET)
-                else:
-                    rows = await self._api(session, chain, "account", "txlist",
-                                           address=address, startblock=cursor,
-                                           endblock=999999999, sort="asc",
-                                           page=1, offset=PAGE_OFFSET)
+                module, action = self._wallet_action(kind)
+                rows = await self._api(session, chain, module, action,
+                                       address=address, startblock=cursor,
+                                       endblock=999999999, sort="asc",
+                                       page=1, offset=PAGE_OFFSET)
+                rows = rows if isinstance(rows, list) else []
                 if not rows:
                     break
                 last_block = cursor
@@ -388,6 +413,13 @@ class EtherscanCollector:
         async with aiohttp.ClientSession() as session:
             while True:
                 try:
+                    if not self.enabled:
+                        for chain in CHAIN_IDS:
+                            self.network_status[chain].update(
+                                status="paused",
+                                error="Etherscan source disabled by admin")
+                        await self._sleep_or_wakeup(self.poll_interval_sec)
+                        continue
                     if not self._pool():
                         for chain in CHAIN_IDS:
                             self.network_status[chain].update(
@@ -439,7 +471,8 @@ class EtherscanCollector:
 
     def status(self) -> dict:
         pool = self._pool()
-        mode = ("paused_no_keys" if not pool else
+        mode = ("disabled" if not self.enabled else
+                "paused_no_keys" if not pool else
                 "paused_alchemy" if self.is_primary_active() else "primary")
         keys = []
         calls_today = 0
@@ -467,6 +500,7 @@ class EtherscanCollector:
             row["source"] = "environment" if row["id"] == "env" else "admin"
         return {
             "available": True, "provider": "etherscan", "mode": mode,
+            "enabled": bool(self.enabled),
             "poll_interval_sec": int(self.poll_interval_sec),
             "daily_calls_limit": self.daily_calls,
             "calls_today": calls_today,

@@ -319,6 +319,10 @@
             <small id="whale-admin-cu-meta" class="meta"></small>
         </div>
     </div>
+    <h4 class="whale-admin-subtitle" data-i18n="adm.sources_title">EVM data sources</h4>
+    <p class="meta" data-i18n="adm.sources_note">Toggles pause polling without deleting keys: an off source spends no quota, and the available one takes over automatically. At least one source must stay on for EVM networks to be collected.</p>
+    <div id="whale-admin-sources" class="whale-admin-switches" aria-live="polite"></div>
+    <p class="meta" id="whale-admin-source-status" role="status"></p>
     <h4 class="whale-admin-subtitle" data-i18n="adm.alchemy_keys_title">Alchemy API keys</h4>
     <div class="row-actions" style="flex-wrap:wrap;gap:10px">
         <label><span data-i18n="adm.alchemy_key_label">API key or Alchemy /v2 URL</span>
@@ -824,7 +828,7 @@
         <div id="ai-prompt-blocks"><p class="meta">загружаю промты…</p></div>
     </div>
 </main>
-<script src="/static/i18n.pages.js?v=etherscan1"></script>
+<script src="/static/i18n.pages.js?v=etherscan2"></script>
 <script src="/static/i18n.js?v=quota2"></script>
 <script src="/static/world-map.js?v=geo1"></script>
 <script src="/static/geo_map.js?v=geo2"></script>
@@ -835,7 +839,7 @@
 <script src="/static/archive_admin.js?v=arcdel1"></script>
 <script src="/static/consent.js?v=consent1"></script>
 <script src="/static/system_settings.js?v=sysset2"></script>
-<script src="/static/whale_admin.js?v=etherscan1"></script>
+<script src="/static/whale_admin.js?v=etherscan2"></script>
 <script src="/static/source_diagnostics.js?v=diag1"></script>
 <link rel="stylesheet" href="/static/brand.css?v=rebrand1">
 </body>

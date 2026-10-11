@@ -189,6 +189,58 @@ class KeyRotationTests(unittest.TestCase):
         with self.assertRaises(es.EtherscanError):
             asyncio.run(coll._api(session, "ETH", "account", "tokentx", address=W1))
 
+    def test_daily_limit_string_in_result_parks_key(self):
+        """Etherscan кладёт «Max calls ... day» в result (message=NOTOK)."""
+        store = FakeStore(("k1", "KEY1"), ("k2", "KEY2"))
+        coll = make_collector(FakeScreener({}), store)
+        session = FakeSession([
+            (lambda q: q["apikey"] == "KEY1",
+             {"status": "0", "message": "NOTOK",
+              "result": "Max calls per day reached (100000)"}),
+            (lambda q: True, ok([])),
+        ])
+        asyncio.run(coll._api(session, "ETH", "account", "tokentx", address=W1))
+        self.assertEqual(session.calls[-1]["apikey"], "KEY2")
+        remaining = coll.key_runtime["k1"]["cooldown_until"] - time.time()
+        self.assertGreater(remaining, 3600)   # не двухсекундный кулдаун
+
+    def test_invalid_key_string_in_result_parks_key(self):
+        """«Invalid API Key» приходит в result — ключ уходит в 15-минутный
+        кулдаун, а вызов переходит следующему."""
+        store = FakeStore(("k1", "KEY1"), ("k2", "KEY2"))
+        coll = make_collector(FakeScreener({}), store)
+        session = FakeSession([
+            (lambda q: q["apikey"] == "KEY1",
+             {"status": "0", "message": "NOTOK", "result": "Invalid API Key"}),
+            (lambda q: True, ok([])),
+        ])
+        asyncio.run(coll._api(session, "ETH", "account", "tokentx", address=W1))
+        self.assertEqual(session.calls[-1]["apikey"], "KEY2")
+        remaining = coll.key_runtime["k1"]["cooldown_until"] - time.time()
+        self.assertGreater(remaining, 600)
+
+    def test_sec_rate_limit_in_result_short_park(self):
+        """«rate limit ... per sec» в result — короткий кулдаун, не день."""
+        store = FakeStore(("k1", "KEY1"), ("k2", "KEY2"))
+        coll = make_collector(FakeScreener({}), store)
+        session = FakeSession([
+            (lambda q: q["apikey"] == "KEY1",
+             {"status": "0", "message": "NOTOK",
+              "result": "Max calls per sec rate limit reached (5/sec)"}),
+            (lambda q: True, ok([])),
+        ])
+        asyncio.run(coll._api(session, "ETH", "account", "tokentx", address=W1))
+        remaining = coll.key_runtime["k1"]["cooldown_until"] - time.time()
+        self.assertLess(remaining, 30)
+
+    def test_disabled_source_mode(self):
+        """Тумблер источника: mode=disabled, цикл не опрашивает."""
+        store = FakeStore(("k1", "KEY1"))
+        coll = make_collector(FakeScreener({"ETH": {W1: "A"}}), store)
+        coll.enabled = False
+        self.assertEqual(coll.status()["mode"], "disabled")
+        self.assertFalse(coll.status()["enabled"])
+
     def test_new_utc_day_resets_counter(self):
         store = FakeStore(("k1", "KEY1"))
         coll = make_collector(FakeScreener({}), store, daily_calls=1)
@@ -308,6 +360,57 @@ class PollingTests(unittest.TestCase):
                                       screener.wallets["ETH"],
                                       {USDT_ETH: ("USDT", 6)}))
         self.assertEqual([e["index"] for e in screener.emitted], ["es7", "es7.1"])
+
+    def test_anchor_accepts_dict_result(self):
+        """V2 getblocknobytime отдаёт result-ОБЪЕКТ: якорь обязан читаться."""
+        screener = FakeScreener({"ETH": {W1: "Binance 14"}})
+        coll = make_collector(screener, FakeStore(("k1", "KEY1")))
+        rows = [tx_row(400, 1_000_000, W1, W1, contract=USDT_ETH)]
+        session = FakeSession([
+            (lambda q: q.get("module") == "block",
+             {"status": "1", "message": "OK",
+              "result": {"blockNumber": "390"}}),
+            (lambda q: q.get("action") == "tokentx" and int(q.get("startblock", -1)) == 387,
+             ok(rows)),
+            (lambda q: True, ok([])),
+        ])
+        asyncio.run(coll._poll_wallet(session, "ETH", W1,
+                                      screener.wallets["ETH"],
+                                      {USDT_ETH: ("USDT", 6)}))
+        self.assertEqual(coll.cursors[f"ETH|{W1}|token"], 400)
+        self.assertEqual(len(screener.emitted), 1)
+
+    def test_anchor_list_result_still_works(self):
+        """Старая форма (список) тоже читается — обе формы V2 валидны."""
+        screener = FakeScreener({"ETH": {W1: "Binance 14"}})
+        coll = make_collector(screener, FakeStore(("k1", "KEY1")))
+        session = FakeSession([
+            (lambda q: q.get("module") == "block",
+             ok([{"blockNumber": "390"}])),
+            (lambda q: True, ok([])),
+        ])
+        anchor = asyncio.run(coll._anchor_block(session, "ETH"))
+        self.assertEqual(anchor, 390)
+
+    def test_anchor_fallback_to_newest_tx_when_block_endpoint_fails(self):
+        """Блок-эндпоинт не дал якорь → берём блок последней записи кошелька."""
+        screener = FakeScreener({"ETH": {W1: "Binance 14"}})
+        coll = make_collector(screener, FakeStore(("k1", "KEY1")))
+        # последняя запись кошелька — блок 510 → курсор 507; дальше asc-опрос
+        rows = [tx_row(508, 1_000_000, W1, W1, contract=USDT_ETH)]
+        session = FakeSession([
+            (lambda q: q.get("module") == "block", ok([])),   # пустой/битый
+            (lambda q: q.get("action") == "tokentx" and q.get("sort") == "desc",
+             ok([tx_row(510, 1, W1, W1, contract=USDT_ETH)])),
+            (lambda q: q.get("action") == "tokentx" and int(q.get("startblock", -1)) == 507,
+             ok(rows)),
+            (lambda q: True, ok([])),
+        ])
+        events = asyncio.run(coll._poll_wallet(session, "ETH", W1,
+                                               screener.wallets["ETH"],
+                                               {USDT_ETH: ("USDT", 6)}))
+        self.assertEqual(events, 1)
+        self.assertEqual(coll.cursors[f"ETH|{W1}|token"], 508)
 
     def test_anchor_cached_per_chain(self):
         """Блок-якорь спрашивается один раз на цепочку, не на каждый кошелёк."""

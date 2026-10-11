@@ -311,7 +311,9 @@
             address.append(make("code", "", wallet.address));
             tr.append(address);
             const sourceLabel = wallet.source === "manual" ? t("adm.cex_wallet_manual")
-                : wallet.source === "etherscan" ? t("adm.cex_wallet_etherscan") : t("adm.cex_wallet_defillama");
+                : wallet.source === "etherscan" ? t("adm.cex_wallet_etherscan")
+                : wallet.source === "tronscan" ? t("adm.cex_wallet_tronscan")
+                : t("adm.cex_wallet_defillama");
             tr.append(make("td", "", sourceLabel));
             const actions = make("td", "");
             if (wallet.source === "manual") {
@@ -710,6 +712,11 @@
             if (number(result.etherscan_count || 0) > 0) {
                 messages.push(t("adm.cex_wallet_refreshed_etherscan", {
                     count: number(result.etherscan_count),
+                }));
+            }
+            if (number(result.tronscan_count || 0) > 0) {
+                messages.push(t("adm.cex_wallet_refreshed_tronscan", {
+                    count: number(result.tronscan_count),
                 }));
             }
             const warnings = Array.isArray(result.warnings) ? result.warnings.filter(Boolean) : [];

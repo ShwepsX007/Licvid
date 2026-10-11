@@ -34,6 +34,31 @@ ETHERSCAN_LABELS_URL = os.getenv(
     "LIQSCOPE_ETHERSCAN_LABELS_URL",
     "https://raw.githubusercontent.com/brianleect/etherscan-labels/main/data/etherscan/combined/combinedAllLabels.json",
 )
+#: TronScan сам публикует официальные теги адресов ("Binance-Hot 7",
+#: "OKX Hot Wallet 8") — единственный бесплатный публичный источник
+#: TRON-меток бирж. Ключ не обязателен, но приглушает rate limit.
+TRONSCAN_API_BASE = os.getenv(
+    "LIQSCOPE_TRONSCAN_API", "https://apilist.tronscanapi.com").rstrip("/")
+TRONSCAN_API_KEY = os.getenv("LIQSCOPE_TRONSCAN_API_KEY", "").strip()
+TRONSCAN_USDT_CONTRACT = os.getenv(
+    "LIQSCOPE_TRONSCAN_USDT", "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t")
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return max(0, int(os.getenv(name, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+#: сколько крупнейших держателей USDT-TRC20 и TRX-аккаунтов просмотреть:
+#: биржи доминируют в обоих списках, поэтому двух проходов хватает
+TRONSCAN_TOP_HOLDERS = _env_int("LIQSCOPE_TRONSCAN_HOLDERS", 600)
+TRONSCAN_TOP_ACCOUNTS = _env_int("LIQSCOPE_TRONSCAN_ACCOUNTS", 300)
+TRONSCAN_PAGE = 50
+TRONSCAN_PAGE_PAUSE_SEC = 0.25
+#: теги TronScan, где биржа с тех пор переименована: компактный фрагмент → имя
+TRONSCAN_TAG_ALIASES = {"huobi": "HTX", "okex": "OKX"}
 SUPPORTED_CHAINS = {"ETH", "BNB", "POLYGON", "ARBITRUM", "BASE", "SOLANA", "TRON"}
 EVM_CHAINS = {"ETH", "BNB", "POLYGON", "ARBITRUM", "BASE"}
 CHAIN_ALIASES = {
@@ -172,7 +197,7 @@ def normalize_wallet_record(raw: dict, source: str | None = None) -> dict | None
         return None
     name = name[:100]
     src = source or str(raw.get("source") or "defillama")
-    if src not in ("manual", "defillama", "etherscan"):
+    if src not in ("manual", "defillama", "etherscan", "tronscan"):
         src = "defillama"
     updated_at = raw.get("updated_at") or int(time.time())
     try:
@@ -322,14 +347,79 @@ def parse_etherscan_labels(payload: Any, exchange_names: list[str]) -> list[dict
     return [row for row in out if row]
 
 
+def _match_exchange_name(tag: str, names: list[str]) -> str:
+    """Каноничное имя биржи, названной тегом TronScan, или ''.
+
+    Тег бывает «Binance-Hot 7» или «OKX Hot Wallet 8»: ищем компактное имя
+    биржи внутри компактного тега, выигрывает самое длинное совпадение
+    («Binance US» точнее «Binance»). Переименованные биржи — через алиасы.
+    """
+    normalized = _compact_name(tag)
+    if not normalized:
+        return ""
+    for fragment, canonical in TRONSCAN_TAG_ALIASES.items():
+        if fragment in normalized:
+            return canonical
+    best = ""
+    best_len = 0
+    for name in names:
+        slug = _compact_name(name)
+        if slug and len(slug) > best_len and slug in normalized:
+            best, best_len = name, len(slug)
+    return best
+
+
+def parse_tronscan_rows(rows: Any, contract_map: Any,
+                        exchange_names: list[str]) -> list[dict]:
+    """TRON-кошельки бирж из официальных тегов TronScan.
+
+    Тег назначает сам проводник, а ``contractMap`` ответа отделяет обычные
+    аккаунты от контрактов: этого достаточно, чтобы не тащить сюда контракты
+    токенов и казначейства эмитентов («Tether Treasury» биржей не считается —
+    имя тега обязано совпасть с известной площадкой). Меткой кошелька остаётся
+    полный тег: «Binance-Hot 7» информативнее безликого «Binance».
+    """
+    contracts = contract_map if isinstance(contract_map, dict) else {}
+    out: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    if not isinstance(rows, list):
+        return out
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        address = str(row.get("holder_address") or row.get("address") or "").strip()
+        tag = str(row.get("addressTag") or "").strip()
+        if not address or not tag:
+            continue
+        if contracts.get(address) is True:
+            continue  # контракт (токен, мост) — не кошелёк биржи
+        if not _match_exchange_name(tag, exchange_names):
+            continue
+        record = normalize_wallet_record({"chain": "TRON", "address": address,
+                                          "name": tag, "source": "tronscan"})
+        if not record:
+            continue
+        key = (record["chain"], address_key(record["chain"], record["address"]))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(record)
+    return out
+
+
 async def _read_source_bytes(session: aiohttp.ClientSession, url: str, *,
-                            limit: int = MAX_SOURCE_BYTES) -> tuple[bytearray, int]:
+                            limit: int = MAX_SOURCE_BYTES,
+                            headers: dict | None = None) -> tuple[bytearray, int]:
     """Download a bounded response in chunks and reject incomplete bodies."""
     for attempt in range(SOURCE_MAX_RETRIES + 1):
         try:
+            request_headers = {"User-Agent": SOURCE_USER_AGENT,
+                               "Accept-Encoding": "identity"}
+            if headers:
+                request_headers.update(headers)
             async with session.get(
                     url,
-                    headers={"User-Agent": SOURCE_USER_AGENT, "Accept-Encoding": "identity"},
+                    headers=request_headers,
                     timeout=aiohttp.ClientTimeout(total=SOURCE_TIMEOUT_SEC)) as response:
                 status = int(response.status)
                 if status != 200:
@@ -396,8 +486,9 @@ async def _read_source_bytes(session: aiohttp.ClientSession, url: str, *,
     raise SourceFetchError(url, "network error", detail="request retries exhausted")
 
 
-async def _read_json(session: aiohttp.ClientSession, url: str, *, limit: int = MAX_SOURCE_BYTES):
-    raw, status = await _read_source_bytes(session, url, limit=limit)
+async def _read_json(session: aiohttp.ClientSession, url: str, *, limit: int = MAX_SOURCE_BYTES,
+                     headers: dict | None = None):
+    raw, status = await _read_source_bytes(session, url, limit=limit, headers=headers)
     try:
         # json.loads accepts bytearray, avoiding an extra full-size UTF-8 copy
         # for the optional large Etherscan label file.
@@ -408,6 +499,58 @@ async def _read_json(session: aiohttp.ClientSession, url: str, *, limit: int = M
         preview = raw[:SOURCE_ERROR_BODY_CHARS].decode("utf-8", errors="replace")
         raise SourceFetchError(url, "JSON decode error", status=status,
                                body=preview, detail=detail) from None
+
+
+async def fetch_tronscan_wallets(session: aiohttp.ClientSession,
+                                 exchange_names: list[str]) -> tuple[list[dict], list[str]]:
+    """Собрать TRON-кошельки бирж по тегам TronScan (крупнейшие держатели).
+
+    Два списка — крупнейшие держатели USDT-TRC20 и крупнейшие TRX-аккаунты —
+    покрывают горячие и холодные кошельки крупных площадок: биржи доминируют
+    в обоих. Каждый список paging'уется по 50 строк; ошибка одного списка
+    не мешает второму.
+    """
+    errors: list[str] = []
+    headers = {"User-Agent": SOURCE_USER_AGENT}
+    if TRONSCAN_API_KEY:
+        headers["apikey"] = TRONSCAN_API_KEY
+    collected: dict[str, dict] = {}
+    contracts: dict[str, bool] = {}
+    listings = (
+        ("/api/token_trc20/holders", {"contract_address": TRONSCAN_USDT_CONTRACT},
+         "trc20_tokens", TRONSCAN_TOP_HOLDERS),
+        ("/api/account/list", {"sort": "-balance"}, "data", TRONSCAN_TOP_ACCOUNTS),
+    )
+    for path, base_params, key, count in listings:
+        for start in range(0, count, TRONSCAN_PAGE):
+            params = {**base_params, "start": start, "limit": TRONSCAN_PAGE}
+            url = f"{TRONSCAN_API_BASE}{path}?{urlencode(params)}"
+            try:
+                payload = await _read_json(session, url, headers=headers)
+            except SourceFetchError as exc:
+                errors.append(str(exc))
+                log.warning("[cex_updater] Ошибка TronScan (%s): %s", path, exc)
+                break
+            if not isinstance(payload, dict):
+                errors.append(f"TronScan {path}: schema mismatch")
+                break
+            contracts.update({str(k): bool(v)
+                              for k, v in (payload.get("contractMap") or {}).items()
+                              if isinstance(k, str)})
+            page_rows = payload.get(key)
+            if not isinstance(page_rows, list):
+                page_rows = []
+            for row in page_rows:
+                if isinstance(row, dict):
+                    address = str(row.get("holder_address")
+                                  or row.get("address") or "").strip()
+                    if address and address not in collected:
+                        collected[address] = row
+            if len(page_rows) < TRONSCAN_PAGE:
+                break
+            await asyncio.sleep(TRONSCAN_PAGE_PAUSE_SEC)
+    rows = parse_tronscan_rows(list(collected.values()), contracts, exchange_names)
+    return rows, errors
 
 
 async def fetch_defillama_cex_wallets(session: aiohttp.ClientSession | None = None) -> WalletFetchResult:
@@ -424,7 +567,7 @@ async def fetch_defillama_cex_wallets(session: aiohttp.ClientSession | None = No
         session = aiohttp.ClientSession(headers={"User-Agent": SOURCE_USER_AGENT})
     assert session is not None
     errors: list[str] = []
-    source_status = {"defillama": "error", "etherscan": "error"}
+    source_status = {"defillama": "error", "etherscan": "error", "tronscan": "error"}
     protocols: list[dict] = []
     defillama_rows: list[dict] = []
 
@@ -513,13 +656,37 @@ async def fetch_defillama_cex_wallets(session: aiohttp.ClientSession | None = No
             log.warning("[cex_updater] Ошибка Etherscan labels (пропущено): %s", error)
 
         etherscan_rows = _dedupe_wallet_records(etherscan_rows)
-        rows = _dedupe_wallet_records([*defillama_rows, *etherscan_rows])
-        if not protocols and source_status["defillama"] != "ok" and source_status["etherscan"] != "ok":
+
+        # TronScan — третий, изолированный источник: официальные теги TRON-
+        # адресов. Ни DeFiLlama (адреса кошельков не отдаёт), ни Etherscan
+        # labels (только Ethereum) сеть TRON не покрывают.
+        tronscan_rows: list[dict] = []
+        try:
+            names_for_tags = list(dict.fromkeys([*exchange_names, *KNOWN_CEX_NAMES]))
+            tronscan_rows, tronscan_errors = await fetch_tronscan_wallets(
+                session, names_for_tags)
+            errors.extend(tronscan_errors)
+            source_status["tronscan"] = "ok" if not tronscan_errors else "partial"
+        except Exception as exc:  # noqa: BLE001 — источник не должен ронять остальные
+            error = (exc if isinstance(exc, SourceFetchError) else
+                     SourceFetchError(TRONSCAN_API_BASE, "source error",
+                                      detail=type(exc).__name__))
+            errors.append(str(error))
+            log.warning("[cex_updater] Ошибка TronScan: %s", error)
+            source_status["tronscan"] = "error"
+        tronscan_rows = _dedupe_wallet_records(tronscan_rows)
+
+        rows = _dedupe_wallet_records([*defillama_rows, *etherscan_rows, *tronscan_rows])
+        if (not protocols and not etherscan_rows and not tronscan_rows
+                and source_status["defillama"] != "ok"
+                and source_status["etherscan"] != "ok"
+                and source_status["tronscan"] != "ok"):
             raise WalletSourceError(errors)
         return WalletFetchResult(
             rows,
             source_counts={"defillama": len(defillama_rows),
-                           "etherscan": len(etherscan_rows)},
+                           "etherscan": len(etherscan_rows),
+                           "tronscan": len(tronscan_rows)},
             source_errors=errors,
             source_status=source_status,
         )
@@ -801,6 +968,8 @@ class CEXWalletRegistry:
                     "defillama", sum(row["source"] == "defillama" for row in automatic)) or 0)
                 etherscan_count = int(raw_counts.get(
                     "etherscan", sum(row["source"] == "etherscan" for row in automatic)) or 0)
+                tronscan_count = int(raw_counts.get(
+                    "tronscan", sum(row["source"] == "tronscan" for row in automatic)) or 0)
                 warnings = list(getattr(fetched, "source_errors", []) or [])
                 source_status = dict(getattr(fetched, "source_status", {}) or {})
 
@@ -816,7 +985,7 @@ class CEXWalletRegistry:
                                 (row["chain"], address_key(row["chain"], row["address"])): row
                                 for row in self._automatic
                             }
-                            priority = {"etherscan": 1, "defillama": 2}
+                            priority = {"etherscan": 1, "defillama": 2, "tronscan": 2}
                             for row in automatic:
                                 key = (row["chain"], address_key(row["chain"], row["address"]))
                                 old = merged.get(key)
@@ -826,6 +995,8 @@ class CEXWalletRegistry:
                             self.updated_at = int(time.time())
                             if defillama_count:
                                 self.last_source = "defillama"
+                            elif tronscan_count:
+                                self.last_source = "tronscan"
                             elif etherscan_count:
                                 self.last_source = "etherscan"
                             self.last_error = ""
@@ -852,6 +1023,7 @@ class CEXWalletRegistry:
                     "added": added,
                     "defillama_count": defillama_count,
                     "etherscan_count": etherscan_count,
+                    "tronscan_count": tronscan_count,
                     "message": (f"Успешно обновлено: получено {defillama_count} "
                                 "адресов из DeFiLlama API"),
                     "warnings": warnings,

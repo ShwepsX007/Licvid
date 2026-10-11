@@ -14,9 +14,10 @@ from aiohttp import ClientSession, web
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cex_wallets_updater import (
-    CEXWalletRegistry, EVM_CHAINS, SourceFetchError, WalletFetchResult,
-    _read_json, fetch_defillama_cex_wallets, normalize_chain,
-    parse_defillama_cex_protocol, valid_address,
+    CEXWalletRegistry, EVM_CHAINS, KNOWN_CEX_NAMES, SourceFetchError,
+    WalletFetchResult, _match_exchange_name, _read_json,
+    fetch_defillama_cex_wallets, normalize_chain,
+    parse_defillama_cex_protocol, parse_tronscan_rows, valid_address,
 )
 from tron_address import tron_to_base58, tron_to_hex
 from whale_poller import (MINED_TRANSACTION_CHAINS, SPL_TOKEN_PROGRAM,
@@ -216,7 +217,9 @@ class CEXWalletRegistryTests(unittest.IsolatedAsyncioTestCase):
         try:
             with patch("cex_wallets_updater.DEFILLAMA_PROTOCOLS_API", base_url + "/protocols"), \
                  patch("cex_wallets_updater.DEFILLAMA_PROTOCOL_API_BASE", base_url + "/protocol"), \
-                 patch("cex_wallets_updater.ETHERSCAN_LABELS_URL", base_url + "/labels"):
+                 patch("cex_wallets_updater.ETHERSCAN_LABELS_URL", base_url + "/labels"), \
+                 patch("cex_wallets_updater.TRONSCAN_TOP_HOLDERS", 0), \
+                 patch("cex_wallets_updater.TRONSCAN_TOP_ACCOUNTS", 0):
                 with tempfile.TemporaryDirectory() as tmp:
                     path = Path(tmp) / "cex_wallets.json"
                     registry = CEXWalletRegistry(path)
@@ -291,7 +294,9 @@ class CEXWalletRegistryTests(unittest.IsolatedAsyncioTestCase):
         base_url = f"http://127.0.0.1:{port}"
         try:
             with patch("cex_wallets_updater.DEFILLAMA_PROTOCOLS_API", base_url + "/protocols"), \
-                 patch("cex_wallets_updater.ETHERSCAN_LABELS_URL", base_url + "/labels"):
+                 patch("cex_wallets_updater.ETHERSCAN_LABELS_URL", base_url + "/labels"), \
+                 patch("cex_wallets_updater.TRONSCAN_TOP_HOLDERS", 0), \
+                 patch("cex_wallets_updater.TRONSCAN_TOP_ACCOUNTS", 0):
                 async with ClientSession() as session:
                     rows = await fetch_defillama_cex_wallets(session)
             self.assertEqual([(row["chain"], row["address"], row["source"])
@@ -326,15 +331,142 @@ class CEXWalletRegistryTests(unittest.IsolatedAsyncioTestCase):
         base_url = f"http://127.0.0.1:{port}"
         try:
             with patch("cex_wallets_updater.DEFILLAMA_PROTOCOLS_API", base_url + "/protocols"), \
-                 patch("cex_wallets_updater.ETHERSCAN_LABELS_URL", base_url + "/labels"):
+                 patch("cex_wallets_updater.ETHERSCAN_LABELS_URL", base_url + "/labels"), \
+                 patch("cex_wallets_updater.TRONSCAN_TOP_HOLDERS", 0), \
+                 patch("cex_wallets_updater.TRONSCAN_TOP_ACCOUNTS", 0):
                 async with ClientSession() as session:
                     rows = await fetch_defillama_cex_wallets(session)
             self.assertEqual([(row["chain"], row["address"], row["name"], row["source"])
                               for row in rows], [("ETH", address, "Binance", "etherscan")])
-            self.assertEqual(rows.source_counts, {"defillama": 0, "etherscan": 1})
+            self.assertEqual(rows.source_counts, {"defillama": 0, "etherscan": 1, "tronscan": 0})
             self.assertEqual(rows.source_status["etherscan"], "ok")
             self.assertTrue(any("HTTP 500" in warning for warning in rows.source_errors))
             self.assertEqual(requests, ["/protocols"] * 3 + ["/labels"])
+        finally:
+            await runner.cleanup()
+
+    async def test_tronscan_tag_parsing(self):
+        binance_hot = tron_to_base58("41" + "a1" * 20)
+        okx_hot = tron_to_base58("41" + "b2" * 20)
+        treasury = tron_to_base58("41" + "d4" * 20)
+        contract = tron_to_base58("41" + "c3" * 20)
+        untagged = tron_to_base58("41" + "e5" * 20)
+        rows = [
+            {"holder_address": binance_hot, "addressTag": "Binance-Hot 7"},
+            {"address": okx_hot, "addressTag": "OKX Hot Wallet 8"},
+            {"holder_address": treasury, "addressTag": "Tether Treasury"},
+            {"holder_address": "T" + "9" * 33, "addressTag": "Binance-Hot 7"},
+            {"holder_address": contract, "addressTag": "Bybit 3"},
+            {"holder_address": untagged},
+            "not-a-dict",
+        ]
+        out = parse_tronscan_rows(rows, {contract: True, binance_hot: False},
+                                  ["Binance", "OKX", "Bybit"])
+        # выживают только тегированные биржами обычные аккаунты; тег остаётся меткой
+        self.assertEqual([(row["chain"], row["address"], row["name"], row["source"])
+                          for row in out],
+                         [("TRON", binance_hot, "Binance-Hot 7", "tronscan"),
+                          ("TRON", okx_hot, "OKX Hot Wallet 8", "tronscan")])
+        # переименованные биржи узнаются по алиасу тега
+        self.assertEqual(_match_exchange_name("Huobi 5", ["Binance", "HTX"]), "HTX")
+        # эмитенты стейблкоинов и прочие не-биржи отбрасываются
+        self.assertEqual(_match_exchange_name("Tether Treasury", list(KNOWN_CEX_NAMES)), "")
+        self.assertEqual(_match_exchange_name("Binance US 3", ["Kraken", "Binance", "Binance US"]),
+                         "Binance US")
+
+    async def test_tronscan_source_feeds_the_registry(self):
+        binance_hot = tron_to_base58("41" + "a1" * 20)
+        okx_hot = tron_to_base58("41" + "b2" * 20)
+        binance_cold = tron_to_base58("41" + "c3" * 20)
+        huobi = tron_to_base58("41" + "d4" * 20)
+        treasury = tron_to_base58("41" + "e5" * 20)
+        contract = tron_to_base58("41" + "f6" * 20)
+        untagged = tron_to_base58("41" + "11" * 20)
+        requests = []
+
+        async def protocols(request):
+            requests.append(request.path)
+            return web.json_response([])
+
+        async def labels(request):
+            requests.append(request.path)
+            return web.json_response({})
+
+        async def holders(request):
+            requests.append(request.path.split("?")[0])
+            pages = {
+                0: [{"holder_address": binance_hot, "addressTag": "Binance-Hot 7"},
+                    {"holder_address": treasury, "addressTag": "Tether Treasury"},
+                    {"holder_address": "T" + "9" * 33, "addressTag": "Binance-Hot 7"}],
+                3: [{"holder_address": okx_hot, "addressTag": "OKX Hot Wallet 8"},
+                    {"holder_address": contract, "addressTag": "Bybit 3"},
+                    {"holder_address": untagged}],
+            }
+            return web.json_response({
+                "trc20_tokens": pages.get(int(request.query.get("start", 0)), []),
+                "contractMap": {contract: True, binance_hot: False, treasury: False},
+            })
+
+        async def accounts(request):
+            requests.append(request.path.split("?")[0])
+            return web.json_response({
+                "data": [
+                    {"address": binance_cold, "addressTag": "Binance-Cold 2"},
+                    {"address": huobi, "addressTag": "Huobi 5"},
+                    {"address": binance_hot, "addressTag": "Binance-Hot 7"},
+                ],
+                "contractMap": {binance_cold: False, huobi: False},
+            })
+
+        app = web.Application()
+        app.router.add_get("/protocols", protocols)
+        app.router.add_get("/labels", labels)
+        app.router.add_get("/api/token_trc20/holders", holders)
+        app.router.add_get("/api/account/list", accounts)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        base_url = f"http://127.0.0.1:{port}"
+        try:
+            with patch("cex_wallets_updater.DEFILLAMA_PROTOCOLS_API", base_url + "/protocols"), \
+                 patch("cex_wallets_updater.ETHERSCAN_LABELS_URL", base_url + "/labels"), \
+                 patch("cex_wallets_updater.TRONSCAN_API_BASE", base_url), \
+                 patch("cex_wallets_updater.TRONSCAN_PAGE", 3), \
+                 patch("cex_wallets_updater.TRONSCAN_PAGE_PAUSE_SEC", 0.0), \
+                 patch("cex_wallets_updater.TRONSCAN_TOP_HOLDERS", 6), \
+                 patch("cex_wallets_updater.TRONSCAN_TOP_ACCOUNTS", 3):
+                async with ClientSession() as session:
+                    rows = await fetch_defillama_cex_wallets(session)
+                self.assertEqual(rows.source_counts,
+                                 {"defillama": 0, "etherscan": 0, "tronscan": 4})
+                self.assertEqual(rows.source_status["tronscan"], "ok")
+                tron_rows = sorted((row["address"], row["name"]) for row in rows
+                                   if row["chain"] == "TRON")
+                self.assertEqual(tron_rows, sorted([
+                    (binance_hot, "Binance-Hot 7"), (okx_hot, "OKX Hot Wallet 8"),
+                    (binance_cold, "Binance-Cold 2"), (huobi, "Huobi 5")]))
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / "cex_wallets.json"
+                    registry = CEXWalletRegistry(path)
+                    async with ClientSession() as session:
+                        result = await registry.refresh(session)
+                    self.assertEqual(result["tronscan_count"], 4)
+                    records = registry.records(chain="TRON")
+                    self.assertEqual({row["address"] for row in records},
+                                     {binance_hot, okx_hot, binance_cold, huobi})
+                    self.assertTrue(all(row["source"] == "tronscan" for row in records))
+                    # события TRON получают имя биржи из тега проводника
+                    self.assertEqual(registry.runtime_wallets()["TRON"].get(binance_hot),
+                                     "Binance-Hot 7")
+                    # перезагрузка с диска сохраняет tronscan-строки
+                    self.assertEqual(len(CEXWalletRegistry(path).records(chain="TRON")), 4)
+                # каждый список пагинируется до конца: holders — 2 страницы за проход
+                self.assertEqual(sum(1 for r in requests
+                                     if r.startswith("/api/token_trc20/holders")), 4)
+                self.assertEqual(sum(1 for r in requests
+                                     if r.startswith("/api/account/list")), 2)
         finally:
             await runner.cleanup()
 

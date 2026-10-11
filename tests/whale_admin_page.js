@@ -42,6 +42,8 @@ let config = {mode: "realtime", poll_interval_sec: 120, interval_sec: 120,
 let walletRows = [
     {id: "aaaaaaaaaaaaaaaa", chain: "ETH", address: "0x" + "1".repeat(40), name: "Manual CEX", source: "manual"},
     {id: "bbbbbbbbbbbbbbbb", chain: "BASE", address: "0x" + "2".repeat(40), name: "Auto CEX", source: "defillama"},
+    {id: "hhhhhhhhhhhhhhhh", chain: "TRON", address: "TWd4WrZ9wn84f5x1hZhL4DHvk738ns5jwb",
+        name: "Binance-Hot 7", source: "tronscan"},
 ];
 let tronKeys = [];
 // как реальный /api/admin/screener/config: keys = public-поля + runtime-состояние
@@ -92,6 +94,8 @@ win.LiqScopeI18n = {t: (key, vars = {}) => {
         "adm.cex_wallet_updated": "Wallet updated", "adm.cex_wallet_added": "Wallet added",
         "adm.cex_wallet_refreshed": "DeFiLlama API addresses {count}",
         "adm.cex_wallet_refreshed_etherscan": "Etherscan labels {count}",
+        "adm.cex_wallet_refreshed_tronscan": "Tronscan tags {count}",
+        "adm.cex_wallet_tronscan": "Tronscan tags",
         "adm.trongrid_saved": "TronGrid key saved",
         "adm.etherscan_no_keys": "No Etherscan keys",
         "adm.etherscan_daily_done": "daily limit", "adm.etherscan_cooldown": "cooldown",
@@ -237,7 +241,7 @@ win.fetch = async (url, options = {}) => {
             reason: "HTTP error; URL=https://api.llama.fi/protocols; HTTP 404; body=Not Found",
         })};
         return response({ok: true, after: walletRows.length,
-            defillama_count: 3, etherscan_count: 2,
+            defillama_count: 3, etherscan_count: 2, tronscan_count: 5,
             warnings: ["secondary labels were skipped"]});
     }
     if (parsed.pathname.startsWith("/api/admin/screener/cex-wallets/") && method === "PUT") {
@@ -295,7 +299,11 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     assert(networkText.includes("HTTP 429: rate limit exceeded"));
     assert(networkText.includes("JSON-RPC code=429: Too many requests"));
     assert(!networkText.includes("All keys exhausted"));
-    assert.equal(win.document.querySelectorAll("#whale-admin-wallet-rows tr").length, 2);
+    assert.equal(win.document.querySelectorAll("#whale-admin-wallet-rows tr").length, 3);
+    const tronWalletRow = Array.from(win.document.querySelectorAll("#whale-admin-wallet-rows tr"))
+        .find(row => row.textContent.includes("Binance-Hot 7"));
+    assert(tronWalletRow && tronWalletRow.textContent.includes("Tronscan tags"),
+        "TRON-строка помечена источником Tronscan");
 
     const firstRow = win.document.querySelector("#whale-admin-wallet-rows tr");
     firstRow.querySelector("button").click();
@@ -328,6 +336,7 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     await sleep(40);
     assert(walletStatus.textContent.includes("DeFiLlama API addresses 3"));
     assert(walletStatus.textContent.includes("Etherscan labels 2"));
+    assert(walletStatus.textContent.includes("Tronscan tags 5"));
     assert(walletStatus.title.includes("secondary labels were skipped"));
     win.document.getElementById("trongrid-admin-key").value = "tron-secret-value";
     win.document.getElementById("trongrid-admin-add-key").click();
@@ -418,7 +427,7 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     assert.deepEqual(walletRows.map(row => row.name), ["Kept by hand"],
         "автострока удалена, ручная осталась");
     assert(win.document.getElementById("whale-admin-wallet-status").textContent
-        .includes("removed 2 of 1"), "пробега по автострокам: убраны обе, ручная осталась");
+        .includes("removed 3 of 1"), "пробега по автострокам: убраны все три, ручная осталась");
 
     win.document.getElementById("whale-admin-mode").value = "economy";
     win.document.getElementById("whale-admin-interval").value = "30";

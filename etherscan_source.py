@@ -49,6 +49,11 @@ RATE_PARK_SEC = 2.0          # 429 / "Max rate limit reached"
 DAILY_PARK_MARGIN_SEC = 60.0  # дневной лимит → до конца UTC-суток (+минута)
 AUTH_PARK_SEC = 900.0        # "Invalid API Key"
 NETWORK_RETRY_SEC = 60.0     # пауза сети после сетевой ошибки
+#: короткий кулдаун (per-sec rate limit) готовы пересидеть внутри вызова,
+#: а не ронять проход: одиночный 429 у единственного ключа — не беда сети
+RATE_WAIT_MAX_SEC = 15.0
+#: потолок, до которого разрешено растягивать интервал ради дневной квоты
+MAX_STRETCH_INTERVAL_SEC = 1800.0
 
 
 def _env_float(name: str, default: float) -> float:
@@ -110,9 +115,12 @@ class EtherscanCollector:
         # key_id → {"cooldown_until": float, "day": "YYYY-MM-DD", "calls": int}
         self.key_runtime: dict[str, dict] = {}
         self.cursors: dict[str, int] = {}
+        self._calls_day = _utc_day()     # день счётчика вызовов по сетям
+        self._pass_calls = 0             # вызовы текущего прохода (для pacing'а)
+        self.effective_interval_sec = float(self.poll_interval_sec)
         self.network_status: dict[str, dict] = {
             chain: {"status": "waiting", "last_success": 0.0, "last_attempt": 0.0,
-                    "last_event": 0.0, "error": "", "wallets": 0}
+                    "last_event": 0.0, "error": "", "wallets": 0, "calls": 0}
             for chain in CHAIN_IDS}
         self._load()
 
@@ -180,69 +188,124 @@ class EtherscanCollector:
         row = self._key_state(key_id)
         row["cooldown_until"] = max(row["cooldown_until"], time.time() + max(0.1, seconds))
 
+    def _tick_day(self) -> None:
+        """Сброс суточных счётчиков вызовов по сетям на новом UTC-дне."""
+        today = _utc_day()
+        if self._calls_day != today:
+            self._calls_day = today
+            for row in self.network_status.values():
+                row["calls"] = 0
+
+    def _pool_wait(self) -> tuple[float | None, bool]:
+        """(секунды до ближайшего готового ключа, все ли на дневном лимите).
+
+        wait=None — ключей нет вовсе; 0.0 — какой-то ключ уже готов.
+        """
+        waits: list[float] = []
+        all_daily = True
+        for key_id, _secret in self._pool():
+            row = self._key_state(key_id)
+            if row["calls"] < self.daily_calls:
+                all_daily = False
+            waits.append(max(0.0, row["cooldown_until"] - time.time()))
+        if not waits:
+            return None, False
+        return min(waits), all_daily
+
+    def _exhausted_message(self) -> str:
+        """Честная причина, почему вызов не состоялся (для статуса сети)."""
+        wait, all_daily = self._pool_wait()
+        if all_daily or (wait is not None and wait > MAX_STRETCH_INTERVAL_SEC):
+            return "daily call limit reached; resumes at 00:00 UTC"
+        if wait is None:
+            return "no ready key after rotation"
+        return f"all keys cooling down; next ready in {int(wait) + 1}s"
+
     # ---------------- HTTP -------------------------------------------------
 
     async def _api(self, session: aiohttp.ClientSession, chain: str,
                    module: str, action: str, **params) -> list[dict]:
-        """Один вызов Etherscan V2 с ротацией ключей; отдаёт список result."""
-        for _attempt in range(max(1, len(self._pool()))):
-            picked = self._pick_key()
-            if picked is None:
-                raise EtherscanError("all keys parked or daily limit reached")
-            key_id, secret = picked
-            async with self._call_lock:
-                wait = self._last_call_at + self.min_interval_sec - time.monotonic()
-                if wait > 0:
-                    await asyncio.sleep(wait)
-                self._last_call_at = time.monotonic()
-            query = {"chainid": CHAIN_IDS[chain], "module": module,
-                     "action": action, "apikey": secret, **params}
-            try:
-                async with session.get(ETHERSCAN_API, params=query,
-                                       timeout=aiohttp.ClientTimeout(total=25)) as resp:
-                    text = await resp.text()
-                    if resp.status == 429:
-                        self._park(key_id, RATE_PARK_SEC)
-                        continue
-                    if resp.status in (401, 403):
-                        self._park(key_id, AUTH_PARK_SEC)
-                        continue
-                    if resp.status != 200:
-                        raise EtherscanError(f"HTTP {resp.status}")
-                    payload = json.loads(text)
-            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
-                raise EtherscanError(f"{type(exc).__name__}: {exc}") from None
-            self._key_state(key_id)["calls"] += 1
-            status = str(payload.get("status", ""))
-            message = str(payload.get("message") or "")
-            result = payload.get("result")
-            # status "1": result бывает списком (account), объектом (block)
-            # или скаляром — отдаём как есть, тип разбирает вызывающий
-            if status == "1" and result is not None:
-                return result
-            # status "0" — нормальный пустой ответ ИЛИ ошибка ключа.
-            # Etherscan часто кладёт текст ошибки в result, а message = NOTOK,
-            # поэтому каждый паттерн ищем в обоих местах.
-            blob = (message + " " + (result if isinstance(result, str) else "")).lower()
-            if ("no transactions" in blob or "no records" in blob
-                    or "no matching" in blob or "no data" in blob):
+        """Один вызов Etherscan V2 с ротацией ключей; отдаёт result как есть.
+
+        Короткий кулдаун (per-sec rate limit) пересиживаем внутри вызова:
+        у единственного ключа одиночный 429 не должен ронять проход сети.
+        """
+        waits_left = 2
+        while True:
+            made_call = False
+            for _attempt in range(max(1, len(self._pool()))):
+                picked = self._pick_key()
+                if picked is None:
+                    break
+                key_id, secret = picked
+                made_call = True
+                async with self._call_lock:
+                    wait = self._last_call_at + self.min_interval_sec - time.monotonic()
+                    if wait > 0:
+                        await asyncio.sleep(wait)
+                    self._last_call_at = time.monotonic()
+                query = {"chainid": CHAIN_IDS[chain], "module": module,
+                         "action": action, "apikey": secret, **params}
+                try:
+                    async with session.get(ETHERSCAN_API, params=query,
+                                           timeout=aiohttp.ClientTimeout(total=25)) as resp:
+                        text = await resp.text()
+                        if resp.status == 429:
+                            self._park(key_id, RATE_PARK_SEC)
+                            continue
+                        if resp.status in (401, 403):
+                            self._park(key_id, AUTH_PARK_SEC)
+                            continue
+                        if resp.status != 200:
+                            raise EtherscanError(f"HTTP {resp.status}")
+                        payload = json.loads(text)
+                except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+                    raise EtherscanError(f"{type(exc).__name__}: {exc}") from None
+                self._key_state(key_id)["calls"] += 1
+                self._tick_day()
+                row = self.network_status.get(chain)
+                if isinstance(row, dict):
+                    row["calls"] = int(row.get("calls") or 0) + 1
+                self._pass_calls += 1
+                status = str(payload.get("status", ""))
+                message = str(payload.get("message") or "")
+                result = payload.get("result")
+                # status "1": result бывает списком (account), объектом (block)
+                # или скаляром — отдаём как есть, тип разбирает вызывающий
+                if status == "1" and result is not None:
+                    return result
+                # status "0" — нормальный пустой ответ ИЛИ ошибка ключа.
+                # Etherscan часто кладёт текст ошибки в result, а message = NOTOK,
+                # поэтому каждый паттерн ищем в обоих местах.
+                blob = (message + " " + (result if isinstance(result, str) else "")).lower()
+                if ("no transactions" in blob or "no records" in blob
+                        or "no matching" in blob or "no data" in blob):
+                    return []
+                if "rate limit" in blob and "per day" not in blob:
+                    self._park(key_id, RATE_PARK_SEC)
+                    continue
+                if ("daily" in blob or "day limit" in blob or "max calls" in blob
+                        or "per day" in blob):
+                    # дневная квота ключа кончилась — до конца UTC-суток
+                    self._park(key_id, max(60.0, _utc_midnight_after(time.time())
+                                           - time.time() + DAILY_PARK_MARGIN_SEC))
+                    continue
+                if "invalid api key" in blob or "missing api" in blob:
+                    self._park(key_id, AUTH_PARK_SEC)
+                    continue
+                if isinstance(result, str) and result:
+                    raise EtherscanError(result[:200])
                 return []
-            if "rate limit" in blob and "per day" not in blob:
-                self._park(key_id, RATE_PARK_SEC)
+            # все ключи только что ушли в кулдаун (или уже были там)
+            wait, all_daily = self._pool_wait()
+            if (not all_daily and wait is not None and wait <= RATE_WAIT_MAX_SEC
+                    and waits_left > 0):
+                waits_left -= 1
+                await asyncio.sleep(wait + 0.05)
                 continue
-            if ("daily" in blob or "day limit" in blob or "max calls" in blob
-                    or "per day" in blob):
-                # дневная квота ключа кончилась — до конца UTC-суток
-                self._park(key_id, max(60.0, _utc_midnight_after(time.time())
-                                       - time.time() + DAILY_PARK_MARGIN_SEC))
-                continue
-            if "invalid api key" in blob or "missing api" in blob:
-                self._park(key_id, AUTH_PARK_SEC)
-                continue
-            if isinstance(result, str) and result:
-                raise EtherscanError(result[:200])
-            return []
-        raise EtherscanError("no ready key after rotation")
+            if not made_call and not self._pool():
+                raise EtherscanError("all keys parked or daily limit reached")
+            raise EtherscanError(self._exhausted_message())
 
     # ---------------- обработка строк --------------------------------------
 
@@ -390,6 +453,25 @@ class EtherscanCollector:
         except Exception:  # noqa: BLE001
             return True
 
+    def _budget_interval(self, pass_calls: int) -> float:
+        """Интервал сна после прохода, чтобы дневная квота дожила до 00:00 UTC.
+
+        Проход с ``pass_calls`` вызовами повторяется не чаще, чем позволяет
+        остаток квоты всех ключей: иначе биржевые кошельки с пагинацией
+        сжигают дневной лимит за часы, и сети молчат до полуночи.
+        """
+        interval = self.poll_interval_sec
+        pool = self._pool()
+        if not pool or pass_calls <= 0:
+            return interval
+        remaining = sum(max(0, self.daily_calls - self._key_state(key_id)["calls"])
+                        for key_id, _secret in pool)
+        seconds_left = _utc_midnight_after(time.time()) - time.time()
+        if remaining <= 0 or seconds_left <= 0:
+            return interval   # квота кончилась — _api честно скажет «до 00:00 UTC»
+        needed = pass_calls * seconds_left / remaining
+        return max(interval, min(needed, MAX_STRETCH_INTERVAL_SEC))
+
     async def poll_chain(self, session: aiohttp.ClientSession, chain: str) -> None:
         row = self.network_status[chain]
         row["last_attempt"] = time.time()
@@ -435,6 +517,7 @@ class EtherscanCollector:
                                 error="Alchemy keys configured; Etherscan is standby")
                         await self._sleep_or_wakeup(self.poll_interval_sec)
                         continue
+                    self._pass_calls = 0
                     for chain in CHAIN_IDS:
                         if not self.network_enabled(chain):
                             self.network_status[chain].update(
@@ -453,7 +536,9 @@ class EtherscanCollector:
                                 status="error", error=str(exc)[:200])
                             log.warning("[etherscan] %s: %s: %s",
                                         chain, type(exc).__name__, exc)
-                    await self._sleep_or_wakeup(self.poll_interval_sec)
+                    # pacing: остаток дневной квоты решает, как долго спать
+                    self.effective_interval_sec = self._budget_interval(self._pass_calls)
+                    await self._sleep_or_wakeup(self.effective_interval_sec)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # noqa: BLE001 — коллектор не роняет сайт
@@ -471,6 +556,7 @@ class EtherscanCollector:
 
     def status(self) -> dict:
         pool = self._pool()
+        self._tick_day()
         mode = ("disabled" if not self.enabled else
                 "paused_no_keys" if not pool else
                 "paused_alchemy" if self.is_primary_active() else "primary")
@@ -502,6 +588,7 @@ class EtherscanCollector:
             "available": True, "provider": "etherscan", "mode": mode,
             "enabled": bool(self.enabled),
             "poll_interval_sec": int(self.poll_interval_sec),
+            "effective_interval_sec": int(self.effective_interval_sec),
             "daily_calls_limit": self.daily_calls,
             "calls_today": calls_today,
             "keys_configured": len(pool),

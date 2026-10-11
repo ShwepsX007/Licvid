@@ -13,7 +13,10 @@ const hash = n => "0x" + String(n).repeat(64).slice(0, 64);
 const chains = ["ETH", "BNB", "POLYGON", "ARBITRUM", "BASE", "SOLANA", "TRON", "HYPERLIQUID"];
 const networks = {};
 chains.forEach((chain, index) => {
-    networks[chain] = {status: index === 0 || index === 7 ? "online" : "waiting",
+    networks[chain] = {status: index === 0 || index === 4 || index === 7 ? "online" : "waiting",
+        // BASE собирает Etherscan (Alchemy на паузе): живая сеть с пометкой источника
+        provider: chain === "BASE" ? "etherscan" : "alchemy",
+        calls_today: chain === "BASE" ? 12 : 0,
         warning_status: index === 0 ? "rate_limited" : "",
         retry_in_sec: index === 0 ? 60 : 0,
         http_status: index === 0 ? 429 : null,
@@ -86,6 +89,7 @@ const i18n = {lang: () => "en", t: (key, vars = {}) => {
         "screener.network_hyperliquid": "Hyperliquid Core",
         "screener.exchange_all": "All exchanges", "screener.exchange_unknown": "Unlabeled exchange",
         "screener.status_live": "Dashboard is updating", "screener.status_online": "Online",
+        "screener.via_etherscan": "via Etherscan",
         "screener.status_waiting": "Waiting", "screener.status_error": "Error",
         "screener.status_rate_limited": "🟡 Rate limit (429) — waiting {seconds}s",
         "screener.status_auth_error": "Authentication error",
@@ -142,6 +146,11 @@ let statsDom = null;
     assert(ethNetworkCard.querySelector(".network-state.status--rate_limited"),
         "an online network with a rate-limit warning uses the yellow status style");
     assert(ethNetworkCard.title.includes("HTTP 429: provider throttled"));
+    // сеть, которую собирает Etherscan, тоже «онлайн» — с пометкой источника
+    const baseNetworkCard = win.document.querySelector('#network-cards [data-network="BASE"]');
+    assert(baseNetworkCard.querySelector(".network-state").textContent.includes(
+        "Online · via Etherscan"), "живая Etherscan-сеть подписана источником: " +
+        baseNetworkCard.querySelector(".network-state").textContent);
     assert(win.document.querySelector('[data-network="SOLANA"]').title.includes(
         "No indexed Solana CEX wallets"));
     assert.equal(win.document.querySelectorAll("#flow-chart .chart-bar").length, 2);

@@ -53,7 +53,10 @@ let etherscanKeys = [
     {id: "env", hint: "Ethe••••ENV9", source: "environment",
      state: "daily_done", calls_today: 95000, cooldown_sec: 3600},
 ];
+// pacing: интервал может растягиваться ради дневной квоты — по умолчанию базовый
+let esEffectiveInterval = 180;
 let etherscanState = () => ({available: true, mode: "primary", poll_interval_sec: 180,
+    effective_interval_sec: esEffectiveInterval,
     daily_calls_limit: 95000, calls_today: etherscanKeys[0].calls_today,
     keys: etherscanKeys});
 let refreshFail = true;
@@ -95,6 +98,9 @@ win.LiqScopeI18n = {t: (key, vars = {}) => {
         "adm.etherscan_ready": "ready", "adm.etherscan_calls": "{used} of {limit} calls",
         "adm.etherscan_calls_total": "today {used} of {limit} calls",
         "adm.etherscan_poll_every": "pass every {seconds} s",
+        "adm.etherscan_calls_today": "calls today: {amount}",
+        "adm.etherscan_paced": "interval stretched so the daily quota lasts until 00:00 UTC",
+        "adm.alchemy_cu_paused": "Alchemy is not active — no CU is being spent",
         "adm.etherscan_state_primary": "Etherscan is the active EVM source",
         "adm.etherscan_state_paused_alchemy": "Standby: Alchemy keys are working",
         "adm.etherscan_state_no_keys": "No keys — EVM networks are not collected",
@@ -161,9 +167,13 @@ win.fetch = async (url, options = {}) => {
         return response({config, etherscan: etherscanState(), sources: sourceState});
     if (parsed.pathname === "/api/admin/screener/sources" && method === "POST") {
         sourceState[body.source] = {...sourceState[body.source], enabled: Boolean(body.enabled)};
+        // как _screener_sources() на сервере: active у каждого источника свой
+        sourceState.alchemy.active = Boolean(sourceState.alchemy.enabled && sourceState.alchemy.keys);
+        sourceState.etherscan.active = Boolean(sourceState.etherscan.enabled
+            && sourceState.etherscan.keys && !sourceState.alchemy.active);
         sourceState = {...sourceState, active:
-            sourceState.alchemy.enabled && sourceState.alchemy.keys ? "alchemy"
-            : sourceState.etherscan.enabled && sourceState.etherscan.keys ? "etherscan"
+            sourceState.alchemy.active ? "alchemy"
+            : sourceState.etherscan.active ? "etherscan"
             : "none"};
         return response({ok: true, sources: sourceState});
     }
@@ -183,9 +193,13 @@ win.fetch = async (url, options = {}) => {
         networks: ["ETH", "BASE", "SOLANA", "ARBITRUM", "TRON", "HYPERLIQUID"].map(chain =>
             ({chain, status: chain === "ETH" ? "online" : chain === "BASE" ? "rate_limited"
                 : chain === "SOLANA" ? "online" : "paused",
+              // Etherscan — активный источник: карточка ETH от него, с дневным
+              // счётчиком вызовов вместо чужого CU Alchemy
+              provider: chain === "ETH" ? "etherscan" : "alchemy",
+              calls_today: chain === "ETH" ? 12 : 0,
               warning_status: chain === "ETH" ? "rate_limited" : "",
               retry_in_sec: chain === "ETH" || chain === "BASE" ? 60 : 0,
-              http_status: chain === "ETH" ? 429 : chain === "BASE" ? 200 : null,
+              http_status: chain === "ETH" ? null : chain === "BASE" ? 200 : null,
               rpc_code: chain === "BASE" ? 429 : null,
               key_active: true,
               enabled: Boolean(networkEnabled[chain]),
@@ -264,8 +278,16 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     assert.equal(win.document.getElementById("whale-admin-mode").value, "realtime");
     assert.equal(win.document.getElementById("whale-admin-interval").value, "120");
     assert(/7[,\.]?500/.test(win.document.getElementById("whale-admin-cu-meta").textContent));
+    // Alchemy активен — пометки «CU не тратится» быть не должно
+    assert(!win.document.getElementById("whale-admin-cu-meta").textContent
+        .includes("no CU is being spent"), "CU-метка паузы только при неактивном Alchemy");
     const networkText = win.document.getElementById("whale-admin-chains").textContent;
     assert(networkText.includes("Solana") && networkText.includes("TRON"));
+    // карточка ETH от Etherscan: дневные вызовы, а не чужой CU Alchemy
+    assert(networkText.includes("calls today: 12"),
+        "счётчик вызовов Etherscan виден на карточке сети: " + networkText);
+    assert(!networkText.includes("4,200 CU"),
+        "CU Alchemy не приписывается карточке Etherscan");
     assert(networkText.includes("Online (waiting for CEX filters)"));
     assert(networkText.includes("🟡 Rate limit (429) — waiting 60s"));
     assert(win.document.querySelector(".whale-admin-network.status--rate_limited"),
@@ -340,6 +362,8 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     assert(offRow.textContent.includes("paid CU"), offRow.textContent);
     assert(offRow.textContent.includes("Arbitrum One"), offRow.textContent);
     assert(tronRow.textContent.includes("free source"), tronRow.textContent);
+    assert(ethRow.textContent.includes("calls today: 12"),
+        "строка тумблера ETH показывает вызовы Etherscan, а не CU: " + ethRow.textContent);
     assert.equal(win.document.getElementById("whale-admin-wallet-retention").value, "7");
     const baseToggle = offRow.querySelector("input");
     baseToggle.checked = true;
@@ -404,6 +428,8 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
         call.method === "POST" && call.body.mode === "economy" && call.body.poll_interval_sec === 30));
 
     /* --- Тумблеры источников: пауза без удаления ключей ------------------- */
+    // заодно: pacing растянул интервал Etherscan — страница перерисуется с ним
+    esEffectiveInterval = 600;
     const sourceRows = win.document.querySelectorAll("#whale-admin-sources .whale-admin-switch-row");
     assert.equal(sourceRows.length, 2, "оба источника показаны тумблерами");
     const sourceText = win.document.getElementById("whale-admin-sources").textContent;
@@ -423,6 +449,11 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     assert(win.document.getElementById("whale-admin-source-status").textContent
         .includes("Etherscan is collecting"),
         "после выключения Alchemy активным назван Etherscan");
+    // CU Alchemy заморожен и помечен: расход остановлен, а не «растёт»
+    assert(win.document.getElementById("whale-admin-cu-meta").textContent
+        .includes("no CU is being spent"),
+        "после выключения Alchemy CU-карточка помечена как замороженная: " +
+        win.document.getElementById("whale-admin-cu-meta").textContent);
 
     /* --- Etherscan: ключи по очереди, статус ключей и источника ------------- */
     const esRows = win.document.querySelectorAll("#etherscan-admin-keys .whale-admin-key-row");
@@ -439,7 +470,10 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     assert(esStateText.includes("active EVM source"),
         "источник Etherscan — активный: " + esStateText);
     assert(esStateText.includes("today 1,200 of 95,000 calls"));
-    assert(esStateText.includes("pass every 180 s"));
+    assert(esStateText.includes("pass every 600 s"),
+        "фактический (растянутый) интервал показан: " + esStateText);
+    assert(esStateText.includes("interval stretched"),
+        "причина растяжения интервала объяснена: " + esStateText);
     // env-ключ нельзя удалить — только добавленный админом
     assert(!esRows[1].querySelector("button.whale-admin-key-delete"),
         "ключ из окружения без кнопки удаления");

@@ -6750,24 +6750,16 @@ async def api_admin_alchemy_stats(request: Request):
         return JSONResponse({"error": "admin"}, status_code=403)
     poll = whale_poller.status() if whale_poller else {}
     # Etherscan подменяет карточки EVM-сетей, когда он активный источник
-    # (ключей Alchemy нет): иначе админ видел бы «нет ключа» у работающих сетей
+    # (ключей Alchemy нет или источник выключен): иначе админ видел бы
+    # «нет ключа» у работающих сетей
     es_status = _etherscan_status()
-    es_primary = es_status.get("mode") == "primary"
-    es_networks = es_status.get("networks") or {}
     networks = []
     for chain in ("ETH", "BNB", "POLYGON", "ARBITRUM", "BASE"):
         network = _mark_network_enabled(_poll_network_health(
             poll, chain, setup_error=alchemy_vault_error if not whale_poller else ""), chain)
         network["provider"] = "alchemy"
-        if es_primary and chain in es_networks:
-            row = es_networks[chain]
-            network.update({
-                "provider": "etherscan",
-                "status": str(row.get("status") or "waiting"),
-                "last_success": float(row.get("last_success") or 0.0),
-                "last_attempt": float(row.get("last_attempt") or 0.0),
-                "error": str(row.get("error") or ""),
-            })
+        network["calls_today"] = 0
+        _apply_etherscan_network(network, chain)
         networks.append(network)
     native = whale_screener.native_status() if whale_screener else {
         "network": "HYPERLIQUID", "provider": "native_api", "enabled": False,
@@ -7091,6 +7083,44 @@ def _etherscan_status() -> dict:
             "keys_configured": 0, "calls_today": 0, "networks": {}}
 
 
+def _apply_etherscan_network(network: dict, chain: str) -> dict:
+    """Подмена карточки EVM-сети на Etherscan, когда он активный источник.
+
+    Alchemy выключен тумблером или без ключей — страница скринера всё равно
+    должна видеть живую сеть, пока резервный источник реально собирает
+    события; иначе «недоступно» при текущих данных. Свежий успех/событие
+    доказывает живость: ошибку провайдера показываем предупреждением.
+    """
+    if chain not in ("ETH", "BNB", "POLYGON", "ARBITRUM", "BASE"):
+        return network
+    es_status = _etherscan_status()
+    if es_status.get("mode") != "primary":
+        return network
+    row = (es_status.get("networks") or {}).get(chain)
+    if not isinstance(row, dict):
+        return network
+    status = str(row.get("status") or "waiting")
+    # предупреждения прошлым провайдером к новой карточке не относятся
+    network["warning_status"] = ""
+    last_success = float(row.get("last_success") or 0.0)
+    last_event = float(row.get("last_event") or 0.0)
+    fresh = max(last_success, last_event)
+    if status in ("error", "rate_limited") and fresh and time.time() - fresh <= 300:
+        network["warning_status"] = status
+        status = "online"
+    network.update({
+        "provider": "etherscan",
+        "status": status,
+        "error": str(row.get("error") or ""),
+        "last_success": last_success,
+        "last_attempt": float(row.get("last_attempt") or 0.0),
+        "retry_in_sec": 0,
+        "http_status": None, "rpc_code": None,
+        "calls_today": int(row.get("calls") or 0),
+    })
+    return network
+
+
 @app.get("/api/admin/etherscan/key")
 async def api_admin_etherscan_key(request: Request):
     user = await asyncio.to_thread(current_user, request)
@@ -7266,8 +7296,13 @@ async def api_screener_whales(request: Request,
                               min_usd: float = Query(0, ge=0),
                               chain: str = Query("ALL", pattern="^(ALL|GENERAL|EVM|ETH|BNB|POLYGON|ARBITRUM|BASE|SOLANA|TRON|HYPERLIQUID)$"),
                               limit: int = Query(100, ge=1, le=100)):
-    alchemy_enabled = bool(alchemy_key_store and alchemy_key_store.keys()) and any(
-        _chain_enabled(chain) for chain in ("ETH", "BNB", "POLYGON", "ARBITRUM", "BASE"))
+    # «Alchemy активен» = тумблер включён И ключи на месте: выключенный
+    # тумблер при живых ключах паузит коллектор, и лента не должна
+    # называть такой источник работающим
+    alchemy_enabled = (alchemy_source_enabled
+                       and bool(alchemy_key_store and alchemy_key_store.keys()) and any(
+                           _chain_enabled(chain)
+                           for chain in ("ETH", "BNB", "POLYGON", "ARBITRUM", "BASE")))
     # EVM-данные есть и от Etherscan: когда Alchemy не активен (выключен
     # тумблером или нет ключей), лента не должна сообщать «скринер выключен»,
     # пока запасной источник собирает события
@@ -7290,7 +7325,8 @@ async def api_screener_whales(request: Request,
             "enabled_networks": [row["id"] for row in _network_switch()["networks"]
                                  if row["enabled"]],
             "available": bool(whale_screener and
-                               (alchemy_enabled or native_enabled or solana_enabled or tron_enabled)),
+                               (alchemy_enabled or etherscan_evm or native_enabled
+                                or solana_enabled or tron_enabled)),
             "unavailable_reason": alchemy_vault_error if not whale_screener else "",
             "alchemy_unavailable_reason": alchemy_vault_error,
             "native_supported": ["HYPERLIQUID", "SOLANA", "TRON"],
@@ -7368,8 +7404,10 @@ def _screener_network_status() -> dict:
     poll = whale_poller.status() if whale_poller else {}
     result = {}
     for chain in ("ETH", "BNB", "POLYGON", "ARBITRUM", "BASE"):
-        result[chain] = _mark_network_enabled(_poll_network_health(
-            poll, chain, setup_error=alchemy_vault_error if not whale_poller else ""), chain)
+        result[chain] = _apply_etherscan_network(_mark_network_enabled(
+            _poll_network_health(
+                poll, chain, setup_error=alchemy_vault_error if not whale_poller else ""),
+            chain), chain)
     native = whale_screener.native_status() if whale_screener else {
         "network": "HYPERLIQUID", "enabled": False, "connected": False,
         "state": "unavailable", "error": ""}
@@ -7409,6 +7447,8 @@ async def api_screener_stats(request: Request):
     networks = {
         chain: {"status": health[chain]["status"],
                 "enabled": bool(health[chain].get("enabled", True)),
+                "provider": str(health[chain].get("provider") or "alchemy"),
+                "calls_today": int(health[chain].get("calls_today") or 0),
                 "last_success": health[chain]["last_success"],
                 "last_attempt": health[chain]["last_attempt"],
                 "error": health[chain]["error"],

@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -49,12 +50,26 @@ class FakeCollector:
         self.wakeup = _Ev()
 
     def status(self):
+        now = time.time()
         return {"available": True, "provider": "etherscan", "mode": "primary",
-                "poll_interval_sec": 180, "daily_calls_limit": 95000,
+                "poll_interval_sec": 180, "effective_interval_sec": 180,
+                "daily_calls_limit": 95000,
                 "calls_today": 12, "keys_configured": 1,
                 "keys": [{"id": "abc", "hint": "Ethe••••CCC1", "state": "active",
                           "calls_today": 12, "cooldown_sec": 0}],
-                "networks": {"ETH": {"status": "online"}}}
+                "networks": {
+                    "ETH": {"status": "online", "last_success": now,
+                            "last_attempt": now, "last_event": now, "calls": 12},
+                    "BNB": {"status": "error", "error": "daily call limit reached;"
+                            " resumes at 00:00 UTC", "last_success": now - 60,
+                            "last_attempt": now - 60, "last_event": now - 30, "calls": 9},
+                    "POLYGON": {"status": "online", "last_success": now,
+                                "last_attempt": now, "last_event": 0, "calls": 7},
+                    "ARBITRUM": {"status": "waiting", "last_success": 0,
+                                 "last_attempt": now, "last_event": 0, "calls": 4},
+                    "BASE": {"status": "online", "last_success": now,
+                             "last_attempt": now, "last_event": 0, "calls": 6},
+                }}
 
 
 class EtherscanAdminRoutesTest(unittest.TestCase):
@@ -172,6 +187,58 @@ class EtherscanAdminRoutesTest(unittest.TestCase):
         self.assertIn("etherscan", cfg)
         self.assertEqual(cfg["etherscan"]["mode"], "primary")
         self.assertEqual(cfg["etherscan"]["networks"]["ETH"]["status"], "online")
+
+    def test_admin_stats_substitutes_etherscan_rows(self):
+        """Карточки EVM-сетей в админке — от Etherscan, пока он активный.
+
+        Alchemy пуст (ключей нет) — без подмены админ видел бы «нужен ключ»
+        у реально работающих сетей; CU Alchemy приписывать Etherscan нельзя,
+        у него свой счётчик вызовов за день."""
+        server.etherscan_collector = FakeCollector()
+        body = self.admin.get("/api/admin/alchemy/stats").json()
+        rows = {row["chain"]: row for row in body["networks"]}
+        self.assertEqual(rows["ETH"]["provider"], "etherscan")
+        self.assertEqual(rows["ETH"]["status"], "online")
+        self.assertEqual(rows["ETH"]["calls_today"], 12)
+        # ошибка Etherscan при свежих данных — не «мёртвая» сеть
+        self.assertEqual(rows["BNB"]["status"], "online")
+        self.assertEqual(rows["BNB"]["warning_status"], "error")
+        self.assertIn("daily", rows["BNB"]["error"])
+        # сети вне EVM подмене не подлежат
+        self.assertNotEqual(rows.get("SOLANA", {}).get("provider"), "etherscan")
+
+    def test_screener_stats_online_when_etherscan_primary(self):
+        """Фронт: EVM-сети «онлайн» с пометкой источника, когда Alchemy не активен."""
+        server.etherscan_collector = FakeCollector()
+        body = self.plain.get("/api/screener/stats").json()
+        eth = body["networks"]["ETH"]
+        self.assertEqual(eth["status"], "online")
+        self.assertEqual(eth["provider"], "etherscan")
+        self.assertEqual(eth["calls_today"], 12)
+        bnb = body["networks"]["BNB"]
+        self.assertEqual(bnb["status"], "online")
+        self.assertEqual(bnb["warning_status"], "error")
+        self.assertGreaterEqual(body["active_networks"], 1)
+
+    def test_whales_feed_counts_etherscan_when_alchemy_toggled_off(self):
+        """Лента: ключи Alchemy есть, но тумблер выключен — источники по факту.
+
+        Наличие ключа не значит «собирает»: пауза тумблером должна отдавать
+        Etherscan как активный EVM-источник, а Solana — выключенной."""
+        saved = server.alchemy_key_store
+        server.alchemy_key_store = AlchemyKeyStore(
+            "test-secret-not-the-published-default",
+            path=Path(tempfile.mkdtemp(prefix="liq-alch-feed-")) / "keys.enc")
+        server.alchemy_key_store.add("fake-alchemy-key-for-feed-test")
+        self.addCleanup(setattr, server, "alchemy_key_store", saved)
+        server.etherscan_key_store.add(KEY_B)
+        server.alchemy_source_enabled = False     # _restore вернёт True
+        body = self.plain.get("/api/screener/whales").json()
+        self.assertFalse(body["alchemy_enabled"])
+        self.assertTrue(body["etherscan_enabled"])
+        self.assertTrue(body["enabled"])
+        self.assertFalse(body["solana_enabled"])
+        self.assertFalse(body["available"])       # whale_screener в тестах None
 
     def test_sources_in_config(self):
         cfg = self.admin.get("/api/admin/screener/config").json()

@@ -133,12 +133,15 @@
         target.textContent = parts.join(" · ");
     }
 
-    function renderCu(cu) {
+    function renderCu(cu, alchemyActive) {
         const used = Number(cu.used || 0), limit = Number(cu.limit || 0);
         el("whale-admin-cu-label").textContent = number(used) + " / " + number(limit) + " CU";
+        // выключенный/безключевой Alchemy не тратит CU: цифра — замороженный
+        // итог месяца, и об этом надо сказать прямо, а не пугать ростом
         el("whale-admin-cu-meta").textContent = (cu.month || t("adm.alchemy_current_month")) +
             " · " + usagePercent(used, limit).toFixed(1) + "% · " +
-            t("adm.alchemy_monthly_estimate", {amount: number(cu.estimated_monthly || 0)});
+            t("adm.alchemy_monthly_estimate", {amount: number(cu.estimated_monthly || 0)}) +
+            (alchemyActive ? "" : " · " + t("adm.alchemy_cu_paused"));
         el("whale-admin-cu-progress").style.width = usagePercent(used, limit) + "%";
     }
     function renderTronKeys(keys) {
@@ -289,9 +292,13 @@
             : mode === "paused_alchemy" ? t("adm.etherscan_state_paused_alchemy")
             : mode === "paused_no_keys" ? t("adm.etherscan_state_no_keys")
             : t("adm.etherscan_unavailable");
+        // интервал мог растянуться ради дневной квоты — показываем фактический
+        const interval = Number(state.effective_interval_sec || state.poll_interval_sec || 0);
         target.textContent = label + " · " + t("adm.etherscan_calls_total", {
             used: number(state.calls_today || 0), limit: number(state.daily_calls_limit || 0)})
-            + " · " + t("adm.etherscan_poll_every", {seconds: number(state.poll_interval_sec || 0)});
+            + " · " + t("adm.etherscan_poll_every", {seconds: number(interval)})
+            + (interval > Number(state.poll_interval_sec || 0)
+                ? " · " + t("adm.etherscan_paced") : "");
     }
     function renderWallets(rows, summary, cleanup) {
         const body = el("whale-admin-wallet-rows");
@@ -426,7 +433,13 @@
                 ? t("adm.networks_switch_free")
                 : t("adm.networks_switch_paid");
             const used = Number((health[row.id] || {}).cu_used || 0);
-            main.append(make("small", "", details + (used ? " · " + t("adm.alchemy_network_cu", {amount: number(used)}) : "")));
+            const healthRow = health[row.id] || {};
+            // пока EVM-данные собирает Etherscan, CU Alchemy не растёт:
+            // показываем вызовы дня, а не замороженную цифру прошлых трат
+            const usage = healthRow.provider === "etherscan"
+                ? t("adm.etherscan_calls_today", {amount: number(healthRow.calls_today || 0)})
+                : (used ? t("adm.alchemy_network_cu", {amount: number(used)}) : "");
+            main.append(make("small", "", details + (usage ? " · " + usage : "")));
             const label = make("label", "whale-admin-switch");
             const input = document.createElement("input");
             input.type = "checkbox";
@@ -468,6 +481,9 @@
         target.replaceChildren();
         (networks || []).forEach(network => {
             const status = network.status || "paused";
+            // Etherscan подменяет карточку, когда он активный источник: CU
+            // Alchemy приписывать его ошибкам нельзя — у Etherscan свой счётчик
+            const viaEtherscan = network.provider === "etherscan";
             // сеть выключена тумблером — это важнее любой прошлой беды в статусе:
             // иначе админ видит «429» у сети, которую сам же и заглушил
             const disabled = network.enabled === false;
@@ -517,7 +533,8 @@
             if (network.http_status && network.http_status !== 200 && !rateLimited) {
                 parts.push("HTTP " + network.http_status);
             }
-            if (network.cu_used) parts.push(t("adm.alchemy_network_cu", {amount: number(network.cu_used)}));
+            if (network.cu_used && !viaEtherscan) parts.push(t("adm.alchemy_network_cu", {amount: number(network.cu_used)}));
+            if (viaEtherscan) parts.push(t("adm.etherscan_calls_today", {amount: number(network.calls_today || 0)}));
             const details = make("div", "whale-admin-network-details", parts.join(" · "));
             details.title = parts.join(" · ");
             card.append(details);
@@ -560,7 +577,9 @@
             } else {
                 status.textContent = configData.vault_error || t("adm.alchemy_unavailable");
             }
-            renderCu(cu);
+            // CU Alchemy показываем с пометкой «на паузе», если он не активен:
+            // замороженная цифра месяца иначе выглядит как текущий расход
+            renderCu(cu, Boolean(((configData.sources || {}).alchemy || {}).active));
             renderKeys(keys, cu);
             renderKeyPool(statsData.key_pool || {});
             renderNetworks(statsData.networks || []);

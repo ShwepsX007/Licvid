@@ -183,7 +183,13 @@
             const errorDetail = String(summary.error || "").trim();
             if (errorDetail) diagnosticParts.push(errorDetail);
             const diagnostic = diagnosticParts.join(" · ");
+            // пока EVM-данные собирает Etherscan (Alchemy на паузе/без ключей),
+            // сеть живая — подписываем источник, чтобы «онлайн» не выглядел
+            // чудом при выключенной Alchemy
+            const viaLabel = summary.provider === "etherscan"
+                ? t("screener.via_etherscan") : "";
             const fullStatus = statusLabel +
+                (viaLabel ? " · " + viaLabel : "") +
                 (warningLabel && summary.status === "online" ? " · " + warningLabel : "");
             const visualStatus = warningStatus === "rate_limited" && summary.status === "online"
                 ? "rate_limited" : (summary.status || "waiting");

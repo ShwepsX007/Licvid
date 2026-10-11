@@ -233,6 +233,81 @@ class KeyRotationTests(unittest.TestCase):
         remaining = coll.key_runtime["k1"]["cooldown_until"] - time.time()
         self.assertLess(remaining, 30)
 
+    def test_transient_rate_limit_waits_out_with_single_key(self):
+        """Одиночный 429 у единственного ключа пересижен, проход не падает."""
+        store = FakeStore(("k1", "KEY1"))
+        coll = make_collector(FakeScreener({}), store)
+        real_park = es.RATE_PARK_SEC
+        es.RATE_PARK_SEC = 0.05          # куцый кулдаун, чтобы тест не спал 2 с
+        self.addCleanup(setattr, es, "RATE_PARK_SEC", real_park)
+        hits = {"n": 0}
+
+        def rate_once(_query):
+            hits["n"] += 1
+            return (429, "too many") if hits["n"] == 1 else ok([{"blockNumber": "7"}])
+
+        session = FakeSession([(lambda q: True, rate_once)])
+        result = asyncio.run(coll._api(session, "ETH", "block", "getblocknobytime"))
+        self.assertEqual(result, [{"blockNumber": "7"}])
+        self.assertEqual(len(session.calls), 2)   # повтор после короткой паузы
+
+    def test_pool_exhausted_daily_limit_message(self):
+        """Когда все ключи выбрали дневную квоту — честное сообщение, не «rotation»."""
+        store = FakeStore(("k1", "KEY1"))
+        coll = make_collector(FakeScreener({}), store, daily_calls=1)
+        session = FakeSession([(lambda q: True, ok([]))])
+        asyncio.run(coll._api(session, "ETH", "account", "tokentx", address=W1))
+        with self.assertRaises(es.EtherscanError) as ctx:
+            asyncio.run(coll._api(session, "ETH", "account", "tokentx", address=W1))
+        self.assertIn("daily", str(ctx.exception).lower())
+
+    def test_pool_exhausted_long_cooldown_reports_wait(self):
+        """Долгий кулдаун (неверный ключ) — ошибка называет время ожидания."""
+        store = FakeStore(("k1", "KEY1"))
+        coll = make_collector(FakeScreener({}), store)
+        coll._park("k1", es.AUTH_PARK_SEC)
+        with self.assertRaises(es.EtherscanError) as ctx:
+            asyncio.run(coll._api(FakeSession([]), "ETH", "account", "tokentx",
+                                  address=W1))
+        self.assertIn("cooling down", str(ctx.exception))
+
+    def test_chain_calls_counted_and_reset_on_new_day(self):
+        """Счётчик вызовов по сети растёт с каждым запросом и обнуляется в UTC-день."""
+        screener = FakeScreener({"ETH": {W1: "Binance 14"}})
+        coll = make_collector(screener, FakeStore(("k1", "KEY1")),
+                              native_enabled=False)
+        session = FakeSession([
+            (lambda q: q.get("module") == "block", ok([{"blockNumber": "90"}])),
+            (lambda q: True, ok([])),
+        ])
+        asyncio.run(coll._poll_wallet(session, "ETH", W1,
+                                      screener.wallets["ETH"], {}))
+        # якорь цепи + один запрос токенов кошелька
+        self.assertEqual(coll.network_status["ETH"]["calls"], 2)
+        self.assertEqual(coll._pass_calls, 2)
+        coll.status()                       # статус не теряет счётчик
+        self.assertEqual(coll.status()["networks"]["ETH"]["calls"], 2)
+        coll._calls_day = "2000-01-01"      # принудительная смена суток
+        self.assertEqual(coll.status()["networks"]["ETH"]["calls"], 0)
+
+    def test_budget_interval_stretches_to_survive_the_day(self):
+        """Остаток квоты растягивает интервал, но не дальше потолка."""
+        store = FakeStore(("k1", "KEY1"), ("k2", "KEY2"))
+        coll = make_collector(FakeScreener({}), store,
+                              poll_interval_sec=180, daily_calls=95000)
+        # квоты вдоволь — базовый интервал
+        self.assertEqual(coll._budget_interval(85), 180.0)
+        # почти всё потрачено, до полуночи далеко: нужен длинный сон, но ≤ 30 мин
+        coll._key_state("k1")["calls"] = 94999
+        coll._key_state("k2")["calls"] = 94999
+        self.assertEqual(coll._budget_interval(85), es.MAX_STRETCH_INTERVAL_SEC)
+        # квота кончилась — интервал не тянем, _api сам скажет «до 00:00 UTC»
+        coll._key_state("k1")["calls"] = 95000
+        coll._key_state("k2")["calls"] = 95000
+        self.assertEqual(coll._budget_interval(85), 180.0)
+        # проход без вызовов (всё в кулдауне) pacing не запускает
+        self.assertEqual(coll._budget_interval(0), 180.0)
+
     def test_disabled_source_mode(self):
         """Тумблер источника: mode=disabled, цикл не опрашивает."""
         store = FakeStore(("k1", "KEY1"))

@@ -179,6 +179,11 @@ except Exception:  # noqa: BLE001 — isolate optional Alchemy imports
     class KeyStoreError(Exception):
         pass
     WHALE_POLLER_AVAILABLE = False
+try:  # Etherscan API V2 — резервный источник EVM-сетей скринера китов
+    from etherscan_source import EtherscanCollector, EtherscanError
+except Exception:  # noqa: BLE001 — опциональный источник не роняет сайт
+    EtherscanCollector = None
+    EtherscanError = Exception
 from timeframes import parse_tf
 from book_feed import (chat_text as book_chat_text, chat_meta as book_chat_meta)
 from book_feed import (BookFeed, format_wall_html, normalize_book_cfg,
@@ -1794,6 +1799,9 @@ cex_wallet_registry = None
 screener_networks = None
 alchemy_vault_error = ""
 trongrid_vault_error = ""
+etherscan_key_store: Optional[AlchemyKeyStore] = None
+etherscan_collector = None
+etherscan_vault_error = ""
 # 📖 Стакан: опрос L2 и детектор стен (заполняется в lifespan; в тестах — подмена).
 book_feed_inst: Optional[BookFeed] = None
 _pending: List[dict] = []
@@ -5044,9 +5052,12 @@ async def lifespan(app: FastAPI):
     ]
     global whale_screener, whale_poller, alchemy_key_store, alchemy_vault_error
     global trongrid_key_store, trongrid_vault_error, cex_wallet_registry
+    global etherscan_key_store, etherscan_collector, etherscan_vault_error
     global screener_networks
     whale_screener = whale_poller = alchemy_key_store = trongrid_key_store = None
     alchemy_vault_error = trongrid_vault_error = ""
+    etherscan_key_store = etherscan_collector = None
+    etherscan_vault_error = ""
     if NetworkSwitch is not None:
         try:
             screener_networks = NetworkSwitch(SCREENER_NETWORKS_FILE)
@@ -5119,6 +5130,27 @@ async def lifespan(app: FastAPI):
                 env_key=os.getenv("TRONGRID_API_KEY", ""))
         except KeyStoreError as exc:
             trongrid_vault_error = str(exc)
+        try:
+            # Etherscan V2: тот же формат хранилища, отдельный файл; один ключ
+            # покрывает все 5 EVM-сетей. Коллектор — резервный источник: пока
+            # есть ключи Alchemy, он молчит и не тратит дневную квоту.
+            etherscan_key_store = AlchemyKeyStore(
+                SECRET, path=Path(os.path.join(HERE, "data", "etherscan_keys.enc")),
+                env_key=os.getenv("ETHERSCAN_API_KEY", ""))
+        except KeyStoreError as exc:
+            etherscan_vault_error = str(exc)
+        if whale_screener and etherscan_key_store and EtherscanCollector is not None:
+            try:
+                etherscan_collector = EtherscanCollector(
+                    whale_screener, etherscan_key_store,
+                    networks=screener_networks,
+                    is_primary_active=lambda: bool(
+                        alchemy_key_store and alchemy_key_store.keys()))
+            except Exception:  # noqa: BLE001 — опциональный источник не мешает сайту
+                etherscan_collector = None
+        if etherscan_collector:
+            tasks.append(asyncio.create_task(
+                etherscan_collector.run(), name="whale-etherscan"))
         if alchemy_key_store:
             try:
                 whale_poller = WhalePoller(
@@ -6438,6 +6470,7 @@ async def api_admin_screener_config(request: Request):
             "config": whale_poller.status() if whale_poller else None,
             "keys": whale_poller.key_status() if whale_poller else [],
             "vault_error": alchemy_vault_error,
+            "etherscan": _etherscan_status(),
             "all_mode_available": False,
             "reason": "Полный обход быстрых сетей превышает бюджет Free 30 млн CU/мес"}
 
@@ -6658,11 +6691,25 @@ async def api_admin_alchemy_stats(request: Request):
     if not user or not user.get("is_admin"):
         return JSONResponse({"error": "admin"}, status_code=403)
     poll = whale_poller.status() if whale_poller else {}
+    # Etherscan подменяет карточки EVM-сетей, когда он активный источник
+    # (ключей Alchemy нет): иначе админ видел бы «нет ключа» у работающих сетей
+    es_status = _etherscan_status()
+    es_primary = es_status.get("mode") == "primary"
+    es_networks = es_status.get("networks") or {}
     networks = []
     for chain in ("ETH", "BNB", "POLYGON", "ARBITRUM", "BASE"):
         network = _mark_network_enabled(_poll_network_health(
             poll, chain, setup_error=alchemy_vault_error if not whale_poller else ""), chain)
         network["provider"] = "alchemy"
+        if es_primary and chain in es_networks:
+            row = es_networks[chain]
+            network.update({
+                "provider": "etherscan",
+                "status": str(row.get("status") or "waiting"),
+                "last_success": float(row.get("last_success") or 0.0),
+                "last_attempt": float(row.get("last_attempt") or 0.0),
+                "error": str(row.get("error") or ""),
+            })
         networks.append(network)
     native = whale_screener.native_status() if whale_screener else {
         "network": "HYPERLIQUID", "provider": "native_api", "enabled": False,
@@ -6715,6 +6762,7 @@ async def api_admin_alchemy_stats(request: Request):
             "trongrid": {"available": bool(trongrid_key_store and not trongrid_vault_error),
                          "vault_error": trongrid_vault_error,
                          "keys": (trongrid_key_store.public() if trongrid_key_store else [])},
+            "etherscan": {k: v for k, v in es_status.items() if k != "keys"},
             "phase": poll.get("phase") or "unavailable"}
 
 
@@ -6967,6 +7015,75 @@ async def api_admin_delete_trongrid_key(request: Request, identifier: str):
         return JSONResponse({"error": "vault_unavailable"}, status_code=503)
     if whale_poller:
         whale_poller.wakeup.set()
+    if not deleted:
+        return JSONResponse({"error": "unknown_key"}, status_code=404)
+    return {"ok": True}
+
+
+def _etherscan_status() -> dict:
+    """Снимок Etherscan-коллектора для админки; безопасен без хранилища."""
+    if etherscan_collector:
+        try:
+            return etherscan_collector.status()
+        except Exception:  # noqa: BLE001 — карточка не должна падать
+            pass
+    return {"available": bool(etherscan_key_store and not etherscan_vault_error),
+            "provider": "etherscan", "mode": "unavailable",
+            "vault_error": etherscan_vault_error, "keys": [],
+            "keys_configured": 0, "calls_today": 0, "networks": {}}
+
+
+@app.get("/api/admin/etherscan/key")
+async def api_admin_etherscan_key(request: Request):
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    try:
+        keys = etherscan_key_store.public() if etherscan_key_store else []
+    except KeyStoreError:
+        keys = []
+    payload = _etherscan_status()
+    return {"ok": True, "keys": keys,
+            "available": bool(etherscan_key_store and not etherscan_vault_error),
+            "vault_error": etherscan_vault_error,
+            "status": {k: v for k, v in payload.items() if k != "keys"}}
+
+
+@app.post("/api/admin/etherscan/key")
+async def api_admin_set_etherscan_key(request: Request,
+                                      body: dict = Body(default_factory=dict)):
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    if not etherscan_key_store or etherscan_vault_error:
+        return JSONResponse({"error": "vault_unavailable"}, status_code=503)
+    value = body.get("key") or body.get("api_key")
+    if not isinstance(value, str) or len(value) > 500:
+        return JSONResponse({"error": "invalid_key"}, status_code=422)
+    try:
+        public = etherscan_key_store.add(value)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=422)
+    except KeyStoreError:
+        return JSONResponse({"error": "vault_unavailable"}, status_code=503)
+    if etherscan_collector:
+        etherscan_collector.wakeup.set()
+    return {"ok": True, "key": public}
+
+
+@app.delete("/api/admin/etherscan/key/{identifier}")
+async def api_admin_delete_etherscan_key(request: Request, identifier: str):
+    user = await asyncio.to_thread(current_user, request)
+    if not user or not user.get("is_admin"):
+        return JSONResponse({"error": "admin"}, status_code=403)
+    if not etherscan_key_store or not re.fullmatch(r"[0-9a-f]{16}", identifier):
+        return JSONResponse({"error": "unknown_key"}, status_code=404)
+    try:
+        deleted = etherscan_key_store.remove(identifier)
+    except KeyStoreError:
+        return JSONResponse({"error": "vault_unavailable"}, status_code=503)
+    if etherscan_collector:
+        etherscan_collector.wakeup.set()
     if not deleted:
         return JSONResponse({"error": "unknown_key"}, status_code=404)
     return {"ok": True}

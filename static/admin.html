@@ -338,6 +338,16 @@
         <span id="trongrid-admin-key-status" class="meta" role="status"></span>
     </div>
     <div id="trongrid-admin-keys" class="whale-admin-keys" aria-live="polite"></div>
+    <h4 class="whale-admin-subtitle" data-i18n="adm.etherscan_title">Etherscan API keys · EVM standby source</h4>
+    <p class="meta" data-i18n="adm.etherscan_note">Free tier: 3 calls/sec, 100k calls/day, one key covers ETH, BNB, Polygon, Arbitrum and Base. Keys rotate in turn; a key that hits its daily limit steps aside until midnight UTC. While Alchemy keys are configured, Etherscan stays on standby and spends no quota.</p>
+    <div class="row-actions" style="flex-wrap:wrap;gap:10px">
+        <label><span data-i18n="adm.etherscan_key_label">Etherscan API key</span>
+            <input class="search" type="password" autocomplete="new-password" id="etherscan-admin-key" maxlength="500"></label>
+        <button class="btn btn-primary" type="button" id="etherscan-admin-add-key" data-i18n="adm.etherscan_add">Add key</button>
+        <span id="etherscan-admin-key-status" class="meta" role="status"></span>
+    </div>
+    <div id="etherscan-admin-keys" class="whale-admin-keys" aria-live="polite"></div>
+    <p class="meta" id="etherscan-admin-state" role="status"></p>
     <h4 class="whale-admin-subtitle" data-i18n="adm.alchemy_networks_title">Network health</h4>
     <div id="whale-admin-chains" class="whale-admin-networks" aria-live="polite"></div>
     <h4 class="whale-admin-subtitle" data-i18n="adm.networks_switch_title">Collected networks</h4>
@@ -814,7 +824,7 @@
         <div id="ai-prompt-blocks"><p class="meta">загружаю промты…</p></div>
     </div>
 </main>
-<script src="/static/i18n.pages.js?v=multichain4"></script>
+<script src="/static/i18n.pages.js?v=etherscan1"></script>
 <script src="/static/i18n.js?v=quota2"></script>
 <script src="/static/world-map.js?v=geo1"></script>
 <script src="/static/geo_map.js?v=geo2"></script>
@@ -825,7 +835,7 @@
 <script src="/static/archive_admin.js?v=arcdel1"></script>
 <script src="/static/consent.js?v=consent1"></script>
 <script src="/static/system_settings.js?v=sysset2"></script>
-<script src="/static/whale_admin.js?v=multichain4"></script>
+<script src="/static/whale_admin.js?v=etherscan1"></script>
 <script src="/static/source_diagnostics.js?v=diag1"></script>
 <link rel="stylesheet" href="/static/brand.css?v=rebrand1">
 </body>

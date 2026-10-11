@@ -173,6 +173,68 @@
             target.append(row);
         });
     }
+    function renderEtherscanKeys(keys, state) {
+        const target = el("etherscan-admin-keys");
+        if (!target) return;
+        target.replaceChildren();
+        const rows = Array.isArray(keys) ? keys : [];
+        if (!rows.length) {
+            target.append(make("p", "meta", t("adm.etherscan_no_keys")));
+            return;
+        }
+        // сводка по ключам коллектора: вызовы за UTC-день и кулдауны
+        const runtime = {};
+        (state && Array.isArray(state.keys) ? state.keys : []).forEach(k => {
+            runtime[k.id] = k;
+        });
+        rows.forEach(key => {
+            const live = runtime[key.id] || {};
+            const row = make("div", "whale-admin-key-row");
+            const main = make("div", "whale-admin-key-main");
+            main.append(make("strong", "", key.hint || "••••"));
+            const stateName = live.state === "daily_done" ? t("adm.etherscan_daily_done")
+                : live.state === "cooldown" ? t("adm.etherscan_cooldown")
+                : t("adm.etherscan_ready");
+            const calls = t("adm.etherscan_calls", {
+                used: number(live.calls_today || 0), limit: number(state && state.daily_calls_limit || 0)});
+            main.append(make("small", "", (key.source === "environment"
+                ? t("adm.alchemy_env_key") : t("adm.alchemy_admin_key")) + " · " + stateName
+                + " · " + calls));
+            row.append(main);
+            if (key.source === "admin") {
+                const del = make("button", "btn btn-ghost btn-compact whale-admin-key-delete", t("adm.alchemy_delete"));
+                del.type = "button";
+                del.addEventListener("click", async () => {
+                    if (!window.confirm(t("adm.alchemy_confirm_delete", {key: key.hint}))) return;
+                    try {
+                        await request("/api/admin/etherscan/key/" + encodeURIComponent(key.id), {method: "DELETE"});
+                        el("etherscan-admin-key-status").textContent = t("adm.etherscan_deleted");
+                        await load();
+                    } catch (_) {
+                        el("etherscan-admin-key-status").textContent = t("adm.etherscan_error");
+                    }
+                });
+                row.append(del);
+            } else row.append(make("span", "meta", t("adm.alchemy_env_managed")));
+            target.append(row);
+        });
+    }
+    function renderEtherscanState(state) {
+        const target = el("etherscan-admin-state");
+        if (!target) return;
+        if (!state || !state.available) {
+            target.textContent = (state && state.vault_error) || t("adm.etherscan_unavailable");
+            return;
+        }
+        const mode = state.mode || "paused_no_keys";
+        const label = mode === "primary" ? t("adm.etherscan_state_primary")
+            : mode === "paused_alchemy" ? t("adm.etherscan_state_paused_alchemy")
+            : mode === "paused_no_keys" ? t("adm.etherscan_state_no_keys")
+            : t("adm.etherscan_unavailable");
+        target.textContent = label + " · " + t("adm.etherscan_calls_total", {
+            used: number(state.calls_today || 0), limit: number(state.daily_calls_limit || 0)})
+            + " · " + t("adm.etherscan_poll_every", {seconds: number(state.poll_interval_sec || 0)});
+    }
     function renderWallets(rows, summary, cleanup) {
         const body = el("whale-admin-wallet-rows");
         body.replaceChildren();
@@ -441,6 +503,17 @@
             renderNetworks(statsData.networks || []);
             renderNetworkSwitches(statsData.network_switch || {}, statsData.networks || []);
             renderTronKeys(tronData.keys || []);
+            // Etherscan-блок есть на странице админки; в старых тестовых DOM
+            // его может не быть — карточка не должна из-за этого падать
+            const esState = configData.etherscan || {};
+            renderEtherscanKeys(esState.keys || [], esState);
+            renderEtherscanState(esState);
+            const esKeyInput = el("etherscan-admin-key");
+            if (esKeyInput) {
+                esKeyInput.disabled = Boolean(esState.vault_error || !esState.available);
+                el("etherscan-admin-add-key").disabled =
+                    Boolean(esState.vault_error || !esState.available);
+            }
             if (keyData.vault_error) keyStatus.textContent = keyData.vault_error;
             if (tronData.vault_error) el("trongrid-admin-key-status").textContent = tronData.vault_error;
             await loadWallets();
@@ -498,6 +571,29 @@
             await load();
         } catch (_) {
             target.textContent = t("adm.trongrid_error");
+        }
+    });
+    const esAddBtn = el("etherscan-admin-add-key");
+    if (!esAddBtn) return;   // страница без блока Etherscan (старые тестовые DOM)
+    esAddBtn.addEventListener("click", async () => {
+        const input = el("etherscan-admin-key");
+        const value = (input.value || "").trim();
+        const target = el("etherscan-admin-key-status");
+        if (!value) { target.textContent = t("adm.etherscan_enter_key"); return; }
+        target.textContent = t("adm.alchemy_saving");
+        try {
+            await request("/api/admin/etherscan/key", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({key: value}),
+            });
+            input.value = "";
+            target.textContent = t("adm.etherscan_saved");
+            await load();
+        } catch (error) {
+            const code = String(error && error.code || "");
+            target.textContent = code === "vault_unavailable"
+                ? t("adm.etherscan_vault_error")
+                : (code && code !== "http_error" ? code + " — " : "") + t("adm.etherscan_error");
         }
     });
     el("whale-admin-save").addEventListener("click", async () => {

@@ -5903,13 +5903,19 @@
             const col = whaleArrowColor(up, dir);
             const key = "whale_" + g.time + "_" + (up ? "u" : "d");
             const label = fmtCompact(g.total);
+            // 🐋-значок у стрелки: тип события виден и без окна-подсказки;
+            // эмодзи рисуем отдельно — цвет суммы остаётся по объёму
+            ctx.font = "10.5px system-ui, -apple-system, Segoe UI, sans-serif";
+            const icon = "🐋";
+            const iconW = ctx.measureText(icon).width;
+            ctx.font = "bold 10.5px system-ui, -apple-system, Segoe UI, sans-serif";
             const tw = ctx.measureText(label).width;
             const active = shapeIsActive("whale", key);
             whaleHits.push({
                 kind: "whale", key: key, x: x, y: y,
-                r: Math.max(13, tw / 2 + 10),
+                r: Math.max(13, (iconW + 4 + tw) / 2 + 10),
                 time: g.time, total: g.total, n: g.n, rows: g.rows,
-                up: up, c: c, label: label,
+                up: up, c: c, label: label, icon: icon, iconW: iconW,
             });
 
             // тёмная подложка — стрелка читается на свече любого цвета
@@ -5926,14 +5932,18 @@
             ctx.strokeStyle = col;
             ctx.stroke();
 
-            // сумма: бледная → янтарная, у крупных — подсветка
+            // 🐋 у стрелки + сумма: бледная → янтарная, у крупных — подсветка
+            ctx.font = "10.5px system-ui, -apple-system, Segoe UI, sans-serif";
+            ctx.fillStyle = "#e8edf7";
+            ctx.fillText(icon, x + 11, y + 0.5);
             const st = whaleNumberStyle(g.total);
+            ctx.font = "bold 10.5px system-ui, -apple-system, Segoe UI, sans-serif";
             if (st.glow || active) {
                 ctx.shadowColor = active ? "#ffd166" : "rgba(255,190,80,0.9)";
                 ctx.shadowBlur = active ? 12 : 4 + 8 * st.t;
             }
             ctx.fillStyle = active ? "#ffe9b0" : st.color;
-            ctx.fillText(label, x + 11, y + 0.5);
+            ctx.fillText(label, x + 11 + iconW + 3, y + 0.5);
             ctx.shadowBlur = 0;
         }
         ctx.restore();
@@ -5976,7 +5986,8 @@
                 feed: (rows) => (rows || []).forEach(addWhale),
                 count: () => whaleRows.size,
                 hits: () => whaleHits.map((h) => ({ key: h.key, x: h.x, y: h.y,
-                    total: h.total, n: h.n, up: h.up, time: h.time })),
+                    total: h.total, n: h.n, up: h.up, time: h.time,
+                    label: h.label, icon: h.icon })),
             };
         } catch (e) { /* ignore */ }
     }

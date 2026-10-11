@@ -261,6 +261,9 @@ function whaleRow(n, dir, usd, ts, side) {
     check("ключи вида whale_<время>_<направление>",
           hits.every((h) => /^whale_\d+_[ud]$/.test(h.key)),
           hits.map((h) => h.key).join(","));
+    check("у стрелки есть значок кита 🐋 и сумма",
+          hits.every((h) => h.icon === "🐋" && /\d/.test(h.label)),
+          JSON.stringify(hits.map((h) => h.icon + h.label)));
 
     /* ---------- часть 3: ховер открывает окно-пояснение ------------------ */
     const modal = doc.getElementById("detail-modal");
@@ -297,6 +300,9 @@ function whaleRow(n, dir, usd, ts, side) {
   check("сумма окрашивается по объёму (бледная → янтарная)",
         src.includes("whaleNumberStyle") &&
         src.includes("190 + (255 - 190) * t"));
+  check("значок кита 🐋 рисуется возле стрелки",
+        src.includes('const icon = "🐋";') &&
+        src.includes("ctx.fillText(icon, x + 11, y + 0.5);"));
   check("слой вызывается из drawClusters",
         src.includes("if (state.whaleLayerEnabled) drawWhaleMarks(ctx);"));
 

@@ -13,6 +13,9 @@ const html = `<!doctype html><body>
   <div id="whale-admin-cu-progress"></div>
   <input id="trongrid-admin-key"><button id="trongrid-admin-add-key"></button>
   <span id="trongrid-admin-key-status"></span><div id="trongrid-admin-keys"></div>
+  <input id="etherscan-admin-key"><button id="etherscan-admin-add-key"></button>
+  <span id="etherscan-admin-key-status"></span><div id="etherscan-admin-keys"></div>
+  <p id="etherscan-admin-state"></p>
   <div id="whale-admin-chains"></div>
   <select id="whale-admin-mode"><option value="realtime">Realtime</option><option value="economy">Economy</option></select>
   <select id="whale-admin-interval"><option value="30">30 sec</option><option value="60">60 sec</option><option value="120">2 min</option><option value="300">5 min</option></select>
@@ -40,6 +43,16 @@ let walletRows = [
     {id: "bbbbbbbbbbbbbbbb", chain: "BASE", address: "0x" + "2".repeat(40), name: "Auto CEX", source: "defillama"},
 ];
 let tronKeys = [];
+// как реальный /api/admin/screener/config: keys = public-поля + runtime-состояние
+let etherscanKeys = [
+    {id: "eeee1111eeee1111", hint: "Ethe••••AAA1", source: "admin",
+     state: "active", calls_today: 1200, cooldown_sec: 0},
+    {id: "env", hint: "Ethe••••ENV9", source: "environment",
+     state: "daily_done", calls_today: 95000, cooldown_sec: 3600},
+];
+let etherscanState = () => ({available: true, mode: "primary", poll_interval_sec: 180,
+    daily_calls_limit: 95000, calls_today: etherscanKeys[0].calls_today,
+    keys: etherscanKeys});
 let refreshFail = true;
 let walletRetentionDays = 7;
 let walletPruneRemoved = 5;
@@ -74,6 +87,19 @@ win.LiqScopeI18n = {t: (key, vars = {}) => {
         "adm.cex_wallet_refreshed": "DeFiLlama API addresses {count}",
         "adm.cex_wallet_refreshed_etherscan": "Etherscan labels {count}",
         "adm.trongrid_saved": "TronGrid key saved",
+        "adm.etherscan_no_keys": "No Etherscan keys",
+        "adm.etherscan_daily_done": "daily limit", "adm.etherscan_cooldown": "cooldown",
+        "adm.etherscan_ready": "ready", "adm.etherscan_calls": "{used} of {limit} calls",
+        "adm.etherscan_calls_total": "today {used} of {limit} calls",
+        "adm.etherscan_poll_every": "pass every {seconds} s",
+        "adm.etherscan_state_primary": "Etherscan is the active EVM source",
+        "adm.etherscan_state_paused_alchemy": "Standby: Alchemy keys are working",
+        "adm.etherscan_state_no_keys": "No keys — EVM networks are not collected",
+        "adm.etherscan_enter_key": "Enter an Etherscan key.",
+        "adm.etherscan_saved": "Etherscan key added.",
+        "adm.etherscan_deleted": "Etherscan key deleted.",
+        "adm.etherscan_error": "Could not add the Etherscan key.",
+        "adm.etherscan_vault_error": "Key vault unavailable.",
         "adm.trongrid_no_key": "No TronGrid key", "adm.alchemy_settings_saved": "Settings saved",
         "adm.alchemy_monthly_estimate": "Monthly CU estimate: {amount}",
         "adm.alchemy_online": "Online",
@@ -109,7 +135,18 @@ win.fetch = async (url, options = {}) => {
     const body = options.body ? JSON.parse(options.body) : {};
     calls.push({path: parsed.pathname, method, body});
     if (parsed.pathname === "/api/auth/me") return response({user: {is_admin: true}});
-    if (parsed.pathname === "/api/admin/screener/config" && method === "GET") return response({config});
+    if (parsed.pathname === "/api/admin/etherscan/key" && method === "POST") {
+        etherscanKeys.push({id: "ffff2222ffff2222", hint: "NewK••••YYY2", source: "admin",
+            state: "active", calls_today: 0, cooldown_sec: 0});
+        return response({ok: true, key: {id: "ffff2222ffff2222", hint: "NewK••••YYY2", source: "admin"}});
+    }
+    if (parsed.pathname.startsWith("/api/admin/etherscan/key/") && method === "DELETE") {
+        const id = parsed.pathname.split("/").pop();
+        etherscanKeys = etherscanKeys.filter(k => k.id !== id);
+        return response({ok: true});
+    }
+    if (parsed.pathname === "/api/admin/screener/config" && method === "GET")
+        return response({config, etherscan: etherscanState()});
     if (parsed.pathname === "/api/admin/screener/config" && method === "POST") {
         config = {...config, mode: body.mode, poll_interval_sec: body.poll_interval_sec,
             interval_sec: body.poll_interval_sec, budget_cu: body.monthly_cu};
@@ -345,6 +382,45 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     await sleep(60);
     assert(calls.some(call => call.path === "/api/admin/screener/config" &&
         call.method === "POST" && call.body.mode === "economy" && call.body.poll_interval_sec === 30));
+
+    /* --- Etherscan: ключи по очереди, статус ключей и источника ------------- */
+    const esRows = win.document.querySelectorAll("#etherscan-admin-keys .whale-admin-key-row");
+    assert.equal(esRows.length, 2, "оба ключа Etherscan показаны");
+    const esText = win.document.getElementById("etherscan-admin-keys").textContent;
+    assert(esText.includes("ready") && esText.includes("daily limit"),
+        "состояния ключей: готов и выбравший дневной лимит");
+    assert(esText.includes("1,200 of 95,000 calls"),
+        "вызовы за день видны у первого ключа");
+    assert(esText.includes("95,000 of 95,000 calls"),
+        "у ключа с дневным лимитом счётчик полный");
+    assert(!esText.includes("EtherscanKeyAAAA"), "секрет ключа не показан");
+    const esStateText = win.document.getElementById("etherscan-admin-state").textContent;
+    assert(esStateText.includes("active EVM source"),
+        "источник Etherscan — активный: " + esStateText);
+    assert(esStateText.includes("today 1,200 of 95,000 calls"));
+    assert(esStateText.includes("pass every 180 s"));
+    // env-ключ нельзя удалить — только добавленный админом
+    assert(!esRows[1].querySelector("button.whale-admin-key-delete"),
+        "ключ из окружения без кнопки удаления");
+    // добавление ключа уходит на сервер и обновляет список
+    win.document.getElementById("etherscan-admin-key").value = "EtherscanKeyNEWKEY1234";
+    win.document.getElementById("etherscan-admin-add-key").click();
+    await sleep(60);
+    assert(calls.some(call => call.path === "/api/admin/etherscan/key" &&
+        call.method === "POST" && call.body.key === "EtherscanKeyNEWKEY1234"),
+        "новый ключ Etherscan уходит POST-ом");
+    assert(win.document.getElementById("etherscan-admin-key-status").textContent
+        .includes("added"), "подтверждение добавления показано");
+    assert.equal(win.document.querySelectorAll("#etherscan-admin-keys .whale-admin-key-row").length,
+        3, "после добавления в списке три ключа");
+    // удаление добавленного
+    esRows[0].querySelector("button.whale-admin-key-delete").click();
+    await sleep(60);
+    assert(calls.some(call => call.path === "/api/admin/etherscan/key/eeee1111eeee1111" &&
+        call.method === "DELETE"), "удаление ключа Etherscan уходит на сервер");
+    assert.equal(win.document.querySelectorAll("#etherscan-admin-keys .whale-admin-key-row").length,
+        2, "после удаления в списке снова два ключа");
+
     win.close();
-    console.log("Whale admin: CU/mode, Solana/TRON health, TronGrid key and CEX wallet CRUD OK");
+    console.log("Whale admin: CU/mode, Solana/TRON/Etherscan keys and CEX wallet CRUD OK");
 })().catch(err => {win.close(); console.error(err); process.exitCode = 1;});

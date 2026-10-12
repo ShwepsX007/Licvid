@@ -218,6 +218,7 @@ class CEXWalletRegistryTests(unittest.IsolatedAsyncioTestCase):
             with patch("cex_wallets_updater.DEFILLAMA_PROTOCOLS_API", base_url + "/protocols"), \
                  patch("cex_wallets_updater.DEFILLAMA_PROTOCOL_API_BASE", base_url + "/protocol"), \
                  patch("cex_wallets_updater.ETHERSCAN_LABELS_URL", base_url + "/labels"), \
+                 patch("cex_wallets_updater.ETHERSCAN_LABELS_URLS", {}), \
                  patch("cex_wallets_updater.TRONSCAN_TOP_HOLDERS", 0), \
                  patch("cex_wallets_updater.TRONSCAN_TOP_ACCOUNTS", 0):
                 with tempfile.TemporaryDirectory() as tmp:
@@ -295,6 +296,7 @@ class CEXWalletRegistryTests(unittest.IsolatedAsyncioTestCase):
         try:
             with patch("cex_wallets_updater.DEFILLAMA_PROTOCOLS_API", base_url + "/protocols"), \
                  patch("cex_wallets_updater.ETHERSCAN_LABELS_URL", base_url + "/labels"), \
+                 patch("cex_wallets_updater.ETHERSCAN_LABELS_URLS", {}), \
                  patch("cex_wallets_updater.TRONSCAN_TOP_HOLDERS", 0), \
                  patch("cex_wallets_updater.TRONSCAN_TOP_ACCOUNTS", 0):
                 async with ClientSession() as session:
@@ -332,6 +334,7 @@ class CEXWalletRegistryTests(unittest.IsolatedAsyncioTestCase):
         try:
             with patch("cex_wallets_updater.DEFILLAMA_PROTOCOLS_API", base_url + "/protocols"), \
                  patch("cex_wallets_updater.ETHERSCAN_LABELS_URL", base_url + "/labels"), \
+                 patch("cex_wallets_updater.ETHERSCAN_LABELS_URLS", {}), \
                  patch("cex_wallets_updater.TRONSCAN_TOP_HOLDERS", 0), \
                  patch("cex_wallets_updater.TRONSCAN_TOP_ACCOUNTS", 0):
                 async with ClientSession() as session:
@@ -342,6 +345,84 @@ class CEXWalletRegistryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(rows.source_status["etherscan"], "ok")
             self.assertTrue(any("HTTP 500" in warning for warning in rows.source_errors))
             self.assertEqual(requests, ["/protocols"] * 3 + ["/labels"])
+        finally:
+            await runner.cleanup()
+
+    async def test_etherscan_labels_cover_evm_chains(self):
+        """Файлы меток по сетям: имя-кошелёк («Binance Hot Wallet») тоже
+        считается, мостовые токены («Binance-Peg …») — нет, ошибка одного
+        файла не мешает остальным."""
+        binance_arb = "0x" + "a1" * 20
+        kucoin_arb = "0x" + "b2" * 20
+        peg_token = "0x" + "c3" * 20
+        deployer = "0x" + "d4" * 20
+        binance_bsc = "0x" + "e5" * 20
+        mexc_bsc = "0x" + "f6" * 20
+        binance_hot = "0x" + "11" * 20
+        requests = []
+
+        files = {
+            "/labels-arb": {
+                binance_arb: {"name": "Binance Hot Wallet", "labels": ["exchange"]},
+                kucoin_arb: {"name": "KuCoin 2", "labels": ["kucoin"]},
+                peg_token: {"name": "Binance-Peg Aave Token",
+                            "labels": ["binance-pegged"]},
+                deployer: {"name": "Binance: Deployer", "labels": ["contract-deployer"]},
+            },
+            "/labels-bsc": {
+                binance_bsc: {"name": "Binance: Hot Wallet 14", "labels": ["exchange"]},
+                mexc_bsc: {"name": "mexc.com 2", "labels": []},
+            },
+            # файл Polygon битый: источник обязан продолжить другими сетями
+            "/labels-poly": "not-json",
+            "/labels-eth": {binance_hot: {"name": "Binance 14", "labels": ["binance"]}},
+        }
+
+        async def serve_label(request):
+            requests.append(request.path)
+            body = files[request.path]
+            if isinstance(body, str):
+                return web.Response(text=body, content_type="application/json")
+            return web.json_response(body)
+
+        app = web.Application()
+        for path in files:
+            app.router.add_get(path, serve_label)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        base_url = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
+        try:
+            with patch("cex_wallets_updater.DEFILLAMA_PROTOCOLS_API",
+                       base_url + "/protocols-empty"), \
+                 patch("cex_wallets_updater.ETHERSCAN_LABELS_URL", base_url + "/labels-eth"), \
+                 patch("cex_wallets_updater.ETHERSCAN_LABELS_URLS", {
+                     "ARBITRUM": base_url + "/labels-arb",
+                     "POLYGON": base_url + "/labels-poly",
+                     "BNB": base_url + "/labels-bsc",
+                 }), \
+                 patch("cex_wallets_updater.TRONSCAN_TOP_HOLDERS", 0), \
+                 patch("cex_wallets_updater.TRONSCAN_TOP_ACCOUNTS", 0):
+                async with ClientSession() as session:
+                    rows = await fetch_defillama_cex_wallets(session)
+            by_key = {(row["chain"], row["address"]): row for row in rows}
+            # Binance Hot Wallet на Arbitrum находится только через имя адреса
+            self.assertEqual(by_key[("ARBITRUM", binance_arb)]["name"], "Binance")
+            self.assertEqual(by_key[("ARBITRUM", kucoin_arb)]["name"], "KuCoin")
+            self.assertEqual(by_key[("BNB", binance_bsc)]["name"], "Binance")
+            self.assertEqual(by_key[("BNB", mexc_bsc)]["name"], "MEXC")
+            self.assertEqual(by_key[("ETH", binance_hot)]["name"], "Binance")
+            # мостовые токены и деплоеры бирж кошельками не считаются
+            self.assertNotIn(("ARBITRUM", peg_token), by_key)
+            self.assertNotIn(("ARBITRUM", deployer), by_key)
+            self.assertEqual(rows.source_counts["etherscan"], 5)
+            self.assertEqual(rows.source_status["etherscan"], "partial")
+            # битый Polygon-файл изолирован: остальные сети загружены
+            self.assertTrue(any("JSON decode error" in warning
+                                for warning in rows.source_errors))
+            self.assertEqual(sorted(requests),
+                             ["/labels-arb", "/labels-bsc", "/labels-eth", "/labels-poly"])
         finally:
             await runner.cleanup()
 
@@ -432,6 +513,7 @@ class CEXWalletRegistryTests(unittest.IsolatedAsyncioTestCase):
         try:
             with patch("cex_wallets_updater.DEFILLAMA_PROTOCOLS_API", base_url + "/protocols"), \
                  patch("cex_wallets_updater.ETHERSCAN_LABELS_URL", base_url + "/labels"), \
+                 patch("cex_wallets_updater.ETHERSCAN_LABELS_URLS", {}), \
                  patch("cex_wallets_updater.TRONSCAN_API_BASE", base_url), \
                  patch("cex_wallets_updater.TRONSCAN_PAGE", 3), \
                  patch("cex_wallets_updater.TRONSCAN_PAGE_PAUSE_SEC", 0.0), \

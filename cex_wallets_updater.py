@@ -34,6 +34,23 @@ ETHERSCAN_LABELS_URL = os.getenv(
     "LIQSCOPE_ETHERSCAN_LABELS_URL",
     "https://raw.githubusercontent.com/brianleect/etherscan-labels/main/data/etherscan/combined/combinedAllLabels.json",
 )
+#: файлы меток того же репозитория для остальных EVM-сетей скринера: без них
+#: Arbitrum/Polygon/BNB остаются на 8-адресном «наследстве» DeFiLlama и молчат.
+#: (файла Base в репозитории нет — сеть остаётся на DeFiLlama/ручных адресах)
+ETHERSCAN_LABELS_URLS = {
+    "BNB": "https://raw.githubusercontent.com/brianleect/etherscan-labels/main/data/bscscan/combined/combinedAllLabels.json",
+    "POLYGON": "https://raw.githubusercontent.com/brianleect/etherscan-labels/main/data/polygonscan/combined/combinedAllLabels.json",
+    "ARBITRUM": "https://raw.githubusercontent.com/brianleect/etherscan-labels/main/data/arbiscan/combined/combinedAllLabels.json",
+}
+#: имена площадок, которых нет ни в KNOWN_CEX_NAMES, ни среди протоколов
+#: DeFiLlama, но чьи кошельки в файлах меток названы по-старому («Huobi 1»)
+ETHERSCAN_LABEL_CEX_NAMES = ("Huobi", "OKEx", "Bitmart", "Poloniex", "Bittrex",
+                             "HitBTC", "Upbit", "Bithumb", "Bitget", "Deribit",
+                             "BitMEX", "LBank", "BingX", "Coincheck")
+#: имя адреса похоже на кошелёк биржи, если содержит одно из этих слов —
+#: «Binance Hot Wallet», «Kucoin: Hot Wallet 2», «Bitmart: Wallet»
+WALLET_NAME_HINT = re.compile(
+    r"wallet|hot|cold|deposit|withdraw|custod|reserve", re.IGNORECASE)
 #: TronScan сам публикует официальные теги адресов ("Binance-Hot 7",
 #: "OKX Hot Wallet 8") — единственный бесплатный публичный источник
 #: TRON-меток бирж. Ключ не обязателен, но приглушает rate limit.
@@ -319,11 +336,56 @@ def _dedupe_wallet_records(rows: list[dict]) -> list[dict]:
     return list(result.values())
 
 
-def parse_etherscan_labels(payload: Any, exchange_names: list[str]) -> list[dict]:
-    """Conservative ETH-only fallback for labels explicitly naming an exchange."""
+def _match_exchange_in_labels(labels: list, names: list[str]) -> str:
+    """Биржа, названная в списке меток адреса, или ''.
+
+    Метки вида ``binance-pegged`` принадлежат мостовых токенам, а не кошелькам
+    биржи — такие метки из текста исключаются.
+    """
+    text = _compact_name(" ".join(str(label) for label in labels
+                                  if "peg" not in _compact_name(label)))
+    best, best_len = "", 0
+    for name in names:
+        slug = _compact_name(name)
+        if slug and len(slug) > best_len and slug in text:
+            best, best_len = name, len(slug)
+    return best
+
+
+def _match_exchange_wallet_name(raw: str, names: list[str]) -> str:
+    """Биржа, названная самим именем адреса, или ''.
+
+    Имя бывает «Binance Hot Wallet», «Kucoin: Hot Wallet 2», «mexc.com 2»
+    или просто «KuCoin 2» / «Gate.io»: принимаем его за кошелёк биржи, когда
+    оно называет площадку И похоже на кошелёк — содержит подсказку
+    (wallet/hot/cold/deposit/…) либо состоит из имени биржи, номера и
+    доменного хвоста. Так мимо проходят контракты и токены
+    («Binance: BUSD Token», «Binance: Deployer», «…Gateway Router»).
+    """
+    compact = _compact_name(raw)
+    best, best_len = "", 0
+    for name in names:
+        slug = _compact_name(name)
+        if not slug or len(slug) <= best_len or slug not in compact:
+            continue
+        rest = compact.replace(slug, "", 1)
+        if WALLET_NAME_HINT.search(raw) or re.fullmatch(r"(com)?\d*", rest):
+            best, best_len = name, len(slug)
+    return best
+
+
+def parse_etherscan_labels(payload: Any, exchange_names: list[str],
+                           chain: str = "ETH") -> list[dict]:
+    """Кошельки бирж из файла меток проводника (семейство Etherscan).
+
+    Совпадение двух видов: компактный текст меток называет биржу (как раньше),
+    либо само имя адреса — «Binance Hot Wallet», «KuCoin 2» — похоже на
+    кошелёк биржи. Файл относится к конкретной сети: ETH, BNB, Polygon,
+    Arbitrum — какой файл спросили, той сети и записи.
+    """
     if not isinstance(payload, dict):
         return []
-    names = {_compact_name(name): str(name) for name in exchange_names if name}
+    names = list(dict.fromkeys([n for n in exchange_names if n]))
     out, seen = [], set()
     for address, value in payload.items():
         if not EVM_ADDRESS.fullmatch(str(address)) or not isinstance(value, dict):
@@ -333,16 +395,15 @@ def parse_etherscan_labels(payload: Any, exchange_names: list[str]) -> list[dict
             labels = list(labels) + list(labels.values())
         if not isinstance(labels, list):
             continue
-        text = " ".join(str(label) for label in labels).lower()
-        normalized = _compact_name(text)
-        name = next((label for slug, label in names.items() if slug and slug in normalized), None)
+        name = (_match_exchange_in_labels(labels, names)
+                or _match_exchange_wallet_name(str(value.get("name") or ""), names))
         if not name:
             continue
         key = address.lower()
         if key in seen:
             continue
         seen.add(key)
-        out.append(normalize_wallet_record({"chain": "ETH", "address": key,
+        out.append(normalize_wallet_record({"chain": chain, "address": key,
                                             "name": name, "source": "etherscan"}))
     return [row for row in out if row]
 
@@ -637,23 +698,48 @@ async def fetch_defillama_cex_wallets(session: aiohttp.ClientSession | None = No
         defillama_rows = _dedupe_wallet_records(defillama_rows)
 
         # Etherscan labels are a secondary enrichment source. Its large JSON
-        # file is streamed in chunks and decoded independently from DeFiLlama.
+        # files (one per explorer family network) are streamed in chunks and
+        # decoded independently from DeFiLlama; a failed file skips only its
+        # own network.
         etherscan_rows: list[dict] = []
-        try:
-            labels = await _read_json(session, ETHERSCAN_LABELS_URL,
-                                      limit=MAX_ETHERSCAN_LABELS_BYTES)
-            if not isinstance(labels, dict):
-                raise SourceFetchError(ETHERSCAN_LABELS_URL, "schema mismatch", status=200,
-                                       detail="expected address-to-label object")
-            names = list(dict.fromkeys([*exchange_names, *KNOWN_CEX_NAMES]))
-            etherscan_rows = await asyncio.to_thread(parse_etherscan_labels, labels, names)
-            source_status["etherscan"] = "ok"
-        except Exception as exc:  # malformed/truncated labels skip only this source
-            error = (exc if isinstance(exc, SourceFetchError) else
-                     SourceFetchError(ETHERSCAN_LABELS_URL, "source error",
-                                      detail=type(exc).__name__))
-            errors.append(str(error))
-            log.warning("[cex_updater] Ошибка Etherscan labels (пропущено): %s", error)
+        label_names = list(dict.fromkeys([*exchange_names, *KNOWN_CEX_NAMES,
+                                          *ETHERSCAN_LABEL_CEX_NAMES]))
+        label_urls = {"ETH": ETHERSCAN_LABELS_URL, **ETHERSCAN_LABELS_URLS}
+        override = os.getenv("LIQSCOPE_ETHERSCAN_LABELS_URLS")
+        if override:
+            try:
+                extra = json.loads(override)
+                if isinstance(extra, dict):
+                    for raw_chain, raw_url in extra.items():
+                        chain_key = normalize_chain(str(raw_chain))
+                        if chain_key in SUPPORTED_CHAINS and isinstance(raw_url, str):
+                            label_urls[chain_key] = raw_url.strip()
+            except (ValueError, TypeError):
+                log.warning("[cex_updater] LIQSCOPE_ETHERSCAN_LABELS_URLS: "
+                            "ожидается JSON-объект {цепочка: url} — игнорирую")
+        label_failures = 0
+        for label_chain, label_url in sorted(label_urls.items()):
+            if not label_url:
+                continue
+            try:
+                labels = await _read_json(session, label_url,
+                                          limit=MAX_ETHERSCAN_LABELS_BYTES)
+                if not isinstance(labels, dict):
+                    raise SourceFetchError(label_url, "schema mismatch", status=200,
+                                           detail="expected address-to-label object")
+                etherscan_rows.extend(await asyncio.to_thread(
+                    parse_etherscan_labels, labels, label_names, label_chain))
+            except Exception as exc:  # malformed/truncated labels skip only this file
+                label_failures += 1
+                error = (exc if isinstance(exc, SourceFetchError) else
+                         SourceFetchError(label_url, "source error",
+                                          detail=type(exc).__name__))
+                errors.append(str(error))
+                log.warning("[cex_updater] Ошибка Etherscan labels %s (пропущено): %s",
+                            label_chain, error)
+        source_status["etherscan"] = (
+            "error" if label_failures and not etherscan_rows else
+            "partial" if label_failures else "ok")
 
         etherscan_rows = _dedupe_wallet_records(etherscan_rows)
 
